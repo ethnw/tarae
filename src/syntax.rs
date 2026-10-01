@@ -733,9 +733,10 @@ pub struct Parsed {
     pub tree: Option<Tree>,
     pub layers: Vec<Layer>,
     covered: Option<Vec<std::ops::Range<usize>>>,
-    /// How many layers, and matches of the injection query, were taken from the last parse.
+    /// How many layers, and matches of the injection query, were taken from the last parse, and how many
+    /// layers were parsed from theirs.
     #[cfg_attr(not(test), allow(dead_code))] // for the tests
-    reused: (usize, usize),
+    reused: (usize, usize, usize),
     /// The injection query's matches in the tree.
     found: Vec<Match>,
 }
@@ -791,8 +792,14 @@ fn parse_rope(
 /// A layer's parse over `ranges` (sorted, not empty), as if its text began the document, then moved to where
 /// it is. How a parser recovers from an error counts how far a skipped token is from the one before — for
 /// the first one, from the document's start — so else typing far above could change a layer's errors and
-/// their colors; this way a layer parses the same wherever it is, and one only moved can be kept.
-fn parse_layer(parser: &mut Parser, text: &Rope, ranges: &[tree_sitter::Range]) -> Option<Tree> {
+/// their colors; this way a layer parses the same wherever it is, and one only moved can be kept. From
+/// `old` (a layer edited along) if given: what it has that the edits didn't reach is taken over.
+fn parse_layer(
+    parser: &mut Parser,
+    text: &Rope,
+    ranges: &[tree_sitter::Range],
+    old: Option<&Tree>,
+) -> Option<Tree> {
     let (base, at) = (ranges[0].start_byte, ranges[0].start_point);
     let back = |p: Point| match p.row == at.row {
         true => Point::new(0, p.column - at.column),
@@ -817,9 +824,22 @@ fn parse_layer(parser: &mut Parser, text: &Rope, ranges: &[tree_sitter::Range]) 
         let (chunk, start, _, _) = text.chunk_at_byte(byte);
         &chunk.as_bytes()[byte - start..]
     };
-    let mut tree = parser.parse_with_options(&mut read, None, None)?;
-    // Text inserted before it all: everything moves over by `base`, the first row's columns by `at`'s
     let zero = Point::new(0, 0);
+    // The old one as if it began there too: the text before deleted
+    let old = old.map(|t| {
+        let mut t = t.clone();
+        t.edit(&InputEdit {
+            start_byte: 0,
+            old_end_byte: base,
+            new_end_byte: 0,
+            start_position: zero,
+            old_end_position: at,
+            new_end_position: zero,
+        });
+        t
+    });
+    let mut tree = parser.parse_with_options(&mut read, old.as_ref(), None)?;
+    // Text inserted before it all: everything moves over by `base`, the first row's columns by `at`'s
     tree.edit(&InputEdit {
         start_byte: 0,
         old_end_byte: 0,
@@ -842,12 +862,18 @@ impl ParseJob {
             .ok()
             .and_then(|_| parse_rope(&mut parser, &self.text, self.old.as_ref(), None));
         let covered = self.near.map(|near| around(&self.text, near, self.near_lines));
-        let (mut layers, mut reused, mut found) = (Vec::new(), (0, 0), Vec::new());
+        let (mut layers, mut reused, mut found) = (Vec::new(), (0, 0, 0), Vec::new());
         if let Some(tree) = &tree {
             let mut inj = Injector::new(&self.text, covered.as_deref(), self.budget);
-            for l in self.old_layers.iter().filter(|l| !l.touched) {
-                let at = l.tree.included_ranges().first().map_or(0, |r| r.start_byte);
-                inj.reuse.entry((l.lang.name.clone(), l.depth, at)).or_default().push(l.clone());
+            for l in self.old_layers.iter() {
+                if l.touched {
+                    if FROM_LAST.contains(&l.lang.name.as_str()) {
+                        inj.redo.entry((l.lang.name.clone(), l.depth)).or_default().push(l.clone());
+                    }
+                } else {
+                    let at = l.tree.included_ranges().first().map_or(0, |r| r.start_byte);
+                    inj.reuse.entry((l.lang.name.clone(), l.depth, at)).or_default().push(l.clone());
+                }
             }
             let old = self.old.as_ref().zip(self.before.as_ref());
             inj.before = old.map(|(_, before)| {
@@ -873,7 +899,7 @@ impl ParseJob {
             });
             found = inj.found(&self.lang, tree, old);
             inj.run(&found, 0, &mut layers);
-            reused = (inj.reused_count, inj.kept_count);
+            reused = (inj.reused_count, inj.kept_count, inj.redone_count);
         }
         Parsed { tree, layers, covered, reused, found }
     }
@@ -921,6 +947,14 @@ fn combines(q: &Query) -> bool {
                 .is_none_or(|lang| resolve(lang).is_some_and(|s| Loader::global().load(s).is_ok()))
     })
 }
+
+/// Languages whose layers an edit reached are parsed from the last tree, not afresh — where the random-edit
+/// test shows that gives what a fresh parse does: HTML, which PHP, Markdown's HTML blocks and Go templates
+/// make one big layer of. Not others, small layers mostly: what tree-sitter takes over from the last tree
+/// can be parsed another way afresh — Markdown's inline grammar matches emphasis across a paragraph, a
+/// span taken over misses a delimiter now matching; YAML's indentation after a Helm action — and in HTML
+/// one holding an error is parsed afresh again (how errors are recovered from differs).
+const FROM_LAST: &[&str] = &["html"];
 
 /// Places shown kept for injecting around (`Syntax::recent`) — a window or two, and a place gone back to.
 const RECENT: usize = 4;
@@ -1103,8 +1137,11 @@ struct Injector<'a> {
     /// Layers parsed before and untouched since, by (language, depth, where the first piece starts): one
     /// asked for with the same pieces again is taken from here, not parsed.
     reuse: HashMap<(String, usize, usize), Vec<Layer>>,
-    /// How many were, and how many matches were kept.
+    /// Layers an edit reached, by (language, depth): one asked for where one of these was is parsed from it.
+    redo: HashMap<(String, usize), Vec<Layer>>,
+    /// How many were kept, parsed from the last, and how many matches were kept.
     reused_count: usize,
+    redone_count: usize,
     kept_count: usize,
     /// Time spent parsing injected languages (grammar loading·query compilation happen once, so not counted).
     spent: std::time::Duration,
@@ -1181,7 +1218,9 @@ impl<'a> Injector<'a> {
             text,
             parsers: HashMap::new(),
             reuse: HashMap::new(),
+            redo: HashMap::new(),
             reused_count: 0,
+            redone_count: 0,
             kept_count: 0,
             spent: std::time::Duration::ZERO,
             budget,
@@ -1201,6 +1240,27 @@ impl<'a> Injector<'a> {
         let same = self.reuse.get_mut(&(lang.to_string(), depth, at))?;
         let i = same.iter().position(|l| l.tree.included_ranges() == ranges)?;
         self.reused_count += 1;
+        Some(same.swap_remove(i))
+    }
+
+    /// The layer an edit reached that was where these pieces are (spans overlapping most), if any.
+    fn redone(&mut self, lang: &str, depth: usize, ranges: &[tree_sitter::Range]) -> Option<Layer> {
+        let span = |r: &[tree_sitter::Range]| {
+            r.first().map_or(0, |r| r.start_byte)..r.last().map_or(0, |r| r.end_byte)
+        };
+        let new = span(ranges);
+        let same = self.redo.get_mut(&(lang.to_string(), depth))?;
+        let overlap = |l: &Layer| {
+            let old = span(&l.tree.included_ranges());
+            old.end.min(new.end) as isize - old.start.max(new.start) as isize
+        };
+        let (i, _) = same
+            .iter()
+            .enumerate()
+            .map(|(i, l)| (i, overlap(l)))
+            .filter(|&(_, o)| o > 0)
+            .max_by_key(|&(_, o)| o)?;
+        self.redone_count += 1;
         Some(same.swap_remove(i))
     }
 
@@ -1335,33 +1395,35 @@ impl<'a> Injector<'a> {
         out
     }
 
-    /// `found` for a layer: kept from the layer it was — its tree is the same, so what changed is only the
-    /// edits within its span, between its pieces (one reaching them makes another layer): a node spanning
-    /// a gap reads the text there.
+    /// `found` for a layer, from the layer it was (`was`: its tree, edited along, and matches): what changed
+    /// is the edits within their spans — a node spanning a gap between pieces reads the text there — and
+    /// where the trees differ (a kept layer's is the same).
     fn layer_found(
         &mut self,
         data: &LangData,
         tree: &Tree,
-        was: Option<&[Match]>,
+        was: Option<(&Tree, &[Match])>,
         depth: usize,
     ) -> Vec<Match> {
         if depth >= MAX_DEPTH {
             return Vec::new();
         }
-        let old = was.zip(self.before.as_ref()).map(|(was, (before, edits))| {
+        let old = was.zip(self.before.as_ref()).map(|((old_tree, was), (before, edits))| {
             let mut kept = was.to_vec();
             for m in &mut kept {
                 for e in &before.since {
                     m.edit(e);
                 }
             }
-            let ranges = tree.included_ranges();
-            let span = ranges.first().map_or(0, |r| r.start_byte)..ranges.last().map_or(0, |r| r.end_byte);
-            let within: Vec<_> =
-                edits.iter().filter(|r| r.start <= span.end && span.start <= r.end).cloned().collect();
-            // Nothing changed in it: no need to look (a file has hundreds of layers)
-            let changed = if within.is_empty() { Vec::new() } else { changed(tree, tree, &within) };
-            (tree, kept, changed)
+            let (a, b) = (tree.included_ranges(), old_tree.included_ranges());
+            let start = a.iter().chain(&b).map(|r| r.start_byte).min().unwrap_or(0);
+            let end = a.iter().chain(&b).map(|r| r.end_byte).max().unwrap_or(0);
+            let within: Vec<_> = edits.iter().filter(|r| r.start <= end && start <= r.end).cloned().collect();
+            // A kept one nothing changed in: no need to look (a file has hundreds of layers)
+            let same = std::ptr::eq(old_tree, tree);
+            let changed =
+                if same && within.is_empty() { Vec::new() } else { changed(old_tree, tree, &within) };
+            (old_tree, kept, changed)
         });
         self.found(data, tree, old)
     }
@@ -1412,21 +1474,29 @@ impl<'a> Injector<'a> {
             ranges.sort_by_key(|r| r.start_byte);
             ranges.dedup_by(|b, a| b.start_byte < a.end_byte);
             let (tree, was) = match self.reused(&data.name, depth + 1, &ranges) {
-                Some(l) => (l.tree, Some(l.found)),
+                Some(l) => (l.tree, Some((None, l.found))),
                 None => {
+                    let old = self.redone(&data.name, depth + 1, &ranges);
                     let parser = self.parsers.entry(data.name.clone()).or_insert_with(|| {
                         let mut p = Parser::new();
                         let _ = p.set_language(&data.language);
                         p
                     });
                     let t = std::time::Instant::now();
-                    let tree = parse_layer(parser, self.text, &ranges);
+                    // One holding an error is always a fresh parse (`FROM_LAST`)
+                    let from = old.as_ref().map(|l| &l.tree);
+                    let mut tree = parse_layer(parser, self.text, &ranges, from);
+                    if from.is_some() && tree.as_ref().is_some_and(|t| t.root_node().has_error()) {
+                        tree = parse_layer(parser, self.text, &ranges, None);
+                    }
                     self.spent += t.elapsed();
                     let Some(tree) = tree else { continue };
-                    (tree, None)
+                    (tree, old.map(|l| (Some(l.tree), l.found)))
                 }
             };
-            let found = Arc::new(self.layer_found(&data, &tree, was.as_deref().map(|v| &v[..]), depth + 1));
+            // A kept layer's last tree is itself
+            let was = was.as_ref().map(|(old, found)| (old.as_ref().unwrap_or(&tree), &found[..]));
+            let found = Arc::new(self.layer_found(&data, &tree, was, depth + 1));
             out.push(Layer {
                 lang: data.clone(),
                 tree,
@@ -1856,8 +1926,42 @@ mod tests {
     /// Edits at random, and what's shown at random (one window or two, a few lines): the layers made around
     /// it — the injection query asked only there — are the ones the query asked over the whole tree gives
     /// there, in every language with injections whose grammar is here (nested, combined, template strings).
+    /// `SEED=n` runs that one instead.
     #[test]
     fn injected_layers_around_what_is_shown_match_the_whole_querys() {
+        match std::env::var("SEED") {
+            Ok(s) => injected_layers_match(&[s.parse().unwrap()]),
+            Err(_) => injected_layers_match(&[0x2545_f491_4f6c_dd1d]),
+        }
+    }
+
+    /// Runs where something was found — beside the others, so they don't take longer.
+    fn seeds<const N: usize>(n: [u64; N]) -> [u64; N] {
+        n.map(|n| n * 104_729 + 7)
+    }
+
+    /// Passes over ranges apart give the matches in another order than one pass (svelte, vue).
+    #[test]
+    fn injected_layers_match_where_passes_come_in_another_order() {
+        injected_layers_match(&seeds([23, 36]));
+    }
+
+    /// Where errors are recovered from: an edit between two pieces of PHP's HTML layer changes how; PHP's
+    /// HTML layer parsed from the last holds one; an empty node moves in one (svelte) — and a macro's
+    /// tokens are injected at two depths (rust).
+    #[test]
+    fn injected_layers_match_where_errors_are() {
+        injected_layers_match(&seeds([11, 2, 116]));
+    }
+
+    /// A window shown at the end, on the empty last line; an edit coming while a parse runs, before what
+    /// it injected around.
+    #[test]
+    fn injected_layers_match_at_the_end_and_mid_parse() {
+        injected_layers_match(&seeds([14, 232]));
+    }
+
+    fn injected_layers_match(seeds: &[u64]) {
         let rust = "/// Doc with `code`.\nfn main() {\n    // a comment\n    let v = vec![1, 2, 3];\n    \
                     println!(\"{} {}\", v[0], v[1]); /* block */\n    assert_eq!(v.len(), 3);\n}\n\n\
                     // tail\nfn other() { let s = format!(\"x\"); }\n";
@@ -1932,18 +2036,6 @@ mod tests {
             "TODO: ",
             "https://x.y ",
         ];
-        // Then runs where passes over ranges apart give the matches in another order than one pass (svelte,
-        // vue); where an edit between two pieces of PHP's HTML layer changes how its errors are recovered;
-        // where an empty node moves in an error (svelte) and a macro's tokens are injected at two depths
-        // (rust); where a window is shown at the end, on the empty last line; and where an edit comes while
-        // a parse runs, before what it injected around — `SEED=n` runs that one instead
-        let seeds = match std::env::var("SEED") {
-            Ok(s) => vec![s.parse().unwrap()],
-            Err(_) => [0x2545_f491_4f6c_dd1du64]
-                .into_iter()
-                .chain([23, 36, 11, 116, 14, 232].map(|n| n * 104_729 + 7))
-                .collect(),
-        };
         let describe = |layers: &[Layer]| -> Vec<String> {
             layers
                 .iter()
@@ -1960,7 +2052,8 @@ mod tests {
         };
         let mut tested = Vec::new();
         let mut cut = 0;
-        for mut seed in seeds {
+        let mut redone_in: HashMap<&str, usize> = HashMap::new();
+        for &(mut seed) in seeds {
             let mut rnd = |n: usize| {
                 seed ^= seed << 13;
                 seed ^= seed >> 7;
@@ -1987,7 +2080,7 @@ mod tests {
                     syn.edit(&edits.iter().map(|e| e.ts).collect::<Vec<_>>());
                 };
                 let mut snapshots: Vec<(Rope, Option<Trees>)> = Vec::new();
-                let (mut reused, mut kept) = (0, 0);
+                let (mut reused, mut kept, mut redone) = (0, 0, 0);
                 for step in 0..300 {
                     for _ in 0..rnd(3) {
                         if rnd(5) == 0 {
@@ -2017,6 +2110,7 @@ mod tests {
                     let parsed = job.run();
                     reused += parsed.reused.0;
                     kept += parsed.reused.1;
+                    redone += parsed.reused.2;
                     if rnd(4) == 0 {
                         edit_once(&mut text, &mut syn, &mut rnd);
                     }
@@ -2027,6 +2121,7 @@ mod tests {
                         let parsed = job.run();
                         reused += parsed.reused.0;
                         kept += parsed.reused.1;
+                        redone += parsed.reused.2;
                         syn.finish_parse(generation, parsed);
                     }
                     let covered = syn.covered.clone().unwrap();
@@ -2070,11 +2165,16 @@ mod tests {
                 // Else it would only check fresh layers
                 assert!(reused > 10, "{lang}: only {reused} layers reused");
                 assert!(kept > 0, "{lang}: no match kept");
+                *redone_in.entry(lang).or_default() += redone;
                 tested.push(lang);
             }
         }
         if !tested.is_empty() {
             assert!(cut > 100, "layers left out for being away from what's shown: {cut} ({tested:?})");
+        }
+        // Over all the runs: PHP's HTML layer (`FROM_LAST`) was parsed from the last
+        if std::env::var("SEED").is_err() && tested.contains(&"php") {
+            assert!(redone_in["php"] > 0, "no layer parsed from the last");
         }
         eprintln!("tested in {tested:?}");
     }
@@ -2335,13 +2435,13 @@ mod tests {
     /// Layers by language and pieces.
     type Described = Vec<(String, Vec<(usize, usize)>)>;
 
-    /// `src` parsed, then `change` made and parsed again from that: its layers (language, pieces), and a
-    /// fresh parse's — `None` if a grammar in `langs` isn't here.
+    /// `src` parsed, then `change` made and parsed again from that: its layers (language, pieces), a fresh
+    /// parse's, and how many layers were parsed from the last — `None` if a grammar in `langs` isn't here.
     fn layers_after(
         langs: &[&str],
         src: &str,
         change: crate::transaction::Change,
-    ) -> Option<(Described, Described)> {
+    ) -> Option<(Described, Described, usize)> {
         for l in langs {
             Loader::global().load(spec(l)?).ok()?;
         }
@@ -2357,8 +2457,12 @@ mod tests {
         parse_now(&mut syn, &text);
         let edits = crate::transaction::Transaction::new(vec![change]).apply(&mut text, false);
         syn.edit(&edits.iter().map(|e| e.ts).collect::<Vec<_>>());
-        parse_now(&mut syn, &text);
-        Some((describe(&syn), describe(&Syntax::parsed(lang, &text))))
+        let job = syn.start_parse(&text);
+        let generation = job.generation;
+        let parsed = job.run();
+        let redone = parsed.reused.2;
+        syn.finish_parse(generation, parsed);
+        Some((describe(&syn), describe(&Syntax::parsed(lang, &text)), redone))
     }
 
     /// An argument typed before the string in `$db->query(…)` — clear of all the match captures, the
@@ -2369,9 +2473,50 @@ mod tests {
         let src = "<?php\n$db->query(  \"SELECT 1\");\n";
         let at = src.find('(').unwrap() + 2;
         let change = crate::transaction::Change::insert(at, "$x, ");
-        let Some((kept, fresh)) = layers_after(&["php", "sql"], src, change) else { return };
+        let Some((kept, fresh, _)) = layers_after(&["php", "sql"], src, change) else { return };
         assert!(!fresh.iter().any(|(l, _)| l == "sql"), "{fresh:?}");
         assert_eq!(kept, fresh);
+    }
+
+    /// PHP's HTML layer starting after `<?php … ?>`, a word typed in its text: it's parsed from the last
+    /// one, which first goes where the new one starts (both parsed as if at the document's start) — so
+    /// what the edit didn't reach is taken over: the list's tokens after it are the last tree's own.
+    #[test]
+    fn a_layer_parsed_from_the_last_takes_over_what_the_edit_missed() {
+        let (Ok(lang), Ok(_)) =
+            (Loader::global().load(spec("php").unwrap()), Loader::global().load(spec("html").unwrap()))
+        else {
+            return;
+        };
+        let src = "<?php $a = 1; ?>\n<div>\n<p>one two</p>\n<ul><li>x</li></ul>\n</div>\n";
+        let mut text = Rope::from_str(src);
+        let mut syn = Syntax::new(lang.clone());
+        syn.covered = None;
+        parse_now(&mut syn, &text);
+        let edits = crate::transaction::Transaction::new(vec![crate::transaction::Change::insert(
+            src.find("two").unwrap(),
+            "and ",
+        )])
+        .apply(&mut text, false);
+        syn.edit(&edits.iter().map(|e| e.ts).collect::<Vec<_>>());
+        let html = |syn: &Syntax| syn.layers.iter().find(|l| l.lang.name == "html").unwrap().tree.clone();
+        // `ul` in `<ul>`
+        let list = |tree: &Tree| {
+            let at = text.to_string().find("<ul>").unwrap() + 1;
+            let n = tree.root_node().descendant_for_byte_range(at, at + 2).unwrap();
+            assert_eq!(n.kind(), "tag_name");
+            n.id()
+        };
+        let before = html(&syn);
+        assert!(before.included_ranges()[0].start_byte > 0);
+        let job = syn.start_parse(&text);
+        let generation = job.generation;
+        let parsed = job.run();
+        assert_eq!(parsed.reused.2, 1);
+        syn.finish_parse(generation, parsed);
+        assert_eq!(list(&html(&syn)), list(&before), "the list taken over");
+        let fresh = Syntax::parsed(lang, &text);
+        assert_eq!(html(&syn).root_node().to_sexp(), html(&fresh).root_node().to_sexp());
     }
 
     /// JavaScript's `// a`, `/* b */// c` on the next line: the line break and the slash deleted, it's one
@@ -2381,7 +2526,7 @@ mod tests {
     fn comments_merged_into_one_leave_one_layer() {
         let src = "// a\n/* b */// c\nlet x = 1;\n";
         let change = crate::transaction::Change::delete(4, 6);
-        let Some((kept, fresh)) = layers_after(&["javascript", "comment"], src, change) else { return };
+        let Some((kept, fresh, _)) = layers_after(&["javascript", "comment"], src, change) else { return };
         assert_eq!(fresh.iter().filter(|(l, _)| l == "comment").count(), 1, "{fresh:?}");
         assert_eq!(kept, fresh);
     }
