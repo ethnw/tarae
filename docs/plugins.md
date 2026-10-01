@@ -287,7 +287,11 @@ document of a kind is the render's k-th object of that kind from it: `kind: Depl
 A line a template writes shows what it made (`replicas: {{ .Values.replicaCount }}  = 2`; in a `range`, every
 item's); a line written out is compared as in any manifest. It renders with the chart's own values (a release's
 are in its Secret, which it doesn't read), so a document they leave out says so, and a hook says it's one. A
-chart's `values.yaml` says which releases of it there are. Saving a chart's file renders again. No helm: it says
+chart's `values.yaml` says which releases of it there are, and beside a value a template writes as it is
+(`replicas: {{ .Values.replicaCount }}`, quoted or piped through `quote`, `int` and the like) what each release
+has there where it isn't the value, and who set it: `replicaCount: 1  → 2 · kubectl`. A value written with others
+(`"{{ .Values.image.repository }}:{{ .Values.image.tag }}"`), defaulted or worked out isn't said — whose it is
+can't be told. The chart's templates are found and read for it, open or not. Saving a chart's file renders again. No helm: it says
 so, and offers to install it.
 
 Nothing is Flux's or Argo CD's own: their objects read like any CRD's (kstatus), and what they install is found by

@@ -197,6 +197,52 @@ pub fn became<'a>(rendered: &'a [Rendered], source: &str, kinds: &[&str]) -> Vec
         .collect()
 }
 
+/// The values a template's line writes as they are — `{{ .Values.replicaCount }}`, quoted or piped through what
+/// keeps the value (`| quote`, `| int`, …): the path into the values (`["replicaCount"]`). None for anything
+/// else (two values, a default, arithmetic, a value the template works out): whose it is can't be said.
+pub fn values_path(template: &str) -> Option<Vec<String>> {
+    let t = template.trim();
+    let t = t.strip_prefix('"').and_then(|t| t.strip_suffix('"')).unwrap_or(t);
+    let t = t.strip_prefix('\'').and_then(|t| t.strip_suffix('\'')).unwrap_or(t);
+    let inner = t.strip_prefix("{{")?.strip_suffix("}}")?;
+    if inner.contains("{{") || inner.contains("}}") {
+        return None;
+    }
+    let inner = inner.trim_matches('-').trim();
+    let mut parts = inner.split('|').map(str::trim);
+    let head = parts.next()?;
+    let keeps = ["quote", "squote", "toString", "int", "int64", "float64"];
+    if !parts.all(|p| keeps.contains(&p)) {
+        return None;
+    }
+    let path = head.strip_prefix("$.Values.").or_else(|| head.strip_prefix(".Values."))?;
+    let keys: Vec<String> = path.split('.').map(str::to_string).collect();
+    keys.iter().all(|k| !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')).then_some(keys)
+}
+
+/// A line of a template that writes a value as it is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Usage {
+    /// The value's path into the values.
+    pub values: Vec<String>,
+    /// Which of the file's documents, and the field there.
+    pub doc: usize,
+    pub path: Vec<crate::fields::Seg>,
+}
+
+/// The values a template file's documents write as they are.
+pub fn usages(docs: &[Doc]) -> Vec<Usage> {
+    let mut out = Vec::new();
+    for (i, d) in docs.iter().enumerate() {
+        for f in d.fields.iter().filter(|f| f.templated) {
+            if let Some(values) = f.value.as_str().and_then(values_path) {
+                out.push(Usage { values, doc: i, path: f.path.clone() });
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,5 +352,21 @@ metadata:
         let names: Vec<Option<&str>> = b.iter().map(|x| x.map(|r| r.name.as_str())).collect();
         assert_eq!(names, [Some("shop-helm-a"), None, Some("shop-helm-b"), None]);
         assert_eq!(b[2].unwrap().namespace.as_deref(), Some("other"));
+    }
+
+    #[test]
+    fn a_value_written_as_it_is_and_nothing_else() {
+        let p = |t: &str| values_path(t).map(|v| v.join("."));
+        assert_eq!(p("{{ .Values.replicaCount }}").as_deref(), Some("replicaCount"));
+        assert_eq!(p("\"{{ .Values.image.tag | quote }}\"").as_deref(), Some("image.tag"));
+        assert_eq!(p("{{- $.Values.service.port | int -}}").as_deref(), Some("service.port"));
+        assert_eq!(p("\"{{ .Values.image.repository }}:{{ .Values.image.tag }}\""), None, "two values");
+        assert_eq!(p("{{ .Values.image.tag | default .Chart.AppVersion }}"), None, "a default");
+        assert_eq!(p("{{ include \"shop.fullname\" . }}"), None);
+        assert_eq!(p("{{ .Values.x | add 1 }}"), None);
+        let text = "kind: Deployment\nspec:\n  replicas: {{ .Values.replicaCount }}\n  template:\n    spec:\n      containers:\n        - image: \"{{ .Values.image.repository }}:{{ .Values.image.tag }}\"\n          imagePullPolicy: {{ .Values.image.pullPolicy }}\n";
+        let u = usages(&templates(text, "/r/charts/shop/templates/deployment.yaml"));
+        let got: Vec<(String, usize)> = u.iter().map(|u| (u.values.join("."), u.path.len())).collect();
+        assert_eq!(got, [("replicaCount".to_string(), 2), ("image.pullPolicy".to_string(), 6)]);
     }
 }

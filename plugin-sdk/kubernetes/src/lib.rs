@@ -73,6 +73,9 @@ const KZ_BUILD: u64 = 1 << 38;
 const FIND_CHARTS: u64 = 85;
 const HELM_INSTALL: u64 = 86;
 const HELM_READ: u64 = 1 << 35;
+/// Helm values: finding the project's chart templates; reading template `n` (of a chart whose values are open).
+const FIND_TEMPLATES: u64 = 87;
+const TPL_READ: u64 = 1 << 34;
 const HELM_RENDER: u64 = 1 << 39;
 const FIRST_CONN: u64 = 1000;
 const RETRY: u64 = 1 << 32;
@@ -286,7 +289,12 @@ struct State {
     renders: BTreeMap<(String, helm::Release), Build<helm::Rendered>>,
     render_keys: Vec<(String, helm::Release)>,
     no_helm: Option<String>,
-    values: BTreeMap<String, u64>,
+    values: BTreeMap<String, (u64, Vec<fields::Field>)>,
+    /// The project's chart templates, and those read (for a chart whose `values.yaml` is open: where each value
+    /// goes) — and being read.
+    templates: Vec<String>,
+    chart_files: BTreeMap<String, Vec<Doc>>,
+    tpl_reading: Vec<String>,
     /// Whether what's shown may have changed since it was last worked out (a watch's change to an object
     /// nobody has open doesn't), and whether what's watched may have to change (a workload came: its pods).
     dirty: bool,
@@ -548,10 +556,14 @@ impl State {
 
     /// A buffer's text, read again (opened, or changed).
     fn file(&mut self, path: String, version: u64, text: &str) -> Vec<Action> {
-        // A chart's values: which releases it's for, on its first line
+        // A chart's values: which releases it's for, on its first line, and what the cluster has of each (its
+        // templates read for where they go)
         if path.ends_with("/values.yaml") {
-            self.values.insert(path, version);
-            return self.render();
+            let lines: Vec<&str> = text.lines().collect();
+            self.values.insert(path, (version, fields::fields(&lines, 0)));
+            let mut out = self.read_templates();
+            out.extend(self.render());
+            return out;
         }
         // A kustomization: the ConfigMaps and Secrets it generates, on their `name:` lines
         let docs = if helm::is_template(&path) {
@@ -576,8 +588,11 @@ impl State {
             let had = self.files.remove(&path).is_some();
             return if had { self.follow() } else { Vec::new() };
         }
-        // (a template: its chart's releases rendered, if they aren't)
+        // (a template: its chart's releases rendered, if they aren't — and, if it's read for its values, read again)
         let template = helm::is_template(&path);
+        if let Some(read) = self.chart_files.get_mut(&path) {
+            *read = docs.clone();
+        }
         self.files.insert(path, File { version, docs });
         if template { self.render() } else { self.follow() }
     }
@@ -847,6 +862,10 @@ impl State {
                 out.extend(readings.into_iter().flatten());
             }
         }
+        // (a chart's templates not open, read for where its open values go)
+        for (path, docs) in self.chart_files.iter().filter(|(p, _)| !self.files.contains_key(*p)) {
+            out.extend(self.readings(path, docs).into_iter().flatten());
+        }
         out.into_iter().filter(|d| matches!(d.via, Via::Itself | Via::Built(_))).collect()
     }
 
@@ -997,6 +1016,7 @@ impl State {
         let mut out = vec![
             Action::Find((FIND_KZ, "**/kustomization.yaml".into())),
             Action::Find((FIND_CHARTS, "**/Chart.yaml".into())),
+            Action::Find((FIND_TEMPLATES, "**/templates/**/*.yaml".into())),
         ];
         if self.own_dir.is_none() {
             let note = b"The Kubernetes plugin's own files: the kustomizations it builds your roots through.\n";
@@ -1134,6 +1154,7 @@ impl State {
         }
         self.labeling = (self.labeling.0 + 1, Vec::new());
         let mut out = self.label(0, true);
+        out.extend(self.read_templates());
         out.extend(self.render());
         out
     }
@@ -1158,8 +1179,9 @@ impl State {
     fn render(&mut self) -> Vec<Action> {
         let mut out = Vec::new();
         if let (Some(charts), None, Some(_)) = (&self.charts, &self.no_helm, &self.labeled) {
+            let values = self.values.keys().filter_map(|p| helm::source_of(charts, &format!("{}/templates/-", kustomize::parent(p))));
             let tops: std::collections::BTreeSet<String> =
-                self.files.keys().filter_map(|p| helm::source_of(charts, p)).map(|(top, _)| top).collect();
+                self.files.keys().filter_map(|p| helm::source_of(charts, p)).chain(values).map(|(top, _)| top).collect();
             for top in tops {
                 for rel in self.releases_of(&top) {
                     let key = (top.clone(), rel.clone());
@@ -1223,25 +1245,105 @@ impl State {
         self.follow()
     }
 
-    /// A chart's `values.yaml`: which releases of it the cluster has.
-    fn values_hint(&self, path: &str) -> Option<Hint> {
-        let charts = self.charts.as_ref()?;
+    /// The chart a `values.yaml` is the values of, if it's one's (its folder, and whether it's the top chart's
+    /// own — a subchart's are its parent's to give).
+    fn values_chart(&self, path: &str) -> Option<(String, bool)> {
         let dir = kustomize::parent(path);
-        let (top, _) = helm::source_of(charts, &format!("{dir}/templates/-"))?;
-        self.labeled.as_ref()?;
+        let (top, _) = helm::source_of(self.charts.as_ref()?, &format!("{dir}/templates/-"))?;
+        let own = top == dir;
+        Some((top, own))
+    }
+
+    /// Reads the templates of each chart whose `values.yaml` is open, that aren't read (or being).
+    fn read_templates(&mut self) -> Vec<Action> {
+        let tops: BTreeSet<String> =
+            self.values.keys().filter_map(|p| self.values_chart(p)).filter(|(_, own)| *own).map(|(t, _)| t).collect();
+        let mut out = Vec::new();
+        for path in &self.templates {
+            let mine = tops.iter().any(|t| path.starts_with(&format!("{t}/templates/")));
+            if mine && !self.chart_files.contains_key(path) && !self.tpl_reading.contains(path) {
+                self.tpl_reading.push(path.clone());
+                out.push(Action::ReadFile((TPL_READ + self.tpl_reading.len() as u64 - 1, path.clone())));
+            }
+        }
+        out
+    }
+
+    /// Template `i` read: where its values go.
+    fn template_read(&mut self, i: usize, bytes: &[u8]) -> Vec<Action> {
+        let Some(path) = self.tpl_reading.get(i).cloned() else { return Vec::new() };
+        let docs = helm::templates(&String::from_utf8_lossy(bytes), &path);
+        self.chart_files.insert(path, docs);
+        self.render()
+    }
+
+    /// A chart's `values.yaml`: which releases of it the cluster has (on its first line), and — beside a value a
+    /// template writes as it is — what the cluster has there, where it isn't the value (each release's).
+    fn values_hints(&self, path: &str) -> Vec<Hint> {
+        let mut out = Vec::new();
+        let (Some(charts), Some((top, own)), Some(_)) = (&self.charts, self.values_chart(path), &self.labeled) else {
+            return out;
+        };
+        let dir = kustomize::parent(path);
         let name = &charts[&top];
         let rels = self.releases_of(&top);
-        let through = if top != dir { format!(" (through {name})") } else { String::new() };
+        let through = if !own { format!(" (through {name})") } else { String::new() };
         let text = match rels.as_slice() {
             [] => format!("no release of {name} in {}", self.context()),
             [r] => format!("release {} · ns {}{through}", r.name, r.namespace),
             rs => {
-                let each: Vec<String> =
-                    rs.iter().map(|r| format!("{} (ns {})", r.name, r.namespace)).collect();
+                let each: Vec<String> = rs.iter().map(|r| format!("{} (ns {})", r.name, r.namespace)).collect();
                 format!("releases {}{through}", each.join(", "))
             }
         };
-        Some(Hint { line: 0, text, tone: Tone::Info })
+        out.push(Hint { line: 0, text, tone: Tone::Info });
+        let Some((_, fields)) = self.values.get(path).filter(|_| own) else { return out };
+        // Where each value goes: the chart's templates (as open, or as read), the lines writing it as it is
+        let mine = |p: &&String| p.starts_with(&format!("{dir}/templates/"));
+        let mut templates: BTreeMap<&String, &Vec<Doc>> =
+            self.chart_files.iter().filter(|(p, _)| mine(p)).map(|(p, d)| (p, d)).collect();
+        // (as open: as it is now)
+        templates.extend(self.files.iter().filter(|(p, _)| mine(p)).map(|(p, f)| (p, &f.docs)));
+        for f in fields.iter().filter(|f| !f.nested && !f.templated) {
+            let Some(keys) = f.path.iter().map(|s| if let fields::Seg::Key(k) = s { Some(k.clone()) } else { None }).collect::<Option<Vec<_>>>()
+            else {
+                continue;
+            };
+            // (release, what the cluster has, who set it) where it isn't the value
+            let mut said: Vec<(String, String, Option<String>)> = Vec::new();
+            for (tpath, docs) in &templates {
+                for u in helm::usages(docs).into_iter().filter(|u| u.values == keys) {
+                    for reading in self.readings(tpath, docs) {
+                        let Some(d) = reading.get(u.doc) else { continue };
+                        let Via::Built(rel) = &d.via else { continue };
+                        let Some(live) = self.live(d).and_then(|o| serde_json::to_value(o).ok()) else { continue };
+                        let Some(now) = fields::at(&live, &u.path) else { continue };
+                        if fields::same(&u.path, &f.value, &now) {
+                            continue;
+                        }
+                        let by = fields::managers(&live, &u.path).into_iter().next();
+                        let entry = (rel.clone(), fields::told(&now), by);
+                        if !said.contains(&entry) {
+                            said.push(entry);
+                        }
+                    }
+                }
+            }
+            if said.is_empty() {
+                continue;
+            }
+            let several = said.iter().map(|(r, ..)| r).collect::<BTreeSet<_>>().len() > 1;
+            let each: Vec<String> = said
+                .iter()
+                .map(|(rel, now, by)| {
+                    let by = by.as_ref().map_or(String::new(), |b| format!(" · {b}"));
+                    let rel = if several { format!(" ({rel})") } else { String::new() };
+                    format!("{now}{by}{rel}")
+                })
+                .collect();
+            out.push(Hint { line: f.line, text: format!("→ {}", each.join(", ")), tone: Tone::Info });
+        }
+        out
     }
 
     fn drop_stream(&mut self, sid: u64) -> Vec<Action> {
@@ -1351,8 +1453,8 @@ impl State {
                 changed.push((path.clone(), now));
             }
         }
-        for (path, version) in &self.values {
-            let now = (*version, self.values_hint(path).into_iter().collect());
+        for (path, (version, _)) in &self.values {
+            let now = (*version, together(self.values_hints(path)));
             if self.sent.get(path) != Some(&now) {
                 changed.push((path.clone(), now));
             }
@@ -2118,6 +2220,9 @@ impl State {
                 self.render_failed((id - HELM_RENDER) as usize, why)
             }
             FIND_CHARTS => self.found_charts(Vec::new()),
+            // (a chart's templates that couldn't be found or read: its values say only which releases)
+            FIND_TEMPLATES => Vec::new(),
+            id if (TPL_READ..HELM_READ).contains(&id) => Vec::new(),
             HELM_INSTALL => {
                 self.no_helm = Some(why);
                 self.follow()
@@ -2329,6 +2434,13 @@ impl State {
                     s.chart_read((id - HELM_READ) as usize, Some(&bytes))
                 }
                 HostEvent::Found((FIND_CHARTS, paths)) => s.found_charts(paths),
+                HostEvent::Found((FIND_TEMPLATES, paths)) => {
+                    s.templates = paths;
+                    s.read_templates()
+                }
+                HostEvent::File((id, bytes)) if (TPL_READ..HELM_READ).contains(&id) => {
+                    s.template_read((id - TPL_READ) as usize, &bytes)
+                }
                 HostEvent::Lines((id, lines)) if (HELM_RENDER..FIRST_VIEW).contains(&id) => {
                     s.render_lines((id - HELM_RENDER) as usize, lines);
                     Vec::new()
@@ -2698,9 +2810,12 @@ mod tests {
                 (12, "→ Always".to_string())
             ]
         );
-        // Its values.yaml: which releases
-        s.file("/r/charts/shop/values.yaml".into(), 1, "replicaCount: 1\n");
-        assert_eq!(s.values_hint("/r/charts/shop/values.yaml").unwrap().text, "release shop-helm · ns shop");
+        // Its values.yaml: which releases — and beside a value a template writes as it is, what the cluster has
+        // where it isn't the value; one written into more (`image.tag` into two) or worked out isn't said
+        s.file("/r/charts/shop/values.yaml".into(), 1, "# shop\nreplicaCount: 1\npullPolicy: Always\n");
+        let said: Vec<(u64, String)> =
+            s.values_hints("/r/charts/shop/values.yaml").into_iter().map(|h| (h.line, h.text)).collect();
+        assert_eq!(said, [(0, "release shop-helm · ns shop".to_string()), (1, "→ 2".to_string())]);
         // helm missing: offered once, and said
         s.renders.clear();
         let out = s.render();
@@ -2878,6 +2993,65 @@ spec:
         let d = Doc { via: Via::Built("prod".into()), ..d };
         let names: Vec<String> = s.named(&d).into_iter().map(|(_, n)| n.name).collect();
         assert_eq!(names, ["worker", "prod-app-settings-5h7k", "app-token", "data"]);
+    }
+
+    /// A chart's values.yaml open on its own: its templates are found and read for where each value goes, and
+    /// what each release has there is said — whose, when there are more, and who set it.
+    #[test]
+    fn a_value_is_followed_to_what_each_release_has() {
+        let mut s = with_cluster();
+        s.charts = Some([("/r/charts/shop".to_string(), "shop".to_string()), ("/r/charts/db".to_string(), "db".to_string())].into());
+        s.labeled = Some(vec![
+            ("shop-0.1.0".into(), "shop-a".into(), "a".into()),
+            ("shop-0.1.0".into(), "shop-b".into(), "b".into()),
+        ]);
+        s.templates = vec![
+            "/r/charts/shop/templates/deployment.yaml".into(),
+            "/r/charts/db/templates/sts.yaml".into(),
+        ];
+        let out = s.file("/r/charts/shop/values.yaml".into(), 1, "replicaCount: 1\n");
+        let reads: Vec<&str> =
+            out.iter().filter_map(|a| if let Action::ReadFile((_, p)) = a { Some(p.as_str()) } else { None }).collect();
+        assert_eq!(reads, ["/r/charts/shop/templates/deployment.yaml"], "its own chart's only");
+        let renders = out.iter().filter(|a| matches!(a, Action::Spawn(_))).count();
+        assert_eq!(renders, 2, "each release rendered");
+        let tpl = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: {{ .Release.Name }}\nspec:\n  replicas: {{ .Values.replicaCount }}\n";
+        s.template_read(0, tpl.as_bytes());
+        for (n, rel) in ["shop-a", "shop-b"].iter().enumerate() {
+            let output = format!("---\n# Source: shop/templates/deployment.yaml\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: {rel}\n");
+            s.render_lines(n, output.lines().map(str::to_string).collect());
+            s.rendered(n, Some(0), &[]);
+        }
+        serve(&mut s, "apps/v1", &[("Deployment", "deployments")]);
+        let live = |rel: &str, ns: &str, replicas: u64, by: &str| {
+            serde_json::from_value::<DynamicObject>(serde_json::json!({"apiVersion": "apps/v1", "kind": "Deployment",
+                "metadata": {"name": rel, "namespace": ns, "managedFields": [{"manager": by, "operation": "Update",
+                    "time": "2026-10-01T00:00:00Z", "fieldsType": "FieldsV1", "fieldsV1": {"f:spec": {"f:replicas": {}}}}]},
+                "spec": {"replicas": replicas}})).unwrap()
+        };
+        for st in s.streams.values_mut() {
+            st.loaded = true;
+            match st.what.ns.as_deref() {
+                Some("a") => st.objects.insert("shop-a".into(), live("shop-a", "a", 1, "helm")),
+                Some("b") => st.objects.insert("shop-b".into(), live("shop-b", "b", 3, "kubectl")),
+                _ => None,
+            };
+        }
+        let said: Vec<(u64, String)> =
+            s.values_hints("/r/charts/shop/values.yaml").into_iter().map(|h| (h.line, h.text)).collect();
+        assert_eq!(said[1], (0, "→ 3 · kubectl".to_string()), "only where it isn't the value: one release");
+        // (on its first line with which releases: one hint, both said)
+        let out = s.show();
+        let first = out.iter().find_map(|a| match a {
+            Action::Hints(h) if h.path.ends_with("values.yaml") => h.hints.first().map(|h| h.text.clone()),
+            _ => None,
+        });
+        assert_eq!(first.as_deref(), Some("releases shop-a (ns a), shop-b (ns b)  ·  → 3 · kubectl"));
+        s.streams.values_mut().filter(|st| st.what.ns.as_deref() == Some("a")).for_each(|st| {
+            st.objects.insert("shop-a".into(), live("shop-a", "a", 2, "helm"));
+        });
+        let said: Vec<String> = s.values_hints("/r/charts/shop/values.yaml").into_iter().map(|h| h.text).collect();
+        assert_eq!(said[1], "→ 2 · helm (shop-a), 3 · kubectl (shop-b)", "two: whose each is");
     }
 
     #[test]

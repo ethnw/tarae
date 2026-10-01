@@ -24,7 +24,8 @@ pub struct Field {
     pub line: u64,
     pub path: Vec<Seg>,
     pub value: Value,
-    /// Written by a template (`{{ }}`): the cluster's value is said, not compared.
+    /// Written by a template (`{{ }}`): the cluster's value is said, not compared — `value` is the template's
+    /// text (`{{ .Values.replicaCount }}`).
     pub templated: bool,
     /// A key whose value is below it (`resources:`): where it is, not a value.
     pub nested: bool,
@@ -148,7 +149,8 @@ pub fn fields(lines: &[&str], first: u64) -> Vec<Field> {
                 } else if value.contains("{{") {
                     let mut path = path_here(&stack);
                     path.push(Seg::Key(key));
-                    out.push(Field { line: first + i as u64, path, value: Value::Null, templated: true, nested: false });
+                    let text = Value::String(value.to_string());
+                    out.push(Field { line: first + i as u64, path, value: text, templated: true, nested: false });
                 } else if let Some(v) = scalar(value) {
                     let mut path = path_here(&stack);
                     path.push(Seg::Key(key));
@@ -158,7 +160,7 @@ pub fn fields(lines: &[&str], first: u64) -> Vec<Field> {
             // `- value`: the item itself
             None if dash => {
                 let (value, templated) = match rest.contains("{{") {
-                    true => (Some(Value::Null), true),
+                    true => (Some(Value::String(rest.trim().to_string())), true),
                     false => (scalar(rest), false),
                 };
                 if let Some(value) = value {
