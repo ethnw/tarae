@@ -1,5 +1,5 @@
-//! Events: plugins that subscribed are told what happens to buffers — opened, saved, closed, changed, and
-//! about to be saved. Never from the key or render path: an event only queues work on the plugin thread.
+//! Events: plugins that subscribed are told what happens to buffers — opened, saved, closed, changed, shown
+//! (now in front), and about to be saved. Never from the key or render path: an event only queues work on the plugin thread.
 //!
 //! - **One after another**: the subscribers of an event are called in turn, each on the buffer as the one
 //!   before left it (its answer applied), so two plugins' edits don't refuse each other.
@@ -42,6 +42,8 @@ pub(super) struct Events {
     saves: u64,
     /// How long a save waits for `before-save` answers.
     pub wait: Duration,
+    /// The buffer in front, as `shown` last said it.
+    front: Option<DocId>,
 }
 
 impl Default for Events {
@@ -56,6 +58,7 @@ impl Default for Events {
             presaved: HashSet::new(),
             saves: 0,
             wait: Duration::from_secs(2),
+            front: None,
         }
     }
 }
@@ -86,6 +89,20 @@ impl Editor {
             })
             .map(|(plugin, ..)| plugin.clone())
             .collect()
+    }
+
+    /// `shown`, when the buffer in front isn't the one it was (after every event: switching, a window's
+    /// focus, opening — all of them).
+    pub fn plugin_front(&mut self) {
+        let Some(p) = &mut self.plugins else { return };
+        let doc = self.docs.get(self.current).map(|d| d.id);
+        if p.events.front == doc {
+            return;
+        }
+        p.events.front = doc;
+        if let Some(doc) = doc {
+            self.plugin_event(Event::Shown, doc);
+        }
     }
 
     /// Tells the subscribers of `e` about buffer `doc` (opened, saved).
@@ -129,7 +146,15 @@ impl Editor {
                     return; // saved without waiting any longer
                 }
                 match result {
-                    Ok(actions) => ed.plugin_apply(&who, &seen, actions),
+                    Ok(actions) => {
+                        // Only I/O asked for, nothing said: not drawn (a buffer brought to the front, again)
+                        let quiet = actions.iter().all(super::Action::unseen);
+                        let said = (ed.status.clone(), ed.toasts.len());
+                        ed.plugin_apply(&who, &seen, actions);
+                        if quiet && said == (ed.status.clone(), ed.toasts.len()) {
+                            ed.unchanged = true;
+                        }
+                    }
                     Err(err) => ed.set_error(format!("{who}: {}", shown(&err))),
                 }
                 ed.plugin_chain(e, doc, rest, save, then);

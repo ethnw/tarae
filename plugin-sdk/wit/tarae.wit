@@ -29,6 +29,8 @@ interface types {
         /// About to be written by `:w` (not auto-save): edits in the answer go into the saved file. Saving
         /// waits for the answer, up to 2 seconds.
         before-save,
+        /// Now the buffer in front (switched to, its window focused, opened) — for a view of "this file".
+        shown,
     }
 
     /// An event to be told about: `text` as for commands; only about buffers in these languages ("yaml", …;

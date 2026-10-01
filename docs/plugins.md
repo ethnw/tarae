@@ -125,6 +125,7 @@ about the buffer it happened to, and the answer is carried out like a command's.
 | `closed` | a buffer is about to close (there's nothing left to edit, but messages show) |
 | `changed` | a buffer was edited and then left alone for 300 ms — not on every key |
 | `before-save` | `:w` (and `:wq`, `:wa`) is about to write: the answer's edits go into the file. Saving waits for it, up to 2 seconds, then saves as is. Auto-save doesn't wait for plugins |
+| `shown` | The buffer is now the one in front — switched to, its window focused, or opened — for a view of "this file". Once per change of buffer, not again while it stays |
 
 ```rust
 fn subscriptions() -> Vec<Subscription> {

@@ -1087,6 +1087,7 @@ impl Editor {
         crate::edits::next(self);
         crate::codereview::land(self);
         self.agent_selection_tick(false);
+        self.plugin_front();
         self.schedule_tick();
     }
 

@@ -33,9 +33,11 @@ pub enum Event {
     Closed,
     Changed,
     BeforeSave,
+    Shown,
 }
 
-const EVENTS: [Event; 5] = [Event::Opened, Event::Saved, Event::Closed, Event::Changed, Event::BeforeSave];
+const EVENTS: [Event; 6] =
+    [Event::Opened, Event::Saved, Event::Closed, Event::Changed, Event::BeforeSave, Event::Shown];
 
 impl Event {
     /// Its name in the WIT.
@@ -46,6 +48,7 @@ impl Event {
             Event::Closed => "closed",
             Event::Changed => "changed",
             Event::BeforeSave => "before-save",
+            Event::Shown => "shown",
         }
     }
 }
@@ -1076,8 +1079,12 @@ pub(super) mod tests {
         for jit in [true, false] {
             let mut p = demo(jit);
             let subs = p.subscriptions(FUEL).unwrap();
-            assert_eq!(subs.len(), 5);
+            assert_eq!(subs.len(), 6);
             assert!(subs.contains(&Subscription { event: Event::Changed, text: true, languages: vec![] }));
+            assert!(
+                subs.contains(&Subscription { event: Event::Shown, text: false, languages: vec![] }),
+                "the last event"
+            );
             assert!(subs.contains(&Subscription { event: Event::Opened, text: false, languages: vec![] }));
             assert_eq!(
                 p.on(Event::Opened, &cx("", None), FUEL).unwrap(),

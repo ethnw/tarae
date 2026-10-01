@@ -232,6 +232,7 @@ impl Guest for Demo {
             sub(Event::Closed, false),
             sub(Event::Changed, true),
             sub(Event::BeforeSave, true),
+            sub(Event::Shown, false),
         ]
     }
 
@@ -311,6 +312,12 @@ impl Guest for Demo {
                 std::hint::black_box(());
             },
             Event::BeforeSave => Vec::new(),
+            // In front again: said for `.front` files (others' tests keep their messages)
+            // (with the time: each its own message, so a test can count them)
+            Event::Shown if name.ends_with(".front") => {
+                vec![Action::Status(format!("shown {name} {}", cx.now.millis))]
+            }
+            Event::Shown => Vec::new(),
         }
     }
 }

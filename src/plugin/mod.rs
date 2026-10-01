@@ -817,6 +817,40 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    /// `shown` goes out when the buffer in front changes — switching buffers, opening one — and not again
+    /// while it stays.
+    #[test]
+    fn the_buffer_in_front_is_shown() {
+        let (mut ed, dir) = setup("shown", "x\n");
+        let (a, b) = (dir.join("a.front"), dir.join("b.front"));
+        std::fs::write(&a, "a\n").unwrap();
+        std::fs::write(&b, "b\n").unwrap();
+        // (each says the file and when — each its own message: the file names, in order)
+        let shown = |ed: &Editor| {
+            let named = |t: &String| {
+                t.rsplit(' ').nth(1).and_then(|p| p.rsplit('/').next()).unwrap_or("").to_string()
+            };
+            ed.toasts
+                .iter()
+                .map(|t| &t.text)
+                .filter(|t| t.starts_with("shown "))
+                .map(named)
+                .collect::<Vec<_>>()
+        };
+        ed.open(&a).unwrap();
+        settle_until(&mut ed, |ed| shown(ed) == ["a.front"]);
+        ed.open(&b).unwrap();
+        settle_until(&mut ed, |ed| shown(ed) == ["a.front", "b.front"]);
+        key(&mut ed, "j");
+        settle_for(&mut ed, Duration::from_millis(200));
+        assert_eq!(shown(&ed), ["a.front", "b.front"], "the same one in front: not again");
+        // (back to one already open)
+        ed.cycle_buffer(-1);
+        ed.handle_event(crate::event::Event::Resize);
+        settle_until(&mut ed, |ed| shown(ed) == ["a.front", "b.front", "a.front"]);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     #[test]
     fn timers_tick_unless_stopped() {
         let (mut ed, dir) = setup("timer", "x\n");
@@ -861,6 +895,8 @@ mod tests {
     #[test]
     fn what_changes_nothing_on_screen_isnt_drawn() {
         let (mut ed, dir) = setup("quiet", "x\n");
+        // (what loading sent it answered first — its buffer shown — and quietly)
+        assert!(quiet_flags(&mut ed, Duration::from_millis(200)).iter().all(|q| *q));
         ed.plugin_run("quiet", "").unwrap();
         let flags = quiet_flags(&mut ed, Duration::from_millis(400));
         // (the command's answer; then the tick, and the plugin's answer to it: `stop` only)
