@@ -2824,6 +2824,7 @@ mod tests {
         // Changed files: each file's diff against HEAD is the preview, +N −M on the right; Enter opens it
         // at its first change
         feed(&mut ed, ":w<ret>");
+        ed.flush_saves(); // (saving is in the background: on disk before git reads it)
         ed.git_changed_files_in(dir.clone());
         settle_until(&mut ed, |ed| ed.picker.is_some());
         let p = ed.picker.as_ref().unwrap();
@@ -4272,6 +4273,7 @@ mod tests {
         settle_until(&mut ed, |ed| ed.doc().git_base.is_some());
         feed(&mut ed, "ggmiwcONE<esc>4gg");
         feed(&mut ed, "miwcFOUR<esc>:w<ret>");
+        ed.flush_saves(); // (on disk before git's status reads it)
         settle_until(&mut ed, |ed| ed.doc().git_hunks.len() == 2);
         let mut sb = crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, repo.clone());
         sb.focus = false;
@@ -4315,6 +4317,7 @@ mod tests {
         assert_eq!(ed.doc().text.line(0).to_string(), "one\n", "its index lines back");
         // Stash and back
         feed(&mut ed, ":w<ret>");
+        ed.flush_saves(); // (on disk before git stashes it)
         ed.sidebar.as_mut().unwrap().focus = true;
         feed(&mut ed, "z");
         settle_until(&mut ed, |_| {
