@@ -1,0 +1,47 @@
+# Go: `go test` in the package's folder, dlv to debug.
+
+[test]
+query = "tests.scm"
+files = ["*_test.go"]
+cwd = "file-dir"
+parse = "go"
+# One test ({name}); the file's tests ({names}, joined with |)
+run = ["go", "test", "-v", "-run", "^{name}$", "."]
+run-file = ["go", "test", "-v", "-run", "^({names})$", "."]
+debug = { mode = "test", program = "{cwd}", cwd = "{cwd}", args = ["-test.run", "^{name}$", "-test.v"], outputMode = "remote" }
+debug-file = { mode = "test", program = "{cwd}", cwd = "{cwd}", args = ["-test.run", "^({names})$", "-test.v"], outputMode = "remote" }
+
+[test.kind.bench]
+file = false
+run = ["go", "test", "-v", "-run", "^$", "-bench", "^{name}$", "."]
+debug = { mode = "test", program = "{cwd}", cwd = "{cwd}", args = ["-test.run", "^$", "-test.bench", "^{name}$", "-test.v"], outputMode = "remote" }
+
+[test.kind.single]
+file = false
+
+[tasks]
+when = ["go.mod"]
+rank = 20
+
+[[tasks.task]]
+name = "go build"
+cmd = "go build ./..."
+
+[[tasks.task]]
+name = "go vet"
+cmd = "go vet ./..."
+
+# `go install` puts it in $GOBIN, else $GOPATH/bin, else ~/go/bin — often not on PATH
+[install.gopls]
+what = "Go's language server"
+ways = [
+    { run = ["go", "install", "golang.org/x/tools/gopls@latest"], bin = ["${GOBIN}", "${GOPATH}/bin", "~/go/bin"] },
+    { run = ["brew", "install", "gopls"] },
+]
+
+[install.dlv]
+what = "Go's debugger"
+ways = [
+    { run = ["go", "install", "github.com/go-delve/delve/cmd/dlv@latest"], bin = ["${GOBIN}", "${GOPATH}/bin", "~/go/bin"] },
+    { run = ["brew", "install", "delve"] },
+]

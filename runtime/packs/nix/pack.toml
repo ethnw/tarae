@@ -1,0 +1,6 @@
+# Nix: only said, not run. Nix setups add packages in their own config, and `nix profile` needs flakes on
+# and has changed its commands between versions.
+
+[install.nil]
+what = "Nix's language server (nil)"
+hint = "add nil to your Nix config (home-manager's home.packages, NixOS's environment.systemPackages, or your flake's devShell)"

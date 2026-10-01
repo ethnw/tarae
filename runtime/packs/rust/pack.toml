@@ -1,0 +1,42 @@
+# Rust: `cargo test` in the package, filtered by module path; lldb-dap on the test binary to debug.
+
+[test]
+query = "tests.scm"
+cwd = { nearest = ["Cargo.toml"] }
+helpers = ["cargo"]          # {cargo-target}, {module}, {module-label}
+parse = "rust"
+
+run = ["cargo", "test", "{cargo-target}", "--", "{module}{path}", "--exact"]
+run-group = ["cargo", "test", "{cargo-target}", "--", "{module}{groups}::"]
+run-file = ["cargo", "test", "{cargo-target}", "--", "{module}"]
+label = "{module}{path}"
+label-group = "{module}{groups}::*"
+label-file = "{module-label}"
+
+debug = { program = "{cargo-test-binary}", args = ["{module}{path}", "--exact", "--nocapture", "--test-threads=1"], cwd = "{cwd}", stopOnEntry = false }
+debug-group = { program = "{cargo-test-binary}", args = ["{module}{groups}::", "--nocapture", "--test-threads=1"], cwd = "{cwd}", stopOnEntry = false }
+debug-file = { program = "{cargo-test-binary}", args = ["{module}", "--nocapture", "--test-threads=1"], cwd = "{cwd}", stopOnEntry = false }
+
+[tasks]
+when = ["Cargo.toml"]
+rank = 10
+
+[[tasks.task]]
+name = "cargo check"
+cmd = "cargo check --all-targets --message-format=short"
+
+[[tasks.task]]
+name = "cargo clippy"
+cmd = "cargo clippy --all-targets --message-format=short"
+
+[[tasks.task]]
+name = "cargo build"
+cmd = "cargo build --message-format=short"
+
+# rustup's proxy lands in ~/.cargo/bin; run in the project, so its rust-toolchain.toml counts
+[install.rust-analyzer]
+what = "Rust's language server"
+ways = [
+    { run = ["rustup", "component", "add", "rust-analyzer"], bin = ["~/.cargo/bin"], project = true },
+    { run = ["brew", "install", "rust-analyzer"] },
+]

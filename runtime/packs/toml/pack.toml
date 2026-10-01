@@ -1,0 +1,6 @@
+[install.taplo]
+what = "TOML's language server (taplo)"
+ways = [
+    { run = ["brew", "install", "taplo"] },
+    { run = ["cargo", "install", "--locked", "taplo-cli"], bin = ["~/.cargo/bin"] },
+]

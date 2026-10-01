@@ -1,0 +1,5 @@
+# Dev tasks: `cargo xtask <task>` (xtask/ — separate from the tarae binary)
+[alias]
+xtask = "run --quiet --package xtask --"
+# Live end-to-end runs with the real tools (tests/live.rs) — minutes, and the Claude ones use your plan
+live = "test --test live -- --ignored --test-threads=1"

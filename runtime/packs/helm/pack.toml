@@ -1,0 +1,9 @@
+[install.helm_ls]
+what = "Helm's language server"
+ways = [{ run = ["brew", "install", "helm-ls"] }]
+hint = "or a release from github.com/mrjosh/helm-ls"
+
+[install.helm]
+what = "Helm (renders a chart's templates)"
+ways = [{ run = ["brew", "install", "helm"] }]
+hint = "or a release from github.com/helm/helm"

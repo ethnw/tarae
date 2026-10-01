@@ -1,0 +1,79 @@
+# terminal_panel · 100x24 · theme meok · cursor 19:1
+## text
+00  tarae  ›  src  ›  demo.rs
+01   1 use std::collections::HashMap;                                                                 ▐
+02   1                                                                                                ▐
+03   2 ▎ Counts how often each word appears.                                                          ▐
+04     ▎                                                                                              ▐
+05     ▎ Words are split on whitespace; case is kept.                                                 ▐
+06   5 pub fn word_counts(text: &str) -> HashMap<&str, usize> {                                       ▐
+07   6     let mut counts = HashMap::new();                                                           ▐
+08   7     for word in text.split_whitespace() {                                                      ▐
+09   8     │   *counts.entry(word).or_insert(0) += 1;                                                 ▐
+10   9     }
+11  10     counts
+12  11 }
+13  12
+14  ▐ TERMINAL ▌  sh                                                            C-\ back to the code
+15  $ cargo test
+16  running 3 tests
+17  test words ... ok
+18  test empty ... FAILED
+19
+20
+21
+22  ▐ NORMAL ▌                                                                  rust   utf-8 LF   1:1
+23
+## bg · surface per cell, blank = ui.background
+00
+01     Acccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+02
+03     11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
+04     11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
+05     11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
+06
+07
+08
+09
+10
+11
+12
+13
+14 ppAAAAAAAAAApppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+15 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+16 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+17 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+18 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+19 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+20 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+21 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+22   AAAAAAAA
+23
+## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
+00  ddddd  f  ddd  f  TTTTTTT
+01   A                                                                                                f
+02   f                                                                                                f
+03   f                                                                                                f
+04                                                                                                    f
+05                                                                                                    f
+06   f                                                                                                f
+07   f                                                                                                f
+08   f                                                                                                f
+09   f                                                                                                f
+10   f
+11  ff
+12  ff
+13  ff
+14  a BBBBBBBB a  TT                                                            DDD ffff ff fff ffff
+15  B
+16
+17
+18
+19
+20
+21
+22  a BBBBBB a                                                                  dddd   ddddd dd   TTT
+23
+## legend
+bg: c=ui.cursorline.primary  p=ui.popup  A=ui.cursor.primary  1=other
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  B=bold

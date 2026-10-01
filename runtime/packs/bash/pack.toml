@@ -1,0 +1,6 @@
+[install.bash-language-server]
+what = "Bash's language server"
+ways = [
+    { run = ["npm", "install", "--global", "bash-language-server"] },
+    { run = ["brew", "install", "bash-language-server"] },
+]

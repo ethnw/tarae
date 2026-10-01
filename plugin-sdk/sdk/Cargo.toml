@@ -1,0 +1,22 @@
+# Helpers for tarae plugins, beside the WIT bindings: the time and randomness tarae hands over, TLS over a
+# plugin's connections, HTTP/1.1 read as it comes.
+[package]
+name = "tarae-plugin"
+version = "0.2.0"
+edition = "2024"
+description = "Helpers for tarae plugins: time, randomness, TLS and HTTP over tarae's connections"
+license = "MIT OR Apache-2.0"
+
+[features]
+tls = ["dep:rustls", "dep:rustls-rustcrypto"]
+
+[dependencies]
+getrandom = { version = "0.2", features = ["custom"] }
+rand_chacha = "0.3"
+rand_core = "0.6"
+httparse = "1"
+rustls = { version = "0.23", default-features = false, features = ["tls12"], optional = true }
+rustls-rustcrypto = { version = "0.0.2-alpha", default-features = false, features = ["alloc", "tls12"], optional = true }
+
+# Not part of tarae's workspace
+[workspace]

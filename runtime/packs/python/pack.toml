@@ -1,0 +1,42 @@
+# Python: pytest from the project's root, with its virtualenv's Python; debugpy to debug.
+
+[test]
+query = "tests.scm"
+cwd = { nearest = ["pyproject.toml", "pytest.ini", "setup.cfg", "tox.ini", "setup.py"], or = [".git"] }
+helpers = ["python"]         # {python}
+parse = "python"
+
+# -v: a line per test; --tb=short: just where it failed and the E lines (what the results panel reads)
+run = ["{python}", "-m", "pytest", "{rel}::{path}", "-v", "--tb=short", "--color=no"]
+run-group = ["{python}", "-m", "pytest", "{rel}::{groups}", "-v", "--tb=short", "--color=no"]
+run-file = ["{python}", "-m", "pytest", "{rel}", "-v", "--tb=short", "--color=no"]
+label = "{rel}::{path}"
+label-group = "{rel}::{groups}"
+label-file = "{rel}"
+
+debug = { module = "pytest", args = ["{rel}::{path}", "-q", "--color=no"], python = "{python}", cwd = "{cwd}", console = "internalConsole", justMyCode = false }
+debug-group = { module = "pytest", args = ["{rel}::{groups}", "-q", "--color=no"], python = "{python}", cwd = "{cwd}", console = "internalConsole", justMyCode = false }
+debug-file = { module = "pytest", args = ["{rel}", "-q", "--color=no"], python = "{python}", cwd = "{cwd}", console = "internalConsole", justMyCode = false }
+
+[tasks]
+when = ["pyproject.toml", "setup.py", "setup.cfg"]
+rank = 50
+
+[[tasks.task]]
+name = "ruff"
+cmd = "ruff check --output-format=concise ."
+needs = "ruff"
+
+[[tasks.task]]
+name = "mypy"
+cmd = "mypy --no-color-output --no-error-summary ."
+needs = "mypy"
+
+# The first of Python's servers tarae looks for; uv and pipx put it in ~/.local/bin
+[install.basedpyright-langserver]
+what = "Python's language server (basedpyright)"
+ways = [
+    { run = ["uv", "tool", "install", "basedpyright"], bin = ["${UV_TOOL_BIN_DIR}", "${XDG_BIN_HOME}", "~/.local/bin"] },
+    { run = ["pipx", "install", "basedpyright"], bin = ["${PIPX_BIN_DIR}", "~/.local/bin"] },
+    { run = ["brew", "install", "basedpyright"] },
+]

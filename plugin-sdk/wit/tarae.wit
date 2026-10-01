@@ -1,0 +1,321 @@
+// tarae's plugin API. A plugin is a core WebAssembly module built from this with wit-bindgen, for
+// wasm32-unknown-unknown: it gets no imports — it reads what tarae hands it and answers with actions, and
+// what it asked for (a program's output, a connection's bytes, a file) comes back as events.
+// Positions are byte offsets into the buffer, on character boundaries.
+// Until 1.0 any 0.x version may break plugins: tarae loads only plugins built for its own.
+// SPDX-License-Identifier: MIT OR Apache-2.0 — like the rest of the SDK, so a plugin can be under any license.
+
+package tarae:plugin@0.2.0;
+
+interface types {
+    /// A command to register: `:name args`, `":name"` in a keymap, and `doc` in the command palette.
+    record command {
+        name: string,
+        doc: string,
+        /// Whether it needs the buffer's text (`buffer.text`). Most commands only need the selections.
+        text: bool,
+    }
+
+    /// What happens to a buffer, for plugins that subscribe.
+    enum event {
+        /// Loaded (a big file: once its text is in).
+        opened,
+        /// Written to disk.
+        saved,
+        /// About to be closed (its edits can't apply any more).
+        closed,
+        /// Edited, then left alone for a moment (not on every key).
+        changed,
+        /// About to be written by `:w` (not auto-save): edits in the answer go into the saved file. Saving
+        /// waits for the answer, up to 2 seconds.
+        before-save,
+    }
+
+    /// An event to be told about: `text` as for commands; only about buffers in these languages ("yaml", …;
+    /// none: every buffer).
+    record subscription {
+        event: event,
+        text: bool,
+        languages: list<string>,
+    }
+
+    /// What a plugin may do beyond the buffer. It says so in `permissions()`; you approve the list when
+    /// it's first loaded (and again if it changes), and it can do nothing else.
+    variant permission {
+        /// Start this program (`spawn`).
+        run(string),
+        /// Read files matching this pattern (`read-file`): `~` is your home folder, `*` any name, `**` any
+        /// folders.
+        read(string),
+        /// Read this environment variable (`read-env`).
+        env(string),
+        /// Connect over TCP (`connect`); each new host:port is asked about the first time.
+        network,
+        /// Read the files of the project you opened (the folder tarae started in): `read-file` there
+        /// without asking, and `find`.
+        project,
+    }
+
+    record selection {
+        anchor: u64,
+        head: u64,
+        %from: u64,
+        to: u64,
+        text: string,
+        /// The line `head` is on, from 0.
+        line: u64,
+    }
+
+    record buffer {
+        path: option<string>,
+        name: string,
+        language: option<string>,
+        /// Only for commands registered with `text: true`.
+        text: option<string>,
+        version: u64,
+        modified: bool,
+    }
+
+    /// What every call gets: the time, and fresh randomness (a plugin has no clock and no random source).
+    record now {
+        /// Milliseconds since 1970-01-01 UTC.
+        millis: u64,
+        /// 32 random bytes — enough to seed a cryptographic generator.
+        entropy: list<u8>,
+    }
+
+    record context {
+        args: string,
+        buffer: buffer,
+        selections: list<selection>,
+        primary: u64,
+        now: now,
+    }
+
+    record edit {
+        %from: u64,
+        to: u64,
+        insert: string,
+    }
+
+    /// A program to run, with its arguments — no shell. What it prints comes back (`lines`), some lines at
+    /// a time, then its end (`exit`). Ids are yours, to tell requests apart; one still in use is replaced.
+    record spawn {
+        id: u64,
+        program: string,
+        args: list<string>,
+        /// Variables to set for it (`AWS_PROFILE`, …) — only ones the plugin may read (`env` permissions).
+        env: list<tuple<string, string>>,
+    }
+
+    /// A TCP connection: `connected`, then `data` as it comes, `closed` at its end.
+    record connect {
+        id: u64,
+        host: string,
+        port: u64,
+    }
+
+    /// The plugin's panel, below the code: a table. You move through its rows (j/k and the like); other keys
+    /// come to the plugin (`key`).
+    record panel {
+        title: string,
+        /// Column names (none: no header row).
+        columns: list<string>,
+        /// A cell per column.
+        rows: list<list<string>>,
+        /// An id per row ("namespace/name"), or none. With ids, the selection stays on its row as rows come,
+        /// go and move, and a key says which row it was on.
+        ids: list<string>,
+        /// A line under the table.
+        status: string,
+        /// Keys to show in the header, with what they do: ("d", "describe").
+        keys: list<tuple<string, string>>,
+    }
+
+    /// A read-only buffer the plugin fills (`show`, then `append`): a describe, a YAML, a log.
+    record view {
+        id: u64,
+        title: string,
+        text: string,
+        /// For colors: "yaml", "json", … (none: plain).
+        language: option<string>,
+    }
+
+    /// How a hint or a card row reads: fine, of note, a warning, an error.
+    enum tone {
+        ok,
+        info,
+        warning,
+        error,
+    }
+
+    /// Text at the end of a buffer's line, beside the code (from 0).
+    record hint {
+        line: u64,
+        text: string,
+        tone: tone,
+    }
+
+    /// A plugin's hints for one buffer, worked out on its text at `version` (a buffer's `version`): they
+    /// replace what it put there before, and show only while the buffer is at that version — edited, they
+    /// go until the plugin sends them again (it hears `changed`).
+    record hints {
+        path: string,
+        version: u64,
+        hints: list<hint>,
+    }
+
+    /// A row of its side tab — a tree, by depth.
+    record side-row {
+        id: string,
+        depth: u64,
+        text: string,
+        /// Dim, at the right.
+        detail: string,
+        tone: tone,
+        /// Where it's defined: (path, first line, last line), from 0. `enter` goes there, and while the
+        /// cursor is there it's the row marked. None: `enter` comes to the plugin (`key`).
+        at: option<tuple<string, u64, u64>>,
+        /// A line of text under the row above it (why that one isn't fine): in its tone's color, with no
+        /// glyph, not a row to select.
+        note: bool,
+    }
+
+    /// Its tab in the side panel, beside files, outline and git.
+    record side {
+        /// The tab's name.
+        title: string,
+        /// At the right of the panel's header: what it's of.
+        note: string,
+        rows: list<side-row>,
+        /// Its keys, for the panel's foot: ("e", "events"). Keys the panel doesn't take itself (moving,
+        /// folding: j k g G h l, enter, tab, esc, q) come to the plugin (`key`, with the row's id).
+        keys: list<tuple<string, string>>,
+        /// Show the side panel at this tab now — without the keys, or (`focus`) with them.
+        open: bool,
+        focus: bool,
+    }
+
+    /// A list to choose from (tarae's picker): the choice comes back as `answer` (its id, or none: esc).
+    record pick {
+        id: u64,
+        title: string,
+        /// (id, what it shows)
+        items: list<tuple<string, string>>,
+    }
+
+    /// What tarae does with an answer, in order. The edits of one answer (replace-selections, edits, select)
+    /// are one undo step, on the buffer and selections the command was given, and are refused if the buffer
+    /// changed while the plugin ran or is being typed in. Text is shown without control characters, and an
+    /// answer may hold up to 64 MB of text and lists. What needs a permission fails (`failed`) without one.
+    variant action {
+        status(string),
+        success(string),
+        warning(string),
+        error(string),
+        /// One text per selection.
+        replace-selections(list<string>),
+        edits(list<edit>),
+        /// (anchor, head) per selection, in the buffer after this answer's edits; the first is the primary one.
+        select(list<tuple<u64, u64>>),
+        /// A tarae movement command (`move_next_word_start`, `goto_file_start`, …). Nothing else runs: not
+        /// typed commands, not other commands.
+        run(string),
+        /// Opens a file — at a line, as `path:line` (from 1).
+        open(string),
+        /// A short text in the status line, for this buffer (while it's in front), until replaced; an
+        /// empty one clears it.
+        status-bar(string),
+        /// Starts a program (`run` permission).
+        spawn(spawn),
+        /// Opens a TCP connection (`network` permission).
+        connect(connect),
+        /// Sends bytes on a connection.
+        send(tuple<u64, list<u8>>),
+        /// Stops what an id started: a program, a connection, a timer.
+        stop(u64),
+        /// Reads a whole file (`read` permission): (id, path).
+        read-file(tuple<u64, string>),
+        /// Reads an environment variable (`env` permission): (id, name).
+        read-env(tuple<u64, string>),
+        /// A `tick` after this many milliseconds: (id, ms).
+        timer(tuple<u64, u64>),
+        /// Shows its panel, replacing what it showed — or closes it.
+        panel(option<panel>),
+        /// Asks for a line of text below the panel: (id, prompt). The answer comes back (`answer`). Only in
+        /// answer to you — a command, a key in its panel, its last prompt — and not while a line is being
+        /// typed (then it fails).
+        prompt(tuple<u64, string>),
+        /// Opens (or replaces) a read-only buffer.
+        show(view),
+        /// Adds text to the end of a buffer it showed: (id, text). When you close that buffer, the plugin is
+        /// told (`failed`, with its id), and appending to it fails (it stays closed).
+        append(tuple<u64, string>),
+        /// Text beside a buffer's lines.
+        hints(hints),
+        /// Its tab in the side panel (replacing it) — or none.
+        side(option<side>),
+        /// Asks you to choose — only in answer to you, as `prompt`.
+        pick(pick),
+        /// A short text in the status line on every buffer (what it's connected to), in a tone — or none.
+        badge(option<tuple<string, tone>>),
+        /// The project's files a pattern matches ("**/kustomization.yaml", from the project's folder; `project`
+        /// permission): (id, pattern). They come back (`found`), as absolute paths.
+        find(tuple<u64, string>),
+        /// Writes a file of its own (in its own folder, under tarae's state folder — nowhere else, and no
+        /// permission needed): (id, name, bytes). Where it is comes back (`written`).
+        write-own(tuple<u64, string, list<u8>>),
+        /// Offers to install a tool the language packs know how to (`kustomize`): a card you answer. Once
+        /// it's in, `installed`; if the install fails, `failed`. Once a session per tool.
+        offer-install(tuple<u64, string>),
+    }
+
+    /// What comes back from what a plugin asked for.
+    variant host-event {
+        /// A program's lines on stdout, in order (without their newlines).
+        lines(tuple<u64, list<string>>),
+        /// A program ended: its exit code (none if a signal stopped it), and its last lines on stderr.
+        exit(tuple<u64, option<u64>, list<string>>),
+        /// A connection is open.
+        connected(u64),
+        /// Bytes from a connection.
+        data(tuple<u64, list<u8>>),
+        /// A connection closed: why (empty when the other end just closed it).
+        closed(tuple<u64, string>),
+        /// A file's bytes.
+        file(tuple<u64, list<u8>>),
+        /// An environment variable's value (none: not set).
+        env(tuple<u64, option<string>>),
+        /// A timer went off.
+        tick(u64),
+        /// A key in its panel or its side tab (tarae's name for it: "d", "ret", "C-k", …), the row selected
+        /// then, and that row's id (if it has ids).
+        key(tuple<string, option<u64>, option<string>>),
+        /// What was typed at its prompt, or chosen in its pick (none: esc).
+        answer(tuple<u64, option<string>>),
+        /// A request couldn't be done: why (no permission, no such file, refused, …).
+        failed(tuple<u64, string>),
+        /// What `find` found.
+        found(tuple<u64, list<string>>),
+        /// Where `write-own` wrote.
+        written(tuple<u64, string>),
+        /// A tool it offered is installed.
+        installed(u64),
+    }
+}
+
+world plugin {
+    use types.{command, event, subscription, permission, context, now, action, host-event};
+
+    /// Called when the plugin loads.
+    export commands: func() -> list<command>;
+    /// Called when the plugin loads: the events it wants (none is fine).
+    export subscriptions: func() -> list<subscription>;
+    /// Called when the plugin loads: what it may do beyond the buffer (none is fine — most plugins).
+    export permissions: func() -> list<permission>;
+    export run: func(name: string, cx: context) -> list<action>;
+    /// An event it subscribed to, about the buffer in `cx`.
+    export on: func(event: event, cx: context) -> list<action>;
+    /// What came back from what it asked for, in order.
+    export on-events: func(events: list<host-event>, now: now) -> list<action>;
+}

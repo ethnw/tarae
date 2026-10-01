@@ -1,0 +1,32 @@
+# Kubernetes for tarae: the cluster in the code — each object's state beside its manifest, live, and a side tab.
+# Pure Rust in WebAssembly — kubeconfig, TLS (rustls + RustCrypto) and HTTP inside; tarae only carries the
+# bytes. Requests from kube-core, types from k8s-openapi.
+#   cargo build --release && cp target/wasm32-unknown-unknown/release/kubernetes.wasm ~/.config/tarae/plugins/
+[package]
+name = "kubernetes"
+version = "0.2.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "=0.62.0"
+tarae-plugin = { path = "../sdk", features = ["tls"] }
+kube-core = { version = "4.2.0", default-features = false }
+k8s-openapi = { version = "0.28.0", default-features = false, features = ["latest"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+base64 = "0.22"
+http = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Not part of tarae's workspace
+[workspace]

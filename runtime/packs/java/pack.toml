@@ -1,0 +1,36 @@
+# Java: through the build — Gradle or Maven, from the top of a multi-module build, in the file's module.
+# Results come from the JUnit XML the build writes. Debugging makes the test JVM wait, then attaches
+# java-debug (it comes with jdtls).
+
+[test]
+query = "tests.scm"
+files = ["*.java"]
+helpers = ["java"]
+cwd = "{java-root}"
+parse = "junit"
+# Nested classes are Outer$Inner to the build
+label = "{groups/.}.{name}"
+label-group = "{groups/.}"
+label-file = "{first-group}"
+sources = ["{java-module-dir}/src/test/java", "{java-module-dir}/src/main/java"]
+debug-attach = "java"
+variant-by = "{java-build}"
+
+[test.variant.gradle]
+run = ["{java-tool}", "{java-task}", "--rerun", "--console=plain", "--tests", "{package}{groups/$}.{name}"]
+run-group = ["{java-tool}", "{java-task}", "--rerun", "--console=plain", "--tests", "{package}{groups/$}"]
+run-file = ["{java-tool}", "{java-task}", "--rerun", "--console=plain", "--tests", "{package}{first-group}"]
+reports = ["{java-module-dir}/build/test-results/test"]
+debug-args = ["--debug-jvm"]
+
+[test.variant.maven]
+run = ["{java-tool}", "-B", "test", "{java-pl}", "-Dtest={package}{groups/$}#{name}", "-Dsurefire.failIfNoSpecifiedTests=false"]
+run-group = ["{java-tool}", "-B", "test", "{java-pl}", "-Dtest={package}{groups/$}", "-Dsurefire.failIfNoSpecifiedTests=false"]
+run-file = ["{java-tool}", "-B", "test", "{java-pl}", "-Dtest={package}{first-group}", "-Dsurefire.failIfNoSpecifiedTests=false"]
+reports = ["{java-module-dir}/target/surefire-reports"]
+debug-args = ["-Dmaven.surefire.debug"]
+
+[install.jdtls]
+what = "Java's language server (jdtls)"
+ways = [{ run = ["brew", "install", "jdtls"] }]
+hint = "or your system's jdtls package, or a snapshot from download.eclipse.org/jdtls"

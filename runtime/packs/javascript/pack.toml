@@ -1,0 +1,10 @@
+# JavaScript (and TypeScript) projects: every script in package.json.
+
+[tasks]
+when = ["package.json"]
+rank = 40
+
+[[tasks.task]]
+name = "npm run {key}"
+cmd = "npm run --silent {key}"
+each = { json = "package.json", keys = "scripts" }

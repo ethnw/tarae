@@ -1,0 +1,9 @@
+# Make: the default target.
+
+[tasks]
+when = ["Makefile", "makefile", "GNUmakefile"]
+rank = 90
+
+[[tasks.task]]
+name = "make"
+cmd = "make"

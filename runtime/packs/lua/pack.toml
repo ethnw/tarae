@@ -1,0 +1,4 @@
+[install.lua-language-server]
+what = "Lua's language server"
+ways = [{ run = ["brew", "install", "lua-language-server"] }]
+hint = "or your system's package, or a release from github.com/LuaLS/lua-language-server"

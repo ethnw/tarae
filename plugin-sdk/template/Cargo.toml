@@ -1,0 +1,20 @@
+[package]
+name = "NAME"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "=0.62.0"  # the version tarae checks its plugin API with
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Builds on its own, even inside another workspace
+[workspace]

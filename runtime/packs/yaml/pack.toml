@@ -1,0 +1,11 @@
+[install.yaml-language-server]
+what = "YAML's language server"
+ways = [
+    { run = ["npm", "install", "--global", "yaml-language-server"] },
+    { run = ["brew", "install", "yaml-language-server"] },
+]
+
+[install.kustomize]
+what = "Kustomize (renders overlays)"
+ways = [{ run = ["brew", "install", "kustomize"] }]
+hint = "or a release from github.com/kubernetes-sigs/kustomize"

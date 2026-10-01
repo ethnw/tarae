@@ -1,0 +1,4 @@
+[install.zls]
+what = "Zig's language server"
+ways = [{ run = ["brew", "install", "zls"] }]
+hint = "or your system's package, or a release from github.com/zigtools/zls"

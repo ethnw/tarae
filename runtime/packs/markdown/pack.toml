@@ -1,0 +1,4 @@
+[install.marksman]
+what = "Markdown's language server (marksman)"
+ways = [{ run = ["brew", "install", "marksman"] }]
+hint = "or your system's package, or a release from github.com/artempyanykh/marksman"

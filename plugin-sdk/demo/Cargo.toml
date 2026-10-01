@@ -1,0 +1,25 @@
+# The plugin tarae's tests load (`../demo.wasm`) — every action, and the ways a plugin fails.
+# After changing it:
+#   RUSTFLAGS="--remap-path-prefix=$HOME=~" cargo build --release
+#   cp target/wasm32-unknown-unknown/release/demo.wasm ..
+# (the remap keeps your home folder's path out of the committed file)
+[package]
+name = "demo"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "=0.62.0"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Not part of tarae's workspace
+[workspace]

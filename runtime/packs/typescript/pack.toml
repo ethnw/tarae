@@ -1,0 +1,17 @@
+# TypeScript: type-checking the project.
+
+[tasks]
+when = ["tsconfig.json"]
+rank = 30
+
+[[tasks.task]]
+name = "tsc"
+cmd = "npx tsc --noEmit --pretty false"
+
+# Also JavaScript's
+[install.typescript-language-server]
+what = "TypeScript and JavaScript's language server"
+ways = [
+    { run = ["npm", "install", "--global", "typescript-language-server", "typescript"] },
+    { run = ["brew", "install", "typescript-language-server"] },
+]

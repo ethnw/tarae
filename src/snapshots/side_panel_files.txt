@@ -1,0 +1,79 @@
+# side_panel_files · 112x24 · theme meok · cursor 2:36
+## text
+00  tarae  ›  src  ›  demo.rs
+01   ▎ files  outline  git        ▌  1 use std::collections::HashMap;
+02                                ▌  2
+03     + docs/                  2 ▌  1 ▎ Counts how often each word appears.
+04     − src/                     ▌    ▎
+05     │ + ui/                  2 ▌    ▎ Words are split on whitespace; case is kept.
+06   ▎ │   demo.rs                ▌  4 pub fn word_counts(text: &str) -> HashMap<&str, usize> {
+07     │   lib.rs                 ▌  5     let mut counts = HashMap::new();
+08     + tests/                 1 ▌  6     for word in text.split_whitespace() {
+09       Cargo.toml               ▌  7     │   *counts.entry(word).or_insert(0) += 1;
+10       README.md                ▌  8     }
+11                                ▌  9     counts
+12                                ▌ 10 }
+13                                ▌ 11
+14                                ▌ 12 fn main() {
+15                                ▌ 13     let text = "the quick brown fox jumps over the lazy dog";
+16                                ▌ 14     let counts = word_counts(text);
+17                                ▌ 15     println!("{} distinct words", counts.len()); // 타래
+18                                ▌ 16 }
+19                                ▌
+20   space e files                ▌
+21   space o outline              ▌
+22  ▐ NORMAL ▌                                                                              rust   utf-8 LF   2:1
+23
+## bg · surface per cell, blank = ui.background
+00
+01 ppppppppppppppppppppppppppppppp
+02 ppppppppppppppppppppppppppppppp     Accccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+03 ppppppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111
+04 ppppppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111
+05 ppppppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111
+06 ppppppppppppppppppppppppppppppp
+07 ppppppppppppppppppppppppppppppp
+08 ppppppppppppppppppppppppppppppp
+09 ppppppppppppppppppppppppppppppp
+10 ppppppppppppppppppppppppppppppp
+11 ppppppppppppppppppppppppppppppp
+12 ppppppppppppppppppppppppppppppp
+13 ppppppppppppppppppppppppppppppp
+14 ppppppppppppppppppppppppppppppp
+15 ppppppppppppppppppppppppppppppp
+16 ppppppppppppppppppppppppppppppp
+17 ppppppppppppppppppppppppppppppp
+18 ppppppppppppppppppppppppppppppp
+19 ppppppppppppppppppppppppppppppp
+20 ppppppppppppppppppppppppppppppp
+21 ppppppppppppppppppppppppppppppp
+22   AAAAAAAA
+23
+## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
+00  ddddd  f  ddd  f  TTTTTTT
+01   f TTTTT  fffffff  fff           f
+02                                   A
+03     d ddddf                  d    f
+04     d dddf
+05     f d ddf                  d
+06   a f   TTTTTTT                   f
+07     f                             f
+08     d dddddf                 d    f
+09                                   f
+10                                   f
+11                                   f
+12                                  ff
+13                                  ff
+14                                  ff
+15                                  ff                gggg ggggg ggggg ggg ggggg gggg ggg gggg gggg
+16                                  ff
+17                                  ff              ggg gggggggg gggggg
+18                                  ff
+19
+20   DDDDD D fffff
+21   DDDDD D fffffff
+22  a BBBBBB a                                                                              dddd   ddddd dd   TTT
+23
+## legend
+bg: c=ui.cursorline.primary  p=ui.popup  A=ui.cursor.primary  1=other
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  g=diff.plus  B=bold

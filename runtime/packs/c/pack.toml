@@ -1,0 +1,10 @@
+# C and C++: clangd, and lldb-dap to debug (Rust's debugger too). Both come with the system's toolchain,
+# so tarae only says where to get them.
+
+[install.clangd]
+what = "C and C++'s language server"
+hint = "comes with Xcode's command line tools (xcode-select --install), or LLVM (brew install llvm, apt install clangd)"
+
+[install.lldb-dap]
+what = "the debugger for Rust, C and C++"
+hint = "comes with Xcode (xcrun finds it), or LLVM (brew install llvm, apt install lldb)"

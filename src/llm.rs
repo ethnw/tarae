@@ -1,0 +1,1167 @@
+//! LLM — runs `claude -p` (or any CLI with the same stream-json protocol) as a subprocess.
+//! No HTTP·SDK·API key inside the editor — uses the user's Claude Code login as is.
+//!
+//! Cold start is slow (measured 2026-09-27, Claude Code 2.1.280, a single "ok"):
+//! default 8–10 s → minimal options (`--tools "" --strict-mcp-config --setting-sources ""`) 4.3 s
+//! → **a process spawned early and waiting on stdin (stream-json): 2.5 s** (haiku 1.9 s).
+//! So the spare process is spawned the moment the ask prompt opens (overlapping typing); a request only
+//! writes the message. One process per request — so contexts don't mix.
+//!
+//! Flow: selections → one request (answer per selection in `<r i="N">` tags) → review (diff, y/n per change)
+//! → applied as one transaction. The answer is received as it streams (`--include-partial-messages`) and
+//! shown in a preview card. Cancel = kill the process.
+
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{Sender, channel};
+use std::time::{Duration, Instant};
+
+use ropey::Rope;
+
+use crate::document::DocId;
+use crate::editor::Editor;
+use crate::event::{Apply, Event};
+use crate::key::{Code, Key};
+use crate::selection::{Range, Selection};
+use crate::transaction::{Assoc, Change, Transaction};
+
+/// Speed options: no tools (pure transform), skip MCP·user settings, no session saving (keeps /resume clean).
+const DEFAULT_ARGS: &[&str] = &[
+    "-p",
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--include-partial-messages",
+    "--tools",
+    "",
+    "--no-session-persistence",
+    "--strict-mcp-config",
+    "--setting-sources",
+    "",
+];
+
+/// A model claude offers (`initialize` → `models`, measured): its alias or id, what it's called, a line
+/// about it, the model it stands for now, and the effort levels it takes (none: it has no such knob).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelInfo {
+    pub value: String,
+    pub name: String,
+    pub about: String,
+    pub resolved: String,
+    pub efforts: Vec<String>,
+}
+
+impl ModelInfo {
+    pub fn list(v: &serde_json::Value) -> Vec<ModelInfo> {
+        let s = |m: &serde_json::Value, k: &str| m[k].as_str().unwrap_or_default().to_string();
+        v.as_array()
+            .into_iter()
+            .flatten()
+            .filter(|m| m["value"].is_string())
+            .map(|m| ModelInfo {
+                value: s(m, "value"),
+                name: s(m, "displayName"),
+                about: s(m, "description"),
+                resolved: s(m, "resolvedModel"),
+                efforts: m["supportedEffortLevels"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|e| e.as_str().map(str::to_string))
+                    .collect(),
+            })
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct LlmConfig {
+    pub command: String,
+    pub args: Vec<String>,
+    pub model: Option<String>,
+    /// `--effort` ("" = the model's default).
+    pub effort: String,
+    /// Lines of context sent before and after the selection.
+    pub context_lines: usize,
+    /// Chat: the editor follows where Claude is reading (`C-f` in the chat toggles it per session).
+    pub follow: bool,
+    /// Chat: load CLAUDE.md files and Claude Code settings like `claude` does (hooks off, edits always ask).
+    pub chat_settings: bool,
+}
+
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            command: "claude".into(),
+            args: DEFAULT_ARGS.iter().map(|s| s.to_string()).collect(),
+            model: None,
+            effort: String::new(),
+            context_lines: 20,
+            follow: true,
+            chat_settings: true,
+        }
+    }
+}
+
+// ── Spare process ───────────────────────────────────────────────────────
+
+/// A pre-spawned process for the next request (at most one).
+#[derive(Default)]
+pub struct Warm {
+    child: Option<Child>,
+}
+
+impl Warm {
+    /// Spawns one if there's no live spare. spawn itself returns at once (slow init happens in the child).
+    pub fn ensure(&mut self, cfg: &LlmConfig) -> Result<(), String> {
+        if let Some(c) = &mut self.child
+            && matches!(c.try_wait(), Ok(None))
+        {
+            return Ok(());
+        }
+        self.child = Some(spawn(cfg, &[]).map_err(|e| format!("{}: {e}", cfg.command))?);
+        Ok(())
+    }
+
+    fn take(&mut self, cfg: &LlmConfig) -> Result<Child, String> {
+        self.ensure(cfg)?;
+        Ok(self.child.take().expect("ensured"))
+    }
+}
+
+impl Drop for Warm {
+    fn drop(&mut self) {
+        if let Some(c) = &mut self.child {
+            let _ = c.kill();
+        }
+    }
+}
+
+pub fn spawn(cfg: &LlmConfig, extra: &[&str]) -> std::io::Result<Child> {
+    let mut cmd = Command::new(&cfg.command);
+    cmd.args(&cfg.args).args(extra);
+    if let Some(m) = &cfg.model {
+        cmd.args(["--model", m]);
+    }
+    if !cfg.effort.is_empty() {
+        cmd.args(["--effort", &cfg.effort]);
+    }
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
+}
+
+/// One user message line (stream-json input).
+pub fn user_message(content: &str) -> String {
+    serde_json::json!({"type": "user", "message": {"role": "user", "content": content}}).to_string()
+}
+
+/// The first line to a chat process: registers tarae's own MCP server (`sdkMcpServers` — its messages come
+/// back as `mcp_message` control requests).
+pub fn initialize_message(servers: &[&str]) -> String {
+    serde_json::json!({"type": "control_request", "request_id": "tarae-init",
+        "request": {"subtype": "initialize", "sdkMcpServers": servers}})
+    .to_string()
+}
+
+/// Our answer to a control request from claude.
+pub fn control_response(request_id: &str, response: serde_json::Value) -> String {
+    serde_json::json!({"type": "control_response",
+        "response": {"subtype": "success", "request_id": request_id, "response": response}})
+    .to_string()
+}
+
+/// Control request that stops the running turn — the process and conversation memory remain.
+pub fn interrupt_message() -> String {
+    serde_json::json!({"type": "control_request", "request_id": "tarae-stop", "request": {"subtype": "interrupt"}})
+        .to_string()
+}
+
+/// Force-kills the process (cancel) — the reader thread ends on EOF.
+pub fn kill(pid: u32) {
+    // SAFETY: kill only sends a signal to the pid (merely fails if the pid already exited).
+    unsafe {
+        libc::kill(pid as libc::pid_t, libc::SIGKILL);
+    }
+}
+
+// ── Reading the streamed answer ─────────────────────────────────────────
+
+/// What one stdout line means.
+pub enum StreamEv {
+    /// Thinking (thinking fragments·token estimate).
+    Thinking,
+    /// Summarized thinking text (chat with `--thinking-display summarized` — batched like `Text`).
+    Thought(String),
+    /// Answer text fragment (batched every 25 ms).
+    Text(String),
+    /// A tool call (chat panel — Read·Grep·Glob with its full input).
+    Tool { id: String, name: String, input: serde_json::Value },
+    /// What a tool returned (its first 4 KB — enough to see where a search landed).
+    ToolResult { id: String, text: String },
+    /// claude asks the host something (`mcp_message` for tarae's own tools) — needs a `control_response`.
+    Control { request_id: String, request: serde_json::Value },
+    /// The process's claude session and the model it runs (`system init`) — the chat resumes it later
+    /// (`--resume`).
+    Session { id: String, model: String },
+    /// The models this claude offers (its answer to our `initialize`) — the chat's model picker.
+    Models(Vec<ModelInfo>),
+    /// End of a turn — final text or error (not logged in·stopped etc.).
+    Done(Result<String, String>),
+    /// The process exited (for the chat panel — last stderr line).
+    Exit(String),
+}
+
+/// Reader thread body: parses stdout line by line and sends closures built by `route` to the main loop.
+/// With `once`, reaps the process after the first turn (ask). Otherwise runs until the process exits (chat).
+/// stderr is drained separately (so a full pipe doesn't stall the child) — its last line is the error text.
+pub fn pump(
+    mut child: Child,
+    once: bool,
+    tx: Sender<Event>,
+    route: impl Fn(StreamEv) -> Option<Apply> + Send + 'static,
+) {
+    std::thread::spawn(move || {
+        // stderr's last line arrives when the pipe closes
+        let (err_tx, err_rx) = channel::<String>();
+        if let Some(err) = child.stderr.take() {
+            std::thread::spawn(move || {
+                let mut last = String::new();
+                for line in BufReader::new(err).lines().map_while(Result::ok) {
+                    if !line.trim().is_empty() {
+                        last = line;
+                    }
+                }
+                let _ = err_tx.send(last);
+            });
+        }
+        let send = |ev: StreamEv| route(ev).is_none_or(|apply| tx.send(Event::Job(apply)).is_ok());
+        // Streamed text not yet sent — answer text or (`pending_thought`) thinking summary
+        let mut pending = String::new();
+        let mut pending_thought = false;
+        let flush = |pending: &mut String, thought: bool| {
+            let t = std::mem::take(pending);
+            t.is_empty() || send(if thought { StreamEv::Thought(t) } else { StreamEv::Text(t) })
+        };
+        let mut last_flush = Instant::now();
+        let mut thinking_sent = false;
+        let mut done = false;
+        if let Some(out) = child.stdout.take() {
+            for line in BufReader::new(out).lines().map_while(Result::ok) {
+                let Ok(ev) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+                // Tool calls arrive whole in the assistant message — text streamed before them goes first
+                let tools = tool_events(&ev);
+                if !tools.is_empty() {
+                    if !flush(&mut pending, pending_thought) {
+                        break;
+                    }
+                    thinking_sent = false;
+                    if !tools.into_iter().all(&send) {
+                        break;
+                    }
+                    continue;
+                }
+                match parse_line(&ev) {
+                    Some(ev @ (StreamEv::Text(_) | StreamEv::Thought(_))) => {
+                        let (t, thought) = match ev {
+                            StreamEv::Thought(t) => (t, true),
+                            StreamEv::Text(t) => (t, false),
+                            _ => unreachable!(),
+                        };
+                        if thought != pending_thought {
+                            if !flush(&mut pending, pending_thought) {
+                                break;
+                            }
+                            pending_thought = thought;
+                        }
+                        pending.push_str(&t);
+                        thinking_sent = thought;
+                        if last_flush.elapsed() >= Duration::from_millis(25) {
+                            last_flush = Instant::now();
+                            if !flush(&mut pending, pending_thought) {
+                                break;
+                            }
+                        }
+                    }
+                    // Answered on the main loop (text streamed before it goes first)
+                    Some(c @ StreamEv::Control { .. }) => {
+                        if !flush(&mut pending, pending_thought) || !send(c) {
+                            break;
+                        }
+                    }
+                    Some(e @ (StreamEv::Session { .. } | StreamEv::Models(_))) => {
+                        if !send(e) {
+                            break;
+                        }
+                    }
+                    Some(StreamEv::Thinking) if !thinking_sent => {
+                        thinking_sent = true;
+                        send(StreamEv::Thinking);
+                    }
+                    Some(d @ StreamEv::Done(_)) => {
+                        flush(&mut pending, pending_thought);
+                        thinking_sent = false;
+                        let ok = send(d);
+                        if once || !ok {
+                            done = true;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if once {
+            let _ = child.kill();
+        }
+        let _ = child.wait();
+        // Let stderr drain after exit (else the real error is lost) — bounded, in case a grandchild holds it
+        let err = err_rx.recv_timeout(Duration::from_millis(500)).unwrap_or_default();
+        if once && !done {
+            let msg = if err.is_empty() { "exited without a result".to_string() } else { err };
+            send(StreamEv::Done(Err(msg)));
+        } else if !once {
+            send(StreamEv::Exit(err));
+        }
+    });
+}
+
+/// `tool_use` blocks of a complete assistant message · `tool_result` blocks of the user message that
+/// answers them.
+fn tool_events(ev: &serde_json::Value) -> Vec<StreamEv> {
+    let Some(content) = ev["message"]["content"].as_array() else { return Vec::new() };
+    let id = |b: &serde_json::Value, k: &str| b[k].as_str().unwrap_or_default().to_string();
+    match ev["type"].as_str() {
+        Some("assistant") => content
+            .iter()
+            .filter(|b| b["type"] == "tool_use")
+            .map(|b| StreamEv::Tool { id: id(b, "id"), name: id(b, "name"), input: b["input"].clone() })
+            .collect(),
+        Some("user") => content
+            .iter()
+            .filter(|b| b["type"] == "tool_result")
+            .map(|b| {
+                // A string, or text blocks
+                let mut text = match &b["content"] {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Array(parts) => {
+                        parts.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join("\n")
+                    }
+                    _ => String::new(),
+                };
+                if text.len() > 4096 {
+                    let cut = (0..=4096).rev().find(|&i| text.is_char_boundary(i)).unwrap_or(0);
+                    text.truncate(cut);
+                }
+                StreamEv::ToolResult { id: id(b, "tool_use_id"), text }
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// `args` with `flag`'s value replaced (the flag appended if it wasn't there).
+pub fn with_flag(args: &[String], flag: &str, value: &str) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len() + 2);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == flag {
+            it.next();
+        } else {
+            out.push(a.clone());
+        }
+    }
+    out.extend([flag.to_string(), value.to_string()]);
+    out
+}
+
+/// `args` with its `--tools <list>` swapped for `tools` (read-only ones for the chat panel), and `allowed`
+/// (those + tarae's own MCP tools) allowed up front, so `-p` never stops to ask.
+pub fn with_tools(args: &[String], tools: &str, allowed: &str) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len() + 4);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--tools" {
+            it.next();
+        } else {
+            out.push(a.clone());
+        }
+    }
+    out.extend(["--tools", tools, "--allowedTools", allowed].map(String::from));
+    out
+}
+
+fn parse_line(ev: &serde_json::Value) -> Option<StreamEv> {
+    match ev["type"].as_str()? {
+        "control_request" => Some(StreamEv::Control {
+            request_id: ev["request_id"].as_str()?.to_string(),
+            request: ev["request"].clone(),
+        }),
+        "stream_event" => {
+            let delta = &ev["event"]["delta"];
+            match delta["type"].as_str()? {
+                "text_delta" => Some(StreamEv::Text(delta["text"].as_str()?.to_string())),
+                "thinking_delta" => Some(match delta["thinking"].as_str().filter(|t| !t.is_empty()) {
+                    Some(t) => StreamEv::Thought(t.to_string()),
+                    None => StreamEv::Thinking,
+                }),
+                _ => None,
+            }
+        }
+        "system" if ev["subtype"] == "thinking_tokens" => Some(StreamEv::Thinking),
+        "system" if ev["subtype"] == "init" => Some(StreamEv::Session {
+            id: ev["session_id"].as_str()?.to_string(),
+            model: ev["model"].as_str().unwrap_or_default().to_string(),
+        }),
+        "control_response" if ev["response"]["request_id"] == "tarae-init" => {
+            Some(StreamEv::Models(ModelInfo::list(&ev["response"]["response"]["models"])))
+        }
+        "result" => {
+            let text = ev["result"].as_str().unwrap_or_default().to_string();
+            let failed = ev["is_error"].as_bool() == Some(true)
+                || ev["subtype"].as_str().is_some_and(|s| s.starts_with("error"));
+            Some(StreamEv::Done(if failed {
+                Err(if text.is_empty() { "stopped".into() } else { text })
+            } else {
+                Ok(text)
+            }))
+        }
+        _ => None,
+    }
+}
+
+// ── Prompt·response ─────────────────────────────────────────────────────
+
+pub fn build_prompt(
+    instruction: &str,
+    file: &str,
+    text: &Rope,
+    ranges: &[(usize, usize)],
+    ctx: usize,
+) -> String {
+    let mut p = String::from(
+        "You are the editing engine inside a text editor. Rewrite each <selection> according to the \
+         instruction.\nReply with ONLY the replacement text of every selection, each wrapped in \
+         <r i=\"N\">...</r> in the same order — no explanations, no markdown fences, nothing else. \
+         Keep the surrounding code style and indentation. If a selection needs no change, return it \
+         unchanged.\n\n",
+    );
+    p.push_str(&format!("Instruction: {instruction}\nFile: {file}\n"));
+    let last_line = text.len_lines().saturating_sub(1);
+    for (i, &(from, to)) in ranges.iter().enumerate() {
+        // Last line = that of the last selected byte (a line-wise selection ends at the next line's start)
+        let (l0, l1) = (text.byte_to_line(from), text.byte_to_line(to.saturating_sub(1).max(from)));
+        let c0 = text.line_to_byte(l0.saturating_sub(ctx));
+        let c1 = text.line_to_byte((l1 + ctx + 1).min(last_line + 1));
+        p.push_str(&format!(
+            "\n<selection i=\"{}\" lines=\"{}-{}\">\n<before>{}</before>\n<text>{}</text>\n<after>{}</after>\n</selection>\n",
+            i + 1,
+            l0 + 1,
+            l1 + 1,
+            text.byte_slice(c0..from),
+            text.byte_slice(from..to),
+            text.byte_slice(to..c1.max(to)),
+        ));
+    }
+    p
+}
+
+/// Extracts N `<r i="N">…</r>`. With a single selection, an untagged answer is accepted too.
+pub fn parse_replies(out: &str, n: usize) -> Result<Vec<String>, String> {
+    let mut replies = Vec::with_capacity(n);
+    for i in 1..=n {
+        let open = format!("<r i=\"{i}\">");
+        let found = out.find(&open).and_then(|s| {
+            let body = &out[s + open.len()..];
+            body.find("</r>").map(|e| &body[..e])
+        });
+        match found {
+            Some(body) => {
+                let body = body.strip_prefix('\n').unwrap_or(body);
+                replies.push(body.strip_suffix('\n').unwrap_or(body).to_string());
+            }
+            None if n == 1 => replies.push(strip_fences(out.trim_matches('\n')).to_string()),
+            None => return Err(format!("reply {i}/{n} missing")),
+        }
+    }
+    Ok(replies)
+}
+
+fn strip_fences(s: &str) -> &str {
+    let Some(rest) = s.strip_prefix("```") else { return s };
+    let rest = rest.split_once('\n').map_or("", |(_, r)| r);
+    rest.strip_suffix("```").map(|r| r.strip_suffix('\n').unwrap_or(r)).unwrap_or(rest)
+}
+
+/// If the original ended with a newline (line-wise selection), end the answer with one; otherwise strip it.
+pub fn match_trailing_newline(old: &str, new: String) -> String {
+    match (old.ends_with('\n'), new.ends_with('\n')) {
+        (true, false) => new + "\n",
+        (false, true) => new.trim_end_matches('\n').to_string(),
+        _ => new,
+    }
+}
+
+/// Line-level diff → (' ' | '-' | '+', line).
+pub fn line_diff<'a>(old: &'a str, new: &'a str) -> Vec<(char, &'a str)> {
+    use imara_diff::intern::InternedInput;
+    use imara_diff::{Algorithm, diff};
+    // imara's `&str` tokens = `str::lines` (terminator excluded) — indexes line up
+    let (a, b): (Vec<&str>, Vec<&str>) = (old.lines().collect(), new.lines().collect());
+    let input = InternedInput::new(old, new);
+    let mut out = Vec::with_capacity(a.len().max(b.len()));
+    let mut next = 0; // first old line not yet emitted
+    diff(Algorithm::Histogram, &input, |before: std::ops::Range<u32>, after: std::ops::Range<u32>| {
+        let (bs, be) = (before.start as usize, before.end as usize);
+        out.extend(a[next..bs].iter().map(|l| (' ', *l)));
+        out.extend(a[bs..be].iter().map(|l| ('-', *l)));
+        out.extend(b[after.start as usize..after.end as usize].iter().map(|l| ('+', *l)));
+        next = be;
+    });
+    out.extend(a[next..].iter().map(|l| (' ', *l)));
+    out
+}
+
+// ── Review state ────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Decision {
+    Undecided,
+    Accept,
+    Reject,
+}
+
+pub struct Hunk {
+    pub from: usize,
+    pub to: usize,
+    pub old: String,
+    pub new: String,
+    pub decision: Decision,
+    /// The original changed while waiting and can't be located — cannot apply.
+    pub conflict: bool,
+}
+
+/// One row of the in-buffer review view.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RRow {
+    /// This document line as is.
+    Doc(usize),
+    /// Change header (change number).
+    Header(usize),
+    /// Line inside a change: ' ' kept · '-' removed · '+' added, old line number (none for added lines).
+    Diff { kind: char, text: String, old_no: Option<usize>, hunk: usize },
+}
+
+pub struct Review {
+    pub generation: u64,
+    pub doc_id: DocId,
+    pub instruction: String,
+    pub hunks: Vec<Hunk>,
+    pub ready: bool,
+    pub current: usize,
+    pub scroll: usize,
+    /// Whether the view follows the current change (off when scrolling directly with j/k).
+    pub follow: bool,
+    pub started: Instant,
+    /// Streamed answer (preview before it's done) · whether thinking.
+    pub streamed: String,
+    pub thinking: bool,
+    /// What to call when done (applied?) — an agent-sent diff is awaiting an answer (agent.rs).
+    pub on_done: Option<OnDone>,
+    /// Who proposed it (in the header) — "Claude" for ask·chat, "Claude Code" for the side-pane agent.
+    pub by: &'static str,
+    /// Why, in Claude's words: what it thought or said just before it asked for this edit (the chat's — a
+    /// row or two under the title, the rest is in the chat).
+    pub reason: String,
+    /// Accepted, it's a step of its own for `space u` (`space i`, Claude Code's) — a chat edit is part of
+    /// its turn instead (`checkpoint.rs`).
+    pub own_turn: bool,
+}
+
+/// Called when the review ends (applied?).
+pub type OnDone = Box<dyn FnOnce(&mut Editor, bool)>;
+
+/// Closes the open review as rejected (before another review takes its place — so the waiter gets an answer).
+/// An ask still waiting for its answer is killed (its result would no longer find its review).
+pub fn close_review(ed: &mut Editor) {
+    let Some(mut rev) = ed.review.take() else { return };
+    if !rev.ready
+        && let Some(pid) = ed.llm_pid.take()
+    {
+        kill(pid);
+    }
+    if let Some(cb) = rev.on_done.take() {
+        cb(ed, false);
+    }
+}
+
+impl Review {
+    /// Waiting for an answer (`ready: false`), proposed by Claude, nobody to call when done.
+    fn new(generation: u64, doc_id: DocId, instruction: &str, hunks: Vec<Hunk>) -> Self {
+        Review {
+            generation,
+            doc_id,
+            instruction: instruction.to_string(),
+            hunks,
+            ready: false,
+            current: 0,
+            scroll: 0,
+            follow: true,
+            started: Instant::now(),
+            streamed: String::new(),
+            thinking: false,
+            on_done: None,
+            by: "Claude",
+            reason: String::new(),
+            own_turn: true,
+        }
+    }
+
+    fn next_undecided(&self) -> Option<usize> {
+        let n = self.hunks.len();
+        (1..=n)
+            .map(|d| (self.current + d) % n)
+            .find(|&i| self.hunks[i].decision == Decision::Undecided && !self.hunks[i].conflict)
+    }
+
+    /// Rows of the in-buffer review (like Cursor): shows the whole document, expanding only the changes.
+    /// Undecided = both removed and added lines, accepted = new text only, rejected = original only.
+    pub fn rows(&self, text: &Rope) -> Vec<RRow> {
+        let last = text.len_lines().saturating_sub(1);
+        let line_of = |b: usize| text.byte_to_line(b.min(text.len_bytes()));
+        let mut order: Vec<usize> = (0..self.hunks.len()).collect();
+        order.sort_by_key(|&i| self.hunks[i].from);
+        let mut out = Vec::new();
+        let mut next = 0; // first document line not yet emitted
+        for i in order {
+            let h = &self.hunks[i];
+            let lf = line_of(h.from);
+            let lt = if h.to > h.from { line_of(h.to - 1) } else { lf };
+            out.extend((next..lf.max(next)).map(RRow::Doc));
+            out.push(RRow::Header(i));
+            next = next.max(lt + 1);
+            if h.conflict {
+                out.extend((lf..=lt).map(RRow::Doc));
+                continue;
+            }
+            // Changes line-wise: attach same-line pieces around the selection so whole lines are compared
+            let ls = text.line_to_byte(lf);
+            let le = text.line_to_byte((lt + 1).min(last + 1)).max(h.to);
+            let (pre, post) =
+                (text.byte_slice(ls..h.from.max(ls)).to_string(), text.byte_slice(h.to..le).to_string());
+            let old = format!("{pre}{}{post}", h.old);
+            let new = format!("{pre}{}{post}", h.new);
+            let mut old_no = lf + 1;
+            for (kind, line) in line_diff(&old, &new) {
+                let kind = match (h.decision, kind) {
+                    (Decision::Accept, '-') | (Decision::Reject, '+') => {
+                        if kind == '-' {
+                            old_no += 1;
+                        }
+                        continue;
+                    }
+                    (Decision::Reject, '-') => ' ',
+                    _ => kind,
+                };
+                let no = (kind != '+').then_some(old_no);
+                if kind != '+' {
+                    old_no += 1;
+                }
+                out.push(RRow::Diff { kind, text: line.to_string(), old_no: no, hunk: i });
+            }
+        }
+        out.extend((next..=last).map(RRow::Doc));
+        out
+    }
+}
+
+// ── Commands ────────────────────────────────────────────────────────────
+
+/// When the ask prompt opens or "ask" starts being typed — spawns the spare process (overlapping typing).
+pub fn prewarm(ed: &mut Editor) {
+    let cfg = ed.config.llm.clone();
+    if let Err(e) = ed.llm_warm.ensure(&cfg) {
+        ed.set_error(e);
+    }
+}
+
+pub fn ask(ed: &mut Editor, instruction: &str) -> Result<(), String> {
+    let instruction = instruction.trim();
+    if instruction.is_empty() {
+        return Err("usage: :ask <instruction>".into());
+    }
+    if ed.review.is_some() {
+        return Err("an ask is already in progress (:ask-cancel)".into());
+    }
+    let cfg = ed.config.llm.clone();
+    let doc = ed.doc();
+    let ranges: Vec<(usize, usize)> = doc
+        .selection()
+        .ranges()
+        .iter()
+        .map(|r| {
+            let r = r.min_width_1(&doc.text);
+            (r.from(), r.to())
+        })
+        .collect();
+    let prompt = build_prompt(instruction, &doc.display_name(), &doc.text, &ranges, cfg.context_lines);
+    let hunks = ranges
+        .iter()
+        .map(|&(from, to)| Hunk {
+            from,
+            to,
+            old: doc.text.byte_slice(from..to).to_string(),
+            new: String::new(),
+            decision: Decision::Undecided,
+            conflict: false,
+        })
+        .collect::<Vec<_>>();
+    let doc_id = doc.id;
+    start(ed, doc_id, instruction, &prompt, hunks)
+}
+
+/// Claude writes what `from..to` of document `doc_id` should be, from `prompt` alone (one answer, no tools) —
+/// streamed, then the in-buffer review like `space i`'s (a commit message's draft).
+pub fn draft(
+    ed: &mut Editor,
+    doc_id: DocId,
+    label: &str,
+    prompt: &str,
+    from: usize,
+    to: usize,
+) -> Result<(), String> {
+    if ed.review.is_some() {
+        return Err("Claude is already answering (:ask-cancel)".into());
+    }
+    let doc = ed.docs.iter().find(|d| d.id == doc_id).ok_or("the buffer is gone")?;
+    let old = doc.text.byte_slice(from..to).to_string();
+    let hunk = Hunk { from, to, old, new: String::new(), decision: Decision::Undecided, conflict: false };
+    start(ed, doc_id, label, prompt, vec![hunk])
+}
+
+/// One answer for `hunks` of `doc_id` (the prompt asks for a `<r i="N">` each): the process, the review
+/// waiting for it, the stream into it.
+fn start(
+    ed: &mut Editor,
+    doc_id: DocId,
+    instruction: &str,
+    prompt: &str,
+    hunks: Vec<Hunk>,
+) -> Result<(), String> {
+    let cfg = ed.config.llm.clone();
+    let mut child = ed.llm_warm.take(&cfg)?;
+    // Write the message and close stdin — the process exits on its own after this one turn.
+    // Before anything is installed: a failed write leaves no review waiting forever.
+    let sent = child.stdin.take().ok_or_else(|| "claude: no stdin".to_string()).and_then(|mut stdin| {
+        writeln!(stdin, "{}", user_message(prompt))
+            .and_then(|_| stdin.flush())
+            .map_err(|e| format!("claude: {e}"))
+    });
+    if let Err(e) = sent {
+        // Reaped off the main thread
+        std::thread::spawn(move || {
+            let _ = child.kill();
+            let _ = child.wait();
+        });
+        return Err(e);
+    }
+    ed.llm_generation += 1;
+    let generation = ed.llm_generation;
+    let n = hunks.len();
+    ed.review = Some(Review::new(generation, doc_id, instruction, hunks));
+    ed.llm_pid = Some(child.id());
+    pump(child, true, ed.events.sender(), move |ev| {
+        Some(match ev {
+            StreamEv::Thinking | StreamEv::Thought(_) => Box::new(move |ed: &mut Editor| {
+                if let Some(r) = ed.review.as_mut().filter(|r| r.generation == generation) {
+                    r.thinking = true;
+                }
+            }),
+            StreamEv::Text(t) => Box::new(move |ed: &mut Editor| {
+                if let Some(r) = ed.review.as_mut().filter(|r| r.generation == generation) {
+                    r.thinking = false;
+                    r.streamed.push_str(&t);
+                }
+            }),
+            StreamEv::Done(r) => {
+                let result = r.and_then(|out| parse_replies(&out, n));
+                Box::new(move |ed: &mut Editor| on_result(ed, generation, result))
+            }
+            // ask runs without tools, and its session isn't kept
+            StreamEv::Session { .. }
+            | StreamEv::Models(_)
+            | StreamEv::Tool { .. }
+            | StreamEv::ToolResult { .. }
+            | StreamEv::Control { .. }
+            | StreamEv::Exit(_) => {
+                return None;
+            }
+        })
+    });
+    Ok(())
+}
+
+/// Cancel: if a request is pending, kill the process (stops tokens too); if reviewing, reject all.
+pub fn cancel(ed: &mut Editor) {
+    if let Some(pid) = ed.llm_pid.take() {
+        kill(pid);
+    }
+    if ed.review.is_some() {
+        close_review(ed);
+        ed.llm_generation += 1;
+        ed.set_status("claude: cancelled");
+    }
+}
+
+/// Opens a review directly with changes in hand (chat code apply, agent diffs — same y/n flow·one undo as
+/// ask) + what to call when done (applied?).
+pub fn review_with(
+    ed: &mut Editor,
+    doc_id: DocId,
+    instruction: &str,
+    changes: Vec<(usize, usize, String, String)>,
+    on_done: Option<OnDone>,
+) {
+    close_review(ed);
+    ed.llm_generation += 1;
+    let hunks: Vec<Hunk> = changes
+        .into_iter()
+        .map(|(from, to, old, new)| Hunk {
+            from,
+            to,
+            decision: if old == new { Decision::Reject } else { Decision::Undecided },
+            old,
+            new,
+            conflict: false,
+        })
+        .collect();
+    if hunks.iter().all(|h| h.decision == Decision::Reject) {
+        if let Some(cb) = on_done {
+            cb(ed, false);
+        }
+        return ed.set_status("claude: no changes");
+    }
+    ed.review =
+        Some(Review { ready: true, on_done, ..Review::new(ed.llm_generation, doc_id, instruction, hunks) });
+}
+
+/// Preview of the streaming answer: the last few lines inside the `<r i="N">` being written.
+pub fn preview(streamed: &str, rows: usize) -> Vec<&str> {
+    let body = match streamed.rfind("<r i=\"") {
+        Some(i) => {
+            let rest = &streamed[i..];
+            rest.find('>').map_or("", |g| &rest[g + 1..])
+        }
+        None => streamed,
+    };
+    let body = body.split("</r>").next().unwrap_or_default().trim_start_matches('\n');
+    let lines: Vec<&str> = body.lines().collect();
+    lines[lines.len().saturating_sub(rows)..].to_vec()
+}
+
+fn on_result(ed: &mut Editor, generation: u64, result: Result<Vec<String>, String>) {
+    let Some(rev) = ed.review.as_mut().filter(|r| r.generation == generation) else { return };
+    ed.llm_pid = None;
+    let secs = rev.started.elapsed().as_secs_f32();
+    let replies = match result {
+        Ok(r) => r,
+        Err(e) => {
+            ed.review = None;
+            ed.set_error(format!("claude: {e}"));
+            return;
+        }
+    };
+    let Some(doc_idx) = ed.docs.iter().position(|d| d.id == rev.doc_id) else {
+        ed.review = None;
+        ed.set_error("claude: buffer was closed");
+        return;
+    };
+    let text = &ed.docs[doc_idx].text;
+    for (h, new) in rev.hunks.iter_mut().zip(replies) {
+        h.new = match_trailing_newline(&h.old, new);
+        if h.new == h.old {
+            h.decision = Decision::Reject;
+        } else if !relocate(h, text) {
+            h.conflict = true;
+        }
+    }
+    if rev.hunks.iter().all(|h| h.decision == Decision::Reject || h.conflict) {
+        let msg = if rev.hunks.iter().any(|h| h.conflict) {
+            "claude: text changed while waiting — nothing applied"
+        } else {
+            "claude: no changes"
+        };
+        ed.review = None;
+        ed.set_status(msg);
+        return;
+    }
+    rev.ready = true;
+    rev.current =
+        rev.hunks.iter().position(|h| h.decision == Decision::Undecided && !h.conflict).unwrap_or(0);
+    ed.current = doc_idx;
+    ed.set_status(format!("claude answered in {secs:.1}s"));
+}
+
+/// If edits happened while waiting, relocates the original (nearest match). False if not found.
+fn relocate(h: &mut Hunk, text: &Rope) -> bool {
+    // Edits while waiting may leave the old position mid-character — check boundaries before slicing.
+    let boundary = |b: usize| b <= text.len_bytes() && text.char_to_byte(text.byte_to_char(b)) == b;
+    if boundary(h.from) && boundary(h.to) && h.from <= h.to && text.byte_slice(h.from..h.to) == h.old.as_str()
+    {
+        return true;
+    }
+    if h.old.is_empty() {
+        return false;
+    }
+    let s = text.to_string();
+    let best = s.match_indices(&h.old).map(|(b, _)| b).min_by_key(|&b| b.abs_diff(h.from));
+    match best {
+        Some(from) => {
+            h.to = from + h.old.len();
+            h.from = from;
+            true
+        }
+        None => false,
+    }
+}
+
+/// Keys during review. True if handled.
+pub fn review_key(ed: &mut Editor, key: Key) -> bool {
+    let Some(rev) = ed.review.as_mut().filter(|r| r.ready) else { return false };
+    let decide = |rev: &mut Review, d: Decision| {
+        rev.hunks[rev.current].decision = d;
+        rev.follow = true;
+        match rev.next_undecided() {
+            Some(i) => {
+                rev.current = i;
+                false
+            }
+            None => true,
+        }
+    };
+    let done = match (key.code, key.ctrl || key.alt) {
+        (Code::Char('y'), false) => decide(rev, Decision::Accept),
+        (Code::Char('n'), false) => decide(rev, Decision::Reject),
+        (Code::Char('a'), false) => {
+            rev.hunks
+                .iter_mut()
+                .filter(|h| h.decision == Decision::Undecided)
+                .for_each(|h| h.decision = Decision::Accept);
+            true
+        }
+        (Code::Char('q'), false) | (Code::Esc, _) => true,
+        (Code::Char('j') | Code::Down, false) => {
+            rev.scroll += 1;
+            rev.follow = false;
+            false
+        }
+        (Code::Char('k') | Code::Up, false) => {
+            rev.scroll = rev.scroll.saturating_sub(1);
+            rev.follow = false;
+            false
+        }
+        (Code::Tab, _) => {
+            rev.current = rev.next_undecided().unwrap_or(rev.current);
+            rev.follow = true;
+            false
+        }
+        _ => false,
+    };
+    if done {
+        finish(ed);
+    }
+    true
+}
+
+/// Accepted changes as one transaction (= one undo).
+fn finish(ed: &mut Editor) {
+    let Some(mut rev) = ed.review.take() else { return };
+    let on_done = rev.on_done.take();
+    let before = ed.docs.iter().find(|d| d.id == rev.doc_id).map(|d| d.text.clone());
+    let applied = apply_accepted(ed, &rev);
+    // A step `space u` takes back on its own
+    if applied
+        && rev.own_turn
+        && let Some(before) = before
+    {
+        let what = if rev.by == "Claude" {
+            rev.instruction.clone()
+        } else {
+            format!("{} {}", rev.by, rev.instruction)
+        };
+        crate::checkpoint::single(ed, rev.doc_id, before, &what);
+    }
+    if let Some(cb) = on_done {
+        cb(ed, applied);
+    }
+}
+
+fn apply_accepted(ed: &mut Editor, rev: &Review) -> bool {
+    let accepted: Vec<&Hunk> =
+        rev.hunks.iter().filter(|h| h.decision == Decision::Accept && !h.conflict).collect();
+    if accepted.is_empty() {
+        ed.set_status("claude: nothing applied");
+        return false;
+    }
+    let Some(idx) = ed.docs.iter().position(|d| d.id == rev.doc_id) else { return false };
+    ed.current = idx;
+    let tx = Transaction::new(
+        accepted.iter().map(|h| Change { from: h.from, to: h.to, insert: h.new.clone() }).collect(),
+    );
+    let ranges: Vec<Range> = accepted
+        .iter()
+        .map(|h| {
+            let start = tx.map_pos(h.from, Assoc::Before);
+            Range::new(start, start + h.new.len())
+        })
+        .collect();
+    let n = ranges.len();
+    ed.with_group(|cx| cx.editor.doc_mut().apply_with(&tx, Selection::new(ranges, 0)));
+    ed.set_status(format!("claude: applied {n} change(s) — u to undo"));
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_lines_and_preview() {
+        let delta = serde_json::json!({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "ab"}}});
+        assert!(matches!(parse_line(&delta), Some(StreamEv::Text(t)) if t == "ab"));
+        let think =
+            serde_json::json!({"type": "system", "subtype": "thinking_tokens", "estimated_tokens": 5});
+        assert!(matches!(parse_line(&think), Some(StreamEv::Thinking)));
+        let stopped =
+            serde_json::json!({"type": "result", "subtype": "error_during_execution", "result": ""});
+        assert!(matches!(parse_line(&stopped), Some(StreamEv::Done(Err(e))) if e == "stopped"));
+        // Preview: the last lines inside the tag being written
+        assert_eq!(preview("<r i=\"1\">a</r>\n<r i=\"2\">\nx\ny\nz", 2), vec!["y", "z"]);
+        assert_eq!(preview("plain\ntext", 5), vec!["plain", "text"]);
+    }
+
+    #[test]
+    fn parses_tagged_replies() {
+        let out = "<r i=\"1\">\nfoo\n</r>\n<r i=\"2\">bar</r>";
+        assert_eq!(parse_replies(out, 2).unwrap(), vec!["foo", "bar"]);
+        assert!(parse_replies("<r i=\"1\">x</r>", 2).is_err());
+        // With one selection, also an answer without tags·fences
+        assert_eq!(parse_replies("```rust\nlet x = 1;\n```", 1).unwrap(), vec!["let x = 1;"]);
+    }
+
+    #[test]
+    fn review_rows_expand_changes_in_place() {
+        let text = Rope::from_str("a\nb\nc\n");
+        let hunk = |decision| Hunk {
+            from: 2,
+            to: 4,
+            old: "b\n".into(),
+            new: "B\nB2\n".into(),
+            decision,
+            conflict: false,
+        };
+        let rev = |h| Review::new(0, 0, "", vec![h]);
+        let diff = |kind, t: &str, no| RRow::Diff { kind, text: t.into(), old_no: no, hunk: 0 };
+        let rows = rev(hunk(Decision::Undecided)).rows(&text);
+        assert_eq!(
+            rows,
+            [
+                RRow::Doc(0),
+                RRow::Header(0),
+                diff('-', "b", Some(2)),
+                diff('+', "B", None),
+                diff('+', "B2", None),
+                RRow::Doc(2),
+                RRow::Doc(3)
+            ]
+        );
+        // Accept = new text only, reject = original only
+        let acc = rev(hunk(Decision::Accept)).rows(&text);
+        assert!(
+            acc.contains(&diff('+', "B", None))
+                && !acc.iter().any(|r| matches!(r, RRow::Diff { kind: '-', .. }))
+        );
+        let rej = rev(hunk(Decision::Reject)).rows(&text);
+        assert_eq!(rej[2], diff(' ', "b", Some(2)));
+        assert_eq!(rej.len(), 5);
+    }
+
+    #[test]
+    fn trailing_newline_follows_original() {
+        assert_eq!(match_trailing_newline("a\n", "b".into()), "b\n");
+        assert_eq!(match_trailing_newline("a", "b\n\n".into()), "b");
+    }
+
+    #[test]
+    fn line_diff_marks_changes() {
+        let d = line_diff("a\nb\nc", "a\nB\nc");
+        assert_eq!(d, vec![(' ', "a"), ('-', "b"), ('+', "B"), (' ', "c")]);
+    }
+
+    #[test]
+    fn prompt_carries_selection_and_context() {
+        let text = Rope::from_str("one\ntwo\nthree\n");
+        let p = build_prompt("upper", "x.txt", &text, &[(4, 7)], 1);
+        assert!(p.contains("Instruction: upper"));
+        assert!(p.contains("<text>two</text>"));
+        assert!(p.contains("<before>one\n</before>"));
+        assert!(p.contains("lines=\"2-2\""));
+        // A line-wise selection (up to the next line's start) is still that one line
+        let p = build_prompt("upper", "x.txt", &text, &[(4, 8)], 1);
+        assert!(p.contains("lines=\"2-2\""), "{p}");
+        assert!(p.contains("<after>three\n</after>"), "{p}");
+    }
+
+    #[test]
+    fn tool_calls_come_from_assistant_messages() {
+        let ev = serde_json::json!({"type": "assistant", "message": {"content": [
+            {"type": "thinking", "thinking": ""},
+            {"type": "tool_use", "name": "Read", "input": {"file_path": "/p/src/lib.rs", "offset": 10}},
+            {"type": "tool_use", "name": "Grep", "input": {"pattern": "fn add"}},
+        ]}});
+        let got: Vec<(String, serde_json::Value)> = tool_events(&ev)
+            .into_iter()
+            .map(|e| match e {
+                StreamEv::Tool { name, input, .. } => (name, input),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].0, "Read");
+        assert_eq!(got[0].1["offset"], 10);
+        assert_eq!(got[1].1["pattern"], "fn add");
+        let text = serde_json::json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "hi"}]}});
+        assert!(tool_events(&text).is_empty());
+        let result = serde_json::json!({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": [{"type": "text", "text": "a.rs:3:fn a"}]}]}});
+        assert!(matches!(&tool_events(&result)[..],
+            [StreamEv::ToolResult { id, text }] if id == "t1" && text == "a.rs:3:fn a"));
+        // Summarized thinking carries text; the omitted kind is just a signal
+        let delta = |t: &str| {
+            serde_json::json!({"type": "stream_event", "event": {"type": "content_block_delta",
+            "delta": {"type": "thinking_delta", "thinking": t}}})
+        };
+        assert!(matches!(parse_line(&delta("hmm")), Some(StreamEv::Thought(t)) if t == "hmm"));
+        assert!(matches!(parse_line(&delta("")), Some(StreamEv::Thinking)));
+    }
+
+    #[test]
+    fn flags_are_replaced_not_repeated() {
+        let args = with_flag(&LlmConfig::default().args, "--setting-sources", "user,project,local");
+        let at = args.iter().position(|a| a == "--setting-sources").unwrap();
+        assert_eq!(args[at + 1], "user,project,local");
+        assert_eq!(args.iter().filter(|a| *a == "--setting-sources").count(), 1);
+        assert_eq!(with_flag(&[], "--x", "1"), ["--x", "1"]);
+    }
+
+    #[test]
+    fn chat_tools_replace_the_no_tools_default() {
+        let args =
+            with_tools(&LlmConfig::default().args, "Read,Grep,Glob", "Read,Grep,Glob,mcp__tarae__note");
+        let at = |f: &str| args.iter().position(|a| a == f).unwrap();
+        assert_eq!(args.iter().filter(|a| *a == "--tools").count(), 1);
+        assert_eq!(args[at("--tools") + 1], "Read,Grep,Glob");
+        assert_eq!(args[at("--allowedTools") + 1], "Read,Grep,Glob,mcp__tarae__note");
+        assert!(args.windows(2).all(|w| w[0] != "--setting-sources" || w[1].is_empty()), "rest kept");
+    }
+}

@@ -1,0 +1,97 @@
+# offer_install · 100x30 · theme meok · cursor 1:4
+## text
+00  tarae  ›  main.go
+01   1 package main
+02   1
+03   2 func main() {
+04   3     println("hi")
+05   4 }
+06
+07
+08
+09
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20                                                     ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+21                                                      ▎ Go's language server
+22                                                        gopls isn't installed. Install it with:
+23                                                        go install golang.org/x/tools/gopls@latest
+24
+25                                                        y Install   n Not now   N Never
+26                                                     ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+27
+28  ▐ NORMAL ▌                                                                         utf-8 LF   1:1
+29
+## bg · surface per cell, blank = ui.background
+00
+01     Accccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+02
+03
+04
+05
+06
+07
+08
+09
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21                                                     ppppppppppppppppppppppppppppppppppppppppppppppp
+22                                                     ppppppppppppppppppppppppppppppppppppppppppppppp
+23                                                     ppppppppppppppppppppppppppppppppppppppppppppppp
+24                                                     ppppppppppppppppppppppppppppppppppppppppppppppp
+25                                                     ppppppppppppppppppppppppppppppppppppppppppppppp
+26
+27
+28   AAAAAAAA
+29
+## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
+00  ddddd  f  TTTTTTT
+01   A
+02   f
+03   f
+04   f
+05   f
+06
+07
+08
+09
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21                                                      a BBBB BBBBBBBB BBBBBB
+22                                                        ddddd ddddd dddddddddd ddddddd dd ddddd
+23                                                        dd ddddddd ddddddddddddddddddddddddddddddd
+24
+25                                                        A           A ddd ddd   A ddddd
+26
+27
+28  a BBBBBB a                                                                         ddddd dd   TTT
+29
+## legend
+bg: c=ui.cursorline.primary  p=ui.popup  A=ui.cursor.primary
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  B=bold

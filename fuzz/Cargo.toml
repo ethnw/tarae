@@ -1,0 +1,40 @@
+# Dev tools for the plugin runtime (src/wasm) — not part of tarae, and outside its workspace (own lockfile),
+# so its heavy dependencies (wasmtime, wasmi, wasm-smith) never touch tarae's build or CI.
+#
+#   cargo run --release --bin fuzz -- 300            differential fuzzing for 5 minutes (see src/main.rs)
+#   cargo run --release --bin spec -- testsuite/*.wast   the official spec tests (see src/bin/spec.rs)
+[package]
+name = "tarae-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "fuzz"
+path = "src/main.rs"
+
+[dependencies]
+arbitrary = "1"
+libc = "0.2"
+wasm-smith = "0.259"
+wasmi = { version = "2", default-features = false, features = ["std", "stable", "validate", "auto-dispatch"] }
+wasmprinter = "0.259"
+wasmtime = { version = "49", default-features = false, features = ["cranelift", "runtime", "std", "gc", "gc-drc"] }
+wast = { version = "259", default-features = false, features = ["wasm-module"] }
+
+# Our runtime with its debug checks on — a failed assertion is a finding too.
+[profile.release]
+debug = 1
+overflow-checks = true
+debug-assertions = true
+
+# wasmi's dispatch grows the stack per instruction with debug assertions on.
+[profile.release.package.wasmi]
+debug-assertions = false
+overflow-checks = false
+[profile.release.package.wasmi_ir]
+debug-assertions = false
+[profile.release.package.wasmi_core]
+debug-assertions = false
