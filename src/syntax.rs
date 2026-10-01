@@ -469,6 +469,29 @@ fn read_query(lang: &str, file: &str, depth: usize) -> Option<String> {
 pub struct Layer {
     pub lang: Arc<LangData>,
     pub tree: Tree,
+    /// An edit since its parse may have changed what parsing it gives — else the next parse reuses it where
+    /// the injection query asks for the same ranges.
+    touched: bool,
+}
+
+impl Layer {
+    /// Moves the tree along with an edit, and tells whether it could now parse differently: the edit
+    /// reaches its text (touching counts — a piece may grow), or changes the gap between two pieces of a
+    /// tree holding errors (how errors are recovered counts how far apart tokens are). Moving it all
+    /// doesn't count (`parse_layer` parses it as if at the start), nor does moving a piece along its line:
+    /// the lexer's column counts only the included text before it on the line.
+    fn edit(&mut self, e: &InputEdit) {
+        if !self.touched {
+            let ranges = self.tree.included_ranges();
+            let reaches = ranges.iter().any(|r| e.start_byte <= r.end_byte && r.start_byte <= e.old_end_byte);
+            let (first, last) = (ranges.first(), ranges.last());
+            let in_gap = first
+                .zip(last)
+                .is_some_and(|(f, l)| f.start_byte < e.start_byte && e.old_end_byte < l.end_byte);
+            self.touched = reaches || in_gap && self.tree.root_node().has_error();
+        }
+        self.tree.edit(e);
+    }
 }
 
 /// Highlight spans: (start, end, global capture number) — see `highlights`.
@@ -553,7 +576,7 @@ impl Syntax {
         if !self.layers.is_empty() {
             for l in Arc::make_mut(&mut self.layers) {
                 for e in edits {
-                    l.tree.edit(e);
+                    l.edit(e);
                 }
             }
         }
@@ -622,6 +645,7 @@ impl Syntax {
         ParseJob {
             text: text.clone(),
             old: self.tree.clone(),
+            old_layers: self.layers.clone(),
             lang: self.lang.clone(),
             generation: self.generation,
             near,
@@ -650,7 +674,7 @@ impl Syntax {
             for e in self.pending_edits.drain(..) {
                 tree.edit(&e);
                 for l in &mut layers {
-                    l.tree.edit(&e);
+                    l.edit(&e);
                 }
             }
             self.tree = Some(tree);
@@ -663,6 +687,8 @@ impl Syntax {
 pub struct ParseJob {
     text: Rope,
     old: Option<Tree>,
+    /// The layers so far, edited along — the untouched ones are reused.
+    old_layers: Arc<Vec<Layer>>,
     lang: Arc<LangData>,
     pub generation: u64,
     /// Inject only around these (`None`: everywhere).
@@ -676,6 +702,9 @@ pub struct Parsed {
     pub tree: Option<Tree>,
     pub layers: Vec<Layer>,
     covered: Option<Vec<std::ops::Range<usize>>>,
+    /// How many layers were taken from the last parse.
+    #[cfg_attr(not(test), allow(dead_code))] // for the tests
+    reused: usize,
 }
 
 impl Syntax {
@@ -726,6 +755,49 @@ fn parse_rope(
     parser.parse_with_options(&mut read, old, options)
 }
 
+/// A layer's parse over `ranges` (sorted, not empty), as if its text began the document, then moved to where
+/// it is. How a parser recovers from an error counts how far a skipped token is from the one before — for
+/// the first one, from the document's start — so else typing far above could change a layer's errors and
+/// their colors; this way a layer parses the same wherever it is, and one only moved can be kept.
+fn parse_layer(parser: &mut Parser, text: &Rope, ranges: &[tree_sitter::Range]) -> Option<Tree> {
+    let (base, at) = (ranges[0].start_byte, ranges[0].start_point);
+    let back = |p: Point| match p.row == at.row {
+        true => Point::new(0, p.column - at.column),
+        false => Point::new(p.row - at.row, p.column),
+    };
+    let shifted: Vec<tree_sitter::Range> = ranges
+        .iter()
+        .map(|r| tree_sitter::Range {
+            start_byte: r.start_byte - base,
+            end_byte: r.end_byte - base,
+            start_point: back(r.start_point),
+            end_point: back(r.end_point),
+        })
+        .collect();
+    parser.set_included_ranges(&shifted).ok()?;
+    let len = text.len_bytes();
+    let mut read = |byte: usize, _: Point| -> &[u8] {
+        let byte = byte + base;
+        if byte >= len {
+            return &[];
+        }
+        let (chunk, start, _, _) = text.chunk_at_byte(byte);
+        &chunk.as_bytes()[byte - start..]
+    };
+    let mut tree = parser.parse_with_options(&mut read, None, None)?;
+    // Text inserted before it all: everything moves over by `base`, the first row's columns by `at`'s
+    let zero = Point::new(0, 0);
+    tree.edit(&InputEdit {
+        start_byte: 0,
+        old_end_byte: 0,
+        new_end_byte: base,
+        start_position: zero,
+        old_end_position: zero,
+        new_end_position: at,
+    });
+    Some(tree)
+}
+
 impl ParseJob {
     /// On a worker thread — incremental parse after edits. Injected languages are parsed fresh each time,
     /// only around what's shown (`near`, a few screens' worth up and down).
@@ -737,18 +809,27 @@ impl ParseJob {
             .and_then(|_| parse_rope(&mut parser, &self.text, self.old.as_ref(), None));
         let covered = self.near.map(|near| around(&self.text, near, self.near_lines));
         let mut layers = Vec::new();
+        let mut reused = 0;
         if let Some(tree) = &tree {
+            let mut reuse: HashMap<_, Vec<Tree>> = HashMap::new();
+            for l in self.old_layers.iter().filter(|l| !l.touched) {
+                let at = l.tree.included_ranges().first().map_or(0, |r| r.start_byte);
+                reuse.entry((l.lang.name.clone(), at)).or_default().push(l.tree.clone());
+            }
             let mut inj = Injector {
                 text: &self.text,
                 parsers: HashMap::new(),
+                reuse,
+                reused_count: 0,
                 spent: std::time::Duration::ZERO,
                 budget: self.budget,
                 near: covered.as_deref(),
                 whole_query: false,
             };
             inj.run(&self.lang, tree, 0, &mut layers);
+            reused = inj.reused_count;
         }
-        Parsed { tree, layers, covered }
+        Parsed { tree, layers, covered, reused }
     }
 }
 
@@ -829,6 +910,11 @@ const INJECT_BUDGET: std::time::Duration = std::time::Duration::from_millis(80);
 struct Injector<'a> {
     text: &'a Rope,
     parsers: HashMap<String, Parser>,
+    /// Layers parsed before and untouched since, by (language, where the first piece starts): one asked for
+    /// with the same pieces again is taken from here, not parsed.
+    reuse: HashMap<(String, usize), Vec<Tree>>,
+    /// How many were.
+    reused_count: usize,
     /// Time spent parsing injected languages (grammar loading·query compilation happen once, so not counted).
     spent: std::time::Duration,
     budget: std::time::Duration,
@@ -898,6 +984,15 @@ fn shebang(first_line: &str) -> Option<String> {
 impl Injector<'_> {
     fn node_text(&self, node: Node) -> String {
         node_slice(self.text, node).chars().take(200).collect()
+    }
+
+    /// A layer parsed before over exactly these pieces, untouched since.
+    fn reused(&mut self, lang: &str, ranges: &[tree_sitter::Range]) -> Option<Tree> {
+        let at = ranges.first()?.start_byte;
+        let same = self.reuse.get_mut(&(lang.to_string(), at))?;
+        let i = same.iter().position(|t| t.included_ranges() == ranges)?;
+        self.reused_count += 1;
+        Some(same.swap_remove(i))
     }
 
     fn run(&mut self, host: &Arc<LangData>, tree: &Tree, depth: usize, out: &mut Vec<Layer>) {
@@ -1016,19 +1111,21 @@ impl Injector<'_> {
             let Some(data) = resolve(&lang).and_then(|s| Loader::global().load(s).ok()) else { continue };
             ranges.sort_by_key(|r| r.start_byte);
             ranges.dedup_by(|b, a| b.start_byte < a.end_byte);
+            if let Some(tree) = self.reused(&data.name, &ranges) {
+                out.push(Layer { lang: data.clone(), tree: tree.clone(), touched: false });
+                self.run(&data, &tree, depth + 1, out);
+                continue;
+            }
             let parser = self.parsers.entry(data.name.clone()).or_insert_with(|| {
                 let mut p = Parser::new();
                 let _ = p.set_language(&data.language);
                 p
             });
-            if parser.set_included_ranges(&ranges).is_err() {
-                continue;
-            }
             let t = std::time::Instant::now();
-            let tree = parse_rope(parser, self.text, None, None);
+            let tree = parse_layer(parser, self.text, &ranges);
             self.spent += t.elapsed();
             let Some(tree) = tree else { continue };
-            out.push(Layer { lang: data.clone(), tree: tree.clone() });
+            out.push(Layer { lang: data.clone(), tree: tree.clone(), touched: false });
             self.run(&data, &tree, depth + 1, out);
         }
     }
@@ -1527,18 +1624,23 @@ mod tests {
             "TODO: ",
             "https://x.y ",
         ];
-        // The last two: runs where passes over ranges apart give the matches in another order than one pass
-        // (svelte, vue) — `SEED=n` runs that one instead
+        // Then runs where passes over ranges apart give the matches in another order than one pass (svelte,
+        // vue), and where an edit between two pieces of PHP's HTML layer changes how its errors are
+        // recovered — `SEED=n` runs that one instead
         let seeds = match std::env::var("SEED") {
             Ok(s) => vec![s.parse().unwrap()],
-            Err(_) => vec![0x2545_f491_4f6c_dd1du64, 23 * 104_729 + 7, 36 * 104_729 + 7],
+            Err(_) => vec![0x2545_f491_4f6c_dd1du64, 23 * 104_729 + 7, 36 * 104_729 + 7, 11 * 104_729 + 7],
         };
         let describe = |layers: &[Layer]| -> Vec<String> {
             layers
                 .iter()
                 .map(|l| {
-                    let r: Vec<_> =
-                        l.tree.included_ranges().iter().map(|r| (r.start_byte, r.end_byte)).collect();
+                    let r: Vec<_> = l
+                        .tree
+                        .included_ranges()
+                        .iter()
+                        .map(|r| (r.start_byte, r.end_byte, r.start_point, r.end_point))
+                        .collect();
                     format!("{} {r:?} {}", l.lang.name, l.tree.root_node().to_sexp())
                 })
                 .collect()
@@ -1572,6 +1674,7 @@ mod tests {
                     syn.edit(&edits.iter().map(|e| e.ts).collect::<Vec<_>>());
                 };
                 let mut snapshots: Vec<(Rope, Option<Trees>)> = Vec::new();
+                let mut reused = 0;
                 for step in 0..300 {
                     for _ in 0..rnd(3) {
                         if rnd(5) == 0 {
@@ -1599,6 +1702,7 @@ mod tests {
                     let job = syn.start_parse(&text);
                     let generation = job.generation;
                     let parsed = job.run();
+                    reused += parsed.reused;
                     if rnd(4) == 0 {
                         edit_once(&mut text, &mut syn, &mut rnd);
                     }
@@ -1606,13 +1710,17 @@ mod tests {
                     if syn.dirty {
                         let job = syn.start_parse(&text);
                         let generation = job.generation;
-                        syn.finish_parse(generation, job.run());
+                        let parsed = job.run();
+                        reused += parsed.reused;
+                        syn.finish_parse(generation, parsed);
                     }
                     let covered = syn.covered.clone().unwrap();
                     let mut whole = Vec::new();
                     let mut inj = Injector {
                         text: &text,
                         parsers: HashMap::new(),
+                        reuse: HashMap::new(),
+                        reused_count: 0,
                         spent: std::time::Duration::ZERO,
                         budget: std::time::Duration::MAX,
                         near: Some(&covered),
@@ -1629,6 +1737,8 @@ mod tests {
                     let mut inj = Injector {
                         text: &text,
                         parsers: HashMap::new(),
+                        reuse: HashMap::new(),
+                        reused_count: 0,
                         spent: std::time::Duration::ZERO,
                         budget: std::time::Duration::MAX,
                         near: None,
@@ -1638,6 +1748,8 @@ mod tests {
                     cut += all.len() - whole.len();
                 }
                 assert!(layered, "{lang}: never injected anything — the test text doesn't exercise it");
+                // Else it would only check fresh layers
+                assert!(reused > 10, "{lang}: only {reused} layers reused");
                 tested.push(lang);
             }
         }
@@ -1863,5 +1975,40 @@ mod tests {
         assert!(top(src.find("Deployment").unwrap()).is_some_and(|c| c.starts_with("string")), "YAML value");
         let values = src.find("Values").unwrap();
         assert!(!top(values).unwrap_or_default().starts_with("string"), "in quotes: template color");
+    }
+
+    /// Editing a template action moves the YAML after it along its line, and the YAML layer is kept: the
+    /// lexer counts a column from the included text only, so `c` stays nested under `b` however long the
+    /// action before `b` is.
+    #[test]
+    fn a_layer_moved_along_its_line_is_kept() {
+        let (Ok(lang), Ok(_)) =
+            (Loader::global().load(spec("helm").unwrap()), Loader::global().load(spec("yaml").unwrap()))
+        else {
+            return;
+        };
+        let yaml = |syn: &Syntax| -> Vec<String> {
+            syn.layers
+                .iter()
+                .filter(|l| l.lang.name == "yaml")
+                .map(|l| l.tree.root_node().to_sexp())
+                .collect()
+        };
+        let mut text = Rope::from_str("{{ .a }}b:\n         c: 1\n");
+        let mut syn = Syntax::new(lang.clone());
+        syn.covered = None;
+        parse_now(&mut syn, &text);
+        // `b` from column 8 to 10 — past `c`'s 9, were columns counted in the whole line
+        let tx = crate::transaction::Transaction::new(vec![crate::transaction::Change::insert(4, "bc")]);
+        let edits = tx.apply(&mut text, false);
+        syn.edit(&edits.iter().map(|e| e.ts).collect::<Vec<_>>());
+        let job = syn.start_parse(&text);
+        let generation = job.generation;
+        let parsed = job.run();
+        assert_eq!(parsed.reused, 1);
+        syn.finish_parse(generation, parsed);
+        let fresh = yaml(&Syntax::parsed(lang, &text));
+        assert_eq!(yaml(&syn), fresh);
+        assert_eq!(fresh[0].matches("(block_mapping ").count(), 2, "c nested under b: {fresh:?}");
     }
 }
