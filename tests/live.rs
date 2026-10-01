@@ -27,11 +27,20 @@ const FOCUS_OUT: &str = "\x1b[O";
 
 fn have(tool: &str) -> bool {
     let found = Command::new("sh").args(["-c", &format!("command -v {tool}")]).output();
-    let ok = found.is_ok_and(|o| o.status.success());
-    if !ok {
+    if !found.is_ok_and(|o| o.status.success()) {
         eprintln!("skipped: {tool} isn't on PATH");
+        return false;
     }
-    ok
+    // A rustup proxy whose component isn't installed is on PATH but isn't the tool (CI's runners: rust-analyzer)
+    let runs = Command::new(tool).arg("--version").output();
+    if let Ok(o) = runs
+        && !o.status.success()
+        && String::from_utf8_lossy(&o.stderr).contains("Unknown binary")
+    {
+        eprintln!("skipped: {tool} is rustup's, not installed (rustup component add {tool})");
+        return false;
+    }
+    true
 }
 
 /// A small Cargo library: a call into another module (for go-to-definition), one passing test and one
