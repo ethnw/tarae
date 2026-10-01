@@ -267,6 +267,8 @@ pub fn render(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io::
         frame.clear();
         render_frame(editor, &mut frame, w, h)?;
     }
+    // What was drawn may want injected languages made there (a buffer scrolled to, opened)
+    editor.schedule_parses();
     out.write_all(&frame)
 }
 

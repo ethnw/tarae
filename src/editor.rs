@@ -1863,9 +1863,13 @@ impl Editor {
     pub fn schedule_parses(&mut self) {
         for doc in &mut self.docs {
             let Some(syn) = doc.syntax.as_mut() else { continue };
-            if doc.loading || !syn.dirty || syn.in_flight {
+            if doc.loading || !(syn.dirty || syn.wants_injections()) || syn.in_flight {
                 continue;
             }
+            // Where its view is (a frame says exactly what's shown, but this parse may be the first)
+            let top = doc.text.line_to_byte(doc.top.min(doc.text.len_lines()));
+            let bottom = doc.text.line_to_byte((doc.top + 100).min(doc.text.len_lines()));
+            syn.shown_near(top..bottom);
             let job = syn.start_parse(&doc.text);
             let id = doc.id;
             self.events.jobs().spawn(move || {
@@ -2679,6 +2683,46 @@ mod tests {
         assert_eq!(ed.status.as_ref().map(|s| s.1), Some(Severity::Error));
         feed(&mut ed, ":q!<ret>");
         assert!(ed.should_quit);
+    }
+
+    /// Injected languages are made where the buffer is shown, not all over: a markdown file's code block at
+    /// the top is colored as Rust from its first parse, one a thousand lines down only once it's scrolled to.
+    #[test]
+    fn injected_languages_are_made_where_the_view_is() {
+        if crate::syntax::Loader::global().load(crate::syntax::spec("rust").unwrap()).is_err() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("tarae-near-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("notes.md");
+        let filler = "Some text.\n\n".repeat(500);
+        std::fs::write(
+            &path,
+            format!("# Top\n\n```rust\nfn top() {{}}\n```\n\n{filler}```rust\nfn bottom() {{}}\n```\n"),
+        )
+        .unwrap();
+        let mut ed = editor("");
+        ed.open(&path).unwrap();
+        let parsed = |ed: &Editor| {
+            ed.doc().syntax.as_ref().is_some_and(|s| s.tree.is_some() && !s.in_flight && !s.dirty)
+        };
+        ed.handle_event(crate::event::Event::Resize); // (every event schedules parses)
+        settle_until(&mut ed, parsed);
+        let rust_at = |ed: &Editor| -> Vec<usize> {
+            let text = ed.doc().text.clone();
+            let layers = ed.doc().syntax.as_ref().unwrap().layers.clone();
+            let rust = layers.iter().filter(|l| l.lang.name == "rust");
+            rust.map(|l| text.byte_to_line(l.tree.root_node().start_byte())).collect()
+        };
+        assert_eq!(rust_at(&ed), [3], "the block in view, with the first tree");
+        ed.goto_line(1004);
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 30).unwrap();
+        // The frame itself started it — no event has to come first
+        assert!(ed.doc().syntax.as_ref().unwrap().in_flight, "a parse for what the frame showed");
+        settle_until(&mut ed, |ed| parsed(ed) && rust_at(ed).len() > 1 || rust_at(ed) == [1007]);
+        assert!(rust_at(&ed).contains(&1007), "the one scrolled to: {:?}", rust_at(&ed));
+        assert!(!rust_at(&ed).contains(&3), "not the one far out of view anymore");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Waits until one background job finishes and is applied.
