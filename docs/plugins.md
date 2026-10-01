@@ -258,8 +258,13 @@ workload's pods aren't fine goes on the line that's why, from the pods' own stat
 cluster): an image that can't be pulled on its `image:` line (`ImagePullBackOff: not found`), a missing ConfigMap
 or Secret on the line that names it, `OOMKilled ↻3` on `limits.memory`, `CrashLoopBackOff · exit 1` on
 `command:`, a container running unready for over a minute on `readinessProbe:`, and each of the scheduler's
-reasons on the request, `nodeSelector`/`affinity`, `tolerations` or `volumes` it's about. A line says all that's
-said of it in one hint. From the
+reasons on the request, `nodeSelector`/`affinity`, `tolerations` or `volumes` it's about. And what a line names
+that isn't there, before a pod finds out: a ConfigMap (or the key it reads from it), a Secret, a ServiceAccount, a
+claim, a pull secret, an Ingress's Service, an HPA's target — `no Secret app-token in prod`, `no key mode in
+app-settings`, or `isn't applied yet` when an open manifest has it; a Service whose selector no pod has. Only the
+names it needs are watched; a reference marked `optional`, or that a template writes, is left alone, and one a
+Kustomize build renamed (a prefix, a generator's hash) is looked for by the name the build gave it. A line says all
+that's said of it in one hint. From the
 kubeconfig: certificates and keys (inline or as files, relative to it), tokens (inline or `tokenFile`), a server
 URL with a path or an IPv6 address, `tls-server-name`, and EKS's exec credentials: it runs `aws eks get-token`
 (with the kubeconfig's `AWS_PROFILE` and the like) for a token, and again a minute before it expires or on a 401.

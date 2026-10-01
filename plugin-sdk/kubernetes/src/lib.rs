@@ -32,6 +32,7 @@ mod helm;
 mod kubeconfig;
 mod kustomize;
 mod manifest;
+mod refs;
 mod status;
 
 use std::cell::RefCell;
@@ -617,7 +618,9 @@ impl State {
             return out;
         }
         let docs: Vec<Doc> = self.watch_docs();
-        for d in &docs {
+        // (and the objects they name: whether they're there)
+        let named: Vec<Doc> = docs.iter().flat_map(|d| self.named(d)).map(|(_, n)| n).collect();
+        for d in docs.iter().chain(&named) {
             if !self.served.contains_key(&d.api_version) {
                 self.served.insert(d.api_version.clone(), Served::Asking);
                 let path = if d.api_version.contains('/') {
@@ -645,6 +648,11 @@ impl State {
                 Some(None) => here.insert(Select::All),
                 None => false,
             };
+        }
+        for n in &named {
+            if let Some((w, _)) = self.watched(n) {
+                kinds.entry(w).or_insert_with(|| (n.kind.clone(), BTreeSet::new())).1.insert(n.name.clone());
+            }
         }
         // (one name: only it — the server sends nothing else; a namespace's pods, by up to two selectors)
         let mut wanted: BTreeMap<(Watched, Select), (String, BTreeSet<String>)> = BTreeMap::new();
@@ -880,6 +888,101 @@ impl State {
                 Some(Hint { line: f.line, text: format!("→ {}{by}", fields::told(&now)), tone: Tone::Info })
             })
             .collect()
+    }
+
+    /// The objects a document's lines name, each as a document of its own (in the document's namespace, under
+    /// the name a Kustomize build gave it).
+    fn named(&self, d: &Doc) -> Vec<(refs::Ref, Doc)> {
+        if !matches!(d.via, Via::Itself | Via::Built(_)) {
+            return Vec::new();
+        }
+        let Some((w, _)) = self.watched(d) else { return Vec::new() };
+        let Some(ns) = w.ns else { return Vec::new() };
+        // A build's names: what it made of a name (a prefix, a generator's hash)
+        let built = match &d.via {
+            Via::Built(label) => self.builds.iter().find_map(|(root, b)| match b {
+                Build::Done(built) if root.rsplit('/').next() == Some(label.as_str()) => Some(built),
+                _ => None,
+            }),
+            _ => None,
+        };
+        refs::refs(&d.fields)
+            .into_iter()
+            .map(|r| {
+                let name = built
+                    .and_then(|b| {
+                        let mine = b.iter().filter(|o| o.kind == r.kind);
+                        let exact = b.iter().find(|o| o.kind == r.kind && o.name == r.name);
+                        exact.or_else(|| mine.filter(|o| o.name.contains(&r.name)).min_by_key(|o| o.name.len()))
+                    })
+                    .map_or(r.name.clone(), |o| o.name.clone());
+                let doc = Doc {
+                    lines: r.line..r.line + 1,
+                    at: r.line,
+                    api_version: r.api_version.clone(),
+                    kind: r.kind.clone(),
+                    name,
+                    namespace: Some(ns.clone()),
+                    generated: false,
+                    via: Via::Itself,
+                    fields: Vec::new(),
+                };
+                (r, doc)
+            })
+            .collect()
+    }
+
+    /// Where a line names an object the cluster hasn't — or a key its ConfigMap hasn't, or a Service's
+    /// selector no pod has. (Not on a line that already says why its pods aren't fine.)
+    fn missing(&self, d: &Doc, said: &[u64]) -> Vec<Hint> {
+        let mut out = Vec::new();
+        for (r, n) in self.named(d) {
+            if said.contains(&r.line) {
+                continue;
+            }
+            // (only once the cluster's been asked)
+            let Some((w, _)) = self.watched(&n) else { continue };
+            let Some(s) = self.stream_for(&w, &n.name).filter(|s| s.loaded) else { continue };
+            let ns = n.namespace.clone().unwrap_or_default();
+            match s.objects.get(&n.name) {
+                None => {
+                    // One of the open manifests has it: it isn't applied yet
+                    let ours = self.files.keys().flat_map(|p| self.docs(p)).any(|o| {
+                        o.kind == n.kind && o.name == n.name && self.watched(&o).is_some_and(|(w, _)| w.ns.as_deref() == Some(&ns))
+                    });
+                    let (text, tone) = if ours {
+                        (format!("{} {} isn't applied yet", n.kind, n.name), Tone::Info)
+                    } else {
+                        (format!("no {} {} in {ns}", n.kind, n.name), Tone::Warning)
+                    };
+                    out.push(Hint { line: r.line, text, tone });
+                }
+                Some(o) => {
+                    if let Some(key) = &r.key {
+                        let has = ["data", "binaryData"].iter().any(|f| o.data[f].get(key).is_some());
+                        if !has {
+                            out.push(Hint { line: r.line, text: format!("no key {key} in {}", n.name), tone: Tone::Warning });
+                        }
+                    }
+                }
+            }
+        }
+        // A Service whose selector no pod has — once the pods it selects (or all the namespace's) are in
+        let selector = [fields::Seg::Key("spec".into()), fields::Seg::Key("selector".into())];
+        if d.kind == "Service"
+            && let Some(o) = self.live(d)
+            && let Some(labels) = status::label_selector(&o.data["spec"]["selector"])
+            && let Some((_, Some(p))) = self.watched(d)
+            && self.streams.values().any(|s| {
+                s.what == p && s.loaded && (s.select == Select::All || s.select == Select::Labels(labels.clone()))
+            })
+            && self.pods_of(d).is_empty()
+            && let Some(line) = d.fields.iter().find(|f| f.path == selector).map(|f| f.line)
+            && !said.contains(&line)
+        {
+            out.push(Hint { line, text: "selects no pods".into(), tone: Tone::Warning });
+        }
+        out
     }
 
     /// Whether the cluster has a document's object.
@@ -1235,7 +1338,10 @@ impl State {
                 // Why its pods aren't fine, on the lines that are why — before what the cluster has otherwise
                 let pods = self.pods_of(&d);
                 let causes = cause::causes(&d.fields, &pods, now);
+                let said: Vec<u64> = causes.iter().map(|c| c.line).collect();
                 hints.extend(causes.into_iter().map(|c| Hint { line: c.line, text: c.text, tone: c.tone }));
+                // What it names that isn't there
+                hints.extend(self.missing(&d, &said));
                 hints.extend(self.differ(&d));
             }
             let hints = together(hints);
@@ -2668,6 +2774,110 @@ mod tests {
         // The cause and what the cluster has otherwise, on the image's line, as one hint — the worse tone
         let image: Vec<&(u64, String, Tone)> = hints.iter().filter(|h| h.0 == 10).collect();
         assert_eq!(image, [&(10, "ErrImagePull: not found  ·  → nginx:no-such-tag-2".to_string(), Tone::Error)], "{hints:?}");
+    }
+
+    /// A line that names an object the cluster hasn't says so — a key its ConfigMap hasn't, too; one an open
+    /// manifest has isn't applied yet; a Service's selector no pod has.
+    #[test]
+    fn what_a_line_names_that_isn_t_there() {
+        let mut s = with_cluster();
+        let text = "\
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+  namespace: prod
+spec:
+  template:
+    spec:
+      serviceAccountName: worker
+      containers:
+        - name: app
+          env:
+            - name: MODE
+              valueFrom:
+                configMapKeyRef: {name: app-settings, key: mode}
+            - name: TOKEN
+              valueFrom:
+                secretKeyRef: {name: app-token, key: token}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: data
+  namespace: prod
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: app
+  namespace: prod
+spec:
+  selector:
+    app: ap
+";
+        s.file("/r/app.yaml".into(), 1, text);
+        serve(&mut s, "apps/v1", &[("Deployment", "deployments")]);
+        let v1 = [("ConfigMap", "configmaps"), ("Secret", "secrets"), ("ServiceAccount", "serviceaccounts"),
+            ("PersistentVolumeClaim", "persistentvolumeclaims"), ("Service", "services"), ("Pod", "pods")];
+        serve(&mut s, "v1", &v1);
+        let obj = |kind: &str, name: &str, extra: Value| {
+            let mut o = serde_json::json!({"apiVersion": "v1", "kind": kind, "metadata": {"name": name, "namespace": "prod"}});
+            o.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            serde_json::from_value::<DynamicObject>(o).unwrap()
+        };
+        let have = [
+            obj("ConfigMap", "app-settings", serde_json::json!({"data": {"level": "1"}})),
+            obj("ServiceAccount", "worker", serde_json::json!({})),
+            obj("Service", "app", serde_json::json!({"spec": {"selector": {"app": "ap"}}})),
+        ];
+        s.follow();
+        for st in s.streams.values_mut() {
+            st.loaded = true;
+            for o in &have {
+                if o.types.as_ref().is_some_and(|t| t.kind == st.kind) {
+                    st.objects.insert(name_of(o), o.clone());
+                }
+            }
+        }
+        s.follow();
+        for st in s.streams.values_mut() {
+            st.loaded = true;
+        }
+        let hints = |s: &mut State| {
+            s.sent.clear();
+            let out = s.show();
+            out.iter()
+                .find_map(|a| if let Action::Hints(h) = a { Some(h.hints.iter().map(|h| (h.line, h.text.clone())).collect::<Vec<_>>()) } else { None })
+                .unwrap()
+        };
+        let got = hints(&mut s);
+        let at = |line: u64| got.iter().find(|h| h.0 == line).map(|h| h.1.as_str());
+        assert_eq!(at(8), None, "its ServiceAccount is there");
+        assert_eq!(at(14), Some("no key mode in app-settings"));
+        assert_eq!(at(17), Some("no Secret app-token in prod"));
+        assert_eq!(at(21), Some("PersistentVolumeClaim data isn't applied yet"), "an open manifest has it");
+        assert_eq!(at(35), Some("selects no pods"));
+        // A line that already says why its pods aren't fine: not said again
+        let d = s.docs("/r/app.yaml").remove(0);
+        assert!(s.missing(&d, &[17]).iter().all(|h| h.line != 17));
+        // Through Kustomize: the name the build gave it (a prefix, a generator's hash)
+        let built = |name: &str| Built {
+            api_version: "v1".into(),
+            kind: "ConfigMap".into(),
+            name: name.into(),
+            namespace: Some("prod".into()),
+            path: None,
+            configured_in: Some("/r/k/base/kustomization.yaml".into()),
+        };
+        s.builds.insert("/r/k/prod".into(), Build::Done(vec![built("prod-app-settings-5h7k"), built("other")]));
+        let d = Doc { via: Via::Built("prod".into()), ..d };
+        let names: Vec<String> = s.named(&d).into_iter().map(|(_, n)| n.name).collect();
+        assert_eq!(names, ["worker", "prod-app-settings-5h7k", "app-token", "data"]);
     }
 
     #[test]
