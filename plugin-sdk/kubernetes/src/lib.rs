@@ -319,6 +319,21 @@ fn tally(tones: &[Tone], fine: String) -> (String, Tone) {
     (detail, worst)
 }
 
+/// `text` in lines of about `width` characters, broken between words.
+fn wrapped(text: &str, width: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for word in text.split_whitespace() {
+        match out.last_mut() {
+            Some(l) if l.chars().count() + 1 + word.chars().count() <= width => {
+                l.push(' ');
+                l.push_str(word);
+            }
+            _ => out.push(word.to_string()),
+        }
+    }
+    out
+}
+
 /// One hint a line (tarae shows the first): what's said of it, in order, the worst tone.
 fn together(hints: Vec<Hint>) -> Vec<Hint> {
     let mut out: Vec<Hint> = Vec::new();
@@ -466,8 +481,9 @@ impl State {
                 if self.loading.take().is_some() {
                     return self.fail(why);
                 }
-                self.error = Some(why);
-                return vec![Action::Timer((REFRESH, 60_000))];
+                let mut out = self.fail(why);
+                out.push(Action::Timer((REFRESH, 60_000)));
+                return out;
             }
         };
         let mut out = Vec::new();
@@ -516,10 +532,12 @@ impl State {
         out
     }
 
-    /// Nothing can be shown (the kubeconfig, signing in): said in its tab until tried again.
+    /// Nothing can be shown (the kubeconfig, signing in): said in its tab until tried again — and, when it's
+    /// news, as a warning (whole, and in tarae's log: the tab's line is cut).
     fn fail(&mut self, why: String) -> Vec<Action> {
-        self.error = Some(why);
-        Vec::new()
+        let news = self.error.as_ref() != Some(&why);
+        self.error = Some(why.clone());
+        if news { vec![Action::Warning(format!("Kubernetes: {why}"))] } else { Vec::new() }
     }
 
     // ── What the manifests hold, and what's watched for them ──
@@ -1256,7 +1274,8 @@ impl State {
         let mut rows = Vec::new();
         if let Some(e) = &self.error {
             rows.push(row("retry".into(), 0, "can't show the cluster".into(), "enter: again".into(), Tone::Error, None));
-            rows.push(why(1, e.clone(), Tone::Error));
+            // (all of it, a line at a time: the panel is narrow)
+            rows.extend(wrapped(e, 30).into_iter().map(|l| why(1, l, Tone::Error)));
         } else if self.cluster.is_none() {
             rows.push(row("none".into(), 0, "connecting…".into(), String::new(), Tone::Info, None));
         } else if self.files.is_empty() {
@@ -2499,6 +2518,28 @@ mod tests {
         let out = s.render_failed(n as usize, "helm isn't on PATH".into());
         assert!(out.iter().any(|a| matches!(a, Action::OfferInstall((HELM_INSTALL, p)) if p == "helm")));
         assert_eq!(s.seen(&s.docs(tpl)[0]).unwrap().text, "helm isn't installed");
+    }
+
+    /// Why it can't show the cluster is said whole: once as a warning (into tarae's log), and in its tab a
+    /// line at a time.
+    #[test]
+    fn why_it_can_t_connect_is_said_whole() {
+        let mut s = State { on: true, kubeconfig: "~/.kube/config".into(), ..State::default() };
+        let config = "apiVersion: v1\ncurrent-context: c\ncontexts:\n- name: c\n  context: {cluster: k, user: u}\nclusters:\n- name: k\n  cluster: {server: https://k:443}\nusers:\n- name: u\n  user:\n    exec:\n      apiVersion: client.authentication.k8s.io/v1beta1\n      command: kubelogin\n      args: [get-token]\n";
+        let warned = |out: &[Action]| {
+            out.iter().filter_map(|a| if let Action::Warning(w) = a { Some(w.clone()) } else { None }).collect::<Vec<_>>()
+        };
+        let out = s.read_kubeconfig(config.as_bytes());
+        assert_eq!(
+            warned(&out),
+            ["Kubernetes: exec credentials with kubelogin: only aws (EKS) for now"]
+        );
+        assert!(warned(&s.read_kubeconfig(config.as_bytes())).is_empty(), "the same again: not said again");
+        let side = s.side_now();
+        let notes: Vec<&str> = side.rows.iter().filter(|r| r.note).map(|r| r.text.as_str()).collect();
+        assert_eq!(notes.join(" "), s.error.clone().unwrap(), "all of it");
+        assert!(notes.len() > 1 && notes.iter().all(|n| n.chars().count() <= 30), "{notes:?}");
+        assert_eq!(wrapped("a bb ccc", 4), ["a bb", "ccc"]);
     }
 
     #[test]

@@ -157,7 +157,13 @@ pub fn plan(text: &[u8], path: &str) -> Result<Plan, String> {
             // `aws` (EKS), as a name or a path: the one on PATH
             let program = e.command.rsplit('/').next().unwrap_or("");
             if !EXEC_PROGRAMS.contains(&program) {
-                return Err(format!("exec credentials with {}: only aws (EKS) for now", e.command));
+                // (EKS's older way: the current one is a command away)
+                let how = if program == "aws-iam-authenticator" {
+                    " — `aws eks update-kubeconfig --name <cluster>` switches it to aws eks get-token"
+                } else {
+                    ""
+                };
+                return Err(format!("exec credentials with {}: only aws (EKS) for now{how}", e.command));
             }
             if let Some(v) = e.env.iter().flatten().find(|v| !EXEC_ENV.contains(&v.name.as_str())) {
                 return Err(format!(
@@ -268,6 +274,7 @@ users:
         assert_eq!(p.files, [("ca", "~/.kube/ca.crt".to_string())]);
         let bad = |from: &str, to: &str| plan(EKS.replace(from, to).as_bytes(), "~/.kube/config").err().unwrap();
         assert!(bad("/opt/homebrew/bin/aws", "gke-gcloud-auth-plugin").contains("only aws"));
+        assert!(bad("/opt/homebrew/bin/aws", "aws-iam-authenticator").contains("aws eks update-kubeconfig --name"));
         assert!(bad("AWS_PROFILE", "AWS_SECRET_ACCESS_KEY").contains("AWS_SECRET_ACCESS_KEY isn't passed on"));
         assert!(bad("current-context: eks", "current-context: nope").contains("no context nope"));
     }
