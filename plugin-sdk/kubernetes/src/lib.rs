@@ -1,7 +1,8 @@
 //! Kubernetes in the code: open a manifest and each object in it has its state beside its `kind:` line —
 //! `2/3 ready · 1 CrashLoopBackOff`, `Ready`, `not in prod-eks` — live. The status line says which cluster
-//! it is (the kubeconfig's current context); the side panel's `kubernetes` tab lists the open manifests'
-//! objects, and the pods of those that aren't fine. From there, or from a line (`:kubernetes-here`): the
+//! it is (the kubeconfig's current context); the side panel's `k8s` tab is the file in front's (as the
+//! outline is): its objects, and the pods of those that aren't fine — and, below, the other open files that
+//! aren't fine. From there, or from a line (`:kubernetes-here`): the
 //! object's logs, events, live YAML, or where it's defined. `:kubernetes` turns it on (the first time, the
 //! tab opens) and, once it's on, takes you to the tab; `:kubernetes-off` turns it off. Browsing a cluster
 //! is kubectl's, in the terminal.
@@ -289,6 +290,8 @@ struct State {
     /// nobody has open doesn't), and whether what's watched may have to change (a workload came: its pods).
     dirty: bool,
     refollow: bool,
+    /// The file in front (`shown`): the side tab is its objects.
+    front: Option<String>,
 }
 
 thread_local! {
@@ -1200,6 +1203,21 @@ impl State {
         Some(Seen { text, tone, brief })
     }
 
+    /// A buffer is now in front (none: one with no file): the side tab is its objects — a manifest it hasn't
+    /// read yet (open before it was on), read now.
+    fn shown(&mut self, path: Option<String>, version: u64, text: Option<&str>) -> Vec<Action> {
+        self.front = path.clone();
+        let mut out = Vec::new();
+        if let (Some(path), Some(text)) = (path, text)
+            && self.files.get(&path).map(|f| f.version) != Some(version)
+            && !self.values.contains_key(&path)
+        {
+            out.extend(self.file(path, version, text));
+        }
+        out.extend(self.show());
+        out
+    }
+
     /// The hints, the side tab and the badge, as things are — sent where they changed.
     fn show(&mut self) -> Vec<Action> {
         let mut out = Vec::new();
@@ -1281,9 +1299,13 @@ impl State {
         } else if self.files.is_empty() {
             let text = "open a manifest: its objects show here".into();
             rows.push(row("none".into(), 0, text, String::new(), Tone::Info, None));
+        } else if !self.front.as_ref().is_some_and(|f| self.files.contains_key(f)) {
+            let text = "no objects in this file".into();
+            rows.push(row("none".into(), 0, text, String::new(), Tone::Info, None));
         }
         if self.cluster.is_some() {
-            for path in self.files.keys() {
+            // The file in front: its objects, by kind, and the pods of those that aren't fine
+            for path in self.files.keys().filter(|p| Some(*p) == self.front.as_ref()) {
                 let docs = self.docs(path);
                 let file = path.rsplitn(3, '/').take(2).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("/");
                 let seen: Vec<Seen> = docs
@@ -1347,6 +1369,23 @@ impl State {
                         }
                     }
                 }
+            }
+            // The other open files: only those that aren't fine, to go to
+            let mut others = Vec::new();
+            for path in self.files.keys().filter(|p| Some(*p) != self.front.as_ref()) {
+                let docs = self.docs(path);
+                let tones: Vec<Tone> = docs.iter().filter_map(|d| self.seen(d)).map(|s| s.tone).collect();
+                let (detail, worst) = tally(&tones, String::new());
+                if matches!(worst, Tone::Error | Tone::Warning) {
+                    let file = path.rsplitn(3, '/').take(2).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("/");
+                    let last = docs.last().map_or(0, |d| d.lines.end);
+                    others.push(row(format!("f:{path}"), 1, file, detail, worst, Some((path.clone(), 0, last))));
+                }
+            }
+            if !others.is_empty() {
+                let worst = others.iter().map(|r| r.tone).min_by_key(|t| rank(*t)).unwrap_or(Tone::Warning);
+                rows.push(row("others".into(), 0, "other open files".into(), String::new(), worst, None));
+                rows.extend(others);
             }
         }
         let keys = [("ret", "go / logs"), ("d", "describe"), ("e", "events"), ("y", "yaml"), ("a", "all")];
@@ -2031,6 +2070,10 @@ impl Guest for Plugin {
             // (saving may change it too: a formatter)
             Subscription { event: Event::Saved, text: true, languages: yaml() },
             Subscription { event: Event::Closed, text: false, languages: yaml() },
+            // (any buffer: the tab is the one in front's — a file with no objects says so; a manifest's text, to
+            // read one opened before it was on)
+            Subscription { event: Event::Shown, text: false, languages: Vec::new() },
+            Subscription { event: Event::Shown, text: true, languages: yaml() },
         ]
     }
 
@@ -2060,6 +2103,7 @@ impl Guest for Plugin {
             "kubernetes" => {
                 let mut out = s.start();
                 // The buffer in front, if it's a manifest (the others: as they're opened or changed)
+                s.front = cx.buffer.path.clone();
                 if let (Some(path), Some(text)) = (&cx.buffer.path, &cx.buffer.text) {
                     out.extend(s.file(path.clone(), cx.buffer.version, text));
                 }
@@ -2086,6 +2130,10 @@ impl Guest for Plugin {
 
     fn on(event: Event, cx: Context) -> Vec<Action> {
         tarae_plugin::now::set(cx.now.millis, &cx.now.entropy);
+        if event == Event::Shown {
+            let b = cx.buffer;
+            return STATE.with_borrow_mut(|s| s.shown(b.path, b.version, b.text.as_deref()));
+        }
         let Some(path) = cx.buffer.path.clone() else { return Vec::new() };
         STATE.with_borrow_mut(|s| match event {
             Event::Opened | Event::Changed | Event::Saved => {
@@ -2355,6 +2403,45 @@ mod tests {
         assert!(hints(&s.on_events(vec![HostEvent::Tick(7)])));
     }
 
+    /// The side tab is the file in front's — another open file shows only if it isn't fine, to go to; a
+    /// file with no objects says so.
+    #[test]
+    fn the_side_tab_is_the_file_in_front() {
+        let mut s = with_cluster();
+        let deploy = |name: &str| format!("apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: {name}\n  namespace: prod\n");
+        s.file("/r/a.yaml".into(), 1, &deploy("a"));
+        s.file("/r/b.yaml".into(), 1, &deploy("b"));
+        s.file("/r/c.yaml".into(), 1, &deploy("c"));
+        serve(&mut s, "apps/v1", &[("Deployment", "deployments")]);
+        let ok = |name: &str| serde_json::json!({"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": name, "namespace": "prod"},
+            "spec": {"replicas": 1}, "status": {"readyReplicas": 1, "updatedReplicas": 1}});
+        for st in s.streams.values_mut() {
+            st.loaded = true;
+            // (a and c are there; b isn't)
+            st.objects.insert("a".into(), serde_json::from_value(ok("a")).unwrap());
+            st.objects.insert("c".into(), serde_json::from_value(ok("c")).unwrap());
+        }
+        let rows = |s: &State| {
+            s.side_now().rows.iter().map(|r| (r.depth, r.text.clone(), r.at.as_ref().map(|a| a.0.clone()))).collect::<Vec<_>>()
+        };
+        s.shown(Some("/r/a.yaml".into()), 1, None);
+        let got = rows(&s);
+        assert_eq!(got[0], (0, "r/a.yaml".to_string(), Some("/r/a.yaml".to_string())), "{got:?}");
+        assert!(!got.iter().any(|r| r.1 == "c"), "a fine file elsewhere: not here");
+        assert_eq!(
+            &got[got.len() - 2..],
+            [(0, "other open files".to_string(), None), (1, "r/b.yaml".to_string(), Some("/r/b.yaml".to_string()))],
+            "one that isn't fine: to go to"
+        );
+        s.shown(Some("/r/notes.md".into()), 1, None);
+        assert_eq!(rows(&s)[0].1, "no objects in this file");
+        s.shown(Some("/r/c.yaml".into()), 1, None);
+        assert_eq!(rows(&s)[0].1, "r/c.yaml");
+        // One open before it was on: read as it comes to the front
+        s.shown(Some("/r/d.yaml".into()), 4, Some(&deploy("c")));
+        assert_eq!((rows(&s)[0].1.as_str(), s.files["/r/d.yaml"].version), ("r/d.yaml", 4));
+    }
+
     #[test]
     fn hints_and_the_side_tab_say_how_each_object_is_doing() {
         let mut s = with_cluster();
@@ -2370,7 +2457,7 @@ mod tests {
                 st.objects.insert("web".into(), serde_json::from_value(web.clone()).unwrap());
             }
         }
-        let out = s.show();
+        let out = s.shown(Some("/r/web.yaml".into()), 3, None);
         let hints: Vec<&Hints> = out.iter().filter_map(|a| if let Action::Hints(h) = a { Some(h) } else { None }).collect();
         assert_eq!(hints.len(), 1);
         assert_eq!(hints[0].version, 3, "for the text it read");

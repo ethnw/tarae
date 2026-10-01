@@ -232,9 +232,10 @@ the keys. While the debugger or the terminal has its place, it's out of sight an
 [`plugin-sdk/kubernetes`](../plugin-sdk/kubernetes) uses all of it: the cluster in the code. Open a manifest and
 each object in it has its state beside its `kind:` line (`2/3 ready · 1 ImagePullBackOff`, `Ready`, `not in
 prod-eks`), live; the status line says which cluster (`⎈` the kubeconfig's current context); the side panel's
-`k8s` tab lists the open manifests' objects by kind, names under each — briefly: a number when it's fine (`3/3`,
+`k8s` tab is the file in front's, as the outline is (`shown`): its objects by kind, names under each — briefly: a number when it's fine (`3/3`,
 `3 pods`, `↻2` if its pods restarted), and when it isn't, why on a line of its own, under the pods that say it
-(newest first, `2m` if new). `enter` goes to where one is defined (a pod: its logs), `d` describes a pod (its
+(newest first, `2m` if new). Below them, the other open files that aren't fine, to go to (`enter`); a file with
+none says so. `C-w e` takes the keys to the tab and back. `enter` goes to where one is defined (a pod: its logs), `d` describes a pod (its
 containers, how they last ended, conditions, events), `e` its events (a workload's with its pods'), `y` its live
 YAML (a Secret's values masked), `a` all of that in a pick. `:kubernetes-here` does the same for the object under the
 cursor. `:kubernetes` turns it on (the tab opens the first time) and then takes you to the tab;
