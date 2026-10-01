@@ -76,6 +76,9 @@ const HELM_READ: u64 = 1 << 35;
 /// Helm values: finding the project's chart templates; reading template `n` (of a chart whose values are open).
 const FIND_TEMPLATES: u64 = 87;
 const TPL_READ: u64 = 1 << 34;
+/// A release's own values: `helm get values` for release `n`, and the file they're written to for its render.
+const VALUES_GET: u64 = 1 << 33;
+const VALUES_WRITE: u64 = (1 << 33) | (1 << 31);
 const HELM_RENDER: u64 = 1 << 39;
 const FIRST_CONN: u64 = 1000;
 const RETRY: u64 = 1 << 32;
@@ -196,6 +199,19 @@ enum Build<T = Built> {
     Failed(String),
 }
 
+/// What a release was given (its values beyond the chart's): being asked, written to a file to render with,
+/// rendered with (the file emptied: they may hold its secrets — written again to render again), none (`helm
+/// get values` said `null`), or not known (why — read access to the release's Secret, say).
+#[derive(Clone, Debug, PartialEq)]
+enum Given {
+    Asking(Vec<String>),
+    Writing(Value),
+    Got(Value, String),
+    Spent(Value),
+    Nothing,
+    Unknown(String),
+}
+
 /// A manifest open in tarae: its objects, as of its `version`.
 struct File {
     version: u64,
@@ -295,6 +311,8 @@ struct State {
     templates: Vec<String>,
     chart_files: BTreeMap<String, Vec<Doc>>,
     tpl_reading: Vec<String>,
+    /// Each release's own values (`helm get values`): what it was given, as a file to render it with.
+    release_values: BTreeMap<(String, helm::Release), Given>,
     /// Whether what's shown may have changed since it was last worked out (a watch's change to an object
     /// nobody has open doesn't), and whether what's watched may have to change (a workload came: its pods).
     dirty: bool,
@@ -806,13 +824,14 @@ impl State {
                         via: Via::Built(rel.name.clone()),
                         ..d.clone()
                     },
-                    None => Doc {
-                        via: Via::Unbuilt(format!(
-                            "{} doesn't render it (with the chart's own values)",
-                            rel.name
-                        )),
-                        ..d.clone()
-                    },
+                    None => {
+                        // (with the values it was given — or, not known, with the chart's)
+                        let with = match self.release_values.get(&(top.clone(), rel.clone())) {
+                            Some(Given::Got(..) | Given::Spent(_) | Given::Nothing) => String::new(),
+                            _ => " (with the chart's own values)".into(),
+                        };
+                        Doc { via: Via::Unbuilt(format!("{} doesn't render it{with}", rel.name)), ..d.clone() }
+                    }
                 })
                 .collect();
             out.push(reading);
@@ -1146,6 +1165,7 @@ impl State {
     fn charts_read(&mut self) -> Vec<Action> {
         self.charts = Some(std::mem::take(&mut self.chart_reading.1));
         self.renders.clear();
+        self.release_values.clear();
         // What the cluster has of the charts, looked at afresh — if there are any (else: six lists of the
         // whole cluster for nothing)
         if self.charts.as_ref().is_some_and(|c| c.is_empty()) {
@@ -1192,9 +1212,32 @@ impl State {
                         self.render_keys.push(key.clone());
                         self.render_keys.len() - 1
                     });
+                    // What the release was given first — it renders with those
+                    let file = match self.release_values.get(&key) {
+                        None => {
+                            self.release_values.insert(key, Given::Asking(Vec::new()));
+                            let args = ["get", "values", &rel.name, "--namespace", &rel.namespace, "--output", "json"];
+                            let args = args.iter().map(|a| a.to_string()).collect();
+                            let id = VALUES_GET + n as u64;
+                            out.push(Action::Spawn(Spawn { id, program: "helm".into(), args, env: Vec::new() }));
+                            continue;
+                        }
+                        Some(Given::Asking(_) | Given::Writing(_)) => continue,
+                        Some(Given::Spent(v)) => {
+                            let bytes = serde_json::to_vec(v).unwrap_or_default();
+                            self.release_values.insert(key, Given::Writing(v.clone()));
+                            out.push(Action::WriteOwn((VALUES_WRITE + n as u64, format!("values/{n}.json"), bytes)));
+                            continue;
+                        }
+                        Some(Given::Got(_, file)) => Some(file.clone()),
+                        Some(Given::Nothing | Given::Unknown(_)) => None,
+                    };
                     self.renders.insert(key, Build::Running(Vec::new()));
-                    let args = ["template", &rel.name, &top, "--namespace", &rel.namespace];
-                    let args = args.iter().map(|a| a.to_string()).collect();
+                    let mut args: Vec<String> =
+                        ["template", &rel.name, &top, "--namespace", &rel.namespace].iter().map(|a| a.to_string()).collect();
+                    if let Some(f) = file {
+                        args.extend(["--values".to_string(), f]);
+                    }
                     out.push(Action::Spawn(Spawn {
                         id: HELM_RENDER + n as u64,
                         program: "helm".into(),
@@ -1206,6 +1249,57 @@ impl State {
         }
         out.extend(self.follow());
         out
+    }
+
+    /// `helm get values` for release `n` answered (or not): its values written for its render — or, none or
+    /// not known, rendered with the chart's.
+    fn values_got(&mut self, n: usize, code: Option<u64>, err: &[String]) -> Vec<Action> {
+        let Some(key) = self.render_keys.get(n).cloned() else { return Vec::new() };
+        let Some(Given::Asking(out)) = self.release_values.get(&key).cloned() else { return Vec::new() };
+        let said = err.iter().rev().find(|l| !l.trim().is_empty()).map_or("it failed", |l| l.trim());
+        let given = match (code, serde_json::from_str::<Value>(&out.join("\n"))) {
+            (Some(0), Ok(Value::Null)) => Given::Nothing,
+            (Some(0), Ok(v)) if self.own_dir.is_some() => Given::Writing(v),
+            (Some(0), _) => Given::Unknown("its values couldn't be read".into()),
+            _ => Given::Unknown(format!("helm get values: {said}")),
+        };
+        let mut out = Vec::new();
+        if let Given::Writing(v) = &given {
+            let bytes = serde_json::to_vec(v).unwrap_or_default();
+            out.push(Action::WriteOwn((VALUES_WRITE + n as u64, format!("values/{n}.json"), bytes)));
+        }
+        self.release_values.insert(key, given);
+        out.extend(self.render());
+        out
+    }
+
+    /// Release `n`'s values written (at `path`): it renders with them.
+    fn values_written(&mut self, n: usize, path: Option<String>) -> Vec<Action> {
+        let Some(key) = self.render_keys.get(n).cloned() else { return Vec::new() };
+        let Some(Given::Writing(v)) = self.release_values.get(&key).cloned() else { return Vec::new() };
+        let given = match path {
+            Some(p) => Given::Got(v, p),
+            None => Given::Unknown("its values couldn't be written for its render".into()),
+        };
+        self.release_values.insert(key, given);
+        self.render()
+    }
+
+    /// A chart's file saved: Helm renders what's on disk, so its releases are rendered again — and what they
+    /// were given asked again (one may have been upgraded meanwhile).
+    fn chart_saved(&mut self, path: &str) {
+        let Some(charts) = &self.charts else { return };
+        let Some(dir) = charts.keys().find(|d| path.starts_with(&format!("{d}/"))) else { return };
+        let Some((top, _)) = helm::source_of(charts, &format!("{dir}/templates/-")) else { return };
+        self.renders.retain(|(t, _), _| *t != top);
+        self.release_values.retain(|(t, _), _| *t != top);
+    }
+
+    /// What release `rel` of the chart in `top` was given at `keys`, if it was given that.
+    fn given(&self, top: &str, rel: &str, keys: &[String]) -> Option<Value> {
+        let (_, g) = self.release_values.iter().find(|((t, r), _)| t == top && r.name == rel)?;
+        let (Given::Got(v, _) | Given::Spent(v)) = g else { return None };
+        keys.iter().try_fold(v, |v, k| v.get(k)).cloned()
     }
 
     fn render_lines(&mut self, n: usize, lines: Vec<String>) {
@@ -1223,8 +1317,16 @@ impl State {
             Some(0) => Build::Done(helm::rendered(&out.join("\n"))),
             _ => Build::Failed(format!("helm: {said}")),
         };
+        // Its values' file, read: emptied (they're kept here, for what they say)
+        let mut wipe = Vec::new();
+        if let Some(Given::Got(v, _)) = self.release_values.get(&key).cloned() {
+            self.release_values.insert(key.clone(), Given::Spent(v));
+            wipe.push(Action::WriteOwn((VALUES_WRITE + n as u64, format!("values/{n}.json"), b"{}".to_vec())));
+        }
         self.renders.insert(key, b);
-        self.follow()
+        let mut out = self.follow();
+        out.extend(wipe);
+        out
     }
 
     /// Release `n` couldn't be rendered: why — helm not installed is offered (once).
@@ -1321,7 +1423,9 @@ impl State {
                         if fields::same(&u.path, &f.value, &now) {
                             continue;
                         }
-                        let by = fields::managers(&live, &u.path).into_iter().next();
+                        // Who: the release's own values, if they say so — else the field's last manager
+                        let given = self.given(&top, rel, &keys).is_some_and(|g| fields::same(&u.path, &g, &now));
+                        let by = if given { Some("release values".into()) } else { fields::managers(&live, &u.path).into_iter().next() };
                         let entry = (rel.clone(), fields::told(&now), by);
                         if !said.contains(&entry) {
                             said.push(entry);
@@ -2220,6 +2324,9 @@ impl State {
                 self.render_failed((id - HELM_RENDER) as usize, why)
             }
             FIND_CHARTS => self.found_charts(Vec::new()),
+            // (a release's values not asked for — helm missing is said by its render — or not written)
+            id if (VALUES_GET..VALUES_WRITE).contains(&id) => self.values_got((id - VALUES_GET) as usize, None, &[why]),
+            id if (VALUES_WRITE..TPL_READ).contains(&id) => self.values_written((id - VALUES_WRITE) as usize, None),
             // (a chart's templates that couldn't be found or read: its values say only which releases)
             FIND_TEMPLATES => Vec::new(),
             id if (TPL_READ..HELM_READ).contains(&id) => Vec::new(),
@@ -2366,12 +2473,8 @@ impl Guest for Plugin {
                         }
                         _ => false,
                     };
-                // Helm renders what's on disk too: a chart's file saved — its releases rendered again
                 if s.on && event == Event::Saved {
-                    let top = s.charts.as_ref().and_then(|c| c.keys().find(|d| path.starts_with(&format!("{d}/"))).cloned());
-                    if let Some(top) = top.and_then(|d| s.charts.as_ref().and_then(|c| helm::source_of(c, &format!("{d}/templates/-")))) {
-                        s.renders.retain(|(t, _), _| *t != top.0);
-                    }
+                    s.chart_saved(&path);
                 }
                 let mut out = s.file(path, cx.buffer.version, cx.buffer.text.as_deref().unwrap_or(""));
                 if rescan {
@@ -2419,6 +2522,20 @@ impl State {
                 HostEvent::Written((OWN_DIR, path)) => {
                     s.own_dir = Some(kustomize::parent(&path).to_string());
                     s.build()
+                }
+                HostEvent::Lines((id, lines)) if (VALUES_GET..VALUES_WRITE).contains(&id) => {
+                    if let Some(Given::Asking(out)) =
+                        s.render_keys.get((id - VALUES_GET) as usize).and_then(|k| s.release_values.get_mut(k))
+                    {
+                        out.extend(lines);
+                    }
+                    Vec::new()
+                }
+                HostEvent::Exit((id, code, err)) if (VALUES_GET..VALUES_WRITE).contains(&id) => {
+                    s.values_got((id - VALUES_GET) as usize, code, &err)
+                }
+                HostEvent::Written((id, path)) if (VALUES_WRITE..TPL_READ).contains(&id) => {
+                    s.values_written((id - VALUES_WRITE) as usize, Some(path))
                 }
                 HostEvent::Written((id, path)) if (KZ_WRITE..KZ_BUILD).contains(&id) => {
                     s.kz_written((id - KZ_WRITE) as usize, &path)
@@ -2511,6 +2628,15 @@ mod tests {
     }
 
     const MANIFEST: &str = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: web\n  namespace: prod\n";
+
+    /// `helm get values` for release `n` says `json`.
+    fn answer_values(s: &mut State, n: usize, json: &str) -> Vec<Action> {
+        let key = s.render_keys[n].clone();
+        if let Some(Given::Asking(out)) = s.release_values.get_mut(&key) {
+            out.push(json.to_string());
+        }
+        s.values_got(n, Some(0), &[])
+    }
 
     fn serve(s: &mut State, av: &str, kinds: &[(&str, &str)]) -> Vec<Action> {
         let resources: Vec<Value> =
@@ -2774,12 +2900,15 @@ mod tests {
             ("shop-0.1.0".into(), "shop-helm".into(), "shop".into()),
             ("other-1.0.0".into(), "x".into(), "y".into()),
         ]);
+        let spawned = |out: &[Action]| -> Vec<Vec<String>> {
+            out.iter().filter_map(|a| if let Action::Spawn(sp) = a { Some(sp.args.clone()) } else { None }).collect()
+        };
+        // What the release was given, first; then rendered with it
         let out = s.render();
-        let spawned: Vec<Vec<String>> = out
-            .iter()
-            .filter_map(|a| if let Action::Spawn(sp) = a { Some(sp.args.clone()) } else { None })
-            .collect();
-        assert_eq!(spawned, [["template", "shop-helm", "/r/charts/shop", "--namespace", "shop"]]);
+        assert_eq!(spawned(&out), [["get", "values", "shop-helm", "--namespace", "shop", "--output", "json"]]);
+        assert!(s.render().iter().all(|a| !matches!(a, Action::Spawn(_))), "once");
+        let out = answer_values(&mut s, 0, "null");
+        assert_eq!(spawned(&out), [["template", "shop-helm", "/r/charts/shop", "--namespace", "shop"]], "given nothing");
         assert!(s.render().iter().all(|a| !matches!(a, Action::Spawn(_))), "once");
         let output = "---\n# Source: shop/templates/deployment.yaml\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: shop-helm\n";
         s.render_lines(0, output.lines().map(str::to_string).collect());
@@ -2799,6 +2928,10 @@ mod tests {
         let d = s.docs(tpl).remove(0);
         assert_eq!((d.name.as_str(), &d.via), ("shop-helm", &Via::Built("shop-helm".into())));
         assert_eq!(s.seen(&d).unwrap().text, "2/2 ready  (via shop-helm)");
+        // A template its values don't render: said so — with the values it was given (none), not the chart's
+        let ingress = "/r/charts/shop/templates/ingress.yaml";
+        s.file(ingress.into(), 1, "{{- if .Values.ingress.enabled }}\napiVersion: networking.k8s.io/v1\nkind: Ingress\nmetadata:\n  name: x\n{{- end }}\n");
+        assert_eq!(s.seen(&s.docs(ingress)[0]).unwrap().text, "shop-helm doesn't render it");
         // A template's value: what it made; a written one: where the cluster says otherwise
         let said: Vec<(u64, String)> = s.differ(&d).into_iter().map(|h| (h.line, h.text)).collect();
         assert_eq!(
@@ -3013,10 +3146,33 @@ spec:
         let reads: Vec<&str> =
             out.iter().filter_map(|a| if let Action::ReadFile((_, p)) = a { Some(p.as_str()) } else { None }).collect();
         assert_eq!(reads, ["/r/charts/shop/templates/deployment.yaml"], "its own chart's only");
-        let renders = out.iter().filter(|a| matches!(a, Action::Spawn(_))).count();
-        assert_eq!(renders, 2, "each release rendered");
+        let asked = out.iter().filter(|a| matches!(a, Action::Spawn(sp) if sp.args[0] == "get")).count();
+        assert_eq!(asked, 2, "each release's values asked for");
+        // shop-a was given nothing; shop-b, its replicas: written for its render, which uses them
+        s.own_dir = Some("/own".into());
+        answer_values(&mut s, 0, "null");
+        let out = answer_values(&mut s, 1, "{\"replicaCount\": 3}");
+        assert!(out.iter().any(|a| matches!(a, Action::WriteOwn((_, p, _)) if p == "values/1.json")));
+        let out = s.values_written(1, Some("/own/values/1.json".into()));
+        let args = out.iter().find_map(|a| if let Action::Spawn(sp) = a { Some(sp.args.clone()) } else { None }).unwrap();
+        assert_eq!(&args[args.len() - 2..], ["--values", "/own/values/1.json"]);
+        let wiped = |out: &[Action]| out.iter().any(|a| matches!(a, Action::WriteOwn((_, p, b)) if p == "values/1.json" && b == b"{}"));
         let tpl = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: {{ .Release.Name }}\nspec:\n  replicas: {{ .Values.replicaCount }}\n";
         s.template_read(0, tpl.as_bytes());
+        for (n, rel) in ["shop-a", "shop-b"].iter().enumerate() {
+            let output = format!("---\n# Source: shop/templates/deployment.yaml\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: {rel}\n");
+            s.render_lines(n, output.lines().map(str::to_string).collect());
+            let out = s.rendered(n, Some(0), &[]);
+            // (shop-b's values, read by its render: their file emptied)
+            assert_eq!(wiped(&out), n == 1);
+        }
+        // Rendered again (helm installed, say): its values written again first
+        s.renders.clear();
+        let out = s.render();
+        assert!(out.iter().any(|a| matches!(a, Action::WriteOwn((_, p, b)) if p == "values/1.json" && b != b"{}")));
+        s.values_written(1, Some("/own/values/1.json".into()));
+        let out = s.render();
+        assert!(out.iter().all(|a| !matches!(a, Action::Spawn(sp) if sp.args.contains(&"shop-b".to_string()))), "rendering");
         for (n, rel) in ["shop-a", "shop-b"].iter().enumerate() {
             let output = format!("---\n# Source: shop/templates/deployment.yaml\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: {rel}\n");
             s.render_lines(n, output.lines().map(str::to_string).collect());
@@ -3039,19 +3195,32 @@ spec:
         }
         let said: Vec<(u64, String)> =
             s.values_hints("/r/charts/shop/values.yaml").into_iter().map(|h| (h.line, h.text)).collect();
-        assert_eq!(said[1], (0, "→ 3 · kubectl".to_string()), "only where it isn't the value: one release");
+        assert_eq!(said[1], (0, "→ 3 · release values".to_string()), "only where it isn't the value; whose: its values'");
         // (on its first line with which releases: one hint, both said)
         let out = s.show();
         let first = out.iter().find_map(|a| match a {
             Action::Hints(h) if h.path.ends_with("values.yaml") => h.hints.first().map(|h| h.text.clone()),
             _ => None,
         });
-        assert_eq!(first.as_deref(), Some("releases shop-a (ns a), shop-b (ns b)  ·  → 3 · kubectl"));
+        assert_eq!(first.as_deref(), Some("releases shop-a (ns a), shop-b (ns b)  ·  → 3 · release values"));
         s.streams.values_mut().filter(|st| st.what.ns.as_deref() == Some("a")).for_each(|st| {
             st.objects.insert("shop-a".into(), live("shop-a", "a", 2, "helm"));
         });
         let said: Vec<String> = s.values_hints("/r/charts/shop/values.yaml").into_iter().map(|h| h.text).collect();
-        assert_eq!(said[1], "→ 2 · helm (shop-a), 3 · kubectl (shop-b)", "two: whose each is");
+        assert_eq!(said[1], "→ 2 · helm (shop-a), 3 · release values (shop-b)", "two: whose each is");
+        // A chart's file saved: rendered again, and what it was given asked again
+        s.chart_saved("/r/charts/shop/values.yaml");
+        assert!(s.renders.is_empty() && s.release_values.is_empty());
+        // Not known (no access to the release's Secret): rendered with the chart's own, and said so
+        s.render();
+        let n = s.render_keys.iter().position(|(_, r)| r.name == "shop-a").unwrap();
+        let out = s.values_got(n, Some(1), &["Error: secrets is forbidden".into()]);
+        let args = out.iter().find_map(|a| if let Action::Spawn(sp) = a { Some(sp.args.clone()) } else { None }).unwrap();
+        assert!(!args.contains(&"--values".to_string()), "{args:?}");
+        assert_eq!(
+            s.release_values.values().find(|g| matches!(g, Given::Unknown(_))),
+            Some(&Given::Unknown("helm get values: Error: secrets is forbidden".into()))
+        );
     }
 
     #[test]

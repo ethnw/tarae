@@ -1278,6 +1278,9 @@ mod tests {
         ed.plugin_run("keep", "").unwrap();
         until_said(&mut ed, "written 51 ");
         assert_eq!(std::fs::read_to_string(dir.join("own/demo/notes/a.txt")).unwrap(), "hello");
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(dir.join("own/demo/notes/a.txt")).unwrap().permissions().mode();
+        assert_eq!(mode & 0o077, 0, "the plugin's alone: {mode:o}");
         // A tool there already: installed at once; one no pack knows: said so
         ed.plugin_run("install", "sh").unwrap();
         until_said(&mut ed, "installed 52");

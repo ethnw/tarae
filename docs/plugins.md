@@ -180,7 +180,7 @@ Requests are actions, and what they bring comes back later to `on-events(events,
 | `connect`, then `send` | `connected`, then `data` as it comes (up to 64 KB at a time), `closed` at the end |
 | `read-file`, `read-env` | `file` (its bytes), `env` (its value, or none) |
 | `find` (id, pattern) | `found` (the project's files it matches) |
-| `write-own` (id, name, bytes) | `written` (where): a file in the plugin's own folder (in tarae's state folder — nowhere else; no permission, up to 1 MB) |
+| `write-own` (id, name, bytes) | `written` (where): a file in the plugin's own folder (in tarae's state folder — nowhere else; no permission, up to 1 MB), readable by you alone |
 | `offer-install` (id, tool) | `installed` once you've installed it from the card (a tool a language pack knows how to install; once a session), or `failed` |
 | `timer` (id, ms) | `tick` |
 | `stop` (id) | nothing more: the program is stopped, the connection closed, the timer dropped |
@@ -285,11 +285,15 @@ Helm's own charts put on what they install — `helm.sh/chart: <chart>-<version>
 Argo CD installed it. Each object the render puts out says its template (`# Source:`), so a template's k-th
 document of a kind is the render's k-th object of that kind from it: `kind: Deployment  1/1 ready (via shop-helm)`.
 A line a template writes shows what it made (`replicas: {{ .Values.replicaCount }}  = 2`; in a `range`, every
-item's); a line written out is compared as in any manifest. It renders with the chart's own values (a release's
-are in its Secret, which it doesn't read), so a document they leave out says so, and a hook says it's one. A
+item's); a line written out is compared as in any manifest. Each release renders with the values it was given
+(`helm get values` — helm reads them from the release's Secret, with your kubeconfig; the plugin itself reads no
+Secret's values): written to a file of the plugin's own for `helm template --values`, which is emptied once it's
+rendered. Without read access to them it renders with the chart's own, and says so where a document isn't
+rendered. A document its values leave out says so, and a hook says it's one. A
 chart's `values.yaml` says which releases of it there are, and beside a value a template writes as it is
 (`replicas: {{ .Values.replicaCount }}`, quoted or piped through `quote`, `int` and the like) what each release
-has there where it isn't the value, and who set it: `replicaCount: 1  → 2 · kubectl`. A value written with others
+has there where it isn't the value, and who set it: `→ 2 · release values` when the release was given it,
+`replicaCount: 1  → 3 · kubectl` when someone changed it since. A value written with others
 (`"{{ .Values.image.repository }}:{{ .Values.image.tag }}"`), defaulted or worked out isn't said — whose it is
 can't be told. The chart's templates are found and read for it, open or not. Saving a chart's file renders again. No helm: it says
 so, and offers to install it.

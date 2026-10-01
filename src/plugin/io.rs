@@ -751,10 +751,13 @@ impl Editor {
             (_, _, false) => HostEvent::Failed(id, "over 1 MB".into()),
             (Some(own), true, true) => {
                 let path = own.join(plugin).join(name);
+                // (the plugin's alone: what it keeps there may be its secrets — a release's values, say)
+                use std::os::unix::fs::PermissionsExt;
                 let wrote = path
                     .parent()
                     .map_or(Ok(()), std::fs::create_dir_all)
-                    .and_then(|()| std::fs::write(&path, bytes));
+                    .and_then(|()| std::fs::write(&path, bytes))
+                    .and_then(|()| std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)));
                 match wrote {
                     Ok(()) => HostEvent::Written(id, path.display().to_string()),
                     Err(e) => HostEvent::Failed(id, format!("{}: {e}", path.display())),
