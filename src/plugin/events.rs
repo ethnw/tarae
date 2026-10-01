@@ -76,6 +76,31 @@ impl Events {
     }
 }
 
+/// A plugin's subscriptions, into `subs`: one entry a (plugin, event) — one subscribed more than once (for
+/// other languages) is about the languages of them all.
+pub(super) fn subscribe(
+    subs: &mut Vec<(String, Event, Vec<String>)>,
+    plugin: &str,
+    subscriptions: Vec<super::abi::Subscription>,
+) {
+    for s in subscriptions {
+        match subs.iter_mut().find(|(q, e, _)| q == plugin && *e == s.event) {
+            Some((.., langs)) => *langs = either(langs, &s.languages),
+            None => subs.push((plugin.to_string(), s.event, s.languages)),
+        }
+    }
+}
+
+/// The languages two subscriptions to one event are about together (none: every buffer).
+fn either(a: &[String], b: &[String]) -> Vec<String> {
+    if a.is_empty() || b.is_empty() {
+        return Vec::new();
+    }
+    let mut out = a.to_vec();
+    out.extend(b.iter().filter(|l| !a.contains(l)).cloned());
+    out
+}
+
 impl Editor {
     /// The plugins that want `e` about buffer `doc` (its language one they asked for, if they did).
     fn subscribers(&self, e: Event, doc: DocId) -> VecDeque<String> {
@@ -316,5 +341,35 @@ impl Editor {
         let Some(p) = &self.plugins else { return Vec::new() };
         let doc = self.doc().id;
         p.status.iter().filter(|((_, d), _)| *d == doc).map(|(_, text)| text.as_str()).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::abi::{Event, Subscription};
+
+    #[test]
+    fn an_event_subscribed_twice_is_about_the_languages_of_both() {
+        let v = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let sub = |event, langs: &[&str]| Subscription { event, text: false, languages: v(langs) };
+        let mut subs = Vec::new();
+        super::subscribe(
+            &mut subs,
+            "k",
+            vec![
+                sub(Event::Shown, &["yaml"]),
+                sub(Event::Opened, &["yaml"]),
+                sub(Event::Shown, &["markdown", "yaml"]),
+            ],
+        );
+        assert_eq!(
+            subs,
+            [
+                ("k".to_string(), Event::Shown, v(&["yaml", "markdown"])),
+                ("k".to_string(), Event::Opened, v(&["yaml"]))
+            ]
+        );
+        super::subscribe(&mut subs, "k", vec![sub(Event::Opened, &[])]);
+        assert!(subs[1].2.is_empty(), "and every buffer, every buffer");
     }
 }

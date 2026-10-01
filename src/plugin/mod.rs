@@ -250,11 +250,7 @@ impl Editor {
                 p.outbox.insert(plugin.clone(), io::Outbox::new(generation));
                 p.asked.remove(&plugin);
                 p.permissions.insert(plugin.clone(), permissions.clone());
-                for s in subscriptions {
-                    if !p.events.subs.iter().any(|(q, e, _)| *q == plugin && *e == s.event) {
-                        p.events.subs.push((plugin.clone(), s.event, s.languages));
-                    }
-                }
+                events::subscribe(&mut p.events.subs, &plugin, subscriptions);
                 p.events.subs.sort_by(|a, b| a.0.cmp(&b.0));
                 let mut taken: std::collections::HashSet<String> =
                     p.commands.iter().map(|c| c.name.clone()).collect();
@@ -848,6 +844,21 @@ mod tests {
         ed.cycle_buffer(-1);
         ed.handle_event(crate::event::Event::Resize);
         settle_until(&mut ed, |ed| shown(ed) == ["a.front", "b.front", "a.front"]);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// An event subscribed to twice — every buffer, and Markdown with its text — gives the text only for
+    /// Markdown.
+    #[test]
+    fn an_event_s_text_is_for_the_languages_that_asked() {
+        let (mut ed, dir) = setup("shown-text", "x\n");
+        let (md, txt) = (dir.join("a.text.md"), dir.join("b.text.log"));
+        std::fs::write(&md, "# a\n").unwrap();
+        std::fs::write(&txt, "b\n").unwrap();
+        ed.open(&md).unwrap();
+        until_said(&mut ed, "shown with text: true");
+        ed.open(&txt).unwrap();
+        until_said(&mut ed, "shown with text: false");
         std::fs::remove_dir_all(dir).ok();
     }
 

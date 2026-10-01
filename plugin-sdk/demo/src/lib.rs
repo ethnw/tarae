@@ -233,6 +233,8 @@ impl Guest for Demo {
             sub(Event::Changed, true),
             sub(Event::BeforeSave, true),
             sub(Event::Shown, false),
+            // (and the text of Markdown ones: an event subscribed twice, for different languages)
+            Subscription { event: Event::Shown, text: true, languages: vec!["markdown".into()] },
         ]
     }
 
@@ -314,6 +316,9 @@ impl Guest for Demo {
             Event::BeforeSave => Vec::new(),
             // In front again: said for `.front` files (others' tests keep their messages)
             // (with the time: each its own message, so a test can count them)
+            Event::Shown if name.contains(".text.") => {
+                vec![Action::Status(format!("shown with text: {} {}", cx.buffer.text.is_some(), cx.now.millis))]
+            }
             Event::Shown if name.ends_with(".front") => {
                 vec![Action::Status(format!("shown {name} {}", cx.now.millis))]
             }

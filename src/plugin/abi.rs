@@ -1079,7 +1079,7 @@ pub(super) mod tests {
         for jit in [true, false] {
             let mut p = demo(jit);
             let subs = p.subscriptions(FUEL).unwrap();
-            assert_eq!(subs.len(), 6);
+            assert_eq!(subs.len(), 7);
             assert!(subs.contains(&Subscription { event: Event::Changed, text: true, languages: vec![] }));
             assert!(
                 subs.contains(&Subscription { event: Event::Shown, text: false, languages: vec![] }),

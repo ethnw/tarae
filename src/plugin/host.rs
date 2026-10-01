@@ -176,11 +176,17 @@ struct Loaded {
 }
 
 impl Loaded {
-    /// Whether `call` gets the buffer's text.
-    fn with_text(&self, call: &Call) -> bool {
+    /// Whether `call` gets the buffer's text — for an event, as the subscription for the buffer's language
+    /// says (one plugin can want the text of its own files only).
+    fn with_text(&self, call: &Call, language: Option<&str>) -> bool {
         match call {
             Call::Command(name) => self.manifest.commands.iter().any(|c| &c.name == name && c.text),
-            Call::Event(e) => self.manifest.subscriptions.iter().any(|s| s.event == *e && s.text),
+            Call::Event(e) => self.manifest.subscriptions.iter().any(|s| {
+                s.event == *e
+                    && s.text
+                    && (s.languages.is_empty()
+                        || language.is_some_and(|l| s.languages.iter().any(|x| x == l)))
+            }),
             Call::Events(..) => false,
         }
     }
@@ -253,8 +259,12 @@ fn worker(rx: std::sync::mpsc::Receiver<Req>, notify: impl Fn(Note)) {
                 let result = p.and_then(|mut p| {
                     let fuel = budget(&p);
                     let r = match &call {
-                        Call::Command(name) => p.run(name, &input.context(l.with_text(&call)), fuel),
-                        Call::Event(e) => p.on(*e, &input.context(l.with_text(&call)), fuel),
+                        Call::Command(name) => {
+                            p.run(name, &input.context(l.with_text(&call, input.language.as_deref())), fuel)
+                        }
+                        Call::Event(e) => {
+                            p.on(*e, &input.context(l.with_text(&call, input.language.as_deref())), fuel)
+                        }
                         Call::Events(_, events) => p.on_events(events, &Now::fresh(), fuel),
                     };
                     if r.is_ok() {
