@@ -4100,7 +4100,7 @@ fn preview_lines<'a>(
             match p.previews.get(&action.preview_key()?)? {
                 crate::picker::Preview::Loading => return Some(PreviewView::Note("loading…".into())),
                 crate::picker::Preview::Unavailable(why) => return Some(PreviewView::Note(why.to_string())),
-                crate::picker::Preview::Ready { text, syntax } => (text, syntax.as_ref(), focus),
+                crate::picker::Preview::Ready { text, syntax } => (text, syntax.as_deref(), focus),
             }
         }
     };
