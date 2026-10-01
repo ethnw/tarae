@@ -221,6 +221,7 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 
 | Key | Command | Description |
 |---|---|---|
+| `C-w e` | `focus_side_panel` | To the side panel and back |
 | `C-w h` | `jump_view_left` | Window to the left |
 | `C-w j` | `jump_view_down` | Window below |
 | `C-w k` | `jump_view_up` | Window above |
@@ -315,6 +316,7 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 
 | Key | Command | Description |
 |---|---|---|
+| `space w e` | `focus_side_panel` | To the side panel and back |
 | `space w h` | `jump_view_left` | Window to the left |
 | `space w j` | `jump_view_down` | Window below |
 | `space w k` | `jump_view_up` | Window above |

@@ -133,7 +133,8 @@ configs carry over as they are.
   needed), `space q` the list below, `space g` git. Left alone it follows you: the current file with its folders
   opened, or the definition around the cursor. With the keys in it, `j`/`k` move, `h`/`l` fold and unfold, Enter
   opens (the code gets the keys back), Tab steps files → outline → list → git, Esc leaves it showing, `q` or the same key again closes it; `space` and `:` still
-  work. Folders you scroll past stay pinned at its top. A name too long for it loses its middle, not its end
+  work. `C-w e` goes to it from whichever window you're in, whatever tab it shows (closed, it opens at the tab it
+  last showed), and back again; `C-w h`/`j`/`k`/`l` stay between the code's windows. Folders you scroll past stay pinned at its top. A name too long for it loses its middle, not its end
   (`user_prof…model.ts`), and the selected one shows whole, over the code. A wide terminal makes it wider (up to
   12 columns, the code keeping 100). A click opens a row, the wheel scrolls. It folds away
   when the terminal leaves the code fewer than 80 columns ([files](screenshots/ux-side-panel.png) ·

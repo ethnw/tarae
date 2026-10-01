@@ -325,6 +325,8 @@ pub struct Editor {
     pub review_ask: bool,
     /// The side panel — files or outline (`sidebar.rs`).
     pub sidebar: Option<crate::sidebar::Sidebar>,
+    /// The tab it last showed (`C-w e` opens it again).
+    pub side_last: crate::sidebar::Mode,
     /// Debug session · breakpoints (kept without a session) · session generation (drops late messages).
     pub dap: Option<crate::dap::Dap>,
     pub breakpoints: crate::dap::Breakpoints,
@@ -487,6 +489,7 @@ impl Editor {
             code_review: None,
             review_ask: false,
             sidebar: None,
+            side_last: crate::sidebar::Mode::Files,
             dap: None,
             breakpoints: Default::default(),
             agent: None,
@@ -816,10 +819,35 @@ impl Editor {
         self.focus_view(next);
     }
 
+    /// Between the code's windows only (`C-w e` is the side panel's way in and out).
     pub fn focus_dir(&mut self, dx: i32, dy: i32) {
         let panes: Vec<_> = self.screen.panes.iter().map(|(v, r, _, _)| (*v, *r)).collect();
         if let Some(v) = crate::split::neighbor(&panes, self.focus, dx, dy) {
             self.focus_view(v);
+        }
+    }
+
+    /// `C-w e`: to the side panel from wherever the keys are — or back to the code from it. A closed panel
+    /// opens at the tab it last showed.
+    pub fn side_toggle_focus(&mut self) {
+        match self.sidebar.as_mut() {
+            Some(s) if s.focus => s.focus = false,
+            Some(_) => self.side_focus(),
+            None => self.sidebar_show(self.side_last),
+        }
+    }
+
+    /// The keys to the open side panel, its row the one for where the code is.
+    fn side_focus(&mut self) {
+        if let Some(c) = self.chat.as_mut() {
+            c.focused = false;
+        }
+        let Some(s) = self.sidebar.as_mut() else { return };
+        s.focus = true;
+        self.sidebar_sync();
+        let here = self.sidebar.as_ref().and_then(|s| s.here(self));
+        if let (Some(s), Some(h)) = (self.sidebar.as_mut(), here) {
+            s.selected = h;
         }
     }
 
@@ -4616,6 +4644,28 @@ mod tests {
         assert!(!ed.should_quit);
         feed(&mut ed, "<C-w>s<C-w>o");
         assert_eq!(ed.views.len(), 1, "only this pane");
+    }
+
+    /// `C-w e` takes the keys to the side panel and back from wherever they are; a closed panel opens at the
+    /// tab it last showed. `C-w h/j/k/l` are the code's windows' — in the panel they leave it be.
+    #[test]
+    fn c_w_e_to_the_side_panel_and_back() {
+        use crate::sidebar::Mode;
+        let mut ed = editor("x\n");
+        feed(&mut ed, "<C-w>v");
+        let focus = |ed: &Editor| ed.sidebar.as_ref().map(|s| (s.mode, s.focus));
+        feed(&mut ed, "<C-w>e");
+        assert_eq!(focus(&ed), Some((Mode::Files, true)), "closed: opens, at files the first time");
+        feed(&mut ed, "<C-w>e");
+        assert_eq!(focus(&ed), Some((Mode::Files, false)), "back to the code");
+        assert_eq!(ed.focus, 2, "the window it came from");
+        feed(&mut ed, " o");
+        feed(&mut ed, "<C-w>h");
+        assert_eq!(focus(&ed), Some((Mode::Outline, true)), "in the panel: a window move doesn't leave it");
+        feed(&mut ed, "q");
+        assert!(ed.sidebar.is_none());
+        feed(&mut ed, "<C-w>e");
+        assert_eq!(focus(&ed), Some((Mode::Outline, true)), "reopens at the tab it last showed");
     }
 
     #[test]

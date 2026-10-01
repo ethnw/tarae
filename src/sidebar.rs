@@ -548,6 +548,7 @@ fn ancestors(rel: &str) -> impl Iterator<Item = &str> {
 impl Editor {
     /// `space e` / `space o` — show the panel in `mode` and focus it; on it already, close it.
     pub fn sidebar_show(&mut self, mode: Mode) {
+        self.side_last = mode;
         // A review's rail holds the panel's place — `space e` gives it the keys
         if mode == Mode::Files && self.code_review.is_some() {
             return crate::codereview::rail_focus(self);
@@ -1058,8 +1059,8 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
     let before = ed.sidebar.as_ref().map(|s| s.selected);
     let Some(s) = ed.sidebar.as_mut() else { return false };
     match (key.code, key.ctrl) {
-        // Still the editor's: the space menu, the command line
-        (Code::Char(' ') | Code::Char(':'), false) => return false,
+        // Still the editor's: the space menu, the command line, the windows (`C-w e` back to the code)
+        (Code::Char(' ') | Code::Char(':'), false) | (Code::Char('w'), true) => return false,
         (Code::Char('j') | Code::Down, false) | (Code::Char('n'), true) => s.move_by(1, &lines),
         (Code::Char('k') | Code::Up, false) | (Code::Char('p'), true) => s.move_by(-1, &lines),
         (Code::Char('d'), true) | (Code::PageDown, _) => s.move_by(10, &lines),

@@ -233,6 +233,7 @@ commands! {
         hsplit => "Split the window top / bottom",
         rotate_view => "Next window",
         jump_view_left => "Window to the left",
+        focus_side_panel => "To the side panel and back",
         jump_view_right => "Window to the right",
         jump_view_up => "Window above",
         jump_view_down => "Window below",
@@ -2043,6 +2044,10 @@ fn hsplit(cx: &mut Context) {
 
 fn rotate_view(cx: &mut Context) {
     cx.editor.cycle_view(1);
+}
+
+fn focus_side_panel(cx: &mut Context) {
+    cx.editor.side_toggle_focus();
 }
 
 fn jump_view_left(cx: &mut Context) {
