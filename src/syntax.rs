@@ -200,6 +200,8 @@ pub struct LangData {
     pub textobjects: Option<Query>,
     /// Where other languages get injected (markdown code blocks·TODO in comments·macros …) — None if absent.
     pub injections: Option<Query>,
+    /// Whether `injections` combines pieces from all over (`combines`) — worked out once, when first asked.
+    combines: OnceLock<bool>,
     /// Scopes·definitions·references (`locals.scm`) — None if absent.
     locals: Option<Locals>,
     /// How new lines indent (`indents.scm`) — None if absent (a heuristic then).
@@ -283,6 +285,7 @@ impl Loader {
             highlights,
             textobjects,
             injections,
+            combines: OnceLock::new(),
             locals,
             indents,
             not_local,
@@ -495,15 +498,18 @@ pub struct Syntax {
     highlighted: std::cell::RefCell<Vec<(std::ops::Range<usize>, Spans)>>,
     /// Where `layers` has the injected languages: only around what was shown (`None`: everywhere) — the
     /// injection query and the layers' parsing cost what's on screen, not the file's size.
-    pub covered: Option<Vec<std::ops::Range<usize>>>,
-    /// What `highlights` was asked for since the last parse started — the next one injects there.
+    covered: Option<Vec<std::ops::Range<usize>>>,
+    /// What `highlights` was asked for since the last parse started.
     asked: std::cell::RefCell<Vec<std::ops::Range<usize>>>,
+    /// The last few places shown (`RECENT`, latest last) — a parse injects around all of them, so going
+    /// back and forth between two keeps both colored.
+    recent: Vec<std::ops::Range<usize>>,
     /// Something was asked for outside `covered`: parse again (for the injections), though nothing changed.
     wants: std::cell::Cell<bool>,
     /// Time a parse may spend on injected layers (`INJECT_BUDGET`).
-    pub inject_budget: std::time::Duration,
+    inject_budget: std::time::Duration,
     /// Lines injected above and below what's shown (`NEAR_LINES`).
-    pub near_lines: usize,
+    near_lines: usize,
 }
 
 impl Syntax {
@@ -520,6 +526,7 @@ impl Syntax {
             highlighted: Default::default(),
             covered: Some(Vec::new()),
             asked: Default::default(),
+            recent: Vec::new(),
             wants: std::cell::Cell::new(false),
             inject_budget: INJECT_BUDGET,
             near_lines: NEAR_LINES,
@@ -553,6 +560,14 @@ impl Syntax {
         if self.in_flight {
             self.pending_edits.extend_from_slice(edits);
         }
+        // Places shown move along with the text
+        for e in edits {
+            for r in
+                self.recent.iter_mut().chain(self.asked.get_mut()).chain(self.covered.iter_mut().flatten())
+            {
+                *r = moved(r.clone(), e);
+            }
+        }
         self.dirty = true;
         self.highlighted.get_mut().clear();
     }
@@ -580,7 +595,9 @@ impl Syntax {
     /// Where the buffer is likely shown, before a frame says (it's opened, or edited out of sight): the next
     /// parse injects there too, so a buffer's first colors come with its first tree.
     pub fn shown_near(&self, range: std::ops::Range<usize>) {
-        self.asked.borrow_mut().push(range);
+        if self.covered.is_some() {
+            self.asked.borrow_mut().push(range);
+        }
     }
 
     /// Whether a parse should run though no edit came: something shown needs injections not made yet.
@@ -594,11 +611,14 @@ impl Syntax {
         self.dirty = false;
         self.pending_edits.clear();
         self.wants.set(false);
-        // Where to inject: what was shown since the last parse — or, if nothing was (a buffer not in sight),
-        // where the last one did
-        let asked = std::mem::take(self.asked.get_mut());
-        let near =
-            self.covered.as_ref().map(|covered| if asked.is_empty() { covered.clone() } else { asked });
+        // Where to inject: around the last few places shown, what was shown since the last parse latest
+        for r in std::mem::take(self.asked.get_mut()) {
+            self.recent.retain(|x| x.end < r.start || r.end < x.start);
+            self.recent.push(r);
+        }
+        let over = self.recent.len().saturating_sub(RECENT);
+        self.recent.drain(..over);
+        let near = self.covered.as_ref().map(|_| self.recent.clone());
         ParseJob {
             text: text.clone(),
             old: self.tree.clone(),
@@ -622,6 +642,10 @@ impl Syntax {
             let mut layers = parsed.layers;
             if self.covered.is_some() {
                 self.covered = parsed.covered;
+                // What was shown while it ran may be covered now
+                let covered = self.covered.as_deref().unwrap_or_default();
+                let outside = self.asked.get_mut().iter().any(|r| !within(covered, r));
+                self.wants.set(outside);
             }
             for e in self.pending_edits.drain(..) {
                 tree.edit(&e);
@@ -771,6 +795,29 @@ fn combines(q: &Query) -> bool {
     })
 }
 
+/// Places shown kept for injecting around (`Syntax::recent`) — a window or two, and a place gone back to.
+const RECENT: usize = 4;
+
+/// Whether `r` lies within one of `ranges`.
+fn within(ranges: &[std::ops::Range<usize>], r: &std::ops::Range<usize>) -> bool {
+    ranges.iter().any(|c| c.start <= r.start && r.end <= c.end)
+}
+
+/// A range moved along with an edit: shifted after it; a bound inside what it replaced goes to the
+/// replacement's start (the range's start) or end (its end).
+fn moved(r: std::ops::Range<usize>, e: &InputEdit) -> std::ops::Range<usize> {
+    let at = |b: usize, inside: usize| {
+        if b >= e.old_end_byte {
+            b - e.old_end_byte + e.new_end_byte
+        } else if b > e.start_byte {
+            inside
+        } else {
+            b
+        }
+    };
+    at(r.start, e.start_byte)..at(r.end, e.new_end_byte)
+}
+
 /// Whether byte range `r` meets one of `near` (sorted, merged) — touching counts.
 fn meets(near: &[std::ops::Range<usize>], start: usize, end: usize) -> bool {
     let from = near.partition_point(|c| c.end < start);
@@ -877,7 +924,7 @@ impl Injector<'_> {
         // Around what's shown, the query asks only there (a pass per range; a match reaching into two comes
         // twice, and the second one's spot is already taken) — unless the language combines what it injects:
         // those pieces come from all over
-        let combines = combines(q);
+        let combines = *host.combines.get_or_init(|| combines(q));
         let everywhere = 0..usize::MAX;
         let passes = match self.near {
             Some(near) if !combines && !self.whole_query => near,
@@ -892,6 +939,16 @@ impl Injector<'_> {
             while let Some(m) = matches.next() {
                 let props = q.property_settings(m.pattern_index);
                 let prop = |k: &str| props.iter().find(|p| &*p.key == k);
+                // Far from what's shown: not worth the work (by the whole node — two patterns on one node
+                // take its pieces differently, and which wins the spot mustn't change)
+                if let Some(near) = self.near
+                    && prop("injection.combined").is_none()
+                    && !m.captures().iter().any(|c| {
+                        Some(c.index) == content_i && meets(near, c.node.start_byte(), c.node.end_byte())
+                    })
+                {
+                    continue;
+                }
                 let mut lang =
                     prop("injection.language").and_then(|p| p.value.as_deref().map(str::to_string));
                 let mut content = Vec::new();
@@ -1167,15 +1224,16 @@ pub fn highlights(
     cursor: &mut QueryCursor,
 ) -> Vec<(usize, usize, u32)> {
     const KEEP: usize = 4; // a few panes' worth
-    // What's shown is where the next parse injects; outside what's injected now, one is wanted
+    // What's shown is where the next parse injects; outside what's injected now, one is wanted (if the
+    // language injects anything)
+    if let Some(covered) = &syn.covered
+        && syn.lang.injections.is_some()
     {
         let mut asked = syn.asked.borrow_mut();
         if !asked.iter().any(|r| r.start <= range.start && range.end <= r.end) {
             asked.push(range.clone());
         }
-        if let Some(covered) = &syn.covered
-            && !covered.iter().any(|r| r.start <= range.start && range.end <= r.end)
-        {
+        if !within(covered, &range) {
             syn.wants.set(true);
         }
     }
@@ -1587,6 +1645,106 @@ mod tests {
             assert!(cut > 100, "layers left out for being away from what's shown: {cut} ({tested:?})");
         }
         eprintln!("tested in {tested:?}");
+    }
+
+    /// A Rust text with a comment on each of `lines` lines.
+    fn commented(lines: usize) -> Rope {
+        Rope::from_str(&(0..lines).map(|i| format!("let x{i} = {i}; // c{i}\n")).collect::<String>())
+    }
+
+    fn parse_now(syn: &mut Syntax, text: &Rope) {
+        let job = syn.start_parse(text);
+        let generation = job.generation;
+        syn.finish_parse(generation, job.run());
+    }
+
+    /// The lines with an injected comment layer.
+    fn comment_lines(syn: &Syntax, text: &Rope) -> Vec<usize> {
+        let comments = syn.layers.iter().filter(|l| l.lang.name == "comment");
+        comments.map(|l| text.byte_to_line(l.tree.root_node().start_byte())).collect()
+    }
+
+    /// A language with nothing to inject doesn't parse again for being scrolled.
+    #[test]
+    fn a_language_without_injections_never_wants_them() {
+        let Ok(comment) = Loader::global().load(spec("comment").unwrap()) else { return };
+        assert!(comment.injections.is_none());
+        let text = Rope::from_str(&"TODO: a note\n".repeat(1000));
+        let mut syn = Syntax::new(comment);
+        parse_now(&mut syn, &text);
+        highlights(&syn, &text, text.line_to_byte(900)..text.line_to_byte(920), &mut QueryCursor::new());
+        assert!(!syn.wants_injections());
+    }
+
+    /// Shown again while the parse for it ran: once it lands, nothing more is wanted.
+    #[test]
+    fn what_the_landing_parse_covers_isnt_wanted_again() {
+        let Ok(rust) = Loader::global().load(spec("rust").unwrap()) else { return };
+        let text = commented(1000);
+        let mut syn = Syntax::new(rust);
+        syn.near_lines = 0;
+        let shown = text.line_to_byte(500)..text.line_to_byte(520);
+        highlights(&syn, &text, shown.clone(), &mut QueryCursor::new());
+        let job = syn.start_parse(&text);
+        let generation = job.generation;
+        let parsed = job.run();
+        highlights(&syn, &text, shown.clone(), &mut QueryCursor::new());
+        assert!(syn.wants_injections(), "not covered yet");
+        syn.finish_parse(generation, parsed);
+        assert!(!syn.wants_injections(), "it is now");
+        let lines = comment_lines(&syn, &text);
+        assert!((500..520).all(|l| lines.contains(&l)), "{lines:?}");
+    }
+
+    /// A syntax made whole (a preview) keeps no list of what it was asked for.
+    #[test]
+    fn a_whole_syntax_keeps_nothing_of_what_was_shown() {
+        let Ok(rust) = Loader::global().load(spec("rust").unwrap()) else { return };
+        let text = commented(200);
+        let syn = Syntax::parsed(rust, &text);
+        for i in 0..100 {
+            highlights(&syn, &text, text.line_to_byte(i)..text.line_to_byte(i + 20), &mut QueryCursor::new());
+        }
+        assert!(syn.asked.borrow().is_empty());
+        assert!(!syn.wants_injections());
+    }
+
+    /// Going back and forth between two places keeps both injected (no parse, no frame without their
+    /// colors); parses with nothing new shown don't spread; places move along with edits above them.
+    #[test]
+    fn recent_places_stay_injected() {
+        let Ok(rust) = Loader::global().load(spec("rust").unwrap()) else { return };
+        let mut text = commented(2000);
+        let mut syn = Syntax::new(rust);
+        syn.near_lines = 0;
+        let at = |text: &Rope, line: usize| text.line_to_byte(line)..text.line_to_byte(line + 10);
+        for line in [100, 1500] {
+            highlights(&syn, &text, at(&text, line), &mut QueryCursor::new());
+            parse_now(&mut syn, &text);
+        }
+        highlights(&syn, &text, at(&text, 100), &mut QueryCursor::new());
+        assert!(!syn.wants_injections(), "the first place is still injected");
+        let lines = comment_lines(&syn, &text);
+        assert!(lines.contains(&100) && lines.contains(&1500), "{lines:?}");
+        let covered = syn.covered.clone();
+        parse_now(&mut syn, &text);
+        parse_now(&mut syn, &text);
+        assert_eq!(syn.covered, covered, "no wider for parses with nothing new shown");
+        // The same place shown again and again takes one of the places kept, not all
+        for _ in 0..RECENT {
+            highlights(&syn, &text, at(&text, 100), &mut QueryCursor::new());
+            parse_now(&mut syn, &text);
+        }
+        highlights(&syn, &text, at(&text, 1500), &mut QueryCursor::new());
+        assert!(!syn.wants_injections(), "the other place is still kept");
+        // 300 lines pasted at the top: the places move down with their text
+        let paste = crate::transaction::Change::insert(0, commented(300).to_string());
+        let edits = crate::transaction::Transaction::new(vec![paste]).apply(&mut text, false);
+        syn.edit(&edits.iter().map(|e| e.ts).collect::<Vec<_>>());
+        parse_now(&mut syn, &text);
+        highlights(&syn, &text, at(&text, 1800), &mut QueryCursor::new());
+        assert!(!syn.wants_injections(), "the place moved along");
+        assert!(comment_lines(&syn, &text).contains(&1800));
     }
 
     /// Around what's shown: whole lines, so many more each way, merged; and a layer touching it meets it.

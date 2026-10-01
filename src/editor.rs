@@ -2686,7 +2686,8 @@ mod tests {
     }
 
     /// Injected languages are made where the buffer is shown, not all over: a markdown file's code block at
-    /// the top is colored as Rust from its first parse, one a thousand lines down only once it's scrolled to.
+    /// the top is colored as Rust from its first parse, one a thousand lines down only once it's scrolled to
+    /// (the top one stays — going back is colored), one in between never.
     #[test]
     fn injected_languages_are_made_where_the_view_is() {
         if crate::syntax::Loader::global().load(crate::syntax::spec("rust").unwrap()).is_err() {
@@ -2695,12 +2696,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("tarae-near-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("notes.md");
-        let filler = "Some text.\n\n".repeat(500);
-        std::fs::write(
-            &path,
-            format!("# Top\n\n```rust\nfn top() {{}}\n```\n\n{filler}```rust\nfn bottom() {{}}\n```\n"),
-        )
-        .unwrap();
+        let filler = "Some text.\n\n".repeat(250);
+        let block = |name: &str| format!("```rust\nfn {name}() {{}}\n```\n\n");
+        let text = format!("# Top\n\n{}{filler}{}{filler}{}", block("top"), block("middle"), block("bottom"));
+        std::fs::write(&path, text).unwrap();
         let mut ed = editor("");
         ed.open(&path).unwrap();
         let parsed = |ed: &Editor| {
@@ -2715,13 +2714,12 @@ mod tests {
             rust.map(|l| text.byte_to_line(l.tree.root_node().start_byte())).collect()
         };
         assert_eq!(rust_at(&ed), [3], "the block in view, with the first tree");
-        ed.goto_line(1004);
+        ed.goto_line(1008);
         crate::term::render(&mut ed, &mut Vec::new(), 100, 30).unwrap();
         // The frame itself started it — no event has to come first
         assert!(ed.doc().syntax.as_ref().unwrap().in_flight, "a parse for what the frame showed");
-        settle_until(&mut ed, |ed| parsed(ed) && rust_at(ed).len() > 1 || rust_at(ed) == [1007]);
-        assert!(rust_at(&ed).contains(&1007), "the one scrolled to: {:?}", rust_at(&ed));
-        assert!(!rust_at(&ed).contains(&3), "not the one far out of view anymore");
+        settle_until(&mut ed, |ed| parsed(ed) && rust_at(ed).contains(&1011));
+        assert_eq!(rust_at(&ed), [3, 1011], "the one scrolled to and the one before, not the one in between");
         std::fs::remove_dir_all(&dir).ok();
     }
 
