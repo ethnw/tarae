@@ -1,13 +1,13 @@
 # follow_offer_run · 100x30 · theme meok · cursor 1:4
 ## text
 00  tarae  ›  src  ›  demo.rs
-01   1 use std::collections::HashMap;                             ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-02   1                                                              claude › follow              ▂▅▆
-03   2 ▎ Counts how often each word appears.                        ▎ commit it
-04     ▎                                                            ◦ thinking…
-05     ▎ Words are split on whitespace; case is kept.               space l open the chat
-06   5 pub fn word_counts(text: &str) -> HashMap<&str, usize> {   ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
-07   6     let mut counts = HashMap::new();
+01   1 use std::collections::HashMap;                           ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+02   1                                                            claude › follow               0.0s
+03   2 ▎ Counts how often each word appears.                      ▎ commit it
+04     ▎                                                          ▂▅▆ thinking
+05     ▎ Words are split on whitespace; case is kept.
+06   5 pub fn word_counts(text: &str) -> HashMap<&str, usize> {   space l open the chat
+07   6     let mut counts = HashMap::new();                     ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
 08   7     for word in text.split_whitespace() {
 09   8     │   *counts.entry(word).or_insert(0) += 1;
 10   9     }
@@ -32,12 +32,12 @@
 29
 ## bg · surface per cell, blank = ui.background
 00
-01     Acccccccccccccccccccccccccccccccccccccccccccccccccccccccccc                                    c
-02                                                                pppppppppppppppppppppppppppppppppppp
-03     11111111111111111111111111111111111111111111111111111111111pppppppppppppppppppppppppppppppppppp1
-04     11111111111111111111111111111111111111111111111111111111111pppppppppppppppppppppppppppppppppppp1
-05     11111111111111111111111111111111111111111111111111111111111pppppppppppppppppppppppppppppppppppp1
-06
+01     Acccccccccccccccccccccccccccccccccccccccccccccccccccccccc                                      c
+02                                                              pppppppppppppppppppppppppppppppppppppp
+03     111111111111111111111111111111111111111111111111111111111pppppppppppppppppppppppppppppppppppppp1
+04     111111111111111111111111111111111111111111111111111111111pppppppppppppppppppppppppppppppppppppp1
+05     111111111111111111111111111111111111111111111111111111111pppppppppppppppppppppppppppppppppppppp1
+06                                                              pppppppppppppppppppppppppppppppppppppp
 07
 08
 09
@@ -64,11 +64,11 @@
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00  ddddd  f  ddd  f  TTTTTTT
 01   A
-02   f                                                              dddddd a aaaaaa              aaa
-03   f                                                              a TTTTTT TT
-04                                                                  f fffffffff
-05                                                                  DDDDD D ffff fff ffff
-06   f
+02   f                                                            dddddd a aaaaaa               ffff
+03   f                                                            a TTTTTT TT
+04                                                                aaa DDDDDDDD
+05
+06   f                                                            DDDDD D ffff fff ffff
 07   f
 08   f
 09   f

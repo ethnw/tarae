@@ -17,8 +17,9 @@
 //!   the card but is never opened, nor put in the list.
 //! - The user wins: moving the cursor or switching files in the editor pauses following until `C-f` or
 //!   the next question. `C-o` goes back to where you were before the turn (one jump point per turn).
-//! - The card (drawn by `term::draw_thought_card`) shows what Claude is doing and its latest words —
-//!   the thinking summary (`--thinking-display summarized`) or what it says between lookups.
+//! - The card (drawn by `term::draw_follow_card`, one card in one place — the bottom right of the code)
+//!   shows what Claude is doing and its latest words — the thinking summary (`--thinking-display
+//!   summarized`) or what it says between lookups; while the panel is minimized, the question and keys too.
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};

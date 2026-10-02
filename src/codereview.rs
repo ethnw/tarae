@@ -242,10 +242,13 @@ pub fn start(ed: &mut Editor, branch: Option<String>) {
 
 /// `start` for the repository around `cwd`.
 pub fn start_in(ed: &mut Editor, cwd: PathBuf, branch: Option<String>) {
-    ed.set_status(match &branch {
-        Some(b) => format!("review: gathering changes since {b}…"),
-        None => "review: gathering changes…".into(),
-    });
+    ed.set_step(
+        "review",
+        match &branch {
+            Some(b) => format!("review: gathering changes since {b}…"),
+            None => "review: gathering changes…".into(),
+        },
+    );
     ed.events.jobs().spawn(move || {
         let found = (|| -> Result<(PathBuf, Base, Vec<File>), String> {
             let root = PathBuf::from(git(&cwd, &["rev-parse", "--show-toplevel"])?.trim());
@@ -269,9 +272,12 @@ pub fn start_in(ed: &mut Editor, cwd: PathBuf, branch: Option<String>) {
             let files = changed(&root, &base)?;
             Ok((root, base, files))
         })();
-        move |ed: &mut Editor| match found {
-            Err(e) => ed.set_error(format!("review: {e}")),
-            Ok((root, base, files)) => open(ed, root, base, files),
+        move |ed: &mut Editor| {
+            ed.step_done("review");
+            match found {
+                Err(e) => ed.set_error(format!("review: {e}")),
+                Ok((root, base, files)) => open(ed, root, base, files),
+            }
         }
     });
 }
@@ -397,7 +403,7 @@ fn claude_reviews(ed: &mut Editor) {
         _ => Vec::new(),
     };
     let n = r.files.len();
-    ed.set_status("Claude is reading the changes…");
+    ed.set_step("review-ask", "Claude is reading the changes…");
     ed.events.jobs().spawn(move || {
         let mut diff = match &rev {
             Some(rev) => diff_text(&root, rev),
@@ -425,6 +431,8 @@ fn claude_reviews(ed: &mut Editor) {
             diff.push_str(&format!("\n… ({more} more bytes — read those files yourself)\n"));
         }
         move |ed: &mut Editor| {
+            // (from here the chat says how Claude is getting on)
+            ed.step_done("review-ask");
             let about = format!("<changes of=\"{label}\">\n<diff>\n{diff}</diff>\n</changes>");
             let chip = format!("Claude reviews · {n} file{}", if n == 1 { "" } else { "s" });
             if ed.chat.is_none() {

@@ -936,15 +936,65 @@ fn the_thought_card_keeps_the_turns_thinking() {
         .collect();
     let all = card.join("\n");
     let at = |needle: &str| all.find(needle).unwrap_or_else(|| panic!("{needle:?} in {card:#?}"));
-    assert!(
-        at("so I read the picker") < at("Let me check") && at("Let me check") < at("I should"),
-        "{card:#?}"
-    );
+    assert!(at("read the picker") < at("Let me check") && at("Let me check") < at("I should"), "{card:#?}");
+}
+
+/// Follow mode is one card in one place (U4): the minimized chat and Claude's words are the same card, at the
+/// bottom right of the code — it stays there as Claude reads elsewhere, and goes to the top right only while
+/// the lines it reads run under it.
+#[test]
+fn follow_is_one_card_in_one_place() {
+    use crate::chat::{Look, Msg, Role};
+    let mut s = Shot::new(112, 30);
+    // Lines 18–25 long enough to reach the right edge; the rest short
+    let text: String = (1..=80)
+        .map(|i| match i {
+            18..=25 => format!("let line_{i} = \"{}\";\n", "x".repeat(90)),
+            _ => format!("let line_{i} = {i};\n"),
+        })
+        .collect();
+    s.file("src/demo.rs", &text);
+    let path = s.ed.doc().path.clone().unwrap();
+    s.ed.config.llm.command = "sh".into();
+    s.ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+    s.keys(" lwhere?<ret>");
+    let gaze = |s: &mut Shot, lines: std::ops::Range<usize>| {
+        let look = Look {
+            verb: "read",
+            what: "src/demo.rs".into(),
+            pattern: false,
+            range: format!("L{}–{}", lines.start + 1, lines.end),
+            link: None,
+        };
+        let c = s.ed.chat.as_mut().unwrap();
+        c.follow.on = true;
+        c.msgs.push(Msg::new(Role::Thought, "Reading where it starts.", ""));
+        c.follow.gaze = Some(crate::follow::Gaze {
+            look,
+            path: Some(path.clone()),
+            lines: Some(lines),
+            why: None,
+            step: None,
+        });
+        s.frame();
+        let card = s.ed.screen.thought_card.get().expect("the card shows");
+        assert_eq!(s.ed.screen.chat_mini.get(), Some(card), "the minimized chat is this card");
+        card
+    };
+    // (its corner — the card grows with the words, up from the bottom)
+    let corner = |r: (usize, usize, usize, usize)| (r.0 + r.2, r.1 + r.3);
+    let first = gaze(&mut s, 1..5);
+    let pane = s.ed.screen.panes[0].1;
+    assert_eq!(corner(first), (pane.x + pane.w - 1, pane.y + pane.h), "bottom right");
+    assert_eq!(corner(gaze(&mut s, 8..12)), corner(first), "Claude reads elsewhere: the card stays put");
+    // The lines read run under it: the top right, out of their way
+    let moved = gaze(&mut s, 17..25);
+    assert_eq!((moved.0, moved.1), (first.0, pane.y), "{moved:?}");
 }
 
 /// Crowded screens: with Claude at work in follow mode and a note under the cursor, the note card, the
-/// minimized chat, the thought card and a notification never overlap — at any size (a card with no room is
-/// skipped; a notification with no room goes into the status line).
+/// follow card and a notification never overlap — at any size (a card with no room is skipped; a
+/// notification with no room goes into the status line).
 #[test]
 fn floating_cards_never_overlap() {
     use crate::chat::{Look, Msg, Role};
@@ -998,15 +1048,12 @@ fn floating_cards_never_overlap() {
         });
         s.ed.set_status("Saved src/demo.rs · 80 lines");
         let bytes = s.frame();
-        let cards: Vec<_> = [
-            &s.ed.screen.note_card,
-            &s.ed.screen.chat_mini,
-            &s.ed.screen.thought_card,
-            &s.ed.screen.toast_card,
-        ]
-        .iter()
-        .filter_map(|c| c.get())
-        .collect();
+        // (the minimized chat and the thought card are one card — U4)
+        assert_eq!(s.ed.screen.chat_mini.get(), s.ed.screen.thought_card.get(), "{w}x{h}: one follow card");
+        let cards: Vec<_> = [&s.ed.screen.note_card, &s.ed.screen.thought_card, &s.ed.screen.toast_card]
+            .iter()
+            .filter_map(|c| c.get())
+            .collect();
         if s.ed.screen.toast_card.get().is_none() {
             let mut vt = vt100::Parser::new(h, w, 0);
             vt.process(&bytes);
@@ -1019,7 +1066,14 @@ fn floating_cards_never_overlap() {
         }
         assert!(s.ed.screen.note_card.get().is_some(), "{w}x{h}: the note card shows");
         if h >= 30 {
-            assert_eq!(cards.len(), 3, "{w}x{h}: all three fit");
+            assert_eq!(
+                cards.len(),
+                3,
+                "{w}x{h}: all three fit — note {:?} follow {:?} toast {:?}",
+                s.ed.screen.note_card.get(),
+                s.ed.screen.thought_card.get(),
+                s.ed.screen.toast_card.get()
+            );
         }
         for (i, a) in cards.iter().enumerate() {
             for b in &cards[i + 1..] {

@@ -649,7 +649,7 @@ impl Editor {
         build: impl FnOnce() -> Result<(Value, String), String> + Send + 'static,
     ) {
         self.dap = Some(Dap::placeholder(State::Building, label));
-        self.set_status("Building for debug…");
+        self.set_step("debug-build", "Building for debug…");
         let lang = lang.to_string();
         self.events.jobs().spawn(move || {
             // Adapter first — no point building if there's nothing to debug with
@@ -663,6 +663,8 @@ impl Editor {
 
     /// The adapter is up (or couldn't start) — begins the session if it's still the current one.
     fn dap_started(&mut self, id: &str, started: Result<(Started, Value, String), String>, generation: u64) {
+        // (built, or not: the debug panel says how it goes from here)
+        self.step_done("debug-build");
         if self.dap_generation != generation {
             if let Ok((s, ..)) = started {
                 reap(s.child);

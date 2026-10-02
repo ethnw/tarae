@@ -332,6 +332,12 @@ impl crate::editor::Editor {
             .is_some_and(|o| self.offer_view.get().is_some_and(|v| (v.0, v.1) == (o.id, o.rev)))
     }
 
+    /// The front card's whole text (`v`) is the buffer in sight: the card steps aside to a one-row bar under
+    /// it (U8 — whole it covered the right half of the very text it's about); back whole once you leave it.
+    pub fn offer_bar(&self) -> bool {
+        self.offer_viewing() && self.offer_view.get().is_some_and(|v| v.2 == self.doc().id)
+    }
+
     /// `v` on a card cut to fit — its whole text in a throwaway buffer (one per card title: an earlier one
     /// gives way), and the card stays to answer.
     pub fn offer_view_all(&mut self) {
@@ -351,7 +357,8 @@ impl crate::editor::Editor {
         let doc = self.open_virtual(&name, &text);
         // (seen whole once its last line has been on screen — `term::render_frame` looks)
         self.offer_view.set(Some((id, rev, doc)));
-        self.set_status("the card's whole text — G to its end, then y answers");
+        // (the card's bar under it says so — U8)
+        self.note("the card's whole text — G to its end, then y answers");
     }
 
     /// `a`: yes for the rest of this conversation — the no-sandbox card (Claude's commands run unprotected),

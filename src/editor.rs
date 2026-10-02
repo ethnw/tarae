@@ -122,7 +122,15 @@ pub struct Toast {
     pub at: std::time::Instant,
     /// How long it stays up: the time to read it (see `Toast::new`).
     pub life: std::time::Duration,
+    /// A step under way (`Editor::set_step`) — up until its end is said (`step_done`).
+    pub step: Option<&'static str>,
+    /// It has been on the notification card. An error or warning that hasn't (a picker over it, no free
+    /// corner) waits: its time doesn't run until it has been (U7, `Editor::toasts_drawn`).
+    pub shown: bool,
 }
+
+/// The longest a step's toast stays up without its end being said.
+const STEP_MAX: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Messages `:messages` keeps (and the most a card holds).
 const MESSAGES_KEPT: usize = 300;
@@ -149,7 +157,7 @@ impl Toast {
             ToastKind::Error => 60_000,
         };
         let life = std::time::Duration::from_millis(ms);
-        Toast { text, kind, at: std::time::Instant::now(), life }
+        Toast { text, kind, at: std::time::Instant::now(), life, step: None, shown: false }
     }
 
     pub fn alive(&self) -> bool {
@@ -202,6 +210,8 @@ pub struct Screen {
     pub terminal_size: std::cell::Cell<Option<(u16, u16)>>,
     /// The test panel: its rows (first, last) and how many of them the detail has — the wheel scrolls it.
     pub test_panel: std::cell::Cell<Option<(usize, usize, usize)>>,
+    /// The in-buffer review's change in hand: its first and last screen rows.
+    pub review_change: std::cell::Cell<Option<(usize, usize)>>,
     /// The task panel's: (first, last, rows of output).
     pub task_panel: std::cell::Cell<Option<(usize, usize, usize)>>,
     /// A plugin's panel: (its first screen line, its last, its first row's line, the first row shown).
@@ -997,6 +1007,23 @@ impl Editor {
         self.status = Some((msg, severity));
     }
 
+    /// A step under way (`fetching…`): its toast stays up until `step_done(key)` says it's over (at most
+    /// `STEP_MAX`) — then it goes, and what came of it shows on its own. The same key again replaces it.
+    pub fn set_step(&mut self, key: &'static str, msg: impl Into<String>) {
+        let msg = msg.into();
+        self.step_done(key);
+        self.report(ToastKind::Info, msg.clone());
+        if let Some(t) = self.toasts.iter_mut().rev().find(|t| t.text == msg && t.kind == ToastKind::Info) {
+            t.step = Some(key);
+            t.life = STEP_MAX;
+        }
+    }
+
+    /// Step `key` is over (done or failed): its toast goes.
+    pub fn step_done(&mut self, key: &'static str) {
+        self.toasts.retain(|t| t.step != Some(key));
+    }
+
     /// Record only, no toast — `status` is never drawn. Only for what the screen shows already (the
     /// diagnostic at the cursor, the selections just made); anything else the user has to see is a toast.
     pub fn note(&mut self, msg: impl Into<String>) {
@@ -1051,6 +1078,20 @@ impl Editor {
             })
             .collect();
         self.open_picker(crate::picker::Picker::new("messages", items, false).without_preview(), None);
+    }
+
+    /// After a frame (`term::render`): the card drawn, its messages have been seen; not drawn (a picker over
+    /// it, no free corner — the status line carried the newest), an error or warning not seen yet waits — its
+    /// time starts over, so it comes up as a card once it can (U7: never only on the status line).
+    pub fn toasts_drawn(&mut self, card: bool) {
+        let now = std::time::Instant::now();
+        for t in &mut self.toasts {
+            if card {
+                t.shown = true;
+            } else if !t.shown && matches!(t.kind, ToastKind::Error | ToastKind::Warning) {
+                t.at = now;
+            }
+        }
     }
 
     /// The card's opacity 0..1: fades in with its first message (150 ms), out with the last one's time (400 ms).
@@ -6527,7 +6568,11 @@ mod tests {
         let ready =
             |ed: &Editor| ed.doc().git_version == ed.doc().version() && ed.doc().review_base.is_some();
         crate::codereview::start_in(&mut ed, dir.clone(), None);
+        let said = |ed: &Editor| ed.toasts.iter().map(|t| t.text.clone()).collect::<Vec<_>>();
+        assert_eq!(said(&ed), ["review: gathering changes…"], "a step under way, said");
         settle_until(&mut ed, |ed| ed.code_review.is_some() && ready(ed));
+        // The step over: its toast goes — what came of it shows on its own (U9)
+        assert_eq!(said(&ed), ["review: 3 files changed — ]g walks the changes"]);
         let r = ed.code_review.as_ref().unwrap();
         let files: Vec<_> =
             r.files.iter().map(|f| (f.rel.as_str(), f.added, f.removed, f.new, f.gone)).collect();
@@ -6973,7 +7018,25 @@ mod tests {
         assert_eq!(ed.mode, Mode::Normal, "v didn't start a selection");
         let s = screen(&mut ed);
         assert!(!s.contains("line 80 of what it runs"), "its end is below the screen");
-        assert!(s.contains("more lines · v view all · G to the end"), "the card says how to get there: {s}");
+        // While its text is read, the card is a bar over the status line (U8) — nothing of it over the text
+        let rows: Vec<&str> = s.lines().collect();
+        let bar = rows[30 - 3];
+        assert!(
+            bar.contains("Trust this project's settings?")
+                && bar.contains("G to its end, then y answers")
+                && bar.contains("y Trust"),
+            "the bar: {bar:?}\n{s}"
+        );
+        assert!(!s.contains("more lines"), "the card stepped aside: {s}");
+        assert!(!ed.offer_seen_whole(), "its bar in sight isn't the card read");
+        assert!(ed.screen.offer_buttons.iter().any(|b| b.3 == 'y' && b.0 == 27), "its y still clicks");
+        // Another buffer: the card whole again; back: the bar
+        let viewed = ed.doc().id;
+        ed.new_scratch();
+        let s = screen(&mut ed);
+        assert!(s.contains("more lines · v view all · G to the end"), "whole again: {s}");
+        ed.current = ed.docs.iter().position(|d| d.id == viewed).unwrap();
+        assert!(!screen(&mut ed).contains("more lines"), "the bar again");
         feed(&mut ed, "y");
         assert_eq!(ed.offers.len(), 1, "y waits while the end is unseen");
         assert!(ed.toasts.last().is_some_and(|t| t.text.contains("read it to its end")));
@@ -6981,7 +7044,7 @@ mod tests {
         feed(&mut ed, "G");
         let s = screen(&mut ed);
         assert!(s.contains("line 80 of what it runs"), "{s}");
-        assert!(s.contains("more lines · seen in full — y answers"), "the card says y counts now: {s}");
+        assert!(s.contains("read to its end — y answers"), "the bar says y counts now: {s}");
         feed(&mut ed, "y");
         assert!(ed.offers.is_empty(), "answered once seen whole");
         // New text on the card: seen again first (a click on y waits as well)
@@ -7166,6 +7229,20 @@ mod tests {
         assert!(m.chip.ends_with(" · screen 100×30"), "{}", m.chip);
         let copy = m.attached.clone().expect("a copy").path;
         assert!(c.links().iter().any(|l| l.path == copy), "C-] reaches it");
+        // On its chip row it looks like the link it is: `screen 100×30` underlined, the rest of the chip not
+        // (the panel back while Claude works, as `space l` brings it)
+        ed.chat.as_mut().unwrap().unfolded = true;
+        let mut bytes = Vec::new();
+        crate::term::render(&mut ed, &mut bytes, 100, 30).unwrap();
+        let mut parser = vt100::Parser::new(30, 100, 0);
+        parser.process(&bytes);
+        let vt = parser.screen();
+        let rows: Vec<String> = vt.rows(0, 100).collect();
+        let r = rows.iter().position(|l| l.contains(" · screen 100×30")).expect("the chip row");
+        let col = |needle: &str| rows[r].find(needle).map(|b| rows[r][..b].chars().count() as u16).unwrap();
+        let underlined = |c: u16| vt.cell(r as u16, c).is_some_and(|cell| cell.underline());
+        assert!(underlined(col("screen")) && underlined(col("100×30")), "the screen is a link: {}", rows[r]);
+        assert!(!underlined(col(" · screen") + 1), "the rest of the chip isn't: {}", rows[r]);
         // (the fake claude's log isn't an editor event: poll, handling events as they come)
         let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while !(std::fs::read_to_string(&log).unwrap_or_default().contains("what is wrong here")

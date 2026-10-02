@@ -235,12 +235,15 @@ impl Editor {
 
     /// `f` in the git tab — fetch every remote (pruned); it never waits on a password prompt.
     pub fn git_fetch(&mut self) {
-        self.set_status("fetching…");
+        self.set_step("git", "fetching…");
         self.git_do(
             Box::new(|top| git_remote(top, &["fetch", "--all", "--prune"])),
-            Box::new(|ed, r| match r {
-                Ok(_) => ed.set_success("Fetched"),
-                Err(e) => ed.set_error(format!("fetch: {e}")),
+            Box::new(|ed, r| {
+                ed.step_done("git");
+                match r {
+                    Ok(_) => ed.set_success("Fetched"),
+                    Err(e) => ed.set_error(format!("fetch: {e}")),
+                }
             }),
         );
     }
@@ -533,10 +536,12 @@ impl Editor {
                 .set_status("open a commit message first — c in the git tab (or C: Claude drafts it)");
         };
         let (top, amend, id) = (c.top.clone(), c.amend, c.doc);
-        self.set_status("Claude is drafting the commit message…");
+        self.set_step("commit-draft", "Claude is drafting the commit message…");
         self.events.jobs().spawn(move || {
             let prompt = commit_prompt(&top, amend);
             move |ed: &mut Editor| {
+                // (from here the draft streams into its review)
+                ed.step_done("commit-draft");
                 let prompt = match prompt {
                     Ok(p) => p,
                     Err(e) => return ed.set_error(format!("commit draft: {e}")),
@@ -575,12 +580,13 @@ impl Editor {
             (true, None) => vec!["push".into(), "-u".into(), "origin".into(), "HEAD".into()],
             (false, _) => vec!["pull".into(), "--ff-only".into()],
         };
-        self.set_status(if push { "Pushing…" } else { "Pulling…" });
+        self.set_step("git", if push { "Pushing…" } else { "Pulling…" });
         let top = st.top.clone();
         self.events.jobs().spawn(move || {
             let a: Vec<&str> = args.iter().map(String::as_str).collect();
             let result = git_remote(&top, &a);
             move |ed: &mut Editor| {
+                ed.step_done("git");
                 match result {
                     Ok(_) if push => ed.set_success(format!("Pushed {}", st.branch)),
                     Ok(out) if out.contains("Already up to date") => ed.set_status("Already up to date"),
@@ -680,10 +686,11 @@ impl Editor {
     pub fn git_switch(&mut self, branch: &str) {
         let cwd = self.git_cwd();
         let branch = branch.to_string();
-        self.set_status(format!("Switching to {branch}…"));
+        self.set_step("git", format!("Switching to {branch}…"));
         self.events.jobs().spawn(move || {
             let result = git(&cwd, &["switch", &branch], None);
             move |ed: &mut Editor| {
+                ed.step_done("git");
                 match result {
                     Ok(_) => ed.set_success(format!("On {branch}")),
                     Err(e) => ed.set_error(format!("switch: {e}")),
