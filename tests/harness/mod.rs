@@ -52,6 +52,8 @@ pub struct Sandbox {
     live: bool,
     /// Folders put in front of the minimal PATH — a tool a test needs as you have it (`with_tools`).
     tools: Vec<PathBuf>,
+    /// More variables for the child (`with_env`).
+    vars: Vec<(OsString, OsString)>,
 }
 
 impl Sandbox {
@@ -66,7 +68,7 @@ impl Sandbox {
         fs::create_dir_all(&dir).unwrap();
         // Real path (macOS: /var → /private/var) — tarae canonicalizes the paths it opens.
         let root = fs::canonicalize(&dir).unwrap();
-        let sb = Sandbox { root, live: false, tools: Vec::new() };
+        let sb = Sandbox { root, live: false, tools: Vec::new(), vars: Vec::new() };
         for d in
             ["home/.config/tarae", "home/.local/state", "home/.local/share", "home/.cache", "claude", "work"]
         {
@@ -103,6 +105,12 @@ impl Sandbox {
                 self.tools.push(dir);
             }
         }
+        self
+    }
+
+    /// One more variable in the child's environment (a measurement's hook: `TARAE_TREES_UNSEEN`).
+    pub fn with_env(mut self, key: &str, value: &str) -> Self {
+        self.vars.push((key.into(), value.into()));
         self
     }
 
@@ -186,9 +194,10 @@ impl Sandbox {
                 ("GIT_CONFIG_GLOBAL".into(), self.git_config().into()),
                 ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
             ]);
+            env.extend(self.vars.iter().cloned());
             return env;
         }
-        [
+        let base: Vec<(OsString, OsString)> = [
             ("HOME", home.clone().into()),
             ("XDG_CONFIG_HOME", home.join(".config").into()),
             ("XDG_STATE_HOME", home.join(".local/state").into()),
@@ -205,7 +214,8 @@ impl Sandbox {
         ]
         .into_iter()
         .map(|(k, v): (&str, OsString)| (k.into(), v))
-        .collect()
+        .collect();
+        base.into_iter().chain(self.vars.iter().cloned()).collect()
     }
 
     pub fn spawn(&self, args: &[&str]) -> Term {
@@ -467,6 +477,11 @@ impl Term {
         usage(self.child.id())
     }
 
+    /// tarae's process id — for a look at it from outside (`heap`, `vmmap`).
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     /// Frames tarae has written so far (each ends its synchronized update).
     pub fn frames(&self) -> usize {
         lock(&self.out).frames
@@ -576,6 +591,9 @@ pub struct Usage {
     pub switches: u64,
     /// Resident memory now, in bytes (not a running total: a difference keeps the later one).
     pub rss: u64,
+    /// Physical footprint now (macOS; RSS elsewhere) — what Activity Monitor shows: memory freed back to
+    /// malloc doesn't count, as it still does in RSS until the pages are reused.
+    pub footprint: u64,
 }
 
 impl std::ops::Sub for Usage {
@@ -585,6 +603,7 @@ impl std::ops::Sub for Usage {
             cpu: self.cpu.saturating_sub(before.cpu),
             switches: self.switches.saturating_sub(before.switches),
             rss: self.rss,
+            footprint: self.footprint,
         }
     }
 }
@@ -603,10 +622,13 @@ pub fn usage(pid: u32) -> Usage {
         libc::mach_timebase_info(&mut tb);
         let ticks = (info.pti_total_user + info.pti_total_system) as u128;
         let nanos = ticks * tb.numer as u128 / tb.denom.max(1) as u128;
+        let mut ri: libc::rusage_info_v2 = std::mem::zeroed();
+        let ok = libc::proc_pid_rusage(pid as i32, libc::RUSAGE_INFO_V2, (&raw mut ri).cast()) == 0;
         Usage {
             cpu: Duration::from_nanos(nanos as u64),
             switches: info.pti_csw as u64,
             rss: info.pti_resident_size,
+            footprint: if ok { ri.ri_phys_footprint } else { info.pti_resident_size },
         }
     }
 }
@@ -634,7 +656,7 @@ pub fn usage(pid: u32) -> Usage {
             .filter_map(|l| l.split_whitespace().last()?.parse::<u64>().ok())
             .sum::<u64>();
     }
-    Usage { cpu: Duration::from_millis(ticks * 1000 / hz), switches, rss }
+    Usage { cpu: Duration::from_millis(ticks * 1000 / hz), switches, rss, footprint: rss }
 }
 
 /// Polls a file on disk until it holds `want` (saves are immediate today, but the test shouldn't care).

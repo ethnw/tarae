@@ -146,6 +146,19 @@ const TOAST_FADE_IN: std::time::Duration = std::time::Duration::from_millis(150)
 /// One animation frame (waves, fades, elapsed seconds) — ~14 frames a second, only while something moves.
 pub const TICK: std::time::Duration = std::time::Duration::from_millis(70);
 
+/// Documents that keep their parse trees however long ago they were seen (`trees_follow_sight`).
+pub const TREES_RECENT: usize = 5;
+
+/// Past the most recent few, how long a document keeps its trees after it was last on screen: 3 minutes
+/// (`TARAE_TREES_UNSEEN` = seconds instead — measurements and tests that can't wait that long).
+pub fn trees_unseen() -> std::time::Duration {
+    static UNSEEN: std::sync::OnceLock<std::time::Duration> = std::sync::OnceLock::new();
+    *UNSEEN.get_or_init(|| {
+        let secs = std::env::var("TARAE_TREES_UNSEEN").ok().and_then(|s| s.parse().ok()).unwrap_or(180);
+        std::time::Duration::from_secs(secs)
+    })
+}
+
 /// The live search (`space /`) runs once typing pauses this long — a burst of keys is one search, not one
 /// each (each key stops the one under way anyway).
 pub const LIVE_PAUSE: std::time::Duration = std::time::Duration::from_millis(50);
@@ -1777,6 +1790,8 @@ impl Editor {
         {
             // (a worker's filtering would land with no picker to take it)
             p.filter_now();
+            // (its previews are parsed files — up to `PREVIEW_CACHE` of them, read again when it reopens)
+            p.previews.clear();
             self.last_picker = Some(p);
         }
     }
@@ -2172,11 +2187,46 @@ impl Editor {
         });
     }
 
-    /// Starts a background parse for each edited document not already parsing (at the end of every event).
+    /// Which documents keep their parse trees (#36 — a big file's are ~15 MB, and a session keeps a dozen
+    /// open): those on screen now and the `TREES_RECENT` seen most recently; any other seen less than
+    /// `trees_unseen()` ago. The rest let theirs go (`Syntax::sleep`) and are parsed again when shown — a
+    /// frame uncolored. One never shown yet (restored by the session) isn't parsed until it is. Every event,
+    /// at `now`; an idle tarae isn't woken for it — the trees go at the next event.
+    pub fn trees_follow_sight(&mut self, now: std::time::Instant) {
+        let current = self.doc().id;
+        let shown = |id: DocId, views: &[View]| id == current || views.iter().any(|v| v.doc == id);
+        for d in &mut self.docs {
+            if shown(d.id, &self.views) {
+                d.seen = Some(now);
+                if let Some(s) = d.syntax.as_mut() {
+                    s.dormant = false;
+                }
+            }
+        }
+        // (the most recent few keep theirs however long ago — a handful of files you go between)
+        let mut recent: Vec<(std::time::Instant, DocId)> =
+            self.docs.iter().filter_map(|d| Some((d.seen?, d.id))).collect();
+        recent.sort_unstable_by_key(|r| std::cmp::Reverse(r.0));
+        recent.truncate(TREES_RECENT);
+        let unseen = trees_unseen();
+        for d in &mut self.docs {
+            let keep = match d.seen {
+                None => false,
+                Some(t) => recent.iter().any(|r| r.1 == d.id) || now.saturating_duration_since(t) < unseen,
+            };
+            if let Some(s) = d.syntax.as_mut().filter(|s| !keep && !s.dormant) {
+                s.sleep();
+            }
+        }
+    }
+
+    /// Starts a background parse for each edited document not already parsing (at the end of every event) —
+    /// not those whose trees went (`trees_follow_sight`), until they're shown.
     pub fn schedule_parses(&mut self) {
+        self.trees_follow_sight(std::time::Instant::now());
         for doc in &mut self.docs {
             let Some(syn) = doc.syntax.as_mut() else { continue };
-            if doc.loading || !syn.dirty || syn.in_flight {
+            if doc.loading || !syn.dirty || syn.in_flight || syn.dormant {
                 continue;
             }
             let job = syn.start_parse(&doc.text);
@@ -3966,35 +4016,39 @@ mod tests {
         let dir = std::fs::canonicalize(&dir).unwrap();
         let lib = dir.join("src/lib.rs");
         std::fs::write(&lib, "pub fn add(a: i32, b: i32) -> i32 {\n    a - b\n}\n").unwrap();
-        let script = dir.join("build.sh");
+        let makefile = dir.join("Makefile");
         std::fs::write(
-            &script,
+            &makefile,
             format!(
-                "echo compiling calc\necho '{}:2:5: error: mismatched types' >&2\nexit 3\n",
+                "all:\n\t@echo compiling calc\n\t@echo '{}:2:5: error: mismatched types' >&2\n\t@exit 3\n",
                 lib.display()
             ),
         )
         .unwrap();
         let mut ed = editor("");
-        // (`sh <file>` stands in for a check: allowed by the setting)
-        ed.config.llm.run_allow = vec!["sh".into()];
-        let command = format!("sh {}", script.display());
+        // (`make` is a check — its recipe a stand-in that prints an error; allowed by the setting)
+        ed.config.llm.run_allow = vec!["make".into()];
+        let command = format!("make -s -f {}", makefile.display());
         let log = claude_calls(&mut ed, &dir, "run", &json!({ "command": command }));
         feed(&mut ed, "<space>lbuild it<ret>");
         settle_for(&mut ed, |ed| !ed.chat.as_ref().unwrap().busy());
         assert!(ed.offers.is_empty(), "a check doesn't ask");
         let r = ed.task_run.as_ref().expect("it ran in the task panel");
+        // (make exits 2 when a recipe fails)
         assert_eq!(
             (r.task.name.as_str(), &r.state),
-            (command.as_str(), &crate::task::State::Failed(Some(3)))
+            (command.as_str(), &crate::task::State::Failed(Some(2)))
         );
         assert!(ed.task_last.is_none(), "not the user's task to run again");
         let answer = tool_answer(&log);
-        assert!(answer.contains("exit 3 in ") && answer.contains(&format!("$ {command}")), "{answer}");
+        assert!(answer.contains("exit 2 in ") && answer.contains(&format!("$ {command}")), "{answer}");
+        // (a check's places are in the user's list — and the report says so)
         assert!(
-            answer.contains("1 errors, 0 warnings") && answer.contains("lib.rs:2:5 error: mismatched types"),
+            answer.contains("1 errors, 0 warnings in the user's list")
+                && answer.contains("lib.rs:2:5 error: mismatched types"),
             "{answer}"
         );
+        assert!(ed.qlist.as_ref().is_some_and(|l| l.items.len() == 1), "and they are");
         assert!(answer.contains("Output:") && answer.contains("compiling calc"), "{answer}");
         assert!(!answer.contains("isError"), "{answer}");
         // The editor went to the error (the row's ending is `chat.rs`'s test: this claude sends no result)
@@ -8457,6 +8511,132 @@ q = \"delete_selection\"\n",
         let pos = doc.selection().primary().head;
         let line = doc.text.line(mv::line_of(&doc.text, pos)).to_string();
         assert!(line.contains("fn put_cursor"), "{line:?}");
+    }
+
+    /// #36: editing a big Rust file keeps memory bounded — undo keeps no parse trees (every step kept its
+    /// own: injected layers share nothing between versions, and a reparse rebuilds the lists an edit sits in,
+    /// a third of this file's nodes), so the document holds one version's trees however long it's edited.
+    /// An undo or redo edits the current trees instead — colored at once, and after edits, undos and redos
+    /// landing while a parse runs (forced, not timed), the tree is exactly what a fresh parse gives.
+    #[test]
+    fn a_long_edit_session_keeps_its_trees_bounded() {
+        let dir = std::env::temp_dir().join(format!("tarae-tree-memory-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("big.rs");
+        let text: String = (0..400)
+            .map(|i| format!("/// Item {i} — does `thing_{i}` for [`Other`].\n// note {i}\nfn f{i}(x: u32) -> u32 {{ x + {i} }}\n"))
+            .collect();
+        std::fs::write(&file, &text).unwrap();
+        let mut ed = editor("");
+        ed.open(&file).unwrap();
+        let parsed = |ed: &Editor| {
+            ed.doc().syntax.as_ref().is_some_and(|s| !s.dirty && !s.in_flight && s.tree.is_some())
+        };
+        settle_for(&mut ed, parsed);
+        let Some(syn) = ed.doc().syntax.as_ref() else { return }; // (no rust grammar in this build)
+        assert!(!syn.layers.is_empty(), "doc comments are injected layers");
+        let one = ed.doc().tree_nodes();
+        // The tree as a fresh parse of the text would have it — what an incremental one must come to
+        let fresh = |ed: &Editor| {
+            let doc = ed.doc();
+            let lang = doc.syntax.as_ref().unwrap().lang.clone();
+            crate::syntax::Syntax::parsed(lang, &doc.text).tree.unwrap().root_node().to_sexp()
+        };
+        let now =
+            |ed: &Editor| ed.doc().syntax.as_ref().unwrap().tree.as_ref().unwrap().root_node().to_sexp();
+        let in_flight = |ed: &Editor| ed.doc().syntax.as_ref().is_some_and(|s| s.in_flight);
+        for k in 0..40 {
+            // An edit here and there, each its own undo step…
+            feed(&mut ed, &format!("{}gg", 1 + (k * 17) % 1200));
+            feed(&mut ed, "Ax<esc>");
+            ed.schedule_parses();
+            // …and every other one, another edit — or an undo, or a redo — landing while that parse runs (the
+            // parse's result gets them reapplied: forced here, not left to timing)
+            assert!(in_flight(&ed));
+            match k % 4 {
+                1 => feed(&mut ed, &format!("{}ggAy<esc>", 1 + (k * 31 + 5) % 1200)),
+                2 => feed(&mut ed, "u"),
+                3 => feed(&mut ed, "uU"),
+                _ => {}
+            }
+            settle_for(&mut ed, |ed| !in_flight(ed));
+            ed.schedule_parses();
+            settle_for(&mut ed, parsed);
+            assert_eq!(now(&ed), fresh(&ed), "edit {k}: the tree is the text's");
+        }
+        // Undo keeps no trees: what the document holds is one version's, after all that
+        let all = ed.doc().tree_nodes();
+        assert!(all.0 < one.0 + 500 && all.1 < one.1 + 100, "one version {one:?}, after 40 edits {all:?}");
+        // An undo (and a redo) edits the current trees into the restored text — colored at once where nothing
+        // changed, right after the parse where something did
+        for keys in ["uuu", "UU"] {
+            feed(&mut ed, keys);
+            let syn = ed.doc().syntax.as_ref().unwrap();
+            assert!(syn.tree.is_some() && !syn.layers.is_empty(), "{keys}: the trees stay, edited");
+            let first =
+                crate::syntax::highlights(syn, &ed.doc().text, 0..60, &mut tree_sitter::QueryCursor::new());
+            assert!(!first.is_empty(), "{keys}: the top of the file still colored before any reparse");
+            ed.schedule_parses();
+            settle_for(&mut ed, parsed);
+            assert_eq!(now(&ed), fresh(&ed), "{keys}: the tree is the text's");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #36: only the files looked at lately keep their parse trees — the `TREES_RECENT` seen most recently,
+    /// and any seen within `trees_unseen()`. The others' go and they aren't parsed in the background; one
+    /// shown again is parsed again. One opened but never shown (a restored session) never gets any.
+    #[test]
+    fn trees_go_from_files_not_looked_at_for_a_while() {
+        let dir = std::env::temp_dir().join(format!("tarae-trees-sight-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        // (documents keep real paths — macOS: /var/folders = /private/var/folders)
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let names = ["a", "b", "c", "d", "e", "f", "g", "h", "never"];
+        for n in names {
+            std::fs::write(dir.join(format!("{n}.rs")), format!("// {n}\nfn {n}() -> u32 {{ 1 }}\n"))
+                .unwrap();
+        }
+        let mut ed = editor("");
+        let has_tree = |ed: &Editor, n: &str| {
+            let path = dir.join(format!("{n}.rs"));
+            let doc = ed.docs.iter().find(|d| d.path.as_deref() == Some(path.as_path())).unwrap();
+            doc.syntax.as_ref().is_some_and(|s| s.tree.is_some())
+        };
+        // Each looked at in turn (its language loads on a worker, then its parse)
+        let mut grammar = true;
+        for n in &names[..8] {
+            ed.open(&dir.join(format!("{n}.rs"))).unwrap();
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !has_tree(&ed, n) && std::time::Instant::now() < end {
+                if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(50)) {
+                    ed.handle_event(ev);
+                }
+                ed.schedule_parses();
+            }
+            grammar &= has_tree(&ed, n);
+        }
+        if !grammar {
+            return; // (no rust grammar in this build)
+        }
+        // One opened and left before it was ever shown
+        ed.open(&dir.join("never.rs")).unwrap();
+        ed.open(&dir.join("h.rs")).unwrap();
+        // Ten minutes on: the five seen last keep theirs, the others' go
+        ed.trees_follow_sight(std::time::Instant::now() + std::time::Duration::from_secs(600));
+        let kept: Vec<&str> = names.iter().copied().filter(|n| has_tree(&ed, n)).collect();
+        assert_eq!(kept, ["d", "e", "f", "g", "h"]);
+        ed.schedule_parses();
+        settle_for(&mut ed, |ed| ed.docs.iter().all(|d| d.syntax.as_ref().is_none_or(|s| !s.in_flight)));
+        let kept: Vec<&str> = names.iter().copied().filter(|n| has_tree(&ed, n)).collect();
+        assert_eq!(kept, ["d", "e", "f", "g", "h"], "not parsed again in the background");
+        // Shown again: parsed again
+        ed.open(&dir.join("a.rs")).unwrap();
+        ed.schedule_parses();
+        settle_for(&mut ed, |ed| has_tree(ed, "a"));
+        assert!(has_tree(&ed, "a"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// N4: `space /` searches the project as you type — a regex, smart case (lowercase = any case), rows of

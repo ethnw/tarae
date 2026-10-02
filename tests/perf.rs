@@ -271,6 +271,197 @@ fn perf_e2e_live_search_in_200k_files() {
     report("e2e_live_search_200k_done_ms", median(done), 4000.0, 150.0);
 }
 
+/// A long session's memory (#36): a copy of this repository, its two biggest files open, rounds of edits
+/// (each reparsed — every doc comment is a layer of its own), files opened and closed, a code review
+/// started and ended, a chat answered with code. RSS at the end, and how much it grew past the first round
+/// — what a leak moves (an hour's work went 214 → 556 MB: every undo step kept a whole set of layers).
+#[test]
+fn perf_e2e_memory_over_a_long_session() {
+    if unoptimized("perf_e2e_memory_over_a_long_session") {
+        return;
+    }
+    let sb = Sandbox::new("perf-long");
+    copy_repo(&sb);
+    fs::write(sb.git_config(), "[user]\n\tname = t\n\temail = t@t\n[commit]\n\tgpgsign = false\n").unwrap();
+    sb.git(&["init", "-q", "-b", "main"]);
+    sb.git(&["add", "-A"]);
+    sb.git(&["commit", "-q", "-m", "base"]);
+    // A stand-in claude: each message answered with some prose and code, ending `fin<n>`
+    let block = "Here is how it fits together.\\n\\n```rust\\nfn walk(tree: &Tree) -> usize {\\n    let mut n = 0;\\n    for c in tree.children() { n += walk(c); }\\n    n + 1\\n}\\n```\\n\\nThe rest follows.\\n\\n";
+    let fake = format!(
+        "n=0\nwhile read -r line; do\n  case \"$line\" in '{{\"message\"'*) ;; *) continue;; esac\n  n=$((n+1))\n  \
+         for i in 1 2 3 4 5 6; do printf '%s\\n' '{{\"type\":\"stream_event\",\"event\":{{\"type\":\"content_block_delta\",\"delta\":{{\"type\":\"text_delta\",\"text\":\"{block}\"}}}}}}'; done\n  \
+         printf '{{\"type\":\"stream_event\",\"event\":{{\"type\":\"content_block_delta\",\"delta\":{{\"type\":\"text_delta\",\"text\":\"fin%s\"}}}}}}\\n' \"$n\"\n  \
+         printf '%s\\n' '{{\"type\":\"result\",\"result\":\"done\"}}'\ndone\n"
+    );
+    let script = sb.write("fake-claude.sh", &fake);
+    sb.write_config(&format!("{BASE_CONFIG}[llm]\ncommand = \"sh\"\nargs = [\"{}\"]\n", script.display()));
+    let mut t = Term::spawn(&sb, &["src/term.rs", "src/editor.rs"], 160, 50);
+    t.wait_text("use std::io");
+    let mut asked = 0;
+    let mut round = |t: &mut Term, r: usize| {
+        for file in 0..2 {
+            for k in 0..40 {
+                // An edit somewhere in the file — its own undo step — and time for its reparse
+                t.send(&format!("{}gg", 50 + (k * 97 + r * 13) % 4000));
+                t.send("o// x");
+                // (Esc alone: one with keys right after it reads as Alt + key)
+                t.send("\x1b");
+                std::thread::sleep(Duration::from_millis(60));
+            }
+            // The other big file, a small one opened and closed
+            t.send(if file == 0 { "ga" } else { ":open src/picker.rs\r" });
+            std::thread::sleep(Duration::from_millis(300));
+            if file == 1 {
+                t.send(":bc\r");
+            }
+        }
+        // (TARAE_LONG_SKIP=review,chat leaves those parts out — to see what a number comes from)
+        let skip = std::env::var("TARAE_LONG_SKIP").unwrap_or_default();
+        // A code review of what changed, started and ended
+        if !skip.contains("review") {
+            t.send(" vv");
+            std::thread::sleep(Duration::from_millis(800));
+            t.send(" vq");
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        if skip.contains("chat") {
+            return;
+        }
+        // A few turns of the chat
+        t.send(" l");
+        for _ in 0..3 {
+            asked += 1;
+            t.send(&format!("tell me more {asked}\r"));
+            let fin = format!("fin{asked}");
+            t.wait_for("the answer", |s| s.contains(&fin));
+        }
+        t.send("\x1b");
+        std::thread::sleep(Duration::from_millis(300));
+    };
+    // Two rounds to warm up: the kept undo steps fill, and malloc's high-water mark settles (each parse
+    // makes a fresh layer set and frees the last — RSS keeps the pages: +34 MB in the second round, with the
+    // live heap flat from then on, measured with `heap`)
+    round(&mut t, 0);
+    round(&mut t, 1);
+    std::thread::sleep(Duration::from_secs(1));
+    let first = t.usage().rss;
+    let rounds: usize = std::env::var("TARAE_LONG_ROUNDS").ok().and_then(|n| n.parse().ok()).unwrap_or(4);
+    for r in 2..2 + rounds {
+        round(&mut t, r);
+        // (TARAE_LONG_HEAP: what's live in the heap, beside the RSS — a freed page malloc keeps is RSS)
+        let heap = match std::env::var_os("TARAE_LONG_HEAP") {
+            Some(_) => std::process::Command::new("/usr/bin/heap")
+                .arg(t.pid().to_string())
+                .output()
+                .map(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .lines()
+                        .find(|l| l.contains("nodes malloced"))
+                        .unwrap_or("")
+                        .to_string()
+                })
+                .unwrap_or_default(),
+            None => String::new(),
+        };
+        eprintln!("round {r}: {:.1} MB  {heap}", t.usage().rss as f64 / (1024.0 * 1024.0));
+    }
+    std::thread::sleep(Duration::from_secs(1));
+    let last = t.usage().rss;
+    let mb = |b: u64| b as f64 / (1024.0 * 1024.0);
+    eprintln!("long session: {:.1} MB warmed up, {:.1} MB {rounds} rounds later", mb(first), mb(last));
+    // (86 MB since undo keeps no trees — 138 MB when it kept 100, 1.4 GB when it kept them all)
+    report("e2e_rss_long_session_mb", mb(last), 150.0, 5.0);
+    // (before #36's fix this grew ~240 MB a round; bounded it's under a MB — the undo texts, the chat)
+    report("e2e_rss_long_session_growth_mb", mb(last.saturating_sub(first)), 20.0, 3.0);
+}
+
+/// Memory at the start of a working day (#36): a copy of this repository with the files a session of
+/// tarae's development keeps open (its biggest sources among them), each looked at once, then left a while
+/// — only the five seen last keep their parse trees (footprint, as Activity Monitor shows it). Next to it,
+/// no file open. With `TARAE_HEAP` set, what's live at each step (`heap`'s count by size: tree-sitter's
+/// subtrees are its 96- and 112-byte blocks).
+#[test]
+fn perf_e2e_memory_with_a_working_set_open() {
+    if unoptimized("perf_e2e_memory_with_a_working_set_open") {
+        return;
+    }
+    // (files unseen for 2 s let their trees go, not 3 minutes — the most recent five keep theirs)
+    let sb = Sandbox::new("perf-working-set").with_env("TARAE_TREES_UNSEEN", "2");
+    copy_repo(&sb);
+    let files = [
+        "src/editor.rs",
+        "src/term.rs",
+        "src/lsp_editor.rs",
+        "src/picker.rs",
+        "src/tools.rs",
+        "src/lsp.rs",
+        "src/readonly.rs",
+        "src/packs.rs",
+        "tests/e2e.rs",
+        "tests/harness/mod.rs",
+        "Cargo.toml",
+        "CONTRIBUTING.md",
+        "README.md",
+    ];
+    let heap = |t: &Term| match std::env::var_os("TARAE_HEAP") {
+        Some(_) => std::process::Command::new("/usr/bin/heap")
+            .arg(t.pid().to_string())
+            .output()
+            .map(|o| {
+                let out = String::from_utf8_lossy(&o.stdout).to_string();
+                out.lines().filter(|l| l.contains("nodes malloced")).collect::<Vec<_>>().join("\n")
+            })
+            .unwrap_or_default(),
+        None => String::new(),
+    };
+    let settled = |t: &mut Term| {
+        // (every file read and parsed — the frames stop)
+        let mut last = t.frames();
+        loop {
+            std::thread::sleep(Duration::from_millis(1500));
+            if t.frames() == last {
+                break;
+            }
+            last = t.frames();
+        }
+    };
+    let mb = |b: u64| b as f64 / (1024.0 * 1024.0);
+    let mut t = Term::spawn(&sb, &[], 160, 50);
+    t.wait_for("the start screen", |s| s.rows.iter().any(|r| !r.trim().is_empty()));
+    settled(&mut t);
+    let empty = t.usage().rss;
+    eprintln!("no file open: {:.1} MB\n{}", mb(empty), heap(&t));
+    drop(t);
+    let mut t = Term::spawn(&sb, &files, 160, 50);
+    t.wait_text("NORMAL");
+    settled(&mut t);
+    let say = |what: &str, u: Usage, t: &Term| {
+        eprintln!("{what}: RSS {:.1} MB, footprint {:.1} MB\n{}", mb(u.rss), mb(u.footprint), heap(t));
+    };
+    // Opened: only the file on screen is parsed — the rest when they're first shown
+    let opened = t.usage();
+    say(&format!("{} files opened", files.len()), opened, &t);
+    // Each looked at once (`gn` round the buffers, each parsed as it's shown)…
+    for _ in 0..files.len() {
+        t.send("gn");
+        std::thread::sleep(Duration::from_millis(400));
+    }
+    settled(&mut t);
+    let seen = t.usage();
+    say("each looked at", seen, &t);
+    // …then a while later (2 s here, 3 minutes for real), at the next key: the five seen last keep theirs
+    std::thread::sleep(Duration::from_secs(3));
+    t.send("\x1b");
+    settled(&mut t);
+    let later = t.usage();
+    say("a while later", later, &t);
+    // (measured 2026-10-03: 96.5 MB when every open file kept its trees — 815k live blocks; 30 MB with the
+    // five seen last — 338k. Just opened, the footprint is mostly a parse's working memory not yet given
+    // back: not a number to keep)
+    report("e2e_footprint_working_set_mb", mb(later.footprint), 60.0, 5.0);
+}
+
 fn copy_repo(sb: &Sandbox) {
     let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     for d in ["src", "runtime", "docs", "tests", "xtask/src"] {

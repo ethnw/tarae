@@ -171,6 +171,8 @@ pub struct Run {
     /// The places its output pointed at (each once, at most `PLACES_KEPT`) — Claude's report and the jump
     /// to the first error read these; the user's list gets them only from a run that feeds it (#28).
     pub places: Vec<Item>,
+    /// Its places went to the user's list too (a check or a build — #28); the report says where they are.
+    pub feeds: bool,
     /// An install's (`install.rs`): what goes on once it ends.
     after: Option<After>,
     /// An install run (not one `space m m` runs again).
@@ -230,6 +232,7 @@ impl Run {
             generation: 0,
             found: (0, 0),
             places: Vec::new(),
+            feeds: true,
             after: None,
             install: false,
             chat: None,
@@ -545,6 +548,7 @@ impl Editor {
             generation,
             found: (0, 0),
             places: Vec::new(),
+            feeds,
             after,
             install,
             chat: None,

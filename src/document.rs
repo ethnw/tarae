@@ -97,13 +97,16 @@ pub fn read_file(path: &Path) -> Result<Rope> {
     }
 }
 
+/// An undo step: the text, selection and version as they were — no parse tree (#36). Snapshots used to keep
+/// theirs so an undo was colored at once, and that cost a session hundreds of MB: injected layers (every
+/// comment, every macro's token tree as Rust) are parsed anew and share nothing between versions, and even
+/// the main tree's reparse rebuilds the lists an edit sits in (a third of a 1,200-line file's nodes, every
+/// edit). An undo now edits the current tree into the restored text instead (`restore`), as typing does.
 #[derive(Clone)]
 pub struct Snapshot {
     text: Rope,
     selection: Selection,
     version: u64,
-    /// Syntax tree matching that text (O(1) copy) — so highlights aren't empty after undo until reparsed.
-    tree: Option<crate::syntax::Trees>,
 }
 
 pub struct Document {
@@ -161,6 +164,9 @@ pub struct Document {
     /// Spots the jump lists point at (id → selection) — they follow edits like diagnostics do.
     marks: Vec<(u64, Selection)>,
     next_mark: u64,
+    /// When it was last on screen (None: not yet) — only the recently seen keep their parse trees
+    /// (`Editor::trees_follow_sight`).
+    pub seen: Option<std::time::Instant>,
 }
 
 impl Document {
@@ -198,6 +204,7 @@ impl Document {
             virtual_uri: None,
             marks: Vec::new(),
             next_mark: 0,
+            seen: None,
         }
     }
 
@@ -229,7 +236,7 @@ impl Document {
         self.text = text;
         self.loading = false;
         if let Some(s) = &mut self.syntax {
-            s.reset(None);
+            s.reset();
         }
         let sel = self.selection.clone();
         self.set_selection(sel);
@@ -322,13 +329,44 @@ impl Document {
         self.version != self.saved_version
     }
 
-    pub fn snapshot(&self) -> Snapshot {
-        Snapshot {
-            text: self.text.clone(),
-            selection: self.selection.clone(),
-            version: self.version,
-            tree: self.syntax.as_ref().and_then(|s| s.trees()),
+    /// The parse trees this document keeps alive, as distinct subtrees: (main tree's, injected layers'). Its
+    /// undo history keeps none (#36) — this is its current trees, for tests that hold memory to a bound.
+    #[cfg(test)]
+    pub fn tree_nodes(&self) -> (usize, usize) {
+        use std::collections::HashSet;
+        fn count(tree: &tree_sitter::Tree, seen: &mut HashSet<usize>) {
+            let mut c = tree.walk();
+            'down: loop {
+                // (a subtree seen already — shared with another version — is counted once, its insides too)
+                if seen.insert(c.node().id()) && c.goto_first_child() {
+                    continue;
+                }
+                loop {
+                    if c.goto_next_sibling() {
+                        continue 'down;
+                    }
+                    if !c.goto_parent() {
+                        break 'down;
+                    }
+                }
+            }
         }
+        let (mut main, mut layers) = (HashSet::new(), HashSet::new());
+        // (all held through the count: a node's id is its slot's address — a root's is inside its `Tree`, and
+        // a clone dropped mid-count let the next one reuse that address, skipping its whole tree as "seen")
+        let trees: Vec<crate::syntax::Trees> =
+            self.syntax.as_ref().and_then(|s| s.trees()).into_iter().collect();
+        for (tree, ls) in &trees {
+            count(tree, &mut main);
+            for l in ls.iter() {
+                count(&l.tree, &mut layers);
+            }
+        }
+        (main.len(), layers.len())
+    }
+
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot { text: self.text.clone(), selection: self.selection.clone(), version: self.version }
     }
 
     /// Close the edit group — if now differs from the group-start snapshot, push onto the undo stack.
@@ -365,7 +403,7 @@ impl Document {
     pub fn install_history(&mut self, (undo, redo): crate::undofile::Stacks) {
         let mut snap = |(text, selection): (Rope, Selection)| {
             self.next_version += 1;
-            Snapshot { text, selection, version: self.next_version, tree: None }
+            Snapshot { text, selection, version: self.next_version }
         };
         let undo: Vec<Snapshot> = undo.into_iter().map(&mut snap).collect();
         let redo: Vec<Snapshot> = redo.into_iter().map(&mut snap).collect();
@@ -377,11 +415,16 @@ impl Document {
     }
 
     fn restore(&mut self, snap: Snapshot) {
+        // The trees follow the text as one edit (the span between what's common at its ends) — what didn't
+        // change keeps its colors at once, the rest within a reparse, from the tree as it is: nothing kept
+        // per undo step (#36). (A parse under way gets the edit too, as for a key.)
+        let edit = crate::disk::minimal_change(&self.text, &snap.text)
+            .map(|c| crate::syntax::input_edit(&self.text, c.from, c.to, &c.insert));
         self.text = snap.text;
         self.selection = snap.selection;
         self.version = snap.version;
-        if let Some(s) = &mut self.syntax {
-            s.reset(snap.tree);
+        if let (Some(s), Some(e)) = (&mut self.syntax, edit) {
+            s.edit(&[e]);
         }
         // Text replaced wholesale → resend everything to the server.
         for l in &mut self.lsp.links {

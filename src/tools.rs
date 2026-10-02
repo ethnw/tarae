@@ -1115,16 +1115,27 @@ fn run_report(r: &crate::task::Run, places: &[crate::quickfix::Item]) -> String 
     };
     let mut out = format!("{verdict}{took}\n$ {}\n", r.task.cmd);
     let (errors, warnings) = r.found;
-    if errors + warnings > 0 && !places.is_empty() {
+    // Where its places are said as they are (#38): a check's or a build's went to the user's list; any
+    // other run's (a grep's `path:line:` hits) are only in its output — not the user's, not errors
+    if errors + warnings > 0 && !places.is_empty() && r.feeds {
         out.push_str(&format!("\n{errors} errors, {warnings} warnings in the user's list (]q):\n"));
+    } else if !places.is_empty() {
+        let n = places.len();
+        out.push_str(&format!(
+            "\n{n} place{} in its output (not in the user's list — only checks and builds go there):\n",
+            if n == 1 { "" } else { "s" }
+        ));
+    }
+    if !places.is_empty() && (errors + warnings > 0 || !r.feeds) {
         for it in places.iter().take(PLACES_MAX) {
             let kind = match it.severity {
-                1 => "error",
-                2 => "warning",
-                _ => "note",
+                _ if !r.feeds => "",
+                1 => "error: ",
+                2 => "warning: ",
+                _ => "note: ",
             };
             out.push_str(&format!(
-                "  {}:{}:{} {kind}: {}\n",
+                "  {}:{}:{} {kind}{}\n",
                 crate::chat::shown(&it.path),
                 it.line + 1,
                 it.col + 1,
@@ -1518,6 +1529,10 @@ mod tests {
             "cd src",
             "",
             "cargo build > out",
+            // #38: the line whose matches were said to be in the user's list
+            r#"sh -c 'grep -rn "pub fn proc_pid_rusage\|ri_phys_footprint" ~/.cargo/registry/src/*/libc-0.2.*/src/unix/bsd/apple/mod.rs | head -5'"#,
+            "grep -rn x src | head -5",
+            "sh -c 'grep -rn x src | head -5'",
         ] {
             assert!(!super::is_check(c), "{c}");
         }
@@ -1598,6 +1613,38 @@ mod tests {
         );
         r.output.retain(|(err, _)| !err);
         assert!(!super::run_report(&r, &[]).contains("skipped"));
+    }
+
+    /// #38: a run that isn't a check or a build (a grep) leaves the user's list alone (#28) — and its report
+    /// says so: its `path:line:` hits are places in its output, not "errors in the user's list" (that claim
+    /// misled both sides into thinking the list had been replaced).
+    #[test]
+    fn a_greps_report_says_its_places_are_not_in_the_users_list() {
+        use crate::task::{Run, State, Task};
+        let cmd = r#"sh -c 'grep -rn "pub fn proc_pid_rusage\|ri_phys_footprint" ~/.cargo/registry/src/*/libc-0.2.*/src/unix/bsd/apple/mod.rs | head -5'"#;
+        let mut r = Run::for_test(Task { name: "grep".into(), cmd: cmd.into(), cwd: "/p".into() });
+        r.feeds = super::is_check(cmd);
+        r.state = State::Passed;
+        r.found = (5, 0);
+        let hit = |line: usize| crate::quickfix::Item {
+            path: "/c/libc/src/unix/bsd/apple/mod.rs".into(),
+            line,
+            col: 0,
+            message: "pub ri_phys_footprint: u64,".into(),
+            severity: 1,
+            mark: None,
+        };
+        let places: Vec<_> = [957, 971, 991, 1013, 1044].into_iter().map(hit).collect();
+        let text = super::run_report(&r, &places);
+        assert!(!r.feeds, "a grep isn't a check");
+        assert!(!text.contains("user's list (]q)") && !text.contains("error:"), "{text}");
+        assert!(
+            text.contains(
+                "5 places in its output (not in the user's list — only checks and builds go there):\n  \
+                 /c/libc/src/unix/bsd/apple/mod.rs:958:1 pub ri_phys_footprint: u64,\n"
+            ),
+            "{text}"
+        );
     }
 
     #[test]

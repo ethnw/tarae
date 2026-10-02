@@ -471,7 +471,8 @@ pub struct Layer {
 /// Highlight spans: (start, end, global capture number) — see `highlights`.
 pub type Spans = Vec<(usize, usize, u32)>;
 
-/// Tree + injected layers (undo snapshots carry the whole thing — cloning only bumps refcounts).
+/// Tree + injected layers (tests count what a document keeps — `Document::tree_nodes`).
+#[cfg(test)]
 pub type Trees = (Tree, Arc<Vec<Layer>>);
 
 pub struct Syntax {
@@ -482,6 +483,9 @@ pub struct Syntax {
     pub layers: Arc<Vec<Layer>>,
     /// Whether a background parse is running.
     pub in_flight: bool,
+    /// Its trees let go: not looked at for a while (`Editor::trees_follow_sight`) — not parsed until it's
+    /// on screen again.
+    pub dormant: bool,
     /// Whether there were edits since the last parse started (need to reparse).
     pub dirty: bool,
     /// Edits that arrived mid-parse — reapplied when the new tree arrives.
@@ -502,6 +506,7 @@ impl Syntax {
             tree: None,
             layers: Arc::default(),
             in_flight: false,
+            dormant: false,
             dirty: true,
             pending_edits: Vec::new(),
             generation: 0,
@@ -540,16 +545,22 @@ impl Syntax {
         self.highlighted.get_mut().clear();
     }
 
+    #[cfg(test)]
     pub fn trees(&self) -> Option<Trees> {
         Some((self.tree.clone()?, self.layers.clone()))
     }
 
-    /// Text replaced wholesale (undo/redo) — use the tree matching that text if there is one.
-    pub fn reset(&mut self, trees: Option<Trees>) {
-        (self.tree, self.layers) = match trees {
-            Some((t, l)) => (Some(t), l),
-            None => (None, Arc::default()),
-        };
+    /// Not looked at for a while: its trees go (a big file's are ~15 MB), and it isn't parsed until it's
+    /// woken (`dormant = false` — it's dirty, so the next round parses it whole).
+    pub fn sleep(&mut self) {
+        self.reset();
+        self.dormant = true;
+    }
+
+    /// Text replaced with no edit to follow it (a file finished loading) — parsed afresh. (Undo and redo edit
+    /// the trees instead: `Document::restore`.)
+    pub fn reset(&mut self) {
+        (self.tree, self.layers) = (None, Arc::default());
         self.pending_edits.clear();
         self.generation += 1;
         self.dirty = true;
