@@ -232,6 +232,9 @@ pub struct Editor {
     pub split: crate::split::Split,
     pub focus: crate::split::ViewId,
     next_view: crate::split::ViewId,
+    /// What a frame may wait for the injected languages of a place jumped to (`SHOWN_NOW_BUDGET`; a test
+    /// about what's made, not how fast, gives it more).
+    pub shown_now_budget: std::time::Duration,
     pub mode: Mode,
     pub keymaps: Keymaps,
     pub config: EditorConfig,
@@ -441,6 +444,7 @@ impl Editor {
             docs: Vec::new(),
             current: 0,
             views: Vec::new(),
+            shown_now_budget: crate::syntax::SHOWN_NOW_BUDGET,
             split: crate::split::Split::Leaf(1),
             focus: 1,
             next_view: 2,
@@ -1859,13 +1863,41 @@ impl Editor {
         });
     }
 
+    /// Injected languages made right away where the frame just drawn showed a buffer they aren't made for
+    /// yet (a place jumped to) — the frame is drawn again with them. One budget (since `start`) for all the
+    /// buffers on screen, the focused one first: another pane doesn't take its time, nor a buffer out of
+    /// sight (left to the background). Tells whether any were.
+    pub fn inject_shown_now(&mut self, start: std::time::Instant, budget: std::time::Duration) -> bool {
+        let mut shown = vec![self.current];
+        for (view, ..) in &self.screen.panes {
+            let doc = self.views.iter().find(|v| v.id == *view).map(|v| v.doc);
+            if let Some(i) = doc.and_then(|d| self.docs.iter().position(|x| x.id == d))
+                && !shown.contains(&i)
+            {
+                shown.push(i);
+            }
+        }
+        let mut any = false;
+        for i in shown {
+            let doc = &mut self.docs[i];
+            if let Some(syn) = doc.syntax.as_mut().filter(|_| !doc.loading) {
+                any |= syn.inject_shown_now(&doc.text, (start, budget));
+            }
+        }
+        any
+    }
+
     /// Starts a background parse for each edited document not already parsing (at the end of every event).
     pub fn schedule_parses(&mut self) {
         for doc in &mut self.docs {
             let Some(syn) = doc.syntax.as_mut() else { continue };
-            if doc.loading || !syn.dirty || syn.in_flight {
+            if doc.loading || !(syn.dirty || syn.wants_injections()) || syn.in_flight {
                 continue;
             }
+            // Where its view is (a frame says exactly what's shown, but this parse may be the first)
+            let top = doc.text.line_to_byte(doc.top.min(doc.text.len_lines()));
+            let bottom = doc.text.line_to_byte((doc.top + 100).min(doc.text.len_lines()));
+            syn.shown_near(top..bottom);
             let job = syn.start_parse(&doc.text);
             let id = doc.id;
             self.events.jobs().spawn(move || {
@@ -2679,6 +2711,117 @@ mod tests {
         assert_eq!(ed.status.as_ref().map(|s| s.1), Some(Severity::Error));
         feed(&mut ed, ":q!<ret>");
         assert!(ed.should_quit);
+    }
+
+    /// One frame's wait for injected languages is one budget for all the buffers it shows (two `:diff`
+    /// panes jumping together don't wait twice as long), the focused one first: here a macro it can't parse
+    /// in time takes what's left, and the other pane gets nothing made on the frame — the background does
+    /// it. A buffer out of sight gets nothing either way.
+    #[test]
+    fn a_frame_waits_once_for_all_buffers() {
+        let Ok(rust) = crate::syntax::Loader::global().load(crate::syntax::spec("rust").unwrap()) else {
+            return;
+        };
+        let comments: String = (0..2000).map(|i| format!("let x{i} = {i}; // c{i}\n")).collect();
+        let block = format!(
+            "{}m! {{\n{}}}\n",
+            "fn a() {}\n".repeat(1000),
+            "let x = vec![1, 2, 3];\n".repeat(100_000)
+        );
+        // docs[0] in a pane of its own, docs[1] in the focused pane, docs[2] out of sight
+        let mut ed = editor("");
+        ed.split_view(crate::split::Dir::Vertical);
+        ed.new_scratch();
+        ed.sync_focus_view();
+        ed.new_scratch();
+        ed.current = 1;
+        crate::term::render(&mut ed, &mut Vec::new(), 120, 40).unwrap();
+        for (i, src) in [(0, &comments), (1, &block), (2, &comments)] {
+            let text = ropey::Rope::from_str(src);
+            let mut syn = crate::syntax::Syntax::new(rust.clone());
+            syn.shown_near(0..text.line_to_byte(1));
+            let job = syn.start_parse(&text);
+            let g = job.generation;
+            syn.finish_parse(g, job.run());
+            // Jumped to: the middle (of the macro)
+            let at = text.line_to_byte(text.len_lines() / 2);
+            crate::syntax::highlights(&syn, &text, at..at + 1, &mut tree_sitter::QueryCursor::new());
+            (ed.docs[i].text, ed.docs[i].syntax) = (text, Some(syn));
+        }
+        let made = |ed: &Editor, i: usize, lang: &str| {
+            let syn = ed.docs[i].syntax.as_ref().unwrap();
+            let text = &ed.docs[i].text;
+            let middle = text.line_to_byte(text.len_lines() / 2);
+            syn.layers.iter().any(|l| l.lang.name == lang && l.tree.root_node().end_byte() > middle)
+        };
+        // A frame with 1 ms of its 50 left: the macro (asked, parsed) is given up then, not 50 ms later
+        let budget = std::time::Duration::from_millis(50);
+        let start = std::time::Instant::now() - std::time::Duration::from_millis(49);
+        let t = std::time::Instant::now();
+        ed.inject_shown_now(start, budget);
+        let took = t.elapsed();
+        assert!(took < std::time::Duration::from_millis(25), "the frame's time, not a fresh 50 ms: {took:?}");
+        assert!(!made(&ed, 1, "rust"), "the macro can't be made in time");
+        assert!(!made(&ed, 0, "comment"), "no time left for the other pane");
+        assert!(ed.docs[1].syntax.as_ref().unwrap().wants_injections(), "the macro next, in the background");
+        // The next frame shows the same, with time: the other pane's made then, the one out of sight not
+        for i in [0, 2] {
+            let (syn, text) = (ed.docs[i].syntax.as_ref().unwrap(), &ed.docs[i].text);
+            let at = text.line_to_byte(text.len_lines() / 2);
+            crate::syntax::highlights(syn, text, at..at + 1, &mut tree_sitter::QueryCursor::new());
+        }
+        assert!(ed.inject_shown_now(std::time::Instant::now(), std::time::Duration::MAX));
+        assert!(made(&ed, 0, "comment"), "with time, the other pane");
+        assert!(!made(&ed, 2, "comment"), "out of sight: not on the frame");
+    }
+
+    /// Injected languages are made where the buffer is shown, not all over: a markdown file's code block at
+    /// the top is colored as Rust from its first parse, one a thousand lines down only once it's scrolled to
+    /// (the top one stays — going back is colored), one in between never.
+    #[test]
+    fn injected_languages_are_made_where_the_view_is() {
+        if crate::syntax::Loader::global().load(crate::syntax::spec("rust").unwrap()).is_err() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("tarae-near-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("notes.md");
+        let filler = "Some text.\n\n".repeat(250);
+        let block = |name: &str| format!("```rust\nfn {name}() {{}}\n```\n\n");
+        let text = format!("# Top\n\n{}{filler}{}{filler}{}", block("top"), block("middle"), block("bottom"));
+        std::fs::write(&path, text).unwrap();
+        let mut ed = editor("");
+        ed.shown_now_budget = std::time::Duration::from_secs(10); // what's made, not how fast (perf_budget_*)
+        ed.open(&path).unwrap();
+        let parsed = |ed: &Editor| {
+            ed.doc().syntax.as_ref().is_some_and(|s| s.tree.is_some() && !s.in_flight && !s.dirty)
+        };
+        ed.handle_event(crate::event::Event::Resize); // (every event schedules parses)
+        settle_until(&mut ed, parsed);
+        let rust_at = |ed: &Editor| -> Vec<usize> {
+            let text = ed.doc().text.clone();
+            let layers = ed.doc().syntax.as_ref().unwrap().layers.clone();
+            let rust = layers.iter().filter(|l| l.lang.name == "rust");
+            rust.map(|l| text.byte_to_line(l.tree.root_node().start_byte())).collect()
+        };
+        assert_eq!(rust_at(&ed), [3], "the block in view, with the first tree");
+        ed.goto_line(1008);
+        let mut frame = Vec::new();
+        crate::term::render(&mut ed, &mut frame, 100, 30).unwrap();
+        // Its first frame has it already: made right there for what it showed, then drawn again
+        assert_eq!(rust_at(&ed), [3, 1011], "the block jumped to, no parse waited for");
+        let mut screen = vt100::Parser::new(30, 100, 0);
+        screen.process(&frame);
+        let rows: Vec<String> = screen.screen().rows(0, 100).collect();
+        let row = rows.iter().position(|r| r.contains("fn bottom")).expect("the block on screen");
+        let col = rows[row].find("fn bottom").unwrap() as u16;
+        let fg = |c: u16| screen.screen().cell(row as u16, c).unwrap().fgcolor();
+        assert_ne!(fg(col), fg(col + 3), "`fn` colored as Rust, not as the code block");
+        // The lines around it next, in the background — the frame itself started it
+        assert!(ed.doc().syntax.as_ref().unwrap().in_flight, "a parse for around what the frame showed");
+        settle_until(&mut ed, parsed);
+        assert_eq!(rust_at(&ed), [3, 1011], "the one scrolled to and the one before, not the one in between");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Waits until one background job finishes and is applied.

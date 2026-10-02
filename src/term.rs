@@ -267,6 +267,13 @@ pub fn render(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io::
         frame.clear();
         render_frame(editor, &mut frame, w, h)?;
     }
+    // A place shown where its injected languages aren't made yet (jumped to): made now, drawn again
+    if editor.inject_shown_now(std::time::Instant::now(), editor.shown_now_budget) {
+        frame.clear();
+        render_frame(editor, &mut frame, w, h)?;
+    }
+    // What was drawn may want injected languages made there (around it, a buffer opened)
+    editor.schedule_parses();
     out.write_all(&frame)
 }
 
@@ -4098,7 +4105,7 @@ fn preview_lines<'a>(
             match p.previews.get(&action.preview_key()?)? {
                 crate::picker::Preview::Loading => return Some(PreviewView::Note("loading…".into())),
                 crate::picker::Preview::Unavailable(why) => return Some(PreviewView::Note(why.to_string())),
-                crate::picker::Preview::Ready { text, syntax } => (text, syntax.as_ref(), focus),
+                crate::picker::Preview::Ready { text, syntax } => (text, syntax.as_deref(), focus),
             }
         }
     };
@@ -8571,6 +8578,53 @@ mod tests {
             "perf+syntax: worst key->frame {:?} on {:?} (full parse of 20k lines {full_parse:?}, off main thread)",
             worst.0, worst.1
         );
+    }
+
+    /// Same budget for the first frame after a jump far down a big Markdown file, its tree up to date: the
+    /// frame makes the injected languages of what it shows itself (`Syntax::inject_shown_now`). 20k headings
+    /// make its root wide, and Markdown combines what it injects (HTML blocks), so asking its injection query
+    /// afresh would go over the whole file — on this frame. Only the first frame counts (the next ones find
+    /// it made).
+    #[test]
+    fn perf_budget_first_frame_after_a_jump() {
+        let budget = frame_budget();
+        let load = |l: &str| crate::syntax::Loader::global().load(crate::syntax::spec(l).unwrap());
+        let (Ok(lang), Ok(_)) = (load("markdown"), load("html")) else {
+            // Without HTML, Markdown doesn't combine: the slow way this guards against isn't there
+            eprintln!("perf+jump: skipped — no markdown or html grammar");
+            return;
+        };
+        let body: String = std::iter::once("<div>\nhtml\n</div>\n\n".to_string())
+            .chain((0..20_000).map(|i| format!("# {i}\n\nParagraph {i} with *emphasis* and `code`.\n\n")))
+            .collect();
+        // The state built anew each time, the fastest of 3 (other tests run beside it)
+        let (frame, made) = (0..3)
+            .map(|_| {
+                let mut ed = Editor::new(Config::default());
+                ed.docs[0].text = Rope::from_str(&body);
+                let mut syn = crate::syntax::Syntax::new(lang.clone());
+                syn.shown_near(0..ed.docs[0].text.line_to_byte(60));
+                let job = syn.start_parse(&ed.docs[0].text);
+                let generation = job.generation;
+                syn.finish_parse(generation, job.run());
+                ed.docs[0].syntax = Some(syn);
+                let mut buf = Vec::with_capacity(1 << 16);
+                render(&mut ed, &mut buf, 160, 50).unwrap();
+                assert!(!ed.docs[0].syntax.as_ref().unwrap().in_flight, "nothing left to parse at the top");
+                ed.handle_key("G".parse().unwrap());
+                buf.clear();
+                let t = Instant::now();
+                render(&mut ed, &mut buf, 160, 50).unwrap();
+                let frame = t.elapsed();
+                let syn = ed.docs[0].syntax.as_ref().unwrap();
+                let end = ed.docs[0].text.len_bytes() - 100;
+                (frame, syn.layers.iter().any(|l| l.tree.root_node().start_byte() > end))
+            })
+            .min()
+            .unwrap();
+        assert!(made, "made on the frame");
+        assert!(frame < budget, "the frame after the jump took {frame:?} (budget {budget:?})");
+        eprintln!("perf+jump: first frame after a jump {frame:?}");
     }
 
     /// Keys (sent as events — every event ends with the panel following the editor) → frame, worst of all.

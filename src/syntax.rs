@@ -9,6 +9,12 @@
 //! - Parsing runs in the background (principle 4). Edits are applied to the existing tree at once via
 //!   `edit`, so highlights follow the text even while parsing. Edits arriving mid-parse are collected
 //!   and reapplied to the new tree.
+//! - Injected languages (code in Markdown, HTML in PHP, a macro's tokens) are layers made only around what's
+//!   shown. A layer no edit reached is kept, and each tree keeps its injection query's matches, asking the
+//!   query again only where the text or the tree changed — so a keystroke costs what changed, not what's
+//!   shown (`Injector`). HTML layers an edit reached are parsed from their last tree (`FROM_LAST`). A place
+//!   jumped to gets its layers on the frame itself, within 4 ms (`Syntax::inject_shown_now`) — the one
+//!   parse besides `fresh_tree` that a frame waits for.
 //! - Highlighting runs queries only over the visible line range.
 //! - `locals.scm` (Helix format): a name used on screen that refers to a local definition — found through
 //!   the enclosing scopes, read from the widest enclosing node within 64 KB above — takes that definition's
@@ -200,6 +206,8 @@ pub struct LangData {
     pub textobjects: Option<Query>,
     /// Where other languages get injected (markdown code blocks·TODO in comments·macros …) — None if absent.
     pub injections: Option<Query>,
+    /// Whether `injections` combines pieces from all over (`combines`) — worked out once, when first asked.
+    combines: OnceLock<bool>,
     /// Scopes·definitions·references (`locals.scm`) — None if absent.
     locals: Option<Locals>,
     /// How new lines indent (`indents.scm`) — None if absent (a heuristic then).
@@ -283,6 +291,7 @@ impl Loader {
             highlights,
             textobjects,
             injections,
+            combines: OnceLock::new(),
             locals,
             indents,
             not_local,
@@ -466,6 +475,34 @@ fn read_query(lang: &str, file: &str, depth: usize) -> Option<String> {
 pub struct Layer {
     pub lang: Arc<LangData>,
     pub tree: Tree,
+    /// An edit since its parse may have changed what parsing it gives — else the next parse reuses it where
+    /// the injection query asks for the same ranges.
+    touched: bool,
+    /// The injection query's matches in it, as that parse found them.
+    matches: Arc<Vec<Match>>,
+    /// How many layers it's in (1: the document's) — the same pieces can be injected at two depths, and
+    /// how deep decides whether its own are made.
+    depth: usize,
+}
+
+impl Layer {
+    /// Moves the tree along with an edit, and tells whether it could now parse differently: the edit
+    /// reaches its text (touching counts — a piece may grow), or changes the gap between two pieces of a
+    /// tree holding errors (how errors are recovered counts how far apart tokens are). Moving it all
+    /// doesn't count (`parse_layer` parses it as if at the start), nor does moving a piece along its line:
+    /// the lexer's column counts only the included text before it on the line.
+    fn edit(&mut self, e: &InputEdit) {
+        if !self.touched {
+            let ranges = self.tree.included_ranges();
+            let reaches = ranges.iter().any(|r| e.start_byte <= r.end_byte && r.start_byte <= e.old_end_byte);
+            let (first, last) = (ranges.first(), ranges.last());
+            let in_gap = first
+                .zip(last)
+                .is_some_and(|(f, l)| f.start_byte < e.start_byte && e.old_end_byte < l.end_byte);
+            self.touched = reaches || in_gap && self.tree.root_node().has_error();
+        }
+        self.tree.edit(e);
+    }
 }
 
 /// Highlight spans: (start, end, global capture number) — see `highlights`.
@@ -493,6 +530,28 @@ pub struct Syntax {
     /// The last few `highlights` answers (range → spans) — a frame asks the same as the last one unless the
     /// text scrolled or changed, and the queries are most of a frame. Cleared whenever a tree changes.
     highlighted: std::cell::RefCell<Vec<(std::ops::Range<usize>, Spans)>>,
+    /// Where `layers` has the injected languages: only around what was shown (`None`: everywhere) — the
+    /// injection query and the layers' parsing cost what's on screen, not the file's size.
+    covered: Option<Vec<std::ops::Range<usize>>>,
+    /// What `highlights` was asked for since the last parse started.
+    asked: std::cell::RefCell<Vec<std::ops::Range<usize>>>,
+    /// The last few places shown (`RECENT`, latest last) — a parse injects around all of them, so going
+    /// back and forth between two keeps both colored.
+    recent: Vec<std::ops::Range<usize>>,
+    /// Something was asked for outside `covered`: parse again (for the injections), though nothing changed.
+    wants: std::cell::Cell<bool>,
+    /// Time a parse may spend on injected layers (`INJECT_BUDGET`).
+    inject_budget: std::time::Duration,
+    /// Lines injected above and below what's shown (`NEAR_LINES`).
+    near_lines: usize,
+    /// `ERROR_SPAN_MAX`.
+    error_max: usize,
+    /// The injection query's matches in the tree, as the last parse found them — the next asks it only
+    /// where something changed (`None`: not known, ask everywhere).
+    matches: Option<Arc<Vec<Match>>>,
+    /// The edits since the last parse started — what moves `matches` (and each layer's) to the text as it is:
+    /// together only (`reset` forgets both).
+    since: Option<Vec<InputEdit>>,
 }
 
 impl Syntax {
@@ -507,6 +566,15 @@ impl Syntax {
             generation: 0,
             slow: std::cell::Cell::new(false),
             highlighted: Default::default(),
+            covered: Some(Vec::new()),
+            asked: Default::default(),
+            recent: Vec::new(),
+            wants: std::cell::Cell::new(false),
+            inject_budget: INJECT_BUDGET,
+            near_lines: NEAR_LINES,
+            error_max: ERROR_SPAN_MAX,
+            matches: None,
+            since: None,
         }
     }
 
@@ -514,6 +582,7 @@ impl Syntax {
     /// code block).
     pub fn parsed(lang: Arc<LangData>, text: &Rope) -> Self {
         let mut syn = Syntax::new(lang);
+        syn.covered = None;
         let job = syn.start_parse(text);
         let generation = job.generation;
         syn.finish_parse(generation, job.run());
@@ -529,12 +598,23 @@ impl Syntax {
         if !self.layers.is_empty() {
             for l in Arc::make_mut(&mut self.layers) {
                 for e in edits {
-                    l.tree.edit(e);
+                    l.edit(e);
                 }
             }
         }
         if self.in_flight {
             self.pending_edits.extend_from_slice(edits);
+        }
+        if let Some(since) = &mut self.since {
+            since.extend_from_slice(edits);
+        }
+        // Places shown move along with the text
+        for e in edits {
+            for r in
+                self.recent.iter_mut().chain(self.asked.get_mut()).chain(self.covered.iter_mut().flatten())
+            {
+                *r = moved(r.clone(), e);
+            }
         }
         self.dirty = true;
         self.highlighted.get_mut().clear();
@@ -554,18 +634,99 @@ impl Syntax {
         self.generation += 1;
         self.dirty = true;
         self.highlighted.get_mut().clear();
+        // Which edits lead from the snapshot's matches to its text isn't known
+        (self.matches, self.since) = (None, None);
+        // The layers given are the snapshot's — where it had them isn't known: what's shown asks again
+        if self.covered.is_some() {
+            self.covered = Some(Vec::new());
+        }
+    }
+
+    /// Where the buffer is likely shown, before a frame says (it's opened, or edited out of sight): the next
+    /// parse injects there too, so a buffer's first colors come with its first tree.
+    pub fn shown_near(&self, range: std::ops::Range<usize>) {
+        if self.covered.is_some() {
+            self.asked.borrow_mut().push(range);
+        }
+    }
+
+    /// What a frame just showed outside where the layers are made, made right here — only that, no lines
+    /// around it (a background parse adds those next) and within the frame's budget (since, how long — one
+    /// for all its buffers): a place jumped to is colored from its first frame. Only while the tree is up to
+    /// date (no edit since its parse, none running); tells whether it did — not if out of time even asking
+    /// the query (a huge code block): then it's as it was.
+    pub fn inject_shown_now(
+        &mut self,
+        text: &Rope,
+        frame: (std::time::Instant, std::time::Duration),
+    ) -> bool {
+        let spent = frame.0.elapsed() >= frame.1;
+        if spent || self.dirty || self.in_flight || self.tree.is_none() || !self.wants.get() {
+            return false;
+        }
+        let Some(covered) = self.covered.clone() else { return false };
+        let shown = self.asked.borrow().clone();
+        if shown.iter().all(|r| within(&covered, r)) {
+            return false;
+        }
+        let mut job = self.start_parse(text);
+        job.near = Some(covered.into_iter().chain(shown).collect());
+        (job.near_lines, job.budget, job.frame) = (0, frame.1, Some(frame.0));
+        let generation = job.generation;
+        let parsed = job.run();
+        // The lines around it next — all of it if the frame gave up
+        let made = !parsed.gave_up;
+        match made {
+            true => self.finish_parse(generation, parsed),
+            false => self.in_flight = false,
+        }
+        self.wants.set(true);
+        made
+    }
+
+    /// Whether a parse should run though no edit came: something shown needs injections not made yet.
+    pub fn wants_injections(&self) -> bool {
+        self.wants.get()
     }
 
     /// Starts a parse — returns the input to send to the worker thread.
     pub fn start_parse(&mut self, text: &Rope) -> ParseJob {
         self.in_flight = true;
-        self.dirty = false;
+        let edited = std::mem::replace(&mut self.dirty, false);
         self.pending_edits.clear();
+        self.wants.set(false);
+        // Where to inject: around the last few places shown, what was shown since the last parse latest — all
+        // of that, however many (split windows: else each parse drops one, and the next frame asks again)
+        let asked = std::mem::take(self.asked.get_mut());
+        let shown = merged(asked.clone()).len();
+        for r in asked {
+            self.recent.retain(|x| x.end < r.start || r.end < x.start);
+            self.recent.push(r);
+        }
+        let over = self.recent.len().saturating_sub(RECENT.max(shown));
+        self.recent.drain(..over);
+        let near = self.covered.as_ref().map(|_| self.recent.clone());
+        let since = self.since.replace(Vec::new());
+        // Many edits: asked afresh (`KEPT_EDITS_MAX`)
+        let since = since.filter(|s| s.len() <= KEPT_EDITS_MAX);
+        let before = self.matches.clone().zip(since).map(|(matches, since)| Before {
+            matches,
+            since,
+            covered: self.covered.clone(),
+        });
         ParseJob {
             text: text.clone(),
             old: self.tree.clone(),
+            old_layers: self.layers.clone(),
+            edited,
             lang: self.lang.clone(),
             generation: self.generation,
+            near,
+            near_lines: self.near_lines,
+            budget: self.inject_budget,
+            before,
+            frame: None,
+            error_max: self.error_max,
         }
     }
 
@@ -579,15 +740,28 @@ impl Syntax {
         }
         if let Some(mut tree) = parsed.tree {
             let mut layers = parsed.layers;
+            if self.covered.is_some() {
+                self.covered = parsed.covered;
+                // What was shown while it ran may be covered now
+                let covered = self.covered.as_deref().unwrap_or_default();
+                let outside = self.asked.get_mut().iter().any(|r| !within(covered, r));
+                self.wants.set(outside);
+            }
             for e in self.pending_edits.drain(..) {
                 tree.edit(&e);
                 for l in &mut layers {
-                    l.tree.edit(&e);
+                    l.edit(&e);
+                }
+                for r in self.covered.iter_mut().flatten() {
+                    *r = moved(r.clone(), &e);
                 }
             }
             self.tree = Some(tree);
             self.layers = Arc::new(layers);
+            self.matches = Some(Arc::new(parsed.matches));
             self.highlighted.get_mut().clear();
+        } else {
+            self.matches = None;
         }
     }
 }
@@ -595,14 +769,53 @@ impl Syntax {
 pub struct ParseJob {
     text: Rope,
     old: Option<Tree>,
+    /// The layers so far, edited along — the untouched ones kept, HTML ones an edit reached parsed from.
+    old_layers: Arc<Vec<Layer>>,
+    /// Whether the text changed since `old` was parsed (else it's the tree, for the injections only).
+    edited: bool,
     lang: Arc<LangData>,
     pub generation: u64,
+    /// Inject only around these (`None`: everywhere).
+    near: Option<Vec<std::ops::Range<usize>>>,
+    near_lines: usize,
+    budget: std::time::Duration,
+    /// What the last parse found (`None`: not known).
+    before: Option<Before>,
+    /// A frame waits for it, since then (`Syntax::inject_shown_now`).
+    frame: Option<std::time::Instant>,
+    error_max: usize,
 }
 
-/// Parse result: tree + injected layers.
+#[cfg(test)]
+impl Taken {
+    fn add(&mut self, o: Taken) {
+        self.layers_kept += o.layers_kept;
+        self.layers_reparsed += o.layers_reparsed;
+        self.matches_kept += o.matches_kept;
+    }
+}
+
+/// What a parse took from the last.
+#[derive(Clone, Copy, Default, Debug)]
+#[cfg_attr(not(test), allow(dead_code))] // read by the tests
+struct Taken {
+    layers_kept: usize,
+    /// Layers an edit reached, parsed from the last tree.
+    layers_reparsed: usize,
+    matches_kept: usize,
+}
+
+/// Parse result: the tree, injected layers, where they're made, and the injection query's matches.
 pub struct Parsed {
     pub tree: Option<Tree>,
     pub layers: Vec<Layer>,
+    covered: Option<Vec<std::ops::Range<usize>>>,
+    #[cfg_attr(not(test), allow(dead_code))] // read by the tests
+    taken: Taken,
+    /// A frame's out of time (`Injector::gave_up`): nothing of it to keep.
+    gave_up: bool,
+    /// The injection query's matches in the tree.
+    matches: Vec<Match>,
 }
 
 impl Syntax {
@@ -653,22 +866,123 @@ fn parse_rope(
     parser.parse_with_options(&mut read, old, options)
 }
 
+/// A layer's parse over `ranges` (sorted, not empty), as if its text began the document, then moved to where
+/// it is. How a parser recovers from an error counts how far a skipped token is from the one before — for
+/// the first one, from the document's start — so else typing far above could change a layer's errors and
+/// their colors; this way a layer parses the same wherever it is, and one only moved can be kept. From
+/// `old` (a layer edited along) if given: what it has that the edits didn't reach is taken over.
+/// Given up when `until` (since, how long) is over.
+fn parse_layer(
+    parser: &mut Parser,
+    text: &Rope,
+    ranges: &[tree_sitter::Range],
+    old: Option<&Tree>,
+    until: Option<(std::time::Instant, std::time::Duration)>,
+) -> Option<Tree> {
+    let (base, at) = (ranges[0].start_byte, ranges[0].start_point);
+    let back = |p: Point| match p.row == at.row {
+        true => Point::new(0, p.column - at.column),
+        false => Point::new(p.row - at.row, p.column),
+    };
+    let shifted: Vec<tree_sitter::Range> = ranges
+        .iter()
+        .map(|r| tree_sitter::Range {
+            start_byte: r.start_byte - base,
+            end_byte: r.end_byte - base,
+            start_point: back(r.start_point),
+            end_point: back(r.end_point),
+        })
+        .collect();
+    parser.set_included_ranges(&shifted).ok()?;
+    let len = text.len_bytes();
+    let mut read = |byte: usize, _: Point| -> &[u8] {
+        let byte = byte + base;
+        if byte >= len {
+            return &[];
+        }
+        let (chunk, start, _, _) = text.chunk_at_byte(byte);
+        &chunk.as_bytes()[byte - start..]
+    };
+    let zero = Point::new(0, 0);
+    // The old one as if it began there too: the text before deleted
+    let old = old.map(|t| {
+        let mut t = t.clone();
+        t.edit(&InputEdit {
+            start_byte: 0,
+            old_end_byte: base,
+            new_end_byte: 0,
+            start_position: zero,
+            old_end_position: at,
+            new_end_position: zero,
+        });
+        t
+    });
+    let mut check = |_: &tree_sitter::ParseState| match until.is_some_and(|(t, b)| t.elapsed() > b) {
+        true => std::ops::ControlFlow::Break(()),
+        false => std::ops::ControlFlow::Continue(()),
+    };
+    let options = tree_sitter::ParseOptions::new().progress_callback(&mut check);
+    let mut tree = parser.parse_with_options(&mut read, old.as_ref(), Some(options))?;
+    // Text inserted before it all: everything moves over by `base`, the first row's columns by `at`'s
+    tree.edit(&InputEdit {
+        start_byte: 0,
+        old_end_byte: 0,
+        new_end_byte: base,
+        start_position: zero,
+        old_end_position: zero,
+        new_end_position: at,
+    });
+    Some(tree)
+}
+
 impl ParseJob {
-    /// On a worker thread — incremental parse after edits. Injected languages are parsed fresh each time
-    /// (usually small pieces).
+    /// On a worker thread — incremental parse after edits. Injected languages only around what's shown
+    /// (`near`, a few screens' worth up and down): a layer whose text no edit reached is kept, and the
+    /// injection query asked only where the text or the tree changed and what's newly near.
     pub fn run(self) -> Parsed {
         let mut parser = Parser::new();
-        let tree = parser
-            .set_language(&self.lang.language)
-            .ok()
-            .and_then(|_| parse_rope(&mut parser, &self.text, self.old.as_ref(), None));
-        let mut layers = Vec::new();
+        let tree = match &self.old {
+            // Nothing to parse again (a first reparse of a tree costs as much as a big edit's: 5 ms on a
+            // 60 KB Markdown file)
+            Some(old) if !self.edited => Some(old.clone()),
+            _ => parser
+                .set_language(&self.lang.language)
+                .ok()
+                .and_then(|_| parse_rope(&mut parser, &self.text, self.old.as_ref(), None)),
+        };
+        let covered = self.near.map(|near| around(&self.text, near, self.near_lines));
+        let (mut layers, mut taken, mut matches, mut gave_up) =
+            (Vec::new(), Taken::default(), Vec::new(), false);
         if let Some(tree) = &tree {
-            let mut inj =
-                Injector { text: &self.text, parsers: HashMap::new(), spent: std::time::Duration::ZERO };
-            inj.run(&self.lang, tree, 0, &mut layers);
+            let mut inj = Injector::new(&self.text, covered.as_deref(), self.budget);
+            (inj.frame, inj.error_max) = (self.frame, self.error_max);
+            for l in self.old_layers.iter() {
+                if l.touched {
+                    if FROM_LAST.contains(&l.lang.name.as_str()) {
+                        inj.to_reparse.entry((l.lang.name.clone(), l.depth)).or_default().push(l.clone());
+                    }
+                } else {
+                    let at = l.tree.included_ranges().first().map_or(0, |r| r.start_byte);
+                    inj.kept_layers.entry((l.lang.name.clone(), l.depth, at)).or_default().push(l.clone());
+                }
+            }
+            let last = self.old.as_ref().zip(self.before.as_ref());
+            inj.before = last.map(|(_, before)| (before, before.edited()));
+            let old = last.and_then(|(old, before)| {
+                let edits = inj.before.as_ref().map_or(&[][..], |(_, e)| &e[..]);
+                // Nothing edited, nothing changed (a frame waits for this one, or it's for around what's
+                // shown): not a step through the tree, not asking afresh
+                let changed = match self.edited {
+                    true => changed(old, tree, edits, self.error_max)?,
+                    false => Vec::new(),
+                };
+                Some((old, before.moved(&before.matches), changed))
+            });
+            matches = inj.matches(&self.lang, tree, old);
+            inj.run(&matches, 0, &mut layers);
+            (taken, gave_up) = (inj.taken, inj.gave_up.get());
         }
-        Parsed { tree, layers }
+        Parsed { tree, layers, covered, taken, matches, gave_up }
     }
 }
 
@@ -676,14 +990,324 @@ impl ParseJob {
 
 /// Caps on layer count·depth·time per document — beyond them the rest keeps the outer colors (not wrong).
 const MAX_LAYERS: usize = 2000;
+/// Lines injected above and below what's shown — scrolling a few screens finds them made.
+const NEAR_LINES: usize = 150;
+
+/// Byte ranges widened to whole lines, `lines` more each way, sorted and merged.
+fn around(text: &Rope, ranges: Vec<std::ops::Range<usize>>, lines: usize) -> Vec<std::ops::Range<usize>> {
+    let len = text.len_bytes();
+    let out: Vec<std::ops::Range<usize>> = ranges
+        .into_iter()
+        .map(|r| {
+            let first = text.byte_to_line(r.start.min(len)).saturating_sub(lines);
+            let last = (text.byte_to_line(r.end.min(len)) + lines + 1).min(text.len_lines());
+            text.line_to_byte(first)..text.line_to_byte(last)
+        })
+        .collect();
+    merged(out)
+}
+
+/// Whether an injection query combines pieces from all over into a layer — then it's asked over the whole
+/// tree even around what's shown. A combined pattern into a language this machine doesn't have makes no
+/// layer (Rust's doc comments into `markdown-rustdoc`), so it doesn't count.
+fn combines(q: &Query) -> bool {
+    (0..q.pattern_count()).any(|i| {
+        let props = q.property_settings(i);
+        let prop = |k: &str| props.iter().find(|p| &*p.key == k);
+        prop("injection.combined").is_some()
+            && prop("injection.language")
+                .and_then(|p| p.value.as_deref())
+                .is_none_or(|lang| resolve(lang).is_some_and(|s| Loader::global().load(s).is_ok()))
+    })
+}
+
+/// Languages whose layers an edit reached are parsed from the last tree, not afresh — where the random-edit
+/// test shows that gives what a fresh parse does: HTML, which PHP, Markdown's HTML blocks and Go templates
+/// make one big layer of. Not others, small layers mostly: what tree-sitter takes over from the last tree
+/// can be parsed another way afresh — Markdown's inline grammar matches emphasis across a paragraph, a
+/// span taken over misses a delimiter now matching; YAML's indentation after a Helm action — and in HTML
+/// one holding an error is parsed afresh again (how errors are recovered from differs).
+const FROM_LAST: &[&str] = &["html"];
+
+/// Places shown kept for injecting around (`Syntax::recent`) — a window or two, and a place gone back to.
+const RECENT: usize = 4;
+
+/// Whether `r` lies within one of `ranges`.
+fn within(ranges: &[std::ops::Range<usize>], r: &std::ops::Range<usize>) -> bool {
+    ranges.iter().any(|c| c.start <= r.start && r.end <= c.end)
+}
+
+/// A range moved along with an edit: shifted after it; a bound inside what it replaced goes to the
+/// replacement's start (the range's start) or end (its end).
+fn moved(r: std::ops::Range<usize>, e: &InputEdit) -> std::ops::Range<usize> {
+    let at = |b: usize, inside: usize| {
+        if b >= e.old_end_byte {
+            b - e.old_end_byte + e.new_end_byte
+        } else if b > e.start_byte {
+            inside
+        } else {
+            b
+        }
+    };
+    at(r.start, e.start_byte)..at(r.end, e.new_end_byte)
+}
+
+/// Whether byte range `r` meets one of `near` (sorted, merged) — touching counts.
+fn meets(near: &[std::ops::Range<usize>], start: usize, end: usize) -> bool {
+    let from = near.partition_point(|c| c.end < start);
+    near.get(from).is_some_and(|c| c.start <= end)
+}
 const MAX_DEPTH: usize = 3;
+/// While a frame waits, a match whose content has more children than this isn't split into its pieces —
+/// the frame gives up and leaves it to the background (a code block of 100k lines in Markdown has a child
+/// per token: 86 ms).
+const FRAME_CHILDREN_MAX: usize = 10_000;
+/// Time a frame may spend making the layers of a place jumped to (`Syntax::inject_shown_now`).
+pub const SHOWN_NOW_BUDGET: std::time::Duration = std::time::Duration::from_millis(4);
 const INJECT_BUDGET: std::time::Duration = std::time::Duration::from_millis(80);
+
+/// A match of an injection query, kept from one parse to the next.
+#[derive(Clone)]
+struct Match {
+    pattern: usize,
+    lang: String,
+    combined: bool,
+    /// Each content node with its injected pieces.
+    nodes: Vec<(std::ops::Range<usize>, Vec<tree_sitter::Range>)>,
+    /// Every capture: (index, start, end) — what tells two matches apart, and which an edit reached.
+    captures: Vec<(u32, usize, usize)>,
+}
+
+impl Match {
+    fn start(&self) -> usize {
+        self.nodes.first().map_or(0, |(n, _)| n.start)
+    }
+
+    /// What tells two matches apart.
+    fn key(&self) -> (usize, Vec<(u32, usize, usize)>) {
+        (self.pattern, self.captures.clone())
+    }
+
+    /// Moved along with an edit (one it reached is asked again anyway, so where it lands doesn't matter).
+    fn edit(&mut self, e: &InputEdit) {
+        for (node, pieces) in &mut self.nodes {
+            *node = moved(node.clone(), e);
+            for r in pieces {
+                *r = edited(*r, e);
+            }
+        }
+        for c in &mut self.captures {
+            let r = moved(c.1..c.2, e);
+            (c.1, c.2) = (r.start, r.end);
+        }
+    }
+}
+
+/// A tree's last parse for `Injector::matches`: (its tree as edited since, its matches moved along, where the
+/// text or the tree changed).
+type Was<'t> = (&'t Tree, Vec<Match>, Vec<std::ops::Range<usize>>);
+
+/// What the last parse found, so this one asks the query again only where something may have changed.
+struct Before {
+    /// The document's matches, in the text that parse ran on (layers keep theirs).
+    matches: Arc<Vec<Match>>,
+    /// The edits since, in order.
+    since: Vec<InputEdit>,
+    /// Where it injected around (`None`: everywhere), as the text is now.
+    covered: Option<Vec<std::ops::Range<usize>>>,
+}
+
+impl Before {
+    /// Matches found then, moved along with the edits since.
+    fn moved(&self, matches: &[Match]) -> Vec<Match> {
+        let mut out = matches.to_vec();
+        for m in &mut out {
+            for e in &self.since {
+                m.edit(e);
+            }
+        }
+        out
+    }
+
+    /// Each edit's new text, as the text is now (moved along with the edits after it).
+    fn edited(&self) -> Vec<std::ops::Range<usize>> {
+        let mut out: Vec<std::ops::Range<usize>> = Vec::with_capacity(self.since.len());
+        for e in &self.since {
+            for r in &mut out {
+                *r = moved(r.clone(), e);
+            }
+            out.push(e.start_byte..e.new_end_byte);
+        }
+        out
+    }
+}
+
+/// More edits than this since the last parse (a replace-all, many cursors), and the injection query is
+/// asked afresh: moving every match along every edit would cost more.
+const KEPT_EDITS_MAX: usize = 100;
+/// An error longer than this where something changed, and its tree's matches are asked afresh: everything
+/// in it is asked again either way (`changed`), and twice — the old tree and the new.
+const ERROR_SPAN_MAX: usize = 16 << 10;
+/// More places changed than this, or a tree whose root holds more nodes than that (a file of 200k flat
+/// statements), and its matches are asked afresh: each place is asked over on its own, the query cursor
+/// going from the root through every node before it, and tree-sitter's changed ranges step through every
+/// one of the root's (70 ms for 200k) — where asking afresh asks only around what's shown.
+const CHANGED_MAX: usize = 8;
+const WIDE_ROOT: usize = 4096;
+
+/// A piece moved along with an edit, points too — as tree-sitter moves a tree's ranges, but for a bound
+/// inside the text replaced (it goes to its end, not its start: a match reaching it is dropped anyway).
+fn edited(mut r: tree_sitter::Range, e: &InputEdit) -> tree_sitter::Range {
+    let at = |b: usize, p: Point| {
+        if b >= e.old_end_byte {
+            let p = match p.row > e.old_end_position.row {
+                true => Point::new(p.row - e.old_end_position.row, p.column),
+                false => Point::new(0, p.column.saturating_sub(e.old_end_position.column)),
+            };
+            let p = match p.row > 0 {
+                true => Point::new(e.new_end_position.row + p.row, p.column),
+                false => Point::new(e.new_end_position.row, e.new_end_position.column + p.column),
+            };
+            (b - e.old_end_byte + e.new_end_byte, p)
+        } else if b > e.start_byte {
+            (e.new_end_byte, e.new_end_position)
+        } else {
+            (b, p)
+        }
+    };
+    (r.start_byte, r.start_point) = at(r.start_byte, r.start_point);
+    (r.end_byte, r.end_point) = at(r.end_byte, r.end_point);
+    r
+}
+
+/// Where a tree may differ from the last one (edited along — for a kept layer, the same): where the text changed
+/// (`edits`) and the tree's changed ranges — a byte wider each way (touching counts), then widened to the
+/// tokens, and the errors, of either tree its ends are in, until none reaches out. The changed ranges say
+/// where a byte's ancestors changed, which misses some: two tokens of a kind merged into one (every byte
+/// still in a comment) or one split — tree-sitter steps over two same-kind tokens without looking whether
+/// their ends agree — and an empty node moved or made where an error was recovered from (Svelte's `{}`).
+/// `None` where asking afresh costs less: an error longer than `error_max`, more than `CHANGED_MAX` places,
+/// a root wider than `WIDE_ROOT`.
+fn changed(
+    old: &Tree,
+    tree: &Tree,
+    edits: &[std::ops::Range<usize>],
+    error_max: usize,
+) -> Option<Vec<std::ops::Range<usize>>> {
+    if old.root_node().child_count().max(tree.root_node().child_count()) as usize > WIDE_ROOT {
+        return None;
+    }
+    let wider = |r: std::ops::Range<usize>| r.start.saturating_sub(1)..r.end + 1;
+    // Too many before even looking
+    if merged(edits.iter().cloned().map(wider).collect()).len() > CHANGED_MAX {
+        return None;
+    }
+    let changes = old.changed_ranges(tree).map(|r| r.start_byte..r.end_byte);
+    let mut out = merged(edits.iter().cloned().chain(changes).map(wider).collect());
+    loop {
+        let mut grown = false;
+        for r in &mut out {
+            for t in [old, tree] {
+                // What its ends are in
+                for at in [r.start, r.end - 1] {
+                    let path = holding(t, at);
+                    let token = path.last().filter(|n| n.child_count() == 0);
+                    for n in path.iter().filter(|n| n.is_error()).chain(token) {
+                        if n.start_byte() < r.start || r.end < n.end_byte() {
+                            if n.is_error() && n.end_byte() - n.start_byte() > error_max {
+                                return None;
+                            }
+                            *r = r.start.min(n.start_byte())..r.end.max(n.end_byte());
+                            grown = true;
+                        }
+                    }
+                }
+            }
+        }
+        out = merged(out);
+        if !grown {
+            return (out.len() <= CHANGED_MAX).then_some(out);
+        }
+    }
+}
+
+/// The nodes holding byte `at`, outermost first — found going down once (`Node::parent` looks for the
+/// child from the root each time: slow in a wide tree).
+fn holding(tree: &Tree, at: usize) -> Vec<Node<'_>> {
+    let mut cursor = tree.walk();
+    let mut out = vec![cursor.node()];
+    while cursor.goto_first_child_for_byte(at).is_some() && cursor.node().start_byte() <= at {
+        out.push(cursor.node());
+    }
+    out
+}
+
+/// Ranges sorted and merged — touching ones too.
+fn merged(mut ranges: Vec<std::ops::Range<usize>>) -> Vec<std::ops::Range<usize>> {
+    ranges.sort_by_key(|r| r.start);
+    let mut out: Vec<std::ops::Range<usize>> = Vec::with_capacity(ranges.len());
+    for r in ranges {
+        match out.last_mut() {
+            Some(last) if r.start <= last.end => last.end = last.end.max(r.end),
+            _ => out.push(r),
+        }
+    }
+    out
+}
+
+/// The parts of `a` outside `b` (both sorted, merged) — an empty one in `a` (a window at the end) too,
+/// unless `b` meets it.
+fn outside(a: &[std::ops::Range<usize>], b: &[std::ops::Range<usize>]) -> Vec<std::ops::Range<usize>> {
+    let mut out = Vec::new();
+    for r in a {
+        if r.is_empty() {
+            if !meets(b, r.start, r.end) {
+                out.push(r.clone());
+            }
+            continue;
+        }
+        let mut from = r.start;
+        for c in b.iter().filter(|c| c.start < r.end && r.start < c.end) {
+            if c.start > from {
+                out.push(from..c.start);
+            }
+            from = from.max(c.end);
+        }
+        if from < r.end {
+            out.push(from..r.end);
+        }
+    }
+    out
+}
 
 struct Injector<'a> {
     text: &'a Rope,
     parsers: HashMap<String, Parser>,
-    /// Time spent parsing injected languages (grammar loading·query compilation happen once, so not counted).
+    /// Layers parsed before and untouched since, by (language, depth, where the first piece starts): one
+    /// asked for with the same pieces again is taken from here, not parsed.
+    kept_layers: HashMap<(String, usize, usize), Vec<Layer>>,
+    /// Layers an edit reached, by (language, depth): one asked for where one of these was is parsed from it.
+    to_reparse: HashMap<(String, usize), Vec<Layer>>,
+    taken: Taken,
+    /// Time spent parsing injected languages (grammar loading·query compilation happen once, so not counted)
+    /// — past `budget`, layers are only kept, not parsed.
     spent: std::time::Duration,
+    budget: std::time::Duration,
+    /// Made while a frame waits, since then (`Syntax::inject_shown_now`): parsing given up `budget` after,
+    /// even one under way, and grammars not loaded yet left for later — layers left out, not made wrong.
+    frame: Option<std::time::Instant>,
+    /// An error longer than this where something changed: its tree's matches asked afresh (`changed`).
+    error_max: usize,
+    /// Out of a frame's time while asking the query (or past `FRAME_CHILDREN_MAX`): the frame keeps what it
+    /// had — its matches would be cut short, and kept so.
+    gave_up: std::cell::Cell<bool>,
+    /// Only the layers meeting these (sorted, merged; `None`: all).
+    near: Option<&'a [std::ops::Range<usize>]>,
+    /// Ask the query over the whole tree even so (what the tests compare with).
+    whole_query: bool,
+    /// The last parse's, and each edit since as the text is now: matches are kept, and the query asked
+    /// only where edits were and what's newly near (`None`: everywhere).
+    before: Option<(&'a Before, Vec<std::ops::Range<usize>>)>,
 }
 
 /// Node range — children excluded (default), only unnamed children included (`include-unnamed-children`),
@@ -743,16 +1367,69 @@ fn shebang(first_line: &str) -> Option<String> {
     Some(prog.to_string())
 }
 
-impl Injector<'_> {
+impl<'a> Injector<'a> {
+    fn new(text: &'a Rope, near: Option<&'a [std::ops::Range<usize>]>, budget: std::time::Duration) -> Self {
+        Injector {
+            text,
+            parsers: HashMap::new(),
+            kept_layers: HashMap::new(),
+            to_reparse: HashMap::new(),
+            taken: Taken::default(),
+            spent: std::time::Duration::ZERO,
+            budget,
+            frame: None,
+            error_max: ERROR_SPAN_MAX,
+            gave_up: std::cell::Cell::new(false),
+            near,
+            whole_query: false,
+            before: None,
+        }
+    }
+
     fn node_text(&self, node: Node) -> String {
         node_slice(self.text, node).chars().take(200).collect()
     }
 
-    fn run(&mut self, host: &Arc<LangData>, tree: &Tree, depth: usize, out: &mut Vec<Layer>) {
-        let Some(q) = &host.injections else { return };
-        if depth >= MAX_DEPTH {
-            return;
-        }
+    /// A layer parsed before over exactly these pieces, untouched since.
+    fn take_kept(&mut self, lang: &str, depth: usize, ranges: &[tree_sitter::Range]) -> Option<Layer> {
+        let at = ranges.first()?.start_byte;
+        let same = self.kept_layers.get_mut(&(lang.to_string(), depth, at))?;
+        let i = same.iter().position(|l| l.tree.included_ranges() == ranges)?;
+        self.taken.layers_kept += 1;
+        Some(same.swap_remove(i))
+    }
+
+    /// The layer an edit reached that was where these pieces are (spans overlapping most), if any.
+    fn take_to_reparse(&mut self, lang: &str, depth: usize, ranges: &[tree_sitter::Range]) -> Option<Layer> {
+        let span = |r: &[tree_sitter::Range]| {
+            r.first().map_or(0, |r| r.start_byte)..r.last().map_or(0, |r| r.end_byte)
+        };
+        let new = span(ranges);
+        let same = self.to_reparse.get_mut(&(lang.to_string(), depth))?;
+        let overlap = |l: &Layer| {
+            let old = span(&l.tree.included_ranges());
+            old.end.min(new.end) as isize - old.start.max(new.start) as isize
+        };
+        let (i, _) = same
+            .iter()
+            .enumerate()
+            .map(|(i, l)| (i, overlap(l)))
+            .filter(|&(_, o)| o > 0)
+            .max_by_key(|&(_, o)| o)?;
+        self.taken.layers_reparsed += 1;
+        Some(same.swap_remove(i))
+    }
+
+    /// The query's matches in `tree` over `passes` (sorted, merged) — those far from what's shown left out,
+    /// but where the language `combines` its pieces from all over.
+    fn ask(
+        &self,
+        q: &Query,
+        combines: bool,
+        tree: &Tree,
+        passes: &[std::ops::Range<usize>],
+        out: &mut Vec<Match>,
+    ) {
         let idx = |name: &str| q.capture_names().iter().position(|n| *n == name).map(|i| i as u32);
         let (content_i, lang_i, shebang_i, file_i) = (
             idx("injection.content"),
@@ -762,81 +1439,270 @@ impl Injector<'_> {
         );
         let text = self.text;
         let provider = |node: Node| node_slice(text, node).chunks().map(str::as_bytes);
+        let mut cursor = QueryCursor::new();
+        for pass in passes {
+            // A byte wider: the cursor leaves out a node only touching the range (`meets` counts it), and
+            // an empty one at its end
+            cursor.set_byte_range(pass.start.saturating_sub(1)..pass.end.saturating_add(1));
+            // While a frame waits, stopped at its time — even walking to a match (the cursor steps through
+            // every sibling before the range: a macro of 100k lines, most of a second)
+            let over = || self.frame.is_some_and(|t| t.elapsed() > self.budget);
+            let mut check = |_: &tree_sitter::QueryCursorState| match over() {
+                true => std::ops::ControlFlow::Break(()),
+                false => std::ops::ControlFlow::Continue(()),
+            };
+            let options = tree_sitter::QueryCursorOptions::new().progress_callback(&mut check);
+            let mut matches = cursor.matches_with_options(q, tree.root_node(), provider, options);
+            while let Some(m) = matches.next() {
+                let props = q.property_settings(m.pattern_index);
+                let prop = |k: &str| props.iter().find(|p| &*p.key == k);
+                // Far from what's shown: not worth the work (by the whole node — two patterns on one node
+                // take its pieces differently, and which wins the spot mustn't change)
+                if let Some(near) = self.near
+                    && !(combines && prop("injection.combined").is_some())
+                    && !m.captures().iter().any(|c| {
+                        Some(c.index) == content_i && meets(near, c.node.start_byte(), c.node.end_byte())
+                    })
+                {
+                    continue;
+                }
+                let mut lang =
+                    prop("injection.language").and_then(|p| p.value.as_deref().map(str::to_string));
+                let mut content = Vec::new();
+                for c in m.captures() {
+                    let i = Some(c.index);
+                    if i == content_i {
+                        content.push(c.node);
+                    }
+                    if i == lang_i {
+                        lang = Some(self.node_text(c.node));
+                    } else if i == shebang_i && lang.is_none() {
+                        let first = self.node_text(c.node);
+                        lang = shebang(first.lines().next().unwrap_or_default());
+                    } else if i == file_i && lang.is_none() {
+                        let f = self.node_text(c.node);
+                        lang = detect(Path::new(f.trim())).map(|s| s.name.clone());
+                    }
+                }
+                let Some(lang) = lang else { continue };
+                let (children, unnamed) = (
+                    prop("injection.include-children").is_some(),
+                    prop("injection.include-unnamed-children").is_some(),
+                );
+                let many = |n: &Node| n.child_count() as usize > FRAME_CHILDREN_MAX;
+                if self.frame.is_some() && !children && content.iter().any(many) {
+                    self.gave_up.set(true);
+                    return;
+                }
+                out.push(Match {
+                    pattern: m.pattern_index,
+                    lang,
+                    combined: prop("injection.combined").is_some(),
+                    nodes: content
+                        .iter()
+                        .map(|&n| (n.byte_range(), node_ranges(n, children, unnamed)))
+                        .collect(),
+                    captures: m
+                        .captures()
+                        .iter()
+                        .map(|c| (c.index, c.node.start_byte(), c.node.end_byte()))
+                        .collect(),
+                });
+            }
+            if over() {
+                self.gave_up.set(true);
+                return;
+            }
+        }
+    }
+
+    /// The query's matches in `tree` (the document's or a layer's). With what the last parse found there —
+    /// `old`: its tree as edited since, its matches moved along, and where the text or the tree changed
+    /// (sorted, merged) — those are kept but where it changed, and the query is asked only there and
+    /// where's newly near.
+    ///
+    /// The cursor starts a match only at a node meeting the range it's asked over (or whose parent does,
+    /// for a pattern of siblings), and one starting at a node clear of every change is the same in both
+    /// trees. So the matches to drop are the old tree's there (asked over the same ranges — their captured
+    /// text is unchanged, so they still match — plus any capturing what changed), and the ones to add the
+    /// new tree's.
+    fn matches(&mut self, host: &LangData, tree: &Tree, old: Option<Was>) -> Vec<Match> {
+        let Some(q) = &host.injections else { return Vec::new() };
+        // Around what's shown, the query asks only there (a pass per range) — unless the language combines
+        // what it injects: those pieces come from all over (worked out before a frame waits: `run`)
+        let combines = *host.combines.get_or_init(|| combines(q));
+        let all = 0..usize::MAX;
+        let everywhere = std::slice::from_ref(&all);
+        let near = match self.near {
+            Some(near) if !combines && !self.whole_query => near,
+            _ => everywhere,
+        };
+        let mut out = Vec::new();
+        let key = Match::key;
+        match (old, &self.before) {
+            (Some((old_tree, mut kept, changed)), Some((before, _))) => {
+                // Newly near: where far matches were left out before and aren't now (in a language that
+                // combines, the query was asked everywhere, but its far matches left out all the same)
+                let newly = match &before.covered {
+                    None => Vec::new(),
+                    Some(was) => outside(self.near.unwrap_or(everywhere), was),
+                };
+                let mut gone = Vec::new();
+                self.ask(q, combines, old_tree, &changed, &mut gone);
+                let gone: std::collections::HashSet<_> = gone.iter().map(key).collect();
+                kept.retain(|m| {
+                    let reached = m.captures.iter().any(|&(_, s, e)| meets(&changed, s, e));
+                    let far = !(combines && m.combined)
+                        && self.near.is_some_and(|n| !m.nodes.iter().any(|(r, _)| meets(n, r.start, r.end)));
+                    !reached && !far && !gone.contains(&key(m))
+                });
+                self.taken.matches_kept += kept.len();
+                out = kept;
+                self.ask(q, combines, tree, &merged([changed, newly].concat()), &mut out);
+            }
+            _ => self.ask(q, combines, tree, near, &mut out),
+        }
+        // A match reaching into two passes comes twice; a kept one may come again
+        let mut seen = std::collections::HashSet::new();
+        out.retain(|m| seen.insert(key(m)));
+        out
+    }
+
+    /// `matches` for a layer, from the layer it was (`was`: its tree, edited along, and matches): what changed
+    /// is the edits within their spans — a node spanning a gap between pieces reads the text there — and
+    /// where the trees differ (a kept layer's is the same).
+    fn layer_matches(
+        &mut self,
+        data: &LangData,
+        tree: &Tree,
+        was: Option<(&Tree, &[Match])>,
+        depth: usize,
+    ) -> Vec<Match> {
+        if depth >= MAX_DEPTH {
+            return Vec::new();
+        }
+        let old = was.zip(self.before.as_ref()).and_then(|((old_tree, was), (before, edits))| {
+            let (a, b) = (tree.included_ranges(), old_tree.included_ranges());
+            let start = a.iter().chain(&b).map(|r| r.start_byte).min().unwrap_or(0);
+            let end = a.iter().chain(&b).map(|r| r.end_byte).max().unwrap_or(0);
+            let within: Vec<_> = edits.iter().filter(|r| r.start <= end && start <= r.end).cloned().collect();
+            // A kept one nothing changed in: no need to look (a file has hundreds of layers)
+            let same = std::ptr::eq(old_tree, tree);
+            let changed = match same && within.is_empty() {
+                true => Vec::new(),
+                false => changed(old_tree, tree, &within, self.error_max)?,
+            };
+            Some((old_tree, before.moved(was), changed))
+        });
+        self.matches(data, tree, old)
+    }
+
+    /// The layers `matches` makes (and theirs, nested).
+    fn run(&mut self, matches: &[Match], depth: usize, out: &mut Vec<Layer>) {
+        if self.gave_up.get() {
+            return;
+        }
+        // In document order — passes over ranges apart give them in another order than one pass over all,
+        // and kept ones come first. Where two patterns catch the same spot (shebang·language name,
+        // `lang="ts"` or not) the one listed first wins.
+        let mut matches: Vec<&Match> = matches.iter().collect();
+        matches.sort_by(|a, b| (a.start(), a.pattern, &a.captures).cmp(&(b.start(), b.pattern, &b.captures)));
         // (language, ranges) — combined ones (`injection.combined`) become one per (pattern, language)
         let mut single: Vec<(String, Vec<tree_sitter::Range>)> = Vec::new();
         let mut combined: Vec<((usize, String), Vec<tree_sitter::Range>)> = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(q, tree.root_node(), provider);
-        while let Some(m) = matches.next() {
-            let props = q.property_settings(m.pattern_index);
-            let prop = |k: &str| props.iter().find(|p| &*p.key == k);
-            let mut lang = prop("injection.language").and_then(|p| p.value.as_deref().map(str::to_string));
-            let mut content = Vec::new();
-            for c in m.captures() {
-                let i = Some(c.index);
-                if i == content_i {
-                    content.push(c.node);
-                }
-                if i == lang_i {
-                    lang = Some(self.node_text(c.node));
-                } else if i == shebang_i && lang.is_none() {
-                    let first = self.node_text(c.node);
-                    lang = shebang(first.lines().next().unwrap_or_default());
-                } else if i == file_i && lang.is_none() {
-                    let f = self.node_text(c.node);
-                    lang = detect(Path::new(f.trim())).map(|s| s.name.clone());
-                }
-            }
-            let Some(lang) = lang else { continue };
-            let (children, unnamed) = (
-                prop("injection.include-children").is_some(),
-                prop("injection.include-unnamed-children").is_some(),
-            );
+        for m in matches {
             let mut ranges = Vec::new();
-            for node in content {
-                // When two patterns catch the same spot (shebang·language name), only the first one
-                if seen.insert((node.start_byte(), node.end_byte())) {
-                    ranges.extend(node_ranges(node, children, unnamed));
+            for (node, pieces) in &m.nodes {
+                if seen.insert((node.start, node.end)) {
+                    ranges.extend_from_slice(pieces);
                 }
             }
             if ranges.is_empty() {
                 continue;
             }
-            if prop("injection.combined").is_some() {
-                let key = (m.pattern_index, lang);
+            if m.combined {
+                let key = (m.pattern, m.lang.clone());
                 match combined.iter_mut().find(|(k, _)| *k == key) {
                     Some((_, r)) => r.extend(ranges),
                     None => combined.push((key, ranges)),
                 }
             } else {
-                single.push((lang, ranges));
+                single.push((m.lang.clone(), ranges));
             }
         }
-        drop(matches);
         let all = combined.into_iter().map(|((_, l), r)| (l, r)).chain(single);
         for (lang, mut ranges) in all {
-            if out.len() >= MAX_LAYERS || self.spent > INJECT_BUDGET {
-                return;
-            }
-            let Some(data) = resolve(&lang).and_then(|s| Loader::global().load(s).ok()) else { continue };
-            ranges.sort_by_key(|r| r.start_byte);
-            ranges.dedup_by(|b, a| b.start_byte < a.end_byte);
-            let parser = self.parsers.entry(data.name.clone()).or_insert_with(|| {
-                let mut p = Parser::new();
-                let _ = p.set_language(&data.language);
-                p
-            });
-            if parser.set_included_ranges(&ranges).is_err() {
+            // Only layers meeting what's shown
+            if let Some(near) = self.near
+                && !ranges.iter().any(|r| meets(near, r.start_byte, r.end_byte))
+            {
                 continue;
             }
-            let t = std::time::Instant::now();
-            let tree = parse_rope(parser, self.text, None, None);
-            self.spent += t.elapsed();
-            let Some(tree) = tree else { continue };
-            out.push(Layer { lang: data.clone(), tree: tree.clone() });
-            self.run(&data, &tree, depth + 1, out);
+            if out.len() >= MAX_LAYERS {
+                return;
+            }
+            let Some(spec) = resolve(&lang) else { continue };
+            // While a frame waits, not a grammar to load, nor its query worked out (dlopen, query compiling:
+            // tens of ms) — and not a layer whose matches couldn't be found
+            let data = match self.frame {
+                Some(_) => match Loader::global().loaded(&spec.name) {
+                    Some(d) if d.injections.is_none() || d.combines.get().is_some() => d,
+                    _ => continue,
+                },
+                None => match Loader::global().load(spec) {
+                    Ok(d) => d,
+                    Err(_) => continue,
+                },
+            };
+            ranges.sort_by_key(|r| r.start_byte);
+            ranges.dedup_by(|b, a| b.start_byte < a.end_byte);
+            let Some((tree, was)) = self.layer_tree(&data, depth + 1, &ranges) else { continue };
+            // A kept layer's last tree is itself
+            let was = was.as_ref().map(|(old, matches)| (old.as_ref().unwrap_or(&tree), &matches[..]));
+            let matches = Arc::new(self.layer_matches(&data, &tree, was, depth + 1));
+            out.push(Layer {
+                lang: data.clone(),
+                tree,
+                touched: false,
+                matches: matches.clone(),
+                depth: depth + 1,
+            });
+            self.run(&matches, depth + 1, out);
         }
+    }
+
+    /// The tree for a layer over these pieces, and the last one's (tree — `None`: this is it — and matches):
+    /// kept if it's there, else parsed — from the one an edit reached if any — while there's time.
+    #[allow(clippy::type_complexity)]
+    fn layer_tree(
+        &mut self,
+        data: &LangData,
+        depth: usize,
+        ranges: &[tree_sitter::Range],
+    ) -> Option<(Tree, Option<(Option<Tree>, Arc<Vec<Match>>)>)> {
+        if let Some(l) = self.take_kept(&data.name, depth, ranges) {
+            return Some((l.tree, Some((None, l.matches))));
+        }
+        let until = self.frame.map(|t| (t, self.budget));
+        if self.spent > self.budget || until.is_some_and(|(t, b)| t.elapsed() > b) {
+            return None;
+        }
+        let old = self.take_to_reparse(&data.name, depth, ranges);
+        let parser = self.parsers.entry(data.name.clone()).or_insert_with(|| {
+            let mut p = Parser::new();
+            let _ = p.set_language(&data.language);
+            p
+        });
+        let t = std::time::Instant::now();
+        // One holding an error is always a fresh parse (`FROM_LAST`)
+        let from = old.as_ref().map(|l| &l.tree);
+        let mut tree = parse_layer(parser, self.text, ranges, from, until);
+        if from.is_some() && tree.as_ref().is_some_and(|t| t.root_node().has_error()) {
+            tree = parse_layer(parser, self.text, ranges, None, until);
+        }
+        self.spent += t.elapsed();
+        Some((tree?, old.map(|l| (Some(l.tree), l.matches))))
     }
 }
 
@@ -1030,6 +1896,19 @@ pub fn highlights(
     cursor: &mut QueryCursor,
 ) -> Vec<(usize, usize, u32)> {
     const KEEP: usize = 4; // a few panes' worth
+    // What's shown is where the next parse injects; outside what's injected now, one is wanted (if the
+    // language injects anything)
+    if let Some(covered) = &syn.covered
+        && syn.lang.injections.is_some()
+    {
+        let mut asked = syn.asked.borrow_mut();
+        if !asked.iter().any(|r| r.start <= range.start && range.end <= r.end) {
+            asked.push(range.clone());
+        }
+        if !within(covered, &range) {
+            syn.wants.set(true);
+        }
+    }
     let mut memo = syn.highlighted.borrow_mut();
     if let Some(k) = memo.iter().position(|(r, _)| *r == range) {
         let hit = memo.remove(k);
@@ -1216,6 +2095,8 @@ mod tests {
         let src = "# Title\n\nSome **bold** text.\n\n```rust\nfn main() {}\n```\n";
         let text = Rope::from_str(src);
         let mut syn = Syntax::new(md);
+        // Everywhere, not just around what was shown (nothing is here)
+        syn.covered = None;
         let job = syn.start_parse(&text);
         let generation = job.generation;
         syn.finish_parse(generation, job.run());
@@ -1236,6 +2117,695 @@ mod tests {
             let b = src.find("bold").unwrap();
             let on_b = spans.iter().rev().find(|&&(s, e, _)| s <= b + 2 && b + 2 < e).unwrap();
             assert!(capture_name(on_b.2).contains("bold"), "{}", capture_name(on_b.2));
+        }
+    }
+
+    /// Edits at random, and what's shown at random (one window or two, a few lines): the layers made around
+    /// it — the injection query asked only there — are the ones the query asked over the whole tree gives
+    /// there, in every language with injections whose grammar is here (nested, combined, template strings).
+    /// `SEED=n` runs that one instead.
+    #[test]
+    fn injected_layers_around_what_is_shown_match_the_whole_querys() {
+        match std::env::var("SEED") {
+            Ok(s) => injected_layers_match(&[s.parse().unwrap()]),
+            Err(_) => injected_layers_match(&[0x2545_f491_4f6c_dd1d]),
+        }
+    }
+
+    /// Runs where something was found (numbered as the seed sweeps number them) — beside the others, so they
+    /// don't take longer.
+    fn seeds<const N: usize>(n: [u64; N]) -> [u64; N] {
+        n.map(|n| n * 104_729 + 7)
+    }
+
+    /// Passes over ranges apart give the matches in another order than one pass (svelte, vue).
+    #[test]
+    fn injected_layers_match_where_passes_come_in_another_order() {
+        injected_layers_match(&seeds([23, 36]));
+    }
+
+    /// Where errors are recovered from: an edit between two pieces of a layer holding one, an HTML layer
+    /// parsed from the last holding one, an empty node moving in one (svelte).
+    #[test]
+    fn injected_layers_match_where_errors_are() {
+        injected_layers_match(&seeds([19, 16, 116]));
+    }
+
+    /// A window shown at the end, on the empty last line; an edit coming while a parse runs, before what
+    /// it injected around.
+    #[test]
+    fn injected_layers_match_at_the_end_and_mid_parse() {
+        injected_layers_match(&seeds([14, 263]));
+    }
+
+    fn injected_layers_match(seeds: &[u64]) {
+        let rust = "/// Doc with `code`.\nfn main() {\n    // a comment\n    let v = vec![1, 2, 3];\n    \
+                    println!(\"{} {}\", v[0], v[1]); /* block */\n    assert_eq!(v.len(), 3);\n}\n\n\
+                    // tail\nfn other() { let s = format!(\"x\"); }\n";
+        let md = "# Title\n\nSome *text* and `code`.\n\n```rust\nfn f() {} // c\nlet x = vec![1];\n```\n\n\
+                  More **bold** text.\n\n```toml\na = 1\n```\n";
+        let html = "<!doctype html>\n<html>\n<head>\n<style>\nbody { color: red; } /* c */\n</style>\n<script>\n\
+                    // note\nconst x = `<b>${1}</b>`;\nfunction f() { return /a+b/.test(\"x\"); }\n</script>\n</head>\n\
+                    <body style=\"margin: 0\" onclick=\"f()\">\n<!-- comment -->\n<p>Hi <b>there</b></p>\n\
+                    <script type=\"module\">import a from \"./a.js\"; a();</script>\n</body>\n</html>\n";
+        let vue = "<template>\n  <div :class=\"cls\" @click=\"go(1)\">{{ msg + 1 }}</div>\n</template>\n\
+                   <script setup>\n// comment\nconst msg = ref(`hi ${name}`)\n</script>\n\
+                   <style scoped>\n.a { color: red }\n</style>\n";
+        let svelte = "<script lang=\"ts\">\n  let count: number = 0;\n  // c\n</script>\n\
+                      <button on:click={() => count++}>{count} {#if count > 1}many{/if}</button>\n\
+                      <style>\n  button { color: red; }\n</style>\n";
+        let php = "<html><body>\n<?php\n// note\n$r = preg_match('/a+/', $s);\n$db->query(\"SELECT * FROM t\");\n\
+                   echo \"<b>\" . $x . \"</b>\";\n?>\n<script>var a = 1;</script>\n<p><?= $name ?></p>\n</body></html>\n";
+        let js = "// note\n/** @param {string} a */\nfunction f(a) {\n  const q = gql`query { a }`;\n\
+                  const h = html`<b>${a}</b>`;\n  return /x+/g.test(a) ? `t ${a}` : a;\n}\n";
+        let dockerfile = "FROM alpine\n# comment\nRUN apk add curl && \\\n    echo \"hi\" > /x\n\
+                          RUN [\"echo\", \"x\"]\nCMD echo $HOME\n";
+        let nix = "{ pkgs }:\n{\n  # comment\n  script = ''\n    echo hi\n  '';\n  buildPhase = ''\n    make\n  '';\n\
+                   x = pkgs.writeShellScript \"a\" ''\n    ls\n  '';\n}\n";
+        let helm = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: {{ .Release.Name }}\n  # comment\ndata:\n\
+                    {{- range $k, $v := .Values.data }}\n  {{ $k }}: {{ $v | quote }}\n{{- end }}\n  plain: value\n";
+        let markup: &[&str] = &[
+            "<script>x()</script>",
+            "<style>a{b:c}</style>",
+            "</script>",
+            "<script>",
+            "</style>",
+            "<!-- c -->",
+            "<",
+            ">",
+            "=\"y\" ",
+        ];
+        let cases: [(&str, &str, &[&str]); 10] = [
+            ("rust", rust, &[]),
+            ("markdown", md, &[]),
+            ("html", html, markup),
+            ("vue", vue, &[markup, &["{{ a }}", ":x=\"y\" ", "@click=\"f()\" "]].concat()),
+            ("svelte", svelte, &[markup, &["{x}", "{#if a}", "{/if}", "lang=\"ts\" "]].concat()),
+            ("php", php, &[markup, &["<?php ", "?>", "<?= $a ?>", "'", "preg_match('/b/', $x)"]].concat()),
+            ("javascript", js, &["html`<i>x</i>`", "${", "/re/", "/** @a */", "gql`{ b }`"]),
+            ("dockerfile", dockerfile, &["RUN echo a\n", "\\\n", "&& ls", "$X"]),
+            ("nix", nix, &["''", "''\n echo x\n''", "${a}", "writeShellScript \"b\" ''x''"]),
+            (
+                "helm",
+                helm,
+                &["{{ .Values.x }}", "{{- if .a }}", "{{- end }}", "{{/* c */}}", ": ", "\n  ", "- item\n"],
+            ),
+        ];
+        let common = [
+            "x",
+            " ",
+            "\n",
+            "// note\n",
+            "/// doc `a`\n",
+            "/* b */",
+            "println!(\"{}\", a);\n",
+            "vec![1, 2]",
+            "\"",
+            "{",
+            "}",
+            "(",
+            ")",
+            "`",
+            "```rust\nfn g() {}\n```\n",
+            "*",
+            "# H\n",
+            "é",
+            "TODO: ",
+            "https://x.y ",
+        ];
+        let describe = |layers: &[Layer]| -> Vec<String> {
+            layers
+                .iter()
+                .map(|l| {
+                    let r: Vec<_> = l
+                        .tree
+                        .included_ranges()
+                        .iter()
+                        .map(|r| (r.start_byte, r.end_byte, r.start_point, r.end_point))
+                        .collect();
+                    format!("{} {r:?} {}", l.lang.name, l.tree.root_node().to_sexp())
+                })
+                .collect()
+        };
+        let mut tested = Vec::new();
+        let mut cut = 0;
+        let mut php_reparsed = 0;
+        for &(mut seed) in seeds {
+            let mut rnd = |n: usize| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                (seed % n as u64) as usize
+            };
+            for (lang, src, own) in cases {
+                let Ok(data) = Loader::global().load(spec(lang).unwrap()) else { continue };
+                let snippets: Vec<&str> = common.iter().chain(own.iter()).copied().collect();
+                let mut text = Rope::from_str(src);
+                let mut syn = Syntax::new(data);
+                syn.inject_budget = std::time::Duration::MAX;
+                let mut layered = false;
+                let edit_once = |text: &mut Rope, syn: &mut Syntax, rnd: &mut dyn FnMut(usize) -> usize| {
+                    let len = text.len_chars();
+                    let at = text.char_to_byte(rnd(len + 1));
+                    let change = if rnd(3) == 0 && at < text.len_bytes() {
+                        let to = text.char_to_byte((text.byte_to_char(at) + 1 + rnd(6)).min(len));
+                        crate::transaction::Change::delete(at, to)
+                    } else {
+                        crate::transaction::Change::insert(at, snippets[rnd(snippets.len())])
+                    };
+                    let edits = crate::transaction::Transaction::new(vec![change]).apply(text, false);
+                    syn.edit(&edits.iter().map(|e| e.ts).collect::<Vec<_>>());
+                };
+                let mut snapshots: Vec<(Rope, Option<Trees>)> = Vec::new();
+                let mut taken = Taken::default();
+                for step in 0..300 {
+                    for _ in 0..rnd(3) {
+                        if rnd(5) == 0 {
+                            snapshots.push((text.clone(), syn.trees()));
+                        }
+                        edit_once(&mut text, &mut syn, &mut rnd);
+                    }
+                    if rnd(8) == 0 && !snapshots.is_empty() {
+                        let (t, trees) = snapshots.swap_remove(rnd(snapshots.len()));
+                        text = t;
+                        syn.reset(trees);
+                    }
+                    // What's shown: a window or two of a few lines, a line or none around them; an error
+                    // where something changed asked afresh always, past a few bytes, or never
+                    syn.near_lines = rnd(2);
+                    syn.error_max = [0, 64, usize::MAX][rnd(3)];
+                    for _ in 0..1 + rnd(2) {
+                        let lines = text.len_lines();
+                        let first = rnd(lines);
+                        let last = (first + rnd(4)).min(lines);
+                        let range = text.line_to_byte(first)..text.line_to_byte(last);
+                        highlights(&syn, &text, range, &mut QueryCursor::new());
+                    }
+                    // Some frames make what they show right there (a jump) — checked as they are, or after
+                    // the parse that follows
+                    let made_now = rnd(3) == 0
+                        && syn.inject_shown_now(&text, (std::time::Instant::now(), std::time::Duration::MAX));
+                    let parse = (syn.dirty || syn.wants_injections()) && !(made_now && rnd(2) == 0);
+                    if !made_now && !parse {
+                        continue;
+                    }
+                    if parse {
+                        let job = syn.start_parse(&text);
+                        let generation = job.generation;
+                        let parsed = job.run();
+                        taken.add(parsed.taken);
+                        // While it runs: an edit, or an undo (it lands on another text)
+                        match rnd(8) {
+                            0 | 1 => edit_once(&mut text, &mut syn, &mut rnd),
+                            2 if !snapshots.is_empty() => {
+                                let (t, trees) = snapshots.swap_remove(rnd(snapshots.len()));
+                                text = t;
+                                syn.reset(trees);
+                            }
+                            _ => {}
+                        }
+                        syn.finish_parse(generation, parsed);
+                        if syn.dirty {
+                            let job = syn.start_parse(&text);
+                            let generation = job.generation;
+                            let parsed = job.run();
+                            taken.add(parsed.taken);
+                            syn.finish_parse(generation, parsed);
+                        }
+                    }
+                    let covered = syn.covered.clone().unwrap();
+                    let made_fresh = |near: Option<&[std::ops::Range<usize>]>, whole_query: bool| {
+                        let mut inj =
+                            Injector { whole_query, ..Injector::new(&text, near, std::time::Duration::MAX) };
+                        let matches = inj.matches(&syn.lang, syn.tree.as_ref().unwrap(), None);
+                        let mut out = Vec::new();
+                        inj.run(&matches, 0, &mut out);
+                        out
+                    };
+                    // The matches kept from parse to parse are the ones asking afresh gives — the document's
+                    // and each layer's
+                    let keys = |matches: &[Match]| {
+                        let mut k: Vec<_> = matches.iter().map(Match::key).collect();
+                        k.sort();
+                        k
+                    };
+                    let mut inj = Injector::new(&text, Some(&covered), std::time::Duration::MAX);
+                    let fresh = inj.matches(&syn.lang, syn.tree.as_ref().unwrap(), None);
+                    assert!(
+                        keys(syn.matches.as_ref().unwrap()) == keys(&fresh),
+                        "{lang} step {step}: matches"
+                    );
+                    for l in syn.layers.iter() {
+                        let fresh = inj.layer_matches(&l.lang, &l.tree, None, l.depth);
+                        assert!(
+                            keys(&l.matches) == keys(&fresh),
+                            "{lang} step {step}: {}'s matches",
+                            l.lang.name
+                        );
+                    }
+                    let whole = made_fresh(Some(&covered), true);
+                    assert_eq!(
+                        describe(&syn.layers),
+                        describe(&whole),
+                        "{lang} step {step} around {covered:?}:\n{text}"
+                    );
+                    layered |= !whole.is_empty();
+                    let all = made_fresh(None, false);
+                    cut += all.len() - whole.len();
+                }
+                assert!(layered, "{lang}: never injected anything — the test text doesn't exercise it");
+                // Else it would only check fresh layers
+                assert!(taken.layers_kept > 0, "{lang}: no layer kept");
+                assert!(taken.matches_kept > 0, "{lang}: no match kept");
+                if lang == "php" {
+                    php_reparsed += taken.layers_reparsed;
+                }
+                tested.push(lang);
+            }
+        }
+        if !tested.is_empty() {
+            assert!(cut > 100, "layers left out for being away from what's shown: {cut} ({tested:?})");
+        }
+        // Over these runs: PHP's HTML layer (`FROM_LAST`) was parsed from the last
+        if std::env::var("SEED").is_err() && tested.contains(&"php") {
+            assert!(php_reparsed > 0, "no layer parsed from the last");
+        }
+        eprintln!("tested in {tested:?}");
+    }
+
+    /// A Rust text with a comment on each of `lines` lines.
+    fn commented(lines: usize) -> Rope {
+        Rope::from_str(&(0..lines).map(|i| format!("let x{i} = {i}; // c{i}\n")).collect::<String>())
+    }
+
+    fn parse_now(syn: &mut Syntax, text: &Rope) {
+        let job = syn.start_parse(text);
+        let generation = job.generation;
+        syn.finish_parse(generation, job.run());
+    }
+
+    /// The lines with an injected comment layer.
+    fn comment_lines(syn: &Syntax, text: &Rope) -> Vec<usize> {
+        let comments = syn.layers.iter().filter(|l| l.lang.name == "comment");
+        comments.map(|l| text.byte_to_line(l.tree.root_node().start_byte())).collect()
+    }
+
+    /// A language with nothing to inject doesn't parse again for being scrolled.
+    #[test]
+    fn a_language_without_injections_never_wants_them() {
+        let Ok(comment) = Loader::global().load(spec("comment").unwrap()) else { return };
+        assert!(comment.injections.is_none());
+        let text = Rope::from_str(&"TODO: a note\n".repeat(1000));
+        let mut syn = Syntax::new(comment);
+        parse_now(&mut syn, &text);
+        highlights(&syn, &text, text.line_to_byte(900)..text.line_to_byte(920), &mut QueryCursor::new());
+        assert!(!syn.wants_injections());
+    }
+
+    /// Shown again while the parse for it ran: once it lands, nothing more is wanted.
+    #[test]
+    fn what_the_landing_parse_covers_isnt_wanted_again() {
+        let Ok(rust) = Loader::global().load(spec("rust").unwrap()) else { return };
+        let text = commented(1000);
+        let mut syn = Syntax::new(rust);
+        syn.near_lines = 0;
+        let shown = text.line_to_byte(500)..text.line_to_byte(520);
+        highlights(&syn, &text, shown.clone(), &mut QueryCursor::new());
+        let job = syn.start_parse(&text);
+        let generation = job.generation;
+        let parsed = job.run();
+        highlights(&syn, &text, shown.clone(), &mut QueryCursor::new());
+        assert!(syn.wants_injections(), "not covered yet");
+        syn.finish_parse(generation, parsed);
+        assert!(!syn.wants_injections(), "it is now");
+        let lines = comment_lines(&syn, &text);
+        assert!((500..520).all(|l| lines.contains(&l)), "{lines:?}");
+    }
+
+    /// A syntax made whole (a preview) keeps no list of what it was asked for.
+    #[test]
+    fn a_whole_syntax_keeps_nothing_of_what_was_shown() {
+        let Ok(rust) = Loader::global().load(spec("rust").unwrap()) else { return };
+        let text = commented(200);
+        let syn = Syntax::parsed(rust, &text);
+        for i in 0..100 {
+            highlights(&syn, &text, text.line_to_byte(i)..text.line_to_byte(i + 20), &mut QueryCursor::new());
+        }
+        assert!(syn.asked.borrow().is_empty());
+        assert!(!syn.wants_injections());
+    }
+
+    /// Going back and forth between two places keeps both injected (no parse, no frame without their
+    /// colors); parses with nothing new shown don't spread; places move along with edits above them.
+    #[test]
+    fn recent_places_stay_injected() {
+        let Ok(rust) = Loader::global().load(spec("rust").unwrap()) else { return };
+        let mut text = commented(2000);
+        let mut syn = Syntax::new(rust);
+        syn.near_lines = 0;
+        let at = |text: &Rope, line: usize| text.line_to_byte(line)..text.line_to_byte(line + 10);
+        for line in [100, 1500] {
+            highlights(&syn, &text, at(&text, line), &mut QueryCursor::new());
+            parse_now(&mut syn, &text);
+        }
+        highlights(&syn, &text, at(&text, 100), &mut QueryCursor::new());
+        assert!(!syn.wants_injections(), "the first place is still injected");
+        let lines = comment_lines(&syn, &text);
+        assert!(lines.contains(&100) && lines.contains(&1500), "{lines:?}");
+        let covered = syn.covered.clone();
+        parse_now(&mut syn, &text);
+        parse_now(&mut syn, &text);
+        assert_eq!(syn.covered, covered, "no wider for parses with nothing new shown");
+        // The same place shown again and again takes one of the places kept, not all
+        for _ in 0..RECENT {
+            highlights(&syn, &text, at(&text, 100), &mut QueryCursor::new());
+            parse_now(&mut syn, &text);
+        }
+        highlights(&syn, &text, at(&text, 1500), &mut QueryCursor::new());
+        assert!(!syn.wants_injections(), "the other place is still kept");
+        // 300 lines pasted at the top: the places move down with their text
+        let paste = crate::transaction::Change::insert(0, commented(300).to_string());
+        let edits = crate::transaction::Transaction::new(vec![paste]).apply(&mut text, false);
+        syn.edit(&edits.iter().map(|e| e.ts).collect::<Vec<_>>());
+        parse_now(&mut syn, &text);
+        highlights(&syn, &text, at(&text, 1800), &mut QueryCursor::new());
+        assert!(!syn.wants_injections(), "the place moved along");
+        assert!(comment_lines(&syn, &text).contains(&1800));
+    }
+
+    /// A frame gives up — and keeps what it had, for the background to do — where even asking the query
+    /// would take long: a match whose content has more children than `FRAME_CHILDREN_MAX` (a child per token
+    /// of a code block: 2000 lines are past it), or its time running out while asking.
+    #[test]
+    fn a_frame_gives_up_where_asking_takes_long() {
+        let (Ok(md), Ok(rust)) =
+            (Loader::global().load(spec("markdown").unwrap()), Loader::global().load(spec("rust").unwrap()))
+        else {
+            return;
+        };
+        let frame = |budget| (std::time::Instant::now(), budget);
+        let middle = |text: &Rope| text.line_to_byte(text.len_lines() / 2);
+        let src = format!(
+            "# A\n\n{}```rust\n{}```\n",
+            "text\n\n".repeat(1000),
+            "fn f() { let x = vec![1, 2, 3]; }\n".repeat(2000)
+        );
+        let text = Rope::from_str(&src);
+        let mut syn = Syntax::new(md);
+        syn.near_lines = 0;
+        highlights(&syn, &text, 0..text.line_to_byte(1), &mut QueryCursor::new());
+        parse_now(&mut syn, &text);
+        highlights(&syn, &text, middle(&text)..middle(&text) + 1, &mut QueryCursor::new());
+        assert!(
+            !syn.inject_shown_now(&text, frame(std::time::Duration::MAX)),
+            "the block's too many children"
+        );
+        assert!(syn.wants_injections() && !syn.in_flight);
+        parse_now(&mut syn, &text);
+        let rust_at = |syn: &Syntax, at| {
+            syn.layers.iter().any(|l| l.lang.name == "rust" && l.tree.root_node().end_byte() > at)
+        };
+        assert!(rust_at(&syn, middle(&text)), "the background made it");
+        // Its time out while asking over many lines: it gives up, not finishes the query
+        let text = commented(20_000);
+        let mut syn = Syntax::new(rust);
+        syn.near_lines = 0;
+        highlights(&syn, &text, 0..text.line_to_byte(1), &mut QueryCursor::new());
+        parse_now(&mut syn, &text);
+        highlights(&syn, &text, 0..text.len_bytes(), &mut QueryCursor::new());
+        assert!(!syn.inject_shown_now(&text, frame(std::time::Duration::from_millis(1))));
+        assert!(syn.wants_injections());
+    }
+
+    /// A parse with nothing edited since the last (a frame's own, or one for around what's shown) keeps
+    /// every match — nothing changed — even where one with edits would ask afresh (a root wider than
+    /// `WIDE_ROOT`): it runs while a frame waits.
+    #[test]
+    fn nothing_edited_keeps_every_match() {
+        let Ok(rust) = Loader::global().load(spec("rust").unwrap()) else { return };
+        let text = commented(WIDE_ROOT);
+        let mut syn = Syntax::new(rust);
+        syn.near_lines = 0;
+        highlights(&syn, &text, 0..text.line_to_byte(10), &mut QueryCursor::new());
+        parse_now(&mut syn, &text);
+        highlights(&syn, &text, text.line_to_byte(3000)..text.line_to_byte(3010), &mut QueryCursor::new());
+        let job = syn.start_parse(&text);
+        assert!(job.run().taken.matches_kept >= 10);
+    }
+
+    /// More places shown at once than are kept (`RECENT` — split windows): all of them stay injected, and
+    /// parsing settles rather than dropping one each time and being asked for it again.
+    #[test]
+    fn many_places_shown_at_once_settle() {
+        let Ok(rust) = Loader::global().load(spec("rust").unwrap()) else { return };
+        let text = commented(4000);
+        let mut syn = Syntax::new(rust);
+        syn.near_lines = 0;
+        let show = |syn: &Syntax| {
+            for i in 0..RECENT + 1 {
+                let line = 500 * i;
+                highlights(
+                    syn,
+                    &text,
+                    text.line_to_byte(line)..text.line_to_byte(line + 10),
+                    &mut QueryCursor::new(),
+                );
+            }
+        };
+        show(&syn);
+        parse_now(&mut syn, &text);
+        show(&syn);
+        assert!(!syn.wants_injections(), "every place shown is injected");
+    }
+
+    /// A place jumped to gets its layers right away — the lines shown only, what was made before kept, the
+    /// lines around them left to a parse after — but not while a parse runs (its landing would lose them)
+    /// or an edit waits for one.
+    #[test]
+    fn a_place_jumped_to_is_injected_right_away() {
+        let Ok(rust) = Loader::global().load(spec("rust").unwrap()) else { return };
+        let mut text = commented(2000);
+        let mut syn = Syntax::new(rust);
+        syn.near_lines = 5;
+        let at = |text: &Rope, line: usize| text.line_to_byte(line)..text.line_to_byte(line + 10);
+        highlights(&syn, &text, at(&text, 100), &mut QueryCursor::new());
+        parse_now(&mut syn, &text);
+        let budget = std::time::Duration::MAX;
+        // Shown while a parse runs: not now
+        let job = syn.start_parse(&text);
+        highlights(&syn, &text, at(&text, 1500), &mut QueryCursor::new());
+        assert!(!syn.inject_shown_now(&text, (std::time::Instant::now(), budget)));
+        syn.finish_parse(job.generation, job.run());
+        // An edit waiting: not now
+        highlights(&syn, &text, at(&text, 1000), &mut QueryCursor::new());
+        let edits = crate::transaction::Transaction::new(vec![crate::transaction::Change::insert(0, " ")])
+            .apply(&mut text, false);
+        syn.edit(&edits.iter().map(|e| e.ts).collect::<Vec<_>>());
+        assert!(!syn.inject_shown_now(&text, (std::time::Instant::now(), budget)));
+        parse_now(&mut syn, &text);
+        // The frame's time spent already (another buffer took it): not now
+        highlights(&syn, &text, at(&text, 1800), &mut QueryCursor::new());
+        let ago = std::time::Instant::now() - std::time::Duration::from_millis(5);
+        assert!(!syn.inject_shown_now(&text, (ago, std::time::Duration::from_millis(5))));
+        // Up to date
+        assert!(syn.inject_shown_now(&text, (std::time::Instant::now(), budget)));
+        let lines = comment_lines(&syn, &text);
+        assert!((1800..1810).all(|l| lines.contains(&l)), "the lines shown");
+        assert!(!lines.contains(&1797) && !lines.contains(&1812), "not the lines around: {lines:?}");
+        assert!(lines.contains(&95) && lines.contains(&1505), "what was made before, kept");
+        assert!(syn.wants_injections(), "the lines around next");
+        parse_now(&mut syn, &text);
+        let lines = comment_lines(&syn, &text);
+        assert!(lines.contains(&1795) && lines.contains(&1814), "{lines:?}");
+    }
+
+    /// Out of time: the layers already made stay (they cost nothing), only new ones are left for the parse
+    /// after — and grammars not loaded yet aren't loaded while a frame waits.
+    #[test]
+    fn out_of_time_layers_made_stay_and_grammars_wait() {
+        let Ok(rust) = Loader::global().load(spec("rust").unwrap()) else { return };
+        let mut text = commented(2000);
+        let mut syn = Syntax::new(rust);
+        syn.near_lines = 0;
+        let at = |text: &Rope, line: usize| text.line_to_byte(line)..text.line_to_byte(line + 10);
+        highlights(&syn, &text, at(&text, 1500), &mut QueryCursor::new());
+        parse_now(&mut syn, &text);
+        // A parse with no time: at most the first new one made
+        highlights(&syn, &text, at(&text, 100), &mut QueryCursor::new());
+        syn.inject_budget = std::time::Duration::ZERO;
+        parse_now(&mut syn, &text);
+        let lines = comment_lines(&syn, &text);
+        assert!((1500..1510).all(|l| lines.contains(&l)), "the ones made: {lines:?}");
+        assert!(!(100..110).all(|l| lines.contains(&l)), "no time to parse them");
+        syn.inject_budget = std::time::Duration::MAX;
+        highlights(&syn, &text, at(&text, 100), &mut QueryCursor::new());
+        parse_now(&mut syn, &text);
+        assert!((100..110).all(|l| comment_lines(&syn, &text).contains(&l)), "the parse after made them");
+        // A Fish block in Markdown, its grammar not loaded: not loaded while a frame waits
+        let (Ok(md), Some(fish)) = (Loader::global().load(spec("markdown").unwrap()), spec("fish")) else {
+            return;
+        };
+        if Loader::global().loaded(&fish.name).is_some() || Loader::global().load(fish).is_err() {
+            return; // (loaded by another test already, or not here)
+        }
+        let src = format!("# A\n{}```fish\necho hi\n```\n", "text\n\n".repeat(500));
+        text = Rope::from_str(&src);
+        let mut syn = Syntax::new(md);
+        syn.near_lines = 0;
+        highlights(&syn, &text, 0..10, &mut QueryCursor::new());
+        parse_now(&mut syn, &text);
+        Loader::global().langs.lock().unwrap().remove(&fish.name);
+        highlights(&syn, &text, text.line_to_byte(995)..text.len_bytes(), &mut QueryCursor::new());
+        assert!(syn.inject_shown_now(&text, (std::time::Instant::now(), std::time::Duration::MAX)));
+        assert!(Loader::global().loaded(&fish.name).is_none(), "loaded while a frame waited");
+        assert!(!syn.layers.iter().any(|l| l.lang.name == "fish"));
+        parse_now(&mut syn, &text);
+        assert!(syn.layers.iter().any(|l| l.lang.name == "fish"), "the parse after made it");
+    }
+
+    /// A layer's parse while a frame waits is given up when its time is over, even half done (one layer can
+    /// be a whole file in a code block).
+    #[test]
+    fn a_layer_parse_is_given_up_in_time() {
+        let Ok(rust) = Loader::global().load(spec("rust").unwrap()) else { return };
+        let text = commented(20_000);
+        let all = [tree_sitter::Range {
+            start_byte: 0,
+            end_byte: text.len_bytes(),
+            start_point: Point::new(0, 0),
+            end_point: Point::new(text.len_lines() - 1, 0),
+        }];
+        let mut parser = Parser::new();
+        parser.set_language(&rust.language).unwrap();
+        let over = Some((std::time::Instant::now(), std::time::Duration::ZERO));
+        assert!(parse_layer(&mut parser, &text, &all, None, over).is_none());
+        assert!(parse_layer(&mut parser, &text, &all, None, None).is_some());
+    }
+
+    /// The injection query is asked afresh, not just where something changed, after many edits (moving
+    /// every match along each would cost more) or where an edit meets a long error (everything in it would
+    /// be asked again, twice).
+    #[test]
+    fn many_edits_or_a_long_error_ask_afresh() {
+        let Ok(rust) = Loader::global().load(spec("rust").unwrap()) else { return };
+        // `edits` spaces typed at the end, or `-` many lines apart
+        let kept_after = |src: &str, edits: isize, error_max: usize| {
+            let mut text = Rope::from_str(src);
+            let mut syn = Syntax::new(rust.clone());
+            syn.covered = None;
+            syn.error_max = error_max;
+            parse_now(&mut syn, &text);
+            for i in 0..edits.unsigned_abs() {
+                let at = if edits > 0 { text.len_bytes() - 1 } else { text.line_to_byte(i * 5) };
+                let edits =
+                    crate::transaction::Transaction::new(vec![crate::transaction::Change::insert(at, " ")])
+                        .apply(&mut text, false);
+                syn.edit(&edits.iter().map(|e| e.ts).collect::<Vec<_>>());
+            }
+            let job = syn.start_parse(&text);
+            job.run().taken.matches_kept
+        };
+        let fine = commented(50).to_string();
+        let max = KEPT_EDITS_MAX as isize;
+        assert!(kept_after(&fine, max, usize::MAX) > 0);
+        assert_eq!(kept_after(&fine, max + 1, usize::MAX), 0);
+        // So many places apart
+        let max = CHANGED_MAX as isize;
+        assert!(kept_after(&fine, -max, usize::MAX) > 0);
+        assert_eq!(kept_after(&fine, -max - 1, usize::MAX), 0);
+        // A file of flat statements, its root wider than `WIDE_ROOT`
+        assert!(kept_after(&commented(WIDE_ROOT / 2 - 1).to_string(), 1, usize::MAX) > 0);
+        assert_eq!(kept_after(&commented(WIDE_ROOT / 2 + 1).to_string(), 1, usize::MAX), 0);
+        // An edit at an error on the last line: what's above kept, unless the error is too long
+        let broken = format!("{fine}let z = @@@@\n");
+        assert!(kept_after(&broken, 1, usize::MAX) > 0);
+        assert_eq!(kept_after(&broken, 1, 0), 0);
+    }
+
+    /// The same pieces can be injected at two depths (a comment in a macro's tokens: one from the document,
+    /// one from the macro's layer) — and what's made in them differs by depth: each is kept as its own.
+    #[test]
+    fn the_same_pieces_at_two_depths_are_kept_apart() {
+        let Ok(rust) = Loader::global().load(spec("rust").unwrap()) else { return };
+        let text = Rope::from_str("let a = 1;\n");
+        let syn = Syntax::parsed(rust.clone(), &text);
+        let tree = syn.tree.unwrap();
+        let ranges = tree.included_ranges();
+        let mut inj = Injector::new(&text, None, std::time::Duration::MAX);
+        let made = |depth: usize, n: usize| {
+            let m = Match {
+                pattern: 0,
+                lang: "comment".into(),
+                combined: false,
+                nodes: Vec::new(),
+                captures: Vec::new(),
+            };
+            let matches = Arc::new(vec![m; n]);
+            Layer { lang: rust.clone(), tree: tree.clone(), touched: false, matches, depth }
+        };
+        for l in [made(1, 1), made(2, 0)] {
+            inj.kept_layers.entry((l.lang.name.clone(), l.depth, 0)).or_default().push(l);
+        }
+        assert_eq!(inj.take_kept("rust", 2, &ranges).map(|l| l.matches.len()), Some(0));
+        assert_eq!(inj.take_kept("rust", 1, &ranges).map(|l| l.matches.len()), Some(1));
+    }
+
+    /// Around what's shown: whole lines, so many more each way, merged; and a layer touching it meets it.
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)] // lists of ranges that happen to have one
+    fn around_what_is_shown_is_whole_lines() {
+        let text = Rope::from_str("a\nbb\nccc\ndddd\neeeee\n");
+        // "bb" (2..4) and "dddd" (9..13), a line more each way: lines 0–4 and 2–5, one range
+        assert_eq!(around(&text, vec![9..10, 2..3], 1), [0..20]);
+        assert_eq!(around(&text, vec![2..3], 0), [2..5]);
+        assert_eq!(around(&text, vec![2..3, 14..15], 0), [2..5, 14..20]);
+        let near = [10..20];
+        assert!(meets(&near, 5, 10) && meets(&near, 20, 25), "touching counts");
+        assert!(!meets(&near, 5, 9) && !meets(&near, 21, 25));
+    }
+
+    /// A language whose combined injections can make a layer is asked everywhere; Rust's only one goes into
+    /// `markdown-rustdoc`, which there's no grammar for, so Rust is asked around what's shown.
+    #[test]
+    fn only_injections_that_can_combine_are_asked_everywhere() {
+        let Ok(rust) = Loader::global().load(spec("rust").unwrap()) else { return };
+        assert!(resolve("markdown-rustdoc").is_none(), "if there's a grammar for it now, this changes");
+        assert!(!combines(rust.injections.as_ref().unwrap()));
+        let lang = rust.language.clone();
+        let q = |src: &str| Query::new(&lang, src).unwrap();
+        assert!(combines(&q(
+            "((line_comment) @injection.content (#set! injection.language \"comment\") (#set! injection.combined))"
+        )));
+        assert!(
+            combines(&q("((line_comment) @injection.content (#set! injection.combined))")),
+            "a language from the text"
+        );
+        assert!(!combines(&q("((line_comment) @injection.content (#set! injection.language \"comment\"))")));
+    }
+
+    /// Where two patterns catch the same spot, the one listed first wins, however the query was asked —
+    /// Svelte's `<script lang="ts">` is TypeScript (listed before plain JavaScript), also when only the
+    /// script's inside is shown.
+    #[test]
+    fn the_pattern_listed_first_wins_a_spot() {
+        let (Ok(svelte), Ok(_), Ok(_)) = (
+            Loader::global().load(spec("svelte").unwrap()),
+            Loader::global().load(spec("typescript").unwrap()),
+            Loader::global().load(spec("javascript").unwrap()),
+        ) else {
+            return;
+        };
+        let text =
+            Rope::from_str("<p>a</p>\n<script lang=\"ts\">\nlet a: number = 1;\n</script>\n<p>b</p>\n");
+        for shown in [0..text.len_bytes(), 30..40] {
+            let mut syn = Syntax::new(svelte.clone());
+            syn.near_lines = 0;
+            highlights(&syn, &text, shown.clone(), &mut QueryCursor::new());
+            let job = syn.start_parse(&text);
+            let generation = job.generation;
+            syn.finish_parse(generation, job.run());
+            let langs: Vec<_> = syn.layers.iter().map(|l| l.lang.name.as_str()).collect();
+            assert_eq!(langs, ["typescript"], "shown {shown:?}");
         }
     }
 
@@ -1284,6 +2854,7 @@ mod tests {
         let src = "kind: Deployment\nimage: \"{{ .Values.tag }}\"\n";
         let text = Rope::from_str(src);
         let mut syn = Syntax::new(lang);
+        syn.covered = None; // everywhere, not just around what was shown (nothing is here)
         let job = syn.start_parse(&text);
         let g = job.generation;
         syn.finish_parse(g, job.run());
@@ -1295,5 +2866,166 @@ mod tests {
         assert!(top(src.find("Deployment").unwrap()).is_some_and(|c| c.starts_with("string")), "YAML value");
         let values = src.find("Values").unwrap();
         assert!(!top(values).unwrap_or_default().starts_with("string"), "in quotes: template color");
+    }
+
+    /// Editing a template action moves the YAML after it along its line, and the YAML layer is kept: the
+    /// lexer counts a column from the included text only, so `c` stays nested under `b` however long the
+    /// action before `b` is.
+    #[test]
+    fn a_layer_moved_along_its_line_is_kept() {
+        let (Ok(lang), Ok(_)) =
+            (Loader::global().load(spec("helm").unwrap()), Loader::global().load(spec("yaml").unwrap()))
+        else {
+            return;
+        };
+        let yaml = |syn: &Syntax| -> Vec<String> {
+            syn.layers
+                .iter()
+                .filter(|l| l.lang.name == "yaml")
+                .map(|l| l.tree.root_node().to_sexp())
+                .collect()
+        };
+        let mut text = Rope::from_str("{{ .a }}b:\n         c: 1\n");
+        let mut syn = Syntax::new(lang.clone());
+        syn.covered = None;
+        parse_now(&mut syn, &text);
+        // `b` from column 8 to 10 — past `c`'s 9, were columns counted in the whole line
+        let tx = crate::transaction::Transaction::new(vec![crate::transaction::Change::insert(4, "bc")]);
+        let edits = tx.apply(&mut text, false);
+        syn.edit(&edits.iter().map(|e| e.ts).collect::<Vec<_>>());
+        let job = syn.start_parse(&text);
+        let generation = job.generation;
+        let parsed = job.run();
+        assert_eq!(parsed.taken.layers_kept, 1);
+        syn.finish_parse(generation, parsed);
+        let fresh = yaml(&Syntax::parsed(lang, &text));
+        assert_eq!(yaml(&syn), fresh);
+        assert_eq!(fresh[0].matches("(block_mapping ").count(), 2, "c nested under b: {fresh:?}");
+    }
+
+    /// Layers by language and pieces.
+    type Described = Vec<(String, Vec<(usize, usize)>)>;
+
+    /// `src` parsed, then `change` made and parsed again from that: its layers (language, pieces), a fresh
+    /// parse's, and how many layers were parsed from the last — `None` if a grammar in `langs` isn't here.
+    fn layers_after(
+        langs: &[&str],
+        src: &str,
+        change: crate::transaction::Change,
+    ) -> Option<(Described, Described, usize)> {
+        for l in langs {
+            Loader::global().load(spec(l)?).ok()?;
+        }
+        let lang = Loader::global().load(spec(langs[0])?).ok()?;
+        let describe = |syn: &Syntax| {
+            let ranges =
+                |l: &Layer| l.tree.included_ranges().iter().map(|r| (r.start_byte, r.end_byte)).collect();
+            syn.layers.iter().map(|l| (l.lang.name.clone(), ranges(l))).collect::<Vec<_>>()
+        };
+        let mut text = Rope::from_str(src);
+        let mut syn = Syntax::new(lang.clone());
+        syn.covered = None;
+        parse_now(&mut syn, &text);
+        let edits = crate::transaction::Transaction::new(vec![change]).apply(&mut text, false);
+        syn.edit(&edits.iter().map(|e| e.ts).collect::<Vec<_>>());
+        let job = syn.start_parse(&text);
+        let generation = job.generation;
+        let parsed = job.run();
+        let redone = parsed.taken.layers_reparsed;
+        syn.finish_parse(generation, parsed);
+        Some((describe(&syn), describe(&Syntax::parsed(lang, &text)), redone))
+    }
+
+    /// An argument typed before the string in `$db->query(…)` — clear of all the match captures, the
+    /// method's name and the string — and the SQL is gone: the query wants it as the first argument. Only
+    /// asking the last tree where the edit was finds that match to drop.
+    #[test]
+    fn a_match_broken_between_what_it_captures_is_dropped() {
+        let src = "<?php\n$db->query(  \"SELECT 1\");\n";
+        let at = src.find('(').unwrap() + 2;
+        let change = crate::transaction::Change::insert(at, "$x, ");
+        let Some((kept, fresh, _)) = layers_after(&["php", "sql"], src, change) else { return };
+        assert!(!fresh.iter().any(|(l, _)| l == "sql"), "{fresh:?}");
+        assert_eq!(kept, fresh);
+    }
+
+    /// PHP's HTML layer starting after `<?php … ?>`, a word typed in its text: it's parsed from the last
+    /// one, which first goes where the new one starts (both parsed as if at the document's start) — so
+    /// what the edit didn't reach is taken over: the list's tokens after it are the last tree's own.
+    #[test]
+    fn a_layer_parsed_from_the_last_takes_over_what_the_edit_missed() {
+        let (Ok(lang), Ok(_)) =
+            (Loader::global().load(spec("php").unwrap()), Loader::global().load(spec("html").unwrap()))
+        else {
+            return;
+        };
+        let src = "<?php $a = 1; ?>\n<div>\n<p>one two</p>\n<ul><li>x</li></ul>\n</div>\n";
+        let mut text = Rope::from_str(src);
+        let mut syn = Syntax::new(lang.clone());
+        syn.covered = None;
+        parse_now(&mut syn, &text);
+        let edits = crate::transaction::Transaction::new(vec![crate::transaction::Change::insert(
+            src.find("two").unwrap(),
+            "and ",
+        )])
+        .apply(&mut text, false);
+        syn.edit(&edits.iter().map(|e| e.ts).collect::<Vec<_>>());
+        let html = |syn: &Syntax| syn.layers.iter().find(|l| l.lang.name == "html").unwrap().tree.clone();
+        // `ul` in `<ul>`
+        let list = |tree: &Tree| {
+            let at = text.to_string().find("<ul>").unwrap() + 1;
+            let n = tree.root_node().descendant_for_byte_range(at, at + 2).unwrap();
+            assert_eq!(n.kind(), "tag_name");
+            n.id()
+        };
+        let before = html(&syn);
+        assert!(before.included_ranges()[0].start_byte > 0);
+        let job = syn.start_parse(&text);
+        let generation = job.generation;
+        let parsed = job.run();
+        assert_eq!(parsed.taken.layers_reparsed, 1);
+        syn.finish_parse(generation, parsed);
+        assert_eq!(list(&html(&syn)), list(&before), "the list taken over");
+        let fresh = Syntax::parsed(lang, &text);
+        assert_eq!(html(&syn).root_node().to_sexp(), html(&fresh).root_node().to_sexp());
+    }
+
+    /// JavaScript's `// a`, `/* b */// c` on the next line: the line break and the slash deleted, it's one
+    /// comment — of the same kind as all three, so the tree's changed ranges are empty, and the layers
+    /// for the other two mustn't stay.
+    #[test]
+    fn comments_merged_into_one_leave_one_layer() {
+        let src = "// a\n/* b */// c\nlet x = 1;\n";
+        let change = crate::transaction::Change::delete(4, 6);
+        let Some((kept, fresh, _)) = layers_after(&["javascript", "comment"], src, change) else { return };
+        assert_eq!(fresh.iter().filter(|(l, _)| l == "comment").count(), 1, "{fresh:?}");
+        assert_eq!(kept, fresh);
+    }
+
+    /// Where two patterns catch the same spot, the one listed first wins whatever order the matches come in
+    /// — kept ones come before those asked anew, and passes over ranges apart in their own order.
+    #[test]
+    fn the_pattern_listed_first_wins_a_spot_in_any_order() {
+        let (Ok(lang), Ok(_)) = (
+            Loader::global().load(spec("svelte").unwrap()),
+            Loader::global().load(spec("typescript").unwrap()),
+        ) else {
+            return;
+        };
+        let text = Rope::from_str("<script lang=\"ts\">\nlet a: number = 1;\n</script>\n");
+        let syn = Syntax::parsed(lang.clone(), &text);
+        let mut inj = Injector::new(&text, None, std::time::Duration::MAX);
+        let mut matches = inj.matches(&lang, syn.tree.as_ref().unwrap(), None);
+        let langs: Vec<&str> = matches.iter().map(|m| m.lang.as_str()).collect();
+        assert!(
+            langs.contains(&"typescript") && langs.contains(&"javascript"),
+            "both catch the script: {langs:?}"
+        );
+        for _ in 0..2 {
+            let mut layers = Vec::new();
+            inj.run(&matches, 0, &mut layers);
+            assert_eq!(layers[0].lang.name, "typescript");
+            matches.reverse();
+        }
     }
 }

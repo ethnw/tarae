@@ -815,7 +815,7 @@ pub fn browse_tree(root: &Path, items: &[Item]) -> Tree {
 
 pub enum Preview {
     Loading,
-    Ready { text: Rope, syntax: Option<Syntax> },
+    Ready { text: Rope, syntax: Option<Box<Syntax>> },
     Unavailable(&'static str),
 }
 
@@ -870,7 +870,7 @@ pub fn load_preview(path: &Path) -> Preview {
         let text = Rope::from_str(&text);
         let syntax = syntax::spec("markdown")
             .and_then(|spec| syntax::Loader::global().load(spec).ok())
-            .map(|lang| Syntax::parsed(lang, &text));
+            .map(|lang| Box::new(Syntax::parsed(lang, &text)));
         return Preview::Ready { text, syntax };
     }
     let Ok(bytes) = std::fs::read(path) else { return Preview::Unavailable("can't read") };
@@ -885,7 +885,7 @@ pub fn load_preview(path: &Path) -> Preview {
     let text = Rope::from_str(s);
     let syntax = syntax::detect(path)
         .and_then(|spec| syntax::Loader::global().load(spec).ok())
-        .map(|lang| Syntax::parsed(lang, &text));
+        .map(|lang| Box::new(Syntax::parsed(lang, &text)));
     Preview::Ready { text, syntax }
 }
 
@@ -895,7 +895,7 @@ fn commit_preview(root: &Path, hash: &str) -> Preview {
     let text = Rope::from_str(&text);
     let syntax = syntax::spec("diff")
         .and_then(|spec| syntax::Loader::global().load(spec).ok())
-        .map(|lang| Syntax::parsed(lang, &text));
+        .map(|lang| Box::new(Syntax::parsed(lang, &text)));
     Preview::Ready { text, syntax }
 }
 
