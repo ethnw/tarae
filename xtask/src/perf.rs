@@ -45,7 +45,23 @@ struct Perf {
     noise: f64,
 }
 
-pub fn run(_args: &[String]) -> Result<()> {
+/// Scenarios run once, not `RUNS` times — a memory number, not a jittery timing, and the longest by far (the
+/// long session: 48 s a run, measured 2026-10-03).
+const ONCE: [&str; 1] = ["perf_e2e_memory_over_a_long_session"];
+
+/// What run `i` (from 0) asks of the perf tests: all of them in the first, the `ONCE` ones left out after.
+fn filters(i: usize) -> Vec<&'static str> {
+    let mut f = vec!["--quiet", "--", "perf_", "--test-threads=1"];
+    if i > 0 {
+        for t in ONCE {
+            f.extend(["--skip", t]);
+        }
+    }
+    f
+}
+
+pub fn run(args: &[String]) -> Result<()> {
+    let all_sizes = args.iter().any(|a| a == "--sizes");
     let root = root();
     if let Some(load) = wait_quiet() {
         println!("not measured (machine busy: load {load:.1}, under {BUSY} needed)");
@@ -71,9 +87,7 @@ pub fn run(_args: &[String]) -> Result<()> {
             return Ok(());
         }
         eprintln!("run {} of {RUNS} …", i + 1);
-        let out = test(&["--quiet", "--", "perf_", "--test-threads=1"])
-            .output()
-            .map_err(|e| format!("cargo: {e}"))?;
+        let out = test(&filters(i)).output().map_err(|e| format!("cargo: {e}"))?;
         let text =
             format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         if !out.status.success() {
@@ -87,7 +101,7 @@ pub fn run(_args: &[String]) -> Result<()> {
     if now.is_empty() {
         return Err("no PERF lines — did the tests run in the perf profile?".into());
     }
-    now.extend(sizes(&cargo, &root)?);
+    now.extend(sizes(&cargo, &root, all_sizes)?);
     let file = root.join("target/perf/history.tsv");
     let past = std::fs::read_to_string(&file).unwrap_or_default();
     let history = read_history(&past);
@@ -135,10 +149,51 @@ const SIZES: [(&str, &[&str], &str, f64); 2] = [
 ];
 const SIZE_NOISE: f64 = 0.05;
 
-/// Each `SIZES` binary built (`cargo build --release`) and measured.
-fn sizes(cargo: &std::ffi::OsStr, root: &Path) -> Result<Vec<Perf>> {
+/// What the bundled binary has beyond the default one (which every run measures): which grammars are in
+/// it, their sources, how they're built, and the release profile. Its size is measured again only when
+/// these changed since it last was (`BUNDLED_KEY`), or with `--sizes` — a release build of ~80 s saved
+/// otherwise.
+const BUNDLED_INPUTS: [&str; 3] = ["src/languages.toml", "runtime/grammars.tar.gz", "build.rs"];
+const BUNDLED_KEY: &str = "target/perf/bundled-size.key";
+
+/// FNV-1a of `BUNDLED_INPUTS` and `Cargo.toml`'s `[profile.release]` section.
+fn bundled_key(root: &Path) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut eat = |bytes: &[u8]| {
+        for &b in bytes.iter().chain([0u8].iter()) {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+    };
+    for f in BUNDLED_INPUTS {
+        eat(&std::fs::read(root.join(f)).unwrap_or_default());
+    }
+    eat(release_profile(&std::fs::read_to_string(root.join("Cargo.toml")).unwrap_or_default()).as_bytes());
+    format!("{h:016x}")
+}
+
+/// A Cargo.toml's `[profile.release]` section (its header to the next table).
+fn release_profile(toml: &str) -> String {
+    let mut lines = toml.lines().skip_while(|l| l.trim() != "[profile.release]");
+    let head = lines.next().unwrap_or_default();
+    let body: Vec<&str> = lines.take_while(|l| !l.trim_start().starts_with('[')).collect();
+    format!("{head}\n{}", body.join("\n"))
+}
+
+/// The `SIZES` binaries built (`cargo build --release`) and measured — the bundled one only when `all`, or
+/// when what makes it differ changed since it last was (`bundled_key`).
+fn sizes(cargo: &std::ffi::OsStr, root: &Path, all: bool) -> Result<Vec<Perf>> {
+    let key = bundled_key(root);
+    let kept = std::fs::read_to_string(root.join(BUNDLED_KEY)).unwrap_or_default();
+    let bundled = all || kept.trim() != key;
     let mut out = Vec::new();
     for (name, flags, dir, budget) in SIZES {
+        if !flags.is_empty() && !bundled {
+            eprintln!(
+                "{name}: not built — its grammars and the release profile are as when it was measured (--sizes builds it)"
+            );
+            continue;
+        }
         eprintln!("building the release binary {} …", flags.join(" "));
         let st = Command::new(cargo)
             .args(["build", "--release", "--quiet", "--target-dir", dir])
@@ -156,6 +211,11 @@ fn sizes(cargo: &std::ffi::OsStr, root: &Path) -> Result<Vec<Perf>> {
             return Err(format!("{name}: {mb:.2} MB (budget {budget})"));
         }
         out.push(Perf { name: name.to_string(), value: mb, budget, noise: SIZE_NOISE });
+        if !flags.is_empty() {
+            let file = root.join(BUNDLED_KEY);
+            std::fs::create_dir_all(file.parent().unwrap()).map_err(|e| e.to_string())?;
+            std::fs::write(&file, &key).map_err(|e| format!("{}: {e}", file.display()))?;
+        }
     }
     Ok(out)
 }
@@ -283,6 +343,51 @@ fn civil(days: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bundled binary is built again when its grammar list or the release profile changed — not for
+    /// another profile, a dependency, or nothing at all.
+    #[test]
+    fn the_bundled_size_waits_for_what_makes_it_differ() {
+        let dir = std::env::temp_dir().join(format!("tarae-xtask-key-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let cargo =
+            "[dependencies]\nx = \"1\"\n\n[profile.release]\nlto = true\n\n[profile.shot]\nlto = false\n";
+        std::fs::write(dir.join("Cargo.toml"), cargo).unwrap();
+        std::fs::write(dir.join("src/languages.toml"), "[[language]]\nname = \"a\"\nbundle = true\n")
+            .unwrap();
+        let k = bundled_key(&dir);
+        assert_eq!(bundled_key(&dir), k, "nothing changed");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            cargo.replace("x = \"1\"", "x = \"2\"").replace("lto = false", ""),
+        )
+        .unwrap();
+        assert_eq!(bundled_key(&dir), k, "a dependency, another profile");
+        std::fs::write(dir.join("Cargo.toml"), cargo.replace("lto = true", "lto = \"thin\"")).unwrap();
+        let k2 = bundled_key(&dir);
+        assert_ne!(k2, k, "the release profile");
+        std::fs::write(dir.join("src/languages.toml"), "[[language]]\nname = \"a\"\nbundle = false\n")
+            .unwrap();
+        assert_ne!(bundled_key(&dir), k2, "the grammar list");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The long session runs in the first run only; a number measured once is that run's value.
+    #[test]
+    fn a_once_only_number_is_its_one_value() {
+        assert!(!filters(0).contains(&"--skip"));
+        for i in 1..RUNS {
+            let f = filters(i);
+            assert!(f.windows(2).any(|w| w == ["--skip", "perf_e2e_memory_over_a_long_session"]), "{f:?}");
+        }
+        let p = |name: &str, value: f64| Perf { name: name.into(), value, budget: 100.0, noise: 1.0 };
+        let runs = vec![vec![p("a", 1.0), p("long", 80.0)], vec![p("a", 3.0)], vec![p("a", 2.0)]];
+        let m = medians(&runs);
+        assert_eq!(
+            m.iter().map(|p| (p.name.as_str(), p.value)).collect::<Vec<_>>(),
+            [("a", 2.0), ("long", 80.0)]
+        );
+    }
 
     #[test]
     fn lines_medians_history_and_slower() {
