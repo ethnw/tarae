@@ -328,22 +328,63 @@ pub fn nested_checkouts(root: &Path) -> Vec<String> {
     found
 }
 
-/// A server's `initializationOptions` past what `java::prepare` gives: rust-analyzer leaves nested
-/// checkouts alone (`files.exclude`, relative to its root).
-pub fn options_for(spec: &ServerSpec, root: &Path, given: Value) -> Box<dyn FnOnce() -> Value + Send> {
-    let rust = spec.name == "rust-analyzer"
-        || Path::new(&spec.command).file_name().is_some_and(|n| n == "rust-analyzer");
-    if !rust {
-        return Box::new(move || given);
-    }
-    let root = root.to_path_buf();
+/// What a server is told at its start: `initializationOptions` (`given` — `java::prepare`'s — and more), and
+/// the settings `workspace/configuration` is answered from (`section`).
+pub struct Options {
+    pub init: Value,
+    pub config: Value,
+}
+
+/// Made on the server's writer thread: its pack is read and the project walked (disk work).
+pub type MakeOptions = Box<dyn FnOnce() -> Options + Send>;
+
+/// `given`, and the server's pack's `leave-out` (`packs::LeaveOut`) filled with `nested_checkouts` — so a
+/// server that scans the workspace leaves worktrees and checkouts inside it alone, through its own setting.
+/// The server is looked for by its name, else by the built-in one its command is (`[lsp.py] command =
+/// "pyright-langserver"` is pyright).
+pub fn options_for(spec: &ServerSpec, root: &Path, given: Value) -> MakeOptions {
+    let mut names = vec![spec.name.clone()];
+    let program = Path::new(&spec.command).file_name().map(|n| n.to_string_lossy().into_owned());
+    let builtin = DEFAULTS.iter().chain(DEFAULT_ALSO).flat_map(|(_, l)| l.iter());
+    names.extend(builtin.filter(|(_, c, _)| program.as_deref() == Some(*c)).map(|(n, ..)| n.to_string()));
+    let (root, name) = (root.to_path_buf(), spec.name.clone());
     Box::new(move || {
-        let exclude = nested_checkouts(&root);
-        if !exclude.is_empty() {
-            crate::log::line("rust-analyzer", "info", &format!("left out: {}", exclude.join(", ")));
+        let mut o = Options { init: given, config: Value::Null };
+        let Some(leave) = names.iter().find_map(|n| crate::packs::leave_out(n)) else { return o };
+        let found = nested_checkouts(&root);
+        if found.is_empty() {
+            return o;
         }
-        json!({ "files": { "exclude": exclude } })
+        crate::log::line(&name, "info", &format!("left out: {}", found.join(", ")));
+        let each = found.iter().flat_map(|rel| leave.each.iter().map(move |e| e.replace("{rel}", rel)));
+        let list = Value::Array(leave.keep.iter().cloned().chain(each).map(Value::String).collect());
+        match &leave.place {
+            crate::packs::Place::Init(path) => put(&mut o.init, path, list),
+            crate::packs::Place::Config(path) => put(&mut o.config, path, list),
+        }
+        o
     })
+}
+
+/// `x` at the dotted `path` in `v`, the objects on the way made (what's beside them kept).
+fn put(v: &mut Value, path: &str, x: Value) {
+    let mut at = v;
+    for key in path.split('.') {
+        if !at.is_object() {
+            *at = json!({});
+        }
+        at = at.as_object_mut().expect("made an object above").entry(key).or_insert(Value::Null);
+    }
+    *at = x;
+}
+
+/// The settings under a `workspace/configuration` item's `section` (a dotted path; none = all of them).
+pub fn section(config: &Value, section: Option<&str>) -> Value {
+    let mut at = config;
+    for key in section.into_iter().flat_map(|s| s.split('.')).filter(|k| !k.is_empty()) {
+        at = &at[key];
+    }
+    at.clone()
 }
 
 // ── URI ──────────────────────────────────────────────────────────────────
@@ -499,6 +540,9 @@ pub struct Client {
     child: Option<Child>,
     /// For the log: how long it took to be ready.
     pub started: std::time::Instant,
+    /// The settings `workspace/configuration` is answered from (`Options.config`, set on the writer thread
+    /// before `initialize` is written).
+    pub config: std::sync::Arc<std::sync::OnceLock<Value>>,
 }
 
 impl Drop for Client {
@@ -525,7 +569,7 @@ impl Client {
         id: ClientId,
         spec: &ServerSpec,
         root: &Path,
-        init_options: Box<dyn FnOnce() -> Value + Send>,
+        options: MakeOptions,
         events: Sender<Event>,
     ) -> Result<Client, String> {
         let mut child = Command::new(&spec.command)
@@ -613,6 +657,7 @@ impl Client {
             caps: Value::Null,
             child: Some(child),
             started: std::time::Instant::now(),
+            config: Default::default(),
         };
         let root_uri = uri(root);
         let mut init = json!({
@@ -686,9 +731,13 @@ impl Client {
                 },
             },
         });
-        // The options are made on the writer thread: some need the disk (`nested_checkouts` walks the project)
+        // The options are made on the writer thread: some need the disk (`nested_checkouts` walks the project).
+        // Its settings are in place before `initialize` goes, so before the server can ask for them.
+        let config = std::sync::Arc::clone(&client.config);
         let _ = client.tx.send(Out::Lazy(Box::new(move || {
-            init["params"]["initializationOptions"] = init_options();
+            let o = options();
+            let _ = config.set(o.config);
+            init["params"]["initializationOptions"] = o.init;
             init.to_string()
         })));
         Ok(client)
@@ -964,9 +1013,12 @@ mod tests {
 
     /// rust-analyzer is told to leave alone what isn't the project: worktrees (whole `.claude/worktrees`,
     /// later ones too) and clones inside it — not submodules (may be members), not through links, not
-    /// under `target`, not deeper than `NESTED_DEPTH`. Other servers get their options untouched.
+    /// under `target`, not deeper than `NESTED_DEPTH`. Every server whose pack says how gets them through
+    /// its own setting — at start (rust-analyzer, jdtls beside its own options, gopls) or when it asks for
+    /// its section (pyright, found by its command under another name) — with the setting's defaults kept.
+    /// Others get their options untouched, and so does every server of a project with nothing nested.
     #[test]
-    fn rust_analyzer_leaves_nested_checkouts_alone() {
+    fn servers_leave_nested_checkouts_alone() {
         let t = std::env::temp_dir().join(format!("tarae-lsp-nested-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&t);
         let root = t.join("repo");
@@ -990,12 +1042,64 @@ mod tests {
         found.sort();
         assert_eq!(found, [".claude/worktrees", "src/a/b/c4", "vendor/clone"]);
 
-        let spec =
-            |name: &str| ServerSpec { name: name.into(), command: name.into(), args: vec![], except: vec![] };
-        let opts = options_for(&spec("rust-analyzer"), &root, Value::Null)();
-        assert_eq!(opts["files"]["exclude"].as_array().map(Vec::len), Some(3), "{opts}");
-        let given = json!({ "bundles": ["x.jar"] });
-        assert_eq!(options_for(&spec("jdtls"), &root, given.clone())(), given);
+        let spec = |name: &str, command: &str| ServerSpec {
+            name: name.into(),
+            command: command.into(),
+            args: vec![],
+            except: vec![],
+        };
+        let strs = |v: &Value| -> Vec<String> {
+            v.as_array().into_iter().flatten().filter_map(|s| s.as_str().map(str::to_string)).collect()
+        };
+        let ra = options_for(&spec("rust-analyzer", "rust-analyzer"), &root, Value::Null)();
+        let mut ex = strs(&ra.init["files"]["exclude"]);
+        ex.sort();
+        assert_eq!(ex, [".claude/worktrees", "src/a/b/c4", "vendor/clone"]);
+        assert_eq!(ra.config, Value::Null);
+
+        let given =
+            json!({ "bundles": ["x.jar"], "settings": { "java": { "maven": { "downloadSources": true } } } });
+        let jdtls = options_for(&spec("jdtls", "/opt/jdtls/bin/jdtls"), &root, given.clone())().init;
+        assert_eq!(
+            (&jdtls["bundles"], &jdtls["settings"]["java"]["maven"]),
+            (&given["bundles"], &json!({ "downloadSources": true })),
+            "its own kept"
+        );
+        let ex = strs(&jdtls["settings"]["java"]["import"]["exclusions"]);
+        let defaults =
+            ["**/node_modules/**", "**/.metadata/**", "**/archetype-resources/**", "**/META-INF/maven/**"];
+        assert!(ex.starts_with(&defaults.map(String::from)), "defaults first: {ex:?}");
+        // (the folder holding a build file, and below it — jdtls matches the folder)
+        for e in ["**/.claude/worktrees", "**/.claude/worktrees/**", "**/vendor/clone", "**/vendor/clone/**"]
+        {
+            assert!(ex.contains(&e.to_string()), "{e}: {ex:?}");
+        }
+        assert_eq!(ex.len(), 4 + 3 * 2, "{ex:?}");
+
+        let py = options_for(&spec("py", "/usr/local/bin/pyright-langserver"), &root, Value::Null)();
+        assert_eq!(py.init, Value::Null, "pyright asks for it");
+        let ex = strs(&section(&py.config, Some("python.analysis"))["exclude"]);
+        assert!(ex.starts_with(&["**/node_modules", "**/__pycache__", "**/.*"].map(String::from)), "{ex:?}");
+        assert!(ex.contains(&"vendor/clone".to_string()) && ex.len() == 7, "{ex:?}");
+        assert_eq!(
+            section(&py.config, Some("python"))["analysis"]["exclude"].as_array().map(Vec::len),
+            Some(7)
+        );
+        assert_eq!(section(&py.config, Some("pyright")), Value::Null);
+
+        let gopls = options_for(&spec("gopls", "gopls"), &root, Value::Null)().init;
+        let f = strs(&gopls["directoryFilters"]);
+        assert!(
+            f.first().is_some_and(|d| d == "-**/node_modules") && f.contains(&"-vendor/clone".into()),
+            "{f:?}"
+        );
+
+        let taplo = options_for(&spec("taplo", "taplo"), &root, Value::Null)();
+        assert_eq!((taplo.init, taplo.config), (Value::Null, Value::Null), "no leave-out in its pack");
+        let plain = t.join("plain");
+        std::fs::create_dir_all(plain.join("src")).unwrap();
+        let ra = options_for(&spec("rust-analyzer", "rust-analyzer"), &plain, Value::Null)();
+        assert_eq!(ra.init, Value::Null, "nothing nested: nothing said");
         let _ = std::fs::remove_dir_all(&t);
     }
 }

@@ -37,7 +37,7 @@
 //!   `sources`, `debug-args`) override these — Java's `gradle` and `maven`. A kind's settings override the
 //!   test ones; `file = false` keeps its tests out of a file's run.
 //!
-//! `[tasks]`: see `tasks`. `[install.<tool>]`: see `Install`.
+//! `[tasks]`: see `tasks`. `[install.<tool>]`: see `Install`. `[server.<name>]`: see `LeaveOut`.
 //!
 //! Packs are read when a test or the tasks are looked for (a few small files), so an edited pack counts at
 //! once.
@@ -204,7 +204,8 @@ fn manifest(lang: &str) -> Option<Result<Table, String>> {
     merged(lang, crate::runtime::pack_builtin(&rel), crate::runtime::pack_user(&rel))
 }
 
-/// The built-in `pack.toml` with the tables of one's own in their place (`[install]`: tool by tool).
+/// The built-in `pack.toml` with the tables of one's own in their place (`[install]` and `[server]`: tool by
+/// tool).
 fn merged(lang: &str, builtin: Option<String>, user: Option<String>) -> Option<Result<Table, String>> {
     let read = |s: String, whose: &str| {
         s.parse::<Table>().map_err(|e| format!("the {lang} pack ({whose}): {}", e.message()))
@@ -217,20 +218,25 @@ fn merged(lang: &str, builtin: Option<String>, user: Option<String>) -> Option<R
         (None, Some(u)) => u,
         (Some(b), Some(u)) => u.and_then(|mut u| {
             let mut b = b?;
-            // `[install]` goes tool by tool: a recipe of one's own keeps the built-in others
-            let mine = u.remove("install");
+            // `[install]` and `[server]` go tool by tool: one of one's own keeps the built-in others
+            let mine: Vec<_> = BY_TOOL.iter().map(|k| (*k, u.remove(*k))).collect();
             b.extend(u);
-            match (mine, b.get_mut("install")) {
-                (Some(toml::Value::Table(m)), Some(toml::Value::Table(t))) => t.extend(m),
-                (Some(m), _) => {
-                    b.insert("install".into(), m);
+            for (key, mine) in mine {
+                match (mine, b.get_mut(key)) {
+                    (Some(toml::Value::Table(m)), Some(toml::Value::Table(t))) => t.extend(m),
+                    (Some(m), _) => {
+                        b.insert(key.into(), m);
+                    }
+                    (None, _) => {}
                 }
-                (None, _) => {}
             }
             Ok(b)
         }),
     })
 }
+
+/// A pack's tables of tools, merged with one's own tool by tool.
+const BY_TOOL: &[&str] = &["install", "server"];
 
 /// A task a pack suggests: its name and command.
 pub type Suggested = (String, String);
@@ -346,11 +352,16 @@ pub fn installed_at(tool: &str) -> Option<PathBuf> {
 
 /// Every pack's `[install]`.
 fn install_tables() -> Vec<(String, Table)> {
+    tables_of("install")
+}
+
+/// Every pack's `[<key>]` (a pack that can't be read is logged).
+fn tables_of(key: &str) -> Vec<(String, Table)> {
     let mut out = Vec::new();
     for lang in crate::runtime::pack_langs() {
         match manifest(&lang) {
             Some(Ok(t)) => {
-                if let Some(i) = t.get("install").and_then(|v| v.as_table()) {
+                if let Some(i) = t.get(key).and_then(|v| v.as_table()) {
                     out.push((lang, i.clone()));
                 }
             }
@@ -359,6 +370,73 @@ fn install_tables() -> Vec<(String, Table)> {
         }
     }
     out
+}
+
+/// How a language server is told to leave alone what isn't the project — a pack's `[server.<name>]`
+/// `leave-out` (the server named as tarae names it: `rust-analyzer`, `jdtls`, `pyright`, `gopls`):
+///
+/// - `init = "files.exclude"`: a dotted path in its `initializationOptions`; or `config =
+///   "python.analysis.exclude"`: in the settings `workspace/configuration` answers, by section.
+/// - `each`: one folder as the setting takes it, `{rel}` being the folder from the server's root
+///   (`"-{rel}"`) — or a list of them, each put in (jdtls matches the folder holding a build file, so
+///   `"**/{rel}"` and `"**/{rel}/**"` both: measured, `**/ext/clone/**` alone still imported its pom.xml).
+/// - `keep`: the setting's own defaults — giving it a list replaces them, so they go first.
+///
+/// The folders are `lsp::nested_checkouts`'s: agents' worktrees and checkouts inside the project (not
+/// submodules). Nothing is set when there are none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LeaveOut {
+    pub place: Place,
+    pub each: Vec<String>,
+    pub keep: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Place {
+    /// A dotted path in `initializationOptions`.
+    Init(String),
+    /// A dotted path in the settings answered by section.
+    Config(String),
+}
+
+/// `server`'s `leave-out`, from whichever pack has it (a broken one is logged and skipped).
+pub fn leave_out(server: &str) -> Option<LeaveOut> {
+    leave_out_in(server, tables_of("server"))
+}
+
+fn leave_out_in(server: &str, tables: Vec<(String, Table)>) -> Option<LeaveOut> {
+    tables.into_iter().find_map(|(lang, t)| {
+        let v = t.get(server)?;
+        server_table(v)
+            .inspect_err(|e| {
+                crate::log::line("tarae", "warning", &format!("the {lang} pack: [server.{server}]: {e}"))
+            })
+            .ok()
+            .flatten()
+    })
+}
+
+fn server_table(v: &toml::Value) -> Result<Option<LeaveOut>, String> {
+    let t = v.as_table().ok_or("isn't a table")?;
+    known(t, &["leave-out"], "it")?;
+    let Some(l) = t.get("leave-out") else { return Ok(None) };
+    let l = l.as_table().ok_or("`leave-out` isn't a table")?;
+    known(l, &["init", "config", "each", "keep"], "`leave-out`")?;
+    let place = match (string(l, "init")?, string(l, "config")?) {
+        (Some(p), None) => Place::Init(p),
+        (None, Some(p)) => Place::Config(p),
+        _ => return Err("`leave-out` takes one of `init` or `config`".into()),
+    };
+    let each = match l.get("each") {
+        Some(toml::Value::String(s)) => vec![s.clone()],
+        v @ Some(_) => strings(v, "each")?.unwrap_or_default(),
+        None => return Err("`leave-out` has no `each`".into()),
+    };
+    if each.is_empty() || each.iter().any(|e| !e.contains("{rel}")) {
+        return Err("`each` has no `{rel}`".into());
+    }
+    let keep = strings(l.get("keep"), "keep")?.unwrap_or_default();
+    Ok(Some(LeaveOut { place, each, keep }))
 }
 
 /// A tool's `[install.<tool>]`, read: every way, and every folder it may land in.
@@ -1156,6 +1234,58 @@ mod tests {
         );
         unsafe { std::env::set_var("TARAE_TEST_LOOP", "${TARAE_TEST_LOOP}") };
         assert_eq!(expand_dir("${TARAE_TEST_LOOP}"), Some(PathBuf::from("${TARAE_TEST_LOOP}")), "not again");
+    }
+
+    /// `[server.<name>] leave-out`: the built-in ones read; a broken one says what's wrong (logged, skipped);
+    /// one of one's own replaces that server's, not the others'.
+    #[test]
+    fn servers_say_how_to_leave_out_folders() {
+        for s in ["rust-analyzer", "jdtls", "pyright", "basedpyright", "gopls"] {
+            assert!(leave_out(s).is_some(), "{s}");
+        }
+        assert_eq!(
+            leave_out("pyright").map(|l| l.place),
+            Some(Place::Config("python.analysis.exclude".into()))
+        );
+        assert!(leave_out("taplo").is_none() && leave_out("marksman").is_none());
+        let t: Table = r#"
+            [a]
+            leave-out = { init = "x.y", each = "-{rel}", keep = ["-k"] }
+            [list]
+            leave-out = { config = "x", each = ["**/{rel}", "**/{rel}/**"] }
+            [listnorel]
+            leave-out = { config = "x", each = ["**/{rel}", "**"] }
+            [both]
+            leave-out = { init = "x", config = "y", each = "{rel}" }
+            [norel]
+            leave-out = { init = "x", each = "*" }
+            [typo]
+            leave-out = { init = "x", each = "{rel}", keeps = [] }
+            [nothing]
+        "#
+        .parse()
+        .unwrap();
+        let one = |k: &str| server_table(&t[k]);
+        assert_eq!(
+            one("a"),
+            Ok(Some(LeaveOut {
+                place: Place::Init("x.y".into()),
+                each: vec!["-{rel}".into()],
+                keep: vec!["-k".into()]
+            }))
+        );
+        assert_eq!(one("list").unwrap().unwrap().each, ["**/{rel}", "**/{rel}/**"]);
+        assert!(one("listnorel").unwrap_err().contains("{rel}"), "every one of them");
+        assert!(one("both").unwrap_err().contains("one of"));
+        assert!(one("norel").unwrap_err().contains("{rel}"));
+        assert!(one("typo").unwrap_err().contains("keeps"));
+        assert_eq!(one("nothing"), Ok(None));
+        assert!(leave_out_in("both", vec![("x".into(), t.clone())]).is_none(), "said and skipped");
+        let builtin = "[server.gopls]\nleave-out = { init = \"a\", each = \"{rel}\" }\n[server.x]\n";
+        let user = "[server.gopls]\nleave-out = { init = \"mine\", each = \"{rel}\" }";
+        let m = merged("go", Some(builtin.into()), Some(user.into())).unwrap().unwrap();
+        assert_eq!(m["server"]["gopls"]["leave-out"]["init"].as_str(), Some("mine"));
+        assert!(m["server"].get("x").is_some(), "the other built-in one stays");
     }
 
     #[test]

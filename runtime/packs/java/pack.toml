@@ -30,6 +30,12 @@ run-file = ["{java-tool}", "-B", "test", "{java-pl}", "-Dtest={package}{first-gr
 reports = ["{java-module-dir}/target/surefire-reports"]
 debug-args = ["-Dmaven.surefire.debug"]
 
+# A pom.xml or build.gradle in a checkout inside the project is imported as a project of its own when the
+# root has no build file (measured: ext/clone/pom.xml became project "v"; dot-folders it skips itself).
+# Globs over the folder holding a build file — the folder itself and below; vscode-java's defaults kept.
+[server.jdtls]
+leave-out = { init = "settings.java.import.exclusions", each = ["**/{rel}", "**/{rel}/**"], keep = ["**/node_modules/**", "**/.metadata/**", "**/archetype-resources/**", "**/META-INF/maven/**"] }
+
 [install.jdtls]
 what = "Java's language server (jdtls)"
 ways = [{ run = ["brew", "install", "jdtls"] }]

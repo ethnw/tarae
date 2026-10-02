@@ -32,6 +32,15 @@ name = "mypy"
 cmd = "mypy --no-color-output --no-error-summary ."
 needs = "mypy"
 
+# Checkouts inside the project aren't analyzed. Asked for by section (`workspace/configuration`); giving a
+# list replaces the default one, so it's kept (dot-folders are in it — `.claude/worktrees` already was; the
+# four "Auto-excluding" lines pyright 1.1.414 logs).
+[server.pyright]
+leave-out = { config = "python.analysis.exclude", each = "{rel}", keep = ["**/node_modules", "**/__pycache__", "**/.*", "**/__editable__.*"] }
+
+[server.basedpyright]
+leave-out = { config = "basedpyright.analysis.exclude", each = "{rel}", keep = ["**/node_modules", "**/__pycache__", "**/.*", "**/__editable__.*"] }
+
 # The first of Python's servers tarae looks for; uv and pipx put it in ~/.local/bin
 [install.basedpyright-langserver]
 what = "Python's language server (basedpyright)"

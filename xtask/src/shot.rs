@@ -14,6 +14,7 @@
 //! - `TARAE_SHOT_FILES` (default `src/transaction.rs src/selection.rs`), `TARAE_SHOT_CWD` (default the repo),
 //!   `TARAE_SHOT_COLS`/`TARAE_SHOT_ROWS` (default 112×30).
 //! - `TARAE_SHOT_REPLAY=<file>` — draw terminal bytes recorded elsewhere instead of running tarae.
+//! - `TARAE_SHOT_BIN` — another tarae binary (absolute; a saved "before" build for a before/after).
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -89,8 +90,9 @@ fn cvt(rc: libc::c_int) -> io::Result<libc::c_int> {
 
 fn drive(vt: &mut Vt, keys: &[String], state: &Path, cols: u16, rows: u16) -> Result<()> {
     let root = root();
-    let bin = root.join("target/release/tarae");
-    if !bin.exists() {
+    let bin = folder("TARAE_SHOT_BIN", std::env::var_os("TARAE_SHOT_BIN"), false)?
+        .unwrap_or_else(|| root.join("target/release/tarae"));
+    if !bin.is_file() {
         return Err(format!("{} not found — cargo build --release first", bin.display()));
     }
     let files =

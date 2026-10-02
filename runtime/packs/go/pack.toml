@@ -31,6 +31,12 @@ cmd = "go build ./..."
 name = "go vet"
 cmd = "go vet ./..."
 
+# Checkouts inside the module (with no go.mod of their own) aren't loaded (`-` = leave out, from the
+# workspace folder; its default kept). gopls's settings are flat — "build" is only its docs' heading:
+# `build.directoryFilters` was refused ("setting option "build": unexpected setting").
+[server.gopls]
+leave-out = { init = "directoryFilters", each = "-{rel}", keep = ["-**/node_modules"] }
+
 # `go install` puts it in $GOBIN, else $GOPATH/bin, else ~/go/bin — often not on PATH
 [install.gopls]
 what = "Go's language server"

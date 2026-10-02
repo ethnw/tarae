@@ -548,9 +548,14 @@ impl Editor {
                         }
                         Value::Null
                     }
+                    // What its pack set (`lsp::options_for` — pyright's `exclude`), null for the rest
                     "workspace/configuration" => {
-                        let n = msg["params"]["items"].as_array().map_or(0, Vec::len);
-                        Value::Array(vec![Value::Null; n])
+                        let config =
+                            self.client(cid).and_then(|c| c.config.get().cloned()).unwrap_or_default();
+                        let items = msg["params"]["items"].as_array().cloned().unwrap_or_default();
+                        Value::Array(
+                            items.iter().map(|i| lsp::section(&config, i["section"].as_str())).collect(),
+                        )
                     }
                     "workspace/workspaceFolders" => {
                         let root = self.lsp.clients.iter().find(|c| c.id == cid).map(|c| c.root.clone());
@@ -2529,6 +2534,43 @@ mod tests {
         ed.close_doc(id);
         settle_for(&mut ed, 5, |ed| ed.client(rust).is_none());
         assert!(ed.client(rust).is_none(), "and rust's once its file closed");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A server that takes its settings by section (pyright) gets the project's left-out folders when it asks —
+    /// the section it names, null for the rest — and its `initialize` carries none.
+    #[test]
+    fn a_server_asking_for_its_settings_gets_what_to_leave_out() {
+        let dir = std::env::temp_dir().join(format!("tarae-lsp-config-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::create_dir_all(dir.join("vendor/clone/.git")).unwrap();
+        std::fs::write(dir.join("a.py"), "x = 1\n").unwrap();
+        let log = dir.join("sent.log");
+        let cfg = format!(
+            "[lsp.pyright]\ncommand = \"sh\"\nargs = [\"-c\", \"cat > '{}'\"]\n[lang.python]\nlsp = [\"pyright\"]\nalso = []\n",
+            log.display()
+        );
+        let (config, w) = crate::config::parse(&cfg);
+        assert!(w.is_empty(), "{w:?}");
+        let mut ed = Editor::new(config);
+        ed.open(&dir.join("a.py")).unwrap();
+        let cid = ready(&mut ed);
+        assert!(sent(&log).contains(r#""initializationOptions":null"#));
+        let items = json!([{ "section": "python.analysis" }, { "section": "python.pythonPath" }, {}]);
+        ed.on_lsp_message(cid, json!({ "jsonrpc": "2.0", "id": 7, "method": "workspace/configuration", "params": { "items": items } }));
+        let out = sent(&log);
+        let reply =
+            out.lines().find(|l| l.contains(r#""id":7"#)).unwrap_or_else(|| panic!("no reply: {out}"));
+        let reply: Value = serde_json::from_str(&reply[reply.find('{').unwrap()..]).unwrap();
+        let ex = &reply["result"][0]["exclude"];
+        assert_eq!(
+            ex,
+            &json!(["**/node_modules", "**/__pycache__", "**/.*", "**/__editable__.*", "vendor/clone"]),
+            "{reply}"
+        );
+        assert_eq!(reply["result"][1], Value::Null, "nothing set there");
+        assert_eq!(reply["result"][2]["python"]["analysis"]["exclude"], *ex, "no section: all of them");
         std::fs::remove_dir_all(&dir).ok();
     }
 

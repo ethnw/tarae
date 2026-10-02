@@ -33,6 +33,10 @@ cmd = "cargo clippy --all-targets --message-format=short"
 name = "cargo build"
 cmd = "cargo build --message-format=short"
 
+# Worktrees and checkouts inside the project aren't scanned (paths from its root; no defaults to keep)
+[server.rust-analyzer]
+leave-out = { init = "files.exclude", each = "{rel}" }
+
 # rustup's proxy lands in ~/.cargo/bin; run in the project, so its rust-toolchain.toml counts
 [install.rust-analyzer]
 what = "Rust's language server"
