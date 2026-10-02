@@ -2156,7 +2156,7 @@ fn buffer_picker(cx: &mut Context) {
 }
 
 fn global_search(cx: &mut Context) {
-    cx.editor.open_prompt(PromptKind::GlobalSearch, "");
+    cx.editor.global_search(String::new());
 }
 
 // ── LLM ──────────────────────────────────────────────────────────────────

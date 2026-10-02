@@ -485,11 +485,25 @@ fn an_idle_editor_draws_nothing_and_sleeps() {
                 break;
             }
         }
-        let (frames, before) = (t.frames(), t.usage());
+        let (frames, before, was) = (t.frames(), t.usage(), t.screen());
         std::thread::sleep(std::time::Duration::from_secs(2));
         let (drawn, used) = (t.frames() - frames, t.usage() - before);
+        // (a frame drawn: which rows it changed — what landed late)
+        let now = t.screen();
+        let changed: Vec<String> = was
+            .rows
+            .iter()
+            .zip(&now.rows)
+            .enumerate()
+            .filter(|(_, (a, b))| a != b)
+            .map(|(i, (a, b))| format!("row {i}: {a:?}\n    → {b:?}"))
+            .collect();
         // (a wake is a few switches: 14 a second came to ~100 in 2 s; at rest it's under 10)
-        assert!(drawn == 0 && used.switches < 30, "{what}: {drawn} frames, {used:?} in 2 s\n{}", t.screen());
+        assert!(
+            drawn == 0 && used.switches < 30,
+            "{what}: {drawn} frames, {used:?} in 2 s — changed:\n{}\n{now}",
+            changed.join("\n")
+        );
     };
     idle(&mut t, "a file");
     t.send(" e");

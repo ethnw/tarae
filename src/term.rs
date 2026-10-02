@@ -4055,8 +4055,12 @@ fn draw_picker(
     let lw = b.list_w;
     let (m, n) = p.counts();
     // `m` as wide as `n`: typing changes it, and the title left of it stays put
-    let count =
-        if p.loading { "loading…".to_string() } else { format!("{m:>w$}/{n}", w = n.to_string().len()) };
+    // (a live search: how many it found, as wide as the most it lists — `…` while one is under way)
+    let count = match () {
+        _ if p.loading => "loading…".to_string(),
+        _ if p.live => format!("{n:>5}{}", if p.searching { "…" } else { " " }),
+        _ => format!("{m:>w$}/{n}", w = n.to_string().len()),
+    };
     // Preview target
     let target = p.current().map(|i| i.action.clone());
     let preview_title = match &target {
@@ -4186,6 +4190,8 @@ fn draw_picker(
                     if row == 3 && p.view.is_empty() {
                         let why = match () {
                             _ if p.loading => "loading…",
+                            _ if p.live && p.query.is_empty() => "type to search the project — a regex",
+                            _ if p.live && p.searching => "searching…",
                             _ if p.query.is_empty() => "nothing here",
                             _ => "no matches",
                         };
@@ -4257,7 +4263,16 @@ fn draw_picker(
 fn picker_input(p: &Picker, lw: usize, count: &str) -> (String, String) {
     let tail = format!("  {count} ");
     let q = fit_left(&p.query, lw.saturating_sub(tail.width() + 3));
-    let title = fit_ellipsis(&p.title, lw.saturating_sub(q.width() + tail.width() + 3));
+    // A word about the query — an unfinished pattern — said quietly in the title's place: the reason, and
+    // that the rows are the last search's as far as the room goes
+    let room = lw.saturating_sub(q.width() + tail.width() + 3);
+    let title = match &p.note {
+        Some(why) => [format!("{why} · last results"), format!("{why} · last"), why.clone()]
+            .into_iter()
+            .find(|t| t.width() <= room)
+            .unwrap_or_else(|| fit_ellipsis(why, room)),
+        None => fit_ellipsis(&p.title, room),
+    };
     let right = fit_ellipsis(&format!("{title}{tail}"), lw.saturating_sub(q.width() + 1));
     (q, right)
 }

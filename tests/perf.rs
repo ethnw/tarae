@@ -138,13 +138,7 @@ fn perf_e2e_memory_in_this_repo() {
         return;
     }
     let sb = Sandbox::new("perf-mem");
-    let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    for d in ["src", "runtime", "docs", "tests", "xtask/src"] {
-        copy_dir(&here.join(d), &sb.file(d));
-    }
-    for f in ["Cargo.toml", "README.md", "CONTRIBUTING.md"] {
-        fs::copy(here.join(f), sb.file(f)).unwrap();
-    }
+    copy_repo(&sb);
     fs::write(sb.git_config(), "[user]\n\tname = t\n\temail = t@t\n[commit]\n\tgpgsign = false\n").unwrap();
     sb.git(&["init", "-q", "-b", "main"]);
     sb.git(&["add", "-A"]);
@@ -156,6 +150,135 @@ fn perf_e2e_memory_in_this_repo() {
     t.esc("the picker closed", |s| !s.contains("files in"));
     std::thread::sleep(Duration::from_secs(1));
     report("e2e_rss_in_this_repo_mb", t.usage().rss as f64 / (1024.0 * 1024.0), 400.0, 2.0);
+}
+
+/// The live search's count on its input row (`› <typed> … search  <n>`): how many it found, and whether a
+/// search is still under way (`…` after it). None while the row doesn't show `typed` yet.
+fn search_count(s: &Screen, typed: &str) -> Option<(usize, bool)> {
+    let row = s.rows.iter().find(|r| r.contains(&format!("› {typed} ")))?;
+    // (the preview's title is further along the same screen row — the count is right after `search`)
+    let after = row.split_once(" search ")?.1.trim_start();
+    let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+    let n = digits.parse().ok()?;
+    Some((n, after[digits.len()..].starts_with('…')))
+}
+
+/// Polls the screen every 2 ms (the harness's 20 ms would be most of what's measured) until `done`.
+fn until(t: &mut Term, within: Duration, done: impl Fn(&Screen) -> bool) -> Option<Duration> {
+    let t0 = Instant::now();
+    while t0.elapsed() < within {
+        if done(&t.screen()) {
+            return Some(t0.elapsed());
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    None
+}
+
+/// The live search (`space /`, N4) in a copy of this repository: each key of a pattern, typed one by one,
+/// to its results on screen (the search done — the count without `…`). Includes the pause it waits for
+/// typing to stop (`LIVE_PAUSE`, 50 ms).
+#[test]
+fn perf_e2e_live_search_in_this_repo() {
+    if unoptimized("perf_e2e_live_search_in_this_repo") {
+        return;
+    }
+    let sb = Sandbox::new("perf-search").with_tools(&["rg"]);
+    copy_repo(&sb);
+    let mut t = Term::spawn(&sb, &["src/term.rs"], 160, 50);
+    t.wait_text("use std::io");
+    t.send(" /");
+    t.wait_for("the search", |s| s.contains("type to search"));
+    let mut runs = Vec::new();
+    let mut typed = String::new();
+    for k in "fn draw_".chars() {
+        typed.push(k);
+        let q = typed.clone();
+        t.send(&k.to_string());
+        let took = until(&mut t, Duration::from_secs(5), |s| search_count(s, &q).is_some_and(|c| !c.1));
+        runs.push(ms(took.unwrap_or_else(|| panic!("no results for {q:?}\n{}", t.screen()))));
+    }
+    report("e2e_live_search_repo_ms", median(runs), 250.0, 5.0);
+}
+
+/// A tree of 200k small files, made once and kept (in the temp folder — the next run reuses it; it's
+/// remade when gone). Every 1000th file has `needle_<n>` in it.
+fn tree_200k() -> std::path::PathBuf {
+    let root = std::path::Path::new("/tmp/tarae-perf-200k").to_path_buf();
+    if root.join(".complete").exists() {
+        return root;
+    }
+    let _ = fs::remove_dir_all(&root);
+    std::thread::scope(|s| {
+        for a in 0..200 {
+            let root = &root;
+            s.spawn(move || {
+                for b in 0..10 {
+                    let dir = root.join(format!("d{a}/e{b}"));
+                    fs::create_dir_all(&dir).unwrap();
+                    for c in 0..100 {
+                        let n = (a * 10 + b) * 100 + c;
+                        let rare = if n % 1000 == 0 {
+                            format!("let needle_{} = 1;\n", n / 1000)
+                        } else {
+                            String::new()
+                        };
+                        let text = format!("// file {n}\nfn f{c}(x: u32) -> u32 {{ x + {n} }}\n{rare}");
+                        fs::write(dir.join(format!("f{c}.rs")), text).unwrap();
+                    }
+                }
+            });
+        }
+    });
+    fs::write(root.join(".complete"), "").unwrap();
+    root
+}
+
+/// The live search in a 200k-file tree: a key to the first results on screen, and to the search done —
+/// medians over a few patterns (`needle_1`, `needle_2` … each a search of every file).
+#[test]
+fn perf_e2e_live_search_in_200k_files() {
+    if unoptimized("perf_e2e_live_search_in_200k_files") {
+        return;
+    }
+    let tree = tree_200k();
+    let sb = Sandbox::new("perf-search-200k").with_tools(&["rg"]);
+    let mut t = Term::spawn_in(&sb, &tree, &[], 160, 50);
+    // (the start screen — a folder with no file named)
+    t.wait_for("the start screen", |s| s.rows.iter().any(|r| !r.trim().is_empty()));
+    t.send(" /");
+    t.wait_for("the search", |s| s.contains("type to search"));
+    t.send("needle_");
+    t.wait_for("the first search", |s| search_count(s, "needle_").is_some_and(|c| !c.1));
+    let (mut first, mut done) = (Vec::new(), Vec::new());
+    for d in ["1", "2", "3", "4", "5"] {
+        let q = format!("needle_{d}");
+        // (the last search's 200 stay up until this one's first results take their place)
+        let before = search_count(&t.screen(), "needle_").map_or(0, |c| c.0);
+        let t0 = Instant::now();
+        t.send(d);
+        let shown = until(&mut t, Duration::from_secs(20), |s| {
+            search_count(s, &q).is_some_and(|c| c.0 > 0 && c.0 != before)
+        });
+        first.push(ms(shown.unwrap_or_else(|| panic!("no results for {q:?}\n{}", t.screen()))));
+        until(&mut t, Duration::from_secs(20), |s| search_count(s, &q).is_some_and(|c| !c.1))
+            .unwrap_or_else(|| panic!("the search for {q:?} never ended\n{}", t.screen()));
+        done.push(ms(t0.elapsed()));
+        t.send("\x7f");
+        t.wait_for("back to needle_", |s| search_count(s, "needle_").is_some_and(|c| !c.1));
+    }
+    report("e2e_live_search_200k_first_ms", median(first), 1000.0, 20.0);
+    report("e2e_live_search_200k_done_ms", median(done), 4000.0, 150.0);
+}
+
+fn copy_repo(sb: &Sandbox) {
+    let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    for d in ["src", "runtime", "docs", "tests", "xtask/src"] {
+        copy_dir(&here.join(d), &sb.file(d));
+    }
+    for f in ["Cargo.toml", "README.md", "CONTRIBUTING.md"] {
+        fs::copy(here.join(f), sb.file(f)).unwrap();
+    }
 }
 
 fn copy_dir(from: &std::path::Path, to: &std::path::Path) {

@@ -129,9 +129,12 @@ configs carry over as they are.
 
 - **Pickers** (nucleo fuzzy matching, the same matcher as Helix) — `space f` files (`git ls-files` in a repository, so
   `.gitignore` is respected; with nothing typed they show as a folder tree opened up to the file you're editing —
-  Enter or `→` opens a folder, `←` folds it or goes up), `space b` buffers, `space /` global search (ripgrep when
-  `rg` is installed, a built-in regex search otherwise). Lists fill in on a worker thread. `C-n`/`C-p` or arrows,
-  `Tab`, `Enter`, `Esc`
+  Enter or `→` opens a folder, `←` folds it or goes up), `space b` buffers, `space /` searches the project as
+  you type (ripgrep when `rg` is installed, a built-in regex search otherwise): a regex, smart case (all
+  lowercase matches any case), each key's search stopping the one before, the first results within a fraction of
+  a second and the rest as they come. Each row is a line's code with its matches standing out, the preview at
+  the line. A pattern not finished yet (`fn draw(`) keeps the last results and says why beside the query —
+  quietly, no error. Lists fill in on a worker thread. `C-n`/`C-p` or arrows, `Tab`, `Enter`, `Esc`
 - **Side panel** — `space e` shows the project's files as a tree left of the code, `space o` the outline of the
   file you're editing (its functions, types, and modules from the tree-sitter tree, nested — no language server
   needed), `space q` the list below, `space g` git. Left alone it follows you: the current file with its folders

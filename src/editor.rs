@@ -50,7 +50,6 @@ pub enum PromptKind {
     Keep {
         remove: bool,
     },
-    GlobalSearch,
     Rename,
     /// Debugger: breakpoint condition / log message / watch expression.
     BreakCondition,
@@ -76,7 +75,6 @@ impl PromptKind {
             PromptKind::Split => "split:",
             PromptKind::Keep { remove: false } => "keep:",
             PromptKind::Keep { remove: true } => "remove:",
-            PromptKind::GlobalSearch => "grep:",
             PromptKind::Rename => "rename:",
             PromptKind::BreakCondition => "break when:",
             PromptKind::LogMessage => "log:",
@@ -147,6 +145,10 @@ const TOAST_FADE: std::time::Duration = std::time::Duration::from_millis(400);
 const TOAST_FADE_IN: std::time::Duration = std::time::Duration::from_millis(150);
 /// One animation frame (waves, fades, elapsed seconds) — ~14 frames a second, only while something moves.
 pub const TICK: std::time::Duration = std::time::Duration::from_millis(70);
+
+/// The live search (`space /`) runs once typing pauses this long — a burst of keys is one search, not one
+/// each (each key stops the one under way anyway).
+pub const LIVE_PAUSE: std::time::Duration = std::time::Duration::from_millis(50);
 
 impl Toast {
     /// Up for as long as it takes to read (1.2 s + 60 ms a character), within a range per kind — a long
@@ -339,6 +341,8 @@ pub struct Editor {
     /// The last picker closed (`space '`).
     last_picker: Option<Picker>,
     picker_ids: u64,
+    /// The live search's latest key (N4) — a search under way for an earlier one stops (its rg killed).
+    live_search: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// In-flight LLM request/review (one at a time).
     pub review: Option<Review>,
     pub llm_warm: Warm,
@@ -550,6 +554,7 @@ impl Editor {
             picker: None,
             last_picker: None,
             picker_ids: 0,
+            live_search: Default::default(),
             git_branch: None,
             lsp: LspState::default(),
             popup: None,
@@ -1271,6 +1276,7 @@ impl Editor {
         if let Some(p) = self.picker.as_mut() {
             p.push_str(&line());
             self.workspace_symbols_requery();
+            self.live_search();
             self.preview_theme();
             self.code_action_preview();
             return;
@@ -1783,15 +1789,86 @@ impl Editor {
         }
     }
 
-    fn global_search(&mut self, pattern: String) {
+    /// `space /` — the project searched as you type (N4): a regex with smart case, its results rows of code
+    /// with the match standing out (`pattern`: what's typed already).
+    pub(crate) fn global_search(&mut self, pattern: String) {
+        let root = self.search_root();
+        let mut picker = Picker::new("search", Vec::new(), false).grouped(root);
+        picker.live = true;
+        picker.query = pattern;
+        self.open_picker(picker, None);
+        self.live_search();
+    }
+
+    /// Where `space /` searches: the project (tarae's folder; a test's own).
+    fn search_root(&self) -> PathBuf {
+        self.project_root.clone().unwrap_or_else(|| cwd().to_path_buf())
+    }
+
+    /// The live search's query changed (a key): the search under way stops, and after a pause in the typing
+    /// (`LIVE_PAUSE`) the new one runs on a worker — its first results shown soon, the rest as they come;
+    /// the last results stay until then. A pattern not finished yet (`(` open) keeps them, said quietly.
+    pub(crate) fn live_search(&mut self) {
+        use std::sync::atomic::Ordering;
+        let Some(p) = self.picker.as_mut().filter(|p| p.live) else { return };
+        let generation = self.live_search.fetch_add(1, Ordering::Relaxed) + 1;
+        let pattern = p.query.clone();
+        p.note = None;
         if pattern.is_empty() {
+            p.set_items(Vec::new());
+            (p.grep, p.emphasis, p.searching) = (None, None, false);
             return;
         }
-        let root = std::env::current_dir().unwrap_or_default();
-        let title = format!("grep /{pattern}/");
-        let mut picker = Picker::new(title, Vec::new(), false).grouped(root.clone());
-        picker.grep = Some(pattern.clone());
-        self.open_picker(picker, Some(Box::new(move || Ok(crate::picker::grep(&root, &pattern)?))));
+        let re = match crate::picker::smart_regex(&pattern) {
+            Ok(re) => re,
+            Err(why) => {
+                p.searching = false;
+                // (the reason; term says the results are the last ones as the room allows)
+                p.note = Some(why);
+                return;
+            }
+        };
+        p.searching = true;
+        let id = p.id;
+        let root = self.search_root();
+        let now = self.live_search.clone();
+        let tx = self.events.sender();
+        self.events.jobs().spawn(move || {
+            std::thread::sleep(LIVE_PAUSE);
+            let stop = || now.load(Ordering::Relaxed) != generation;
+            let found = if stop() {
+                None
+            } else {
+                let mut partial = |items: Vec<crate::picker::Item>| {
+                    let (re, pattern) = (re.clone(), pattern.clone());
+                    let show = move |ed: &mut Editor| {
+                        if ed.live_search.load(Ordering::Relaxed) == generation
+                            && let Some(p) = ed.picker.as_mut().filter(|p| p.id == id)
+                        {
+                            p.set_found(items);
+                            (p.grep, p.emphasis) = (Some(pattern), Some(re));
+                        }
+                    };
+                    let _ = tx.send(crate::event::Event::Job(Box::new(show)));
+                };
+                Some(crate::picker::search(&root, &pattern, &stop, &mut partial))
+            };
+            move |ed: &mut Editor| {
+                if ed.live_search.load(Ordering::Relaxed) != generation {
+                    return;
+                }
+                let Some(p) = ed.picker.as_mut().filter(|p| p.id == id) else { return };
+                p.searching = false;
+                match found {
+                    Some(Ok(items)) => {
+                        p.set_found(items);
+                        (p.grep, p.emphasis) = (Some(pattern), Some(re));
+                    }
+                    Some(Err(why)) => p.note = Some(why),
+                    None => {}
+                }
+            }
+        });
     }
 
     /// Every event: a filtering the picker asked for runs on a worker; its result lands if no later key
@@ -1876,6 +1953,7 @@ impl Editor {
         }
         if matches!(key.code, Code::Backspace | Code::Char(_)) && !key.ctrl {
             self.workspace_symbols_requery();
+            self.live_search();
         }
         self.preview_theme();
         self.code_action_preview();
@@ -2731,7 +2809,6 @@ impl Editor {
             PromptKind::SelectRegex => self.with_group(|cx| search::select_regex(cx, &text)),
             PromptKind::Split => self.with_group(|cx| search::split_selection(cx, &text)),
             PromptKind::Keep { remove } => self.with_group(|cx| search::keep_selections(cx, &text, remove)),
-            PromptKind::GlobalSearch => self.global_search(text),
             PromptKind::BreakCondition => self.set_breakpoint_field(false, &text),
             PromptKind::LogMessage => self.set_breakpoint_field(true, &text),
             PromptKind::Plugin(token) => self.plugin_prompt_done(token, Some(text)),
@@ -8371,16 +8448,78 @@ q = \"delete_selection\"\n",
             "{:?}",
             ed.doc().path
         );
-        feed(&mut ed, " /fn put_cursor<ret>");
-        // Other jobs such as grammar loading are queued too — keep going until the search result arrives.
-        while ed.picker.as_ref().is_some_and(|p| p.loading) {
-            settle(&mut ed);
-        }
+        // (the live search looks in the project — this repo here)
+        ed.project_root = std::fs::canonicalize(cwd()).ok();
+        feed(&mut ed, " /fn put_cursor");
+        settle_for(&mut ed, |ed| ed.picker.as_ref().is_some_and(|p| !p.searching && p.current().is_some()));
         feed(&mut ed, "<ret>");
         let doc = ed.doc();
         let pos = doc.selection().primary().head;
         let line = doc.text.line(mv::line_of(&doc.text, pos)).to_string();
         assert!(line.contains("fn put_cursor"), "{line:?}");
+    }
+
+    /// N4: `space /` searches the project as you type — a regex, smart case (lowercase = any case), rows of
+    /// code with the match standing out. Keys typed before a search lands leave only the last one's results;
+    /// an unfinished pattern keeps the last results and says so quietly (no error); Enter goes there.
+    #[test]
+    fn space_slash_searches_as_you_type() {
+        let dir = std::env::temp_dir().join(format!("tarae-live-search-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        std::fs::write(dir.join("a.rs"), "fn alpha() {}\nlet Beta = alpha();\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "ALPHA beta\n").unwrap();
+        let mut ed = editor("");
+        ed.project_root = Some(dir.clone());
+        feed(&mut ed, "<space>/");
+        let p = ed.picker.as_ref().expect("the search");
+        assert!(p.live && p.title == "search" && p.current().is_none());
+        let landed = |ed: &Editor| ed.picker.as_ref().is_some_and(|p| !p.searching);
+        let found = |ed: &mut Editor| -> Vec<(String, Vec<(u32, u32)>)> {
+            let p = ed.picker.as_mut().unwrap();
+            p.visible(20).into_iter().filter(|r| r.label.contains(": ")).map(|r| (r.label, r.spots)).collect()
+        };
+        // Lowercase: any case
+        feed(&mut ed, "alp");
+        settle_for(&mut ed, landed);
+        let rows = found(&mut ed);
+        let labels: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
+        assert_eq!(labels, ["1: fn alpha() {}", "2: let Beta = alpha();", "1: ALPHA beta"]);
+        assert_eq!(rows[1].1, [(14, 17)], "the match stands out");
+        // A capital: as written — typed all at once, only the last pattern's results land
+        feed(&mut ed, "<backspace><backspace><backspace>Beta");
+        settle_for(&mut ed, landed);
+        let rows = found(&mut ed);
+        assert_eq!(rows.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(), ["2: let Beta = alpha();"]);
+        // Unfinished: the last results stay, said in the title's place — no error
+        feed(&mut ed, "(");
+        assert_eq!(ed.picker.as_ref().unwrap().note.as_deref(), Some("unclosed group"));
+        let mut bytes = Vec::new();
+        crate::term::render(&mut ed, &mut bytes, 160, 40).unwrap();
+        let mut vt = vt100::Parser::new(40, 160, 0);
+        vt.process(&bytes);
+        let screen = vt.screen().contents();
+        assert!(screen.contains("unclosed group · last results"), "{screen}");
+        assert_eq!(found(&mut ed).len(), 1);
+        assert!(ed.status.is_none(), "{:?}", ed.status);
+        // Finished: searched again, the note gone
+        feed(&mut ed, ")");
+        settle_for(&mut ed, landed);
+        assert!(ed.picker.as_ref().unwrap().note.is_none());
+        assert_eq!(found(&mut ed).len(), 1);
+        // A regex is searched, not fuzzy-matched against the rows (no `[` or `\` in them)
+        feed(&mut ed, "<backspace><backspace><backspace><backspace><backspace><backspace>alph[a]\\(\\)");
+        settle_for(&mut ed, landed);
+        let rows = found(&mut ed);
+        assert_eq!(
+            rows.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(),
+            ["1: fn alpha() {}", "2: let Beta = alpha();"]
+        );
+        feed(&mut ed, "<down><ret>");
+        assert_eq!(ed.doc().path.as_deref(), Some(dir.join("a.rs").as_path()));
+        assert_eq!(mv::line_of(&ed.doc().text, ed.doc().selection().primary().head), 1);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A click on a picker's row selects it — the picker stays, its preview follows; the same row clicked

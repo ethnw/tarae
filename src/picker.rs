@@ -233,6 +233,12 @@ pub struct Picker {
     pub compact: bool,
     /// Picker that refetches the list when the query changes (workspace symbols — the server filters).
     pub requery: bool,
+    /// The query is a search, not a filter (`space /`, N4): every item it found is listed, and its matches
+    /// stand out (`emphasis`) · one is under way (the rows are the last search's) · a word about the
+    /// query said quietly in the title's place (an unfinished pattern).
+    pub live: bool,
+    pub searching: bool,
+    pub note: Option<String>,
     /// The list is still being filled.
     pub loading: bool,
     /// Lines visible this frame (render fills them, draw draws them).
@@ -276,6 +282,9 @@ impl Picker {
             scroll: 0,
             compact: false,
             requery: false,
+            live: false,
+            searching: false,
+            note: None,
             loading: false,
             view: Vec::new(),
             lines: Vec::new(),
@@ -334,6 +343,18 @@ impl Picker {
             let path = self.tree.as_ref().map(|t| t.root.join(&r));
             self.select_where(|a| matches!(a, Action::Open(p) if Some(p) == path.as_ref()));
             self.center = true;
+        }
+    }
+
+    /// A live search's results, the row in hand kept selected if it's still found (results arrive while you
+    /// move through them).
+    pub fn set_found(&mut self, items: Vec<Item>) {
+        let at = self.current().map(|i| i.action.clone());
+        self.set_items(items);
+        self.selected = 0;
+        self.settle(1);
+        if let Some(a) = at {
+            self.select_where(|x| *x == a);
         }
     }
 
@@ -547,7 +568,8 @@ impl Picker {
     /// query's until `filtered`).
     pub fn refilter(&mut self) -> bool {
         self.preview_scroll = 0;
-        if self.query.is_empty() {
+        // (a live search's query found these — it doesn't filter them)
+        if self.query.is_empty() || self.live {
             self.cancel_filter();
             self.matched = None;
             self.tail_unsorted = false;
@@ -780,8 +802,9 @@ impl Picker {
             .copied()
             .chain((scroll + pins.len()..n).take(rows.saturating_sub(pins.len())))
             .collect();
-        // A tree row shows a piece of its source's label: its marks are the label's, shifted
-        let typed = !self.query.is_empty();
+        // A tree row shows a piece of its source's label: its marks are the label's, shifted (a live search's
+        // query isn't fuzzy letters — its matches are the emphasis)
+        let typed = !self.query.is_empty() && !self.live;
         let mut out = Vec::with_capacity(rows);
         for &k in &lines {
             let r = &tm.rows[k];
@@ -1029,17 +1052,17 @@ pub fn file_items(root: &Path) -> Vec<Item> {
 
 const MAX_RESULTS: usize = 10_000;
 
-/// Global search — ripgrep if `rg` exists (smart case, respects .gitignore), else built-in regex scan.
-pub fn grep(root: &Path, pattern: &str) -> Result<Vec<Item>, String> {
-    rg(root, &["--smart-case", "-e", pattern], || smart_regex(pattern))
-}
-
-/// `pattern` as rg's `--smart-case` reads it: all lowercase = any case.
-fn smart_regex(pattern: &str) -> Result<regex::Regex, String> {
+/// `pattern` as rg's `--smart-case` reads it: all lowercase = any case. Err: why it isn't a pattern yet, in
+/// a few words (`unclosed group`).
+pub fn smart_regex(pattern: &str) -> Result<regex::Regex, String> {
     regex::RegexBuilder::new(pattern)
         .case_insensitive(!pattern.chars().any(char::is_uppercase))
         .build()
-        .map_err(|e| e.to_string().lines().last().unwrap_or("invalid regex").trim().to_string())
+        .map_err(|e| {
+            // (the regex crate's last line: `error: unclosed group`)
+            let why = e.to_string().lines().last().unwrap_or("invalid regex").trim().to_string();
+            why.strip_prefix("error: ").map_or(why.clone(), str::to_string)
+        })
 }
 
 /// Where `word` is in the code under `root` as text (N3 — `g r` while the server is loading): whole word,
@@ -1062,10 +1085,66 @@ fn rg(
     args: &[&str],
     re: impl FnOnce() -> Result<regex::Regex, String>,
 ) -> Result<Vec<Item>, String> {
+    rg_while(root, args, re, &|| false, &mut |_| {})
+}
+
+/// The live search (`space /`, N4): `pattern` with smart case, by file then line — `stop` asked as it goes
+/// (a newer key's search: the rg under way is killed, even while it has nothing to say), what's found so
+/// far handed to `partial` a little after it starts and now and then after (a big tree takes a while).
+pub fn search(
+    root: &Path,
+    pattern: &str,
+    stop: &(dyn Fn() -> bool + Sync),
+    partial: &mut dyn FnMut(Vec<Item>),
+) -> Result<Vec<Item>, String> {
+    let mut items =
+        rg_while(root, &["--smart-case", "-e", pattern], || smart_regex(pattern), stop, &mut |found| {
+            partial(by_place(found.to_vec()))
+        })?;
+    items = by_place(items);
+    Ok(items)
+}
+
+/// Hits by file then line — one a line (rg says a line once per match in it; its matches all stand out in
+/// its row anyway), at its first match.
+fn by_place(mut items: Vec<Item>) -> Vec<Item> {
+    let at = |it: &Item| match &it.action {
+        Action::Goto { path, line, col } => (path.clone(), *line, *col),
+        _ => (PathBuf::new(), 0, 0),
+    };
+    items.sort_by_key(at);
+    items.dedup_by(|b, a| {
+        let (a, b) = (at(a), at(b));
+        (a.0, a.1) == (b.0, b.1)
+    });
+    items
+}
+
+/// rg's threads at most — more contend in the kernel and are slower (see `rg_while`).
+const RG_THREADS: usize = 4;
+
+/// The first of a search's results shown this soon after it starts, then more this often.
+const PARTIAL_FIRST: std::time::Duration = std::time::Duration::from_millis(100);
+const PARTIAL_EVERY: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// `rg`, stopped once `stop` says so (checked between lines, and by a watcher while it's quiet) — what
+/// it found so far to `partial` now and then.
+fn rg_while(
+    root: &Path,
+    args: &[&str],
+    re: impl FnOnce() -> Result<regex::Regex, String>,
+    stop: &(dyn Fn() -> bool + Sync),
+    partial: &mut dyn FnMut(&[Item]),
+) -> Result<Vec<Item>, String> {
     use std::io::{BufRead, Read};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    // (rg's default — a thread a core — fights over the kernel opening files: a 200k-file tree took 6.8 s
+    // with 14 threads, 75 s of it system time; 2.3 s with 4, its best — measured 2026-10-03, macOS)
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(RG_THREADS).to_string();
     let rg = Command::new("rg")
         // (a line past 240 columns shows its start, not "[Omitted long line]")
         .args(["--vimgrep", "--no-heading", "--color=never", "--max-columns=240", "--max-columns-preview"])
+        .args(["--threads", &threads])
         .args(args)
         .current_dir(root)
         .stdin(std::process::Stdio::null())
@@ -1083,15 +1162,44 @@ fn rg(
         })
     });
     let mut items = Vec::new();
-    if let Some(out) = rg.stdout.take() {
-        for line in std::io::BufReader::new(out).split(b'\n').map_while(Result::ok) {
-            items.extend(parse_vimgrep(root, &String::from_utf8_lossy(&line)));
-            if items.len() == MAX_RESULTS {
-                let _ = rg.kill();
-                let _ = rg.wait();
-                return Ok(items);
+    let pid = rg.id() as i32;
+    let done = AtomicBool::new(false);
+    let started = std::time::Instant::now();
+    let mut next = PARTIAL_FIRST;
+    std::thread::scope(|s| {
+        // (a quiet rg — no hit for a while in a big tree — is stopped too, not only between lines)
+        s.spawn(|| {
+            while !done.load(Ordering::Relaxed) {
+                if stop() {
+                    // SAFETY: a signal to the rg this function started (still ours: it's waited for below).
+                    unsafe { libc::kill(pid, libc::SIGKILL) };
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        });
+        if let Some(out) = rg.stdout.take() {
+            for line in std::io::BufReader::new(out).split(b'\n').map_while(Result::ok) {
+                if stop() {
+                    break;
+                }
+                items.extend(parse_vimgrep(root, &String::from_utf8_lossy(&line)));
+                if items.len() == MAX_RESULTS {
+                    let _ = rg.kill();
+                    break;
+                }
+                if started.elapsed() >= next {
+                    partial(&items);
+                    next = started.elapsed() + PARTIAL_EVERY;
+                }
             }
         }
+        done.store(true, Ordering::Relaxed);
+    });
+    if items.len() == MAX_RESULTS || stop() {
+        let _ = rg.kill();
+        let _ = rg.wait();
+        return Ok(items);
     }
     let status = rg.wait().map_err(|e| e.to_string())?;
     let err = err.and_then(|h| h.join().ok()).unwrap_or_default();
@@ -1275,6 +1383,25 @@ mod tests {
         );
         assert_eq!(hits[0].action, Action::Goto { path: dir.join("a.txt"), line: 1, col: 7 }, "col in bytes");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The live search stops when told (a newer key): what it found is dropped, rg killed. Not stopped, it
+    /// finds every match, by file then line.
+    #[test]
+    fn a_stopped_search_finds_nothing_more() {
+        let dir = std::env::temp_dir().join(format!("tarae-search-stop-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in ["b.txt", "a.txt"] {
+            std::fs::write(dir.join(f), "x\nno\nx x\n").unwrap();
+        }
+        let labels = |items: Vec<Item>| items.into_iter().map(|i| i.label).collect::<Vec<_>>();
+        let all = search(&dir, "x", &|| false, &mut |_| {}).unwrap();
+        // (one row a line, its two matches in it)
+        assert_eq!(labels(all), ["a.txt:1: x", "a.txt:3: x x", "b.txt:1: x", "b.txt:3: x x"]);
+        let stopped = search(&dir, "x", &|| true, &mut |_| {}).unwrap();
+        assert!(stopped.is_empty(), "{:?}", labels(stopped));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A big list is filtered by a worker: the key only hands the job over, the result lands if no later

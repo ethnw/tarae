@@ -50,6 +50,8 @@ pub struct Sandbox {
     root: PathBuf,
     /// Real PATH and HOME (language servers, cargo, claude and its login) — see `live`.
     live: bool,
+    /// Folders put in front of the minimal PATH — a tool a test needs as you have it (`with_tools`).
+    tools: Vec<PathBuf>,
 }
 
 impl Sandbox {
@@ -64,7 +66,7 @@ impl Sandbox {
         fs::create_dir_all(&dir).unwrap();
         // Real path (macOS: /var → /private/var) — tarae canonicalizes the paths it opens.
         let root = fs::canonicalize(&dir).unwrap();
-        let sb = Sandbox { root, live: false };
+        let sb = Sandbox { root, live: false, tools: Vec::new() };
         for d in
             ["home/.config/tarae", "home/.local/state", "home/.local/share", "home/.cache", "claude", "work"]
         {
@@ -87,6 +89,21 @@ impl Sandbox {
         fs::write(sb.git_config(), "[user]\n\tname = t\n\temail = t@t\n[commit]\n\tgpgsign = false\n")
             .unwrap();
         sb
+    }
+
+    /// The child finds these programs as you do (`rg` for the live search) — their folders, from your PATH,
+    /// go in front of the minimal one. Panics if one isn't installed.
+    pub fn with_tools(mut self, names: &[&str]) -> Self {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        for name in names {
+            let dir = std::env::split_paths(&path)
+                .find(|d| d.join(name).is_file())
+                .unwrap_or_else(|| panic!("{name} isn't on PATH — this test needs it"));
+            if !self.tools.contains(&dir) {
+                self.tools.push(dir);
+            }
+        }
+        self
     }
 
     pub fn git_config(&self) -> PathBuf {
@@ -153,6 +170,9 @@ impl Sandbox {
     /// TARAE_*, COLORFGBG, TERM_PROGRAM … can't leak in from the developer's shell or CI).
     pub fn env(&self) -> Vec<(OsString, OsString)> {
         let home = self.home();
+        let mut path = self.tools.clone();
+        path.extend(["/usr/bin".into(), "/bin".into()]);
+        let path = std::env::join_paths(path).unwrap_or_default();
         if self.live {
             let mut env: Vec<(OsString, OsString)> = std::env::vars_os()
                 .filter(|(k, _)| !LIVE_DROP.iter().any(|p| k.to_string_lossy().starts_with(p)))
@@ -177,7 +197,7 @@ impl Sandbox {
             // tarae writes a Claude Code lock file on startup — never into the real ~/.claude
             ("CLAUDE_CONFIG_DIR", self.root.join("claude").into()),
             // Minimal PATH: no language servers, debuggers or claude from ~/.cargo/bin etc.
-            ("PATH", "/usr/bin:/bin".into()),
+            ("PATH", path),
             ("SHELL", "/bin/sh".into()),
             ("TERM", "xterm-256color".into()),
             // The harness doesn't answer the OSC 11 background query — skip it (and its 200 ms timeout)
