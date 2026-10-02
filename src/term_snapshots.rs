@@ -618,10 +618,11 @@ fn snapshot_toast_error() {
     s.file("src/demo.rs", DEMO_RS);
     s.ed.set_error("Couldn't save demo.rs: permission denied");
     s.ed.set_warning("demo.rs changed on disk");
-    // Half a second in: fully faded in, seconds before the fade-out starts (errors live 7 s, warnings 6 s)
+    // Half a second on the card: fully faded in, seconds before the fade-out starts (errors live 7 s,
+    // warnings 6 s)
     let fresh = Instant::now().checked_sub(Duration::from_millis(500)).unwrap();
     for t in &mut s.ed.toasts {
-        t.at = fresh;
+        (t.at, t.shown) = (fresh, true);
     }
     assert_eq!(s.ed.toast_alpha(), 1.0);
     s.check("toast_error");
@@ -1328,7 +1329,7 @@ fn snapshot_side_panel_list() {
     // The item's message toast, frozen at full opacity (a slow machine would catch it fading in)
     let fresh = Instant::now().checked_sub(Duration::from_millis(500)).unwrap();
     for t in &mut s.ed.toasts {
-        t.at = fresh;
+        (t.at, t.shown) = (fresh, true);
     }
     s.check("side_panel_list");
 }

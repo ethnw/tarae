@@ -456,6 +456,63 @@ fn git_tab_stages_and_commits() {
 
 /// `space f` in the real binary: the tree picker's first frame (the list still coming from its worker —
 /// no rows yet) draws, then the files show; a query nothing matches draws too.
+/// An idle tarae sleeps — a file open in a git repository, then the side panel, the git tab, the terminal,
+/// the chat, and a picker over an error waiting for its card: once settled, nothing goes out for seconds
+/// and nothing wakes it (CPU time and context switches stay near nothing). The error under the picker
+/// woke the main loop 14 times a second (U7 restarted its time every frame): 146 switches in 3 s.
+#[test]
+fn an_idle_editor_draws_nothing_and_sleeps() {
+    let sb = Sandbox::new("idle");
+    fs::write(sb.git_config(), "[user]\n\tname = t\n\temail = t@t\n[commit]\n\tgpgsign = false\n").unwrap();
+    sb.write("a.txt", "one\n");
+    sb.git(&["init", "-q", "-b", "main"]);
+    sb.git(&["add", "-A"]);
+    sb.git(&["commit", "-q", "-m", "base"]);
+    sb.write("a.txt", "one\ntwo\n");
+    let mut t = sb.spawn(&["a.txt"]);
+    t.wait_text("two");
+    let idle = |t: &mut Term, what: &str| {
+        // Settled: the git bar, the whole-screen redraw that follows frames sent in parts (`RESTING_REDRAW`)
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let (frames, before) = (t.frames(), t.usage());
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let (drawn, used) = (t.frames() - frames, t.usage() - before);
+        // (a wake is a few switches: 14 a second came to ~100 in 2 s; at rest it's under 10)
+        assert!(drawn == 0 && used.switches < 30, "{what}: {drawn} frames, {used:?} in 2 s\n{}", t.screen());
+    };
+    idle(&mut t, "a file");
+    t.send(" e");
+    t.wait_for("the side panel", |s| s.contains("esc code"));
+    idle(&mut t, "the side panel");
+    t.esc("the code has the keys", |s| s.contains("space e files"));
+    t.send(" g");
+    t.wait_for("the git tab", |s| s.contains("Changes"));
+    idle(&mut t, "the git tab");
+    t.esc("the code has the keys", |s| s.contains("space e files"));
+    t.send(" T");
+    t.wait_for("the terminal", |s| s.contains("TERMINAL") && s.contains("$"));
+    idle(&mut t, "the terminal");
+    t.send("\x1c");
+    t.wait_for("the code has the keys", |s| s.contains("C-\\ type in it"));
+    t.send(" l");
+    t.wait_text("Ask about");
+    idle(&mut t, "the chat");
+    drop(t);
+    let mut t = sb.spawn(&["a.txt"]);
+    t.wait_text("two");
+    t.send(" f");
+    t.wait_for("the picker", |s| s.contains("files in work"));
+    sb.write_config(&format!("{BASE_CONFIG}tab-width = \"wide\"\n"));
+    t.wait_for("the error on the status line", |s| s.status().contains("config:"));
+    idle(&mut t, "a picker over an error");
+    // The picker gone, the card comes up — its time starts and its fade-in gets frames (first drawn
+    // transparent, it would stay so without them)
+    let frames = t.frames();
+    t.esc("the card", |s| !s.contains("files in work") && s.contains("expected integer"));
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(t.frames() - frames >= 3, "{} frames for the card's fade-in", t.frames() - frames);
+}
+
 #[test]
 fn file_picker_opens_lists_and_survives_no_matches() {
     let sb = Sandbox::new("picker");

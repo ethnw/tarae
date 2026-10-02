@@ -56,6 +56,53 @@ pub struct LspState {
     missing: std::collections::HashSet<String>,
     /// Diagnostics for files that aren't open (`space D`): path → (server, severity, line, column, message).
     pub(crate) elsewhere: HashMap<std::path::PathBuf, Vec<Elsewhere>>,
+    /// The go-to in hand, timed from its key to the frame that shows its answer (N1 — `tarae.log`).
+    pub trace: Option<Trace>,
+    /// When the message being handled was read off the server's output (its reader thread) — the time
+    /// it then waited for the main loop is ours, not the server's.
+    pub(crate) arrived: Option<std::time::Instant>,
+    /// Servers no open file uses, since when (`lsp_unused` — they stop after `IDLE_STOP`).
+    unused: HashMap<ClientId, std::time::Instant>,
+    /// (tests: the trace lines written — the log writes nothing in tests)
+    #[cfg(test)]
+    pub traced: Vec<String>,
+}
+
+/// One `g d`·`g r`… from its key to the first frame that shows the answer (N1): each step and what it
+/// took, written to `tarae.log` as one line once that frame is drawn (`Editor::trace_drawn`) —
+/// `references 1.84s · sent 3ms · waited for "cargo check" 1.20s · asked again 1ms · answered 600ms (412
+/// places) · main loop 2ms · list 4ms · drawn 6ms`.
+pub struct Trace {
+    what: &'static str,
+    start: std::time::Instant,
+    last: std::time::Instant,
+    steps: Vec<String>,
+    /// The answer has been dealt with (listed, jumped to, nothing found): the next frame ends it.
+    answered: bool,
+}
+
+impl Trace {
+    fn new(what: &'static str) -> Trace {
+        let now = std::time::Instant::now();
+        Trace { what, start: now, last: now, steps: Vec::new(), answered: false }
+    }
+
+    /// A step done now — what it took is the time since the step before.
+    fn step(&mut self, what: impl Into<String>) {
+        self.step_at(what, std::time::Instant::now());
+    }
+
+    fn step_at(&mut self, what: impl Into<String>, at: std::time::Instant) {
+        let took = at.saturating_duration_since(self.last);
+        self.steps.push(format!("{} {}", what.into(), crate::term::duration(took.as_secs_f32())));
+        self.last = self.last.max(at);
+    }
+
+    /// The log line.
+    pub fn line(&self) -> String {
+        let total = self.last.saturating_duration_since(self.start).as_secs_f32();
+        format!("{} {} · {}", self.what, crate::term::duration(total), self.steps.join(" · "))
+    }
 }
 
 /// A diagnostic in a file that isn't open: (server, severity, line, column, message).
@@ -71,6 +118,11 @@ pub enum ActionPreview {
     CommandOnly,
     Failed(String),
 }
+
+/// How long a server stays up once no open file uses it — a file reopened soon after needn't wait for it to
+/// load again (rust-analyzer took minutes on this repository — N1); after that it stops (it ran on for hours).
+const IDLE_STOP: std::time::Duration =
+    std::time::Duration::from_millis(if cfg!(test) { 30 } else { 10 * 60 * 1000 });
 
 /// How often one question (same place, same text) is put off for a busy server before it's given up —
 /// asked again at each piece of work that ends (rust-analyzer reports a dozen while loading a project).
@@ -332,8 +384,11 @@ impl Editor {
         self.lsp.next_id += 1;
         let cid = self.lsp.next_id;
         let (server, options) = crate::java::prepare(server, &root);
+        let options = lsp::options_for(&server, &root, options);
         match Client::start(cid, &server, &root, options, self.events.sender()) {
             Ok(c) => {
+                // (started again after it exited: no longer the status line's red dot)
+                self.lsp.failed.remove(&server.name);
                 self.lsp.clients.push(c);
                 Some(cid)
             }
@@ -592,11 +647,18 @@ impl Editor {
                 let Some(c) = self.client_mut(cid) else { return };
                 match v["kind"].as_str() {
                     Some("end") => {
-                        c.progress.remove(&token);
+                        // (what it was busy with, and how long — a go-to may have waited on it)
+                        if let Some(p) = c.progress.remove(&token)
+                            && let Some(began) = p.began
+                        {
+                            let took = crate::term::duration(began.elapsed().as_secs_f32());
+                            crate::log::line(&c.name, "progress", &format!("{} took {took}", p.title));
+                        }
                         self.ask_again(cid);
                     }
                     Some("begin") => {
-                        let mut p = lsp::Progress::default();
+                        let mut p =
+                            lsp::Progress { began: Some(std::time::Instant::now()), ..Default::default() };
                         p.update(v);
                         c.progress.insert(token, p);
                     }
@@ -608,6 +670,10 @@ impl Editor {
             "language/status" => {
                 let Some(c) = self.client_mut(cid) else { return };
                 let key = "language/status".to_string();
+                // (jdtls says what it's at with each change — the log keeps them in order, timed)
+                if let Some(text) = crate::java::status_text(params) {
+                    crate::log::line(&c.name, "status", &text);
+                }
                 match crate::java::status_text(params) {
                     Some(title) => c.progress.insert(key, lsp::Progress { title, ..Default::default() }),
                     None => c.progress.remove(&key),
@@ -780,19 +846,33 @@ impl Editor {
                 self.note(format!("{n} uses selected"));
             }
             Kind::Goto(goto) => {
+                // (the server's time ends where its reader read the answer; the rest is ours)
+                let arrived = self.lsp.arrived.take();
+                if let Some(t) = self.lsp.trace.as_mut() {
+                    let n = result.as_array().map_or(usize::from(!result.is_null()), Vec::len);
+                    t.step_at(format!("answered ({n})"), arrived.unwrap_or_else(std::time::Instant::now));
+                    t.step("main loop");
+                }
                 // jdtls: library/JDK classes come as jdt:// URIs — source into a read-only buffer (java.rs)
                 if goto != Goto::References
                     && let Some((uri, pos)) = crate::java::jdt_location(result)
                 {
                     self.push_jump();
+                    self.trace_ends("class file asked");
                     return self.open_class_file(cid, uri, pos);
                 }
                 let locs = lsp::locations(result);
                 match locs.as_slice() {
                     [] if self.wait_for_idle(cid, &p) => {}
-                    [] => self.set_status(format!("no {} found", goto.noun())),
+                    [] => {
+                        self.trace_ends("none");
+                        self.set_status(format!("no {} found", goto.noun()))
+                    }
                     // One place: go straight there (references always list — even one is worth seeing)
-                    [(path, pos)] if goto != Goto::References => self.lsp_jump(path, pos, enc),
+                    [(path, pos)] if goto != Goto::References => {
+                        self.lsp_jump(path, pos, enc);
+                        self.trace_ends("jumped");
+                    }
                     _ => {
                         let root = std::env::current_dir().unwrap_or_default();
                         let items = locs
@@ -811,6 +891,7 @@ impl Editor {
                             })
                             .collect();
                         self.open_picker(Picker::new(goto.noun(), items, true).grouped(root), None);
+                        self.trace_ends("list");
                     }
                 }
             }
@@ -1528,6 +1609,40 @@ impl Editor {
             if let Some(c) = self.client_mut(cid) {
                 c.notify("textDocument/didClose", json!({ "textDocument": { "uri": lsp::uri(&path) } }));
             }
+            // The last file it served: it stops once none has come back for a while
+            if !self.docs.iter().any(|d| d.lsp.clients().any(|c| c == cid)) {
+                self.lsp_unused(cid);
+            }
+        }
+    }
+
+    /// Server `cid` serves no open file now: in `IDLE_STOP` it stops, unless one has come back by then (or it
+    /// was let go again since — the latest wait counts). The next file of its project starts it again.
+    fn lsp_unused(&mut self, cid: ClientId) {
+        let since = std::time::Instant::now();
+        self.lsp.unused.insert(cid, since);
+        self.events.jobs().spawn(move || {
+            std::thread::sleep(IDLE_STOP);
+            move |ed: &mut Editor| ed.lsp_stop_if_unused(cid, since)
+        });
+    }
+
+    fn lsp_stop_if_unused(&mut self, cid: ClientId, since: std::time::Instant) {
+        if self.lsp.unused.get(&cid) != Some(&since) {
+            return;
+        }
+        self.lsp.unused.remove(&cid);
+        if self.docs.iter().any(|d| d.lsp.clients().any(|c| c == cid)) {
+            return;
+        }
+        let Some(root) = self.client(cid).map(|c| c.root.display().to_string()) else { return };
+        if let Some(name) = self.lsp_stopped(cid) {
+            let idle = crate::term::duration(IDLE_STOP.as_secs_f32());
+            crate::log::line(
+                &name,
+                "stop",
+                &format!("{name} for {root} stopped — no file of it open for {idle}"),
+            );
         }
     }
 
@@ -1870,8 +1985,12 @@ impl Editor {
             _ => "selecting them",
         };
         let msg = format!("{} is loading — {then} when ready", c.name);
+        let doing: Vec<String> = c.progress.values().map(|p| p.title.clone()).collect();
         if !self.put_off(cid, p) {
             return false;
+        }
+        if let Some(t) = self.lsp.trace.as_mut() {
+            t.step(format!("answered empty while busy ({})", doing.join(", ")));
         }
         self.set_status(msg);
         true
@@ -1892,6 +2011,9 @@ impl Editor {
     /// The server dropped the question because the project changed meanwhile: ask again when it's idle — at
     /// once if it already is (after a moment, so a burst of changes can settle).
     fn ask_again_later(&mut self, cid: ClientId, p: &Pending) {
+        if let Some(t) = self.lsp.trace.as_mut() {
+            t.step("content modified");
+        }
         if self.wait_for_idle(cid, p) {
             return;
         }
@@ -1917,7 +2039,7 @@ impl Editor {
             return; // moved on
         }
         match kind {
-            Kind::Goto(goto) => self.goto_location(goto),
+            Kind::Goto(goto) => self.goto_ask(goto, true),
             Kind::Hover => {
                 self.lsp_request(Kind::Hover, "textDocument/hover", json!({}));
             }
@@ -1928,19 +2050,56 @@ impl Editor {
 
     /// `g d`·`g D`·`g y`·`g i`·`g r` — asks only a server that says it can answer.
     pub fn goto_location(&mut self, goto: Goto) {
-        let Some(cid) = self.ready_client(&Kind::Goto(goto)) else { return };
+        // One still waiting (never answered, or the user gave up): logged as it stood
+        if let Some(mut old) = self.lsp.trace.replace(Trace::new(goto.noun())) {
+            old.step("asked anew, unanswered");
+            crate::log::line("tarae", "timing", &old.line());
+            #[cfg(test)]
+            self.lsp.traced.push(old.line());
+        }
+        self.goto_ask(goto, false);
+    }
+
+    /// The question — from its key, or `again` once the busy server it waited for has done a piece of work.
+    fn goto_ask(&mut self, goto: Goto, again: bool) {
+        if again && let Some(t) = self.lsp.trace.as_mut() {
+            t.step("waited for the server");
+        }
+        let Some(cid) = self.ready_client(&Kind::Goto(goto)) else { return self.trace_ends("not asked") };
         let Some(c) = self.client(cid) else { return };
         if let Some(cap) = goto.provider().map(|p| &c.caps[p])
             && (cap.is_null() || *cap == json!(false))
         {
             let name = c.name.clone();
+            self.trace_ends("can't");
             return self.set_status(format!("{name} can't find {}", goto.noun()));
         }
         let extra = match goto {
             Goto::References => json!({ "context": { "includeDeclaration": true } }),
             _ => json!({}),
         };
-        self.lsp_request(Kind::Goto(goto), goto.method(), extra);
+        if self.lsp_request(Kind::Goto(goto), goto.method(), extra)
+            && let Some(t) = self.lsp.trace.as_mut()
+        {
+            t.step(if again { "asked again" } else { "sent" });
+        }
+    }
+
+    /// The go-to's answer is dealt with (`what` it came to): the next frame drawn ends its trace.
+    fn trace_ends(&mut self, what: &str) {
+        if let Some(t) = self.lsp.trace.as_mut() {
+            t.step(what);
+            t.answered = true;
+        }
+    }
+
+    /// After a frame: a go-to whose answer was dealt with is on screen now — its way into the log (N1).
+    pub fn trace_drawn(&mut self) {
+        let Some(mut t) = self.lsp.trace.take_if(|t| t.answered) else { return };
+        t.step("drawn");
+        crate::log::line("tarae", "timing", &t.line());
+        #[cfg(test)]
+        self.lsp.traced.push(t.line());
     }
 
     fn lsp_jump(&mut self, path: &std::path::Path, pos: &Value, enc: Encoding) {
@@ -2054,8 +2213,10 @@ impl Editor {
     /// Server `cid` closed its stdout (exited or crashed) — forget it and everything waiting on it; its docs
     /// go without a server (reopening the file starts a new one).
     pub fn lsp_exited(&mut self, cid: ClientId) {
+        let root = self.client(cid).map(|c| c.root.display().to_string()).unwrap_or_default();
         if let Some(name) = self.lsp_stopped(cid) {
-            crate::log::line(&name, "exit", "the server exited");
+            // (reaped as it's dropped; the next file of its project starts it again)
+            crate::log::line(&name, "exit", &format!("{name} for {root} exited"));
             self.lsp.failed.insert(name.clone(), "exited".into());
             self.set_error(format!("{name} exited · :log-open shows why"));
         }
@@ -2243,6 +2404,132 @@ mod tests {
         let init = json!({ "jsonrpc": "2.0", "id": 0, "result": { "capabilities": { "positionEncoding": "utf-8" } } });
         ed.on_lsp_message(cid, init);
         cid
+    }
+
+    /// Events until `done` (or `secs` pass) — the language server's own messages and our timers.
+    fn settle_for(ed: &mut Editor, secs: u64, done: impl Fn(&Editor) -> bool) {
+        let end = std::time::Instant::now() + Duration::from_secs(secs);
+        while !done(ed) && std::time::Instant::now() < end {
+            if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
+    }
+
+    /// Process `pid` is gone and reaped — not even a zombie is left (`kill(pid, 0)` finds a zombie).
+    fn reaped(pid: u32) -> bool {
+        // SAFETY: signal 0 only asks whether the process exists; nothing is sent.
+        let r = unsafe { libc::kill(pid as i32, 0) };
+        r != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
+
+    /// A server no open file uses stops after `IDLE_STOP` — quietly (it's said in the log), its process
+    /// reaped — unless a file of it comes back first; the next file of its project starts it again.
+    #[test]
+    fn an_unused_server_stops_unless_a_file_comes_back() {
+        let (mut ed, file, _log) = setup("idle", "fn main() {}\n");
+        let cid = ready(&mut ed);
+        let pid = ed.client(cid).and_then(Client::pid).expect("its process");
+        // Closed and opened again before the wait ends: it stays
+        let id = ed.doc().id;
+        ed.close_doc(id);
+        assert!(ed.lsp.unused.contains_key(&cid), "unused, waiting");
+        ed.open(&file).unwrap();
+        assert_eq!(ed.doc().lsp.client, Some(cid), "the same server took the file back");
+        settle_for(&mut ed, 1, |_| false);
+        assert!(ed.client(cid).is_some(), "a file of it came back: it stays");
+        // Closed for good: it stops, without a word on screen, and its process is gone — not a zombie
+        let id = ed.doc().id;
+        ed.close_doc(id);
+        settle_for(&mut ed, 5, |ed| ed.client(cid).is_none());
+        assert!(ed.client(cid).is_none(), "stopped");
+        let said: Vec<&str> = ed.toasts.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(said, ["fake ready"], "nothing on screen about the stop (only its start was said)");
+        assert!(!ed.lsp.failed.contains_key("fake"), "a stop isn't a failure");
+        let end = std::time::Instant::now() + Duration::from_secs(5);
+        while !reaped(pid) && std::time::Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(reaped(pid), "reaped");
+        // The next file of its project starts it again
+        ed.open(&file).unwrap();
+        assert!(ed.doc().lsp.client.is_some_and(|c| c != cid), "a new one");
+        std::fs::remove_dir_all(file.parent().unwrap()).ok();
+    }
+
+    /// A server that exits (crashed, killed) is reaped — no zombie left — and said so; the next file of its
+    /// project starts it again. (The test kills its own stand-in server, a `cat`.)
+    #[test]
+    fn a_server_that_exits_is_reaped_and_started_again_when_needed() {
+        let (mut ed, file, _log) = setup("exits", "fn main() {}\n");
+        let cid = ready(&mut ed);
+        let pid = ed.client(cid).and_then(Client::pid).expect("its process");
+        // SAFETY: a signal to the stand-in server this test started.
+        unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        settle_for(&mut ed, 5, |ed| ed.client(cid).is_none());
+        assert!(ed.client(cid).is_none(), "noticed");
+        assert!(ed.toasts.iter().any(|t| t.text.starts_with("fake exited")), "said");
+        let end = std::time::Instant::now() + Duration::from_secs(5);
+        while !reaped(pid) && std::time::Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(reaped(pid), "reaped, not a zombie");
+        let id = ed.doc().id;
+        ed.close_doc(id);
+        ed.open(&file).unwrap();
+        assert!(ed.doc().lsp.client.is_some_and(|c| c != cid), "started again for the file that needs it");
+        assert!(!ed.lsp.failed.contains_key("fake"), "running again: no red dot");
+        std::fs::remove_dir_all(file.parent().unwrap()).ok();
+    }
+
+    /// Every kind of server stops once no file of it is open (a TOML one here, beside rust's that stays while
+    /// its file is open); rust-analyzer's `initialize` tells it to leave the project's worktrees alone.
+    #[test]
+    fn every_server_stops_unused_and_rust_analyzer_skips_worktrees() {
+        let dir = std::env::temp_dir().join(format!("tarae-lsp-kinds-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join(".claude/worktrees/w")).unwrap();
+        std::fs::write(dir.join(".claude/worktrees/w/.git"), "gitdir: elsewhere").unwrap();
+        std::fs::write(dir.join("main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"t\"\n").unwrap();
+        let (rust_log, toml_log) = (dir.join("rust.log"), dir.join("toml.log"));
+        let cfg = format!(
+            "[lsp.rust-analyzer]\ncommand = \"sh\"\nargs = [\"-c\", \"cat > '{}'\"]\n\
+             [lsp.tomlfake]\ncommand = \"sh\"\nargs = [\"-c\", \"cat > '{}'\"]\n\
+             [lang.rust]\nlsp = [\"rust-analyzer\"]\n[lang.toml]\nlsp = [\"tomlfake\"]\n",
+            rust_log.display(),
+            toml_log.display()
+        );
+        let (config, w) = crate::config::parse(&cfg);
+        assert!(w.is_empty(), "{w:?}");
+        let mut ed = Editor::new(config);
+        ed.open(&dir.join("main.rs")).unwrap();
+        let rust = ed.doc().lsp.client.expect("rust's server");
+        ed.open(&dir.join("Cargo.toml")).unwrap();
+        let toml = ed.doc().lsp.client.expect("toml's server");
+        assert_ne!(rust, toml);
+        let out = sent(&rust_log);
+        assert!(
+            out.contains(r#""initializationOptions":{"files":{"exclude":[".claude/worktrees"]}}"#),
+            "{out}"
+        );
+        assert!(sent(&toml_log).contains(r#""initializationOptions":null"#), "others get none");
+        let pid = ed.client(toml).and_then(Client::pid).expect("its process");
+        let id = ed.doc().id;
+        ed.close_doc(id);
+        settle_for(&mut ed, 5, |ed| ed.client(toml).is_none());
+        assert!(ed.client(toml).is_none(), "toml's server stopped");
+        assert!(ed.client(rust).is_some(), "rust's file is still open: its server stays");
+        let end = std::time::Instant::now() + Duration::from_secs(5);
+        while !reaped(pid) && std::time::Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(reaped(pid), "reaped");
+        let id = ed.doc().id;
+        ed.close_doc(id);
+        settle_for(&mut ed, 5, |ed| ed.client(rust).is_none());
+        assert!(ed.client(rust).is_none(), "and rust's once its file closed");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -2945,6 +3232,55 @@ mod tests {
         assert_eq!(ed.doc().selection().primary(), Range::point(11));
         feed(&mut ed, "<C-o>");
         assert_eq!(ed.doc().selection().primary(), Range::point(6), "back on `T`");
+        std::fs::remove_dir_all(file.parent().unwrap()).ok();
+    }
+
+    /// A go-to is timed from its key to the frame that shows its answer (N1): one line in the log once
+    /// that frame is drawn, each step in order — what the server took, the wait for its work, the re-ask,
+    /// our list and our frame.
+    #[test]
+    fn a_goto_is_timed_from_its_key_to_its_frame() {
+        let (mut ed, file, _log) = setup("traced", "fn a() {}\nfn b() { a() }\n");
+        let cid = ready(&mut ed);
+        let progress = |kind: &str| {
+            json!({ "method": "$/progress", "params": { "token": "rustAnalyzer/Indexing",
+                "value": { "kind": kind, "title": "Indexing" } } })
+        };
+        ed.on_lsp_message(cid, progress("begin"));
+        feed(&mut ed, "jwwgr");
+        let id = pending_of(&ed, Kind::Goto(Goto::References));
+        ed.on_lsp_message(cid, json!({ "id": id, "result": [] }));
+        ed.on_lsp_message(cid, progress("end"));
+        let id = pending_of(&ed, Kind::Goto(Goto::References));
+        let at = |line: u64| json!({ "uri": lsp::uri(&file), "range": { "start": { "line": line, "character": 3 }, "end": { "line": line, "character": 4 } } });
+        ed.on_lsp_message(cid, json!({ "id": id, "result": [at(0), at(1)] }));
+        assert!(ed.picker.is_some(), "listed");
+        assert!(ed.lsp.traced.is_empty(), "not before it's on screen");
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 30).unwrap();
+        assert_eq!(ed.lsp.traced.len(), 1, "one line, once drawn");
+        let line = &ed.lsp.traced[0];
+        let steps: Vec<&str> =
+            line.split(" · ").skip(1).map(|s| s.rsplit_once(' ').map_or(s, |(what, _took)| what)).collect();
+        assert_eq!(
+            steps,
+            [
+                "sent",
+                "answered (0)",
+                "main loop",
+                "answered empty while busy (Indexing)",
+                "waited for the server",
+                "asked again",
+                "answered (2)",
+                "main loop",
+                "list",
+                "drawn"
+            ],
+            "{line}"
+        );
+        assert!(line.starts_with("references "), "{line}");
+        // The next frame writes nothing more
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 30).unwrap();
+        assert_eq!(ed.lsp.traced.len(), 1);
         std::fs::remove_dir_all(file.parent().unwrap()).ok();
     }
 

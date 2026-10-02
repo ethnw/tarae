@@ -271,6 +271,8 @@ pub fn render(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io::
     // (an error under a picker waits for the card — U7)
     let card = editor.screen.toast_card.get().is_some();
     editor.toasts_drawn(card);
+    // (a go-to's answer on screen: its timing to the log — N1)
+    editor.trace_drawn();
     // (kept: the screen as the user sees it — `C-s` in the chat sends it as text, and so does Claude's
     // `screen` once the user said yes)
     editor.last_frame = Some((frame, w, h));
@@ -5944,7 +5946,7 @@ fn draw_which_key(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) 
 
 /// How long something took (seconds), the one way it's written: `412ms` under a second, else `1.2s`. Takes
 /// the plain number — test reports can say anything (`Infinity`), and a `Duration` would panic on it.
-fn duration(s: f32) -> String {
+pub fn duration(s: f32) -> String {
     if s < 1.0 { format!("{:.0}ms", s * 1000.0) } else { format!("{s:.1}s") }
 }
 

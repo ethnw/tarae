@@ -276,6 +276,76 @@ pub fn find_root_for(lang: &str, file: &Path) -> PathBuf {
     root_by_markers(file, markers_for(lang)).unwrap_or_else(|| repo_or_dir(file))
 }
 
+/// Folders where agents keep their worktrees — left out whole, worktrees made later included.
+const WORKTREE_HOMES: &[&str] = &[".claude/worktrees"];
+/// How deep `nested_checkouts` looks, and how many folders at most (a huge tree mustn't hold up the start).
+const NESTED_DEPTH: usize = 4;
+const NESTED_BUDGET: usize = 5000;
+
+/// Checkouts inside `root` that aren't part of its project — a folder with its own `.git` (worktrees,
+/// clones; not submodules, `.gitmodules` — those may be workspace members), and `WORKTREE_HOMES` — relative
+/// to `root`. Measured on this repo: rust-analyzer scanned 40 GB of `.claude/worktrees` twice before it
+/// could answer `gr` (222 s cold). Disk work: the server's writer thread.
+pub fn nested_checkouts(root: &Path) -> Vec<String> {
+    let submodules: Vec<String> = std::fs::read_to_string(root.join(".gitmodules"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("path")?.trim_start().strip_prefix('='))
+        .map(|p| p.trim().trim_end_matches('/').to_string())
+        .collect();
+    let mut found: Vec<String> =
+        WORKTREE_HOMES.iter().filter(|h| root.join(h).is_dir()).map(|h| h.to_string()).collect();
+    let mut queue = std::collections::VecDeque::from([(root.to_path_buf(), 0)]);
+    let mut seen = 0;
+    while let Some((dir, depth)) = queue.pop_front() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for e in entries.flatten() {
+            // (not through links — a link out of the project isn't the project's to scan)
+            if !e.file_type().is_ok_and(|t| t.is_dir()) {
+                continue;
+            }
+            let path = e.path();
+            let Some(rel) = path.strip_prefix(root).ok().map(|r| r.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            let name = e.file_name();
+            if [".git", "target", "node_modules"].iter().any(|n| name == *n)
+                || WORKTREE_HOMES.contains(&rel.as_str())
+            {
+                continue;
+            }
+            seen += 1;
+            if seen > NESTED_BUDGET {
+                return found;
+            }
+            if path.join(".git").exists() && !submodules.contains(&rel) {
+                found.push(rel);
+            } else if depth + 1 < NESTED_DEPTH {
+                queue.push_back((path, depth + 1));
+            }
+        }
+    }
+    found
+}
+
+/// A server's `initializationOptions` past what `java::prepare` gives: rust-analyzer leaves nested
+/// checkouts alone (`files.exclude`, relative to its root).
+pub fn options_for(spec: &ServerSpec, root: &Path, given: Value) -> Box<dyn FnOnce() -> Value + Send> {
+    let rust = spec.name == "rust-analyzer"
+        || Path::new(&spec.command).file_name().is_some_and(|n| n == "rust-analyzer");
+    if !rust {
+        return Box::new(move || given);
+    }
+    let root = root.to_path_buf();
+    Box::new(move || {
+        let exclude = nested_checkouts(&root);
+        if !exclude.is_empty() {
+            crate::log::line("rust-analyzer", "info", &format!("left out: {}", exclude.join(", ")));
+        }
+        json!({ "files": { "exclude": exclude } })
+    })
+}
+
 // ── URI ──────────────────────────────────────────────────────────────────
 
 pub fn uri(path: &Path) -> String {
@@ -372,6 +442,8 @@ pub struct Progress {
     pub title: String,
     pub message: Option<String>,
     pub percentage: Option<u64>,
+    /// When it began — its end goes to the log with how long it ran (what a go-to waited for — N1).
+    pub began: Option<std::time::Instant>,
 }
 
 impl Progress {
@@ -423,23 +495,37 @@ pub struct Client {
     pub progress: HashMap<String, Progress>,
     /// Server capabilities (initialize response) — completion trigger characters etc.
     pub caps: Value,
-    child: Child,
+    /// (taken by `Drop` — killed and reaped on a thread of its own)
+    child: Option<Child>,
     /// For the log: how long it took to be ready.
     pub started: std::time::Instant,
 }
 
 impl Drop for Client {
+    /// The process goes — killed now (if it hasn't exited; tarae quitting can't leave it running), then waited
+    /// for on a thread of its own, so it never stays behind as a zombie and never holds up the main loop.
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
     }
 }
 
 impl Client {
+    /// The server's process id (tests: is it gone, reaped?).
+    #[cfg(test)]
+    pub fn pid(&self) -> Option<u32> {
+        self.child.as_ref().map(Child::id)
+    }
+
     pub fn start(
         id: ClientId,
         spec: &ServerSpec,
         root: &Path,
-        init_options: Value,
+        init_options: Box<dyn FnOnce() -> Value + Send>,
         events: Sender<Event>,
     ) -> Result<Client, String> {
         let mut child = Command::new(&spec.command)
@@ -470,7 +556,12 @@ impl Client {
         thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
             while let Some(msg) = read_message(&mut reader) {
-                let apply = move |ed: &mut Editor| ed.on_lsp_message(id, msg);
+                // (when it was read — what it then waits for the main loop is ours, not the server's)
+                let at = std::time::Instant::now();
+                let apply = move |ed: &mut Editor| {
+                    ed.lsp.arrived = Some(at);
+                    ed.on_lsp_message(id, msg)
+                };
                 if events.send(Event::Job(Box::new(apply))).is_err() {
                     return;
                 }
@@ -520,15 +611,15 @@ impl Client {
             encoding: Encoding::Utf16,
             progress: HashMap::new(),
             caps: Value::Null,
-            child,
+            child: Some(child),
             started: std::time::Instant::now(),
         };
         let root_uri = uri(root);
-        let init = json!({
+        let mut init = json!({
             "jsonrpc": "2.0", "id": 0, "method": "initialize",
             "params": {
                 "processId": std::process::id(),
-                "initializationOptions": init_options,
+                "initializationOptions": Value::Null,
                 "clientInfo": { "name": "tarae", "version": env!("CARGO_PKG_VERSION") },
                 "rootUri": root_uri,
                 "rootPath": root.to_string_lossy(),
@@ -595,7 +686,11 @@ impl Client {
                 },
             },
         });
-        let _ = client.tx.send(Out::Body(init.to_string()));
+        // The options are made on the writer thread: some need the disk (`nested_checkouts` walks the project)
+        let _ = client.tx.send(Out::Lazy(Box::new(move || {
+            init["params"]["initializationOptions"] = init_options();
+            init.to_string()
+        })));
         Ok(client)
     }
 
@@ -864,6 +959,43 @@ mod tests {
         assert_eq!(find_root_for("typescript", &file), t.join("repo/crates"));
         std::fs::remove_file(t.join("repo/Cargo.toml")).unwrap();
         assert_eq!(find_root_for("rust", &file), t.join("repo/crates/core"));
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    /// rust-analyzer is told to leave alone what isn't the project: worktrees (whole `.claude/worktrees`,
+    /// later ones too) and clones inside it — not submodules (may be members), not through links, not
+    /// under `target`, not deeper than `NESTED_DEPTH`. Other servers get their options untouched.
+    #[test]
+    fn rust_analyzer_leaves_nested_checkouts_alone() {
+        let t = std::env::temp_dir().join(format!("tarae-lsp-nested-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        let root = t.join("repo");
+        for d in [
+            ".git",
+            ".claude/worktrees/a",
+            "vendor/clone/.git",
+            "sub/mod",
+            "target/x/.git",
+            "crates/core/src",
+        ] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        std::fs::write(root.join(".claude/worktrees/a/.git"), "gitdir: ../../../.git/worktrees/a").unwrap();
+        std::fs::write(root.join("sub/mod/.git"), "gitdir: ../../.git/modules/mod").unwrap();
+        std::fs::write(root.join(".gitmodules"), "[submodule \"mod\"]\n\tpath = sub/mod\n").unwrap();
+        std::fs::create_dir_all(root.join("src/a/b/c/d/.git")).unwrap(); // level 5
+        std::fs::create_dir_all(root.join("src/a/b/c4/.git")).unwrap(); // level 4
+        std::os::unix::fs::symlink(root.join("vendor/clone"), root.join("link")).unwrap();
+        let mut found = nested_checkouts(&root);
+        found.sort();
+        assert_eq!(found, [".claude/worktrees", "src/a/b/c4", "vendor/clone"]);
+
+        let spec =
+            |name: &str| ServerSpec { name: name.into(), command: name.into(), args: vec![], except: vec![] };
+        let opts = options_for(&spec("rust-analyzer"), &root, Value::Null)();
+        assert_eq!(opts["files"]["exclude"].as_array().map(Vec::len), Some(3), "{opts}");
+        let given = json!({ "bundles": ["x.jar"] });
+        assert_eq!(options_for(&spec("jdtls"), &root, given.clone())(), given);
         let _ = std::fs::remove_dir_all(&t);
     }
 }

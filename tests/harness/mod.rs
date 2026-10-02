@@ -418,6 +418,16 @@ impl Term {
         cvt(unsafe { libc::ioctl(self.master.as_raw_fd(), libc::TIOCSWINSZ as _, &ws) }).expect("TIOCSWINSZ");
     }
 
+    /// What tarae has used so far: CPU time and context switches (every thread's).
+    pub fn usage(&self) -> Usage {
+        usage(self.child.id())
+    }
+
+    /// Frames tarae has written so far (each ends its synchronized update).
+    pub fn frames(&self) -> usize {
+        lock(&self.out).raw.windows(FRAME_END.len()).filter(|w| *w == FRAME_END).count()
+    }
+
     pub fn running(&mut self) -> bool {
         self.child.try_wait().expect("try_wait").is_none()
     }
@@ -486,6 +496,65 @@ impl Drop for Term {
             thread::sleep(POLL);
         }
     }
+}
+
+/// Where a frame ends (`CSI ?2026l`, the synchronized update's end).
+pub const FRAME_END: &[u8] = b"\x1b[?2026l";
+
+/// A process's CPU time and context switches so far.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Usage {
+    pub cpu: Duration,
+    pub switches: u64,
+}
+
+impl std::ops::Sub for Usage {
+    type Output = Usage;
+    fn sub(self, before: Usage) -> Usage {
+        Usage {
+            cpu: self.cpu.saturating_sub(before.cpu),
+            switches: self.switches.saturating_sub(before.switches),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[allow(deprecated)] // (libc's mach_timebase_info — the one call the mach2 crate would be added for)
+pub fn usage(pid: u32) -> Usage {
+    // SAFETY: plain out-structs of the sizes given; the calls only fill them in.
+    unsafe {
+        let mut info: libc::proc_taskinfo = std::mem::zeroed();
+        let size = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
+        let n = libc::proc_pidinfo(pid as i32, libc::PROC_PIDTASKINFO, 0, (&raw mut info).cast(), size);
+        assert_eq!(n, size, "proc_pidinfo({pid})");
+        // (CPU times are in Mach time units — not nanoseconds on Apple silicon)
+        let mut tb = libc::mach_timebase_info { numer: 0, denom: 0 };
+        libc::mach_timebase_info(&mut tb);
+        let ticks = (info.pti_total_user + info.pti_total_system) as u128;
+        let nanos = ticks * tb.numer as u128 / tb.denom.max(1) as u128;
+        Usage { cpu: Duration::from_nanos(nanos as u64), switches: info.pti_csw as u64 }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn usage(pid: u32) -> Usage {
+    // utime + stime in clock ticks (fields 14 and 15, after the command's closing parenthesis)
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).expect("/proc stat");
+    let rest = &stat[stat.rfind(')').expect("comm") + 2..];
+    let f: Vec<&str> = rest.split_whitespace().collect();
+    // SAFETY: sysconf only reads a constant.
+    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u64;
+    let ticks: u64 = f[11].parse::<u64>().unwrap() + f[12].parse::<u64>().unwrap();
+    let mut switches = 0;
+    for task in fs::read_dir(format!("/proc/{pid}/task")).into_iter().flatten().flatten() {
+        let status = fs::read_to_string(task.path().join("status")).unwrap_or_default();
+        switches += status
+            .lines()
+            .filter(|l| l.contains("ctxt_switches"))
+            .filter_map(|l| l.split_whitespace().last()?.parse::<u64>().ok())
+            .sum::<u64>();
+    }
+    Usage { cpu: Duration::from_millis(ticks * 1000 / hz), switches }
 }
 
 /// Polls a file on disk until it holds `want` (saves are immediate today, but the test shouldn't care).

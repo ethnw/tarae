@@ -129,6 +129,9 @@ pub struct Toast {
     pub shown: bool,
 }
 
+/// Two clicks on the same picker row this close together are a double click (it opens the row).
+const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
+
 /// The longest a step's toast stays up without its end being said.
 const STEP_MAX: std::time::Duration = std::time::Duration::from_secs(120);
 
@@ -161,7 +164,17 @@ impl Toast {
     }
 
     pub fn alive(&self) -> bool {
-        self.at.elapsed() < self.life
+        self.age() < self.life
+    }
+
+    /// An error or warning no card has shown yet (U7) — its time doesn't run.
+    pub fn waiting(&self) -> bool {
+        !self.shown && matches!(self.kind, ToastKind::Error | ToastKind::Warning)
+    }
+
+    /// How long it has been up — none while it waits for a card (its time starts when one shows it).
+    pub fn age(&self) -> std::time::Duration {
+        if self.waiting() { std::time::Duration::ZERO } else { self.at.elapsed() }
     }
 }
 
@@ -461,6 +474,8 @@ pub struct Editor {
     pub sizes_seq: u64,
     /// The border the mouse is dragging (pressed on it, not let go yet).
     pub dragging: Option<crate::sizes::Border>,
+    /// The last click on a picker's row (picker, row, when) — the same row again within `DOUBLE_CLICK` opens it.
+    pub picker_click: Option<(u64, usize, std::time::Instant)>,
     /// `C-w z`: what fills the screen — drawn only while it still has the keys (`sizes::Editor::zoomed`).
     pub zoom: Option<crate::sizes::Zoom>,
     /// The bottom slot has tarae's keys (`C-w j`, a click): they scroll its output (`sizes::bottom_key`).
@@ -611,6 +626,7 @@ impl Editor {
             sizes_path: if cfg!(test) { None } else { crate::sizes::Sizes::path() },
             sizes_seq: 0,
             dragging: None,
+            picker_click: None,
             zoom: None,
             bottom_focus: false,
             screen_sends: Vec::new(),
@@ -1081,25 +1097,33 @@ impl Editor {
     }
 
     /// After a frame (`term::render`): the card drawn, its messages have been seen; not drawn (a picker over
-    /// it, no free corner — the status line carried the newest), an error or warning not seen yet waits — its
-    /// time starts over, so it comes up as a card once it can (U7: never only on the status line).
+    /// it, no free corner — the status line carried the newest), an error or warning not seen yet waits
+    /// (`Toast::waiting`), so it comes up as a card once it can (U7: never only on the status line). Its
+    /// time starts when the card first shows it — and only then does it need frames (its fade-in): a
+    /// waiting one asks for none, where restarting its time every frame drew 14 frames a second.
     pub fn toasts_drawn(&mut self, card: bool) {
+        if !card {
+            return;
+        }
         let now = std::time::Instant::now();
-        for t in &mut self.toasts {
-            if card {
-                t.shown = true;
-            } else if !t.shown && matches!(t.kind, ToastKind::Error | ToastKind::Warning) {
+        let mut started = false;
+        for t in self.toasts.iter_mut().filter(|t| !t.shown) {
+            if t.waiting() {
                 t.at = now;
+                started = true;
             }
+            t.shown = true;
+        }
+        if started {
+            self.schedule_tick();
         }
     }
 
     /// The card's opacity 0..1: fades in with its first message (150 ms), out with the last one's time (400 ms).
     pub fn toast_alpha(&self) -> f32 {
-        let Some(first) = self.toasts.iter().map(|t| t.at).min() else { return 0.0 };
-        let left =
-            self.toasts.iter().map(|t| t.life.saturating_sub(t.at.elapsed())).max().unwrap_or_default();
-        (first.elapsed().as_secs_f32() / TOAST_FADE_IN.as_secs_f32())
+        let Some(oldest) = self.toasts.iter().map(Toast::age).max() else { return 0.0 };
+        let left = self.toasts.iter().map(|t| t.life.saturating_sub(t.age())).max().unwrap_or_default();
+        (oldest.as_secs_f32() / TOAST_FADE_IN.as_secs_f32())
             .min(left.as_secs_f32() / TOAST_FADE.as_secs_f32())
             .clamp(0.0, 1.0)
     }
@@ -1318,7 +1342,7 @@ impl Editor {
             return;
         }
         if let Some(p) = self.picker.as_mut() {
-            // (a click picks a row — of this query's rows, not the last one's)
+            // (a click acts on this query's rows, not the last one's)
             if m.kind == K::Down {
                 p.filter_now();
             }
@@ -1328,12 +1352,23 @@ impl Editor {
                 K::ScrollDown if over_preview => p.preview_scroll += 3,
                 K::ScrollUp => p.move_by(-3),
                 K::ScrollDown => p.move_by(3),
+                // A click selects the row (the preview follows); the same row again soon after — a double
+                // click — opens it, as Enter does (N3). A folder (nothing to preview) folds or unfolds at once.
                 K::Down => {
                     if let Some((top, rows)) = s.picker_list
                         && (top..top + rows).contains(&y)
-                        && p.row_at(y - top).is_some_and(|r| p.select_row(r))
+                        && let Some(row) = p.row_at(y - top)
+                        && p.select_row(row)
                     {
-                        self.handle_key(Key::plain(Code::Enter));
+                        let (id, folder) =
+                            (p.id, p.current().is_some_and(|i| matches!(i.action, Action::Dir(_))));
+                        let again = self
+                            .picker_click
+                            .is_some_and(|(i, r, at)| (i, r) == (id, row) && at.elapsed() < DOUBLE_CLICK);
+                        self.picker_click = (!again).then(|| (id, row, std::time::Instant::now()));
+                        if folder || again {
+                            self.handle_key(Key::plain(Code::Enter));
+                        }
                     }
                 }
                 _ => {}
@@ -1610,12 +1645,13 @@ impl Editor {
     /// time. A toast needs frames only while it fades: between its fade-in and fade-out one wake-up is
     /// scheduled for when the fade-out starts. Nothing to wait for, no tick (an idle editor uses 0 CPU).
     /// When the notification card next needs a frame: a `TICK` while it fades in or out, else when its
-    /// fade-out starts — None without one.
+    /// fade-out starts — None without one. One waiting for a card (`Toast::waiting`) needs none.
     fn toast_wake(&self) -> Option<std::time::Duration> {
-        let first = self.toasts.iter().map(|t| t.at).min()?;
-        let left = self.toasts.iter().map(|t| t.life.saturating_sub(t.at.elapsed())).max();
+        let running = || self.toasts.iter().filter(|t| !t.waiting());
+        let oldest = running().map(Toast::age).max()?;
+        let left = running().map(|t| t.life.saturating_sub(t.age())).max();
         let steady = left.unwrap_or_default().saturating_sub(TOAST_FADE);
-        let fading_in = first.elapsed() < TOAST_FADE_IN;
+        let fading_in = oldest < TOAST_FADE_IN;
         Some(if fading_in || steady.is_zero() { TICK } else { steady })
     }
 
@@ -2101,7 +2137,7 @@ impl Editor {
     pub fn handle_key(&mut self, key: Key) {
         // A key after an error has been read (`ERROR_MIN`) lets it go — it fades out
         for t in self.toasts.iter_mut().filter(|t| t.kind == ToastKind::Error) {
-            let age = t.at.elapsed();
+            let age = t.age();
             if age >= ERROR_MIN && t.life > age + TOAST_FADE {
                 t.life = age + TOAST_FADE;
             }
@@ -7643,10 +7679,37 @@ q = \"delete_selection\"\n",
         ed.set_error("broke");
         feed(&mut ed, "l");
         assert!(ed.toasts[0].life > std::time::Duration::from_secs(30), "too soon to take it");
+        // Five seconds on the card
+        ed.toasts_drawn(true);
         ed.toasts[0].at = std::time::Instant::now() - std::time::Duration::from_secs(5);
         assert!(ed.toasts[0].alive(), "still up without a key");
         feed(&mut ed, "l");
         assert!(ed.toasts[0].life < std::time::Duration::from_secs(6), "a key lets it go (fading out)");
+    }
+
+    /// An error no card could show yet (a picker over it, U7) waits with its time stopped — and asks for no
+    /// frames while it waits (restarting its time every frame drew 14 a second, an idle tarae at 4–9% CPU).
+    /// Shown, its time starts and its fade-in gets frames; a key can't take it before it was read.
+    #[test]
+    fn an_error_waiting_for_its_card_asks_for_no_frames() {
+        use std::time::{Duration, Instant};
+        let mut ed = editor("");
+        ed.set_error("broke");
+        ed.toasts[0].at = Instant::now() - Duration::from_secs(120);
+        ed.toasts_drawn(false);
+        assert!(ed.toasts[0].alive(), "waits, its time stopped");
+        assert_eq!(ed.toast_wake(), None, "no frames while it waits");
+        feed(&mut ed, "l");
+        assert!(ed.toasts[0].life > Duration::from_secs(30), "a key doesn't take what wasn't read");
+        // On the card: its time starts now, fading in
+        ed.toasts_drawn(true);
+        assert!(ed.toasts[0].shown && ed.toasts[0].age() < Duration::from_secs(1));
+        assert_eq!(ed.toast_wake(), Some(TICK), "its fade-in");
+        // A routine message beside a waiting error runs its own course
+        let mut ed = editor("");
+        ed.set_warning("changed on disk");
+        ed.set_status("saved");
+        assert!(ed.toast_wake().is_some_and(|d| d <= TICK), "the routine one fades in");
     }
 
     #[test]
@@ -7793,6 +7856,60 @@ q = \"delete_selection\"\n",
         let pos = doc.selection().primary().head;
         let line = doc.text.line(mv::line_of(&doc.text, pos)).to_string();
         assert!(line.contains("fn put_cursor"), "{line:?}");
+    }
+
+    /// A click on a picker's row selects it — the picker stays, its preview follows; the same row clicked
+    /// again soon after (a double click) opens it, as Enter does (N3). A slow second click, or a click on
+    /// another row, only selects.
+    #[test]
+    fn a_click_selects_a_picker_row_and_a_double_click_opens_it() {
+        use crate::event::{Mouse, MouseKind as K};
+        let dir = std::env::temp_dir().join(format!("tarae-picker-click-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        // Opened documents keep real paths (macOS: /var/folders = /private/var/folders)
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        for f in ["a.txt", "b.txt"] {
+            std::fs::write(dir.join(f), format!("{f}\n")).unwrap();
+        }
+        let mut ed = editor("");
+        let open = |ed: &mut Editor| {
+            let items = ["a.txt", "b.txt"]
+                .iter()
+                .map(|f| crate::picker::Item {
+                    label: format!("{f}:1"),
+                    action: Action::Goto { path: dir.join(f), line: 0, col: 0 },
+                    hint: String::new(),
+                    glyph: None,
+                })
+                .collect();
+            ed.open_picker(Picker::new("places", items, true), None);
+            crate::term::render(ed, &mut Vec::new(), 100, 30).unwrap();
+        };
+        let click = |ed: &mut Editor, row: usize| {
+            let (top, _) = ed.screen.picker_list.expect("the list on screen");
+            ed.handle_mouse(Mouse { kind: K::Down, x: 10, y: (top + row) as u16, alt: false });
+        };
+        let selected = |ed: &Editor| ed.picker.as_ref().and_then(|p| p.current()).map(|i| i.label.clone());
+        open(&mut ed);
+        click(&mut ed, 1);
+        assert_eq!(selected(&ed).as_deref(), Some("b.txt:1"), "selected, the picker still there");
+        assert!(ed.doc().path.is_none(), "nothing opened");
+        click(&mut ed, 1);
+        assert!(ed.picker.is_none(), "the double click opened it");
+        assert_eq!(ed.doc().path.as_deref(), Some(dir.join("b.txt").as_path()));
+        // A slow second click selects again; another row in between breaks the pair
+        open(&mut ed);
+        click(&mut ed, 0);
+        if let Some((.., at)) = ed.picker_click.as_mut() {
+            *at -= std::time::Duration::from_secs(1);
+        }
+        click(&mut ed, 0);
+        assert_eq!(selected(&ed).as_deref(), Some("a.txt:1"), "too slow to be a double click");
+        click(&mut ed, 1);
+        click(&mut ed, 0);
+        assert!(ed.picker.is_some(), "two rows aren't a double click");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
