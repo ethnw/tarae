@@ -6156,6 +6156,7 @@ fn draw_follow_card(
                 "read" => "reading",
                 "search" => "searching",
                 "find" => "finding",
+                "uses" => "finding uses of",
                 "note" => "pinning a note",
                 "reply" => "replying on",
                 "show" => "showing",

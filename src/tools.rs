@@ -11,6 +11,8 @@
 //!   ends, with how it ended, the places it pointed at and its output. Checks (build, test, lint, format,
 //!   git's read-only commands) start at once; anything else asks the user first on a card (`y` run · `n` no).
 //! - `screen` shows Claude the user's screen as text, once they say yes (`seeing.rs`).
+//! - `references` and `search` find code the way the user does — the language server's references and
+//!   the project search, read-only, no card (`nav.rs`).
 
 use std::path::PathBuf;
 
@@ -49,6 +51,8 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
                     run_schema(),
                     crate::plan::tool_schema(),
                     crate::seeing::tool_schema(),
+                    crate::nav::references_schema(),
+                    crate::nav::search_schema(),
                 ] }))
         }
         "tools/call" => {
@@ -76,6 +80,17 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
                     crate::seeing::call(ed, call);
                     return None;
                 }
+                Some(name @ ("references" | "search")) => {
+                    let call = Call { generation, request_id: request_id.to_string(), id: id.clone() };
+                    let asked = match name {
+                        "references" => crate::nav::references(ed, call, args),
+                        _ => crate::nav::search(ed, call, args),
+                    };
+                    match asked {
+                        Ok(()) => return None,
+                        Err(e) => Err(e),
+                    }
+                }
                 other => Err(format!("no tool {}", other.unwrap_or_default())),
             };
             Ok(content(r))
@@ -97,8 +112,25 @@ fn content(r: Result<String, String>) -> Value {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// (tests: what calls that waited were answered, by their id)
+    pub static ANSWERED: std::cell::RefCell<Vec<(Value, Result<String, String>)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+impl Call {
+    /// A call with this id from no chat process (its answer only goes to `ANSWERED`).
+    pub fn test(id: u64) -> Call {
+        Call { generation: u64::MAX, request_id: String::new(), id: json!(id) }
+    }
+}
+
 /// Answers a call that waited — only to the process that made it.
 pub fn answer(ed: &mut Editor, call: Call, r: Result<String, String>) {
+    #[cfg(test)]
+    ANSWERED.with(|a| a.borrow_mut().push((call.id.clone(), r.clone())));
     if ed.chat.as_ref().is_none_or(|c| c.generation() != call.generation) {
         return;
     }

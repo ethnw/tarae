@@ -46,6 +46,7 @@ mod lsp_editor;
 mod markdown;
 mod models;
 mod movement;
+mod nav;
 mod notes;
 mod offer;
 mod packs;

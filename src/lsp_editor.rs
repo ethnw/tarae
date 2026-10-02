@@ -65,6 +65,9 @@ pub struct LspState {
     unused: HashMap<ClientId, std::time::Instant>,
     /// The `g r` in hand (N2): its list is laid out on a worker — the code of each place read there.
     refs: Refs,
+    /// Claude's `references` calls waiting for their server (N5, `nav.rs`), by number · the next number.
+    pub(crate) tool_asks: HashMap<u64, crate::nav::Ask>,
+    pub(crate) tool_ask_next: u64,
     /// (tests: the trace lines written — the log writes nothing in tests)
     #[cfg(test)]
     pub traced: Vec<String>,
@@ -283,6 +286,14 @@ pub enum Kind {
     Declared {
         generation: u64,
     },
+    /// Claude's `references` question `ask` (N5, `nav.rs`) — its references and its definition. Not tied to
+    /// the cursor: answered wherever the user is by then.
+    ToolRefs {
+        ask: u64,
+    },
+    ToolDeclared {
+        ask: u64,
+    },
     /// `space h` — this symbol's uses in the file become the selections.
     Highlights,
     Hover,
@@ -332,7 +343,8 @@ impl Kind {
         Some(match self {
             Kind::Goto(Goto::References) => ("goto", "referencesProvider"),
             Kind::Goto(g) => ("goto", g.provider().unwrap_or("definitionProvider")),
-            Kind::Declared { .. } => ("goto", "definitionProvider"),
+            Kind::Declared { .. } | Kind::ToolDeclared { .. } => ("goto", "definitionProvider"),
+            Kind::ToolRefs { .. } => ("goto", "referencesProvider"),
             Kind::Highlights => ("highlights", "documentHighlightProvider"),
             Kind::Hover => ("hover", "hoverProvider"),
             Kind::CodeAction { .. } => ("code-action", "codeActionProvider"),
@@ -607,6 +619,12 @@ impl Editor {
                         self.class_file_reply(cid, uri.clone(), pos, error, result)
                     }
                     Kind::InlayHint { range } => self.on_inlay(cid, &p, *range, result),
+                    &Kind::ToolRefs { ask } => {
+                        crate::nav::refs_answered(self, ask, error.map_or(Ok(result), Err))
+                    }
+                    &Kind::ToolDeclared { ask } => {
+                        crate::nav::declared_answered(self, ask, error.is_none().then_some(result))
+                    }
                     // One server failing leaves the others' actions (it's logged)
                     &Kind::CodeAction { list } if error.is_some() => {
                         let name = self.client(cid).map(|c| c.name.clone()).unwrap_or_default();
@@ -906,7 +924,9 @@ impl Editor {
             | Kind::SignatureHelp
             | Kind::InlayHint { .. }
             | Kind::JavaDebug
-            | Kind::ClassFile { .. } => {}
+            | Kind::ClassFile { .. }
+            | Kind::ToolRefs { .. }
+            | Kind::ToolDeclared { .. } => {}
             Kind::Rename => match self.apply_workspace_edit(cid, result) {
                 Ok(n) => self.set_status(format!("renamed in {n} file(s)")),
                 Err(e) => self.set_error(format!("rename: {e}")),
@@ -2316,6 +2336,49 @@ impl Editor {
                 }
             }
         });
+    }
+
+    /// Claude's `references` question `ask` (N5): the references at `byte` of document `id` (its
+    /// declaration included) and its definition, asked of its server — that server, its name, and whether
+    /// the definition was asked too. Err: why it can't be asked now, and whether it can be soon (a server
+    /// starting) — the answers go to `nav::refs_answered`/`declared_answered`.
+    pub(crate) fn ask_references(
+        &mut self,
+        id: DocId,
+        byte: usize,
+        ask: u64,
+    ) -> Result<(ClientId, String, bool), (String, bool)> {
+        self.lsp_flush();
+        let doc = self.docs.iter().find(|d| d.id == id).ok_or(("the file was closed".to_string(), false))?;
+        let lang = doc.syntax.as_ref().map(|s| s.lang.name.clone());
+        let lang = lang.or_else(|| crate::syntax::detect(doc.path.as_deref()?).map(|s| s.name.clone()));
+        if doc.lsp.clients().next().is_none() {
+            let lang = lang.map_or(String::new(), |l| format!("{l} "));
+            return Err((format!("there's no language server for {lang}files here"), false));
+        }
+        let kind = Kind::ToolRefs { ask };
+        let cid =
+            self.server_for_doc(id, &kind).ok_or(("no server here finds references".to_string(), false))?;
+        let c = self.client(cid).ok_or(("its language server stopped".to_string(), true))?;
+        if !c.ready {
+            return Err((format!("{} is starting", c.name), true));
+        }
+        let name = c.name.clone();
+        let defines = !c.caps["definitionProvider"].is_null() && c.caps["definitionProvider"] != json!(false);
+        let doc = self.docs.iter().find(|d| d.id == id).expect("found above");
+        let Some(path) = doc.path.as_deref() else { return Err(("the file has no path".into(), false)) };
+        let at = json!({ "textDocument": { "uri": lsp::uri(path) },
+            "position": lsp::to_position(&doc.text, byte, self.encoding_of(cid)) });
+        let mut refs = at.clone();
+        refs["context"] = json!({ "includeDeclaration": true });
+        if self.lsp_send_for(id, cid, kind, "textDocument/references", refs).is_none() {
+            return Err((format!("{name} couldn't be asked"), true));
+        }
+        let defines = defines
+            && self
+                .lsp_send_for(id, cid, Kind::ToolDeclared { ask }, "textDocument/definition", at)
+                .is_some();
+        Ok((cid, name, defines))
     }
 
     /// A go-to's places as a list (N2): each row the code there, the name it's about standing out, by file
@@ -3768,6 +3831,111 @@ mod tests {
         assert_eq!(ed.picker.as_ref().map(|p| p.title.as_str()), Some("references"));
         assert!(ed.lsp.refs.texts.is_none(), "no text matches came up");
         std::fs::remove_dir_all(file.parent().unwrap()).ok();
+    }
+
+    /// Claude's `references` call `id`'s answer, once it's given (`tools::ANSWERED`).
+    fn tool_answer(id: u64) -> Option<Result<String, String>> {
+        crate::tools::ANSWERED
+            .with(|a| a.borrow().iter().find(|(i, _)| *i == json!(id)).map(|(_, r)| r.clone()))
+    }
+
+    fn ask_tool(ed: &mut Editor, id: u64, args: Value) -> Result<String, String> {
+        crate::nav::references(ed, crate::tools::Call::test(id), &args)?;
+        settle_for(ed, 10, |_| tool_answer(id).is_some());
+        tool_answer(id).expect("answered")
+    }
+
+    /// N5: Claude's `references` asks the file's server at the name on the line it gave (not the user's
+    /// cursor, which may move meanwhile) and answers with the places' code, the declaration first — a file
+    /// not open is opened aside, the user's file staying in view.
+    #[test]
+    fn the_references_tool_asks_the_server_at_the_name() {
+        let (mut ed, file, log) = setup("tool-refs", "fn b() { a() }\nfn c() { a(); a() }\n");
+        let dir = file.parent().unwrap().to_path_buf();
+        let other = dir.join("other.rs");
+        std::fs::write(&other, "// other\nuse crate::a;\n\npub fn a() {}\n").unwrap();
+        let other = std::fs::canonicalize(&other).unwrap();
+        ed.project_root = Some(dir.clone());
+        let cid = ed.doc().lsp.client.unwrap();
+        let caps =
+            json!({ "positionEncoding": "utf-8", "definitionProvider": true, "referencesProvider": true });
+        ed.on_lsp_message(cid, json!({ "id": 0, "result": { "capabilities": caps } }));
+        crate::nav::references(
+            &mut ed,
+            crate::tools::Call::test(1),
+            &json!({"path": "other.rs", "line": 4, "symbol": "crate::a"}),
+        )
+        .unwrap();
+        settle_for(&mut ed, 5, |ed| ed.lsp.pending.values().any(|p| matches!(p.kind, Kind::ToolRefs { .. })));
+        assert_eq!(ed.doc().path.as_deref(), Some(file.as_path()), "the user's file stays in view");
+        assert!(ed.docs.iter().any(|d| d.path.as_deref() == Some(other.as_path())), "opened aside");
+        let out = sent(&log);
+        let asked = out.lines().find(|l| l.contains("textDocument/references")).expect("asked");
+        assert!(
+            asked.contains(r#""position":{"character":7,"line":3}"#) && asked.contains("other.rs"),
+            "{asked}"
+        );
+        assert!(asked.contains(r#""includeDeclaration":true"#), "{asked}");
+        // The user moves on meanwhile: still answered
+        feed(&mut ed, "j");
+        let at = |path: &PathBuf, line: u64, col: u64| {
+            json!({ "uri": lsp::uri(path), "range": {
+            "start": { "line": line, "character": col }, "end": { "line": line, "character": col + 1 } } })
+        };
+        let id = pending_of(&ed, Kind::ToolRefs { ask: 0 });
+        let refs =
+            json!([at(&file, 1, 9), at(&other, 3, 7), at(&file, 0, 9), at(&other, 1, 11), at(&file, 1, 14)]);
+        ed.on_lsp_message(cid, json!({ "id": id, "result": refs }));
+        assert!(tool_answer(1).is_none(), "waits for the declaration");
+        let id = pending_of(&ed, Kind::ToolDeclared { ask: 0 });
+        ed.on_lsp_message(cid, json!({ "id": id, "result": at(&other, 3, 7) }));
+        settle_for(&mut ed, 5, |_| tool_answer(1).is_some());
+        assert_eq!(
+            tool_answer(1).unwrap().unwrap(),
+            "5 references in 2 files (fake), the declaration first:\nother.rs\n  4: pub fn a() {}  (declaration)\n  \
+             2: use crate::a;\nmain.rs\n  1: fn b() { a() }\n  2: fn c() { a(); a() }"
+        );
+        assert!(ed.lsp.tool_asks.is_empty());
+        // Not on that line: said, with what the line reads
+        let e = ask_tool(&mut ed, 2, json!({"path": "other.rs", "line": 1, "symbol": "a"})).unwrap_err();
+        assert!(e.contains("isn't on line 1 of other.rs — it reads `// other`"), "{e}");
+        // Outside the project: refused
+        let e = ask_tool(&mut ed, 3, json!({"path": "/etc/hosts", "symbol": "localhost"})).unwrap_err();
+        assert!(e.contains("outside the project"), "{e}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// N5: when the server can't give its references — starting, still loading with nothing yet, or silent
+    /// for `REFS_WAIT` — the answer is the name's whole-word text matches, saying why and that they aren't
+    /// its references.
+    #[test]
+    fn the_references_tool_gives_text_matches_while_the_server_cannot() {
+        let (mut ed, file, _log) = setup("tool-refs-loading", "fn a() {}\nfn b() { a() }\n// ab, A\n");
+        let dir = file.parent().unwrap().to_path_buf();
+        ed.project_root = Some(dir.clone());
+        let args = json!({"path": "main.rs", "symbol": "a"});
+        let t = ask_tool(&mut ed, 1, args.clone()).unwrap();
+        assert!(t.contains("— fake is starting, so these are the whole-word text matches of `a`"), "{t}");
+        assert!(t.contains("not its references — ask again in a moment for those:"), "{t}");
+        assert!(t.contains("main.rs\n  1: fn a() {}\n  2: fn b() { a() }"), "{t}");
+        assert!(!t.contains("// ab, A"), "whole words, case as written: {t}");
+        // Loading, and its answer empty
+        let cid = ready(&mut ed);
+        let progress = json!({ "method": "$/progress", "params": { "token": "i",
+            "value": { "kind": "begin", "title": "Indexing" } } });
+        ed.on_lsp_message(cid, progress);
+        crate::nav::references(&mut ed, crate::tools::Call::test(2), &args).unwrap();
+        settle_for(&mut ed, 5, |ed| ed.lsp.pending.values().any(|p| matches!(p.kind, Kind::ToolRefs { .. })));
+        let id = pending_of(&ed, Kind::ToolRefs { ask: 0 });
+        ed.on_lsp_message(cid, json!({ "id": id, "result": [] }));
+        settle_for(&mut ed, 5, |_| tool_answer(2).is_some());
+        let t = tool_answer(2).unwrap().unwrap();
+        assert!(t.contains("fake is still loading (Indexing) and found none yet, so these are"), "{t}");
+        // Silent: the text matches after the wait
+        let t = ask_tool(&mut ed, 3, args).unwrap();
+        assert!(t.contains("fake didn't answer within 300ms, so these are"), "{t}");
+        assert!(ed.lsp.tool_asks.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A go-to is timed from its key to the frame that shows its answer (N1): one line in the log once
