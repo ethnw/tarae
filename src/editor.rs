@@ -143,8 +143,40 @@ const ERROR_MIN: std::time::Duration = std::time::Duration::from_secs(4);
 const TOAST_FADE: std::time::Duration = std::time::Duration::from_millis(400);
 /// …and the fade-in when a card first shows.
 const TOAST_FADE_IN: std::time::Duration = std::time::Duration::from_millis(150);
-/// One animation frame (waves, fades, elapsed seconds) — ~14 frames a second, only while something moves.
-pub const TICK: std::time::Duration = std::time::Duration::from_millis(70);
+/// One animation frame (waves, fades, elapsed seconds) — 10 a second, only while something moves: what
+/// other terminal tools wait at (measured 2026-10-03: Gemini CLI's spinner 80 ms, Claude Code a frame every
+/// ~107 ms), a third fewer frames than the 70 ms it was (N6).
+pub const TICK: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// The clock the waiting animation steps on: every wave on screen takes the same step, and a waiting tick
+/// is set for the next step (`step_in`) — ticks timed from when the last one was handled drifted, and now
+/// and then a wave skipped a step.
+pub fn anim_clock() -> std::time::Instant {
+    #[cfg(not(test))]
+    {
+        static CLOCK: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        *CLOCK.get_or_init(std::time::Instant::now)
+    }
+    // Tests: a clock each (a test runs on a thread of its own) — a snapshot's wave is at its first step,
+    // however long the run has been going
+    #[cfg(test)]
+    {
+        thread_local!(static CLOCK: std::time::Instant = std::time::Instant::now());
+        CLOCK.with(|c| *c)
+    }
+}
+
+/// The waiting animation's step now (`anim_clock`, a `TICK` a step).
+pub fn anim_step() -> u128 {
+    anim_clock().elapsed().as_nanos() / TICK.as_nanos()
+}
+
+/// From `elapsed` on the animation's clock to just past its next step (2 ms past — the frame drawn then is
+/// surely on it).
+fn step_in(elapsed: std::time::Duration) -> std::time::Duration {
+    let into = elapsed.as_nanos() % TICK.as_nanos();
+    TICK - std::time::Duration::from_nanos(into as u64) + std::time::Duration::from_millis(2)
+}
 
 /// Documents that keep their parse trees however long ago they were seen (`trees_follow_sight`).
 pub const TREES_RECENT: usize = 5;
@@ -505,6 +537,10 @@ pub struct Editor {
     /// The project — the folder tarae started in, links resolved (follow mode goes nowhere else). Tests with
     /// a project of their own in a temp folder set it.
     pub project_root: Option<PathBuf>,
+    /// The terminal said its focus went elsewhere (CSI ?1004 — tmux passes it on only with `focus-events
+    /// on`), and no input came since: the waiting animation rests (`tick_wanted`). A terminal that never
+    /// says keeps it going.
+    pub unfocused: bool,
     /// Claude's `screen` calls the user said yes to — answered with the next frame drawn (`seeing.rs`).
     pub screen_sends: Vec<crate::tools::Call>,
     /// The run whose denials `space m s` listed, and what could open (`blocked.rs`).
@@ -640,6 +676,7 @@ impl Editor {
             blocked: None,
             last_frame: None,
             project_root: std::fs::canonicalize(cwd()).ok(),
+            unfocused: false,
             // (a few bytes, read before the first frame — it's drawn at the sizes you left)
             sizes: if cfg!(test) {
                 Default::default()
@@ -1230,6 +1267,10 @@ impl Editor {
     // ── Dispatch ─────────────────────────────────────────────────────────
 
     pub fn handle_event(&mut self, ev: Event) {
+        // Input means the terminal has focus, whatever it said last (a focus-in lost on the way)
+        if matches!(ev, Event::Key(_) | Event::Mouse(_) | Event::Paste(_)) {
+            self.unfocused = false;
+        }
         match ev {
             Event::Key(k) => {
                 self.handle_key(k);
@@ -1237,7 +1278,10 @@ impl Editor {
                 self.plugin_input_went_in();
             }
             Event::Mouse(m) => self.handle_mouse(m),
-            Event::Focus(gained) => self.on_focus(gained),
+            Event::Focus(gained) => {
+                self.unfocused = !gained;
+                self.on_focus(gained)
+            }
             Event::Resize => {}
             Event::Paste(text) => {
                 self.handle_paste(text);
@@ -1696,20 +1740,26 @@ impl Editor {
         Some(if fading_in || steady.is_zero() { TICK } else { steady })
     }
 
-    fn schedule_tick(&mut self) {
-        use std::time::{Duration, Instant};
-        if !self.toasts.is_empty() && !self.toasts.iter().any(Toast::alive) {
-            self.toasts.clear();
-            self.unchanged = false; // gone from the screen — whatever event this is, it's drawn
-        }
+    /// When a frame is next wanted with nothing else happening: the waiting animation's next step while
+    /// something is waited on, else a toast's (`toast_wake`) — None: no frame. Not the animation while the
+    /// terminal says it's unfocused (`unfocused`): nobody sees it, and focus coming back draws it again.
+    fn tick_wanted(&self) -> Option<std::time::Duration> {
         let waiting = self.review.as_ref().is_some_and(|r| !r.ready)
             || self.chat.as_ref().is_some_and(|c| c.busy())
             || self.dap.as_ref().is_some_and(|d| d.state == crate::dap::State::Building)
             || self.test_run.as_ref().is_some_and(|r| r.state == crate::testing::RunState::Running)
             || self.task_run.as_ref().is_some_and(|r| r.state == crate::task::State::Running)
             || self.offer_busy();
-        let delay = if waiting { Some(TICK) } else { self.toast_wake() };
-        let Some(delay) = delay else { return };
+        if waiting && !self.unfocused { Some(step_in(anim_clock().elapsed())) } else { self.toast_wake() }
+    }
+
+    fn schedule_tick(&mut self) {
+        use std::time::{Duration, Instant};
+        if !self.toasts.is_empty() && !self.toasts.iter().any(Toast::alive) {
+            self.toasts.clear();
+            self.unchanged = false; // gone from the screen — whatever event this is, it's drawn
+        }
+        let Some(delay) = self.tick_wanted() else { return };
         let at = Instant::now() + delay;
         // One already due by then serves (a later one doesn't: a new toast must start fading in now)
         if self.ticking.is_some_and(|t| t <= at + Duration::from_millis(5)) || cfg!(test) {
@@ -3145,6 +3195,69 @@ mod tests {
         );
         ed.toasts[0].at = Instant::now() - (life - TOAST_FADE / 2);
         assert_eq!(ed.toast_wake(), Some(TICK), "fading out");
+    }
+
+    /// An editor whose chat is waiting on Claude (a process that never answers).
+    fn waiting_chat(text: &str) -> Editor {
+        let mut ed = editor(text);
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        crate::chat::open(&mut ed);
+        ed.chat.as_mut().unwrap().state = crate::chat::State::Thinking;
+        ed
+    }
+
+    /// N6: the waiting animation wants its next step while Claude works — in a terminal that never says
+    /// where its focus is, too. Focus out (CSI ?1004's `CSI O`) rests it, focus back or any input wakes it;
+    /// a toast still gets its fade meanwhile.
+    #[test]
+    fn the_waiting_animation_rests_while_the_terminal_is_unfocused() {
+        let mut ed = waiting_chat("x\n");
+        let next = ed.tick_wanted().expect("animating — no focus event yet");
+        assert!(next <= TICK + std::time::Duration::from_millis(2), "{next:?}");
+        ed.handle_event(Event::Focus(false));
+        assert_eq!(ed.tick_wanted(), None, "unfocused: resting");
+        ed.handle_event(Event::Focus(true));
+        assert!(ed.tick_wanted().is_some(), "focus back");
+        ed.handle_event(Event::Focus(false));
+        ed.handle_event(Event::Key("left".parse().unwrap()));
+        assert!(ed.tick_wanted().is_some(), "input means the terminal has focus");
+        ed.handle_event(Event::Focus(false));
+        ed.set_status("saved");
+        assert_eq!(ed.tick_wanted(), Some(TICK), "a toast's fade-in still draws");
+    }
+
+    /// A waiting tick lands just past the animation's next step — not a `TICK` after whenever the last one
+    /// was handled (that drifted, and the wave now and then skipped a step).
+    #[test]
+    fn a_waiting_tick_lands_on_the_next_step() {
+        let ms = std::time::Duration::from_millis;
+        assert_eq!(step_in(ms(250)), ms(52));
+        assert_eq!(step_in(ms(1_099)), ms(3));
+        assert_eq!(step_in(ms(300)), ms(102), "on a step: the next one");
+    }
+
+    /// N6: a frame that only moves the waiting animation writes only its cells — the wave's and the seconds
+    /// beside it — not the screen (`screen.rs`'s cell diff; a frame it couldn't read would go out whole).
+    #[test]
+    fn a_waiting_frame_writes_only_the_animation() {
+        let mut ed = waiting_chat("fn main() {\n    println!(\"hi\");\n}\n");
+        let mut screen = crate::screen::Screen::new();
+        let frame = |ed: &mut Editor| {
+            let mut b = Vec::new();
+            crate::term::render(ed, &mut b, 160, 50).unwrap();
+            b
+        };
+        let first = frame(&mut ed);
+        let whole = screen.present(&first, 160, 50).len();
+        std::thread::sleep(ed.tick_wanted().unwrap());
+        let next = frame(&mut ed);
+        let out = String::from_utf8(screen.present(&next, 160, 50).to_vec()).unwrap();
+        let escapes = regex::Regex::new(r"\x1b\[[0-9;:?]*[ -/]*[@-~]").unwrap();
+        let text = escapes.replace_all(&out, "");
+        assert!(text.chars().any(|c| "▂▃▄▅▆▇".contains(c)), "the wave moved: {text:?}");
+        assert!(text.chars().all(|c| "▂▃▄▅▆▇0123456789.s ".contains(c)), "only the animation: {text:?}");
+        assert!(out.len() < 300, "{} bytes (the whole screen: {whole})", out.len());
     }
 
     /// An sh standing in for `claude` that reads one stdin line and emits a fixed result event.

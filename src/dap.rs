@@ -72,7 +72,6 @@ pub struct Dap {
     /// What's running (for display).
     pub program: String,
     launch: Value,
-    pub started: Instant,
     /// The adapter's last stderr lines — why it died if it exits before starting.
     adapter_err: Arc<Mutex<Vec<String>>>,
 }
@@ -1029,7 +1028,6 @@ impl Dap {
             output: Vec::new(),
             program,
             launch: Value::Null,
-            started: Instant::now(),
             adapter_err: Arc::default(),
         }
     }

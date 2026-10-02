@@ -14,6 +14,7 @@ mod harness;
 
 use std::fs;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use harness::*;
 
@@ -452,6 +453,32 @@ fn git_tab_stages_and_commits() {
     assert_eq!(String::from_utf8_lossy(&log.stdout).trim(), "second line");
     t.command("q");
     assert_eq!(t.wait_exit().code(), Some(0));
+}
+
+/// N6: while Claude works the waiting animation draws 10 frames a second — in a terminal that never says
+/// where its focus is, too. The terminal saying focus went elsewhere (`CSI O`, focus reporting being on —
+/// CSI ?1004) rests it: nothing goes out after the last frame and the whole-screen redraw that follows
+/// half a second later. Focus back (`CSI I`) and it goes on.
+#[test]
+fn the_waiting_animation_rests_while_the_terminal_is_unfocused() {
+    let sb = Sandbox::new("waiting-focus");
+    sb.write("a.txt", "some text\n");
+    let mut t = sb.waiting_turn(&["a.txt"], COLS, ROWS, 60);
+    let frames_in = |t: &Term, d: Duration| {
+        let before = t.frames();
+        std::thread::sleep(d);
+        t.frames() - before
+    };
+    let second = Duration::from_secs(1);
+    let n = frames_in(&t, second);
+    assert!((7..=12).contains(&n), "{n} frames in a second, no focus event yet");
+    t.send("\x1b[O");
+    // (the tick already set, then the redraw of the whole screen when nothing more came)
+    std::thread::sleep(Duration::from_millis(800));
+    assert_eq!(frames_in(&t, Duration::from_millis(1500)), 0, "unfocused: nothing drawn");
+    t.send("\x1b[I");
+    let n = frames_in(&t, second);
+    assert!((7..=13).contains(&n), "{n} frames in a second after focus came back");
 }
 
 /// `space f` in the real binary: the tree picker's first frame (the list still coming from its worker —

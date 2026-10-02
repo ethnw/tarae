@@ -221,6 +221,26 @@ impl Sandbox {
     pub fn spawn(&self, args: &[&str]) -> Term {
         Term::spawn(self, args, COLS, ROWS)
     }
+
+    /// tarae on `args` (`cols`×`rows`) in the middle of a chat turn that's all waiting: a stand-in claude
+    /// that answers each message only after `secs` seconds of silence — the message sent, "thinking" on
+    /// screen when this returns. Nothing but the waiting animation draws meanwhile (N6).
+    pub fn waiting_turn(&self, args: &[&str], cols: u16, rows: u16, secs: u32) -> Term {
+        let fake = format!(
+            "while read -r line; do\n  case \"$line\" in '{{\"message\"'*) ;; *) continue;; esac\n  sleep {secs}\n  \
+             printf '%s\\n' '{{\"type\":\"result\",\"result\":\"done\"}}'\ndone\n"
+        );
+        let script = self.write("fake-claude.sh", &fake);
+        self.write_config(&format!(
+            "{BASE_CONFIG}[llm]\ncommand = \"sh\"\nargs = [\"{}\"]\n",
+            script.display()
+        ));
+        let mut t = Term::spawn(self, args, cols, rows);
+        t.send(" l");
+        t.send("wait for it\r");
+        t.wait_text("thinking");
+        t
+    }
 }
 
 impl Drop for Sandbox {

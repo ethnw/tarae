@@ -645,7 +645,7 @@ fn draw_debug_panel(
     queue!(out, MoveTo(0, y0 as u16))?;
     let mut used = panel_pill(out, card, pill, label, None)?;
     let what = match &d.state {
-        State::Building => format!("  {}  {}", d.program, wave(d.started)),
+        State::Building => format!("  {}  {}", d.program, wave()),
         State::Stopped { reason } => {
             let at = d
                 .frames
@@ -1159,7 +1159,7 @@ fn draw_task_panel(
         }
     }
     let when = match (&r.state, r.took) {
-        (State::Running, _) => format!("   {}", wave(r.started)),
+        (State::Running, _) => format!("   {}", wave()),
         (_, Some(d)) => format!("   {}", duration(d.as_secs_f32())),
         _ => String::new(),
     };
@@ -1427,7 +1427,7 @@ fn draw_test_panel(
         }
     }
     let when = match (&r.state, r.took) {
-        (RunState::Running, _) => format!("   {}", wave(r.started)),
+        (RunState::Running, _) => format!("   {}", wave()),
         (_, Some(d)) => format!("   {}", duration(d.as_secs_f32())),
         _ => String::new(),
     };
@@ -4841,8 +4841,8 @@ fn draw_statusline(
             });
             right.push(gap(220));
         }
-        Some(r) => {
-            right.push(Seg { text: format!("{} claude", wave(r.started)), style: accent, keep: 220 });
+        Some(_) => {
+            right.push(Seg { text: format!("{} claude", wave()), style: accent, keep: 220 });
             right.push(gap(220));
         }
         None => {}
@@ -5577,8 +5577,8 @@ impl OfferCard {
                 }
                 (v, Some(b))
             }
-            OfferState::Installing(t) => {
-                (vec![(title, false), (format!("{} {}", wave(*t), o.working), true)], None)
+            OfferState::Installing(_) => {
+                (vec![(title, false), (format!("{} {}", wave(), o.working), true)], None)
             }
             OfferState::Failed(why) => {
                 let mut v = vec![(o.failed.clone(), false)];
@@ -5771,7 +5771,7 @@ impl OfferCard {
                 apply(out, Style { fg: bg, bg: ui.base.bg, ..Style::default() })?;
                 queue!(out, MoveTo(px as u16, (py - 1) as u16), Print("▄".repeat(pw)))?;
             }
-            let tail = started.map(|t| format!(" {}", wave(t))).unwrap_or_default();
+            let tail = started.map(|_| format!(" {}", wave())).unwrap_or_default();
             let room = pw.saturating_sub(5 + tail.width());
             let t = fit_ellipsis(title, room);
             queue!(out, MoveTo(px as u16, py as u16))?;
@@ -6005,9 +6005,11 @@ pub fn duration(s: f32) -> String {
 }
 
 /// Waiting animation: a three-cell equalizer wave (`▂▅▇` …) — only block chars in common monospace fonts.
-fn wave(since: std::time::Instant) -> String {
+/// A step a `TICK` on the animation's clock (`editor::anim_step`): every wave on screen moves together, a
+/// step a frame.
+fn wave() -> String {
     const W: [char; 10] = ['▂', '▃', '▄', '▅', '▆', '▇', '▆', '▅', '▄', '▃'];
-    let f = (since.elapsed().as_millis() / crate::editor::TICK.as_millis()) as usize;
+    let f = (crate::editor::anim_step() % W.len() as u128) as usize;
     (0..3).map(|k| W[(f + k * 3) % W.len()]).collect()
 }
 
@@ -6048,7 +6050,7 @@ fn draw_ask_stream(
     apply(out, card)?;
     queue!(out, Print("  "))?;
     apply(out, Style { fg: ui.accent.fg, ..card })?;
-    queue!(out, Print(wave(rev.started)))?;
+    queue!(out, Print(wave()))?;
     apply(out, Style { bold: true, ..card })?;
     queue!(out, Print(format!(" claude {phase}")))?;
     let instr = fit_ellipsis(
@@ -6195,7 +6197,7 @@ fn draw_follow_card(
             ]
         }
         None => vec![
-            Span { text: wave(c.started), style: accent },
+            Span { text: wave(), style: accent },
             Span { text: " thinking".into(), style: Style { bold: true, ..dim } },
         ],
     };
@@ -7085,7 +7087,7 @@ fn draw_chat(
     let thought_live = c.msgs.last().is_some_and(|m| m.role == Role::Thought);
     if c.state == State::Thinking && !exploring && !thought_live {
         lines.push(Vec::new());
-        lines.push(vec![sp(wave(c.started), accent), sp(" thinking…".into(), dim)]);
+        lines.push(vec![sp(wave(), accent), sp(" thinking…".into(), dim)]);
     }
     // Empty chat: guidance + example questions in the middle
     if c.msgs.is_empty() && !c.busy() {
@@ -7192,7 +7194,7 @@ fn draw_chat(
             _ => Vec::new(),
         },
         s => vec![
-            sp(wave(c.started), accent),
+            sp(wave(), accent),
             sp(
                 format!(
                     " {} {:>4.1}s",
@@ -8119,11 +8121,9 @@ fn note_lines(
         }
     }
     if n.waiting {
-        let started = editor.chat.as_ref().map_or_else(std::time::Instant::now, |c| c.started);
         out.push(Line::Blank);
         out.push(Line::Text {
-            spans: vec![sp(&wave(started), accent), sp(" claude is replying…", dim)],
-            indent: 0,
+            spans: vec![sp(&wave(), accent), sp(" claude is replying…", dim)], indent: 0
         });
     }
     out.push(Line::Blank);

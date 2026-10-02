@@ -130,6 +130,28 @@ fn perf_e2e_idle_cpu() {
     report("e2e_idle_cpu_ms_per_s", ms(used.cpu) / 3.0, 10.0, 0.5);
 }
 
+/// A chat turn's wait (N6): nothing on screen moves but the waiting animation — tarae's CPU, its frames a
+/// second and the bytes a frame writes, over 4 s of it.
+#[test]
+fn perf_e2e_waiting_for_claude() {
+    if unoptimized("perf_e2e_waiting_for_claude") {
+        return;
+    }
+    let sb = Sandbox::new("perf-waiting");
+    big_file(&sb, "a.rs", 2_000);
+    let t = sb.waiting_turn(&["a.rs"], 160, 50, 30);
+    // (past the first frames — the chat opening, its first whole redraw)
+    std::thread::sleep(Duration::from_secs(1));
+    let (before, frames, bytes) = (t.usage(), t.frames(), t.raw().len());
+    let secs = 4.0;
+    std::thread::sleep(Duration::from_secs_f64(secs));
+    let used = t.usage() - before;
+    let (frames, bytes) = ((t.frames() - frames) as f64, (t.raw().len() - bytes) as f64);
+    report("e2e_waiting_cpu_ms_per_s", ms(used.cpu) / secs, 60.0, 2.0);
+    report("e2e_waiting_frames_per_s", frames / secs, 12.0, 0.5);
+    report("e2e_waiting_bytes_per_frame", bytes / frames.max(1.0), 400.0, 20.0);
+}
+
 /// Memory with this repository open: its files (a copy, in a git repository of the test's own) listed in
 /// the file picker, the biggest source file open.
 #[test]
