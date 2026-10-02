@@ -3606,13 +3606,19 @@ fn draw_review(
                 )?;
                 queue!(out, Print(&label))?;
                 used = num_w + 3 + label.width();
+                // What each key takes, said plainly: `y` this change, `a` every one still undecided (it
+                // was "a all" — one `y` left the rest waiting, easy to miss)
+                let left =
+                    rev.hunks.iter().filter(|h| h.decision == Decision::Undecided && !h.conflict).count();
+                let all = format!("accept all {left}");
                 let (status, st): (Vec<(&str, &str)>, Style) = match (h.conflict, h.decision) {
                     (true, _) => (vec![("", "text changed while waiting — skipped")], base.patch(ui.error)),
                     (_, Decision::Accept) => (vec![("", "accepted")], Style { fg: plus_fg, ..base }),
                     (_, Decision::Reject) => (vec![("", "rejected")], Style { fg: minus_fg, ..base }),
-                    _ if current => {
-                        (vec![("y", "accept"), ("n", "reject"), ("a", "all"), ("tab", "next")], base)
+                    _ if current && left > 1 => {
+                        (vec![("y", "accept this one"), ("a", &all), ("n", "reject"), ("tab", "next")], base)
                     }
+                    _ if current => (vec![("y", "accept"), ("n", "reject")], base),
                     _ => (vec![("", "pending")], Style { fg: ui.linenr.fg, ..base }),
                 };
                 for (key, desc) in status {
@@ -5525,6 +5531,19 @@ impl OfferCard {
                     }
                     v.extend(rows);
                 }
+                // Where its answers go (#24/#25): the keys elsewhere (the chat's input, insert mode, a
+                // review) — `C-q` brings them here, what's being typed stays; brought here — Esc goes back
+                let whose = if editor.card_keys {
+                    Some("esc goes back, unanswered")
+                } else if !editor.card_has_keys() {
+                    Some("C-q to answer it — what you're typing stays")
+                } else {
+                    None
+                };
+                if let Some(whose) = whose {
+                    v.push((String::new(), true));
+                    v.extend(wrapped(whose, 2));
+                }
                 (v, Some(b))
             }
             OfferState::Installing(t) => {
@@ -7167,7 +7186,19 @@ fn draw_chat(
     // Input — the line over it says when the screen goes with the message (`C-s`)
     chat_row_start(out, x0, y, edge, card)?;
     let mut used = 0;
-    if let Some(s) = &c.screen {
+    // A message waiting for this turn's end (#23): its start, faint, over the input
+    if let Some(q) = &c.queued
+        && w > 14
+    {
+        let first = q.lines().next().unwrap_or_default();
+        let shown = fit_ellipsis(first, w - 10);
+        apply(out, accent)?;
+        queue!(out, Print("queued "))?;
+        apply(out, faint)?;
+        queue!(out, Print(&shown))?;
+        queue!(out, Print(" "))?;
+        used = 8 + shown.width();
+    } else if let Some(s) = &c.screen {
         let size = format!("screen {}×{}", s.cols, s.rows);
         let said = " goes with it ";
         if size.width() + said.width() + 2 <= w {
@@ -7209,12 +7240,22 @@ fn draw_chat(
         hints.push(("space l", "focus"));
         hints.push(("space L", "close"));
     } else if c.busy() {
+        // (Enter queues what's typed for this turn's end — #23; ↑ takes it back)
+        if !c.input.trim().is_empty() {
+            hints.push(("enter", "queue"));
+        } else if c.queued.is_some() {
+            hints.push(("↑", "edit queued"));
+        }
         hints.push(("C-c", "stop"));
         hints.push(("esc", "editor"));
         hints.push(("C-f", if c.follow.active() { "unfollow" } else { "follow" }));
     } else {
         let code = c.last_code().is_some();
         hints.push(("enter", "send"));
+        // (one queued and not sent — a restart waited for the turn)
+        if c.queued.is_some() && c.input.is_empty() {
+            hints.push(("↑", "edit queued"));
+        }
         // The screen waiting: how it comes off (early — the one way back)
         if c.screen.is_some() && c.input.is_empty() {
             hints.push(("backspace", "no screen"));

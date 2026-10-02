@@ -216,6 +216,9 @@ pub struct Chat {
     /// Commands starting so run without asking for the rest of this conversation (`a` on a run card —
     /// `tools::pattern`).
     pub run_allow: Vec<String>,
+    /// A message sent while Claude works (#23) — it goes when the turn ends; `↑` on an empty input takes it
+    /// back to edit (or drop).
+    pub queued: Option<String>,
     /// The screen waiting to go with the next message (`C-s`).
     pub screen: Option<Shot>,
     /// claude's session for this conversation (from its `init`) · the one the next process resumes.
@@ -254,6 +257,7 @@ impl Chat {
             reads: Default::default(),
             sees: false,
             run_allow: Vec::new(),
+            queued: None,
             screen: None,
             session: None,
             resume: None,
@@ -651,6 +655,15 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
         }
         StreamEv::Models(list) => c.models = list,
         StreamEv::ToolResult { id, text } => {
+            // What it did on disk (an edit, a write, a command): the git tab reads the status again (#29 — it
+            // said "the tree is clean" over files Claude had changed, until reopened)
+            let wrote = c
+                .msgs
+                .iter()
+                .rev()
+                .find(|m| m.call == id)
+                .and_then(|m| m.look.as_ref())
+                .is_some_and(|l| matches!(l.verb, "edit" | "write" | "run" | "test"));
             // A test run's row ends with its verdict, a command's with how it ended
             if let Some(m) = c.msgs.iter_mut().rev().find(|m| m.call == id)
                 && let Some(l) = m.look.as_mut().filter(|l| matches!(l.verb, "test" | "run"))
@@ -664,6 +677,9 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             }
             if c.state != State::Idle {
                 crate::follow::on_result(ed, &id, &text);
+            }
+            if wrote {
+                ed.git_tab_follow();
             }
         }
         StreamEv::Control { request_id, request } => {
@@ -720,6 +736,9 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             });
             crate::notes::turn_done(ed, answer.flatten());
             crate::restart::turn_over(ed);
+            // (whatever the turn changed on disk, the git tab shows it — #29)
+            ed.git_tab_follow();
+            send_queued(ed);
         }
         StreamEv::Exit(err) => {
             c.proc = None;
@@ -793,9 +812,34 @@ fn screen_copy_path() -> PathBuf {
     std::env::temp_dir().join(format!("tarae-screen-{}-{n}.txt", std::process::id()))
 }
 
+/// The turn ended: the message queued during it goes now (#23) — unless a restart waits for the turn (it
+/// stays queued, over the input, for after).
+fn send_queued(ed: &mut Editor) {
+    if ed.restart.is_some() {
+        return;
+    }
+    let Some(q) = ed.chat.as_mut().and_then(|c| c.queued.take()) else { return };
+    if !submit(ed, &q, None, None)
+        && let Some(c) = ed.chat.as_mut()
+    {
+        c.queued = Some(q);
+    }
+}
+
 pub fn send(ed: &mut Editor) {
-    let Some(c) = &ed.chat else { return };
+    let Some(c) = &mut ed.chat else { return };
     let question = c.input.trim().to_string();
+    // Claude is working: it waits its turn (#23) — said over the input, sent when this turn ends; a second
+    // one joins it
+    if c.busy() && !question.is_empty() {
+        c.queued = Some(match c.queued.take() {
+            Some(q) => format!("{q}\n\n{question}"),
+            None => question,
+        });
+        c.input.clear();
+        c.cursor = 0;
+        return;
+    }
     if !question.is_empty() && submit(ed, &question, None, None) {
         let c = ed.chat.as_mut().expect("just sent");
         c.input.clear();
@@ -1372,6 +1416,11 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
         (Code::Delete, ..) if c.cursor < c.input.len() => {
             let n = c.input[c.cursor..].chars().next().map_or(0, char::len_utf8);
             c.input.drain(c.cursor..c.cursor + n);
+        }
+        // The queued message back to edit — or drop (#23): it's out of the queue while it's in the input
+        (Code::Up, ..) if c.input.is_empty() && c.queued.is_some() => {
+            c.input = c.queued.take().unwrap_or_default();
+            c.cursor = c.input.len();
         }
         (Code::PageUp, ..) | (Code::Up, ..) if c.input.is_empty() || key.code == Code::PageUp => {
             c.scroll += if key.code == Code::PageUp { 10 } else { 1 };

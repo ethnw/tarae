@@ -74,6 +74,11 @@ conversation without asking, `n` says no. What goes is the screen as it is just 
 card. `llm.screen-terminal = false` leaves the terminal panel out: its rows go blank, and the card says so.
 To send the screen yourself, use `C-s` (below).
 
+A card that asks something (this one, a command to run, a read outside the project) takes its answer keys in
+the editor. While you're typing in the chat, or in a review, it leaves your keys alone and says
+`C-q to answer it`: `C-q` gives the card the keys, your draft stays as it was, and Esc goes back unanswered.
+Esc never answers a card. `n` does.
+
 ![Claude wants to see your screen: a card says it goes as text, 140×40, that Claude can only look, and that it includes the terminal panel (14 rows), with y Once, a This chat and n No](screenshots/chat-screen.png)
 
 The chat reads your CLAUDE.md files and Claude Code settings the way `claude` does, so project rules apply to its
@@ -92,7 +97,7 @@ each one while the chat keeps the keys.
 
 | Key | In the chat |
 |---|---|
-| `enter` | Send |
+| `enter` | Send. While Claude works, it queues the message: the line over the input says `queued …`, and it goes when the turn ends. `↑` in the empty input takes it back to edit or drop |
 | `alt-enter` / `C-j` | New line |
 | `C-c` | Stop the answer (the conversation stays) |
 | `C-r` | Replace the selection with the answer's code — through the same review |
@@ -164,8 +169,9 @@ plan belongs to its conversation: it's kept and continued with it, and `C-l` sta
 ![An edit from the chat, reviewed in place: headed by what you asked, the removed line in red and the proposed lines in green, y/n per change](screenshots/chat-edit.png)
 
 When you ask for a change, Claude edits files from the chat too, across as many files as it takes. Nothing is
-written until you've seen it: each edit opens as the same in-buffer review as select → instruct → diff (`y`/`n`
-per change, `a` all, `q` reject the rest), headed by what you asked for. Under that title, Claude's own
+written until you've seen it: each edit opens as the same in-buffer review as select → instruct → diff, headed
+by what you asked for. The change in hand says what its keys do: `y accept this one`, `a accept all 2` (every
+change still undecided), `n reject`; `q` rejects the rest. Under that title, Claude's own
 words from just before it made the edit say why ([screenshot](screenshots/chat-edit-why.png)): what it
 concluded, in a row or two. Its full reasoning is in the chat. The accepted changes are what gets
 written. Accept part of a change, and only that part is written. Decline, and Claude is told so. Several edits

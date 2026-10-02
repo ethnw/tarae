@@ -476,6 +476,9 @@ pub struct Editor {
     pub dragging: Option<crate::sizes::Border>,
     /// The last click on a picker's row (picker, row, when) — the same row again within `DOUBLE_CLICK` opens it.
     pub picker_click: Option<(u64, usize, std::time::Instant)>,
+    /// The front card has the keys, given with `C-q` from wherever they were (#24) — the chat's draft, insert
+    /// mode, a review stay as they were; an answer or Esc gives them back.
+    pub card_keys: bool,
     /// `C-w z`: what fills the screen — drawn only while it still has the keys (`sizes::Editor::zoomed`).
     pub zoom: Option<crate::sizes::Zoom>,
     /// The bottom slot has tarae's keys (`C-w j`, a click): they scroll its output (`sizes::bottom_key`).
@@ -627,6 +630,7 @@ impl Editor {
             sizes_seq: 0,
             dragging: None,
             picker_click: None,
+            card_keys: false,
             zoom: None,
             bottom_focus: false,
             screen_sends: Vec::new(),
@@ -1284,6 +1288,22 @@ impl Editor {
         }
         if self.review.is_some() {
             return self.set_status("finish reviewing the answer first");
+        }
+        // A file under review (a turn's, a branch's) took the keys when the turn ended — a paste in normal mode
+        // there was meant for the chat (#31: it landed in the file as an unsaved edit). It goes to the chat;
+        // without one it goes in, saying where. (In insert mode it's typed there on purpose.)
+        let reviewing =
+            self.code_review.is_some() && self.doc().review_base.is_some() && self.mode != Mode::Insert;
+        if reviewing && let Some(c) = self.chat.as_mut() {
+            let text: String = text.chars().filter(|&c| c == '\n' || !c.is_control()).collect();
+            c.input.insert_str(c.cursor, &text);
+            c.cursor += text.len();
+            c.focused = true;
+            return self.set_status("pasted into the chat — the file is under review (i pastes there)");
+        }
+        if reviewing {
+            let name = self.doc().display_name();
+            self.set_warning(format!("pasted into {name}, which is under review — u takes it back"));
         }
         if self.doc().loading {
             return self.set_warning("still loading — paste once it's read");
@@ -2134,6 +2154,56 @@ impl Editor {
         }
     }
 
+    /// Whether the front card takes the keys: given it with `C-q`, or in normal mode with nothing else
+    /// holding them (no prefix key, prompt, picker, review, the chat's input or the terminal).
+    pub fn card_has_keys(&self) -> bool {
+        self.card_keys
+            || (self.mode == Mode::Normal
+                && self.pending.is_empty()
+                && self.prompt.is_none()
+                && self.picker.is_none()
+                && self.review.is_none()
+                && !self.chat.as_ref().is_some_and(|c| c.focused)
+                && !self.terminal.as_ref().is_some_and(|t| t.focus && t.visible && t.exited.is_none()))
+    }
+
+    /// `C-q` while a card is up gives it the keys from wherever they are (#24); while it has them, its
+    /// answers answer it and Esc gives them back unanswered (#25) — other keys are swallowed, saying what it
+    /// asks. True if the key was the card's.
+    fn card_key(&mut self, key: Key) -> bool {
+        let up = self.offers.first().is_some_and(|o| !o.installing());
+        if !up || self.picker.is_some() || self.prompt.is_some() {
+            self.card_keys = false;
+            return false;
+        }
+        if key.ctrl && !key.alt && key.code == Code::Char('q') {
+            self.card_keys = true;
+            return true;
+        }
+        if !self.card_keys {
+            return false;
+        }
+        if key.code == Code::Esc {
+            self.card_keys = false;
+            return true;
+        }
+        let front = self.offers.first().map(|o| o.id);
+        if !self.offer_key(key) {
+            let o = &self.offers[0];
+            let asks = match (o.keeps(), o.lasts()) {
+                (true, _) => "y, a, A or n",
+                (false, true) => "y, a or n",
+                _ => "y or n",
+            };
+            self.set_status(format!("the card asks {asks} — esc goes back"));
+        }
+        // Answered (or gone): the keys go back where they were
+        if self.offers.first().map(|o| o.id) != front {
+            self.card_keys = false;
+        }
+        true
+    }
+
     pub fn handle_key(&mut self, key: Key) {
         // A key after an error has been read (`ERROR_MIN`) lets it go — it fades out
         for t in self.toasts.iter_mut().filter(|t| t.kind == ToastKind::Error) {
@@ -2144,21 +2214,17 @@ impl Editor {
         }
         // (whoever took the keys since — a click, a job — has them)
         self.focus_sync();
+        // A card is answered from anywhere (#24): `C-q` gives it the keys — what you were typing stays
+        if self.card_key(key) {
+            return;
+        }
         // The terminal has the keys: all of them go to its program (`C-\` gives them back)
         if self.picker.is_none() && self.prompt.is_none() && self.terminal_key(key) {
             return self.focus_sync();
         }
-        // Grammar offers: y·n·Esc in normal mode (something else open or a pending prefix key goes first) —
-        // not while the chat's input has the keys: a card took the `n`s of a message being typed
-        if !self.offers.is_empty()
-            && self.mode == Mode::Normal
-            && self.pending.is_empty()
-            && self.prompt.is_none()
-            && self.picker.is_none()
-            && self.review.is_none()
-            && !self.chat.as_ref().is_some_and(|c| c.focused)
-            && self.offer_key(key)
-        {
+        // Cards: y·a·n in normal mode (something else open or a pending prefix key goes first) — not while
+        // the chat's input has the keys: a card took the `n`s of a message being typed (`C-q` reaches it)
+        if !self.offers.is_empty() && self.card_has_keys() && self.offer_key(key) {
             return;
         }
         // If the completion list is up, intercept selection keys first (as in Helix: Tab/C-n down,
@@ -4254,6 +4320,201 @@ mod tests {
         let answer = tool_answer(&log);
         assert!(answer.contains("exit 0") && answer.contains("(no output)"), "{answer}");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #24/#25: a card is answered from anywhere — with a draft in the chat's input its `y` is the draft's,
+    /// and the card says `C-q` brings it the keys; there Esc goes back unanswered, keys it doesn't ask for
+    /// are swallowed, and `y` answers it — the draft as it was. Esc never says no, in the input or out.
+    #[test]
+    fn a_card_is_answered_from_a_draft_with_c_q() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-card-cq-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let made = dir.join("made");
+        let command = format!("touch {}", made.display());
+        let draw = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 140, 40).unwrap();
+            let mut parser = vt100::Parser::new(40, 140, 0);
+            parser.process(&bytes);
+            parser.screen().contents()
+        };
+        let mut ed = editor("");
+        ed.offer_popups = true;
+        let log = claude_calls(&mut ed, &dir, "run", &json!({ "command": command }));
+        feed(&mut ed, "<space>ltouch it<ret>");
+        settle_for(&mut ed, |ed| !ed.offers.is_empty());
+        // A draft in the chat's input: what's typed is the draft's, the card says how to reach it
+        ed.chat.as_mut().unwrap().focused = true;
+        feed(&mut ed, "my draft y");
+        let input = |ed: &Editor| ed.chat.as_ref().unwrap().input.clone();
+        assert_eq!(input(&ed), "my draft y");
+        assert!(!made.exists() && ed.offers.len() == 1);
+        assert!(draw(&mut ed).contains("C-q to answer it"));
+        // Esc leaves the input; another Esc (the card has the keys now) isn't a no
+        feed(&mut ed, "<esc><esc>");
+        assert_eq!(ed.offers.len(), 1, "Esc never answers a card");
+        // Back in the input: C-q — the card has the keys, the draft stays
+        ed.chat.as_mut().unwrap().focused = true;
+        feed(&mut ed, "<C-q>");
+        assert!(ed.card_keys);
+        assert!(draw(&mut ed).contains("esc goes back, unanswered"));
+        feed(&mut ed, "x");
+        assert!(ed.status.as_ref().is_some_and(|s| s.0.contains("the card asks y or n")), "{:?}", ed.status);
+        feed(&mut ed, "<esc>");
+        assert!(!ed.card_keys && ed.offers.len() == 1 && ed.chat.as_ref().unwrap().focused);
+        assert_eq!(input(&ed), "my draft y", "back where it was");
+        // C-q, y (once the card has been in sight a moment): answered, the keys back in the draft
+        feed(&mut ed, "<C-q>");
+        draw(&mut ed);
+        std::thread::sleep(crate::offer::SETTLE);
+        draw(&mut ed);
+        feed(&mut ed, "y");
+        assert!(ed.offers.is_empty() && !ed.card_keys);
+        settle_for(&mut ed, |ed| !ed.chat.as_ref().unwrap().busy());
+        assert!(made.exists() && tool_answer(&log).contains("exit 0"));
+        assert_eq!(input(&ed), "my draft y");
+        assert!(ed.chat.as_ref().unwrap().focused);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #23: Enter while Claude works queues the message — said over the input, nothing sent yet; ↑ takes it
+    /// back to edit (out of the queue), Enter queues it again; it goes as the next turn when this one ends.
+    #[test]
+    fn a_message_sent_while_claude_works_waits_its_turn() {
+        let dir = std::env::temp_dir().join(format!("tarae-chat-queue-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("sent.log");
+        std::fs::remove_file(&log).ok();
+        let draw = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 140, 40).unwrap();
+            let mut parser = vt100::Parser::new(40, 140, 0);
+            parser.process(&bytes);
+            parser.screen().contents()
+        };
+        let mut ed = editor("fn main() {}\n");
+        let logged = format!("printf '%s\\n' \"$line\" >> '{}'", log.display());
+        fake_claude_stream(
+            &mut ed,
+            &[json_str(&logged), json_str("sleep 1"), serde_json::json!({"type": "result", "result": "ok"})],
+        );
+        let sent = |log: &Path| std::fs::read_to_string(log).unwrap_or_default().lines().count();
+        feed(&mut ed, "<space>lfirst<ret>");
+        // (its first turn takes a second: no events handled meanwhile, so it's still in flight)
+        while sent(&log) < 1 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(ed.chat.as_ref().unwrap().busy());
+        // (the panel in full while Claude works, not folded to the following card)
+        ed.chat.as_mut().unwrap().unfolded = true;
+        feed(&mut ed, "second<ret>");
+        let c = ed.chat.as_ref().unwrap();
+        assert_eq!((c.queued.as_deref(), c.input.as_str()), (Some("second"), ""));
+        let s = draw(&mut ed);
+        assert!(s.contains("queued second") && s.contains("↑ edit queued"), "{s}");
+        // ↑: back to edit — out of the queue; Enter queues it again
+        feed(&mut ed, "<up>");
+        let c = ed.chat.as_ref().unwrap();
+        assert_eq!((c.queued.as_deref(), c.input.as_str()), (None, "second"));
+        feed(&mut ed, " too<ret>");
+        assert_eq!(ed.chat.as_ref().unwrap().queued.as_deref(), Some("second too"));
+        assert_eq!(sent(&log), 1, "nothing goes while Claude works");
+        // The turn ends: it goes
+        settle_for(&mut ed, |_| sent(&log) == 2);
+        let last = std::fs::read_to_string(&log).unwrap();
+        assert!(last.lines().nth(1).unwrap().contains("second too"), "{last}");
+        assert!(ed.chat.as_ref().unwrap().queued.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The edit review's keys say what each takes (it read "y accept · a all" — one `y` left the rest
+    /// waiting, easy to miss): with several left `y accept this one` and `a accept all N`; with one, no `a`.
+    #[test]
+    fn an_edit_reviews_keys_say_this_one_or_all() {
+        let mut ed = editor("one\ntwo\nthree\n");
+        let id = ed.doc().id;
+        let changes = vec![
+            (0, 3, "one".to_string(), "ONE".to_string()),
+            (8, 13, "three".to_string(), "THREE".to_string()),
+        ];
+        crate::llm::review_with(&mut ed, id, "upper", changes, None);
+        let draw = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 140, 40).unwrap();
+            let mut parser = vt100::Parser::new(40, 140, 0);
+            parser.process(&bytes);
+            parser.screen().contents()
+        };
+        let s = draw(&mut ed);
+        assert!(s.contains("y accept this one   a accept all 2   n reject"), "{s}");
+        feed(&mut ed, "y");
+        let s = draw(&mut ed);
+        assert!(s.contains("y accept   n reject") && !s.contains("accept all"), "{s}");
+    }
+
+    /// #29: the git tab reads the status again when Claude edits, writes or runs something — not only when
+    /// it's reopened ("nothing to commit — the tree is clean" over files Claude had changed). Mid-turn: the
+    /// fake claude changes the file (standing in for its Edit), then sends the edit's result, then waits.
+    #[test]
+    fn the_git_tab_follows_claudes_edits() {
+        let repo = git_repo("git-follow", &[("a.txt", "one\n")]);
+        let file = repo.join("a.txt");
+        let mut ed = editor("");
+        ed.sidebar = Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, repo.clone()));
+        ed.git_refresh();
+        settle_until(&mut ed, |ed| ed.git_status.as_ref().is_some_and(|s| s.unstaged.is_empty()));
+        let edit = serde_json::json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "e1",
+            "name": "Edit", "input": {"file_path": file, "old_string": "one", "new_string": "two"}}]}});
+        let result = serde_json::json!({"type": "user", "message": {"content": [{"type": "tool_result",
+            "tool_use_id": "e1", "content": "edited"}]}});
+        let write = format!("printf 'two\\n' > '{}'", file.display());
+        fake_claude_stream(
+            &mut ed,
+            &[
+                edit,
+                json_str(&write),
+                result,
+                json_str("sleep 2"),
+                serde_json::json!({"type": "result", "result": "ok"}),
+            ],
+        );
+        feed(&mut ed, "<space>lchange it<ret>");
+        let dirty = |ed: &Editor| ed.git_status.as_ref().is_some_and(|s| !s.unstaged.is_empty());
+        settle_for(&mut ed, |ed| dirty(ed) || !ed.chat.as_ref().unwrap().busy());
+        assert!(dirty(&ed) && ed.chat.as_ref().unwrap().busy(), "the tab caught up mid-turn");
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// #31: a paste in normal mode into a file under review (the review took the keys at the turn's end)
+    /// goes to the chat, saying so — it doesn't land in the file as an unsaved edit; in insert mode it's
+    /// typed there on purpose.
+    #[test]
+    fn a_paste_into_a_file_under_review_goes_to_the_chat() {
+        let dir = git_repo("paste-review", &[("a.rs", "fn a() {}\n")]);
+        std::fs::write(dir.join("a.rs"), "fn a() { 1 }\n").unwrap();
+        let mut ed = editor("");
+        crate::chat::open(&mut ed);
+        ed.chat.as_mut().unwrap().focused = false;
+        crate::codereview::start_in(&mut ed, dir.clone(), None);
+        settle_until(&mut ed, |ed| ed.code_review.is_some() && ed.doc().review_base.is_some());
+        let before = ed.doc().text.to_string();
+        ed.handle_paste("meant for the chat".into());
+        assert_eq!(ed.doc().text.to_string(), before, "the file under review is as it was");
+        let c = ed.chat.as_ref().unwrap();
+        assert!(c.focused && c.input == "meant for the chat", "{:?}", c.input);
+        assert!(ed.status.as_ref().is_some_and(|s| s.0.contains("pasted into the chat")), "{:?}", ed.status);
+        // Insert mode: typed there on purpose
+        ed.chat.as_mut().unwrap().focused = false;
+        feed(&mut ed, "i");
+        ed.handle_paste("X".into());
+        assert_ne!(ed.doc().text.to_string(), before);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn json_str(s: &str) -> serde_json::Value {
+        serde_json::Value::String(s.to_string())
     }
 
     /// Stopping Claude's command (`space m c`) tells Claude so — it doesn't wait for an end that won't come.

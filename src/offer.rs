@@ -224,8 +224,8 @@ impl crate::editor::Editor {
         self.offers.push(o);
     }
 
-    /// Normal-mode keys while an offer is shown — true if handled
-    /// (`y` download · `n`/Esc dismiss · `N` never, for an install, on the front card).
+    /// A card's keys while it has them (`Editor::card_has_keys`) — true if handled (`y` yes · `n` no · `a`/`A`
+    /// for longer · `N` never, for an install, on the front card · `v` all of a cut one).
     pub fn offer_key(&mut self, key: crate::key::Key) -> bool {
         use crate::key::Code;
         let Some(o) = self.offers.first() else { return false };
@@ -238,9 +238,7 @@ impl crate::editor::Editor {
             if !self.screen.offer_buttons.iter().any(|b| b.3 == 'y') {
                 return false;
             }
-            if !self.offer_settled()
-                && matches!(key.code, Code::Char('y' | 'n' | 'N' | 'a' | 'A') | Code::Esc)
-            {
+            if !self.offer_settled() && matches!(key.code, Code::Char('y' | 'n' | 'N' | 'a' | 'A')) {
                 return true;
             }
             // Cut to fit the screen: `v` shows it all, and `y` waits for that (not taken otherwise — it's
@@ -259,9 +257,11 @@ impl crate::editor::Editor {
                 }
             }
         }
+        // (Esc isn't an answer — #25: it's how one leaves an input or a mode, and a "no" by accident told Claude
+        // no; `n` says no)
         match key.code {
             Code::Char('y') => self.offer_accept(),
-            Code::Char('n') | Code::Esc => self.offer_dismiss(),
+            Code::Char('n') => self.offer_dismiss(),
             Code::Char('N') if matches!(o.what, What::Install { .. }) => self.offer_never(),
             Code::Char('a') if o.lasts() => self.offer_for_chat(),
             Code::Char('A') if o.keeps() => self.offer_always(),

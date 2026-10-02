@@ -8,7 +8,7 @@
 05  14   fn main() {
 06  15       let text = "the quick brown fox jumps over the lazy dog";
 07  16       let counts = word_counts(text);
-08     ▎ Change 1 of 1 · line 17   y accept   n reject   a all   tab next
+08     ▎ Change 1 of 1 · line 17   y accept   n reject
 09  17 −     println!("{} distinct words", counts.len()); // 타래
 10     ▎     println!("{} distinct words in {:?}", counts.len(), text);
 11  18   }
@@ -70,7 +70,7 @@
 05  ff
 06  ff                  gggg ggggg ggggg ggg ggggg gggg ggg gggg gggg
 07  ff
-08     a AAAAAA A AA A A AAAA AA   A dddddd   A dddddd   A ddd   AAA dddd
+08     a AAAAAA A AA A A AAAA AA   A dddddd   A dddddd
 09  ff E              ggg gggggggg gggggg
 10     g              ggg gggggggg ggggg gg ggggg
 11  ff

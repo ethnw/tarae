@@ -278,6 +278,14 @@ impl Editor {
         self.popup = Some(crate::markdown::render(md, &self.theme, None));
     }
 
+    /// Something changed files outside the editor's own saves — Claude's edit, write or command, a turn's
+    /// end (#29): the git tab, when it's shown, reads the status again.
+    pub fn git_tab_follow(&mut self) {
+        if self.sidebar.as_ref().is_some_and(|s| s.mode == crate::sidebar::Mode::Git) {
+            self.git_refresh();
+        }
+    }
+
     /// Read the status again (worker) — the panel follows. Only the latest read lands (a slow one started
     /// before a stage doesn't undo what the panel shows).
     pub fn git_refresh(&mut self) {

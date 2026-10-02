@@ -78,7 +78,10 @@ configs carry over as they are.
 - Registers `"x`, `_` (black hole), and `+` = the system clipboard (`space y`, `space p`, `space P`) · macros: `Q`
   records, `q` replays (with a count), `"xQ` records into a named register
 - Pasting with your terminal's paste goes in as it is — no auto-indent, no auto-pairs — as one undo step: at the
-  cursor while typing, before the selection in normal mode (as Helix does)
+  cursor while typing, before the selection in normal mode (as Helix does). While a code review is open, a
+  paste in normal mode doesn't edit the file you're reviewing: it goes into the chat's input when the chat is
+  open, and the toast says so (`i` pastes into the file). With no chat, it goes in and the toast says where
+  (`u` takes it back)
 - Grapheme-cluster aware everywhere — movement, deletion, `r`, `f`, and drawing treat `é`, NFD Hangul, 👍🏽, 👨‍👩‍👧, and
   `\r\n` as one character; wide characters get the right width
 - **Soft wrap** `editor.soft-wrap` — long lines show as several rows, broken after a space (mid-word only when a word is
@@ -202,7 +205,7 @@ configs carry over as they are.
   ([screenshot](screenshots/ux-git.png))
 - **Git** `space g` — the side panel's git tab, with the keys, like lazygit beside your code: what's staged and what
   isn't, each a tree of files with status letters in the gutter's colors and `+a −r`, the branch and how far it is
-  from its upstream (`main ↑1`). Enter (or `l`) on a changed file opens it to its **hunks and merge conflicts**, one
+  from its upstream (`main ↑1`); it catches up as soon as Claude edits a file or a command it ran ends. Enter (or `l`) on a changed file opens it to its **hunks and merge conflicts**, one
   row each (where it starts, `+a −r`); moving onto one shows it in the editor. On a hunk `s` stages it and `d` puts
   the index's lines back (an undoable edit); on a conflict `o` / `t` / `a` keep ours / theirs / both. On files,
   folders, or a whole section: `s` / `u` stage / unstage, `d` discards (press it twice — an open file's old text is
