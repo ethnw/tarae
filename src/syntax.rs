@@ -653,13 +653,15 @@ impl Syntax {
     /// What a frame just showed outside where the layers are made, made right here — only that, no lines
     /// around it (a background parse adds those next) and within the frame's budget (since, how long — one
     /// for all its buffers): a place jumped to is colored from its first frame. Only while the tree is up to
-    /// date (no edit since its parse, none running); tells whether it did.
+    /// date (no edit since its parse, none running); tells whether it did — not if out of time even asking
+    /// the query (a huge code block): then it's as it was.
     pub fn inject_shown_now(
         &mut self,
         text: &Rope,
         frame: (std::time::Instant, std::time::Duration),
     ) -> bool {
-        if self.dirty || self.in_flight || self.tree.is_none() || !self.wants.get() {
+        let spent = frame.0.elapsed() >= frame.1;
+        if spent || self.dirty || self.in_flight || self.tree.is_none() || !self.wants.get() {
             return false;
         }
         let Some(covered) = self.covered.clone() else { return false };
@@ -671,10 +673,15 @@ impl Syntax {
         job.near = Some(covered.into_iter().chain(shown).collect());
         (job.near_lines, job.budget, job.frame) = (0, frame.1, Some(frame.0));
         let generation = job.generation;
-        self.finish_parse(generation, job.run());
-        // The lines around it next
+        let parsed = job.run();
+        // The lines around it next — all of it if the frame gave up
+        let made = !parsed.gave_up;
+        match made {
+            true => self.finish_parse(generation, parsed),
+            false => self.in_flight = false,
+        }
         self.wants.set(true);
-        true
+        made
     }
 
     /// Whether a parse should run though no edit came: something shown needs injections not made yet.
@@ -805,6 +812,8 @@ pub struct Parsed {
     covered: Option<Vec<std::ops::Range<usize>>>,
     #[cfg_attr(not(test), allow(dead_code))] // read by the tests
     taken: Taken,
+    /// A frame's out of time (`Injector::gave_up`): nothing of it to keep.
+    gave_up: bool,
     /// The injection query's matches in the tree.
     matches: Vec<Match>,
 }
@@ -942,7 +951,8 @@ impl ParseJob {
                 .and_then(|_| parse_rope(&mut parser, &self.text, self.old.as_ref(), None)),
         };
         let covered = self.near.map(|near| around(&self.text, near, self.near_lines));
-        let (mut layers, mut taken, mut matches) = (Vec::new(), Taken::default(), Vec::new());
+        let (mut layers, mut taken, mut matches, mut gave_up) =
+            (Vec::new(), Taken::default(), Vec::new(), false);
         if let Some(tree) = &tree {
             let mut inj = Injector::new(&self.text, covered.as_deref(), self.budget);
             (inj.frame, inj.error_max) = (self.frame, self.error_max);
@@ -970,9 +980,9 @@ impl ParseJob {
             });
             matches = inj.matches(&self.lang, tree, old);
             inj.run(&matches, 0, &mut layers);
-            taken = inj.taken;
+            (taken, gave_up) = (inj.taken, inj.gave_up.get());
         }
-        Parsed { tree, layers, covered, taken, matches }
+        Parsed { tree, layers, covered, taken, matches, gave_up }
     }
 }
 
@@ -1048,6 +1058,10 @@ fn meets(near: &[std::ops::Range<usize>], start: usize, end: usize) -> bool {
     near.get(from).is_some_and(|c| c.start <= end)
 }
 const MAX_DEPTH: usize = 3;
+/// While a frame waits, a match whose content has more children than this isn't split into its pieces —
+/// the frame gives up and leaves it to the background (a code block of 100k lines in Markdown has a child
+/// per token: 86 ms).
+const FRAME_CHILDREN_MAX: usize = 10_000;
 /// Time a frame may spend making the layers of a place jumped to (`Syntax::inject_shown_now`).
 pub const SHOWN_NOW_BUDGET: std::time::Duration = std::time::Duration::from_millis(4);
 const INJECT_BUDGET: std::time::Duration = std::time::Duration::from_millis(80);
@@ -1284,6 +1298,9 @@ struct Injector<'a> {
     frame: Option<std::time::Instant>,
     /// An error longer than this where something changed: its tree's matches asked afresh (`changed`).
     error_max: usize,
+    /// Out of a frame's time while asking the query (or past `FRAME_CHILDREN_MAX`): the frame keeps what it
+    /// had — its matches would be cut short, and kept so.
+    gave_up: std::cell::Cell<bool>,
     /// Only the layers meeting these (sorted, merged; `None`: all).
     near: Option<&'a [std::ops::Range<usize>]>,
     /// Ask the query over the whole tree even so (what the tests compare with).
@@ -1362,6 +1379,7 @@ impl<'a> Injector<'a> {
             budget,
             frame: None,
             error_max: ERROR_SPAN_MAX,
+            gave_up: std::cell::Cell::new(false),
             near,
             whole_query: false,
             before: None,
@@ -1426,7 +1444,15 @@ impl<'a> Injector<'a> {
             // A byte wider: the cursor leaves out a node only touching the range (`meets` counts it), and
             // an empty one at its end
             cursor.set_byte_range(pass.start.saturating_sub(1)..pass.end.saturating_add(1));
-            let mut matches = cursor.matches(q, tree.root_node(), provider);
+            // While a frame waits, stopped at its time — even walking to a match (the cursor steps through
+            // every sibling before the range: a macro of 100k lines, most of a second)
+            let over = || self.frame.is_some_and(|t| t.elapsed() > self.budget);
+            let mut check = |_: &tree_sitter::QueryCursorState| match over() {
+                true => std::ops::ControlFlow::Break(()),
+                false => std::ops::ControlFlow::Continue(()),
+            };
+            let options = tree_sitter::QueryCursorOptions::new().progress_callback(&mut check);
+            let mut matches = cursor.matches_with_options(q, tree.root_node(), provider, options);
             while let Some(m) = matches.next() {
                 let props = q.property_settings(m.pattern_index);
                 let prop = |k: &str| props.iter().find(|p| &*p.key == k);
@@ -1463,6 +1489,11 @@ impl<'a> Injector<'a> {
                     prop("injection.include-children").is_some(),
                     prop("injection.include-unnamed-children").is_some(),
                 );
+                let many = |n: &Node| n.child_count() as usize > FRAME_CHILDREN_MAX;
+                if self.frame.is_some() && !children && content.iter().any(many) {
+                    self.gave_up.set(true);
+                    return;
+                }
                 out.push(Match {
                     pattern: m.pattern_index,
                     lang,
@@ -1477,6 +1508,10 @@ impl<'a> Injector<'a> {
                         .map(|c| (c.index, c.node.start_byte(), c.node.end_byte()))
                         .collect(),
                 });
+            }
+            if over() {
+                self.gave_up.set(true);
+                return;
             }
         }
     }
@@ -1564,6 +1599,9 @@ impl<'a> Injector<'a> {
 
     /// The layers `matches` makes (and theirs, nested).
     fn run(&mut self, matches: &[Match], depth: usize, out: &mut Vec<Layer>) {
+        if self.gave_up.get() {
+            return;
+        }
         // In document order — passes over ranges apart give them in another order than one pass over all,
         // and kept ones come first. Where two patterns catch the same spot (shebang·language name,
         // `lang="ts"` or not) the one listed first wins.
@@ -2455,6 +2493,50 @@ mod tests {
         assert!(comment_lines(&syn, &text).contains(&1800));
     }
 
+    /// A frame gives up — and keeps what it had, for the background to do — where even asking the query
+    /// would take long: a match whose content has more children than `FRAME_CHILDREN_MAX` (a child per token
+    /// of a code block: 2000 lines are past it), or its time running out while asking.
+    #[test]
+    fn a_frame_gives_up_where_asking_takes_long() {
+        let (Ok(md), Ok(rust)) =
+            (Loader::global().load(spec("markdown").unwrap()), Loader::global().load(spec("rust").unwrap()))
+        else {
+            return;
+        };
+        let frame = |budget| (std::time::Instant::now(), budget);
+        let middle = |text: &Rope| text.line_to_byte(text.len_lines() / 2);
+        let src = format!(
+            "# A\n\n{}```rust\n{}```\n",
+            "text\n\n".repeat(1000),
+            "fn f() { let x = vec![1, 2, 3]; }\n".repeat(2000)
+        );
+        let text = Rope::from_str(&src);
+        let mut syn = Syntax::new(md);
+        syn.near_lines = 0;
+        highlights(&syn, &text, 0..text.line_to_byte(1), &mut QueryCursor::new());
+        parse_now(&mut syn, &text);
+        highlights(&syn, &text, middle(&text)..middle(&text) + 1, &mut QueryCursor::new());
+        assert!(
+            !syn.inject_shown_now(&text, frame(std::time::Duration::MAX)),
+            "the block's too many children"
+        );
+        assert!(syn.wants_injections() && !syn.in_flight);
+        parse_now(&mut syn, &text);
+        let rust_at = |syn: &Syntax, at| {
+            syn.layers.iter().any(|l| l.lang.name == "rust" && l.tree.root_node().end_byte() > at)
+        };
+        assert!(rust_at(&syn, middle(&text)), "the background made it");
+        // Its time out while asking over many lines: it gives up, not finishes the query
+        let text = commented(20_000);
+        let mut syn = Syntax::new(rust);
+        syn.near_lines = 0;
+        highlights(&syn, &text, 0..text.line_to_byte(1), &mut QueryCursor::new());
+        parse_now(&mut syn, &text);
+        highlights(&syn, &text, 0..text.len_bytes(), &mut QueryCursor::new());
+        assert!(!syn.inject_shown_now(&text, frame(std::time::Duration::from_millis(1))));
+        assert!(syn.wants_injections());
+    }
+
     /// A parse with nothing edited since the last (a frame's own, or one for around what's shown) keeps
     /// every match — nothing changed — even where one with edits would ask afresh (a root wider than
     /// `WIDE_ROOT`): it runs while a frame waits.
@@ -2521,8 +2603,11 @@ mod tests {
         syn.edit(&edits.iter().map(|e| e.ts).collect::<Vec<_>>());
         assert!(!syn.inject_shown_now(&text, (std::time::Instant::now(), budget)));
         parse_now(&mut syn, &text);
-        // Up to date
+        // The frame's time spent already (another buffer took it): not now
         highlights(&syn, &text, at(&text, 1800), &mut QueryCursor::new());
+        let ago = std::time::Instant::now() - std::time::Duration::from_millis(5);
+        assert!(!syn.inject_shown_now(&text, (ago, std::time::Duration::from_millis(5))));
+        // Up to date
         assert!(syn.inject_shown_now(&text, (std::time::Instant::now(), budget)));
         let lines = comment_lines(&syn, &text);
         assert!((1800..1810).all(|l| lines.contains(&l)), "the lines shown");
@@ -2534,8 +2619,8 @@ mod tests {
         assert!(lines.contains(&1795) && lines.contains(&1814), "{lines:?}");
     }
 
-    /// Out of time while a frame waits: the layers already made stay (they cost nothing), only new ones are
-    /// left for the parse after — and grammars not loaded yet aren't loaded while it waits.
+    /// Out of time: the layers already made stay (they cost nothing), only new ones are left for the parse
+    /// after — and grammars not loaded yet aren't loaded while a frame waits.
     #[test]
     fn out_of_time_layers_made_stay_and_grammars_wait() {
         let Ok(rust) = Loader::global().load(spec("rust").unwrap()) else { return };
@@ -2545,13 +2630,17 @@ mod tests {
         let at = |text: &Rope, line: usize| text.line_to_byte(line)..text.line_to_byte(line + 10);
         highlights(&syn, &text, at(&text, 1500), &mut QueryCursor::new());
         parse_now(&mut syn, &text);
+        // A parse with no time: at most the first new one made
         highlights(&syn, &text, at(&text, 100), &mut QueryCursor::new());
-        assert!(syn.inject_shown_now(&text, (std::time::Instant::now(), std::time::Duration::ZERO)));
+        syn.inject_budget = std::time::Duration::ZERO;
+        parse_now(&mut syn, &text);
         let lines = comment_lines(&syn, &text);
         assert!((1500..1510).all(|l| lines.contains(&l)), "the ones made: {lines:?}");
-        assert!(!lines.contains(&100), "no time to parse it");
+        assert!(!(100..110).all(|l| lines.contains(&l)), "no time to parse them");
+        syn.inject_budget = std::time::Duration::MAX;
+        highlights(&syn, &text, at(&text, 100), &mut QueryCursor::new());
         parse_now(&mut syn, &text);
-        assert!(comment_lines(&syn, &text).contains(&100), "the parse after made it");
+        assert!((100..110).all(|l| comment_lines(&syn, &text).contains(&l)), "the parse after made them");
         // A Fish block in Markdown, its grammar not loaded: not loaded while a frame waits
         let (Ok(md), Some(fish)) = (Loader::global().load(spec("markdown").unwrap()), spec("fish")) else {
             return;
