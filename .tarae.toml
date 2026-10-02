@@ -7,3 +7,14 @@ restart-binary = "target/release/tarae"
 # tarae's own tests (agent.rs, attach.rs …) connect to their own port-0 listeners — opens every local port,
 # the risky ones too
 sandbox-localhost = true
+
+# `:preflight` — what CI checks, before a push (perf on a busy machine or a slower number: a pass with a note)
+[preflight]
+steps = [
+  { name = "fmt", cmd = "cargo fmt --all --check" },
+  { name = "clippy", cmd = "cargo clippy --all-targets -- -D warnings" },
+  { name = "clippy bundled", cmd = "cargo clippy --all-targets --features bundled-grammars -- -D warnings" },
+  { name = "test", cmd = "cargo test" },
+  { name = "test bundled", cmd = "cargo test --features bundled-grammars" },
+  { name = "perf", cmd = "cargo perf", note = "not measured|SLOWER" },
+]

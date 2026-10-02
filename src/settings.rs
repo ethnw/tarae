@@ -505,9 +505,11 @@ fn walk(
 ) {
     for (k, v) in t {
         let path = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
-        // Free-form-named tables (keymap, language servers, per-language settings, `[[attach]]`) are read by
-        // config.rs.
-        if prefix.is_empty() && matches!(path.as_str(), "keys" | "lsp" | "lang" | "attach" | "task") {
+        // Free-form-named tables (keymap, language servers, per-language settings, `[[attach]]`, `:preflight`'s
+        // steps) are read by config.rs.
+        if prefix.is_empty()
+            && matches!(path.as_str(), "keys" | "lsp" | "lang" | "attach" | "task" | "preflight")
+        {
             continue;
         }
         let at = || match locate(src, &path) {

@@ -85,6 +85,9 @@ pub struct EditorConfig {
     pub attach: Vec<crate::attach::AttachTarget>,
     /// Build tasks (`[task.<name>] cmd = "…"`, optional `cwd`) — before the ones the project suggests.
     pub tasks: Vec<crate::task::Task>,
+    /// `:preflight`'s steps (`[preflight] steps = [{ name, cmd, note }, …]` — `preflight.rs`). A layer that
+    /// gives them replaces the list.
+    pub preflight: Vec<crate::preflight::Step>,
 }
 
 impl Default for EditorConfig {
@@ -123,6 +126,7 @@ impl Default for EditorConfig {
             lsp: crate::lsp::LspConfig { enabled: true, ..Default::default() },
             attach: Vec::new(),
             tasks: Vec::new(),
+            preflight: Vec::new(),
         }
     }
 }
@@ -350,6 +354,18 @@ fn apply_source(
             let cwd = v.get("cwd").and_then(Value::as_str).map_or(cwd.clone(), |c| cwd.join(c));
             config.editor.tasks.retain(|t| t.name != *name);
             config.editor.tasks.push(crate::task::Task { name: name.clone(), cmd: cmd.to_string(), cwd });
+        }
+    }
+    if let Some(v) = table.get("preflight") {
+        // Each step's command runs — each goes in only once the project is trusted (`preflight.<name>`)
+        let steps = crate::preflight::parse_config(v, file, warnings);
+        let n = steps.len();
+        let passed: Vec<_> = steps
+            .into_iter()
+            .filter(|s| pass(format!("preflight.{}", s.name), &Value::from(s.cmd.as_str())))
+            .collect();
+        if n > 0 && passed.len() == n {
+            config.editor.preflight = passed;
         }
     }
     if let Some(v) = table.get("attach") {
@@ -590,6 +606,8 @@ restart-build = "touch marker"
 run-allow = ["make"]
 [task.build]
 cmd = "touch marker"
+[preflight]
+steps = [{ name = "check", cmd = "touch marker" }]
 [lsp.mine]
 command = "my-server"
 [lsp.ruff]
@@ -626,6 +644,7 @@ Z = ["move_line_down", ":sh touch marker"]
         assert_eq!(c.editor.restart_binary, "");
         assert!(c.editor.llm.run_allow.is_empty());
         assert!(c.editor.tasks.iter().all(|t| t.name != "build"));
+        assert!(c.editor.preflight.is_empty(), "no preflight steps");
         assert!(!c.editor.lsp.servers.contains_key("mine"));
         assert_ne!(bound(&c, "X").as_deref(), Some(":sh touch marker"), "the default binding stays");
         assert!(bound(&c, "space Z").is_none_or(|b| !b.contains(":sh")));
@@ -637,6 +656,7 @@ Z = ["move_line_down", ":sh touch marker"]
             "editor.restart-build",
             "llm.run-allow",
             "task.build",
+            "preflight.check",
             "lsp.mine",
             "keys.normal.X",
             "keys.normal.space.Z",
@@ -653,6 +673,7 @@ Z = ["move_line_down", ":sh touch marker"]
         assert_eq!(t.editor.restart_binary, "bin/marker");
         assert_eq!(t.editor.llm.run_allow, ["make"]);
         assert!(t.editor.tasks.iter().any(|t| t.name == "build"));
+        assert_eq!(t.editor.preflight.iter().map(|s| s.cmd.as_str()).collect::<Vec<_>>(), ["touch marker"]);
         assert!(t.editor.lsp.servers.contains_key("mine"));
         assert_eq!(bound(&t, "X").as_deref(), Some(":sh touch marker"));
         // A change asks again, and holds it back meanwhile

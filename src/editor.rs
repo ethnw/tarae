@@ -549,6 +549,8 @@ pub struct Editor {
     pub sandbox: crate::sandbox::Availability,
     /// `:restart` under way (`restart.rs`) — once `Ready`, main runs the new binary after the loop ends.
     pub restart: Option<crate::restart::Restart>,
+    /// `:preflight` under way, or the last one while its run is in the task panel (`preflight.rs`).
+    pub preflight: Option<crate::preflight::Preflight>,
     /// Undo history files being written (`undofile.rs`) — the process ending waits for them.
     pub undo_writes: crate::undofile::Writes,
     pub idle_save_gen: u64,
@@ -693,6 +695,7 @@ impl Editor {
             screen_sends: Vec::new(),
             sandbox: if cfg!(test) { crate::sandbox::Availability::Bypass } else { Default::default() },
             restart: None,
+            preflight: None,
             undo_writes: Default::default(),
             idle_save_gen: 0,
             recent: Vec::new(),
@@ -3226,6 +3229,66 @@ mod tests {
         ed.handle_event(Event::Focus(false));
         ed.set_status("saved");
         assert_eq!(ed.tick_wanted(), Some(TICK), "a toast's fade-in still draws");
+    }
+
+    /// `:preflight` runs every step one after another in the task panel — the ones after a failure too —
+    /// each with its row (how it ended, its time), a failure's places in `]q`, a pass with a note, and a
+    /// one-line summary; the markers between steps aren't shown, each step's output is under its heading.
+    #[test]
+    fn preflight_runs_every_step_and_sums_up() {
+        use crate::preflight::{State, Step};
+        let dir = std::env::temp_dir().join(format!("tarae-preflight-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        std::fs::write(dir.join("a.rs"), "fn a() {}\nfn b() {}\n").unwrap();
+        let step = |name: &str, cmd: &str| Step { name: name.into(), cmd: cmd.into(), note: None };
+        let mut ed = editor("");
+        ed.project_root = Some(dir.clone());
+        assert!(ed.preflight_start().unwrap_err().contains("no preflight steps"));
+        ed.config.preflight = vec![
+            step("fmt", "echo formatted"),
+            step("clippy", "echo 'a.rs:2:1: error: not like that' >&2; exit 3"),
+            Step { note: Some("not measured".into()), ..step("perf", "echo 'not measured (machine busy)'") },
+            step("test", "cd / && echo 'all fine'; exit 0"),
+        ];
+        ed.preflight_start().unwrap();
+        assert!(ed.preflight_start().unwrap_err().contains("preflight is running"), "not twice at once");
+        settle_for(&mut ed, |ed| {
+            ed.task_run.as_ref().is_some_and(|r| r.state != crate::task::State::Running)
+        });
+        let p = ed.preflight.as_ref().unwrap();
+        let states: Vec<&State> = p.steps.iter().map(|s| &s.state).collect();
+        assert_eq!(
+            states,
+            [&State::Passed, &State::Failed(3), &State::Passed, &State::Passed],
+            "every step ran"
+        );
+        assert!(p.steps.iter().all(|s| s.took.is_some()));
+        assert_eq!(p.steps[2].note.as_deref(), Some("not measured (machine busy)"));
+        let said = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        assert!(
+            said.starts_with(
+                "preflight: 3 of 4 passed — clippy failed · perf: not measured (machine busy) · "
+            ),
+            "{said}"
+        );
+        assert!(said.ends_with(" — ]q goes to the first"), "{said}");
+        let listed: Vec<(PathBuf, usize)> =
+            ed.qlist.as_ref().unwrap().items.iter().map(|i| (i.path.clone(), i.line)).collect();
+        assert_eq!(listed, [(dir.join("a.rs"), 1)], "the failure's place");
+        let out: Vec<&str> = ed.task_run.as_ref().unwrap().output.iter().map(|(_, l)| l.as_str()).collect();
+        assert_eq!(out[..3], ["── fmt ──", "formatted", "── clippy ──"], "{out:?}");
+        assert!(!out.iter().any(|l| l.contains("tarae-preflight")), "{out:?}");
+        let mut bytes = Vec::new();
+        crate::term::render(&mut ed, &mut bytes, 120, 30).unwrap();
+        let mut parser = vt100::Parser::new(30, 120, 0);
+        parser.process(&bytes);
+        let s = parser.screen().contents();
+        assert!(
+            s.contains("● fmt") && s.contains("▲ clippy") && s.contains("● perf") && s.contains("● test"),
+            "{s}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A waiting tick lands just past the animation's next step — not a `TICK` after whenever the last one

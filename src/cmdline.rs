@@ -53,6 +53,7 @@ pub const COMMANDS: &[TypedCmd] = &[
     c(&["quit-all!", "qa!"], Arg::None, "Quit tarae without saving"),
     c(&["restart"], Arg::None, "Start tarae again, as you were (after an update)"),
     c(&["restart!"], Arg::None, "Restart, skipping editor.restart-build"),
+    c(&["preflight"], Arg::None, "Run the project's checks before a push"),
     c(&["open", "o", "e", "edit"], Arg::File, "Open files"),
     c(&["new", "n"], Arg::None, "New scratch buffer"),
     c(&["reload"], Arg::None, "Reload the file from disk (u brings your version back)"),

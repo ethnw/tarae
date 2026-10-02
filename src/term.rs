@@ -482,7 +482,7 @@ impl Layout {
         } else if terminal {
             terminal_panel_h(total)
         } else if let Some(r) = task_in_the_slot(editor) {
-            task_panel_h(r, total)
+            task_panel_h(r, preflight_of(editor, r).is_some(), total)
         } else if editor.dap.is_some()
             || editor.test_run.is_some()
             || editor.task_run.is_some()
@@ -925,6 +925,81 @@ fn task_in_the_slot(editor: &Editor) -> Option<&crate::task::Run> {
     (!taken).then_some(k)
 }
 
+/// The preflight `r` is the run of, if it is one (`preflight.rs`) — its steps' row goes under the header.
+fn preflight_of<'a>(editor: &'a Editor, r: &crate::task::Run) -> Option<&'a crate::preflight::Preflight> {
+    editor.preflight.as_ref().filter(|p| p.generation == r.generation())
+}
+
+/// A preflight's steps in a row: `● fmt 0.4s   ▲ clippy 12s   ▂▅▇ test 3.2s   ◦ perf` — passed in the plus
+/// color (a note's pass in warning), failed in the error color, the one running with the wave, the ones to
+/// come faint. Too wide: the times go, then names are cut from the end.
+fn preflight_row(
+    p: &crate::preflight::Preflight,
+    w: usize,
+    card: Style,
+    ui: &Ui,
+    colors: (Option<Color>, Option<Color>, Option<Color>),
+) -> Vec<(String, Style)> {
+    use crate::preflight::State;
+    let (good, bad, warn) = colors;
+    let faint = Style { fg: ui.linenr.fg, ..card };
+    let dim = Style { fg: ui.virt.fg, ..card };
+    let accent = Style { fg: ui.accent.fg, ..card };
+    let cells = |timed: bool| -> Vec<(String, Style)> {
+        let mut out = Vec::new();
+        for (k, s) in p.steps.iter().enumerate() {
+            if k > 0 {
+                out.push(("   ".to_string(), card));
+            }
+            let time = |d: Option<std::time::Duration>| match d {
+                Some(d) if timed => format!(" {}", crate::preflight::long_duration(d)),
+                _ => String::new(),
+            };
+            let (glyph, gs, name) = match s.state {
+                State::Waiting => ("◦".to_string(), faint, faint),
+                State::Running => (wave(), accent, Style { bold: true, ..card }),
+                State::Passed if s.note.is_some() => ("●".into(), Style { fg: warn, ..card }, card),
+                State::Passed => ("●".into(), Style { fg: good, ..card }, card),
+                State::Failed(_) => ("▲".into(), Style { fg: bad, ..card }, Style { bold: true, ..card }),
+            };
+            out.push((format!("{glyph} "), gs));
+            out.push((s.name.clone(), name));
+            let t = match s.state {
+                State::Running => time(s.started.map(|t| t.elapsed())),
+                _ => time(s.took),
+            };
+            if !t.is_empty() {
+                out.push((t, dim));
+            }
+        }
+        out
+    };
+    let width = |c: &[(String, Style)]| c.iter().map(|(s, _)| s.width()).sum::<usize>();
+    let room = w.saturating_sub(4);
+    let timed = cells(true);
+    if width(&timed) <= room {
+        return timed;
+    }
+    let bare = cells(false);
+    if width(&bare) <= room {
+        return bare;
+    }
+    // Cut where the room ends
+    let mut out = Vec::new();
+    let mut used = 0;
+    for (s, st) in bare {
+        let left = room.saturating_sub(used);
+        if s.width() <= left {
+            used += s.width();
+            out.push((s, st));
+        } else {
+            out.push((fit_ellipsis(&s, left), st));
+            break;
+        }
+    }
+    out
+}
+
 /// The fewest rows the task panel takes (its header and two of output).
 const TASK_PANEL_MIN: usize = 3;
 
@@ -932,10 +1007,10 @@ const TASK_PANEL_MIN: usize = 3;
 /// `TASK_PANEL_MIN`, at most half the editing area (and 4 rows of code always). It never shrinks while the
 /// run is up (`Run.tall`, which a rerun of the same task starts from). (A size you set will win over this —
 /// U1.)
-fn task_panel_h(r: &crate::task::Run, total: usize) -> usize {
+fn task_panel_h(r: &crate::task::Run, steps: bool, total: usize) -> usize {
     let running = matches!(r.state, crate::task::State::Running);
     let sandbox = crate::sandbox::panel_line(r.guard.as_ref(), running, r.last_output).is_some();
-    let want = 1 + r.output.len().max(1) + usize::from(sandbox);
+    let want = 1 + usize::from(steps) + r.output.len().max(1) + usize::from(sandbox);
     let cap = (total / 2).min(total.saturating_sub(4));
     let h = want.max(TASK_PANEL_MIN).max(r.tall.get()).min(cap);
     r.tall.set(r.tall.get().max(h));
@@ -1158,14 +1233,22 @@ fn draw_task_panel(
             summary.push((n.to_string(), Style { bold: true, ..card }));
         }
     }
-    let when = match (&r.state, r.took) {
-        (State::Running, _) => format!("   {}", wave()),
-        (_, Some(d)) => format!("   {}", duration(d.as_secs_f32())),
+    // A preflight's: which step (its row has the wave), its whole time in minutes
+    let steps = preflight_of(editor, r);
+    let when = match (&r.state, r.took, steps) {
+        (State::Running, _, Some(p)) => {
+            let at = p.steps.iter().filter(|s| s.state != crate::preflight::State::Waiting).count();
+            format!("   step {} of {}", at.max(1), p.steps.len())
+        }
+        (State::Running, _, None) => format!("   {}", wave()),
+        (_, Some(d), Some(_)) => format!("   {}", crate::preflight::long_duration(d)),
+        (_, Some(d), None) => format!("   {}", duration(d.as_secs_f32())),
         _ => String::new(),
     };
     // The wave in the accent, as everywhere something is under way
     let running = matches!(r.state, State::Running);
-    summary.push((when, if running { Style { fg: ui.accent.fg, ..card } } else { dim }));
+    let waving = running && steps.is_none();
+    summary.push((when, if waving { Style { fg: ui.accent.fg, ..card } } else { dim }));
     let sum_w: usize = summary.iter().map(|(s, _)| s.width()).sum();
     if used + sum_w + 2 < w {
         for (s, st) in &summary {
@@ -1181,27 +1264,60 @@ fn draw_task_panel(
         (_, (0, 0)) => vec![("space m m", "again"), ("space m c", "close")],
         _ => vec![("]q", "next"), ("space q", "list"), ("space m m", "again"), ("space m c", "close")],
     };
-    if r.by_claude {
+    // (a preflight is run again with `:preflight`, not as a task)
+    if r.by_claude || steps.is_some() {
         hints.retain(|h| h.0 != "space m m");
     }
     hints.splice(0..0, slot_hints(editor));
     panel_hints(out, &hints, used, w, card, dim, faint)?;
+    // A preflight's steps: the row under the header
+    let top = 1 + usize::from(steps.is_some());
+    if let Some(p) = steps {
+        queue!(out, MoveTo(0, (y0 + 1) as u16))?;
+        apply(out, card)?;
+        queue!(out, Spaces(w), MoveTo(2, (y0 + 1) as u16))?;
+        for (s, st) in preflight_row(p, w, card, ui, (good, bad, warn)) {
+            apply(out, st)?;
+            queue!(out, Print(s))?;
+        }
+    }
     // The sandbox's line, when it blocked something: the bottom row, under the output
     let sandbox = crate::sandbox::panel_line(r.guard.as_ref(), running, r.last_output);
-    let rows = lay.debug_h.saturating_sub(1 + usize::from(sandbox.is_some()));
+    let rows = lay.debug_h.saturating_sub(top + usize::from(sandbox.is_some()));
     if let Some((line, quiet)) = &sandbox {
-        sandbox_row(out, (y0 + 1 + rows) as u16, w, line, "space m s", quiet.as_deref(), card, warn, faint)?;
+        sandbox_row(
+            out,
+            (y0 + top + rows) as u16,
+            w,
+            line,
+            "space m s",
+            quiet.as_deref(),
+            card,
+            warn,
+            faint,
+        )?;
     }
     // (its end, unless scrolled back; the wheel's thumb when it doesn't fit)
-    editor.screen.task_panel.set(Some((y0, y0 + rows, rows)));
+    editor.screen.task_panel.set(Some((y0, y0 + top - 1 + rows, rows)));
     let start = r.top(rows);
     let bar = (r.output.len() > rows).then(|| scroll_thumb(rows, r.output.len(), start));
     for i in 0..rows {
-        let y = (y0 + 1 + i) as u16;
+        let y = (y0 + top + i) as u16;
         queue!(out, MoveTo(0, y))?;
         apply(out, card)?;
         queue!(out, Spaces(w), MoveTo(2, y))?;
+        // (a preflight step's heading recedes, its name bold)
+        let heading = |l: &str| l.strip_prefix("── ").and_then(|l| l.strip_suffix(" ──")).map(str::to_string);
         match r.output.get(start + i) {
+            Some((_, line)) if steps.is_some() && heading(line).is_some() => {
+                let name = fit_ellipsis(&heading(line).unwrap_or_default(), w.saturating_sub(10));
+                apply(out, faint)?;
+                queue!(out, Print("── "))?;
+                apply(out, Style { bold: true, ..dim })?;
+                queue!(out, Print(name))?;
+                apply(out, faint)?;
+                queue!(out, Print(" ──"))?;
+            }
             Some((err, line)) => {
                 apply(out, output_style(*err, line, card, good, bad, faint))?;
                 queue!(out, Print(fit(&line.replace('\t', "  "), w.saturating_sub(4))))?;

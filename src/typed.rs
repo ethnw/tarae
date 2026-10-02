@@ -85,6 +85,8 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
         // `editor.restart-build` is set, unless `!`
         "restart" => crate::restart::start(editor, true),
         "restart!" => crate::restart::start(editor, false),
+        // The project's checks before a push, one after another in the task panel (preflight.rs)
+        "preflight" => editor.preflight_start(),
         "wa" | "write-all" => write_all(editor, false),
         "wqa" | "xa" | "write-quit-all" => write_all(editor, true),
         "wq" | "x" | "write-quit" if rest.is_empty() && editor.format_then_save(true) => Ok(()),

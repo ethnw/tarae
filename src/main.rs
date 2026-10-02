@@ -54,6 +54,7 @@ mod pairs;
 mod picker;
 mod plan;
 mod plugin;
+mod preflight;
 mod quickfix;
 mod readonly;
 mod reads;

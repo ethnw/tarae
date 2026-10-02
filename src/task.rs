@@ -196,6 +196,11 @@ pub struct Run {
 }
 
 impl Run {
+    /// Which run this is (each spawn a new one).
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
     /// The output's first line in `rows` rows: where it was scrolled to, else the end (the newest in sight).
     pub fn top(&self, rows: usize) -> usize {
         let max = self.output.len().saturating_sub(rows);
@@ -378,6 +383,14 @@ impl Editor {
         (self.task_generation != before).then_some(self.task_generation)
     }
 
+    /// `:preflight`'s run (`preflight.rs`): not the task `space m m` runs again; every step's places go to the
+    /// list. Its generation; None if it didn't start.
+    pub(crate) fn task_start_preflight(&mut self, task: Task) -> Option<u64> {
+        let before = self.task_generation;
+        self.task_spawn(task, None, None, true, false);
+        (self.task_generation != before).then_some(self.task_generation)
+    }
+
     /// An install (`install.rs`) in the task panel: not the task `space m m` runs again, and its output's
     /// places stay out of the list.
     pub(crate) fn task_start_install(&mut self, task: Task, after: After) {
@@ -443,10 +456,18 @@ impl Editor {
                 .collect();
             let apply = move |ed: &mut Editor| {
                 let Some(r) = ed.task_run.as_mut().filter(|r| r.generation == generation) else { return };
+                // (a preflight's markers move its steps on, and aren't shown — `preflight.rs`)
+                let mut preflight = ed.preflight.as_mut().filter(|p| p.generation == generation);
                 let mut places = Vec::new();
                 r.last_output = Instant::now();
                 for (line, found) in lines {
-                    r.output.push((err, line));
+                    let shown = match preflight.as_deref_mut() {
+                        Some(p) => p.line(&line),
+                        None => Some(line),
+                    };
+                    if let Some(line) = shown {
+                        r.output.push((err, line));
+                    }
                     places.extend(found.filter(|_| !install));
                 }
                 let n = r.output.len();
@@ -507,7 +528,7 @@ impl Editor {
                     code => State::Failed(code),
                 };
                 let (passed, errors) = (r.state == State::Passed, r.found.0);
-                if crate::restart::built(ed, generation, passed, errors) {
+                if crate::restart::built(ed, generation, passed, errors) || ed.preflight_done(generation) {
                     return;
                 }
                 let Some(r) = ed.task_run.as_mut() else { return };

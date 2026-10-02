@@ -83,10 +83,11 @@ pub fn run(_args: &[String]) -> Result<()> {
         }
         runs.push(parse(&text));
     }
-    let now = medians(&runs);
+    let mut now = medians(&runs);
     if now.is_empty() {
         return Err("no PERF lines — did the tests run in the perf profile?".into());
     }
+    now.extend(sizes(&cargo, &root)?);
     let file = root.join("target/perf/history.tsv");
     let past = std::fs::read_to_string(&file).unwrap_or_default();
     let history = read_history(&past);
@@ -123,6 +124,40 @@ pub fn run(_args: &[String]) -> Result<()> {
         if slower > 0 { format!(" — {slower} slower than before") } else { String::new() }
     );
     Ok(())
+}
+
+/// The release binary's size in MB (10⁶ bytes, as Finder and `ls -lh` say): `(name, cargo flags, target dir,
+/// budget)`. The bundled one builds in a target dir of its own, so `target/release/tarae` — what `:restart`
+/// runs — stays the default build. Sizes don't move between runs: the noise is a few edits' worth.
+const SIZES: [(&str, &[&str], &str, f64); 2] = [
+    ("release_size_mb", &[], "target", 9.0),
+    ("release_size_bundled_mb", &["--features", "bundled-grammars"], "target/bundled-size", 15.0),
+];
+const SIZE_NOISE: f64 = 0.05;
+
+/// Each `SIZES` binary built (`cargo build --release`) and measured.
+fn sizes(cargo: &std::ffi::OsStr, root: &Path) -> Result<Vec<Perf>> {
+    let mut out = Vec::new();
+    for (name, flags, dir, budget) in SIZES {
+        eprintln!("building the release binary {} …", flags.join(" "));
+        let st = Command::new(cargo)
+            .args(["build", "--release", "--quiet", "--target-dir", dir])
+            .args(flags)
+            .current_dir(root)
+            .status()
+            .map_err(|e| format!("cargo: {e}"))?;
+        if !st.success() {
+            return Err(format!("building the release binary {} failed", flags.join(" ")));
+        }
+        let bin = root.join(dir).join("release/tarae");
+        let len = std::fs::metadata(&bin).map_err(|e| format!("{}: {e}", bin.display()))?.len();
+        let mb = len as f64 / 1e6;
+        if mb >= budget {
+            return Err(format!("{name}: {mb:.2} MB (budget {budget})"));
+        }
+        out.push(Perf { name: name.to_string(), value: mb, budget, noise: SIZE_NOISE });
+    }
+    Ok(out)
 }
 
 /// None once the machine is quiet — waiting up to `WAIT` for it, saying so; else the load it stayed at.
