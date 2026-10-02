@@ -1859,7 +1859,6 @@ impl Editor {
         });
     }
 
-    /// Starts a background parse for each edited document not already parsing (at the end of every event).
     /// Injected languages made right away where the frame just drawn showed a buffer they aren't made for
     /// yet (a place jumped to) — the frame is drawn again with them. Tells whether any were.
     pub fn inject_shown_now(&mut self) -> bool {
@@ -1872,6 +1871,7 @@ impl Editor {
         any
     }
 
+    /// Starts a background parse for each edited document not already parsing (at the end of every event).
     pub fn schedule_parses(&mut self) {
         for doc in &mut self.docs {
             let Some(syn) = doc.syntax.as_mut() else { continue };

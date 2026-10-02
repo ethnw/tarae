@@ -41,6 +41,10 @@ changing the code, see [CONTRIBUTING.md](../CONTRIBUTING.md).
   files held the main loop 93 ms before; now about 1 ms.
 - **Parsing** runs on a worker thread and is incremental: edits apply to the existing tree immediately, and edits made
   during a parse are replayed onto the new tree. A full parse of a 20k-line Rust file takes 145 ms — in the background.
+  Injected languages are made only around what's shown, and a keystroke redoes only what it changed: layers no edit
+  reached are kept, the injection query is asked again only where something changed (0.5–1.7 ms a keystroke on a
+  7k-line Rust file, 60 KB of Markdown, a PHP page). The one exception to "in the background": a place jumped to gets
+  its layers on the frame itself, at most 4 ms, so it's never drawn without them.
 - **Positions are byte offsets** everywhere (tree-sitter, regex, and LSP all speak bytes), always on character
   boundaries; "one character" is a grapheme cluster.
 - **Budgets are tests.** Worst key → frame on a 200k-line file: 1.0 ms in a debug build, 52 µs in release (budget
