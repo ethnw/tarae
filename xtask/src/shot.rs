@@ -1,8 +1,10 @@
-//! `cargo xtask shot out.png [keys …]` — the real screen as a PNG: `target/release/tarae` on a pty, read back
-//! through `vt100` (as `tests/e2e.rs` does), drawn cell by cell the way a terminal draws them.
+//! `cargo xtask shot out.png [keys …]` — the real screen as a PNG: tarae on a pty, read back through `vt100`
+//! (as `tests/e2e.rs` does), drawn cell by cell the way a terminal draws them. The tarae is the `shot`
+//! profile's, built first (release's behavior; incremental, so seconds after an edit).
 //!
 //! Keys are sent in order, 0.35 s apart (`\r` = Enter, `\t` = Tab, `\x1b` = Esc, `\xHH` = any byte; everything
-//! else, Korean too, goes out as UTF-8); `@3` waits 3 s taking screen updates (a language server indexing …).
+//! else, Korean too, goes out as UTF-8); `@3` waits 3 s taking screen updates; `@?ready` waits until `ready` is
+//! on screen (a language server indexing …) — at most 120 s, or `@30?ready` 30.
 //!
 //! Environment:
 //! - `TARAE_SHOT_XDG` — config home (`tarae/config.toml` under it; default `/tmp/tarae-shot/xdg`). Point it at
@@ -14,7 +16,7 @@
 //! - `TARAE_SHOT_FILES` (default `src/transaction.rs src/selection.rs`), `TARAE_SHOT_CWD` (default the repo),
 //!   `TARAE_SHOT_COLS`/`TARAE_SHOT_ROWS` (default 112×30).
 //! - `TARAE_SHOT_REPLAY=<file>` — draw terminal bytes recorded elsewhere instead of running tarae.
-//! - `TARAE_SHOT_BIN` — another tarae binary (absolute; a saved "before" build for a before/after).
+//! - `TARAE_SHOT_BIN` — another tarae binary (absolute; a saved "before" build for a before/after), not built.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -90,10 +92,12 @@ fn cvt(rc: libc::c_int) -> io::Result<libc::c_int> {
 
 fn drive(vt: &mut Vt, keys: &[String], state: &Path, cols: u16, rows: u16) -> Result<()> {
     let root = root();
-    let bin = folder("TARAE_SHOT_BIN", std::env::var_os("TARAE_SHOT_BIN"), false)?
-        .unwrap_or_else(|| root.join("target/release/tarae"));
+    let bin = match folder("TARAE_SHOT_BIN", std::env::var_os("TARAE_SHOT_BIN"), false)? {
+        Some(bin) => bin,
+        None => build_shot(&root)?,
+    };
     if !bin.is_file() {
-        return Err(format!("{} not found — cargo build --release first", bin.display()));
+        return Err(format!("{} not found", bin.display()));
     }
     let files =
         std::env::var("TARAE_SHOT_FILES").unwrap_or_else(|_| "src/transaction.rs src/selection.rs".into());
@@ -161,8 +165,32 @@ fn drive(vt: &mut Vt, keys: &[String], state: &Path, cols: u16, rows: u16) -> Re
             }
         }
     };
+    // Until `text` is on screen (whole frames — `Vt::feed`) or `max` seconds pass
+    let pump_until = |vt: &mut Vt, text: &str, max: f64| -> bool {
+        let end = Instant::now() + Duration::from_secs_f64(max);
+        loop {
+            if vt.parser.screen().contents().contains(text) {
+                return true;
+            }
+            let Some(left) = end.checked_duration_since(Instant::now()) else { return false };
+            match rx.recv_timeout(left.min(Duration::from_millis(100))) {
+                Ok(chunk) => vt.feed(&chunk),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => return false,
+            }
+        }
+    };
     pump(vt, 1.2);
     for k in keys {
+        if let Some((max, text)) = wait_key(k) {
+            let t = Instant::now();
+            if pump_until(vt, text, max) {
+                eprintln!("shot: {text:?} on screen after {:.1}s", t.elapsed().as_secs_f64());
+            } else {
+                eprintln!("shot: {text:?} not on screen after {max}s — taking the shot as it is");
+            }
+            continue;
+        }
         if let Some(secs) = k.strip_prefix('@').and_then(|s| s.parse::<f64>().ok()) {
             pump(vt, secs);
             continue;
@@ -173,6 +201,31 @@ fn drive(vt: &mut Vt, keys: &[String], state: &Path, cols: u16, rows: u16) -> Re
     pump(vt, 0.6);
     quit(&mut master, &mut child, &rx);
     Ok(())
+}
+
+/// The longest `@?text` waits unless it says (`@30?text`).
+const WAIT_MAX: f64 = 120.0;
+
+/// `@?text` / `@30?text`: wait until `text` is on screen — at most `WAIT_MAX` seconds, or the ones given.
+fn wait_key(key: &str) -> Option<(f64, &str)> {
+    let (secs, text) = key.strip_prefix('@')?.split_once('?')?;
+    let max = if secs.is_empty() { WAIT_MAX } else { secs.parse().ok()? };
+    (!text.is_empty()).then_some((max, text))
+}
+
+/// The `shot` profile's tarae, built now (`Cargo.toml`: release's behavior, built incrementally without
+/// LTO — seconds after an edit where `--release` takes over a minute).
+fn build_shot(root: &Path) -> Result<PathBuf> {
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let st = Command::new(cargo)
+        .args(["build", "--quiet", "--profile", "shot", "--bin", "tarae"])
+        .current_dir(root)
+        .status()
+        .map_err(|e| format!("cargo: {e}"))?;
+    if !st.success() {
+        return Err("building the shot profile failed".into());
+    }
+    Ok(root.join("target/shot/tarae"))
 }
 
 /// tarae's environment in the shot: a color terminal, its own config and state. An inherited `NO_COLOR`
@@ -521,6 +574,12 @@ mod tests {
 
     #[test]
     fn only_whole_frames_are_drawn() {
+        assert_eq!(wait_key("@?ready"), Some((WAIT_MAX, "ready")));
+        assert_eq!(wait_key("@30?a b"), Some((30.0, "a b")));
+        assert_eq!(
+            (wait_key("@3"), wait_key("@?"), wait_key("@x?y"), wait_key("?y")),
+            (None, None, None, None)
+        );
         let mut vt = Vt { parser: vt100::Parser::new(2, 10, 0), held: Vec::new() };
         vt.feed(b"\x1b[?2026hab\x1b[?2026l\x1b[?2026hcd");
         assert_eq!(vt.parser.screen().contents(), "ab");

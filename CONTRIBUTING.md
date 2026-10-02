@@ -16,7 +16,8 @@ You need Rust 1.90+ and a C compiler (grammars are compiled from C).
 
 ```sh
 cargo run -- path/to/file                # try it
-cargo test                               # unit + key-sequence + screen snapshot + e2e tests, performance budgets
+cargo test                               # unit + key-sequence + screen snapshot + e2e tests (opt-level 0: quick to build)
+cargo perf                               # the performance budgets, in an optimized build
 cargo test --test e2e                    # just the end-to-end tests (the real binary in a pseudo-terminal)
 cargo live                               # live runs with the real rust-analyzer, cargo and claude (see Tests)
 cargo test --features bundled-grammars   # also exercises the bundled-grammar path
@@ -24,9 +25,11 @@ cargo clippy --all-targets               # must stay at 0 warnings
 cargo fmt                                # rustfmt.toml: max_width = 110
 ```
 
-Before sending a change, all of `cargo fmt`, `cargo clippy --all-targets`, and `cargo test` must be clean. The test
-suite includes performance budgets (a key → frame on a 200k-line file must stay under 16 ms), so a slow change fails
-a test, not just a benchmark. On a slow shared machine, `TARAE_PERF_SLACK=3` multiplies the budget (CI does this).
+Before sending a change, all of `cargo fmt`, `cargo clippy --all-targets`, `cargo test` and `cargo perf` must be
+clean. `cargo perf` runs the performance budgets (a key → frame on a 200k-line file must stay under 16 ms), so a slow
+change fails a test, not just a benchmark. They need an optimized build: `cargo test` builds at opt-level 0 for a
+quick edit-and-test loop, and there they skip themselves, saying so. On a slow shared machine,
+`TARAE_PERF_SLACK=3` multiplies the budget (CI does this).
 
 [CI](.github/workflows/ci.yml) runs the same checks when started by hand (Actions → CI → Run workflow) — fmt,
 clippy (warnings are errors), and tests on Linux and macOS, with and without bundled grammars — plus a build on the
@@ -243,14 +246,15 @@ is committed only **after you've looked at it in a screenshot** and polished it:
 jitter when state changes, empty and failure states.
 
 ```sh
-cargo build --release
 TARAE_SHOT_XDG=/tmp/empty-config TARAE_BACKGROUND=dark cargo xtask shot out.png 'keys to send'
 ```
 
-`TARAE_SHOT_XDG` should point at an empty config so your own settings don't leak in, and `TARAE_BACKGROUND=dark|light`
-picks the theme (the virtual terminal can't answer the background-color query). Session, recent files, and undo
-history go to a fresh temp dir, never yours; `@3` among the keys waits 3 s (a language server indexing). The
-other knobs are listed at the top of [`xtask/src/shot.rs`](xtask/src/shot.rs).
+The shot builds tarae's `shot` profile first — release's behavior, built incrementally without LTO, so a shot after
+an edit takes seconds rather than a release build's minute. `TARAE_SHOT_XDG` should point at an empty config so
+your own settings don't leak in, and `TARAE_BACKGROUND=dark|light` picks the theme (the virtual terminal can't
+answer the background-color query). Session, recent files, and undo history go to a fresh temp dir, never yours;
+`@3` among the keys waits 3 s, `@?ready` until `ready` is on screen (a language server indexing). The other knobs
+are listed at the top of [`xtask/src/shot.rs`](xtask/src/shot.rs).
 
 The design language:
 

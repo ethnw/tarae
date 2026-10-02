@@ -33,13 +33,31 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
+# Screenshots (`cargo xtask shot` builds it): release's behavior (its grammars, no debug assertions) in a
+# fraction of its build time — no LTO, many codegen units, incremental. Not for measuring speed.
+[profile.shot]
+inherits = "release"
+opt-level = 1
+lto = false
+codegen-units = 256
+incremental = true
+strip = false
+
 # Optimize dependencies (tree-sitter C·regex·ropey) even in debug builds — our own code keeps fast compiles.
 [profile.dev.package."*"]
 opt-level = 3
 
-# Tests at opt-level 1 — so the perf budget test (key → frame 16 ms) measures near-real cost rather than
-# debug-code cell loops (a frame is 7–9 ms at level 0, ~1 ms at level 1).
+# Tests at opt-level 0 with line tables only: an edit → test loop rebuilds in ~2 s, not ~8.5 s (measured
+# 2026-10-02: LLVM re-optimizing a big module's unit was the cost; linking 0.1 s). The perf budgets skip
+# themselves there — `cargo perf` runs them in `perf` below.
 [profile.test]
+opt-level = 0
+debug = "line-tables-only"
+
+# The perf budgets (key → frame 16 ms …) measure near-real cost: opt-level 1, not debug-code cell loops (a
+# frame is 7–9 ms at level 0, ~1 ms at level 1). `cargo perf`.
+[profile.perf]
+inherits = "test"
 opt-level = 1
 
 

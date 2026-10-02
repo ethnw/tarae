@@ -59,6 +59,9 @@ jobs:
           git config --global user.name ci
           git config --global user.email ci@example.com
       - run: cargo test --locked --features "${{ matrix.features }}"
+      # The perf budgets skip themselves at the test profile's opt-level 0 — here in an optimized build
+      # (`cargo perf` written out: the alias ends in `--`, so flags after it would go to the tests)
+      - run: cargo test --locked --features "${{ matrix.features }}" --profile perf --bin tarae -- perf_budget
 
   msrv:
     runs-on: ubuntu-latest

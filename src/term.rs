@@ -8979,10 +8979,48 @@ mod tests {
         Duration::from_millis(16) * slack.max(1)
     }
 
+    /// The budgets measure an optimized build: the test profile builds at opt-level 0 (a fast edit-test
+    /// loop), where a key costs several times as much — there a budget skips itself, saying so past libtest's
+    /// capture (`test_results::SELF_SKIP`), and `cargo perf` runs them at opt-level 1.
+    fn unoptimized(test: &str) -> bool {
+        if cfg!(tarae_optimized) {
+            return false;
+        }
+        let line = format!(
+            "{}term::tests::{test} — built at opt-level 0 (the test profile); `cargo perf` runs the budgets\n",
+            crate::test_results::SELF_SKIP
+        );
+        let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+        true
+    }
+
+    /// Every budget skips itself by its own name at opt-level 0 (else the skip lands on another test's row).
+    #[test]
+    fn every_budget_says_its_own_name_when_it_skips() {
+        let src = include_str!("term.rs");
+        let mut n = 0;
+        for (i, line) in src.lines().enumerate() {
+            let Some(name) = line.trim().strip_prefix("fn perf_budget_").and_then(|r| r.strip_suffix("() {"))
+            else {
+                continue;
+            };
+            let next = src.lines().nth(i + 1).unwrap_or_default();
+            assert!(
+                next.contains(&format!("unoptimized(\"perf_budget_{name}\")")),
+                "perf_budget_{name}: {next}"
+            );
+            n += 1;
+        }
+        assert!(n >= 11, "found {n}");
+    }
+
     /// Performance budget: in a 200k-line file, key input → finished frame within one frame (16 ms, 60 Hz).
     /// Held even for debug builds — release is much faster.
     #[test]
     fn perf_budget_key_to_frame_on_large_file() {
+        if unoptimized("perf_budget_key_to_frame_on_large_file") {
+            return;
+        }
         let budget = frame_budget();
         let text: String =
             (0..200_000).map(|i| format!("line {i} 타래 fn main() {{ let x = {i}; }}\n")).collect();
@@ -9010,6 +9048,9 @@ mod tests {
     /// for the ones on screen and the one under the cursor).
     #[test]
     fn perf_budget_with_many_notes() {
+        if unoptimized("perf_budget_with_many_notes") {
+            return;
+        }
         let budget = frame_budget();
         let dir = std::env::temp_dir().join(format!("tarae-perf-notes-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -9051,6 +9092,9 @@ mod tests {
     /// that gets the whole text): plugins have their own thread, and asking one copies nothing.
     #[test]
     fn perf_budget_with_a_runaway_plugin() {
+        if unoptimized("perf_budget_with_a_runaway_plugin") {
+            return;
+        }
         let budget = frame_budget();
         let dir = std::env::temp_dir().join(format!("tarae-perf-plugin-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -9095,6 +9139,9 @@ mod tests {
     /// must not read every sibling method above the screen on every frame.
     #[test]
     fn perf_budget_with_locals_in_a_huge_item() {
+        if unoptimized("perf_budget_with_locals_in_a_huge_item") {
+            return;
+        }
         let budget = frame_budget();
         let Ok(lang) = crate::syntax::Loader::global().load(crate::syntax::spec("rust").unwrap()) else {
             return;
@@ -9302,6 +9349,9 @@ mod tests {
     /// halving, and copying them all a line down (`C`) sorts and merges once — both were per cursor.
     #[test]
     fn perf_budget_with_20k_cursors() {
+        if unoptimized("perf_budget_with_20k_cursors") {
+            return;
+        }
         let budget = frame_budget();
         let text: String = (0..20_000).map(|i| format!("let x{i} = {i};\n// line {i}\n")).collect();
         let mut ed = Editor::new(Config::default());
@@ -9334,6 +9384,9 @@ mod tests {
     /// Same budget with syntax highlighting on — a big Rust file (only on machines with the grammar).
     #[test]
     fn perf_budget_with_syntax_highlighting() {
+        if unoptimized("perf_budget_with_syntax_highlighting") {
+            return;
+        }
         let budget = frame_budget();
         let Ok(lang) = crate::syntax::Loader::global().load(crate::syntax::spec("rust").unwrap()) else {
             return;
@@ -9409,6 +9462,9 @@ mod tests {
     /// built when a folder opens or closes, not on every frame.
     #[test]
     fn perf_budget_side_panel_with_200k_files() {
+        if unoptimized("perf_budget_side_panel_with_200k_files") {
+            return;
+        }
         let budget = frame_budget();
         let root = PathBuf::from("/nowhere/big");
         let rels: Vec<String> = (0..20)
@@ -9436,6 +9492,9 @@ mod tests {
     /// best matches out as a tree.
     #[test]
     fn perf_budget_file_picker_typing_in_200k_files() {
+        if unoptimized("perf_budget_file_picker_typing_in_200k_files") {
+            return;
+        }
         let budget = frame_budget();
         let root = PathBuf::from("/nowhere/big");
         let items: Vec<crate::picker::Item> = (0..20)
@@ -9485,6 +9544,9 @@ mod tests {
     /// built then, once).
     #[test]
     fn perf_budget_git_tab_with_20k_changes() {
+        if unoptimized("perf_budget_git_tab_with_20k_changes") {
+            return;
+        }
         let budget = frame_budget();
         let root = PathBuf::from("/nowhere/repo");
         let porcelain: String = (0..20_000).map(|i| format!("? new/d{}/f{i}.txt\0", i / 100)).collect();
@@ -9513,6 +9575,9 @@ mod tests {
     /// colored lines, as the reader thread sends it) processed and drawn.
     #[test]
     fn perf_budget_terminal_flood() {
+        if unoptimized("perf_budget_terminal_flood") {
+            return;
+        }
         let budget = frame_budget();
         let mut ed = Editor::new(Config::default());
         ed.terminal_run(vec!["/bin/sh".into(), "-c".into(), "sleep 30".into()], Vec::new());
@@ -9550,6 +9615,9 @@ mod tests {
     /// Same budget moving between merge conflicts in a 200k-line file (500 of them, the card on each).
     #[test]
     fn perf_budget_conflicts_in_a_huge_file() {
+        if unoptimized("perf_budget_conflicts_in_a_huge_file") {
+            return;
+        }
         let budget = frame_budget();
         let mut text = String::new();
         for i in 0..200_000 {

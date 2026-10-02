@@ -15,6 +15,12 @@ fn main() {
     embed(&manifest.join("runtime/queries"), &["scm"], "QUERIES", &out.join("queries.rs"));
     embed(&manifest.join("runtime/packs"), &["toml", "scm"], "PACKS", &out.join("packs.rs"));
     grammars(&manifest, &out);
+    // The perf budgets measure an optimized build (`cargo perf`); the test profile's opt-level 0 (a fast
+    // edit-test loop) has them skip themselves
+    println!("cargo::rustc-check-cfg=cfg(tarae_optimized)");
+    if std::env::var("OPT_LEVEL").is_ok_and(|o| o != "0") {
+        println!("cargo::rustc-cfg=tarae_optimized");
+    }
 }
 
 /// Grammar names to embed (`core` from languages.toml `[[grammar]]`, `dev` in debug builds, plus `bundle` if
