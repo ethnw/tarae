@@ -267,7 +267,12 @@ pub fn render(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io::
         frame.clear();
         render_frame(editor, &mut frame, w, h)?;
     }
-    // What was drawn may want injected languages made there (a buffer scrolled to, opened)
+    // A place shown where its injected languages aren't made yet (jumped to): made now, drawn again
+    if editor.inject_shown_now() {
+        frame.clear();
+        render_frame(editor, &mut frame, w, h)?;
+    }
+    // What was drawn may want injected languages made there (around it, a buffer opened)
     editor.schedule_parses();
     out.write_all(&frame)
 }

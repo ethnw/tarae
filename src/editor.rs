@@ -1860,6 +1860,18 @@ impl Editor {
     }
 
     /// Starts a background parse for each edited document not already parsing (at the end of every event).
+    /// Injected languages made right away where the frame just drawn showed a buffer they aren't made for
+    /// yet (a place jumped to) — the frame is drawn again with them. Tells whether any were.
+    pub fn inject_shown_now(&mut self) -> bool {
+        let mut any = false;
+        for doc in self.docs.iter_mut().filter(|d| !d.loading) {
+            if let Some(syn) = doc.syntax.as_mut() {
+                any |= syn.inject_shown_now(&doc.text, crate::syntax::SHOWN_NOW_BUDGET);
+            }
+        }
+        any
+    }
+
     pub fn schedule_parses(&mut self) {
         for doc in &mut self.docs {
             let Some(syn) = doc.syntax.as_mut() else { continue };
@@ -2715,10 +2727,20 @@ mod tests {
         };
         assert_eq!(rust_at(&ed), [3], "the block in view, with the first tree");
         ed.goto_line(1008);
-        crate::term::render(&mut ed, &mut Vec::new(), 100, 30).unwrap();
-        // The frame itself started it — no event has to come first
-        assert!(ed.doc().syntax.as_ref().unwrap().in_flight, "a parse for what the frame showed");
-        settle_until(&mut ed, |ed| parsed(ed) && rust_at(ed).contains(&1011));
+        let mut frame = Vec::new();
+        crate::term::render(&mut ed, &mut frame, 100, 30).unwrap();
+        // Its first frame has it already: made right there for what it showed, then drawn again
+        assert_eq!(rust_at(&ed), [3, 1011], "the block jumped to, no parse waited for");
+        let mut screen = vt100::Parser::new(30, 100, 0);
+        screen.process(&frame);
+        let rows: Vec<String> = screen.screen().rows(0, 100).collect();
+        let row = rows.iter().position(|r| r.contains("fn bottom")).expect("the block on screen");
+        let col = rows[row].find("fn bottom").unwrap() as u16;
+        let fg = |c: u16| screen.screen().cell(row as u16, c).unwrap().fgcolor();
+        assert_ne!(fg(col), fg(col + 3), "`fn` colored as Rust, not as the code block");
+        // The lines around it next, in the background — the frame itself started it
+        assert!(ed.doc().syntax.as_ref().unwrap().in_flight, "a parse for around what the frame showed");
+        settle_until(&mut ed, parsed);
         assert_eq!(rust_at(&ed), [3, 1011], "the one scrolled to and the one before, not the one in between");
         std::fs::remove_dir_all(&dir).ok();
     }

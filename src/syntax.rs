@@ -639,6 +639,29 @@ impl Syntax {
         }
     }
 
+    /// What a frame just showed outside where the layers are made, made right here — only that, no lines
+    /// around it (a background parse adds those next) and within `budget`: a place jumped to is colored from
+    /// its first frame. Only while the tree is up to date (no edit since its parse, none running); tells
+    /// whether it did.
+    pub fn inject_shown_now(&mut self, text: &Rope, budget: std::time::Duration) -> bool {
+        if self.dirty || self.in_flight || self.tree.is_none() || !self.wants.get() {
+            return false;
+        }
+        let Some(covered) = self.covered.clone() else { return false };
+        let shown = self.asked.borrow().clone();
+        if shown.iter().all(|r| within(&covered, r)) {
+            return false;
+        }
+        let mut job = self.start_parse(text);
+        job.near = Some(covered.into_iter().chain(shown).collect());
+        (job.near_lines, job.budget) = (0, budget);
+        let generation = job.generation;
+        self.finish_parse(generation, job.run());
+        // The lines around it next
+        self.wants.set(true);
+        true
+    }
+
     /// Whether a parse should run though no edit came: something shown needs injections not made yet.
     pub fn wants_injections(&self) -> bool {
         self.wants.get()
@@ -647,7 +670,7 @@ impl Syntax {
     /// Starts a parse — returns the input to send to the worker thread.
     pub fn start_parse(&mut self, text: &Rope) -> ParseJob {
         self.in_flight = true;
-        self.dirty = false;
+        let edited = std::mem::replace(&mut self.dirty, false);
         self.pending_edits.clear();
         self.wants.set(false);
         // Where to inject: around the last few places shown, what was shown since the last parse latest
@@ -668,6 +691,7 @@ impl Syntax {
             text: text.clone(),
             old: self.tree.clone(),
             old_layers: self.layers.clone(),
+            edited,
             lang: self.lang.clone(),
             generation: self.generation,
             near,
@@ -718,6 +742,8 @@ pub struct ParseJob {
     old: Option<Tree>,
     /// The layers so far, edited along — the untouched ones are reused.
     old_layers: Arc<Vec<Layer>>,
+    /// Whether the text changed since `old` was parsed (else it's the tree, for the injections only).
+    edited: bool,
     lang: Arc<LangData>,
     pub generation: u64,
     /// Inject only around these (`None`: everywhere).
@@ -857,10 +883,15 @@ impl ParseJob {
     /// injection query asked only where the text or the tree changed and what's newly near.
     pub fn run(self) -> Parsed {
         let mut parser = Parser::new();
-        let tree = parser
-            .set_language(&self.lang.language)
-            .ok()
-            .and_then(|_| parse_rope(&mut parser, &self.text, self.old.as_ref(), None));
+        let tree = match &self.old {
+            // Nothing to parse again (a first reparse of a tree costs as much as a big edit's: 5 ms on a
+            // 60 KB Markdown file)
+            Some(old) if !self.edited => Some(old.clone()),
+            _ => parser
+                .set_language(&self.lang.language)
+                .ok()
+                .and_then(|_| parse_rope(&mut parser, &self.text, self.old.as_ref(), None)),
+        };
         let covered = self.near.map(|near| around(&self.text, near, self.near_lines));
         let (mut layers, mut reused, mut found) = (Vec::new(), (0, 0, 0), Vec::new());
         if let Some(tree) = &tree {
@@ -985,6 +1016,8 @@ fn meets(near: &[std::ops::Range<usize>], start: usize, end: usize) -> bool {
     near.get(from).is_some_and(|c| c.start <= end)
 }
 const MAX_DEPTH: usize = 3;
+/// Time a frame may spend making the layers of a place jumped to (`Syntax::inject_shown_now`).
+pub const SHOWN_NOW_BUDGET: std::time::Duration = std::time::Duration::from_millis(4);
 const INJECT_BUDGET: std::time::Duration = std::time::Duration::from_millis(80);
 
 /// A match of an injection query, kept from one parse to the next.
@@ -2277,6 +2310,44 @@ mod tests {
         highlights(&syn, &text, at(&text, 1800), &mut QueryCursor::new());
         assert!(!syn.wants_injections(), "the place moved along");
         assert!(comment_lines(&syn, &text).contains(&1800));
+    }
+
+    /// A place jumped to gets its layers right away — the lines shown only, what was made before kept, the
+    /// lines around them left to a parse after — but not while a parse runs (its landing would lose them)
+    /// or an edit waits for one.
+    #[test]
+    fn a_place_jumped_to_is_injected_right_away() {
+        let Ok(rust) = Loader::global().load(spec("rust").unwrap()) else { return };
+        let mut text = commented(2000);
+        let mut syn = Syntax::new(rust);
+        syn.near_lines = 5;
+        let at = |text: &Rope, line: usize| text.line_to_byte(line)..text.line_to_byte(line + 10);
+        highlights(&syn, &text, at(&text, 100), &mut QueryCursor::new());
+        parse_now(&mut syn, &text);
+        let budget = std::time::Duration::MAX;
+        // Shown while a parse runs: not now
+        let job = syn.start_parse(&text);
+        highlights(&syn, &text, at(&text, 1500), &mut QueryCursor::new());
+        assert!(!syn.inject_shown_now(&text, budget));
+        syn.finish_parse(job.generation, job.run());
+        // An edit waiting: not now
+        highlights(&syn, &text, at(&text, 1000), &mut QueryCursor::new());
+        let edits = crate::transaction::Transaction::new(vec![crate::transaction::Change::insert(0, " ")])
+            .apply(&mut text, false);
+        syn.edit(&edits.iter().map(|e| e.ts).collect::<Vec<_>>());
+        assert!(!syn.inject_shown_now(&text, budget));
+        parse_now(&mut syn, &text);
+        // Up to date
+        highlights(&syn, &text, at(&text, 1800), &mut QueryCursor::new());
+        assert!(syn.inject_shown_now(&text, budget));
+        let lines = comment_lines(&syn, &text);
+        assert!((1800..1810).all(|l| lines.contains(&l)), "the lines shown");
+        assert!(!lines.contains(&1797) && !lines.contains(&1812), "not the lines around: {lines:?}");
+        assert!(lines.contains(&95) && lines.contains(&1505), "what was made before, kept");
+        assert!(syn.wants_injections(), "the lines around next");
+        parse_now(&mut syn, &text);
+        let lines = comment_lines(&syn, &text);
+        assert!(lines.contains(&1795) && lines.contains(&1814), "{lines:?}");
     }
 
     /// Around what's shown: whole lines, so many more each way, merged; and a layer touching it meets it.
