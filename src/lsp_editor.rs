@@ -238,6 +238,22 @@ impl Editor {
         }
         let Some(path) = doc.path.clone() else { return };
         let Some(spec) = crate::syntax::detect(&path) else { return };
+        // No project for a server that needs one: none started (said once per folder, in the log — not a
+        // message on screen at every open)
+        if let Some(markers) = lsp::project_markers(&spec.name)
+            && lsp::root_by_markers(&path, markers).is_none()
+        {
+            let dir = path.parent().unwrap_or(&path).display().to_string();
+            if self.lsp.missing.insert(format!("{}:no project:{dir}", spec.name)) {
+                let msg = format!(
+                    "no {} above {dir} — no language server for {} files there (it needs a project)",
+                    markers.join(" or "),
+                    spec.name
+                );
+                crate::log::line("tarae", "info", &msg);
+            }
+            return;
+        }
         let attached: Vec<String> =
             doc.lsp.clients().filter_map(|c| self.client(c).map(|c| c.name.clone())).collect();
         let has_main = doc.lsp.client.is_some();
@@ -2202,6 +2218,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("main.rs");
         std::fs::write(&file, src).unwrap();
+        // (a cargo project: rust's server isn't started for a lone .rs)
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"t\"\n").unwrap();
         let log = dir.join("sent.log");
         let cfg = format!(
             "[lsp.fake]\ncommand = \"sh\"\nargs = [\"-c\", \"cat > '{}'\"]\n[lang.rust]\nlsp = [\"fake\"]\n",
@@ -2259,6 +2277,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("main.rs");
         std::fs::write(&file, "fn main() {\n    let x = 1;\n}\n").unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"t\"\n").unwrap();
         let (main_log, side_log) = (dir.join("main.log"), dir.join("side.log"));
         let cfg = format!(
             "[lsp.fake]\ncommand = \"sh\"\nargs = [\"-c\", \"cat > '{}'\"]\nexcept = [\"format\"]\n\
@@ -2337,6 +2356,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("main.rs");
         std::fs::write(&file, "fn main() {\n    \n}\n").unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"t\"\n").unwrap();
         let cat =
             |n: &str| format!("command = \"sh\"\nargs = [\"-c\", \"cat > '{}'\"]\n", dir.join(n).display());
         let cfg = format!(
@@ -2447,6 +2467,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("main.rs");
         std::fs::write(&file, "fn main() {\n    let x = 1;\n}\n").unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"t\"\n").unwrap();
         let cat =
             |n: &str| format!("command = \"sh\"\nargs = [\"-c\", \"cat > '{}'\"]\n", dir.join(n).display());
         let cfg = format!(
@@ -3133,6 +3154,39 @@ mod tests {
         std::fs::remove_dir_all(file.parent().unwrap()).ok();
     }
 
+    /// A `.rs` with no cargo project above it gets no server — rust-analyzer would only say "Failed to discover
+    /// workspace" — and nothing on screen says so (the log does); one under a `Cargo.toml`, or a
+    /// `rust-project.json`, gets its server.
+    #[test]
+    fn a_lone_rust_file_gets_no_server() {
+        let dir = std::env::temp_dir().join(format!("tarae-lsp-lone-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        for d in ["lone", "cargo/src", "json"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        std::fs::write(dir.join("cargo/Cargo.toml"), "[package]\nname = \"t\"\n").unwrap();
+        std::fs::write(dir.join("json/rust-project.json"), "{}\n").unwrap();
+        let cfg = format!(
+            "[lsp.fake]\ncommand = \"sh\"\nargs = [\"-c\", \"cat > '{}'\"]\n[lang.rust]\nlsp = [\"fake\"]\n",
+            dir.join("sent.log").display()
+        );
+        let (config, w) = crate::config::parse(&cfg);
+        assert!(w.is_empty(), "{w:?}");
+        let mut ed = Editor::new(config);
+        for f in ["lone/calc.rs", "cargo/src/main.rs", "json/lib.rs"] {
+            std::fs::write(dir.join(f), "fn main() {}\n").unwrap();
+        }
+        ed.open(&dir.join("lone/calc.rs")).unwrap();
+        assert!(ed.doc().lsp.client.is_none() && ed.lsp.clients.is_empty(), "no server for a lone file");
+        assert!(ed.status.is_none(), "nothing on screen: {:?}", ed.status);
+        ed.open(&dir.join("cargo/src/main.rs")).unwrap();
+        assert!(ed.doc().lsp.client.is_some(), "a cargo project: its server");
+        ed.open(&dir.join("json/lib.rs")).unwrap();
+        assert!(ed.doc().lsp.client.is_some(), "rust-project.json: its server");
+        assert_eq!(ed.lsp.clients.len(), 2, "one per project");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// A language whose server isn't installed: a faint dot, no toast (the log says what was tried).
     #[test]
     fn server_not_installed() {
@@ -3140,6 +3194,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("main.rs");
         std::fs::write(&file, "fn main() {}\n").unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"t\"\n").unwrap();
         let (config, w) = crate::config::parse(
             "[lsp.broken]\ncommand = \"tarae-no-such-server\"\n[lang.rust]\nlsp = [\"broken\"]\n",
         );

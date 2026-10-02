@@ -221,12 +221,12 @@ fn main() -> Result<()> {
         editor.set_error(format!("config: {}", warnings.join("; ")));
     }
     editor.disk_watch();
-    editor.agent_start();
+    // (Claude Code's IDE connection opens with the first `space c` — no lock file in ~/.claude/ide before)
     let result = term::run(&mut editor);
     editor.save_session();
     // The last saves' undo history is still being written on workers — exiting or exec'ing cuts it off
     editor.undo_flush();
-    editor.agent = None; // remove the lock file
+    editor.agent = None; // remove our lock file (only ours)
     if result.is_ok()
         && let Some(bin) = editor.restart.as_ref().and_then(|r| r.ready()).map(PathBuf::from)
     {

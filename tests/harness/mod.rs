@@ -138,9 +138,14 @@ impl Sandbox {
         fs::write(self.home().join(".config/tarae/config.toml"), content).unwrap();
     }
 
-    /// Claude Code IDE lock files tarae wrote (`$CLAUDE_CONFIG_DIR/ide/*.lock`).
+    /// Where Claude Code IDE lock files go (`$CLAUDE_CONFIG_DIR/ide`).
+    pub fn claude_ide(&self) -> PathBuf {
+        self.root.join("claude/ide")
+    }
+
+    /// Claude Code IDE lock files there (`$CLAUDE_CONFIG_DIR/ide/*.lock`).
     pub fn lock_files(&self) -> Vec<PathBuf> {
-        let Ok(rd) = fs::read_dir(self.root.join("claude/ide")) else { return Vec::new() };
+        let Ok(rd) = fs::read_dir(self.claude_ide()) else { return Vec::new() };
         rd.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "lock")).collect()
     }
 

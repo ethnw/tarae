@@ -13,6 +13,8 @@
 //!   list (if it's empty or holds the last walk-through — `]q`). Then scrolling the chat stops the tour and
 //!   moves the editor to the first place the chat shows (`reading`, after each frame).
 //! - Files follow opened are previews: unedited ones close when it moves on (they stay once the turn ends).
+//!   Only files in the project (`in_project`): what Claude reads elsewhere (its memory, a temp file) shows on
+//!   the card but is never opened, nor put in the list.
 //! - The user wins: moving the cursor or switching files in the editor pauses following until `C-f` or
 //!   the next question. `C-o` goes back to where you were before the turn (one jump point per turn).
 //! - The card (drawn by `term::draw_thought_card`) shows what Claude is doing and its latest words —
@@ -290,7 +292,8 @@ pub fn on_words(ed: &mut Editor, all: bool) {
         .filter_map(|(k, (_, at, why))| {
             let (_, m) = mentions(at, false).into_iter().find(|m| matches!(m.1, Mention::Place(..)))?;
             let Mention::Place(path, lines) = m else { return None };
-            path.is_file().then(|| (k, Stop { path, lines, why: why.clone(), shown: true }))
+            let ours = path.is_file() && in_project(ed, &path);
+            ours.then(|| (k, Stop { path, lines, why: why.clone(), shown: true }))
         })
         .collect();
     let taken = tags.len();
@@ -335,7 +338,8 @@ pub fn on_words(ed: &mut Editor, all: bool) {
 /// `lines` of `path` as a stop of the walk-through — the editor there, unless `paced` and it moved less
 /// than PACE ago.
 fn look_at(ed: &mut Editor, path: &Path, lines: Range<usize>, why: String, paced: bool) {
-    if !path.is_file() {
+    // (nor does a place outside the project go into the list)
+    if !path.is_file() || !in_project(ed, path) {
         return;
     }
     let Some(f) = follow(ed) else { return };
@@ -616,9 +620,17 @@ pub fn reading(ed: &mut Editor) -> bool {
 /// The list a walk-through leaves.
 const TOUR: &str = "Claude's walk-through";
 
-/// Moves the editor there (when following and the user hasn't taken over).
+/// Whether `path` is in the project (`Editor::project_root` — the folder tarae started in, links resolved):
+/// follow goes nowhere else — a file Claude reads elsewhere (its memory under `~/.claude`, a temp file)
+/// isn't opened; the card still says what it reads.
+fn in_project(ed: &Editor, path: &Path) -> bool {
+    let root = ed.project_root.as_deref();
+    root.is_some_and(|root| std::fs::canonicalize(path).is_ok_and(|p| p.starts_with(root)))
+}
+
+/// Moves the editor there (when following and the user hasn't taken over) — in the project only.
 fn go(ed: &mut Editor, path: &Path, line: usize) {
-    if !ed.chat.as_ref().is_some_and(|c| c.follow.active()) || !path.is_file() {
+    if !ed.chat.as_ref().is_some_and(|c| c.follow.active()) || !path.is_file() || !in_project(ed, path) {
         return;
     }
     let already = ed.docs.iter().any(|d| d.path.as_deref() == Some(path));

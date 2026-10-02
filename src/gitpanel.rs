@@ -473,9 +473,11 @@ impl Editor {
                     if let Some(s) = ed.sidebar.as_mut() {
                         s.focus = false;
                     }
+                    // A new message: typed at once. Amending: the last message is there to change, not to
+                    // type over the top of — normal mode
                     if draft {
                         ed.commit_draft();
-                    } else {
+                    } else if !amend {
                         ed.mode = crate::editor::Mode::Insert;
                     }
                 }

@@ -62,6 +62,14 @@ impl Terminal {
         let _ = self.writer.send(bytes);
     }
 
+    /// The program's output onto the screen — and the answers to what it asks the terminal.
+    fn take(&mut self, bytes: &[u8]) {
+        self.parser.process(bytes);
+        for reply in answers(bytes) {
+            self.send(reply.to_vec());
+        }
+    }
+
     /// The selection, first cell to last, in reading order (on the screen as it is now — it may have
     /// shrunk since).
     pub fn selected(&self) -> Option<((u16, u16), (u16, u16))> {
@@ -304,11 +312,21 @@ fn spawn(
     })
 }
 
+/// What a terminal answers to what the program asks of it in `bytes`: the Primary Device Attributes query
+/// (`CSI c` / `CSI 0 c`) — a VT220 with ANSI color, as many terminals say. Unanswered, fish waits 10 s for
+/// it before its first prompt (measured: a blank panel, then "could not read response to Primary Device
+/// Attribute query").
+fn answers(bytes: &[u8]) -> Vec<&'static [u8]> {
+    const DA1: &[u8] = b"\x1b[?62;22c";
+    let asks = |q: &[u8]| bytes.windows(q.len()).filter(|w| *w == q).count();
+    std::iter::repeat_n(DA1, asks(b"\x1b[c") + asks(b"\x1b[0c")).collect()
+}
+
 /// Output of run `generation` — kept until the terminal is in place if it comes first (the reader starts
 /// before the worker that started the program hands it over).
 fn output(ed: &mut Editor, generation: u64, bytes: &[u8]) {
     if let Some(t) = ed.terminal.as_mut().filter(|t| t.generation == generation) {
-        t.parser.process(bytes);
+        t.take(bytes);
         // What was selected has likely moved (not while it's being dragged)
         if !t.selecting {
             t.selection = None;
@@ -331,7 +349,7 @@ fn ended(ed: &mut Editor, generation: u64, code: i32) {
 /// The started terminal in place — with what it printed (and whether it ended) before.
 fn install(ed: &mut Editor, mut t: Terminal) {
     let (bytes, exited) = std::mem::take(&mut ed.terminal_early);
-    t.parser.process(&bytes);
+    t.take(&bytes);
     if let Some(code) = exited {
         t.exited = Some(code);
         t.focus = false;
@@ -586,6 +604,28 @@ mod tests {
         assert!(screen.contents().starts_with("hello tarae"), "{:?}", screen.contents());
         assert!(screen.cell(0, 6).is_some_and(|c| c.bold()), "bold");
         assert!(!t.focus, "an exited program gives the keys back");
+    }
+
+    /// A program that asks the terminal what it is (Primary Device Attributes — fish does, and waits 10 s for
+    /// the answer before its first prompt) gets an answer at once. The stand-in asks, reads the reply raw (5 s
+    /// at most) and prints it with ESC as `E`.
+    #[test]
+    fn a_program_asking_what_the_terminal_is_gets_an_answer() {
+        let (config, _) = crate::config::parse("");
+        let mut ed = Editor::new(config);
+        let script =
+            r"stty -icanon -echo min 9 time 50; printf '\033[c'; head -c 9 | tr '\033' E; printf '|'";
+        ed.terminal_run(vec!["/bin/sh".to_string(), "-c".into(), script.into()], Vec::new());
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while ed.terminal.as_ref().is_none_or(|t| t.exited.is_none()) && std::time::Instant::now() < end {
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(200)) {
+                ed.handle_event(ev);
+            }
+        }
+        let contents = ed.terminal.as_ref().unwrap().parser.screen().contents();
+        assert!(contents.contains("E[?62;22c|"), "{contents:?}");
+        assert_eq!(answers(b"x\x1b[0cy\x1b[c"), [b"\x1b[?62;22c"; 2], "both forms, each answered");
+        assert!(answers(b"\x1b[>c\x1b[?1;2c").is_empty(), "not the secondary query, nor a reply");
     }
 
     /// Output (and the end) that comes before the terminal is in place isn't lost — the reader thread starts

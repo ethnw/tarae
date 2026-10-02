@@ -1,10 +1,11 @@
 //! External agent integration (M5) — Claude Code's IDE protocol (as used by the VS Code·JetBrains·Neovim
 //! extensions).
 //!
-//! - tarae opens a WebSocket server on `127.0.0.1:<free port>` and writes
-//!   `{pid, workspaceFolders, ideName: "tarae", transport: "ws", authToken}` to `~/.claude/ide/<port>.lock`.
-//!   Run `claude` in the same folder and pick `/ide` (or launch it in a side pane with `space c` — direct
-//!   via `CLAUDE_CODE_SSE_PORT`) to attach. Auth = token (128-bit random) in the
+//! - The first `space c` opens a WebSocket server on `127.0.0.1:<free port>` and writes
+//!   `{pid, workspaceFolders, ideName: "tarae", transport: "ws", authToken}` to `~/.claude/ide/<port>.lock`
+//!   (a new file — and on the way out only that file goes, while it still holds our token; nothing else
+//!   there is ever touched). `space c` launches `claude` in a side pane, attached directly via
+//!   `CLAUDE_CODE_SSE_PORT`; a `claude` started by hand in the same folder can attach with `/ide` from then on. Auth = token (128-bit random) in the
 //!   `x-claude-code-ide-authorization` header. Bound to localhost only.
 //! - Speaks MCP (JSON-RPC 2.0) over WebSocket text frames. Tools: `openFile` · **`openDiff`** ·
 //!   `getCurrentSelection` · `getLatestSelection` · `getOpenEditors` · `getWorkspaceFolders` ·
@@ -56,6 +57,8 @@ type SelKey = (DocId, u64, Vec<(usize, usize)>);
 pub struct Agent {
     pub port: u16,
     lock: PathBuf,
+    /// The token in our lock file — it's ours to remove only while it still holds this.
+    token: String,
     /// Connection → (sender, whether `notifications/initialized` arrived — notifications only after that).
     conns: HashMap<u64, (Sender<Out>, bool)>,
     /// Queued diffs (the review view shows one at a time).
@@ -68,9 +71,19 @@ pub struct Agent {
 }
 
 impl Drop for Agent {
+    /// Our lock file goes — only ours: what's there now must hold our token (never another tarae's or a
+    /// Claude Code's lock that took the name).
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.lock);
+        if ours(&self.lock, &self.token) {
+            let _ = std::fs::remove_file(&self.lock);
+        }
     }
+}
+
+/// Whether the lock file at `lock` is the one we wrote (its token is `token`).
+fn ours(lock: &std::path::Path, token: &str) -> bool {
+    let body = std::fs::read_to_string(lock).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok());
+    body.is_some_and(|v| !token.is_empty() && v["authToken"] == token)
 }
 
 impl Agent {
@@ -97,29 +110,6 @@ fn lock_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude")))?;
     Some(base.join("ide"))
-}
-
-/// Cleans up lock files left by dead tarae instances — closing the terminal window (SIGHUP) exits without
-/// cleanup, so they pile up (measured). Leaves other IDEs' files and live tarae instances' files alone.
-fn clean_stale_locks(dir: &std::path::Path) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
-    for e in rd.flatten() {
-        let p = e.path();
-        let Some(v) = std::fs::read_to_string(&p).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        else {
-            continue;
-        };
-        if v["ideName"] != "tarae" {
-            continue;
-        }
-        let Some(pid) = v["pid"].as_i64() else { continue };
-        // SAFETY: signal 0 = sends nothing, only asks whether it's alive.
-        let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0
-            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
-        if !alive {
-            let _ = std::fs::remove_file(&p);
-        }
-    }
 }
 
 /// 128-bit random → 32 lowercase hex chars.
@@ -158,17 +148,23 @@ fn selection_result(v: Option<Value>, none: &str) -> Value {
     ))
 }
 
-/// The lock file holds the auth token — readable by the owner only.
+/// The lock file holds the auth token — readable by the owner only. A new file only: one already there
+/// (AlreadyExists) isn't ours. Whole when it appears: written aside, then linked in under its name (a link
+/// fails on a name that's taken) — a reader never finds it empty (measured: the e2e test did).
 fn write_lock(dir: &std::path::Path, lock: &std::path::Path, body: &str) -> std::io::Result<()> {
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
-    std::fs::OpenOptions::new()
+    let aside = dir.join(format!(".tarae-{}.lock.tmp", std::process::id()));
+    let written = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(0o600)
-        .open(lock)?
-        .write_all(body.as_bytes())
+        .open(&aside)
+        .and_then(|mut f| f.write_all(body.as_bytes()))
+        .and_then(|()| std::fs::hard_link(&aside, lock));
+    let _ = std::fs::remove_file(&aside);
+    written
 }
 
 fn tool(name: &str, description: &str, props: Value, required: &[&str]) -> Value {
@@ -281,24 +277,38 @@ fn serve(stream: TcpStream, token: String, conn: u64, tx: Sender<Event>) {
 }
 
 impl Editor {
-    /// At startup: opens the server, announced via a lock file (not opened if `agent.claude-code = false`).
+    /// The first `space c`: opens the server, announced via a lock file (not opened if `agent.claude-code =
+    /// false`) — nothing in `~/.claude/ide` before that. Other lock files are never touched, a dead tarae's
+    /// neither (its pid may be another program's by now).
     pub fn agent_start(&mut self) {
         if !self.config.agent_claude_code || self.agent.is_some() {
             return;
         }
-        let Ok(listener) = TcpListener::bind("127.0.0.1:0") else { return };
-        let Ok(port) = listener.local_addr().map(|a| a.port()) else { return };
         let (Some(dir), Ok(cwd)) = (lock_dir(), std::env::current_dir()) else { return };
-        clean_stale_locks(&dir);
         let token = token();
-        let lock = dir.join(format!("{port}.lock"));
-        let body = json!({ "pid": std::process::id(), "workspaceFolders": [cwd], "ideName": "tarae",
-                           "transport": "ws", "authToken": token });
-        if write_lock(&dir, &lock, &body.to_string()).is_err() {
-            return;
+        // A lock file already named for our port (one left by a program that had it before) isn't ours to
+        // overwrite: another port, a few tries
+        let mut opened = None;
+        for _ in 0..5 {
+            let Ok(listener) = TcpListener::bind("127.0.0.1:0") else { return };
+            let Ok(port) = listener.local_addr().map(|a| a.port()) else { return };
+            let lock = dir.join(format!("{port}.lock"));
+            let body = json!({ "pid": std::process::id(), "workspaceFolders": [cwd], "ideName": "tarae",
+                               "transport": "ws", "authToken": token });
+            match write_lock(&dir, &lock, &body.to_string()) {
+                Ok(()) => {
+                    opened = Some((listener, port, lock));
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(_) => return,
+            }
         }
+        let Some((listener, port, lock)) = opened else { return };
         let tx = self.events.sender();
+        let theirs = token.clone();
         std::thread::spawn(move || {
+            let token = theirs;
             static NEXT: AtomicU64 = AtomicU64::new(1);
             for stream in listener.incoming().flatten() {
                 let (token, tx) = (token.clone(), tx.clone());
@@ -309,6 +319,7 @@ impl Editor {
         self.agent = Some(Agent {
             port,
             lock,
+            token,
             conns: HashMap::new(),
             queue: VecDeque::new(),
             active_tab: None,
@@ -697,8 +708,13 @@ impl Editor {
 
     /// `space c` — launches Claude Code in a side pane and attaches (zellij·tmux), else explains how.
     pub fn agent_open_claude(&mut self) {
+        // (the server and its lock file only from the first `space c` on)
+        self.agent_start();
         let Some(a) = &self.agent else {
-            return self.set_warning("Claude Code integration is off (agent.claude-code)");
+            return self.set_warning(match self.config.agent_claude_code {
+                false => "Claude Code integration is off (llm.claude-code)",
+                true => "couldn't open the connection for Claude Code (a port on 127.0.0.1, ~/.claude/ide)",
+            });
         };
         if a.connected() {
             return self.set_status("Claude Code is already connected");
@@ -794,6 +810,7 @@ mod tests {
         ed.agent = Some(Agent {
             port: 0,
             lock: PathBuf::from("/nonexistent/tarae-test.lock"),
+            token: String::new(),
             conns: HashMap::from([(1, (tx, true))]),
             queue: VecDeque::new(),
             active_tab: None,
@@ -910,12 +927,13 @@ mod tests {
         let mut ed = Editor::new(crate::config::Config::default());
         ed.open(&file).unwrap();
         let file = ed.doc().path.clone().unwrap();
-        // Dead tarae's lock file is removed, other IDEs' are kept
+        // Lock files that aren't ours stay — a dead tarae's too (its pid may be another program's now)
         std::fs::create_dir_all(dir.join("claude/ide")).unwrap();
         std::fs::write(dir.join("claude/ide/1.lock"), r#"{"pid":999999,"ideName":"tarae"}"#).unwrap();
         std::fs::write(dir.join("claude/ide/2.lock"), r#"{"pid":999999,"ideName":"VS Code"}"#).unwrap();
+        let theirs = || dir.join("claude/ide/1.lock").exists() && dir.join("claude/ide/2.lock").exists();
         ed.agent_start();
-        assert!(!dir.join("claude/ide/1.lock").exists() && dir.join("claude/ide/2.lock").exists());
+        assert!(theirs(), "nothing of others' removed");
         let port = ed.agent.as_ref().unwrap().port;
         let lock: Value = serde_json::from_str(
             &std::fs::read_to_string(dir.join(format!("claude/ide/{port}.lock"))).unwrap(),
@@ -1036,6 +1054,44 @@ mod tests {
         let _ = bad.read_to_end(&mut rest);
         ed.agent = None;
         assert!(!dir.join(format!("claude/ide/{port}.lock")).exists());
+        assert!(theirs(), "only ours went");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Our lock file is a new one (a file already named for the port is left as it is), and going away we
+    /// remove it only while it still holds our token — never one another program put in its place.
+    /// (Harmless: lock files in the test's own temp folder.)
+    #[test]
+    fn only_our_own_lock_file_is_ever_removed() {
+        let dir = std::env::temp_dir().join(format!("tarae-agent-locks-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let lock = dir.join("ide/4242.lock");
+        let agent = |token: &str| Agent {
+            port: 4242,
+            lock: lock.clone(),
+            token: token.into(),
+            conns: HashMap::new(),
+            queue: VecDeque::new(),
+            active_tab: None,
+            last_key: None,
+            last_selection: None,
+        };
+        // A new file, ours: written, and removed with us
+        write_lock(&dir.join("ide"), &lock, r#"{"authToken":"ours"}"#).unwrap();
+        drop(agent("ours"));
+        assert!(!lock.exists(), "ours goes");
+        // Someone else's under the name: not overwritten, not removed
+        let theirs = r#"{"pid":1,"ideName":"VS Code","authToken":"theirs"}"#;
+        std::fs::write(&lock, theirs).unwrap();
+        let e = write_lock(&dir.join("ide"), &lock, r#"{"authToken":"ours"}"#).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+        drop(agent("ours"));
+        assert_eq!(std::fs::read_to_string(&lock).unwrap(), theirs, "left as it was");
+        // Nothing to match (no token, or not JSON): left too
+        drop(agent(""));
+        std::fs::write(&lock, "not json").unwrap();
+        drop(agent("ours"));
+        assert!(lock.exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -311,7 +311,7 @@ pub static SETTINGS: &[Setting] = &[
     Setting {
         path: "llm.claude-code",
         kind: Kind::Bool,
-        doc: "Let Claude Code (run `claude` → /ide, or space c) connect: it sees your selection and diagnostics, and its edits come here as a y/n diff (restart to apply)",
+        doc: "Let Claude Code connect (space c opens the connection; then `claude` → /ide works too): it sees your selection and diagnostics, and its edits come here as a y/n diff",
         get: |c| Value::from(c.agent_claude_code),
         set: |c, v| c.agent_claude_code = b(v),
     },

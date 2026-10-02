@@ -1,61 +1,61 @@
 # sandbox_blocked_card · 100x30 · theme meok · cursor 1:4
 ## text
 00  tarae  ›  src  ›  demo.rs
-01   1 use std::collections::HashMap;                                                                 ▐
-02   1                                                                                                ▐
-03   2 ▎ Counts how often each word appears.                                                          ▐
-04     ▎                                                                                              ▐
-05     ▎ Words are split on whitespace; case is▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▐
-06   5 pub fn word_counts(text: &str) -> HashMa ▎ Open the sandbox a little?                          ▐
-07   6     let mut counts = HashMap::new();       Let Claude's commands write in                      ▐
-08   7     for word in text.split_whitespace()    /private/tmp/tarae-shot-blocked/npm-cache and       ▐
-09   8     │   *counts.entry(word).or_insert(0)   everything in it                                    ▐
-10   9     }                                                                                          ▐
-11  10     counts                                 npm was writing …/_cacache/index-v5 in it, in `npm  ▐
-12  11 }                                          test` — which runs again now with it open,          ▐
-13  12                                            whichever you choose. Always lasts until            ▐
-14  13 fn main() {                                :sandbox-allowed takes it back.                     ▐
-15  14     let text = "the quick brown fox jump                                                       ▐
-16  15     let counts = word_counts(text);        y Once   a This chat   A Always   n No              ▐
-17  16     println!("{} distinct words", counts▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▐
-18  17 }                                                                                              ▐
-19  ▐ FAILED ▌  npm test   2.4s                                                      space m c close
-20   npm ERR! code EPERM
-21   npm ERR! syscall open
-22
+01   1 use std::collections::HashMap;
+02   1
+03   2 ▎ Counts how often each word appears.
+04     ▎
+05     ▎ Words are split on whitespace; case is kept.
+06   5 pub fn word_counts(text: &str) -> HashMap<&str, usize> {
+07   6     let mut counts = HashMap::new();
+08   7     for word in text.split_whitespace() {
+09   8     │   *counts.entry(word).or_insert(0) += 1;
+10   9     }                                   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+11  10     counts                               ▎ Open the sandbox a little?
+12  11 }                                          Let Claude's commands write in
+13  12                                            /private/tmp/tarae-shot-blocked/npm-cache and
+14  13 fn main() {                                everything in it
+15  14     let text = "the quick brown fox jump
+16  15     let counts = word_counts(text);        npm was writing …/_cacache/index-v5 in it, in `npm
+17  16     println!("{} distinct words", counts   test` — which runs again now with it open,
+18  17 }                                          whichever you choose. Always lasts until
+19                                                :sandbox-allowed takes it back.
+20
+21                                                y Once   a This chat   A Always   n No
+22                                             ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
 23
-24
-25
-26
+24  ▐ FAILED ▌  npm test   2.4s                                                      space m c close
+25   npm ERR! code EPERM
+26   npm ERR! syscall open
 27   ▲ sandbox blocked writing /private/tmp/tarae-shot-blocked/npm-cache/_cacach…   space m s open it
 28  ▐ NORMAL ▌                                                                  rust   utf-8 LF   1:1
 29
 ## bg · surface per cell, blank = ui.background
 00
-01     Acccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+01     Accccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 02
-03     11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
-04     11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
-05     1111111111111111111111111111111111111111
-06                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-07                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-08                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-09                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-10                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+03     111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
+04     111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
+05     111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
+06
+07
+08
+09
+10
 11                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 12                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 13                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 14                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 15                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 16                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-17
-18
-19 pp22222222pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-20 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-21 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-22 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-23 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-24 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+17                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+18                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+19                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+20                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+21                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+22
+23
+24 pp22222222pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 25 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 26 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 27 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
@@ -63,32 +63,32 @@
 29
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00  ddddd  f  ddd  f  TTTTTTT
-01   A                                                                                                f
-02   f                                                                                                f
-03   f                                                                                                f
-04                                                                                                    f
-05                                                                                                    f
-06   f                                          a BBBB BBB BBBBBBB B BBBBBBB                          f
-07   f                                                                                                f
-08   f                                                                                                f
-09   f                                                                                                f
-10   f                                                                                                f
-11  ff                                            ddd ddd ddddddd ddddddddddddddddddd dd ddd dd dddd  f
-12  ff                                            ddddd d ddddd dddd ddddd ddd dddd dd ddddd          f
-13  ff                                            ddddddddd ddd ddddddd dddddd ddddd ddddd            f
-14  ff                                            dddddddddddddddd ddddd dd ddddd                     f
-15  ff                gggg ggggg ggggg ggg gggg                                                       f
-16  ff                                            A        A dddd dddd   A dddddd   A dd              f
-17  ff              ggg gggggggg gggggg                                                               f
-18  ff                                                                                                f
-19  e BBBBBB e  TTT TTTT   dddd                                                      DDDDD D D fffff
-20   fff ffff ffff fffff
-21   fff ffff fffffff ffff
+01   A
+02   f
+03   f
+04
+05
+06   f
+07   f
+08   f
+09   f
+10   f
+11  ff                                          a BBBB BBB BBBBBBB B BBBBBBB
+12  ff
+13  ff
+14  ff
+15  ff                gggg ggggg ggggg ggg gggg
+16  ff                                            ddd ddd ddddddd ddddddddddddddddddd dd ddd dd dddd
+17  ff              ggg gggggggg gggggg           ddddd d ddddd dddd ddddd ddd dddd dd ddddd
+18  ff                                            ddddddddd ddd ddddddd dddddd ddddd ddddd
+19                                                dddddddddddddddd ddddd dd ddddd
+20
+21                                                A        A dddd dddd   A dddddd   A dd
 22
 23
-24
-25
-26
+24  e BBBBBB e  TTT TTTT   dddd                                                      DDDDD D D fffff
+25   fff ffff ffff fffff
+26   fff ffff fffffff ffff
 27   w wwwwwww wwwwwww wwwwwww wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww   FFFFF F F ffff ff
 28  a BBBBBB a                                                                  dddd   ddddd dd   TTT
 29

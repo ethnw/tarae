@@ -139,7 +139,9 @@ stop's card stays as long as your cursor is in its lines, even after the tour en
 holds still while you type. Your question becomes a [note](#notes) on the stop's lines, and Claude gets
 those lines along with what it said about them there. It answers in the note, next to the code.
 
-Files opened along the way are previews: unedited ones close when follow moves on. Moving the cursor, switching
+Files opened along the way are previews: unedited ones close when follow moves on, in the pane you're in. Follow
+stays in the project: what Claude reads elsewhere (its own memory files, say) shows on the card but isn't opened.
+Moving the cursor, switching
 files, or scrolling in the editor takes over: following pauses (`claude › paused`) until `C-f` or your next
 question. `C-o` jumps back to where you were before the turn.
 
@@ -455,9 +457,10 @@ draft, and `space v s` sends your answers together.
 tarae speaks Claude Code's IDE protocol — the same one the VS Code and JetBrains extensions use (MCP over WebSocket) —
 so there's nothing to set up on the Claude Code side.
 
-- `space c` launches `claude` in a zellij or tmux side pane, already connected. A `claude` you already have running
-  connects with `/ide` → tarae. Once connected, the status line shows `◦ claude code`
-  ([screenshot](screenshots/m5-agent-connected.png))
+- `space c` launches `claude` in a zellij or tmux side pane, already connected. tarae opens the connection (and
+  its file in `~/.claude/ide`) only then, so until your first `space c` nothing of it is there. From then on a
+  `claude` you started yourself in this folder connects with `/ide` → tarae. Once connected, the status line shows
+  `◦ claude code` ([screenshot](screenshots/m5-agent-connected.png))
 - Claude sees your current selection (updated as it changes — its input shows `⧉ 1 line selected`), your open files
   and unsaved edits, and language-server diagnostics, so "fix this error" just works
 - `space C` inserts the selected lines into Claude's input as `@file#L10-20`
@@ -465,7 +468,8 @@ so there's nothing to set up on the Claude Code side.
   `space i`, headed `Claude Code`. `y`/`n` per change, `a` for all. Accept only part and Claude knows what you kept; it
   writes the file, and tarae treats that content arriving on disk as saved. A terminal bell gets your attention
 - Security: tarae listens only on `127.0.0.1` and checks a per-session 128-bit token (from `~/.claude/ide/<port>.lock`).
-  Turn it off with `llm.claude-code = false`
+  That file is the only one tarae writes there, and the only one it removes, when it quits; other editors' and other
+  tarae windows' files are never touched. Turn it off with `llm.claude-code = false`
 
 ## Settings
 
@@ -474,7 +478,7 @@ so there's nothing to set up on the Claude Code side.
 command = "claude"   # a CLI speaking Claude Code's stream-json protocol
 model = "haiku"      # "" = the CLI's default model
 context-lines = 20   # lines around each selection sent along
-claude-code = true   # let Claude Code connect (restart to apply)
+claude-code = true   # let Claude Code connect (space c opens the connection)
 ```
 
 All of them, with defaults: [settings reference](reference/settings.md#llm).

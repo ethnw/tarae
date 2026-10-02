@@ -231,6 +231,16 @@ fn markers_for(lang: &str) -> &'static [&'static str] {
     }
 }
 
+/// Languages whose server can't work without a project, and the markers that make one: rust-analyzer in a
+/// lone `.rs` finds no workspace ("Failed to discover workspace" on the status line at every open) — so a
+/// file with none of these above it gets no server.
+pub fn project_markers(lang: &str) -> Option<&'static [&'static str]> {
+    match lang {
+        "rust" => Some(&["Cargo.toml", "rust-project.json"]),
+        _ => None,
+    }
+}
+
 /// The **topmost** dir with a marker, walking up but never past the repo root (`.git`) or into `$HOME` —
 /// one server per workspace, not one per member crate/module (each is hundreds of MB). None if no marker.
 pub fn root_by_markers(file: &Path, markers: &[&str]) -> Option<PathBuf> {

@@ -239,16 +239,36 @@ fn which_key_and_command_palette_open_and_close() {
 fn claude_code_lock_file_stays_in_the_sandbox_and_is_removed_on_quit() {
     let sb = Sandbox::new("lock");
     sb.write("x.txt", "x\n");
+    // Others' lock files in the sandbox's CLAUDE_CONFIG_DIR (its HOME is a temp one): a dead tarae's and
+    // another IDE's
+    let ide = sb.claude_ide();
+    fs::create_dir_all(&ide).unwrap();
+    let others =
+        [("1.lock", r#"{"pid":999999,"ideName":"tarae"}"#), ("2.lock", r#"{"pid":1,"ideName":"VS Code"}"#)];
+    for (name, body) in others {
+        fs::write(ide.join(name), body).unwrap();
+    }
     let mut t = sb.spawn(&["x.txt"]);
-    // Written before the first frame (main.rs: agent_start runs before term::run)
-    let locks = sb.lock_files();
-    assert_eq!(locks.len(), 1, "one lock file under CLAUDE_CONFIG_DIR/ide: {locks:?}");
-    let body = fs::read_to_string(&locks[0]).unwrap();
+    t.wait_text("x");
+    assert_eq!(sb.lock_files().len(), 2, "nothing of tarae's before space c, nothing of others' gone");
+    // space c: the connection opens (claude isn't on the sandbox's PATH — it just doesn't start)
+    t.send(" c");
+    let ours =
+        |sb: &Sandbox| sb.lock_files().into_iter().find(|p| !others.iter().any(|(n, _)| p.ends_with(n)));
+    let deadline = std::time::Instant::now() + sb.timeout();
+    while ours(&sb).is_none() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let lock = ours(&sb).expect("our lock file after space c");
+    let body = fs::read_to_string(&lock).unwrap();
     assert!(body.contains("\"ideName\":\"tarae\""), "{body}");
     assert!(body.contains(&format!("\"pid\":{}", t.child.id())), "{body}");
     t.command("q");
     assert_eq!(t.wait_exit().code(), Some(0));
-    assert!(sb.lock_files().is_empty(), "lock file removed on quit");
+    assert!(!lock.exists(), "ours removed on quit");
+    for (name, body) in others {
+        assert_eq!(fs::read_to_string(ide.join(name)).unwrap(), body, "{name} left as it was");
+    }
 }
 
 /// A key that arrives together with a resize must not be lost. crossterm's default (mio, edge-triggered)
@@ -532,10 +552,9 @@ fn restart_becomes_the_new_binary_as_you_were() {
     assert!(s.status().contains("2:1"), "b focused, its cursor kept:\n{s}");
     t.send("\x17w");
     t.wait_for("the other pane: a at line 6", |s| s.status().contains("6:1"));
-    // The Claude Code lock file is the new tarae's — one, with the same pid
+    // No Claude Code lock file: none before `space c`, none left behind by the restart
     let locks = sb.lock_files();
-    assert_eq!(locks.len(), 1, "{locks:?}");
-    assert!(fs::read_to_string(&locks[0]).unwrap().contains(&format!("\"pid\":{}", t.child.id())));
+    assert!(locks.is_empty(), "{locks:?}");
 
     t.command("restart!");
     t.wait_raw("a third tarae", |r| entered(r) >= 3);

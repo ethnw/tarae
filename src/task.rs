@@ -180,6 +180,9 @@ pub struct Run {
     pub guard: Option<crate::sandbox::Guard>,
     /// When it last printed (a sandboxed run quiet after a denial may be waiting on it — the panel says so).
     pub last_output: Instant,
+    /// The tallest its panel has been (`term::task_panel_h`) — it never shrinks while the run is up; a run of
+    /// the same task again starts there.
+    pub tall: std::cell::Cell<usize>,
 }
 
 /// An install run's card, tool, and what goes on after it.
@@ -210,6 +213,7 @@ impl Run {
             by_claude: false,
             guard: None,
             last_output: Instant::now(),
+            tall: Default::default(),
         }
     }
 }
@@ -483,6 +487,8 @@ impl Editor {
         if !install {
             self.qlist_set(task.name.clone(), Vec::new());
         }
+        // The same task again: its panel starts as tall as it was (no shrink and grow back)
+        let tall = self.task_run.as_ref().filter(|r| r.task.name == task.name).map_or(0, |r| r.tall.get());
         self.task_run = Some(Run {
             task,
             state: State::Running,
@@ -499,6 +505,7 @@ impl Editor {
             by_claude: false,
             guard: None,
             last_output: Instant::now(),
+            tall: std::cell::Cell::new(tall),
         });
     }
 }

@@ -435,6 +435,9 @@ pub struct Editor {
     pub allow_path: Option<std::path::PathBuf>,
     /// The last frame drawn and its size — what the user sees (`chat::attach_screen`).
     pub last_frame: Option<(Vec<u8>, u16, u16)>,
+    /// The project — the folder tarae started in, links resolved (follow mode goes nowhere else). Tests with
+    /// a project of their own in a temp folder set it.
+    pub project_root: Option<PathBuf>,
     /// Claude's `screen` calls the user said yes to — answered with the next frame drawn (`seeing.rs`).
     pub screen_sends: Vec<crate::tools::Call>,
     /// The run whose denials `space m s` listed, and what could open (`blocked.rs`).
@@ -568,6 +571,7 @@ impl Editor {
             allow_path: if cfg!(test) { None } else { crate::allow::Store::path() },
             blocked: None,
             last_frame: None,
+            project_root: std::fs::canonicalize(cwd()).ok(),
             screen_sends: Vec::new(),
             sandbox: if cfg!(test) { crate::sandbox::Availability::Bypass } else { Default::default() },
             restart: None,
@@ -2543,6 +2547,8 @@ mod tests {
     fn editor(text: &str) -> Editor {
         let mut ed = Editor::new(Config::default());
         ed.docs[0].text = ropey::Rope::from_str(text);
+        // (tests make their projects in the temp folder — follow goes only into the project)
+        ed.project_root = std::fs::canonicalize(std::env::temp_dir()).ok();
         ed
     }
 
@@ -3096,6 +3102,52 @@ mod tests {
 
     fn cursor_line(ed: &Editor) -> usize {
         ed.doc().text.byte_to_line(ed.doc().selection().primary().cursor(&ed.doc().text))
+    }
+
+    /// Follow stays in the project: a file Claude reads outside it (its memory, a temp file) isn't opened —
+    /// the editor stays where it was, the card still says what it reads — and a place outside named in the
+    /// answer doesn't go into the list. Inside, one pane is reused: the panes stay as they were (U5 said
+    /// "splits pile up" — measured: one pane stays one, two stay two). Harmless: a marker file in the
+    /// test's own temp folder.
+    #[test]
+    fn chat_follow_never_opens_files_outside_the_project() {
+        use serde_json::json;
+        let (dir, main, util, lib) = follow_project("outside");
+        let out = std::env::temp_dir().join(format!("tarae-not-the-project-{}", std::process::id()));
+        std::fs::create_dir_all(&out).unwrap();
+        let memo = std::fs::canonicalize(&out).unwrap().join("memo.md");
+        std::fs::write(&memo, "# marker\n").unwrap();
+        let tool = |id: &str, name: &str, input: serde_json::Value| json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": id, "name": name, "input": input}]}});
+        let text = |t: &str| json!({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": t}}});
+        let mut ed = editor("");
+        ed.project_root = Some(dir.clone());
+        ed.open(&main).unwrap();
+        ed.split_view(crate::split::Dir::Vertical);
+        fake_claude_stream(
+            &mut ed,
+            &[
+                tool("r1", "Read", json!({"file_path": util})),
+                json!("sleep 0.2"),
+                tool("r2", "Read", json!({"file_path": memo})),
+                json!("sleep 0.2"),
+                text(&format!("See {}:1 and {}:2 and {}:3.", memo.display(), lib.display(), util.display())),
+                json!({"type": "result", "result": "done"}),
+            ],
+        );
+        feed(&mut ed, "<space>lwhere?<ret>");
+        // At the outside read: the card says it, the editor stays on util.rs
+        settle_until(&mut ed, |ed| {
+            ed.chat.as_ref().unwrap().follow.gaze.as_ref().is_some_and(|g| g.path.as_deref() == Some(&*memo))
+        });
+        assert_eq!(ed.doc().path.as_deref(), Some(util.as_path()), "not opened: stays where it was");
+        settle_until(&mut ed, |ed| !ed.chat.as_ref().unwrap().busy());
+        assert!(!ed.docs.iter().any(|d| d.path.as_deref() == Some(memo.as_path())), "never opened");
+        assert_eq!(ed.views.len(), 2, "the panes as they were");
+        let listed: Vec<PathBuf> =
+            ed.qlist.as_ref().map(|l| l.items.iter().map(|i| i.path.clone()).collect()).unwrap_or_default();
+        assert!(!listed.contains(&memo), "not in the list: {listed:?}");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&out).ok();
     }
 
     /// Follow mode: the editor goes to each file Claude reads, to a search's first hit, and at the end to
@@ -5621,6 +5673,42 @@ mod tests {
         assert!(repo.join("b.txt").exists());
         feed(&mut ed, "d");
         settle_until(&mut ed, |_| !repo.join("b.txt").exists());
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// `A` in the git tab opens the last message to amend in normal mode (the first keys move, they don't
+    /// land on top of the message); `c` still opens a new one ready to type.
+    #[test]
+    fn amending_opens_the_message_in_normal_mode() {
+        let repo = git_repo("amend", &[("a.txt", "one\n")]);
+        let mut ed = editor("");
+        ed.sidebar = Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, repo.clone()));
+        ed.git_refresh();
+        settle_until(&mut ed, |ed| ed.git_status.is_some());
+        ed.sidebar.as_mut().unwrap().focus = true;
+        feed(&mut ed, "A");
+        settle_until(&mut ed, |ed| ed.committing.is_some());
+        assert_eq!(ed.doc().display_name_short(), "COMMIT_EDITMSG");
+        assert_eq!(ed.mode, Mode::Normal);
+        assert!(text(&ed).starts_with("base\n"), "{}", text(&ed));
+        feed(&mut ed, "A, amended<esc>:w<ret>");
+        settle_until(&mut ed, |ed| ed.docs.iter().all(|d| d.display_name_short() != "COMMIT_EDITMSG"));
+        let log = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["log", "--format=%s"])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&log.stdout).trim(), "base, amended", "one commit, amended");
+        // A new message: insert mode, as before
+        std::fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
+        git_in(&repo, &["add", "a.txt"]);
+        ed.git_refresh();
+        settle_until(&mut ed, |ed| ed.git_status.as_ref().is_some_and(|s| !s.staged.is_empty()));
+        ed.sidebar.as_mut().unwrap().focus = true;
+        feed(&mut ed, "c");
+        settle_until(&mut ed, |ed| ed.committing.is_some());
+        assert_eq!(ed.mode, Mode::Insert);
         std::fs::remove_dir_all(&repo).ok();
     }
 

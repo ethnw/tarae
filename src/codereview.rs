@@ -82,6 +82,8 @@ pub struct CodeReview {
     /// The git tab is in front of the rail (`space g` during a review; `space g`/Esc there gives the
     /// column back — `Editor::review_rail_up`).
     pub behind: bool,
+    /// The columns the rail's rows need (`term::review_rail_w` — measured once: the files don't change).
+    pub rail_need: std::cell::OnceCell<usize>,
 }
 
 impl CodeReview {
@@ -100,6 +102,7 @@ impl CodeReview {
             scroll: 0,
             shown: None,
             behind: false,
+            rail_need: Default::default(),
         }
     }
 
@@ -343,6 +346,7 @@ fn open(ed: &mut Editor, root: PathBuf, base: Base, mut files: Vec<File>) {
         scroll: 0,
         shown: None,
         behind: false,
+        rail_need: Default::default(),
     });
     let s = if n == 1 { "" } else { "s" };
     ed.set_status(match turn {

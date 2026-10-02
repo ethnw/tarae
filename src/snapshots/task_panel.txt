@@ -12,16 +12,16 @@
 09   8     │   *counts.entry(word).or_insert(0) += 1;                                                 ▐
 10   9     }                                                                                          ▐
 11  10     counts                                                                                     ▐
-12  11 }
-13  12
-14  13 fn main() {
-15  ▐ FAILED ▌  check   ● 1   1.8s           ]q next  space q list  space m m again  space m c close
-16      Compiling demo v0.1.0
-17   error[E0308]: mismatched types
-18    --> src/snapshots/fixtures/demo/src/main.rs:1:4
-19   error: could not compile demo
-20
-21
+12  11 }                                                                                              ▐
+13  12                                                                                                ▐
+14  13 fn main() {                                                                                    ▐
+15  14     let text = "the quick brown fox jumps over the lazy dog";
+16  15     let counts = word_counts(text);
+17  ▐ FAILED ▌  check   ● 1   1.8s           ]q next  space q list  space m m again  space m c close
+18      Compiling demo v0.1.0
+19   error[E0308]: mismatched types
+20    --> src/snapshots/fixtures/demo/src/main.rs:1:4
+21   error: could not compile demo
 22  ▐ NORMAL ▌                                                                  rust   utf-8 LF   1:1
 23
 ## bg · surface per cell, blank = ui.background
@@ -40,9 +40,9 @@
 12
 13
 14
-15 pp22222222pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-16 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-17 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+15
+16
+17 pp22222222pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 18 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 19 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 20 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
@@ -62,18 +62,18 @@
 09   f                                                                                                f
 10   f                                                                                                f
 11  ff                                                                                                f
-12  ff
-13  ff
-14  ff
-15  e BBBBBB e  TTTTT   e B   dddd           DD ffff  DDDDD D ffff  DDDDD D D fffff  DDDDD D D fffff
-16
-17   eeeeeeeeeeeee eeeeeeeeee eeeee
+12  ff                                                                                                f
+13  ff                                                                                                f
+14  ff                                                                                                f
+15  ff                gggg ggggg ggggg ggg ggggg gggg ggg gggg gggg
+16  ff
+17  e BBBBBB e  TTTTT   e B   dddd           DD ffff  DDDDD D ffff  DDDDD D D fffff  DDDDD D D fffff
 18
-19   eeeeee eeeee eee eeeeeee eeee
+19   eeeeeeeeeeeee eeeeeeeeee eeeee
 20
-21
+21   eeeeee eeeee eee eeeeeee eeee
 22  a BBBBBB a                                                                  dddd   ddddd dd   TTT
 23
 ## legend
 bg: c=ui.cursorline.primary  p=ui.popup  A=ui.cursor.primary  1=other  2=other
-fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  e=error  B=bold
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  e=error  g=diff.plus  B=bold

@@ -6,7 +6,8 @@
 //!
 //! Environment:
 //! - `TARAE_SHOT_XDG` — config home (`tarae/config.toml` under it; default `/tmp/tarae-shot/xdg`). Point it at
-//!   an empty folder so your own settings don't leak in.
+//!   an empty folder so your own settings don't leak in. Folders given here must be absolute (and the config
+//!   and start folders there already) — else the shot refuses.
 //! - `TARAE_SHOT_STATE` — state home (session, recent files, undo, chats); default a fresh temp dir, removed
 //!   afterwards — never the user's.
 //! - `TARAE_BACKGROUND=dark|light` — the theme (the virtual terminal doesn't answer the background query).
@@ -46,7 +47,7 @@ pub fn run(args: &[String]) -> Result<()> {
         let bytes = std::fs::read(&replay).map_err(|e| format!("{}: {e}", Path::new(&replay).display()))?;
         vt.feed(&bytes);
     } else {
-        let given = std::env::var_os("TARAE_SHOT_STATE").map(PathBuf::from);
+        let given = folder("TARAE_SHOT_STATE", std::env::var_os("TARAE_SHOT_STATE"), false)?;
         let state = given
             .clone()
             .unwrap_or_else(|| std::env::temp_dir().join(format!("tarae-shot-state-{}", std::process::id())));
@@ -94,8 +95,10 @@ fn drive(vt: &mut Vt, keys: &[String], state: &Path, cols: u16, rows: u16) -> Re
     }
     let files =
         std::env::var("TARAE_SHOT_FILES").unwrap_or_else(|_| "src/transaction.rs src/selection.rs".into());
-    let cwd = std::env::var_os("TARAE_SHOT_CWD").map(PathBuf::from).unwrap_or_else(|| root.clone());
-    let config = std::env::var_os("TARAE_SHOT_XDG").unwrap_or_else(|| "/tmp/tarae-shot/xdg".into());
+    let cwd =
+        folder("TARAE_SHOT_CWD", std::env::var_os("TARAE_SHOT_CWD"), true)?.unwrap_or_else(|| root.clone());
+    let config = folder("TARAE_SHOT_XDG", std::env::var_os("TARAE_SHOT_XDG"), true)?
+        .map_or_else(|| "/tmp/tarae-shot/xdg".into(), PathBuf::into_os_string);
 
     let (mut master, mut slave) = (-1, -1);
     let mut ws = libc::winsize { ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0 };
@@ -173,6 +176,20 @@ fn drive(vt: &mut Vt, keys: &[String], state: &Path, cols: u16, rows: u16) -> Re
 /// tarae's environment in the shot: a color terminal, its own config and state. An inherited `NO_COLOR`
 /// goes — it's meant for the output of whatever runs it (a task panel sets it), and the shot renders tarae
 /// itself: with it, every shot taken from a panel came out gray.
+/// A folder given in `var`: absolute (tarae starts in `TARAE_SHOT_CWD`, so a relative one would mean another
+/// folder there), and there already when `must_exist` — a config folder that isn't found leaves tarae on its
+/// defaults, and the default `llm.command` is the real `claude` (a slip that started it once).
+fn folder(var: &str, value: Option<std::ffi::OsString>, must_exist: bool) -> Result<Option<PathBuf>> {
+    let Some(p) = value.map(PathBuf::from) else { return Ok(None) };
+    if !p.is_absolute() {
+        return Err(format!("{var}={} — give an absolute path", p.display()));
+    }
+    if must_exist && !p.is_dir() {
+        return Err(format!("{var}={} — no such folder", p.display()));
+    }
+    Ok(Some(p))
+}
+
 fn as_a_terminal<'c>(cmd: &'c mut Command, config: &std::ffi::OsStr, state: &Path) -> &'c mut Command {
     cmd.env("TERM", "xterm-256color")
         .env("COLORTERM", "truecolor")
@@ -519,6 +536,24 @@ mod tests {
             .output()
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout), "unset|xterm-256color");
+    }
+
+    /// Folders from the environment: a relative one is refused (it'd be read from where tarae starts), and so
+    /// is a config or start folder that isn't there; an absolute one that is goes through, nothing set is fine.
+    #[test]
+    fn shot_folders_are_absolute_and_there() {
+        let tmp = std::env::temp_dir();
+        let given = |p: &str| Some(std::ffi::OsString::from(p));
+        let e = folder("TARAE_SHOT_XDG", given("target/sb/shot-xdg"), true).unwrap_err();
+        assert!(e.contains("TARAE_SHOT_XDG=target/sb/shot-xdg") && e.contains("absolute"), "{e}");
+        assert!(folder("TARAE_SHOT_CWD", given("."), true).is_err());
+        assert!(folder("TARAE_SHOT_STATE", given("state"), false).is_err());
+        let missing = tmp.join(format!("tarae-shot-missing-{}", std::process::id()));
+        let e = folder("TARAE_SHOT_XDG", Some(missing.clone().into()), true).unwrap_err();
+        assert!(e.contains("no such folder"), "{e}");
+        assert_eq!(folder("TARAE_SHOT_STATE", Some(missing.clone().into()), false), Ok(Some(missing)));
+        assert_eq!(folder("TARAE_SHOT_XDG", Some(tmp.clone().into()), true), Ok(Some(tmp)));
+        assert_eq!(folder("TARAE_SHOT_XDG", None, true), Ok(None));
     }
 
     #[test]

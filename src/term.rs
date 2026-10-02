@@ -439,6 +439,8 @@ impl Layout {
         let terminal = editor.terminal.as_ref().is_some_and(|t| t.visible) && editor.dap.is_none();
         let debug_h = if terminal {
             terminal_panel_h(total)
+        } else if let Some(r) = task_in_the_slot(editor) {
+            task_panel_h(r, total)
         } else if editor.dap.is_some()
             || editor.test_run.is_some()
             || editor.task_run.is_some()
@@ -462,12 +464,13 @@ impl Layout {
         let review = editor.review_rail_up();
         // Wider on a wide terminal (names need the room) — as long as the code keeps 100 columns; it only
         // changes with the terminal, never while you move in it
-        let rail_w = if (review && edit_w >= 90)
-            || (!review && editor.sidebar.is_some() && edit_w >= crate::sidebar::MIN_EDIT_W)
-        {
-            RAIL_W + (edit_w.saturating_sub(RAIL_W + 100) / 2).min(RAIL_MORE)
-        } else {
-            0
+        let rail_w = match editor.code_review.as_ref() {
+            // The review's: as wide as its names (U6)
+            Some(r) if review && edit_w >= 90 => review_rail_w(r, edit_w),
+            _ if !review && editor.sidebar.is_some() && edit_w >= crate::sidebar::MIN_EDIT_W => {
+                RAIL_W + (edit_w.saturating_sub(RAIL_W + 100) / 2).min(RAIL_MORE)
+            }
+            _ => 0,
         };
         Self {
             width: w as usize,
@@ -838,6 +841,34 @@ fn value_and_type(
         queue!(out, Spaces(rest - shown.width() - ty.width()), Print(&ty))?;
     }
     Ok(())
+}
+
+/// The task run the bottom slot shows — none while the debugger, the terminal or a plugin's panel has it, or
+/// a test run started after it (`draw` picks the same).
+fn task_in_the_slot(editor: &Editor) -> Option<&crate::task::Run> {
+    let k = editor.task_run.as_ref()?;
+    let taken = editor.dap.is_some()
+        || editor.terminal.as_ref().is_some_and(|t| t.visible)
+        || editor.plugins.as_ref().is_some_and(|p| p.panel.is_some())
+        || editor.test_run.as_ref().is_some_and(|t| t.started >= k.started);
+    (!taken).then_some(k)
+}
+
+/// The fewest rows the task panel takes (its header and two of output).
+const TASK_PANEL_MIN: usize = 3;
+
+/// The task panel's height (U2): its output whole — the header, the lines, the sandbox's row — at least
+/// `TASK_PANEL_MIN`, at most half the editing area (and 4 rows of code always). It never shrinks while the
+/// run is up (`Run.tall`, which a rerun of the same task starts from). (A size you set will win over this —
+/// U1.)
+fn task_panel_h(r: &crate::task::Run, total: usize) -> usize {
+    let running = matches!(r.state, crate::task::State::Running);
+    let sandbox = crate::sandbox::panel_line(r.guard.as_ref(), running, r.last_output).is_some();
+    let want = 1 + r.output.len().max(1) + usize::from(sandbox);
+    let cap = (total / 2).min(total.saturating_sub(4));
+    let h = want.max(TASK_PANEL_MIN).max(r.tall.get()).min(cap);
+    r.tall.set(r.tall.get().max(h));
+    h
 }
 
 /// The terminal panel's height for `total` rows of editing area — more than the other panels (a shell wants
@@ -6203,7 +6234,8 @@ fn draw_sidebar(
     Ok(())
 }
 
-/// Width of the side panel and the code review's file rail — and how much wider a wide terminal makes it.
+/// Width of the side panel — and how much wider a wide terminal makes it (the review's rail fits its names:
+/// `review_rail_w`).
 const RAIL_W: usize = 32;
 const RAIL_MORE: usize = 12;
 
@@ -6227,6 +6259,108 @@ const RAIL_MORE: usize = 12;
 /// (a blank and three rows).
 const RAIL_HEAD: usize = 4;
 const RAIL_HINTS: usize = 4;
+
+/// The review rail's width bounds, and the columns the code keeps beside it.
+const REVIEW_RAIL_MIN: usize = 24;
+const REVIEW_RAIL_MAX: usize = 48;
+const REVIEW_CODE_MIN: usize = 60;
+
+/// The review rail's width: what its rows need — every file's whole (bar, guides, glyph, name, `+a −r`,
+/// `new`), its folders, the head and the key hints — between 24 and 48 columns, the code keeping 60. Measured
+/// once (the files don't change), so it never shifts while you read; a draft's `¶n` cuts the name a little
+/// rather than widening it. A name that still doesn't fit is cut from the left (its end stays).
+fn review_rail_w(r: &crate::codereview::CodeReview, edit_w: usize) -> usize {
+    let need = *r.rail_need.get_or_init(|| review_rail_need(r));
+    // (margin 2 · a cell of air before the edge · edge 1)
+    (need + 4).clamp(REVIEW_RAIL_MIN, REVIEW_RAIL_MAX).min(edit_w.saturating_sub(REVIEW_CODE_MIN))
+}
+
+/// The cells the review rail's widest row takes (between its margin and its edge).
+fn review_rail_need(r: &crate::codereview::CodeReview) -> usize {
+    let mut need = 2 + "review".len() + 2 + r.base.label().width();
+    let (added, removed): (usize, usize) =
+        r.files.iter().fold((0, 0), |(a, b), f| (a + f.added, b + f.removed));
+    let n = r.files.len();
+    need = need.max(format!("  {n} files  +{added} −{removed}").width());
+    for t in r.rail_rows() {
+        let piece: String = r.files[t.source].rel.chars().skip(t.span.start).take(t.span.len()).collect();
+        let guides = tree_guides(t.depth).width();
+        let row = match t.item {
+            None => 2 + guides + 2 + piece.width() + 1,
+            Some(i) => 4 + guides + piece.width() + rail_tail(&r.files[i]).width(),
+        };
+        need = need.max(row);
+    }
+    let st = Style::default();
+    let turn = matches!(r.base, crate::codereview::Base::Turn { .. });
+    for (focus, drafts) in [(true, 0), (false, 0), (false, 9)] {
+        for row in review_rail_hints(focus, turn, drafts, st, st, st) {
+            need = need.max(row.iter().map(|s| s.text.width()).sum());
+        }
+    }
+    need
+}
+
+/// A file row's end: `+a −r`, `binary`, `new`/`gone` (as `draw_review_rail` puts it — drafts aside).
+fn rail_tail(f: &crate::codereview::File) -> String {
+    let mut s = String::new();
+    if f.binary {
+        s += " binary";
+    } else {
+        if f.added > 0 {
+            s += &format!(" +{}", f.added);
+        }
+        if f.removed > 0 {
+            s += &format!(" −{}", f.removed);
+        }
+    }
+    if f.new {
+        s += " new";
+    } else if f.gone {
+        s += " gone";
+    }
+    s
+}
+
+/// The review rail's key hints — with its keys, on Claude's turn, or a review's (`send n` with drafts).
+fn review_rail_hints(
+    focus: bool,
+    turn: bool,
+    drafts: usize,
+    key: Style,
+    faint: Style,
+    accent: Style,
+) -> Vec<Vec<crate::markdown::Span>> {
+    use crate::markdown::Span;
+    let sp = |text: &str, style: Style| Span { text: text.to_string(), style };
+    let hint = |pairs: &[(&str, &str)]| {
+        let mut row = vec![sp("  ", faint)];
+        row.extend(hint_spans(pairs, key, faint));
+        row
+    };
+    if focus {
+        vec![
+            hint(&[("j k", "files"), ("enter", "open")]),
+            hint(&[("m", "viewed, on to the next")]),
+            hint(&[("esc", "back to the code")]),
+        ]
+    } else if turn && drafts == 0 {
+        // Claude's turn: what to do with its changes — one back, all back, or keep them
+        vec![
+            hint(&[("]g", "change"), ("space n", "comment")]),
+            hint(&[("space u", "undo the whole turn")]),
+            vec![sp("  space v", key), sp(" u undo · q keep", faint)],
+        ]
+    } else {
+        // `space v` once, its keys after it (`s send 2 · q end`) — the pairs wouldn't fit the rail
+        let send = if drafts > 0 {
+            vec![sp("  space v s", key), sp(&format!(" send {drafts}"), accent), sp(" · q end", faint)]
+        } else {
+            vec![sp("  space v", key), sp(" m viewed · q end", faint)]
+        };
+        vec![hint(&[("]g", "change"), ("space e", "files")]), hint(&[("space n", "comment")]), send]
+    }
+}
 
 /// Rows the review rail has for its files (a turn's has its question under the head).
 fn review_rail_room(lay: &Layout, r: &crate::codereview::CodeReview) -> usize {
@@ -6310,8 +6444,8 @@ fn draw_review_rail(
         let piece: String = r.files[t.source].rel.chars().skip(t.span.start).take(t.span.len()).collect();
         let guides = sp(tree_guides(t.depth), faint);
         let Some(i) = t.item else {
-            // A folder heading: dim, a faint `/`
-            let name = fit_middle(&piece, &[], w.saturating_sub(5 + guides.text.width())).0;
+            // A folder heading: dim, a faint `/` (cut from the left: the folder it is stays)
+            let name = fit_left(&piece, w.saturating_sub(5 + guides.text.width()));
             rows.push((
                 vec![
                     sp("  ".into(), card),
@@ -6351,8 +6485,9 @@ fn draw_review_rail(
         }
         let tail_w: usize = tail.iter().map(|s| s.text.width()).sum();
         let indent = guides.text.width();
-        // The file name plain (dimmed once viewed) — its folders are the headings above
-        let shown = fit_middle(&piece, &[], w.saturating_sub(4 + indent + tail_w)).0;
+        // The file name plain (dimmed once viewed) — its folders are the headings above; cut from the left
+        // when the rail is at its widest (the end, its extension, stays)
+        let shown = fit_left(&piece, w.saturating_sub(4 + indent + tail_w + 1));
         let name_st = if seen { Style { fg: ui.virt.fg, ..bg } } else { bg };
         let mut row = vec![
             sp(if here { "▎ ".into() } else { "  ".into() }, Style { fg: ui.accent.fg, ..bg }),
@@ -6364,7 +6499,8 @@ fn draw_review_rail(
             sp(shown.clone(), name_st),
         ];
         let used = 4 + indent + shown.width();
-        row.push(sp(" ".repeat(w.saturating_sub(used + tail_w)), bg));
+        // (the counts end a cell before the edge)
+        row.push(sp(" ".repeat(w.saturating_sub(used + tail_w + 1)), bg));
         row.extend(tail);
         rows.push((row, bg, Some(i)));
     }
@@ -6373,34 +6509,8 @@ fn draw_review_rail(
     let fill = lay.text_rows.saturating_sub(rows.len() + RAIL_HINTS);
     rows.extend(std::iter::repeat_n((Vec::new(), card, None), fill));
     rows.push((Vec::new(), card, None));
-    let hint = |pairs: &[(&str, &str)]| {
-        let mut row = vec![sp("  ".into(), faint)];
-        row.extend(hint_spans(pairs, key, faint));
-        (row, card, None)
-    };
-    if r.focus {
-        rows.push(hint(&[("j k", "files"), ("enter", "open")]));
-        rows.push(hint(&[("m", "viewed, on to the next")]));
-        rows.push(hint(&[("esc", "back to the code")]));
-    } else if turn && drafts == 0 {
-        // Claude's turn: what to do with its changes — one back, all back, or keep them
-        rows.push(hint(&[("]g", "change"), ("space n", "comment")]));
-        rows.push(hint(&[("space u", "undo the whole turn")]));
-        rows.push((vec![sp("  space v".into(), key), sp(" u undo · q keep".into(), faint)], card, None));
-    } else {
-        rows.push(hint(&[("]g", "change"), ("space e", "files")]));
-        rows.push(hint(&[("space n", "comment")]));
-        // `space v` once, its keys after it (`s send 2 · q end`) — the pairs wouldn't fit the rail
-        let send = if drafts > 0 {
-            vec![
-                sp("  space v s".into(), key),
-                sp(format!(" send {drafts}"), accent),
-                sp(" · q end".into(), faint),
-            ]
-        } else {
-            vec![sp("  space v".into(), key), sp(" m viewed · q end".into(), faint)]
-        };
-        rows.push((send, card, None));
+    for row in review_rail_hints(r.focus, turn, drafts, key, faint, accent) {
+        rows.push((row, card, None));
     }
     let mut links = editor.screen.review_rail.borrow_mut();
     for (k, (row, bg, file)) in rows.iter().take(lay.text_rows).enumerate() {
@@ -8780,6 +8890,100 @@ mod tests {
         assert!(t.width() <= 16 && t.ends_with(".rs") && t.contains('…'), "{t}");
         assert_eq!(tree_guides(2), "│ │ ");
         assert_eq!(tree_guides(5), "│ │ │ ││", "past the third, one cell each");
+    }
+
+    /// The review rail is as wide as its rows need (U6: 31 columns for two files, yet names cut): a short
+    /// review takes what its hints need, long names widen it up to 48, the code keeping 60; a name past that
+    /// is cut from the left (its end stays); a draft's `¶1` doesn't move it.
+    #[test]
+    fn the_review_rail_fits_its_names() {
+        use crate::codereview::{Base, CodeReview, File};
+        let review = |rels: &[&str]| {
+            let files = rels
+                .iter()
+                .map(|rel| File {
+                    rel: rel.to_string(),
+                    path: PathBuf::from("/x").join(rel),
+                    added: 12,
+                    removed: 3,
+                    new: false,
+                    gone: false,
+                    binary: false,
+                })
+                .collect();
+            let mut ed = Editor::new(Config::default());
+            ed.code_review = Some(CodeReview::for_test(Base::Head, PathBuf::from("/x"), files));
+            ed
+        };
+        let rail = |ed: &Editor, w| Layout::new(ed, w, 40).rail_w;
+        let short = review(&["a.rs", "b.rs"]);
+        let hints = review_rail_need(short.code_review.as_ref().unwrap()) + 4;
+        assert!((24..31).contains(&hints), "two short names take what the hints need: {hints}");
+        assert_eq!(rail(&short, 140), hints);
+        assert_eq!(rail(&short, 240), hints, "not wider for a wide terminal");
+        // A long name: the rail grows to show it whole
+        let name = "a_rather_long_module_name_here.rs";
+        let long = review(&[name, "b.rs"]);
+        let w = rail(&long, 200);
+        assert_eq!(w, 4 + name.len() + " +12 −3".width() + 4, "the row whole, a cell of air");
+        assert!(w > 31 && w <= 48);
+        assert_eq!(rail(&long, 100), 40, "the code keeps 60");
+        // Longer than 48 can show: cut from the left — its end, the extension, stays
+        let huge = review(&["a_name_so_long_that_no_rail_could_ever_hold_it_whole_end.rs"]);
+        assert_eq!(rail(&huge, 200), 48);
+        let mut bytes = Vec::new();
+        let mut ed = huge;
+        ed.docs[0].text = ropey::Rope::from_str("fn main() {}\n"); // (an empty scratch is the start screen)
+        render(&mut ed, &mut bytes, 200, 40).unwrap();
+        let mut parser = vt100::Parser::new(40, 200, 0);
+        parser.process(&bytes);
+        let s = parser.screen().contents();
+        let row = s.lines().find(|l| l.contains("whole_end.rs")).expect("its row");
+        assert!(row.contains("…") && !row.contains("a_name_so_long"), "cut from the left: {row}");
+        assert!(row.contains("end.rs +12 −3 ▌"), "the end whole, a cell of air: {row}");
+        // A draft on a file doesn't move it
+        let mut ed = long;
+        crate::notes::add(&mut ed, &PathBuf::from("/x").join(name), 0..1, crate::notes::By::You, "draft");
+        ed.notes.list[0].thread[0].draft = true;
+        assert_eq!(rail(&ed, 200), w);
+    }
+
+    /// The task panel fits its output (U2): a line or two take a small panel, more grows it — up to half the
+    /// editing area — and it never shrinks while the run is up; the same task run again starts as tall as it
+    /// was, another task from the bottom. (Harmless: `printf` in the temp folder.)
+    #[test]
+    fn the_task_panel_fits_its_output() {
+        use crate::task::{Run, Task};
+        let task =
+            |name: &str| Task { name: name.into(), cmd: "printf ''".into(), cwd: std::env::temp_dir() };
+        let mut ed = Editor::new(Config::default());
+        let lay = |ed: &Editor| {
+            let l = Layout::new(ed, 120, 40);
+            (l.debug_h, l.text_rows + l.debug_h)
+        };
+        let mut r = Run::for_test(task("cargo fmt"));
+        r.output = vec![(false, "formatted".into())];
+        ed.task_run = Some(r);
+        let (h, total) = lay(&ed);
+        assert_eq!(h, TASK_PANEL_MIN, "one line: a small panel");
+        // More output: it grows to show it all
+        let more = |ed: &mut Editor, n: usize| {
+            ed.task_run.as_mut().unwrap().output = (0..n).map(|i| (false, format!("line {i}"))).collect();
+        };
+        more(&mut ed, 9);
+        assert_eq!(lay(&ed).0, 10, "the header and nine lines");
+        more(&mut ed, 400);
+        assert_eq!(lay(&ed).0, total / 2, "half the editing area at most");
+        // Never shrinking while the run is up (a resize may cut it, the code keeps its rows)
+        more(&mut ed, 2);
+        assert_eq!(lay(&ed).0, total / 2, "doesn't shrink back");
+        // The same task again starts as tall; another from the bottom
+        ed.task_start(task("cargo fmt"));
+        assert_eq!(lay(&ed).0, total / 2, "the same task again: as tall as it was");
+        ed.task_start(task("cargo build"));
+        assert_eq!(lay(&ed).0, TASK_PANEL_MIN, "another task: from the bottom");
+        ed.task_run = None;
+        assert_eq!(lay(&ed).0, 0, "no panel without a run");
     }
 
     /// The side panel grows with a wide terminal — up to 12 more columns, the code keeping 100.
