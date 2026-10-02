@@ -135,7 +135,12 @@ fn blocker(ed: &Editor, in_turn: bool) -> Option<String> {
 /// files are left to Claude by auto-save, so until the watch sees the write they'd count as unsaved.
 fn pending_writes(ed: &Editor) -> Option<Instant> {
     let now = Instant::now();
-    ed.docs.iter().filter(|d| d.is_modified()).filter_map(|d| d.agent_writes).filter(|&u| u > now).max()
+    ed.docs
+        .iter()
+        .filter(|d| d.is_modified())
+        .filter_map(|d| Some(d.agent_writes?.0))
+        .filter(|&u| u > now)
+        .max()
 }
 
 /// Claude's edits are still landing: looked at again shortly (the wait ends on the write, or after

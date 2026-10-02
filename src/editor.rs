@@ -3837,10 +3837,15 @@ mod tests {
 
     /// The answer tarae gave claude's permission request (from the fake's log).
     fn permission_answer(log: &Path) -> serde_json::Value {
+        permission_answer_to(log, "p1")
+    }
+
+    /// The answer tarae gave claude's permission request `id`.
+    fn permission_answer_to(log: &Path, id: &str) -> serde_json::Value {
         let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             let sent = std::fs::read_to_string(log).unwrap_or_default();
-            if let Some(l) = sent.lines().find(|l| l.contains("\"request_id\":\"p1\"")) {
+            if let Some(l) = sent.lines().find(|l| l.contains(&format!("\"request_id\":\"{id}\""))) {
                 return serde_json::from_str::<serde_json::Value>(l).unwrap()["response"]["response"].clone();
             }
             assert!(std::time::Instant::now() < end, "no answer: {sent}");
@@ -4270,6 +4275,82 @@ mod tests {
         feed(&mut ed, "<space>lagain<ret>");
         settle_until(&mut ed, |ed| !ed.chat.as_ref().unwrap().busy());
         assert!(ed.review.is_none(), "no orphaned review");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A fake claude that asks for two Edits to `file` back to back: p2 right after tarae answers p1 —
+    /// before the watch has seen claude write p1 (no watch runs in tests). Its stdin goes to the log.
+    fn fake_two_edits(ed: &mut Editor, dir: &Path, file: &Path) -> PathBuf {
+        let log = dir.join("stdin.log");
+        let ask = |id: &str, old: &str, new: &str| {
+            serde_json::json!({"type": "control_request", "request_id": id,
+                "request": {"subtype": "can_use_tool", "tool_name": "Edit",
+                    "input": {"file_path": file, "old_string": old, "new_string": new}}})
+        };
+        // (lengths change, so the file's fingerprint surely does)
+        let (p1, p2) = (ask("p1", "line 2", "LINE TWO"), ask("p2", "line 3", "LINE THREE"));
+        let result = serde_json::json!({"type": "result", "result": "done"});
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec![
+            "-c".into(),
+            format!(
+                "while read -r line; do printf '%s\\n' \"$line\" >> '{}'; case \"$line\" in \
+                 '{{\"message\"'*) printf '%s\\n' '{p1}';; *'\"p1\"'*) printf '%s\\n' '{p2}';; \
+                 *'\"p2\"'*) printf '%s\\n' '{result}';; esac; done",
+                log.display()
+            ),
+        ];
+        log
+    }
+
+    /// Claude's second Edit to a file comes while its write of the first is still on the way: the buffer
+    /// differs from disk only by that write, so the second is Claude's to write too — not left unsaved in
+    /// the buffer (seen twice making :restart — the tab kept its dot until a test run saved it).
+    #[test]
+    fn back_to_back_chat_edits_to_one_file_are_both_written() {
+        let (dir, main, ..) = follow_project("edit-twice");
+        let mut ed = editor("");
+        ed.open(&main).unwrap();
+        let log = fake_two_edits(&mut ed, &dir, &main);
+        feed(&mut ed, "<space>ltwo edits<ret>");
+        settle_until(&mut ed, |ed| ed.review.is_some());
+        feed(&mut ed, "y");
+        assert_eq!(permission_answer_to(&log, "p1")["behavior"], "allow");
+        settle_until(&mut ed, |ed| ed.review.is_some());
+        feed(&mut ed, "y");
+        let a = permission_answer_to(&log, "p2");
+        assert_eq!(a["behavior"], "allow", "{a}");
+        assert_eq!(
+            (a["updatedInput"]["old_string"].as_str(), a["updatedInput"]["new_string"].as_str()),
+            (Some("line 3"), Some("LINE THREE"))
+        );
+        // Claude writes it; the watch takes that as the save
+        let done = "line 1\nLINE TWO\nLINE THREE\n";
+        assert_eq!(text(&ed), done);
+        std::fs::write(&main, done).unwrap();
+        ed.on_focus(true);
+        settle_until(&mut ed, |ed| !ed.doc().is_modified());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// …but if the user typed in the buffer after accepting the first, disk isn't what they see: the second
+    /// stays in the buffer, as with any unsaved edits.
+    #[test]
+    fn back_to_back_chat_edits_after_typing_stay_in_the_buffer() {
+        let (dir, main, ..) = follow_project("edit-twice-typed");
+        let mut ed = editor("");
+        ed.open(&main).unwrap();
+        let log = fake_two_edits(&mut ed, &dir, &main);
+        feed(&mut ed, "<space>ltwo edits<ret>");
+        settle_until(&mut ed, |ed| ed.review.is_some());
+        feed(&mut ed, "y");
+        feed(&mut ed, "ggiX<esc>"); // (before p2 is read — events wait for settle_until)
+        settle_until(&mut ed, |ed| ed.review.is_some());
+        feed(&mut ed, "y");
+        let a = permission_answer_to(&log, "p2");
+        assert_eq!(a["behavior"], "deny", "{a}");
+        assert!(a["message"].as_str().unwrap().contains("unsaved"), "{a}");
+        assert_eq!(text(&ed), "Xline 1\nLINE TWO\nLINE THREE\n");
         std::fs::remove_dir_all(&dir).ok();
     }
 

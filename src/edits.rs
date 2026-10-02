@@ -100,7 +100,9 @@ fn show(ed: &mut Editor, p: Pending) {
         );
     }
     let doc = ed.doc();
-    let (doc_id, dirty, base) = (doc.id, doc.is_modified(), doc.text.to_string());
+    // (unsaved only by Claude's write of its previous edit — on its way, the watch may not have seen it yet)
+    let dirty = doc.is_modified() && !doc.unsaved_is_claudes();
+    let (doc_id, base) = (doc.id, doc.text.to_string());
     let proposed = match p.tool.as_str() {
         "Write" => s("content"),
         _ => {

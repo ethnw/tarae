@@ -133,7 +133,8 @@ pub struct Document {
     pub disk_conflict: bool,
     /// Claude was told to write this buffer's text (an accepted edit): until the write lands or this time
     /// passes, auto-save leaves the file to Claude — saving first fails its edit ("changed since read").
-    pub agent_writes: Option<std::time::Instant>,
+    /// (until, the buffer's version Claude writes)
+    pub agent_writes: Option<(std::time::Instant, u64)>,
     /// Saves of this buffer the saver thread hasn't finished (`saver.rs`) — the disk changing meanwhile is
     /// that write, not someone else's.
     pub saving: u32,

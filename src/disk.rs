@@ -351,7 +351,7 @@ impl Editor {
             if !d.is_modified() || d.path.is_none() || d.loading || d.disk_conflict {
                 continue;
             }
-            if d.agent_writes.is_some_and(|until| std::time::Instant::now() < until) {
+            if d.agent_writes.is_some_and(|(until, _)| std::time::Instant::now() < until) {
                 continue; // Claude writes it
             }
             let (id, name) = (d.id, d.display_name_short());
@@ -386,7 +386,13 @@ fn changed_while_editing(name: &str) -> String {
 impl crate::document::Document {
     /// Claude is about to write this buffer's text to the file — see `agent_writes`.
     pub fn agent_will_write(&mut self) {
-        self.agent_writes = Some(std::time::Instant::now() + AGENT_WRITE_WAIT);
+        self.agent_writes = Some((std::time::Instant::now() + AGENT_WRITE_WAIT, self.version()));
+    }
+
+    /// The buffer differs from disk only by an accepted edit Claude is writing (nothing typed since) — its
+    /// next edit goes on top of that, as on disk once the write lands.
+    pub fn unsaved_is_claudes(&self) -> bool {
+        self.agent_writes.is_some_and(|(until, v)| v == self.version() && std::time::Instant::now() < until)
     }
 }
 
@@ -555,7 +561,8 @@ mod tests {
         assert!(!ed.doc().is_modified() && ed.doc().agent_writes.is_none(), "its write is the save");
         // A claude that never writes: after the wait, auto-save does it
         feed(&mut ed, "ggwcTHREE<esc>");
-        ed.doc_mut().agent_writes = Some(std::time::Instant::now() - Duration::from_millis(1));
+        let v = ed.doc().version();
+        ed.doc_mut().agent_writes = Some((std::time::Instant::now() - Duration::from_millis(1), v));
         ed.on_focus(false);
         ed.flush_saves();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "THREE\n");
