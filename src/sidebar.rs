@@ -17,9 +17,6 @@ use crate::filetree::{Kind, Tree};
 use crate::key::{Code, Key};
 use crate::syntax::Def;
 
-/// The panel shows when the editing area is at least this wide.
-pub const MIN_EDIT_W: usize = 80;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Files,
@@ -580,8 +577,11 @@ impl Editor {
         if mode == Mode::Files {
             self.sidebar_list_files();
         }
-        if self.screen.edit_w.is_some_and(|w| w < MIN_EDIT_W) && !self.review_rail_up() {
-            self.set_warning(format!("the panel shows from {MIN_EDIT_W} columns — the code needs the room"));
+        if self.side_folded() {
+            self.set_warning(format!(
+                "no room for the panel — the code keeps {} columns (C-w < narrows the chat)",
+                crate::sizes::CODE_MIN
+            ));
         }
         self.sidebar_sync();
         let here = self.sidebar.as_ref().and_then(|s| s.here(self));
@@ -1008,9 +1008,10 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
     if ed.mode != EdMode::Normal || !ed.pending.is_empty() || ed.prompt.is_some() {
         return false;
     }
-    let Some(s) = ed.sidebar.as_mut().filter(|s| s.focus) else { return false };
     // Folded away (the terminal is too narrow for it and the code): the keys are the code's
-    if ed.screen.edit_w.is_some_and(|w| w < MIN_EDIT_W) {
+    let folded = ed.side_folded();
+    let Some(s) = ed.sidebar.as_mut().filter(|s| s.focus) else { return false };
+    if folded {
         s.focus = false;
         return false;
     }

@@ -340,7 +340,10 @@ fn output(ed: &mut Editor, generation: u64, bytes: &[u8]) {
 fn ended(ed: &mut Editor, generation: u64, code: i32) {
     if let Some(t) = ed.terminal.as_mut().filter(|t| t.generation == generation) {
         t.exited = Some(code);
-        t.focus = false;
+        // (filling the screen, it goes on doing so — its last lines to read)
+        if std::mem::take(&mut t.focus) && ed.zoom == Some(crate::sizes::Zoom::Bottom) {
+            ed.bottom_focus = true;
+        }
     } else if ed.terminal_generation == generation {
         ed.terminal_early.1 = Some(code);
     }
@@ -454,6 +457,8 @@ impl Editor {
         };
         if Some(key) == escape {
             t.focus = false;
+            // Filling the screen (`C-w z`): tarae's keys stay on it — the code isn't in sight
+            self.bottom_focus = self.zoom == Some(crate::sizes::Zoom::Bottom);
             return true;
         }
         // Typing scrolls back to the bottom
@@ -555,10 +560,14 @@ impl Editor {
 
     /// The wheel over the terminal: scroll back (up) / forward (down) three lines.
     pub fn terminal_scroll(&mut self, up: bool) {
+        self.terminal_scroll_by(if up { 3 } else { -3 });
+    }
+
+    /// `back` lines further back (forward when negative) — as far as it keeps (vt100 clamps).
+    pub fn terminal_scroll_by(&mut self, back: isize) {
         if let Some(t) = self.terminal.as_mut() {
             let now = t.parser.screen().scrollback();
-            let to = if up { now + 3 } else { now.saturating_sub(3) };
-            t.parser.screen_mut().set_scrollback(to);
+            t.parser.screen_mut().set_scrollback(now.saturating_add_signed(back));
         }
     }
 }
@@ -837,5 +846,59 @@ mod tests {
         }
         let t = ed.terminal.as_ref().unwrap();
         assert!(t.visible && t.focus, "shown with the keys, the same shell");
+    }
+
+    /// `C-w j` puts tarae's keys on the terminal (not the program's — `C-w z` can be typed there), `C-w z`
+    /// fills the screen with it, `i` types in it; its escape key then leaves the keys on it while it fills
+    /// the screen, and Esc goes back to the code — which ends it.
+    #[test]
+    fn the_terminal_fills_the_screen_and_its_escape_stays_on_it() {
+        use crate::sizes::Zoom;
+        let (config, _) = crate::config::parse("");
+        let mut ed = Editor::new(config);
+        ed.terminal_run(
+            vec!["/bin/sh".into()],
+            vec![("PS1".into(), "$ ".into()), ("HISTFILE".into(), "/dev/null".into())],
+        );
+        while ed.terminal.is_none() {
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_secs(5)) {
+                ed.handle_event(ev);
+            }
+        }
+        let draw = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 140, 40).unwrap();
+        };
+        let key = |c: char| Key { code: Code::Char(c), ctrl: false, alt: false };
+        let ctrl = |c: char| Key { code: Code::Char(c), ctrl: true, alt: false };
+        let focus = |ed: &Editor| ed.terminal.as_ref().unwrap().focus;
+        draw(&mut ed);
+        let small = ed.screen.bottom_h;
+        // Its escape, not filling the screen: back to the code
+        ed.handle_key(ctrl('\\'));
+        assert!(!focus(&ed) && !ed.bottom_focus);
+        for k in [ctrl('w'), key('j'), ctrl('w'), key('z')] {
+            ed.handle_key(k);
+        }
+        assert!(ed.bottom_focus && !focus(&ed), "tarae's keys on it");
+        draw(&mut ed);
+        assert_eq!(ed.zoomed(), Some(Zoom::Bottom));
+        assert_eq!(ed.screen.bottom_h, ed.screen.body_h, "all the rows");
+        ed.handle_key(key('i'));
+        assert!(focus(&ed) && !ed.bottom_focus, "the program's keys");
+        for c in "echo zoomed-in".chars() {
+            ed.handle_key(key(c));
+        }
+        ed.handle_key(Key::plain(Code::Enter));
+        assert_eq!(ed.doc().text.to_string(), "", "the buffer never saw them");
+        assert_eq!(ed.zoomed(), Some(Zoom::Bottom), "typing in it, it still fills the screen");
+        ed.handle_key(ctrl('\\'));
+        assert!(!focus(&ed) && ed.bottom_focus, "its escape: the keys stay on it");
+        assert_eq!(ed.zoomed(), Some(Zoom::Bottom));
+        ed.handle_key(Key::plain(Code::Esc));
+        assert!(!ed.bottom_focus);
+        assert_eq!(ed.zoom, None, "back to the code: it ended");
+        draw(&mut ed);
+        assert_eq!(ed.screen.bottom_h, small);
     }
 }

@@ -221,6 +221,10 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 
 | Key | Command | Description |
 |---|---|---|
+| `C-w +` | `bottom_taller` | Taller: the panel at the bottom |
+| `C-w <` | `panel_narrower` | Narrower: the chat, the side panel |
+| `C-w =` | `sizes_auto` | Sizes back to automatic |
+| `C-w >` | `panel_wider` | Wider: the chat, the side panel |
 | `C-w e` | `focus_side_panel` | To the side panel and back |
 | `C-w h` | `jump_view_left` | Window to the left |
 | `C-w j` | `jump_view_down` | Window below |
@@ -231,7 +235,9 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `C-w s` | `hsplit` | Split the window top / bottom |
 | `C-w v` | `vsplit` | Split the window side by side |
 | `C-w w` | `rotate_view` | Next window |
+| `C-w z` | `zoom_toggle` | Fill the screen with this, or back |
 | `C-w C-w` | `rotate_view` | Next window |
+| `C-w minus` | `bottom_shorter` | Shorter: the panel at the bottom |
 
 ### `space`
 
@@ -320,6 +326,10 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 
 | Key | Command | Description |
 |---|---|---|
+| `space w +` | `bottom_taller` | Taller: the panel at the bottom |
+| `space w <` | `panel_narrower` | Narrower: the chat, the side panel |
+| `space w =` | `sizes_auto` | Sizes back to automatic |
+| `space w >` | `panel_wider` | Wider: the chat, the side panel |
 | `space w e` | `focus_side_panel` | To the side panel and back |
 | `space w h` | `jump_view_left` | Window to the left |
 | `space w j` | `jump_view_down` | Window below |
@@ -330,7 +340,9 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `space w s` | `hsplit` | Split the window top / bottom |
 | `space w v` | `vsplit` | Split the window side by side |
 | `space w w` | `rotate_view` | Next window |
+| `space w z` | `zoom_toggle` | Fill the screen with this, or back |
 | `space w C-w` | `rotate_view` | Next window |
+| `space w minus` | `bottom_shorter` | Shorter: the panel at the bottom |
 
 ### `space x`
 

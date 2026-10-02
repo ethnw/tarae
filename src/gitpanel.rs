@@ -549,8 +549,14 @@ impl Editor {
                 // Nothing written yet: the draft goes in at the top (a plain insertion to read, the blank
                 // lines under it the gap before the `#` lines); amending: it's a new version of the message
                 let end = if text[..end].trim().is_empty() { 0 } else { end };
-                if let Err(e) = crate::llm::draft(ed, id, "a commit message", &prompt, 0, end) {
-                    ed.set_error(e);
+                match crate::llm::draft(ed, id, "a commit message", &prompt, 0, end) {
+                    // (its body at 72, like every message — Claude doesn't always: #21)
+                    Ok(()) => {
+                        if let Some(r) = ed.review.as_mut() {
+                            r.wrap = Some(72);
+                        }
+                    }
+                    Err(e) => ed.set_error(e),
                 }
             }
         });
@@ -741,7 +747,7 @@ fn commit_prompt(top: &Path, amend: bool) -> Result<String, String> {
         "Write the git commit message for the change below. Match the style of this repository's recent \
          commit messages (their subject lines, how they explain, trailers they use). A subject line, a blank \
          line, then a body on what changed and why — the reasons a reader of the history needs, not a file \
-         list. Reply with only the message, no code fences, no commentary.\n\n",
+         list. Wrap the body at 72 columns. Reply with only the message, no code fences, no commentary.\n\n",
     );
     if !recent.is_empty() {
         p.push_str("<recent-commits>\n");

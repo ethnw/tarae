@@ -19,7 +19,7 @@
 16
 17
 18
-19  ▐ DEMO ▌  pods · default                                            d describe  l logs  esc back
+19 ▎▐ DEMO ▌  pods · default                                            d describe  l logs  esc back
 20   NAME    READY  STATUS
 21   web-0   1/1    Running
 22   web-1   1/1    Running
@@ -81,7 +81,7 @@
 16
 17
 18
-19  a BBBB a  TTTT T TTTTTTT                                            D ffffffff  D ffff  DDD ffff
+19 aa BBBB a  TTTT T TTTTTTT                                            D ffffffff  D ffff  DDD ffff
 20   ffff    fffff  ffffff
 21
 22

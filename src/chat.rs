@@ -1294,7 +1294,15 @@ pub fn follow(ed: &mut Editor) {
 
 /// Keys while focus is in the chat panel. True if handled.
 pub fn key(ed: &mut Editor, key: Key) -> bool {
+    // (the second key of a sequence — `C-w >` from an empty input — is the keymap's)
+    if !ed.pending.is_empty() {
+        return false;
+    }
     let Some(c) = ed.chat.as_mut().filter(|c| c.focused) else { return false };
+    // An empty input: `C-w` is the windows' (sizes — `C-w >` widens the chat), nothing to delete
+    if key.ctrl && key.code == Code::Char('w') && c.input.is_empty() {
+        return false;
+    }
     let ch = |c: &Chat| c.input[..c.cursor].chars().next_back().map_or(0, char::len_utf8);
     match (key.code, key.ctrl, key.alt) {
         (Code::Esc, ..) => c.focused = false,

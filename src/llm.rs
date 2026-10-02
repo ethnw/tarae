@@ -621,6 +621,8 @@ pub struct Review {
     /// Accepted, it's a step of its own for `space u` (`space i`, Claude Code's) — a chat edit is part of
     /// its turn instead (`checkpoint.rs`).
     pub own_turn: bool,
+    /// The answer's lines wrapped at this width when it lands (a commit message's body at 72 — `wrap_message`).
+    pub wrap: Option<usize>,
 }
 
 /// Called when the review ends (applied?).
@@ -659,6 +661,7 @@ impl Review {
             by: "Claude",
             reason: String::new(),
             own_turn: true,
+            wrap: None,
         }
     }
 
@@ -890,6 +893,38 @@ pub fn review_with(
         Some(Review { ready: true, on_done, ..Review::new(ed.llm_generation, doc_id, instruction, hunks) });
 }
 
+/// A commit message with its body wrapped at `width` (git's convention, 72): the subject line stays as it
+/// is; a longer body line breaks between words, a list item's continuation under its text; indented lines
+/// (code), trailers (`Co-Authored-By: …`) and words longer than the width stay whole.
+pub fn wrap_message(text: &str, width: usize) -> String {
+    let mut out = String::new();
+    for (i, line) in text.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let trailer = line.split_once(": ").is_some_and(|(k, _)| !k.is_empty() && !k.contains(' '));
+        if i == 0 || line.chars().count() <= width || line.starts_with([' ', '\t']) || trailer {
+            out.push_str(line);
+            continue;
+        }
+        // A list item's lines go on under its text
+        let hang = ["- ", "* "].iter().find(|b| line.starts_with(**b)).map_or(0, |b| b.len());
+        let mut row = String::new();
+        for word in line.split(' ').filter(|w| !w.is_empty()) {
+            if !row.is_empty() && row.chars().count() + 1 + word.chars().count() > width {
+                out.push_str(&row);
+                out.push('\n');
+                row = " ".repeat(hang);
+            } else if !row.is_empty() && !row.ends_with(' ') {
+                row.push(' ');
+            }
+            row.push_str(word);
+        }
+        out.push_str(&row);
+    }
+    out
+}
+
 /// Preview of the streaming answer: the last few lines inside the `<r i="N">` being written.
 pub fn preview(streamed: &str, rows: usize) -> Vec<&str> {
     let body = match streamed.rfind("<r i=\"") {
@@ -922,7 +957,12 @@ fn on_result(ed: &mut Editor, generation: u64, result: Result<Vec<String>, Strin
         return;
     };
     let text = &ed.docs[doc_idx].text;
+    let wrap = rev.wrap;
     for (h, new) in rev.hunks.iter_mut().zip(replies) {
+        let new = match wrap {
+            Some(w) => wrap_message(&new, w),
+            None => new,
+        };
         h.new = match_trailing_newline(&h.old, new);
         if h.new == h.old {
             h.decision = Decision::Reject;
@@ -1069,6 +1109,33 @@ fn apply_accepted(ed: &mut Editor, rev: &Review) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A commit message's body wrapped at 72: the subject and short lines as they are, a long line between
+    /// words, a list item's rest under its text; code, trailers and an over-long word whole.
+    #[test]
+    fn commit_messages_wrap_at_72() {
+        let long = "word ".repeat(20).trim_end().to_string(); // 99 columns
+        let msg = format!(
+            "{long}\n\nshort line\n{long}\n- {long}\n    {long}\nCo-Authored-By: {long}\n{}",
+            "x".repeat(80)
+        );
+        let out = wrap_message(&msg, 72);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], long, "the subject stays");
+        assert_eq!(lines[2], "short line");
+        let row = "word ".repeat(14).trim_end().to_string(); // 69 columns — one more word would be 74
+        assert_eq!((lines[3], lines[4]), (row.as_str(), "word word word word word word"));
+        assert_eq!(lines[5], format!("- {}", "word ".repeat(14).trim_end()), "a list item (71 columns)");
+        assert!(lines[6].starts_with("  word"), "its rest under its text: {:?}", lines[6]);
+        assert!(lines.contains(&format!("    {long}").as_str()), "code stays");
+        assert!(lines.contains(&format!("Co-Authored-By: {long}").as_str()), "a trailer stays");
+        assert_eq!(*lines.last().unwrap(), "x".repeat(80), "a word longer than the width stays whole");
+        assert!(
+            lines[2..]
+                .iter()
+                .all(|l| l.len() <= 72 || l.starts_with(' ') || !l.contains(' ') || l.contains(": "))
+        );
+    }
 
     #[test]
     fn stream_lines_and_preview() {

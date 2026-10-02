@@ -183,6 +183,23 @@ pub struct Run {
     /// The tallest its panel has been (`term::task_panel_h`) — it never shrinks while the run is up; a run of
     /// the same task again starts there.
     pub tall: std::cell::Cell<usize>,
+    /// The output's first line shown, scrolled back (`sizes::bottom_key`, the wheel) — None: its end.
+    pub scroll: Option<usize>,
+}
+
+impl Run {
+    /// The output's first line in `rows` rows: where it was scrolled to, else the end (the newest in sight).
+    pub fn top(&self, rows: usize) -> usize {
+        let max = self.output.len().saturating_sub(rows);
+        self.scroll.map_or(max, |t| t.min(max))
+    }
+
+    /// `by` lines down (up when negative); back at the end, it follows the output again.
+    pub fn scroll_by(&mut self, by: isize, rows: usize) {
+        let max = self.output.len().saturating_sub(rows);
+        let top = self.top(rows).saturating_add_signed(by).min(max);
+        self.scroll = (top < max).then_some(top);
+    }
 }
 
 /// An install run's card, tool, and what goes on after it.
@@ -214,6 +231,7 @@ impl Run {
             guard: None,
             last_output: Instant::now(),
             tall: Default::default(),
+            scroll: None,
         }
     }
 }
@@ -506,6 +524,7 @@ impl Editor {
             guard: None,
             last_output: Instant::now(),
             tall: std::cell::Cell::new(tall),
+            scroll: None,
         });
     }
 }

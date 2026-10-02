@@ -72,6 +72,7 @@ mod settings;
 mod shell;
 mod sidebar;
 mod signature;
+mod sizes;
 mod split;
 mod structure;
 mod syntax;

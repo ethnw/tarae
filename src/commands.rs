@@ -244,6 +244,12 @@ commands! {
         jump_view_down => "Window below",
         wclose => "Close this window",
         wonly => "Close all other windows",
+        panel_wider => "Wider: the chat, the side panel",
+        panel_narrower => "Narrower: the chat, the side panel",
+        bottom_taller => "Taller: the panel at the bottom",
+        bottom_shorter => "Shorter: the panel at the bottom",
+        sizes_auto => "Sizes back to automatic",
+        zoom_toggle => "Fill the screen with this, or back",
         workspace_symbol_picker => "Symbols in the workspace",
         chat_close => "Close chat",
         code_action => "Code actions",
@@ -2096,6 +2102,30 @@ fn wclose(cx: &mut Context) {
     if !cx.editor.close_view() {
         cx.editor.set_status("only one window");
     }
+}
+
+fn panel_wider(cx: &mut Context) {
+    cx.editor.size_width(true);
+}
+
+fn panel_narrower(cx: &mut Context) {
+    cx.editor.size_width(false);
+}
+
+fn bottom_taller(cx: &mut Context) {
+    cx.editor.size_height(true);
+}
+
+fn bottom_shorter(cx: &mut Context) {
+    cx.editor.size_height(false);
+}
+
+fn sizes_auto(cx: &mut Context) {
+    cx.editor.sizes_auto();
+}
+
+fn zoom_toggle(cx: &mut Context) {
+    cx.editor.zoom_toggle();
 }
 
 fn wonly(cx: &mut Context) {

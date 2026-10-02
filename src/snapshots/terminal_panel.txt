@@ -14,7 +14,7 @@
 11  10     counts
 12  11 }
 13  12
-14  ▐ TERMINAL ▌  sh                                                            C-\ back to the code
+14 ▎▐ TERMINAL ▌  sh                                                            C-\ back to the code
 15  $ cargo test
 16  running 3 tests
 17  test words ... ok
@@ -64,7 +64,7 @@
 11  ff
 12  ff
 13  ff
-14  a BBBBBBBB a  TT                                                            DDD ffff ff fff ffff
+14 aa BBBBBBBB a  TT                                                            DDD ffff ff fff ffff
 15  B
 16
 17

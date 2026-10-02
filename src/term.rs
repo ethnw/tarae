@@ -307,18 +307,31 @@ fn render_frame(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io
         chat_mini: Default::default(),
         review_rail: Default::default(),
         sidebar: Default::default(),
-        edit_w: Some(lay.edit_w),
+        width: Some(lay.width),
+        chat_w: lay.chat_w,
+        side_w: if editor.review_rail_up() { 0 } else { lay.rail_w },
+        bottom_h: lay.debug_h,
+        body_h: lay.text_rows + lay.debug_h,
+        text_top: lay.text_top as usize,
         terminal_rows: (lay.debug_h > 0
             && editor.dap.is_none()
             && editor.terminal.as_ref().is_some_and(|t| t.visible))
         .then(|| {
             (lay.text_top as usize + lay.text_rows, lay.text_top as usize + lay.text_rows + lay.debug_h - 1)
         }),
+        // (the terminal's rows: its panel's — the size you set, or its own)
         terminal_size: std::cell::Cell::new(Some((
-            terminal_panel_h(lay.text_rows + lay.debug_h).saturating_sub(1).max(2) as u16,
+            crate::sizes::bottom(
+                lay.text_rows + lay.debug_h,
+                editor.sizes.bottom,
+                terminal_panel_h(lay.text_rows + lay.debug_h),
+            )
+            .saturating_sub(1)
+            .max(2) as u16,
             lay.edit_w.saturating_sub(2) as u16,
         ))),
         test_panel: Default::default(),
+        task_panel: Default::default(),
         plugin_panel: Default::default(),
         note_card: Default::default(),
         thought_card: Default::default(),
@@ -429,6 +442,16 @@ struct Layout {
     debug_h: usize,
     status_y: u16,
     cmd_y: u16,
+    /// What fills the screen (`C-w z`) — the rest gets no room.
+    zoom: Option<crate::sizes::Zoom>,
+}
+
+impl Layout {
+    /// No code drawn: something else fills the screen (the chat on a narrow screen too).
+    fn code_hidden(&self) -> bool {
+        use crate::sizes::Zoom;
+        self.edit_w == 0 || matches!(self.zoom, Some(Zoom::Bottom | Zoom::Side | Zoom::Chat))
+    }
 }
 
 impl Layout {
@@ -437,7 +460,13 @@ impl Layout {
         let text_top = header as u16;
         let total = (h as usize).saturating_sub(2 + text_top as usize).max(1);
         let terminal = editor.terminal.as_ref().is_some_and(|t| t.visible) && editor.dap.is_none();
-        let debug_h = if terminal {
+        // `C-w z`: one thing fills the screen (`sizes::Zoom`)
+        use crate::sizes::Zoom;
+        let zoom = editor.zoomed();
+        // What the slot's panel wants — unless you set its size (`C-w +`/`-`, a drag): that wins (U1)
+        let natural = if zoom.is_some_and(|z| z != Zoom::Bottom) {
+            0
+        } else if terminal {
             terminal_panel_h(total)
         } else if let Some(r) = task_in_the_slot(editor) {
             task_panel_h(r, total)
@@ -450,27 +479,38 @@ impl Layout {
         } else {
             0
         };
-        let text_rows = (total - debug_h).max(1);
+        let (debug_h, text_rows) = match zoom {
+            Some(Zoom::Bottom) => (total, 0),
+            _ if natural == 0 => (0, total),
+            _ => {
+                let h = crate::sizes::bottom(total, editor.sizes.bottom, natural);
+                (h, (total - h).max(1))
+            }
+        };
         let digits = editor.doc().text.len_lines().to_string().len();
         // Docs with a language server or breakpoints get one sign column before the line numbers
         let doc = editor.doc();
         let signs = wants_signs(editor, doc);
         let gutter = digits.max(3) + 1 + signs as usize;
-        let chat_w = chat_width(editor, w as usize);
         let scrollbar = editor.config.scrollbar && doc.text.len_lines() > total;
-        let edit_w = w as usize - chat_w;
         // The review's file rail when there's room for it and the code (else the header says where you are)
-        // …or the side panel (files / outline) — folded away when the code would get too narrow
+        // …or the side panel (files / outline): the chat's and its widths are yours or automatic, the panel
+        // giving way when the code would get too narrow (`sizes::widths`)
         let review = editor.review_rail_up();
-        // Wider on a wide terminal (names need the room) — as long as the code keeps 100 columns; it only
-        // changes with the terminal, never while you move in it
+        let chat_open = editor.chat.as_ref().is_some_and(|c| !c.compact());
+        let side_open = !review && editor.sidebar.is_some();
+        let widths = match zoom {
+            None => crate::sizes::widths(w as usize, chat_open, side_open, editor.sizes),
+            Some(Zoom::Chat) => crate::sizes::Widths { chat: w as usize, side: 0 },
+            Some(Zoom::Side) => crate::sizes::Widths { chat: 0, side: w as usize },
+            Some(_) => crate::sizes::Widths { chat: 0, side: 0 },
+        };
+        let chat_w = widths.chat;
+        let edit_w = w as usize - chat_w;
         let rail_w = match editor.code_review.as_ref() {
             // The review's: as wide as its names (U6)
-            Some(r) if review && edit_w >= 90 => review_rail_w(r, edit_w),
-            _ if !review && editor.sidebar.is_some() && edit_w >= crate::sidebar::MIN_EDIT_W => {
-                RAIL_W + (edit_w.saturating_sub(RAIL_W + 100) / 2).min(RAIL_MORE)
-            }
-            _ => 0,
+            Some(r) if review && zoom.is_none() && edit_w >= 90 => review_rail_w(r, edit_w),
+            _ => widths.side,
         };
         Self {
             width: w as usize,
@@ -487,6 +527,7 @@ impl Layout {
             debug_h,
             status_y: text_top + total as u16,
             cmd_y: text_top + total as u16 + 1,
+            zoom,
         }
     }
 }
@@ -539,10 +580,10 @@ fn panes(
         w: lay.edit_w - lay.rail_w,
         h: lay.text_rows,
     };
-    let many = editor.views.len() > 1;
-    let mut out: Vec<_> = editor
-        .split
-        .layout(area)
+    // (`C-w z`: the focused pane alone, no title row)
+    let many = editor.views.len() > 1 && lay.zoom.is_none();
+    let tiles = if lay.zoom.is_some() { vec![(editor.focus, area)] } else { editor.split.layout(area) };
+    let mut out: Vec<_> = tiles
         .into_iter()
         .filter_map(|(id, r)| {
             let v = editor.views.iter().find(|v| v.id == id)?;
@@ -588,7 +629,7 @@ fn draw_debug_panel(
         State::Exited(_) => ("EXITED", ui.linenr.fg),
     };
     queue!(out, MoveTo(0, y0 as u16))?;
-    let mut used = panel_pill(out, card, pill, label)?;
+    let mut used = panel_pill(out, card, pill, label, None)?;
     let what = match &d.state {
         State::Building => format!("  {}  {}", d.program, wave(d.started)),
         State::Stopped { reason } => {
@@ -766,15 +807,31 @@ fn draw_debug_panel(
     Ok(())
 }
 
-/// Bottom panel header start: ` ▐ LABEL ▌` — a pill in `pill` color. Returns the cells used.
+/// A test's or task's panel with the keys: what they do there, first in its header's hints.
+fn slot_hints(editor: &Editor) -> Vec<(&'static str, &'static str)> {
+    if !editor.bottom_focus {
+        return Vec::new();
+    }
+    let zoom = if editor.zoomed().is_some() { "back" } else { "full screen" };
+    vec![("j k", "scroll"), ("C-w z", zoom), ("esc", "to the code")]
+}
+
+/// The accent for a bottom panel's `▎` while it has the keys (`panel_pill`).
+fn keys_bar(editor: &Editor) -> Option<crossterm::style::Color> {
+    editor.bottom_has_keys().then(|| accent_color(&editor.theme)).flatten()
+}
+
+/// Bottom panel header start: ` ▐ LABEL ▌` — a pill in `pill` color; `▎` in `bar` first while the panel has
+/// the keys (as the side panel's). Returns the cells used.
 fn panel_pill(
     out: &mut impl Write,
     card: Style,
     pill: Option<crossterm::style::Color>,
     label: &str,
+    bar: Option<crossterm::style::Color>,
 ) -> io::Result<usize> {
-    apply(out, card)?;
-    queue!(out, Print(" "))?;
+    apply(out, Style { fg: bar, ..card })?;
+    queue!(out, Print(if bar.is_some() { "▎" } else { " " }))?;
     let edge = Style { fg: pill, ..card };
     apply(out, edge)?;
     queue!(out, Print("▐"))?;
@@ -912,7 +969,7 @@ fn draw_terminal_panel(
         (None, true) => ("TERMINAL", ui.accent.fg),
         (None, false) => ("TERMINAL", ui.virt.fg),
     };
-    let mut used = panel_pill(out, card, pill, label)?;
+    let mut used = panel_pill(out, card, pill, label, keys_bar(editor))?;
     let mut head = vec![(format!("  {}", t.title), strong)];
     if let Some(code) = t.exited {
         head.push((
@@ -930,10 +987,18 @@ fn draw_terminal_panel(
         used += text.width();
     }
     let esc = editor.config.terminal_escape.as_str();
-    let mut hints: Vec<(&str, &str)> = match (t.exited, t.focus) {
-        (Some(_), _) => vec![("space T", "close")],
-        (None, true) => vec![(esc, "back to the code")],
-        (None, false) => vec![(esc, "type in it"), ("space T", "hide")],
+    let zoomed = editor.zoomed().is_some();
+    let zoom = if zoomed { "back" } else { "full screen" };
+    let mut hints: Vec<(&str, &str)> = match (t.exited, t.focus, editor.bottom_focus) {
+        (Some(_), _, true) => vec![("j k", "scroll"), ("C-w z", zoom), ("esc", "to the code")],
+        (Some(_), _, false) => vec![("space T", "close")],
+        // (filling the screen, its escape leaves the keys on it: `C-w z` from there)
+        (None, true, _) if zoomed => vec![(esc, "stop typing")],
+        (None, true, _) => vec![(esc, "back to the code")],
+        (None, false, true) => {
+            vec![("i", "type in it"), ("j k", "scroll"), ("C-w z", zoom), ("esc", "to the code")]
+        }
+        (None, false, false) => vec![(esc, "type in it"), ("space T", "hide")],
     };
     // The program has the mouse: how to select in it anyway
     if t.exited.is_none() && screen.mouse_protocol_mode() != vt100::MouseProtocolMode::None {
@@ -1067,7 +1132,7 @@ fn draw_task_panel(
         State::Failed(_) => ("FAILED", bad),
     };
     queue!(out, MoveTo(0, y0 as u16))?;
-    let mut used = panel_pill(out, card, pill, label)?;
+    let mut used = panel_pill(out, card, pill, label, keys_bar(editor))?;
     let name = fit_ellipsis(&format!("  {}", r.task.name), (w / 3).max(12));
     apply(out, strong)?;
     queue!(out, Print(&name))?;
@@ -1105,6 +1170,7 @@ fn draw_task_panel(
     if r.by_claude {
         hints.retain(|h| h.0 != "space m m");
     }
+    hints.splice(0..0, slot_hints(editor));
     panel_hints(out, &hints, used, w, card, dim, faint)?;
     // The sandbox's line, when it blocked something: the bottom row, under the output
     let sandbox = crate::sandbox::panel_line(r.guard.as_ref(), running, r.last_output);
@@ -1112,7 +1178,10 @@ fn draw_task_panel(
     if let Some((line, quiet)) = &sandbox {
         sandbox_row(out, (y0 + 1 + rows) as u16, w, line, "space m s", quiet.as_deref(), card, warn, faint)?;
     }
-    let start = r.output.len().saturating_sub(rows);
+    // (its end, unless scrolled back; the wheel's thumb when it doesn't fit)
+    editor.screen.task_panel.set(Some((y0, y0 + rows, rows)));
+    let start = r.top(rows);
+    let bar = (r.output.len() > rows).then(|| scroll_thumb(rows, r.output.len(), start));
     for i in 0..rows {
         let y = (y0 + 1 + i) as u16;
         queue!(out, MoveTo(0, y))?;
@@ -1128,6 +1197,10 @@ fn draw_task_panel(
                 queue!(out, Print(fit_ellipsis(&r.task.cmd, w.saturating_sub(4))))?;
             }
             None => {}
+        }
+        if bar.as_ref().is_some_and(|b| b.contains(&i)) {
+            apply(out, faint)?;
+            queue!(out, MoveTo(w.saturating_sub(1) as u16, y), Print("▐"))?;
         }
     }
     Ok(())
@@ -1208,7 +1281,7 @@ fn draw_plugin_panel<W: Write>(
     let w = lay.edit_w;
     queue!(out, MoveTo(0, y0 as u16))?;
     let pill = if st.focus { ui.accent.fg } else { ui.linenr.fg };
-    let mut used = panel_pill(out, card, pill, &st.plugin.to_uppercase())?;
+    let mut used = panel_pill(out, card, pill, &st.plugin.to_uppercase(), keys_bar(editor))?;
     let title = fit_ellipsis(&format!("  {}", clean(&panel.title)), (w / 2).max(12));
     apply(out, strong)?;
     queue!(out, Print(&title))?;
@@ -1325,7 +1398,7 @@ fn draw_test_panel(
     };
     // ── Header row
     queue!(out, MoveTo(0, y0 as u16))?;
-    let mut used = panel_pill(out, card, pill, label)?;
+    let mut used = panel_pill(out, card, pill, label, keys_bar(editor))?;
     let name = fit_ellipsis(&format!("  {}", r.target.label), (w / 3).max(12));
     apply(out, strong)?;
     queue!(out, Print(&name))?;
@@ -1354,14 +1427,15 @@ fn draw_test_panel(
         }
         used += sum_w;
     }
-    let hints: &[(&str, &str)] = match r.state {
+    let mut hints = slot_hints(editor);
+    hints.extend_from_slice(match r.state {
         RunState::Running => &[("space x c", "stop")],
         // (most useful first — the ones that don't fit fold away from the end)
         _ => {
             &[("space x l", "again"), ("space x o", "output"), ("space x c", "close"), ("space x d", "debug")]
         }
-    };
-    panel_hints(out, hints, used, w, card, dim, faint)?;
+    });
+    panel_hints(out, &hints, used, w, card, dim, faint)?;
 
     // The sandbox's line, when it blocked something: the bottom row, under the rest
     let sandbox = crate::sandbox::panel_line(r.guard.as_ref(), running, r.last_output);
@@ -1639,19 +1713,6 @@ fn draw_pane_title(
     }
     apply(out, base)?;
     queue!(out, Spaces(r.w.saturating_sub(used)))
-}
-
-/// Chat panel width: 2/5 of the screen (36–72 cells). If editing area < 40 cells, it takes the whole screen.
-fn chat_width(editor: &Editor, w: usize) -> usize {
-    if editor.chat.is_none() {
-        return 0;
-    }
-    // Following: minimized to a floating card — the code gets the whole width
-    if editor.chat.as_ref().is_some_and(|c| c.compact()) {
-        return 0;
-    }
-    let c = (w * 2 / 5).clamp(36, 72);
-    if w < c + 40 { w } else { c }
 }
 
 /// Line-number column width (excluding the diagnostic sign column).
@@ -1994,9 +2055,10 @@ fn draw(
     if lay.header {
         draw_header(editor, ui, lay, out)?;
     }
-    // Narrow screen with the chat open: the chat takes it all — no text, nothing floating over it
+    // Narrow screen with the chat open: the chat takes it all — no text, nothing floating over it (so too
+    // when something fills the screen — `C-w z`)
     let text_cursor = match editor.review.as_ref().filter(|r| r.ready) {
-        _ if lay.edit_w == 0 => None,
+        _ if lay.code_hidden() => None,
         Some(rev) => {
             if let Some(rows) = review_rows {
                 draw_review(rev, rows, editor, ui, lay, out)?;
@@ -2011,6 +2073,7 @@ fn draw(
     };
     if let Some(r) = editor.code_review.as_ref().filter(|_| editor.review_rail_up())
         && lay.rail_w > 0
+        && lay.zoom.is_none()
         && !editor.review.as_ref().is_some_and(|r| r.ready)
         && !editor.welcome()
     {
@@ -2052,7 +2115,7 @@ fn draw(
     // card what's left (each skipped if nothing is)
     let note_rect = text_cursor.and_then(|at| note_card_geom(editor, at, ui, lay)).map(|g| g.rect());
     let offer_rect = offer.as_ref().map(|o| o.rect());
-    let mini_rect = editor.chat.as_ref().filter(|c| c.compact()).and_then(|c| {
+    let mini_rect = editor.chat.as_ref().filter(|c| c.compact() && !lay.code_hidden()).and_then(|c| {
         let avoid: Vec<Rect4> = [note_rect, offer_rect].into_iter().flatten().collect();
         chat_mini_rect(c, editor, ui, lay, &avoid)
     });
@@ -2060,7 +2123,7 @@ fn draw(
     if let Some(c) = editor.chat.as_ref().filter(|c| {
         c.follow.on && (c.busy() || c.follow.touring() || crate::follow::stop_here(editor).is_some())
     }) && editor.review.is_none()
-        && lay.edit_w > 0
+        && !lay.code_hidden()
         && !editor.welcome()
     {
         let taken: Vec<Rect4> = [note_rect, mini_rect, offer_rect].into_iter().flatten().collect();
@@ -4694,6 +4757,13 @@ fn draw_statusline(
     let col = doc.text.byte_slice(mv::line_start(&doc.text, line)..pos).len_chars() + 1; // char col for users
     let gap = |keep| Seg { text: "   ".into(), style: ui.status, keep };
     let mut right = Vec::new();
+    // `C-w z`: one thing fills the screen — how to get the rest back
+    if lay.zoom.is_some() {
+        right.push(Seg { text: "full screen  ".into(), style: dim, keep: 215 });
+        right.push(Seg { text: "C-w z".into(), style: Style { bold: true, ..dim }, keep: 215 });
+        right.push(Seg { text: " back".into(), style: Style { fg: ui.linenr.fg, ..ui.status }, keep: 215 });
+        right.push(gap(215));
+    }
     match &editor.review {
         Some(r) if r.ready => {
             right.push(Seg {
@@ -6073,7 +6143,13 @@ fn draw_sidebar(
     let strong = card.patch(t.try_get("ui.text.focus").unwrap_or(Style { bold: true, ..Style::default() }));
     let selected = selected_row(ui, editor, card);
     let key = Style { bold: true, fg: ui.virt.fg, ..card };
-    let edge = Style { fg: card.bg, bg: ui.base.bg, ..Style::default() };
+    // (the edge in the accent while it's being dragged — U1)
+    let dragged = editor.dragging == Some(crate::sizes::Border::Side);
+    let edge = Style {
+        fg: if dragged { accent_color(&editor.theme) } else { card.bg },
+        bg: ui.base.bg,
+        ..Style::default()
+    };
     let sp = |text: &str, style: Style| Span { text: text.to_string(), style };
     let w = lay.rail_w - 3; // margin 2 · edge 1
     let lines = sb.lines();
@@ -6233,11 +6309,6 @@ fn draw_sidebar(
     }
     Ok(())
 }
-
-/// Width of the side panel — and how much wider a wide terminal makes it (the review's rail fits its names:
-/// `review_rail_w`).
-const RAIL_W: usize = 32;
-const RAIL_MORE: usize = 12;
 
 /// The code review's files, left of the code: what's being compared, then one row per file — `●` viewed /
 /// `◦` not, the name (folder faint), `+a −r`, `¶n` comments — the current one on the accent bar; the keys at
@@ -6747,7 +6818,10 @@ fn draw_chat(
     let mut chat_links = editor.screen.chat_links.borrow_mut();
 
     // ── Draw row by row: [edge][margin 2][text w][margin 1]
-    let edge = Style { fg: card.bg, bg: ui.base.bg, ..Style::default() };
+    // (the edge in the accent while it's being dragged — U1)
+    let dragged = editor.dragging == Some(crate::sizes::Border::Chat);
+    let edge_fg = if dragged { accent_color(&editor.theme) } else { card.bg };
+    let edge = Style { fg: edge_fg, bg: ui.base.bg, ..Style::default() };
     let mut y = top;
     // Title
     chat_row_start(out, x0, y, edge, card)?;

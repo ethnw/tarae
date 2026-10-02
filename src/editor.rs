@@ -188,13 +188,22 @@ pub struct Screen {
     pub review_rail: std::cell::RefCell<Vec<(usize, usize)>>,
     /// The side panel's rows: (screen row, list row) — a click opens it.
     pub sidebar: std::cell::RefCell<Vec<(usize, usize)>>,
-    /// Width of the editing area (the chat's excluded) last frame — None before the first (tests).
-    pub edit_w: Option<usize>,
+    /// The whole screen's width (None before the first frame — tests) · the chat's, the side panel's (0: not shown — folded away if it's open) and
+    /// the bottom slot's (rows) as drawn last frame (`sizes.rs` starts a change from these).
+    pub width: Option<usize>,
+    pub chat_w: usize,
+    pub side_w: usize,
+    pub bottom_h: usize,
+    /// The rows of code and bottom slot together, from row `text_top`.
+    pub body_h: usize,
+    pub text_top: usize,
     /// The terminal panel: its rows on screen (first, last) when it shows · the size a terminal gets.
     pub terminal_rows: Option<(usize, usize)>,
     pub terminal_size: std::cell::Cell<Option<(u16, u16)>>,
     /// The test panel: its rows (first, last) and how many of them the detail has — the wheel scrolls it.
     pub test_panel: std::cell::Cell<Option<(usize, usize, usize)>>,
+    /// The task panel's: (first, last, rows of output).
+    pub task_panel: std::cell::Cell<Option<(usize, usize, usize)>>,
     /// A plugin's panel: (its first screen line, its last, its first row's line, the first row shown).
     pub plugin_panel: std::cell::Cell<Option<(usize, usize, usize, usize)>>,
     /// The note card and the thought card this frame (x, y, width, height).
@@ -435,6 +444,17 @@ pub struct Editor {
     pub allow_path: Option<std::path::PathBuf>,
     /// The last frame drawn and its size — what the user sees (`chat::attach_screen`).
     pub last_frame: Option<(Vec<u8>, u16, u16)>,
+    /// Sizes you set — the chat's and side panel's widths, the bottom slot's height (`sizes.rs`), global and
+    /// kept in `sizes_path` (None in tests: nothing read or written) · the latest write's number.
+    pub sizes: crate::sizes::Sizes,
+    pub sizes_path: Option<PathBuf>,
+    pub sizes_seq: u64,
+    /// The border the mouse is dragging (pressed on it, not let go yet).
+    pub dragging: Option<crate::sizes::Border>,
+    /// `C-w z`: what fills the screen — drawn only while it still has the keys (`sizes::Editor::zoomed`).
+    pub zoom: Option<crate::sizes::Zoom>,
+    /// The bottom slot has tarae's keys (`C-w j`, a click): they scroll its output (`sizes::bottom_key`).
+    pub bottom_focus: bool,
     /// The project — the folder tarae started in, links resolved (follow mode goes nowhere else). Tests with
     /// a project of their own in a temp folder set it.
     pub project_root: Option<PathBuf>,
@@ -572,6 +592,17 @@ impl Editor {
             blocked: None,
             last_frame: None,
             project_root: std::fs::canonicalize(cwd()).ok(),
+            // (a few bytes, read before the first frame — it's drawn at the sizes you left)
+            sizes: if cfg!(test) {
+                Default::default()
+            } else {
+                crate::sizes::Sizes::read(crate::sizes::Sizes::path().as_deref())
+            },
+            sizes_path: if cfg!(test) { None } else { crate::sizes::Sizes::path() },
+            sizes_seq: 0,
+            dragging: None,
+            zoom: None,
+            bottom_focus: false,
             screen_sends: Vec::new(),
             sandbox: if cfg!(test) { crate::sandbox::Availability::Bypass } else { Default::default() },
             restart: None,
@@ -863,10 +894,21 @@ impl Editor {
     }
 
     /// Between the code's windows only (`C-w e` is the side panel's way in and out).
+    /// `C-w h/j/k/l`: to the pane that way — below the lowest one, the bottom slot (`C-w k` from it, back to
+    /// the code).
     pub fn focus_dir(&mut self, dx: i32, dy: i32) {
+        if self.bottom_has_keys() {
+            if dy < 0 {
+                self.bottom_focus = false;
+                self.plugin_panel_unfocus();
+            }
+            return;
+        }
         let panes: Vec<_> = self.screen.panes.iter().map(|(v, r, _, _)| (*v, *r)).collect();
         if let Some(v) = crate::split::neighbor(&panes, self.focus, dx, dy) {
             self.focus_view(v);
+        } else if dy > 0 {
+            self.bottom_take_keys();
         }
     }
 
@@ -1115,6 +1157,7 @@ impl Editor {
             Event::Job(apply) => apply(self),
         }
         self.sync_focus_view();
+        self.focus_sync();
         self.schedule_parses();
         self.lsp_flush();
         self.inlay_schedule();
@@ -1211,6 +1254,26 @@ impl Editor {
                 'N' => self.offer_never(),
                 d => self.offer_to_front(d.to_digit(10).unwrap_or(0) as usize),
             }
+            return;
+        }
+        // A border being dragged (the chat's edge, the side panel's, the bottom panel's top row): it follows the
+        // mouse; let go, the size is kept
+        if let Some(b) = self.dragging {
+            match m.kind {
+                K::Drag => self.border_drag(b, x, y),
+                K::Up => {
+                    self.dragging = None;
+                    self.border_done(b);
+                }
+                _ => self.dragging = None,
+            }
+            return;
+        }
+        if m.kind == K::Down
+            && self.picker.is_none()
+            && let Some(b) = self.border_at(x, y)
+        {
+            self.dragging = Some(b);
             return;
         }
         if let Some(p) = self.picker.as_mut() {
@@ -1313,17 +1376,33 @@ impl Editor {
             }
             return;
         }
-        // The test panel: the wheel scrolls its detail (the failure's message, or the output)
+        // The test panel: the wheel scrolls its detail (the failure's message, or the output); a click gives it
+        // the keys (`sizes::bottom_key`)
+        let slot = self.slot();
         if let Some((y0, y1, rows)) = s.test_panel.get()
+            && slot == Some(crate::sizes::Slot::Test)
             && (y0..=y1).contains(&y)
             && s.chat_x.is_none_or(|cx| x < cx)
         {
-            if let Some(r) = self.test_run.as_mut() {
-                match m.kind {
-                    K::ScrollDown => r.scroll_by(3, rows),
-                    K::ScrollUp => r.scroll_by(-3, rows),
-                    _ => {}
-                }
+            match (m.kind, self.test_run.as_mut()) {
+                (K::ScrollDown, Some(r)) => r.scroll_by(3, rows),
+                (K::ScrollUp, Some(r)) => r.scroll_by(-3, rows),
+                (K::Down, _) => self.bottom_take_keys(),
+                _ => {}
+            }
+            return;
+        }
+        // The task panel: the same, over its output
+        if let Some((y0, y1, rows)) = s.task_panel.get()
+            && slot == Some(crate::sizes::Slot::Task)
+            && (y0..=y1).contains(&y)
+            && s.chat_x.is_none_or(|cx| x < cx)
+        {
+            match (m.kind, self.task_run.as_mut()) {
+                (K::ScrollDown, Some(r)) => r.scroll_by(3, rows),
+                (K::ScrollUp, Some(r)) => r.scroll_by(-3, rows),
+                (K::Down, _) => self.bottom_take_keys(),
+                _ => {}
             }
             return;
         }
@@ -1414,6 +1493,7 @@ impl Editor {
             c.focused = false;
         }
         self.plugin_panel_unfocus();
+        self.bottom_focus = false;
         self.completion = None;
         self.popup = None;
         let tab = self.config.tab_width;
@@ -1985,9 +2065,11 @@ impl Editor {
                 t.life = age + TOAST_FADE;
             }
         }
+        // (whoever took the keys since — a click, a job — has them)
+        self.focus_sync();
         // The terminal has the keys: all of them go to its program (`C-\` gives them back)
         if self.picker.is_none() && self.prompt.is_none() && self.terminal_key(key) {
-            return;
+            return self.focus_sync();
         }
         // Grammar offers: y·n·Esc in normal mode (something else open or a pending prefix key goes first) —
         // not while the chat's input has the keys: a card took the `n`s of a message being typed
@@ -2026,6 +2108,7 @@ impl Editor {
         self.insert_key(key);
         self.handle_key_inner(key);
         self.insert_finished(self.last_trigger_len);
+        self.focus_sync();
         self.track_doc_switch();
         if self.diag_card_hidden.is_some_and(|h| h != (self.doc().id, self.cursor_line())) {
             self.diag_card_hidden = None;
@@ -2096,6 +2179,9 @@ impl Editor {
             return;
         }
         if crate::plugin::plugin_panel_key(self, key) {
+            return;
+        }
+        if crate::sizes::bottom_key(self, key) {
             return;
         }
         // Start screen: `r` = the last session here
@@ -5581,7 +5667,7 @@ mod tests {
         let s = screen(&mut ed);
         assert!(ed.code_review.is_some() && !ed.review_rail_up(), "the review open, behind the tab");
         assert!(ed.sidebar.as_ref().is_some_and(|s| s.focus && s.mode == crate::sidebar::Mode::Git));
-        assert!(s.contains("review behind") && s.contains("space g back to it"), "{s}");
+        assert!(s.contains("review behind") && s.contains("space g back"), "{s}");
         assert!(!s.contains("undo the whole turn"), "the rail gave the column: {s}");
         assert!(s.contains("review 1/3"), "the status line says which file: {s}");
         feed(&mut ed, "jkd");
@@ -5676,6 +5762,312 @@ mod tests {
         std::fs::remove_dir_all(&repo).ok();
     }
 
+    /// Sizes you set (U1): `C-w >`/`<` on the chat — from the chat's empty input too (with text there, `C-w`
+    /// deletes a word) — and on the side panel when it has the keys; `C-w +`/`-` on the bottom slot, which
+    /// then wins over its panel's own height; kept in a file (global), shown clamped on a smaller screen
+    /// without changing what's kept; `C-w =` makes all automatic again.
+    #[test]
+    fn sizes_you_set_are_kept_and_clamped() {
+        let dir = std::env::temp_dir().join(format!("tarae-sizes-keys-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ed = editor("fn main() {}\n");
+        ed.sizes_path = Some(dir.join("sizes.json"));
+        // (the chat's process: a stand-in that reads and says nothing)
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        let draw = |ed: &mut Editor, w: u16| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, w, 40).unwrap();
+        };
+        draw(&mut ed, 140);
+        // The chat: automatic 56 at 140; C-w > from its empty input widens it
+        crate::chat::open(&mut ed);
+        draw(&mut ed, 140);
+        assert_eq!(ed.screen.chat_w, 56);
+        assert!(ed.chat.as_ref().unwrap().focused);
+        feed(&mut ed, "<C-w>>");
+        draw(&mut ed, 140);
+        assert_eq!((ed.sizes.chat, ed.screen.chat_w), (Some(60), 60));
+        assert!(ed.chat.as_ref().unwrap().input.is_empty(), "nothing typed into the chat");
+        // With text in the input, C-w deletes a word as before
+        feed(&mut ed, "two words<C-w>");
+        assert_eq!(ed.chat.as_ref().unwrap().input, "two ");
+        feed(&mut ed, "<C-u><esc>");
+        // From the code: the chat
+        feed(&mut ed, "<C-w><lt><C-w><lt>");
+        draw(&mut ed, 140);
+        assert_eq!(ed.screen.chat_w, 52);
+        // Said in one toast that changes, not a stack of them
+        let said: Vec<&str> =
+            ed.toasts.iter().filter(|t| t.text.starts_with("chat ")).map(|t| t.text.as_str()).collect();
+        assert_eq!(said, ["chat 52 columns · C-w = automatic"]);
+        // Kept in the file
+        let kept = || crate::sizes::Sizes::read(Some(&dir.join("sizes.json")));
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while kept().chat != Some(52) && std::time::Instant::now() < end {
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
+        assert_eq!(kept().chat, Some(52), "written");
+        // A smaller screen shows less of it; the kept size stays, a bigger screen has it again
+        ed.sizes.chat = Some(90);
+        draw(&mut ed, 120);
+        assert_eq!((ed.screen.chat_w, ed.sizes.chat), (80, Some(90)), "clamped, not overwritten");
+        draw(&mut ed, 200);
+        assert_eq!(ed.screen.chat_w, 90);
+        // The side panel, with the keys: its own width
+        crate::chat::close(&mut ed);
+        ed.sidebar = Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Files, dir.clone()));
+        ed.sidebar.as_mut().unwrap().focus = true;
+        draw(&mut ed, 140);
+        let side = ed.screen.side_w;
+        feed(&mut ed, "<C-w>>");
+        draw(&mut ed, 140);
+        assert_eq!(ed.screen.side_w, side + crate::sizes::STEP_COLS);
+        // The bottom slot: yours wins over the task panel's own height
+        let mut run = crate::task::Run::for_test(crate::task::Task {
+            name: "t".into(),
+            cmd: "true".into(),
+            cwd: dir.clone(),
+        });
+        run.output = vec![(false, "one".into())];
+        ed.task_run = Some(run);
+        ed.sidebar.as_mut().unwrap().focus = false;
+        draw(&mut ed, 140);
+        assert_eq!(ed.screen.bottom_h, 3, "its own: a small one");
+        feed(&mut ed, "<C-w>+<C-w>+");
+        draw(&mut ed, 140);
+        assert_eq!((ed.sizes.bottom, ed.screen.bottom_h), (Some(7), 7));
+        // C-w =: all automatic again
+        feed(&mut ed, "<C-w>=");
+        draw(&mut ed, 140);
+        assert_eq!(ed.sizes, crate::sizes::Sizes::default());
+        assert_eq!((ed.screen.bottom_h, ed.screen.side_w), (3, side));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The borders drag (U1): the chat's left edge, the side panel's edge, the bottom panel's top row follow
+    /// the mouse — within what leaves the code its room — and what's set when it's let go is kept; a press
+    /// elsewhere isn't a drag.
+    #[test]
+    fn borders_drag_and_the_size_is_kept() {
+        use crate::event::{Mouse, MouseKind as K};
+        let dir = std::env::temp_dir().join(format!("tarae-sizes-drag-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ed = editor("fn main() {}\n");
+        ed.sizes_path = Some(dir.join("sizes.json"));
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        let draw = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 140, 40).unwrap();
+        };
+        let mouse = |ed: &mut Editor, kind, x: u16, y: u16| ed.handle_mouse(Mouse { kind, x, y, alt: false });
+        crate::chat::open(&mut ed);
+        ed.chat.as_mut().unwrap().focused = false;
+        draw(&mut ed);
+        // The chat's edge: at column 140 - 56; dragged 10 to the left, 10 wider
+        let edge = (140 - ed.screen.chat_w) as u16;
+        assert_eq!(ed.border_at(edge as usize, 10), Some(crate::sizes::Border::Chat));
+        assert_eq!(ed.border_at(edge as usize - 1, 10), None, "beside it: not the border");
+        mouse(&mut ed, K::Down, edge, 10);
+        mouse(&mut ed, K::Drag, edge - 10, 12);
+        draw(&mut ed);
+        assert_eq!(ed.screen.chat_w, 66, "follows the mouse");
+        // Past what leaves the code its room: held there
+        mouse(&mut ed, K::Drag, 2, 12);
+        draw(&mut ed);
+        assert_eq!(ed.screen.chat_w, 140 - crate::sizes::CHAT_FULL_CODE);
+        mouse(&mut ed, K::Drag, edge - 10, 12);
+        assert!(ed.toasts.is_empty(), "nothing said while it moves");
+        mouse(&mut ed, K::Up, edge - 10, 12);
+        assert!(ed.dragging.is_none());
+        assert!(ed.toasts.iter().any(|t| t.text == "chat 66 columns · C-w = automatic"), "said when let go");
+        let kept = || crate::sizes::Sizes::read(Some(&dir.join("sizes.json")));
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while kept().chat != Some(66) && std::time::Instant::now() < end {
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
+        assert_eq!(kept().chat, Some(66), "kept when let go");
+        // The side panel's edge (its last column)
+        crate::chat::close(&mut ed);
+        ed.sidebar = Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Files, dir.clone()));
+        draw(&mut ed);
+        let side = ed.screen.side_w as u16;
+        mouse(&mut ed, K::Down, side - 1, 5);
+        mouse(&mut ed, K::Drag, side + 7, 5);
+        mouse(&mut ed, K::Up, side + 7, 5);
+        draw(&mut ed);
+        assert_eq!(ed.screen.side_w, side as usize + 8);
+        // The bottom panel's top row, dragged up 5 rows: 5 taller
+        let mut run = crate::task::Run::for_test(crate::task::Task {
+            name: "t".into(),
+            cmd: "true".into(),
+            cwd: dir.clone(),
+        });
+        run.output = vec![(false, "one".into())];
+        ed.task_run = Some(run);
+        draw(&mut ed);
+        let (h, top) = (ed.screen.bottom_h, ed.screen.text_top + ed.screen.body_h - ed.screen.bottom_h);
+        mouse(&mut ed, K::Down, 60, top as u16);
+        mouse(&mut ed, K::Drag, 60, top as u16 - 5);
+        mouse(&mut ed, K::Up, 60, top as u16 - 5);
+        draw(&mut ed);
+        assert_eq!(ed.screen.bottom_h, h + 5);
+        // A press in the code isn't a drag
+        mouse(&mut ed, K::Down, 60, 3);
+        assert!(ed.dragging.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A finished task of 40 lines, its panel at the bottom.
+    fn task_of_40_lines(ed: &mut Editor) {
+        let mut run = crate::task::Run::for_test(crate::task::Task {
+            name: "t".into(),
+            cmd: "true".into(),
+            cwd: std::env::temp_dir(),
+        });
+        run.output = (0..40).map(|i| (false, format!("line {i}"))).collect();
+        ed.task_run = Some(run);
+    }
+
+    /// The bottom slot takes the keys — `C-w j` below the code, or a click on it: they scroll its output
+    /// (back to following its end at `G`) and never reach the code; Esc or `C-w k` give them back, and so
+    /// does a click in the code. Nothing there: it says so.
+    #[test]
+    fn the_bottom_slot_takes_the_keys() {
+        use crate::event::{Mouse, MouseKind as K};
+        let mut ed = editor("a\nb\nc\n");
+        let draw = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 140, 40).unwrap();
+        };
+        feed(&mut ed, "<C-w>j");
+        assert!(!ed.bottom_focus);
+        assert!(ed.toasts.iter().any(|t| t.text.starts_with("nothing at the bottom")));
+        task_of_40_lines(&mut ed);
+        draw(&mut ed);
+        let rows = ed.screen.task_panel.get().unwrap().2;
+        let end = 40 - rows;
+        let top = |ed: &Editor| ed.task_run.as_ref().unwrap().top(rows);
+        assert_eq!(top(&ed), end, "its end in sight");
+        feed(&mut ed, "<C-w>j");
+        assert!(ed.bottom_focus);
+        feed(&mut ed, "kkk");
+        assert_eq!(top(&ed), end - 3, "scrolled back");
+        feed(&mut ed, "xdi");
+        assert_eq!(text(&ed), "a\nb\nc\n", "the code never saw them");
+        assert_eq!(ed.mode, Mode::Normal);
+        assert_eq!(ed.cursor_line(), 0);
+        feed(&mut ed, "g");
+        assert_eq!(top(&ed), 0);
+        feed(&mut ed, "G");
+        assert_eq!(ed.task_run.as_ref().unwrap().scroll, None, "at the end: follows it again");
+        // Its header says it has the keys, and what they do
+        draw(&mut ed);
+        let (frame, w, h) = ed.last_frame.clone().unwrap();
+        let screen = crate::screen::text(&frame, w, h).unwrap();
+        let head = screen.lines().find(|l| l.contains(" OK ")).unwrap();
+        assert!(head.starts_with('▎') && head.contains("j k scroll"), "{head}");
+        feed(&mut ed, "<esc>j");
+        assert!(!ed.bottom_focus);
+        assert_eq!(ed.cursor_line(), 1, "the code's again");
+        feed(&mut ed, "<C-w>j<C-w>k");
+        assert!(!ed.bottom_focus, "C-w k: back up");
+        // A click on the panel, then one in the code
+        let y = ed.screen.task_panel.get().unwrap().0 as u16 + 2;
+        ed.handle_mouse(Mouse { kind: K::Down, x: 20, y, alt: false });
+        assert!(ed.bottom_focus);
+        let line_1 = ed.screen.text_top as u16 + 1;
+        ed.handle_mouse(Mouse { kind: K::Down, x: 20, y: line_1, alt: false });
+        assert!(!ed.bottom_focus);
+        assert_eq!(ed.cursor_line(), 1);
+        // The panel gone: so are its keys
+        feed(&mut ed, "<C-w>j");
+        ed.task_run = None;
+        feed(&mut ed, "j");
+        assert!(!ed.bottom_focus);
+        assert_eq!(ed.cursor_line(), 2);
+    }
+
+    /// `C-w z` fills the screen with what has the keys — the code (its pane alone), the bottom slot, the
+    /// chat, the side panel — and again gives the rest back; the keys going elsewhere end it too. The
+    /// sizes you set stay as they were.
+    #[test]
+    fn c_w_z_fills_the_screen_with_what_has_the_keys() {
+        let mut ed = editor("fn main() {}\n");
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        let draw = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 140, 40).unwrap();
+        };
+        let shown =
+            |ed: &Editor| (ed.screen.chat_w, ed.screen.side_w, ed.screen.bottom_h, ed.screen.panes.len());
+        // Alone: nothing to hide
+        draw(&mut ed);
+        feed(&mut ed, "<C-w>z");
+        assert_eq!(ed.zoom, None);
+        assert!(ed.toasts.iter().any(|t| t.text == "the code has the whole screen already"));
+        // The chat, the side panel, a task, two panes
+        crate::chat::open(&mut ed);
+        ed.chat.as_mut().unwrap().focused = false;
+        ed.sidebar = Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Files, std::env::temp_dir()));
+        ed.sidebar.as_mut().unwrap().focus = false;
+        task_of_40_lines(&mut ed);
+        feed(&mut ed, "<C-w>v");
+        draw(&mut ed);
+        let all = shown(&ed);
+        assert!(all.0 > 0 && all.1 > 0 && all.2 > 0 && all.3 == 2, "{all:?}");
+        let sizes = ed.sizes;
+        // The code: its pane alone, the whole width
+        feed(&mut ed, "<C-w>z");
+        draw(&mut ed);
+        assert_eq!(shown(&ed), (0, 0, 0, 1));
+        assert_eq!(ed.screen.panes[0].1.w, 140);
+        let (frame, w, h) = ed.last_frame.clone().unwrap();
+        let screen = crate::screen::text(&frame, w, h).unwrap();
+        assert!(screen.lines().last().unwrap().contains("full screen  C-w z back"), "{screen}");
+        feed(&mut ed, "<C-w>z");
+        draw(&mut ed);
+        assert_eq!(shown(&ed), all, "back as it was");
+        // The bottom slot: all the rows; its keys still scroll it; Esc back to the code ends it
+        feed(&mut ed, "<C-w>j<C-w>z");
+        draw(&mut ed);
+        assert_eq!((ed.screen.bottom_h, ed.screen.chat_w, ed.screen.side_w), (ed.screen.body_h, 0, 0));
+        feed(&mut ed, "k");
+        assert_eq!(
+            ed.task_run.as_ref().unwrap().scroll,
+            Some(40 - ed.screen.task_panel.get().unwrap().2 - 1)
+        );
+        feed(&mut ed, "<esc>");
+        draw(&mut ed);
+        assert_eq!((ed.zoom, shown(&ed)), (None, all), "the keys went to the code: it ended");
+        // The chat (its empty input lets C-w through)
+        ed.chat.as_mut().unwrap().focused = true;
+        feed(&mut ed, "<C-w>z");
+        draw(&mut ed);
+        assert_eq!((ed.screen.chat_w, ed.screen.bottom_h), (140, 0));
+        feed(&mut ed, "<esc>");
+        draw(&mut ed);
+        assert_eq!(shown(&ed), all);
+        // The side panel
+        ed.sidebar.as_mut().unwrap().focus = true;
+        feed(&mut ed, "<C-w>z");
+        draw(&mut ed);
+        assert_eq!((ed.screen.side_w, ed.screen.chat_w, ed.screen.bottom_h), (140, 0, 0));
+        feed(&mut ed, "<C-w>z");
+        draw(&mut ed);
+        assert_eq!(shown(&ed), all);
+        assert!(ed.sidebar.as_ref().unwrap().focus, "back, the keys where they were");
+        assert_eq!(ed.sizes, sizes, "nothing kept changed");
+    }
+
     /// `A` in the git tab opens the last message to amend in normal mode (the first keys move, they don't
     /// land on top of the message); `c` still opens a new one ready to type.
     #[test]
@@ -5720,8 +6112,10 @@ mod tests {
         std::fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
         let log = repo.join("..").join(format!("commitdraft-{}.log", std::process::id()));
         let mut ed = editor("");
-        let reply =
-            serde_json::json!({"type": "result", "result": "Add two\n\nThe second line was missing."});
+        // (a body line past 72 columns — the draft comes wrapped: #21)
+        let body = "The second line was missing, so the file ended a line early and the count it gave back \
+                    was one short.";
+        let reply = serde_json::json!({"type": "result", "result": format!("Add two\n\n{body}")});
         ed.config.llm.command = "sh".into();
         ed.config.llm.args = vec![
             "-c".into(),
@@ -5739,10 +6133,13 @@ mod tests {
         let sent = std::fs::read_to_string(&log).unwrap();
         assert!(sent.contains("<recent-commits>") && sent.contains("base"), "its style: {sent}");
         assert!(sent.contains("+two"), "the staged diff: {sent}");
+        assert!(sent.contains("Wrap the body at 72 columns"), "asked for: {sent}");
         feed(&mut ed, "a");
+        let wrapped = "The second line was missing, so the file ended a line early and the\ncount it gave \
+                       back was one short.";
         assert!(
-            ed.doc().text.to_string().starts_with("Add two\n\nThe second line was missing.\n"),
-            "{}",
+            ed.doc().text.to_string().starts_with(&format!("Add two\n\n{wrapped}\n")),
+            "wrapped at 72: {}",
             ed.doc().text
         );
         feed(&mut ed, ":w<ret>");
@@ -5755,7 +6152,7 @@ mod tests {
             .args(["log", "-1", "--format=%B"])
             .output()
             .unwrap();
-        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "Add two\n\nThe second line was missing.");
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), format!("Add two\n\n{wrapped}"));
         std::fs::remove_dir_all(&repo).ok();
         std::fs::remove_file(&log).ok();
     }
