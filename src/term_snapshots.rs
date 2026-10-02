@@ -678,6 +678,21 @@ fn snapshot_offer_install() {
     s.check("offer_install");
 }
 
+/// A command Claude wants to run — shown whole (a commit message past four lines too), `y Run` · `n No`.
+#[test]
+fn snapshot_offer_run() {
+    let mut s = Shot::new(100, 30);
+    s.ed.offer_popups = true;
+    s.file("src/demo.rs", DEMO_RS);
+    let command = "git commit -m 'Count words: the words in the text, counted\n\nSplits on whitespace, so \
+                   \"a  b\" is two words, and keeps the counts in a map from word to how many times it came, \
+                   printed after the text.\n\nThe tests cover the empty text and repeated words.'";
+    let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "run", "arguments": {"command": command}}});
+    assert!(crate::tools::mcp(&mut s.ed, 0, "c1", &msg).is_none(), "it waits for the user");
+    s.check("offer_run");
+}
+
 /// `:ask` review — the answer shown as an inline diff inside the buffer (fake claude).
 #[test]
 fn snapshot_ask_review() {
@@ -779,6 +794,27 @@ fn chat_minimizes_while_following() {
     s.ed.chat.as_mut().unwrap().follow.on = false;
     s.frame();
     assert_eq!(s.ed.screen.chat_x, docked, "not following = docked");
+}
+
+/// A command Claude wants to run, asked while it works in follow mode: the minimized chat moves to the top
+/// right, out of the card's way, the card's buttons in sight.
+#[test]
+fn snapshot_follow_offer_run() {
+    let mut s = Shot::new(100, 30);
+    s.file("src/demo.rs", DEMO_RS);
+    s.ed.config.llm.command = "sh".into();
+    s.ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+    s.keys(" lcommit it<ret>");
+    let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "run", "arguments": {"command": "git commit -am 'Count words'"}}});
+    assert!(crate::tools::mcp(&mut s.ed, 0, "c1", &msg).is_none());
+    s.frame();
+    let mini = s.ed.screen.chat_mini.get().expect("the minimized chat shows");
+    for &(row, from, to, _) in &s.ed.screen.offer_buttons {
+        let covers = mini.1 <= row && row < mini.1 + mini.3 && mini.0 < to && from < mini.0 + mini.2;
+        assert!(!covers, "the chat {mini:?} is under the card's buttons (row {row})");
+    }
+    s.check("follow_offer_run");
 }
 
 /// A note on several lines keeps them in sight: its card goes under (or over) all of them — the code it's
@@ -1187,6 +1223,34 @@ fn snapshot_task_panel() {
     s.ed.task_run.as_mut().unwrap().took = Some(Duration::from_millis(1830));
     s.ed.toasts.clear();
     s.check("task_panel");
+}
+
+/// Claude's command in the task panel: no `space m m again` — that runs the user's task, not this one.
+#[test]
+fn claudes_command_offers_no_again() {
+    let hints = |by_claude: bool, found: (usize, usize)| {
+        let mut s = Shot::new(100, 24);
+        s.file("src/demo.rs", DEMO_RS);
+        let task = crate::task::Task { name: "cargo build".into(), cmd: "true".into(), cwd: "/p".into() };
+        let mut r = crate::task::Run::for_test(task);
+        (r.by_claude, r.found, r.took) = (by_claude, found, Some(Duration::from_millis(40)));
+        s.ed.task_run = Some(r);
+        let mut vt = vt100::Parser::new(24, 100, 0);
+        vt.process(&s.frame());
+        let row = vt
+            .screen()
+            .contents()
+            .lines()
+            .find(|l| l.contains("cargo build"))
+            .unwrap_or_default()
+            .to_string();
+        assert!(row.contains("space m c"), "the panel's header: {row}");
+        row
+    };
+    assert!(hints(false, (0, 0)).contains("space m m"), "the user's task: again");
+    assert!(!hints(true, (0, 0)).contains("space m m"));
+    let found = hints(true, (2, 0));
+    assert!(found.contains("]q") && !found.contains("space m m"), "{found}");
 }
 
 /// The test panel after a run with a long failure, the wheel partway down its message: the list, the

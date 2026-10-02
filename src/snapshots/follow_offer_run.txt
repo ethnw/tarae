@@ -1,0 +1,97 @@
+# follow_offer_run · 100x30 · theme meok · cursor 1:4
+## text
+00  tarae  ›  src  ›  demo.rs
+01   1 use std::collections::HashMap;                             ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+02   1                                                              claude › follow              ▂▅▆
+03   2 ▎ Counts how often each word appears.                        ▎ commit it
+04     ▎                                                            ◦ thinking…
+05     ▎ Words are split on whitespace; case is kept.               C-c stop  C-f unfollow
+06   5 pub fn word_counts(text: &str) -> HashMap<&str, usize> {   ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+07   6     let mut counts = HashMap::new();
+08   7     for word in text.split_whitespace() {
+09   8     │   *counts.entry(word).or_insert(0) += 1;
+10   9     }
+11  10     counts
+12  11 }
+13  12
+14  13 fn main() {
+15  14     let text = "the quick brown fox jumps over the lazy dog";
+16  15     let counts = word_counts(text);
+17  16     println!("{} distinct words", counts.len()); // 타래
+18  17 }
+19
+20
+21                                                                   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+22                                                                    ▎ Claude wants to run
+23                                                                      git commit -am 'Count words'
+24
+25                                                                      y Run   n No
+26                                                                   ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+27
+28  ▐ NORMAL ▌                                                                  rust   utf-8 LF   1:1
+29
+## bg · surface per cell, blank = ui.background
+00
+01     Acccccccccccccccccccccccccccccccccccccccccccccccccccccccccc                                    c
+02                                                                pppppppppppppppppppppppppppppppppppp
+03     11111111111111111111111111111111111111111111111111111111111pppppppppppppppppppppppppppppppppppp1
+04     11111111111111111111111111111111111111111111111111111111111pppppppppppppppppppppppppppppppppppp1
+05     11111111111111111111111111111111111111111111111111111111111pppppppppppppppppppppppppppppppppppp1
+06
+07
+08
+09
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22                                                                   ppppppppppppppppppppppppppppppppp
+23                                                                   ppppppppppppppppppppppppppppppppp
+24                                                                   ppppppppppppppppppppppppppppppppp
+25                                                                   ppppppppppppppppppppppppppppppppp
+26
+27
+28   AAAAAAAA
+29
+## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
+00  ddddd  f  ddd  f  TTTTTTT
+01   A
+02   f                                                              TTTTTT a aaaaaa              aaa
+03   f                                                              a TTTTTT TT
+04                                                                  f fffffffff
+05                                                                  DDD ffff  DDD ffffffff
+06   f
+07   f
+08   f
+09   f
+10   f
+11  ff
+12  ff
+13  ff
+14  ff
+15  ff                gggg ggggg ggggg ggg ggggg gggg ggg gggg gggg
+16  ff
+17  ff              ggg gggggggg gggggg
+18  ff
+19
+20
+21
+22                                                                    a BBBBBB BBBBB BB BBB
+23                                                                      ddd dddddd ddd dddddd dddddd
+24
+25                                                                      A       A dd
+26
+27
+28  a BBBBBB a                                                                  dddd   ddddd dd   TTT
+29
+## legend
+bg: c=ui.cursorline.primary  p=ui.popup  A=ui.cursor.primary  1=other
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  g=diff.plus  B=bold

@@ -327,6 +327,16 @@ pub static SETTINGS: &[Setting] = &[
         set: |c, v| c.llm.chat_settings = b(v),
     },
     Setting {
+        path: "llm.run-allow",
+        kind: Kind::StrList,
+        doc: "Chat: commands Claude runs without asking, past the checks (cargo build/test/clippy/fmt, git status/diff/log…) — word prefixes, like \"npm test\"",
+        get: |c| Value::Array(c.llm.run_allow.iter().map(|a| Value::from(a.as_str())).collect()),
+        set: |c, v| {
+            c.llm.run_allow =
+                v.as_array().into_iter().flatten().filter_map(|a| a.as_str().map(str::to_string)).collect()
+        },
+    },
+    Setting {
         path: "llm.context-lines",
         kind: Kind::Int { min: 0, max: 1000 },
         doc: "Lines of context sent around each selection",

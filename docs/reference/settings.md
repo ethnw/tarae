@@ -58,6 +58,7 @@ The name is also the `:set` path: `:set editor.scrolloff 8` changes it for this 
 | `llm.effort` | `""` · `"low"` · `"medium"` · `"high"` · `"xhigh"` · `"max"` | `""` | How hard Claude thinks, for models that take it ("" = the model's default) |
 | `llm.follow` | bool | `true` | Chat: the editor follows the code Claude is reading, with its thoughts beside it (C-f toggles per session) |
 | `llm.chat-settings` | bool | `true` | Chat: read your CLAUDE.md files and Claude Code settings, like `claude` does (hooks stay off, edits always ask) |
+| `llm.run-allow` | list of strings | `[]` | Chat: commands Claude runs without asking, past the checks (cargo build/test/clippy/fmt, git status/diff/log…) — word prefixes, like "npm test" |
 | `llm.context-lines` | integer 0–1000 | `20` | Lines of context sent around each selection |
 
 ## Tables you name yourself

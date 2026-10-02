@@ -3492,6 +3492,200 @@ mod tests {
         assert!(call(&mut ed, json!({"path": "README.md"})).is_none());
     }
 
+    /// A fake `claude` that answers the first message by calling tarae's `name` tool with `args`, waits for
+    /// tarae's answer (request `c7`), then ends the turn — what it was sent goes to the returned log.
+    fn claude_calls(
+        ed: &mut Editor,
+        dir: &std::path::Path,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> std::path::PathBuf {
+        use serde_json::json;
+        let log = dir.join("stdin.log");
+        let tool = json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1",
+            "name": format!("mcp__tarae__{name}"), "input": args}]}});
+        let call = json!({"type": "control_request", "request_id": "c7", "request": {"subtype": "mcp_message",
+            "server_name": "tarae", "message": {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+            "params": {"name": name, "arguments": args}}}});
+        let result = json!({"type": "result", "result": "done"});
+        let script = format!(
+            "while read -r line; do printf '%s\\n' \"$line\" >> '{log}'; case \"$line\" in '{{\"message\"'*) ;; *) continue;; esac; \
+             printf '%s\\n' '{tool}'; printf '%s\\n' '{call}'; \
+             while read -r l; do printf '%s\\n' \"$l\" >> '{log}'; case \"$l\" in *'\"c7\"'*) break;; esac; done; \
+             printf '%s\\n' '{result}'; done",
+            log = log.display()
+        );
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), script];
+        log
+    }
+
+    /// Handles events until `done` (or panics after a minute).
+    fn settle_for(ed: &mut Editor, done: impl Fn(&Editor) -> bool) {
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !done(ed) {
+            let left = end.saturating_duration_since(std::time::Instant::now());
+            let ev = ed.events.recv_timeout(left).expect("done before the timeout");
+            ed.handle_event(ev);
+        }
+    }
+
+    /// tarae's answer to the tool call (`c7`), as sent to claude.
+    fn tool_answer(log: &std::path::Path) -> String {
+        let sent = std::fs::read_to_string(log).unwrap();
+        sent.lines().find(|l| l.contains("\"c7\"")).expect("answered").to_string()
+    }
+
+    /// Claude builds: a check runs at once in the task panel, the call waits for its end, and Claude reads
+    /// how it ended, the places it pointed at and its output; the editor goes to the first error, and the
+    /// It isn't the task `space m m` runs again.
+    #[test]
+    fn claude_runs_a_check_and_reads_how_it_ended() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-run-cmd-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let lib = dir.join("src/lib.rs");
+        std::fs::write(&lib, "pub fn add(a: i32, b: i32) -> i32 {\n    a - b\n}\n").unwrap();
+        let script = dir.join("build.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "echo compiling calc\necho '{}:2:5: error: mismatched types' >&2\nexit 3\n",
+                lib.display()
+            ),
+        )
+        .unwrap();
+        let mut ed = editor("");
+        // (`sh <file>` stands in for a check: allowed by the setting)
+        ed.config.llm.run_allow = vec!["sh".into()];
+        let command = format!("sh {}", script.display());
+        let log = claude_calls(&mut ed, &dir, "run", &json!({ "command": command }));
+        feed(&mut ed, "<space>lbuild it<ret>");
+        settle_for(&mut ed, |ed| !ed.chat.as_ref().unwrap().busy());
+        assert!(ed.offers.is_empty(), "a check doesn't ask");
+        let r = ed.task_run.as_ref().expect("it ran in the task panel");
+        assert_eq!(
+            (r.task.name.as_str(), &r.state),
+            (command.as_str(), &crate::task::State::Failed(Some(3)))
+        );
+        assert!(ed.task_last.is_none(), "not the user's task to run again");
+        let answer = tool_answer(&log);
+        assert!(answer.contains("exit 3 in ") && answer.contains(&format!("$ {command}")), "{answer}");
+        assert!(
+            answer.contains("1 errors, 0 warnings") && answer.contains("lib.rs:2:5 error: mismatched types"),
+            "{answer}"
+        );
+        assert!(answer.contains("Output:") && answer.contains("compiling calc"), "{answer}");
+        assert!(!answer.contains("isError"), "{answer}");
+        // The editor went to the error (the row's ending is `chat.rs`'s test: this claude sends no result)
+        assert_eq!((ed.doc().path.as_deref(), cursor_line(&ed)), (Some(lib.as_path()), 1));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Past the checks, a command waits for the user: nothing runs until `y`; `n` tells Claude no.
+    #[test]
+    fn a_command_past_the_checks_asks_first() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-run-ask-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let made = dir.join("made");
+        let command = format!("touch {}", made.display());
+        // No: Claude is told, nothing ran
+        let mut ed = editor("");
+        let log = claude_calls(&mut ed, &dir, "run", &json!({ "command": command }));
+        feed(&mut ed, "<space>ltouch it<ret>");
+        settle_for(&mut ed, |ed| !ed.offers.is_empty());
+        let o = &ed.offers[0];
+        assert!(matches!(&o.what, crate::offer::What::Run { cmd, .. } if *cmd == command));
+        assert_eq!((o.title.as_str(), o.question.as_str()), ("Claude wants to run", command.as_str()));
+        assert!(o.weighty(), "y must have been in sight a moment to count");
+        // Another command while that one is asked about isn't stacked
+        let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "run", "arguments": {"command": "rm -rf x"}}});
+        let r = crate::tools::mcp(&mut ed, 0, "c1", &msg).expect("answered now");
+        assert!(r["result"]["isError"] == true, "{r}");
+        assert_eq!(ed.offers.len(), 1);
+        ed.offer_dismiss();
+        settle_for(&mut ed, |ed| !ed.chat.as_ref().unwrap().busy());
+        let answer = tool_answer(&log);
+        assert!(answer.contains("the user chose not to run") && answer.contains("isError"), "{answer}");
+        assert!(ed.task_run.is_none() && !made.exists());
+        // Yes: it runs, and Claude hears how it ended
+        std::fs::remove_file(&log).ok();
+        let mut ed = editor("");
+        let log = claude_calls(&mut ed, &dir, "run", &json!({ "command": command }));
+        feed(&mut ed, "<space>ltouch it<ret>");
+        settle_for(&mut ed, |ed| !ed.offers.is_empty());
+        assert!(!made.exists(), "nothing runs before the answer");
+        ed.offer_accept();
+        settle_for(&mut ed, |ed| !ed.chat.as_ref().unwrap().busy());
+        assert!(made.exists() && ed.offers.is_empty());
+        let answer = tool_answer(&log);
+        assert!(answer.contains("exit 0") && answer.contains("(no output)"), "{answer}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Stopping Claude's command (`space m c`) tells Claude so — it doesn't wait for an end that won't come.
+    #[test]
+    fn stopping_claudes_command_tells_it() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-run-stop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let mut ed = editor("");
+        ed.config.llm.run_allow = vec!["sleep".into()];
+        let log = claude_calls(&mut ed, &dir, "run", &json!({ "command": "sleep 30" }));
+        feed(&mut ed, "<space>lwait<ret>");
+        settle_for(&mut ed, |ed| ed.task_run.is_some());
+        ed.task_close();
+        settle_for(&mut ed, |ed| !ed.chat.as_ref().unwrap().busy());
+        let answer = tool_answer(&log);
+        assert!(answer.contains("the command was stopped — the user stopped it"), "{answer}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A command already running isn't cut short, a turn that ends takes its card away, and one too long to
+    /// show whole isn't put to the user.
+    #[test]
+    fn run_waits_its_turn() {
+        use serde_json::json;
+        let mut ed = editor("");
+        let call = |ed: &mut Editor, command: &str| {
+            let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "run", "arguments": {"command": command}}});
+            crate::tools::mcp(ed, 0, "c1", &msg)
+        };
+        let text = |r: Option<serde_json::Value>| {
+            let r = r.expect("answered now");
+            (
+                r["result"]["content"][0]["text"].as_str().unwrap_or_default().to_string(),
+                r["result"]["isError"] == true,
+            )
+        };
+        let (t, err) = text(call(&mut ed, " "));
+        assert!(err && t.contains("command is required"), "{t}");
+        let (t, err) = text(call(&mut ed, &"echo x ".repeat(100)));
+        assert!(err && t.contains("too long to show the user"), "{t}");
+        ed.task_start(crate::task::Task {
+            name: "slow".into(),
+            cmd: "sleep 5".into(),
+            cwd: std::env::temp_dir(),
+        });
+        let (t, err) = text(call(&mut ed, "git status"));
+        assert!(err && t.contains("already running in the editor (slow)"), "{t}");
+        let (t, err) = text(call(&mut ed, "git push"));
+        assert!(err && t.contains("already running"), "{t}");
+        assert!(ed.offers.is_empty());
+        ed.task_close();
+        // Asked about, then the turn ends: the card goes
+        assert!(call(&mut ed, "git push").is_none());
+        assert_eq!(ed.offers.len(), 1);
+        crate::tools::turn_over(&mut ed);
+        assert!(ed.offers.is_empty());
+    }
+
     /// Asking about a line starts a note with you; Claude's plain answer (no tool) lands in the thread.
     #[test]
     fn a_question_on_a_line_becomes_a_note() {

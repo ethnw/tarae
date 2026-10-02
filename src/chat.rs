@@ -35,7 +35,9 @@ guessing. You can change files with Edit and Write when the user asks for change
 a diff they accept or reject (maybe in part), so keep edits focused, and if one is declined, ask before trying \
 another way. After you change code, check your work with the run_tests tool: run the tests that cover the \
 change (a test file, and a line for a single test), and when they fail, read why and fix it — the user \
-watches the run in their editor. When the work takes several steps, lay them out first with the plan tool \
+watches the run in their editor. To build, lint, format, run a whole test suite or use git, use the run \
+tool: one command per call, its output comes back; checks start at once, other commands wait for the user's \
+yes. When the work takes several steps, lay them out first with the plan tool \
 and keep it current as you go (the step you're on doing, finished ones done). Each user message starts with <editor-context>: the file the user is looking at, \
 cursor line, the lines on screen (and any other file shown beside it), selection, diagnostics and the other \
 open files — \"this\" and \"here\" usually mean the selection, the cursor or what's on screen. Files marked unsaved differ from disk — trust the \
@@ -54,12 +56,13 @@ one to three sentences — and keep any chat text to one short line. A message w
 review: address every <comment note=N> (edit the code where it calls for it) and answer each with \
 note(reply_to=N); the chat answer is a short summary.";
 
-/// The tools the chat process gets. Reading and tarae's own (`note`, `run_tests` — `tools.rs`) are allowed up
-/// front: the tests are the project's own, run the way the user runs them, in view, and any code Claude wrote
-/// for them was reviewed. Edit and Write come to tarae as permission requests and show as a review first
-/// (`edits.rs`).
+/// The tools the chat process gets. Reading and tarae's own (`note`, `run_tests`, `run` — `tools.rs`) are
+/// allowed up front: the tests are the project's own, run the way the user runs them, in view, and any code
+/// Claude wrote for them was reviewed; `run` asks the user itself for anything but the checks. Edit and Write
+/// come to tarae as permission requests and show as a review first (`edits.rs`).
 const TOOLS: &str = "Read,Grep,Glob,Edit,Write";
-const ALLOWED: &str = "Read,Grep,Glob,mcp__tarae__note,mcp__tarae__run_tests,mcp__tarae__plan";
+const ALLOWED: &str =
+    "Read,Grep,Glob,mcp__tarae__note,mcp__tarae__run_tests,mcp__tarae__run,mcp__tarae__plan";
 
 /// Settings laid over the user's and the project's when they're loaded (`llm.chat-settings`).
 const CHAT_SETTINGS: &str = r#"{"permissions":{"ask":["Edit","Write"]},"disableAllHooks":true}"#;
@@ -103,7 +106,7 @@ pub struct Link {
 pub struct Look {
     pub verb: &'static str,
     pub what: String,
-    /// Grep·Glob: the pattern is drawn like a string literal.
+    /// Grep·Glob's pattern, a command: drawn like a string literal (and cut at its end, not its start).
     pub pattern: bool,
     /// Dim suffix (line range · folder).
     pub range: String,
@@ -544,11 +547,15 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
         }
         StreamEv::Models(list) => c.models = list,
         StreamEv::ToolResult { id, text } => {
-            // A test run's row ends with its verdict
+            // A test run's row ends with its verdict, a command's with how it ended
             if let Some(m) = c.msgs.iter_mut().rev().find(|m| m.call == id)
-                && let Some(l) = m.look.as_mut().filter(|l| l.verb == "test")
+                && let Some(l) = m.look.as_mut().filter(|l| matches!(l.verb, "test" | "run"))
             {
-                l.range = crate::tools::verdict(&text);
+                l.range = if l.verb == "test" {
+                    crate::tools::verdict(&text)
+                } else {
+                    crate::tools::run_verdict(&text)
+                };
                 m.cache.replace(None);
             }
             if c.state != State::Idle {
@@ -646,8 +653,9 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
                 };
                 c.msgs.push(Msg::new(Role::Note, e, ""));
             }
-            // A review claude was waiting on has no one to answer now
+            // A review (or a command's card) claude was waiting on has no one to answer now
             crate::edits::turn_over(ed);
+            crate::tools::turn_over(ed);
         }
     }
 }
@@ -972,6 +980,15 @@ fn look(name: &str, input: &serde_json::Value) -> Look {
             };
             Look { verb: "test", what, pattern: false, range: String::new(), link: Some(Link { path, line }) }
         }
+        "mcp__tarae__run" => {
+            let cmd = s("command").split_whitespace().collect::<Vec<_>>().join(" ");
+            let what = if cmd.chars().count() > 48 {
+                format!("{}…", cmd.chars().take(47).collect::<String>())
+            } else {
+                cmd
+            };
+            Look { verb: "run", what, pattern: true, range: String::new(), link: None }
+        }
         other => {
             Look { verb: "use", what: other.to_string(), pattern: false, range: String::new(), link: None }
         }
@@ -1259,6 +1276,27 @@ mod tests {
         assert_eq!(got, [("src/lib.rs:12".into(), 11), ("main.rs:3".into(), 2), ("/abs/p.rs:7".into(), 6)]);
         assert_eq!(refs_in("/abs/p.rs:7")[0].1.path, Path::new("/abs/p.rs"));
         assert!(refs_in("no refs: 1, v1.2:3").is_empty());
+    }
+
+    /// A command's row: the command in a line, ended by how it ended once its result comes.
+    #[test]
+    fn a_command_row_ends_with_how_it_ended() {
+        let r = look("mcp__tarae__run", &serde_json::json!({"command": "cargo  test\n  -p tarae"}));
+        assert_eq!(
+            (r.verb, r.what.as_str(), r.pattern, r.link.is_none()),
+            ("run", "cargo test -p tarae", true, true)
+        );
+        let long = look("mcp__tarae__run", &serde_json::json!({"command": "x".repeat(60)}));
+        assert_eq!(long.what.chars().count(), 48);
+        let mut ed = editor("");
+        let mut c = Chat::new();
+        c.msgs.push(Msg::tool(r, "t1"));
+        let generation = c.generation;
+        ed.chat = Some(c);
+        let text = "exit 101 in 2.0s\n$ cargo test -p tarae\n".to_string();
+        on_event(&mut ed, generation, StreamEv::ToolResult { id: "t1".into(), text });
+        let c = ed.chat.as_ref().unwrap();
+        assert_eq!(c.msgs[0].look.as_ref().unwrap().range, "exit 101");
     }
 
     #[test]

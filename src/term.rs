@@ -1023,13 +1023,17 @@ fn draw_task_panel(
         }
         used += sum_w;
     }
-    let hints: &[(&str, &str)] = match (&r.state, r.found) {
-        (State::Running, _) => &[("space m c", "stop")],
-        _ if r.install => &[("space m c", "close")],
-        (_, (0, 0)) => &[("space m m", "again"), ("space m c", "close")],
-        _ => &[("]q", "next"), ("space q", "list"), ("space m m", "again"), ("space m c", "close")],
+    // (`space m m` runs the user's task again — not an install, not Claude's command)
+    let mut hints: Vec<(&str, &str)> = match (&r.state, r.found) {
+        (State::Running, _) => vec![("space m c", "stop")],
+        _ if r.install => vec![("space m c", "close")],
+        (_, (0, 0)) => vec![("space m m", "again"), ("space m c", "close")],
+        _ => vec![("]q", "next"), ("space q", "list"), ("space m m", "again"), ("space m c", "close")],
     };
-    panel_hints(out, hints, used, w, card, dim, faint)?;
+    if r.by_claude {
+        hints.retain(|h| h.0 != "space m m");
+    }
+    panel_hints(out, &hints, used, w, card, dim, faint)?;
     let rows = lay.debug_h.saturating_sub(1);
     let start = r.output.len().saturating_sub(rows);
     for i in 0..rows {
@@ -1903,14 +1907,15 @@ fn draw(
     if let Some(rev) = editor.review.as_ref().filter(|r| !r.ready) {
         draw_ask_stream(rev, editor, ui, lay, out)?;
     }
-    // Cards over the code share the screen without overlapping: the note at the cursor is placed first,
-    // the minimized chat takes a free corner, the thought card what's left (each skipped if nothing is)
+    // Cards over the code share the screen without overlapping: the note at the cursor and an offer (a
+    // command Claude wants to run) are placed first, the minimized chat takes a free corner, the thought
+    // card what's left (each skipped if nothing is)
     let note_rect = text_cursor.and_then(|at| note_card_geom(editor, at, ui, lay)).map(|g| g.rect());
-    let mini_rect = editor
-        .chat
-        .as_ref()
-        .filter(|c| c.compact())
-        .and_then(|c| chat_mini_rect(c, editor, ui, lay, note_rect));
+    let offer_rect = offer.as_ref().map(|o| o.rect());
+    let mini_rect = editor.chat.as_ref().filter(|c| c.compact()).and_then(|c| {
+        let avoid: Vec<Rect4> = [note_rect, offer_rect].into_iter().flatten().collect();
+        chat_mini_rect(c, editor, ui, lay, &avoid)
+    });
     // (after the turn, a walk-through's stop keeps its card while the cursor is in it — `space n` asks there)
     if let Some(c) = editor.chat.as_ref().filter(|c| {
         c.follow.on && (c.busy() || c.follow.touring() || crate::follow::stop_here(editor).is_some())
@@ -1918,7 +1923,7 @@ fn draw(
         && lay.edit_w > 0
         && !editor.welcome()
     {
-        let taken: Vec<Rect4> = [note_rect, mini_rect].into_iter().flatten().collect();
+        let taken: Vec<Rect4> = [note_rect, mini_rect, offer_rect].into_iter().flatten().collect();
         draw_thought_card(c, editor, ui, &taken, out)?;
     }
     if let (Some(c), Some(rect)) = (editor.chat.as_ref(), mini_rect) {
@@ -1942,10 +1947,7 @@ fn draw(
     }
     // The notification card keeps out of every other card's way — or folds into the status line
     let taken: Vec<Rect4> =
-        [note_rect, mini_rect, editor.screen.thought_card.get(), offer.as_ref().map(|o| o.rect())]
-            .into_iter()
-            .flatten()
-            .collect();
+        [note_rect, mini_rect, editor.screen.thought_card.get(), offer_rect].into_iter().flatten().collect();
     let toast_folded = !draw_toasts(editor, ui, lay, &taken, out)?;
     if let Some(card) = offer {
         card.draw(editor, ui, out)?;
@@ -5218,11 +5220,14 @@ impl OfferCard {
                         b = vec![('y', "Allow"), ('n', "Not now")]
                     }
                     crate::offer::What::PluginAsk { .. } => b = vec![('y', "Allow"), ('n', "No")],
+                    crate::offer::What::Run { .. } => b = vec![('y', "Run"), ('n', "No")],
                     _ => {}
                 }
+                // A command is shown whole (`tools::COMMAND_MAX` keeps it to a card's height)
+                let most = if matches!(o.what, crate::offer::What::Run { .. }) { 24 } else { 4 };
                 let mut v = vec![(title, false)];
                 for part in o.question.split('\n') {
-                    v.extend(wrapped(part, 4));
+                    v.extend(wrapped(part, most));
                 }
                 (v, Some(b))
             }
@@ -5641,6 +5646,7 @@ fn draw_thought_card(
                 "show" => "showing",
                 "look" => "looking at",
                 "test" => "testing",
+                "run" => "running",
                 "plan" => "planning",
                 "edit" => "editing",
                 "write" => "writing",
@@ -6721,7 +6727,8 @@ fn trail_row(
     let what = if look.pattern { fit_ellipsis(&name, room) } else { fit_left(&name, room) };
     let mut row = vec![glyph, sp(head, st.faint), sp(what, if look.pattern { st.string } else { st.dim })];
     let used: usize = row.iter().map(|s| s.text.width()).sum();
-    if w.saturating_sub(used) >= 6 && !range.is_empty() {
+    // (a short suffix — a command's `ok` — whenever it fits whole)
+    if w.saturating_sub(used) >= range.width().min(6) && !range.is_empty() {
         row.push(sp(fit_ellipsis(&range, w - used), st.faint));
     }
     row
@@ -6736,13 +6743,14 @@ fn overlaps(a: Rect4, b: Rect4) -> bool {
 
 /// Where the minimized chat sits: the bottom right of the editing area, like a picture-in-picture (the
 /// right edge of code is mostly empty; the thought card takes the room above the lines being read) — the
-/// top right if the note card holds that corner, nowhere if it holds both. `None` also on a tiny screen.
+/// top right if a card in `avoid` (the note, an offer) holds that corner, nowhere if they hold both. `None`
+/// also on a tiny screen.
 fn chat_mini_rect(
     c: &crate::chat::Chat,
     editor: &Editor,
     ui: &Ui,
     lay: &Layout,
-    avoid: Option<Rect4>,
+    avoid: &[Rect4],
 ) -> Option<Rect4> {
     const INNER: usize = 32;
     if lay.edit_w < INNER + 30 || lay.text_rows < 12 {
@@ -6762,7 +6770,7 @@ fn chat_mini_rect(
     let width = INNER + 4;
     let x = lay.edit_w.saturating_sub(width + 1);
     let (top, bottom) = (lay.text_top as usize, (lay.text_top as usize + lay.text_rows).saturating_sub(h));
-    [bottom, top].into_iter().map(|y| (x, y, width, h)).find(|&r| avoid.is_none_or(|a| !overlaps(r, a)))
+    [bottom, top].into_iter().map(|y| (x, y, width, h)).find(|&r| !avoid.iter().any(|&a| overlaps(r, a)))
 }
 
 /// Trail rows the minimized chat shows (the newest).
@@ -7842,6 +7850,34 @@ mod snapshot_tests;
 
 #[cfg(test)]
 mod tests {
+    /// The chat's tool row keeps its suffix when it fits whole — a command's `ok` too, the command cut for it.
+    #[test]
+    fn a_short_suffix_stays_on_a_long_row() {
+        let st = TrailStyles {
+            faint: Style::default(),
+            dim: Style::default(),
+            string: Style::default(),
+            accent: Style::default(),
+        };
+        let look = |range: &str| crate::chat::Look {
+            verb: "run",
+            what: "git commit -m 'Add sub' src/lib.rs".into(),
+            pattern: true,
+            range: range.into(),
+            link: None,
+        };
+        let text = |l: &crate::chat::Look, slim| -> String {
+            trail_row(l, false, 30, slim, &st).into_iter().map(|s| s.text).collect()
+        };
+        let row = text(&look("ok"), false);
+        assert!(row.ends_with("  ok") && row.contains("git commit"), "{row:?}");
+        assert!(row.width() <= 30, "{row:?}");
+        let row = text(&look("exit 101"), false);
+        assert!(row.ends_with("  exit 101"), "{row:?}");
+        // (the minimized chat keeps the name instead — its rows are slim)
+        assert!(!text(&look("ok"), true).ends_with("ok"));
+    }
+
     /// The notification card takes the top right, else the bottom right, never over another card; with
     /// both taken it has no place (the status line carries it).
     #[test]

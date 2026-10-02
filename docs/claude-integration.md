@@ -8,7 +8,7 @@ Claude Code login as it is. You need [Claude Code](https://claude.com/claude-cod
 logged in.
 
 - [Select → instruct → diff](#select--instruct--diff)
-- [Chat panel](#chat-panel) — [follow mode](#follow-mode), [the plan](#the-plan), [edits](#edits), [undoing a turn](#undoing-a-turn), [running the tests](#running-the-tests), [notes](#notes)
+- [Chat panel](#chat-panel) — [follow mode](#follow-mode), [the plan](#the-plan), [edits](#edits), [undoing a turn](#undoing-a-turn), [running the tests](#running-the-tests), [running commands](#running-commands), [notes](#notes)
 - [Commit messages](#commit-messages)
 - [Code review](#code-review)
 - [Claude Code integration](#claude-code-integration)
@@ -207,6 +207,32 @@ a row that ends with its outcome (`◦ test  src/lib.rs:17  1 failed`).
 
 The tool runs without asking. It only runs the project's own tests, the same way you do and in plain view, and
 every line Claude wrote for them went through your review first.
+
+### Running commands
+
+Claude can build, lint, format, run a whole test suite, and use git, all with tarae's `run` tool. Each call is
+one command, run in the task panel the way `space m m` runs a task, and Claude waits for it to end.
+
+- Claude gets how it ended (`exit 101 in 4.2s`), the places it pointed at (the errors and warnings that went into
+  the list, `]q`), and its output. Long output comes as its first 100 and last 150 lines
+- When it fails with an error, the editor goes there and a card says why, as with a failed test. In the chat,
+  the row ends with the outcome (`◦ run  cargo clippy --all-targets  exit 101`)
+- It never cuts a run short. If a task is already running, Claude is told to wait. If you stop it (`space m c`)
+  or start another task, Claude is told it stopped
+- Unsaved files are saved first, as with a task. There's no stdin and no terminal, so nothing interactive
+- It isn't the task `space m m` runs again: that stays yours
+
+**Checks run at once**: `cargo build`, `check`, `test`, `clippy` and `fmt`, `go build`, `test` and `vet`,
+`gofmt -l`, and git's `status`, `diff`, `log` and `show`. `llm.run-allow` adds your own, as word prefixes
+(`["npm test", "make lint"]`). A command only counts as one of those when it's plain words. Quoting, `$`,
+redirection, pipes, `;`, `&&`, globs, a `VAR=value`, or an option that makes git write or run something
+(`--output`, `--ext-diff`) and it asks like any other.
+
+**Anything else asks first.** A card shows the whole command, `y` runs it, `n` tells Claude you said no. A
+command too long to show whole on a card isn't put to you at all: Claude is told to write it to a script
+(that goes through your review) and run that.
+
+![Claude wants to run git commit: a card at the bottom right shows the whole command with y Run and n No, the minimized chat moved to the top right, its row on the command](screenshots/chat-run.png)
 
 ### Notes
 

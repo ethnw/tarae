@@ -51,6 +51,8 @@ pub enum What {
     PluginAsk { plugin: String, ask: Box<crate::plugin::PluginAsk> },
     /// A language server or debugger — `run` in the task panel (in `cwd`), then `then`.
     Install { tool: String, run: Vec<String>, cwd: PathBuf, then: crate::install::Then },
+    /// A command Claude wants to run (`tools.rs`): `y` runs it in the task panel, `n` tells Claude no.
+    Run { cmd: String, call: crate::tools::Call },
 }
 
 /// Work that stopped for lack of a grammar — resumed once downloaded
@@ -89,7 +91,10 @@ impl Offer {
 
     /// Whether answering it runs something (an install, a plugin's permissions).
     pub fn weighty(&self) -> bool {
-        matches!(self.what, What::Install { .. } | What::PluginPermissions { .. } | What::PluginAsk { .. })
+        matches!(
+            self.what,
+            What::Install { .. } | What::PluginPermissions { .. } | What::PluginAsk { .. } | What::Run { .. }
+        )
     }
 
     pub fn installing(&self) -> bool {
@@ -180,6 +185,7 @@ impl crate::editor::Editor {
                 self.offer_finished(id, Ok(()));
                 self.plugin_ask_answer(plugin, *ask, true);
             }
+            What::Run { cmd, call } => crate::tools::run_answer(self, id, cmd, call, true),
         }
     }
 
@@ -212,6 +218,7 @@ impl crate::editor::Editor {
             What::Install { tool, .. } => {
                 self.set_status(format!("Not installing {tool} for now (N on its card: never ask)"))
             }
+            What::Run { cmd, call } => crate::tools::run_answer(self, o.id, cmd, call, false),
         }
     }
 

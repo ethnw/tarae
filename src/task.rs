@@ -169,6 +169,10 @@ pub struct Run {
     after: Option<After>,
     /// An install run (not one `space m m` runs again).
     pub install: bool,
+    /// Claude's `run` waiting for this run's end (`tools.rs`).
+    pub chat: Option<crate::tools::Call>,
+    /// Claude's command (not one `space m m` runs again).
+    pub by_claude: bool,
 }
 
 /// An install run's card, tool, and what goes on after it.
@@ -177,6 +181,27 @@ pub struct After {
     pub offer: u64,
     pub tool: String,
     pub then: crate::install::Then,
+}
+
+#[cfg(test)]
+impl Run {
+    /// A finished run with no process — for tests of what's made of one.
+    pub fn for_test(task: Task) -> Run {
+        Run {
+            task,
+            state: State::Passed,
+            output: Vec::new(),
+            started: Instant::now(),
+            took: None,
+            pid: None,
+            generation: 0,
+            found: (0, 0),
+            after: None,
+            install: false,
+            chat: None,
+            by_claude: false,
+        }
+    }
 }
 
 impl Drop for Run {
@@ -247,6 +272,7 @@ impl Editor {
         {
             self.offer_finished(a.offer, Err("stopped before it finished".into()));
         }
+        crate::tools::run_dropped(self, "the user stopped it");
         self.task_run = None;
     }
 
@@ -259,6 +285,26 @@ impl Editor {
         self.flush_saves();
         self.task_last = Some(task.clone());
         self.task_spawn(task, None);
+    }
+
+    /// A command Claude runs (`tools.rs`): like a task, but not the one `space m m` runs again — the call
+    /// waits for its end. False: it didn't start (an install is running, or it couldn't spawn).
+    pub(crate) fn task_start_for(&mut self, task: Task, call: crate::tools::Call) -> bool {
+        if self.task_run.as_ref().is_some_and(|r| r.state == State::Running) {
+            return false;
+        }
+        self.auto_save(" · before the command");
+        self.flush_saves();
+        let before = self.task_generation;
+        self.task_spawn(task, None);
+        match self.task_run.as_mut().filter(|_| self.task_generation != before) {
+            Some(r) => {
+                r.chat = Some(call);
+                r.by_claude = true;
+                true
+            }
+            None => false,
+        }
     }
 
     /// An install (`install.rs`) in the task panel: not the task `space m m` runs again, and its output's
@@ -290,6 +336,7 @@ impl Editor {
         if self.test_run.as_ref().is_some_and(|r| r.state != crate::testing::RunState::Running) {
             self.test_run = None;
         }
+        crate::tools::run_dropped(self, "another task took its place");
         self.task_generation += 1;
         let generation = self.task_generation;
         let pid = child.id();
@@ -365,6 +412,9 @@ impl Editor {
                     let passed = r.state == State::Passed;
                     return ed.install_done(after, passed);
                 }
+                if r.chat.is_some() {
+                    return crate::tools::run_done(ed);
+                }
                 let (name, state, (errors, warnings)) = (r.task.name.clone(), r.state.clone(), r.found);
                 let found = errors + warnings;
                 match (state, found) {
@@ -394,6 +444,8 @@ impl Editor {
             found: (0, 0),
             after,
             install,
+            chat: None,
+            by_claude: false,
         });
     }
 }
