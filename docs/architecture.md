@@ -17,8 +17,10 @@ changing the code, see [CONTRIBUTING.md](../CONTRIBUTING.md).
 2. **Batteries included.** Needed features go into the core, kept small.
 3. **Configuration is data.** No code in config files. Changes apply on save, or at runtime with `:set`, and a setting's
    name is its `:set` path. Bad settings are reported with line numbers instead of blocking startup.
-4. **Never make you wait.** Keystrokes and screen updates never block on LSP, the LLM, disk, or parsing. Slow work runs
-   in the background, late results are discarded, and performance budgets are tests.
+4. **Never make you wait.** Keystrokes and screen updates never block on LSP, the LLM or disk. Slow work runs in the
+   background, late results are discarded, and performance budgets are tests. Parsing waits only where a frame later
+   would be worse, and only within a fixed budget: a new line's indentation, and the colors of a place jumped to (at
+   most 4 ms — past it, the rest comes from the background).
 5. **The LLM is a first-class verb.** In a selection-first editor, the LLM takes the action slot — instruct, review the
    diff, accept. Editor state is open to external agents such as Claude Code.
 6. **Makes you want to try it at a glance.** Design weighs as much as features. Floating things speak the same color
@@ -43,8 +45,8 @@ changing the code, see [CONTRIBUTING.md](../CONTRIBUTING.md).
   during a parse are replayed onto the new tree. A full parse of a 20k-line Rust file takes 145 ms — in the background.
   Injected languages are made only around what's shown, and a keystroke redoes only what it changed: layers no edit
   reached are kept, the injection query is asked again only where something changed (0.5–1.7 ms a keystroke on a
-  7k-line Rust file, 60 KB of Markdown, a PHP page). The one exception to "in the background": a place jumped to gets
-  its layers on the frame itself, at most 4 ms, so it's never drawn without them.
+  7k-line Rust file, 60 KB of Markdown, a PHP page). A place jumped to gets its layers on the frame itself (principle
+  4), so it's never drawn without them.
 - **Positions are byte offsets** everywhere (tree-sitter, regex, and LSP all speak bytes), always on character
   boundaries; "one character" is a grapheme cluster.
 - **Budgets are tests.** Worst key → frame on a 200k-line file: 1.0 ms in a debug build, 52 µs in release (budget

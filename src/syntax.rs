@@ -479,7 +479,7 @@ pub struct Layer {
     /// the injection query asks for the same ranges.
     touched: bool,
     /// The injection query's matches in it, as that parse found them.
-    found: Arc<Vec<Match>>,
+    matches: Arc<Vec<Match>>,
     /// How many layers it's in (1: the document's) — the same pieces can be injected at two depths, and
     /// how deep decides whether its own are made.
     depth: usize,
@@ -548,8 +548,8 @@ pub struct Syntax {
     error_max: usize,
     /// The injection query's matches in the tree, as the last parse found them — the next asks it only
     /// where something changed (`None`: not known, ask everywhere).
-    found: Option<Arc<Vec<Match>>>,
-    /// The edits since the last parse started — what moves `found` (and each layer's) to the text as it is:
+    matches: Option<Arc<Vec<Match>>>,
+    /// The edits since the last parse started — what moves `matches` (and each layer's) to the text as it is:
     /// together only (`reset` forgets both).
     since: Option<Vec<InputEdit>>,
 }
@@ -573,7 +573,7 @@ impl Syntax {
             inject_budget: INJECT_BUDGET,
             near_lines: NEAR_LINES,
             error_max: ERROR_SPAN_MAX,
-            found: None,
+            matches: None,
             since: None,
         }
     }
@@ -635,7 +635,7 @@ impl Syntax {
         self.dirty = true;
         self.highlighted.get_mut().clear();
         // Which edits lead from the snapshot's matches to its text isn't known
-        (self.found, self.since) = (None, None);
+        (self.matches, self.since) = (None, None);
         // The layers given are the snapshot's — where it had them isn't known: what's shown asks again
         if self.covered.is_some() {
             self.covered = Some(Vec::new());
@@ -696,8 +696,8 @@ impl Syntax {
         let since = self.since.replace(Vec::new());
         // Many edits: asked afresh (`KEPT_EDITS_MAX`)
         let since = since.filter(|s| s.len() <= KEPT_EDITS_MAX);
-        let before = self.found.clone().zip(since).map(|(found, since)| Before {
-            found,
+        let before = self.matches.clone().zip(since).map(|(matches, since)| Before {
+            matches,
             since,
             covered: self.covered.clone(),
         });
@@ -745,10 +745,10 @@ impl Syntax {
             }
             self.tree = Some(tree);
             self.layers = Arc::new(layers);
-            self.found = Some(Arc::new(parsed.found));
+            self.matches = Some(Arc::new(parsed.matches));
             self.highlighted.get_mut().clear();
         } else {
-            self.found = None;
+            self.matches = None;
         }
     }
 }
@@ -800,7 +800,7 @@ pub struct Parsed {
     #[cfg_attr(not(test), allow(dead_code))] // read by the tests
     taken: Taken,
     /// The injection query's matches in the tree.
-    found: Vec<Match>,
+    matches: Vec<Match>,
 }
 
 impl Syntax {
@@ -936,31 +936,31 @@ impl ParseJob {
                 .and_then(|_| parse_rope(&mut parser, &self.text, self.old.as_ref(), None)),
         };
         let covered = self.near.map(|near| around(&self.text, near, self.near_lines));
-        let (mut layers, mut taken, mut found) = (Vec::new(), Taken::default(), Vec::new());
+        let (mut layers, mut taken, mut matches) = (Vec::new(), Taken::default(), Vec::new());
         if let Some(tree) = &tree {
             let mut inj = Injector::new(&self.text, covered.as_deref(), self.budget);
             (inj.frame, inj.error_max) = (self.frame, self.error_max);
             for l in self.old_layers.iter() {
                 if l.touched {
                     if FROM_LAST.contains(&l.lang.name.as_str()) {
-                        inj.redo.entry((l.lang.name.clone(), l.depth)).or_default().push(l.clone());
+                        inj.to_reparse.entry((l.lang.name.clone(), l.depth)).or_default().push(l.clone());
                     }
                 } else {
                     let at = l.tree.included_ranges().first().map_or(0, |r| r.start_byte);
-                    inj.reuse.entry((l.lang.name.clone(), l.depth, at)).or_default().push(l.clone());
+                    inj.kept_layers.entry((l.lang.name.clone(), l.depth, at)).or_default().push(l.clone());
                 }
             }
             let last = self.old.as_ref().zip(self.before.as_ref());
             inj.before = last.map(|(_, before)| (before, before.edited()));
             let old = last.and_then(|(old, before)| {
                 let edits = inj.before.as_ref().map_or(&[][..], |(_, e)| &e[..]);
-                Some((old, before.moved(&before.found), changed(old, tree, edits, self.error_max)?))
+                Some((old, before.moved(&before.matches), changed(old, tree, edits, self.error_max)?))
             });
-            found = inj.found(&self.lang, tree, old);
-            inj.run(&found, 0, &mut layers);
+            matches = inj.matches(&self.lang, tree, old);
+            inj.run(&matches, 0, &mut layers);
             taken = inj.taken;
         }
-        Parsed { tree, layers, covered, taken, found }
+        Parsed { tree, layers, covered, taken, matches }
     }
 }
 
@@ -1077,14 +1077,14 @@ impl Match {
     }
 }
 
-/// A tree's last parse for `Injector::found`: (its tree as edited since, its matches moved along, where the
+/// A tree's last parse for `Injector::matches`: (its tree as edited since, its matches moved along, where the
 /// text or the tree changed).
 type Was<'t> = (&'t Tree, Vec<Match>, Vec<std::ops::Range<usize>>);
 
 /// What the last parse found, so this one asks the query again only where something may have changed.
 struct Before {
     /// The document's matches, in the text that parse ran on (layers keep theirs).
-    found: Arc<Vec<Match>>,
+    matches: Arc<Vec<Match>>,
     /// The edits since, in order.
     since: Vec<InputEdit>,
     /// Where it injected around (`None`: everywhere), as the text is now.
@@ -1259,9 +1259,9 @@ struct Injector<'a> {
     parsers: HashMap<String, Parser>,
     /// Layers parsed before and untouched since, by (language, depth, where the first piece starts): one
     /// asked for with the same pieces again is taken from here, not parsed.
-    reuse: HashMap<(String, usize, usize), Vec<Layer>>,
+    kept_layers: HashMap<(String, usize, usize), Vec<Layer>>,
     /// Layers an edit reached, by (language, depth): one asked for where one of these was is parsed from it.
-    redo: HashMap<(String, usize), Vec<Layer>>,
+    to_reparse: HashMap<(String, usize), Vec<Layer>>,
     taken: Taken,
     /// Time spent parsing injected languages (grammar loading·query compilation happen once, so not counted)
     /// — past `budget`, layers are only kept, not parsed.
@@ -1343,8 +1343,8 @@ impl<'a> Injector<'a> {
         Injector {
             text,
             parsers: HashMap::new(),
-            reuse: HashMap::new(),
-            redo: HashMap::new(),
+            kept_layers: HashMap::new(),
+            to_reparse: HashMap::new(),
             taken: Taken::default(),
             spent: std::time::Duration::ZERO,
             budget,
@@ -1361,21 +1361,21 @@ impl<'a> Injector<'a> {
     }
 
     /// A layer parsed before over exactly these pieces, untouched since.
-    fn reused(&mut self, lang: &str, depth: usize, ranges: &[tree_sitter::Range]) -> Option<Layer> {
+    fn take_kept(&mut self, lang: &str, depth: usize, ranges: &[tree_sitter::Range]) -> Option<Layer> {
         let at = ranges.first()?.start_byte;
-        let same = self.reuse.get_mut(&(lang.to_string(), depth, at))?;
+        let same = self.kept_layers.get_mut(&(lang.to_string(), depth, at))?;
         let i = same.iter().position(|l| l.tree.included_ranges() == ranges)?;
         self.taken.layers_kept += 1;
         Some(same.swap_remove(i))
     }
 
     /// The layer an edit reached that was where these pieces are (spans overlapping most), if any.
-    fn redone(&mut self, lang: &str, depth: usize, ranges: &[tree_sitter::Range]) -> Option<Layer> {
+    fn take_to_reparse(&mut self, lang: &str, depth: usize, ranges: &[tree_sitter::Range]) -> Option<Layer> {
         let span = |r: &[tree_sitter::Range]| {
             r.first().map_or(0, |r| r.start_byte)..r.last().map_or(0, |r| r.end_byte)
         };
         let new = span(ranges);
-        let same = self.redo.get_mut(&(lang.to_string(), depth))?;
+        let same = self.to_reparse.get_mut(&(lang.to_string(), depth))?;
         let overlap = |l: &Layer| {
             let old = span(&l.tree.included_ranges());
             old.end.min(new.end) as isize - old.start.max(new.start) as isize
@@ -1479,7 +1479,7 @@ impl<'a> Injector<'a> {
     /// trees. So the matches to drop are the old tree's there (asked over the same ranges — their captured
     /// text is unchanged, so they still match — plus any capturing what changed), and the ones to add the
     /// new tree's.
-    fn found(&mut self, host: &LangData, tree: &Tree, old: Option<Was>) -> Vec<Match> {
+    fn matches(&mut self, host: &LangData, tree: &Tree, old: Option<Was>) -> Vec<Match> {
         let Some(q) = &host.injections else { return Vec::new() };
         // Around what's shown, the query asks only there (a pass per range) — unless the language combines
         // what it injects: those pieces come from all over (worked out before a frame waits: `run`)
@@ -1521,10 +1521,10 @@ impl<'a> Injector<'a> {
         out
     }
 
-    /// `found` for a layer, from the layer it was (`was`: its tree, edited along, and matches): what changed
+    /// `matches` for a layer, from the layer it was (`was`: its tree, edited along, and matches): what changed
     /// is the edits within their spans — a node spanning a gap between pieces reads the text there — and
     /// where the trees differ (a kept layer's is the same).
-    fn layer_found(
+    fn layer_matches(
         &mut self,
         data: &LangData,
         tree: &Tree,
@@ -1547,21 +1547,21 @@ impl<'a> Injector<'a> {
             };
             Some((old_tree, before.moved(was), changed))
         });
-        self.found(data, tree, old)
+        self.matches(data, tree, old)
     }
 
-    /// The layers `found` makes (and theirs, nested).
-    fn run(&mut self, found: &[Match], depth: usize, out: &mut Vec<Layer>) {
+    /// The layers `matches` makes (and theirs, nested).
+    fn run(&mut self, matches: &[Match], depth: usize, out: &mut Vec<Layer>) {
         // In document order — passes over ranges apart give them in another order than one pass over all,
         // and kept ones come first. Where two patterns catch the same spot (shebang·language name,
         // `lang="ts"` or not) the one listed first wins.
-        let mut found: Vec<&Match> = found.iter().collect();
-        found.sort_by(|a, b| (a.start(), a.pattern, &a.captures).cmp(&(b.start(), b.pattern, &b.captures)));
+        let mut matches: Vec<&Match> = matches.iter().collect();
+        matches.sort_by(|a, b| (a.start(), a.pattern, &a.captures).cmp(&(b.start(), b.pattern, &b.captures)));
         // (language, ranges) — combined ones (`injection.combined`) become one per (pattern, language)
         let mut single: Vec<(String, Vec<tree_sitter::Range>)> = Vec::new();
         let mut combined: Vec<((usize, String), Vec<tree_sitter::Range>)> = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        for m in found {
+        for m in matches {
             let mut ranges = Vec::new();
             for (node, pieces) in &m.nodes {
                 if seen.insert((node.start, node.end)) {
@@ -1609,16 +1609,16 @@ impl<'a> Injector<'a> {
             ranges.dedup_by(|b, a| b.start_byte < a.end_byte);
             let Some((tree, was)) = self.layer_tree(&data, depth + 1, &ranges) else { continue };
             // A kept layer's last tree is itself
-            let was = was.as_ref().map(|(old, found)| (old.as_ref().unwrap_or(&tree), &found[..]));
-            let found = Arc::new(self.layer_found(&data, &tree, was, depth + 1));
+            let was = was.as_ref().map(|(old, matches)| (old.as_ref().unwrap_or(&tree), &matches[..]));
+            let matches = Arc::new(self.layer_matches(&data, &tree, was, depth + 1));
             out.push(Layer {
                 lang: data.clone(),
                 tree,
                 touched: false,
-                found: found.clone(),
+                matches: matches.clone(),
                 depth: depth + 1,
             });
-            self.run(&found, depth + 1, out);
+            self.run(&matches, depth + 1, out);
         }
     }
 
@@ -1631,14 +1631,14 @@ impl<'a> Injector<'a> {
         depth: usize,
         ranges: &[tree_sitter::Range],
     ) -> Option<(Tree, Option<(Option<Tree>, Arc<Vec<Match>>)>)> {
-        if let Some(l) = self.reused(&data.name, depth, ranges) {
-            return Some((l.tree, Some((None, l.found))));
+        if let Some(l) = self.take_kept(&data.name, depth, ranges) {
+            return Some((l.tree, Some((None, l.matches))));
         }
         let until = self.frame.map(|t| (t, self.budget));
         if self.spent > self.budget || until.is_some_and(|(t, b)| t.elapsed() > b) {
             return None;
         }
-        let old = self.redone(&data.name, depth, ranges);
+        let old = self.take_to_reparse(&data.name, depth, ranges);
         let parser = self.parsers.entry(data.name.clone()).or_insert_with(|| {
             let mut p = Parser::new();
             let _ = p.set_language(&data.language);
@@ -1652,7 +1652,7 @@ impl<'a> Injector<'a> {
             tree = parse_layer(parser, self.text, ranges, None, until);
         }
         self.spent += t.elapsed();
-        Some((tree?, old.map(|l| (Some(l.tree), l.found))))
+        Some((tree?, old.map(|l| (Some(l.tree), l.matches))))
     }
 }
 
@@ -2286,25 +2286,28 @@ mod tests {
                     let made_fresh = |near: Option<&[std::ops::Range<usize>]>, whole_query: bool| {
                         let mut inj =
                             Injector { whole_query, ..Injector::new(&text, near, std::time::Duration::MAX) };
-                        let found = inj.found(&syn.lang, syn.tree.as_ref().unwrap(), None);
+                        let matches = inj.matches(&syn.lang, syn.tree.as_ref().unwrap(), None);
                         let mut out = Vec::new();
-                        inj.run(&found, 0, &mut out);
+                        inj.run(&matches, 0, &mut out);
                         out
                     };
                     // The matches kept from parse to parse are the ones asking afresh gives — the document's
                     // and each layer's
-                    let keys = |found: &[Match]| {
-                        let mut k: Vec<_> = found.iter().map(Match::key).collect();
+                    let keys = |matches: &[Match]| {
+                        let mut k: Vec<_> = matches.iter().map(Match::key).collect();
                         k.sort();
                         k
                     };
                     let mut inj = Injector::new(&text, Some(&covered), std::time::Duration::MAX);
-                    let fresh = inj.found(&syn.lang, syn.tree.as_ref().unwrap(), None);
-                    assert!(keys(syn.found.as_ref().unwrap()) == keys(&fresh), "{lang} step {step}: matches");
+                    let fresh = inj.matches(&syn.lang, syn.tree.as_ref().unwrap(), None);
+                    assert!(
+                        keys(syn.matches.as_ref().unwrap()) == keys(&fresh),
+                        "{lang} step {step}: matches"
+                    );
                     for l in syn.layers.iter() {
-                        let fresh = inj.layer_found(&l.lang, &l.tree, None, l.depth);
+                        let fresh = inj.layer_matches(&l.lang, &l.tree, None, l.depth);
                         assert!(
-                            keys(&l.found) == keys(&fresh),
+                            keys(&l.matches) == keys(&fresh),
                             "{lang} step {step}: {}'s matches",
                             l.lang.name
                         );
@@ -2586,7 +2589,7 @@ mod tests {
         let tree = syn.tree.unwrap();
         let ranges = tree.included_ranges();
         let mut inj = Injector::new(&text, None, std::time::Duration::MAX);
-        let made = |depth: usize, matches: usize| {
+        let made = |depth: usize, n: usize| {
             let m = Match {
                 pattern: 0,
                 lang: "comment".into(),
@@ -2594,14 +2597,14 @@ mod tests {
                 nodes: Vec::new(),
                 captures: Vec::new(),
             };
-            let found = Arc::new(vec![m; matches]);
-            Layer { lang: rust.clone(), tree: tree.clone(), touched: false, found, depth }
+            let matches = Arc::new(vec![m; n]);
+            Layer { lang: rust.clone(), tree: tree.clone(), touched: false, matches, depth }
         };
         for l in [made(1, 1), made(2, 0)] {
-            inj.reuse.entry((l.lang.name.clone(), l.depth, 0)).or_default().push(l);
+            inj.kept_layers.entry((l.lang.name.clone(), l.depth, 0)).or_default().push(l);
         }
-        assert_eq!(inj.reused("rust", 2, &ranges).map(|l| l.found.len()), Some(0));
-        assert_eq!(inj.reused("rust", 1, &ranges).map(|l| l.found.len()), Some(1));
+        assert_eq!(inj.take_kept("rust", 2, &ranges).map(|l| l.matches.len()), Some(0));
+        assert_eq!(inj.take_kept("rust", 1, &ranges).map(|l| l.matches.len()), Some(1));
     }
 
     /// Around what's shown: whole lines, so many more each way, merged; and a layer touching it meets it.
@@ -2869,17 +2872,17 @@ mod tests {
         let text = Rope::from_str("<script lang=\"ts\">\nlet a: number = 1;\n</script>\n");
         let syn = Syntax::parsed(lang.clone(), &text);
         let mut inj = Injector::new(&text, None, std::time::Duration::MAX);
-        let mut found = inj.found(&lang, syn.tree.as_ref().unwrap(), None);
-        let langs: Vec<&str> = found.iter().map(|m| m.lang.as_str()).collect();
+        let mut matches = inj.matches(&lang, syn.tree.as_ref().unwrap(), None);
+        let langs: Vec<&str> = matches.iter().map(|m| m.lang.as_str()).collect();
         assert!(
             langs.contains(&"typescript") && langs.contains(&"javascript"),
             "both catch the script: {langs:?}"
         );
         for _ in 0..2 {
             let mut layers = Vec::new();
-            inj.run(&found, 0, &mut layers);
+            inj.run(&matches, 0, &mut layers);
             assert_eq!(layers[0].lang.name, "typescript");
-            found.reverse();
+            matches.reverse();
         }
     }
 }
