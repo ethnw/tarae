@@ -128,7 +128,93 @@ pub(crate) struct Crate {
     pub mods: Vec<String>,
 }
 
-pub(crate) fn rust_crate(path: &Path) -> Result<Crate, String> {
+/// `lang` = the Rust grammar (a file taken in with `#[path]` is found through other files' trees).
+pub(crate) fn rust_crate(path: &Path, lang: &tree_sitter::Language) -> Result<Crate, String> {
+    rust_crate_in(path, lang, 0)
+}
+
+fn rust_crate_in(path: &Path, lang: &tree_sitter::Language, depth: usize) -> Result<Crate, String> {
+    let placed = rust_crate_by_place(path)?;
+    if placed.mods.is_empty() || depth >= 4 {
+        return Ok(placed);
+    }
+    let root = up_to(path, |d| d.join("Cargo.toml").is_file()).ok_or("not in a Cargo project")?;
+    match declared_with_path(path, &root, lang) {
+        // That file's module (or crate), and this one in it by its declared name
+        Some((file, name)) => {
+            let mut c = rust_crate_in(&file, lang, depth + 1)?;
+            c.mods.push(name);
+            Ok(c)
+        }
+        None => Ok(placed),
+    }
+}
+
+/// The file that takes `path` in with `#[path = "…"] mod name;` (`term.rs`:
+/// `#[path = "term_snapshots.rs"] mod snapshot_tests;`) — (that file, name). Looked for in the folders from
+/// the file's own up to the package's (the path is relative to the declaring file's folder), read through
+/// the tree; files that don't mention the attribute and the name aren't parsed. On a worker (reads files).
+fn declared_with_path(path: &Path, root: &Path, lang: &tree_sitter::Language) -> Option<(PathBuf, String)> {
+    let canon = |p: PathBuf| std::fs::canonicalize(&p).unwrap_or(p);
+    let target = canon(path.to_path_buf());
+    let name = path.file_name()?.to_str()?;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(lang).ok()?;
+    for dir in path.parent()?.ancestors().take_while(|d| d.starts_with(root)) {
+        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        let mut files: Vec<PathBuf> = entries
+            .filter_map(|e| Some(e.ok()?.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "rs") && p.as_path() != path)
+            .collect();
+        files.sort();
+        for file in files {
+            let Ok(src) = std::fs::read_to_string(&file) else { continue };
+            if !src.contains("#[path") || !src.contains(name) {
+                continue;
+            }
+            let Some(tree) = parser.parse(&src, None) else { continue };
+            if let Some((_, m)) =
+                path_mods(&tree, &src).into_iter().find(|(p, _)| canon(dir.join(p)) == target)
+            {
+                return Some((file, m));
+            }
+        }
+    }
+    None
+}
+
+/// A file's top-level `#[path = "…"] mod name;` declarations: (path, name). (Inside an inline `mod {}`
+/// the path means something else — those aren't taken.)
+fn path_mods(tree: &Tree, src: &str) -> Vec<(String, String)> {
+    let text = |n: tree_sitter::Node| n.utf8_text(src.as_bytes()).unwrap_or_default().to_string();
+    let root = tree.root_node();
+    let mut cursor = root.walk();
+    let mut out = Vec::new();
+    for m in root.named_children(&mut cursor) {
+        let (true, None, Some(name)) =
+            (m.kind() == "mod_item", m.child_by_field_name("body"), m.child_by_field_name("name"))
+        else {
+            continue;
+        };
+        // Its attributes: the items right above it (comments between)
+        let mut prev = m.prev_named_sibling();
+        while let Some(a) =
+            prev.filter(|p| matches!(p.kind(), "attribute_item" | "line_comment" | "block_comment"))
+        {
+            if let Some(attr) = a.named_child(0).filter(|n| n.kind() == "attribute")
+                && attr.named_child(0).is_some_and(|i| text(i) == "path")
+                && let Some(v) = attr.child_by_field_name("value").filter(|v| v.kind() == "string_literal")
+            {
+                out.push((text(v).trim_matches('"').to_string(), text(name)));
+            }
+            prev = a.prev_named_sibling();
+        }
+    }
+    out
+}
+
+/// The Cargo target and module path from where the file sits.
+fn rust_crate_by_place(path: &Path) -> Result<Crate, String> {
     let c = |crate_root: PathBuf, flag: Vec<String>, mods: Vec<String>| Crate { crate_root, flag, mods };
     let root = up_to(path, |d| d.join("Cargo.toml").is_file()).ok_or("not in a Cargo project")?;
     let rel = path.strip_prefix(&root).map_err(|_| "file outside its package")?;
@@ -203,6 +289,8 @@ pub enum RunState {
     Running,
     Passed,
     Failed(Option<i32>),
+    /// It ended without running a test — a filter that matched nothing (`Parser::ran_none`).
+    NoTests,
 }
 
 pub struct TestRun {
@@ -334,26 +422,22 @@ pub(crate) fn strip_ansi(s: &str) -> String {
 }
 
 impl Editor {
-    /// Test for the current file·cursor — if the grammar is missing, shows a download offer and returns None
-    /// (`resume` continues once downloaded).
-    fn test_target(&mut self, scope: Scope, resume: crate::offer::Resume) -> Option<Target> {
+    /// Test for the current file·cursor, found on a worker (a pack may read other files — Rust's `#[path]`
+    /// modules), then `then` with it — if the grammar is missing, shows a download offer instead (`resume`
+    /// continues once downloaded).
+    fn test_target(&mut self, scope: Scope, resume: crate::offer::Resume, then: fn(&mut Editor, Target)) {
         let doc = self.doc();
         let Some(path) = doc.path.clone() else {
-            self.set_status("save the file first");
-            return None;
+            return self.set_status("save the file first");
         };
         let spec = crate::syntax::detect(&path);
         if let Err(e) = supported(spec.map_or("", |s| s.name.as_str())) {
-            self.set_status(e);
-            return None;
+            return self.set_status(e);
         }
         let spec = spec.expect("supported");
         let lang = match crate::syntax::Loader::global().load(spec) {
             Ok(l) => l,
-            Err(_) => {
-                self.offer_grammar_then(spec, resume);
-                return None;
-            }
+            Err(_) => return self.offer_grammar_then(spec, resume),
         };
         // The tree of the text as it is now: the doc's own, brought up to date from the edits since its last
         // parse (well under a ms) — a whole parse only without one (tens of ms on a big file)
@@ -369,23 +453,21 @@ impl Editor {
             parser.set_language(&lang.language).ok().and_then(|_| parser.parse(&src, None))
         });
         let Some(tree) = tree else {
-            self.set_error(format!("test: couldn't parse {}", spec.name));
-            return None;
+            return self.set_error(format!("test: couldn't parse {}", spec.name));
         };
-        match find(&spec.name, &path, &src, &tree, cursor, scope) {
-            Ok(t) => Some(t),
-            Err(e) => {
-                self.set_status(e);
-                None
+        let name = spec.name.clone();
+        self.events.jobs().spawn(move || {
+            let found = find(&name, &path, &src, &tree, cursor, scope);
+            move |ed: &mut Editor| match found {
+                Ok(t) => then(ed, t),
+                Err(e) => ed.set_status(e),
             }
-        }
+        });
     }
 
     /// `space x x` · `space x f`.
     pub fn test_run(&mut self, scope: Scope) {
-        if let Some(t) = self.test_target(scope, crate::offer::Resume::Test(scope)) {
-            self.test_start(t);
-        }
+        self.test_target(scope, crate::offer::Resume::Test(scope), |ed, t| ed.test_start(t));
     }
 
     /// `space x l` — rerun the last one (as debug if it was debug).
@@ -565,7 +647,9 @@ impl Editor {
                 // Pick the first failure (right side of the results pane · ]x)
                 r.selected = r.failures().first().copied().unwrap_or(0);
                 r.scroll = None;
-                r.state = match status.and_then(|s| s.code()) {
+                let code = status.and_then(|s| s.code());
+                r.state = match code {
+                    _ if r.parser.ran_none(code, &r.cases) => RunState::NoTests,
                     Some(0) => RunState::Passed,
                     code => RunState::Failed(code),
                 };
@@ -615,9 +699,7 @@ impl Editor {
 
     /// `space x d` — debugs the test at the cursor (stops at breakpoints).
     pub fn test_debug(&mut self) {
-        if let Some(t) = self.test_target(Scope::Nearest, crate::offer::Resume::TestDebug) {
-            self.test_debug_target(t);
-        }
+        self.test_target(Scope::Nearest, crate::offer::Resume::TestDebug, |ed, t| ed.test_debug_target(t));
     }
 
     pub fn test_debug_target(&mut self, target: Target) {
@@ -1023,13 +1105,119 @@ mod tests {
         let d = tmp("rust-bin");
         std::fs::write(d.join("Cargo.toml"), "").unwrap();
         std::fs::create_dir_all(d.join("src/bin/tool")).unwrap();
-        let c = rust_crate(&d.join("src/bin/tool/main.rs")).unwrap();
+        let c = rust_crate_by_place(&d.join("src/bin/tool/main.rs")).unwrap();
         assert_eq!(
             (c.crate_root, c.flag, c.mods),
             (d.join("src/bin/tool/main.rs"), vec!["--bin".into(), "tool".into()], vec![])
         );
-        let c = rust_crate(&d.join("src/bin/tool/util.rs")).unwrap();
+        let c = rust_crate_by_place(&d.join("src/bin/tool/util.rs")).unwrap();
         assert_eq!((c.flag, c.mods), (vec!["--bin".to_string(), "tool".into()], vec!["util".to_string()]));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A Cargo project whose tests sit in files other modules take in with `#[path]` (as `term.rs` does
+    /// `term_snapshots.rs`), one of them from a folder above; a commented-out attribute takes in nothing.
+    fn path_project(name: &str) -> PathBuf {
+        let d = tmp(name);
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+        std::fs::create_dir_all(d.join("src/ui")).unwrap();
+        let files = [
+            (
+                "src/main.rs",
+                "// #[path = \"term_snapshots.rs\"] mod wrong;\nmod term;\nmod ui;\nfn main() {}\n",
+            ),
+            ("src/term.rs", "#[cfg(test)]\n#[path = \"term_snapshots.rs\"]\nmod snapshot_tests;\n"),
+            ("src/term_snapshots.rs", "#[test]\nfn shows() {}\n"),
+            ("src/ui.rs", "#[path = \"ui/view_checks.rs\"]\nmod view;\n\nfn helper() {}\n"),
+            ("src/ui/view_checks.rs", "#[test]\nfn works() {}\n"),
+        ];
+        for (f, text) in files {
+            std::fs::write(d.join(f), text).unwrap();
+        }
+        std::fs::canonicalize(d).unwrap()
+    }
+
+    /// A file taken in with `#[path = "…"]` is the module that declares it, not its own file name — the
+    /// filter named a module that doesn't exist, and nothing ran.
+    #[test]
+    fn rust_modules_declared_with_a_path_attribute() {
+        let d = path_project("rust-path");
+        let find_in = |rel: &str, needle: &str| {
+            let src = std::fs::read_to_string(d.join(rel)).unwrap();
+            let tree = parse("rust", &src).expect("rust grammar is always built in");
+            find("rust", &d.join(rel), &src, &tree, at(&src, needle), Scope::Nearest).unwrap()
+        };
+        let t = find_in("src/term_snapshots.rs", "{}");
+        assert_eq!(t.label, "term::snapshot_tests::shows");
+        assert_eq!(t.argv(), ["cargo", "test", "--", "term::snapshot_tests::shows", "--exact"]);
+        let t = find_in("src/ui/view_checks.rs", "{}");
+        assert_eq!(t.label, "ui::view::works", "declared from a folder above");
+        assert_eq!(
+            find_in("src/ui.rs", "fn helper").label,
+            "ui::*",
+            "a file in its own place keeps its name"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// `space x x` finds the same way — on a worker (the declaring file is read from disk), then runs.
+    #[test]
+    fn space_x_x_finds_path_modules_on_a_worker() {
+        let d = path_project("rust-path-keys");
+        let mut ed = Editor::new(crate::config::Config::default());
+        ed.open(&d.join("src/term_snapshots.rs")).unwrap();
+        ed.test_run(Scope::Nearest);
+        assert!(ed.test_run.is_none(), "found on a worker, not while the key is handled");
+        let end = Instant::now() + Duration::from_secs(10);
+        while ed.test_run.is_none() {
+            let ev = ed.events.recv_timeout(end.saturating_duration_since(Instant::now())).expect("event");
+            ed.handle_event(ev);
+        }
+        assert_eq!(ed.test_run.as_ref().unwrap().target.label, "term::snapshot_tests::shows");
+        ed.test_close();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A run in which no test ran (a filter that matched nothing) isn't "passed" — where the output says
+    /// how many ran; a runner whose output isn't read per test still passes on its exit code.
+    #[test]
+    fn a_run_where_no_test_ran_says_so() {
+        let d = tmp("no-tests");
+        let mut ed = Editor::new(crate::config::Config::default());
+        let run = |ed: &mut Editor, parse: &str, script: &str| -> RunState {
+            ed.test_start(Target {
+                label: "t".into(),
+                cwd: d.clone(),
+                how: How::Pack {
+                    lang: parse.into(),
+                    argv: vec!["sh".into(), "-c".into(), script.into()],
+                    debug: None,
+                    parse: parse.into(),
+                    build: None,
+                    debug_run: None,
+                    junit: None,
+                },
+            });
+            let end = Instant::now() + Duration::from_secs(10);
+            while ed.test_run.as_ref().is_some_and(|r| r.state == RunState::Running) {
+                let ev =
+                    ed.events.recv_timeout(end.saturating_duration_since(Instant::now())).expect("event");
+                ed.handle_event(ev);
+            }
+            ed.test_run.as_ref().unwrap().state.clone()
+        };
+        let none = "printf 'running 0 tests\\n\\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out\\n'";
+        assert_eq!(run(&mut ed, "rust", none), RunState::NoTests);
+        let one = "printf 'running 1 test\\ntest a::b ... ok\\n\\ntest result: ok. 1 passed; 0 failed\\n'";
+        assert_eq!(run(&mut ed, "rust", one), RunState::Passed);
+        assert_eq!(
+            run(&mut ed, "go", "echo 'testing: warning: no tests to run'; echo PASS"),
+            RunState::NoTests
+        );
+        // pytest: exit 5 = nothing collected
+        assert_eq!(run(&mut ed, "python", "echo 'no tests ran in 0.01s'; exit 5"), RunState::NoTests);
+        assert_eq!(run(&mut ed, "python", "exit 1"), RunState::Failed(Some(1)));
+        assert_eq!(run(&mut ed, "other", "true"), RunState::Passed, "not read per test: its exit code");
         let _ = std::fs::remove_dir_all(&d);
     }
 

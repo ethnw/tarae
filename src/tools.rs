@@ -494,6 +494,7 @@ fn report(r: &TestRun) -> String {
         RunState::Failed(Some(code)) => format!("failed (exit {code})"),
         RunState::Failed(None) => "failed (killed)".to_string(),
         RunState::Running => "still running".to_string(),
+        RunState::NoTests => "no tests ran".to_string(),
     };
     let mut out = format!(
         "{verdict}{took} — {}\n$ {}  (in {})\n",
@@ -501,6 +502,9 @@ fn report(r: &TestRun) -> String {
         r.target.argv().join(" "),
         crate::chat::shown(&r.target.cwd)
     );
+    if r.state == RunState::NoTests {
+        out.push_str("The run ended without running a test — nothing matched what it asked for (the output says what the runner saw).\n");
+    }
     let count = |s: Status| r.cases.iter().filter(|c| c.status == s).count();
     let counts: Vec<String> =
         [(Status::Passed, "passed"), (Status::Failed, "failed"), (Status::Skipped, "skipped")]
@@ -562,6 +566,8 @@ pub fn verdict(result: &str) -> String {
     let count = |what: &str| counts?.split(", ").find(|c| c.ends_with(what)).map(str::to_string);
     if head.starts_with("passed") {
         count("passed").unwrap_or_else(|| "passed".into())
+    } else if head.starts_with("no tests ran") {
+        "no tests ran".into()
     } else if head.starts_with("failed") {
         count("failed").unwrap_or_else(|| "failed".into())
     } else {
@@ -581,6 +587,22 @@ mod tests {
         assert_eq!(v("passed in 0.4s — a.rs\n$ cargo test\n3 passed\n"), "3 passed");
         assert_eq!(v("failed (exit 101) in 3s — a.rs\n$ cargo test\n\nOutput (last 9 lines):\n"), "failed");
         assert_eq!(v("the test run was stopped — the user closed it"), "not run");
+        assert_eq!(v("no tests ran in 0.3s — a::b\n$ cargo test -- a::b --exact\n"), "no tests ran");
+    }
+
+    /// A run where no test ran is reported as that — not "passed" — with the output to see why.
+    #[test]
+    fn a_run_where_no_test_ran_is_not_passed() {
+        let output = vec![
+            "running 0 tests".to_string(),
+            "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out".into(),
+        ];
+        let mut r = crate::testing::TestRun::finished("term_snapshots::shows", Vec::new(), output);
+        r.state = crate::testing::RunState::NoTests;
+        let text = super::report(&r);
+        assert!(text.starts_with("no tests ran — term_snapshots::shows\n"), "{text}");
+        assert!(text.contains("running 0 tests\n"), "the output says why: {text}");
+        assert_eq!(super::verdict(&text), "no tests ran");
     }
 
     /// Checks run at once; anything the words don't fully say — or a read-only command made to write —

@@ -1393,6 +1393,29 @@ fn snapshot_test_panel_scrolled() {
     s.check("test_panel_scrolled");
 }
 
+/// A run where no test ran: the pill says so, and the first row says why above the runner's own "ok".
+#[test]
+fn test_panel_says_when_no_test_ran() {
+    let mut s = Shot::new(100, 24);
+    s.file("src/demo.rs", DEMO_RS);
+    let output = vec![
+        "running 0 tests".to_string(),
+        String::new(),
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out".into(),
+    ];
+    let mut run = crate::testing::TestRun::finished("orphan::forgotten", Vec::new(), output);
+    run.state = crate::testing::RunState::NoTests;
+    s.ed.test_run = Some(run);
+    let mut p = vt100::Parser::new(s.h, s.w, 0);
+    p.process(&s.frame());
+    let text = p.screen().contents();
+    let (y0, _, _) = s.ed.screen.test_panel.get().expect("the panel is drawn");
+    let rows: Vec<&str> = text.lines().skip(y0).collect();
+    assert!(rows[0].contains("NO TESTS") && rows[0].contains("orphan::forgotten"), "{text}");
+    assert!(rows[1].contains("no test ran — nothing matched it"), "{text}");
+    assert!(rows[2..].iter().any(|r| r.contains("test result: ok. 0 passed")), "the output under it: {text}");
+}
+
 /// The terminal panel under the code with a program's colored output, the keys in it.
 #[test]
 fn snapshot_terminal_panel() {

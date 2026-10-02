@@ -770,7 +770,7 @@ impl Tests {
                     vars.insert("python".into(), Var::One(crate::testing::py_interpreter(cwd)));
                 }
                 "cargo" => {
-                    let c = crate::testing::rust_crate(path)?;
+                    let c = crate::testing::rust_crate(path, &tree.language())?;
                     let module =
                         if c.mods.is_empty() { String::new() } else { format!("{}::", c.mods.join("::")) };
                     let label = if c.mods.is_empty() {

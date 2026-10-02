@@ -1204,6 +1204,7 @@ fn draw_test_panel(
         RunState::Running => ("RUNNING", ui.accent.fg),
         RunState::Passed => ("PASSED", good),
         RunState::Failed(_) => ("FAILED", bad),
+        RunState::NoTests => ("NO TESTS", color("warning")),
     };
     // ── Header row
     queue!(out, MoveTo(0, y0 as u16))?;
@@ -1252,16 +1253,26 @@ fn draw_test_panel(
         let n = r.detail_len();
         (n > detail_rows).then(|| scroll_thumb(detail_rows, n, top))
     };
-    // No results yet — the whole output (following its end, unless the wheel moved it)
+    // No results yet — the whole output (following its end, unless the wheel moved it); a run where no
+    // test ran says so above it (its last line may well read "ok")
     if r.cases.is_empty() {
-        editor.screen.test_panel.set(Some((y0, y0 + rows, rows)));
-        let start = r.detail_top(rows);
-        let bar = thumb(rows, start);
+        let note = usize::from(r.state == RunState::NoTests);
+        let out_rows = rows.saturating_sub(note);
+        editor.screen.test_panel.set(Some((y0, y0 + rows, out_rows)));
+        let start = r.detail_top(out_rows);
+        let bar = thumb(out_rows, start);
         for i in 0..rows {
             let y = (y0 + 1 + i) as u16;
             queue!(out, MoveTo(0, y))?;
             apply(out, card)?;
             queue!(out, Spaces(w), MoveTo(2, y))?;
+            if i < note {
+                apply(out, Style { fg: color("warning"), ..card })?;
+                let why = "no test ran — nothing matched it. What the runner did:";
+                queue!(out, Print(fit_ellipsis(why, w.saturating_sub(4))))?;
+                continue;
+            }
+            let i = i - note;
             match r.output.get(start + i) {
                 Some((err, line)) => {
                     apply(out, line_style(*err, line))?;

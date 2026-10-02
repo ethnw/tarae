@@ -82,6 +82,17 @@ impl Parser {
         }
     }
 
+    /// Whether a finished run ran no test: a runner read test by test that reported none (a filter that
+    /// matched nothing — libtest's `running 0 tests`, go's "no tests to run", pytest's exit 5). A runner not
+    /// read per test can't tell — its exit code stands.
+    pub fn ran_none(&self, code: Option<i32>, cases: &[Case]) -> bool {
+        match self {
+            Parser::None => false,
+            Parser::Python { .. } => cases.is_empty() && matches!(code, Some(0 | 5)),
+            Parser::Rust { .. } | Parser::Go { .. } => cases.is_empty() && code == Some(0),
+        }
+    }
+
     /// Reads one line — adds to or updates `cases`.
     pub fn line(&mut self, cwd: &Path, line: &str, cases: &mut Vec<Case>) {
         let find = |cases: &mut Vec<Case>, name: &str| -> usize {
