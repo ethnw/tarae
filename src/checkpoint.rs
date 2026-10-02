@@ -79,16 +79,25 @@ pub fn record(ed: &mut Editor, id: crate::document::DocId, before: Option<Rope>)
 }
 
 /// An edit of Claude's let in unasked (review at the end) to `path`, which was `before` (None = no such
-/// file) — kept the first time this turn; what it is after is read when the turn ends.
-pub fn record_unseen(ed: &mut Editor, path: PathBuf, before: Option<Rope>) {
+/// file) — kept the first time this turn; what it is after is read when the turn ends. `then` (claude
+/// told it may write) runs once that's on disk: a crash before claude writes still has what it was.
+pub fn record_unseen(
+    ed: &mut Editor,
+    path: PathBuf,
+    before: Option<Rope>,
+    then: impl FnOnce(&mut Editor) + Send + 'static,
+) {
     let turn = &mut ed.checkpoints.turn;
     match turn.iter_mut().find(|t| t.path == path) {
-        Some(t) => t.unseen = true,
+        Some(t) if t.unseen => then(ed),
+        Some(t) => {
+            t.unseen = true;
+            keep_then(ed, then);
+        }
         None => {
             let after = before.clone().unwrap_or_default();
             turn.push(Touched { path, before, after, unseen: true });
-            // (what it was, on disk before claude writes it — a crash keeps it)
-            keep(ed);
+            keep_then(ed, then);
         }
     }
 }
@@ -334,6 +343,12 @@ pub struct Stored {
 /// Saves read, compare and write the file one at a time.
 static SAVING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Holds every save back while it's kept (tests: what waits for one).
+#[cfg(test)]
+pub fn hold_saves() -> std::sync::MutexGuard<'static, ()> {
+    SAVING.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn touched_json(t: &Touched) -> Value {
     json!({ "path": t.path, "before": t.before.as_ref().map(Rope::to_string), "after": t.after.to_string(),
             "unseen": t.unseen })
@@ -400,7 +415,27 @@ fn save(dir: &Path, root: &Path, s: Stored) {
 
 /// The turns as they are now, kept (the texts are written out on a worker).
 fn keep(ed: &Editor) {
-    let Some(dir) = ed.checkpoints.dir.clone() else { return };
+    if let Some(save) = saving(ed) {
+        ed.events.jobs().spawn(move || {
+            save();
+            |_: &mut Editor| {}
+        });
+    }
+}
+
+/// `keep`, then `then` on the main loop once it's written (at once when nothing is kept — tests, or
+/// before `restore` has them back).
+fn keep_then(ed: &mut Editor, then: impl FnOnce(&mut Editor) + Send + 'static) {
+    let Some(save) = saving(ed) else { return then(ed) };
+    ed.events.jobs().spawn(move || {
+        save();
+        then
+    });
+}
+
+/// Writing the turns as they are now (for a worker) — None when they aren't kept.
+fn saving(ed: &Editor) -> Option<impl FnOnce() + Send + 'static> {
+    let dir = ed.checkpoints.dir.clone()?;
     let root = std::env::current_dir().unwrap_or_default();
     let list = &ed.checkpoints.list;
     let question = ed
@@ -415,10 +450,7 @@ fn keep(ed: &Editor) {
         question,
         seq: crate::chats::seq(),
     };
-    ed.events.jobs().spawn(move || {
-        save(&dir, &root, s);
-        |_: &mut Editor| {}
-    });
+    Some(move || save(&dir, &root, s))
 }
 
 /// At startup: the project's kept turns come back (read on a worker), before any made since. A turn

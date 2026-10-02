@@ -266,6 +266,15 @@ pub struct BlameState {
 // ── On the editor ─────────────────────────────────────────────────────────────
 
 impl Editor {
+    /// What the quick keys after `space g` could act on in the code: (a hunk under the cursor, a conflict
+    /// there or below — `conflict_take`'s reach).
+    pub(crate) fn git_code_here(&mut self) -> (bool, bool) {
+        self.conflicts_now();
+        let line = self.cursor_line();
+        let doc = self.doc();
+        (hunk_at(&doc.git_hunks, line).is_some(), doc.conflicts.iter().any(|c| c.end >= line))
+    }
+
     /// The current document's hunk under the cursor, with its index text.
     fn cursor_hunk(&mut self) -> Option<(Hunk, std::sync::Arc<String>)> {
         let doc = self.doc();

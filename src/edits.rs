@@ -176,8 +176,13 @@ fn unasked(ed: &mut Editor, root: PathBuf, p: Pending) {
             };
             match found {
                 Some((before, real)) if at_end(ed) && !dirty(&real) => {
-                    crate::checkpoint::record_unseen(ed, real, before.map(ropey::Rope::from));
-                    answer(ed, &p.request_id, allow(p.input.clone()));
+                    // (allowed once what it was is on disk)
+                    let before = before.map(ropey::Rope::from);
+                    crate::checkpoint::record_unseen(ed, real, before, move |ed: &mut Editor| {
+                        if ed.chat.as_ref().map(crate::chat::Chat::generation) == generation {
+                            answer(ed, &p.request_id, allow(p.input));
+                        }
+                    });
                 }
                 _ => {
                     if let Some(c) = &mut ed.chat {

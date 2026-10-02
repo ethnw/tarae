@@ -3704,6 +3704,68 @@ mod tests {
         assert!(ed.offers.is_empty());
     }
 
+    /// Review at the end: a command that runs a file Claude wrote unseen this turn shows that file whole on
+    /// its card — what runs is in sight before `y`. A `y` after the file changed again doesn't run it, and
+    /// one too long for a card isn't put to the user.
+    #[test]
+    fn running_a_file_written_unseen_shows_it_first() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-run-unseen-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let (script, made) = (dir.join("x.sh"), dir.join("made"));
+        let body = format!("echo making\ntouch {}\n", made.display());
+        // (no quotes: the fake claude's script is single-quoted — `named` is tested with them in tools.rs)
+        let command = format!("sh {}", script.display());
+        let start = |body: &str| {
+            std::fs::write(&script, body).unwrap();
+            std::fs::remove_file(dir.join("stdin.log")).ok();
+            let mut ed = editor("");
+            ed.checkpoints.turn.push(crate::checkpoint::Touched {
+                path: script.clone(),
+                before: None,
+                after: ropey::Rope::new(),
+                unseen: true,
+            });
+            let log = claude_calls(&mut ed, &dir, "run", &json!({ "command": command }));
+            feed(&mut ed, "<space>lmake it<ret>");
+            (ed, log)
+        };
+        // Shown on the card, drawn whole; `y` runs it
+        let (mut ed, log) = start(&body);
+        settle_for(&mut ed, |ed| !ed.offers.is_empty());
+        let q = ed.offers[0].question.clone();
+        assert!(q.starts_with(&command) && q.contains("x.sh") && q.contains(body.trim_end()), "{q}");
+        let mut bytes = Vec::new();
+        crate::term::render(&mut ed, &mut bytes, 150, 40).unwrap();
+        let mut parser = vt100::Parser::new(40, 150, 0);
+        parser.process(&bytes);
+        let screen = parser.screen().contents();
+        assert!(screen.contains("echo making") && screen.contains("written this turn"), "{screen}");
+        assert!(ed.screen.offer_buttons.iter().any(|b| b.3 == 'y'), "y can answer it");
+        ed.offer_accept();
+        settle_for(&mut ed, |ed| !ed.chat.as_ref().unwrap().busy());
+        assert!(made.exists(), "{}", tool_answer(&log));
+        std::fs::remove_file(&made).ok();
+        // Changed after it was shown: not run, Claude hears why
+        let (mut ed, log) = start(&body);
+        settle_for(&mut ed, |ed| !ed.offers.is_empty());
+        let sneaked = dir.join("sneaked");
+        std::fs::write(&script, format!("{body}touch {}\n", sneaked.display())).unwrap();
+        ed.offer_accept();
+        settle_for(&mut ed, |ed| !ed.chat.as_ref().unwrap().busy());
+        let answer = tool_answer(&log);
+        assert!(answer.contains("changed after the user saw it") && answer.contains("isError"), "{answer}");
+        assert!(!made.exists() && !sneaked.exists() && ed.task_run.is_none());
+        // Too long to show: not asked about
+        let (mut ed, log) = start(&"echo x\n".repeat(200));
+        settle_for(&mut ed, |ed| !ed.chat.as_ref().unwrap().busy());
+        let answer = tool_answer(&log);
+        assert!(answer.contains("too long to show") && answer.contains("isError"), "{answer}");
+        assert!(ed.offers.is_empty() && ed.task_run.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Asking about a line starts a note with you; Claude's plain answer (no tool) lands in the thread.
     #[test]
     fn a_question_on_a_line_becomes_a_note() {
@@ -4713,6 +4775,7 @@ mod tests {
             &mut ed,
             main.clone(),
             Some(ropey::Rope::from_str("line 1\nline 2\nline 3\n")),
+            |_| {},
         );
         std::fs::write(&main, "line 1\nLINE 2\nline 3\n").unwrap(); // claude's write
         turns_kept(&store, |k| k.turn.len() == 1);
@@ -4735,6 +4798,59 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&main).unwrap(), "line 1\nline 2\nline 3\n");
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&store).ok();
+    }
+
+    /// Review at the end: what a file was is on disk before claude is allowed to write it — a crash right
+    /// after still has it. (Saves are held here: the answer waits for them.)
+    #[test]
+    fn what_a_file_was_is_kept_before_claude_writes_it() {
+        use serde_json::json;
+        let store = std::env::temp_dir().join(format!("tarae-turns-first-{}", std::process::id()));
+        let (dir, main, ..) = follow_project("kept-first");
+        let mut ed = editor("");
+        ed.checkpoints.dir = Some(store.clone());
+        let edit = json!({"file_path": main, "old_string": "line 2", "new_string": "LINE 2"});
+        let log = fake_asks(&mut ed, &dir, &[("Edit", edit)], true);
+        feed(&mut ed, "<space>l");
+        ed.chat.as_mut().unwrap().edits.at_end = Some(dir.clone());
+        let held = crate::checkpoint::hold_saves();
+        feed(&mut ed, "edit it<ret>");
+        settle_until(&mut ed, |ed| !ed.checkpoints.turn.is_empty());
+        // (a moment for an answer to reach claude)
+        let end = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        while std::time::Instant::now() < end {
+            if let Ok(Some(ev)) = ed.events.recv_within(std::time::Duration::from_millis(10)) {
+                ed.handle_event(ev);
+            }
+        }
+        let sent = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(!sent.contains("\"request_id\":\"p1\""), "answered before what it was is kept: {sent}");
+        drop(held);
+        settle_until(&mut ed, |_| std::fs::read_to_string(&log).unwrap_or_default().contains("\"p1\""));
+        assert_eq!(permission_answer_to(&log, "p1")["behavior"], "allow");
+        let was = |t: &crate::checkpoint::Touched| {
+            t.path == main && t.before.as_ref().is_some_and(|b| *b == "line 1\nline 2\nline 3\n")
+        };
+        turns_kept(&store, |k| k.turn.iter().any(was) || k.list.iter().any(|c| c.files.iter().any(was)));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&store).ok();
+    }
+
+    /// While a review is open its rail holds the side panel's place, so the git tab isn't there: `space g`
+    /// says so, and the key after it doesn't reach the code (`d` there would delete the selected change).
+    #[test]
+    fn space_g_in_a_review_keeps_its_key() {
+        let (mut ed, dir, _) = turn_of_three("turn-review-space-g", None);
+        settle_until(&mut ed, reviewing);
+        let before = text(&ed);
+        feed(&mut ed, "<space>g");
+        let said = ed.toasts.last().map(|t| t.text.clone()).unwrap_or_default();
+        assert!(said.contains("space v q") && said.contains("space v u"), "{said}");
+        feed(&mut ed, "d");
+        assert_eq!(text(&ed), before, "the change is still there");
+        assert!(ed.code_review.is_some());
+        assert!(ed.sidebar.as_ref().is_none_or(|s| !s.focus), "nothing hidden has the keys");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A throwaway git repository: `files` committed on `main`, then `run` on top.
@@ -5044,6 +5160,28 @@ mod tests {
         ed.sidebar.as_mut().unwrap().selected = at;
         feed(&mut ed, "t");
         assert_eq!(ed.doc().text.to_string(), "a\ntheirs\nz\n");
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// `space g` from a file with nothing changed under the cursor: there's no hunk for the next key to act
+    /// on, so the tab has the keys — `s` stages the row it's on.
+    #[test]
+    fn space_g_with_nothing_here_gives_the_tab_the_keys() {
+        let repo = git_repo("gitnothinghere", &[("a.txt", "one\n"), ("b.txt", "two\n")]);
+        std::fs::write(repo.join("b.txt"), "two\nmore\n").unwrap();
+        let mut ed = editor("");
+        ed.git_auto = true;
+        ed.open(&repo.join("a.txt")).unwrap();
+        settle_until(&mut ed, |ed| ed.doc().git_base.is_some());
+        let mut sb = crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, repo.clone());
+        sb.focus = false;
+        ed.sidebar = Some(sb);
+        feed(&mut ed, "<space>g");
+        settle_until(&mut ed, |ed| ed.git_status.as_ref().is_some_and(|s| !s.unstaged.is_empty()));
+        feed(&mut ed, "s");
+        settle_until(&mut ed, |ed| ed.git_status.as_ref().is_some_and(|s| !s.staged.is_empty()));
+        assert_eq!(ed.git_status.as_ref().unwrap().staged[0].rel, "b.txt");
+        assert!(ed.sidebar.as_ref().unwrap().focus, "the tab keeps the keys");
         std::fs::remove_dir_all(&repo).ok();
     }
 

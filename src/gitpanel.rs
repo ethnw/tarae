@@ -202,6 +202,16 @@ impl Editor {
     /// `space g` — the side panel's git tab, with the keys; from the code, on the row for what's under the
     /// cursor (its hunk or conflict — the file opened to them — else its file). Again: closed.
     pub fn git_panel(&mut self) {
+        // A review's rail holds the tab's place: the rail takes the keys (as with `space e`), so the next
+        // one doesn't land in the code — `d` there would delete the selected change
+        if self.code_review.as_ref().is_some_and(|r| !r.focus) {
+            crate::codereview::rail_focus(self);
+        }
+        if self.code_review.is_some() {
+            return self.set_status(
+                "the git tab is behind the review — space v q ends it · space v u takes a change back",
+            );
+        }
         if self.sidebar.as_ref().is_some_and(|s| s.mode == crate::sidebar::Mode::Git && s.focus) {
             self.sidebar = None;
             return;

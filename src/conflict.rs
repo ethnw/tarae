@@ -172,7 +172,7 @@ impl Editor {
     }
 
     /// The current document's conflicts found now (a key that acts on them can't wait for the worker).
-    fn conflicts_now(&mut self) {
+    pub(crate) fn conflicts_now(&mut self) {
         let d = self.doc_mut();
         if d.conflicts_of != d.version() && !d.loading {
             d.conflicts = find(&d.text);

@@ -894,10 +894,13 @@ fn git_key(ed: &mut Editor, key: Key, at: Option<Line>) -> bool {
         }
         _ => None,
     };
-    let quick = ed.sidebar.as_mut().is_some_and(|s| std::mem::take(&mut s.from_code));
+    let from_code = ed.sidebar.as_mut().is_some_and(|s| std::mem::take(&mut s.from_code));
     let Code::Char(c) = key.code else { return false };
-    // Right after `space g` in the code: a hunk's and a conflict's keys act there — then back to the code
-    if quick && matches!(c, 's' | 'd' | 'o' | 't' | 'a') {
+    // Right after `space g` in the code: a hunk's and a conflict's keys act there — then back to the code.
+    // Nothing of either there (a file with no changes): the tab has the keys, as if opened from it
+    let (on_hunk, on_conflict) = if from_code { ed.git_code_here() } else { (false, false) };
+    let quick = on_hunk || on_conflict;
+    if (on_hunk && matches!(c, 's' | 'd')) || (on_conflict && matches!(c, 'o' | 't' | 'a')) {
         match c {
             's' => ed.git_stage_hunk(),
             'd' => ed.git_reset_hunk(),

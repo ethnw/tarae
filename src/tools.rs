@@ -327,13 +327,105 @@ fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
     if allowed(cmd, &ed.config.llm.run_allow) {
         return run_start(ed, call, cmd.to_string());
     }
-    let title = "Claude wants to run".to_string();
-    if ed.offers.iter().any(|o| matches!(o.what, crate::offer::What::Run { .. })) {
-        return Err("the user hasn't answered your last command yet — wait for it, then run this".into());
+    asked(ed)?;
+    // Review at the end: a file it names that Claude wrote unseen this turn goes on the card with it —
+    // which ones, and their text, found on a worker
+    let unseen: Vec<PathBuf> =
+        ed.checkpoints.turn.iter().filter(|t| t.unseen).map(|t| t.path.clone()).collect();
+    let cmd = cmd.to_string();
+    if unseen.is_empty() {
+        return ask(ed, cmd, call, Vec::new());
     }
-    let what = crate::offer::What::Run { cmd: cmd.to_string(), call };
-    ed.push_offer(crate::offer::Offer::new(title, cmd, "Running…", "Claude's command".into(), what));
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    ed.events.jobs().spawn(move || {
+        let shown = named(&cmd, &cwd, &unseen);
+        move |ed: &mut Editor| {
+            // (the turn ended meanwhile: nobody waits for a card)
+            if ed.chat.as_ref().is_some_and(|c| c.generation() != call.generation || !c.busy()) {
+                return;
+            }
+            let c = call.clone();
+            if let Err(e) = shown.and_then(|shown| ask(ed, cmd, call, shown)) {
+                answer(ed, c, Err(e));
+            }
+        }
+    });
     Ok(())
+}
+
+/// One command asked about at a time.
+fn asked(ed: &Editor) -> Result<(), String> {
+    match ed.offers.iter().any(|o| matches!(o.what, crate::offer::What::Run { .. })) {
+        true => Err("the user hasn't answered your last command yet — wait for it, then run this".into()),
+        false => Ok(()),
+    }
+}
+
+/// The card for `cmd` — with each file in `shown` (path, text) whole under it.
+fn ask(ed: &mut Editor, cmd: String, call: Call, shown: Vec<(PathBuf, String)>) -> Result<(), String> {
+    asked(ed)?;
+    let mut question = cmd.clone();
+    for (path, text) in &shown {
+        let text = text.replace("\r\n", "\n").replace('\t', "    ");
+        question.push_str(&format!(
+            "\n\n{} — written this turn, unseen:\n{}",
+            crate::chat::shown(path),
+            text.trim_end_matches('\n')
+        ));
+    }
+    let title = "Claude wants to run".to_string();
+    let what = crate::offer::What::Run { cmd, call, shown };
+    ed.push_offer(crate::offer::Offer::new(title, &question, "Running…", "Claude's command".into(), what));
+    Ok(())
+}
+
+/// A file Claude wrote unseen is shown on the card whole — at most this many lines, each at most this many
+/// characters — or the command isn't put to the user.
+const SHOWN_LINES_MAX: usize = 16;
+const SHOWN_LINE_MAX: usize = 160;
+
+/// The files among `unseen` (real paths) that `cmd` names, with their text — on a worker. The words are
+/// read the way the shell would join them (quotes and backslashes gone) and split at its operators; a
+/// name made up while it runs (a variable, a glob) isn't seen. Err: one can't be shown whole.
+fn named(cmd: &str, cwd: &std::path::Path, unseen: &[PathBuf]) -> Result<Vec<(PathBuf, String)>, String> {
+    let joined: String = cmd.chars().filter(|c| !matches!(c, '\'' | '"' | '\\')).collect();
+    let mut out: Vec<(PathBuf, String)> = Vec::new();
+    for word in joined.split(|c: char| c.is_whitespace() || ";&|`$()<>={}".contains(c)) {
+        if word.is_empty() {
+            continue;
+        }
+        let Ok(real) = std::fs::canonicalize(cwd.join(word)) else { continue };
+        if unseen.contains(&real) && !out.iter().any(|(p, _)| *p == real) {
+            let text = showable(&real)?;
+            out.push((real, text));
+        }
+    }
+    Ok(out)
+}
+
+/// The file's text if a card can show it as it is: text, short, and nothing that draws as something else
+/// (control characters, bidi and zero-width marks).
+fn showable(path: &std::path::Path) -> Result<String, String> {
+    let shown = crate::chat::shown(path);
+    let unseen = format!("{shown} was written this turn without the user seeing it, and");
+    let bytes = std::fs::read(path).map_err(|e| format!("{shown}: {e}"))?;
+    let text = String::from_utf8(bytes).map_err(|_| format!("{unseen} it isn't text the card can show"))?;
+    let lines = text.lines().count();
+    if lines > SHOWN_LINES_MAX || text.lines().any(|l| l.chars().count() > SHOWN_LINE_MAX) {
+        return Err(format!(
+            "{unseen} it's too long to show them on the card ({lines} lines; at most {SHOWN_LINES_MAX}, each \
+             at most {SHOWN_LINE_MAX} characters) — the user reviews it when your turn ends: run it after \
+             that, or keep the script short"
+        ));
+    }
+    let hidden = |c: char| {
+        (c.is_control() && c != '\n' && c != '\t')
+            || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
+    };
+    if text.replace("\r\n", "\n").chars().any(hidden) {
+        return Err(format!("{unseen} it has characters a card can't show as they are"));
+    }
+    Ok(text)
 }
 
 /// A task running in the panel isn't cut short (the user's, or an install).
@@ -356,12 +448,42 @@ fn run_start(ed: &mut Editor, call: Call, cmd: String) -> Result<(), String> {
     Ok(())
 }
 
-/// The user's answer on the card: `y` runs it, `n` tells Claude no.
-pub fn run_answer(ed: &mut Editor, id: u64, cmd: String, call: Call, yes: bool) {
+/// The user's answer on the card: `y` runs it — the files it showed read again first (on a worker), and not
+/// run if one changed since — `n` tells Claude no.
+pub fn run_answer(
+    ed: &mut Editor,
+    id: u64,
+    cmd: String,
+    call: Call,
+    shown: Vec<(PathBuf, String)>,
+    yes: bool,
+) {
     ed.offer_finished(id, Ok(()));
     if !yes {
         return answer(ed, call, Err(format!("the user chose not to run `{cmd}`")));
     }
+    if shown.is_empty() {
+        return run_now(ed, cmd, call);
+    }
+    ed.events.jobs().spawn(move || {
+        let changed =
+            shown.iter().find(|(p, text)| std::fs::read(p).ok().as_deref() != Some(text.as_bytes()));
+        let changed = changed.map(|(p, _)| crate::chat::shown(p));
+        move |ed: &mut Editor| match changed {
+            Some(name) => answer(
+                ed,
+                call,
+                Err(format!(
+                    "{name} changed after the user saw it on the card — nothing ran; run it again to show \
+                     them what's there now"
+                )),
+            ),
+            None => run_now(ed, cmd, call),
+        }
+    });
+}
+
+fn run_now(ed: &mut Editor, cmd: String, call: Call) {
     if let Err(e) = run_busy(ed) {
         return answer(ed, call, Err(e));
     }
@@ -651,6 +773,42 @@ mod tests {
         assert!(super::allowed("npm test -- --watch=false", &extra), "an option's value is a plain word");
         assert!(!super::allowed("npm test FOO=1", &extra), "an assignment isn't");
         assert!(!super::allowed("npm install", &extra), "an empty rule allows nothing");
+    }
+
+    /// The files a command names among those written unseen: read as the shell joins words (quotes and
+    /// backslashes gone), split at its operators, relative to the folder it runs in; one that can't be
+    /// shown as it is stops it.
+    #[test]
+    fn a_command_names_the_unseen_files_it_runs() {
+        let dir = std::env::temp_dir().join(format!("tarae-named-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("tools")).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let (x, g, seen) = (dir.join("x.sh"), dir.join("tools/gen.py"), dir.join("seen.sh"));
+        std::fs::write(&x, "echo x\n").unwrap();
+        std::fs::write(&g, "print(1)\n").unwrap();
+        std::fs::write(&seen, "echo seen\n").unwrap();
+        let unseen = vec![x.clone(), g.clone()];
+        let names = |cmd: &str| -> Vec<std::path::PathBuf> {
+            super::named(cmd, &dir, &unseen).unwrap().into_iter().map(|(p, _)| p).collect()
+        };
+        assert_eq!(names("sh x.sh"), vec![x.clone()]);
+        assert_eq!(names("sh 'x'.sh"), vec![x.clone()], "quotes joined as the shell does");
+        assert_eq!(names("sh x\\.sh && python3 \"tools/gen.py\""), [x.clone(), g.clone()]);
+        assert_eq!(names("bash -c \"$(cat ./tools/../x.sh)\""), vec![x.clone()]);
+        assert_eq!(names("F=x.sh; sh $F"), vec![x.clone()]);
+        assert_eq!(names(&format!("sh {}", x.display())), vec![x.clone()], "a full path");
+        assert!(names("sh seen.sh x.sh.bak").is_empty(), "only what was written unseen");
+        assert_eq!(names("sh x.sh x.sh"), vec![x.clone()], "once each");
+        std::fs::write(&x, "echo a\u{202E}b\n").unwrap();
+        let e = super::named("sh x.sh", &dir, &unseen).unwrap_err();
+        assert!(e.contains("can't show"), "{e}");
+        std::fs::write(&x, "echo x\r\n").unwrap();
+        assert_eq!(names("sh x.sh"), vec![x.clone()], "CRLF is fine");
+        std::fs::write(&x, "a\n".repeat(super::SHOWN_LINES_MAX + 1)).unwrap();
+        assert!(super::named("sh x.sh", &dir, &unseen).unwrap_err().contains("too long to show"));
+        std::fs::write(&x, "a".repeat(super::SHOWN_LINE_MAX + 1)).unwrap();
+        assert!(super::named("sh x.sh", &dir, &unseen).unwrap_err().contains("too long to show"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
