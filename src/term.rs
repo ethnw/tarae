@@ -3934,12 +3934,24 @@ fn draw_list_row(
             }
         }
         Some((_, Kind::Hit)) => {
-            let num = r.label.chars().take_while(|c| c.is_ascii_digit() || *c == ':').count();
+            // (the number, right-aligned — its padding — and the `: ` after it)
+            let num = r.label.chars().take_while(|c| c.is_ascii_digit() || matches!(c, ':' | ' ')).count();
             let (head, tail) = r.label.split_at(num);
             let (a, b): (Vec<u32>, Vec<u32>) = r.marks.iter().partition(|&&m| (m as usize) < num);
             let b: Vec<u32> = b.into_iter().map(|m| m - num as u32).collect();
             used += print_matched(out, head, &a, faint, matched, label_room.saturating_sub(used))?;
-            used += print_matched(out, tail, &b, name, matched, label_room.saturating_sub(used))?;
+            // What the list is for (the name `g r` lists) stands out of its code: the code dim, it bold
+            let room = label_room.saturating_sub(used);
+            if r.spots.is_empty() {
+                used += print_matched(out, tail, &b, name, matched, room)?;
+            } else {
+                let spot = Style { bold: true, ..name };
+                let spots: Vec<(usize, usize)> =
+                    r.spots.iter().map(|&(s, e)| (s as usize - num, e as usize - num)).collect();
+                let at =
+                    |ci: usize| if spots.iter().any(|&(s, e)| (s..e).contains(&ci)) { spot } else { dim };
+                used += print_styled(out, tail, &b, at, matched, room)?;
+            }
         }
         // A note: in its glyph's color, italic
         Some((_, Kind::Note)) => {
@@ -6544,6 +6556,7 @@ fn draw_sidebar(
                         hint_first: sb.mode == SMode::Plugin,
                         glyph: l.glyph,
                         tree: Some((l.depth, l.kind)),
+                        spots: Vec::new(),
                     };
                     links.push((y, r));
                     // The selected row's name cut short: whole, over the code (drawn after the rest) — with
@@ -7729,6 +7742,18 @@ fn print_matched(
     matched: Style,
     room: usize,
 ) -> io::Result<usize> {
+    print_styled(out, label, hits, |_| name, matched, room)
+}
+
+/// `print_matched` with each char's style its own (`style(char index)`) — the typed letters still win.
+fn print_styled(
+    out: &mut impl Write,
+    label: &str,
+    hits: &[u32],
+    style: impl Fn(usize) -> Style,
+    matched: Style,
+    room: usize,
+) -> io::Result<usize> {
     let mut hit = hits.iter().peekable();
     let mut current = None;
     let mut used = 0;
@@ -7738,6 +7763,7 @@ fn print_matched(
             break;
         }
         while hit.next_if(|&&h| (h as usize) < ci).is_some() {}
+        let name = style(ci);
         let want = if hit.peek().is_some_and(|&&h| h as usize == ci) { name.patch(matched) } else { name };
         if current != Some(want) {
             apply(out, want)?;

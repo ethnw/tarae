@@ -108,6 +108,9 @@ pub struct Row {
     pub glyph: Option<(&'static str, &'static str)>,
     /// A tree row's depth and kind (None = a plain list row).
     pub tree: Option<(usize, Kind)>,
+    /// What the list is about, in a hit's code (`Picker::emphasis` — the name `g r` lists): char ranges of
+    /// `label`, past its line number.
+    pub spots: Vec<(u32, u32)>,
 }
 
 /// Matches laid out as a tree while typing, best first — the rest only counted (a tree of all 200k files
@@ -199,6 +202,8 @@ struct TreeMode {
     rows: Vec<crate::filetree::Row>,
     /// Browsing: the folder rows' items (`Action::Dir`) — a row's item past `items` is one of these.
     dirs: Vec<Item>,
+    /// The widest line number among the hits — each is padded to it, so their code starts in one column.
+    num_w: usize,
 }
 
 pub struct Picker {
@@ -238,6 +243,8 @@ pub struct Picker {
     pub preview: bool,
     /// Global search results: the pattern (`C-r` replaces the listed matches).
     pub grep: Option<String>,
+    /// What each hit's code is shown for — its matches stand out in the row (`g r`: the name, whole word).
+    pub emphasis: Option<regex::Regex>,
     /// Preview scrolled this many lines from where it opens (back to 0 when the selection changes).
     pub preview_scroll: usize,
     /// Paths shown as a folder tree (filetree.rs) — `selected`/`scroll` then count its rows.
@@ -274,6 +281,7 @@ impl Picker {
             lines: Vec::new(),
             preview: true,
             grep: None,
+            emphasis: None,
             preview_scroll: 0,
             tree: None,
             center: false,
@@ -340,6 +348,7 @@ impl Picker {
             reveal,
             rows: Vec::new(),
             dirs: Vec::new(),
+            num_w: 0,
         });
         self.sync();
         self
@@ -356,6 +365,7 @@ impl Picker {
             reveal: None,
             rows: Vec::new(),
             dirs: Vec::new(),
+            num_w: 0,
         });
         self.sync();
         self
@@ -398,6 +408,17 @@ impl Picker {
                 }
             }
         }
+        let items = &self.items;
+        tm.num_w = tm
+            .rows
+            .iter()
+            .filter(|r| r.kind == Kind::Hit)
+            .map(|r| {
+                let label = &items.get(r.source).map_or("", |it| it.label.as_str());
+                label.chars().skip(r.span.start).take_while(char::is_ascii_digit).count()
+            })
+            .max()
+            .unwrap_or(0);
         self.selected = self.selected.min(tm.rows.len().saturating_sub(1));
         self.settle(1);
     }
@@ -731,10 +752,12 @@ impl Picker {
                         hint_first: false,
                         glyph: item.glyph,
                         tree: None,
+                        spots: Vec::new(),
                     }
                 })
                 .collect();
         };
+        let emphasis = self.emphasis.clone();
         // Folders (and a hit's file) that scrolled away stay pinned at the top, over the rows under them —
         // settled together with the scroll, so the selection never hides behind them
         let n = tm.rows.len();
@@ -781,14 +804,32 @@ impl Picker {
                 _ if r.count > 0 => r.count.to_string(),
                 _ => String::new(),
             };
+            let mut spots = match (&emphasis, r.kind) {
+                (Some(re), Kind::Hit) => spots(re, &label),
+                _ => Vec::new(),
+            };
+            // A hit's line number right-aligned to the widest: the code starts in one column
+            let (label, marks) = match r.kind {
+                Kind::Hit => {
+                    let pad = tm.num_w.saturating_sub(label.chars().take_while(char::is_ascii_digit).count());
+                    let shift = pad as u32;
+                    spots.iter_mut().for_each(|s| *s = (s.0 + shift, s.1 + shift));
+                    let marks: Vec<u32> = marks.into_iter().map(|m| m + shift).collect();
+                    (format!("{}{label}", " ".repeat(pad)), marks)
+                }
+                _ => (label, marks),
+            };
+            // (a hit's annotation says what that hit is — `decl`: it keeps its room, the code is cut)
+            let hint_first = r.kind == Kind::Hit && !hint.is_empty();
             out.push(Row {
                 label,
                 marks,
                 selected: k == selected,
                 hint,
-                hint_first: false,
+                hint_first,
                 glyph: item.and_then(|it| it.glyph),
                 tree: Some((r.depth, r.kind)),
+                spots,
             });
         }
         self.lines = lines;
@@ -802,6 +843,16 @@ impl Picker {
             None => Some(self.scroll + line),
         }
     }
+}
+
+/// Where `re` matches in a hit row's code — past its `12:` — as char ranges of `label`.
+fn spots(re: &regex::Regex, label: &str) -> Vec<(u32, u32)> {
+    let code = label.find(|c: char| !c.is_ascii_digit() && c != ':').unwrap_or(label.len());
+    let char_at = |b: usize| label[..b].chars().count() as u32;
+    re.find_iter(&label[code..])
+        .filter(|m| !m.is_empty())
+        .map(|m| (char_at(code + m.start()), char_at(code + m.end())))
+        .collect()
 }
 
 /// Every file under `root`, by folder, for browsing.
@@ -1127,6 +1178,35 @@ mod tests {
         assert_eq!(p.counts(), (1, 3));
         let marks = &p.visible(10)[1].marks;
         assert_eq!(marks, &[3], "the label's match lands on the hit row, shifted");
+    }
+
+    /// Hits' line numbers are right-aligned to the widest in the list — their code starts in one column —
+    /// and what's marked in the code (typed letters, the emphasis) moves along.
+    #[test]
+    fn hit_numbers_line_up() {
+        let root = PathBuf::from("/r");
+        let hit = |rel: &str, line: usize, text: &str| Item {
+            label: format!("{rel}:{}: {text}", line + 1),
+            action: Action::Goto { path: root.join(rel), line, col: 0 },
+            hint: String::new(),
+            glyph: None,
+        };
+        let mut p = Picker::new("references", Vec::new(), true).grouped(root.clone());
+        p.emphasis = regex::Regex::new(r"\bx\b").ok();
+        p.set_items(vec![hit("a.rs", 8, "let x"), hit("a.rs", 119, "x + 1"), hit("b.rs", 6, "f(x)")]);
+        let rows: Vec<(String, Vec<(u32, u32)>)> =
+            p.visible(10).into_iter().map(|r| (r.label, r.spots)).collect();
+        let labels: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
+        assert_eq!(labels, ["a.rs", "  9: let x", "120: x + 1", "b.rs", "  7: f(x)"]);
+        assert_eq!(rows[1].1, [(9, 10)], "the emphasis moved with the padding");
+        assert_eq!(rows[4].1, [(7, 8)]);
+        p.push('x');
+        let row = p.visible(10).into_iter().find(|r| r.label.ends_with("let x")).unwrap();
+        assert_eq!(
+            (row.label.as_str(), row.marks.as_slice()),
+            ("  9: let x", &[9][..]),
+            "and the typed letter"
+        );
     }
 
     /// Scrolled deep into a folder, its heading (and a hit's file) stays pinned at the top; clicks on the

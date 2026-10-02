@@ -63,9 +63,87 @@ pub struct LspState {
     pub(crate) arrived: Option<std::time::Instant>,
     /// Servers no open file uses, since when (`lsp_unused` — they stop after `IDLE_STOP`).
     unused: HashMap<ClientId, std::time::Instant>,
+    /// The `g r` in hand (N2): its list is laid out on a worker — the code of each place read there.
+    refs: Refs,
     /// (tests: the trace lines written — the log writes nothing in tests)
     #[cfg(test)]
     pub traced: Vec<String>,
+}
+
+/// One `g r`: the name asked about · where it's declared (the server's definition, asked beside it — None
+/// until it answers) · the list once shown (picker id and its places, to put the declaration first if
+/// that answer comes later).
+#[derive(Default)]
+struct Refs {
+    generation: u64,
+    name: String,
+    declared: Option<Vec<(std::path::PathBuf, usize)>>,
+    shown: Option<(u64, Vec<Place>)>,
+}
+
+/// A place of a list with the code there: path, line and byte column (from 0), the line's text.
+#[derive(Clone, Debug)]
+pub struct Place {
+    pub path: std::path::PathBuf,
+    pub line: usize,
+    pub col: usize,
+    pub text: String,
+}
+
+/// A line's text as a list shows it: trimmed, at most this many chars.
+const PLACE_TEXT_MAX: usize = 240;
+
+/// The places' lines — open files from their buffers (`open`, what's on screen even unsaved), the rest
+/// read from disk (on a worker), each file once.
+pub fn read_places(
+    found: Vec<(std::path::PathBuf, usize, usize)>,
+    open: &HashMap<std::path::PathBuf, ropey::Rope>,
+) -> Vec<Place> {
+    let mut files: HashMap<std::path::PathBuf, Option<Vec<String>>> = HashMap::new();
+    found
+        .into_iter()
+        .map(|(path, line, col)| {
+            let text = match open.get(&path) {
+                Some(rope) => (line < rope.len_lines()).then(|| rope.line(line).to_string()),
+                None => files
+                    .entry(path.clone())
+                    .or_insert_with(|| {
+                        std::fs::read(&path)
+                            .ok()
+                            .map(|b| String::from_utf8_lossy(&b).lines().map(str::to_string).collect())
+                    })
+                    .as_ref()
+                    .and_then(|lines| lines.get(line).cloned()),
+            };
+            let text: String = text.unwrap_or_default().trim().chars().take(PLACE_TEXT_MAX).collect();
+            Place { path, line, col, text }
+        })
+        .collect()
+}
+
+/// The list's items: the declaration first (marked), the rest by file then line — each row its code.
+fn place_items(
+    root: &std::path::Path,
+    mut places: Vec<Place>,
+    declared: &[(std::path::PathBuf, usize)],
+) -> Vec<Item> {
+    let is_decl = |p: &Place| declared.iter().any(|(path, line)| *path == p.path && *line == p.line);
+    places.sort_by(|a, b| (!is_decl(a), &a.path, a.line, a.col).cmp(&(!is_decl(b), &b.path, b.line, b.col)));
+    places.dedup_by(|a, b| a.path == b.path && a.line == b.line && a.col == b.col);
+    places
+        .into_iter()
+        .map(|p| {
+            let rel = p.path.strip_prefix(root).unwrap_or(&p.path);
+            Item {
+                label: format!("{}:{}: {}", rel.display(), p.line + 1, p.text),
+                // (short — the code keeps the room)
+                hint: if is_decl(&p) { "decl".into() } else { String::new() },
+                // Approximate column (UTF-16 may drift after non-ASCII; line is exact)
+                action: Action::Goto { path: p.path, line: p.line, col: p.col },
+                glyph: None,
+            }
+        })
+        .collect()
 }
 
 /// One `g d`·`g r`… from its key to the first frame that shows the answer (N1): each step and what it
@@ -195,6 +273,10 @@ const INLAY_DEBOUNCE_MS: u64 = 120;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Kind {
     Goto(Goto),
+    /// The definition of what `g r` round `generation` lists — its declaration goes first (N2).
+    Declared {
+        generation: u64,
+    },
     /// `space h` — this symbol's uses in the file become the selections.
     Highlights,
     Hover,
@@ -244,6 +326,7 @@ impl Kind {
         Some(match self {
             Kind::Goto(Goto::References) => ("goto", "referencesProvider"),
             Kind::Goto(g) => ("goto", g.provider().unwrap_or("definitionProvider")),
+            Kind::Declared { .. } => ("goto", "definitionProvider"),
             Kind::Highlights => ("highlights", "documentHighlightProvider"),
             Kind::Hover => ("hover", "hoverProvider"),
             Kind::CodeAction { .. } => ("code-action", "codeActionProvider"),
@@ -747,8 +830,10 @@ impl Editor {
     fn on_response(&mut self, cid: ClientId, p: Pending, result: &Value) {
         // Late response: drop if the doc changed (edit kinds) or the cursor moved (position kinds).
         let Some(doc) = self.docs.iter().find(|d| d.id == p.doc) else { return };
-        let cursor_bound =
-            matches!(p.kind, Kind::Goto(_) | Kind::Highlights | Kind::Hover | Kind::CodeAction { .. });
+        let cursor_bound = matches!(
+            p.kind,
+            Kind::Goto(_) | Kind::Declared { .. } | Kind::Highlights | Kind::Hover | Kind::CodeAction { .. }
+        );
         let version_bound = !matches!(
             p.kind,
             Kind::ResolvePreview { .. }
@@ -885,26 +970,34 @@ impl Editor {
                         self.trace_ends("jumped");
                     }
                     _ => {
-                        let root = std::env::current_dir().unwrap_or_default();
-                        let items = locs
+                        let found = locs
                             .iter()
                             .map(|(path, pos)| {
                                 let line = pos["line"].as_u64().unwrap_or(0) as usize;
-                                let col = pos["character"].as_u64().unwrap_or(0) as usize;
-                                let rel = path.strip_prefix(&root).unwrap_or(path);
-                                Item {
-                                    label: format!("{}:{}", rel.display(), line + 1),
-                                    // Approximate column (UTF-16 may drift after non-ASCII; line is exact)
-                                    action: Action::Goto { path: path.clone(), line, col },
-                                    hint: String::new(),
-                                    glyph: None,
-                                }
+                                (path.clone(), line, pos["character"].as_u64().unwrap_or(0) as usize)
                             })
                             .collect();
-                        self.open_picker(Picker::new(goto.noun(), items, true).grouped(root), None);
-                        self.trace_ends("list");
+                        self.list_places(goto, found);
                     }
                 }
+            }
+            Kind::Declared { generation } => {
+                if generation != self.lsp.refs.generation {
+                    return;
+                }
+                let declared: Vec<(std::path::PathBuf, usize)> = lsp::locations(result)
+                    .into_iter()
+                    .map(|(path, pos)| (path, pos["line"].as_u64().unwrap_or(0) as usize))
+                    .collect();
+                // The list already on screen: its declaration goes first now
+                if let Some((id, places)) = self.lsp.refs.shown.clone()
+                    && let Some(p) = self.picker.as_mut().filter(|p| p.id == id)
+                {
+                    let root = std::env::current_dir().unwrap_or_default();
+                    p.set_items(place_items(&root, places, &declared));
+                }
+                // (none while the server is busy: asked again with the references)
+                self.lsp.refs.declared = (!declared.is_empty()).then_some(declared);
             }
         }
     }
@@ -2083,6 +2176,13 @@ impl Editor {
             #[cfg(test)]
             self.lsp.traced.push(old.line());
         }
+        // A new round: the name under the cursor is what its list's rows show
+        let doc = self.doc();
+        let head = doc.selection().primary().cursor(&doc.text);
+        let from = crate::completion::word_start(&doc.text, head);
+        let name: String =
+            doc.text.byte_slice(from..).chars().take_while(|&c| crate::completion::is_word(c)).collect();
+        self.lsp.refs = Refs { generation: self.lsp.refs.generation + 1, name, declared: None, shown: None };
         self.goto_ask(goto, false);
     }
 
@@ -2104,11 +2204,56 @@ impl Editor {
             Goto::References => json!({ "context": { "includeDeclaration": true } }),
             _ => json!({}),
         };
-        if self.lsp_request(Kind::Goto(goto), goto.method(), extra)
-            && let Some(t) = self.lsp.trace.as_mut()
-        {
+        if !self.lsp_request(Kind::Goto(goto), goto.method(), extra) {
+            return;
+        }
+        if let Some(t) = self.lsp.trace.as_mut() {
             t.step(if again { "asked again" } else { "sent" });
         }
+        // References: where it's declared, asked beside them — that row goes first, marked
+        let defines = self.client(cid).is_some_and(|c| {
+            let cap = &c.caps["definitionProvider"];
+            !cap.is_null() && *cap != json!(false)
+        });
+        if goto == Goto::References && defines && self.lsp.refs.declared.is_none() {
+            let generation = self.lsp.refs.generation;
+            self.lsp_request(Kind::Declared { generation }, "textDocument/definition", json!({}));
+        }
+    }
+
+    /// A go-to's places as a list (N2): each row the code there, the name it's about standing out, by file
+    /// then line, the declaration first — the lines read on a worker (files not open are on disk).
+    fn list_places(&mut self, goto: Goto, found: Vec<(std::path::PathBuf, usize, usize)>) {
+        let open: HashMap<std::path::PathBuf, ropey::Rope> = self
+            .docs
+            .iter()
+            .filter_map(|d| Some((d.path.clone()?, d.text.clone())))
+            .filter(|(p, _)| found.iter().any(|f| f.0 == *p))
+            .collect();
+        let generation = self.lsp.refs.generation;
+        self.events.jobs().spawn(move || {
+            let places = read_places(found, &open);
+            move |ed: &mut Editor| {
+                // (another go-to since: this list is moot)
+                if ed.lsp.refs.generation != generation {
+                    return;
+                }
+                if let Some(t) = ed.lsp.trace.as_mut() {
+                    t.step("lines read");
+                }
+                let root = std::env::current_dir().unwrap_or_default();
+                let declared = ed.lsp.refs.declared.clone().unwrap_or_default();
+                let items = place_items(&root, places.clone(), &declared);
+                let mut picker = Picker::new(goto.noun(), items, true).grouped(root);
+                let name = &ed.lsp.refs.name;
+                picker.emphasis = (!name.is_empty())
+                    .then(|| regex::Regex::new(&format!(r"\b{}\b", regex::escape(name))).ok())
+                    .flatten();
+                ed.open_picker(picker, None);
+                ed.lsp.refs.shown = ed.picker.as_ref().map(|p| (p.id, places));
+                ed.trace_ends("list");
+            }
+        });
     }
 
     /// The go-to's answer is dealt with (`what` it came to): the next frame drawn ends its trace.
@@ -3291,6 +3436,7 @@ mod tests {
         let at = |line: u64| json!({ "uri": lsp::uri(&file), "range": { "start": { "line": line, "character": 0 }, "end": { "line": line, "character": 1 } } });
         let id = pending_of(&ed, Kind::Goto(Goto::Implementation));
         ed.on_lsp_message(cid, json!({ "id": id, "result": [at(1), at(2)] }));
+        settle_for(&mut ed, 5, |ed| ed.picker.is_some());
         assert_eq!(ed.picker.as_ref().map(|p| p.title.as_str()), Some("implementations"));
         feed(&mut ed, "<esc>");
         // gy: one → straight there, and C-o comes back
@@ -3301,6 +3447,92 @@ mod tests {
         assert_eq!(ed.doc().selection().primary(), Range::point(11));
         feed(&mut ed, "<C-o>");
         assert_eq!(ed.doc().selection().primary(), Range::point(6), "back on `T`");
+        std::fs::remove_dir_all(file.parent().unwrap()).ok();
+    }
+
+    /// N2: `g r` lists the code at each place — the line trimmed, the name standing out (whole word: `a`,
+    /// not the `a` in `crate`) — open files from their buffer (unsaved text too), the rest from disk; by
+    /// file then line, the declaration (the server's definition, asked beside them) first and marked, even
+    /// when that answer comes after the list is up.
+    #[test]
+    fn references_list_the_code_with_the_declaration_first() {
+        let (mut ed, file, log) = setup("refs-code", "fn b() { a() }\nfn c() { a(); a() }\n");
+        let other = file.parent().unwrap().join("other.rs");
+        std::fs::write(&other, "// other\nuse crate::a;\n\npub fn a() {}\n").unwrap();
+        let cid = ed.doc().lsp.client.unwrap();
+        let caps =
+            json!({ "positionEncoding": "utf-8", "definitionProvider": true, "referencesProvider": true });
+        ed.on_lsp_message(cid, json!({ "id": 0, "result": { "capabilities": caps } }));
+        // Unsaved: the buffer's text is what the row shows
+        feed(&mut ed, "A // edited<esc>");
+        ed.doc_mut().set_selection(Selection::point(9));
+        feed(&mut ed, "gr");
+        assert_eq!(ed.lsp.refs.name, "a");
+        let out = sent(&log);
+        assert!(out.contains("textDocument/references") && out.contains("textDocument/definition"), "{out}");
+        let at = |path: &PathBuf, line: u64, col: u64| {
+            json!({ "uri": lsp::uri(path), "range": {
+            "start": { "line": line, "character": col }, "end": { "line": line, "character": col + 1 } } })
+        };
+        // The references first, out of order — the declaration's answer after the list is up
+        let id = pending_of(&ed, Kind::Goto(Goto::References));
+        let refs =
+            json!([at(&file, 1, 9), at(&other, 3, 7), at(&file, 0, 9), at(&other, 1, 11), at(&file, 1, 14)]);
+        ed.on_lsp_message(cid, json!({ "id": id, "result": refs }));
+        settle_for(&mut ed, 5, |ed| ed.picker.is_some());
+        // (a row: its label, hint and what stands out in it)
+        type Shown = (String, String, Vec<(u32, u32)>);
+        let rows = |ed: &mut Editor| -> Vec<Shown> {
+            let p = ed.picker.as_mut().expect("the list");
+            p.visible(20).into_iter().map(|r| (r.label, r.hint, r.spots)).collect()
+        };
+        // (past the folder's heading — the temp folder is outside the project)
+        let labels = |rows: &[Shown]| -> Vec<String> {
+            rows.iter()
+                .skip(1)
+                .map(|r| if r.1.is_empty() { r.0.clone() } else { format!("{} [{}]", r.0, r.1) })
+                .collect()
+        };
+        assert_eq!(
+            labels(&rows(&mut ed)),
+            [
+                "main.rs [3]",
+                "1: fn b() { a() } // edited",
+                "2: fn c() { a(); a() }",
+                "2: fn c() { a(); a() }",
+                "other.rs [2]",
+                "2: use crate::a;",
+                "4: pub fn a() {}",
+            ],
+            "by file then line, each its code"
+        );
+        let id = pending_of(&ed, Kind::Declared { generation: 0 });
+        ed.on_lsp_message(cid, json!({ "id": id, "result": at(&other, 3, 7) }));
+        let shown = rows(&mut ed);
+        assert_eq!(
+            labels(&shown),
+            [
+                "other.rs [2]",
+                "4: pub fn a() {} [decl]",
+                "2: use crate::a;",
+                "main.rs [3]",
+                "1: fn b() { a() } // edited",
+                "2: fn c() { a(); a() }",
+                "2: fn c() { a(); a() }",
+            ],
+            "the declaration first"
+        );
+        // The name stands out, whole words only: `a` in `crate::a`, not the one in `crate`
+        assert_eq!(shown[3].2, [(14, 15)], "{:?}", shown[3]);
+        assert_eq!(shown[6].2, [(12, 13), (17, 18)], "{:?}", shown[6]);
+        // The other way round: the declaration known before the references come — first from the start
+        feed(&mut ed, "<esc>gr");
+        let id = pending_of(&ed, Kind::Declared { generation: 0 });
+        ed.on_lsp_message(cid, json!({ "id": id, "result": [at(&other, 3, 7)] }));
+        let id = pending_of(&ed, Kind::Goto(Goto::References));
+        ed.on_lsp_message(cid, json!({ "id": id, "result": refs }));
+        settle_for(&mut ed, 5, |ed| ed.picker.is_some());
+        assert_eq!(labels(&rows(&mut ed))[..2], ["other.rs [2]", "4: pub fn a() {} [decl]"]);
         std::fs::remove_dir_all(file.parent().unwrap()).ok();
     }
 
@@ -3323,6 +3555,7 @@ mod tests {
         let id = pending_of(&ed, Kind::Goto(Goto::References));
         let at = |line: u64| json!({ "uri": lsp::uri(&file), "range": { "start": { "line": line, "character": 3 }, "end": { "line": line, "character": 4 } } });
         ed.on_lsp_message(cid, json!({ "id": id, "result": [at(0), at(1)] }));
+        settle_for(&mut ed, 5, |ed| ed.picker.is_some());
         assert!(ed.picker.is_some(), "listed");
         assert!(ed.lsp.traced.is_empty(), "not before it's on screen");
         crate::term::render(&mut ed, &mut Vec::new(), 100, 30).unwrap();
@@ -3341,6 +3574,7 @@ mod tests {
                 "asked again",
                 "answered (2)",
                 "main loop",
+                "lines read",
                 "list",
                 "drawn"
             ],

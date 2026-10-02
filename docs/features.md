@@ -284,7 +284,9 @@ cursor or document moved on are dropped.
   gets 2 s, then the file is saved as is) · server-sent edits, including creating, moving, and deleting files — one undo
   step per file
 - `gd` definition · `gD` declaration · `gy` type definition · `gi` implementation · `gr` references · `space k` hover
-  — docs render as Markdown with code in its own colors ([screenshot](screenshots/m3-hover.png))
+  — docs render as Markdown with code in its own colors ([screenshot](screenshots/m3-hover.png)). A list of
+  places (`gr`, or several `gi`) shows each one's code: the line trimmed, the name standing out, line numbers
+  right-aligned, by file then line. For `gr` the declaration (the server's own definition) comes first, marked `decl`
 - **Jump list** per pane — `C-o` back · `C-i`/Tab forward · `C-s` saves a spot · `space j` lists them (with a preview;
   picking one keeps where you were, so `Tab` comes back). Go-tos, searches, `gg`/`ge` and
   switching files record where you were, and a saved spot follows later edits · `ga` = the file shown before this one
