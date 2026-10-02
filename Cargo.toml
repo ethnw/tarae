@@ -54,11 +54,13 @@ opt-level = 3
 opt-level = 0
 debug = "line-tables-only"
 
-# The perf budgets (key → frame 16 ms …) measure near-real cost: opt-level 1, not debug-code cell loops (a
-# frame is 7–9 ms at level 0, ~1 ms at level 1). `cargo perf`.
+# The perf budgets and real-use scenarios (`cargo perf` → xtask perf): what a release build costs, so the test
+# profile's opt-level doesn't change what they measure — with line tables (and not stripped) so samples have
+# names. Debug info also embeds the dev grammars (build.rs), which the syntax budgets need.
 [profile.perf]
-inherits = "test"
-opt-level = 1
+inherits = "release"
+debug = "line-tables-only"
+strip = false
 
 
 [features]

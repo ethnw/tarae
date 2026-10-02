@@ -205,6 +205,11 @@ impl Drop for Sandbox {
 pub struct Output {
     parser: vt100::Parser,
     raw: Vec<u8>,
+    /// Frames ended so far (`FRAME_END`), and when the first and the latest came — counted as bytes
+    /// arrive, so timing a key to its frame doesn't rescan everything.
+    frames: usize,
+    first_frame_at: Option<Instant>,
+    last_frame_at: Option<Instant>,
     /// Panics of the vt100 parser itself (it overflows on a 1-column screen). The parser is replaced with a
     /// blank one — tarae redraws whole frames, so the next frame fills it again.
     parser_panics: Vec<String>,
@@ -262,6 +267,11 @@ pub fn cvt(rc: libc::c_int) -> io::Result<libc::c_int> {
 
 impl Term {
     pub fn spawn(sb: &Sandbox, args: &[&str], cols: u16, rows: u16) -> Term {
+        Term::spawn_in(sb, &sb.work(), args, cols, rows)
+    }
+
+    /// `spawn`, working in `cwd` rather than the sandbox's work folder (its HOME and state stay the sandbox's).
+    pub fn spawn_in(sb: &Sandbox, cwd: &Path, args: &[&str], cols: u16, rows: u16) -> Term {
         let (mut master, mut slave) = (-1, -1);
         let mut ws = libc::winsize { ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0 };
         // SAFETY: out-pointers to live locals; no name buffer, default termios. The size is a raw pointer
@@ -280,7 +290,7 @@ impl Term {
         let stdio = || Stdio::from(slave.try_clone().expect("dup slave"));
         let mut cmd = Command::new(BIN);
         cmd.args(args)
-            .current_dir(sb.work())
+            .current_dir(cwd)
             .env_clear()
             .envs(sb.env())
             .stdin(stdio())
@@ -300,6 +310,9 @@ impl Term {
         let out = Arc::new(Mutex::new(Output {
             parser: vt100::Parser::new(rows, cols, 0),
             raw: Vec::new(),
+            frames: 0,
+            first_frame_at: None,
+            last_frame_at: None,
             parser_panics: Vec::new(),
         }));
         let mut reader = master.try_clone().expect("dup master");
@@ -314,8 +327,19 @@ impl Term {
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
+                        let at = Instant::now();
                         let mut o = lock(&sink);
+                        let old = o.raw.len();
                         o.raw.extend_from_slice(&buf[..n]);
+                        // (every window starting here holds a new byte — one split across reads counts once)
+                        let from = old.saturating_sub(FRAME_END.len() - 1);
+                        let ended =
+                            o.raw[from..].windows(FRAME_END.len()).filter(|w| *w == FRAME_END).count();
+                        if ended > 0 {
+                            o.frames += ended;
+                            o.first_frame_at.get_or_insert(at);
+                            o.last_frame_at = Some(at);
+                        }
                         let (rows, cols) = o.parser.screen().size();
                         let parser = &mut o.parser;
                         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -425,7 +449,31 @@ impl Term {
 
     /// Frames tarae has written so far (each ends its synchronized update).
     pub fn frames(&self) -> usize {
-        lock(&self.out).raw.windows(FRAME_END.len()).filter(|w| *w == FRAME_END).count()
+        lock(&self.out).frames
+    }
+
+    /// When the first frame ended (startup's end).
+    pub fn first_frame_at(&self) -> Option<Instant> {
+        lock(&self.out).first_frame_at
+    }
+
+    /// `keys` sent, then how long until the next frame has ended — polled finely, the frame's time taken
+    /// as its bytes arrived. None if none came within `within`.
+    pub fn key_to_frame(&mut self, keys: &str, within: Duration) -> Option<Duration> {
+        let before = self.frames();
+        let t0 = Instant::now();
+        self.send(keys);
+        let end = t0 + within;
+        while Instant::now() < end {
+            {
+                let o = lock(&self.out);
+                if o.frames > before {
+                    return o.last_frame_at.map(|at| at.saturating_duration_since(t0));
+                }
+            }
+            thread::sleep(Duration::from_micros(200));
+        }
+        None
     }
 
     pub fn running(&mut self) -> bool {
@@ -506,6 +554,8 @@ pub const FRAME_END: &[u8] = b"\x1b[?2026l";
 pub struct Usage {
     pub cpu: Duration,
     pub switches: u64,
+    /// Resident memory now, in bytes (not a running total: a difference keeps the later one).
+    pub rss: u64,
 }
 
 impl std::ops::Sub for Usage {
@@ -514,6 +564,7 @@ impl std::ops::Sub for Usage {
         Usage {
             cpu: self.cpu.saturating_sub(before.cpu),
             switches: self.switches.saturating_sub(before.switches),
+            rss: self.rss,
         }
     }
 }
@@ -532,7 +583,11 @@ pub fn usage(pid: u32) -> Usage {
         libc::mach_timebase_info(&mut tb);
         let ticks = (info.pti_total_user + info.pti_total_system) as u128;
         let nanos = ticks * tb.numer as u128 / tb.denom.max(1) as u128;
-        Usage { cpu: Duration::from_nanos(nanos as u64), switches: info.pti_csw as u64 }
+        Usage {
+            cpu: Duration::from_nanos(nanos as u64),
+            switches: info.pti_csw as u64,
+            rss: info.pti_resident_size,
+        }
     }
 }
 
@@ -546,6 +601,11 @@ pub fn usage(pid: u32) -> Usage {
     let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u64;
     let ticks: u64 = f[11].parse::<u64>().unwrap() + f[12].parse::<u64>().unwrap();
     let mut switches = 0;
+    let status = fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
+    let kb = |key: &str| {
+        status.lines().find_map(|l| l.strip_prefix(key)?.split_whitespace().next()?.parse::<u64>().ok())
+    };
+    let rss = kb("VmRSS:").unwrap_or(0) * 1024;
     for task in fs::read_dir(format!("/proc/{pid}/task")).into_iter().flatten().flatten() {
         let status = fs::read_to_string(task.path().join("status")).unwrap_or_default();
         switches += status
@@ -554,7 +614,7 @@ pub fn usage(pid: u32) -> Usage {
             .filter_map(|l| l.split_whitespace().last()?.parse::<u64>().ok())
             .sum::<u64>();
     }
-    Usage { cpu: Duration::from_millis(ticks * 1000 / hz), switches }
+    Usage { cpu: Duration::from_millis(ticks * 1000 / hz), switches, rss }
 }
 
 /// Polls a file on disk until it holds `want` (saves are immediate today, but the test shouldn't care).

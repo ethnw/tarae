@@ -17,7 +17,7 @@ You need Rust 1.90+ and a C compiler (grammars are compiled from C).
 ```sh
 cargo run -- path/to/file                # try it
 cargo test                               # unit + key-sequence + screen snapshot + e2e tests (opt-level 0: quick to build)
-cargo perf                               # the performance budgets, in an optimized build
+cargo perf                               # performance: budgets + real-use runs, numbers kept and compared
 cargo test --test e2e                    # just the end-to-end tests (the real binary in a pseudo-terminal)
 cargo live                               # live runs with the real rust-analyzer, cargo and claude (see Tests)
 cargo test --features bundled-grammars   # also exercises the bundled-grammar path
@@ -26,10 +26,14 @@ cargo fmt                                # rustfmt.toml: max_width = 110
 ```
 
 Before sending a change, all of `cargo fmt`, `cargo clippy --all-targets`, `cargo test` and `cargo perf` must be
-clean. `cargo perf` runs the performance budgets (a key → frame on a 200k-line file must stay under 16 ms), so a slow
-change fails a test, not just a benchmark. They need an optimized build: `cargo test` builds at opt-level 0 for a
-quick edit-and-test loop, and there they skip themselves, saying so. On a slow shared machine,
-`TARAE_PERF_SLACK=3` multiplies the budget (CI does this).
+clean. `cargo perf` runs the performance budgets (a key → frame on a 200k-line file must stay under 16 ms) and
+real-use runs of the built editor on a pseudo-terminal (startup, a key in a big file, scrolling, idle CPU, memory
+with this repository open), in the `perf` profile — release, with line tables. It runs them three times, keeps
+each number's median in `target/perf/history.tsv` with the commit and date, and says which are more than 15% slower
+than the median of their last runs. On a busy machine (load 5 or more) it measures nothing and says so. A slow
+change thus fails a budget, and a slower one shows up as a number. `cargo test` builds at opt-level 0 for a quick
+edit-and-test loop, where these skip themselves, saying so. On a slow shared machine, `TARAE_PERF_SLACK=3`
+multiplies the budget (CI does this).
 
 [CI](.github/workflows/ci.yml) runs the same checks when started by hand (Actions → CI → Run workflow) — fmt,
 clippy (warnings are errors), and tests on Linux and macOS, with and without bundled grammars — plus a build on the

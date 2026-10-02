@@ -32,8 +32,14 @@ fn wanted(manifest: &Path) -> Vec<String> {
         toml::from_str(&std::fs::read_to_string(&path).unwrap()).expect("languages.toml");
     let all = cfg!(feature = "bundled-grammars");
     // `cargo run`/`cargo test` (the debug profile): the tests and screen snapshots are written against these,
-    // and working on tarae itself wants them without a download. Release builds leave them out (size).
-    let dev = std::env::var("PROFILE").is_ok_and(|p| p == "debug");
+    // and working on tarae itself wants them without a download. So do builds with debug info (`cargo
+    // perf`'s profile: its syntax budgets). Release builds leave them out (size).
+    let dev = std::env::var("PROFILE").is_ok_and(|p| p == "debug")
+        || std::env::var("DEBUG").is_ok_and(|d| d == "true");
+    println!("cargo::rustc-check-cfg=cfg(tarae_dev_grammars)");
+    if dev {
+        println!("cargo::rustc-cfg=tarae_dev_grammars");
+    }
     let flag = |g: &toml::Value, key: &str| g.get(key).and_then(|v| v.as_bool()) == Some(true);
     table["grammar"]
         .as_array()

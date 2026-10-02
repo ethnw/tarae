@@ -1,0 +1,282 @@
+//! `cargo xtask perf` (`cargo perf`) — tarae's performance as numbers kept over time, not only pass or fail.
+//!
+//! Builds the budgets (`term.rs` `perf_budget_*`) and the real-use scenarios (`tests/perf.rs`: startup, a key
+//! in a big file, scrolling, idle CPU, memory) in the `perf` profile (release, with line tables), runs them
+//! `RUNS` times one test at a time, and takes each number's median. Every test prints `PERF <name> <value>
+//! budget=<value> [noise=<value>]`; the medians go to `target/perf/history.tsv` (date, commit — `+` when the
+//! tree has changes — name, value, budget) and are compared with the median of the same number's last
+//! `HISTORY` runs: more than `SLOWER` slower *and* by more than the number's own noise is said (a warning,
+//! not a failure). The noise is the number's, in its own unit — what it moves between quiet runs (a
+//! worst-of-N frame jumps a tenth of a millisecond: `DEFAULT_NOISE`), not a share of its budget: a loose
+//! budget (startup's 500 ms) would hide a real slowdown (5.7 → 10 ms).
+//!
+//! Only on a quiet machine: with a load of `BUSY` or more it waits up to `WAIT` for it to fall (a fat-LTO
+//! build leaves the load up), then says "not measured (machine busy)" and keeps nothing — numbers from a
+//! busy machine (or a sandboxed parallel run) would only be noise. A budget broken on a quiet machine is a
+//! failure.
+
+use std::collections::BTreeMap;
+use std::path::Path;
+use std::process::Command;
+
+use crate::{Result, root};
+
+/// Runs whose median is kept.
+const RUNS: usize = 3;
+/// The 1-minute load at or above which nothing is measured.
+const BUSY: f64 = 5.0;
+/// Past runs a number is compared with (their median).
+const HISTORY: usize = 5;
+/// Slower than the past median by this much is said…
+const SLOWER: f64 = 1.15;
+/// …when the difference is also more than the number's noise — unless it says its own (`noise=`), this, in
+/// milliseconds: above the worst-of-N frame numbers' jumps between quiet runs (+0.13 ms measured).
+const DEFAULT_NOISE: f64 = 0.25;
+/// How long a busy machine is waited for (`TARAE_PERF_WAIT` seconds instead).
+const WAIT: u64 = 90;
+
+/// One measured number.
+#[derive(Clone, Debug, PartialEq)]
+struct Perf {
+    name: String,
+    value: f64,
+    budget: f64,
+    /// What it moves between quiet runs, in its own unit.
+    noise: f64,
+}
+
+pub fn run(_args: &[String]) -> Result<()> {
+    let root = root();
+    if let Some(load) = wait_quiet() {
+        println!("not measured (machine busy: load {load:.1}, under {BUSY} needed)");
+        return Ok(());
+    }
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let test = |extra: &[&str]| {
+        let mut c = Command::new(&cargo);
+        c.args(["test", "--profile", "perf", "--bin", "tarae", "--test", "perf"])
+            .args(extra)
+            .current_dir(&root);
+        c
+    };
+    eprintln!("building the perf profile …");
+    let st = test(&["--no-run", "--quiet"]).status().map_err(|e| format!("cargo: {e}"))?;
+    if !st.success() {
+        return Err("building the perf profile failed".into());
+    }
+    let mut runs: Vec<Vec<Perf>> = Vec::new();
+    for i in 0..RUNS {
+        if let Some(load) = wait_quiet() {
+            println!("not measured (machine busy: load {load:.1} before run {})", i + 1);
+            return Ok(());
+        }
+        eprintln!("run {} of {RUNS} …", i + 1);
+        let out = test(&["--quiet", "--", "perf_", "--test-threads=1"])
+            .output()
+            .map_err(|e| format!("cargo: {e}"))?;
+        let text =
+            format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        if !out.status.success() {
+            let tail: Vec<&str> = text.lines().rev().take(40).collect();
+            let tail: Vec<&str> = tail.into_iter().rev().collect();
+            return Err(format!("a budget broke on a quiet machine:\n{}", tail.join("\n")));
+        }
+        runs.push(parse(&text));
+    }
+    let now = medians(&runs);
+    if now.is_empty() {
+        return Err("no PERF lines — did the tests run in the perf profile?".into());
+    }
+    let file = root.join("target/perf/history.tsv");
+    let past = std::fs::read_to_string(&file).unwrap_or_default();
+    let history = read_history(&past);
+    let width = now.iter().map(|p| p.name.len()).max().unwrap_or(0);
+    let mut slower = 0;
+    for p in &now {
+        let was = history.get(&p.name).map(|v| median(v.iter().rev().take(HISTORY).copied().collect()));
+        let vs = match was {
+            Some(was) if is_slower(p.value, was, p.noise) => {
+                slower += 1;
+                format!("  SLOWER than {was:.3} (+{:.0}%)", (p.value / was - 1.0) * 100.0)
+            }
+            Some(was) if was > 0.0 => format!("  ({:+.0}% vs {was:.3})", (p.value / was - 1.0) * 100.0),
+            _ => String::new(),
+        };
+        println!("{:width$}  {:>10.3}  budget {:>6.0}{vs}", p.name, p.value, p.budget);
+    }
+    let (date, commit) = (today(), commit(&root));
+    let mut add = String::new();
+    if past.is_empty() {
+        add.push_str("date\tcommit\tname\tvalue\tbudget\n");
+    }
+    for p in &now {
+        add.push_str(&format!("{date}\t{commit}\t{}\t{:.3}\t{:.0}\n", p.name, p.value, p.budget));
+    }
+    std::fs::create_dir_all(file.parent().unwrap()).map_err(|e| e.to_string())?;
+    let mut kept = past;
+    kept.push_str(&add);
+    std::fs::write(&file, kept).map_err(|e| format!("{}: {e}", file.display()))?;
+    println!(
+        "{} numbers, median of {RUNS} runs, kept in {} ({commit}){}",
+        now.len(),
+        file.display(),
+        if slower > 0 { format!(" — {slower} slower than before") } else { String::new() }
+    );
+    Ok(())
+}
+
+/// None once the machine is quiet — waiting up to `WAIT` for it, saying so; else the load it stayed at.
+fn wait_quiet() -> Option<f64> {
+    let mut load = busy()?;
+    let wait = std::env::var("TARAE_PERF_WAIT").ok().and_then(|w| w.parse().ok()).unwrap_or(WAIT);
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(wait);
+    eprintln!("waiting up to {wait}s for the machine to quiet down (load {load:.1}) …");
+    while std::time::Instant::now() < end {
+        std::thread::sleep(std::time::Duration::from_secs(5).min(end - std::time::Instant::now()));
+        load = busy()?;
+    }
+    Some(load)
+}
+
+/// The 1-minute load when it's `BUSY` or more. `TARAE_PERF_LOAD` stands in for it (to see the busy path).
+fn busy() -> Option<f64> {
+    let load = match std::env::var("TARAE_PERF_LOAD").ok().and_then(|l| l.parse().ok()) {
+        Some(l) => l,
+        None => {
+            let mut load = [0f64; 3];
+            // SAFETY: fills up to 3 values into the array given.
+            let n = unsafe { libc::getloadavg(load.as_mut_ptr(), 3) };
+            if n < 1 {
+                return None;
+            }
+            load[0]
+        }
+    };
+    (load >= BUSY).then_some(load)
+}
+
+/// The `PERF <name> <value> budget=<value> [noise=<value>]` lines in a run's output.
+fn parse(text: &str) -> Vec<Perf> {
+    text.lines()
+        .filter_map(|l| {
+            let mut w = l.trim().strip_prefix("PERF ")?.split_whitespace();
+            let name = w.next()?.to_string();
+            let value = w.next()?.parse().ok()?;
+            let budget = w.next()?.strip_prefix("budget=")?.parse().ok()?;
+            let noise = match w.next() {
+                Some(n) => n.strip_prefix("noise=")?.parse().ok()?,
+                None => DEFAULT_NOISE,
+            };
+            Some(Perf { name, value, budget, noise })
+        })
+        .collect()
+}
+
+/// Each number's median over the runs (in name order).
+fn medians(runs: &[Vec<Perf>]) -> Vec<Perf> {
+    let mut by: BTreeMap<&str, (Vec<f64>, &Perf)> = BTreeMap::new();
+    for p in runs.iter().flatten() {
+        by.entry(&p.name).or_insert((Vec::new(), p)).0.push(p.value);
+    }
+    by.into_iter().map(|(_, (v, p))| Perf { value: median(v), ..p.clone() }).collect()
+}
+
+fn median(mut v: Vec<f64>) -> f64 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    v.sort_by(f64::total_cmp);
+    v[v.len() / 2]
+}
+
+/// The kept values of each number, oldest first.
+fn read_history(tsv: &str) -> BTreeMap<String, Vec<f64>> {
+    let mut out: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+    for l in tsv.lines().skip_while(|l| l.starts_with("date\t")) {
+        let f: Vec<&str> = l.split('\t').collect();
+        if let (Some(name), Some(Ok(v))) = (f.get(2), f.get(3).map(|v| v.parse::<f64>())) {
+            out.entry(name.to_string()).or_default().push(v);
+        }
+    }
+    out
+}
+
+/// More than `SLOWER` above the past median, and by more than the number's noise.
+fn is_slower(now: f64, was: f64, noise: f64) -> bool {
+    now > was * SLOWER && now - was > noise
+}
+
+/// `abc1234`, `+` when the tree has changes (tracked files only; read without taking git's index lock).
+fn commit(root: &Path) -> String {
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    };
+    let head = git(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "?".into());
+    let dirty = git(&["status", "--porcelain", "--untracked-files=no"]).is_some_and(|s| !s.is_empty());
+    if dirty { format!("{head}+") } else { head }
+}
+
+/// Today's date (UTC) as `YYYY-MM-DD`.
+fn today() -> String {
+    let secs =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let (y, m, d) = civil(secs as i64 / 86_400);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// Days since 1970-01-01 → (year, month, day) — Howard Hinnant's `civil_from_days`.
+fn civil(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    (y, m, d)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lines_medians_history_and_slower() {
+        let out = "running 2 tests\nPERF a 1.500 budget=16\nnoise PERF b 1 budget=2\nPERF b 3.0 budget=100\nPERF bad x budget=1\n";
+        let n = DEFAULT_NOISE;
+        assert_eq!(
+            parse(out),
+            [
+                Perf { name: "a".into(), value: 1.5, budget: 16.0, noise: n },
+                Perf { name: "b".into(), value: 3.0, budget: 100.0, noise: n }
+            ]
+        );
+        assert_eq!(parse("PERF m 37.2 budget=400 noise=2")[0].noise, 2.0, "its own, in its unit");
+        assert!(parse("PERF m 37.2 budget=400 nois=2").is_empty());
+        let runs = vec![
+            parse("PERF a 3 budget=16 noise=0.5"),
+            parse("PERF a 1 budget=16 noise=0.5"),
+            parse("PERF a 2 budget=16 noise=0.5"),
+        ];
+        assert_eq!(medians(&runs)[0], Perf { name: "a".into(), value: 2.0, budget: 16.0, noise: 0.5 });
+        let tsv = "date\tcommit\tname\tvalue\tbudget\n2026-10-02\tabc\ta\t2.000\t16\n2026-10-03\tdef+\ta\t4.000\t16\n";
+        assert_eq!(read_history(tsv)["a"], [2.0, 4.0]);
+        assert!(is_slower(12.0, 10.0, n), "+20%, 2 ms");
+        assert!(!is_slower(11.0, 10.0, n), "+10%");
+        // Measured between two quiet runs: worst-of-N frames jumping +40% by a tenth of a millisecond
+        assert!(!is_slower(0.45, 0.32, n) && !is_slower(0.30, 0.21, n), "noise");
+        // A loose budget doesn't hide a real slowdown: startup 5.7 → 10 ms against a 500 ms budget
+        assert!(is_slower(10.0, 5.7, 0.5));
+        assert!(is_slower(43.0, 37.0, 2.0) && !is_slower(38.5, 37.0, 2.0), "memory, in MB");
+        assert_eq!((civil(0), civil(20_363)), ((1970, 1, 1), (2025, 10, 2)));
+    }
+}

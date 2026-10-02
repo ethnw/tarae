@@ -10,12 +10,15 @@
 //!   Run only when grammar commits or the bundle list change.
 //! - `shot out.png [keys …]` — the real screen as a PNG, for looking at a change before it's committed
 //!   (see [`shot`]).
+//! - `perf` (`cargo perf`) — the budgets and real-use scenarios in the `perf` profile, their numbers kept in
+//!   `target/perf/history.tsv` and compared with the last runs (see [`perf`]).
 
 use std::collections::BTreeSet;
 use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
+mod perf;
 mod shot;
 
 type Result<T> = std::result::Result<T, String>;
@@ -25,7 +28,8 @@ fn main() {
     let result = match args.first().map(String::as_str) {
         Some("vendor-grammars") => vendor_grammars(),
         Some("shot") => shot::run(&args[1..]),
-        _ => Err("usage: cargo xtask vendor-grammars | shot out.png [keys …]".into()),
+        Some("perf") => perf::run(&args[1..]),
+        _ => Err("usage: cargo xtask vendor-grammars | shot out.png [keys …] | perf".into()),
     };
     if let Err(e) = result {
         eprintln!("error: {e}");

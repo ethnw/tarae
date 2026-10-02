@@ -8981,7 +8981,7 @@ mod tests {
 
     /// The budgets measure an optimized build: the test profile builds at opt-level 0 (a fast edit-test
     /// loop), where a key costs several times as much — there a budget skips itself, saying so past libtest's
-    /// capture (`test_results::SELF_SKIP`), and `cargo perf` runs them at opt-level 1.
+    /// capture (`test_results::SELF_SKIP`), and `cargo perf` runs them in the `perf` profile (release).
     fn unoptimized(test: &str) -> bool {
         if cfg!(tarae_optimized) {
             return false;
@@ -8992,6 +8992,14 @@ mod tests {
         );
         let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
         true
+    }
+
+    /// The number behind a budget, for `cargo perf`'s history (`xtask perf`): `PERF <name> <ms> budget=<ms>`,
+    /// written past libtest's capture so a passing run shows it too.
+    fn measured(name: &str, took: Duration, budget: Duration) {
+        let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+        let line = format!("PERF {name} {:.3} budget={:.0}\n", ms(took), ms(budget));
+        let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
     }
 
     /// Every budget skips itself by its own name at opt-level 0 (else the skip lands on another test's row).
@@ -9040,8 +9048,8 @@ mod tests {
                 worst = (dt, k);
             }
         }
+        measured("key_to_frame_on_large_file", worst.0, budget);
         assert!(worst.0 < budget, "key {:?} took {:?} (budget {:?})", worst.1, worst.0, budget);
-        eprintln!("perf: worst key->frame {:?} on {:?}", worst.0, worst.1);
     }
 
     /// Same budget with a thousand notes on the file (every event re-reads their marks; every frame looks
@@ -9084,8 +9092,8 @@ mod tests {
             worst = worst.max(t.elapsed());
         }
         std::fs::remove_dir_all(&dir).ok();
+        measured("with_many_notes", worst, budget);
         assert!(worst < budget, "worst event→frame {worst:?} with 1000 notes (budget {budget:?})");
-        eprintln!("perf: worst event->frame with 1000 notes {worst:?}");
     }
 
     /// Same budget on an 8 MB file while a plugin runs away (the demo plugin's endless loop, then a command
@@ -9125,13 +9133,13 @@ mod tests {
                 worst = (dt, k);
             }
         }
+        measured("with_a_runaway_plugin", worst.0, budget);
         assert!(
             worst.0 < budget,
             "key {:?} took {:?} with a plugin running (budget {budget:?})",
             worst.1,
             worst.0
         );
-        eprintln!("perf: worst key->frame with a runaway plugin {:?} on {:?}", worst.0, worst.1);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -9169,13 +9177,8 @@ mod tests {
                 worst = (dt, k);
             }
         }
+        measured("with_locals_in_a_huge_item", worst.0, budget);
         assert!(worst.0 < budget, "key {:?} took {:?} (budget {:?})", worst.1, worst.0, budget);
-        eprintln!(
-            "perf+locals: worst key->frame {:?} on {:?} (a {} KB item)",
-            worst.0,
-            worst.1,
-            body.len() / 1024
-        );
     }
 
     /// A long name loses its middle, not its end — the extension and the suffix that tells siblings apart
@@ -9367,6 +9370,7 @@ mod tests {
         ed.handle_key("C".parse().unwrap());
         let copy = t.elapsed();
         assert_eq!(ed.doc().selection().len(), 40_000, "C copied every cursor");
+        measured("copy_20k_cursors", copy, budget * 10);
         assert!(copy < budget * 10, "C took {copy:?} with 20k cursors (budget {:?})", budget * 10);
         // Frames over 40k cursors, moved about (moving each is the keys' own work — not timed)
         let mut worst = Duration::ZERO;
@@ -9377,8 +9381,8 @@ mod tests {
             render(&mut ed, &mut buf, 120, 40).unwrap();
             worst = worst.max(t.elapsed());
         }
+        measured("frame_with_40k_cursors", worst, budget);
         assert!(worst < budget, "a frame took {worst:?} with 40k cursors (budget {budget:?})");
-        eprintln!("perf+cursors: worst frame {worst:?} with 40k cursors, C over 20k {copy:?}");
     }
 
     /// Same budget with syntax highlighting on — a big Rust file (only on machines with the grammar).
@@ -9417,11 +9421,10 @@ mod tests {
                 worst = (dt, k);
             }
         }
+        measured("with_syntax_highlighting", worst.0, budget);
+        // (off the main thread — tracked, not budgeted against a frame)
+        measured("full_parse_20k_rust_lines", full_parse, Duration::from_secs(1));
         assert!(worst.0 < budget, "key {:?} took {:?} (budget {:?})", worst.1, worst.0, budget);
-        eprintln!(
-            "perf+syntax: worst key->frame {:?} on {:?} (full parse of 20k lines {full_parse:?}, off main thread)",
-            worst.0, worst.1
-        );
     }
 
     /// Keys (sent as events — every event ends with the panel following the editor) → frame, worst of all.
@@ -9484,8 +9487,8 @@ mod tests {
             "esc",
         ];
         let (worst, key) = events_to_frames(&mut ed, &keys, 180, 50);
+        measured("side_panel_with_200k_files", worst, budget);
         assert!(worst < budget, "key {key:?} took {worst:?} with {rows} panel rows (budget {budget:?})");
-        eprintln!("perf+side panel: worst event->frame {worst:?} on {key:?} ({rows} rows of 200k files)");
     }
 
     /// Same budget typing in the file picker over 200k files — every key refilters them all and lays the
@@ -9512,6 +9515,7 @@ mod tests {
         ed.picker = Some(p);
         let keys = ["d", "1", "e", "4", "f", "backspace", "backspace", "C-n", "C-n", "down"];
         let (worst, key) = events_to_frames(&mut ed, &keys, 180, 50);
+        measured("file_picker_typing_in_200k_files", worst, budget);
         assert!(worst < budget, "key {key:?} took {worst:?} (budget {budget:?})");
         // As the editor opens it: filtered on a worker — a key only hands it over, a result lands on the
         // main loop (taken, laid out, drawn)
@@ -9531,12 +9535,10 @@ mod tests {
             render(&mut ed, &mut buf, 180, 50).unwrap();
             landing = landing.max(t.elapsed());
         }
+        measured("file_picker_result_landing_200k", typing.max(landing), budget);
         assert!(
             typing.max(landing) < budget,
             "a key {typing:?}, a result landing {landing:?} (budget {budget:?})"
-        );
-        eprintln!(
-            "perf+file picker: worst key->frame {worst:?} on {key:?} in place; on a worker a key {typing:?}, a result {landing:?} (200k files)"
         );
     }
 
@@ -9561,14 +9563,13 @@ mod tests {
         ed.git_status = Some(status(1));
         ed.sidebar = Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, root.clone()));
         let (worst, key) = events_to_frames(&mut ed, &["j", "j", "C-d", "G", "k", "g", "esc", "w"], 180, 50);
+        measured("git_tab_with_20k_changes", worst, budget);
         assert!(worst < budget, "key {key:?} took {worst:?} (budget {budget:?})");
         // A new status: the rows are built again on the next event
         ed.git_status = Some(status(2));
         let (fresh, _) = events_to_frames(&mut ed, &["j"], 180, 50);
+        measured("git_tab_fresh_status_20k", fresh, budget);
         assert!(fresh < budget, "a fresh status took {fresh:?} to show (budget {budget:?})");
-        eprintln!(
-            "perf+git tab: worst key->frame {worst:?} on {key:?}, a fresh status {fresh:?} (20k files)"
-        );
     }
 
     /// Same budget with a program flooding the terminal panel — each batch of its output (a screen of
@@ -9608,8 +9609,8 @@ mod tests {
             worst = worst.max(t0.elapsed());
         }
         ed.terminal = None; // hangs it up
+        measured("terminal_flood_batch", worst, budget);
         assert!(worst < budget, "a batch of output took {worst:?} to show (budget {budget:?})");
-        eprintln!("perf+terminal: worst output batch->frame {worst:?} ({} KB a batch)", batch.len() / 1024);
     }
 
     /// Same budget moving between merge conflicts in a 200k-line file (500 of them, the card on each).
@@ -9634,9 +9635,9 @@ mod tests {
         assert_eq!(ed.doc().conflicts.len(), 500);
         let keys = ["] m", "] m", "] m", "[ m", "j", "k", "G", "[ m", "g g"];
         let (worst, key) = events_to_frames(&mut ed, &keys, 160, 50);
+        measured("conflicts_in_a_huge_file", worst, budget);
+        // (off the main thread — tracked, not budgeted against a frame)
+        measured("conflict_scan_200k_lines", scan, Duration::from_secs(1));
         assert!(worst < budget, "key {key:?} took {worst:?} (budget {budget:?})");
-        eprintln!(
-            "perf+conflicts: worst key->frame {worst:?} on {key:?} (a full scan {scan:?}, off main thread)"
-        );
     }
 }
