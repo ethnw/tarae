@@ -3,10 +3,160 @@
 //! a path outside gets the run card, saying what it reads: what's read goes to Claude, and the sandbox
 //! doesn't stop reads. Writes and the network are the sandbox's either way, so a command misjudged as
 //! read-only can still only write in the project and the temp folders.
+//!
+//! A line can be several of them (#27): `cd src && grep -n x a.rs | sort | head`, or the same as `sh -c
+//! '…'`. `parse` reads it the way the shell would, but only the parts it can judge: words (quoted or not —
+//! `grep -E 'a|b'` is one pattern), `cd <dir>`, and `;` `&&` `||` `|` between them. Anything that could
+//! make a word say something else, or write a file, isn't read at all: `$`, backticks, `\`, `(`, `{`, `<`,
+//! a redirect to a file (`2>&1` and `>/dev/null` are fine), a lone `&`, `~` at a word's start, an
+//! assignment, a newline, and an `sh -c` inside the body. A glob is fine where its fixed folder is read.
 
 use std::path::{Path, PathBuf};
 
 use crate::allow::Allowed;
+
+/// One word of a line, quotes taken off; `glob`: it has an unquoted `*` `?` `[` (the shell fills it in).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Word {
+    pub text: String,
+    pub glob: bool,
+}
+
+/// One part of a line: a command's words, or a `cd` into a folder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Part {
+    Cd(String),
+    Cmd(Vec<Word>),
+}
+
+/// Shells whose `-c '<body>'` is read as the body (once — not one inside another).
+const SHELLS: [&str; 4] = ["sh", "bash", "zsh", "dash"];
+
+/// The parts of `line` (an `sh -c '…'` around it taken off), if it's only words, `cd` and `;` `&&` `||` `|`
+/// — None for anything else (see the module's doc).
+pub fn parse(line: &str) -> Option<Vec<Part>> {
+    let outer = parts(line)?;
+    if let [Part::Cmd(w)] = &outer[..]
+        && let [shell, c, body] = &w[..]
+        && SHELLS.contains(&shell.text.as_str())
+        && c.text == "-c"
+        && !body.glob
+    {
+        let inner = parts(&body.text)?;
+        // (an `sh -c` inside that one isn't read)
+        let nested = inner.iter().any(|p| matches!(p, Part::Cmd(w) if SHELLS.contains(&w[0].text.as_str())));
+        return (!nested).then_some(inner);
+    }
+    Some(outer)
+}
+
+/// The line's parts, without looking for an `sh -c` around them.
+fn parts(line: &str) -> Option<Vec<Part>> {
+    let mut parts = Vec::new();
+    let mut words: Vec<Word> = Vec::new();
+    let mut word: Option<Word> = None;
+    let end_word = |word: &mut Option<Word>, words: &mut Vec<Word>| {
+        if let Some(w) = word.take() {
+            words.push(w);
+        }
+    };
+    let end_part = |words: &mut Vec<Word>, parts: &mut Vec<Part>| -> Option<()> {
+        let w = std::mem::take(words);
+        let first = w.first()?;
+        // An assignment where the command goes (`PAGER=sh git log`) isn't a command's word
+        if first.text.contains('=') || first.glob {
+            return None;
+        }
+        parts.push(match &w[..] {
+            [cd, dir] if cd.text == "cd" && !dir.glob && !dir.text.starts_with('-') => {
+                Part::Cd(dir.text.clone())
+            }
+            [cd, ..] if cd.text == "cd" => return None,
+            _ => Part::Cmd(w),
+        });
+        Some(())
+    };
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            ' ' | '\t' => end_word(&mut word, &mut words),
+            '\'' => {
+                let w = word.get_or_insert(Word { text: String::new(), glob: false });
+                loop {
+                    match chars.next()? {
+                        '\'' => break,
+                        c => w.text.push(c),
+                    }
+                }
+            }
+            '"' => {
+                let w = word.get_or_insert(Word { text: String::new(), glob: false });
+                loop {
+                    match chars.next()? {
+                        '"' => break,
+                        '$' | '`' | '\\' => return None,
+                        c => w.text.push(c),
+                    }
+                }
+            }
+            ';' | '|' | '&' => {
+                end_word(&mut word, &mut words);
+                match (c, chars.peek()) {
+                    ('&', Some('&')) | ('|', Some('|')) => {
+                        chars.next();
+                    }
+                    ('&', _) => return None,
+                    _ => {}
+                }
+                end_part(&mut words, &mut parts)?;
+            }
+            '>' => {
+                // Only to nowhere: `2>&1`, `>/dev/null`, `2>/dev/null` (the fd as the word before it)
+                if word.as_ref().is_some_and(|w| !matches!(w.text.as_str(), "1" | "2")) {
+                    return None;
+                }
+                word = None;
+                if chars.peek() == Some(&'>') {
+                    chars.next();
+                }
+                while chars.peek() == Some(&' ') {
+                    chars.next();
+                }
+                let mut target = String::new();
+                if chars.peek() == Some(&'&') {
+                    target.push('&');
+                    chars.next();
+                }
+                while let Some(&c) = chars.peek().filter(|c| !matches!(c, ' ' | ';' | '|' | '&')) {
+                    target.push(c);
+                    chars.next();
+                }
+                if !matches!(target.as_str(), "&1" | "&2" | "/dev/null") {
+                    return None;
+                }
+            }
+            '$' | '`' | '\\' | '(' | ')' | '{' | '}' | '<' | '!' | '\n' | '\r' => return None,
+            '#' | '~' if word.is_none() => return None,
+            c => {
+                let w = word.get_or_insert(Word { text: String::new(), glob: false });
+                w.glob |= matches!(c, '*' | '?' | '[' | ']');
+                w.text.push(c);
+            }
+        }
+    }
+    end_word(&mut word, &mut words);
+    end_part(&mut words, &mut parts)?;
+    Some(parts)
+}
+
+/// The words of `line` when it's one command and nothing else (quotes taken off, no glob) — what runs,
+/// word for word: the checks and a chat's patterns are matched against these.
+pub fn one_command(line: &str) -> Option<Vec<String>> {
+    match &parse(line)?[..] {
+        [Part::Cmd(w)] if !w.iter().any(|w| w.glob) => Some(w.iter().map(|w| w.text.clone()).collect()),
+        _ => None,
+    }
+}
 
 /// The commands that only read (with their options below), by name.
 const COMMANDS: [&str; 16] = [
@@ -17,10 +167,21 @@ const COMMANDS: [&str; 16] = [
 /// git's that only read — `branch` only bare (with words it creates, renames, deletes).
 const GIT: [&str; 3] = ["blame", "rev-parse", "ls-files"];
 
-/// Whether `cmd` only reads: plain words (`tools::plain_words`), a command above, and none of the options
+/// Whether `cmd` only reads: a line `parse` reads, each command in it one above with none of the options
 /// that make it write a file, run a program, or never end. Where it reads is `outside`'s.
 pub fn read_only(cmd: &str) -> bool {
-    let Some(words) = crate::tools::plain_words(cmd) else { return false };
+    let Some(parts) = parse(cmd) else { return false };
+    parts.iter().all(|p| match p {
+        Part::Cd(_) => true,
+        Part::Cmd(w) => {
+            let words: Vec<&str> = w.iter().map(|w| w.text.as_str()).collect();
+            !words.iter().any(|w| crate::tools::WRITES.iter().any(|o| w.starts_with(o))) && reads_only(&words)
+        }
+    })
+}
+
+/// One command's words: a command above, without the options that make it write, run, or never end.
+fn reads_only(words: &[&str]) -> bool {
     let Some((&name, args)) = words.split_first() else { return false };
     // A short option cluster with `c` in it (`-ro` has `-o`)
     let short = |w: &str, c: char| w.starts_with('-') && !w.starts_with("--") && w[1..].contains(c);
@@ -43,34 +204,67 @@ pub fn read_only(cmd: &str) -> bool {
     }
 }
 
-/// The words of `cmd` that could name a path: every one that isn't an option, and an option's own value
-/// (`--file=x`, `-f/x`). A word that names nothing (a pattern) is left out by `outside`.
-fn candidates(cmd: &str) -> Vec<&str> {
-    let words = crate::tools::plain_words(cmd).unwrap_or_default();
-    let skip = if words.first() == Some(&"git") { 2 } else { 1 };
+/// The words of one command that could name a path: every one that isn't an option, and an option's own
+/// value (`--file=x`, `-f/x`); a glob as its fixed folder (`../*.rs` reads `..`). A word that names nothing
+/// (a pattern) is left out by `outside`.
+fn candidates(words: &[Word]) -> Vec<String> {
+    let skip = if words.first().is_some_and(|w| w.text == "git") { 2 } else { 1 };
     words
-        .into_iter()
+        .iter()
         .skip(skip)
-        .filter_map(|w| match w.strip_prefix('-') {
-            None => Some(w),
-            Some(_) => w.split_once('=').map(|(_, v)| v).or_else(|| w.find('/').map(|i| &w[i..])),
+        .filter_map(|w| {
+            let path = match w.text.strip_prefix('-') {
+                None => w.text.as_str(),
+                Some(_) => w
+                    .text
+                    .split_once('=')
+                    .map(|(_, v)| v)
+                    .or_else(|| w.text.find('/').map(|i| &w.text[i..]))?,
+            };
+            if !w.glob {
+                return Some(path.to_string());
+            }
+            let fixed = &path[..path.find(['*', '?', '[', ']']).unwrap_or(path.len())];
+            Some(fixed.rfind('/').map_or(".".to_string(), |i| fixed[..i.max(1)].to_string()))
         })
         .filter(|w| !w.is_empty())
         .collect()
 }
 
 /// The places `cmd` reads outside `root` (real paths, links followed) that aren't allowed — on a worker.
-/// A word that names nothing there isn't a path; `..` and links are resolved.
-pub fn outside(cmd: &str, cwd: &Path, root: &Path, chat: &Allowed, kept: &Allowed) -> Vec<PathBuf> {
+/// A word that names nothing there isn't a path; `..` and links are resolved. Each command's words are
+/// where it runs: after a `cd`, in that folder (its real path) — which is read too. Err: a `cd` into
+/// what isn't a folder that's there — the shell would stay where it was and run the rest (after `;` or
+/// `||`) from there, so where those read can't be told: the line is asked about.
+pub fn outside(
+    cmd: &str,
+    cwd: &Path,
+    root: &Path,
+    chat: &Allowed,
+    kept: &Allowed,
+) -> Result<Vec<PathBuf>, String> {
     let mut out: Vec<PathBuf> = Vec::new();
-    for w in candidates(cmd) {
-        let Ok(real) = std::fs::canonicalize(cwd.join(w)) else { continue };
-        if real.starts_with(root) || chat.reads(&real) || kept.reads(&real) || out.contains(&real) {
-            continue;
+    let mut here = cwd.to_path_buf();
+    for part in parse(cmd).unwrap_or_default() {
+        let words = match part {
+            Part::Cd(dir) => {
+                here = std::fs::canonicalize(here.join(&dir))
+                    .ok()
+                    .filter(|d| d.is_dir())
+                    .ok_or_else(|| format!("cd {dir}: no such folder"))?;
+                vec![".".to_string()]
+            }
+            Part::Cmd(w) => candidates(&w),
+        };
+        for w in words {
+            let Ok(real) = std::fs::canonicalize(here.join(w)) else { continue };
+            if real.starts_with(root) || chat.reads(&real) || kept.reads(&real) || out.contains(&real) {
+                continue;
+            }
+            out.push(real);
         }
-        out.push(real);
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -143,6 +337,93 @@ mod tests {
         }
     }
 
+    /// Lines of several reads (#27): `cd`, `;` `&&` `||` `|` between read-only commands, or the same in
+    /// `sh -c '…'` — and every line that must still ask: a redirect to a file, an `sh -c` inside the body,
+    /// anything the shell fills in or runs. A `|` inside quotes is part of a word (#22: `grep -E 'a|b'`).
+    #[test]
+    fn lines_of_several_reads() {
+        for c in [
+            "cd src && grep -n fn a.rs | sort | head -5",
+            "sh -c 'wc -l src/*.rs | sort -n | tail -8'",
+            "bash -c \"ls -la; pwd\"",
+            "grep -E 'a|b' src/x.rs",
+            "grep -E \"a|b\" src/x.rs",
+            "grep -rn 'fn main' src 2>/dev/null | head",
+            "rg -n x src 2>&1 | wc -l",
+            "ls || pwd",
+            "find . -name '*.rs' | wc -l",
+            "cat 'a file with spaces.txt'",
+            "git ls-files src | grep -c rs",
+        ] {
+            assert!(read_only(c), "{c}");
+        }
+        for c in [
+            // Redirects to a file
+            "ls > out.txt",
+            "cat a >> b",
+            "grep x a 2> err.txt",
+            "sh -c 'ls > x'",
+            "cat a 1>b",
+            // An sh -c inside the body, or a shell anywhere in the line
+            "sh -c 'sh -c \"ls\"'",
+            "sh -c 'bash -c ls'",
+            "ls | sh",
+            "sh -c 'ls' extra",
+            // What the shell fills in or runs
+            "cat $(echo x)",
+            "cat \"$HOME\"",
+            "ls `pwd`",
+            "ls \\; rm x",
+            "(ls)",
+            "{ ls; }",
+            "cat <<EOF",
+            "cat < x",
+            "ls & rm x",
+            "ls &",
+            "ls\npwd",
+            "FOO=1 ls",
+            "cat ~/x",
+            "ls ! x",
+            // Not read-only, or not a line at all
+            "cd /tmp && rm x",
+            "cd",
+            "cd -",
+            "cd a b",
+            "xargs cat",
+            "echo hi",
+            "ls; ",
+            "; ls",
+            "ls && && ls",
+            "grep 'unterminated",
+            "grep \"a\\b\" x",
+        ] {
+            assert!(!read_only(c), "{c}");
+        }
+        let w = |t: &str| Word { text: t.into(), glob: false };
+        assert_eq!(
+            parse("cd src && grep -n 'a b' x.rs | head"),
+            Some(vec![
+                Part::Cd("src".into()),
+                Part::Cmd(vec![w("grep"), w("-n"), w("a b"), w("x.rs")]),
+                Part::Cmd(vec![w("head")]),
+            ])
+        );
+        assert_eq!(
+            parse("ls src/*.rs"),
+            Some(vec![Part::Cmd(vec![w("ls"), Word { text: "src/*.rs".into(), glob: true }])])
+        );
+        assert_eq!(
+            parse("ls '*.rs'"),
+            Some(vec![Part::Cmd(vec![w("ls"), w("*.rs")])]),
+            "a quoted glob is a word"
+        );
+        assert_eq!(
+            one_command("sh -c 'cargo test -- \"a b\"'"),
+            Some(vec!["cargo".into(), "test".into(), "--".into(), "a b".into()])
+        );
+        assert_eq!(one_command("ls | head"), None);
+    }
+
     /// Paths it names are resolved where it runs: inside the project they're fine, outside they're what the
     /// card says — unless allowed; a word that names nothing isn't a path, and a link that leads out is out.
     #[test]
@@ -156,7 +437,7 @@ mod tests {
         std::fs::write(out.join("m.txt"), "x\n").unwrap();
         std::os::unix::fs::symlink(&out, p.join("link")).unwrap();
         let none = Allowed::default();
-        let at = |cmd: &str| outside(cmd, &p, &p, &none, &none);
+        let at = |cmd: &str| outside(cmd, &p, &p, &none, &none).unwrap();
         assert!(at("cat src/a.rs").is_empty());
         assert!(at("grep -rn nothing-like-a-path src").is_empty(), "a pattern isn't a path");
         assert!(at("ls").is_empty());
@@ -166,9 +447,32 @@ mod tests {
         assert_eq!(at(&format!("grep --file={}/m.txt src", out.display())), [out.join("m.txt")]);
         assert_eq!(at(&format!("grep -f{}/m.txt src", out.display())), [out.join("m.txt")]);
         assert_eq!(at("git ls-files ../out"), std::slice::from_ref(&out));
+        // A line of several: each part where it runs — a cd's folder read too; a glob by its fixed folder
+        assert!(at("cd src && cat a.rs | wc -l").is_empty());
+        assert_eq!(at("cd ../out && cat m.txt"), [out.clone(), out.join("m.txt")]);
+        assert_eq!(at("ls ../out/*.txt"), std::slice::from_ref(&out), "the glob's folder");
+        assert!(at("ls src/*.rs").is_empty());
+        assert_eq!(at("sh -c 'grep -n x src/a.rs; cat ../out/m.txt'"), [out.join("m.txt")]);
+        // A cd into what isn't a folder that's there: the shell stays put and runs the rest from where it
+        // was — where that reads can't be told, so the line is asked about (not skipped as naming nothing)
+        for line in [
+            "cd nope; cat ../../out/m.txt",
+            "cd nope || cat ../out/m.txt",
+            "cd src/a.rs; cat ../out/m.txt",
+            "cd nope && cat x",
+            "sh -c 'cd nope; cat ../out/m.txt'",
+        ] {
+            let r = outside(line, &p, &p, &none, &none);
+            assert!(r.as_ref().is_err_and(|e| e.contains("no such folder")), "{line}: {r:?}");
+        }
+        // One there is followed to its real path: a link into somewhere else is read there
+        assert_eq!(at("cd link; cat m.txt"), [out.clone(), out.join("m.txt")]);
         let allowed = Allowed { read: vec![out.clone()], ..Default::default() };
-        assert!(outside("cat ../out/m.txt", &p, &p, &allowed, &none).is_empty(), "allowed this chat");
-        assert!(outside("cat ../out/m.txt", &p, &p, &none, &allowed).is_empty(), "kept");
+        assert!(
+            outside("cat ../out/m.txt", &p, &p, &allowed, &none).unwrap().is_empty(),
+            "allowed this chat"
+        );
+        assert!(outside("cat ../out/m.txt", &p, &p, &none, &allowed).unwrap().is_empty(), "kept");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

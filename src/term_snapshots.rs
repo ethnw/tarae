@@ -694,6 +694,19 @@ fn snapshot_offer_run() {
     s.check("offer_run");
 }
 
+/// A command with a pattern for the rest of the chat (#27): the card names it, `a This chat` beside `y`/`n`.
+#[test]
+fn snapshot_offer_run_pattern() {
+    let mut s = Shot::new(100, 30);
+    s.ed.offer_popups = true;
+    s.file("src/demo.rs", DEMO_RS);
+    let command = "cargo xtask shot /tmp/words.png ' l' '@?distinct words'";
+    let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "run", "arguments": {"command": command}}});
+    assert!(crate::tools::mcp(&mut s.ed, 0, "c1", &msg).is_none(), "it waits for the user");
+    s.check("offer_run_pattern");
+}
+
 /// `:ask` review — the answer shown as an inline diff inside the buffer (fake claude).
 #[test]
 fn snapshot_ask_review() {

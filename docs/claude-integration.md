@@ -257,8 +257,12 @@ every line Claude wrote for them went through your review first, unless you turn
 Claude can build, lint, format, run a whole test suite, and use git, all with tarae's `run` tool. Each call is
 one command, run in the task panel the way `space m m` runs a task, and Claude waits for it to end.
 
-- Claude gets how it ended (`exit 101 in 4.2s`), the places it pointed at (the errors and warnings that went into
-  the list, `]q`), and its output. Long output comes as its first 100 and last 150 lines
+- Claude gets how it ended (`exit 101 in 4.2s`), the places it pointed at (errors and warnings), and its
+  output. Long output comes as its first 100 and last 150 lines
+- Only a check or a build (`cargo build`/`check`/`test`/`clippy`, `go build`/`test`/`vet`, `make`, `npm test`,
+  `pytest`, `tsc`, `ruff check` and the like) puts its places in your list (`]q`), as your own build would. A grep
+  of Claude's looking around leaves your list as it was
+- It runs in the project root, or in the folder Claude gives (`cwd`, inside the project)
 - When it fails with an error, the editor goes there and a card says why, as with a failed test. In the chat,
   the row ends with the outcome (`◦ run  cargo clippy --all-targets  exit 101`)
 - It never cuts a run short. If a task is already running, Claude is told to wait. If you stop it (`space m c`)
@@ -268,21 +272,31 @@ one command, run in the task panel the way `space m m` runs a task, and Claude w
 
 **Checks run at once**: `cargo build`, `check`, `test`, `clippy` and `fmt`, `go build`, `test` and `vet`,
 `gofmt -l`, and git's `status`, `diff`, `log` and `show`. `llm.run-allow` adds your own, as word prefixes
-(`["npm test", "make lint"]`). A command only counts as one of those when it's plain words. Quoting, `$`,
-redirection, pipes, `;`, `&&`, globs, a `VAR=value`, or an option that makes git write or run something
+(`["npm test", "make lint"]`). A command only counts as one of those when it's one command and its words say
+what runs: quoted words are fine (`cargo test -- 'a b'`), and so is `2>&1`. `$`, backticks, a redirect to a
+file, pipes, `;`, `&&`, globs, a `VAR=value` before it, or an option that makes git write or run something
 (`--output`, `--ext-diff`) and it asks like any other.
 
 **So do commands that only read, when they read in the project**: `ls`, `cat`, `head`, `tail`, `wc`, `grep`,
 `rg`, `find`, `tree`, `stat`, `file`, `du`, `diff`, `sort`, `uniq`, `pwd`, and git's `blame`, `rev-parse`,
-`ls-files` and a bare `branch`. Plain words again, and not with an option that writes, runs something or never
-ends (`find -exec`/`-delete`/`-fprint`, `sort -o`, `tree -o`, `rg --pre`, `tail -f`, `uniq in out`, `git branch
-<name>`). Every path the command names is resolved (links followed, `..` gone through): if one lies outside
-the project, the card says which, since what it reads goes to Claude. `a` and `A` there work as on a
+`ls-files` and a bare `branch`. Not with an option that writes, runs something or never ends (`find
+-exec`/`-delete`/`-fprint`, `sort -o`, `tree -o`, `rg --pre`, `tail -f`, `uniq in out`, `git branch <name>`). A
+line of them reads too: joined by `;` `&&` `||` `|`, with a `cd`, or the same inside `sh -c '…'` — `cd src &&
+grep -n fn a.rs | sort | head`. A `|` inside quotes is part of a pattern (`grep -E 'a|b'`). Anything the shell
+would fill in or run (`$`, backticks, a redirect to a file, `<`, a lone `&`, a `sh -c` inside the body) and it
+asks. Every path the line names is resolved where its part runs (after a `cd`, there — that folder is read
+too; a glob by its fixed folder; links followed, `..` gone through): if one lies outside the project, the card
+says which, since what it reads goes to Claude. `a` and `A` there work as on a
 [read's card](#reading-outside-the-project): those places stay allowed, for the conversation or always.
 
-**Anything else asks first.** A card shows the whole command, `y` runs it, `n` tells Claude you said no. A
-command too long to show whole on a card isn't put to you at all: Claude is told to write it to a script
-(that goes through your review) and run that.
+**Anything else asks first.** A card shows the whole command (and its folder, when it's not the project
+root), `y` runs it, `n` tells Claude you said no. When the command starts with plain words that say what it is
+(`cargo xtask shot …`), `a` runs it and lets commands starting with those words run without asking for the
+rest of the conversation — the card says which words. It's never offered for a program that runs whatever
+follows it (`sh`, `env`, `python`, `xargs` …), nor for git (what of it reads runs already; what writes goes to
+`.git`, which the sandbox keeps), and never kept beyond the conversation. A command too long to
+show whole on a card isn't put to you at all: Claude is told to write it to a script (that goes through your
+review) and run that.
 
 ![Claude wants to run git commit: a card at the bottom right shows the whole command with y Run and n No, the minimized chat moved to the top right, its row on the command](screenshots/chat-run.png)
 

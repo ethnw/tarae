@@ -154,6 +154,9 @@ pub enum State {
     Failed(Option<i32>),
 }
 
+/// Places a run keeps, at most (its output keeps 5000 lines).
+const PLACES_KEPT: usize = 5000;
+
 pub struct Run {
     pub task: Task,
     pub state: State,
@@ -163,8 +166,11 @@ pub struct Run {
     pub took: Option<Duration>,
     pid: Option<u32>,
     generation: u64,
-    /// (errors, warnings) put in the list.
+    /// (errors, warnings) among its places.
     pub found: (usize, usize),
+    /// The places its output pointed at (each once, at most `PLACES_KEPT`) — Claude's report and the jump
+    /// to the first error read these; the user's list gets them only from a run that feeds it (#28).
+    pub places: Vec<Item>,
     /// An install's (`install.rs`): what goes on once it ends.
     after: Option<After>,
     /// An install run (not one `space m m` runs again).
@@ -223,6 +229,7 @@ impl Run {
             pid: None,
             generation: 0,
             found: (0, 0),
+            places: Vec::new(),
             after: None,
             install: false,
             chat: None,
@@ -317,12 +324,14 @@ impl Editor {
         self.auto_save(" · before the task");
         self.flush_saves();
         self.task_last = Some(task.clone());
-        self.task_spawn(task, None, None);
+        self.task_spawn(task, None, None, true, false);
     }
 
     /// A command Claude runs (`tools.rs`): like a task, but not the one `space m m` runs again — the call
     /// waits for its end (or, the user's run of it again, Claude hears it later); in the sandbox, unless
-    /// `guard` says otherwise. False: it didn't start (an install is running, or it couldn't spawn).
+    /// `guard` says otherwise. Its places go to the list only when it's a check or a build
+    /// (`tools::is_check`, #28) — a grep of Claude's looking around doesn't replace the user's list. False:
+    /// it didn't start (an install is running, or it couldn't spawn).
     pub(crate) fn task_start_for(
         &mut self,
         task: Task,
@@ -339,7 +348,8 @@ impl Editor {
             Some(crate::sandbox::Guard::In(p)) => Some(p),
             _ => None,
         };
-        self.task_spawn(task, None, policy);
+        let feeds = crate::tools::is_check(&task.cmd);
+        self.task_spawn(task, None, policy, feeds, true);
         match self.task_run.as_mut().filter(|_| self.task_generation != before) {
             Some(r) => {
                 match who {
@@ -361,20 +371,33 @@ impl Editor {
             return None;
         }
         let before = self.task_generation;
-        self.task_spawn(task, None, None);
+        self.task_spawn(task, None, None, true, false);
         (self.task_generation != before).then_some(self.task_generation)
     }
 
     /// An install (`install.rs`) in the task panel: not the task `space m m` runs again, and its output's
     /// places stay out of the list.
     pub(crate) fn task_start_install(&mut self, task: Task, after: After) {
-        self.task_spawn(task, Some(after), None);
+        self.task_spawn(task, Some(after), None, false, false);
     }
 
-    fn task_spawn(&mut self, task: Task, after: Option<After>, sandbox: Option<&crate::sandbox::Policy>) {
+    /// `feeds`: its places make the list (`]q`) — the run takes it over from its start. `claudes`: a
+    /// command of Claude's — without `CDPATH`, so a `cd` lands where `readonly::outside` resolved it (with
+    /// it set, `cd src` may go to another `src` on it, and the line read there unasked).
+    fn task_spawn(
+        &mut self,
+        task: Task,
+        after: Option<After>,
+        sandbox: Option<&crate::sandbox::Policy>,
+        feeds: bool,
+        claudes: bool,
+    ) {
         let install = after.is_some();
         let watched = sandbox.is_some_and(|p| p.watch.is_some());
         let mut cmd = crate::sandbox::command(sandbox, "sh", &["-c".into(), task.cmd.clone()]);
+        if claudes {
+            cmd.env_remove("CDPATH");
+        }
         cmd.current_dir(&task.cwd)
             .env("NO_COLOR", "1")
             .env("CARGO_TERM_COLOR", "never")
@@ -428,16 +451,21 @@ impl Editor {
                     r.output.drain(..n - 5000);
                 }
                 for it in places {
-                    let severity = it.severity;
-                    // Counted once it's in the list (the same place twice isn't two)
-                    if ed.qlist_push(it)
-                        && let Some(r) = ed.task_run.as_mut()
-                    {
-                        match severity {
-                            1 => r.found.0 += 1,
-                            2 => r.found.1 += 1,
-                            _ => {}
-                        }
+                    let Some(r) = ed.task_run.as_mut() else { break };
+                    // Counted once (the same place twice isn't two) — the run's own, for its report; the
+                    // user's list only from a run that feeds it (#28)
+                    let seen = |p: &Item| p.path == it.path && p.line == it.line && p.message == it.message;
+                    if r.places.iter().any(seen) || r.places.len() >= PLACES_KEPT {
+                        continue;
+                    }
+                    match it.severity {
+                        1 => r.found.0 += 1,
+                        2 => r.found.1 += 1,
+                        _ => {}
+                    }
+                    r.places.push(it.clone());
+                    if feeds {
+                        ed.qlist_push(it);
                     }
                 }
             };
@@ -502,7 +530,7 @@ impl Editor {
             let _ = tx.send(crate::event::Event::Job(Box::new(done)));
         });
         // The list is this run's from now on
-        if !install {
+        if feeds {
             self.qlist_set(task.name.clone(), Vec::new());
         }
         // The same task again: its panel starts as tall as it was (no shrink and grow back)
@@ -516,6 +544,7 @@ impl Editor {
             pid: Some(pid),
             generation,
             found: (0, 0),
+            places: Vec::new(),
             after,
             install,
             chat: None,

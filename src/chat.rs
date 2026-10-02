@@ -213,6 +213,9 @@ pub struct Chat {
     /// Claude may look at the screen without asking for the rest of this conversation (`a` on its card —
     /// `seeing.rs`).
     pub sees: bool,
+    /// Commands starting so run without asking for the rest of this conversation (`a` on a run card —
+    /// `tools::pattern`).
+    pub run_allow: Vec<String>,
     /// The screen waiting to go with the next message (`C-s`).
     pub screen: Option<Shot>,
     /// claude's session for this conversation (from its `init`) · the one the next process resumes.
@@ -250,6 +253,7 @@ impl Chat {
             allowed: Default::default(),
             reads: Default::default(),
             sees: false,
+            run_allow: Vec::new(),
             screen: None,
             session: None,
             resume: None,

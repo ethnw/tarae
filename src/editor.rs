@@ -3857,6 +3857,163 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// #27: a line of reads runs without a card — `cd`, pipes, `sh -c '…'`, a `|` inside quotes — and in the
+    /// `cwd` given; a cwd outside the project, or not there, is refused. Harmless: reads of this repo's files.
+    #[test]
+    fn lines_of_reads_and_a_cwd_run_without_a_card() {
+        use serde_json::json;
+        let mut ed = editor("");
+        let call = |ed: &mut Editor, args: serde_json::Value| {
+            let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "run", "arguments": args}});
+            crate::tools::mcp(ed, 0, "c1", &msg)
+        };
+        let ran = |ed: &mut Editor, cmd: &str| {
+            settle_for(ed, |ed| {
+                !ed.offers.is_empty()
+                    || ed
+                        .task_run
+                        .as_ref()
+                        .is_some_and(|r| r.task.cmd == cmd && r.state != crate::task::State::Running)
+            });
+            assert!(ed.offers.is_empty(), "{cmd}: no card");
+            let r = ed.task_run.as_ref().unwrap();
+            assert_eq!(r.state, crate::task::State::Passed, "{cmd}: {:?}", r.output);
+            r.task.cwd.clone()
+        };
+        for cmd in [
+            "cd src && grep -c fn readonly.rs | head -1",
+            "sh -c 'wc -l src/readonly.rs | sort -n'",
+            "grep -cE 'fn (parse|parts)' src/readonly.rs",
+        ] {
+            assert!(call(&mut ed, json!({ "command": cmd })).is_none(), "answered when it ends");
+            ran(&mut ed, cmd);
+        }
+        assert!(call(&mut ed, json!({ "command": "ls readonly.rs", "cwd": "src" })).is_none());
+        assert!(ran(&mut ed, "ls readonly.rs").ends_with("src"), "in the cwd given");
+        for (cwd, why) in [("/", "outside the project"), ("no-such-folder", "cwd no-such-folder")] {
+            let r = call(&mut ed, json!({ "command": "ls", "cwd": cwd })).expect("refused now");
+            assert!(r["result"]["isError"] == true && r.to_string().contains(why), "{r}");
+        }
+        // A cd into nothing: the shell would stay put and read `../../x` from the root — the card, not a run
+        let cmd = "cd no-such-folder; cat ../../tarae-not-there";
+        assert!(call(&mut ed, json!({ "command": cmd })).is_none());
+        settle_for(&mut ed, |ed| {
+            !ed.offers.is_empty() || ed.task_run.as_ref().is_some_and(|r| r.task.cmd == cmd)
+        });
+        assert!(ed.task_run.as_ref().is_none_or(|r| r.task.cmd != cmd), "it didn't run");
+        assert!(
+            matches!(&ed.offers[0].what, crate::offer::What::Run(r) if r.cmd == cmd && r.pattern.is_none())
+        );
+    }
+
+    /// A command of Claude's runs without `CDPATH` — a `cd` lands where the read-only check resolved it, not
+    /// in a folder of that name on `CDPATH`; the user's own task keeps their environment. (The test's own
+    /// `CDPATH` is an empty folder of its own: any other test's `cd` finds nothing there, as without it.)
+    #[test]
+    fn claudes_commands_run_without_cdpath() {
+        let dir = std::env::temp_dir().join(format!("tarae-cdpath-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // SAFETY: an empty folder of this test's own — a cd elsewhere falls back as if it weren't set
+        unsafe { std::env::set_var("CDPATH", &dir) };
+        let mut ed = editor("");
+        let task = |name: &str| crate::task::Task {
+            name: name.into(),
+            cmd: "echo \"cdpath=${CDPATH-none}\"".into(),
+            cwd: std::env::temp_dir(),
+        };
+        let printed = |ed: &mut Editor, name: &str| {
+            settle_for(ed, |ed| {
+                ed.task_run
+                    .as_ref()
+                    .is_some_and(|r| r.task.name == name && r.state != crate::task::State::Running)
+            });
+            ed.task_run.as_ref().unwrap().output.iter().map(|(_, l)| l.clone()).collect::<Vec<_>>().join("\n")
+        };
+        ed.task_start(task("mine"));
+        assert_eq!(printed(&mut ed, "mine"), format!("cdpath={}", dir.display()), "the user's: as it is");
+        assert!(ed.task_start_for(task("claudes"), crate::tools::For::User("t".into()), None));
+        assert_eq!(printed(&mut ed, "claudes"), "cdpath=none");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #27: a card's `a` lets its pattern (`tools::pattern` — here the whole `echo one two`) run without
+    /// asking for the rest of the chat: the same command the next turn has no card. The card says so.
+    #[test]
+    fn a_cards_this_chat_allows_its_pattern() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-run-pattern-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let mut ed = editor("");
+        let log = claude_calls(&mut ed, &dir, "run", &json!({ "command": "echo one two" }));
+        feed(&mut ed, "<space>lsay it<ret>");
+        settle_for(&mut ed, |ed| !ed.offers.is_empty());
+        let q = ed.offers[0].question.clone();
+        assert!(q.contains("a — also `echo one two …` unasked, this chat"), "{q}");
+        assert!(ed.offers[0].lasts() && !ed.offers[0].keeps(), "a — this chat; never for good");
+        // (`a`, as its key does once the card has been in sight)
+        ed.offer_for_chat();
+        settle_for(&mut ed, |ed| !ed.chat.as_ref().unwrap().busy());
+        assert!(tool_answer(&log).contains("exit 0"));
+        assert_eq!(ed.chat.as_ref().unwrap().run_allow, ["echo one two"]);
+        ed.chat.as_mut().unwrap().focused = true;
+        let answers = |log: &Path| std::fs::read_to_string(log).unwrap_or_default().matches("\"c7\"").count();
+        feed(&mut ed, "again<ret>");
+        settle_for(&mut ed, |ed| !ed.offers.is_empty() || answers(&log) == 2);
+        assert!(ed.offers.is_empty(), "this chat: no card");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #28: a run of Claude's that isn't a check or a build (a grep, a script) leaves the user's list as it
+    /// was — its places still reach Claude's report; a check (`make`, its recipe a stand-in that prints an
+    /// error line) takes the list over, as the user's own build would.
+    #[test]
+    fn only_claudes_checks_feed_the_users_list() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-run-list-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let lib = dir.join("lib.rs");
+        std::fs::write(&lib, "fn a() {}\nfn b() {}\n").unwrap();
+        let error = format!("{}:2:1: error: mismatched types", lib.display());
+        std::fs::write(dir.join("x.sh"), format!("echo '{error}'\n")).unwrap();
+        std::fs::write(dir.join("Makefile"), format!("all:\n\t@echo '{error}'\n")).unwrap();
+        let mut ed = editor("");
+        ed.config.llm.run_allow = vec!["sh".into(), "make".into()];
+        let mine = crate::quickfix::Item {
+            path: lib.clone(),
+            line: 0,
+            col: 0,
+            message: "mine".into(),
+            severity: 2,
+            mark: None,
+        };
+        ed.qlist_set("my build", vec![mine]);
+        let run = |ed: &mut Editor, cmd: &str| {
+            let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "run", "arguments": {"command": cmd}}});
+            assert!(crate::tools::mcp(ed, 0, "c1", &msg).is_none());
+            settle_for(ed, |ed| {
+                ed.task_run
+                    .as_ref()
+                    .is_some_and(|r| r.task.cmd == cmd && r.state != crate::task::State::Running)
+            });
+        };
+        let script = format!("sh {}", dir.join("x.sh").display());
+        run(&mut ed, &script);
+        let list = ed.qlist.as_ref().unwrap();
+        assert_eq!((list.title.as_str(), list.items.len()), ("my build", 1), "not Claude's to replace");
+        let r = ed.task_run.as_ref().unwrap();
+        assert_eq!((r.places.len(), r.found), (1, (1, 0)), "its own places, for its report");
+        let make = format!("make -s -f {}", dir.join("Makefile").display());
+        run(&mut ed, &make);
+        let list = ed.qlist.as_ref().unwrap();
+        assert_eq!(list.title, make, "a check takes it over");
+        assert!(list.items.iter().any(|i| i.message.contains("mismatched types")), "{:?}", list.items);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// A command that only reads (`ls`, `cat`, `wc`, …) runs without a card when what it names stays in
     /// the project; one naming a path outside gets the run card, which says what it reads outside — `a`
     /// runs it and lets that place be read for the rest of the conversation, so the same command in the

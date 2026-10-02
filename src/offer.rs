@@ -162,14 +162,19 @@ impl Offer {
             | What::Read { keep: true, .. }
             | What::Grant { .. }
             | What::Screen { .. } => true,
-            What::Run(r) => r.keep,
+            // (what it reads outside, or its pattern for the rest of the chat)
+            What::Run(r) => r.keep || r.pattern.is_some(),
             _ => false,
         }
     }
 
-    /// Whether `A` (always) answers it: what it allows is kept for the project.
+    /// Whether `A` (always) answers it: what it allows is kept for the project — a run card's reads, never
+    /// its pattern.
     pub fn keeps(&self) -> bool {
-        self.lasts() && matches!(self.what, What::Read { .. } | What::Run(_) | What::Grant { .. })
+        match &self.what {
+            What::Run(r) => r.keep,
+            _ => self.lasts() && matches!(self.what, What::Read { .. } | What::Grant { .. }),
+        }
     }
 
     pub fn installing(&self) -> bool {

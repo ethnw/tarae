@@ -275,20 +275,24 @@ pub fn tests_dropped(ed: &mut Editor, why: &str) {
 fn run_schema() -> Value {
     json!({
         "name": "run",
-        "description": "Run a shell command in the project root, in the user's editor, and get how it ended \
-    and its output — build, lint, format, test suites, git. The user watches it in their task panel. Both \
-    output streams come back whole (long output: its start and end), so don't redirect, pipe to head/tail or \
-    chain commands: one command per call. Checks (cargo build/check/test/clippy/fmt, go build/test/vet, git \
-    status/diff/log/show) start at once, and so do read-only ones (ls cat head tail wc grep rg find tree stat \
-    file du diff sort uniq pwd, git blame/rev-parse/ls-files/branch) whose paths stay in the project; any \
-    other command waits for the user to allow it — if they say no, don't retry it, ask. No stdin and no terminal: nothing interactive. For one test file or test, \
-    run_tests is better (it reads each failure). Commands run in a sandbox; when one can't work in it (it \
-    needs the network, or to write where the sandbox doesn't let it), you may ask to run it outside: \
-    outside_sandbox with your reason — the user decides on a card, this once.",
+        "description": "Run a shell command in the project, in the user's editor, and get how it ended and \
+    its output — build, lint, format, test suites, git. The user watches it in their task panel. Both output \
+    streams come back whole (long output: its start and end), so don't redirect or pipe to head/tail for \
+    that. Checks (cargo build/check/test/clippy/fmt, go build/test/vet, git status/diff/log/show) start at \
+    once — one command, words only (quotes are fine). So do read-only ones (ls cat head tail wc grep rg find \
+    tree stat file du diff sort uniq pwd, git blame/rev-parse/ls-files/branch) whose paths stay in the \
+    project — and lines of them joined by ; && || |, with cd, or the same in sh -c '…' (no $, backticks or \
+    redirects to files). To run somewhere other than the project root, give cwd rather than a cd. Any other \
+    command waits for the user to allow it — if they say no, don't retry it, ask. No stdin and no terminal: \
+    nothing interactive. For one test file or test, run_tests is better (it reads each failure). Commands \
+    run in a sandbox; when one can't work in it (it needs the network, or to write where the sandbox \
+    doesn't let it), you may ask to run it outside: outside_sandbox with your reason — the user decides on a \
+    card, this once.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "command": { "type": "string", "description": "The command line (run by sh -c in the project root)" },
+                "command": { "type": "string", "description": "The command line (run by sh -c)" },
+                "cwd": { "type": "string", "description": "The folder it runs in, inside the project (relative to its root); the root if left out" },
                 "outside_sandbox": { "type": "boolean", "description": "Ask the user to run it outside the sandbox, this once (with reason)" },
                 "reason": { "type": "string", "description": "Why it can't run in the sandbox — required with outside_sandbox; the user reads it" }
             },
@@ -322,37 +326,94 @@ pub const RUN_ALLOW: [&str; 13] = [
 const COMMAND_MAX: usize = 600;
 const COMMAND_LINES_MAX: usize = 12;
 
-/// Whether `cmd` runs without asking: plain words (no quoting, expansion, redirection, chaining or globs —
-/// any of those and the words don't say what runs), starting with one of the `RUN_ALLOW` or `extra`
-/// prefixes word for word, and none of the options that make a read-only command write or run something.
+/// Options that make a command that otherwise reads write a file or run a program.
+pub const WRITES: [&str; 6] = ["--output", "--ext-diff", "--textconv", "--config", "--exec", "--upload-pack"];
+
+/// Whether `cmd` runs without asking: one command and nothing else (`readonly::one_command` — quoted words
+/// are fine; expansion, redirection, chaining, globs or an assignment and the words don't say what runs),
+/// starting with one of the `RUN_ALLOW` or `extra` prefixes word for word (`extra`: `llm.run-allow`, this
+/// chat's patterns), and none of the options that make it write or run something.
 pub fn allowed(cmd: &str, extra: &[String]) -> bool {
-    let Some(words) = plain_words(cmd) else { return false };
+    let Some(words) = crate::readonly::one_command(cmd) else { return false };
+    if words.iter().any(|w| WRITES.iter().any(|o| w.starts_with(o))) {
+        return false;
+    }
     RUN_ALLOW.iter().copied().chain(extra.iter().map(String::as_str)).any(|rule| {
         let rule: Vec<&str> = rule.split_whitespace().collect();
-        !rule.is_empty() && words.starts_with(&rule)
+        !rule.is_empty() && words.len() >= rule.len() && words.iter().zip(&rule).all(|(w, r)| w == r)
     })
 }
 
-/// The command's words, if they're all it says: nothing the shell would read as more than words (quoting,
-/// expansion, redirection, chaining, globs, `~`, an assignment), and none of the options that make a
-/// read-only command write or run something. None: the words don't say what runs.
-pub fn plain_words(cmd: &str) -> Option<Vec<&str>> {
-    const SHELL: &[char] = &[
-        ';', '&', '|', '`', '$', '(', ')', '<', '>', '\\', '\'', '"', '*', '?', '[', ']', '{', '}', '#', '!',
-        '\n', '\r',
-    ];
-    const WRITES: [&str; 6] = ["--output", "--ext-diff", "--textconv", "--config", "--exec", "--upload-pack"];
-    if cmd.contains(SHELL) {
-        return None;
+/// Commands whose places are worth the user's list (`]q`): builds, tests, linters — by whole words.
+const CHECKS: [&str; 22] = [
+    "cargo build",
+    "cargo check",
+    "cargo test",
+    "cargo clippy",
+    "cargo nextest",
+    "cargo fmt",
+    "cargo perf",
+    "go build",
+    "go test",
+    "go vet",
+    "gofmt -l",
+    "make",
+    "npm test",
+    "npm run",
+    "pnpm test",
+    "pnpm run",
+    "yarn test",
+    "tsc",
+    "eslint",
+    "ruff check",
+    "mypy",
+    "pytest",
+];
+
+/// Whether a command Claude runs is a check or a build — every command in its line one of `CHECKS` (a `cd`
+/// aside). Only those feed the user's list; a grep of Claude's looking around doesn't replace it (#28).
+pub fn is_check(cmd: &str) -> bool {
+    let Some(parts) = crate::readonly::parse(cmd) else { return false };
+    let mut any = false;
+    for p in &parts {
+        let crate::readonly::Part::Cmd(w) = p else { continue };
+        let ok = CHECKS.iter().any(|c| {
+            let c: Vec<&str> = c.split(' ').collect();
+            w.len() >= c.len() && w.iter().zip(&c).all(|(w, c)| w.text == *c)
+        });
+        if !ok {
+            return false;
+        }
+        any = true;
     }
-    let words: Vec<&str> = cmd.split_whitespace().collect();
-    // (`~` only expands at a word's start: `HEAD~1` is a plain word)
-    let unsafe_word = |w: &&str| {
-        w.starts_with('~')
-            || w.contains('=') && !w.starts_with('-')
-            || WRITES.iter().any(|o| w.starts_with(o))
-    };
-    (!words.iter().any(unsafe_word)).then_some(words)
+    any
+}
+
+/// Programs that run whatever follows them — a pattern ending in one would allow anything.
+const RUNNERS: [&str; 22] = [
+    "sh", "bash", "zsh", "dash", "fish", "env", "sudo", "doas", "xargs", "nohup", "time", "nice", "exec",
+    "eval", "command", "builtin", "source", "python", "python3", "node", "ruby", "perl",
+];
+
+/// The pattern a run card can allow for the rest of the chat (`a`): the command's first plain words — no
+/// option, path, value or glob — two or three of them (`cargo xtask shot`). None for a line of several
+/// commands, one word, or a runner (`sh x.sh`, `env …`: anything could follow).
+pub fn pattern(cmd: &str) -> Option<String> {
+    let words = crate::readonly::one_command(cmd)?;
+    let lead: Vec<&str> = words
+        .iter()
+        .map(String::as_str)
+        .take_while(|w| {
+            !w.is_empty()
+                && !w.starts_with(['-', '.', '@', '+'])
+                && !w.contains(['/', '=', ':', '@', '"', '\''])
+        })
+        .take(3)
+        .collect();
+    let runner = |w: &&str| RUNNERS.contains(w) || w.starts_with("python");
+    // (git: what reads runs already; what writes goes to `.git`, which the sandbox denies)
+    let git = lead.first() == Some(&"git");
+    (lead.len() >= 2 && !lead.iter().any(runner) && !git).then(|| lead.join(" "))
 }
 
 /// Runs `command` now (allowed), or once the user says yes on its card — answered when it ends.
@@ -388,12 +449,15 @@ fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
         false => None,
     };
     run_busy(ed)?;
-    if outside.is_none() && allowed(cmd, &ed.config.llm.run_allow) {
-        guarded(ed, call, Job::Command(cmd.to_string()), false);
+    let cwd = run_cwd(args["cwd"].as_str())?;
+    let mut extra = ed.config.llm.run_allow.clone();
+    extra.extend(ed.chat.as_ref().map(|c| c.run_allow.clone()).unwrap_or_default());
+    if outside.is_none() && allowed(cmd, &extra) {
+        guarded(ed, call, Job::Command(cmd.to_string(), cwd), false);
         return Ok(());
     }
     if outside.is_none() && crate::readonly::read_only(cmd) {
-        return read_only(ed, call, cmd.to_string());
+        return read_only(ed, call, cmd.to_string(), cwd);
     }
     asked(ed)?;
     // Review at the end: a file it names that Claude wrote unseen this turn goes on the card with it —
@@ -402,9 +466,8 @@ fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
         ed.checkpoints.turn.iter().filter(|t| t.unseen).map(|t| t.path.clone()).collect();
     let cmd = cmd.to_string();
     if unseen.is_empty() {
-        return ask(ed, cmd, call, Vec::new(), outside);
+        return ask(ed, cmd, cwd, call, Vec::new(), outside);
     }
-    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     ed.events.jobs().spawn(move || {
         let shown = named(&cmd, &cwd, &unseen);
         move |ed: &mut Editor| {
@@ -413,7 +476,7 @@ fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
                 return;
             }
             let c = call.clone();
-            if let Err(e) = shown.and_then(|shown| ask(ed, cmd, call, shown, outside)) {
+            if let Err(e) = shown.and_then(|shown| ask(ed, cmd, cwd, call, shown, outside)) {
                 answer(ed, c, Err(e));
             }
         }
@@ -421,14 +484,30 @@ fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
     Ok(())
 }
 
+/// Where a command runs: the project root, or `cwd` in it (relative to the root, or absolute) — a folder
+/// that's there, inside the project (real path), so a `cd` isn't needed (#27).
+fn run_cwd(cwd: Option<&str>) -> Result<PathBuf, String> {
+    let root = std::env::current_dir().map_err(|e| e.to_string())?;
+    let Some(cwd) = cwd.map(str::trim).filter(|c| !c.is_empty() && *c != ".") else { return Ok(root) };
+    let real_root = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+    let dir = std::fs::canonicalize(root.join(cwd)).map_err(|e| format!("cwd {cwd}: {e}"))?;
+    if !dir.is_dir() {
+        return Err(format!("cwd {cwd} isn't a folder"));
+    }
+    if !dir.starts_with(&real_root) {
+        return Err(format!("cwd {cwd} is outside the project — commands run in it"));
+    }
+    Ok(dir)
+}
+
 /// A command that only reads (`readonly.rs`): where it reads is found on a worker — all of it in the
 /// project, or in places allowed, and it runs now; anything else is on its card.
-fn read_only(ed: &mut Editor, call: Call, cmd: String) -> Result<(), String> {
+fn read_only(ed: &mut Editor, call: Call, cmd: String, cwd: PathBuf) -> Result<(), String> {
     let chat = ed.chat.as_ref().map(|c| c.allowed.clone()).unwrap_or_default();
     let store = ed.allow_path.clone();
-    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let project = std::env::current_dir().map_err(|e| e.to_string())?;
     ed.events.jobs().spawn(move || {
-        let root = std::fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
+        let root = std::fs::canonicalize(&project).unwrap_or_else(|_| project.clone());
         let kept = crate::allow::Store::read(store.as_deref()).get(&root);
         let reads = crate::readonly::outside(&cmd, &cwd, &root, &chat, &kept);
         move |ed: &mut Editor| {
@@ -436,11 +515,14 @@ fn read_only(ed: &mut Editor, call: Call, cmd: String) -> Result<(), String> {
             if ed.chat.as_ref().is_some_and(|c| c.generation() != call.generation || !c.busy()) {
                 return;
             }
-            if reads.is_empty() {
-                return guarded(ed, call, Job::Command(cmd), false);
-            }
+            // (a `cd` into what isn't a folder: where the rest reads can't be told — the plain card)
+            let reads = match reads {
+                Ok(r) if r.is_empty() => return guarded(ed, call, Job::Command(cmd, cwd), false),
+                Ok(r) => r,
+                Err(_) => Vec::new(),
+            };
             let c = call.clone();
-            if let Err(e) = ask_with(ed, cmd, call, Vec::new(), reads, None) {
+            if let Err(e) = ask_with(ed, cmd, cwd, call, Vec::new(), reads, None) {
                 answer(ed, c, Err(e));
             }
         }
@@ -461,21 +543,24 @@ fn asked(ed: &Editor) -> Result<(), String> {
 fn ask(
     ed: &mut Editor,
     cmd: String,
+    cwd: PathBuf,
     call: Call,
     shown: Vec<(PathBuf, String)>,
     outside: Option<String>,
 ) -> Result<(), String> {
-    ask_with(ed, cmd, call, shown, Vec::new(), outside)
+    ask_with(ed, cmd, cwd, call, shown, Vec::new(), outside)
 }
 
 pub const OUTSIDE_RUN_TITLE: &str = "Claude wants to run — outside the sandbox";
 
 /// The card for `cmd`, saying too what it reads outside the project (`reads` — a read-only command's):
 /// those can be allowed for longer, as on a read's card, unless one of them never can. Outside the sandbox
-/// (`outside` = Claude's reason): its own title, the reason, what that means — once, never kept.
+/// (`outside` = Claude's reason): its own title, the reason, what that means — once, never kept. Its
+/// pattern (`pattern`) can be allowed for the rest of the chat with `a` — said on the card.
 fn ask_with(
     ed: &mut Editor,
     cmd: String,
+    cwd: PathBuf,
     call: Call,
     shown: Vec<(PathBuf, String)>,
     reads: Vec<PathBuf>,
@@ -483,8 +568,17 @@ fn ask_with(
 ) -> Result<(), String> {
     asked(ed)?;
     let mut question = cmd.clone();
-    // What's decided: the command, and what it reads outside (one place a line)
+    // What's decided: the command (and where it runs, when not at the root), what it reads outside (one
+    // place a line)
     let mut decided = 0..cmd.split('\n').count();
+    if let Ok(root) = std::env::current_dir()
+        && let Some(rel) =
+            std::fs::canonicalize(&root).ok().and_then(|r| cwd.strip_prefix(r).ok().map(|p| p.to_path_buf()))
+        && !rel.as_os_str().is_empty()
+    {
+        question.push_str(&format!("\n  in {}", rel.display()));
+        decided.end += 1;
+    }
     // (outside: the reason faint — Claude's own words — and what yes means in the warning color)
     let mut warning = None;
     if let Some(reason) = &outside {
@@ -507,6 +601,11 @@ fn ask_with(
     let keep = outside.is_none()
         && !reads.is_empty()
         && reads.iter().all(|p| crate::allow::keepable(p, home.as_deref()));
+    // (a command that only reads is asked for where it reads, not what it is)
+    let pattern = pattern(&cmd).filter(|_| outside.is_none() && reads.is_empty());
+    if let Some(p) = &pattern {
+        question.push_str(&format!("\n\na — also `{p} …` unasked, this chat"));
+    }
     for (path, text) in &shown {
         let text = text.replace("\r\n", "\n").replace('\t', "    ");
         question.push_str(&format!(
@@ -531,12 +630,14 @@ fn ask_with(
     };
     let card = RunCard {
         cmd,
+        cwd,
         call,
         shown,
         unprotected: unprotected.is_some(),
         reads,
         keep,
         outside: outside.is_some(),
+        pattern,
     };
     let what = crate::offer::What::Run(Box::new(card));
     let o = crate::offer::Offer::new(title, &question, "Running…", "Claude's command".into(), what);
@@ -620,8 +721,13 @@ fn run_busy(ed: &Editor) -> Result<(), String> {
     }
 }
 
-fn run_start(ed: &mut Editor, who: For, cmd: String, guard: Option<Guard>) -> Result<(), String> {
-    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+fn run_start(
+    ed: &mut Editor,
+    who: For,
+    cmd: String,
+    cwd: PathBuf,
+    guard: Option<Guard>,
+) -> Result<(), String> {
     let task = crate::task::Task { name: cmd.clone(), cmd, cwd };
     if !ed.task_start_for(task, who, guard) {
         return Err(run_busy(ed).err().unwrap_or_else(|| "couldn't start sh".into()));
@@ -691,7 +797,7 @@ pub fn with_allowed(
 /// run if one changed since — `a`/`A` too, and what it reads outside stays allowed (this chat · always);
 /// None tells Claude no. `unprotected`: the card said there's no sandbox.
 pub fn run_answer(ed: &mut Editor, id: u64, what: RunCard, scope: Option<crate::allow::Scope>) {
-    let RunCard { cmd, call, shown, unprotected, reads, keep, outside } = what;
+    let RunCard { cmd, cwd, call, shown, unprotected, reads, keep, outside, pattern } = what;
     ed.offer_finished(id, Ok(()));
     let Some(scope) = scope else {
         return answer(ed, call, Err(format!("the user chose not to run `{cmd}`")));
@@ -699,8 +805,16 @@ pub fn run_answer(ed: &mut Editor, id: u64, what: RunCard, scope: Option<crate::
     if keep {
         crate::allow::grant_reads(ed, &reads, scope);
     }
+    // `a` (or `A` where reads are kept too): its pattern for the rest of this chat — never for good
+    if let (Some(p), crate::allow::Scope::ThisChat | crate::allow::Scope::Always) = (&pattern, scope)
+        && let Some(chat) = ed.chat.as_mut()
+        && !chat.run_allow.contains(p)
+    {
+        chat.run_allow.push(p.clone());
+        ed.note(format!("`{p}` runs without asking for the rest of this chat"));
+    }
     if shown.is_empty() {
-        return run_now(ed, cmd, call, unprotected, outside);
+        return run_now(ed, cmd, cwd, call, unprotected, outside);
     }
     ed.events.jobs().spawn(move || {
         let changed =
@@ -715,24 +829,26 @@ pub fn run_answer(ed: &mut Editor, id: u64, what: RunCard, scope: Option<crate::
                      them what's there now"
                 )),
             ),
-            None => run_now(ed, cmd, call, unprotected, outside),
+            None => run_now(ed, cmd, cwd, call, unprotected, outside),
         }
     });
 }
 
-fn run_now(ed: &mut Editor, cmd: String, call: Call, unprotected: bool, outside: bool) {
+fn run_now(ed: &mut Editor, cmd: String, cwd: PathBuf, call: Call, unprotected: bool, outside: bool) {
     if let Err(e) = run_busy(ed) {
         return answer(ed, call, Err(e));
     }
     let extra = Extra { grant: None, outside };
-    guard_and_go(ed, For::Claude(call), Job::Command(cmd), unprotected, extra);
+    guard_and_go(ed, For::Claude(call), Job::Command(cmd, cwd), unprotected, extra);
 }
 
-/// A `run` card's command, its call, the files it showed, whether it said there's no sandbox, what it reads
-/// outside the project (a read-only command's), and whether that can be allowed for longer.
+/// A `run` card's command and where it runs, its call, the files it showed, whether it said there's no
+/// sandbox, what it reads outside the project (a read-only command's), whether that can be allowed for
+/// longer, and the pattern `a` allows for the rest of the chat.
 #[derive(Clone, Debug)]
 pub struct RunCard {
     pub cmd: String,
+    pub cwd: PathBuf,
     pub call: Call,
     pub shown: Vec<(PathBuf, String)>,
     pub unprotected: bool,
@@ -740,21 +856,23 @@ pub struct RunCard {
     pub keep: bool,
     /// Claude asked to run it outside the sandbox (`y` runs it so, once).
     pub outside: bool,
+    /// What `a` lets run without asking for the rest of the chat (`pattern`).
+    pub pattern: Option<String>,
 }
 
 // ── The sandbox ─────────────────────────────────────────────────────────────
 
-/// What Claude asked to run.
+/// What Claude asked to run: a command and the folder it runs in, or tests.
 #[derive(Clone, Debug)]
 pub enum Job {
-    Command(String),
+    Command(String, PathBuf),
     Tests(Box<crate::testing::Target>),
 }
 
 impl Job {
     fn label(&self) -> String {
         match self {
-            Job::Command(c) => c.clone(),
+            Job::Command(c, _) => c.clone(),
             Job::Tests(t) => format!("tests: {}", t.label),
         }
     }
@@ -841,11 +959,11 @@ pub fn guard_and_go(ed: &mut Editor, who: For, job: Job, asked: bool, extra: Ext
 
 fn go(ed: &mut Editor, who: For, job: Job, guard: Option<Guard>) {
     match job {
-        Job::Command(cmd) => {
+        Job::Command(cmd, cwd) => {
             if let Err(e) = run_busy(ed) {
                 return fail(ed, who, e);
             }
-            if let Err(e) = run_start(ed, who.clone(), cmd, guard) {
+            if let Err(e) = run_start(ed, who.clone(), cmd, cwd, guard) {
                 fail(ed, who, e);
             }
         }
@@ -914,14 +1032,14 @@ pub fn unsandboxed(ed: &Editor) -> bool {
 /// user ran again (`blocked.rs`): Claude hears how it ended with the next message.
 pub fn run_done(ed: &mut Editor) {
     let Some(r) = ed.task_run.as_mut() else { return };
+    // (its own places — the user's list has them only when it was a check, #28)
     if let Some(head) = r.tell.take() {
-        let items = ed.qlist.as_ref().filter(|l| l.title == r.task.name).map_or(&[][..], |l| &l.items[..]);
         let r = &*r;
-        let text = run_report(r, items);
+        let text = run_report(r, &r.places);
         return told(ed, head, text);
     }
     let Some(call) = r.chat.take() else { return };
-    let items = ed.qlist.as_ref().filter(|l| l.title == r.task.name).map_or(&[][..], |l| &l.items[..]);
+    let items = &r.places;
     let text = run_report(r, items);
     let first =
         items.iter().find(|i| i.severity == 1).filter(|_| r.state != crate::task::State::Passed).cloned();
@@ -1214,20 +1332,30 @@ mod tests {
         {
             assert!(ok(c), "{c}");
         }
-        for c in
-            ["cargo fmt", "cargo fmt --check", "git status", "git diff HEAD~1 -- src/tools.rs", "git log -5"]
-        {
+        for c in [
+            "cargo fmt",
+            "cargo fmt --check",
+            "git status",
+            "git diff HEAD~1 -- src/tools.rs",
+            "git log -5",
+            // Quoted words are words; a redirect to nowhere writes nothing (#27)
+            "git log --format='%h'",
+            "cargo test -- 'a b'",
+            "cargo build 2>&1",
+            "sh -c 'cargo test'",
+        ] {
             assert!(ok(c), "{c}");
         }
         for c in [
             "cargo test; rm -rf ~",
             "cargo test && git push",
             "cargo test | tail",
-            "cargo build 2>&1",
             "cargo test > out.txt",
+            "cargo test 2> err.txt",
             "cargo test $(rm x)",
             "cargo test `rm x`",
-            "git log --format='%h'",
+            "cargo test \"$HOME\"",
+            "cargo test src/*",
             "git diff --output=src/main.rs",
             "git diff --ext-diff",
             "git log --exec=x",
@@ -1248,8 +1376,74 @@ mod tests {
         }
         let extra = vec!["npm test".to_string(), " ".to_string()];
         assert!(super::allowed("npm test -- --watch=false", &extra), "an option's value is a plain word");
-        assert!(!super::allowed("npm test FOO=1", &extra), "an assignment isn't");
+        assert!(super::allowed("npm test FOO=1", &extra), "an argument with = in it is a word");
+        assert!(!super::allowed("FOO=1 npm test", &extra), "an assignment where the command goes isn't");
         assert!(!super::allowed("npm install", &extra), "an empty rule allows nothing");
+        assert!(!super::allowed("npm testx", &extra), "word for word");
+    }
+
+    /// The pattern a run card's `a` allows for the rest of the chat: a command's first plain words, two or
+    /// three — none for a runner (anything could follow it), one word, or a line of several.
+    #[test]
+    fn a_cards_pattern_for_the_chat() {
+        let p = |c: &str| super::pattern(c);
+        assert_eq!(p("cargo xtask shot /tmp/x.png '@?ready'").as_deref(), Some("cargo xtask shot"));
+        assert_eq!(p("git config --get user.name"), None, "git: reads run already, writes go to .git");
+        assert_eq!(p("npm run build:prod").as_deref(), Some("npm run"), "a value isn't part of it");
+        assert_eq!(p("echo one two three four").as_deref(), Some("echo one two"), "three at most");
+        assert_eq!(p("sh -c 'cargo bench'").as_deref(), Some("cargo bench"), "the body's, sh -c taken off");
+        for c in [
+            "sh target/sb/x.sh",
+            "bash x",
+            "env FOO=1 cargo test",
+            "python3 -m http.server",
+            "xargs rm",
+            "sudo make",
+            "time cargo build",
+            "make",
+            "rm -rf target",
+            "touch /tmp/made",
+            "ls | wc -l",
+            "cargo build; rm x",
+            "FOO=1 cargo test",
+        ] {
+            assert_eq!(p(c), None, "{c}");
+        }
+        // Allowed for the chat: the pattern, word for word
+        let chat = vec!["cargo xtask shot".to_string()];
+        assert!(super::allowed("cargo xtask shot /tmp/a.png '@?files in'", &chat));
+        assert!(!super::allowed("cargo xtask perf", &chat));
+        assert!(!super::allowed("cargo xtask shot x; rm -rf y", &chat));
+    }
+
+    /// Only checks and builds feed the user's list (#28): every command in the line one of them; Claude's
+    /// looking around (a grep, a script) doesn't.
+    #[test]
+    fn what_feeds_the_users_list() {
+        for c in [
+            "cargo build",
+            "cargo test --bin tarae -- lsp",
+            "cargo clippy --all-targets",
+            "cd sub && cargo check",
+            "sh -c 'cargo build 2>&1'",
+            "make -j4",
+            "go vet ./...",
+        ] {
+            assert!(super::is_check(c), "{c}");
+        }
+        for c in [
+            "grep -rn fn src",
+            "rg -n x",
+            "sh target/sb/x.sh",
+            "cargo xtask shot x.png",
+            "cargo build && grep -n x src/a.rs",
+            "cargo testx",
+            "cd src",
+            "",
+            "cargo build > out",
+        ] {
+            assert!(!super::is_check(c), "{c}");
+        }
     }
 
     /// The files a command names among those written unseen: read as the shell joins words (quotes and

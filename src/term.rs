@@ -5485,6 +5485,10 @@ impl OfferCard {
                     crate::offer::What::Run(ref r) if r.keep => {
                         b = vec![('y', "Run"), ('a', "This chat"), ('A', "Always"), ('n', "No")]
                     }
+                    // (its pattern for the rest of the chat — the card says which)
+                    crate::offer::What::Run(ref r) if r.pattern.is_some() => {
+                        b = vec![('y', "Run"), ('a', "This chat"), ('n', "No")]
+                    }
                     crate::offer::What::Run(_) => b = vec![('y', "Run"), ('n', "No")],
                     crate::offer::What::ReviewAtEnd => b = vec![('y', "Turn on"), ('n', "No")],
                     crate::offer::What::ProjectTrust { .. } => b = vec![('y', "Trust"), ('n', "Ignore")],

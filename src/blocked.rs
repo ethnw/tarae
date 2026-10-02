@@ -25,7 +25,7 @@ impl BlockedRun {
     /// What ran, as the cards and Claude say it.
     pub fn label(&self) -> String {
         match &self.job {
-            Job::Command(c) => c.clone(),
+            Job::Command(c, _) => c.clone(),
             Job::Tests(t) => format!("tests: {}", t.label),
         }
     }
@@ -99,7 +99,10 @@ impl Editor {
         let task = self.task_run.as_ref().and_then(|r| {
             Some((
                 r.started,
-                BlockedRun { job: Job::Command(r.task.cmd.clone()), denials: denials(r.guard.as_ref())? },
+                BlockedRun {
+                    job: Job::Command(r.task.cmd.clone(), r.task.cwd.clone()),
+                    denials: denials(r.guard.as_ref())?,
+                },
             ))
         });
         let test = self.test_run.as_ref().and_then(|r| {
