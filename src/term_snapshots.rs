@@ -771,6 +771,40 @@ fn snapshot_chat_explore() {
     s.check("chat_explore");
 }
 
+/// An answer with tables in a 60-cell chat: one that fits (aligned columns, a rule under the header), one
+/// too wide (cells wrapping in their columns, a blank line between rows) and one stacked row by row (its
+/// header names dim, not faint — they say what each value is).
+#[test]
+fn snapshot_chat_table() {
+    use crate::chat::{Msg, Role};
+    let mut s = Shot::new(150, 44);
+    s.file("src/demo.rs", DEMO_RS);
+    s.ed.config.llm.command = "sh".into();
+    s.ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+    s.keys(" l");
+    let msg = |role, text: &str| Msg {
+        role,
+        text: text.into(),
+        chip: String::new(),
+        look: None,
+        call: String::new(),
+        cache: Default::default(),
+    };
+    let answer = "Two ways to draw a cell that doesn't fit:\n\n\
+                  | 방식 | 장점 | 단점 |\n|---|---|---|\n\
+                  | 셀 안에서 줄바꿈 | 내용이 전부 보이고 열 정렬이 유지된다 | 행 높이가 들쭉날쭉해진다 |\n\
+                  | 잘라내기(`…`) | 한 행 = 한 줄, 훑어보기 좋다 | 잘린 내용은 볼 방법이 없다 |\n\n\
+                  The work, roughly:\n\n\
+                  | 부분 | 줄 수 | 비고 |\n|---|---:|:---:|\n| `markdown.rs` 표 파싱 | ~120 | **핵심** |\n\
+                  | `wrap` 배치 | ~80 | |\n| 테스트 | ~150 | 스냅샷 1 |\n\n\
+                  And a wide one, row by row:\n\n\
+                  | 설정 | 기본값 | 범위 | 설명 | 예시 | 비고 |\n|---|---|---|---|---|---|\n\
+                  | `chat.width` | `0.4` | `0.2–0.6` | 채팅 패널이 차지하는 화면 비율 | `:set chat.width 0.5` | 좁으면 전체 화면 |";
+    s.ed.chat.as_mut().unwrap().msgs =
+        vec![msg(Role::User, "표는 어떻게 그릴까?"), msg(Role::Assistant, answer), msg(Role::Note, "3.1s")];
+    s.check("chat_table");
+}
+
 /// While Claude works in follow mode the panel is minimized to a floating card (the code gets the whole
 /// width); `space l` brings it back for the turn, and without follow it stays docked.
 #[test]

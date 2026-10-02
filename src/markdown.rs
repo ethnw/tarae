@@ -1,6 +1,7 @@
 //! Markdown → colored lines (shared by hover and completion docs). The light subset language servers send:
-//! paragraphs·headings·lists·quotes·rules·code blocks (tree-sitter colored)·inline `code`·**bold**·*italic*·
-//! [links](url)·backslash escapes. Colors come from the theme at build time; wrapping happens at draw time.
+//! paragraphs·headings·lists·quotes·rules·code blocks (tree-sitter colored)·tables·inline `code`·**bold**·
+//! *italic*·[links](url)·backslash escapes. Colors come from the theme at build time; wrapping (and a table's
+//! layout) happens at draw time.
 
 use ropey::Rope;
 use tree_sitter::QueryCursor;
@@ -24,18 +25,40 @@ pub enum Line {
     },
     /// One code line — wraps under its own indentation.
     Code(Vec<Span>),
+    /// A table — every row has as many cells as the header. Laid out at wrap time (`table`).
+    Table {
+        aligns: Vec<Align>,
+        header: Vec<Vec<Span>>,
+        rows: Vec<Vec<Vec<Span>>>,
+    },
     Rule,
     Blank,
+}
+
+/// A table column's alignment (`---` · `:---:` · `---:`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Align {
+    Left,
+    Center,
+    Right,
 }
 
 impl Line {
     /// Width before wrapping (for sizing the box).
     pub fn width(&self) -> usize {
         match self {
-            Line::Text { spans, .. } | Line::Code(spans) => spans.iter().map(|s| s.text.width()).sum(),
+            Line::Text { spans, .. } | Line::Code(spans) => spans_width(spans),
+            Line::Table { header, rows, .. } => {
+                column_max(header, rows, spans_width).iter().sum::<usize>()
+                    + GAP * header.len().saturating_sub(1)
+            }
             Line::Rule | Line::Blank => 0,
         }
     }
+}
+
+fn spans_width(spans: &[Span]) -> usize {
+    spans.iter().map(|s| s.text.width()).sum()
 }
 
 /// `default_lang` = language for code blocks without one (usually the current document's language).
@@ -54,7 +77,7 @@ pub fn render(src: &str, theme: &Theme, default_lang: Option<&str>) -> Vec<Line>
             out.push(Line::Text { spans, indent });
         }
     };
-    let mut lines = src.lines();
+    let mut lines = src.lines().peekable();
     while let Some(raw) = lines.next() {
         let l = raw.trim_end();
         let t = l.trim_start();
@@ -76,6 +99,31 @@ pub fn render(src: &str, theme: &Theme, default_lang: Option<&str>) -> Vec<Line>
                 out.push(Line::Blank);
             }
             out.extend(code_lines(&code, if lang.is_empty() { default_lang } else { Some(lang) }, theme));
+            out.push(Line::Blank);
+            continue;
+        }
+        // A table: a row of cells, then a delimiter row of as many (`|---|:--:|`); it goes on while lines
+        // have a pipe. A blank line on each side, as for code blocks
+        if t.contains('|')
+            && let Some(aligns) = lines.peek().and_then(|n| delimiter(n))
+            && aligns.len() == cells(t).len()
+        {
+            flush(&mut para, &mut out);
+            lines.next();
+            let row = |l: &str, base: Style| {
+                let mut row: Vec<Vec<Span>> = cells(l).iter().map(|c| inline(c, base, theme)).collect();
+                row.resize(aligns.len(), Vec::new());
+                row
+            };
+            let header = row(t, Style { bold: true, ..Style::default() });
+            let mut rows = Vec::new();
+            while let Some(l) = lines.next_if(|l| l.contains('|')) {
+                rows.push(row(l, Style::default()));
+            }
+            if !matches!(out.last(), None | Some(Line::Blank)) {
+                out.push(Line::Blank);
+            }
+            out.push(Line::Table { aligns, header, rows });
             out.push(Line::Blank);
             continue;
         }
@@ -276,6 +324,71 @@ fn inline(text: &str, base: Style, theme: &Theme) -> Vec<Span> {
     spans
 }
 
+/// A table row's cells, split at `|` — not at an escaped one (`\|`, left for `inline` to unescape) nor at one
+/// inside backticks (Claude writes `a | b` in code; GFM would split it). The outer pipes are optional.
+fn cells(line: &str) -> Vec<String> {
+    let line = line.trim();
+    let line = line.strip_prefix('|').unwrap_or(line);
+    let line = match line.strip_suffix('|') {
+        Some(l) if !l.ends_with('\\') => l,
+        _ => line,
+    };
+    let chars: Vec<char> = line.chars().collect();
+    let run = |j: usize| chars[j..].iter().take_while(|&&c| c == '`').count();
+    let mut out = vec![String::new()];
+    // The backtick run that opened the code span we're in
+    let mut code: Option<usize> = None;
+    let mut i = 0;
+    while i < chars.len() {
+        let cell = out.last_mut().unwrap();
+        match chars[i] {
+            '`' => {
+                let n = run(i);
+                // (only a run that closes later opens one)
+                let closes = (i + n..chars.len()).any(|j| chars[j - 1] != '`' && run(j) == n);
+                code = match code {
+                    Some(o) if o == n => None,
+                    None if closes => Some(n),
+                    keep => keep,
+                };
+                cell.push_str(&"`".repeat(n));
+                i += n;
+                continue;
+            }
+            // In code nothing unescapes it later
+            '\\' if chars.get(i + 1) == Some(&'|') => {
+                cell.push_str(if code.is_some() { "|" } else { "\\|" });
+                i += 1;
+            }
+            '|' if code.is_none() => out.push(String::new()),
+            c => cell.push(c),
+        }
+        i += 1;
+    }
+    out.into_iter().map(|c| c.trim().to_string()).collect()
+}
+
+/// A table's delimiter row (`|---|:--:|--:|`) → its columns' alignment.
+fn delimiter(line: &str) -> Option<Vec<Align>> {
+    if !line.contains('|') {
+        return None;
+    }
+    cells(line)
+        .iter()
+        .map(|c| {
+            let d = c.strip_prefix(':').unwrap_or(c);
+            let d = d.strip_suffix(':').unwrap_or(d);
+            (!d.is_empty() && d.bytes().all(|b| b == b'-')).then(|| {
+                match (c.starts_with(':'), c.ends_with(':')) {
+                    (true, true) => Align::Center,
+                    (false, true) => Align::Right,
+                    _ => Align::Left,
+                }
+            })
+        })
+        .collect()
+}
+
 /// Code block → lines (same colors as the editor if that language is already loaded — loading a grammar is
 /// slow, and this runs on the main thread; usually it's the open doc's language anyway).
 pub fn code_lines(code: &str, lang: Option<&str>, theme: &Theme) -> Vec<Line> {
@@ -344,6 +457,11 @@ fn painted(data: std::sync::Arc<syntax::LangData>, code: &str) -> std::sync::Arc
 
 /// Screen lines wrapped to width. Paragraphs wrap by word; code is truncated.
 pub fn wrap(lines: &[Line], width: usize, rule: Style) -> Vec<Vec<Span>> {
+    wrap_with(lines, width, rule, rule)
+}
+
+/// `wrap`, with a stacked table's header names in `label` (a step above `rule` when the rules are faint).
+pub fn wrap_with(lines: &[Line], width: usize, rule: Style, label: Style) -> Vec<Vec<Span>> {
     let mut out = Vec::new();
     for line in lines {
         match line {
@@ -355,6 +473,9 @@ pub fn wrap(lines: &[Line], width: usize, rule: Style) -> Vec<Vec<Span>> {
                 wrap_row(spans, lead, width, &mut out);
             }
             Line::Text { spans, indent } => wrap_row(spans, *indent, width, &mut out),
+            Line::Table { aligns, header, rows } => {
+                table(aligns, header, rows, width, (rule, label), &mut out)
+            }
         }
     }
     out
@@ -375,6 +496,14 @@ fn wrap_row(spans: &[Span], indent: usize, width: usize, out: &mut Vec<Vec<Span>
         let cw = c.width().unwrap_or(0);
         // A row holding only the indent takes the char even if it overflows (else no progress)
         if w + cw > width && row.len() > indent {
+            // The word before just fits: break at this space
+            if c == ' ' {
+                out.push(group(&row));
+                row = vec![(' ', Style::default()); indent];
+                w = indent;
+                i += 1;
+                continue;
+            }
             // Break at the last space (excluding spaces inside the indent), else mid-word
             let brk = row.iter().rposition(|(x, _)| *x == ' ').filter(|&p| p >= indent.max(1));
             let rest: Vec<(char, Style)> = match brk {
@@ -407,6 +536,204 @@ fn group(cells: &[(char, Style)]) -> Vec<Span> {
         }
     }
     spans
+}
+
+/// Table columns are this many cells apart.
+const GAP: usize = 2;
+/// The narrowest a column gets: its longest word, up to this many cells (longer words break mid-word).
+const WORD_MAX: usize = 14;
+
+/// Per column, the most `f` gives over its cells (header included).
+fn column_max(header: &[Vec<Span>], rows: &[Vec<Vec<Span>>], f: impl Fn(&[Span]) -> usize) -> Vec<usize> {
+    let all = || std::iter::once(header).chain(rows.iter().map(Vec::as_slice));
+    (0..header.len()).map(|i| all().map(|r| f(&r[i])).max().unwrap_or(0)).collect()
+}
+
+fn longest_word(spans: &[Span]) -> usize {
+    let (mut best, mut cur) = (0, 0);
+    for c in spans.iter().flat_map(|s| s.text.chars()) {
+        if c == ' ' {
+            cur = 0;
+        } else {
+            cur += c.width().unwrap_or(0);
+            best = best.max(cur);
+        }
+    }
+    best
+}
+
+/// A table at `width`: columns padded to their alignment under a rule, when they fit; too wide → the narrow
+/// columns keep their width, the wide ones share the rest and wrap inside it (a blank line between rows once
+/// one takes more than a line); not even each column's longest word fits → `stacked`. `(rule, label)`: the
+/// rules' tone and a stacked row's header names'.
+fn table(
+    aligns: &[Align],
+    header: &[Vec<Span>],
+    rows: &[Vec<Vec<Span>>],
+    width: usize,
+    (rule, label): (Style, Style),
+    out: &mut Vec<Vec<Span>>,
+) {
+    let natural = column_max(header, rows, spans_width);
+    let least = column_max(header, rows, |s| longest_word(s).min(WORD_MAX));
+    let gaps = GAP * header.len().saturating_sub(1);
+    if least.iter().sum::<usize>() + gaps > width {
+        return stacked(header, rows, width, label, out);
+    }
+    let widths = share(&least, &natural, width - gaps);
+    let wrapped = |row: &[Vec<Span>]| -> Vec<Vec<Vec<Span>>> {
+        let wrap = |(cell, &w): (&Vec<Span>, &usize)| {
+            let mut lines = Vec::new();
+            wrap_row(cell, 0, w, &mut lines);
+            lines
+        };
+        row.iter().zip(&widths).map(wrap).collect()
+    };
+    let body: Vec<_> = rows.iter().map(|r| wrapped(r)).collect();
+    let tall = body.iter().any(|r| r.iter().any(|c| c.len() > 1));
+    table_row(&wrapped(header), aligns, &widths, out);
+    let mut line = Vec::new();
+    for (i, &w) in widths.iter().enumerate() {
+        if i > 0 {
+            line.push(pad(GAP));
+        }
+        line.push(Span { text: "─".repeat(w), style: rule });
+    }
+    out.push(trimmed(line));
+    for (k, r) in body.iter().enumerate() {
+        if tall && k > 0 {
+            out.push(Vec::new());
+        }
+        table_row(r, aligns, &widths, out);
+    }
+}
+
+/// Column widths summing to at most `budget`: one water level, each column held between its least and its
+/// natural width — the narrow ones whole, the wide ones level.
+fn share(least: &[usize], natural: &[usize], budget: usize) -> Vec<usize> {
+    let fill = |level: usize| -> Vec<usize> {
+        least.iter().zip(natural).map(|(&l, &n)| level.clamp(l, n.max(l))).collect()
+    };
+    let top = natural.iter().copied().max().unwrap_or(0);
+    let mut level = 0;
+    while level < top && fill(level + 1).iter().sum::<usize>() <= budget {
+        level += 1;
+    }
+    let mut widths = fill(level);
+    // The level raises every wide column at once: the few cells left go one each, left to right
+    let mut left = budget.saturating_sub(widths.iter().sum());
+    for (w, &n) in widths.iter_mut().zip(natural) {
+        if left > 0 && *w < n {
+            *w += 1;
+            left -= 1;
+        }
+    }
+    widths
+}
+
+/// One table row, its cells already wrapped → screen rows, each piece padded to its column's alignment.
+fn table_row(cells: &[Vec<Vec<Span>>], aligns: &[Align], widths: &[usize], out: &mut Vec<Vec<Span>>) {
+    let height = cells.iter().map(Vec::len).max().unwrap_or(0).max(1);
+    for j in 0..height {
+        let mut line = Vec::new();
+        for (i, cell) in cells.iter().enumerate() {
+            if i > 0 {
+                line.push(pad(GAP));
+            }
+            let piece = cell.get(j).map_or(&[][..], Vec::as_slice);
+            let room = widths[i].saturating_sub(spans_width(piece));
+            let before = match aligns[i] {
+                Align::Left => 0,
+                Align::Center => room / 2,
+                Align::Right => room,
+            };
+            line.push(pad(before));
+            line.extend(piece.iter().cloned());
+            line.push(pad(room - before));
+        }
+        out.push(trimmed(line));
+    }
+}
+
+/// Too many columns for the width: each row a small card — its first cell the title (bold), then
+/// `header  value` for the other cells that have something, the headers in `label` and the values wrapping
+/// under themselves.
+fn stacked(
+    header: &[Vec<Span>],
+    rows: &[Vec<Vec<Span>>],
+    width: usize,
+    label: Style,
+    out: &mut Vec<Vec<Span>>,
+) {
+    let label_w = header.iter().skip(1).map(|h| spans_width(h)).max().unwrap_or(0).min(width / 3);
+    let indent = 2 + label_w + GAP;
+    let bold = Style { bold: true, ..Style::default() };
+    for (k, row) in rows.iter().enumerate() {
+        if k > 0 {
+            out.push(Vec::new());
+        }
+        let title: Vec<Span> =
+            row[0].iter().map(|s| Span { text: s.text.clone(), style: s.style.patch(bold) }).collect();
+        wrap_row(&title, 0, width, out);
+        for (h, cell) in header.iter().zip(row).skip(1) {
+            if cell.iter().all(|s| s.text.trim().is_empty()) {
+                continue;
+            }
+            let name = cut(&h.iter().map(|s| s.text.as_str()).collect::<String>(), label_w);
+            let mut lines = Vec::new();
+            wrap_row(cell, 0, width.saturating_sub(indent), &mut lines);
+            for (j, mut l) in lines.into_iter().enumerate() {
+                let mut line = if j == 0 {
+                    let gap = indent - 2 - name.width();
+                    vec![pad(2), Span { text: name.clone(), style: label }, pad(gap)]
+                } else {
+                    vec![pad(indent)]
+                };
+                line.append(&mut l);
+                out.push(line);
+            }
+        }
+    }
+}
+
+fn pad(n: usize) -> Span {
+    Span { text: " ".repeat(n), style: Style::default() }
+}
+
+/// Without empty spans and trailing spaces (a row's padding).
+fn trimmed(mut line: Vec<Span>) -> Vec<Span> {
+    line.retain(|s| !s.text.is_empty());
+    while let Some(last) = line.last_mut() {
+        let keep = last.text.trim_end_matches(' ').len();
+        if keep > 0 {
+            last.text.truncate(keep);
+            break;
+        }
+        line.pop();
+    }
+    line
+}
+
+/// `s` in at most `w` cells, `…` at the end if cut.
+fn cut(s: &str, w: usize) -> String {
+    if s.width() <= w {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    let mut used = 1;
+    for c in s.chars() {
+        let cw = c.width().unwrap_or(0);
+        if used + cw > w {
+            break;
+        }
+        used += cw;
+        out.push(c);
+    }
+    if w > 0 {
+        out.truncate(out.trim_end().len());
+        out.push('…');
+    }
+    out
 }
 
 #[cfg(test)]
@@ -506,6 +833,171 @@ mod tests {
                 "Hash Eq [1, 2]"
             ]
         );
+    }
+
+    /// A word that exactly fills the row stays on it (the space after it used to push it down).
+    #[test]
+    fn a_word_that_just_fits_stays_on_its_row() {
+        let text = Line::Text {
+            spans: vec![Span { text: "aaa bbb ccc".into(), style: Style::default() }],
+            indent: 0,
+        };
+        assert_eq!(plain(&wrap(&[text], 7, Style::default())), ["aaa bbb", "ccc"]);
+    }
+
+    const FITS: &str = "| 부분 | 줄 수 | 비고 |\n|---|---:|:---:|\n| `markdown.rs` 표 파싱 | ~120 | **핵심** |\n\
+                        | `wrap` 배치 | ~80 | |\n| 테스트 | ~150 | 스냅샷 1 |";
+    const WRAPS: &str = "| 방식 | 장점 | 단점 |\n|---|---|---|\n\
+                         | 셀 안에서 줄바꿈 | 내용이 전부 보이고 열 정렬이 유지된다 | 행 높이가 들쭉날쭉해진다 |\n\
+                         | 잘라내기(`…`) | 한 행 = 한 줄, 훑어보기 좋다 | 잘린 내용은 볼 방법이 없다 |";
+    const STACKS: &str = "| 설정 | 기본값 | 범위 | 설명 | 예시 | 비고 |\n|---|---|---|---|---|---|\n\
+                          | `chat.width` | `0.4` | `0.2–0.6` | 채팅 패널이 차지하는 화면 비율 | `:set chat.width 0.5` | 좁으면 전체 화면 |\n\
+                          | `chat.follow` | `true` | `true·false` | 답이 가리키는 코드로 에디터가 따라감 | `:set chat.follow false` | |";
+
+    fn table(md: &str, width: usize) -> Vec<String> {
+        plain(&wrap(&render(md, &Theme::builtin(), None), width, Style::default()))
+    }
+
+    /// A table that fits: columns two cells apart, a rule under each, cells padded by display width (Korean is
+    /// two cells) to their column's alignment.
+    #[test]
+    fn table_fits_aligned() {
+        let rows = table(FITS, 56);
+        assert_eq!(
+            rows,
+            [
+                "부분                 줄 수    비고",
+                "───────────────────  ─────  ────────",
+                "markdown.rs 표 파싱   ~120    핵심",
+                "wrap 배치              ~80",
+                "테스트                ~150  스냅샷 1",
+            ]
+        );
+        // Right-aligned: the numbers end where the header does; centered: 핵심 two cells into its column
+        let end = |r: &str, s: &str| r[..r.find(s).unwrap() + s.len()].width();
+        for (r, s) in [(2, "~120"), (3, "~80"), (4, "~150")] {
+            assert_eq!(end(&rows[r], s), end(&rows[0], "줄 수"), "{s}");
+        }
+        assert_eq!(rows[2][..rows[2].find("핵심").unwrap()].width(), 19 + 2 + 5 + 2 + 2);
+        // A card sizes itself by the table's natural width
+        assert_eq!(render(FITS, &Theme::builtin(), None)[0].width(), 36);
+    }
+
+    #[test]
+    fn table_cells_keep_inline_styles() {
+        let t = Theme::builtin();
+        let rows = wrap(
+            &render("| **a** | b |\n|---|---|\n| `code` x | **bold** |", &t, None),
+            40,
+            Style::default(),
+        );
+        let style = |r: usize, s: &str| rows[r].iter().find(|sp| sp.text == s).map(|sp| sp.style);
+        assert!(rows[0].iter().filter(|s| !s.text.trim().is_empty()).all(|s| s.style.bold), "header is bold");
+        assert_eq!(style(2, "code"), Some(t.get("markup.raw")));
+        assert!(style(2, "bold").is_some_and(|s| s.bold));
+    }
+
+    /// Too wide: narrow columns keep their width, the wide ones share the rest; cells wrap in their column and
+    /// rows taller than one line get a blank line between them.
+    #[test]
+    fn table_wraps_long_cells() {
+        assert_eq!(
+            table(WRAPS, 56),
+            [
+                "방식              장점                단점",
+                "────────────────  ──────────────────  ──────────────────",
+                "셀 안에서 줄바꿈  내용이 전부 보이고  행 높이가",
+                "                  열 정렬이 유지된다  들쭉날쭉해진다",
+                "",
+                "잘라내기(…)       한 행 = 한 줄,      잘린 내용은 볼",
+                "                  훑어보기 좋다       방법이 없다",
+            ]
+        );
+    }
+
+    /// Columns that can't fit even at their longest words: each row a small card — the first cell its title,
+    /// the rest `header  value`, empty cells left out.
+    #[test]
+    fn table_stacks_when_columns_cant_fit() {
+        assert_eq!(
+            table(STACKS, 56),
+            [
+                "chat.width",
+                "  기본값  0.4",
+                "  범위    0.2–0.6",
+                "  설명    채팅 패널이 차지하는 화면 비율",
+                "  예시    :set chat.width 0.5",
+                "  비고    좁으면 전체 화면",
+                "",
+                "chat.follow",
+                "  기본값  true",
+                "  범위    true·false",
+                "  설명    답이 가리키는 코드로 에디터가 따라감",
+                "  예시    :set chat.follow false",
+            ]
+        );
+    }
+
+    /// A stacked row's header names say what each value is: their own tone (`label`), a step above the
+    /// rules' (`rule`), which stay as they were.
+    #[test]
+    fn stacked_labels_take_their_own_tone() {
+        let t = Theme::builtin();
+        let (rule, label) =
+            (Style { italic: true, ..Style::default() }, Style { underline: true, ..Style::default() });
+        let style = |md: &str, s: &str| {
+            let rows = wrap_with(&render(md, &t, None), 56, rule, label);
+            rows.iter().flatten().find(|sp| sp.text == s).map(|sp| sp.style)
+        };
+        assert_eq!(style(STACKS, "기본값"), Some(label));
+        assert_eq!(style(FITS, &"─".repeat(5)), Some(rule));
+        // `wrap` gives both the rule's tone
+        let rows = wrap(&render(STACKS, &t, None), 56, rule);
+        assert_eq!(rows.iter().flatten().find(|sp| sp.text == "기본값").map(|sp| sp.style), Some(rule));
+    }
+
+    #[test]
+    fn tables_stay_inside_any_width() {
+        for md in [FITS, WRAPS, STACKS] {
+            // Every body cell's text is there (header labels may be cut when stacked)
+            let want: Vec<char> = md
+                .lines()
+                .skip(2)
+                .flat_map(str::chars)
+                .filter(|c| !c.is_whitespace() && !"|`*".contains(*c))
+                .collect();
+            for w in 12..=80 {
+                let rows = table(md, w);
+                for r in &rows {
+                    assert!(r.width() <= w, "{w}: {r:?}");
+                }
+                let mut got: Vec<char> = rows.concat().chars().filter(|c| !c.is_whitespace()).collect();
+                for c in &want {
+                    let k = got
+                        .iter()
+                        .position(|g| g == c)
+                        .unwrap_or_else(|| panic!("{w}: {c:?} lost in {rows:#?}"));
+                    got.remove(k);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn table_parsing_edges() {
+        // No outer pipes; `\|` and a pipe in backticks stay in their cell; a short row gets blank cells, a long
+        // one loses the extra
+        assert_eq!(
+            table("a | b\n:-|-:\n`x|y` | p \\| q\n| 1 | 2 | 3 |\n| 4 |", 40),
+            ["a        b", "───  ─────", "x|y  p | q", "1        2", "4"]
+        );
+        // Not tables: a delimiter row of another size, no delimiter row
+        assert_eq!(table("a | b\n|---|---|---|", 40), ["a | b |---|---|---|"]);
+        assert_eq!(table("x | y\nz", 40), ["x | y z"]);
+        // It cuts off a paragraph, ends at a line without a pipe, and gets a blank line on each side
+        assert_eq!(table("intro\n| a |\n|---|\n| 1 |\nafter", 40), ["intro", "", "a", "─", "1", "", "after"]);
+        // Still streaming in: a row cut short
+        assert_eq!(table("| a | b |\n|---|---|\n| 1", 40), ["a  b", "─  ─", "1"]);
     }
 
     #[test]

@@ -5711,7 +5711,7 @@ fn draw_thought_card(
                 } else {
                     let text = crate::chat::displayed(&m.text);
                     let rendered = crate::markdown::render(text.trim(), &editor.theme, lang.as_deref());
-                    chat_markdown(&rendered, inner, faint, ui.base.bg)
+                    chat_markdown(&rendered, inner, (faint, dim), ui.base.bg)
                 };
                 while rows.last().is_some_and(|r| blank(r)) {
                     rows.pop();
@@ -6284,7 +6284,7 @@ fn draw_chat(
                 let mut cache = m.cache.borrow_mut();
                 if !matches!(&*cache, Some((len, cw, _)) if *len == m.text.len() && *cw == w) {
                     let rendered = md::render(&crate::chat::displayed(&m.text), t, lang.as_deref());
-                    *cache = Some((m.text.len(), w, chat_markdown(&rendered, w, faint, ui.base.bg)));
+                    *cache = Some((m.text.len(), w, chat_markdown(&rendered, w, (faint, dim), ui.base.bg)));
                 }
                 let body = &cache.as_ref().unwrap().2;
                 lines.extend(body.iter().cloned());
@@ -6570,11 +6570,12 @@ fn draw_chat(
 }
 
 /// Answer markdown → rows. Code blocks as a "well" of editor bg (sunk a tone inside the card) — text and
-/// code separate at a glance. Code is truncated, not wrapped (`…` at the end if cut).
+/// code separate at a glance. Code is truncated, not wrapped (`…` at the end if cut). Rules in `rule` (faint),
+/// a stacked table's header names in `label` (dim — they say what each value is).
 fn chat_markdown(
     lines: &[crate::markdown::Line],
     w: usize,
-    rule: Style,
+    (rule, label): (Style, Style),
     well: Option<crossterm::style::Color>,
 ) -> Vec<Vec<crate::markdown::Span>> {
     use crate::markdown::{self as md, Line, Span};
@@ -6605,7 +6606,7 @@ fn chat_markdown(
                 });
                 out.push(row);
             }
-            other => out.extend(md::wrap(std::slice::from_ref(other), w, rule)),
+            other => out.extend(md::wrap_with(std::slice::from_ref(other), w, rule, label)),
         }
     }
     out
@@ -6910,7 +6911,7 @@ fn thought_rows(
     editor: &Editor,
 ) -> Vec<Vec<crate::markdown::Span>> {
     let rendered = crate::markdown::render(text.trim(), &editor.theme, None);
-    chat_markdown(&rendered, w, faint, None)
+    chat_markdown(&rendered, w, (faint, dim), None)
         .into_iter()
         .map(|row| {
             row.into_iter()

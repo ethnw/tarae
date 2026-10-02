@@ -14,8 +14,8 @@
 11   9     }                                                   ▐  ◦ read   src/lib.rs  L1–40
 12  10     counts                                              ▐
 13  11 }                                                       ▐  Only main does, at src/demo.rs:15.
-14  12                                                         ▐  src/lib.rs:12 has a copy that
-15  13 fn main() {                                             ▐  splits on commas.
+14  12                                                         ▐  src/lib.rs:12 has a copy that splits
+15  13 fn main() {                                             ▐  on commas.
 16  14     let text = "the quick brown fox jumps over the lazy ▐                                  2.4s
 17         dog";                                               ▐
 18  15     let counts = word_counts(text);                     ▐

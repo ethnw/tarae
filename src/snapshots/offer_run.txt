@@ -15,8 +15,8 @@
 12  11 }
 13  12                                         ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
 14  13 fn main() {                              ▎ Claude wants to run
-15  14     let text = "the quick brown fox jump   git commit -m 'Count words: the words in the
-16  15     let counts = word_counts(text);        text, counted
+15  14     let text = "the quick brown fox jump   git commit -m 'Count words: the words in the text,
+16  15     let counts = word_counts(text);        counted
 17  16     println!("{} distinct words", counts
 18  17 }                                          Splits on whitespace, so "a  b" is two words, and
 19                                                keeps the counts in a map from word to how many
@@ -77,8 +77,8 @@
 12  ff
 13  ff
 14  ff                                          a BBBBBB BBBBB BB BBB
-15  ff                gggg ggggg ggggg ggg gggg   ddd dddddd dd dddddd dddddd ddd ddddd dd ddd
-16  ff                                            ddddd ddddddd
+15  ff                gggg ggggg ggggg ggg gggg   ddd dddddd dd dddddd dddddd ddd ddddd dd ddd ddddd
+16  ff                                            ddddddd
 17  ff              ggg gggggggg gggggg
 18  ff                                            dddddd dd ddddddddddd dd dd  dd dd ddd dddddd ddd
 19                                                ddddd ddd dddddd dd d ddd dddd dddd dd ddd dddd
