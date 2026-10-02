@@ -356,7 +356,11 @@ fn detail_rows(
         return vec![row("…".into(), None, String::new(), Target::None)];
     };
     let mut out: Vec<(usize, Line)> = Vec::new();
-    if doc.git_version == doc.version() {
+    // In a review its hunks are against the review's base, not the index — `s`/`d` would act on those
+    if doc.review_base.is_some() {
+        let note = "in the review";
+        out.push((0, Line { kind: Kind::Note, ..row(note.into(), None, String::new(), Target::None) }));
+    } else if doc.git_version == doc.version() {
         for (index, h) in doc.git_hunks.iter().enumerate() {
             // A conflict's markers are a change too — its own row says it better
             let end = h.lines.end.max(h.lines.start + 1);
@@ -576,7 +580,7 @@ impl Editor {
         if mode == Mode::Files {
             self.sidebar_list_files();
         }
-        if self.screen.edit_w.is_some_and(|w| w < MIN_EDIT_W) && self.code_review.is_none() {
+        if self.screen.edit_w.is_some_and(|w| w < MIN_EDIT_W) && !self.review_rail_up() {
             self.set_warning(format!("the panel shows from {MIN_EDIT_W} columns — the code needs the room"));
         }
         self.sidebar_sync();
@@ -897,9 +901,9 @@ fn git_key(ed: &mut Editor, key: Key, at: Option<Line>) -> bool {
     let from_code = ed.sidebar.as_mut().is_some_and(|s| std::mem::take(&mut s.from_code));
     let Code::Char(c) = key.code else { return false };
     // Right after `space g` in the code: a hunk's and a conflict's keys act there — then back to the code.
-    // Nothing of either there (a file with no changes): the tab has the keys, as if opened from it
+    // Any other key makes it the tab, which keeps the keys (#18: after `r`, `b`, `f`… the code had them
+    // again, and the next keys went there)
     let (on_hunk, on_conflict) = if from_code { ed.git_code_here() } else { (false, false) };
-    let quick = on_hunk || on_conflict;
     if (on_hunk && matches!(c, 's' | 'd')) || (on_conflict && matches!(c, 'o' | 't' | 'a')) {
         match c {
             's' => ed.git_stage_hunk(),
@@ -913,15 +917,6 @@ fn git_key(ed: &mut Editor, key: Key, at: Option<Line>) -> bool {
         }
         return true;
     }
-    let done = |ed: &mut Editor| {
-        // (a quick one from the code: the code has the keys again)
-        if quick
-            && !matches!(c, '?' | 'l' | 'h')
-            && let Some(s) = ed.sidebar.as_mut()
-        {
-            s.focus = false;
-        }
-    };
     match (c, &t, change) {
         // A hunk: stage it · its index lines back
         ('s', Some(t @ Target::Hunk { .. }), _) => {
@@ -1005,7 +1000,6 @@ fn git_key(ed: &mut Editor, key: Key, at: Option<Line>) -> bool {
         ('?', ..) => ed.git_help(),
         _ => return false,
     }
-    done(ed);
     true
 }
 
@@ -1115,6 +1109,10 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
                 ed.git_refresh();
             }
         }
+        // (in front of a review's rail: the rail back, with the keys)
+        (Code::Esc, _) if ed.code_review.as_ref().is_some_and(|r| r.behind) => {
+            crate::codereview::rail_focus(ed)
+        }
         (Code::Esc, _) => s.focus = false,
         (Code::Char('q'), false) => ed.sidebar = None,
         _ => {}
@@ -1128,4 +1126,31 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
         ed.git_reveal(&t);
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A file in a review: the git tab lists no hunks for it — they're against the review's base, not the
+    /// index, so `s`/`d` there would stage or put back the wrong lines — a note says where they are.
+    #[test]
+    fn a_reviewed_files_hunks_stay_the_reviews() {
+        let top = std::path::Path::new("/r");
+        let mut doc = crate::document::Document::from_str(1, "one\nTWO\n");
+        doc.path = Some(top.join("a.txt"));
+        doc.git_version = doc.version();
+        doc.git_hunks = vec![crate::git::Hunk {
+            kind: crate::git::HunkKind::Modified,
+            lines: 1..2,
+            removed: 1,
+            base: 1..2,
+        }];
+        let hunks = |rows: &[Line]| rows.iter().filter(|l| matches!(l.target, Target::Hunk { .. })).count();
+        assert_eq!(hunks(&detail_rows(std::slice::from_ref(&doc), top, "a.txt", 1)), 1, "against the index");
+        doc.review_base = Some(ropey::Rope::from_str("one\ntwo\n"));
+        let rows = detail_rows(std::slice::from_ref(&doc), top, "a.txt", 1);
+        assert_eq!(hunks(&rows), 0, "in a review");
+        assert!(rows.iter().any(|l| l.kind == Kind::Note && l.label == "in the review"), "{:?}", rows.len());
+    }
 }

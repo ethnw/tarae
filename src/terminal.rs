@@ -750,7 +750,11 @@ mod tests {
     fn keys_go_to_the_program_until_ctrl_backslash() {
         let (config, _) = crate::config::parse("");
         let mut ed = Editor::new(config);
-        ed.terminal_run(vec!["/bin/sh".into()], vec![("PS1".into(), "$ ".into())]);
+        // (an interactive shell keeps its history on exit — not in the user's ~/.bash_history)
+        ed.terminal_run(
+            vec!["/bin/sh".into()],
+            vec![("PS1".into(), "$ ".into()), ("HISTFILE".into(), "/dev/null".into())],
+        );
         while ed.terminal.is_none() {
             if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_secs(5)) {
                 ed.handle_event(ev);

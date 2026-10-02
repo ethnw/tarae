@@ -343,6 +343,12 @@ pub struct Editor {
     pub offer_seq: u64,
     /// The front card as drawn: (its id, its rev, since when) — `y` waits for it to settle.
     pub offer_seen: std::cell::Cell<Option<(u64, u64, std::time::Instant)>>,
+    /// The card (id, rev) last in sight whole — drawn uncut, or read to its end in its `v` buffer (a weighty
+    /// `y` waits for it).
+    pub offer_whole: std::cell::Cell<Option<(u64, u64)>>,
+    /// The card (id, rev) whose whole text `v` opened, in this buffer — seen whole once its last line has
+    /// been on screen (opening it isn't reading it: a line 50 would go unseen).
+    pub offer_view: std::cell::Cell<Option<(u64, u64, DocId)>>,
     /// Whether to show offers (off in tests — so they don't swallow y/n keys).
     pub offer_popups: bool,
     /// Diagnostic card closed with Esc on this line (doc, line) — back once the cursor leaves the line.
@@ -511,6 +517,8 @@ impl Editor {
             grammar_hinted: Default::default(),
             offers: Vec::new(),
             offer_seen: Default::default(),
+            offer_whole: Default::default(),
+            offer_view: Default::default(),
             offer_seq: 0,
             offer_popups: !cfg!(test),
             diag_card_hidden: None,
@@ -1177,8 +1185,10 @@ impl Editor {
             && let Some(&(_, _, _, k)) = s.offer_buttons.iter().find(|b| b.0 == y && (b.1..b.2).contains(&x))
         {
             match k {
+                'y' if !self.offer_seen_whole() => self.offer_see_all_first(),
                 'y' if self.offer_settled() => self.offer_accept(),
                 'y' => {}
+                'v' => self.offer_view_all(),
                 'a' if self.offer_settled() => self.offer_for_chat(),
                 'a' => {}
                 'n' => self.offer_dismiss(),
@@ -1303,7 +1313,7 @@ impl Editor {
         }
         // The side panel: a click opens that row (a folder folds or unfolds), the wheel scrolls it
         if self.sidebar.is_some()
-            && self.code_review.is_none()
+            && !self.review_rail_up()
             && x < s.panes.iter().map(|p| p.1.x).min().unwrap_or(0)
         {
             let row = s.sidebar.borrow().iter().find(|l| l.0 == y).map(|l| l.1);
@@ -3698,7 +3708,12 @@ mod tests {
         let (t, err) = text(call(&mut ed, " "));
         assert!(err && t.contains("command is required"), "{t}");
         let (t, err) = text(call(&mut ed, &"echo x ".repeat(100)));
-        assert!(err && t.contains("too long to show the user"), "{t}");
+        // (one line — trimmed — only its length is the reason)
+        assert!(err && t.contains("it's 699 characters — a card shows a command of at most 600"), "{t}");
+        assert!(!t.contains("lines"), "{t}");
+        let (t, err) = text(call(&mut ed, &"echo x\n".repeat(13)));
+        assert!(err && t.contains("it's 13 lines — a card shows a command of at most 12"), "{t}");
+        assert!(!t.contains("characters"), "{t}");
         ed.task_start(crate::task::Task {
             name: "slow".into(),
             cmd: "sleep 5".into(),
@@ -3778,7 +3793,10 @@ mod tests {
         let (mut ed, log) = start(&"echo x\n".repeat(200));
         settle_for(&mut ed, |ed| !ed.chat.as_ref().unwrap().busy());
         let answer = tool_answer(&log);
-        assert!(answer.contains("too long to show") && answer.contains("isError"), "{answer}");
+        assert!(
+            answer.contains("it has 200 lines — a card shows at most 16") && answer.contains("isError"),
+            "{answer}"
+        );
         assert!(ed.offers.is_empty() && ed.task_run.is_none());
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -5046,20 +5064,54 @@ mod tests {
         std::fs::remove_dir_all(&store).ok();
     }
 
-    /// While a review is open its rail holds the side panel's place, so the git tab isn't there: `space g`
-    /// says so, and the key after it doesn't reach the code (`d` there would delete the selected change).
+    /// While a review is open, its rail and the git tab take turns in the left column (#19 — a status line
+    /// saying the tab was behind went unseen): `space g` puts the tab in front with the keys, the review
+    /// still open (a row at its top says so, the status line which file); `space g` or Esc there gives the
+    /// column back to the rail, with the keys — no key lands in the code (`d` would delete the change).
     #[test]
-    fn space_g_in_a_review_keeps_its_key() {
+    fn space_g_in_a_review_takes_turns_with_the_rail() {
         let (mut ed, dir, _) = turn_of_three("turn-review-space-g", None);
         settle_until(&mut ed, reviewing);
+        // (the tab rooted in the test's folder, not this repository)
+        let mut sb = crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, dir.clone());
+        sb.focus = false;
+        ed.sidebar = Some(sb);
+        let screen = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 220, 30).unwrap();
+            let mut parser = vt100::Parser::new(30, 220, 0);
+            parser.process(&bytes);
+            parser.screen().contents()
+        };
         let before = text(&ed);
+        let s = screen(&mut ed);
+        assert!(s.contains("undo the whole turn") && !s.contains("review behind"), "the rail: {s}");
         feed(&mut ed, "<space>g");
-        let said = ed.toasts.last().map(|t| t.text.clone()).unwrap_or_default();
-        assert!(said.contains("space v q") && said.contains("space v u"), "{said}");
+        let s = screen(&mut ed);
+        assert!(ed.code_review.is_some() && !ed.review_rail_up(), "the review open, behind the tab");
+        assert!(ed.sidebar.as_ref().is_some_and(|s| s.focus && s.mode == crate::sidebar::Mode::Git));
+        assert!(s.contains("review behind") && s.contains("space g back to it"), "{s}");
+        assert!(!s.contains("undo the whole turn"), "the rail gave the column: {s}");
+        assert!(s.contains("review 1/3"), "the status line says which file: {s}");
+        feed(&mut ed, "jkd");
+        assert_eq!(text(&ed), before, "the keys are the tab's");
+        // `space g` again: the rail, with the keys
+        feed(&mut ed, "<space>g");
+        assert!(ed.review_rail_up() && ed.code_review.as_ref().unwrap().focus, "the rail has the keys");
+        assert!(!ed.sidebar.as_ref().unwrap().focus);
+        let s = screen(&mut ed);
+        assert!(s.contains("m viewed, on to the next") && !s.contains("review behind"), "{s}");
         feed(&mut ed, "d");
         assert_eq!(text(&ed), before, "the change is still there");
-        assert!(ed.code_review.is_some());
-        assert!(ed.sidebar.as_ref().is_none_or(|s| !s.focus), "nothing hidden has the keys");
+        // Esc in the tab: the same
+        feed(&mut ed, "<esc><space>g");
+        assert!(!ed.review_rail_up());
+        feed(&mut ed, "<esc>");
+        assert!(ed.review_rail_up() && ed.code_review.as_ref().unwrap().focus, "Esc: the rail again");
+        // The tab closed (`q`): the rail is back by itself
+        feed(&mut ed, "<esc><space>gq");
+        assert!(ed.sidebar.is_none() && ed.review_rail_up());
+        assert!(screen(&mut ed).contains("undo the whole turn"));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -5279,6 +5331,58 @@ mod tests {
     /// cursor (its file opened to its hunks) and the next key acts there (`s` stages that hunk alone), then
     /// the code has the keys again. In the panel, moving onto a hunk shows it in the editor and `d` puts
     /// the index's lines back; `z` / `Z` stash and take it back; `?` lists the keys.
+    /// `space g` from a changed line: the tab keeps the keys for moving about (`k k k` walks its rows, none
+    /// lands in the code — #18: after one, the rest went into the code); only a quick key on the change
+    /// under the cursor (`s`) gives them back.
+    #[test]
+    fn space_g_on_a_change_keeps_the_keys_for_moving() {
+        let repo = git_repo("gitmoves", &[("a.txt", "one\ntwo\nthree\nfour\nfive\n"), ("b.txt", "b\n")]);
+        std::fs::write(repo.join("b.txt"), "b\nmore\n").unwrap();
+        let file = repo.join("a.txt");
+        let mut ed = editor("");
+        ed.git_auto = true;
+        ed.open(&file).unwrap();
+        settle_until(&mut ed, |ed| ed.doc().git_base.is_some());
+        feed(&mut ed, "4ggmiwcFOUR<esc>:w<ret>");
+        ed.flush_saves();
+        settle_until(&mut ed, |ed| ed.doc().git_hunks.len() == 1);
+        let mut sb = crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, repo.clone());
+        sb.focus = false;
+        ed.sidebar = Some(sb);
+        feed(&mut ed, " g");
+        settle_until(&mut ed, |ed| ed.git_status.is_some() && ed.sidebar.as_ref().unwrap().aim.is_none());
+        let text_before = text(&ed);
+        let at = |ed: &Editor| ed.sidebar.as_ref().unwrap().selected;
+        let start = at(&ed);
+        feed(&mut ed, "k");
+        assert!(ed.sidebar.as_ref().unwrap().focus, "the tab keeps the keys after one k");
+        feed(&mut ed, "kk");
+        assert!(ed.sidebar.as_ref().unwrap().focus, "and after three");
+        assert!(at(&ed) < start, "k walked up the tab's rows: {} → {}", start, at(&ed));
+        assert_eq!(text(&ed), text_before, "no key landed in the code");
+        feed(&mut ed, "jjj");
+        assert!(ed.sidebar.as_ref().unwrap().focus);
+        // A tab key that isn't one of the quick ones (refresh) leaves it a tab — the keys stay
+        feed(&mut ed, "<esc>");
+        feed(&mut ed, " g");
+        settle_until(&mut ed, |ed| ed.sidebar.as_ref().unwrap().aim.is_none());
+        feed(&mut ed, "r");
+        assert!(ed.sidebar.as_ref().unwrap().focus, "r refreshed it and the tab still has the keys");
+        feed(&mut ed, "k");
+        assert!(ed.sidebar.as_ref().unwrap().focus);
+        assert_eq!(text(&ed), text_before);
+        // Pressed before git has answered (the tab still empty): the same
+        feed(&mut ed, "<esc>");
+        ed.git_status = None;
+        feed(&mut ed, " gk");
+        assert!(ed.sidebar.as_ref().unwrap().focus, "a k before the rows are in");
+        settle_until(&mut ed, |ed| ed.git_status.is_some() && ed.sidebar.as_ref().unwrap().aim.is_none());
+        feed(&mut ed, "kk");
+        assert!(ed.sidebar.as_ref().unwrap().focus, "and the ones after");
+        assert_eq!(text(&ed), text_before, "no key landed in the code");
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
     #[test]
     fn git_panel_hunks_like_lazygit() {
         let repo = git_repo("hub", &[("a.txt", "one\ntwo\nthree\nfour\nfive\n")]);
@@ -5884,6 +5988,94 @@ mod tests {
             y: 20,
             alt: false,
         });
+        assert!(ed.offers.is_empty());
+    }
+
+    /// A card taller than the screen is still drawn — cut to fit, its buttons in sight, a row saying how much
+    /// is left — and answerable: `y` waits until all of it has been seen (`v` opens it whole in a buffer,
+    /// and it counts once that buffer's last line has been on screen); new text on the card has to be seen
+    /// again. A card that fits takes `y` as before. (#14: an 88-line
+    /// card wasn't drawn at all, so it couldn't be answered.)
+    #[test]
+    fn a_card_taller_than_the_screen_is_cut_and_answerable() {
+        use crate::offer::{Offer, What};
+        let screen = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 120, 30).unwrap();
+            let mut parser = vt100::Parser::new(30, 120, 0);
+            parser.process(&bytes);
+            parser.screen().contents()
+        };
+        let settled = |ed: &mut Editor| {
+            let o = ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
+            ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
+        };
+        let question: String =
+            (1..=80).map(|i| format!("line {i} of what it runs")).collect::<Vec<_>>().join("\n");
+        let mut ed = editor("text\n");
+        let card = |q: &str| {
+            Offer::new(
+                "Trust this project's settings?".into(),
+                q,
+                "",
+                String::new(),
+                What::ProjectTrust { hash: 0 },
+            )
+        };
+        ed.push_offer(card(&question));
+        let s = screen(&mut ed);
+        assert!(s.contains("Trust this project's settings?") && s.contains("line 1 of what it runs"), "{s}");
+        assert!(!s.contains("line 80 of what it runs"), "cut to fit");
+        assert!(s.contains("more lines · v view all") && s.contains("y Trust"), "{s}");
+        assert!(ed.screen.offer_buttons.iter().any(|b| b.3 == 'y'), "y in sight");
+        settled(&mut ed);
+        // `y` before all of it was seen: not an answer
+        feed(&mut ed, "y");
+        assert_eq!(ed.offers.len(), 1, "y waits");
+        assert!(ed.toasts.last().is_some_and(|t| t.text.contains("see all of it first")));
+        // `v`: all of it in a buffer — opened isn't read: `y` still waits until its end has been on screen
+        feed(&mut ed, "v");
+        assert!(text(&ed).contains("line 80 of what it runs") && text(&ed).starts_with("Trust this project"));
+        assert_eq!(ed.mode, Mode::Normal, "v didn't start a selection");
+        let s = screen(&mut ed);
+        assert!(!s.contains("line 80 of what it runs"), "its end is below the screen");
+        assert!(s.contains("more lines · v view all · G to the end"), "the card says how to get there: {s}");
+        feed(&mut ed, "y");
+        assert_eq!(ed.offers.len(), 1, "y waits while the end is unseen");
+        assert!(ed.toasts.last().is_some_and(|t| t.text.contains("read it to its end")));
+        // Scrolled to the end: seen — the card says so in that same frame, and `y` answers
+        feed(&mut ed, "G");
+        let s = screen(&mut ed);
+        assert!(s.contains("line 80 of what it runs"), "{s}");
+        assert!(s.contains("more lines · seen in full — y answers"), "the card says y counts now: {s}");
+        feed(&mut ed, "y");
+        assert!(ed.offers.is_empty(), "answered once seen whole");
+        // New text on the card: seen again first (a click on y waits as well)
+        ed.push_offer(card(&question));
+        screen(&mut ed);
+        settled(&mut ed);
+        ed.push_offer(card(&format!("{question}\nline 81, new")));
+        screen(&mut ed);
+        settled(&mut ed);
+        let click = |ed: &mut Editor, k: char| {
+            let (row, x0, _, _) = *ed.screen.offer_buttons.iter().find(|b| b.3 == k).unwrap();
+            let (x, y) = (x0 as u16, row as u16);
+            ed.handle_mouse(crate::event::Mouse { kind: crate::event::MouseKind::Down, x, y, alt: false });
+        };
+        click(&mut ed, 'y');
+        assert_eq!(ed.offers.len(), 1, "a click on y waits too");
+        click(&mut ed, 'v');
+        assert!(text(&ed).contains("line 81, new"), "a click on its last row views it");
+        screen(&mut ed);
+        click(&mut ed, 'y');
+        assert_eq!(ed.offers.len(), 1, "opened by a click isn't read either");
+        feed(&mut ed, "n");
+        assert!(ed.offers.is_empty(), "n answers it unseen");
+        // One that fits: y at once, and v is the code's (select mode)
+        ed.push_offer(card("a = \"b\""));
+        screen(&mut ed);
+        settled(&mut ed);
+        feed(&mut ed, "y");
         assert!(ed.offers.is_empty());
     }
 

@@ -321,6 +321,7 @@ mod tests {
         ed.screen.offer_buttons = vec![(20, 50, 59, 'y'), (20, 62, 71, 'n'), (20, 74, 81, 'N')];
         // Just drawn: a y typed a moment ago (meant for the code) is swallowed, not an answer
         let o = (ed.offers[0].id, ed.offers[0].rev);
+        ed.offer_whole.set(Some(o)); // (drawn uncut)
         ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now())));
         assert!(ed.offer_key(y));
         assert!(!ed.offers[0].installing());

@@ -168,6 +168,21 @@ impl crate::editor::Editor {
             if !self.offer_settled() && matches!(key.code, Code::Char('y' | 'n' | 'N' | 'a') | Code::Esc) {
                 return true;
             }
+            // Cut to fit the screen: `v` shows it all, and `y` waits for that (not taken otherwise — it's
+            // select mode in the code)
+            if !self.offer_seen_whole() {
+                match key.code {
+                    Code::Char('v') => {
+                        self.offer_view_all();
+                        return true;
+                    }
+                    Code::Char('y' | 'a') => {
+                        self.offer_see_all_first();
+                        return true;
+                    }
+                    _ => {}
+                }
+            }
         }
         match key.code {
             Code::Char('y') => self.offer_accept(),
@@ -217,6 +232,48 @@ impl crate::editor::Editor {
             }
             What::ProjectTrust { hash } => self.project_trust_answer(id, hash, true),
         }
+    }
+
+    /// Whether the front card has been in sight whole — drawn uncut, or opened with `v` — as it is now.
+    pub fn offer_seen_whole(&self) -> bool {
+        self.offers.first().is_some_and(|o| self.offer_whole.get() == Some((o.id, o.rev)))
+    }
+
+    /// `y` on a card cut to fit: not an answer yet.
+    pub fn offer_see_all_first(&mut self) {
+        self.set_status(match self.offer_viewing() {
+            true => "read it to its end first — G in its buffer",
+            false => "see all of it first — v shows the whole card",
+        });
+    }
+
+    /// Whether the front card's whole text is open (`v`), not yet read to its end.
+    pub fn offer_viewing(&self) -> bool {
+        self.offers
+            .first()
+            .is_some_and(|o| self.offer_view.get().is_some_and(|v| (v.0, v.1) == (o.id, o.rev)))
+    }
+
+    /// `v` on a card cut to fit — its whole text in a throwaway buffer (one per card title: an earlier one
+    /// gives way), and the card stays to answer.
+    pub fn offer_view_all(&mut self) {
+        let Some(o) = self.offers.first() else { return };
+        let (id, rev, title) = (o.id, o.rev, o.title.clone());
+        let text = format!("{title}\n\n{}\n", o.question);
+        let name = format!("card · {title}");
+        let old: Vec<_> = self
+            .docs
+            .iter()
+            .filter(|d| d.throwaway && d.title.as_deref() == Some(&name))
+            .map(|d| d.id)
+            .collect();
+        for d in old {
+            self.close_doc(d);
+        }
+        let doc = self.open_virtual(&name, &text);
+        // (seen whole once its last line has been on screen — `term::render_frame` looks)
+        self.offer_view.set(Some((id, rev, doc)));
+        self.set_status("the card's whole text — G to its end, then y answers");
     }
 
     /// `a` on the no-sandbox card: Claude's command runs, and the rest of this conversation's too.

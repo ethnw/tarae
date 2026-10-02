@@ -273,11 +273,17 @@ pub fn render(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io::
 fn render_frame(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io::Result<()> {
     let lay = Layout::new(editor, w, h);
     let ui = Ui::new(editor);
-    let offer = OfferCard::new(editor, &lay, &ui);
+    let mut offer = OfferCard::new(editor, &lay, &ui);
     // The front card in sight since when (a new one, or new text, starts it over)
     let front = offer.as_ref().and(editor.offers.first()).map(|o| (o.id, o.rev));
     if front != editor.offer_seen.get().map(|(id, rev, _)| (id, rev)) {
         editor.offer_seen.set(front.map(|(id, rev)| (id, rev, std::time::Instant::now())));
+    }
+    // Drawn whole: all of it has been in sight (a cut one is only once `v` showed it)
+    if offer.as_ref().is_some_and(|c| c.cut == 0)
+        && let Some(f) = front
+    {
+        editor.offer_whole.set(Some(f));
     }
     // With split windows, scroll/viewport follow the focused pane
     let focus_lay = panes(editor, &lay).into_iter().find(|p| p.6).map_or_else(|| lay.clone(), |p| p.2);
@@ -327,13 +333,14 @@ fn render_frame(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io
         t.resize((lay.debug_h - 1) as u16, lay.edit_w.saturating_sub(2) as u16);
     }
     if lay.rail_w > 0
-        && editor.code_review.is_none()
+        && !editor.review_rail_up()
         && let Some(sb) = editor.sidebar.as_mut()
     {
         let depths: Vec<usize> = sb.lines().iter().map(|l| l.depth).collect();
         sb.fit(sidebar_list_rows(&lay), &depths);
     }
     if lay.rail_w > 0
+        && editor.review_rail_up()
         && let Some(marked) = editor.code_review.as_ref().map(|r| r.marked(editor))
         && let Some(r) = editor.code_review.as_mut()
     {
@@ -371,7 +378,29 @@ fn render_frame(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io
         }
     }
     editor.screen.panes = screen_panes;
+    // A cut card's whole text (`v`) counts as seen once its buffer's last line is on screen
+    if let Some((id, rev, doc)) = editor.offer_view.get()
+        && editor.offer_viewing()
+        && !editor.offer_seen_whole()
+        && offer_text_read(editor, doc)
+    {
+        editor.offer_whole.set(Some((id, rev)));
+        // (this frame's card already says so)
+        offer = OfferCard::new(editor, &lay, &ui);
+        editor.screen.offer_buttons = offer.as_ref().map(|c| c.buttons.clone()).unwrap_or_default();
+    }
     draw(editor, &lay, &ui, review_rows.as_deref(), offer.as_ref(), out)
+}
+
+/// Whether a pane shows document `doc`'s last line (its last non-empty one, past a final newline).
+fn offer_text_read(editor: &Editor, doc: crate::document::DocId) -> bool {
+    let Some(d) = editor.docs.iter().find(|d| d.id == doc) else { return false };
+    let lines = d.text.len_lines();
+    let last = lines.saturating_sub(if lines > 1 && d.text.line(lines - 1).len_bytes() == 0 { 2 } else { 1 });
+    editor.screen.panes.iter().any(|(view, _, _, rows)| {
+        editor.views.iter().find(|v| v.id == *view).is_some_and(|v| v.doc == doc)
+            && rows.iter().any(|r| r.0 >= last)
+    })
 }
 
 #[derive(Clone)]
@@ -425,7 +454,7 @@ impl Layout {
         let edit_w = w as usize - chat_w;
         // The review's file rail when there's room for it and the code (else the header says where you are)
         // …or the side panel (files / outline) — folded away when the code would get too narrow
-        let review = editor.code_review.is_some();
+        let review = editor.review_rail_up();
         // Wider on a wide terminal (names need the room) — as long as the code keeps 100 columns; it only
         // changes with the terminal, never while you move in it
         let rail_w = if (review && edit_w >= 90)
@@ -1927,7 +1956,7 @@ fn draw(
         }
         None => draw_panes(editor, ui, lay, out)?,
     };
-    if let Some(r) = &editor.code_review
+    if let Some(r) = editor.code_review.as_ref().filter(|_| editor.review_rail_up())
         && lay.rail_w > 0
         && !editor.review.as_ref().is_some_and(|r| r.ready)
         && !editor.welcome()
@@ -1935,7 +1964,7 @@ fn draw(
         draw_review_rail(r, editor, ui, lay, out)?;
     } else if let Some(sb) = &editor.sidebar
         && lay.rail_w > 0
-        && editor.code_review.is_none()
+        && !editor.review_rail_up()
         && !editor.review.as_ref().is_some_and(|r| r.ready)
     {
         draw_sidebar(sb, editor, ui, lay, out)?;
@@ -4440,7 +4469,7 @@ fn draw_header(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> 
         left.push(Seg { text: " ●".into(), style: ui.base.patch(ui.accent), keep: 245 });
     }
     // A review with no room for its rail (the chat beside it, a phone): which of its files this is
-    if let Some(r) = editor.code_review.as_ref().filter(|_| lay.rail_w == 0)
+    if let Some(r) = editor.code_review.as_ref().filter(|_| lay.rail_w == 0 || !editor.review_rail_up())
         && let Some(i) = r.current(editor)
     {
         let n = r.files.len();
@@ -5242,6 +5271,8 @@ struct OfferCard {
     busy: bool,
     /// Cards stacked behind (nearest first): (depth 1.., title, start time if downloading, failed?).
     peeks: Vec<(usize, String, Option<std::time::Instant>, bool)>,
+    /// Lines left out for want of room (0: shown whole).
+    cut: usize,
 }
 
 /// How many cells a back card is inset on each side relative to the one in front.
@@ -5295,14 +5326,9 @@ impl OfferCard {
                     }
                     _ => {}
                 }
-                // A command is shown whole (`tools::COMMAND_MAX`, `trust::SHOWN_MAX` keep it to a card's height)
-                let whole = matches!(
-                    o.what,
-                    crate::offer::What::Run { .. }
-                        | crate::offer::What::ProjectTrust { .. }
-                        | crate::offer::What::NoSandbox { .. }
-                );
-                let most = if whole { 24 } else { 4 };
+                // One that runs something is shown whole — cut to the room below if it must be, with `v`
+                // to see all of it (and `y` waits for that)
+                let most = if o.weighty() { usize::MAX } else { 4 };
                 let mut v = vec![(title, false)];
                 for part in o.question.split('\n') {
                     v.extend(wrapped(part, most));
@@ -5324,6 +5350,26 @@ impl OfferCard {
         }
         let labels = labels.unwrap_or_default();
         let has_buttons = !labels.is_empty();
+        // Taller than the room: the body cut to fit, its last row saying how much is left (`v` views it all);
+        // the buttons stay (#14: an 88-line card wasn't drawn at all, so it couldn't be answered)
+        let room = lay.text_rows.saturating_sub(if has_buttons { 2 } else { 0 } + 2 * pad + 1);
+        let mut cut = 0;
+        if lines.len() > room {
+            if room < 3 {
+                return None;
+            }
+            cut = lines.len() - (room - 1);
+            lines.truncate(room - 1);
+            // (once its `v` buffer has been read to the end, it says so — `y` answers now)
+            let then = if editor.offer_seen_whole() {
+                "seen in full — y answers"
+            } else if editor.offer_viewing() {
+                "v view all · G to the end"
+            } else {
+                "v view all"
+            };
+            lines.push((format!("↓ {cut} more lines · {then}"), true));
+        }
         // Button row: "y Install   n Not now" — each "k label", three spaces between
         let btn_w =
             labels.iter().map(|(_, l)| 2 + l.width()).sum::<usize>() + 3 * labels.len().saturating_sub(1);
@@ -5377,9 +5423,13 @@ impl OfferCard {
             let px = x + PEEK_INSET * k;
             buttons.push((y - k, px, px + width - 2 * PEEK_INSET * k, char::from(b'0' + *k as u8)));
         }
+        if cut > 0 {
+            // (its "more lines" row: a click views it all)
+            buttons.push((y + pad + lines.len() - 1, x + 3, x + width - 2, 'v'));
+        }
         let failed = matches!(o.state, OfferState::Failed(_));
         let busy = o.installing();
-        Some(Self { x, y, inner, lines, buttons_row, buttons, labels, pad, failed, badge, busy, peeks })
+        Some(Self { x, y, inner, lines, buttons_row, buttons, labels, pad, failed, badge, busy, peeks, cut })
     }
 
     /// Where it sits, back cards included — the notification card keeps out of it.
@@ -5999,6 +6049,17 @@ fn draw_sidebar(
     } else {
         [h(&[("space e", "files")]), h(&[("space o", "outline")])]
     };
+    // In front of a review's rail (drawn here = the rail gave the column): it's still open, and how back
+    // (under the tabs' names, in the accent — that it's still open is what went unseen, #19)
+    let behind = match editor.code_review.is_some() {
+        true => {
+            let back = if w >= "  review behind  space g back to it".len() { "back to it" } else { "back" };
+            let says = Style { fg: ui.accent.fg, ..card };
+            [vec![sp("  ", card), sp("review behind", says), sp("  ", card)], h(&[("space g", back)])]
+                .concat()
+        }
+        false => Vec::new(),
+    };
     let empty = if lines.is_empty() {
         let note = crate::markdown::Line::Text { spans: vec![sp(sb.empty_note(editor), faint)], indent: 0 };
         crate::markdown::wrap(&[note], w, faint)
@@ -6015,6 +6076,7 @@ fn draw_sidebar(
         let list = k.checked_sub(2).filter(|&i| i < list_rows);
         let used = match (k, list) {
             (0, _) => chat_spans(out, &head, card, w)?,
+            (1, _) if !behind.is_empty() => chat_spans(out, &behind, card, w)?,
             (_, Some(i)) => match shown.get(i).map(|&r| (r, &lines[r])) {
                 Some((r, l)) => {
                     let row = crate::picker::Row {

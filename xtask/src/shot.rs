@@ -113,16 +113,8 @@ fn drive(vt: &mut Vt, keys: &[String], state: &Path, cols: u16, rows: u16) -> Re
     }
     let stdio = || slave.try_clone().map(Stdio::from).map_err(|e| e.to_string());
     let mut cmd = Command::new(&bin);
-    cmd.args(files.split_whitespace())
-        .current_dir(cwd)
-        .env("TERM", "xterm-256color")
-        .env("COLORTERM", "truecolor")
-        .env("TARAE_UNDERCURL", "0")
-        .env("XDG_CONFIG_HOME", config)
-        .env("XDG_STATE_HOME", state)
-        .stdin(stdio()?)
-        .stdout(stdio()?)
-        .stderr(stdio()?);
+    cmd.args(files.split_whitespace()).current_dir(cwd);
+    as_a_terminal(&mut cmd, &config, state).stdin(stdio()?).stdout(stdio()?).stderr(stdio()?);
     // SAFETY: only async-signal-safe calls between fork and exec.
     unsafe {
         cmd.pre_exec(|| {
@@ -176,6 +168,18 @@ fn drive(vt: &mut Vt, keys: &[String], state: &Path, cols: u16, rows: u16) -> Re
     pump(vt, 0.6);
     quit(&mut master, &mut child, &rx);
     Ok(())
+}
+
+/// tarae's environment in the shot: a color terminal, its own config and state. An inherited `NO_COLOR`
+/// goes — it's meant for the output of whatever runs it (a task panel sets it), and the shot renders tarae
+/// itself: with it, every shot taken from a panel came out gray.
+fn as_a_terminal<'c>(cmd: &'c mut Command, config: &std::ffi::OsStr, state: &Path) -> &'c mut Command {
+    cmd.env("TERM", "xterm-256color")
+        .env("COLORTERM", "truecolor")
+        .env("TARAE_UNDERCURL", "0")
+        .env("XDG_CONFIG_HOME", config)
+        .env("XDG_STATE_HOME", state)
+        .env_remove("NO_COLOR")
 }
 
 /// `:q!`, then a kill if tarae is still there a second later. Esc goes out alone — `ESC :` in one read is Alt-:.
@@ -503,6 +507,18 @@ mod tests {
         assert_eq!(vt.parser.screen().contents(), "ab");
         vt.feed(b"\x1b[?2026l");
         assert_eq!(vt.parser.screen().contents(), "abcd");
+    }
+
+    /// A shot taken where `NO_COLOR=1` is set (a task panel) is still in color: tarae doesn't see it. (A
+    /// stand-in prints what it was given; the variable set the way an inherited one would be.)
+    #[test]
+    fn an_inherited_no_color_doesnt_reach_tarae() {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", r#"printf '%s|%s' "${NO_COLOR-unset}" "$TERM""#]).env("NO_COLOR", "1");
+        let out = as_a_terminal(&mut cmd, "/nonexistent-config".as_ref(), Path::new("/nonexistent-state"))
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "unset|xterm-256color");
     }
 
     #[test]

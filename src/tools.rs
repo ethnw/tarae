@@ -327,12 +327,19 @@ pub fn allowed(cmd: &str, extra: &[String]) -> bool {
 fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
     let cmd =
         args["command"].as_str().map(str::trim).filter(|c| !c.is_empty()).ok_or("command is required")?;
-    if cmd.len() > COMMAND_MAX || cmd.lines().count() > COMMAND_LINES_MAX {
+    // Said as what was crossed, not every limit at once ("3 lines; at most 12" read as the reason)
+    let (chars, lines) = (cmd.chars().count(), cmd.lines().count());
+    let mut crossed = Vec::new();
+    if chars > COMMAND_MAX {
+        crossed.push(format!("it's {chars} characters — a card shows a command of at most {COMMAND_MAX}"));
+    }
+    if lines > COMMAND_LINES_MAX {
+        crossed.push(format!("it's {lines} lines — a card shows a command of at most {COMMAND_LINES_MAX}"));
+    }
+    if !crossed.is_empty() {
         return Err(format!(
-            "too long to show the user ({} characters, {} lines; at most {COMMAND_MAX} and \
-             {COMMAND_LINES_MAX}) — put it in a script with Write, then run that",
-            cmd.len(),
-            cmd.lines().count()
+            "too long to put to the user: {} — put it in a script with Write, then run that",
+            crossed.join(", and ")
         ));
     }
     run_busy(ed)?;
@@ -432,12 +439,24 @@ fn showable(path: &std::path::Path) -> Result<String, String> {
     let unseen = format!("{shown} was written this turn without the user seeing it, and");
     let bytes = std::fs::read(path).map_err(|e| format!("{shown}: {e}"))?;
     let text = String::from_utf8(bytes).map_err(|_| format!("{unseen} it isn't text the card can show"))?;
+    // Said as what was crossed: too many lines, or one line too long (which one) — not both limits at once
     let lines = text.lines().count();
-    if lines > SHOWN_LINES_MAX || text.lines().any(|l| l.chars().count() > SHOWN_LINE_MAX) {
+    let mut crossed = Vec::new();
+    if lines > SHOWN_LINES_MAX {
+        crossed.push(format!("it has {lines} lines — a card shows at most {SHOWN_LINES_MAX}"));
+    }
+    if let Some((i, l)) = text.lines().enumerate().find(|(_, l)| l.chars().count() > SHOWN_LINE_MAX) {
+        crossed.push(format!(
+            "its line {} is {} characters — a card shows lines of at most {SHOWN_LINE_MAX}",
+            i + 1,
+            l.chars().count()
+        ));
+    }
+    if !crossed.is_empty() {
         return Err(format!(
-            "{unseen} it's too long to show them on the card ({lines} lines; at most {SHOWN_LINES_MAX}, each \
-             at most {SHOWN_LINE_MAX} characters) — the user reviews it when your turn ends: run it after \
-             that, or keep the script short"
+            "{unseen} it's too long to show them on the card: {} — they review it when your turn ends: run it \
+             after that, or keep the script within what a card shows",
+            crossed.join(", and ")
         ));
     }
     let hidden = |c: char| {
@@ -1008,10 +1027,22 @@ mod tests {
         assert!(e.contains("can't show"), "{e}");
         std::fs::write(&x, "echo x\r\n").unwrap();
         assert_eq!(names("sh x.sh"), vec![x.clone()], "CRLF is fine");
+        // The limit it crossed, not every limit: too many lines · one line too long (#15: a 12-line script
+        // with a long line was told "12 lines; at most 16")
         std::fs::write(&x, "a\n".repeat(super::SHOWN_LINES_MAX + 1)).unwrap();
-        assert!(super::named("sh x.sh", &dir, &unseen).unwrap_err().contains("too long to show"));
-        std::fs::write(&x, "a".repeat(super::SHOWN_LINE_MAX + 1)).unwrap();
-        assert!(super::named("sh x.sh", &dir, &unseen).unwrap_err().contains("too long to show"));
+        let e = super::named("sh x.sh", &dir, &unseen).unwrap_err();
+        assert!(
+            e.contains("too long to show") && e.contains("it has 17 lines — a card shows at most 16"),
+            "{e}"
+        );
+        assert!(!e.contains("characters"), "{e}");
+        std::fs::write(&x, format!("echo a\n{}\necho b\n", "a".repeat(super::SHOWN_LINE_MAX + 1))).unwrap();
+        let e = super::named("sh x.sh", &dir, &unseen).unwrap_err();
+        assert!(e.contains("its line 2 is 161 characters — a card shows lines of at most 160"), "{e}");
+        assert!(!e.contains("lines —"), "3 lines isn't the reason: {e}");
+        std::fs::write(&x, format!("{}{}\n", "a\n".repeat(20), "a".repeat(200))).unwrap();
+        let e = super::named("sh x.sh", &dir, &unseen).unwrap_err();
+        assert!(e.contains("21 lines") && e.contains(", and its line 21 is 200 characters"), "both: {e}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

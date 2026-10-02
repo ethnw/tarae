@@ -200,19 +200,22 @@ impl Editor {
     }
 
     /// `space g` — the side panel's git tab, with the keys; from the code, on the row for what's under the
-    /// cursor (its hunk or conflict — the file opened to them — else its file). Again: closed.
+    /// cursor (its hunk or conflict — the file opened to them — else its file). Again: closed. During a
+    /// review the tab and the review's rail take turns in the column: again = the rail back, with the keys
+    /// (so the next one doesn't land in the code — `d` there would delete the selected change).
     pub fn git_panel(&mut self) {
-        // A review's rail holds the tab's place: the rail takes the keys (as with `space e`), so the next
-        // one doesn't land in the code — `d` there would delete the selected change
-        if self.code_review.as_ref().is_some_and(|r| !r.focus) {
-            crate::codereview::rail_focus(self);
+        if self.code_review.is_some() && !self.review_rail_up() {
+            return crate::codereview::rail_focus(self);
         }
-        if self.code_review.is_some() {
-            return self.set_status(
-                "the git tab is behind the review — space v q ends it · space v u takes a change back",
-            );
-        }
-        if self.sidebar.as_ref().is_some_and(|s| s.mode == crate::sidebar::Mode::Git && s.focus) {
+        let review = self.code_review.is_some();
+        if let Some(r) = self.code_review.as_mut() {
+            r.behind = true;
+            r.focus = false;
+            // (a tab focused behind the rail would close instead of coming to the front)
+            if let Some(s) = self.sidebar.as_mut() {
+                s.focus = false;
+            }
+        } else if self.sidebar.as_ref().is_some_and(|s| s.mode == crate::sidebar::Mode::Git && s.focus) {
             self.sidebar = None;
             return;
         }
@@ -220,7 +223,8 @@ impl Editor {
         self.sidebar_show(crate::sidebar::Mode::Git);
         if let Some(s) = self.sidebar.as_mut() {
             s.aim = aim;
-            s.from_code = true;
+            // (no quick `s`/`d` on the change under the cursor in a review: it's against the review's base)
+            s.from_code = !review;
         }
         self.git_refresh();
     }

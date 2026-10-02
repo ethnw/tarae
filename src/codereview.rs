@@ -79,6 +79,9 @@ pub struct CodeReview {
     /// The rail's first file row shown (the wheel moves it) · the file it last scrolled to (`fit`).
     pub scroll: usize,
     shown: Option<usize>,
+    /// The git tab is in front of the rail (`space g` during a review; `space g`/Esc there gives the
+    /// column back — `Editor::review_rail_up`).
+    pub behind: bool,
 }
 
 impl CodeReview {
@@ -96,6 +99,7 @@ impl CodeReview {
             selected: 0,
             scroll: 0,
             shown: None,
+            behind: false,
         }
     }
 
@@ -330,6 +334,7 @@ fn open(ed: &mut Editor, root: PathBuf, base: Base, mut files: Vec<File>) {
         selected: 0,
         scroll: 0,
         shown: None,
+        behind: false,
     });
     let s = if n == 1 { "" } else { "s" };
     ed.set_status(match turn {
@@ -603,10 +608,19 @@ pub fn toggle_viewed(ed: &mut Editor) {
 
 // ── The rail's keys ───────────────────────────────────────────────────────────
 
-/// `space e` during a review: the keys to the rail (on the file being read), or back to the code.
+/// `space e` during a review: the keys to the rail (on the file being read), or back to the code. With the
+/// git tab in front: the rail back in its place, with the keys.
 pub fn rail_focus(ed: &mut Editor) {
     let current = ed.code_review.as_ref().and_then(|r| r.current(ed));
+    let up = ed.review_rail_up();
     let Some(r) = ed.code_review.as_mut() else { return };
+    if !up {
+        r.behind = false;
+        r.focus = false;
+        if let Some(s) = ed.sidebar.as_mut() {
+            s.focus = false;
+        }
+    }
     r.focus = !r.focus;
     if r.focus {
         r.selected = current.or_else(|| r.rail_order().first().copied()).unwrap_or(0);
@@ -618,6 +632,9 @@ pub fn rail_focus(ed: &mut Editor) {
 /// rail's.
 pub fn rail_key(ed: &mut Editor, key: Key) -> bool {
     if ed.mode != crate::editor::Mode::Normal || !ed.pending.is_empty() || ed.prompt.is_some() {
+        return false;
+    }
+    if !ed.review_rail_up() {
         return false;
     }
     let Some(r) = ed.code_review.as_mut().filter(|r| r.focus) else { return false };
@@ -651,6 +668,14 @@ pub fn rail_key(ed: &mut Editor, key: Key) -> bool {
         _ => {}
     }
     true
+}
+
+impl Editor {
+    /// Whether the review's rail has the left column: a review is open and the git tab isn't in front of
+    /// it (closed, the tab gives the column back).
+    pub fn review_rail_up(&self) -> bool {
+        self.code_review.as_ref().is_some_and(|r| !r.behind || self.sidebar.is_none())
+    }
 }
 
 // ── Sending ───────────────────────────────────────────────────────────────────
