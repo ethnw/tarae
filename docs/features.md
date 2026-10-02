@@ -12,6 +12,7 @@ and so does [Claude](claude-integration.md).
 - [Syntax highlighting](#syntax-highlighting)
 - [Language servers](#language-servers)
 - [Java](#java)
+- [Updating without losing your place](#updating-without-losing-your-place)
 
 ## First steps
 
@@ -304,3 +305,31 @@ your `PATH`.
   loads it into the running jdtls — no restart ([screenshot](screenshots/java-debug-offer.png)). Copies already
   downloaded by VS Code or Neovim's mason are found too
 - Tests and debugging for Java: see [Tests and debugging](testing-and-debugging.md)
+
+## Updating without losing your place
+
+Install a new tarae (`cargo install …` again) while one is running, then type `:restart`. The running tarae
+saves your files and starts the new one in the same terminal, in the same zellij or tmux pane, and you're back
+where you were: the open files with their cursors, selections, and scroll, the split windows, the side panel, the
+chat with the same conversation (and the words you were typing in it), and the settings you changed with `:set`.
+A toast says so (`Restarted · 3 files as they were`).
+
+It runs the tarae at the path the running one was started from, so whatever `cargo install` put there is what
+comes up. Before it lets go, it checks that the new binary runs and answers as a tarae; one that doesn't (a
+broken build, the wrong file) is caught while the old tarae is still running, and you stay in it with a message
+saying why. Nothing is built by default. `editor.restart-binary` points it at another binary, and
+`editor.restart-build` makes it build one first, which is how tarae is developed in tarae
+([how](../CONTRIBUTING.md#developing-tarae-in-tarae)). `:restart!` skips that build.
+
+Some things don't come along. A shell in the terminal panel (`space T`) ends; the new tarae says so, and
+`space T` starts a fresh one. Language servers start again, so a large project is indexed again before
+go-to-definition and the like answer. The turns `space u` can take back, notes, and the list (`]q`) belong to
+the old session and stay behind. Undo within a file (`u`/`U`) keeps working, as after any restart
+(`editor.persistent-undo`).
+
+Some things make it wait, and some stop it. If Claude is answering in the chat, the restart waits for the turn
+to end, and for any edits you accepted to land on disk; `:restart` again cancels. It stops, with a message
+saying what to do, if something open can't be carried over or would be cut short: text in a buffer that has no
+file, a file that changed on disk under your edits, an open review or code review, a commit message being
+written, a task or tests still running, or a debug session. When a file can't be saved, it stops too, and
+nothing is lost.

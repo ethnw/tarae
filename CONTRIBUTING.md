@@ -48,6 +48,40 @@ TARAE_BLESS=1 cargo test keymap_reference
 The example in [`docs/configuration.md`](docs/configuration.md) (and the TOML blocks in the other docs) is parsed by a
 test too — keep it valid.
 
+## Developing tarae in tarae
+
+tarae is written in tarae, and the repository is set up for it. [`.tarae.toml`](.tarae.toml) at the root tells
+`:restart` how to get the next tarae: build it with `cargo build --release`, then run `target/release/tarae`.
+Start a release build from the repository and work in it:
+
+```sh
+cargo build --release && target/release/tarae
+```
+
+**The loop.** Change the code, then `:restart`. Files are saved, the build runs in the task panel below the code
+(its errors go into the list, so `]q` walks them), and when it passes, tarae checks the new binary answers
+`--version` and becomes it, in the same terminal, with your files, cursors, panes, side panel, and chat
+conversation as they were ([what comes along](docs/features.md#updating-without-losing-your-place)). A failed
+build leaves you in the running tarae. `:restart` again while it builds cancels, and so does stopping the build
+(`space m c`). `:restart!` skips the build, for when you've just built by hand.
+
+**Claude checks its own work.** In the chat (`space l`), Claude runs `cargo build`, `check`, `test`, `clippy`, and
+`fmt`, and git's read-only commands, with its `run` tool, without asking each time; anything else asks first
+([running commands](docs/claude-integration.md#running-commands)). After a change it runs the tests that cover it
+with `run_tests`, at a test file or a single test, in the test pane where you can watch
+([running the tests](docs/claude-integration.md#running-the-tests)). A `:restart` typed while Claude is working
+waits for the turn to end.
+
+**Review before committing.** `space v c` has Claude review the uncommitted changes (`:review-claude main` for
+everything since `main`): its findings are notes on the lines, its verdict is in the chat. Answer a note with
+`space n`, and `space v s` sends your answers back together; `space v q` ends the review
+([code review](docs/claude-integration.md#code-review)).
+
+**Commit.** `space g` opens the git tab. Stage with `s`, then `C` commits with a message Claude drafts from the
+staged diff in the style of the recent log. It lands as a review in the message buffer: take it (`a`), edit it,
+and `:w` commits (`:q` cancels). `c` is the plain commit, written by you
+([commit messages](docs/claude-integration.md#commit-messages)).
+
 ## Engineering rules
 
 ### Never block the main thread

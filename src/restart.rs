@@ -1,6 +1,7 @@
-//! `:restart` — tarae building tarae. Build (`editor.restart-build`), check the new binary answers
-//! `--version`, then become it: `exec` keeps the pid, the terminal and the zellij pane, and the new tarae
-//! comes back with what was on screen — the open files with their selections and scroll, the panes, the
+//! `:restart` — a new tarae (after `cargo install`, or tarae building tarae). Build if
+//! `editor.restart-build` says how, check the binary (`editor.restart-binary`, else the running one's
+//! path) answers `--version`, then become it: `exec` keeps the pid, the terminal and the zellij pane, and
+//! the new tarae comes back with what was on screen — the open files with their selections and scroll, the panes, the
 //! side panel, the chat (its claude session resumed, the words being typed) and the `:set`s.
 //!
 //! The state goes through one file (`restart-<pid>.json` in the state dir → `--restart <file>`), written

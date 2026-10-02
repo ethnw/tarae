@@ -81,7 +81,8 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
         "q" | "quit" if editor.close_view() => Ok(()),
         "q" | "quit" | "qa" | "quit-all" => quit(editor, false),
         "q!" | "quit!" | "qa!" | "quit-all!" => quit(editor, true),
-        // Build (`editor.restart-build`) and become the new tarae, as you were (restart.rs) — `!` skips the build
+        // Become the tarae at `editor.restart-binary`, as you were (restart.rs) — built first when
+        // `editor.restart-build` is set, unless `!`
         "restart" => crate::restart::start(editor, true),
         "restart!" => crate::restart::start(editor, false),
         "wa" | "write-all" => write_all(editor, false),

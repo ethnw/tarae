@@ -25,8 +25,8 @@ The name is also the `:set` path: `:set editor.scrolloff 8` changes it for this 
 | `editor.auto-save` | `"off"` · `"focus"` · `"idle"` | `"focus"` | Save modified files automatically: when the terminal loses focus, or also after 2 s idle |
 | `editor.terminal-escape` | string | `'C-\'` | The key that gives the keys back to the code from the terminal (space T) |
 | `editor.persistent-undo` | bool | `true` | Keep undo history across restarts (saved next to your state, dropped if the file changed elsewhere) |
-| `editor.restart-build` | string | `""` | Command :restart builds with first, e.g. "cargo build --release" ("" = no build; :restart! skips it) |
-| `editor.restart-binary` | string | `""` | The tarae :restart runs, from the project root if relative ("" = the one running now) |
+| `editor.restart-build` | string | `""` | For working on tarae itself: a command :restart runs first, e.g. "cargo build --release" ("" = none; :restart! skips it) |
+| `editor.restart-binary` | string | `""` | The tarae :restart runs, from the project root if relative ("" = the same path as the one running now) |
 | `editor.offer-grammars` | bool | `true` | When a file's language has no syntax grammar yet, offer to download and build it (y/n) |
 | `editor.offer-installs` | bool | `true` | When a language server or debugger is missing, offer to install it the way its pack says (y/n/N) |
 | `editor.render-doc-comments` | bool | `true` | Show doc comments (///, //!, /** */) rendered as Markdown; raw when the cursor enters the block |

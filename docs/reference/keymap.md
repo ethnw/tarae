@@ -403,8 +403,8 @@ Type `:` in normal mode. `Tab` completes command names and their arguments (path
 | `:quit!` | `:q!` | Quit without saving |
 | `:quit-all` | `:qa` | Quit tarae |
 | `:quit-all!` | `:qa!` | Quit tarae without saving |
-| `:restart` |  | Build tarae and run the new one, as you were |
-| `:restart!` |  | Run the new tarae without building first |
+| `:restart` |  | Start tarae again, as you were (after an update) |
+| `:restart!` |  | Restart, skipping editor.restart-build |
 | `:open` | `:o` `:e` `:edit` | Open files |
 | `:new` | `:n` | New scratch buffer |
 | `:reload` |  | Reload the file from disk (u brings your version back) |

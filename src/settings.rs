@@ -165,14 +165,14 @@ pub static SETTINGS: &[Setting] = &[
     Setting {
         path: "editor.restart-build",
         kind: Kind::Str,
-        doc: "Command :restart builds with first, e.g. \"cargo build --release\" (\"\" = no build; :restart! skips it)",
+        doc: "For working on tarae itself: a command :restart runs first, e.g. \"cargo build --release\" (\"\" = none; :restart! skips it)",
         get: |c| Value::from(c.restart_build.as_str()),
         set: |c, v| c.restart_build = s(v).to_string(),
     },
     Setting {
         path: "editor.restart-binary",
         kind: Kind::Str,
-        doc: "The tarae :restart runs, from the project root if relative (\"\" = the one running now)",
+        doc: "The tarae :restart runs, from the project root if relative (\"\" = the same path as the one running now)",
         get: |c| Value::from(c.restart_binary.as_str()),
         set: |c, v| c.restart_binary = s(v).to_string(),
     },
