@@ -421,6 +421,12 @@ pub struct Editor {
     pub git_auto: bool,
     /// Where the chat's conversations are kept (`chats.rs`) — None in tests (they set a temp dir).
     pub chats_dir: Option<std::path::PathBuf>,
+    /// The project file's held-back settings and the answer about them (`trust.rs`).
+    pub project_trust: Option<crate::trust::Project>,
+    /// Where answers about projects are kept — None in tests.
+    pub trust_path: Option<std::path::PathBuf>,
+    /// Whether Claude's commands can be sandboxed here (`sandbox.rs`) — found with the first one.
+    pub sandbox: crate::sandbox::Availability,
     /// `:restart` under way (`restart.rs`) — once `Ready`, main runs the new binary after the loop ends.
     pub restart: Option<crate::restart::Restart>,
     /// Undo history files being written (`undofile.rs`) — the process ending waits for them.
@@ -541,6 +547,9 @@ impl Editor {
             git_diffing: false,
             git_auto: !cfg!(test),
             chats_dir: if cfg!(test) { None } else { crate::chats::default_dir() },
+            project_trust: None,
+            trust_path: if cfg!(test) { None } else { crate::trust::Store::path() },
+            sandbox: if cfg!(test) { crate::sandbox::Availability::Bypass } else { Default::default() },
             restart: None,
             undo_writes: Default::default(),
             idle_save_gen: 0,
@@ -569,6 +578,7 @@ impl Editor {
         };
         ed.new_scratch();
         ed.views.push(View::new(1, ed.docs[0].id));
+        ed.project_trust_set(config.project);
         ed
     }
 
@@ -1169,6 +1179,8 @@ impl Editor {
             match k {
                 'y' if self.offer_settled() => self.offer_accept(),
                 'y' => {}
+                'a' if self.offer_settled() => self.offer_for_chat(),
+                'a' => {}
                 'n' => self.offer_dismiss(),
                 'N' => self.offer_never(),
                 d => self.offer_to_front(d.to_digit(10).unwrap_or(0) as usize),
@@ -1928,6 +1940,7 @@ impl Editor {
         for (path, v) in &self.overrides {
             let _ = crate::settings::apply(&mut self.config, path, v);
         }
+        self.project_trust_set(config.project);
         self.ensure_theme();
         self.pending.clear();
         self.count = None;
@@ -3764,6 +3777,144 @@ mod tests {
         assert!(answer.contains("too long to show") && answer.contains("isError"), "{answer}");
         assert!(ed.offers.is_empty() && ed.task_run.is_none());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// No sandbox on this system: a command of Claude's — a check too — doesn't run quietly without one. Its
+    /// card says so: `n` tells Claude, `y` runs it this once, `a` for the rest of the conversation (the
+    /// chat's title says so meanwhile); a command that asks anyway says it on its own card.
+    #[test]
+    fn without_a_sandbox_claudes_commands_ask() {
+        use crate::sandbox::Availability;
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-run-bare-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let made = dir.join("made");
+        let command = format!("touch {}", made.display());
+        let start = |command: &str| {
+            std::fs::remove_file(dir.join("stdin.log")).ok();
+            let mut ed = editor("");
+            ed.sandbox = Availability::Missing("not on this system".into());
+            ed.config.llm.run_allow = vec!["touch".into()];
+            let log = claude_calls(&mut ed, &dir, "run", &json!({ "command": command }));
+            feed(&mut ed, "<space>ltouch it<ret>");
+            (ed, log)
+        };
+        // n: nothing ran, Claude hears why
+        let (mut ed, log) = start(&command);
+        settle_for(&mut ed, |ed| !ed.offers.is_empty());
+        let o = &ed.offers[0];
+        assert!(matches!(o.what, crate::offer::What::NoSandbox { .. }) && o.weighty());
+        assert!(o.question.contains(&command) && o.question.contains("not on this system"), "{}", o.question);
+        ed.offer_dismiss();
+        settle_for(&mut ed, |ed| !ed.chat.as_ref().unwrap().busy());
+        let answer = tool_answer(&log);
+        assert!(answer.contains("chose not to run") && answer.contains("isError"), "{answer}");
+        assert!(!made.exists() && ed.task_run.is_none());
+        // y: this once — and it says how it ran
+        let (mut ed, log) = start(&command);
+        settle_for(&mut ed, |ed| !ed.offers.is_empty());
+        ed.offer_accept();
+        settle_for(&mut ed, |ed| !ed.chat.as_ref().unwrap().busy());
+        assert!(made.exists());
+        let answer = tool_answer(&log);
+        assert!(answer.contains("Ran without a sandbox (not on this system)"), "{answer}");
+        assert!(!crate::tools::unsandboxed(&ed), "only this once");
+        std::fs::remove_file(&made).ok();
+        // a: for this conversation — the next one doesn't ask, and the title says so
+        let (mut ed, _) = start(&command);
+        settle_for(&mut ed, |ed| !ed.offers.is_empty());
+        ed.offer_for_chat();
+        settle_for(&mut ed, |ed| !ed.chat.as_ref().unwrap().busy());
+        assert!(made.exists() && crate::tools::unsandboxed(&ed));
+        std::fs::remove_file(&made).ok();
+        let mut bytes = Vec::new();
+        crate::term::render(&mut ed, &mut bytes, 150, 40).unwrap();
+        let mut parser = vt100::Parser::new(40, 150, 0);
+        parser.process(&bytes);
+        assert!(parser.screen().contents().contains("› no sandbox"), "{}", parser.screen().contents());
+        let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "run", "arguments": {"command": command}}});
+        ed.chat.as_mut().unwrap().state = crate::chat::State::Thinking;
+        ed.task_run = None;
+        let generation = ed.chat.as_ref().unwrap().generation();
+        assert!(crate::tools::mcp(&mut ed, generation, "c1", &msg).is_none());
+        settle_for(&mut ed, |ed| {
+            ed.task_run.as_ref().is_some_and(|r| r.state != crate::task::State::Running)
+        });
+        assert!(ed.offers.is_empty() && made.exists(), "agreed for the conversation: no card");
+        std::fs::remove_file(&made).ok();
+        // A command that asks anyway: its own card says there's no sandbox, and `y` there is enough
+        // (`;` makes it more than a check)
+        let (mut ed, _) = start(&format!("{command}; true"));
+        settle_for(&mut ed, |ed| !ed.offers.is_empty());
+        let o = &ed.offers[0];
+        assert!(matches!(o.what, crate::offer::What::Run { unprotected: true, .. }));
+        assert!(o.question.contains("No sandbox here (not on this system)"), "{}", o.question);
+        ed.offer_accept();
+        settle_for(&mut ed, |ed| !ed.chat.as_ref().unwrap().busy());
+        assert!(ed.offers.is_empty() && made.exists(), "one card, not two");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `llm.sandbox = false`: Claude's commands run without one, unasked — and the title and Claude's report
+    /// say so.
+    #[test]
+    fn the_sandbox_turned_off_is_said() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-run-off-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let mut ed = editor("");
+        ed.sandbox = crate::sandbox::Availability::Missing("not on this system".into());
+        ed.config.llm.sandbox = false;
+        ed.config.llm.run_allow = vec!["touch".into()];
+        let made = dir.join("made");
+        let log =
+            claude_calls(&mut ed, &dir, "run", &json!({ "command": format!("touch {}", made.display()) }));
+        feed(&mut ed, "<space>ltouch it<ret>");
+        settle_for(&mut ed, |ed| !ed.chat.as_ref().unwrap().busy());
+        assert!(ed.offers.is_empty() && made.exists());
+        assert!(tool_answer(&log).contains("the user turned it off (llm.sandbox)"));
+        assert!(crate::tools::unsandboxed(&ed));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// For real, on macOS: Claude's check runs inside the sandbox — it writes in temp, not in a path the
+    /// project keeps (`llm.sandbox-protect`, a harmless marker under `target/`), and Claude reads that it
+    /// ran sandboxed. Inside a sandbox already (Claude's own `cargo test`) one can't start: skipped, said.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn claudes_check_runs_in_the_sandbox() {
+        use serde_json::json;
+        if std::env::var_os(crate::sandbox::MARK).is_some() {
+            eprintln!("(in a sandbox already: this runs outside one — cargo test, CI)");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("tarae-run-sb-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let kept = std::env::current_dir().unwrap().join(format!("target/sb-kept-{}", std::process::id()));
+        std::fs::create_dir_all(&kept).unwrap();
+        let (made, marker) = (dir.join("made"), kept.join("marker"));
+        let mut ed = editor("");
+        ed.sandbox = crate::sandbox::Availability::Ready;
+        ed.config.llm.run_allow = vec!["touch".into()];
+        ed.config.llm.sandbox_protect = vec![format!("target/sb-kept-{}", std::process::id())];
+        let command = format!("touch {} {}", made.display(), marker.display());
+        let log = claude_calls(&mut ed, &dir, "run", &json!({ "command": command }));
+        feed(&mut ed, "<space>ltouch them<ret>");
+        settle_for(&mut ed, |ed| !ed.chat.as_ref().unwrap().busy());
+        assert!(made.exists(), "temp is writable");
+        assert!(!marker.exists(), "a kept path isn't");
+        let answer = tool_answer(&log);
+        assert!(
+            answer.contains("Operation not permitted") && answer.contains("In tarae's sandbox"),
+            "{answer}"
+        );
+        assert!(!crate::tools::unsandboxed(&ed));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&kept).ok();
     }
 
     /// Asking about a line starts a note with you; Claude's plain answer (no tool) lands in the thread.

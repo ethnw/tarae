@@ -18,6 +18,14 @@ the [keymap reference](reference/keymap.md).
 - **Project config**: `.tarae.toml`, found by searching upward from the current directory — handy for per-project
   debugger [attach targets](testing-and-debugging.md#attaching-to-a-running-program)
 - **Layers**, later ones winning: defaults < user config < project `.tarae.toml` < `:set` at runtime
+- **A project's file is trusted before it runs anything.** A `.tarae.toml` usually comes with the project, so
+  someone else may have written it. What in it runs commands or loosens how Claude's commands are guarded waits
+  until you trust the project: `llm.command`, `llm.args`, `llm.run-allow`, `llm.review-ask`, `llm.chat-settings`,
+  `llm.sandbox*`, `editor.restart-build` and `restart-binary`, `[task.*]`, a `[lsp.*]` `command` or `args`, an
+  `[[attach]]` `before`, and keys bound to `:` commands. A card shows each one as written: `y` trusts the
+  project, `n` ignores that part. The rest of the file applies either way. The answer is kept per project and
+  asked again when any of those values change. `:project-trust` shows the card again, and `:project-untrust`
+  takes trust back
 
 One file holds everything — editor, keys, languages, language servers, and Claude. There's no separate
 `languages.toml`.

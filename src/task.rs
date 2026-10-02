@@ -8,7 +8,7 @@
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use crate::editor::Editor;
@@ -173,6 +173,8 @@ pub struct Run {
     pub chat: Option<crate::tools::Call>,
     /// Claude's command (not one `space m m` runs again).
     pub by_claude: bool,
+    /// How Claude's command ran — in the sandbox or not (`sandbox.rs`); None for the user's own.
+    pub guard: Option<crate::sandbox::Guard>,
 }
 
 /// An install run's card, tool, and what goes on after it.
@@ -200,6 +202,7 @@ impl Run {
             install: false,
             chat: None,
             by_claude: false,
+            guard: None,
         }
     }
 }
@@ -285,23 +288,34 @@ impl Editor {
         self.auto_save(" · before the task");
         self.flush_saves();
         self.task_last = Some(task.clone());
-        self.task_spawn(task, None);
+        self.task_spawn(task, None, None);
     }
 
     /// A command Claude runs (`tools.rs`): like a task, but not the one `space m m` runs again — the call
-    /// waits for its end. False: it didn't start (an install is running, or it couldn't spawn).
-    pub(crate) fn task_start_for(&mut self, task: Task, call: crate::tools::Call) -> bool {
+    /// waits for its end; in the sandbox, unless `guard` says otherwise. False: it didn't start (an install
+    /// is running, or it couldn't spawn).
+    pub(crate) fn task_start_for(
+        &mut self,
+        task: Task,
+        call: crate::tools::Call,
+        guard: Option<crate::sandbox::Guard>,
+    ) -> bool {
         if self.task_run.as_ref().is_some_and(|r| r.state == State::Running) {
             return false;
         }
         self.auto_save(" · before the command");
         self.flush_saves();
         let before = self.task_generation;
-        self.task_spawn(task, None);
+        let policy = match &guard {
+            Some(crate::sandbox::Guard::In(p)) => Some(p),
+            _ => None,
+        };
+        self.task_spawn(task, None, policy);
         match self.task_run.as_mut().filter(|_| self.task_generation != before) {
             Some(r) => {
                 r.chat = Some(call);
                 r.by_claude = true;
+                r.guard = guard;
                 true
             }
             None => false,
@@ -315,21 +329,20 @@ impl Editor {
             return None;
         }
         let before = self.task_generation;
-        self.task_spawn(task, None);
+        self.task_spawn(task, None, None);
         (self.task_generation != before).then_some(self.task_generation)
     }
 
     /// An install (`install.rs`) in the task panel: not the task `space m m` runs again, and its output's
     /// places stay out of the list.
     pub(crate) fn task_start_install(&mut self, task: Task, after: After) {
-        self.task_spawn(task, Some(after));
+        self.task_spawn(task, Some(after), None);
     }
 
-    fn task_spawn(&mut self, task: Task, after: Option<After>) {
+    fn task_spawn(&mut self, task: Task, after: Option<After>, sandbox: Option<&crate::sandbox::Policy>) {
         let install = after.is_some();
-        let mut cmd = Command::new("sh");
-        cmd.args(["-c", &task.cmd])
-            .current_dir(&task.cwd)
+        let mut cmd = crate::sandbox::command(sandbox, "sh", &["-c".into(), task.cmd.clone()]);
+        cmd.current_dir(&task.cwd)
             .env("NO_COLOR", "1")
             .env("CARGO_TERM_COLOR", "never")
             .stdin(Stdio::null())
@@ -464,6 +477,7 @@ impl Editor {
             install,
             chat: None,
             by_claude: false,
+            guard: None,
         });
     }
 }
@@ -501,6 +515,7 @@ pub fn read_batches(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     /// Every line arrives, in batches, without its line end — CR LF, bytes that aren't UTF-8, a last line
     /// without a newline — and a thousand lines are a handful of batches, not a thousand.

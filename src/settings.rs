@@ -361,6 +361,40 @@ pub static SETTINGS: &[Setting] = &[
         },
     },
     Setting {
+        path: "llm.sandbox",
+        kind: Kind::Bool,
+        doc: "Chat: Claude's commands run in a sandbox — they write only in the project (not .git), temp and the build's folders, with no network but this machine (macOS)",
+        get: |c| Value::from(c.llm.sandbox),
+        set: |c, v| c.llm.sandbox = b(v),
+    },
+    Setting {
+        path: "llm.sandbox-network",
+        kind: Kind::Bool,
+        doc: "Chat: the sandbox lets Claude's commands reach the network",
+        get: |c| Value::from(c.llm.sandbox_network),
+        set: |c, v| c.llm.sandbox_network = b(v),
+    },
+    Setting {
+        path: "llm.sandbox-write",
+        kind: Kind::StrList,
+        doc: "Chat: more folders the sandbox lets Claude's commands write to (\"~/.npm\") — never the project's own folders above it",
+        get: |c| Value::Array(c.llm.sandbox_write.iter().map(|a| Value::from(a.as_str())).collect()),
+        set: |c, v| {
+            c.llm.sandbox_write =
+                v.as_array().into_iter().flatten().filter_map(|a| a.as_str().map(str::to_string)).collect()
+        },
+    },
+    Setting {
+        path: "llm.sandbox-protect",
+        kind: Kind::StrList,
+        doc: "Chat: paths in the project the sandbox keeps Claude's commands from changing (\"migrations/\"); .git and .tarae.toml always",
+        get: |c| Value::Array(c.llm.sandbox_protect.iter().map(|a| Value::from(a.as_str())).collect()),
+        set: |c, v| {
+            c.llm.sandbox_protect =
+                v.as_array().into_iter().flatten().filter_map(|a| a.as_str().map(str::to_string)).collect()
+        },
+    },
+    Setting {
         path: "llm.context-lines",
         kind: Kind::Int { min: 0, max: 1000 },
         doc: "Lines of context sent around each selection",
@@ -389,6 +423,7 @@ pub fn parse_value(raw: &str) -> Value {
 }
 
 /// Apply a config file table (`keys` belongs to the keymap, skipped). Problems as `file:line: msg` warnings.
+#[cfg(test)]
 pub fn apply_table(
     cfg: &mut EditorConfig,
     table: &toml::Table,
@@ -396,10 +431,30 @@ pub fn apply_table(
     file: &str,
     warnings: &mut Vec<String>,
 ) {
-    walk(cfg, "", table, src, file, warnings);
+    walk(cfg, "", table, src, file, warnings, &mut |_, _| true);
 }
 
-fn walk(cfg: &mut EditorConfig, prefix: &str, t: &toml::Table, src: &str, file: &str, w: &mut Vec<String>) {
+/// `apply_table`, with each setting first put to `pass` (path, value) — false keeps it out (`trust.rs`).
+pub fn apply_table_gated(
+    cfg: &mut EditorConfig,
+    table: &toml::Table,
+    src: &str,
+    file: &str,
+    warnings: &mut Vec<String>,
+    pass: &mut dyn FnMut(&str, &Value) -> bool,
+) {
+    walk(cfg, "", table, src, file, warnings, pass);
+}
+
+fn walk(
+    cfg: &mut EditorConfig,
+    prefix: &str,
+    t: &toml::Table,
+    src: &str,
+    file: &str,
+    w: &mut Vec<String>,
+    pass: &mut dyn FnMut(&str, &Value) -> bool,
+) {
     for (k, v) in t {
         let path = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
         // Free-form-named tables (keymap, language servers, per-language settings, `[[attach]]`) are read by
@@ -412,13 +467,16 @@ fn walk(cfg: &mut EditorConfig, prefix: &str, t: &toml::Table, src: &str, file: 
             None => format!("{file}: "),
         };
         if find(&path).is_some() {
+            if !pass(&path, v) {
+                continue;
+            }
             if let Err(e) = apply(cfg, &path, v) {
                 w.push(format!("{}{e}", at()));
             }
         } else if let Value::Table(sub) = v
             && SETTINGS.iter().any(|s| s.path.starts_with(&format!("{path}.")))
         {
-            walk(cfg, &path, sub, src, file, w);
+            walk(cfg, &path, sub, src, file, w, pass);
         } else {
             w.push(format!("{}unknown setting '{path}'", at()));
         }

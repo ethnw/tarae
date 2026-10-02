@@ -265,6 +265,26 @@ command too long to show whole on a card isn't put to you at all: Claude is told
 
 ![Claude wants to run git commit: a card at the bottom right shows the whole command with y Run and n No, the minimized chat moved to the top right, its row on the command](screenshots/chat-run.png)
 
+### The sandbox
+
+What Claude runs, with `run` and `run_tests`, runs in a sandbox (macOS: Seatbelt). What you run yourself doesn't.
+
+- It can write in the project, except `.git`, `.tarae.toml` and the paths in `llm.sandbox-protect`. It can also
+  write in the temp folders and the toolchain's own folders: cargo's target and build dirs wherever they are
+  (tarae asks `cargo metadata`), cargo's registry, and Go's caches. It can't write in `~/.cargo/bin` or anything
+  else on your `PATH`
+- It reaches nothing over the network except this machine, so tests that start a local server still work. A
+  build that needs to download something fails. `llm.sandbox-network` lets it through, and
+  `llm.sandbox-write` adds folders
+- Unix sockets work only in the project and in a temp folder made for each run, which the command gets as
+  `TMPDIR`. The sockets in `/tmp` and your own temp folder belong to programs running outside the sandbox
+  (tmux, zellij, ssh-agent), and some of them would run whatever they're told
+- Claude reads with each result that it ran in the sandbox, so an `Operation not permitted` points to the cause
+- **Where there's no sandbox** (Linux for now, or tarae itself running inside one), Claude's commands don't
+  quietly run without one. A card says there's none: `y` runs this one, `a` runs the rest of this conversation's
+  commands too, and `n` says no. While they run without one, the chat's title says `› no sandbox`.
+  `llm.sandbox = false` turns the sandbox off; the title says so too
+
 ### Notes
 
 ![A note thread under its line: Claude's remark, your reply, and Claude's answer, with the line end showing ¶ and the reply count](screenshots/notes.png)

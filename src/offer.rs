@@ -52,10 +52,17 @@ pub enum What {
     /// A language server or debugger — `run` in the task panel (in `cwd`), then `then`.
     Install { tool: String, run: Vec<String>, cwd: PathBuf, then: crate::install::Then },
     /// A command Claude wants to run (`tools.rs`): `y` runs it in the task panel, `n` tells Claude no.
-    /// `shown` = files it names that Claude wrote unseen (review at the end), on the card as they were.
-    Run { cmd: String, call: crate::tools::Call, shown: Vec<(PathBuf, String)> },
+    /// `shown` = files it names that Claude wrote unseen (review at the end), on the card as they were ·
+    /// `unprotected` = the card said there's no sandbox (`sandbox.rs`).
+    Run { cmd: String, call: crate::tools::Call, shown: Vec<(PathBuf, String)>, unprotected: bool },
+    /// No sandbox on this system (`tools.rs`): `y` runs Claude's command anyway, `a` does for the rest of
+    /// the conversation, `n` tells Claude no.
+    NoSandbox { job: crate::tools::Job, call: crate::tools::Call },
     /// Review at the end (`edits.rs`): `y` lets Claude's edits go in as it makes them.
     ReviewAtEnd,
+    /// The project's `.tarae.toml` sets what runs commands (`trust.rs`): `y` trusts it, `n` ignores that
+    /// part. `hash` = what the card showed.
+    ProjectTrust { hash: u64 },
 }
 
 /// Work that stopped for lack of a grammar — resumed once downloaded
@@ -100,7 +107,9 @@ impl Offer {
                 | What::PluginPermissions { .. }
                 | What::PluginAsk { .. }
                 | What::Run { .. }
+                | What::NoSandbox { .. }
                 | What::ReviewAtEnd
+                | What::ProjectTrust { .. }
         )
     }
 
@@ -156,7 +165,7 @@ impl crate::editor::Editor {
             if !self.screen.offer_buttons.iter().any(|b| b.3 == 'y') {
                 return false;
             }
-            if !self.offer_settled() && matches!(key.code, Code::Char('y' | 'n' | 'N') | Code::Esc) {
+            if !self.offer_settled() && matches!(key.code, Code::Char('y' | 'n' | 'N' | 'a') | Code::Esc) {
                 return true;
             }
         }
@@ -164,6 +173,7 @@ impl crate::editor::Editor {
             Code::Char('y') => self.offer_accept(),
             Code::Char('n') | Code::Esc => self.offer_dismiss(),
             Code::Char('N') if matches!(o.what, What::Install { .. }) => self.offer_never(),
+            Code::Char('a') if matches!(o.what, What::NoSandbox { .. }) => self.offer_for_chat(),
             _ => return false,
         }
         true
@@ -192,11 +202,31 @@ impl crate::editor::Editor {
                 self.offer_finished(id, Ok(()));
                 self.plugin_ask_answer(plugin, *ask, true);
             }
-            What::Run { cmd, call, shown } => crate::tools::run_answer(self, id, cmd, call, shown, true),
+            What::Run { cmd, call, shown, unprotected } => crate::tools::run_answer(
+                self,
+                id,
+                crate::tools::RunCard { cmd, call, shown, unprotected },
+                true,
+            ),
+            What::NoSandbox { job, call } => {
+                crate::tools::unprotected_answer(self, id, job, call, crate::tools::Unprotected::Once)
+            }
             What::ReviewAtEnd => {
                 self.offer_finished(id, Ok(()));
                 crate::edits::at_end_set(self, true);
             }
+            What::ProjectTrust { hash } => self.project_trust_answer(id, hash, true),
+        }
+    }
+
+    /// `a` on the no-sandbox card: Claude's command runs, and the rest of this conversation's too.
+    pub fn offer_for_chat(&mut self) {
+        if !self.offers.first().is_some_and(|o| matches!(o.what, What::NoSandbox { .. })) {
+            return;
+        }
+        let o = self.offers.remove(0);
+        if let What::NoSandbox { job, call } = o.what {
+            crate::tools::unprotected_answer(self, o.id, job, call, crate::tools::Unprotected::ThisChat);
         }
     }
 
@@ -229,8 +259,15 @@ impl crate::editor::Editor {
             What::Install { tool, .. } => {
                 self.set_status(format!("Not installing {tool} for now (N on its card: never ask)"))
             }
-            What::Run { cmd, call, shown } => crate::tools::run_answer(self, o.id, cmd, call, shown, false),
+            What::Run { cmd, call, shown, unprotected } => {
+                let card = crate::tools::RunCard { cmd, call, shown, unprotected };
+                crate::tools::run_answer(self, o.id, card, false)
+            }
+            What::NoSandbox { job, call } => {
+                crate::tools::unprotected_answer(self, o.id, job, call, crate::tools::Unprotected::No)
+            }
             What::ReviewAtEnd => self.set_status("Claude's edits come one at a time"),
+            What::ProjectTrust { hash } => self.project_trust_answer(o.id, hash, false),
         }
     }
 

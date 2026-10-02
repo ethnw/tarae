@@ -62,6 +62,10 @@ The name is also the `:set` path: `:set editor.scrolloff 8` changes it for this 
 | `llm.chat-settings` | bool | `true` | Chat: read your CLAUDE.md files and Claude Code settings, like `claude` does (hooks stay off, edits always ask) |
 | `llm.run-allow` | list of strings | `[]` | Chat: commands Claude runs without asking, past the checks (cargo build/test/clippy/fmt, git status/diff/log…) — word prefixes, like "npm test" |
 | `llm.review-ask` | list of strings | `["build.rs", "Cargo.toml", "package.json", "Makefile", "justfile", ".envrc", ".tarae.toml", ".cargo", ".github", ".claude", ".vscode"]` | Chat, review at the end (space v a): files whose edits still ask first — a name matches anywhere ("build.rs"), a path from the project root ("src/secret/"); .git always asks |
+| `llm.sandbox` | bool | `true` | Chat: Claude's commands run in a sandbox — they write only in the project (not .git), temp and the build's folders, with no network but this machine (macOS) |
+| `llm.sandbox-network` | bool | `false` | Chat: the sandbox lets Claude's commands reach the network |
+| `llm.sandbox-write` | list of strings | `[]` | Chat: more folders the sandbox lets Claude's commands write to ("~/.npm") — never the project's own folders above it |
+| `llm.sandbox-protect` | list of strings | `[]` | Chat: paths in the project the sandbox keeps Claude's commands from changing ("migrations/"); .git and .tarae.toml always |
 | `llm.context-lines` | integer 0–1000 | `20` | Lines of context sent around each selection |
 
 ## Tables you name yourself

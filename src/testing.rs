@@ -8,7 +8,7 @@
 //! (setsid) so closing kills the whole process group (including the test binaries cargo spawned).
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -314,6 +314,8 @@ pub struct TestRun {
     pub scroll: Option<usize>,
     /// Claude's `run_tests` waiting for this run's results (`tools.rs`).
     pub(crate) chat: Option<crate::tools::Call>,
+    /// How Claude's run ran — in the sandbox or not (`sandbox.rs`); None for the user's own.
+    pub guard: Option<crate::sandbox::Guard>,
 }
 
 impl TestRun {
@@ -374,6 +376,7 @@ impl TestRun {
             selected: 0,
             scroll: None,
             chat: None,
+            guard: None,
         }
     }
 
@@ -557,14 +560,22 @@ impl Editor {
     }
 
     pub fn test_start(&mut self, target: Target) {
+        self.test_start_guarded(target, None);
+    }
+
+    /// Claude's run (`tools.rs`): in the sandbox, unless `guard` says otherwise.
+    pub fn test_start_guarded(&mut self, target: Target, guard: Option<crate::sandbox::Guard>) {
         // Save modified files first — tests run the code on disk
         self.auto_save(" · before test");
         self.flush_saves();
         self.test_last = Some((target.clone(), false));
         let argv = target.argv();
-        let mut cmd = Command::new(&argv[0]);
-        cmd.args(&argv[1..])
-            .current_dir(&target.cwd)
+        let policy = match &guard {
+            Some(crate::sandbox::Guard::In(p)) => Some(p),
+            _ => None,
+        };
+        let mut cmd = crate::sandbox::command(policy, &argv[0], &argv[1..]);
+        cmd.current_dir(&target.cwd)
             .env("NO_COLOR", "1")
             .env("CARGO_TERM_COLOR", "never")
             .stdin(Stdio::null())
@@ -672,6 +683,7 @@ impl Editor {
             selected: 0,
             scroll: None,
             chat: None,
+            guard,
         });
     }
 

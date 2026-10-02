@@ -33,8 +33,13 @@ fn main() {
     }
 }
 
+/// The repository — from `cargo run`'s environment first: the compile-time one is wrong when the binary
+/// was built in another worktree and reused through a shared `build.build-dir` (measured: shots ran that
+/// worktree's old `target/release/tarae`).
 fn root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
+    let manifest = std::env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from);
+    let manifest = manifest.unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf());
+    manifest.parent().unwrap().to_path_buf()
 }
 
 struct Grammar {

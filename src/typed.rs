@@ -158,6 +158,8 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
             let path = config::config_path().ok_or("no config directory")?;
             editor.open(&path).map_err(|e| format!("{e:#}"))
         }
+        "project-trust" => editor.project_trust_ask(),
+        "project-untrust" => editor.project_untrust(),
         "config-reload" => {
             editor.events.jobs().spawn(|| {
                 let (c, w) = config::load();

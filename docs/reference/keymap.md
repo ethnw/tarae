@@ -426,6 +426,8 @@ Type `:` in normal mode. `Tab` completes command names and their arguments (path
 | `:config-open` |  | Open your config file |
 | `:config-reload` |  | Reload your config file |
 | `:config-show` |  | Show every setting with its value |
+| `:project-trust` |  | Look again at what this project's .tarae.toml runs, and trust it or not |
+| `:project-untrust` |  | Stop running what this project's .tarae.toml sets |
 | `:log-open` |  | Open tarae's log (language servers, errors) |
 | `:messages` |  | This session's notifications again, newest first |
 | `:redraw` |  | Draw the whole screen again (when something else wrote over it) |

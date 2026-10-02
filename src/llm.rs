@@ -95,6 +95,14 @@ pub struct LlmConfig {
     /// Chat, review at the end (`edits.rs`): files whose edits still ask first — a name matches anywhere, a
     /// path (with `/`) from the project's root.
     pub review_ask: Vec<String>,
+    /// Chat: Claude's commands run in a sandbox (`sandbox.rs`) — writes in the project, temp and the
+    /// toolchain's folders; no network but this machine.
+    pub sandbox: bool,
+    pub sandbox_network: bool,
+    /// More folders the sandbox may write to (`~/` for home).
+    pub sandbox_write: Vec<String>,
+    /// Paths in the project the sandbox keeps as they are, besides `.git` and `.tarae.toml`.
+    pub sandbox_protect: Vec<String>,
 }
 
 /// `llm.review-ask`'s default: what runs or sets how things run, and the dependencies a build fetches.
@@ -124,6 +132,10 @@ impl Default for LlmConfig {
             chat_settings: true,
             run_allow: Vec::new(),
             review_ask: REVIEW_ASK.iter().map(|s| s.to_string()).collect(),
+            sandbox: true,
+            sandbox_network: false,
+            sandbox_write: Vec::new(),
+            sandbox_protect: Vec::new(),
         }
     }
 }

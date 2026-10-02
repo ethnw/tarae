@@ -71,6 +71,12 @@ pub const COMMANDS: &[TypedCmd] = &[
     c(&["config-open"], Arg::None, "Open your config file"),
     c(&["config-reload"], Arg::None, "Reload your config file"),
     c(&["config-show"], Arg::None, "Show every setting with its value"),
+    c(
+        &["project-trust"],
+        Arg::None,
+        "Look again at what this project's .tarae.toml runs, and trust it or not",
+    ),
+    c(&["project-untrust"], Arg::None, "Stop running what this project's .tarae.toml sets"),
     c(&["log-open"], Arg::None, "Open tarae's log (language servers, errors)"),
     c(&["messages"], Arg::None, "This session's notifications again, newest first"),
     c(&["redraw"], Arg::None, "Draw the whole screen again (when something else wrote over it)"),

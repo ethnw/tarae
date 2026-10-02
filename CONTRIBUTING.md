@@ -200,6 +200,14 @@ process, or the disk.
 - **No real servers or real Claude in tests.** Language server tests use a fake server (`sh -c "cat > log"`): grade the
   JSON it was sent via the file and inject responses with `on_lsp_message`. LLM tests use a fake `claude` written in
   `sh` — use `read -r`, or backslashes in the JSON disappear.
+- **Dangerous behavior is tested with harmless markers.** A test of deleting, overwriting, killing processes, or
+  reaching the network makes a file in its own temp dir and checks it. Its contents never hold the real thing
+  (`rm -rf /`, a path outside the temp dir), not even in a branch meant never to run: a broken build or a wrong
+  guard runs it. This happened on 2026-10-01, and macOS refused `/`.
+- **Claude's commands run in a sandbox** ([`src/sandbox.rs`](src/sandbox.rs)), and none can start inside
+  another. The real Seatbelt tests therefore check what tarae says instead when they run under a sandboxed
+  `cargo test` (`TARAE_SANDBOXED` is set), and run in full in your own `cargo test` and in CI. Under
+  `cfg(test)` Claude's commands skip the sandbox (`Availability::Bypass`) unless a test sets it.
 - Background behavior that would make single-event tests flaky is off under `cfg(test)`: the git gutter
   (`git_auto`), session and recent-file state, grammar download offers, and the waiting animation. The clipboard uses
   memory, so your real clipboard is never touched.

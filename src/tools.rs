@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use serde_json::{Value, json};
 
 use crate::editor::Editor;
+use crate::sandbox::{Availability, Guard};
 use crate::test_results::Status;
 use crate::testing::{RunState, Scope, TestRun};
 
@@ -39,9 +40,12 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
             "capabilities": { "tools": {} },
             "serverInfo": { "name": "tarae", "version": env!("CARGO_PKG_VERSION") },
         })),
-        "tools/list" => Ok(
-            json!({ "tools": [crate::notes::tool_schema(), run_tests_schema(), run_schema(), crate::plan::tool_schema()] }),
-        ),
+        "tools/list" => {
+            sandbox_look(ed);
+            Ok(
+                json!({ "tools": [crate::notes::tool_schema(), run_tests_schema(), run_schema(), crate::plan::tool_schema()] }),
+            )
+        }
         "tools/call" => {
             let params = &msg["params"];
             let args = &params["arguments"];
@@ -195,9 +199,16 @@ fn start(ed: &mut Editor, call: Call, target: crate::testing::Target) {
     if let Err(e) = busy(ed) {
         return answer(ed, call, Err(e));
     }
+    guarded(ed, call, Job::Tests(Box::new(target)), false);
+}
+
+fn start_tests(ed: &mut Editor, call: Call, target: crate::testing::Target, guard: Option<Guard>) {
+    if let Err(e) = busy(ed) {
+        return answer(ed, call, Err(e));
+    }
     let before = ed.test_generation;
     let program = target.argv().first().cloned().unwrap_or_default();
-    ed.test_start(target);
+    ed.test_start_guarded(target, guard);
     match ed.test_run.as_mut().filter(|_| ed.test_generation != before) {
         Some(r) => r.chat = Some(call),
         None => answer(ed, call, Err(format!("couldn't start {program}"))),
@@ -229,7 +240,8 @@ pub fn turn_over(ed: &mut Editor) {
     if let Some(r) = ed.task_run.as_mut() {
         r.chat = None;
     }
-    ed.offers.retain(|o| !matches!(o.what, crate::offer::What::Run { .. }));
+    ed.offers
+        .retain(|o| !matches!(o.what, crate::offer::What::Run { .. } | crate::offer::What::NoSandbox { .. }));
 }
 
 /// A run Claude waited on is gone before it ended (closed, or another run took its place).
@@ -325,7 +337,8 @@ fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
     }
     run_busy(ed)?;
     if allowed(cmd, &ed.config.llm.run_allow) {
-        return run_start(ed, call, cmd.to_string());
+        guarded(ed, call, Job::Command(cmd.to_string()), false);
+        return Ok(());
     }
     asked(ed)?;
     // Review at the end: a file it names that Claude wrote unseen this turn goes on the card with it —
@@ -373,8 +386,17 @@ fn ask(ed: &mut Editor, cmd: String, call: Call, shown: Vec<(PathBuf, String)>) 
             text.trim_end_matches('\n')
         ));
     }
+    // Where there's no sandbox, this card is where the user hears it
+    let unprotected = match (&ed.sandbox, ed.config.llm.sandbox) {
+        (Availability::Missing(why), true) => Some(format!("No sandbox here ({why})")),
+        (_, false) => Some("The sandbox is off (llm.sandbox)".to_string()),
+        _ => None,
+    };
+    if let Some(u) = &unprotected {
+        question.push_str(&format!("\n\n{u} — it runs with all your permissions."));
+    }
     let title = "Claude wants to run".to_string();
-    let what = crate::offer::What::Run { cmd, call, shown };
+    let what = crate::offer::What::Run { cmd, call, shown, unprotected: unprotected.is_some() };
     ed.push_offer(crate::offer::Offer::new(title, &question, "Running…", "Claude's command".into(), what));
     Ok(())
 }
@@ -439,31 +461,25 @@ fn run_busy(ed: &Editor) -> Result<(), String> {
     }
 }
 
-fn run_start(ed: &mut Editor, call: Call, cmd: String) -> Result<(), String> {
+fn run_start(ed: &mut Editor, call: Call, cmd: String, guard: Option<Guard>) -> Result<(), String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let task = crate::task::Task { name: cmd.clone(), cmd, cwd };
-    if !ed.task_start_for(task, call) {
+    if !ed.task_start_for(task, call, guard) {
         return Err(run_busy(ed).err().unwrap_or_else(|| "couldn't start sh".into()));
     }
     Ok(())
 }
 
 /// The user's answer on the card: `y` runs it — the files it showed read again first (on a worker), and not
-/// run if one changed since — `n` tells Claude no.
-pub fn run_answer(
-    ed: &mut Editor,
-    id: u64,
-    cmd: String,
-    call: Call,
-    shown: Vec<(PathBuf, String)>,
-    yes: bool,
-) {
+/// run if one changed since — `n` tells Claude no. `unprotected`: the card said there's no sandbox.
+pub fn run_answer(ed: &mut Editor, id: u64, what: RunCard, yes: bool) {
+    let RunCard { cmd, call, shown, unprotected } = what;
     ed.offer_finished(id, Ok(()));
     if !yes {
         return answer(ed, call, Err(format!("the user chose not to run `{cmd}`")));
     }
     if shown.is_empty() {
-        return run_now(ed, cmd, call);
+        return run_now(ed, cmd, call, unprotected);
     }
     ed.events.jobs().spawn(move || {
         let changed =
@@ -478,19 +494,173 @@ pub fn run_answer(
                      them what's there now"
                 )),
             ),
-            None => run_now(ed, cmd, call),
+            None => run_now(ed, cmd, call, unprotected),
         }
     });
 }
 
-fn run_now(ed: &mut Editor, cmd: String, call: Call) {
+fn run_now(ed: &mut Editor, cmd: String, call: Call, unprotected: bool) {
     if let Err(e) = run_busy(ed) {
         return answer(ed, call, Err(e));
     }
-    let c = call.clone();
-    if let Err(e) = run_start(ed, call, cmd) {
-        answer(ed, c, Err(e));
+    guarded(ed, call, Job::Command(cmd), unprotected);
+}
+
+/// A `run` card's command, its call, the files it showed, and whether it said there's no sandbox.
+pub struct RunCard {
+    pub cmd: String,
+    pub call: Call,
+    pub shown: Vec<(PathBuf, String)>,
+    pub unprotected: bool,
+}
+
+// ── The sandbox ─────────────────────────────────────────────────────────────
+
+/// What Claude asked to run.
+#[derive(Clone, Debug)]
+pub enum Job {
+    Command(String),
+    Tests(Box<crate::testing::Target>),
+}
+
+impl Job {
+    fn label(&self) -> String {
+        match self {
+            Job::Command(c) => c.clone(),
+            Job::Tests(t) => format!("tests: {}", t.label),
+        }
     }
+}
+
+/// Starts looking whether there's a sandbox here, before Claude's first command (claude lists the tools
+/// when it starts) — so a card for a command can say there's none.
+fn sandbox_look(ed: &mut Editor) {
+    if ed.sandbox != Availability::Unknown {
+        return;
+    }
+    ed.events.jobs().spawn(|| {
+        let found = crate::sandbox::probe();
+        move |ed: &mut Editor| {
+            if ed.sandbox == Availability::Unknown {
+                ed.sandbox = found;
+            }
+        }
+    });
+}
+
+/// Runs `job` the way `sandbox.rs` says: in the sandbox (the policy made on a worker — the toolchain's
+/// folders are asked there), or, where there's none, once the user agrees: on its own card, for this
+/// conversation (`Chat.unprotected`), or already (`asked`: the command's card said so).
+fn guarded(ed: &mut Editor, call: Call, job: Job, asked: bool) {
+    if !ed.config.llm.sandbox {
+        return go(ed, call, job, Some(Guard::Off));
+    }
+    let found = ed.sandbox.clone();
+    if found == Availability::Bypass {
+        return go(ed, call, job, None);
+    }
+    let llm = &ed.config.llm;
+    let (write, protect, network) =
+        (llm.sandbox_write.clone(), llm.sandbox_protect.clone(), llm.sandbox_network);
+    let root = std::env::current_dir().unwrap_or_default();
+    ed.events.jobs().spawn(move || {
+        let found = match found {
+            Availability::Unknown => crate::sandbox::probe(),
+            f => f,
+        };
+        let policy =
+            (found == Availability::Ready).then(|| crate::sandbox::policy(&root, &write, &protect, network));
+        move |ed: &mut Editor| {
+            ed.sandbox = found.clone();
+            // (the turn ended meanwhile: nothing waits for it)
+            if ed.chat.as_ref().is_some_and(|c| c.generation() != call.generation || !c.busy()) {
+                return;
+            }
+            match (policy, found) {
+                (Some(p), _) => go(ed, call, job, Some(Guard::In(p))),
+                (None, Availability::Missing(why)) => {
+                    if asked || ed.chat.as_ref().is_some_and(|c| c.unprotected) {
+                        go(ed, call, job, Some(Guard::Without(why)))
+                    } else {
+                        ask_unprotected(ed, call, job, why)
+                    }
+                }
+                (None, _) => go(ed, call, job, None),
+            }
+        }
+    });
+}
+
+fn go(ed: &mut Editor, call: Call, job: Job, guard: Option<Guard>) {
+    match job {
+        Job::Command(cmd) => {
+            if let Err(e) = run_busy(ed) {
+                return answer(ed, call, Err(e));
+            }
+            let c = call.clone();
+            if let Err(e) = run_start(ed, call, cmd, guard) {
+                answer(ed, c, Err(e));
+            }
+        }
+        Job::Tests(target) => start_tests(ed, call, *target, guard),
+    }
+}
+
+pub const NO_SANDBOX_TITLE: &str = "Claude wants to run — without a sandbox";
+
+/// No sandbox on this system: Claude's command waits for the user — `y` this once, `a` for this
+/// conversation, `n` no.
+fn ask_unprotected(ed: &mut Editor, call: Call, job: Job, why: String) {
+    if ed.offers.iter().any(|o| matches!(o.what, crate::offer::What::NoSandbox { .. })) {
+        let e = "the user hasn't answered about your last command yet — wait for it, then run this";
+        return answer(ed, call, Err(e.into()));
+    }
+    let question = format!(
+        "{}\n\nThere's none here ({why}) — it would run with all your permissions: your files, your network.",
+        job.label()
+    );
+    let what = crate::offer::What::NoSandbox { job, call };
+    ed.push_offer(crate::offer::Offer::new(NO_SANDBOX_TITLE.into(), &question, "", String::new(), what));
+}
+
+/// The answer on that card: `y` runs it unprotected, `a` too — and the rest of this conversation's — `n`
+/// tells Claude no.
+pub fn unprotected_answer(ed: &mut Editor, id: u64, job: Job, call: Call, answer_is: Unprotected) {
+    ed.offer_finished(id, Ok(()));
+    let why = match &ed.sandbox {
+        Availability::Missing(why) => why.clone(),
+        _ => "none here".into(),
+    };
+    match answer_is {
+        Unprotected::No => {
+            let e = format!(
+                "There's no sandbox on this system ({why}), and the user chose not to run `{}` without one — \
+                 ask them how to go on",
+                job.label()
+            );
+            answer(ed, call, Err(e))
+        }
+        Unprotected::Once => go(ed, call, job, Some(Guard::Without(why))),
+        Unprotected::ThisChat => {
+            if let Some(c) = ed.chat.as_mut() {
+                c.unprotected = true;
+            }
+            ed.set_warning("Claude's commands run without a sandbox in this conversation");
+            go(ed, call, job, Some(Guard::Without(why)))
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unprotected {
+    Once,
+    ThisChat,
+    No,
+}
+
+/// Whether Claude's commands run without a sandbox now — the chat's title says so.
+pub fn unsandboxed(ed: &Editor) -> bool {
+    !ed.config.llm.sandbox || ed.chat.as_ref().is_some_and(|c| c.unprotected)
 }
 
 /// The command Claude ran ended — how, and its output, go back; the editor shows the first error.
@@ -556,8 +726,10 @@ fn run_report(r: &crate::task::Run, places: &[crate::quickfix::Item]) -> String 
         }
     }
     let lines = &r.output;
+    let guard = r.guard.as_ref().map(|g| format!("\n{}\n", g.report())).unwrap_or_default();
     if lines.is_empty() {
         out.push_str("\n(no output)\n");
+        out.push_str(&guard);
         return out;
     }
     let cut = |l: &str| -> String {
@@ -587,6 +759,7 @@ fn run_report(r: &crate::task::Run, places: &[crate::quickfix::Item]) -> String 
             out.push('\n');
         }
     }
+    out.push_str(&guard);
     out
 }
 
@@ -648,6 +821,9 @@ fn report(r: &TestRun) -> String {
             out.push_str(line);
             out.push('\n');
         }
+    }
+    if let Some(g) = &r.guard {
+        out.push_str(&format!("\n{}\n", g.report()));
     }
     out
 }

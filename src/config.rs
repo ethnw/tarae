@@ -133,6 +133,8 @@ pub struct Config {
     pub keymaps: Keymaps,
     /// Theme loaded by the `editor.theme` name (the config reader = watcher thread reads disk for us).
     pub theme: Theme,
+    /// The project file's held-back part (`trust.rs`) — None when it has none.
+    pub project: Option<crate::trust::Project>,
 }
 
 // ── Paths ────────────────────────────────────────────────────────────────────
@@ -176,6 +178,11 @@ fn layers() -> Vec<PathBuf> {
     v
 }
 
+/// The project layer, unless it's the user's own file (started in the config folder).
+fn project_layer() -> Option<PathBuf> {
+    project_path().filter(|p| config_path().as_ref() != Some(p))
+}
+
 fn short(p: &Path) -> String {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     match home.as_deref().and_then(|h| p.strip_prefix(h).ok()) {
@@ -187,14 +194,59 @@ fn short(p: &Path) -> String {
 // ── Reading ──────────────────────────────────────────────────────────────────
 
 /// Read the layers in order. Problems come back as `file:line: message` warnings (startup isn't blocked).
+/// The project's file goes in through `trust.rs`: what runs commands only once the project is trusted.
 pub fn load() -> (Config, Vec<String>) {
+    let store = crate::trust::Store::read(crate::trust::Store::path().as_deref());
+    load_from(config_path(), project_layer(), &store)
+}
+
+pub(crate) fn load_from(
+    user: Option<PathBuf>,
+    project: Option<PathBuf>,
+    store: &crate::trust::Store,
+) -> (Config, Vec<String>) {
+    let read = |path: &Path, warnings: &mut Vec<String>| match fs::read_to_string(path) {
+        Ok(src) => Some(src),
+        Err(e) if e.kind() == ErrorKind::NotFound => None,
+        Err(e) => {
+            warnings.push(format!("{}: {e}", short(path)));
+            None
+        }
+    };
     let mut config = Config::default();
     let mut warnings = Vec::new();
-    for path in layers() {
-        match fs::read_to_string(&path) {
-            Ok(src) => apply_source(&mut config, &src, &short(&path), &mut warnings),
-            Err(e) if e.kind() == ErrorKind::NotFound => {}
-            Err(e) => warnings.push(format!("{}: {e}", short(&path))),
+    if let Some(path) = &user
+        && let Some(src) = read(path, &mut warnings)
+    {
+        apply_source(&mut config, &src, &short(path), &mut warnings, None);
+    }
+    if let Some(path) = &project
+        && let Some(src) = read(path, &mut warnings)
+    {
+        let file = short(path);
+        let (mut without, mut w_without) = (config.clone(), Vec::new());
+        let mut gate = crate::trust::Gate::new(false);
+        apply_source(&mut without, &src, &file, &mut w_without, Some(&mut gate));
+        if gate.held.is_empty() {
+            config = without;
+            warnings.extend(w_without);
+        } else {
+            let (mut with, mut w_with) = (config.clone(), Vec::new());
+            apply_source(&mut with, &src, &file, &mut w_with, Some(&mut crate::trust::Gate::new(true)));
+            let real = fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+            let hash = crate::trust::hash(&gate.held);
+            let state = store.state(&real, hash);
+            let trusted = state == crate::trust::State::Trusted;
+            config = if trusted { with.clone() } else { without.clone() };
+            warnings.extend(if trusted { w_with } else { w_without });
+            config.project = Some(crate::trust::Project {
+                file: real,
+                hash,
+                items: gate.held,
+                state,
+                with: Box::new((with.editor, with.keymaps)),
+                without: Box::new((without.editor, without.keymaps)),
+            });
         }
     }
     config.theme = crate::theme::load(&config.editor.theme).unwrap_or_else(|e| {
@@ -210,11 +262,19 @@ pub fn load() -> (Config, Vec<String>) {
 pub fn parse(src: &str) -> (Config, Vec<String>) {
     let mut config = Config::default();
     let mut warnings = Vec::new();
-    apply_source(&mut config, src, "config.toml", &mut warnings);
+    apply_source(&mut config, src, "config.toml", &mut warnings, None);
     (config, warnings)
 }
 
-fn apply_source(config: &mut Config, src: &str, file: &str, warnings: &mut Vec<String>) {
+/// One layer on top of `config`. `gate` = a project's file: each thing that runs commands goes through it.
+fn apply_source(
+    config: &mut Config,
+    src: &str,
+    file: &str,
+    warnings: &mut Vec<String>,
+    mut gate: Option<&mut crate::trust::Gate>,
+) {
+    let mut pass = |key: String, v: &Value| gate.as_deref_mut().is_none_or(|g| g.pass(key, v));
     let table: toml::Table = match toml::from_str(src) {
         Ok(t) => t,
         Err(e) => {
@@ -224,13 +284,18 @@ fn apply_source(config: &mut Config, src: &str, file: &str, warnings: &mut Vec<S
             return;
         }
     };
-    settings::apply_table(&mut config.editor, &table, src, file, warnings);
+    let mut risky = |path: &str, v: &Value| !crate::trust::is_risky(path) || pass(path.to_string(), v);
+    settings::apply_table_gated(&mut config.editor, &table, src, file, warnings, &mut risky);
     // Server and language tables have free-form names, so they're read here, not via the settings table.
     if let Some(Value::Table(servers)) = table.get("lsp") {
         let strings = |v: &Value, k: &str| -> Option<Vec<String>> {
             v.get(k)?.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
         };
         for (name, v) in servers {
+            // A server's own command runs only once the project is trusted (`except` alone doesn't run one)
+            if (v.get("command").is_some() || v.get("args").is_some()) && !pass(format!("lsp.{name}"), v) {
+                continue;
+            }
             // A built-in server needs no command (`[lsp.ruff] except = ["format"]`)
             let base = crate::lsp::default_spec(name);
             let command = match (v.get("command").and_then(Value::as_str), &base) {
@@ -274,6 +339,9 @@ fn apply_source(config: &mut Config, src: &str, file: &str, warnings: &mut Vec<S
     }
     if let Some(Value::Table(tasks)) = table.get("task") {
         for (name, v) in tasks {
+            if !pass(format!("task.{name}"), v) {
+                continue;
+            }
             let Some(cmd) = v.get("cmd").and_then(Value::as_str) else {
                 warnings.push(format!("{file}: task.{name}: needs cmd = \"...\""));
                 continue;
@@ -286,12 +354,37 @@ fn apply_source(config: &mut Config, src: &str, file: &str, warnings: &mut Vec<S
     }
     if let Some(v) = table.get("attach") {
         for t in crate::attach::parse_config(v, file, warnings) {
+            // `before` is a command run first (a port-forward)
+            if let Some(b) = &t.before
+                && !pass(format!("attach.{}.before", t.name), &Value::from(b.as_str()))
+            {
+                continue;
+            }
             config.editor.attach.retain(|x| x.name != t.name);
             config.editor.attach.push(t);
         }
     }
     if let Some(Value::Table(keys)) = table.get("keys") {
-        config.keymaps.merge_user(keys, warnings);
+        // A key bound to a `:` command (`:sh …`) runs it when pressed
+        let mut keys = keys.clone();
+        drop_typed(&mut keys, "keys", &mut pass);
+        config.keymaps.merge_user(&keys, warnings);
+    }
+}
+
+/// Takes the bindings to `:` commands that `pass` doesn't let through out of a `[keys]` table (submodes too).
+fn drop_typed(t: &mut toml::Table, path: &str, pass: &mut impl FnMut(String, &Value) -> bool) {
+    let mut out = Vec::new();
+    for (k, v) in t.iter_mut() {
+        let at = format!("{path}.{k}");
+        match v {
+            Value::Table(sub) => drop_typed(sub, &at, pass),
+            v if crate::trust::typed_binding(v) && !pass(at, v) => out.push(k.clone()),
+            _ => {}
+        }
+    }
+    for k in out {
+        t.remove(&k);
     }
 }
 
@@ -396,7 +489,7 @@ fn set_path(doc: &mut DocumentMut, path: &str, v: &Value) -> Result<(), String> 
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// The ```toml blocks of a Markdown file.
@@ -477,6 +570,114 @@ mod tests {
         let (_, w) = parse("[editor]\nscrolloff = = 3\n");
         assert_eq!(w.len(), 1);
         assert!(w[0].starts_with("config.toml:2:"), "{w:?}");
+    }
+
+    /// A project file in a temp dir (its real path) — the values are never run.
+    pub(crate) fn project_file(name: &str, src: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("tarae-config-{name}-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".tarae.toml");
+        fs::write(&path, src).unwrap();
+        fs::canonicalize(path).unwrap()
+    }
+
+    pub(crate) const RISKY_PROJECT: &str = r#"
+"editor.restart-binary" = "bin/marker"
+[editor]
+scrolloff = 9
+restart-build = "touch marker"
+[llm]
+run-allow = ["make"]
+[task.build]
+cmd = "touch marker"
+[lsp.mine]
+command = "my-server"
+[lsp.ruff]
+except = ["format"]
+[keys.normal]
+X = ":sh touch marker"
+Y = "move_line_down"
+[keys.normal.space]
+Z = ["move_line_down", ":sh touch marker"]
+"#;
+
+    fn bound(c: &Config, keys: &str) -> Option<String> {
+        let keys: Vec<crate::key::Key> = keys.split(' ').map(|k| k.parse().unwrap()).collect();
+        match c.keymaps.lookup(crate::editor::Mode::Normal, &keys) {
+            crate::keymap::Lookup::Matched(cmds) => {
+                Some(cmds.iter().map(|c| c.doc()).collect::<Vec<_>>().join(","))
+            }
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_projects_commands_wait_for_trust() {
+        use crate::trust::{State, Store};
+        let path = project_file("trust", RISKY_PROJECT);
+        let (c, w) = load_from(None, Some(path.clone()), &Store::default());
+        assert!(w.is_empty(), "{w:?}");
+        // The harmless rest applies
+        assert_eq!(c.editor.scrolloff, 9);
+        assert_eq!(c.editor.lsp.servers["ruff"].except, ["format"]);
+        assert_eq!(bound(&c, "Y").as_deref(), Some(crate::commands::find("move_line_down").unwrap().doc));
+        // What runs commands doesn't — however it's written
+        assert_eq!(c.editor.restart_build, "");
+        assert_eq!(c.editor.restart_binary, "");
+        assert!(c.editor.llm.run_allow.is_empty());
+        assert!(c.editor.tasks.iter().all(|t| t.name != "build"));
+        assert!(!c.editor.lsp.servers.contains_key("mine"));
+        assert_ne!(bound(&c, "X").as_deref(), Some(":sh touch marker"), "the default binding stays");
+        assert!(bound(&c, "space Z").is_none_or(|b| !b.contains(":sh")));
+        let p = c.project.as_ref().expect("held back");
+        assert_eq!(p.state, State::Ask);
+        let keys: Vec<&str> = p.items.iter().map(|(k, _)| k.as_str()).collect();
+        for k in [
+            "editor.restart-binary",
+            "editor.restart-build",
+            "llm.run-allow",
+            "task.build",
+            "lsp.mine",
+            "keys.normal.X",
+            "keys.normal.space.Z",
+        ] {
+            assert!(keys.contains(&k), "{k} in {keys:?}");
+        }
+        assert!(p.items.iter().any(|(k, v)| k == "editor.restart-build" && v == "\"touch marker\""));
+        // Trusted for what it says now: all of it applies
+        let mut store = Store::default();
+        store.answer(&path, p.hash, true);
+        let (t, _) = load_from(None, Some(path.clone()), &store);
+        assert_eq!(t.project.as_ref().unwrap().state, State::Trusted);
+        assert_eq!(t.editor.restart_build, "touch marker");
+        assert_eq!(t.editor.restart_binary, "bin/marker");
+        assert_eq!(t.editor.llm.run_allow, ["make"]);
+        assert!(t.editor.tasks.iter().any(|t| t.name == "build"));
+        assert!(t.editor.lsp.servers.contains_key("mine"));
+        assert_eq!(bound(&t, "X").as_deref(), Some(":sh touch marker"));
+        // A change asks again, and holds it back meanwhile
+        fs::write(&path, RISKY_PROJECT.replace("bin/marker", "bin/other")).unwrap();
+        let (a, _) = load_from(None, Some(path.clone()), &store);
+        assert_eq!(a.project.as_ref().unwrap().state, State::Ask);
+        assert_eq!(a.editor.restart_binary, "");
+        // Ignored: held back, not asked
+        store.answer(&path, a.project.as_ref().unwrap().hash, false);
+        let (i, _) = load_from(None, Some(path.clone()), &store);
+        assert_eq!(i.project.as_ref().unwrap().state, State::Ignored);
+        assert_eq!(i.editor.restart_build, "");
+    }
+
+    #[test]
+    fn the_users_own_file_is_never_held_back() {
+        let user = project_file("user", RISKY_PROJECT);
+        let (c, _) = load_from(Some(user), None, &crate::trust::Store::default());
+        assert!(c.project.is_none());
+        assert_eq!(c.editor.restart_build, "touch marker");
+        // and a project file that sets nothing that runs has nothing to ask
+        let plain = project_file("plain", "[editor]\nscrolloff = 3\n");
+        let (p, _) = load_from(None, Some(plain), &crate::trust::Store::default());
+        assert!(p.project.is_none());
+        assert_eq!(p.editor.scrolloff, 3);
     }
 
     #[test]

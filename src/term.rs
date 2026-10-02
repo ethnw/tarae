@@ -5249,10 +5249,20 @@ impl OfferCard {
                     crate::offer::What::PluginAsk { .. } => b = vec![('y', "Allow"), ('n', "No")],
                     crate::offer::What::Run { .. } => b = vec![('y', "Run"), ('n', "No")],
                     crate::offer::What::ReviewAtEnd => b = vec![('y', "Turn on"), ('n', "No")],
+                    crate::offer::What::ProjectTrust { .. } => b = vec![('y', "Trust"), ('n', "Ignore")],
+                    crate::offer::What::NoSandbox { .. } => {
+                        b = vec![('y', "Run"), ('a', "This chat"), ('n', "No")]
+                    }
                     _ => {}
                 }
-                // A command is shown whole (`tools::COMMAND_MAX` keeps it to a card's height)
-                let most = if matches!(o.what, crate::offer::What::Run { .. }) { 24 } else { 4 };
+                // A command is shown whole (`tools::COMMAND_MAX`, `trust::SHOWN_MAX` keep it to a card's height)
+                let whole = matches!(
+                    o.what,
+                    crate::offer::What::Run { .. }
+                        | crate::offer::What::ProjectTrust { .. }
+                        | crate::offer::What::NoSandbox { .. }
+                );
+                let most = if whole { 24 } else { 4 };
                 let mut v = vec![(title, false)];
                 for part in o.question.split('\n') {
                     v.extend(wrapped(part, most));
@@ -6480,7 +6490,22 @@ fn draw_chat(
     };
     apply(out, accent)?;
     queue!(out, Print(at_end))?;
-    let title_w = 6 + badge.width() + at_end.width();
+    // Claude's commands without a sandbox (off, or none here and agreed): said while it's so, in warning
+    let room = room.saturating_sub(at_end.width());
+    let bare = match crate::tools::unsandboxed(editor) {
+        false => "",
+        true if room >= 13 => " › no sandbox",
+        true if room >= 7 => " › bare",
+        true => "",
+    };
+    let warn = editor
+        .theme
+        .try_get("warning")
+        .and_then(|s| s.fg)
+        .map_or(accent, |fg| Style { fg: Some(fg), ..accent });
+    apply(out, warn)?;
+    queue!(out, Print(bare))?;
+    let title_w = 6 + badge.width() + at_end.width() + bare.width();
     // Idle: the model it's talking to (`Opus 5.5 · high`), else "ready" — either only where it fits
     let left = w.saturating_sub(title_w + 2);
     let status: Vec<Span> = match c.state {
@@ -6881,11 +6906,20 @@ fn draw_chat_mini(
     // Title: claude › follow ……… wave
     let badge = if c.follow.paused { " › paused" } else { " › follow" };
     let wv = wave(c.started);
-    let gap = inner.saturating_sub(6 + badge.width() + wv.width());
+    // Claude's commands without a sandbox: said here too (in warning), where it fits
+    let room = inner.saturating_sub(6 + badge.width() + wv.width() + 1);
+    let bare = match crate::tools::unsandboxed(editor) {
+        true if room >= 13 => " › no sandbox",
+        true if room >= 7 => " › bare",
+        _ => "",
+    };
+    let warn = t.try_get("warning").and_then(|s| s.fg).map_or(accent, |fg| Style { fg: Some(fg), ..card });
+    let gap = inner.saturating_sub(6 + badge.width() + bare.width() + wv.width());
     rows.push((
         vec![
             sp("claude".into(), if c.focused { strong } else { dim }),
             sp(badge.into(), if c.follow.paused { faint } else { accent }),
+            sp(bare.into(), warn),
             sp(" ".repeat(gap), card),
             sp(wv, accent),
         ],
