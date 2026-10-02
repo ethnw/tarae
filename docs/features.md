@@ -286,7 +286,10 @@ cursor or document moved on are dropped.
 - `gd` definition · `gD` declaration · `gy` type definition · `gi` implementation · `gr` references · `space k` hover
   — docs render as Markdown with code in its own colors ([screenshot](screenshots/m3-hover.png)). A list of
   places (`gr`, or several `gi`) shows each one's code: the line trimmed, the name standing out, line numbers
-  right-aligned, by file then line. For `gr` the declaration (the server's own definition) comes first, marked `decl`
+  right-aligned, by file then line. For `gr` the declaration (the server's own definition) comes first, marked `decl`.
+  While the server is still starting or loading the project, `gr` doesn't wait: the name's text matches (whole
+  word, case as written) show at once, titled `text matches`, and the server's references take their place when
+  they come (it says so). A server that answers within a moment never shows them
 - **Jump list** per pane — `C-o` back · `C-i`/Tab forward · `C-s` saves a spot · `space j` lists them (with a preview;
   picking one keeps where you were, so `Tab` comes back). Go-tos, searches, `gg`/`ge` and
   switching files record where you were, and a saved spot follows later edits · `ga` = the file shown before this one

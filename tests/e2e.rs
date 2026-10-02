@@ -471,9 +471,20 @@ fn an_idle_editor_draws_nothing_and_sleeps() {
     sb.write("a.txt", "one\ntwo\n");
     let mut t = sb.spawn(&["a.txt"]);
     t.wait_text("two");
+    // (the line's blame lands late — git on a worker; a loaded machine drew it inside the measured window)
+    t.wait_for("the line's blame", |s| s.contains("just now"));
     let idle = |t: &mut Term, what: &str| {
-        // Settled: the git bar, the whole-screen redraw that follows frames sent in parts (`RESTING_REDRAW`)
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        // Settled: what lands late (the git bar, the blame, the whole-screen redraw that follows frames sent
+        // in parts — `RESTING_REDRAW`) is drawn — a second with no frame; a loaded machine takes longer, so
+        // that's waited for, not a fixed time. One that never goes quiet is caught below all the same.
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            let frames = t.frames();
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            if t.frames() == frames || std::time::Instant::now() > end {
+                break;
+            }
+        }
         let (frames, before) = (t.frames(), t.usage());
         std::thread::sleep(std::time::Duration::from_secs(2));
         let (drawn, used) = (t.frames() - frames, t.usage() - before);

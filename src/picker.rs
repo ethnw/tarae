@@ -1031,23 +1031,48 @@ const MAX_RESULTS: usize = 10_000;
 
 /// Global search — ripgrep if `rg` exists (smart case, respects .gitignore), else built-in regex scan.
 pub fn grep(root: &Path, pattern: &str) -> Result<Vec<Item>, String> {
+    rg(root, &["--smart-case", "-e", pattern], || smart_regex(pattern))
+}
+
+/// `pattern` as rg's `--smart-case` reads it: all lowercase = any case.
+fn smart_regex(pattern: &str) -> Result<regex::Regex, String> {
+    regex::RegexBuilder::new(pattern)
+        .case_insensitive(!pattern.chars().any(char::is_uppercase))
+        .build()
+        .map_err(|e| e.to_string().lines().last().unwrap_or("invalid regex").trim().to_string())
+}
+
+/// Where `word` is in the code under `root` as text (N3 — `g r` while the server is loading): whole word,
+/// case as written, by file then line.
+pub fn word_matches(root: &Path, word: &str) -> Result<Vec<Item>, String> {
+    let re = || regex::Regex::new(&format!(r"\b{}\b", regex::escape(word))).map_err(|e| e.to_string());
+    let mut items = rg(root, &["--case-sensitive", "--word-regexp", "--fixed-strings", "-e", word], re)?;
+    let at = |it: &Item| match &it.action {
+        Action::Goto { path, line, .. } => (path.clone(), *line),
+        _ => (PathBuf::new(), 0),
+    };
+    items.sort_by_key(at);
+    Ok(items)
+}
+
+/// ripgrep with `args` (each hit `path:line: text`), stopped at MAX_RESULTS — else the built-in scan with
+/// the same pattern (`re`).
+fn rg(
+    root: &Path,
+    args: &[&str],
+    re: impl FnOnce() -> Result<regex::Regex, String>,
+) -> Result<Vec<Item>, String> {
     use std::io::{BufRead, Read};
     let rg = Command::new("rg")
-        .args([
-            "--vimgrep",
-            "--no-heading",
-            "--color=never",
-            "--smart-case",
-            "--max-columns=240",
-            "-e",
-            pattern,
-        ])
+        // (a line past 240 columns shows its start, not "[Omitted long line]")
+        .args(["--vimgrep", "--no-heading", "--color=never", "--max-columns=240", "--max-columns-preview"])
+        .args(args)
         .current_dir(root)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn();
-    let Ok(mut rg) = rg else { return grep_builtin(root, pattern) };
+    let Ok(mut rg) = rg else { return grep_builtin(root, &re()?) };
     // Read as it comes and stopped at the limit — a common word in a big tree was held whole (and searched
     // to the end) before keeping the first 10k
     let err = rg.stderr.take().map(|mut e| {
@@ -1089,11 +1114,7 @@ fn parse_vimgrep(root: &Path, l: &str) -> Option<Item> {
     })
 }
 
-fn grep_builtin(root: &Path, pattern: &str) -> Result<Vec<Item>, String> {
-    let re = regex::RegexBuilder::new(pattern)
-        .case_insensitive(!pattern.chars().any(char::is_uppercase))
-        .build()
-        .map_err(|e| e.to_string().lines().last().unwrap_or("invalid regex").trim().to_string())?;
+fn grep_builtin(root: &Path, re: &regex::Regex) -> Result<Vec<Item>, String> {
     let mut out = Vec::new();
     for rel in list_files(root) {
         let Ok(src) = std::fs::read_to_string(root.join(&rel)) else { continue }; // skip binary and non-UTF-8
@@ -1245,7 +1266,7 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "hello\n타래 world\n").unwrap();
         std::fs::write(dir.join("sub/b.txt"), "no\nWorld\n").unwrap();
         std::fs::write(dir.join("target/skip.txt"), "world\n").unwrap();
-        let hits = grep_builtin(&dir, "world").unwrap();
+        let hits = grep_builtin(&dir, &smart_regex("world").unwrap()).unwrap();
         let labels: Vec<_> = hits.iter().map(|i| i.label.clone()).collect();
         assert_eq!(
             labels,

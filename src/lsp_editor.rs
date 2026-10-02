@@ -73,12 +73,14 @@ pub struct LspState {
 /// One `g r`: the name asked about · where it's declared (the server's definition, asked beside it — None
 /// until it answers) · the list once shown (picker id and its places, to put the declaration first if
 /// that answer comes later).
+/// · while the server was loading, the text matches shown meanwhile (N3 — that picker's id).
 #[derive(Default)]
 struct Refs {
     generation: u64,
     name: String,
     declared: Option<Vec<(std::path::PathBuf, usize)>>,
     shown: Option<(u64, Vec<Place>)>,
+    texts: Option<u64>,
 }
 
 /// A place of a list with the code there: path, line and byte column (from 0), the line's text.
@@ -207,6 +209,10 @@ const IDLE_STOP: std::time::Duration =
 /// folders stayed the full ten minutes): a grace for a quick reopen, then it stops.
 const ROOT_GONE: std::time::Duration =
     std::time::Duration::from_millis(if cfg!(test) { 30 } else { 30 * 1000 });
+
+/// How long `g r`'s text matches wait for a busy server's own answer before they show (N3) — one that
+/// answers by then (warm rust-analyzer: 35–68 ms) isn't preceded by a flash of text matches.
+const TEXT_GRACE: std::time::Duration = std::time::Duration::from_millis(150);
 
 /// How often one question (same place, same text) is put off for a busy server before it's given up —
 /// asked again at each piece of work that ends (rust-analyzer reports a dozen while loading a project).
@@ -575,6 +581,22 @@ impl Editor {
                     self.lsp.failed.remove(&name);
                     self.set_success(format!("{name} ready"));
                     self.lsp_flush();
+                    // A question put off while it started (N3): asked once it's up — by the end of the work
+                    // it begins now (indexing), or after a moment if it begins none
+                    if self.lsp.ask_when_idle.as_ref().is_some_and(|w| w.0 == cid) {
+                        self.events.jobs().spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(if cfg!(test) {
+                                5
+                            } else {
+                                500
+                            }));
+                            move |ed: &mut Editor| {
+                                if ed.client(cid).is_some_and(|c| c.progress.is_empty()) {
+                                    ed.ask_again(cid);
+                                }
+                            }
+                        });
+                    }
                     return;
                 }
                 let Some(p) = self.lsp.pending.remove(&(cid, id)) else { return };
@@ -2182,7 +2204,7 @@ impl Editor {
         let from = crate::completion::word_start(&doc.text, head);
         let name: String =
             doc.text.byte_slice(from..).chars().take_while(|&c| crate::completion::is_word(c)).collect();
-        self.lsp.refs = Refs { generation: self.lsp.refs.generation + 1, name, declared: None, shown: None };
+        self.lsp.refs = Refs { generation: self.lsp.refs.generation + 1, name, ..Refs::default() };
         self.goto_ask(goto, false);
     }
 
@@ -2190,6 +2212,23 @@ impl Editor {
     fn goto_ask(&mut self, goto: Goto, again: bool) {
         if again && let Some(t) = self.lsp.trace.as_mut() {
             t.step("waited for the server");
+        }
+        // A server still starting can't be asked yet (N3): the text matches meanwhile, the question once
+        // it's up
+        if goto == Goto::References
+            && !again
+            && let Some(cid) = self.doc().lsp.client
+            && let Some(name) = self.client(cid).filter(|c| !c.ready).map(|c| c.name.clone())
+        {
+            let d = self.doc();
+            let head = d.selection().primary().cursor(&d.text);
+            let p = Pending { kind: Kind::Goto(goto), doc: d.id, version: d.version(), head };
+            self.put_off(cid, &p);
+            self.text_matches(cid);
+            if let Some(t) = self.lsp.trace.as_mut() {
+                t.step("server starting");
+            }
+            return self.set_status(format!("{name} is starting — {} when it's ready", goto.noun()));
         }
         let Some(cid) = self.ready_client(&Kind::Goto(goto)) else { return self.trace_ends("not asked") };
         let Some(c) = self.client(cid) else { return };
@@ -2210,6 +2249,10 @@ impl Editor {
         if let Some(t) = self.lsp.trace.as_mut() {
             t.step(if again { "asked again" } else { "sent" });
         }
+        // A server still loading answers late, or empty: the name's text matches meanwhile (N3)
+        if goto == Goto::References && !again && self.client(cid).is_some_and(|c| !c.progress.is_empty()) {
+            self.text_matches(cid);
+        }
         // References: where it's declared, asked beside them — that row goes first, marked
         let defines = self.client(cid).is_some_and(|c| {
             let cap = &c.caps["definitionProvider"];
@@ -2219,6 +2262,60 @@ impl Editor {
             let generation = self.lsp.refs.generation;
             self.lsp_request(Kind::Declared { generation }, "textDocument/definition", json!({}));
         }
+    }
+
+    /// `g r` with server `cid` still loading (N3): the name's text matches in its project (rg — whole word,
+    /// case as written) listed at once, titled as text matches; the server's references take their place
+    /// when they come (`list_places`). Not if the server answered first, or another list is up.
+    fn text_matches(&mut self, cid: ClientId) {
+        let Some(c) = self.client(cid) else { return };
+        let (root, server) = (c.root.clone(), c.name.clone());
+        let name = self.lsp.refs.name.clone();
+        if name.is_empty() {
+            return;
+        }
+        let generation = self.lsp.refs.generation;
+        let here = std::env::current_dir().unwrap_or_else(|_| root.clone());
+        let asked = std::time::Instant::now();
+        self.events.jobs().spawn(move || {
+            // (paths as the server's list shows them — from where tarae runs, not the server's root)
+            let found = crate::picker::word_matches(&root, &name).map(|items| {
+                items
+                    .into_iter()
+                    .map(|mut it| {
+                        if let Action::Goto { path, .. } = &it.action
+                            && let Ok(rel) = path.strip_prefix(&root)
+                        {
+                            let rest = it.label[rel.to_string_lossy().len()..].to_string();
+                            it.label =
+                                format!("{}{rest}", path.strip_prefix(&here).unwrap_or(path).display());
+                        }
+                        it
+                    })
+                    .collect::<Vec<_>>()
+            });
+            // (a server that answers within the grace never shows text matches — no flash of a list)
+            std::thread::sleep(TEXT_GRACE.saturating_sub(asked.elapsed()));
+            move |ed: &mut Editor| {
+                if ed.lsp.refs.generation != generation || ed.lsp.refs.shown.is_some() || ed.picker.is_some()
+                {
+                    return;
+                }
+                let items = match found {
+                    Ok(items) if !items.is_empty() => items,
+                    _ => return,
+                };
+                // (short — the title holds a few words; the server's state is said beside it)
+                let mut picker = Picker::new("text matches", items, true).grouped(here);
+                picker.emphasis = regex::Regex::new(&format!(r"\b{}\b", regex::escape(&name))).ok();
+                ed.open_picker(picker, None);
+                ed.lsp.refs.texts = ed.picker.as_ref().map(|p| p.id);
+                ed.set_status(format!("text matches of `{name}` until {server} is ready"));
+                if let Some(t) = ed.lsp.trace.as_mut() {
+                    t.step("text matches shown");
+                }
+            }
+        });
     }
 
     /// A go-to's places as a list (N2): each row the code there, the name it's about standing out, by file
@@ -2244,6 +2341,22 @@ impl Editor {
                 let root = std::env::current_dir().unwrap_or_default();
                 let declared = ed.lsp.refs.declared.clone().unwrap_or_default();
                 let items = place_items(&root, places.clone(), &declared);
+                // The text matches shown while the server loaded (N3): its answer takes their place — said;
+                // once they were left (one picked, or closed), the answer isn't pushed on you
+                if let Some(id) = ed.lsp.refs.texts {
+                    match ed.picker.as_mut().filter(|p| p.id == id) {
+                        Some(p) => {
+                            p.title = goto.noun().to_string();
+                            p.selected = 0;
+                            p.set_items(items);
+                            ed.lsp.refs.shown = Some((id, places));
+                            ed.set_status(format!("the server's {} replaced the text matches", goto.noun()));
+                            ed.trace_ends("list (text matches replaced)");
+                        }
+                        None => ed.trace_ends("not listed (the text matches were left)"),
+                    }
+                    return;
+                }
                 let mut picker = Picker::new(goto.noun(), items, true).grouped(root);
                 let name = &ed.lsp.refs.name;
                 picker.emphasis = (!name.is_empty())
@@ -3536,6 +3649,127 @@ mod tests {
         std::fs::remove_dir_all(file.parent().unwrap()).ok();
     }
 
+    /// N3: `g r` while the server is loading lists the name's text matches at once (whole word, case as
+    /// written — not `ab`, not `A`), titled as such; the server's answer takes their place, said so. Left
+    /// (closed) before the answer came, the text matches aren't followed by a list popping up.
+    #[test]
+    fn references_while_loading_show_text_matches_until_the_answer() {
+        let (mut ed, file, _log) = setup("refs-loading", "fn a() {}\nfn b() { a() }\n// ab, A\n");
+        let dir = file.parent().unwrap().to_path_buf();
+        std::fs::write(dir.join("other.rs"), "use a;\nlet ab = 1;\n").unwrap();
+        let cid = ready(&mut ed);
+        let progress = |kind: &str| {
+            json!({ "method": "$/progress", "params": { "token": "rustAnalyzer/Indexing",
+                "value": { "kind": kind, "title": "Indexing" } } })
+        };
+        ed.on_lsp_message(cid, progress("begin"));
+        ed.doc_mut().set_selection(Selection::point(3));
+        feed(&mut ed, "gr");
+        settle_for(&mut ed, 5, |ed| ed.picker.is_some());
+        let shown = |ed: &mut Editor| -> (String, Vec<String>) {
+            let p = ed.picker.as_mut().expect("a list");
+            let rows = p.visible(20).into_iter().filter(|r| r.label.contains(':')).map(|r| r.label).collect();
+            (p.title.clone(), rows)
+        };
+        let (title, rows) = shown(&mut ed);
+        assert_eq!(title, "text matches");
+        assert!(
+            ed.status.as_ref().is_some_and(|s| s.0 == "text matches of `a` until fake is ready"),
+            "{:?}",
+            ed.status
+        );
+        assert!(
+            rows.contains(&"1: fn a() {}".to_string()) && rows.contains(&"2: fn b() { a() }".to_string()),
+            "{rows:?}"
+        );
+        assert!(rows.contains(&"1: use a;".to_string()), "{rows:?}");
+        // (the fake server's log in that folder has the file's text too — its line isn't what's checked)
+        assert!(
+            !rows.iter().any(|r| r.ends_with("// ab, A") || r.ends_with("let ab = 1;")),
+            "whole words, case as written: {rows:?}"
+        );
+        // The server's answer takes their place
+        let at = |line: u64, col: u64| {
+            json!({ "uri": lsp::uri(&file), "range": {
+            "start": { "line": line, "character": col }, "end": { "line": line, "character": col + 1 } } })
+        };
+        let id = pending_of(&ed, Kind::Goto(Goto::References));
+        ed.on_lsp_message(cid, json!({ "id": id, "result": [at(0, 3), at(1, 9)] }));
+        settle_for(&mut ed, 5, |ed| ed.picker.as_ref().is_some_and(|p| p.title == "references"));
+        let (title, rows) = shown(&mut ed);
+        assert_eq!(
+            (title.as_str(), rows),
+            ("references", vec!["1: fn a() {}".into(), "2: fn b() { a() }".into()])
+        );
+        assert!(
+            ed.status.as_ref().is_some_and(|s| s.0.contains("replaced the text matches")),
+            "{:?}",
+            ed.status
+        );
+        // Closed before the answer came: no list pops up after
+        feed(&mut ed, "<esc>gr");
+        settle_for(&mut ed, 5, |ed| ed.picker.is_some());
+        feed(&mut ed, "<esc>");
+        let id = pending_of(&ed, Kind::Goto(Goto::References));
+        ed.on_lsp_message(cid, json!({ "id": id, "result": [at(0, 3), at(1, 9)] }));
+        settle_for(&mut ed, 1, |ed| ed.picker.is_some());
+        assert!(ed.picker.is_none(), "the answer isn't pushed on you");
+        // Not loading: no text matches — the server's list only
+        ed.on_lsp_message(cid, progress("end"));
+        feed(&mut ed, "gr");
+        let id = pending_of(&ed, Kind::Goto(Goto::References));
+        ed.on_lsp_message(cid, json!({ "id": id, "result": [at(0, 3), at(1, 9)] }));
+        settle_for(&mut ed, 5, |ed| ed.picker.is_some());
+        assert_eq!(ed.picker.as_ref().map(|p| p.title.as_str()), Some("references"));
+        settle_for(&mut ed, 1, |ed| ed.picker.as_ref().is_some_and(|p| p.title != "references"));
+        assert_eq!(ed.picker.as_ref().map(|p| p.title.as_str()), Some("references"), "and none come after");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// N3: a server still starting can't be asked — the text matches show, it's said, and the question goes
+    /// once it's up; its answer takes their place. A busy server that answers within `TEXT_GRACE` never has
+    /// text matches flash up before its list.
+    #[test]
+    fn references_while_the_server_starts_and_a_quick_answer() {
+        let (mut ed, file, log) = setup("refs-starting", "fn a() {}\nfn b() { a() }\n");
+        let cid = ed.doc().lsp.client.unwrap();
+        ed.doc_mut().set_selection(Selection::point(3));
+        feed(&mut ed, "gr");
+        assert!(ed.status.as_ref().is_some_and(|s| s.0 == "fake is starting — references when it's ready"));
+        settle_for(&mut ed, 5, |ed| ed.picker.is_some());
+        assert_eq!(ed.picker.as_ref().map(|p| p.title.as_str()), Some("text matches"));
+        assert!(!sent(&log).contains("textDocument/references"), "not asked before it's up");
+        let init = json!({ "id": 0, "result": { "capabilities": { "positionEncoding": "utf-8" } } });
+        ed.on_lsp_message(cid, init);
+        settle_for(&mut ed, 5, |ed| ed.lsp.pending.values().any(|p| p.kind == Kind::Goto(Goto::References)));
+        let at = |line: u64, col: u64| {
+            json!({ "uri": lsp::uri(&file), "range": {
+            "start": { "line": line, "character": col }, "end": { "line": line, "character": col + 1 } } })
+        };
+        let id = pending_of(&ed, Kind::Goto(Goto::References));
+        ed.on_lsp_message(cid, json!({ "id": id, "result": [at(0, 3), at(1, 9)] }));
+        settle_for(&mut ed, 5, |ed| ed.picker.as_ref().is_some_and(|p| p.title == "references"));
+        assert_eq!(
+            ed.picker.as_ref().map(|p| p.title.as_str()),
+            Some("references"),
+            "asked once up, replaced"
+        );
+        // Busy, but its answer comes within the grace: the list only — no text matches before or after
+        feed(&mut ed, "<esc>");
+        let progress = json!({ "method": "$/progress", "params": { "token": "t",
+            "value": { "kind": "begin", "title": "cargo check" } } });
+        ed.on_lsp_message(cid, progress);
+        feed(&mut ed, "gr");
+        // (the answer after the text search is done — a tiny folder — but within the grace)
+        std::thread::sleep(Duration::from_millis(60));
+        let id = pending_of(&ed, Kind::Goto(Goto::References));
+        ed.on_lsp_message(cid, json!({ "id": id, "result": [at(0, 3), at(1, 9)] }));
+        settle_for(&mut ed, 1, |ed| ed.picker.as_ref().is_some_and(|p| p.title != "references"));
+        assert_eq!(ed.picker.as_ref().map(|p| p.title.as_str()), Some("references"));
+        assert!(ed.lsp.refs.texts.is_none(), "no text matches came up");
+        std::fs::remove_dir_all(file.parent().unwrap()).ok();
+    }
+
     /// A go-to is timed from its key to the frame that shows its answer (N1): one line in the log once
     /// that frame is drawn, each step in order — what the server took, the wait for its work, the re-ask,
     /// our list and our frame.
@@ -3549,13 +3783,15 @@ mod tests {
         };
         ed.on_lsp_message(cid, progress("begin"));
         feed(&mut ed, "jwwgr");
+        // (the server is busy: the text matches come first — N3)
+        settle_for(&mut ed, 5, |ed| ed.picker.is_some());
         let id = pending_of(&ed, Kind::Goto(Goto::References));
         ed.on_lsp_message(cid, json!({ "id": id, "result": [] }));
         ed.on_lsp_message(cid, progress("end"));
         let id = pending_of(&ed, Kind::Goto(Goto::References));
         let at = |line: u64| json!({ "uri": lsp::uri(&file), "range": { "start": { "line": line, "character": 3 }, "end": { "line": line, "character": 4 } } });
         ed.on_lsp_message(cid, json!({ "id": id, "result": [at(0), at(1)] }));
-        settle_for(&mut ed, 5, |ed| ed.picker.is_some());
+        settle_for(&mut ed, 5, |ed| ed.picker.as_ref().is_some_and(|p| p.title == "references"));
         assert!(ed.picker.is_some(), "listed");
         assert!(ed.lsp.traced.is_empty(), "not before it's on screen");
         crate::term::render(&mut ed, &mut Vec::new(), 100, 30).unwrap();
@@ -3567,6 +3803,7 @@ mod tests {
             steps,
             [
                 "sent",
+                "text matches shown",
                 "answered (0)",
                 "main loop",
                 "answered empty while busy (Indexing)",
@@ -3575,7 +3812,7 @@ mod tests {
                 "answered (2)",
                 "main loop",
                 "lines read",
-                "list",
+                "list (text matches replaced)",
                 "drawn"
             ],
             "{line}"
