@@ -165,6 +165,7 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
             Ok(())
         }
         "sandbox-disallow" => editor.sandbox_disallow(rest),
+        "chat-screen" => crate::chat::attach_screen(editor),
         "sandbox-blocked" => {
             editor.sandbox_blocked(crate::blocked::Which::Either);
             Ok(())

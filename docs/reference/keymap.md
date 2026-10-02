@@ -433,6 +433,7 @@ Type `:` in normal mode. `Tab` completes command names and their arguments (path
 | `:sandbox-allowed` |  | What Claude may do past the defaults — take one back |
 | `:sandbox-disallow` |  | Take back a path or port :sandbox-allowed lists |
 | `:sandbox-blocked` |  | What the sandbox blocked in Claude's last run: open it |
+| `:chat-screen` |  | Send the screen, as text, with your next chat message |
 | `:sandbox-grant` |  | A row of :sandbox-blocked's list, on its card |
 | `:log-open` |  | Open tarae's log (language servers, errors) |
 | `:messages` |  | This session's notifications again, newest first |

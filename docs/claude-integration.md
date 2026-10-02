@@ -67,6 +67,15 @@ first time a version is sent, and just the area around the cursor for files over
 above your message (`main.rs · L13–18 · 3 diagnostics`). Answers render as Markdown, with code blocks in their
 language's colors.
 
+When what you mean is somewhere else on the screen (a card, a panel, a message, the terminal's output), Claude
+can **ask to see your screen**. A card says what would go: the screen as text, whether the terminal panel is in
+it, and that Claude can only look, with no keys or clicks. `y` sends it once, `a` lets Claude look again in this
+conversation without asking, `n` says no. What goes is the screen as it is just after your answer, without the
+card. `llm.screen-terminal = false` leaves the terminal panel out: its rows go blank, and the card says so.
+To send the screen yourself, use `C-s` (below).
+
+![Claude wants to see your screen: a card says it goes as text, 140×40, that Claude can only look, and that it includes the terminal panel (14 rows), with y Once, a This chat and n No](screenshots/chat-screen.png)
+
 The chat reads your CLAUDE.md files and Claude Code settings the way `claude` does, so project rules apply to its
 answers and edits. Two things differ on purpose: hooks don't run, and edits always come to you as a review, even
 if a settings file allows them. `llm.chat-settings = false` starts it clean.
@@ -88,6 +97,7 @@ each one while the chat keeps the keys.
 | `C-c` | Stop the answer (the conversation stays) |
 | `C-r` | Replace the selection with the answer's code — through the same review |
 | `C-y` | Copy the code |
+| `C-s` | Send the screen with your next message: what you see, as text (`:chat-screen` from anywhere). The line over the input says `screen 140×40 goes with it`; Backspace in the empty input takes it off. The message's row opens a copy of what went |
 | `C-]` (`C-g`) | Go to where Claude looked or pointed (again = one further back) |
 | `C-f` | Follow mode on/off (resumes if you took over) |
 | `C-z` | Undo what Claude changed in its last turn ([more](#undoing-a-turn)) |

@@ -45,7 +45,9 @@ processes, the network) use a harmless stand-in — a marker file made in the te
 never the real command or a real path outside that dir, not even in code meant never to run. When the work takes several steps, lay them out first with the plan tool \
 and keep it current as you go (the step you're on doing, finished ones done). Each user message starts with <editor-context>: the file the user is looking at, \
 cursor line, the lines on screen (and any other file shown beside it), selection, diagnostics and the other \
-open files — \"this\" and \"here\" usually mean the selection, the cursor or what's on screen. Files marked unsaved differ from disk — trust the \
+open files — \"this\" and \"here\" usually mean the selection, the cursor or what's on screen. When what they \
+mean is on their screen but not in the context (a panel, a card, a message, the terminal panel's output), the \
+screen tool shows you their screen as text — they're asked first, and it only looks. Files marked unsaved differ from disk — trust the \
 text given in the context over what Read returns. When you point at code, cite it as path:line (relative to the \
 project root) — the user can jump there; their editor follows you, showing the code you read and the code you \
 cite. When you explain how code works, walk the user through it in the order of the flow: right before you \
@@ -67,7 +69,9 @@ note(reply_to=N); the chat answer is a short summary.";
 /// come to tarae as permission requests and show as a review first (`edits.rs`).
 const TOOLS: &str = "Read,Grep,Glob,Edit,Write";
 /// Not Read, Grep or Glob: allowed by name they read anywhere unasked (measured — `reads.rs` answers them).
-const ALLOWED: &str = "mcp__tarae__note,mcp__tarae__run_tests,mcp__tarae__run,mcp__tarae__plan";
+/// (`screen` asks the user itself — `seeing.rs`)
+const ALLOWED: &str =
+    "mcp__tarae__note,mcp__tarae__run_tests,mcp__tarae__run,mcp__tarae__plan,mcp__tarae__screen";
 
 /// Settings laid over the user's and the project's when they're loaded (`llm.chat-settings`).
 const CHAT_SETTINGS: &str = r#"{"permissions":{"ask":["Edit","Write"]},"disableAllHooks":true}"#;
@@ -126,8 +130,18 @@ pub struct Msg {
     /// `Role::Tool`: the call, and its id (its result may finish the row — a test run's verdict).
     pub look: Option<Look>,
     pub call: String,
+    /// A user message's copy of the screen that went with it (`C-s`) — its chip row opens it.
+    pub attached: Option<Link>,
     /// Wrapped lines (text length, width, lines) — only changed messages are rewrapped, even while streaming.
     pub cache: RefCell<Rendered>,
+}
+
+/// The screen as the user saw it, waiting to go with their next message (`C-s` · `:chat-screen`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Shot {
+    pub text: String,
+    pub cols: u16,
+    pub rows: u16,
 }
 
 /// (text length, width, wrapped lines).
@@ -141,6 +155,7 @@ impl Msg {
             chip: chip.into(),
             look: None,
             call: String::new(),
+            attached: None,
             cache: RefCell::new(None),
         }
     }
@@ -195,6 +210,11 @@ pub struct Chat {
     /// for their card (`reads.rs`).
     pub allowed: crate::allow::Allowed,
     pub reads: std::collections::VecDeque<crate::reads::Pending>,
+    /// Claude may look at the screen without asking for the rest of this conversation (`a` on its card —
+    /// `seeing.rs`).
+    pub sees: bool,
+    /// The screen waiting to go with the next message (`C-s`).
+    pub screen: Option<Shot>,
     /// claude's session for this conversation (from its `init`) · the one the next process resumes.
     pub session: Option<String>,
     resume: Option<String>,
@@ -229,6 +249,8 @@ impl Chat {
             unprotected: false,
             allowed: Default::default(),
             reads: Default::default(),
+            sees: false,
+            screen: None,
             session: None,
             resume: None,
             past: Vec::new(),
@@ -284,6 +306,7 @@ impl Chat {
             let found: Vec<Link> = match m.role {
                 Role::Tool => m.look.iter().filter_map(|l| l.link.clone()).collect(),
                 Role::Assistant => refs_in(&m.text).into_iter().map(|(_, l)| l).collect(),
+                Role::User => m.attached.iter().cloned().collect(),
                 _ => Vec::new(),
             };
             for l in found {
@@ -743,6 +766,29 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
 
 // ── Send ───────────────────────────────────────────────────────────────────
 
+/// `C-s` in the chat · `:chat-screen` — the screen as the user sees it now (the last frame, as text) goes
+/// with their next message; the chat opens if it isn't, and the line over the input says so.
+pub fn attach_screen(ed: &mut Editor) -> Result<(), String> {
+    let (frame, cols, rows) = ed.last_frame.as_ref().ok_or("nothing is on screen yet")?;
+    let (cols, rows) = (*cols, *rows);
+    let text = crate::screen::text(frame, cols, rows).ok_or("this screen can't be read as text")?;
+    if ed.chat.is_none() {
+        open(ed);
+    }
+    let c = ed.chat.as_mut().ok_or("no chat")?;
+    c.focused = true;
+    c.screen = Some(Shot { text, cols, rows });
+    Ok(())
+}
+
+/// Where a sent screen's copy goes (the temp folder — one per message).
+fn screen_copy_path() -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("tarae-screen-{}-{n}.txt", std::process::id()))
+}
+
 pub fn send(ed: &mut Editor) {
     let Some(c) = &ed.chat else { return };
     let question = c.input.trim().to_string();
@@ -770,6 +816,16 @@ pub fn submit(ed: &mut Editor, question: &str, about: Option<String>, chip: Opti
         true => context,
         false => format!("{context}\n<editor-note>\n{}\n</editor-note>", told.join("\n")),
     };
+    // The screen the user attached (`C-s`): as they saw it, characters only
+    let shot = c.screen.take();
+    let context = match &shot {
+        Some(s) => format!(
+            "{context}\n<screen cols=\"{}\" rows=\"{}\" note=\"the user's editor as they saw it, characters only \
+             (no colors)\">\n{}\n</screen>",
+            s.cols, s.rows, s.text
+        ),
+        None => context,
+    };
     let content = match about {
         Some(a) => format!("{context}\n{a}\n\n{question}"),
         None => format!("{context}\n\n{question}"),
@@ -778,6 +834,7 @@ pub fn submit(ed: &mut Editor, question: &str, about: Option<String>, chip: Opti
     if let Err(e) = ok {
         // (said again with the next message that goes)
         ed.checkpoints.tell = told;
+        c.screen = shot;
         c.kill();
         c.msgs.push(Msg::new(Role::Note, format!("claude: {e} — press enter to retry"), ""));
         return false;
@@ -786,7 +843,25 @@ pub fn submit(ed: &mut Editor, question: &str, about: Option<String>, chip: Opti
     c.hop = 0;
     c.follow.new_turn();
     c.unfolded = false;
-    c.msgs.push(Msg::new(Role::User, question, chip.unwrap_or(ctx_chip)));
+    let mut chip = chip.unwrap_or(ctx_chip);
+    let mut msg = Msg::new(Role::User, question, String::new());
+    if let Some(s) = shot {
+        // A copy of what went, to open from its row (written on a worker)
+        chip.push_str(&format!(" · screen {}×{}", s.cols, s.rows));
+        let path = screen_copy_path();
+        msg.attached = Some(Link { path: path.clone(), line: 0 });
+        ed.events.jobs().spawn(move || {
+            let r = std::fs::write(&path, format!("{}\n", s.text));
+            move |ed: &mut Editor| {
+                if let Err(e) = r {
+                    ed.set_error(format!("couldn't keep a copy of the screen: {e}"));
+                }
+            }
+        });
+    }
+    msg.chip = chip;
+    let c = ed.chat.as_mut().expect("sent above");
+    c.msgs.push(msg);
     c.scroll = 0;
     c.state = State::Thinking;
     c.started = Instant::now();
@@ -1100,6 +1175,9 @@ fn look(name: &str, input: &serde_json::Value) -> Look {
             };
             Look { verb: "run", what, pattern: true, range: String::new(), link: None }
         }
+        "mcp__tarae__screen" => {
+            Look { verb: "look", what: "your screen".into(), pattern: true, range: String::new(), link: None }
+        }
         other => {
             Look { verb: "use", what: other.to_string(), pattern: false, range: String::new(), link: None }
         }
@@ -1242,6 +1320,13 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
             }
         }
         (Code::Char('r'), true, _) => apply_code(ed),
+        (Code::Char('s'), true, _) => {
+            if let Err(e) = attach_screen(ed) {
+                ed.set_status(e);
+            }
+        }
+        // An empty input: Backspace takes the screen off
+        (Code::Backspace, ..) if c.input.is_empty() && c.screen.is_some() => c.screen = None,
         // (C-g too — zellij takes it for its lock mode)
         (Code::Char(']') | Code::Char('g'), true, _) => follow(ed),
         (Code::Char('f'), true, _) => crate::follow::toggle(ed),

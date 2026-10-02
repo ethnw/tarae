@@ -5,7 +5,7 @@
 02   1                                                              claude › follow              ▂▅▆
 03   2 ▎ Counts how often each word appears.                        ▎ commit it
 04     ▎                                                            ◦ thinking…
-05     ▎ Words are split on whitespace; case is kept.               C-c stop  C-f unfollow
+05     ▎ Words are split on whitespace; case is kept.               space l open the chat
 06   5 pub fn word_counts(text: &str) -> HashMap<&str, usize> {   ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
 07   6     let mut counts = HashMap::new();
 08   7     for word in text.split_whitespace() {
@@ -64,10 +64,10 @@
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00  ddddd  f  ddd  f  TTTTTTT
 01   A
-02   f                                                              TTTTTT a aaaaaa              aaa
+02   f                                                              dddddd a aaaaaa              aaa
 03   f                                                              a TTTTTT TT
 04                                                                  f fffffffff
-05                                                                  DDD ffff  DDD ffffffff
+05                                                                  DDDDD D ffff fff ffff
 06   f
 07   f
 08   f

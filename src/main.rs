@@ -65,6 +65,7 @@ mod sandbox;
 mod saver;
 mod screen;
 mod search;
+mod seeing;
 mod selection;
 mod session;
 mod settings;

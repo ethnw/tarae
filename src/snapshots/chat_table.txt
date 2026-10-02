@@ -41,7 +41,7 @@
 38                                                                                           ▐
 39                                                                                           ▐  ────────────────────────────────────────────────────────
 40                                                                                           ▐  › Ask about demo.rs…
-41                                                                                           ▐  enter send  esc editor  C-l new  C-f unfollow
+41                                                                                           ▐  enter send  esc editor  C-s screen  C-l new
 42  ▐ NORMAL ▌                                                                                                                    rust   utf-8 LF   1:1
 43
 ## bg · surface per cell, blank = ui.background
@@ -131,7 +131,7 @@
 38
 39                                                                                              ffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 40                                                                                              A fff fffff ffffffff
-41                                                                                              DDDDD ffff  DDD ffffff  DDD fff  DDD ffffffff
+41                                                                                              DDDDD ffff  DDD ffffff  DDD ffffff  DDD fff
 42  a BBBBBB a                                                                                                                    dddd   ddddd dd   TTT
 43
 ## legend

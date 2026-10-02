@@ -27,7 +27,7 @@
 24                                                             ▐
 25                                                             ▐  ────────────────────────────────────
 26                                                             ▐  › Ask about demo.rs…
-27                                                             ▐  enter send  esc editor  C-l new
+27                                                             ▐  enter send  esc editor  C-s screen
 28  ▐ NORMAL ▌                                                                  rust   utf-8 LF   1:1
 29
 ## bg · surface per cell, blank = ui.background
@@ -89,7 +89,7 @@
 24
 25                                                                ffffffffffffffffffffffffffffffffffff
 26                                                                A fff fffff ffffffff
-27                                                                DDDDD ffff  DDD ffffff  DDD fff
+27                                                                DDDDD ffff  DDD ffffff  DDD ffffff
 28  a BBBBBB a                                                                  dddd   ddddd dd   TTT
 29
 ## legend

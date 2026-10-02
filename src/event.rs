@@ -110,5 +110,14 @@ impl Jobs {
 
 /// One copy of the thread-spawn machinery for every job, not one per job type.
 fn run(job: Box<dyn FnOnce() + Send>) {
+    #[cfg(not(test))]
     thread::spawn(job);
+    // Tests: the worker carries the test's name (libtest names its threads after them), so a failure on
+    // it says which test it ran for
+    #[cfg(test)]
+    {
+        let name = thread::current().name().map(str::to_string);
+        let worker = name.map_or_else(thread::Builder::new, |n| thread::Builder::new().name(n));
+        worker.spawn(job).expect("failed to spawn thread");
+    }
 }

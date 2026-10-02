@@ -224,6 +224,8 @@ pub fn blame_text(b: &Blame, now: i64) -> String {
 }
 
 pub(crate) fn git(dir: &Path, args: &[&str], input: Option<&str>) -> Result<String, String> {
+    #[cfg(test)]
+    not_in_this_repository(dir, args);
     let mut cmd = Command::new("git");
     // A session of its own: ssh or gpg asking for a passphrase can't take the terminal (it fails instead)
     crate::dap::new_session(&mut cmd);
@@ -252,6 +254,35 @@ pub(crate) fn git(dir: &Path, args: &[&str], input: Option<&str>) -> Result<Stri
         return Err(err.lines().find(|l| !l.trim().is_empty()).unwrap_or("git failed").to_string());
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Tests only: whether git run in `dir` would work on tarae's own repository (the nearest `.git` up from it
+/// is this crate's).
+#[cfg(test)]
+fn in_this_repository(dir: &Path) -> bool {
+    let own = std::fs::canonicalize(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let dir = dir.ancestors().find_map(|d| std::fs::canonicalize(d).ok()).unwrap_or_default();
+    dir.ancestors().find(|d| d.join(".git").exists()) == Some(own.as_path())
+}
+
+/// Tests only: no test runs git in tarae's own repository — even a read can write there (`git diff`
+/// refreshes the index), and a sandboxed run reports it as a denial. One that does stops the whole run,
+/// naming the command and where it came from (past libtest's capture: an abort loses what it captured).
+#[cfg(test)]
+pub(crate) fn not_in_this_repository(dir: &Path, args: &[&str]) {
+    if in_this_repository(dir) {
+        // (a job's worker is named after the test it ran for — `event::run`)
+        let test = std::thread::current().name().unwrap_or("a test").to_string();
+        let line = format!(
+            "{test} ran `git {}` in tarae's own repository ({}) — give it a repository of its own in its \
+             temp folder\n{}\n",
+            args.join(" "),
+            dir.display(),
+            std::backtrace::Backtrace::force_capture()
+        );
+        let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+        std::process::abort();
+    }
 }
 
 /// Blame state for the current document (on/off is `editor.git-blame`).
@@ -505,6 +536,24 @@ impl Editor {
 mod tests {
     use super::*;
     use crate::git::hunks;
+
+    /// The tripwire's question: this crate's folders (a subfolder too, and one that isn't there yet) are
+    /// this repository; a repository of a test's own, even one made under `target/`, is not.
+    #[test]
+    fn tests_know_this_repository() {
+        let own = Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert!(in_this_repository(own));
+        assert!(in_this_repository(&own.join("src")));
+        assert!(in_this_repository(&own.join("target/not-there-yet")));
+        let dir = own.join(format!("target/tarae-own-repo-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let ok = std::process::Command::new("git").args(["init", "-q"]).current_dir(&dir).output().unwrap();
+        assert!(ok.status.success());
+        assert!(!in_this_repository(&dir), "a repository of its own");
+        assert!(!in_this_repository(&std::env::temp_dir()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     /// Changed files come diffed and in `git status` order, however many workers took them.
     #[test]

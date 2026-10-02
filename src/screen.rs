@@ -520,6 +520,46 @@ impl Screen {
     }
 }
 
+/// A whole frame as the text it shows (`w`×`h` cells, a row a line, trailing blanks and rows dropped) — what
+/// goes to Claude for "the screen" (`chat::attach_screen`). None: a frame this doesn't read.
+pub fn text(frame: &[u8], w: u16, h: u16) -> Option<String> {
+    text_hiding(frame, w, h, None)
+}
+
+/// A part of the screen left out of its text: rows `rows` (first, last), from the left edge up to column
+/// `cols_end`, blanked — `note` on its first row says so.
+pub struct Hidden {
+    pub rows: (usize, usize),
+    pub cols_end: usize,
+    pub note: String,
+}
+
+/// `text`, with `hide` left out (the terminal panel, when `llm.screen-terminal` is off).
+pub fn text_hiding(frame: &[u8], w: u16, h: u16, hide: Option<&Hidden>) -> Option<String> {
+    let mut g = Grid::new(w as usize, h as usize);
+    g.apply(frame)?;
+    let mut rows: Vec<String> = (0..g.h)
+        .map(|y| {
+            let hid = hide.filter(|d| (d.rows.0..=d.rows.1).contains(&y));
+            let mut row: Vec<u8> = Vec::new();
+            if let Some(d) = hid {
+                let note: String =
+                    if y == d.rows.0 { d.note.chars().take(d.cols_end).collect() } else { String::new() };
+                row.extend(format!("{note:<width$}", width = d.cols_end).bytes());
+            }
+            // (cells by column: a wide one takes two, its second has no width)
+            let from = hid.map_or(0, |d| d.cols_end);
+            let cells = g.row(y).iter().enumerate().skip(from).filter(|(_, c)| c.width > 0);
+            row.extend(cells.flat_map(|(_, c)| c.text().to_vec()));
+            String::from_utf8_lossy(&row).trim_end().to_string()
+        })
+        .collect();
+    while rows.last().is_some_and(String::is_empty) {
+        rows.pop();
+    }
+    Some(rows.join("\n"))
+}
+
 /// Replaying what `Screen` writes gives, frame after frame, the screen each whole frame draws over the ones
 /// before it — checked cell by cell with a terminal emulator (vt100).
 #[cfg(test)]

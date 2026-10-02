@@ -190,7 +190,9 @@ pub fn parse_numstat(out: &str) -> Vec<(usize, usize, String, bool)> {
 /// The changed files against `base`, sorted by path.
 fn changed(root: &Path, base: &Base) -> Result<Vec<File>, String> {
     let rev = base.rev().ok_or("not a git review")?;
-    let mut files: Vec<File> = parse_numstat(&git(root, &["diff", "--numstat", "-z", "--no-renames", rev])?)
+    // (`diff-index`: `diff` would refresh the index — `diff_text`)
+    let numstat = git(root, &["diff-index", "--numstat", "-z", "--no-renames", rev])?;
+    let mut files: Vec<File> = parse_numstat(&numstat)
         .into_iter()
         .map(|(added, removed, rel, binary)| {
             let path = root.join(&rel);
@@ -220,6 +222,12 @@ fn changed(root: &Path, base: &Base) -> Result<Vec<File>, String> {
     files.sort_by(|a, b| a.rel.cmp(&b.rel));
     files.dedup_by(|a, b| a.rel == b.rel);
     Ok(files)
+}
+
+/// The working tree's patch against `rev`. (`diff-index`, not `diff`: over a file whose stat changed, `diff`
+/// refreshes the index — taking its lock whatever `GIT_OPTIONAL_LOCKS` says; the output is the same)
+fn diff_text(root: &Path, rev: &str) -> String {
+    git(root, &["diff-index", "-p", "--no-color", "--no-ext-diff", rev]).unwrap_or_default()
 }
 
 // ── Starting and ending ───────────────────────────────────────────────────────
@@ -388,7 +396,7 @@ fn claude_reviews(ed: &mut Editor) {
     ed.set_status("Claude is reading the changes…");
     ed.events.jobs().spawn(move || {
         let mut diff = match &rev {
-            Some(rev) => git(&root, &["diff", "--no-color", "--no-ext-diff", rev]).unwrap_or_default(),
+            Some(rev) => diff_text(&root, rev),
             None => turn_diff(&turn),
         };
         for f in untracked.iter().filter(|_| rev.is_some()) {
@@ -781,6 +789,39 @@ pub fn send(ed: &mut Editor) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Gathering a review's changes and its diff for Claude never writes the index: `git diff` over a file
+    /// whose stat changed but not its text refreshes it (lock and all — measured: `core.trustctime=false`
+    /// and `core.checkStat=minimal` don't stop it); `diff-index` leaves it and doesn't list that file.
+    #[test]
+    fn a_reviews_changes_leave_the_index() {
+        let dir = std::env::temp_dir().join(format!("tarae-review-index-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let run = |args: &[&str]| {
+            let id = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"];
+            let ok = std::process::Command::new("git").args(id).args(args).current_dir(&dir).output();
+            assert!(ok.unwrap().status.success(), "git {args:?}");
+        };
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "two\n").unwrap();
+        run(&["init", "-q"]);
+        run(&["add", "a.txt", "b.txt"]);
+        run(&["commit", "-qm", "x"]);
+        std::fs::write(dir.join("b.txt"), "two\nthree\n").unwrap();
+        // The same text, an hour older: its stat no longer matches the index's (git counts whole seconds)
+        let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::options().write(true).open(dir.join("a.txt")).unwrap().set_modified(hour_ago).unwrap();
+        let before = std::fs::read(dir.join(".git/index")).unwrap();
+        let files = changed(&dir, &Base::Head).unwrap();
+        let rows: Vec<_> = files.iter().map(|f| (f.rel.as_str(), f.added, f.removed)).collect();
+        assert_eq!(rows, [("b.txt", 1, 0)], "only the file whose text changed");
+        let diff = diff_text(&dir, "HEAD");
+        assert!(diff.contains("+three") && !diff.contains("a.txt"), "{diff}");
+        assert_eq!(std::fs::read(dir.join(".git/index")).unwrap(), before, "the index was rewritten");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn numstat_records() {

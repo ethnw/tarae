@@ -10,6 +10,7 @@
 //! - `run` runs a command in the task panel, the way `space m m` runs a task (`task.rs`) — answered when it
 //!   ends, with how it ended, the places it pointed at and its output. Checks (build, test, lint, format,
 //!   git's read-only commands) start at once; anything else asks the user first on a card (`y` run · `n` no).
+//! - `screen` shows Claude the user's screen as text, once they say yes (`seeing.rs`).
 
 use std::path::PathBuf;
 
@@ -42,9 +43,13 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
         })),
         "tools/list" => {
             sandbox_look(ed);
-            Ok(
-                json!({ "tools": [crate::notes::tool_schema(), run_tests_schema(), run_schema(), crate::plan::tool_schema()] }),
-            )
+            Ok(json!({ "tools": [
+                    crate::notes::tool_schema(),
+                    run_tests_schema(),
+                    run_schema(),
+                    crate::plan::tool_schema(),
+                    crate::seeing::tool_schema(),
+                ] }))
         }
         "tools/call" => {
             let params = &msg["params"];
@@ -65,6 +70,11 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
                         Ok(()) => return None,
                         Err(e) => Err(e),
                     }
+                }
+                Some("screen") => {
+                    let call = Call { generation, request_id: request_id.to_string(), id: id.clone() };
+                    crate::seeing::call(ed, call);
+                    return None;
                 }
                 other => Err(format!("no tool {}", other.unwrap_or_default())),
             };
@@ -250,6 +260,7 @@ pub fn turn_over(ed: &mut Editor) {
     }
     ed.offers
         .retain(|o| !matches!(o.what, crate::offer::What::Run(_) | crate::offer::What::NoSandbox { .. }));
+    crate::seeing::turn_over(ed);
 }
 
 /// A run Claude waited on is gone before it ended (closed, or another run took its place).

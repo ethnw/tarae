@@ -737,6 +737,7 @@ fn snapshot_chat_explore() {
         chip: chip.into(),
         look,
         call: String::new(),
+        attached: None,
         cache: Default::default(),
     };
     let look = |verb, what: &str, pattern, range: &str, link: Option<Link>| {
@@ -788,6 +789,7 @@ fn snapshot_chat_table() {
         chip: String::new(),
         look: None,
         call: String::new(),
+        attached: None,
         cache: Default::default(),
     };
     let answer = "Two ways to draw a cell that doesn't fit:\n\n\
@@ -968,6 +970,7 @@ fn floating_cards_never_overlap() {
             chip: String::new(),
             look: None,
             call: String::new(),
+            attached: None,
             cache: Default::default(),
         });
         let look = Look {
@@ -983,6 +986,7 @@ fn floating_cards_never_overlap() {
             chip: String::new(),
             look: Some(look.clone()),
             call: String::new(),
+            attached: None,
             cache: Default::default(),
         });
         c.follow.gaze = Some(crate::follow::Gaze {

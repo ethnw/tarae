@@ -138,7 +138,9 @@ pub fn status(cwd: &Path) -> Result<Status, String> {
     let mut st = parse_v2(&out);
     st.top = top.clone();
     let staged = numstat(&git(&top, &["diff", "--cached", "--numstat", "-z"], None).unwrap_or_default());
-    let unstaged = numstat(&git(&top, &["diff", "--numstat", "-z"], None).unwrap_or_default());
+    // (`diff-files`, not `diff`: over a file whose stat changed, `diff` refreshes the index — taking its lock
+    // whatever `GIT_OPTIONAL_LOCKS` says)
+    let unstaged = numstat(&git(&top, &["diff-files", "--numstat", "-z"], None).unwrap_or_default());
     for (list, counts) in [(&mut st.staged, &staged), (&mut st.unstaged, &unstaged)] {
         for e in list.iter_mut() {
             if let Some(&(a, r)) = counts.get(&e.rel) {
@@ -162,6 +164,8 @@ pub fn status(cwd: &Path) -> Result<Status, String> {
 /// Git with a time limit on its patience for remotes: no prompts (push/pull fail fast instead of waiting
 /// for a password nobody will type).
 fn git_remote(dir: &Path, args: &[&str]) -> Result<String, String> {
+    #[cfg(test)]
+    crate::gitmenu::not_in_this_repository(dir, args);
     let mut cmd = std::process::Command::new("git");
     crate::dap::new_session(&mut cmd);
     let out = cmd
@@ -782,5 +786,36 @@ mod tests {
         let m = numstat("3\t1\tsrc/a.rs\0-\t-\tlogo.png\0");
         assert_eq!(m["src/a.rs"], (Some(3), Some(1)));
         assert_eq!(m["logo.png"], (None, None), "binary");
+    }
+
+    /// Reading the status never writes the index: `git diff` over a file whose stat changed refreshes it
+    /// (taking the lock, whatever `GIT_OPTIONAL_LOCKS` says) — a commit made in a terminal meanwhile would
+    /// fail on the lock. (A repository of the test's own, in its temp folder.)
+    #[test]
+    fn reading_the_status_leaves_the_index() {
+        let dir = std::env::temp_dir().join(format!("tarae-gitpanel-index-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let run = |args: &[&str]| {
+            let id = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"];
+            let ok = std::process::Command::new("git").args(id).args(args).current_dir(&dir).output();
+            assert!(ok.unwrap().status.success(), "git {args:?}");
+        };
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "two\n").unwrap();
+        run(&["init", "-q"]);
+        run(&["add", "a.txt", "b.txt"]);
+        run(&["commit", "-qm", "x"]);
+        std::fs::write(dir.join("b.txt"), "two\nthree\n").unwrap();
+        // The same text, an hour older: its stat no longer matches the index's (git counts whole seconds)
+        let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::options().write(true).open(dir.join("a.txt")).unwrap().set_modified(hour_ago).unwrap();
+        let before = std::fs::read(dir.join(".git/index")).unwrap();
+        let st = status(&dir).unwrap();
+        let rows: Vec<_> = st.unstaged.iter().map(|e| (e.rel.as_str(), e.added, e.removed)).collect();
+        assert_eq!(rows, [("b.txt", Some(1), Some(0))], "its counts still come");
+        assert_eq!(std::fs::read(dir.join(".git/index")).unwrap(), before, "the index was rewritten");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

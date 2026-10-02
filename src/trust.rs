@@ -17,8 +17,8 @@ use crate::config::EditorConfig;
 use crate::keymap::Keymaps;
 
 /// Settings a project file sets only once trusted: they run commands, or change what Claude's commands do
-/// unasked (`llm.sandbox*` comes with the sandbox).
-pub const RISKY: [&str; 13] = [
+/// unasked (`llm.sandbox*` comes with the sandbox), or what Claude sees.
+pub const RISKY: [&str; 14] = [
     "editor.restart-build",
     "editor.restart-binary",
     "llm.command",
@@ -32,6 +32,8 @@ pub const RISKY: [&str; 13] = [
     "llm.sandbox-protect",
     "llm.sandbox-ports",
     "llm.sandbox-localhost",
+    // (a project turning it back on when the user turned it off)
+    "llm.screen-terminal",
 ];
 
 /// A value longer than this (as written) isn't put on the card whole — so it's never trusted.

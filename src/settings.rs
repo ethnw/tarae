@@ -361,6 +361,13 @@ pub static SETTINGS: &[Setting] = &[
         set: |c, v| c.llm.chat_settings = b(v),
     },
     Setting {
+        path: "llm.screen-terminal",
+        kind: Kind::Bool,
+        doc: "Chat: when Claude looks at your screen (you say yes on a card), the terminal panel's contents go too — off: its rows go blank",
+        get: |c| Value::from(c.llm.screen_terminal),
+        set: |c, v| c.llm.screen_terminal = b(v),
+    },
+    Setting {
         path: "llm.run-allow",
         kind: Kind::StrList,
         doc: "Chat: commands Claude runs without asking, past the checks (cargo build/test/clippy/fmt, git status/diff/log…) — word prefixes, like \"npm test\"",

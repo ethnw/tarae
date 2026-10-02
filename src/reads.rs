@@ -28,6 +28,8 @@ pub struct Look {
     pub filter: String,
     /// The path as Claude gave it (shown when `at` is None).
     pub given: String,
+    /// `at` is a single file (Grep searches just it — not "everything in it").
+    pub file: bool,
 }
 
 /// An ask waiting for its answer.
@@ -53,7 +55,8 @@ pub fn look(tool: &str, input: &Value, cwd: &Path) -> Look {
         "Glob" => glob_root(&rel(&given), &pattern).and_then(|p| crate::edits::real(&p)),
         _ => crate::edits::real(&rel(&given)),
     };
-    Look { tool: tool.to_string(), at, pattern, filter, given }
+    let file = at.as_ref().is_some_and(|p| p.is_file());
+    Look { tool: tool.to_string(), at, pattern, filter, given, file }
 }
 
 /// The folder a Glob pattern walks from `base`: its folders up to the first one with a wildcard (never its
@@ -132,7 +135,8 @@ pub fn question(look: &Look, keep: bool) -> String {
     let mut q = match look.tool.as_str() {
         "Read" => at,
         "Grep" => {
-            let mut s = format!("searches {at} and everything in it\nfor {}", look.pattern);
+            let all = if look.file { "" } else { " and everything in it" };
+            let mut s = format!("searches {at}{all}\nfor {}", look.pattern);
             if !look.filter.is_empty() {
                 s.push_str(&format!("\nin files {}", look.filter));
             }
@@ -218,6 +222,23 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// The card says what's searched: a folder "and everything in it", a single file just itself.
+    #[test]
+    fn a_search_of_one_file_isnt_a_folders() {
+        let dir = std::env::temp_dir().join(format!("tarae-reads-q-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("out")).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        std::fs::write(dir.join("out/m.txt"), "marker\n").unwrap();
+        let q = |path: PathBuf| question(&look("Grep", &json!({"pattern": "x", "path": path}), &dir), true);
+        let (folder, file) = (dir.join("out"), dir.join("out/m.txt"));
+        assert!(
+            q(folder.clone())
+                .starts_with(&format!("searches {} and everything in it\nfor x", folder.display()))
+        );
+        assert!(q(file.clone()).starts_with(&format!("searches {}\nfor x", file.display())), "{}", q(file));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn inside_or_allowed_goes_without_asking() {
         let root = Path::new("/r/p");
@@ -227,6 +248,7 @@ mod tests {
             pattern: String::new(),
             filter: String::new(),
             given: String::new(),
+            file: true,
         };
         let none = Allowed::default();
         let some = Allowed { read: vec!["/t/x".into()], ..Default::default() };

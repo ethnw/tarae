@@ -267,7 +267,12 @@ pub fn render(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io::
         frame.clear();
         render_frame(editor, &mut frame, w, h)?;
     }
-    out.write_all(&frame)
+    out.write_all(&frame)?;
+    // (kept: the screen as the user sees it — `C-s` in the chat sends it as text, and so does Claude's
+    // `screen` once the user said yes)
+    editor.last_frame = Some((frame, w, h));
+    crate::seeing::after_frame(editor);
+    Ok(())
 }
 
 fn render_frame(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io::Result<()> {
@@ -5355,6 +5360,9 @@ impl OfferCard {
                         b = vec![('y', "Once"), ('a', "This chat"), ('A', "Always"), ('n', "No")]
                     }
                     crate::offer::What::Outside { .. } => b = vec![('y', "Run"), ('n', "No")],
+                    crate::offer::What::Screen { .. } => {
+                        b = vec![('y', "Once"), ('a', "This chat"), ('n', "No")]
+                    }
                     _ => {}
                 }
                 // One that runs something is shown whole — cut to the room below if it must be, with `v`
@@ -6497,6 +6505,9 @@ fn draw_chat(
                 }
                 if !m.chip.is_empty() {
                     lines.push(vec![sp(fit_ellipsis(&m.chip, w), faint)]);
+                    // (a screen went with it: the row opens the copy)
+                    row_links.resize(lines.len(), None);
+                    *row_links.last_mut().expect("just pushed") = m.attached.clone();
                 }
                 let para = [md::Line::Text { spans: vec![sp(m.text.clone(), strong)], indent: 0 }];
                 for l in md::wrap(&para, w - 2, faint) {
@@ -6743,10 +6754,22 @@ fn draw_chat(
         chat_row_end(out, card, lay.chat_w, used)?;
         y += 1;
     }
-    // Input
+    // Input — the line over it says when the screen goes with the message (`C-s`)
     chat_row_start(out, x0, y, edge, card)?;
+    let mut used = 0;
+    if let Some(s) = &c.screen {
+        let size = format!("screen {}×{}", s.cols, s.rows);
+        let said = " goes with it ";
+        if size.width() + said.width() + 2 <= w {
+            apply(out, accent)?;
+            queue!(out, Print(&size))?;
+            apply(out, faint)?;
+            queue!(out, Print(said))?;
+            used = size.width() + said.width();
+        }
+    }
     apply(out, faint)?;
-    queue!(out, Print("─".repeat(w)))?;
+    queue!(out, Print("─".repeat(w - used)))?;
     chat_row_end(out, card, lay.chat_w, w)?;
     y += 1;
     let input_top = y;
@@ -6782,6 +6805,10 @@ fn draw_chat(
     } else {
         let code = c.last_code().is_some();
         hints.push(("enter", "send"));
+        // The screen waiting: how it comes off (early — the one way back)
+        if c.screen.is_some() && c.input.is_empty() {
+            hints.push(("backspace", "no screen"));
+        }
         hints.push(("esc", "editor"));
         if crate::checkpoint::can_undo(editor) {
             hints.push(("C-z", "undo turn"));
@@ -6791,6 +6818,10 @@ fn draw_chat(
         }
         if !c.links().is_empty() {
             hints.push(("C-]", "go to"));
+        }
+        // (how the screen goes along — after what the answer offers, where the row has room)
+        if c.screen.is_none() {
+            hints.push(("C-s", "screen"));
         }
         if code {
             hints.push(("C-y", "copy"));

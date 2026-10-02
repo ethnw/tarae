@@ -107,6 +107,9 @@ pub struct LlmConfig {
     pub sandbox_ports: Vec<u16>,
     /// Every port on this machine open to them — the risky ones too (Seatbelt can't leave some out).
     pub sandbox_localhost: bool,
+    /// Chat: Claude's `screen` tool shows the terminal panel's contents too (`seeing.rs`) — off, its rows go
+    /// blank.
+    pub screen_terminal: bool,
 }
 
 /// `llm.review-ask`'s default: what runs or sets how things run, and the dependencies a build fetches.
@@ -142,6 +145,7 @@ impl Default for LlmConfig {
             sandbox_protect: Vec::new(),
             sandbox_ports: Vec::new(),
             sandbox_localhost: false,
+            screen_terminal: true,
         }
     }
 }

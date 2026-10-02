@@ -78,6 +78,8 @@ pub enum What {
     /// The project's `.tarae.toml` sets what runs commands (`trust.rs`): `y` trusts it, `n` ignores that
     /// part. `hash` = what the card showed.
     ProjectTrust { hash: u64 },
+    /// Claude asks to see the screen (`seeing.rs`): `y` once, `a` this chat, `n` no.
+    Screen { call: crate::tools::Call },
 }
 
 /// Work that stopped for lack of a grammar — resumed once downloaded
@@ -156,7 +158,10 @@ impl Offer {
     /// Whether its answer can last longer than once (`a` this chat · `A` always — `A` only for reads).
     pub fn lasts(&self) -> bool {
         match &self.what {
-            What::NoSandbox { .. } | What::Read { keep: true, .. } | What::Grant { .. } => true,
+            What::NoSandbox { .. }
+            | What::Read { keep: true, .. }
+            | What::Grant { .. }
+            | What::Screen { .. } => true,
             What::Run(r) => r.keep,
             _ => false,
         }
@@ -200,6 +205,14 @@ impl crate::editor::Editor {
         // A plugin asking something: its panel gives the keys back, so they reach the card
         if matches!(o.what, What::PluginPermissions { .. } | What::PluginAsk { .. }) {
             self.plugin_panel_unfocus();
+        }
+        // A card that runs something (or shows Claude the screen), while the chat has the keys and nothing is
+        // being typed there (Claude asking mid-turn): the chat gives them to the card — as a review takes them. Mid-message, the
+        // card waits (cards don't take keys from the chat's input — a `n` typed there was a "no")
+        if (o.weighty() || matches!(o.what, What::Screen { .. }))
+            && let Some(c) = self.chat.as_mut().filter(|c| c.focused && c.input.is_empty())
+        {
+            c.focused = false;
         }
         self.offer_seq += 1;
         o.id = self.offer_seq;
@@ -247,6 +260,10 @@ impl crate::editor::Editor {
             Code::Char('N') if matches!(o.what, What::Install { .. }) => self.offer_never(),
             Code::Char('a') if o.lasts() => self.offer_for_chat(),
             Code::Char('A') if o.keeps() => self.offer_always(),
+            // An answer letter this card doesn't take isn't the code's either (`a`/`A` there start inserting —
+            // and the `y` after it was typed)
+            Code::Char('a' | 'A') if o.lasts() => self.set_status("this card asks y, a or n"),
+            Code::Char('a' | 'A') if o.weighty() => self.set_status("this card asks only y or n"),
             _ => return false,
         }
         true
@@ -291,6 +308,7 @@ impl crate::editor::Editor {
                 crate::blocked::grant_answer(self, id, grant, *run, Some(crate::allow::Scope::Once))
             }
             What::Outside { run } => crate::blocked::outside_answer(self, id, *run, true),
+            What::Screen { call } => crate::seeing::answer(self, id, call, Some(crate::allow::Scope::Once)),
         }
     }
 
@@ -364,6 +382,7 @@ impl crate::editor::Editor {
             What::Read { pending, keep } => crate::reads::answer(self, o.id, *pending, Some(scope), keep),
             What::Run(card) => crate::tools::run_answer(self, o.id, *card, Some(scope)),
             What::Grant { grant, run } => crate::blocked::grant_answer(self, o.id, grant, *run, Some(scope)),
+            What::Screen { call } => crate::seeing::answer(self, o.id, call, Some(scope)),
             _ => {}
         }
     }
@@ -406,6 +425,7 @@ impl crate::editor::Editor {
             What::Read { pending, keep } => crate::reads::answer(self, o.id, *pending, None, keep),
             What::Grant { grant, run } => crate::blocked::grant_answer(self, o.id, grant, *run, None),
             What::Outside { run } => crate::blocked::outside_answer(self, o.id, *run, false),
+            What::Screen { call } => crate::seeing::answer(self, o.id, call, None),
         }
     }
 

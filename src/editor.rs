@@ -433,6 +433,10 @@ pub struct Editor {
     pub trust_path: Option<std::path::PathBuf>,
     /// Where what's always allowed is kept (`allow.rs`) — None in tests (they set a temp file).
     pub allow_path: Option<std::path::PathBuf>,
+    /// The last frame drawn and its size — what the user sees (`chat::attach_screen`).
+    pub last_frame: Option<(Vec<u8>, u16, u16)>,
+    /// Claude's `screen` calls the user said yes to — answered with the next frame drawn (`seeing.rs`).
+    pub screen_sends: Vec<crate::tools::Call>,
     /// The run whose denials `space m s` listed, and what could open (`blocked.rs`).
     pub blocked: Option<(crate::blocked::BlockedRun, Vec<crate::blocked::Choice>)>,
     /// Whether Claude's commands can be sandboxed here (`sandbox.rs`) — found with the first one.
@@ -563,6 +567,8 @@ impl Editor {
             trust_path: if cfg!(test) { None } else { crate::trust::Store::path() },
             allow_path: if cfg!(test) { None } else { crate::allow::Store::path() },
             blocked: None,
+            last_frame: None,
+            screen_sends: Vec::new(),
             sandbox: if cfg!(test) { crate::sandbox::Availability::Bypass } else { Default::default() },
             restart: None,
             undo_writes: Default::default(),
@@ -1979,13 +1985,15 @@ impl Editor {
         if self.picker.is_none() && self.prompt.is_none() && self.terminal_key(key) {
             return;
         }
-        // Grammar offers: y·n·Esc in normal mode (something else open or a pending prefix key goes first)
+        // Grammar offers: y·n·Esc in normal mode (something else open or a pending prefix key goes first) —
+        // not while the chat's input has the keys: a card took the `n`s of a message being typed
         if !self.offers.is_empty()
             && self.mode == Mode::Normal
             && self.pending.is_empty()
             && self.prompt.is_none()
             && self.picker.is_none()
             && self.review.is_none()
+            && !self.chat.as_ref().is_some_and(|c| c.focused)
             && self.offer_key(key)
         {
             return;
@@ -2876,6 +2884,10 @@ mod tests {
         git(&["commit", "-qm", "first"]);
         let mut ed = editor("");
         ed.git_auto = true;
+        // (the git tab `space g` opens reads its status in the panel's folder — not this repository)
+        let mut sb = crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, dir.clone());
+        sb.focus = false;
+        ed.sidebar = Some(sb);
         ed.open(&file).unwrap();
         settle_until(&mut ed, |ed| ed.doc().git_base.is_some());
         feed(&mut ed, "jmiwcTWO<esc>");
@@ -3726,6 +3738,105 @@ mod tests {
             ed.task_run.as_ref().and_then(|r| r.guard.clone()),
             Some(crate::sandbox::Guard::Outside)
         ));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Claude asks to see the screen: a card first (it takes the keys from an empty chat input), nothing
+    /// goes before `y`, and what goes is the frame drawn after it — the code and the terminal panel's
+    /// output, not the card. The card says the terminal panel is in it; with `llm.screen-terminal` off its
+    /// rows are blank and the card says that instead. `a` lets the next call go unasked; `n` tells Claude no.
+    #[test]
+    fn claude_sees_the_screen_once_the_user_says_yes() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-screen-tool-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "screen-marker on this line\n").unwrap();
+        let draw = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 140, 40).unwrap();
+            let mut parser = vt100::Parser::new(40, 140, 0);
+            parser.process(&bytes);
+            parser.screen().contents()
+        };
+        // Events handled with a frame drawn after each — the screen goes with a frame
+        let settle_drawing = |ed: &mut Editor, done: &dyn Fn(&Editor) -> bool| {
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while !done(ed) {
+                assert!(std::time::Instant::now() < end, "done before the timeout");
+                if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(50)) {
+                    ed.handle_event(ev);
+                }
+                draw(ed);
+            }
+        };
+        let with_terminal = |screen_terminal: bool| {
+            let mut ed = editor("");
+            ed.config.llm.screen_terminal = screen_terminal;
+            ed.open(&dir.join("a.txt")).unwrap();
+            let argv = ["/bin/sh".to_string(), "-c".into(), "printf term-marker; sleep 5".into()];
+            ed.terminal_run(argv.to_vec(), Vec::new());
+            let shows = |ed: &Editor| {
+                ed.terminal.as_ref().is_some_and(|t| t.parser.screen().contents().contains("term-marker"))
+            };
+            settle_for(&mut ed, shows);
+            ed.terminal.as_mut().unwrap().focus = false;
+            draw(&mut ed);
+            ed
+        };
+        let answers = |log: &Path| std::fs::read_to_string(log).unwrap_or_default().matches("\"c7\"").count();
+        // y: the card first, then the screen as drawn after the yes
+        let mut ed = with_terminal(true);
+        let log = claude_calls(&mut ed, &dir, "screen", &json!({}));
+        feed(&mut ed, "<space>lwhat do you see<ret>");
+        settle_for(&mut ed, |ed| !ed.offers.is_empty());
+        let o = ed.offers.first().unwrap();
+        assert_eq!(o.title, crate::seeing::TITLE);
+        assert!(o.question.contains("Includes the terminal panel ("), "{}", o.question);
+        assert!(!ed.chat.as_ref().unwrap().focused, "the card has the keys");
+        let s = draw(&mut ed);
+        assert!(s.contains("y Once   a This chat   n No"), "{s}");
+        assert_eq!(answers(&log), 0, "nothing goes before the answer");
+        feed(&mut ed, "y");
+        assert!(ed.offers.is_empty());
+        settle_drawing(&mut ed, &|ed| !ed.chat.as_ref().unwrap().busy());
+        let answer = tool_answer(&log);
+        assert!(answer.contains("screen-marker on this line") && answer.contains("term-marker"), "{answer}");
+        assert!(answer.contains("the terminal panel included"), "{answer}");
+        assert!(
+            !answer.contains(crate::seeing::TITLE) && !answer.contains("isError"),
+            "not the card: {answer}"
+        );
+        assert!(!ed.chat.as_ref().unwrap().sees, "only once");
+        // The terminal panel left out: said on the card, blank in what goes; `a` — the next call is unasked
+        let mut ed = with_terminal(false);
+        std::fs::remove_file(&log).ok();
+        let log = claude_calls(&mut ed, &dir, "screen", &json!({}));
+        feed(&mut ed, "<space>lwhat do you see<ret>");
+        settle_for(&mut ed, |ed| !ed.offers.is_empty());
+        let q = ed.offers[0].question.clone();
+        assert!(q.contains("Not the terminal panel (llm.screen-terminal is off)"), "{q}");
+        feed(&mut ed, "a");
+        settle_drawing(&mut ed, &|ed| !ed.chat.as_ref().unwrap().busy());
+        let answer = tool_answer(&log);
+        assert!(answer.contains("screen-marker") && !answer.contains("term-marker"), "{answer}");
+        assert!(answer.contains(crate::seeing::LEFT_OUT), "{answer}");
+        ed.chat.as_mut().unwrap().focused = true;
+        feed(&mut ed, "again<ret>");
+        settle_drawing(&mut ed, &|ed| !ed.offers.is_empty() || answers(&log) == 2);
+        assert!(ed.offers.is_empty(), "this chat: no card");
+        // n: Claude is told
+        let mut ed = editor("");
+        std::fs::remove_file(&log).ok();
+        let log = claude_calls(&mut ed, &dir, "screen", &json!({}));
+        draw(&mut ed);
+        feed(&mut ed, "<space>lwhat do you see<ret>");
+        settle_for(&mut ed, |ed| !ed.offers.is_empty());
+        feed(&mut ed, "n");
+        settle_drawing(&mut ed, &|ed| !ed.chat.as_ref().unwrap().busy());
+        let answer = tool_answer(&log);
+        assert!(answer.contains("said no") && answer.contains("isError"), "{answer}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -5853,7 +5964,16 @@ mod tests {
     fn conflicts_keep_a_side() {
         const SRC: &str =
             "a\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> b\nz\n<<<<<<< HEAD\n1\n=======\n2\n>>>>>>> b\n";
-        let mut ed = editor(SRC);
+        // (`space g` opens the git tab too, which reads the status where it's rooted — not this repository)
+        let repo = git_repo("conflicts", &[("a.txt", "a\n")]);
+        let in_repo = |text: &str| {
+            let mut ed = editor(text);
+            let mut sb = crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, repo.clone());
+            sb.focus = false;
+            ed.sidebar = Some(sb);
+            ed
+        };
+        let mut ed = in_repo(SRC);
         feed(&mut ed, "]m");
         assert_eq!(ed.cursor_line(), 1);
         feed(&mut ed, " gt");
@@ -5866,9 +5986,10 @@ mod tests {
         feed(&mut ed, "[m ga");
         assert!(text(&ed).ends_with("z\n1\n2\n"), "{}", text(&ed));
         // Below the last conflict: nothing out of sight above is taken
-        let mut ed = editor("<<<<<<< a\nx\n=======\ny\n>>>>>>> b\nz\n");
+        let mut ed = in_repo("<<<<<<< a\nx\n=======\ny\n>>>>>>> b\nz\n");
         feed(&mut ed, "G gt");
         assert!(text(&ed).starts_with("<<<<<<<"), "{}", text(&ed));
+        std::fs::remove_dir_all(&repo).ok();
     }
 
     /// Conflicts are found in any file — past 1 MB too (the first look at a file is always made).
@@ -6499,6 +6620,144 @@ mod tests {
         assert_eq!(fg("Its reason: the network"), theme("ui.virtual"), "Claude's words: faint");
         let cmd = fg("cargo fetch");
         assert!(cmd != theme("warning") && cmd != theme("ui.virtual"), "the command: full strength");
+    }
+
+    /// The screen as text reads a real frame the way a terminal shows it (checked against a terminal emulator:
+    /// the same characters, rows trimmed alike).
+    #[test]
+    fn the_screen_as_text_is_what_a_terminal_shows() {
+        let mut ed = editor("fn main() {\n    println!(\"타래 — 🎉 wide\");\n}\n");
+        let mut bytes = Vec::new();
+        crate::term::render(&mut ed, &mut bytes, 100, 30).unwrap();
+        let mut parser = vt100::Parser::new(30, 100, 0);
+        parser.process(&bytes);
+        let text = crate::screen::text(&bytes, 100, 30).expect("read");
+        // (vt100 keeps the blanks a background was painted on; the text has none at a row's end)
+        let shown: Vec<String> =
+            parser.screen().contents().lines().map(|l| l.trim_end().to_string()).collect();
+        assert_eq!(text, shown.join("\n").trim_end());
+        assert!(text.contains("println!(\"타래 — 🎉 wide\");"), "{text}");
+        assert_eq!(ed.last_frame.as_ref().map(|f| (f.1, f.2)), Some((100, 30)), "the frame is kept");
+    }
+
+    /// `C-s` in the chat input: the screen as the user saw it (the last frame, as text) goes with the next
+    /// message — the line over the input says so, Backspace in the empty input takes it off; what's sent
+    /// carries it, and the message's chip row opens a copy of it. `:chat-screen` opens the chat for it.
+    #[test]
+    fn the_screen_goes_with_the_next_message() {
+        let dir = std::env::temp_dir().join(format!("tarae-chat-screen-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("stdin.log");
+        let mut ed = editor("fn main() {}\n");
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec![
+            "-c".into(),
+            format!("while read -r line; do printf '%s\\n' \"$line\" >> '{}'; done", log.display()),
+        ];
+        let screen = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 100, 30).unwrap();
+            let mut parser = vt100::Parser::new(30, 100, 0);
+            parser.process(&bytes);
+            parser.screen().contents()
+        };
+        feed(&mut ed, "<space>l");
+        screen(&mut ed);
+        feed(&mut ed, "<C-s>");
+        let shot = ed.chat.as_ref().unwrap().screen.clone().expect("attached");
+        assert_eq!((shot.cols, shot.rows), (100, 30));
+        assert!(shot.text.contains("fn main() {}") && shot.text.contains("claude"), "{}", shot.text);
+        let s = screen(&mut ed);
+        assert!(s.contains("screen 100×30 goes with it") && s.contains("backspace no screen"), "{s}");
+        // Backspace in the empty input takes it off; C-s again puts it back
+        feed(&mut ed, "<backspace>");
+        assert!(ed.chat.as_ref().unwrap().screen.is_none());
+        assert!(screen(&mut ed).contains("C-s screen"));
+        feed(&mut ed, "<C-s>what is wrong here<ret>");
+        let c = ed.chat.as_ref().unwrap();
+        assert!(c.screen.is_none(), "it went");
+        let m = c.msgs.iter().rev().find(|m| m.role == crate::chat::Role::User).unwrap();
+        assert!(m.chip.ends_with(" · screen 100×30"), "{}", m.chip);
+        let copy = m.attached.clone().expect("a copy").path;
+        assert!(c.links().iter().any(|l| l.path == copy), "C-] reaches it");
+        // (the fake claude's log isn't an editor event: poll, handling events as they come)
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !(std::fs::read_to_string(&log).unwrap_or_default().contains("what is wrong here")
+            && std::fs::read_to_string(&copy).is_ok_and(|t| t.contains("fn main() {}")))
+        {
+            assert!(std::time::Instant::now() < end, "sent, and its copy written");
+            if let Ok(Some(ev)) = ed.events.recv_within(std::time::Duration::from_millis(10)) {
+                ed.handle_event(ev);
+            }
+        }
+        let sent = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            sent.contains(r#"<screen cols=\"100\" rows=\"30\""#) && sent.contains("fn main() {}"),
+            "{sent}"
+        );
+        // As seen when `C-s` was pressed: its hint still offered it (not the line that came after)
+        assert!(sent.contains("C-s screen") && !sent.contains("goes with it"), "as seen then: {sent}");
+        std::fs::remove_file(&copy).ok();
+        // `:chat-screen` with the chat closed: it opens, with the screen waiting
+        let mut ed = editor("fn other() {}\n");
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        screen(&mut ed);
+        crate::typed::execute(&mut ed, "chat-screen").unwrap();
+        let c = ed.chat.as_ref().expect("opened");
+        assert!(c.focused && c.screen.as_ref().is_some_and(|s| s.text.contains("fn other() {}")));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A card never takes what's typed in the chat (B1: the project-trust card took every `n` of "guard_and_go"
+    /// and was dismissed): while the input has the keys they're the message's — a card that comes then waits.
+    /// One that comes while nothing is being typed (Claude asking mid-turn) takes the keys, as a review does.
+    #[test]
+    fn a_card_doesnt_take_what_is_typed_in_the_chat() {
+        use crate::offer::{Offer, What};
+        let mut ed = editor("text\n");
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        let settle = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 120, 30).unwrap();
+            let o = ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
+            ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
+        };
+        let card = |title: &str| {
+            Offer::new(title.into(), "x = 1", "", String::new(), What::ProjectTrust { hash: 0 })
+        };
+        // A card up, in sight and settled — then the chat, and a message with `n`s in it
+        ed.push_offer(card("Trust this project's settings?"));
+        settle(&mut ed);
+        feed(&mut ed, "<space>l");
+        assert!(ed.chat.as_ref().unwrap().focused);
+        feed(&mut ed, "guard_and_go no");
+        assert_eq!(ed.chat.as_ref().unwrap().input, "guard_and_go no", "every key went to the message");
+        assert_eq!(ed.offers.len(), 1, "the card is still there, unanswered");
+        // A card that comes mid-message waits; the keys stay the message's
+        ed.push_offer(card("Second"));
+        assert!(ed.chat.as_ref().unwrap().focused);
+        feed(&mut ed, "n");
+        assert_eq!(ed.chat.as_ref().unwrap().input, "guard_and_go non");
+        // Nothing being typed: a card that comes takes the keys
+        ed.chat.as_mut().unwrap().input.clear();
+        ed.offers.clear();
+        ed.push_offer(card("Claude wants to run"));
+        assert!(!ed.chat.as_ref().unwrap().focused, "the card has the keys");
+        settle(&mut ed);
+        feed(&mut ed, "y");
+        assert!(ed.offers.is_empty(), "y answered it");
+        // An answer letter the card doesn't take isn't the code's (`a` would start inserting, and the `y` after
+        // it would be typed)
+        ed.push_offer(card("Only y or n"));
+        settle(&mut ed);
+        feed(&mut ed, "aA");
+        assert_eq!((ed.mode, ed.offers.len()), (Mode::Normal, 1), "a/A went nowhere");
+        feed(&mut ed, "y");
+        assert!(ed.offers.is_empty());
+        assert_eq!(text(&ed), "text\n");
     }
 
     /// Multiple offers stack in arrival order and only the front one gets keys — clicking a back card
