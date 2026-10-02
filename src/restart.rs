@@ -69,7 +69,8 @@ pub fn start(ed: &mut Editor, build: bool) -> Result<(), String> {
         ed.set_status("restart canceled");
         return Ok(());
     }
-    let in_turn = ed.chat.as_ref().is_some_and(crate::chat::Chat::busy);
+    // (a turn's files still being read belong to it)
+    let in_turn = ed.chat.as_ref().is_some_and(crate::chat::Chat::busy) || ed.checkpoints.gathering;
     blocker(ed, in_turn).map_or(Ok(()), |why| Err(format!("can't restart: {why}")))?;
     static NEXT: AtomicU64 = AtomicU64::new(1);
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -82,10 +83,12 @@ pub fn start(ed: &mut Editor, build: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// The chat's turn ended (or the chat closed): a restart waiting for it goes on.
+/// The chat's turn ended (or the chat closed, or the turn's files were read): a restart waiting for it goes
+/// on.
 pub fn turn_over(ed: &mut Editor) {
     if ed.restart.as_ref().is_some_and(|r| r.stage == Stage::Turn)
         && !ed.chat.as_ref().is_some_and(crate::chat::Chat::busy)
+        && !ed.checkpoints.gathering
     {
         go(ed);
     }
@@ -267,7 +270,7 @@ fn check(ed: &mut Editor, bin: PathBuf) {
             }
             // Claude was asked something meanwhile, or its edits are still landing: on from that wait
             // (built already)
-            let busy = ed.chat.as_ref().is_some_and(crate::chat::Chat::busy);
+            let busy = ed.chat.as_ref().is_some_and(crate::chat::Chat::busy) || ed.checkpoints.gathering;
             if busy || pending_writes(ed).is_some() {
                 let r = ed.restart.as_mut().expect("checked above");
                 (r.stage, r.build) = (Stage::Turn, false);
@@ -448,7 +451,7 @@ pub fn snapshot(ed: &mut Editor) -> Value {
         ed.sidebar.as_ref().and_then(|s| Some(json!({ "mode": mode_name(s.mode)?, "focus": s.focus })));
     let chat = ed.chat.as_ref().map(|c| {
         json!({ "session": c.session, "input": c.input, "cursor": c.cursor, "focused": c.focused,
-                "scroll": c.scroll, "follow": c.follow.on })
+                "scroll": c.scroll, "follow": c.follow.on, "at_end": c.edits.at_end })
     });
     let overrides: Vec<Value> = ed.overrides.iter().map(|(p, v)| json!([p, v.to_string()])).collect();
     json!({
@@ -547,6 +550,7 @@ fn restore_quietly(ed: &mut Editor, v: &Value) -> usize {
                 focused: chat["focused"].as_bool().unwrap_or(false),
                 scroll: num(&chat["scroll"]),
                 follow: chat["follow"].as_bool().unwrap_or(ed.config.llm.follow),
+                at_end: chat["at_end"].as_str().map(PathBuf::from),
             },
         );
     }
@@ -764,12 +768,13 @@ mod tests {
         ed.config.llm.args =
             vec!["-c".into(), format!("printf '%s\\n' \"$*\" >> '{}'; cat > /dev/null", argv.display())];
         let state = json!({ "chat": { "session": "s-1", "input": "half 한", "cursor": 5, "focused": true,
-                                      "scroll": 2, "follow": false } });
+                                      "scroll": 2, "follow": false, "at_end": dir } });
         assert_eq!(restore(&mut ed, &state), 0, "no files — the chat comes back all the same");
         settle_until(&mut ed, |ed| ed.chat.as_ref().unwrap().msgs.iter().any(|m| m.text == "Hello back."));
         let c = ed.chat.as_ref().unwrap();
         assert_eq!((c.input.as_str(), c.cursor, c.focused, c.scroll), ("half 한", 5, true, 2));
         assert!(!c.follow.on);
+        assert_eq!(c.edits.at_end.as_deref(), Some(dir.as_path()), "review at the end stays on");
         assert_eq!(c.session.as_deref(), Some("s-1"));
         assert_eq!(c.msgs.last().unwrap().text, crate::chat::RESTARTED);
         let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -781,6 +786,18 @@ mod tests {
         assert_eq!(started().lines().count(), 1, "one claude — none prewarmed only to be killed");
         drop(ed);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Review at the end (the folder it was agreed for) goes into the state with the chat.
+    #[test]
+    fn review_at_the_end_is_in_the_state() {
+        let mut ed = Editor::new(Config::default());
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        crate::chat::open(&mut ed);
+        assert_eq!(snapshot(&mut ed)["chat"]["at_end"], Value::Null);
+        ed.chat.as_mut().unwrap().edits.at_end = Some("/p".into());
+        assert_eq!(snapshot(&mut ed)["chat"]["at_end"], "/p");
     }
 
     fn feed(ed: &mut Editor, keys: &str) {
@@ -967,6 +984,39 @@ mod tests {
         assert!(!ed.doc().is_modified(), "Claude's write was the save");
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "TWO\n");
         drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A turn's files still being read (review at the end) are waited for like the turn; then its review
+    /// doesn't open over the restart — the chat says `space v t`, which works after it.
+    #[test]
+    fn a_turn_being_gathered_is_waited_for() {
+        let dir = temp("gather");
+        let bin = fake_tarae(&dir, "tarae 9.9.9");
+        let mut ed = Editor::new(Config::default());
+        ed.config.restart_binary = bin.display().to_string();
+        ed.checkpoints.gathering = true;
+        crate::typed::execute(&mut ed, "restart!").unwrap();
+        assert_eq!(ed.restart.as_ref().unwrap().stage, Stage::Turn, "{}", toasts(&ed));
+        turn_over(&mut ed);
+        assert_eq!(ed.restart.as_ref().unwrap().stage, Stage::Turn, "still reading");
+        let file = dir.join("a.txt");
+        std::fs::write(&file, "two\n").unwrap();
+        ed.checkpoints.gathering = false;
+        ed.checkpoints.list.push(crate::checkpoint::Checkpoint {
+            question: "q".into(),
+            files: vec![crate::checkpoint::Touched {
+                path: file,
+                before: Some(ropey::Rope::from_str("one\n")),
+                after: ropey::Rope::from_str("two\n"),
+                unseen: true,
+            }],
+            undone: false,
+        });
+        crate::chat::turn_gathered(&mut ed, Some("a.txt".into()));
+        assert!(ed.code_review.is_none(), "not over the restart");
+        settle_until(&mut ed, |ed| ed.should_quit || ed.restart.is_none());
+        assert_eq!(ed.restart.as_ref().and_then(Restart::ready), Some(bin.as_path()), "{}", toasts(&ed));
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -26,13 +26,18 @@ pub enum Base {
     Head,
     /// This branch since it left `name` (at `commit`, their merge base).
     Branch { name: String, commit: String },
+    /// What Claude changed in a turn — checkpoint `at` (`checkpoint.rs`), each file against its text before
+    /// the turn. No git.
+    Turn { at: usize, question: String },
 }
 
 impl Base {
-    fn rev(&self) -> &str {
+    /// The git revision the files are diffed against (None: a turn's own texts).
+    fn rev(&self) -> Option<&str> {
         match self {
-            Base::Head => "HEAD",
-            Base::Branch { commit, .. } => commit,
+            Base::Head => Some("HEAD"),
+            Base::Branch { commit, .. } => Some(commit),
+            Base::Turn { .. } => None,
         }
     }
 
@@ -40,6 +45,7 @@ impl Base {
         match self {
             Base::Head => "uncommitted".into(),
             Base::Branch { name, .. } => format!("since {name}"),
+            Base::Turn { .. } => "Claude's turn".into(),
         }
     }
 }
@@ -179,7 +185,7 @@ pub fn parse_numstat(out: &str) -> Vec<(usize, usize, String, bool)> {
 
 /// The changed files against `base`, sorted by path.
 fn changed(root: &Path, base: &Base) -> Result<Vec<File>, String> {
-    let rev = base.rev();
+    let rev = base.rev().ok_or("not a git review")?;
     let mut files: Vec<File> = parse_numstat(&git(root, &["diff", "--numstat", "-z", "--no-renames", rev])?)
         .into_iter()
         .map(|(added, removed, rel, binary)| {
@@ -250,38 +256,90 @@ pub fn start_in(ed: &mut Editor, cwd: PathBuf, branch: Option<String>) {
         })();
         move |ed: &mut Editor| match found {
             Err(e) => ed.set_error(format!("review: {e}")),
-            Ok((_, base, files)) if files.is_empty() => {
-                ed.set_status(format!("review: no changes {}", base.label()));
-            }
-            Ok((root, base, files)) => {
-                close(ed);
-                let n = files.len();
-                // Start on the file being looked at, if it's among the changes (else the first)
-                let here = ed.doc().path.clone();
-                let first = files.iter().position(|f| here.as_ref() == Some(&f.path)).unwrap_or(0);
-                ed.code_review = Some(CodeReview {
-                    base,
-                    root,
-                    files,
-                    viewed: HashMap::new(),
-                    docs: Vec::new(),
-                    land: None,
-                    focus: false,
-                    selected: 0,
-                    scroll: 0,
-                    shown: None,
-                });
-                ed.set_status(format!(
-                    "review: {n} file{} changed — ]g walks the changes",
-                    if n == 1 { "" } else { "s" }
-                ));
-                show(ed, first, false);
-                if std::mem::take(&mut ed.review_ask) {
-                    claude_reviews(ed);
-                }
-            }
+            Ok((root, base, files)) => open(ed, root, base, files),
         }
     });
+}
+
+/// `space v t` · `:review-turn`: what Claude changed in its latest turn (not taken back), as a review.
+pub fn review_turn(ed: &mut Editor) {
+    match ed.checkpoints.list.iter().rposition(|c| !c.undone) {
+        Some(at) => start_turn(ed, at),
+        None => ed.set_status("no turn of Claude's changed files — nothing to review"),
+    }
+}
+
+/// Checkpoint `at` as a review (the end of a turn under review at the end, `space v t`): its files as they
+/// are now, each against its text before the turn — counted on a worker.
+pub fn start_turn(ed: &mut Editor, at: usize) {
+    let Some(cp) = ed.checkpoints.list.get(at) else { return };
+    let base = Base::Turn { at, question: cp.question.clone() };
+    let files: Vec<(PathBuf, Option<ropey::Rope>)> =
+        cp.files.iter().map(|t| (t.path.clone(), t.before.clone())).collect();
+    let root = ed.chat.as_ref().and_then(|c| c.edits.at_end.clone()).unwrap_or_else(|| {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        std::fs::canonicalize(&cwd).unwrap_or(cwd)
+    });
+    ed.events.jobs().spawn(move || {
+        let files: Vec<File> = files
+            .into_iter()
+            .map(|(path, before)| {
+                let now = std::fs::read_to_string(&path);
+                let gone = !path.exists();
+                let hunks = crate::git::hunks(
+                    &before.as_ref().map(|b| b.to_string()).unwrap_or_default(),
+                    now.as_deref().unwrap_or_default(),
+                );
+                let rel = path.strip_prefix(&root).unwrap_or(&path).display().to_string();
+                File {
+                    added: hunks.iter().map(|h| h.lines.len()).sum(),
+                    removed: hunks.iter().map(|h| h.base.len()).sum(),
+                    new: before.is_none(),
+                    gone,
+                    // (there but not text)
+                    binary: !gone && now.is_err(),
+                    rel,
+                    path,
+                }
+            })
+            .collect();
+        move |ed: &mut Editor| open(ed, root, base, files)
+    });
+}
+
+/// The review of `files` against `base` begins (any open one ends).
+fn open(ed: &mut Editor, root: PathBuf, base: Base, mut files: Vec<File>) {
+    if files.is_empty() {
+        return ed.set_status(format!("review: no changes {}", base.label()));
+    }
+    files.sort_by(|a, b| a.rel.cmp(&b.rel));
+    close(ed);
+    let n = files.len();
+    // Start on the file being looked at, if it's among the changes (else the first)
+    let here = ed.doc().path.clone();
+    let first = files.iter().position(|f| here.as_ref() == Some(&f.path)).unwrap_or(0);
+    let turn = matches!(base, Base::Turn { .. });
+    ed.code_review = Some(CodeReview {
+        base,
+        root,
+        files,
+        viewed: HashMap::new(),
+        docs: Vec::new(),
+        land: None,
+        focus: false,
+        selected: 0,
+        scroll: 0,
+        shown: None,
+    });
+    let s = if n == 1 { "" } else { "s" };
+    ed.set_status(match turn {
+        true => format!("review: {n} file{s} Claude changed — ]g walks the changes"),
+        false => format!("review: {n} file{s} changed — ]g walks the changes"),
+    });
+    show(ed, first, false);
+    if std::mem::take(&mut ed.review_ask) {
+        claude_reviews(ed);
+    }
 }
 
 /// `space v c` · `:review-claude [branch]` — Claude reviews the changes: a note on the lines of each finding,
@@ -309,13 +367,26 @@ fn claude_reviews(ed: &mut Editor) {
     if ed.chat.as_ref().is_some_and(|c| c.busy()) {
         return ed.set_status("Claude is still answering — ask for its review once it's done");
     }
-    let (root, rev, label) = (r.root.clone(), r.base.rev().to_string(), r.base.label());
+    let (root, rev, label) = (r.root.clone(), r.base.rev().map(str::to_string), r.base.label());
     let untracked: Vec<File> = r.files.iter().filter(|f| f.new && !f.binary && !f.gone).cloned().collect();
+    // A turn's: each file against its text before the turn
+    let turn: Vec<(String, PathBuf, Option<ropey::Rope>)> = match &r.base {
+        Base::Turn { at, .. } => {
+            let before = |p: &PathBuf| {
+                ed.checkpoints.list.get(*at)?.files.iter().find(|t| &t.path == p)?.before.clone()
+            };
+            r.files.iter().map(|f| (f.rel.clone(), f.path.clone(), before(&f.path))).collect()
+        }
+        _ => Vec::new(),
+    };
     let n = r.files.len();
     ed.set_status("Claude is reading the changes…");
     ed.events.jobs().spawn(move || {
-        let mut diff = git(&root, &["diff", "--no-color", "--no-ext-diff", &rev]).unwrap_or_default();
-        for f in &untracked {
+        let mut diff = match &rev {
+            Some(rev) => git(&root, &["diff", "--no-color", "--no-ext-diff", rev]).unwrap_or_default(),
+            None => turn_diff(&turn),
+        };
+        for f in untracked.iter().filter(|_| rev.is_some()) {
             if diff.contains(&format!("b/{}\n", f.rel)) {
                 continue;
             }
@@ -353,6 +424,22 @@ fn claude_reviews(ed: &mut Editor) {
     });
 }
 
+/// A turn's files (rel, path, text before) as a unified diff against what they are on disk now.
+fn turn_diff(files: &[(String, PathBuf, Option<ropey::Rope>)]) -> String {
+    let mut out = String::new();
+    for (rel, path, before) in files {
+        let base = before.as_ref().map(|b| b.to_string()).unwrap_or_default();
+        let now = ropey::Rope::from_str(&std::fs::read_to_string(path).unwrap_or_default());
+        for (k, h) in crate::git::hunks(&base, &now.to_string()).iter().enumerate() {
+            let p = crate::gitmenu::patch(rel, &base, &now, h);
+            // (the file's header once)
+            let body = if k == 0 { p.as_str() } else { p.splitn(4, '\n').nth(3).unwrap_or_default() };
+            out.push_str(body);
+        }
+    }
+    out
+}
+
 /// `space v q`: the review ends — documents go back to the index as their diff base (drafts stay).
 pub fn close(ed: &mut Editor) {
     let Some(r) = ed.code_review.take() else { return };
@@ -373,7 +460,16 @@ pub fn close(ed: &mut Editor) {
 pub fn show(ed: &mut Editor, i: usize, at_end: bool) {
     let Some(r) = &ed.code_review else { return };
     let Some(f) = r.files.get(i).cloned() else { return };
-    let (root, rev) = (r.root.clone(), r.base.rev().to_string());
+    let from = match &r.base {
+        Base::Turn { at, .. } => From::Text(
+            ed.checkpoints
+                .list
+                .get(*at)
+                .and_then(|c| c.files.iter().find(|t| t.path == f.path))
+                .and_then(|t| t.before.clone()),
+        ),
+        base => From::Git(r.root.clone(), base.rev().unwrap_or("HEAD").to_string()),
+    };
     if f.binary {
         return ed.set_status(format!("review: {} is binary", f.rel));
     }
@@ -404,20 +500,27 @@ pub fn show(ed: &mut Editor, i: usize, at_end: bool) {
     if ed.docs.iter().any(|d| d.id == id && d.review_base.is_some() && d.diff_of.is_none()) {
         return land(ed);
     }
-    load_base(ed, id, root, rev, f);
+    load_base(ed, id, from, f);
+}
+
+/// Where a file's base text comes from: git (the root, the revision) · the text itself (a turn's — None: the
+/// file didn't exist).
+enum From {
+    Git(PathBuf, String),
+    Text(Option<ropey::Rope>),
 }
 
 /// The file's base text (worker) → its diff base; the first diff comes with it.
-fn load_base(ed: &mut Editor, id: DocId, root: PathBuf, rev: String, f: File) {
+fn load_base(ed: &mut Editor, id: DocId, from: From, f: File) {
     let Some(doc) = ed.docs.iter().find(|d| d.id == id) else { return };
     // A big file still loading has a placeholder for text (and keeps its version when the text comes in):
     // its diff is worked out once it's there
     let (text, version) = (doc.text.clone(), (!doc.loading).then(|| doc.version()));
     ed.events.jobs().spawn(move || {
-        let base = if f.new {
-            String::new()
-        } else {
-            git(&root, &["show", &format!("{rev}:{}", f.rel)]).unwrap_or_default()
+        let base = match from {
+            From::Text(t) => t.map(|t| t.to_string()).unwrap_or_default(),
+            From::Git(..) if f.new => String::new(),
+            From::Git(root, rev) => git(&root, &["show", &format!("{rev}:{}", f.rel)]).unwrap_or_default(),
         };
         let hunks = version.map(|_| crate::git::hunks(&base, &text.to_string()));
         move |ed: &mut Editor| {

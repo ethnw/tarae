@@ -161,6 +161,36 @@ queue up one after another.
 A file with unsaved edits is a special case, because disk isn't what you're looking at. The accepted change stays
 in your buffer, and Claude is told the file changes when you save.
 
+### Review at the end
+
+![The end of a turn under review at the end: the files Claude changed in a rail with what you asked under its head, lib.rs open with the new lines on a green wash, and the chat saying "changed 3 files · reviewing them now"](screenshots/chat-turn-review.png)
+
+A long piece of work can mean dozens of edits, and a `y`/`n` for each one. Review at the end lets Claude work
+through it and shows you the whole change once, the way you'd read a pull request. `space v a` (or
+`:review-at-end on`) asks first, on a card that says what it means: Claude's edits go into your files as it makes
+them, before you see them, and the checks it runs (`cargo test`, `cargo build`) run that code. `y` turns it on for
+this chat. The chat's title says `› review at end` while it's on, and `space v a` turns it off. A new chat
+(`C-l`) starts with it off.
+
+![The card that turns it on: edits go into your files before you see them, and the checks run that code; you review all of it at the end, and space u takes the turn back](screenshots/chat-review-at-end.png)
+
+When the turn ends, the files Claude changed open as a [code review](#code-review), each against what it was before
+the turn. What you asked is under the rail's head. `]g` walks the changes across files, `space v u` takes the change
+at the cursor back, `space u` takes the whole turn back, and `space v q` keeps the rest. `space n` comments and
+`space v s` sends your comments to Claude, as in any review. `space v t` (`:review-turn`) opens Claude's latest turn
+as a review again, whether or not it was made this way.
+
+Some edits still ask first, one at a time:
+
+- files outside the project (where the link or `..` really leads)
+- anything in `.git`, and the files in `llm.review-ask`: build scripts, manifests, and settings that decide what
+  runs (`build.rs`, `Cargo.toml`, `package.json`, `Makefile`, `.tarae.toml`, `.cargo/`, `.github/`, `.claude/`, …).
+  A name matches anywhere in the project, and a path with `/` matches from its root
+- a file with unsaved edits of yours
+
+The turns are kept on disk per project, so `:restart` (or a crash in the middle of a turn) doesn't lose them.
+After a crash, a turn that was cut short comes back as a turn of its own, and you can review it and take it back.
+
 ### Undoing a turn
 
 ![After undoing a turn: the chat's rows say "changed sub.rs, lib.rs · C-z undo" and then "undid the turn (2 files)", lib.rs is back as it was, and a toast offers :redo-turn](screenshots/chat-undo-turn.png)
@@ -206,7 +236,8 @@ a row that ends with its outcome (`◦ test  src/lib.rs:17  1 failed`).
   download offer, and Claude asks you to accept it
 
 The tool runs without asking. It only runs the project's own tests, the same way you do and in plain view, and
-every line Claude wrote for them went through your review first.
+every line Claude wrote for them went through your review first, unless you turned on
+[review at the end](#review-at-the-end), whose card says so.
 
 ### Running commands
 
@@ -310,9 +341,12 @@ draft, and `space v s` sends your answers together.
 | `space n` | Draft a comment (or a reply) on this line |
 | `space v m` | Mark this file viewed |
 | `space e` | The rail: `j`/`k` files, Enter open, `m` viewed and next, Esc back |
+| `space v u` | Take the change at the cursor back |
 | `space v s` / `:review-send` | Send the drafts to Claude |
 | `space v c` / `:review-claude` | Claude reviews the changes: notes on the lines, a verdict in the chat |
 | `space v q` / `:review-close` | End the review |
+| `space v t` / `:review-turn` | Review what Claude changed in its latest turn |
+| `space v a` / `:review-at-end` | [Review at the end](#review-at-the-end): Claude's edits go in as it works (asks first) |
 
 ## Claude Code integration
 

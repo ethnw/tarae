@@ -305,11 +305,14 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 
 | Key | Command | Description |
 |---|---|---|
+| `space v a` | `review_at_end` | Claude's edits: review at end |
 | `space v b` | `review_branch` | Review against a branch… |
 | `space v c` | `review_claude` | Claude reviews the changes |
 | `space v m` | `review_viewed` | Mark this file viewed |
 | `space v q` | `review_close` | End the review |
 | `space v s` | `review_send` | Send the review to Claude |
+| `space v t` | `review_turn` | Review Claude's last turn |
+| `space v u` | `review_undo_change` | Take this change back |
 | `space v v` | `review_start` | Review the changes |
 
 ### `space w`
@@ -451,6 +454,8 @@ Type `:` in normal mode. `Tab` completes command names and their arguments (path
 | `:review-send` |  | Send the review's comments to Claude |
 | `:review-claude` |  | Claude reviews the changes (uncommitted, or since a branch) |
 | `:review-close` |  | End the review |
+| `:review-at-end` |  | Claude's edits go in as it works, reviewed when its turn ends (on/off) |
+| `:review-turn` |  | Review what Claude changed in its last turn |
 | `:note-close` |  | Close Claude's note on this line |
 | `:notes-clear` |  | Close all of Claude's notes |
 | `:commit-draft` |  | Let Claude draft the commit message |

@@ -168,6 +168,9 @@ m = "review_viewed"
 s = "review_send"
 c = "review_claude"
 q = "review_close"
+a = "review_at_end"
+t = "review_turn"
+u = "review_undo_change"
 
 [normal.space.x]
 x = "test_nearest"

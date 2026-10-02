@@ -211,6 +211,9 @@ commands! {
         review_send => "Send the review to Claude",
         review_claude => "Claude reviews the changes",
         review_close => "End the review",
+        review_at_end => "Claude's edits: review at end",
+        review_turn => "Review Claude's last turn",
+        review_undo_change => "Take this change back",
         note_picker => "Claude's notes",
         undo_turn => "Undo Claude's last turn",
         model_picker => "Choose Claude's model",
@@ -1898,6 +1901,19 @@ fn review_send(cx: &mut Context) {
 
 fn review_close(cx: &mut Context) {
     crate::codereview::close(cx.editor);
+}
+
+fn review_at_end(cx: &mut Context) {
+    crate::edits::at_end_toggle(cx.editor, None);
+}
+
+fn review_turn(cx: &mut Context) {
+    crate::codereview::review_turn(cx.editor);
+}
+
+fn review_undo_change(cx: &mut Context) {
+    // (the change at the cursor back to the review's base — `space g d`'s, where the git tab can't open)
+    cx.editor.git_reset_hunk();
 }
 
 fn note_here(cx: &mut Context) {

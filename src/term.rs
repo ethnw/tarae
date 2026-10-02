@@ -337,7 +337,8 @@ fn render_frame(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io
         && let Some(marked) = editor.code_review.as_ref().map(|r| r.marked(editor))
         && let Some(r) = editor.code_review.as_mut()
     {
-        r.fit(marked, review_rail_room(&lay));
+        let room = review_rail_room(&lay, r);
+        r.fit(marked, room);
     }
     if let Some(p) = editor.picker.as_mut() {
         let pb = PickerBox::new(&lay, p);
@@ -4398,6 +4399,15 @@ fn draw_header(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> 
     } else if doc.is_modified() {
         left.push(Seg { text: " ●".into(), style: ui.base.patch(ui.accent), keep: 245 });
     }
+    // A review with no room for its rail (the chat beside it, a phone): which of its files this is
+    if let Some(r) = editor.code_review.as_ref().filter(|_| lay.rail_w == 0)
+        && let Some(i) = r.current(editor)
+    {
+        let n = r.files.len();
+        let at = r.rail_order().iter().position(|&k| k == i).unwrap_or(i) + 1;
+        left.push(Seg { text: "  review ".into(), style: dim, keep: 243 });
+        left.push(Seg { text: format!("{at}/{n}"), style: ui.base.patch(ui.accent), keep: 243 });
+    }
     // `:diff`: what it's compared with
     if let Some(of) = &doc.diff_of {
         left.push(Seg { text: "  against ".into(), style: dim, keep: 244 });
@@ -5238,6 +5248,7 @@ impl OfferCard {
                     }
                     crate::offer::What::PluginAsk { .. } => b = vec![('y', "Allow"), ('n', "No")],
                     crate::offer::What::Run { .. } => b = vec![('y', "Run"), ('n', "No")],
+                    crate::offer::What::ReviewAtEnd => b = vec![('y', "Turn on"), ('n', "No")],
                     _ => {}
                 }
                 // A command is shown whole (`tools::COMMAND_MAX` keeps it to a card's height)
@@ -6035,9 +6046,10 @@ const RAIL_MORE: usize = 12;
 const RAIL_HEAD: usize = 4;
 const RAIL_HINTS: usize = 4;
 
-/// Rows the review rail has for its files.
-fn review_rail_room(lay: &Layout) -> usize {
-    lay.text_rows.saturating_sub(RAIL_HEAD + RAIL_HINTS + 1).max(1)
+/// Rows the review rail has for its files (a turn's has its question under the head).
+fn review_rail_room(lay: &Layout, r: &crate::codereview::CodeReview) -> usize {
+    let question = usize::from(matches!(r.base, crate::codereview::Base::Turn { .. }));
+    lay.text_rows.saturating_sub(RAIL_HEAD + question + RAIL_HINTS + 1).max(1)
 }
 
 fn draw_review_rail(
@@ -6077,11 +6089,20 @@ fn draw_review_rail(
         vec![
             sp("▎ ".into(), accent),
             sp("review".into(), strong),
-            sp(pad_left(&fit_left(&label, head_room), head_room), faint),
+            sp(pad_left(&fit_left(&label, head_room.saturating_sub(2)), head_room), faint),
         ],
         card,
         None,
     ));
+    // Claude's turn: what it was asked, under the head
+    let turn = match &r.base {
+        crate::codereview::Base::Turn { question, .. } => {
+            let q = format!("“{}”", question.lines().next().unwrap_or_default());
+            rows.push((vec![sp(format!("  {}", fit_ellipsis(&q, w.saturating_sub(2))), dim)], card, None));
+            true
+        }
+        _ => false,
+    };
     let mut summary = vec![sp(format!("  {n} file{}", if n == 1 { "" } else { "s" }), dim)];
     if added > 0 {
         summary.push(sp(format!("  +{added}"), plus));
@@ -6093,7 +6114,7 @@ fn draw_review_rail(
     rows.push((vec![sp(format!("  {viewed} of {n} viewed"), faint)], card, None));
     // Files under their folders (filetree.rs, in the review's order) — from its scroll (`CodeReview::fit`),
     // the files out of sight counted in the blank rows around them
-    let room = review_rail_room(lay);
+    let room = review_rail_room(lay, r);
     let tree = r.rail_rows();
     let files_in = |rows: &[crate::filetree::Row]| rows.iter().filter(|t| t.item.is_some()).count();
     let more = |k: usize, arrow: &str| {
@@ -6179,6 +6200,11 @@ fn draw_review_rail(
         rows.push(hint(&[("j k", "files"), ("enter", "open")]));
         rows.push(hint(&[("m", "viewed, on to the next")]));
         rows.push(hint(&[("esc", "back to the code")]));
+    } else if turn && drafts == 0 {
+        // Claude's turn: what to do with its changes — one back, all back, or keep them
+        rows.push(hint(&[("]g", "change"), ("space n", "comment")]));
+        rows.push(hint(&[("space u", "undo the whole turn")]));
+        rows.push((vec![sp("  space v".into(), key), sp(" u undo · q keep".into(), faint)], card, None));
     } else {
         rows.push(hint(&[("]g", "change"), ("space e", "files")]));
         rows.push(hint(&[("space n", "comment")]));
@@ -6442,12 +6468,26 @@ fn draw_chat(
     };
     apply(out, if paused { faint } else { accent })?;
     queue!(out, Print(badge))?;
-    let title_w = 6 + badge.width();
-    // Idle: the model it's talking to (`Opus 5.5 · high`), else "ready"
+    // Review at the end: Claude's edits go in unasked — said while it's on. Room for it before the model's
+    // name (which gives way); shorter when the time of a turn in flight needs the room
+    let busy_w = if c.busy() { 4 + " thinking 00.0s".len() + 1 } else { 0 };
+    let room = w.saturating_sub(6 + badge.width() + busy_w);
+    let at_end = match c.edits.at_end.is_some() {
+        false => "",
+        true if room >= 16 => " › review at end",
+        true if room >= 9 => " › at end",
+        true => "",
+    };
+    apply(out, accent)?;
+    queue!(out, Print(at_end))?;
+    let title_w = 6 + badge.width() + at_end.width();
+    // Idle: the model it's talking to (`Opus 5.5 · high`), else "ready" — either only where it fits
+    let left = w.saturating_sub(title_w + 2);
     let status: Vec<Span> = match c.state {
         State::Idle => match crate::models::label(editor) {
-            Some(m) => vec![sp(fit_ellipsis(&m, w.saturating_sub(title_w + 2)), faint)],
-            None => vec![sp("ready".into(), faint)],
+            Some(m) if left >= 4 => vec![sp(fit_ellipsis(&m, left), faint)],
+            None if left >= 5 => vec![sp("ready".into(), faint)],
+            _ => Vec::new(),
         },
         s => vec![
             sp(wave(c.started), accent),

@@ -300,6 +300,20 @@ impl Editor {
         }
     }
 
+    /// What `path` is on disk, read elsewhere (`body` at `stamp` — the end of a turn whose edits went in
+    /// unseen, `checkpoint::gather`): an open buffer without unsaved edits takes it now, as the watch would
+    /// a moment later. One with unsaved edits is left to the watch (it says the file changed).
+    pub fn disk_take(&mut self, path: &Path, body: &Rope, stamp: Option<Stamp>) {
+        let Some(doc) = self.docs.iter_mut().find(|d| d.path.as_deref() == Some(path)) else { return };
+        if doc.is_modified() || doc.loading || stamp.is_none() || doc.disk == stamp {
+            return;
+        }
+        reload_text(doc, body);
+        doc.disk = stamp;
+        doc.disk_conflict = false;
+        doc.agent_writes = None;
+    }
+
     /// `:reload` — take the disk content (my changes are discarded but recoverable with undo).
     pub fn reload_current(&mut self) -> Result<(), String> {
         let doc = self.doc_mut();

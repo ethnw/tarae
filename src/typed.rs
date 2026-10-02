@@ -241,6 +241,20 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
             crate::codereview::close(editor);
             Ok(())
         }
+        "review-turn" => {
+            crate::codereview::review_turn(editor);
+            Ok(())
+        }
+        "review-at-end" => {
+            // (on · off · nothing: flip)
+            let arg = rest.trim();
+            let want = ["off", "on"].iter().position(|w| *w == arg).map(|i| i == 1);
+            if want.is_none() && !arg.is_empty() {
+                return Err(format!("review-at-end: on or off, not {arg}"));
+            }
+            crate::edits::at_end_toggle(editor, want);
+            Ok(())
+        }
         "note-close" => crate::notes::close_here(editor),
         "chat-resume" => {
             match rest.split_whitespace().next() {

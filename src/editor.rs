@@ -488,7 +488,10 @@ impl Editor {
             llm_pid: None,
             chat: None,
             notes: Default::default(),
-            checkpoints: Default::default(),
+            checkpoints: crate::checkpoint::Checkpoints {
+                dir: if cfg!(test) { None } else { crate::checkpoint::default_dir() },
+                ..Default::default()
+            },
             goto_after_load: None,
             code_review: None,
             review_ask: false,
@@ -4364,6 +4367,374 @@ mod tests {
         assert!(a["message"].as_str().unwrap().contains("unsaved"), "{a}");
         assert_eq!(text(&ed), "Xline 1\nLINE TWO\nLINE THREE\n");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The chat's title row, drawn.
+    fn chat_title(ed: &mut Editor) -> String {
+        let mut bytes = Vec::new();
+        crate::term::render(ed, &mut bytes, 110, 24).unwrap();
+        let mut parser = vt100::Parser::new(24, 110, 0);
+        parser.process(&bytes);
+        parser.screen().rows(0, 110).find(|r| r.contains("claude")).unwrap_or_default()
+    }
+
+    /// `space v a` asks first: a card that says edits go into the files before they're seen and that the
+    /// checks run that code. `n` leaves it off; `y` turns it on for this chat — the title says so and Claude
+    /// hears of it with the next message — and `space v a` again turns it off without asking.
+    #[test]
+    fn review_at_the_end_asks_first() {
+        let mut ed = editor("");
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        feed(&mut ed, "<space>va");
+        let o = ed.offers.first().expect("a card");
+        assert!(matches!(o.what, crate::offer::What::ReviewAtEnd));
+        assert!(o.weighty(), "y must have been in sight a moment to count");
+        assert!(
+            o.question.contains("before you see them") && o.question.contains("cargo test"),
+            "{}",
+            o.question
+        );
+        ed.offer_dismiss();
+        assert!(!crate::edits::at_end(&ed));
+        assert!(ed.chat.is_none());
+        feed(&mut ed, "<space>va");
+        ed.offer_accept();
+        assert!(crate::edits::at_end(&ed));
+        let c = ed.chat.as_ref().expect("the chat it's for");
+        assert!(!c.focused, "the keys stay in the editor");
+        assert!(c.msgs.iter().any(|m| m.text.contains("space v a turns it off")));
+        assert!(chat_title(&mut ed).contains("review at end"), "{}", chat_title(&mut ed));
+        assert_eq!(ed.checkpoints.tell.len(), 1);
+        assert!(ed.checkpoints.tell[0].contains("when your turn ends"), "{:?}", ed.checkpoints.tell);
+        feed(&mut ed, "<space>va");
+        assert!(ed.offers.is_empty(), "off without asking");
+        assert!(!crate::edits::at_end(&ed));
+        assert!(!chat_title(&mut ed).contains("review at end"));
+        assert!(ed.checkpoints.tell.is_empty(), "on then off before a message: nothing to tell");
+        // Typed: on asks, off doesn't; a new chat starts with it off
+        feed(&mut ed, ":review-at-end on<ret>");
+        assert!(matches!(ed.offers.first().map(|o| &o.what), Some(crate::offer::What::ReviewAtEnd)));
+        ed.offer_accept();
+        assert!(crate::edits::at_end(&ed));
+        feed(&mut ed, ":review-at-end on<ret>");
+        assert!(ed.offers.is_empty(), "already on");
+        crate::chat::reset(&mut ed);
+        assert!(!crate::edits::at_end(&ed), "a new chat asks again");
+        feed(&mut ed, ":review-at-end on<ret>:review-at-end off<ret>");
+        assert!(ed.offers.is_empty(), "off takes the card away");
+    }
+
+    /// A fake claude that asks to use each of `asks` (tool, input) in turn — p1 on the question, the next once
+    /// tarae answers the one before — and ends the turn after the last answer. With `write`, each answer is
+    /// taken as an allow and the file written as claude would (an Edit on the file as it is by then). Its stdin
+    /// goes to the log.
+    fn fake_asks(ed: &mut Editor, dir: &Path, asks: &[(&str, serde_json::Value)], write: bool) -> PathBuf {
+        let log = dir.join("stdin.log");
+        let ask = |i: usize| {
+            let (tool, input) = &asks[i];
+            serde_json::json!({"type": "control_request", "request_id": format!("p{}", i + 1),
+                "request": {"subtype": "can_use_tool", "tool_name": tool, "input": input}})
+        };
+        // What each one writes, worked out now and put beside the log: `cp` once it's answered
+        let mut files: HashMap<PathBuf, String> = HashMap::new();
+        let mut writes = Vec::new();
+        for (i, (tool, input)) in asks.iter().enumerate() {
+            let path = PathBuf::from(input["file_path"].as_str().unwrap());
+            let now = files
+                .entry(path.clone())
+                .or_insert_with(|| std::fs::read_to_string(&path).unwrap_or_default());
+            *now = match *tool {
+                "Write" => input["content"].as_str().unwrap().to_string(),
+                _ => now.replacen(
+                    input["old_string"].as_str().unwrap(),
+                    input["new_string"].as_str().unwrap(),
+                    1,
+                ),
+            };
+            let prepared = dir.join(format!(".claude-writes-{i}"));
+            std::fs::write(&prepared, &*now).unwrap();
+            let folder = path.parent().unwrap().display().to_string();
+            writes.push(format!("mkdir -p '{folder}'; cp '{}' '{}'; ", prepared.display(), path.display()));
+        }
+        let result = serde_json::json!({"type": "result", "result": "done"});
+        let mut cases = format!("'{{\"message\"'*) printf '%s\\n' '{}';; ", ask(0));
+        for i in 1..=asks.len() {
+            let next = if i < asks.len() { ask(i).to_string() } else { result.to_string() };
+            let then = if write { writes[i - 1].as_str() } else { "" };
+            cases.push_str(&format!("*'\"p{i}\"'*) {then}printf '%s\\n' '{next}';; "));
+        }
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec![
+            "-c".into(),
+            format!(
+                "while read -r line; do printf '%s\\n' \"$line\" >> '{}'; case \"$line\" in {cases}esac; done",
+                log.display()
+            ),
+        ];
+        log
+    }
+
+    /// Review at the end: an edit inside the project goes in unasked — claude is allowed its own input and
+    /// writes it; tarae keeps what the file was. One outside the project, to a listed file (a build
+    /// script), or to a file with unsaved edits is still a review first.
+    #[test]
+    fn review_at_the_end_lets_edits_in_unasked() {
+        use serde_json::json;
+        let (dir, main, util, _) = follow_project("at-end");
+        let (build, new) = (dir.join("build.rs"), dir.join("src/new.rs"));
+        std::fs::write(&build, "fn main() {}\n").unwrap();
+        let away = dir.with_file_name(format!("tarae-at-end-away-{}", std::process::id()));
+        std::fs::create_dir_all(&away).unwrap();
+        let outside = away.join("notes.txt");
+        std::fs::write(&outside, "note\n").unwrap();
+        let edit =
+            |f: &Path, old: &str, new: &str| json!({"file_path": f, "old_string": old, "new_string": new});
+        let mut ed = editor("");
+        ed.open(&util).unwrap();
+        feed(&mut ed, "ggiX<esc>"); // unsaved edits in util.rs
+        let log = fake_asks(
+            &mut ed,
+            &dir,
+            &[
+                ("Edit", edit(&main, "line 2", "LINE 2")),
+                ("Write", json!({"file_path": new, "content": "pub fn new() {}\n"})),
+                ("Edit", edit(&build, "fn main() {}", "fn main() { run() }")),
+                ("Edit", edit(&outside, "note", "NOTE")),
+                ("Edit", edit(&util, "line 3", "LINE 3")),
+            ],
+            false,
+        );
+        feed(&mut ed, "<space>l");
+        ed.chat.as_mut().unwrap().edits.at_end = Some(dir.clone());
+        feed(&mut ed, "write them<ret>");
+        settle_until(&mut ed, |ed| ed.review.is_some());
+        // p1, p2: allowed as asked, nothing shown, nothing written by tarae
+        for (id, input) in [
+            ("p1", edit(&main, "line 2", "LINE 2")),
+            ("p2", json!({"file_path": new, "content": "pub fn new() {}\n"})),
+        ] {
+            let a = permission_answer_to(&log, id);
+            assert_eq!((&a["behavior"], &a["updatedInput"]), (&json!("allow"), &input), "{id}: {a}");
+        }
+        assert_eq!(std::fs::read_to_string(&main).unwrap(), "line 1\nline 2\nline 3\n", "claude writes it");
+        assert!(!new.exists());
+        let turn = &ed.checkpoints.turn;
+        let kept = |p: &Path| {
+            turn.iter().find(|t| t.path == p).map(|t| (t.before.as_ref().map(|r| r.to_string()), t.unseen))
+        };
+        assert_eq!(kept(&main), Some((Some("line 1\nline 2\nline 3\n".into()), true)), "{turn:?}");
+        assert_eq!(kept(&new), Some((None, true)), "a file it makes: none before");
+        // p3: a build script is a review
+        assert_eq!(ed.doc().path.as_deref(), Some(build.as_path()));
+        feed(&mut ed, "y");
+        assert_eq!(permission_answer_to(&log, "p3")["behavior"], "allow");
+        // p4: outside the project too
+        settle_until(&mut ed, |ed| ed.review.is_some());
+        assert_eq!(ed.doc().path.as_deref(), Some(outside.as_path()));
+        feed(&mut ed, "y");
+        // p5: unsaved edits in util.rs — a review, and it stays in the buffer
+        settle_until(&mut ed, |ed| ed.review.is_some());
+        assert_eq!(ed.doc().path.as_deref(), Some(util.as_path()));
+        let kept = |p: &Path| ed.checkpoints.turn.iter().find(|t| t.path == p).map(|t| t.unseen);
+        assert_eq!(kept(&build), Some(false), "seen in its review");
+        feed(&mut ed, "y");
+        let a = permission_answer_to(&log, "p5");
+        assert!(a["behavior"] == "deny" && a["message"].as_str().unwrap().contains("unsaved"), "{a}");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&away).ok();
+    }
+
+    /// Review at the end, on a fake claude that edits main.rs and lib.rs and makes src/new.rs (turns kept in
+    /// `store`, if given).
+    fn turn_of_three(name: &str, store: Option<&Path>) -> (Editor, PathBuf, [PathBuf; 3]) {
+        use serde_json::json;
+        let (dir, main, _, lib) = follow_project(name);
+        let new = dir.join("src/new.rs");
+        let edit =
+            |f: &Path, old: &str, new: &str| json!({"file_path": f, "old_string": old, "new_string": new});
+        let mut ed = editor("");
+        ed.checkpoints.dir = store.map(Path::to_path_buf);
+        ed.viewport = (30, 100);
+        ed.open(&lib).unwrap();
+        fake_asks(
+            &mut ed,
+            &dir,
+            &[
+                ("Edit", edit(&main, "line 2", "LINE 2")),
+                ("Write", json!({"file_path": new, "content": "pub fn new() {}\n"})),
+                ("Edit", edit(&lib, "line 9", "LINE 9")),
+            ],
+            true,
+        );
+        feed(&mut ed, "<space>l");
+        ed.chat.as_mut().unwrap().edits.at_end = Some(dir.clone());
+        feed(&mut ed, "three files<ret>");
+        (ed, dir, [main, lib, new])
+    }
+
+    /// Its review is up and the file in front has its diff.
+    fn reviewing(ed: &Editor) -> bool {
+        ed.code_review.is_some()
+            && ed.doc().review_base.is_some()
+            && ed.doc().git_version == ed.doc().version()
+    }
+
+    /// Review at the end: when the turn ends, what Claude wrote is read from disk and the turn opens as a
+    /// review — its files in the rail, each against what it was before the turn, `]g` on into the next file.
+    /// `space g d` takes one change back, `space v q` keeps the rest, `space v t` opens the turn again, and
+    /// `space u` takes it all back.
+    #[test]
+    fn the_turn_is_reviewed_when_it_ends() {
+        let (mut ed, dir, [main, lib, new]) = turn_of_three("turn-review", None);
+        settle_until(&mut ed, reviewing);
+        let c = ed.chat.as_ref().unwrap();
+        assert!(!c.busy() && !c.focused, "the keys went to the review");
+        assert!(c.msgs.iter().any(|m| m.text == "changed 3 files · reviewing them now"));
+        // The chat beside it leaves no room for the rail: the header says which file of the review this is
+        let mut bytes = Vec::new();
+        crate::term::render(&mut ed, &mut bytes, 110, 30).unwrap();
+        let mut parser = vt100::Parser::new(30, 110, 0);
+        parser.process(&bytes);
+        let header = parser.screen().rows(0, 110).next().unwrap();
+        assert!(header.contains("lib.rs  review 1/3"), "{header}");
+        let r = ed.code_review.as_ref().unwrap();
+        assert!(
+            matches!(&r.base, crate::codereview::Base::Turn { question, .. } if question == "three files"),
+            "{:?}",
+            r.base
+        );
+        let files: Vec<(&str, usize, usize, bool)> =
+            r.files.iter().map(|f| (f.rel.as_str(), f.added, f.removed, f.new)).collect();
+        assert_eq!(files, [("lib.rs", 1, 1, false), ("main.rs", 1, 1, false), ("src/new.rs", 1, 0, true)]);
+        // On the file in front (lib.rs), its change selected; its base is what it was before the turn
+        assert_eq!(ed.doc().path.as_deref(), Some(lib.as_path()));
+        assert_eq!(text(&ed), std::fs::read_to_string(&lib).unwrap(), "the buffer has Claude's write");
+        assert_eq!(ed.doc().git_hunks.len(), 1);
+        assert_eq!(ed.cursor_line(), 8);
+        assert!(ed.doc().review_base.as_ref().unwrap().to_string().contains("line 9\n"));
+        // ]g past lib.rs's one change: main.rs
+        feed(&mut ed, "]g");
+        settle_until(&mut ed, |ed| reviewing(ed) && ed.doc().path.as_deref() == Some(main.as_path()));
+        assert_eq!(ed.cursor_line(), 1);
+        // One change back (`space v u`, as the rail says): that's the user's edit now (the buffer, saved by
+        // auto-save as usual)
+        feed(&mut ed, "<space>vu");
+        assert_eq!(text(&ed), "line 1\nline 2\nline 3\n");
+        feed(&mut ed, "<space>vq");
+        assert!(ed.code_review.is_none());
+        feed(&mut ed, "<space>vt");
+        settle_until(&mut ed, reviewing);
+        assert_eq!(ed.code_review.as_ref().unwrap().files.len(), 3, "the turn's files again");
+        // All of it back: lib.rs as before, new.rs gone, main.rs as the user left it
+        feed(&mut ed, "<space>u");
+        let lib_now =
+            ed.docs.iter().find(|d| d.path.as_deref() == Some(lib.as_path())).unwrap().text.to_string();
+        assert!(lib_now.contains("line 9\n") && !lib_now.contains("LINE 9"), "{lib_now}");
+        assert!(!new.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// While the turn's files are read (a worker), `space u` waits for them (a restart too — restart.rs). A
+    /// review already open isn't replaced by the turn's.
+    #[test]
+    fn the_turn_review_waits_its_turn() {
+        let (mut ed, dir, _) = turn_of_three("turn-review-wait", None);
+        settle_until(&mut ed, |ed| ed.checkpoints.gathering);
+        let err = crate::checkpoint::step(&mut ed, true).unwrap_err();
+        assert!(err.contains("a moment"), "{err}");
+        settle_until(&mut ed, reviewing);
+        assert!(crate::checkpoint::can_undo(&ed));
+        std::fs::remove_dir_all(&dir).ok();
+        // A review open already: it stays, the row says how to get to the turn's
+        let (mut ed, dir, _) = turn_of_three("turn-review-busy", None);
+        let other =
+            crate::codereview::CodeReview::for_test(crate::codereview::Base::Head, dir.clone(), Vec::new());
+        ed.code_review = Some(other);
+        settle_until(&mut ed, |ed| !ed.chat.as_ref().unwrap().busy() && !ed.checkpoints.gathering);
+        assert_eq!(ed.code_review.as_ref().unwrap().base, crate::codereview::Base::Head);
+        let c = ed.chat.as_ref().unwrap();
+        assert!(c.msgs.iter().any(|m| m.text == "changed 3 files · space v t reviews them"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// What's kept of the turns in `store` for this folder, once a worker's save has `ok` (5 s at most).
+    fn turns_kept(
+        store: &Path,
+        ok: impl Fn(&crate::checkpoint::Stored) -> bool,
+    ) -> crate::checkpoint::Stored {
+        let root = std::env::current_dir().unwrap();
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let kept = crate::checkpoint::load(store, &root);
+            if ok(&kept) {
+                return kept;
+            }
+            assert!(std::time::Instant::now() < end, "never kept: {kept:?}");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// Turns are kept on disk: a new tarae in the same folder (`:restart`, or after a crash) still has the
+    /// latest turn — `space v t` reviews it, `space u` takes it back (and that's kept too).
+    #[test]
+    fn turns_outlive_tarae() {
+        let store = std::env::temp_dir().join(format!("tarae-turns-kept-{}", std::process::id()));
+        let (mut ed, dir, [_, lib, new]) = turn_of_three("turns-kept", Some(&store));
+        settle_until(&mut ed, reviewing);
+        let kept = turns_kept(&store, |k| k.list.len() == 1);
+        assert_eq!(kept.list[0].files.len(), 3);
+        drop(ed);
+        let mut ed = editor("");
+        ed.checkpoints.dir = Some(store.clone());
+        crate::checkpoint::restore(&mut ed);
+        settle_until(&mut ed, |ed| !ed.checkpoints.list.is_empty());
+        assert_eq!(ed.checkpoints.list[0].question, "three files");
+        feed(&mut ed, "<space>vt");
+        settle_until(&mut ed, reviewing);
+        assert_eq!(ed.code_review.as_ref().unwrap().files.len(), 3);
+        feed(&mut ed, "<space>vq<space>u");
+        assert!(!std::fs::read_to_string(&lib).unwrap().contains("LINE 9"));
+        assert!(!new.exists());
+        turns_kept(&store, |k| k.list.first().is_some_and(|c| c.undone));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&store).ok();
+    }
+
+    /// A turn cut short (tarae ended mid-turn — a crash) comes back as a turn of its own: what it wrote
+    /// unseen against what was there before, so it can still be reviewed and taken back.
+    #[test]
+    fn a_turn_cut_short_comes_back() {
+        let store = std::env::temp_dir().join(format!("tarae-turns-cut-{}", std::process::id()));
+        let (dir, main, ..) = follow_project("turn-cut");
+        let mut ed = editor("");
+        ed.checkpoints.dir = Some(store.clone());
+        crate::checkpoint::record_unseen(
+            &mut ed,
+            main.clone(),
+            Some(ropey::Rope::from_str("line 1\nline 2\nline 3\n")),
+        );
+        std::fs::write(&main, "line 1\nLINE 2\nline 3\n").unwrap(); // claude's write
+        turns_kept(&store, |k| k.turn.len() == 1);
+        drop(ed); // (no turn end)
+        let mut ed = editor("");
+        ed.checkpoints.dir = Some(store.clone());
+        crate::checkpoint::restore(&mut ed);
+        settle_until(&mut ed, |ed| !ed.checkpoints.list.is_empty());
+        let cp = &ed.checkpoints.list[0];
+        assert_eq!(cp.question, "a turn cut short");
+        let f = &cp.files[0];
+        assert_eq!(
+            (f.path.as_path(), f.before.as_ref().map(|b| b.to_string())),
+            (main.as_path(), Some("line 1\nline 2\nline 3\n".into()))
+        );
+        assert_eq!(f.after.to_string(), "line 1\nLINE 2\nline 3\n", "as it is now");
+        // Kept as a turn now, not cut short any more
+        turns_kept(&store, |k| k.turn.is_empty() && k.list.len() == 1);
+        feed(&mut ed, "<space>u");
+        assert_eq!(std::fs::read_to_string(&main).unwrap(), "line 1\nline 2\nline 3\n");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&store).ok();
     }
 
     /// A throwaway git repository: `files` committed on `main`, then `run` on top.

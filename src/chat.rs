@@ -407,6 +407,8 @@ pub struct Restored {
     pub focused: bool,
     pub scroll: usize,
     pub follow: bool,
+    /// Review at the end, on for this folder (`edits.rs`).
+    pub at_end: Option<PathBuf>,
 }
 
 /// The note a conversation carried over a restart ends with (one — earlier ones go).
@@ -420,6 +422,7 @@ pub fn restore(ed: &mut Editor, r: Restored) {
     c.cursor = if r.input.is_char_boundary(r.cursor) { r.cursor } else { r.input.len() };
     c.input = r.input;
     c.focused = r.focused;
+    c.edits.at_end = r.at_end;
     ed.chat = Some(c);
     let (Some(id), Some(dir)) = (r.session, ed.chats_dir.clone()) else { return ensure_proc(ed) };
     let root = std::env::current_dir().unwrap_or_default();
@@ -492,6 +495,8 @@ pub fn reset(ed: &mut Editor) {
         }
         c.msgs.clear();
         c.plan = None;
+        // (agreed for that conversation — a new one asks again)
+        c.edits.at_end = None;
         c.state = State::Idle;
         c.scroll = 0;
         c.follow.new_turn();
@@ -777,11 +782,41 @@ fn checkpoint_turn(ed: &mut Editor) {
         .and_then(|c| c.msgs.iter().rev().find(|m| m.role == Role::User))
         .map(|m| m.text.clone())
         .unwrap_or_default();
+    // Files written unseen (review at the end): read first — `turn_gathered` goes on from there
+    if crate::checkpoint::gather(ed, &question) {
+        return;
+    }
     if let Some(n) = crate::checkpoint::turn_over(ed, &question)
         && let Some(c) = &mut ed.chat
     {
         c.msgs.push(Msg::new(Role::Note, format!("changed {n} · space u undo"), ""));
     }
+}
+
+/// A turn that wrote files unseen is a checkpoint now (`checkpoint::gather`; `n` = its files, None: nothing
+/// changed in the end): its review opens — unless another review is up, or a restart waits for the turn
+/// (then the row says how to get to it).
+pub fn turn_gathered(ed: &mut Editor, n: Option<String>) {
+    if let Some(n) = n {
+        let open = ed.code_review.is_none() && ed.review.is_none() && ed.restart.is_none();
+        // (short: a row this narrow chat cuts at its end)
+        let row = match open {
+            true => format!("changed {n} · reviewing them now"),
+            false => format!("changed {n} · space v t reviews them"),
+        };
+        if let Some(c) = &mut ed.chat {
+            c.msgs.push(Msg::new(Role::Note, row, ""));
+            keep(ed);
+        }
+        if open {
+            // (the keys go to the review, as with an edit's)
+            if let Some(c) = &mut ed.chat {
+                c.focused = false;
+            }
+            crate::codereview::start_turn(ed, ed.checkpoints.list.len() - 1);
+        }
+    }
+    crate::restart::turn_over(ed);
 }
 
 /// A control request of ours to the chat's process (a model or effort chosen) — its answer isn't needed.

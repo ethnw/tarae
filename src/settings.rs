@@ -351,6 +351,16 @@ pub static SETTINGS: &[Setting] = &[
         },
     },
     Setting {
+        path: "llm.review-ask",
+        kind: Kind::StrList,
+        doc: "Chat, review at the end (space v a): files whose edits still ask first — a name matches anywhere (\"build.rs\"), a path from the project root (\"src/secret/\"); .git always asks",
+        get: |c| Value::Array(c.llm.review_ask.iter().map(|a| Value::from(a.as_str())).collect()),
+        set: |c, v| {
+            c.llm.review_ask =
+                v.as_array().into_iter().flatten().filter_map(|a| a.as_str().map(str::to_string)).collect()
+        },
+    },
+    Setting {
         path: "llm.context-lines",
         kind: Kind::Int { min: 0, max: 1000 },
         doc: "Lines of context sent around each selection",

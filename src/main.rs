@@ -199,6 +199,8 @@ fn main() -> Result<()> {
     }
     // Claude's notes from last time in this folder (the open files get them right away)
     notes::restore(&mut editor);
+    // Claude's turns here, for `space u` and `space v t` (a restart's, or ones a crash cut short)
+    checkpoint::restore(&mut editor);
     if !files.is_empty() {
         editor.current = 0;
     }

@@ -53,6 +53,8 @@ pub enum What {
     Install { tool: String, run: Vec<String>, cwd: PathBuf, then: crate::install::Then },
     /// A command Claude wants to run (`tools.rs`): `y` runs it in the task panel, `n` tells Claude no.
     Run { cmd: String, call: crate::tools::Call },
+    /// Review at the end (`edits.rs`): `y` lets Claude's edits go in as it makes them.
+    ReviewAtEnd,
 }
 
 /// Work that stopped for lack of a grammar — resumed once downloaded
@@ -93,7 +95,11 @@ impl Offer {
     pub fn weighty(&self) -> bool {
         matches!(
             self.what,
-            What::Install { .. } | What::PluginPermissions { .. } | What::PluginAsk { .. } | What::Run { .. }
+            What::Install { .. }
+                | What::PluginPermissions { .. }
+                | What::PluginAsk { .. }
+                | What::Run { .. }
+                | What::ReviewAtEnd
         )
     }
 
@@ -186,6 +192,10 @@ impl crate::editor::Editor {
                 self.plugin_ask_answer(plugin, *ask, true);
             }
             What::Run { cmd, call } => crate::tools::run_answer(self, id, cmd, call, true),
+            What::ReviewAtEnd => {
+                self.offer_finished(id, Ok(()));
+                crate::edits::at_end_set(self, true);
+            }
         }
     }
 
@@ -219,6 +229,7 @@ impl crate::editor::Editor {
                 self.set_status(format!("Not installing {tool} for now (N on its card: never ask)"))
             }
             What::Run { cmd, call } => crate::tools::run_answer(self, o.id, cmd, call, false),
+            What::ReviewAtEnd => self.set_status("Claude's edits come one at a time"),
         }
     }
 

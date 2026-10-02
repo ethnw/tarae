@@ -12,11 +12,13 @@
 //! - One review at a time: more requests wait (`next`, every event); the turn ending closes a pending one.
 
 use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
 use crate::document::DocId;
 use crate::editor::Editor;
+use crate::offer::{Offer, What};
 
 /// A permission request waiting for (or in) its review.
 pub struct Pending {
@@ -32,6 +34,82 @@ pub struct Edits {
     pub queue: VecDeque<Pending>,
     /// The review showing one of ours (its `llm_generation`).
     pub review: Option<u64>,
+    /// Review at the end (`space v a`, agreed on its card): edits under this folder go in as Claude makes
+    /// them, and the turn is reviewed when it ends.
+    pub at_end: Option<PathBuf>,
+}
+
+// ── Review at the end ───────────────────────────────────────────────────────
+
+const AT_END_TITLE: &str = "Review Claude's edits at the end?";
+
+/// What the card asks — what turning it on means.
+const AT_END_ASK: &str = "Claude's edits go into your files as it makes them — before you see them — and the \
+checks it runs (cargo test, cargo build) run that code.\n\nWhen its turn ends you review all of it; space u \
+takes the turn back. Build scripts, settings and files outside the project still ask first.";
+
+/// What Claude hears with its next message when it's turned on · off.
+const TELL_ON: &str = "From now on in this conversation your Edit and Write calls are applied as you make them, \
+without the user seeing each one: they review all of your changes when your turn ends. Edits outside the project, \
+to build scripts and settings, and to files with unsaved edits still go to the user first.";
+const TELL_OFF: &str =
+    "Your Edit and Write calls are shown to the user one at a time again, before they're written.";
+
+/// Whether the chat's edits are reviewed at the end of its turn.
+pub fn at_end(ed: &Editor) -> bool {
+    ed.chat.as_ref().is_some_and(|c| c.edits.at_end.is_some())
+}
+
+/// `space v a` · `:review-at-end [on|off]` (`want`; None flips it): on asks first, on its card.
+pub fn at_end_toggle(ed: &mut Editor, want: Option<bool>) {
+    let on = at_end(ed);
+    let want = want.unwrap_or(!on);
+    ed.offers.retain(|o| !matches!(o.what, What::ReviewAtEnd));
+    if want == on {
+        return ed.set_status(match on {
+            true => "review at the end is on — space v a turns it off",
+            false => "Claude's edits come one at a time",
+        });
+    }
+    if !want {
+        return at_end_set(ed, false);
+    }
+    let card = Offer::new(AT_END_TITLE.into(), AT_END_ASK, "", String::new(), What::ReviewAtEnd);
+    ed.push_offer(card);
+}
+
+/// `y` on the card (on) · turned off: for this chat, the project folder it was agreed for.
+pub fn at_end_set(ed: &mut Editor, on: bool) {
+    if ed.chat.is_none() {
+        crate::chat::open(ed);
+        if let Some(c) = &mut ed.chat {
+            c.focused = false;
+            c.unfolded = false;
+        }
+    }
+    let Some(c) = &mut ed.chat else { return };
+    c.edits.at_end = on.then(|| {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        std::fs::canonicalize(&cwd).unwrap_or(cwd)
+    });
+    let row = match on {
+        true => "review at the end · space v a turns it off",
+        false => "Claude's edits come one at a time again",
+    };
+    c.msgs.push(crate::chat::Msg::new(crate::chat::Role::Note, row, ""));
+    // Claude hears the change with its next message — unless it never heard of the other
+    let (say, unsay) = if on { (TELL_ON, TELL_OFF) } else { (TELL_OFF, TELL_ON) };
+    let tell = &mut ed.checkpoints.tell;
+    match tell.iter().position(|t| t == unsay) {
+        Some(i) => {
+            tell.remove(i);
+        }
+        None => tell.push(say.to_string()),
+    }
+    match on {
+        true => ed.set_success("Claude's edits go in as it works — you review the turn when it ends"),
+        false => ed.set_status(row),
+    }
 }
 
 /// A `can_use_tool` request: answered now (Some) or after its review (None).
@@ -57,14 +135,105 @@ pub fn request(ed: &mut Editor, request_id: &str, req: &Value) -> Option<Value> 
         Some(format!("step {}/{}: {}", i + 1, p.steps.len(), p.steps[i].text))
     });
     let reason = words.filter(|w| !w.is_empty()).or(step).unwrap_or_default();
-    c.edits.queue.push_back(Pending {
+    let p = Pending {
         request_id: request_id.to_string(),
         tool: tool.to_string(),
         input: req["input"].clone(),
         reason,
-    });
-    next(ed);
+    };
+    match c.edits.at_end.clone() {
+        Some(root) => unasked(ed, root, p),
+        None => {
+            c.edits.queue.push_back(p);
+            next(ed);
+        }
+    }
     None
+}
+
+/// Review at the end: whether the edit goes in unasked is worked out on a worker — where its path really
+/// leads, and the file's text before it — then it's allowed as claude asked (claude writes it; the watch
+/// brings an open buffer along), or shown as a review after all.
+fn unasked(ed: &mut Editor, root: PathBuf, p: Pending) {
+    let path = crate::chat::resolve(p.input["file_path"].as_str().unwrap_or_default());
+    let ask = ed.config.llm.review_ask.clone();
+    let generation = ed.chat.as_ref().map(crate::chat::Chat::generation);
+    ed.events.jobs().spawn(move || {
+        // (Some: it goes in — the real path, and what's there now: None = no file)
+        let found = inside(&root, &path)
+            .filter(|real| !real.strip_prefix(&root).is_ok_and(|rel| listed(rel, &ask)))
+            .and_then(|real| Some((before_text(&real)?, real)));
+        move |ed: &mut Editor| {
+            // (a new chat, claude restarted: no one waits for this answer)
+            if ed.chat.as_ref().map(crate::chat::Chat::generation) != generation {
+                return;
+            }
+            // Unsaved edits of the user's: disk isn't what they see — the usual review
+            let dirty = |real: &PathBuf| {
+                ed.docs
+                    .iter()
+                    .any(|d| d.path.as_ref() == Some(real) && d.is_modified() && !d.unsaved_is_claudes())
+            };
+            match found {
+                Some((before, real)) if at_end(ed) && !dirty(&real) => {
+                    crate::checkpoint::record_unseen(ed, real, before.map(ropey::Rope::from));
+                    answer(ed, &p.request_id, allow(p.input.clone()));
+                }
+                _ => {
+                    if let Some(c) = &mut ed.chat {
+                        c.edits.queue.push_back(p);
+                    }
+                    next(ed);
+                }
+            }
+        }
+    });
+}
+
+/// Where `path` really leads — its deepest existing folder resolved (links followed, `..` gone through) —
+/// if that's inside `root` (resolved itself).
+pub fn inside(root: &Path, path: &Path) -> Option<PathBuf> {
+    let root = std::fs::canonicalize(root).ok()?;
+    let mut rest = Vec::new();
+    let mut at = path.to_path_buf();
+    let real = loop {
+        if let Ok(real) = std::fs::canonicalize(&at) {
+            break real;
+        }
+        rest.push(at.file_name()?.to_os_string());
+        at = at.parent()?.to_path_buf();
+    };
+    // What doesn't exist yet: plain names only (a `..` there would climb out unseen)
+    let mut real = real;
+    for name in rest.iter().rev() {
+        if name == ".." || name == "." {
+            return None;
+        }
+        real.push(name);
+    }
+    real.starts_with(&root).then_some(real)
+}
+
+/// Whether an edit to `rel` (from the project's root) still asks first: anything in `.git`, or an entry of
+/// `llm.review-ask` — a name matches any part of the path, a path (with `/`) its start.
+pub fn listed(rel: &Path, ask: &[String]) -> bool {
+    let parts: Vec<&std::ffi::OsStr> = rel.iter().collect();
+    parts.iter().any(|p| *p == ".git")
+        || ask
+            .iter()
+            .map(|a| a.trim().trim_end_matches('/'))
+            .filter(|a| !a.is_empty())
+            .any(|a| if a.contains('/') { rel.starts_with(a) } else { parts.iter().any(|p| *p == a) })
+}
+
+/// The file's text before an edit (None inside: no such file) — None when it can't be told (not text, not
+/// readable): then it's a review.
+fn before_text(path: &Path) -> Option<Option<String>> {
+    match std::fs::read(path) {
+        Ok(bytes) => String::from_utf8(bytes).ok().map(Some),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(None),
+        Err(_) => None,
+    }
 }
 
 fn allow(input: Value) -> Value {
@@ -253,6 +422,45 @@ pub fn turn_over(ed: &mut Editor) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review at the end lets in only edits that land inside the project — where the path really leads,
+    /// links followed and `..` gone through — and not to `.git` or a listed name (anywhere) or path (from
+    /// the root).
+    #[test]
+    fn which_edits_go_in_unasked() {
+        let dir = std::env::temp_dir().join(format!("tarae-edits-inside-{}", std::process::id()));
+        let outside = std::env::temp_dir().join(format!("tarae-edits-outside-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let root = std::fs::canonicalize(&dir).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("away")).ok();
+        let at = |p: &str| inside(&root, &root.join(p));
+        assert_eq!(at("src/main.rs"), Some(root.join("src/main.rs")));
+        assert_eq!(
+            at("src/new/deeper/file.rs"),
+            Some(root.join("src/new/deeper/file.rs")),
+            "folders to come"
+        );
+        assert_eq!(at("src/../src/lib.rs"), Some(root.join("src/lib.rs")));
+        assert_eq!(at("../elsewhere.rs"), None);
+        assert_eq!(at("away/x.rs"), None, "a link out of the project");
+        assert_eq!(inside(&root, Path::new("/etc/hosts")), None);
+        // (the root as given: /tmp → /private/tmp on macOS)
+        assert_eq!(inside(&root, &dir.join("src/main.rs")), Some(root.join("src/main.rs")));
+        let ask: Vec<String> =
+            ["build.rs", ".github", "src/secret/", "Cargo.toml"].iter().map(|s| s.to_string()).collect();
+        let listed = |p: &str| listed(Path::new(p), &ask);
+        assert!(!listed("src/main.rs"));
+        assert!(listed(".git/hooks/pre-commit"), ".git always asks");
+        assert!(listed("crates/a/build.rs"), "a name, anywhere");
+        assert!(listed(".github/workflows/ci.yml"));
+        assert!(listed("src/secret/key.rs"), "a path, from the root");
+        assert!(!listed("lib/src/secret/key.rs"));
+        assert!(!listed("src/build.rs.bak"));
+        assert!(listed("Cargo.toml") && listed("crates/a/Cargo.toml"));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&outside).ok();
+    }
 
     #[test]
     fn region_is_one_unique_span_of_whole_lines() {

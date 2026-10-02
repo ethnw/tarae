@@ -11,10 +11,16 @@
 //!   again, so the disk — what Claude, tests and git read — matches. A file the turn created goes (deleted,
 //!   its buffer closed) when nothing else is in it; redo writes it again.
 //! - Claude is told on the next message (its memory still has its edits).
+//! - Review at the end (`edits.rs`): edits Claude makes unseen keep only the text before; what it is after is
+//!   read when the turn ends (`gather`), and the turn opens as a review (`codereview::start_turn`).
+//! - Kept on disk per project (`$XDG_STATE_HOME/tarae/turns/<project hash>.json` — the newest `KEEP`, and
+//!   the turn in flight), written on a worker at each change: a new tarae (`:restart`, a crash) still has
+//!   them. A turn cut short comes back as one of its own, its files as they are now.
 
 use std::path::{Path, PathBuf};
 
 use ropey::Rope;
+use serde_json::{Value, json};
 
 use crate::editor::Editor;
 use crate::transaction::{Change, Transaction};
@@ -27,6 +33,9 @@ pub struct Touched {
     pub before: Option<Rope>,
     /// After its latest.
     pub after: Rope,
+    /// Written without the user seeing it (review at the end, `edits.rs`) — `after` is read from disk when
+    /// the turn ends, and the turn is reviewed then.
+    pub unseen: bool,
 }
 
 /// One turn's changes.
@@ -42,9 +51,13 @@ pub struct Checkpoint {
 pub struct Checkpoints {
     pub list: Vec<Checkpoint>,
     /// The turn in flight.
-    turn: Vec<Touched>,
+    pub turn: Vec<Touched>,
     /// What Claude hears with the next message (it undid or redid a turn).
     pub tell: Vec<String>,
+    /// The turn that just ended wrote files unseen, being read (`gather`): its checkpoint comes after.
+    pub gathering: bool,
+    /// Where they're kept (the state dir's `turns/`; None: not kept — tests).
+    pub dir: Option<PathBuf>,
 }
 
 /// An accepted edit of Claude's landed in document `id`: `before` was its text just before (None = no such
@@ -58,7 +71,25 @@ pub fn record(ed: &mut Editor, id: crate::document::DocId, before: Option<Rope>)
     let turn = &mut ed.checkpoints.turn;
     match turn.iter_mut().find(|t| t.path == path) {
         Some(t) => t.after = after,
-        None => turn.push(Touched { path, before, after }),
+        None => {
+            turn.push(Touched { path, before, after, unseen: false });
+            keep(ed);
+        }
+    }
+}
+
+/// An edit of Claude's let in unasked (review at the end) to `path`, which was `before` (None = no such
+/// file) — kept the first time this turn; what it is after is read when the turn ends.
+pub fn record_unseen(ed: &mut Editor, path: PathBuf, before: Option<Rope>) {
+    let turn = &mut ed.checkpoints.turn;
+    match turn.iter_mut().find(|t| t.path == path) {
+        Some(t) => t.unseen = true,
+        None => {
+            let after = before.clone().unwrap_or_default();
+            turn.push(Touched { path, before, after, unseen: true });
+            // (what it was, on disk before claude writes it — a crash keeps it)
+            keep(ed);
+        }
     }
 }
 
@@ -73,18 +104,69 @@ pub fn single(ed: &mut Editor, id: crate::document::DocId, before: Rope, what: &
         return;
     }
     let question = what.lines().next().unwrap_or_default().to_string();
-    let files = vec![Touched { path, before: Some(before), after }];
+    let files = vec![Touched { path, before: Some(before), after, unseen: false }];
     ed.checkpoints.list.push(Checkpoint { question, files, undone: false });
+    keep(ed);
 }
 
 /// The chat turn ended: its changes become a checkpoint (a chat row says so). The files it changed, as
 /// the row names them (`lib.rs, sub.rs` · `4 files`), if any.
 pub fn turn_over(ed: &mut Editor, question: &str) -> Option<String> {
     let files = std::mem::take(&mut ed.checkpoints.turn);
+    finish(ed, question, files)
+}
+
+/// The chat turn ended having written files unseen (review at the end): what they are now is read on a
+/// worker, then the checkpoint is made and `chat::turn_gathered` takes it on. False: nothing unseen —
+/// `turn_over` it is.
+pub fn gather(ed: &mut Editor, question: &str) -> bool {
+    if !ed.checkpoints.turn.iter().any(|t| t.unseen) {
+        return false;
+    }
+    let files = std::mem::take(&mut ed.checkpoints.turn);
+    ed.checkpoints.gathering = true;
+    let question = question.to_string();
+    let paths: Vec<PathBuf> = files.iter().filter(|t| t.unseen).map(|t| t.path.clone()).collect();
+    ed.events.jobs().spawn(move || {
+        // (gone: nothing in it now · unreadable: as it was kept) — with its fingerprint, for open buffers
+        let now: Vec<(Option<Rope>, Option<crate::disk::Stamp>)> = paths
+            .iter()
+            .map(|p| {
+                let stamp = crate::disk::stamp(p);
+                let text = match std::fs::read(p) {
+                    Ok(b) => String::from_utf8(b).ok().map(|s| Rope::from_str(&s)),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(Rope::new()),
+                    Err(_) => None,
+                };
+                (text, stamp)
+            })
+            .collect();
+        move |ed: &mut Editor| {
+            let mut files = files;
+            for (p, (now, stamp)) in paths.iter().zip(now) {
+                let Some(now) = now else { continue };
+                // An open buffer shows what Claude wrote before the review diffs it
+                ed.disk_take(p, &now, stamp);
+                if let Some(t) = files.iter_mut().find(|t| &t.path == p) {
+                    t.after = now;
+                }
+            }
+            ed.checkpoints.gathering = false;
+            let n = finish(ed, &question, files);
+            crate::chat::turn_gathered(ed, n);
+        }
+    });
+    true
+}
+
+/// The turn's `files` as a checkpoint — the files row (`lib.rs, sub.rs` · `4 files`), None if none changed.
+fn finish(ed: &mut Editor, question: &str, files: Vec<Touched>) -> Option<String> {
     // (a file changed and changed back isn't a change)
     let files: Vec<Touched> =
         files.into_iter().filter(|t| t.before.as_ref().is_none_or(|b| *b != t.after)).collect();
     if files.is_empty() {
+        // (the turn kept as in flight goes)
+        keep(ed);
         return None;
     }
     let names: Vec<String> = files
@@ -94,6 +176,7 @@ pub fn turn_over(ed: &mut Editor, question: &str) -> Option<String> {
     let n = if names.len() <= 2 { names.join(", ") } else { format!("{} files", names.len()) };
     let question = question.lines().next().unwrap_or_default().to_string();
     ed.checkpoints.list.push(Checkpoint { question, files, undone: false });
+    keep(ed);
     Some(n)
 }
 
@@ -106,6 +189,9 @@ pub fn can_undo(ed: &Editor) -> bool {
 pub fn step(ed: &mut Editor, undo: bool) -> Result<(), String> {
     if !ed.checkpoints.turn.is_empty() || ed.chat.as_ref().is_some_and(|c| c.busy()) {
         return Err("Claude is still working — stop it (C-c in the chat) or wait for the turn to end".into());
+    }
+    if ed.checkpoints.gathering {
+        return Err("reading what Claude wrote this turn — a moment".into());
     }
     let list = &ed.checkpoints.list;
     let i = if undo {
@@ -130,6 +216,7 @@ pub fn step(ed: &mut Editor, undo: bool) -> Result<(), String> {
         }
     }
     ed.checkpoints.list[i].undone = undo;
+    keep(ed);
     let what = if undo { "undid" } else { "brought back" };
     let files = match changed.as_slice() {
         [one] => one.clone(),
@@ -220,6 +307,164 @@ fn file(
         ed.undo_persist(id);
     }
     Ok((true, kept))
+}
+
+// ── Kept on disk ────────────────────────────────────────────────────────────
+
+/// Checkpoints kept per project (the oldest go).
+const KEEP: usize = 10;
+
+/// The question of a turn tarae ended in the middle of, when it didn't say.
+const CUT_SHORT: &str = "a turn cut short";
+
+pub fn default_dir() -> Option<PathBuf> {
+    Some(crate::config::state_dir()?.join("turns"))
+}
+
+/// A project's turns as kept: the checkpoints, and the turn in flight with its question.
+#[derive(Debug, Default)]
+pub struct Stored {
+    pub list: Vec<Checkpoint>,
+    pub turn: Vec<Touched>,
+    pub question: String,
+    /// When it was taken (`chats::seq`) — a slower save of an older one doesn't replace it.
+    pub seq: u64,
+}
+
+/// Saves read, compare and write the file one at a time.
+static SAVING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn touched_json(t: &Touched) -> Value {
+    json!({ "path": t.path, "before": t.before.as_ref().map(Rope::to_string), "after": t.after.to_string(),
+            "unseen": t.unseen })
+}
+
+fn touched_of(v: &Value) -> Option<Touched> {
+    Some(Touched {
+        path: PathBuf::from(v["path"].as_str()?),
+        before: v["before"].as_str().map(Rope::from_str),
+        after: Rope::from_str(v["after"].as_str()?),
+        unseen: v["unseen"].as_bool().unwrap_or(false),
+    })
+}
+
+fn files_of(v: &Value) -> Vec<Touched> {
+    v.as_array().into_iter().flatten().filter_map(touched_of).collect()
+}
+
+/// The project at `root`'s turns kept in `dir` (nothing if none — or unreadable).
+pub fn load(dir: &Path, root: &Path) -> Stored {
+    let Ok(body) = std::fs::read_to_string(crate::chats::file(dir, root)) else { return Stored::default() };
+    let Ok(v) = serde_json::from_str::<Value>(&body) else { return Stored::default() };
+    let list = v["list"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|c| Checkpoint {
+            question: c["question"].as_str().unwrap_or_default().to_string(),
+            files: files_of(&c["files"]),
+            undone: c["undone"].as_bool().unwrap_or(false),
+        })
+        .filter(|c| !c.files.is_empty())
+        .collect();
+    Stored {
+        list,
+        turn: files_of(&v["turn"]),
+        question: v["question"].as_str().unwrap_or_default().to_string(),
+        seq: v["seq"].as_u64().unwrap_or(0),
+    }
+}
+
+/// Written — unless what's there was taken later (on a worker).
+fn save(dir: &Path, root: &Path, s: Stored) {
+    let _one = SAVING.lock().unwrap_or_else(|e| e.into_inner());
+    if load(dir, root).seq > s.seq {
+        return;
+    }
+    let list: Vec<Value> = s
+        .list
+        .iter()
+        .map(|c| {
+            let files: Vec<Value> = c.files.iter().map(touched_json).collect();
+            json!({ "question": c.question, "files": files, "undone": c.undone })
+        })
+        .collect();
+    let turn: Vec<Value> = s.turn.iter().map(touched_json).collect();
+    let body =
+        json!({ "root": root, "seq": s.seq, "list": list, "turn": turn, "question": s.question }).to_string();
+    let _ = std::fs::create_dir_all(dir);
+    let _ = crate::disk::write_atomic(&crate::chats::file(dir, root), |w| {
+        std::io::Write::write_all(w, body.as_bytes())
+    });
+}
+
+/// The turns as they are now, kept (the texts are written out on a worker).
+fn keep(ed: &Editor) {
+    let Some(dir) = ed.checkpoints.dir.clone() else { return };
+    let root = std::env::current_dir().unwrap_or_default();
+    let list = &ed.checkpoints.list;
+    let question = ed
+        .chat
+        .as_ref()
+        .and_then(|c| c.msgs.iter().rev().find(|m| m.role == crate::chat::Role::User))
+        .map(|m| m.text.lines().next().unwrap_or_default().to_string())
+        .unwrap_or_default();
+    let s = Stored {
+        list: list[list.len().saturating_sub(KEEP)..].to_vec(),
+        turn: ed.checkpoints.turn.clone(),
+        question,
+        seq: crate::chats::seq(),
+    };
+    ed.events.jobs().spawn(move || {
+        save(&dir, &root, s);
+        |_: &mut Editor| {}
+    });
+}
+
+/// At startup: the project's kept turns come back (read on a worker), before any made since. A turn
+/// tarae ended in the middle of becomes a checkpoint of its own, its files as they are now.
+pub fn restore(ed: &mut Editor) {
+    // (nothing is kept until they're back — a save before would write over them)
+    let Some(dir) = ed.checkpoints.dir.take() else { return };
+    let root = std::env::current_dir().unwrap_or_default();
+    ed.events.jobs().spawn(move || {
+        let back = dir.clone();
+        let mut s = load(&dir, &root);
+        let mut cut = std::mem::take(&mut s.turn);
+        for t in &mut cut {
+            // (gone: nothing in it now · unreadable: as it was kept)
+            match std::fs::read(&t.path) {
+                Ok(b) => {
+                    if let Ok(now) = String::from_utf8(b) {
+                        t.after = Rope::from_str(&now);
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => t.after = Rope::new(),
+                Err(_) => {}
+            }
+        }
+        cut.retain(|t| t.before.as_ref().is_none_or(|b| *b != t.after));
+        if !cut.is_empty() {
+            let question = if s.question.is_empty() { CUT_SHORT.to_string() } else { s.question.clone() };
+            s.list.push(Checkpoint { question, files: cut, undone: false });
+        }
+        move |ed: &mut Editor| {
+            ed.checkpoints.dir = Some(back);
+            let n = s.list.len();
+            if n == 0 {
+                return keep(ed);
+            }
+            let since = std::mem::take(&mut ed.checkpoints.list);
+            ed.checkpoints.list = s.list.into_iter().chain(since).collect();
+            // (a turn's review open already points past the ones put before it)
+            if let Some(crate::codereview::Base::Turn { at, .. }) =
+                ed.code_review.as_mut().map(|r| &mut r.base)
+            {
+                *at += n;
+            }
+            keep(ed);
+        }
+    });
 }
 
 /// `base` taken to `theirs`, over `ours` (= `base` with the user's edits): the lines `base` → `theirs`
