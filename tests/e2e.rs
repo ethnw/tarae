@@ -551,3 +551,80 @@ fn restart_becomes_the_new_binary_as_you_were() {
     t.command("q");
     assert_eq!(t.wait_exit().code(), Some(0));
 }
+
+/// A file just under the size that loads in the background, given 1000 undo steps (`C-s` in insert mode,
+/// the most kept) and a last one typing ` END ` — enough that writing its undo history takes a while: the
+/// fingerprint and every step are worked out over the whole text.
+fn edit_big_file(sb: &Sandbox, t: &mut Term) {
+    t.wait_text("line number 1");
+    t.send("i");
+    t.wait_for("INSERT mode", |s| s.status().contains("INSERT"));
+    t.send(&format!("{} END ", "x\x13".repeat(1000)));
+    t.wait_text("END");
+    t.normal_mode();
+    assert!(fs::metadata(sb.file("big.txt")).unwrap().len() > 800_000);
+}
+
+fn big_file(sb: &Sandbox) {
+    sb.write("big.txt", &(1..=50_000).map(|i| format!("line number {i}\n")).collect::<String>());
+}
+
+/// `u` in a tarae started afresh takes back the last step (the history came from disk): tried until the
+/// history read on a worker is in.
+fn undo_reaches_back(t: &mut Term) {
+    let undone = |s: &Screen| !s.contains("END");
+    for _ in 0..20 {
+        t.send("u");
+        if t.poll_for(std::time::Duration::from_millis(250), undone).is_some() {
+            return;
+        }
+    }
+    panic!("u didn't take the last step back — no undo history\n{}", t.screen());
+}
+
+/// `:wq` right after editing: the undo history is written (on a worker) before tarae exits — exiting used to
+/// cut that write off — so the next tarae's `u` still takes the edit back.
+#[test]
+fn undo_history_is_on_disk_before_quitting() {
+    let sb = Sandbox::new("undoquit");
+    big_file(&sb);
+    let mut t = sb.spawn(&["big.txt"]);
+    edit_big_file(&sb, &mut t);
+    t.command("wq");
+    assert_eq!(t.wait_exit().code(), Some(0));
+    // (cut off, the write leaves only its temp file — `.<name>.json.tarae-….tmp`)
+    let undo = sb.home().join(".local/state/tarae/undo");
+    let names: Vec<String> = fs::read_dir(&undo)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        names.iter().any(|n| n.ends_with(".json") && !n.starts_with('.')),
+        "the undo history wasn't written before tarae exited: {names:?}"
+    );
+    assert!(!names.iter().any(|n| n.ends_with(".tmp")), "a write cut off halfway: {names:?}");
+
+    let mut t = sb.spawn(&["big.txt"]);
+    t.wait_text("END");
+    undo_reaches_back(&mut t);
+    t.command("q!");
+    assert_eq!(t.wait_exit().code(), Some(0));
+}
+
+/// `:restart` saves first, and the new tarae has the undo history of that save: the write isn't cut off by
+/// the exec.
+#[test]
+fn undo_history_comes_along_on_restart() {
+    let sb = Sandbox::new("undorestart");
+    sb.write(".tarae.toml", &format!("[editor]\nrestart-binary = \"{BIN}\"\n"));
+    big_file(&sb);
+    let mut t = sb.spawn(&["big.txt"]);
+    edit_big_file(&sb, &mut t);
+    t.command("restart");
+    t.wait_text("Restarted · 1 file as it was");
+    undo_reaches_back(&mut t);
+    t.command("q!");
+    assert_eq!(t.wait_exit().code(), Some(0));
+}

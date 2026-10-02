@@ -423,6 +423,8 @@ pub struct Editor {
     pub chats_dir: Option<std::path::PathBuf>,
     /// `:restart` under way (`restart.rs`) — once `Ready`, main runs the new binary after the loop ends.
     pub restart: Option<crate::restart::Restart>,
+    /// Undo history files being written (`undofile.rs`) — the process ending waits for them.
+    pub undo_writes: crate::undofile::Writes,
     pub idle_save_gen: u64,
     /// When the scheduled animation tick lands (None: none scheduled).
     ticking: Option<std::time::Instant>,
@@ -537,6 +539,7 @@ impl Editor {
             git_auto: !cfg!(test),
             chats_dir: if cfg!(test) { None } else { crate::chats::default_dir() },
             restart: None,
+            undo_writes: Default::default(),
             idle_save_gen: 0,
             recent: Vec::new(),
             session: crate::session::State::default(),

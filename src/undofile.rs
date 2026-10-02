@@ -6,9 +6,13 @@
 //! (middle minus common prefix/suffix): `undo[0]` = now → most recent undo state,
 //! `undo[1]` = that → the one before … (redo alike).
 //! Writing, reading and restoring all run on worker threads (ropes copy for free, so pass them whole).
+//! The process ending cuts a write off (only its temp file is left), so quitting and `:restart` wait for
+//! the ones under way (`Writes`, `Editor::undo_flush`).
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 use ropey::Rope;
 use serde_json::{Value, json};
@@ -25,6 +29,39 @@ const KEEP_STEPS: usize = 1000;
 const MAX_FILE_BYTES: usize = 8 << 20;
 /// Number of history files — beyond it, the least recently touched are deleted first.
 const KEEP_FILES: usize = 400;
+/// How long the end of the process waits for history still being written (a hung disk isn't waited for
+/// forever — that history is lost, the file it's for isn't).
+const EXIT_WAIT: Duration = Duration::from_secs(5);
+
+/// History files being written on workers, counted.
+#[derive(Clone, Default)]
+pub struct Writes(Arc<(Mutex<usize>, Condvar)>);
+
+/// One write under way — counted until dropped (a worker that panics, too).
+struct Writing(Writes);
+
+impl Writes {
+    fn start(&self) -> Writing {
+        *self.0.0.lock().unwrap_or_else(|p| p.into_inner()) += 1;
+        Writing(self.clone())
+    }
+
+    /// Until none is under way, or `within` passes — whether they all finished.
+    fn wait(&self, within: Duration) -> bool {
+        let (lock, cv) = &*self.0;
+        let n = lock.lock().unwrap_or_else(|p| p.into_inner());
+        let (n, _) = cv.wait_timeout_while(n, within, |n| *n > 0).unwrap_or_else(|p| p.into_inner());
+        *n == 0
+    }
+}
+
+impl Drop for Writing {
+    fn drop(&mut self) {
+        let (lock, cv) = &*self.0.0;
+        *lock.lock().unwrap_or_else(|p| p.into_inner()) -= 1;
+        cv.notify_all();
+    }
+}
 
 pub fn dir() -> Option<PathBuf> {
     Some(crate::config::state_dir()?.join("undo"))
@@ -162,7 +199,9 @@ impl Editor {
         let Some(dir) = dir() else { return };
         let text = doc.text.clone();
         let (undo, redo) = doc.history();
+        let writing = self.undo_writes.start();
         self.events.jobs().spawn(move || {
+            let _writing = writing;
             let file = file_for(&dir, &path);
             match encode(&path, &text, &undo, &redo) {
                 Some(body) => {
@@ -178,6 +217,12 @@ impl Editor {
             }
             |_: &mut Editor| {}
         });
+    }
+
+    /// Before the process ends (quitting, `:restart`'s exec): the history files still being written land.
+    /// false: some didn't within `EXIT_WAIT`.
+    pub fn undo_flush(&self) -> bool {
+        self.undo_writes.wait(EXIT_WAIT)
     }
 
     /// Right after opening (fully reading) a file: restore if a history file exists and the fingerprint
@@ -231,6 +276,25 @@ mod tests {
         assert!(decode(&body, &Rope::from_str("a타B")).is_none());
         assert!(decode("{broken", &now).is_none());
         assert!(encode(Path::new("/x.rs"), &now, &[], &[]).is_none(), "no history, no file");
+    }
+
+    /// Waiting ends when the last write under way does — on another thread, or panicking.
+    #[test]
+    fn waits_for_the_writes_under_way() {
+        let writes = Writes::default();
+        assert!(writes.wait(Duration::ZERO), "nothing under way");
+        let (a, b) = (writes.start(), writes.start());
+        assert!(!writes.wait(Duration::from_millis(10)));
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            drop(a);
+        });
+        let _ = std::thread::spawn(move || {
+            let _b = b;
+            panic!("a worker that panics still counts down");
+        })
+        .join();
+        assert!(writes.wait(Duration::from_secs(5)));
     }
 
     #[test]
