@@ -268,7 +268,7 @@ pub fn render(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io::
         render_frame(editor, &mut frame, w, h)?;
     }
     // A place shown where its injected languages aren't made yet (jumped to): made now, drawn again
-    if editor.inject_shown_now() {
+    if editor.inject_shown_now(crate::syntax::SHOWN_NOW_BUDGET) {
         frame.clear();
         render_frame(editor, &mut frame, w, h)?;
     }
@@ -8578,6 +8578,43 @@ mod tests {
             "perf+syntax: worst key->frame {:?} on {:?} (full parse of 20k lines {full_parse:?}, off main thread)",
             worst.0, worst.1
         );
+    }
+
+    /// Same budget for the first frame after a jump far down a big Markdown file, its tree up to date: the
+    /// frame makes the injected languages of what it shows itself (`Syntax::inject_shown_now`). 20k headings
+    /// make its root wide, and Markdown combines what it injects (HTML blocks), so asking its injection query
+    /// afresh would go over the whole file — on this frame. Only the first frame counts (the next ones find
+    /// it made).
+    #[test]
+    fn perf_budget_first_frame_after_a_jump() {
+        let budget = frame_budget();
+        let Ok(lang) = crate::syntax::Loader::global().load(crate::syntax::spec("markdown").unwrap()) else {
+            return;
+        };
+        let body: String = std::iter::once("<div>\nhtml\n</div>\n\n".to_string())
+            .chain((0..20_000).map(|i| format!("# {i}\n\nParagraph {i} with *emphasis* and `code`.\n\n")))
+            .collect();
+        let mut ed = Editor::new(Config::default());
+        ed.docs[0].text = Rope::from_str(&body);
+        let mut syn = crate::syntax::Syntax::new(lang);
+        syn.shown_near(0..ed.docs[0].text.line_to_byte(60));
+        let job = syn.start_parse(&ed.docs[0].text);
+        let generation = job.generation;
+        syn.finish_parse(generation, job.run());
+        ed.docs[0].syntax = Some(syn);
+        let mut buf = Vec::with_capacity(1 << 16);
+        render(&mut ed, &mut buf, 160, 50).unwrap();
+        assert!(!ed.docs[0].syntax.as_ref().unwrap().in_flight, "nothing left to parse at the top");
+        ed.handle_key("G".parse().unwrap());
+        buf.clear();
+        let t = Instant::now();
+        render(&mut ed, &mut buf, 160, 50).unwrap();
+        let frame = t.elapsed();
+        let syn = ed.docs[0].syntax.as_ref().unwrap();
+        let end = ed.docs[0].text.len_bytes() - 100;
+        assert!(syn.layers.iter().any(|l| l.tree.root_node().start_byte() > end), "made on the frame");
+        assert!(frame < budget, "the frame after the jump took {frame:?} (budget {budget:?})");
+        eprintln!("perf+jump: first frame after a jump {frame:?}");
     }
 
     /// Keys (sent as events — every event ends with the panel following the editor) → frame, worst of all.

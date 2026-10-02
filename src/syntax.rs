@@ -651,10 +651,14 @@ impl Syntax {
     }
 
     /// What a frame just showed outside where the layers are made, made right here — only that, no lines
-    /// around it (a background parse adds those next) and within `budget`: a place jumped to is colored from
-    /// its first frame. Only while the tree is up to date (no edit since its parse, none running); tells
-    /// whether it did.
-    pub fn inject_shown_now(&mut self, text: &Rope, budget: std::time::Duration) -> bool {
+    /// around it (a background parse adds those next) and within the frame's budget (since, how long — one
+    /// for all its buffers): a place jumped to is colored from its first frame. Only while the tree is up to
+    /// date (no edit since its parse, none running); tells whether it did.
+    pub fn inject_shown_now(
+        &mut self,
+        text: &Rope,
+        frame: (std::time::Instant, std::time::Duration),
+    ) -> bool {
         if self.dirty || self.in_flight || self.tree.is_none() || !self.wants.get() {
             return false;
         }
@@ -665,8 +669,7 @@ impl Syntax {
         }
         let mut job = self.start_parse(text);
         job.near = Some(covered.into_iter().chain(shown).collect());
-        (job.near_lines, job.budget) = (0, budget);
-        job.frame = Some(std::time::Instant::now());
+        (job.near_lines, job.budget, job.frame) = (0, frame.1, Some(frame.0));
         let generation = job.generation;
         self.finish_parse(generation, job.run());
         // The lines around it next
@@ -685,12 +688,15 @@ impl Syntax {
         let edited = std::mem::replace(&mut self.dirty, false);
         self.pending_edits.clear();
         self.wants.set(false);
-        // Where to inject: around the last few places shown, what was shown since the last parse latest
-        for r in std::mem::take(self.asked.get_mut()) {
+        // Where to inject: around the last few places shown, what was shown since the last parse latest — all
+        // of that, however many (split windows: else each parse drops one, and the next frame asks again)
+        let asked = std::mem::take(self.asked.get_mut());
+        let shown = merged(asked.clone()).len();
+        for r in asked {
             self.recent.retain(|x| x.end < r.start || r.end < x.start);
             self.recent.push(r);
         }
-        let over = self.recent.len().saturating_sub(RECENT);
+        let over = self.recent.len().saturating_sub(RECENT.max(shown));
         self.recent.drain(..over);
         let near = self.covered.as_ref().map(|_| self.recent.clone());
         let since = self.since.replace(Vec::new());
@@ -954,7 +960,13 @@ impl ParseJob {
             inj.before = last.map(|(_, before)| (before, before.edited()));
             let old = last.and_then(|(old, before)| {
                 let edits = inj.before.as_ref().map_or(&[][..], |(_, e)| &e[..]);
-                Some((old, before.moved(&before.matches), changed(old, tree, edits, self.error_max)?))
+                // Nothing edited, nothing changed (a frame waits for this one, or it's for around what's
+                // shown): not a step through the tree, not asking afresh
+                let changed = match self.edited {
+                    true => changed(old, tree, edits, self.error_max)?,
+                    false => Vec::new(),
+                };
+                Some((old, before.moved(&before.matches), changed))
             });
             matches = inj.matches(&self.lang, tree, old);
             inj.run(&matches, 0, &mut layers);
@@ -2253,7 +2265,8 @@ mod tests {
                     }
                     // Some frames make what they show right there (a jump) — checked as they are, or after
                     // the parse that follows
-                    let made_now = rnd(3) == 0 && syn.inject_shown_now(&text, std::time::Duration::MAX);
+                    let made_now = rnd(3) == 0
+                        && syn.inject_shown_now(&text, (std::time::Instant::now(), std::time::Duration::MAX));
                     let parse = (syn.dirty || syn.wants_injections()) && !(made_now && rnd(2) == 0);
                     if !made_now && !parse {
                         continue;
@@ -2442,6 +2455,47 @@ mod tests {
         assert!(comment_lines(&syn, &text).contains(&1800));
     }
 
+    /// A parse with nothing edited since the last (a frame's own, or one for around what's shown) keeps
+    /// every match — nothing changed — even where one with edits would ask afresh (a root wider than
+    /// `WIDE_ROOT`): it runs while a frame waits.
+    #[test]
+    fn nothing_edited_keeps_every_match() {
+        let Ok(rust) = Loader::global().load(spec("rust").unwrap()) else { return };
+        let text = commented(WIDE_ROOT);
+        let mut syn = Syntax::new(rust);
+        syn.near_lines = 0;
+        highlights(&syn, &text, 0..text.line_to_byte(10), &mut QueryCursor::new());
+        parse_now(&mut syn, &text);
+        highlights(&syn, &text, text.line_to_byte(3000)..text.line_to_byte(3010), &mut QueryCursor::new());
+        let job = syn.start_parse(&text);
+        assert!(job.run().taken.matches_kept >= 10);
+    }
+
+    /// More places shown at once than are kept (`RECENT` — split windows): all of them stay injected, and
+    /// parsing settles rather than dropping one each time and being asked for it again.
+    #[test]
+    fn many_places_shown_at_once_settle() {
+        let Ok(rust) = Loader::global().load(spec("rust").unwrap()) else { return };
+        let text = commented(4000);
+        let mut syn = Syntax::new(rust);
+        syn.near_lines = 0;
+        let show = |syn: &Syntax| {
+            for i in 0..RECENT + 1 {
+                let line = 500 * i;
+                highlights(
+                    syn,
+                    &text,
+                    text.line_to_byte(line)..text.line_to_byte(line + 10),
+                    &mut QueryCursor::new(),
+                );
+            }
+        };
+        show(&syn);
+        parse_now(&mut syn, &text);
+        show(&syn);
+        assert!(!syn.wants_injections(), "every place shown is injected");
+    }
+
     /// A place jumped to gets its layers right away — the lines shown only, what was made before kept, the
     /// lines around them left to a parse after — but not while a parse runs (its landing would lose them)
     /// or an edit waits for one.
@@ -2458,18 +2512,18 @@ mod tests {
         // Shown while a parse runs: not now
         let job = syn.start_parse(&text);
         highlights(&syn, &text, at(&text, 1500), &mut QueryCursor::new());
-        assert!(!syn.inject_shown_now(&text, budget));
+        assert!(!syn.inject_shown_now(&text, (std::time::Instant::now(), budget)));
         syn.finish_parse(job.generation, job.run());
         // An edit waiting: not now
         highlights(&syn, &text, at(&text, 1000), &mut QueryCursor::new());
         let edits = crate::transaction::Transaction::new(vec![crate::transaction::Change::insert(0, " ")])
             .apply(&mut text, false);
         syn.edit(&edits.iter().map(|e| e.ts).collect::<Vec<_>>());
-        assert!(!syn.inject_shown_now(&text, budget));
+        assert!(!syn.inject_shown_now(&text, (std::time::Instant::now(), budget)));
         parse_now(&mut syn, &text);
         // Up to date
         highlights(&syn, &text, at(&text, 1800), &mut QueryCursor::new());
-        assert!(syn.inject_shown_now(&text, budget));
+        assert!(syn.inject_shown_now(&text, (std::time::Instant::now(), budget)));
         let lines = comment_lines(&syn, &text);
         assert!((1800..1810).all(|l| lines.contains(&l)), "the lines shown");
         assert!(!lines.contains(&1797) && !lines.contains(&1812), "not the lines around: {lines:?}");
@@ -2492,7 +2546,7 @@ mod tests {
         highlights(&syn, &text, at(&text, 1500), &mut QueryCursor::new());
         parse_now(&mut syn, &text);
         highlights(&syn, &text, at(&text, 100), &mut QueryCursor::new());
-        assert!(syn.inject_shown_now(&text, std::time::Duration::ZERO));
+        assert!(syn.inject_shown_now(&text, (std::time::Instant::now(), std::time::Duration::ZERO)));
         let lines = comment_lines(&syn, &text);
         assert!((1500..1510).all(|l| lines.contains(&l)), "the ones made: {lines:?}");
         assert!(!lines.contains(&100), "no time to parse it");
@@ -2513,7 +2567,7 @@ mod tests {
         parse_now(&mut syn, &text);
         Loader::global().langs.lock().unwrap().remove(&fish.name);
         highlights(&syn, &text, text.line_to_byte(995)..text.len_bytes(), &mut QueryCursor::new());
-        assert!(syn.inject_shown_now(&text, std::time::Duration::MAX));
+        assert!(syn.inject_shown_now(&text, (std::time::Instant::now(), std::time::Duration::MAX)));
         assert!(Loader::global().loaded(&fish.name).is_none(), "loaded while a frame waited");
         assert!(!syn.layers.iter().any(|l| l.lang.name == "fish"));
         parse_now(&mut syn, &text);

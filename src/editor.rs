@@ -1860,12 +1860,17 @@ impl Editor {
     }
 
     /// Injected languages made right away where the frame just drawn showed a buffer they aren't made for
-    /// yet (a place jumped to) — the frame is drawn again with them. Tells whether any were.
-    pub fn inject_shown_now(&mut self) -> bool {
+    /// yet (a place jumped to) — the frame is drawn again with them. `budget` is the frame's, for all its
+    /// buffers. Tells whether any were.
+    pub fn inject_shown_now(&mut self, budget: std::time::Duration) -> bool {
+        let start = std::time::Instant::now();
         let mut any = false;
         for doc in self.docs.iter_mut().filter(|d| !d.loading) {
+            if start.elapsed() >= budget {
+                break;
+            }
             if let Some(syn) = doc.syntax.as_mut() {
-                any |= syn.inject_shown_now(&doc.text, crate::syntax::SHOWN_NOW_BUDGET);
+                any |= syn.inject_shown_now(&doc.text, (start, budget));
             }
         }
         any
@@ -2695,6 +2700,37 @@ mod tests {
         assert_eq!(ed.status.as_ref().map(|s| s.1), Some(Severity::Error));
         feed(&mut ed, ":q!<ret>");
         assert!(ed.should_quit);
+    }
+
+    /// One frame's wait for injected languages is one budget for all the buffers it shows (two `:diff`
+    /// panes jumping together don't wait twice as long): none left, none made — the background does them.
+    #[test]
+    fn a_frame_waits_once_for_all_buffers() {
+        let Ok(rust) = crate::syntax::Loader::global().load(crate::syntax::spec("rust").unwrap()) else {
+            return;
+        };
+        let text = ropey::Rope::from_str(
+            &(0..2000).map(|i| format!("let x{i} = {i}; // c{i}\n")).collect::<String>(),
+        );
+        let mut ed = editor("");
+        for i in 0..2 {
+            if i > 0 {
+                ed.new_scratch();
+            }
+            let doc = &mut ed.docs[i];
+            doc.text = text.clone();
+            let mut syn = crate::syntax::Syntax::new(rust.clone());
+            syn.shown_near(0..text.line_to_byte(10));
+            let job = syn.start_parse(&text);
+            let g = job.generation;
+            syn.finish_parse(g, job.run());
+            // A jump to the end
+            let end = text.line_to_byte(1990)..text.len_bytes();
+            crate::syntax::highlights(&syn, &text, end, &mut tree_sitter::QueryCursor::new());
+            doc.syntax = Some(syn);
+        }
+        assert!(!ed.inject_shown_now(std::time::Duration::ZERO), "no time: nothing made on the frame");
+        assert!(ed.inject_shown_now(std::time::Duration::MAX));
     }
 
     /// Injected languages are made where the buffer is shown, not all over: a markdown file's code block at
