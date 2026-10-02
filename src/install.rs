@@ -123,13 +123,19 @@ impl Editor {
         if let Some(first) = title.get_mut(..1) {
             first.make_ascii_uppercase();
         }
-        self.push_offer(Offer::new(
-            title,
-            &format!("{tool} isn't installed. Install it with:\n{}", shown(&run)),
-            &format!("Installing {tool}…"),
-            format!("Couldn't install {tool}"),
-            What::Install { tool, run, cwd, then },
-        ));
+        // (what's decided: the command, under the line saying why)
+        let command = shown(&run);
+        let lines = command.split('\n').count();
+        self.push_offer(
+            Offer::new(
+                title,
+                &format!("{tool} isn't installed. Install it with:\n{command}"),
+                &format!("Installing {tool}…"),
+                format!("Couldn't install {tool}"),
+                What::Install { tool, run, cwd, then },
+            )
+            .deciding(1..1 + lines),
+        );
     }
 
     /// `y`: runs the install in the task panel (the card waits with it). Not while a task is running — its

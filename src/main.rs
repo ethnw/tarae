@@ -1,6 +1,7 @@
 //! tarae (타래) — a selection-first modal editor carrying on helix's spirit and keymap.
 
 mod agent;
+mod allow;
 mod attach;
 mod chat;
 mod chats;
@@ -52,6 +53,8 @@ mod picker;
 mod plan;
 mod plugin;
 mod quickfix;
+mod readonly;
+mod reads;
 mod recent;
 mod repeat;
 mod replace;

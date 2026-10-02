@@ -115,6 +115,9 @@ pub fn at_end_set(ed: &mut Editor, on: bool) {
 /// A `can_use_tool` request: answered now (Some) or after its review (None).
 pub fn request(ed: &mut Editor, request_id: &str, req: &Value) -> Option<Value> {
     let tool = req["tool_name"].as_str().unwrap_or_default();
+    if crate::reads::TOOLS.contains(&tool) {
+        return crate::reads::request(ed, request_id, req);
+    }
     if !matches!(tool, "Edit" | "Write") {
         return Some(deny(&format!("{tool} isn't available in tarae's chat")));
     }
@@ -199,6 +202,12 @@ fn unasked(ed: &mut Editor, root: PathBuf, p: Pending) {
 /// if that's inside `root` (resolved itself).
 pub fn inside(root: &Path, path: &Path) -> Option<PathBuf> {
     let root = std::fs::canonicalize(root).ok()?;
+    real(path).filter(|real| real.starts_with(&root))
+}
+
+/// Where `path` really leads: its deepest existing folder resolved (links followed, `..` gone through),
+/// the names below it as they are — None if one of those is `.`/`..` (it would climb unseen).
+pub fn real(path: &Path) -> Option<PathBuf> {
     let mut rest = Vec::new();
     let mut at = path.to_path_buf();
     let real = loop {
@@ -216,7 +225,7 @@ pub fn inside(root: &Path, path: &Path) -> Option<PathBuf> {
         }
         real.push(name);
     }
-    real.starts_with(&root).then_some(real)
+    Some(real)
 }
 
 /// Whether an edit to `rel` (from the project's root) still asks first: anything in `.git`, or an entry of

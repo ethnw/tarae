@@ -206,7 +206,9 @@ impl crate::editor::Editor {
 
     fn project_trust_offer(&mut self, p: &Project) {
         let what = crate::offer::What::ProjectTrust { hash: p.hash };
-        let o = crate::offer::Offer::new(TITLE.into(), &question(p), "", "Project settings".into(), what);
+        // (what's decided: the settings, under the line naming the file)
+        let o = crate::offer::Offer::new(TITLE.into(), &question(p), "", "Project settings".into(), what)
+            .deciding(2..2 + p.items.len());
         self.push_offer(o);
     }
 
@@ -311,6 +313,11 @@ mod tests {
             ed.offers[0].question
         );
         assert!(ed.offers[0].weighty(), "y needs the card settled in sight");
+        // What's decided — drawn at full strength — is exactly the settings, not the line naming the file
+        let lines: Vec<&str> = ed.offers[0].question.split('\n').collect();
+        let decided = ed.offers[0].decided_lines();
+        let items: Vec<usize> = (0..lines.len()).filter(|&i| lines[i].starts_with("  ")).collect();
+        assert_eq!(decided.collect::<Vec<_>>(), items, "{lines:?}");
         assert_eq!(ed.config.restart_build, "");
         ed.offer_accept();
         assert!(ed.offers.is_empty());

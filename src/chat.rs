@@ -66,8 +66,8 @@ note(reply_to=N); the chat answer is a short summary.";
 /// Claude wrote for them was reviewed; `run` asks the user itself for anything but the checks. Edit and Write
 /// come to tarae as permission requests and show as a review first (`edits.rs`).
 const TOOLS: &str = "Read,Grep,Glob,Edit,Write";
-const ALLOWED: &str =
-    "Read,Grep,Glob,mcp__tarae__note,mcp__tarae__run_tests,mcp__tarae__run,mcp__tarae__plan";
+/// Not Read, Grep or Glob: allowed by name they read anywhere unasked (measured — `reads.rs` answers them).
+const ALLOWED: &str = "mcp__tarae__note,mcp__tarae__run_tests,mcp__tarae__run,mcp__tarae__plan";
 
 /// Settings laid over the user's and the project's when they're loaded (`llm.chat-settings`).
 const CHAT_SETTINGS: &str = r#"{"permissions":{"ask":["Edit","Write"]},"disableAllHooks":true}"#;
@@ -191,6 +191,10 @@ pub struct Chat {
     /// No sandbox on this system, and the user agreed (`a` on its card) to run Claude's commands without
     /// one for this conversation (`sandbox.rs`).
     pub unprotected: bool,
+    /// What the user allowed for this conversation (`a` on a card — `allow.rs`) · Claude's reads waiting
+    /// for their card (`reads.rs`).
+    pub allowed: crate::allow::Allowed,
+    pub reads: std::collections::VecDeque<crate::reads::Pending>,
     /// claude's session for this conversation (from its `init`) · the one the next process resumes.
     pub session: Option<String>,
     resume: Option<String>,
@@ -223,6 +227,8 @@ impl Chat {
             unfolded: false,
             edits: Default::default(),
             unprotected: false,
+            allowed: Default::default(),
+            reads: Default::default(),
             session: None,
             resume: None,
             past: Vec::new(),
@@ -507,6 +513,7 @@ pub fn reset(ed: &mut Editor) {
         // (agreed for that conversation — a new one asks again)
         c.edits.at_end = None;
         c.unprotected = false;
+        c.allowed = Default::default();
         c.state = State::Idle;
         c.scroll = 0;
         c.follow.new_turn();
@@ -675,6 +682,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             crate::follow::on_done(ed);
             crate::edits::turn_over(ed);
             crate::tools::turn_over(ed);
+            crate::reads::turn_over(ed);
             checkpoint_turn(ed);
             keep(ed);
             let answer = ok.then(|| {
@@ -727,6 +735,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             // A review (or a command's card) claude was waiting on has no one to answer now
             crate::edits::turn_over(ed);
             crate::tools::turn_over(ed);
+            crate::reads::turn_over(ed);
             crate::restart::turn_over(ed);
         }
     }

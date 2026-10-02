@@ -428,6 +428,8 @@ Type `:` in normal mode. `Tab` completes command names and their arguments (path
 | `:config-show` |  | Show every setting with its value |
 | `:project-trust` |  | Look again at what this project's .tarae.toml runs, and trust it or not |
 | `:project-untrust` |  | Stop running what this project's .tarae.toml sets |
+| `:sandbox-allowed` |  | What Claude may read past the project — take one back |
+| `:sandbox-disallow` |  | Claude asks again before reading this path |
 | `:log-open` |  | Open tarae's log (language servers, errors) |
 | `:messages` |  | This session's notifications again, newest first |
 | `:redraw` |  | Draw the whole screen again (when something else wrote over it) |

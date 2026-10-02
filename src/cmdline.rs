@@ -77,6 +77,8 @@ pub const COMMANDS: &[TypedCmd] = &[
         "Look again at what this project's .tarae.toml runs, and trust it or not",
     ),
     c(&["project-untrust"], Arg::None, "Stop running what this project's .tarae.toml sets"),
+    c(&["sandbox-allowed"], Arg::None, "What Claude may read past the project — take one back"),
+    c(&["sandbox-disallow"], Arg::None, "Claude asks again before reading this path"),
     c(&["log-open"], Arg::None, "Open tarae's log (language servers, errors)"),
     c(&["messages"], Arg::None, "This session's notifications again, newest first"),
     c(&["redraw"], Arg::None, "Draw the whole screen again (when something else wrote over it)"),

@@ -77,15 +77,15 @@
 12  ff
 13  ff
 14  ff                                          a BBBBBB BBBBB BB BBB
-15  ff                gggg ggggg ggggg ggg gggg   ddd dddddd dd dddddd dddddd ddd ddddd dd ddd ddddd
-16  ff                                            ddddddd
+15  ff                gggg ggggg ggggg ggg gggg
+16  ff
 17  ff              ggg gggggggg gggggg
-18  ff                                            dddddd dd ddddddddddd dd dd  dd dd ddd dddddd ddd
-19                                                ddddd ddd dddddd dd d ddd dddd dddd dd ddd dddd
-20                                                ddddd dd ddddd ddddddd ddddd ddd ddddd
+18  ff
+19
+20
 21
-22                                                ddd ddddd ddddd ddd ddddd dddd ddd dddddddd
-23                                                ddddddd
+22
+23
 24
 25                                                A       A dd
 26

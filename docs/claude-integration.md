@@ -71,8 +71,9 @@ The chat reads your CLAUDE.md files and Claude Code settings the way `claude` do
 answers and edits. Two things differ on purpose: hooks don't run, and edits always come to you as a review, even
 if a settings file allows them. `llm.chat-settings = false` starts it clean.
 
-Claude isn't limited to that file: it **explores the project itself** (Read, Grep, Glob — allowed up front; its
-[edits](#edits) always come to you first). Each lookup shows as a quiet row (`◦ read  src/lib.rs  L10–49`, `◦ search  fn add  in src`),
+Claude isn't limited to that file: it **explores the project itself** (Read, Grep, Glob — in the project without
+asking, [outside it only once you say so](#reading-outside-the-project); its [edits](#edits) always come to you
+first). Each lookup shows as a quiet row (`◦ read  src/lib.rs  L10–49`, `◦ search  fn add  in src`),
 the one in progress marked `●`. The other open files are listed in the context, and unsaved ones send their text,
 since Claude would otherwise read the stale copy on disk. Answers cite code as `path:line`. Those references are
 underlined, and a click opens them. `C-]` (or `C-g` — zellij takes that one) walks every place the conversation points at, newest first, centering
@@ -259,6 +260,14 @@ one command, run in the task panel the way `space m m` runs a task, and Claude w
 redirection, pipes, `;`, `&&`, globs, a `VAR=value`, or an option that makes git write or run something
 (`--output`, `--ext-diff`) and it asks like any other.
 
+**So do commands that only read, when they read in the project**: `ls`, `cat`, `head`, `tail`, `wc`, `grep`,
+`rg`, `find`, `tree`, `stat`, `file`, `du`, `diff`, `sort`, `uniq`, `pwd`, and git's `blame`, `rev-parse`,
+`ls-files` and a bare `branch`. Plain words again, and not with an option that writes, runs something or never
+ends (`find -exec`/`-delete`/`-fprint`, `sort -o`, `tree -o`, `rg --pre`, `tail -f`, `uniq in out`, `git branch
+<name>`). Every path the command names is resolved (links followed, `..` gone through): if one lies outside
+the project, the card says which, since what it reads goes to Claude. `a` and `A` there work as on a
+[read's card](#reading-outside-the-project): those places stay allowed, for the conversation or always.
+
 **Anything else asks first.** A card shows the whole command, `y` runs it, `n` tells Claude you said no. A
 command too long to show whole on a card isn't put to you at all: Claude is told to write it to a script
 (that goes through your review) and run that.
@@ -315,6 +324,19 @@ What Claude runs, with `run` and `run_tests`, runs in a sandbox (macOS: Seatbelt
   quietly run without one. A card says there's none: `y` runs this one, `a` runs the rest of this conversation's
   commands too, and `n` says no. While they run without one, the chat's title says `› no sandbox`.
   `llm.sandbox = false` turns the sandbox off; the title says so too
+
+### Reading outside the project
+
+Claude reads the project freely: its Read, Grep and Glob go through without asking wherever the path really
+leads into the project (links followed). Outside it, a card says exactly what would be read: the file, or the
+folder searched and what for. What's read goes to Claude.
+
+- `y` once · `a` this conversation · `A` always, in this project · `n` no
+- "This conversation" and "always" cover the place: the file, or the folder and everything in it. The
+  "always" answers are kept in your own state (`$XDG_STATE_HOME/tarae/sandbox.json`, per project), not in the
+  project's files. `:sandbox-allowed` lists them, and Enter on one takes it back
+- Home itself, the folders above it, and places that hold keys (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`,
+  `~/.docker`, `~/.config/gh`, `~/.netrc`, …) are only ever allowed once
 
 ### Notes
 

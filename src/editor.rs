@@ -431,6 +431,8 @@ pub struct Editor {
     pub project_trust: Option<crate::trust::Project>,
     /// Where answers about projects are kept — None in tests.
     pub trust_path: Option<std::path::PathBuf>,
+    /// Where what's always allowed is kept (`allow.rs`) — None in tests (they set a temp file).
+    pub allow_path: Option<std::path::PathBuf>,
     /// Whether Claude's commands can be sandboxed here (`sandbox.rs`) — found with the first one.
     pub sandbox: crate::sandbox::Availability,
     /// `:restart` under way (`restart.rs`) — once `Ready`, main runs the new binary after the loop ends.
@@ -557,6 +559,7 @@ impl Editor {
             chats_dir: if cfg!(test) { None } else { crate::chats::default_dir() },
             project_trust: None,
             trust_path: if cfg!(test) { None } else { crate::trust::Store::path() },
+            allow_path: if cfg!(test) { None } else { crate::allow::Store::path() },
             sandbox: if cfg!(test) { crate::sandbox::Availability::Bypass } else { Default::default() },
             restart: None,
             undo_writes: Default::default(),
@@ -1185,12 +1188,12 @@ impl Editor {
             && let Some(&(_, _, _, k)) = s.offer_buttons.iter().find(|b| b.0 == y && (b.1..b.2).contains(&x))
         {
             match k {
-                'y' if !self.offer_seen_whole() => self.offer_see_all_first(),
+                'y' | 'a' | 'A' if !self.offer_seen_whole() => self.offer_see_all_first(),
                 'y' if self.offer_settled() => self.offer_accept(),
-                'y' => {}
                 'v' => self.offer_view_all(),
                 'a' if self.offer_settled() => self.offer_for_chat(),
-                'a' => {}
+                'A' if self.offer_settled() => self.offer_always(),
+                'y' | 'a' | 'A' => {}
                 'n' => self.offer_dismiss(),
                 'N' => self.offer_never(),
                 d => self.offer_to_front(d.to_digit(10).unwrap_or(0) as usize),
@@ -3624,6 +3627,57 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// A command that only reads (`ls`, `cat`, `wc`, …) runs without a card when what it names stays in
+    /// the project; one naming a path outside gets the run card, which says what it reads outside — `a`
+    /// runs it and lets that place be read for the rest of the conversation, so the same command in the
+    /// next turn runs unasked. Harmless: `wc` of this repo's Cargo.toml, `cat` of a marker in a temp dir.
+    #[test]
+    fn a_read_only_command_asks_only_for_what_is_outside() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-run-reads-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let marker = dir.join("marker.txt");
+        std::fs::write(&marker, "tarae-marker-content\n").unwrap();
+        let card_or_done = |ed: &Editor| !ed.offers.is_empty() || !ed.chat.as_ref().unwrap().busy();
+        // Inside the project: it just runs
+        let mut ed = editor("");
+        let log = claude_calls(&mut ed, &dir, "run", &json!({ "command": "wc -l Cargo.toml" }));
+        feed(&mut ed, "<space>lcount<ret>");
+        settle_for(&mut ed, card_or_done);
+        assert!(ed.offers.is_empty(), "inside: no card");
+        settle_for(&mut ed, |ed| !ed.chat.as_ref().unwrap().busy());
+        assert!(tool_answer(&log).contains("Cargo.toml"), "{}", tool_answer(&log));
+        // Outside: the card says what it reads
+        std::fs::remove_file(&log).ok();
+        let command = format!("cat {}", marker.display());
+        let mut ed = editor("");
+        let log = claude_calls(&mut ed, &dir, "run", &json!({ "command": command }));
+        feed(&mut ed, "<space>lread it<ret>");
+        settle_for(&mut ed, card_or_done);
+        let q = ed.offers.first().map(|o| o.question.clone()).expect("a card for a read outside");
+        assert!(q.contains(&format!("It reads outside the project:\n  {}", marker.display())), "{q}");
+        let mut bytes = Vec::new();
+        crate::term::render(&mut ed, &mut bytes, 140, 40).unwrap();
+        let mut parser = vt100::Parser::new(40, 140, 0);
+        parser.process(&bytes);
+        assert!(parser.screen().contents().contains("y Run   a This chat   A Always   n No"));
+        let o = ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
+        ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
+        feed(&mut ed, "a");
+        settle_for(&mut ed, |ed| !ed.chat.as_ref().unwrap().busy());
+        assert!(tool_answer(&log).contains("tarae-marker-content"), "{}", tool_answer(&log));
+        assert!(ed.chat.as_ref().unwrap().allowed.reads(&marker));
+        // The next turn, the same command: allowed now, no card
+        ed.chat.as_mut().unwrap().focused = true;
+        feed(&mut ed, "again<ret>");
+        let answers = |log: &Path| std::fs::read_to_string(log).unwrap().matches("\"c7\"").count();
+        settle_for(&mut ed, |ed| !ed.offers.is_empty() || answers(&log) == 2);
+        assert!(ed.offers.is_empty(), "allowed this chat: no card");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Past the checks, a command waits for the user: nothing runs until `y`; `n` tells Claude no.
     #[test]
     fn a_command_past_the_checks_asks_first() {
@@ -3639,7 +3693,7 @@ mod tests {
         feed(&mut ed, "<space>ltouch it<ret>");
         settle_for(&mut ed, |ed| !ed.offers.is_empty());
         let o = &ed.offers[0];
-        assert!(matches!(&o.what, crate::offer::What::Run { cmd, .. } if *cmd == command));
+        assert!(matches!(&o.what, crate::offer::What::Run(r) if r.cmd == command));
         assert_eq!((o.title.as_str(), o.question.as_str()), ("Claude wants to run", command.as_str()));
         assert!(o.weighty(), "y must have been in sight a moment to count");
         // Another command while that one is asked about isn't stacked
@@ -3871,7 +3925,7 @@ mod tests {
         let (mut ed, _) = start(&format!("{command}; true"));
         settle_for(&mut ed, |ed| !ed.offers.is_empty());
         let o = &ed.offers[0];
-        assert!(matches!(o.what, crate::offer::What::Run { unprotected: true, .. }));
+        assert!(matches!(&o.what, crate::offer::What::Run(r) if r.unprotected));
         assert!(o.question.contains("No sandbox here (not on this system)"), "{}", o.question);
         ed.offer_accept();
         settle_for(&mut ed, |ed| !ed.chat.as_ref().unwrap().busy());
@@ -4156,6 +4210,126 @@ mod tests {
             assert!(std::time::Instant::now() < end, "no answer: {sent}");
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+
+    /// A fake claude that asks these tool permissions one after another (each once the one before is
+    /// answered — `p1`, `p2`, …), then ends the turn; every line it's sent goes to the returned log.
+    fn fake_tool_asks(ed: &mut Editor, dir: &Path, asks: &[(&str, serde_json::Value)]) -> PathBuf {
+        let log = dir.join("stdin.log");
+        let ask = |i: usize| {
+            let (tool, input) = &asks[i];
+            serde_json::json!({"type": "control_request", "request_id": format!("p{}", i + 1),
+                "request": {"subtype": "can_use_tool", "tool_name": tool, "input": input}})
+        };
+        let result = serde_json::json!({"type": "result", "result": "done"});
+        let mut cases = format!("'{{\"message\"'*) printf '%s\\n' '{}';; ", ask(0));
+        for i in 1..=asks.len() {
+            let next = if i < asks.len() { ask(i) } else { result.clone() };
+            cases.push_str(&format!("*'\"p{i}\"'*) printf '%s\\n' '{next}';; "));
+        }
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec![
+            "-c".into(),
+            format!(
+                "while read -r line; do printf '%s\\n' \"$line\" >> '{}'; case \"$line\" in {cases}esac; done",
+                log.display()
+            ),
+        ];
+        log
+    }
+
+    /// Claude's Read, Grep and Glob (measured: allowed by name they read anywhere unasked — so they aren't):
+    /// inside the project they're allowed at once; outside, a card says exactly what's read — `n` no, `a`
+    /// this chat (what it covers then goes unasked), `A` always (kept for the project, `:sandbox-allowed`
+    /// lists it, `:sandbox-disallow` takes it back), and a place that's everything (`/`) only once. Nothing
+    /// is read here: the fake claude only asks, and its paths are this test's own temp folder.
+    #[test]
+    fn claudes_reads_outside_the_project_ask_first() {
+        use crate::reads::TITLE;
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-reads-ask-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join("out")).unwrap();
+        std::fs::create_dir_all(dir.join("other")).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let (out, other) = (dir.join("out"), dir.join("other"));
+        let marker = out.join("marker.txt");
+        std::fs::write(&marker, "tarae-marker\n").unwrap();
+        let store = dir.join("state/sandbox.json");
+        let project = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+        let mut ed = editor("");
+        ed.allow_path = Some(store.clone());
+        let asks = [
+            ("Read", json!({"file_path": "Cargo.toml"})),
+            ("Read", json!({"file_path": marker})),
+            ("Grep", json!({"pattern": "tarae-marker", "path": out})),
+            ("Read", json!({"file_path": marker})),
+            ("Glob", json!({"pattern": "*.txt", "path": other})),
+            ("Glob", json!({"pattern": "*", "path": "/"})),
+        ];
+        let log = fake_tool_asks(&mut ed, &dir, &asks);
+        // (answers decided on a worker: the editor's events go on while it waits)
+        let answered = |ed: &mut Editor, id: &str| {
+            let quoted = format!("\"request_id\":\"{id}\"");
+            settle_until(ed, |_| std::fs::read_to_string(&log).unwrap_or_default().contains(&quoted));
+            permission_answer_to(&log, id)
+        };
+        let screen = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 140, 40).unwrap();
+            let mut parser = vt100::Parser::new(40, 140, 0);
+            parser.process(&bytes);
+            parser.screen().contents()
+        };
+        // The card up, drawn, and in sight long enough for an answer — what it says (a long path wraps on
+        // screen) and the screen
+        let card = |ed: &mut Editor| {
+            settle_until(ed, |ed| ed.offers.iter().any(|o| o.title == TITLE));
+            let s = screen(ed);
+            let o = ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
+            ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
+            (ed.offers[0].question.clone(), s)
+        };
+        feed(&mut ed, "<space>lread them<ret>");
+        assert_eq!(answered(&mut ed, "p1")["behavior"], "allow", "inside: at once");
+        let (q, s) = card(&mut ed);
+        assert!(
+            q.starts_with(&marker.display().to_string()) && q.contains("What it reads goes to Claude"),
+            "{q}"
+        );
+        assert!(s.contains("marker.txt"), "{s}");
+        assert!(s.contains("y Once") && s.contains("a This chat") && s.contains("A Always"), "{s}");
+        feed(&mut ed, "n");
+        let a = answered(&mut ed, "p2");
+        assert_eq!(a["behavior"], "deny");
+        assert!(a["message"].as_str().unwrap().contains(&marker.display().to_string()), "{a}");
+        let (q, _) = card(&mut ed);
+        assert!(
+            q.contains(&format!("searches {} and everything in it\nfor tarae-marker", out.display())),
+            "{q}"
+        );
+        feed(&mut ed, "a");
+        assert_eq!(answered(&mut ed, "p3")["behavior"], "allow");
+        assert_eq!(answered(&mut ed, "p4")["behavior"], "allow", "in what `a` allowed: unasked");
+        let (q, _) = card(&mut ed);
+        assert!(q.contains(&format!("lists *.txt in {}", other.display())), "{q}");
+        feed(&mut ed, "A");
+        assert_eq!(answered(&mut ed, "p5")["behavior"], "allow");
+        let (q, s) = card(&mut ed);
+        assert!(q.contains("Only once") && s.contains("y Once") && !s.contains("A Always"), "not kept: {s}");
+        feed(&mut ed, "A");
+        assert!(ed.offers.iter().any(|o| o.title == TITLE), "A isn't an answer here");
+        feed(&mut ed, "y");
+        assert_eq!(answered(&mut ed, "p6")["behavior"], "allow");
+        // Kept for this project; this chat's only in the chat
+        let kept = |p: &Path| crate::allow::Store::read(Some(&store)).get(&project).reads(p);
+        settle_until(&mut ed, |_| kept(&other));
+        assert!(!kept(&out) && !kept(Path::new("/")));
+        assert!(ed.chat.as_ref().unwrap().allowed.reads(&marker));
+        // Taken back
+        crate::typed::execute(&mut ed, &format!("sandbox-disallow {}", other.display())).unwrap();
+        settle_until(&mut ed, |_| !kept(&other));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Claude's Edit from the chat is a review first; accepting lets claude write it (its own input).
@@ -6077,6 +6251,68 @@ mod tests {
         settled(&mut ed);
         feed(&mut ed, "y");
         assert!(ed.offers.is_empty());
+    }
+
+    /// What a weighty card asks you to decide is its most visible text: its first paragraph (a command, a
+    /// path) or the lines it names (a trust card's settings) at full strength, what explains it faint. A
+    /// light card stays as it was.
+    #[test]
+    fn what_a_card_decides_is_drawn_at_full_strength() {
+        use crate::offer::{Offer, What};
+        // (crossterm drops every color under NO_COLOR, which tarae's own runs set)
+        crossterm::style::force_color_output(true);
+        let mut ed = editor("text\n");
+        let fg = |ed: &mut Editor, needle: &str| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 120, 30).unwrap();
+            let mut parser = vt100::Parser::new(30, 120, 0);
+            parser.process(&bytes);
+            let screen = parser.screen();
+            let (y, row) = screen.rows(0, 120).enumerate().find(|(_, r)| r.contains(needle)).expect(needle);
+            let x = row[..row.find(needle).unwrap()].chars().count();
+            screen.cell(y as u16, x as u16).unwrap().fgcolor()
+        };
+        // A run card: the command, then why
+        ed.push_offer(Offer::new(
+            "Claude wants to run".into(),
+            "make deploy-all\n\nNo sandbox here — it runs with all your permissions.",
+            "",
+            String::new(),
+            What::ProjectTrust { hash: 0 },
+        ));
+        let (cmd, why) = (fg(&mut ed, "make deploy-all"), fg(&mut ed, "No sandbox here"));
+        assert_ne!(cmd, why, "the command stands out");
+        // Lines it names: the settings under the line naming the file
+        ed.offers.clear();
+        ed.push_offer(
+            Offer::new(
+                "Trust this project's settings?".into(),
+                ".tarae.toml sets what runs commands as you:\n\n  task.x = rm-it\n\nIgnored, the rest applies.",
+                "",
+                String::new(),
+                What::ProjectTrust { hash: 1 },
+            )
+            .deciding(2..3),
+        );
+        let (head, item, foot) = (
+            fg(&mut ed, ".tarae.toml sets"),
+            fg(&mut ed, "task.x = rm-it"),
+            fg(&mut ed, "Ignored, the rest"),
+        );
+        assert_eq!(head, foot, "both faint");
+        assert_eq!(item, cmd, "the setting as strong as a command");
+        assert_ne!(item, head);
+        // A light card: its question faint, as before
+        ed.offers.clear();
+        ed.offer_popups = true;
+        ed.push_offer(Offer::new(
+            "Rust syntax colors".into(),
+            "Download and build the grammar?",
+            "",
+            String::new(),
+            What::Grammars { lang: "Rust".into(), names: vec![], then: None },
+        ));
+        assert_eq!(fg(&mut ed, "Download and build"), head);
     }
 
     /// Multiple offers stack in arrival order and only the front one gets keys — clicking a back card

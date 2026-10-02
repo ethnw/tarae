@@ -5318,20 +5318,33 @@ impl OfferCard {
                         b = vec![('y', "Allow"), ('n', "Not now")]
                     }
                     crate::offer::What::PluginAsk { .. } => b = vec![('y', "Allow"), ('n', "No")],
-                    crate::offer::What::Run { .. } => b = vec![('y', "Run"), ('n', "No")],
+                    crate::offer::What::Run(ref r) if r.keep => {
+                        b = vec![('y', "Run"), ('a', "This chat"), ('A', "Always"), ('n', "No")]
+                    }
+                    crate::offer::What::Run(_) => b = vec![('y', "Run"), ('n', "No")],
                     crate::offer::What::ReviewAtEnd => b = vec![('y', "Turn on"), ('n', "No")],
                     crate::offer::What::ProjectTrust { .. } => b = vec![('y', "Trust"), ('n', "Ignore")],
                     crate::offer::What::NoSandbox { .. } => {
                         b = vec![('y', "Run"), ('a', "This chat"), ('n', "No")]
                     }
+                    crate::offer::What::Read { keep: true, .. } => {
+                        b = vec![('y', "Once"), ('a', "This chat"), ('A', "Always"), ('n', "No")]
+                    }
+                    crate::offer::What::Read { keep: false, .. } => b = vec![('y', "Once"), ('n', "No")],
                     _ => {}
                 }
                 // One that runs something is shown whole — cut to the room below if it must be, with `v`
                 // to see all of it (and `y` waits for that)
                 let most = if o.weighty() { usize::MAX } else { 4 };
                 let mut v = vec![(title, false)];
-                for part in o.question.split('\n') {
-                    v.extend(wrapped(part, most));
+                // What's being decided at full strength (the path, the command, the settings) — the rest faint
+                let decided = o.decided_lines();
+                for (k, part) in o.question.split('\n').enumerate() {
+                    let mut rows = wrapped(part, most);
+                    if decided.contains(&k) {
+                        rows.iter_mut().for_each(|r| r.1 = false);
+                    }
+                    v.extend(rows);
                 }
                 (v, Some(b))
             }
@@ -8226,6 +8239,7 @@ mod tests {
                 what: crate::offer::What::Grammars { lang: "Rust".into(), names: vec![], then: None },
                 state: crate::offer::OfferState::Asking,
                 rev: 0,
+                decided: None,
             });
             let result =
                 serde_json::json!([{"label": "line_one", "detail": "fn line_one()"}, {"label": "lx"}]);

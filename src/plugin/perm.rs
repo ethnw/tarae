@@ -320,13 +320,17 @@ impl Editor {
             .is_some_and(|a| !a.granted.is_empty());
         let list: Vec<String> = declared.iter().map(|p| format!("· {}", describe(p))).collect();
         let head = if before { "It now asks to:" } else { "It asks to:" };
-        self.push_offer(Offer::new(
-            format!("Plugin {plugin} asks for permissions"),
-            &format!("{head}\n{}", list.join("\n")),
-            "…",
-            format!("Plugin {plugin}"),
-            What::PluginPermissions { plugin: plugin.to_string(), permissions: declared },
-        ));
+        let n = list.len();
+        self.push_offer(
+            Offer::new(
+                format!("Plugin {plugin} asks for permissions"),
+                &format!("{head}\n{}", list.join("\n")),
+                "…",
+                format!("Plugin {plugin}"),
+                What::PluginPermissions { plugin: plugin.to_string(), permissions: declared },
+            )
+            .deciding(1..1 + n),
+        );
     }
 
     /// Whether what a plugin asks for is what you approved (nothing to approve counts).
@@ -449,13 +453,17 @@ impl Editor {
                 ),
             ),
         };
-        self.push_offer(Offer::new(
-            title,
-            &question,
-            "…",
-            format!("Plugin {plugin}"),
-            What::PluginAsk { plugin: plugin.to_string(), ask: Box::new(ask) },
-        ));
+        // (what's decided: the host, the file — not the question after it)
+        self.push_offer(
+            Offer::new(
+                title,
+                &question,
+                "…",
+                format!("Plugin {plugin}"),
+                What::PluginAsk { plugin: plugin.to_string(), ask: Box::new(ask) },
+            )
+            .deciding(0..1),
+        );
     }
 
     /// Your answer about one connection or file: yes is kept, and the request goes on; no fails it.

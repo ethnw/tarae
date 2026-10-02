@@ -241,7 +241,7 @@ pub fn turn_over(ed: &mut Editor) {
         r.chat = None;
     }
     ed.offers
-        .retain(|o| !matches!(o.what, crate::offer::What::Run { .. } | crate::offer::What::NoSandbox { .. }));
+        .retain(|o| !matches!(o.what, crate::offer::What::Run(_) | crate::offer::What::NoSandbox { .. }));
 }
 
 /// A run Claude waited on is gone before it ended (closed, or another run took its place).
@@ -260,8 +260,9 @@ fn run_schema() -> Value {
     and its output — build, lint, format, test suites, git. The user watches it in their task panel. Both \
     output streams come back whole (long output: its start and end), so don't redirect, pipe to head/tail or \
     chain commands: one command per call. Checks (cargo build/check/test/clippy/fmt, go build/test/vet, git \
-    status/diff/log/show) start at once; any other command waits for the user to allow it — if they say no, \
-    don't retry it, ask. No stdin and no terminal: nothing interactive. For one test file or test, \
+    status/diff/log/show) start at once, and so do read-only ones (ls cat head tail wc grep rg find tree stat \
+    file du diff sort uniq pwd, git blame/rev-parse/ls-files/branch) whose paths stay in the project; any \
+    other command waits for the user to allow it — if they say no, don't retry it, ask. No stdin and no terminal: nothing interactive. For one test file or test, \
     run_tests is better (it reads each failure).",
         "inputSchema": {
             "type": "object",
@@ -299,13 +300,24 @@ const COMMAND_LINES_MAX: usize = 12;
 /// any of those and the words don't say what runs), starting with one of the `RUN_ALLOW` or `extra`
 /// prefixes word for word, and none of the options that make a read-only command write or run something.
 pub fn allowed(cmd: &str, extra: &[String]) -> bool {
+    let Some(words) = plain_words(cmd) else { return false };
+    RUN_ALLOW.iter().copied().chain(extra.iter().map(String::as_str)).any(|rule| {
+        let rule: Vec<&str> = rule.split_whitespace().collect();
+        !rule.is_empty() && words.starts_with(&rule)
+    })
+}
+
+/// The command's words, if they're all it says: nothing the shell would read as more than words (quoting,
+/// expansion, redirection, chaining, globs, `~`, an assignment), and none of the options that make a
+/// read-only command write or run something. None: the words don't say what runs.
+pub fn plain_words(cmd: &str) -> Option<Vec<&str>> {
     const SHELL: &[char] = &[
         ';', '&', '|', '`', '$', '(', ')', '<', '>', '\\', '\'', '"', '*', '?', '[', ']', '{', '}', '#', '!',
         '\n', '\r',
     ];
     const WRITES: [&str; 6] = ["--output", "--ext-diff", "--textconv", "--config", "--exec", "--upload-pack"];
     if cmd.contains(SHELL) {
-        return false;
+        return None;
     }
     let words: Vec<&str> = cmd.split_whitespace().collect();
     // (`~` only expands at a word's start: `HEAD~1` is a plain word)
@@ -314,13 +326,7 @@ pub fn allowed(cmd: &str, extra: &[String]) -> bool {
             || w.contains('=') && !w.starts_with('-')
             || WRITES.iter().any(|o| w.starts_with(o))
     };
-    if words.iter().any(unsafe_word) {
-        return false;
-    }
-    RUN_ALLOW.iter().copied().chain(extra.iter().map(String::as_str)).any(|rule| {
-        let rule: Vec<&str> = rule.split_whitespace().collect();
-        !rule.is_empty() && words.starts_with(&rule)
-    })
+    (!words.iter().any(unsafe_word)).then_some(words)
 }
 
 /// Runs `command` now (allowed), or once the user says yes on its card — answered when it ends.
@@ -346,6 +352,9 @@ fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
     if allowed(cmd, &ed.config.llm.run_allow) {
         guarded(ed, call, Job::Command(cmd.to_string()), false);
         return Ok(());
+    }
+    if crate::readonly::read_only(cmd) {
+        return read_only(ed, call, cmd.to_string());
     }
     asked(ed)?;
     // Review at the end: a file it names that Claude wrote unseen this turn goes on the card with it —
@@ -373,9 +382,36 @@ fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
     Ok(())
 }
 
+/// A command that only reads (`readonly.rs`): where it reads is found on a worker — all of it in the
+/// project, or in places allowed, and it runs now; anything else is on its card.
+fn read_only(ed: &mut Editor, call: Call, cmd: String) -> Result<(), String> {
+    let chat = ed.chat.as_ref().map(|c| c.allowed.clone()).unwrap_or_default();
+    let store = ed.allow_path.clone();
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    ed.events.jobs().spawn(move || {
+        let root = std::fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
+        let kept = crate::allow::Store::read(store.as_deref()).get(&root);
+        let reads = crate::readonly::outside(&cmd, &cwd, &root, &chat, &kept);
+        move |ed: &mut Editor| {
+            // (the turn ended meanwhile: nobody waits for it)
+            if ed.chat.as_ref().is_some_and(|c| c.generation() != call.generation || !c.busy()) {
+                return;
+            }
+            if reads.is_empty() {
+                return guarded(ed, call, Job::Command(cmd), false);
+            }
+            let c = call.clone();
+            if let Err(e) = ask_with(ed, cmd, call, Vec::new(), reads) {
+                answer(ed, c, Err(e));
+            }
+        }
+    });
+    Ok(())
+}
+
 /// One command asked about at a time.
 fn asked(ed: &Editor) -> Result<(), String> {
-    match ed.offers.iter().any(|o| matches!(o.what, crate::offer::What::Run { .. })) {
+    match ed.offers.iter().any(|o| matches!(o.what, crate::offer::What::Run(_))) {
         true => Err("the user hasn't answered your last command yet — wait for it, then run this".into()),
         false => Ok(()),
     }
@@ -383,8 +419,32 @@ fn asked(ed: &Editor) -> Result<(), String> {
 
 /// The card for `cmd` — with each file in `shown` (path, text) whole under it.
 fn ask(ed: &mut Editor, cmd: String, call: Call, shown: Vec<(PathBuf, String)>) -> Result<(), String> {
+    ask_with(ed, cmd, call, shown, Vec::new())
+}
+
+/// The card for `cmd`, saying too what it reads outside the project (`reads` — a read-only command's):
+/// those can be allowed for longer, as on a read's card, unless one of them never can.
+fn ask_with(
+    ed: &mut Editor,
+    cmd: String,
+    call: Call,
+    shown: Vec<(PathBuf, String)>,
+    reads: Vec<PathBuf>,
+) -> Result<(), String> {
     asked(ed)?;
     let mut question = cmd.clone();
+    // What's decided: the command, and what it reads outside (one place a line)
+    let mut decided = 0..cmd.split('\n').count();
+    if !reads.is_empty() {
+        question.push_str("\n\nIt reads outside the project:");
+        for p in &reads {
+            question.push_str(&format!("\n  {}", p.display()));
+        }
+        question.push_str("\n\nWhat it reads goes to Claude.");
+        decided.end += 2 + reads.len();
+    }
+    let home = crate::allow::home();
+    let keep = !reads.is_empty() && reads.iter().all(|p| crate::allow::keepable(p, home.as_deref()));
     for (path, text) in &shown {
         let text = text.replace("\r\n", "\n").replace('\t', "    ");
         question.push_str(&format!(
@@ -403,8 +463,10 @@ fn ask(ed: &mut Editor, cmd: String, call: Call, shown: Vec<(PathBuf, String)>) 
         question.push_str(&format!("\n\n{u} — it runs with all your permissions."));
     }
     let title = "Claude wants to run".to_string();
-    let what = crate::offer::What::Run { cmd, call, shown, unprotected: unprotected.is_some() };
-    ed.push_offer(crate::offer::Offer::new(title, &question, "Running…", "Claude's command".into(), what));
+    let card = RunCard { cmd, call, shown, unprotected: unprotected.is_some(), reads, keep };
+    let what = crate::offer::What::Run(Box::new(card));
+    let o = crate::offer::Offer::new(title, &question, "Running…", "Claude's command".into(), what);
+    ed.push_offer(o.deciding(decided));
     Ok(())
 }
 
@@ -490,12 +552,16 @@ fn run_start(ed: &mut Editor, call: Call, cmd: String, guard: Option<Guard>) -> 
 }
 
 /// The user's answer on the card: `y` runs it — the files it showed read again first (on a worker), and not
-/// run if one changed since — `n` tells Claude no. `unprotected`: the card said there's no sandbox.
-pub fn run_answer(ed: &mut Editor, id: u64, what: RunCard, yes: bool) {
-    let RunCard { cmd, call, shown, unprotected } = what;
+/// run if one changed since — `a`/`A` too, and what it reads outside stays allowed (this chat · always);
+/// None tells Claude no. `unprotected`: the card said there's no sandbox.
+pub fn run_answer(ed: &mut Editor, id: u64, what: RunCard, scope: Option<crate::allow::Scope>) {
+    let RunCard { cmd, call, shown, unprotected, reads, keep } = what;
     ed.offer_finished(id, Ok(()));
-    if !yes {
+    let Some(scope) = scope else {
         return answer(ed, call, Err(format!("the user chose not to run `{cmd}`")));
+    };
+    if keep {
+        crate::allow::grant_reads(ed, &reads, scope);
     }
     if shown.is_empty() {
         return run_now(ed, cmd, call, unprotected);
@@ -525,12 +591,16 @@ fn run_now(ed: &mut Editor, cmd: String, call: Call, unprotected: bool) {
     guarded(ed, call, Job::Command(cmd), unprotected);
 }
 
-/// A `run` card's command, its call, the files it showed, and whether it said there's no sandbox.
+/// A `run` card's command, its call, the files it showed, whether it said there's no sandbox, what it reads
+/// outside the project (a read-only command's), and whether that can be allowed for longer.
+#[derive(Clone, Debug)]
 pub struct RunCard {
     pub cmd: String,
     pub call: Call,
     pub shown: Vec<(PathBuf, String)>,
     pub unprotected: bool,
+    pub reads: Vec<PathBuf>,
+    pub keep: bool,
 }
 
 // ── The sandbox ─────────────────────────────────────────────────────────────

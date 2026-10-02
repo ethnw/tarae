@@ -31,6 +31,9 @@ pub struct Offer {
     pub state: OfferState,
     /// Bumped whenever what it says (and does) changes: a `y` answers the card as it's been in sight.
     pub rev: u64,
+    /// The question's lines (split at `\n`) that say what's being decided — drawn at full strength, the rest
+    /// faint. None: a weighty card's first paragraph (a light one's: none).
+    pub decided: Option<std::ops::Range<usize>>,
 }
 
 /// How long a card that runs something must have been in sight, as it is, before `y` answers it — a key
@@ -54,12 +57,16 @@ pub enum What {
     /// A command Claude wants to run (`tools.rs`): `y` runs it in the task panel, `n` tells Claude no.
     /// `shown` = files it names that Claude wrote unseen (review at the end), on the card as they were ·
     /// `unprotected` = the card said there's no sandbox (`sandbox.rs`).
-    Run { cmd: String, call: crate::tools::Call, shown: Vec<(PathBuf, String)>, unprotected: bool },
+    /// `reads` = places outside the project a read-only command reads — `a`/`A` allow them for longer too.
+    Run(Box<crate::tools::RunCard>),
     /// No sandbox on this system (`tools.rs`): `y` runs Claude's command anyway, `a` does for the rest of
     /// the conversation, `n` tells Claude no.
     NoSandbox { job: crate::tools::Job, call: crate::tools::Call },
     /// Review at the end (`edits.rs`): `y` lets Claude's edits go in as it makes them.
     ReviewAtEnd,
+    /// Claude's Read, Grep or Glob outside the project (`reads.rs`): `y` once, `a` this chat, `A` always
+    /// (those two only when `keep`), `n` no.
+    Read { pending: Box<crate::reads::Pending>, keep: bool },
     /// The project's `.tarae.toml` sets what runs commands (`trust.rs`): `y` trusts it, `n` ignores that
     /// part. `hash` = what the card showed.
     ProjectTrust { hash: u64 },
@@ -96,7 +103,22 @@ impl Offer {
             what,
             state: OfferState::Asking,
             rev: 0,
+            decided: None,
         }
+    }
+
+    /// What's being decided is these lines of the question, not its first paragraph.
+    pub fn deciding(mut self, lines: std::ops::Range<usize>) -> Offer {
+        self.decided = Some(lines);
+        self
+    }
+
+    /// The question's lines drawn at full strength.
+    pub fn decided_lines(&self) -> std::ops::Range<usize> {
+        self.decided.clone().unwrap_or_else(|| match self.weighty() {
+            true => 0..self.question.split('\n').position(|l| l.trim().is_empty()).unwrap_or(usize::MAX),
+            false => 0..0,
+        })
     }
 
     /// Whether answering it runs something (an install, a plugin's permissions).
@@ -106,11 +128,26 @@ impl Offer {
             What::Install { .. }
                 | What::PluginPermissions { .. }
                 | What::PluginAsk { .. }
-                | What::Run { .. }
+                | What::Run(_)
                 | What::NoSandbox { .. }
                 | What::ReviewAtEnd
                 | What::ProjectTrust { .. }
+                | What::Read { .. }
         )
+    }
+
+    /// Whether its answer can last longer than once (`a` this chat · `A` always — `A` only for reads).
+    pub fn lasts(&self) -> bool {
+        match &self.what {
+            What::NoSandbox { .. } | What::Read { keep: true, .. } => true,
+            What::Run(r) => r.keep,
+            _ => false,
+        }
+    }
+
+    /// Whether `A` (always) answers it: what it allows is reading places, kept for the project.
+    pub fn keeps(&self) -> bool {
+        self.lasts() && matches!(self.what, What::Read { .. } | What::Run(_))
     }
 
     pub fn installing(&self) -> bool {
@@ -137,6 +174,7 @@ impl crate::editor::Editor {
             // Replaced whole — what it says with what it does — and it settles again before `y` counts
             if !old.installing() {
                 (old.question, old.working, old.failed) = (o.question, o.working, o.failed);
+                old.decided = o.decided;
                 (old.what, old.state) = (o.what, OfferState::Asking);
                 old.rev += 1;
             }
@@ -165,7 +203,9 @@ impl crate::editor::Editor {
             if !self.screen.offer_buttons.iter().any(|b| b.3 == 'y') {
                 return false;
             }
-            if !self.offer_settled() && matches!(key.code, Code::Char('y' | 'n' | 'N' | 'a') | Code::Esc) {
+            if !self.offer_settled()
+                && matches!(key.code, Code::Char('y' | 'n' | 'N' | 'a' | 'A') | Code::Esc)
+            {
                 return true;
             }
             // Cut to fit the screen: `v` shows it all, and `y` waits for that (not taken otherwise — it's
@@ -176,7 +216,7 @@ impl crate::editor::Editor {
                         self.offer_view_all();
                         return true;
                     }
-                    Code::Char('y' | 'a') => {
+                    Code::Char('y' | 'a' | 'A') => {
                         self.offer_see_all_first();
                         return true;
                     }
@@ -188,7 +228,8 @@ impl crate::editor::Editor {
             Code::Char('y') => self.offer_accept(),
             Code::Char('n') | Code::Esc => self.offer_dismiss(),
             Code::Char('N') if matches!(o.what, What::Install { .. }) => self.offer_never(),
-            Code::Char('a') if matches!(o.what, What::NoSandbox { .. }) => self.offer_for_chat(),
+            Code::Char('a') if o.lasts() => self.offer_for_chat(),
+            Code::Char('A') if o.keeps() => self.offer_always(),
             _ => return false,
         }
         true
@@ -217,12 +258,7 @@ impl crate::editor::Editor {
                 self.offer_finished(id, Ok(()));
                 self.plugin_ask_answer(plugin, *ask, true);
             }
-            What::Run { cmd, call, shown, unprotected } => crate::tools::run_answer(
-                self,
-                id,
-                crate::tools::RunCard { cmd, call, shown, unprotected },
-                true,
-            ),
+            What::Run(card) => crate::tools::run_answer(self, id, *card, Some(crate::allow::Scope::Once)),
             What::NoSandbox { job, call } => {
                 crate::tools::unprotected_answer(self, id, job, call, crate::tools::Unprotected::Once)
             }
@@ -231,6 +267,9 @@ impl crate::editor::Editor {
                 crate::edits::at_end_set(self, true);
             }
             What::ProjectTrust { hash } => self.project_trust_answer(id, hash, true),
+            What::Read { pending, keep } => {
+                crate::reads::answer(self, id, *pending, Some(crate::allow::Scope::Once), keep)
+            }
         }
     }
 
@@ -276,14 +315,34 @@ impl crate::editor::Editor {
         self.set_status("the card's whole text — G to its end, then y answers");
     }
 
-    /// `a` on the no-sandbox card: Claude's command runs, and the rest of this conversation's too.
+    /// `a`: yes for the rest of this conversation — the no-sandbox card (Claude's commands run unprotected),
+    /// a read outside the project or a command reading there (those places).
     pub fn offer_for_chat(&mut self) {
-        if !self.offers.first().is_some_and(|o| matches!(o.what, What::NoSandbox { .. })) {
+        if !self.offers.first().is_some_and(Offer::lasts) {
             return;
         }
         let o = self.offers.remove(0);
-        if let What::NoSandbox { job, call } = o.what {
-            crate::tools::unprotected_answer(self, o.id, job, call, crate::tools::Unprotected::ThisChat);
+        self.offer_lasting(o, crate::allow::Scope::ThisChat);
+    }
+
+    /// `A` on a read outside the project, or a command reading there: those places, always, in this
+    /// project (`allow.rs`).
+    pub fn offer_always(&mut self) {
+        if !self.offers.first().is_some_and(Offer::keeps) {
+            return;
+        }
+        let o = self.offers.remove(0);
+        self.offer_lasting(o, crate::allow::Scope::Always);
+    }
+
+    fn offer_lasting(&mut self, o: Offer, scope: crate::allow::Scope) {
+        match o.what {
+            What::NoSandbox { job, call } => {
+                crate::tools::unprotected_answer(self, o.id, job, call, crate::tools::Unprotected::ThisChat)
+            }
+            What::Read { pending, keep } => crate::reads::answer(self, o.id, *pending, Some(scope), keep),
+            What::Run(card) => crate::tools::run_answer(self, o.id, *card, Some(scope)),
+            _ => {}
         }
     }
 
@@ -316,15 +375,13 @@ impl crate::editor::Editor {
             What::Install { tool, .. } => {
                 self.set_status(format!("Not installing {tool} for now (N on its card: never ask)"))
             }
-            What::Run { cmd, call, shown, unprotected } => {
-                let card = crate::tools::RunCard { cmd, call, shown, unprotected };
-                crate::tools::run_answer(self, o.id, card, false)
-            }
+            What::Run(card) => crate::tools::run_answer(self, o.id, *card, None),
             What::NoSandbox { job, call } => {
                 crate::tools::unprotected_answer(self, o.id, job, call, crate::tools::Unprotected::No)
             }
             What::ReviewAtEnd => self.set_status("Claude's edits come one at a time"),
             What::ProjectTrust { hash } => self.project_trust_answer(o.id, hash, false),
+            What::Read { pending, keep } => crate::reads::answer(self, o.id, *pending, None, keep),
         }
     }
 
