@@ -163,6 +163,20 @@ pub static SETTINGS: &[Setting] = &[
         set: |c, v| c.persistent_undo = b(v),
     },
     Setting {
+        path: "editor.restart-build",
+        kind: Kind::Str,
+        doc: "Command :restart builds with first, e.g. \"cargo build --release\" (\"\" = no build; :restart! skips it)",
+        get: |c| Value::from(c.restart_build.as_str()),
+        set: |c, v| c.restart_build = s(v).to_string(),
+    },
+    Setting {
+        path: "editor.restart-binary",
+        kind: Kind::Str,
+        doc: "The tarae :restart runs, from the project root if relative (\"\" = the one running now)",
+        get: |c| Value::from(c.restart_binary.as_str()),
+        set: |c, v| c.restart_binary = s(v).to_string(),
+    },
+    Setting {
         path: "editor.offer-grammars",
         kind: Kind::Bool,
         doc: "When a file's language has no syntax grammar yet, offer to download and build it (y/n)",

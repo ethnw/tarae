@@ -1,0 +1,4 @@
+# tarae's own project settings — working on tarae in tarae
+[editor]
+restart-build = "cargo build --release"
+restart-binary = "target/release/tarae"

@@ -399,10 +399,51 @@ pub fn resume(ed: &mut Editor, id: &str) {
     });
 }
 
-/// The turn ended: the conversation is kept (on a worker) — its rows and claude's session.
-fn keep(ed: &Editor) {
-    let (Some(dir), Some(c)) = (ed.chats_dir.clone(), ed.chat.as_ref()) else { return };
-    let Some(id) = c.session.clone() else { return };
+/// What the chat panel was, for the tarae `:restart` runs (`restart.rs`).
+pub struct Restored {
+    pub session: Option<String>,
+    pub input: String,
+    pub cursor: usize,
+    pub focused: bool,
+    pub scroll: usize,
+    pub follow: bool,
+}
+
+/// The note a conversation carried over a restart ends with (one — earlier ones go).
+pub const RESTARTED: &str = "tarae restarted — same conversation";
+
+/// After `:restart`: the panel as it was — its conversation (claude's session resumed, not the latest one
+/// guessed), the words being typed, where it was scrolled.
+pub fn restore(ed: &mut Editor, r: Restored) {
+    let mut c = Chat::new();
+    c.follow.on = r.follow;
+    c.cursor = if r.input.is_char_boundary(r.cursor) { r.cursor } else { r.input.len() };
+    c.input = r.input;
+    c.focused = r.focused;
+    ed.chat = Some(c);
+    let (Some(id), Some(dir)) = (r.session, ed.chats_dir.clone()) else { return ensure_proc(ed) };
+    let root = std::env::current_dir().unwrap_or_default();
+    ed.events.jobs().spawn(move || {
+        let saved = crate::chats::load(&dir, &root);
+        move |ed: &mut Editor| {
+            let Some(c) = &mut ed.chat else { return };
+            c.past = saved.iter().map(|s| (s.id.clone(), s.title.clone(), s.updated)).collect();
+            let Some(s) = saved.into_iter().find(|s| s.id == id) else { return ensure_proc(ed) };
+            continue_with(ed, s);
+            let Some(c) = &mut ed.chat else { return };
+            c.scroll = r.scroll;
+            c.msgs.retain(|m| !(m.role == Role::Note && m.text == RESTARTED));
+            if let Some(m) = c.msgs.last_mut().filter(|m| m.role == Role::Note) {
+                m.text = RESTARTED.into();
+            }
+        }
+    });
+}
+
+/// The conversation as it's kept: (store, project, it) — None before claude named its session.
+fn kept(ed: &Editor) -> Option<(std::path::PathBuf, std::path::PathBuf, crate::chats::Saved)> {
+    let (dir, c) = (ed.chats_dir.clone()?, ed.chat.as_ref()?);
+    let id = c.session.clone()?;
     let title = c.msgs.iter().find(|m| m.role == Role::User).map(|m| m.text.clone()).unwrap_or_default();
     let plan = c.plan.as_ref().map(crate::plan::Plan::to_json);
     let saved = crate::chats::Saved {
@@ -413,15 +454,29 @@ fn keep(ed: &Editor) {
         plan,
         seq: crate::chats::seq(),
     };
-    let root = std::env::current_dir().unwrap_or_default();
+    Some((dir, std::env::current_dir().unwrap_or_default(), saved))
+}
+
+/// The turn ended: the conversation is kept (on a worker) — its rows and claude's session.
+fn keep(ed: &Editor) {
+    let Some((dir, root, saved)) = kept(ed) else { return };
     ed.events.jobs().spawn(move || {
         crate::chats::save(&dir, &root, saved);
         |_: &mut Editor| {}
     });
 }
 
+/// Kept now, on this thread — the last thing before `:restart` replaces this process (a worker's save
+/// would go with it).
+pub fn keep_now(ed: &Editor) {
+    if let Some((dir, root, saved)) = kept(ed) {
+        crate::chats::save(&dir, &root, saved);
+    }
+}
+
 pub fn close(ed: &mut Editor) {
     ed.chat = None;
+    crate::restart::turn_over(ed);
 }
 
 /// New chat — fresh process (drops memory of the previous conversation).
@@ -614,6 +669,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
                 })
             });
             crate::notes::turn_done(ed, answer.flatten());
+            crate::restart::turn_over(ed);
         }
         StreamEv::Exit(err) => {
             c.proc = None;
@@ -656,6 +712,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             // A review (or a command's card) claude was waiting on has no one to answer now
             crate::edits::turn_over(ed);
             crate::tools::turn_over(ed);
+            crate::restart::turn_over(ed);
         }
     }
 }

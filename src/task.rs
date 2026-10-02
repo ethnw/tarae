@@ -273,6 +273,7 @@ impl Editor {
             self.offer_finished(a.offer, Err("stopped before it finished".into()));
         }
         crate::tools::run_dropped(self, "the user stopped it");
+        crate::restart::run_dropped(self);
         self.task_run = None;
     }
 
@@ -307,6 +308,17 @@ impl Editor {
         }
     }
 
+    /// `:restart`'s build (`restart.rs`): not the task `space m m` runs again — the restart waits for its
+    /// end. Its generation; None if it didn't start (an install is running, or it couldn't spawn).
+    pub(crate) fn task_start_restart(&mut self, task: Task) -> Option<u64> {
+        if self.task_run.as_ref().is_some_and(|r| r.install && r.state == State::Running) {
+            return None;
+        }
+        let before = self.task_generation;
+        self.task_spawn(task, None);
+        (self.task_generation != before).then_some(self.task_generation)
+    }
+
     /// An install (`install.rs`) in the task panel: not the task `space m m` runs again, and its output's
     /// places stay out of the list.
     pub(crate) fn task_start_install(&mut self, task: Task, after: After) {
@@ -337,6 +349,7 @@ impl Editor {
             self.test_run = None;
         }
         crate::tools::run_dropped(self, "another task took its place");
+        crate::restart::run_dropped(self);
         self.task_generation += 1;
         let generation = self.task_generation;
         let pid = child.id();
@@ -408,6 +421,11 @@ impl Editor {
                     Some(0) => State::Passed,
                     code => State::Failed(code),
                 };
+                let (passed, errors) = (r.state == State::Passed, r.found.0);
+                if crate::restart::built(ed, generation, passed, errors) {
+                    return;
+                }
+                let Some(r) = ed.task_run.as_mut() else { return };
                 if let Some(after) = r.after.take() {
                     let passed = r.state == State::Passed;
                     return ed.install_done(after, passed);

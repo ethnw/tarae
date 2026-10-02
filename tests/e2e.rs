@@ -500,3 +500,54 @@ fn a_folder_argument_opens_there_on_the_start_screen() {
     t.command("q");
     assert_eq!(t.wait_exit().code(), Some(0));
 }
+
+/// `:restart` on a real terminal: the build runs as a task, then the new binary (this same one here) takes
+/// the process over — same pid, the pty still its terminal — and comes back as it was: both panes, each
+/// file's cursor, the focused one current. Twice, so a restarted tarae restarts too; then it quits cleanly.
+#[test]
+fn restart_becomes_the_new_binary_as_you_were() {
+    let sb = Sandbox::new("restart");
+    sb.write(
+        ".tarae.toml",
+        &format!("[editor]\nrestart-build = \"echo built\"\nrestart-binary = \"{BIN}\"\n"),
+    );
+    let body: String = (1..=40).map(|i| format!("line {i}\n")).collect();
+    sb.write("a.txt", &body);
+    sb.write("b.txt", "bee one\nbee two\n");
+    let mut t = Term::spawn(&sb, &["a.txt"], 120, ROWS);
+    t.wait_text("line 1");
+    t.send("5j");
+    t.wait_for("cursor on line 6 of a", |s| s.status().contains("6:1"));
+    t.command("vsplit b.txt");
+    t.wait_text("bee two");
+    t.send("j");
+    t.wait_for("cursor on line 2 of b", |s| s.status().contains("2:1"));
+
+    let entered = |raw: &[u8]| raw.windows(8).filter(|w| *w == b"\x1b[?1049h").count();
+    t.command("restart");
+    t.wait_raw("a second tarae entering the alternate screen", |r| entered(r) >= 2);
+    let s = t.wait_text("Restarted · 2 files as they were");
+    assert!(t.running(), "the same process, still running");
+    assert!(s.contains("bee two") && s.contains("line 6"), "both panes:\n{s}");
+    assert!(s.status().contains("2:1"), "b focused, its cursor kept:\n{s}");
+    t.send("\x17w");
+    t.wait_for("the other pane: a at line 6", |s| s.status().contains("6:1"));
+    // The Claude Code lock file is the new tarae's — one, with the same pid
+    let locks = sb.lock_files();
+    assert_eq!(locks.len(), 1, "{locks:?}");
+    assert!(fs::read_to_string(&locks[0]).unwrap().contains(&format!("\"pid\":{}", t.child.id())));
+
+    t.command("restart!");
+    t.wait_raw("a third tarae", |r| entered(r) >= 3);
+    t.wait_for("a back at line 6, focused", |s| s.status().contains("6:1") && s.contains("bee two"));
+    let state = sb.home().join(".local/state/tarae");
+    let left: Vec<_> = fs::read_dir(&state)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("restart-"))
+        .collect();
+    assert!(left.is_empty(), "the state file goes once read: {left:?}");
+    t.command("q");
+    t.command("q");
+    assert_eq!(t.wait_exit().code(), Some(0));
+}

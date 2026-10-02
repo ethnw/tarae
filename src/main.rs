@@ -55,6 +55,7 @@ mod quickfix;
 mod recent;
 mod repeat;
 mod replace;
+mod restart;
 mod runtime;
 mod saver;
 mod screen;
@@ -108,11 +109,18 @@ config: $XDG_CONFIG_HOME/tarae/config.toml (default ~/.config/tarae/config.toml)
         inside tarae: :set <path> [value], :set! (also saves), :toggle, :config-show";
 
 fn main() -> Result<()> {
+    restart::remember_exe();
     let mut files = Vec::new();
     let mut diff_against: Option<PathBuf> = None;
+    // `:restart`: the state the last tarae left (restart.rs)
+    let mut restarted = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--restart" => {
+                restart::reap();
+                restarted = args.next().and_then(|f| restart::read(std::path::Path::new(&f)));
+            }
             "--diff" => match (args.next(), args.next()) {
                 (Some(old), Some(new)) => {
                     diff_against = Some(PathBuf::from(old));
@@ -163,8 +171,10 @@ fn main() -> Result<()> {
         std::process::exit(2);
     }
 
-    // Theme "default" (meok/hanji) follows the terminal background — before reading config (config reads it)
-    if let Some(light) = term::detect_light_background() {
+    // Theme "default" (meok/hanji) follows the terminal background — before reading config (config reads it).
+    // A restart knows it already (and the query's answer could mix with keys typed meanwhile).
+    let light = restarted.as_ref().and_then(|s| s["light"].as_bool());
+    if let Some(light) = light.or_else(term::detect_light_background) {
         theme::set_light(light);
     }
     let (config, warnings) = config::load();
@@ -177,9 +187,11 @@ fn main() -> Result<()> {
             editor.set_error(format!("{e:#}"));
         }
     }
-    // Started without files: the start screen (offering this folder's last session — `r`), or that session
-    // right away if `editor.restore-session` is on
-    if files.is_empty() {
+    if let Some(state) = &restarted {
+        restart::restore(&mut editor, state);
+    } else if files.is_empty() {
+        // Started without files: the start screen (offering this folder's last session — `r`), or that
+        // session right away if `editor.restore-session` is on
         editor.find_last_session();
         if editor.config.restore_session {
             editor.restore_session();
@@ -204,5 +216,15 @@ fn main() -> Result<()> {
     let result = term::run(&mut editor);
     editor.save_session();
     editor.agent = None; // remove the lock file
+    if result.is_ok()
+        && let Some(bin) = editor.restart.as_ref().and_then(|r| r.ready()).map(PathBuf::from)
+    {
+        // Returns only if the new tarae couldn't take over
+        eprintln!(
+            "tarae: {} — run tarae again; r on its start screen reopens your files",
+            restart::exec(editor, &bin)
+        );
+        std::process::exit(1);
+    }
     result
 }

@@ -51,6 +51,8 @@ pub const COMMANDS: &[TypedCmd] = &[
     c(&["quit!", "q!"], Arg::None, "Quit without saving"),
     c(&["quit-all", "qa"], Arg::None, "Quit tarae"),
     c(&["quit-all!", "qa!"], Arg::None, "Quit tarae without saving"),
+    c(&["restart"], Arg::None, "Build tarae and run the new one, as you were"),
+    c(&["restart!"], Arg::None, "Run the new tarae without building first"),
     c(&["open", "o", "e", "edit"], Arg::File, "Open files"),
     c(&["new", "n"], Arg::None, "New scratch buffer"),
     c(&["reload"], Arg::None, "Reload the file from disk (u brings your version back)"),

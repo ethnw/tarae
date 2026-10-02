@@ -67,6 +67,10 @@ pub struct EditorConfig {
     pub terminal_escape: String,
     /// On save, record the undo history; restore it on reopen (`undofile.rs`).
     pub persistent_undo: bool,
+    /// `:restart` builds with this first ("" = no build) and runs this binary ("" = the one running) —
+    /// a relative path is from the project root (`restart.rs`).
+    pub restart_build: String,
+    pub restart_binary: String,
     /// Open an IDE server so Claude Code can connect (`agent.rs`).
     pub agent_claude_code: bool,
     /// Ask whether to download when opening a file whose language has no grammar (`grammar.rs` notice).
@@ -108,6 +112,8 @@ impl Default for EditorConfig {
             auto_save: "focus".into(),
             terminal_escape: "C-\\".into(),
             persistent_undo: true,
+            restart_build: String::new(),
+            restart_binary: String::new(),
             agent_claude_code: true,
             offer_grammars: true,
             offer_installs: true,

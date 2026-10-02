@@ -231,7 +231,7 @@ pub struct Editor {
     pub views: Vec<View>,
     pub split: crate::split::Split,
     pub focus: crate::split::ViewId,
-    next_view: crate::split::ViewId,
+    pub(crate) next_view: crate::split::ViewId,
     pub mode: Mode,
     pub keymaps: Keymaps,
     pub config: EditorConfig,
@@ -421,6 +421,8 @@ pub struct Editor {
     pub git_auto: bool,
     /// Where the chat's conversations are kept (`chats.rs`) — None in tests (they set a temp dir).
     pub chats_dir: Option<std::path::PathBuf>,
+    /// `:restart` under way (`restart.rs`) — once `Ready`, main runs the new binary after the loop ends.
+    pub restart: Option<crate::restart::Restart>,
     pub idle_save_gen: u64,
     /// When the scheduled animation tick lands (None: none scheduled).
     ticking: Option<std::time::Instant>,
@@ -534,6 +536,7 @@ impl Editor {
             git_diffing: false,
             git_auto: !cfg!(test),
             chats_dir: if cfg!(test) { None } else { crate::chats::default_dir() },
+            restart: None,
             idle_save_gen: 0,
             recent: Vec::new(),
             session: crate::session::State::default(),
