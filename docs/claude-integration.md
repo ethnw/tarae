@@ -273,13 +273,39 @@ What Claude runs, with `run` and `run_tests`, runs in a sandbox (macOS: Seatbelt
   write in the temp folders and the toolchain's own folders: cargo's target and build dirs wherever they are
   (tarae asks `cargo metadata`), cargo's registry, and Go's caches. It can't write in `~/.cargo/bin` or anything
   else on your `PATH`
-- It reaches nothing over the network except this machine, so tests that start a local server still work. A
-  build that needs to download something fails. `llm.sandbox-network` lets it through, and
-  `llm.sandbox-write` adds folders
+- It reaches nothing over the network, so a build that needs to download something fails.
+  `llm.sandbox-network` lets it through, and `llm.sandbox-write` adds folders
 - Unix sockets work only in the project and in a temp folder made for each run, which the command gets as
   `TMPDIR`. The sockets in `/tmp` and your own temp folder belong to programs running outside the sandbox
-  (tmux, zellij, ssh-agent), and some of them would run whatever they're told
-- Claude reads with each result that it ran in the sandbox, so an `Operation not permitted` points to the cause
+  (tmux, zellij, ssh-agent), and some of them would run whatever they're told. tmux's and zellij's socket
+  folders (`$TMUX_TMPDIR` or `/tmp`, then `tmux-<uid>`; `$ZELLIJ_SOCKET_DIR` or `$TMPDIR/zellij-<uid>`) can't
+  be written either, so a command can't delete or replace the session you work in
+- **Programs on this machine are closed to it too, except on the ports you open.** It can still listen on a
+  port; connecting is what's closed. Some ports belong to programs that run whatever they're asked, outside
+  the sandbox (the table below), and macOS's sandbox can't open "all of this machine but those". So:
+  - `llm.sandbox-ports = [3000, 5432]` opens just those ports: a dev server, a test database. At most 200, since
+    each port is one more rule checked on every connect
+  - `llm.sandbox-localhost = true` opens every port on this machine, for tests that talk to their own servers
+    on ports picked at random. **That includes the ports in the table below**: it can't leave them out.
+    tarae's own `.tarae.toml` sets it, because its tests do this
+  - With `llm.sandbox-network` on, everything is reachable except the ports in the table, unless they're in
+    `llm.sandbox-ports`
+
+  | Port | What usually listens there |
+  |---|---|
+  | 2375, 2376, 4243 | Docker's API: it starts containers that mount any folder |
+  | 8888 | Jupyter: it runs code in its kernels |
+  | 9222 | Chrome DevTools: it drives the browser, signed-in sessions included |
+  | 9229 | Node's inspector: it runs code in the program being inspected |
+  | 6379 | Redis: its `CONFIG` and `MODULE` commands write files and load code |
+  | 2379 | etcd: a cluster's state, its secrets included |
+  | 6443 | Kubernetes API server: it starts pods |
+  | 10250 | kubelet: it runs commands in the node's pods |
+
+  Like the other settings that run something or loosen a guard, a project's `.tarae.toml` sets these only
+  once you trust the project
+- Claude reads with each result that it ran in the sandbox and which ports were open, so an `Operation not
+  permitted` points to the cause
 - **Where there's no sandbox** (Linux for now, or tarae itself running inside one), Claude's commands don't
   quietly run without one. A card says there's none: `y` runs this one, `a` runs the rest of this conversation's
   commands too, and `n` says no. While they run without one, the chat's title says `› no sandbox`.

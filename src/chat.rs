@@ -38,8 +38,9 @@ change (a test file, and a line for a single test), and when they fail, read why
 watches the run in their editor. To build, lint, format, run a whole test suite or use git, use the run \
 tool: one command per call, its output comes back; checks start at once, other commands wait for the user's \
 yes. Both run in a sandbox: they can write only in the project (not .git or .tarae.toml), temp folders and the \
-toolchain's own, and reach nothing over the network but this machine — when it blocks something a command \
-needs, tell the user; never work around it. Tests of dangerous behavior (deleting, overwriting, killing \
+toolchain's own, and connect to nothing over the network, this machine included, but the ports the user \
+opened (each result says which) — when it blocks something a command needs, tell the user (the settings \
+llm.sandbox-ports, llm.sandbox-localhost and llm.sandbox-network open more); never work around it. Tests of dangerous behavior (deleting, overwriting, killing \
 processes, the network) use a harmless stand-in — a marker file made in the test's own temp dir, then checked — \
 never the real command or a real path outside that dir, not even in code meant never to run. When the work takes several steps, lay them out first with the plan tool \
 and keep it current as you go (the step you're on doing, finished ones done). Each user message starts with <editor-context>: the file the user is looking at, \

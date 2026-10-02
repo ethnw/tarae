@@ -3754,7 +3754,11 @@ mod tests {
         let mut parser = vt100::Parser::new(40, 150, 0);
         parser.process(&bytes);
         let screen = parser.screen().contents();
-        assert!(screen.contains("echo making") && screen.contains("written this turn"), "{screen}");
+        // (words, not a phrase: a long temp path — a sandboxed run's own `TMPDIR` — wraps it)
+        assert!(
+            screen.contains("echo making") && screen.contains("written") && screen.contains("unseen:"),
+            "{screen}"
+        );
         assert!(ed.screen.offer_buttons.iter().any(|b| b.3 == 'y'), "y can answer it");
         ed.offer_accept();
         settle_for(&mut ed, |ed| !ed.chat.as_ref().unwrap().busy());

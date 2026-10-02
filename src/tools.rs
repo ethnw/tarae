@@ -559,17 +559,14 @@ fn guarded(ed: &mut Editor, call: Call, job: Job, asked: bool) {
     if found == Availability::Bypass {
         return go(ed, call, job, None);
     }
-    let llm = &ed.config.llm;
-    let (write, protect, network) =
-        (llm.sandbox_write.clone(), llm.sandbox_protect.clone(), llm.sandbox_network);
+    let llm = ed.config.llm.clone();
     let root = std::env::current_dir().unwrap_or_default();
     ed.events.jobs().spawn(move || {
         let found = match found {
             Availability::Unknown => crate::sandbox::probe(),
             f => f,
         };
-        let policy =
-            (found == Availability::Ready).then(|| crate::sandbox::policy(&root, &write, &protect, network));
+        let policy = (found == Availability::Ready).then(|| crate::sandbox::policy(&root, &llm));
         move |ed: &mut Editor| {
             ed.sandbox = found.clone();
             // (the turn ended meanwhile: nothing waits for it)

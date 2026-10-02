@@ -1,9 +1,10 @@
 //! Claude's commands in a sandbox. What Claude runs — `run` and `run_tests` (`tools.rs`) — goes through
 //! macOS's Seatbelt (`/usr/bin/sandbox-exec`) with a profile made here (`Policy::profile`): it may write
 //! in the project (but `.git`, `.tarae.toml` and `llm.sandbox-protect`), the temp folders and the
-//! toolchain's own folders (cargo's target and build dirs, its registry; Go's caches), reach nothing
-//! over the network but this machine, and make or reach unix sockets only in the project and its own
-//! temp folder (`RunDir`, its `TMPDIR`). What the user runs themselves (`space m m`, `space x x`, installs,
+//! toolchain's own folders (cargo's target and build dirs, its registry; Go's caches), connect to nothing
+//! over the network but the ports on this machine the user opened (`llm.sandbox-ports`, or all with
+//! `llm.sandbox-localhost` — `RISKY_PORTS` says why not all by default), and make or reach unix sockets
+//! only in the project and its own temp folder (`RunDir`, its `TMPDIR`). What the user runs themselves (`space m m`, `space x x`, installs,
 //! `:restart`) isn't sandboxed.
 //!
 //! Measured on macOS 27 (2026-10-01, `target/sb/` scripts): the later of two rules on a path wins and
@@ -55,11 +56,26 @@ impl Guard {
     /// The line Claude reads with the command's result.
     pub fn report(&self) -> String {
         match self {
-            Guard::In(p) => format!(
-                "In tarae's sandbox: it could write only in the project (not .git or .tarae.toml), temp \
-                 folders and the toolchain's own{} — \"Operation not permitted\" is likely the sandbox.",
-                if p.network { "" } else { ", and reach nothing over the network but this machine" }
-            ),
+            Guard::In(p) => {
+                let ports = p.ports.iter().map(u16::to_string).collect::<Vec<_>>().join(", ");
+                let net = match (p.network, p.localhost, ports.is_empty()) {
+                    (true, ..) => ", and reach the network — but not this machine's risky ports (Docker, Jupyter, \
+                                   debuggers…)"
+                        .to_string(),
+                    (false, true, _) => ", and connect to nothing over the network but this machine".into(),
+                    (false, false, true) => ", and connect to nothing over the network, this machine's ports \
+                                             included (llm.sandbox-ports opens some, llm.sandbox-localhost all)"
+                        .into(),
+                    (false, false, false) => format!(
+                        ", and connect to nothing over the network but this machine's ports {ports} \
+                         (llm.sandbox-ports)"
+                    ),
+                };
+                format!(
+                    "In tarae's sandbox: it could write only in the project (not .git or .tarae.toml), temp \
+                     folders and the toolchain's own{net} — \"Operation not permitted\" is likely the sandbox."
+                )
+            }
             Guard::Without(why) => format!("Ran without a sandbox ({why}) — the user agreed."),
             Guard::Off => "Ran without a sandbox — the user turned it off (llm.sandbox).".into(),
         }
@@ -77,8 +93,16 @@ pub struct Policy {
     pub write: Vec<PathBuf>,
     /// Single files writable (cargo's lock and cache databases).
     pub files: Vec<PathBuf>,
+    /// Folders inside writable ones kept as they are: the terminal multiplexers' sockets (`mux_dirs`) — a
+    /// command could otherwise delete or replace the session the user works in.
+    pub keep: Vec<PathBuf>,
     /// The network beyond this machine (`llm.sandbox-network`).
     pub network: bool,
+    /// Ports on this machine it may connect to (`llm.sandbox-ports`): the network closed, the only ones;
+    /// open, the risky ones listed here stay reachable.
+    pub ports: Vec<u16>,
+    /// Every port on this machine, the risky ones too (`llm.sandbox-localhost`).
+    pub localhost: bool,
     /// This run's own temp folder — its `TMPDIR`, and with the project the only place it may make or reach
     /// a unix socket (`RunDir`).
     pub run: Option<std::sync::Arc<RunDir>>,
@@ -119,6 +143,29 @@ impl Drop for RunDir {
 const DEVICES: &str = "(allow file-write* (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/tty\") \
 (literal \"/dev/ptmx\") (literal \"/dev/dtracehelper\") (regex #\"^/dev/ttys[0-9]+$\") (subpath \"/dev/fd\"))\n";
 
+/// Ports on this machine where what listens runs what it's asked to, outside the sandbox. The network
+/// closed (the default), every port on this machine is closed but `llm.sandbox-ports` — these included;
+/// open (`llm.sandbox-network`), these stay closed unless listed. `llm.sandbox-localhost` opens them too:
+/// once `localhost:*` is allowed no port's deny wins over it, before or after, by any filter (measured by
+/// the user, 2026-10-02) — so "localhost but these" can't be written. `docs/claude-integration.md` lists
+/// them (a test checks).
+pub const RISKY_PORTS: [(u16, &str); 10] = [
+    (2375, "Docker API — starts containers that mount any folder"),
+    (2376, "Docker API over TLS — the same"),
+    (4243, "Docker API on its old port — the same"),
+    (8888, "Jupyter — runs code in its kernels"),
+    (9222, "Chrome DevTools — drives the browser, signed-in sessions included"),
+    (9229, "Node inspector — runs code in the inspected program"),
+    (6379, "Redis — its CONFIG and MODULE commands write files and load code"),
+    (2379, "etcd — a cluster's state, its secrets included"),
+    (6443, "Kubernetes API server — starts pods"),
+    (10250, "kubelet — runs commands in the node's pods"),
+];
+
+/// `llm.sandbox-ports` at most: one rule a port, and they cost every command (measured: 1000 rules 20 ms,
+/// 5000 0.4 s, 20000 don't compile).
+pub const PORTS_MAX: usize = 200;
+
 /// Ways to get something run outside: Apple Events to other apps, LaunchServices (`open`).
 const NO_WAY_OUT: &str = "(deny appleevent-send)\n(deny mach-lookup (global-name \
 \"com.apple.coreservices.launchservicesd\") (global-name-regex #\"^com\\.apple\\.lsd\\.\"))\n";
@@ -137,11 +184,32 @@ impl Policy {
         if !run.is_empty() || !dirs.is_empty() || !files.is_empty() {
             p.push_str(&format!("(allow file-write*{run}{dirs}{files})\n"));
         }
+        // After the allows, so these win: the multiplexers' socket folders sit inside writable temp ones
+        let keep: String = (0..self.keep.len()).map(|i| format!(" (subpath (param \"K{i}\"))")).collect();
+        if !keep.is_empty() {
+            p.push_str(&format!("(deny file-write*{keep})\n"));
+        }
         p.push_str(DEVICES);
+        let open: String = self.ports.iter().map(|n| format!(" (remote ip \"localhost:{n}\")")).collect();
         if !self.network {
+            // Listening stays open (a test's own server); connecting, only where it's allowed
             p.push_str("(deny network*)\n");
             p.push_str("(allow network-bind network-inbound (local ip \"localhost:*\"))\n");
-            p.push_str("(allow network-outbound (remote ip \"localhost:*\"))\n");
+            if self.localhost {
+                p.push_str("(allow network-outbound (remote ip \"localhost:*\"))\n");
+            } else if !open.is_empty() {
+                p.push_str(&format!("(allow network-outbound{open})\n"));
+            }
+        } else {
+            // Under the open network a port's deny does win (measured)
+            let risky: String = RISKY_PORTS
+                .iter()
+                .filter(|(n, _)| !self.ports.contains(n))
+                .map(|(n, _)| format!(" (remote ip \"localhost:{n}\")"))
+                .collect();
+            if !risky.is_empty() {
+                p.push_str(&format!("(deny network-outbound{risky})\n"));
+            }
         }
         // Unix sockets — made or reached — only in the project and the run's own folder (`RunDir`), the
         // network open or not: the ones elsewhere are servers outside (tmux, zellij, ssh-agent). Last, so
@@ -165,6 +233,7 @@ impl Policy {
         v.extend(self.protect.iter().enumerate().map(|(i, p)| (format!("P{i}"), s(p))));
         v.extend(self.write.iter().enumerate().map(|(i, p)| (format!("W{i}"), s(p))));
         v.extend(self.files.iter().enumerate().map(|(i, p)| (format!("F{i}"), s(p))));
+        v.extend(self.keep.iter().enumerate().map(|(i, p)| (format!("K{i}"), s(p))));
         v
     }
 
@@ -218,8 +287,35 @@ impl Policy {
                 .collect(),
             None => Vec::new(),
         };
-        Policy { root, protect, write, files, network: env.network, run: None }
+        let mut ports: Vec<u16> = env.ports.clone();
+        ports.sort_unstable();
+        ports.dedup();
+        ports.truncate(PORTS_MAX);
+        Policy {
+            root,
+            protect,
+            write,
+            files,
+            keep: mux_dirs(env),
+            network: env.network,
+            ports,
+            localhost: env.localhost,
+            run: None,
+        }
     }
+}
+
+/// Where tmux and zellij keep their sockets: tmux in `$TMUX_TMPDIR` (else `/tmp`) `/tmux-<uid>`, zellij in
+/// `$ZELLIJ_SOCKET_DIR` (else `$TMPDIR/zellij-<uid>`). Real paths.
+fn mux_dirs(env: &Env) -> Vec<PathBuf> {
+    let tmux_base = env.tmux_tmpdir.as_deref().unwrap_or(Path::new("/private/tmp"));
+    let mut v = vec![real(tmux_base).join(format!("tmux-{}", env.uid))];
+    match (&env.zellij_dir, &env.tmp) {
+        (Some(d), _) => v.push(real(d)),
+        (None, Some(t)) => v.push(t.join(format!("zellij-{}", env.uid))),
+        (None, None) => {}
+    }
+    v
 }
 
 /// What a project's policy is made from.
@@ -233,10 +329,16 @@ pub struct Env {
     pub cargo_home: Option<PathBuf>,
     /// The toolchain's own folders (`toolchain_dirs`).
     pub dirs: Vec<PathBuf>,
-    /// `llm.sandbox-write` · `llm.sandbox-protect` · `llm.sandbox-network`.
+    /// `llm.sandbox-write` · `-protect` · `-network` · `-ports` · `-localhost`.
     pub write: Vec<String>,
     pub protect: Vec<String>,
     pub network: bool,
+    pub ports: Vec<u16>,
+    pub localhost: bool,
+    /// `$TMUX_TMPDIR` · `$ZELLIJ_SOCKET_DIR` · the user's id (their socket folders — `mux_dirs`).
+    pub tmux_tmpdir: Option<PathBuf>,
+    pub zellij_dir: Option<PathBuf>,
+    pub uid: u32,
 }
 
 /// The real path; for one that isn't there yet, its folder's real path joined with its name.
@@ -298,7 +400,7 @@ pub fn missing_why(stderr: &str) -> String {
 }
 
 /// The policy for the project at `root` with these settings — the toolchain's folders found (blocks).
-pub fn policy(root: &Path, write: &[String], protect: &[String], network: bool) -> Policy {
+pub fn policy(root: &Path, llm: &crate::llm::LlmConfig) -> Policy {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let cargo_home = std::env::var_os("CARGO_HOME")
         .map(PathBuf::from)
@@ -311,9 +413,15 @@ pub fn policy(root: &Path, write: &[String], protect: &[String], network: bool) 
         tmp,
         cargo_home,
         dirs: Vec::new(),
-        write: write.to_vec(),
-        protect: protect.to_vec(),
-        network,
+        write: llm.sandbox_write.clone(),
+        protect: llm.sandbox_protect.clone(),
+        network: llm.sandbox_network,
+        ports: llm.sandbox_ports.clone(),
+        localhost: llm.sandbox_localhost,
+        tmux_tmpdir: std::env::var_os("TMUX_TMPDIR").filter(|v| !v.is_empty()).map(PathBuf::from),
+        zellij_dir: std::env::var_os("ZELLIJ_SOCKET_DIR").filter(|v| !v.is_empty()).map(PathBuf::from),
+        // SAFETY: getuid has no preconditions and can't fail.
+        uid: unsafe { libc::getuid() },
     };
     // The toolchain is asked inside the sandbox it's for (it reads only)
     env.dirs = toolchain_dirs(&Policy::for_project(&env));
@@ -418,6 +526,48 @@ mod tests {
             write: vec!["~/Library/Caches/thing".into(), "/".into(), "/Users".into()],
             protect: vec!["secrets".into(), "../outside".into(), "/etc".into()],
             network: false,
+            ports: Vec::new(),
+            localhost: false,
+            tmux_tmpdir: None,
+            zellij_dir: None,
+            uid: 501,
+        }
+    }
+
+    /// The multiplexers' socket folders, where they put them by default and where the environment says.
+    #[test]
+    fn the_multiplexers_socket_folders() {
+        let root = Path::new("/Users/u/p");
+        let keep = Policy::for_project(&env(root)).keep;
+        assert_eq!(
+            keep,
+            [
+                real(Path::new("/private/tmp")).join("tmux-501"),
+                "/private/var/folders/ab/cd/T/zellij-501".into()
+            ]
+        );
+        let moved = Env {
+            tmux_tmpdir: Some("/Users/u/tm".into()),
+            zellij_dir: Some("/Users/u/zj".into()),
+            ..env(root)
+        };
+        assert_eq!(
+            Policy::for_project(&moved).keep,
+            [PathBuf::from("/Users/u/tm/tmux-501"), "/Users/u/zj".into()]
+        );
+    }
+
+    /// The docs say which local ports are closed and why — every one of them.
+    #[test]
+    fn the_docs_name_every_risky_port() {
+        let doc = include_str!("../docs/claude-integration.md");
+        let start = doc.find("### The sandbox").expect("the sandbox section");
+        let section = &doc[start..start + doc[start + 1..].find("\n### ").unwrap_or(doc.len() - start - 1)];
+        for (port, why) in RISKY_PORTS {
+            assert!(
+                section.contains(&port.to_string()),
+                "docs/claude-integration.md doesn't name port {port} ({why})"
+            );
         }
     }
 
@@ -459,10 +609,14 @@ mod tests {
         assert!(text.contains("(require-not (subpath (param \"P0\")))"));
         assert!(text.contains("(subpath (param \"W5\"))") && !text.contains("W6"));
         assert!(text.contains("(deny network*)") && text.contains("(deny appleevent-send)"));
+        assert!(
+            text.contains("(deny file-write* (subpath (param \"K0\")) (subpath (param \"K1\")))"),
+            "{text}"
+        );
         let params = p.params();
         assert_eq!(params[0], ("ROOT".into(), "/Users/u/a\"b (c)".into()));
         assert!(params.iter().any(|(k, v)| k == "P0" && v.ends_with("/.git")));
-        let open = Policy { network: true, ..p };
+        let open = Policy { network: true, ..p.clone() };
         let text = open.profile();
         assert!(!text.contains("(deny network*)"), "{text}");
         assert!(
@@ -470,6 +624,47 @@ mod tests {
             "sockets stay guarded: {text}"
         );
         assert!(!text.contains("RUN"), "no folder of its own: only the project's sockets");
+        assert!(text.contains("(param \"K0\")"), "the socket folders stay kept, the network open or not");
+    }
+
+    /// Connecting on this machine: the network closed, only the listed ports (`localhost:*` only when
+    /// asked — its port denies can't win, measured); open, all but the risky ports not listed.
+    #[test]
+    fn local_ports_in_the_profile() {
+        let p = Policy::for_project(&env(Path::new("/Users/u/p")));
+        let outbound = |p: &Policy| -> Vec<String> {
+            p.profile()
+                .lines()
+                .filter(|l| l.contains("network-outbound (remote ip"))
+                .map(str::to_string)
+                .collect()
+        };
+        assert!(outbound(&p).is_empty(), "closed, nothing listed: no connect allowed: {:?}", outbound(&p));
+        assert!(p.profile().contains("(allow network-bind network-inbound (local ip \"localhost:*\"))"));
+        let listed = Policy { ports: vec![3000, 5432], ..p.clone() };
+        assert_eq!(
+            outbound(&listed),
+            ["(allow network-outbound (remote ip \"localhost:3000\") (remote ip \"localhost:5432\"))"]
+        );
+        let all = Policy { localhost: true, ..listed.clone() };
+        assert_eq!(outbound(&all), ["(allow network-outbound (remote ip \"localhost:*\"))"]);
+        let open = Policy { network: true, ports: vec![6379], ..p.clone() };
+        let deny = outbound(&open);
+        assert_eq!(deny.len(), 1);
+        assert!(
+            deny[0].starts_with("(deny network-outbound") && deny[0].contains("localhost:2375"),
+            "{deny:?}"
+        );
+        assert!(!deny[0].contains("localhost:6379"), "a listed risky port stays reachable: {deny:?}");
+        // Ports in the env are sorted, once each, and at most PORTS_MAX
+        let many = Env { ports: (1..=500).rev().chain([7, 7]).collect(), ..env(Path::new("/Users/u/p")) };
+        let ports = Policy::for_project(&many).ports;
+        assert_eq!((ports.len(), ports[0], ports[1]), (PORTS_MAX, 1, 2));
+        assert!(
+            crate::settings::Kind::Ports { max: PORTS_MAX }
+                .check(&toml::Value::Array((1..=201).map(toml::Value::from).collect()))
+                .is_err_and(|e| e.contains("201 ports, at most 200") && e.contains("llm.sandbox-localhost"))
+        );
     }
 
     /// What `sandbox-exec` says inside another sandbox (measured) reads as that.
@@ -500,13 +695,19 @@ mod tests {
         std::fs::create_dir_all(&out).unwrap();
         let (root, out) = (real(&root), real(&out));
         std::os::unix::fs::symlink(&out, root.join("link")).ok();
+        // A server of this test's own, its port opened for the sandbox
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
         // Not the usual temp folders: here, the outside folder is in one
         let p = Policy {
             root: root.clone(),
             protect: vec![root.join(".git"), root.join(".tarae.toml")],
             write: Vec::new(),
             files: Vec::new(),
+            keep: Vec::new(),
             network: false,
+            ports: vec![port],
+            localhost: false,
             run: None,
         };
         let sh = |script: &str| {
@@ -525,10 +726,9 @@ mod tests {
             assert!(!r.status.success() && !target.exists(), "{what}: written");
             assert!(String::from_utf8_lossy(&r.stderr).contains("Operation not permitted"), "{what}");
         }
-        // This machine answers; TEST-NET-1 (never routed) is refused at once, not timed out
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
+        // Its open port on this machine answers; TEST-NET-1 (never routed) is refused at once, not timed out
         assert!(sh(&format!("/usr/bin/nc -z -w 2 127.0.0.1 {port}")).status.success());
+        drop(listener);
         let started = std::time::Instant::now();
         assert!(!sh("/usr/bin/nc -z -w 5 192.0.2.1 9").status.success());
         assert!(started.elapsed() < std::time::Duration::from_secs(3), "refused, not timed out");
@@ -564,7 +764,10 @@ mod tests {
                 protect: vec![root.join(".git")],
                 write: vec!["/private/tmp".into(), user_temp(&real(&std::env::temp_dir()))],
                 files: Vec::new(),
+                keep: Vec::new(),
                 network,
+                ports: Vec::new(),
+                localhost: false,
                 run: Some(run.clone()),
             };
             let sh = |script: &str| {
@@ -591,5 +794,122 @@ mod tests {
         }
         std::fs::remove_dir_all(&t).ok();
         std::fs::remove_dir_all(&in_tmp).ok();
+    }
+
+    /// A folder of this test's own under `target/` (real path), made fresh.
+    #[cfg(target_os = "macos")]
+    fn scratch(name: &str) -> PathBuf {
+        let t = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("target/{name}-{}", std::process::id()));
+        std::fs::remove_dir_all(&t).ok();
+        std::fs::create_dir_all(&t).unwrap();
+        real(&t)
+    }
+
+    /// For real, on macOS: the multiplexers' socket folders stay as they are though they sit in a writable
+    /// temp folder — nothing made in them, what's there not moved away. Harmless: stand-in folders under
+    /// `target/`, a plain file standing in for the socket.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_multiplexers_socket_folders_stay_as_they_are() {
+        if std::env::var_os(MARK).is_some() {
+            eprintln!("(in a sandbox already: the Seatbelt checks run outside one — cargo test, CI)");
+            return;
+        }
+        let t = scratch("sb-mux");
+        let (root, tmp) = (t.join("project"), t.join("tmp"));
+        let kept = [tmp.join("tmux-501"), tmp.join("zellij-501")];
+        std::fs::create_dir_all(&root).unwrap();
+        for dir in &kept {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("default"), "").unwrap();
+        }
+        let p = Policy {
+            root: root.clone(),
+            protect: Vec::new(),
+            write: vec![tmp.clone()],
+            files: Vec::new(),
+            keep: kept.to_vec(),
+            network: false,
+            ports: Vec::new(),
+            localhost: false,
+            run: None,
+        };
+        let sh = |script: &str| {
+            let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
+            c.current_dir(&root).stdin(Stdio::null()).output().unwrap()
+        };
+        sh(&format!("touch '{}'", tmp.join("free").display()));
+        assert!(tmp.join("free").exists(), "the temp folder around them stays writable");
+        for dir in &kept {
+            sh(&format!("touch '{}'", dir.join("marker").display()));
+            assert!(!dir.join("marker").exists(), "{}: written in", dir.display());
+            sh(&format!("mv '{}' '{}'", dir.join("default").display(), dir.join("gone").display()));
+            assert!(
+                dir.join("default").exists() && !dir.join("gone").exists(),
+                "{}: moved away",
+                dir.display()
+            );
+        }
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// For real, on macOS — connecting to this machine's ports from inside:
+    /// - the network closed (the default): an ordinary port isn't reached, a listed one
+    ///   (`llm.sandbox-ports`) is;
+    /// - `llm.sandbox-localhost`: both are, and a risky one too (it can't be left out — measured);
+    /// - the network open: an ordinary port is reached, a risky one (`RISKY_PORTS`) only when listed.
+    ///
+    /// Harmless: the listeners are this test's own, on 127.0.0.1, and only `nc -z` knocks.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn local_ports_open_only_where_asked() {
+        use std::net::TcpListener;
+        if std::env::var_os(MARK).is_some() {
+            eprintln!("(in a sandbox already: the Seatbelt checks run outside one — cargo test, CI)");
+            return;
+        }
+        // One of them free here (Redis or Jupyter may be running)
+        let risky = RISKY_PORTS
+            .iter()
+            .find_map(|(port, _)| TcpListener::bind(("127.0.0.1", *port)).ok())
+            .expect("a risky port free to listen on");
+        let ordinary = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listed = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = |l: &TcpListener| l.local_addr().unwrap().port();
+        for l in [&risky, &ordinary, &listed] {
+            l.set_nonblocking(true).unwrap();
+        }
+        let root = scratch("sb-ports");
+        let policy = |network: bool, localhost: bool, ports: Vec<u16>| Policy {
+            root: root.clone(),
+            protect: Vec::new(),
+            write: Vec::new(),
+            files: Vec::new(),
+            keep: Vec::new(),
+            network,
+            ports,
+            localhost,
+            run: None,
+        };
+        let reached = |p: &Policy, l: &TcpListener| {
+            let script = format!("/usr/bin/nc -z -w 2 127.0.0.1 {}", port(l));
+            let mut c = command(Some(p), "/bin/sh", &["-c".into(), script]);
+            c.current_dir(&root).stdin(Stdio::null()).output().unwrap();
+            l.accept().is_ok()
+        };
+        let closed = policy(false, false, vec![port(&listed)]);
+        assert!(!reached(&closed, &ordinary), "closed: an ordinary port");
+        assert!(reached(&closed, &listed), "closed: a listed port");
+        assert!(!reached(&closed, &risky), "closed: port {}", port(&risky));
+        let localhost = policy(false, true, Vec::new());
+        assert!(reached(&localhost, &ordinary), "sandbox-localhost: an ordinary port");
+        assert!(reached(&localhost, &listed), "sandbox-localhost: the listed one");
+        assert!(reached(&localhost, &risky), "sandbox-localhost: port {} (opens them all)", port(&risky));
+        let open = policy(true, false, Vec::new());
+        assert!(reached(&open, &ordinary), "network open: an ordinary port");
+        assert!(!reached(&open, &risky), "network open: port {}, not listed", port(&risky));
+        let open_listed = policy(true, false, vec![port(&risky)]);
+        assert!(reached(&open_listed, &risky), "network open: port {}, listed", port(&risky));
+        std::fs::remove_dir_all(&root).ok();
     }
 }

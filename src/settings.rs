@@ -8,15 +8,34 @@ use crate::config::{CursorShape, EditorConfig, LineNumber};
 
 pub enum Kind {
     Bool,
-    Int { min: i64, max: i64 },
+    Int {
+        min: i64,
+        max: i64,
+    },
     Enum(&'static [&'static str]),
     Str,
     StrList,
+    /// Port numbers, at most `max` of them.
+    Ports {
+        max: usize,
+    },
 }
 
 impl Kind {
     pub fn check(&self, v: &Value) -> Result<(), String> {
+        if let (Kind::Ports { max }, Value::Array(a)) = (self, v)
+            && a.len() > *max
+        {
+            return Err(format!(
+                "{} ports, at most {max}: the sandbox checks one rule per port on every connect, and many \
+                 slow every command (measured: 1000 cost 20 ms, 5000 0.4 s) — llm.sandbox-localhost opens them all",
+                a.len()
+            ));
+        }
         let ok = match (self, v) {
+            (Kind::Ports { .. }, Value::Array(a)) => {
+                a.iter().all(|p| p.as_integer().is_some_and(|n| (1..=65535).contains(&n)))
+            }
             (Kind::Bool, Value::Boolean(_)) => true,
             (Kind::Int { min, max }, Value::Integer(n)) => (min..=max).contains(&n),
             (Kind::Enum(opts), Value::String(s)) => opts.contains(&s.as_str()),
@@ -34,6 +53,7 @@ impl Kind {
             Kind::Enum(opts) => opts.iter().map(|o| format!("\"{o}\"")).collect::<Vec<_>>().join(" | "),
             Kind::Str => "string".into(),
             Kind::StrList => "list of strings".into(),
+            Kind::Ports { max } => format!("list of ports 1..=65535, at most {max}"),
         }
     }
 }
@@ -363,16 +383,37 @@ pub static SETTINGS: &[Setting] = &[
     Setting {
         path: "llm.sandbox",
         kind: Kind::Bool,
-        doc: "Chat: Claude's commands run in a sandbox — they write only in the project (not .git), temp and the build's folders, with no network but this machine (macOS)",
+        doc: "Chat: Claude's commands run in a sandbox — they write only in the project (not .git), temp and the build's folders, and connect to nothing but the ports you open (macOS)",
         get: |c| Value::from(c.llm.sandbox),
         set: |c, v| c.llm.sandbox = b(v),
     },
     Setting {
         path: "llm.sandbox-network",
         kind: Kind::Bool,
-        doc: "Chat: the sandbox lets Claude's commands reach the network",
+        doc: "Chat: the sandbox lets Claude's commands reach the network — but not this machine's risky ports (Docker, Jupyter…) unless in llm.sandbox-ports",
         get: |c| Value::from(c.llm.sandbox_network),
         set: |c, v| c.llm.sandbox_network = b(v),
+    },
+    Setting {
+        path: "llm.sandbox-ports",
+        kind: Kind::Ports { max: crate::sandbox::PORTS_MAX },
+        doc: "Chat: ports on this machine Claude's commands may connect to in the sandbox — a dev server, a test's database ([3000, 5432])",
+        get: |c| Value::Array(c.llm.sandbox_ports.iter().map(|p| Value::from(i64::from(*p))).collect()),
+        set: |c, v| {
+            c.llm.sandbox_ports = v
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|p| p.as_integer().and_then(|n| u16::try_from(n).ok()))
+                .collect()
+        },
+    },
+    Setting {
+        path: "llm.sandbox-localhost",
+        kind: Kind::Bool,
+        doc: "Chat: every port on this machine open to Claude's commands (tests that talk to their own servers) — the risky ones too (Docker, Jupyter…): the sandbox can't leave some out",
+        get: |c| Value::from(c.llm.sandbox_localhost),
+        set: |c, v| c.llm.sandbox_localhost = b(v),
     },
     Setting {
         path: "llm.sandbox-write",
@@ -582,6 +623,7 @@ mod tests {
                 }
                 Kind::Str => "string".into(),
                 Kind::StrList => "list of strings".into(),
+                Kind::Ports { max } => format!("list of ports (at most {max})"),
             };
             let default = md_code(&(s.get)(&defaults).to_string());
             out.push_str(&format!("| {} | {kind} | {default} | {} |\n", md_code(s.path), md_cell(s.doc)));

@@ -103,6 +103,10 @@ pub struct LlmConfig {
     pub sandbox_write: Vec<String>,
     /// Paths in the project the sandbox keeps as they are, besides `.git` and `.tarae.toml`.
     pub sandbox_protect: Vec<String>,
+    /// Ports on this machine the sandbox lets Claude's commands connect to (the network closed: none else).
+    pub sandbox_ports: Vec<u16>,
+    /// Every port on this machine open to them — the risky ones too (Seatbelt can't leave some out).
+    pub sandbox_localhost: bool,
 }
 
 /// `llm.review-ask`'s default: what runs or sets how things run, and the dependencies a build fetches.
@@ -136,6 +140,8 @@ impl Default for LlmConfig {
             sandbox_network: false,
             sandbox_write: Vec::new(),
             sandbox_protect: Vec::new(),
+            sandbox_ports: Vec::new(),
+            sandbox_localhost: false,
         }
     }
 }
