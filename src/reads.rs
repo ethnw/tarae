@@ -229,7 +229,7 @@ mod tests {
             given: String::new(),
         };
         let none = Allowed::default();
-        let some = Allowed { read: vec!["/t/x".into()] };
+        let some = Allowed { read: vec!["/t/x".into()], ..Default::default() };
         assert!(covered(&l(Some("/r/p/src/a.rs")), root, &none, &none));
         assert!(!covered(&l(Some("/r/pq/a.rs")), root, &none, &none), "by path parts");
         assert!(!covered(&l(Some("/t/x/m.txt")), root, &none, &none));

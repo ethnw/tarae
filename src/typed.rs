@@ -165,6 +165,11 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
             Ok(())
         }
         "sandbox-disallow" => editor.sandbox_disallow(rest),
+        "sandbox-blocked" => {
+            editor.sandbox_blocked(crate::blocked::Which::Either);
+            Ok(())
+        }
+        "sandbox-grant" => editor.sandbox_grant(rest),
         "config-reload" => {
             editor.events.jobs().spawn(|| {
                 let (c, w) = config::load();

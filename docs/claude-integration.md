@@ -320,6 +320,23 @@ What Claude runs, with `run` and `run_tests`, runs in a sandbox (macOS: Seatbelt
   failing it. Claude's result lists what was blocked, or says nothing was, along with which ports were open.
   If tarae can't watch (`log stream` refuses to run inside another sandbox), the result says so and quotes
   the output's `Operation not permitted` lines instead
+- **What it blocked is yours to open**, never Claude's: `space m s` on a command's panel (`space x s` on a test
+  run's, or `:sandbox-blocked`) lists what could open. For a write, each folder from the one written in up
+  to just below home, so you choose how wide. For a connection, that port on this machine. And, last, running
+  the command once outside the sandbox. A folder's or a port's card offers `y` once, `a` this conversation,
+  `A` always in this project; whichever you pick, the command runs again now with it open. "Always" is kept in
+  your own state (`$XDG_STATE_HOME/tarae/sandbox.json`), and `:sandbox-allowed` lists it with what Claude may
+  read, Enter taking one back. Some places are never offered, only set by hand in `llm.sandbox-write`: home and
+  above it, folders that hold keys, folders on your `PATH`, shell, git and tarae settings, launch agents, the
+  project's `.git`. Neither are the ports in the table above. Running it outside is a weighty card of its own,
+  and only ever once. These runs are yours, not Claude's: Claude hears how one ended with your next message,
+  and from then on its results say what you opened
+- **Claude can ask to run a command outside the sandbox**, when one can't work in it (it needs the network,
+  say), but only with a reason. Its card always asks, even for a command that would otherwise run at once.
+  It shows the command, Claude's reason, and that it runs with all your permissions, this once: `y` or `n`,
+  nothing kept. A request without a reason is turned back before it reaches you
+- git's read-only commands run with `GIT_OPTIONAL_LOCKS=0`, so `git status` doesn't try to refresh the index
+  in `.git` (a write the sandbox would deny and report)
 - **Where there's no sandbox** (Linux for now, or tarae itself running inside one), Claude's commands don't
   quietly run without one. A card says there's none: `y` runs this one, `a` runs the rest of this conversation's
   commands too, and `n` says no. While they run without one, the chat's title says `› no sandbox`.

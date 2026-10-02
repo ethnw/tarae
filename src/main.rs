@@ -3,6 +3,7 @@
 mod agent;
 mod allow;
 mod attach;
+mod blocked;
 mod chat;
 mod chats;
 mod checkpoint;

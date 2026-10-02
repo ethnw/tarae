@@ -50,6 +50,8 @@ pub enum Guard {
     Without(String),
     /// `llm.sandbox` is off.
     Off,
+    /// The user ran it outside the sandbox, this once (`blocked.rs`).
+    Outside,
 }
 
 impl Guard {
@@ -84,8 +86,10 @@ impl Guard {
                 s.push_str(&format!("  … and {} more\n", b.distinct - b.seen.len()));
             }
             s.push_str(&format!(
-                "{rules}\nIf the command needs one of these, tell the user — llm.sandbox-write, llm.sandbox-ports, \
-                 llm.sandbox-localhost and llm.sandbox-network open more; don't work around it."
+                "{rules}\nIf the command needs one of these, tell the user — they can open it from the run's \
+                 panel (space m s), or llm.sandbox-write, llm.sandbox-ports, llm.sandbox-localhost and \
+                 llm.sandbox-network open more — or ask to run it outside the sandbox (outside_sandbox, with \
+                 your reason); don't work around it."
             ));
             return s;
         }
@@ -124,13 +128,18 @@ impl Guard {
                          (llm.sandbox-ports)"
                     ),
                 };
+                let granted = match p.granted.is_empty() {
+                    true => String::new(),
+                    false => format!(" The user also let it {}.", p.granted.join(", and ")),
+                };
                 format!(
                     "In tarae's sandbox: it could write only in the project (not .git or .tarae.toml), temp \
-                     folders and the toolchain's own{net}."
+                     folders and the toolchain's own{net}.{granted}"
                 )
             }
             Guard::Without(why) => format!("Ran without a sandbox ({why}) — the user agreed."),
             Guard::Off => "Ran without a sandbox — the user turned it off (llm.sandbox).".into(),
+            Guard::Outside => "Ran outside the sandbox — the user chose to, this once.".into(),
         }
     }
 }
@@ -164,6 +173,8 @@ pub struct Policy {
     pub tag: Option<String>,
     /// What the sandbox denied this run, watched while it goes (`Watch`).
     pub watch: Option<std::sync::Arc<Watch>>,
+    /// What the user let Claude's commands do besides (`allow.rs`) — as the result says it.
+    pub granted: Vec<String>,
 }
 
 /// A run's own temp folder. Unix sockets anywhere else stay out of reach: in `/private/tmp` and `$TMPDIR`
@@ -624,6 +635,7 @@ impl Policy {
             run: None,
             tag: None,
             watch: None,
+            granted: Vec::new(),
         }
     }
 }
@@ -818,12 +830,20 @@ fn output_in(policy: &Policy, program: &str, args: &[&str]) -> Option<serde_json
     serde_json::from_slice(&out.stdout).ok()
 }
 
+/// What a sandboxed command's environment says: that it's sandboxed (`MARK`), and `GIT_OPTIONAL_LOCKS=0` —
+/// git's read-only commands (status, diff) otherwise refresh the index on the side, a write into `.git` the
+/// sandbox denies: noise in every report (measured: 6 denials in one `cargo test`).
+fn inside_env(c: &mut Command) -> &mut Command {
+    c.env(MARK, "1").env("GIT_OPTIONAL_LOCKS", "0")
+}
+
 /// `program args` inside `policy` — or as it is, without one.
 pub fn command(policy: Option<&Policy>, program: &str, args: &[String]) -> Command {
     match policy {
         Some(p) => {
             let mut c = Command::new(SANDBOX_EXEC);
-            c.args(p.args()).arg(program).args(args).env(MARK, "1");
+            c.args(p.args()).arg(program).args(args);
+            inside_env(&mut c);
             if let Some(run) = &p.run {
                 c.env("TMPDIR", run.path());
             }
@@ -855,6 +875,44 @@ pub(crate) fn skipped_inside(test: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// git's read-only commands don't write in `.git` in a sandboxed run's environment: `git status` over a
+    /// file whose stat changed would refresh the index (a write the sandbox denies, reported as noise) —
+    /// with `GIT_OPTIONAL_LOCKS=0` it leaves it. (A repository of the test's own, in its temp folder.)
+    #[test]
+    fn git_status_leaves_the_index_in_a_sandboxed_run() {
+        let dir = std::env::temp_dir().join(format!("tarae-sb-gitlock-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            let ok = Command::new("git").args(args).current_dir(&dir).output().unwrap().status.success();
+            assert!(ok, "git {args:?}");
+        };
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        git(&["init", "-q"]);
+        git(&["-c", "user.email=t@t", "-c", "user.name=t", "add", "a.txt"]);
+        git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "x",
+        ]);
+        // The same text, an hour older: its stat no longer matches the index's (git counts whole seconds)
+        let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::options().write(true).open(dir.join("a.txt")).unwrap().set_modified(hour_ago).unwrap();
+        let before = std::fs::read(dir.join(".git/index")).unwrap();
+        let mut status = Command::new("git");
+        status.args(["status", "--porcelain"]).current_dir(&dir);
+        let out = inside_env(&mut status).output().unwrap();
+        assert!(out.status.success() && out.stdout.is_empty(), "{out:?}");
+        assert_eq!(std::fs::read(dir.join(".git/index")).unwrap(), before, "the index was rewritten");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     fn env(root: &Path) -> Env {
         Env {
@@ -1218,6 +1276,7 @@ mod tests {
             run: None,
             tag: None,
             watch: None,
+            granted: Vec::new(),
         };
         let sh = |script: &str| {
             let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
@@ -1279,6 +1338,7 @@ mod tests {
                 run: Some(run.clone()),
                 tag: None,
                 watch: None,
+                granted: Vec::new(),
             };
             let sh = |script: &str| {
                 let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
@@ -1340,6 +1400,7 @@ mod tests {
             run: None,
             tag: Some(tag.to_string()),
             watch: None,
+            granted: Vec::new(),
         };
         let pid = std::process::id();
         let (mine, other) = (format!("tarae-test-{pid}-1."), format!("tarae-test-{pid}-10."));
@@ -1388,6 +1449,7 @@ mod tests {
             run: None,
             tag: None,
             watch: None,
+            granted: Vec::new(),
         };
         let sh = |script: &str| {
             let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
@@ -1405,6 +1467,73 @@ mod tests {
                 dir.display()
             );
         }
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// For real, on macOS — what the user granted (`blocked.rs`) opens under the real profile, and only that:
+    /// a folder kept for the project (through the store file) and one for this conversation are written in,
+    /// their sibling isn't; a granted port is reached, another isn't. The policy is made as a run's is
+    /// (`tools::with_allowed` → `llm.sandbox-write`/`-ports` → `Policy::for_project`), but without the usual
+    /// temp folders — the test's own folders are in one. Harmless: markers in its temp folder, listeners of
+    /// its own on 127.0.0.1 (only `nc -z` knocks).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn what_the_user_granted_opens_under_the_real_profile() {
+        use crate::allow::{Allowed, Grant};
+        use std::net::TcpListener;
+        if skipped_inside("sandbox::tests::what_the_user_granted_opens_under_the_real_profile") {
+            return;
+        }
+        let t = real(&std::env::temp_dir()).join(format!("tarae-sb-granted-{}", std::process::id()));
+        std::fs::remove_dir_all(&t).ok();
+        let (root, kept, chat, sibling) =
+            (t.join("project"), t.join("kept"), t.join("chat"), t.join("sibling"));
+        for d in [&root, &kept, &chat, &sibling] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let granted = TcpListener::bind("127.0.0.1:0").unwrap();
+        let other = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = |l: &TcpListener| l.local_addr().unwrap().port();
+        for l in [&granted, &other] {
+            l.set_nonblocking(true).unwrap();
+        }
+        // Kept for the project, as `A` keeps it; this conversation's, as `a` adds it
+        let store = t.join("state/sandbox.json");
+        crate::allow::keep(&store, &root, |a| {
+            a.add(&Grant::Write(kept.clone()));
+            a.add(&Grant::Port(port(&granted)));
+        })
+        .unwrap();
+        let from_store = crate::allow::Store::read(Some(&store)).get(&root);
+        let mut this_chat = Allowed::default();
+        this_chat.add(&Grant::Write(chat.clone()));
+        let (llm, said) =
+            crate::tools::with_allowed(&crate::llm::LlmConfig::default(), &[&from_store, &this_chat], None);
+        assert_eq!(said.len(), 3, "{said:?}");
+        let env = Env {
+            root: root.clone(),
+            write: llm.sandbox_write.clone(),
+            ports: llm.sandbox_ports,
+            ..Env::default()
+        };
+        let p = Policy::for_project(&env);
+        let sh = |script: &str| {
+            let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
+            c.current_dir(&root).stdin(Stdio::null()).output().unwrap()
+        };
+        for (dir, what) in [(&kept, "kept for the project"), (&chat, "this conversation's")] {
+            let r = sh(&format!("touch '{}'", dir.join("marker").display()));
+            assert!(r.status.success() && dir.join("marker").exists(), "{what}: not written — {r:?}");
+        }
+        let r = sh(&format!("touch '{}'", sibling.join("marker").display()));
+        assert!(!r.status.success() && !sibling.join("marker").exists(), "the sibling: written");
+        assert!(String::from_utf8_lossy(&r.stderr).contains("Operation not permitted"));
+        let reached = |l: &TcpListener| {
+            sh(&format!("/usr/bin/nc -z -w 2 127.0.0.1 {}", port(l)));
+            l.accept().is_ok()
+        };
+        assert!(reached(&granted), "the granted port");
+        assert!(!reached(&other), "another port");
         std::fs::remove_dir_all(&t).ok();
     }
 
@@ -1446,6 +1575,7 @@ mod tests {
             run: None,
             tag: None,
             watch: None,
+            granted: Vec::new(),
         };
         let reached = |p: &Policy, l: &TcpListener| {
             let script = format!("/usr/bin/nc -z -w 2 127.0.0.1 {}", port(l));

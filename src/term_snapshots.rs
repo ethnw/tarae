@@ -1320,6 +1320,53 @@ fn snapshot_task_panel() {
     s.check("task_panel");
 }
 
+/// What the sandbox blocked in Claude's command, acted on: the panel's row with its key, the list of what
+/// could open (folders widest last, a port, running it outside), and a folder's card. macOS only — the
+/// fixed folder is in `/private/tmp` so the paths read the same every run. With `TARAE_FRAMES_DIR` set,
+/// each frame is written there too (`cargo xtask shot` draws them: `TARAE_SHOT_REPLAY`).
+#[cfg(target_os = "macos")]
+#[test]
+fn snapshot_sandbox_blocked() {
+    let cache = PathBuf::from("/private/tmp/tarae-shot-blocked/npm-cache");
+    std::fs::create_dir_all(&cache).unwrap();
+    let mut s = Shot::new(100, 30);
+    s.file("src/demo.rs", DEMO_RS);
+    let watch = crate::sandbox::Watch::quiet("t.");
+    let d = |op: &str, target: &str| crate::sandbox::Denial {
+        process: "npm".into(),
+        op: op.into(),
+        target: target.into(),
+    };
+    watch.record(d("file-write-create", "/private/tmp/tarae-shot-blocked/npm-cache/_cacache/index-v5"));
+    watch.record(d("network-outbound", "remote:*:5432"));
+    let policy = crate::sandbox::Policy {
+        watch: Some(watch),
+        ..crate::sandbox::Policy::for_project(&crate::sandbox::Env::default())
+    };
+    let task = crate::task::Task { name: "npm test".into(), cmd: "npm test".into(), cwd: "/p".into() };
+    let mut r = crate::task::Run::for_test(task);
+    r.state = crate::task::State::Failed(Some(1));
+    r.took = Some(Duration::from_millis(2410));
+    r.by_claude = true;
+    r.guard = Some(crate::sandbox::Guard::In(policy));
+    r.output = vec![(true, "npm ERR! code EPERM".into()), (true, "npm ERR! syscall open".into())];
+    s.ed.task_run = Some(r);
+    let dump = |s: &mut Shot, name: &str| {
+        if let Some(dir) = std::env::var_os("TARAE_FRAMES_DIR") {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(Path::new(&dir).join(format!("{name}.bin")), s.frame()).unwrap();
+        }
+    };
+    s.check("sandbox_blocked_panel");
+    dump(&mut s, "sandbox_blocked_panel");
+    s.keys(" ms");
+    s.check("sandbox_blocked_list");
+    dump(&mut s, "sandbox_blocked_list");
+    s.keys("<ret>");
+    s.check("sandbox_blocked_card");
+    dump(&mut s, "sandbox_blocked_card");
+}
+
 /// Claude's command in the task panel: no `space m m again` — that runs the user's task, not this one.
 #[test]
 fn claudes_command_offers_no_again() {

@@ -171,6 +171,9 @@ pub struct Run {
     pub install: bool,
     /// Claude's `run` waiting for this run's end (`tools.rs`).
     pub chat: Option<crate::tools::Call>,
+    /// The user ran Claude's command again (`blocked.rs`): how it ended goes to Claude with the next message,
+    /// after this.
+    pub tell: Option<String>,
     /// Claude's command (not one `space m m` runs again).
     pub by_claude: bool,
     /// How Claude's command ran — in the sandbox or not (`sandbox.rs`); None for the user's own.
@@ -203,6 +206,7 @@ impl Run {
             after: None,
             install: false,
             chat: None,
+            tell: None,
             by_claude: false,
             guard: None,
             last_output: Instant::now(),
@@ -295,12 +299,12 @@ impl Editor {
     }
 
     /// A command Claude runs (`tools.rs`): like a task, but not the one `space m m` runs again — the call
-    /// waits for its end; in the sandbox, unless `guard` says otherwise. False: it didn't start (an install
-    /// is running, or it couldn't spawn).
+    /// waits for its end (or, the user's run of it again, Claude hears it later); in the sandbox, unless
+    /// `guard` says otherwise. False: it didn't start (an install is running, or it couldn't spawn).
     pub(crate) fn task_start_for(
         &mut self,
         task: Task,
-        call: crate::tools::Call,
+        who: crate::tools::For,
         guard: Option<crate::sandbox::Guard>,
     ) -> bool {
         if self.task_run.as_ref().is_some_and(|r| r.state == State::Running) {
@@ -316,7 +320,10 @@ impl Editor {
         self.task_spawn(task, None, policy);
         match self.task_run.as_mut().filter(|_| self.task_generation != before) {
             Some(r) => {
-                r.chat = Some(call);
+                match who {
+                    crate::tools::For::Claude(call) => r.chat = Some(call),
+                    crate::tools::For::User(head) => r.tell = Some(head),
+                }
                 r.by_claude = true;
                 r.guard = guard;
                 true
@@ -455,7 +462,7 @@ impl Editor {
                     let passed = r.state == State::Passed;
                     return ed.install_done(after, passed);
                 }
-                if r.chat.is_some() {
+                if r.chat.is_some() || r.tell.is_some() {
                     return crate::tools::run_done(ed);
                 }
                 let (name, state, (errors, warnings)) = (r.task.name.clone(), r.state.clone(), r.found);
@@ -488,6 +495,7 @@ impl Editor {
             after,
             install,
             chat: None,
+            tell: None,
             by_claude: false,
             guard: None,
             last_output: Instant::now(),

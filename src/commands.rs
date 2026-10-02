@@ -202,6 +202,7 @@ commands! {
         test_last => "Run the last test again",
         test_output => "Test output in a buffer",
         test_close => "Close the test panel",
+        test_sandbox => "What the sandbox blocked: open it",
         goto_next_test_failure => "Next failed test",
         goto_prev_test_failure => "Previous failed test",
         note_here => "Ask Claude here, or reply",
@@ -227,6 +228,7 @@ commands! {
         task_again => "Run the task (again)",
         task_picker => "Pick a task to run",
         task_close => "Stop the task, close its panel",
+        task_sandbox => "What the sandbox blocked: open it",
         claude_code => "Open Claude Code beside",
         claude_code_mention => "Send selection to Claude Code",
         dap_edit_condition => "Break only when… (condition)",
@@ -1951,6 +1953,14 @@ fn task_picker(cx: &mut Context) {
 
 fn task_close(cx: &mut Context) {
     cx.editor.task_close();
+}
+
+fn task_sandbox(cx: &mut Context) {
+    cx.editor.sandbox_blocked(crate::blocked::Which::Task);
+}
+
+fn test_sandbox(cx: &mut Context) {
+    cx.editor.sandbox_blocked(crate::blocked::Which::Test);
 }
 
 fn goto_next_note(cx: &mut Context) {

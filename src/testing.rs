@@ -314,6 +314,8 @@ pub struct TestRun {
     pub scroll: Option<usize>,
     /// Claude's `run_tests` waiting for this run's results (`tools.rs`).
     pub(crate) chat: Option<crate::tools::Call>,
+    /// The user ran Claude's tests again (`blocked.rs`): the results go to Claude with the next message.
+    pub tell: Option<String>,
     /// How Claude's run ran — in the sandbox or not (`sandbox.rs`); None for the user's own.
     pub guard: Option<crate::sandbox::Guard>,
     /// When it last printed (a sandboxed run quiet after a denial may be waiting on it — the panel says so).
@@ -378,6 +380,7 @@ impl TestRun {
             selected: 0,
             scroll: None,
             chat: None,
+            tell: None,
             guard: None,
             last_output: Instant::now(),
         }
@@ -695,6 +698,7 @@ impl Editor {
             selected: 0,
             scroll: None,
             chat: None,
+            tell: None,
             guard,
             last_output: Instant::now(),
         });

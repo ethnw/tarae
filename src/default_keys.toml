@@ -155,11 +155,12 @@ w = "dap_watch"
 W = "dap_unwatch"
 
 # Tests (x = run): test at cursor · debug · whole file · rerun last · close window
-# Build tasks (m = run again · p = pick · c = stop/close)
+# Build tasks (m = run again · p = pick · c = stop/close · s = what the sandbox blocked in Claude's command)
 [normal.space.m]
 m = "task_again"
 p = "task_picker"
 c = "task_close"
+s = "task_sandbox"
 
 [normal.space.v]
 v = "review_start"
@@ -179,6 +180,7 @@ f = "test_file"
 l = "test_last"
 o = "test_output"
 c = "test_close"
+s = "test_sandbox"
 
 [normal."C-w"]
 v = "vsplit"

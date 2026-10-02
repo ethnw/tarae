@@ -166,7 +166,7 @@ mod tests {
         assert_eq!(at(&format!("grep --file={}/m.txt src", out.display())), [out.join("m.txt")]);
         assert_eq!(at(&format!("grep -f{}/m.txt src", out.display())), [out.join("m.txt")]);
         assert_eq!(at("git ls-files ../out"), std::slice::from_ref(&out));
-        let allowed = Allowed { read: vec![out.clone()] };
+        let allowed = Allowed { read: vec![out.clone()], ..Default::default() };
         assert!(outside("cat ../out/m.txt", &p, &p, &allowed, &none).is_empty(), "allowed this chat");
         assert!(outside("cat ../out/m.txt", &p, &p, &none, &allowed).is_empty(), "kept");
         std::fs::remove_dir_all(&dir).ok();

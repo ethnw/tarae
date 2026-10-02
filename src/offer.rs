@@ -34,6 +34,9 @@ pub struct Offer {
     /// The question's lines (split at `\n`) that say what's being decided — drawn at full strength, the rest
     /// faint. None: a weighty card's first paragraph (a light one's: none).
     pub decided: Option<std::ops::Range<usize>>,
+    /// The question's lines that warn what saying yes means — drawn in the warning color (the run-outside
+    /// card's "with all your permissions").
+    pub warning: Option<std::ops::Range<usize>>,
 }
 
 /// How long a card that runs something must have been in sight, as it is, before `y` answers it — a key
@@ -67,6 +70,11 @@ pub enum What {
     /// Claude's Read, Grep or Glob outside the project (`reads.rs`): `y` once, `a` this chat, `A` always
     /// (those two only when `keep`), `n` no.
     Read { pending: Box<crate::reads::Pending>, keep: bool },
+    /// The user opens the sandbox for what it blocked in `run` (`blocked.rs`): `y` once (it runs again with
+    /// it), `a` this chat, `A` always — and runs again — `n` no.
+    Grant { grant: crate::allow::Grant, run: Box<crate::blocked::BlockedRun> },
+    /// The user runs `run` again outside the sandbox, once (`blocked.rs`): `y` · `n`.
+    Outside { run: Box<crate::blocked::BlockedRun> },
     /// The project's `.tarae.toml` sets what runs commands (`trust.rs`): `y` trusts it, `n` ignores that
     /// part. `hash` = what the card showed.
     ProjectTrust { hash: u64 },
@@ -104,12 +112,19 @@ impl Offer {
             state: OfferState::Asking,
             rev: 0,
             decided: None,
+            warning: None,
         }
     }
 
     /// What's being decided is these lines of the question, not its first paragraph.
     pub fn deciding(mut self, lines: std::ops::Range<usize>) -> Offer {
         self.decided = Some(lines);
+        self
+    }
+
+    /// These lines of the question warn what yes means: the warning color.
+    pub fn warning(mut self, lines: std::ops::Range<usize>) -> Offer {
+        self.warning = Some(lines);
         self
     }
 
@@ -133,21 +148,23 @@ impl Offer {
                 | What::ReviewAtEnd
                 | What::ProjectTrust { .. }
                 | What::Read { .. }
+                | What::Grant { .. }
+                | What::Outside { .. }
         )
     }
 
     /// Whether its answer can last longer than once (`a` this chat · `A` always — `A` only for reads).
     pub fn lasts(&self) -> bool {
         match &self.what {
-            What::NoSandbox { .. } | What::Read { keep: true, .. } => true,
+            What::NoSandbox { .. } | What::Read { keep: true, .. } | What::Grant { .. } => true,
             What::Run(r) => r.keep,
             _ => false,
         }
     }
 
-    /// Whether `A` (always) answers it: what it allows is reading places, kept for the project.
+    /// Whether `A` (always) answers it: what it allows is kept for the project.
     pub fn keeps(&self) -> bool {
-        self.lasts() && matches!(self.what, What::Read { .. } | What::Run(_))
+        self.lasts() && matches!(self.what, What::Read { .. } | What::Run(_) | What::Grant { .. })
     }
 
     pub fn installing(&self) -> bool {
@@ -174,7 +191,7 @@ impl crate::editor::Editor {
             // Replaced whole — what it says with what it does — and it settles again before `y` counts
             if !old.installing() {
                 (old.question, old.working, old.failed) = (o.question, o.working, o.failed);
-                old.decided = o.decided;
+                (old.decided, old.warning) = (o.decided, o.warning);
                 (old.what, old.state) = (o.what, OfferState::Asking);
                 old.rev += 1;
             }
@@ -270,6 +287,10 @@ impl crate::editor::Editor {
             What::Read { pending, keep } => {
                 crate::reads::answer(self, id, *pending, Some(crate::allow::Scope::Once), keep)
             }
+            What::Grant { grant, run } => {
+                crate::blocked::grant_answer(self, id, grant, *run, Some(crate::allow::Scope::Once))
+            }
+            What::Outside { run } => crate::blocked::outside_answer(self, id, *run, true),
         }
     }
 
@@ -342,6 +363,7 @@ impl crate::editor::Editor {
             }
             What::Read { pending, keep } => crate::reads::answer(self, o.id, *pending, Some(scope), keep),
             What::Run(card) => crate::tools::run_answer(self, o.id, *card, Some(scope)),
+            What::Grant { grant, run } => crate::blocked::grant_answer(self, o.id, grant, *run, Some(scope)),
             _ => {}
         }
     }
@@ -382,6 +404,8 @@ impl crate::editor::Editor {
             What::ReviewAtEnd => self.set_status("Claude's edits come one at a time"),
             What::ProjectTrust { hash } => self.project_trust_answer(o.id, hash, false),
             What::Read { pending, keep } => crate::reads::answer(self, o.id, *pending, None, keep),
+            What::Grant { grant, run } => crate::blocked::grant_answer(self, o.id, grant, *run, None),
+            What::Outside { run } => crate::blocked::outside_answer(self, o.id, *run, false),
         }
     }
 

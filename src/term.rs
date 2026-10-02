@@ -1074,7 +1074,7 @@ fn draw_task_panel(
     let sandbox = crate::sandbox::panel_line(r.guard.as_ref(), running, r.last_output);
     let rows = lay.debug_h.saturating_sub(1 + usize::from(sandbox.is_some()));
     if let Some((line, quiet)) = &sandbox {
-        sandbox_row(out, (y0 + 1 + rows) as u16, w, line, quiet.as_deref(), card, warn, faint)?;
+        sandbox_row(out, (y0 + 1 + rows) as u16, w, line, "space m s", quiet.as_deref(), card, warn, faint)?;
     }
     let start = r.output.len().saturating_sub(rows);
     for i in 0..rows {
@@ -1097,14 +1097,16 @@ fn draw_task_panel(
     Ok(())
 }
 
-/// A sandboxed run's line in its panel: `▲ sandbox blocked writing ~/x  +2` in warning, and the
-/// quiet hint after it, faint — or folded away when the row is too narrow for it.
+/// A sandboxed run's line in its panel: `▲ sandbox blocked writing ~/x  +2` in warning, the key that acts
+/// on it (`space m s  open it`), and the quiet hint after it, faint — each folded away, last first, when the
+/// row is too narrow for it.
 #[allow(clippy::too_many_arguments)]
 fn sandbox_row(
     out: &mut impl Write,
     y: u16,
     w: usize,
     line: &str,
+    key: &str,
     quiet: Option<&str>,
     card: Style,
     warn: Option<Color>,
@@ -1114,11 +1116,25 @@ fn sandbox_row(
     apply(out, card)?;
     queue!(out, Spaces(w), MoveTo(2, y))?;
     let room = w.saturating_sub(4);
-    let main = fit_ellipsis(&format!("▲ {line}"), room);
+    // (the key keeps its room — a long path is cut instead — unless the row is very narrow)
+    let hint = format!("{key} open it");
+    let keyed = room >= hint.width() + 3 + 24;
+    let main = fit_ellipsis(&format!("▲ {line}"), if keyed { room - hint.width() - 3 } else { room });
     apply(out, Style { fg: warn, ..card })?;
     queue!(out, Print(&main))?;
+    let mut used = main.width();
+    if keyed {
+        let k = Style { bold: true, fg: faint.fg, ..card };
+        apply(out, card)?;
+        queue!(out, Print("   "))?;
+        apply(out, k)?;
+        queue!(out, Print(key))?;
+        apply(out, faint)?;
+        queue!(out, Print(" open it"))?;
+        used += 3 + hint.width();
+    }
     if let Some(q) = quiet {
-        let left = room.saturating_sub(main.width() + 3);
+        let left = room.saturating_sub(used + 3);
         if left >= 12 {
             apply(out, faint)?;
             queue!(out, Print(format!("   {}", fit_ellipsis(q, left))))?;
@@ -1315,7 +1331,8 @@ fn draw_test_panel(
     let sandbox = crate::sandbox::panel_line(r.guard.as_ref(), running, r.last_output);
     let rows = lay.debug_h.saturating_sub(1 + usize::from(sandbox.is_some()));
     if let Some((line, quiet)) = &sandbox {
-        sandbox_row(out, (y0 + 1 + rows) as u16, w, line, quiet.as_deref(), card, color("warning"), faint)?;
+        let warn = color("warning");
+        sandbox_row(out, (y0 + 1 + rows) as u16, w, line, "space x s", quiet.as_deref(), card, warn, faint)?;
     }
     let line_style = |err: bool, l: &str| output_style(err, l, card, good, bad, faint);
     // The wheel's thumb on the card's right edge, when the detail doesn't fit
@@ -5257,6 +5274,8 @@ struct OfferCard {
     inner: usize,
     /// (text, dimmed?)
     lines: Vec<(String, bool)>,
+    /// Rows of `lines` that warn what yes means (`Offer::warning`) — the warning color.
+    warn: Vec<usize>,
     /// Button row (None while downloading)
     buttons_row: Option<usize>,
     /// (row, start col, end col, key) — for mouse (`Screen.offer_buttons`; digit = bring back card N forward)
@@ -5309,6 +5328,7 @@ impl OfferCard {
             }
             all
         };
+        let mut warn = Vec::new();
         let (mut lines, labels) = match &o.state {
             OfferState::Asking => {
                 let mut b = vec![('y', "Install"), ('n', "Not now")];
@@ -5331,6 +5351,10 @@ impl OfferCard {
                         b = vec![('y', "Once"), ('a', "This chat"), ('A', "Always"), ('n', "No")]
                     }
                     crate::offer::What::Read { keep: false, .. } => b = vec![('y', "Once"), ('n', "No")],
+                    crate::offer::What::Grant { .. } => {
+                        b = vec![('y', "Once"), ('a', "This chat"), ('A', "Always"), ('n', "No")]
+                    }
+                    crate::offer::What::Outside { .. } => b = vec![('y', "Run"), ('n', "No")],
                     _ => {}
                 }
                 // One that runs something is shown whole — cut to the room below if it must be, with `v`
@@ -5339,10 +5363,14 @@ impl OfferCard {
                 let mut v = vec![(title, false)];
                 // What's being decided at full strength (the path, the command, the settings) — the rest faint
                 let decided = o.decided_lines();
+                let warning = o.warning.clone().unwrap_or(0..0);
                 for (k, part) in o.question.split('\n').enumerate() {
                     let mut rows = wrapped(part, most);
                     if decided.contains(&k) {
                         rows.iter_mut().for_each(|r| r.1 = false);
+                    }
+                    if warning.contains(&k) {
+                        warn.extend(v.len()..v.len() + rows.len());
                     }
                     v.extend(rows);
                 }
@@ -5442,7 +5470,24 @@ impl OfferCard {
         }
         let failed = matches!(o.state, OfferState::Failed(_));
         let busy = o.installing();
-        Some(Self { x, y, inner, lines, buttons_row, buttons, labels, pad, failed, badge, busy, peeks, cut })
+        // (a row cut away isn't drawn — nor its color)
+        warn.retain(|&i| i < lines.len());
+        Some(Self {
+            x,
+            y,
+            inner,
+            lines,
+            warn,
+            buttons_row,
+            buttons,
+            labels,
+            pad,
+            failed,
+            badge,
+            busy,
+            peeks,
+            cut,
+        })
     }
 
     /// Where it sits, back cards included — the notification card keeps out of it.
@@ -5463,6 +5508,8 @@ impl OfferCard {
         };
         let strong = Style { bold: true, ..body };
         let key = Style { fg: ui.accent.fg, bold: true, ..body };
+        // (the color of the panel's `▲ sandbox blocked` row)
+        let warning = Style { fg: editor.theme.try_get("warning").and_then(|s| s.fg).or(body.fg), ..body };
         let width = self.inner + 5;
         // Back cards first (deeper = narrower, dimmer) — one title row each, the topmost up to the top edge
         let peek_bg = |k: usize| blend(card.bg, ui.tint, 1.0 - 0.3 * k as f32).or(card.bg);
@@ -5516,7 +5563,9 @@ impl OfferCard {
             let badge = if i == 0 { self.badge.as_str() } else { "" };
             apply(
                 out,
-                if *faint {
+                if self.warn.contains(&i) {
+                    warning
+                } else if *faint {
                     dim
                 } else if i == 0 {
                     strong
@@ -8240,6 +8289,7 @@ mod tests {
                 state: crate::offer::OfferState::Asking,
                 rev: 0,
                 decided: None,
+                warning: None,
             });
             let result =
                 serde_json::json!([{"label": "line_one", "detail": "fn line_one()"}, {"label": "lx"}]);

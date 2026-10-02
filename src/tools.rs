@@ -202,22 +202,30 @@ fn start(ed: &mut Editor, call: Call, target: crate::testing::Target) {
     guarded(ed, call, Job::Tests(Box::new(target)), false);
 }
 
-fn start_tests(ed: &mut Editor, call: Call, target: crate::testing::Target, guard: Option<Guard>) {
+fn start_tests(ed: &mut Editor, who: For, target: crate::testing::Target, guard: Option<Guard>) {
     if let Err(e) = busy(ed) {
-        return answer(ed, call, Err(e));
+        return fail(ed, who, e);
     }
     let before = ed.test_generation;
     let program = target.argv().first().cloned().unwrap_or_default();
     ed.test_start_guarded(target, guard);
     match ed.test_run.as_mut().filter(|_| ed.test_generation != before) {
-        Some(r) => r.chat = Some(call),
-        None => answer(ed, call, Err(format!("couldn't start {program}"))),
+        Some(r) => match who {
+            For::Claude(call) => r.chat = Some(call),
+            For::User(head) => r.tell = Some(head),
+        },
+        None => fail(ed, who, format!("couldn't start {program}")),
     }
 }
 
-/// The run Claude asked for ended — its results go back, and the editor shows the first failure.
+/// The run Claude asked for ended — its results go back, and the editor shows the first failure. One the
+/// user ran again (`blocked.rs`): Claude hears how it ended with the next message.
 pub fn tests_done(ed: &mut Editor) {
     let Some(r) = ed.test_run.as_mut() else { return };
+    if let Some(head) = r.tell.take() {
+        let text = report(r);
+        return told(ed, head, text);
+    }
     let Some(call) = r.chat.take() else { return };
     let text = report(r);
     let failed = r.failures().first().map(|&i| r.cases[i].clone());
@@ -263,16 +271,23 @@ fn run_schema() -> Value {
     status/diff/log/show) start at once, and so do read-only ones (ls cat head tail wc grep rg find tree stat \
     file du diff sort uniq pwd, git blame/rev-parse/ls-files/branch) whose paths stay in the project; any \
     other command waits for the user to allow it — if they say no, don't retry it, ask. No stdin and no terminal: nothing interactive. For one test file or test, \
-    run_tests is better (it reads each failure).",
+    run_tests is better (it reads each failure). Commands run in a sandbox; when one can't work in it (it \
+    needs the network, or to write where the sandbox doesn't let it), you may ask to run it outside: \
+    outside_sandbox with your reason — the user decides on a card, this once.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "command": { "type": "string", "description": "The command line (run by sh -c in the project root)" }
+                "command": { "type": "string", "description": "The command line (run by sh -c in the project root)" },
+                "outside_sandbox": { "type": "boolean", "description": "Ask the user to run it outside the sandbox, this once (with reason)" },
+                "reason": { "type": "string", "description": "Why it can't run in the sandbox — required with outside_sandbox; the user reads it" }
             },
             "required": ["command"]
         }
     })
 }
+
+/// A reason to run outside the sandbox, at most (the card shows it whole).
+const REASON_MAX: usize = 300;
 
 /// Commands that run without asking: the checks, and git's read-only ones — by whole words, and only
 /// when the line has nothing the shell would read as more than words (`allowed`).
@@ -348,12 +363,25 @@ fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
             crossed.join(", and ")
         ));
     }
+    // Outside the sandbox: always asked, with Claude's reason on the card — a check or a read-only command too
+    let outside = match args["outside_sandbox"].as_bool() == Some(true) {
+        true => {
+            let reason = args["reason"].as_str().map(str::trim).filter(|r| !r.is_empty()).ok_or(
+                "outside_sandbox needs a reason: why it can't run in the sandbox — the user reads it on the card",
+            )?;
+            if reason.chars().count() > REASON_MAX {
+                return Err(format!("keep the reason to {REASON_MAX} characters — the card shows it whole"));
+            }
+            Some(reason.to_string())
+        }
+        false => None,
+    };
     run_busy(ed)?;
-    if allowed(cmd, &ed.config.llm.run_allow) {
+    if outside.is_none() && allowed(cmd, &ed.config.llm.run_allow) {
         guarded(ed, call, Job::Command(cmd.to_string()), false);
         return Ok(());
     }
-    if crate::readonly::read_only(cmd) {
+    if outside.is_none() && crate::readonly::read_only(cmd) {
         return read_only(ed, call, cmd.to_string());
     }
     asked(ed)?;
@@ -363,7 +391,7 @@ fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
         ed.checkpoints.turn.iter().filter(|t| t.unseen).map(|t| t.path.clone()).collect();
     let cmd = cmd.to_string();
     if unseen.is_empty() {
-        return ask(ed, cmd, call, Vec::new());
+        return ask(ed, cmd, call, Vec::new(), outside);
     }
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     ed.events.jobs().spawn(move || {
@@ -374,7 +402,7 @@ fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
                 return;
             }
             let c = call.clone();
-            if let Err(e) = shown.and_then(|shown| ask(ed, cmd, call, shown)) {
+            if let Err(e) = shown.and_then(|shown| ask(ed, cmd, call, shown, outside)) {
                 answer(ed, c, Err(e));
             }
         }
@@ -401,7 +429,7 @@ fn read_only(ed: &mut Editor, call: Call, cmd: String) -> Result<(), String> {
                 return guarded(ed, call, Job::Command(cmd), false);
             }
             let c = call.clone();
-            if let Err(e) = ask_with(ed, cmd, call, Vec::new(), reads) {
+            if let Err(e) = ask_with(ed, cmd, call, Vec::new(), reads, None) {
                 answer(ed, c, Err(e));
             }
         }
@@ -417,24 +445,45 @@ fn asked(ed: &Editor) -> Result<(), String> {
     }
 }
 
-/// The card for `cmd` — with each file in `shown` (path, text) whole under it.
-fn ask(ed: &mut Editor, cmd: String, call: Call, shown: Vec<(PathBuf, String)>) -> Result<(), String> {
-    ask_with(ed, cmd, call, shown, Vec::new())
+/// The card for `cmd` — with each file in `shown` (path, text) whole under it; `outside`: Claude asks to run
+/// it outside the sandbox, for this reason.
+fn ask(
+    ed: &mut Editor,
+    cmd: String,
+    call: Call,
+    shown: Vec<(PathBuf, String)>,
+    outside: Option<String>,
+) -> Result<(), String> {
+    ask_with(ed, cmd, call, shown, Vec::new(), outside)
 }
 
+pub const OUTSIDE_RUN_TITLE: &str = "Claude wants to run — outside the sandbox";
+
 /// The card for `cmd`, saying too what it reads outside the project (`reads` — a read-only command's):
-/// those can be allowed for longer, as on a read's card, unless one of them never can.
+/// those can be allowed for longer, as on a read's card, unless one of them never can. Outside the sandbox
+/// (`outside` = Claude's reason): its own title, the reason, what that means — once, never kept.
 fn ask_with(
     ed: &mut Editor,
     cmd: String,
     call: Call,
     shown: Vec<(PathBuf, String)>,
     reads: Vec<PathBuf>,
+    outside: Option<String>,
 ) -> Result<(), String> {
     asked(ed)?;
     let mut question = cmd.clone();
     // What's decided: the command, and what it reads outside (one place a line)
     let mut decided = 0..cmd.split('\n').count();
+    // (outside: the reason faint — Claude's own words — and what yes means in the warning color)
+    let mut warning = None;
+    if let Some(reason) = &outside {
+        question.push_str(&format!("\n\nIts reason: {}\n\n", reason.replace('\n', " ")));
+        let at = question.split('\n').count() - 1;
+        question.push_str(
+            "Outside the sandbox it runs with all your permissions — your files, your network — this once.",
+        );
+        warning = Some(at..at + 1);
+    }
     if !reads.is_empty() {
         question.push_str("\n\nIt reads outside the project:");
         for p in &reads {
@@ -444,7 +493,9 @@ fn ask_with(
         decided.end += 2 + reads.len();
     }
     let home = crate::allow::home();
-    let keep = !reads.is_empty() && reads.iter().all(|p| crate::allow::keepable(p, home.as_deref()));
+    let keep = outside.is_none()
+        && !reads.is_empty()
+        && reads.iter().all(|p| crate::allow::keepable(p, home.as_deref()));
     for (path, text) in &shown {
         let text = text.replace("\r\n", "\n").replace('\t', "    ");
         question.push_str(&format!(
@@ -453,8 +504,9 @@ fn ask_with(
             text.trim_end_matches('\n')
         ));
     }
-    // Where there's no sandbox, this card is where the user hears it
+    // Where there's no sandbox, this card is where the user hears it (outside one, it said so already)
     let unprotected = match (&ed.sandbox, ed.config.llm.sandbox) {
+        _ if outside.is_some() => None,
         (Availability::Missing(why), true) => Some(format!("No sandbox here ({why})")),
         (_, false) => Some("The sandbox is off (llm.sandbox)".to_string()),
         _ => None,
@@ -462,11 +514,26 @@ fn ask_with(
     if let Some(u) = &unprotected {
         question.push_str(&format!("\n\n{u} — it runs with all your permissions."));
     }
-    let title = "Claude wants to run".to_string();
-    let card = RunCard { cmd, call, shown, unprotected: unprotected.is_some(), reads, keep };
+    let title = match outside {
+        Some(_) => OUTSIDE_RUN_TITLE.to_string(),
+        None => "Claude wants to run".to_string(),
+    };
+    let card = RunCard {
+        cmd,
+        call,
+        shown,
+        unprotected: unprotected.is_some(),
+        reads,
+        keep,
+        outside: outside.is_some(),
+    };
     let what = crate::offer::What::Run(Box::new(card));
     let o = crate::offer::Offer::new(title, &question, "Running…", "Claude's command".into(), what);
-    ed.push_offer(o.deciding(decided));
+    let o = o.deciding(decided);
+    ed.push_offer(match warning {
+        Some(lines) => o.warning(lines),
+        None => o,
+    });
     Ok(())
 }
 
@@ -542,20 +609,78 @@ fn run_busy(ed: &Editor) -> Result<(), String> {
     }
 }
 
-fn run_start(ed: &mut Editor, call: Call, cmd: String, guard: Option<Guard>) -> Result<(), String> {
+fn run_start(ed: &mut Editor, who: For, cmd: String, guard: Option<Guard>) -> Result<(), String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let task = crate::task::Task { name: cmd.clone(), cmd, cwd };
-    if !ed.task_start_for(task, call, guard) {
+    if !ed.task_start_for(task, who, guard) {
         return Err(run_busy(ed).err().unwrap_or_else(|| "couldn't start sh".into()));
     }
     Ok(())
+}
+
+/// Who waits for a run's end: Claude's call — or no one: the user ran it again from what the sandbox
+/// blocked (`blocked.rs`), and Claude hears how it ended with the next message (`head` says what they did).
+#[derive(Clone, Debug)]
+pub enum For {
+    Claude(Call),
+    User(String),
+}
+
+/// What couldn't start, said to whoever waits for it.
+fn fail(ed: &mut Editor, who: For, e: String) {
+    match who {
+        For::Claude(call) => answer(ed, call, Err(e)),
+        For::User(_) => ed.set_error(e),
+    }
+}
+
+/// A run the user started again ended: Claude reads how with the next message — the panel shows it now.
+fn told(ed: &mut Editor, head: String, report: String) {
+    ed.checkpoints.tell.push(format!("{head}\n{report}"));
+    ed.note("Claude hears how it ended with your next message");
+}
+
+/// What a run may do besides what's allowed (`allow.rs`): a grant just this once, or no sandbox at all.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Extra {
+    pub grant: Option<crate::allow::Grant>,
+    pub outside: bool,
+}
+
+/// The settings a run's policy is made from with what's allowed added — kept for the project, for this
+/// conversation, and `once` — and how its result says it.
+pub fn with_allowed(
+    llm: &crate::llm::LlmConfig,
+    scopes: &[&crate::allow::Allowed],
+    once: Option<&crate::allow::Grant>,
+) -> (crate::llm::LlmConfig, Vec<String>) {
+    use crate::allow::Grant;
+    let mut llm = llm.clone();
+    let mut granted: Vec<String> = Vec::new();
+    let grants = scopes
+        .iter()
+        .flat_map(|a| {
+            a.write.iter().map(|p| Grant::Write(p.clone())).chain(a.ports.iter().map(|n| Grant::Port(*n)))
+        })
+        .chain(once.cloned());
+    for g in grants {
+        match &g {
+            Grant::Write(p) => llm.sandbox_write.push(p.display().to_string()),
+            Grant::Port(n) => llm.sandbox_ports.push(*n),
+        }
+        let said = g.shown();
+        if !granted.contains(&said) {
+            granted.push(said);
+        }
+    }
+    (llm, granted)
 }
 
 /// The user's answer on the card: `y` runs it — the files it showed read again first (on a worker), and not
 /// run if one changed since — `a`/`A` too, and what it reads outside stays allowed (this chat · always);
 /// None tells Claude no. `unprotected`: the card said there's no sandbox.
 pub fn run_answer(ed: &mut Editor, id: u64, what: RunCard, scope: Option<crate::allow::Scope>) {
-    let RunCard { cmd, call, shown, unprotected, reads, keep } = what;
+    let RunCard { cmd, call, shown, unprotected, reads, keep, outside } = what;
     ed.offer_finished(id, Ok(()));
     let Some(scope) = scope else {
         return answer(ed, call, Err(format!("the user chose not to run `{cmd}`")));
@@ -564,7 +689,7 @@ pub fn run_answer(ed: &mut Editor, id: u64, what: RunCard, scope: Option<crate::
         crate::allow::grant_reads(ed, &reads, scope);
     }
     if shown.is_empty() {
-        return run_now(ed, cmd, call, unprotected);
+        return run_now(ed, cmd, call, unprotected, outside);
     }
     ed.events.jobs().spawn(move || {
         let changed =
@@ -579,16 +704,17 @@ pub fn run_answer(ed: &mut Editor, id: u64, what: RunCard, scope: Option<crate::
                      them what's there now"
                 )),
             ),
-            None => run_now(ed, cmd, call, unprotected),
+            None => run_now(ed, cmd, call, unprotected, outside),
         }
     });
 }
 
-fn run_now(ed: &mut Editor, cmd: String, call: Call, unprotected: bool) {
+fn run_now(ed: &mut Editor, cmd: String, call: Call, unprotected: bool, outside: bool) {
     if let Err(e) = run_busy(ed) {
         return answer(ed, call, Err(e));
     }
-    guarded(ed, call, Job::Command(cmd), unprotected);
+    let extra = Extra { grant: None, outside };
+    guard_and_go(ed, For::Claude(call), Job::Command(cmd), unprotected, extra);
 }
 
 /// A `run` card's command, its call, the files it showed, whether it said there's no sandbox, what it reads
@@ -601,6 +727,8 @@ pub struct RunCard {
     pub unprotected: bool,
     pub reads: Vec<PathBuf>,
     pub keep: bool,
+    /// Claude asked to run it outside the sandbox (`y` runs it so, once).
+    pub outside: bool,
 }
 
 // ── The sandbox ─────────────────────────────────────────────────────────────
@@ -637,18 +765,29 @@ fn sandbox_look(ed: &mut Editor) {
     });
 }
 
-/// Runs `job` the way `sandbox.rs` says: in the sandbox (the policy made on a worker — the toolchain's
-/// folders are asked there), or, where there's none, once the user agrees: on its own card, for this
-/// conversation (`Chat.unprotected`), or already (`asked`: the command's card said so).
+/// Runs Claude's `job` the way `sandbox.rs` says: in the sandbox (the policy made on a worker — the
+/// toolchain's folders are asked there), or, where there's none, once the user agrees: on its own card, for
+/// this conversation (`Chat.unprotected`), or already (`asked`: the command's card said so).
 fn guarded(ed: &mut Editor, call: Call, job: Job, asked: bool) {
+    guard_and_go(ed, For::Claude(call), job, asked, Extra::default());
+}
+
+/// `guarded` for whoever waits (`For`), with `extra` — what the user allowed this run alone, or that it
+/// runs outside the sandbox. The policy has what's allowed for the project and this conversation in it.
+pub fn guard_and_go(ed: &mut Editor, who: For, job: Job, asked: bool, extra: Extra) {
+    if extra.outside {
+        return go(ed, who, job, Some(Guard::Outside));
+    }
     if !ed.config.llm.sandbox {
-        return go(ed, call, job, Some(Guard::Off));
+        return go(ed, who, job, Some(Guard::Off));
     }
     let found = ed.sandbox.clone();
     if found == Availability::Bypass {
-        return go(ed, call, job, None);
+        return go(ed, who, job, None);
     }
     let llm = ed.config.llm.clone();
+    let chat = ed.chat.as_ref().map(|c| c.allowed.clone()).unwrap_or_default();
+    let store = ed.allow_path.clone();
     let root = std::env::current_dir().unwrap_or_default();
     ed.events.jobs().spawn(move || {
         let found = match found {
@@ -656,8 +795,11 @@ fn guarded(ed: &mut Editor, call: Call, job: Job, asked: bool) {
             f => f,
         };
         let policy = (found == Availability::Ready).then(|| {
-            // Its denials watched from before it starts (the stream up first — measured)
+            let kept = crate::allow::Store::read(store.as_deref()).get(&crate::sandbox::real(&root));
+            let (llm, granted) = with_allowed(&llm, &[&kept, &chat], extra.grant.as_ref());
             let mut p = crate::sandbox::policy(&root, &llm);
+            p.granted = granted;
+            // Its denials watched from before it starts (the stream up first — measured)
             if let Some(tag) = &p.tag {
                 p.watch = Some(crate::sandbox::Watch::start(tag));
                 std::thread::sleep(crate::sandbox::WATCH_READY);
@@ -666,37 +808,37 @@ fn guarded(ed: &mut Editor, call: Call, job: Job, asked: bool) {
         });
         move |ed: &mut Editor| {
             ed.sandbox = found.clone();
-            // (the turn ended meanwhile: nothing waits for it)
-            if ed.chat.as_ref().is_some_and(|c| c.generation() != call.generation || !c.busy()) {
+            // (Claude's turn ended meanwhile: nothing waits for it)
+            if let For::Claude(call) = &who
+                && ed.chat.as_ref().is_some_and(|c| c.generation() != call.generation || !c.busy())
+            {
                 return;
             }
-            match (policy, found) {
-                (Some(p), _) => go(ed, call, job, Some(Guard::In(p))),
-                (None, Availability::Missing(why)) => {
-                    if asked || ed.chat.as_ref().is_some_and(|c| c.unprotected) {
-                        go(ed, call, job, Some(Guard::Without(why)))
-                    } else {
-                        ask_unprotected(ed, call, job, why)
-                    }
+            match (policy, found, who) {
+                (Some(p), _, who) => go(ed, who, job, Some(Guard::In(p))),
+                (None, Availability::Missing(why), For::Claude(call))
+                    if !asked && !ed.chat.as_ref().is_some_and(|c| c.unprotected) =>
+                {
+                    ask_unprotected(ed, call, job, why)
                 }
-                (None, _) => go(ed, call, job, None),
+                (None, Availability::Missing(why), who) => go(ed, who, job, Some(Guard::Without(why))),
+                (None, _, who) => go(ed, who, job, None),
             }
         }
     });
 }
 
-fn go(ed: &mut Editor, call: Call, job: Job, guard: Option<Guard>) {
+fn go(ed: &mut Editor, who: For, job: Job, guard: Option<Guard>) {
     match job {
         Job::Command(cmd) => {
             if let Err(e) = run_busy(ed) {
-                return answer(ed, call, Err(e));
+                return fail(ed, who, e);
             }
-            let c = call.clone();
-            if let Err(e) = run_start(ed, call, cmd, guard) {
-                answer(ed, c, Err(e));
+            if let Err(e) = run_start(ed, who.clone(), cmd, guard) {
+                fail(ed, who, e);
             }
         }
-        Job::Tests(target) => start_tests(ed, call, *target, guard),
+        Job::Tests(target) => start_tests(ed, who, *target, guard),
     }
 }
 
@@ -734,13 +876,13 @@ pub fn unprotected_answer(ed: &mut Editor, id: u64, job: Job, call: Call, answer
             );
             answer(ed, call, Err(e))
         }
-        Unprotected::Once => go(ed, call, job, Some(Guard::Without(why))),
+        Unprotected::Once => go(ed, For::Claude(call), job, Some(Guard::Without(why))),
         Unprotected::ThisChat => {
             if let Some(c) = ed.chat.as_mut() {
                 c.unprotected = true;
             }
             ed.set_warning("Claude's commands run without a sandbox in this conversation");
-            go(ed, call, job, Some(Guard::Without(why)))
+            go(ed, For::Claude(call), job, Some(Guard::Without(why)))
         }
     }
 }
@@ -757,9 +899,16 @@ pub fn unsandboxed(ed: &Editor) -> bool {
     !ed.config.llm.sandbox || ed.chat.as_ref().is_some_and(|c| c.unprotected)
 }
 
-/// The command Claude ran ended — how, and its output, go back; the editor shows the first error.
+/// The command Claude ran ended — how, and its output, go back; the editor shows the first error. One the
+/// user ran again (`blocked.rs`): Claude hears how it ended with the next message.
 pub fn run_done(ed: &mut Editor) {
     let Some(r) = ed.task_run.as_mut() else { return };
+    if let Some(head) = r.tell.take() {
+        let items = ed.qlist.as_ref().filter(|l| l.title == r.task.name).map_or(&[][..], |l| &l.items[..]);
+        let r = &*r;
+        let text = run_report(r, items);
+        return told(ed, head, text);
+    }
     let Some(call) = r.chat.take() else { return };
     let items = ed.qlist.as_ref().filter(|l| l.title == r.task.name).map_or(&[][..], |l| &l.items[..]);
     let text = run_report(r, items);
@@ -1018,6 +1167,30 @@ mod tests {
         assert!(text.starts_with("no tests ran — term_snapshots::shows\n"), "{text}");
         assert!(text.contains("running 0 tests\n"), "the output says why: {text}");
         assert_eq!(super::verdict(&text), "no tests ran");
+    }
+
+    /// A run's policy has what the user allowed in it — kept, this chat's, and a grant for this run alone —
+    /// each once, and its result says them.
+    #[test]
+    fn what_the_user_allowed_goes_into_the_policy() {
+        use crate::allow::{Allowed, Grant};
+        let kept = Allowed { write: vec!["/w/kept".into()], ports: vec![5432], ..Default::default() };
+        let chat = Allowed { write: vec!["/w/chat".into()], ports: vec![5432], ..Default::default() };
+        let base = crate::llm::LlmConfig::default();
+        let (llm, granted) = super::with_allowed(&base, &[&kept, &chat], Some(&Grant::Port(3000)));
+        assert_eq!(llm.sandbox_write, ["/w/kept", "/w/chat"]);
+        assert_eq!(llm.sandbox_ports, [5432, 5432, 3000], "(the policy keeps each port once)");
+        assert_eq!(
+            granted,
+            [
+                "write in /w/kept and everything in it",
+                "connect to port 5432 on this machine",
+                "write in /w/chat and everything in it",
+                "connect to port 3000 on this machine"
+            ]
+        );
+        let (none, said) = super::with_allowed(&base, &[], None);
+        assert!(none.sandbox_write.is_empty() && none.sandbox_ports.is_empty() && said.is_empty());
     }
 
     /// Checks run at once; anything the words don't fully say — or a read-only command made to write —

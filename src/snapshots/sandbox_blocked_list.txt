@@ -1,0 +1,97 @@
+# sandbox_blocked_list · 100x30 · theme meok · cursor 2:4
+## text
+00  tarae  ›  src  ›  demo.rs
+01  ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+02   ›                                                                  what the sandbox blocked  4/4
+03   ────────────────────────────────────────────────────────────────────────────────────────────────
+04  ▎ ◦ allow writing in /private/tmp/tarae-shot-blocked/npm-cache                …/_cacache/index-v5
+05    ◦ allow writing in /private/tmp/tarae-shot-blocked                …/npm-cache/_cacache/index-v5
+06    ◦ allow port 5432 on this machine                                                npm connecting
+07    ▲ run it outside the sandbox, once                                                     npm test
+08
+09
+10
+11
+12
+13
+14
+15
+16
+17
+18  ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+19  ▐ FAILED ▌  npm test   2.4s                                                      space m c close
+20   npm ERR! code EPERM
+21   npm ERR! syscall open
+22
+23
+24
+25
+26
+27   ▲ sandbox blocked writing /private/tmp/tarae-shot-blocked/npm-cache/_cacach…   space m s open it
+28  ▐ NORMAL ▌                                                                  rust   utf-8 LF   1:1
+29
+## bg · surface per cell, blank = ui.background
+00
+01
+02  pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+03  pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+04  PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP
+05  pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+06  pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+07  pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+08  pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+09  pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+10  pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+11  pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+12  pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+13  pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+14  pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+15  pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+16  pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+17  pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+18
+19 pp11111111pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+20 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+21 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+22 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+23 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+24 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+25 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+26 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+27 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+28   AAAAAAAA
+29
+## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
+00  ddddd  f  ddd  f  TTTTTTT
+01
+02   A                                                                  ffff fff fffffff fffffff  fff
+03   ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+04  a d TTTTT TTTTTTT TT TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT                ddddddddddddddddddd
+05    d                                                                 ddddddddddddddddddddddddddddd
+06    d                                                                                ddd dddddddddd
+07    w                                                                                      ddd dddd
+08
+09
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19  e BBBBBB e  TTT TTTT   dddd                                                      DDDDD D D fffff
+20   fff ffff ffff fffff
+21   fff ffff fffffff ffff
+22
+23
+24
+25
+26
+27   w wwwwwww wwwwwww wwwwwww wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww   FFFFF F F ffff ff
+28  a BBBBBB a                                                                  dddd   ddddd dd   TTT
+29
+## legend
+bg: p=ui.popup  P=ui.menu.selected  A=ui.cursor.primary  1=other
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  e=error  w=warning  B=bold

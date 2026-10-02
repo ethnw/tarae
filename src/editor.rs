@@ -433,6 +433,8 @@ pub struct Editor {
     pub trust_path: Option<std::path::PathBuf>,
     /// Where what's always allowed is kept (`allow.rs`) — None in tests (they set a temp file).
     pub allow_path: Option<std::path::PathBuf>,
+    /// The run whose denials `space m s` listed, and what could open (`blocked.rs`).
+    pub blocked: Option<(crate::blocked::BlockedRun, Vec<crate::blocked::Choice>)>,
     /// Whether Claude's commands can be sandboxed here (`sandbox.rs`) — found with the first one.
     pub sandbox: crate::sandbox::Availability,
     /// `:restart` under way (`restart.rs`) — once `Ready`, main runs the new binary after the loop ends.
@@ -560,6 +562,7 @@ impl Editor {
             project_trust: None,
             trust_path: if cfg!(test) { None } else { crate::trust::Store::path() },
             allow_path: if cfg!(test) { None } else { crate::allow::Store::path() },
+            blocked: None,
             sandbox: if cfg!(test) { crate::sandbox::Availability::Bypass } else { Default::default() },
             restart: None,
             undo_writes: Default::default(),
@@ -3678,6 +3681,54 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Claude asks to run a command outside the sandbox: never without a reason (told at once, no card);
+    /// with one, always a card — even for a command that would run unasked (`pwd`) — its reason on it, `y`
+    /// or `n` only (`a` isn't an answer: never kept); `y` runs it outside, once, and the result says so.
+    #[test]
+    fn claude_asks_to_run_outside_the_sandbox_with_a_reason() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-run-outside-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        // No reason: told so, nothing asked
+        let mut ed = editor("");
+        let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "run", "arguments": {"command": "pwd", "outside_sandbox": true}}});
+        let r = crate::tools::mcp(&mut ed, 0, "c1", &msg).expect("answered now");
+        assert!(r["result"]["isError"] == true && r.to_string().contains("needs a reason"), "{r}");
+        assert!(ed.offers.is_empty());
+        // With one: a card, even for a command that runs unasked
+        let reason = "it needs the network to fetch the crates";
+        let mut ed = editor("");
+        let args = json!({ "command": "pwd", "outside_sandbox": true, "reason": reason });
+        let log = claude_calls(&mut ed, &dir, "run", &args);
+        feed(&mut ed, "<space>lwhere am I<ret>");
+        settle_for(&mut ed, |ed| !ed.offers.is_empty() || !ed.chat.as_ref().unwrap().busy());
+        let o = ed.offers.first().expect("asked, not run");
+        assert_eq!(o.title, crate::tools::OUTSIDE_RUN_TITLE);
+        assert!(o.question.contains(&format!("Its reason: {reason}")), "{}", o.question);
+        let mut bytes = Vec::new();
+        crate::term::render(&mut ed, &mut bytes, 140, 40).unwrap();
+        let mut parser = vt100::Parser::new(40, 140, 0);
+        parser.process(&bytes);
+        let s = parser.screen().contents();
+        assert!(s.contains("y Run") && !s.contains("This chat") && !s.contains("Always"), "{s}");
+        let o = ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
+        ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
+        feed(&mut ed, "a");
+        assert_eq!(ed.offers.len(), 1, "never kept: `a` isn't an answer");
+        feed(&mut ed, "y");
+        settle_for(&mut ed, |ed| !ed.chat.as_ref().unwrap().busy());
+        let answer = tool_answer(&log);
+        assert!(answer.contains("Ran outside the sandbox"), "{answer}");
+        assert!(matches!(
+            ed.task_run.as_ref().and_then(|r| r.guard.clone()),
+            Some(crate::sandbox::Guard::Outside)
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Past the checks, a command waits for the user: nothing runs until `y`; `n` tells Claude no.
     #[test]
     fn a_command_past_the_checks_asks_first() {
@@ -4046,6 +4097,109 @@ mod tests {
             s.contains("▲ sandbox blocked writing /dev/ttys004  +1") && !s.contains("may be waiting"),
             "{s}"
         );
+    }
+
+    /// What the sandbox blocked in Claude's command is the user's to open (`space m s`): a list of the
+    /// folders the denied write could open and running it outside once; a folder's card `a` lets Claude's
+    /// commands write there this conversation and runs the command again now; `A` keeps one for the
+    /// project; outside runs it once with no sandbox. Each run again is the user's: Claude hears how it ended
+    /// with the next message. Harmless: the command is an `echo`, the folders this test's temp ones.
+    #[test]
+    fn the_user_opens_what_the_sandbox_blocked() {
+        let dir = std::env::temp_dir().join(format!("tarae-blocked-ks-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join("cache/deep")).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let (deep, cache) = (dir.join("cache/deep"), dir.join("cache"));
+        let store = dir.join("state/sandbox.json");
+        let mut ed = editor("");
+        ed.allow_path = Some(store.clone());
+        // A chat to hear it (a claude that reads and says nothing)
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        crate::chat::open(&mut ed);
+        // Claude's command, and what the sandbox blocked in it
+        let watch = crate::sandbox::Watch::quiet("t.");
+        watch.record(crate::sandbox::Denial {
+            process: "echo".into(),
+            op: "file-write-create".into(),
+            target: deep.join("new/x.bin").display().to_string(),
+        });
+        let policy = crate::sandbox::Policy {
+            watch: Some(watch),
+            ..crate::sandbox::Policy::for_project(&crate::sandbox::Env::default())
+        };
+        let cmd = "echo tarae-rerun-marker";
+        let mut run = crate::task::Run::for_test(crate::task::Task {
+            name: cmd.into(),
+            cmd: cmd.into(),
+            cwd: dir.clone(),
+        });
+        run.guard = Some(crate::sandbox::Guard::In(policy));
+        run.by_claude = true;
+        ed.task_run = Some(run);
+        let screen = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 160, 40).unwrap();
+            let mut parser = vt100::Parser::new(40, 160, 0);
+            parser.process(&bytes);
+            parser.screen().contents()
+        };
+        assert!(screen(&mut ed).contains("space m s open it"), "the panel says the key");
+        // The list: the folders, widest last, then running it outside
+        ed.chat.as_mut().unwrap().focused = false;
+        feed(&mut ed, " ms");
+        let rows: Vec<String> = ed.picker.as_ref().unwrap().items().iter().map(|i| i.label.clone()).collect();
+        assert_eq!(rows[0], format!("allow writing in {}", crate::allow::tilde(&deep)), "{rows:?}");
+        assert_eq!(rows[1], format!("allow writing in {}", crate::allow::tilde(&cache)), "{rows:?}");
+        assert_eq!(rows.last().unwrap(), "run it outside the sandbox, once");
+        // A card in sight long enough for an answer
+        let settled = |ed: &mut Editor, title: &str| {
+            assert_eq!(ed.offers.first().map(|o| o.title.clone()).as_deref(), Some(title));
+            let s = screen(ed);
+            let o = ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
+            ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
+            s
+        };
+        let told = |ed: &Editor, what: &str| ed.checkpoints.tell.iter().any(|t| t.contains(what));
+        let ran_again = |ed: &Editor| {
+            ed.task_run.as_ref().is_some_and(|r| r.state != crate::task::State::Running && r.tell.is_none())
+                && ed.checkpoints.tell.iter().any(|t| t.contains("tarae-rerun-marker"))
+        };
+        // `a`: this conversation — and it runs again now
+        feed(&mut ed, "<ret>");
+        let s = settled(&mut ed, crate::blocked::GRANT_TITLE);
+        assert!(s.contains("y Once") && s.contains("a This chat") && s.contains("A Always"), "{s}");
+        feed(&mut ed, "a");
+        assert!(ed.chat.as_ref().unwrap().allowed.write.contains(&deep));
+        assert!(told(&ed, "The user let your commands write in"));
+        settle_until(&mut ed, ran_again);
+        assert!(told(&ed, &format!("The user ran `{cmd}` again, letting it write in")));
+        // `A` on the wider one: kept for the project
+        ed.checkpoints.tell.clear();
+        crate::typed::execute(&mut ed, "sandbox-grant 1").unwrap();
+        settled(&mut ed, crate::blocked::GRANT_TITLE);
+        feed(&mut ed, "A");
+        let kept = |p: &Path| {
+            crate::allow::Store::read(Some(&store))
+                .get(&crate::allow::project())
+                .write
+                .contains(&p.to_path_buf())
+        };
+        settle_until(&mut ed, |ed| kept(&cache) && ran_again(ed));
+        // Outside, once
+        ed.checkpoints.tell.clear();
+        crate::typed::execute(&mut ed, "sandbox-grant outside").unwrap();
+        let s = settled(&mut ed, crate::blocked::OUTSIDE_TITLE);
+        assert!(s.contains("y Run") && !s.contains("A Always"), "{s}");
+        feed(&mut ed, "y");
+        settle_until(&mut ed, ran_again);
+        assert!(told(&ed, "again outside the sandbox, this once"));
+        assert!(matches!(
+            ed.task_run.as_ref().and_then(|r| r.guard.clone()),
+            Some(crate::sandbox::Guard::Outside)
+        ));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Asking about a line starts a note with you; Claude's plain answer (no tool) lands in the thread.
@@ -6313,6 +6467,38 @@ mod tests {
             What::Grammars { lang: "Rust".into(), names: vec![], then: None },
         ));
         assert_eq!(fg(&mut ed, "Download and build"), head);
+    }
+
+    /// On the card for running outside the sandbox, what yes means — "with all your permissions" — is in the
+    /// warning color (that of the panel's `▲ sandbox blocked` row); Claude's reason stays faint (its own
+    /// words); the command is at full strength.
+    #[test]
+    fn running_outside_the_sandbox_warns_in_its_color() {
+        use serde_json::json;
+        // (crossterm drops every color under NO_COLOR, which tarae's own runs set)
+        crossterm::style::force_color_output(true);
+        let mut ed = editor("text\n");
+        let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "run",
+            "arguments": {"command": "cargo fetch", "outside_sandbox": true, "reason": "the network is closed"}}});
+        assert!(crate::tools::mcp(&mut ed, 0, "c1", &msg).is_none(), "it waits for the user");
+        let mut bytes = Vec::new();
+        crate::term::render(&mut ed, &mut bytes, 120, 30).unwrap();
+        let mut parser = vt100::Parser::new(30, 120, 0);
+        parser.process(&bytes);
+        let screen = parser.screen();
+        let fg = |needle: &str| {
+            let (y, row) = screen.rows(0, 120).enumerate().find(|(_, r)| r.contains(needle)).expect(needle);
+            let x = row[..row.find(needle).unwrap()].chars().count();
+            screen.cell(y as u16, x as u16).unwrap().fgcolor()
+        };
+        let theme = |key: &str| match ed.theme.try_get(key).and_then(|s| s.fg) {
+            Some(crossterm::style::Color::Rgb { r, g, b }) => vt100::Color::Rgb(r, g, b),
+            c => panic!("{key}: {c:?}"),
+        };
+        assert_eq!(fg("Outside the sandbox it runs"), theme("warning"), "what yes means: the warning color");
+        assert_eq!(fg("Its reason: the network"), theme("ui.virtual"), "Claude's words: faint");
+        let cmd = fg("cargo fetch");
+        assert!(cmd != theme("warning") && cmd != theme("ui.virtual"), "the command: full strength");
     }
 
     /// Multiple offers stack in arrival order and only the front one gets keys — clicking a back card

@@ -300,6 +300,7 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `space m c` | `task_close` | Stop the task, close its panel |
 | `space m m` | `task_again` | Run the task (again) |
 | `space m p` | `task_picker` | Pick a task to run |
+| `space m s` | `task_sandbox` | What the sandbox blocked: open it |
 
 ### `space v`
 
@@ -340,6 +341,7 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `space x f` | `test_file` | Run this file's tests |
 | `space x l` | `test_last` | Run the last test again |
 | `space x o` | `test_output` | Test output in a buffer |
+| `space x s` | `test_sandbox` | What the sandbox blocked: open it |
 | `space x x` | `test_nearest` | Run the test at the cursor |
 
 ## Select mode
@@ -428,8 +430,10 @@ Type `:` in normal mode. `Tab` completes command names and their arguments (path
 | `:config-show` |  | Show every setting with its value |
 | `:project-trust` |  | Look again at what this project's .tarae.toml runs, and trust it or not |
 | `:project-untrust` |  | Stop running what this project's .tarae.toml sets |
-| `:sandbox-allowed` |  | What Claude may read past the project — take one back |
-| `:sandbox-disallow` |  | Claude asks again before reading this path |
+| `:sandbox-allowed` |  | What Claude may do past the defaults — take one back |
+| `:sandbox-disallow` |  | Take back a path or port :sandbox-allowed lists |
+| `:sandbox-blocked` |  | What the sandbox blocked in Claude's last run: open it |
+| `:sandbox-grant` |  | A row of :sandbox-blocked's list, on its card |
 | `:log-open` |  | Open tarae's log (language servers, errors) |
 | `:messages` |  | This session's notifications again, newest first |
 | `:redraw` |  | Draw the whole screen again (when something else wrote over it) |
