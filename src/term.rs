@@ -6159,6 +6159,7 @@ fn draw_follow_card(
                 "search" => "searching",
                 "find" => "finding",
                 "uses" => "finding uses of",
+                "map" => "mapping",
                 "note" => "pinning a note",
                 "reply" => "replying on",
                 "show" => "showing",

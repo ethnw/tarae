@@ -141,8 +141,10 @@ pub fn rows_of(msgs: &[Msg]) -> Vec<Value> {
 
 /// Stored rows back as the panel's (unknown roles or verbs are skipped — a newer tarae wrote them).
 pub fn msgs_of(rows: &[Value]) -> Vec<Msg> {
-    const VERBS: [&str; 12] =
-        ["read", "search", "find", "uses", "edit", "write", "note", "reply", "test", "show", "look", "plan"];
+    const VERBS: [&str; 13] = [
+        "read", "search", "find", "uses", "map", "edit", "write", "note", "reply", "test", "show", "look",
+        "plan",
+    ];
     rows.iter()
         .filter_map(|r| {
             let s = |k: &str| r[k].as_str().unwrap_or_default().to_string();

@@ -81,6 +81,7 @@ mod task;
 mod term;
 mod terminal;
 mod test_results;
+mod testcode;
 mod testing;
 mod textobject;
 mod theme;

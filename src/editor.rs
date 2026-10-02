@@ -1270,6 +1270,7 @@ impl Editor {
         // Input means the terminal has focus, whatever it said last (a focus-in lost on the way)
         if matches!(ev, Event::Key(_) | Event::Mouse(_) | Event::Paste(_)) {
             self.unfocused = false;
+            crate::edits::taken_up(self);
         }
         match ev {
             Event::Key(k) => {
@@ -6254,6 +6255,48 @@ mod tests {
         feed(&mut ed, "y");
         let a = permission_answer_to(&log, "p5");
         assert!(a["behavior"] == "deny" && a["message"].as_str().unwrap().contains("unsaved"), "{a}");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&away).ok();
+    }
+
+    /// #37: a file outside the project that a chat edit's review opened closes when the turn ends — its root
+    /// keeps no language server — and a `:restart` meanwhile wouldn't bring it back. One the user pressed
+    /// keys in stays theirs; keys typed in the chat's input don't take it up.
+    #[test]
+    fn files_a_turn_opened_outside_the_project_close_with_it() {
+        use serde_json::json;
+        let (dir, main, ..) = follow_project("aside");
+        let away = dir.with_file_name(format!("tarae-aside-away-{}", std::process::id()));
+        std::fs::create_dir_all(&away).unwrap();
+        let outside = std::fs::canonicalize(&away).unwrap().join("config.toml");
+        std::fs::write(&outside, "a = 1\n").unwrap();
+        let open = |ed: &Editor, p: &Path| ed.docs.iter().any(|d| d.path.as_deref() == Some(p));
+        let mut ed = editor("");
+        ed.project_root = Some(dir.clone());
+        ed.open(&main).unwrap();
+        let edit = json!({"file_path": outside, "old_string": "a = 1", "new_string": "a = 2"});
+        fake_asks(&mut ed, &dir, &[("Edit", edit)], true);
+        feed(&mut ed, "<space>l");
+        ed.handle_event(Event::Key("c".parse().unwrap())); // (typed in the chat's input)
+        feed(&mut ed, "hange it<ret>");
+        settle_until(&mut ed, |ed| ed.review.is_some());
+        assert_eq!(ed.doc().path.as_deref(), Some(outside.as_path()), "its review");
+        let restarted = crate::restart::snapshot(&mut ed);
+        let saved: Vec<&str> =
+            restarted["docs"].as_array().unwrap().iter().filter_map(|d| d["path"].as_str()).collect();
+        assert_eq!(saved, [main.to_str().unwrap()], "a restart doesn't bring it");
+        ed.handle_event(Event::Key("y".parse().unwrap())); // (the review's answer isn't taking it up)
+        settle_until(&mut ed, |ed| !ed.chat.as_ref().unwrap().busy());
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "a = 2\n");
+        assert!(!open(&ed, &outside), "closed with the turn");
+        assert!(open(&ed, &main));
+        // Taken up: a key in the code pane while it's in front — it stays when the turn ends
+        ed.open(&outside).unwrap();
+        ed.doc_mut().aside = true;
+        ed.chat.as_mut().unwrap().focused = false;
+        ed.handle_event(Event::Key("j".parse().unwrap()));
+        crate::edits::turn_over(&mut ed);
+        assert!(open(&ed, &outside), "yours now");
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&away).ok();
     }

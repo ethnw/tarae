@@ -68,6 +68,8 @@ pub struct LspState {
     /// Claude's `references` calls waiting for their server (N5, `nav.rs`), by number · the next number.
     pub(crate) tool_asks: HashMap<u64, crate::nav::Ask>,
     pub(crate) tool_ask_next: u64,
+    /// …and its `symbols` calls (N5b), by the same numbers.
+    pub(crate) tool_symbols: HashMap<u64, crate::nav::SymAsk>,
     /// (tests: the trace lines written — the log writes nothing in tests)
     #[cfg(test)]
     pub traced: Vec<String>,
@@ -294,6 +296,10 @@ pub enum Kind {
     ToolDeclared {
         ask: u64,
     },
+    /// Claude's `symbols` question `ask` (N5b) — a file's document symbols, wherever the user is by then.
+    ToolSymbols {
+        ask: u64,
+    },
     /// `space h` — this symbol's uses in the file become the selections.
     Highlights,
     Hover,
@@ -353,7 +359,7 @@ impl Kind {
             Kind::Completion => ("completion", "completionProvider"),
             Kind::SignatureHelp => ("signature-help", "signatureHelpProvider"),
             Kind::InlayHint { .. } => ("inlay-hints", "inlayHintProvider"),
-            Kind::DocumentSymbols => ("symbols", "documentSymbolProvider"),
+            Kind::DocumentSymbols | Kind::ToolSymbols { .. } => ("symbols", "documentSymbolProvider"),
             Kind::WorkspaceSymbols => ("symbols", "workspaceSymbolProvider"),
             _ => return None,
         })
@@ -624,6 +630,9 @@ impl Editor {
                     }
                     &Kind::ToolDeclared { ask } => {
                         crate::nav::declared_answered(self, ask, error.is_none().then_some(result))
+                    }
+                    &Kind::ToolSymbols { ask } => {
+                        crate::nav::symbols_answered(self, ask, error.map_or(Ok(result), Err))
                     }
                     // One server failing leaves the others' actions (it's logged)
                     &Kind::CodeAction { list } if error.is_some() => {
@@ -926,7 +935,8 @@ impl Editor {
             | Kind::JavaDebug
             | Kind::ClassFile { .. }
             | Kind::ToolRefs { .. }
-            | Kind::ToolDeclared { .. } => {}
+            | Kind::ToolDeclared { .. }
+            | Kind::ToolSymbols { .. } => {}
             Kind::Rename => match self.apply_workspace_edit(cid, result) {
                 Ok(n) => self.set_status(format!("renamed in {n} file(s)")),
                 Err(e) => self.set_error(format!("rename: {e}")),
@@ -2379,6 +2389,31 @@ impl Editor {
                 .lsp_send_for(id, cid, Kind::ToolDeclared { ask }, "textDocument/definition", at)
                 .is_some();
         Ok((cid, name, defines))
+    }
+
+    /// Claude's `symbols` question `ask` (N5b): document `id`'s symbols, asked of its server — that server
+    /// and its name. Err: why it can't be asked now (the answer is tarae's outline then); the answer goes
+    /// to `nav::symbols_answered`.
+    pub(crate) fn ask_symbols(&mut self, id: DocId, ask: u64) -> Result<(ClientId, String), String> {
+        self.lsp_flush();
+        let doc = self.docs.iter().find(|d| d.id == id).ok_or("the file was closed")?;
+        if doc.lsp.clients().next().is_none() {
+            return Err("there's no language server for it".into());
+        }
+        let kind = Kind::ToolSymbols { ask };
+        let cid = self.server_for_doc(id, &kind).ok_or("its language server doesn't list symbols")?;
+        let c = self.client(cid).ok_or("its language server stopped")?;
+        if !c.ready {
+            return Err(format!("{} is starting", c.name));
+        }
+        let name = c.name.clone();
+        let Some(path) = self.docs.iter().find(|d| d.id == id).and_then(|d| d.path.clone()) else {
+            return Err("the file has no path".into());
+        };
+        let params = json!({ "textDocument": { "uri": lsp::uri(&path) } });
+        self.lsp_send_for(id, cid, kind, "textDocument/documentSymbol", params)
+            .ok_or_else(|| format!("{name} couldn't be asked"))?;
+        Ok((cid, name))
     }
 
     /// A go-to's places as a list (N2): each row the code there, the name it's about standing out, by file
@@ -3935,6 +3970,52 @@ mod tests {
         let t = ask_tool(&mut ed, 3, args).unwrap();
         assert!(t.contains("fake didn't answer within 300ms, so these are"), "{t}");
         assert!(ed.lsp.tool_asks.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// N5b: Claude's `symbols` — while the file's server is starting, tarae's own outline (said so); once
+    /// it's up, the server's document symbols; with a line, what holds it.
+    #[test]
+    fn the_symbols_tool_asks_the_server_or_gives_the_outline() {
+        let (mut ed, file, log) =
+            setup("tool-syms", "struct S;\nimpl S {\n    fn f(&self) {\n        1;\n    }\n}\n");
+        let dir = file.parent().unwrap().to_path_buf();
+        ed.project_root = Some(dir.clone());
+        let syms = |ed: &mut Editor, id: u64, args: Value| {
+            crate::nav::symbols(ed, crate::tools::Call::test(id), &args).unwrap();
+            settle_for(ed, 10, |_| tool_answer(id).is_some());
+            tool_answer(id).expect("answered")
+        };
+        let t = syms(&mut ed, 1, json!({"path": "main.rs", "line": 4})).unwrap();
+        let rust =
+            crate::syntax::spec("rust").is_some_and(|s| crate::syntax::Loader::global().load(s).is_ok());
+        if rust {
+            assert_eq!(
+                t,
+                "line 4 of main.rs is in (tarae's outline — fake is starting):\nimpl S  2–6\n  fn f  3–5"
+            );
+        }
+        let cid = ed.doc().lsp.client.unwrap();
+        let caps = json!({ "positionEncoding": "utf-8", "documentSymbolProvider": true });
+        ed.on_lsp_message(cid, json!({ "id": 0, "result": { "capabilities": caps } }));
+        crate::nav::symbols(&mut ed, crate::tools::Call::test(2), &json!({"path": "main.rs"})).unwrap();
+        settle_for(&mut ed, 5, |ed| {
+            ed.lsp.pending.values().any(|p| matches!(p.kind, Kind::ToolSymbols { .. }))
+        });
+        assert!(sent(&log).contains("textDocument/documentSymbol"));
+        let range = |a: u64, b: u64| json!({ "start": { "line": a, "character": 0 }, "end": { "line": b, "character": 1 } });
+        let answer = json!([{ "name": "S", "kind": 23, "range": range(0, 0), "selectionRange": range(0, 0) },
+            { "name": "impl S", "kind": 19, "range": range(1, 5), "selectionRange": range(1, 1),
+              "children": [{ "name": "f", "kind": 6, "range": range(2, 4), "selectionRange": range(2, 2) }] }]);
+        let id = pending_of(&ed, Kind::ToolSymbols { ask: 0 });
+        ed.on_lsp_message(cid, json!({ "id": id, "result": answer }));
+        settle_for(&mut ed, 5, |_| tool_answer(2).is_some());
+        assert_eq!(
+            tool_answer(2).unwrap().unwrap(),
+            "3 symbols in main.rs (fake):\nstruct S  1\nimpl S  2–6\n  method f  3–5"
+        );
+        let e = syms(&mut ed, 3, json!({"path": "main.rs", "line": 99})).unwrap_err();
+        assert!(e.contains("main.rs has 6 lines — no line 99"), "{e}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

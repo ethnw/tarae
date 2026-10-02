@@ -167,6 +167,10 @@ pub struct Document {
     /// When it was last on screen (None: not yet) — only the recently seen keep their parse trees
     /// (`Editor::trees_follow_sight`).
     pub seen: Option<std::time::Instant>,
+    /// Opened by Claude's turn outside the project (an edit's review) and not worked in by the user since:
+    /// it closes when the turn ends, and `:restart` doesn't bring it back (#37 — such tabs stayed, each
+    /// root keeping a language server).
+    pub aside: bool,
 }
 
 impl Document {
@@ -205,6 +209,7 @@ impl Document {
             marks: Vec::new(),
             next_mark: 0,
             seen: None,
+            aside: false,
         }
     }
 

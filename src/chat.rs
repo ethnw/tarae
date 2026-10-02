@@ -30,10 +30,10 @@ use crate::llm::{self, StreamEv};
 use crate::markdown::Span;
 
 const SYSTEM: &str = "You are Claude, built into tarae — a terminal code editor, working in the user's project \
-(your current directory). Explore it with Read, Glob and tarae's own references and search tools — look at \
-the code you need across files instead of guessing. For where something is used, references (the language \
-server's) beats any text search; for finding code or text, search (the editor's project search) — Grep is for \
-what those can't do. You can change files with Edit and Write when the user asks for changes: each one is shown to them as \
+(your current directory). Explore it with Read, Glob and tarae's own references, search and symbols tools — \
+look at the code you need across files instead of guessing. For where something is used, references (the \
+language server's) beats any text search; for finding code or text, search (the editor's project search); for \
+a file's outline or which function a line is in, symbols — Grep is for what those can't do. You can change files with Edit and Write when the user asks for changes: each one is shown to them as \
 a diff they accept or reject (maybe in part), so keep edits focused, and if one is declined, ask before trying \
 another way. After you change code, check your work with the run_tests tool: run the tests that cover the \
 change (a test file, and a line for a single test), and when they fail, read why and fix it — the user \
@@ -72,9 +72,9 @@ note(reply_to=N); the chat answer is a short summary.";
 const TOOLS: &str = "Read,Grep,Glob,Edit,Write";
 /// Not Read, Grep or Glob: allowed by name they read anywhere unasked (measured — `reads.rs` answers them).
 /// (`screen` asks the user itself — `seeing.rs`)
-/// (`references` and `search` read inside the project only — `nav.rs`)
+/// (`references`, `search` and `symbols` read inside the project only — `nav.rs`)
 const ALLOWED: &str = "mcp__tarae__note,mcp__tarae__run_tests,mcp__tarae__run,mcp__tarae__plan,\
-mcp__tarae__screen,mcp__tarae__references,mcp__tarae__search";
+mcp__tarae__screen,mcp__tarae__references,mcp__tarae__search,mcp__tarae__symbols";
 
 /// Settings laid over the user's and the project's when they're loaded (`llm.chat-settings`).
 const CHAT_SETTINGS: &str = r#"{"permissions":{"ask":["Edit","Write"]},"disableAllHooks":true}"#;
@@ -680,7 +680,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             }
             // A lookup's row ends with what it found (`12 references in 3 files`) — Grep's answers aren't read
             if let Some(m) = c.msgs.iter_mut().rev().find(|m| m.call == id)
-                && let Some(l) = m.look.as_mut().filter(|l| matches!(l.verb, "uses" | "search"))
+                && let Some(l) = m.look.as_mut().filter(|l| matches!(l.verb, "uses" | "search" | "map"))
                 && let Some(v) = crate::nav::verdict(&text)
             {
                 l.range = v;
@@ -1255,6 +1255,14 @@ fn look(name: &str, input: &serde_json::Value) -> Look {
         "mcp__tarae__search" => {
             let place = if input["glob"].is_string() { s("glob") } else { s("path") };
             Look { verb: "search", what: s("pattern"), pattern: true, range: within(place), link: None }
+        }
+        "mcp__tarae__symbols" => {
+            let path = resolve(&s("path"));
+            let (what, line) = match n("line") {
+                Some(l) => (format!("{}:{}", shown(&path), l.max(1)), l.max(1) - 1),
+                None => (shown(&path), 0),
+            };
+            Look { verb: "map", what, pattern: false, range: String::new(), link: Some(Link { path, line }) }
         }
         other => {
             Look { verb: "use", what: other.to_string(), pattern: false, range: String::new(), link: None }

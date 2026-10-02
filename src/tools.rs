@@ -11,8 +11,8 @@
 //!   ends, with how it ended, the places it pointed at and its output. Checks (build, test, lint, format,
 //!   git's read-only commands) start at once; anything else asks the user first on a card (`y` run · `n` no).
 //! - `screen` shows Claude the user's screen as text, once they say yes (`seeing.rs`).
-//! - `references` and `search` find code the way the user does — the language server's references and
-//!   the project search, read-only, no card (`nav.rs`).
+//! - `references`, `search` and `symbols` find code the way the user does — the language server's
+//!   references, the project search, a file's outline — read-only, no card (`nav.rs`).
 
 use std::path::PathBuf;
 
@@ -53,6 +53,7 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
                     crate::seeing::tool_schema(),
                     crate::nav::references_schema(),
                     crate::nav::search_schema(),
+                    crate::nav::symbols_schema(),
                 ] }))
         }
         "tools/call" => {
@@ -80,10 +81,11 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
                     crate::seeing::call(ed, call);
                     return None;
                 }
-                Some(name @ ("references" | "search")) => {
+                Some(name @ ("references" | "search" | "symbols")) => {
                     let call = Call { generation, request_id: request_id.to_string(), id: id.clone() };
                     let asked = match name {
                         "references" => crate::nav::references(ed, call, args),
+                        "symbols" => crate::nav::symbols(ed, call, args),
                         _ => crate::nav::search(ed, call, args),
                     };
                     match asked {

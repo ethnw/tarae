@@ -271,9 +271,16 @@ fn show(ed: &mut Editor, p: Pending) {
     let s = |k: &str| p.input[k].as_str().unwrap_or_default().to_string();
     let path = crate::chat::resolve(&s("file_path"));
     // (a file Claude creates goes again when its turn is undone)
-    let existed = ed.docs.iter().any(|d| d.path.as_deref() == Some(path.as_path())) || path.exists();
+    let open_before = ed.docs.iter().any(|d| d.path.as_deref() == Some(path.as_path()));
+    let existed = open_before || path.exists();
     if let Err(e) = ed.open(&path) {
         return answer(ed, &p.request_id, deny(&format!("tarae couldn't open {}: {e:#}", path.display())));
+    }
+    // Outside the project and opened for this: it goes when the turn ends, unless you take it up (#37)
+    let root = ed.project_root.clone();
+    let doc = ed.doc_mut();
+    if !open_before && root.is_some_and(|r| doc.path.as_ref().is_some_and(|p| !p.starts_with(&r))) {
+        doc.aside = true;
     }
     if ed.doc().loading {
         return answer(
@@ -422,7 +429,9 @@ fn answer(ed: &mut Editor, request_id: &str, response: Value) {
     crate::chat::respond(ed, request_id, response);
 }
 
-/// The chat turn ended (or claude exited): a review still waiting for it closes, queued ones are dropped.
+/// The chat turn ended (or claude exited): a review still waiting for it closes, queued ones are dropped,
+/// and the files outside the project its reviews opened go (`Document::aside` — not ones with unsaved
+/// edits of yours, nor ones you worked in since; an accepted edit Claude is still writing is its own).
 pub fn turn_over(ed: &mut Editor) {
     let Some(c) = &mut ed.chat else { return };
     c.edits.queue.clear();
@@ -431,6 +440,34 @@ pub fn turn_over(ed: &mut Editor) {
     {
         crate::llm::close_review(ed);
     }
+    let aside: Vec<_> = ed
+        .docs
+        .iter()
+        .filter(|d| d.aside && (!d.is_modified() || d.unsaved_is_claudes()))
+        .map(|d| d.id)
+        .collect();
+    for id in aside {
+        ed.close_doc(id);
+    }
+}
+
+/// Before every key, click or paste: the file in the code pane, if Claude's turn opened it aside, is yours
+/// now — unless what you press goes elsewhere (a review, a card, a picker or prompt, the chat's input, the
+/// terminal, the side panel, the bottom slot).
+pub fn taken_up(ed: &mut Editor) {
+    if !ed.doc().aside
+        || ed.review.is_some()
+        || ed.picker.is_some()
+        || ed.prompt.is_some()
+        || ed.chat.as_ref().is_some_and(|c| c.focused)
+        || (!ed.offers.is_empty() && ed.card_has_keys())
+        || ed.terminal.as_ref().is_some_and(|t| t.focus && t.visible)
+        || ed.sidebar.as_ref().is_some_and(|s| s.focus)
+        || ed.bottom_focus
+    {
+        return;
+    }
+    ed.doc_mut().aside = false;
 }
 
 #[cfg(test)]

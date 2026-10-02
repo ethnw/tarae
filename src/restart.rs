@@ -428,11 +428,12 @@ pub fn reap() {
 // ── What comes along ────────────────────────────────────────────────────────
 
 /// What was on screen, as the next tarae reads it. Documents without a file (scratch, a review's deleted
-/// file, `jdt://` classes) stay behind — panes showing one show the current file.
+/// file, `jdt://` classes) stay behind — panes showing one show the current file — and so do files outside
+/// the project Claude's turn opened that you never took up (`Document::aside`, #37).
 pub fn snapshot(ed: &mut Editor) -> Value {
     ed.sync_focus_view();
     let docs: Vec<&crate::document::Document> =
-        ed.docs.iter().filter(|d| d.path.is_some() && d.virtual_uri.is_none()).collect();
+        ed.docs.iter().filter(|d| d.path.is_some() && d.virtual_uri.is_none() && !d.aside).collect();
     let index = |id| docs.iter().position(|d| d.id == id);
     let files: Vec<Value> = docs
         .iter()
