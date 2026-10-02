@@ -125,6 +125,8 @@ can follow the reasoning at your own pace ([screenshot](screenshots/follow-think
 Claude works, the chat minimizes to a small card at the bottom right: your question, its last few lookups
 (each a link) and the keys. The code gets the whole width, and the thought card takes the room above the lines
 being read. The panel comes back with the finished answer, or right away with `space l` or a click on the card.
+While Claude waits on you (a command or a read on its card, an edit under review), the card says `waiting for
+your answer`, and over an edit's review it keeps to the room between the changes.
 
 It follows what Claude talks about, too, not only what it reads. While it thinks, every `path:line` or
 `path:start-end` it mentions shows at once, and a `name` in backticks goes to that definition in a file open here.
@@ -281,10 +283,14 @@ one command, run in the task panel the way `space m m` runs a task, and Claude w
 (`["npm test", "make lint"]`). A command only counts as one of those when it's one command and its words say
 what runs: quoted words are fine (`cargo test -- 'a b'`), and so is `2>&1`. `$`, backticks, a redirect to a
 file, pipes, `;`, `&&`, globs, a `VAR=value` before it, or an option that makes git write or run something
-(`--output`, `--ext-diff`) and it asks like any other.
+(`--output`, `--ext-diff`) and it asks like any other. One exception for pipes: a check whose output only goes
+through filters that read it is still the check — `cargo test 2>&1 | grep -E 'FAILED|panicked' | head`, through
+`grep`, `head`, `tail`, `wc`, `sort`, `cut` or `uniq` (none with an option that writes, runs or never ends).
+It runs where the check alone would, its places still go to your list, and a card for one offers its first
+words (below), as for the command alone.
 
 **So do commands that only read, when they read in the project**: `ls`, `cat`, `head`, `tail`, `wc`, `grep`,
-`rg`, `find`, `tree`, `stat`, `file`, `du`, `diff`, `sort`, `uniq`, `pwd`, and git's `blame`, `rev-parse`,
+`rg`, `find`, `tree`, `stat`, `file`, `du`, `diff`, `sort`, `uniq`, `cut`, `pwd`, and git's `blame`, `rev-parse`,
 `ls-files` and a bare `branch`. Not with an option that writes, runs something or never ends (`find
 -exec`/`-delete`/`-fprint`, `sort -o`, `tree -o`, `rg --pre`, `tail -f`, `uniq in out`, `git branch <name>`). A
 line of them reads too: joined by `;` `&&` `||` `|`, with a `cd`, or the same inside `sh -c '…'` — `cd src &&

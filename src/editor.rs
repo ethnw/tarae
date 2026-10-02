@@ -225,6 +225,8 @@ pub struct Screen {
     pub test_panel: std::cell::Cell<Option<(usize, usize, usize)>>,
     /// The in-buffer review's change in hand: its first and last screen rows.
     pub review_change: std::cell::Cell<Option<(usize, usize)>>,
+    /// The in-buffer review's changes: every screen row of one (its header, its lines) — cards keep off them.
+    pub review_rows: std::cell::RefCell<Vec<usize>>,
     /// The task panel's: (first, last, rows of output).
     pub task_panel: std::cell::Cell<Option<(usize, usize, usize)>>,
     /// A plugin's panel: (its first screen line, its last, its first row's line, the first row shown).
@@ -4031,6 +4033,46 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// #32: a check piped into filters is the check — unasked where the check alone is (`echo one` stands in
+    /// for it here, as an allowed pattern), and on a card its pattern is offered; a pipe into what isn't a
+    /// filter (`tee`) still asks.
+    #[test]
+    fn a_check_piped_into_filters_runs_as_the_check() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-run-piped-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        // (no `sh -c '…'` here: the fake claude's JSON goes in single quotes — tools.rs tests that form)
+        let piped = "echo one two 2>&1 | grep -E \"one|x\" | head -n 1";
+        // Allowed: no card, it ran
+        let mut ed = editor("");
+        ed.config.llm.run_allow = vec!["echo one".into()];
+        let log = claude_calls(&mut ed, &dir, "run", &json!({ "command": piped }));
+        feed(&mut ed, "<space>lsay it<ret>");
+        settle_for(&mut ed, |ed| !ed.offers.is_empty() || !ed.chat.as_ref().unwrap().busy());
+        assert!(ed.offers.is_empty(), "a check through filters runs as the check would");
+        let answer = tool_answer(&log);
+        assert!(answer.contains("exit 0") && answer.contains("one two"), "{answer}");
+        // Not allowed yet: the card offers the check's own pattern
+        std::fs::remove_file(&log).ok();
+        let mut ed = editor("");
+        claude_calls(&mut ed, &dir, "run", &json!({ "command": piped }));
+        feed(&mut ed, "<space>lsay it<ret>");
+        settle_for(&mut ed, |ed| !ed.offers.is_empty());
+        let q = ed.offers[0].question.clone();
+        assert!(q.contains("a — also `echo one two …` unasked, this chat"), "{q}");
+        // A pipe into a writer isn't a filter
+        std::fs::remove_file(&log).ok();
+        let mut ed = editor("");
+        ed.config.llm.run_allow = vec!["echo one".into()];
+        let tee = format!("echo one two | tee {}", dir.join("out").display());
+        claude_calls(&mut ed, &dir, "run", &json!({ "command": tee }));
+        feed(&mut ed, "<space>lsay it<ret>");
+        settle_for(&mut ed, |ed| !ed.offers.is_empty());
+        assert!(!dir.join("out").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// #28: a run of Claude's that isn't a check or a build (a grep, a script) leaves the user's list as it
     /// was — its places still reach Claude's report; a check (`make`, its recipe a stand-in that prints an
     /// error line) takes the list over, as the user's own build would.
@@ -4319,6 +4361,36 @@ mod tests {
         assert!(made.exists() && ed.offers.is_empty());
         let answer = tool_answer(&log);
         assert!(answer.contains("exit 0") && answer.contains("(no output)"), "{answer}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The follow card says Claude waits on the user while its command waits on its card — not "running";
+    /// once allowed, it runs.
+    #[test]
+    fn a_command_waiting_on_its_card_is_waiting_for_you() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-run-waits-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let draw = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 140, 40).unwrap();
+            let mut parser = vt100::Parser::new(40, 140, 0);
+            parser.process(&bytes);
+            parser.screen().contents()
+        };
+        let mut ed = editor("fn main() {}\n");
+        let command = format!("sleep 1; touch {}", dir.join("made").display());
+        claude_calls(&mut ed, &dir, "run", &json!({ "command": command }));
+        feed(&mut ed, "<space>lmake it<ret>");
+        settle_for(&mut ed, |ed| !ed.offers.is_empty());
+        let screen = draw(&mut ed);
+        assert!(screen.contains("● waiting for you") && !screen.contains("● running"), "{screen}");
+        ed.offer_accept();
+        settle_for(&mut ed, |ed| ed.task_run.is_some());
+        let screen = draw(&mut ed);
+        assert!(screen.contains("● running") && !screen.contains("waiting for you"), "{screen}");
+        settle_for(&mut ed, |ed| !ed.chat.as_ref().unwrap().busy());
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -5369,6 +5441,41 @@ mod tests {
         let rows: Vec<String> = parser.screen().rows(0, 100).collect();
         let title = rows.iter().position(|r| r.contains("“fix it”")).expect("the title");
         assert!(rows[title + 1].contains("so I will make it match."), "{rows:#?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The follow card keeps off an edit review's changes: with one near the top and one near the bottom it
+    /// goes into the gap between — the bottom right covered the second change's new line.
+    #[test]
+    fn the_follow_card_keeps_off_the_changes_under_review() {
+        let (dir, ..) = follow_project("edit-gap");
+        let file = dir.join("long.txt");
+        let lines: Vec<String> =
+            (1..=30).map(|i| format!("line {i} of the long file under review")).collect();
+        std::fs::write(&file, lines.join("\n") + "\n").unwrap();
+        let mut ed = editor("");
+        ed.open(&file).unwrap();
+        let mut after = lines.clone();
+        after[1] = "LINE 2 of the long file under review, now shouting".into();
+        after[27] = "LINE 28 of the long file under review, now shouting".into();
+        let ask = serde_json::json!({"type": "control_request", "request_id": "p1", "request": {"subtype": "can_use_tool",
+            "tool_name": "Write", "input": {"file_path": file, "content": after.join("\n") + "\n"}}});
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec![
+            "-c".into(),
+            format!(
+                "while read -r line; do case \"$line\" in '{{\"message\"'*) printf '%s\\n' '{ask}';; esac; done"
+            ),
+        ];
+        feed(&mut ed, "<space>lshout<ret>");
+        settle_until(&mut ed, |ed| ed.review.is_some());
+        assert_eq!(ed.review.as_ref().unwrap().hunks.len(), 2);
+        let mut bytes = Vec::new();
+        crate::term::render(&mut ed, &mut bytes, 120, 40).unwrap();
+        let (_, y, _, h) = ed.screen.thought_card.get().expect("the follow card");
+        let rows = ed.screen.review_rows.borrow().clone();
+        assert!(rows.iter().any(|&r| r > 30), "the second change is near the bottom: {rows:?}");
+        assert!(!rows.iter().any(|r| (y..y + h).contains(r)), "card {y}..{} over {rows:?}", y + h);
         std::fs::remove_dir_all(&dir).ok();
     }
 

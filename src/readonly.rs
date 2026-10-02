@@ -35,8 +35,29 @@ const SHELLS: [&str; 4] = ["sh", "bash", "zsh", "dash"];
 /// The parts of `line` (an `sh -c '…'` around it taken off), if it's only words, `cd` and `;` `&&` `||` `|`
 /// — None for anything else (see the module's doc).
 pub fn parse(line: &str) -> Option<Vec<Part>> {
+    split(line).map(|(parts, _)| parts)
+}
+
+/// The commands of `line` when it's one command piped into others (`a 2>&1 | b | c`) and nothing else —
+/// every part a command, every separator a single `|`.
+pub fn piped(line: &str) -> Option<Vec<Vec<Word>>> {
+    let (parts, piped) = split(line)?;
+    if !piped.iter().all(|p| *p) {
+        return None;
+    }
+    parts
+        .into_iter()
+        .map(|p| match p {
+            Part::Cmd(w) => Some(w),
+            Part::Cd(_) => None,
+        })
+        .collect()
+}
+
+/// The line's parts (an `sh -c '…'` around it taken off) and, between each two, whether it's a single `|`.
+fn split(line: &str) -> Option<(Vec<Part>, Vec<bool>)> {
     let outer = parts(line)?;
-    if let [Part::Cmd(w)] = &outer[..]
+    if let [Part::Cmd(w)] = &outer.0[..]
         && let [shell, c, body] = &w[..]
         && SHELLS.contains(&shell.text.as_str())
         && c.text == "-c"
@@ -44,15 +65,17 @@ pub fn parse(line: &str) -> Option<Vec<Part>> {
     {
         let inner = parts(&body.text)?;
         // (an `sh -c` inside that one isn't read)
-        let nested = inner.iter().any(|p| matches!(p, Part::Cmd(w) if SHELLS.contains(&w[0].text.as_str())));
+        let nested =
+            inner.0.iter().any(|p| matches!(p, Part::Cmd(w) if SHELLS.contains(&w[0].text.as_str())));
         return (!nested).then_some(inner);
     }
     Some(outer)
 }
 
-/// The line's parts, without looking for an `sh -c` around them.
-fn parts(line: &str) -> Option<Vec<Part>> {
+/// The line's parts and their separators (`split`), without looking for an `sh -c` around them.
+fn parts(line: &str) -> Option<(Vec<Part>, Vec<bool>)> {
     let mut parts = Vec::new();
+    let mut piped = Vec::new();
     let mut words: Vec<Word> = Vec::new();
     let mut word: Option<Word> = None;
     let end_word = |word: &mut Option<Word>, words: &mut Vec<Word>| {
@@ -101,14 +124,16 @@ fn parts(line: &str) -> Option<Vec<Part>> {
             }
             ';' | '|' | '&' => {
                 end_word(&mut word, &mut words);
-                match (c, chars.peek()) {
+                let pipe = match (c, chars.peek()) {
                     ('&', Some('&')) | ('|', Some('|')) => {
                         chars.next();
+                        false
                     }
                     ('&', _) => return None,
-                    _ => {}
-                }
+                    (c, _) => c == '|',
+                };
                 end_part(&mut words, &mut parts)?;
+                piped.push(pipe);
             }
             '>' => {
                 // Only to nowhere: `2>&1`, `>/dev/null`, `2>/dev/null` (the fd as the word before it)
@@ -146,7 +171,7 @@ fn parts(line: &str) -> Option<Vec<Part>> {
     }
     end_word(&mut word, &mut words);
     end_part(&mut words, &mut parts)?;
-    Some(parts)
+    Some((parts, piped))
 }
 
 /// The words of `line` when it's one command and nothing else (quotes taken off, no glob) — what runs,
@@ -159,9 +184,9 @@ pub fn one_command(line: &str) -> Option<Vec<String>> {
 }
 
 /// The commands that only read (with their options below), by name.
-const COMMANDS: [&str; 16] = [
+const COMMANDS: [&str; 17] = [
     "ls", "cat", "head", "tail", "wc", "grep", "rg", "find", "tree", "stat", "file", "du", "diff", "sort",
-    "uniq", "pwd",
+    "uniq", "cut", "pwd",
 ];
 
 /// git's that only read — `branch` only bare (with words it creates, renames, deletes).
@@ -173,11 +198,14 @@ pub fn read_only(cmd: &str) -> bool {
     let Some(parts) = parse(cmd) else { return false };
     parts.iter().all(|p| match p {
         Part::Cd(_) => true,
-        Part::Cmd(w) => {
-            let words: Vec<&str> = w.iter().map(|w| w.text.as_str()).collect();
-            !words.iter().any(|w| crate::tools::WRITES.iter().any(|o| w.starts_with(o))) && reads_only(&words)
-        }
+        Part::Cmd(w) => only_reads(w),
     })
+}
+
+/// Whether one command only reads (`read_only`'s rule for each part of a line).
+pub fn only_reads(w: &[Word]) -> bool {
+    let words: Vec<&str> = w.iter().map(|w| w.text.as_str()).collect();
+    !words.iter().any(|w| crate::tools::WRITES.iter().any(|o| w.starts_with(o))) && reads_only(&words)
 }
 
 /// One command's words: a command above, without the options that make it write, run, or never end.

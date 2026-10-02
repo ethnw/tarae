@@ -279,8 +279,9 @@ fn run_schema() -> Value {
     its output — build, lint, format, test suites, git. The user watches it in their task panel. Both output \
     streams come back whole (long output: its start and end), so don't redirect or pipe to head/tail for \
     that. Checks (cargo build/check/test/clippy/fmt, go build/test/vet, git status/diff/log/show) start at \
-    once — one command, words only (quotes are fine). So do read-only ones (ls cat head tail wc grep rg find \
-    tree stat file du diff sort uniq pwd, git blame/rev-parse/ls-files/branch) whose paths stay in the \
+    once — one command, words only (quotes are fine), alone or piped into grep head tail wc sort cut uniq. \
+    So do read-only ones (ls cat head tail wc grep rg find tree stat file du diff sort uniq cut pwd, git \
+    blame/rev-parse/ls-files/branch) whose paths stay in the \
     project — and lines of them joined by ; && || |, with cd, or the same in sh -c '…' (no $, backticks or \
     redirects to files). To run somewhere other than the project root, give cwd rather than a cd. Any other \
     command waits for the user to allow it — if they say no, don't retry it, ask. No stdin and no terminal: \
@@ -334,7 +335,30 @@ pub const WRITES: [&str; 6] = ["--output", "--ext-diff", "--textconv", "--config
 /// starting with one of the `RUN_ALLOW` or `extra` prefixes word for word (`extra`: `llm.run-allow`, this
 /// chat's patterns), and none of the options that make it write or run something.
 pub fn allowed(cmd: &str, extra: &[String]) -> bool {
-    let Some(words) = crate::readonly::one_command(cmd) else { return false };
+    crate::readonly::one_command(cmd).is_some_and(|words| allowed_words(&words, extra))
+}
+
+/// Programs a check's output can go through and still count as the check (#32): they only read it.
+const FILTERS: [&str; 7] = ["grep", "head", "tail", "wc", "sort", "cut", "uniq"];
+
+/// The first command's words when `cmd` is one command piped into filters and nothing else (`cargo test
+/// 2>&1 | grep -E "a|b" | head`): each filter one of `FILTERS` with no option that writes, runs or never
+/// ends (`readonly::only_reads`). What the filters read besides their input is `readonly::outside`'s.
+pub fn filtered(cmd: &str) -> Option<Vec<String>> {
+    let mut parts = crate::readonly::piped(cmd)?.into_iter();
+    let head = parts.next()?;
+    let mut any = false;
+    for f in parts {
+        if !FILTERS.contains(&f[0].text.as_str()) || !crate::readonly::only_reads(&f) {
+            return None;
+        }
+        any = true;
+    }
+    (any && !head.iter().any(|w| w.glob)).then(|| head.into_iter().map(|w| w.text).collect())
+}
+
+/// `allowed` for one command's words.
+fn allowed_words(words: &[String], extra: &[String]) -> bool {
     if words.iter().any(|w| WRITES.iter().any(|o| w.starts_with(o))) {
         return false;
     }
@@ -373,20 +397,28 @@ const CHECKS: [&str; 22] = [
 /// Whether a command Claude runs is a check or a build — every command in its line one of `CHECKS` (a `cd`
 /// aside). Only those feed the user's list; a grep of Claude's looking around doesn't replace it (#28).
 pub fn is_check(cmd: &str) -> bool {
+    // (a check's output through filters is the check's: its places are what's left — #32)
+    if let Some(head) = filtered(cmd) {
+        return check_words(&head);
+    }
     let Some(parts) = crate::readonly::parse(cmd) else { return false };
     let mut any = false;
     for p in &parts {
         let crate::readonly::Part::Cmd(w) = p else { continue };
-        let ok = CHECKS.iter().any(|c| {
-            let c: Vec<&str> = c.split(' ').collect();
-            w.len() >= c.len() && w.iter().zip(&c).all(|(w, c)| w.text == *c)
-        });
-        if !ok {
+        if !check_words(&w.iter().map(|w| w.text.clone()).collect::<Vec<_>>()) {
             return false;
         }
         any = true;
     }
     any
+}
+
+/// Whether one command's words start with one of `CHECKS`.
+fn check_words(w: &[String]) -> bool {
+    CHECKS.iter().any(|c| {
+        let c: Vec<&str> = c.split(' ').collect();
+        w.len() >= c.len() && w.iter().zip(&c).all(|(w, c)| w == c)
+    })
 }
 
 /// Programs that run whatever follows them — a pattern ending in one would allow anything.
@@ -396,10 +428,11 @@ const RUNNERS: [&str; 22] = [
 ];
 
 /// The pattern a run card can allow for the rest of the chat (`a`): the command's first plain words — no
-/// option, path, value or glob — two or three of them (`cargo xtask shot`). None for a line of several
-/// commands, one word, or a runner (`sh x.sh`, `env …`: anything could follow).
+/// option, path, value or glob — two or three of them (`cargo xtask shot`); a command piped into filters
+/// gives its own (`filtered`, #32). None for a line of other commands, one word, or a runner (`sh x.sh`,
+/// `env …`: anything could follow).
 pub fn pattern(cmd: &str) -> Option<String> {
-    let words = crate::readonly::one_command(cmd)?;
+    let words = crate::readonly::one_command(cmd).or_else(|| filtered(cmd))?;
     let lead: Vec<&str> = words
         .iter()
         .map(String::as_str)
@@ -456,7 +489,9 @@ fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
         guarded(ed, call, Job::Command(cmd.to_string(), cwd), false);
         return Ok(());
     }
-    if outside.is_none() && crate::readonly::read_only(cmd) {
+    // (a check piped into filters: the check's rule, and what the filters name is read as any read's — #32)
+    let checked = filtered(cmd).is_some_and(|head| allowed_words(&head, &extra));
+    if outside.is_none() && (checked || crate::readonly::read_only(cmd)) {
         return read_only(ed, call, cmd.to_string(), cwd);
     }
     asked(ed)?;
@@ -1414,6 +1449,48 @@ mod tests {
         assert!(super::allowed("cargo xtask shot /tmp/a.png '@?files in'", &chat));
         assert!(!super::allowed("cargo xtask perf", &chat));
         assert!(!super::allowed("cargo xtask shot x; rm -rf y", &chat));
+    }
+
+    /// #32: a check piped only into filters that read is the check — its words, for the rules, the
+    /// pattern and the list; anything else in the line, or a filter's option that writes, runs or never
+    /// ends, and it isn't.
+    #[test]
+    fn a_check_piped_into_filters_is_the_check() {
+        let f = |c: &str| super::filtered(c).map(|w| w.join(" "));
+        let yours = "sh -c 'cargo test -p tarae --lib 2>&1 | grep -E \"FAILED|panicked\" | head -40'";
+        assert_eq!(f(yours).as_deref(), Some("cargo test -p tarae --lib"));
+        for c in [
+            "cargo build 2>&1 | tail -n 20",
+            "cargo test | sort | uniq -c | cut -c1-80",
+            "go test ./... | grep -v '^ok'",
+            "cargo clippy 2>&1 | wc -l",
+        ] {
+            assert!(f(c).is_some(), "{c}");
+        }
+        for c in [
+            "cargo test",
+            "cargo test | sh",
+            "cargo test | tee out",
+            "cargo test | xargs rm",
+            "cargo test | tail -f",
+            "cargo test | sort -o out",
+            "cargo test | uniq a out",
+            "cargo test | grep x > out",
+            "cargo test; grep x",
+            "cargo test && head x",
+            "cargo test || head",
+            "cd src | grep x",
+            "cargo test src/* | head",
+            "grep x | cargo test",
+        ] {
+            assert_eq!(f(c), None, "{c}");
+        }
+        assert!(super::is_check(yours), "it still feeds the list");
+        assert!(!super::is_check("grep -rn x src | head"), "a grep through a filter isn't a check");
+        assert!(!super::is_check("cargo xtask shot x.png | head"));
+        let shot = "sh -c 'cargo xtask shot /tmp/x.png 2>&1 | grep -E \"a|b\" | tail -3'";
+        assert_eq!(super::pattern(shot).as_deref(), Some("cargo xtask shot"));
+        assert_eq!(super::pattern("ls | wc -l"), None, "one word isn't a pattern");
     }
 
     /// Only checks and builds feed the user's list (#28): every command in the line one of them; Claude's

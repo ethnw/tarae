@@ -338,6 +338,7 @@ fn render_frame(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io
         ))),
         test_panel: Default::default(),
         review_change: Default::default(),
+        review_rows: Default::default(),
         task_panel: Default::default(),
         plugin_panel: Default::default(),
         note_card: Default::default(),
@@ -3557,6 +3558,9 @@ fn draw_review(
         .screen
         .review_change
         .set(shown.iter().position(mine).zip(shown.iter().rposition(mine)).map(|(a, b)| (top + a, top + b)));
+    // Every change's rows — the follow card keeps off them
+    *editor.screen.review_rows.borrow_mut() =
+        shown.iter().enumerate().filter(|(_, r)| !matches!(r, RRow::Doc(_))).map(|(k, _)| top + k).collect();
     for (k, row) in shown.iter().enumerate() {
         let y = lay.text_top + title_h as u16 + k as u16;
         queue!(out, MoveTo(0, y))?;
@@ -6107,7 +6111,19 @@ fn draw_follow_card(
     let string = card.patch(editor.theme.try_get("string").unwrap_or(dim));
     // Header: what it's doing
     let gaze = c.follow.gaze.as_ref();
+    // Its call waits on the user — a card of Claude's asking (a command, a read, the screen) or an edit's
+    // review: said so, not "running" while nothing runs (what it waits on is that card's — not repeated)
+    let asks = editor.offers.iter().any(|o| {
+        use crate::offer::What;
+        matches!(o.what, What::Run(_) | What::NoSandbox { .. } | What::Read { .. } | What::Screen { .. })
+    });
+    let waiting =
+        |verb: &str| c.busy() && (asks || matches!(verb, "edit" | "write") && editor.review.is_some());
     let mut head: Vec<Span> = match gaze {
+        Some(g) if waiting(g.look.verb) => vec![
+            Span { text: "● ".into(), style: accent },
+            Span { text: "waiting for your answer".into(), style: Style { bold: true, ..dim } },
+        ],
         Some(g) => {
             let verb = match g.look.verb {
                 "read" => "reading",
@@ -6281,25 +6297,53 @@ fn draw_follow_card(
             .unwrap_or_default(),
         _ => Vec::new(),
     };
-    // Where: the bottom right — the top right if that's taken; neither free of the lines read: the bottom
-    // anyway (a card over cards never). As many of the newest words as there's room for, a row at least, up
-    // to `BODY` and half the pane.
+    // Where: the bottom right — the top right if that's taken, else the biggest gap between (an edit
+    // review's changes); none free of the lines read and the review's changes: free of the change in hand,
+    // then of the lines read, then anywhere (a card over cards never). As many of the newest words as
+    // there's room for, a row at least, up to `BODY` and half the pane.
     let end = py + ph;
     let min_h = fixed + 1;
-    let place = |read: &[usize]| -> Option<(bool, usize)> {
-        // Rows other cards (and the lines read) hold in the card's columns
-        let blocks: Vec<(usize, usize)> = avoid
+    // (first row, end, anchored at its end)
+    let place = |keep: &[usize]| -> Option<(usize, usize, bool)> {
+        // Rows other cards (and what's kept in sight) hold in the card's columns
+        let mut blocks: Vec<(usize, usize)> = avoid
             .iter()
             .filter(|r| r.0 < x0 + width && x0 < r.0 + r.2)
             .map(|r| (r.1, r.1 + r.3))
-            .chain(read.iter().map(|&r| (r, r + 1)))
+            .chain(keep.iter().map(|&r| (r, r + 1)))
             .filter(|b| b.0 < end && b.1 > py)
             .collect();
-        let below = end.saturating_sub(blocks.iter().map(|b| b.1).max().unwrap_or(py).max(py));
-        let above = blocks.iter().map(|b| b.0).min().unwrap_or(end).max(py) - py;
-        [(true, below), (false, above)].into_iter().find(|&(_, room)| room >= min_h)
+        blocks.sort_unstable();
+        let mut gaps = Vec::new();
+        let mut at = py;
+        for b in &blocks {
+            if b.0 > at {
+                gaps.push((at, b.0));
+            }
+            at = at.max(b.1);
+        }
+        if end > at {
+            gaps.push((at, end));
+        }
+        let fits = |g: &&(usize, usize)| g.1 - g.0 >= min_h;
+        let bottom = gaps.last().filter(|g| g.1 == end).filter(fits).map(|g| (g.0, g.1, true));
+        let top = gaps.first().filter(|g| g.0 == py).filter(fits).map(|g| (g.0, g.1, false));
+        bottom
+            .or(top)
+            .or_else(|| gaps.iter().filter(fits).max_by_key(|g| g.1 - g.0).map(|g| (g.0, g.1, true)))
     };
-    let Some((at_bottom, room)) = place(&read).or_else(|| place(&[])) else { return Ok(None) };
+    let changes = editor.screen.review_rows.borrow().clone();
+    let current: Vec<usize> =
+        editor.screen.review_change.get().map_or(Vec::new(), |(a, b)| (a..=b).collect());
+    let and = |a: &[usize], b: &[usize]| -> Vec<usize> { a.iter().chain(b).copied().collect() };
+    let Some((gap_top, gap_end, at_bottom)) = place(&and(&read, &changes))
+        .or_else(|| place(&and(&read, &current)))
+        .or_else(|| place(&read))
+        .or_else(|| place(&[]))
+    else {
+        return Ok(None);
+    };
+    let room = gap_end - gap_top;
     let body_max = BODY.min((ph / 2).saturating_sub(fixed)).min(room - fixed).max(1);
     // The newest rows; cut mid-way → `…` in front, and no blank row on top
     let from = log_cut(&body, body_max);
@@ -6318,7 +6362,7 @@ fn draw_follow_card(
         rows.push((h, None));
     }
     let h = rows.len() + 2 * pad;
-    let y0 = if at_bottom { end - h } else { py };
+    let y0 = if at_bottom { gap_end - h } else { gap_top };
     let rect = (x0, y0, width, h);
     editor.screen.thought_card.set(Some(rect));
     if compact {

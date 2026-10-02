@@ -119,10 +119,16 @@ pub enum ActionPreview {
     Failed(String),
 }
 
-/// How long a server stays up once no open file uses it — a file reopened soon after needn't wait for it to
-/// load again (rust-analyzer took minutes on this repository — N1); after that it stops (it ran on for hours).
+/// How long a server stays up once no open file uses it while another file of its project is still open —
+/// a file reopened soon after needn't wait for it to load again (rust-analyzer took minutes on this
+/// repository — N1); after that it stops (it ran on for hours).
 const IDLE_STOP: std::time::Duration =
-    std::time::Duration::from_millis(if cfg!(test) { 30 } else { 10 * 60 * 1000 });
+    std::time::Duration::from_millis(if cfg!(test) { 60_000 } else { 10 * 60 * 1000 });
+
+/// …and once no file under its root is open at all (#34 — taplo and bash-language-server for closed temp
+/// folders stayed the full ten minutes): a grace for a quick reopen, then it stops.
+const ROOT_GONE: std::time::Duration =
+    std::time::Duration::from_millis(if cfg!(test) { 30 } else { 30 * 1000 });
 
 /// How often one question (same place, same text) is put off for a busy server before it's given up —
 /// asked again at each piece of work that ends (rust-analyzer reports a dozen while loading a project).
@@ -1610,29 +1616,44 @@ impl Editor {
         doc.lsp.links.clear();
         doc.lsp.diagnostics.clear();
         doc.lsp.inlay.clear();
-        for cid in clients {
+        for &cid in &clients {
             if let Some(c) = self.client_mut(cid) {
                 c.notify("textDocument/didClose", json!({ "textDocument": { "uri": lsp::uri(&path) } }));
             }
-            // The last file it served: it stops once none has come back for a while
-            if !self.docs.iter().any(|d| d.lsp.clients().any(|c| c == cid)) {
-                self.lsp_unused(cid);
-            }
+        }
+        // The servers this file's closing leaves with none to serve — its own, and others of its root (one
+        // already let go waits less once its project has no file open): they stop once none has come back
+        // for a while — a short while when no file under their root is open (`ROOT_GONE`)
+        let serves = |cid: ClientId| self.docs.iter().any(|d| d.lsp.clients().any(|c| c == cid));
+        let root_open = |root: &std::path::Path| {
+            self.docs.iter().any(|d| d.id != id && d.path.as_deref().is_some_and(|p| p.starts_with(root)))
+        };
+        let waits: Vec<(ClientId, bool)> = self
+            .lsp
+            .clients
+            .iter()
+            .filter(|c| clients.contains(&c.id) || path.starts_with(&c.root))
+            .filter(|c| !serves(c.id))
+            .map(|c| (c.id, root_open(&c.root)))
+            .filter(|&(cid, open)| clients.contains(&cid) || !open)
+            .collect();
+        for (cid, open) in waits {
+            self.lsp_unused(cid, if open { IDLE_STOP } else { ROOT_GONE });
         }
     }
 
-    /// Server `cid` serves no open file now: in `IDLE_STOP` it stops, unless one has come back by then (or it
+    /// Server `cid` serves no open file now: after `wait` it stops, unless one has come back by then (or it
     /// was let go again since — the latest wait counts). The next file of its project starts it again.
-    fn lsp_unused(&mut self, cid: ClientId) {
+    fn lsp_unused(&mut self, cid: ClientId, wait: std::time::Duration) {
         let since = std::time::Instant::now();
         self.lsp.unused.insert(cid, since);
         self.events.jobs().spawn(move || {
-            std::thread::sleep(IDLE_STOP);
-            move |ed: &mut Editor| ed.lsp_stop_if_unused(cid, since)
+            std::thread::sleep(wait);
+            move |ed: &mut Editor| ed.lsp_stop_if_unused(cid, since, wait)
         });
     }
 
-    fn lsp_stop_if_unused(&mut self, cid: ClientId, since: std::time::Instant) {
+    fn lsp_stop_if_unused(&mut self, cid: ClientId, since: std::time::Instant, wait: std::time::Duration) {
         if self.lsp.unused.get(&cid) != Some(&since) {
             return;
         }
@@ -1642,7 +1663,7 @@ impl Editor {
         }
         let Some(root) = self.client(cid).map(|c| c.root.display().to_string()) else { return };
         if let Some(name) = self.lsp_stopped(cid) {
-            let idle = crate::term::duration(IDLE_STOP.as_secs_f32());
+            let idle = crate::term::duration(wait.as_secs_f32());
             crate::log::line(
                 &name,
                 "stop",
@@ -2487,8 +2508,10 @@ mod tests {
         std::fs::remove_dir_all(file.parent().unwrap()).ok();
     }
 
-    /// Every kind of server stops once no file of it is open (a TOML one here, beside rust's that stays while
-    /// its file is open); rust-analyzer's `initialize` tells it to leave the project's worktrees alone.
+    /// Every kind of server stops once no file of it is open (a TOML one here, beside rust's): while another
+    /// file of its project is open it waits the long wait (`IDLE_STOP`), and once none under its root is,
+    /// both go after the short one (#34); rust-analyzer's `initialize` tells it to leave the project's
+    /// worktrees alone.
     #[test]
     fn every_server_stops_unused_and_rust_analyzer_skips_worktrees() {
         let dir = std::env::temp_dir().join(format!("tarae-lsp-kinds-{}", std::process::id()));
@@ -2520,20 +2543,24 @@ mod tests {
         );
         assert!(sent(&toml_log).contains(r#""initializationOptions":null"#), "others get none");
         let pid = ed.client(toml).and_then(Client::pid).expect("its process");
+        // Cargo.toml closed, main.rs still open in the same root: toml's server waits the long wait
         let id = ed.doc().id;
         ed.close_doc(id);
-        settle_for(&mut ed, 5, |ed| ed.client(toml).is_none());
-        assert!(ed.client(toml).is_none(), "toml's server stopped");
+        assert!(ed.lsp.unused.contains_key(&toml), "unused, waiting");
+        settle_for(&mut ed, 1, |_| false);
+        assert!(ed.client(toml).is_some(), "its project still has a file open: it stays a while");
         assert!(ed.client(rust).is_some(), "rust's file is still open: its server stays");
+        // main.rs closed too: nothing under the root — both stop soon
+        let id = ed.doc().id;
+        ed.close_doc(id);
+        settle_for(&mut ed, 5, |ed| ed.client(toml).is_none() && ed.client(rust).is_none());
+        assert!(ed.client(toml).is_none(), "toml's server stopped once its root had no file open");
+        assert!(ed.client(rust).is_none(), "and rust's");
         let end = std::time::Instant::now() + Duration::from_secs(5);
         while !reaped(pid) && std::time::Instant::now() < end {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(reaped(pid), "reaped");
-        let id = ed.doc().id;
-        ed.close_doc(id);
-        settle_for(&mut ed, 5, |ed| ed.client(rust).is_none());
-        assert!(ed.client(rust).is_none(), "and rust's once its file closed");
         std::fs::remove_dir_all(&dir).ok();
     }
 
