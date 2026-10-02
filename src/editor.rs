@@ -1206,10 +1206,19 @@ impl Editor {
                 _ => {}
             }
         }
-        // The review's file rail: a click opens that file
+        // The review's file rail: a click opens that file, the wheel scrolls it (`CodeReview::fit` clamps)
+        let on_rail =
+            x < s.panes.iter().map(|p| p.1.x).min().unwrap_or(0) && !s.review_rail.borrow().is_empty();
+        if on_rail && let Some(r) = self.code_review.as_mut() {
+            match m.kind {
+                K::ScrollDown => return r.scroll += 3,
+                K::ScrollUp => return r.scroll = r.scroll.saturating_sub(3),
+                _ => {}
+            }
+        }
         if m.kind == K::Down
             && let Some(&(_, i)) = s.review_rail.borrow().iter().find(|r| r.0 == y)
-            && x < s.panes.iter().map(|p| p.1.x).min().unwrap_or(0)
+            && on_rail
         {
             crate::codereview::show(self, i, false);
             return;
@@ -4851,6 +4860,106 @@ mod tests {
             ed.status.is_some() && ed.status.as_ref().unwrap().0.contains("no changes")
         });
         assert!(ed.code_review.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A diff against the index still under way when the review's base lands mustn't replace the review's
+    /// diff (a staged file: index = worktree → no hunks → the file showed as plain code).
+    #[test]
+    fn review_diff_survives_a_stale_index_diff() {
+        let dir = git_repo("stale", &[("a.txt", "a\nb\nc\n")]);
+        std::fs::write(dir.join("a.txt"), "a\nB\nc\n").unwrap();
+        git_in(&dir, &["add", "a.txt"]);
+        let mut ed = editor("");
+        ed.open(&dir.join("a.txt")).unwrap();
+        // What `git_load_base` leaves (git_auto is off in tests): the index as the base, a diff due
+        ed.doc_mut().git_base = Some(std::sync::Arc::new("a\nB\nc\n".into()));
+        ed.doc_mut().git_version = u64::MAX;
+        ed.git_schedule();
+        let stale = ed.events.recv_timeout(std::time::Duration::from_secs(5)).expect("the index diff");
+        crate::codereview::start_in(&mut ed, dir.clone(), None);
+        settle_until(&mut ed, |ed| {
+            ed.doc().review_base.is_some() && ed.doc().git_version == ed.doc().version()
+        });
+        assert_eq!(ed.doc().git_hunks.len(), 1, "the review's diff");
+        ed.handle_event(stale);
+        assert_eq!(ed.doc().git_hunks.len(), 1, "the review's diff stays");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The index base asked for when a review's file opened, landing before the review's own base, stays
+    /// out of it.
+    #[test]
+    fn review_files_take_no_index_base() {
+        let dir = git_repo("nobase", &[("a.txt", "a\n")]);
+        std::fs::write(dir.join("a.txt"), "A\n").unwrap();
+        let mut ed = editor("");
+        ed.git_auto = true;
+        ed.open(&dir.join("a.txt")).unwrap(); // asks for the index base
+        let id = ed.doc().id;
+        let mut r =
+            crate::codereview::CodeReview::for_test(crate::codereview::Base::Head, dir.clone(), Vec::new());
+        r.docs.push(id);
+        ed.code_review = Some(r);
+        let ev = ed.events.recv_timeout(std::time::Duration::from_secs(5)).expect("the index base");
+        ed.handle_event(ev);
+        assert!(ed.doc().git_base.is_none(), "the review's base is on its way");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A big file's review base arriving after its text: its diff is worked out on that text, not on the
+    /// empty placeholder the base was asked for over.
+    #[test]
+    fn review_of_a_file_still_loading() {
+        let dir = git_repo("loading", &[("a.txt", "a\nb\nc\n")]);
+        std::fs::write(dir.join("a.txt"), "a\nB\nc\n").unwrap();
+        let path = dir.join("a.txt");
+        let mut ed = editor("");
+        let id = ed.alloc_id();
+        ed.add_doc(Document::placeholder(id, &path)); // what `open` makes of a file over 1 MB
+        let file = crate::codereview::File {
+            rel: "a.txt".into(),
+            path: path.clone(),
+            added: 1,
+            removed: 1,
+            new: false,
+            gone: false,
+            binary: false,
+        };
+        ed.code_review = Some(crate::codereview::CodeReview::for_test(
+            crate::codereview::Base::Head,
+            dir.clone(),
+            vec![file],
+        ));
+        crate::codereview::show(&mut ed, 0, false); // the base is asked for over the placeholder
+        ed.finish_loading(id, Ok(ropey::Rope::from_str("a\nB\nc\n")), 0);
+        settle_until(&mut ed, |ed| {
+            ed.doc().review_base.is_some() && ed.doc().git_version == ed.doc().version()
+        });
+        let h = &ed.doc().git_hunks;
+        assert_eq!(h.len(), 1, "{h:?}");
+        assert_eq!((h[0].kind, h[0].lines.clone()), (crate::git::HunkKind::Modified, 1..2));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A new file lands on its top — its whole text is one change, and the cursor at its end showed the
+    /// last line.
+    #[test]
+    fn review_lands_on_the_top_of_a_new_file() {
+        let dir = git_repo("newtop", &[("a.txt", "a\n")]);
+        let body: String = (0..200).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(dir.join("n.txt"), &body).unwrap();
+        let mut ed = editor("");
+        ed.viewport = (20, 80);
+        crate::codereview::start_in(&mut ed, dir.clone(), None);
+        settle_until(&mut ed, |ed| {
+            ed.doc().review_base.is_some() && ed.doc().git_version == ed.doc().version()
+        });
+        assert_eq!(ed.doc().path.as_deref(), Some(dir.join("n.txt").as_path()));
+        assert_eq!(ed.cursor_line(), 0, "on the change's first line");
+        assert_eq!(ed.doc().top, 0);
+        let sel = ed.doc().selection().primary();
+        assert_eq!((sel.from(), sel.to()), (0, body.len()), "the whole change selected");
         std::fs::remove_dir_all(&dir).ok();
     }
 

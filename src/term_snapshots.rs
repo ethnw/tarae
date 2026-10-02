@@ -1095,6 +1095,67 @@ fn review_keeps_the_cursor_on_screen_below_a_big_deletion() {
     }
 }
 
+/// The review's rail with more files than rows: a click opens the file under it without the list sliding
+/// (the next click lands where it's aimed), the wheel scrolls it, and a file shown from elsewhere (`]g`)
+/// scrolls into view.
+#[test]
+fn review_rail_scrolls_by_itself_only_to_show_the_file() {
+    use crate::codereview::{Base, CodeReview, File};
+    use crate::event::{Mouse, MouseKind};
+    let dir = std::env::temp_dir().join(format!("tarae-rail-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = std::fs::canonicalize(dir).unwrap();
+    let files: Vec<File> = (0..30)
+        .map(|i| {
+            let rel = format!("f{i:02}.txt");
+            std::fs::write(dir.join(&rel), "x\n").unwrap();
+            File { path: dir.join(&rel), rel, added: 1, removed: 0, new: true, gone: false, binary: false }
+        })
+        .collect();
+    let mut s = Shot::new(100, 24);
+    s.ed.open(&dir.join("f00.txt")).unwrap();
+    s.ed.code_review = Some(CodeReview::for_test(Base::Head, dir.clone(), files));
+    s.frame();
+    let rail = |s: &Shot| s.ed.screen.review_rail.borrow().clone();
+    let click = |s: &mut Shot, kind, y: usize| {
+        s.ed.handle_mouse(Mouse { kind, x: 4, y: y as u16, alt: false });
+        s.frame();
+    };
+    let screen = |s: &mut Shot| {
+        let mut p = vt100::Parser::new(s.h, s.w, 0);
+        p.process(&s.frame());
+        p.screen().contents()
+    };
+    let before = rail(&s);
+    assert!(before.len() < 30, "more files than rows: {before:?}");
+    // The files out of sight are counted
+    let text = screen(&mut s);
+    assert!(text.contains(&format!("↓ {} more", 30 - before.len())) && !text.contains('↑'), "{text}");
+    // Clicks on the last row, then on the first: each opens the file it was on
+    let (last, first) = (*before.last().unwrap(), before[0]);
+    click(&mut s, MouseKind::Down, last.0);
+    assert_eq!(s.ed.doc().path.as_deref(), Some(dir.join(format!("f{:02}.txt", last.1)).as_path()));
+    assert_eq!(rail(&s), before, "the list stays where it was");
+    click(&mut s, MouseKind::Down, first.0);
+    assert_eq!(s.ed.doc().path.as_deref(), Some(dir.join(format!("f{:02}.txt", first.1)).as_path()));
+    // The wheel scrolls it (and leaves the code alone)
+    click(&mut s, MouseKind::ScrollDown, first.0);
+    assert_eq!(rail(&s)[0].1, first.1 + 3, "three files down");
+    assert!(screen(&mut s).contains("↑ 3 more"));
+    click(&mut s, MouseKind::ScrollUp, first.0);
+    assert_eq!(rail(&s), before);
+    for _ in 0..20 {
+        click(&mut s, MouseKind::ScrollDown, first.0);
+    }
+    assert_eq!(rail(&s).last().unwrap().1, 29, "no further than the last file");
+    assert!(!screen(&mut s).contains('↓'), "nothing below the last file");
+    // Another file shown from elsewhere comes into view
+    crate::codereview::show(&mut s.ed, 5, false);
+    s.frame();
+    assert!(rail(&s).iter().any(|r| r.1 == 5), "{:?}", rail(&s));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// Completion card with the selected item's docs — the list comes from a fake server (`cat`), the
 /// response is injected with `on_lsp_message`.
 #[test]

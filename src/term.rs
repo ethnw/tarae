@@ -333,6 +333,12 @@ fn render_frame(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io
         let depths: Vec<usize> = sb.lines().iter().map(|l| l.depth).collect();
         sb.fit(sidebar_list_rows(&lay), &depths);
     }
+    if lay.rail_w > 0
+        && let Some(marked) = editor.code_review.as_ref().map(|r| r.marked(editor))
+        && let Some(r) = editor.code_review.as_mut()
+    {
+        r.fit(marked, review_rail_room(&lay));
+    }
     if let Some(p) = editor.picker.as_mut() {
         let pb = PickerBox::new(&lay, p);
         p.view = p.visible(pb.list_rows);
@@ -6013,6 +6019,16 @@ const RAIL_MORE: usize = 12;
 ///     space n comment            ▌
 ///     space v s send 2 · q end   ▌
 /// ```
+/// The review rail's rows above its files (title, counts, viewed, a blank) and the key hints under them
+/// (a blank and three rows).
+const RAIL_HEAD: usize = 4;
+const RAIL_HINTS: usize = 4;
+
+/// Rows the review rail has for its files.
+fn review_rail_room(lay: &Layout) -> usize {
+    lay.text_rows.saturating_sub(RAIL_HEAD + RAIL_HINTS + 1).max(1)
+}
+
 fn draw_review_rail(
     r: &crate::codereview::CodeReview,
     editor: &Editor,
@@ -6034,7 +6050,6 @@ fn draw_review_rail(
     let w = lay.rail_w - 3; // margin 2 · edge 1
     let sp = |text: String, style: Style| Span { text, style };
     let edge = Style { fg: card.bg, bg: ui.base.bg, ..Style::default() };
-    let current = r.current(editor);
     let drafts_in = |f: &crate::codereview::File| {
         editor.notes.list.iter().filter(|n| n.path == f.path && n.thread.iter().any(|e| e.draft)).count()
     };
@@ -6065,20 +6080,19 @@ fn draw_review_rail(
     }
     rows.push((summary, card, None));
     rows.push((vec![sp(format!("  {viewed} of {n} viewed"), faint)], card, None));
-    rows.push((Vec::new(), card, None));
-    // Files under their folders (filetree.rs, in the review's order) — scrolled so the current one shows
-    let hints = 4;
-    let room = lay.text_rows.saturating_sub(rows.len() + hints + 1).max(1);
-    let tree = crate::filetree::Tree::build(
-        r.files.iter().enumerate().map(|(i, f)| (i, f.rel.as_str(), f.rel.len())),
-        false,
-    )
-    .rows(None);
+    // Files under their folders (filetree.rs, in the review's order) — from its scroll (`CodeReview::fit`),
+    // the files out of sight counted in the blank rows around them
+    let room = review_rail_room(lay);
+    let tree = r.rail_rows();
+    let files_in = |rows: &[crate::filetree::Row]| rows.iter().filter(|t| t.item.is_some()).count();
+    let more = |k: usize, arrow: &str| {
+        let text = if k > 0 { vec![sp(format!("  {arrow} {k} more"), faint)] } else { Vec::new() };
+        (text, card, None)
+    };
+    rows.push(more(files_in(&tree[..r.scroll.min(tree.len())]), "↑"));
     // The keys in the rail: its selection is the row marked (else the file being read)
-    let marked = if r.focus { Some(r.selected) } else { current };
-    let at = marked.and_then(|c| tree.iter().position(|t| t.item == Some(c)));
-    let first = at.map_or(0, |a| a.saturating_sub(room / 2)).min(tree.len().saturating_sub(room));
-    for t in tree.iter().skip(first).take(room) {
+    let marked = r.marked(editor);
+    for t in tree.iter().skip(r.scroll).take(room) {
         let piece: String = r.files[t.source].rel.chars().skip(t.span.start).take(t.span.len()).collect();
         let guides = sp(tree_guides(t.depth), faint);
         let Some(i) = t.item else {
@@ -6140,8 +6154,9 @@ fn draw_review_rail(
         row.extend(tail);
         rows.push((row, bg, Some(i)));
     }
+    rows.push(more(files_in(tree.get(r.scroll + room..).unwrap_or_default()), "↓"));
     // Keys at the bottom
-    let fill = lay.text_rows.saturating_sub(rows.len() + hints);
+    let fill = lay.text_rows.saturating_sub(rows.len() + RAIL_HINTS);
     rows.extend(std::iter::repeat_n((Vec::new(), card, None), fill));
     rows.push((Vec::new(), card, None));
     let hint = |pairs: &[(&str, &str)]| {

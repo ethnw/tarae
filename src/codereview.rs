@@ -70,6 +70,9 @@ pub struct CodeReview {
     /// The rail has the keys (`space e` during a review) · the file selected there.
     pub focus: bool,
     pub selected: usize,
+    /// The rail's first file row shown (the wheel moves it) · the file it last scrolled to (`fit`).
+    pub scroll: usize,
+    shown: Option<usize>,
 }
 
 impl CodeReview {
@@ -85,6 +88,8 @@ impl CodeReview {
             land: None,
             focus: false,
             selected: 0,
+            scroll: 0,
+            shown: None,
         }
     }
 
@@ -94,16 +99,43 @@ impl CodeReview {
             .is_some_and(|&(id, v)| ed.docs.iter().find(|d| d.id == id).is_none_or(|d| d.version() == v))
     }
 
-    /// The files in the rail's order (under their folders).
-    pub fn rail_order(&self) -> Vec<usize> {
+    /// The rail's rows: the files under their folders.
+    pub fn rail_rows(&self) -> Vec<crate::filetree::Row> {
         crate::filetree::Tree::build(
             self.files.iter().enumerate().map(|(i, f)| (i, f.rel.as_str(), f.rel.len())),
             false,
         )
         .rows(None)
-        .into_iter()
-        .filter_map(|t| t.item)
-        .collect()
+    }
+
+    /// The files in the rail's order (under their folders).
+    pub fn rail_order(&self) -> Vec<usize> {
+        self.rail_rows().into_iter().filter_map(|t| t.item).collect()
+    }
+
+    /// The file the rail marks: its selection while it has the keys, else the file being read.
+    pub fn marked(&self, ed: &Editor) -> Option<usize> {
+        if self.focus { Some(self.selected) } else { self.current(ed) }
+    }
+
+    /// Before drawing `room` rows of the rail: scroll only when the marked file changed and is out of
+    /// sight — just into view while the rail has the keys, else centered — so a click doesn't slide the
+    /// list under the pointer, and the wheel's scroll stays.
+    pub fn fit(&mut self, marked: Option<usize>, room: usize) {
+        let rows = self.rail_rows();
+        if marked != self.shown {
+            self.shown = marked;
+            if let Some(at) = marked.and_then(|m| rows.iter().position(|t| t.item == Some(m)))
+                && !(self.scroll..self.scroll + room).contains(&at)
+            {
+                self.scroll = match (self.focus, at < self.scroll) {
+                    (true, true) => at,
+                    (true, false) => at + 1 - room,
+                    (false, _) => at.saturating_sub(room / 2),
+                };
+            }
+        }
+        self.scroll = self.scroll.min(rows.len().saturating_sub(room));
     }
 
     /// Which file the current document is.
@@ -236,6 +268,8 @@ pub fn start_in(ed: &mut Editor, cwd: PathBuf, branch: Option<String>) {
                     land: None,
                     focus: false,
                     selected: 0,
+                    scroll: 0,
+                    shown: None,
                 });
                 ed.set_status(format!(
                     "review: {n} file{} changed — ]g walks the changes",
@@ -376,20 +410,24 @@ pub fn show(ed: &mut Editor, i: usize, at_end: bool) {
 /// The file's base text (worker) → its diff base; the first diff comes with it.
 fn load_base(ed: &mut Editor, id: DocId, root: PathBuf, rev: String, f: File) {
     let Some(doc) = ed.docs.iter().find(|d| d.id == id) else { return };
-    let (text, version) = (doc.text.clone(), doc.version());
+    // A big file still loading has a placeholder for text (and keeps its version when the text comes in):
+    // its diff is worked out once it's there
+    let (text, version) = (doc.text.clone(), (!doc.loading).then(|| doc.version()));
     ed.events.jobs().spawn(move || {
         let base = if f.new {
             String::new()
         } else {
             git(&root, &["show", &format!("{rev}:{}", f.rel)]).unwrap_or_default()
         };
-        let hunks = crate::git::hunks(&base, &text.to_string());
+        let hunks = version.map(|_| crate::git::hunks(&base, &text.to_string()));
         move |ed: &mut Editor| {
             let Some(d) = ed.docs.iter_mut().find(|d| d.id == id) else { return };
             d.review_base = Some(ropey::Rope::from_str(&base));
             d.git_base = Some(Arc::new(base));
             d.diff_of = None; // the review's base now, not a `:diff`'s
-            if d.version() == version {
+            if let (Some(version), Some(hunks)) = (version, hunks)
+                && d.version() == version
+            {
                 d.git_hunks = hunks;
                 d.git_version = version;
             } else {
@@ -413,6 +451,10 @@ pub fn land(ed: &mut Editor) {
     let target = if at_end { d.git_hunks.last() } else { d.git_hunks.first() }.cloned();
     if let Some(h) = target {
         ed.select_hunk(&h);
+        // The cursor on its first line — a change taller than the screen (a new file) shows from its top
+        let r = ed.doc().selection().primary();
+        let back = crate::selection::Range::new(r.to(), r.from());
+        ed.doc_mut().set_selection(crate::selection::Selection::single(back));
         ed.align_view(crate::viewalign::Place::Center);
     }
 }

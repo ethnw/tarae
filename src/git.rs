@@ -131,16 +131,23 @@ impl Editor {
         if !self.git_auto {
             return;
         }
-        // In a code review the base is the review's (codereview.rs), not the index
+        // In a code review the base is the review's (codereview.rs), not the index — also before it lands
+        let reviewed = move |ed: &Editor| ed.code_review.as_ref().is_some_and(|r| r.docs.contains(&id));
         let Some(path) =
             self.docs.iter().find(|d| d.id == id && d.review_base.is_none()).and_then(|d| d.path.clone())
         else {
             return;
         };
+        if reviewed(self) {
+            return;
+        }
         self.events.jobs().spawn(move || {
             let base = index_blob(&path).map(std::sync::Arc::new);
             move |ed: &mut Editor| {
                 // A review or `:diff` that started meanwhile keeps its base
+                if reviewed(ed) {
+                    return;
+                }
                 if let Some(d) = ed.docs.iter_mut().find(|d| d.id == id && d.review_base.is_none())
                     && d.git_base.as_deref() != base.as_deref()
                 {
@@ -179,8 +186,10 @@ impl Editor {
             let hunks = hunks(&base, &text.to_string());
             move |ed: &mut Editor| {
                 ed.git_diffing = false;
+                // Against the base it still has — a review's or `:diff`'s base may have come in meanwhile
                 if let Some(d) = ed.docs.iter_mut().find(|d| d.id == id)
                     && d.version() == version
+                    && d.git_base.as_ref().is_some_and(|b| std::sync::Arc::ptr_eq(b, &base))
                 {
                     d.git_hunks = hunks;
                     d.git_version = version;
