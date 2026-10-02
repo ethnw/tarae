@@ -53,8 +53,61 @@ pub enum Guard {
 }
 
 impl Guard {
-    /// The line Claude reads with the command's result.
-    pub fn report(&self) -> String {
+    /// The run's watch, when it ran in the sandbox.
+    pub fn watch(&self) -> Option<&std::sync::Arc<Watch>> {
+        match self {
+            Guard::In(p) => p.watch.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// What Claude reads with the command's result: what the sandbox blocked (or that it blocked nothing),
+    /// then what the sandbox allows. `output` = the run's lines — the fallback when nothing could watch.
+    pub fn report(&self, output: &[(bool, String)]) -> String {
+        let rules = self.rules();
+        let unwatched = " \"Operation not permitted\" is likely the sandbox.";
+        let Some(w) = self.watch() else {
+            return if matches!(self, Guard::In(_)) { format!("{rules}{unwatched}") } else { rules };
+        };
+        let b = w.blocked();
+        if b.total > 0 {
+            let mut s = format!(
+                "The sandbox blocked {} — {} time{}:\n",
+                if b.distinct == 1 { "one thing".to_string() } else { format!("{} things", b.distinct) },
+                b.total,
+                if b.total == 1 { "" } else { "s" }
+            );
+            for d in &b.seen {
+                s.push_str(&format!("  {}\n", d.reported()));
+            }
+            if b.distinct > b.seen.len() {
+                s.push_str(&format!("  … and {} more\n", b.distinct - b.seen.len()));
+            }
+            s.push_str(&format!(
+                "{rules}\nIf the command needs one of these, tell the user — llm.sandbox-write, llm.sandbox-ports, \
+                 llm.sandbox-localhost and llm.sandbox-network open more; don't work around it."
+            ));
+            return s;
+        }
+        match b.failed {
+            None => format!("The sandbox blocked nothing. {rules}"),
+            Some(why) => {
+                let mut s =
+                    format!("tarae couldn't watch what the sandbox blocked ({why}). {rules}{unwatched}");
+                let refused = refused_lines(output);
+                if !refused.is_empty() {
+                    s.push_str("\nLines that may be the sandbox:\n");
+                    for l in refused {
+                        s.push_str(&format!("  {l}\n"));
+                    }
+                }
+                s
+            }
+        }
+    }
+
+    /// What the sandbox allows (or that there was none).
+    fn rules(&self) -> String {
         match self {
             Guard::In(p) => {
                 let ports = p.ports.iter().map(u16::to_string).collect::<Vec<_>>().join(", ");
@@ -73,7 +126,7 @@ impl Guard {
                 };
                 format!(
                     "In tarae's sandbox: it could write only in the project (not .git or .tarae.toml), temp \
-                     folders and the toolchain's own{net} — \"Operation not permitted\" is likely the sandbox."
+                     folders and the toolchain's own{net}."
                 )
             }
             Guard::Without(why) => format!("Ran without a sandbox ({why}) — the user agreed."),
@@ -106,6 +159,11 @@ pub struct Policy {
     /// This run's own temp folder — its `TMPDIR`, and with the project the only place it may make or reach
     /// a unix socket (`RunDir`).
     pub run: Option<std::sync::Arc<RunDir>>,
+    /// This run's tag: every deny carries it (`(with message …)`), so the kernel's report of a denial says
+    /// whose it is — by the time it arrives the process is mostly gone (measured), so its pid can't.
+    pub tag: Option<String>,
+    /// What the sandbox denied this run, watched while it goes (`Watch`).
+    pub watch: Option<std::sync::Arc<Watch>>,
 }
 
 /// A run's own temp folder. Unix sockets anywhere else stay out of reach: in `/private/tmp` and `$TMPDIR`
@@ -130,6 +188,11 @@ impl RunDir {
     pub fn path(&self) -> &Path {
         &self.0
     }
+
+    /// The run's tag: its folder's name, closed with a dot (so `…-1.` isn't found in `…-10.`).
+    pub fn tag(&self) -> String {
+        format!("{}.", self.0.file_name().unwrap_or_default().to_string_lossy())
+    }
 }
 
 impl Drop for RunDir {
@@ -137,6 +200,257 @@ impl Drop for RunDir {
         let dir = std::mem::take(&mut self.0);
         std::thread::spawn(move || std::fs::remove_dir_all(dir));
     }
+}
+
+/// One denial the kernel reported: the process, what it tried (`file-write-create`, `network-outbound`…)
+/// and on what (a path, an address).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Denial {
+    pub process: String,
+    pub op: String,
+    pub target: String,
+}
+
+impl Denial {
+    /// The target, home spelled `~`.
+    fn target_shown(&self) -> String {
+        let home = std::env::var("HOME").unwrap_or_default();
+        match self.target.strip_prefix(&home) {
+            Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with('/')) => {
+                format!("~{rest}")
+            }
+            _ => self.target.clone(),
+        }
+    }
+
+    /// As Seatbelt says it: `file-write-create ~/x`.
+    pub fn shown(&self) -> String {
+        format!("{} {}", self.op, self.target_shown()).trim_end().to_string()
+    }
+
+    /// In plain words: `writing ~/x`, `connecting to port 9`, `opening apps` — Seatbelt's own (`shown`) for
+    /// what has none. Its network denials name no address, only the port (`remote:*:9` — measured).
+    pub fn plain(&self) -> String {
+        let t = self.target_shown();
+        let op = self.op.as_str();
+        match op {
+            "file-write-create" | "file-write-data" => format!("writing {t}"),
+            "file-write-unlink" => format!("deleting {t}"),
+            "file-write-rename" => format!("moving {t}"),
+            _ if op.starts_with("file-write") => format!("changing {t}"),
+            "network-outbound" if t.starts_with('/') => format!("connecting to socket {t}"),
+            "network-outbound" if t.starts_with("remote:") => match t.rsplit_once(':') {
+                Some((_, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => {
+                    format!("connecting to port {port}")
+                }
+                _ => self.shown(),
+            },
+            "network-bind" if t.starts_with('/') => format!("making socket {t}"),
+            "appleevent-send" if !t.is_empty() => format!("Apple Event to {t}"),
+            "mach-lookup"
+                if t.starts_with("com.apple.lsd") || t == "com.apple.coreservices.launchservicesd" =>
+            {
+                "opening apps".into()
+            }
+            _ => self.shown(),
+        }
+    }
+
+    /// For Claude: the plain words, then Seatbelt's (`writing ~/x (file-write-create, touch)`).
+    pub fn reported(&self) -> String {
+        match self.plain() {
+            p if p == self.shown() => format!("{p} ({})", self.process),
+            p => format!("{p} ({}, {})", self.op, self.process),
+        }
+    }
+}
+
+/// What the sandbox denied a run: the distinct ones (at most `DENIALS_KEPT`), how many in all, and why
+/// watching didn't work if it didn't.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Blocked {
+    pub seen: Vec<Denial>,
+    pub distinct: usize,
+    pub total: usize,
+    pub failed: Option<String>,
+}
+
+pub const DENIALS_KEPT: usize = 10;
+
+impl Blocked {
+    pub fn add(&mut self, d: Denial) {
+        self.total += 1;
+        let same = |s: &Denial| s.op == d.op && s.target == d.target;
+        if self.seen.iter().any(same) {
+            return;
+        }
+        self.distinct += 1;
+        if self.seen.len() < DENIALS_KEPT {
+            self.seen.push(d);
+        }
+    }
+}
+
+/// A denial from one line of `log stream --style ndjson`, if it carries `tag` — read from the JSON's
+/// `eventMessage`: `Sandbox: touch(80432) deny(1) file-write-create /path` with the tag after it (on a line
+/// of its own, measured — or after a space). A line of repeats (`3 duplicate reports for Sandbox: …`) counts
+/// once.
+pub fn parse_denial(json: &str, tag: &str) -> Option<Denial> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let msg = v["eventMessage"].as_str()?;
+    let (first, rest) = msg.split_once('\n').unwrap_or((msg, ""));
+    let first = first.trim_end();
+    let first = match first.strip_suffix(tag) {
+        Some(head) if head.ends_with(' ') => head.trim_end(),
+        _ if rest.lines().any(|l| l.trim() == tag) => first,
+        _ => return None,
+    };
+    let after = &first[first.find("Sandbox: ")? + "Sandbox: ".len()..];
+    let (process, after) = after.split_once('(')?;
+    let (_, after) = after.split_once(") deny(")?;
+    let (_, after) = after.split_once(") ")?;
+    let (op, target) = after.split_once(' ').unwrap_or((after, ""));
+    Some(Denial { process: process.into(), op: op.into(), target: target.trim().into() })
+}
+
+/// How long `log stream` takes to be up before a run starts (its first denials arrived from 50 ms on, and
+/// 10 ms after they happened — measured), and how long the end of a watched run waits for the last ones.
+pub const WATCH_READY: std::time::Duration = std::time::Duration::from_millis(150);
+pub const WATCH_LAST: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// The kernel's denials for one run (`log stream`, only the lines with its tag), gathered on a thread of its
+/// own; stopped when the run is gone or done (`finish`).
+pub struct Watch {
+    tag: String,
+    child: Mutex<Option<std::process::Child>>,
+    blocked: std::sync::Arc<Mutex<Blocked>>,
+    stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl std::fmt::Debug for Watch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Watch({})", self.tag)
+    }
+}
+
+impl PartialEq for Watch {
+    fn eq(&self, other: &Self) -> bool {
+        self.tag == other.tag
+    }
+}
+
+impl Eq for Watch {}
+
+impl Watch {
+    /// A watch with nothing behind it — the denials come from `record` (tests), or never.
+    pub fn quiet(tag: &str) -> std::sync::Arc<Watch> {
+        std::sync::Arc::new(Watch {
+            tag: tag.to_string(),
+            child: Mutex::new(None),
+            blocked: Default::default(),
+            stopped: Default::default(),
+        })
+    }
+
+    /// Starts `log stream` for `tag` (on a worker: it returns at once, but give it `WATCH_READY` before the
+    /// run starts). When it can't run or ends early, `blocked().failed` says why.
+    pub fn start(tag: &str) -> std::sync::Arc<Watch> {
+        let w = Watch::quiet(tag);
+        let predicate = format!("sender == \"Sandbox\" AND eventMessage CONTAINS \"{tag}\"");
+        let spawned = Command::new("/usr/bin/log")
+            .args(["stream", "--style", "ndjson", "--predicate", &predicate])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
+        let mut child = match spawned {
+            Ok(c) => c,
+            Err(e) => {
+                w.fail(format!("/usr/bin/log: {e}"));
+                return w;
+            }
+        };
+        let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
+        *w.child.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
+        let (blocked, stopped, tag) = (w.blocked.clone(), w.stopped.clone(), tag.to_string());
+        std::thread::spawn(move || {
+            use std::io::{BufRead, Read};
+            for line in std::io::BufReader::new(stdout.expect("piped")).lines().map_while(Result::ok) {
+                if let Some(d) = parse_denial(&line, &tag) {
+                    blocked.lock().unwrap_or_else(|e| e.into_inner()).add(d);
+                }
+            }
+            // Ended without being stopped: why, from what it said
+            if !stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                let mut said = String::new();
+                if let Some(mut e) = stderr {
+                    let _ = e.read_to_string(&mut said);
+                }
+                let why = said.lines().find(|l| !l.trim().is_empty()).unwrap_or("log stream ended").trim();
+                blocked.lock().unwrap_or_else(|e| e.into_inner()).failed = Some(why.to_string());
+            }
+        });
+        w
+    }
+
+    /// A denial, as if reported (tests).
+    #[cfg(test)]
+    pub fn record(&self, d: Denial) {
+        self.blocked.lock().unwrap_or_else(|e| e.into_inner()).add(d);
+    }
+
+    fn fail(&self, why: String) {
+        self.blocked.lock().unwrap_or_else(|e| e.into_inner()).failed = Some(why);
+    }
+
+    pub fn blocked(&self) -> Blocked {
+        self.blocked.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// The run is done: no more watching (its last denials have had `WATCH_LAST`).
+    pub fn finish(&self) {
+        self.stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(mut c) = self.child.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = c.kill();
+            std::thread::spawn(move || c.wait());
+        }
+    }
+}
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+/// A sandboxed run that has printed nothing this long since something was denied may be waiting on it —
+/// its panel says so (the worst case had no error at all: a pty test without `/dev/ptmx` just waited).
+pub const QUIET: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// A run's sandbox line for its panel: (what was blocked, in plain words — `sandbox blocked writing ~/x  +2`,
+/// the quiet hint when it applies). None when nothing was.
+pub fn panel_line(
+    guard: Option<&Guard>,
+    running: bool,
+    last_output: std::time::Instant,
+) -> Option<(String, Option<String>)> {
+    let b = guard?.watch()?.blocked();
+    let first = b.seen.first()?;
+    let more = if b.distinct > 1 { format!("  +{}", b.distinct - 1) } else { String::new() };
+    let quiet = (running && last_output.elapsed() >= QUIET).then(|| {
+        format!("quiet {}s — it may be waiting on what was blocked", last_output.elapsed().as_secs())
+    });
+    Some((format!("sandbox blocked {}{more}", first.plain()), quiet))
+}
+
+/// Lines of output that say a permission was refused — what's left to go by when nothing watched.
+pub fn refused_lines(output: &[(bool, String)]) -> Vec<String> {
+    output
+        .iter()
+        .filter(|(_, l)| l.contains("Operation not permitted"))
+        .take(5)
+        .map(|(_, l)| l.clone())
+        .collect()
 }
 
 /// Device files every program writes to (`/dev/null`, terminals — a pty test hangs without them: measured).
@@ -167,14 +481,19 @@ pub const RISKY_PORTS: [(u16, &str); 10] = [
 pub const PORTS_MAX: usize = 200;
 
 /// Ways to get something run outside: Apple Events to other apps, LaunchServices (`open`).
-const NO_WAY_OUT: &str = "(deny appleevent-send)\n(deny mach-lookup (global-name \
-\"com.apple.coreservices.launchservicesd\") (global-name-regex #\"^com\\.apple\\.lsd\\.\"))\n";
+const NO_WAY_OUT: [&str; 2] = [
+    "appleevent-send",
+    "mach-lookup (global-name \"com.apple.coreservices.launchservicesd\") (global-name-regex #\"^com\\.apple\\.lsd\\.\")",
+];
 
 impl Policy {
     /// The Seatbelt profile. Paths aren't in it: they're `-D` parameters (`params`), so no path can change
-    /// what it says.
+    /// what it says. Every deny carries the run's tag (`tag`) — the only text from outside, and tarae's own.
     pub fn profile(&self) -> String {
-        let mut p = String::from("(version 1)\n(allow default)\n(deny file-write*)\n");
+        let with = self.tag.as_ref().map(|t| format!(" (with message \"{t}\")")).unwrap_or_default();
+        let deny = |rule: &str| format!("(deny {rule}{with})\n");
+        let mut p = String::from("(version 1)\n(allow default)\n");
+        p.push_str(&deny("file-write*"));
         let protect: String =
             (0..self.protect.len()).map(|i| format!(" (require-not (subpath (param \"P{i}\")))")).collect();
         p.push_str(&format!("(allow file-write* (require-all (subpath (param \"ROOT\")){protect}))\n"));
@@ -187,13 +506,13 @@ impl Policy {
         // After the allows, so these win: the multiplexers' socket folders sit inside writable temp ones
         let keep: String = (0..self.keep.len()).map(|i| format!(" (subpath (param \"K{i}\"))")).collect();
         if !keep.is_empty() {
-            p.push_str(&format!("(deny file-write*{keep})\n"));
+            p.push_str(&deny(&format!("file-write*{keep}")));
         }
         p.push_str(DEVICES);
         let open: String = self.ports.iter().map(|n| format!(" (remote ip \"localhost:{n}\")")).collect();
         if !self.network {
             // Listening stays open (a test's own server); connecting, only where it's allowed
-            p.push_str("(deny network*)\n");
+            p.push_str(&deny("network*"));
             p.push_str("(allow network-bind network-inbound (local ip \"localhost:*\"))\n");
             if self.localhost {
                 p.push_str("(allow network-outbound (remote ip \"localhost:*\"))\n");
@@ -208,20 +527,22 @@ impl Policy {
                 .map(|(n, _)| format!(" (remote ip \"localhost:{n}\")"))
                 .collect();
             if !risky.is_empty() {
-                p.push_str(&format!("(deny network-outbound{risky})\n"));
+                p.push_str(&deny(&format!("network-outbound{risky}")));
             }
         }
         // Unix sockets — made or reached — only in the project and the run's own folder (`RunDir`), the
         // network open or not: the ones elsewhere are servers outside (tmux, zellij, ssh-agent). Last, so
         // these win (the later rule does — measured)
         let here = format!("(require-any (subpath (param \"ROOT\")){run})");
-        p.push_str("(deny network-bind network-inbound (local unix-socket))\n");
-        p.push_str("(deny network-outbound (remote unix-socket))\n");
+        p.push_str(&deny("network-bind network-inbound (local unix-socket)"));
+        p.push_str(&deny("network-outbound (remote unix-socket)"));
         p.push_str(&format!(
             "(allow network-bind network-inbound (require-all (local unix-socket) {here}))\n\
              (allow network-outbound (require-all (remote unix-socket) {here}))\n"
         ));
-        p.push_str(NO_WAY_OUT);
+        for rule in NO_WAY_OUT {
+            p.push_str(&deny(rule));
+        }
         p
     }
 
@@ -301,6 +622,8 @@ impl Policy {
             ports,
             localhost: env.localhost,
             run: None,
+            tag: None,
+            watch: None,
         }
     }
 }
@@ -425,8 +748,10 @@ pub fn policy(root: &Path, llm: &crate::llm::LlmConfig) -> Policy {
     };
     // The toolchain is asked inside the sandbox it's for (it reads only)
     env.dirs = toolchain_dirs(&Policy::for_project(&env));
-    // (no folder of its own: no sockets but the project's, and `TMPDIR` as it was)
-    Policy { run: RunDir::new().ok(), ..Policy::for_project(&env) }
+    // (no folder of its own: no sockets but the project's, `TMPDIR` as it was, and no tag to watch by)
+    let run = RunDir::new().ok();
+    let tag = run.as_ref().map(|r| r.tag());
+    Policy { run, tag, ..Policy::for_project(&env) }
 }
 
 /// Folders the project's toolchain writes outside it: cargo's target and build dirs (`cargo metadata` —
@@ -510,6 +835,21 @@ pub fn command(policy: Option<&Policy>, program: &str, args: &[String]) -> Comma
             c
         }
     }
+}
+
+/// Tests only: true inside a sandbox already (Claude's `cargo test`), where Seatbelt can't start — and then
+/// says so past libtest's capture (`test_results::SELF_SKIP`), so the run reads it as a skip, not a pass.
+#[cfg(test)]
+pub(crate) fn skipped_inside(test: &str) -> bool {
+    if std::env::var_os(MARK).is_none() {
+        return false;
+    }
+    let line = format!(
+        "{}{test} — Seatbelt can't start inside a sandbox; run `cargo test` outside one to check it\n",
+        crate::test_results::SELF_SKIP
+    );
+    let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+    true
 }
 
 #[cfg(test)]
@@ -667,6 +1007,174 @@ mod tests {
         );
     }
 
+    /// A line of `log stream --style ndjson` (its other fields cut), the message as given.
+    fn ndjson(msg: &str) -> String {
+        serde_json::json!({ "eventMessage": msg, "processID": 0, "senderImagePath": "/System/Library/Extensions/Sandbox.kext/Contents/MacOS/Sandbox" }).to_string()
+    }
+
+    /// The denial out of the JSON (not the raw line — its tail would ride along: measured), only with this
+    /// run's tag; `…-1.` isn't `…-10.`; repeats count; a path keeps its spaces.
+    #[test]
+    fn denials_are_read_by_their_tag() {
+        let tag = "tarae-7-1.";
+        let d = parse_denial(
+            &ndjson(&format!("Sandbox: touch(80432) deny(1) file-write-create /Users/u/a b\n{tag}")),
+            tag,
+        );
+        assert_eq!(
+            d,
+            Some(Denial {
+                process: "touch".into(),
+                op: "file-write-create".into(),
+                target: "/Users/u/a b".into()
+            })
+        );
+        let after_space =
+            parse_denial(&ndjson(&format!("Sandbox: nc(9) deny(1) network-outbound 192.0.2.1:9 {tag}")), tag);
+        assert_eq!(
+            after_space.map(|d| (d.op, d.target)),
+            Some(("network-outbound".into(), "192.0.2.1:9".into()))
+        );
+        let repeats = parse_denial(
+            &ndjson(&format!("3 duplicate reports for Sandbox: sh(5) deny(1) file-write-data /x\n{tag}")),
+            tag,
+        );
+        assert_eq!(repeats.map(|d| d.process), Some("sh".into()));
+        assert_eq!(
+            parse_denial(&ndjson("Sandbox: touch(1) deny(1) file-write-create /x\ntarae-7-10."), tag),
+            None
+        );
+        assert_eq!(parse_denial(&ndjson("Sandbox: mds(1) deny(1) system-info vfs.disk-space"), tag), None);
+        assert_eq!(parse_denial("not json", tag), None);
+        // Escaped slashes, as log stream writes them
+        let raw = format!(
+            r#"{{"eventMessage":"Sandbox: touch(2) deny(1) file-write-create \/private\/tmp\/x\n{tag}","processID":0}}"#
+        );
+        assert_eq!(parse_denial(&raw, tag).map(|d| d.target), Some("/private/tmp/x".into()));
+    }
+
+    /// Every deny in the profile carries the run's tag — the network closed or open (the ones it has
+    /// differ) — and without a tag none do.
+    #[test]
+    fn every_deny_carries_the_tag() {
+        let p =
+            Policy { tag: Some("tarae-7-1.".into()), ..Policy::for_project(&env(Path::new("/Users/u/p"))) };
+        for p in [p.clone(), Policy { network: true, ..p.clone() }] {
+            let text = p.profile();
+            let denies: Vec<&str> = text.lines().filter(|l| l.starts_with("(deny")).collect();
+            assert!(denies.len() >= 7, "{text}");
+            for d in denies {
+                assert!(d.ends_with(" (with message \"tarae-7-1.\"))"), "untagged: {d}");
+            }
+        }
+        let untagged = Policy::for_project(&env(Path::new("/Users/u/p"))).profile();
+        assert!(!untagged.contains("with message"), "{untagged}");
+    }
+
+    fn denial(op: &str, target: &str) -> Denial {
+        Denial { process: "touch".into(), op: op.into(), target: target.into() }
+    }
+
+    /// Kept once each, at most `DENIALS_KEPT`, every one counted.
+    #[test]
+    fn blocked_keeps_each_once() {
+        let mut b = Blocked::default();
+        b.add(denial("file-write-create", "/a"));
+        b.add(denial("file-write-create", "/a"));
+        for i in 0..20 {
+            b.add(denial("file-write-data", &format!("/f{i}")));
+        }
+        assert_eq!((b.total, b.distinct, b.seen.len()), (22, 21, DENIALS_KEPT));
+    }
+
+    /// What Claude reads: what was blocked (deduplicated, with who tried); that nothing was; or that nothing
+    /// could watch — then the output's refusals.
+    #[test]
+    fn the_report_says_what_was_blocked() {
+        let p = Policy { tag: Some("t.".into()), ..Policy::for_project(&env(Path::new("/Users/u/p"))) };
+        let home = std::env::var("HOME").unwrap();
+        let w = Watch::quiet("t.");
+        w.record(denial("file-write-create", &format!("{home}/marker")));
+        w.record(denial("file-write-create", &format!("{home}/marker")));
+        w.record(denial("network-outbound", "remote:*:9"));
+        let g = Guard::In(Policy { watch: Some(w), ..p.clone() });
+        let r = g.report(&[]);
+        assert!(r.starts_with("The sandbox blocked 2 things — 3 times:\n"), "{r}");
+        // Plain words first, Seatbelt's after
+        assert!(r.contains("  writing ~/marker (file-write-create, touch)\n"), "{r}");
+        assert!(r.contains("  connecting to port 9 (network-outbound, touch)\n"), "{r}");
+        assert!(r.contains("In tarae's sandbox") && r.contains("don't work around it"), "{r}");
+        let none = Guard::In(Policy { watch: Some(Watch::quiet("t.")), ..p.clone() }).report(&[]);
+        assert!(
+            none.starts_with("The sandbox blocked nothing.") && !none.contains("likely the sandbox"),
+            "{none}"
+        );
+        let failed = Watch::quiet("t.");
+        failed.fail("log: Cannot run while sandboxed".into());
+        let out = [(true, "touch: /x: Operation not permitted".to_string()), (false, "fine".to_string())];
+        let r = Guard::In(Policy { watch: Some(failed), ..p }).report(&out);
+        assert!(
+            r.starts_with("tarae couldn't watch what the sandbox blocked (log: Cannot run while sandboxed)"),
+            "{r}"
+        );
+        assert!(
+            r.contains("likely the sandbox")
+                && r.contains("  touch: /x: Operation not permitted")
+                && !r.contains("fine"),
+            "{r}"
+        );
+    }
+
+    /// Seatbelt's words in plain ones (its network denials name only the port: measured) — and its own
+    /// where there are none; for Claude, both.
+    #[test]
+    fn denials_in_plain_words() {
+        let home = std::env::var("HOME").unwrap();
+        let plain = |op: &str, target: &str| denial(op, target).plain();
+        assert_eq!(plain("file-write-create", &format!("{home}/x")), "writing ~/x");
+        assert_eq!(plain("file-write-data", "/dev/ttys004"), "writing /dev/ttys004");
+        assert_eq!(plain("file-write-unlink", "/a"), "deleting /a");
+        assert_eq!(plain("file-write-rename", "/a"), "moving /a");
+        assert_eq!(plain("file-write-mode", "/a"), "changing /a");
+        assert_eq!(plain("network-outbound", "remote:*:9"), "connecting to port 9");
+        assert_eq!(plain("network-outbound", "remote:*:40147"), "connecting to port 40147");
+        assert_eq!(
+            plain("network-outbound", "/private/tmp/tmux-501/default"),
+            "connecting to socket /private/tmp/tmux-501/default"
+        );
+        assert_eq!(plain("network-bind", "/private/tmp/x.sock"), "making socket /private/tmp/x.sock");
+        assert_eq!(plain("appleevent-send", "com.apple.finder"), "Apple Event to com.apple.finder");
+        assert_eq!(plain("mach-lookup", "com.apple.coreservices.launchservicesd"), "opening apps");
+        assert_eq!(plain("mach-lookup", "com.apple.lsd.mapdb"), "opening apps");
+        // As Seatbelt says it, where there are no plainer words
+        assert_eq!(plain("mach-lookup", "com.apple.other"), "mach-lookup com.apple.other");
+        assert_eq!(plain("network-outbound", "remote:*:x"), "network-outbound remote:*:x");
+        assert_eq!(plain("system-info", ""), "system-info");
+        assert_eq!(denial("file-write-unlink", "/a").reported(), "deleting /a (file-write-unlink, touch)");
+        assert_eq!(denial("system-info", "x").reported(), "system-info x (touch)");
+    }
+
+    /// The panel's line: the first thing blocked and how many more; the quiet hint only while it runs and
+    /// has printed nothing for `QUIET`.
+    #[test]
+    fn the_panel_line() {
+        let p = Policy::for_project(&env(Path::new("/Users/u/p")));
+        let w = Watch::quiet("t.");
+        let g = Guard::In(Policy { watch: Some(w.clone()), ..p });
+        let now = std::time::Instant::now();
+        assert_eq!(panel_line(Some(&g), true, now), None, "nothing blocked: no line");
+        w.record(denial("file-write-create", "/a"));
+        w.record(denial("network-outbound", "remote:*:9"));
+        let (line, quiet) = panel_line(Some(&g), true, now).unwrap();
+        assert_eq!((line.as_str(), quiet), ("sandbox blocked writing /a  +1", None));
+        let long_ago = now - QUIET - std::time::Duration::from_secs(1);
+        assert!(
+            panel_line(Some(&g), true, long_ago).unwrap().1.is_some_and(|q| q.contains("may be waiting"))
+        );
+        assert_eq!(panel_line(Some(&g), false, long_ago).unwrap().1, None, "done: no longer waiting");
+        assert_eq!(panel_line(Some(&Guard::Off), true, long_ago), None);
+    }
+
     /// What `sandbox-exec` says inside another sandbox (measured) reads as that.
     #[test]
     fn a_sandbox_inside_one_says_so() {
@@ -683,9 +1191,8 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn seatbelt_keeps_writes_in_the_project() {
-        if std::env::var_os(MARK).is_some() {
+        if skipped_inside("sandbox::tests::seatbelt_keeps_writes_in_the_project") {
             assert!(matches!(probe_now(), Availability::Missing(w) if w.contains("runs in a sandbox")));
-            eprintln!("(in a sandbox already: the Seatbelt checks run outside one — cargo test, CI)");
             return;
         }
         assert_eq!(probe_now(), Availability::Ready);
@@ -709,6 +1216,8 @@ mod tests {
             ports: vec![port],
             localhost: false,
             run: None,
+            tag: None,
+            watch: None,
         };
         let sh = |script: &str| {
             let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
@@ -746,8 +1255,7 @@ mod tests {
     #[test]
     fn unix_sockets_only_in_the_run_and_the_project() {
         use std::os::unix::net::UnixListener;
-        if std::env::var_os(MARK).is_some() {
-            eprintln!("(in a sandbox already: the Seatbelt checks run outside one — cargo test, CI)");
+        if skipped_inside("sandbox::tests::unix_sockets_only_in_the_run_and_the_project") {
             return;
         }
         let pid = std::process::id();
@@ -769,6 +1277,8 @@ mod tests {
                 ports: Vec::new(),
                 localhost: false,
                 run: Some(run.clone()),
+                tag: None,
+                watch: None,
             };
             let sh = |script: &str| {
                 let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
@@ -805,14 +1315,57 @@ mod tests {
         real(&t)
     }
 
+    /// For real, on macOS: a watch sees its own run's denials, and not another's sandboxed at the same time
+    /// under a tag it begins with (`…-1.` / `…-10.`). Harmless: the denied writes are touches into a folder
+    /// of this test's own under `target/`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_watch_sees_its_own_runs_denials() {
+        if skipped_inside("sandbox::tests::a_watch_sees_its_own_runs_denials") {
+            return;
+        }
+        let t = scratch("sb-watch");
+        let (root, out) = (t.join("project"), t.join("out"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+        let policy = |tag: &str| Policy {
+            root: root.clone(),
+            protect: Vec::new(),
+            write: Vec::new(),
+            files: Vec::new(),
+            keep: Vec::new(),
+            network: false,
+            ports: Vec::new(),
+            localhost: false,
+            run: None,
+            tag: Some(tag.to_string()),
+            watch: None,
+        };
+        let pid = std::process::id();
+        let (mine, other) = (format!("tarae-test-{pid}-1."), format!("tarae-test-{pid}-10."));
+        let w = Watch::start(&mine);
+        std::thread::sleep(WATCH_READY);
+        for (tag, name) in [(&mine, "mine"), (&other, "other")] {
+            let mut c =
+                command(Some(&policy(tag)), "/usr/bin/touch", &[out.join(name).display().to_string()]);
+            c.current_dir(&root).stdin(Stdio::null()).output().unwrap();
+        }
+        std::thread::sleep(WATCH_LAST * 2);
+        let b = w.blocked();
+        w.finish();
+        assert_eq!(b.failed, None);
+        let seen: Vec<String> = b.seen.iter().map(|d| format!("{} {}", d.op, d.target)).collect();
+        assert_eq!(seen, [format!("file-write-create {}", out.join("mine").display())]);
+        std::fs::remove_dir_all(&t).ok();
+    }
+
     /// For real, on macOS: the multiplexers' socket folders stay as they are though they sit in a writable
     /// temp folder — nothing made in them, what's there not moved away. Harmless: stand-in folders under
     /// `target/`, a plain file standing in for the socket.
     #[cfg(target_os = "macos")]
     #[test]
     fn the_multiplexers_socket_folders_stay_as_they_are() {
-        if std::env::var_os(MARK).is_some() {
-            eprintln!("(in a sandbox already: the Seatbelt checks run outside one — cargo test, CI)");
+        if skipped_inside("sandbox::tests::the_multiplexers_socket_folders_stay_as_they_are") {
             return;
         }
         let t = scratch("sb-mux");
@@ -833,6 +1386,8 @@ mod tests {
             ports: Vec::new(),
             localhost: false,
             run: None,
+            tag: None,
+            watch: None,
         };
         let sh = |script: &str| {
             let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
@@ -864,8 +1419,7 @@ mod tests {
     #[test]
     fn local_ports_open_only_where_asked() {
         use std::net::TcpListener;
-        if std::env::var_os(MARK).is_some() {
-            eprintln!("(in a sandbox already: the Seatbelt checks run outside one — cargo test, CI)");
+        if skipped_inside("sandbox::tests::local_ports_open_only_where_asked") {
             return;
         }
         // One of them free here (Redis or Jupyter may be running)
@@ -890,6 +1444,8 @@ mod tests {
             ports,
             localhost,
             run: None,
+            tag: None,
+            watch: None,
         };
         let reached = |p: &Policy, l: &TcpListener| {
             let script = format!("/usr/bin/nc -z -w 2 127.0.0.1 {}", port(l));

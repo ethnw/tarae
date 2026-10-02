@@ -205,9 +205,11 @@ process, or the disk.
   (`rm -rf /`, a path outside the temp dir), not even in a branch meant never to run: a broken build or a wrong
   guard runs it. This happened on 2026-10-01, and macOS refused `/`.
 - **Claude's commands run in a sandbox** ([`src/sandbox.rs`](src/sandbox.rs)), and none can start inside
-  another. The real Seatbelt tests therefore check what tarae says instead when they run under a sandboxed
-  `cargo test` (`TARAE_SANDBOXED` is set), and run in full in your own `cargo test` and in CI. Under
-  `cfg(test)` Claude's commands skip the sandbox (`Availability::Bypass`) unless a test sets it.
+  another. Under a sandboxed `cargo test` (`TARAE_SANDBOXED` is set), the real Seatbelt tests skip themselves
+  through `sandbox::skipped_inside`, which writes `tarae-test: skipped <name> — <why>` past libtest's capture.
+  libtest still prints `ok`, but tarae's test pane and Claude's results count them as skipped, not passed.
+  They run in full in your own `cargo test` and in CI. Under `cfg(test)` Claude's commands skip the sandbox
+  (`Availability::Bypass`) unless a test sets it.
 - Background behavior that would make single-event tests flaky is off under `cfg(test)`: the git gutter
   (`git_auto`), session and recent-file state, grammar download offers, and the waiting animation. The clipboard uses
   memory, so your real clipboard is never touched.

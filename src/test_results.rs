@@ -52,6 +52,11 @@ fn file_line(s: &str, ext: &str) -> Option<(String, usize)> {
     Some((path, n.parse::<usize>().ok()?.saturating_sub(1)))
 }
 
+/// A test that skipped itself says so on a line of its own — `tarae-test: skipped <name> — <why>` — written
+/// past libtest's capture (`io::stderr()`), which would otherwise call it `ok`: tarae's Seatbelt tests can't
+/// run inside a sandbox (`sandbox::skipped_inside`). The case reads as skipped, with the why.
+pub const SELF_SKIP: &str = "tarae-test: skipped ";
+
 /// Per-runner parse state.
 #[derive(Clone, Debug, Default)]
 pub enum Parser {
@@ -106,6 +111,14 @@ impl Parser {
         };
         match self {
             Parser::Rust { section } => {
+                if let Some(rest) = line.strip_prefix(SELF_SKIP) {
+                    let (name, why) = rest.split_once(" — ").unwrap_or((rest, ""));
+                    let i = find(cases, name.trim());
+                    cases[i].status = Status::Skipped;
+                    cases[i].message =
+                        vec![why.trim().to_string()].into_iter().filter(|w| !w.is_empty()).collect();
+                    return;
+                }
                 if let Some(rest) = line.strip_prefix("test ")
                     && let Some((name, verdict)) = rest.rsplit_once(" ... ")
                 {
@@ -117,7 +130,10 @@ impl Parser {
                         _ => return,
                     };
                     let i = find(cases, name);
-                    cases[i].status = status;
+                    // libtest's `ok` for a test that skipped itself (it said so first) stays a skip
+                    if !(status == Status::Passed && cases[i].status == Status::Skipped) {
+                        cases[i].status = status;
+                    }
                     return;
                 }
                 if let Some(name) = line.strip_prefix("---- ").and_then(|l| l.strip_suffix(" stdout ----")) {
@@ -345,6 +361,34 @@ pub fn junit(report_dirs: &[PathBuf], since: SystemTime, src_roots: &[PathBuf]) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A test that skipped itself (`SELF_SKIP`, written past the capture) reads as skipped — with the why —
+    /// though libtest calls it `ok` after; others are as libtest says.
+    #[test]
+    fn a_test_that_skipped_itself_isnt_a_pass() {
+        let mut p = Parser::for_lang("rust");
+        let mut cases = Vec::new();
+        let cwd = std::env::temp_dir();
+        for l in [
+            "tarae-test: skipped sandbox::tests::real — Seatbelt can't start inside a sandbox",
+            "test sandbox::tests::real ... ok",
+            "test sandbox::tests::plain ... ok",
+        ] {
+            p.line(&cwd, l, &mut cases);
+        }
+        let got: Vec<_> = cases.iter().map(|c| (c.name.as_str(), c.status, c.message.join(""))).collect();
+        assert_eq!(
+            got,
+            [
+                (
+                    "sandbox::tests::real",
+                    Status::Skipped,
+                    "Seatbelt can't start inside a sandbox".to_string()
+                ),
+                ("sandbox::tests::plain", Status::Passed, String::new()),
+            ]
+        );
+    }
 
     fn feed(p: &mut Parser, cwd: &Path, text: &str) -> Vec<Case> {
         let mut cases = Vec::new();

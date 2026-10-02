@@ -3891,8 +3891,7 @@ mod tests {
     #[test]
     fn claudes_check_runs_in_the_sandbox() {
         use serde_json::json;
-        if std::env::var_os(crate::sandbox::MARK).is_some() {
-            eprintln!("(in a sandbox already: this runs outside one — cargo test, CI)");
+        if crate::sandbox::skipped_inside("editor::tests::claudes_check_runs_in_the_sandbox") {
             return;
         }
         let dir = std::env::temp_dir().join(format!("tarae-run-sb-{}", std::process::id()));
@@ -3916,9 +3915,65 @@ mod tests {
             answer.contains("Operation not permitted") && answer.contains("In tarae's sandbox"),
             "{answer}"
         );
+        // What was blocked, watched — the marker by name (JSON-escaped in the log), not a guess
+        assert!(answer.contains("The sandbox blocked one thing"), "{answer}");
+        assert!(
+            answer.contains("  writing ") && answer.contains("marker (file-write-create, touch)"),
+            "{answer}"
+        );
         assert!(!crate::tools::unsandboxed(&ed));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&kept).ok();
+    }
+
+    /// A sandboxed run that was denied something: its panel says what, on its bottom row — and once it has
+    /// printed nothing for a while, that it may be waiting on it. The same in the test pane.
+    #[test]
+    fn the_panel_says_what_the_sandbox_blocked() {
+        let screen = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 140, 30).unwrap();
+            let mut parser = vt100::Parser::new(30, 140, 0);
+            parser.process(&bytes);
+            parser.screen().contents()
+        };
+        let watch = crate::sandbox::Watch::quiet("t.");
+        let policy = crate::sandbox::Policy {
+            watch: Some(watch.clone()),
+            ..crate::sandbox::Policy::for_project(&crate::sandbox::Env::default())
+        };
+        let mut ed = editor("");
+        let mut run = crate::task::Run::for_test(crate::task::Task {
+            name: "cargo test".into(),
+            cmd: "cargo test".into(),
+            cwd: std::env::temp_dir(),
+        });
+        run.state = crate::task::State::Running;
+        run.guard = Some(crate::sandbox::Guard::In(policy.clone()));
+        ed.task_run = Some(run);
+        assert!(!screen(&mut ed).contains("sandbox blocked"), "nothing blocked: no line");
+        let d = |op: &str, target: &str| crate::sandbox::Denial {
+            process: "script".into(),
+            op: op.into(),
+            target: target.into(),
+        };
+        watch.record(d("file-write-data", "/dev/ttys004"));
+        watch.record(d("network-outbound", "192.0.2.1:9"));
+        let s = screen(&mut ed);
+        assert!(s.contains("▲ sandbox blocked writing /dev/ttys004  +1"), "{s}");
+        assert!(!s.contains("may be waiting"), "it printed just now");
+        ed.task_run.as_mut().unwrap().last_output -= crate::sandbox::QUIET;
+        assert!(screen(&mut ed).contains("— it may be waiting on what was blocked"));
+        // The test pane, the same
+        ed.task_run = None;
+        let mut t = crate::testing::TestRun::finished("tests", Vec::new(), vec!["running 1 test".into()]);
+        t.guard = Some(crate::sandbox::Guard::In(policy));
+        ed.test_run = Some(t);
+        let s = screen(&mut ed);
+        assert!(
+            s.contains("▲ sandbox blocked writing /dev/ttys004  +1") && !s.contains("may be waiting"),
+            "{s}"
+        );
     }
 
     /// Asking about a line starts a note with you; Claude's plain answer (no tool) lands in the thread.

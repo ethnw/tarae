@@ -566,7 +566,15 @@ fn guarded(ed: &mut Editor, call: Call, job: Job, asked: bool) {
             Availability::Unknown => crate::sandbox::probe(),
             f => f,
         };
-        let policy = (found == Availability::Ready).then(|| crate::sandbox::policy(&root, &llm));
+        let policy = (found == Availability::Ready).then(|| {
+            // Its denials watched from before it starts (the stream up first — measured)
+            let mut p = crate::sandbox::policy(&root, &llm);
+            if let Some(tag) = &p.tag {
+                p.watch = Some(crate::sandbox::Watch::start(tag));
+                std::thread::sleep(crate::sandbox::WATCH_READY);
+            }
+            p
+        });
         move |ed: &mut Editor| {
             ed.sandbox = found.clone();
             // (the turn ended meanwhile: nothing waits for it)
@@ -722,8 +730,22 @@ fn run_report(r: &crate::task::Run, places: &[crate::quickfix::Item]) -> String 
             ));
         }
     }
+    // Tests that skipped themselves (`test_results::SELF_SKIP`) — libtest calls them ok
+    let skipped: Vec<&str> =
+        r.output.iter().filter_map(|(_, l)| l.strip_prefix(crate::test_results::SELF_SKIP)).collect();
+    if !skipped.is_empty() {
+        out.push_str(&format!(
+            "\n{} test{} skipped {} — libtest says ok, but nothing was checked:\n",
+            skipped.len(),
+            if skipped.len() == 1 { "" } else { "s" },
+            if skipped.len() == 1 { "itself" } else { "themselves" }
+        ));
+        for s in skipped {
+            out.push_str(&format!("  {s}\n"));
+        }
+    }
     let lines = &r.output;
-    let guard = r.guard.as_ref().map(|g| format!("\n{}\n", g.report())).unwrap_or_default();
+    let guard = r.guard.as_ref().map(|g| format!("\n{}\n", g.report(&r.output))).unwrap_or_default();
     if lines.is_empty() {
         out.push_str("\n(no output)\n");
         out.push_str(&guard);
@@ -811,6 +833,15 @@ fn report(r: &TestRun) -> String {
     }
     let fails = r.failures();
     out.push_str(&failures(&r.cases, &fails));
+    // Skipped with a why: they skipped themselves (`test_results::SELF_SKIP`) — nothing was checked
+    let said: Vec<_> =
+        r.cases.iter().filter(|c| c.status == Status::Skipped && !c.message.is_empty()).collect();
+    if !said.is_empty() {
+        out.push_str("\nSkipped — nothing was checked:\n");
+        for c in said {
+            out.push_str(&format!("  {} — {}\n", c.name, c.message.join(" ")));
+        }
+    }
     if r.state != RunState::Passed && fails.is_empty() {
         let from = r.output.len().saturating_sub(TAIL);
         out.push_str(&format!("\nOutput (last {} lines):\n", r.output.len() - from));
@@ -820,7 +851,7 @@ fn report(r: &TestRun) -> String {
         }
     }
     if let Some(g) = &r.guard {
-        out.push_str(&format!("\n{}\n", g.report()));
+        out.push_str(&format!("\n{}\n", g.report(&r.output)));
     }
     out
 }
@@ -995,6 +1026,24 @@ mod tests {
     }
 
     /// Long output comes as its start and its end, a line too long cut; the places come first.
+    #[test]
+    fn run_report_says_which_tests_skipped_themselves() {
+        use crate::task::{Run, Task};
+        let mut r = Run::for_test(Task { name: "t".into(), cmd: "cargo test".into(), cwd: "/p".into() });
+        r.output = vec![
+            (false, "test sandbox::tests::real ... ok".into()),
+            (true, "tarae-test: skipped sandbox::tests::real — Seatbelt can't start inside a sandbox".into()),
+            (false, "test result: ok. 1 passed".into()),
+        ];
+        let text = super::run_report(&r, &[]);
+        assert!(
+            text.contains("1 test skipped itself — libtest says ok, but nothing was checked:\n  sandbox::tests::real — Seatbelt"),
+            "{text}"
+        );
+        r.output.retain(|(err, _)| !err);
+        assert!(!super::run_report(&r, &[]).contains("skipped"));
+    }
+
     #[test]
     fn run_report_keeps_the_start_and_the_end() {
         use crate::task::{Run, State, Task};

@@ -1041,7 +1041,12 @@ fn draw_task_panel(
         hints.retain(|h| h.0 != "space m m");
     }
     panel_hints(out, &hints, used, w, card, dim, faint)?;
-    let rows = lay.debug_h.saturating_sub(1);
+    // The sandbox's line, when it blocked something: the bottom row, under the output
+    let sandbox = crate::sandbox::panel_line(r.guard.as_ref(), running, r.last_output);
+    let rows = lay.debug_h.saturating_sub(1 + usize::from(sandbox.is_some()));
+    if let Some((line, quiet)) = &sandbox {
+        sandbox_row(out, (y0 + 1 + rows) as u16, w, line, quiet.as_deref(), card, warn, faint)?;
+    }
     let start = r.output.len().saturating_sub(rows);
     for i in 0..rows {
         let y = (y0 + 1 + i) as u16;
@@ -1058,6 +1063,36 @@ fn draw_task_panel(
                 queue!(out, Print(fit_ellipsis(&r.task.cmd, w.saturating_sub(4))))?;
             }
             None => {}
+        }
+    }
+    Ok(())
+}
+
+/// A sandboxed run's line in its panel: `▲ sandbox blocked writing ~/x  +2` in warning, and the
+/// quiet hint after it, faint — or folded away when the row is too narrow for it.
+#[allow(clippy::too_many_arguments)]
+fn sandbox_row(
+    out: &mut impl Write,
+    y: u16,
+    w: usize,
+    line: &str,
+    quiet: Option<&str>,
+    card: Style,
+    warn: Option<Color>,
+    faint: Style,
+) -> io::Result<()> {
+    queue!(out, MoveTo(0, y))?;
+    apply(out, card)?;
+    queue!(out, Spaces(w), MoveTo(2, y))?;
+    let room = w.saturating_sub(4);
+    let main = fit_ellipsis(&format!("▲ {line}"), room);
+    apply(out, Style { fg: warn, ..card })?;
+    queue!(out, Print(&main))?;
+    if let Some(q) = quiet {
+        let left = room.saturating_sub(main.width() + 3);
+        if left >= 12 {
+            apply(out, faint)?;
+            queue!(out, Print(format!("   {}", fit_ellipsis(q, left))))?;
         }
     }
     Ok(())
@@ -1247,7 +1282,12 @@ fn draw_test_panel(
     };
     panel_hints(out, hints, used, w, card, dim, faint)?;
 
-    let rows = lay.debug_h.saturating_sub(1);
+    // The sandbox's line, when it blocked something: the bottom row, under the rest
+    let sandbox = crate::sandbox::panel_line(r.guard.as_ref(), running, r.last_output);
+    let rows = lay.debug_h.saturating_sub(1 + usize::from(sandbox.is_some()));
+    if let Some((line, quiet)) = &sandbox {
+        sandbox_row(out, (y0 + 1 + rows) as u16, w, line, quiet.as_deref(), card, color("warning"), faint)?;
+    }
     let line_style = |err: bool, l: &str| output_style(err, l, card, good, bad, faint);
     // The wheel's thumb on the card's right edge, when the detail doesn't fit
     let thumb = |detail_rows: usize, top: usize| {

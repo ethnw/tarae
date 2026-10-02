@@ -175,6 +175,8 @@ pub struct Run {
     pub by_claude: bool,
     /// How Claude's command ran — in the sandbox or not (`sandbox.rs`); None for the user's own.
     pub guard: Option<crate::sandbox::Guard>,
+    /// When it last printed (a sandboxed run quiet after a denial may be waiting on it — the panel says so).
+    pub last_output: Instant,
 }
 
 /// An install run's card, tool, and what goes on after it.
@@ -203,6 +205,7 @@ impl Run {
             chat: None,
             by_claude: false,
             guard: None,
+            last_output: Instant::now(),
         }
     }
 }
@@ -341,6 +344,7 @@ impl Editor {
 
     fn task_spawn(&mut self, task: Task, after: Option<After>, sandbox: Option<&crate::sandbox::Policy>) {
         let install = after.is_some();
+        let watched = sandbox.is_some_and(|p| p.watch.is_some());
         let mut cmd = crate::sandbox::command(sandbox, "sh", &["-c".into(), task.cmd.clone()]);
         cmd.current_dir(&task.cwd)
             .env("NO_COLOR", "1")
@@ -385,6 +389,7 @@ impl Editor {
             let apply = move |ed: &mut Editor| {
                 let Some(r) = ed.task_run.as_mut().filter(|r| r.generation == generation) else { return };
                 let mut places = Vec::new();
+                r.last_output = Instant::now();
                 for (line, found) in lines {
                     r.output.push((err, line));
                     places.extend(found.filter(|_| !install));
@@ -426,8 +431,15 @@ impl Editor {
                 let _ = h.join();
             }
             let status = child.wait().ok();
+            // Its last denials reach the watch before its end is told (here, not on the main loop)
+            if watched {
+                std::thread::sleep(crate::sandbox::WATCH_LAST);
+            }
             let done = move |ed: &mut Editor| {
                 let Some(r) = ed.task_run.as_mut().filter(|r| r.generation == generation) else { return };
+                if let Some(w) = r.guard.as_ref().and_then(|g| g.watch()) {
+                    w.finish();
+                }
                 r.took = Some(r.started.elapsed());
                 r.pid = None;
                 r.state = match status.and_then(|s| s.code()) {
@@ -478,6 +490,7 @@ impl Editor {
             chat: None,
             by_claude: false,
             guard: None,
+            last_output: Instant::now(),
         });
     }
 }

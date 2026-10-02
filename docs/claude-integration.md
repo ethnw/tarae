@@ -304,8 +304,13 @@ What Claude runs, with `run` and `run_tests`, runs in a sandbox (macOS: Seatbelt
 
   Like the other settings that run something or loosen a guard, a project's `.tarae.toml` sets these only
   once you trust the project
-- Claude reads with each result that it ran in the sandbox and which ports were open, so an `Operation not
-  permitted` points to the cause
+- **When the sandbox blocks something, it says so.** tarae watches the system's report of what the sandbox
+  denied, while the command runs. The run's panel shows the first thing blocked on its bottom row
+  in plain words (`▲ sandbox blocked writing ~/x  +2`, `connecting to port 9`, `opening apps`). If the command then prints nothing for 15 seconds, a quiet
+  note says it may be waiting on what was blocked: a blocked terminal or socket can hang a program instead of
+  failing it. Claude's result lists what was blocked, or says nothing was, along with which ports were open.
+  If tarae can't watch (`log stream` refuses to run inside another sandbox), the result says so and quotes
+  the output's `Operation not permitted` lines instead
 - **Where there's no sandbox** (Linux for now, or tarae itself running inside one), Claude's commands don't
   quietly run without one. A card says there's none: `y` runs this one, `a` runs the rest of this conversation's
   commands too, and `n` says no. While they run without one, the chat's title says `› no sandbox`.

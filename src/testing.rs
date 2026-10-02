@@ -316,6 +316,8 @@ pub struct TestRun {
     pub(crate) chat: Option<crate::tools::Call>,
     /// How Claude's run ran — in the sandbox or not (`sandbox.rs`); None for the user's own.
     pub guard: Option<crate::sandbox::Guard>,
+    /// When it last printed (a sandboxed run quiet after a denial may be waiting on it — the panel says so).
+    pub last_output: Instant,
 }
 
 impl TestRun {
@@ -377,6 +379,7 @@ impl TestRun {
             scroll: None,
             chat: None,
             guard: None,
+            last_output: Instant::now(),
         }
     }
 
@@ -574,6 +577,7 @@ impl Editor {
             Some(crate::sandbox::Guard::In(p)) => Some(p),
             _ => None,
         };
+        let watched = policy.is_some_and(|p| p.watch.is_some());
         let mut cmd = crate::sandbox::command(policy, &argv[0], &argv[1..]);
         cmd.current_dir(&target.cwd)
             .env("NO_COLOR", "1")
@@ -612,6 +616,7 @@ impl Editor {
                         r.parser.line(&r.target.cwd, &line, &mut r.cases);
                         r.output.push((err, line));
                     }
+                    r.last_output = Instant::now();
                     let n = r.output.len();
                     if n > 5000 {
                         r.output.drain(..n - 5000);
@@ -644,11 +649,18 @@ impl Editor {
                 let _ = h.join();
             }
             let status = child.wait().ok();
+            // Its last denials reach the watch before its end is told (here, not on the main loop)
+            if watched {
+                std::thread::sleep(crate::sandbox::WATCH_LAST);
+            }
             let cases = junit.map(|(reports, src)| crate::test_results::junit(&reports, wall, &src));
             let done = move |ed: &mut Editor| {
                 let Some(r) = ed.test_run.as_mut().filter(|r| r.generation == generation) else { return };
                 if r.state != RunState::Running {
                     return;
+                }
+                if let Some(w) = r.guard.as_ref().and_then(|g| g.watch()) {
+                    w.finish();
                 }
                 r.took = Some(r.started.elapsed());
                 r.pid = None;
@@ -684,6 +696,7 @@ impl Editor {
             scroll: None,
             chat: None,
             guard,
+            last_output: Instant::now(),
         });
     }
 
