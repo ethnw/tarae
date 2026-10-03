@@ -80,6 +80,8 @@ pub enum What {
     ProjectTrust { hash: u64 },
     /// Claude asks to see the screen (`seeing.rs`): `y` once, `a` this chat, `n` no.
     Screen { call: crate::tools::Call },
+    /// `:preflight`'s first run in a project with the packs' default steps (`preflight.rs`): `y` runs them.
+    Preflight { root: PathBuf, steps: Vec<crate::preflight::Step> },
 }
 
 /// Work that stopped for lack of a grammar — resumed once downloaded
@@ -152,6 +154,7 @@ impl Offer {
                 | What::Read { .. }
                 | What::Grant { .. }
                 | What::Outside { .. }
+                | What::Preflight { .. }
         )
     }
 
@@ -314,6 +317,7 @@ impl crate::editor::Editor {
             }
             What::Outside { run } => crate::blocked::outside_answer(self, id, *run, true),
             What::Screen { call } => crate::seeing::answer(self, id, call, Some(crate::allow::Scope::Once)),
+            What::Preflight { root, steps } => self.preflight_answer(id, root, steps, true),
         }
     }
 
@@ -438,6 +442,7 @@ impl crate::editor::Editor {
             What::Grant { grant, run } => crate::blocked::grant_answer(self, o.id, grant, *run, None),
             What::Outside { run } => crate::blocked::outside_answer(self, o.id, *run, false),
             What::Screen { call } => crate::seeing::answer(self, o.id, call, None),
+            What::Preflight { root, steps } => self.preflight_answer(o.id, root, steps, false),
         }
     }
 

@@ -8,6 +8,12 @@
 //! ]
 //! ```
 //!
+//! Where the steps come from: the project's `[preflight]` (`.tarae.toml`, or your config for every project),
+//! else the language packs' defaults for the kind of project it is (`packs::preflight` — Cargo.toml, go.mod
+//! …; the commands are tarae's, but they build and run the project's code, so the first run in a project shows
+//! them on a card that says so — `DEFAULTS_SAY`; never a project's own `./gradlew`/`./mvnw`); then
+//! `.tarae.local.toml`'s steps, yours, added after either (`config.rs` — read only while git ignores it).
+//!
 //! One task run (`task.rs`, the task panel): an `sh` script runs the steps one after another — every one,
 //! whatever the ones before did — each in a subshell with its output and errors as one stream, between
 //! marker lines (`MARK`) that tarae reads off as they come: the step's row (name, time, how it ended) in the
@@ -27,6 +33,16 @@ const MARK: &str = "::tarae-preflight::";
 /// A step's note in the summary, at most (chars).
 const NOTE_SHOWN: usize = 40;
 
+/// What the card before pack defaults run says of them: the commands are tarae's, but what they run is the
+/// project's — its tests, build scripts, npm scripts — so running them is running its code. (Not the
+/// project's wrapper, though: `./gradlew`/`./mvnw` are a project's own, for its own `[preflight]` once
+/// trusted.)
+pub const DEFAULTS_SAY: &str = "These are tarae's defaults, but they build and run this project's code (its \
+tests and build scripts) — run them only for code you trust.";
+
+/// …and under it, plainly: how a project has its own.
+const DEFAULTS_REPLACED: &str = "A [preflight] of the project's own (.tarae.toml) replaces them.";
+
 /// One step as the project lists it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Step {
@@ -34,10 +50,19 @@ pub struct Step {
     pub cmd: String,
     /// A line of its output matching this makes a pass one with a note.
     pub note: Option<String>,
+    /// Where it came from: `.tarae.toml`, `.tarae.local.toml`, `config.toml`, `rust pack`.
+    pub from: String,
 }
 
-/// `[preflight] steps = [{ name, cmd, note? }, …]` → the steps (what's wrong said in `warnings`).
+/// `[preflight] steps = [{ name, cmd, note? }, …]` from `file` (a path, or a pack's name) → the steps
+/// (what's wrong said in `warnings`).
 pub fn parse_config(v: &toml::Value, file: &str, warnings: &mut Vec<String>) -> Vec<Step> {
+    let from = match file.contains('/') {
+        true => {
+            std::path::Path::new(file).file_name().map_or(file.to_string(), |n| n.to_string_lossy().into())
+        }
+        false => file.to_string(),
+    };
     let Some(steps) = v.get("steps").and_then(toml::Value::as_array) else {
         warnings.push(format!("{file}: preflight: needs steps = [{{ name = \"…\", cmd = \"…\" }}, …]"));
         return Vec::new();
@@ -60,8 +85,29 @@ pub fn parse_config(v: &toml::Value, file: &str, warnings: &mut Vec<String>) -> 
             warnings.push(format!("{file}: preflight.steps[{i}]: a second step named \"{name}\""));
             continue;
         }
-        out.push(Step { name, cmd, note });
+        out.push(Step { name, cmd, note, from: from.clone() });
     }
+    out
+}
+
+/// What the card before a first run with pack defaults says: each source's steps under it, the commands in
+/// a column.
+pub fn shown(steps: &[Step]) -> String {
+    let w = steps.iter().map(|s| s.name.chars().count()).max().unwrap_or(0);
+    let mut out = String::new();
+    let mut last = "";
+    for s in steps {
+        if s.from != last {
+            last = &s.from;
+            let whose = match s.from.ends_with(" pack") {
+                true => format!("The {}'s defaults", s.from),
+                false => format!("Yours, from {}", s.from),
+            };
+            out.push_str(&format!("{}{whose}:\n", if out.is_empty() { "" } else { "\n" }));
+        }
+        out.push_str(&format!("  {:<w$}  {}\n", s.name, s.cmd));
+    }
+    out.truncate(out.trim_end().len());
     out
 }
 
@@ -215,26 +261,94 @@ pub fn long_duration(d: Duration) -> String {
 }
 
 impl Editor {
-    /// `:preflight` — the project's steps, run in the task panel. Err: why not now.
+    /// `:preflight` — the project's steps (else the packs' defaults, looked for on a worker), then
+    /// `.tarae.local.toml`'s, run in the task panel. Err: why not now.
     pub fn preflight_start(&mut self) -> Result<(), String> {
-        let steps = self.config.preflight.clone();
-        if steps.is_empty() {
-            let held = self.config_project_held("preflight.");
-            return Err(if held {
-                "the project's preflight steps wait for it to be trusted — :project-trust".into()
-            } else {
-                "no preflight steps — add [preflight] steps = [{ name = \"…\", cmd = \"…\" }, …] to .tarae.toml"
-                    .into()
-            });
+        self.preflight_free()?;
+        // The project's own, held back until it's trusted: not the packs' instead
+        if self.config_project_held("preflight.") {
+            return Err("the project's preflight steps wait for it to be trusted — :project-trust".into());
         }
-        if self.task_run.as_ref().is_some_and(|r| r.state == crate::task::State::Running) {
-            let name = self.task_run.as_ref().map(|r| r.task.name.clone()).unwrap_or_default();
-            return Err(format!("{name} is running — let it finish, or stop it (space m c)"));
+        let (project, local) = (self.config.preflight.clone(), self.config.preflight_local.clone());
+        if !project.is_empty() {
+            return self.preflight_run([project, local].concat());
         }
+        let root = self.preflight_root();
+        self.events.jobs().spawn(move || {
+            let packs = crate::packs::preflight(&root);
+            move |ed: &mut Editor| ed.preflight_found(root, packs, local)
+        });
+        Ok(())
+    }
+
+    /// The packs' default steps for `root` came (none: not a kind of project they know), with yours after:
+    /// the first time in a project, a card says what will run, and that it runs the project's code.
+    pub(crate) fn preflight_found(&mut self, root: std::path::PathBuf, packs: Vec<Step>, local: Vec<Step>) {
+        if packs.is_empty() && local.is_empty() {
+            return self.set_error(
+                "no preflight steps — no language pack knows this kind of project; add [preflight] steps = \
+                 [{ name = \"…\", cmd = \"…\" }, …] to .tarae.toml",
+            );
+        }
+        let defaults = !packs.is_empty();
+        let steps = [packs, local].concat();
+        if defaults && !self.preflight_told.contains(&root) {
+            let question = format!("{}\n\n{DEFAULTS_SAY}\n{DEFAULTS_REPLACED}", shown(&steps));
+            // (what yes means — the project's code runs — in the warning color)
+            let last = question.split('\n').count() - 2;
+            let o = crate::offer::Offer::new(
+                "Run these checks?".into(),
+                &question,
+                "running",
+                "didn't start".into(),
+                crate::offer::What::Preflight { root, steps },
+            )
+            .warning(last..last + 1);
+            return self.push_offer(o);
+        }
+        if let Err(e) = self.preflight_run(steps) {
+            self.set_error(e);
+        }
+    }
+
+    /// `y` on that card: run, and no card again for this project this session.
+    pub(crate) fn preflight_answer(
+        &mut self,
+        id: u64,
+        root: std::path::PathBuf,
+        steps: Vec<Step>,
+        yes: bool,
+    ) {
+        self.offer_finished(id, Ok(()));
+        if !yes {
+            return self.set_status("preflight not run");
+        }
+        self.preflight_told.insert(root);
+        if let Err(e) = self.preflight_run(steps) {
+            self.set_error(e);
+        }
+    }
+
+    /// Where the preflight runs: the project.
+    fn preflight_root(&self) -> std::path::PathBuf {
+        self.project_root.clone().unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+    }
+
+    /// Err while a task runs (the panel is one run's).
+    fn preflight_free(&self) -> Result<(), String> {
+        match self.task_run.as_ref().filter(|r| r.state == crate::task::State::Running) {
+            Some(r) => Err(format!("{} is running — let it finish, or stop it (space m c)", r.task.name)),
+            None => Ok(()),
+        }
+    }
+
+    /// `steps`, one after another, in the task panel.
+    fn preflight_run(&mut self, steps: Vec<Step>) -> Result<(), String> {
+        self.preflight_free()?;
         self.auto_save(" · before the preflight");
         self.flush_saves();
-        let root = self.project_root.clone().unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-        let task = crate::task::Task { name: "preflight".into(), cmd: script(&steps), cwd: root };
+        let task =
+            crate::task::Task { name: "preflight".into(), cmd: script(&steps), cwd: self.preflight_root() };
         let generation = self.task_start_preflight(task).ok_or("the preflight didn't start")?;
         self.preflight = Some(Preflight::new(generation, &steps));
         Ok(())
@@ -268,7 +382,7 @@ mod tests {
     use super::*;
 
     fn step(name: &str, cmd: &str) -> Step {
-        Step { name: name.into(), cmd: cmd.into(), note: None }
+        Step { name: name.into(), cmd: cmd.into(), note: None, from: ".tarae.toml".into() }
     }
 
     #[test]
@@ -279,7 +393,7 @@ mod tests {
         )
         .unwrap();
         let mut w = Vec::new();
-        let steps = parse_config(&v, "f", &mut w);
+        let steps = parse_config(&v, "~/p/.tarae.toml", &mut w);
         assert_eq!(
             steps,
             [
@@ -289,6 +403,84 @@ mod tests {
         );
         assert_eq!(w.len(), 2, "{w:?}");
         assert!(w[0].contains("steps[2]: needs name") && w[1].contains("not a regex"), "{w:?}");
+        // A pack's steps say so
+        assert_eq!(parse_config(&v, "rust pack", &mut Vec::new())[0].from, "rust pack");
+    }
+
+    /// The checks are one set in three places: `.tarae.toml`'s `[preflight]` (what `:preflight` runs here),
+    /// CONTRIBUTING's list, and CI's jobs — CI read as it runs them (`--locked` aside, `RUSTFLAGS: -D
+    /// warnings` making clippy's warnings errors, its feature matrix spelled out). Where CI differs on
+    /// purpose: `cargo perf` (it runs only the budgets — noisy runners) and the network job (`--ignored`).
+    #[test]
+    fn the_checks_are_the_same_here_in_contributing_and_in_ci() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let read = |f: &str| std::fs::read_to_string(root.join(f)).unwrap();
+        let set = |v: Vec<String>| v.into_iter().collect::<std::collections::BTreeSet<String>>();
+        // Here
+        let tarae: toml::Table = read(".tarae.toml").parse().unwrap();
+        let ours = parse_config(&tarae["preflight"], ".tarae.toml", &mut Vec::new());
+        let ours = set(ours.into_iter().map(|s| s.cmd).collect());
+        // CONTRIBUTING: the block under its marker
+        let contributing = read("CONTRIBUTING.md");
+        let block =
+            contributing.split("<!-- the checks:").nth(1).expect("the marker").split("```").nth(1).unwrap();
+        let listed =
+            set(block.lines().skip(1).map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect());
+        assert_eq!(listed, ours, "CONTRIBUTING's checks and .tarae.toml's [preflight]");
+        // CI
+        let ci = read(".github/workflows/ci.yml");
+        let warnings_are_errors = ci.lines().any(|l| l.trim() == "RUSTFLAGS: -D warnings");
+        let features: Vec<String> = ci
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("features:"))
+            .flat_map(|v| {
+                v.trim().trim_matches(['[', ']']).split(',').map(|f| f.trim().trim_matches('"').to_string())
+            })
+            .collect();
+        let mut ran = Vec::new();
+        for cmd in
+            ci.lines().filter_map(|l| l.trim().strip_prefix("- run: ")).filter(|c| c.starts_with("cargo "))
+        {
+            // (on purpose: perf as budgets only, and the network job)
+            if cmd.contains("--profile perf") || cmd.contains("-- --ignored") {
+                continue;
+            }
+            let cmd = cmd.replace(" --locked", "");
+            let each: Vec<String> = match cmd.contains("\"${{ matrix.features }}\"") {
+                true => features
+                    .iter()
+                    .map(|f| match f.is_empty() {
+                        true => cmd.replace(" --features \"${{ matrix.features }}\"", ""),
+                        false => cmd.replace("\"${{ matrix.features }}\"", f),
+                    })
+                    .collect(),
+                false => vec![cmd],
+            };
+            for c in each {
+                let errors = warnings_are_errors && c.starts_with("cargo clippy");
+                ran.push(if errors { format!("{c} -- -D warnings") } else { c });
+            }
+        }
+        let mut expected = ours.clone();
+        expected.remove("cargo perf");
+        assert_eq!(set(ran), expected, "CI's checks and .tarae.toml's [preflight] (perf aside)");
+    }
+
+    /// The card before pack defaults run: each source's steps under it, a pack's said to be tarae's own.
+    #[test]
+    fn the_card_says_what_runs_and_whose_it_is() {
+        let pack = |name: &str, cmd: &str, from: &str| Step { from: from.into(), ..step(name, cmd) };
+        let steps = [
+            pack("fmt", "cargo fmt --all --check", "rust pack"),
+            pack("go test", "go test ./...", "go pack"),
+            pack("lint", "make lint", ".tarae.local.toml"),
+        ];
+        assert_eq!(
+            shown(&steps),
+            "The rust pack's defaults:\n  fmt      cargo fmt --all --check\n\n\
+             The go pack's defaults:\n  go test  go test ./...\n\n\
+             Yours, from .tarae.local.toml:\n  lint     make lint"
+        );
     }
 
     #[test]

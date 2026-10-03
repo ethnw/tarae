@@ -30,6 +30,20 @@ run-file = ["{java-tool}", "-B", "test", "{java-pl}", "-Dtest={package}{first-gr
 reports = ["{java-module-dir}/target/surefire-reports"]
 debug-args = ["-Dmaven.surefire.debug"]
 
+# `:preflight` in a project with no steps of its own: the build's own whole check — Maven's `verify`
+# (compile, tests, what the pom binds), Gradle's `check` — with the mvn or gradle on your PATH. Never the
+# project's wrapper (./mvnw, ./gradlew: a script from the repository, fetching what it names): that's the
+# project's own to run, from its [preflight] in .tarae.toml, once you trust it.
+[[preflight]]
+when = ["pom.xml"]
+rank = 60
+steps = [{ name = "mvn verify", cmd = "command -v mvn >/dev/null 2>&1 || { echo \"mvn isn't on PATH — tarae's defaults don't run a project's own ./mvnw: a [preflight] step in .tarae.toml can, once you trust the project\"; exit 1; }; mvn -B verify" }]
+
+[[preflight]]
+when = ["build.gradle", "build.gradle.kts"]
+rank = 60
+steps = [{ name = "gradle check", cmd = "command -v gradle >/dev/null 2>&1 || { echo \"gradle isn't on PATH — tarae's defaults don't run a project's own ./gradlew: a [preflight] step in .tarae.toml can, once you trust the project\"; exit 1; }; gradle check --console=plain" }]
+
 # A pom.xml or build.gradle in a checkout inside the project is imported as a project of its own when the
 # root has no build file (measured: ext/clone/pom.xml became project "v"; dot-folders it skips itself).
 # Globs over the folder holding a build file — the folder itself and below; vscode-java's defaults kept.

@@ -1509,11 +1509,30 @@ mod tests {
         assert_eq!(lsp_symbols(&flat), [sym(0, "fn", "app::run", 3, 8)]);
     }
 
-    /// (a measurement: a search over this repository that hits most of its files — not a check)
+    /// Why a measured test doesn't run here, said past libtest's capture (`test_results::SELF_SKIP`) — at
+    /// opt-level 0 (the test profile: `cargo perf` runs it), or without rg.
+    fn not_measured(test: &str) -> Option<&'static str> {
+        let why = if !cfg!(tarae_optimized) {
+            "built at opt-level 0 (the test profile); `cargo perf` runs it"
+        } else if !rg_here() {
+            "rg (ripgrep) isn't installed"
+        } else {
+            return None;
+        };
+        let line = format!("{}nav::tests::{test} — {why}\n", crate::test_results::SELF_SKIP);
+        let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+        Some(why)
+    }
+
+    /// A search over this repository that hits most of its files, test code told apart (`testcode.rs`) — a
+    /// number for `cargo perf` (11.3 s once, 0.72 s since each file's declarations are read once an answer;
+    /// measured 2026-10-03). `perf_`, not `perf_budget_`: CI runs those, without rg.
     #[test]
-    #[ignore]
-    fn measure_a_wide_search_here() {
-        let root = std::env::current_dir().unwrap();
+    fn perf_search_wide_with_test_code() {
+        if not_measured("perf_search_wide_with_test_code").is_some() {
+            return;
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let q = Query {
             pattern: "fn ".into(),
             literal: true,
@@ -1525,8 +1544,12 @@ mod tests {
             tests: true,
         };
         let t0 = std::time::Instant::now();
-        let text = run_search(&root, None, &q, &[]).unwrap();
-        eprintln!("{:?} — {}", t0.elapsed(), text.lines().next().unwrap());
+        let text = run_search(root, None, &q, &[]).unwrap();
+        let ms = t0.elapsed().as_secs_f64() * 1000.0;
+        assert!(text.contains("in test code, listed last"), "{}", text.lines().next().unwrap_or_default());
+        let line = format!("PERF search_wide_with_test_code_ms {ms:.3} budget=3000 noise=100\n");
+        let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+        assert!(ms < 3000.0, "{ms:.0} ms (budget 3000)");
     }
 
     /// With no server: tarae's outline from the syntax tree (when the grammar is there).

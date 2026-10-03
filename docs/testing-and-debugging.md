@@ -182,6 +182,21 @@ needs = "cargo-nextest"              # only when it's on PATH
 (quoted for the shell there; the built-in [JavaScript pack](../runtime/packs/javascript) does). Tasks of your own in
 the config come first ([Build tasks](configuration.md#build-tasks)).
 
+`:preflight`'s default steps — for a project with none of its own ([Checks before a
+push](configuration.md#checks-before-a-push-preflight)) — come from `[[preflight]]`, one entry per kind of project
+(Java has two: Maven, Gradle):
+
+```toml
+# ~/.local/share/tarae/packs/go/pack.toml — replaces the built-in Go preflight defaults
+[[preflight]]
+when = ["go.mod"]
+rank = 20                            # several kinds of project: their steps together, lower rank first
+steps = [
+  { name = "go vet", cmd = "go vet ./..." },
+  { name = "go test", cmd = "go test ./..." },
+]
+```
+
 ## Debugger
 
 DAP for Rust, C, and C++ (lldb-dap — Rust is built with `cargo build` first), Go (dlv), Python (debugpy), and Java

@@ -27,8 +27,20 @@ cargo clippy --all-targets               # must stay at 0 warnings
 cargo fmt                                # rustfmt.toml: max_width = 110
 ```
 
-Before sending a change, all of `cargo fmt`, `cargo clippy --all-targets`, `cargo test` and `cargo perf` must be
-clean. `cargo perf` runs the performance budgets (a key → frame on a 200k-line file must stay under 16 ms) and
+Before sending a change, these checks must all pass — `:preflight` runs them in tarae (`.tarae.toml`'s
+`[preflight]`), and CI runs the same ones:
+
+<!-- the checks: the same as .tarae.toml's [preflight] and CI's jobs — a test keeps them so (preflight.rs) -->
+```sh
+cargo fmt --all --check
+cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --features bundled-grammars -- -D warnings
+cargo test
+cargo test --features bundled-grammars
+cargo perf
+```
+
+`cargo perf` runs the performance budgets (a key → frame on a 200k-line file must stay under 16 ms) and
 real-use runs of the built editor on a pseudo-terminal (startup, a key in a big file, scrolling, idle CPU, memory
 with this repository open), in the `perf` profile — release, with line tables. It runs them three times, keeps
 each number's median in `target/perf/history.tsv` with the commit and date, and says which are more than 15% slower
@@ -38,8 +50,9 @@ edit-and-test loop, where these skip themselves, saying so. On a slow shared mac
 multiplies the budget (CI does this).
 
 [CI](.github/workflows/ci.yml) runs the same checks when started by hand (Actions → CI → Run workflow) — fmt,
-clippy (warnings are errors), and tests on Linux and macOS, with and without bundled grammars — and downloads and
-builds a grammar from GitHub (`cargo test -- --ignored`). It builds with the pinned toolchain too
+clippy (warnings are errors), and tests on Linux and macOS, with and without bundled grammars — except `cargo perf`:
+shared runners are too noisy for numbers, so CI runs only the budgets, in the `perf` profile. It also downloads and
+builds a grammar from GitHub (`cargo test -- --ignored`: the tests that need the network). It builds with the pinned toolchain too
 (`rustup toolchain install` reads `rust-toolchain.toml`), so a check that passes here passes there.
 
 ### The toolchain

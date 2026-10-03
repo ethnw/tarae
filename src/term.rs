@@ -5656,6 +5656,7 @@ impl OfferCard {
                         b = vec![('y', "Once"), ('a', "This chat"), ('A', "Always"), ('n', "No")]
                     }
                     crate::offer::What::Outside { .. } => b = vec![('y', "Run"), ('n', "No")],
+                    crate::offer::What::Preflight { .. } => b = vec![('y', "Run them"), ('n', "Not now")],
                     crate::offer::What::Screen { .. } => {
                         b = vec![('y', "Once"), ('a', "This chat"), ('n', "No")]
                     }

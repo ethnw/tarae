@@ -312,6 +312,54 @@ fn tasks_of(v: &toml::Value, root: &Path) -> Result<Option<(i64, Vec<Suggested>)
     Ok(Some((rank, out)))
 }
 
+/// `:preflight`'s default steps for a project at `root` (`preflight.rs`), when it lists none of its own:
+/// each pack's `[[preflight]]` whose `when` file `root` has, by `rank` (then pack name) — several kinds of
+/// project, their steps together. Each step says where it came from (`rust pack`). A pack that can't be
+/// read is logged and skipped. The commands are tarae's, what they run (tests, build scripts) the project's:
+/// the first run in a project says so on a card (`preflight::DEFAULTS_SAY`). Never a project's own wrapper.
+///
+/// `[[preflight]]`: `when` — the files that say it's this kind of project (any); `rank` (50 unless set);
+/// `steps = [{ name, cmd, note? }]` as in `.tarae.toml`.
+pub fn preflight(root: &Path) -> Vec<crate::preflight::Step> {
+    let mut found = Vec::new();
+    for lang in crate::runtime::pack_langs() {
+        let Some(Ok(t)) = manifest(&lang) else { continue };
+        let Some(list) = t.get("preflight") else { continue };
+        match preflight_of(list, root, &lang) {
+            Ok(sets) => found.extend(sets.into_iter().map(|(rank, steps)| (rank, lang.clone(), steps))),
+            Err(e) => crate::log::line("tarae", "warning", &format!("the {lang} pack: [[preflight]]: {e}")),
+        }
+    }
+    found.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+    found.into_iter().flat_map(|(_, _, steps)| steps).collect()
+}
+
+/// One pack's `[[preflight]]` entries that `root` is a project of: (rank, steps).
+fn preflight_of(
+    v: &toml::Value,
+    root: &Path,
+    lang: &str,
+) -> Result<Vec<(i64, Vec<crate::preflight::Step>)>, String> {
+    let list = v.as_array().ok_or("isn't a list ([[preflight]])")?;
+    let mut out = Vec::new();
+    for entry in list {
+        let t = entry.as_table().ok_or("an entry isn't a table")?;
+        known(t, &["when", "rank", "steps"], "[[preflight]]")?;
+        let when = strings(t.get("when"), "when")?.unwrap_or_default();
+        if !when.iter().any(|f| root.join(f).is_file()) {
+            continue;
+        }
+        let rank = t.get("rank").map_or(Ok(50), |r| r.as_integer().ok_or("`rank` isn't a number"))?;
+        let mut warnings = Vec::new();
+        let steps = crate::preflight::parse_config(entry, &format!("{lang} pack"), &mut warnings);
+        if let Some(w) = warnings.first() {
+            return Err(w.clone());
+        }
+        out.push((rank, steps));
+    }
+    Ok(out)
+}
+
 /// Whether `cmd` is a program on `PATH`.
 pub fn on_path(cmd: &str) -> bool {
     std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(cmd).is_file()))
@@ -1157,6 +1205,91 @@ mod tests {
         assert_eq!(names.last().map(String::as_str), Some("make"));
         assert!(names.contains(&"npm run lint".to_string()));
         std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// `:preflight`'s defaults come by the files that mark a project — several kinds, their steps together
+    /// by rank, each saying its pack; Python has none (no single standard); a folder that's no kind of
+    /// project, none.
+    #[test]
+    fn preflight_defaults_by_the_project_files() {
+        let dir = std::env::temp_dir().join(format!("tarae-pack-preflight-{}", std::process::id()));
+        let steps = |files: &[&str]| {
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            for f in files {
+                std::fs::write(dir.join(f), "").unwrap();
+            }
+            preflight(&dir).iter().map(|s| format!("{}: {}", s.from, s.name)).collect::<Vec<_>>()
+        };
+        let rust = ["rust pack: fmt", "rust pack: clippy", "rust pack: test"];
+        assert_eq!(steps(&["Cargo.toml"]), rust);
+        let both = steps(&["go.mod", "Cargo.toml"]);
+        assert_eq!(both[..3], rust, "rust first (rank 10)");
+        assert_eq!(both[3..], ["go pack: gofmt", "go pack: go vet", "go pack: go test"]);
+        assert_eq!(
+            steps(&["tsconfig.json", "package.json"]),
+            ["typescript pack: tsc", "javascript pack: npm test"]
+        );
+        assert_eq!(steps(&["pom.xml"]), ["java pack: mvn verify"]);
+        assert_eq!(steps(&["build.gradle.kts"]), ["java pack: gradle check"]);
+        assert!(steps(&["pyproject.toml"]).is_empty(), "no Python defaults");
+        assert!(steps(&["notes.txt"]).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The Java defaults run the mvn or gradle on your PATH — never the project's own wrapper (a script from
+    /// the repository: a project's `[preflight]` runs it, once trusted). Without the tool: said so, nothing
+    /// run. Harmless stand-ins: a `./mvnw`/`./gradlew` that would leave a marker, a fake `mvn`/`gradle` in
+    /// the test's own folder.
+    #[test]
+    fn the_java_defaults_never_run_the_projects_wrapper() {
+        let dir = std::env::temp_dir().join(format!("tarae-pack-wrapper-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let script = |path: &Path, body: &str| {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        for (marker, tool, wrapper) in [("pom.xml", "mvn", "mvnw"), ("build.gradle", "gradle", "gradlew")] {
+            for f in ["pom.xml", "build.gradle"] {
+                let _ = std::fs::remove_file(dir.join(f));
+            }
+            std::fs::write(dir.join(marker), "").unwrap();
+            script(&dir.join(wrapper), &format!("touch '{}'", dir.join("wrapper-ran").display()));
+            let step = preflight(&dir).into_iter().find(|s| s.from == "java pack").expect("a java step");
+            let run = || {
+                std::process::Command::new("sh")
+                    .args(["-c", &step.cmd])
+                    .current_dir(&dir)
+                    .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+                    .output()
+                    .unwrap()
+            };
+            // No tool on PATH: said, and the wrapper isn't the way out
+            let out = run();
+            let said = String::from_utf8_lossy(&out.stdout).to_string();
+            assert!(!out.status.success(), "{said}");
+            assert!(
+                said.contains(&format!(
+                    "{tool} isn't on PATH — tarae's defaults don't run a project's own ./{wrapper}"
+                )),
+                "{said}"
+            );
+            assert!(!dir.join("wrapper-ran").exists(), "./{wrapper} didn't run");
+            // The one on PATH runs
+            script(&bin.join(tool), &format!("echo \"{tool} $*\" > '{}'", dir.join("tool-ran").display()));
+            assert!(run().status.success());
+            let ran = std::fs::read_to_string(dir.join("tool-ran")).unwrap();
+            assert!(
+                ran.starts_with(&format!("{tool} ")) && (ran.contains("verify") || ran.contains("check")),
+                "{ran}"
+            );
+            assert!(!dir.join("wrapper-ran").exists(), "./{wrapper} didn't run");
+            std::fs::remove_file(bin.join(tool)).unwrap();
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

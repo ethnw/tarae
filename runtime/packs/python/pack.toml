@@ -32,6 +32,10 @@ name = "mypy"
 cmd = "mypy --no-color-output --no-error-summary ."
 needs = "mypy"
 
+# No `[[preflight]]` defaults: Python has no single standard to guess — tests run by pytest or unittest
+# (nox, tox), lint by ruff or flake8, format by ruff or black, types by mypy or pyright — and a guess that
+# isn't the project's fails good code. `[preflight]` in .tarae.toml says what this project uses.
+
 # Checkouts inside the project aren't analyzed. Asked for by section (`workspace/configuration`); giving a
 # list replaces the default one, so it's kept (dot-folders are in it — `.claude/worktrees` already was; the
 # four "Auto-excluding" lines pyright 1.1.414 logs).

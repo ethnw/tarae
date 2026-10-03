@@ -31,6 +31,17 @@ cmd = "go build ./..."
 name = "go vet"
 cmd = "go vet ./..."
 
+# `:preflight` in a project with no steps of its own: gofmt has nothing to say (it lists the files it
+# would change), vet, the tests
+[[preflight]]
+when = ["go.mod"]
+rank = 20
+steps = [
+  { name = "gofmt", cmd = "out=$(gofmt -l .) && [ -z \"$out\" ] || { printf '%s\\n' \"$out\"; echo 'gofmt -l: these files are not formatted'; exit 1; }" },
+  { name = "go vet", cmd = "go vet ./..." },
+  { name = "go test", cmd = "go test ./..." },
+]
+
 # Checkouts inside the module (with no go.mod of their own) aren't loaded (`-` = leave out, from the
 # workspace folder; its default kept). gopls's settings are flat — "build" is only its docs' heading:
 # `build.directoryFilters` was refused ("setting option "build": unexpected setting").

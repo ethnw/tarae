@@ -1,5 +1,6 @@
 //! Config file — TOML + tarae's own schema (one table in `settings.rs`).
-//! Layers: defaults < user `~/.config/tarae/config.toml` < project `.tarae.toml` < runtime `:set`.
+//! Layers: defaults < user `~/.config/tarae/config.toml` < project `.tarae.toml` < your `.tarae.local.toml`
+//! (that project's, read only while git ignores it — `personal`) < runtime `:set`.
 
 use std::fs;
 use std::io::{ErrorKind, Write as _};
@@ -86,8 +87,10 @@ pub struct EditorConfig {
     /// Build tasks (`[task.<name>] cmd = "…"`, optional `cwd`) — before the ones the project suggests.
     pub tasks: Vec<crate::task::Task>,
     /// `:preflight`'s steps (`[preflight] steps = [{ name, cmd, note }, …]` — `preflight.rs`). A layer that
-    /// gives them replaces the list.
+    /// gives them replaces the list (and the packs' defaults).
     pub preflight: Vec<crate::preflight::Step>,
+    /// …and `.tarae.local.toml`'s, added after them (or after the packs').
+    pub preflight_local: Vec<crate::preflight::Step>,
 }
 
 impl Default for EditorConfig {
@@ -127,6 +130,7 @@ impl Default for EditorConfig {
             attach: Vec::new(),
             tasks: Vec::new(),
             preflight: Vec::new(),
+            preflight_local: Vec::new(),
         }
     }
 }
@@ -187,6 +191,45 @@ fn project_layer() -> Option<PathBuf> {
     project_path().filter(|p| config_path().as_ref() != Some(p))
 }
 
+/// `.tarae.local.toml` — yours, for one project: beside its `.tarae.toml`, or in the folder tarae started
+/// in (whether it's there or not: the watch picks it up once made).
+fn local_path() -> Option<PathBuf> {
+    let dir = match project_path() {
+        Some(p) => p.parent()?.to_path_buf(),
+        None => std::env::current_dir().ok()?,
+    };
+    Some(dir.join(".tarae.local.toml"))
+}
+
+/// Whether `.tarae.local.toml` at `path` is yours to read as you'd read your own config: git says it's
+/// untracked and ignored. Err (why not) otherwise — a committed one came with the repository (the
+/// project's, which `.tarae.toml` is for), an untracked one git doesn't ignore may have come with a
+/// download of it, and outside a repository git can't tell. Asked only when the file is there.
+pub(crate) fn personal(path: &Path) -> Result<(), String> {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else { return Err("no folder".into()) };
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .arg(name)
+            .current_dir(dir)
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .ok()
+    };
+    let inside = git(&["rev-parse", "--is-inside-work-tree", "--"]).is_some_and(|o| o.status.success());
+    if !inside {
+        return Err("not in a git repository, so git can't say it's yours".into());
+    }
+    if git(&["ls-files", "--error-unmatch", "--"]).is_some_and(|o| o.status.success()) {
+        return Err("git tracks it — a committed one is the project's: put that in .tarae.toml".into());
+    }
+    if !git(&["check-ignore", "-q", "--"]).is_some_and(|o| o.status.success()) {
+        return Err("git doesn't ignore it — add it to .gitignore or .git/info/exclude to use it".into());
+    }
+    Ok(())
+}
+
 fn short(p: &Path) -> String {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     match home.as_deref().and_then(|h| p.strip_prefix(h).ok()) {
@@ -201,12 +244,27 @@ fn short(p: &Path) -> String {
 /// The project's file goes in through `trust.rs`: what runs commands only once the project is trusted.
 pub fn load() -> (Config, Vec<String>) {
     let store = crate::trust::Store::read(crate::trust::Store::path().as_deref());
-    load_from(config_path(), project_layer(), &store)
+    let local = local_path().filter(|p| p.is_file());
+    load_layers(config_path(), project_layer(), local, &store)
 }
 
+/// (tests: the layers without a local one)
+#[cfg(test)]
 pub(crate) fn load_from(
     user: Option<PathBuf>,
     project: Option<PathBuf>,
+    store: &crate::trust::Store,
+) -> (Config, Vec<String>) {
+    load_layers(user, project, None, store)
+}
+
+/// The layers in order: yours, the project's (through `trust.rs`), then `.tarae.local.toml` — read as
+/// yours when git ignores it (`personal`), else not at all, said so. Its `[preflight]` steps go after the
+/// project's (`EditorConfig::preflight_local`), not in their place.
+pub(crate) fn load_layers(
+    user: Option<PathBuf>,
+    project: Option<PathBuf>,
+    local: Option<PathBuf>,
     store: &crate::trust::Store,
 ) -> (Config, Vec<String>) {
     let read = |path: &Path, warnings: &mut Vec<String>| match fs::read_to_string(path) {
@@ -251,6 +309,32 @@ pub(crate) fn load_from(
                 with: Box::new((with.editor, with.keymaps)),
                 without: Box::new((without.editor, without.keymaps)),
             });
+        }
+    }
+    if let Some(path) = &local
+        && let Some(src) = read(path, &mut warnings)
+    {
+        match personal(path) {
+            Ok(()) => {
+                let file = short(path);
+                let apply = |c: &mut Config, warnings: &mut Vec<String>| {
+                    let project_steps = std::mem::take(&mut c.editor.preflight);
+                    apply_source(c, &src, &file, warnings, None);
+                    // (its steps were read in place of the project's: they go after them instead)
+                    c.editor.preflight_local = std::mem::replace(&mut c.editor.preflight, project_steps);
+                };
+                apply(&mut config, &mut warnings);
+                // …and on both ways the project's trust can go (the card switches between them)
+                if let Some(p) = &mut config.project {
+                    for half in [&mut p.with, &mut p.without] {
+                        let (editor, keymaps) = (half.0.clone(), half.1.clone());
+                        let mut c = Config { editor, keymaps, ..Config::default() };
+                        apply(&mut c, &mut Vec::new());
+                        **half = (c.editor, c.keymaps);
+                    }
+                }
+            }
+            Err(why) => warnings.push(format!("{}: not read — {why}", short(path))),
         }
     }
     config.theme = crate::theme::load(&config.editor.theme).unwrap_or_else(|e| {
@@ -414,6 +498,9 @@ pub fn watch(tx: Sender<Event>) {
             paths.push(p); // even if missing yet — picked up as soon as it's created
         }
     }
+    if let Some(p) = local_path().filter(|p| !paths.contains(p)) {
+        paths.push(p);
+    }
     thread::spawn(move || {
         let stamps =
             || -> Vec<_> { paths.iter().map(|p| fs::metadata(p).and_then(|m| m.modified()).ok()).collect() };
@@ -543,7 +630,9 @@ pub(crate) mod tests {
                 } else if block.lines().next().is_some_and(|l| l.contains("pack.toml")) {
                     let pack: Result<toml::Table, _> = toml::from_str(block);
                     assert!(
-                        pack.is_ok_and(|p| ["test", "tasks", "install"].iter().any(|k| p.contains_key(*k))),
+                        pack.is_ok_and(|p| {
+                            ["test", "tasks", "install", "preflight"].iter().any(|k| p.contains_key(*k))
+                        }),
                         "{file}: language pack example\n{block}"
                     );
                 } else {
@@ -618,6 +707,86 @@ Y = "move_line_down"
 [keys.normal.space]
 Z = ["move_line_down", ":sh touch marker"]
 "#;
+
+    /// `.tarae.local.toml` is read as yours only while git says it's untracked and ignored: its settings over
+    /// the project's, its preflight steps after the project's — on both ways the project's trust can go.
+    /// Not ignored, committed, or outside a repository: not read, and why is said.
+    #[test]
+    fn a_local_layer_is_read_only_while_git_ignores_it() {
+        use crate::trust::{State, Store};
+        let dir = std::env::temp_dir().join(format!("tarae-config-local-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let dir = fs::canonicalize(&dir).unwrap();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git").args(args).current_dir(&dir).output().unwrap();
+            assert!(ok.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&ok.stderr));
+        };
+        let (project, local) = (dir.join(".tarae.toml"), dir.join(".tarae.local.toml"));
+        fs::write(
+            &project,
+            "[editor]\nscrolloff = 9\n[preflight]\nsteps = [{ name = \"check\", cmd = \"cargo check\" }]\n",
+        )
+        .unwrap();
+        fs::write(
+            &local,
+            "[editor]\nscrolloff = 4\n[preflight]\nsteps = [{ name = \"mine\", cmd = \"make lint\" }]\n",
+        )
+        .unwrap();
+        fs::write(dir.join(".gitignore"), ".tarae.local.toml\n").unwrap();
+        let load = |store: &Store| load_layers(None, Some(project.clone()), Some(local.clone()), store);
+        let names = |s: &[crate::preflight::Step]| s.iter().map(|s| s.name.clone()).collect::<Vec<_>>();
+        // Outside a repository: git can't say it's yours
+        let (c, w) = load(&Store::default());
+        assert_eq!(c.editor.scrolloff, 9);
+        assert!(
+            w.iter().any(|w| w.ends_with("not read — not in a git repository, so git can't say it's yours")),
+            "{w:?}"
+        );
+        // Ignored, untracked: yours — over the project's settings, its steps after (the project not trusted
+        // yet: its own steps held, yours there either way)
+        git(&["init", "-q"]);
+        let (c, w) = load(&Store::default());
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(c.editor.scrolloff, 4);
+        assert!(c.editor.preflight.is_empty(), "the project's steps wait for trust");
+        assert_eq!(names(&c.editor.preflight_local), ["mine"]);
+        assert_eq!(c.editor.preflight_local[0].from, ".tarae.local.toml");
+        let p = c.project.as_ref().unwrap();
+        assert_eq!(p.state, State::Ask);
+        assert!(
+            p.items.iter().all(|(k, _)| !k.contains("mine")),
+            "yours isn't on the trust card: {:?}",
+            p.items
+        );
+        let mut store = Store::default();
+        store.answer(&project, p.hash, true);
+        let (t, _) = load(&store);
+        assert_eq!(
+            (names(&t.editor.preflight), names(&t.editor.preflight_local)),
+            (vec!["check".into()], vec!["mine".into()])
+        );
+        assert_eq!(
+            (t.editor.scrolloff, &p.with.0.preflight_local[0].name),
+            (4, &"mine".to_string()),
+            "both ways"
+        );
+        // Not ignored: not read
+        fs::write(dir.join(".gitignore"), "").unwrap();
+        let (c, w) = load(&Store::default());
+        assert_eq!((c.editor.scrolloff, c.editor.preflight_local.len()), (9, 0));
+        assert!(
+            w.iter().any(|w| w.contains("not read — git doesn't ignore it — add it to .gitignore")),
+            "{w:?}"
+        );
+        // Committed (ignored or not): the project's — not read as yours
+        fs::write(dir.join(".gitignore"), ".tarae.local.toml\n").unwrap();
+        git(&["add", "-f", ".tarae.local.toml"]);
+        let (c, w) = load(&Store::default());
+        assert_eq!(c.editor.scrolloff, 9);
+        assert!(w.iter().any(|w| w.contains("not read — git tracks it")), "{w:?}");
+        fs::remove_dir_all(&dir).ok();
+    }
 
     fn bound(c: &Config, keys: &str) -> Option<String> {
         let keys: Vec<crate::key::Key> = keys.split(' ').map(|k| k.parse().unwrap()).collect();

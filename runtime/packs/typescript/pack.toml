@@ -8,6 +8,13 @@ rank = 30
 name = "tsc"
 cmd = "npx tsc --noEmit --pretty false"
 
+# `:preflight` in a project with no steps of its own: the types check (its tests: package.json's — the
+# JavaScript pack's step)
+[[preflight]]
+when = ["tsconfig.json"]
+rank = 30
+steps = [{ name = "tsc", cmd = "npx tsc --noEmit --pretty false" }]
+
 # Also JavaScript's
 [install.typescript-language-server]
 what = "TypeScript and JavaScript's language server"

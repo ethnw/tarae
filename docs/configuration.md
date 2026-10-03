@@ -17,12 +17,19 @@ the [keymap reference](reference/keymap.md).
 - **User config**: `~/.config/tarae/config.toml` (or `$XDG_CONFIG_HOME/tarae/config.toml`). `:config-open` opens it
 - **Project config**: `.tarae.toml`, found by searching upward from the current directory — handy for per-project
   debugger [attach targets](testing-and-debugging.md#attaching-to-a-running-program)
-- **Layers**, later ones winning: defaults < user config < project `.tarae.toml` < `:set` at runtime
+- **Your settings for one project**: `.tarae.local.toml` beside its `.tarae.toml` (or in the folder you start
+  tarae in). It's yours, so nothing in it waits for trust — which is why it's read only while git says it's
+  **untracked and ignored** (add it to `.gitignore`, or `.git/info/exclude` to keep that to yourself). A committed
+  one came with the repository, an unignored one may have come with a download of it, and outside a git
+  repository git can't tell: then it isn't read, and a warning says why. Its `[preflight]` steps go after the
+  project's, not in their place
+- **Layers**, later ones winning: defaults < user config < project `.tarae.toml` < your `.tarae.local.toml` <
+  `:set` at runtime
 - **A project's file is trusted before it runs anything.** A `.tarae.toml` usually comes with the project, so
   someone else may have written it. What in it runs commands or loosens how Claude's commands are guarded waits
   until you trust the project: `llm.command`, `llm.args`, `llm.run-allow`, `llm.review-ask`, `llm.chat-settings`,
-  `llm.sandbox*`, `editor.restart-build` and `restart-binary`, `[task.*]`, a `[lsp.*]` `command` or `args`, an
-  `[[attach]]` `before`, and keys bound to `:` commands. A card shows each one as written: `y` trusts the
+  `llm.sandbox*`, `editor.restart-build` and `restart-binary`, `[task.*]`, `[preflight]` steps, a `[lsp.*]`
+  `command` or `args`, an `[[attach]]` `before`, and keys bound to `:` commands. A card shows each one as written: `y` trusts the
   project, `n` ignores that part. The rest of the file applies either way. The answer is kept per project and
   asked again when any of those values change. `:project-trust` shows the card again, and `:project-untrust`
   takes trust back
@@ -146,6 +153,38 @@ cwd = "web"                # relative to where tarae started
 ```
 
 A task runs with `sh -c`; `file:line:col: message` lines in its output go into the list (`]q`).
+
+## Checks before a push (`:preflight`)
+
+`:preflight` runs a project's checks one after another in the task panel — every one, whatever the ones before
+did — each with its time and how it ended, the places any of them points at in the list (`]q`), and a one-line
+summary at the end (`5 of 6 passed — clippy failed · 4m 12s`).
+
+```toml
+[preflight]
+steps = [
+  { name = "fmt", cmd = "cargo fmt --all --check" },
+  { name = "clippy", cmd = "cargo clippy --all-targets -- -D warnings" },
+  { name = "test", cmd = "cargo test" },
+  # a line matching `note` (a regex) makes the pass one with a note
+  { name = "perf", cmd = "cargo perf", note = "not measured|SLOWER" },
+]
+```
+
+Where the steps come from:
+
+- **The project's** `[preflight]` in `.tarae.toml` — run once you've trusted the project. (In your own config
+  it's for every project.)
+- **Else the language packs' defaults**, by the files that mark the project — several kinds of project, their steps
+  together: Rust (`Cargo.toml`: `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`,
+  `cargo test`), Go (`go.mod`: `gofmt -l` must list nothing, `go vet ./...`, `go test ./...`), TypeScript
+  (`tsconfig.json`: `tsc --noEmit`), JavaScript (`package.json`: its `test` script, if it has one), Java
+  (`pom.xml`: Maven's `verify`; `build.gradle`: Gradle's `check` — the `mvn` or `gradle` on your PATH, never the
+  project's own `./mvnw` or `./gradlew`: a script from the repository is for the project's own `[preflight]`,
+  once you trust it). Python has none: there's no single standard to guess. The commands are tarae's, but what
+  they run is the project's code — its tests, build scripts, npm scripts — so the first run in a project shows
+  them on a card that says so (`y` runs them): run them only for code you trust.
+- **Then yours**, from `.tarae.local.toml`'s `[preflight]`: added after either.
 
 ## Custom themes
 

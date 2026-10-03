@@ -33,6 +33,16 @@ cmd = "cargo clippy --all-targets --message-format=short"
 name = "cargo build"
 cmd = "cargo build --message-format=short"
 
+# `:preflight` in a project with no steps of its own: formatted, clippy with warnings as errors, the tests
+[[preflight]]
+when = ["Cargo.toml"]
+rank = 10
+steps = [
+  { name = "fmt", cmd = "cargo fmt --all --check" },
+  { name = "clippy", cmd = "cargo clippy --all-targets -- -D warnings" },
+  { name = "test", cmd = "cargo test" },
+]
+
 # Worktrees and checkouts inside the project aren't scanned (paths from its root; no defaults to keep)
 [server.rust-analyzer]
 leave-out = { init = "files.exclude", each = "{rel}" }

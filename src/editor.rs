@@ -551,6 +551,8 @@ pub struct Editor {
     pub restart: Option<crate::restart::Restart>,
     /// `:preflight` under way, or the last one while its run is in the task panel (`preflight.rs`).
     pub preflight: Option<crate::preflight::Preflight>,
+    /// Projects whose pack-default preflight was shown on its card and run this session (no card again).
+    pub preflight_told: std::collections::HashSet<PathBuf>,
     /// Undo history files being written (`undofile.rs`) — the process ending waits for them.
     pub undo_writes: crate::undofile::Writes,
     pub idle_save_gen: u64,
@@ -696,6 +698,7 @@ impl Editor {
             sandbox: if cfg!(test) { crate::sandbox::Availability::Bypass } else { Default::default() },
             restart: None,
             preflight: None,
+            preflight_told: Default::default(),
             undo_writes: Default::default(),
             idle_save_gen: 0,
             recent: Vec::new(),
@@ -3241,10 +3244,22 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let dir = std::fs::canonicalize(&dir).unwrap();
         std::fs::write(dir.join("a.rs"), "fn a() {}\nfn b() {}\n").unwrap();
-        let step = |name: &str, cmd: &str| Step { name: name.into(), cmd: cmd.into(), note: None };
+        let step = |name: &str, cmd: &str| Step {
+            name: name.into(),
+            cmd: cmd.into(),
+            note: None,
+            from: ".tarae.toml".into(),
+        };
         let mut ed = editor("");
         ed.project_root = Some(dir.clone());
-        assert!(ed.preflight_start().unwrap_err().contains("no preflight steps"));
+        // No steps, and no kind of project a pack knows (looked for on a worker)
+        ed.preflight_start().unwrap();
+        settle_for(&mut ed, |ed| ed.status.is_some());
+        let said = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        assert!(
+            said.starts_with("no preflight steps — no language pack knows this kind of project"),
+            "{said}"
+        );
         ed.config.preflight = vec![
             step("fmt", "echo formatted"),
             step("clippy", "echo 'a.rs:2:1: error: not like that' >&2; exit 3"),
@@ -3288,6 +3303,67 @@ mod tests {
             s.contains("● fmt") && s.contains("▲ clippy") && s.contains("● perf") && s.contains("● test"),
             "{s}"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// With no steps of the project's own, the packs' defaults: the first time, on a card that names them and
+    /// says plainly they run the project's code, yours after them; `n` runs nothing, `y` runs them all, and
+    /// the next `:preflight` there doesn't ask again. The project's own steps replace the packs' — yours
+    /// still go after, and no card asks.
+    #[test]
+    fn preflight_uses_the_packs_defaults_after_saying_so() {
+        use crate::preflight::{State, Step};
+        let dir = std::env::temp_dir().join(format!("tarae-preflight-packs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+        let step = |name: &str, cmd: &str, from: &str| Step {
+            name: name.into(),
+            cmd: cmd.into(),
+            note: None,
+            from: from.into(),
+        };
+        let mut ed = editor("");
+        ed.project_root = Some(dir.clone());
+        ed.config.preflight_local = vec![step("mine", "echo mine", ".tarae.local.toml")];
+        // A Cargo project: the rust pack's steps, on a card
+        ed.preflight_start().unwrap();
+        settle_for(&mut ed, |ed| !ed.offers.is_empty());
+        let q = ed.offers[0].question.clone();
+        assert!(q.starts_with("The rust pack's defaults:"), "{q}");
+        // (what's run is the project's code — said plainly, not "no trust needed")
+        let lines: Vec<&str> = q.split('\n').collect();
+        let say =
+            lines.iter().position(|l| *l == crate::preflight::DEFAULTS_SAY).expect("the caution, a line");
+        assert!(lines[say].contains("they build and run this project's code (its tests and build scripts)"));
+        assert!(!q.contains("no trust"), "{q}");
+        assert_eq!(ed.offers[0].warning, Some(say..say + 1), "the caution alone in the warning color");
+        assert!(q.contains("  clippy  cargo clippy --all-targets -- -D warnings"), "{q}");
+        assert!(q.contains("Yours, from .tarae.local.toml:\n  mine    echo mine"), "{q}");
+        assert!(ed.offers[0].weighty(), "it runs commands: y waits for it settled in sight");
+        ed.offer_dismiss();
+        assert!(ed.task_run.is_none(), "n: nothing ran");
+        // `y`: they run, yours after (stand-in pack steps — a real one would run cargo here)
+        let pack = vec![step("fmt", "echo formatted", "rust pack")];
+        ed.preflight_found(dir.clone(), pack.clone(), ed.config.preflight_local.clone());
+        assert_eq!(ed.offers.len(), 1);
+        ed.offer_accept();
+        let done = |ed: &Editor| ed.task_run.as_ref().is_some_and(|r| r.state != crate::task::State::Running);
+        settle_for(&mut ed, done);
+        let ran = |ed: &Editor| -> Vec<(String, State)> {
+            ed.preflight.as_ref().unwrap().steps.iter().map(|s| (s.name.clone(), s.state.clone())).collect()
+        };
+        assert_eq!(ran(&ed), [("fmt".to_string(), State::Passed), ("mine".to_string(), State::Passed)]);
+        // Told once: not asked again in this project
+        ed.preflight_found(dir.clone(), pack, ed.config.preflight_local.clone());
+        assert!(ed.offers.is_empty(), "no card the second time");
+        settle_for(&mut ed, done);
+        // The project's own replace the packs'; yours still after
+        ed.config.preflight = vec![step("own", "echo own", ".tarae.toml")];
+        ed.preflight_start().unwrap();
+        assert!(ed.offers.is_empty());
+        settle_for(&mut ed, done);
+        assert_eq!(ran(&ed).iter().map(|r| r.0.as_str()).collect::<Vec<_>>(), ["own", "mine"]);
         std::fs::remove_dir_all(&dir).ok();
     }
 

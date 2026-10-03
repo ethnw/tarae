@@ -12,12 +12,15 @@
 //!   (see [`shot`]).
 //! - `perf` (`cargo perf`) — the budgets and real-use scenarios in the `perf` profile, their numbers kept in
 //!   `target/perf/history.tsv` and compared with the last runs (see [`perf`]).
+//! - `linux [clippy|test]` — the checks on Linux in Docker, on the pinned toolchain, the tree read-only (see
+//!   [`linux`]).
 
 use std::collections::BTreeSet;
 use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
+mod linux;
 mod perf;
 mod shot;
 
@@ -29,7 +32,11 @@ fn main() {
         Some("vendor-grammars") => vendor_grammars(),
         Some("shot") => shot::run(&args[1..]),
         Some("perf") => perf::run(&args[1..]),
-        _ => Err("usage: cargo xtask vendor-grammars | shot out.png [keys …] | perf".into()),
+        Some("linux") => linux::run(&args[1..]),
+        _ => {
+            Err("usage: cargo xtask vendor-grammars | shot out.png [keys …] | perf | linux [clippy|test]"
+                .into())
+        }
     };
     if let Err(e) = result {
         eprintln!("error: {e}");
