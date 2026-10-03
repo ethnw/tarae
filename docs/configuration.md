@@ -178,10 +178,10 @@ Where the steps come from:
 - **Else the language packs' defaults**, by the files that mark the project — several kinds of project, their steps
   together: Rust (`Cargo.toml`: `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`,
   `cargo test`), Go (`go.mod`: `gofmt -l` must list nothing, `go vet ./...`, `go test ./...`), TypeScript
-  (`tsconfig.json`: `tsc --noEmit`), JavaScript (`package.json`: its `test` script, if it has one), Java
-  (`pom.xml`: Maven's `verify`; `build.gradle`: Gradle's `check` — the `mvn` or `gradle` on your PATH, never the
-  project's own `./mvnw` or `./gradlew`: a script from the repository is for the project's own `[preflight]`,
-  once you trust it). Python has none: there's no single standard to guess. The commands are tarae's, but what
+  (`tsconfig.json`: `tsc --noEmit`), JavaScript (`package.json`: its `test` script, if it has one). Python has
+  none: there's no single standard to guess. Java has none either: a Java project builds with its own wrapper
+  (`./mvnw`, `./gradlew`), a script from the repository that tarae's defaults don't run — list the steps in its
+  `[preflight]`, and they run once you trust the project. The commands are tarae's, but what
   they run is the project's code — its tests, build scripts, npm scripts — so the first run in a project shows
   them on a card that says so (`y` runs them): run them only for code you trust.
 - **Then yours**, from `.tarae.local.toml`'s `[preflight]`: added after either.

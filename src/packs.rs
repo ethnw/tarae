@@ -316,7 +316,8 @@ fn tasks_of(v: &toml::Value, root: &Path) -> Result<Option<(i64, Vec<Suggested>)
 /// each pack's `[[preflight]]` whose `when` file `root` has, by `rank` (then pack name) — several kinds of
 /// project, their steps together. Each step says where it came from (`rust pack`). A pack that can't be
 /// read is logged and skipped. The commands are tarae's, what they run (tests, build scripts) the project's:
-/// the first run in a project says so on a card (`preflight::DEFAULTS_SAY`). Never a project's own wrapper.
+/// the first run in a project says so on a card (`preflight::DEFAULTS_SAY`). Python and Java have none (their
+/// pack.toml says why).
 ///
 /// `[[preflight]]`: `when` — the files that say it's this kind of project (any); `rank` (50 unless set);
 /// `steps = [{ name, cmd, note? }]` as in `.tarae.toml`.
@@ -1208,8 +1209,8 @@ mod tests {
     }
 
     /// `:preflight`'s defaults come by the files that mark a project — several kinds, their steps together
-    /// by rank, each saying its pack; Python has none (no single standard); a folder that's no kind of
-    /// project, none.
+    /// by rank, each saying its pack; Python has none (no single standard), nor Java (its build is its
+    /// wrapper, a project's own); a folder that's no kind of project, none.
     #[test]
     fn preflight_defaults_by_the_project_files() {
         let dir = std::env::temp_dir().join(format!("tarae-pack-preflight-{}", std::process::id()));
@@ -1230,65 +1231,11 @@ mod tests {
             steps(&["tsconfig.json", "package.json"]),
             ["typescript pack: tsc", "javascript pack: npm test"]
         );
-        assert_eq!(steps(&["pom.xml"]), ["java pack: mvn verify"]);
-        assert_eq!(steps(&["build.gradle.kts"]), ["java pack: gradle check"]);
+        for java in ["pom.xml", "build.gradle", "build.gradle.kts"] {
+            assert!(steps(&[java]).is_empty(), "no Java defaults ({java})");
+        }
         assert!(steps(&["pyproject.toml"]).is_empty(), "no Python defaults");
         assert!(steps(&["notes.txt"]).is_empty());
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// The Java defaults run the mvn or gradle on your PATH — never the project's own wrapper (a script from
-    /// the repository: a project's `[preflight]` runs it, once trusted). Without the tool: said so, nothing
-    /// run. Harmless stand-ins: a `./mvnw`/`./gradlew` that would leave a marker, a fake `mvn`/`gradle` in
-    /// the test's own folder.
-    #[test]
-    fn the_java_defaults_never_run_the_projects_wrapper() {
-        let dir = std::env::temp_dir().join(format!("tarae-pack-wrapper-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let bin = dir.join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        let script = |path: &Path, body: &str| {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        };
-        for (marker, tool, wrapper) in [("pom.xml", "mvn", "mvnw"), ("build.gradle", "gradle", "gradlew")] {
-            for f in ["pom.xml", "build.gradle"] {
-                let _ = std::fs::remove_file(dir.join(f));
-            }
-            std::fs::write(dir.join(marker), "").unwrap();
-            script(&dir.join(wrapper), &format!("touch '{}'", dir.join("wrapper-ran").display()));
-            let step = preflight(&dir).into_iter().find(|s| s.from == "java pack").expect("a java step");
-            let run = || {
-                std::process::Command::new("sh")
-                    .args(["-c", &step.cmd])
-                    .current_dir(&dir)
-                    .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
-                    .output()
-                    .unwrap()
-            };
-            // No tool on PATH: said, and the wrapper isn't the way out
-            let out = run();
-            let said = String::from_utf8_lossy(&out.stdout).to_string();
-            assert!(!out.status.success(), "{said}");
-            assert!(
-                said.contains(&format!(
-                    "{tool} isn't on PATH — tarae's defaults don't run a project's own ./{wrapper}"
-                )),
-                "{said}"
-            );
-            assert!(!dir.join("wrapper-ran").exists(), "./{wrapper} didn't run");
-            // The one on PATH runs
-            script(&bin.join(tool), &format!("echo \"{tool} $*\" > '{}'", dir.join("tool-ran").display()));
-            assert!(run().status.success());
-            let ran = std::fs::read_to_string(dir.join("tool-ran")).unwrap();
-            assert!(
-                ran.starts_with(&format!("{tool} ")) && (ran.contains("verify") || ran.contains("check")),
-                "{ran}"
-            );
-            assert!(!dir.join("wrapper-ran").exists(), "./{wrapper} didn't run");
-            std::fs::remove_file(bin.join(tool)).unwrap();
-        }
         std::fs::remove_dir_all(&dir).ok();
     }
 

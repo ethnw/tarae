@@ -11,7 +11,7 @@
 //! Where the steps come from: the project's `[preflight]` (`.tarae.toml`, or your config for every project),
 //! else the language packs' defaults for the kind of project it is (`packs::preflight` — Cargo.toml, go.mod
 //! …; the commands are tarae's, but they build and run the project's code, so the first run in a project shows
-//! them on a card that says so — `DEFAULTS_SAY`; never a project's own `./gradlew`/`./mvnw`); then
+//! them on a card that says so — `DEFAULTS_SAY`); then
 //! `.tarae.local.toml`'s steps, yours, added after either (`config.rs` — read only while git ignores it).
 //!
 //! One task run (`task.rs`, the task panel): an `sh` script runs the steps one after another — every one,
@@ -34,9 +34,7 @@ const MARK: &str = "::tarae-preflight::";
 const NOTE_SHOWN: usize = 40;
 
 /// What the card before pack defaults run says of them: the commands are tarae's, but what they run is the
-/// project's — its tests, build scripts, npm scripts — so running them is running its code. (Not the
-/// project's wrapper, though: `./gradlew`/`./mvnw` are a project's own, for its own `[preflight]` once
-/// trusted.)
+/// project's — its tests, build scripts, npm scripts — so running them is running its code.
 pub const DEFAULTS_SAY: &str = "These are tarae's defaults, but they build and run this project's code (its \
 tests and build scripts) — run them only for code you trust.";
 

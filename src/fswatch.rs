@@ -570,25 +570,49 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Ten writes 5 ms apart are one burst: the one wake comes after the last of them — it took them all in.
+    /// Then, once the burst's late events are drained (an event can reach the queue after the wake — seen
+    /// on CI's macOS), nothing more wakes: an event is an edge, not a level. A try where the writer itself
+    /// stalled for half of `QUIET` or more (a busy runner) wasn't one burst — tried again.
     #[test]
     fn a_burst_of_writes_is_one_wake() {
         let dir = tmp("burst");
         let path = dir.join("a.log");
-        std::fs::write(&path, "").unwrap();
-        let mut w = watching(|w| w.file(&path));
-        let p = path.clone();
-        let t = std::thread::spawn(move || {
-            use std::io::Write as _;
-            let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
-            for _ in 0..10 {
-                f.write_all(b"line\n").unwrap();
-                std::thread::sleep(Duration::from_millis(5));
+        for attempt in 1.. {
+            std::fs::write(&path, "").unwrap();
+            let mut w = watching(|w| w.file(&path));
+            let p = path.clone();
+            let t = std::thread::spawn(move || {
+                use std::io::Write as _;
+                let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
+                let (mut last, mut gap) = (Instant::now(), Duration::ZERO);
+                for i in 0..10 {
+                    f.write_all(b"line\n").unwrap();
+                    if i > 0 {
+                        gap = gap.max(last.elapsed());
+                    }
+                    last = Instant::now();
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                (last, gap)
+            });
+            assert_eq!(w.wait(), Woke::Changed);
+            let woke = Instant::now();
+            let (last, gap) = t.join().unwrap();
+            if gap >= QUIET / 2 {
+                assert!(attempt < 5, "the writer stalled ({gap:?} between writes) in each of 5 tries");
+                continue;
             }
-        });
-        assert_eq!(w.wait(), Woke::Changed);
-        t.join().unwrap();
-        // All ten were taken in by that wake
-        assert_eq!(w.wait_for(Duration::from_millis(100)), Woke::TimedOut);
+            assert!(woke >= last, "woke {:?} before the last write — the burst was split", last - woke);
+            let drained = Instant::now() + BURST_MAX;
+            while Instant::now() < drained && w.wait_for(QUIET) == Woke::Changed {}
+            assert_eq!(
+                w.wait_for(Duration::from_millis(200)),
+                Woke::TimedOut,
+                "nothing more after the burst"
+            );
+            break;
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 }
