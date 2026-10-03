@@ -27,22 +27,15 @@ pub struct FilePlan {
     pub count: usize,
 }
 
-/// Case like ripgrep's `--smart-case`: insensitive unless the pattern has an uppercase letter.
-pub fn regex(pattern: &str) -> Result<regex::Regex, String> {
-    regex::RegexBuilder::new(pattern)
-        .case_insensitive(!pattern.chars().any(char::is_uppercase))
-        .build()
-        .map_err(|e| e.to_string().lines().last().unwrap_or("invalid regex").trim().to_string())
-}
-
 /// `targets` = per file, the lines (from 0) whose matches get replaced. `open` = texts of open buffers.
+/// The pattern's case as the search read it (`picker::smart_regex`) — what it found is what's replaced.
 pub fn plan(
     pattern: &str,
     replacement: &str,
     targets: &[(PathBuf, Vec<usize>)],
     open: &HashMap<PathBuf, Rope>,
 ) -> Result<Vec<FilePlan>, String> {
-    let re = regex(pattern)?;
+    let re = crate::picker::smart_regex(pattern)?;
     let mut out = Vec::new();
     for (path, lines) in targets {
         let base = match open.get(path) {
@@ -224,6 +217,8 @@ mod tests {
         );
         assert_eq!(plans[0].count, 3, "smart case: lowercase pattern matches OLD_NAME too");
         assert_eq!(plans[1].count, 1);
+        // (case as the search read it — `\S` isn't an uppercase letter, so OLD_NAME is found and replaced)
+        assert_eq!(plan(r"\Sld_(\w+)", "x", &targets, &open).unwrap()[0].count, 3);
         assert!(plan("(", "x", &targets, &open).is_err());
         std::fs::remove_dir_all(&dir).ok();
     }

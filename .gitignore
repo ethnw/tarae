@@ -1,3 +1,5 @@
 /target
 /.claude/
 CLAUDE.md
+# Your own settings and :preflight steps for this project — tarae reads it only while git ignores it
+.tarae.local.toml

@@ -26,6 +26,12 @@ unicode-segmentation = "1.13.3"
 unicode-width = "0.2.2"
 imara-diff = "0.1"
 vt100 = "0.16"  # the built-in terminal: escape sequences → a screen of cells (terminal.rs)
+# The project search (grep.rs): ripgrep's own crates, in-process — its walk (.gitignore, globs, threads),
+# its line searcher (binary files, BOMs, context) and its matcher (smart case, words, literals)
+ignore = "0.4"
+grep-searcher = "0.1"
+grep-regex = "0.1"
+grep-matcher = "0.1"
 
 [profile.release]
 lto = true

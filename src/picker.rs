@@ -1052,61 +1052,97 @@ pub fn file_items(root: &Path) -> Vec<Item> {
 
 const MAX_RESULTS: usize = 10_000;
 
-/// `pattern` as rg's `--smart-case` reads it: all lowercase = any case. Err: why it isn't a pattern yet, in
-/// a few words (`unclosed group`).
+/// A hit's text in its row at most this many characters — a minified file's line shows its start.
+const LABEL_MAX: usize = 240;
+
+/// `pattern` as the search reads it — smart case (`grep::smart_insensitive`) — for marking its matches in
+/// the rows. Err: why it isn't a pattern yet, in a few words (`unclosed group`).
 pub fn smart_regex(pattern: &str) -> Result<regex::Regex, String> {
     regex::RegexBuilder::new(pattern)
-        .case_insensitive(!pattern.chars().any(char::is_uppercase))
+        .case_insensitive(crate::grep::smart_insensitive(pattern, false))
         .build()
-        .map_err(|e| {
-            // (the regex crate's last line: `error: unclosed group`)
-            let why = e.to_string().lines().last().unwrap_or("invalid regex").trim().to_string();
-            why.strip_prefix("error: ").map_or(why.clone(), str::to_string)
-        })
+        .map_err(|e| crate::grep::why(&e.to_string()))
 }
 
 /// Where `word` is in the code under `root` as text (N3 — `g r` while the server is loading): whole word,
 /// case as written, by file then line.
 pub fn word_matches(root: &Path, word: &str) -> Result<Vec<Item>, String> {
-    let re = || regex::Regex::new(&format!(r"\b{}\b", regex::escape(word))).map_err(|e| e.to_string());
-    let mut items = rg(root, &["--case-sensitive", "--word-regexp", "--fixed-strings", "-e", word], re)?;
-    let at = |it: &Item| match &it.action {
-        Action::Goto { path, line, .. } => (path.clone(), *line),
-        _ => (PathBuf::new(), 0),
+    let q = crate::grep::Query {
+        pattern: word,
+        literal: true,
+        case: crate::grep::Case::Sensitive,
+        word: true,
+        globs: &[],
+        context: 0,
+        mode: crate::grep::Mode::Lines,
     };
-    items.sort_by_key(at);
-    Ok(items)
-}
-
-/// ripgrep with `args` (each hit `path:line: text`), stopped at MAX_RESULTS — else the built-in scan with
-/// the same pattern (`re`).
-fn rg(
-    root: &Path,
-    args: &[&str],
-    re: impl FnOnce() -> Result<regex::Regex, String>,
-) -> Result<Vec<Item>, String> {
-    rg_while(root, args, re, &|| false, &mut |_| {})
+    Ok(by_place(hits(root, &q, &|| false, &mut |_| {})?))
 }
 
 /// The live search (`space /`, N4): `pattern` with smart case, by file then line — `stop` asked as it goes
-/// (a newer key's search: the rg under way is killed, even while it has nothing to say), what's found so
-/// far handed to `partial` a little after it starts and now and then after (a big tree takes a while).
+/// (a newer key's search: this one ends in its own threads, even in a file with nothing to say), what's
+/// found so far handed to `partial` a little after it starts and now and then after (a big tree takes a
+/// while).
 pub fn search(
     root: &Path,
     pattern: &str,
     stop: &(dyn Fn() -> bool + Sync),
     partial: &mut dyn FnMut(Vec<Item>),
 ) -> Result<Vec<Item>, String> {
-    let mut items =
-        rg_while(root, &["--smart-case", "-e", pattern], || smart_regex(pattern), stop, &mut |found| {
-            partial(by_place(found.to_vec()))
-        })?;
-    items = by_place(items);
+    let q = crate::grep::Query {
+        pattern,
+        literal: false,
+        case: crate::grep::Case::Smart,
+        word: false,
+        globs: &[],
+        context: 0,
+        mode: crate::grep::Mode::Lines,
+    };
+    let items = hits(root, &q, stop, &mut |found| partial(by_place(found.to_vec())))?;
+    Ok(by_place(items))
+}
+
+/// The first of a search's results shown this soon after it starts, then more this often.
+const PARTIAL_FIRST: std::time::Duration = std::time::Duration::from_millis(100);
+const PARTIAL_EVERY: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// `q`'s matching lines under `root` as rows to open (`path:line: text`), at most MAX_RESULTS — what's
+/// found so far to `partial` now and then. What it couldn't read is left out quietly, as rg's list would.
+fn hits(
+    root: &Path,
+    q: &crate::grep::Query,
+    stop: &(dyn Fn() -> bool + Sync),
+    partial: &mut dyn FnMut(&[Item]),
+) -> Result<Vec<Item>, String> {
+    let mut items = Vec::new();
+    let started = std::time::Instant::now();
+    let mut next = PARTIAL_FIRST;
+    crate::grep::search(root, None, q, stop, &mut |file| {
+        for r in file.rows.into_iter().filter(|r| r.hit) {
+            let text = r.text.trim();
+            let text = text.char_indices().nth(LABEL_MAX).map_or(text, |(i, _)| &text[..i]);
+            items.push(Item {
+                label: format!("{}:{}: {text}", file.rel, r.line),
+                action: Action::Goto { path: root.join(&file.rel), line: r.line - 1, col: r.col },
+                hint: String::new(),
+                glyph: None,
+            });
+        }
+        if items.len() >= MAX_RESULTS {
+            items.truncate(MAX_RESULTS);
+            return false;
+        }
+        if started.elapsed() >= next {
+            partial(&items);
+            next = started.elapsed() + PARTIAL_EVERY;
+        }
+        true
+    })?;
     Ok(items)
 }
 
-/// Hits by file then line — one a line (rg says a line once per match in it; its matches all stand out in
-/// its row anyway), at its first match.
+/// Hits by file then line — files come as the threads searching them finish. One a line (its matches all
+/// stand out in its row anyway), at its first match.
 fn by_place(mut items: Vec<Item>) -> Vec<Item> {
     let at = |it: &Item| match &it.action {
         Action::Goto { path, line, col } => (path.clone(), *line, *col),
@@ -1118,138 +1154,6 @@ fn by_place(mut items: Vec<Item>) -> Vec<Item> {
         (a.0, a.1) == (b.0, b.1)
     });
     items
-}
-
-/// rg's threads at most — more contend in the kernel and are slower (see `rg_while`).
-const RG_THREADS: usize = 4;
-
-/// The first of a search's results shown this soon after it starts, then more this often.
-const PARTIAL_FIRST: std::time::Duration = std::time::Duration::from_millis(100);
-const PARTIAL_EVERY: std::time::Duration = std::time::Duration::from_millis(400);
-
-/// `rg`, stopped once `stop` says so (checked between lines, and by a watcher while it's quiet) — what
-/// it found so far to `partial` now and then.
-fn rg_while(
-    root: &Path,
-    args: &[&str],
-    re: impl FnOnce() -> Result<regex::Regex, String>,
-    stop: &(dyn Fn() -> bool + Sync),
-    partial: &mut dyn FnMut(&[Item]),
-) -> Result<Vec<Item>, String> {
-    use std::io::{BufRead, Read};
-    use std::sync::atomic::{AtomicBool, Ordering};
-    // (rg's default — a thread a core — fights over the kernel opening files: a 200k-file tree took 6.8 s
-    // with 14 threads, 75 s of it system time; 2.3 s with 4, its best — measured 2026-10-03, macOS)
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(RG_THREADS).to_string();
-    let rg = Command::new("rg")
-        // (a line past 240 columns shows its start, not "[Omitted long line]")
-        .args(["--vimgrep", "--no-heading", "--color=never", "--max-columns=240", "--max-columns-preview"])
-        .args(["--threads", &threads])
-        .args(args)
-        .current_dir(root)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn();
-    let Ok(mut rg) = rg else { return grep_builtin(root, &re()?, stop) };
-    // Read as it comes and stopped at the limit — a common word in a big tree was held whole (and searched
-    // to the end) before keeping the first 10k
-    let err = rg.stderr.take().map(|mut e| {
-        std::thread::spawn(move || {
-            let mut s = String::new();
-            let _ = e.read_to_string(&mut s);
-            s
-        })
-    });
-    let mut items = Vec::new();
-    let pid = rg.id() as i32;
-    let done = AtomicBool::new(false);
-    let started = std::time::Instant::now();
-    let mut next = PARTIAL_FIRST;
-    std::thread::scope(|s| {
-        // (a quiet rg — no hit for a while in a big tree — is stopped too, not only between lines)
-        s.spawn(|| {
-            while !done.load(Ordering::Relaxed) {
-                if stop() {
-                    // SAFETY: a signal to the rg this function started (still ours: it's waited for below).
-                    unsafe { libc::kill(pid, libc::SIGKILL) };
-                    return;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-        });
-        if let Some(out) = rg.stdout.take() {
-            for line in std::io::BufReader::new(out).split(b'\n').map_while(Result::ok) {
-                if stop() {
-                    break;
-                }
-                items.extend(parse_vimgrep(root, &String::from_utf8_lossy(&line)));
-                if items.len() == MAX_RESULTS {
-                    let _ = rg.kill();
-                    break;
-                }
-                if started.elapsed() >= next {
-                    partial(&items);
-                    next = started.elapsed() + PARTIAL_EVERY;
-                }
-            }
-        }
-        done.store(true, Ordering::Relaxed);
-    });
-    if items.len() == MAX_RESULTS || stop() {
-        let _ = rg.kill();
-        let _ = rg.wait();
-        return Ok(items);
-    }
-    let status = rg.wait().map_err(|e| e.to_string())?;
-    let err = err.and_then(|h| h.join().ok()).unwrap_or_default();
-    match status.code() {
-        Some(0 | 1) => Ok(items),
-        _ => Err(err.lines().next().unwrap_or("rg failed").to_string()),
-    }
-}
-
-/// `path:line:col:text` (line and col from 1, col in bytes).
-fn parse_vimgrep(root: &Path, l: &str) -> Option<Item> {
-    let mut it = l.splitn(4, ':');
-    let (path, line, col, text) = (it.next()?, it.next()?, it.next()?, it.next().unwrap_or(""));
-    let (line, col): (usize, usize) = (line.parse().ok()?, col.parse().ok()?);
-    Some(Item {
-        label: format!("{path}:{line}: {}", text.trim()),
-        action: Action::Goto { path: root.join(path), line: line - 1, col: col - 1 },
-        hint: String::new(),
-        glyph: None,
-    })
-}
-
-/// The search without rg (not installed): file by file, asking `stop` before each — a newer key's search
-/// stops this one as it would rg (without, a live search on a machine without rg ran to its end).
-fn grep_builtin(
-    root: &Path,
-    re: &regex::Regex,
-    stop: &(dyn Fn() -> bool + Sync),
-) -> Result<Vec<Item>, String> {
-    let mut out = Vec::new();
-    for rel in list_files(root) {
-        if stop() {
-            return Ok(out);
-        }
-        let Ok(src) = std::fs::read_to_string(root.join(&rel)) else { continue }; // skip binary and non-UTF-8
-        for (i, line) in src.lines().enumerate() {
-            if let Some(m) = re.find(line) {
-                out.push(Item {
-                    label: format!("{}:{}: {}", rel.display(), i + 1, line.trim()),
-                    action: Action::Goto { path: root.join(&rel), line: i, col: m.start() },
-                    hint: String::new(),
-                    glyph: None,
-                });
-                if out.len() >= MAX_RESULTS {
-                    return Ok(out);
-                }
-            }
-        }
-    }
-    Ok(out)
 }
 
 #[cfg(test)]
@@ -1368,40 +1272,61 @@ mod tests {
         assert_eq!(p.current().map(|i| i.label.as_str()), Some("src/a.rs:21: x"));
     }
 
+    /// The search as rg would (in-process — no rg needed): smart case, a hit's column in bytes, hidden files
+    /// in, `.git` out, `.gitignore` honored inside a git repository, a binary file skipped, a long line's
+    /// start; `g r`'s whole words with case as written.
     #[test]
-    fn vimgrep_lines() {
-        let it = parse_vimgrep(Path::new("/r"), "src/a.rs:12:5:    let 타래 = 1;").unwrap();
-        assert_eq!(it.action, Action::Goto { path: PathBuf::from("/r/src/a.rs"), line: 11, col: 4 });
-        assert_eq!(it.label, "src/a.rs:12: let 타래 = 1;");
-    }
-
-    #[test]
-    fn builtin_grep_and_walk() {
+    fn the_search_reads_as_rg_does() {
         let dir = std::env::temp_dir().join(format!("tarae-grep-{}", std::process::id()));
-        std::fs::create_dir_all(dir.join("sub")).unwrap();
-        std::fs::create_dir_all(dir.join("target")).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        for d in ["sub", ".hidden", ".git", "ignored"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
         std::fs::write(dir.join("a.txt"), "hello\n타래 world\n").unwrap();
-        std::fs::write(dir.join("sub/b.txt"), "no\nWorld\n").unwrap();
-        std::fs::write(dir.join("target/skip.txt"), "world\n").unwrap();
-        let hits = grep_builtin(&dir, &smart_regex("world").unwrap(), &|| false).unwrap();
-        let labels: Vec<_> = hits.iter().map(|i| i.label.clone()).collect();
+        std::fs::write(dir.join("sub/b.txt"), "no\nWorld\nworlds\n").unwrap();
+        std::fs::write(dir.join(".hidden/c.txt"), "world\n").unwrap();
+        std::fs::write(dir.join(".git/d.txt"), "world\n").unwrap();
+        std::fs::write(dir.join(".gitignore"), "ignored/\n").unwrap();
+        std::fs::write(dir.join("ignored/e.txt"), "world\n").unwrap();
+        std::fs::write(dir.join("bin.dat"), "world\0\n").unwrap();
+        std::fs::write(dir.join("long.txt"), format!("world {}\n", "x".repeat(500))).unwrap();
+        let labels = |items: &[Item]| items.iter().map(|i| i.label.clone()).collect::<Vec<_>>();
+        let hits = search(&dir, "world", &|| false, &mut |_| {}).unwrap();
+        let long = format!("long.txt:1: world {}", "x".repeat(LABEL_MAX - 6));
         assert_eq!(
-            labels,
-            vec!["a.txt:2: 타래 world", "sub/b.txt:2: World"],
-            "lowercase = case-insensitive, target skipped"
+            labels(&hits),
+            [
+                ".hidden/c.txt:1: world",
+                "a.txt:2: 타래 world",
+                &long,
+                "sub/b.txt:2: World",
+                "sub/b.txt:3: worlds"
+            ],
+            "lowercase = any case; hidden in; .git, .gitignore'd and binary out"
         );
-        assert_eq!(hits[0].action, Action::Goto { path: dir.join("a.txt"), line: 1, col: 7 }, "col in bytes");
-        // Stopped (a newer key): nothing more — told before its first file, nothing at all
-        assert!(grep_builtin(&dir, &smart_regex("world").unwrap(), &|| true).unwrap().is_empty());
-        let asked = std::sync::atomic::AtomicUsize::new(0);
-        let after_one = || asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 1;
-        let hits = grep_builtin(&dir, &smart_regex("world").unwrap(), &after_one).unwrap();
-        assert_eq!(hits.iter().map(|i| i.label.as_str()).collect::<Vec<_>>(), ["a.txt:2: 타래 world"]);
+        assert_eq!(hits[1].action, Action::Goto { path: dir.join("a.txt"), line: 1, col: 7 }, "col in bytes");
+        assert_eq!(labels(&search(&dir, "World", &|| false, &mut |_| {}).unwrap()), ["sub/b.txt:2: World"]);
+        let words = labels(&word_matches(&dir, "world").unwrap());
+        assert_eq!(words[..2], [".hidden/c.txt:1: world", "a.txt:2: 타래 world"]);
+        assert_eq!(words.len(), 3, "not `worlds`, not `World`: {words:?}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// The live search stops when told (a newer key): what it found is dropped, rg killed. Not stopped, it
-    /// finds every match, by file then line.
+    /// The file list's own walk (no git): build and dot folders left out.
+    #[test]
+    fn the_file_walk_skips_build_folders() {
+        let dir = std::env::temp_dir().join(format!("tarae-walk-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        for d in ["sub", "target", ".cache"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+            std::fs::write(dir.join(d).join("f.txt"), "x").unwrap();
+        }
+        assert_eq!(list_files(&dir), [PathBuf::from("sub/f.txt")]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The live search stops when told (a newer key): told before its first file, it finds nothing. Not
+    /// stopped, it finds every match, by file then line.
     #[test]
     fn a_stopped_search_finds_nothing_more() {
         let dir = std::env::temp_dir().join(format!("tarae-search-stop-{}", std::process::id()));

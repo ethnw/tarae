@@ -584,6 +584,25 @@ fn file_picker_opens_lists_and_survives_no_matches() {
     assert_eq!(t.wait_exit().code(), Some(0));
 }
 
+/// The project search (`space /`) with no rg anywhere — the harness's PATH is `/usr/bin:/bin`: ripgrep's
+/// crates search in-process, hidden files too, and Enter opens the hit at its line.
+#[test]
+fn the_project_search_needs_no_rg() {
+    let sb = Sandbox::new("search");
+    fs::create_dir_all(sb.file(".github")).unwrap();
+    sb.write("notes.md", "# notes\n");
+    sb.write("src.rs", "fn one() {}\n\nfn needle_here() {}\n");
+    sb.write(".github/ci.yml", "needle: ci\n");
+    let mut t = sb.spawn(&["notes.md"]);
+    t.wait_text("# notes");
+    t.send(" /");
+    t.wait_for("the search", |s| s.contains("type to search"));
+    t.send("needle");
+    t.wait_for("both hits", |s| s.contains("needle: ci") && s.contains("fn needle_here() {}"));
+    t.send("\x1b[B\r");
+    t.wait_for("src.rs at the hit", |s| s.rows[0].contains("›  src.rs") && s.status().contains(" 3:4 "));
+}
+
 /// `tarae <folder>`: tarae works there on the start screen — even with a session saved there — and the file
 /// picker lists its files; `editor.restore-session` brings the session back. A quit from the start screen
 /// keeps the session; closing every file clears it. A file given beside it is read from where the command ran.

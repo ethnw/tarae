@@ -205,7 +205,7 @@ fn perf_e2e_live_search_in_this_repo() {
     if unoptimized("perf_e2e_live_search_in_this_repo") {
         return;
     }
-    let sb = Sandbox::new("perf-search").with_tools(&["rg"]);
+    let sb = Sandbox::new("perf-search");
     copy_repo(&sb);
     let mut t = Term::spawn(&sb, &["src/term.rs"], 160, 50);
     t.wait_text("use std::io");
@@ -264,7 +264,7 @@ fn perf_e2e_live_search_in_200k_files() {
         return;
     }
     let tree = tree_200k();
-    let sb = Sandbox::new("perf-search-200k").with_tools(&["rg"]);
+    let sb = Sandbox::new("perf-search-200k");
     let mut t = Term::spawn_in(&sb, &tree, &[], 160, 50);
     // (the start screen — a folder with no file named)
     t.wait_for("the start screen", |s| s.rows.iter().any(|r| !r.trim().is_empty()));

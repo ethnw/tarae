@@ -386,7 +386,8 @@ pub struct Editor {
     /// The last picker closed (`space '`).
     last_picker: Option<Picker>,
     picker_ids: u64,
-    /// The live search's latest key (N4) — a search under way for an earlier one stops (its rg killed).
+    /// The live search's latest key (N4) — a search under way for an earlier one stops (`grep::search`
+    /// asks before each file and at each match).
     live_search: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// In-flight LLM request/review (one at a time).
     pub review: Option<Review>,

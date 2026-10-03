@@ -40,6 +40,11 @@ cargo test --features bundled-grammars
 cargo perf
 ```
 
+Checks of your own go in `.tarae.local.toml` at the root — its `[preflight] steps` run after these, for you only
+(`cargo xtask linux` is a good one: the Linux checks in Docker; with `note = "skipped"` its run without Docker
+reads as a pass with a note). The repository's `.gitignore` lists it: tarae reads that file only while git
+ignores it ([docs](docs/configuration.md#where-it-lives)).
+
 `cargo perf` runs the performance budgets (a key → frame on a 200k-line file must stay under 16 ms) and
 real-use runs of the built editor on a pseudo-terminal (startup, a key in a big file, scrolling, idle CPU, memory
 with this repository open), in the `perf` profile — release, with line tables. It runs them three times, keeps

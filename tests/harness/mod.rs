@@ -93,7 +93,7 @@ impl Sandbox {
         sb
     }
 
-    /// The child finds these programs as you do (`rg` for the live search) — their folders, from your PATH,
+    /// The child finds these programs as you do (a tool a scenario runs) — their folders, from your PATH,
     /// go in front of the minimal one. Panics if one isn't installed.
     pub fn with_tools(mut self, names: &[&str]) -> Self {
         let path = std::env::var_os("PATH").unwrap_or_default();
@@ -338,7 +338,8 @@ impl Term {
             cvt(unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) }).unwrap();
         }
         let stdio = || Stdio::from(slave.try_clone().expect("dup slave"));
-        let mut cmd = Command::new(BIN);
+        // (`TARAE_BIN`: another build of tarae — a kept copy, to measure it against this one)
+        let mut cmd = Command::new(std::env::var_os("TARAE_BIN").unwrap_or_else(|| BIN.into()));
         cmd.args(args)
             .current_dir(cwd)
             .env_clear()

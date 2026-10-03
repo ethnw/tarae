@@ -2294,7 +2294,7 @@ impl Editor {
         }
     }
 
-    /// `g r` with server `cid` still loading (N3): the name's text matches in its project (rg — whole word,
+    /// `g r` with server `cid` still loading (N3): the name's text matches in its project (`grep.rs` — whole word,
     /// case as written) listed at once, titled as text matches; the server's references take their place
     /// when they come (`list_places`). Not if the server answered first, or another list is up.
     fn text_matches(&mut self, cid: ClientId) {

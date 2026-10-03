@@ -130,9 +130,9 @@ configs carry over as they are.
 - **Pickers** (nucleo fuzzy matching, the same matcher as Helix) — `space f` files (`git ls-files` in a repository, so
   `.gitignore` is respected; with nothing typed they show as a folder tree opened up to the file you're editing —
   Enter or `→` opens a folder, `←` folds it or goes up), `space b` buffers, `space /` searches the project as
-  you type (ripgrep when `rg` is installed, a built-in regex search otherwise): a regex, smart case (all
-  lowercase matches any case), each key's search stopping the one before, the first results within a fraction of
-  a second and the rest as they come. Each row is a line's code with its matches standing out, the preview at
+  you type (ripgrep's own engine, built in — nothing to install): a regex, smart case (all lowercase matches any
+  case), what `.gitignore` leaves out left out and hidden files searched (not `.git`), each key's search stopping
+  the one before, the first results within a fraction of a second and the rest as they come. Each row is a line's code with its matches standing out, the preview at
   the line. A pattern not finished yet (`fn draw(`) keeps the last results and says why beside the query —
   quietly, no error. Lists fill in on a worker thread. `C-n`/`C-p` or arrows, `Tab`, `Enter`, `Esc`
 - **Side panel** — `space e` shows the project's files as a tree left of the code, `space o` the outline of the

@@ -5,19 +5,19 @@
 //!   with its line of code, by file then line, the declaration (its definition, asked beside them) first
 //!   (N2). While the server starts or loads, or when it says nothing within `REFS_WAIT`, the name's
 //!   whole-word text matches instead — said so (N3).
-//! - `search` runs the project search `space /` runs (N4 — ripgrep, a regex, smart case): by file then
-//!   line, each hit its line of code (and context lines when asked), capped and said so; or the files, or
-//!   counts.
+//! - `search` runs the project search `space /` runs (`grep.rs` — ripgrep's crates, a regex, smart case):
+//!   by file then line, each hit its line of code (and context lines when asked), capped and said so; or
+//!   the files, or counts.
 //!
 //! Both only read, inside the project (`Editor::project_root`) — no card. Disk and searching go to workers.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 use serde_json::{Value, json};
 
 use crate::editor::Editor;
+use crate::grep::Case;
 use crate::lsp::ClientId;
 use crate::lsp_editor::Place;
 use crate::tools::{Call, answer};
@@ -30,7 +30,7 @@ const REFS_WAIT: std::time::Duration =
 const REFS_SHOWN: usize = 200;
 
 /// `search`: hits listed at most, rows with their context at most, files at most (files/count), and where
-/// rg is stopped (the count then says `10000+`).
+/// the search is stopped (the count then says `10000+`).
 const HITS_SHOWN: usize = 200;
 const ROWS_SHOWN: usize = 400;
 const FILES_SHOWN: usize = 300;
@@ -708,7 +708,7 @@ pub fn search_schema() -> Value {
     json!({
         "name": "search",
         "description": "Search the project's files for a regex — the editor's own project search \
-    (ripgrep). Use it over Grep for finding code and text in the project. Hits come by file then line, each \
+    (ripgrep's engine). Use it over Grep for finding code and text in the project. Hits come by file then line, each \
     with its line of code (and context lines around it if you ask), capped and said so — narrow with path \
     or glob, or page with offset. Smart case: an all-lowercase pattern matches any case. Skips what \
     .gitignore skips; hidden files are searched. Inside the project only. For where a function, type or \
@@ -736,13 +736,6 @@ enum Output {
     Lines,
     Files,
     Count,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Case {
-    Smart,
-    Sensitive,
-    Insensitive,
 }
 
 #[derive(Clone, Debug)]
@@ -822,36 +815,22 @@ fn run_search(root: &Path, path: Option<&str>, q: &Query, unsaved: &[PathBuf]) -
         }
         None => root.clone(),
     };
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(4);
-    let mut args: Vec<String> =
-        ["--color=never", "--hidden", "--glob=!.git", "--threads", &threads.to_string()]
-            .map(String::from)
-            .into();
-    args.push(
-        match q.case {
-            Case::Smart => "--smart-case",
-            Case::Sensitive => "--case-sensitive",
-            Case::Insensitive => "--ignore-case",
-        }
-        .into(),
-    );
-    if q.literal {
-        args.push("--fixed-strings".into());
-    }
-    args.extend(q.globs.iter().map(|g| format!("--glob={g}")));
-    match q.output {
-        Output::Lines if q.context > 0 => args.extend(["--json".into(), format!("--context={}", q.context)]),
-        Output::Lines => args.push("--json".into()),
-        Output::Files => args.push("--files-with-matches".into()),
-        // (the file's name even when it's the one file searched)
-        Output::Count => args.extend(["--count".into(), "--with-filename".into()]),
-    }
-    args.extend(["-e".into(), q.pattern.clone(), "--".into()]);
-    if let Ok(rel) = scope.strip_prefix(&root)
-        && !rel.as_os_str().is_empty()
-    {
-        args.push(rel.to_string_lossy().into_owned());
-    }
+    let query = crate::grep::Query {
+        pattern: &q.pattern,
+        literal: q.literal,
+        case: q.case,
+        word: false,
+        globs: &q.globs,
+        context: q.context,
+        mode: match q.output {
+            Output::Lines => crate::grep::Mode::Lines,
+            Output::Files => crate::grep::Mode::Files,
+            Output::Count => crate::grep::Mode::Count,
+        },
+    };
+    let search = |each: &mut dyn FnMut(crate::grep::File) -> bool| {
+        crate::grep::search(&root, Some(&scope), &query, &|| false, each)
+    };
     let unsaved: Vec<String> =
         unsaved.iter().filter(|p| p.starts_with(&scope)).map(|p| rel(&root, p)).collect();
     let note = match unsaved.is_empty() {
@@ -864,22 +843,14 @@ fn run_search(root: &Path, path: Option<&str>, q: &Query, unsaved: &[PathBuf]) -
         Output::Lines => {
             let mut files: BTreeMap<String, Vec<Row>> = BTreeMap::new();
             let mut hits = 0;
-            let warn = rg(&root, &args, &mut |l| {
-                let Ok(v) = serde_json::from_slice::<Value>(l) else { return true };
-                let hit = match v["type"].as_str() {
-                    Some("match") => true,
-                    Some("context") => false,
-                    _ => return true,
-                };
-                let d = &v["data"];
-                let (Some(path), Some(line)) = (d["path"]["text"].as_str(), d["line_number"].as_u64()) else {
-                    return true;
-                };
-                let text =
-                    d["lines"]["text"].as_str().map_or("(not UTF-8)", |t| t.trim_end_matches(['\n', '\r']));
-                let row = Row { line: line as usize, hit, text: clip(text, LINE_MAX) };
-                files.entry(path.to_string()).or_default().push(row);
-                hits += usize::from(hit);
+            let warn = search(&mut |f| {
+                hits += f.hits;
+                let rows = f.rows.into_iter().map(|r| Row {
+                    line: r.line,
+                    hit: r.hit,
+                    text: clip(&r.text, LINE_MAX),
+                });
+                files.entry(f.rel).or_default().extend(rows);
                 hits < HITS_MAX
             })?;
             if files.is_empty() {
@@ -891,8 +862,9 @@ fn run_search(root: &Path, path: Option<&str>, q: &Query, unsaved: &[PathBuf]) -
         }
         Output::Files | Output::Count => {
             let mut rows: Vec<String> = Vec::new();
-            let warn = rg(&root, &args, &mut |l| {
-                rows.push(String::from_utf8_lossy(l).into_owned());
+            let counts = q.output == Output::Count;
+            let warn = search(&mut |f| {
+                rows.push(if counts { format!("{}:{}", f.rel, f.hits) } else { f.rel });
                 true
             })?;
             if rows.is_empty() {
@@ -900,7 +872,6 @@ fn run_search(root: &Path, path: Option<&str>, q: &Query, unsaved: &[PathBuf]) -
             }
             // A file all test code goes last (one with some tests in it is counted with the rest)
             let mut t = crate::testcode::Tests::new(&root);
-            let counts = q.output == Output::Count;
             let mut rows: Vec<(String, bool)> = rows
                 .into_iter()
                 .map(|r| {
@@ -924,8 +895,9 @@ fn no_hits(warn: Option<String>, q: &Query) -> Result<String, String> {
     }
 }
 
+/// What the search couldn't read, said after its hits.
 fn warned(warn: Option<String>) -> String {
-    warn.map(|w| format!("\n(rg: {w})")).unwrap_or_default()
+    warn.map(|w| format!("\n(not searched — {w})")).unwrap_or_default()
 }
 
 /// A file's runs of adjacent lines — in test code or not.
@@ -1091,47 +1063,6 @@ fn files_text(rows: Vec<(String, bool)>, tests: bool, counts: bool, offset: usiz
     }
     text.truncate(text.trim_end().len());
     text
-}
-
-/// rg with `args` in `root`, each line of its output to `each` (false: enough — rg is stopped). Ok(Some):
-/// what rg complained about while it still searched (a file it couldn't read, a bad glob).
-fn rg(root: &Path, args: &[String], each: &mut dyn FnMut(&[u8]) -> bool) -> Result<Option<String>, String> {
-    use std::io::{BufRead, Read};
-    let mut child = Command::new("rg")
-        .args(args)
-        .current_dir(root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("couldn't run rg (ripgrep): {e} — Grep can search instead"))?;
-    let err = child.stderr.take().map(|mut e| {
-        std::thread::spawn(move || {
-            let mut s = String::new();
-            let _ = e.read_to_string(&mut s);
-            s
-        })
-    });
-    let mut stopped = false;
-    if let Some(out) = child.stdout.take() {
-        for line in std::io::BufReader::new(out).split(b'\n').map_while(Result::ok) {
-            if !each(&line) {
-                stopped = true;
-                break;
-            }
-        }
-    }
-    if stopped {
-        let _ = child.kill();
-    }
-    let status = child.wait().map_err(|e| e.to_string())?;
-    let err = err.and_then(|h| h.join().ok()).unwrap_or_default();
-    let first = err.lines().map(|l| l.trim_start_matches("rg: ")).find(|l| !l.trim().is_empty());
-    Ok(match status.code() {
-        _ if stopped => None,
-        Some(0 | 1) => None,
-        _ => Some(first.unwrap_or("rg failed").to_string()),
-    })
 }
 
 // ── shared ──────────────────────────────────────────────────────────────────
@@ -1374,17 +1305,10 @@ mod tests {
         assert_eq!(v("src/a.rs:12:fn main"), None, "Grep's answer isn't one");
     }
 
-    fn rg_here() -> bool {
-        Command::new("rg").arg("--version").output().is_ok()
-    }
-
-    /// The search itself: smart case, a glob, a folder, context, hidden files in and `.gitignore`d out;
-    /// outside the project refused; an unsaved buffer said.
+    /// The search itself (in-process — rg or not): smart case, a glob, a folder, context, hidden files in
+    /// and `.gitignore`d out; outside the project refused; an unsaved buffer said.
     #[test]
-    fn search_runs_rg_inside_the_project() {
-        if !rg_here() {
-            return;
-        }
+    fn search_looks_inside_the_project() {
         let dir = std::env::temp_dir().join(format!("tarae-nav-search-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).unwrap();
@@ -1395,7 +1319,7 @@ mod tests {
         std::fs::write(dir.join(".gitignore"), "ignored/\n").unwrap();
         std::fs::create_dir_all(dir.join("ignored")).unwrap();
         std::fs::write(dir.join("ignored/x.rs"), "alpha\n").unwrap();
-        // (rg reads .gitignore only in a git repository)
+        // (.gitignore is read only in a git repository, as rg does)
         std::fs::create_dir_all(dir.join(".git")).unwrap();
         let q = |pattern: &str| Query {
             pattern: pattern.into(),
@@ -1509,27 +1433,19 @@ mod tests {
         assert_eq!(lsp_symbols(&flat), [sym(0, "fn", "app::run", 3, 8)]);
     }
 
-    /// Why a measured test doesn't run here, said past libtest's capture (`test_results::SELF_SKIP`) — at
-    /// opt-level 0 (the test profile: `cargo perf` runs it), or without rg.
-    fn not_measured(test: &str) -> Option<&'static str> {
-        let why = if !cfg!(tarae_optimized) {
-            "built at opt-level 0 (the test profile); `cargo perf` runs it"
-        } else if !rg_here() {
-            "rg (ripgrep) isn't installed"
-        } else {
-            return None;
-        };
-        let line = format!("{}nav::tests::{test} — {why}\n", crate::test_results::SELF_SKIP);
-        let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
-        Some(why)
-    }
-
     /// A search over this repository that hits most of its files, test code told apart (`testcode.rs`) — a
     /// number for `cargo perf` (11.3 s once, 0.72 s since each file's declarations are read once an answer;
-    /// measured 2026-10-03). `perf_`, not `perf_budget_`: CI runs those, without rg.
+    /// measured 2026-10-03). At opt-level 0 (the test profile) it skips itself, saying so past libtest's
+    /// capture (`test_results::SELF_SKIP`) — `cargo perf` runs it.
     #[test]
     fn perf_search_wide_with_test_code() {
-        if not_measured("perf_search_wide_with_test_code").is_some() {
+        if !cfg!(tarae_optimized) {
+            let line = format!(
+                "{}nav::tests::perf_search_wide_with_test_code — built at opt-level 0 (the test profile); \
+                 `cargo perf` runs it\n",
+                crate::test_results::SELF_SKIP
+            );
+            let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
             return;
         }
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));

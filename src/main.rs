@@ -32,6 +32,7 @@ mod gitmenu;
 mod gitpanel;
 mod grammar;
 mod graphemes;
+mod grep;
 mod indent;
 mod install;
 mod java;
