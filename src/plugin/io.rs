@@ -113,7 +113,7 @@ impl Flow {
     }
 
     fn ease(&self, n: usize) {
-        let _ = self.backlog.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |b| Some(b.saturating_sub(n)));
+        let _ = self.backlog.try_update(Ordering::SeqCst, Ordering::SeqCst, |b| Some(b.saturating_sub(n)));
     }
 }
 
@@ -837,6 +837,24 @@ mod tests {
         let got: Vec<_> = (0..2).map(|_| rx.recv_timeout(Duration::from_secs(5)).unwrap()).collect();
         assert_eq!(got, ["early", "late"]);
         assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+    }
+
+    /// Easing takes off what was taken, from many threads at once, and never below nothing (a late count
+    /// mustn't wrap around and stall every reader).
+    #[test]
+    fn easing_the_backlog_adds_up_and_stops_at_nothing() {
+        let flow = Arc::new(Flow::default());
+        flow.add(8000);
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let flow = flow.clone();
+                std::thread::spawn(move || (0..500).for_each(|_| flow.ease(1)))
+            })
+            .collect();
+        threads.into_iter().for_each(|t| t.join().unwrap());
+        assert_eq!(flow.backlog.load(Ordering::SeqCst), 4000);
+        flow.ease(5000);
+        assert_eq!(flow.backlog.load(Ordering::SeqCst), 0, "not below nothing");
     }
 
     #[test]

@@ -1151,7 +1151,7 @@ fn rg_while(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn();
-    let Ok(mut rg) = rg else { return grep_builtin(root, &re()?) };
+    let Ok(mut rg) = rg else { return grep_builtin(root, &re()?, stop) };
     // Read as it comes and stopped at the limit — a common word in a big tree was held whole (and searched
     // to the end) before keeping the first 10k
     let err = rg.stderr.take().map(|mut e| {
@@ -1222,9 +1222,18 @@ fn parse_vimgrep(root: &Path, l: &str) -> Option<Item> {
     })
 }
 
-fn grep_builtin(root: &Path, re: &regex::Regex) -> Result<Vec<Item>, String> {
+/// The search without rg (not installed): file by file, asking `stop` before each — a newer key's search
+/// stops this one as it would rg (without, a live search on a machine without rg ran to its end).
+fn grep_builtin(
+    root: &Path,
+    re: &regex::Regex,
+    stop: &(dyn Fn() -> bool + Sync),
+) -> Result<Vec<Item>, String> {
     let mut out = Vec::new();
     for rel in list_files(root) {
+        if stop() {
+            return Ok(out);
+        }
         let Ok(src) = std::fs::read_to_string(root.join(&rel)) else { continue }; // skip binary and non-UTF-8
         for (i, line) in src.lines().enumerate() {
             if let Some(m) = re.find(line) {
@@ -1374,7 +1383,7 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "hello\n타래 world\n").unwrap();
         std::fs::write(dir.join("sub/b.txt"), "no\nWorld\n").unwrap();
         std::fs::write(dir.join("target/skip.txt"), "world\n").unwrap();
-        let hits = grep_builtin(&dir, &smart_regex("world").unwrap()).unwrap();
+        let hits = grep_builtin(&dir, &smart_regex("world").unwrap(), &|| false).unwrap();
         let labels: Vec<_> = hits.iter().map(|i| i.label.clone()).collect();
         assert_eq!(
             labels,
@@ -1382,6 +1391,12 @@ mod tests {
             "lowercase = case-insensitive, target skipped"
         );
         assert_eq!(hits[0].action, Action::Goto { path: dir.join("a.txt"), line: 1, col: 7 }, "col in bytes");
+        // Stopped (a newer key): nothing more — told before its first file, nothing at all
+        assert!(grep_builtin(&dir, &smart_regex("world").unwrap(), &|| true).unwrap().is_empty());
+        let asked = std::sync::atomic::AtomicUsize::new(0);
+        let after_one = || asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 1;
+        let hits = grep_builtin(&dir, &smart_regex("world").unwrap(), &after_one).unwrap();
+        assert_eq!(hits.iter().map(|i| i.label.as_str()).collect::<Vec<_>>(), ["a.txt:2: 타래 world"]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

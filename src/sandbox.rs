@@ -859,7 +859,8 @@ pub fn command(policy: Option<&Policy>, program: &str, args: &[String]) -> Comma
 
 /// Tests only: true inside a sandbox already (Claude's `cargo test`), where Seatbelt can't start — and then
 /// says so past libtest's capture (`test_results::SELF_SKIP`), so the run reads it as a skip, not a pass.
-#[cfg(test)]
+/// (macOS only, as the Seatbelt tests that ask — elsewhere it'd be dead code, an error under `-D warnings`)
+#[cfg(all(test, target_os = "macos"))]
 pub(crate) fn skipped_inside(test: &str) -> bool {
     if std::env::var_os(MARK).is_none() {
         return false;

@@ -542,7 +542,8 @@ fn an_idle_editor_draws_nothing_and_sleeps() {
     idle(&mut t, "the git tab");
     t.esc("the code has the keys", |s| s.contains("space e files"));
     t.send(" T");
-    t.wait_for("the terminal", |s| s.contains("TERMINAL") && s.contains("$"));
+    // (sh's prompt: `$`, or `#` as root — a container)
+    t.wait_for("the terminal", |s| s.contains("TERMINAL") && (s.contains("$ ") || s.contains("# ")));
     idle(&mut t, "the terminal");
     t.send("\x1c");
     t.wait_for("the code has the keys", |s| s.contains("C-\\ type in it"));

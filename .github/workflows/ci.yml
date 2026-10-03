@@ -16,23 +16,21 @@ env:
   # Shared runners are slower than a dev machine — the 16 ms key → frame budget gets this multiplier.
   TARAE_PERF_SLACK: "3"
 
+# Every job builds with the toolchain rust-toolchain.toml pins (its components and targets too):
+# `rustup toolchain install` with no name installs that one — the version is written there only.
 jobs:
   fmt:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
+      - run: rustup toolchain install
       - run: cargo fmt --all --check
 
   clippy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+      - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --locked --all-targets
       - run: cargo clippy --locked --all-targets --features bundled-grammars
@@ -50,7 +48,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.features }}
@@ -64,24 +62,11 @@ jobs:
       # are too noisy for
       - run: cargo test --locked --features "${{ matrix.features }}" --profile perf --bin tarae -- perf_budget
 
-  msrv:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Read rust-version from Cargo.toml
-        id: msrv
-        run: echo "version=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ steps.msrv.outputs.version }}
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo check --locked --all-targets --features bundled-grammars
-
   # Downloads and builds a grammar from GitHub (the #[ignore]d network test).
   network:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked -- --ignored

@@ -1286,8 +1286,21 @@ mod tests {
         until_said(&mut ed, "installed 52");
         ed.plugin_run("install", "kustomize-not-a-tool").unwrap();
         until_said(&mut ed, "failed 52 no language pack says how to install kustomize-not-a-tool");
-        // One a pack knows (and not here): a card, the plugin's — once a session
-        if !crate::packs::on_path("kustomize") && crate::packs::installed_at("kustomize").is_none() {
+        // One a pack knows (and not here): a card, the plugin's — once a session; with no way this machine can
+        // take (its pack says `brew install`, and there's no brew — Linux), the pack's hint instead
+        let here = crate::packs::install("kustomize").is_some_and(|f| f.run.is_some());
+        let missing =
+            !crate::packs::on_path("kustomize") && crate::packs::installed_at("kustomize").is_none();
+        if missing && !here {
+            ed.offer_popups = true;
+            ed.plugin_run("install", "kustomize").unwrap();
+            until_said(
+                &mut ed,
+                "failed 52 kustomize: or a release from github.com/kubernetes-sigs/kustomize",
+            );
+            assert!(ed.offers.is_empty(), "no card");
+        }
+        if missing && here {
             ed.offer_popups = true;
             ed.plugin_run("install", "kustomize").unwrap();
             settle_until(&mut ed, |ed| !ed.offers.is_empty());

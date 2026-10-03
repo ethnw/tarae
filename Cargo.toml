@@ -2,8 +2,8 @@
 name = "tarae"
 version = "0.1.0"
 edition = "2024"
-# tree-sitter 0.27 needs 1.90 (let-chains need 1.88) — on an older rustc, `rustup update`
-rust-version = "1.90"
+# The pinned toolchain's (rust-toolchain.toml) — tarae is built with exactly that one, no older
+rust-version = "1.99"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/ethnw/tarae"
 

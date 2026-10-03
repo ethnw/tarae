@@ -12,7 +12,9 @@ sending a pull request.
 
 ## Building and checking
 
-You need Rust 1.90+ and a C compiler (grammars are compiled from C).
+You need [rustup](https://rustup.rs) and a C compiler (grammars are compiled from C). The Rust version is pinned in
+[`rust-toolchain.toml`](rust-toolchain.toml): in this folder rustup uses that one (and installs it, with its
+components and the wasm target the plugin SDK builds for, the first time).
 
 ```sh
 cargo run -- path/to/file                # try it
@@ -36,8 +38,25 @@ edit-and-test loop, where these skip themselves, saying so. On a slow shared mac
 multiplies the budget (CI does this).
 
 [CI](.github/workflows/ci.yml) runs the same checks when started by hand (Actions → CI → Run workflow) — fmt,
-clippy (warnings are errors), and tests on Linux and macOS, with and without bundled grammars — plus a build on the
-minimum Rust version from `Cargo.toml`, and downloads and builds a grammar from GitHub (`cargo test -- --ignored`).
+clippy (warnings are errors), and tests on Linux and macOS, with and without bundled grammars — and downloads and
+builds a grammar from GitHub (`cargo test -- --ignored`). It builds with the pinned toolchain too
+(`rustup toolchain install` reads `rust-toolchain.toml`), so a check that passes here passes there.
+
+### The toolchain
+
+tarae is built with exactly one Rust: the latest stable, pinned in `rust-toolchain.toml` (`rust-version` in
+`Cargo.toml` says the same, as a floor for `cargo install`). There's no older version to keep building on. To move
+to a new stable release, as a change of its own:
+
+1. Set `channel` in `rust-toolchain.toml` to the new version (`1.100.0`), and `rust-version` in `Cargo.toml` to its
+   `major.minor` (`1.100`).
+2. Run every check on it — `:preflight` in tarae, or `cargo fmt --all --check`, `cargo clippy --all-targets -- -D
+   warnings` (and with `--features bundled-grammars`), `cargo test`, `cargo perf`. A new release brings new lints
+   and deprecations: fix them in the same change (a deprecated call gets its replacement, not an `allow`).
+   A new rustfmt may reformat — `cargo fmt` and commit that too.
+3. Linux, where CI runs too: the same checks in a container on the matching `rust:<major.minor>` image.
+4. `cargo perf`'s numbers change with the compiler: the first run after a bump is the new baseline, worth a look
+   against the old one.
 
 Code comments are in English.
 

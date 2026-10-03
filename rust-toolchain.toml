@@ -1,0 +1,8 @@
+# The one Rust tarae is built and checked with — here, in CI and in the Linux container alike (rustup reads
+# this file). Pinned to the latest stable; bumping it is a change of its own (CONTRIBUTING.md, "The toolchain").
+[toolchain]
+channel = "1.99.0"
+profile = "minimal"
+components = ["clippy", "rustfmt", "rust-src"]
+# (the plugin-sdk crates build for it)
+targets = ["wasm32-unknown-unknown"]

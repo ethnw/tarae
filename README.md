@@ -16,7 +16,7 @@ built in, and an editor that never makes you wait.
 
 ```sh
 git clone https://github.com/ethnw/tarae && cd tarae
-cargo install --path .        # Rust 1.90+ and a C compiler; --features bundled-grammars builds 26 grammars in
+cargo install --path .        # rustup and a C compiler; --features bundled-grammars builds 26 grammars in
 tarae .                       # space ? finds any command · :tutor teaches the keys in 10 minutes
 ```
 
