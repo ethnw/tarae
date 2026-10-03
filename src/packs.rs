@@ -316,8 +316,8 @@ fn tasks_of(v: &toml::Value, root: &Path) -> Result<Option<(i64, Vec<Suggested>)
 /// each pack's `[[preflight]]` whose `when` file `root` has, by `rank` (then pack name) — several kinds of
 /// project, their steps together. Each step says where it came from (`rust pack`). A pack that can't be
 /// read is logged and skipped. The commands are tarae's, what they run (tests, build scripts) the project's:
-/// the first run in a project says so on a card (`preflight::DEFAULTS_SAY`). Python and Java have none (their
-/// pack.toml says why).
+/// the first run in a project says so on a card (`preflight::DEFAULTS_SAY`). Only where the language's own
+/// toolchain defines the check — Rust, Go; the other packs' pack.toml says why they have none.
 ///
 /// `[[preflight]]`: `when` — the files that say it's this kind of project (any); `rank` (50 unless set);
 /// `steps = [{ name, cmd, note? }]` as in `.tarae.toml`.
@@ -1209,8 +1209,9 @@ mod tests {
     }
 
     /// `:preflight`'s defaults come by the files that mark a project — several kinds, their steps together
-    /// by rank, each saying its pack; Python has none (no single standard), nor Java (its build is its
-    /// wrapper, a project's own); a folder that's no kind of project, none.
+    /// by rank, each saying its pack. Only where the language's own toolchain defines the check (cargo, go):
+    /// none for JavaScript and TypeScript (many runners, a project's own tsc), Python (no single standard),
+    /// Java (its build is its wrapper, a project's own); a folder that's no kind of project, none.
     #[test]
     fn preflight_defaults_by_the_project_files() {
         let dir = std::env::temp_dir().join(format!("tarae-pack-preflight-{}", std::process::id()));
@@ -1227,15 +1228,18 @@ mod tests {
         let both = steps(&["go.mod", "Cargo.toml"]);
         assert_eq!(both[..3], rust, "rust first (rank 10)");
         assert_eq!(both[3..], ["go pack: gofmt", "go pack: go vet", "go pack: go test"]);
-        assert_eq!(
-            steps(&["tsconfig.json", "package.json"]),
-            ["typescript pack: tsc", "javascript pack: npm test"]
-        );
-        for java in ["pom.xml", "build.gradle", "build.gradle.kts"] {
-            assert!(steps(&[java]).is_empty(), "no Java defaults ({java})");
+        assert_eq!(steps(&["Cargo.toml", "package.json", "tsconfig.json"]), rust, "only rust's beside them");
+        for none in [
+            "package.json",
+            "tsconfig.json",
+            "pom.xml",
+            "build.gradle",
+            "build.gradle.kts",
+            "pyproject.toml",
+            "notes.txt",
+        ] {
+            assert!(steps(&[none]).is_empty(), "no defaults for {none}");
         }
-        assert!(steps(&["pyproject.toml"]).is_empty(), "no Python defaults");
-        assert!(steps(&["notes.txt"]).is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 

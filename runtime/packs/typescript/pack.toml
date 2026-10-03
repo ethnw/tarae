@@ -8,12 +8,9 @@ rank = 30
 name = "tsc"
 cmd = "npx tsc --noEmit --pretty false"
 
-# `:preflight` in a project with no steps of its own: the types check (its tests: package.json's — the
-# JavaScript pack's step)
-[[preflight]]
-when = ["tsconfig.json"]
-rank = 30
-steps = [{ name = "tsc", cmd = "npx tsc --noEmit --pretty false" }]
+# No `[[preflight]]` defaults: tsc usually lives in the project's node_modules/.bin, and monorepos and
+# frameworks check types their own way (`tsc -b`, vue-tsc, svelte-check). `[preflight]` in .tarae.toml lists
+# this project's steps.
 
 # Also JavaScript's
 [install.typescript-language-server]

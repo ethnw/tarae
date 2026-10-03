@@ -9,9 +9,6 @@ name = "npm run {key}"
 cmd = "npm run --silent {key}"
 each = { json = "package.json", keys = "scripts" }
 
-# `:preflight` in a project with no steps of its own: its `test` script, if it has one (a linter isn't
-# standard enough to guess — `[preflight]` in .tarae.toml for that)
-[[preflight]]
-when = ["package.json"]
-rank = 40
-steps = [{ name = "npm test", cmd = "npm run --if-present test" }]
+# No `[[preflight]]` defaults: JavaScript's toolchain doesn't define the check — npm, pnpm, yarn or bun run
+# it, jest, vitest, mocha … test it, and `npm init`'s default `test` script fails on purpose. `[preflight]`
+# in .tarae.toml lists this project's steps.

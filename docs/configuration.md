@@ -175,15 +175,19 @@ Where the steps come from:
 
 - **The project's** `[preflight]` in `.tarae.toml` — run once you've trusted the project. (In your own config
   it's for every project.)
-- **Else the language packs' defaults**, by the files that mark the project — several kinds of project, their steps
-  together: Rust (`Cargo.toml`: `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`,
-  `cargo test`), Go (`go.mod`: `gofmt -l` must list nothing, `go vet ./...`, `go test ./...`), TypeScript
-  (`tsconfig.json`: `tsc --noEmit`), JavaScript (`package.json`: its `test` script, if it has one). Python has
-  none: there's no single standard to guess. Java has none either: a Java project builds with its own wrapper
-  (`./mvnw`, `./gradlew`), a script from the repository that tarae's defaults don't run — list the steps in its
-  `[preflight]`, and they run once you trust the project. The commands are tarae's, but what
-  they run is the project's code — its tests, build scripts, npm scripts — so the first run in a project shows
-  them on a card that says so (`y` runs them): run them only for code you trust.
+- **Else the language packs' defaults**, by the files that mark the project — only where the language's own
+  toolchain defines the check: Rust (`Cargo.toml`: `cargo fmt --all --check`, `cargo clippy --all-targets -- -D
+  warnings`, `cargo test`) and Go (`go.mod`: `gofmt -l` must list nothing, `go vet ./...`, `go test ./...`),
+  both together in a project that is both. The commands are tarae's, but what they run is the project's code —
+  its tests and build scripts — so the first run in a project shows them on a card that says so (`y` runs
+  them): run them only for code you trust.
+
+  Other languages have none, and their steps go in the project's `[preflight]`: JavaScript has npm, pnpm, yarn
+  and bun to run it and jest, vitest, mocha … to test it (and `npm init`'s default `test` script fails on
+  purpose); TypeScript's `tsc` usually lives in the project's `node_modules/.bin`, and monorepos and frameworks
+  check types their own way (`tsc -b`, `vue-tsc`, `svelte-check`); Python has no single standard to guess; a
+  Java project builds with its own wrapper (`./mvnw`, `./gradlew`), a script from the repository that runs
+  from the project's `[preflight]` once you trust it.
 - **Then yours**, from `.tarae.local.toml`'s `[preflight]`: added after either.
 
 ## Custom themes

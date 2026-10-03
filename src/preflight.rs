@@ -34,7 +34,7 @@ const MARK: &str = "::tarae-preflight::";
 const NOTE_SHOWN: usize = 40;
 
 /// What the card before pack defaults run says of them: the commands are tarae's, but what they run is the
-/// project's — its tests, build scripts, npm scripts — so running them is running its code.
+/// project's — its tests and build scripts — so running them is running its code.
 pub const DEFAULTS_SAY: &str = "These are tarae's defaults, but they build and run this project's code (its \
 tests and build scripts) — run them only for code you trust.";
 
