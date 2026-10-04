@@ -354,6 +354,13 @@ pub static SETTINGS: &[Setting] = &[
         set: |c, v| c.llm.follow = b(v),
     },
     Setting {
+        path: "llm.review-at-end",
+        kind: Kind::Bool,
+        doc: "Chat: Claude's edits go in as it makes them, and you review its turn when it ends — every new chat starts so (space v a turns it on and off, and saves it here)",
+        get: |c| Value::from(c.llm.review_at_end),
+        set: |c, v| c.llm.review_at_end = b(v),
+    },
+    Setting {
         path: "llm.chat-settings",
         kind: Kind::Bool,
         doc: "Chat: read your CLAUDE.md files and Claude Code settings, like `claude` does (hooks stay off, edits always ask)",

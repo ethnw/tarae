@@ -542,19 +542,24 @@ pub fn watch(tx: crate::event::Tx, root: PathBuf) {
 /// Set `path` in the user config file to `v` — comments and formatting kept (toml_edit).
 pub fn persist(path: &str, v: &Value) -> Result<PathBuf, String> {
     let file = config_path().ok_or("no config directory")?;
-    let src = match fs::read_to_string(&file) {
+    persist_to(&file, path, v)?;
+    Ok(file)
+}
+
+/// Set `path` in the config file `file` to `v` — comments and formatting kept.
+pub fn persist_to(file: &Path, path: &str, v: &Value) -> Result<(), String> {
+    let src = match fs::read_to_string(file) {
         Ok(s) => s,
         Err(e) if e.kind() == ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e.to_string()),
     };
-    let mut doc: DocumentMut = src.parse().map_err(|e| format!("{}: {e}", short(&file)))?;
+    let mut doc: DocumentMut = src.parse().map_err(|e| format!("{}: {e}", short(file)))?;
     set_path(&mut doc, path, v)?;
     if let Some(dir) = file.parent() {
         fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     let body = doc.to_string();
-    crate::disk::write_atomic(&file, |w| w.write_all(body.as_bytes())).map_err(|e| e.to_string())?;
-    Ok(file)
+    crate::disk::write_atomic(file, |w| w.write_all(body.as_bytes())).map_err(|e| e.to_string())
 }
 
 fn set_path(doc: &mut DocumentMut, path: &str, v: &Value) -> Result<(), String> {
@@ -695,6 +700,7 @@ scrolloff = 9
 restart-build = "touch marker"
 [llm]
 run-allow = ["make"]
+review-at-end = true
 [task.build]
 cmd = "touch marker"
 [preflight]
@@ -814,6 +820,7 @@ Z = ["move_line_down", ":sh touch marker"]
         assert_eq!(c.editor.restart_build, "");
         assert_eq!(c.editor.restart_binary, "");
         assert!(c.editor.llm.run_allow.is_empty());
+        assert!(!c.editor.llm.review_at_end, "edits going in unseen, their checks run: not unasked");
         assert!(c.editor.tasks.iter().all(|t| t.name != "build"));
         assert!(c.editor.preflight.is_empty(), "no preflight steps");
         assert!(!c.editor.lsp.servers.contains_key("mine"));
@@ -826,6 +833,7 @@ Z = ["move_line_down", ":sh touch marker"]
             "editor.restart-binary",
             "editor.restart-build",
             "llm.run-allow",
+            "llm.review-at-end",
             "task.build",
             "preflight.check",
             "lsp.mine",
@@ -843,6 +851,7 @@ Z = ["move_line_down", ":sh touch marker"]
         assert_eq!(t.editor.restart_build, "touch marker");
         assert_eq!(t.editor.restart_binary, "bin/marker");
         assert_eq!(t.editor.llm.run_allow, ["make"]);
+        assert!(t.editor.llm.review_at_end);
         assert!(t.editor.tasks.iter().any(|t| t.name == "build"));
         assert_eq!(t.editor.preflight.iter().map(|s| s.cmd.as_str()).collect::<Vec<_>>(), ["touch marker"]);
         assert!(t.editor.lsp.servers.contains_key("mine"));

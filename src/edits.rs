@@ -39,6 +39,8 @@ pub struct Edits {
     pub at_end: Option<PathBuf>,
     /// Claude's renames and replaces landing (`refactor.rs`): the front one's files reviewed one at a time.
     pub sets: VecDeque<crate::refactor::Landing>,
+    /// An edit waiting while you type has been said (once until it's shown).
+    pub waiting_told: bool,
 }
 
 // ── Review at the end ───────────────────────────────────────────────────────
@@ -80,14 +82,38 @@ pub fn at_end_toggle(ed: &mut Editor, want: Option<bool>) {
     ed.push_offer(card);
 }
 
-/// `y` on the card (on) · turned off: for this chat, the project folder it was agreed for.
+/// A new conversation (the chat opened, `C-l`, `:chat-new`): review at the end as `llm.review-at-end`
+/// says — on, Claude hears it with its first message.
+pub fn at_end_new_chat(ed: &mut Editor) {
+    let on = ed.config.llm.review_at_end;
+    let root = ed.lane.root.clone();
+    let Some(c) = &mut ed.lane.chat else { return };
+    c.edits.at_end = on.then_some(root);
+    let tell = &mut ed.lane.checkpoints.tell;
+    tell.retain(|t| t != TELL_ON && t != TELL_OFF);
+    if on {
+        tell.push(TELL_ON.to_string());
+    }
+}
+
+/// `y` on the card (on) · turned off: for this chat, the project folder it was agreed for — and for the
+/// chats after it (`llm.review-at-end`, kept in the config file).
 pub fn at_end_set(ed: &mut Editor, on: bool) {
+    // (opened as it was set — it's told below)
     if ed.lane.chat.is_none() {
         crate::chat::open(ed);
         if let Some(c) = &mut ed.lane.chat {
             c.focused = false;
             c.unfolded = false;
         }
+    }
+    ed.config.llm.review_at_end = on;
+    ed.overrides.retain(|(p, _)| p != "llm.review-at-end");
+    // (here, as `:set!` writes: on a worker each, a quick on-off could land off-on — and the config watch
+    // would take that back — or cross a `:set!` of the same file)
+    let kept = ed.config_file.as_ref().map(|f| crate::config::persist_to(f, "llm.review-at-end", &on.into()));
+    if let Some(Err(e)) = kept {
+        ed.set_error(format!("review at the end isn't kept for the next chats: {e}"));
     }
     let root = ed.lane.root.clone();
     let Some(c) = &mut ed.lane.chat else { return };
@@ -107,7 +133,9 @@ pub fn at_end_set(ed: &mut Editor, on: bool) {
         None => tell.push(say.to_string()),
     }
     match on {
-        true => ed.set_success("Claude's edits go in as it works — you review the turn when it ends"),
+        true => ed.set_success(
+            "Claude's edits go in as it works — you review the turn when it ends (new chats too)",
+        ),
         false => ed.set_status(row),
     }
 }
@@ -262,13 +290,26 @@ fn deny(message: &str) -> Value {
     json!({ "behavior": "deny", "message": message })
 }
 
-/// Every event: shows the next waiting edit once no review is up.
+/// Every event: shows the next waiting edit once no review is up — not while you're typing (insert mode,
+/// the command line, a picker): it waits, said once, and comes up when you stop (#54: it took the screen,
+/// and the next keys answered it).
 pub fn next(ed: &mut Editor) {
     // (a lane behind: its edits wait in their queue until it's in front)
     if ed.lane.review.is_some() || ed.background() {
         return;
     }
-    let Some(p) = ed.lane.chat.as_mut().and_then(|c| c.edits.queue.pop_front()) else { return };
+    let typing = ed.mode == crate::editor::Mode::Insert || ed.prompt.is_some() || ed.picker.is_some();
+    let Some(c) = ed.lane.chat.as_mut() else { return };
+    if typing {
+        let Some(p) = c.edits.queue.front().filter(|_| !c.edits.waiting_told) else { return };
+        c.edits.waiting_told = true;
+        let path = crate::chat::resolve(&ed.lane.root, p.input["file_path"].as_str().unwrap_or_default());
+        let shown = crate::chat::shown(&ed.lane.root, &path);
+        return ed
+            .set_status(format!("Claude's edit to {shown} waits — it opens when you stop typing (esc)"));
+    }
+    c.edits.waiting_told = false;
+    let Some(p) = c.edits.queue.pop_front() else { return };
     show(ed, p);
 }
 
@@ -281,10 +322,11 @@ fn show(ed: &mut Editor, p: Pending) {
     if let Err(e) = ed.open(&path) {
         return answer(ed, &p.request_id, deny(&format!("tarae couldn't open {}: {e:#}", path.display())));
     }
-    // Outside the project and opened for this: it goes when the turn ends, unless you take it up (#37)
+    // Outside the project (#37) or in its build output (#46), and opened for this: it goes when the turn
+    // ends, unless you take it up
     let root = ed.lane.root.clone();
     let doc = ed.doc_mut();
-    if !open_before && doc.path.as_ref().is_some_and(|p| !p.starts_with(&root)) {
+    if !open_before && doc.path.as_ref().is_some_and(|p| aside_path(&root, p)) {
         doc.aside = true;
     }
     if ed.doc().loading {
@@ -457,23 +499,37 @@ pub fn turn_over(ed: &mut Editor) {
     }
 }
 
-/// Before every key, click or paste: the file in the code pane, if Claude's turn opened it aside, is yours
-/// now — unless what you press goes elsewhere (a review, a card, a picker or prompt, the chat's input, the
-/// terminal, the side panel, the bottom slot).
-pub fn taken_up(ed: &mut Editor) {
-    if !ed.doc().aside
-        || ed.lane.review.is_some()
-        || ed.picker.is_some()
-        || ed.prompt.is_some()
-        || ed.lane.chat.as_ref().is_some_and(|c| c.focused)
-        || (!ed.offers.is_empty() && ed.card_has_keys())
-        || ed.lane.terminal.as_ref().is_some_and(|t| t.focus && t.visible)
-        || ed.lane.sidebar.as_ref().is_some_and(|s| s.focus)
-        || ed.bottom_focus
-    {
+/// The code pane before a key, click or paste: its lane, document, version and selection — None while what
+/// you press goes to a review (its answer moves and edits the file, but isn't you going there).
+pub struct Before(Option<(crate::event::LaneId, DocId, u64, crate::selection::Selection)>);
+
+/// Before every key, click or paste (`taken_up` after it).
+pub fn before_input(ed: &Editor) -> Before {
+    let d = ed.doc();
+    Before((ed.lane.review.is_none()).then(|| (ed.lane.id, d.id, d.version(), d.selection().clone())))
+}
+
+/// After every key, click or paste: the file in the code pane, if Claude's turn opened it aside, is yours
+/// now if you went there — switched to it (the file you were in still open, in the same lane), moved in
+/// it or changed it. Not a key that went elsewhere (a review's answer, the chat's input, `space l`, a
+/// picker that closed again: #46 — such files stayed, each keeping a language server), nor one that only
+/// brought it to the front by closing yours (`:bc`, `C-x` in the buffer list) or switching lanes.
+pub fn taken_up(ed: &mut Editor, before: Before) {
+    let Before(Some((lane, id, version, sel))) = before else { return };
+    let d = ed.doc();
+    if !d.aside || ed.lane.review.is_some() {
         return;
     }
-    ed.doc_mut().aside = false;
+    let switched = d.id != id && ed.lane.id == lane && ed.docs.iter().any(|d| d.id == id);
+    if switched || (d.id == id && (d.version() != version || *d.selection() != sel)) {
+        ed.doc_mut().aside = false;
+    }
+}
+
+/// Whether a file Claude's turn opens is aside — it goes when the turn ends unless you take it up: one
+/// outside the project, or in its build output (`target/` — test fixtures, sandboxes; #46).
+pub fn aside_path(root: &Path, path: &Path) -> bool {
+    !path.starts_with(root) || path.starts_with(root.join("target"))
 }
 
 #[cfg(test)]

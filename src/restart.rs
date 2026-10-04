@@ -1031,6 +1031,7 @@ mod tests {
                 unseen: true,
             }],
             undone: false,
+            seen: false,
         });
         crate::chat::turn_gathered(&mut ed, Some("a.txt".into()));
         assert!(ed.lane.code_review.is_none(), "not over the restart");

@@ -88,6 +88,9 @@ pub struct LlmConfig {
     pub context_lines: usize,
     /// Chat: the editor follows where Claude is reading (`C-f` in the chat toggles it per session).
     pub follow: bool,
+    /// Chat: Claude's edits go in as it makes them, the turn reviewed when it ends — every new chat starts
+    /// so (`space v a` turns it on and off, and keeps it here).
+    pub review_at_end: bool,
     /// Chat: load CLAUDE.md files and Claude Code settings like `claude` does (hooks off, edits always ask).
     pub chat_settings: bool,
     /// Chat: commands Claude's `run` starts without asking, past the built-in checks (`tools::RUN_ALLOW`) —
@@ -137,6 +140,7 @@ impl Default for LlmConfig {
             effort: String::new(),
             context_lines: 20,
             follow: true,
+            review_at_end: false,
             chat_settings: true,
             run_allow: Vec::new(),
             review_ask: REVIEW_ASK.iter().map(|s| s.to_string()).collect(),

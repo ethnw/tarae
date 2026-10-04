@@ -117,6 +117,32 @@ pub fn hunks(base: &str, now: &str) -> Vec<Hunk> {
     out
 }
 
+/// Unchanged lines between two changes that still make them one hunk — as `git diff` shows them (three lines
+/// of context on each side).
+const HUNK_GAP: usize = 6;
+
+/// `hunks` as `]g` walks them: changes `HUNK_GAP` or fewer unchanged lines apart are one (a rewritten
+/// function, not each line of it).
+pub fn regions(hunks: &[Hunk]) -> Vec<Hunk> {
+    let mut out: Vec<Hunk> = Vec::new();
+    for h in hunks {
+        match out.last_mut() {
+            Some(r) if h.lines.start.saturating_sub(r.lines.end) <= HUNK_GAP => {
+                r.kind = if (r.kind, h.kind) == (HunkKind::Added, HunkKind::Added) {
+                    HunkKind::Added
+                } else {
+                    HunkKind::Modified
+                };
+                r.lines.end = h.lines.end.max(r.lines.end);
+                r.base.end = h.base.end.max(r.base.end);
+                r.removed += h.removed;
+            }
+            _ => out.push(h.clone()),
+        }
+    }
+    out
+}
+
 /// This file's content in the index (None outside a repo or for an untracked file) — the gutter compares
 /// against it, so staged changes leave the gutter. Runs on a worker thread.
 pub fn index_blob(path: &Path) -> Option<String> {

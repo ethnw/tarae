@@ -103,7 +103,12 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
                 return Err("usage: :open <path>...".into());
             }
             for p in paths {
-                editor.open(&PathBuf::from(p)).map_err(|e| format!("{e:#}"))?;
+                let path = typed_path(editor, &p);
+                match at_line(&path, |p| p.exists()) {
+                    Some((path, line, col)) => editor.open_at(&path, line, col),
+                    None => editor.open(&path),
+                }
+                .map_err(|e| format!("{e:#}"))?;
             }
             Ok(())
         }
@@ -306,7 +311,6 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
             Ok(())
         }
         "chat-new" => {
-            crate::chat::open(editor);
             crate::chat::reset(editor);
             Ok(())
         }
@@ -437,8 +441,7 @@ fn write(editor: &mut Editor, path: &str, force: bool) -> Result<(), String> {
     let id = editor.doc().id;
     let target = match shell_words(path).into_iter().next() {
         Some(p) => {
-            let p =
-                std::path::absolute(editor.path_of(std::path::Path::new(&p))).map_err(|e| e.to_string())?;
+            let p = std::path::absolute(typed_path(editor, &p)).map_err(|e| e.to_string())?;
             let p = std::fs::canonicalize(&p).unwrap_or(p); // same form as `open`
             (editor.doc().path.as_ref() != Some(&p)).then_some(p)
         }
@@ -572,6 +575,42 @@ fn run_shell(cmd: &str, dir: &std::path::Path) -> Result<Option<String>, String>
     }
 }
 
+/// A path typed after `:open` / `:w`: home spelled out, then from the root.
+fn typed_path(editor: &Editor, p: &str) -> PathBuf {
+    editor.path_of(&expand_home(p, crate::allow::home().as_deref()))
+}
+
+/// A typed path with home spelled out: `~`, `~/…`, `$HOME`, `${HOME}` at its start (`home`: the user's
+/// home folder; without one, the path as typed).
+fn expand_home(p: &str, home: Option<&Path>) -> PathBuf {
+    let rest = ["~", "$HOME", "${HOME}"].iter().find_map(|h| {
+        let rest = p.strip_prefix(h)?;
+        (rest.is_empty() || rest.starts_with('/')).then(|| rest.trim_start_matches('/'))
+    });
+    match (rest, home) {
+        (Some(""), Some(home)) => home.to_path_buf(),
+        (Some(rest), Some(home)) => home.join(rest),
+        _ => PathBuf::from(p),
+    }
+}
+
+/// `file:12` / `file:12:5` (1-based line and column, as compilers and greps print them) when `file`
+/// exists and the whole doesn't: the file and the 0-based line and column.
+fn at_line(path: &Path, exists: impl Fn(&Path) -> bool) -> Option<(PathBuf, usize, usize)> {
+    if exists(path) {
+        return None;
+    }
+    let s = path.to_str()?;
+    let num = |s: &str| s.parse::<usize>().ok().filter(|&n| n > 0);
+    let (head, last) = s.rsplit_once(':')?;
+    let last = num(last)?;
+    let (file, line, col) = match head.rsplit_once(':').and_then(|(f, l)| Some((f, num(l)?))) {
+        Some((file, line)) if exists(Path::new(file)) => (file, line, last),
+        _ => (head, last, 1),
+    };
+    exists(Path::new(file)).then(|| (PathBuf::from(file), line - 1, col - 1))
+}
+
 /// Whitespace splitting + backslash escapes + quotes. Accepts paths the yazi picker passes via `printf %q`.
 pub fn shell_words(s: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -620,5 +659,63 @@ mod tests {
         assert_eq!(shell_words(r"a b\ c 'd e' "), vec!["a", "b c", "d e"]);
         assert_eq!(shell_words(r#""x \"y\"""#), vec![r#"x "y""#]);
         assert!(shell_words("   ").is_empty());
+    }
+
+    /// #53: `~` and `$HOME` at a path's start are the home folder — not a folder named `~` in the project.
+    #[test]
+    fn home_is_expanded_at_a_paths_start() {
+        let home = Path::new("/h/me");
+        for (typed, want) in [
+            ("~/.config/tarae/config.toml", "/h/me/.config/tarae/config.toml"),
+            ("~", "/h/me"),
+            ("$HOME/a", "/h/me/a"),
+            ("${HOME}/a", "/h/me/a"),
+            ("~other/a", "~other/a"),
+            ("$HOMEY/a", "$HOMEY/a"),
+            ("src/~/a", "src/~/a"),
+        ] {
+            assert_eq!(expand_home(typed, Some(home)), PathBuf::from(want), "{typed}");
+        }
+        assert_eq!(expand_home("~/a", None), PathBuf::from("~/a"), "no home: as typed");
+    }
+
+    /// #52: `file:line[:col]` opens the file there, when the file exists and the whole doesn't.
+    #[test]
+    fn a_line_after_an_existing_file_is_where_it_opens() {
+        let files = ["/p/src/typed.rs", "/p/odd:7", "/p/both", "/p/both:2"];
+        let exists = |p: &Path| files.iter().any(|f| Path::new(f) == p);
+        let at = |s: &str| at_line(Path::new(s), exists);
+        assert_eq!(at("/p/src/typed.rs:302"), Some(("/p/src/typed.rs".into(), 301, 0)));
+        assert_eq!(at("/p/src/typed.rs:302:5"), Some(("/p/src/typed.rs".into(), 301, 4)));
+        assert_eq!(at("/p/src/typed.rs"), None, "no suffix");
+        assert_eq!(at("/p/odd:7"), None, "a file whose name ends so is that file");
+        assert_eq!(at("/p/both:2"), None, "… even when the name without it is a file too");
+        assert_eq!(at("/p/odd:7:3"), Some(("/p/odd:7".into(), 2, 0)));
+        assert_eq!(at("/p/new.rs:3"), None, "a new file: its name as typed");
+        assert_eq!(at("/p/src/typed.rs:0"), None, "lines count from 1");
+        assert_eq!(at("/p/src/typed.rs:x"), None);
+    }
+
+    /// `:open` with both, end to end: the file itself, at its line — no buffer named `typed.rs:3`.
+    #[test]
+    fn open_takes_a_line_and_home() {
+        let dir = std::env::temp_dir().join(format!("tarae-open-line-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        let mut ed = Editor::new(config::Config::default());
+        ed.lane.root = dir.clone();
+        execute(&mut ed, "open a.txt:3:2").unwrap();
+        assert_eq!(ed.doc().path.as_deref(), Some(dir.join("a.txt").as_path()));
+        let head = ed.doc().selection().primary().head;
+        assert_eq!(head, "one\ntwo\nt".len(), "line 3, column 2");
+        assert!(ed.docs.iter().all(|d| d.path.as_deref() != Some(dir.join("a.txt:3:2").as_path())));
+        // (`:open` and `:w` read a path the same way: home first — only computed here, nothing written)
+        if let Some(home) = crate::allow::home() {
+            assert_eq!(typed_path(&ed, "~/x.toml"), home.join("x.toml"));
+        }
+        assert_eq!(typed_path(&ed, "b/x.toml"), dir.join("b/x.toml"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

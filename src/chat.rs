@@ -227,6 +227,9 @@ pub struct Chat {
     pub follow: crate::follow::Follow,
     /// This claude doesn't know `--thinking-display` (older CLI) — spawn without it.
     no_thought_flag: bool,
+    /// A new conversation was asked for (`C-l`, `:chat-new`) — the recent one isn't continued when the
+    /// project's are read.
+    pub started_new: bool,
     /// The user brought the panel back this turn (`space l`, a click on the minimized card).
     pub unfolded: bool,
     /// Claude's edits waiting for (or in) their review.
@@ -279,6 +282,7 @@ impl Chat {
             hop: 0,
             follow: Default::default(),
             no_thought_flag: false,
+            started_new: false,
             unfolded: false,
             edits: Default::default(),
             unprotected: false,
@@ -416,6 +420,7 @@ pub fn open(ed: &mut Editor) {
                 });
             }
             ed.lane.chat = Some(c);
+            crate::edits::at_end_new_chat(ed);
         }
     }
     ensure_proc(ed);
@@ -427,7 +432,7 @@ fn loaded(ed: &mut Editor, saved: Vec<crate::chats::Saved>) {
     c.past = saved.iter().map(|s| (s.id.clone(), s.title.clone(), s.updated)).collect();
     let fresh = saved.first().filter(|s| crate::chats::now().saturating_sub(s.updated) < crate::chats::FRESH);
     match fresh {
-        Some(s) if c.msgs.is_empty() && !c.busy() => continue_with(ed, s.clone()),
+        Some(s) if c.msgs.is_empty() && !c.busy() && !c.started_new => continue_with(ed, s.clone()),
         _ => {}
     }
 }
@@ -583,30 +588,39 @@ pub fn close(ed: &mut Editor) {
     crate::restart::turn_over(ed);
 }
 
-/// New chat — fresh process (drops memory of the previous conversation).
+/// New chat — fresh process (drops memory of the previous conversation): `C-l` in the chat, `:chat-new`
+/// (the chat opened first if it's closed — and the recent conversation not continued when it's read).
 pub fn reset(ed: &mut Editor) {
-    if let Some(c) = &mut ed.lane.chat {
-        c.kill();
-        // The one just left is an earlier one now (the empty chat lists it)
-        if let Some(id) = c.session.take() {
-            let title =
-                c.msgs.iter().find(|m| m.role == Role::User).map(|m| m.text.clone()).unwrap_or_default();
-            c.past.retain(|p| p.0 != id);
-            c.past.insert(0, (id, title, crate::chats::now()));
+    let said = "New conversation with Claude";
+    let Some(c) = &mut ed.lane.chat else {
+        open(ed);
+        if let Some(c) = &mut ed.lane.chat {
+            c.started_new = true;
         }
-        c.msgs.clear();
-        c.plan = None;
-        // (agreed for that conversation — a new one asks again)
-        c.edits.at_end = None;
-        c.unprotected = false;
-        c.allowed = Default::default();
-        c.state = State::Idle;
-        c.scroll = 0;
-        c.follow.new_turn();
-        c.session = None;
-        c.resume = None;
+        return ed.set_status(said);
+    };
+    c.started_new = true;
+    (c.focused, c.unfolded) = (true, true);
+    c.kill();
+    // The one just left is an earlier one now (the empty chat lists it)
+    if let Some(id) = c.session.take() {
+        let title = c.msgs.iter().find(|m| m.role == Role::User).map(|m| m.text.clone()).unwrap_or_default();
+        c.past.retain(|p| p.0 != id);
+        c.past.insert(0, (id, title, crate::chats::now()));
     }
+    c.msgs.clear();
+    c.plan = None;
+    c.unprotected = false;
+    c.allowed = Default::default();
+    c.state = State::Idle;
+    c.scroll = 0;
+    c.follow.new_turn();
+    c.session = None;
+    c.resume = None;
+    // (review at the end stays as it's set — `llm.review-at-end`)
+    crate::edits::at_end_new_chat(ed);
     ensure_proc(ed);
+    ed.set_status(said);
 }
 
 fn ensure_proc(ed: &mut Editor) {

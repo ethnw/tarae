@@ -294,7 +294,7 @@ fn render_frame(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io
     if offer.as_ref().is_some_and(|c| c.cut == 0 && !c.bar)
         && let Some(f) = front
     {
-        editor.offer_whole.set(Some(f));
+        editor.offer_read_whole(f);
     }
     // With split windows, scroll/viewport follow the focused pane
     let focus_lay = panes(editor, &lay).into_iter().find(|p| p.6).map_or_else(|| lay.clone(), |p| p.2);
@@ -414,7 +414,7 @@ fn render_frame(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io
         && !editor.offer_seen_whole()
         && offer_text_read(editor, doc)
     {
-        editor.offer_whole.set(Some((id, rev)));
+        editor.offer_read_whole((id, rev));
         // (this frame's card already says so)
         offer = OfferCard::new(editor, &lay, &ui);
         editor.screen.offer_buttons = offer.as_ref().map(|c| c.buttons.clone()).unwrap_or_default();
@@ -6138,7 +6138,7 @@ impl OfferCard {
             }
             let how = match &o.state {
                 OfferState::Asking if editor.offer_seen_whole() => "read to its end — y answers".to_string(),
-                OfferState::Asking => "G to its end, then y answers".to_string(),
+                OfferState::Asking => format!("{} to its end, then y answers", editor.end_key()),
                 _ => lines.get(1).map(|l| l.0.clone()).unwrap_or_default(),
             };
             let title = lines.first().map(|l| l.0.clone()).unwrap_or_default();
@@ -6173,11 +6173,11 @@ impl OfferCard {
             lines.truncate(room - 1);
             // (once its `v` buffer has been read to the end, it says so — `y` answers now)
             let then = if editor.offer_seen_whole() {
-                "seen in full — y answers"
+                "seen in full — y answers".to_string()
             } else if editor.offer_viewing() {
-                "v view all · G to the end"
+                format!("v view all · {} to the end", editor.end_key())
             } else {
-                "v view all"
+                "v view all".to_string()
             };
             lines.push((format!("↓ {cut} more lines · {then}"), true));
         }
@@ -6398,7 +6398,7 @@ impl OfferCard {
     /// The card as a bar while its text is read (U8):
     ///
     /// ```text
-    ///  ▎ Run this command?   G to its end, then y answers                     y Run   a This chat   n No
+    ///  ▎ Run this command?   ge to its end, then y answers                    y Run   a This chat   n No
     /// ```
     fn draw_bar(
         &self,
@@ -7176,9 +7176,9 @@ fn draw_sidebar(
 ///     space v s send 2 · q end   ▌
 /// ```
 /// The review rail's rows above its files (title, counts, viewed, a blank) and the key hints under them
-/// (a blank and three rows).
+/// (a blank and four rows).
 const RAIL_HEAD: usize = 4;
-const RAIL_HINTS: usize = 4;
+const RAIL_HINTS: usize = 5;
 
 /// The review rail's width bounds, and the columns the code keeps beside it.
 const REVIEW_RAIL_MIN: usize = 24;
@@ -7258,16 +7258,21 @@ fn review_rail_hints(
         row.extend(hint_spans(pairs, key, faint));
         row
     };
+    // (`]g` a hunk, `]F` the next file — #49: `]g` stopped at each small change, and the next file had no
+    // key)
+    let walk = || hint(&[("]g", "hunk"), ("]F", "file")]);
     if focus {
         vec![
             hint(&[("j k", "files"), ("enter", "open")]),
             hint(&[("m", "viewed, on to the next")]),
             hint(&[("esc", "back to the code")]),
+            walk(),
         ]
     } else if turn && drafts == 0 {
         // Claude's turn: what to do with its changes — one back, all back, or keep them
         vec![
-            hint(&[("]g", "change"), ("space n", "comment")]),
+            walk(),
+            hint(&[("space n", "comment")]),
             hint(&[("space u", "undo the whole turn")]),
             vec![sp("  space v", key), sp(" u undo · q keep", faint)],
         ]
@@ -7278,7 +7283,7 @@ fn review_rail_hints(
         } else {
             vec![sp("  space v", key), sp(" m viewed · q end", faint)]
         };
-        vec![hint(&[("]g", "change"), ("space e", "files")]), hint(&[("space n", "comment")]), send]
+        vec![walk(), hint(&[("space e", "files")]), hint(&[("space n", "comment")]), send]
     }
 }
 
@@ -9012,6 +9017,16 @@ fn key_hints(editor: &Editor) -> Option<Vec<(&'static str, String)>> {
                 ("b", "bring into its base"),
                 ("esc", "close"),
             ]),
+        }
+    } else if let Some(p) = editor.picker.as_ref().filter(|p| p.title == crate::picker::BUFFERS) {
+        // (one with unsaved changes asked about: what the next `C-x` does)
+        match (p.current().map(|i| &i.action), p.closing) {
+            (Some(Action::Buffer(id)), Some(asked)) if *id == asked => {
+                hints(&[("enter", "open"), ("C-x", "close without saving"), ("esc", "close the list")])
+            }
+            _ => {
+                hints(&[("enter", "open"), ("C-x", "close the buffer"), ("type", "narrow"), ("esc", "close")])
+            }
         }
     } else if editor.picker.as_ref().is_some_and(replace_list) {
         hints(&[("enter", "replace in every listed file"), ("type", "narrow"), ("esc", "cancel")])

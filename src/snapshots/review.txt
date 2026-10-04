@@ -24,8 +24,8 @@
 21                              ▌ 17 }
 22                              ▌
 23                              ▌
-24                              ▌
-25     ]g change  space e files ▌
+24     ]g hunk  ]F file         ▌
+25     space e files            ▌
 26     space n comment          ▌
 27     space v s send 1 · q end ▌
 28  ▐ NORMAL ▌  +3  −3                                                                      rust   utf-8 LF   1:1
@@ -86,8 +86,8 @@
 21                                ff
 22
 23
-24
-25     DD ffffff  DDDDD D fffff
+24     DD ffff  DD ffff
+25     DDDDD D fffff
 26     DDDDD D fffffff
 27     DDDDD D D aaaa a f f fff
 28  a BBBBBB a  gg  ee                                                                      dddd   ddddd dd   TTT

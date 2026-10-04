@@ -214,6 +214,9 @@ struct TreeMode {
     num_w: usize,
 }
 
+/// The buffer list's title (`space b`) — its key hints go by it.
+pub const BUFFERS: &str = "buffers";
+
 pub struct Picker {
     /// Number assigned by the editor — so a late list doesn't land in a different (newer) picker.
     pub id: u64,
@@ -275,6 +278,8 @@ pub struct Picker {
     /// Letters are the list's keys, not a query (the session list: `d` `b` `n`, a digit picks a row) — a
     /// short list nobody needs to filter.
     pub keys: bool,
+    /// The buffer with unsaved changes `C-x` was pressed on once (the buffer list) — again closes it.
+    pub closing: Option<crate::document::DocId>,
 }
 
 impl Picker {
@@ -314,6 +319,7 @@ impl Picker {
             make: None,
             made: None,
             keys: false,
+            closing: None,
         };
         p.refilter();
         p

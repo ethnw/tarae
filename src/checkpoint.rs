@@ -45,6 +45,17 @@ pub struct Checkpoint {
     pub question: String,
     pub files: Vec<Touched>,
     pub undone: bool,
+    /// Its changes have been looked at: each was reviewed as it came, or the user ended its review (`space
+    /// v q`), or a git review showing all its files — not one written unseen whose review a later turn's
+    /// replaced (`space v t` says so).
+    pub seen: bool,
+}
+
+impl Checkpoint {
+    pub fn new(question: String, files: Vec<Touched>) -> Self {
+        let seen = !files.iter().any(|t| t.unseen);
+        Checkpoint { question, files, undone: false, seen }
+    }
 }
 
 #[derive(Default)]
@@ -139,7 +150,7 @@ pub fn single(ed: &mut Editor, id: crate::document::DocId, before: Rope, what: &
     }
     let question = what.lines().next().unwrap_or_default().to_string();
     let files = vec![Touched { path, before: Some(before), after, unseen: false }];
-    ed.lane.checkpoints.list.push(Checkpoint { question, files, undone: false });
+    ed.lane.checkpoints.list.push(Checkpoint::new(question, files));
     keep(ed);
 }
 
@@ -209,7 +220,7 @@ fn finish(ed: &mut Editor, question: &str, files: Vec<Touched>) -> Option<String
         .collect();
     let n = if names.len() <= 2 { names.join(", ") } else { format!("{} files", names.len()) };
     let question = question.lines().next().unwrap_or_default().to_string();
-    ed.lane.checkpoints.list.push(Checkpoint { question, files, undone: false });
+    ed.lane.checkpoints.list.push(Checkpoint::new(question, files));
     keep(ed);
     Some(n)
 }
@@ -404,6 +415,8 @@ pub fn load(dir: &Path, root: &Path) -> Stored {
             question: c["question"].as_str().unwrap_or_default().to_string(),
             files: files_of(&c["files"]),
             undone: c["undone"].as_bool().unwrap_or(false),
+            // (kept before this was: nothing to say about it)
+            seen: c["seen"].as_bool().unwrap_or(true),
         })
         .filter(|c| !c.files.is_empty())
         .collect();
@@ -426,7 +439,7 @@ fn save(dir: &Path, root: &Path, s: Stored) {
         .iter()
         .map(|c| {
             let files: Vec<Value> = c.files.iter().map(touched_json).collect();
-            json!({ "question": c.question, "files": files, "undone": c.undone })
+            json!({ "question": c.question, "files": files, "undone": c.undone, "seen": c.seen })
         })
         .collect();
     let turn: Vec<Value> = s.turn.iter().map(touched_json).collect();
@@ -439,7 +452,7 @@ fn save(dir: &Path, root: &Path, s: Stored) {
 }
 
 /// The turns as they are now, kept (the texts are written out on a worker).
-fn keep(ed: &Editor) {
+pub(crate) fn keep(ed: &Editor) {
     if let Some(save) = saving(ed) {
         ed.events.jobs().spawn(move || {
             save();
@@ -504,7 +517,7 @@ pub fn restore(ed: &mut Editor) {
         cut.retain(|t| t.before.as_ref().is_none_or(|b| *b != t.after));
         if !cut.is_empty() {
             let question = if s.question.is_empty() { CUT_SHORT.to_string() } else { s.question.clone() };
-            s.list.push(Checkpoint { question, files: cut, undone: false });
+            s.list.push(Checkpoint::new(question, cut));
         }
         move |ed: &mut Editor| {
             ed.lane.checkpoints.dir = Some(back);

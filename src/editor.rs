@@ -427,6 +427,9 @@ pub struct Editor {
     /// The card (id, rev) whose whole text `v` opened, in this buffer — seen whole once its last line has
     /// been on screen (opening it isn't reading it: a line 50 would go unseen).
     pub offer_view: std::cell::Cell<Option<(u64, u64, DocId)>>,
+    /// The texts of cards seen whole this session (`offer::text_hash`): the same card again — a script run
+    /// again unchanged — isn't to be read again.
+    pub offer_read: std::cell::RefCell<std::collections::HashSet<u64>>,
     /// Whether to show offers (off in tests — so they don't swallow y/n keys).
     pub offer_popups: bool,
     /// Diagnostic card closed with Esc on this line (doc, line) — back once the cursor leaves the line.
@@ -489,6 +492,9 @@ pub struct Editor {
     pub trust_path: Option<std::path::PathBuf>,
     /// Where what's always allowed is kept (`allow.rs`) — None in tests (they set a temp file).
     pub allow_path: Option<std::path::PathBuf>,
+    /// The user's config file, where a toggle that's kept is written (`space v a`) — None in tests (they
+    /// set a temp file).
+    pub config_file: Option<std::path::PathBuf>,
     /// The last frame drawn and its size — what the user sees (`chat::attach_screen`).
     pub last_frame: Option<(Vec<u8>, u16, u16)>,
     /// Sizes you set — the chat's and side panel's widths, the bottom slot's height (`sizes.rs`), global and
@@ -603,6 +609,7 @@ impl Editor {
             offer_seen: Default::default(),
             offer_whole: Default::default(),
             offer_view: Default::default(),
+            offer_read: Default::default(),
             offer_seq: 0,
             offer_popups: !cfg!(test),
             diag_card_hidden: None,
@@ -632,6 +639,7 @@ impl Editor {
             project_trust: None,
             trust_path: if cfg!(test) { None } else { crate::trust::Store::path() },
             allow_path: if cfg!(test) { None } else { crate::allow::Store::path() },
+            config_file: if cfg!(test) { None } else { crate::config::config_path() },
             last_frame: None,
             unfocused: false,
             // (a few bytes, read before the first frame — it's drawn at the sizes you left)
@@ -853,7 +861,58 @@ impl Editor {
         }
     }
 
+    /// Closing document `id` while a change to it is under review: asked on a card first (`y` declines the
+    /// change and closes it, `n` keeps both) — #54: closed, the change was declined without a word. True:
+    /// asked. Not `force` (`:bc!`), your own unsaved edits keep it open after `y` all the same.
+    fn close_asks_review(&mut self, id: DocId, force: bool) -> bool {
+        if self.lane.review.as_ref().is_none_or(|r| r.doc_id != id) {
+            return false;
+        }
+        let Some(d) = self.docs.iter().find(|d| d.id == id) else { return false };
+        let name = d.display_name(&self.lane.root);
+        let closes = match !force && d.is_modified() && !d.throwaway {
+            true => "— your unsaved edits keep the buffer open (:bc! discards them)",
+            false => "and closes the buffer",
+        };
+        let card = crate::offer::Offer::new(
+            format!("Close {name}?"),
+            &format!(
+                "A change to {name} waits for your answer.\n\ny declines it (Claude hears so) {closes} · n keeps both"
+            ),
+            "",
+            String::new(),
+            crate::offer::What::CloseReviewed { doc: id, force },
+        );
+        self.push_offer(card);
+        // (asked for by you, over the review: its y and n are the card's, as after `C-q`)
+        self.card_keys = true;
+        true
+    }
+
+    /// `y` on that card: the change declined, the buffer closed — unless it has unsaved changes of yours and
+    /// the close wasn't forced: then kept open, as `:bc` keeps it.
+    pub(crate) fn close_reviewed(&mut self, id: DocId, force: bool) {
+        if self.lane.review.as_ref().is_some_and(|r| r.doc_id == id) {
+            crate::llm::close_review(self);
+        }
+        // (a `:w` a moment ago may still be being written — it counts)
+        if self.docs.iter().any(|d| d.id == id && d.saving > 0) {
+            self.flush_saves();
+        }
+        let Some(d) = self.docs.iter().find(|d| d.id == id) else { return };
+        if !force && d.is_modified() && !d.throwaway {
+            let name = d.display_name(&self.lane.root);
+            return self.set_error(format!(
+                "declined — unsaved changes in {name} keep it open (use :bc! to discard)"
+            ));
+        }
+        self.close_doc(id);
+    }
+
     pub fn close_current(&mut self, force: bool) -> Result<(), String> {
+        if self.close_asks_review(self.doc().id, force) {
+            return Ok(());
+        }
         // (a `:w` a moment ago may still be being written — it counts)
         if self.doc().saving > 0 {
             self.flush_saves();
@@ -1278,9 +1337,10 @@ impl Editor {
 
     pub fn handle_event(&mut self, ev: Event) {
         // Input means the terminal has focus, whatever it said last (a focus-in lost on the way)
-        if matches!(ev, Event::Key(_) | Event::Mouse(_) | Event::Paste(_)) {
+        let input = matches!(ev, Event::Key(_) | Event::Mouse(_) | Event::Paste(_));
+        let before = input.then(|| crate::edits::before_input(self));
+        if input {
             self.unfocused = false;
-            crate::edits::taken_up(self);
         }
         match ev {
             Event::Key(k) => {
@@ -1301,6 +1361,9 @@ impl Editor {
             Event::Job(apply) => apply(self),
             Event::For(lane, apply) => self.with_lane(lane, apply),
         }
+        if let Some(before) = before {
+            crate::edits::taken_up(self, before);
+        }
         self.sync_focus_view();
         self.focus_sync();
         self.schedule_parses();
@@ -1320,6 +1383,7 @@ impl Editor {
         crate::edits::next(self);
         crate::refactor::next(self);
         crate::codereview::land(self);
+        self.offer_view_sync();
         self.agent_selection_tick(false);
         self.plugin_front();
         self.schedule_tick();
@@ -1999,6 +2063,40 @@ impl Editor {
         });
     }
 
+    /// `C-x` in the buffer list: buffer `id` closes and leaves the list. One with unsaved changes is kept
+    /// the first time, said so — `C-x` again on it closes it without saving.
+    fn picker_close_buffer(&mut self, id: DocId) {
+        let Some(i) = self.docs.iter().position(|d| d.id == id) else { return };
+        // (under review: the card asks — the list makes way for it)
+        if self.lane.review.as_ref().is_some_and(|r| r.doc_id == id) {
+            self.keep_last_picker();
+            self.close_asks_review(id, false);
+            return;
+        }
+        // (a `:w` a moment ago may still be being written — it counts)
+        if self.docs[i].saving > 0 {
+            self.flush_saves();
+        }
+        let d = &self.docs[i];
+        let name = d.display_name(&self.lane.root);
+        let unsaved = d.is_modified() && !d.throwaway;
+        let Some(p) = self.picker.as_mut() else { return };
+        if unsaved && p.closing != Some(id) {
+            p.closing = Some(id);
+            return self
+                .set_warning(format!("{name} has unsaved changes — C-x again closes it without saving"));
+        }
+        p.closing = None;
+        let (at, rest): (usize, Vec<crate::picker::Item>) = (
+            p.selected,
+            p.items().iter().filter(|i| !matches!(i.action, Action::Buffer(b) if b == id)).cloned().collect(),
+        );
+        p.set_items(rest);
+        p.selected = at.min(p.len().saturating_sub(1));
+        self.close_doc(id);
+        self.note(format!("closed {name}"));
+    }
+
     fn picker_key(&mut self, key: Key) {
         let Some(p) = self.picker.as_mut() else { return };
         // Anything but typing acts on the list — never on the last query's rows
@@ -2046,6 +2144,11 @@ impl Editor {
                     }
                     _ => self.git_branch_delete(&name, true),
                 };
+            }
+            // A buffer: close it (#47)
+            (Code::Char('x'), true) if matches!(p.current().map(|i| &i.action), Some(Action::Buffer(_))) => {
+                let Some(Action::Buffer(id)) = p.current().map(|i| i.action.clone()) else { return };
+                return self.picker_close_buffer(id);
             }
             // Replace preview: Enter applies to every file still listed
             (Code::Enter, _) if p.current().is_some_and(|i| matches!(i.action, Action::ReplaceFile(_))) => {
@@ -3604,15 +3707,16 @@ mod tests {
         settle_until(&mut ed, |ed| ed.doc().git_base.is_some());
         feed(&mut ed, "jmiwcTWO<esc>");
         settle_until(&mut ed, |ed| !ed.doc().git_hunks.is_empty());
+        // (the tab keeps the keys after its quick key — esc gives them back to the code: #50)
         feed(&mut ed, " gd");
         assert_eq!(text(&ed), "one\ntwo\nthree\n", "reset (the hunk's index lines back)");
-        feed(&mut ed, "u");
+        feed(&mut ed, "<esc>u");
         settle_until(&mut ed, |ed| ed.doc().git_hunks.len() == 1);
         feed(&mut ed, " gs");
         settle_until(&mut ed, |ed| ed.doc().git_hunks.is_empty());
         let staged = String::from_utf8(git(&["diff", "--cached"])).unwrap();
         assert!(staged.contains("-two") && staged.contains("+TWO"), "{staged}");
-        feed(&mut ed, "ggOnew<esc>"); // blame is on by default
+        feed(&mut ed, "<esc>ggOnew<esc>"); // blame is on by default
         ed.blame_schedule(); // the event loop does this after every event
         settle_until(&mut ed, |ed| ed.blame.of.is_some_and(|(_, v)| v == ed.doc().version()));
         assert_eq!(ed.blame_here(0).as_deref(), Some("not committed yet"));
@@ -6189,6 +6293,21 @@ mod tests {
         assert!(c.msgs.iter().any(|m| m.text == "Hello back."));
         assert_eq!(c.session, None);
         settle_until(&mut ed, |ed| ed.lane.chat.as_ref().unwrap().proc_alive());
+        drop(ed);
+        // #51: `:chat-new` at a fresh start — a new conversation, said, not the recent one continued once
+        // the project's conversations are read
+        let mut ed = editor("");
+        fake(&mut ed, false);
+        std::fs::remove_file(&argv).ok();
+        feed(&mut ed, ":chat-new<ret>");
+        assert!(ed.lane.chat.as_ref().is_some_and(|c| c.focused), "the chat, open, with the keys");
+        let said = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        assert!(said.contains("New conversation"), "{said}");
+        settle_until(&mut ed, |ed| !ed.lane.chat.as_ref().unwrap().past.is_empty());
+        settle_until(&mut ed, |ed| ed.lane.chat.as_ref().unwrap().proc_alive());
+        let c = ed.lane.chat.as_ref().unwrap();
+        assert!(c.msgs.is_empty() && c.session.is_none(), "nothing continued: {:?}", c.msgs.len());
+        assert!(!started().contains("--resume"), "claude started fresh: {}", started());
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -6385,6 +6504,94 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// #54: closing the buffer a change of Claude's is under review in asks first — `n` keeps both, `y`
+    /// declines it (Claude hears so) and closes it. Not a silent "declined".
+    #[test]
+    fn closing_a_buffer_under_review_asks() {
+        let (dir, main, ..) = follow_project("edit-close");
+        let mut ed = editor("");
+        ed.open(&main).unwrap();
+        let input = serde_json::json!({"file_path": main, "old_string": "line 2", "new_string": "LINE 2"});
+        let log = fake_edit(&mut ed, &dir, "Edit", input, false);
+        feed(&mut ed, "<space>lshout<ret>");
+        settle_until(&mut ed, |ed| ed.lane.review.is_some());
+        let open = |ed: &Editor| ed.docs.iter().any(|d| d.path.as_deref() == Some(main.as_path()));
+        crate::typed::execute(&mut ed, "buffer-close!").unwrap();
+        assert!(open(&ed) && ed.lane.review.is_some(), "asked, not closed");
+        let q = ed.offers.first().map(|o| o.question.clone()).expect("a card");
+        assert!(q.contains("y declines") && q.contains("n keeps"), "{q}");
+        feed(&mut ed, "n");
+        assert!(open(&ed) && ed.lane.review.is_some() && ed.offers.is_empty(), "n: both kept");
+        crate::typed::execute(&mut ed, "buffer-close!").unwrap();
+        feed(&mut ed, "y");
+        assert!(!open(&ed) && ed.lane.review.is_none(), "y: declined and closed");
+        let a = permission_answer(&log);
+        assert_eq!(a["behavior"], "deny");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Plain `:bc` on a buffer under review with unsaved edits of yours: `y` declines Claude's change, and
+    /// your edits keep the buffer open, as `:bc` keeps it — they're not dropped; `:bc!` then closes it.
+    #[test]
+    fn closing_under_review_keeps_your_unsaved_edits() {
+        let (dir, main, ..) = follow_project("edit-close-unsaved");
+        let mut ed = editor("");
+        ed.open(&main).unwrap();
+        feed(&mut ed, "imine <esc>");
+        assert!(ed.doc().is_modified());
+        let input = serde_json::json!({"file_path": main, "old_string": "line 2", "new_string": "LINE 2"});
+        let log = fake_edit(&mut ed, &dir, "Edit", input, false);
+        feed(&mut ed, "<space>lshout<ret>");
+        settle_until(&mut ed, |ed| ed.lane.review.is_some());
+        let open = |ed: &Editor| ed.docs.iter().any(|d| d.path.as_deref() == Some(main.as_path()));
+        crate::typed::execute(&mut ed, "buffer-close").unwrap();
+        let q = ed.offers.first().map(|o| o.question.clone()).expect("a card");
+        assert!(q.contains("unsaved edits keep the buffer open"), "said on the card: {q}");
+        feed(&mut ed, "y");
+        assert!(ed.lane.review.is_none(), "y: declined");
+        assert_eq!(permission_answer(&log)["behavior"], "deny");
+        assert!(open(&ed), "your unsaved edits keep it open");
+        assert_eq!(text(&ed), "mine line 1\nline 2\nline 3\n");
+        assert!(
+            ed.status.as_ref().is_some_and(|(m, _)| m.contains("unsaved changes") && m.contains(":bc!")),
+            "{:?}",
+            ed.status
+        );
+        crate::typed::execute(&mut ed, "buffer-close!").unwrap();
+        assert!(!open(&ed), ":bc! discards them");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #54: an edit of Claude's arriving while you type in a buffer waits — said once — and opens when you
+    /// stop (it took the screen, and the next keys answered it).
+    #[test]
+    fn an_edit_waits_while_you_type() {
+        let (dir, main, util, _) = follow_project("edit-typing");
+        let mut ed = editor("");
+        ed.open(&main).unwrap();
+        let input = serde_json::json!({"file_path": main, "old_string": "line 2", "new_string": "LINE 2"});
+        let log = fake_edit(&mut ed, &dir, "Edit", input, false);
+        feed(&mut ed, "<space>lshout<ret>");
+        // Typing in another file before Claude's ask comes in
+        ed.lane.chat.as_mut().unwrap().focused = false;
+        ed.open(&util).unwrap();
+        feed(&mut ed, "ityping");
+        settle_until(&mut ed, |ed| ed.lane.chat.as_ref().unwrap().edits.queue.len() == 1);
+        assert!(ed.lane.review.is_none(), "it waits");
+        assert_eq!(ed.mode, Mode::Insert);
+        let waits = |ed: &Editor| ed.messages.iter().filter(|m| m.2.contains("waits — it opens")).count();
+        assert_eq!(waits(&ed), 1);
+        feed(&mut ed, " more");
+        assert_eq!(waits(&ed), 1, "said once");
+        assert!(ed.doc().text.to_string().starts_with("typing more"), "the keys stayed yours");
+        ed.handle_event(Event::Key("esc".parse().unwrap()));
+        assert!(ed.lane.review.is_some(), "stopped typing: it opens");
+        assert_eq!(ed.doc().path.as_deref(), Some(main.as_path()));
+        feed(&mut ed, "y");
+        assert_eq!(permission_answer(&log)["behavior"], "allow");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Accepting part of a Write: claude writes exactly what was accepted.
     #[test]
     fn a_partly_accepted_write_writes_the_accepted_part() {
@@ -6530,7 +6737,20 @@ mod tests {
     /// hears of it with the next message — and `space v a` again turns it off without asking.
     #[test]
     fn review_at_the_end_asks_first() {
+        let dir = std::env::temp_dir().join(format!("tarae-at-end-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("config.toml");
+        std::fs::write(&config, "# mine\n[llm]\nfollow = false\n").unwrap();
+        // Kept at once, in the order you toggle (a worker each could land them the other way round, and the
+        // config watch would take that back) — the file's own lines with it
+        let kept = |_: &mut Editor, want: &str| {
+            let now = std::fs::read_to_string(&config).unwrap();
+            assert!(now.contains(want), "{now}");
+            assert!(now.contains("# mine") && now.contains("follow = false"), "{now}");
+        };
         let mut ed = editor("");
+        ed.config_file = Some(config.clone());
         ed.config.llm.command = "sh".into();
         ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
         feed(&mut ed, "<space>va");
@@ -6558,22 +6778,39 @@ mod tests {
             "{:?}",
             ed.lane.checkpoints.tell
         );
+        kept(&mut ed, "review-at-end = true");
         feed(&mut ed, "<space>va");
         assert!(ed.offers.is_empty(), "off without asking");
         assert!(!crate::edits::at_end(&ed));
         assert!(!chat_title(&mut ed).contains("review at end"));
         assert!(ed.lane.checkpoints.tell.is_empty(), "on then off before a message: nothing to tell");
-        // Typed: on asks, off doesn't; a new chat starts with it off
+        kept(&mut ed, "review-at-end = false");
+        // Typed: on asks, off doesn't; a new chat keeps it (#51: it reset per chat), and Claude hears it
         feed(&mut ed, ":review-at-end on<ret>");
         assert!(matches!(ed.offers.first().map(|o| &o.what), Some(crate::offer::What::ReviewAtEnd)));
         ed.offer_accept();
         assert!(crate::edits::at_end(&ed));
         feed(&mut ed, ":review-at-end on<ret>");
         assert!(ed.offers.is_empty(), "already on");
+        ed.lane.checkpoints.tell.clear(); // (heard with a message)
         crate::chat::reset(&mut ed);
-        assert!(!crate::edits::at_end(&ed), "a new chat asks again");
+        assert!(crate::edits::at_end(&ed), "a new chat keeps it");
+        assert_eq!(ed.lane.checkpoints.tell.len(), 1, "the new conversation hears it");
+        // Closed and opened again (as at the next start: the setting): still on
+        crate::chat::close(&mut ed);
+        crate::chat::open(&mut ed);
+        assert!(crate::edits::at_end(&ed), "a chat opened later starts so");
+        ed.lane.chat.as_mut().unwrap().focused = false;
         feed(&mut ed, ":review-at-end on<ret>:review-at-end off<ret>");
         assert!(ed.offers.is_empty(), "off takes the card away");
+        crate::chat::reset(&mut ed);
+        assert!(!crate::edits::at_end(&ed), "off: new chats come one edit at a time");
+        kept(&mut ed, "review-at-end = false");
+        // On and straight off again: off is what's kept
+        crate::edits::at_end_set(&mut ed, true);
+        crate::edits::at_end_set(&mut ed, false);
+        kept(&mut ed, "review-at-end = false");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A fake claude that asks to use each of `asks` (tool, input) in turn — p1 on the question, the next once
@@ -6707,12 +6944,17 @@ mod tests {
         std::fs::create_dir_all(&away).unwrap();
         let outside = std::fs::canonicalize(&away).unwrap().join("config.toml");
         std::fs::write(&outside, "a = 1\n").unwrap();
+        // #46: and one in the project's build output (a test's fixture)
+        std::fs::create_dir_all(dir.join("target/sb")).unwrap();
+        let fixture = dir.join("target/sb/fixture.toml");
+        std::fs::write(&fixture, "b = 1\n").unwrap();
         let open = |ed: &Editor, p: &Path| ed.docs.iter().any(|d| d.path.as_deref() == Some(p));
         let mut ed = editor("");
         ed.lane.root = dir.clone();
         ed.open(&main).unwrap();
         let edit = json!({"file_path": outside, "old_string": "a = 1", "new_string": "a = 2"});
-        fake_asks(&mut ed, &dir, &[("Edit", edit)], true);
+        let in_target = json!({"file_path": fixture, "old_string": "b = 1", "new_string": "b = 2"});
+        fake_asks(&mut ed, &dir, &[("Edit", edit), ("Edit", in_target)], true);
         feed(&mut ed, "<space>l");
         ed.handle_event(Event::Key("c".parse().unwrap())); // (typed in the chat's input)
         feed(&mut ed, "hange it<ret>");
@@ -6723,17 +6965,50 @@ mod tests {
             restarted["docs"].as_array().unwrap().iter().filter_map(|d| d["path"].as_str()).collect();
         assert_eq!(saved, [main.to_str().unwrap()], "a restart doesn't bring it");
         ed.handle_event(Event::Key("y".parse().unwrap())); // (the review's answer isn't taking it up)
+        // The fixture's review: between the two, keys that go elsewhere (`:` and esc) don't take up the
+        // file in front (#46: any key did)
+        settle_until(&mut ed, |ed| ed.lane.review.is_some() && ed.doc().path.as_deref() == Some(&fixture));
+        for k in ["y", ":", "esc"] {
+            ed.handle_event(Event::Key(k.parse().unwrap()));
+        }
         settle_until(&mut ed, |ed| !ed.lane.chat.as_ref().unwrap().busy());
         assert_eq!(std::fs::read_to_string(&outside).unwrap(), "a = 2\n");
+        assert_eq!(std::fs::read_to_string(&fixture).unwrap(), "b = 2\n");
         assert!(!open(&ed, &outside), "closed with the turn");
+        assert!(!open(&ed, &fixture), "in target/: closed with the turn too");
         assert!(open(&ed, &main));
-        // Taken up: a key in the code pane while it's in front — it stays when the turn ends
+        // Taken up: a move in the code pane while it's in front — it stays when the turn ends
         ed.open(&outside).unwrap();
         ed.doc_mut().aside = true;
         ed.lane.chat.as_mut().unwrap().focused = false;
-        ed.handle_event(Event::Key("j".parse().unwrap()));
+        for k in [":", "esc"] {
+            ed.handle_event(Event::Key(k.parse().unwrap()));
+        }
+        assert!(ed.doc().aside, "nothing moved: not yet");
+        ed.handle_event(Event::Key("l".parse().unwrap()));
         crate::edits::turn_over(&mut ed);
         assert!(open(&ed, &outside), "yours now");
+        // (as typed: each key an event)
+        let keys = |ed: &mut Editor, ks: &[&str]| {
+            for k in ks {
+                ed.handle_event(Event::Key(k.parse().unwrap()));
+            }
+        };
+        // Switched to by you (`ga`, back from your file): taken up
+        ed.doc_mut().aside = true;
+        ed.open(&main).unwrap();
+        keys(&mut ed, &["g", "a"]);
+        assert_eq!(ed.doc().path.as_deref(), Some(outside.as_path()));
+        assert!(!ed.doc().aside, "you went there");
+        // Brought to the front only by `:bc` on your own file: not taken up — it goes with the turn
+        ed.doc_mut().aside = true;
+        ed.open(&main).unwrap();
+        keys(&mut ed, &[":", "b", "c", "ret"]);
+        assert!(!open(&ed, &main));
+        assert_eq!(ed.doc().path.as_deref(), Some(outside.as_path()), "in front now");
+        assert!(ed.doc().aside, "closing yours isn't going there");
+        crate::edits::turn_over(&mut ed);
+        assert!(!open(&ed, &outside), "closed with the turn");
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&away).ok();
     }
@@ -6806,7 +7081,11 @@ mod tests {
         assert_eq!(ed.doc().git_hunks.len(), 1);
         assert_eq!(ed.cursor_line(), 8);
         assert!(ed.doc().review_base.as_ref().unwrap().to_string().contains("line 9\n"));
-        // ]g past lib.rs's one change: main.rs
+        // ]F: the next file (main.rs), [F back; ]g past lib.rs's one change: main.rs
+        feed(&mut ed, "]F");
+        settle_until(&mut ed, |ed| reviewing(ed) && ed.doc().path.as_deref() == Some(main.as_path()));
+        feed(&mut ed, "[F");
+        settle_until(&mut ed, |ed| reviewing(ed) && ed.doc().path.as_deref() == Some(lib.as_path()));
         feed(&mut ed, "]g");
         settle_until(&mut ed, |ed| reviewing(ed) && ed.doc().path.as_deref() == Some(main.as_path()));
         assert_eq!(ed.cursor_line(), 1);
@@ -6892,6 +7171,114 @@ mod tests {
         turns_kept(&store, |k| k.list.first().is_some_and(|c| c.undone));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&store).ok();
+    }
+
+    /// #49: `space v t` reviews the latest turn — the turns before it that went in unseen (their review
+    /// replaced by a later one's, never ended) are said. A turn whose review you ended is seen.
+    #[test]
+    fn review_turn_says_earlier_turns_unseen() {
+        use crate::checkpoint::{Checkpoint, Touched};
+        let (dir, main, ..) = follow_project("turn-unseen");
+        let mut ed = editor("");
+        ed.lane.root = dir.clone();
+        let now = std::fs::read_to_string(&main).unwrap();
+        let turn = |q: &str| {
+            let t = Touched {
+                path: main.clone(),
+                before: Some(ropey::Rope::from_str("x\n")),
+                after: ropey::Rope::from_str(&now),
+                unseen: true,
+            };
+            Checkpoint::new(q.into(), vec![t])
+        };
+        for q in ["one", "two", "three"] {
+            ed.lane.checkpoints.list.push(turn(q));
+        }
+        let unseen = |ed: &Editor| -> Vec<String> {
+            ed.messages.iter().filter(|m| m.2.contains("earlier turn")).map(|m| m.2.clone()).collect()
+        };
+        feed(&mut ed, "<space>vt");
+        settle_until(&mut ed, reviewing);
+        assert_eq!(unseen(&ed), ["2 earlier turns unseen — space v v for all"]);
+        // Ended by you: seen — the next turn's review says nothing of it
+        feed(&mut ed, "<space>vq");
+        ed.lane.checkpoints.list.push(turn("four"));
+        ed.messages.clear();
+        feed(&mut ed, "<space>vt");
+        settle_until(&mut ed, reviewing);
+        assert!(unseen(&ed).is_empty(), "{:?}", unseen(&ed));
+        // `space v v` — the one the warning points to — ended: the turns whose files it showed are seen. One
+        // that didn't show them (another file only) leaves them as they were.
+        let git_review = |ed: &mut Editor, path: &Path| {
+            let rel = path.file_name().unwrap().to_string_lossy().into_owned();
+            let f = crate::codereview::File {
+                rel,
+                path: path.to_path_buf(),
+                added: 1,
+                removed: 1,
+                new: false,
+                gone: false,
+                binary: false,
+            };
+            let r =
+                crate::codereview::CodeReview::for_test(crate::codereview::Base::Head, dir.clone(), vec![f]);
+            ed.lane.code_review = Some(r);
+            feed(ed, "<space>vq");
+        };
+        feed(&mut ed, "<space>vq");
+        for q in ["five", "six"] {
+            ed.lane.checkpoints.list.push(turn(q));
+        }
+        git_review(&mut ed, &dir.join("util.rs"));
+        ed.lane.checkpoints.list.push(turn("seven"));
+        ed.messages.clear();
+        feed(&mut ed, "<space>vt");
+        settle_until(&mut ed, reviewing);
+        assert_eq!(unseen(&ed), ["2 earlier turns unseen — space v v for all"], "util.rs isn't theirs");
+        feed(&mut ed, "<space>vq");
+        ed.lane.checkpoints.list.push(turn("eight"));
+        git_review(&mut ed, &main);
+        ed.lane.checkpoints.list.push(turn("nine"));
+        ed.messages.clear();
+        feed(&mut ed, "<space>vt");
+        settle_until(&mut ed, reviewing);
+        assert!(unseen(&ed).is_empty(), "seen in space v v: {:?}", unseen(&ed));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #49: `]g` goes hunk by hunk — changes a few lines apart are one, as `git diff` shows them — `]G` change
+    /// by change, `[g` back (not onto the hunk it's on); `]F` the review's next file.
+    #[test]
+    fn bracket_g_walks_hunks_and_capital_g_each_change() {
+        let base: String = (0..30).map(|i| format!("line {i}\n")).collect();
+        let now = base
+            .replace("line 2\n", "LINE 2\n")
+            .replace("line 4\n", "LINE 4\n")
+            .replace("line 6\n", "LINE 6\n");
+        let now = now.replace("line 14\n", "LINE 14\n");
+        let now = now.replace("line 22\n", "LINE 22\n").replace("line 24\n", "LINE 24\n");
+        let mut ed = editor(&now);
+        ed.doc_mut().git_hunks = crate::git::hunks(&base, &now);
+        assert_eq!(ed.doc().git_hunks.len(), 6);
+        let sel = |ed: &Editor| {
+            let r = ed.doc().selection().primary();
+            let t = &ed.doc().text;
+            (t.byte_to_line(r.from()), t.byte_to_line(r.to().saturating_sub(1)))
+        };
+        feed(&mut ed, "]g");
+        assert_eq!(sel(&ed), (2, 6), "the rewritten lines as one");
+        feed(&mut ed, "]g]g");
+        assert_eq!(sel(&ed), (22, 24));
+        feed(&mut ed, "[g");
+        assert_eq!(sel(&ed), (14, 14), "back: the one before, not the one it's on");
+        feed(&mut ed, "gg]G");
+        assert_eq!(sel(&ed), (2, 2), "]G: each change");
+        feed(&mut ed, "]G");
+        assert_eq!(sel(&ed), (4, 4));
+        // No review: ]F says so
+        feed(&mut ed, "]F");
+        let said = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        assert!(said.contains("no review"), "{said}");
     }
 
     /// A turn cut short (tarae ended mid-turn — a crash) comes back as a turn of its own: what it wrote
@@ -8448,12 +8835,12 @@ mod tests {
     }
 
     /// `space g` is the git panel, lazygit beside the code: from the code it opens on the hunk under the
-    /// cursor (its file opened to its hunks) and the next key acts there (`s` stages that hunk alone), then
-    /// the code has the keys again. In the panel, moving onto a hunk shows it in the editor and `d` puts
-    /// the index's lines back; `z` / `Z` stash and take it back; `?` lists the keys.
+    /// cursor (its file opened to its hunks) and the next key acts there (`s` stages that hunk alone), the
+    /// tab keeping the keys. In the panel, moving onto a hunk shows it in the editor and `d` puts the
+    /// index's lines back; `z` / `Z` stash and take it back; `?` lists the keys.
     /// `space g` from a changed line: the tab keeps the keys for moving about (`k k k` walks its rows, none
-    /// lands in the code — #18: after one, the rest went into the code); only a quick key on the change
-    /// under the cursor (`s`) gives them back.
+    /// lands in the code — #18: after one, the rest went into the code), a quick key on the change under the
+    /// cursor (`s`) too (#50: the `j`/`k`/`s` after it went into the code).
     #[test]
     fn space_g_on_a_change_keeps_the_keys_for_moving() {
         let repo = git_repo("gitmoves", &[("a.txt", "one\ntwo\nthree\nfour\nfive\n"), ("b.txt", "b\n")]);
@@ -8504,6 +8891,25 @@ mod tests {
         feed(&mut ed, "kk");
         assert!(ed.lane.sidebar.as_ref().unwrap().focus, "and the ones after");
         assert_eq!(text(&ed), text_before, "no key landed in the code");
+        // #50: on the change itself, a file opened from the editor just before — `s` stages it there, and
+        // the `j`/`k` after it are still the tab's
+        feed(&mut ed, "<esc>");
+        ed.open(&repo.join("b.txt")).unwrap();
+        feed(&mut ed, "2gg");
+        settle_until(&mut ed, |ed| ed.doc().git_hunks.len() == 1);
+        feed(&mut ed, " g");
+        settle_until(&mut ed, |ed| ed.lane.sidebar.as_ref().unwrap().aim.is_none());
+        assert!(ed.git_code_here().0, "on the change");
+        let b_before = text(&ed);
+        feed(&mut ed, "s");
+        settle_until(&mut ed, |ed| ed.doc().git_hunks.is_empty());
+        assert!(ed.lane.sidebar.as_ref().unwrap().focus, "the tab keeps the keys after s");
+        // (`o` would open a line in the code)
+        feed(&mut ed, "jjko");
+        assert!(ed.lane.sidebar.as_ref().unwrap().focus, "the tab has the keys");
+        assert_eq!(ed.mode, Mode::Normal);
+        let b = ed.docs.iter().find(|d| d.path.as_ref().is_some_and(|p| p.ends_with("b.txt"))).unwrap();
+        assert_eq!(b.text.to_string(), b_before, "none landed in the code");
         std::fs::remove_dir_all(&repo).ok();
     }
 
@@ -8547,9 +8953,9 @@ mod tests {
             .unwrap();
         let staged = String::from_utf8_lossy(&staged.stdout);
         assert!(staged.contains("+FOUR") && !staged.contains("+ONE"), "that hunk alone: {staged}");
-        assert!(!ed.lane.sidebar.as_ref().unwrap().focus, "the code has the keys again");
+        assert!(ed.lane.sidebar.as_ref().unwrap().focus, "the tab keeps the keys (#50)");
         // In the panel: onto the other hunk (the editor goes there), `d` puts it back
-        feed(&mut ed, " g");
+        feed(&mut ed, "<esc> g");
         settle_until(&mut ed, |ed| ed.lane.sidebar.as_ref().unwrap().aim.is_none());
         let rows: Vec<crate::sidebar::Target> =
             ed.lane.sidebar.as_ref().unwrap().lines().iter().map(|l| l.target.clone()).collect();
@@ -8668,7 +9074,8 @@ mod tests {
         feed(&mut ed, " gt");
         assert_eq!(text(&ed), "a\ntheirs\nz\n<<<<<<< HEAD\n1\n=======\n2\n>>>>>>> b\n");
         assert_eq!(ed.doc().conflicts.len(), 1);
-        feed(&mut ed, "u");
+        // (the tab keeps the keys after its quick key — esc back to the code: #50)
+        feed(&mut ed, "<esc>u");
         assert_eq!(text(&ed), SRC, "one undo step");
         feed(&mut ed, "]m]m");
         assert_eq!(ed.cursor_line(), 1, "wraps around");
@@ -8846,8 +9253,9 @@ mod tests {
         );
         assert_eq!(ed.doc().path.as_deref(), Some(dir.join("a.rs").as_path()));
         assert_eq!(ed.cursor_line(), 1, "on the first change");
-        // ]g: the deletion, then on into the deleted file, the new one, and [g back
-        feed(&mut ed, "]g");
+        // ]G: the deletion (a line from the change, one hunk to `]g`), then ]g on into the deleted file, the
+        // new one, and [g back
+        feed(&mut ed, "]G");
         assert_eq!(ed.cursor_line(), 3, "where `let z` was");
         feed(&mut ed, "]g");
         settle_until(&mut ed, ready);
@@ -9190,12 +9598,15 @@ mod tests {
         ed.handle_event(ev);
         let kinds: Vec<_> = ed.doc().git_hunks.iter().map(|h| (h.kind, h.lines.clone())).collect();
         assert_eq!(kinds, [(crate::git::HunkKind::Modified, 1..2), (crate::git::HunkKind::Added, 4..5)]);
-        feed(&mut ed, "]g");
+        // Each change (`]G`); two lines apart they're one hunk to `]g`, as `git diff` shows them
+        feed(&mut ed, "]G");
         assert_eq!(ed.doc().selection().primary(), Range::new(2, 4), "edited line selected");
-        feed(&mut ed, "]g");
+        feed(&mut ed, "]G");
         assert_eq!(ed.doc().selection().primary(), Range::new(8, 12), "added line");
-        feed(&mut ed, "[g");
+        feed(&mut ed, "[G");
         assert_eq!(ed.doc().selection().primary(), Range::new(2, 4));
+        feed(&mut ed, "gg]g");
+        assert_eq!(ed.doc().selection().primary(), Range::new(2, 12), "]g: the hunk");
     }
 
     #[test]
@@ -9276,10 +9687,18 @@ mod tests {
         feed(&mut ed, "y");
         assert_eq!(ed.offers.len(), 1, "y waits");
         assert!(ed.toasts.last().is_some_and(|t| t.text.contains("see all of it first")));
-        // `v`: all of it in a buffer — opened isn't read: `y` still waits until its end has been on screen
+        // `v`: all of it in a buffer — opened isn't read: `y` still waits until its end has been on screen.
+        // The keys go to it (#55: the side panel or the review's rail kept them, and keys did nothing)
+        let mut side = crate::sidebar::Sidebar::new(crate::sidebar::Mode::Files, test_root());
+        side.focus = true;
+        ed.lane.sidebar = Some(side);
         feed(&mut ed, "v");
+        assert!(!ed.lane.sidebar.as_ref().unwrap().focus, "the code has the keys");
+        ed.lane.sidebar = None;
         assert!(text(&ed).contains("line 80 of what it runs") && text(&ed).starts_with("Trust this project"));
         assert_eq!(ed.mode, Mode::Normal, "v didn't start a selection");
+        let said = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        assert!(said.contains("ge to its end"), "the keymap's key (#55: it said G): {said}");
         let s = screen(&mut ed);
         assert!(!s.contains("line 80 of what it runs"), "its end is below the screen");
         // While its text is read, the card is a bar over the status line (U8) — nothing of it over the text
@@ -9287,7 +9706,7 @@ mod tests {
         let bar = rows[30 - 3];
         assert!(
             bar.contains("Trust this project's settings?")
-                && bar.contains("G to its end, then y answers")
+                && bar.contains("ge to its end, then y answers")
                 && bar.contains("y Trust"),
             "the bar: {bar:?}\n{s}"
         );
@@ -9298,21 +9717,27 @@ mod tests {
         let viewed = ed.doc().id;
         ed.new_scratch();
         let s = screen(&mut ed);
-        assert!(s.contains("more lines · v view all · G to the end"), "whole again: {s}");
+        assert!(s.contains("more lines · v view all · ge to the end"), "whole again: {s}");
         ed.current = ed.docs.iter().position(|d| d.id == viewed).unwrap();
         assert!(!screen(&mut ed).contains("more lines"), "the bar again");
         feed(&mut ed, "y");
         assert_eq!(ed.offers.len(), 1, "y waits while the end is unseen");
         assert!(ed.toasts.last().is_some_and(|t| t.text.contains("read it to its end")));
         // Scrolled to the end: seen — the card says so in that same frame, and `y` answers
-        feed(&mut ed, "G");
+        feed(&mut ed, "ge");
         let s = screen(&mut ed);
         assert!(s.contains("line 80 of what it runs"), "{s}");
         assert!(s.contains("read to its end — y answers"), "the bar says y counts now: {s}");
-        feed(&mut ed, "y");
+        ed.handle_event(Event::Key("y".parse().unwrap()));
         assert!(ed.offers.is_empty(), "answered once seen whole");
-        // New text on the card: seen again first (a click on y waits as well)
+        let card_buffers = |ed: &Editor| {
+            ed.docs.iter().filter(|d| d.title.as_deref().is_some_and(|t| t.starts_with("card ·"))).count()
+        };
+        assert_eq!(card_buffers(&ed), 0, "its buffer went with the answer (#55)");
+        // The same card again (a script run again, unchanged): read already (#55)
         ed.push_offer(card(&question));
+        assert!(ed.offer_seen_whole(), "the same text, read to its end before");
+        // New text on the card: seen again first (a click on y waits as well)
         screen(&mut ed);
         settled(&mut ed);
         ed.push_offer(card(&format!("{question}\nline 81, new")));
@@ -10058,6 +10483,49 @@ q = \"delete_selection\"\n",
         assert_eq!(text(&ed), "first");
         feed(&mut ed, " b<esc>");
         assert!(ed.picker.is_none(), "closes with esc");
+    }
+
+    /// #47: `C-x` in the buffer list closes the buffer on its row — one with unsaved changes only when asked
+    /// again — and the list says its keys.
+    #[test]
+    fn the_buffer_list_closes_buffers() {
+        let dir = std::env::temp_dir().join(format!("tarae-buflist-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        for f in ["a.txt", "b.txt"] {
+            std::fs::write(dir.join(f), "text\n").unwrap();
+        }
+        let mut ed = editor("");
+        ed.lane.root = dir.clone();
+        feed(&mut ed, ":o a.txt<ret>:o b.txt<ret>ihey<esc>");
+        let names = |ed: &Editor| -> Vec<String> {
+            ed.picker.as_ref().unwrap().items().iter().map(|i| i.label.clone()).collect()
+        };
+        let open = |ed: &Editor, f: &str| ed.docs.iter().any(|d| d.path.as_deref() == Some(&dir.join(f)));
+        let screen = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 140, 30).unwrap();
+            let mut parser = vt100::Parser::new(30, 140, 0);
+            parser.process(&bytes);
+            parser.screen().contents()
+        };
+        feed(&mut ed, " b");
+        assert!(screen(&mut ed).contains("C-x close the buffer"), "{}", screen(&mut ed));
+        // a.txt, saved: gone at once, the list still up
+        feed(&mut ed, "a.txt<C-x>");
+        assert!(!open(&ed, "a.txt") && ed.picker.is_some());
+        assert!(!names(&ed).iter().any(|n| n.contains("a.txt")), "{:?}", names(&ed));
+        // b.txt, unsaved: kept and said, then closed on the second
+        feed(&mut ed, "<backspace><backspace><backspace><backspace><backspace>b.txt<C-x>");
+        assert!(open(&ed, "b.txt"), "unsaved: kept");
+        let said = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        assert!(said.contains("unsaved") && said.contains("C-x again"), "{said}");
+        assert!(screen(&mut ed).contains("C-x close without saving"));
+        feed(&mut ed, "<C-x>");
+        assert!(!open(&ed, "b.txt"), "asked twice: closed");
+        assert_eq!(std::fs::read_to_string(dir.join("b.txt")).unwrap(), "text\n", "not saved");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

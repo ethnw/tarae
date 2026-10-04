@@ -670,6 +670,11 @@ fn go(ed: &mut Editor, path: &Path, line: usize) {
         return ed.set_error(format!("{e:#}"));
     }
     let here = ed.doc().id;
+    // (one in the build output goes when the turn ends, unless you take it up — #46)
+    let aside = ed.doc().path.as_deref().is_some_and(|p| crate::edits::aside_path(&ed.lane.root, p));
+    if !already && aside {
+        ed.doc_mut().aside = true;
+    }
     // A big file loads in the background: the spot is applied when its text arrives (`watch` then settles)
     let loading = ed.doc().loading;
     if loading {

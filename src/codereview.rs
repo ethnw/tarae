@@ -284,15 +284,32 @@ pub fn start_in(ed: &mut Editor, cwd: PathBuf, branch: Option<String>) {
 
 /// `space v t` · `:review-turn`: what Claude changed in its latest turn (not taken back), as a review.
 pub fn review_turn(ed: &mut Editor) {
-    match ed.lane.checkpoints.list.iter().rposition(|c| !c.undone) {
-        Some(at) => start_turn(ed, at),
-        None => ed.set_status("no turn of Claude's changed files — nothing to review"),
+    let list = &ed.lane.checkpoints.list;
+    let Some(at) = list.iter().rposition(|c| !c.undone) else {
+        return ed.set_status("no turn of Claude's changed files — nothing to review");
+    };
+    // The turns before it that went in unseen, since the last one looked at (#49)
+    let unseen = list[..at].iter().rev().filter(|c| !c.undone).take_while(|c| !c.seen).count();
+    start_turn_saying(ed, at, unseen);
+}
+
+/// What the review opening for a turn says once it's open: its earlier turns not looked at.
+fn earlier_said(n: usize) -> Option<String> {
+    match n {
+        0 => None,
+        1 => Some("1 earlier turn unseen — space v v for all".into()),
+        n => Some(format!("{n} earlier turns unseen — space v v for all")),
     }
 }
 
 /// Checkpoint `at` as a review (the end of a turn under review at the end, `space v t`): its files as they
 /// are now, each against its text before the turn — counted on a worker.
 pub fn start_turn(ed: &mut Editor, at: usize) {
+    start_turn_saying(ed, at, 0);
+}
+
+/// `start_turn`, saying once it's open that `earlier` turns before it went in unseen.
+fn start_turn_saying(ed: &mut Editor, at: usize, earlier: usize) {
     let Some(cp) = ed.lane.checkpoints.list.get(at) else { return };
     let base = Base::Turn { at, question: cp.question.clone() };
     let files: Vec<(PathBuf, Option<ropey::Rope>)> =
@@ -322,7 +339,12 @@ pub fn start_turn(ed: &mut Editor, at: usize) {
                 }
             })
             .collect();
-        move |ed: &mut Editor| open(ed, root, base, files)
+        move |ed: &mut Editor| {
+            open(ed, root, base, files);
+            if let Some(said) = earlier_said(earlier) {
+                ed.set_warning(said);
+            }
+        }
     });
 }
 
@@ -332,7 +354,7 @@ fn open(ed: &mut Editor, root: PathBuf, base: Base, mut files: Vec<File>) {
         return ed.set_status(format!("review: no changes {}", base.label()));
     }
     files.sort_by(|a, b| a.rel.cmp(&b.rel));
-    close(ed);
+    end(ed);
     let n = files.len();
     // Start on the file being looked at, if it's among the changes (else the first)
     let here = ed.doc().path.clone();
@@ -463,8 +485,35 @@ fn turn_diff(files: &[(String, PathBuf, Option<ropey::Rope>)]) -> String {
     out
 }
 
-/// `space v q`: the review ends — documents go back to the index as their diff base (drafts stay).
+/// `space v q`: the review ends — documents go back to the index as their diff base (drafts stay). A
+/// turn's: its changes count as seen (`space v t` doesn't count it among the earlier ones unseen) — and so
+/// do those of every turn whose files a git review (`space v v`, the one that warning points to) showed.
 pub fn close(ed: &mut Editor) {
+    if let Some(r) = ed.lane.code_review.as_ref() {
+        let shown = |c: &crate::checkpoint::Checkpoint| {
+            !c.files.is_empty() && c.files.iter().all(|t| r.files.iter().any(|f| f.path == t.path))
+        };
+        let seen: Vec<usize> = match &r.base {
+            Base::Turn { at, .. } => vec![*at],
+            _ => {
+                (0..ed.lane.checkpoints.list.len()).filter(|&i| shown(&ed.lane.checkpoints.list[i])).collect()
+            }
+        };
+        let mut changed = false;
+        for i in seen {
+            if let Some(cp) = ed.lane.checkpoints.list.get_mut(i) {
+                changed |= !std::mem::replace(&mut cp.seen, true);
+            }
+        }
+        if changed {
+            crate::checkpoint::keep(ed);
+        }
+    }
+    end(ed);
+}
+
+/// The review ends (closed, or another one taking its place).
+fn end(ed: &mut Editor) {
     let Some(r) = ed.lane.code_review.take() else { return };
     for id in r.docs {
         if let Some(d) = ed.docs.iter_mut().find(|d| d.id == id) {
@@ -603,6 +652,27 @@ pub fn next_file(ed: &mut Editor, forward: bool) -> bool {
     }
     show(ed, j, !forward);
     true
+}
+
+/// `]F` / `[F`: the review's next (previous) file, at its first change.
+pub fn step_file(ed: &mut Editor, forward: bool) {
+    let Some(r) = &ed.lane.code_review else {
+        return ed.set_status("no review here — space v v starts one");
+    };
+    let n = r.files.len();
+    // (from the file being read; from none of them: the first · the last)
+    let j = match r.current(ed) {
+        Some(i) if forward => (i + 1) % n,
+        Some(i) => (i + n - 1) % n,
+        None if forward => 0,
+        None => n - 1,
+    };
+    let rel = r.files[j].rel.clone();
+    if n == 1 && r.current(ed).is_some() {
+        return ed.set_status("the review has this one file");
+    }
+    show(ed, j, false);
+    ed.note(format!("{rel} — file {} of {n}", j + 1));
 }
 
 /// `space v m`: marks the current file viewed (again: unmarks).

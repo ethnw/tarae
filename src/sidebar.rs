@@ -898,9 +898,8 @@ fn git_key(ed: &mut Editor, key: Key, at: Option<Line>) -> bool {
     };
     let from_code = ed.lane.sidebar.as_mut().is_some_and(|s| std::mem::take(&mut s.from_code));
     let Code::Char(c) = key.code else { return false };
-    // Right after `space g` in the code: a hunk's and a conflict's keys act there — then back to the code.
-    // Any other key makes it the tab, which keeps the keys (#18: after `r`, `b`, `f`… the code had them
-    // again, and the next keys went there)
+    // Right after `space g` in the code: a hunk's and a conflict's keys act there. The tab keeps the keys
+    // either way (#18, #50: given back to the code, the next `j`/`k`/`s` went there)
     let (on_hunk, on_conflict) = if from_code { ed.git_code_here() } else { (false, false) };
     if (on_hunk && matches!(c, 's' | 'd')) || (on_conflict && matches!(c, 'o' | 't' | 'a')) {
         match c {
@@ -909,9 +908,6 @@ fn git_key(ed: &mut Editor, key: Key, at: Option<Line>) -> bool {
             'o' => ed.conflict_take(Pick::Ours),
             't' => ed.conflict_take(Pick::Theirs),
             _ => ed.conflict_take(Pick::Both),
-        }
-        if let Some(s) = ed.lane.sidebar.as_mut() {
-            s.focus = false;
         }
         return true;
     }

@@ -91,6 +91,17 @@ pub enum What {
     /// Ending a session that has something to lose (`sessions.rs`): `y` removes its checkout and keeps its
     /// branch, `D` deletes the branch too, `n` keeps it all.
     SessionEnd(Box<crate::sessions::Ending>),
+    /// Closing a buffer whose change is under review (#54): `y` declines the change and closes it, `n` keeps
+    /// both. Not `force`d, unsaved edits of yours keep it open still.
+    CloseReviewed { doc: crate::document::DocId, force: bool },
+}
+
+/// A card's text, as `offer_read` knows it: its title and question.
+fn text_hash(o: &Offer) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (&o.title, &o.question).hash(&mut h);
+    h.finish()
 }
 
 /// Work that stopped for lack of a grammar — resumed once downloaded
@@ -375,6 +386,10 @@ impl crate::editor::Editor {
             What::ForcePush(f) => self.git_force_push(id, *f),
             What::SessionNew(m) => self.session_make(id, *m),
             What::SessionEnd(e) => self.session_remove(*e, false, Some(id)),
+            What::CloseReviewed { doc, force } => {
+                self.offer_finished(id, Ok(()));
+                self.close_reviewed(doc, force);
+            }
         }
     }
 
@@ -404,17 +419,51 @@ impl crate::editor::Editor {
         }
     }
 
-    /// Whether the front card has been in sight whole — drawn uncut, or opened with `v` — as it is now.
+    /// Whether the front card has been in sight whole — drawn uncut, or opened with `v` — as it is now; or a
+    /// card with the very same text was, this session (#55: the same script run again was to be read again).
     pub fn offer_seen_whole(&self) -> bool {
-        self.offers.first().is_some_and(|o| self.offer_whole.get() == Some((o.id, o.rev)))
+        self.offers.first().is_some_and(|o| {
+            self.offer_whole.get() == Some((o.id, o.rev)) || self.offer_read.borrow().contains(&text_hash(o))
+        })
+    }
+
+    /// Card `(id, rev)` has been in sight whole — and so has its text, should a card bring it again.
+    pub fn offer_read_whole(&self, card: (u64, u64)) {
+        self.offer_whole.set(Some(card));
+        if let Some(o) = self.offers.iter().find(|o| (o.id, o.rev) == card) {
+            self.offer_read.borrow_mut().insert(text_hash(o));
+        }
+    }
+
+    /// The key that goes to a buffer's end, as the keymap has it (`ge`) — #55: the card said `G`.
+    pub(crate) fn end_key(&self) -> String {
+        let key = self.keymaps.bindings().remove("goto_last_line").unwrap_or_else(|| "g e".into());
+        // (`g e` reads as typed: `ge` — a key with a name keeps its space: `space e`)
+        match key.split(' ').all(|k| k.chars().count() == 1) {
+            true => key.replace(' ', ""),
+            false => key,
+        }
     }
 
     /// `y` on a card cut to fit: not an answer yet.
     pub fn offer_see_all_first(&mut self) {
-        self.set_status(match self.offer_viewing() {
-            true => "read it to its end first — G in its buffer",
-            false => "see all of it first — v shows the whole card",
-        });
+        let msg = match self.offer_viewing() {
+            true => format!("read it to its end first — {} in its buffer", self.end_key()),
+            false => "see all of it first — v shows the whole card".into(),
+        };
+        self.set_status(msg);
+    }
+
+    /// Every event: the whole text of a card that's been answered (or has gone) closes with it (#55).
+    pub(crate) fn offer_view_sync(&mut self) {
+        let Some((id, _, doc)) = self.offer_view.get() else { return };
+        if self.offers.iter().any(|o| o.id == id) {
+            return;
+        }
+        self.offer_view.set(None);
+        if self.docs.iter().any(|d| d.id == doc && d.throwaway) {
+            self.close_doc(doc);
+        }
     }
 
     /// Whether the front card's whole text is open (`v`), not yet read to its end.
@@ -449,8 +498,22 @@ impl crate::editor::Editor {
         let doc = self.open_virtual(&name, &text);
         // (seen whole once its last line has been on screen — `term::render_frame` looks)
         self.offer_view.set(Some((id, rev, doc)));
+        // The code has the keys, to read it (#55: the review's rail kept them, and keys did nothing)
+        if let Some(c) = self.lane.chat.as_mut() {
+            c.focused = false;
+        }
+        if let Some(s) = self.lane.sidebar.as_mut() {
+            s.focus = false;
+        }
+        if let Some(r) = self.lane.code_review.as_mut() {
+            r.focus = false;
+        }
+        if let Some(t) = self.lane.terminal.as_mut() {
+            t.focus = false;
+        }
+        self.bottom_focus = false;
         // (the card's bar under it says so — U8)
-        self.note("the card's whole text — G to its end, then y answers");
+        self.note(format!("the card's whole text — {} to its end, then y answers", self.end_key()));
     }
 
     /// `a`: yes for the rest of this conversation — the no-sandbox card (Claude's commands run unprotected),
@@ -530,6 +593,9 @@ impl crate::editor::Editor {
             What::ForcePush(f) => self.set_status(format!("Not pushed — {} as it was", f.upstream())),
             What::SessionNew(m) => self.set_status(format!("No session {} — nothing was made", m.branch)),
             What::SessionEnd(e) => self.set_status(format!("Kept {} as it is", e.name)),
+            What::CloseReviewed { .. } => {
+                self.set_status("kept open — Claude's change still waits for y or n")
+            }
         }
     }
 

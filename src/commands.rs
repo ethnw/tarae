@@ -271,8 +271,12 @@ commands! {
         completion => "Invoke completion popup (LSP)",
         goto_next_diag => "Next diagnostic",
         goto_prev_diag => "Previous diagnostic",
-        goto_next_change => "Next git change",
-        goto_prev_change => "Previous git change",
+        goto_next_change => "Next git hunk",
+        goto_prev_change => "Previous git hunk",
+        goto_next_change_part => "Next change (each small one)",
+        goto_prev_change_part => "Previous change (each small one)",
+        goto_next_review_file => "Next file of the review",
+        goto_prev_review_file => "Previous file of the review",
         diagnostics_picker => "Diagnostics",
         workspace_diagnostics_picker => "Diagnostics in every file",
         select_references_to_symbol_under_cursor => "Select this symbol's uses",
@@ -1711,11 +1715,16 @@ fn hover(cx: &mut Context) {
 }
 /// To the next/previous git hunk — selects its lines (for a deletion, the line start at that spot). In a code
 /// review, past the last one it goes on into the next file.
-fn goto_change(cx: &mut Context, forward: bool) {
+/// `]g` `[g`: to the next (previous) hunk — changes a few lines apart are one, as `git diff` shows them
+/// (#49: a rewritten function was ten stops); `parts`: each change on its own (`]G` `[G`). Past the last
+/// one, the review's next file.
+fn goto_change(cx: &mut Context, forward: bool, parts: bool) {
     let doc = cx.editor.doc();
     let text = &doc.text;
-    let line = crate::movement::line_of(text, doc.selection().primary().cursor(text));
-    let hunks = &doc.git_hunks;
+    // (from the selection's end going on, its start going back — a hunk selected isn't landed on again)
+    let r = doc.selection().primary();
+    let line = crate::movement::line_of(text, if forward { r.cursor(text) } else { r.from() });
+    let hunks = if parts { doc.git_hunks.clone() } else { crate::git::regions(&doc.git_hunks) };
     let target = if forward {
         hunks.iter().find(|h| h.lines.start > line)
     } else {
@@ -1730,11 +1739,27 @@ fn goto_change(cx: &mut Context, forward: bool) {
 }
 
 fn goto_next_change(cx: &mut Context) {
-    goto_change(cx, true);
+    goto_change(cx, true, false);
 }
 
 fn goto_prev_change(cx: &mut Context) {
-    goto_change(cx, false);
+    goto_change(cx, false, false);
+}
+
+fn goto_next_change_part(cx: &mut Context) {
+    goto_change(cx, true, true);
+}
+
+fn goto_prev_change_part(cx: &mut Context) {
+    goto_change(cx, false, true);
+}
+
+fn goto_next_review_file(cx: &mut Context) {
+    crate::codereview::step_file(cx.editor, true);
+}
+
+fn goto_prev_review_file(cx: &mut Context) {
+    crate::codereview::step_file(cx.editor, false);
 }
 
 fn goto_next_diag(cx: &mut Context) {
@@ -2170,7 +2195,7 @@ fn buffer_picker(cx: &mut Context) {
             glyph: None,
         })
         .collect();
-    cx.editor.open_picker(crate::picker::Picker::new("buffers", items, true), None);
+    cx.editor.open_picker(crate::picker::Picker::new(crate::picker::BUFFERS, items, true), None);
 }
 
 fn global_search(cx: &mut Context) {

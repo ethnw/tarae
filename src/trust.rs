@@ -18,13 +18,15 @@ use crate::keymap::Keymaps;
 
 /// Settings a project file sets only once trusted: they run commands, or change what Claude's commands do
 /// unasked (`llm.sandbox*` comes with the sandbox), or what Claude sees.
-pub const RISKY: [&str; 15] = [
+pub const RISKY: [&str; 16] = [
     "editor.restart-build",
     "editor.restart-binary",
     "llm.command",
     "llm.args",
     "llm.run-allow",
     "llm.review-ask",
+    // (Claude's edits go in unseen, and the checks run them)
+    "llm.review-at-end",
     "llm.chat-settings",
     "llm.sandbox",
     "llm.sandbox-network",

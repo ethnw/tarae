@@ -126,7 +126,9 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `[ c` | `goto_prev_comment` | Previous comment |
 | `[ d` | `goto_prev_diag` | Previous diagnostic |
 | `[ f` | `goto_prev_function` | Previous function |
-| `[ g` | `goto_prev_change` | Previous git change |
+| `[ F` | `goto_prev_review_file` | Previous file of the review |
+| `[ g` | `goto_prev_change` | Previous git hunk |
+| `[ G` | `goto_prev_change_part` | Previous change (each small one) |
 | `[ m` | `goto_prev_conflict` | Previous merge conflict |
 | `[ n` | `goto_prev_note` | Previous note |
 | `[ p` | `goto_prev_paragraph` | Previous paragraph |
@@ -144,7 +146,9 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `] c` | `goto_next_comment` | Next comment |
 | `] d` | `goto_next_diag` | Next diagnostic |
 | `] f` | `goto_next_function` | Next function |
-| `] g` | `goto_next_change` | Next git change |
+| `] F` | `goto_next_review_file` | Next file of the review |
+| `] g` | `goto_next_change` | Next git hunk |
+| `] G` | `goto_next_change_part` | Next change (each small one) |
 | `] m` | `goto_next_conflict` | Next merge conflict |
 | `] n` | `goto_next_note` | Next note |
 | `] p` | `goto_next_paragraph` | Next paragraph |
