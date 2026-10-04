@@ -1,21 +1,21 @@
-# lsp_completion · 100x30 · theme meok · cursor 4:11
+# lsp_completion · 100x30 · theme meok · cursor 4:10
 ## text
-00   tarae  ›  src  ›  demo.rs ●  ›  ƒ main
-01   ─────────────────────────────────────────────────────────────────────────────────────────────────
-02    2 fn main() {
-03    1     let v = vec![3, 1, 2];
-04    3     v.
-05    1 }  ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄ ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-06         ▎ƒ push          fn(&mut self, value: i32)     fn(&mut self, value: i32)
-07          ƒ pop        fn(&mut self) -> Option<i32>
-08          ƒ len                  fn(&self) -> usize     Appends an element to the back of a
-09          ƒ iter         fn(&self) -> Iter<'_, i32>     collection.
-10          ƒ capacity             fn(&self) -> usize
-11         ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀   Panics
+00  tarae  ›  src  ›  demo.rs ●  ›  ƒ main
+01  ──────────────────────────────────────────────────────────────────────────────────────────────────
+02   2 fn main() {
+03   1     let v = vec![3, 1, 2];
+04   3     v.
+05   1 }  ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄ ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+06        ▎ƒ push          fn(&mut self, value: i32)     fn(&mut self, value: i32)
+07         ƒ pop        fn(&mut self) -> Option<i32>
+08         ƒ len                  fn(&self) -> usize     Appends an element to the back of a
+09         ƒ iter         fn(&self) -> Iter<'_, i32>     collection.
+10         ƒ capacity             fn(&self) -> usize
+11        ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀   Panics
 12
-13                                                        Panics if the new capacity exceeds
-14                                                        isize::MAX bytes.
-15                                                      ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+13                                                       Panics if the new capacity exceeds
+14                                                       isize::MAX bytes.
+15                                                     ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
 16
 17
 18
@@ -35,17 +35,17 @@
 01
 02
 03
-04      ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+04     cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 05
-06         PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPp ppppppppppppppppppppppppppppppppppppppppppppppp
-07         pppppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppp
-08         pppppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppp
-09         pppppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppp
-10         pppppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppp
-11                                                      ppppppppppppppppppppppppppppppppppppppppppppppp
-12                                                      ppppppppppppppppppppppppppppppppppppppppppppppp
-13                                                      ppppppppppppppppppppppppppppppppppppppppppppppp
-14                                                      ppppppppppppppppppppppppppppppppppppppppppppppp
+06        PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPp pppppppppppppppppppppppppppppppppppppppppppppppp
+07        pppppppppppppppppppppppppppppppppppppppppppp pppppppppppppppppppppppppppppppppppppppppppppppp
+08        pppppppppppppppppppppppppppppppppppppppppppp pppppppppppppppppppppppppppppppppppppppppppppppp
+09        pppppppppppppppppppppppppppppppppppppppppppp pppppppppppppppppppppppppppppppppppppppppppppppp
+10        pppppppppppppppppppppppppppppppppppppppppppp pppppppppppppppppppppppppppppppppppppppppppppppp
+11                                                     pppppppppppppppppppppppppppppppppppppppppppppppp
+12                                                     pppppppppppppppppppppppppppppppppppppppppppppppp
+13                                                     pppppppppppppppppppppppppppppppppppppppppppppppp
+14                                                     pppppppppppppppppppppppppppppppppppppppppppppppp
 15
 16
 17
@@ -62,18 +62,18 @@
 28   iiiiiiii
 29
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00   ddddd  f  ddd  f  TTTTTTT a  f    dddd
-01   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-02    f
-03    f
-04    G
-05    f
-06         a  TTTT          ddddddd ddddd dddddd dddd
-07                       ddddddd ddddd dd ddddddddddd
-08                                 ddddddddd dd ddddd
-09                         ddddddddd dd dddddddd dddd
-10                                 ddddddddd dd ddddd
-11                                                        AAAAAA
+00  ddddd  f  ddd  f  TTTTTTT a  f    dddd
+01  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+02   f
+03   f
+04   G
+05   f
+06        a  TTTT          ddddddd ddddd dddddd dddd
+07                      ddddddd ddddd dd ddddddddddd
+08                                ddddddddd dd ddddd
+09                        ddddddddd dd dddddddd dddd
+10                                ddddddddd dd ddddd
+11                                                       AAAAAA
 12
 13
 14

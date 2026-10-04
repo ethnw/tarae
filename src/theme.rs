@@ -103,6 +103,12 @@ impl Theme {
         self.try_get(scope).unwrap_or_default()
     }
 
+    /// Tests: `scope` drawn as `st` from now on (a theme unlike the built-ins, without a file).
+    #[cfg(test)]
+    pub fn set(&mut self, scope: &str, st: Style) {
+        self.styles.insert(scope.to_string(), st);
+    }
+
     /// Global capture number → style (`syntax::highlights` spans carry the number). Every frame and code
     /// block wants it, so it's built once — and again only when a language brings new capture names.
     pub fn capture_styles(&self) -> std::sync::Arc<Vec<Option<Style>>> {

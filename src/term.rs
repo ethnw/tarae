@@ -525,9 +525,9 @@ impl Layout {
                 (h, (total - h).max(1))
             }
         };
-        // The numbers start `PAD` in — the sign column (breakpoints, diagnostics) is that padding's last cell
+        // The sign column (breakpoints, diagnostics) right after the gutter, the numbers after it
         let doc = editor.doc();
-        let gutter = crate::chrome::PAD + num_w(doc);
+        let gutter = crate::chrome::SIGNS + num_w(doc);
         let scrollbar = editor.config.scrollbar && doc.text.len_lines() > total;
         // The review's file rail when there's room for it and the code (else the header says where you are)
         // …or the side panel (files / outline): the chat's and its widths are yours or automatic, the panel
@@ -582,7 +582,7 @@ impl Layout {
         editor: &Editor,
     ) -> Layout {
         let rows = r.h.saturating_sub(title as usize).max(1);
-        let gutter = crate::chrome::PAD + num_w(doc);
+        let gutter = crate::chrome::SIGNS + num_w(doc);
         let scrollbar = editor.config.scrollbar && doc.text.len_lines() > rows;
         Layout {
             x0: r.x,
@@ -2221,8 +2221,8 @@ fn draw_pane_title(
     queue!(out, Spaces(r.w.saturating_sub(used)))
 }
 
-/// Line-number column width (the padding before it, where the signs go, aside) — two digits at least, so a
-/// file growing past nine lines doesn't move its text.
+/// Line-number column width (the sign column before it aside) — two digits at least, so a file growing
+/// past nine lines doesn't move its text.
 fn num_w(doc: &crate::document::Document) -> usize {
     doc.text.len_lines().to_string().len().max(2) + 1
 }
@@ -3222,7 +3222,7 @@ fn draw_text(
             apply(out, ui.base)?;
             queue!(out, Spaces(lay.gutter - 1))?;
         } else if signs > 0 {
-            // Sign column — the padding's last cell: stopped line ▶ > breakpoint ● > diagnostic bar
+            // Sign column — the cell before the numbers: stopped line ▶ > breakpoint ● > diagnostic bar
             apply(out, ui.base)?;
             queue!(out, Spaces(signs - 1))?;
             let sev = line_severity.get(line.wrapping_sub(top)).copied().unwrap_or(0);
@@ -4083,7 +4083,7 @@ fn draw_review(
     // Head band is neutral card color — an accent tint (hanji's vermilion) would look like deleted-line red
     let band = card_style(ui, editor, "ui.popup").bg;
     let width = lay.edit_w;
-    let num_w = lay.gutter.saturating_sub(2).max(3);
+    let num_w = num_w(doc).max(3);
     let code_w = width.saturating_sub(num_w + 3);
     // Why, under the title: the end of what Claude thought before asking (its conclusion), two rows at most
     let reason: Vec<Vec<crate::markdown::Span>> = if rev.reason.is_empty() {
@@ -5274,7 +5274,7 @@ fn fit(s: &str, width: usize) -> String {
 /// definition` ……… open buffers (current one bold) — and its rule under it (the accent while the code has
 /// the keys). When narrow, drop less important parts first (project, folders, outer definitions).
 fn draw_header(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> io::Result<()> {
-    use crate::chrome::{PAD, PAD_R};
+    use crate::chrome::{PAD_R, SIGNS};
     let doc = editor.doc();
     let t = &editor.theme;
     let dim = Style { fg: ui.virt.fg, ..ui.base };
@@ -5286,7 +5286,8 @@ fn draw_header(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> 
         return Ok(());
     }
     let sep = |keep| Seg { text: "  ›  ".into(), style: faint, keep };
-    let mut left = vec![Seg { text: " ".repeat(PAD), style: ui.base, keep: 255 }];
+    // (where the code's numbers start — `chrome::SIGNS`)
+    let mut left = vec![Seg { text: " ".repeat(SIGNS), style: ui.base, keep: 255 }];
     let project = editor.session.root.file_name().map(|p| p.to_string_lossy().into_owned());
     // Tests: a fixed project name (the checkout folder's name varies — worktrees, CI)
     #[cfg(test)]
@@ -5384,7 +5385,7 @@ fn draw_header(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> 
         queue!(out, Print(&s.text))?;
     }
     if lay.text_top as usize >= crate::chrome::HEAD {
-        header_rule(out, ui, ui.base, (x0, 1, width), editor.keys_at().code())?;
+        header_rule_from(out, ui, ui.base, (x0, 1, width), editor.keys_at().code(), SIGNS)?;
     }
     Ok(())
 }
@@ -5396,18 +5397,29 @@ fn header_rule(
     out: &mut impl Write,
     ui: &Ui,
     base: Style,
-    (x, y, w): (usize, usize, usize),
+    rect: (usize, usize, usize),
     keys: bool,
 ) -> io::Result<()> {
-    use crate::chrome::{PAD, PAD_R};
-    let line = w.saturating_sub(PAD + PAD_R);
+    header_rule_from(out, ui, base, rect, keys, crate::chrome::PAD)
+}
+
+/// `header_rule` starting `pad` cells in (the code's: where its numbers start).
+fn header_rule_from(
+    out: &mut impl Write,
+    ui: &Ui,
+    base: Style,
+    (x, y, w): (usize, usize, usize),
+    keys: bool,
+    pad: usize,
+) -> io::Result<()> {
+    let line = w.saturating_sub(pad + crate::chrome::PAD_R);
     queue!(out, MoveTo(x as u16, y as u16))?;
     apply(out, base)?;
-    queue!(out, Spaces(PAD.min(w)))?;
+    queue!(out, Spaces(pad.min(w)))?;
     apply(out, Style { fg: if keys { ui.accent.fg } else { ui.window }, ..base })?;
     queue!(out, Print("─".repeat(line)))?;
     apply(out, base)?;
-    queue!(out, Spaces(w.saturating_sub(PAD + line)))
+    queue!(out, Spaces(w.saturating_sub(pad + line)))
 }
 
 /// A statusline segment. Lowest `keep` is dropped first (when width runs short).
@@ -7348,7 +7360,7 @@ fn draw_sidebar(
         apply(out, card)?;
         if y == 1 {
             header_rule(out, ui, card, (0, 1, lay.rail_w - GAP), sb.focus)?;
-            gutter_cell(out, ui, card, dragged)?;
+            gutter_cell(out, ui, lay, card, dragged)?;
             continue;
         }
         let list = y.checked_sub(first).filter(|&i| i < list_rows);
@@ -7401,7 +7413,7 @@ fn draw_sidebar(
         };
         apply(out, card)?;
         queue!(out, Spaces(w.saturating_sub(used) + PAD_R))?;
-        gutter_cell(out, ui, card, dragged)?;
+        gutter_cell(out, ui, lay, card, dragged)?;
     }
     // The whole name on its row, running on over the code — ending in a half cell of the row's color
     if let Some((y, row, whole)) = overflow
@@ -7415,23 +7427,72 @@ fn draw_sidebar(
     Ok(())
 }
 
-/// The gutter between a panel and what's beside it (`chrome::GAP`): a cell of ground — a faint `│` where the
-/// theme's surfaces are the ground's colour; the accent `│` while the border is being dragged (U1).
-fn gutter_cell(out: &mut impl Write, ui: &Ui, card: Style, dragged: bool) -> io::Result<()> {
-    let (glyph, style) = gutter(ui, card, dragged);
-    apply(out, style)?;
-    queue!(out, Print(glyph))
+/// The gutter right of a left column panel (the side panel, the review's rail): `gutter`'s cell, with
+/// something beside it unless the panel fills the screen.
+fn gutter_cell(out: &mut impl Write, ui: &Ui, lay: &Layout, card: Style, dragged: bool) -> io::Result<()> {
+    put_gutter(out, gutter(ui, card, dragged, lay.rail_w < lay.width))
 }
 
-/// What `gutter_cell` draws: its glyph and style.
-fn gutter(ui: &Ui, card: Style, dragged: bool) -> (&'static str, Style) {
-    let surfaces = card.bg.is_some() && card.bg != ui.base.bg;
-    let (glyph, fg) = match () {
-        _ if dragged => ("│", ui.accent.fg),
-        _ if surfaces => (" ", None),
-        _ => ("│", ui.window),
-    };
-    (glyph, Style { fg, ..ui.base })
+/// Whether a theme's panels have a surface of their own (`card`'s background isn't the ground's).
+fn surfaces(ui: &Ui, card: Style) -> bool {
+    card.bg.is_some() && card.bg != ui.base.bg
+}
+
+/// A gutter's cell (`chrome::GAP`, `chrome.rs`) is split down the middle: its left half is what's left of it,
+/// its right half ground — what's right of it starts on the next cell, so every panel's surface starts on a
+/// cell and its padding counts from its visible edge. Right of a panel (this): `▌`, the panel's half in its
+/// surface colour — in the accent while its border is dragged (U1). With nothing beyond it (`beyond` false
+/// — the panel fills the screen) the panel takes the cell whole. A theme whose surfaces are the ground's
+/// colour: a faint `│` (the accent one dragged), nothing against the screen's edge. Left of the chat:
+/// `chat_gutter`.
+fn gutter(ui: &Ui, card: Style, dragged: bool, beyond: bool) -> (&'static str, Style) {
+    let lit = |on: bool| if on { ui.accent.fg } else { ui.window };
+    match (surfaces(ui, card), beyond) {
+        (true, true) => ("▌", Style { fg: if dragged { ui.accent.fg } else { card.bg }, ..ui.base }),
+        (true, false) => (" ", card),
+        (false, true) => ("│", Style { fg: lit(dragged), ..ui.base }),
+        (false, false) => (" ", ui.base),
+    }
+}
+
+/// The chat's gutter on row `y` (`gutter`'s rule from the other side): its left half is what's left of it —
+/// the bottom slot's surface (a panel's, the chat's own colour) on the slot's rows, else the ground beside
+/// the code — its right half ground, the chat's surface from the next cell; that half in the accent while
+/// the chat's border is dragged. The chat filling the screen takes the cell whole.
+fn chat_gutter(ui: &Ui, editor: &Editor, lay: &Layout, card: Style, y: usize) -> (&'static str, Style) {
+    let dragged = editor.dragging == Some(crate::sizes::Border::Chat);
+    if lay.edit_w == 0 {
+        return gutter(ui, card, dragged, false);
+    }
+    if !surfaces(ui, card) {
+        return gutter(ui, card, dragged, true);
+    }
+    // (a picker over the editing area covers the slot: the ground there)
+    let slot_y = lay.slot_y();
+    let slot = lay.debug_h > 0
+        && lay.slot_w > 0
+        && (slot_y..slot_y + lay.debug_h).contains(&y)
+        && !editor.picker.as_ref().is_some_and(|p| !p.compact);
+    let right = if dragged { ui.accent.fg } else { ui.base.bg };
+    match (slot, dragged) {
+        (true, _) => ("▌", Style { fg: card.bg, bg: right, ..ui.base }),
+        (false, true) => ("▐", Style { fg: ui.accent.fg, ..ui.base }),
+        (false, false) => (" ", ui.base),
+    }
+}
+
+/// Draws a gutter's cell (`gutter`) — its half block unfaded: that half is the panel's surface, not text
+/// (`Fade` would move it toward the ground, off the panel's colour).
+fn put_gutter(out: &mut impl Write, (glyph, style): (&str, Style)) -> io::Result<()> {
+    if matches!(glyph, "▌" | "▐") {
+        let fading = FADING.replace(None);
+        let applied = apply(out, style);
+        FADING.set(fading);
+        applied?;
+    } else {
+        apply(out, style)?;
+    }
+    queue!(out, Print(glyph))
 }
 
 /// The code review's files, left of the code, the whole height: what's being compared, then one row per
@@ -7727,7 +7788,7 @@ fn draw_review_rail(
     for (y, (row, bg, file)) in rows.iter().take(lay.body_h).enumerate() {
         if y == 1 {
             header_rule(out, ui, card, (0, 1, lay.rail_w - GAP), r.focus)?;
-            gutter_cell(out, ui, card, false)?;
+            gutter_cell(out, ui, lay, card, false)?;
             continue;
         }
         queue!(out, MoveTo(0, y as u16))?;
@@ -7744,7 +7805,7 @@ fn draw_review_rail(
         queue!(out, Spaces(w.saturating_sub(used)))?;
         apply(out, card)?;
         queue!(out, Spaces(PAD_R))?;
-        gutter_cell(out, ui, card, false)?;
+        gutter_cell(out, ui, lay, card, false)?;
         if let Some(i) = file {
             links.push((y, *i));
         }
@@ -8086,13 +8147,12 @@ fn draw_chat(
     let mut chat_calls = editor.screen.chat_calls.borrow_mut();
 
     // ── Draw row by row: [gutter][padding][text w][padding]
-    // (the gutter in the accent while it's being dragged — U1)
-    let dragged = editor.dragging == Some(crate::sizes::Border::Chat);
-    let edge = gutter(ui, card, dragged);
+    // (the gutter's left half the bottom slot's on its rows; in the accent while it's being dragged — U1)
+    let edge = |y: usize| chat_gutter(ui, editor, lay, card, y);
     let text_x = x0 + GAP + PAD;
     let mut y = top;
     // Title
-    chat_row_start(out, x0, y, edge, card)?;
+    chat_row_start(out, x0, y, edge(y), card)?;
     apply(out, if c.focused { strong } else { dim })?;
     queue!(out, Print("claude"))?;
     // Follow badge: accent while following, faint once the user took over
@@ -8166,7 +8226,7 @@ fn draw_chat(
     chat_row_end(out, card, lay.chat_w, used)?;
     y += 1;
     // Its rule: the accent while the chat has the keys
-    chat_row_start(out, x0, y, edge, card)?;
+    chat_row_start(out, x0, y, edge(y), card)?;
     apply(out, if c.focused { accent } else { Style { fg: ui.window, ..card } })?;
     queue!(out, Print("─".repeat(w)))?;
     chat_row_end(out, card, lay.chat_w, w)?;
@@ -8176,7 +8236,7 @@ fn draw_chat(
         let warn =
             t.try_get("warning").and_then(|s| s.fg).map_or(accent, |fg| Style { fg: Some(fg), ..card });
         let (spans, spots) = session_tabs(editor, w, [strong, dim, faint, accent, warn]);
-        chat_row_start(out, x0, y, edge, card)?;
+        chat_row_start(out, x0, y, edge(y), card)?;
         let used = chat_spans(out, &spans, card, w)?;
         chat_row_end(out, card, lay.chat_w, used)?;
         let mut taken = editor.screen.session_spots.borrow_mut();
@@ -8185,19 +8245,19 @@ fn draw_chat(
     }
     if !plan_rows.is_empty() {
         for row in &plan_rows {
-            chat_row_start(out, x0, y, edge, card)?;
+            chat_row_start(out, x0, y, edge(y), card)?;
             let used = chat_spans(out, row, card, w)?;
             chat_row_end(out, card, lay.chat_w, used)?;
             y += 1;
         }
-        chat_row_start(out, x0, y, edge, card)?;
+        chat_row_start(out, x0, y, edge(y), card)?;
         apply(out, faint)?;
         queue!(out, Print("─".repeat(w)))?;
         chat_row_end(out, card, lay.chat_w, w)?;
         y += 1;
     }
     for i in 0..area {
-        chat_row_start(out, x0, y, edge, card)?;
+        chat_row_start(out, x0, y, edge(y), card)?;
         let used = match shown.get(i) {
             Some(l) => match &row_links[from + i] {
                 Some(link) => {
@@ -8222,7 +8282,7 @@ fn draw_chat(
         y += 1;
     }
     // Input — the line over it says when the screen goes with the message (`C-s`)
-    chat_row_start(out, x0, y, edge, card)?;
+    chat_row_start(out, x0, y, edge(y), card)?;
     let mut used = 0;
     // A message waiting for this turn's end (#23): its start, faint, over the input
     if let Some(q) = &c.queued
@@ -8264,7 +8324,7 @@ fn draw_chat(
     y += 1;
     let input_top = y;
     for (i, r) in input_rows.iter().skip(first_input).take(input_h).enumerate() {
-        chat_row_start(out, x0, y, edge, card)?;
+        chat_row_start(out, x0, y, edge(y), card)?;
         let prompt = if i == 0 { "› " } else { "  " };
         apply(out, if c.focused { Style { bold: true, ..accent } } else { faint })?;
         queue!(out, Print(prompt))?;
@@ -8282,7 +8342,7 @@ fn draw_chat(
         y += 1;
     }
     // Hint
-    chat_row_start(out, x0, y, edge, card)?;
+    chat_row_start(out, x0, y, edge(y), card)?;
     let key = Style { bold: true, ..dim };
     let mut hints: Vec<(&str, &str)> = Vec::new();
     if !c.focused {
@@ -8345,7 +8405,7 @@ fn draw_chat(
     y += 1;
     // Remaining rows (when the panel is taller than the input)
     while y < top + rows {
-        chat_row_start(out, x0, y, edge, card)?;
+        chat_row_start(out, x0, y, edge(y), card)?;
         chat_row_end(out, card, lay.chat_w, 0)?;
         y += 1;
     }
@@ -8643,12 +8703,11 @@ fn chat_row_start(
     out: &mut impl Write,
     x0: usize,
     y: usize,
-    (glyph, edge): (&str, Style),
+    edge: (&str, Style),
     card: Style,
 ) -> io::Result<()> {
     queue!(out, MoveTo(x0 as u16, y as u16))?;
-    apply(out, edge)?;
-    queue!(out, Print(glyph))?;
+    put_gutter(out, edge)?;
     apply(out, card)?;
     queue!(out, Spaces(crate::chrome::PAD))
 }
@@ -9912,7 +9971,7 @@ mod tests {
         ed.config.soft_wrap = "never".into(); // sideways scrolling
         ed.docs[0].text = Rope::from_str(&"漢".repeat(30));
         ed.docs[0].set_selection(crate::selection::Selection::point(29 * 3));
-        let (w, h) = (22, 6); // gutter 5 (the padding, two digits, a space) → 17 text columns
+        let (w, h) = (21, 6); // gutter 4 (the sign column, two digits, a space) → 17 text columns
         let mut buf = Vec::new();
         render(&mut ed, &mut buf, w, h).unwrap();
         assert_eq!(ed.docs[0].left, 60 - 17, "the last 漢 (cols 58–59) fits whole");
@@ -9920,7 +9979,7 @@ mod tests {
         let rows = screen(&buf, w as usize, h as usize);
         let row = rows.iter().find(|r| r.contains('漢')).unwrap();
         // 漢 at col 42 straddles left = 43 → one blank, then 漢 from col 44 at x = 1
-        assert_eq!(row.trim_end(), format!("   1  {}", "漢".repeat(8)), "{rows:#?}");
+        assert_eq!(row.trim_end(), format!("  1  {}", "漢".repeat(8)), "{rows:#?}");
     }
 
     /// Prose wraps at word boundaries with list items hanging; `j`/`k` go by rows; a click on a
@@ -9930,14 +9989,14 @@ mod tests {
         let mut ed = Editor::new(Config::default());
         let src = "- one two three four five six\nnext\n";
         ed.docs[0].text = Rope::from_str(src);
-        let (w, h) = (21, 8); // gutter 5 → 16 text columns
+        let (w, h) = (20, 8); // gutter 4 → 16 text columns
         let mut buf = Vec::new();
         render(&mut ed, &mut buf, w, h).unwrap();
         let rows = screen(&buf, w as usize, h as usize);
         // Row 0 is the path bar (a screen this short has no rule under it); line numbers are relative
-        assert_eq!(rows[1].trim_end(), "   1 - one two three", "{rows:#?}");
-        assert_eq!(rows[2].trim_end(), "       four five six", "no number, hangs under the text");
-        assert_eq!(rows[3].trim_end(), "   1 next");
+        assert_eq!(rows[1].trim_end(), "  1 - one two three", "{rows:#?}");
+        assert_eq!(rows[2].trim_end(), "      four five six", "no number, hangs under the text");
+        assert_eq!(rows[3].trim_end(), "  1 next");
         let head = |ed: &Editor| ed.doc().selection().primary().cursor(&ed.doc().text);
         let key = |ed: &mut Editor, k: &str| {
             ed.handle_key(k.parse().unwrap());
@@ -9950,7 +10009,7 @@ mod tests {
         key(&mut ed, "k");
         assert_eq!(head(&ed), src.find("four").unwrap());
         let click =
-            crate::event::Mouse { kind: crate::event::MouseKind::Down, x: 5 + 2 + 5, y: 2, alt: false };
+            crate::event::Mouse { kind: crate::event::MouseKind::Down, x: 4 + 2 + 5, y: 2, alt: false };
         ed.handle_mouse(click);
         assert_eq!(head(&ed), src.find("five").unwrap());
         // One line taller than the screen: the rows around the cursor show
@@ -9979,15 +10038,15 @@ mod tests {
         render(&mut ed, &mut Vec::new(), w, h).unwrap();
         key(&mut ed, "g");
         // After the cursor first: beta = aa, then alpha (the cursor's own word) = ab, gamma = ac
-        assert_eq!(key(&mut ed, "w"), "   1 abpha aata acmma", "labels cover the first two chars");
-        assert_eq!(key(&mut ed, "a"), "   1 blpha aeta camma", "only the second letters are left");
+        assert_eq!(key(&mut ed, "w"), "  1 abpha aata acmma", "labels cover the first two chars");
+        assert_eq!(key(&mut ed, "a"), "  1 blpha aeta camma", "only the second letters are left");
         key(&mut ed, "c");
         let r = ed.doc().selection().primary();
         assert_eq!((r.from(), r.to()), (11, 16), "gamma selected");
         assert!(ed.jump_labels.is_none());
         key(&mut ed, "g");
         key(&mut ed, "w");
-        assert_eq!(key(&mut ed, "esc"), "   1 alpha beta gamma", "cancelled");
+        assert_eq!(key(&mut ed, "esc"), "  1 alpha beta gamma", "cancelled");
         assert_eq!(ed.doc().selection().primary(), r);
     }
 
@@ -10599,7 +10658,7 @@ mod tests {
         let row = s.lines().find(|l| l.contains("whole_end.rs")).expect("its row");
         assert!(row.contains("…") && !row.contains("a_name_so_long"), "cut from the left: {row}");
         let rail_part: String = row.chars().take(48).collect();
-        assert!(rail_part.ends_with("end.rs +12 −3  "), "the end whole, the padding, the gutter: {row}");
+        assert!(rail_part.ends_with("end.rs +12 −3 ▌"), "the end whole, the padding, the gutter: {row}");
         // A draft on a file doesn't move it
         let mut ed = long;
         crate::notes::add(&mut ed, &PathBuf::from("/x").join(name), 0..1, crate::notes::By::You, "draft");

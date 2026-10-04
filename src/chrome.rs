@@ -4,11 +4,18 @@
 //! - **Columns.** The side panel (or the review's rail) and the chat run the whole height, top to the status
 //!   line; between them the code, and under the code the bottom slot. Every panel is a surface
 //!   (`ui.popup`) on the ground (`ui.background`).
-//! - **Gutter.** One cell of ground, `GAP`, between a panel and what's beside it — the same width and colour
-//!   everywhere; a theme whose surfaces are the ground's colour gets a faint `│` there instead.
-//! - **Padding.** Text starts `PAD` cells in from a panel's edge and stops `PAD_R` before its other edge —
-//!   the code too: its numbers start `PAD` in (the sign column lives in that padding, so a server attaching
-//!   doesn't move the text).
+//! - **Gutter.** Half a cell of ground between regions side by side: the gutter's cell, `GAP`, is split down
+//!   the middle — its left half is what's left of it (the side panel's or the review rail's surface, the
+//!   bottom slot's beside the chat, the ground beside the code), its right half ground, and what's right of
+//!   it starts on the next cell. So every panel's surface starts on a cell and its text is `PAD` from where
+//!   the surface shows — the side panel, the slot and the chat alike. Against the screen's edge (a panel
+//!   filling the screen) the panel takes the cell whole — no ground against nothing. A theme whose surfaces
+//!   are the ground's colour gets a faint `│` there instead (the same middle of the cell; nothing at the
+//!   edge). A card edge over a gutter's cell is seated on its left half (`screen::Grid::put`).
+//! - **Padding.** Text starts `PAD` cells in from a panel's edge and stops `PAD_R` before its other edge.
+//!   The code has none of its own: its sign column is the first cell after the gutter (so a server attaching
+//!   doesn't move the text), its numbers right after — they inset its text already — and its path bar and
+//!   rule start where the numbers do (`SIGNS`).
 //! - **Header.** Every panel, and the code under the path bar, opens with a title row and a thin rule
 //!   (`HEAD` rows); their tops line up on the screen's first row. (A screen under `RULE_MIN_ROWS` rows:
 //!   the code's title goes without its rule.)
@@ -28,7 +35,9 @@ use crate::sizes::Slot;
 /// Cells between a panel's edge and its text: before it, after it.
 pub const PAD: usize = 2;
 pub const PAD_R: usize = 1;
-/// Ground between two regions side by side.
+/// The code's cells before its numbers: the sign column, right after the gutter.
+pub const SIGNS: usize = 1;
+/// The gutter between two regions side by side: a cell, half of it ground.
 pub const GAP: usize = 1;
 /// A header: the title row and its rule.
 pub const HEAD: usize = 2;

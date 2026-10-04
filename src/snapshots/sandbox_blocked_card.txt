@@ -1,25 +1,25 @@
-# sandbox_blocked_card · 100x30 · theme meok · cursor 2:5
+# sandbox_blocked_card · 100x30 · theme meok · cursor 2:4
 ## text
-00   tarae  ›  src  ›  demo.rs
-01   ─────────────────────────────────────────────────────────────────────────────────────────────────
-02    1 use std::collections::HashMap;
-03    1
-04    2 ▎ Counts how often each word appears.
-05      ▎
-06      ▎ Words are split on whitespace; case is kept.
-07    5 pub fn word_counts(text: &str) -> HashMap<&str, usize> {
-08    6     let mut counts = HashMap::new();
-09    7     for word in text.split_whitespace()▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-10    8     │   *counts.entry(word).or_insert(0 ▎ Open the sandbox a little?
-11    9     }                                     Let Claude's commands write in
-12   10     counts                                /private/tmp/tarae-shot-blocked/npm-cache and
-13   11 }                                         everything in it
-14   12
-15   13 fn main() {                               npm was writing …/_cacache/index-v5 in it, in `npm
-16   14     let text = "the quick brown fox jum   test` — which runs again now with it open,
-17   15     let counts = word_counts(text);       whichever you choose. Always lasts until
-18   16     println!("{} distinct words", count   :sandbox-allowed takes it back.
-19   17 }
+00  tarae  ›  src  ›  demo.rs
+01  ──────────────────────────────────────────────────────────────────────────────────────────────────
+02   1 use std::collections::HashMap;
+03   1
+04   2 ▎ Counts how often each word appears.
+05     ▎
+06     ▎ Words are split on whitespace; case is kept.
+07   5 pub fn word_counts(text: &str) -> HashMap<&str, usize> {
+08   6     let mut counts = HashMap::new();
+09   7     for word in text.split_whitespace() ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+10   8     │   *counts.entry(word).or_insert(0) ▎ Open the sandbox a little?
+11   9     }                                      Let Claude's commands write in
+12  10     counts                                 /private/tmp/tarae-shot-blocked/npm-cache and
+13  11 }                                          everything in it
+14  12
+15  13 fn main() {                                npm was writing …/_cacache/index-v5 in it, in `npm
+16  14     let text = "the quick brown fox jump   test` — which runs again now with it open,
+17  15     let counts = word_counts(text);        whichever you choose. Always lasts until
+18  16     println!("{} distinct words", counts   :sandbox-allowed takes it back.
+19  17 }
 20                                                y Once   a This chat   A Always   n No
 21                                             ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
 22
@@ -33,11 +33,11 @@
 ## bg · surface per cell, blank = ui.background
 00
 01
-02      Acccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+02     Accccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 03
-04      11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
-05      11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
-06      11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
+04     111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
+05     111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
+06     111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
 07
 08
 09
@@ -62,26 +62,26 @@
 28   AAAAAAAA
 29
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00   ddddd  f  ddd  f  TTTTTTT
-01   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-02    A
-03    f
-04    f
+00  ddddd  f  ddd  f  TTTTTTT
+01  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+02   A
+03   f
+04   f
 05
 06
-07    f
-08    f
-09    f
-10    f                                         a BBBB BBB BBBBBBB B BBBBBBB
-11    f
-12   ff
-13   ff
-14   ff
-15   ff                                           ddd ddd ddddddd ddddddddddddddddddd dd ddd dd dddd
-16   ff                gggg ggggg ggggg ggg ggg   ddddd d ddddd dddd ddddd ddd dddd dd ddddd
-17   ff                                           ddddddddd ddd ddddddd dddddd ddddd ddddd
-18   ff              ggg gggggggg gggggg          dddddddddddddddd ddddd dd ddddd
-19   ff
+07   f
+08   f
+09   f
+10   f                                          a BBBB BBB BBBBBBB B BBBBBBB
+11   f
+12  ff
+13  ff
+14  ff
+15  ff                                            ddd ddd ddddddd ddddddddddddddddddd dd ddd dd dddd
+16  ff                gggg ggggg ggggg ggg gggg   ddddd d ddddd dddd ddddd ddd dddd dd ddddd
+17  ff                                            ddddddddd ddd ddddddd dddddd ddddd ddddd
+18  ff              ggg gggggggg gggggg           dddddddddddddddd ddddd dd ddddd
+19  ff
 20                                                A        A dddd dddd   A dddddd   A dd
 21
 22

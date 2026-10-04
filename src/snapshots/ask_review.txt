@@ -1,7 +1,7 @@
 # ask_review · 100x30 · theme meok · cursor hidden
 ## text
-00   tarae  ›  src  ›  demo.rs  ›  ƒ main
-01   ─────────────────────────────────────────────────────────────────────────────────────────────────
+00  tarae  ›  src  ›  demo.rs  ›  ƒ main
+01  ──────────────────────────────────────────────────────────────────────────────────────────────────
 02  ▎ Claude   “show the text too”                                                      0 of 1 decided
 03  11       counts
 04  12   }
@@ -62,8 +62,8 @@
 28   AAAAAAAA
 29
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00   ddddd  f  ddd  f  TTTTTTT  f    dddd
-01   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+00  ddddd  f  ddd  f  TTTTTTT  f    dddd
+01  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 02  a TTTTTT   ddddd ddd dddd dddd                                                      f ff f fffffff
 03  ff
 04  ff

@@ -115,12 +115,14 @@ impl Grid {
         if self.cells[i].width == 2 && x + 1 < self.w {
             self.cells[i + 1] = Cell::blank(cell.style);
         }
-        // (the same half block drawn again keeps what was under the first)
+        // (the same half block drawn again keeps what was under the first; over a gutter's cell — a left half
+        // block, `chrome.rs` — the panel's half: its colour, the panel's edge kept straight)
         if let Some(under) = self.under.as_mut()
             && HALVES.contains(&cell.text())
             && self.cells[i] != cell
         {
-            under[i] = Some(self.cells[i].style.bg);
+            let was = &self.cells[i];
+            under[i] = Some(if GUTTERS.contains(&was.text()) { was.style.fg } else { was.style.bg });
         }
         self.cells[i] = cell;
         if cell.width == 2 {
@@ -567,6 +569,9 @@ impl Screen {
 /// The half blocks a card's top and bottom edges are drawn with (`term::card_edge`).
 const HALVES: [&[u8]; 2] = ["▄".as_bytes(), "▀".as_bytes()];
 
+/// The half block a gutter's cell is drawn with (`term::gutter`): its left half — a panel's — in its fg.
+const GUTTERS: [&[u8]; 1] = ["▌".as_bytes()];
+
 /// A card's edge row: `width` cells from (`x`, `y`), drawn in half blocks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Edge {
@@ -793,5 +798,28 @@ mod tests {
         let odd = b"\x1b[1;1Habd\x1b[5n".as_slice();
         assert_eq!(s.present(odd, 10, 1, &[]), odd);
         assert!(s.present(good, 10, 1, &[]).len() > 10, "everything again");
+    }
+
+    /// A card's edge over a gutter's cell (a left half block, the panel's half in its fg) is seated on the
+    /// panel's colour — not the ground of the other half — and over anything else on its background (a
+    /// scroll thumb's `▐` on its panel's).
+    #[test]
+    fn a_card_edge_over_a_gutter_is_seated_on_the_panel() {
+        let mut s = Screen::new();
+        let (panel, ground, card, code) = ("9;9;9", "1;1;1", "5;5;5", "3;3;3");
+        let frame = format!(
+            "\x1b[1;1H\x1b[0;38;2;{panel};48;2;{ground}m▌\x1b[0;38;2;{card};48;2;{panel}m▐\x1b[0;48;2;{code}m \
+             \x1b[1;1H\x1b[0;38;2;{card};48;2;{ground}m▄▀▄"
+        );
+        let out = s.present(frame.as_bytes(), 4, 1, &[Edge { x: 0, y: 0, width: 3 }]).to_vec();
+        let mut p = vt100::Parser::new(1, 4, 0);
+        p.process(&out);
+        let at = |x: u16| {
+            let c = p.screen().cell(0, x).unwrap();
+            (c.contents(), c.bgcolor())
+        };
+        assert_eq!(at(0), ("▄", vt100::Color::Rgb(9, 9, 9)), "over `▌`: the panel");
+        assert_eq!(at(1), ("▀", vt100::Color::Rgb(9, 9, 9)), "over a thumb's `▐`: its panel, the background");
+        assert_eq!(at(2), ("▄", vt100::Color::Rgb(3, 3, 3)), "over the code: its background");
     }
 }

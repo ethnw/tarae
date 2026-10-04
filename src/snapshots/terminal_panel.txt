@@ -1,19 +1,19 @@
 # terminal_panel · 100x24 · theme meok · cursor 20:2
 ## text
-00   tarae  ›  src  ›  demo.rs
-01   ─────────────────────────────────────────────────────────────────────────────────────────────────
-02    1 use std::collections::HashMap;                                                                ▐
-03    1                                                                                               ▐
-04    2 ▎ Counts how often each word appears.                                                         ▐
-05      ▎                                                                                             ▐
-06      ▎ Words are split on whitespace; case is kept.                                                ▐
-07    5 pub fn word_counts(text: &str) -> HashMap<&str, usize> {                                      ▐
-08    6     let mut counts = HashMap::new();                                                          ▐
-09    7     for word in text.split_whitespace() {                                                     ▐
-10    8     │   *counts.entry(word).or_insert(0) += 1;
-11    9     }
-12   10     counts
-13   11 }
+00  tarae  ›  src  ›  demo.rs
+01  ──────────────────────────────────────────────────────────────────────────────────────────────────
+02   1 use std::collections::HashMap;                                                                 ▐
+03   1                                                                                                ▐
+04   2 ▎ Counts how often each word appears.                                                          ▐
+05     ▎                                                                                              ▐
+06     ▎ Words are split on whitespace; case is kept.                                                 ▐
+07   5 pub fn word_counts(text: &str) -> HashMap<&str, usize> {                                       ▐
+08   6     let mut counts = HashMap::new();                                                           ▐
+09   7     for word in text.split_whitespace() {                                                      ▐
+10   8     │   *counts.entry(word).or_insert(0) += 1;
+11   9     }
+12  10     counts
+13  11 }
 14   terminal  │  sh                                                            C-\ back to the code
 15   ─────────────────────────────────────────────────────────────────────────────────────────────────
 16   $ cargo test
@@ -27,11 +27,11 @@
 ## bg · surface per cell, blank = ui.background
 00
 01
-02      Accccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+02     Acccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 03
-04      1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
-05      1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
-06      1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
+04     11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
+05     11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
+06     11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
 07
 08
 09
@@ -50,20 +50,20 @@
 22   AAAAAAAAAA
 23
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00   ddddd  f  ddd  f  TTTTTTT
-01   fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-02    A                                                                                               f
-03    f                                                                                               f
-04    f                                                                                               f
+00  ddddd  f  ddd  f  TTTTTTT
+01  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+02   A                                                                                                f
+03   f                                                                                                f
+04   f                                                                                                f
 05                                                                                                    f
 06                                                                                                    f
-07    f                                                                                               f
-08    f                                                                                               f
-09    f                                                                                               f
-10    f
-11    f
-12   ff
-13   ff
+07   f                                                                                                f
+08   f                                                                                                f
+09   f                                                                                                f
+10   f
+11   f
+12  ff
+13  ff
 14   TTTTTTTT  f  dd                                                            DDD ffff ff fff ffff
 15   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 16   B

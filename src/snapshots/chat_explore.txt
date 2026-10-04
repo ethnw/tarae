@@ -1,28 +1,28 @@
 # chat_explore · 100x30 · theme meok · cursor 26:65
 ## text
-00   tarae  ›  src  ›  demo.rs                                    claude › follow                ready
-01   ─────────────────────────────────────────────────────────    ────────────────────────────────────
-02    1 use std::collections::HashMap;                            demo.rs · L5
-03    1                                                           ▎ Who calls word_counts?
-04    2 ▎ Counts how often each word appears.
-05      ▎                                                         ▎ Finding the callers
-06      ▎ Words are split on whitespace; case is kept.            ▎ It's public, so other modules may…
-07    5 pub fn word_counts(text: &str) -> HashMap<&str, usize>
-08      {                                                         ◦ grep   word_counts\(  in src
-09    6     let mut counts = HashMap::new();                      ◦ glob   src/**/*.rs
-10    7     for word in text.split_whitespace() {                 ◦ read   src/lib.rs  L1–40
-11    8     │   *counts.entry(word).or_insert(0) += 1;
-12    9     }                                                     Only main does, at src/demo.rs:15.
-13   10     counts                                                src/lib.rs:12 has a copy that splits
-14   11 }                                                         on commas.
-15   12                                                                                           2.4s
-16   13 fn main() {
-17   14     let text = "the quick brown fox jumps over the
-18          lazy dog";
-19   15     let counts = word_counts(text);
-20   16     println!("{} distinct words", counts.len()); //
-21          타래
-22   17 }
+00  tarae  ›  src  ›  demo.rs                                     claude › follow                ready
+01  ──────────────────────────────────────────────────────────    ────────────────────────────────────
+02   1 use std::collections::HashMap;                             demo.rs · L5
+03   1                                                            ▎ Who calls word_counts?
+04   2 ▎ Counts how often each word appears.
+05     ▎                                                          ▎ Finding the callers
+06     ▎ Words are split on whitespace; case is kept.             ▎ It's public, so other modules may…
+07   5 pub fn word_counts(text: &str) -> HashMap<&str, usize>
+08     {                                                          ◦ grep   word_counts\(  in src
+09   6     let mut counts = HashMap::new();                       ◦ glob   src/**/*.rs
+10   7     for word in text.split_whitespace() {                  ◦ read   src/lib.rs  L1–40
+11   8     │   *counts.entry(word).or_insert(0) += 1;
+12   9     }                                                      Only main does, at src/demo.rs:15.
+13  10     counts                                                 src/lib.rs:12 has a copy that splits
+14  11 }                                                          on commas.
+15  12                                                                                            2.4s
+16  13 fn main() {
+17  14     let text = "the quick brown fox jumps over the lazy
+18         dog";
+19  15     let counts = word_counts(text);
+20  16     println!("{} distinct words", counts.len()); //
+21         타래
+22  17 }
 23
 24
 25                                                                ────────────────────────────────────
@@ -33,11 +33,11 @@
 ## bg · surface per cell, blank = ui.background
 00                                                              ppppppppppppppppppppppppppppppppppppppp
 01                                                              ppppppppppppppppppppppppppppppppppppppp
-02      Acccccccccccccccccccccccccccccccccccccccccccccccccccccc ppppppppppppppppppppppppppppppppppppppp
+02     Accccccccccccccccccccccccccccccccccccccccccccccccccccccc ppppppppppppppppppppppppppppppppppppppp
 03                                                              ppppppppppppppppppppppppppppppppppppppp
-04      1111111111111111111111111111111111111111111111111111111 ppppppppppppppppppppppppppppppppppppppp
-05      1111111111111111111111111111111111111111111111111111111 ppppppppppppppppppppppppppppppppppppppp
-06      1111111111111111111111111111111111111111111111111111111 ppppppppppppppppppppppppppppppppppppppp
+04     11111111111111111111111111111111111111111111111111111111 ppppppppppppppppppppppppppppppppppppppp
+05     11111111111111111111111111111111111111111111111111111111 ppppppppppppppppppppppppppppppppppppppp
+06     11111111111111111111111111111111111111111111111111111111 ppppppppppppppppppppppppppppppppppppppp
 07                                                              ppppppppppppppppppppppppppppppppppppppp
 08                                                              ppppppppppppppppppppppppppppppppppppppp
 09                                                              ppppppppppppppppppppppppppppppppppppppp
@@ -62,29 +62,29 @@
 28   AAAAAA
 29
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00   ddddd  f  ddd  f  TTTTTTT                                    TTTTTT a aaaaaa                fffff
-01   fffffffffffffffffffffffffffffffffffffffffffffffffffffffff    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-02    A                                                           fffffff f ff
-03    f                                                           a TTT TTTTT TTTTTTTTTTTT
-04    f
+00  ddddd  f  ddd  f  TTTTTTT                                     TTTTTT a aaaaaa                fffff
+01  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffff    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+02   A                                                            fffffff f ff
+03   f                                                            a TTT TTTTT TTTTTTTTTTTT
+04   f
 05                                                                f DDDDDDD DDD DDDDDDD
 06                                                                f dddd ddddddd dd ddddd ddddddd dddf
-07    f
+07   f
 08                                                                f ffff   ggggggggggggg  ff fff
-09    f                                                           f ffff   ggggggggggg
-10    f                                                           f ffff   dddddddddd  fffff
-11    f
-12    f
-13   ff
-14   ff
-15   ff                                                                                           ffff
-16   ff
-17   ff                gggg ggggg ggggg ggg ggggg gggg ggg
-18          gggg gggg
-19   ff
-20   ff              ggg gggggggg gggggg
+09   f                                                            f ffff   ggggggggggg
+10   f                                                            f ffff   dddddddddd  fffff
+11   f
+12   f
+13  ff
+14  ff
+15  ff                                                                                            ffff
+16  ff
+17  ff                gggg ggggg ggggg ggg ggggg gggg ggg gggg
+18         gggg
+19  ff
+20  ff              ggg gggggggg gggggg
 21
-22   ff
+22  ff
 23
 24
 25                                                                aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa

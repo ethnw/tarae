@@ -1,24 +1,24 @@
-# diagnostic_card · 90x24 · theme meok · cursor 16:22
+# diagnostic_card · 90x24 · theme meok · cursor 16:21
 ## text
-00   tarae  ›  src  ›  demo.rs  ›  ƒ main
-01   ───────────────────────────────────────────────────────────────────────────────────────
-02   14
-03   13 ▎ Counts how often each word appears.
-04      ▎
-05      ▎ Words are split on whitespace; case is kept.
-06   10 pub fn word_counts(text: &str) -> HashMap<&str, usize> {
-07    9     let mut counts = HashMap::new();
-08    8     for word in text.split_whitespace() {
-09    7     │   *counts.entry(word).or_insert(0) += 1;
-10    6     }          ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-11    5     counts       ● mismatched types  rustc E0308
-12    4 }                  expected HashMap<&str, u32>, found HashMap<&str, usize>
-13    3
-14    2 fn main() {      · expected due to this
-15    1     let text = ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
-16  ▎16     let counts = word_counts(text);   ● mismatched types  +1
-17    1     println!("{} distinct words", counts.len()); // 타래
-18    2 }
+00  tarae  ›  src  ›  demo.rs  ›  ƒ main
+01  ────────────────────────────────────────────────────────────────────────────────────────
+02  14
+03  13 ▎ Counts how often each word appears.
+04     ▎
+05     ▎ Words are split on whitespace; case is kept.
+06  10 pub fn word_counts(text: &str) -> HashMap<&str, usize> {
+07   9     let mut counts = HashMap::new();
+08   8     for word in text.split_whitespace() {
+09   7     │   *counts.entry(word).or_insert(0) += 1;
+10   6     }          ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+11   5     counts       ● mismatched types  rustc E0308
+12   4 }                  expected HashMap<&str, u32>, found HashMap<&str, usize>
+13   3
+14   2 fn main() {      · expected due to this
+15   1     let text = ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+16 ▎16     let counts = word_counts(text);   ● mismatched types  +1
+17   1     println!("{} distinct words", counts.len()); // 타래
+18   2 }
 19
 20
 21
@@ -28,20 +28,20 @@
 00
 01
 02
-03      1111111111111111111111111111111111111111111111111111111111111111111111111111111111111
-04      1111111111111111111111111111111111111111111111111111111111111111111111111111111111111
-05      1111111111111111111111111111111111111111111111111111111111111111111111111111111111111
+03     11111111111111111111111111111111111111111111111111111111111111111111111111111111111111
+04     11111111111111111111111111111111111111111111111111111111111111111111111111111111111111
+05     11111111111111111111111111111111111111111111111111111111111111111111111111111111111111
 06
 07
 08
 09
 10
-11                     ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-12                     ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-13                     ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-14                     ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+11                    ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+12                    ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+13                    ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+14                    ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 15
-16      VVVVVVVVVVVVVVVVVAccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+16     VVVVVVVVVVVVVVVVVAcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 17
 18
 19
@@ -50,25 +50,25 @@
 22   AAAAAAAA
 23
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00   ddddd  f  ddd  f  TTTTTTT  f    dddd
-01   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-02   ff
-03   ff
+00  ddddd  f  ddd  f  TTTTTTT  f    dddd
+01  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+02  ff
+03  ff
 04
 05
-06   ff
-07    f
-08    f
-09    f
-10    f
-11    f                  e BBBBBBBBBB BBBBB  fffff fffff
-12    f
-13    f
-14    f                  d dddddddd ddd dd dddd
-15    f
-16  eAA                                       e                   ff
-17    f              ggg gggggggg gggggg
-18    f
+06  ff
+07   f
+08   f
+09   f
+10   f
+11   f                  e BBBBBBBBBB BBBBB  fffff fffff
+12   f
+13   f
+14   f                  d dddddddd ddd dd dddd
+15   f
+16 eAA                                       e                   ff
+17   f              ggg gggggggg gggggg
+18   f
 19
 20
 21

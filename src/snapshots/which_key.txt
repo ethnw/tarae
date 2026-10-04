@@ -1,25 +1,25 @@
-# which_key · 100x30 · theme meok · cursor 2:5
+# which_key · 100x30 · theme meok · cursor 2:4
 ## text
-00   tarae  ›  src  ›  demo.rs
-01   ─────────────────────────────────────────────────────────────────────────────────────────────────
-02    1 use std::collections::HashMap;
-03    1
-04    2 ▎ Counts how often each word appears.
-05      ▎                      ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-06      ▎ Words are split on wh  space
-07    5 pub fn word_counts(text
-08    6     let mut counts = Ha  '  Reopen the last picker          m  Tasks …
-09    7     for word in text.sp  /  Search in project               n  Ask Claude here, or reply
-10    8     │   *counts.entry(w  ?  Find a command                  N  Claude's notes
-11    9     }                    a  Code actions                    o  Outline panel (this file)
-12   10     counts               b  Open buffer picker              p  Paste clipboard after
-13   11 }                        c  Open Claude Code beside         P  Paste clipboard before
-14   12                          C  Send selection to Claude Code   q  Show the list (quickfix)
-15   13 fn main() {              d  Diagnostics                     r  Rename symbol
-16   14     let text = "the qui  D  Diagnostics in every file       s  Symbols in this file
-17   15     let counts = word_c  e  Files panel (tree)              S  Symbols in the workspace
-18   16     println!("{} distin  f  Open file picker                t  Choose a theme (live preview)
-19   17 }                        g  Git: stage, commit, push        T  Terminal: show / hide
+00  tarae  ›  src  ›  demo.rs
+01  ──────────────────────────────────────────────────────────────────────────────────────────────────
+02   1 use std::collections::HashMap;
+03   1
+04   2 ▎ Counts how often each word appears.
+05     ▎                       ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+06     ▎ Words are split on whi  space
+07   5 pub fn word_counts(text:
+08   6     let mut counts = Has  '  Reopen the last picker          m  Tasks …
+09   7     for word in text.spl  /  Search in project               n  Ask Claude here, or reply
+10   8     │   *counts.entry(wo  ?  Find a command                  N  Claude's notes
+11   9     }                     a  Code actions                    o  Outline panel (this file)
+12  10     counts                b  Open buffer picker              p  Paste clipboard after
+13  11 }                         c  Open Claude Code beside         P  Paste clipboard before
+14  12                           C  Send selection to Claude Code   q  Show the list (quickfix)
+15  13 fn main() {               d  Diagnostics                     r  Rename symbol
+16  14     let text = "the quic  D  Diagnostics in every file       s  Symbols in this file
+17  15     let counts = word_co  e  Files panel (tree)              S  Symbols in the workspace
+18  16     println!("{} distinc  f  Open file picker                t  Choose a theme (live preview)
+19  17 }                         g  Git: stage, commit, push        T  Terminal: show / hide
 20                               G  Debug …                         u  Undo Claude's last turn
 21                               h  Select this symbol's uses       U  Bring Claude's turn back
 22                               i  Ask Claude to edit selection    v  Review …
@@ -33,11 +33,11 @@
 ## bg · surface per cell, blank = ui.background
 00
 01
-02      Acccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+02     Accccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 03
-04      11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
-05      11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
-06      11111111111111111111111ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp1
+04     111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
+05     111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
+06     111111111111111111111111ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp1
 07                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 08                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 09                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
@@ -62,26 +62,26 @@
 28   AAAAAAAA
 29
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00   ddddd  f  ddd  f  TTTTTTT
-01   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-02    A
-03    f
-04    f
+00  ddddd  f  ddd  f  TTTTTTT
+01  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+02   A
+03   f
+04   f
 05
 06                               BBBBB
-07    f
-08    f                          A                                  A  ddddd d
-09    f                          A                                  A
-10    f                          A                                  A
-11    f                          A                                  A
-12   ff                          A                                  A
-13   ff                          A                                  A
-14   ff                          A                                  A
-15   ff                          A                                  A
-16   ff                gggg ggg  A                                  A
-17   ff                          A                                  A
-18   ff              ggg gggggg  A                                  A
-19   ff                          A                                  A
+07   f
+08   f                           A                                  A  ddddd d
+09   f                           A                                  A
+10   f                           A                                  A
+11   f                           A                                  A
+12  ff                           A                                  A
+13  ff                           A                                  A
+14  ff                           A                                  A
+15  ff                           A                                  A
+16  ff                gggg gggg  A                                  A
+17  ff                           A                                  A
+18  ff              ggg ggggggg  A                                  A
+19  ff                           A                                  A
 20                               A  ddddd d                         A
 21                               A                                  A
 22                               A                                  A  dddddd d
