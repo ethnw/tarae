@@ -14,6 +14,8 @@
 //! - `references`, `search`, `symbols`, `definition`, `hover` and `diagnostics` find code the way the user
 //!   does — the language server's answers, the project search, a file's outline — read-only, no card
 //!   (`nav.rs`).
+//! - `procs` says what `:procs` shows: the session's processes (or every session's) — pid, parent, age, CPU,
+//!   footprint, command line, folder — read on a worker, no card (`procs.rs`).
 //! - `rename` and `replace` are the editor's own refactoring — one call, one change set that lands as
 //!   Claude's edits do, in the review (`refactor.rs`).
 
@@ -71,6 +73,7 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
                 crate::nav::diagnostics_schema(),
                 crate::refactor::rename_schema(),
                 crate::refactor::replace_schema(),
+                crate::procs::tool_schema(),
             ];
             Ok(json!({ "tools": tools.map(annotated) }))
         }
@@ -90,6 +93,10 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
                 },
                 Some("screen") => {
                     crate::seeing::call(ed, call());
+                    return None;
+                }
+                Some("procs") => {
+                    crate::procs::tool_call(ed, call(), args);
                     return None;
                 }
                 Some(
@@ -152,6 +159,7 @@ fn annotated(mut schema: Value) -> Value {
         "diagnostics" => ("Diagnostics", Some("readOnlyHint")),
         "rename" => ("Rename a symbol", Some("destructiveHint")),
         "replace" => ("Replace in files", Some("destructiveHint")),
+        "procs" => ("The editor's processes", Some("readOnlyHint")),
         _ => return schema,
     };
     let mut a = json!({ "title": title });
@@ -377,14 +385,16 @@ pub fn tests_done(ed: &mut Editor) {
 /// command still waiting for the user's yes is no longer asked about.
 pub fn turn_over(ed: &mut Editor) {
     ed.session.tool_waits.clear();
+    ed.session.runs_next.clear();
+    // (nothing waits on a card any more — its cards go below)
+    ed.session.asking.clear();
     if let Some(r) = ed.session.test_run.as_mut() {
         r.chat = None;
     }
     if let Some(r) = ed.session.task_run.as_mut() {
         r.chat = None;
     }
-    ed.offers
-        .retain(|o| !matches!(o.what, crate::offer::What::Run(_) | crate::offer::What::NoSandbox { .. }));
+    ed.drop_cards(|w| matches!(w, crate::offer::What::Run(_) | crate::offer::What::NoSandbox { .. }));
     crate::seeing::turn_over(ed);
     crate::refactor::turn_over(ed);
 }
@@ -464,17 +474,32 @@ pub fn allowed(cmd: &str, extra: &[String]) -> bool {
     if let Some(words) = crate::readonly::one_command(cmd) {
         return allowed_words(&words, extra);
     }
-    // `NAME=value` words in front (#44): only a rule naming each of them lets it through (`A= cargo x`)
+    // `NAME=value` words in front (#44), or set through `env` (#93): only a rule naming each of them lets it
+    // through (`A= cargo x`)
     let Some((names, words)) = crate::readonly::one_command_env(cmd) else { return false };
-    if names.is_empty() || !names.iter().all(|n| crate::readonly::env_allowed(n)) {
+    env_allowed_words(&names, &words, extra)
+}
+
+/// A command setting `names` (`NAME=value` in front, or through `env`) allowed: by a rule naming each of
+/// them — not by the built-in checks: `RUSTC_WRAPPER=x cargo build` runs x.
+fn env_allowed_words(names: &[String], words: &[String], extra: &[String]) -> bool {
+    if names.is_empty() {
+        return allowed_words(words, extra);
+    }
+    if !names.iter().all(|n| crate::readonly::env_allowed(n)) {
         return false;
     }
-    // (only the rules that name them — not the built-in checks: `RUSTC_WRAPPER=x cargo build` runs x)
     !words.iter().any(|w| WRITES.iter().any(|o| w.starts_with(o)))
         && extra.iter().any(|rule| {
             let (set, rest) = rule_env(rule);
-            names.iter().all(|n| set.contains(&n.as_str())) && rule_matches(&words, &rest)
+            names.iter().all(|n| set.contains(&n.as_str())) && rule_matches(words, &rest)
         })
+}
+
+/// One command of a line allowed on its own: a check, a rule's words — `env NAME=value …` in front read as
+/// the names it sets (#93).
+fn part_allowed(words: &[String], extra: &[String]) -> bool {
+    crate::readonly::env_words(words).is_some_and(|(names, rest)| env_allowed_words(&names, &rest, extra))
 }
 
 /// Whether `words` start with `rule`'s, word for word (an empty rule matches nothing).
@@ -516,8 +541,9 @@ pub fn filtered(cmd: &str) -> Option<Vec<String>> {
 /// `cargo test; cargo clippy`, `cd sub && git -C x log | sort` — every command one that runs unasked
 /// (`allowed_words`, no glob; git's after `-C <dir>` as without it) or only reads, joined by `;` `&&` `||`
 /// `|`, a `cd` aside. Where it reads (a `cd`'s or `-C`'s folder, the files named) is then judged as any
-/// read's (`read_only`).
-fn chain_allowed(cmd: &str, extra: &[String]) -> bool {
+/// read's (`read_only`). `scripts`: a part that runs a script by its path counts too — then what's in each is
+/// checked against the chat's (`readonly::script_pins`, on a worker).
+fn chain_allowed(cmd: &str, extra: &[String], scripts: bool) -> bool {
     let Some(parts) = crate::readonly::parse(cmd) else { return false };
     let mut any = false;
     for p in &parts {
@@ -528,8 +554,9 @@ fn chain_allowed(cmd: &str, extra: &[String]) -> bool {
             words.truncate(1);
             words.extend(rest);
         }
-        let plain = !w.iter().any(|w| w.glob) && allowed_words(&words, extra);
-        if !plain && !crate::readonly::only_reads(w) {
+        let plain = !w.iter().any(|w| w.glob) && part_allowed(&words, extra);
+        let script = scripts && crate::readonly::script_part(w).is_some();
+        if !plain && !script && !crate::readonly::only_reads(w) {
             return false;
         }
         any = true;
@@ -537,11 +564,13 @@ fn chain_allowed(cmd: &str, extra: &[String]) -> bool {
     any
 }
 
-/// `allowed` for one command's words.
+/// `allowed` for one command's words — git's harmless options before its subcommand read as if not there
+/// (`git --no-pager log`, #88).
 fn allowed_words(words: &[String], extra: &[String]) -> bool {
     if words.iter().any(|w| WRITES.iter().any(|o| w.starts_with(o))) {
         return false;
     }
+    let words = &crate::readonly::git_plain(words);
     RUN_ALLOW
         .iter()
         .copied()
@@ -608,6 +637,11 @@ const RUNNERS: [&str; 22] = [
     "eval", "command", "builtin", "source", "python", "python3", "node", "ruby", "perl",
 ];
 
+/// Whether a program's name is a runner's (`RUNNERS`, any `python…`) — what follows it, it runs.
+pub(crate) fn runner(name: &str) -> bool {
+    RUNNERS.contains(&name) || name.starts_with("python")
+}
+
 /// The pattern a run card can allow for the rest of the chat (`a`): the command's first plain words — no
 /// option, path, value or glob — two or three of them (`cargo xtask shot`); a command piped into filters
 /// gives its own (`filtered`, #32). None for a line of other commands, one word, or a runner (`sh x.sh`,
@@ -616,6 +650,57 @@ const RUNNERS: [&str; 22] = [
 pub fn pattern(cmd: &str) -> Option<String> {
     let (names, words) =
         crate::readonly::one_command_env(cmd).or_else(|| filtered(cmd).map(|w| (Vec::new(), w)))?;
+    words_pattern(&names, &words)
+}
+
+/// What a run card's `a` allows for the rest of the chat: patterns (`pattern`'s) and scripts, each as it
+/// is when the user says yes (`readonly::script_pins`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pattern {
+    pub rules: Vec<String>,
+    pub scripts: Vec<String>,
+}
+
+impl Pattern {
+    /// As the card says it: `` `sh target/x/setup.sh` as it is now and `A=… cargo xtask shot …` ``.
+    pub fn shown(&self) -> String {
+        let scripts = self.scripts.iter().map(|s| format!("`{s}` as it is now"));
+        let rules = self.rules.iter().map(|r| format!("`{} …`", pattern_shown(r)));
+        scripts.chain(rules).collect::<Vec<_>>().join(" and ")
+    }
+}
+
+/// The card's `a` for `cmd`: its pattern (`pattern`) — or, for a line of several commands (#93: `sh
+/// target/x/setup.sh && env A=1 cargo xtask shot x.png`, asked six times an hour), each part's: a script run
+/// by its path as it is now, a pattern for the rest; parts that run unasked already need none. None when a
+/// part can have neither (a runner, one word, a glob).
+pub fn card_pattern(cmd: &str) -> Option<Pattern> {
+    use crate::readonly::Part;
+    if let Some(p) = pattern(cmd) {
+        return Some(Pattern { rules: vec![p], scripts: Vec::new() });
+    }
+    let (mut rules, mut scripts) = (Vec::new(), Vec::new());
+    for p in crate::readonly::parse(cmd)? {
+        let Part::Cmd(w) = p else { continue };
+        if let Some(s) = crate::readonly::script_part(&w) {
+            scripts.push(s.to_string());
+            continue;
+        }
+        let words: Vec<String> = w.iter().map(|w| w.text.clone()).collect();
+        if w.iter().any(|w| w.glob) {
+            return None;
+        }
+        if part_allowed(&words, &[]) || crate::readonly::only_reads(&w) {
+            continue;
+        }
+        let (names, rest) = crate::readonly::env_words(&words)?;
+        rules.push(words_pattern(&names, &rest)?);
+    }
+    (!rules.is_empty() || !scripts.is_empty()).then_some(Pattern { rules, scripts })
+}
+
+/// `pattern` for one command's words and the names set in front of them.
+fn words_pattern(names: &[String], words: &[String]) -> Option<String> {
     if !names.iter().all(|n| crate::readonly::env_allowed(n)) {
         return None;
     }
@@ -629,7 +714,7 @@ pub fn pattern(cmd: &str) -> Option<String> {
         })
         .take(3)
         .collect();
-    let runner = |w: &&str| RUNNERS.contains(w) || w.starts_with("python");
+    let runner = |w: &&str| runner(w);
     // (git: what reads runs already; what writes goes to `.git`, which the sandbox denies)
     let git = lead.first() == Some(&"git");
     let names = names.iter().map(|n| format!("{n}="));
@@ -690,13 +775,27 @@ fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
     // (a check piped into filters: the check's rule, and what the filters name is read as any read's — #32)
     // (a chain of allowed parts likewise — #57, #66)
     let checked =
-        filtered(cmd).is_some_and(|head| allowed_words(&head, &extra)) || chain_allowed(cmd, &extra);
+        filtered(cmd).is_some_and(|head| allowed_words(&head, &extra)) || chain_allowed(cmd, &extra, false);
     if outside.is_none() && (checked || crate::readonly::read_only(cmd)) {
-        return read_only(ed, call, cmd.to_string(), cwd);
+        return read_only(ed, call, cmd.to_string(), cwd, Vec::new());
     }
-    asked(ed)?;
-    // Review at the end: a file it names that Claude wrote unseen this turn goes on the card with it —
-    // which ones, and their text, found on a worker
+    // (scripts the chat allowed as they were, the rest allowed: what's in them looked at on a worker — #93)
+    let pins = ed.session.chat.as_ref().map(|c| c.run_scripts.clone()).unwrap_or_default();
+    if outside.is_none() && !pins.is_empty() && chain_allowed(cmd, &extra, true) {
+        return read_only(ed, call, cmd.to_string(), cwd, pins);
+    }
+    card(ed, call, cmd.to_string(), cwd, outside)
+}
+
+/// `cmd`'s card. Review at the end: a file it names that Claude wrote unseen this turn goes on the card
+/// with it — which ones, and their text, found on a worker.
+fn card(
+    ed: &mut Editor,
+    call: Call,
+    cmd: String,
+    cwd: PathBuf,
+    outside: Option<String>,
+) -> Result<(), String> {
     let checkpoints = &ed.session.checkpoints;
     let unseen: Vec<PathBuf> = checkpoints
         .turn
@@ -705,7 +804,6 @@ fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
         .map(|t| t.path.clone())
         .chain(checkpoints.carried.iter().cloned())
         .collect();
-    let cmd = cmd.to_string();
     if unseen.is_empty() {
         return ask(ed, cmd, cwd, call, Vec::new(), outside);
     }
@@ -770,8 +868,15 @@ fn run_cwd(root: &Path, cwd: Option<&str>) -> Result<PathBuf, String> {
 /// A command that only reads (`readonly.rs`) — or a line of checks and reads (`chain_allowed`, `filtered`):
 /// where it reads is found on a worker — all of it in the project, or in places allowed, and it runs now;
 /// anything else is on its card. A part that runs something (a check, git) outside the project is the plain
-/// card, reads allowed there or not (`readonly::runs_outside`).
-fn read_only(ed: &mut Editor, call: Call, cmd: String, cwd: PathBuf) -> Result<(), String> {
+/// card, reads allowed there or not (`readonly::runs_outside`). `pins`: the scripts it runs must be the
+/// chat's as they were allowed (`a` on a card — #93) — one changed since, or another, and it's the plain card.
+fn read_only(
+    ed: &mut Editor,
+    call: Call,
+    cmd: String,
+    cwd: PathBuf,
+    pins: Vec<(PathBuf, u64)>,
+) -> Result<(), String> {
     let chat = ed.session.chat.as_ref().map(|c| c.allowed.clone()).unwrap_or_default();
     let (store, root) = (ed.allow_path.clone(), ed.session.root.clone());
     ed.events.jobs().spawn(move || {
@@ -779,6 +884,9 @@ fn read_only(ed: &mut Editor, call: Call, cmd: String, cwd: PathBuf) -> Result<(
         let reads = crate::readonly::outside(&cmd, &cwd, &root, &chat, &kept);
         // (a check or git that would run outside the project: the plain card, whatever reads are allowed)
         let runs_outside = crate::readonly::runs_outside(&cmd, &cwd, &root);
+        let pinned = pins.is_empty()
+            || crate::readonly::script_pins(&cmd, &cwd, &root)
+                .is_some_and(|s| s.iter().all(|p| pins.contains(p)));
         move |ed: &mut Editor| {
             // (the turn ended meanwhile: nobody waits for it)
             if ed.session.chat.as_ref().is_some_and(|c| c.generation() != call.generation || !c.busy()) {
@@ -787,6 +895,14 @@ fn read_only(ed: &mut Editor, call: Call, cmd: String, cwd: PathBuf) -> Result<(
             if runs_outside {
                 let c = call.clone();
                 if let Err(e) = ask(ed, cmd, cwd, call, Vec::new(), None) {
+                    answer(ed, c, Err(e));
+                }
+                return;
+            }
+            // (a script not as it was allowed: its card, as any command's — written unseen, shown on it)
+            if !pinned {
+                let c = call.clone();
+                if let Err(e) = card(ed, call, cmd, cwd, None) {
                     answer(ed, c, Err(e));
                 }
                 return;
@@ -806,12 +922,14 @@ fn read_only(ed: &mut Editor, call: Call, cmd: String, cwd: PathBuf) -> Result<(
     Ok(())
 }
 
-/// One command asked about at a time.
-fn asked(ed: &Editor) -> Result<(), String> {
-    match ed.offers.iter().any(|o| matches!(o.what, crate::offer::What::Run(_))) {
-        true => Err("the user hasn't answered your last command yet — wait for it, then run this".into()),
-        false => Ok(()),
-    }
+/// Whether `cmd` runs without a card as far as its words tell (`run`'s order: a check or an allowed
+/// pattern, a check through filters, a chain of allowed parts, a read) — where a read reads isn't looked at
+/// (that's a worker's): a read outside the project may still ask.
+pub fn runs_unasked(cmd: &str, extra: &[String]) -> bool {
+    allowed(cmd, extra)
+        || filtered(cmd).is_some_and(|head| allowed_words(&head, extra))
+        || chain_allowed(cmd, extra, false)
+        || crate::readonly::read_only(cmd)
 }
 
 /// The card for `cmd` — with each file in `shown` (path, text) whole under it; `outside`: Claude asks to run
@@ -842,7 +960,8 @@ fn ask_with(
     reads: Vec<PathBuf>,
     outside: Option<String>,
 ) -> Result<(), String> {
-    asked(ed)?;
+    // (a card up for another command already: this one waits under it, counted — #5: refused, Claude sent
+    // the same command again and again)
     let mut question = cmd.clone();
     // What's decided: the command (and where it runs, when not at the root), what it reads outside (one
     // place a line)
@@ -876,9 +995,9 @@ fn ask_with(
         && !reads.is_empty()
         && reads.iter().all(|p| crate::allow::keepable(p, home.as_deref()));
     // (a command that only reads is asked for where it reads, not what it is)
-    let pattern = pattern(&cmd).filter(|_| outside.is_none() && reads.is_empty());
+    let pattern = card_pattern(&cmd).filter(|_| outside.is_none() && reads.is_empty());
     if let Some(p) = &pattern {
-        question.push_str(&format!("\n\na — also `{} …` unasked, this chat", pattern_shown(p)));
+        question.push_str(&format!("\n\na — also {} unasked, this chat", p.shown()));
     }
     for (path, text) in &shown {
         let text = text.replace("\r\n", "\n").replace('\t', "    ");
@@ -985,8 +1104,12 @@ fn moved(cmd: &str, cwd: &Path, unseen: &[PathBuf]) -> Option<Vec<PathBuf>> {
         let words: Vec<&str> = w.iter().map(|w| w.text.as_str()).collect();
         let args = match words.as_slice() {
             ["mv" | "cp" | "ln", rest @ ..] => rest,
-            ["git", "mv", rest @ ..] => rest,
             ["git", ..] if words.contains(&"-C") => return None,
+            // (its harmless options passed over: `git --no-pager mv` moves as `git mv` does)
+            ["git", rest @ ..] => match crate::readonly::git_after_c(rest) {
+                ["mv", rest @ ..] => rest,
+                _ => continue,
+            },
             _ => continue,
         };
         let picks = |a: &&str| a.starts_with("--") || (a.starts_with('-') && a[1..].contains(['t', 'T']));
@@ -1154,15 +1277,21 @@ pub fn run_answer(ed: &mut Editor, id: u64, what: RunCard, scope: Option<crate::
     if keep {
         crate::allow::grant_reads(ed, &reads, scope);
     }
-    // `a` (or `A` where reads are kept too): its pattern for the rest of this chat — never for good
-    if let (Some(p), crate::allow::Scope::ThisChat | crate::allow::Scope::Always) = (&pattern, scope)
+    // `a` (or `A` where reads are kept too): its pattern for the rest of this chat — never for good; its
+    // scripts as they are now (pinned on the worker below)
+    let lasting = matches!(scope, crate::allow::Scope::ThisChat | crate::allow::Scope::Always);
+    let pin = lasting && pattern.as_ref().is_some_and(|p| !p.scripts.is_empty());
+    if let (Some(p), true) = (&pattern, lasting)
         && let Some(chat) = ed.session.chat.as_mut()
-        && !chat.run_allow.contains(p)
     {
-        chat.run_allow.push(p.clone());
-        ed.note(format!("`{}` runs without asking for the rest of this chat", pattern_shown(p)));
+        for r in &p.rules {
+            if !chat.run_allow.contains(r) {
+                chat.run_allow.push(r.clone());
+            }
+        }
+        ed.note(format!("{} runs without asking for the rest of this chat", p.shown()));
     }
-    if shown.is_empty() {
+    if shown.is_empty() && !pin {
         return run_now(ed, cmd, cwd, call, unprotected, outside);
     }
     let root = ed.session.root.clone();
@@ -1170,26 +1299,66 @@ pub fn run_answer(ed: &mut Editor, id: u64, what: RunCard, scope: Option<crate::
         let changed =
             shown.iter().find(|(p, text)| std::fs::read(p).ok().as_deref() != Some(text.as_bytes()));
         let changed = changed.map(|(p, _)| crate::chat::shown(&root, p));
-        move |ed: &mut Editor| match changed {
-            Some(name) => answer(
-                ed,
-                call,
-                Err(format!(
-                    "{name} changed after the user saw it on the card — nothing ran; run it again to show \
-                     them what's there now"
-                )),
-            ),
-            None => run_now(ed, cmd, cwd, call, unprotected, outside),
+        // (none: one isn't a text script in the checkout — `script_pins` — it runs this once only)
+        let pins = pin.then(|| crate::readonly::script_pins(&cmd, &cwd, &root));
+        move |ed: &mut Editor| {
+            // (its scripts as they are now, for the chat that asked — one pinned before gives way)
+            if let Some(Some(pins)) = &pins
+                && let Some(c) = ed.session.chat.as_mut().filter(|c| c.generation() == call.generation)
+            {
+                c.run_scripts.retain(|(p, _)| !pins.iter().any(|(q, _)| q == p));
+                c.run_scripts.extend(pins.iter().cloned());
+            }
+            if let Some(None) = pins {
+                ed.set_warning(
+                    "not allowed for the chat: what it runs by its path isn't a text script in this checkout — \
+                     it runs this once",
+                );
+            }
+            match changed {
+                Some(name) => answer(
+                    ed,
+                    call,
+                    Err(format!(
+                        "{name} changed after the user saw it on the card — nothing ran; run it again to show \
+                         them what's there now"
+                    )),
+                ),
+                None => run_now(ed, cmd, cwd, call, unprotected, outside),
+            }
         }
     });
 }
 
 fn run_now(ed: &mut Editor, cmd: String, cwd: PathBuf, call: Call, unprotected: bool, outside: bool) {
-    if let Err(e) = run_busy(ed) {
-        return answer(ed, call, Err(e));
+    // A yes while another command runs (two cards answered one after the other): it runs next (#5)
+    if run_busy(ed).is_err() {
+        ed.note(format!("`{cmd}` runs once the command running ends"));
+        return ed.session.runs_next.push_back(Next { cmd, cwd, call, unprotected, outside });
     }
     let extra = Extra { grant: None, outside };
     guard_and_go(ed, For::Claude(call), Job::Command(cmd, cwd), unprotected, extra);
+}
+
+/// A command the user said yes to while another ran — it runs when that one ends (`run_next`).
+pub struct Next {
+    cmd: String,
+    cwd: PathBuf,
+    call: Call,
+    unprotected: bool,
+    outside: bool,
+}
+
+/// The task panel's run ended: the next command said yes to, if one waits — and its call still does.
+pub fn run_next(ed: &mut Editor) {
+    if run_busy(ed).is_err() {
+        return;
+    }
+    while let Some(n) = ed.session.runs_next.pop_front() {
+        if ed.session.chat.as_ref().is_some_and(|c| c.generation() == n.call.generation && c.busy()) {
+            return run_now(ed, n.cmd, n.cwd, n.call, n.unprotected, n.outside);
+        }
+    }
 }
 
 /// A `run` card's command and where it runs, its call, the files it showed, whether it said there's no
@@ -1206,8 +1375,8 @@ pub struct RunCard {
     pub keep: bool,
     /// Claude asked to run it outside the sandbox (`y` runs it so, once).
     pub outside: bool,
-    /// What `a` lets run without asking for the rest of the chat (`pattern`).
-    pub pattern: Option<String>,
+    /// What `a` lets run without asking for the rest of the chat (`card_pattern`).
+    pub pattern: Option<Pattern>,
 }
 
 // ── The sandbox ─────────────────────────────────────────────────────────────
@@ -1325,10 +1494,6 @@ pub const NO_SANDBOX_TITLE: &str = "Claude wants to run — without a sandbox";
 /// No sandbox on this system: Claude's command waits for the user — `y` this once, `a` for this
 /// conversation, `n` no.
 fn ask_unprotected(ed: &mut Editor, call: Call, job: Job, why: String) {
-    if ed.offers.iter().any(|o| matches!(o.what, crate::offer::What::NoSandbox { .. })) {
-        let e = "the user hasn't answered about your last command yet — wait for it, then run this";
-        return answer(ed, call, Err(e.into()));
-    }
     let question = format!(
         "{}\n\nThere's none here ({why}) — it would run with all your permissions: your files, your network.",
         job.label()
@@ -1901,8 +2066,32 @@ mod tests {
             "cargo test -- 'a b'",
             "cargo build 2>&1",
             "sh -c 'cargo test'",
+            // #88: git's options that change neither what runs nor where
+            "git --no-optional-locks status",
+            "git --no-pager log -5",
+            "git -P diff HEAD",
+            "git --no-optional-locks --no-pager diff --stat",
+            "git --literal-pathspecs show HEAD -- src/a.rs",
         ] {
             assert!(ok(c), "{c}");
+        }
+        // …and the ones that do still ask
+        for c in [
+            "git --git-dir=/x status",
+            "git --git-dir /x status",
+            "git --work-tree=/x status",
+            "git --exec-path=/x status",
+            "git --namespace=x log",
+            "git --config-env=core.pager=X log",
+            "git --no-pager -c core.pager=x log",
+            "git -p log",
+            "git --paginate log",
+            "git --no-pager push",
+            "git --no-optional-locks commit -m x",
+            // (where -C goes is `read_only`'s to judge — not a plain check)
+            "git --no-pager -C .. status",
+        ] {
+            assert!(!ok(c), "{c}");
         }
         for c in [
             "cargo test; rm -rf ~",
@@ -1951,6 +2140,86 @@ mod tests {
             }
         }
         ed.offers.first().map(|o| o.question.clone()).unwrap_or_else(|| panic!("a card for {cmd}"))
+    }
+
+    /// #87, #5: Claude's calls held back behind a run card are said on it; a second run while the card is up
+    /// queues its own card (not refused — Claude sent the refused command again and again), and a yes while
+    /// the first runs runs it next. With no card yet but one about to come, `C-q` says so.
+    #[test]
+    fn calls_behind_a_run_card_are_said_and_a_second_card_waits_its_turn() {
+        use crate::chat::Called;
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-run-queue-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        ed.session.root = dir.clone();
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        crate::chat::open(&mut ed);
+        let c = ed.session.chat.as_mut().unwrap();
+        c.state = crate::chat::State::Thinking;
+        c.focused = false;
+        let generation = c.generation();
+        let called = |id: &str, name: &str, input: serde_json::Value| Called {
+            id: id.into(),
+            name: name.into(),
+            input,
+        };
+        let (one, two) = ("touch one.txt && echo one", "touch two.txt && echo two");
+        c.calls = vec![
+            called("t1", "mcp__tarae__run", json!({ "command": one })),
+            called("t2", "Read", json!({ "file_path": "a.rs" })),
+            called("t3", "Read", json!({ "file_path": "b.rs" })),
+            called("t4", "mcp__tarae__run", json!({ "command": two })),
+        ];
+        let call = |n: u64| super::Call::of(generation, &format!("r{n}"), json!(n));
+        super::run(&mut ed, call(1), &json!({ "command": one })).unwrap();
+        // The second while the first card is up: a card of its own under it, nothing refused
+        super::run(&mut ed, call(2), &json!({ "command": two })).unwrap();
+        assert_eq!(ed.offers.len(), 2, "both cards");
+        let refused = super::ANSWERED.with(|a| a.borrow().iter().any(|(id, _)| *id == json!(2)));
+        assert!(!refused, "the second isn't refused");
+        let mut bytes = Vec::new();
+        crate::term::render(&mut ed, &mut bytes, 140, 36).unwrap();
+        let mut vt = vt100::Parser::new(36, 140, 0);
+        vt.process(&bytes);
+        let s = vt.screen().contents();
+        // (the card wraps — the words read in a row once its rows are joined)
+        let joined = s.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(joined.contains("2 more calls wait on this: read a.rs · read b.rs"), "{s}");
+        assert!(joined.contains("1/2"), "the second counted: {s}");
+        // Yes to the first, then to the second while the first runs: it runs next
+        ed.offer_accept();
+        assert!(ed.session.task_run.as_ref().is_some_and(|r| r.task.cmd == one), "the first runs");
+        ed.offer_accept();
+        assert_eq!(ed.session.runs_next.len(), 1, "the second waits for the first to end");
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !dir.join("two.txt").exists() {
+            assert!(std::time::Instant::now() < end, "the second ran after the first");
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
+        let said =
+            |n: u64| super::ANSWERED.with(|a| a.borrow().iter().find(|(id, _)| *id == json!(n)).cloned());
+        assert!(said(1).is_some_and(|(_, r)| r.is_ok_and(|t| t.starts_with("exit 0"))), "{:?}", said(1));
+        // No card yet, one about to come (claude holds it until the call in hand is answered): said
+        ed.offers.clear();
+        let c = ed.session.chat.as_mut().unwrap();
+        c.calls = vec![
+            called("t5", "mcp__tarae__run", json!({ "command": "cargo test" })),
+            called("t6", "mcp__tarae__run", json!({ "command": "git status" })),
+        ];
+        assert!(!c.asks_next(&[]), "a check comes next: it runs unasked");
+        c.calls.push(called("t7", "mcp__tarae__run", json!({ "command": "touch x" })));
+        assert!(c.asks_next(&[]));
+        ed.session.name = "solo".into();
+        ed.handle_key("C-q".parse().unwrap());
+        let status = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        assert!(status.contains("no card yet — solo's comes once its run ends"), "{status}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Review note: a copy, move or link of a file written unseen this turn is unseen too — a later call that
@@ -2033,6 +2302,9 @@ mod tests {
             "cd ../other; cargo fmt && cargo clippy",
             "git -C .. log | sort",
             "cd .. && git ls-files",
+            // #88: a -C behind git's harmless options is judged all the same
+            "git --no-optional-locks -C .. status",
+            "git --no-pager -C .. log | sort",
         ];
         // (then reading all of it allowed for good, `A` on a read's card: still not a build or git run there)
         let store = dir.join("sandbox.json");
@@ -2049,6 +2321,18 @@ mod tests {
         // Inside the project: at once
         assert_eq!(decided(&mut ed, "cd sub && git status"), None, "inside: runs");
         ed.session.task_run = None;
+        assert_eq!(decided(&mut ed, "git --no-optional-locks -C sub status"), None, "#88 inside: runs");
+        ed.session.task_run = None;
+        // #92, word for word: a pipeline of reads over a file under the git-ignored `target/` — at once,
+        // whether the file is there yet or not
+        let line = r#"sh -c 'grep -v "^.*note" target/ra-out/grow/grow.events | sed -n "1,200p" | grep -E "begin|end|status|stopped"'"#;
+        std::fs::write(proj.join(".gitignore"), "target/\n").unwrap();
+        assert_eq!(decided(&mut ed, line), None, "not there yet: runs");
+        ed.session.task_run = None;
+        std::fs::create_dir_all(proj.join("target/ra-out/grow")).unwrap();
+        std::fs::write(proj.join("target/ra-out/grow/grow.events"), "begin\nnote\nend\n").unwrap();
+        assert_eq!(decided(&mut ed, line), None, "there: runs");
+        ed.session.task_run = None;
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2057,7 +2341,7 @@ mod tests {
     /// one part that isn't, and the line asks.
     #[test]
     fn a_chain_of_allowed_parts_is_allowed() {
-        let ok = |c: &str| super::chain_allowed(c, &[]);
+        let ok = |c: &str| super::chain_allowed(c, &[], false);
         for c in [
             "cargo fmt && cargo clippy",
             "cargo test; cargo clippy",
@@ -2070,6 +2354,10 @@ mod tests {
             "git log --oneline | sort",
             "cd src && cargo check && ls",
             "sh -c 'cargo test; cargo clippy'",
+            // #88
+            "git --no-optional-locks -C sub diff",
+            "git -C sub --no-pager log | sort",
+            "git --no-pager blame src/a.rs | head",
         ] {
             assert!(ok(c), "{c}");
         }
@@ -2079,6 +2367,8 @@ mod tests {
             "git -C sub push",
             "git -C sub -c core.pager=x log",
             "git -C sub diff --ext-diff",
+            "git -C sub --no-pager -c core.pager=x log",
+            "git --no-pager --git-dir=x -C sub log",
             "cargo test | sed 's/a/b/w out'",
             "cargo test | sed -n '1,4w out'",
             "cargo test | sh",
@@ -2090,7 +2380,7 @@ mod tests {
             assert!(!ok(c), "{c}");
         }
         let chat = vec!["cargo xtask shot".to_string()];
-        assert!(super::chain_allowed("cargo xtask shot a.png && cargo test", &chat), "the chat's own");
+        assert!(super::chain_allowed("cargo xtask shot a.png && cargo test", &chat, false), "the chat's own");
         assert!(super::filtered("cargo test | sed -n '1,40p'").is_some(), "sed -n is a filter");
         assert!(super::is_check("cargo fmt && cargo clippy"), "a chain of checks feeds the list");
     }
@@ -2105,10 +2395,17 @@ mod tests {
         assert_eq!(p("npm run build:prod").as_deref(), Some("npm run"), "a value isn't part of it");
         assert_eq!(p("echo one two three four").as_deref(), Some("echo one two"), "three at most");
         assert_eq!(p("sh -c 'cargo bench'").as_deref(), Some("cargo bench"), "the body's, sh -c taken off");
+        // #93: `env NAME=value …` reads as the names it sets
+        assert_eq!(p("env FOO=1 cargo test").as_deref(), Some("FOO= cargo test"));
+        assert_eq!(p("A=1 env B=2 cargo xtask shot x.png").as_deref(), Some("A= B= cargo xtask shot"));
         for c in [
             "sh target/sb/x.sh",
             "bash x",
-            "env FOO=1 cargo test",
+            "env -i cargo test",
+            "env -S 'cargo test' x",
+            "env FOO=1",
+            "env",
+            "env PATH=/x cargo xtask shot",
             "python3 -m http.server",
             "xargs rm",
             "sudo make",
@@ -2128,6 +2425,148 @@ mod tests {
         assert!(!super::allowed("cargo xtask shot x; rm -rf y", &chat));
     }
 
+    /// #93: a line of several commands gets a pattern for each part — a script run by its path as it is
+    /// now, a pattern for the rest, nothing for a part that runs unasked — or none when a part can't.
+    #[test]
+    fn a_line_of_a_script_and_a_command_gets_a_pattern_for_each() {
+        use super::Pattern;
+        let p = |c: &str| super::card_pattern(c);
+        let shot = "sh target/x/setup.sh && env TARAE_SHOT_XDG=/tmp/x TARAE_BACKGROUND=dark cargo xtask shot \
+                    target/x/2.png '@?ready'";
+        let want = Pattern {
+            rules: vec!["TARAE_SHOT_XDG= TARAE_BACKGROUND= cargo xtask shot".into()],
+            scripts: vec!["target/x/setup.sh".into()],
+        };
+        assert_eq!(p(shot), Some(want.clone()));
+        assert_eq!(
+            want.shown(),
+            "`target/x/setup.sh` as it is now and `TARAE_SHOT_XDG=… TARAE_BACKGROUND=… cargo xtask shot …`"
+        );
+        assert_eq!(p("cargo xtask shot a.png").map(|p| p.rules), Some(vec!["cargo xtask shot".to_string()]));
+        assert_eq!(p("./run.sh fast"), Some(Pattern { rules: vec![], scripts: vec!["./run.sh".into()] }));
+        assert_eq!(
+            p("cd sub && bash gen.sh && cargo test && ls"),
+            Some(Pattern { rules: vec![], scripts: vec!["gen.sh".into()] }),
+            "the check and the read need nothing"
+        );
+        for c in [
+            "sh x.sh && rm -rf y",
+            "sh x.sh && python3 y.py",
+            "sh -c 'sh x.sh'",
+            "sh -x x.sh",
+            "sh x*.sh && cargo xtask shot",
+            "sh x.sh && env -i cargo xtask shot",
+            "sh x.sh && PATH=/x cargo xtask shot",
+        ] {
+            assert_eq!(p(c), None, "{c}");
+        }
+        // Review: a program by its path is no script — a runner's would let anything through it, and a
+        // binary's hash never changes; nothing outside the checkout either
+        for c in [
+            "/bin/sh -c 'echo hi'",
+            "/bin/sh x.sh",
+            "/usr/bin/env FOO=1 cargo test",
+            "/usr/bin/python3 tools/gen.py",
+            "./node_modules/.bin/sh -c 'echo hi'",
+            "bash /bin/sh",
+            "sh /usr/bin/env",
+            "/bin/rm -rf x",
+            "/usr/bin/curl -o x y",
+            "../elsewhere/x.sh",
+            "sh ../x.sh",
+        ] {
+            let got = p(c);
+            assert!(got.as_ref().is_none_or(|p| p.scripts.is_empty()), "{c}: {got:?}");
+        }
+        // The chat's rule lets the line's command through, `env` and all — its script is for the worker
+        let chat = vec!["TARAE_SHOT_XDG= TARAE_BACKGROUND= cargo xtask shot".to_string()];
+        assert!(!super::chain_allowed(shot, &chat, false), "a script isn't a check");
+        assert!(super::chain_allowed(shot, &chat, true));
+        assert!(!super::chain_allowed("sh x.sh && rm y", &chat, true));
+    }
+
+    /// #93 as the user met it: the same screenshot line again with one argument changed asked every time.
+    /// `a` on its card allows its script as it is and its command's pattern for the chat — the next one runs
+    /// unasked; the script changed, and it asks again.
+    #[test]
+    fn a_scripted_line_allowed_for_the_chat_runs_again_unasked_while_its_script_is_the_same() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-run-script-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("target/x")).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        std::fs::write(dir.join("target/x/setup.sh"), "touch set-up\n").unwrap();
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        ed.session.root = dir.clone();
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        crate::chat::open(&mut ed);
+        let c = ed.session.chat.as_mut().unwrap();
+        c.state = crate::chat::State::Thinking;
+        c.focused = false;
+        let generation = c.generation();
+        let line =
+            |n: u32| format!("sh target/x/setup.sh && env TARAE_BACKGROUND=dark echo shot target/x/{n}.png");
+        let pump = |ed: &mut crate::editor::Editor, done: &dyn Fn(&crate::editor::Editor) -> bool| {
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !done(ed) {
+                assert!(std::time::Instant::now() < end, "waited too long");
+                if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+                    ed.handle_event(ev);
+                }
+            }
+        };
+        let ended = |ed: &crate::editor::Editor| {
+            ed.session.task_run.as_ref().is_some_and(|r| r.state != crate::task::State::Running)
+        };
+        // The first time: a card, offering both
+        super::run(&mut ed, super::Call::of(generation, "r1", json!(1)), &json!({ "command": line(1) }))
+            .unwrap();
+        pump(&mut ed, &|ed| !ed.offers.is_empty());
+        let q = ed.offers[0].question.clone();
+        assert!(
+            q.contains("a — also `target/x/setup.sh` as it is now and `TARAE_BACKGROUND=… echo shot …` unasked, this chat"),
+            "{q}"
+        );
+        ed.offer_for_chat();
+        pump(&mut ed, &ended);
+        assert!(dir.join("set-up").exists(), "it ran");
+        assert_eq!(ed.session.chat.as_ref().unwrap().run_scripts.len(), 1, "the script, as it was");
+        // Again, another file: unasked
+        ed.session.task_run = None;
+        super::run(&mut ed, super::Call::of(generation, "r2", json!(2)), &json!({ "command": line(2) }))
+            .unwrap();
+        pump(&mut ed, &|ed| ed.session.task_run.is_some() || !ed.offers.is_empty());
+        assert!(ed.offers.is_empty(), "no card: {:?}", ed.offers.first().map(|o| &o.question));
+        pump(&mut ed, &ended);
+        // The script changed: asked again
+        std::fs::write(dir.join("target/x/setup.sh"), "touch set-up-again\n").unwrap();
+        ed.session.task_run = None;
+        super::run(&mut ed, super::Call::of(generation, "r3", json!(3)), &json!({ "command": line(3) }))
+            .unwrap();
+        pump(&mut ed, &|ed| ed.session.task_run.is_some() || !ed.offers.is_empty());
+        assert!(ed.session.task_run.is_none() && !ed.offers.is_empty(), "a card for the changed script");
+        assert!(!dir.join("set-up-again").exists());
+        // Review: a shell pinned by its path (as the old rule let `a` do) lets nothing through it
+        ed.offer_dismiss();
+        let sh = std::fs::canonicalize("/bin/sh").unwrap();
+        let hash = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            std::fs::read(&sh).unwrap().hash(&mut h);
+            h.finish()
+        };
+        ed.session.chat.as_mut().unwrap().run_scripts.push((sh, hash));
+        let marker = dir.join("through-sh");
+        let through = format!("/bin/sh -c 'touch {}'", marker.display());
+        super::run(&mut ed, super::Call::of(generation, "r4", json!(4)), &json!({ "command": through }))
+            .unwrap();
+        pump(&mut ed, &|ed| ed.session.task_run.is_some() || !ed.offers.is_empty());
+        assert!(ed.session.task_run.is_none() && !ed.offers.is_empty(), "a card, not a run");
+        assert!(!marker.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// #44: assignments in front of the command go into the pattern by name, values left open — never a
     /// name that finds programs or libraries, or one the sandbox sets; and a command setting a name its
     /// rule doesn't name still asks.
@@ -2142,6 +2581,8 @@ mod tests {
             "TARAE_SHOT_XDG=… TARAE_BACKGROUND=… cargo xtask shot"
         );
         assert_eq!(p("FOO=1 cargo test").as_deref(), Some("FOO= cargo test"), "not only in sh -c");
+        // (`env` in between sets nothing more — #93)
+        assert_eq!(p("A=1 env cargo test").as_deref(), Some("A= cargo test"));
         for c in [
             "PATH=/tmp/bin cargo xtask shot",
             "LD_PRELOAD=/tmp/x.so cargo xtask shot",
@@ -2149,7 +2590,7 @@ mod tests {
             "sh -c 'A=1 HOME=/tmp cargo xtask shot'",
             "TMPDIR=/x cargo xtask shot",
             "TARAE_SANDBOXED= cargo xtask shot",
-            "A=1 env cargo test",
+            "A=1 env -i cargo test",
             "A=1 sh x.sh",
             "'A=1' cargo test",
             "A=$(id) cargo test",

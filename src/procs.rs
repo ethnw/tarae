@@ -5,7 +5,9 @@
 //!   lists on macOS, `/proc` on Linux), each read for its CPU time, resident memory and (macOS) physical
 //!   footprint. What each one is *for* comes from the editor (`Editor::procs_known` — its language servers,
 //!   the debugger, runs, the terminal, Claude, plugins' programs); one it doesn't know is listed by name,
-//!   under its parent. tarae itself is the first row.
+//!   under its parent. What a session started stays its own after its run is closed or replaced
+//!   (`Spawned`, "left running"), and a child of tarae's nothing names goes under the session whose
+//!   checkout it works in (#100). tarae itself is the first row. Claude asks the same with its `procs` tool.
 //! - **Sampling** is a thread of its own (`start`): every `QUIET_EVERY` while `:procs` is closed, every
 //!   `OPEN_EVERY` while it's open. A sample goes to the main loop, which draws nothing for it unless the panel
 //!   is up or the status line's mark changed — an idle tarae stays idle (measured: `perf_e2e_procs_sampling`).
@@ -68,6 +70,9 @@ pub struct Os {
     pub footprint: Option<u64>,
     /// It ended and nobody waited for it.
     pub zombie: bool,
+    /// Its working folder — read for tarae's own children only (`Sampler::sample`): one the editor can't
+    /// name goes under the session whose checkout it works in (#100).
+    pub cwd: Option<PathBuf>,
 }
 
 /// A C string in a fixed buffer.
@@ -117,6 +122,7 @@ pub fn read(pid: u32) -> Option<Os> {
             rss: if ok { ri.ri_resident_size } else { 0 },
             footprint: ok.then_some(ri.ri_phys_footprint),
             zombie: bsd.pbi_status == libc::SZOMB,
+            cwd: None,
         })
     }
 }
@@ -161,6 +167,7 @@ fn parse_stat(pid: u32, stat: &str, hz: u64, page: u64, boot: u64) -> Option<Os>
         rss: num(21)? * page,
         footprint: None,
         zombie: f.first() == Some(&"Z"),
+        cwd: None,
     })
 }
 
@@ -234,6 +241,75 @@ pub fn tree(root: u32) -> Vec<Os> {
     out
 }
 
+/// Process `pid`'s command line, its words joined by spaces (`KERN_PROCARGS2`: argc, the executable's path,
+/// NULs, then the words) — None if it's gone or not ours to read.
+#[cfg(target_os = "macos")]
+pub fn command(pid: u32) -> Option<String> {
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
+    let mut size: libc::size_t = 0;
+    let null = std::ptr::null_mut();
+    // SAFETY: a size query (no buffer), then a read into a buffer of that size; both only fill in.
+    unsafe {
+        if libc::sysctl(mib.as_mut_ptr(), 3, null, &mut size, null, 0) != 0 || size < 4 {
+            return None;
+        }
+        let mut buf = vec![0u8; size];
+        if libc::sysctl(mib.as_mut_ptr(), 3, buf.as_mut_ptr().cast(), &mut size, null, 0) != 0 {
+            return None;
+        }
+        buf.truncate(size);
+        let argc = i32::from_ne_bytes(buf.get(..4)?.try_into().ok()?).max(0) as usize;
+        let rest = &buf[4..];
+        let rest = &rest[rest.iter().position(|&b| b == 0)?..];
+        let rest = &rest[rest.iter().position(|&b| b != 0)?..];
+        let words: Vec<String> =
+            rest.split(|&b| b == 0).take(argc).map(|w| String::from_utf8_lossy(w).into_owned()).collect();
+        (!words.is_empty()).then(|| words.join(" "))
+    }
+}
+
+/// Process `pid`'s working folder.
+#[cfg(target_os = "macos")]
+pub fn cwd(pid: u32) -> Option<PathBuf> {
+    // SAFETY: a plain out-struct of the size given; the call only fills it in.
+    unsafe {
+        let mut vi: libc::proc_vnodepathinfo = std::mem::zeroed();
+        let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
+        if libc::proc_pidinfo(pid as i32, libc::PROC_PIDVNODEPATHINFO, 0, (&raw mut vi).cast(), size) != size
+        {
+            return None;
+        }
+        let flat: Vec<libc::c_char> = vi.pvi_cdir.vip_path.iter().flatten().copied().collect();
+        Some(PathBuf::from(c_str(&flat))).filter(|p| !p.as_os_str().is_empty())
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub fn command(pid: u32) -> Option<String> {
+    let b = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let words: Vec<String> = b
+        .split(|&c| c == 0)
+        .filter(|w| !w.is_empty())
+        .map(|w| String::from_utf8_lossy(w).into_owned())
+        .collect();
+    (!words.is_empty()).then(|| words.join(" "))
+}
+
+#[cfg(target_os = "linux")]
+pub fn cwd(pid: u32) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn command(_pid: u32) -> Option<String> {
+    None
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn cwd(_pid: u32) -> Option<PathBuf> {
+    None
+}
+
 // ── Samples ──────────────────────────────────────────────────────────────
 
 /// One look at the tree: each process with its share of a core since the look before (None: its first).
@@ -258,7 +334,10 @@ impl Sampler {
         let wall = self.at.map(|a| t0.duration_since(a)).filter(|w| *w >= Duration::from_millis(50));
         let procs: Vec<(Os, Option<f32>)> = tree(root)
             .into_iter()
-            .map(|os| {
+            .map(|mut os| {
+                if os.ppid == root {
+                    os.cwd = cwd(os.pid);
+                }
                 let before = self.prev.get(&(os.pid, os.started));
                 let pct = wall
                     .zip(before)
@@ -397,6 +476,36 @@ pub struct Known {
     pub what: String,
     /// The session it's for — None: shared (and with one session, every one).
     pub session: Option<SessionId>,
+    /// When it started (epoch seconds), when that's what tells it from a later process given its pid — a
+    /// remembered one's (`Spawned`); None: the editor holds it now.
+    pub at: Option<u64>,
+}
+
+impl Known {
+    /// Whether it's process `os`.
+    fn is(&self, os: &Os) -> bool {
+        self.pid == os.pid && self.at.is_none_or(|a| os.started.abs_diff(a) <= 2)
+    }
+}
+
+/// A process a session started (a run of Claude's, a task, tests — `Session.spawned`): kept while the OS
+/// still shows it, so it stays its session's after its run is closed or replaced (#100: a program of Claude's
+/// run that outlived its panel was listed as nobody's, its session showing nothing).
+#[derive(Clone, Debug)]
+pub struct Spawned {
+    pub pid: u32,
+    /// When it was started, epoch seconds (with the pid, which process — pids are reused).
+    pub at: u64,
+    pub title: String,
+    pub what: String,
+}
+
+impl Editor {
+    /// Process `pid` was just started in the session in `ed.session`, for `title` (`what`: its command).
+    pub(crate) fn procs_spawned(&mut self, pid: u32, title: &str, what: &str) {
+        let at = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        self.session.spawned.push(Spawned { pid, at, title: title.to_string(), what: what.to_string() });
+    }
 }
 
 /// A session as `:procs` heads its processes: its name as its tab says it, its checkout.
@@ -412,6 +521,8 @@ pub struct Group {
 pub struct Row {
     /// 0 for a held server (no process).
     pub pid: u32,
+    /// Its parent (0 with no process).
+    pub ppid: u32,
     started: u64,
     /// Under tarae's child (0) — its children 1, theirs 2.
     pub depth: usize,
@@ -476,6 +587,7 @@ pub fn rows(
     }
     let row = |os: &Os, depth: usize, kind: Kind, under: Kind, title: String, what: String, session| Row {
         pid: os.pid,
+        ppid: os.ppid,
         started: os.started,
         depth,
         kind,
@@ -494,6 +606,7 @@ pub fn rows(
     // No process: a held server, a session's heading
     let bare = |kind: Kind, under: Kind, title: &str, what: String, session| Row {
         pid: 0,
+        ppid: 0,
         started: 0,
         depth: 0,
         kind,
@@ -515,14 +628,23 @@ pub fn rows(
     }
     // (a session that isn't among `groups` is no session here)
     let grouped = |l: Option<SessionId>| l.filter(|l| groups.iter().any(|g| g.id == *l));
+    // (one the editor can't name: the session whose checkout it works in, the innermost — #100)
+    let working_in = |os: &Os| {
+        let dir = os.cwd.as_ref()?;
+        groups
+            .iter()
+            .filter(|g| dir.starts_with(&g.root))
+            .max_by_key(|g| g.root.as_os_str().len())
+            .map(|g| g.id)
+    };
     let mut top: Vec<(Kind, String, String, &Os, Option<SessionId>)> = kids
         .get(&me)
         .into_iter()
         .flatten()
         .filter_map(|pid| by_pid.get(pid))
-        .map(|os| match known.iter().find(|k| k.pid == os.pid) {
+        .map(|os| match known.iter().find(|k| k.is(os)) {
             Some(k) => (k.kind.clone(), k.title.clone(), k.what.clone(), *os, grouped(k.session)),
-            None => (Kind::Other, os.name.clone(), String::new(), *os, None),
+            None => (Kind::Other, os.name.clone(), String::new(), *os, working_in(os)),
         })
         .collect();
     top.sort_by(|a, b| (a.0.order(), &a.1, a.3.pid).cmp(&(b.0.order(), &b.1, b.3.pid)));
@@ -552,7 +674,7 @@ pub fn rows(
                 kids.get(&os.pid).into_iter().flatten().rev().map(|&p| (p, 1)).collect();
             while let Some((pid, depth)) = todo.pop() {
                 let Some(o) = by_pid.get(&pid) else { continue };
-                let (k, t, w) = match known.iter().find(|k| k.pid == pid) {
+                let (k, t, w) = match known.iter().find(|k| k.is(o)) {
                     Some(k) => (k.kind.clone(), k.title.clone(), k.what.clone()),
                     None => (Kind::Other, o.name.clone(), String::new()),
                 };
@@ -604,6 +726,121 @@ pub fn summed(rows: &[Row], pids: &[u32]) -> Option<(f32, u64)> {
         }
     }
     sum
+}
+
+// ── Claude's tool ────────────────────────────────────────────────────────
+
+/// How long the tool's CPU shares are measured over (two looks this far apart).
+const TOOL_WINDOW: Duration = Duration::from_millis(300);
+/// A command line longer than this is cut (a server's long classpath).
+const COMMAND_MAX: usize = 400;
+
+pub fn tool_schema() -> serde_json::Value {
+    serde_json::json!({
+        "name": "procs",
+        "description": "The processes the user's editor runs for this session, as its :procs panel shows them — \
+    language servers, your own chat process, commands and tests running, the terminal, what each started — with \
+    pid, parent, age, CPU (share of a core over the last 0.3 s), memory (physical footprint, which counts \
+    compressed pages that RSS hides; resident beside it), command line and working folder. Read-only, no card: \
+    use it instead of ps, pgrep or lsof through run. all: every session's, and what they share.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "all": { "type": "boolean", "description": "Every session's processes, not only this session's" }
+            }
+        }
+    })
+}
+
+/// A `procs` call (#97: Claude ran ps, pgrep and lsof through `run`, a card each): two looks
+/// `TOOL_WINDOW` apart on a worker, the rows `:procs` makes of them, each process's command line and
+/// folder — answered with `report`.
+pub fn tool_call(ed: &mut Editor, call: crate::tools::Call, args: &serde_json::Value) {
+    let all = args["all"].as_bool() == Some(true);
+    let (known, groups, held) = (ed.procs_known(), ed.procs_groups(), ed.procs.held.clone());
+    let (me, name) = (ed.session.id, ed.session.label().to_string());
+    ed.events.jobs().spawn(move || {
+        let mut s = Sampler::default();
+        s.sample(std::process::id());
+        std::thread::sleep(TOOL_WINDOW);
+        let sample = s.sample(std::process::id());
+        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let rows = rows(&sample, &known, std::process::id(), &held, &groups, now);
+        let mine = |r: &Row| all || groups.is_empty() || r.session == Some(me);
+        let shown: Vec<Row> = rows.into_iter().filter(mine).collect();
+        let extra =
+            shown.iter().filter(|r| r.pid > 0).map(|r| (r.pid, (command(r.pid), cwd(r.pid)))).collect();
+        let scope = match (all, groups.is_empty()) {
+            (false, false) => format!("session {name}"),
+            _ => "every session".to_string(),
+        };
+        let text = report(&shown, &extra, &scope);
+        move |ed: &mut Editor| crate::tools::answer(ed, call, Ok(text))
+    });
+}
+
+/// What the tool answers: a line on what's measured, then each row as `:procs` lists it — a session's
+/// heading with its sums; a process indented under what started it, with its pid, parent, age, CPU,
+/// memory (footprint, resident beside it), command line and folder (`extra`); a held server said so.
+pub fn report(rows: &[Row], extra: &HashMap<u32, (Option<String>, Option<PathBuf>)>, scope: &str) -> String {
+    let footprint = rows.iter().any(|r| r.footprint.is_some());
+    let memory = match footprint {
+        true => {
+            "memory = physical footprint (what Activity Monitor shows — RSS leaves compressed pages out), resident beside it"
+        }
+        false => "memory = resident (no footprint on this system)",
+    };
+    let window = TOOL_WINDOW.as_secs_f32();
+    let mut out = format!(
+        "The editor's processes for {scope}, as :procs lists them — cpu = share of a core over the last {window:.1} s; {memory}.\n"
+    );
+    if rows.is_empty() {
+        out.push_str("\nNone running.\n");
+        return out;
+    }
+    let mem = |r: &Row| match r.footprint {
+        Some(f) => format!("{} (resident {})", self::mem(f), self::mem(r.rss)),
+        None => self::mem(r.rss),
+    };
+    let cpu = |r: &Row| r.cpu.map_or("—".to_string(), |c| format!("{c:.1}%"));
+    for r in rows {
+        let pad = "  ".repeat(r.depth);
+        let head = match r.what.is_empty() {
+            true => r.title.clone(),
+            false => format!("{} — {}", r.title, r.what),
+        };
+        match (&r.kind, r.pid) {
+            (Kind::Session(_), _) => {
+                out.push_str(&format!("\n── {head}: cpu {} · memory {}\n", cpu(r), mem(r)));
+            }
+            (_, 0) => out.push_str(&format!(
+                "\n{pad}{head}: held — it exited again and again; not started until r on it in :procs\n"
+            )),
+            _ => {
+                let up = r.up.map_or("—".to_string(), age);
+                let ended = if r.zombie { " · ended, not reaped" } else { "" };
+                out.push_str(&format!(
+                    "\n{pad}{head}\n{pad}  pid {} · parent {} · up {up} · cpu {} · memory {}{ended}\n",
+                    r.pid,
+                    r.ppid,
+                    cpu(r),
+                    mem(r)
+                ));
+                let (cmd, dir) = extra.get(&r.pid).cloned().unwrap_or_default();
+                if let Some(cmd) = cmd {
+                    let cut = match cmd.chars().count() > COMMAND_MAX {
+                        true => format!("{}…", cmd.chars().take(COMMAND_MAX).collect::<String>()),
+                        false => cmd,
+                    };
+                    out.push_str(&format!("{pad}  command: {cut}\n"));
+                }
+                if let Some(dir) = dir {
+                    out.push_str(&format!("{pad}  folder: {}\n", crate::allow::tilde(&dir)));
+                }
+            }
+        }
+    }
+    out
 }
 
 // ── Checks ───────────────────────────────────────────────────────────────
@@ -1066,7 +1303,7 @@ impl Editor {
         let mut add =
             |pid: Option<u32>, kind: Kind, title: &str, what: String, session: Option<SessionId>| {
                 if let Some(pid) = pid.filter(|&p| p > 0) {
-                    out.push(Known { pid, kind, title: title.to_string(), what, session });
+                    out.push(Known { pid, kind, title: title.to_string(), what, session, at: None });
                 }
             };
         let sessions = !self.sessions.is_empty();
@@ -1099,6 +1336,23 @@ impl Editor {
         add(self.llm_warm.pid(), Kind::Spare, "claude", "ready for space i".into(), None);
         for (plugin, id, pid, program) in self.plugin_pids() {
             add(Some(pid), Kind::Plugin(plugin.clone(), id), &program, format!("plugin {plugin}"), None);
+        }
+        // What a session started that outlived its run (closed, replaced): still its session's (#100)
+        for l in std::iter::once(&self.session).chain(&self.sessions) {
+            let session = sessions.then_some(l.id);
+            for s in l.spawned.iter() {
+                if out.iter().any(|k| k.pid == s.pid) {
+                    continue;
+                }
+                out.push(Known {
+                    pid: s.pid,
+                    kind: Kind::Other,
+                    title: format!("{} · left running", s.title),
+                    what: s.what.clone(),
+                    session,
+                    at: Some(s.at),
+                });
+            }
         }
         out
     }
@@ -1145,6 +1399,13 @@ impl Editor {
         }
         let now = SystemTime::now();
         let secs = now.duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        // (what a session started and is gone: forgotten — a later process given its pid isn't it)
+        let alive = |sp: &Spawned| {
+            s.procs.iter().any(|(o, _)| o.pid == sp.pid && o.started.abs_diff(sp.at) <= 2 && !o.zombie)
+        };
+        for l in std::iter::once(&mut self.session).chain(&mut self.sessions) {
+            l.spawned.retain(alive);
+        }
         let groups = self.procs_groups();
         let mut rows = rows(&s, &self.procs_known(), std::process::id(), &self.procs.held, &groups, secs);
         let (found, learned) = self.procs.check(&rows, &self.procs_lsp_facts(), Instant::now());
@@ -1482,6 +1743,7 @@ mod tests {
     fn row(pid: u32, kind: Kind, cpu: f32, mb: u64, up: u64) -> Row {
         Row {
             pid,
+            ppid: 1,
             started: 1,
             depth: 0,
             under: kind.clone(),
@@ -1560,6 +1822,151 @@ mod tests {
         assert!(look.took < Duration::from_millis(500), "a look took {:?}", look.took);
     }
 
+    /// A process's command line and working folder, read from the OS (a stand-in child of the test's own,
+    /// in its temp folder, stopped at its end).
+    #[test]
+    fn a_processs_command_line_and_folder_are_read() {
+        let dir = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("tarae-procs-cwd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut child =
+            std::process::Command::new("sleep").arg("30").current_dir(&dir).spawn().expect("sleep");
+        let (cmd, folder) = (command(child.id()), cwd(child.id()));
+        let _ = child.kill();
+        let _ = child.wait();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(cmd.as_deref(), Some("sleep 30"));
+        assert_eq!(folder, Some(dir));
+        assert_eq!(command(u32::MAX - 1), None, "no such process: nothing made up");
+    }
+
+    /// #97: Claude's `procs` answers what `:procs` shows, no card — this session's processes (a command
+    /// running in it: pid, parent, age, CPU, footprint and resident memory, command line, folder), not
+    /// another session's unless `all` asks.
+    #[test]
+    fn claudes_procs_tool_says_what_procs_shows() {
+        use serde_json::json;
+        let base = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("tarae-procs-tool-{}", std::process::id()));
+        let (here, there) = (base.join("here"), base.join("there"));
+        for d in [&here, &there] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let mut ed = Editor::new(crate::config::Config::default());
+        (ed.session.root, ed.session.name) = (here.clone(), "here".into());
+        let task = |name: &str, dir: &Path| crate::task::Task {
+            name: name.into(),
+            cmd: "sleep 20".into(),
+            cwd: dir.into(),
+        };
+        ed.task_start(task("sleeps-here", &here));
+        let other = ed.session_open(&there).unwrap();
+        ed.session.name = "there".into();
+        ed.task_start(task("sleeps-there", &there));
+        assert!(ed.session_switch(0));
+        let ask = |ed: &mut Editor, n: u64, args: serde_json::Value| -> String {
+            let msg = json!({"jsonrpc": "2.0", "id": n, "method": "tools/call",
+                "params": {"name": "procs", "arguments": args}});
+            assert!(crate::tools::mcp(ed, u64::MAX, "c", &msg).is_none(), "answered from its worker");
+            let end = Instant::now() + Duration::from_secs(10);
+            loop {
+                let got = crate::tools::ANSWERED
+                    .with(|a| a.borrow().iter().find(|(id, _)| *id == json!(n)).cloned());
+                if let Some((_, r)) = got {
+                    return r.expect("an answer");
+                }
+                assert!(Instant::now() < end, "procs answered");
+                if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
+                    ed.handle_event(ev);
+                }
+            }
+        };
+        let mine = ask(&mut ed, 970, json!({}));
+        assert!(ed.offers.is_empty(), "no card");
+        assert!(mine.starts_with("The editor's processes for session here"), "{mine}");
+        assert!(mine.contains("sleeps-here — sleep 20"), "{mine}");
+        // (`sh -c` with one command runs it in its own place)
+        assert!(mine.contains("command: sleep 20") || mine.contains("command: sh -c sleep 20"), "{mine}");
+        assert!(mine.contains(&format!("folder: {}", crate::allow::tilde(&here))), "{mine}");
+        let pid = ed.session.task_run.as_ref().and_then(|r| r.pid()).unwrap();
+        assert!(mine.contains(&format!("pid {pid} · parent {}", std::process::id())), "{mine}");
+        assert!(mine.contains("· up ") && mine.contains("· cpu "), "{mine}");
+        if cfg!(target_os = "macos") {
+            assert!(mine.contains("(resident ") && mine.contains("physical footprint"), "{mine}");
+        }
+        assert!(!mine.contains("sleeps-there"), "another session's isn't this one's: {mine}");
+        let every = ask(&mut ed, 971, json!({ "all": true }));
+        assert!(every.starts_with("The editor's processes for every session"), "{every}");
+        assert!(every.contains("── here") && every.contains("── there"), "headed by session: {every}");
+        assert!(every.contains("sleeps-here") && every.contains("sleeps-there"), "{every}");
+        ed.session.task_run = None;
+        ed.with_session(other, |ed| ed.session.task_run = None);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// #100 as met: a run of Claude's in a session behind whose program outlives its panel (closed — the
+    /// program shrugs off the SIGTERM) is still that session's, by name, in `procs` and `:procs`. (The
+    /// stand-in ignores TERM and sleeps in the test's temp folder; it's killed at the end.)
+    #[test]
+    fn a_claude_run_left_running_stays_under_its_session() {
+        use serde_json::json;
+        let base = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("tarae-procs-left-{}", std::process::id()));
+        let (here, there) = (base.join("here"), base.join("there"));
+        for d in [&here, &there] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let mut ed = Editor::new(crate::config::Config::default());
+        (ed.session.root, ed.session.name) = (here.clone(), "here".into());
+        let other = ed.session_open(&there).unwrap();
+        ed.session.name = "there".into();
+        let task = crate::task::Task {
+            name: "swap".into(),
+            cmd: "trap '' TERM; sleep 30".into(),
+            cwd: there.clone(),
+        };
+        assert!(ed.task_start_for(task, crate::tools::For::User("swap".into()), None));
+        let pid = ed.session.task_run.as_ref().and_then(|r| r.pid()).unwrap();
+        // (its `trap` in place before the TERM comes)
+        let end = Instant::now() + Duration::from_secs(5);
+        while !tree(pid).iter().any(|o| o.name == "sleep") {
+            assert!(Instant::now() < end, "the stand-in sleeps");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // Its panel closed: the run is gone, its program isn't
+        ed.task_close();
+        assert!(ed.session.task_run.is_none());
+        assert!(ed.session_switch(0));
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(read(pid).is_some_and(|o| !o.zombie), "still running");
+        let msg = json!({"jsonrpc": "2.0", "id": 990, "method": "tools/call",
+            "params": {"name": "procs", "arguments": {"all": true}}});
+        assert!(crate::tools::mcp(&mut ed, u64::MAX, "c", &msg).is_none());
+        let end = Instant::now() + Duration::from_secs(10);
+        let text = loop {
+            let got =
+                crate::tools::ANSWERED.with(|a| a.borrow().iter().find(|(id, _)| *id == json!(990)).cloned());
+            if let Some((_, r)) = got {
+                break r.unwrap();
+            }
+            assert!(Instant::now() < end, "procs answered");
+            if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        };
+        // SAFETY: stops the process group of this test's own stand-in.
+        unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+        let at = text.find("── there").unwrap_or_else(|| panic!("there's heading: {text}"));
+        let named = text.find("claude's command · left running").unwrap_or_else(|| panic!("named: {text}"));
+        assert!(named > at, "under its session: {text}");
+        assert!(text[named..].contains(&format!("pid {pid}")), "{text}");
+        let _ = other;
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     /// A session's share (the session list's column): its children's CPU and memory with what they started,
     /// not tarae's own row nor another session's; none of its processes listed — nothing said.
     #[test]
@@ -1601,6 +2008,7 @@ mod tests {
                 title: "rust-analyzer".into(),
                 what: "~/w".into(),
                 session: None,
+                at: None,
             },
             Known {
                 pid: 5,
@@ -1608,6 +2016,7 @@ mod tests {
                 title: "terminal".into(),
                 what: "fish".into(),
                 session: None,
+                at: None,
             },
         ];
         let held = [Held { name: "pyright".into(), root: "/w".into(), what: String::new() }];
@@ -1657,6 +2066,7 @@ mod tests {
             title: title.into(),
             what: String::new(),
             session,
+            at: None,
         };
         let known = [
             k(2, Kind::Spare, "claude", None),
@@ -1695,6 +2105,53 @@ mod tests {
         assert_eq!(summed(&rows, &[5, 6]), Some((41.0, 230 * MB)));
         // A heading keeps its row a look later, as a process does
         assert!(rows[6].same(&rows[6].clone()) && !rows[6].same(&rows[3]) && !rows[6].same(&rows[7]));
+    }
+
+    /// #100: what a session started stays under it after its run is gone — remembered with when it started
+    /// (a later process given the same pid isn't it) — and a child of tarae's nothing names goes under the
+    /// session whose checkout it works in; elsewhere, it's shared.
+    #[test]
+    fn what_a_session_started_stays_its_own() {
+        let at = |mut o: Os, dir: &str| {
+            o.cwd = Some(dir.into());
+            o
+        };
+        let s = sample(vec![
+            os(1, 0, "tarae"),
+            os(8, 1, "ra-swap-tool"),
+            at(os(9, 1, "swap-helper"), "/wt/ra-swap/tools"),
+            at(os(10, 1, "elsewhere"), "/tmp"),
+            os(11, 1, "sleep"),
+        ]);
+        let remembered = |pid, started| Known {
+            pid,
+            kind: Kind::Other,
+            title: "claude's command · left running".into(),
+            what: "ra-swap-tool swap-on".into(),
+            session: Some(1),
+            at: Some(started),
+        };
+        // (pid 11's start doesn't match what was remembered: another process now)
+        let known = [remembered(8, 1_001), remembered(11, 500)];
+        let groups = [
+            Group { id: 0, name: "main".into(), root: "/w".into() },
+            Group { id: 1, name: "ra-swap".into(), root: "/wt/ra-swap".into() },
+        ];
+        let rows = rows(&s, &known, 1, &[], &groups, 1_060);
+        let got: Vec<(u32, &str, Option<SessionId>)> =
+            rows.iter().map(|r| (r.pid, r.title.as_str(), r.session)).collect();
+        assert_eq!(
+            got,
+            [
+                (1, "tarae", None),
+                (10, "elsewhere", None),
+                (11, "sleep", None),
+                (0, "main", Some(0)),
+                (0, "ra-swap", Some(1)),
+                (8, "claude's command · left running", Some(1)),
+                (9, "swap-helper", Some(1)),
+            ]
+        );
     }
 
     /// Busy: most of a core at every look for `BUSY_FOR` — not sooner, not for the user's own runs (a

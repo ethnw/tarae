@@ -2625,8 +2625,8 @@ impl Editor {
     }
 
     /// `C-q` while a card is up gives it the keys from wherever they are (#24); while it has them, its
-    /// answers answer it and Esc gives them back unanswered (#25) — other keys are swallowed, saying what it
-    /// asks. True if the key was the card's.
+    /// answers answer it and Esc — or `C-q` again — gives them back unanswered (#25, #94), the card staying
+    /// up — other keys are swallowed, saying what it asks. True if the key was the card's.
     fn card_key(&mut self, key: Key) -> bool {
         let up = self.offers.first().is_some_and(|o| !o.installing());
         if !up || self.picker.is_some() || self.prompt.is_some() {
@@ -2634,7 +2634,10 @@ impl Editor {
             return false;
         }
         if key.ctrl && !key.alt && key.code == Code::Char('q') {
-            self.card_keys = true;
+            self.card_keys = !self.card_keys;
+            if !self.card_keys {
+                self.set_status("keys back — the card waits, C-q answers it");
+            }
             return true;
         }
         if !self.card_keys {
@@ -2687,7 +2690,12 @@ impl Editor {
             && self.prompt.is_none()
         {
             if !self.go_to_waiting_card() {
-                self.set_status("no card waits for you");
+                // (one about to come — its call held back until the run before it ends: said, #5)
+                match self.cards_coming().as_slice() {
+                    [] => self.set_status("no card waits for you"),
+                    [one] => self.set_status(format!("no card yet — {one}'s comes once its run ends")),
+                    many => self.set_status(format!("no card yet — {}'s come as runs end", many.join(", "))),
+                }
             }
             return;
         }
@@ -5759,12 +5767,13 @@ mod tests {
         assert!(matches!(&o.what, crate::offer::What::Run(r) if r.cmd == command));
         assert_eq!((o.title.as_str(), o.question.as_str()), ("Claude wants to run", command.as_str()));
         assert!(o.weighty(), "y must have been in sight a moment to count");
-        // Another command while that one is asked about isn't stacked
+        // Another command while that one is asked about waits on a card of its own, under it (#5: refused,
+        // Claude sent it again and again)
         let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
             "params": {"name": "run", "arguments": {"command": "rm -rf x"}}});
-        let r = crate::tools::mcp(&mut ed, 0, "c1", &msg).expect("answered now");
-        assert!(r["result"]["isError"] == true, "{r}");
-        assert_eq!(ed.offers.len(), 1);
+        assert!(crate::tools::mcp(&mut ed, 0, "c1", &msg).is_none(), "answered from its card");
+        assert_eq!(ed.offers.len(), 2);
+        assert!(matches!(&ed.offers[1].what, crate::offer::What::Run(r) if r.cmd == "rm -rf x"));
         ed.offer_dismiss();
         settle_for(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
         let answer = tool_answer(&log);
@@ -8597,7 +8606,7 @@ mod tests {
         std::fs::remove_dir_all(&repo).ok();
     }
 
-    /// The chat shows the sessions: a tab row under its header (`●` working, `▲` waiting for you, `+` new);
+    /// The chat shows the sessions: a tab row under its header (`●` working, `▲ waits` for you, `+` new);
     /// where it doesn't fit, one dropdown with how many others wait. A tab click switches the whole session;
     /// with no chat, the status line's chip names the session and the count, and a click on it opens the
     /// list.
@@ -8628,12 +8637,12 @@ mod tests {
         };
         let r = rows(&mut ed, 200);
         // (the checkout tarae started in by its branch)
-        let tabs = r.iter().position(|r| r.contains("main │ fix-login-everywhere │ parser ▲ │ +"));
+        let tabs = r.iter().position(|r| r.contains("main │ fix-login-everywhere │ parser ▲ waits │ +"));
         let tabs = tabs.unwrap_or_else(|| panic!("the tabs: {r:#?}"));
         assert!(r[tabs - 2].contains("claude") && r[tabs - 1].contains("────"), "under its header: {r:#?}");
         // Narrow: the dropdown
         let r = rows(&mut ed, 100);
-        assert!(r.iter().any(|r| r.contains("◂ main ▾ 1/3 ▲1 ▸")), "{r:#?}");
+        assert!(r.iter().any(|r| r.contains("◂ main ▾ 1/3 ▲1 waiting ▸")), "{r:#?}");
         // A click on a tab: that session, whole
         let r = rows(&mut ed, 200);
         let x = r[tabs].find("fix-login").map(|b| r[tabs][..b].chars().count()).unwrap();
@@ -8642,7 +8651,7 @@ mod tests {
         // No chat there: the chip, then the list from it
         let r = rows(&mut ed, 120);
         let status = r.iter().position(|r| r.contains("NORMAL")).expect("the status line");
-        assert!(r[status].contains("NORMAL ▌  fix-login-everywhere ▲1"), "{}", r[status]);
+        assert!(r[status].contains("NORMAL ▌  fix-login-everywhere ▲1 waiting"), "{}", r[status]);
         let x = r[status].find("fix-login").map(|b| r[status][..b].chars().count()).unwrap();
         ed.handle_mouse(Mouse { kind: MouseKind::Down, x: x as u16, y: status as u16, alt: false });
         assert!(ed.picker.as_ref().is_some_and(|p| p.keys), "the list");

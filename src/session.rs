@@ -110,12 +110,26 @@ pub struct Session {
     /// front · Claude's waiting on one has been said (once while it's behind).
     pub parked: Vec<crate::offer::Offer>,
     pub waiting_told: bool,
+    /// Since when its Claude has waited for you (`Doing::Waiting`, kept by `sessions_sync`) — with its cards'
+    /// own times, which session `C-q` goes to first (#90).
+    pub waiting_since: Option<Instant>,
+    /// Its Claude ended a turn while it was behind, and it hasn't been in front since — its tab says `done`
+    /// (#86: not the `▲` of a card waiting).
+    pub turn_done: bool,
     /// Its documents whose servers stopped while it rested behind (`lsp_rest`) — attached again when it's in
     /// front, or its Claude starts a turn.
     pub asleep: Vec<DocId>,
     /// Its Claude's tool calls waiting for the editor's answer (`tools::WATCHED`) — one silent past its time
     /// marks the session possibly stuck (`Doing::Stuck`).
     pub tool_waits: Vec<ToolWait>,
+    /// Claude's commands the user said yes to while another ran — each runs when the one before ends.
+    pub runs_next: std::collections::VecDeque<crate::tools::Next>,
+    /// Its Claude's calls waiting on a card for the user's answer (`offer::Asking`) — each card must be up
+    /// (in front) or parked (behind) until it's answered; one gone is told (`asking_sync`).
+    pub asking: Vec<crate::offer::Asking>,
+    /// The processes it started (runs, tasks, tests) while the OS still shows them — `:procs` and Claude's
+    /// `procs` keep them under it after their run is closed or replaced (#100).
+    pub spawned: Vec<crate::procs::Spawned>,
     /// The code review's viewed marks, by file — kept past the review (#9: reopened, they were gone) while the
     /// file's diff is what it was when marked (`codereview::Viewed`).
     pub viewed: std::collections::HashMap<PathBuf, crate::codereview::Viewed>,
@@ -208,8 +222,13 @@ impl Session {
             restorable: None,
             parked: Vec::new(),
             waiting_told: false,
+            waiting_since: None,
+            turn_done: false,
             asleep: Vec::new(),
             tool_waits: Vec::new(),
+            runs_next: Default::default(),
+            asking: Vec::new(),
+            spawned: Vec::new(),
             viewed: Default::default(),
         }
     }
@@ -264,8 +283,10 @@ pub enum Doing {
     Idle,
     /// Answering — `●`.
     Working,
-    /// Waiting for your answer: a card of its, an edit to review — `▲` (before working: it's both).
+    /// Waiting for your answer: a card of its, an edit to review — `▲ waits` (before working: it's both).
     Waiting,
+    /// Its turn ended while it was behind, not looked at since — `done` (#86).
+    Done,
     /// Possibly stuck: a call to one of tarae's tools has had no answer for `secs` — `◦ symbols 42s`
     /// (`said`). Before working: the work may be going nowhere.
     Stuck {
@@ -302,6 +323,8 @@ impl Editor {
             Doing::Stuck { tool: w.tool, secs: w.since.elapsed().as_secs() }
         } else if l.chat.as_ref().is_some_and(crate::chat::Chat::busy) {
             Doing::Working
+        } else if l.turn_done && !front {
+            Doing::Done
         } else {
             Doing::Idle
         }
@@ -352,27 +375,46 @@ impl Editor {
         self.sessions.iter().filter(|l| self.doing(l) == Doing::Waiting).count()
     }
 
-    /// How many of Claude's questions wait behind the card up — cards stacked under it, its chat's reads and
-    /// edits queued (parallel calls queued silently), a change set's files, and what waits in sessions
-    /// behind (#7: the card's `1/N`).
-    pub fn cards_behind(&self) -> usize {
+    /// How many of Claude's questions wait — here: the cards up (the front one too), its chat's reads and
+    /// edits queued (parallel calls queued silently), a change set's files — and in sessions behind (#7; #91:
+    /// one `1/N` mixed the two, the card's `1/2 here · 1 elsewhere` keeps them apart).
+    pub fn cards_waiting(&self) -> (usize, usize) {
         let queued = |l: &Session| {
             l.chat.as_ref().map_or(0, |c| {
                 c.reads.len() + c.edits.queue.len() + c.edits.sets.iter().map(|s| s.waiting()).sum::<usize>()
             })
         };
-        let behind: usize =
+        let elsewhere: usize =
             self.sessions.iter().map(|l| l.parked.iter().filter(|o| o.claudes()).count() + queued(l)).sum();
-        self.offers.len().saturating_sub(1) + queued(&self.session) + behind
+        (self.offers.len() + queued(&self.session), elsewhere)
     }
 
-    /// `C-q` with no card up in front (#7): to the first session behind whose Claude waits for you — its card
-    /// comes up there. False: none waits.
+    /// `C-q` with no card up in front (#7): to the session behind whose Claude has waited for you longest —
+    /// its oldest card's time, else since it began to wait (#90: the first in the list wasn't the one you
+    /// expected) — its card comes up there. False: none waits.
     pub(crate) fn go_to_waiting_card(&mut self) -> bool {
-        let Some(id) = self.sessions.iter().find(|l| self.doing(l) == Doing::Waiting).map(|l| l.id) else {
-            return false;
+        let since = |l: &Session| {
+            let cards = l.parked.iter().filter(|o| o.claudes()).map(|o| o.since);
+            cards.chain(l.waiting_since).min().unwrap_or_else(Instant::now)
         };
+        let waiting = self.sessions.iter().filter(|l| self.doing(l) == Doing::Waiting);
+        let Some(id) = waiting.min_by_key(|l| since(l)).map(|l| l.id) else { return false };
         self.session_switch(id)
+    }
+
+    /// Sessions whose Claude is about to ask (its next call needs a card, held back by claude until the one
+    /// running ends — #5): their names, for `C-q` finding no card yet.
+    pub(crate) fn cards_coming(&self) -> Vec<String> {
+        std::iter::once(&self.session)
+            .chain(&self.sessions)
+            .filter(|l| l.chat.as_ref().is_some_and(|c| c.busy() && c.asks_next(&self.config.llm.run_allow)))
+            .map(|l| l.label().to_string())
+            .collect()
+    }
+
+    /// How many sessions behind ended a turn you haven't looked at (`Doing::Done`).
+    pub fn sessions_done(&self) -> usize {
+        self.sessions.iter().filter(|l| self.doing(l) == Doing::Done).count()
     }
 
     /// How many sessions behind are possibly stuck (`Doing::Stuck`) — `◦n` where their tabs aren't drawn.
@@ -423,8 +465,14 @@ impl Editor {
     /// one of the front session's files uses never rests.
     pub(crate) fn sessions_sync(&mut self) {
         self.session_list_sync();
+        self.asking_sync();
         if self.sessions.is_empty() {
             return;
+        }
+        // (since when each one waits for you — `C-q` goes to the longest first)
+        let waits: Vec<bool> = self.sessions.iter().map(|l| self.doing(l) == Doing::Waiting).collect();
+        for (l, waits) in self.sessions.iter_mut().zip(waits) {
+            l.waiting_since = waits.then(|| l.waiting_since.unwrap_or_else(Instant::now));
         }
         let in_front = |ed: &Editor, cid| {
             ed.docs.iter().any(|d| ed.session.docs.contains(&d.id) && d.lsp.clients().any(|c| c == cid))
@@ -449,6 +497,56 @@ impl Editor {
             .collect();
         for id in woken {
             self.attach_lsp(id);
+        }
+    }
+
+    /// Every event (#94): a call of Claude's waiting on a card whose card is neither up (in front) nor parked
+    /// (behind) — lost, not answered — is told so at once (`offer::LOST`) and stops waiting, and the user
+    /// hears which. Nothing waits on a card nobody can see: a phantom held every run of a session until its
+    /// turn ended.
+    pub(crate) fn asking_sync(&mut self) {
+        let mut lost: Vec<(SessionId, crate::offer::Asking)> = Vec::new();
+        let front = self.session.id;
+        let take = |l: &mut Session, up: &[u64], lost: &mut Vec<(SessionId, crate::offer::Asking)>| {
+            let here: Vec<u64> = l.parked.iter().map(|o| o.id).chain(up.iter().copied()).collect();
+            let (keep, gone): (Vec<_>, Vec<_>) = l.asking.drain(..).partition(|a| here.contains(&a.card));
+            l.asking = keep;
+            lost.extend(gone.into_iter().map(|a| (l.id, a)));
+        };
+        let up: Vec<u64> = self.offers.iter().map(|o| o.id).collect();
+        take(&mut self.session, &up, &mut lost);
+        for l in &mut self.sessions {
+            take(l, &[], &mut lost);
+        }
+        for (id, a) in lost {
+            let tell = move |ed: &mut Editor| {
+                crate::log::line(
+                    "cards",
+                    "lost",
+                    &format!("a card was lost with its call waiting: {}", a.what),
+                );
+                match a.asker {
+                    crate::offer::Asker::Tool(call) => {
+                        crate::tools::answer(ed, call, Err(crate::offer::LOST.into()))
+                    }
+                    crate::offer::Asker::Permission { request_id, generation } => {
+                        if ed.session.chat.as_ref().is_some_and(|c| c.generation() == generation) {
+                            let deny =
+                                serde_json::json!({ "behavior": "deny", "message": crate::offer::LOST });
+                            crate::chat::respond(ed, &request_id, deny);
+                        }
+                    }
+                }
+                let msg = ed.said_by_session(format!(
+                    "a card went missing ({}) — Claude was told nothing ran",
+                    a.what
+                ));
+                ed.set_warning(msg);
+            };
+            match id == front {
+                true => tell(self),
+                false => self.with_session(id, tell),
+            }
         }
     }
 
@@ -587,6 +685,7 @@ impl Editor {
         }
         self.offers.append(&mut self.session.parked);
         self.session.waiting_told = false;
+        self.session.turn_done = false;
         crate::edits::next(self);
         crate::follow::session_in(self);
         // (which one is in front is kept too — `:restart` and the next start come back to it)
@@ -660,16 +759,16 @@ mod tests {
         ed.session.parked.push(screen_card(1));
         assert!(ed.session_switch(0) && ed.session.root == front);
         assert_eq!(ed.sessions_waiting(), 1);
-        // In front: one card up, one under it — and the one behind
+        // In front: one card up, one under it — and the one behind, counted apart (#91)
         ed.push_offer(screen_card(2));
         ed.push_offer(screen_card(3));
-        assert_eq!(ed.cards_behind(), 2);
+        assert_eq!(ed.cards_waiting(), (2, 1));
         let mut bytes = Vec::new();
         crate::term::render(&mut ed, &mut bytes, 120, 30).unwrap();
         let mut parser = vt100::Parser::new(30, 120, 0);
         parser.process(&bytes);
         let s = parser.screen().contents();
-        assert!(s.contains("Claude asks 2") && s.contains("1/3"), "{s}");
+        assert!(s.contains("Claude asks 2") && s.contains("1/2 here · 1 elsewhere"), "{s}");
         // C-q with cards up here: the card's (it takes the keys)
         feed(&mut ed, "<C-q>");
         assert!(ed.card_keys && ed.session.id == 0);
@@ -684,6 +783,331 @@ mod tests {
         feed(&mut ed, "<C-q>");
         assert_eq!(ed.session.id, back_id);
         assert!(ed.status.as_ref().is_some_and(|s| s.0.contains("no card waits")), "{:?}", ed.status);
+    }
+
+    /// #90: `C-q` goes to the session whose card has waited longest — not the first in the list — and the
+    /// card up there names its session; #91: its count keeps here and elsewhere apart.
+    #[test]
+    fn c_q_goes_to_the_card_waiting_longest_and_names_its_session() {
+        use crate::offer::{Offer, What};
+        let (mut ed, front, back) = two_projects("longest");
+        let third = front.with_file_name("third");
+        std::fs::create_dir_all(&third).unwrap();
+        let card = |n: u64, ago: u64| {
+            let what = What::Screen { call: crate::tools::Call::test(n) };
+            let mut o = Offer::new(format!("Claude asks {n}"), "to see the screen", "", String::new(), what);
+            o.since = Instant::now() - Duration::from_secs(ago);
+            o
+        };
+        let back_id = ed.session_open(&back).unwrap();
+        let third_id = ed.session_open(&third).unwrap();
+        assert!(ed.session_switch(0));
+        // `back` is first in the list, but `third`'s card came earlier
+        session_by_mut(&mut ed, back_id).parked.push(card(1, 5));
+        session_by_mut(&mut ed, third_id).parked.push(card(2, 60));
+        session_by_mut(&mut ed, third_id).parked.push(card(3, 1));
+        assert_eq!(ed.cards_waiting(), (0, 3));
+        feed(&mut ed, "<C-q>");
+        assert_eq!(ed.session.id, third_id, "the one that waited longest");
+        assert_eq!(ed.cards_waiting(), (2, 1), "its two here, back's elsewhere");
+        let rows = screen(&mut ed, 140, 30);
+        let head = rows.iter().find(|r| r.contains("Claude asks 2")).expect("its card");
+        assert!(head.contains("third · Claude asks 2"), "named: {head}");
+        assert!(head.contains("1/2 here · 1 elsewhere"), "{head}");
+        // Answered there: the next C-q goes to back
+        ed.offers.clear();
+        feed(&mut ed, "<C-q>");
+        assert_eq!(ed.session.id, back_id);
+        let rows = screen(&mut ed, 140, 30);
+        assert!(
+            rows.iter().any(|r| r.contains("back · Claude asks 1") && !r.contains("elsewhere")),
+            "{rows:#?}"
+        );
+        std::fs::remove_dir_all(front.parent().unwrap()).ok();
+    }
+
+    /// #86: a session behind whose turn ends — its card that waited goes with the turn (the front's stays),
+    /// and its tab says `done`, not the `▲ waits` of a card; looked at, the mark goes.
+    #[test]
+    fn a_turn_ended_behind_says_done_not_waits() {
+        use crate::offer::{Offer, What};
+        let (mut ed, front, back) = two_projects("done");
+        let log = back.join("claude-heard.log");
+        claude_calls(&mut ed, &log, &[]);
+        let screen_card = |n: u64| {
+            let what = What::Screen { call: crate::tools::Call::test(n) };
+            Offer::new(format!("Claude asks {n}"), "to see the screen", "", String::new(), what)
+        };
+        let (id, _) = back_at_work(&mut ed, &back);
+        // A card of back's waits behind; one of front's is up
+        session_by_mut(&mut ed, id).parked.push(screen_card(1));
+        ed.push_offer(screen_card(2));
+        assert_eq!(ed.doing(session_by(&ed, id)), Doing::Waiting);
+        feed(&mut ed, "<space>l");
+        let end = Instant::now() + Duration::from_secs(10);
+        while session_by(&ed, id).chat.as_ref().unwrap().busy() {
+            assert!(Instant::now() < end, "back's turn ends");
+            if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
+        assert!(session_by(&ed, id).parked.is_empty(), "its card went with its turn");
+        assert_eq!(ed.offers.len(), 1, "the front's card stays");
+        assert_eq!(ed.doing(session_by(&ed, id)), Doing::Done);
+        assert_eq!((ed.sessions_waiting(), ed.sessions_done()), (0, 1));
+        // (front's own card up: front waits; back is done)
+        let tabs = |ed: &mut Editor| {
+            let rows = screen(ed, 160, 24);
+            rows.iter().find(|r| r.contains(" │ +")).cloned().unwrap_or_else(|| panic!("{rows:#?}"))
+        };
+        let row = tabs(&mut ed);
+        assert!(row.contains("front ▲ waits │ back done │ +"), "{row}");
+        ed.offers.clear();
+        let row = tabs(&mut ed);
+        assert!(row.contains("back done") && !row.contains('▲'), "{row}");
+        // A card waiting says so apart
+        session_by_mut(&mut ed, id).parked.push(screen_card(3));
+        let row = tabs(&mut ed);
+        assert!(row.contains("back ▲ waits"), "{row}");
+        session_by_mut(&mut ed, id).parked.clear();
+        // The status line's chip with no chat up counts them apart
+        ed.session.chat = None;
+        let rows = screen(&mut ed, 160, 24);
+        let status = rows.iter().find(|r| r.contains("NORMAL")).unwrap_or_else(|| panic!("{rows:#?}"));
+        assert!(status.contains("front 1 done") && !status.contains('▲'), "{status}");
+        // Looked at: no longer done
+        assert!(ed.session_switch(id));
+        assert!(ed.session_switch(0));
+        assert_eq!(ed.doing(session_by(&ed, id)), Doing::Idle);
+        std::fs::remove_dir_all(front.parent().unwrap()).ok();
+    }
+
+    /// #11 (frictions3): a run card up in front, its call pending — `C-q`, a `y` too soon (refused), Esc —
+    /// and meanwhile another session's turn ends behind. The card stays up, `C-q` finds it, and the call is
+    /// still the card's to answer (it was gone from the screen, the call pending for minutes, `C-q` saying
+    /// no card waits: the session behind's turn end had swept the front's run cards). #94: a Read outside
+    /// the project asked while the run card is up waits under it — and is the card up once the run's is
+    /// answered (it was swept too: its call pending, no card, `C-q` saying none waits).
+    #[test]
+    fn a_pending_calls_card_stays_when_another_session_ends_its_turn() {
+        let (mut ed, front, back) = two_projects("pending-card");
+        let made = front.join("made");
+        let log = front.join("claude-heard.log");
+        // Front's Claude: a run that asks, and with it a Read outside the project (back's file)
+        let run = json!({"type": "control_request", "request_id": "q-run", "request": {
+            "subtype": "mcp_message", "server_name": "tarae", "message": {"jsonrpc": "2.0", "id": 1,
+            "method": "tools/call", "params": {"name": "run",
+            "arguments": {"command": format!("touch {}", made.display())}}}}});
+        let read = json!({"type": "control_request", "request_id": "q-Read", "request": {
+            "subtype": "can_use_tool", "tool_name": "Read",
+            "input": {"file_path": back.join("main.rs").display().to_string()}}});
+        let result = json!({"type": "result", "result": "done"});
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec![
+            "-c".into(),
+            format!(
+                "while read -r line; do case \"$line\" in '{{\"message\"'*) ;; *) continue;; esac; \
+                 printf '%s\\n' '{run}'; printf '%s\\n' '{read}'; n=0; while read -r l; do \
+                 printf '%s\\n' \"$l\" >> '{log}'; case \"$l\" in *'\"q-run\"'*|*'\"q-Read\"'*) n=$((n+1));; esac; \
+                 [ $n -ge 2 ] && break; done; printf '%s\\n' '{result}'; done",
+                log = log.display()
+            ),
+        ];
+        feed(&mut ed, "<space>lmake it<ret>");
+        let is = |ed: &Editor, i: usize, read: bool| {
+            ed.offers.get(i).is_some_and(|o| match read {
+                true => matches!(o.what, crate::offer::What::Read { .. }),
+                false => matches!(o.what, crate::offer::What::Run(_)),
+            })
+        };
+        let end = Instant::now() + Duration::from_secs(10);
+        while !(is(&ed, 0, false) && is(&ed, 1, true)) {
+            assert!(Instant::now() < end, "front's run card, and the Read's under it");
+            if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
+        let is_run = |ed: &Editor| is(ed, 0, false);
+        // C-q, a `y` before it settled (swallowed), Esc: the keys back, the card still up
+        feed(&mut ed, "<C-q>y<esc>");
+        assert!(is_run(&ed) && !ed.card_keys, "Esc gives the keys back, never drops the card");
+        // Another session's Claude ends a turn behind
+        let back_log = back.join("claude-heard.log");
+        claude_calls(&mut ed, &back_log, &[]);
+        let (id, _) = back_at_work(&mut ed, &back);
+        let end = Instant::now() + Duration::from_secs(10);
+        while session_by(&ed, id).chat.as_ref().unwrap().busy() {
+            assert!(Instant::now() < end, "back's turn ends");
+            if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
+        assert!(is_run(&ed), "front's card is still up");
+        assert!(is(&ed, 1, true), "and the Read's under it");
+        assert!(answered(&log, "run").is_none(), "its call still waits for the card");
+        feed(&mut ed, "<C-q>");
+        assert!(ed.card_keys, "C-q finds it");
+        // …and it's answered from there
+        std::thread::sleep(crate::offer::SETTLE + Duration::from_millis(50));
+        ed.offer_accept();
+        let end = Instant::now() + Duration::from_secs(10);
+        while answered(&log, "run").is_none() {
+            assert!(Instant::now() < end, "Claude hears how it ran");
+            if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
+        assert!(made.exists());
+        // The run's card answered: the Read's is the one up, `C-q` finds it, and `y` lets it read
+        assert!(
+            is(&ed, 0, true),
+            "the Read's card up: {:?}",
+            ed.offers.iter().map(|o| &o.title).collect::<Vec<_>>()
+        );
+        assert!(answered(&log, "Read").is_none());
+        ed.card_keys = false;
+        feed(&mut ed, "<C-q>");
+        assert!(ed.card_keys, "C-q finds it");
+        ed.offer_accept();
+        let end = Instant::now() + Duration::from_secs(10);
+        while answered(&log, "Read").is_none() {
+            assert!(Instant::now() < end, "Claude hears the Read's answer");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(answered(&log, "Read").is_some_and(|a| a.contains("allow")), "{:?}", answered(&log, "Read"));
+        std::fs::remove_dir_all(front.parent().unwrap()).ok();
+    }
+
+    /// #94 (ra-swap, as met): a run card waits in a session behind; `C-q` goes there, its card up; `C-q`
+    /// gives it the keys (CARD); `C-q` again gives them back — the card stays up — and `C-q` brings them to
+    /// it again. Meanwhile the other session's turn ends behind: the card stays up with the keys (it had
+    /// vanished for good, `C-q` saying no card waits, the run pending until its turn was stopped), and `y`
+    /// answers it.
+    #[test]
+    fn c_q_on_a_card_with_the_keys_never_drops_it() {
+        let (mut ed, front, back) = two_projects("c-q-twice");
+        let (front_log, back_log) = (front.join("claude-heard.log"), back.join("claude-heard.log"));
+        let pump = |ed: &mut Editor, done: &dyn Fn(&Editor) -> bool, what: &str| {
+            let end = Instant::now() + Duration::from_secs(10);
+            while !done(ed) {
+                assert!(Instant::now() < end, "{what}");
+                if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
+                    ed.handle_event(ev);
+                }
+            }
+        };
+        let runs = |cards: &[crate::offer::Offer]| {
+            cards.iter().any(|o| matches!(o.what, crate::offer::What::Run(_)))
+        };
+        // Back's Claude asks to run, behind
+        let made = back.join("made");
+        claude_calls(
+            &mut ed,
+            &back_log,
+            &[("run", json!({ "command": format!("touch {}", made.display()) }))],
+        );
+        let (id, _) = back_at_work(&mut ed, &back);
+        pump(&mut ed, &|ed| runs(&session_by(ed, id).parked), "back's card, parked");
+        // Front's Claude at work (waiting on its server), to end its turn later
+        claude_calls(&mut ed, &front_log, &[("symbols", json!({ "path": "main.rs" }))]);
+        feed(&mut ed, "<space>lgo<ret><esc>");
+        pump(&mut ed, &|ed| !ed.session.tool_waits.is_empty(), "front's Claude asked its server");
+        // C-q: to back, its card up · C-q: the keys · C-q: back · C-q: the keys again
+        feed(&mut ed, "<C-q>");
+        assert!(ed.session.id == id && runs(&ed.offers), "C-q goes to the card");
+        feed(&mut ed, "<C-q>");
+        assert!(ed.card_keys, "the card has the keys");
+        assert_eq!(ed.keys_at().label(), Some("CARD"));
+        feed(&mut ed, "<C-q>");
+        assert!(!ed.card_keys && runs(&ed.offers), "keys back, the card still up");
+        feed(&mut ed, "<C-q>");
+        assert!(ed.card_keys && runs(&ed.offers), "C-q brings them to it again");
+        // Front's turn ends behind: the card stays, with the keys
+        let end = Instant::now() + Duration::from_secs(10);
+        while session_by(&ed, 0).chat.as_ref().unwrap().busy() {
+            assert!(Instant::now() < end, "front's turn ends");
+            serve(&mut ed, &front.join("main.rs"));
+            if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
+        assert!(runs(&ed.offers) && ed.card_keys, "still up, still with the keys");
+        // …and it's answered
+        let mut out = Vec::new();
+        crate::term::render(&mut ed, &mut out, 140, 30).unwrap();
+        std::thread::sleep(crate::offer::SETTLE + Duration::from_millis(50));
+        crate::term::render(&mut ed, &mut out, 140, 30).unwrap();
+        feed(&mut ed, "y");
+        pump(&mut ed, &|_| answered(&back_log, "run").is_some(), "back's Claude hears how it ran");
+        assert!(made.exists());
+        std::fs::remove_dir_all(front.parent().unwrap()).ok();
+    }
+
+    /// #94 (ra-swap): a session behind asking to run while the front has a run card up isn't refused ("the
+    /// user hasn't answered your last command" — the front's card, which its own screen never showed): it
+    /// gets a card of its own, parked, that `C-q` reaches. And a card lost by some fault never leaves its
+    /// call waiting unseen: the call is told nothing ran, and the user hears which card it was.
+    #[test]
+    fn no_call_waits_on_a_card_nobody_can_see() {
+        let (mut ed, front, back) = two_projects("phantom");
+        let (front_log, back_log) = (front.join("claude-heard.log"), back.join("claude-heard.log"));
+        let run = |dir: &Path| json!({ "command": format!("touch {}", dir.join("made").display()) });
+        claude_calls(&mut ed, &front_log, &[("run", run(&front))]);
+        feed(&mut ed, "<space>lfront<ret><esc>");
+        let pump = |ed: &mut Editor, done: &dyn Fn(&Editor) -> bool, what: &str| {
+            let end = Instant::now() + Duration::from_secs(10);
+            while !done(ed) {
+                assert!(Instant::now() < end, "{what}");
+                if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
+                    ed.handle_event(ev);
+                }
+            }
+        };
+        let runs = |cards: &[crate::offer::Offer]| {
+            cards.iter().any(|o| matches!(o.what, crate::offer::What::Run(_)))
+        };
+        pump(&mut ed, &|ed| runs(&ed.offers), "front's run card");
+        // Back's Claude asks to run too, behind, while front's card is up: its own card, parked
+        claude_calls(&mut ed, &back_log, &[("run", run(&back))]);
+        let (id, _) = back_at_work(&mut ed, &back);
+        pump(&mut ed, &|ed| runs(&session_by(ed, id).parked), "back's own card, parked");
+        assert!(answered(&back_log, "run").is_none(), "not refused: {:?}", answered(&back_log, "run"));
+        // Front's answered (no): C-q goes to back's, up there
+        std::thread::sleep(crate::offer::SETTLE);
+        ed.offer_dismiss();
+        assert!(!runs(&ed.offers));
+        feed(&mut ed, "<C-q>");
+        assert_eq!(ed.session.id, id, "C-q reaches it");
+        assert!(runs(&ed.offers), "its card up");
+        // Lost by a fault (gone without an answer): the call is told, the user hears it
+        ed.offers.clear();
+        ed.asking_sync();
+        pump(&mut ed, &|_| answered(&back_log, "run").is_some(), "back's call told");
+        let told = answered(&back_log, "run").unwrap();
+        assert!(told.contains("was lost before they could answer") && told.contains("isError"), "{told}");
+        assert!(ed.session.asking.is_empty(), "nothing waits any more");
+        let said = ed.messages.iter().map(|m| m.2.clone()).collect::<Vec<_>>().join(" | ");
+        assert!(said.contains("a card went missing (Claude wants to run)"), "{said}");
+        assert!(!back.join("made").exists(), "nothing ran");
+        // …the same behind: its parked card lost, told in its session, named
+        let front_log = front.join("claude-heard-again.log");
+        claude_calls(&mut ed, &front_log, &[("run", run(&front))]);
+        assert!(ed.session_switch(0));
+        ed.session.chat = None;
+        feed(&mut ed, "<space>lagain<ret><esc>");
+        pump(&mut ed, &|ed| runs(&ed.offers), "front's card again");
+        let front_id = ed.session.id;
+        assert!(ed.session_switch(id), "front goes behind, its card parked");
+        session_by_mut(&mut ed, front_id).parked.clear();
+        ed.asking_sync();
+        pump(
+            &mut ed,
+            &|_| answered(&front_log, "run").is_some_and(|a| a.contains("was lost")),
+            "front's call told",
+        );
+        let said = ed.messages.iter().map(|m| m.2.clone()).collect::<Vec<_>>().join(" | ");
+        assert!(said.contains("front · a card went missing"), "named: {said}");
+        std::fs::remove_dir_all(front.parent().unwrap()).ok();
     }
 
     /// Two checkouts, `front` and `back`, each a cargo project with a `main.rs` — and an editor whose rust
@@ -917,7 +1341,8 @@ mod tests {
         }
         assert!(answered(&log, "symbols").is_some_and(|a| a.contains("(fake)")));
         assert!(session_by(&ed, id).tool_waits.is_empty());
-        assert_eq!((ed.doing(session_by(&ed, id)), ed.sessions_stuck()), (Doing::Idle, 0));
+        // (its turn ended behind: done, not looked at yet — #86)
+        assert_eq!((ed.doing(session_by(&ed, id)), ed.sessions_stuck()), (Doing::Done, 0));
         std::fs::remove_dir_all(front.parent().unwrap()).ok();
     }
 

@@ -1280,6 +1280,9 @@ fn output_style(
     }
 }
 
+/// How the task panel and Claude's run row say a run waiting on another cargo's lock (`Run::lock_wait`).
+const LOCK_WAIT_SAID: &str = "waiting for another build (cargo's lock)";
+
 /// The build task's panel (below the code, where tests show theirs): the slot's header (its tab names the
 /// task — `slot_header`; here how it ended, what went into the list `● 2  ▲ 1`, the time, the keys); then
 /// its output, the end showing.
@@ -1328,6 +1331,10 @@ fn draw_task_panel(
     let running = matches!(r.state, State::Running);
     let waving = running && steps.is_none();
     summary.push((when, if waving { Style { fg: ui.accent.fg, ..card } } else { dim }));
+    // (waiting on another cargo — another session's build, likely — not stuck: #10)
+    if running && r.lock_wait {
+        summary.push((format!("   {LOCK_WAIT_SAID}"), dim));
+    }
     // (`space m m` runs the user's task again — not an install, not Claude's command, not tarae's git)
     let mut hints: Vec<(&str, &str)> = match (&r.state, r.found) {
         (State::Running, _) => vec![("space m c", "stop")],
@@ -5507,13 +5514,13 @@ fn draw_statusline(
                 if r.stopped() { ui.status.patch(warn) } else { Style { fg: ui.virt.fg, ..ui.status } };
             left.push(Seg { text: format!(" {}", r.said()), style, keep: CHIP });
         }
-        match editor.sessions_waiting() {
-            0 => {}
-            n => left.push(Seg { text: format!(" ▲{n}"), style: ui.status.patch(warn), keep: CHIP }),
+        // (the others: waiting for you · done, said apart — #86)
+        let [waiting, done] = sessions_counted(editor, false);
+        if !waiting.is_empty() {
+            left.push(Seg { text: waiting, style: ui.status.patch(warn), keep: CHIP });
         }
-        match editor.sessions_stuck() {
-            0 => {}
-            n => left.push(Seg { text: format!(" ◦{n}"), style: ui.status.patch(warn), keep: CHIP }),
+        if !done.is_empty() {
+            left.push(Seg { text: done, style: accent, keep: CHIP });
         }
     }
     if !lay.header {
@@ -6243,6 +6250,24 @@ struct OfferCard {
 /// How many cells a back card is inset on each side relative to the one in front.
 const PEEK_INSET: usize = 2;
 
+/// The card's count from what waits (`Editor::cards_waiting`: here, the card itself among them · in sessions
+/// behind): `1/3` · `1/2 here · 1 elsewhere` · `+1 elsewhere` — nothing when it's alone. With the title it
+/// shares a row with (`title_w`, in `room`): shorter (`1/2 · +1 elsewhere`, `1/2 · +1`) before the title is cut.
+fn card_badge((here, elsewhere): (usize, usize), title_w: usize, room: usize) -> String {
+    let forms = match (here, elsewhere) {
+        (0 | 1, 0) => vec![String::new()],
+        (n, 0) => vec![format!("1/{n}")],
+        (0 | 1, e) => vec![format!("+{e} elsewhere"), format!("+{e}")],
+        (n, e) => vec![
+            format!("1/{n} here · {e} elsewhere"),
+            format!("1/{n} · +{e} elsewhere"),
+            format!("1/{n} · +{e}"),
+        ],
+    };
+    let fits = |b: &String| b.is_empty() || title_w + 2 + b.width() <= room;
+    forms.iter().find(|b| fits(b)).or(forms.last()).cloned().unwrap_or_default()
+}
+
 impl OfferCard {
     fn new(editor: &Editor, lay: &Layout, ui: &Ui) -> Option<Self> {
         use crate::offer::OfferState;
@@ -6254,10 +6279,13 @@ impl OfferCard {
         }
         let pad = card_padding(ui, card_style(ui, editor, "ui.popup"));
         let max_inner = (lay.edit_w / 2).clamp(30, 56).min(lay.edit_w.saturating_sub(8));
-        // (what waits behind it too — queued calls, other sessions' cards, #7)
-        let count = 1 + editor.cards_behind();
-        let badge = if count > 1 { format!("1/{count}") } else { String::new() };
-        let title = o.title.clone();
+        // (with sessions, Claude's card names whose it is — #90: `C-q` landed somewhere unsaid)
+        let title = match !editor.sessions.is_empty() && o.claudes() {
+            true => format!("{} · {}", editor.session.label(), o.title),
+            false => o.title.clone(),
+        };
+        // (what waits behind it too — queued calls here, and other sessions' cards apart, #7/#91)
+        let badge = card_badge(editor.cards_waiting(), title.width(), max_inner);
         // A paragraph wrapped to the card, up to `n` lines (a command to run is shown whole)
         let wrapped = |text: &str, n: usize| -> Vec<(String, bool)> {
             // An indented line (a setting, a command) goes on hanging 4 cells under its own start — its
@@ -6314,6 +6342,9 @@ impl OfferCard {
                     crate::offer::What::Preflight { .. } => b = vec![('y', "Run them"), ('n', "Not now")],
                     crate::offer::What::BranchDelete { .. } => b = vec![('y', "Delete"), ('n', "Keep it")],
                     crate::offer::What::ForcePush(_) => b = vec![('y', "Push"), ('n', "No")],
+                    crate::offer::What::SessionNew(_) if o.base_steps() => {
+                        b = vec![('y', "Make it"), ('b', "Other base"), ('n', "Not now")]
+                    }
                     crate::offer::What::SessionNew(_) => b = vec![('y', "Make it"), ('n', "Not now")],
                     // (work in no commit: no `y` — committing leads, removing takes a capital)
                     crate::offer::What::SessionEnd(_) if o.commits_first() => {
@@ -6376,6 +6407,17 @@ impl OfferCard {
                         warn.extend(v.len()..v.len() + rows.len());
                     }
                     v.extend(rows);
+                }
+                // Claude's calls held back behind it (#87 — claude makes them one after another, so its
+                // reads waited here unseen): which, faint
+                if let crate::offer::What::Run(r) = &o.what {
+                    let behind = crate::chat::behind_run(editor, &r.cmd);
+                    if !behind.is_empty() {
+                        let n = behind.len();
+                        let calls = if n == 1 { "call waits" } else { "calls wait" };
+                        v.push((String::new(), true));
+                        v.extend(wrapped(&format!("{n} more {calls} on this: {}", behind.join(" · ")), 2));
+                    }
                 }
                 // Where its answers go (#24/#25): the keys elsewhere (the chat's input, insert mode, a
                 // review) — `C-q` brings them here, what's being typed stays; brought here — Esc goes back
@@ -7856,12 +7898,30 @@ fn draw_review_rail(
 ///   enter send  esc editor  C-r apply
 /// ```
 /// Returns the input cursor position (when focused).
-/// The sessions under the chat's header (with more than one): `main │ fix-login ● │ new-parser ▲ │ +` — the
-/// one in front strong, `●` its Claude working, `▲` waiting for you, `◦ symbols 42s` possibly stuck (a tool
-/// call unanswered that long), `+` a new one. Where that doesn't fit,
-/// one dropdown: `◂ fix-login ● ▾ 2/3 ▲1 ▸` (the name opens the list, `▲1` = others waiting for you, `◦1`
-/// possibly stuck, the arrows step). Styles: strong, dim, faint, accent, warning · where each click goes
-/// (from the row's start).
+/// The sessions under the chat's header (with more than one): `main │ fix-login ● │ new-parser ▲ waits │
+/// docs done │ +` — the one in front strong, `●` its Claude working, `▲ waits` a card (or an edit) waiting for
+/// you, `done` a turn that ended behind and hasn't been looked at, `◦ symbols 42s` possibly stuck (a tool
+/// call unanswered that long), `+` a new one. Where that doesn't fit, one dropdown: `◂ fix-login ● ▾ 2/3
+/// ▲1 waiting 1 done ▸` (the name opens the list, `◦1` possibly stuck, the arrows step). Styles: strong,
+/// dim, faint, accent, warning · where each click goes (from the row's start).
+/// The other sessions as the dropdown and the status line's chip count them: ` ▲2 waiting` (a card or an
+/// edit waits for you — `◦1` too when some may be stuck) · ` 1 done` (a turn ended, not looked at) —
+/// each empty when none (#86: one `▲N` counted both). `compact`: ` ▲2` (where the room is the name's).
+fn sessions_counted(editor: &Editor, compact: bool) -> [String; 2] {
+    let word = if compact { "" } else { " waiting" };
+    let waiting = match (editor.sessions_waiting(), editor.sessions_stuck()) {
+        (0, 0) => String::new(),
+        (n, 0) => format!(" ▲{n}{word}"),
+        (0, k) => format!(" ◦{k}"),
+        (n, k) => format!(" ▲{n}{word} ◦{k}"),
+    };
+    let done = match editor.sessions_done() {
+        0 => String::new(),
+        n => format!(" {n} done"),
+    };
+    [waiting, done]
+}
+
 fn session_tabs(
     editor: &Editor,
     w: usize,
@@ -7872,7 +7932,9 @@ fn session_tabs(
     let sessions = editor.sessions_in_order();
     let mark = |l: &crate::session::Session| match editor.doing(l) {
         Doing::Working => Some(Span { text: " ●".into(), style: accent }),
-        Doing::Waiting => Some(Span { text: " ▲".into(), style: warn }),
+        // (a card waits · a turn ended: said apart — #86, one `▲` meant both)
+        Doing::Waiting => Some(Span { text: " ▲ waits".into(), style: warn }),
+        Doing::Done => Some(Span { text: " done".into(), style: accent }),
         d @ Doing::Stuck { .. } => Some(Span { text: format!(" ◦ {}", d.said()), style: warn }),
         Doing::Idle => None,
     };
@@ -7909,17 +7971,21 @@ fn session_tabs(
     // The dropdown
     let at = sessions.iter().position(|l| l.id == editor.session.id).unwrap_or(0) + 1;
     let count = format!(" {at:>n$}/{}", sessions.len(), n = sessions.len().to_string().len());
-    let waiting = match (editor.sessions_waiting(), editor.sessions_stuck()) {
-        (0, 0) => String::new(),
-        (n, 0) => format!(" ▲{n}"),
-        (0, k) => format!(" ◦{k}"),
-        (n, k) => format!(" ▲{n} ◦{k}"),
-    };
-    let mark = mark(&editor.session);
+    // (its own mark as a glyph, its rebase as main has it, the counts with words while the name keeps its
+    // room — else without)
+    let mark =
+        mark(&editor.session).map(|m| if m.text == " ▲ waits" { Span { text: " ▲".into(), ..m } } else { m });
     let rebasing = rebasing(&editor.session);
     let marks_w = [&mark, &rebasing].iter().filter_map(|m| m.as_ref()).map(|m| m.text.width()).sum::<usize>();
-    let fixed = 2 + marks_w + 2 + count.width() + waiting.width() + 2;
-    let name = fit_ellipsis(editor.session.label(), w.saturating_sub(fixed).max(1));
+    let fixed =
+        |[waiting, done]: &[String; 2]| 2 + marks_w + 2 + count.width() + waiting.width() + done.width() + 2;
+    let label = editor.session.label();
+    let full = sessions_counted(editor, false);
+    let [waiting, done] = match w.saturating_sub(fixed(&full)) >= label.width().min(12) {
+        true => full,
+        false => sessions_counted(editor, true),
+    };
+    let name = fit_ellipsis(label, w.saturating_sub(fixed(&[waiting.clone(), done.clone()])).max(1));
     // (the arrows dim, not faint — they're what a click steps with)
     let mut spans = vec![Span { text: "◂ ".into(), style: dim }, Span { text: name, style: strong }];
     spans.extend(mark);
@@ -7928,6 +7994,9 @@ fn session_tabs(
     spans.push(Span { text: count, style: faint });
     if !waiting.is_empty() {
         spans.push(Span { text: waiting, style: warn });
+    }
+    if !done.is_empty() {
+        spans.push(Span { text: done, style: accent });
     }
     let list_end: usize = spans.iter().map(|s| s.text.width()).sum();
     spans.push(Span { text: " ▸".into(), style: dim });
@@ -8094,10 +8163,19 @@ fn draw_chat(
                     lines.push(Vec::new());
                 }
                 let styles = TrailStyles { faint, dim, string, accent };
-                lines.push(trail_row(look, exploring && i + 1 == n, w, false, &styles));
+                let live = exploring && i + 1 == n;
+                lines.push(trail_row(look, live, w, false, &styles));
                 row_links.resize(lines.len(), None);
                 *row_links.last_mut().expect("just pushed") = look.link.clone();
                 row_calls.push((lines.len() - 1, m.call.as_str()));
+                // (its command waiting on another cargo's lock — said under it, not left looking stuck: #10)
+                let waits =
+                    editor.session.task_run.as_ref().is_some_and(|r| {
+                        r.by_claude && r.lock_wait && r.state == crate::task::State::Running
+                    });
+                if live && look.verb == "run" && waits {
+                    lines.push(vec![sp(format!("  {}", fit_ellipsis(LOCK_WAIT_SAID, w - 2)), faint)]);
+                }
             }
             // Elapsed time dimmed at the right end; stopped/error on the left
             Role::Note => {
@@ -9963,6 +10041,7 @@ mod tests {
                 rev: 0,
                 decided: None,
                 warning: None,
+                since: std::time::Instant::now(),
             });
             let result =
                 serde_json::json!([{"label": "line_one", "detail": "fn line_one()"}, {"label": "lx"}]);
@@ -10738,6 +10817,64 @@ mod tests {
         assert_eq!(lay(&ed).0, TASK_PANEL_MIN, "another task: from the bottom");
         ed.session.task_run = None;
         assert_eq!(lay(&ed).0, 0, "no panel without a run");
+    }
+
+    /// #91: the card's count keeps here and elsewhere apart — and shortens before the title is cut.
+    #[test]
+    fn a_cards_count_says_here_and_elsewhere() {
+        let b = |w: (usize, usize), title: usize| card_badge(w, title, 42);
+        assert_eq!(b((1, 0), 10), "");
+        assert_eq!(b((3, 0), 10), "1/3");
+        assert_eq!(b((1, 2), 10), "+2 elsewhere");
+        assert_eq!(b((2, 1), 10), "1/2 here · 1 elsewhere");
+        assert_eq!(b((2, 1), 21), "1/2 · +1 elsewhere", "a session's name in the title: shorter");
+        assert_eq!(b((2, 1), 30), "1/2 · +1");
+        assert_eq!(b((2, 1), 60), "1/2 · +1", "the shortest when nothing fits");
+    }
+
+    /// #10: a run whose cargo waits on another cargo's lock says so — in the task panel's header and under
+    /// Claude's run row — from cargo's "Blocking waiting for file lock" line until the next line comes.
+    #[test]
+    fn a_run_waiting_on_cargos_lock_says_so() {
+        use crate::task::{Run, State, Task};
+        let mut ed = Editor::new(Config::default());
+        let cmd = "cargo test --lib";
+        let mut r = Run::for_test(Task { name: cmd.into(), cmd: cmd.into(), cwd: std::env::temp_dir() });
+        (r.state, r.by_claude) = (State::Running, true);
+        r.push_line(true, "    Blocking waiting for file lock on build directory".into(), false);
+        assert!(r.lock_wait);
+        ed.session.task_run = Some(r);
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        crate::chat::open(&mut ed);
+        let c = ed.session.chat.as_mut().unwrap();
+        // (the panel, not the minimized card follow mode makes of it while Claude works)
+        (c.state, c.unfolded) = (crate::chat::State::Thinking, true);
+        c.msgs.push(crate::chat::Msg::new(crate::chat::Role::User, "check it", ""));
+        let look = crate::chat::Look {
+            verb: "run",
+            what: cmd.into(),
+            pattern: true,
+            range: String::new(),
+            link: None,
+        };
+        let mut m = crate::chat::Msg::new(crate::chat::Role::Tool, "", "");
+        m.look = Some(look);
+        c.msgs.push(m);
+        let shown = |ed: &mut Editor| -> String {
+            let mut out = Vec::new();
+            render(ed, &mut out, 140, 36).unwrap();
+            let mut vt = vt100::Parser::new(36, 140, 0);
+            vt.process(&out);
+            vt.screen().contents()
+        };
+        let s = shown(&mut ed);
+        assert_eq!(s.matches(LOCK_WAIT_SAID).count(), 2, "the panel's header and the chat's row: {s}");
+        // The lock taken: the next line, and it's gone
+        let r = ed.session.task_run.as_mut().unwrap();
+        r.push_line(true, "   Compiling tarae v0.1.0".into(), false);
+        assert!(!r.lock_wait);
+        assert!(!shown(&mut ed).contains(LOCK_WAIT_SAID));
     }
 
     /// The side panel grows with a wide terminal — up to 12 more columns, the code keeping 100.

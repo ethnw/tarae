@@ -37,6 +37,8 @@ pub struct Offer {
     /// The question's lines that warn what saying yes means — drawn in the warning color (the run-outside
     /// card's "with all your permissions").
     pub warning: Option<std::ops::Range<usize>>,
+    /// When it came (`push_offer`) — `C-q` goes to the session whose card has waited longest (#90).
+    pub since: Instant,
 }
 
 /// A card's text in a buffer of its own (`v`) is titled this, then the card's title.
@@ -116,6 +118,44 @@ pub enum What {
     Hooks(Box<crate::hooks::Ask>),
 }
 
+/// A call of Claude's waiting on a card for the user's answer (`Session.asking`): the card, how the call is
+/// answered, and what the card asks (its title). Taken off when the user answers the card or the turn
+/// ends; a card gone otherwise was lost, and the call is told so (`Editor::asking_sync`, #94) — never a
+/// call left waiting on a card nobody can see.
+#[derive(Clone, Debug)]
+pub struct Asking {
+    pub card: u64,
+    pub asker: Asker,
+    pub what: String,
+}
+
+#[derive(Clone, Debug)]
+pub enum Asker {
+    /// One of tarae's tools (`run`, `screen`) — answered as a tool's result.
+    Tool(crate::tools::Call),
+    /// A permission ask (`can_use_tool` — a Read outside the project) of chat process `generation`.
+    Permission { request_id: String, generation: u64 },
+}
+
+/// What Claude hears for a call whose card was lost.
+pub const LOST: &str = "the card asking the user about this was lost before they could answer (an editor fault) \
+— nothing ran; send it again";
+
+impl Offer {
+    /// The call waiting on it, if it's Claude's and asks for one call's answer.
+    fn asker(&self) -> Option<Asker> {
+        match &self.what {
+            What::Run(r) => Some(Asker::Tool(r.call.clone())),
+            What::NoSandbox { call, .. } | What::Screen { call } => Some(Asker::Tool(call.clone())),
+            What::Read { pending, .. } => Some(Asker::Permission {
+                request_id: pending.request_id.clone(),
+                generation: pending.generation,
+            }),
+            _ => None,
+        }
+    }
+}
+
 /// A card's text, as `offer_read` knows it: its title and question.
 fn text_hash(o: &Offer) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -157,6 +197,7 @@ impl Offer {
             rev: 0,
             decided: None,
             warning: None,
+            since: Instant::now(),
         }
     }
 
@@ -233,6 +274,11 @@ impl Offer {
         }
     }
 
+    /// Whether `b` answers it: a new session's card with another base to make it from (#85).
+    pub fn base_steps(&self) -> bool {
+        matches!(&self.what, What::SessionNew(m) if !m.others.is_empty())
+    }
+
     /// Whether `D` answers it: the end card of a session on a branch (removes both).
     pub fn both(&self) -> bool {
         matches!(&self.what, What::SessionEnd(e) if e.branch.is_some())
@@ -300,16 +346,45 @@ impl crate::editor::Editor {
         }
     }
 
+    /// Card `id` was answered by the user: the call it held is the answer's now, no longer waiting on it.
+    fn card_answered(&mut self, id: u64) {
+        self.session.asking.retain(|a| a.card != id);
+    }
+
+    /// The cards of the session in `ed.session`: up in front, parked behind.
+    pub fn session_cards(&self) -> impl Iterator<Item = &Offer> {
+        let front = !self.background();
+        self.session.parked.iter().chain(self.offers.iter().filter(move |_| front))
+    }
+
+    /// The cards of the session in `ed.session` that `gone` picks go: up in front, parked behind (#86: a
+    /// session behind ended its turn swapped in, so its cards were parked — they stayed, its tab said `▲`
+    /// after its turn was over, and the front's cards went instead).
+    pub fn drop_cards(&mut self, gone: impl Fn(&What) -> bool) {
+        self.session.parked.retain(|o| !gone(&o.what));
+        if !self.background() {
+            self.offers.retain(|o| !gone(&o.what));
+        }
+    }
+
     /// Stacks an offer (at the back). If one with the same title exists, keeps it (untouched while
-    /// downloading; only its content is refreshed while asking).
+    /// downloading; only its content is refreshed while asking) — not a command of Claude's: each waits for
+    /// its own answer (#5: the second was refused, and Claude sent it again and again).
     pub fn push_offer(&mut self, mut o: Offer) {
+        self.offer_seq += 1;
+        o.id = self.offer_seq;
+        o.since = Instant::now();
+        // (the call it holds waits on it — watched until it's answered: `asking_sync`)
+        if let Some(asker) = o.asker() {
+            self.session.asking.push(Asking { card: o.id, asker, what: o.title.clone() });
+        }
         // From a session behind: it waits in that session, and comes up when the session is in front (`session_in`)
         if self.background() {
-            self.offer_seq += 1;
-            o.id = self.offer_seq;
             return self.session.parked.push(o);
         }
-        if let Some(old) = self.offers.iter_mut().find(|x| x.title == o.title) {
+        // (one holding a call isn't merged into another by its title — the other's call would be lost)
+        let own = o.asker().is_some();
+        if let Some(old) = self.offers.iter_mut().find(|x| x.title == o.title).filter(|_| !own) {
             // Replaced whole — what it says with what it does — and it settles again before `y` counts
             if !old.installing() {
                 (old.question, old.working, old.failed) = (o.question, o.working, o.failed);
@@ -331,8 +406,6 @@ impl crate::editor::Editor {
         {
             c.focused = false;
         }
-        self.offer_seq += 1;
-        o.id = self.offer_seq;
         self.offers.push(o);
     }
 
@@ -400,6 +473,7 @@ impl crate::editor::Editor {
             Code::Char('D') if o.both() => self.offer_remove(true),
             Code::Char('p') if o.preflights() => self.offer_preflight_first(),
             Code::Char('X') if o.aborts() => self.offer_abort(),
+            Code::Char('b') if o.base_steps() => self.offer_session_base(),
             // An answer letter this card doesn't take isn't the code's either (`a`/`A` there start inserting —
             // and the `y` after it was typed)
             Code::Char('a' | 'A') if o.lasts() => self.set_status("this card asks y, a or n"),
@@ -429,6 +503,7 @@ impl crate::editor::Editor {
         o.state = OfferState::Installing(Instant::now());
         let (id, what) = (o.id, o.what.clone());
         self.offers.push(o);
+        self.card_answered(id);
         match what {
             What::Grammars { names, .. } => {
                 self.install_grammars(names, Some(id));
@@ -521,6 +596,19 @@ impl crate::editor::Editor {
         if let What::SessionEnd(e) = what {
             self.session_remove(*e, both, Some(id));
         }
+    }
+
+    /// `b` on a new session's card: made from the next base it offers — the card says so, and settles again
+    /// before `y` (#85).
+    pub fn offer_session_base(&mut self) {
+        let Some(What::SessionNew(m)) = self.offers.first().map(|o| o.what.clone()) else { return };
+        let mut m = *m;
+        if m.others.is_empty() {
+            return;
+        }
+        let (b, s) = m.others.remove(0);
+        m.others.push((std::mem::replace(&mut m.base, b), std::mem::replace(&mut m.base_sha, s)));
+        self.push_offer(m.card());
     }
 
     /// `c` on a session's end card with work in no commit: committed on its branch first, then asked again.
@@ -688,6 +776,7 @@ impl crate::editor::Editor {
     }
 
     fn offer_lasting(&mut self, o: Offer, scope: crate::allow::Scope) {
+        self.card_answered(o.id);
         match o.what {
             What::NoSandbox { job, call } => {
                 crate::tools::unprotected_answer(self, o.id, job, call, crate::tools::Unprotected::ThisChat)
@@ -714,6 +803,7 @@ impl crate::editor::Editor {
             return;
         }
         let o = self.offers.remove(0);
+        self.card_answered(o.id);
         match o.what {
             What::Grammars { lang, names, .. } => {
                 let first = names.first().cloned().unwrap_or_default();

@@ -129,6 +129,9 @@ fn parts(line: &str, env: bool) -> Option<(Vec<Part>, Vec<bool>)> {
                 loop {
                     match chars.next()? {
                         '"' => break,
+                        // A `$` nothing can follow as a name (a regex's end: `"^.*note$"`, `"a$|b"` — #92) is
+                        // itself, as sh reads it; before anything else it may expand
+                        '$' if chars.peek().is_some_and(|c| " \t\"|)/.,:]".contains(*c)) => w.text.push('$'),
                         '$' | '`' => return None,
                         // As sh reads it in double quotes: `\` takes `$ ` " \` as themselves, and stays
                         // before anything else (#80: `rg "sleep\(|a *[<>]"` went to a card) — a line
@@ -286,9 +289,82 @@ pub fn one_command_env(line: &str) -> Option<(Vec<String>, Vec<String>)> {
     if w.iter().any(|w| w.glob) {
         return None;
     }
-    let lead = w.iter().take_while(|w| w.text.split_once('=').is_some_and(|(n, _)| env_name(n))).count();
-    let names = w[..lead].iter().map(|w| w.text.split_once('=').map_or("", |(n, _)| n).to_string());
-    Some((names.collect(), w[lead..].iter().map(|w| w.text.clone()).collect()))
+    env_words(&w.iter().map(|w| w.text.clone()).collect::<Vec<_>>())
+}
+
+/// A command's words with the names it sets in front taken off — `NAME=value` words, and `env NAME=value …`
+/// read the same (#93: `env A=1 cargo xtask shot` is `A=1 cargo xtask shot`): the names, in order, and the
+/// command's words. None for `env` with an option (`-i`, `-S` splits a string into more words) or with no
+/// command after it.
+pub fn env_words(w: &[String]) -> Option<(Vec<String>, Vec<String>)> {
+    let assign = |s: &String| s.split_once('=').filter(|(n, _)| env_name(n)).map(|(n, _)| n.to_string());
+    let mut names: Vec<String> = w.iter().map_while(assign).collect();
+    let mut rest = &w[names.len()..];
+    if rest.first().is_some_and(|x| x == "env") {
+        let more: Vec<String> = rest[1..].iter().map_while(assign).collect();
+        rest = &rest[1 + more.len()..];
+        names.extend(more);
+        if rest.first().is_none_or(|x| x.starts_with('-')) {
+            return None;
+        }
+    }
+    Some((names, rest.to_vec()))
+}
+
+/// The script a command runs by its path — `sh target/x/setup.sh …`, `bash x.sh`, `./run.sh …` — as
+/// written: not a glob, not an option (`sh -c`, `sh -x x.sh`). What's in it decides what runs: a chat
+/// allows it as it is (`script_pins`). Never a program by its path (review: a pinned `/bin/sh` let `/bin/sh
+/// -c '<anything>'` run unasked — a binary's hash never changes): not a runner whatever its folder
+/// (`tools::RUNNERS` — `/bin/sh`, `./node_modules/.bin/sh`, `/usr/bin/env`, python…), not an absolute path,
+/// not one through `..` (the checkout's own scripts only); run by its path (`./run`, no shell), it ends in
+/// `.sh`, `.bash` or `.zsh` or is a relative path whose `#!` the worker reads (`script_pins`).
+pub fn script_part(w: &[Word]) -> Option<&str> {
+    let (first, rest) = w.split_first()?;
+    let path = match first.text.as_str() {
+        s if SHELLS.contains(&s) => rest.first()?,
+        s if s.contains('/') => first,
+        _ => return None,
+    };
+    let p = Path::new(&path.text);
+    let runner = p.file_name().and_then(|n| n.to_str()).is_some_and(crate::tools::runner);
+    let escapes = p.is_absolute() || p.components().any(|c| c == std::path::Component::ParentDir);
+    let usable = !path.glob && !path.text.is_empty() && !path.text.starts_with('-');
+    (usable && !runner && !escapes).then_some(path.text.as_str())
+}
+
+/// Endings a script may have; one without them must start with `#!`.
+const SCRIPT_ENDINGS: [&str; 3] = ["sh", "bash", "zsh"];
+
+/// The scripts `cmd` runs by path (`script_part`), each where it runs (after a `cd`) by its real path, with
+/// a hash of what's in it — on a worker. None: a line `parse` doesn't read, or a script that isn't there,
+/// isn't inside `root` (the session's checkout — a link out of it isn't), or isn't a text script: a NUL in
+/// it (a binary) or neither `#!` at its start nor a script's ending.
+pub fn script_pins(cmd: &str, cwd: &Path, root: &Path) -> Option<Vec<(PathBuf, u64)>> {
+    use std::hash::{Hash, Hasher};
+    let mut here = cwd.to_path_buf();
+    let mut out = Vec::new();
+    for part in parse(cmd)? {
+        match part {
+            Part::Cd(d) => here = std::fs::canonicalize(here.join(d)).ok()?,
+            Part::Cmd(w) => {
+                let Some(path) = script_part(&w) else { continue };
+                let real = std::fs::canonicalize(here.join(path)).ok()?;
+                if !real.starts_with(root) {
+                    return None;
+                }
+                let text = std::fs::read(&real).ok()?;
+                let ending =
+                    real.extension().and_then(|e| e.to_str()).is_some_and(|e| SCRIPT_ENDINGS.contains(&e));
+                if text.contains(&0) || !(text.starts_with(b"#!") || ending) {
+                    return None;
+                }
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                text.hash(&mut h);
+                out.push((real, h.finish()));
+            }
+        }
+    }
+    Some(out)
 }
 
 /// The words of `line` when it's one command and nothing else (quotes taken off, no glob) — what runs,
@@ -348,23 +424,81 @@ pub fn only_reads(w: &[Word]) -> bool {
     !words.iter().any(|w| crate::tools::WRITES.iter().any(|o| w.starts_with(o))) && reads_only(&words)
 }
 
-/// git's words after the `-C <dir>`s in front of them (`git -C sub log` reads as `git log`, run in `sub` —
-/// #57; the folder is a read, `candidates`').
-pub fn git_after_c<T: AsRef<str>>(mut args: &[T]) -> &[T] {
-    while let [c, _, rest @ ..] = args
-        && c.as_ref() == "-C"
-    {
-        args = rest;
+impl AsRef<str> for Word {
+    fn as_ref(&self) -> &str {
+        &self.text
     }
-    args
 }
 
-/// `sed` that only prints lines by number (`sed -n '3,40p'`, `-n '$p'`, #66): no script that writes (`w`),
-/// runs (`e`) or edits in place (`-i`) gets this far.
+/// git's options before its subcommand that change neither what runs nor where (#88: `git
+/// --no-optional-locks status` went to a card) — read as if they weren't there. Not `-c`, `--git-dir`,
+/// `--work-tree`, `--exec-path`, `--namespace`, `--config-env`, nor `-p`/`--paginate` (its pager runs):
+/// git's words stop at them, so they still ask.
+const GIT_QUIET: [&str; 9] = [
+    "--no-pager",
+    "-P",
+    "--no-optional-locks",
+    "--literal-pathspecs",
+    "--glob-pathspecs",
+    "--noglob-pathspecs",
+    "--icase-pathspecs",
+    "--no-replace-objects",
+    "--no-lazy-fetch",
+];
+
+/// git's options in front of its subcommand, read: the folders of its `-C <dir>`s, in order, and its words
+/// from the subcommand on — the harmless ones (`GIT_QUIET`) passed over, anything else where they stop.
+pub fn git_globals<T: AsRef<str>>(mut args: &[T]) -> (Vec<&str>, &[T]) {
+    let mut dirs = Vec::new();
+    loop {
+        match args {
+            [c, dir, rest @ ..] if c.as_ref() == "-C" => {
+                dirs.push(dir.as_ref());
+                args = rest;
+            }
+            [q, rest @ ..] if GIT_QUIET.contains(&q.as_ref()) => args = rest,
+            _ => return (dirs, args),
+        }
+    }
+}
+
+/// git's words after the `-C <dir>`s and harmless options in front of them (`git -C sub log` reads as `git
+/// log`, run in `sub` — #57; the folder is a read, `candidates`').
+pub fn git_after_c<T: AsRef<str>>(args: &[T]) -> &[T] {
+    git_globals(args).1
+}
+
+/// One command's words with git's harmless options (`GIT_QUIET`) taken out from before its subcommand — its
+/// `-C <dir>`s kept: where it runs is still `read_only`'s to judge (`tools::allowed_words`).
+pub fn git_plain(words: &[String]) -> Vec<String> {
+    let Some((git, mut args)) = words.split_first().filter(|(g, _)| *g == "git") else {
+        return words.to_vec();
+    };
+    let mut out = vec![git.clone()];
+    loop {
+        match args {
+            [c, dir, rest @ ..] if c == "-C" => {
+                out.extend([c.clone(), dir.clone()]);
+                args = rest;
+            }
+            [q, rest @ ..] if GIT_QUIET.contains(&q.as_str()) => args = rest,
+            _ => break,
+        }
+    }
+    out.extend(args.iter().cloned());
+    out
+}
+
+/// `sed` that only prints lines by number or pattern (`sed -n '3,40p'`, `-n '$p'`, #66; `-n '/begin/,/end/p'`,
+/// #92): no script that writes (`w`), runs (`e`) or edits in place (`-i`) gets this far — a pattern holding
+/// `/`, `,` or `;` isn't read at all.
 fn sed_prints(args: &[&str]) -> bool {
     let (opts, rest): (Vec<&str>, Vec<&str>) = args.iter().partition(|w| w.starts_with('-'));
     let Some(script) = rest.first() else { return false };
-    let line = |a: &str| a == "$" || (!a.is_empty() && a.chars().all(|c| c.is_ascii_digit()));
+    let pattern = |a: &str| {
+        a.len() >= 2 && a.starts_with('/') && a.ends_with('/') && !a[1..a.len() - 1].contains(['/', ';', ','])
+    };
+    let line = |a: &str| a == "$" || (!a.is_empty() && a.chars().all(|c| c.is_ascii_digit())) || pattern(a);
     let prints = |item: &str| {
         item.trim().strip_suffix('p').is_some_and(|at| match at.split_once(',') {
             Some((a, b)) => line(a) && line(b),
@@ -411,14 +545,12 @@ fn candidates(words: &[Word]) -> Vec<String> {
     let mut base = PathBuf::new();
     let mut dirs = Vec::new();
     if words.first().is_some_and(|w| w.text == "git") {
-        while let [c, dir, more @ ..] = rest
-            && c.text == "-C"
-        {
-            base = base.join(&dir.text);
+        let (cs, after) = git_globals(rest);
+        for dir in cs {
+            base = base.join(dir);
             dirs.push(base.to_string_lossy().into_owned());
-            rest = more;
         }
-        rest = rest.get(1..).unwrap_or_default();
+        rest = after.get(1..).unwrap_or_default();
     }
     let at = |p: String| match base.as_os_str().is_empty() {
         true => p,
@@ -467,13 +599,10 @@ pub fn runs_outside(cmd: &str, cwd: &Path, root: &Path) -> bool {
                     continue;
                 }
                 let mut at = here.clone();
-                let mut rest = w.get(1..).unwrap_or_default();
-                while git
-                    && let [c, dir, more @ ..] = rest
-                    && c.text == "-C"
-                {
-                    at = at.join(&dir.text);
-                    rest = more;
+                if git {
+                    for dir in git_globals(w.get(1..).unwrap_or_default()).0 {
+                        at = at.join(dir);
+                    }
                 }
                 if !inside(&at) {
                     return true;
@@ -603,11 +732,19 @@ mod tests {
             // #57: `-C <dir>` as without it (its folder is a read — `where_a_command_reads`)
             "git -C /x blame a",
             "git -C sub -C deeper ls-files",
+            // #88: git's harmless options in front, -C among them
+            "git --no-pager blame a",
+            "git -P -C sub ls-files",
+            "git --no-optional-locks rev-parse HEAD",
             // #66: sed printing lines by number
             "sed -n '3,40p' src/a.rs",
             "sed -n 10p",
             "sed -n -E '$p'",
             "sed -n '1,5p;9p'",
+            // #92: by pattern too
+            "sed -n '/x/p' a",
+            "sed -n '/begin/,/end/p' target/x/y.events",
+            "sed -n '0,/end/p;$p' a",
         ] {
             assert!(read_only(c), "{c}");
         }
@@ -635,6 +772,9 @@ mod tests {
             "git branch -D main",
             "git -C /x push",
             "git -C /x -c core.pager=sh log",
+            "git --no-pager -c core.pager=sh blame a",
+            "git --git-dir=/x blame a",
+            "git -p blame a",
             "git -C",
             "git push",
             "sed 1,5p x",
@@ -643,7 +783,11 @@ mod tests {
             "sed -n s/a/b/p x",
             "sed -n -i 1p x",
             "sed -n -e 1p x",
-            "sed -n '/x/p' a",
+            "sed -n '/x/w out' a",
+            "sed -n '/x;w out/p' a",
+            "sed -n '/a,b/p' a",
+            "sed -n '/x/Ip' a",
+            "sed -n '/x/,+3p' a",
             "sed -n",
             "cat a | sh",
             "cat ~/.ssh/id_ed25519",
@@ -669,6 +813,7 @@ mod tests {
             "cp x.sh y.sh && rm x.sh",
             "cd src && mkdir m && mv a.rs m/ && ls m",
             "git add src/b.rs; git ls-files src",
+            "git --no-pager mv a b",
         ] {
             assert!(only_moves(c), "{c}");
         }
@@ -707,6 +852,12 @@ mod tests {
             // #80: quotes keep `|` `<` `>` `*` `{}` as they are, and a `\` in them as sh reads it
             r#"rg -n "thread::sleep\(|elapsed\(\) *[<>]|assert!\(.*elapsed|< *SOON|recv_timeout\(Duration::from_millis\([0-9]{1,3}\)\)" src tests --glob "*.rs""#,
             "grep \"a\\b\" x",
+            // #92: the line as it was carded, and its likely kin — a regex's `$` in double quotes, sed by
+            // pattern, a file under the git-ignored target/
+            r#"sh -c 'grep -v "^.*note" target/ra-out/grow/grow.events | sed -n "1,200p" | grep -E "begin|end|status|stopped"'"#,
+            r#"sh -c 'grep -v "^.*note$" target/x/y.events | sed -n "/begin/,/end/p" | grep -E "begin$|end$"'"#,
+            r#"grep -nE "fn [a-z_]+\(\)$" src/a.rs"#,
+            r#"rg "(a|b)$" src"#,
         ] {
             assert!(read_only(c), "{c}");
         }
@@ -736,6 +887,12 @@ mod tests {
             // What the shell fills in or runs
             "cat $(echo x)",
             "cat \"$HOME\"",
+            "grep \"a$b\" x",
+            "grep \"$1\" x",
+            "grep \"$(id)\" x",
+            "grep \"${x}\" x",
+            "grep \"$$\" x",
+            "grep note$ x",
             "ls `pwd`",
             "ls \\; rm x",
             "(ls)",
@@ -788,6 +945,55 @@ mod tests {
         assert_eq!(one_command("ls | head"), None);
     }
 
+    /// Review (#93's pins): only a text script in the checkout is pinned as it is — `#!` at its start or a
+    /// script's ending, no NUL (a binary), its real path inside the checkout (a link out isn't); a program by
+    /// its path (a runner anywhere, an absolute path, one through `..`) is no script at all. (Fixtures are
+    /// files only — nothing here runs them.)
+    #[test]
+    fn only_a_text_script_in_the_checkout_is_pinned() {
+        let dir = std::env::temp_dir().join(format!("tarae-pins-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("p/sub")).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let p = dir.join("p");
+        std::fs::write(p.join("run"), "#!/bin/sh\necho marker\n").unwrap();
+        std::fs::write(p.join("x.sh"), "echo marker\n").unwrap();
+        std::fs::write(p.join("sub/y.zsh"), "echo marker\n").unwrap();
+        std::fs::write(p.join("plain"), "echo marker\n").unwrap();
+        std::fs::write(p.join("tool"), b"\xcf\xfa\xed\xfe\x00\x00binary").unwrap();
+        std::fs::write(p.join("tool.sh"), b"#!/bin/sh\n\x00").unwrap();
+        std::fs::write(dir.join("out.sh"), "echo marker\n").unwrap();
+        std::os::unix::fs::symlink(dir.join("out.sh"), p.join("link.sh")).unwrap();
+        let pins =
+            |cmd: &str| script_pins(cmd, &p, &p).map(|v| v.into_iter().map(|(f, _)| f).collect::<Vec<_>>());
+        assert_eq!(pins("./run fast"), Some(vec![p.join("run")]), "#! at its start");
+        assert_eq!(pins("sh x.sh"), Some(vec![p.join("x.sh")]), "a script's ending");
+        assert_eq!(pins("cd sub && ./y.zsh"), Some(vec![p.join("sub/y.zsh")]), "where it runs");
+        assert_eq!(pins("ls && cargo test"), Some(vec![]), "no script, nothing to pin");
+        for c in ["./plain", "./tool", "./tool.sh", "./link.sh", "sh link.sh"] {
+            assert_eq!(pins(c), None, "{c}");
+        }
+        // A program by its path: not a script — not even looked at
+        for c in [
+            "/bin/sh -c 'echo marker'",
+            "./node_modules/.bin/env x",
+            "../out.sh",
+            "sh ../out.sh",
+            "/usr/bin/true",
+        ] {
+            let w = match &parse(c).unwrap()[..] {
+                [Part::Cmd(w)] => w.clone(),
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(script_part(&w), None, "{c}");
+        }
+        // Same text, another hash once it changes
+        let before = script_pins("sh x.sh", &p, &p).unwrap();
+        std::fs::write(p.join("x.sh"), "echo another\n").unwrap();
+        assert_ne!(script_pins("sh x.sh", &p, &p).unwrap(), before);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Paths it names are resolved where it runs: inside the project they're fine, outside they're what the
     /// card says — unless allowed; a word that names nothing isn't a path, and a link that leads out is out.
     #[test]
@@ -815,6 +1021,11 @@ mod tests {
         assert_eq!(at("git -C ../out log"), std::slice::from_ref(&out));
         assert!(at("git -C src ls-files a.rs").is_empty());
         assert_eq!(at("git -C src ls-files ../../out"), std::slice::from_ref(&out), "from where -C goes");
+        // #88: a -C behind git's harmless options is a read all the same, and where it runs (`runs_outside`)
+        assert_eq!(at("git --no-pager -C ../out log"), std::slice::from_ref(&out));
+        assert_eq!(at("git -C src --no-optional-locks ls-files ../../out"), std::slice::from_ref(&out));
+        assert!(runs_outside("git --no-optional-locks -C ../out status", &p, &p));
+        assert!(!runs_outside("git --no-optional-locks -C src status", &p, &p));
         // A line of several: each part where it runs — a cd's folder read too; a glob by its fixed folder
         assert!(at("cd src && cat a.rs | wc -l").is_empty());
         assert_eq!(at("cd ../out && cat m.txt"), [out.clone(), out.join("m.txt")]);

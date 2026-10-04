@@ -53,7 +53,9 @@ and keep it current as you go (the step you're on doing, finished ones done). Ea
 cursor line, the lines on screen (and any other file shown beside it), selection, diagnostics and the other \
 open files — \"this\" and \"here\" usually mean the selection, the cursor or what's on screen. When what they \
 mean is on their screen but not in the context (a panel, a card, a message, the terminal panel's output), the \
-screen tool shows you their screen as text — they're asked first, and it only looks. Files marked unsaved differ from disk — trust the \
+screen tool shows you their screen as text — they're asked first, and it only looks. For the processes the \
+editor runs (language servers, your chat, commands, tests, the terminal — pid, parent, age, CPU, memory, \
+command line, folder), use the procs tool, not ps, pgrep or lsof through run. Files marked unsaved differ from disk — trust the \
 text given in the context over what Read returns. When you point at code, cite it as path:line (relative to the \
 project root) — the user can jump there; their editor follows you, showing the code you read and the code you \
 cite. When you explain how code works, walk the user through it in the order of the flow: right before you \
@@ -97,10 +99,11 @@ const TOOLS: &str = "Read,Grep,Glob,Edit,Write";
 /// Not Read, Grep or Glob: allowed by name they read anywhere unasked (measured — `reads.rs` answers them).
 /// (`screen` asks the user itself — `seeing.rs`)
 /// (`references`, `search`, `symbols`, `definition`, `hover` and `diagnostics` read inside the project
-/// only — `nav.rs`; `rename` and `replace` land as Claude's edits do, in the review — `refactor.rs`)
+/// only — `nav.rs`; `rename` and `replace` land as Claude's edits do, in the review — `refactor.rs`; `procs`
+/// reads what `:procs` shows — `procs.rs`)
 const ALLOWED: &str = "mcp__tarae__note,mcp__tarae__run_tests,mcp__tarae__run,mcp__tarae__plan,\
 mcp__tarae__screen,mcp__tarae__references,mcp__tarae__search,mcp__tarae__symbols,mcp__tarae__definition,\
-mcp__tarae__hover,mcp__tarae__diagnostics,mcp__tarae__rename,mcp__tarae__replace";
+mcp__tarae__hover,mcp__tarae__diagnostics,mcp__tarae__rename,mcp__tarae__replace,mcp__tarae__procs";
 
 /// Settings laid over the user's and the project's when they're loaded (`llm.chat-settings`).
 const CHAT_SETTINGS: &str = r#"{"permissions":{"ask":["Edit","Write"]},"disableAllHooks":true}"#;
@@ -248,6 +251,9 @@ pub struct Chat {
     /// Commands starting so run without asking for the rest of this conversation (`a` on a run card —
     /// `tools::pattern`).
     pub run_allow: Vec<String>,
+    /// Scripts run by their path that run without asking for the rest of this conversation while they're
+    /// what they were (real path, hash of what's in it — `a` on a run card, `readonly::script_pins`, #93).
+    pub run_scripts: Vec<(PathBuf, u64)>,
     /// A message sent while Claude works (#23) — it goes when the turn ends; `↑` on an empty input takes it
     /// back to edit (or drop).
     pub queued: Option<String>,
@@ -264,6 +270,61 @@ pub struct Chat {
     /// runs, then what wrote its latest answer (empty after `:model` until the next answer says).
     pub models: Vec<crate::llm::ModelInfo>,
     pub model: String,
+    /// Its tool calls this turn whose result hasn't come yet, in the order claude made them (#87: claude
+    /// makes them one after another, so what comes after a run card waits on it unseen).
+    pub calls: Vec<Called>,
+}
+
+/// A tool call claude made (a `tool_use` block) — its id, tool and input.
+#[derive(Clone, Debug)]
+pub struct Called {
+    pub id: String,
+    pub name: String,
+    pub input: serde_json::Value,
+}
+
+impl Called {
+    /// Whether it's tarae's `run` of `cmd`.
+    fn runs(&self, cmd: &str) -> bool {
+        self.name == "mcp__tarae__run" && self.input["command"].as_str().map(str::trim) == Some(cmd)
+    }
+}
+
+/// Claude's calls this turn held back behind its `run` of `cmd` (the card up for it) — what each does, as
+/// its row says it (`read src/a.rs`); not a later run with a card of its own (it counts as a card).
+pub fn behind_run(ed: &Editor, cmd: &str) -> Vec<String> {
+    let Some(c) = ed.session.chat.as_ref().filter(|c| c.busy()) else { return Vec::new() };
+    let carded: Vec<&str> = ed
+        .session_cards()
+        .filter_map(|o| match &o.what {
+            crate::offer::What::Run(r) => Some(r.cmd.as_str()),
+            _ => None,
+        })
+        .collect();
+    let Some(at) = c.calls.iter().position(|k| k.runs(cmd)) else { return Vec::new() };
+    c.calls[at + 1..]
+        .iter()
+        .filter(|k| !carded.iter().any(|cmd| k.runs(cmd)))
+        .map(|k| {
+            let l = look(&ed.session.root, &k.name, &k.input);
+            format!("{} {}", label(l.verb), l.what).trim().to_string()
+        })
+        .collect()
+}
+
+impl Chat {
+    /// Whether a call it made is about to ask the user: one waiting behind the call in hand (claude holds
+    /// it back until that one is answered) is a command that won't run unasked (#5: `C-q` found no card
+    /// while one was about to come). `allow`: `llm.run-allow`.
+    pub fn asks_next(&self, allow: &[String]) -> bool {
+        let extra: Vec<String> = allow.iter().chain(&self.run_allow).cloned().collect();
+        self.calls.iter().skip(1).any(|k| {
+            k.name == "mcp__tarae__run"
+                && k.input["command"]
+                    .as_str()
+                    .is_some_and(|cmd| !crate::tools::runs_unasked(cmd.trim(), &extra))
+        })
+    }
 }
 
 impl Chat {
@@ -291,6 +352,7 @@ impl Chat {
             reads: Default::default(),
             sees: false,
             run_allow: Vec::new(),
+            run_scripts: Vec::new(),
             queued: None,
             screen: None,
             conversation: None,
@@ -299,6 +361,7 @@ impl Chat {
             plan: None,
             models: Vec::new(),
             model: String::new(),
+            calls: Vec::new(),
         }
     }
 
@@ -705,6 +768,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
                 return;
             }
             c.state = State::Thinking;
+            c.calls.push(Called { id: id.clone(), name: name.clone(), input: input.clone() });
             let mut look = look(&ed.session.root, &name, &input);
             // A reply points at its note
             if let Some(n) =
@@ -737,6 +801,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
         StreamEv::Models(list) => c.models = list,
         StreamEv::Answered(model) => c.model = model,
         StreamEv::ToolResult { id, text, error } => {
+            c.calls.retain(|k| k.id != id);
             // What it did on disk (an edit, a write, a command): the git tab reads the status again (#29 — it
             // said "the tree is clean" over files Claude had changed, until reopened)
             let wrote = c
@@ -810,7 +875,13 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             }
             let secs = c.started.elapsed().as_secs_f32();
             c.state = State::Idle;
+            c.calls.clear();
             let ok = r.is_ok();
+            // (a session behind: its tab says `done` until it's looked at — #86)
+            if ed.background() {
+                ed.session.turn_done = true;
+            }
+            let Some(c) = ed.session.chat.as_mut() else { return };
             match r {
                 // Answers with no streamed pieces (short answers, CLIs without partials) get the final text
                 Ok(text) => {
@@ -846,6 +917,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
         StreamEv::Exit(err) => {
             c.proc = None;
             c.follow.gaze = None;
+            c.calls.clear();
             // The conversation is gone from claude: a fresh one, the rows still shown
             if err.contains("No conversation found") && c.resume.is_some() {
                 c.resume = None;
@@ -1337,6 +1409,11 @@ fn look(root: &Path, name: &str, input: &serde_json::Value) -> Look {
         }
         "mcp__tarae__screen" => {
             Look { verb: "look", what: "your screen".into(), pattern: true, range: String::new(), link: None }
+        }
+        "mcp__tarae__procs" => {
+            let what =
+                if input["all"].as_bool() == Some(true) { "every session's" } else { "this session's" };
+            Look { verb: "procs", what: what.into(), pattern: true, range: String::new(), link: None }
         }
         "mcp__tarae__references" => {
             let path = resolve(&s("path"));

@@ -603,6 +603,7 @@ impl Editor {
         self.test_generation += 1;
         let generation = self.test_generation;
         let pid = child.id();
+        self.procs_spawned(pid, "tests", &target.label);
         let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
         let tx = self.events.sender();
         let send_lines = move |tx: &crate::event::Tx, err: bool, lines: Vec<String>| {

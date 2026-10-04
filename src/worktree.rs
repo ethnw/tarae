@@ -247,6 +247,10 @@ pub struct Making {
     /// The instruction files git doesn't have here (`instructions`) — copied into its checkout, so its
     /// Claude starts with the project's rules.
     pub copies: Vec<String>,
+    /// The other bases `b` on its card steps to (as `base`, `base_sha`): the repository's main branch and
+    /// the front session's, whichever isn't `base` (#85: three sessions from main meant going to main
+    /// before each).
+    pub others: Vec<(String, String)>,
 }
 
 /// The instruction files a session's checkout gets from this one when git doesn't carry them (#17: CLAUDE.md
@@ -364,6 +368,10 @@ impl Making {
         if !self.copies.is_empty() {
             q += &format!("\n\nCopied into it (not in git here):\n  {}", self.copies.join("  "));
         }
+        if let Some((b, s)) = self.others.first() {
+            let said = if b == s { s[..7].to_string() } else { format!("{b} ({})", &s[..7]) };
+            q += &format!("\n\nb — from {said} instead");
+        }
         crate::offer::Offer::new(
             format!("New session: {}", self.branch),
             &q,
@@ -392,17 +400,27 @@ pub fn making(root: &Path, name: &str, base: Option<&str>, setting: &str) -> Res
             None => format!("there's a branch {branch} already — pick another name"),
         });
     }
-    let (base, base_sha) = match base {
+    let (base, base_sha, others) = match base {
         Some(b) if b.starts_with('-') => return Err(format!("{b:?} isn't a commit")),
         Some(b) => {
             let s = sha(&top, &format!("{b}^{{commit}}")).map_err(|_| format!("there's no {b} here"))?;
             // (a branch is kept by name — `:session-bring` moves it; anything else is the commit)
             let named = sha(&top, &format!("refs/heads/{b}")).is_ok();
-            (if named { b.to_string() } else { s.clone() }, s)
+            (if named { b.to_string() } else { s.clone() }, s, Vec::new())
         }
+        // The repository's main branch first, the front session's after it (`b` steps)
         None => {
             let s = sha(&top, "HEAD")?;
-            (current_branch(&top).unwrap_or_else(|| s.clone()), s)
+            let front = (current_branch(&top).unwrap_or_else(|| s.clone()), s);
+            let mut bases: Vec<(String, String)> = main_branch(&top)
+                .and_then(|m| Some((m.clone(), sha(&top, &format!("refs/heads/{m}")).ok()?)))
+                .into_iter()
+                .collect();
+            if !bases.iter().any(|b| b.0 == front.0) {
+                bases.push(front);
+            }
+            let (base, base_sha) = bases.remove(0);
+            (base, base_sha, bases)
         }
     };
     let common = common_dir(&top)?;
@@ -416,7 +434,21 @@ pub fn making(root: &Path, name: &str, base: Option<&str>, setting: &str) -> Res
     // (where cargo builds, from the user's cargo config as it is)
     let cargo = top.join("Cargo.toml").is_file().then(|| cargo_dirs(&top)).flatten();
     let copies = instructions(&top);
-    Ok(Making { top, branch, base, base_sha, path, files, big, cargo, copies })
+    Ok(Making { top, branch, base, base_sha, path, files, big, cargo, copies, others })
+}
+
+/// The repository's main branch, a local one: the remote's default (`origin/HEAD`), else `main` or
+/// `master`, else the branch of its main checkout (the first `git worktree list` gives).
+fn main_branch(top: &Path) -> Option<String> {
+    let local = |b: &str| sha(top, &format!("refs/heads/{b}")).is_ok();
+    let remote = git(top, &["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], None)
+        .ok()
+        .and_then(|r| r.trim().strip_prefix("origin/").map(str::to_string));
+    if let Some(b) = remote.into_iter().chain(["main".to_string(), "master".to_string()]).find(|b| local(b)) {
+        return Some(b);
+    }
+    let list = git(top, &["worktree", "list", "--porcelain"], None).ok()?;
+    crate::gitpanel::parse_worktrees(&list).into_iter().next()?.1
 }
 
 /// The tracked files' size on disk — what a new checkout writes.
@@ -766,7 +798,7 @@ pub struct Shown {
 }
 
 /// The list's rows: the name, a glyph for what its Claude does (`●` working, `▲` waiting for you, `◦` a
-/// tool call unanswered too long — `stuck? symbols 42s`), and the
+/// tool call unanswered too long — `stuck? symbols 42s`; a turn ended behind says `done` in words), and the
 /// rest in columns — branch, `↑ahead ↓behind`, what's changed, what it's doing, CPU and memory — each column
 /// as wide as its widest and empty ones left out, so the hints (right-aligned) line up row under row.
 pub fn items(sessions: &[Shown]) -> Vec<crate::picker::Item> {
@@ -783,6 +815,7 @@ pub fn items(sessions: &[Shown]) -> Vec<crate::picker::Item> {
             let changed = if f.changed > 0 { format!("{} changed", f.changed) } else { String::new() };
             let doing = match (l.doing, l.front) {
                 (Doing::Waiting, _) => "waits for you".to_string(),
+                (Doing::Done, _) => "done — not looked at".to_string(),
                 (d @ Doing::Stuck { .. }, _) => format!("stuck? {}", d.said()),
                 (Doing::Working, _) => "working".to_string(),
                 (Doing::Idle, true) => "here".to_string(),
@@ -820,7 +853,7 @@ pub fn items(sessions: &[Shown]) -> Vec<crate::picker::Item> {
                 Doing::Working => ("●", "ui.accent"),
                 Doing::Waiting => ("▲", "warning"),
                 Doing::Stuck { .. } => ("◦", "warning"),
-                Doing::Idle => (" ", "ui.linenr"),
+                Doing::Done | Doing::Idle => (" ", "ui.linenr"),
             };
             crate::picker::Item {
                 label: l.name.clone(),
@@ -1029,12 +1062,12 @@ impl Editor {
 
     // ── Making ───────────────────────────────────────────────────────────────
 
-    /// `space W n` — the name of a new session, made from the front session's HEAD (said; `C-b` another base).
+    /// `space W n` — the name of a new session, made from the repository's main branch — its card says, and
+    /// `b` there steps to the front session's branch (#85); `C-b` here picks any.
     pub fn session_prompt(&mut self) {
-        let base = self.session.git_branch.clone().unwrap_or_else(|| "HEAD".into());
         self.open_prompt(crate::editor::PromptKind::Session, "");
         if let Some(p) = self.prompt.as_mut() {
-            p.label = Some(format!("new session from {base} (C-b another base):"));
+            p.label = Some("new session from the main branch (C-b another base):".into());
         }
     }
 
@@ -1548,7 +1581,7 @@ mod tests {
         let mut ed = editor(&repo, &dir);
         feed(&mut ed, "<space>Wn");
         let p = ed.prompt.as_ref().expect("the name's prompt");
-        assert_eq!(p.label.as_deref(), Some("new session from main (C-b another base):"));
+        assert_eq!(p.label.as_deref(), Some("new session from the main branch (C-b another base):"));
         feed(&mut ed, "fix-login<ret>");
         settle_until(&mut ed, |ed| !ed.offers.is_empty() || says(ed, "new session:"));
         let o = ed.offers.first().unwrap_or_else(|| panic!("the card: {}", said(&ed)));
@@ -1659,6 +1692,48 @@ mod tests {
             o.question
         );
         drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #85: from a session in front on its own branch, a new one is made from the repository's main branch by
+    /// default — `b` on its card steps to the front session's branch and back, the card saying which.
+    #[test]
+    fn a_new_session_is_made_from_main_and_b_steps_to_the_front_ones_branch() {
+        let (repo, dir) = place("bases");
+        let mut ed = editor(&repo, &dir);
+        let first = new_session(&mut ed, "first");
+        git_in(&first, &["commit", "-q", "--allow-empty", "-m", "on first only"]);
+        let (main, on_first) =
+            (git_in(&repo, &["rev-parse", "main"]), git_in(&first, &["rev-parse", "HEAD"]));
+        assert_ne!(main, on_first);
+        // From `first` in front: main by default, first offered
+        assert_eq!(ed.session.root, first);
+        feed(&mut ed, ":session-new second<ret>");
+        settle_until(&mut ed, |ed| !ed.offers.is_empty() || says(ed, "new session:"));
+        let q = |ed: &Editor| ed.offers.first().map(|o| o.question.clone()).unwrap_or_else(|| said(ed));
+        assert!(q(&ed).starts_with(&format!("Branch second from main ({}).", &main[..7])), "{}", q(&ed));
+        assert!(q(&ed).ends_with(&format!("b — from first ({}) instead", &on_first[..7])), "{}", q(&ed));
+        assert!(card_in_sight(&mut ed).contains(&'b'), "its button");
+        feed(&mut ed, "b");
+        assert!(q(&ed).starts_with(&format!("Branch second from first ({}).", &on_first[..7])), "{}", q(&ed));
+        assert!(q(&ed).ends_with(&format!("b — from main ({}) instead", &main[..7])), "{}", q(&ed));
+        feed(&mut ed, "b");
+        assert!(q(&ed).starts_with("Branch second from main"), "{}", q(&ed));
+        // Made from main
+        card_in_sight(&mut ed);
+        feed(&mut ed, "y");
+        settle_until(&mut ed, |ed| ed.sessions.len() == 2);
+        assert_eq!(git_in(&repo, &["rev-parse", "second"]), main);
+        // From the checkout on main: nothing else to offer
+        ed.session.chat = None;
+        ed.session_switch(0);
+        feed(&mut ed, ":session-new third<ret>");
+        settle_until(&mut ed, |ed| !ed.offers.is_empty() || says(ed, "new session:"));
+        assert!(!q(&ed).contains("b — from"), "{}", q(&ed));
+        drop(ed);
+        for wt in [first, dir.join("wt").join(repo_folder(&repo.join(".git"))).join("second")] {
+            git_in(&repo, &["worktree", "remove", "--force", wt.to_str().unwrap()]);
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 

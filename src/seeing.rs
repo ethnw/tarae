@@ -32,7 +32,7 @@ pub fn call(ed: &mut Editor, call: Call) {
         return ed.screen_sends.push(call);
     }
     // (one card at a time — the same title would replace the card, and its call with it)
-    if ed.offers.iter().any(|o| matches!(o.what, crate::offer::What::Screen { .. })) {
+    if ed.session_cards().any(|o| matches!(o.what, crate::offer::What::Screen { .. })) {
         let e = "the user is already being asked to show the screen — wait for that answer";
         return crate::tools::answer(ed, call, Err(e.into()));
     }
@@ -106,5 +106,5 @@ fn text(ed: &Editor) -> Result<String, String> {
 
 /// The chat turn ended: a card still asking goes; its call needs no answer.
 pub fn turn_over(ed: &mut Editor) {
-    ed.offers.retain(|o| !matches!(o.what, crate::offer::What::Screen { .. }));
+    ed.drop_cards(|w| matches!(w, crate::offer::What::Screen { .. }));
 }

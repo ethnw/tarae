@@ -211,7 +211,13 @@ pub struct Run {
     /// many), once it's been cut (`keep`).
     section: usize,
     cut: Option<(usize, usize)>,
+    /// It waits on another cargo's lock — from cargo's "Blocking waiting for file lock" line to the line
+    /// after it (#10: a check waited 37 of its 48 s on another session's build, and looked stuck).
+    pub lock_wait: bool,
 }
+
+/// What cargo prints while another cargo holds the build directory, the package cache or the like.
+const LOCK_WAIT: &str = "Blocking waiting for file lock";
 
 impl Run {
     /// Which run this is (each spawn a new one).
@@ -250,6 +256,7 @@ impl Run {
             self.keep(0);
             (self.section, self.cut) = (self.output.len(), None);
         }
+        self.lock_wait = line.contains(LOCK_WAIT);
         self.output.push((err, line));
     }
 
@@ -318,6 +325,7 @@ impl Run {
             scroll: None,
             section: 0,
             cut: None,
+            lock_wait: false,
         }
     }
 }
@@ -526,6 +534,8 @@ impl Editor {
         self.task_generation += 1;
         let generation = self.task_generation;
         let pid = child.id();
+        let title = if claudes { "claude's command" } else { task.name.as_str() };
+        self.procs_spawned(pid, title, &task.cmd);
         let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
         let tx = self.events.sender();
         // Each stream reads its places on its own thread (a stat per `path:line` — never the main loop's)
@@ -618,6 +628,12 @@ impl Editor {
                     Some(0) => State::Passed,
                     code => State::Failed(code),
                 };
+                // (a command of Claude's said yes to while this ran goes next — once this one's end is told)
+                if !ed.session.runs_next.is_empty() {
+                    let next = crate::event::Event::Job(Box::new(crate::tools::run_next));
+                    let _ = ed.events.sender().send(next);
+                }
+                let Some(r) = ed.session.task_run.as_mut() else { return };
                 let (passed, errors) = (r.state == State::Passed, r.found.0);
                 if crate::restart::built(ed, generation, passed, errors)
                     || ed.preflight_done(generation)
@@ -677,6 +693,7 @@ impl Editor {
             scroll: None,
             section: 0,
             cut: None,
+            lock_wait: false,
         });
     }
 }

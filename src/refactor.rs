@@ -455,7 +455,7 @@ pub fn turn_over(ed: &mut Editor) {
         c.edits.sets.clear();
     }
     // (and a card for one: nobody waits for its answer)
-    ed.offers.retain(|o| !matches!(o.what, crate::offer::What::ChangeSet { .. }));
+    ed.drop_cards(|w| matches!(w, crate::offer::What::ChangeSet { .. }));
 }
 
 /// The answer: how many places in how many files changed, then per file what became of it.

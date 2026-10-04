@@ -118,7 +118,7 @@ pub const TITLE: &str = "Claude wants to read — outside the project";
 
 /// The next waiting ask on its card, once none is up.
 pub fn next(ed: &mut Editor) {
-    if ed.offers.iter().any(|o| matches!(o.what, crate::offer::What::Read { .. })) {
+    if ed.session_cards().any(|o| matches!(o.what, crate::offer::What::Read { .. })) {
         return;
     }
     let Some(p) = ed.session.chat.as_mut().and_then(|c| c.reads.pop_front()) else { return };
@@ -189,7 +189,7 @@ pub fn turn_over(ed: &mut Editor) {
     if let Some(c) = ed.session.chat.as_mut() {
         c.reads.clear();
     }
-    ed.offers.retain(|o| !matches!(o.what, crate::offer::What::Read { .. }));
+    ed.drop_cards(|w| matches!(w, crate::offer::What::Read { .. }));
 }
 
 #[cfg(test)]
