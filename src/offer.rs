@@ -647,8 +647,9 @@ impl crate::editor::Editor {
         }
     }
 
-    /// `y` on a card cut to fit: not an answer yet.
+    /// `y` on a card cut to fit: not an answer yet — said, and on the card's cut row too.
     pub fn offer_see_all_first(&mut self) {
+        self.offer_early.set(self.offers.first().map(|o| (o.id, o.rev)));
         let msg = match self.offer_viewing() {
             true => format!("read it to its end first — {} in its buffer", self.end_key()),
             false => "see all of it first — v shows the whole card".into(),

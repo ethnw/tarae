@@ -245,6 +245,8 @@ pub struct Chat {
     /// for their card (`reads.rs`).
     pub allowed: crate::allow::Allowed,
     pub reads: std::collections::VecDeque<crate::reads::Pending>,
+    /// This turn's sandboxed runs of Claude's — what they made is read unasked (#81, `reads::Ran`).
+    pub ran: Vec<crate::reads::Ran>,
     /// Claude may look at the screen without asking for the rest of this conversation (`a` on its card —
     /// `seeing.rs`).
     pub sees: bool,
@@ -350,6 +352,7 @@ impl Chat {
             unprotected: false,
             allowed: Default::default(),
             reads: Default::default(),
+            ran: Vec::new(),
             sees: false,
             run_allow: Vec::new(),
             run_scripts: Vec::new(),

@@ -532,10 +532,13 @@ impl Layout {
         // The review's file rail when there's room for it and the code (else the header says where you are)
         // …or the side panel (files / outline): the chat's and its widths are yours or automatic, the panel
         // giving way when the code would get too narrow (`sizes::widths`)
-        let review = editor.review_rail_up();
+        // (a review read wide — `space v z` — gives the rail's and the chat's columns to the code)
+        let wide = editor.review_wide();
+        let review = editor.review_rail_up() && !wide;
         let chat_open = editor.session.chat.as_ref().is_some_and(|c| !c.compact());
         let side_open = !review && editor.session.sidebar.is_some();
         let widths = match zoom {
+            None if wide => crate::sizes::Widths { chat: 0, side: 0 },
             None => crate::sizes::widths(w as usize, chat_open, side_open, editor.sizes),
             Some(Zoom::Chat) => crate::sizes::Widths { chat: w as usize, side: 0 },
             Some(Zoom::Side) => crate::sizes::Widths { chat: 0, side: w as usize },
@@ -1408,8 +1411,12 @@ fn draw_task_panel(
                 queue!(out, Print(fit(&line.replace('\t', "  "), w.saturating_sub(4))))?;
             }
             None if i == 0 && r.output.is_empty() => {
+                // (its first line: a command of several printed whole went down the rows as a staircase)
+                let mut lines = r.task.cmd.lines();
+                let first = lines.next().unwrap_or_default();
+                let cmd = if lines.next().is_some() { format!("{first} …") } else { first.to_string() };
                 apply(out, faint)?;
-                queue!(out, Print(fit_ellipsis(&r.task.cmd, w.saturating_sub(4))))?;
+                queue!(out, Print(fit_ellipsis(&cmd, w.saturating_sub(4))))?;
             }
             None => {}
         }
@@ -4066,6 +4073,18 @@ const REASON_ROWS: usize = 2;
 /// Deleted lines on faint red, added on faint green bg, keeping syntax colors. Each change has a head row —
 /// the current one an accent band with key hints, decided ones "accepted"/"rejected" (accept leaves only
 /// the new text visible, reject only the original). The top row is a fixed title (instruction · # decided).
+/// The file an edit review changes, as its head names it: from the checkout's root when inside it, else
+/// with its folders (home as `~`) — CLAUDE.md in the main checkout isn't this one's.
+fn review_file(editor: &Editor, doc: &crate::document::Document) -> String {
+    match doc.path.as_deref() {
+        Some(p) => match p.strip_prefix(&editor.session.root) {
+            Ok(rel) => rel.display().to_string(),
+            Err(_) => crate::allow::tilde(p),
+        },
+        None => "[scratch]".into(),
+    }
+}
+
 fn draw_review(
     rev: &Review,
     rows: &[crate::llm::RRow],
@@ -4138,7 +4157,24 @@ fn draw_review(
         format!("   {}", rev.instruction)
     };
     let head = 3 + rev.by.width();
-    let instr = fit_ellipsis(&said, width.saturating_sub(head + right.len() + 2));
+    // Which file it changes — the path bar names the one in front, which may be another (#82)
+    // (cut from the left — its name matters most — leaving the instruction a few words)
+    let room = width.saturating_sub(head + right.len() + 2);
+    let file = fit_left(&review_file(editor, doc), room.saturating_sub(2 + said.width().min(16)));
+    // (its folders dim, its name as the code is)
+    let file_w = if file.is_empty() { 0 } else { 2 + file.width() };
+    if !file.is_empty() {
+        let (dirs, name) = file.rsplit_once('/').map_or(("", file.as_str()), |(d, n)| (d, n));
+        queue!(out, Print("  "))?;
+        if !dirs.is_empty() {
+            apply(out, dim)?;
+            queue!(out, Print(format!("{dirs}/")))?;
+        }
+        apply(out, ui.base)?;
+        queue!(out, Print(name))?;
+    }
+    let head = head + file_w;
+    let instr = fit_ellipsis(&said, room.saturating_sub(file_w));
     apply(out, dim)?;
     queue!(out, Print(&instr), Spaces(width.saturating_sub(head + instr.width() + right.len())))?;
     apply(out, faint)?;
@@ -5334,6 +5370,9 @@ fn draw_header(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> 
         let at = r.rail_order().iter().position(|&k| k == i).unwrap_or(i) + 1;
         left.push(Seg { text: "  review ".into(), style: dim, keep: 243 });
         left.push(Seg { text: format!("{at}/{n}"), style: ui.base.patch(ui.accent), keep: 243 });
+        if editor.review_wide() {
+            left.push(Seg { text: " · wide".into(), style: faint, keep: 242 });
+        }
     }
     // `:diff`: what it's compared with
     if let Some(of) = &doc.diff_of {
@@ -5521,6 +5560,15 @@ fn draw_statusline(
         }
         if !done.is_empty() {
             left.push(Seg { text: done, style: accent, keep: CHIP });
+        }
+        // (files came again from disk in sessions behind — #6)
+        match editor.sessions_reloaded() {
+            0 => {}
+            n => left.push(Seg {
+                text: format!(" •{n}"),
+                style: Style { fg: ui.virt.fg, ..ui.status },
+                keep: CHIP,
+            }),
         }
     }
     if !lay.header {
@@ -6490,21 +6538,33 @@ impl OfferCard {
         // the buttons stay (#14: an 88-line card wasn't drawn at all, so it couldn't be answered)
         let room = lay.text_rows.saturating_sub(if has_buttons { 2 } else { 0 } + 2 * pad + 1);
         let mut cut = 0;
+        // (the cut row's forms all fit: the card keeps its width as it says another)
+        let mut cut_floor = 0;
         if lines.len() > room {
             if room < 3 {
                 return None;
             }
             cut = lines.len() - (room - 1);
             lines.truncate(room - 1);
-            // (once its `v` buffer has been read to the end, it says so — `y` answers now)
+            // (what `y` waits for, said where it's cut — #84: a `y` before was taken in silence; once its `v`
+            // buffer has been read to the end, it says so — `y` answers now)
+            let early = editor.offer_early.get() == Some((o.id, o.rev));
+            let (before, after) = ("y once you've seen it all — v", "y waits — v shows all of it");
             let then = if editor.offer_seen_whole() {
                 "seen in full — y answers".to_string()
             } else if editor.offer_viewing() {
-                format!("v view all · {} to the end", editor.end_key())
+                format!("y once read to the end — {} there", editor.end_key())
+            } else if early {
+                after.to_string()
             } else {
-                "v view all".to_string()
+                before.to_string()
             };
-            lines.push((format!("↓ {cut} more lines · {then}"), true));
+            let row = |then: &str| format!("↓ {cut} more lines · {then}");
+            cut_floor = row(before).width().max(row(after).width());
+            lines.push((row(&then), true));
+            if early && !editor.offer_seen_whole() && !editor.offer_viewing() {
+                warn.push(lines.len() - 1);
+            }
         }
         // Button row: "y Install   n Not now" — each "k label", three spaces between
         let btn_w =
@@ -6519,7 +6579,8 @@ impl OfferCard {
             .max()
             .unwrap_or(0)
             .max(if has_buttons { btn_w } else { 0 })
-            .max(ask.min(max_inner));
+            .max(ask.min(max_inner))
+            .max(cut_floor);
         let width = inner + 5;
         // Too narrow for it: not drawn (and an install's `y` isn't taken — `offer_key`)
         if width + 1 > lay.edit_w {
@@ -7901,9 +7962,10 @@ fn draw_review_rail(
 /// The sessions under the chat's header (with more than one): `main │ fix-login ● │ new-parser ▲ waits │
 /// docs done │ +` — the one in front strong, `●` its Claude working, `▲ waits` a card (or an edit) waiting for
 /// you, `done` a turn that ended behind and hasn't been looked at, `◦ symbols 42s` possibly stuck (a tool
-/// call unanswered that long), `+` a new one. Where that doesn't fit, one dropdown: `◂ fix-login ● ▾ 2/3
-/// ▲1 waiting 1 done ▸` (the name opens the list, `◦1` possibly stuck, the arrows step). Styles: strong,
-/// dim, faint, accent, warning · where each click goes (from the row's start).
+/// call unanswered that long), `•` files came again from disk there (#6), `+` a new one. Where that doesn't
+/// fit, one dropdown: `◂ fix-login ● ▾ 2/3 ▲1 waiting 1 done •1 ▸` (the name opens the list, `◦1` possibly
+/// stuck, `•1` files came again from disk there, the arrows step). Styles: strong, dim, faint, accent,
+/// warning · where each click goes (from the row's start).
 /// The other sessions as the dropdown and the status line's chip count them: ` ▲2 waiting` (a card or an
 /// edit waits for you — `◦1` too when some may be stuck) · ` 1 done` (a turn ended, not looked at) —
 /// each empty when none (#86: one `▲N` counted both). `compact`: ` ▲2` (where the room is the name's).
@@ -7960,6 +8022,10 @@ fn session_tabs(
         if let Some(r) = rebasing(l) {
             end = put(&mut spans, r.text, r.style);
         }
+        // (files came again from disk while it was behind — #6)
+        if l.reloaded > 0 {
+            end = put(&mut spans, " •".into(), dim);
+        }
         spots.push((start, end, Spot::Session(l.id)));
     }
     let start = put(&mut spans, " │ ".into(), faint);
@@ -7977,8 +8043,13 @@ fn session_tabs(
         mark(&editor.session).map(|m| if m.text == " ▲ waits" { Span { text: " ▲".into(), ..m } } else { m });
     let rebasing = rebasing(&editor.session);
     let marks_w = [&mark, &rebasing].iter().filter_map(|m| m.as_ref()).map(|m| m.text.width()).sum::<usize>();
-    let fixed =
-        |[waiting, done]: &[String; 2]| 2 + marks_w + 2 + count.width() + waiting.width() + done.width() + 2;
+    let reloaded = match editor.sessions_reloaded() {
+        0 => String::new(),
+        n => format!(" •{n}"),
+    };
+    let fixed = |[waiting, done]: &[String; 2]| {
+        2 + marks_w + 2 + count.width() + waiting.width() + done.width() + reloaded.width() + 2
+    };
     let label = editor.session.label();
     let full = sessions_counted(editor, false);
     let [waiting, done] = match w.saturating_sub(fixed(&full)) >= label.width().min(12) {
@@ -7997,6 +8068,9 @@ fn session_tabs(
     }
     if !done.is_empty() {
         spans.push(Span { text: done, style: accent });
+    }
+    if !reloaded.is_empty() {
+        spans.push(Span { text: reloaded, style: dim });
     }
     let list_end: usize = spans.iter().map(|s| s.text.width()).sum();
     spans.push(Span { text: " ▸".into(), style: dim });
@@ -9906,6 +9980,42 @@ mod tests {
         let (a, b) = ed.screen.review_change.get().expect("the change on screen");
         let card = ed.screen.toast_card.get().expect("a card");
         assert!((a..=b).all(|r| !rows_of(card).contains(&r)), "change {a}–{b} under {card:?}");
+    }
+
+    /// #82: an edit review names the file it changes — the path bar names the one in front, which may be
+    /// another: from the checkout's root when inside it, with its folders when outside.
+    #[test]
+    fn an_edit_review_names_its_file() {
+        let dir = std::env::temp_dir().join(format!("tarae-review-file-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("co/src")).unwrap();
+        std::fs::create_dir_all(dir.join("main")).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let (inside, outside) = (dir.join("co/src/tools.rs"), dir.join("main/CLAUDE.md"));
+        let front = dir.join("co/src/front.rs");
+        for p in [&inside, &outside, &front] {
+            std::fs::write(p, "one\ntwo\n").unwrap();
+        }
+        let mut ed = Editor::new(Config::default());
+        ed.session.root = dir.join("co");
+        let title = |ed: &mut Editor, path: &std::path::Path, w: u16| {
+            ed.open(path).unwrap();
+            let id = ed.doc().id;
+            ed.open(&front).unwrap();
+            crate::llm::review_with(ed, id, "edit", vec![(0, 4, "one\n".into(), "uno\n".into())], None);
+            let mut bytes = Vec::new();
+            render(ed, &mut bytes, w, 30).unwrap();
+            let mut parser = vt100::Parser::new(30, w, 0);
+            parser.process(&bytes);
+            parser.screen().contents().lines().nth(ed.screen.text_top).unwrap_or_default().to_string()
+        };
+        let t = title(&mut ed, &inside, 120);
+        assert!(t.contains("Claude  src/tools.rs   “edit”"), "{t}");
+        let t = title(&mut ed, &outside, 250);
+        assert!(t.contains(&format!("Claude  {}   “edit”", crate::allow::tilde(&outside))), "{t}");
+        // Narrow: the folders give way, the name and a word of why stay
+        let t = title(&mut ed, &outside, 70);
+        assert!(t.contains("Claude  …") && t.contains("main/CLAUDE.md   “edit”"), "{t}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     use std::time::{Duration, Instant};

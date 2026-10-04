@@ -133,6 +133,10 @@ pub struct Session {
     /// The code review's viewed marks, by file — kept past the review (#9: reopened, they were gone) while the
     /// file's diff is what it was when marked (`codereview::Viewed`).
     pub viewed: std::collections::HashMap<PathBuf, crate::codereview::Viewed>,
+    /// Its files that came again from disk (or changed there under an edit) while it was behind — said only
+    /// in `:messages` (`disk_said`), so its tab, the chip and its row in the list carry a `•` (#6) until it
+    /// comes to the front.
+    pub reloaded: usize,
 }
 
 /// How long a tool call may wait before its session is marked possibly stuck (a `diagnostics` call's own
@@ -230,6 +234,7 @@ impl Session {
             asking: Vec::new(),
             spawned: Vec::new(),
             viewed: Default::default(),
+            reloaded: 0,
         }
     }
 
@@ -420,6 +425,12 @@ impl Editor {
     /// How many sessions behind are possibly stuck (`Doing::Stuck`) — `◦n` where their tabs aren't drawn.
     pub fn sessions_stuck(&self) -> usize {
         self.sessions.iter().filter(|l| matches!(self.doing(l), Doing::Stuck { .. })).count()
+    }
+
+    /// How many sessions behind had files come again from disk since they were in front (#6) — `•n` where
+    /// their tabs aren't drawn.
+    pub fn sessions_reloaded(&self) -> usize {
+        self.sessions.iter().filter(|l| l.reloaded > 0).count()
     }
 
     /// The front session's buffers as indexes into `docs`, in their order there (the one shown always among
@@ -686,6 +697,8 @@ impl Editor {
         self.offers.append(&mut self.session.parked);
         self.session.waiting_told = false;
         self.session.turn_done = false;
+        // (what came from disk meanwhile is in sight now — its `•` goes)
+        self.session.reloaded = 0;
         crate::edits::next(self);
         crate::follow::session_in(self);
         // (which one is in front is kept too — `:restart` and the next start come back to it)
@@ -1319,6 +1332,7 @@ mod tests {
             front: false,
             usage: None,
             rebasing: None,
+            reloaded: 0,
         };
         let row = &crate::worktree::items(&[shown(doing)])[0];
         assert!(row.hint.contains("stuck? symbols 42s"), "{}", row.hint);

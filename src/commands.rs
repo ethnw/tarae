@@ -215,6 +215,7 @@ commands! {
         review_at_end => "Claude's edits: review at end",
         review_turn => "Review Claude's last turn",
         review_undo_change => "Take this change back",
+        review_wide => "Read wide: hide rail and chat",
         session_new => "New session (its own branch)",
         session_list => "Sessions: switch, end, new",
         note_picker => "Claude's notes",
@@ -1951,6 +1952,10 @@ fn review_at_end(cx: &mut Context) {
 
 fn review_turn(cx: &mut Context) {
     crate::codereview::review_turn(cx.editor);
+}
+
+fn review_wide(cx: &mut Context) {
+    crate::codereview::wide_toggle(cx.editor);
 }
 
 fn session_new(cx: &mut Context) {

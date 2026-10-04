@@ -795,16 +795,19 @@ pub struct Shown {
     pub usage: Option<(f32, u64)>,
     /// A rebase under way in its checkout, as it says it (`rebasing 2/5`).
     pub rebasing: Option<String>,
+    /// Its files that came again from disk while it was behind (`Session.reloaded`, #6).
+    pub reloaded: usize,
 }
 
 /// The list's rows: the name, a glyph for what its Claude does (`●` working, `▲` waiting for you, `◦` a
 /// tool call unanswered too long — `stuck? symbols 42s`; a turn ended behind says `done` in words), and the
-/// rest in columns — branch, `↑ahead ↓behind`, what's changed, what it's doing, CPU and memory — each column
-/// as wide as its widest and empty ones left out, so the hints (right-aligned) line up row under row.
+/// rest in columns — branch, `↑ahead ↓behind`, what's changed, files reloaded behind (`• 2 reloaded`), what
+/// it's doing, CPU and memory — each column as wide as its widest and empty ones left out, so the hints
+/// (right-aligned) line up row under row.
 pub fn items(sessions: &[Shown]) -> Vec<crate::picker::Item> {
     use crate::session::Doing;
     use unicode_width::UnicodeWidthStr as _;
-    let cols: Vec<[String; 5]> = sessions
+    let cols: Vec<[String; 6]> = sessions
         .iter()
         .map(|l| {
             let branch = l.branch.clone().filter(|b| *b != l.name).unwrap_or_default();
@@ -830,12 +833,14 @@ pub fn items(sessions: &[Shown]) -> Vec<crate::picker::Item> {
                 .usage
                 .map(|(cpu, bytes)| format!("{cpu:>3.0}%  {:>6}", crate::procs::mem(bytes)))
                 .unwrap_or_default();
-            [branch, moved.join(" "), changed, doing, usage]
+            let reloaded =
+                if l.reloaded > 0 { format!("• {} reloaded", l.reloaded) } else { String::new() };
+            [branch, moved.join(" "), changed, reloaded, doing, usage]
         })
         .collect();
-    let widths: Vec<usize> = (0..5).map(|c| cols.iter().map(|r| r[c].width()).max().unwrap_or(0)).collect();
+    let widths: Vec<usize> = (0..6).map(|c| cols.iter().map(|r| r[c].width()).max().unwrap_or(0)).collect();
     // (counts right-aligned, words left)
-    let right = [false, true, true, false, true];
+    let right = [false, true, true, true, false, true];
     sessions
         .iter()
         .zip(cols)
@@ -1352,6 +1357,7 @@ impl Editor {
                 front: l.id == self.session.id,
                 usage: crate::procs::summed(&self.procs.rows, &self.session_pids(l)),
                 rebasing: l.rebase.as_ref().map(crate::rebase::Rebase::said),
+                reloaded: l.reloaded,
             })
             .collect();
         items(&shown)
@@ -2586,6 +2592,7 @@ mod tests {
             front: id == 0,
             usage,
             rebasing: None,
+            reloaded: 0,
         };
         let f = |ahead, behind, changed| Some(Facts { ahead, behind, changed });
         let rows = items(&[

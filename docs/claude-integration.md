@@ -89,7 +89,7 @@ if a settings file allows them. `llm.chat-settings = false` starts it clean.
 
 Claude isn't limited to that file: it **explores the project itself** (Read, Grep, Glob — in the project without
 asking, [outside it only once you say so](#reading-outside-the-project); its [edits](#edits) always come to you
-first). Each lookup shows as a quiet row (`◦ read  src/lib.rs  L10–49`, `◦ search  fn add  in src`),
+first). Each lookup shows as a quiet row (`◦ read  src/lib.rs  L10–49`, `◦ grep  fn add  in src` — each named as the tool it is),
 the one in progress marked `●`. The other open files are listed in the context, and unsaved ones send their text,
 since Claude would otherwise read the stale copy on disk. Answers cite code as `path:line`. Those references are
 underlined, and a click opens them. `C-]` (or `C-g` — zellij takes that one) walks every place the conversation points at, newest first, centering
@@ -419,6 +419,11 @@ folder searched and what for. What's read goes to Claude.
   project's files. `:sandbox-allowed` lists them, and Enter on one takes it back
 - Home itself, the folders above it, and places that hold keys (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`,
   `~/.docker`, `~/.config/gh`, `~/.netrc`, …) are only ever allowed once
+- What Claude's own commands made this turn is read without a card: a file (or a folder and what's in it)
+  created in the temp folders (`/tmp`, your `$TMPDIR`) while one of its runs went, and anything in a run's own
+  temp folder — screenshots a script just wrote, a test's dump. A run could print whatever it read anyway; a
+  file something else made there in that same time goes through too. Files that were there before, or made
+  after the run ended, still ask, and the next turn starts over
 
 ### Notes
 
@@ -500,6 +505,7 @@ draft, and `space v s` sends your answers together.
 | `space e` | The rail: `j`/`k` files, Enter open, `m` viewed and next, Esc back |
 | click on a file's `◦` | Open it and mark it viewed |
 | `space v u` | Take the change at the cursor back |
+| `space v z` | Read wide: the rail and the chat give the code their columns (again: back) |
 | `space v s` / `:review-send` | Send the drafts to Claude |
 | `space v c` / `:review-claude` | Claude reviews the changes: notes on the lines, a verdict in the chat |
 | `space v q` / `:review-close` | End the review (asks first while files aren't viewed) |

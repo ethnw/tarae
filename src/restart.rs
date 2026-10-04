@@ -486,6 +486,8 @@ pub fn snapshot(ed: &mut Editor) -> Value {
         "overrides": overrides,
         // (every session, and which is in front; its files are the ones above)
         "sessions": crate::worktree::snapshot(ed),
+        // (the review's viewed marks, each session's)
+        "viewed": crate::codereview::viewed_snapshot(ed),
         // (its shell can't come along — the next tarae says so)
         "terminal": ed.session.terminal.as_ref().is_some_and(|t| t.exited.is_none()),
     })
@@ -523,6 +525,7 @@ fn restore_quietly(ed: &mut Editor, v: &Value) -> usize {
     }
     // The sessions, the one in front in front — the files below open in it
     crate::worktree::restore(ed, &v["sessions"]);
+    crate::codereview::viewed_restore(ed, &v["viewed"]);
     // Saved index → the document it is now
     let mut ids = Vec::new();
     for d in v["docs"].as_array().into_iter().flatten() {

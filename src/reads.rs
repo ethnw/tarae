@@ -6,6 +6,7 @@
 //! in `Chat.reads`, and an answer for longer lets the ones it covers through.
 
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use serde_json::{Value, json};
 
@@ -75,12 +76,81 @@ fn glob_root(base: &Path, pattern: &str) -> Option<PathBuf> {
     Some(root)
 }
 
-/// Whether the call may go without asking: inside the project, in a place allowed, or tarae's own log
-/// (the file itself — `log::is_log_real`).
-pub fn covered(look: &Look, root: &Path, chat: &Allowed, kept: &Allowed) -> bool {
+/// One of Claude's runs this turn (#81 — 12 shots under `/tmp` were 12 cards): what it made in the temp
+/// folders while it went, and anything in its own folder (`sandbox::RunDir`, kept until the turn ends), is
+/// read unasked. A run reads what it likes and could have printed it, so what it wrote holds nothing it
+/// couldn't have said; a file made over there by something else in that time goes through too.
+#[derive(Clone, Debug)]
+pub struct Ran {
+    pub from: SystemTime,
+    /// None: still going.
+    pub to: Option<SystemTime>,
+    pub dir: Option<std::sync::Arc<crate::sandbox::RunDir>>,
+}
+
+/// What a worker checks a read against: each run's time and folder.
+#[derive(Clone, Debug, Default)]
+pub struct Made {
+    pub runs: Vec<(SystemTime, Option<SystemTime>)>,
+    pub dirs: Vec<PathBuf>,
+    /// Where a run's files count (real paths): `/private/tmp` and the user's temp folder — not what holds
+    /// that (`$TMPDIR`'s parent has the apps' caches), nor the toolchain's folders.
+    pub temp: Vec<PathBuf>,
+}
+
+impl Made {
+    pub fn of(ran: &[Ran]) -> Made {
+        let temp = [PathBuf::from("/private/tmp"), crate::sandbox::real(&std::env::temp_dir())];
+        Made {
+            runs: ran.iter().map(|r| (r.from, r.to)).collect(),
+            dirs: ran.iter().filter_map(|r| r.dir.as_ref().map(|d| d.path().to_path_buf())).collect(),
+            temp: temp.into(),
+        }
+    }
+
+    /// Whether `at` (a real path) is in a run's folder, or was made in the temp folders while a run went
+    /// (a folder made then counts with what's in it — a Grep or Glob of it). Made = its birth time.
+    pub fn covers(&self, at: &Path, now: SystemTime) -> bool {
+        if self.dirs.iter().any(|d| at.starts_with(d)) {
+            return true;
+        }
+        if !self.temp.iter().any(|t| at.starts_with(t) && at != t) || self.runs.is_empty() {
+            return false;
+        }
+        let born = |p: &Path| std::fs::symlink_metadata(p).and_then(|m| m.created()).ok();
+        let during = |t: SystemTime| self.runs.iter().any(|&(from, to)| from <= t && t <= to.unwrap_or(now));
+        // The path, else a folder it's in made then (up to the temp folder itself)
+        at.ancestors().take_while(|p| !self.temp.iter().any(|t| t == p)).any(|p| born(p).is_some_and(during))
+    }
+}
+
+/// Whether the call may go without asking: inside the project, in a place allowed, tarae's own log
+/// (the file itself — `log::is_log_real`), or made by one of Claude's runs this turn (`Made`).
+pub fn covered(look: &Look, root: &Path, chat: &Allowed, kept: &Allowed, made: &Made) -> bool {
     look.at.as_ref().is_some_and(|at| {
-        at.starts_with(root) || chat.reads(at) || kept.reads(at) || crate::log::is_log_real(at)
+        at.starts_with(root)
+            || chat.reads(at)
+            || kept.reads(at)
+            || crate::log::is_log_real(at)
+            || made.covers(at, SystemTime::now())
     })
+}
+
+/// One of Claude's runs started (`tools::go`).
+pub fn run_started(ed: &mut Editor, dir: Option<std::sync::Arc<crate::sandbox::RunDir>>) {
+    if let Some(c) = ed.session.chat.as_mut() {
+        c.ran.push(Ran { from: SystemTime::now(), to: None, dir });
+    }
+}
+
+/// Claude's run ended (or was dropped): its time is over.
+pub fn run_ended(ed: &mut Editor) {
+    if let Some(c) = ed.session.chat.as_mut() {
+        let now = SystemTime::now();
+        for r in c.ran.iter_mut().filter(|r| r.to.is_none()) {
+            r.to = Some(now);
+        }
+    }
 }
 
 /// A `can_use_tool` ask for one of `TOOLS` — decided on a worker (paths resolved, the kept answers read),
@@ -88,7 +158,7 @@ pub fn covered(look: &Look, root: &Path, chat: &Allowed, kept: &Allowed) -> bool
 pub fn request(ed: &mut Editor, request_id: &str, req: &Value) -> Option<Value> {
     let tool = req["tool_name"].as_str().unwrap_or_default().to_string();
     let c = ed.session.chat.as_ref()?;
-    let (generation, chat) = (c.generation(), c.allowed.clone());
+    let (generation, chat, made) = (c.generation(), c.allowed.clone(), Made::of(&c.ran));
     let input = req["input"].clone();
     let request_id = request_id.to_string();
     let store = ed.allow_path.clone();
@@ -97,7 +167,7 @@ pub fn request(ed: &mut Editor, request_id: &str, req: &Value) -> Option<Value> 
     ed.events.jobs().spawn(move || {
         let look = look(&tool, &input, &root);
         let kept = crate::allow::Store::read(store.as_deref()).get(&root);
-        let ok = covered(&look, &root, &chat, &kept);
+        let ok = covered(&look, &root, &chat, &kept, &made);
         move |ed: &mut Editor| {
             let Some(c) = ed.session.chat.as_mut().filter(|c| c.generation() == generation) else { return };
             if ok {
@@ -184,10 +254,11 @@ pub fn answer(ed: &mut Editor, id: u64, p: Pending, scope: Option<Scope>, keep: 
     next(ed);
 }
 
-/// The turn ended: nothing waits for these asks any more.
+/// The turn ended: nothing waits for these asks any more, and what its runs made asks again.
 pub fn turn_over(ed: &mut Editor) {
     if let Some(c) = ed.session.chat.as_mut() {
         c.reads.clear();
+        c.ran.clear();
     }
     ed.drop_cards(|w| matches!(w, crate::offer::What::Read { .. }));
 }
@@ -255,12 +326,59 @@ mod tests {
         };
         let none = Allowed::default();
         let some = Allowed { read: vec!["/t/x".into()], ..Default::default() };
-        assert!(covered(&l(Some("/r/p/src/a.rs")), root, &none, &none));
-        assert!(!covered(&l(Some("/r/pq/a.rs")), root, &none, &none), "by path parts");
-        assert!(!covered(&l(Some("/t/x/m.txt")), root, &none, &none));
-        assert!(covered(&l(Some("/t/x/m.txt")), root, &some, &none), "this chat");
-        assert!(covered(&l(Some("/t/x/m.txt")), root, &none, &some), "kept");
-        assert!(!covered(&l(None), root, &some, &some), "can't be told: asks");
+        assert!(covered(&l(Some("/r/p/src/a.rs")), root, &none, &none, &Made::default()));
+        assert!(!covered(&l(Some("/r/pq/a.rs")), root, &none, &none, &Made::default()), "by path parts");
+        assert!(!covered(&l(Some("/t/x/m.txt")), root, &none, &none, &Made::default()));
+        assert!(covered(&l(Some("/t/x/m.txt")), root, &some, &none, &Made::default()), "this chat");
+        assert!(covered(&l(Some("/t/x/m.txt")), root, &none, &some, &Made::default()), "kept");
+        assert!(!covered(&l(None), root, &some, &some, &Made::default()), "can't be told: asks");
+    }
+
+    /// #81: what a run made in the temp folders while it went reads unasked — a file, or a folder made then
+    /// with what's in it — and anything in the run's own folder; not what was there before it, nor what
+    /// came after it ended, nor what it made outside the temp folders, nor the temp folder itself.
+    #[test]
+    fn what_a_run_made_reads_unasked() {
+        let base =
+            crate::sandbox::real(&std::env::temp_dir()).join(format!("tarae-made-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        let (temp, elsewhere, own) = (base.join("tmp"), base.join("elsewhere"), base.join("tmp/run-1"));
+        for d in [&temp, &elsewhere, &own] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        // (apart in time: birth times are what's compared)
+        let pause = || std::thread::sleep(std::time::Duration::from_millis(20));
+        let before = temp.join("before.png");
+        std::fs::write(&before, "x").unwrap();
+        std::fs::write(own.join("frame.txt"), "x").unwrap();
+        pause();
+        let from = SystemTime::now();
+        pause();
+        let shot = temp.join("shot.png");
+        std::fs::write(&shot, "x").unwrap();
+        std::fs::create_dir(temp.join("shots")).unwrap();
+        std::fs::write(temp.join("shots/1.png"), "x").unwrap();
+        std::fs::write(elsewhere.join("out.png"), "x").unwrap();
+        pause();
+        let to = SystemTime::now();
+        pause();
+        let after = temp.join("after.png");
+        std::fs::write(&after, "x").unwrap();
+        let made = Made { runs: vec![(from, Some(to))], dirs: vec![own.clone()], temp: vec![temp.clone()] };
+        let now = SystemTime::now();
+        assert!(made.covers(&shot, now), "made while it went");
+        assert!(made.covers(&temp.join("shots/1.png"), now) && made.covers(&temp.join("shots"), now));
+        assert!(made.covers(&own.join("frame.txt"), now), "its own folder, whenever");
+        assert!(!made.covers(&before, now), "there before it ran");
+        assert!(!made.covers(&after, now), "made after it ended");
+        assert!(!made.covers(&elsewhere.join("out.png"), now), "outside the temp folders");
+        assert!(!made.covers(&temp, now), "not the temp folder itself");
+        // Still going: up to now
+        let going = Made { runs: vec![(from, None)], ..made.clone() };
+        assert!(going.covers(&after, SystemTime::now()));
+        // No run this turn: nothing
+        assert!(!Made { runs: vec![], dirs: vec![], ..made }.covers(&shot, now));
+        std::fs::remove_dir_all(&base).ok();
     }
 
     /// #45: tarae's own log is read unasked — Read, a Grep of it, a read-only command naming it — but only
@@ -270,7 +388,9 @@ mod tests {
         let Some(log) = crate::log::path() else { return };
         let root = Path::new("/r/p");
         let none = Allowed::default();
-        let at = |tool: &str, input: Value| covered(&look(tool, &input, root), root, &none, &none);
+        let at = |tool: &str, input: Value| {
+            covered(&look(tool, &input, root), root, &none, &none, &Made::default())
+        };
         assert!(at("Read", json!({ "file_path": log })));
         assert!(at("Grep", json!({ "pattern": "ready", "path": log })));
         let dir = log.parent().unwrap();

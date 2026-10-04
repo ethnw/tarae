@@ -179,6 +179,7 @@ q = "review_close"
 a = "review_at_end"
 t = "review_turn"
 u = "review_undo_change"
+z = "review_wide"
 
 [normal.space.x]
 x = "test_nearest"

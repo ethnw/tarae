@@ -329,6 +329,7 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `space v t` | `review_turn` | Review Claude's last turn |
 | `space v u` | `review_undo_change` | Take this change back |
 | `space v v` | `review_start` | Review the changes |
+| `space v z` | `review_wide` | Read wide: hide rail and chat |
 
 ### `space w`
 

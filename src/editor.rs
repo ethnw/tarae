@@ -444,6 +444,9 @@ pub struct Editor {
     /// The card (id, rev) last in sight whole — drawn uncut, or read to its end in its `v` buffer (a weighty
     /// `y` waits for it).
     pub offer_whole: std::cell::Cell<Option<(u64, u64)>>,
+    /// The card (id, rev) a `y` came to before it was seen whole — its cut row says why in the warning
+    /// color (#84: the toast alone was missed, the `y` seemed ignored).
+    pub offer_early: std::cell::Cell<Option<(u64, u64)>>,
     /// The card (id, rev) whose whole text `v` opened, in this buffer — seen whole once its last line has
     /// been on screen (opening it isn't reading it: a line 50 would go unseen).
     pub offer_view: std::cell::Cell<Option<(u64, u64, DocId)>>,
@@ -629,6 +632,7 @@ impl Editor {
             offers: Vec::new(),
             offer_seen: Default::default(),
             offer_whole: Default::default(),
+            offer_early: Default::default(),
             offer_view: Default::default(),
             offer_read: Default::default(),
             offer_seq: 0,
@@ -6095,6 +6099,47 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// #83: `space v z` reads the review wide — the rail and the chat give the code their columns, the
+    /// header says so; going to the chat brings it while it has the keys; again, both are back. Without a
+    /// review it says why.
+    #[test]
+    fn space_v_z_reads_the_review_wide() {
+        let dir = git_repo("broad", &[("a.rs", "fn a() {}\n")]);
+        std::fs::write(dir.join("a.rs"), format!("fn a() {{ {} }}\n", "x".repeat(150))).unwrap();
+        let mut ed = editor("");
+        feed(&mut ed, "<space>vz");
+        assert!(ed.toasts.iter().any(|t| t.text.contains("no review open")), "{:?}", ed.toasts);
+        crate::chat::open(&mut ed);
+        ed.session.chat.as_mut().unwrap().focused = false;
+        crate::codereview::start_in(&mut ed, dir.clone(), None);
+        settle_until(&mut ed, |ed| ed.session.code_review.is_some() && ed.doc().review_base.is_some());
+        // (the code's columns: its pane's width · the header's row)
+        let frame = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 200, 40).unwrap();
+            let mut parser = vt100::Parser::new(40, 200, 0);
+            parser.process(&bytes);
+            let head = parser.screen().contents().lines().next().unwrap_or_default().to_string();
+            (ed.screen.panes[0].1.x, ed.screen.panes[0].1.w, ed.screen.chat_w, head)
+        };
+        let (x, w, chat, head) = frame(&mut ed);
+        assert!(x > 0 && chat > 0 && x + w + chat == 200, "rail {x}, code {w}, chat {chat}");
+        assert!(!head.contains("· wide"), "{head}");
+        feed(&mut ed, "<space>vz");
+        let (x, w, chat, head) = frame(&mut ed);
+        assert_eq!((x, w, chat), (0, 200, 0), "the code has the screen");
+        assert!(head.contains("review 1/1 · wide"), "{head}");
+        // The chat with the keys: back while it has them
+        ed.session.chat.as_mut().unwrap().focused = true;
+        assert!(frame(&mut ed).2 > 0, "the chat has the keys: it shows");
+        ed.session.chat.as_mut().unwrap().focused = false;
+        assert_eq!(frame(&mut ed).2, 0, "and goes again");
+        feed(&mut ed, "<space>vz");
+        let (x, _, chat, _) = frame(&mut ed);
+        assert!(x > 0 && chat > 0, "both back");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     fn json_str(s: &str) -> serde_json::Value {
         serde_json::Value::String(s.to_string())
     }
@@ -6818,6 +6863,52 @@ mod tests {
         // Taken back
         crate::typed::execute(&mut ed, &format!("sandbox-disallow {}", other.display())).unwrap();
         settle_until(&mut ed, |_| !kept(&other));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #81: what one of Claude's runs made this turn (a shot under the temp folder) is read unasked; what
+    /// was there before it still asks; the turn over, its runs count no more. Nothing is read here: the fake
+    /// claude only asks.
+    #[test]
+    fn what_claudes_run_made_this_turn_reads_unasked() {
+        use serde_json::json;
+        let dir = crate::sandbox::real(&std::env::temp_dir())
+            .join(format!("tarae-made-ask-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let (old, shot) = (dir.join("old.png"), dir.join("shot.png"));
+        std::fs::write(&old, "x").unwrap();
+        let mut ed = editor("");
+        ed.session.root = this_repo();
+        let log = fake_tool_asks(
+            &mut ed,
+            &dir,
+            &[("Read", json!({"file_path": shot})), ("Read", json!({"file_path": old}))],
+        );
+        feed(&mut ed, "<space>l");
+        // (apart in time: birth times are what's compared)
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        crate::reads::run_started(&mut ed, None);
+        std::fs::write(&shot, "x").unwrap();
+        crate::reads::run_ended(&mut ed);
+        assert_eq!(ed.session.chat.as_ref().map(|c| c.ran.len()), Some(1));
+        feed(&mut ed, "look at the shot<ret>");
+        let answered = |ed: &mut Editor, id: &str| {
+            let quoted = format!("\"request_id\":\"{id}\"");
+            settle_until(ed, |_| std::fs::read_to_string(&log).unwrap_or_default().contains(&quoted));
+            permission_answer_to(&log, id)
+        };
+        assert_eq!(answered(&mut ed, "p1")["behavior"], "allow", "made by its run: unasked");
+        settle_until(&mut ed, |ed| ed.offers.iter().any(|o| o.title == crate::reads::TITLE));
+        assert!(ed.offers[0].question.starts_with(&old.display().to_string()), "there before: asks");
+        // (drawn, and in sight long enough for an answer)
+        crate::term::render(&mut ed, &mut Vec::new(), 140, 40).unwrap();
+        let o = (ed.offers[0].id, ed.offers[0].rev);
+        ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
+        feed(&mut ed, "n");
+        assert_eq!(answered(&mut ed, "p2")["behavior"], "deny");
+        settle_until(&mut ed, |ed| ed.session.chat.as_ref().unwrap().state == crate::chat::State::Idle);
+        assert!(ed.session.chat.as_ref().unwrap().ran.is_empty(), "the turn's runs are over with it");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -10219,6 +10310,44 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// #5: a file's viewed mark comes through `:restart` — still checked against its diff: the same diff
+    /// reviewed again is viewed; once the file changes, it isn't.
+    #[test]
+    fn viewed_marks_come_through_a_restart() {
+        let dir = git_repo("viewed-restart", &[("a.txt", "a\nb\nc\n"), ("b.txt", "x\n")]);
+        std::fs::write(dir.join("a.txt"), "a\nB\nc\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "x\ny\n").unwrap();
+        let review = |ed: &mut Editor| {
+            crate::codereview::start_in(ed, dir.clone(), None);
+            settle_until(ed, |ed| {
+                ed.session.code_review.is_some() && ed.doc().review_base.is_some() && !ed.doc().loading
+            });
+        };
+        let viewed = |ed: &Editor| -> Vec<String> {
+            let r = ed.session.code_review.as_ref().unwrap();
+            r.files.iter().filter(|f| r.viewed(ed, f)).map(|f| f.rel.clone()).collect()
+        };
+        let mut ed = editor("");
+        review(&mut ed);
+        let first = ed.session.code_review.as_ref().unwrap().files[0].rel.clone();
+        feed(&mut ed, "<space>vm");
+        assert_eq!(viewed(&ed), std::slice::from_ref(&first));
+        let state = crate::restart::snapshot(&mut ed);
+        // The next tarae
+        let mut ed = editor("");
+        crate::restart::restore(&mut ed, &state);
+        review(&mut ed);
+        assert_eq!(viewed(&ed), std::slice::from_ref(&first), "the same diff: still viewed");
+        // Changed since: the mark goes
+        let file = dir.join(&first);
+        std::fs::write(&file, format!("{}more\n", std::fs::read_to_string(&file).unwrap())).unwrap();
+        let mut ed = editor("");
+        crate::restart::restore(&mut ed, &state);
+        review(&mut ed);
+        assert!(viewed(&ed).is_empty(), "{:?}", viewed(&ed));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// A big file's review base arriving after its text: its diff is worked out on that text, not on the
     /// empty placeholder the base was asked for over.
     #[test]
@@ -10483,6 +10612,85 @@ mod tests {
         assert!(ed.offers.is_empty());
     }
 
+    /// A command of several lines running with nothing printed yet: the task panel shows its first line and
+    /// `…` — printed whole, its newlines went down the rows as a staircase (seen in the #84 screenshot).
+    #[test]
+    fn a_command_of_several_lines_waits_on_its_first() {
+        let mut ed = editor("text\n");
+        ed.offer_popups = true;
+        crate::chat::open(&mut ed);
+        let generation = ed.session.chat.as_ref().unwrap().generation();
+        let msg = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "run", "arguments": {"command": "sleep 3\necho second line"}}});
+        assert!(crate::tools::mcp(&mut ed, generation, "c1", &msg).is_none());
+        settle_until(&mut ed, |ed| ed.offers.iter().any(|o| matches!(o.what, crate::offer::What::Run(_))));
+        let screen = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 140, 30).unwrap();
+            let mut parser = vt100::Parser::new(30, 140, 0);
+            parser.process(&bytes);
+            parser.screen().contents()
+        };
+        screen(&mut ed);
+        let o = ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
+        ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
+        feed(&mut ed, "y");
+        settle_until(&mut ed, |ed| ed.session.task_run.is_some());
+        assert!(ed.session.task_run.as_ref().unwrap().output.is_empty(), "nothing printed yet");
+        let s = screen(&mut ed);
+        assert!(s.contains("sleep 3 …") && !s.contains("echo second line"), "{s}");
+        ed.task_close();
+    }
+
+    /// #84: Claude's run card cut to fit (the chat beside it, Claude asking mid-turn) says that `y` waits
+    /// for all of it to be seen, and a `y` before that says why on screen — it was taken in silence.
+    #[test]
+    fn a_cut_run_card_says_y_waits_for_all_of_it() {
+        let frame = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 140, 20).unwrap();
+            let mut parser = vt100::Parser::new(20, 140, 0);
+            parser.process(&bytes);
+            parser
+        };
+        let screen = |ed: &mut Editor| frame(ed).screen().contents();
+        // The color of the card's cut row (its `↓`) — colors drawn though tarae's test runner sets NO_COLOR
+        crossterm::style::force_color_output(true);
+        let cut_color = |ed: &mut Editor| {
+            let p = frame(ed);
+            let s = p.screen().contents();
+            let (row, line) = s.lines().enumerate().find(|(_, l)| l.contains('↓')).expect("the cut row");
+            let col = line.chars().position(|c| c == '↓').unwrap();
+            p.screen().cell(row as u16, col as u16).unwrap().fgcolor()
+        };
+        let mut ed = editor("text\n");
+        ed.offer_popups = true;
+        crate::chat::open(&mut ed);
+        let generation = ed.session.chat.as_ref().unwrap().generation();
+        let command: String = (1..=12).map(|i| format!("echo step {i}")).collect::<Vec<_>>().join("\n");
+        let msg = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "run", "arguments": {"command": command}}});
+        let r = crate::tools::mcp(&mut ed, generation, "c1", &msg);
+        assert!(r.is_none(), "it waits for the user: {r:?}");
+        settle_until(&mut ed, |ed| ed.offers.iter().any(|o| matches!(o.what, crate::offer::What::Run(_))));
+        let s = screen(&mut ed);
+        assert!(s.contains("more lines · y once you've seen it all — v"), "{s}");
+        let plain = cut_color(&mut ed);
+        let y_at = |ed: &Editor| ed.screen.offer_buttons.iter().find(|b| b.3 == 'y').map(|b| (b.0, b.1));
+        let before = y_at(&ed);
+        let o = ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
+        ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
+        feed(&mut ed, "y");
+        assert_eq!(ed.offers.len(), 1, "y waits");
+        let s = screen(&mut ed);
+        assert!(s.contains("see all of it first — v shows the whole card"), "said: {s}");
+        // …and on the card, where the eyes are: its cut row, in the warning color
+        assert!(s.contains("more lines · y waits — v shows all of it"), "{s}");
+        let warning = ed.theme.try_get("warning").and_then(|s| s.fg);
+        assert_ne!(cut_color(&mut ed), plain, "the warning color, not the faint row's ({warning:?})");
+        assert_eq!(y_at(&ed), before, "the card stays where it was (no wider)\n{}", screen(&mut ed));
+    }
+
     /// A card taller than the screen is still drawn — cut to fit, its buttons in sight, a row saying how much
     /// is left — and answerable: `y` waits until all of it has been seen (`v` opens it whole in a buffer,
     /// and it counts once that buffer's last line has been on screen); new text on the card has to be seen
@@ -10518,7 +10726,7 @@ mod tests {
         let s = screen(&mut ed);
         assert!(s.contains("Trust this project's settings?") && s.contains("line 1 of what it runs"), "{s}");
         assert!(!s.contains("line 80 of what it runs"), "cut to fit");
-        assert!(s.contains("more lines · v view all") && s.contains("y Trust"), "{s}");
+        assert!(s.contains("more lines · y once you've seen it all — v") && s.contains("y Trust"), "{s}");
         assert!(ed.screen.offer_buttons.iter().any(|b| b.3 == 'y'), "y in sight");
         settled(&mut ed);
         // `y` before all of it was seen: not an answer
@@ -10555,7 +10763,7 @@ mod tests {
         let viewed = ed.doc().id;
         ed.new_scratch();
         let s = screen(&mut ed);
-        assert!(s.contains("more lines · v view all · ge to the end"), "whole again: {s}");
+        assert!(s.contains("more lines · y once read to the end — ge there"), "whole again: {s}");
         ed.current = ed.docs.iter().position(|d| d.id == viewed).unwrap();
         assert!(!screen(&mut ed).contains("more lines"), "the bar again");
         feed(&mut ed, "y");

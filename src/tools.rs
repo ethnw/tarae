@@ -371,6 +371,7 @@ pub fn tests_done(ed: &mut Editor) {
     let Some(call) = r.chat.take() else { return };
     let text = report(&ed.session.root, r);
     let failed = r.failures().first().map(|&i| r.cases[i].clone());
+    crate::reads::run_ended(ed);
     answer(ed, call, Ok(text));
     if let Some(case) = failed
         && let Some((path, line)) = case.at.clone()
@@ -402,6 +403,7 @@ pub fn turn_over(ed: &mut Editor) {
 /// A run Claude waited on is gone before it ended (closed, or another run took its place).
 pub fn tests_dropped(ed: &mut Editor, why: &str) {
     if let Some(call) = ed.session.test_run.as_mut().and_then(|r| r.chat.take()) {
+        crate::reads::run_ended(ed);
         answer(ed, call, Err(format!("the test run was stopped — {why}")));
     }
 }
@@ -1218,7 +1220,10 @@ pub enum For {
 /// What couldn't start, said to whoever waits for it.
 fn fail(ed: &mut Editor, who: For, e: String) {
     match who {
-        For::Claude(call) => answer(ed, call, Err(e)),
+        For::Claude(call) => {
+            crate::reads::run_ended(ed);
+            answer(ed, call, Err(e))
+        }
         For::User(_) => ed.set_error(e),
     }
 }
@@ -1476,6 +1481,13 @@ pub fn guard_and_go(ed: &mut Editor, who: For, job: Job, asked: bool, extra: Ext
 }
 
 fn go(ed: &mut Editor, who: For, job: Job, guard: Option<Guard>) {
+    if matches!(who, For::Claude(_)) {
+        let dir = match &guard {
+            Some(Guard::In(p)) => p.run.clone(),
+            _ => None,
+        };
+        crate::reads::run_started(ed, dir);
+    }
     match job {
         Job::Command(cmd, cwd) => {
             if let Err(e) = run_busy(ed) {
@@ -1558,6 +1570,7 @@ pub fn run_done(ed: &mut Editor) {
     let first =
         items.iter().find(|i| i.severity == 1).filter(|_| r.state != crate::task::State::Passed).cloned();
     let label = r.task.name.clone();
+    crate::reads::run_ended(ed);
     answer(ed, call, Ok(text));
     if let Some(it) = first {
         crate::follow::point(ed, "failed", label, &it.path, it.line..it.line + 1, Some(it.message));
@@ -1573,6 +1586,7 @@ pub fn run_dropped(ed: &mut Editor, why: &str) {
         .filter(|r| r.state == crate::task::State::Running)
         .and_then(|r| r.chat.take())
     {
+        crate::reads::run_ended(ed);
         answer(ed, call, Err(format!("the command was stopped — {why}")));
     }
 }

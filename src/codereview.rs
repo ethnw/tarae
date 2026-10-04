@@ -16,6 +16,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use serde_json::{Value, json};
+
 use crate::document::DocId;
 use crate::editor::Editor;
 use crate::key::{Code, Key};
@@ -90,6 +92,9 @@ pub struct CodeReview {
     pub behind: bool,
     /// The columns the rail's rows need (`term::review_rail_w` — measured once: the files don't change).
     pub rail_need: std::cell::OnceCell<usize>,
+    /// Read wide (`space v z`, #83): the rail and the chat give the code their columns until it's off
+    /// again or the review ends (`Editor::review_wide`).
+    pub wide: bool,
 }
 
 impl CodeReview {
@@ -109,6 +114,7 @@ impl CodeReview {
             shown: None,
             behind: false,
             rail_need: Default::default(),
+            wide: false,
         }
     }
 
@@ -207,6 +213,44 @@ pub struct Viewed {
     text: u64,
     counts: (usize, usize),
     checked: std::cell::Cell<Option<(DocId, u64, bool)>>,
+}
+
+/// Every session's viewed marks for `:restart`'s state (#5 — they were gone after one), by the session's
+/// root. (The hashes are the toolchain's `DefaultHasher`: a build on another one drops them, as a changed
+/// diff would.)
+pub fn viewed_snapshot(ed: &Editor) -> Value {
+    let sessions = ed.sessions_in_order().into_iter().filter(|s| !s.viewed.is_empty());
+    let marks = |s: &crate::session::Session| -> Vec<Value> {
+        s.viewed
+            .iter()
+            .map(|(p, v)| json!({ "path": p, "base": v.base, "text": v.text, "counts": [v.counts.0, v.counts.1] }))
+            .collect()
+    };
+    Value::Array(sessions.map(|s| json!({ "root": s.root, "files": marks(s) })).collect())
+}
+
+/// Back from `:restart`'s state, into the sessions there are again (after `worktree::restore`) — each mark
+/// still checked against the diff as it is when its file is drawn.
+pub fn viewed_restore(ed: &mut Editor, v: &Value) {
+    for s in v.as_array().into_iter().flatten() {
+        let Some(root) = s["root"].as_str().map(PathBuf::from) else { continue };
+        let Some(session) = std::iter::once(&mut ed.session).chain(&mut ed.sessions).find(|l| l.root == root)
+        else {
+            continue;
+        };
+        for f in s["files"].as_array().into_iter().flatten() {
+            let n = |v: &Value| v.as_u64();
+            let (Some(path), Some(base), Some(text), Some(added), Some(removed)) =
+                (f["path"].as_str(), n(&f["base"]), n(&f["text"]), n(&f["counts"][0]), n(&f["counts"][1]))
+            else {
+                continue;
+            };
+            let counts = (added as usize, removed as usize);
+            session
+                .viewed
+                .insert(PathBuf::from(path), Viewed { base, text, counts, checked: Default::default() });
+        }
+    }
 }
 
 fn rope_hash(r: &ropey::Rope) -> u64 {
@@ -534,6 +578,7 @@ fn open(ed: &mut Editor, root: PathBuf, base: Base, mut files: Vec<File>) {
         shown: None,
         behind: false,
         rail_need: Default::default(),
+        wide: false,
     });
     let s = if n == 1 { "" } else { "s" };
     ed.set_status(format!("review: {n} file{s} {said} — ]g walks the changes"));
@@ -952,6 +997,32 @@ impl Editor {
     pub fn review_rail_up(&self) -> bool {
         self.session.code_review.as_ref().is_some_and(|r| !r.behind || self.session.sidebar.is_none())
     }
+
+    /// Whether the review reads wide now (`space v z`): on, and neither the rail (`space e`) nor the chat
+    /// has the keys — going to one brings it back while it has them.
+    pub fn review_wide(&self) -> bool {
+        self.session.code_review.as_ref().is_some_and(|r| r.wide && !r.focus)
+            && !self.session.chat.as_ref().is_some_and(|c| c.focused)
+    }
+}
+
+/// `space v z` · `:review-wide`: the review reads wide — the rail and the chat give the code their columns
+/// (#83: beside both a long line wrapped into four rows and a change didn't fit) — or back. A toggle that
+/// lasts the review, not `C-w z`'s zoom, which drops as soon as the keys leave the code.
+pub fn wide_toggle(ed: &mut Editor) {
+    let Some(r) = ed.session.code_review.as_mut() else {
+        return ed.set_warning("no review open — space v v starts one");
+    };
+    r.wide = !r.wide;
+    r.focus = false;
+    let wide = r.wide;
+    if let Some(c) = ed.session.chat.as_mut() {
+        c.focused = false;
+    }
+    ed.set_status(match wide {
+        true => "review wide: the rail and the chat give way — space v z brings them back",
+        false => "the review's rail and the chat are back",
+    });
 }
 
 // ── Sending ───────────────────────────────────────────────────────────────────

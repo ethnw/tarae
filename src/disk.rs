@@ -319,13 +319,18 @@ impl Editor {
     }
 
     /// What became of document `id` on disk, said for its session (#59): with several sessions, named after
-    /// it; shown only when it's the one in front — a session behind's goes to `:messages`.
+    /// it; shown only when it's the one in front — a session behind's goes to `:messages`, and its tab, the
+    /// chip and its row in the list get a `•` (#6, `Session.reloaded`).
     fn disk_said(&mut self, id: DocId, msg: String, warn: bool) {
         if self.sessions.is_empty() {
             return if warn { self.set_warning(msg) } else { self.set_status(msg) };
         }
-        let behind = self.sessions.iter().find(|l| l.docs.contains(&id) && !self.session.docs.contains(&id));
-        let label = behind.map_or_else(|| self.session.label(), |l| l.label()).to_string();
+        let front = self.session.docs.contains(&id);
+        let mut behind = self.sessions.iter_mut().find(|l| l.docs.contains(&id) && !front);
+        if let Some(l) = behind.as_deref_mut() {
+            l.reloaded += 1;
+        }
+        let label = behind.as_deref().map_or_else(|| self.session.label(), |l| l.label()).to_string();
         let msg = format!("{label} · {msg}");
         let kind = if warn { crate::editor::ToastKind::Warning } else { crate::editor::ToastKind::Info };
         match (behind.is_some(), warn) {
@@ -731,6 +736,26 @@ mod tests {
             "the session behind's, in :messages: {:?}",
             ed.messages.iter().map(|m| &m.2).collect::<Vec<_>>()
         );
+        // …and marked — the chip, its row in the list — until it comes to the front (#6)
+        let screen = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 140, 24).unwrap();
+            let mut parser = vt100::Parser::new(24, 140, 0);
+            parser.process(&bytes);
+            parser.screen().contents()
+        };
+        assert_eq!(ed.sessions.iter().find(|l| l.id == back).unwrap().reloaded, 1);
+        assert_eq!(ed.session.reloaded, 0, "the front's was said");
+        let chip = |ed: &mut Editor| screen(ed).lines().nth(22).unwrap_or_default().to_string();
+        assert!(chip(&mut ed).contains(&format!("{front} •1")), "{}", chip(&mut ed));
+        ed.session_list();
+        let s = screen(&mut ed);
+        let row = s.lines().find(|l| l.contains(&back_label)).unwrap_or_default();
+        assert!(row.contains("• 1 reloaded"), "{s}");
+        ed.picker = None;
+        assert!(ed.session_switch(back));
+        assert!(ed.session_switch(0));
+        assert!(!chip(&mut ed).contains('•'), "seen: {}", chip(&mut ed));
         // A round started while the other session was in front lands in the one in front now — said there,
         // named after it (not swapped into the one that started it)
         assert!(ed.session_switch(back));

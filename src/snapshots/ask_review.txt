@@ -2,7 +2,7 @@
 ## text
 00  tarae  ›  src  ›  demo.rs  ›  ƒ main
 01  ──────────────────────────────────────────────────────────────────────────────────────────────────
-02  ▎ Claude   “show the text too”                                                      0 of 1 decided
+02  ▎ Claude  src/demo.rs   “show the text too”                                         0 of 1 decided
 03  11       counts
 04  12   }
 05  13
@@ -64,7 +64,7 @@
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00  ddddd  f  ddd  f  TTTTTTT  f    dddd
 01  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-02  a TTTTTT   ddddd ddd dddd dddd                                                      f ff f fffffff
+02  a TTTTTT  dddd          ddddd ddd dddd dddd                                         f ff f fffffff
 03  ff
 04  ff
 05  ff
