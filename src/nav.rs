@@ -371,7 +371,7 @@ fn refs_text(
     let files = places.iter().map(|p| &p.0.path).collect::<std::collections::HashSet<_>>().len();
     let is_decl = |p: &Place| declared.iter().any(|(path, line)| *path == p.path && *line == p.line);
     let decl_file = places.iter().find(|p| is_decl(&p.0)).map(|p| p.0.path.clone());
-    places.sort_by(|(a, at), (b, bt)| {
+    crate::sorting::by(&mut places, |(a, at), (b, bt)| {
         let key = |p: &Place, test: bool| {
             (test, Some(&p.path) != decl_file.as_ref(), p.path.clone(), !is_decl(p), p.line, p.col)
         };
@@ -420,7 +420,9 @@ fn text_matches(ed: &mut Editor, call: Call, name: Name, why: String, later: boo
                 places.retain(|p| !p.1);
             }
             // (by file then line, test code last)
-            places.sort_by(|(a, at), (b, bt)| (at, &a.path, a.line).cmp(&(bt, &b.path, b.line)));
+            crate::sorting::by(&mut places, |(a, at), (b, bt)| {
+                (at, &a.path, a.line).cmp(&(bt, &b.path, b.line))
+            });
             let files = places.iter().map(|p| &p.0.path).collect::<std::collections::HashSet<_>>().len();
             let then = if later { " — ask again in a moment for those" } else { "" };
             if n == 0 {
@@ -712,7 +714,7 @@ fn symbols_text(shown: &str, syms: &[Sym], line: Option<usize>, from: &str) -> S
     let text = match line {
         Some(l) => {
             let mut holding: Vec<&Sym> = syms.iter().filter(|s| s.lines.0 <= l && l <= s.lines.1).collect();
-            holding.sort_by_key(|s| (s.lines.0, std::cmp::Reverse(s.lines.1)));
+            crate::sorting::by_key(&mut holding, |s| (s.lines.0, std::cmp::Reverse(s.lines.1)));
             if holding.is_empty() {
                 return format!("line {} of {shown} is in no symbol — at the top level ({from})", l + 1);
             }
@@ -1106,7 +1108,9 @@ fn defs_text(root: &Path, a: &DefAsk, servers: &str, open: &HashMap<PathBuf, rop
             })
             .collect();
         let first = |w: &str| a.container.as_ref().is_some_and(|c| w.ends_with(&format!(" in {c}")));
-        out.sort_by(|x, y| (!first(&x.1), &x.0.path, x.0.line).cmp(&(!first(&y.1), &y.0.path, y.0.line)));
+        crate::sorting::by(&mut out, |x, y| {
+            (!first(&x.1), &x.0.path, x.0.line).cmp(&(!first(&y.1), &y.0.path, y.0.line))
+        });
         out.dedup_by(|x, y| x.0.path == y.0.path && x.0.line == y.0.line);
         out
     };
@@ -1165,7 +1169,7 @@ fn owners(places: &[(Place, String)]) -> String {
         *counts.entry(crate_of(&p.path)).or_default() += 1;
     }
     let mut counts: Vec<(String, usize)> = counts.into_iter().collect();
-    counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    crate::sorting::by(&mut counts, |a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     let mut said: Vec<String> = counts.iter().take(6).map(|(c, n)| format!("{c} {n}")).collect();
     if counts.len() > 6 {
         said.push("…".into());
@@ -1696,7 +1700,7 @@ fn diags_text(ed: &Editor, w: &DiagWait, settled: Option<bool>) -> String {
                 })
                 .collect(),
         };
-        rows.sort_by_key(|d| (d.line, d.col, d.severity));
+        crate::sorting::by_key(&mut rows, |d| (d.line, d.col, d.severity));
         let theirs = ed.servers_of_path(path);
         for c in &theirs {
             if !servers.contains(c) {
@@ -1963,7 +1967,7 @@ fn run_search(root: &Path, path: Option<&str>, q: &Query, unsaved: &[PathBuf]) -
                     (r, test)
                 })
                 .collect();
-            rows.sort_by(|a, b| (a.1, &a.0).cmp(&(b.1, &b.0)));
+            crate::sorting::by(&mut rows, |a, b| (a.1, &a.0).cmp(&(b.1, &b.0)));
             files_text(rows, q.tests, counts, q.offset) + &warned(warn)
         }
     };

@@ -51,7 +51,17 @@ pub fn query(rel: &str) -> Option<String> {
     {
         return Some(s);
     }
-    QUERIES.iter().find(|(r, _)| *r == rel).map(|(_, s)| s.to_string())
+    let &(_, start, end) = QUERIES.iter().find(|(r, ..)| *r == rel)?;
+    Some(queries_text()[start..end].to_string())
+}
+
+/// The built-in queries, unpacked at their first use (deflated in the binary — 233 KB of text is 52 KB so).
+fn queries_text() -> &'static str {
+    static TEXT: OnceLock<String> = OnceLock::new();
+    TEXT.get_or_init(|| {
+        let bytes = miniz_oxide::inflate::decompress_to_vec(QUERIES_Z).expect("built-in queries unpack");
+        String::from_utf8(bytes).expect("built-in queries are UTF-8")
+    })
 }
 
 /// A language pack's file (`go/pack.toml`, `go/tests.scm`): `packs/<rel>` in a runtime folder if present,

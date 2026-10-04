@@ -838,7 +838,7 @@ impl Injector<'_> {
                 return;
             }
             let Some(data) = resolve(&lang).and_then(|s| Loader::global().load(s).ok()) else { continue };
-            ranges.sort_by_key(|r| r.start_byte);
+            crate::sorting::by_key(&mut ranges, |r| r.start_byte);
             ranges.dedup_by(|b, a| b.start_byte < a.end_byte);
             let parser = self.parsers.entry(data.name.clone()).or_insert_with(|| {
                 let mut p = Parser::new();

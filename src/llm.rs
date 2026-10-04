@@ -834,7 +834,7 @@ impl Review {
         let last = text.len_lines().saturating_sub(1);
         let line_of = |b: usize| text.byte_to_line(b.min(text.len_bytes()));
         let mut order: Vec<usize> = (0..self.hunks.len()).collect();
-        order.sort_by_key(|&i| self.hunks[i].from);
+        crate::sorting::by_key(&mut order, |&i| self.hunks[i].from);
         let mut out = Vec::new();
         let mut next = 0; // first document line not yet emitted
         for i in order {

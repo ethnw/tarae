@@ -267,7 +267,7 @@ pub fn tasks(root: &Path) -> Vec<Suggested> {
             Err(e) => crate::log::line("tarae", "warning", &format!("the {lang} pack: [tasks]: {e}")),
         }
     }
-    found.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+    crate::sorting::by(&mut found, |a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
     found.into_iter().flat_map(|(_, _, list)| list).collect()
 }
 
@@ -332,7 +332,7 @@ pub fn preflight(root: &Path) -> Vec<crate::preflight::Step> {
             Err(e) => crate::log::line("tarae", "warning", &format!("the {lang} pack: [[preflight]]: {e}")),
         }
     }
-    found.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+    crate::sorting::by(&mut found, |a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
     found.into_iter().flat_map(|(_, _, steps)| steps).collect()
 }
 
@@ -805,7 +805,7 @@ impl Tests {
             tests.iter().filter(|t| around(&t.range, cursor)).max_by_key(|t| t.range.end - t.range.start);
         let groups_of = |pos: usize| {
             let mut g: Vec<&&Item> = groups.iter().filter(|g| around(&g.range, pos)).collect();
-            g.sort_by_key(|g| g.range.start);
+            crate::sorting::by_key(&mut g, |g| g.range.start);
             g.iter().map(|g| g.name.clone()).collect::<Vec<_>>()
         };
         let first_group = groups.iter().min_by_key(|g| g.range.start).map(|g| g.name.clone());
@@ -918,7 +918,7 @@ impl Tests {
             out.push(Item { range: start..node.end_byte(), name: name.to_string(), kind, test });
         }
         // One node matched by several patterns (with its attributes, without): once, from its earliest start
-        out.sort_by(|a, b| {
+        crate::sorting::by(&mut out, |a, b| {
             (a.test, a.range.end, &a.name, a.range.start).cmp(&(b.test, b.range.end, &b.name, b.range.start))
         });
         out.dedup_by(|b, a| a.test == b.test && a.range.end == b.range.end && a.name == b.name);
@@ -1158,7 +1158,14 @@ fn json(v: &toml::Value, vars: &HashMap<String, Var>) -> Value {
             Value::Array(args(&strs, vars).into_iter().map(Value::String).collect())
         }
         toml::Value::Array(a) => Value::Array(a.iter().map(|x| json(x, vars)).collect()),
-        toml::Value::Table(t) => Value::Object(t.iter().map(|(k, x)| (k.clone(), json(x, vars))).collect()),
+        toml::Value::Table(t) => {
+            // Inserted, not collected: a Map's `collect` sorts — a copy of the sort for each (~6 KB)
+            let mut m = serde_json::Map::new();
+            for (k, x) in t {
+                m.insert(k.clone(), json(x, vars));
+            }
+            Value::Object(m)
+        }
     }
 }
 

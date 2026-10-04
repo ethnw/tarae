@@ -189,7 +189,7 @@ pub fn inlay_hints(text: &Rope, v: &Value, enc: Encoding) -> Vec<InlayHint> {
             Some(InlayHint { pos, text: format!("{}{label}{}", pad("paddingLeft"), pad("paddingRight")) })
         })
         .collect();
-    out.sort_by_key(|h| h.pos);
+    crate::sorting::by_key(&mut out, |h| h.pos);
     out
 }
 

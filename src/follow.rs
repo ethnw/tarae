@@ -345,7 +345,7 @@ fn mentions(root: &Path, text: &str, in_code: bool) -> Vec<(usize, Mention)> {
         let parent = (parts.len() > 1).then(|| parts[parts.len() - 2].to_string());
         out.push((start + piece.len(), Mention::Name(name, parent)));
     }
-    out.sort_by_key(|m| m.0);
+    crate::sorting::by_key(&mut out, |m| m.0);
     out
 }
 

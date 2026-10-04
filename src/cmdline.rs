@@ -212,7 +212,7 @@ fn rank(query: &str, items: Vec<Cand>, keep_order_when_empty: bool) -> Vec<Cand>
     if query.is_empty() {
         let mut v = items;
         if !keep_order_when_empty {
-            v.sort_by(|a, b| a.label.cmp(&b.label));
+            crate::sorting::by(&mut v, |a, b| a.label.cmp(&b.label));
         }
         return v;
     }
@@ -241,7 +241,7 @@ fn rank(query: &str, items: Vec<Cand>, keep_order_when_empty: bool) -> Vec<Cand>
             Some((tier, if tier == 1 { c.label.len() } else { 0 }, u32::MAX - score, i, c))
         })
         .collect();
-    scored.sort_by_key(|a| (a.0, a.1, a.2, a.3));
+    crate::sorting::by_key(&mut scored, |a| (a.0, a.1, a.2, a.3));
     scored.into_iter().map(|t| t.4).collect()
 }
 
@@ -318,7 +318,7 @@ pub fn complete(text: &str, cwd: &Path, lists: &Lists) -> Completion {
                         })
                         .collect();
                     // Folders first, then by name
-                    v.sort_by(|a, b| (!a.dir, &a.label).cmp(&(!b.dir, &b.label)));
+                    crate::sorting::by(&mut v, |a, b| (!a.dir, &a.label).cmp(&(!b.dir, &b.label)));
                     (v, false)
                 }
             }

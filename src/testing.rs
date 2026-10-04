@@ -885,7 +885,13 @@ fn with_binary(v: Value, exe: &str) -> Value {
     match v {
         Value::String(s) => Value::String(s.replace("{cargo-test-binary}", exe)),
         Value::Array(a) => Value::Array(a.into_iter().map(|x| with_binary(x, exe)).collect()),
-        Value::Object(o) => Value::Object(o.into_iter().map(|(k, x)| (k, with_binary(x, exe))).collect()),
+        // In place, not collected: a Map's `collect` sorts — a copy of the sort for each (~6 KB)
+        Value::Object(mut o) => {
+            for x in o.values_mut() {
+                *x = with_binary(x.take(), exe);
+            }
+            Value::Object(o)
+        }
         v => v,
     }
 }

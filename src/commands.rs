@@ -369,7 +369,7 @@ fn insert_at(cx: &mut Context, items: Vec<(usize, String, usize)>) {
 /// `insert_at` for replacements: (from, to, text, cursor offset in the text). Duplicate or overlapping
 /// spans keep only the first.
 fn replace_at(cx: &mut Context, mut items: Vec<(usize, usize, String, usize)>) {
-    items.sort_by_key(|(p, ..)| *p);
+    crate::sorting::by_key(&mut items, |(p, ..)| *p);
     let mut end = 0;
     items.retain(|(from, to, ..)| {
         let keep = *from >= end;
@@ -816,7 +816,7 @@ fn paste(cx: &mut Context, before: bool, reg: &[String]) {
             items.push((pos, s.clone(), 0, n));
         }
     }
-    items.sort_by_key(|it| it.0);
+    crate::sorting::by_key(&mut items, |it| it.0);
     items.dedup_by_key(|it| it.0);
     let tx = Transaction::new(items.iter().map(|(p, s, _, _)| Change::insert(*p, s.clone())).collect());
     let ranges = items
@@ -1850,7 +1850,7 @@ fn command_palette(cx: &mut Context) {
         }));
     }
     // Bound commands first (the frequently used ones), then by name
-    items.sort_by(|a, b| (a.hint.is_empty(), &a.label).cmp(&(b.hint.is_empty(), &b.label)));
+    crate::sorting::by(&mut items, |a, b| (a.hint.is_empty(), &a.label).cmp(&(b.hint.is_empty(), &b.label)));
     cx.editor.open_picker(crate::picker::Picker::new("commands", items, false).without_preview(), None);
 }
 

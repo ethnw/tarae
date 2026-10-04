@@ -742,7 +742,7 @@ impl Editor {
         let mut v: Vec<_> = std::iter::once((self.session.id, self.session.name.clone(), true))
             .chain(self.sessions.iter().map(|l| (l.id, l.name.clone(), false)))
             .collect();
-        v.sort_by_key(|l| l.0);
+        crate::sorting::by_key(&mut v, |l| l.0);
         v
     }
 }

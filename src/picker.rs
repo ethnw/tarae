@@ -1085,7 +1085,7 @@ const MAX_FILES: usize = 200_000;
 fn walk(root: &Path, rel: &Path, out: &mut Vec<PathBuf>) {
     let Ok(rd) = std::fs::read_dir(root.join(rel)) else { return };
     let mut entries: Vec<_> = rd.flatten().collect();
-    entries.sort_by_key(|e| e.file_name());
+    crate::sorting::by_key(&mut entries, |e| e.file_name());
     for e in entries {
         if out.len() >= MAX_FILES {
             return;

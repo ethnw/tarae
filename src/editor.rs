@@ -3308,7 +3308,7 @@ impl Editor {
                         .filter(|n| !n.is_empty() && !n.ends_with("/HEAD"))
                         .map(String::from)
                         .collect();
-                    names.sort_by_key(|n| (n.contains('/'), n.clone()));
+                    crate::sorting::by_key(&mut names, |n| (n.contains('/'), n.clone()));
                     move |ed: &mut Editor| {
                         ed.cmd_loading.remove(&key);
                         ed.cmd_lists.branches = Some(names);
@@ -9027,7 +9027,7 @@ mod tests {
                 t0.elapsed().as_secs_f64() * 1e6
             })
             .collect();
-        runs.sort_by(f64::total_cmp);
+        crate::sorting::by(&mut runs, f64::total_cmp);
         let us = runs[runs.len() / 2];
         let line = format!("PERF session_switch_us {us:.3} budget=1000 noise=2\n");
         let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());

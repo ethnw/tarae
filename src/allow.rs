@@ -176,15 +176,12 @@ impl Store {
 
     pub fn to_json(&self) -> String {
         let strings = |v: &[PathBuf]| v.iter().map(|r| r.to_string_lossy().into_owned()).collect::<Vec<_>>();
-        let projects: serde_json::Map<String, Json> = self
-            .projects
-            .iter()
-            .filter(|(_, a)| !a.is_empty())
-            .map(|(p, a)| {
-                let body = json!({ "read": strings(&a.read), "write": strings(&a.write), "ports": a.ports });
-                (p.to_string_lossy().into_owned(), body)
-            })
-            .collect();
+        // Inserted, not collected: a Map's `collect` sorts — a copy of the sort for each (~6 KB)
+        let mut projects = serde_json::Map::new();
+        for (p, a) in self.projects.iter().filter(|(_, a)| !a.is_empty()) {
+            let body = json!({ "read": strings(&a.read), "write": strings(&a.write), "ports": a.ports });
+            projects.insert(p.to_string_lossy().into_owned(), body);
+        }
         serde_json::to_string_pretty(&json!({ "projects": projects })).unwrap_or_default()
     }
 }

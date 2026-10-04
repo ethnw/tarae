@@ -243,7 +243,7 @@ const CARD_FILES: usize = 8;
 fn card(l: &Landing) -> crate::offer::Offer {
     let places: usize = l.review.iter().map(|f| f.places).sum();
     let mut files: Vec<&FileChange> = l.review.iter().collect();
-    files.sort_by(|a, b| a.rel.cmp(&b.rel));
+    crate::sorting::by(&mut files, |a, b| a.rel.cmp(&b.rel));
     // The change itself first, at full strength (in the title it was cut); then where, counts in a column
     let mut q =
         format!("{}\n\n{} in {}:", l.what, nav::count(places, l.noun), nav::count(files.len(), "file"));
@@ -344,7 +344,7 @@ pub fn view_all(ed: &mut Editor, generation: u64) {
     };
     let title = format!("{}Claude changes {}", crate::offer::CARD_VIEW, nav::count(l.review.len(), "file"));
     let mut files: Vec<FileChange> = l.review.iter().cloned().collect();
-    files.sort_by(|a, b| a.rel.cmp(&b.rel));
+    crate::sorting::by(&mut files, |a, b| a.rel.cmp(&b.rel));
     ed.events.jobs().spawn(move || {
         let text = changes_text(&files);
         move |ed: &mut Editor| {
@@ -484,7 +484,7 @@ fn report(l: &Landing) -> String {
     };
     // (by path, as the review's rail lists them — not in the server's order)
     let mut done: Vec<&(String, usize, Outcome)> = l.done.iter().collect();
-    done.sort_by(|a, b| a.0.cmp(&b.0));
+    crate::sorting::by(&mut done, |a, b| a.0.cmp(&b.0));
     let group = |o: fn(&Outcome) -> bool| -> Vec<String> {
         done.iter().filter(|d| o(&d.2)).map(|(rel, n, _)| format!("{rel} ({n})")).collect()
     };

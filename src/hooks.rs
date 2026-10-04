@@ -192,7 +192,7 @@ pub fn unseen(top: &Path, base: &str, likely: &[&str]) -> Vec<Hook> {
         out.push(Hook { rel, kind, likely: named, text });
     }
     // (the ones this action runs first)
-    out.sort_by_key(|h| !h.likely);
+    crate::sorting::by_key(&mut out, |h| !h.likely);
     out
 }
 

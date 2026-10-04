@@ -251,7 +251,7 @@ impl Editor {
                 p.asked.remove(&plugin);
                 p.permissions.insert(plugin.clone(), permissions.clone());
                 events::subscribe(&mut p.events.subs, &plugin, subscriptions);
-                p.events.subs.sort_by(|a, b| a.0.cmp(&b.0));
+                crate::sorting::by(&mut p.events.subs, |a, b| a.0.cmp(&b.0));
                 let mut taken: std::collections::HashSet<String> =
                     p.commands.iter().map(|c| c.name.clone()).collect();
                 let mut skipped = Vec::new();
@@ -560,7 +560,7 @@ impl Editor {
                 _ => {}
             }
         }
-        changes.sort_by_key(|c| (c.from, c.to));
+        crate::sorting::by_key(&mut changes, |c| (c.from, c.to));
         if changes.windows(2).any(|w| w[1].from < w[0].to) {
             return Err("its edits overlap".into());
         }

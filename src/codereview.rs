@@ -377,7 +377,7 @@ fn changed(root: &Path, base: &Base) -> Result<Vec<File>, String> {
         let added = if binary { 0 } else { text.iter().filter(|&&b| b == b'\n').count() };
         files.push(File { rel: rel.to_string(), path, added, removed: 0, new: true, gone: false, binary });
     }
-    files.sort_by(|a, b| a.rel.cmp(&b.rel));
+    crate::sorting::by(&mut files, |a, b| a.rel.cmp(&b.rel));
     files.dedup_by(|a, b| a.rel == b.rel);
     Ok(files)
 }
@@ -546,7 +546,7 @@ fn open(ed: &mut Editor, root: PathBuf, base: Base, mut files: Vec<File>) {
     if files.is_empty() {
         return ed.set_status(format!("review: no changes {}", base.label()));
     }
-    files.sort_by(|a, b| a.rel.cmp(&b.rel));
+    crate::sorting::by(&mut files, |a, b| a.rel.cmp(&b.rel));
     end(ed);
     let n = files.len();
     // Start on the file being looked at, if it's among the changes (else the first)

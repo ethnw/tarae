@@ -392,7 +392,7 @@ fn detail_rows(
         let target = Target::Conflict { rel: rel.to_string(), doc: doc.id, index };
         out.push((c.start, row(label, Some(("●", "error")), String::new(), target)));
     }
-    out.sort_by_key(|r| r.0);
+    crate::sorting::by_key(&mut out, |r| r.0);
     out.into_iter().map(|r| r.1).collect()
 }
 

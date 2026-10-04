@@ -94,7 +94,7 @@ impl Completion {
             })
             .collect();
         // score → server's sortText → original order (stable sort)
-        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+        crate::sorting::by(&mut scored, |a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
         self.shown = scored.into_iter().map(|(_, _, i)| i).collect();
         // Highlights index the name (label) — that's what's shown. Only leading items (none past the scroll).
         self.hits = self

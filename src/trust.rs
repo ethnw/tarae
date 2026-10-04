@@ -157,13 +157,12 @@ impl Store {
     }
 
     pub fn to_json(&self) -> String {
-        let projects: serde_json::Map<String, Json> = self
-            .answers
-            .iter()
-            .map(|(f, (h, t))| {
-                (f.to_string_lossy().into_owned(), json!({ "hash": format!("{h:016x}"), "trusted": t }))
-            })
-            .collect();
+        // Inserted, not collected: a Map's `collect` sorts — a copy of the sort for each (~6 KB)
+        let mut projects = serde_json::Map::new();
+        for (f, (h, t)) in &self.answers {
+            let body = json!({ "hash": format!("{h:016x}"), "trusted": t });
+            projects.insert(f.to_string_lossy().into_owned(), body);
+        }
         serde_json::to_string_pretty(&json!({ "projects": projects })).unwrap_or_default()
     }
 }

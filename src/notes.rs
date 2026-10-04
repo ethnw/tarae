@@ -248,7 +248,7 @@ pub fn all_here(ed: &Editor) -> Vec<&Note> {
     let line = ed.cursor_line();
     let mut v: Vec<&Note> =
         ed.session.notes.list.iter().filter(|n| n.path == path && n.lines.contains(&line)).collect();
-    v.sort_by_key(|n| (n.lines.start, n.id));
+    crate::sorting::by_key(&mut v, |n| (n.lines.start, n.id));
     v
 }
 

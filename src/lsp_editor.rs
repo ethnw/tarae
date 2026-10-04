@@ -168,7 +168,9 @@ fn place_items(
     declared: &[(std::path::PathBuf, usize)],
 ) -> Vec<Item> {
     let is_decl = |p: &Place| declared.iter().any(|(path, line)| *path == p.path && *line == p.line);
-    places.sort_by(|a, b| (!is_decl(a), &a.path, a.line, a.col).cmp(&(!is_decl(b), &b.path, b.line, b.col)));
+    crate::sorting::by(&mut places, |a, b| {
+        (!is_decl(a), &a.path, a.line, a.col).cmp(&(!is_decl(b), &b.path, b.line, b.col))
+    });
     places.dedup_by(|a, b| a.path == b.path && a.line == b.line && a.col == b.col);
     places
         .into_iter()
@@ -1026,7 +1028,7 @@ impl Editor {
                     .collect();
                 // Each server's list replaces only its own
                 list.extend(doc.lsp.diagnostics.drain(..).filter(|d| d.source != cid));
-                list.sort_by_key(|d| (d.from, d.severity));
+                crate::sorting::by_key(&mut list, |d| (d.from, d.severity));
                 doc.lsp.diagnostics = list;
                 crate::nav::diagnostics_moved(self);
             }
@@ -2345,7 +2347,7 @@ impl Editor {
         if self.lsp.actions.is_empty() {
             return self.set_status("no code actions");
         }
-        self.lsp.actions.sort_by_key(|(_, a)| {
+        crate::sorting::by_key(&mut self.lsp.actions, |(_, a)| {
             let quickfix = a["kind"].as_str().is_some_and(|k| k.starts_with("quickfix"));
             (!a["isPreferred"].as_bool().unwrap_or(false), !quickfix)
         });
@@ -3057,7 +3059,7 @@ impl Editor {
         if rows.is_empty() {
             return self.set_status("no diagnostics anywhere");
         }
-        rows.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+        crate::sorting::by(&mut rows, |a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
         let items = rows.into_iter().map(|r| r.2).collect();
         self.open_picker(Picker::new("workspace diagnostics", items, true).grouped(root), None);
     }

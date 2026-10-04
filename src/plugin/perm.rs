@@ -128,10 +128,11 @@ pub(super) fn load(path: Option<&Path>) -> BTreeMap<String, Approval> {
 }
 
 fn save(path: &Path, all: &BTreeMap<String, Approval>) -> std::io::Result<()> {
-    let v: serde_json::Map<String, Value> = all
-        .iter()
-        .map(|(p, a)| (p.clone(), json!({ "granted": a.granted, "hosts": a.hosts, "files": a.files })))
-        .collect();
+    // Inserted, not collected: a Map's `collect` sorts — a copy of the sort for each (~6 KB)
+    let mut v = serde_json::Map::new();
+    for (p, a) in all {
+        v.insert(p.clone(), json!({ "granted": a.granted, "hosts": a.hosts, "files": a.files }));
+    }
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }

@@ -115,7 +115,8 @@ pub fn run(args: &[String]) -> Result<()> {
             Some(was) if was > 0.0 => format!("  ({:+.0}% vs {was:.3})", (p.value / was - 1.0) * 100.0),
             _ => String::new(),
         };
-        println!("{:width$}  {:>10.3}  budget {:>6.0}{vs}", p.name, p.value, p.budget);
+        // A budget as it is (`{}`: 16 → "16", 9.5 → "9.5" — `{:.0}` said 10 for the size's 9.5)
+        println!("{:width$}  {:>10.3}  budget {:>6}{vs}", p.name, p.value, p.budget);
     }
     let (date, commit) = (today(), commit(&root));
     let mut add = String::new();
@@ -123,7 +124,7 @@ pub fn run(args: &[String]) -> Result<()> {
         add.push_str("date\tcommit\tname\tvalue\tbudget\n");
     }
     for p in &now {
-        add.push_str(&format!("{date}\t{commit}\t{}\t{:.3}\t{:.0}\n", p.name, p.value, p.budget));
+        add.push_str(&format!("{date}\t{commit}\t{}\t{:.3}\t{}\n", p.name, p.value, p.budget));
     }
     std::fs::create_dir_all(file.parent().unwrap()).map_err(|e| e.to_string())?;
     let mut kept = past;
@@ -141,8 +142,10 @@ pub fn run(args: &[String]) -> Result<()> {
 /// The release binary's size in MB (10⁶ bytes, as Finder and `ls -lh` say): `(name, cargo flags, target dir,
 /// budget)`. The bundled one builds in a target dir of its own, so `target/release/tarae` — what `:restart`
 /// runs — stays the default build. Sizes don't move between runs: the noise is a few edits' worth.
+/// 9.5 (2026-10-04, ~8.5 then): feature batches added 0.03–0.24 MB each, so it has room for the roadmap
+/// (queues, UI state, the RA swap) and still trips on a dependency's +0.5 MB (ripgrep's crates were).
 const SIZES: [(&str, &[&str], &str, f64); 2] = [
-    ("release_size_mb", &[], "target", 9.0),
+    ("release_size_mb", &[], "target", 9.5),
     ("release_size_bundled_mb", &["--features", "bundled-grammars"], "target/bundled-size", 15.0),
 ];
 const SIZE_NOISE: f64 = 0.05;

@@ -651,7 +651,7 @@ pub fn rows(
             None => (Kind::Other, os.name.clone(), String::new(), *os, working_in(os)),
         })
         .collect();
-    top.sort_by(|a, b| (a.0.order(), &a.1, a.3.pid).cmp(&(b.0.order(), &b.1, b.3.pid)));
+    crate::sorting::by(&mut top, |a, b| (a.0.order(), &a.1, a.3.pid).cmp(&(b.0.order(), &b.1, b.3.pid)));
     // A held server goes with the session its root is in (the innermost)
     let held_in = |h: &Held| {
         groups

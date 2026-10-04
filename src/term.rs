@@ -723,7 +723,7 @@ fn panes(
             Some((id, r, lay.pane(doc, r, many, editor), idx, top, left, focused))
         })
         .collect();
-    out.sort_by_key(|p| (p.1.x, p.1.y));
+    crate::sorting::by_key(&mut out, |p| (p.1.x, p.1.y));
     out
 }
 
@@ -10063,7 +10063,7 @@ fn cursor_diagnostics(editor: &Editor) -> Vec<&crate::lsp::Diagnostic> {
     let doc = editor.doc();
     let head = doc.selection().primary().cursor(&doc.text);
     let mut list: Vec<_> = doc.lsp.diagnostics.iter().filter(|d| underlines(d, head)).collect();
-    list.sort_by_key(|d| (d.severity, d.from));
+    crate::sorting::by_key(&mut list, |d| (d.severity, d.from));
     list
 }
 

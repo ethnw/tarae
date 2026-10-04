@@ -547,13 +547,13 @@ fn big_ignored(top: &Path, until: Instant) -> Vec<(String, (u64, bool))> {
             .unwrap_or_default();
     let mut found: Vec<&str> = out.split('\0').filter(|p| !p.is_empty()).collect();
     // (folders first: they hold the bulk, and the time is shared)
-    found.sort_by_key(|p| !p.ends_with('/'));
+    crate::sorting::by_key(&mut found, |p| !p.ends_with('/'));
     let mut big: Vec<(String, (u64, bool))> = found
         .into_iter()
         .map(|p| (p.to_string(), disk_size(&top.join(p), until)))
         .filter(|(_, s)| s.0 >= BIG)
         .collect();
-    big.sort_by_key(|(_, s)| std::cmp::Reverse(s.0));
+    crate::sorting::by_key(&mut big, |(_, s)| std::cmp::Reverse(s.0));
     big.truncate(BIG_SHOWN);
     big
 }
@@ -1226,7 +1226,7 @@ impl Editor {
     pub fn sessions_in_order(&self) -> Vec<&crate::session::Session> {
         let mut all: Vec<&crate::session::Session> =
             std::iter::once(&self.session).chain(&self.sessions).collect();
-        all.sort_by_key(|l| l.id);
+        crate::sorting::by_key(&mut all, |l| l.id);
         all
     }
 

@@ -13,8 +13,9 @@ anyhow = "1.0.104"
 crossterm = { version = "0.29.0", features = ["use-dev-tty"] }  # poll(2)-based input — mio drops a key that arrives with a resize
 libloading = "0.9.0"
 memchr = "2"  # already built for regex — substring search over rope chunks
+miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }  # the embedded queries, unpacked once (runtime.rs)
 nucleo-matcher = "0.3.1"
-regex = { version = "1.13.1", default-features = false, features = ["std", "perf", "unicode-perl", "unicode-case", "unicode-gencat", "unicode-script"] }  # size: without unicode-age·bool·segment (−150 KB)
+regex = { version = "1.13.1", default-features = false, features = ["std", "perf", "unicode-perl", "unicode-case", "unicode-gencat", "unicode-script"] }  # what tarae needs — but tree-sitter and grep-regex turn on all of `unicode` anyway (age·bool·segment: ~150 KB of tables)
 ropey = "1"
 serde_json = "1.0.151"
 streaming-iterator = "0.1.9"

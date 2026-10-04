@@ -573,7 +573,7 @@ pub fn rebase(base: &str, theirs: &str, ours: &str) -> (String, usize) {
     let (take, left): (Vec<_>, Vec<_>) = wanted.into_iter().partition(|w| !mine.iter().any(|m| near(w, m)));
     // Both sets are disjoint on `base` now: apply them in order
     let mut all: Vec<(usize, usize, String, String)> = mine.into_iter().chain(take).collect();
-    all.sort_by_key(|c| (c.0, c.1));
+    crate::sorting::by_key(&mut all, |c| (c.0, c.1));
     let mut out = String::with_capacity(ours.len());
     let mut at = 0;
     for (from, to, _, insert) in all {

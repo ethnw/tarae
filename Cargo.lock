@@ -838,6 +838,7 @@ dependencies = [
  "libc",
  "libloading",
  "memchr",
+ "miniz_oxide 0.9.1",
  "nucleo-matcher",
  "regex",
  "ropey",

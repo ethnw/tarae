@@ -1432,7 +1432,7 @@ fn context(ed: &Editor, ui: Option<&str>) -> (String, String, Vec<(DocId, u64)>)
 /// in two panes counts once, as its first.
 fn on_screen(ed: &Editor) -> Vec<(DocId, Range<usize>)> {
     let mut panes: Vec<_> = ed.screen.panes.iter().collect();
-    panes.sort_by_key(|p| p.0 != ed.session.focus);
+    crate::sorting::by_key(&mut panes, |p| p.0 != ed.session.focus);
     let mut out: Vec<(DocId, Range<usize>)> = Vec::new();
     for (view, _, _, rows) in panes {
         let Some(doc) = ed.session.views.iter().find(|v| v.id == *view).map(|v| v.doc) else { continue };

@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 fn main() {
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    embed(Path::new("runtime/queries"), &["scm"], "QUERIES", &out.join("queries.rs"));
+    embed_packed(Path::new("runtime/queries"), &["scm"], "QUERIES", &out);
     embed(Path::new("runtime/packs"), &["toml", "scm"], "PACKS", &out.join("packs.rs"));
     grammars(&out);
     // The perf budgets measure an optimized build (`cargo perf`); the test profile's opt-level 0 (a fast
@@ -55,9 +55,8 @@ fn wanted() -> Vec<String> {
         .collect()
 }
 
-/// `static NAME: &[(&str, &str)]` of every `<lang>/<file>` under `root` (relative) with one of `exts`, and
-/// its text.
-fn embed(root: &Path, exts: &[&str], name: &str, out: &Path) {
+/// Every `<lang>/<file>` under `root` (relative) with one of `exts`, sorted.
+fn files(root: &Path, exts: &[&str]) -> Vec<(String, PathBuf)> {
     // A directory is scanned recursively by cargo — covers every language folder
     println!("cargo:rerun-if-changed={}", root.display());
     let mut entries = Vec::new();
@@ -75,14 +74,41 @@ fn embed(root: &Path, exts: &[&str], name: &str, out: &Path) {
         }
     }
     entries.sort();
+    entries
+}
+
+/// `static NAME: &[(&str, &str)]` of every `<lang>/<file>` under `root` (relative) with one of `exts`, and
+/// its text.
+fn embed(root: &Path, exts: &[&str], name: &str, out: &Path) {
     let mut s = format!("pub static {name}: &[(&str, &str)] = &[\n");
-    for (rel, p) in entries {
+    for (rel, p) in files(root, exts) {
         // The text itself (a Rust literal by `{:?}`), not `include_str!` of a path: see the top
         let text = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
         writeln!(s, "    ({rel:?}, {text:?}),").unwrap();
     }
     s.push_str("];\n");
     std::fs::write(out, s).unwrap();
+}
+
+/// The same files as one deflated text (`<name>.z`, unpacked once at run time — `runtime::queries_text`)
+/// and `static NAME: &[(&str, usize, usize)]`, each file's byte range in the unpacked text.
+fn embed_packed(root: &Path, exts: &[&str], name: &str, out: &Path) {
+    use std::io::Write as _;
+    let mut text = String::new();
+    let mut s = format!("pub static {name}: &[(&str, usize, usize)] = &[\n");
+    for (rel, p) in files(root, exts) {
+        let start = text.len();
+        text.push_str(&std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display())));
+        writeln!(s, "    ({rel:?}, {start}, {}),", text.len()).unwrap();
+    }
+    s.push_str("];\n");
+    let z = out.join(format!("{}.z", name.to_lowercase()));
+    let mut enc = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::best());
+    enc.write_all(text.as_bytes()).unwrap();
+    std::fs::write(&z, enc.finish().unwrap()).unwrap();
+    // A path in OUT_DIR — the shared build-dir's, written by this run — names no checkout (see the top)
+    writeln!(s, "static {name}_Z: &[u8] = include_bytes!({:?});", z.display().to_string()).unwrap();
+    std::fs::write(out.join(format!("{}.rs", name.to_lowercase())), s).unwrap();
 }
 
 fn grammars(out: &Path) {
