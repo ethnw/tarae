@@ -514,8 +514,9 @@ fn run_schema() -> Value {
     start at once — words only (quotes are fine), alone or piped into grep head tail wc sort cut uniq, sed -n \
     'a,bp'. So do read-only ones (ls cat head tail wc grep rg find tree stat file du diff sort uniq cut pwd \
     echo nm otool strings size, sed -n 'a,bp', git blame/rev-parse/ls-files/branch/show, git diff --no-index; \
-    git -C <dir> too) whose paths stay in the project, the Rust toolchain's sources ($(rustc --print \
-    sysroot)/lib/rustlib/src) or cargo's downloaded crates — and lines of checks and reads joined by ; && || |, \
+    git -C <dir> too) whose paths stay in the project, the repository's other checkouts, the temp folders, \
+    the Rust toolchain's sources ($(rustc --print sysroot)/lib/rustlib/src) or cargo's downloaded crates — \
+    and lines of checks and reads joined by ; && || |, \
     with cd, for/while-read loops of reads, or the same in sh -c '…' (no other $, no backticks or redirects \
     to files). To run somewhere other than the project root, give cwd rather than a cd. Any other command \
     waits for the user to allow it — if they say no, don't retry it, ask. No stdin and no terminal: nothing \
@@ -959,7 +960,36 @@ fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
     if outside.is_none() && !pins.is_empty() && chain_allowed(cmd, &extra, true) {
         return read_only(ed, call, cmd.to_string(), cwd, pins);
     }
-    card(ed, call, cmd.to_string(), cwd, outside)
+    let why = match &outside {
+        Some(Beyond { socket: Some(_), .. }) => crate::cards::Why::Socket,
+        Some(_) => crate::cards::Why::Outside,
+        None => why_asked(cmd, &extra),
+    };
+    card(ed, call, cmd.to_string(), cwd, outside, why)
+}
+
+/// Why `cmd` comes to its card when nothing past the sandbox was asked, as far as its words tell — the
+/// rule of `run`'s it fell through (its `card` line, `cards.rs`).
+fn why_asked(cmd: &str, extra: &[String]) -> crate::cards::Why {
+    use crate::cards::Why;
+    if !scripts_run(cmd).is_empty() {
+        return Why::Script;
+    }
+    if crate::readonly::one_command_env(cmd).is_some_and(|(names, _)| !names.is_empty()) {
+        return Why::EnvName;
+    }
+    let Some(parts) = crate::readonly::parse(cmd) else { return Why::Unreadable };
+    for p in &parts {
+        let crate::readonly::Part::Cmd(w) = p else { continue };
+        if w.iter().any(|w| w.glob) {
+            return Why::Glob;
+        }
+        let words: Vec<String> = w.iter().map(|w| w.text.clone()).collect();
+        if !part_allowed(&words, extra) && !crate::readonly::only_reads(w) {
+            return Why::NotACheck(words.first().cloned().unwrap_or_default());
+        }
+    }
+    Why::Unreadable
 }
 
 /// What Claude asked to run past the sandbox, and why: outside it whole, or with one unix socket (#119).
@@ -996,6 +1026,7 @@ fn card(
     cmd: String,
     cwd: PathBuf,
     outside: Option<Beyond>,
+    why: crate::cards::Why,
 ) -> Result<(), String> {
     let checkpoints = &ed.session.checkpoints;
     let unseen: Vec<PathBuf> = checkpoints
@@ -1007,7 +1038,7 @@ fn card(
         .collect();
     let scripts = scripts_run(&cmd);
     if unseen.is_empty() && scripts.is_empty() {
-        return ask(ed, cmd, cwd, call, Vec::new(), Vec::new(), outside);
+        return ask_with(ed, cmd, cwd, call, Default::default(), (Vec::new(), why), outside);
     }
     let root = ed.session.root.clone();
     ed.events.jobs().spawn(move || {
@@ -1048,7 +1079,8 @@ fn card(
                 }
             }
             let c = call.clone();
-            if let Err(e) = shown.and_then(|shown| ask(ed, cmd, cwd, call, shown, scripts, outside)) {
+            let asked = |shown| ask_with(ed, cmd, cwd, call, (shown, scripts), (Vec::new(), why), outside);
+            if let Err(e) = shown.and_then(asked) {
                 answer(ed, c, Err(e));
             }
         }
@@ -1222,46 +1254,45 @@ fn read_only(
     pins: Vec<(PathBuf, u64)>,
 ) -> Result<(), String> {
     let chat = ed.session.chat.as_ref().map(|c| c.allowed.clone()).unwrap_or_default();
-    let (store, root) = (ed.allow_path.clone(), ed.session.root.clone());
+    let (store, root, temp) = (ed.allow_path.clone(), ed.session.root.clone(), ed.read_temp);
     ed.events.jobs().spawn(move || {
         let mut kept = crate::allow::Store::read(store.as_deref()).get(&root);
-        kept.read.extend(crate::allow::also_readable(&root));
+        let defaults = crate::allow::defaults(&root, temp);
+        kept.read.extend(defaults.all());
         let sysroot = cmd.contains(crate::readonly::SYSROOT).then(|| crate::allow::sysroot(&cwd)).flatten();
         let reads = crate::readonly::outside(&cmd, &cwd, &root, &chat, &kept, sysroot.as_deref());
+        // (where they are, for the card's line)
+        let classes = reads.as_ref().map(|r| crate::cards::classes(r, &defaults)).unwrap_or_default();
         // (a check or git that would run outside the project: the plain card, whatever reads are allowed)
         let runs_outside = crate::readonly::runs_outside(&cmd, &cwd, &root, sysroot.as_deref());
         let pinned = pins.is_empty()
             || crate::readonly::script_pins(&cmd, &cwd, &root)
                 .is_some_and(|s| s.iter().all(|p| pins.contains(p)));
         move |ed: &mut Editor| {
+            use crate::cards::Why;
             call.step("where it reads looked at");
             // (the turn ended meanwhile: nobody waits for it)
             if ed.session.chat.as_ref().is_some_and(|c| c.generation() != call.generation || !c.busy()) {
                 return;
             }
-            if runs_outside {
+            // (a check or git running outside; a script not as it was allowed: its card, as any command's —
+            // written unseen, shown on it)
+            if runs_outside || !pinned {
                 let c = call.clone();
-                if let Err(e) = card(ed, call, cmd, cwd, None) {
-                    answer(ed, c, Err(e));
-                }
-                return;
-            }
-            // (a script not as it was allowed: its card, as any command's — written unseen, shown on it)
-            if !pinned {
-                let c = call.clone();
-                if let Err(e) = card(ed, call, cmd, cwd, None) {
+                let why = if runs_outside { Why::RunsOutside } else { Why::ScriptChanged };
+                if let Err(e) = card(ed, call, cmd, cwd, None, why) {
                     answer(ed, c, Err(e));
                 }
                 return;
             }
             // (a `cd` into what isn't a folder: where the rest reads can't be told — the plain card)
-            let reads = match reads {
+            let (reads, why) = match reads {
                 Ok(r) if r.is_empty() => return guarded(ed, call, Job::Command(cmd, cwd), false),
-                Ok(r) => r,
-                Err(_) => Vec::new(),
+                Ok(r) => (r, Why::ReadsOutside(classes)),
+                Err(_) => (Vec::new(), Why::CdUnknown),
             };
             let c = call.clone();
-            if let Err(e) = ask_with(ed, cmd, cwd, call, Default::default(), reads, None) {
+            if let Err(e) = ask_with(ed, cmd, cwd, call, Default::default(), (reads, why), None) {
                 answer(ed, c, Err(e));
             }
         }
@@ -1279,34 +1310,22 @@ pub fn runs_unasked(cmd: &str, extra: &[String]) -> bool {
         || crate::readonly::read_only(cmd)
 }
 
-/// The card for `cmd` — with each file in `shown` (path, text) whole under it, and each script it runs
-/// (`scripts`); `outside`: Claude asks to run it outside the sandbox, for this reason.
-fn ask(
-    ed: &mut Editor,
-    cmd: String,
-    cwd: PathBuf,
-    call: Call,
-    shown: Vec<(PathBuf, String)>,
-    scripts: Vec<Script>,
-    outside: Option<Beyond>,
-) -> Result<(), String> {
-    ask_with(ed, cmd, cwd, call, (shown, scripts), Vec::new(), outside)
-}
-
 pub const OUTSIDE_RUN_TITLE: &str = "Claude wants to run — outside the sandbox";
 pub const SOCKET_RUN_TITLE: &str = "Claude wants to run — with one socket";
 
 /// The card for `cmd`, saying too what it reads outside the project (`reads` — a read-only command's):
 /// those can be allowed for longer, as on a read's card, unless one of them never can. Outside the sandbox
 /// (`outside` = Claude's reason): its own title, the reason, what that means — once, never kept. Its
-/// pattern (`pattern`) can be allowed for the rest of the chat with `a` — said on the card.
+/// pattern (`pattern`) can be allowed for the rest of the chat with `a` — said on the card. With each file
+/// in `shown` (path, text) whole under it — written unseen —, and each script it runs (`scripts`). `why`:
+/// the rule that put it to the user (its `card` line).
 fn ask_with(
     ed: &mut Editor,
     cmd: String,
     cwd: PathBuf,
     call: Call,
     (shown, scripts): (Vec<(PathBuf, String)>, Vec<Script>),
-    reads: Vec<PathBuf>,
+    (reads, why): (Vec<PathBuf>, crate::cards::Why),
     outside: Option<Beyond>,
 ) -> Result<(), String> {
     // (a card up for another command already: this one waits under it, counted — #5: refused, Claude sent
@@ -1420,6 +1439,17 @@ fn ask_with(
         (Some(_), None) => OUTSIDE_RUN_TITLE.to_string(),
         (None, None) => "Claude wants to run".to_string(),
     };
+    let past = match (&outside, &socket) {
+        (_, Some(_)) => crate::cards::Past::Socket,
+        (Some(_), None) => crate::cards::Past::Outside,
+        (None, None) => crate::cards::Past::No,
+    };
+    let at = match &why {
+        crate::cards::Why::ReadsOutside(c) => c.clone(),
+        _ => Vec::new(),
+    };
+    let sandboxed = ed.config.llm.sandbox && !matches!(ed.sandbox, Availability::Missing(_));
+    let asked = crate::cards::Asked::new(why, crate::cards::Request::Run { past, sandboxed, reads: at });
     call.step("card up");
     let card = RunCard {
         cmd,
@@ -1436,7 +1466,7 @@ fn ask_with(
     };
     let what = crate::offer::What::Run(Box::new(card));
     let o = crate::offer::Offer::new(title, &question, "Running…", "Claude's command".into(), what);
-    let o = o.deciding(decided);
+    let o = o.deciding(decided).asked(asked);
     ed.push_offer(match warning {
         Some(lines) => o.warning(lines),
         None => o,
@@ -1937,7 +1967,11 @@ fn ask_unprotected(ed: &mut Editor, call: Call, job: Job, why: String, ride: Rid
     );
     call.step("no-sandbox card up");
     let what = crate::offer::What::NoSandbox { job, call, ride: Box::new(ride) };
-    ed.push_offer(crate::offer::Offer::new(NO_SANDBOX_TITLE.into(), &question, "", String::new(), what));
+    let request =
+        crate::cards::Request::Run { past: crate::cards::Past::No, sandboxed: false, reads: Vec::new() };
+    let asked = crate::cards::Asked::new(crate::cards::Why::NoSandbox, request);
+    let o = crate::offer::Offer::new(NO_SANDBOX_TITLE.into(), &question, "", String::new(), what);
+    ed.push_offer(o.asked(asked));
 }
 
 /// The answer on that card: `y` runs it unprotected, `a` too — and the rest of this conversation's — `n`
@@ -2622,6 +2656,78 @@ mod tests {
             }
         }
         ed.offers.first().map(|o| o.question.clone()).unwrap_or_else(|| panic!("a card for {cmd}"))
+    }
+
+    /// P0 of docs/design/cards.md: each answer on a card of Claude's is one `card` line — the session, why
+    /// today's rules asked, what the capability model would do instead (`cards::decide`), the answer, and
+    /// the time since it was first drawn (or that it never was); one a turn took away is `dropped`.
+    #[test]
+    fn each_answer_on_a_card_is_one_line_in_the_log() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-card-lines-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        ed.session.root = dir.clone();
+        ed.session.name = "cardlines".into();
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        crate::chat::open(&mut ed);
+        let c = ed.session.chat.as_mut().unwrap();
+        c.state = crate::chat::State::Thinking;
+        c.focused = false;
+        let generation = c.generation();
+        let lines = || crate::cards::logged_lines("card cardlines · ");
+        // (its card, through the worker it may ask on — the call the chat's, or the card is moot)
+        let card = |ed: &mut crate::editor::Editor, n: u64, cmd: &str| {
+            let call = super::Call::of(generation, &format!("r{n}"), json!(n));
+            super::run(ed, call, &json!({ "command": cmd })).unwrap();
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while ed.offers.is_empty() {
+                assert!(std::time::Instant::now() < end, "a card for {cmd}");
+                if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+                    ed.handle_event(ev);
+                }
+            }
+        };
+        // A command none of today's rules lets through: drawn, then `n`
+        card(&mut ed, 1, "python3 -c 'print(1)'");
+        crate::term::render(&mut ed, &mut Vec::new(), 140, 36).unwrap();
+        assert!(ed.offers[0].drawn.get().is_some(), "drawn in front");
+        ed.offer_dismiss();
+        let l = lines();
+        assert_eq!(l.len(), 1, "{l:?}");
+        assert!(
+            l[0].starts_with("card cardlines · run · why=not-a-check:python3 · shadow=none · n · ")
+                && !l[0].contains("not drawn")
+                && l[0].contains(" · up "),
+            "{}",
+            l[0]
+        );
+        // Outside the sandbox: still a card under the model; never drawn
+        let outside = json!({ "command": "ls", "outside_sandbox": true, "reason": "to see" });
+        super::run(&mut ed, super::Call::of(generation, "r2", json!(2)), &outside).unwrap();
+        ed.offer_dismiss();
+        let l = lines();
+        assert!(l[1].contains("· run · why=outside · shadow=outside · n · not drawn · up "), "{}", l[1]);
+        // A turn that ends takes its card away: dropped
+        card(&mut ed, 3, "awk -f x.awk");
+        ed.drop_cards(|w| matches!(w, crate::offer::What::Run(_)));
+        let l = lines();
+        assert_eq!(l.len(), 3, "{l:?}");
+        assert!(l[2].contains("· run · why=script · shadow=none · dropped · "), "{}", l[2]);
+        // A light card that asks nothing of Claude's says nothing
+        ed.push_offer(crate::offer::Offer::new(
+            "x".into(),
+            "q",
+            "",
+            String::new(),
+            crate::offer::What::ReviewEnd,
+        ));
+        ed.offer_dismiss();
+        assert_eq!(lines().len(), 3);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// #87, #5: Claude's calls held back behind a run card are said on it; a second run while the card is up

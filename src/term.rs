@@ -293,6 +293,12 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
     if front != editor.offer_seen.get().map(|(id, rev, _)| (id, rev)) {
         editor.offer_seen.set(front.map(|(id, rev)| (id, rev, std::time::Instant::now())));
     }
+    // (first drawn: its `card` line counts the answer's time from here — `cards.rs`)
+    if let Some(o) = editor.offers.first().filter(|_| front.is_some())
+        && o.drawn.get().is_none()
+    {
+        o.drawn.set(Some(std::time::Instant::now()));
+    }
     // Drawn whole: all of it has been in sight (a cut one is only once `v` showed it — its bar is no card in
     // sight)
     if offer.as_ref().is_some_and(|c| c.cut == 0 && !c.bar)
@@ -10420,6 +10426,8 @@ mod tests {
                 decided: None,
                 warning: None,
                 since: std::time::Instant::now(),
+                drawn: Default::default(),
+                asked: None,
             });
             let result =
                 serde_json::json!([{"label": "line_one", "detail": "fn line_one()"}, {"label": "lx"}]);

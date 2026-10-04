@@ -523,6 +523,9 @@ pub struct Editor {
     pub trust_path: Option<std::path::PathBuf>,
     /// Where what's always allowed is kept (`allow.rs`) — None in tests (they set a temp file).
     pub allow_path: Option<std::path::PathBuf>,
+    /// Claude reads the temp folders unasked (`allow::defaults`) — off in tests: their projects, and what
+    /// they read "outside" them, are in the temp folder.
+    pub read_temp: bool,
     /// The clock a run of Claude's starts by (`reads::run_started`) — `reads::file_clock` unless a test says.
     pub(crate) run_clock: Option<fn() -> std::time::SystemTime>,
     /// The user's config file, where a toggle that's kept is written (`space v a`) — None in tests (they
@@ -678,6 +681,7 @@ impl Editor {
             project_trust: None,
             trust_path: if cfg!(test) { None } else { crate::trust::Store::path() },
             allow_path: if cfg!(test) { None } else { crate::allow::Store::path() },
+            read_temp: !cfg!(test),
             run_clock: None,
             config_file: if cfg!(test) { None } else { crate::config::config_path() },
             last_frame: None,

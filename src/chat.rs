@@ -1876,6 +1876,7 @@ mod tests {
             generation,
             input: serde_json::json!({"file_path": shots.join(f)}),
             look: crate::reads::look("Read", &serde_json::json!({"file_path": shots.join(f)}), &root),
+            class: crate::cards::Class::Elsewhere,
         };
         let card = |ed: &Editor| match ed.offers.first().map(|o| (&o.what, o.question.clone(), o.id)) {
             Some((crate::offer::What::Read { pending, folder, .. }, q, id)) => {

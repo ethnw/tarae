@@ -4,6 +4,7 @@ mod agent;
 mod allow;
 mod attach;
 mod blocked;
+mod cards;
 mod chat;
 mod chats;
 mod checkpoint;

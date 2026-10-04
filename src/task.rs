@@ -708,11 +708,13 @@ impl Editor {
                 std::thread::sleep(crate::sandbox::WATCH_LAST);
             }
             let done = move |ed: &mut Editor| {
+                let session = ed.session.label().to_string();
                 let Some(r) = ed.session.task_run.as_mut().filter(|r| r.generation == generation) else {
                     return;
                 };
                 if let Some(w) = r.guard.as_ref().and_then(|g| g.watch()) {
                     w.finish();
+                    crate::cards::denied(&session, &r.task.name, w);
                 }
                 r.took = Some(r.started.elapsed());
                 r.pid = None;

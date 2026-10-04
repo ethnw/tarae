@@ -39,8 +39,9 @@ pub fn call(ed: &mut Editor, call: Call) {
     let q = question(ed);
     let o =
         crate::offer::Offer::new(TITLE.into(), &q, "", String::new(), crate::offer::What::Screen { call });
+    let asked = crate::cards::Asked::new(crate::cards::Why::Screen, crate::cards::Request::Screen);
     // (the terminal line at full strength: what the user may not think of as "the screen")
-    ed.push_offer(o.deciding(1..2));
+    ed.push_offer(o.deciding(1..2).asked(asked));
 }
 
 /// The card's text: what goes, and the terminal panel's part in it said plainly.

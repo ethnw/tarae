@@ -322,7 +322,8 @@ echo clean` — where it reads judged as below.
 `rev-parse`, `ls-files`, `show` (`git show :2:src/a.rs`, `HEAD~1:a.rs`), `diff --no-index` and a bare `branch` —
 git's `-C <dir>` too, the folder read like any other. Besides the project, the Rust toolchains' own sources
 (`$(rustc --print sysroot)/lib/rustlib/src/…`, written out or just so — tarae asks rustup which toolchain that
-is) and the crates cargo downloaded (`~/.cargo/registry/src/…`) read the same: code, nothing of yours. Not
+is) and the crates cargo downloaded (`~/.cargo/registry/src/…`) read the same: code, nothing of yours. So do
+the repository's other checkouts and the temp folders (as Claude's own reads, below). Not
 cargo's home itself (its credentials), and a link in those folders is judged where it leads. So does the
 project's own build folder where cargo puts it outside the project. Not with an option that writes, runs something or never ends (`find
 -exec`/`-delete`/`-fprint`, `sort -o`, `tree -o`, `rg --pre`, `tail -f`, `uniq in out`, `git branch <name>`). A
@@ -440,8 +441,11 @@ What Claude runs, with `run` and `run_tests`, runs in a sandbox (macOS: Seatbelt
 ### Reading outside the project
 
 Claude reads the project freely: its Read, Grep and Glob go through without asking wherever the path really
-leads into the project (links followed). Outside it, a card says exactly what would be read: the file, or the
-folder searched and what for. What's read goes to Claude.
+leads into the project (links followed). So do the repository's other checkouts (the main one and each
+session's — as git's own files say, both ways: an entry under `.git/worktrees` whose folder doesn't name it
+back is no checkout), the temp folders (`/tmp`, your `$TMPDIR`), the toolchains' sources and the crates cargo
+downloaded. Outside those, a card says exactly what would be read: the file, or the folder searched and what
+for. What's read goes to Claude.
 
 - `y` once · `a` this conversation · `A` always, in this project · `n` no
 - "This conversation" and "always" cover the place: the file, or the folder and everything in it. The
@@ -449,11 +453,10 @@ folder searched and what for. What's read goes to Claude.
   project's files. `:sandbox-allowed` lists them, and Enter on one takes it back
 - Home itself, the folders above it, and places that hold keys (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`,
   `~/.docker`, `~/.config/gh`, `~/.netrc`, …) are only ever allowed once
-- What Claude's own commands made this turn is read without a card: a file (or a folder and what's in it)
-  created in the temp folders (`/tmp`, your `$TMPDIR`) while one of its runs went, and anything in a run's own
-  temp folder — screenshots a script just wrote, a test's dump. A run could print whatever it read anyway; a
-  file something else made there in that same time goes through too. Files that were there before, or made
-  after the run ended, still ask, and the next turn starts over
+- Each answer on a card is one `card` line in tarae's log (`~/.local/state/tarae/tarae.log`): the session, why
+  it asked, where the read goes, what the planned card model would do instead, your answer and how long it
+  was up — and each run the sandbox denied something is a `denied` line. That's how the cards are counted
+  (`docs/design/cards.md`)
 
 ### Notes
 

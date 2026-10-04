@@ -225,7 +225,12 @@ pub fn keepable(real: &Path, home: Option<&Path>) -> bool {
     if home.starts_with(real) {
         return false;
     }
-    !SECRETS.iter().any(|s| real.starts_with(home.join(s)))
+    !secret(real, Some(home))
+}
+
+/// Whether `real` is in a place under home that holds keys (`SECRETS`).
+pub fn secret(real: &Path, home: Option<&Path>) -> bool {
+    home.is_some_and(|h| SECRETS.iter().any(|s| real.starts_with(h.join(s))))
 }
 
 /// Places under home that run something later when written — and so are never offered for writing (a
@@ -320,16 +325,122 @@ fn rust_homes() -> (Option<PathBuf>, Option<PathBuf>) {
     (at("CARGO_HOME", ".cargo"), at("RUSTUP_HOME", ".rustup"))
 }
 
-/// What a read of Claude's may read unasked besides the project and what the user allowed: the code
-/// folders (`code_trees`) and the project's own build folders outside it, as far as the sandbox has found
-/// them (`sandbox::build_dirs` — its target and build dirs: Claude's runs write there already). On a worker.
-pub fn also_readable(root: &Path) -> Vec<PathBuf> {
+/// What a read of Claude's may read unasked besides the project and what the user allowed, by kind
+/// (`cards::class` sorts places by these). Real paths.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Defaults {
+    /// The repository's other checkouts (`checkouts` — 8 of a day's 14 reads allowed for a chat were
+    /// these: the main checkout's `target/`, a sibling session's design doc).
+    pub checkouts: Vec<PathBuf>,
+    /// The temp folders (`temp_folders` — what Claude's own shots and scripts left there in an earlier turn
+    /// were the other 6).
+    pub temp: Vec<PathBuf>,
+    /// The code folders (`code_trees`) and the project's own build folders outside it, as far as the
+    /// sandbox has found them (`sandbox::build_dirs` — its target and build dirs: Claude's runs write
+    /// there already).
+    pub code: Vec<PathBuf>,
+}
+
+impl Defaults {
+    pub fn all(&self) -> Vec<PathBuf> {
+        self.checkouts.iter().chain(&self.temp).chain(&self.code).cloned().collect()
+    }
+}
+
+/// The places Claude reads unasked for the project at `root` (`Defaults`); the temp folders only with
+/// `temp` (`Editor.read_temp` — tests' projects are in the temp folder, and theirs off). On a worker.
+pub fn defaults(root: &Path, temp: bool) -> Defaults {
     let (cargo, rustup) = rust_homes();
-    let mut v = code_trees(cargo.as_deref(), rustup.as_deref());
-    // (a cargo config can point them anywhere: never home or above it, nor where keys are)
+    let mut code = code_trees(cargo.as_deref(), rustup.as_deref());
+    // (a cargo config can point them anywhere — and a checkout can be anywhere: never home or above it,
+    // nor where keys are)
     let h = home();
-    v.extend(crate::sandbox::build_dirs(root).into_iter().filter(|d| keepable(d, h.as_deref())));
+    code.extend(crate::sandbox::build_dirs(root).into_iter().filter(|d| keepable(d, h.as_deref())));
+    let checkouts = checkouts(root).into_iter().filter(|d| keepable(d, h.as_deref())).collect();
+    let temp = if temp { temp_folders() } else { Vec::new() };
+    Defaults { checkouts, temp, code }
+}
+
+/// `/private/tmp` and the user's temp folder (`$TMPDIR` itself — not its parent, which holds apps'
+/// caches), real paths.
+pub fn temp_folders() -> Vec<PathBuf> {
+    let mut v = vec![crate::sandbox::real(Path::new("/private/tmp"))];
+    let t = crate::sandbox::real(&std::env::temp_dir());
+    if !v.contains(&t) {
+        v.push(t);
+    }
     v
+}
+
+/// The other checkouts of the repository whose checkout is `root` (the folder holding its `.git`), as git's
+/// own files say — no git run: the main checkout and each `git worktree add`ed one, real paths, `root` not
+/// among them. Each is taken only when git's links go both ways (a checkout's `.git` file names its folder
+/// under `<common>/worktrees/`, whose `gitdir` names that `.git` file back): a `.git/worktrees` entry that
+/// came in a download of a repository can't make some other folder read as one. Nothing for a folder
+/// inside a checkout, or not in one. On a worker.
+pub fn checkouts(root: &Path) -> Vec<PathBuf> {
+    let Ok(root) = std::fs::canonicalize(root) else { return Vec::new() };
+    let Some(common) = common_dir(&root) else { return Vec::new() };
+    let mut out = Vec::new();
+    // (the main checkout: what holds the common folder, when that's its `.git`)
+    if common.file_name().is_some_and(|n| n == ".git")
+        && let Some(main) = common.parent()
+    {
+        out.push(main.to_path_buf());
+    }
+    for entry in std::fs::read_dir(common.join("worktrees")).into_iter().flatten().flatten() {
+        let Some(dot) = linked_to(&entry.path()) else { continue };
+        if let Some(checkout) = dot.parent()
+            && worktree_dir(checkout).is_some_and(|d| same(&d, &entry.path()))
+        {
+            out.push(checkout.to_path_buf());
+        }
+    }
+    let mut seen = Vec::new();
+    for p in out {
+        if let Ok(p) = std::fs::canonicalize(p)
+            && p != root
+            && p.is_dir()
+            && !seen.contains(&p)
+        {
+            seen.push(p);
+        }
+    }
+    seen
+}
+
+/// The repository's common git folder for the checkout at `root` (real): its `.git` folder, or — a linked
+/// checkout — the `commondir` of the folder its `.git` file names, when that folder names it back.
+fn common_dir(root: &Path) -> Option<PathBuf> {
+    let dot = root.join(".git");
+    if dot.is_dir() {
+        return std::fs::canonicalize(dot).ok();
+    }
+    let dir = worktree_dir(root)?;
+    if !linked_to(&dir).is_some_and(|d| same(&d, &dot)) {
+        return None;
+    }
+    let common = std::fs::read_to_string(dir.join("commondir")).ok()?;
+    std::fs::canonicalize(dir.join(common.trim())).ok()
+}
+
+/// The folder a checkout's `.git` file names (`gitdir: …`, relative to the checkout or absolute).
+fn worktree_dir(checkout: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(checkout.join(".git")).ok()?;
+    let at = text.lines().next()?.strip_prefix("gitdir:")?.trim();
+    Some(checkout.join(at))
+}
+
+/// The `.git` file a folder under `<common>/worktrees/` names (its `gitdir`).
+fn linked_to(dir: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(dir.join("gitdir")).ok()?;
+    let at = text.lines().next()?.trim();
+    (!at.is_empty()).then(|| dir.join(at))
+}
+
+/// Whether two paths are the same place (real paths).
+fn same(a: &Path, b: &Path) -> bool {
+    matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(a), Ok(b)) if a == b)
 }
 
 /// The real sysroot `$(rustc --print sysroot)` gives where a command runs (`cwd`), as rustup says it
@@ -487,7 +598,7 @@ impl crate::editor::Editor {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -593,6 +704,65 @@ mod tests {
         for said in ["", "nope-z", "..", "../../cargo", "/tmp/tc (path)", "stable-x/../bare-y"] {
             assert_eq!(sysroot_of(said, &rustup), None, "{said}");
         }
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// A real repository in `base`: `main` with a commit, and `wt` added as a linked checkout of it (git's
+    /// own files, as `git worktree add` writes them). Real paths.
+    pub(crate) fn repo_with_worktree(base: &Path) -> (PathBuf, PathBuf) {
+        let git = |dir: &Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main"])
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        std::fs::create_dir_all(base.join("main")).unwrap();
+        let main = std::fs::canonicalize(base.join("main")).unwrap();
+        git(&main, &["init", "-q"]);
+        git(&main, &["commit", "-q", "--allow-empty", "-m", "first"]);
+        git(&main, &["worktree", "add", "-q", "../wt"]);
+        (main, std::fs::canonicalize(base.join("wt")).unwrap())
+    }
+
+    /// P0 of docs/design/cards.md: the repository's other checkouts are read unasked, from either one —
+    /// as git's own files say, only where the links go both ways: an entry under `.git/worktrees` naming a
+    /// folder whose `.git` doesn't name it back (one that came in a download) is no checkout; a folder inside
+    /// a checkout, or in none, has none.
+    #[test]
+    fn the_repositorys_other_checkouts_both_ways_only() {
+        let base = std::env::temp_dir().join(format!("tarae-checkouts-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::create_dir_all(&base).unwrap();
+        let (main, wt) = repo_with_worktree(&base);
+        assert_eq!(checkouts(&main), std::slice::from_ref(&wt));
+        assert_eq!(checkouts(&wt), std::slice::from_ref(&main));
+        // Planted: an entry naming a folder that has no `.git`, and one whose `.git` names somewhere else
+        let (victim, other) = (base.join("victim"), base.join("other"));
+        std::fs::create_dir_all(&victim).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join(".git"), format!("gitdir: {}\n", base.join("nowhere").display())).unwrap();
+        for (name, to) in [("evil", &victim), ("evil2", &other)] {
+            let e = main.join(".git/worktrees").join(name);
+            std::fs::create_dir_all(&e).unwrap();
+            std::fs::write(e.join("gitdir"), format!("{}\n", to.join(".git").display())).unwrap();
+            std::fs::write(e.join("commondir"), "../..\n").unwrap();
+        }
+        assert_eq!(checkouts(&main), std::slice::from_ref(&wt), "planted entries aren't checkouts");
+        // A checkout whose `.git` file names an entry that doesn't name it back has no others
+        std::fs::write(other.join(".git"), format!("gitdir: {}\n", main.join(".git/worktrees/wt").display()))
+            .unwrap();
+        assert!(checkouts(&other).is_empty(), "one-way: no repository");
+        std::fs::create_dir_all(main.join("src")).unwrap();
+        assert!(checkouts(&main.join("src")).is_empty(), "a folder inside a checkout");
+        assert!(checkouts(&victim).is_empty(), "no repository");
+        // The temp folders only when asked for
+        assert!(defaults(&main, false).temp.is_empty());
+        let t = defaults(&main, true).temp;
+        assert!(t.contains(&crate::sandbox::real(&std::env::temp_dir())), "{t:?}");
+        assert!(t.contains(&crate::sandbox::real(Path::new("/private/tmp"))), "{t:?}");
         std::fs::remove_dir_all(&base).ok();
     }
 

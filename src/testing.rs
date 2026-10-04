@@ -736,6 +736,7 @@ impl Editor {
             }
             let cases = junit.map(|(reports, src)| crate::test_results::junit(&reports, wall, &src));
             let done = move |ed: &mut Editor| {
+                let session = ed.session.label().to_string();
                 let Some(r) = ed.session.test_run.as_mut().filter(|r| r.generation == generation) else {
                     return;
                 };
@@ -744,6 +745,7 @@ impl Editor {
                 }
                 if let Some(w) = r.guard.as_ref().and_then(|g| g.watch()) {
                     w.finish();
+                    crate::cards::denied(&session, &format!("tests: {}", r.target.label), w);
                 }
                 r.took = Some(r.started.elapsed());
                 r.pid = None;

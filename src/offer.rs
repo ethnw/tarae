@@ -39,6 +39,11 @@ pub struct Offer {
     pub warning: Option<std::ops::Range<usize>>,
     /// When it came (`push_offer`) — `C-q` goes to the session whose card has waited longest (#90).
     pub since: Instant,
+    /// When it was first drawn in front (`term::render_frame`) — its `card` line says how long it was up
+    /// before the answer (`cards.rs`).
+    pub drawn: std::cell::Cell<Option<Instant>>,
+    /// What it asks, for its `card` line (`cards.rs`) — Claude's cards and the sandbox's.
+    pub asked: Option<crate::cards::Asked>,
 }
 
 /// A card's text in a buffer of its own (`v`) is titled this, then the card's title.
@@ -206,7 +211,20 @@ impl Offer {
             decided: None,
             warning: None,
             since: Instant::now(),
+            drawn: Default::default(),
+            asked: None,
         }
+    }
+
+    /// What it asks, for its `card` line.
+    pub fn asked(mut self, a: crate::cards::Asked) -> Offer {
+        self.asked = Some(a);
+        self
+    }
+
+    /// Its `card` line: answered (`y` `a` `A` `n`) or dropped — in `session`.
+    fn said(&self, session: &str, answer: &str) {
+        crate::cards::said(session, self, answer);
     }
 
     /// What's being decided is these lines of the question, not its first paragraph.
@@ -379,8 +397,15 @@ impl crate::editor::Editor {
     /// session behind ended its turn swapped in, so its cards were parked — they stayed, its tab said `▲`
     /// after its turn was over, and the front's cards went instead).
     pub fn drop_cards(&mut self, gone: impl Fn(&What) -> bool) {
+        let front = !self.background();
+        let label = self.session.label();
+        for o in self.session.parked.iter().chain(self.offers.iter().filter(|_| front)) {
+            if gone(&o.what) {
+                o.said(label, "dropped");
+            }
+        }
         self.session.parked.retain(|o| !gone(&o.what));
-        if !self.background() {
+        if front {
             self.offers.retain(|o| !gone(&o.what));
         }
     }
@@ -406,7 +431,7 @@ impl crate::editor::Editor {
             // Replaced whole — what it says with what it does — and it settles again before `y` counts
             if !old.installing() {
                 (old.question, old.working, old.failed) = (o.question, o.working, o.failed);
-                (old.decided, old.warning) = (o.decided, o.warning);
+                (old.decided, old.warning, old.asked) = (o.decided, o.warning, o.asked);
                 (old.what, old.state) = (o.what, OfferState::Asking);
                 old.rev += 1;
             }
@@ -519,6 +544,7 @@ impl crate::editor::Editor {
             return self.set_status("a hook here can't be shown — n goes on without hooks");
         }
         let mut o = self.offers.remove(0);
+        o.said(self.session.label(), "y");
         o.state = OfferState::Installing(Instant::now());
         let (id, what) = (o.id, o.what.clone());
         self.offers.push(o);
@@ -818,6 +844,7 @@ impl crate::editor::Editor {
     }
 
     fn offer_lasting(&mut self, o: Offer, scope: crate::allow::Scope) {
+        o.said(self.session.label(), if scope == crate::allow::Scope::Always { "A" } else { "a" });
         self.card_answered(o.id);
         match o.what {
             What::NoSandbox { job, call, ride } => crate::tools::unprotected_answer(
@@ -852,6 +879,7 @@ impl crate::editor::Editor {
             return;
         }
         let o = self.offers.remove(0);
+        o.said(self.session.label(), "n");
         self.card_answered(o.id);
         match o.what {
             What::Grammars { lang, names, .. } => {

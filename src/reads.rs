@@ -40,6 +40,8 @@ pub struct Pending {
     pub generation: u64,
     pub input: Value,
     pub look: Look,
+    /// Where it reads, as the capability model sorts places (its card's `card` line — `cards.rs`).
+    pub class: crate::cards::Class,
 }
 
 /// Where the call reads — `cwd` is where relative paths start (claude's, the project's root).
@@ -185,20 +187,22 @@ pub fn request(ed: &mut Editor, request_id: &str, req: &Value) -> Option<Value> 
     let (generation, chat, made) = (c.generation(), c.allowed.clone(), Made::of(&c.ran));
     let input = req["input"].clone();
     let request_id = request_id.to_string();
-    let store = ed.allow_path.clone();
+    let (store, temp) = (ed.allow_path.clone(), ed.read_temp);
     // (the root, a real path, is where claude runs — its relative paths are from there)
     let root = ed.session.root.clone();
     ed.events.jobs().spawn(move || {
         let look = look(&tool, &input, &root);
         let mut kept = crate::allow::Store::read(store.as_deref()).get(&root);
-        kept.read.extend(crate::allow::also_readable(&root));
+        let defaults = crate::allow::defaults(&root, temp);
+        kept.read.extend(defaults.all());
         let ok = covered(&look, &root, &chat, &kept, &made);
+        let class = crate::cards::class(look.at.as_deref(), &defaults, crate::allow::home().as_deref());
         move |ed: &mut Editor| {
             let Some(c) = ed.session.chat.as_mut().filter(|c| c.generation() == generation) else { return };
             if ok {
                 return crate::chat::respond(ed, &request_id, allow(&input));
             }
-            c.reads.push_back(Pending { request_id, generation, input, look });
+            c.reads.push_back(Pending { request_id, generation, input, look, class });
             refold(ed);
             next(ed);
         }
@@ -258,8 +262,9 @@ pub fn next(ed: &mut Editor) {
         _ => None,
     };
     let q = question(&p.look, keep, folder.as_deref());
+    let asked = crate::cards::Asked::new(crate::cards::Why::Read, crate::cards::Request::Read(p.class));
     let what = crate::offer::What::Read { pending: Box::new(p), keep, folder };
-    ed.push_offer(crate::offer::Offer::new(TITLE.into(), &q, "", String::new(), what));
+    ed.push_offer(crate::offer::Offer::new(TITLE.into(), &q, "", String::new(), what).asked(asked));
 }
 
 /// The card's text: exactly what's read, and where it goes — and, when `a`/`A` allow its folder rather
@@ -413,6 +418,35 @@ mod tests {
         assert!(covered(&l(Some("/t/x/m.txt")), root, &some, &none, &Made::default()), "this chat");
         assert!(covered(&l(Some("/t/x/m.txt")), root, &none, &some, &Made::default()), "kept");
         assert!(!covered(&l(None), root, &some, &some, &Made::default()), "can't be told: asks");
+    }
+
+    /// P0 of docs/design/cards.md: Claude reads the repository's other checkouts and the temp folders
+    /// unasked (`allow::defaults`, as `request` adds them) — the temp folders only where they're on
+    /// (`Editor.read_temp`); and a card's read is sorted where the capability model sorts it.
+    #[test]
+    fn other_checkouts_and_the_temp_folders_read_unasked() {
+        let base =
+            crate::sandbox::real(&std::env::temp_dir()).join(format!("tarae-dflt-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::create_dir_all(&base).unwrap();
+        let (main, wt) = crate::allow::tests::repo_with_worktree(&base);
+        std::fs::write(main.join("notes.md"), "marker\n").unwrap();
+        std::fs::create_dir_all(base.join("shot")).unwrap();
+        std::fs::write(base.join("shot/a.png"), "marker\n").unwrap();
+        let none = Allowed::default();
+        let reads = |file: &Path, temp: bool| {
+            let d = crate::allow::defaults(&wt, temp);
+            let kept = Allowed { read: d.all(), ..Default::default() };
+            let l = look("Read", &json!({ "file_path": file }), &wt);
+            let class = crate::cards::class(l.at.as_deref(), &d, crate::allow::home().as_deref());
+            (covered(&l, &wt, &none, &kept, &Made::default()), class)
+        };
+        use crate::cards::Class;
+        assert_eq!(reads(&main.join("notes.md"), false), (true, Class::OtherCheckout), "the main checkout");
+        assert_eq!(reads(&base.join("shot/a.png"), true), (true, Class::Temp), "the temp folder");
+        let (unasked, class) = reads(&base.join("shot/a.png"), false);
+        assert!(!unasked && class != Class::Temp, "temp off: it asks, and isn't temp");
+        std::fs::remove_dir_all(&base).ok();
     }
 
     /// #81: what a run made in the temp folders while it went reads unasked — a file, or a folder made then

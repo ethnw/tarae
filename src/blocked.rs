@@ -167,6 +167,7 @@ impl Editor {
     pub fn sandbox_grant(&mut self, arg: &str) -> Result<(), String> {
         let (run, list) =
             self.session.blocked.clone().ok_or("nothing blocked to act on — space m s on a run's panel")?;
+        use crate::cards::{Asked, Past, Request, Why};
         let cmd = run.label();
         let run = Box::new(run);
         let card = match arg.trim() {
@@ -179,7 +180,11 @@ impl Editor {
                 "",
                 String::new(),
                 crate::offer::What::Outside { run },
-            ),
+            )
+            .asked(Asked::new(
+                Why::Blocked,
+                Request::Run { past: Past::Outside, sandboxed: true, reads: Vec::new() },
+            )),
             n => {
                 let Choice { grant, why, .. } =
                     n.parse::<usize>().ok().and_then(|i| list.get(i).cloned()).ok_or("no such row")?;
@@ -198,11 +203,12 @@ impl Editor {
                     let at = question.split('\n').count() - 1;
                     at..at + 1
                 });
+                let asked = Asked::new(Why::Blocked, Request::Grant(grant.clone()));
                 let what = crate::offer::What::Grant { grant, run };
                 let o = crate::offer::Offer::new(GRANT_TITLE.into(), &question, "", String::new(), what);
                 match warning {
-                    Some(lines) => o.warning(lines),
-                    None => o,
+                    Some(lines) => o.warning(lines).asked(asked),
+                    None => o.asked(asked),
                 }
             }
         };
