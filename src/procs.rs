@@ -438,6 +438,8 @@ pub enum Kind {
     Other,
     /// A session's heading (no process): what's under it, summed.
     Session(SessionId),
+    /// A run waiting in its session's line (`queued.rs`) — no process yet; `s` takes it out.
+    Queued(u64),
 }
 
 impl Kind {
@@ -448,7 +450,7 @@ impl Kind {
             Kind::Lsp(_) | Kind::Held(..) => 1,
             Kind::Chat | Kind::Ask | Kind::Spare => 2,
             Kind::Debug | Kind::Helper => 3,
-            Kind::Task => 4,
+            Kind::Task | Kind::Queued(_) => 4,
             Kind::Test => 5,
             Kind::Terminal => 6,
             Kind::Plugin(..) => 7,
@@ -713,6 +715,35 @@ pub fn rows(
     out
 }
 
+/// The runs waiting in line (`Editor::procs_queued`: session, id, what, where in line) into the list, each
+/// after its session's processes (with `groups`, under its heading) — no process, so no pid, CPU or
+/// memory (a run waiting was nowhere to be seen, and taken for done — twice).
+pub fn with_queued(rows: &mut Vec<Row>, queued: &[(SessionId, u64, String, String)], groups: &[Group]) {
+    for (session, id, title, what) in queued {
+        let session = groups.iter().any(|g| g.id == *session).then_some(*session);
+        let at = rows.iter().rposition(|r| r.session == session).map_or(rows.len(), |i| i + 1);
+        let row = Row {
+            pid: 0,
+            ppid: 0,
+            started: 0,
+            depth: 0,
+            kind: Kind::Queued(*id),
+            under: Kind::Task,
+            title: title.clone(),
+            what: what.clone(),
+            program: String::new(),
+            up: None,
+            cpu: None,
+            rss: 0,
+            footprint: None,
+            zombie: false,
+            flagged: false,
+            session,
+        };
+        rows.insert(at, row);
+    }
+}
+
 /// CPU % and memory of the processes `pids` among tarae's children, each with what it started — None when
 /// none of them is in the list.
 pub fn summed(rows: &[Row], pids: &[u32]) -> Option<(f32, u64)> {
@@ -760,6 +791,7 @@ pub fn tool_schema() -> serde_json::Value {
 pub fn tool_call(ed: &mut Editor, call: crate::tools::Call, args: &serde_json::Value) {
     let all = args["all"].as_bool() == Some(true);
     let (known, groups, held) = (ed.procs_known(), ed.procs_groups(), ed.procs.held.clone());
+    let queued = ed.procs_queued();
     let (me, name) = (ed.session.id, ed.session.label().to_string());
     ed.events.jobs().spawn(move || {
         let mut s = Sampler::default();
@@ -767,7 +799,8 @@ pub fn tool_call(ed: &mut Editor, call: crate::tools::Call, args: &serde_json::V
         std::thread::sleep(TOOL_WINDOW);
         let sample = s.sample(std::process::id());
         let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        let rows = rows(&sample, &known, std::process::id(), &held, &groups, now);
+        let mut rows = rows(&sample, &known, std::process::id(), &held, &groups, now);
+        with_queued(&mut rows, &queued, &groups);
         let mine = |r: &Row| all || groups.is_empty() || r.session == Some(me);
         let shown: Vec<Row> = rows.into_iter().filter(mine).collect();
         let extra =
@@ -815,6 +848,9 @@ pub fn report(rows: &[Row], extra: &HashMap<u32, (Option<String>, Option<PathBuf
             (Kind::Session(_), _) => {
                 out.push_str(&format!("\n── {head}: cpu {} · memory {}\n", cpu(r), mem(r)));
             }
+            (Kind::Queued(_), _) => out.push_str(&format!(
+                "\n{pad}{head}: queued, not started — it runs when the one before it ends\n"
+            )),
             (_, 0) => out.push_str(&format!(
                 "\n{pad}{head}: held — it exited again and again; not started until r on it in :procs\n"
             )),
@@ -1430,6 +1466,7 @@ impl Editor {
         }
         let groups = self.procs_groups();
         let mut rows = rows(&s, &self.procs_known(), std::process::id(), &self.procs.held, &groups, secs);
+        with_queued(&mut rows, &self.procs_queued(), &groups);
         let (found, learned) = self.procs.check(&rows, &self.procs_lsp_facts(), Instant::now());
         let flagged: HashSet<u32> = found.iter().map(|f| f.pid).filter(|&p| p > 0).collect();
         self.procs_found(found, now);
@@ -1532,6 +1569,12 @@ impl Editor {
             Kind::Tarae => self.set_status("that's tarae itself — :q quits it"),
             Kind::Held(..) => self.set_status(format!("{} isn't running — r starts it", r.title)),
             Kind::Session(_) => self.set_status(format!("{} is a session — :session-end ends it", r.title)),
+            Kind::Queued(id) => {
+                self.procs_in(&r, |ed| {
+                    crate::queued::leave(ed, id, "the user took it out of the line in :procs")
+                });
+                self.procs_wake(Wake::Now);
+            }
             Kind::Lsp(cid) => {
                 if let Some(name) = self.lsp_stopped(cid) {
                     crate::log::line(&name, "stop", &format!("{name} stopped from :procs"));
@@ -1960,7 +2003,9 @@ mod tests {
             cmd: "trap '' TERM; sleep 30".into(),
             cwd: there.clone(),
         };
-        assert!(ed.task_start_for(task, crate::tools::For::User("swap".into()), None));
+        assert!(
+            ed.task_start_for(task, crate::tools::For::User("swap".into()), None, Default::default()).is_ok()
+        );
         let pid = ed.session.task_run.as_ref().and_then(|r| r.pid()).unwrap();
         // (its `trap` in place before the TERM comes)
         let end = Instant::now() + Duration::from_secs(5);

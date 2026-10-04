@@ -60,6 +60,7 @@ mod plan;
 mod plugin;
 mod preflight;
 mod procs;
+mod queued;
 mod quickfix;
 mod readonly;
 mod reads;

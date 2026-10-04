@@ -488,6 +488,13 @@ pub fn region(base: &str, now: &str) -> Option<(String, String)> {
 }
 
 fn answer(ed: &mut Editor, request_id: &str, response: Value) {
+    // (allowed: Claude writes the file now — a run under way no longer runs what's there, `queued::join`)
+    if response["behavior"] == "allow"
+        && let Some(path) = response["updatedInput"]["file_path"].as_str()
+    {
+        let path = crate::chat::resolve(&ed.session.root, path);
+        ed.wrote(&path);
+    }
     crate::chat::respond(ed, request_id, response);
 }
 

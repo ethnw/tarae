@@ -214,6 +214,11 @@ pub struct Run {
     pub wait: crate::waits::Waiting,
     /// Its way from the ask to its end, for the log (`trace.rs`).
     pub trace: crate::trace::RunTrace,
+    /// Claude's: its dedupe key (`queued::key_of`), the calls that joined it, its time in line before it
+    /// started (`queued.rs`).
+    pub key: Option<String>,
+    pub joined: Vec<crate::queued::Joined>,
+    pub queued: Option<crate::queued::Queued>,
 }
 
 impl Run {
@@ -323,6 +328,9 @@ impl Run {
             cut: None,
             wait: Default::default(),
             trace: crate::trace::RunTrace::new("test run"),
+            key: None,
+            joined: Vec::new(),
+            queued: None,
         }
     }
 }
@@ -421,20 +429,37 @@ impl Editor {
         crate::restart::run_dropped(self);
         crate::rebase::run_dropped(self);
         self.session.task_run = None;
+        // (the panel is free: what waits for it starts)
+        crate::queued::run_next(self);
     }
 
+    /// The user's task — Claude's command running in the panel isn't stopped: the task waits first in line
+    /// (`queued.rs`; `enter` in the panel runs it now).
     pub fn task_start(&mut self, task: Task) {
         if self.install_running() {
             return;
         }
+        self.session.task_last = Some(task.clone());
+        if crate::queued::claudes_running(&self.session, crate::queued::Slot::Task) {
+            return crate::queued::push(self, crate::queued::What::Task(task));
+        }
+        self.task_start_now(task, false);
+    }
+
+    /// The user's task starts — `force`: over Claude's command running (it stops); else one of Claude's that
+    /// started while the saves were written keeps the panel, and the task waits for it.
+    pub(crate) fn task_start_now(&mut self, task: Task, force: bool) {
         let trace = crate::trace::RunTrace::new(format!("task: {}", task.name));
         self.auto_save(" · before the task");
-        self.session.task_last = Some(task.clone());
         // (it runs what's on disk: once the saves are written — `after_saves`)
         self.after_saves(move |ed| {
             trace.step("saved");
             if ed.install_running() {
                 return trace.end("an install was running");
+            }
+            if !force && crate::queued::claudes_running(&ed.session, crate::queued::Slot::Task) {
+                trace.end("queued behind claude's command");
+                return crate::queued::again(ed, crate::queued::What::Task(task));
             }
             ed.task_spawn(task, None, None, true, false, trace);
         });
@@ -452,17 +477,18 @@ impl Editor {
     /// A command Claude runs (`tools.rs`): like a task, but not the one `space m m` runs again — the call
     /// waits for its end (or, the user's run of it again, Claude hears it later); in the sandbox, unless
     /// `guard` says otherwise. Its places go to the list only when it's a check or a build
-    /// (`tools::is_check`, #28) — a grep of Claude's looking around doesn't replace the user's list. False:
-    /// it didn't start (an install is running, or it couldn't spawn). Saves first: `tools::go` starts it
-    /// `after_saves`.
+    /// (`tools::is_check`, #28) — a grep of Claude's looking around doesn't replace the user's list. `ride`:
+    /// what goes along to the run (`queued.rs`). Err (who and what rode, back): it didn't start (a run is
+    /// under way, or it couldn't spawn). Saves first: `tools::go` starts it `after_saves`.
     pub(crate) fn task_start_for(
         &mut self,
         task: Task,
         who: crate::tools::For,
         guard: Option<crate::sandbox::Guard>,
-    ) -> bool {
+        ride: crate::queued::Ride,
+    ) -> Result<(), Box<(crate::tools::For, crate::queued::Ride)>> {
         if self.session.task_run.as_ref().is_some_and(|r| r.state == State::Running) {
-            return false;
+            return Err(Box::new((who, ride)));
         }
         // (Claude's call's trace goes on — from its ask; the user's run again of it starts here)
         let trace = match &who {
@@ -489,9 +515,10 @@ impl Editor {
                 }
                 r.by_claude = true;
                 r.guard = guard;
-                true
+                (r.key, r.joined, r.queued) = (ride.key, ride.joined, ride.queued);
+                Ok(())
             }
-            None => false,
+            None => Err(Box::new((who, ride))),
         }
     }
 
@@ -563,7 +590,12 @@ impl Editor {
                 if let Some(a) = after {
                     return self.offer_finished(a.offer, Err(format!("{}: {e}", task.name)));
                 }
-                return self.set_error(format!("{}: {e}", task.name));
+                self.set_error(format!("{}: {e}", task.name));
+                // (the panel is still free: what waits for it — Claude's own failure says so itself, `tools::fail`)
+                if !claudes {
+                    crate::queued::run_next(self);
+                }
+                return;
             }
         };
         trace.step("spawned");
@@ -579,6 +611,7 @@ impl Editor {
         let pid = child.pid;
         let title = if claudes { "claude's command" } else { task.name.as_str() };
         self.procs_spawned(pid, title, &task.cmd);
+        crate::queued::started(self, crate::queued::Slot::Task, &traced(&task.name));
         let (stdout, stderr) = (child.stdout, child.stderr);
         let tx = self.events.sender();
         // Each stream reads its places on its own thread (a stat per `path:line` — never the main loop's)
@@ -690,9 +723,9 @@ impl Editor {
                 // (a wait it ended in — killed while it waited — ends with it)
                 r.wait.end(Instant::now(), &r.trace);
                 r.trace.end(ended(&r.state));
-                // (a command of Claude's said yes to while this ran goes next — once this one's end is told)
+                // (what waits for the panel goes next — once this one's end is told)
                 if !ed.session.runs_next.is_empty() {
-                    let next = crate::event::Event::Job(Box::new(crate::tools::run_next));
+                    let next = crate::event::Event::Job(Box::new(crate::queued::run_next));
                     let _ = ed.events.sender().send(next);
                 }
                 let Some(r) = ed.session.task_run.as_mut() else { return };
@@ -757,6 +790,9 @@ impl Editor {
             cut: None,
             wait: Default::default(),
             trace,
+            key: None,
+            joined: Vec::new(),
+            queued: None,
         });
     }
 }

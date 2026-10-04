@@ -122,8 +122,12 @@ pub struct Session {
     /// Its Claude's tool calls waiting for the editor's answer (`tools::WATCHED`) — one silent past its time
     /// marks the session possibly stuck (`Doing::Stuck`).
     pub tool_waits: Vec<ToolWait>,
-    /// Claude's commands the user said yes to while another ran — each runs when the one before ends.
-    pub runs_next: std::collections::VecDeque<crate::tools::Next>,
+    /// Runs waiting for their slot (the task panel, the test pane) — Claude's and, first in line, the user's
+    /// own; each starts when its slot frees (`queued.rs`).
+    pub runs_next: std::collections::VecDeque<crate::queued::Next>,
+    /// When a file in its checkout was last saved or written (Claude's edit, a change set) — a run under way
+    /// since then is no longer the one the same command would run (`queued::join`).
+    pub wrote: Option<Instant>,
     /// Its Claude's calls waiting on a card for the user's answer (`offer::Asking`) — each card must be up
     /// (in front) or parked (behind) until it's answered; one gone is told (`asking_sync`).
     pub asking: Vec<crate::offer::Asking>,
@@ -231,6 +235,7 @@ impl Session {
             asleep: Vec::new(),
             tool_waits: Vec::new(),
             runs_next: Default::default(),
+            wrote: None,
             asking: Vec::new(),
             spawned: Vec::new(),
             viewed: Default::default(),
@@ -298,15 +303,21 @@ pub enum Doing {
         tool: &'static str,
         secs: u64,
     },
+    /// Its run waits in line for its slot, `pos`th (`queued.rs`) — `● queued 2nd`, dim: at work, held back,
+    /// not stuck.
+    Queued {
+        pos: usize,
+    },
 }
 
 impl Doing {
     /// A stuck call as its mark says it: the tool and how long, the time as wide as it stays (`symbols 42s`,
-    /// `symbols  3m`) — empty for the rest.
+    /// `symbols  3m`); a run in line, where (`queued 2nd`) — empty for the rest.
     pub fn said(&self) -> String {
         match *self {
             Doing::Stuck { tool, secs } if secs < 60 => format!("{tool} {secs:>2}s"),
             Doing::Stuck { tool, secs } => format!("{tool} {:>2}m", secs / 60),
+            Doing::Queued { pos } => format!("queued {}", crate::queued::ordinal(pos)),
             _ => String::new(),
         }
     }
@@ -326,6 +337,8 @@ impl Editor {
             Doing::Waiting
         } else if let Some(w) = l.stuck(Instant::now()) {
             Doing::Stuck { tool: w.tool, secs: w.since.elapsed().as_secs() }
+        } else if let Some(pos) = crate::queued::position(l) {
+            Doing::Queued { pos }
         } else if l.chat.as_ref().is_some_and(crate::chat::Chat::busy) {
             Doing::Working
         } else if l.turn_done && !front {

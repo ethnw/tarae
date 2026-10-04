@@ -20,10 +20,12 @@
 //!   Claude's edits do, in the review (`refactor.rs`).
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
 use crate::editor::Editor;
+use crate::queued::{Queued, Ride};
 use crate::sandbox::{Availability, Guard};
 use crate::test_results::Status;
 use crate::testing::{RunState, Scope, TestRun};
@@ -43,10 +45,15 @@ pub struct Call {
 
 impl Call {
     /// A step on its run's way (`trace.rs`), if it's a run's.
-    fn step(&self, what: &str) {
+    pub(crate) fn step(&self, what: &str) {
         if let Some(t) = &self.trace {
             t.step(what);
         }
+    }
+
+    /// The chat process it came from.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
     }
 }
 
@@ -282,12 +289,11 @@ fn run_tests_schema() -> Value {
 }
 
 /// Finds the target on a worker (the file read and parsed there), then runs it — the answer comes with
-/// the run's end (`tests_done`). Err = answered now.
+/// the run's end (`tests_done`); tests running already, it waits for them (`queued.rs`). Err = answered now.
 fn run_tests(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
     let path = args["path"].as_str().filter(|p| !p.is_empty()).ok_or("path is required")?;
     let path = crate::chat::resolve(&ed.session.root, path);
     let line = args["line"].as_u64().map(|l| l.max(1) as usize - 1);
-    busy(ed)?;
     let what = crate::chat::shown(&ed.session.root, &path);
     let what = line.map_or(what.clone(), |l| format!("{what}:{}", l + 1));
     let mut call = call;
@@ -315,17 +321,6 @@ fn run_tests(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
         }
     });
     Ok(())
-}
-
-/// Tests already running (the user's or an earlier call) aren't cut short.
-fn busy(ed: &Editor) -> Result<(), String> {
-    match &ed.session.test_run {
-        Some(r) if r.state == RunState::Running => Err(format!(
-            "tests are already running in the editor ({}) — wait for them to finish, then run again",
-            r.target.label
-        )),
-        _ => Ok(()),
-    }
 }
 
 enum Found {
@@ -370,16 +365,10 @@ fn find(
 }
 
 fn start(ed: &mut Editor, call: Call, target: crate::testing::Target) {
-    if let Err(e) = busy(ed) {
-        return answer(ed, call, Err(e));
-    }
     guarded(ed, call, Job::Tests(Box::new(target)), false);
 }
 
-fn start_tests(ed: &mut Editor, who: For, target: crate::testing::Target, guard: Option<Guard>) {
-    if let Err(e) = busy(ed) {
-        return fail(ed, who, e);
-    }
+fn start_tests(ed: &mut Editor, who: For, target: crate::testing::Target, guard: Option<Guard>, ride: Ride) {
     let before = ed.test_generation;
     let program = target.argv().first().cloned().unwrap_or_default();
     let trace = match &who {
@@ -388,27 +377,90 @@ fn start_tests(ed: &mut Editor, who: For, target: crate::testing::Target, guard:
     };
     ed.test_start_guarded(target, guard, trace);
     match ed.session.test_run.as_mut().filter(|_| ed.test_generation != before) {
-        Some(r) => match who {
-            For::Claude(call) => r.chat = Some(call),
-            For::User(head) => r.tell = Some(head),
-        },
-        None => fail(ed, who, format!("couldn't start {program}")),
+        Some(r) => {
+            match who {
+                For::Claude(call) => r.chat = Some(call),
+                For::User(head) => r.tell = Some(head),
+            }
+            r.by_claude = true;
+            (r.key, r.joined, r.queued) = (ride.key, ride.joined, ride.queued);
+        }
+        None => fail(ed, who, ride.joined, format!("couldn't start {program}")),
     }
 }
 
-/// The run Claude asked for ended — its results go back, and the editor shows the first failure. One the
-/// user ran again (`blocked.rs`): Claude hears how it ended with the next message.
+/// How a caller's wait before its run is said in its report (`waits::Waiting::said`).
+#[derive(Clone, Copy, Debug)]
+pub enum Waited<'a> {
+    /// Not in line: it started when asked.
+    No,
+    /// So long in line, behind these.
+    Queued(Duration, &'a [String]),
+    /// It joined the same run under way, this far in.
+    Joined(Duration),
+}
+
+impl Waited<'_> {
+    /// The wait of a caller of the run that `started` then after `queued` in line: the one that asked it
+    /// (`joined` None), or one that joined — asked when, and how far in the run was if it was under way.
+    fn of<'a>(
+        started: Instant,
+        queued: Option<&'a Queued>,
+        joined: Option<(Instant, Option<Duration>)>,
+    ) -> Waited<'a> {
+        let behind = queued.map_or(&[][..], |q| &q.behind[..]);
+        match (joined, queued) {
+            (Some((_, Some(d))), _) => Waited::Joined(d),
+            (Some((asked, None)), _) => Waited::Queued(started.saturating_duration_since(asked), behind),
+            (None, Some(q)) => Waited::Queued(started.saturating_duration_since(q.since), behind),
+            (None, None) => Waited::No,
+        }
+    }
+
+    /// The report's line on it, with the run's own waits (`waits.rs`) once it took `took`.
+    fn line(self, wait: &crate::waits::Waiting, took: Option<Duration>) -> String {
+        let joined = match self {
+            Waited::Joined(d) => format!(
+                "Joined a run of the same command already under way ({:.1}s in) — this is its result.\n",
+                d.as_secs_f32()
+            ),
+            _ => String::new(),
+        };
+        let queued = match self {
+            Waited::Queued(d, behind) => Some((d, behind)),
+            _ => None,
+        };
+        let waited = took.and_then(|t| wait.said(t, queued)).map(|w| format!("{w}\n")).unwrap_or_default();
+        format!("{joined}{waited}")
+    }
+}
+
+/// The run Claude asked for ended — its results go back (to every call that joined it too), and the editor
+/// shows the first failure. One the user ran again (`blocked.rs`): Claude hears how it ended with the next
+/// message.
 pub fn tests_done(ed: &mut Editor) {
     let Some(r) = ed.session.test_run.as_mut() else { return };
     if let Some(head) = r.tell.take() {
-        let text = report(&ed.session.root, r);
+        let text = report(&ed.session.root, r, Waited::No);
         return told(ed, head, text);
     }
+    let joined = std::mem::take(&mut r.joined);
     let Some(call) = r.chat.take() else { return };
-    let text = report(&ed.session.root, r);
+    let root = ed.session.root.clone();
+    let text = report(&root, r, Waited::of(r.started, r.queued.as_ref(), None));
+    let others: Vec<(Call, String)> = joined
+        .into_iter()
+        .map(|j| {
+            let how = Waited::of(r.started, r.queued.as_ref(), Some((j.asked, j.running)));
+            (j.call, report(&root, r, how))
+        })
+        .collect();
     let failed = r.failures().first().map(|&i| r.cases[i].clone());
     crate::reads::run_ended(ed);
     answer(ed, call, Ok(text));
+    for (c, text) in others {
+        answer(ed, c, Ok(text));
+    }
     if let Some(case) = failed
         && let Some((path, line)) = case.at.clone()
     {
@@ -422,14 +474,16 @@ pub fn tests_done(ed: &mut Editor) {
 /// command still waiting for the user's yes is no longer asked about.
 pub fn turn_over(ed: &mut Editor) {
     ed.session.tool_waits.clear();
-    ed.session.runs_next.clear();
+    crate::queued::turn_over(ed);
     // (nothing waits on a card any more — its cards go below)
     ed.session.asking.clear();
     if let Some(r) = ed.session.test_run.as_mut() {
         r.chat = None;
+        r.joined.clear();
     }
     if let Some(r) = ed.session.task_run.as_mut() {
         r.chat = None;
+        r.joined.clear();
     }
     ed.drop_cards(|w| matches!(w, crate::offer::What::Run(_) | crate::offer::What::NoSandbox { .. }));
     crate::seeing::turn_over(ed);
@@ -438,9 +492,13 @@ pub fn turn_over(ed: &mut Editor) {
 
 /// A run Claude waited on is gone before it ended (closed, or another run took its place).
 pub fn tests_dropped(ed: &mut Editor, why: &str) {
-    if let Some(call) = ed.session.test_run.as_mut().and_then(|r| r.chat.take()) {
+    let Some(r) = ed.session.test_run.as_mut() else { return };
+    let joined = std::mem::take(&mut r.joined);
+    if let Some(call) = r.chat.take() {
         crate::reads::run_ended(ed);
-        answer(ed, call, Err(format!("the test run was stopped — {why}")));
+        for c in std::iter::once(call).chain(joined.into_iter().map(|j| j.call)) {
+            answer(ed, c, Err(format!("the test run was stopped — {why}")));
+        }
     }
 }
 
@@ -864,10 +922,25 @@ fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
             Some(Beyond { reason: reason.to_string(), socket })
         }
     };
-    run_busy(ed)?;
     let cwd = run_cwd(&ed.session.root, args["cwd"].as_str())?;
     let mut call = call;
     call.trace = Some(crate::trace::RunTrace::new(format!("claude's run: {}", crate::task::traced(cmd))));
+    // The same command sent again, while the first waits or runs what it would: one run, both answered (§3.4
+    // of docs/design/async.md) — it was allowed or said yes to already, so no card
+    let call = match outside {
+        Some(_) => call,
+        None => {
+            let key = crate::queued::key_of(
+                &ed.session.root,
+                &Job::Command(cmd.to_string(), cwd.clone()),
+                &Extra::default(),
+            );
+            match crate::queued::join(ed, &key, call) {
+                Ok(()) => return Ok(()),
+                Err(call) => call,
+            }
+        }
+    };
     let mut extra = ed.config.llm.run_allow.clone();
     extra.extend(ed.session.chat.as_ref().map(|c| c.run_allow.clone()).unwrap_or_default());
     if outside.is_none() && allowed(cmd, &extra) {
@@ -1511,29 +1584,14 @@ pub(crate) fn draws_as_itself(text: &str) -> bool {
     !text.replace("\r\n", "\n").chars().any(hidden)
 }
 
-/// A task running in the panel isn't cut short (the user's, or an install).
-fn run_busy(ed: &Editor) -> Result<(), String> {
-    match &ed.session.task_run {
-        Some(r) if r.state == crate::task::State::Running => Err(format!(
-            "a command is already running in the editor ({}) — wait for it to finish, then run again",
-            r.task.name
-        )),
-        _ => Ok(()),
-    }
-}
-
-fn run_start(
-    ed: &mut Editor,
-    who: For,
-    cmd: String,
-    cwd: PathBuf,
-    guard: Option<Guard>,
-) -> Result<(), String> {
+/// Claude's command into the task panel (`go_now` saw it free) — one that couldn't spawn is told to its
+/// callers.
+fn run_start(ed: &mut Editor, who: For, cmd: String, cwd: PathBuf, guard: Option<Guard>, ride: Ride) {
     let task = crate::task::Task { name: cmd.clone(), cmd, cwd };
-    if !ed.task_start_for(task, who, guard) {
-        return Err(run_busy(ed).err().unwrap_or_else(|| "couldn't start sh".into()));
+    if let Err(back) = ed.task_start_for(task, who, guard, ride) {
+        let (who, ride) = *back;
+        fail(ed, who, ride.joined, "couldn't start sh".into());
     }
-    Ok(())
 }
 
 /// Who waits for a run's end: Claude's call — or no one: the user ran it again from what the sandbox
@@ -1544,15 +1602,19 @@ pub enum For {
     User(String),
 }
 
-/// What couldn't start, said to whoever waits for it.
-fn fail(ed: &mut Editor, who: For, e: String) {
+/// What couldn't start, said to whoever waits for it (the calls that `joined` it too) — and its slot, still
+/// free, goes to the next in line.
+fn fail(ed: &mut Editor, who: For, joined: Vec<crate::queued::Joined>, e: String) {
     match who {
         For::Claude(call) => {
             crate::reads::run_ended(ed);
-            answer(ed, call, Err(e))
+            for c in std::iter::once(call).chain(joined.into_iter().map(|j| j.call)) {
+                answer(ed, c, Err(e.clone()));
+            }
         }
         For::User(_) => ed.set_error(e),
     }
+    crate::queued::run_next(ed);
 }
 
 /// A run the user started again ended: Claude reads how with the next message — the panel shows it now.
@@ -1681,36 +1743,10 @@ pub fn run_answer(ed: &mut Editor, id: u64, what: RunCard, scope: Option<crate::
     });
 }
 
+/// A yes on its card: it runs — or, another command running (two cards answered one after the other), it
+/// waits in line and runs next (#5, `queued.rs`).
 fn run_now(ed: &mut Editor, cmd: String, cwd: PathBuf, call: Call, unprotected: bool, extra: Extra) {
-    // A yes while another command runs (two cards answered one after the other): it runs next (#5)
-    if run_busy(ed).is_err() {
-        ed.note(format!("`{cmd}` runs once the command running ends"));
-        call.step("queued");
-        return ed.session.runs_next.push_back(Next { cmd, cwd, call, unprotected, extra });
-    }
     guard_and_go(ed, For::Claude(call), Job::Command(cmd, cwd), unprotected, extra);
-}
-
-/// A command the user said yes to while another ran — it runs when that one ends (`run_next`).
-pub struct Next {
-    cmd: String,
-    cwd: PathBuf,
-    call: Call,
-    unprotected: bool,
-    extra: Extra,
-}
-
-/// The task panel's run ended: the next command said yes to, if one waits — and its call still does.
-pub fn run_next(ed: &mut Editor) {
-    if run_busy(ed).is_err() {
-        return;
-    }
-    while let Some(n) = ed.session.runs_next.pop_front() {
-        if ed.session.chat.as_ref().is_some_and(|c| c.generation() == n.call.generation && c.busy()) {
-            n.call.step("its turn");
-            return run_now(ed, n.cmd, n.cwd, n.call, n.unprotected, n.extra);
-        }
-    }
 }
 
 /// A `run` card's command and where it runs, its call, the files it showed, whether it said there's no
@@ -1778,20 +1814,27 @@ fn guarded(ed: &mut Editor, call: Call, job: Job, asked: bool) {
 
 /// `guarded` for whoever waits (`For`), with `extra` — what the user allowed this run alone, or that it
 /// runs outside the sandbox. The policy has what's allowed for the project and this conversation in it.
+/// Its slot busy (another run, or Claude's before it in line): it waits its turn (`queued::admit`).
 pub fn guard_and_go(ed: &mut Editor, who: For, job: Job, asked: bool, extra: Extra) {
-    if extra.outside {
-        return go(ed, who, job, Some(Guard::Outside));
+    crate::queued::admit(ed, who, job, Ride { unprotected: asked, extra, ..Default::default() });
+}
+
+/// `guard_and_go` once it's this run's turn — what rides along goes on to the run (`ride`).
+pub(crate) fn guard_then_go(ed: &mut Editor, who: For, job: Job, ride: Ride) {
+    if ride.extra.outside {
+        return go(ed, who, job, Some(Guard::Outside), ride);
     }
     if !ed.config.llm.sandbox {
-        return go(ed, who, job, Some(Guard::Off));
+        return go(ed, who, job, Some(Guard::Off), ride);
     }
     let found = ed.sandbox.clone();
     if found == Availability::Bypass {
-        return go(ed, who, job, None);
+        return go(ed, who, job, None, ride);
     }
     let llm = ed.config.llm.clone();
     let chat = ed.session.chat.as_ref().map(|c| c.allowed.clone()).unwrap_or_default();
     let (store, root) = (ed.allow_path.clone(), ed.session.root.clone());
+    let grant = ride.extra.grant.clone();
     ed.events.jobs().spawn(move || {
         let found = match found {
             Availability::Unknown => crate::sandbox::probe(),
@@ -1799,7 +1842,7 @@ pub fn guard_and_go(ed: &mut Editor, who: For, job: Job, asked: bool, extra: Ext
         };
         let policy = (found == Availability::Ready).then(|| {
             let kept = crate::allow::Store::read(store.as_deref()).get(&crate::sandbox::real(&root));
-            let (llm, granted, sockets) = with_allowed(&llm, &[&kept, &chat], extra.grant.as_ref());
+            let (llm, granted, sockets) = with_allowed(&llm, &[&kept, &chat], grant.as_ref());
             let mut p = crate::sandbox::policy(&root, &llm);
             (p.granted, p.sockets) = (granted, sockets);
             // Its denials watched from before it starts (the stream up first — measured)
@@ -1814,21 +1857,21 @@ pub fn guard_and_go(ed: &mut Editor, who: For, job: Job, asked: bool, extra: Ext
             if let For::Claude(call) = &who {
                 call.step("sandbox ready");
             }
-            // (Claude's turn ended meanwhile: nothing waits for it)
+            // (Claude's turn ended meanwhile: nothing waits for it — the slot goes to the next in line)
             if let For::Claude(call) = &who
                 && ed.session.chat.as_ref().is_some_and(|c| c.generation() != call.generation || !c.busy())
             {
-                return;
+                return crate::queued::run_next(ed);
             }
             match (policy, found, who) {
-                (Some(p), _, who) => go(ed, who, job, Some(Guard::In(Box::new(p)))),
+                (Some(p), _, who) => go(ed, who, job, Some(Guard::In(Box::new(p))), ride),
                 (None, Availability::Missing(why), For::Claude(call))
-                    if !asked && !ed.session.chat.as_ref().is_some_and(|c| c.unprotected) =>
+                    if !ride.unprotected && !ed.session.chat.as_ref().is_some_and(|c| c.unprotected) =>
                 {
-                    ask_unprotected(ed, call, job, why)
+                    ask_unprotected(ed, call, job, why, ride)
                 }
-                (None, Availability::Missing(why), who) => go(ed, who, job, Some(Guard::Without(why))),
-                (None, _, who) => go(ed, who, job, None),
+                (None, Availability::Missing(why), who) => go(ed, who, job, Some(Guard::Without(why)), ride),
+                (None, _, who) => go(ed, who, job, None, ride),
             }
         }
     });
@@ -1836,7 +1879,7 @@ pub fn guard_and_go(ed: &mut Editor, who: For, job: Job, asked: bool, extra: Ext
 
 /// It runs what's on disk: the user's unsaved files are saved, and it starts once they're written
 /// (`after_saves` — an event, not a wait).
-fn go(ed: &mut Editor, who: For, job: Job, guard: Option<Guard>) {
+fn go(ed: &mut Editor, who: For, job: Job, guard: Option<Guard>, ride: Ride) {
     ed.auto_save(match &job {
         Job::Command(..) => " · before the command",
         Job::Tests(_) => " · before test",
@@ -1846,18 +1889,30 @@ fn go(ed: &mut Editor, who: For, job: Job, guard: Option<Guard>) {
     };
     let asked_in_turn = matches!(&who, For::Claude(call) if turn(ed, call));
     ed.after_saves(move |ed| {
-        // (Claude's turn ended while the saves were written: nothing waits for it)
+        // (Claude's turn ended while the saves were written: nothing waits for it — nor holds the slot)
         if asked_in_turn
             && let For::Claude(call) = &who
             && !turn(ed, call)
         {
-            return;
+            return crate::queued::run_next(ed);
         }
-        go_now(ed, who, job, guard)
+        go_now(ed, who, job, guard, ride)
     });
 }
 
-fn go_now(ed: &mut Editor, who: For, job: Job, guard: Option<Guard>) {
+/// It starts — unless its slot was taken while it got ready (the user's task, a race with another call of
+/// Claude's): then it's back at the front of its line, its sandbox made again when its turn comes.
+fn go_now(ed: &mut Editor, who: For, job: Job, guard: Option<Guard>, ride: Ride) {
+    let taken = match &job {
+        Job::Command(..) => {
+            ed.session.task_run.as_ref().is_some_and(|r| r.state == crate::task::State::Running)
+        }
+        Job::Tests(_) => ed.session.test_run.as_ref().is_some_and(|r| r.state == RunState::Running),
+    };
+    if taken {
+        drop(guard);
+        return crate::queued::again(ed, crate::queued::What::Guarded { who, job, ride });
+    }
     if matches!(who, For::Claude(_)) {
         let dir = match &guard {
             Some(Guard::In(p)) => p.run.clone(),
@@ -1866,15 +1921,8 @@ fn go_now(ed: &mut Editor, who: For, job: Job, guard: Option<Guard>) {
         crate::reads::run_started(ed, dir);
     }
     match job {
-        Job::Command(cmd, cwd) => {
-            if let Err(e) = run_busy(ed) {
-                return fail(ed, who, e);
-            }
-            if let Err(e) = run_start(ed, who.clone(), cmd, cwd, guard) {
-                fail(ed, who, e);
-            }
-        }
-        Job::Tests(target) => start_tests(ed, who, *target, guard),
+        Job::Command(cmd, cwd) => run_start(ed, who, cmd, cwd, guard, ride),
+        Job::Tests(target) => start_tests(ed, who, *target, guard, ride),
     }
 }
 
@@ -1882,19 +1930,26 @@ pub const NO_SANDBOX_TITLE: &str = "Claude wants to run — without a sandbox";
 
 /// No sandbox on this system: Claude's command waits for the user — `y` this once, `a` for this
 /// conversation, `n` no.
-fn ask_unprotected(ed: &mut Editor, call: Call, job: Job, why: String) {
+fn ask_unprotected(ed: &mut Editor, call: Call, job: Job, why: String, ride: Ride) {
     let question = format!(
         "{}\n\nThere's none here ({why}) — it would run with all your permissions: your files, your network.",
         job.label()
     );
     call.step("no-sandbox card up");
-    let what = crate::offer::What::NoSandbox { job, call };
+    let what = crate::offer::What::NoSandbox { job, call, ride: Box::new(ride) };
     ed.push_offer(crate::offer::Offer::new(NO_SANDBOX_TITLE.into(), &question, "", String::new(), what));
 }
 
 /// The answer on that card: `y` runs it unprotected, `a` too — and the rest of this conversation's — `n`
-/// tells Claude no.
-pub fn unprotected_answer(ed: &mut Editor, id: u64, job: Job, call: Call, answer_is: Unprotected) {
+/// tells Claude no (and the calls that joined it).
+pub fn unprotected_answer(
+    ed: &mut Editor,
+    id: u64,
+    job: Job,
+    call: Call,
+    ride: Ride,
+    answer_is: Unprotected,
+) {
     ed.offer_finished(id, Ok(()));
     if answer_is != Unprotected::No {
         call.step("answered yes");
@@ -1910,15 +1965,18 @@ pub fn unprotected_answer(ed: &mut Editor, id: u64, job: Job, call: Call, answer
                  ask them how to go on",
                 job.label()
             );
-            answer(ed, call, Err(e))
+            for c in std::iter::once(call).chain(ride.joined.into_iter().map(|j| j.call)) {
+                answer(ed, c, Err(e.clone()));
+            }
+            crate::queued::run_next(ed);
         }
-        Unprotected::Once => go(ed, For::Claude(call), job, Some(Guard::Without(why))),
+        Unprotected::Once => go(ed, For::Claude(call), job, Some(Guard::Without(why)), ride),
         Unprotected::ThisChat => {
             if let Some(c) = ed.session.chat.as_mut() {
                 c.unprotected = true;
             }
             ed.set_warning("Claude's commands run without a sandbox in this conversation");
-            go(ed, For::Claude(call), job, Some(Guard::Without(why)))
+            go(ed, For::Claude(call), job, Some(Guard::Without(why)), ride)
         }
     }
 }
@@ -1942,17 +2000,30 @@ pub fn run_done(ed: &mut Editor) {
     // (its own places — the user's list has them only when it was a check, #28)
     if let Some(head) = r.tell.take() {
         let r = &*r;
-        let text = run_report(&ed.session.root, r, &r.places);
+        let text = run_report(&ed.session.root, r, &r.places, Waited::No);
         return told(ed, head, text);
     }
+    let joined = std::mem::take(&mut r.joined);
     let Some(call) = r.chat.take() else { return };
+    let r = &*r;
     let items = &r.places;
-    let text = run_report(&ed.session.root, r, items);
+    let text = run_report(&ed.session.root, r, items, Waited::of(r.started, r.queued.as_ref(), None));
+    // (each call that joined it: the same run, its own wait)
+    let others: Vec<(Call, String)> = joined
+        .into_iter()
+        .map(|j| {
+            let how = Waited::of(r.started, r.queued.as_ref(), Some((j.asked, j.running)));
+            (j.call, run_report(&ed.session.root, r, items, how))
+        })
+        .collect();
     let first =
         items.iter().find(|i| i.severity == 1).filter(|_| r.state != crate::task::State::Passed).cloned();
     let label = r.task.name.clone();
     crate::reads::run_ended(ed);
     answer(ed, call, Ok(text));
+    for (c, text) in others {
+        answer(ed, c, Ok(text));
+    }
     if let Some(it) = first {
         crate::follow::point(ed, "failed", label, &it.path, it.line..it.line + 1, Some(it.message));
     }
@@ -1960,15 +2031,15 @@ pub fn run_done(ed: &mut Editor) {
 
 /// A run Claude waited on is gone before it ended (stopped, or another task took its place).
 pub fn run_dropped(ed: &mut Editor, why: &str) {
-    if let Some(call) = ed
-        .session
-        .task_run
-        .as_mut()
-        .filter(|r| r.state == crate::task::State::Running)
-        .and_then(|r| r.chat.take())
-    {
+    let Some(r) = ed.session.task_run.as_mut().filter(|r| r.state == crate::task::State::Running) else {
+        return;
+    };
+    let joined = std::mem::take(&mut r.joined);
+    if let Some(call) = r.chat.take() {
         crate::reads::run_ended(ed);
-        answer(ed, call, Err(format!("the command was stopped — {why}")));
+        for c in std::iter::once(call).chain(joined.into_iter().map(|j| j.call)) {
+            answer(ed, c, Err(format!("the command was stopped — {why}")));
+        }
     }
 }
 
@@ -1981,9 +2052,9 @@ const OUTPUT_TAIL: usize = 150;
 /// Characters per output line, at most (a minified bundle on one line).
 const LINE_MAX: usize = 500;
 
-/// How the command ended as Claude reads it: the verdict, the places it pointed at (from `root`, the
-/// project's), its output.
-fn run_report(root: &Path, r: &crate::task::Run, places: &[crate::quickfix::Item]) -> String {
+/// How the command ended as Claude reads it: the verdict, what it waited on (`waited` — in line, then on
+/// another's lock), the places it pointed at (from `root`, the project's), its output.
+fn run_report(root: &Path, r: &crate::task::Run, places: &[crate::quickfix::Item], waited: Waited) -> String {
     use crate::task::State;
     let took = r.took.map(|d| format!(" in {:.1}s", d.as_secs_f32())).unwrap_or_default();
     let verdict = match r.state {
@@ -1993,8 +2064,9 @@ fn run_report(root: &Path, r: &crate::task::Run, places: &[crate::quickfix::Item
         State::Stopped(ref why) => format!("stopped: {why}"),
         State::Running => "still running".to_string(),
     };
-    // (how much of it waited on what isn't its own — another cargo's lock — `waits.rs`)
-    let waited = r.took.and_then(|t| r.wait.said(t)).map(|w| format!("{w}\n")).unwrap_or_default();
+    // (how long it waited in line, and how much of it on what isn't its own — another cargo's lock —
+    // `waits.rs`)
+    let waited = waited.line(&r.wait, r.took);
     let mut out = format!("{verdict}{took}\n{waited}$ {}\n", r.task.cmd);
     let (errors, warnings) = r.found;
     // Where its places are said as they are (#38): a check's or a build's went to the user's list; any
@@ -2095,8 +2167,9 @@ const NAMES_MAX: usize = 50;
 const TAIL: usize = 80;
 
 /// The results as Claude reads them: the verdict, counts, each failure with where and why — and the
-/// output's tail when the run failed with no failed test to show for it (a build error). Paths from `root`.
-fn report(root: &Path, r: &TestRun) -> String {
+/// output's tail when the run failed with no failed test to show for it (a build error). Paths from `root`;
+/// `waited`: its wait before it ran.
+fn report(root: &Path, r: &TestRun, waited: Waited) -> String {
     let took = r.took.map(|d| format!(" in {:.1}s", d.as_secs_f32())).unwrap_or_default();
     let verdict = match r.state {
         RunState::Passed => "passed".to_string(),
@@ -2105,8 +2178,9 @@ fn report(root: &Path, r: &TestRun) -> String {
         RunState::Running => "still running".to_string(),
         RunState::NoTests => "no tests ran".to_string(),
     };
-    // (how much of it waited on what isn't its own — another cargo's lock — `waits.rs`)
-    let waited = r.took.and_then(|t| r.wait.said(t)).map(|w| format!("{w}\n")).unwrap_or_default();
+    // (how long it waited in line, and how much of it on what isn't its own — another cargo's lock —
+    // `waits.rs`)
+    let waited = waited.line(&r.wait, r.took);
     let mut out = format!(
         "{verdict}{took} — {}\n{waited}$ {}  (in {})\n",
         r.target.label,
@@ -2414,7 +2488,7 @@ mod tests {
         ];
         let mut r = crate::testing::TestRun::finished("term_snapshots::shows", Vec::new(), output);
         r.state = crate::testing::RunState::NoTests;
-        let text = super::report(elsewhere(), &r);
+        let text = super::report(elsewhere(), &r, super::Waited::No);
         assert!(text.starts_with("no tests ran — term_snapshots::shows\n"), "{text}");
         assert!(text.contains("running 0 tests\n"), "the output says why: {text}");
         assert_eq!(super::verdict(&text), "no tests ran");
@@ -3414,13 +3488,13 @@ mod tests {
             (true, "tarae-test: skipped sandbox::tests::real — Seatbelt can't start inside a sandbox".into()),
             (false, "test result: ok. 1 passed".into()),
         ];
-        let text = super::run_report(elsewhere(), &r, &[]);
+        let text = super::run_report(elsewhere(), &r, &[], super::Waited::No);
         assert!(
             text.contains("1 test skipped itself — libtest says ok, but nothing was checked:\n  sandbox::tests::real — Seatbelt"),
             "{text}"
         );
         r.output.retain(|(err, _)| !err);
-        assert!(!super::run_report(elsewhere(), &r, &[]).contains("skipped"));
+        assert!(!super::run_report(elsewhere(), &r, &[], super::Waited::No).contains("skipped"));
     }
 
     /// #38: a run that isn't a check or a build (a grep) leaves the user's list alone (#28) — and its report
@@ -3443,7 +3517,7 @@ mod tests {
             mark: None,
         };
         let places: Vec<_> = [957, 971, 991, 1013, 1044].into_iter().map(hit).collect();
-        let text = super::run_report(elsewhere(), &r, &places);
+        let text = super::run_report(elsewhere(), &r, &places, super::Waited::No);
         assert!(!r.feeds, "a grep isn't a check");
         assert!(!text.contains("user's list (]q)") && !text.contains("error:"), "{text}");
         assert!(
@@ -3471,7 +3545,7 @@ mod tests {
             severity: 1,
             mark: None,
         };
-        let text = super::run_report(elsewhere(), &r, &[place]);
+        let text = super::run_report(elsewhere(), &r, &[place], super::Waited::No);
         assert!(text.starts_with("exit 101\n$ cargo build\n"), "{text}");
         assert!(
             text.contains(
@@ -3488,7 +3562,7 @@ mod tests {
         r.output.truncate(3);
         r.output[0].1 = "line 0".into();
         r.state = State::Passed;
-        let text = super::run_report(elsewhere(), &r, &[]);
+        let text = super::run_report(elsewhere(), &r, &[], super::Waited::No);
         assert!(text.contains("Output:\n") && text.ends_with("line 2\n") && !text.contains("…"), "{text}");
     }
 

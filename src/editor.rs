@@ -5041,8 +5041,8 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// `run_tests` doesn't cut a run short — the user's tests keep going and Claude is told to wait; a file with
-    /// no runner is a tool error Claude can read.
+    /// `run_tests` doesn't cut a run short — the user's tests keep going and Claude's call waits its turn (not
+    /// refused: `queued.rs`); a file with no runner is a tool error Claude can read.
     #[test]
     fn run_tests_waits_its_turn() {
         use serde_json::json;
@@ -5074,8 +5074,9 @@ mod tests {
             },
         };
         ed.test_start(target);
-        let (t, err) = text(call(&mut ed, json!({"path": "src/lib.rs"})));
-        assert!(err && t.contains("already running in the editor (slow)"), "{t}");
+        assert!(call(&mut ed, json!({"path": "src/lib.rs"})).is_none(), "not refused: it waits");
+        let running = ed.session.test_run.as_ref().map(|r| (r.target.label.as_str(), r.state.clone()));
+        assert_eq!(running, Some(("slow", crate::testing::RunState::Running)), "not cut short");
         ed.test_close();
         // Not a test runner's language: found on the worker, answered from there (no chat here → dropped)
         assert!(call(&mut ed, json!({"path": "README.md"})).is_none());
@@ -5541,7 +5542,10 @@ mod tests {
         };
         ed.task_start(task("mine"));
         assert_eq!(printed(&mut ed, "mine"), format!("cdpath={}", dir.display()), "the user's: as it is");
-        assert!(ed.task_start_for(task("claudes"), crate::tools::For::User("t".into()), None));
+        assert!(
+            ed.task_start_for(task("claudes"), crate::tools::For::User("t".into()), None, Default::default())
+                .is_ok()
+        );
         assert_eq!(printed(&mut ed, "claudes"), "cdpath=none");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -6338,8 +6342,8 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A command already running isn't cut short, a turn that ends takes its card away, and one too long to
-    /// show whole isn't put to the user.
+    /// A command already running isn't cut short — Claude's waits its turn (not refused: `queued.rs`) — a turn
+    /// that ends takes its card and what waited away, and one too long to show whole isn't put to the user.
     #[test]
     fn run_waits_its_turn() {
         use serde_json::json;
@@ -6370,17 +6374,16 @@ mod tests {
             cmd: "sleep 5".into(),
             cwd: std::env::temp_dir(),
         });
-        let (t, err) = text(call(&mut ed, "git status"));
-        assert!(err && t.contains("already running in the editor (slow)"), "{t}");
-        let (t, err) = text(call(&mut ed, "git push"));
-        assert!(err && t.contains("already running"), "{t}");
-        assert!(ed.offers.is_empty());
-        ed.task_close();
-        // Asked about, then the turn ends: the card goes
+        assert!(call(&mut ed, "git status").is_none(), "not refused: it waits");
+        assert_eq!(ed.session.runs_next.len(), 1);
+        let running = ed.session.task_run.as_ref().map(|r| (r.task.name.as_str(), r.state.clone()));
+        assert_eq!(running, Some(("slow", crate::task::State::Running)), "not cut short");
+        // Asked about (a card holds no slot), then the turn ends: the card goes, and what waited
         assert!(call(&mut ed, "git push").is_none());
         assert_eq!(ed.offers.len(), 1);
         crate::tools::turn_over(&mut ed);
-        assert!(ed.offers.is_empty());
+        assert!(ed.offers.is_empty() && ed.session.runs_next.is_empty());
+        ed.task_close();
     }
 
     /// Review at the end: a command that runs a file Claude wrote unseen this turn shows that file whole on

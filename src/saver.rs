@@ -226,6 +226,8 @@ impl Editor {
                     if same_file {
                         doc.saved_at(d.version, stamp);
                     }
+                    // (a run under way no longer runs what's there — `queued::join`)
+                    self.wrote(&d.path);
                     match d.then {
                         Then::Command => saved.push(d.id),
                         Then::Auto(w) => {

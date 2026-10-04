@@ -513,7 +513,10 @@ impl Layout {
             Some(Slot::Procs) => procs_panel_h(editor, total),
             Some(Slot::Terminal) => terminal_panel_h(total),
             Some(Slot::Task) => match editor.session.task_run.as_ref() {
-                Some(r) => task_panel_h(r, preflight_of(editor, r).is_some(), total),
+                Some(r) => {
+                    let queued = queued_h(editor, crate::queued::Slot::Task);
+                    task_panel_h(r, preflight_of(editor, r).is_some(), queued, total)
+                }
                 None => 0,
             },
             Some(_) => (total / 3).clamp(8, 15).min(total.saturating_sub(4)),
@@ -1107,14 +1110,15 @@ fn preflight_row(
 /// The fewest rows the task panel takes (its header — title and rule — and two of output).
 const TASK_PANEL_MIN: usize = crate::chrome::HEAD + 2;
 
-/// The task panel's height (U2): its output whole — the header, the lines, the sandbox's row — at least
-/// `TASK_PANEL_MIN`, at most half the editing area (and 4 rows of code always). It never shrinks while the
-/// run is up (`Run.tall`, which a rerun of the same task starts from). (A size you set will win over this —
-/// U1.)
-fn task_panel_h(r: &crate::task::Run, steps: bool, total: usize) -> usize {
+/// The task panel's height (U2): its output whole — the header, the lines, the rows of what waits for it
+/// (`queued`), the sandbox's row — at least `TASK_PANEL_MIN`, at most half the editing area (and 4 rows of
+/// code always). It never shrinks while the run is up (`Run.tall`, which a rerun of the same task starts
+/// from). (A size you set will win over this — U1.)
+fn task_panel_h(r: &crate::task::Run, steps: bool, queued: usize, total: usize) -> usize {
     let running = matches!(r.state, crate::task::State::Running);
     let sandbox = crate::sandbox::panel_line(r.guard.as_ref(), running, r.last_output).is_some();
-    let want = crate::chrome::HEAD + usize::from(steps) + r.output.len().max(1) + usize::from(sandbox);
+    let want =
+        crate::chrome::HEAD + usize::from(steps) + r.output.len().max(1) + queued + usize::from(sandbox);
     let cap = (total / 2).min(total.saturating_sub(4));
     let h = want.max(TASK_PANEL_MIN).max(r.tall.get()).min(cap);
     r.tall.set(r.tall.get().max(h));
@@ -1370,13 +1374,17 @@ fn draw_task_panel(
             x += s.width();
         }
     }
-    // The sandbox's line, when it blocked something: the bottom row, under the output
+    // The sandbox's line, when it blocked something: the bottom row, under the output — and over it, what
+    // waits for the panel, a row each (`queued.rs`)
     let sandbox = crate::sandbox::panel_line(r.guard.as_ref(), running, r.last_output);
-    let rows = lay.debug_h.saturating_sub(top + usize::from(sandbox.is_some()));
+    // (the output keeps a row)
+    let below = lay.debug_h.saturating_sub(top + 1).min(queued_h(editor, crate::queued::Slot::Task));
+    let rows = lay.debug_h.saturating_sub(top + below + usize::from(sandbox.is_some()));
+    draw_queued(out, editor, ui, crate::queued::Slot::Task, (x0, y0 + top + rows), w, below, card)?;
     if let Some((line, quiet)) = &sandbox {
         sandbox_row(
             out,
-            (x0, (y0 + top + rows) as u16),
+            (x0, (y0 + top + rows + below) as u16),
             w,
             line,
             "space m s",
@@ -1387,7 +1395,7 @@ fn draw_task_panel(
         )?;
     }
     // (its end, unless scrolled back; the wheel's thumb when it doesn't fit)
-    editor.screen.task_panel.set(Some((y0, y0 + top - 1 + rows, rows)));
+    editor.screen.task_panel.set(Some((y0, y0 + top - 1 + rows + below, rows)));
     let start = r.top(rows);
     let bar = (r.output.len() > rows).then(|| scroll_thumb(rows, r.output.len(), start));
     for i in 0..rows {
@@ -1470,6 +1478,86 @@ fn sandbox_row(
         if left >= 12 {
             apply(out, faint)?;
             queue!(out, Print(format!("   {}", fit_ellipsis(q, left))))?;
+        }
+    }
+    Ok(())
+}
+
+/// Rows a panel gives what waits in line for it (`queued.rs`), at most — past that the last says how many
+/// more.
+const QUEUED_ROWS: usize = 3;
+
+/// How many rows what waits for `slot` takes in its panel.
+fn queued_h(editor: &Editor, slot: crate::queued::Slot) -> usize {
+    editor.session.runs_next.iter().filter(|n| n.what.slot() == slot).count().min(QUEUED_ROWS)
+}
+
+/// What waits in line for `slot`, in its panel's `n` rows from (`x0`, `y`), `w` wide: a row each, first in
+/// line first — what it is (dim), where it is in line (`queued · 2nd · behind cargo test · 0:12`, faint),
+/// and on the user's own, right-aligned, what `enter` does (`enter run now — stops cargo test`; from the
+/// code `C-w j` first — its row leaves out `behind`, the hint says it). The hint folds away first, then
+/// the label is cut; more than fit → `+2 more queued`.
+#[allow(clippy::too_many_arguments)]
+fn draw_queued(
+    out: &mut impl Write,
+    editor: &Editor,
+    ui: &Ui,
+    slot: crate::queued::Slot,
+    (x0, y): (usize, usize),
+    w: usize,
+    n: usize,
+    card: Style,
+) -> io::Result<()> {
+    use crate::chrome::PAD;
+    if n == 0 {
+        return Ok(());
+    }
+    let dim = Style { fg: ui.virt.fg, ..card };
+    let faint = Style { fg: ui.linenr.fg, ..card };
+    let key = Style { bold: true, ..dim };
+    let rows = crate::queued::rows(&editor.session, slot, std::time::Instant::now());
+    let shown = if rows.len() > n { n - 1 } else { rows.len() };
+    let room = w.saturating_sub(PAD + 2);
+    // (the labels as one column: where each is in line starts under the one above)
+    let label_w = rows.iter().take(shown).map(|r| r.label.width()).max().unwrap_or(0);
+    for i in 0..n {
+        let yy = (y + i) as u16;
+        queue!(out, MoveTo(x0 as u16, yy))?;
+        apply(out, card)?;
+        queue!(out, Spaces(w), MoveTo((x0 + PAD) as u16, yy))?;
+        let Some(r) = rows.get(i).filter(|_| i < shown) else {
+            let more = rows.len() - shown;
+            apply(out, faint)?;
+            queue!(out, Print(fit_ellipsis(&format!("+{more} more queued · :procs lists them"), room)))?;
+            continue;
+        };
+        let hint = match (&r.stops, editor.bottom_focus) {
+            (None, _) => Vec::new(),
+            (Some(s), true) => hint_spans(&[("enter", &format!("run now — stops {s}"))], key, faint),
+            (Some(s), false) => {
+                hint_spans(&[("C-w j", ""), ("enter", &format!("run now — stops {s}"))], key, faint)
+            }
+        };
+        let hint_w: usize = hint.iter().map(|s| s.text.width()).sum();
+        // (the hint names what it waits behind: then the row doesn't — the hint keeps its room while the
+        // label keeps 12, else it folds away and the row says it again)
+        let short = r.said(false).width();
+        let keyed = hint_w > 0 && room > 12 + 3 + short + 3 + hint_w;
+        let said = r.said(!keyed);
+        let label_room = room.saturating_sub(said.width() + 3 + if keyed { hint_w + 3 } else { 0 });
+        let col = label_w.min(label_room.max(8));
+        let label = fit_ellipsis(&r.label, col);
+        apply(out, dim)?;
+        queue!(out, Print(&label), Spaces(col.saturating_sub(label.width())))?;
+        apply(out, faint)?;
+        queue!(out, Print(fit_ellipsis(&format!("   {said}"), room.saturating_sub(col))))?;
+        if keyed {
+            // (ending where the header's keys end)
+            queue!(out, MoveTo((x0 + w - 3 - hint_w) as u16, yy))?;
+            for s in &hint {
+                apply(out, s.style)?;
+                queue!(out, Print(&s.text))?;
+            }
         }
     }
     Ok(())
@@ -1618,8 +1706,11 @@ fn draw_procs_panel<W: Write>(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut 
     let mut hints: Vec<(&str, &str)> = Vec::new();
     if panel.focus {
         let heading = sel.is_some_and(|r| matches!(r.kind, Kind::Session(_)));
-        if sel.is_some_and(|r| !matches!(r.kind, Kind::Tarae | Kind::Held(..) | Kind::Session(_))) {
-            hints.push(("s", "stop"));
+        // (a run waiting in line isn't stopped: it leaves the line)
+        match sel.map(|r| &r.kind) {
+            Some(Kind::Queued(_)) => hints.push(("s", "drop")),
+            Some(Kind::Tarae | Kind::Held(..) | Kind::Session(_)) | None => {}
+            Some(_) => hints.push(("s", "stop")),
         }
         if sel.is_some_and(|r| r.kind.restarts()) {
             hints.push(("r", "restart"));
@@ -1749,6 +1840,7 @@ fn draw_procs_panel<W: Write>(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut 
                 Some(Doing::Working) => Some(("●", Style { fg: ui.accent.fg, ..card })),
                 Some(Doing::Waiting) => Some(("▲", warn)),
                 Some(Doing::Stuck { .. }) => Some(("◦", warn)),
+                Some(Doing::Queued { .. }) => Some(("●", dim)),
                 _ => None,
             };
             let name = glyph.map_or_else(|| r.title.clone(), |(g, _)| format!("{} {g}", r.title));
@@ -1788,6 +1880,8 @@ fn draw_procs_panel<W: Write>(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut 
         );
         let name_st = match () {
             _ if r.flagged => warn,
+            // (not running yet: no process to stand for)
+            _ if matches!(r.kind, Kind::Queued(_)) => dim,
             _ if r.depth == 0 => strong,
             _ => dim,
         };
@@ -1798,6 +1892,7 @@ fn draw_procs_panel<W: Write>(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut 
         let none = || "—".to_string();
         let up_text = match (&r.kind, r.zombie, r.up) {
             (Kind::Held(..), ..) => "held".to_string(),
+            (Kind::Queued(_), ..) => "queued".to_string(),
             (_, true, _) => "ended".to_string(),
             (_, _, Some(d)) => age(d),
             _ => none(),
@@ -1967,14 +2062,18 @@ fn draw_test_panel(
     });
     let body = slot_header(out, editor, ui, lay, card, &summary, &hints)?;
 
-    // The sandbox's line, when it blocked something: the bottom row, under the rest
+    // The sandbox's line, when it blocked something: the bottom row, under the rest — and over it, what waits
+    // for the pane, a row each (`queued.rs`)
     let sandbox = crate::sandbox::panel_line(r.guard.as_ref(), running, r.last_output);
-    let rows = lay.debug_h.saturating_sub(crate::chrome::HEAD + usize::from(sandbox.is_some()));
+    let inner = lay.debug_h.saturating_sub(crate::chrome::HEAD + usize::from(sandbox.is_some()));
+    let below = inner.saturating_sub(2).min(queued_h(editor, crate::queued::Slot::Tests));
+    let rows = inner - below;
     // (for the mouse: the panel from its tabs to its last row)
-    let last = body + rows - usize::from(rows > 0);
+    let last = body + inner - usize::from(inner > 0);
+    draw_queued(out, editor, ui, crate::queued::Slot::Tests, (x0, body + rows), w, below, card)?;
     if let Some((line, quiet)) = &sandbox {
         let warn = color("warning");
-        let at = (x0, (body + rows) as u16);
+        let at = (x0, (body + rows + below) as u16);
         sandbox_row(out, at, w, line, "space x s", quiet.as_deref(), card, warn, faint)?;
     }
     let line_style = |err: bool, l: &str| output_style(err, l, card, good, bad, faint);
@@ -8041,6 +8140,8 @@ fn session_tabs(
         Doing::Waiting => Some(Span { text: " ▲ waits".into(), style: warn }),
         Doing::Done => Some(Span { text: " done".into(), style: accent }),
         d @ Doing::Stuck { .. } => Some(Span { text: format!(" ◦ {}", d.said()), style: warn }),
+        // (at work, held back in line — dim, not the accent's working nor stuck's warning)
+        d @ Doing::Queued { .. } => Some(Span { text: format!(" ● {}", d.said()), style: dim }),
         Doing::Idle => None,
     };
     // A rebase under way there: `rebasing 2/5` — in the warning color once it waits for you

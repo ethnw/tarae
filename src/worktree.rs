@@ -1069,6 +1069,7 @@ pub fn items(sessions: &[Shown]) -> Vec<crate::picker::Item> {
                 (Doing::Waiting, _) => "waits for you".to_string(),
                 (Doing::Done, _) => "done — not looked at".to_string(),
                 (d @ Doing::Stuck { .. }, _) => format!("stuck? {}", d.said()),
+                (d @ Doing::Queued { .. }, _) => format!("working · {}", d.said()),
                 (Doing::Working, _) => "working".to_string(),
                 (Doing::Idle, true) => "here".to_string(),
                 (Doing::Idle, false) => String::new(),
@@ -1107,6 +1108,7 @@ pub fn items(sessions: &[Shown]) -> Vec<crate::picker::Item> {
                 Doing::Working => ("●", "ui.accent"),
                 Doing::Waiting => ("▲", "warning"),
                 Doing::Stuck { .. } => ("◦", "warning"),
+                Doing::Queued { .. } => ("●", "ui.virtual"),
                 Doing::Done | Doing::Idle => (" ", "ui.linenr"),
             };
             crate::picker::Item {

@@ -323,6 +323,14 @@ pub struct TestRun {
     pub wait: crate::waits::Waiting,
     /// Its way from the ask to its end, for the log (`trace.rs`).
     pub trace: crate::trace::RunTrace,
+    /// Claude's run (or the user's run of Claude's again) — the user's own tests wait behind it rather than
+    /// stop it (`queued.rs`).
+    pub by_claude: bool,
+    /// Claude's: its dedupe key (`queued::key_of`), the calls that joined it, its time in line before it
+    /// started.
+    pub key: Option<String>,
+    pub joined: Vec<crate::queued::Joined>,
+    pub queued: Option<crate::queued::Queued>,
 }
 
 impl TestRun {
@@ -388,6 +396,10 @@ impl TestRun {
             last_output: Instant::now(),
             wait: Default::default(),
             trace: crate::trace::RunTrace::new("test run"),
+            by_claude: false,
+            key: None,
+            joined: Vec::new(),
+            queued: None,
         }
     }
 
@@ -574,14 +586,39 @@ impl Editor {
     pub fn test_close(&mut self) {
         crate::tools::tests_dropped(self, "the user closed it");
         self.session.test_run = None;
+        // (the pane is free: what waits for it starts)
+        crate::queued::run_next(self);
     }
 
+    /// The user's tests — Claude's running in the pane aren't stopped: these wait first in line
+    /// (`queued.rs`; `enter` in the pane runs them now).
     pub fn test_start(&mut self, target: Target) {
+        if crate::queued::claudes_running(&self.session, crate::queued::Slot::Tests) {
+            self.session.test_last = Some((target.clone(), false));
+            return crate::queued::push(self, crate::queued::What::Tests(target));
+        }
+        self.test_start_now(target, false);
+    }
+
+    /// The user's tests start — `force`: over Claude's running (they stop); else Claude's that started while
+    /// the saves were written keep the pane, and these wait for them.
+    pub(crate) fn test_start_now(&mut self, target: Target, force: bool) {
         // (its trace from the ask — the saves' time is in it)
         let trace = crate::trace::RunTrace::new(format!("tests: {}", target.label));
         // Save modified files first — tests run the code on disk (started once they're written)
         self.auto_save(" · before test");
-        self.after_saves(move |ed| ed.test_start_guarded(target, None, Some(trace)));
+        self.after_saves(move |ed| {
+            if !force && crate::queued::claudes_running(&ed.session, crate::queued::Slot::Tests) {
+                trace.end("queued behind claude's tests");
+                return crate::queued::again(ed, crate::queued::What::Tests(target));
+            }
+            let before = ed.test_generation;
+            ed.test_start_guarded(target, None, Some(trace));
+            // (it didn't start: the pane goes to what waits for it — Claude's failures say so in `tools::fail`)
+            if ed.test_generation == before {
+                crate::queued::run_next(ed);
+            }
+        });
     }
 
     /// Started now, the saves before it written (`test_start`; Claude's run, `tools::go`): in the sandbox,
@@ -619,6 +656,7 @@ impl Editor {
         let generation = self.test_generation;
         let pid = child.pid;
         self.procs_spawned(pid, "tests", &target.label);
+        crate::queued::started(self, crate::queued::Slot::Tests, &format!("tests {}", target.label));
         let (stdout, stderr) = (child.stdout, child.stderr);
         let tx = self.events.sender();
         // (a line a pack says is a wait — `waits.rs` — is told on the reader's thread)
@@ -729,6 +767,11 @@ impl Editor {
                     RunState::Failed(Some(c)) => format!("failed, exit {c}"),
                     RunState::Failed(None) | RunState::Running => "killed".to_string(),
                 });
+                // (what waits for the pane goes next — once this one's end is told)
+                if !ed.session.runs_next.is_empty() {
+                    let next = crate::event::Event::Job(Box::new(crate::queued::run_next));
+                    let _ = ed.events.sender().send(next);
+                }
                 crate::tools::tests_done(ed);
             };
             let _ = tx.send(crate::event::Event::Job(Box::new(done)));
@@ -753,6 +796,10 @@ impl Editor {
             last_output: Instant::now(),
             wait: Default::default(),
             trace,
+            by_claude: false,
+            key: None,
+            joined: Vec::new(),
+            queued: None,
         });
     }
 

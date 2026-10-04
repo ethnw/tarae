@@ -183,7 +183,7 @@ pub enum Slot {
 
 /// Keys while the bottom slot has them (test and task output, the terminal's scrollback): `j`/`k` a line,
 /// `C-d`/`C-u` half the panel, `g`/`G` the start/end, `tab`/`S-tab` its other tabs; on the terminal `i`
-/// (Enter) types in it; Esc back to
+/// (Enter) types in it, on a task or test panel Enter runs the user's run waiting there now; Esc back to
 /// the code. The space menu, `:`, `[`/`]` and `C-w` stay the editor's; other keys do nothing here (the code
 /// may not be in sight). False = not the slot's.
 pub fn bottom_key(ed: &mut crate::editor::Editor, key: Key) -> bool {
@@ -220,6 +220,13 @@ pub fn bottom_key(ed: &mut crate::editor::Editor, key: Key) -> bool {
                 t.focus = true;
                 ed.bottom_focus = false;
             }
+            return true;
+        }
+        // The user's own run waiting behind Claude's: now, Claude's stopping (`queued.rs`)
+        (Code::Enter, false) => {
+            let which =
+                if slot == Slot::Test { crate::queued::Slot::Tests } else { crate::queued::Slot::Task };
+            crate::queued::run_now(ed, which);
             return true;
         }
         (Code::Char('j') | Code::Down, false) | (Code::Char('e'), true) => 1,

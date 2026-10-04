@@ -147,6 +147,7 @@ fn write(ed: &mut Editor, mut l: Landing, unseen: Vec<FileChange>) {
                 let outcome = match r {
                     Ok(stamp) => {
                         ed.disk_take(&f.path, &f.after, stamp);
+                        ed.wrote(&f.path);
                         Outcome::Written
                     }
                     Err(o) => o,
@@ -290,6 +291,7 @@ pub fn accept_all(ed: &mut Editor, id: u64, generation: u64) {
                     let outcome = match r {
                         Ok(stamp) => {
                             ed.disk_take(&f.path, &f.after, stamp);
+                            ed.wrote(&f.path);
                             Outcome::Accepted
                         }
                         Err(o) => o,

@@ -113,22 +113,42 @@ impl Waiting {
         Some(format!("waiting for {} · {}", hit.said, clock(now.saturating_duration_since(*since))))
     }
 
-    /// Claude's report's line, once the run ended (`took` all told): `Waited 16.0s for cargo's build
-    /// directory lock. Ran 11.0s.` — None when it waited on nothing.
-    pub fn said(&self, took: Duration) -> Option<String> {
-        if self.waited.is_empty() {
-            return None;
+    /// Claude's report's line, once the run ended (`took` all told — from its start): `Waited 16.0s for
+    /// cargo's build directory lock. Ran 11.0s.` — and with its time in line before it started (`queued`: how
+    /// long, behind what — `queued.rs`), `Waited 37.0s — 21.0s queued behind cargo test, 16.0s for cargo's
+    /// build directory lock. Ran 11.0s.` None when it waited on nothing.
+    pub fn said(&self, took: Duration, queued: Option<(Duration, &[String])>) -> Option<String> {
+        let locks: Duration = self.waited.iter().map(|w| w.1).sum();
+        let ran = took.saturating_sub(locks).as_secs_f32();
+        let queued_said = queued.map(|(d, behind)| match behind {
+            [] => format!("{:.1}s queued", d.as_secs_f32()),
+            b => format!("{:.1}s queued behind {}", d.as_secs_f32(), listed(b)),
+        });
+        let each: Vec<String> = queued_said
+            .into_iter()
+            .chain(self.waited.iter().map(|(r, d)| format!("{:.1}s for {r}", d.as_secs_f32())))
+            .collect();
+        let total = locks + queued.map_or(Duration::ZERO, |q| q.0);
+        match &each[..] {
+            [] => None,
+            [one] => Some(format!("Waited {one}. Ran {ran:.1}s.")),
+            all => Some(format!("Waited {:.1}s — {}. Ran {ran:.1}s.", total.as_secs_f32(), all.join(", "))),
         }
-        let total: Duration = self.waited.iter().map(|w| w.1).sum();
-        let each: Vec<String> =
-            self.waited.iter().map(|(r, d)| format!("{:.1}s for {r}", d.as_secs_f32())).collect();
-        Some(format!("Waited {}. Ran {:.1}s.", each.join(" and "), took.saturating_sub(total).as_secs_f32()))
+    }
+}
+
+/// `a` · `a and b` · `a, b and c`.
+fn listed(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
     }
 }
 
 /// `0:37` · `12:05` — a wait's time, minutes and seconds (the seconds always two digits, so it doesn't
 /// slide as it counts).
-fn clock(d: Duration) -> String {
+pub(crate) fn clock(d: Duration) -> String {
     let s = d.as_secs();
     format!("{}:{:02}", s / 60, s % 60)
 }
@@ -163,8 +183,17 @@ mod tests {
         assert!(!w.line(None, at(39), &trace), "the next line ends it");
         assert_eq!(w.shown(at(40)), None);
         assert_eq!(
-            w.said(Duration::from_secs(48)).as_deref(),
+            w.said(Duration::from_secs(48), None).as_deref(),
             Some("Waited 37.0s for cargo's build directory lock. Ran 11.0s.")
+        );
+        // In line before it started too: both said, and their sum
+        let behind = ["cargo test".to_string(), "cargo clippy".to_string()];
+        assert_eq!(
+            w.said(Duration::from_secs(48), Some((Duration::from_secs(21), &behind))).as_deref(),
+            Some(
+                "Waited 58.0s — 21.0s queued behind cargo test and cargo clippy, 37.0s for cargo's build \
+                 directory lock. Ran 11.0s."
+            )
         );
         trace.end("exit 0");
         let line =
@@ -174,7 +203,11 @@ mod tests {
             line.contains("first output 1.0s · ran 1.0s · waited for cargo's lock 37.0s · exit 0"),
             "{line}"
         );
-        // Nothing waited on: nothing said
-        assert_eq!(Waiting::default().said(Duration::from_secs(3)), None);
+        // Nothing waited on: nothing said; only in line, that alone
+        assert_eq!(Waiting::default().said(Duration::from_secs(3), None), None);
+        assert_eq!(
+            Waiting::default().said(Duration::from_secs(11), Some((Duration::from_secs(21), &behind[..1]))),
+            Some("Waited 21.0s queued behind cargo test. Ran 11.0s.".into())
+        );
     }
 }
