@@ -354,6 +354,7 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
         note_card: Default::default(),
         thought_card: Default::default(),
         toast_card: Default::default(),
+        prompt_card: Default::default(),
     };
     editor.refresh_search(focus_lay.text_rows);
     // During `/` preview the screen follows the match, not the cursor
@@ -465,8 +466,8 @@ struct Layout {
     /// The panel columns' height — the side panel's, the chat's: from the screen's first row to the status
     /// line (the card's bar row aside).
     body_h: usize,
+    /// The status line — the screen's last row.
     status_y: u16,
-    cmd_y: u16,
     /// The row a card stepped aside to while its text is read (U8) — over the status line.
     offer_bar: Option<u16>,
     /// What fills the screen (`C-w z`) — the rest gets no room.
@@ -500,7 +501,8 @@ impl Layout {
             true => 1,
             false => 0,
         };
-        let all = (h as usize).saturating_sub(2 + text_top as usize).max(1);
+        // (the status line is the last row — no command row: a prompt is a card standing on it)
+        let all = (h as usize).saturating_sub(1 + text_top as usize).max(1);
         // A card stepped aside to a bar while its text is read (U8): the row over the status line is its
         let bar = usize::from(editor.offer_bar() && all > 6);
         let total = all - bar;
@@ -573,7 +575,6 @@ impl Layout {
             slot_w: edit_w - rail_w,
             body_h: text_top as usize + total,
             status_y: text_top + all as u16,
-            cmd_y: text_top + all as u16 + 1,
             offer_bar: (bar == 1).then_some(text_top + total as u16),
             zoom,
         }
@@ -2880,12 +2881,12 @@ fn draw(
         })
         .flatten();
     draw_statusline(editor, ui, lay, folded, out)?;
-    let completion = editor.cmdline_completion();
-    draw_cmdline_menu(editor, completion.as_ref(), ui, lay, out)?;
-    let prompt_cursor = draw_cmdline(editor, completion.as_ref(), ui, lay, out)?
-        .or(picker_cursor)
-        .or(chat_cursor)
-        .or(terminal_cursor);
+    // A prompt (`:`, `/`, `select:` …) is a card standing on the status line, its menu in it
+    let prompt_cursor = match &editor.prompt {
+        Some(p) => Some(draw_prompt(editor, p, editor.cmdline_completion().as_ref(), ui, lay, out)?),
+        None => None,
+    };
+    let prompt_cursor = prompt_cursor.or(picker_cursor).or(chat_cursor).or(terminal_cursor);
     // Every card's edges sit on what's drawn under them — no strip of ground between a card and the code,
     // a panel or a wash it floats over
     // (seated as the frame is read for the terminal — `Screen::present`)
@@ -5648,6 +5649,8 @@ fn draw_statusline(
         }
         None => left.push(Seg { text: format!(" {} ", &mode[..3]), style: ui.status_mode, keep: 255 }),
     }
+    // (a floating list's keys go right after the pill — laid in at the end, once the room is known)
+    let hints_at = left.len();
     // The session in front, when there's more than one and the chat (whose top row has them all) isn't
     // up: its name — a click opens the list — and how many others wait for you
     let chip = !editor.sessions.is_empty() && lay.chat_w == 0;
@@ -5854,7 +5857,37 @@ fn draw_statusline(
     }
     // The column two cells at least: the right side is right-aligned, and `l`/`w` crossing column 10 would
     // slide everything left of it back and forth (the line number changes digits far less often)
-    right.push(Seg { text: format!("{}:{:<2} ", line + 1, col), style: strong, keep: 250 });
+    let at = format!("{}:{:<2} ", line + 1, col);
+    // Keys pending (a count, `g`, `space w` …) in its place, as wide, in the typed keys' accent
+    let pending = editor.pending_display();
+    right.push(match pending.is_empty() {
+        true => Seg { text: at, style: strong, keep: 250 },
+        false => Seg {
+            text: pad_left(&format!("{pending} "), at.width()),
+            style: Style { fg: ui.accent.fg, bold: true, ..ui.status },
+            keep: 250,
+        },
+    });
+    // What a floating list or the docs take as keys (`enter open  esc close`): after the pill, before all but
+    // the pill and the position — whole pairs, as many as fit beside those
+    if let Some(pairs) = key_hints(editor) {
+        let fixed: usize =
+            left.iter().chain(&right).filter(|s| s.keep > HINTS).map(|s| s.text.width()).sum::<usize>() + 2;
+        let key = Style { fg: ui.virt.fg, bold: true, ..ui.status };
+        let what = Style { fg: ui.linenr.fg, ..ui.status };
+        let mut room = lay.width.saturating_sub(fixed);
+        let mut segs = Vec::new();
+        for (k, d) in &pairs {
+            let w = 2 + k.width() + 1 + d.width();
+            if w > room {
+                break;
+            }
+            room -= w;
+            segs.push(Seg { text: format!("  {k}"), style: key, keep: HINTS });
+            segs.push(Seg { text: format!(" {d}"), style: what, keep: HINTS });
+        }
+        left.splice(hints_at..hints_at, segs);
+    }
 
     fit_segments(&mut left, &mut right, lay.width);
     queue!(out, MoveTo(0, lay.status_y))?;
@@ -5890,8 +5923,12 @@ fn draw_statusline(
 }
 
 /// The status line's session chip — its segments are told apart by this `keep` (it outlasts all but the
-/// mode and the position).
+/// mode, the position and a floating list's keys).
 const CHIP: u8 = 235;
+
+/// The status line's `keep` for a floating list's keys (`key_hints`): only the mode and the position outlast
+/// them — and they're cut to fit beside those, whole pairs, so none is ever dropped half.
+const HINTS: u8 = 249;
 
 /// Completion list — below the word so the name column lines up with the typed word (above if no room).
 ///
@@ -6265,15 +6302,15 @@ fn toast_color(editor: &Editor, ui: &Ui, kind: crate::editor::ToastKind) -> Opti
     }
 }
 
-/// The notification card's row: the top of the editing rows `[top, bottom)`, else their bottom (a row above
-/// the end), wherever it overlaps none of `taken` — None if neither is free.
+/// The notification card's row: the top of the editing rows `[top, bottom)`, else their bottom (its lower edge
+/// the half row of air over what's below), wherever it overlaps none of `taken` — None if neither is free.
 fn toast_place(
     (x, w, h): (usize, usize, usize),
     (top, bottom): (usize, usize),
     taken: &[Rect4],
 ) -> Option<usize> {
     let free = |y: usize| y >= top && y + h <= bottom && taken.iter().all(|&r| !overlaps((x, y, w, h), r));
-    [top, bottom.saturating_sub(h + 1)].into_iter().find(|&y| free(y))
+    [top, bottom.saturating_sub(h)].into_iter().find(|&y| free(y))
 }
 
 /// Older messages a card shows under the newest (one row each) — more are counted.
@@ -6678,7 +6715,7 @@ impl OfferCard {
         let has_buttons = !labels.is_empty();
         // Taller than the room: the body cut to fit, its last row saying how much is left (`v` views it all);
         // the buttons stay (#14: an 88-line card wasn't drawn at all, so it couldn't be answered)
-        let room = lay.text_rows.saturating_sub(if has_buttons { 2 } else { 0 } + 2 * pad + 1);
+        let room = lay.text_rows.saturating_sub(if has_buttons { 2 } else { 0 } + 2 * pad);
         let mut cut = 0;
         // (the cut row's forms all fit: the card keeps its width as it says another)
         let mut cut_floor = 0;
@@ -6731,7 +6768,8 @@ impl OfferCard {
         let h = lines.len() + if has_buttons { 2 } else { 0 } + 2 * pad;
         let top = lay.text_top as usize;
         let bottom = top + lay.text_rows;
-        let y = bottom.checked_sub(h + 1)?.max(top);
+        // (its bottom edge is the half row of air over what's below — the slot, the status line)
+        let y = bottom.checked_sub(h)?.max(top);
         let x = lay.edit_w.saturating_sub(width + 1 + usize::from(lay.scrollbar));
         // Back cards: one row each above the front card (as room allows, max three — beyond that "1/N" tells)
         let room = y.saturating_sub(top + pad);
@@ -9771,18 +9809,7 @@ fn diagnostic_source(raw: &serde_json::Value) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(" "))
 }
 
-fn cursor_diagnostic(editor: &Editor) -> Option<&crate::lsp::Diagnostic> {
-    let doc = editor.doc();
-    let head = doc.selection().primary().cursor(&doc.text);
-    let line = mv::line_of(&doc.text, head);
-    let list = &doc.lsp.diagnostics;
-    list.iter()
-        .filter(|d| d.from <= head && head <= d.to)
-        .min_by_key(|d| d.severity)
-        .or_else(|| list.iter().filter(|d| mv::line_of(&doc.text, d.from) == line).min_by_key(|d| d.severity))
-}
-
-/// Keys for whatever is floating now (shown dimmed when the command line is empty).
+/// Keys for whatever is floating now — a list, the docs — on the status line after its pill.
 fn key_hints(editor: &Editor) -> Option<Vec<(&'static str, String)>> {
     let replace_list = |p: &Picker| p.current().is_some_and(|i| matches!(i.action, Action::ReplaceFile(_)));
     let hints = |h: &[(&'static str, &str)]| Some(h.iter().map(|&(k, d)| (k, d.to_string())).collect());
@@ -9834,55 +9861,75 @@ fn key_hints(editor: &Editor) -> Option<Vec<(&'static str, String)>> {
     }
 }
 
-/// Command line row. Returns the prompt's cursor position while typing.
-/// `:` completion list — a card attached just above the statusline, first cell at the word being completed.
-/// One row = [bar][name (typed chars highlighted, folders in accent)][   description·aliases dimmed][scroll].
-fn draw_cmdline_menu(
+/// A prompt (`:`, `/`, `?`, `select:`, `rename:` …) — a card standing on the status line, its lower edge the
+/// half row of air over it, a cell in from the code's left and inside the code's columns (the screen's when
+/// no code is drawn): the input on its last row, the `:` menu above it in the same card — names under the
+/// word being completed, typed letters in the accent, folders in the directory colour, a scroll thumb past
+/// `ROWS`. The status line stays in sight under it. Returns the cursor.
+///
+/// ```text
+///  ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+///    task         Run a build task (by name; …)
+///  ▎ write-all    Save every modified file  · wa
+///
+///   :ta▏sk
+///  ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+/// ```
+fn draw_prompt(
     editor: &Editor,
+    p: &crate::editor::Prompt,
     completion: Option<&crate::cmdline::Completion>,
     ui: &Ui,
     lay: &Layout,
     out: &mut impl Write,
-) -> io::Result<()> {
+) -> io::Result<(u16, u16)> {
     const ROWS: usize = 8;
     const LABEL_MAX: usize = 30;
     const HINT_MAX: usize = 60;
-    let Some(p) = editor.prompt.as_ref() else { return Ok(()) };
-    let Some(c) = completion else { return Ok(()) };
-    let n = c.cands.len();
+    // (its inside's width at least: a short `:w` doesn't make a sliver)
+    const MIN: usize = 44;
     let t = &editor.theme;
+    let head = prompt_head(p);
+    let code_w = lay.edit_w.saturating_sub(lay.rail_w + usize::from(lay.scrollbar));
+    let (ax, aw) = if lay.code_hidden() { (0, lay.width) } else { (lay.rail_w, code_w) };
+    let x0 = ax + 1;
     let card = card_style(ui, editor, "ui.menu");
     let pad = card_padding(ui, card);
-    let status_y = lay.cmd_y as usize - 1;
-    let rows = n.min(ROWS).min(status_y.saturating_sub(lay.text_top as usize + 2 * pad));
-    if rows == 0 {
-        return Ok(());
-    }
+    let cands = completion.map_or(&[][..], |c| &c.cands[..]);
+    // (the menu: as many rows as there's room for over the input and its blank row)
+    let over = (lay.status_y as usize).saturating_sub(lay.text_top as usize + 2 * pad + 2);
+    let rows = cands.len().min(ROWS).min(over);
     let selected_i = p.cycle.as_ref().map(|(_, i)| *i);
-    let first = selected_i.map_or(0, |s| s.saturating_sub(rows - 1));
+    let first = selected_i.map_or(0, |s| s.saturating_sub(rows.saturating_sub(1)));
     let visible = first..first + rows;
-    let label_w = visible.clone().map(|i| c.cands[i].label.width()).max().unwrap_or(0).min(LABEL_MAX);
-    let hint_w = visible.clone().map(|i| c.cands[i].hint.width()).max().unwrap_or(0).min(HINT_MAX);
-    let scroll = n > rows;
-    let width = (2 + label_w + if hint_w > 0 { 3 + hint_w } else { 0 } + 2).min(lay.width);
-    // Column of the word being completed: prompt head (`:`) + text before the word
+    let label_w = visible.clone().map(|i| cands[i].label.width()).max().unwrap_or(0).min(LABEL_MAX);
+    let hint_w = visible.clone().map(|i| cands[i].hint.width()).max().unwrap_or(0).min(HINT_MAX);
+    let menu_w = if rows > 0 { label_w + if hint_w > 0 { 3 + hint_w } else { 0 } } else { 0 };
+    // Column of the word being completed: the prompt's head (`:`) + the text before the word
     let base = p.cycle.as_ref().map_or(p.text.as_str(), |(b, _)| b.as_str());
-    let col = prompt_head(p).width() + base[..c.start.min(base.len())].width();
-    let x0 = col.saturating_sub(2).min(lay.width.saturating_sub(width));
-    let h = rows + 2 * pad;
-    let y0 = status_y - h;
+    let col = completion.map_or(0, |c| head.width() + base[..c.start.min(base.len())].width());
+    // (a cell each side of it, its padding inside)
+    let room = aw.saturating_sub(2 + 4).max(1);
+    let inner = (col + menu_w).max(head.width() + p.text.width() + 1).max(MIN).min(room);
+    let indent = col.min(inner.saturating_sub(menu_w));
+    let width = inner + 4;
+    let h = rows + usize::from(rows > 0) + 1 + 2 * pad;
+    let y0 = (lay.status_y as usize).saturating_sub(h);
+    editor.screen.prompt_card.set(Some((x0, y0, width, h)));
     let card = card_at(ui, editor, "ui.menu", lay, (x0, y0, width, h));
     let selected = selected_row(ui, editor, card);
     let matched = Style { fg: ui.accent.fg, bold: true, ..Style::default() };
     let dir_fg = t.try_get("ui.text.directory").and_then(|s| s.fg).or(ui.accent.fg);
     card_edge(out, ui, card, x0, y0, width, pad, true)?;
-    let thumb = scroll_thumb(rows, n, first);
-    for row in 0..rows {
-        let i = first + row;
-        let cand = &c.cands[i];
+    let thumb = scroll_thumb(rows.max(1), cands.len().max(1), first);
+    let mut y = y0 + pad;
+    for (row, i) in visible.enumerate() {
+        let cand = &cands[i];
         let is_sel = selected_i == Some(i);
         let base_st = if is_sel { selected } else { card };
-        queue!(out, MoveTo(x0 as u16, (y0 + pad + row) as u16))?;
+        queue!(out, MoveTo(x0 as u16, y as u16))?;
+        apply(out, card)?;
+        queue!(out, Spaces(indent))?;
         apply(out, if is_sel { Style { fg: ui.accent.fg, ..base_st } } else { base_st })?;
         queue!(out, Print(if is_sel { "▎ " } else { "  " }))?;
         let name =
@@ -9892,7 +9939,7 @@ fn draw_cmdline_menu(
         print_matched(out, &label, &cand.hits, name, matched, label_w)?;
         apply(out, base_st)?;
         queue!(out, Spaces(label_w - label.width()))?;
-        let mut used = 2 + label_w;
+        let mut used = indent + 2 + label_w;
         if hint_w > 0 {
             let hnt = fit_ellipsis(&cand.hint, hint_w);
             apply(out, Style { fg: ui.virt.fg, ..base_st })?;
@@ -9901,84 +9948,52 @@ fn draw_cmdline_menu(
         }
         apply(out, base_st)?;
         queue!(out, Spaces(width.saturating_sub(used + 1)))?;
-        if scroll && thumb.contains(&row) {
+        if cands.len() > rows && thumb.contains(&row) {
             apply(out, Style { fg: ui.linenr.fg, ..card })?;
             queue!(out, Print("▐"))?;
         } else {
             apply(out, card)?;
             queue!(out, Print(" "))?;
         }
+        y += 1;
     }
-    card_edge(out, ui, card, x0, y0 + pad + rows, width, pad, false)
+    if rows > 0 {
+        queue!(out, MoveTo(x0 as u16, y as u16))?;
+        apply(out, card)?;
+        queue!(out, Spaces(width))?;
+        y += 1;
+    }
+    // The input — a long one keeps its end in sight (that's where the cursor is), the rest of the first
+    // candidate dimmed after it (→ takes it)
+    queue!(out, MoveTo(x0 as u16, y as u16))?;
+    apply(out, card)?;
+    queue!(out, Print("  "))?;
+    let text = fit_left(&p.text, inner.saturating_sub(head.width() + 1));
+    apply(out, if head.width() > 1 { Style { fg: ui.virt.fg, ..card } } else { card })?;
+    queue!(out, Print(&head))?;
+    apply(out, card)?;
+    queue!(out, Print(&text))?;
+    let mut used = head.width() + text.width();
+    let cursor = ((x0 + 2 + used) as u16, y as u16);
+    if let Some(c) = completion.filter(|_| p.cycle.is_none())
+        && let Some(g) = crate::cmdline::ghost(&p.text, c)
+    {
+        let g = fit(g, inner.saturating_sub(used));
+        apply(out, Style { fg: ui.linenr.fg, ..card })?;
+        queue!(out, Print(&g))?;
+        used += g.width();
+    }
+    apply(out, card)?;
+    queue!(out, Spaces(inner.saturating_sub(used) + 2))?;
+    card_edge(out, ui, card, x0, y + 1, width, pad, false)?;
+    Ok(cursor)
 }
 
-/// What the command line starts with: `:` `/` `?` as they are (the input's own first character); a word
-/// (`grep:`, `rename:`) says what the line is for — drawn dim, a space before the input.
+/// What a prompt's input starts with: `:` `/` `?` as they are (the input's own first character); a word
+/// (`grep:`, `rename:`) says what it's for — drawn dim, a space before the input.
 fn prompt_head(p: &crate::editor::Prompt) -> String {
     let label = p.label.as_deref().unwrap_or(p.kind.label());
     if label.len() > 1 { format!("{label} ") } else { label.to_string() }
-}
-
-fn draw_cmdline(
-    editor: &Editor,
-    completion: Option<&crate::cmdline::Completion>,
-    ui: &Ui,
-    lay: &Layout,
-    out: &mut impl Write,
-) -> io::Result<Option<(u16, u16)>> {
-    queue!(out, MoveTo(0, lay.cmd_y))?;
-    clear_rest(out, ui.base)?;
-    if let Some(prompt) = &editor.prompt {
-        let head = prompt_head(prompt);
-        // A long input keeps its end in sight — that's where the cursor is
-        let text = fit_left(&prompt.text, lay.width.saturating_sub(head.width() + 1));
-        let word = head.width() > 1;
-        apply(out, if word { Style { fg: ui.virt.fg, ..ui.base } } else { ui.base })?;
-        queue!(out, Print(&head))?;
-        apply(out, ui.base)?;
-        queue!(out, Print(&text))?;
-        let shown = format!("{head}{text}");
-        // Rest of the first candidate dimmed after the cursor (accept with →)
-        if let Some(c) = completion.filter(|_| prompt.cycle.is_none())
-            && let Some(g) = crate::cmdline::ghost(&prompt.text, c)
-        {
-            apply(out, Style { fg: ui.linenr.fg, ..ui.base })?;
-            queue!(out, Print(fit(g, lay.width.saturating_sub(shown.width() + 1))))?;
-            apply(out, ui.base)?;
-        }
-        return Ok(Some((shown.width() as u16, lay.cmd_y)));
-    }
-    let pending = editor.pending_display();
-    let room = lay.width.saturating_sub(pending.width() + 1);
-    // Status messages go to top-right toasts — the command line has only input, key hints, cursor diagnostics
-    if let Some(hints) = key_hints(editor) {
-        // If something is floating, show its keys: keys crisp, descriptions dimmed
-        let key = Style { fg: ui.virt.fg, bold: true, ..ui.base };
-        let desc = Style { fg: ui.linenr.fg, ..ui.base };
-        let mut used = 0;
-        for (k, d) in hints {
-            let w = k.width() + d.width() + 4;
-            if used + w > room {
-                break;
-            }
-            apply(out, key)?;
-            queue!(out, Print(" "), Print(k))?;
-            apply(out, desc)?;
-            queue!(out, Print(" "), Print(d), Print("  "))?;
-            used += w;
-        }
-        apply(out, ui.base)?;
-    } else if let Some(d) = cursor_diagnostic(editor) {
-        // If the cursor is on a diagnostic (else that line), show its message
-        let msg = format!("● {}", d.message.lines().next().unwrap_or_default());
-        apply(out, ui.base.patch(ui.sign[d.severity as usize]))?;
-        queue!(out, Print(fit_ellipsis(&msg, room)))?;
-        apply(out, ui.base)?;
-    }
-    if !pending.is_empty() {
-        queue!(out, MoveTo(lay.width.saturating_sub(pending.width()) as u16, lay.cmd_y), Print(&pending))?;
-    }
-    Ok(None)
 }
 
 #[cfg(test)]
@@ -10023,10 +10038,88 @@ mod tests {
         let rows = (1, 29);
         assert_eq!(toast_place(card, rows, &[]), Some(1));
         let thought = (50, 2, 40, 8);
-        assert_eq!(toast_place(card, rows, &[thought]), Some(24), "under the thought card: the bottom");
+        // (its last row, the lower edge, is the editing rows' last: the half row of air)
+        assert_eq!(toast_place(card, rows, &[thought]), Some(25), "under the thought card: the bottom");
         let mini = (58, 20, 36, 8);
         assert_eq!(toast_place(card, rows, &[thought, mini]), None, "no room left");
         assert_eq!(toast_place(card, rows, &[(0, 2, 20, 8)]), Some(1), "a card elsewhere doesn't matter");
+    }
+
+    /// No command row: the status line is the screen's last row, and a prompt is a card standing on it — its
+    /// lower edge the half row over the status line (still in sight under it), the input on its last row with
+    /// the cursor, the `:` menu above in the same card. A click on the card isn't the code's under it.
+    #[test]
+    fn a_prompt_is_a_card_standing_on_the_status_line() {
+        let mut ed = Editor::new(Config::default());
+        ed.docs[0].text = Rope::from_str(&"some code here\n".repeat(40));
+        let (w, h) = (100, 30);
+        let draw = |ed: &mut Editor| {
+            let mut buf = Vec::new();
+            render(ed, &mut buf, w, h).unwrap();
+            let mut vt = vt100::Parser::new(h, w, 0);
+            vt.process(&buf);
+            let rows: Vec<String> = vt.screen().rows(0, w).collect();
+            (rows, vt.screen().cursor_position())
+        };
+        let (rows, _) = draw(&mut ed);
+        assert!(rows[29].contains("NORMAL") && rows[28].contains("some code"), "the code to the status line");
+        for k in [":", "w", "r"] {
+            ed.handle_key(k.parse().unwrap());
+        }
+        let (rows, cursor) = draw(&mut ed);
+        assert!(rows[29].contains("NORMAL"), "the status line stays in sight: {:?}", rows[29]);
+        assert!(rows[28].trim().chars().all(|c| c == '▀'), "the card's edge over it: {:?}", rows[28]);
+        assert!(rows[27].trim_start().starts_with(":wr"), "the input on its last row: {:?}", rows[27]);
+        assert_eq!(cursor, (27, rows[27].find(":wr").unwrap() as u16 + 3), "the cursor after what's typed");
+        let menu = rows.iter().position(|r| r.contains("write-quit")).expect("the menu");
+        assert!(menu < 27 && rows[26].trim().is_empty(), "the menu above, a blank row before the input");
+        // A click on it doesn't move the code's cursor (the code is under it)
+        let (x, y, ..) = ed.screen.prompt_card.get().expect("its rect");
+        let before = ed.doc().selection().primary();
+        let at = crate::event::Mouse {
+            kind: crate::event::MouseKind::Down,
+            x: x as u16 + 3,
+            y: y as u16 + 2,
+            alt: false,
+        };
+        ed.handle_mouse(at);
+        assert_eq!(ed.doc().selection().primary(), before);
+        assert!(ed.prompt.is_some(), "still typing");
+        // Gone with the prompt: the code under it again
+        ed.handle_key("esc".parse().unwrap());
+        let (rows, _) = draw(&mut ed);
+        assert!(rows[27].contains("some code") && ed.screen.prompt_card.get().is_none());
+    }
+
+    /// What used to sit under the status line is in it: a list's keys after the pill (whole pairs, as many
+    /// as fit beside the pill and the position), keys pending in the position's place until they're done.
+    #[test]
+    fn the_status_line_says_a_lists_keys_and_the_keys_pending() {
+        let mut ed = Editor::new(Config::default());
+        ed.docs[0].text = Rope::from_str("one\ntwo\n");
+        let status = |ed: &mut Editor, w: u16| {
+            let mut buf = Vec::new();
+            render(ed, &mut buf, w, 20).unwrap();
+            screen(&buf, w as usize, 20)[19].trim_end().to_string()
+        };
+        assert!(status(&mut ed, 100).ends_with("1:1"), "{}", status(&mut ed, 100));
+        // Keys pending: in the position's place, as wide (nothing to the left of it moves)
+        ed.handle_key("g".parse().unwrap());
+        let s = status(&mut ed, 100);
+        assert!(s.ends_with(" g") && !s.contains("1:1"), "{s}");
+        ed.handle_key("esc".parse().unwrap());
+        assert!(status(&mut ed, 100).ends_with("1:1"));
+        // A list with keys of its own: after the pill
+        ed.handle_key("space".parse().unwrap());
+        ed.handle_key("b".parse().unwrap());
+        assert!(ed.picker.is_some(), "the buffers");
+        let s = status(&mut ed, 100);
+        assert!(s.contains("PICKER ▌  enter open  C-x close the buffer"), "{s}");
+        assert!(s.ends_with("1:1"), "the position kept: {s}");
+        // Narrow: whole pairs only, the position kept
+        let s = status(&mut ed, 40);
+        assert!(s.ends_with("1:1") && s.contains("enter open"), "{s}");
+        assert!(!s.contains("C-x") || s.contains("C-x close the buffer"), "no pair cut in half: {s}");
     }
 
     /// A card's setting too long for a row goes on hanging under it — 4 cells in from where the setting
@@ -10083,7 +10176,8 @@ mod tests {
         ed.set_status("Saved notes");
         let s = draw(&mut ed);
         assert!(ed.screen.toast_card.get().is_none(), "no card over a picker");
-        let status = s.lines().nth(28).unwrap_or_default();
+        // (the status line: the screen's last row)
+        let status = s.lines().nth(29).unwrap_or_default();
         assert!(status.contains("demo.rs changed on disk"), "the warning, not the routine one: {status}");
         // A long while under the picker: the routine message has had its time, the warning hasn't
         let long_ago = Instant::now() - Duration::from_secs(60);
@@ -10443,7 +10537,7 @@ mod tests {
         ed.config.soft_wrap = "never".into();
         let text: String = (0..100).map(|i| format!("line {i}\n")).collect();
         ed.docs[0].text = Rope::from_str(&text);
-        let (w, h) = (30, 21); // 17 text rows (under the path bar and its rule), scrolloff 5
+        let (w, h) = (30, 20); // 17 text rows (under the path bar and its rule, over the status line), scrolloff 5
         let keys = |ed: &mut Editor, ks: &str| {
             for k in ks.split(' ') {
                 ed.handle_key(k.parse().unwrap());

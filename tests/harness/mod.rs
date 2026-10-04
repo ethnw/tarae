@@ -282,9 +282,9 @@ impl Screen {
         self.rows.iter().any(|r| r.contains(s))
     }
 
-    /// The status line (one above the command line at the bottom).
+    /// The status line — the screen's last row (a prompt is a card standing on it).
     pub fn status(&self) -> &str {
-        &self.rows[self.rows.len().saturating_sub(2)]
+        &self.rows[self.rows.len().saturating_sub(1)]
     }
 }
 

@@ -20,10 +20,10 @@
 17                                ▌ 15     let counts = word_counts(text);
 18                                ▌ 16     println!("{} distinct words", counts.len()); // 타래
 19                                ▌ 17 }
-20   s u stage  d discard  ?      ▌
-21   c commit  C Claude drafts    ▌
-22  ▐ GIT ▌                                                                                 rust   utf-8 LF   1:1
-23
+20                                ▌
+21   s u stage  d discard  ?      ▌
+22   c commit  C Claude drafts    ▌
+23  ▐ GIT ▌                                                                                 rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00 ppppppppppppppppppppppppppppppp
 01 ppppppppppppppppppppppppppppppp
@@ -47,8 +47,8 @@
 19 ppppppppppppppppppppppppppppppp
 20 ppppppppppppppppppppppppppppppp
 21 ppppppppppppppppppppppppppppppp
-22   AAAAA
-23
+22 ppppppppppppppppppppppppppppppp
+23   AAAAA
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00   fffff  fffffff  TTT            ddddd  f  ddd  f  TTTTTTT
 01   aaaaaaaaaaaaaaaaaaaaaaaaaaaa   ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
@@ -70,10 +70,10 @@
 17                                  ff
 18                                  ff              ggg gggggggg gggggg
 19                                  ff
-20   D D fffff  D fffffff  D
-21   D ffffff  D ffffff ffffff
-22  a BBB a                                                                                 dddd   ddddd dd   TTT
-23
+20
+21   D D fffff  D fffffff  D
+22   D ffffff  D ffffff ffffff
+23  a BBB a                                                                                 dddd   ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary  p=ui.popup  P=ui.menu.selected  A=ui.cursor.primary  1=other
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  e=error  w=warning  g=diff.plus  B=bold

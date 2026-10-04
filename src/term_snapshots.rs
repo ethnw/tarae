@@ -1130,8 +1130,9 @@ fn a_note_card_stays_in_its_pane() {
     inside(&mut s, "split");
 }
 
-/// A card over a panel — the `:` menu over the side panel, both `ui.popup` — is a tone up from it, so it
-/// stands apart from the panel as it does from the ground, in the light theme too.
+/// A card over a panel — the prompt's card standing on the status line over the task panel in the bottom
+/// slot, both `ui.popup`-coloured — is a tone up from it, so it stands apart from the panel as it does from
+/// the ground, in the light theme too.
 #[test]
 fn a_card_over_a_panel_stands_apart_from_it() {
     for light in [false, true] {
@@ -1139,27 +1140,23 @@ fn a_card_over_a_panel_stands_apart_from_it() {
         if light {
             s.ed.theme = crate::theme::load("hanji").unwrap();
         }
-        let root = s.in_project();
         s.file("src/demo.rs", DEMO_RS);
-        let rels = ["Cargo.toml", "README.md", "src/demo.rs"].map(String::from).to_vec();
-        let mut sb = crate::sidebar::Sidebar::with_files(root, rels);
-        sb.focus = false;
-        s.ed.session.sidebar = Some(sb);
+        let cwd = std::env::current_dir().unwrap();
+        s.ed.task_start(crate::task::Task { name: "check".into(), cmd: "echo done".into(), cwd });
+        s.until("task", |ed| ed.session.task_run.as_ref().is_some_and(|r| r.took.is_some()));
+        s.ed.toasts.clear();
         s.keys(":w");
         let (ground, surface, _) = chrome_colors(&s.ed);
         let p = cells(&s.frame(), s.w, s.h);
         let rows: Vec<String> = p.screen().rows(0, s.w).collect();
-        let y = rows.iter().rposition(|r| r.contains("write-all")).expect("the menu");
+        let y = rows.iter().rposition(|r| r.contains(":w")).expect("the prompt");
+        let slot = s.ed.screen.text_top + s.ed.screen.body_h - s.ed.screen.bottom_h;
+        assert!(s.ed.screen.bottom_h > 0 && y >= slot, "the task panel is up, the prompt over it");
         let bg = |x: usize| p.screen().cell(y as u16, x as u16).unwrap().bgcolor();
-        let (over_side, side_w) = (bg(1), s.ed.screen.side_w);
-        assert!(side_w > 2, "the side panel is up");
-        assert!(
-            over_side != surface && over_side != ground,
-            "light {light}: the menu over the panel {over_side:?}"
-        );
-        // (beside the panel, under the code's rows, the panel's own surface is still there)
-        let panel = p.screen().cell(2, 1).unwrap().bgcolor();
-        assert_eq!(panel, surface, "light {light}: the panel");
+        let x = s.ed.screen.prompt_card.get().expect("the prompt's card").0 + 1;
+        assert!(bg(x) != surface && bg(x) != ground, "light {light}: the card over the panel {:?}", bg(x));
+        // (beside the card, the panel's own surface is still there)
+        assert_eq!(bg(s.w as usize - 3), surface, "light {light}: the panel");
     }
 }
 
@@ -1869,10 +1866,12 @@ fn snapshot_terminal_panel() {
         })
     });
     s.check("terminal_panel");
-    // A drag over its first line (screen row 16, under the slot's tabs and rule; its text starts at the
+    // A drag over its first line (the screen row under the slot's tabs and rule; its text starts at the
     // padding, two columns in): selected on the selection's color, copied on release
+    let first = s.ed.screen.terminal_rows.expect("the terminal's rows").0 + crate::chrome::HEAD;
+    let y = first as u16;
     let mouse = |s: &mut Shot, kind, x| {
-        s.ed.handle_event(Event::Mouse(crate::event::Mouse { kind, x, y: 16, alt: false }));
+        s.ed.handle_event(Event::Mouse(crate::event::Mouse { kind, x, y, alt: false }));
         s.frame()
     };
     use crate::event::MouseKind as K;
@@ -1882,7 +1881,7 @@ fn snapshot_terminal_panel() {
     assert_eq!(s.ed.session.terminal.as_ref().unwrap().selected_text(), "$ cargo test");
     assert!(s.ed.toasts.iter().any(|t| t.text == "copied 12 characters"));
     let shot = snapshot(&s.ed, "t", &bytes, s.w, s.h);
-    let bg_row = shot.lines().skip_while(|l| !l.starts_with("## bg")).nth(17).unwrap();
+    let bg_row = shot.lines().skip_while(|l| !l.starts_with("## bg")).nth(first + 1).unwrap();
     assert_eq!(&bg_row[4..18], "pVVVVVVVVVVVVp", "the selected cells: {bg_row:?}");
     // A drag begun in the code isn't the terminal's when it crosses it — nor is its cursor moved by it
     let at = |s: &mut Shot, kind, x, y| {
@@ -1894,11 +1893,11 @@ fn snapshot_terminal_panel() {
         s.ed.session.terminal.as_ref().unwrap().selection.is_none()
             && !s.ed.session.terminal.as_ref().unwrap().focus
     );
-    at(&mut s, K::Drag, 10, 17);
-    at(&mut s, K::Up, 10, 17);
+    at(&mut s, K::Drag, 10, y + 1);
+    at(&mut s, K::Up, 10, y + 1);
     assert!(s.ed.session.terminal.as_ref().unwrap().selection.is_none(), "not a terminal selection");
-    // A drag begun in it goes on outside it (clamped to its edge) and ends there
-    at(&mut s, K::Down, 2, 17);
+    // A drag begun in it (its second line) goes on outside it (clamped to its edge) and ends there
+    at(&mut s, K::Down, 2, y + 1);
     at(&mut s, K::Drag, 31, 3);
     assert_eq!(
         s.ed.session.terminal.as_ref().unwrap().selected(),
@@ -2432,15 +2431,22 @@ fn the_gutters_hold_at_their_edges() {
     s.ed.dragging = Some(Border::Chat);
     assert_eq!(cell(&mut s, 5, chat), ("▐".into(), accent, ground), "the chat's border, held");
     s.ed.dragging = None;
-    // The `:` menu over the side panel and its gutter: its edges there seated on the panel's half
-    s.keys(":w");
+    // A card over the side panel and its gutter — a completion list wider than the code beside the chat,
+    // pushed left over them: its edges there seated on the panel's half
+    let item =
+        |label: &str| json!({ "label": label, "detail": "fn(&str) -> Result<HashMap<String, usize>>" });
+    let items =
+        json!([item("a_name_long_enough_to_fill_its_column_wide"), item("another_name_as_long_as_that")]);
+    let mut list = crate::completion::Completion::new(0, s.ed.doc().id, 0, items);
+    list.filter("");
+    s.ed.completion = Some(list);
     let edges: Vec<_> =
         (0..end).map(|y| cell(&mut s, y, side - 1)).filter(|c| c.0 == "▄" || c.0 == "▀").collect();
-    assert!(!edges.is_empty(), "the menu's edge crosses the gutter");
+    assert!(!edges.is_empty(), "the list's edge crosses the gutter");
     for c in edges {
         assert_eq!(c.2, surface, "a card's edge over the gutter: {c:?}");
     }
-    s.keys("<esc><esc>");
+    s.ed.completion = None;
     // The chat filling the screen: its gutter's cell whole, the screen's edge no ground
     s.keys(" l<C-w>z");
     for y in 0..end {

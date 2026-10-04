@@ -806,7 +806,8 @@ mod tests {
         };
         assert_eq!(ed.sessions.iter().find(|l| l.id == back).unwrap().reloaded, 1);
         assert_eq!(ed.session.reloaded, 0, "the front's was said");
-        let chip = |ed: &mut Editor| screen(ed).lines().nth(22).unwrap_or_default().to_string();
+        // (the status line: the screen's last row)
+        let chip = |ed: &mut Editor| screen(ed).lines().nth(23).unwrap_or_default().to_string();
         assert!(chip(&mut ed).contains(&format!("{front} •1")), "{}", chip(&mut ed));
         ed.session_list();
         let s = screen(&mut ed);

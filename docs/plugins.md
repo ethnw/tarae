@@ -209,7 +209,7 @@ shows the card again.
 | Action | |
 |---|---|
 | `panel` | a table below the code — columns, rows (with an id each, if you like: `"namespace/name"`), a status line, and the keys it offers (`("d", "describe")`) for the header. A command's answer that shows it gives it the keys. With ids, the selection stays on its row as rows come, go and move |
-| `prompt` (id, label) | the command line, labelled with the plugin's name and the label; the answer comes back (`answer`: the text, or none for `esc`). Only in answer to you — a command, a key in its panel, a line you typed — and not while you're typing something else (then `failed`) |
+| `prompt` (id, label) | a prompt (the card on the status line where `:` commands are typed), labelled with the plugin's name and the label; the answer comes back (`answer`: the text, or none for `esc`). Only in answer to you — a command, a key in its panel, a line you typed — and not while you're typing something else (then `failed`) |
 | `show` (a view) | a buffer of its own, in front, colored by its language — shown again with the same id, replaced |
 | `append` (id, text) | added to that buffer's end; a cursor at the end follows it (a log). When you close it, the plugin is told (`failed`, with its id: time to stop following), and appending to it fails |
 

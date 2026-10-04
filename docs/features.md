@@ -32,7 +32,8 @@ You don't need to know the keys to start:
   them right away instead
 - **Mouse** — click to place the cursor, drag to select, alt+click for another cursor, wheel to scroll. In pickers the
   wheel moves the selection and a click opens. (Your terminal's own text selection is usually shift+drag.)
-- **Key hints** — while a completion or docs window is open, the keys that operate it show dimmed on the command line
+- **Key hints** — while a completion, a picker or a docs window is open, the keys that operate it show dimmed on the
+  status line, right after the mode pill
 
 ## Editing
 
@@ -110,7 +111,10 @@ configs carry over as they are.
 - **Status line** — mode pill (`▐ NORMAL ▌`, a color per mode) · git branch and `+3 −2` · Claude status (`…` waiting,
   `● review` ready) · `● errors ▲ warnings` · language, colored by its server's state — dim italic starting, green
   connected (a "ready" toast says so too), red failed or exited, faintest when none is installed · encoding and line
-  endings · selection count · position. When the terminal is narrow, the least important items fold away first
+  endings · selection count · position (keys you've started — a count, `g`, `space w` — show in its place until
+  they're done). It's the screen's last row: a `:` command, a `/` search or any other prompt opens as a card
+  standing on it, its completions in the same card above what you type. When the terminal is narrow, the least
+  important items fold away first
 - **Log** `:log-open` — what language servers print, when they start, get ready, or exit, what's missing from PATH, and
   every message tarae showed, with local times (`$XDG_STATE_HOME/tarae/tarae.log`, the previous run's kept as `.old`)
 - **Processes** `:procs` — every process tarae started (language servers by project, the debugger, tasks and test
@@ -123,8 +127,7 @@ configs carry over as they are.
   it doesn't know. Each check is listed with when and what tarae did, and while one holds, the status line says
   so with a `▲` — nothing otherwise
 - **Toasts** — status messages fade in as cards at the top right, the left bar colored by kind (info, saved, warning,
-  error). The more serious, the longer they stay. The command line is left for input, key hints, and the diagnostic at
-  the cursor ([screenshot](screenshots/ux-toasts-sync.png))
+  error). The more serious, the longer they stay ([screenshot](screenshots/ux-toasts-sync.png))
 - **Rendered doc comments** — `///`, `//!`, and `/** */` blocks show as rewrapped prose: markers stripped, paragraphs
   joined, headings in accent, `code`, lists, `@param` tags, and example code in its language's colors, on a lightly
   tinted panel. In normal mode `j`/`k` step over a block as one line; it unfolds into its source when you edit or

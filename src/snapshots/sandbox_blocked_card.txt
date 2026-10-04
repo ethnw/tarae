@@ -9,27 +9,27 @@
 06     ▎ Words are split on whitespace; case is kept.
 07   5 pub fn word_counts(text: &str) -> HashMap<&str, usize> {
 08   6     let mut counts = HashMap::new();
-09   7     for word in text.split_whitespace() ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-10   8     │   *counts.entry(word).or_insert(0) ▎ Open the sandbox a little?
-11   9     }                                      Let Claude's commands write in
-12  10     counts                                 /private/tmp/tarae-shot-blocked/npm-cache and
-13  11 }                                          everything in it
-14  12
-15  13 fn main() {                                npm was writing …/_cacache/index-v5 in it, in `npm
-16  14     let text = "the quick brown fox jump   test` — which runs again now with it open,
-17  15     let counts = word_counts(text);        whichever you choose. Always lasts until
-18  16     println!("{} distinct words", counts   :sandbox-allowed takes it back.
-19  17 }
-20                                                y Once   a This chat   A Always   n No
-21                                             ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
-22
-23   npm test ▲  │  failed   2.4s                                                    space m c close
-24   ─────────────────────────────────────────────────────────────────────────────────────────────────
-25   npm ERR! code EPERM
-26   npm ERR! syscall open
-27   ▲ sandbox blocked writing /private/tmp/tarae-shot-blocked/npm-cache/_cacach…   space m s open it
-28  ▐ NORMAL ▌                                                                  rust   utf-8 LF   1:1
-29
+09   7     for word in text.split_whitespace() {
+10   8     │   *counts.entry(word).or_insert(0) += 1;
+11   9     }                                   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+12  10     counts                               ▎ Open the sandbox a little?
+13  11 }                                          Let Claude's commands write in
+14  12                                            /private/tmp/tarae-shot-blocked/npm-cache and
+15  13 fn main() {                                everything in it
+16  14     let text = "the quick brown fox jump
+17  15     let counts = word_counts(text);        npm was writing …/_cacache/index-v5 in it, in `npm
+18  16     println!("{} distinct words", counts   test` — which runs again now with it open,
+19  17 }                                          whichever you choose. Always lasts until
+20                                                :sandbox-allowed takes it back.
+21
+22                                                y Once   a This chat   A Always   n No
+23                                             ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+24   npm test ▲  │  failed   2.4s                                                    space m c close
+25   ─────────────────────────────────────────────────────────────────────────────────────────────────
+26   npm ERR! code EPERM
+27   npm ERR! syscall open
+28   ▲ sandbox blocked writing /private/tmp/tarae-shot-blocked/npm-cache/_cacach…   space m s open it
+29  ▐ NORMAL ▌                                                                  rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
 01
@@ -41,8 +41,8 @@
 07
 08
 09
-10                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-11                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+10
+11
 12                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 13                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 14                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
@@ -52,15 +52,15 @@
 18                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 19                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 20                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-21
-22
-23 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+21                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+22                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+23
 24 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 25 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 26 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 27 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-28   AAAAAAAA
-29
+28 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+29   AAAAAAAA
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00  ddddd  f  ddd  f  TTTTTTT
 01  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -72,26 +72,26 @@
 07   f
 08   f
 09   f
-10   f                                          a BBBB BBB BBBBBBB B BBBBBBB
+10   f
 11   f
-12  ff
+12  ff                                          a BBBB BBB BBBBBBB B BBBBBBB
 13  ff
 14  ff
-15  ff                                            ddd ddd ddddddd ddddddddddddddddddd dd ddd dd dddd
-16  ff                gggg ggggg ggggg ggg gggg   ddddd d ddddd dddd ddddd ddd dddd dd ddddd
-17  ff                                            ddddddddd ddd ddddddd dddddd ddddd ddddd
-18  ff              ggg gggggggg gggggg           dddddddddddddddd ddddd dd ddddd
-19  ff
-20                                                A        A dddd dddd   A dddddd   A dd
+15  ff
+16  ff                gggg ggggg ggggg ggg gggg
+17  ff                                            ddd ddd ddddddd ddddddddddddddddddd dd ddd dd dddd
+18  ff              ggg gggggggg gggggg           ddddd d ddddd dddd ddddd ddd dddd dd ddddd
+19  ff                                            ddddddddd ddd ddddddd dddddd ddddd ddddd
+20                                                dddddddddddddddd ddddd dd ddddd
 21
-22
-23   TTT TTTT e  f  eeeeee   dddd                                                    DDDDD D D fffff
-24   fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-25   fff ffff ffff fffff
-26   fff ffff fffffff ffff
-27   w wwwwwww wwwwwww wwwwwww wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww   FFFFF F F ffff ff
-28  a BBBBBB a                                                                  dddd   ddddd dd   TTT
-29
+22                                                A        A dddd dddd   A dddddd   A dd
+23
+24   TTT TTTT e  f  eeeeee   dddd                                                    DDDDD D D fffff
+25   fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+26   fff ffff ffff fffff
+27   fff ffff fffffff ffff
+28   w wwwwwww wwwwwww wwwwwww wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww   FFFFF F F ffff ff
+29  a BBBBBB a                                                                  dddd   ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary  p=ui.popup  A=ui.cursor.primary  1=other
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  e=error  w=warning  g=diff.plus  B=bold

@@ -309,6 +309,8 @@ pub struct Screen {
     /// The notification card (x, y, width, height) — None when there's none, or it's folded into the status
     /// line.
     pub toast_card: std::cell::Cell<Option<(usize, usize, usize, usize)>>,
+    /// The prompt's card (x, y, width, height) — a click on it is its own, not the code's under it.
+    pub prompt_card: std::cell::Cell<Option<(usize, usize, usize, usize)>>,
 }
 
 /// One pane of a split: what it shows (a document) + its scroll. Cursor and selection are the document's.
@@ -1525,6 +1527,13 @@ impl Editor {
         let s = self.screen.clone();
         let (x, y) = (m.x as usize, m.y as usize);
         self.status = None;
+        // The prompt's card: what's under it isn't clicked through it
+        if let Some((px, py, pw, ph)) = s.prompt_card.get()
+            && (px..px + pw).contains(&x)
+            && (py..py + ph).contains(&y)
+        {
+            return;
+        }
         if m.kind == K::Down
             && let Some(&(_, _, _, k)) = s.offer_buttons.iter().find(|b| b.0 == y && (b.1..b.2).contains(&x))
         {
@@ -6007,7 +6016,8 @@ mod tests {
         // Back in the input: C-q — the card has the keys, the draft stays
         ed.session.chat.as_mut().unwrap().focused = true;
         // (the status line's label names where the keys go — #78: it said CHAT while the card had them)
-        let label = |s: &str| s.lines().nth(38).unwrap_or_default().to_string();
+        // (the status line: the screen's last row)
+        let label = |s: &str| s.lines().nth(39).unwrap_or_default().to_string();
         assert!(label(&draw(&mut ed)).contains(" CHAT "), "{}", label(&draw(&mut ed)));
         feed(&mut ed, "<C-q>");
         assert!(ed.card_keys);
@@ -10824,10 +10834,11 @@ mod tests {
     /// for all of it to be seen, and a `y` before that says why on screen — it was taken in silence.
     #[test]
     fn a_cut_run_card_says_y_waits_for_all_of_it() {
+        // (a screen too short for the card's 12 lines: it's cut)
         let frame = |ed: &mut Editor| {
             let mut bytes = Vec::new();
-            crate::term::render(ed, &mut bytes, 140, 20).unwrap();
-            let mut parser = vt100::Parser::new(20, 140, 0);
+            crate::term::render(ed, &mut bytes, 140, 18).unwrap();
+            let mut parser = vt100::Parser::new(18, 140, 0);
             parser.process(&bytes);
             parser
         };
@@ -10925,9 +10936,10 @@ mod tests {
         assert!(said.contains("ge to its end"), "the keymap's key (#55: it said G): {said}");
         let s = screen(&mut ed);
         assert!(!s.contains("line 80 of what it runs"), "its end is below the screen");
-        // While its text is read, the card is a bar over the status line (U8) — nothing of it over the text
+        // While its text is read, the card is a bar over the status line (U8: the screen's last row) — nothing
+        // of it over the text
         let rows: Vec<&str> = s.lines().collect();
-        let bar = rows[30 - 3];
+        let bar = rows[30 - 2];
         assert!(
             bar.contains("Trust this project's settings?")
                 && bar.contains("ge to its end, then y answers")
@@ -10936,7 +10948,7 @@ mod tests {
         );
         assert!(!s.contains("more lines"), "the card stepped aside: {s}");
         assert!(!ed.offer_seen_whole(), "its bar in sight isn't the card read");
-        assert!(ed.screen.offer_buttons.iter().any(|b| b.3 == 'y' && b.0 == 27), "its y still clicks");
+        assert!(ed.screen.offer_buttons.iter().any(|b| b.3 == 'y' && b.0 == 28), "its y still clicks");
         // Another buffer: the card whole again; back: the bar
         let viewed = ed.doc().id;
         ed.new_scratch();

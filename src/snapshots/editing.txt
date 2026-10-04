@@ -28,8 +28,8 @@
 25
 26
 27
-28  ▐ NORMAL ▌                                                                  rust   utf-8 LF   8:8
-29
+28
+29  ▐ NORMAL ▌                                                                  rust   utf-8 LF   8:8
 ## bg · surface per cell, blank = ui.background
 00
 01
@@ -59,8 +59,8 @@
 25
 26
 27
-28   AAAAAAAA
-29
+28
+29   AAAAAAAA
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00  ddddd  f  ddd  f  TTTTTTT  f    ddddddddddd
 01  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -90,8 +90,8 @@
 25
 26
 27
-28  a BBBBBB a                                                                  dddd   ddddd dd   TTT
-29
+28
+29  a BBBBBB a                                                                  dddd   ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary  V=ui.selection.primary  A=ui.cursor.primary  1=other
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  g=diff.plus  B=bold

@@ -2571,7 +2571,8 @@ mod tests {
     #[test]
     fn a_server_that_keeps_exiting_is_held_until_r() {
         let (mut ed, root) = with_server("held");
-        let status = |ed: &mut Editor| screen(ed, 140, 30)[28].clone();
+        // (the status line: the screen's last row)
+        let status = |ed: &mut Editor| screen(ed, 140, 30)[29].clone();
         assert!(!status(&mut ed).contains('▲'), "no mark while all is well: {}", status(&mut ed));
         for _ in 0..3 {
             let cid = ed.doc().lsp.client.expect("attached");

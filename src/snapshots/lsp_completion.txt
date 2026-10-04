@@ -28,8 +28,8 @@
 25
 26
 27
-28  ▐ INSERT ▌                                                                  rust   utf-8 LF   3:7
-29  tab select   enter accept   C-x complete   esc close
+28
+29  ▐ INSERT ▌  tab select  enter accept  C-x complete  esc close               rust   utf-8 LF   3:7
 ## bg · surface per cell, blank = ui.background
 00
 01
@@ -59,8 +59,8 @@
 25
 26
 27
-28   iiiiiiii
-29
+28
+29   iiiiiiii
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00  ddddd  f  ddd  f  TTTTTTT a  f    dddd
 01  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -90,8 +90,8 @@
 25
 26
 27
-28  g BBBBBB g                                                                  gggg   ddddd dd   TTT
-29  DDD ffffff   DDDDD ffffff   DDD ffffffff   DDD fffff
+28
+29  g BBBBBB g  DDD ffffff  DDDDD ffffff  DDD ffffffff  DDD fffff               gggg   ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary  p=ui.popup  P=ui.menu.selected  i=ui.cursor.primary.insert
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  g=diff.plus  B=bold

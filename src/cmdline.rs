@@ -5,7 +5,7 @@
 //! and candidate computation (`complete`).
 //! Lists that need disk reads (folders, themes) are read by the editor on a worker thread into `Lists`
 //! (no disk waits on the key-input path).
-//! Drawing is in term.rs (`draw_cmdline_menu`), keys (Tab·Shift-Tab·→) in editor.rs.
+//! Drawing is in term.rs (`draw_prompt` — the menu in the prompt's card), keys (Tab·Shift-Tab·→) in editor.rs.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

@@ -27,9 +27,9 @@
 24
 25
 26
-27                                          tarae 0.1.0 · meok
-28  ▐ NORMAL ▌                                                                         utf-8 LF   1:1
-29
+27
+28                                          tarae 0.1.0 · meok
+29  ▐ NORMAL ▌                                                                         utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
 01
@@ -59,8 +59,8 @@
 25
 26
 27
-28   AAAAAAAA
-29
+28
+29   AAAAAAAA
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00  ddddd
 01  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -89,9 +89,9 @@
 24
 25
 26
-27                                          fffff fffff f ffff
-28  a BBBBBB a                                                                         ddddd dd   TTT
-29
+27
+28                                          fffff fffff f ffff
+29  a BBBBBB a                                                                         ddddd dd   TTT
 ## legend
 bg: A=ui.cursor.primary
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  B=bold
