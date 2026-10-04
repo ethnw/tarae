@@ -161,7 +161,7 @@ impl Editor {
             }
             return;
         };
-        let events = self.events.sender();
+        let events = self.events.shared_sender();
         let who = plugin.clone();
         let reply = Box::new(move |result: Result<Vec<super::Action>, String>| {
             let apply = move |ed: &mut Editor| {
@@ -219,7 +219,7 @@ impl Editor {
         }
         let Some((input, seen)) = self.plugin_input(doc, "") else { return };
         for plugin in subs {
-            let events = self.events.sender();
+            let events = self.events.shared_sender();
             let (who, seen) = (plugin.clone(), seen.clone());
             let reply = Box::new(move |result: Result<Vec<super::Action>, String>| {
                 let apply = move |ed: &mut Editor| match result {

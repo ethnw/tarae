@@ -289,7 +289,7 @@ fn quiet_every() -> Duration {
 
 /// The sampling thread: a look now, then one every `QUIET_EVERY` (`OPEN_EVERY` while `:procs` is open), each
 /// sent to the main loop. It ends with the editor.
-pub fn start(events: Sender<Event>, usual_path: Option<PathBuf>) -> Sender<Wake> {
+pub fn start(events: crate::event::Tx, usual_path: Option<PathBuf>) -> Sender<Wake> {
     let (tx, rx) = channel();
     let run = move || {
         let mut s = Sampler::default();
@@ -874,7 +874,7 @@ impl Editor {
     pub fn procs_start_sampling(&mut self) {
         let path = crate::config::state_dir().map(|d| d.join("procs.json"));
         self.procs.usual_path.clone_from(&path);
-        self.procs.wake = Some(start(self.events.sender(), path));
+        self.procs.wake = Some(start(self.events.shared_sender(), path));
     }
 
     /// Whether the panel is up (it takes the bottom slot first).

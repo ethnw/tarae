@@ -2,7 +2,6 @@
 //! A watcher thread waits for HEAD to change (`fswatch`) and notifies the main loop (checkout in lazygit etc.).
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Sender;
 use std::thread;
 
 use crate::editor::Editor;
@@ -44,7 +43,7 @@ pub fn read_branch(head: &Path) -> Option<String> {
 }
 
 /// Watcher thread for `dir`'s repository — reads once at first, then whenever HEAD changes.
-pub fn watch(tx: Sender<Event>, dir: PathBuf) {
+pub fn watch(tx: crate::event::Tx, dir: PathBuf) {
     thread::spawn(move || {
         let Some(head) = find_head(&dir) else { return };
         let stamp = || std::fs::metadata(&head).and_then(|m| m.modified()).ok();

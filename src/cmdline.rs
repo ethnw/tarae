@@ -139,6 +139,8 @@ pub const COMMANDS: &[TypedCmd] = &[
     c(&["git-amend"], Arg::None, "Put what's staged into the last commit"),
     c(&["diff"], Arg::File, "Show changes against HEAD, a file, or a revision"),
     c(&["diff-off"], Arg::None, "Stop showing the diff"),
+    c(&["lane-open"], Arg::File, "Work in another checkout beside this one"),
+    c(&["lane-switch"], Arg::None, "Bring another checkout's work to the front"),
 ];
 
 /// One candidate.

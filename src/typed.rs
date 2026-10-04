@@ -1,6 +1,6 @@
 //! `:` typed commands. Names and aliases match helix.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::editor::Editor;
@@ -121,6 +121,25 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
         "sh" | "run-shell-command" => shell(editor, rest),
         "diff" => editor.diff_against(rest.trim()),
         "diff-off" => editor.diff_off(),
+        "lane-open" if !rest.trim().is_empty() => {
+            let id = editor.lane_open(Path::new(rest.trim()))?;
+            editor.set_status(format!("lane {id} · {}", editor.lane.name()));
+            Ok(())
+        }
+        "lane-open" => Err("usage: :lane-open <folder> (a worktree or another checkout)".into()),
+        "lane-switch" => {
+            let lanes = editor.lanes_listed();
+            match rest.trim().parse() {
+                Ok(id) if editor.lane_switch(id) => Ok(()),
+                _ => {
+                    let list: Vec<String> = lanes
+                        .iter()
+                        .map(|(id, name, front)| format!("{id} {name}{}", if *front { " ●" } else { "" }))
+                        .collect();
+                    Err(format!("usage: :lane-switch <n> — {}", list.join(" · ")))
+                }
+            }
+        }
         "git-switch" if !rest.is_empty() => {
             editor.git_switch(rest);
             Ok(())

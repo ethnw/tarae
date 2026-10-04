@@ -605,44 +605,43 @@ impl Editor {
         let pid = child.id();
         let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
         let tx = self.events.sender();
-        let send_lines =
-            move |tx: &std::sync::mpsc::Sender<crate::event::Event>, err: bool, lines: Vec<String>| {
-                let apply = move |ed: &mut Editor| {
-                    let Some(r) = ed.lane.test_run.as_mut().filter(|r| r.generation == generation) else {
-                        return;
-                    };
-                    let mut attach = None;
-                    for line in lines {
-                        let line = strip_ansi(&line);
-                        // Java test debug: the test JVM waits for a debugger — attach to that port
-                        let listen = line
-                            .split_once("Listening for transport dt_socket at address:")
-                            .and_then(|(_, a)| a.trim().rsplit(':').next()?.parse::<u16>().ok());
-                        if let Some(port) = listen
-                            && let Some(a) = r.java_attach.take()
-                        {
-                            attach = Some((a, port, r.target.label.clone()));
-                        }
-                        r.parser.line(&r.target.cwd, &line, &mut r.cases);
-                        r.output.push((err, line));
-                    }
-                    r.last_output = Instant::now();
-                    let n = r.output.len();
-                    if n > 5000 {
-                        r.output.drain(..n - 5000);
-                    }
-                    if let Some(((file, root), port, label)) = attach {
-                        ed.dap_generation += 1;
-                        let g = ed.dap_generation;
-                        ed.java_attach(file, root, "127.0.0.1".into(), port, g);
-                        // Debug pane header = the test name, not the address
-                        if let Some(d) = ed.dap.as_mut() {
-                            d.program = label;
-                        }
-                    }
+        let send_lines = move |tx: &crate::event::Tx, err: bool, lines: Vec<String>| {
+            let apply = move |ed: &mut Editor| {
+                let Some(r) = ed.lane.test_run.as_mut().filter(|r| r.generation == generation) else {
+                    return;
                 };
-                tx.send(crate::event::Event::Job(Box::new(apply))).is_ok()
+                let mut attach = None;
+                for line in lines {
+                    let line = strip_ansi(&line);
+                    // Java test debug: the test JVM waits for a debugger — attach to that port
+                    let listen = line
+                        .split_once("Listening for transport dt_socket at address:")
+                        .and_then(|(_, a)| a.trim().rsplit(':').next()?.parse::<u16>().ok());
+                    if let Some(port) = listen
+                        && let Some(a) = r.java_attach.take()
+                    {
+                        attach = Some((a, port, r.target.label.clone()));
+                    }
+                    r.parser.line(&r.target.cwd, &line, &mut r.cases);
+                    r.output.push((err, line));
+                }
+                r.last_output = Instant::now();
+                let n = r.output.len();
+                if n > 5000 {
+                    r.output.drain(..n - 5000);
+                }
+                if let Some(((file, root), port, label)) = attach {
+                    ed.dap_generation += 1;
+                    let g = ed.dap_generation;
+                    ed.java_attach(file, root, "127.0.0.1".into(), port, g);
+                    // Debug pane header = the test name, not the address
+                    if let Some(d) = ed.dap.as_mut() {
+                        d.program = label;
+                    }
+                }
             };
+            tx.send(crate::event::Event::Job(Box::new(apply))).is_ok()
+        };
         // `parse = "junit"`: results from the JUnit XML the build tool leaves (only files written since this
         // run) — read here on the waiter thread once it ends
         let How::Pack { junit, .. } = &target.how;

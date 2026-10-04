@@ -3,7 +3,6 @@
 
 use std::io::{self, Write};
 use std::sync::OnceLock;
-use std::sync::mpsc::Sender;
 use std::thread;
 
 use anyhow::Result;
@@ -145,8 +144,8 @@ fn tests_skip_seek() -> bool {
 const RESTING_REDRAW: std::time::Duration = std::time::Duration::from_millis(500);
 
 fn event_loop(editor: &mut Editor) -> Result<()> {
-    spawn_input(editor.events.sender());
-    crate::config::watch(editor.events.sender(), editor.lane.root.clone());
+    spawn_input(editor.events.shared_sender());
+    crate::config::watch(editor.events.shared_sender(), editor.lane.root.clone());
     crate::git::watch(editor.events.sender(), editor.lane.root.clone());
     editor.procs_start_sampling();
     let mut out = io::stdout();
@@ -220,7 +219,7 @@ fn handle_noting(editor: &mut Editor, ev: crate::event::Event) -> bool {
 }
 
 /// Input thread — so terminal reads don't block the main loop.
-fn spawn_input(tx: Sender<Event>) {
+fn spawn_input(tx: crate::event::Tx) {
     thread::spawn(move || {
         while let Ok(ev) = event::read() {
             let ev = match ev {
@@ -386,7 +385,7 @@ fn render_frame(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io
     }
     // Reviewing: put the current change's head at the top 1/4 of the screen (follow — off once j/k scroll)
     let mut review_rows = None;
-    if let Some(rev) = editor.review.as_mut().filter(|r| r.ready)
+    if let Some(rev) = editor.lane.review.as_mut().filter(|r| r.ready)
         && let Some(doc) = editor.docs.iter().find(|d| d.id == rev.doc_id)
     {
         let rows = rev.rows(&doc.text);
@@ -2474,7 +2473,7 @@ fn draw(
     }
     // Narrow screen with the chat open: the chat takes it all — no text, nothing floating over it (so too
     // when something fills the screen — `C-w z`)
-    let text_cursor = match editor.review.as_ref().filter(|r| r.ready) {
+    let text_cursor = match editor.lane.review.as_ref().filter(|r| r.ready) {
         _ if lay.code_hidden() => None,
         Some(rev) => {
             if let Some(rows) = review_rows {
@@ -2491,14 +2490,14 @@ fn draw(
     if let Some(r) = editor.lane.code_review.as_ref().filter(|_| editor.review_rail_up())
         && lay.rail_w > 0
         && lay.zoom.is_none()
-        && !editor.review.as_ref().is_some_and(|r| r.ready)
+        && !editor.lane.review.as_ref().is_some_and(|r| r.ready)
         && !editor.welcome()
     {
         draw_review_rail(r, editor, ui, lay, out)?;
     } else if let Some(sb) = &editor.lane.sidebar
         && lay.rail_w > 0
         && !editor.review_rail_up()
-        && !editor.review.as_ref().is_some_and(|r| r.ready)
+        && !editor.lane.review.as_ref().is_some_and(|r| r.ready)
     {
         draw_sidebar(sb, editor, ui, lay, out)?;
     }
@@ -2526,7 +2525,7 @@ fn draw(
         Some(c) if lay.chat_w > 0 => draw_chat(c, editor, ui, lay, out)?,
         _ => None,
     };
-    if let Some(rev) = editor.review.as_ref().filter(|r| !r.ready) {
+    if let Some(rev) = editor.lane.review.as_ref().filter(|r| !r.ready) {
         draw_ask_stream(rev, editor, ui, lay, out)?;
     }
     // Cards over the code share the screen without overlapping: the note at the cursor and an offer (a
@@ -2538,7 +2537,7 @@ fn draw(
     let mut follow_rect = None;
     if let Some(c) = editor.lane.chat.as_ref().filter(|c| {
         c.follow.on && (c.busy() || c.follow.touring() || crate::follow::stop_here(editor).is_some())
-    }) && (editor.review.is_none() || c.compact())
+    }) && (editor.lane.review.is_none() || c.compact())
         && !lay.code_hidden()
         && !editor.welcome()
     {
@@ -3596,7 +3595,7 @@ fn build_view(
     }
     if !editor.config.render_doc_comments
         || left > 0
-        || editor.review.is_some()
+        || editor.lane.review.is_some()
         || !crate::doccomment::applies(lang)
     {
         let mut view = Vec::with_capacity(rows);
@@ -5244,7 +5243,7 @@ fn draw_statusline(
         right.push(Seg { text: " back".into(), style: Style { fg: ui.linenr.fg, ..ui.status }, keep: 215 });
         right.push(gap(215));
     }
-    match &editor.review {
+    match &editor.lane.review {
         Some(r) if r.ready => {
             right.push(Seg {
                 text: "claude ● review".into(),
@@ -5260,7 +5259,7 @@ fn draw_statusline(
         None => {}
     }
     // Claude Code in the adjacent pane is attached (sees selection/diagnostics; edits come here as reviews)
-    if editor.agent.as_ref().is_some_and(|a| a.connected()) && editor.review.is_none() {
+    if editor.agent.as_ref().is_some_and(|a| a.connected()) && editor.lane.review.is_none() {
         right.push(Seg { text: "◦ claude code".into(), style: accent, keep: 150 });
         right.push(gap(150));
     }
@@ -6573,7 +6572,7 @@ fn draw_follow_card(
         matches!(o.what, What::Run(_) | What::NoSandbox { .. } | What::Read { .. } | What::Screen { .. })
     });
     let waiting =
-        |verb: &str| c.busy() && (asks || matches!(verb, "edit" | "write") && editor.review.is_some());
+        |verb: &str| c.busy() && (asks || matches!(verb, "edit" | "write") && editor.lane.review.is_some());
     let mut head: Vec<Span> = match gaze {
         Some(g) if waiting(g.look.verb) => vec![
             Span { text: "● ".into(), style: accent },

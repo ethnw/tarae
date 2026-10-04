@@ -1,12 +1,23 @@
-//! A lane: one checkout's work — its panes, chat, terminal, tests, tasks, git and review. The editor holds
-//! the one in front as `Editor.lane`; what every lane shares (documents, servers, config, toasts, the
-//! generation counters) stays on `Editor`.
+//! Lanes: one checkout's work each — its panes, chat, terminal, tests, tasks, git and review. The editor
+//! holds the one in front as `Editor.lane` and the others in `Editor.lanes`; a switch is one swap, so no
+//! field is forgotten. What every lane shares (documents, servers, config, toasts, the generation
+//! counters) stays on `Editor`.
+//!
+//! - A lane behind goes on working: what it started (its Claude, terminal, tests, tasks, git) sends its
+//!   results tagged with it (`event::Tx`), and `with_lane` swaps it in to apply them, then back.
+//! - What would take the screen waits in the lane: a card (`push_offer` parks it), an edit review (its
+//!   queue isn't taken up — `edits::next`), follow mode's moves (its trail is kept). Claude waiting on one
+//!   is said once, named. A tag for a lane that's gone runs in front — the generation checks drop it.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use crate::editor::View;
+use crate::document::{DocId, Document};
+use crate::editor::{Editor, Mode, View};
+use crate::event::LaneId;
+use crate::key::{Code, Key};
 
 pub struct Lane {
+    pub id: LaneId,
     /// The checkout, links resolved: where git, the terminal, tasks, Claude, pickers and searches run, what
     /// paths are shown relative to, what a relative path means (follow mode goes nowhere else). Read once,
     /// in `Editor::with_root`; nothing reads the process's folder after that. Tests with a project of their
@@ -17,12 +28,19 @@ pub struct Lane {
     pub views: Vec<View>,
     pub split: crate::split::Split,
     pub focus: crate::split::ViewId,
+    /// While it's behind: the document its focused pane shows (in front, that's `Editor.current`).
+    pub current_doc: DocId,
+    /// The blank scratch it opened with, until a document is added in it — the first file opened takes
+    /// its place, as at startup.
+    pub scratch: Option<DocId>,
     /// Chat pane on the right (if open).
     pub chat: Option<crate::chat::Chat>,
     /// Claude's notes pinned to code (`notes.rs`).
     pub notes: crate::notes::Notes,
     /// What Claude changed per chat turn — undone as one (`checkpoint.rs`).
     pub checkpoints: crate::checkpoint::Checkpoints,
+    /// The in-buffer review (`llm.rs`) — `space i`'s, a chat edit's, Claude Code's.
+    pub review: Option<crate::llm::Review>,
     /// The code review in progress (`codereview.rs`).
     pub code_review: Option<crate::codereview::CodeReview>,
     /// The review being opened is for Claude to review (`space v c`) — asked once it's open.
@@ -31,8 +49,10 @@ pub struct Lane {
     pub sidebar: Option<crate::sidebar::Sidebar>,
     /// The tab it last showed (`C-w e` opens it again).
     pub side_last: crate::sidebar::Mode,
-    /// The built-in terminal (terminal.rs).
+    /// The built-in terminal (terminal.rs) · the run that's this lane's latest (a replaced one's late
+    /// output is dropped).
     pub terminal: Option<crate::terminal::Terminal>,
+    pub terminal_run: u64,
     /// A terminal is being started (on a worker) · what it printed and its exit code, if they came before
     /// it was in place.
     pub terminal_starting: bool,
@@ -65,27 +85,36 @@ pub struct Lane {
     pub preflight: Option<crate::preflight::Preflight>,
     /// The files of this folder's last session that are still there — the start screen's `r`.
     pub last_session: Option<Vec<PathBuf>>,
+    /// Cards that came while it was behind, and Claude's that were up when it left — up again when it's in
+    /// front · Claude's waiting on one has been said (once while it's behind).
+    pub parked: Vec<crate::offer::Offer>,
+    pub waiting_told: bool,
 }
 
 impl Lane {
     /// A lane for the checkout in `root` (a real path) — nothing open in it yet, its first pane `view`.
-    pub fn new(root: PathBuf, view: crate::split::ViewId) -> Self {
+    pub fn new(id: LaneId, root: PathBuf, view: crate::split::ViewId) -> Self {
         Self {
+            id,
             root,
             views: Vec::new(),
             split: crate::split::Split::Leaf(view),
             focus: view,
+            current_doc: 0,
+            scratch: None,
             chat: None,
             notes: Default::default(),
             checkpoints: crate::checkpoint::Checkpoints {
                 dir: if cfg!(test) { None } else { crate::checkpoint::default_dir() },
                 ..Default::default()
             },
+            review: None,
             code_review: None,
             review_ask: false,
             sidebar: None,
             side_last: crate::sidebar::Mode::Files,
             terminal: None,
+            terminal_run: 0,
             terminal_starting: false,
             terminal_early: Default::default(),
             test_run: None,
@@ -104,6 +133,153 @@ impl Lane {
             blocked: None,
             preflight: None,
             last_session: None,
+            parked: Vec::new(),
+            waiting_told: false,
         }
+    }
+
+    /// What toasts from it start with — its checkout's folder name.
+    pub fn name(&self) -> String {
+        self.root.file_name().map_or_else(|| self.root.display().to_string(), |n| n.to_string_lossy().into())
+    }
+
+    /// Whether its Claude waits for the user: a card of its, or an edit (a rename's files) to review.
+    pub fn waits(&self) -> bool {
+        self.parked.iter().any(crate::offer::Offer::claudes)
+            || self.chat.as_ref().is_some_and(|c| {
+                !c.edits.queue.is_empty() || c.edits.sets.iter().any(|l| !l.review.is_empty())
+            })
+    }
+}
+
+impl Editor {
+    /// Whether a result of a lane behind is being applied (`with_lane`): what would take the screen waits.
+    pub fn background(&self) -> bool {
+        self.behind
+    }
+
+    /// `msg` as a toast says it: from a lane behind, its name first.
+    pub(crate) fn said_by_lane(&self, msg: String) -> String {
+        match self.behind {
+            true => format!("{} · {msg}", self.lane.name()),
+            false => msg,
+        }
+    }
+
+    /// Applies `f` in lane `id` — swapped in for it if it's behind, as it is if it's in front or gone.
+    pub fn with_lane(&mut self, id: LaneId, f: impl FnOnce(&mut Editor)) {
+        let Some(i) = self.lanes.iter().position(|l| l.id == id) else { return f(self) };
+        let front = self.lane.id;
+        self.lane.current_doc = self.doc().id;
+        std::mem::swap(&mut self.lane, &mut self.lanes[i]);
+        self.current = self.doc_index(self.lane.current_doc);
+        self.events.set_lane(id);
+        self.behind = true;
+        let said = self.messages.last().map(|m| m.0);
+        f(self);
+        self.behind = false;
+        let tell = self.lane.waits() && !std::mem::replace(&mut self.lane.waiting_told, true);
+        let name = self.lane.name();
+        if let Some(d) = self.docs.get(self.current) {
+            self.lane.current_doc = d.id;
+        }
+        let i =
+            self.lanes.iter().position(|l| l.id == front).expect("the front lane is behind while swapped");
+        std::mem::swap(&mut self.lane, &mut self.lanes[i]);
+        self.current = self.doc_index(self.lane.current_doc);
+        self.events.set_lane(front);
+        if tell {
+            self.set_status(format!("{name} · Claude waits for your answer"));
+        } else if self.messages.last().map(|m| m.0) == said {
+            // (nothing of it is on screen — an idle front draws nothing for a busy lane behind)
+            self.unchanged = true;
+        }
+    }
+
+    /// The index of document `id` — the first one's if it's gone (closed from another lane).
+    fn doc_index(&self, id: DocId) -> usize {
+        self.docs.iter().position(|d| d.id == id).unwrap_or(0)
+    }
+
+    /// `:lane-open <folder>` — a lane for that checkout (a worktree, a clone), in front; the one there
+    /// already if it has a lane.
+    pub fn lane_open(&mut self, folder: &Path) -> Result<LaneId, String> {
+        let folder = self.path_of(folder);
+        let root = std::fs::canonicalize(&folder).map_err(|e| format!("{}: {e}", folder.display()))?;
+        if !root.is_dir() {
+            return Err(format!("{} isn't a folder", root.display()));
+        }
+        if let Some(id) =
+            std::iter::once(&self.lane).chain(&self.lanes).find(|l| l.root == root).map(|l| l.id)
+        {
+            self.lane_switch(id);
+            return Ok(id);
+        }
+        self.next_lane += 1;
+        let id = self.next_lane;
+        let view = self.next_view;
+        self.next_view += 1;
+        let doc = self.alloc_id();
+        self.docs.push(Document::from_str(doc, ""));
+        let mut lane = Lane::new(id, root, view);
+        lane.views.push(View::new(view, doc));
+        (lane.current_doc, lane.scratch) = (doc, Some(doc));
+        self.lanes.push(lane);
+        self.lane_switch(id);
+        if self.git_auto {
+            crate::git::watch(self.events.sender(), self.lane.root.clone());
+        }
+        Ok(id)
+    }
+
+    /// `:lane-switch <n>` — lane `id` to the front. What was up over the one in front closes (a picker, a
+    /// prompt, insert mode); Claude's cards there go with it. False: no such lane.
+    pub fn lane_switch(&mut self, id: LaneId) -> bool {
+        if id == self.lane.id {
+            return true;
+        }
+        let Some(i) = self.lanes.iter().position(|l| l.id == id) else { return false };
+        let esc = Key { code: Code::Esc, ctrl: false, alt: false };
+        if self.picker.is_some() {
+            self.handle_key(esc);
+        }
+        if self.prompt.is_some() {
+            self.handle_key(esc);
+        }
+        if self.mode != Mode::Normal {
+            self.handle_key(esc);
+            self.mode = Mode::Normal;
+        }
+        // Out: where it was, and Claude's cards (they wait for it)
+        self.lane.current_doc = self.doc().id;
+        let (mut mine, rest): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.offers).into_iter().partition(crate::offer::Offer::claudes);
+        self.offers = rest;
+        mine.append(&mut self.lane.parked);
+        self.lane.parked = mine;
+        self.lane.waiting_told = false;
+        std::mem::swap(&mut self.lane, &mut self.lanes[i]);
+        // In: its panes on documents that are still there, its cards up, its tour going on
+        self.current = self.doc_index(self.lane.current_doc);
+        let shown = self.docs[self.current].id;
+        let docs: std::collections::HashSet<DocId> = self.docs.iter().map(|d| d.id).collect();
+        for v in self.lane.views.iter_mut().filter(|v| !docs.contains(&v.doc)) {
+            v.doc = shown;
+        }
+        self.events.set_lane(id);
+        self.offers.append(&mut self.lane.parked);
+        self.lane.waiting_told = false;
+        crate::edits::next(self);
+        crate::follow::lane_in(self);
+        true
+    }
+
+    /// The lanes in the order they were opened: (id, name, in front).
+    pub fn lanes_listed(&self) -> Vec<(LaneId, String, bool)> {
+        let mut v: Vec<_> = std::iter::once((self.lane.id, self.lane.name(), true))
+            .chain(self.lanes.iter().map(|l| (l.id, l.name(), false)))
+            .collect();
+        v.sort_by_key(|l| l.0);
+        v
     }
 }

@@ -391,7 +391,7 @@ impl Editor {
                     }
                 }
             })?;
-            let events = self.events.sender();
+            let events = self.events.shared_sender();
             let who = plugin.to_string();
             thread("tarae-plugin-read", move || {
                 let mut r = reader;
@@ -490,7 +490,7 @@ impl Editor {
             let why = format!("it has {MAX_TIMERS} timers set already");
             return self.plugin_events(plugin, vec![HostEvent::Failed(id, why)]);
         }
-        let events = self.events.sender();
+        let events = self.events.shared_sender();
         let who = plugin.to_string();
         // (a day at most)
         let when = Instant::now() + Duration::from_millis(ms.min(86_400_000));
@@ -569,7 +569,7 @@ impl Editor {
         p.serial += 1;
         let serial = p.serial;
         let pid = child.id();
-        let events = self.events.sender();
+        let events = self.events.shared_sender();
         let done = ended.clone();
         thread("tarae-plugin-run", move || {
             let send = |ev: HostEvent| {
@@ -664,7 +664,7 @@ impl Editor {
         let w = std::mem::take(&mut o.weight);
         let (generation, flow) = (o.generation, o.flow.clone());
         o.busy = true;
-        let tx = self.events.sender();
+        let tx = self.events.shared_sender();
         let who = plugin.to_string();
         let taken = flow.clone();
         let reply = Box::new(move |result: Result<Vec<Action>, String>| {

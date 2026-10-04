@@ -571,7 +571,7 @@ impl Client {
         spec: &ServerSpec,
         root: &Path,
         options: MakeOptions,
-        events: Sender<Event>,
+        events: crate::event::Tx,
     ) -> Result<Client, String> {
         let mut child = Command::new(&spec.command)
             .args(&spec.args)

@@ -712,7 +712,7 @@ impl Editor {
         program: String,
         generation: u64,
     ) {
-        let tx = self.events.sender();
+        let tx = self.events.shared_sender();
         std::thread::spawn(move || {
             let mut r = BufReader::new(reader);
             while let Some(msg) = crate::lsp::read_message(&mut r) {

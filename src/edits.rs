@@ -264,7 +264,8 @@ fn deny(message: &str) -> Value {
 
 /// Every event: shows the next waiting edit once no review is up.
 pub fn next(ed: &mut Editor) {
-    if ed.review.is_some() {
+    // (a lane behind: its edits wait in their queue until it's in front)
+    if ed.lane.review.is_some() || ed.background() {
         return;
     }
     let Some(p) = ed.lane.chat.as_mut().and_then(|c| c.edits.queue.pop_front()) else { return };
@@ -345,7 +346,7 @@ fn show(ed: &mut Editor, p: Pending) {
             done(ed, p, doc_id, base, dirty, existed, applied)
         })),
     );
-    if let Some(r) = &mut ed.review {
+    if let Some(r) = &mut ed.lane.review {
         r.reason = reason;
         // (its turn in the chat is the step)
         r.own_turn = false;
@@ -441,7 +442,7 @@ pub fn turn_over(ed: &mut Editor) {
     let Some(c) = &mut ed.lane.chat else { return };
     c.edits.queue.clear();
     if let Some(g) = c.edits.review.take()
-        && ed.review.as_ref().is_some_and(|r| r.generation == g)
+        && ed.lane.review.as_ref().is_some_and(|r| r.generation == g)
     {
         crate::llm::close_review(ed);
     }
@@ -461,7 +462,7 @@ pub fn turn_over(ed: &mut Editor) {
 /// terminal, the side panel, the bottom slot).
 pub fn taken_up(ed: &mut Editor) {
     if !ed.doc().aside
-        || ed.review.is_some()
+        || ed.lane.review.is_some()
         || ed.picker.is_some()
         || ed.prompt.is_some()
         || ed.lane.chat.as_ref().is_some_and(|c| c.focused)

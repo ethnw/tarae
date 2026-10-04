@@ -108,7 +108,7 @@ fn blocker(ed: &Editor, in_turn: bool) -> Option<String> {
         return Some(format!("unsaved changes in {} — save or close them first", stuck.join(", ")));
     }
     let claudes = |yes: bool| in_turn && yes;
-    if ed.review.is_some() && !claudes(ed.lane.chat.as_ref().is_some_and(|c| c.edits.review.is_some())) {
+    if ed.lane.review.is_some() && !claudes(ed.lane.chat.as_ref().is_some_and(|c| c.edits.review.is_some())) {
         return Some("a review is open — answer it first".into());
     }
     if crate::codereview::drafting(ed) {
@@ -985,7 +985,7 @@ mod tests {
             ),
         ];
         feed(&mut ed, "<space>lwrite it<ret>");
-        settle_until(&mut ed, |ed| ed.review.is_some());
+        settle_until(&mut ed, |ed| ed.lane.review.is_some());
         crate::typed::execute(&mut ed, "restart!").unwrap();
         assert_eq!(ed.restart.as_ref().unwrap().stage, Stage::Turn, "{}", toasts(&ed));
         feed(&mut ed, "y");

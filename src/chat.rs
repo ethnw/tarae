@@ -1008,7 +1008,7 @@ fn checkpoint_turn(ed: &mut Editor) {
 /// (then the row says how to get to it).
 pub fn turn_gathered(ed: &mut Editor, n: Option<String>) {
     if let Some(n) = n {
-        let open = ed.lane.code_review.is_none() && ed.review.is_none() && ed.restart.is_none();
+        let open = ed.lane.code_review.is_none() && ed.lane.review.is_none() && ed.restart.is_none();
         // (short: a row this narrow chat cuts at its end)
         let row = match open {
             true => format!("changed {n} · reviewing them now"),

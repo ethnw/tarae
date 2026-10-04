@@ -14,7 +14,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{Sender, channel};
+use std::sync::mpsc::channel;
 use std::time::{Duration, Instant};
 
 use ropey::Rope;
@@ -280,7 +280,7 @@ pub enum StreamEv {
 pub fn pump(
     mut child: Child,
     once: bool,
-    tx: Sender<Event>,
+    tx: crate::event::Tx,
     route: impl Fn(StreamEv) -> Option<Apply> + Send + 'static,
 ) {
     std::thread::spawn(move || {
@@ -648,7 +648,7 @@ pub type OnDone = Box<dyn FnOnce(&mut Editor, bool)>;
 /// Closes the open review as rejected (before another review takes its place — so the waiter gets an answer).
 /// An ask still waiting for its answer is killed (its result would no longer find its review).
 pub fn close_review(ed: &mut Editor) {
-    let Some(mut rev) = ed.review.take() else { return };
+    let Some(mut rev) = ed.lane.review.take() else { return };
     if !rev.ready
         && let Some(pid) = ed.llm_pid.take()
     {
@@ -755,7 +755,7 @@ pub fn ask(ed: &mut Editor, instruction: &str) -> Result<(), String> {
     if instruction.is_empty() {
         return Err("usage: :ask <instruction>".into());
     }
-    if ed.review.is_some() {
+    if ed.lane.review.is_some() {
         return Err("an ask is already in progress (:ask-cancel)".into());
     }
     let cfg = ed.config.llm.clone();
@@ -796,7 +796,7 @@ pub fn draft(
     from: usize,
     to: usize,
 ) -> Result<(), String> {
-    if ed.review.is_some() {
+    if ed.lane.review.is_some() {
         return Err("Claude is already answering (:ask-cancel)".into());
     }
     let doc = ed.docs.iter().find(|d| d.id == doc_id).ok_or("the buffer is gone")?;
@@ -834,17 +834,17 @@ fn start(
     ed.llm_generation += 1;
     let generation = ed.llm_generation;
     let n = hunks.len();
-    ed.review = Some(Review::new(generation, doc_id, instruction, hunks));
+    ed.lane.review = Some(Review::new(generation, doc_id, instruction, hunks));
     ed.llm_pid = Some(child.id());
     pump(child, true, ed.events.sender(), move |ev| {
         Some(match ev {
             StreamEv::Thinking | StreamEv::Thought(_) => Box::new(move |ed: &mut Editor| {
-                if let Some(r) = ed.review.as_mut().filter(|r| r.generation == generation) {
+                if let Some(r) = ed.lane.review.as_mut().filter(|r| r.generation == generation) {
                     r.thinking = true;
                 }
             }),
             StreamEv::Text(t) => Box::new(move |ed: &mut Editor| {
-                if let Some(r) = ed.review.as_mut().filter(|r| r.generation == generation) {
+                if let Some(r) = ed.lane.review.as_mut().filter(|r| r.generation == generation) {
                     r.thinking = false;
                     r.streamed.push_str(&t);
                 }
@@ -872,7 +872,7 @@ pub fn cancel(ed: &mut Editor) {
     if let Some(pid) = ed.llm_pid.take() {
         kill(pid);
     }
-    if ed.review.is_some() {
+    if ed.lane.review.is_some() {
         close_review(ed);
         ed.llm_generation += 1;
         ed.set_status("claude: cancelled");
@@ -907,7 +907,7 @@ pub fn review_with(
         }
         return ed.set_status("claude: no changes");
     }
-    ed.review =
+    ed.lane.review =
         Some(Review { ready: true, on_done, ..Review::new(ed.llm_generation, doc_id, instruction, hunks) });
 }
 
@@ -958,19 +958,19 @@ pub fn preview(streamed: &str, rows: usize) -> Vec<&str> {
 }
 
 fn on_result(ed: &mut Editor, generation: u64, result: Result<Vec<String>, String>) {
-    let Some(rev) = ed.review.as_mut().filter(|r| r.generation == generation) else { return };
+    let Some(rev) = ed.lane.review.as_mut().filter(|r| r.generation == generation) else { return };
     ed.llm_pid = None;
     let secs = rev.started.elapsed().as_secs_f32();
     let replies = match result {
         Ok(r) => r,
         Err(e) => {
-            ed.review = None;
+            ed.lane.review = None;
             ed.set_error(format!("claude: {e}"));
             return;
         }
     };
     let Some(doc_idx) = ed.docs.iter().position(|d| d.id == rev.doc_id) else {
-        ed.review = None;
+        ed.lane.review = None;
         ed.set_error("claude: buffer was closed");
         return;
     };
@@ -994,7 +994,7 @@ fn on_result(ed: &mut Editor, generation: u64, result: Result<Vec<String>, Strin
         } else {
             "claude: no changes"
         };
-        ed.review = None;
+        ed.lane.review = None;
         ed.set_status(msg);
         return;
     }
@@ -1030,7 +1030,7 @@ fn relocate(h: &mut Hunk, text: &Rope) -> bool {
 
 /// Keys during review. True if handled.
 pub fn review_key(ed: &mut Editor, key: Key) -> bool {
-    let Some(rev) = ed.review.as_mut().filter(|r| r.ready) else { return false };
+    let Some(rev) = ed.lane.review.as_mut().filter(|r| r.ready) else { return false };
     let decide = |rev: &mut Review, d: Decision| {
         rev.hunks[rev.current].decision = d;
         rev.follow = true;
@@ -1078,7 +1078,7 @@ pub fn review_key(ed: &mut Editor, key: Key) -> bool {
 
 /// Accepted changes as one transaction (= one undo).
 fn finish(ed: &mut Editor) {
-    let Some(mut rev) = ed.review.take() else { return };
+    let Some(mut rev) = ed.lane.review.take() else { return };
     let on_done = rev.on_done.take();
     let before = ed.docs.iter().find(|d| d.id == rev.doc_id).map(|d| d.text.clone());
     let applied = apply_accepted(ed, &rev);

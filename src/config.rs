@@ -5,7 +5,6 @@
 use std::fs;
 use std::io::{ErrorKind, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Sender;
 use std::thread;
 
 use toml::Value;
@@ -492,7 +491,7 @@ fn drop_typed(t: &mut toml::Table, path: &str, pass: &mut impl FnMut(String, &Va
 /// Config file watcher thread — sleeps until the files may have changed (inotify/kqueue, see `fswatch`),
 /// then compares mtimes. On change, it reads and parses here and sends only the result to the main loop.
 /// The project's files are `root`'s (the editor's).
-pub fn watch(tx: Sender<Event>, root: PathBuf) {
+pub fn watch(tx: crate::event::Tx, root: PathBuf) {
     let mut paths = layers(&root);
     let p = root.join(".tarae.toml");
     if !paths.contains(&p) {

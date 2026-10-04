@@ -225,7 +225,7 @@ fn tools() -> Value {
 }
 
 /// One connection: handshake → send thread → received messages go to the main loop.
-fn serve(stream: TcpStream, token: String, conn: u64, tx: Sender<Event>) {
+fn serve(stream: TcpStream, token: String, conn: u64, tx: crate::event::Tx) {
     let Ok(reader) = ws::handshake(&stream, Some((AUTH_HEADER, &token))) else { return };
     let mut reader = ws::Reader::server(reader);
     // Small JSON-RPC messages — don't hold them back waiting for ACKs (Nagle)
@@ -308,7 +308,7 @@ impl Editor {
             }
         }
         let Some((listener, port, lock)) = opened else { return };
-        let tx = self.events.sender();
+        let tx = self.events.shared_sender();
         let theirs = token.clone();
         std::thread::spawn(move || {
             let token = theirs;
@@ -641,7 +641,7 @@ impl Editor {
     /// hanging. Only here is the queue popped (not from a review's callback — that would install a review
     /// inside `review_with`, which then overwrites it).
     pub fn agent_next_diff(&mut self) {
-        while self.review.is_none() {
+        while self.lane.review.is_none() {
             let Some(d) = self.agent.as_mut().and_then(|a| a.queue.pop_front()) else { return };
             self.agent_show_diff(d);
         }
@@ -684,7 +684,7 @@ impl Editor {
                 ed.agent_diff_answer(d, applied);
             })),
         );
-        if let Some(r) = &mut self.review {
+        if let Some(r) = &mut self.lane.review {
             r.by = "Claude Code";
         }
         // Call whoever is waiting in the side pane (terminal bell)
@@ -952,11 +952,11 @@ mod tests {
             (v["id"].clone(), v["result"]["content"][0]["text"].clone()),
             (json!(1), json!("DIFF_REJECTED"))
         );
-        assert_eq!(ed.review.as_ref().unwrap().by, "Claude");
+        assert_eq!(ed.lane.review.as_ref().unwrap().by, "Claude");
         assert_eq!(ed.agent.as_ref().unwrap().queue.len(), 1);
         // The chat review ends → A2 shows
         ed.handle_event(Event::Key("q".parse().unwrap()));
-        assert_eq!(ed.review.as_ref().map(|r| r.by), Some("Claude Code"));
+        assert_eq!(ed.lane.review.as_ref().map(|r| r.by), Some("Claude Code"));
         ed.handle_event(Event::Key("y".parse().unwrap()));
         let v = sent_reply(&rx);
         assert_eq!(v["id"], 2);
@@ -1093,9 +1093,9 @@ mod tests {
             "params": { "name": "openDiff", "arguments": { "old_file_path": file, "new_file_path": file,
                 "new_file_contents": "one\nTWO\n", "tab_name": "✻ [Claude Code] a.txt" } } }),
         );
-        assert!(ed.review.as_ref().is_some_and(|r| r.ready));
+        assert!(ed.lane.review.as_ref().is_some_and(|r| r.ready));
         ed.handle_key("y".parse().unwrap());
-        assert!(ed.review.is_none());
+        assert!(ed.lane.review.is_none());
         let saved = reply(&mut r);
         assert_eq!(saved["id"], 4);
         assert_eq!(saved["result"]["content"][0]["text"], "FILE_SAVED");

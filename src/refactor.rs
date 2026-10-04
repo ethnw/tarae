@@ -65,7 +65,7 @@ pub struct Landing {
     noun: &'static str,
     /// Claude's words before the call (the review shows them).
     reason: String,
-    review: VecDeque<FileChange>,
+    pub(crate) review: VecDeque<FileChange>,
     /// How many went to review in all (`2 of 5` in the title).
     reviews: usize,
     done: Vec<(String, usize, Outcome)>,
@@ -167,11 +167,16 @@ fn queue(ed: &mut Editor, l: Landing) {
 /// Every event: once no review is up, the front landing's next file in review — or, its files all done,
 /// its answer.
 pub fn next(ed: &mut Editor) {
-    if ed.review.is_some() {
+    if ed.lane.review.is_some() {
         return;
     }
+    let background = ed.background();
     let Some(c) = ed.lane.chat.as_mut() else { return };
     let Some(l) = c.edits.sets.front_mut() else { return };
+    // (a lane behind: its files wait for their review until it's in front)
+    if background && !l.review.is_empty() {
+        return;
+    }
     match l.review.pop_front() {
         Some(f) => {
             let n = l.reviews - l.review.len();
@@ -224,7 +229,7 @@ fn show(ed: &mut Editor, f: FileChange, title: String, reason: String) {
         changes,
         Some(Box::new(move |ed: &mut Editor, applied: bool| reviewed(ed, f, doc_id, dirty, applied))),
     );
-    if let Some(r) = &mut ed.review {
+    if let Some(r) = &mut ed.lane.review {
         r.reason = reason;
         // (its turn in the chat is the step)
         r.own_turn = false;

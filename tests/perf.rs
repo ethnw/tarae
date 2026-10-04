@@ -198,6 +198,53 @@ fn perf_e2e_waiting_for_claude() {
     report("e2e_waiting_bytes_per_frame", bytes / frames.max(1.0), 400.0, 20.0);
 }
 
+/// Two lanes (`:lane-open` on a worktree), Claude streaming a word every 50 ms in the one behind: tarae's CPU
+/// and its frames a second in front, which shows nothing of it — the lane's results are applied (swapped in
+/// and out) but draw nothing.
+#[test]
+fn perf_e2e_busy_lane_behind() {
+    if unoptimized("perf_e2e_busy_lane_behind") {
+        return;
+    }
+    let sb = Sandbox::new("perf-lanes");
+    fs::write(sb.git_config(), "[user]\n\tname = t\n\temail = t@t\n[commit]\n\tgpgsign = false\n").unwrap();
+    big_file(&sb, "a.rs", 2_000);
+    sb.git(&["init", "-q", "-b", "main"]);
+    sb.git(&["add", "-A"]);
+    sb.git(&["commit", "-q", "-m", "base"]);
+    let wt = sb.work().with_file_name("wt");
+    sb.git(&["worktree", "add", "-q", "-b", "fix", wt.to_str().unwrap()]);
+    let word = r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"word "}}}"#;
+    let fake = format!(
+        "while read -r line; do\n  case \"$line\" in '{{\"message\"'*) ;; *) continue;; esac\n  i=0\n  \
+         while [ $i -lt 400 ]; do printf '%s\\n' '{word}'; sleep 0.05; i=$((i+1)); done\n  \
+         printf '%s\\n' '{{\"type\":\"result\",\"result\":\"done\"}}'\ndone\n"
+    );
+    let script = sb.home().join("fake-claude.sh");
+    fs::write(&script, fake).unwrap();
+    sb.write_config(&format!("{BASE_CONFIG}[llm]\ncommand = \"sh\"\nargs = [\"{}\"]\n", script.display()));
+    let mut t = Term::spawn(&sb, &["a.rs"], 160, 50);
+    t.wait_text("fn f1(");
+    t.send(&format!(":lane-open {}\r", wt.display()));
+    t.wait_text("lane 1");
+    t.send(" l");
+    t.send("go\r");
+    t.wait_text("word word");
+    // (Esc alone — with a key right behind it, it reads as alt+that key)
+    t.esc("the chat let go of the keys", |s| s.contains("C-f unfollow"));
+    t.send(":lane-switch 0\r");
+    t.wait_for("lane 0 in front", |s| !s.contains("word word"));
+    // (past the toasts' fade and the switch's frames)
+    std::thread::sleep(Duration::from_secs(4));
+    let (before, frames) = (t.usage(), t.frames());
+    let secs = 3.0;
+    std::thread::sleep(Duration::from_secs_f64(secs));
+    let used = t.usage() - before;
+    let frames = (t.frames() - frames) as f64;
+    report("e2e_busy_lane_behind_cpu_ms_per_s", ms(used.cpu) / secs, 10.0, 0.5);
+    report("e2e_busy_lane_behind_frames_per_s", frames / secs, 1.0, 0.2);
+}
+
 /// Memory with this repository open: its files (a copy, in a git repository of the test's own) listed in
 /// the file picker, the biggest source file open.
 #[test]

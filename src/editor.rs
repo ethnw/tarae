@@ -12,7 +12,7 @@ use crate::document::{DocId, Document, Snapshot};
 use crate::event::{Event, Queue};
 use crate::key::{Code, Key};
 use crate::keymap::{Keymaps, Lookup, MappableCommand};
-use crate::llm::{self, Review, Warm};
+use crate::llm::{self, Warm};
 use crate::lsp_editor::LspState;
 use crate::movement as mv;
 use crate::picker::{Action, Picker};
@@ -313,6 +313,11 @@ pub struct Editor {
     pub current: usize,
     /// The lane in front — its checkout, panes, chat, terminal, tests, tasks, git (`lane.rs`).
     pub lane: crate::lane::Lane,
+    /// The lanes behind it (switching swaps one with `lane`) · the last lane id given · a result of a lane
+    /// behind is being applied (`with_lane` — what would take the screen waits in that lane).
+    pub lanes: Vec<crate::lane::Lane>,
+    pub(crate) next_lane: crate::event::LaneId,
+    pub(crate) behind: bool,
     pub(crate) next_view: crate::split::ViewId,
     pub mode: Mode,
     pub keymaps: Keymaps,
@@ -386,8 +391,6 @@ pub struct Editor {
     /// The live search's latest key (N4) — a search under way for an earlier one stops (`grep::search`
     /// asks before each file and at each match).
     live_search: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    /// In-flight LLM request/review (one at a time).
-    pub review: Option<Review>,
     pub llm_warm: Warm,
     pub llm_generation: u64,
     /// The ask process awaiting an answer (killed on cancel).
@@ -534,11 +537,14 @@ impl Editor {
     pub fn with_root(config: Config, root: PathBuf) -> Self {
         let root = std::fs::canonicalize(&root).unwrap_or(root);
         let events = Queue::default();
-        let saver = crate::saver::Saver::new(events.sender());
+        let saver = crate::saver::Saver::new(events.shared_sender());
         let mut ed = Self {
             docs: Vec::new(),
             current: 0,
-            lane: crate::lane::Lane::new(root, 1),
+            lane: crate::lane::Lane::new(0, root, 1),
+            lanes: Vec::new(),
+            next_lane: 0,
+            behind: false,
             next_view: 2,
             mode: Mode::Normal,
             keymaps: config.keymaps,
@@ -565,7 +571,6 @@ impl Editor {
             sticky_used: false,
             events,
             saver,
-            review: None,
             picker: None,
             last_picker: None,
             picker_ids: 0,
@@ -676,21 +681,28 @@ impl Editor {
         self.next_id
     }
 
-    /// If the only buffer is the empty scratch created at startup, hand over its slot.
-    fn replaceable_scratch(&self) -> bool {
-        self.docs.len() == 1 && self.docs[0].path.is_none() && !self.docs[0].is_modified()
+    /// The slot of the empty scratch created at startup, if it can be handed over: the only buffer, or the
+    /// current one when it's the lane's own first (`lane_open`) and nothing else was added in it since.
+    fn replaceable_scratch(&self) -> Option<usize> {
+        let blank = |i: usize| self.docs[i].path.is_none() && !self.docs[i].is_modified();
+        if self.docs.len() == 1 && blank(0) {
+            return Some(0);
+        }
+        (self.lane.scratch == Some(self.docs[self.current].id) && blank(self.current)).then_some(self.current)
     }
 
     /// Adds a document and makes it current — taking over the startup scratch's slot if that's all there
     /// is (panes showing the scratch then show the new document).
     fn add_doc(&mut self, doc: Document) {
-        if self.replaceable_scratch() {
-            let (old, new) = (self.docs[0].id, doc.id);
+        let slot = self.replaceable_scratch();
+        self.lane.scratch = None;
+        if let Some(i) = slot {
+            let (old, new) = (self.docs[i].id, doc.id);
             for v in self.lane.views.iter_mut().filter(|v| v.doc == old) {
                 (v.doc, v.top, v.left) = (new, 0, 0);
             }
-            self.docs[0] = doc;
-            self.current = 0;
+            self.docs[i] = doc;
+            self.current = i;
         } else {
             self.docs.push(doc);
             self.current = self.docs.len() - 1;
@@ -1031,6 +1043,11 @@ impl Editor {
     }
 
     fn report(&mut self, kind: ToastKind, msg: String) {
+        let msg = self.said_by_lane(msg);
+        self.report_as_is(kind, msg);
+    }
+
+    fn report_as_is(&mut self, kind: ToastKind, msg: String) {
         let level = match kind {
             ToastKind::Error => "error",
             ToastKind::Warning => "warning",
@@ -1049,9 +1066,9 @@ impl Editor {
     /// A step under way (`fetching…`): its toast stays up until `step_done(key)` says it's over (at most
     /// `STEP_MAX`) — then it goes, and what came of it shows on its own. The same key again replaces it.
     pub fn set_step(&mut self, key: &'static str, msg: impl Into<String>) {
-        let msg = msg.into();
+        let msg = self.said_by_lane(msg.into());
         self.step_done(key);
-        self.report(ToastKind::Info, msg.clone());
+        self.report_as_is(ToastKind::Info, msg.clone());
         if let Some(t) = self.toasts.iter_mut().rev().find(|t| t.text == msg && t.kind == ToastKind::Info) {
             t.step = Some(key);
             t.life = STEP_MAX;
@@ -1251,6 +1268,7 @@ impl Editor {
                 self.plugin_input_went_in();
             }
             Event::Job(apply) => apply(self),
+            Event::For(lane, apply) => self.with_lane(lane, apply),
         }
         self.sync_focus_view();
         self.focus_sync();
@@ -1316,7 +1334,7 @@ impl Editor {
             c.cursor += text.len();
             return;
         }
-        if self.review.is_some() {
+        if self.lane.review.is_some() {
             return self.set_status("finish reviewing the answer first");
         }
         // A file under review (a turn's, a branch's) took the keys when the turn ended — a paste in normal mode
@@ -1605,7 +1623,7 @@ impl Editor {
             }
             return;
         }
-        if self.review.is_some() || self.welcome() {
+        if self.lane.review.is_some() || self.welcome() {
             return;
         }
         // Which pane (with splits, focus moves to the pane clicked/scrolled). With several panes the top
@@ -1730,7 +1748,7 @@ impl Editor {
     /// something is waited on, else a toast's (`toast_wake`) — None: no frame. Not the animation while the
     /// terminal says it's unfocused (`unfocused`): nobody sees it, and focus coming back draws it again.
     fn tick_wanted(&self) -> Option<std::time::Duration> {
-        let waiting = self.review.as_ref().is_some_and(|r| !r.ready)
+        let waiting = self.lane.review.as_ref().is_some_and(|r| !r.ready)
             || self.lane.chat.as_ref().is_some_and(|c| c.busy())
             || self.dap.as_ref().is_some_and(|d| d.state == crate::dap::State::Building)
             || self.lane.test_run.as_ref().is_some_and(|r| r.state == crate::testing::RunState::Running)
@@ -2346,7 +2364,7 @@ impl Editor {
                 && self.pending.is_empty()
                 && self.prompt.is_none()
                 && self.picker.is_none()
-                && self.review.is_none()
+                && self.lane.review.is_none()
                 && !self.lane.chat.as_ref().is_some_and(|c| c.focused)
                 && !self.lane.terminal.as_ref().is_some_and(|t| t.focus && t.visible && t.exited.is_none()))
     }
@@ -2709,7 +2727,7 @@ impl Editor {
         let lang = doc.lang_name();
         if !self.config.render_doc_comments
             || self.mode != Mode::Normal
-            || self.review.is_some()
+            || self.lane.review.is_some()
             || doc.left > 0
             || !crate::doccomment::applies(lang)
         {
@@ -3643,7 +3661,7 @@ mod tests {
         assert!(!turns[1].contains("<file-content>"), "same version only once");
         // C-r: review replacing the selection with the last code block → y
         feed(&mut ed, "<C-r>");
-        assert!(ed.review.as_ref().is_some_and(|r| r.ready));
+        assert!(ed.lane.review.as_ref().is_some_and(|r| r.ready));
         feed(&mut ed, "y");
         assert_eq!(text(&ed), "foo BAR");
         // esc = back to the editor (pane stays), space L = close
@@ -5857,7 +5875,7 @@ mod tests {
         let input = serde_json::json!({"file_path": main, "old_string": "line 2", "new_string": "LINE 2"});
         let log = fake_edit(&mut ed, &dir, "Edit", input, false);
         feed(&mut ed, "<space>lshout line 2<ret>");
-        settle_until(&mut ed, |ed| ed.review.is_some());
+        settle_until(&mut ed, |ed| ed.lane.review.is_some());
         assert!(!ed.lane.chat.as_ref().unwrap().focused, "the keys go to the review");
         feed(&mut ed, "y");
         let a = permission_answer(&log);
@@ -5907,9 +5925,9 @@ mod tests {
             ),
         ];
         feed(&mut ed, "<space>ltwo files please<ret>");
-        settle_until(&mut ed, |ed| ed.review.is_some());
+        settle_until(&mut ed, |ed| ed.lane.review.is_some());
         feed(&mut ed, "y");
-        settle_until(&mut ed, |ed| ed.review.is_some());
+        settle_until(&mut ed, |ed| ed.lane.review.is_some());
         feed(&mut ed, "y");
         settle_until(&mut ed, |ed| !ed.lane.chat.as_ref().unwrap().busy());
         let c = ed.lane.chat.as_ref().unwrap();
@@ -5978,8 +5996,8 @@ mod tests {
             ),
         ];
         feed(&mut ed, "<space>lfix it<ret>");
-        settle_until(&mut ed, |ed| ed.review.is_some());
-        let r = ed.review.as_ref().unwrap();
+        settle_until(&mut ed, |ed| ed.lane.review.is_some());
+        let r = ed.lane.review.as_ref().unwrap();
         assert_eq!(r.reason, "Line 2 is lowercase while the rest shout, so I will make it match.");
         // Under the title
         let mut bytes = Vec::new();
@@ -6016,8 +6034,8 @@ mod tests {
             ),
         ];
         feed(&mut ed, "<space>lshout<ret>");
-        settle_until(&mut ed, |ed| ed.review.is_some());
-        assert_eq!(ed.review.as_ref().unwrap().hunks.len(), 2);
+        settle_until(&mut ed, |ed| ed.lane.review.is_some());
+        assert_eq!(ed.lane.review.as_ref().unwrap().hunks.len(), 2);
         let mut bytes = Vec::new();
         crate::term::render(&mut ed, &mut bytes, 120, 40).unwrap();
         let (_, y, _, h) = ed.screen.thought_card.get().expect("the follow card");
@@ -6150,8 +6168,8 @@ mod tests {
             ),
         ];
         feed(&mut ed, "<space>ladd a flag<ret>");
-        settle_until(&mut ed, |ed| ed.review.is_some());
-        assert_eq!(ed.review.as_ref().unwrap().reason, "step 2/3: Wire it into the config");
+        settle_until(&mut ed, |ed| ed.lane.review.is_some());
+        assert_eq!(ed.lane.review.as_ref().unwrap().reason, "step 2/3: Wire it into the config");
         settle_until(&mut ed, |ed| !ed.lane.chat.as_ref().unwrap().busy());
         let p = ed.lane.chat.as_ref().unwrap().plan.clone().expect("the plan");
         assert_eq!((p.title.as_str(), p.done(), p.current()), ("Add a flag", 1, Some(1)));
@@ -6254,7 +6272,7 @@ mod tests {
         let input = serde_json::json!({"file_path": main, "old_string": "line 2", "new_string": "LINE 2"});
         let log = fake_edit(&mut ed, &dir, "Edit", input, false);
         feed(&mut ed, "<space>lshout<ret>");
-        settle_until(&mut ed, |ed| ed.review.is_some());
+        settle_until(&mut ed, |ed| ed.lane.review.is_some());
         feed(&mut ed, "n");
         let a = permission_answer(&log);
         assert_eq!(a["behavior"], "deny");
@@ -6273,7 +6291,7 @@ mod tests {
         let input = serde_json::json!({"file_path": util, "content": content});
         let log = fake_edit(&mut ed, &dir, "Write", input, false);
         feed(&mut ed, "<space>lshout<ret>");
-        settle_until(&mut ed, |ed| ed.review.is_some());
+        settle_until(&mut ed, |ed| ed.lane.review.is_some());
         feed(&mut ed, "yn");
         let a = permission_answer(&log);
         assert_eq!(a["behavior"], "allow", "{a}");
@@ -6294,7 +6312,7 @@ mod tests {
         let input = serde_json::json!({"file_path": main, "old_string": "line 2", "new_string": "LINE 2"});
         let log = fake_edit(&mut ed, &dir, "Edit", input.clone(), false);
         feed(&mut ed, "<space>lshout<ret>");
-        settle_until(&mut ed, |ed| ed.review.is_some());
+        settle_until(&mut ed, |ed| ed.lane.review.is_some());
         feed(&mut ed, "y");
         let a = permission_answer(&log);
         assert_eq!(a["behavior"], "deny");
@@ -6314,7 +6332,7 @@ mod tests {
         );
         feed(&mut ed, "<space>lagain<ret>");
         settle_until(&mut ed, |ed| !ed.lane.chat.as_ref().unwrap().busy());
-        assert!(ed.review.is_none(), "no orphaned review");
+        assert!(ed.lane.review.is_none(), "no orphaned review");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -6353,10 +6371,10 @@ mod tests {
         ed.open(&main).unwrap();
         let log = fake_two_edits(&mut ed, &dir, &main);
         feed(&mut ed, "<space>ltwo edits<ret>");
-        settle_until(&mut ed, |ed| ed.review.is_some());
+        settle_until(&mut ed, |ed| ed.lane.review.is_some());
         feed(&mut ed, "y");
         assert_eq!(permission_answer_to(&log, "p1")["behavior"], "allow");
-        settle_until(&mut ed, |ed| ed.review.is_some());
+        settle_until(&mut ed, |ed| ed.lane.review.is_some());
         feed(&mut ed, "y");
         let a = permission_answer_to(&log, "p2");
         assert_eq!(a["behavior"], "allow", "{a}");
@@ -6382,10 +6400,10 @@ mod tests {
         ed.open(&main).unwrap();
         let log = fake_two_edits(&mut ed, &dir, &main);
         feed(&mut ed, "<space>ltwo edits<ret>");
-        settle_until(&mut ed, |ed| ed.review.is_some());
+        settle_until(&mut ed, |ed| ed.lane.review.is_some());
         feed(&mut ed, "y");
         feed(&mut ed, "ggiX<esc>"); // (before p2 is read — events wait for settle_until)
-        settle_until(&mut ed, |ed| ed.review.is_some());
+        settle_until(&mut ed, |ed| ed.lane.review.is_some());
         feed(&mut ed, "y");
         let a = permission_answer_to(&log, "p2");
         assert_eq!(a["behavior"], "deny", "{a}");
@@ -6537,7 +6555,7 @@ mod tests {
         feed(&mut ed, "<space>l");
         ed.lane.chat.as_mut().unwrap().edits.at_end = Some(dir.clone());
         feed(&mut ed, "write them<ret>");
-        settle_until(&mut ed, |ed| ed.review.is_some());
+        settle_until(&mut ed, |ed| ed.lane.review.is_some());
         // p1, p2: allowed as asked, nothing shown, nothing written by tarae
         for (id, input) in [
             ("p1", edit(&main, "line 2", "LINE 2")),
@@ -6559,11 +6577,11 @@ mod tests {
         feed(&mut ed, "y");
         assert_eq!(permission_answer_to(&log, "p3")["behavior"], "allow");
         // p4: outside the project too
-        settle_until(&mut ed, |ed| ed.review.is_some());
+        settle_until(&mut ed, |ed| ed.lane.review.is_some());
         assert_eq!(ed.doc().path.as_deref(), Some(outside.as_path()));
         feed(&mut ed, "y");
         // p5: unsaved edits in util.rs — a review, and it stays in the buffer
-        settle_until(&mut ed, |ed| ed.review.is_some());
+        settle_until(&mut ed, |ed| ed.lane.review.is_some());
         assert_eq!(ed.doc().path.as_deref(), Some(util.as_path()));
         let kept = |p: &Path| ed.lane.checkpoints.turn.iter().find(|t| t.path == p).map(|t| t.unseen);
         assert_eq!(kept(&build), Some(false), "seen in its review");
@@ -6594,7 +6612,7 @@ mod tests {
         feed(&mut ed, "<space>l");
         ed.handle_event(Event::Key("c".parse().unwrap())); // (typed in the chat's input)
         feed(&mut ed, "hange it<ret>");
-        settle_until(&mut ed, |ed| ed.review.is_some());
+        settle_until(&mut ed, |ed| ed.lane.review.is_some());
         assert_eq!(ed.doc().path.as_deref(), Some(outside.as_path()), "its review");
         let restarted = crate::restart::snapshot(&mut ed);
         let saved: Vec<&str> =
@@ -6915,6 +6933,248 @@ mod tests {
             git_in(&dir, args);
         }
         std::fs::canonicalize(dir).unwrap()
+    }
+
+    /// A worktree of `repo` beside it, on a new branch `name` — another lane's checkout.
+    fn worktree(repo: &Path, name: &str) -> PathBuf {
+        let wt = repo.with_file_name(format!("{}-{name}", repo.file_name().unwrap().to_string_lossy()));
+        std::fs::remove_dir_all(&wt).ok();
+        git_in(repo, &["worktree", "add", "-q", "-b", name, wt.to_str().unwrap()]);
+        std::fs::canonicalize(wt).unwrap()
+    }
+
+    /// Lane `id`, wherever it is (in front or behind).
+    fn lane(ed: &Editor, id: crate::event::LaneId) -> &crate::lane::Lane {
+        std::iter::once(&ed.lane).chain(&ed.lanes).find(|l| l.id == id).expect("the lane")
+    }
+
+    /// A lane behind goes on: its Claude (started in its checkout) streams into its own chat, not the front
+    /// one's — and the front draws nothing for it but what it says; what it reads doesn't move the editor.
+    #[test]
+    fn a_background_lanes_chat_streams_into_its_lane() {
+        use serde_json::json;
+        let repo = git_repo("lane-chat", &[("a.txt", "one\n")]);
+        let wt = worktree(&repo, "fix");
+        let ran_in = wt.join("claude-ran-here");
+        let text = |t: &str| json!({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": t}}});
+        let read = json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "r1", "name": "Read", "input": {"file_path": wt.join("a.txt")}}]}});
+        let mut ed = editor("");
+        ed.lane.root = repo.clone();
+        feed(&mut ed, ":o a.txt<ret>");
+        let front_doc = ed.doc().id;
+        fake_claude_stream(
+            &mut ed,
+            &[
+                json!(format!("pwd > '{}'", ran_in.display())),
+                json!("sleep 0.3"),
+                read,
+                text("Hello "),
+                json!("sleep 0.2"),
+                text("from the worktree"),
+                json!({"type": "result", "result": "done"}),
+            ],
+        );
+        feed(&mut ed, &format!(":lane-open {}<ret>", wt.display()));
+        let behind = ed.lane.id;
+        assert_eq!((behind, ed.lane.root.clone()), (1, wt.clone()));
+        feed(&mut ed, "<space>lhi<ret><esc>:lane-switch 0<ret>");
+        assert_eq!(ed.lane.root, repo, "lane 0 in front");
+        assert!(lane(&ed, behind).chat.as_ref().unwrap().busy(), "switched while Claude works");
+        let (mut events, mut drawn) = (0, 0);
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while lane(&ed, behind).chat.as_ref().unwrap().busy() {
+            let left = end.saturating_duration_since(std::time::Instant::now());
+            let ev = ed.events.recv_timeout(left).expect("the lane behind's answer");
+            // (the front's own results — `:lane-open`'s path completion — draw as ever)
+            let from_behind = matches!(ev, Event::For(id, _) if id == behind);
+            ed.unchanged = false;
+            ed.handle_event(ev);
+            if from_behind {
+                events += 1;
+                drawn += usize::from(!std::mem::take(&mut ed.unchanged));
+            }
+        }
+        assert!(events >= 3, "its answer came as {events} events");
+        let c = lane(&ed, behind).chat.as_ref().unwrap();
+        let said: Vec<&str> = c.msgs.iter().map(|m| m.text.as_str()).collect();
+        assert!(said.iter().any(|m| m.contains("Hello from the worktree")), "{said:?}");
+        assert!(ed.lane.chat.is_none(), "nothing in the front lane's chat");
+        assert_eq!(ed.doc().id, front_doc, "its read didn't move the editor in front");
+        let opened = |p: &Path| ed.docs.iter().any(|d| d.path.as_deref() == Some(p));
+        assert!(!opened(&wt.join("a.txt")), "nor opened its file behind");
+        assert_eq!(std::fs::read_to_string(&ran_in).unwrap().trim(), wt.to_str().unwrap());
+        let said =
+            ed.messages.iter().filter(|m| m.2.starts_with(&format!("{} · ", lane(&ed, behind).name())));
+        assert_eq!(drawn, said.count(), "{events} events behind drew {drawn} frames in front");
+        feed(&mut ed, ":lane-switch 1<ret>");
+        assert!(ed.lane.chat.as_ref().unwrap().msgs.iter().any(|m| m.text.contains("from the worktree")));
+        git_in(&repo, &["worktree", "remove", "--force", wt.to_str().unwrap()]);
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// A lane behind's terminal goes on and its output is read into it — a terminal started in front
+    /// meanwhile doesn't make its output "an older run's".
+    #[test]
+    fn a_background_lanes_terminal_keeps_its_output() {
+        let repo = git_repo("lane-term", &[("a.txt", "one\n")]);
+        let wt = worktree(&repo, "term");
+        let mut ed = editor("");
+        ed.lane.root = repo.clone();
+        let behind = ed.lane_open(&wt).unwrap();
+        let sh = |s: &str| vec!["/bin/sh".to_string(), "-c".into(), s.into()];
+        assert!(ed.terminal_run(sh("sleep 0.3; echo from-behind; sleep 5"), Vec::new()));
+        assert!(ed.lane_switch(0));
+        assert!(ed.terminal_run(sh("echo in-front; sleep 5"), Vec::new()));
+        let shows = |t: Option<&crate::terminal::Terminal>, s: &str| {
+            t.is_some_and(|t| t.parser.screen().contents().contains(s))
+        };
+        settle_until(&mut ed, |ed| {
+            shows(lane(ed, behind).terminal.as_ref(), "from-behind")
+                && shows(ed.lane.terminal.as_ref(), "in-front")
+        });
+        assert!(!shows(ed.lane.terminal.as_ref(), "from-behind"), "each lane's output in its own terminal");
+        assert!(ed.lane_switch(behind));
+        assert!(shows(ed.lane.terminal.as_ref(), "from-behind"));
+        ed.lane.terminal = None;
+        ed.lanes.clear();
+        git_in(&repo, &["worktree", "remove", "--force", wt.to_str().unwrap()]);
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// A lane's panes, its document and the cursor in it come back when it does; `:lane-switch` alone lists
+    /// the lanes; a relative path opens in the lane's own checkout.
+    #[test]
+    fn a_lanes_panes_come_back_when_it_does() {
+        let repo = git_repo("lane-views", &[("a.txt", "one\ntwo\nthree\n")]);
+        let wt = worktree(&repo, "views");
+        let mut ed = editor("");
+        ed.lane.root = repo.clone();
+        feed(&mut ed, ":o a.txt<ret>jj<C-w>v");
+        assert_eq!(ed.lane.views.len(), 2);
+        feed(&mut ed, &format!(":lane-open {}<ret>", wt.display()));
+        assert_eq!(ed.lane.views.len(), 1, "a new lane starts with one pane");
+        feed(&mut ed, ":o a.txt<ret>j");
+        assert_eq!(ed.doc().path.as_deref(), Some(wt.join("a.txt").as_path()));
+        assert_eq!(ed.docs.len(), 2, "its first file took its blank scratch's place, as at startup");
+        feed(&mut ed, ":lane-switch 0<ret>");
+        assert_eq!(ed.lane.views.len(), 2);
+        assert_eq!(ed.doc().path.as_deref(), Some(repo.join("a.txt").as_path()));
+        assert_eq!(cursor_line(&ed), 2);
+        feed(&mut ed, ":lane-switch 1<ret>");
+        assert_eq!(ed.doc().path.as_deref(), Some(wt.join("a.txt").as_path()));
+        assert_eq!(cursor_line(&ed), 1);
+        feed(&mut ed, ":lane-switch<ret>");
+        let (msg, _) = ed.status.clone().unwrap();
+        assert!(msg.contains("0 tarae-review-lane-views") && msg.contains("-views ●"), "{msg}");
+        feed(&mut ed, &format!(":lane-open {}<ret>", repo.display()));
+        assert_eq!((ed.lane.id, ed.lanes.len()), (0, 1), "a checkout with a lane gets that lane");
+        git_in(&repo, &["worktree", "remove", "--force", wt.to_str().unwrap()]);
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// Claude's cards in a lane behind wait for it: nothing comes up over the front lane — no card, no
+    /// review, the cursor stays — and it's said once, named; in front they're up; leaving again, they go
+    /// with it. Harmless: the read it asks for is never answered (a file in the test's own temp folder).
+    #[test]
+    fn a_background_claudes_cards_wait_for_its_lane() {
+        use serde_json::json;
+        let repo = git_repo("lane-card", &[("a.txt", "one\n")]);
+        let wt = worktree(&repo, "card");
+        let file = wt.join("a.txt");
+        let out = repo.with_file_name(format!("tarae-lane-outside-{}", std::process::id()));
+        std::fs::create_dir_all(&out).unwrap();
+        let outside = std::fs::canonicalize(&out).unwrap().join("notes.md");
+        std::fs::write(&outside, "# marker\n").unwrap();
+        let ask = |id: &str, tool: &str, input: serde_json::Value| {
+            json!({"type": "control_request", "request_id": id,
+            "request": {"subtype": "can_use_tool", "tool_name": tool, "input": input}})
+        };
+        let mut ed = editor("");
+        ed.lane.root = repo.clone();
+        feed(&mut ed, ":o a.txt<ret>");
+        let front_doc = ed.doc().id;
+        fake_claude_stream(
+            &mut ed,
+            &[
+                json!("sleep 0.3"),
+                ask("r1", "Read", json!({"file_path": outside})),
+                ask("e1", "Edit", json!({"file_path": file, "old_string": "one", "new_string": "ONE"})),
+            ],
+        );
+        let behind = ed.lane_open(&wt).unwrap();
+        feed(&mut ed, "<space>lfix it<ret><esc>:lane-switch 0<ret>");
+        let waiting = |ed: &Editor| {
+            let l = lane(ed, behind);
+            l.parked.iter().any(crate::offer::Offer::claudes)
+                && l.chat.as_ref().is_some_and(|c| !c.edits.queue.is_empty())
+        };
+        settle_until(&mut ed, waiting);
+        assert!(ed.offers.is_empty(), "no card over the front lane");
+        assert!(ed.lane.review.is_none(), "no review over it");
+        assert_eq!(ed.doc().id, front_doc, "the front stays where it was");
+        let told: Vec<&String> =
+            ed.messages.iter().map(|m| &m.2).filter(|m| m.contains("Claude waits for your answer")).collect();
+        assert_eq!(told.len(), 1, "said once: {told:?}");
+        assert!(told[0].starts_with(&format!("{} · ", lane(&ed, behind).name())), "named: {}", told[0]);
+        // In front: its card and its review are up, on its own file
+        feed(&mut ed, ":lane-switch 1<ret>");
+        assert!(ed.offers.iter().any(crate::offer::Offer::claudes), "the card");
+        assert!(ed.lane.review.is_some(), "the review");
+        assert_eq!(ed.doc().path.as_deref(), Some(file.as_path()));
+        // Away again: Claude's card goes with its lane
+        ed.lane_switch(0);
+        assert!(ed.offers.is_empty());
+        assert!(lane(&ed, behind).parked.iter().any(crate::offer::Offer::claudes));
+        ed.lanes.clear();
+        git_in(&repo, &["worktree", "remove", "--force", wt.to_str().unwrap()]);
+        std::fs::remove_dir_all(&repo).ok();
+        std::fs::remove_dir_all(&out).ok();
+    }
+
+    /// Switching lanes with 20 files open in each — a number for `cargo perf` (it's two swaps and a few
+    /// lookups, whatever is open). At opt-level 0 it skips itself, saying so past libtest's capture.
+    #[test]
+    fn perf_lane_switch_with_twenty_files_each() {
+        if !cfg!(tarae_optimized) {
+            let line = format!(
+                "{}editor::tests::perf_lane_switch_with_twenty_files_each — built at opt-level 0 (the test \
+                 profile); `cargo perf` runs it\n",
+                crate::test_results::SELF_SKIP
+            );
+            let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+            return;
+        }
+        let files: Vec<(String, String)> = (0..20)
+            .map(|i| (format!("f{i}.rs"), (0..2_000).map(|l| format!("fn f{l}() {{ {i} }}\n")).collect()))
+            .collect();
+        let refs: Vec<(&str, &str)> = files.iter().map(|(n, t)| (n.as_str(), t.as_str())).collect();
+        let repo = git_repo("lane-perf", &refs);
+        let wt = worktree(&repo, "perf");
+        let mut ed = editor("");
+        ed.lane.root = repo.clone();
+        let open_all = |ed: &mut Editor| {
+            for (name, _) in &files {
+                ed.open(Path::new(name)).unwrap();
+            }
+        };
+        open_all(&mut ed);
+        let behind = ed.lane_open(&wt).unwrap();
+        open_all(&mut ed);
+        assert_eq!(ed.docs.len(), 40, "each lane's first file took its scratch's place");
+        let mut runs: Vec<f64> = (0..200)
+            .map(|i| {
+                let t0 = std::time::Instant::now();
+                ed.lane_switch(if i % 2 == 0 { 0 } else { behind });
+                t0.elapsed().as_secs_f64() * 1e6
+            })
+            .collect();
+        runs.sort_by(f64::total_cmp);
+        let us = runs[runs.len() / 2];
+        let line = format!("PERF lane_switch_us {us:.3} budget=1000 noise=2\n");
+        let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+        assert!(us < 1000.0, "{us:.1} µs (budget 1 ms)");
+        git_in(&repo, &["worktree", "remove", "--force", wt.to_str().unwrap()]);
+        std::fs::remove_dir_all(&repo).ok();
     }
 
     /// The git tab: changes and staged files as sections; `s` stages the file under the selection, `c` opens
@@ -7763,7 +8023,7 @@ mod tests {
         feed(&mut ed, "s");
         settle_until(&mut ed, |ed| ed.lane.git_status.as_ref().is_some_and(|s| !s.staged.is_empty()));
         feed(&mut ed, "C");
-        settle_until(&mut ed, |ed| ed.review.as_ref().is_some_and(|r| r.ready));
+        settle_until(&mut ed, |ed| ed.lane.review.as_ref().is_some_and(|r| r.ready));
         let sent = std::fs::read_to_string(&log).unwrap();
         assert!(sent.contains("<recent-commits>") && sent.contains("base"), "its style: {sent}");
         assert!(sent.contains("+two"), "the staged diff: {sent}");
@@ -9102,7 +9362,7 @@ mod tests {
         fake_claude(&mut ed, "<r i=\"1\">LINE</r>", false);
         feed(&mut ed, "e iupper<ret>");
         // (a file's own jobs — its parse — may come first)
-        settle_until(&mut ed, |ed| ed.review.as_ref().is_some_and(|r| r.ready));
+        settle_until(&mut ed, |ed| ed.lane.review.as_ref().is_some_and(|r| r.ready));
         feed(&mut ed, "y");
         assert_eq!(text(&ed), "LINE 1\nline 2\nline 3\n");
         assert_eq!(ed.lane.checkpoints.list.last().map(|c| c.question.as_str()), Some("upper"));
@@ -9120,12 +9380,12 @@ mod tests {
         feed(&mut ed, "e i");
         assert_eq!(ed.prompt.as_ref().map(|p| p.text.as_str()), Some("ask "));
         feed(&mut ed, "upper<ret>");
-        assert!(ed.review.as_ref().is_some_and(|r| !r.ready), "editing isn't blocked while waiting");
+        assert!(ed.lane.review.as_ref().is_some_and(|r| !r.ready), "editing isn't blocked while waiting");
         settle(&mut ed);
-        assert!(ed.review.as_ref().is_some_and(|r| r.ready));
+        assert!(ed.lane.review.as_ref().is_some_and(|r| r.ready));
         feed(&mut ed, "y");
         assert_eq!(text(&ed), "FOO bar");
-        assert!(ed.review.is_none());
+        assert!(ed.lane.review.is_none());
         feed(&mut ed, "u");
         assert_eq!(text(&ed), "foo bar");
     }
@@ -9157,7 +9417,7 @@ mod tests {
         fake_claude(&mut ed, "Not logged in", true);
         feed(&mut ed, ":ask x<ret>");
         settle(&mut ed);
-        assert!(ed.review.is_none());
+        assert!(ed.lane.review.is_none());
         assert_eq!(ed.status, Some(("claude: Not logged in".into(), Severity::Error)));
     }
 

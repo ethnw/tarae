@@ -718,7 +718,7 @@ fn snapshot_ask_review() {
     s.ed.config.llm.args = vec!["-c".into(), format!("read -r line; printf '%s\\n' '{json}'")];
     s.keys("17ggx i");
     s.keys("show the text too<ret>");
-    s.until("review", |ed| ed.review.as_ref().is_some_and(|r| r.ready));
+    s.until("review", |ed| ed.lane.review.as_ref().is_some_and(|r| r.ready));
     s.ed.toasts.clear(); // "claude answered in 0.0s" — wall-clock time
     s.check("ask_review");
 }

@@ -451,61 +451,60 @@ impl Editor {
         let tx = self.events.sender();
         // Each stream reads its places on its own thread (a stat per `path:line` — never the main loop's)
         let cwd = task.cwd.clone();
-        let send_lines = move |tx: &std::sync::mpsc::Sender<crate::event::Event>,
-                               matcher: &mut Matcher,
-                               err: bool,
-                               lines: Vec<String>| {
-            let lines: Vec<(String, Option<Item>)> = lines
-                .iter()
-                .map(|l| {
-                    let line = crate::testing::strip_ansi(l);
-                    let found = matcher.line(&cwd, &line);
-                    (line, found)
-                })
-                .collect();
-            let apply = move |ed: &mut Editor| {
-                let Some(r) = ed.lane.task_run.as_mut().filter(|r| r.generation == generation) else {
-                    return;
-                };
-                // (a preflight's markers move its steps on, and aren't shown — `preflight.rs`)
-                let mut preflight = ed.lane.preflight.as_mut().filter(|p| p.generation == generation);
-                let mut places = Vec::new();
-                r.last_output = Instant::now();
-                for (line, found) in lines {
-                    let shown = match preflight.as_deref_mut() {
-                        Some(p) => p.line(&line),
-                        None => Some(line),
+        let send_lines =
+            move |tx: &crate::event::Tx, matcher: &mut Matcher, err: bool, lines: Vec<String>| {
+                let lines: Vec<(String, Option<Item>)> = lines
+                    .iter()
+                    .map(|l| {
+                        let line = crate::testing::strip_ansi(l);
+                        let found = matcher.line(&cwd, &line);
+                        (line, found)
+                    })
+                    .collect();
+                let apply = move |ed: &mut Editor| {
+                    let Some(r) = ed.lane.task_run.as_mut().filter(|r| r.generation == generation) else {
+                        return;
                     };
-                    if let Some(line) = shown {
-                        r.output.push((err, line));
+                    // (a preflight's markers move its steps on, and aren't shown — `preflight.rs`)
+                    let mut preflight = ed.lane.preflight.as_mut().filter(|p| p.generation == generation);
+                    let mut places = Vec::new();
+                    r.last_output = Instant::now();
+                    for (line, found) in lines {
+                        let shown = match preflight.as_deref_mut() {
+                            Some(p) => p.line(&line),
+                            None => Some(line),
+                        };
+                        if let Some(line) = shown {
+                            r.output.push((err, line));
+                        }
+                        places.extend(found.filter(|_| !install));
                     }
-                    places.extend(found.filter(|_| !install));
-                }
-                let n = r.output.len();
-                if n > 5000 {
-                    r.output.drain(..n - 5000);
-                }
-                for it in places {
-                    let Some(r) = ed.lane.task_run.as_mut() else { break };
-                    // Counted once (the same place twice isn't two) — the run's own, for its report; the
-                    // user's list only from a run that feeds it (#28)
-                    let seen = |p: &Item| p.path == it.path && p.line == it.line && p.message == it.message;
-                    if r.places.iter().any(seen) || r.places.len() >= PLACES_KEPT {
-                        continue;
+                    let n = r.output.len();
+                    if n > 5000 {
+                        r.output.drain(..n - 5000);
                     }
-                    match it.severity {
-                        1 => r.found.0 += 1,
-                        2 => r.found.1 += 1,
-                        _ => {}
+                    for it in places {
+                        let Some(r) = ed.lane.task_run.as_mut() else { break };
+                        // Counted once (the same place twice isn't two) — the run's own, for its report; the
+                        // user's list only from a run that feeds it (#28)
+                        let seen =
+                            |p: &Item| p.path == it.path && p.line == it.line && p.message == it.message;
+                        if r.places.iter().any(seen) || r.places.len() >= PLACES_KEPT {
+                            continue;
+                        }
+                        match it.severity {
+                            1 => r.found.0 += 1,
+                            2 => r.found.1 += 1,
+                            _ => {}
+                        }
+                        r.places.push(it.clone());
+                        if feeds {
+                            ed.qlist_push(it);
+                        }
                     }
-                    r.places.push(it.clone());
-                    if feeds {
-                        ed.qlist_push(it);
-                    }
-                }
+                };
+                tx.send(crate::event::Event::Job(Box::new(apply))).is_ok()
             };
-            tx.send(crate::event::Event::Job(Box::new(apply))).is_ok()
-        };
         std::thread::spawn(move || {
             let err_reader = stderr.map(|e| {
                 let tx = tx.clone();

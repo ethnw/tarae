@@ -551,7 +551,7 @@ impl Editor {
         let cid = self.lsp.next_id;
         let (server, options) = crate::java::prepare(server, &root);
         let options = lsp::options_for(&server, &root, options);
-        match Client::start(cid, &server, &root, options, self.events.sender()) {
+        match Client::start(cid, &server, &root, options, self.events.shared_sender()) {
             Ok(c) => {
                 // (started again after it exited: no longer the status line's red dot)
                 self.lsp.failed.remove(&server.name);
@@ -4701,15 +4701,15 @@ mod tests {
             lsp::uri(&other): [te5(1, 11), te5(3, 7)],
             lsp::uri(&std::fs::canonicalize(&third).unwrap()): [te5(0, 16)] } });
         ed.on_lsp_message(cid, json!({ "id": n, "result": changes }));
-        let title = |ed: &Editor| ed.review.as_ref().map(|r| r.instruction.clone());
-        settle_for(&mut ed, 5, |ed| ed.review.is_some());
+        let title = |ed: &Editor| ed.lane.review.as_ref().map(|r| r.instruction.clone());
+        settle_for(&mut ed, 5, |ed| ed.lane.review.is_some());
         assert_eq!(title(&ed).as_deref(), Some("rename `alpha` → `beta` · 1 of 3"));
         assert_eq!(ed.doc().path.as_ref(), Some(&file));
         feed(&mut ed, "a");
-        settle_for(&mut ed, 5, |ed| ed.review.is_some());
+        settle_for(&mut ed, 5, |ed| ed.lane.review.is_some());
         assert_eq!(title(&ed).as_deref(), Some("rename `alpha` → `beta` · 2 of 3"));
         feed(&mut ed, "q");
-        settle_for(&mut ed, 5, |ed| ed.review.is_some());
+        settle_for(&mut ed, 5, |ed| ed.lane.review.is_some());
         assert_eq!(ed.doc().path.as_deref(), Some(std::fs::canonicalize(&third).unwrap().as_path()));
         feed(&mut ed, "a");
         settle_for(&mut ed, 5, |_| tool_answer(7).is_some());

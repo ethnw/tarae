@@ -190,7 +190,7 @@ impl Editor {
             if found.is_empty() {
                 return;
             }
-            let events = self.events.sender();
+            let events = self.events.shared_sender();
             let started = Host::start(move |note| {
                 let _ = events.send(Event::Job(Box::new(move |ed: &mut Editor| ed.plugin_note(note))));
             });
@@ -311,7 +311,7 @@ impl Editor {
     pub fn plugin_run(&mut self, name: &str, args: &str) -> Result<(), String> {
         let cmd = self.plugin_command(name).cloned().ok_or_else(|| format!("no such command: '{name}'"))?;
         let (input, seen) = self.plugin_input(self.doc().id, args).expect("the current buffer is open");
-        let events = self.events.sender();
+        let events = self.events.shared_sender();
         let plugin = cmd.plugin.clone();
         let reply = Box::new(move |result: Result<Vec<Action>, String>| {
             let apply = move |ed: &mut Editor| match result {

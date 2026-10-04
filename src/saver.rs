@@ -56,14 +56,14 @@ struct Shared {
 }
 
 pub struct Saver {
-    events: Sender<Event>,
+    events: crate::event::Tx,
     /// The thread, started with the first save
     tx: Option<Sender<Job>>,
     shared: Arc<(Mutex<Shared>, Condvar)>,
 }
 
 impl Saver {
-    pub fn new(events: Sender<Event>) -> Saver {
+    pub fn new(events: crate::event::Tx) -> Saver {
         Saver { events, tx: None, shared: Arc::default() }
     }
 

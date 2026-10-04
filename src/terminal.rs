@@ -198,7 +198,7 @@ fn spawn(
     env: &[(String, String)],
     rows: u16,
     cols: u16,
-    events: Sender<crate::event::Event>,
+    events: crate::event::Tx,
     generation: u64,
 ) -> Result<Terminal, String> {
     let (mut master, mut slave) = (0, 0);
@@ -336,7 +336,7 @@ fn output(ed: &mut Editor, generation: u64, bytes: &[u8]) {
         if !t.selecting {
             t.selection = None;
         }
-    } else if ed.terminal_generation == generation {
+    } else if ed.lane.terminal_run == generation {
         ed.lane.terminal_early.0.extend_from_slice(bytes);
     }
 }
@@ -349,7 +349,7 @@ fn ended(ed: &mut Editor, generation: u64, code: i32) {
         if std::mem::take(&mut t.focus) && ed.zoom == Some(crate::sizes::Zoom::Bottom) {
             ed.bottom_focus = true;
         }
-    } else if ed.terminal_generation == generation {
+    } else if ed.lane.terminal_run == generation {
         ed.lane.terminal_early.1 = Some(code);
     }
 }
@@ -434,13 +434,14 @@ impl Editor {
         self.terminal_generation += 1;
         self.lane.terminal_early = Default::default();
         let generation = self.terminal_generation;
+        self.lane.terminal_run = generation;
         self.lane.terminal_starting = true;
         let cwd = self.lane.root.clone();
         let events = self.events.sender();
         self.events.jobs().spawn(move || {
             let result = spawn(&argv, &cwd, &env, rows, cols, events, generation);
             move |ed: &mut Editor| {
-                if ed.terminal_generation != generation {
+                if ed.lane.terminal_run != generation {
                     return;
                 }
                 ed.lane.terminal_starting = false;
@@ -652,7 +653,7 @@ mod tests {
     fn output_before_the_terminal_is_in_place_is_kept() {
         let (config, _) = crate::config::parse("");
         let mut ed = Editor::new(config);
-        ed.terminal_generation = 7;
+        (ed.terminal_generation, ed.lane.terminal_run) = (7, 7);
         let argv = ["/bin/sh".to_string(), "-c".into(), "sleep 5".into()];
         let t = spawn(&argv, Path::new("/"), &[], 5, 40, ed.events.sender(), 7).unwrap();
         output(&mut ed, 7, b"early \x1b[1mbird");

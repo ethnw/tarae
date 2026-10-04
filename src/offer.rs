@@ -186,6 +186,11 @@ impl Offer {
         }
     }
 
+    /// Whether Claude's call waits on it — it goes with its lane when another comes to the front.
+    pub fn claudes(&self) -> bool {
+        matches!(self.what, What::Run(_) | What::NoSandbox { .. } | What::Read { .. } | What::Screen { .. })
+    }
+
     pub fn installing(&self) -> bool {
         matches!(self.state, OfferState::Installing(_))
     }
@@ -206,6 +211,12 @@ impl crate::editor::Editor {
     /// Stacks an offer (at the back). If one with the same title exists, keeps it (untouched while
     /// downloading; only its content is refreshed while asking).
     pub fn push_offer(&mut self, mut o: Offer) {
+        // From a lane behind: it waits in that lane, and comes up when the lane is in front (`lane_in`)
+        if self.background() {
+            self.offer_seq += 1;
+            o.id = self.offer_seq;
+            return self.lane.parked.push(o);
+        }
         if let Some(old) = self.offers.iter_mut().find(|x| x.title == o.title) {
             // Replaced whole — what it says with what it does — and it settles again before `y` counts
             if !old.installing() {

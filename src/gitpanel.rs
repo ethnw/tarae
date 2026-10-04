@@ -896,7 +896,7 @@ impl Editor {
                 match crate::llm::draft(ed, id, "a commit message", &prompt, 0, end) {
                     // (its body at 72, like every message — Claude doesn't always: #21)
                     Ok(()) => {
-                        if let Some(r) = ed.review.as_mut() {
+                        if let Some(r) = ed.lane.review.as_mut() {
                             r.wrap = Some(72);
                         }
                     }

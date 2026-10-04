@@ -392,8 +392,14 @@ fn look_at(ed: &mut Editor, path: &Path, lines: Range<usize>, why: String, paced
 /// reading speed: 2.5–8 s) — then it wakes itself for the one after. Not while the user has taken over.
 fn play(ed: &mut Editor) {
     let root = ed.lane.root.clone();
+    let background = ed.background();
     let Some(f) = follow(ed) else { return };
     if !f.active() || f.playing.is_some_and(|(until, _)| std::time::Instant::now() < until) {
+        return;
+    }
+    // A lane behind: the tour waits where it is, and goes on when the lane is in front (`lane_in`)
+    if background {
+        f.playing = None;
         return;
     }
     let Some((msg, k, stop, step)) = f.queue.pop_front() else {
@@ -457,6 +463,11 @@ fn play(ed: &mut Editor) {
             }
         }
     });
+}
+
+/// The lane came to the front: a walk-through that waited behind goes on.
+pub fn lane_in(ed: &mut Editor) {
+    play(ed);
 }
 
 /// The `name` Claude last mentioned, in the outline of a file open here (the one shown first) — worked out
@@ -643,7 +654,12 @@ fn in_project(ed: &Editor, path: &Path) -> bool {
 
 /// Moves the editor there (when following and the user hasn't taken over) — in the project only.
 fn go(ed: &mut Editor, path: &Path, line: usize) {
-    if !ed.lane.chat.as_ref().is_some_and(|c| c.follow.active()) || !path.is_file() || !in_project(ed, path) {
+    // (a lane behind keeps its trail; the editor in front is someone else's)
+    if ed.background()
+        || !ed.lane.chat.as_ref().is_some_and(|c| c.follow.active())
+        || !path.is_file()
+        || !in_project(ed, path)
+    {
         return;
     }
     let already = ed.docs.iter().any(|d| d.path.as_deref() == Some(path));
