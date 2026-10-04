@@ -104,6 +104,8 @@ mod trace;
 mod transaction;
 mod trust;
 mod typed;
+mod uisocket;
+mod uistate;
 mod undofile;
 mod viewalign;
 mod waits;
@@ -130,6 +132,8 @@ usage: tarae [FILE]...
        tarae plugin dev [DIR]                build it on every save; a running tarae reloads it
        tarae plugin list                     installed plugins and their commands
                                              (~/.config/tarae/plugins)
+       tarae state [--json] [--pid PID]      a running tarae's UI state: where the keys go, its
+                   [--after-input N]         cards, sessions and toasts (state --help)
 
 config: $XDG_CONFIG_HOME/tarae/config.toml (default ~/.config/tarae/config.toml)
         project overrides: .tarae.toml (searched upward from the current directory)
@@ -170,6 +174,10 @@ fn main() -> Result<()> {
                 let rest: Vec<String> = std::env::args().skip(2).collect();
                 return plugin::cli(&rest);
             }
+            "state" if files.is_empty() => {
+                let rest: Vec<String> = std::env::args().skip(2).collect();
+                return uisocket::cli(&rest);
+            }
             "-V" | "--version" => {
                 println!("tarae {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
@@ -198,6 +206,9 @@ fn main() -> Result<()> {
         std::process::exit(2);
     }
 
+    // The UI state's socket — now, while no thread runs (its umask, and for a long path its folder, are the
+    // process's for a moment); served once the editor is there
+    let ui = uisocket::bind();
     // Theme "default" (meok/hanji) follows the terminal background — before reading config (config reads it).
     // A restart knows it already (and the query's answer could mix with keys typed meanwhile).
     let light = restarted.as_ref().and_then(|s| s["light"].as_bool());
@@ -247,8 +258,14 @@ fn main() -> Result<()> {
         editor.set_error(format!("config: {}", warnings.join("; ")));
     }
     editor.disk_watch();
+    match ui {
+        Ok(listener) => uisocket::serve(listener, editor.events.shared_sender()),
+        Err(e) => log::line("ui", "info", &format!("no UI state socket: {e}")),
+    }
     // (Claude Code's IDE connection opens with the first `space c` — no lock file in ~/.claude/ide before)
     let result = term::run(&mut editor);
+    // (`:restart`'s new binary binds its own at the same path; a failed one ends here too)
+    uisocket::remove();
     editor.save_restore();
     // The last saves' undo history is still being written on workers — exiting or exec'ing cuts it off
     editor.undo_flush();

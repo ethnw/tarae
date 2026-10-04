@@ -1842,6 +1842,39 @@ mod tests {
         std::fs::remove_dir_all(&t).ok();
     }
 
+    /// tarae's UI state socket (`uisocket.rs`, `$state/ui/<pid>.sock`) can't be reached from Claude's runs:
+    /// under the real profile — the network closed or open — `nc -U` doesn't get through, while the same
+    /// knock from outside the sandbox does. Harmless: the socket is this test's own, nothing is sent.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn claudes_runs_cant_reach_the_ui_state_socket() {
+        if skipped_inside("sandbox::tests::claudes_runs_cant_reach_the_ui_state_socket") {
+            return;
+        }
+        let t = real(&std::env::temp_dir()).join(format!("tarae-sb-ui-{}", std::process::id()));
+        std::fs::remove_dir_all(&t).ok();
+        let root = t.join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        // (as tarae binds it: the state folder's `ui/`, 0700, the socket 0600)
+        let ui = t.join("state/tarae/ui");
+        let listener = crate::uisocket::bind_in(&ui, 4242).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let sock = ui.join("4242.sock");
+        let knock = |p: Option<&Policy>| {
+            let script = format!("/usr/bin/nc -U -w 2 '{}' < /dev/null", sock.display());
+            let mut c = command(p, "/bin/sh", &["-c".into(), script]);
+            c.current_dir(&root).stdin(Stdio::null()).output().unwrap();
+            listener.accept().is_ok()
+        };
+        assert!(knock(None), "from outside the sandbox: reached (the knock works)");
+        let env = Env { root: root.clone(), ..Env::default() };
+        let closed = Policy::for_project(&env);
+        assert!(!knock(Some(&closed)), "a run of Claude's (network closed) reached the UI state");
+        let open = Policy { network: true, ..Policy::for_project(&env) };
+        assert!(!knock(Some(&open)), "a run of Claude's (network open) reached the UI state");
+        std::fs::remove_dir_all(&t).ok();
+    }
+
     /// For real, on macOS — connecting to this machine's ports from inside:
     /// - the network closed (the default): an ordinary port isn't reached, a listed one
     ///   (`llm.sandbox-ports`) is;

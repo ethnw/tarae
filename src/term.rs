@@ -280,7 +280,10 @@ pub fn render(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io::
     // (kept: the screen as the user sees it — `C-s` in the chat sends it as text, and so does Claude's
     // `screen` once the user said yes)
     editor.last_frame = Some((frame, w, h));
+    editor.frames += 1;
     crate::seeing::after_frame(editor);
+    // (snapshots of the UI state asked over its socket: as of this frame)
+    crate::uistate::after_frame(editor);
     Ok(())
 }
 
@@ -320,6 +323,7 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
         picker_preview_x: editor.picker.as_ref().and_then(|p| PickerBox::new(&lay, p).preview_x()),
         popup: std::cell::Cell::new(None),
         offer_buttons: offer.as_ref().map(|c| c.buttons.clone()).unwrap_or_default(),
+        offer_card: offer.as_ref().map(OfferCard::rect),
         chat_links: Default::default(),
         chat_calls: Default::default(),
         chat_mini: Default::default(),
@@ -332,6 +336,7 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
         width: Some(lay.width),
         chat_w: lay.chat_w,
         side_w: if editor.review_rail_up() { 0 } else { lay.rail_w },
+        rail_w: if editor.review_rail_up() && lay.zoom.is_none() { lay.rail_w } else { 0 },
         bottom_h: lay.debug_h,
         body_h: lay.text_rows + lay.debug_h,
         text_top: lay.text_top as usize,
@@ -431,6 +436,7 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
         // (this frame's card already says so)
         offer = OfferCard::new(editor, &lay, &ui);
         editor.screen.offer_buttons = offer.as_ref().map(|c| c.buttons.clone()).unwrap_or_default();
+        editor.screen.offer_card = offer.as_ref().map(OfferCard::rect);
     }
     draw(editor, &lay, &ui, review_rows.as_deref(), offer.as_ref(), out)
 }
@@ -2799,7 +2805,7 @@ fn draw(
     if lay.debug_h > 0 && lay.slot_w > 0 {
         use crate::sizes::Slot;
         let session = &editor.session;
-        let _fade = Fade::unless(matches!(keys, Keys::Slot(_)), ui);
+        let _fade = Fade::unless(matches!(keys, Keys::Slot(_) | Keys::Program), ui);
         let slot = editor.slot();
         let plugin = editor.plugins.as_ref().and_then(|p| p.panel.as_ref());
         if slot == Some(Slot::Procs) {
@@ -5640,7 +5646,8 @@ fn draw_statusline(
     let strong =
         ui.status.patch(t.try_get("ui.text.focus").unwrap_or(Style { bold: true, ..Style::default() }));
     // Where the keys go: the code's mode, or the place that has them (`chrome::Keys`)
-    let mode = editor.keys_at().label().unwrap_or(match editor.mode {
+    let keys = editor.keys_at();
+    let mode = keys.label().unwrap_or(match editor.mode {
         Mode::Normal => "NORMAL",
         Mode::Insert => "INSERT",
         Mode::Select => "SELECT",
@@ -5657,6 +5664,15 @@ fn draw_statusline(
     }
     // (a floating list's keys go right after the pill — laid in at the end, once the room is known)
     let hints_at = left.len();
+    // (the terminal with tarae's keys: typing isn't the program's until `i` — a key hint, as the panels' are)
+    if let Some((key, what)) = keys.hint() {
+        left.push(Seg { text: format!("  {key}"), style: Style { bold: true, ..dim }, keep: 240 });
+        left.push(Seg {
+            text: format!(" {what}"),
+            style: Style { fg: ui.linenr.fg, ..ui.status },
+            keep: 240,
+        });
+    }
     // The session in front, when there's more than one and the chat (whose top row has them all) isn't
     // up: its name — a click opens the list — and how many others wait for you
     let chip = !editor.sessions.is_empty() && lay.chat_w == 0;
@@ -6525,105 +6541,7 @@ impl OfferCard {
         let mut warn = Vec::new();
         let (mut lines, labels) = match &o.state {
             OfferState::Asking => {
-                let mut b = vec![('y', "Install"), ('n', "Not now")];
-                match o.what {
-                    crate::offer::What::Install { .. } => b.push(('N', "Never")),
-                    crate::offer::What::PluginPermissions { .. } => {
-                        b = vec![('y', "Allow"), ('n', "Not now")]
-                    }
-                    crate::offer::What::PluginAsk { .. } => b = vec![('y', "Allow"), ('n', "No")],
-                    // (one socket past the sandbox — #119)
-                    crate::offer::What::Run(ref r) if r.socket.is_some() => {
-                        b = vec![('y', "This run"), ('a', "This chat"), ('n', "No")]
-                    }
-                    crate::offer::What::Run(ref r) if r.keep => {
-                        b = vec![('y', "Run"), ('a', "This chat"), ('A', "Always"), ('n', "No")]
-                    }
-                    // (its pattern for the rest of the chat — the card says which)
-                    crate::offer::What::Run(ref r) if r.pattern.is_some() => {
-                        b = vec![('y', "Run"), ('a', "This chat"), ('n', "No")]
-                    }
-                    crate::offer::What::Run(_) => b = vec![('y', "Run"), ('n', "No")],
-                    crate::offer::What::ReviewAtEnd => b = vec![('y', "Turn on"), ('n', "No")],
-                    crate::offer::What::ProjectTrust { .. } => b = vec![('y', "Trust"), ('n', "Ignore")],
-                    crate::offer::What::NoSandbox { .. } => {
-                        b = vec![('y', "Run"), ('a', "This chat"), ('n', "No")]
-                    }
-                    crate::offer::What::Read { keep: true, .. } => {
-                        b = vec![('y', "Once"), ('a', "This chat"), ('A', "Always"), ('n', "No")]
-                    }
-                    crate::offer::What::Read { keep: false, .. } => b = vec![('y', "Once"), ('n', "No")],
-                    crate::offer::What::Grant { ref grant, .. } if !grant.keepable() => {
-                        b = vec![('y', "This run"), ('a', "This chat"), ('n', "No")]
-                    }
-                    crate::offer::What::Grant { .. } => {
-                        b = vec![('y', "Once"), ('a', "This chat"), ('A', "Always"), ('n', "No")]
-                    }
-                    crate::offer::What::Outside { .. } => b = vec![('y', "Run"), ('n', "No")],
-                    crate::offer::What::Preflight { .. } => b = vec![('y', "Run them"), ('n', "Not now")],
-                    crate::offer::What::BranchDelete { .. } => b = vec![('y', "Delete"), ('n', "Keep it")],
-                    crate::offer::What::ForcePush(_) => b = vec![('y', "Push"), ('n', "No")],
-                    crate::offer::What::SessionNew(_) if o.base_steps() => {
-                        b = vec![('y', "Make it"), ('b', "Other base"), ('n', "Not now")]
-                    }
-                    crate::offer::What::SessionNew(_) => b = vec![('y', "Make it"), ('n', "Not now")],
-                    // (work in no commit: no `y` — committing leads, removing takes a capital)
-                    crate::offer::What::SessionEnd(_) if o.commits_first() => {
-                        b = vec![
-                            ('c', "Commit, then end"),
-                            ('R', "Remove"),
-                            ('D', "Remove both"),
-                            ('n', "Cancel"),
-                        ]
-                    }
-                    crate::offer::What::SessionEnd(_) if o.end_dirty() => {
-                        b = vec![('R', "Remove"), ('n', "Cancel")]
-                    }
-                    crate::offer::What::SessionEnd(_) if o.both() => {
-                        b = vec![('y', "Remove checkout"), ('D', "Remove both"), ('n', "Cancel")]
-                    }
-                    crate::offer::What::SessionEnd(_) => b = vec![('y', "Remove it"), ('n', "Cancel")],
-                    crate::offer::What::Screen { .. } => {
-                        b = vec![('y', "Once"), ('a', "This chat"), ('n', "No")]
-                    }
-                    crate::offer::What::ReviewEnd => b = vec![('y', "End it"), ('n', "Keep reviewing")],
-                    crate::offer::What::Rebase(_) => b = vec![('y', "Rebase first"), ('n', "Leave it")],
-                    // (`p` runs the quick set when the project has two — the card names its steps)
-                    crate::offer::What::Rebased(_) => {
-                        let p = match editor.preflight_quick() {
-                            Some(_) => "Quick preflight, then bring",
-                            None => "Preflight, then bring",
-                        };
-                        b = vec![('y', "Bring"), ('p', p), ('n', "Not now")]
-                    }
-                    // (abort throws the resolution away: a capital, as removing does)
-                    crate::offer::What::RebaseResolved { .. } => {
-                        b = vec![('y', "Continue"), ('X', "Abort"), ('n', "Not now")]
-                    }
-                    crate::offer::What::Hooks(ref a) if a.runnable() => {
-                        b = vec![
-                            ('y', if a.hooks.len() == 1 { "Run it" } else { "Run them" }),
-                            ('n', "Skip hooks"),
-                        ]
-                    }
-                    crate::offer::What::Hooks(_) => b = vec![('n', "Skip hooks")],
-                    crate::offer::What::Restart(_) if o.restart_other() => {
-                        b = vec![('y', "Restart"), ('f', "The front's instead"), ('n', "Not now")]
-                    }
-                    crate::offer::What::Restart(_) => b = vec![('y', "Restart"), ('n', "Not now")],
-                    crate::offer::What::RestartSame { .. } => {
-                        b = vec![('y', "Restart anyway"), ('n', "Don't")]
-                    }
-                    crate::offer::What::ChangeSet { .. } => {
-                        b = vec![
-                            ('y', "Accept all"),
-                            ('r', "One by one"),
-                            ('v', "See them"),
-                            ('n', "Decline all"),
-                        ]
-                    }
-                    _ => {}
-                }
+                let b = o.answers(editor.preflight_quick().is_some());
                 // One that runs something is shown whole — cut to the room below if it must be, with `v`
                 // to see all of it (and `y` waits for that)
                 let most = if o.weighty() { usize::MAX } else { 4 };
@@ -6673,7 +6591,7 @@ impl OfferCard {
             OfferState::Failed(why) => {
                 let mut v = vec![(o.failed.clone(), false)];
                 v.extend(wrapped(why, 3));
-                (v, Some(vec![('y', "Retry"), ('n', "Dismiss")]))
+                (v, Some(o.answers(false)))
             }
         };
         let badge_w = if badge.is_empty() { 0 } else { badge.width() + 2 };

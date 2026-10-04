@@ -1,6 +1,7 @@
 # UI state — what's on screen, as data
 
-Status: design (2026-10-04), nothing built. The direction was approved after queue phase 0 (1085db8).
+Status: design approved (2026-10-04) with the five recommendations (see "Decided"); phase 1 under way,
+phase 4 dropped for now. The direction was approved after queue phase 0 (1085db8).
 
 ## Why
 
@@ -119,8 +120,10 @@ side git · 4 rows · in hand git:src/term.rs
     - `answers`: a card's keys.
 
     A driver about to send `y` checks `takes`.
-  - `answers`: when a card has the keys.
-  - `pending`: a key sequence under way, as which-key shows it.
+  - `answers`: when a card has the keys (an edit's review: `y n a q`).
+  - `held`: `C-q` gave the card the keys — every key is its (else only its answers are, the rest go `under`).
+  - `pending`: a key sequence under way, as which-key shows it (a count first). `char_next`: the next key is
+    taken as a character (`f`, `r`, a `gw` label).
   - `drawn`: the region is on screen this frame.
   - `under`: what has the keys once a `C-q` card lets go.
 
@@ -203,7 +206,8 @@ never describes a state the user hasn't seen, and `frame` lets a driver tell two
 
 `after_input: N` holds the reply until `input_seq ≥ N` and a frame after that. That replaces sleeping after
 sending keys. For example: read `input` = 1033, send ` W`, then ask with `after_input: 1035`. The reply is about
-what those two keys did. (crossterm makes one key event per key or escape sequence, and one per paste.)
+what those two keys did. (crossterm makes one key event per key or escape sequence, and one per paste;
+`input` also counts a mouse press and a drag, not a release or the wheel over a panel.)
 
 ### Tests (in-process)
 
@@ -224,7 +228,10 @@ they check focus, cards or runs. Snapshots keep checking the look.
 - **One per process.** A listener thread sits blocked in `accept`: no wakes, no CPU.
 - **Leftover sockets:** tarae removes only the socket at its own pid's path, which can only be a dead
   process's leftover now that the pid is ours. It never removes another's — the `agent.rs` lock-file lesson.
-- **Too long a path:** over `sun_path`'s 104 bytes there's no socket, and the log says why.
+- **Too long a path:** over `sun_path`'s 104 bytes (108 on Linux) the socket is bound from its folder — at
+  startup, before any thread runs, as the umask is set — and `tarae state` connects the same way. (Built so in
+  phase 1: an e2e sandbox's state folder is past 104 bytes; with no socket there, nothing would test it.)
+  Other clients use the path as it is.
 - **Protocol:** one JSON line per request. Snapshots and events are one JSON value per line:
   - `{"get":"state"}`
   - `{"get":"state","after_input":1035}`
@@ -250,8 +257,7 @@ doesn't send `y`.
 ### tarae's Claude: the `ui` tool and the context line
 
 - **The `ui` tool** returns the text form at Claude's level, with ids. It's read-only
-  (`readOnlyHint`), answered at once, and asks no card (see "Privacy" for why that's safe, and "Open
-  questions").
+  (`readOnlyHint`), answered at once, and asks no card (see "Privacy" for why that's safe; decided).
 - **The context line.** Every message's `<editor-context>` gains one line, and only when it says something:
   `keys: card#12 · cards up: card#12 run "cargo test -p tarae" (claude) · toast#311 warning "…"`. Most "why did
   this come up" questions are then answered without a tool call. Claude's system prompt gets one sentence
@@ -379,7 +385,10 @@ check above is all that stands between it and its own run card. So:
 
 ## Phases
 
-### Phase 1 — where the keys go (the smallest step that pays off alone)
+### Phase 1 — where the keys go (the smallest step that pays off alone) — built 2026-10-04
+
+Built as below, with two changes: Claude's level waits for phase 3 (its `ui` tool is its only reader), and
+the long-path rule above. What it found and what it cost: see "Phase 1, measured".
 
 - **`Editor::keys_to()`:** finer than `chrome::Keys` (`takes`, `pending`, `drawn`, `under`). `keys_at` and
   the status line read it too, so TERMINAL can say whether `i` types in it or the program has the keys.
@@ -438,11 +447,12 @@ at least one case where the keys go somewhere not drawn.
 - Claude citing ids it made up. A link that resolves to nothing says "no such element" faintly. No flash.
 - Context cost: one line, only when non-trivial.
 
-### Phase 4 — the screen reader, and guarded keys if needed
+### Phase 4 — dropped for now (user decision, 2026-10-04)
 
-- **Speaking:** `ui.speak` (`off` · `focus` · `all`) sends events' `said` to the platform's speech on a worker
-  (`say`, `spd-say`), newest first, rate-limited, never on the key path. ~400 lines.
-- **Guarded keys** (above): only with data from phases 1–2. ~300 lines.
+- **Speaking** isn't built: no `ui.speak`, nothing sent to the platform's speech. Events keep their `said`
+  line (the text CLI prints it), so a screen reader could start from it later.
+- **Guarded keys** come only if phases 1–2 show `after_input` plus checking `keys` before sending isn't
+  enough — then as described above (`ui.driver-keys`, `trust::RISKY`, the user's config only).
 
 ## What to measure
 
@@ -455,12 +465,36 @@ at least one case where the keys go somewhere not drawn.
 | Keystroke → frame with a watcher connected | Unchanged within noise (`cargo perf`'s key-to-frame number) |
 | The outcome | The drive-through-tarae friction log: count "keys went somewhere else" slips before and after phase 1 |
 
-## Open questions for the user
+## Phase 1, measured (2026-10-04, `perf` profile, this Mac)
 
-1. **`ui` tool:** no card (recommended — less than `screen`, its own session only), or asked once per chat
-   like `screen`?
-2. **The socket:** on by default (recommended — same uid, 0600, Claude can't reach it, costs nothing idle),
-   or opt-in?
-3. **Guarded keys for drivers:** leave them out until phases 1–2 show a need (recommended)?
-4. **Pointing's key** in the chat.
-5. **Other sessions in Claude's view:** counts only (recommended), or their cards' titles too?
+| | |
+|---|---|
+| State built, busy scene (3 sessions, 3 cards, an edit's review, a task, toasts) | 2.9 µs; as JSON 34 µs; as text 8.5 µs (medians of 200) |
+| Size, busy scene | JSON 2,154 B (~540 tokens); text 691 B (~173 tokens) — a token per 4 bytes, no tokenizer here |
+| Round trip, frame included | socket 0.40 ms; `tarae state --json` 2.5 ms (its process start too); medians of 30 |
+| Idle | 0 ms/s CPU (`e2e_idle_cpu`, the socket listening); the idle e2e: 0 frames and flat switches with the socket and a driver connected |
+| Release binary | 9,113,936 → 9,180,272 B (+66 KB, +0.7%) |
+
+What the routing test and the pulled-out answers found:
+- An edit's review under a focused side panel had the keys (`y` accepted Claude's change) while the status line
+  said OUTLINE/GIT.
+- A side panel focused in insert mode: the status line said OUTLINE, the keys typed into the code.
+- A prompt over the terminal's program: the status line said TERMINAL, the prompt had the keys.
+- The terminal's program and tarae's keys on its panel were both TERMINAL (slip 2) — now `TERMINAL  i type in
+  it` for the second.
+- The close-a-reviewed-buffer card's hint row said `y Install · n Not now` (the download card's default) while
+  its text said `y` declines Claude's change.
+- The only state where the keys go somewhere not on screen is the chat minimized while Claude works (slip 3).
+
+## Decided (user, 2026-10-04)
+
+1. **`ui` tool:** asks no card — it's less than `screen` sends, and its own session only.
+2. **The socket:** on by default — same uid, 0600, Claude's sandbox can't reach it, nothing idle.
+3. **Guarded keys for drivers:** left out; no direct actions for drivers for now. They come back only if
+   phases 1–2 show a need (phase 4).
+4. **Pointing's key** in the chat: decided in phase 3.
+5. **Other sessions in Claude's view:** counts only (name, `doing`, how many cards), never their titles.
+
+The format: JSON (JSON Lines for events) for drivers and scripts — `serde_json` is in already, no new
+dependency, readable with `jq`; the compact text form for Claude, where tokens are the cost; the structs
+themselves in tests. No binary format (a new dependency, and the size budget).

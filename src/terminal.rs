@@ -226,11 +226,16 @@ fn spawn(
         .env("TERM", "xterm-256color")
         .env("COLORTERM", "truecolor")
         .env_remove("TARAE_SHOT_XDG")
+        .env_remove("TARAE_UI")
         .stdin(io(&slave)?)
         .stdout(io(&slave)?)
         .stderr(io(&slave)?);
     for (k, v) in env {
         cmd.env(k, v);
+    }
+    // (a script run in it finds this tarae's UI state: `tarae state`)
+    if let Some(ui) = crate::uisocket::bound() {
+        cmd.env("TARAE_UI", ui);
     }
     {
         use std::os::unix::process::CommandExt;

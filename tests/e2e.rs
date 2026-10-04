@@ -540,6 +540,14 @@ fn an_idle_editor_draws_nothing_and_sleeps() {
         );
     };
     idle(&mut t, "a file");
+    // The UI state's socket listens all along (on by default); a snapshot asked is one frame that writes
+    // nothing — and a driver connected, asking nothing, wakes nothing
+    let sock = sb.state().join(format!("ui/{}.sock", t.pid()));
+    assert!(sock.exists(), "{} listens", sock.display());
+    assert!(t.state(&[]).contains("keys → pane#"));
+    let held = connected(&sock);
+    idle(&mut t, "a file, a driver connected");
+    drop(held);
     t.send(" e");
     t.wait_for("the side panel", |s| s.contains("esc code"));
     idle(&mut t, "the side panel");
@@ -581,6 +589,83 @@ fn an_idle_editor_draws_nothing_and_sleeps() {
         }
     }
     assert!(t.frames() - frames >= 2, "{} frames for the card's fade-in", t.frames() - frames);
+}
+
+/// A client connected to `sock` that asks nothing (`nc -U`, from the socket's folder — its path may be past
+/// `sun_path`'s 104 bytes); gone when dropped. None where there's no `nc` with `-U`.
+fn connected(sock: &std::path::Path) -> Option<std::process::Child> {
+    let child = std::process::Command::new("/bin/sh")
+        .args(["-c", "exec nc -U \"$0\"", &sock.file_name().unwrap().to_string_lossy()])
+        .current_dir(sock.parent().unwrap())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let mut child = child;
+    // (macOS has `nc -U`: still there = connected, and asking nothing)
+    if cfg!(target_os = "macos") {
+        assert!(matches!(child.try_wait(), Ok(None)), "nc couldn't connect to {}", sock.display());
+    }
+    Some(child)
+}
+
+/// A driver reads where the keys go before sending — the four slips of 2026-10-04 through the real binary
+/// and its socket (`tarae state`): the code's keys; the terminal's program having every key, then tarae's
+/// keys on its panel (the status line says `i type in it`); a card the chat's draft keeps from its `y`;
+/// `--after-input` answering about the keys just sent. The terminal's shell finds this tarae (`TARAE_UI`).
+#[test]
+fn a_driver_reads_where_the_keys_go() {
+    let sb = Sandbox::new("uistate");
+    sb.write("a.txt", "one\n");
+    let mut t = sb.spawn(&["a.txt"]);
+    t.wait_text("one");
+    let s = t.state_json(0);
+    assert_eq!(s["v"], 1);
+    assert_eq!((s["keys"]["region"].as_str(), s["keys"]["takes"].as_str()), (Some("code"), Some("commands")));
+    assert_eq!(s["tarae"]["pid"], t.pid());
+    let input = s["input"].as_u64().unwrap();
+    // The terminal: every key the program's
+    t.send(" T");
+    let s = t.state_json(input + 2);
+    assert_eq!(s["input"].as_u64(), Some(input + 2), "about the two keys sent");
+    t.wait_for("the shell", |s| s.contains("$ ") || s.contains("# "));
+    let s = t.state_json(input + 2);
+    assert_eq!(
+        (s["keys"]["region"].as_str(), s["keys"]["takes"].as_str()),
+        (Some("terminal-program"), Some("program"))
+    );
+    t.send("echo ui=${TARAE_UI##*/}\r");
+    t.wait_text(&format!("ui={}.sock", t.pid()));
+    // tarae's keys on its panel: `C-\` back to the code, `C-w j` down to it
+    let input = t.state_json(0)["input"].as_u64().unwrap();
+    t.send("\x1c\x17j");
+    let s = t.state_json(input + 3);
+    assert_eq!(
+        (s["keys"]["region"].as_str(), s["keys"]["takes"].as_str()),
+        (Some("slot:terminal"), Some("commands"))
+    );
+    t.wait_for("the status line says so", |s| {
+        s.status().contains("TERMINAL") && s.status().contains("i type in it")
+    });
+    assert!(t.state(&[]).lines().nth(1).unwrap().starts_with("keys → terminal (commands)"));
+    drop(t);
+}
+
+/// A state folder past `sun_path`'s 104 bytes: the socket is bound from its folder, and `tarae state`
+/// reaches it the same way.
+#[test]
+fn the_socket_lives_in_a_long_state_folder() {
+    let sb = Sandbox::new("uistate-long");
+    let deep = sb.home().join(format!(".local/{}/state", "very-long-folder-name/".repeat(4)));
+    std::fs::create_dir_all(&deep).unwrap();
+    let sb = sb.with_env("XDG_STATE_HOME", &deep.to_string_lossy());
+    let t = sb.spawn(&[]);
+    let sock = deep.join(format!("tarae/ui/{}.sock", t.pid()));
+    assert!(sock.as_os_str().len() > 104, "{}", sock.display());
+    assert!(sock.exists(), "{} listens", sock.display());
+    assert_eq!(t.state_json(0)["keys"]["region"], "code");
 }
 
 #[test]

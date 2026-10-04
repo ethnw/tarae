@@ -140,6 +140,11 @@ impl Sandbox {
         self.root.join("home")
     }
 
+    /// tarae's state folder (`$XDG_STATE_HOME/tarae`).
+    pub fn state(&self) -> PathBuf {
+        self.home().join(".local/state/tarae")
+    }
+
     /// The working directory tarae runs in — test files go here.
     pub fn work(&self) -> PathBuf {
         self.root.join("work")
@@ -309,6 +314,8 @@ pub struct Term {
     _slave: OwnedFd,
     out: Shared,
     timeout: Duration,
+    /// The environment it runs in — `tarae state` runs in it too (the same state folder).
+    env: Vec<(OsString, OsString)>,
 }
 
 pub fn cvt(rc: libc::c_int) -> io::Result<libc::c_int> {
@@ -411,7 +418,7 @@ impl Term {
             }
         });
 
-        let mut term = Term { child, master, _slave: slave, out, timeout: sb.timeout() };
+        let mut term = Term { child, master, _slave: slave, out, timeout: sb.timeout(), env: sb.env() };
         // First frame drawn = raw mode is on — safe to type from here.
         term.wait_for("the first frame (status line with the mode)", |s| s.status().contains("NORMAL"));
         term
@@ -566,6 +573,27 @@ impl Term {
             }
             thread::sleep(POLL);
         }
+    }
+
+    /// `tarae state --pid <its pid> args…` in its environment: what it prints (panics if it fails).
+    pub fn state(&self, args: &[&str]) -> String {
+        let out = Command::new(std::env::var_os("TARAE_BIN").unwrap_or_else(|| BIN.into()))
+            .arg("state")
+            .args(["--pid", &self.pid().to_string()])
+            .args(args)
+            .env_clear()
+            .envs(self.env.iter().cloned())
+            .output()
+            .expect("tarae state");
+        let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success(), "tarae state {args:?}: {stderr}\n{}", self.screen());
+        stdout.into_owned()
+    }
+
+    /// The state as JSON — once the input so far (`input` keys and clicks) is handled and drawn.
+    pub fn state_json(&self, after_input: u64) -> serde_json::Value {
+        let s = self.state(&["--json", "--after-input", &after_input.to_string()]);
+        serde_json::from_str(&s).unwrap_or_else(|e| panic!("tarae state: {e}: {s}"))
     }
 
     /// `:cmd` Enter.

@@ -128,6 +128,8 @@ pub struct Toast {
     /// It has been on the notification card. An error or warning that hasn't (a picker over it, no free
     /// corner) waits: its time doesn't run until it has been (U7, `Editor::toasts_drawn`).
     pub shown: bool,
+    /// Which message it is — the count of messages said when it came (`toast#N` in the UI state).
+    pub id: u64,
 }
 
 /// Two clicks on the same picker row this close together are a double click (it opens the row).
@@ -210,7 +212,7 @@ impl Toast {
             ToastKind::Error => 60_000,
         };
         let life = std::time::Duration::from_millis(ms);
-        Toast { text, kind, at: std::time::Instant::now(), life, step: None, shown: false }
+        Toast { text, kind, at: std::time::Instant::now(), life, step: None, shown: false, id: 0 }
     }
 
     pub fn alive(&self) -> bool {
@@ -249,6 +251,8 @@ pub struct Screen {
     pub picker_list: Option<(usize, usize)>,
     /// Grammar download offer buttons: (row, start col, end col, key to feed when clicked).
     pub offer_buttons: Vec<(usize, usize, usize, char)>,
+    /// The front card as drawn, its back cards' rows too (x, y, width, height) — the UI state's `at`.
+    pub offer_card: Option<(usize, usize, usize, usize)>,
     /// Column where the picker's preview card starts (the wheel scrolls it there).
     pub picker_preview_x: Option<usize>,
     /// The floating docs card this frame (x, y, width, height) — drawing fills it in; the wheel scrolls it.
@@ -278,6 +282,8 @@ pub struct Screen {
     pub width: Option<usize>,
     pub chat_w: usize,
     pub side_w: usize,
+    /// The code review's rail, as wide as drawn (0: not shown).
+    pub rail_w: usize,
     pub bottom_h: usize,
     /// The rows of code and bottom slot together, from row `text_top`.
     pub body_h: usize,
@@ -555,6 +561,11 @@ pub struct Editor {
     pub unfocused: bool,
     /// Claude's `screen` calls the user said yes to — answered with the next frame drawn (`seeing.rs`).
     pub screen_sends: Vec<crate::tools::Call>,
+    /// Frames drawn since tarae started · snapshots of the UI state asked over its socket, answered after a
+    /// frame (`uistate.rs`) · messages said so far (a toast's id).
+    pub frames: u64,
+    pub ui_asks: Vec<crate::uistate::Ask>,
+    pub said: u64,
     /// Whether Claude's commands can be sandboxed here (`sandbox.rs`) — found with the first one.
     pub sandbox: crate::sandbox::Availability,
     /// `:restart` under way (`restart.rs`) — once `Ready`, main runs the new binary after the loop ends.
@@ -569,7 +580,7 @@ pub struct Editor {
     /// Values `:set` at runtime — they win even when the config file is reloaded (the top layer).
     pub overrides: Vec<(String, toml::Value)>,
     pub pending: Vec<Key>,
-    count: Option<usize>,
+    pub(crate) count: Option<usize>,
     /// Starting snapshot of the open edit group. Stays open throughout insert mode.
     undo_group: Option<(DocId, Snapshot)>,
     next_id: DocId,
@@ -700,6 +711,9 @@ impl Editor {
             zoom: None,
             bottom_focus: false,
             screen_sends: Vec::new(),
+            frames: 0,
+            ui_asks: Vec::new(),
+            said: 0,
             sandbox: if cfg!(test) { crate::sandbox::Availability::Bypass } else { Default::default() },
             restart: None,
             preflight_told: Default::default(),
@@ -1200,6 +1214,7 @@ impl Editor {
             _ => "info",
         };
         crate::log::line("tarae", level, &msg);
+        self.said += 1;
         self.messages.push((std::time::Instant::now(), kind, msg));
         if self.messages.len() > MESSAGES_KEPT {
             self.messages.remove(0);
@@ -1235,11 +1250,12 @@ impl Editor {
             self.toasts.clear();
         }
         // The same message again: its time starts over, where it is (moving it would make the card jump)
+        let id = self.said;
         if let Some(t) = self.toasts.iter_mut().find(|t| t.text == text && t.kind == kind) {
-            *t = Toast::new(kind, text);
+            *t = Toast { id, ..Toast::new(kind, text) };
             return;
         }
-        self.toasts.push(Toast::new(kind, text));
+        self.toasts.push(Toast { id, ..Toast::new(kind, text) });
         // (the card shows the newest few and counts the rest — all of them are in `:messages`)
         if self.toasts.len() > MESSAGES_KEPT {
             self.toasts.remove(0);
@@ -2695,11 +2711,16 @@ impl Editor {
         }
         let front = self.offers.first().map(|o| o.id);
         if !self.offer_key(key) {
-            let o = &self.offers[0];
-            let asks = match (o.keeps(), o.lasts()) {
-                (true, _) => "y, a, A or n",
-                (false, true) => "y, a or n",
-                _ => "y or n",
+            // (its own answers, as its hint row has them — a session's end card asks c, R, D or n)
+            let keys: Vec<String> = self.offers[0]
+                .answers(self.preflight_quick().is_some())
+                .iter()
+                .map(|(k, _)| k.to_string())
+                .collect();
+            let asks = match keys.split_last() {
+                Some((last, [])) => last.clone(),
+                Some((last, rest)) => format!("{} or {last}", rest.join(", ")),
+                None => "nothing yet".into(),
             };
             self.set_status(format!("the card asks {asks} — esc goes back"));
         }
@@ -2712,7 +2733,10 @@ impl Editor {
     }
 
     pub fn handle_key(&mut self, key: Key) {
+        use crate::uistate::{Handler, took};
         self.input_seq += 1;
+        // (each handler below that takes the key says so — the routing test holds `keys_to` to it)
+        took(Handler::Code);
         self.session_store.keyed = true;
         // A key after an error has been read (`ERROR_MIN`) lets it go — it fades out
         for t in self.toasts.iter_mut().filter(|t| t.kind == ToastKind::Error) {
@@ -2725,7 +2749,7 @@ impl Editor {
         self.focus_sync();
         // A card is answered from anywhere (#24): `C-q` gives it the keys — what you were typing stays
         if self.card_key(key) {
-            return;
+            return took(Handler::Card);
         }
         // …and with none up here (nor an edit review), to the session whose Claude waits for you (#7)
         if key.ctrl
@@ -2736,6 +2760,7 @@ impl Editor {
             && self.picker.is_none()
             && self.prompt.is_none()
         {
+            took(Handler::NextCard);
             if !self.go_to_waiting_card() {
                 // (one about to come — its call held back until the run before it ends: said, #5)
                 match self.cards_coming().as_slice() {
@@ -2748,12 +2773,13 @@ impl Editor {
         }
         // The terminal has the keys: all of them go to its program (`C-\` gives them back)
         if self.picker.is_none() && self.prompt.is_none() && self.terminal_key(key) {
+            took(Handler::Program);
             return self.focus_sync();
         }
         // Cards: y·a·n in normal mode (something else open or a pending prefix key goes first) — not while
         // the chat's input has the keys: a card took the `n`s of a message being typed (`C-q` reaches it)
         if !self.offers.is_empty() && self.card_has_keys() && self.offer_key(key) {
-            return;
+            return took(Handler::Card);
         }
         // If the completion list is up, intercept selection keys first (as in Helix: Tab/C-n down,
         // S-Tab/C-p up; Enter inserts only when something is selected — otherwise a plain newline).
@@ -2804,6 +2830,7 @@ impl Editor {
     }
 
     fn handle_key_inner(&mut self, key: Key) {
+        use crate::uistate::{Handler, took};
         self.status = None;
         // Esc in normal mode = clear search highlight (and still does its other work)
         if key.code == Code::Esc && self.mode == Mode::Normal && self.prompt.is_none() {
@@ -2817,14 +2844,20 @@ impl Editor {
             && key.ctrl
         {
             match key.code {
-                Code::Char('d') => return self.popup_scroll = (self.popup_scroll + 8).min(lines.len()),
-                Code::Char('u') => return self.popup_scroll = self.popup_scroll.saturating_sub(8),
+                Code::Char('d') => {
+                    took(Handler::Popup);
+                    return self.popup_scroll = (self.popup_scroll + 8).min(lines.len());
+                }
+                Code::Char('u') => {
+                    took(Handler::Popup);
+                    return self.popup_scroll = self.popup_scroll.saturating_sub(8);
+                }
                 _ => {}
             }
         }
         self.popup_scroll = 0;
         if self.popup.take().is_some() && key.code == Code::Esc {
-            return;
+            return took(Handler::Popup);
         }
         // Keys a replayed macro feeds in aren't recorded — the `q` that replays them already was
         if self.replaying.is_empty()
@@ -2834,29 +2867,30 @@ impl Editor {
             keys.push(key);
         }
         if llm::review_key(self, key) {
-            return;
+            return took(Handler::EditReview);
         }
         if self.picker.is_some() {
+            took(Handler::Picker);
             self.picker_key(key);
             return;
         }
         if crate::chat::key(self, key) {
-            return;
+            return took(Handler::Chat);
         }
         if crate::codereview::rail_key(self, key) {
-            return;
+            return took(Handler::Rail);
         }
         if crate::sidebar::key(self, key) {
-            return;
+            return took(Handler::Side);
         }
         if crate::procs::key(self, key) {
-            return;
+            return took(Handler::Procs);
         }
         if crate::plugin::plugin_panel_key(self, key) {
-            return;
+            return took(Handler::PluginPanel);
         }
         if crate::sizes::bottom_key(self, key) {
-            return;
+            return took(Handler::Bottom);
         }
         // Start screen: `r` = the files last open here
         if self.welcome()
@@ -2879,6 +2913,7 @@ impl Editor {
             return;
         }
         if self.prompt.is_some() {
+            took(Handler::Prompt);
             self.handle_prompt_key(key);
             return;
         }

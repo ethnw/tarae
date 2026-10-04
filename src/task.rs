@@ -578,6 +578,12 @@ impl Editor {
         let install = after.is_some();
         let watched = sandbox.is_some_and(|p| p.watch.is_some());
         let mut cmd = crate::sandbox::command(sandbox, "sh", &["-c".into(), task.cmd.clone()]);
+        // (the user's own find this tarae's UI state — `tarae state`; Claude's never get a socket's path, and
+        // couldn't reach it from the sandbox anyway)
+        match crate::uisocket::bound().filter(|_| !claudes) {
+            Some(ui) => cmd.env("TARAE_UI", ui),
+            None => cmd.env_remove("TARAE_UI"),
+        };
         if claudes {
             cmd.env_remove("CDPATH");
         }

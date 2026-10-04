@@ -87,6 +87,48 @@ fn perf_e2e_key_in_a_big_file() {
     report("e2e_key_to_frame_big_file_ms", median(runs), 16.0, 0.05);
 }
 
+/// The UI state over its socket (`tarae state`): a request to its answer, the frame it waits for included —
+/// straight over the socket, and as the `tarae state` command (its process start too). Medians of 30.
+#[test]
+fn perf_e2e_ui_state_round_trip() {
+    use std::io::{BufRead, BufReader, Write};
+    if unoptimized("perf_e2e_ui_state_round_trip") {
+        return;
+    }
+    // (a short state folder: the test connects by the socket's path, 104 bytes at most)
+    let short = std::env::temp_dir().join(format!("tps{}", std::process::id()));
+    fs::create_dir_all(&short).unwrap();
+    let sb = Sandbox::new("perf-ui").with_env("XDG_STATE_HOME", &short.to_string_lossy());
+    big_file(&sb, "a.rs", 2_000);
+    let mut t = sb.spawn(&["a.rs"]);
+    t.wait_text("fn f1(");
+    std::thread::sleep(Duration::from_millis(600));
+    let sock = short.join(format!("tarae/ui/{}.sock", t.pid()));
+    let mut s = std::os::unix::net::UnixStream::connect(&sock).expect("the socket");
+    let mut lines = BufReader::new(s.try_clone().unwrap()).lines();
+    let mut socket = Vec::new();
+    let mut bytes = 0;
+    for _ in 0..30 {
+        let t0 = Instant::now();
+        writeln!(s, r#"{{"get":"state"}}"#).unwrap();
+        let line = lines.next().unwrap().unwrap();
+        socket.push(ms(t0.elapsed()));
+        bytes = line.len();
+    }
+    let cli: Vec<f64> = (0..30)
+        .map(|_| {
+            let t0 = Instant::now();
+            t.state(&["--json"]);
+            ms(t0.elapsed())
+        })
+        .collect();
+    drop(t);
+    fs::remove_dir_all(&short).ok();
+    report("e2e_ui_state_socket_round_trip_ms", median(socket), 50.0, 0.1);
+    report("e2e_ui_state_cli_round_trip_ms", median(cli), 200.0, 1.0);
+    report("e2e_ui_state_json_bytes_plain_scene", bytes as f64, 16384.0, 1.0);
+}
+
 /// Scrolling a 200k-line file by half pages to each frame.
 #[test]
 fn perf_e2e_scrolling() {

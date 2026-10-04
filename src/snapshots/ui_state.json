@@ -1,0 +1,127 @@
+{
+  "cards": [
+    {
+      "answers": [
+        {
+          "does": "End it",
+          "key": "y"
+        },
+        {
+          "does": "Keep reviewing",
+          "key": "n"
+        }
+      ],
+      "asks": "End the review?",
+      "at": [
+        71,
+        31,
+        48,
+        8
+      ],
+      "id": "card#2",
+      "in_sight_ms": 0,
+      "kind": "review-end",
+      "rev": 0,
+      "seen_whole": true,
+      "session": "s0",
+      "settled": true,
+      "state": "asking",
+      "title": "End the review?",
+      "up": "front",
+      "waited_ms": 0,
+      "weighty": false,
+      "whose": "tarae"
+    },
+    {
+      "answers": [
+        {
+          "does": "Accept all",
+          "key": "y"
+        },
+        {
+          "does": "One by one",
+          "key": "r"
+        },
+        {
+          "does": "See them",
+          "key": "v"
+        },
+        {
+          "does": "Decline all",
+          "key": "n"
+        }
+      ],
+      "asks": "Claude changes 2 files · Claude renames `x`.",
+      "at": null,
+      "id": "card#1",
+      "in_sight_ms": null,
+      "kind": "change-set",
+      "rev": 0,
+      "seen_whole": false,
+      "session": "s1",
+      "settled": false,
+      "state": "asking",
+      "title": "Claude changes 2 files",
+      "up": "parked",
+      "waited_ms": 0,
+      "weighty": true,
+      "whose": "claude"
+    }
+  ],
+  "frame": 1,
+  "front": "s0",
+  "input": 0,
+  "keys": {
+    "answers": [
+      "y",
+      "n",
+      "a",
+      "q"
+    ],
+    "char_next": false,
+    "drawn": true,
+    "held": false,
+    "pending": "",
+    "region": "edit-review",
+    "takes": "answers",
+    "to": "edit-review",
+    "under": null
+  },
+  "mode": "normal",
+  "prompt": null,
+  "sessions": [
+    {
+      "cards": 1,
+      "doing": "idle",
+      "id": "s0",
+      "name": "main",
+      "root": "tarae-uistate-main"
+    },
+    {
+      "cards": 1,
+      "doing": "waiting",
+      "id": "s1",
+      "name": "fix-login",
+      "root": "tarae-uistate-golden"
+    }
+  ],
+  "size": [
+    120,
+    40
+  ],
+  "tarae": {
+    "boot": "-",
+    "pid": 0,
+    "version": "-"
+  },
+  "toasts": [
+    {
+      "id": "toast#1",
+      "kind": "warning",
+      "shown": false,
+      "text": "a.rs changed on disk",
+      "where": "waiting"
+    }
+  ],
+  "v": 1
+}

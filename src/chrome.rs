@@ -104,7 +104,10 @@ pub enum Keys {
     Side(crate::sidebar::Mode),
     /// The review's file rail, or an edit's review in the buffer (its `y`/`n`).
     Review,
+    /// The bottom slot with tarae's keys — on the terminal they scroll it, `i` types in it.
     Slot(Slot),
+    /// The terminal's program: every key goes to it.
+    Program,
     /// A card given the keys with `C-q` (#78: the status line still said CHAT).
     Card,
 }
@@ -123,7 +126,7 @@ impl Keys {
             Keys::Side(S::Git) => "GIT",
             Keys::Side(S::Plugin) => "PANEL",
             Keys::Review => "REVIEW",
-            Keys::Slot(Slot::Terminal) => "TERMINAL",
+            Keys::Slot(Slot::Terminal) | Keys::Program => "TERMINAL",
             Keys::Slot(Slot::Test) => "TESTS",
             Keys::Slot(Slot::Task) => "TASK",
             Keys::Slot(Slot::Procs) => "PROCS",
@@ -137,38 +140,35 @@ impl Keys {
     pub fn code(self) -> bool {
         matches!(self, Keys::Code | Keys::Review)
     }
+
+    /// The key hint the status line puts after the label (key, what it does): on the terminal with tarae's
+    /// keys, that typing isn't the program's yet — the label alone was the program's too.
+    pub fn hint(self) -> Option<(&'static str, &'static str)> {
+        (self == Keys::Slot(Slot::Terminal)).then_some(("i", "type in it"))
+    }
 }
 
 impl Editor {
-    /// Where the keys go now.
+    /// Where the keys go now — `keys_to`'s region (`uistate.rs`, `handle_key`'s chain as data). A card's
+    /// answers taken in normal mode aren't where the keys are (the code's mode is): only one held with
+    /// `C-q`. A prompt is the code's (its line is the status line's neighbour).
     pub fn keys_at(&self) -> Keys {
-        if self.picker.is_some() {
-            return Keys::Picker;
+        use crate::uistate::Region as R;
+        let k = self.keys_to();
+        let region = match k.region {
+            R::Card(_) if !k.held => k.under.unwrap_or(R::Code),
+            r => r,
+        };
+        match region {
+            R::Picker => Keys::Picker,
+            R::Card(_) => Keys::Card,
+            R::Chat => Keys::Chat,
+            R::Rail | R::EditReview => Keys::Review,
+            R::Side(m) => Keys::Side(m),
+            R::Slot(s) => Keys::Slot(s),
+            R::Program => Keys::Program,
+            R::Code | R::Prompt | R::NextCard | R::Popup => Keys::Code,
         }
-        // (given with `C-q` from wherever they were — the chat stays focused underneath, its draft kept)
-        if self.card_keys && self.offers.first().is_some_and(|o| !o.installing()) {
-            return Keys::Card;
-        }
-        if self.session.chat.as_ref().is_some_and(|c| c.focused) {
-            return Keys::Chat;
-        }
-        let rail = self.review_rail_up();
-        if rail && self.session.code_review.as_ref().is_some_and(|r| r.focus) {
-            return Keys::Review;
-        }
-        if !rail && let Some(s) = self.session.sidebar.as_ref().filter(|s| s.focus) {
-            return Keys::Side(s.mode);
-        }
-        if self.bottom_has_keys()
-            && let Some(s) = self.slot()
-        {
-            return Keys::Slot(s);
-        }
-        // (one whose keys Esc gave back to the code waits: the code's mode — #118)
-        if self.session.review.as_ref().is_some_and(|r| r.ready && !r.away) {
-            return Keys::Review;
-        }
-        Keys::Code
     }
 }
 

@@ -368,6 +368,116 @@ impl Offer {
     pub fn installing(&self) -> bool {
         matches!(self.state, OfferState::Installing(_))
     }
+
+    /// Its answers as its hint row draws them, key and what it does — the card and the UI state read this
+    /// one list (`uistate.rs`). None while it's downloading. `quick`: the project has a quick preflight set
+    /// (the bring card's `p` runs that one).
+    pub fn answers(&self, quick: bool) -> Vec<(char, &'static str)> {
+        use What as W;
+        match self.state {
+            OfferState::Installing(_) => return Vec::new(),
+            OfferState::Failed(_) => return vec![('y', "Retry"), ('n', "Dismiss")],
+            OfferState::Asking => {}
+        }
+        match &self.what {
+            W::Grammars { .. } | W::JavaDebug { .. } => vec![('y', "Install"), ('n', "Not now")],
+            W::Install { .. } => vec![('y', "Install"), ('n', "Not now"), ('N', "Never")],
+            W::PluginPermissions { .. } => vec![('y', "Allow"), ('n', "Not now")],
+            W::PluginAsk { .. } => vec![('y', "Allow"), ('n', "No")],
+            // (one socket past the sandbox — #119)
+            W::Run(r) if r.socket.is_some() => vec![('y', "This run"), ('a', "This chat"), ('n', "No")],
+            W::Run(r) if r.keep => vec![('y', "Run"), ('a', "This chat"), ('A', "Always"), ('n', "No")],
+            // (its pattern for the rest of the chat — the card says which)
+            W::Run(r) if r.pattern.is_some() => vec![('y', "Run"), ('a', "This chat"), ('n', "No")],
+            W::Run(_) => vec![('y', "Run"), ('n', "No")],
+            W::ReviewAtEnd => vec![('y', "Turn on"), ('n', "No")],
+            W::ProjectTrust { .. } => vec![('y', "Trust"), ('n', "Ignore")],
+            W::NoSandbox { .. } => vec![('y', "Run"), ('a', "This chat"), ('n', "No")],
+            W::Read { keep: true, .. } => {
+                vec![('y', "Once"), ('a', "This chat"), ('A', "Always"), ('n', "No")]
+            }
+            W::Read { keep: false, .. } => vec![('y', "Once"), ('n', "No")],
+            W::Grant { grant, .. } if !grant.keepable() => {
+                vec![('y', "This run"), ('a', "This chat"), ('n', "No")]
+            }
+            W::Grant { .. } => vec![('y', "Once"), ('a', "This chat"), ('A', "Always"), ('n', "No")],
+            W::Outside { .. } => vec![('y', "Run"), ('n', "No")],
+            W::Preflight { .. } => vec![('y', "Run them"), ('n', "Not now")],
+            W::BranchDelete { .. } => vec![('y', "Delete"), ('n', "Keep it")],
+            W::ForcePush(_) => vec![('y', "Push"), ('n', "No")],
+            W::SessionNew(_) if self.base_steps() => {
+                vec![('y', "Make it"), ('b', "Other base"), ('n', "Not now")]
+            }
+            W::SessionNew(_) => vec![('y', "Make it"), ('n', "Not now")],
+            // (work in no commit: no `y` — committing leads, removing takes a capital)
+            W::SessionEnd(_) if self.commits_first() => {
+                vec![('c', "Commit, then end"), ('R', "Remove"), ('D', "Remove both"), ('n', "Cancel")]
+            }
+            W::SessionEnd(_) if self.end_dirty() => vec![('R', "Remove"), ('n', "Cancel")],
+            W::SessionEnd(_) if self.both() => {
+                vec![('y', "Remove checkout"), ('D', "Remove both"), ('n', "Cancel")]
+            }
+            W::SessionEnd(_) => vec![('y', "Remove it"), ('n', "Cancel")],
+            // (it fell to the download's row once: `y Install` on a card whose `y` declines Claude's change)
+            W::CloseReviewed { .. } => vec![('y', "Decline and close"), ('n', "Keep both")],
+            W::Screen { .. } => vec![('y', "Once"), ('a', "This chat"), ('n', "No")],
+            W::ReviewEnd => vec![('y', "End it"), ('n', "Keep reviewing")],
+            W::Rebase(_) => vec![('y', "Rebase first"), ('n', "Leave it")],
+            // (`p` runs the quick set when the project has two — the card names its steps)
+            W::Rebased(_) => {
+                let p = if quick { "Quick preflight, then bring" } else { "Preflight, then bring" };
+                vec![('y', "Bring"), ('p', p), ('n', "Not now")]
+            }
+            // (abort throws the resolution away: a capital, as removing does)
+            W::RebaseResolved { .. } => vec![('y', "Continue"), ('X', "Abort"), ('n', "Not now")],
+            W::Hooks(a) if a.runnable() => {
+                vec![('y', if a.hooks.len() == 1 { "Run it" } else { "Run them" }), ('n', "Skip hooks")]
+            }
+            W::Hooks(_) => vec![('n', "Skip hooks")],
+            W::Restart(_) if self.restart_other() => {
+                vec![('y', "Restart"), ('f', "The front's instead"), ('n', "Not now")]
+            }
+            W::Restart(_) => vec![('y', "Restart"), ('n', "Not now")],
+            W::RestartSame { .. } => vec![('y', "Restart anyway"), ('n', "Don't")],
+            W::ChangeSet { .. } => {
+                vec![('y', "Accept all"), ('r', "One by one"), ('v', "See them"), ('n', "Decline all")]
+            }
+        }
+    }
+
+    /// Its kind, as the UI state names it (`uistate.rs`): the `What` in kebab case.
+    pub fn kind(&self) -> &'static str {
+        use What as W;
+        match self.what {
+            W::Grammars { .. } => "grammars",
+            W::JavaDebug { .. } => "java-debug",
+            W::PluginPermissions { .. } => "plugin-permissions",
+            W::PluginAsk { .. } => "plugin-ask",
+            W::Install { .. } => "install",
+            W::Run(_) => "run",
+            W::NoSandbox { .. } => "no-sandbox",
+            W::ReviewAtEnd => "review-at-end",
+            W::Read { .. } => "read",
+            W::Grant { .. } => "grant",
+            W::Outside { .. } => "outside",
+            W::ProjectTrust { .. } => "project-trust",
+            W::Screen { .. } => "screen",
+            W::Preflight { .. } => "preflight",
+            W::BranchDelete { .. } => "branch-delete",
+            W::ForcePush(_) => "force-push",
+            W::SessionNew(_) => "session-new",
+            W::SessionEnd(_) => "session-end",
+            W::CloseReviewed { .. } => "close-reviewed",
+            W::ChangeSet { .. } => "change-set",
+            W::ReviewEnd => "review-end",
+            W::Rebase(_) => "rebase",
+            W::Rebased(_) => "rebased",
+            W::RebaseResolved { .. } => "rebase-resolved",
+            W::Hooks(_) => "hooks",
+            W::Restart(_) => "restart",
+            W::RestartSame { .. } => "restart-same",
+        }
+    }
 }
 
 impl crate::editor::Editor {
