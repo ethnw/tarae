@@ -1474,19 +1474,31 @@ mod tests {
     }
 
     /// Asking a plugin costs the editor the same for a line and for 8 MB: the rope is shared, not copied.
+    /// The best of a few runs each — a stall only ever adds time (a loaded runner's worst of five took 2.5
+    /// ms) — and the 8 MB one against the one-line one, not an absolute: a copy costs several ms more.
     #[test]
     fn running_a_command_costs_the_same_for_any_size() {
+        let best = |text: &str, name: &str| {
+            let (mut ed, dir) = setup(name, text);
+            let best = (0..5)
+                .map(|_| {
+                    let t = Instant::now();
+                    ed.plugin_run("trim-trailing", "").unwrap();
+                    t.elapsed()
+                })
+                .min()
+                .unwrap();
+            settle_until(&mut ed, |ed| toasts(ed).contains("trimmed"));
+            std::fs::remove_dir_all(dir).ok();
+            best
+        };
         let big: String = (0..240_000).map(|i| format!("line {i} with some text on it   \n")).collect();
         assert!(big.len() > 8 << 20);
-        let (mut ed, dir) = setup("cost", &big);
-        let mut worst = Duration::ZERO;
-        for _ in 0..5 {
-            let t = Instant::now();
-            ed.plugin_run("trim-trailing", "").unwrap();
-            worst = worst.max(t.elapsed());
-        }
-        assert!(worst < Duration::from_millis(2), "the editor's part took {worst:?}");
-        settle_until(&mut ed, |ed| toasts(ed).contains("lines trimmed"));
-        std::fs::remove_dir_all(dir).ok();
+        let (large, line) = (best(&big, "cost-large"), best("one line   \n", "cost-line"));
+        // (measured: about 1 µs each; the 8 MB copied, 3 ms — 1 ms is room for noise, not for a copy)
+        assert!(
+            large < line + Duration::from_millis(1),
+            "8 MB took {large:?} against {line:?} for a line — the text copied?"
+        );
     }
 }

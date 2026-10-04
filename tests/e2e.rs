@@ -470,11 +470,13 @@ fn the_waiting_animation_rests_while_the_terminal_is_unfocused() {
         std::thread::sleep(d);
         (t.frames() - before, start.elapsed())
     };
-    // Frames a second over the time that actually passed — a runner stretches a sleep (CI's macOS: 5 ms → 25)
+    // Frames a second over the time that actually passed — a runner stretches a sleep (CI's macOS: 5 ms → 25).
+    // At most the 10 a second (what's guarded: never more); at least a few — it animates — not near 10: a
+    // slow runner draws fewer of them, and a stopped animation draws none.
     let per_second = |(n, took): (usize, Duration)| (n as f64 / took.as_secs_f64()).round() as usize;
     let second = Duration::from_secs(1);
     let n = per_second(frames_in(&t, second));
-    assert!((7..=12).contains(&n), "{n} frames a second, no focus event yet");
+    assert!((3..=12).contains(&n), "{n} frames a second, no focus event yet");
     t.send("\x1b[O");
     // The tick already set, then the redraw of the whole screen when nothing more came (`RESTING_REDRAW`,
     // half a second): waited for — a stretch with no frame longer than that — not a fixed time
@@ -483,7 +485,7 @@ fn the_waiting_animation_rests_while_the_terminal_is_unfocused() {
     assert_eq!(frames_in(&t, Duration::from_millis(1500)).0, 0, "unfocused: nothing drawn");
     t.send("\x1b[I");
     let n = per_second(frames_in(&t, second));
-    assert!((7..=13).contains(&n), "{n} frames a second after focus came back");
+    assert!((3..=13).contains(&n), "{n} frames a second after focus came back");
 }
 
 /// `space f` in the real binary: the tree picker's first frame (the list still coming from its worker —
@@ -565,8 +567,9 @@ fn an_idle_editor_draws_nothing_and_sleeps() {
     idle(&mut t, "a picker over an error");
     // The picker gone, the card comes up — its time starts and its fade-in gets frames (first drawn
     // transparent, it would stay so without them)
-    // (counted until the fade is over — frames stop for a while — not in a fixed window: CI's macOS drew
-    // only 2 in 500 ms)
+    // (counted until the fade is over — frames stop for a while — not in a fixed window; and "it animated",
+    // not how far: a fade lasts a fixed time, so a slow runner draws fewer frames of it — CI's macOS drew 2.
+    // Without the fade's frames only the one that shows the card comes.)
     let frames = t.frames();
     t.esc("the card", |s| !s.contains("files in work") && s.contains("expected integer"));
     let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -577,7 +580,7 @@ fn an_idle_editor_draws_nothing_and_sleeps() {
             break;
         }
     }
-    assert!(t.frames() - frames >= 3, "{} frames for the card's fade-in", t.frames() - frames);
+    assert!(t.frames() - frames >= 2, "{} frames for the card's fade-in", t.frames() - frames);
 }
 
 #[test]
