@@ -120,12 +120,15 @@ pub struct LlmConfig {
 }
 
 /// `llm.review-ask`'s default: what runs or sets how things run, and the dependencies a build fetches.
-pub const REVIEW_ASK: [&str; 11] = [
+/// (make reads `GNUmakefile` before `Makefile`; just reads `.justfile` too — names match in any case)
+pub const REVIEW_ASK: [&str; 13] = [
     "build.rs",
     "Cargo.toml",
     "package.json",
     "Makefile",
+    "GNUmakefile",
     "justfile",
+    ".justfile",
     ".envrc",
     ".tarae.toml",
     ".cargo",
