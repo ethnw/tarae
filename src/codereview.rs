@@ -986,7 +986,7 @@ pub fn rail_key(ed: &mut Editor, key: Key) -> bool {
             }
         }
         (Code::Esc | Code::Char('q'), false) => r.focus = false,
-        _ => {}
+        _ => ed.key_unused(key, "the review's file list", "enter opens a file, esc goes to the code"),
     }
     true
 }

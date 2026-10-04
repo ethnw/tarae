@@ -235,7 +235,15 @@ pub fn bottom_key(ed: &mut crate::editor::Editor, key: Key) -> bool {
         (Code::Char('u'), true) | (Code::PageUp, _) => -half,
         (Code::Char('g') | Code::Home, false) => isize::MIN / 2,
         (Code::Char('G') | Code::End, false) => isize::MAX / 2,
-        _ => return true,
+        _ => {
+            let (place, out) = match slot {
+                Slot::Terminal => ("the terminal's panel", "i types in it, esc goes to the code"),
+                Slot::Test => ("the test panel", "esc gives the keys to the code"),
+                _ => ("the task panel", "esc gives the keys to the code"),
+            };
+            ed.key_unused(key, place, out);
+            return true;
+        }
     };
     match slot {
         Slot::Test => {

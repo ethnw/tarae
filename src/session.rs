@@ -553,6 +553,7 @@ impl Editor {
             take(l, &[], &mut lost);
         }
         for (id, a) in lost {
+            self.card_how(a.card, "lost — its call was told nothing ran");
             let tell = move |ed: &mut Editor| {
                 crate::log::line(
                     "cards",

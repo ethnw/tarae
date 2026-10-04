@@ -30,6 +30,9 @@ pub enum Region {
     Prompt,
     Picker,
     Chat,
+    /// The chat minimized while Claude works: a key that would type there brings it back instead
+    /// (`chat::unfold_key`).
+    Unfold,
     Side(crate::sidebar::Mode),
     /// The code review's file rail.
     Rail,
@@ -55,6 +58,7 @@ impl Region {
             Region::Prompt => "prompt".into(),
             Region::Picker => "picker".into(),
             Region::Chat => "chat".into(),
+            Region::Unfold => "chat-minimized".into(),
             Region::Side(m) => format!("side:{}", side_tab(m)),
             Region::Rail => "review".into(),
             Region::EditReview => "edit-review".into(),
@@ -74,6 +78,7 @@ impl Region {
             Region::Prompt => Handler::Prompt,
             Region::Picker => Handler::Picker,
             Region::Chat => Handler::Chat,
+            Region::Unfold => Handler::Unfold,
             Region::Side(_) => Handler::Side,
             Region::Rail => Handler::Rail,
             Region::EditReview => Handler::EditReview,
@@ -120,6 +125,7 @@ pub enum Handler {
     Popup,
     EditReview,
     Picker,
+    Unfold,
     Chat,
     Rail,
     Side,
@@ -153,6 +159,8 @@ pub enum Takes {
     Program,
     /// A card's keys (or an edit review's `y` `n` `a`).
     Answers,
+    /// The next key that would type brings the minimized chat back — it isn't typed.
+    Unfold,
 }
 
 impl Takes {
@@ -162,6 +170,7 @@ impl Takes {
             Takes::Text => "text",
             Takes::Program => "program",
             Takes::Answers => "answers",
+            Takes::Unfold => "unfold",
         }
     }
 }
@@ -283,6 +292,28 @@ impl Editor {
         if self.picker.is_some() {
             v.push(layer(Region::Picker, Filter::All));
         }
+        // `chat::unfold_key`: minimized, what would type brings it back — its own keys (and `C-w` from an
+        // empty input) go on
+        if let Some(c) = self.session.chat.as_ref().filter(|c| c.focused && c.compact() && !pending) {
+            let mut passes: Vec<Key> = [
+                Key::plain(Code::Esc),
+                ctrl('c'),
+                ctrl('f'),
+                ctrl('g'),
+                ctrl(']'),
+                ctrl('z'),
+                ctrl('t'),
+                ctrl('p'),
+                ctrl('l'),
+                ctrl('y'),
+                ctrl('r'),
+            ]
+            .into();
+            if c.input.is_empty() {
+                passes.extend([ctrl('w'), Key { alt: true, ..ctrl('w') }]);
+            }
+            v.push(layer(Region::Unfold, Filter::Except(passes)));
+        }
         // `chat::key` — before the prompt: it doesn't ask whether one is open
         if let Some(c) = self.session.chat.as_ref().filter(|c| c.focused && !pending) {
             v.push(match c.input.is_empty() {
@@ -389,6 +420,7 @@ impl Editor {
         let takes = match region {
             Region::Card(_) | Region::EditReview => Takes::Answers,
             Region::Program => Takes::Program,
+            Region::Unfold => Takes::Unfold,
             Region::Picker | Region::Prompt | Region::Chat => Takes::Text,
             Region::Code if self.mode == Mode::Insert => Takes::Text,
             _ => Takes::Commands,
@@ -429,8 +461,9 @@ impl Editor {
             Region::Code => !s.panes.is_empty() || self.welcome(),
             Region::Prompt => s.width.is_some(),
             Region::Picker => s.picker_list.is_some(),
-            // (minimized while Claude works, the input isn't on screen — slip 3 of 2026-10-04)
             Region::Chat => s.chat_w > 0,
+            // (its input isn't on screen — the minimized card is, and the first key brings the panel back)
+            Region::Unfold => s.chat_mini.get().is_some() || s.chat_w > 0,
             Region::Side(_) => s.side_w > 0,
             Region::Rail => s.rail_w > 0,
             Region::EditReview => s.review_change.get().is_some(),
@@ -456,6 +489,7 @@ impl Editor {
             Region::Slot(Slot::Terminal) | Region::Program => "terminal".into(),
             Region::Slot(s) => slot_name(s).into(),
             Region::Rail => "review".into(),
+            Region::Unfold => "chat".into(),
             other => other.name(),
         }
     }
@@ -498,7 +532,16 @@ pub struct UiState {
     pub sessions: Vec<SessionState>,
     pub cards: Vec<CardState>,
     pub toasts: Vec<ToastState>,
+    /// The front session's panels — their rows on screen only (`panels.rs`).
+    pub panels: panels::Panels,
+    /// Every session's runs: running, ended, waiting in line.
+    pub runs: Vec<panels::Run>,
+    /// The cards that went last, and how (`watch.rs`' ring — newest first, `GONE_SHOWN` of them).
+    pub gone: Vec<watch::Gone>,
 }
+
+/// Cards the state lists of the gone ring (it keeps `watch::GONE_KEPT`).
+const GONE_SHOWN: usize = 10;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionState {
@@ -679,6 +722,9 @@ impl Editor {
             sessions,
             cards,
             toasts,
+            panels: self.ui_panels(),
+            runs: self.ui_runs(),
+            gone: watch::recent(&self.ui_gone, GONE_SHOWN),
         }
     }
 }
@@ -767,6 +813,11 @@ impl UiState {
             "sessions": sessions,
             "cards": cards,
             "toasts": toasts,
+            "panels": self.panels.json(),
+            "runs": self.runs.iter().map(panels::Run::json).collect::<Vec<_>>(),
+            "gone": self.gone.iter().map(|g| json!({
+                "id": g.id, "title": g.title, "how": g.how, "ago_ms": g.at.elapsed().as_millis() as u64,
+            })).collect::<Vec<_>>(),
         })
     }
 
@@ -841,6 +892,11 @@ impl UiState {
             let text = t.text.lines().next().unwrap_or_default();
             out.push(format!("{} {} {text:?} ({})", t.id, t.kind, t.place));
         }
+        self.panels.text(&mut out);
+        out.extend(self.runs.iter().map(panels::Run::text));
+        if let Some(g) = self.gone.first() {
+            out.push(format!("last gone: {} {:?} — {}", g.id, g.title, g.how));
+        }
         out.join("\n") + "\n"
     }
 }
@@ -857,8 +913,10 @@ pub struct Ask {
     pub until: std::time::Instant,
 }
 
-/// After each frame (`term::render`): the snapshots waiting for it. Nobody asking — one branch.
+/// After each frame (`term::render`): the gone ring and the watchers (`watch.rs`), then the snapshots waiting
+/// for it. Nobody asking — a branch each.
 pub fn after_frame(ed: &mut Editor) {
+    watch::after_frame(ed);
     if ed.ui_asks.is_empty() {
         return;
     }
@@ -875,6 +933,9 @@ pub fn after_frame(ed: &mut Editor) {
         let _ = a.reply.send(if a.json { state.json().to_string() } else { state.text() });
     }
 }
+
+pub mod panels;
+pub mod watch;
 
 #[cfg(test)]
 mod tests;

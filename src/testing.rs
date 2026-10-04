@@ -597,20 +597,25 @@ impl Editor {
             self.session.test_last = Some((target.clone(), false));
             return crate::queued::push(self, crate::queued::What::Tests(target));
         }
-        self.test_start_now(target, false);
+        self.test_start_now(target, false, None);
     }
 
     /// The user's tests start — `force`: over Claude's running (they stop); else Claude's that started while
-    /// the saves were written keep the pane, and these wait for them.
-    pub(crate) fn test_start_now(&mut self, target: Target, force: bool) {
+    /// the saves were written keep the pane, and these wait for them. `trace`: its own from its place in
+    /// line (the same run, the same id).
+    pub(crate) fn test_start_now(
+        &mut self,
+        target: Target,
+        force: bool,
+        trace: Option<crate::trace::RunTrace>,
+    ) {
         // (its trace from the ask — the saves' time is in it)
-        let trace = crate::trace::RunTrace::new(format!("tests: {}", target.label));
+        let trace = trace.unwrap_or_else(|| crate::trace::RunTrace::new(format!("tests: {}", target.label)));
         // Save modified files first — tests run the code on disk (started once they're written)
         self.auto_save(" · before test");
         self.after_saves(move |ed| {
             if !force && crate::queued::claudes_running(&ed.session, crate::queued::Slot::Tests) {
-                trace.end("queued behind claude's tests");
-                return crate::queued::again(ed, crate::queued::What::Tests(target));
+                return crate::queued::again(ed, crate::queued::What::Tests(target), Some(trace));
             }
             let before = ed.test_generation;
             ed.test_start_guarded(target, None, Some(trace));

@@ -373,7 +373,7 @@ fn start_tests(ed: &mut Editor, who: For, target: crate::testing::Target, guard:
     let program = target.argv().first().cloned().unwrap_or_default();
     let trace = match &who {
         For::Claude(call) => call.trace.clone(),
-        For::User(_) => None,
+        For::User(_) => ride.trace.clone(),
     };
     ed.test_start_guarded(target, guard, trace);
     match ed.session.test_run.as_mut().filter(|_| ed.test_generation != before) {
@@ -1941,7 +1941,7 @@ fn go_now(ed: &mut Editor, who: For, job: Job, guard: Option<Guard>, ride: Ride)
     };
     if taken {
         drop(guard);
-        return crate::queued::again(ed, crate::queued::What::Guarded { who, job, ride });
+        return crate::queued::again(ed, crate::queued::What::Guarded { who, job, ride }, None);
     }
     if matches!(who, For::Claude(_)) {
         let dir = match &guard {

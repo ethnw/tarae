@@ -443,13 +443,14 @@ impl Editor {
         if crate::queued::claudes_running(&self.session, crate::queued::Slot::Task) {
             return crate::queued::push(self, crate::queued::What::Task(task));
         }
-        self.task_start_now(task, false);
+        self.task_start_now(task, false, None);
     }
 
     /// The user's task starts — `force`: over Claude's command running (it stops); else one of Claude's that
-    /// started while the saves were written keeps the panel, and the task waits for it.
-    pub(crate) fn task_start_now(&mut self, task: Task, force: bool) {
-        let trace = crate::trace::RunTrace::new(format!("task: {}", task.name));
+    /// started while the saves were written keeps the panel, and the task waits for it. `trace`: its own from
+    /// its place in line (the same run, the same id).
+    pub(crate) fn task_start_now(&mut self, task: Task, force: bool, trace: Option<crate::trace::RunTrace>) {
+        let trace = trace.unwrap_or_else(|| crate::trace::RunTrace::new(format!("task: {}", task.name)));
         self.auto_save(" · before the task");
         // (it runs what's on disk: once the saves are written — `after_saves`)
         self.after_saves(move |ed| {
@@ -458,8 +459,7 @@ impl Editor {
                 return trace.end("an install was running");
             }
             if !force && crate::queued::claudes_running(&ed.session, crate::queued::Slot::Task) {
-                trace.end("queued behind claude's command");
-                return crate::queued::again(ed, crate::queued::What::Task(task));
+                return crate::queued::again(ed, crate::queued::What::Task(task), Some(trace));
             }
             ed.task_spawn(task, None, None, true, false, trace);
         });
@@ -493,7 +493,7 @@ impl Editor {
         // (Claude's call's trace goes on — from its ask; the user's run again of it starts here)
         let trace = match &who {
             crate::tools::For::Claude(call) => call.trace.clone(),
-            crate::tools::For::User(_) => None,
+            crate::tools::For::User(_) => ride.trace.clone(),
         };
         let trace = trace.unwrap_or_else(|| {
             crate::trace::RunTrace::new(format!("claude's run again: {}", traced(&task.cmd)))

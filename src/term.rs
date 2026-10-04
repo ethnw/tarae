@@ -6612,7 +6612,10 @@ impl OfferCard {
                 buttons.push((y, at, end, *k));
                 at = end + 3;
             }
+            // (a key it refused: why, in the bar's place for it — in the warning colour)
+            let said = editor.offer_said_now().filter(|_| matches!(o.state, OfferState::Asking));
             let how = match &o.state {
+                _ if said.is_some() => said.unwrap_or_default().to_string(),
                 OfferState::Asking if editor.offer_seen_whole() => "read to its end — y answers".to_string(),
                 OfferState::Asking => format!("{} to its end, then y answers", editor.end_key()),
                 _ => lines.get(1).map(|l| l.0.clone()).unwrap_or_default(),
@@ -6623,7 +6626,7 @@ impl OfferCard {
                 y,
                 inner: width.saturating_sub(5),
                 lines: vec![(title, false), (how, true)],
-                warn: Vec::new(),
+                warn: if said.is_some() { vec![1] } else { Vec::new() },
                 buttons_row: Some(y),
                 buttons,
                 labels,
@@ -6637,9 +6640,19 @@ impl OfferCard {
             });
         }
         let has_buttons = !labels.is_empty();
+        // A key it refused: why, over its answers in the warning colour — never cut away with its body (no
+        // silent refusal; the status line's flash was missed)
+        let said: Vec<(String, bool)> = match editor.offer_said_now() {
+            Some(s) if matches!(o.state, OfferState::Asking) => {
+                let mut v = vec![(String::new(), true)];
+                v.extend(wrapped(s, 2));
+                v
+            }
+            _ => Vec::new(),
+        };
         // Taller than the room: the body cut to fit, its last row saying how much is left (`v` views it all);
         // the buttons stay (#14: an 88-line card wasn't drawn at all, so it couldn't be answered)
-        let room = lay.text_rows.saturating_sub(if has_buttons { 2 } else { 0 } + 2 * pad);
+        let room = lay.text_rows.saturating_sub(if has_buttons { 2 } else { 0 } + 2 * pad + said.len());
         let mut cut = 0;
         // (the cut row's forms all fit: the card keeps its width as it says another)
         let mut cut_floor = 0;
@@ -6668,6 +6681,12 @@ impl OfferCard {
             if early && !editor.offer_seen_whole() && !editor.offer_viewing() {
                 warn.push(lines.len() - 1);
             }
+        }
+        for row in said {
+            if !row.0.is_empty() {
+                warn.push(lines.len());
+            }
+            lines.push((fit_ellipsis(&row.0, max_inner), row.1));
         }
         // Button row: "y Install   n Not now" — each "k label", three spaces between
         let btn_w =
@@ -6772,11 +6791,13 @@ impl OfferCard {
         };
         let strong = Style { bold: true, ..body };
         let key = Style { fg: ui.accent.fg, bold: true, ..body };
-        if self.bar {
-            return self.draw_bar(body, dim, bar, strong, key, out);
-        }
         // (the color of the panel's `▲ sandbox blocked` row)
         let warning = Style { fg: editor.theme.try_get("warning").and_then(|s| s.fg).or(body.fg), ..body };
+        if self.bar {
+            // (what it says after its title: how far the reading is, dim — or a key it refused, a warning)
+            let how = if self.warn.contains(&1) { warning } else { dim };
+            return self.draw_bar(body, how, bar, strong, key, out);
+        }
         let width = self.inner + 5;
         // Back cards first (deeper = narrower, dimmer) — one title row each, the topmost up to the top edge
         let peek_bg = |k: usize| blend(card.bg, ui.tint, 1.0 - 0.3 * k as f32).or(card.bg);

@@ -325,9 +325,9 @@ fn side_panel_lists_opens_and_closes() {
     t.normal_mode();
     // Back in the panel, `q` closes it
     t.send(" e");
-    t.wait_for("the panel focused", |s| s.contains("esc code"));
+    t.wait_state("the panel has the keys", |s| s["keys"]["region"] == "side:files");
     t.send("q");
-    t.wait_for("the panel gone", |s| !s.contains("notes.md"));
+    t.wait_state("the panel gone", |s| s["panels"]["side"].is_null() && s["keys"]["region"] == "code");
     t.command("q");
     assert_eq!(t.wait_exit().code(), Some(0));
 }
@@ -548,20 +548,25 @@ fn an_idle_editor_draws_nothing_and_sleeps() {
     let held = connected(&sock);
     idle(&mut t, "a file, a driver connected");
     drop(held);
+    // …and one watching: told only of changes, after frames drawn anyway — none while idle
+    let watching = t.watch("");
+    idle(&mut t, "a file, a watcher connected");
+    assert_eq!(watching.events().len(), 1, "only its `watching` line: {:#?}", watching.events());
+    drop(watching);
     t.send(" e");
-    t.wait_for("the side panel", |s| s.contains("esc code"));
+    t.wait_state("the side panel has the keys", |s| s["keys"]["region"] == "side:files");
     idle(&mut t, "the side panel");
-    t.esc("the code has the keys", |s| s.contains("space e files"));
+    t.esc_state("the code has the keys", |s| s["keys"]["region"] == "code");
     t.send(" g");
     t.wait_for("the git tab", |s| s.contains("Changes"));
     idle(&mut t, "the git tab");
-    t.esc("the code has the keys", |s| s.contains("space e files"));
+    t.esc_state("the code has the keys", |s| s["keys"]["region"] == "code");
     t.send(" T");
     // (sh's prompt: `$`, or `#` as root — a container)
     t.wait_for("the terminal", |s| s.contains("TERMINAL") && (s.contains("$ ") || s.contains("# ")));
     idle(&mut t, "the terminal");
     t.send("\x1c");
-    t.wait_for("the code has the keys", |s| s.contains("C-\\ type in it"));
+    t.wait_state("the code has the keys", |s| s["keys"]["region"] == "code");
     t.send(" l");
     t.wait_text("Ask about");
     idle(&mut t, "the chat");
@@ -651,6 +656,66 @@ fn a_driver_reads_where_the_keys_go() {
     });
     assert!(t.state(&[]).lines().nth(1).unwrap().starts_with("keys → terminal (commands)"));
     drop(t);
+}
+
+/// Watching over the socket (`tarae state --watch`): the trust card up from the start goes with `n` — told
+/// as `card-gone`, `answered n`; the keys going to the terminal's program — told as `keys`; each event with
+/// the frame that showed it and the input it followed, in plain words too.
+#[test]
+fn a_watcher_hears_what_changes() {
+    let sb = Sandbox::new("watch");
+    sb.write(".tarae.toml", "[editor]\nrestart-build = \"true\"\n");
+    sb.write("a.txt", "one\n");
+    let mut t = sb.spawn(&["a.txt"]);
+    let card = t.wait_state("the trust card settled", |s| {
+        s["cards"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|c| c["kind"] == "project-trust" && c["settled"] == true)
+    });
+    let id = card["cards"][0]["id"].as_str().unwrap().to_string();
+    let w = t.watch("");
+    t.send("n");
+    let gone = w.wait("the card gone", |e| e["event"] == "card-gone");
+    assert_eq!((gone["id"].as_str(), gone["how"].as_str()), (Some(id.as_str()), Some("answered n")));
+    assert!(gone["said"].as_str().unwrap().contains("answered n — Trust this project"), "{gone}");
+    t.send(" T");
+    let keys = w.wait("the keys to the terminal's program", |e| {
+        e["event"] == "keys" && e["region"] == "terminal-program"
+    });
+    assert_eq!(keys["said"], "keys → terminal (program)");
+    let s = t.state_json(0);
+    assert!(keys["frame"].as_u64() <= s["frame"].as_u64() && keys["input"].as_u64() <= s["input"].as_u64());
+    // The gone ring remembers it
+    assert!(s["gone"].as_array().unwrap().iter().any(|g| g["id"] == id.as_str() && g["how"] == "answered n"));
+}
+
+/// A chat turn as a watcher hears it: `turn started` as the message goes, `turn ended` with its time when
+/// the answer's in (a stand-in claude answering after a second).
+#[test]
+fn a_watcher_hears_a_turn_begin_and_end() {
+    let sb = Sandbox::new("watch-turn");
+    let fake = "while read -r line; do\n  case \"$line\" in '{\"message\"'*) ;; *) continue;; esac\n  sleep 1\n  \
+                printf '%s\\n' '{\"type\":\"result\",\"result\":\"done\"}'\ndone\n";
+    let script = sb.write("fake-claude.sh", fake);
+    sb.write_config(&format!("{BASE_CONFIG}[llm]\ncommand = \"sh\"\nargs = [\"{}\"]\n", script.display()));
+    sb.write("a.txt", "one\n");
+    let mut t = sb.spawn(&["a.txt"]);
+    t.send(" l");
+    t.wait_state("the chat has the keys", |s| s["keys"]["region"] == "chat");
+    let w = t.watch("turns");
+    t.send("hello\r");
+    let started = w.wait("the turn started", |e| e["event"] == "turn" && e["what"] == "started");
+    assert_eq!(started["session"], "s0");
+    let ended = w.wait("the turn ended", |e| e["event"] == "turn" && e["what"] == "ended");
+    assert!(ended["took_ms"].as_u64().is_some_and(|ms| ms >= 900), "{ended}");
+    assert!(ended["said"].as_str().unwrap().contains("Claude's turn ended — 0 calls"), "{ended}");
+    assert!(
+        w.events().iter().skip(1).all(|e| e["event"] == "turn"),
+        "only turns asked for: {:#?}",
+        w.events()
+    );
 }
 
 /// A state folder past `sun_path`'s 104 bytes: the socket is bound from its folder, and `tarae state`
@@ -756,15 +821,21 @@ fn a_folder_argument_opens_there_on_the_start_screen() {
 /// a moment — the project's trust card, up since the start (its `.tarae.toml` sets the binary), set aside
 /// with `n` first.
 fn yes_to_restart(t: &mut Term) {
-    // (a card's answer counts once it has been in sight as it is — the stack changed as this one came)
-    let settle = || std::thread::sleep(std::time::Duration::from_millis(800));
-    t.wait_text("Restart into");
-    if t.screen().contains("Trust this project") {
-        settle();
+    // (a card's answer counts once it has been in sight as it is — the state says when: `settled`; it slept
+    // 800 ms and hoped)
+    let front = |s: &serde_json::Value, kind: &str| {
+        s["cards"].as_array().into_iter().flatten().any(|c| c["up"] == "front" && c["kind"] == kind)
+    };
+    let settled = |s: &serde_json::Value| {
+        s["cards"].as_array().into_iter().flatten().any(|c| c["up"] == "front" && c["settled"] == true)
+    };
+    let s = t.wait_state("a card settled in front", |s| {
+        settled(s) && (front(s, "restart") || front(s, "project-trust"))
+    });
+    if front(&s, "project-trust") {
         t.send("n");
-        t.wait_for("the trust card gone", |s| !s.contains("Trust this project"));
+        t.wait_state("the restart card settled in front", |s| front(s, "restart") && settled(s));
     }
-    settle();
     t.send("y");
 }
 

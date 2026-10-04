@@ -509,10 +509,15 @@ impl crate::editor::Editor {
     pub fn drop_cards(&mut self, gone: impl Fn(&What) -> bool) {
         let front = !self.background();
         let label = self.session.label();
+        let mut dropped = Vec::new();
         for o in self.session.parked.iter().chain(self.offers.iter().filter(|_| front)) {
             if gone(&o.what) {
                 o.said(label, "dropped");
+                dropped.push(o.id);
             }
+        }
+        for id in dropped {
+            self.card_how(id, "dropped — its turn ended");
         }
         self.session.parked.retain(|o| !gone(&o.what));
         if front {
@@ -580,6 +585,8 @@ impl crate::editor::Editor {
             if !self.offer_settled()
                 && matches!(key.code, Code::Char(c) if matches!(c, 'n' | 'N') || o.weighty_answer(c))
             {
+                // (a key pressed as it came up isn't an answer — said, not swallowed in silence)
+                self.offer_refused(format!("{key} came as the card did — not taken; press it again"));
                 return true;
             }
             // A change set's card: `r` one by one, `v` every change in a buffer (not a cut card's text)
@@ -655,6 +662,7 @@ impl crate::editor::Editor {
         }
         let mut o = self.offers.remove(0);
         o.said(self.session.label(), "y");
+        self.card_how(o.id, "answered y");
         o.state = OfferState::Installing(Instant::now());
         let (id, what) = (o.id, o.what.clone());
         self.offers.push(o);
@@ -816,14 +824,39 @@ impl crate::editor::Editor {
         }
     }
 
-    /// `y` on a card cut to fit: not an answer yet — said, and on the card's cut row too.
+    /// `y` on a card cut to fit: not an answer yet — said on the card (and its cut row too).
     pub fn offer_see_all_first(&mut self) {
         self.offer_early.set(self.offers.first().map(|o| (o.id, o.rev)));
-        let msg = match self.offer_viewing() {
-            true => format!("read it to its end first — {} in its buffer", self.end_key()),
-            false => "see all of it first — v shows the whole card".into(),
-        };
-        self.set_status(msg);
+        // (what to do first — a bar cuts the end of what it says)
+        match self.offer_viewing() {
+            true => {
+                self.offer_refused(format!("{} to its end first — y waits until it's read", self.end_key()))
+            }
+            // (the card's cut row says it, in the warning colour — `offer_early`)
+            false => self.recorded(
+                crate::editor::ToastKind::Info,
+                "v shows all of it — y waits until it's been seen".into(),
+            ),
+        }
+    }
+
+    /// A key the front card didn't take as an answer, and why — said on the card itself (a row in the warning
+    /// colour over its answers, or its bar's), where the one who pressed it is looking; kept in `:messages`.
+    /// No silent refusal: the status line flashing it was missed (2026-10-04).
+    pub fn offer_refused(&mut self, msg: impl Into<String>) {
+        let Some((id, rev)) = self.offers.first().map(|o| (o.id, o.rev)) else { return };
+        let msg = msg.into();
+        self.recorded(crate::editor::ToastKind::Info, msg.clone());
+        self.offer_said = Some((id, rev, msg));
+    }
+
+    /// What the front card says about the last key it refused (None: none, or it was about another card or
+    /// what it said before it changed).
+    pub fn offer_said_now(&self) -> Option<&str> {
+        let o = self.offers.first()?;
+        // (a `y` that waited for it to be read: past once it has been — the card says `y` answers now)
+        let stale = |s: &str| s.contains("y waits until") && self.offer_seen_whole();
+        self.offer_said.as_ref().filter(|s| (s.0, s.1) == (o.id, o.rev) && !stale(&s.2)).map(|s| s.2.as_str())
     }
 
     /// Every event: the whole text of a card that's been answered (or has gone) closes with it (#55) — any
@@ -954,7 +987,9 @@ impl crate::editor::Editor {
     }
 
     fn offer_lasting(&mut self, o: Offer, scope: crate::allow::Scope) {
-        o.said(self.session.label(), if scope == crate::allow::Scope::Always { "A" } else { "a" });
+        let key = if scope == crate::allow::Scope::Always { "A" } else { "a" };
+        o.said(self.session.label(), key);
+        self.card_how(o.id, format!("answered {key}"));
         self.card_answered(o.id);
         match o.what {
             What::NoSandbox { job, call, ride } => crate::tools::unprotected_answer(
@@ -990,6 +1025,7 @@ impl crate::editor::Editor {
         }
         let o = self.offers.remove(0);
         o.said(self.session.label(), "n");
+        self.card_how(o.id, "answered n");
         self.card_answered(o.id);
         match o.what {
             What::Grammars { lang, names, .. } => {

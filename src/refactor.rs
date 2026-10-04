@@ -331,7 +331,9 @@ pub fn decline_all(ed: &mut Editor, generation: u64) {
 /// `v` on the card: every change, file by file, in a buffer of its own (worked out on a worker) — it
 /// closes with the card.
 pub fn view_all(ed: &mut Editor, generation: u64) {
-    let Some(l) = asking(ed, generation) else { return };
+    let Some(l) = asking(ed, generation) else {
+        return ed.offer_refused("its changes are gone (its chat ended) — n closes the card");
+    };
     let title = format!("{}Claude changes {}", crate::offer::CARD_VIEW, nav::count(l.review.len(), "file"));
     let mut files: Vec<FileChange> = l.review.iter().cloned().collect();
     files.sort_by(|a, b| a.rel.cmp(&b.rel));

@@ -126,6 +126,11 @@ const SCENES: &[Scene] = &[
     ("the chat, empty", |ed| chat(ed, "")),
     ("the chat, a draft", |ed| chat(ed, "hello")),
     ("the chat minimized while Claude works", chat_minimized),
+    ("the chat minimized, a draft in it", |ed| {
+        chat_minimized(ed);
+        let c = ed.session.chat.as_mut().unwrap();
+        (c.input, c.cursor) = ("half a thought".into(), 14);
+    }),
     ("the chat, a prompt opened over it", |ed| {
         chat(ed, "hello");
         ed.open_prompt(crate::editor::PromptKind::Command, "");
@@ -286,10 +291,81 @@ fn the_routing_test_sees_each_case_broken() {
     assert!(leaves >= 5, "scenes whose place leaves keys to the editor: {leaves}");
 }
 
-/// In every scene the keys go somewhere on screen — but one: the chat minimized while Claude works (its
-/// input isn't drawn, and it has the keys — slip 3).
+/// The frame as text, as the user sees it.
+fn shown(ed: &mut Editor) -> String {
+    frame(ed);
+    crate::screen::text(ed.last_frame.as_ref().unwrap().0.as_slice(), 120, 40).unwrap()
+}
+
+/// Every scene × every probe key where the key changed nothing on screen and nothing was said — a key
+/// refused (or lost) in silence.
+fn silent() -> Vec<String> {
+    let mut out = Vec::new();
+    for (name, setup) in SCENES {
+        for probe in PROBES {
+            let mut ed = editor();
+            setup(&mut ed);
+            if name.contains("settled") {
+                frame(&mut ed);
+                settle(&mut ed);
+            }
+            let (before, said) = (shown(&mut ed), ed.said);
+            if name.contains("settled") {
+                settle(&mut ed);
+            }
+            ed.handle_key(key(probe));
+            if shown(&mut ed) == before && ed.said == said {
+                out.push(format!("{name} · {probe:?}"));
+            }
+        }
+    }
+    out
+}
+
+/// No silent refusal (user decision 2026-10-04): in every scene of the routing matrix, a key either changes
+/// what's on screen or is said. What's left is what does nothing on purpose — Esc with nothing to leave,
+/// `C-w` with nothing to delete, `j`/`C-d` at a list's end, a space at the end of an input (there, but not
+/// in sight as text) — and the terminal's program, whose echo comes later from its reader. Found and fixed
+/// with this: the side panel, the review's list, `:procs`, the bottom slot and an edit's review dropped
+/// keys they had no use for; `f`/`r` waited for a character unsaid; a card swallowed `y` as it came up;
+/// `C-` keys in the chat and the command line went nowhere; `:procs`' `s`/`r` with no row.
 #[test]
-fn the_keys_go_somewhere_on_screen_but_the_minimized_chat() {
+fn no_key_is_refused_in_silence() {
+    let quiet = |k: &str, name: &str| match k {
+        "<esc>" | "<C-w>" => true,
+        "j" | "<C-d>" => [
+            "side panel",
+            "rail",
+            ":procs",
+            "panel",
+            "tarae's keys",
+            "chat",
+            "picker",
+            "hover",
+            "command line",
+            "review",
+        ]
+        .iter()
+        .any(|p| name.contains(p)),
+        " " => ["draft", "a prompt opened over it", "picker"].iter().any(|p| name.contains(p)),
+        _ => false,
+    };
+    let off: Vec<String> = silent()
+        .into_iter()
+        // (the program's: its echo comes from its reader thread, after this frame)
+        .filter(|l| !l.contains("the terminal's program ·"))
+        .filter(|l| {
+            let (name, k) = l.rsplit_once(" · ").unwrap();
+            !quiet(k.trim_matches('"'), name)
+        })
+        .collect();
+    assert!(off.is_empty(), "keys refused in silence:\n{}", off.join("\n"));
+}
+
+/// In every scene the keys go somewhere on screen — the minimized chat too, since its first key brings it
+/// back (slip 3 was the one place they didn't).
+#[test]
+fn the_keys_always_go_somewhere_on_screen() {
     let mut hidden = Vec::new();
     for (name, setup) in SCENES {
         let mut ed = editor();
@@ -299,7 +375,7 @@ fn the_keys_go_somewhere_on_screen_but_the_minimized_chat() {
             hidden.push(*name);
         }
     }
-    assert_eq!(hidden, vec!["the chat minimized while Claude works"]);
+    assert!(hidden.is_empty(), "keys to what isn't on screen: {hidden:?}");
 }
 
 /// Found by the routing test, where the status line named one place and the keys went to another: a side
@@ -370,21 +446,28 @@ fn slip_2_the_terminal_program_has_the_keys_or_tarae_has_them_on_its_panel() {
     assert!(status.contains("TERMINAL ▌  i type in it"), "{shown}");
 }
 
-/// Slip 3: ` W` typed into a chat input that wasn't on screen — minimized while Claude worked. The keys
-/// are the chat's, and the state says it isn't drawn.
+/// Slip 3: ` W` typed into a chat input that wasn't on screen — minimized while Claude worked. Now the
+/// first key that would type brings the panel back instead, isn't typed, and says so; the state said so
+/// before it (`takes: unfold`). The chat's own keys (`C-c` stop, Esc) still act while it's minimized.
 #[test]
-fn slip_3_keys_to_a_chat_input_not_on_screen() {
+fn slip_3_the_minimized_chat_comes_back_before_anything_is_typed() {
     let mut ed = editor();
     chat_minimized(&mut ed);
     frame(&mut ed);
+    assert!(ed.screen.chat_mini.get().is_some(), "minimized: its card is drawn");
     let k = ed.keys_to();
-    assert_eq!((k.region, k.takes, k.drawn), (Region::Chat, Takes::Text, false));
-    assert_eq!(k.route(key(" ")), Region::Chat, "space is text there, not the menu");
-    assert!(ed.ui_state().text().contains("NOT ON SCREEN"));
-    // Unfolded: on screen
-    ed.session.chat.as_mut().unwrap().unfolded = true;
+    assert_eq!((k.region, k.takes, k.to.as_str(), k.drawn), (Region::Unfold, Takes::Unfold, "chat", true));
+    assert_eq!(k.route(key(" ")), Region::Unfold, "space brings it back — no menu, no text");
+    assert_eq!(k.route(key("<C-c>")), Region::Chat, "C-c still stops Claude");
+    assert!(ed.ui_state().text().contains("keys → chat (unfold)"));
+    let said = ed.said;
+    feed(&mut ed, &[" ", "W"]);
+    let c = ed.session.chat.as_ref().unwrap();
+    assert!(!c.compact() && c.focused, "back, with the keys");
+    assert_eq!(c.input, "W", "the first key brought it back; the next typed");
+    assert!(ed.said > said, "said");
     frame(&mut ed);
-    assert!(ed.keys_to().drawn);
+    assert!(ed.screen.chat_w > 0 && ed.keys_to().drawn && ed.keys_to().takes == Takes::Text);
 }
 
 /// Slip 4: a card nobody noticed for minutes. Every card is in the state — up front, stacked behind it,
@@ -461,6 +544,13 @@ fn steady(mut v: Value) -> Value {
     for s in v["sessions"].as_array_mut().unwrap() {
         s["root"] = json!(Path::new(s["root"].as_str().unwrap()).file_name().unwrap().to_string_lossy());
     }
+    // (run ids are the process's sequence — other tests take theirs)
+    for r in v["runs"].as_array_mut().unwrap() {
+        (r["id"], r["since_ms"]) = (json!("run#-"), json!(0));
+    }
+    for g in v["gone"].as_array_mut().unwrap() {
+        g["ago_ms"] = json!(0);
+    }
     v
 }
 
@@ -485,6 +575,7 @@ fn the_state_as_json_is_pinned() {
         ),
     );
     edit_review(&mut ed);
+    task_panel(&mut ed);
     light_card(&mut ed);
     ed.set_warning("a.rs changed on disk");
     frame(&mut ed);
@@ -662,6 +753,292 @@ fn the_socket_is_this_users_alone() {
     assert!(crate::uisocket::bind_in(&ui, 78).is_err());
     assert_eq!(std::fs::read_to_string(ui.join("78.sock")).unwrap(), "mine");
     std::fs::remove_dir_all(&dir).ok();
+}
+
+// ── No silent state change ───────────────────────────────────────────────
+
+/// The run card of 2026-10-04: a card too tall for the screen, its whole text open in its buffer, the card
+/// holding the keys (`C-q`). `y` before it's read to its end isn't taken — and the card's bar says so, in the
+/// warning colour (it only flashed in the status line). The keys that read it (`g e`) move its buffer from
+/// the card (they were refused, and nothing could be done without leaving it); read to its end, the bar says
+/// `y` answers.
+#[test]
+fn a_card_says_why_y_waits_and_lets_its_text_be_read_from_it() {
+    let mut ed = editor();
+    let script: String = (1..=60).map(|i| format!("echo step {i}\n")).collect();
+    let q = format!("{script}\nRuns the script Claude wrote this turn.");
+    let o = Offer::new(
+        "Claude wants to run a script".into(),
+        &q,
+        "",
+        String::new(),
+        What::Install {
+            tool: "script".into(),
+            run: vec!["true".into()],
+            cwd: ed_root(),
+            then: crate::install::Then::Lsp,
+        },
+    );
+    ed.push_offer(o);
+    let (w, h) = (100, 24);
+    let shown = |ed: &mut Editor| {
+        ed.focus_sync();
+        crate::term::render(ed, &mut Vec::new(), w, h).unwrap();
+        crate::screen::text(ed.last_frame.as_ref().unwrap().0.as_slice(), w, h).unwrap()
+    };
+    shown(&mut ed);
+    settle(&mut ed);
+    assert!(!ed.offer_seen_whole(), "cut to fit");
+    feed(&mut ed, &["<C-q>", "v"]);
+    shown(&mut ed);
+    settle(&mut ed);
+    assert!(ed.offer_bar(), "its text in its buffer, the card a bar over the status line");
+    feed(&mut ed, &["y"]);
+    let s = shown(&mut ed);
+    assert!(!ed.offers.is_empty() && s.contains("ge to its end first — y waits"), "said on the bar:\n{s}");
+    feed(&mut ed, &["g", "e"]);
+    assert!(ed.card_keys, "the card still holds the keys");
+    let s = shown(&mut ed);
+    assert!(ed.offer_seen_whole(), "read to its end from the card:\n{s}");
+    assert!(s.contains("echo step 60"), "{s}");
+    // A key it has no use for: said there too
+    feed(&mut ed, &["x"]);
+    let s = shown(&mut ed);
+    assert!(s.contains("x isn't an answer here"), "{s}");
+    feed(&mut ed, &["n"]);
+    assert!(ed.offers.is_empty());
+}
+
+/// A paste in normal mode: a `:` line opens the command line with it, not run (`:w` pasted into a commit
+/// message became part of its subject, unsaid); any other text goes in and is said; into the minimized
+/// chat, it comes back with it.
+#[test]
+fn a_paste_in_normal_mode_is_never_silent() {
+    let mut ed = editor();
+    ed.handle_paste(":w\n".into());
+    let p = ed.prompt.as_ref().expect("the command line");
+    assert_eq!((p.kind, p.text.as_str()), (crate::editor::PromptKind::Command, "w"));
+    assert_eq!(ed.doc().text.to_string(), "one\ntwo\nthree\n", "nothing went in, nothing ran");
+    feed(&mut ed, &["<esc>"]);
+    let said = ed.said;
+    ed.handle_paste("pasted text".into());
+    assert!(ed.doc().text.to_string().contains("pasted text") && ed.said > said, "in, and said");
+    assert!(ed.messages.last().unwrap().2.starts_with("pasted a line into"));
+    // In insert mode it's typed where you type: nothing to say
+    feed(&mut ed, &["i"]);
+    let said = ed.said;
+    ed.handle_paste(":not a command".into());
+    assert!(ed.prompt.is_none() && ed.said == said && ed.doc().text.to_string().contains(":not a command"));
+    feed(&mut ed, &["<esc>"]);
+    chat_minimized(&mut ed);
+    ed.handle_paste("for claude".into());
+    let c = ed.session.chat.as_ref().unwrap();
+    assert!(c.input == "for claude" && !c.compact(), "the chat back, with it");
+}
+
+// ── Phase 2: panels, runs, the gone ring, watching ───────────────────────
+
+/// A folder of the test's own with a few files, the side panel's files tab on it, a picker, the review's
+/// rail of two files, a task in the slot — every panel row the state lists is on the frame, as its label.
+/// (The rows only ever come from what `term.rs` recorded drawing them.)
+#[test]
+fn every_row_the_state_lists_is_on_the_frame() {
+    let dir = sock_dir("rows");
+    let mut ed = editor();
+    ed.session.root = dir.clone();
+    let rels = vec!["Cargo.toml".to_string(), "src/main.rs".into(), "src/panels.rs".into()];
+    let mut side = crate::sidebar::Sidebar::with_files(dir.clone(), rels);
+    side.set_open(["src"], true);
+    ed.session.sidebar = Some(side);
+    task_panel(&mut ed);
+    let w = 160;
+    let check = |ed: &mut Editor, what: &str| {
+        ed.focus_sync();
+        crate::term::render(ed, &mut Vec::new(), w, 40).unwrap();
+        let shown = crate::screen::text(ed.last_frame.as_ref().unwrap().0.as_slice(), w, 40).unwrap();
+        let p = ed.ui_state().panels;
+        let mut rows: Vec<panels::Row> = Vec::new();
+        rows.extend(p.side.iter().flat_map(|s| s.2.clone()));
+        rows.extend(p.review.iter().flat_map(|r| r.rows.clone()));
+        rows.extend(p.picker.iter().flat_map(|r| r.rows.clone()));
+        assert!(!rows.is_empty(), "{what}: rows listed");
+        for r in &rows {
+            assert!(shown.contains(&r.label), "{what}: {} ({:?}) isn't on the frame\n{shown}", r.id, r.label);
+        }
+        rows
+    };
+    let side = check(&mut ed, "the side panel");
+    let ids: Vec<&str> = side.iter().map(|r| r.id.as_str()).collect();
+    assert!(ids.contains(&"files:src/") && ids.contains(&"files:src/panels.rs"), "content ids: {ids:?}");
+    let slot = ed.ui_state().panels.slot.unwrap();
+    assert_eq!((slot.tabs[0].0.as_str(), slot.front.as_deref()), ("check", Some("task")));
+    // The review's rail takes the side panel's place
+    let file = |rel: &str| crate::codereview::File {
+        rel: rel.into(),
+        path: dir.join(rel),
+        added: 1,
+        removed: 0,
+        new: false,
+        gone: false,
+        binary: false,
+    };
+    let review = crate::codereview::CodeReview::for_test(
+        crate::codereview::Base::Head,
+        dir.clone(),
+        vec![file("src/main.rs"), file("README.md")],
+    );
+    ed.session.code_review = Some(review);
+    let rail = check(&mut ed, "the review's rail");
+    assert!(rail.iter().any(|r| r.id == "review:src/main.rs" && r.label == "main.rs"), "{rail:?}");
+    // A picker over it all
+    ed.set_status("first message");
+    ed.messages_picker();
+    let picker = check(&mut ed, "a picker");
+    assert!(picker.iter().any(|r| r.label.contains("first message")), "{picker:?}");
+    // (found by this test: the rail's rows were drawn, then covered by the picker — and still listed)
+    let p = ed.ui_state().panels;
+    assert!(p.covered && p.review.unwrap().rows.is_empty(), "the rail under the picker lists no rows");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A run keeps one id from its ask to its end: the user's task waiting in line behind Claude's command is
+/// `run#N` queued, and the same `run#N` once it runs.
+#[test]
+fn a_run_keeps_its_id_from_the_line_to_its_end() {
+    let mut ed = editor();
+    let task = |name: &str| crate::task::Task { name: name.into(), cmd: "true".into(), cwd: ed_root() };
+    let mut claudes = crate::task::Run::for_test(task("claude's"));
+    (claudes.state, claudes.by_claude) = (crate::task::State::Running, true);
+    ed.session.task_run = Some(claudes);
+    ed.task_start(task("check"));
+    let runs = ed.ui_runs();
+    let queued = runs.iter().find(|r| r.state == "queued").expect("waiting in line");
+    assert_eq!((queued.of, queued.label.as_str(), queued.waiting.as_deref()), ("user", "check", Some("1st")));
+    let id = queued.id.clone();
+    // Claude's ends; the line moves
+    ed.session.task_run.as_mut().unwrap().state = crate::task::State::Passed;
+    crate::queued::run_next(&mut ed);
+    let end = Instant::now() + Duration::from_secs(10);
+    while !ed.session.task_run.as_ref().is_some_and(|r| r.task.name == "check") {
+        assert!(Instant::now() < end, "the task started");
+        if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(10)) {
+            ed.handle_event(ev);
+        }
+    }
+    let r = ed.ui_runs().into_iter().find(|r| r.label == "check").unwrap();
+    assert_eq!(r.id, id, "the same run");
+    assert_ne!(r.state, "queued");
+}
+
+fn ed_root() -> PathBuf {
+    std::fs::canonicalize(std::env::temp_dir()).unwrap()
+}
+
+/// The gone ring: a card answered, one dropped as its turn ends, one that went without a word — each with
+/// how; the newest first in the state.
+#[test]
+fn the_gone_ring_says_how_each_card_went() {
+    let mut ed = editor();
+    light_card(&mut ed);
+    frame(&mut ed);
+    feed(&mut ed, &["n"]);
+    frame(&mut ed);
+    weighty_card(&mut ed);
+    frame(&mut ed);
+    ed.drop_cards(|w| matches!(w, What::ChangeSet { .. }));
+    frame(&mut ed);
+    light_card(&mut ed);
+    frame(&mut ed);
+    ed.offers.clear();
+    frame(&mut ed);
+    let gone: Vec<(String, String)> =
+        ed.ui_state().gone.iter().map(|g| (g.title.clone(), g.how.clone())).collect();
+    assert_eq!(
+        gone,
+        vec![
+            ("End the review?".into(), "gone".into()),
+            ("Claude changes 3 files".into(), "dropped — its turn ended".into()),
+            ("End the review?".into(), "answered n".into()),
+        ]
+    );
+    assert!(ed.ui_state().text().contains("last gone: card#3 \"End the review?\" — gone"));
+}
+
+/// A watcher (as a socket connection is one) is told what changes, a frame at a time — where the keys
+/// went, a card up and gone (and how), a toast, a run's steps — each with its frame, input and a `said`
+/// line; nothing between frames, and nothing when nothing changed.
+#[test]
+fn a_watcher_is_told_what_changes() {
+    let mut ed = editor();
+    frame(&mut ed);
+    let (tx, rx) = std::sync::mpsc::sync_channel(watch::UNREAD);
+    let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    ed.ui_watch_add(watch::Watcher { tx, kinds: Vec::new(), overflowed: flag });
+    let events = |rx: &std::sync::mpsc::Receiver<String>| -> Vec<Value> {
+        rx.try_iter().map(|l| serde_json::from_str(&l).unwrap()).collect()
+    };
+    frame(&mut ed);
+    assert!(events(&rx).is_empty(), "nothing changed, nothing said");
+    feed(&mut ed, &[":"]);
+    assert!(events(&rx).is_empty(), "nothing before its frame");
+    frame(&mut ed);
+    let e = events(&rx);
+    assert_eq!(e.len(), 1, "{e:?}");
+    assert_eq!((e[0]["event"].as_str(), e[0]["to"].as_str()), (Some("keys"), Some("prompt")));
+    assert_eq!((e[0]["frame"].as_u64(), e[0]["input"].as_u64()), (Some(ed.frames), Some(ed.input_seq)));
+    assert_eq!(e[0]["said"], "keys → prompt (text)");
+    feed(&mut ed, &["<esc>"]);
+    light_card(&mut ed);
+    let trace = crate::trace::RunTrace::new("task: check");
+    trace.step("spawned");
+    frame(&mut ed);
+    let e = events(&rx);
+    let kinds: Vec<&str> = e.iter().filter_map(|v| v["event"].as_str()).collect();
+    assert_eq!(kinds, vec!["run", "keys", "card-up"], "{e:?}");
+    assert_eq!(e[0]["said"], format!("run#{} task: check — spawned", trace.id()));
+    assert!(e[2]["said"].as_str().unwrap().contains("End the review? — y end it · n keep reviewing"));
+    feed(&mut ed, &["y"]);
+    ed.set_warning("a.rs changed on disk");
+    frame(&mut ed);
+    let e = events(&rx);
+    let gone = e.iter().find(|v| v["event"] == "card-gone").expect("card-gone");
+    assert_eq!(gone["how"], "answered y");
+    assert!(e.iter().any(|v| v["event"] == "toast" && v["said"] == "warning: a.rs changed on disk"), "{e:?}");
+    // Kinds asked for only
+    let (tx, only) = std::sync::mpsc::sync_channel(watch::UNREAD);
+    let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    ed.ui_watch_add(watch::Watcher { tx, kinds: vec!["cards".into()], overflowed: flag });
+    feed(&mut ed, &[":"]);
+    light_card(&mut ed);
+    frame(&mut ed);
+    let e = events(&only);
+    assert!(e.iter().all(|v| v["event"] == "card-up") && !e.is_empty(), "{e:?}");
+}
+
+/// A watcher that doesn't read is let go once `UNREAD` events wait for it — its flag says why (its
+/// connection's last line); the others go on, and with none left, nothing more is kept.
+#[test]
+fn a_watcher_that_doesnt_read_is_let_go() {
+    let mut ed = editor();
+    frame(&mut ed);
+    let (tx, _unread) = std::sync::mpsc::sync_channel(watch::UNREAD);
+    let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    ed.ui_watch_add(watch::Watcher { tx, kinds: Vec::new(), overflowed: flag.clone() });
+    for i in 0..watch::UNREAD + 10 {
+        ed.set_status(format!("message {i}"));
+        frame(&mut ed);
+        if !ed.ui_watch.watching() {
+            break;
+        }
+    }
+    assert!(!ed.ui_watch.watching() && flag.load(std::sync::atomic::Ordering::Relaxed), "let go, and why");
+    assert!(
+        crate::trace::steps_taken().is_empty() && {
+            crate::trace::RunTrace::new("x").step("y");
+            true
+        }
+    );
+    assert!(crate::trace::steps_taken().is_empty(), "nobody watching: a run's steps aren't kept");
 }
 
 // ── Measured ─────────────────────────────────────────────────────────────

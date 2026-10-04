@@ -129,6 +129,62 @@ fn perf_e2e_ui_state_round_trip() {
     report("e2e_ui_state_json_bytes_plain_scene", bytes as f64, 16384.0, 1.0);
 }
 
+/// A key in a 200k-line file to its frame, with a watcher of the UI state connected (`tarae state --watch`):
+/// the summary compared after each frame, the events written — next to `e2e_key_to_frame_big_file_ms`.
+#[test]
+fn perf_e2e_key_in_a_big_file_watched() {
+    if unoptimized("perf_e2e_key_in_a_big_file_watched") {
+        return;
+    }
+    let sb = Sandbox::new("perf-key-watched");
+    big_file(&sb, "big.rs", 200_000);
+    let mut t = sb.spawn(&["big.rs"]);
+    t.wait_text("fn f1(");
+    std::thread::sleep(Duration::from_millis(600));
+    let w = t.watch("");
+    let mut runs = Vec::new();
+    for k in ["j", "j", "w", "w", "e", "b", "k", "l", "h", "j"].iter().cycle().take(40) {
+        runs.extend(t.key_to_frame(k, Duration::from_secs(2)).map(ms));
+    }
+    assert!(runs.len() >= 30, "frames came for {} of 40 keys", runs.len());
+    // (moving in the code changes nothing a watcher is told of)
+    eprintln!("watched: {} events for 40 keys", w.events().len() - 1);
+    report("e2e_key_to_frame_big_file_watched_ms", median(runs), 16.0, 0.05);
+}
+
+/// What a watcher is told while Claude streams an answer in front (a word every 50 ms, the chat open): the
+/// summary leaves the chat's words out — events a second, over 3 s of it.
+#[test]
+fn perf_e2e_events_while_claude_streams() {
+    if unoptimized("perf_e2e_events_while_claude_streams") {
+        return;
+    }
+    let sb = Sandbox::new("perf-stream-events");
+    big_file(&sb, "a.rs", 2_000);
+    let word = r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"word "}}}"#;
+    let fake = format!(
+        "while read -r line; do\n  case \"$line\" in '{{\"message\"'*) ;; *) continue;; esac\n  i=0\n  \
+         while [ $i -lt 400 ]; do printf '%s\\n' '{word}'; sleep 0.05; i=$((i+1)); done\n  \
+         printf '%s\\n' '{{\"type\":\"result\",\"result\":\"done\"}}'\ndone\n"
+    );
+    let script = sb.home().join("fake-claude.sh");
+    fs::write(&script, fake).unwrap();
+    sb.write_config(&format!("{BASE_CONFIG}[llm]\ncommand = \"sh\"\nargs = [\"{}\"]\n", script.display()));
+    let mut t = Term::spawn(&sb, &["a.rs"], 160, 50);
+    t.wait_text("fn f1(");
+    t.send(" l");
+    t.send("go\r");
+    t.wait_text("word word");
+    let w = t.watch("");
+    let (frames, secs) = (t.frames(), 3.0);
+    std::thread::sleep(Duration::from_secs_f64(secs));
+    let events = w.events().len() - 1;
+    let kinds: Vec<String> =
+        w.events().iter().skip(1).filter_map(|e| e["event"].as_str().map(String::from)).collect();
+    eprintln!("while streaming: {events} events in {secs} s over {} frames: {kinds:?}", t.frames() - frames);
+    report("e2e_events_while_streaming_per_s", events as f64 / secs, 5.0, 0.5);
+}
+
 /// Scrolling a 200k-line file by half pages to each frame.
 #[test]
 fn perf_e2e_scrolling() {
@@ -170,6 +226,14 @@ fn perf_e2e_idle_cpu() {
     std::thread::sleep(Duration::from_secs(3));
     let used = t.usage() - before;
     report("e2e_idle_cpu_ms_per_s", ms(used.cpu) / 3.0, 10.0, 0.5);
+    // …and with a watcher of the UI state connected: nothing changes, nothing is told, nothing wakes
+    let w = t.watch("");
+    std::thread::sleep(Duration::from_secs(1));
+    let before = t.usage();
+    std::thread::sleep(Duration::from_secs(3));
+    let used = t.usage() - before;
+    assert_eq!(w.events().len(), 1, "told nothing while idle: {:?}", w.events());
+    report("e2e_idle_cpu_watched_ms_per_s", ms(used.cpu) / 3.0, 10.0, 0.5);
 }
 
 /// What `:procs` costs — its looks at tarae's processes (here tarae, the shell in its terminal): one look,
@@ -273,14 +337,11 @@ fn perf_e2e_busy_session_behind() {
     t.send(" l");
     t.send("go\r");
     t.wait_text("word word");
-    // (Esc alone — with a key right behind it, it reads as alt+that key. So wait for what's so only once it
-    // took: the follow card without the keys, `space l open the chat`. It waited for "C-f unfollow" — what
-    // the card says while it *has* the keys (`C-c stop  C-f unfollow`), so the wait passed at once, the `:`
-    // went out right behind the Esc, and on a loaded machine both came in one read: alt+`:`, the switch
-    // typed into the chat, a timeout — :preflight 2026-10-04, while main ran its own test loops)
-    let let_go = |s: &Screen| s.contains("space l open the chat") && !s.contains("C-f unfollow");
-    assert!(!let_go(&t.screen()), "what's waited for isn't on screen before the Esc");
-    t.esc("the chat let go of the keys", let_go);
+    // (Esc alone — with a key right behind it, it reads as alt+that key: on a loaded machine the `:` went out
+    // right behind it, both came in one read, alt+`:`, the switch typed into the chat, a timeout —
+    // :preflight 2026-10-04. A screen grep for the follow card's words passed too early once. Now: the Esc
+    // handled and drawn — `after_input` — and the state saying the code has the keys)
+    t.esc_state("the chat let go of the keys", |s| s["keys"]["region"] == "code");
     t.send(":session-switch 0\r");
     t.wait_for("the first session in front", |s| !s.contains("word word") && s.contains("fn f1("));
     // (past the toasts' fade and the switch's frames)

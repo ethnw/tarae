@@ -18,7 +18,6 @@
 
 use std::collections::VecDeque;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::editor::Editor;
@@ -57,6 +56,9 @@ pub struct Ride {
     pub key: Option<String>,
     pub joined: Vec<Joined>,
     pub queued: Option<Queued>,
+    /// The user's run of Claude's again (`For::User`): its trace from its place in line (Claude's own rides on
+    /// its call).
+    pub trace: Option<crate::trace::RunTrace>,
 }
 
 /// A run waiting for its slot.
@@ -112,14 +114,14 @@ impl What {
     }
 }
 
-/// A run in line: its id (`:procs`), what it is, and its time there.
+/// A run in line: its id (`:procs`, the UI state's `run#<id>` — its trace's), what it is, its time there,
+/// and its trace from the ask: the same run, the same id, once it starts.
 pub struct Next {
     pub id: u64,
     pub what: What,
     pub queued: Queued,
+    pub trace: crate::trace::RunTrace,
 }
-
-static IDS: AtomicU64 = AtomicU64::new(1);
 
 /// Whether `slot` is running a run now.
 fn busy(l: &Session, slot: Slot) -> bool {
@@ -235,15 +237,16 @@ pub fn join(ed: &mut Editor, key: &str, call: Call) -> Result<(), Call> {
 /// the user's first, after their own already waiting (a task of theirs replaces the task waiting, tests the
 /// tests).
 pub fn push(ed: &mut Editor, what: What) {
-    push_at(ed, what, false)
+    push_at(ed, what, false, None)
 }
 
 /// `push`, back at the front of its line — it was its turn, and its slot was taken while it got ready.
-pub fn again(ed: &mut Editor, what: What) {
-    push_at(ed, what, true)
+/// `trace`: the user's run's, from its ask (Claude's rides on its call).
+pub fn again(ed: &mut Editor, what: What, trace: Option<crate::trace::RunTrace>) {
+    push_at(ed, what, true, trace)
 }
 
-fn push_at(ed: &mut Editor, mut what: What, front: bool) {
+fn push_at(ed: &mut Editor, mut what: What, front: bool, trace: Option<crate::trace::RunTrace>) {
     let slot = what.slot();
     let holder = holder(&ed.session, slot);
     // (back in line: its time and what it waited behind go on)
@@ -259,10 +262,22 @@ fn push_at(ed: &mut Editor, mut what: What, front: bool) {
     }
     let label = what.label();
     let users = what.users();
-    if let What::Guarded { who: For::Claude(call), .. } = &what {
-        call.step("queued");
+    // (Claude's call carries its trace; the user's run comes with one, or begins it here)
+    let trace = match &what {
+        What::Guarded { who: For::Claude(call), .. } => call.trace.clone(),
+        What::Guarded { ride, .. } => ride.trace.clone(),
+        _ => None,
     }
-    let next = Next { id: IDS.fetch_add(1, Ordering::Relaxed), what, queued };
+    .or(trace)
+    .unwrap_or_else(|| {
+        crate::trace::RunTrace::new(match &what {
+            What::Task(t) => format!("task: {}", t.name),
+            What::Tests(t) => format!("tests: {}", t.label),
+            What::Guarded { .. } => format!("{label}: run again"),
+        })
+    });
+    trace.step("queued");
+    let next = Next { id: trace.id(), what, queued, trace };
     let line = &mut ed.session.runs_next;
     if users {
         line.retain(|n| !(n.what.slot() == slot && matches!(n.what, What::Task(_) | What::Tests(_))));
@@ -311,10 +326,11 @@ fn start(ed: &mut Editor, next: Next) {
     match next.what {
         What::Guarded { who, job, mut ride } => {
             ride.queued = Some(next.queued);
+            ride.trace = Some(next.trace);
             crate::tools::guard_then_go(ed, who, job, ride)
         }
-        What::Task(t) => ed.task_start_now(t, false),
-        What::Tests(t) => ed.test_start_now(t, false),
+        What::Task(t) => ed.task_start_now(t, false, Some(next.trace)),
+        What::Tests(t) => ed.test_start_now(t, false, Some(next.trace)),
     }
 }
 
@@ -338,9 +354,9 @@ pub fn run_now(ed: &mut Editor, slot: Slot) -> bool {
     else {
         return false;
     };
-    match ed.session.runs_next.remove(i).map(|n| n.what) {
-        Some(What::Task(t)) => ed.task_start_now(t, true),
-        Some(What::Tests(t)) => ed.test_start_now(t, true),
+    match ed.session.runs_next.remove(i).map(|n| (n.what, n.trace)) {
+        Some((What::Task(t), trace)) => ed.task_start_now(t, true, Some(trace)),
+        Some((What::Tests(t), trace)) => ed.test_start_now(t, true, Some(trace)),
         _ => {}
     }
     true

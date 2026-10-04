@@ -149,6 +149,13 @@ impl Keys {
 }
 
 impl Editor {
+    /// A key the panel with the keys has no use for: said, not swallowed in silence — the routing matrix
+    /// found the side panel, the review's file list, `:procs`, the bottom slot and an edit's review taking
+    /// any key and doing nothing (`uistate::tests::silent`). `out`: what to do instead.
+    pub fn key_unused(&mut self, key: crate::key::Key, place: &str, out: &str) {
+        self.set_status(format!("{key} does nothing in {place} — {out}"));
+    }
+
     /// Where the keys go now — `keys_to`'s region (`uistate.rs`, `handle_key`'s chain as data). A card's
     /// answers taken in normal mode aren't where the keys are (the code's mode is): only one held with
     /// `C-q`. A prompt is the code's (its line is the status line's neighbour).
@@ -162,7 +169,7 @@ impl Editor {
         match region {
             R::Picker => Keys::Picker,
             R::Card(_) => Keys::Card,
-            R::Chat => Keys::Chat,
+            R::Chat | R::Unfold => Keys::Chat,
             R::Rail | R::EditReview => Keys::Review,
             R::Side(m) => Keys::Side(m),
             R::Slot(s) => Keys::Slot(s),

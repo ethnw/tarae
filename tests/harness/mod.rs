@@ -596,6 +596,69 @@ impl Term {
         serde_json::from_str(&s).unwrap_or_else(|e| panic!("tarae state: {e}: {s}"))
     }
 
+    /// A watcher of its UI state — `tarae state --watch [kinds] --json` running beside it, its event lines
+    /// gathered as they come (`Watching::events`); stopped when dropped.
+    pub fn watch(&self, kinds: &str) -> Watching {
+        let mut cmd = Command::new(std::env::var_os("TARAE_BIN").unwrap_or_else(|| BIN.into()));
+        cmd.arg("state").args(["--pid", &self.pid().to_string(), "--json", "--watch"]);
+        if !kinds.is_empty() {
+            cmd.arg(kinds);
+        }
+        let mut child = cmd
+            .env_clear()
+            .envs(self.env.iter().cloned())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("tarae state --watch");
+        let out = child.stdout.take().unwrap();
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let sink = lines.clone();
+        thread::spawn(move || {
+            use std::io::BufRead;
+            for l in io::BufReader::new(out).lines().map_while(Result::ok) {
+                sink.lock().unwrap_or_else(|e| e.into_inner()).push(l);
+            }
+        });
+        let w = Watching { child, lines };
+        // (its first line: it's registered — what changes from here on is told)
+        let deadline = Instant::now() + self.timeout;
+        while w.events().is_empty() {
+            assert!(Instant::now() < deadline, "the watcher never started");
+            thread::sleep(POLL);
+        }
+        w
+    }
+
+    /// Polls the UI state until `done` holds — where the keys go, the cards, the runs, the panels, read as
+    /// data, not grepped off the screen. On timeout, panics with the last state and the screen.
+    pub fn wait_state(&mut self, what: &str, done: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
+        let deadline = Instant::now() + self.timeout;
+        loop {
+            let s = self.state_json(0);
+            if done(&s) {
+                return s;
+            }
+            if Instant::now() > deadline {
+                panic!(
+                    "timed out after {:?} waiting for {what} — the state:\n{s:#}\n{}",
+                    self.timeout,
+                    self.screen()
+                );
+            }
+            thread::sleep(POLL);
+        }
+    }
+
+    /// Esc on its own — handled and drawn before anything else is sent (an Esc with a key right behind it
+    /// reads as Alt + that key) — then `done` waited for in the state.
+    pub fn esc_state(&mut self, what: &str, done: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
+        let input = self.state_json(0)["input"].as_u64().unwrap_or(0);
+        self.send("\x1b");
+        self.state_json(input + 1);
+        self.wait_state(what, done)
+    }
+
     /// `:cmd` Enter.
     pub fn command(&mut self, cmd: &str) {
         self.send(&format!(":{cmd}\r"));
@@ -627,6 +690,39 @@ impl Drop for Term {
         while matches!(self.child.try_wait(), Ok(None)) && Instant::now() < deadline {
             thread::sleep(POLL);
         }
+    }
+}
+
+/// A `tarae state --watch` running: its lines so far.
+pub struct Watching {
+    child: Child,
+    lines: Arc<Mutex<Vec<String>>>,
+}
+
+impl Watching {
+    /// Every line it has printed (the first: `watching`), as JSON.
+    pub fn events(&self) -> Vec<serde_json::Value> {
+        let lines = self.lines.lock().unwrap_or_else(|e| e.into_inner());
+        lines.iter().filter_map(|l| serde_json::from_str(l).ok()).collect()
+    }
+
+    /// Waits until an event satisfies `done`; panics with what came.
+    pub fn wait(&self, what: &str, done: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            if let Some(e) = self.events().into_iter().find(|e| done(e)) {
+                return e;
+            }
+            assert!(Instant::now() < deadline, "no event for {what}: {:#?}", self.events());
+            thread::sleep(POLL);
+        }
+    }
+}
+
+impl Drop for Watching {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 

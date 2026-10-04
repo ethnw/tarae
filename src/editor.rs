@@ -566,6 +566,16 @@ pub struct Editor {
     pub frames: u64,
     pub ui_asks: Vec<crate::uistate::Ask>,
     pub said: u64,
+    /// Connections watching the UI state · the cards that went, and how (the gone ring) · the cards up or
+    /// parked as of the last frame · how a card went, said where it went (`uistate/watch.rs`).
+    pub ui_watch: crate::uistate::watch::Watch,
+    pub ui_gone: std::collections::VecDeque<crate::uistate::watch::Gone>,
+    pub(crate) ui_cards_seen: Vec<(u64, String)>,
+    pub(crate) ui_card_how: HashMap<u64, String>,
+    /// The last key a card refused, and why: (its id, its rev, what it says) — on the card (`offer_refused`).
+    pub offer_said: Option<(u64, u64, String)>,
+    /// The keys of the command waiting for a character (`on_next_char`) — the status line shows them.
+    pub(crate) char_for: String,
     /// Whether Claude's commands can be sandboxed here (`sandbox.rs`) — found with the first one.
     pub sandbox: crate::sandbox::Availability,
     /// `:restart` under way (`restart.rs`) — once `Ready`, main runs the new binary after the loop ends.
@@ -714,6 +724,12 @@ impl Editor {
             frames: 0,
             ui_asks: Vec::new(),
             said: 0,
+            ui_watch: Default::default(),
+            ui_gone: Default::default(),
+            ui_cards_seen: Vec::new(),
+            ui_card_how: HashMap::new(),
+            offer_said: None,
+            char_for: String::new(),
             sandbox: if cfg!(test) { crate::sandbox::Availability::Bypass } else { Default::default() },
             restart: None,
             preflight_told: Default::default(),
@@ -1333,6 +1349,11 @@ impl Editor {
         for k in &self.pending {
             s.push_str(&k.to_string());
         }
+        // (`f`, `r`, `"` … wait for a character: the next key is taken as one — said, it showed nothing)
+        if self.on_next_char.is_some() {
+            s.push_str(&self.char_for);
+            s.push('…');
+        }
         s
     }
 
@@ -1499,10 +1520,27 @@ impl Editor {
             let text: String = text.chars().filter(|&c| c == '\n' || !c.is_control()).collect();
             c.input.insert_str(c.cursor, &text);
             c.cursor += text.len();
+            // (minimized, its input isn't on screen: it comes back with what was pasted — never text unseen)
+            if c.compact() {
+                c.unfolded = true;
+                self.set_status("pasted into the chat — it was minimized; it's back");
+            }
             return;
         }
         if self.session.review.is_some() {
             return self.set_status("finish reviewing the answer first");
+        }
+        // A `:` line pasted in normal mode is a command meant for the command line (2026-10-04: `:w` pasted
+        // into a commit message became part of its subject, unsaid): it opens the line with it, not run —
+        // Enter runs it, Esc drops it. (Text that starts with `:` goes in from insert mode, as typed.)
+        if self.mode == Mode::Normal
+            && let Some(cmd) = text.strip_suffix('\n').unwrap_or(&text).strip_prefix(':')
+            && !cmd.contains('\n')
+        {
+            let cmd = cmd.to_string();
+            self.open_prompt(PromptKind::Command, &cmd);
+            return self
+                .set_status("a pasted : line — in the command line, not run: enter runs it, esc drops it");
         }
         // A file under review (a turn's, a branch's) took the keys when the turn ended — a paste in normal mode
         // there was meant for the chat (#31: it landed in the file as an unsaved edit). It goes to the chat;
@@ -1533,7 +1571,14 @@ impl Editor {
         // A list or signature card for the text before it would be stale (accepting would replace the paste)
         self.completion = None;
         self.signature = None;
+        let lines = text.trim_end_matches('\n').lines().count().max(1);
         self.with_group(|cx| crate::commands::paste_text(cx, text));
+        // (in insert mode it's typed where you type; from normal or select mode it's said where it went)
+        if self.mode != Mode::Insert && !reviewing {
+            let name = self.doc().display_name(&self.session.root);
+            let what = if lines == 1 { "a line".to_string() } else { format!("{lines} lines") };
+            self.set_status(format!("pasted {what} into {name} — u takes it back"));
+        }
     }
 
     pub fn handle_mouse(&mut self, m: crate::event::Mouse) {
@@ -1570,7 +1615,8 @@ impl Editor {
                 'c' if self.offer_settled() => self.offer_commit_first(),
                 'p' if self.offer_settled() => self.offer_preflight_first(),
                 'X' if self.offer_settled() => self.offer_abort(),
-                _ if weighty => {}
+                // (clicked as it came up: not an answer — said on the card, not dropped in silence)
+                _ if weighty => self.offer_refused(format!("{k} came as the card did — not taken; again")),
                 'n' => self.offer_dismiss(),
                 'N' => self.offer_never(),
                 d => self.offer_to_front(d.to_digit(10).unwrap_or(0) as usize),
@@ -2707,22 +2753,23 @@ impl Editor {
         }
         if key.code == Code::Esc {
             self.card_keys = false;
+            self.pending.clear();
             return true;
         }
+        // Its whole text open in its buffer, the one in sight (its bar): the keys that read it move it — `ge`
+        // to its end, as the bar asks (they were swallowed, and `y` waited for a read nobody could do)
+        if self.offer_bar() && card_reads(key, &self.pending) {
+            self.pending.push(key);
+            self.dispatch_pending();
+            return true;
+        }
+        self.pending.clear();
         let front = self.offers.first().map(|o| o.id);
         if !self.offer_key(key) {
-            // (its own answers, as its hint row has them — a session's end card asks c, R, D or n)
-            let keys: Vec<String> = self.offers[0]
-                .answers(self.preflight_quick().is_some())
-                .iter()
-                .map(|(k, _)| k.to_string())
-                .collect();
-            let asks = match keys.split_last() {
-                Some((last, [])) => last.clone(),
-                Some((last, rest)) => format!("{} or {last}", rest.join(", ")),
-                None => "nothing yet".into(),
-            };
-            self.set_status(format!("the card asks {asks} — esc goes back"));
+            // (its answers are beside what it says — on the card, or its bar)
+            // (short: a bar has room for little beside its title and answers; esc is on the card and
+            // the status line says CARD)
+            self.offer_refused(format!("{key} isn't an answer here"));
         }
         // Answered (or gone): the keys go to the next card up here (#101 — card 2 of 3 waited for another
         // `C-q`), else back where they were
@@ -2731,7 +2778,22 @@ impl Editor {
         }
         true
     }
+}
 
+/// Whether `key` (after `pending`) reads a card's text in its buffer: a line or a page up or down, its top
+/// or its end (`g g`, `g e`, `G`).
+fn card_reads(key: Key, pending: &[Key]) -> bool {
+    let plain = !key.ctrl && !key.alt;
+    match (pending, key.code) {
+        ([], Code::Char('j' | 'k' | 'g' | 'G')) => plain,
+        ([], Code::Down | Code::Up | Code::PageDown | Code::PageUp) => true,
+        ([], Code::Char('d' | 'u' | 'f' | 'b')) => key.ctrl && !key.alt,
+        ([g], Code::Char('e' | 'g')) => plain && g.plain_char() == Some('g'),
+        _ => false,
+    }
+}
+
+impl Editor {
     pub fn handle_key(&mut self, key: Key) {
         use crate::uistate::{Handler, took};
         self.input_seq += 1;
@@ -2874,6 +2936,9 @@ impl Editor {
             self.picker_key(key);
             return;
         }
+        if crate::chat::unfold_key(self, key) {
+            return took(Handler::Unfold);
+        }
         if crate::chat::key(self, key) {
             return took(Handler::Chat);
         }
@@ -2967,6 +3032,9 @@ impl Editor {
         match (cmds, pending.split_last()) {
             (Some(cmds), _) => {
                 self.run(&cmds, count);
+                if self.on_next_char.is_some() {
+                    self.char_for = pending.iter().map(Key::to_string).collect();
+                }
                 if sticky && self.mode == Mode::Normal {
                     self.pending = vec![pending[0]];
                 }
@@ -3267,6 +3335,14 @@ impl Editor {
             (Code::Char(c), false) => {
                 prompt.cycle = None;
                 prompt.text.push(c);
+            }
+            // (said, not dropped: a `C-q` here waited for a card the prompt keeps from it)
+            (Code::Char(_), true) => {
+                let out = match self.offers.is_empty() {
+                    true => "enter runs the line, esc leaves it",
+                    false => "esc leaves it — then C-q reaches the card",
+                };
+                self.key_unused(key, "the command line", out);
             }
             _ => {}
         }
@@ -6044,6 +6120,9 @@ mod tests {
         settle_for(&mut ed, |ed| !ed.offers.is_empty());
         // A draft in the chat's input: what's typed is the draft's, the card says how to reach it
         ed.session.chat.as_mut().unwrap().focused = true;
+        // (minimized while Claude works: the first key brings it back, untyped — slip 3 — then the draft)
+        assert!(ed.session.chat.as_ref().unwrap().compact());
+        feed(&mut ed, "m");
         feed(&mut ed, "my draft y");
         let input = |ed: &Editor| ed.session.chat.as_ref().unwrap().input.clone();
         assert_eq!(input(&ed), "my draft y");
@@ -6064,7 +6143,8 @@ mod tests {
         assert!(s.contains("esc goes back, unanswered"));
         assert!(label(&s).contains(" CARD ") && !label(&s).contains("CHAT"), "{}", label(&s));
         feed(&mut ed, "x");
-        assert!(ed.status.as_ref().is_some_and(|s| s.0.contains("the card asks y or n")), "{:?}", ed.status);
+        // (said on the card, where the eyes are — it was a flash on the status line)
+        assert!(draw(&mut ed).contains("x isn't an answer here"), "{:?}", ed.offer_said_now());
         feed(&mut ed, "<esc>");
         assert!(!ed.card_keys && ed.offers.len() == 1 && ed.session.chat.as_ref().unwrap().focused);
         assert_eq!(input(&ed), "my draft y", "back where it was");
@@ -10911,8 +10991,8 @@ mod tests {
         feed(&mut ed, "y");
         assert_eq!(ed.offers.len(), 1, "y waits");
         let s = screen(&mut ed);
-        assert!(s.contains("see all of it first — v shows the whole card"), "said: {s}");
-        // …and on the card, where the eyes are: its cut row, in the warning color
+        assert!(ed.messages.last().is_some_and(|m| m.2.contains("v shows all of it")), "kept in :messages");
+        // …and said on the card, where the eyes are: its cut row, in the warning color
         assert!(s.contains("more lines · y waits — v shows all of it"), "{s}");
         let warning = ed.theme.try_get("warning").and_then(|s| s.fg);
         assert_ne!(cut_color(&mut ed), plain, "the warning color, not the faint row's ({warning:?})");
@@ -10960,7 +11040,7 @@ mod tests {
         // `y` before all of it was seen: not an answer
         feed(&mut ed, "y");
         assert_eq!(ed.offers.len(), 1, "y waits");
-        assert!(ed.toasts.last().is_some_and(|t| t.text.contains("see all of it first")));
+        assert!(screen(&mut ed).contains("more lines · y waits — v shows all of it"), "said on the card");
         // `v`: all of it in a buffer — opened isn't read: `y` still waits until its end has been on screen.
         // The keys go to it (#55: the side panel or the review's rail kept them, and keys did nothing)
         let mut side = crate::sidebar::Sidebar::new(crate::sidebar::Mode::Files, test_root());
@@ -10997,7 +11077,7 @@ mod tests {
         assert!(!screen(&mut ed).contains("more lines"), "the bar again");
         feed(&mut ed, "y");
         assert_eq!(ed.offers.len(), 1, "y waits while the end is unseen");
-        assert!(ed.toasts.last().is_some_and(|t| t.text.contains("read it to its end")));
+        assert!(screen(&mut ed).contains("ge to its end first — y waits"), "said on the card's bar");
         // Scrolled to the end: seen — the card says so in that same frame, and `y` answers
         feed(&mut ed, "ge");
         let s = screen(&mut ed);

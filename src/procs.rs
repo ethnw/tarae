@@ -1566,7 +1566,9 @@ impl Editor {
 
     /// `s` on the selected row: it stops (the way its owner stops it — a run keeps its output).
     fn procs_stop(&mut self) {
-        let Some(r) = self.procs_selected() else { return };
+        let Some(r) = self.procs_selected() else {
+            return self.set_status("no row selected — nothing to stop");
+        };
         let gone = |ed: &mut Editor, what: &str, then: Option<&str>| {
             ed.set_status(stopped(&ed.procs_whose(&r, what), then));
             ed.procs_wake(Wake::Now);
@@ -1629,7 +1631,9 @@ impl Editor {
 
     /// `r` on the selected row: started again, where that means something.
     fn procs_restart(&mut self) {
-        let Some(r) = self.procs_selected() else { return };
+        let Some(r) = self.procs_selected() else {
+            return self.set_status("no row selected — nothing to restart");
+        };
         match r.kind {
             Kind::Lsp(cid) => {
                 let docs: Vec<_> =
@@ -1786,7 +1790,7 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
         (Code::Char('s'), false, false) => ed.procs_stop(),
         (Code::Char('r'), false, false) => ed.procs_restart(),
         (Code::Char('l'), false, false) => ed.procs_log(),
-        _ => {}
+        _ => ed.key_unused(key, ":procs", "esc gives the keys to the code"),
     }
     true
 }

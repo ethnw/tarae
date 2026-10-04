@@ -881,8 +881,10 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
                 return;
             }
             let secs = c.started.elapsed().as_secs_f32();
+            let (calls, took) = (c.calls.len(), c.started.elapsed());
             c.state = State::Idle;
             c.calls.clear();
+            crate::uistate::watch::turn(ed, "ended", calls, Some(took));
             let ok = r.is_ok();
             // (a session behind: its tab says `done` until it's looked at — #86)
             if ed.background() {
@@ -1094,6 +1096,7 @@ pub fn submit(ed: &mut Editor, question: &str, about: Option<String>, chip: Opti
     c.scroll = 0;
     c.state = State::Thinking;
     c.started = Instant::now();
+    crate::uistate::watch::turn(ed, "started", 0, None);
     true
 }
 
@@ -1641,6 +1644,33 @@ pub fn follow(ed: &mut Editor) {
 // ── Keys ───────────────────────────────────────────────────────────────────
 
 /// Keys while focus is in the chat panel. True if handled.
+/// Keys the minimized chat (`Chat::compact`) still takes as they are: Esc, and the ones that act on the chat
+/// rather than its input — stop, follow, go to, undo the turn, model, past, new, copy, apply. Any other would
+/// type, edit or send what isn't on screen.
+pub fn acts_unseen(key: Key) -> bool {
+    key.code == Code::Esc
+        || (key.ctrl
+            && !key.alt
+            && matches!(key.code, Code::Char('c' | 'f' | 'g' | ']' | 'z' | 't' | 'p' | 'l' | 'y' | 'r')))
+}
+
+/// The chat minimized while Claude works has the keys, its input not on screen (slip 3, 2026-10-04): a key
+/// that would type, edit or send there brings the panel back instead — it isn't typed, and that's said. True
+/// if it was that key.
+pub fn unfold_key(ed: &mut Editor, key: Key) -> bool {
+    if !ed.pending.is_empty() {
+        return false;
+    }
+    let Some(c) = ed.session.chat.as_mut().filter(|c| c.focused && c.compact()) else { return false };
+    // (as `key`: from an empty input `C-w` is the windows')
+    if acts_unseen(key) || (key.ctrl && key.code == Code::Char('w') && c.input.is_empty()) {
+        return false;
+    }
+    c.unfolded = true;
+    ed.set_status(format!("{key} brought the chat back — it wasn't typed; its input is in sight now"));
+    true
+}
+
 pub fn key(ed: &mut Editor, key: Key) -> bool {
     // (the second key of a sequence — `C-w >` from an empty input — is the keymap's)
     if !ed.pending.is_empty() {
@@ -1739,6 +1769,8 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
             c.input.insert(c.cursor, x);
             c.cursor += x.len_utf8();
         }
+        // (a `C-`/`A-` key the chat has no use for: said, not dropped — the keys stay the chat's)
+        (Code::Char(_), ..) => ed.key_unused(key, "the chat", "esc gives the keys to the code"),
         _ => {}
     }
     true

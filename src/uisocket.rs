@@ -156,9 +156,82 @@ fn peer(stream: UnixStream, tx: crate::event::Tx) {
         if req.trim().is_empty() {
             continue;
         }
+        // (a watch takes the connection over: events a line until either end goes)
+        if let Ok(v) = serde_json::from_str::<Value>(&req)
+            && let Some(kinds) = v.get("watch")
+        {
+            drop(say);
+            return watch(out, kinds, &line, &tx);
+        }
         if !say(answer(&req, &line, &tx)) {
             return;
         }
+    }
+}
+
+/// The kinds of events a watcher may ask for (`{"watch":[…]}`; none: all).
+const KINDS: [&str; 6] = ["keys", "cards", "sessions", "turns", "runs", "toasts"];
+
+/// `{"watch":["keys","cards",…]}`: this connection is told what changes, a JSON line an event, from the frame
+/// after it's registered on (`uistate/watch.rs`). It ends when the reader goes — or reads too slowly: then its
+/// last line says so.
+fn watch(mut out: UnixStream, kinds: &Value, line: &[u32], tx: &crate::event::Tx) {
+    let kinds: Vec<String> = match kinds {
+        Value::Array(a) => a.iter().filter_map(|k| k.as_str()).map(String::from).collect(),
+        _ => Vec::new(),
+    };
+    if let Some(k) = kinds.iter().find(|k| !KINDS.contains(&k.as_str())) {
+        let _ =
+            writeln!(out, "{}", json!({ "error": format!("no events of kind {k:?} — {}", KINDS.join(" ")) }));
+        return;
+    }
+    let (events, got) = std::sync::mpsc::sync_channel(crate::uistate::watch::UNREAD);
+    let (ok, registered) = std::sync::mpsc::channel();
+    let overflowed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (line, flag, asked) = (line.to_vec(), overflowed.clone(), kinds.clone());
+    let job = move |ed: &mut crate::editor::Editor| {
+        let claude = ed.claude_pids();
+        if let Some(p) = line.iter().find(|p| claude.contains(p)) {
+            let _ = ok.send(Err(format!("refused: under a process of Claude's (pid {p})")));
+            ed.unchanged = true;
+            return;
+        }
+        let at = (ed.frames, ed.input_seq);
+        ed.ui_watch_add(crate::uistate::watch::Watcher { tx: events, kinds: asked, overflowed: flag });
+        let _ = ok.send(Ok(at));
+        // (no frame for it: what it's told comes with the frames drawn anyway)
+        ed.unchanged = true;
+    };
+    if tx.send(crate::event::Event::Job(Box::new(job))).is_err() {
+        return;
+    }
+    match registered.recv_timeout(WAIT) {
+        Ok(Ok((frame, input))) => {
+            let all = if kinds.is_empty() { KINDS.iter().map(|k| k.to_string()).collect() } else { kinds };
+            let hello = json!({ "event": "watching", "kinds": all, "frame": frame, "input": input,
+                                "said": "watching — events come as they happen" });
+            if writeln!(out, "{hello}").is_err() {
+                return;
+            }
+        }
+        Ok(Err(e)) => {
+            let _ = writeln!(out, "{}", json!({ "error": e }));
+            return;
+        }
+        Err(_) => return,
+    }
+    // (until tarae lets this watcher go — the reader gone, or too slow — or ends)
+    for ev in got.iter() {
+        if writeln!(out, "{ev}").is_err() {
+            return;
+        }
+    }
+    if overflowed.load(std::sync::atomic::Ordering::Relaxed) {
+        let e = format!(
+            "let go: {} events unread — connect again and read a snapshot (frames tell what was missed)",
+            crate::uistate::watch::UNREAD
+        );
+        let _ = writeln!(out, "{}", json!({ "event": "dropped", "said": e }));
     }
 }
 
@@ -167,9 +240,6 @@ fn answer(req: &str, line: &[u32], tx: &crate::event::Tx) -> Value {
     let Ok(req) = serde_json::from_str::<Value>(req) else {
         return json!({ "error": "not JSON — {\"get\":\"state\"}" });
     };
-    if req.get("watch").is_some() {
-        return json!({ "error": "watching comes later — ask {\"get\":\"state\"} with after_input" });
-    }
     if req["get"] != "state" {
         return json!({ "error": "unknown request — {\"get\":\"state\"}" });
     }
@@ -259,19 +329,26 @@ fn ancestors(pid: u32) -> Vec<u32> {
 // ── `tarae state` ────────────────────────────────────────────────────────
 
 const USAGE: &str = "\
-usage: tarae state [--json] [--pid PID] [--after-input N]
-  the UI state of a running tarae: where the keys go, the mode, the sessions, the cards, the toasts
+usage: tarae state [--json] [--pid PID] [--after-input N] [--watch [KINDS]]
+  the UI state of a running tarae: where the keys go, the mode, the sessions, the cards, the panels,
+  the runs, the toasts
   --json            as JSON (the schema: docs/design/ui-state.md)
   --pid PID         that tarae (else $TARAE_UI's, or the one whose session holds this folder)
-  --after-input N   once N keys and clicks were handled and drawn (read `input` first, add what you send)";
+  --after-input N   once N keys and clicks were handled and drawn (read `input` first, add what you send)
+  --watch [KINDS]   what changes, a line an event, until interrupted — KINDS: keys,cards,sessions,turns,
+                    runs,toasts (all when left out)";
 
 pub fn cli(args: &[String]) -> anyhow::Result<()> {
-    let (mut json, mut pid, mut after) = (false, None, 0u64);
-    let mut it = args.iter();
+    let (mut json, mut pid, mut after, mut watching) = (false, None, 0u64, None::<Vec<String>>);
+    let mut it = args.iter().peekable();
     while let Some(a) = it.next() {
         let num = |v: Option<&String>| v.and_then(|v| v.parse::<u64>().ok());
         match a.as_str() {
             "--json" => json = true,
+            "--watch" => {
+                let kinds = it.next_if(|k| !k.starts_with("--"));
+                watching = Some(kinds.map(|k| k.split(',').map(String::from).collect()).unwrap_or_default());
+            }
             "--pid" => {
                 pid = Some(num(it.next()).ok_or_else(|| anyhow::anyhow!("--pid PID\n{USAGE}"))? as u32)
             }
@@ -289,6 +366,23 @@ pub fn cli(args: &[String]) -> anyhow::Result<()> {
         Some(p) => path_for(p).ok_or_else(|| anyhow::anyhow!("no state folder"))?,
         None => find()?,
     };
+    if let Some(kinds) = watching {
+        let mut s = at(&path, |p: &Path| UnixStream::connect(p))
+            .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+        writeln!(s, "{}", json!({ "watch": kinds }))?;
+        for line in BufReader::new(&s).lines() {
+            let line = line?;
+            let v: Value = serde_json::from_str(&line).unwrap_or_default();
+            if let Some(e) = v["error"].as_str() {
+                anyhow::bail!("{e}");
+            }
+            match json {
+                true => println!("{line}"),
+                false => println!("{:>6}  {}", v["frame"], v["said"].as_str().unwrap_or_default()),
+            }
+        }
+        return Ok(());
+    }
     let mut req = json!({ "get": "state", "after_input": after });
     if !json {
         req["format"] = json!("text");

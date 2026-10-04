@@ -1202,7 +1202,11 @@ fn review_answer(ed: &mut Editor, key: Key) -> bool {
             rev.follow = true;
             false
         }
-        _ => false,
+        _ => {
+            let out = "y takes it, n leaves it, a takes all, q ends — esc goes back unanswered";
+            ed.key_unused(key, "the review of this change", out);
+            return true;
+        }
     };
     if done {
         finish(ed);

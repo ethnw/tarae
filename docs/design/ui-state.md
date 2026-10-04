@@ -1,6 +1,6 @@
 # UI state — what's on screen, as data
 
-Status: design approved (2026-10-04) with the five recommendations (see "Decided"); phase 1 under way,
+Status: design approved (2026-10-04) with the five recommendations (see "Decided"); phases 1 and 2 built,
 phase 4 dropped for now. The direction was approved after queue phase 0 (1085db8).
 
 ## Why
@@ -419,7 +419,20 @@ at least one case where the keys go somewhere not drawn.
   them, not simplify them. That's what the matrix is for.
 - The socket on Linux: `SO_PEERCRED` and the path differ; checked with `cargo xtask linux test`.
 
-### Phase 2 — panels, runs, events
+### Phase 2 — panels, runs, events — built 2026-10-04
+
+Built as below (`uistate/panels.rs`, `uistate/watch.rs`), with these choices:
+- **Run events come from the run's trace**: every `RunTrace` step (`queued`, `saved`, `spawned`, `waited for
+  cargo's lock`, `exit 0` …) is a `run` event, kept on the main loop's thread only while someone watches. A
+  run's id is its trace's, from its ask to its end — a run waiting in line carries its trace, so it keeps its
+  id when it starts.
+- **The gone ring holds cards** (how each went: `answered y`, `dropped — its turn ended`, `lost`, else `gone`).
+  A run that ended stays in `runs` until another takes its panel.
+- **Every event goes out after the frame that showed it** (explicit ones too), stamped with that frame.
+- **A panel under a picker lists no rows** (`covered_by_picker`): the side panel's and the rail's rows were
+  drawn, then covered — the snapshot test caught the state listing them.
+- `tarae state --watch [kinds]` prints the `said` lines (`--json`: the events); a watch's first line is
+  `watching`.
 
 - `panels` with visible rows and content-keyed row ids; `runs` with run ids; the gone ring.
 - `watch`: the diff plus the explicit `card-gone` / `turn` / `run` events, with `said`.
@@ -485,6 +498,36 @@ What the routing test and the pulled-out answers found:
 - The close-a-reviewed-buffer card's hint row said `y Install · n Not now` (the download card's default) while
   its text said `y` declines Claude's change.
 - The only state where the keys go somewhere not on screen is the chat minimized while Claude works (slip 3).
+
+## Phase 2, measured (2026-10-04, `perf` profile, this Mac)
+
+| | |
+|---|---|
+| Keystroke → frame, 200k lines | 0.211 ms; with a watcher connected 0.205 ms (noise) |
+| Events while Claude streams (a word every 50 ms, in front) | 0 a second over 3 s — the summary has no chat text |
+| Idle | 0 ms/s CPU with a watcher (`e2e_idle_cpu_watched`); the idle e2e: 0 frames, flat switches, the watcher told nothing |
+| State built, busy scene (now with panels and runs) | 3.4 µs; JSON 41.8 µs, 2,659 B (~665 tokens); text 9.2 µs, 811 B (~203 tokens) |
+| Round trip | socket 0.69 ms, `tarae state --json` 2.8 ms |
+| Release binary | 9,329,424 → 9,428,608 B (+99 KB, +1.1%) |
+
+## No silent state change (user decision, 2026-10-04)
+
+Whatever changes state the user didn't see change, or refuses a key, says so where they're looking.
+- **The minimized chat**: the first key that would type, edit or send there brings it back instead, isn't
+  typed, and says so (`chat::unfold_key`; `takes: "unfold"` in the state). Its own keys (Esc, `C-c` stop,
+  `C-f` …) act as before. A paste into it brings it back with what was pasted.
+- **Cards**: a key a card refuses — a `y` before its text was read, a key as it came up, one that isn't an
+  answer, a click as it came up — is said on the card itself (a row in the warning colour over its answers,
+  or its bar's text), and kept in `:messages`; it went to the status line, or nowhere. While a card holds the
+  keys over its own text in its buffer, the keys that read it (`g e`, `G`, `j`/`k`, `C-d`…) move that buffer.
+- **A paste in normal mode**: a `:` line opens the command line with it, not run (Enter runs it) — a pasted
+  `:w` meant a command, and landed in a commit message's subject unsaid; making it text would have kept the
+  slip, and running it would run what nobody saw. Any other paste outside insert mode goes in as before, and
+  says where (`pasted 3 lines into a.rs — u takes it back`).
+- **Keys a panel has no use for** (the side panel, the review's list, `:procs`, the bottom slot, an edit's
+  review, `C-` keys in the chat and the command line) are said; `f`/`r`/`"` waiting for a character show on
+  the status line (`f…`). The routing matrix pins it: `no_key_is_refused_in_silence` (what's left does nothing
+  on purpose — Esc with nothing to leave, `C-w` with nothing to delete, `j` at a list's end).
 
 ## Decided (user, 2026-10-04)
 
