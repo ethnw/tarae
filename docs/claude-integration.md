@@ -506,6 +506,35 @@ draft, and `space v s` sends your answers together.
 | `space v t` / `:review-turn` | Review what Claude changed in its latest turn |
 | `space v a` / `:review-at-end` | [Review at the end](#review-at-the-end): Claude's edits go in as it works (asks first) |
 
+## Rebasing a session
+
+A session (`space W`) is a branch in a checkout of its own. `:session-bring` (or `b` in the session list) moves
+its base up to it, fast-forward only. When the base has moved since the session left it, a card says how far
+(`main moved 3 commits since fix-login left it; fix-login is 2 commits ahead`) and offers to rebase first:
+
+- `y` rebases it onto its base in its checkout. tarae runs git itself (Claude's sandbox can't write `.git`), as
+  `git rebase <base>` in the task panel — with hooks off: a hooks folder inside the checkout is one Claude can
+  write, and this git runs outside the sandbox. A stop at conflicts reads `stopped: 2 conflicts` there, not failed
+- Clean: a card offers to bring it now (`y`), to run [`:preflight`](configuration.md#checks-before-a-push-preflight) first and bring it once that
+  passes (`p`), or not now (`n`)
+- A conflict: the rebase stops, and the session's own Claude is asked in its chat to resolve the files. It's
+  sent the files and both sides (what the commit being replayed changed, and what the base changed since that
+  commit's parent), and told not to run git or commit. When its turn ends with no conflict markers left in
+  those files, a review shows them against the commit being replayed, and a card offers to continue (`y`: tarae
+  stages them and runs `git rebase --continue`, which may stop again — the same loop) or abort (`X`: back to
+  where the branch was). Markers left: the files are named, and the rebase waits
+
+While it's under way the session's tab, the status line's chip and its row in the list say `rebasing 2/5`, and
+`:session-end`, `:session-bring` and `:restart` wait for it (they say why).
+
+| Command | What it does |
+|---|---|
+| `:rebase-continue` | Stage the stopped rebase's files (no markers left) and go on |
+| `:rebase-abort` | `git rebase --abort`: the branch back where it was |
+
+Both also take up a rebase tarae didn't start — one begun by hand in the session's terminal, or from before a
+restart.
+
 ## Claude Code integration
 
 ![Edits from Claude Code in a side pane arrive as a review inside the tarae buffer — y/n/a](screenshots/m5-agent-review.png)

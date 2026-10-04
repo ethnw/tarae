@@ -567,7 +567,7 @@ fn expand_dir(d: &str) -> Option<PathBuf> {
 }
 
 /// `it's` → `'it'\''s'`: one word to `sh`, whatever it holds.
-fn sh_quote(s: &str) -> String {
+pub(crate) fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 

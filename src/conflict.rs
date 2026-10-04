@@ -51,6 +51,12 @@ fn marker<'a>(line: &'a str, m: &str) -> Option<&'a str> {
     (rest.is_empty() || rest.starts_with([' ', '\n', '\r'])).then(|| rest.trim())
 }
 
+/// Whether any line of `text` is a conflict's `<<<<<<<`, `|||||||` or `>>>>>>>` marker — a conflict left
+/// half-resolved counts (`=======` alone doesn't: it underlines a heading too).
+pub fn has_markers(text: &str) -> bool {
+    text.lines().any(|l| ["<<<<<<<", "|||||||", ">>>>>>>"].iter().any(|m| marker(l, m).is_some()))
+}
+
 /// Every conflict in the text (complete ones — an unfinished block is left alone). Only marker lines are
 /// turned into strings.
 pub fn find(text: &Rope) -> Vec<Conflict> {

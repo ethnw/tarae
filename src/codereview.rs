@@ -29,6 +29,9 @@ pub enum Base {
     /// What Claude changed in a turn — checkpoint `at` (`checkpoint.rs`), each file against its text before
     /// the turn. No git.
     Turn { at: usize, question: String },
+    /// A stopped rebase's resolved files against the commit being replayed (`rebase.rs`) — `label` = its
+    /// short sha and subject.
+    Replay { commit: String, label: String },
 }
 
 impl Base {
@@ -37,6 +40,7 @@ impl Base {
         match self {
             Base::Head => Some("HEAD"),
             Base::Branch { commit, .. } => Some(commit),
+            Base::Replay { commit, .. } => Some(commit),
             Base::Turn { .. } => None,
         }
     }
@@ -46,6 +50,7 @@ impl Base {
             Base::Head => "uncommitted".into(),
             Base::Branch { name, .. } => format!("since {name}"),
             Base::Turn { .. } => "Claude's turn".into(),
+            Base::Replay { label, .. } => format!("against {label}"),
         }
     }
 }
@@ -366,7 +371,8 @@ pub fn start_in(ed: &mut Editor, cwd: PathBuf, branch: Option<String>) {
                     if let Some((remote, rest)) = name.split_once('/')
                         && remotes.lines().any(|r| r == remote)
                     {
-                        let _ = git(&root, &["fetch", "--quiet", remote, rest]);
+                        // (tarae's own step: no hooks — `gitmenu::NO_HOOKS`)
+                        let _ = crate::gitmenu::git_no_hooks(&root, &["fetch", "--quiet", remote, rest]);
                     }
                     let commit = git(&root, &["merge-base", "HEAD", &name])
                         .map_err(|e| format!("{name}: {e}"))?
@@ -458,6 +464,47 @@ fn start_turn_saying(ed: &mut Editor, at: usize, earlier: usize) {
     });
 }
 
+/// A stopped rebase's resolution as a review (`rebase.rs`): `rels` (its conflicted files, relative to `root`)
+/// as they are now, each against `commit` — the commit being replayed. Counted on a worker; `then` once
+/// it's open.
+pub fn start_replay(
+    ed: &mut Editor,
+    root: PathBuf,
+    commit: String,
+    label: String,
+    rels: Vec<String>,
+    then: fn(&mut Editor),
+) {
+    ed.events.jobs().spawn(move || {
+        let files: Vec<File> = rels
+            .into_iter()
+            .map(|rel| {
+                let path = root.join(&rel);
+                let base = git(&root, &["show", &format!("{commit}:{rel}")]);
+                let now = std::fs::read_to_string(&path);
+                let gone = !path.exists();
+                let hunks = crate::git::hunks(
+                    base.as_deref().unwrap_or_default(),
+                    now.as_deref().unwrap_or_default(),
+                );
+                File {
+                    added: hunks.iter().map(|h| h.lines.len()).sum(),
+                    removed: hunks.iter().map(|h| h.base.len()).sum(),
+                    new: base.is_err(),
+                    gone,
+                    binary: !gone && now.is_err(),
+                    rel,
+                    path,
+                }
+            })
+            .collect();
+        move |ed: &mut Editor| {
+            open(ed, root, Base::Replay { commit, label }, files);
+            then(ed);
+        }
+    });
+}
+
 /// The review of `files` against `base` begins (any open one ends).
 fn open(ed: &mut Editor, root: PathBuf, base: Base, mut files: Vec<File>) {
     if files.is_empty() {
@@ -469,7 +516,11 @@ fn open(ed: &mut Editor, root: PathBuf, base: Base, mut files: Vec<File>) {
     // Start on the file being looked at, if it's among the changes (else the first)
     let here = ed.doc().path.clone();
     let first = files.iter().position(|f| here.as_ref() == Some(&f.path)).unwrap_or(0);
-    let turn = matches!(base, Base::Turn { .. });
+    let said = match &base {
+        Base::Turn { .. } => "Claude changed".to_string(),
+        Base::Replay { label, .. } => format!("resolved, against {label}"),
+        _ => "changed".to_string(),
+    };
     ed.session.code_review = Some(CodeReview {
         base,
         root,
@@ -485,10 +536,7 @@ fn open(ed: &mut Editor, root: PathBuf, base: Base, mut files: Vec<File>) {
         rail_need: Default::default(),
     });
     let s = if n == 1 { "" } else { "s" };
-    ed.set_status(match turn {
-        true => format!("review: {n} file{s} Claude changed — ]g walks the changes"),
-        false => format!("review: {n} file{s} changed — ]g walks the changes"),
-    });
+    ed.set_status(format!("review: {n} file{s} {said} — ]g walks the changes"));
     show(ed, first, false);
     if std::mem::take(&mut ed.session.review_ask) {
         claude_reviews(ed);

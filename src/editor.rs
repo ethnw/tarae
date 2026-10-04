@@ -437,6 +437,8 @@ pub struct Editor {
     /// Offers asking to download (arrival order — the front one gets keys, offer.rs).
     pub offers: Vec<crate::offer::Offer>,
     pub offer_seq: u64,
+    /// Git-tab actions waiting on their hooks card (`hooks.rs`): the card's id, the session, the action.
+    pub hook_waits: Vec<crate::hooks::Wait>,
     /// The front card as drawn: (its id, its rev, since when) — `y` waits for it to settle.
     pub offer_seen: std::cell::Cell<Option<(u64, u64, std::time::Instant)>>,
     /// The card (id, rev) last in sight whole — drawn uncut, or read to its end in its `v` buffer (a weighty
@@ -630,6 +632,7 @@ impl Editor {
             offer_view: Default::default(),
             offer_read: Default::default(),
             offer_seq: 0,
+            hook_waits: Vec::new(),
             offer_popups: !cfg!(test),
             diag_card_hidden: None,
             cmd_loading: Default::default(),
@@ -1508,8 +1511,9 @@ impl Editor {
         if m.kind == K::Down
             && let Some(&(_, _, _, k)) = s.offer_buttons.iter().find(|b| b.0 == y && (b.1..b.2).contains(&x))
         {
+            let weighty = self.offers.first().is_some_and(|o| o.weighty_answer(k));
             match k {
-                'y' | 'a' | 'A' | 'D' | 'R' | 'c' if !self.offer_seen_whole() => self.offer_see_all_first(),
+                _ if weighty && !self.offer_seen_whole() => self.offer_see_all_first(),
                 'y' if self.offer_settled() => self.offer_accept(),
                 'v' => self.offer_view(),
                 'r' => self.offer_one_by_one(),
@@ -1518,7 +1522,9 @@ impl Editor {
                 'D' if self.offer_settled() => self.offer_remove(true),
                 'R' if self.offer_settled() => self.offer_remove(false),
                 'c' if self.offer_settled() => self.offer_commit_first(),
-                'y' | 'a' | 'A' | 'D' | 'R' | 'c' => {}
+                'p' if self.offer_settled() => self.offer_preflight_first(),
+                'X' if self.offer_settled() => self.offer_abort(),
+                _ if weighty => {}
                 'n' => self.offer_dismiss(),
                 'N' => self.offer_never(),
                 d => self.offer_to_front(d.to_digit(10).unwrap_or(0) as usize),

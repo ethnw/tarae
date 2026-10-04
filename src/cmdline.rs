@@ -143,7 +143,9 @@ pub const COMMANDS: &[TypedCmd] = &[
     c(&["session-switch"], Arg::None, "Bring another session to the front"),
     c(&["session-new"], Arg::None, "New session: a branch in its own checkout"),
     c(&["session-end"], Arg::None, "End a session (its checkout goes)"),
-    c(&["session-bring"], Arg::None, "Move a session's base up to it (fast-forward)"),
+    c(&["session-bring"], Arg::None, "Move a session's base up to it (rebase first if it moved)"),
+    c(&["rebase-continue"], Arg::None, "Stage the resolved files and go on with the rebase"),
+    c(&["rebase-abort"], Arg::None, "Abort the rebase: back to where it was"),
 ];
 
 /// One candidate.

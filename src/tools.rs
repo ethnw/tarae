@@ -1043,14 +1043,20 @@ fn showable(root: &Path, path: &std::path::Path) -> Result<String, String> {
             crossed.join(", and ")
         ));
     }
+    if !draws_as_itself(&text) {
+        return Err(format!("{unseen} it has characters a card can't show as they are"));
+    }
+    Ok(text)
+}
+
+/// Whether a card shows `text` as it is: nothing that draws as something else (control characters, bidi and
+/// zero-width marks) — what a script's card asks before showing it (`showable`, `hooks.rs`).
+pub(crate) fn draws_as_itself(text: &str) -> bool {
     let hidden = |c: char| {
         (c.is_control() && c != '\n' && c != '\t')
             || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
     };
-    if text.replace("\r\n", "\n").chars().any(hidden) {
-        return Err(format!("{unseen} it has characters a card can't show as they are"));
-    }
-    Ok(text)
+    !text.replace("\r\n", "\n").chars().any(hidden)
 }
 
 /// A task running in the panel isn't cut short (the user's, or an install).
@@ -1424,6 +1430,7 @@ fn run_report(root: &Path, r: &crate::task::Run, places: &[crate::quickfix::Item
         State::Passed => "exit 0".to_string(),
         State::Failed(Some(code)) => format!("exit {code}"),
         State::Failed(None) => "killed".to_string(),
+        State::Stopped(ref why) => format!("stopped: {why}"),
         State::Running => "still running".to_string(),
     };
     let mut out = format!("{verdict}{took}\n$ {}\n", r.task.cmd);

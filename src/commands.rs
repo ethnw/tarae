@@ -1814,6 +1814,8 @@ const TYPED_IN_PALETTE: &[(&str, &str)] = &[
     ("Previous buffer", "bp"),
     ("End this session", "session-end"),
     ("Bring this session into its base", "session-bring"),
+    ("Go on with the rebase", "rebase-continue"),
+    ("Abort the rebase", "rebase-abort"),
 ];
 
 /// Command palette (`space ?`): find every command by its description, bound keys on the right —

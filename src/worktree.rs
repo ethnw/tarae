@@ -3,7 +3,8 @@
 //! the name is the branch, made from the front session's HEAD (`C-b` in the prompt picks another base); a
 //! card says where its checkout goes and what it costs on disk before anything is made. `:session-end`
 //! removes one — at once when nothing would be lost (no changes, merged into its base), else a card says
-//! what would be. `:session-bring` moves its base up to it, fast-forward only. The list (`space W`). The
+//! what would be. `:session-bring` moves its base up to it, fast-forward only — a base that moved since is
+//! rebased onto first, after a card (`rebase.rs`). The list (`space W`). The
 //! sessions are kept per repository (`$state/sessions/<hash of its git folder>.json`) and come back at
 //! startup and after `:restart`.
 //!
@@ -17,7 +18,7 @@ use serde_json::{Value, json};
 
 use crate::editor::Editor;
 use crate::event::SessionId;
-use crate::gitmenu::git;
+use crate::gitmenu::{git, git_no_hooks};
 use crate::gitpanel::{branch_name, commit_rows, current_branch, only_on, parse_log, top_of};
 
 /// How long sizes on disk are measured for, at most (then the card says "over").
@@ -150,7 +151,7 @@ fn cargo_dirs(top: &Path) -> Option<(PathBuf, PathBuf)> {
 // ── Git ──────────────────────────────────────────────────────────────────────
 
 /// The commit `rev` names (full sha).
-fn sha(dir: &Path, rev: &str) -> Result<String, String> {
+pub(crate) fn sha(dir: &Path, rev: &str) -> Result<String, String> {
     git(dir, &["rev-parse", "--verify", "-q", rev], None).map(|s| s.trim().to_string())
 }
 
@@ -162,15 +163,15 @@ pub fn common_dir(dir: &Path) -> Result<PathBuf, String> {
 }
 
 /// Whether `a` is in `b`'s history.
-fn is_ancestor(dir: &Path, a: &str, b: &str) -> bool {
+pub(crate) fn is_ancestor(dir: &Path, a: &str, b: &str) -> bool {
     git(dir, &["merge-base", "--is-ancestor", a, b], None).is_ok()
 }
 
-fn count(dir: &Path, range: &str) -> usize {
+pub(crate) fn count(dir: &Path, range: &str) -> usize {
     git(dir, &["rev-list", "--count", range], None).ok().and_then(|n| n.trim().parse().ok()).unwrap_or(0)
 }
 
-fn commits(n: usize) -> String {
+pub(crate) fn commits(n: usize) -> String {
     if n == 1 { "1 commit".into() } else { format!("{n} commits") }
 }
 
@@ -461,7 +462,7 @@ fn make(m: &Making) -> Result<(PathBuf, Vec<String>), String> {
         return Err(format!("{} is there already", crate::allow::tilde(&m.path)));
     }
     let path = m.path.to_str().ok_or("a checkout path that isn't UTF-8")?;
-    git(&m.top, &["worktree", "add", "-q", "-b", &m.branch, path, &m.base_sha], None)?;
+    git_no_hooks(&m.top, &["worktree", "add", "-q", "-b", &m.branch, path, &m.base_sha])?;
     let failed = copy_instructions(&m.top, &m.path, &m.copies);
     Ok((std::fs::canonicalize(&m.path).unwrap_or_else(|_| m.path.clone()), failed))
 }
@@ -589,6 +590,11 @@ fn ending(name: String, root: &Path, base: Option<String>, start: &Path) -> Resu
     if top != root {
         return Err(format!("{} isn't a checkout's top any more", crate::allow::tilde(root)));
     }
+    if crate::rebase::under_way(root).is_some() {
+        return Err(
+            "its checkout is in the middle of a rebase — :rebase-continue or :rebase-abort first".into()
+        );
+    }
     let common = common_dir(root)?;
     let status = git(root, &["status", "--porcelain", "--untracked-files=all"], None)?;
     let changed: Vec<String> = status.lines().filter(|l| !l.trim().is_empty()).map(str::to_string).collect();
@@ -620,9 +626,9 @@ fn remove(e: &Ending, both: bool) -> Result<(u64, bool), String> {
         args.push("--force");
     }
     args.push(root);
-    git(&e.common, &args, None)?;
+    git_no_hooks(&e.common, &args)?;
     if let Some(b) = branch {
-        git(&e.common, &["branch", "-D", "--", b], None)?;
+        git_no_hooks(&e.common, &["branch", "-D", "--", b])?;
     }
     Ok(freed)
 }
@@ -636,6 +642,31 @@ pub struct Brought {
     pub tip: String,
 }
 
+/// What the checks before a bring found (on a worker).
+enum Bringing {
+    Brought(Brought),
+    /// The base moved since: the rebase card.
+    Moved(crate::rebase::Moved),
+    /// A rebase is under way in its checkout (tarae's or not — taken up then).
+    Rebasing(crate::rebase::Stop),
+    Refused(String),
+}
+
+/// Its base moved since it left it, and it has commits of its own: a rebase first, not a bring — None when
+/// it can be brought as it is (or git can't say: `bring` says why).
+fn moved(root: &Path, name: &str, base: Option<String>, start: &Path) -> Option<crate::rebase::Moved> {
+    let branch = current_branch(root)?;
+    let base = base_or_start(base, start).ok()?;
+    let base_tip = local_branch(root, &base).ok()?;
+    let tip = sha(root, "HEAD").ok()?;
+    let ahead = count(root, &format!("{base_tip}..{tip}"));
+    if ahead == 0 || is_ancestor(root, &base_tip, &tip) {
+        return None;
+    }
+    let moved = count(root, &format!("{tip}..{base_tip}"));
+    Some(crate::rebase::Moved { root: root.to_path_buf(), name: name.into(), branch, base, moved, ahead })
+}
+
 /// Its base moved up to its branch — fast-forward only, in the checkout that has the base (refused if that
 /// one has changes, saved or not, in the files it brings), else the ref alone (on a worker).
 fn bring(root: &Path, base: Option<String>, start: &Path, unsaved: &[PathBuf]) -> Result<Brought, String> {
@@ -643,7 +674,7 @@ fn bring(root: &Path, base: Option<String>, start: &Path, unsaved: &[PathBuf]) -
     let base = base_or_start(base, start)?;
     let base_tip = local_branch(root, &base)?;
     let tip = sha(root, "HEAD")?;
-    if tip == base_tip {
+    if tip == base_tip || count(root, &format!("{base_tip}..{tip}")) == 0 {
         return Err(format!("nothing to bring — {branch} has no commits past {base}"));
     }
     if !is_ancestor(root, &base_tip, &tip) {
@@ -685,11 +716,11 @@ fn bring(root: &Path, base: Option<String>, start: &Path, unsaved: &[PathBuf]) -
                     if held.len() > 3 { ", …" } else { "" }
                 ));
             }
-            git(&at, &["merge", "--ff-only", "-q", &tip], None)?;
+            git_no_hooks(&at, &["merge", "--ff-only", "-q", &tip])?;
         }
         None => {
             let msg = format!("tarae: bring {branch} into {base}");
-            git(root, &["update-ref", "-m", &msg, &format!("refs/heads/{base}"), &tip, &base_tip], None)?;
+            git_no_hooks(root, &["update-ref", "-m", &msg, &format!("refs/heads/{base}"), &tip, &base_tip])?;
         }
     }
     Ok(Brought { branch, base, count: n, tip: tip[..7].to_string() })
@@ -730,6 +761,8 @@ pub struct Shown {
     pub front: bool,
     /// CPU % and memory of its processes, summed (none seen yet: None).
     pub usage: Option<(f32, u64)>,
+    /// A rebase under way in its checkout, as it says it (`rebasing 2/5`).
+    pub rebasing: Option<String>,
 }
 
 /// The list's rows: the name, a glyph for what its Claude does (`●` working, `▲` waiting for you, `◦` a
@@ -754,6 +787,11 @@ pub fn items(sessions: &[Shown]) -> Vec<crate::picker::Item> {
                 (Doing::Working, _) => "working".to_string(),
                 (Doing::Idle, true) => "here".to_string(),
                 (Doing::Idle, false) => String::new(),
+            };
+            let doing = match (&l.rebasing, doing.is_empty()) {
+                (Some(r), true) => r.clone(),
+                (Some(r), false) => format!("{r} · {doing}"),
+                (None, _) => doing,
             };
             let usage = l
                 .usage
@@ -1092,6 +1130,9 @@ impl Editor {
         let session =
             std::iter::once(&self.session).chain(&self.sessions).find(|l| l.id == id).expect("named");
         let root = session.root.clone();
+        if let Some(r) = session.rebase.as_ref() {
+            return Err(format!("end {name}: {}", r.why(&name)));
+        }
         if session.chat.as_ref().is_some_and(crate::chat::Chat::busy) {
             return Err(format!("{name}'s Claude is answering — stop it (C-c) or let it finish first"));
         }
@@ -1178,7 +1219,7 @@ impl Editor {
         let root = e.root.clone();
         // (its session's: the status and the message are that session's, wherever you are when they land)
         self.events.jobs().spawn(move || {
-            let read = git(&root, &["add", "--all"], None)
+            let read = git_no_hooks(&root, &["add", "--all"])
                 .and_then(|_| crate::gitpanel::status(&root).map(crate::gitpanel::Status::with_rows));
             move |ed: &mut Editor| {
                 ed.step_done("session");
@@ -1277,6 +1318,7 @@ impl Editor {
                 doing: self.doing(l),
                 front: l.id == self.session.id,
                 usage: crate::procs::summed(&self.procs.rows, &self.session_pids(l)),
+                rebasing: l.rebase.as_ref().map(crate::rebase::Rebase::said),
             })
             .collect();
         items(&shown)
@@ -1333,7 +1375,8 @@ impl Editor {
 
     // ── Bringing ─────────────────────────────────────────────────────────────
 
-    /// `:session-bring [<n|name>]` — its base moved up to its branch, fast-forward only (a worker).
+    /// `:session-bring [<n|name>]` — its base moved up to its branch, fast-forward only (a worker). The base
+    /// moved since: a card offers to rebase it first (`rebase.rs`). Not while a rebase is under way there.
     pub fn session_bring(&mut self, which: &str) -> Result<(), String> {
         let (id, name) = self.session_named(which)?;
         if id == 0 {
@@ -1341,23 +1384,44 @@ impl Editor {
         }
         let session =
             std::iter::once(&self.session).chain(&self.sessions).find(|l| l.id == id).expect("named");
+        if let Some(r) = session.rebase.as_ref() {
+            return Err(format!("bring {name}: {}", r.why(&name)));
+        }
         let (root, base, start) = (session.root.clone(), session.base.clone(), self.start_root());
         let unsaved: Vec<PathBuf> =
             self.docs.iter().filter(|d| d.is_modified()).filter_map(|d| d.path.clone()).collect();
         self.set_step("session", format!("Bringing {name} in…"));
+        let who = name.clone();
         self.events.shared_jobs().spawn(move || {
-            let result = bring(&root, base, &start, &unsaved);
+            let result = match crate::rebase::under_way(&root) {
+                Some(stop) => Bringing::Rebasing(stop),
+                None => match moved(&root, &who, base.clone(), &start) {
+                    Some(m) => Bringing::Moved(m),
+                    None => {
+                        bring(&root, base, &start, &unsaved).map_or_else(Bringing::Refused, Bringing::Brought)
+                    }
+                },
+            };
             move |ed: &mut Editor| {
                 ed.step_done("session");
                 match result {
-                    Ok(b) => ed.set_success(format!(
+                    Bringing::Brought(b) => ed.set_success(format!(
                         "Brought {} of {} into {} — now at {}",
                         commits(b.count),
                         b.branch,
                         b.base,
                         b.tip
                     )),
-                    Err(e) => ed.set_error(format!("bring {name}: {e}")),
+                    Bringing::Moved(m) => ed.push_offer(m.card()),
+                    // (one tarae didn't start: taken up, so continue and abort know it)
+                    Bringing::Rebasing(stop) => ed.with_session(id, |ed| {
+                        if ed.session.rebase.is_none() {
+                            ed.rebase_adopt(stop);
+                        }
+                        let why = ed.session.rebase.as_ref().map(|r| r.why(&name)).unwrap_or_default();
+                        ed.set_error(format!("bring {name}: {why}"));
+                    }),
+                    Bringing::Refused(e) => ed.set_error(format!("bring {name}: {e}")),
                 }
                 ed.git_refresh();
                 ed.git_reload_bases();
@@ -1646,6 +1710,11 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// The card up titled `title`.
+    fn card<'a>(ed: &'a Editor, title: &str) -> Option<&'a crate::offer::Offer> {
+        ed.offers.iter().find(|o| o.title == title)
+    }
+
     /// The card drawn and in sight long enough (`offer::SETTLE`) for its keys to answer it.
     fn card_in_sight(ed: &mut Editor) -> Vec<char> {
         let mut out = Vec::new();
@@ -1741,9 +1810,9 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Bringing in: main moves up to the session's branch in main's checkout (its files follow); refused
-    /// when main moved meanwhile (with how far), or when main's checkout has changes in a file it brings;
-    /// a base no checkout has moves as a ref alone.
+    /// Bringing in: main moves up to the session's branch in main's checkout (its files follow); main moved
+    /// meanwhile: a card offers to rebase first (with how far — `n` leaves it all); refused when main's
+    /// checkout has changes in a file it brings; a base no checkout has moves as a ref alone.
     #[test]
     fn a_session_is_brought_into_its_base_fast_forward_only() {
         let (repo, dir) = place("bring");
@@ -1762,16 +1831,27 @@ mod tests {
         );
         assert_eq!(git_in(&repo, &["rev-parse", "main"]), tip);
         assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "feat\n", "its checkout followed");
-        // main moved since: refused, with the count
+        // main moved since: the card offers a rebase first, with the counts — `n` leaves it all
         let wt = new_session(&mut ed, "late");
         git_in(&wt, &["commit", "-q", "--allow-empty", "-m", "late"]);
+        let late = git_in(&wt, &["rev-parse", "HEAD"]);
         git_in(&repo, &["commit", "-q", "--allow-empty", "-m", "main moves"]);
         git_in(&repo, &["commit", "-q", "--allow-empty", "-m", "and again"]);
         let main = git_in(&repo, &["rev-parse", "main"]);
         feed(&mut ed, ":session-bring<ret>");
-        settle_until(&mut ed, |ed| says(ed, "bring late:"));
-        assert!(says(&ed, "main moved 2 commits since — rebase late on it first"), "{}", said(&ed));
+        settle_until(&mut ed, |ed| card(ed, "Bring late: main moved").is_some() || says(ed, "bring late:"));
+        let q = &card(&ed, "Bring late: main moved").unwrap().question;
+        assert!(
+            q.starts_with(
+                "Rebase late onto main first? main moved 2 commits since late left it; late is 1 commit ahead."
+            ),
+            "{q}"
+        );
+        assert_eq!(card_in_sight(&mut ed), ['y', 'n']);
+        feed(&mut ed, "n");
+        assert!(says(&ed, "Not rebased — late as it is, nothing brought"), "{}", said(&ed));
         assert_eq!(git_in(&repo, &["rev-parse", "main"]), main);
+        assert_eq!(git_in(&wt, &["rev-parse", "HEAD"]), late);
         // A change in main's checkout to a file it brings: refused, nothing moves
         let wt = new_session(&mut ed, "edit");
         std::fs::write(wt.join("a.txt"), "edit\n").unwrap();
@@ -1786,14 +1866,547 @@ mod tests {
         // A base no checkout has: the ref alone moves
         git_in(&repo, &["branch", "side"]);
         let wt = new_session(&mut ed, "topic side");
+        // (with hooks a Claude could write, in main's checkout: `update-ref` runs none of them)
+        let marks = dir.join("hooks-ran");
+        plant_hooks(&repo, &marks);
+        let abs = repo.join(".githooks");
+        git_in(&repo, &["config", "core.hooksPath", abs.to_str().unwrap()]);
         git_in(&wt, &["commit", "-q", "--allow-empty", "-m", "topic"]);
+        marked_by_hand(&marks);
         let tip = git_in(&wt, &["rev-parse", "HEAD"]);
         feed(&mut ed, ":session-bring<ret>");
         settle_until(&mut ed, |ed| says(ed, "of topic into side") || says(ed, "bring topic:"));
         assert_eq!(git_in(&repo, &["rev-parse", "side"]), tip, "{}", said(&ed));
+        assert!(!marks.exists(), "a hook ran: {}", std::fs::read_to_string(&marks).unwrap_or_default());
         // Nothing to bring
         feed(&mut ed, ":session-bring<ret>");
         settle_until(&mut ed, |ed| says(ed, "nothing to bring"));
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A Claude stand-in for the sessions made after it: each message is logged to `log`, then it does
+    /// `act` (a shell line, in the session's checkout) and ends its turn.
+    fn claude_does(ed: &mut Editor, log: &Path, act: &str) {
+        let result = json!({"type": "result", "result": "Resolved."});
+        ed.config.llm.args = vec![
+            "-c".into(),
+            format!(
+                "while read -r line; do case \"$line\" in '{{\"message\"'*) printf '%s\\n' \"$line\" >> '{}'; \
+                 {act} printf '%s\\n' '{result}';; esac; done",
+                log.display()
+            ),
+        ];
+    }
+
+    /// A session `feat` with two commits — the first changes `a.txt`'s second line, the second adds `b.txt`
+    /// — and main moved since (its own second line of `a.txt`, unless `clean`). Returns its checkout and its
+    /// tip.
+    fn moved_apart(ed: &mut Editor, repo: &Path, clean: bool) -> (PathBuf, String) {
+        let wt = new_session(ed, "feat");
+        std::fs::write(wt.join("a.txt"), "one\nfeat\n").unwrap();
+        git_in(&wt, &["commit", "-qam", "feat a"]);
+        std::fs::write(wt.join("b.txt"), "b\n").unwrap();
+        git_in(&wt, &["add", "-A"]);
+        git_in(&wt, &["commit", "-qm", "add b"]);
+        match clean {
+            true => std::fs::write(repo.join("c.txt"), "c\n").unwrap(),
+            false => std::fs::write(repo.join("a.txt"), "one\nmain\n").unwrap(),
+        }
+        git_in(repo, &["add", "-A"]);
+        git_in(repo, &["commit", "-qm", "main moves"]);
+        (wt.clone(), git_in(&wt, &["rev-parse", "HEAD"]))
+    }
+
+    /// `:session-bring`, the rebase card up and answered `y` — the rebase under way.
+    fn rebase_asked(ed: &mut Editor) {
+        feed(ed, ":session-bring<ret>");
+        settle_until(ed, |ed| card(ed, "Bring feat: main moved").is_some() || says(ed, "bring feat:"));
+        assert_eq!(card_in_sight(ed), ['y', 'n'], "{}", said(ed));
+        feed(ed, "y");
+        assert!(ed.session.rebase.is_some(), "under way: {}", said(ed));
+    }
+
+    /// Roadmap #3, clean: main moved, so `:session-bring` offers a rebase first; `y` runs `git rebase main`
+    /// in the session's checkout (tarae's own run, in the task panel); its commits land on main's tip, and the
+    /// bring card offers to bring them now — `y` does.
+    #[test]
+    fn a_moved_base_is_rebased_onto_then_brought() {
+        let (repo, dir) = place("rebase-clean");
+        let mut ed = editor(&repo, &dir);
+        let (wt, _) = moved_apart(&mut ed, &repo, true);
+        rebase_asked(&mut ed);
+        let task = ed.session.task_run.as_ref().map(|r| (r.task.name.clone(), r.task.cmd.clone()));
+        let cmd = "git -c core.hooksPath=/dev/null -c advice.mergeConflict=false rebase 'main'";
+        assert_eq!(task, Some(("rebase onto main".into(), cmd.into())), "in the task panel, with no hooks");
+        settle_until(&mut ed, |ed| card(ed, "Rebased feat onto main").is_some() || says(ed, "rebase feat:"));
+        let main = git_in(&repo, &["rev-parse", "main"]);
+        assert_eq!(git_in(&wt, &["merge-base", "main", "HEAD"]), main, "on main's tip");
+        assert_eq!(git_in(&wt, &["log", "--format=%s", "main..HEAD"]), "add b\nfeat a");
+        assert!(ed.session.rebase.is_none() && crate::rebase::under_way(&wt).is_none());
+        assert!(says(&ed, "Rebased feat onto main — 2 commits on top, now at "), "{}", said(&ed));
+        let q = &card(&ed, "Rebased feat onto main").unwrap().question;
+        assert!(q.starts_with("2 commits on main's tip now.\n\nBring them into main"), "{q}");
+        assert_eq!(card_in_sight(&mut ed), ['y', 'p', 'n']);
+        feed(&mut ed, "y");
+        settle_until(&mut ed, |ed| says(ed, "Brought") || says(ed, "bring feat:"));
+        assert!(says(&ed, "Brought 2 commits of feat into main"), "{}", said(&ed));
+        assert_eq!(git_in(&repo, &["rev-parse", "main"]), git_in(&wt, &["rev-parse", "HEAD"]));
+        assert_eq!(std::fs::read_to_string(repo.join("b.txt")).unwrap(), "b\n", "main's checkout followed");
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Roadmap #3, a conflict: the rebase stops at commit 1 of 2; the session's own Claude is asked in its
+    /// chat (the file, both sides, no git, no commit); its turn ends with the markers gone, so the review
+    /// shows the file against the commit being replayed and the card offers to go on. Meanwhile the session
+    /// says `rebasing 1/2`, and bring, end and `:restart` wait for it. `y` stages it and continues — to the end.
+    #[test]
+    fn a_conflict_goes_to_the_sessions_claude_and_the_rebase_goes_on() {
+        let (repo, dir) = place("rebase-conflict");
+        let (log, answer) = (dir.join("claude.log"), dir.join("answer.txt"));
+        std::fs::write(&answer, "one\nmain\nfeat\n").unwrap();
+        let mut ed = editor(&repo, &dir);
+        claude_does(&mut ed, &log, &format!("cp '{}' a.txt;", answer.display()));
+        let (wt, _) = moved_apart(&mut ed, &repo, false);
+        rebase_asked(&mut ed);
+        settle_until(&mut ed, |ed| {
+            card(ed, "feat: conflicts resolved").is_some() || says(ed, "rebase feat:")
+        });
+        assert!(ed.session.code_review.is_some(), "the card comes once the review is open");
+        // The panel: stopped at its conflict, not failed
+        let state = ed.session.task_run.as_ref().map(|r| r.state.clone());
+        assert_eq!(state, Some(crate::task::State::Stopped("1 conflict".into())));
+        // Claude was asked: the file, both sides, what not to do
+        let heard = std::fs::read_to_string(&log).unwrap();
+        for part in [
+            "Rebasing feat onto main stopped at commit 1 of 2 (",
+            " feat a): git couldn't merge a.txt.",
+            "Don't run git and don't commit",
+            "<conflicted>\\na.txt\\n</conflicted>",
+            "+feat",
+            "+main",
+        ] {
+            assert!(heard.contains(part), "{part:?} in {heard}");
+        }
+        let r = ed.session.rebase.as_ref().expect("under way");
+        assert_eq!(
+            (r.stage, r.step, r.stop.files.clone()),
+            (crate::rebase::Stage::Resolved, Some((1, 2)), vec!["a.txt".to_string()])
+        );
+        // The review: the resolved file against the commit being replayed
+        let review = ed.session.code_review.as_ref().expect("the review");
+        assert!(
+            matches!(&review.base, crate::codereview::Base::Replay { label, .. } if label.ends_with(" feat a")),
+            "{:?}",
+            review.base
+        );
+        assert_eq!(review.files.iter().map(|f| f.rel.as_str()).collect::<Vec<_>>(), ["a.txt"]);
+        let q = &card(&ed, "feat: conflicts resolved").unwrap().question;
+        assert!(q.starts_with("a.txt resolved for commit 1 of 2 ("), "{q}");
+        assert!(q.ends_with(" feat a). The review shows it against that commit.\n\nX aborts the rebase: feat goes back as it was."));
+        // It says so — the tabs over its chat, its row in the list
+        let mut out = Vec::new();
+        crate::term::render(&mut ed, &mut out, 112, 30).unwrap();
+        let mut vt = vt100::Parser::new(30, 112, 0);
+        vt.process(&out);
+        let shown = vt.screen().contents();
+        assert!(shown.contains("feat rebasing 1/2"), "{shown}");
+        assert!(shown.contains("stopped: 1 conflict") && !shown.contains("failed"), "{shown}");
+        assert!(ed.session_items()[1].hint.contains("rebasing 1/2"), "{}", ed.session_items()[1].hint);
+        // What would get in its way waits for it
+        feed(&mut ed, ":session-bring<ret>");
+        assert!(says(&ed, "bring feat: feat is rebasing 1/2 — :rebase-continue or :rebase-abort first"));
+        feed(&mut ed, ":session-end<ret>");
+        assert!(says(&ed, "end feat: feat is rebasing 1/2"), "{}", said(&ed));
+        let restart = crate::restart::start(&mut ed, false).unwrap_err();
+        assert_eq!(restart, "can't restart: feat is rebasing 1/2 — :rebase-continue or :rebase-abort first");
+        // y: staged, and on to the end
+        assert_eq!(card_in_sight(&mut ed), ['y', 'X', 'n']);
+        let a = ed
+            .docs
+            .iter()
+            .find(|d| d.path.as_deref() == Some(wt.join("a.txt").as_path()))
+            .expect("in review");
+        ed.blame.of = Some((a.id, a.version()));
+        feed(&mut ed, "y");
+        settle_until(&mut ed, |ed| card(ed, "Rebased feat onto main").is_some() || says(ed, "rebase feat:"));
+        assert!(ed.blame.of.is_none(), "its blame is asked again — the lines are committed now");
+        assert_eq!(git_in(&wt, &["log", "--format=%s", "main..HEAD"]), "add b\nfeat a", "{}", said(&ed));
+        assert_eq!(
+            git_in(&wt, &["show", "HEAD~1:a.txt"]),
+            "one\nmain\nfeat",
+            "Claude's resolution, committed"
+        );
+        assert_eq!(git_in(&wt, &["log", "-1", "--format=%s", "HEAD~1"]), "feat a", "its message kept");
+        assert!(ed.session.rebase.is_none() && ed.session.code_review.is_none());
+        assert!(card(&ed, "feat: conflicts resolved").is_none());
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Claude's turn ends with markers left: the files are named, nothing goes on — `:rebase-continue`
+    /// won't either; `:rebase-abort` puts the branch back where it was.
+    #[test]
+    fn markers_left_are_named_and_abort_goes_back() {
+        let (repo, dir) = place("rebase-abort");
+        let log = dir.join("claude.log");
+        let mut ed = editor(&repo, &dir);
+        claude_does(&mut ed, &log, "");
+        let (wt, tip) = moved_apart(&mut ed, &repo, false);
+        // Open from before the rebase, saved: its buffer may lag the disk (a shot showed it) — the disk's
+        // text is what's checked
+        feed(&mut ed, ":o a.txt<ret>");
+        rebase_asked(&mut ed);
+        settle_until(&mut ed, |ed| says(ed, "conflict markers still in") || says(ed, "rebase feat:"));
+        assert!(
+            says(&ed, "conflict markers still in a.txt — ask Claude again, or fix them and :rebase-continue"),
+            "{}",
+            said(&ed)
+        );
+        assert!(card(&ed, "feat: conflicts resolved").is_none() && ed.session.code_review.is_none());
+        feed(&mut ed, ":rebase-continue<ret>");
+        settle_until(&mut ed, |ed| says(ed, "not going on"));
+        assert!(says(&ed, "conflict markers still in a.txt — not going on"));
+        assert!(crate::rebase::under_way(&wt).is_some(), "still stopped");
+        feed(&mut ed, ":rebase-abort<ret>");
+        settle_until(&mut ed, |ed| says(ed, "Rebase aborted") || says(ed, "rebase feat:"));
+        assert!(says(&ed, "Rebase aborted — feat is back where it was"), "{}", said(&ed));
+        assert_eq!(git_in(&wt, &["rev-parse", "HEAD"]), tip);
+        assert_eq!(std::fs::read_to_string(wt.join("a.txt")).unwrap(), "one\nfeat\n");
+        assert!(ed.session.rebase.is_none() && crate::rebase::under_way(&wt).is_none());
+        // None under way now
+        feed(&mut ed, ":rebase-abort<ret>");
+        settle_until(&mut ed, |ed| says(ed, "no rebase under way"));
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Hooks a Claude could write — a `core.hooksPath` inside the checkout `wt` — written as hooks that leave
+    /// a mark in the test's own folder: one per hook making, rebasing, bringing or ending a session may run.
+    fn plant_hooks(wt: &Path, marks: &Path) {
+        use std::os::unix::fs::PermissionsExt as _;
+        git_in(wt, &["config", "core.hooksPath", ".githooks"]);
+        // (out of git: a commit of the test's own doesn't carry them into the other checkout)
+        let common = PathBuf::from(git_in(wt, &["rev-parse", "--path-format=absolute", "--git-common-dir"]));
+        std::fs::create_dir_all(common.join("info")).unwrap();
+        std::fs::write(common.join("info/exclude"), ".githooks/\n").unwrap();
+        std::fs::create_dir_all(wt.join(".githooks")).unwrap();
+        for hook in [
+            "pre-rebase",
+            "post-checkout",
+            "post-rewrite",
+            "reference-transaction",
+            "pre-commit",
+            "prepare-commit-msg",
+            "commit-msg",
+            "post-commit",
+            "post-merge",
+        ] {
+            let path = wt.join(".githooks").join(hook);
+            std::fs::write(&path, format!("#!/bin/sh\necho {hook} >> '{}'\n", marks.display())).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    /// The test's own git ran the stand-in hooks (they work): what they marked, and the marks cleared.
+    fn marked_by_hand(marks: &Path) -> String {
+        let ran = std::fs::read_to_string(marks).unwrap_or_default();
+        assert!(ran.contains("pre-commit"), "the stand-ins run for git run as usual: {ran}");
+        std::fs::remove_file(marks).unwrap();
+        ran
+    }
+
+    /// Review 2026-10-04: what tarae's git does in a checkout runs outside the sandbox, so hooks under a
+    /// `core.hooksPath` a Claude can write (in main's checkout and in the session's) never run for it —
+    /// making the session (`worktree add`), the rebase, its continue after a conflict, the bring (`merge
+    /// --ff-only` in main's checkout), an abort, and the end that deletes the branch too.
+    #[test]
+    fn hooks_in_the_checkout_never_run_in_taraes_rebase() {
+        let (repo, dir) = place("rebase-hooks");
+        let (log, answer, marks) = (dir.join("claude.log"), dir.join("answer.txt"), dir.join("hooks-ran"));
+        std::fs::write(&answer, "one\nmain\nfeat\n").unwrap();
+        let mut ed = editor(&repo, &dir);
+        claude_does(&mut ed, &log, &format!("cp '{}' a.txt;", answer.display()));
+        plant_hooks(&repo, &marks);
+        let (wt, _) = moved_apart(&mut ed, &repo, false);
+        // (main's commit in `moved_apart` ran them; making the session didn't)
+        let ran = marked_by_hand(&marks);
+        assert!(!ran.contains("post-checkout"), "worktree add ran a hook: {ran}");
+        plant_hooks(&wt, &marks);
+        std::fs::write(wt.join("d.txt"), "d\n").unwrap();
+        git_in(&wt, &["add", "d.txt"]);
+        git_in(&wt, &["commit", "-qm", "hooked"]);
+        marked_by_hand(&marks);
+        // The rebase stops at its conflict; Claude resolves it; it goes on to the end; it's brought
+        rebase_asked(&mut ed);
+        settle_until(&mut ed, |ed| {
+            card(ed, "feat: conflicts resolved").is_some() || says(ed, "rebase feat:")
+        });
+        card_in_sight(&mut ed);
+        feed(&mut ed, "y");
+        settle_until(&mut ed, |ed| card(ed, "Rebased feat onto main").is_some() || says(ed, "rebase feat:"));
+        assert_eq!(
+            git_in(&wt, &["log", "--format=%s", "main..HEAD"]),
+            "hooked\nadd b\nfeat a",
+            "{}",
+            said(&ed)
+        );
+        card_in_sight(&mut ed);
+        feed(&mut ed, "y");
+        settle_until(&mut ed, |ed| says(ed, "Brought") || says(ed, "bring feat:"));
+        assert_eq!(
+            git_in(&repo, &["rev-parse", "main"]),
+            git_in(&wt, &["rev-parse", "HEAD"]),
+            "{}",
+            said(&ed)
+        );
+        assert!(!marks.exists(), "a hook ran: {}", std::fs::read_to_string(&marks).unwrap_or_default());
+        // An abort: both change a.txt's second line again
+        std::fs::write(wt.join("a.txt"), "one\nfeat two\n").unwrap();
+        git_in(&wt, &["commit", "-qam", "feat two"]);
+        std::fs::write(repo.join("a.txt"), "one\nmain again\n").unwrap();
+        git_in(&repo, &["commit", "-qam", "main moves again"]);
+        marked_by_hand(&marks);
+        ed.offers.clear();
+        rebase_asked(&mut ed);
+        settle_until(&mut ed, |ed| {
+            card(ed, "feat: conflicts resolved").is_some() || says(ed, "rebase feat:")
+        });
+        feed(&mut ed, ":rebase-abort<ret>");
+        settle_until(&mut ed, |ed| says(ed, "Rebase aborted") || says(ed, "rebase feat:"));
+        // The end, its branch deleted too — run from the git folder, where a relative hooksPath means a folder
+        // in `.git`: an absolute one into main's checkout
+        let abs = repo.join(".githooks");
+        git_in(&repo, &["config", "core.hooksPath", abs.to_str().unwrap()]);
+        ed.offers.clear();
+        feed(&mut ed, ":session-end<ret>");
+        settle_until(&mut ed, |ed| end_card(ed).is_some() || says(ed, "end feat:"));
+        card_in_sight(&mut ed);
+        feed(&mut ed, "D");
+        settle_until(&mut ed, |ed| says(ed, "Ended feat") || says(ed, "end feat:"));
+        assert!(!wt.exists() && !has_branch(&repo, "feat"), "{}", said(&ed));
+        assert!(!marks.exists(), "a hook ran: {}", std::fs::read_to_string(&marks).unwrap_or_default());
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Review 2026-10-04: the user's own git in a session's checkout whose `core.hooksPath` is inside it. A
+    /// hook committed and as the base has it runs as before; one changed since the base, or untracked, is
+    /// asked about first — named and shown, nothing run yet — `n` goes on without hooks, `y` runs them.
+    #[test]
+    fn the_users_git_asks_before_hooks_a_claude_could_have_written() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (repo, dir) = place("user-hooks");
+        let marks = dir.join("hooks-ran");
+        let hook = |at: &Path, name: &str, says: &str| {
+            let p = at.join(".githooks").join(name);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, format!("#!/bin/sh\necho {says} >> '{}'\n", marks.display())).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let ran = || std::fs::read_to_string(&marks).unwrap_or_default();
+        // main has its pre-commit committed (the test's own commit runs it)
+        git_in(&repo, &["config", "core.hooksPath", ".githooks"]);
+        hook(&repo, "pre-commit", "committed");
+        git_in(&repo, &["add", "-A"]);
+        git_in(&repo, &["commit", "-qm", "hooks"]);
+        std::fs::remove_file(&marks).unwrap();
+        let mut ed = editor(&repo, &dir);
+        let wt = new_session(&mut ed, "feat");
+        let amended = |ed: &Editor| ed.messages.iter().filter(|m| m.2.starts_with("Amended")).count();
+        let amend = |ed: &mut Editor, n: &str| {
+            std::fs::write(wt.join("a.txt"), format!("{n}\n")).unwrap();
+            git_in(&wt, &["add", "a.txt"]);
+            feed(ed, ":git-amend<ret>");
+        };
+        // As its base has it: runs, no card
+        amend(&mut ed, "1");
+        settle_until(&mut ed, |ed| amended(ed) == 1 || says(ed, "amend:"));
+        assert!(ed.offers.is_empty() && ran() == "committed\n", "{} — {}", ran(), said(&ed));
+        std::fs::remove_file(&marks).unwrap();
+        // Changed since the base: the card names and shows it, and nothing has run
+        hook(&wt, "pre-commit", "changed");
+        let head = git_in(&wt, &["rev-parse", "HEAD"]);
+        amend(&mut ed, "2");
+        settle_until(&mut ed, |ed| card(ed, "Hooks before the amend").is_some() || says(ed, "amend:"));
+        let q = card(&ed, "Hooks before the amend").unwrap().question.clone();
+        assert!(
+            q.starts_with(
+                "This hook isn't as main has it:\n  .githooks/pre-commit — changed · this amend runs it\nIt runs as you"
+            ),
+            "{q}"
+        );
+        assert!(q.contains(".githooks/pre-commit:\n#!/bin/sh\necho changed >> "), "shown: {q}");
+        assert!(
+            git_in(&wt, &["rev-parse", "HEAD"]) == head && ran().is_empty(),
+            "nothing ran before the answer"
+        );
+        assert_eq!(card_in_sight(&mut ed), ['y', 'n']);
+        feed(&mut ed, "n");
+        settle_until(&mut ed, |ed| amended(ed) == 2 || says(ed, "amend:"));
+        assert!(git_in(&wt, &["rev-parse", "HEAD"]) != head, "amended: {}", said(&ed));
+        assert_eq!(ran(), "", "n: without hooks");
+        // An untracked one too — both named; y runs them
+        hook(&wt, "commit-msg", "untracked");
+        amend(&mut ed, "3");
+        settle_until(&mut ed, |ed| card(ed, "Hooks before the amend").is_some() || says(ed, "amend:"));
+        let q = card(&ed, "Hooks before the amend").unwrap().question.clone();
+        assert!(
+            q.contains(
+                "  .githooks/commit-msg — untracked · this amend runs it\n  .githooks/pre-commit — changed · this amend runs it"
+            ),
+            "{q}"
+        );
+        // (taller than the room beside the chat: read whole first — `v`, to its end — as a script's card)
+        card_in_sight(&mut ed);
+        if !ed.offer_seen_whole() {
+            feed(&mut ed, "v");
+            let end = ed.end_key();
+            feed(&mut ed, &end);
+            card_in_sight(&mut ed);
+        }
+        feed(&mut ed, "y");
+        settle_until(&mut ed, |ed| amended(ed) == 3 || says(ed, "amend:"));
+        assert_eq!(ran(), "changed\nuntracked\n", "y: they ran — {}", said(&ed));
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Review 2026-10-04: what a pull runs depends on config — merging (pre-merge-commit, commit-msg …) or
+    /// rebasing (pre-rebase, post-rewrite …) — so every file in the hooks folder is asked about, not a list by
+    /// action: hooks no pull list names bring the card up, unmarked as "this pull runs it"; `n` pulls anyway.
+    #[test]
+    fn a_pull_asks_about_every_hook_whatever_config_runs() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (repo, dir) = place("pull-hooks");
+        let origin = dir.join("origin");
+        let out =
+            std::process::Command::new("git").args(["clone", "-q"]).arg(&repo).arg(&origin).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        git_in(&repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        git_in(&repo, &["fetch", "-q", "origin"]);
+        git_in(&repo, &["branch", "-q", "-u", "origin/main"]);
+        let marks = dir.join("hooks-ran");
+        let hook = |name: &str| {
+            let p = repo.join(".githooks").join(name);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, format!("#!/bin/sh\necho {name} >> '{}'\n", marks.display())).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let up = |msg: &str| {
+            git_in(
+                &origin,
+                &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", msg],
+            );
+            git_in(&origin, &["rev-parse", "HEAD"])
+        };
+        git_in(&repo, &["config", "core.hooksPath", ".githooks"]);
+        let mut ed = editor(&repo, &dir);
+        ed.git_refresh();
+        settle_until(&mut ed, |ed| ed.session.git_status.is_some());
+        let pulled = |ed: &Editor| ed.messages.iter().filter(|m| m.2.starts_with("Pulled")).count();
+        for (k, (config, name)) in
+            [("false", "pre-merge-commit"), ("true", "pre-rebase")].into_iter().enumerate()
+        {
+            git_in(&repo, &["config", "pull.rebase", config]);
+            hook(name);
+            let tip = up(&format!("up {k}"));
+            ed.git_push_pull(false);
+            settle_until(&mut ed, |ed| card(ed, "Hooks before the pull").is_some() || says(ed, "pull:"));
+            let q = card(&ed, "Hooks before the pull").unwrap().question.clone();
+            let row = format!("  .githooks/{name} — untracked\n");
+            assert!(q.contains(&row), "{name} asked about, not marked as the pull's own: {q}");
+            card_in_sight(&mut ed);
+            if !ed.offer_seen_whole() {
+                feed(&mut ed, "v");
+                let end = ed.end_key();
+                feed(&mut ed, &end);
+                card_in_sight(&mut ed);
+            }
+            feed(&mut ed, "n");
+            settle_until(&mut ed, |ed| pulled(ed) == k + 1 || says(ed, "pull:"));
+            assert_eq!(git_in(&repo, &["rev-parse", "HEAD"]), tip, "pulled: {}", said(&ed));
+            assert!(!marks.exists(), "a hook ran: {}", std::fs::read_to_string(&marks).unwrap_or_default());
+        }
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A review against a remote branch fetches it first — tarae's own step, so with no hooks either.
+    #[test]
+    fn a_reviews_fetch_runs_no_hooks() {
+        let (repo, dir) = place("review-fetch");
+        let origin = dir.join("origin");
+        let out =
+            std::process::Command::new("git").args(["clone", "-q"]).arg(&repo).arg(&origin).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        git_in(&repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        git_in(&repo, &["fetch", "-q", "origin"]);
+        git_in(
+            &origin,
+            &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "up"],
+        );
+        let up = git_in(&origin, &["rev-parse", "HEAD"]);
+        let marks = dir.join("hooks-ran");
+        plant_hooks(&repo, &marks);
+        let mut ed = editor(&repo, &dir);
+        feed(&mut ed, ":review origin/main<ret>");
+        // (past its step's own "gathering…": no changes, an error, or the review)
+        let after = |ed: &Editor| ed.messages.iter().filter(|m| m.2.starts_with("review:")).count() > 1;
+        settle_until(&mut ed, |ed| after(ed) || ed.session.code_review.is_some());
+        assert_eq!(git_in(&repo, &["rev-parse", "origin/main"]), up, "fetched: {}", said(&ed));
+        assert!(!marks.exists(), "a hook ran: {}", std::fs::read_to_string(&marks).unwrap_or_default());
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The rebase's git closed while it runs (`space m c`): what git left is read — the session doesn't say
+    /// `rebasing` for good with nothing running — and the rebase can still be ended.
+    #[test]
+    fn the_rebases_git_closed_mid_run_is_read_as_left() {
+        let (repo, dir) = place("rebase-closed");
+        let mut ed = editor(&repo, &dir);
+        claude_does(&mut ed, &dir.join("claude.log"), "");
+        let (wt, tip) = moved_apart(&mut ed, &repo, false);
+        rebase_asked(&mut ed);
+        settle_until(&mut ed, |ed| says(ed, "conflict markers still in") || says(ed, "rebase feat:"));
+        feed(&mut ed, ":rebase-abort<ret>");
+        assert!(matches!(ed.session.rebase.as_ref().unwrap().stage, crate::rebase::Stage::Running { .. }));
+        ed.task_close();
+        settle_until(&mut ed, |ed| ed.session.rebase.as_ref().is_none_or(|r| r.stopped()));
+        assert!(says(&ed, "the rebase's git was stopped — it's read as git left it"), "{}", said(&ed));
+        if ed.session.rebase.is_some() {
+            feed(&mut ed, ":rebase-abort<ret>");
+            settle_until(&mut ed, |ed| says(ed, "Rebase aborted") || says(ed, "rebase feat:"));
+        }
+        assert_eq!(git_in(&wt, &["rev-parse", "HEAD"]), tip, "{}", said(&ed));
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A rebase tarae didn't start (by hand in the session's terminal, or from before a restart): bring
+    /// refuses and takes it up — `:rebase-abort` then knows it.
+    #[test]
+    fn a_rebase_by_hand_is_taken_up() {
+        let (repo, dir) = place("rebase-hand");
+        let mut ed = editor(&repo, &dir);
+        let (wt, tip) = moved_apart(&mut ed, &repo, false);
+        let out =
+            std::process::Command::new("git").arg("-C").arg(&wt).args(["rebase", "main"]).output().unwrap();
+        assert!(!out.status.success(), "stopped at the conflict");
+        feed(&mut ed, ":session-bring<ret>");
+        settle_until(&mut ed, |ed| says(ed, "bring feat:"));
+        assert!(
+            says(&ed, "bring feat: feat is rebasing 1/2 — :rebase-continue or :rebase-abort first"),
+            "{}",
+            said(&ed)
+        );
+        let r = ed.session.rebase.as_ref().expect("taken up");
+        assert_eq!((r.branch.as_str(), r.stop.files.clone()), ("feat", vec!["a.txt".to_string()]));
+        feed(&mut ed, ":rebase-abort<ret>");
+        settle_until(&mut ed, |ed| says(ed, "Rebase aborted") || says(ed, "rebase feat:"));
+        assert_eq!(git_in(&wt, &["rev-parse", "HEAD"]), tip, "{}", said(&ed));
         drop(ed);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1897,6 +2510,7 @@ mod tests {
             doing,
             front: id == 0,
             usage,
+            rebasing: None,
         };
         let f = |ahead, behind, changed| Some(Facts { ahead, behind, changed });
         let rows = items(&[

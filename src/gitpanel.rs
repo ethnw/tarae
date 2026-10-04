@@ -16,6 +16,7 @@ use std::time::Instant;
 use crate::document::DocId;
 use crate::editor::Editor;
 use crate::gitmenu::git;
+use crate::hooks;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
@@ -510,7 +511,7 @@ pub struct Committing {
 
 impl Editor {
     /// Where git runs: the side panel's folder, else the editor's root.
-    fn git_cwd(&self) -> PathBuf {
+    pub(crate) fn git_cwd(&self) -> PathBuf {
         self.session.sidebar.as_ref().map_or_else(|| self.session.root.clone(), |s| s.root().to_path_buf())
     }
 
@@ -551,32 +552,38 @@ impl Editor {
 
     /// `f` in the git tab — fetch every remote (pruned); it never waits on a password prompt.
     pub fn git_fetch(&mut self) {
-        self.set_step("git", "fetching…");
-        self.git_do(
-            Box::new(|top| git_remote(top, &["fetch", "--all", "--prune"]).map_err(|r| r.why)),
-            Box::new(|ed, r| {
-                ed.step_done("git");
-                match r {
-                    Ok(_) => ed.set_success("Fetched"),
-                    Err(e) => ed.set_error(format!("fetch: {e}")),
-                }
-            }),
-        );
+        self.git_hooked("fetch", hooks::FETCH, |ed, pre| {
+            ed.set_step("git", "fetching…");
+            ed.git_do(
+                Box::new(move |top| {
+                    git_remote(top, &hooks::with(pre, &["fetch", "--all", "--prune"])).map_err(|r| r.why)
+                }),
+                Box::new(|ed, r| {
+                    ed.step_done("git");
+                    match r {
+                        Ok(_) => ed.set_success("Fetched"),
+                        Err(e) => ed.set_error(format!("fetch: {e}")),
+                    }
+                }),
+            );
+        });
     }
 
     /// `z` / `Z` in the git tab — put the changes away (new files too) / take the last ones back.
     pub fn git_stash(&mut self, pop: bool) {
         let args: &'static [&'static str] =
             if pop { &["stash", "pop"] } else { &["stash", "push", "--include-untracked"] };
-        self.git_do(
-            Box::new(move |top| git(top, args, None)),
-            Box::new(move |ed, r| match r {
-                Ok(_) if pop => ed.set_success("Took the stashed changes back"),
-                Ok(out) if out.contains("No local changes") => ed.set_status("nothing to stash"),
-                Ok(_) => ed.set_success("Stashed — Z takes them back"),
-                Err(e) => ed.set_error(format!("stash: {e}")),
-            }),
-        );
+        self.git_hooked("stash", hooks::STASH, move |ed, pre| {
+            ed.git_do(
+                Box::new(move |top| git(top, &hooks::with(pre, args), None)),
+                Box::new(move |ed, r| match r {
+                    Ok(_) if pop => ed.set_success("Took the stashed changes back"),
+                    Ok(out) if out.contains("No local changes") => ed.set_status("nothing to stash"),
+                    Ok(_) => ed.set_success("Stashed — Z takes them back"),
+                    Err(e) => ed.set_error(format!("stash: {e}")),
+                }),
+            );
+        });
     }
 
     /// `?` in the git tab — every key it takes, as a card.
@@ -853,33 +860,37 @@ impl Editor {
                 return;
             };
             let (top, amend, then_end) = (c.top, c.amend, c.then_end);
-            // In the git queue — after a stage still running, never beside another git that writes
-            self.git_do(
-                Box::new(move |top| {
-                    let f = file.to_string_lossy().into_owned();
-                    let mut args = vec!["commit", "--cleanup=strip", "-F", f.as_str()];
-                    if amend {
-                        args.push("--amend");
-                    }
-                    git(top, &args, None).and_then(|_| git(top, &["log", "-1", "--format=%h %s"], None))
-                }),
-                Box::new(move |ed, result| match result {
-                    // Its buffer goes (wherever you are by now — a hook can take a while)
-                    Ok(line) => {
-                        ed.set_success(format!("Committed {}", line.trim()));
-                        ed.close_doc(id);
-                        // (its session asked to end once its changes were in: asked again, now with none)
-                        if then_end && let Err(e) = ed.session_end("") {
-                            ed.set_error(e);
+            let (what, names) = if amend { ("amend", hooks::AMEND) } else { ("commit", hooks::COMMIT) };
+            self.git_hooked(what, names, move |ed, pre| {
+                // In the git queue — after a stage still running, never beside another git that writes
+                ed.git_do(
+                    Box::new(move |top| {
+                        let f = file.to_string_lossy().into_owned();
+                        let mut args = vec!["commit", "--cleanup=strip", "-F", f.as_str()];
+                        if amend {
+                            args.push("--amend");
                         }
-                    }
-                    // An empty message aborts — the buffer stays for another try
-                    Err(e) => {
-                        ed.session.committing = Some(Committing { doc: id, top, amend, then_end });
-                        ed.set_error(format!("commit: {e}"));
-                    }
-                }),
-            );
+                        git(top, &hooks::with(pre, &args), None)
+                            .and_then(|_| git(top, &["log", "-1", "--format=%h %s"], None))
+                    }),
+                    Box::new(move |ed, result| match result {
+                        // Its buffer goes (wherever you are by now — a hook can take a while)
+                        Ok(line) => {
+                            ed.set_success(format!("Committed {}", line.trim()));
+                            ed.close_doc(id);
+                            // (its session asked to end once its changes were in: asked again, now with none)
+                            if then_end && let Err(e) = ed.session_end("") {
+                                ed.set_error(e);
+                            }
+                        }
+                        // An empty message aborts — the buffer stays for another try
+                        Err(e) => {
+                            ed.session.committing = Some(Committing { doc: id, top, amend, then_end });
+                            ed.set_error(format!("commit: {e}"));
+                        }
+                    }),
+                );
+            });
             return;
         }
         if self.session.sidebar.as_ref().is_some_and(|s| s.mode == crate::sidebar::Mode::Git) {
@@ -947,23 +958,28 @@ impl Editor {
             (true, None) => vec!["push".into(), "-u".into(), "origin".into(), "HEAD".into()],
             (false, _) => vec!["pull".into(), "--ff-only".into()],
         };
-        self.set_step("git", if push { "Pushing…" } else { "Pulling…" });
-        let top = st.top.clone();
-        self.events.jobs().spawn(move || {
-            let a: Vec<&str> = args.iter().map(String::as_str).collect();
-            let result = git_remote(&top, &a);
-            move |ed: &mut Editor| {
-                ed.step_done("git");
-                match result {
-                    Ok(_) if push => ed.set_success(format!("Pushed {}", st.branch)),
-                    Ok(out) if out.contains("Already up to date") => ed.set_status("Already up to date"),
-                    Ok(_) => ed.set_success(format!("Pulled into {}", st.branch)),
-                    Err(r) if push && r.diverged() && st.upstream.is_some() => ed.git_force_ask(Some(r.why)),
-                    Err(r) => ed.set_error(format!("{}: {}", if push { "push" } else { "pull" }, r.why)),
+        let (what, names) = if push { ("push", hooks::PUSH) } else { ("pull", hooks::PULL) };
+        self.git_hooked(what, names, move |ed, pre| {
+            ed.set_step("git", if push { "Pushing…" } else { "Pulling…" });
+            let top = st.top.clone();
+            ed.events.jobs().spawn(move || {
+                let a: Vec<&str> = args.iter().map(String::as_str).collect();
+                let result = git_remote(&top, &hooks::with(pre, &a));
+                move |ed: &mut Editor| {
+                    ed.step_done("git");
+                    match result {
+                        Ok(_) if push => ed.set_success(format!("Pushed {}", st.branch)),
+                        Ok(out) if out.contains("Already up to date") => ed.set_status("Already up to date"),
+                        Ok(_) => ed.set_success(format!("Pulled into {}", st.branch)),
+                        Err(r) if push && r.diverged() && st.upstream.is_some() => {
+                            ed.git_force_ask(Some(r.why))
+                        }
+                        Err(r) => ed.set_error(format!("{}: {}", if push { "push" } else { "pull" }, r.why)),
+                    }
+                    ed.git_refresh();
+                    ed.git_reload_bases();
                 }
-                ed.git_refresh();
-                ed.git_reload_bases();
-            }
+            });
         });
     }
 
@@ -1007,57 +1023,61 @@ impl Editor {
     /// moved since — said, nothing replaced.
     pub fn git_force_push(&mut self, id: u64, f: ForcePush) {
         self.offer_finished(id, Ok(()));
-        self.set_step("git", "Pushing…");
-        self.events.jobs().spawn(move || {
-            let args = f.args();
-            let a: Vec<&str> = args.iter().map(String::as_str).collect();
-            let result = git_remote(&f.top, &a);
-            move |ed: &mut Editor| {
-                ed.step_done("git");
-                let (up, n) = (f.upstream(), f.lost.len());
-                match result {
-                    Ok(_) => ed.set_success(format!(
-                        "Pushed {} over {up} — {n} commit{} of it replaced",
-                        f.branch,
-                        if n == 1 { "" } else { "s" }
-                    )),
-                    Err(r) if r.rejected.as_deref() == Some("stale info") => ed.set_error(format!(
-                        "push: {up} moved since the card was shown — nothing replaced; P looks again"
-                    )),
-                    Err(r) => ed.set_error(format!("push: {}", r.why)),
+        self.git_hooked("push", hooks::PUSH, move |ed, pre| {
+            ed.set_step("git", "Pushing…");
+            ed.events.jobs().spawn(move || {
+                let args = f.args();
+                let a: Vec<&str> = args.iter().map(String::as_str).collect();
+                let result = git_remote(&f.top, &hooks::with(pre, &a));
+                move |ed: &mut Editor| {
+                    ed.step_done("git");
+                    let (up, n) = (f.upstream(), f.lost.len());
+                    match result {
+                        Ok(_) => ed.set_success(format!(
+                            "Pushed {} over {up} — {n} commit{} of it replaced",
+                            f.branch,
+                            if n == 1 { "" } else { "s" }
+                        )),
+                        Err(r) if r.rejected.as_deref() == Some("stale info") => ed.set_error(format!(
+                            "push: {up} moved since the card was shown — nothing replaced; P looks again"
+                        )),
+                        Err(r) => ed.set_error(format!("push: {}", r.why)),
+                    }
+                    ed.git_refresh();
+                    ed.git_reload_bases();
                 }
-                ed.git_refresh();
-                ed.git_reload_bases();
-            }
+            });
         });
     }
 
     /// `:git-amend` — what's staged goes into the last commit, its message kept (no buffer). Warned when
     /// that commit is pushed already.
     pub fn git_amend(&mut self) {
-        self.git_queued(
-            |top| {
-                // (`--quiet` exits 1 when something is staged)
-                if git(top, &["diff", "--cached", "--quiet"], None).is_ok() {
-                    return Err(
-                        "nothing staged to add to the last commit — A changes its message".to_string()
-                    );
-                }
-                let was_pushed = pushed(top);
-                git(top, &["commit", "--amend", "--no-edit"], None)?;
-                let line = git(top, &["log", "-1", "--format=%h %s"], None)?;
-                Ok((line.trim().to_string(), was_pushed))
-            },
-            |ed, r| match r {
-                Ok((line, was_pushed)) => {
-                    ed.set_success(format!("Amended {line}"));
-                    if was_pushed {
-                        ed.set_warning(PUSHED_WARNING);
+        self.git_hooked("amend", hooks::AMEND, |ed, pre| {
+            ed.git_queued(
+                move |top| {
+                    // (`--quiet` exits 1 when something is staged)
+                    if git(top, &["diff", "--cached", "--quiet"], None).is_ok() {
+                        return Err(
+                            "nothing staged to add to the last commit — A changes its message".to_string()
+                        );
                     }
-                }
-                Err(e) => ed.set_error(format!("amend: {e}")),
-            },
-        );
+                    let was_pushed = pushed(top);
+                    git(top, &hooks::with(pre, &["commit", "--amend", "--no-edit"]), None)?;
+                    let line = git(top, &["log", "-1", "--format=%h %s"], None)?;
+                    Ok((line.trim().to_string(), was_pushed))
+                },
+                |ed, r| match r {
+                    Ok((line, was_pushed)) => {
+                        ed.set_success(format!("Amended {line}"));
+                        if was_pushed {
+                            ed.set_warning(PUSHED_WARNING);
+                        }
+                    }
+                    Err(e) => ed.set_error(format!("amend: {e}")),
+                },
+            );
+        });
     }
 
     /// `L` in the git tab — the log (500 commits), each commit's diff as the preview; Enter opens it in a buffer.
@@ -1158,23 +1178,28 @@ impl Editor {
     }
 
     /// Branch work on a worker in the folder git runs in, `step` said meanwhile; then `done`, and the status
-    /// and the gutter's bases read again.
+    /// and the gutter's bases read again. The hooks it may run (`names`) asked about first (`hooks.rs`) —
+    /// `work` gets the args to put before its git's own.
     fn git_branch_job<T: Send + 'static>(
         &mut self,
         step: String,
-        work: impl FnOnce(&Path) -> Result<T, String> + Send + 'static,
+        names: &'static [&'static str],
+        work: impl FnOnce(&Path, hooks::Pre) -> Result<T, String> + Send + 'static,
         done: impl FnOnce(&mut Editor, Result<T, String>) + Send + 'static,
     ) {
-        let cwd = self.git_cwd();
-        self.set_step("git", step);
-        self.events.jobs().spawn(move || {
-            let result = top_of(&cwd).and_then(|top| work(&top));
-            move |ed: &mut Editor| {
-                ed.step_done("git");
-                done(ed, result);
-                ed.git_refresh();
-                ed.git_reload_bases();
-            }
+        let what = if names == hooks::SWITCH { "switch" } else { "branch change" };
+        self.git_hooked(what, names, move |ed, pre| {
+            let cwd = ed.git_cwd();
+            ed.set_step("git", step);
+            ed.events.jobs().spawn(move || {
+                let result = top_of(&cwd).and_then(|top| work(&top, pre));
+                move |ed: &mut Editor| {
+                    ed.step_done("git");
+                    done(ed, result);
+                    ed.git_refresh();
+                    ed.git_reload_bases();
+                }
+            });
         });
     }
 
@@ -1184,12 +1209,13 @@ impl Editor {
         let b = branch.clone();
         self.git_branch_job(
             format!("Switching to {branch}…"),
-            move |top| {
+            hooks::SWITCH,
+            move |top, pre| {
                 if b.starts_with('-') {
                     return Err(format!("{b:?} isn't a branch"));
                 }
                 not_held(top, &b, "switch to")?;
-                git(top, &["switch", &b], None)
+                git(top, &hooks::with(pre, &["switch", &b]), None)
             },
             move |ed, r| match r {
                 Ok(_) => ed.set_success(format!("On {branch}")),
@@ -1205,7 +1231,8 @@ impl Editor {
         let n = name.clone();
         self.git_branch_job(
             format!("Making {name}…"),
-            move |top| {
+            hooks::SWITCH,
+            move |top, pre| {
                 let name = branch_name(top, &n)?;
                 let mut args = vec!["switch", "--no-guess", "-c", name.as_str()];
                 if let Some(f) = from.as_deref() {
@@ -1214,7 +1241,7 @@ impl Editor {
                     }
                     args.push(f);
                 }
-                git(top, &args, None).map(|_| name)
+                git(top, &hooks::with(pre, &args), None).map(|_| name)
             },
             move |ed, r| match r {
                 Ok(name) => ed.set_success(format!("On {name}, a new branch")),
@@ -1229,14 +1256,15 @@ impl Editor {
         let (old, new) = (old.map(str::to_string), new.to_string());
         self.git_branch_job(
             format!("Renaming to {new}…"),
-            move |top| {
+            hooks::REFS,
+            move |top, pre| {
                 let old = match old {
                     Some(o) => o,
                     None => current_branch(top).ok_or("not on a branch — name the one to rename")?,
                 };
                 let new = branch_name(top, &new)?;
                 not_held(top, &old, "rename")?;
-                git(top, &["branch", "-m", "--", &old, &new], None)?;
+                git(top, &hooks::with(pre, &["branch", "-m", "--", &old, &new]), None)?;
                 let up = git(
                     top,
                     &["for-each-ref", "--format=%(upstream:short)", &format!("refs/heads/{new}")],
@@ -1264,7 +1292,8 @@ impl Editor {
         let n = name.clone();
         self.git_branch_job(
             format!("Deleting {name}…"),
-            move |top| {
+            hooks::REFS,
+            move |top, pre| {
                 if current_branch(top).as_deref() == Some(n.as_str()) {
                     return Err(format!("you're on {n} — switch to another branch first"));
                 }
@@ -1277,7 +1306,7 @@ impl Editor {
                 if !lost.is_empty() {
                     return Ok((top.to_path_buf(), Deleting::Ask { tip, lost }));
                 }
-                git(top, &["branch", "-D", "--", &n], None)?;
+                git(top, &hooks::with(pre, &["branch", "-D", "--", &n]), None)?;
                 Ok((top.to_path_buf(), Deleting::Done(tip)))
             },
             move |ed, r| match r {
@@ -1318,29 +1347,32 @@ impl Editor {
     /// `y` on the delete card: deleted, if it's still where the card saw it.
     pub fn git_branch_delete_answer(&mut self, id: u64, top: PathBuf, branch: String, tip: String) {
         self.offer_finished(id, Ok(()));
-        self.set_step("git", format!("Deleting {branch}…"));
-        self.events.jobs().spawn(move || {
-            let result = (|| {
-                not_held(&top, &branch, "delete")?;
-                let now = git(&top, &["rev-parse", "--verify", "-q", &format!("refs/heads/{branch}")], None)
-                    .map_err(|_| format!("there's no branch {branch} any more"))?;
-                if now.trim() != tip {
-                    return Err(format!("{branch} moved since the card was shown — nothing deleted"));
+        self.git_hooked("branch change", hooks::REFS, move |ed, pre| {
+            ed.set_step("git", format!("Deleting {branch}…"));
+            ed.events.jobs().spawn(move || {
+                let result = (|| {
+                    not_held(&top, &branch, "delete")?;
+                    let now =
+                        git(&top, &["rev-parse", "--verify", "-q", &format!("refs/heads/{branch}")], None)
+                            .map_err(|_| format!("there's no branch {branch} any more"))?;
+                    if now.trim() != tip {
+                        return Err(format!("{branch} moved since the card was shown — nothing deleted"));
+                    }
+                    git(&top, &hooks::with(pre, &["branch", "-D", "--", &branch]), None)
+                })();
+                move |ed: &mut Editor| {
+                    ed.step_done("git");
+                    match result {
+                        Ok(_) => ed.set_success(format!(
+                            "Deleted {branch} — `git branch {branch} {}` brings it back",
+                            &tip[..7]
+                        )),
+                        Err(e) => ed.set_error(format!("delete: {e}")),
+                    }
+                    ed.git_refresh();
+                    ed.git_reload_bases();
                 }
-                git(&top, &["branch", "-D", "--", &branch], None)
-            })();
-            move |ed: &mut Editor| {
-                ed.step_done("git");
-                match result {
-                    Ok(_) => ed.set_success(format!(
-                        "Deleted {branch} — `git branch {branch} {}` brings it back",
-                        &tip[..7]
-                    )),
-                    Err(e) => ed.set_error(format!("delete: {e}")),
-                }
-                ed.git_refresh();
-                ed.git_reload_bases();
-            }
+            });
         });
     }
 }

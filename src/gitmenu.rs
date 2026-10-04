@@ -223,6 +223,17 @@ pub fn blame_text(b: &Blame, now: i64) -> String {
     format!("{}, {} · {}", b.author, ago(now - b.time), b.summary)
 }
 
+/// git's hooks turned off — for what tarae itself runs in a checkout, outside the sandbox (session making,
+/// ending and bringing, a review's fetch, the rebase — `rebase::GIT`): a `core.hooksPath` inside a checkout
+/// is a folder Claude can write (review, 2026-10-04). The user's own git-tab actions keep their hooks.
+pub(crate) const NO_HOOKS: [&str; 2] = ["-c", "core.hooksPath=/dev/null"];
+
+/// `git` with `NO_HOOKS`.
+pub(crate) fn git_no_hooks(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let all: Vec<&str> = NO_HOOKS.iter().chain(args).copied().collect();
+    git(dir, &all, None)
+}
+
 pub(crate) fn git(dir: &Path, args: &[&str], input: Option<&str>) -> Result<String, String> {
     #[cfg(test)]
     not_in_this_repository(dir, args);

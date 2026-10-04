@@ -288,6 +288,7 @@ impl Editor {
     /// the first time in a project, a card says what will run, and that it runs the project's code.
     pub(crate) fn preflight_found(&mut self, root: std::path::PathBuf, packs: Vec<Step>, local: Vec<Step>) {
         if packs.is_empty() && local.is_empty() {
+            self.session.bring_after_preflight = false;
             return self.set_error(
                 "no preflight steps — no language pack knows this kind of project; add [preflight] steps = \
                  [{ name = \"…\", cmd = \"…\" }, …] to .tarae.toml",
@@ -310,6 +311,7 @@ impl Editor {
             return self.push_offer(o);
         }
         if let Err(e) = self.preflight_run(steps) {
+            self.session.bring_after_preflight = false;
             self.set_error(e);
         }
     }
@@ -324,6 +326,7 @@ impl Editor {
     ) {
         self.offer_finished(id, Ok(()));
         if !yes {
+            self.session.bring_after_preflight = false;
             return self.set_status("preflight not run");
         }
         self.preflight_told.insert(root);
@@ -371,6 +374,7 @@ impl Editor {
         } else {
             self.set_error(format!("preflight: {summary}{tail}"));
         }
+        self.rebase_preflight_done(passed);
         true
     }
 

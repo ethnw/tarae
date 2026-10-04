@@ -229,7 +229,9 @@ impl Editor {
         }
     }
 
-    /// The buffers of files under `dir` (a checkout whose HEAD moved) take the index as it is now.
+    /// The buffers of files under `dir` (a checkout whose HEAD moved) take the index as it is now — and the
+    /// blame of the one in view is asked again (it's kept per text version, which a commit doesn't change: a
+    /// rebased line said "not committed yet" — a shot, 2026-10-04).
     pub fn git_reload_bases_in(&mut self, dir: &Path) {
         let ids: Vec<_> = self
             .docs
@@ -237,6 +239,9 @@ impl Editor {
             .filter(|d| d.path.as_deref().is_some_and(|p| p.starts_with(dir)))
             .map(|d| d.id)
             .collect();
+        if self.blame.of.is_some_and(|(id, _)| ids.contains(&id)) {
+            self.blame.of = None;
+        }
         for id in ids {
             self.git_load_base(id);
         }

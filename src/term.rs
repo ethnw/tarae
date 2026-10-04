@@ -866,6 +866,7 @@ fn badge_glyph(b: crate::chrome::Badge, editor: &Editor, ui: &Ui) -> Option<(Str
         Badge::Passed => ("●".into(), color("diff.plus")),
         Badge::Failed => ("▲".into(), ui.error.fg),
         Badge::Warning => ("▲".into(), color("warning")),
+        Badge::Stopped => ("◦".into(), color("warning")),
     })
 }
 
@@ -1303,6 +1304,7 @@ fn draw_task_panel(
         State::Passed if r.found == (0, 0) => vec![("ok".into(), Style { fg: good, ..card })],
         State::Passed => vec![("warnings".into(), Style { fg: warn, ..card })],
         State::Failed(_) => vec![("failed".into(), Style { fg: bad, ..card })],
+        State::Stopped(ref why) => vec![(format!("stopped: {why}"), Style { fg: warn, ..card })],
     };
     for (n, g, c) in [(r.found.0, "●", bad), (r.found.1, "▲", warn)] {
         if n > 0 {
@@ -1326,10 +1328,10 @@ fn draw_task_panel(
     let running = matches!(r.state, State::Running);
     let waving = running && steps.is_none();
     summary.push((when, if waving { Style { fg: ui.accent.fg, ..card } } else { dim }));
-    // (`space m m` runs the user's task again — not an install, not Claude's command)
+    // (`space m m` runs the user's task again — not an install, not Claude's command, not tarae's git)
     let mut hints: Vec<(&str, &str)> = match (&r.state, r.found) {
         (State::Running, _) => vec![("space m c", "stop")],
-        _ if r.install => vec![("space m c", "close")],
+        _ if r.install || r.git => vec![("space m c", "close")],
         (_, (0, 0)) => vec![("space m m", "again"), ("space m c", "close")],
         _ => vec![("]q", "next"), ("space q", "list"), ("space m m", "again"), ("space m c", "close")],
     };
@@ -5499,6 +5501,12 @@ fn draw_statusline(
             style: accent,
             keep: CHIP,
         });
+        // (its rebase under way — in the warning color once it waits for you)
+        if let Some(r) = editor.session.rebase.as_ref() {
+            let style =
+                if r.stopped() { ui.status.patch(warn) } else { Style { fg: ui.virt.fg, ..ui.status } };
+            left.push(Seg { text: format!(" {}", r.said()), style, keep: CHIP });
+        }
         match editor.sessions_waiting() {
             0 => {}
             n => left.push(Seg { text: format!(" ▲{n}"), style: ui.status.patch(warn), keep: CHIP }),
@@ -6327,6 +6335,21 @@ impl OfferCard {
                         b = vec![('y', "Once"), ('a', "This chat"), ('n', "No")]
                     }
                     crate::offer::What::ReviewEnd => b = vec![('y', "End it"), ('n', "Keep reviewing")],
+                    crate::offer::What::Rebase(_) => b = vec![('y', "Rebase first"), ('n', "Leave it")],
+                    crate::offer::What::Rebased(_) => {
+                        b = vec![('y', "Bring"), ('p', "Preflight, then bring"), ('n', "Not now")]
+                    }
+                    // (abort throws the resolution away: a capital, as removing does)
+                    crate::offer::What::RebaseResolved { .. } => {
+                        b = vec![('y', "Continue"), ('X', "Abort"), ('n', "Not now")]
+                    }
+                    crate::offer::What::Hooks(ref a) if a.runnable() => {
+                        b = vec![
+                            ('y', if a.hooks.len() == 1 { "Run it" } else { "Run them" }),
+                            ('n', "Skip hooks"),
+                        ]
+                    }
+                    crate::offer::What::Hooks(_) => b = vec![('n', "Skip hooks")],
                     crate::offer::What::ChangeSet { .. } => {
                         b = vec![
                             ('y', "Accept all"),
@@ -7853,6 +7876,12 @@ fn session_tabs(
         d @ Doing::Stuck { .. } => Some(Span { text: format!(" ◦ {}", d.said()), style: warn }),
         Doing::Idle => None,
     };
+    // A rebase under way there: `rebasing 2/5` — in the warning color once it waits for you
+    let rebasing = |l: &crate::session::Session| {
+        l.rebase
+            .as_ref()
+            .map(|r| Span { text: format!(" {}", r.said()), style: if r.stopped() { warn } else { dim } })
+    };
     let (mut spans, mut spots, mut x) = (Vec::new(), Vec::new(), 0);
     let mut put = |spans: &mut Vec<Span>, text: String, style: Style| {
         x += text.width();
@@ -7865,6 +7894,9 @@ fn session_tabs(
             put(&mut spans, l.label().to_string(), if l.id == editor.session.id { strong } else { dim });
         if let Some(m) = mark(l) {
             end = put(&mut spans, m.text, m.style);
+        }
+        if let Some(r) = rebasing(l) {
+            end = put(&mut spans, r.text, r.style);
         }
         spots.push((start, end, Spot::Session(l.id)));
     }
@@ -7884,11 +7916,14 @@ fn session_tabs(
         (n, k) => format!(" ▲{n} ◦{k}"),
     };
     let mark = mark(&editor.session);
-    let fixed = 2 + mark.as_ref().map_or(0, |m| m.text.width()) + 2 + count.width() + waiting.width() + 2;
+    let rebasing = rebasing(&editor.session);
+    let marks_w = [&mark, &rebasing].iter().filter_map(|m| m.as_ref()).map(|m| m.text.width()).sum::<usize>();
+    let fixed = 2 + marks_w + 2 + count.width() + waiting.width() + 2;
     let name = fit_ellipsis(editor.session.label(), w.saturating_sub(fixed).max(1));
     // (the arrows dim, not faint — they're what a click steps with)
     let mut spans = vec![Span { text: "◂ ".into(), style: dim }, Span { text: name, style: strong }];
     spans.extend(mark);
+    spans.extend(rebasing);
     spans.push(Span { text: " ▾".into(), style: dim });
     spans.push(Span { text: count, style: faint });
     if !waiting.is_empty() {

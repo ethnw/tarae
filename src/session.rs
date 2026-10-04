@@ -100,6 +100,10 @@ pub struct Session {
     pub blocked: Option<(crate::blocked::BlockedRun, Vec<crate::blocked::Choice>)>,
     /// `:preflight` under way, or the last one while its run is in the task panel (`preflight.rs`).
     pub preflight: Option<crate::preflight::Preflight>,
+    /// Its checkout's rebase onto its base, under way (`rebase.rs`) · its bring waits for the preflight to
+    /// pass (the bring card's `p`).
+    pub rebase: Option<crate::rebase::Rebase>,
+    pub bring_after_preflight: bool,
     /// The files last open in this folder that are still there — the start screen's `r` (`restore.rs`).
     pub restorable: Option<Vec<PathBuf>>,
     /// Cards that came while it was behind, and Claude's that were up when it left — up again when it's in
@@ -199,6 +203,8 @@ impl Session {
             changed_files: Vec::new(),
             blocked: None,
             preflight: None,
+            rebase: None,
+            bring_after_preflight: false,
             restorable: None,
             parked: Vec::new(),
             waiting_told: false,
@@ -888,6 +894,7 @@ mod tests {
             doing,
             front: false,
             usage: None,
+            rebasing: None,
         };
         let row = &crate::worktree::items(&[shown(doing)])[0];
         assert!(row.hint.contains("stuck? symbols 42s"), "{}", row.hint);

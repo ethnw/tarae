@@ -528,4 +528,6 @@ Type `:` in normal mode. `Tab` completes command names and their arguments (path
 | `:session-switch` |  | Bring another session to the front |
 | `:session-new` |  | New session: a branch in its own checkout |
 | `:session-end` |  | End a session (its checkout goes) |
-| `:session-bring` |  | Move a session's base up to it (fast-forward) |
+| `:session-bring` |  | Move a session's base up to it (rebase first if it moved) |
+| `:rebase-continue` |  | Stage the resolved files and go on with the rebase |
+| `:rebase-abort` |  | Abort the rebase: back to where it was |

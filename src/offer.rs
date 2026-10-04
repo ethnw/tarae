@@ -102,6 +102,18 @@ pub enum What {
     ChangeSet { generation: u64 },
     /// Ending a code review with files not viewed (`codereview.rs`, #10): `y` ends it, `n` keeps reviewing.
     ReviewEnd,
+    /// Bringing a session whose base moved since it left it (`rebase.rs`): `y` rebases it onto its base
+    /// first, `n` leaves it.
+    Rebase(Box<crate::rebase::Moved>),
+    /// A session rebased cleanly (`rebase.rs`): `y` brings it into its base, `p` runs the preflight first and
+    /// brings it once that passes, `n` not now.
+    Rebased(Box<crate::rebase::Moved>),
+    /// A rebase stopped at a conflict its Claude resolved (`rebase.rs`): `y` stages the files and goes on,
+    /// `X` aborts the rebase, `n` leaves it stopped.
+    RebaseResolved { root: PathBuf },
+    /// A git-tab action would run hooks from inside the checkout that its base doesn't have as they are
+    /// (`hooks.rs`): `y` runs it as usual, `n` runs it with no hooks this time.
+    Hooks(Box<crate::hooks::Ask>),
 }
 
 /// A card's text, as `offer_read` knows it: its title and question.
@@ -188,7 +200,29 @@ impl Offer {
                 | What::SessionNew(_)
                 | What::SessionEnd(_)
                 | What::ChangeSet { .. }
+                | What::Rebase(_)
+                | What::Rebased(_)
+                | What::RebaseResolved { .. }
+                | What::Hooks(_)
         )
+    }
+
+    /// Whether `p` answers it: the bring card after a rebase (the preflight, then the bring).
+    pub fn preflights(&self) -> bool {
+        matches!(self.what, What::Rebased(_))
+    }
+
+    /// Whether `X` answers it: a resolved rebase's card (aborts the rebase).
+    pub fn aborts(&self) -> bool {
+        matches!(self.what, What::RebaseResolved { .. })
+    }
+
+    /// Whether `key` is one of its answers that only a settled card in sight takes (`y`, and the letters
+    /// that do something too).
+    pub fn weighty_answer(&self, c: char) -> bool {
+        matches!(c, 'y' | 'a' | 'A' | 'D' | 'R' | 'c')
+            || (c == 'p' && self.preflights())
+            || (c == 'X' && self.aborts())
     }
 
     /// The `(generation)` of a change set's card (`r` one by one, `v` every change).
@@ -318,7 +352,7 @@ impl crate::editor::Editor {
                 return false;
             }
             if !self.offer_settled()
-                && matches!(key.code, Code::Char('y' | 'n' | 'N' | 'a' | 'A' | 'D' | 'R' | 'c'))
+                && matches!(key.code, Code::Char(c) if matches!(c, 'n' | 'N') || o.weighty_answer(c))
             {
                 return true;
             }
@@ -345,7 +379,7 @@ impl crate::editor::Editor {
                         self.offer_view_all();
                         return true;
                     }
-                    Code::Char('y' | 'a' | 'A' | 'D' | 'R' | 'c') => {
+                    Code::Char(c) if o.weighty_answer(c) => {
                         self.offer_see_all_first();
                         return true;
                     }
@@ -364,6 +398,8 @@ impl crate::editor::Editor {
             Code::Char('a') if o.lasts() => self.offer_for_chat(),
             Code::Char('A') if o.keeps() => self.offer_always(),
             Code::Char('D') if o.both() => self.offer_remove(true),
+            Code::Char('p') if o.preflights() => self.offer_preflight_first(),
+            Code::Char('X') if o.aborts() => self.offer_abort(),
             // An answer letter this card doesn't take isn't the code's either (`a`/`A` there start inserting —
             // and the `y` after it was typed)
             Code::Char('a' | 'A') if o.lasts() => self.set_status("this card asks y, a or n"),
@@ -384,6 +420,10 @@ impl crate::editor::Editor {
                 true => "its changes are in no commit — c commits them first, R removes them anyway",
                 false => "its changes are in no commit — R removes them anyway, n keeps them",
             });
+        }
+        // (a hook the card couldn't show isn't run on a yes)
+        if matches!(&self.offers[0].what, What::Hooks(a) if !a.runnable()) {
+            return self.set_status("a hook here can't be shown — n goes on without hooks");
         }
         let mut o = self.offers.remove(0);
         o.state = OfferState::Installing(Instant::now());
@@ -434,6 +474,36 @@ impl crate::editor::Editor {
                 self.offer_finished(id, Ok(()));
                 crate::codereview::close(self);
             }
+            What::Rebase(m) => self.rebase_start(id, *m),
+            What::Rebased(m) => {
+                self.offer_finished(id, Ok(()));
+                self.rebase_bring(*m);
+            }
+            What::RebaseResolved { root } => {
+                self.offer_finished(id, Ok(()));
+                self.rebase_answer(&root, true);
+            }
+            What::Hooks(ask) => self.hooks_answer(id, *ask, true),
+        }
+    }
+
+    /// `p` on the bring card after a rebase: the preflight first, the bring once it passes.
+    pub fn offer_preflight_first(&mut self) {
+        if !self.offers.first().is_some_and(Offer::preflights) {
+            return;
+        }
+        if let What::Rebased(m) = self.offers.remove(0).what {
+            self.rebase_preflight_then_bring(*m);
+        }
+    }
+
+    /// `X` on a resolved rebase's card: the rebase aborted.
+    pub fn offer_abort(&mut self) {
+        if !self.offers.first().is_some_and(Offer::aborts) {
+            return;
+        }
+        if let What::RebaseResolved { root } = self.offers.remove(0).what {
+            self.rebase_answer(&root, false);
         }
     }
 
@@ -679,6 +749,16 @@ impl crate::editor::Editor {
             }
             What::ChangeSet { generation } => crate::refactor::decline_all(self, generation),
             What::ReviewEnd => self.set_status("still reviewing — space v m marks a file viewed"),
+            What::Rebase(m) => {
+                self.set_status(format!("Not rebased — {} as it is, nothing brought", m.branch))
+            }
+            What::Rebased(m) => {
+                self.set_status(format!("Not brought — :session-bring {} when you're ready", m.name))
+            }
+            What::RebaseResolved { .. } => {
+                self.set_status("the rebase waits — :rebase-continue goes on, :rebase-abort ends it")
+            }
+            What::Hooks(ask) => self.hooks_answer(o.id, *ask, false),
         }
     }
 

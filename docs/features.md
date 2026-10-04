@@ -226,7 +226,11 @@ configs carry over as they are.
   `P` pushes (setting the upstream the first time), `f` fetches — none ever waits on a password prompt. `B`
   switches branch, `L` is the log (each commit's diff as the preview), `z` stashes, `Z` takes it back, `b` flips
   blame, `?` lists every key. From the code, `space g` lands on the row for what's under the cursor, and the next
-  key acts there: `space g s` stages the hunk you're in, `space g t` keeps theirs — then the code has the keys again
+  key acts there: `space g s` stages the hunk you're in, `space g t` keeps theirs — then the code has the keys again.
+  When the repository's hooks folder (`core.hooksPath`) is inside the checkout — a folder Claude can write — a
+  file there that's new, changed or untracked is shown on a card before any commit, push, pull, switch or other
+  git-tab action (the hooks it's likely to run are marked): `y` runs them, `n` goes on without hooks this time.
+  Hooks committed as the base has them run as always
 - **Merge conflicts** — a file a merge or rebase left `<<<<<<<` / `=======` / `>>>>>>>` blocks in shows ours on the
   green wash and theirs on the amber one (a diff3 base faint), and a card under the conflict at the cursor names both
   sides as git labeled them: `space g o` keeps ours, `space g t` theirs, `space g a` both (one undo step each); `]m` /

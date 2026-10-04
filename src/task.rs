@@ -152,6 +152,9 @@ pub enum State {
     Running,
     Passed,
     Failed(Option<i32>),
+    /// Ended part-way on purpose, waiting for the user — a rebase at its conflicts (`rebase.rs`): what it
+    /// waits on (`2 conflicts`).
+    Stopped(String),
 }
 
 /// Places a run keeps, at most.
@@ -186,6 +189,8 @@ pub struct Run {
     after: Option<After>,
     /// An install run (not one `space m m` runs again).
     pub install: bool,
+    /// tarae's own git run (`rebase.rs`) — not one `space m m` runs again either.
+    pub git: bool,
     /// Claude's `run` waiting for this run's end (`tools.rs`).
     pub chat: Option<crate::tools::Call>,
     /// The user ran Claude's command again (`blocked.rs`): how it ended goes to Claude with the next message,
@@ -303,6 +308,7 @@ impl Run {
             feeds: true,
             after: None,
             install: false,
+            git: false,
             chat: None,
             tell: None,
             by_claude: false,
@@ -389,6 +395,7 @@ impl Editor {
         }
         crate::tools::run_dropped(self, "the user stopped it");
         crate::restart::run_dropped(self);
+        crate::rebase::run_dropped(self);
         self.session.task_run = None;
     }
 
@@ -459,6 +466,16 @@ impl Editor {
         (self.task_generation != before).then_some(self.task_generation)
     }
 
+    /// tarae's own git run (`rebase.rs`): not the task `space m m` runs again, and its output's places stay
+    /// out of the list. Its generation; None if it didn't start.
+    pub(crate) fn task_start_git(&mut self, task: Task) -> Option<u64> {
+        let before = self.task_generation;
+        self.task_spawn(task, None, None, false, false);
+        let r = self.session.task_run.as_mut().filter(|_| self.task_generation != before)?;
+        r.git = true;
+        Some(self.task_generation)
+    }
+
     /// An install (`install.rs`) in the task panel: not the task `space m m` runs again, and its output's
     /// places stay out of the list.
     pub(crate) fn task_start_install(&mut self, task: Task, after: After) {
@@ -505,6 +522,7 @@ impl Editor {
         }
         crate::tools::run_dropped(self, "another task took its place");
         crate::restart::run_dropped(self);
+        crate::rebase::run_dropped(self);
         self.task_generation += 1;
         let generation = self.task_generation;
         let pid = child.id();
@@ -517,7 +535,8 @@ impl Editor {
                 let lines: Vec<(String, Option<Item>)> = lines
                     .iter()
                     .map(|l| {
-                        let line = crate::testing::strip_ansi(l);
+                        // (as shown first: `strip_ansi` drops the carriage returns)
+                        let line = crate::testing::strip_ansi(as_shown(l));
                         let found = matcher.line(&cwd, &line);
                         (line, found)
                     })
@@ -600,7 +619,10 @@ impl Editor {
                     code => State::Failed(code),
                 };
                 let (passed, errors) = (r.state == State::Passed, r.found.0);
-                if crate::restart::built(ed, generation, passed, errors) || ed.preflight_done(generation) {
+                if crate::restart::built(ed, generation, passed, errors)
+                    || ed.preflight_done(generation)
+                    || crate::rebase::ran(ed, generation)
+                {
                     return;
                 }
                 let Some(r) = ed.session.task_run.as_mut() else { return };
@@ -645,6 +667,7 @@ impl Editor {
             feeds,
             after,
             install,
+            git: false,
             chat: None,
             tell: None,
             by_claude: false,
@@ -656,6 +679,14 @@ impl Editor {
             cut: None,
         });
     }
+}
+
+/// A line as a terminal leaves it: what comes after its last carriage return — progress redrawn in place
+/// read as one line glued to what followed (`Rebasing (2/2)Successfully rebased…` — a shot, 2026-10-04). A
+/// CRLF line's own `\r` isn't one.
+fn as_shown(line: &str) -> &str {
+    let line = line.trim_end_matches('\r');
+    line.rsplit('\r').next().unwrap_or(line)
 }
 
 /// The lines of a program's output, a batch at a time to `send` (false: stop): what has come by the time
@@ -692,6 +723,29 @@ pub fn read_batches(
 mod tests {
     use super::*;
     use std::process::Command;
+
+    /// Progress redrawn in place shows as a terminal leaves it: the text after the last carriage return.
+    #[test]
+    fn a_line_redrawn_in_place_shows_its_last_state() {
+        assert_eq!(as_shown("Rebasing (2/2)\rSuccessfully rebased"), "Successfully rebased");
+        assert_eq!(as_shown(" 10%\r 50%\r100%"), "100%");
+        assert_eq!(as_shown("plain\r"), "plain", "a CRLF line's own end");
+        assert_eq!(as_shown("plain"), "plain");
+        // Through a run, colours and all (`strip_ansi` drops carriage returns — it came first once)
+        let mut ed = Editor::new(crate::config::Config::default());
+        let cmd = r"printf 'Rebasing (2/2)\r\033[1mSuccessfully\033[0m rebased\n'".to_string();
+        ed.task_start(Task { name: "redrawn".into(), cmd, cwd: std::env::temp_dir() });
+        let end = Instant::now() + Duration::from_secs(10);
+        while ed.session.task_run.as_ref().is_some_and(|r| r.state == State::Running) {
+            assert!(Instant::now() < end, "the run ended");
+            if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
+        let out: Vec<&str> =
+            ed.session.task_run.as_ref().unwrap().output.iter().map(|l| l.1.as_str()).collect();
+        assert_eq!(out, ["Successfully rebased"]);
+    }
 
     /// Every line arrives, in batches, without its line end — CR LF, bytes that aren't UTF-8, a last line
     /// without a newline — and a thousand lines are a handful of batches, not a thousand.

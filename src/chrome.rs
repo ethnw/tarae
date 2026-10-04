@@ -174,7 +174,7 @@ impl Editor {
 // ── The bottom slot's tabs ───────────────────────────────────────────────
 
 /// How a tab's panel is doing: under way (the wave), done well (`●`), failed (`▲` in the error colour),
-/// wants a look (`▲` in the warning colour).
+/// wants a look (`▲` in the warning colour), stopped part-way for you (`◦` in the warning colour).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Badge {
     None,
@@ -182,6 +182,7 @@ pub enum Badge {
     Passed,
     Failed,
     Warning,
+    Stopped,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -235,6 +236,7 @@ impl Editor {
                             crate::task::State::Passed if r.found == (0, 0) => Badge::Passed,
                             crate::task::State::Passed => Badge::Warning,
                             crate::task::State::Failed(_) => Badge::Failed,
+                            crate::task::State::Stopped(_) => Badge::Stopped,
                         };
                         (r.task.name.clone(), badge)
                     }

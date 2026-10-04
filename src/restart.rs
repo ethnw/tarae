@@ -108,6 +108,13 @@ fn blocker(ed: &Editor, in_turn: bool) -> Option<String> {
     if !stuck.is_empty() {
         return Some(format!("unsaved changes in {} — save or close them first", stuck.join(", ")));
     }
+    // A session's rebase under way: tarae's part of it (the review, the card, Claude's ask) wouldn't come back
+    let rebasing = std::iter::once(&ed.session)
+        .chain(&ed.sessions)
+        .find_map(|l| Some(l.rebase.as_ref()?.why(l.label())));
+    if rebasing.is_some() {
+        return rebasing;
+    }
     let claudes = |yes: bool| in_turn && yes;
     if ed.session.review.is_some()
         && !claudes(ed.session.chat.as_ref().is_some_and(|c| c.edits.review.is_some()))

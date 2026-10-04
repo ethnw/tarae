@@ -838,6 +838,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             });
             crate::notes::turn_done(ed, answer.flatten());
             crate::restart::turn_over(ed);
+            crate::rebase::turn_over(ed);
             // (whatever the turn changed on disk, the git tab shows it — #29)
             ed.git_tab_follow();
             send_queued(ed);
