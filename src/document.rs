@@ -499,9 +499,10 @@ impl Document {
             .or_else(|| self.path.as_deref().and_then(crate::syntax::detect).map(|s| s.name.as_str()))
     }
 
-    pub fn display_name(&self) -> String {
+    /// Its path relative to `root` (the editor's), else its title.
+    pub fn display_name(&self, root: &Path) -> String {
         match &self.path {
-            Some(p) => p.strip_prefix(crate::editor::cwd()).unwrap_or(p).display().to_string(),
+            Some(p) => p.strip_prefix(root).unwrap_or(p).display().to_string(),
             None => self.title.clone().unwrap_or_else(|| "[scratch]".to_string()),
         }
     }
@@ -675,7 +676,9 @@ mod tests {
         assert_eq!(doc.text.len_bytes(), 0);
         assert!(doc.disk.is_none() && !doc.is_modified());
         assert_eq!(doc.display_name_short(), "new.txt");
-        assert_eq!(Document::from_str(1, "").display_name(), "[scratch]");
+        assert_eq!(Document::from_str(1, "").display_name(&dir), "[scratch]");
+        assert_eq!(doc.display_name(&dir), "new.txt", "relative to the root");
+        assert_eq!(doc.display_name(Path::new("/elsewhere")), dir.join("new.txt").display().to_string());
     }
 
     #[test]

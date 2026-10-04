@@ -196,11 +196,9 @@ pub struct Committing {
 }
 
 impl Editor {
-    /// Where git runs: the side panel's folder, else where tarae started.
+    /// Where git runs: the side panel's folder, else the editor's root.
     fn git_cwd(&self) -> PathBuf {
-        self.sidebar
-            .as_ref()
-            .map_or_else(|| std::env::current_dir().unwrap_or_default(), |s| s.root().to_path_buf())
+        self.sidebar.as_ref().map_or_else(|| self.root.clone(), |s| s.root().to_path_buf())
     }
 
     /// `space g` — the side panel's git tab, with the keys; from the code, on the row for what's under the

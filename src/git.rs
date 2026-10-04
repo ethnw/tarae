@@ -43,10 +43,10 @@ pub fn read_branch(head: &Path) -> Option<String> {
     parse_head(&std::fs::read_to_string(head).ok()?)
 }
 
-/// Watcher thread — reads once at first, then whenever HEAD changes.
-pub fn watch(tx: Sender<Event>) {
+/// Watcher thread for `dir`'s repository — reads once at first, then whenever HEAD changes.
+pub fn watch(tx: Sender<Event>, dir: PathBuf) {
     thread::spawn(move || {
-        let Some(head) = std::env::current_dir().ok().and_then(|d| find_head(&d)) else { return };
+        let Some(head) = find_head(&dir) else { return };
         let stamp = || std::fs::metadata(&head).and_then(|m| m.modified()).ok();
         let (mut last, mut first) = (None, true);
         loop {

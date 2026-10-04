@@ -176,7 +176,7 @@ impl Editor {
     /// they match the documents').
     pub fn qlist_from_picker(&mut self) -> bool {
         let Some(p) = self.picker.as_ref() else { return false };
-        let root = std::env::current_dir().unwrap_or_default();
+        let root = &self.root;
         let items: Vec<Item> = p
             .shown()
             .filter_map(|i| {
@@ -186,7 +186,7 @@ impl Editor {
                     _ => return None,
                 };
                 // What the row says past its path (`src/a.rs:12: text` → `12: text` → `text`)
-                let rel = path.strip_prefix(&root).unwrap_or(&path).to_string_lossy().into_owned();
+                let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().into_owned();
                 let rest = i.label.strip_prefix(rel.as_str()).unwrap_or(&i.label);
                 let message =
                     rest.trim_start_matches(':').trim_start_matches(|c: char| c.is_ascii_digit() || c == ':');

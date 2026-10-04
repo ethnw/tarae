@@ -217,7 +217,7 @@ pub fn step(ed: &mut Editor, undo: bool) -> Result<(), String> {
             if undo { (Some(&f.after), f.before.as_ref()) } else { (f.before.as_ref(), Some(&f.after)) };
         match file(ed, &f.path, from, to) {
             Ok((true, k)) => {
-                changed.push(crate::chat::shown(&f.path));
+                changed.push(crate::chat::shown(&ed.root, &f.path));
                 kept += k;
             }
             Ok((false, k)) => kept += k,
@@ -274,7 +274,7 @@ fn file(
     from: Option<&Rope>,
     to: Option<&Rope>,
 ) -> Result<(bool, usize), String> {
-    let shown = crate::chat::shown(path);
+    let shown = crate::chat::shown(&ed.root, path);
     let open = ed.docs.iter().any(|d| d.path.as_deref() == Some(path));
     if !open && !path.exists() && from.is_some() {
         return Err(format!("{shown} is gone"));
@@ -436,7 +436,7 @@ fn keep_then(ed: &mut Editor, then: impl FnOnce(&mut Editor) + Send + 'static) {
 /// Writing the turns as they are now (for a worker) — None when they aren't kept.
 fn saving(ed: &Editor) -> Option<impl FnOnce() + Send + 'static> {
     let dir = ed.checkpoints.dir.clone()?;
-    let root = std::env::current_dir().unwrap_or_default();
+    let root = ed.root.clone();
     let list = &ed.checkpoints.list;
     let question = ed
         .chat
@@ -458,7 +458,7 @@ fn saving(ed: &Editor) -> Option<impl FnOnce() + Send + 'static> {
 pub fn restore(ed: &mut Editor) {
     // (nothing is kept until they're back — a save before would write over them)
     let Some(dir) = ed.checkpoints.dir.take() else { return };
-    let root = std::env::current_dir().unwrap_or_default();
+    let root = ed.root.clone();
     ed.events.jobs().spawn(move || {
         let back = dir.clone();
         let mut s = load(&dir, &root);

@@ -435,7 +435,7 @@ impl Editor {
         self.terminal_early = Default::default();
         let generation = self.terminal_generation;
         self.terminal_starting = true;
-        let cwd = std::env::current_dir().unwrap_or_default();
+        let cwd = self.root.clone();
         let events = self.events.sender();
         self.events.jobs().spawn(move || {
             let result = spawn(&argv, &cwd, &env, rows, cols, events, generation);

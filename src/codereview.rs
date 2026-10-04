@@ -237,7 +237,7 @@ fn diff_text(root: &Path, rev: &str) -> String {
 
 /// `space v v` / `:review [branch]`: the changes against HEAD, or since `branch` (fetched first if remote).
 pub fn start(ed: &mut Editor, branch: Option<String>) {
-    start_in(ed, std::env::current_dir().unwrap_or_default(), branch);
+    start_in(ed, ed.root.clone(), branch);
 }
 
 /// `start` for the repository around `cwd`.
@@ -297,10 +297,7 @@ pub fn start_turn(ed: &mut Editor, at: usize) {
     let base = Base::Turn { at, question: cp.question.clone() };
     let files: Vec<(PathBuf, Option<ropey::Rope>)> =
         cp.files.iter().map(|t| (t.path.clone(), t.before.clone())).collect();
-    let root = ed.chat.as_ref().and_then(|c| c.edits.at_end.clone()).unwrap_or_else(|| {
-        let cwd = std::env::current_dir().unwrap_or_default();
-        std::fs::canonicalize(&cwd).unwrap_or(cwd)
-    });
+    let root = ed.chat.as_ref().and_then(|c| c.edits.at_end.clone()).unwrap_or_else(|| ed.root.clone());
     ed.events.jobs().spawn(move || {
         let files: Vec<File> = files
             .into_iter()
@@ -754,7 +751,7 @@ pub fn send(ed: &mut Editor) {
         body.push_str(&format!(
             "<comment note=\"{}\" path=\"{}\" lines=\"{}-{}\">\n<diff>\n{diff}</diff>\n",
             n.id,
-            crate::chat::shown(&n.path),
+            crate::chat::shown(&ed.root, &n.path),
             n.lines.start + 1,
             n.lines.end
         ));

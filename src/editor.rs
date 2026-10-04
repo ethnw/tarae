@@ -225,11 +225,13 @@ impl Toast {
     }
 }
 
-/// The working directory. Only `main` sets it, before the editor starts, so it's read once: `getcwd` goes
-/// to the file system, and drawing asks for it every frame (the header, paths shown relative to it).
-pub fn cwd() -> &'static std::path::Path {
-    static CWD: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
-    CWD.get_or_init(|| std::env::current_dir().unwrap_or_default())
+/// The folder tarae was started in (`main` moves there for `tarae <folder>` before the editor starts),
+/// links resolved — the editor's `root`. Read once, by `main` at startup (and by the tests' `Editor::new`):
+/// everything after goes by `Editor::root()`, so a root of its own (a test's temp folder, later a session's
+/// worktree) is honored everywhere.
+pub fn started_in() -> PathBuf {
+    let dir = std::env::current_dir().unwrap_or_default();
+    std::fs::canonicalize(&dir).unwrap_or(dir)
 }
 
 /// Screen layout of the last frame (term.rs fills it on every draw).
@@ -539,9 +541,11 @@ pub struct Editor {
     pub zoom: Option<crate::sizes::Zoom>,
     /// The bottom slot has tarae's keys (`C-w j`, a click): they scroll its output (`sizes::bottom_key`).
     pub bottom_focus: bool,
-    /// The project — the folder tarae started in, links resolved (follow mode goes nowhere else). Tests with
-    /// a project of their own in a temp folder set it.
-    pub project_root: Option<PathBuf>,
+    /// The project — the folder tarae started in, links resolved: where git, the terminal, tasks, Claude,
+    /// pickers and searches run, what paths are shown relative to, what a relative path means (follow mode
+    /// goes nowhere else). Read once, in `new`; nothing reads the process's folder after that. Tests with a
+    /// project of their own in a temp folder set it.
+    pub root: PathBuf,
     /// The terminal said its focus went elsewhere (CSI ?1004 — tmux passes it on only with `focus-events
     /// on`), and no input came since: the waiting animation rests (`tick_wanted`). A terminal that never
     /// says keeps it going.
@@ -573,7 +577,14 @@ pub struct Editor {
 }
 
 impl Editor {
+    /// An editor whose root is the folder the tests run in (`main` gives its own: `with_root`).
+    #[cfg(test)]
     pub fn new(config: Config) -> Self {
+        Self::with_root(config, started_in())
+    }
+
+    /// An editor for the project in `root` (a real path).
+    pub fn with_root(config: Config, root: PathBuf) -> Self {
         let events = Queue::default();
         let saver = crate::saver::Saver::new(events.sender());
         let mut ed = Self {
@@ -685,7 +696,7 @@ impl Editor {
             allow_path: if cfg!(test) { None } else { crate::allow::Store::path() },
             blocked: None,
             last_frame: None,
-            project_root: std::fs::canonicalize(cwd()).ok(),
+            root,
             unfocused: false,
             // (a few bytes, read before the first frame — it's drawn at the sizes you left)
             sizes: if cfg!(test) {
@@ -798,9 +809,25 @@ impl Editor {
         self.current = self.docs.len() - 1;
     }
 
-    /// Opens a file. If already open, switches to that buffer.
+    /// The project's folder (`root`).
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// `path` as the editor means it: a relative one is from the root, not from the process's folder.
+    pub fn path_of(&self, path: &Path) -> PathBuf {
+        if path.is_absolute() { path.to_path_buf() } else { self.root.join(path) }
+    }
+
+    /// `path` relative to the root, for showing (unchanged if outside).
+    pub fn shown<'a>(&self, path: &'a Path) -> &'a Path {
+        path.strip_prefix(&self.root).unwrap_or(path)
+    }
+
+    /// Opens a file (a relative path is from the root). If already open, switches to that buffer.
     pub fn open(&mut self, path: &Path) -> Result<()> {
-        let path = std::fs::canonicalize(path).or_else(|_| std::path::absolute(path))?;
+        let path = self.path_of(path);
+        let path = std::fs::canonicalize(&path).or_else(|_| std::path::absolute(&path))?;
         if let Some(i) = self.docs.iter().position(|d| d.path.as_deref() == Some(path.as_path())) {
             self.current = i;
             return Ok(());
@@ -868,7 +895,10 @@ impl Editor {
                 self.attach_lsp(id);
                 self.undo_restore(id);
                 self.qlist_mark_open();
-                self.set_status(format!("{} loaded — {mb:.1} MB in {ms} ms", self.docs[i].display_name()));
+                self.set_status(format!(
+                    "{} loaded — {mb:.1} MB in {ms} ms",
+                    self.docs[i].display_name(&self.root)
+                ));
                 self.plugin_event(crate::plugin::PluginEvent::Opened, id);
             }
             Err(e) => {
@@ -884,7 +914,10 @@ impl Editor {
             self.flush_saves();
         }
         if !force && self.doc().is_modified() && !self.doc().throwaway {
-            return Err(format!("unsaved changes in {} (use :bc! to discard)", self.doc().display_name()));
+            return Err(format!(
+                "unsaved changes in {} (use :bc! to discard)",
+                self.doc().display_name(&self.root)
+            ));
         }
         self.close_doc(self.docs[self.current].id);
         Ok(())
@@ -1381,7 +1414,7 @@ impl Editor {
             return self.set_status("pasted into the chat — the file is under review (i pastes there)");
         }
         if reviewing {
-            let name = self.doc().display_name();
+            let name = self.doc().display_name(&self.root);
             self.set_warning(format!("pasted into {name}, which is under review — u takes it back"));
         }
         if self.doc().loading {
@@ -1902,7 +1935,7 @@ impl Editor {
 
     /// Where `space /` searches: the project (tarae's folder; a test's own).
     fn search_root(&self) -> PathBuf {
-        self.project_root.clone().unwrap_or_else(|| cwd().to_path_buf())
+        self.root.clone()
     }
 
     /// The live search's query changed (a key): the search under way stops, and after a pause in the typing
@@ -2572,7 +2605,7 @@ impl Editor {
         // A loading buffer ignores edit keys (`:` commands and buffer moves are allowed — :q·:bn while
         // reading).
         if self.doc().loading && key.plain_char() != Some(':') && self.pending.is_empty() {
-            let name = self.doc().display_name();
+            let name = self.doc().display_name(&self.root);
             self.set_status(format!("{name} is still loading…"));
             return;
         }
@@ -2765,8 +2798,7 @@ impl Editor {
     pub fn cmdline_completion(&self) -> Option<crate::cmdline::Completion> {
         let p = self.prompt.as_ref().filter(|p| p.kind == PromptKind::Command)?;
         let base = p.cycle.as_ref().map_or(p.text.as_str(), |(b, _)| b.as_str());
-        let cwd = std::env::current_dir().unwrap_or_default();
-        Some(crate::cmdline::complete(base, &cwd, &self.cmd_lists))
+        Some(crate::cmdline::complete(base, &self.root, &self.cmd_lists))
     }
 
     /// If the lists a candidate needs (folders, themes) aren't read yet, read them on a worker thread.
@@ -2777,8 +2809,7 @@ impl Editor {
         match crate::cmdline::find(name).map(|c| c.arg) {
             Some(crate::cmdline::Arg::File) => {
                 let token = text.rsplit(char::is_whitespace).next().unwrap_or_default();
-                let cwd = std::env::current_dir().unwrap_or_default();
-                let (dir, _) = crate::cmdline::file_query(token, &cwd);
+                let (dir, _) = crate::cmdline::file_query(token, &self.root);
                 if self.cmd_lists.dirs.contains_key(&dir) || !self.cmd_loading.insert(dir.clone()) {
                     return;
                 }
@@ -2807,9 +2838,11 @@ impl Editor {
                 if !self.cmd_loading.insert(key.clone()) {
                     return;
                 }
+                let root = self.root.clone();
                 self.events.jobs().spawn(move || {
                     let out = std::process::Command::new("git")
                         .args(["branch", "-a", "--format=%(refname:short)"])
+                        .current_dir(&root)
                         .stderr(std::process::Stdio::null())
                         .output()
                         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
@@ -2994,8 +3027,18 @@ mod tests {
         let mut ed = Editor::new(Config::default());
         ed.docs[0].text = ropey::Rope::from_str(text);
         // (tests make their projects in the temp folder — follow goes only into the project)
-        ed.project_root = std::fs::canonicalize(std::env::temp_dir()).ok();
+        ed.root = test_root();
         ed
+    }
+
+    /// The root `editor()` gives: the temp folder, real path (not the folder the tests run in).
+    fn test_root() -> PathBuf {
+        std::fs::canonicalize(std::env::temp_dir()).unwrap()
+    }
+
+    /// This repository, for tests whose project it is (reads of its own files — harmless).
+    fn this_repo() -> PathBuf {
+        std::fs::canonicalize(env!("CARGO_MANIFEST_DIR")).unwrap()
     }
 
     fn run(text: &str, keys: &str) -> Editor {
@@ -3282,7 +3325,7 @@ mod tests {
             from: ".tarae.toml".into(),
         };
         let mut ed = editor("");
-        ed.project_root = Some(dir.clone());
+        ed.root = dir.clone();
         // No steps, and no kind of project a pack knows (looked for on a worker)
         ed.preflight_start().unwrap();
         settle_for(&mut ed, |ed| ed.status.is_some());
@@ -3355,7 +3398,7 @@ mod tests {
             from: from.into(),
         };
         let mut ed = editor("");
-        ed.project_root = Some(dir.clone());
+        ed.root = dir.clone();
         ed.config.preflight_local = vec![step("mine", "echo mine", ".tarae.local.toml")];
         // A Cargo project: the rust pack's steps, on a card
         ed.preflight_start().unwrap();
@@ -3762,7 +3805,7 @@ mod tests {
         let tool = |id: &str, name: &str, input: serde_json::Value| json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": id, "name": name, "input": input}]}});
         let text = |t: &str| json!({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": t}}});
         let mut ed = editor("");
-        ed.project_root = Some(dir.clone());
+        ed.root = dir.clone();
         ed.open(&main).unwrap();
         ed.split_view(crate::split::Dir::Vertical);
         fake_claude_stream(
@@ -4346,6 +4389,7 @@ mod tests {
     fn lines_of_reads_and_a_cwd_run_without_a_card() {
         use serde_json::json;
         let mut ed = editor("");
+        ed.root = this_repo();
         let call = |ed: &mut Editor, args: serde_json::Value| {
             let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                 "params": {"name": "run", "arguments": args}});
@@ -4551,8 +4595,9 @@ mod tests {
         let marker = dir.join("marker.txt");
         std::fs::write(&marker, "tarae-marker-content\n").unwrap();
         let card_or_done = |ed: &Editor| !ed.offers.is_empty() || !ed.chat.as_ref().unwrap().busy();
-        // Inside the project: it just runs
+        // Inside the project (this repo): it just runs
         let mut ed = editor("");
+        ed.root = this_repo();
         let log = claude_calls(&mut ed, &dir, "run", &json!({ "command": "wc -l Cargo.toml" }));
         feed(&mut ed, "<space>lcount<ret>");
         settle_for(&mut ed, card_or_done);
@@ -4563,6 +4608,7 @@ mod tests {
         std::fs::remove_file(&log).ok();
         let command = format!("cat {}", marker.display());
         let mut ed = editor("");
+        ed.root = this_repo();
         let log = claude_calls(&mut ed, &dir, "run", &json!({ "command": command }));
         feed(&mut ed, "<space>lread it<ret>");
         settle_for(&mut ed, card_or_done);
@@ -5344,6 +5390,8 @@ mod tests {
         let (deep, cache) = (dir.join("cache/deep"), dir.join("cache"));
         let store = dir.join("state/sandbox.json");
         let mut ed = editor("");
+        // (the project is this repo: the temp folder the writes were denied in is outside it)
+        ed.root = this_repo();
         ed.allow_path = Some(store.clone());
         // A chat to hear it (a claude that reads and says nothing)
         ed.config.llm.command = "sh".into();
@@ -5411,12 +5459,9 @@ mod tests {
         crate::typed::execute(&mut ed, "sandbox-grant 1").unwrap();
         settled(&mut ed, crate::blocked::GRANT_TITLE);
         feed(&mut ed, "A");
-        let kept = |p: &Path| {
-            crate::allow::Store::read(Some(&store))
-                .get(&crate::allow::project())
-                .write
-                .contains(&p.to_path_buf())
-        };
+        let project = ed.root.clone();
+        let kept =
+            |p: &Path| crate::allow::Store::read(Some(&store)).get(&project).write.contains(&p.to_path_buf());
         settle_until(&mut ed, |ed| kept(&cache) && ran_again(ed));
         // Outside, once
         ed.checkpoints.tell.clear();
@@ -5641,8 +5686,9 @@ mod tests {
         let marker = out.join("marker.txt");
         std::fs::write(&marker, "tarae-marker\n").unwrap();
         let store = dir.join("state/sandbox.json");
-        let project = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+        let project = this_repo();
         let mut ed = editor("");
+        ed.root = project.clone();
         ed.allow_path = Some(store.clone());
         let asks = [
             ("Read", json!({"file_path": "Cargo.toml"})),
@@ -5930,7 +5976,7 @@ mod tests {
         let kept = |dir: &Path| {
             let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
             loop {
-                let all = crate::chats::load(&dir.join("chats"), &std::env::current_dir().unwrap());
+                let all = crate::chats::load(&dir.join("chats"), &test_root());
                 // (kept twice — the question when the session starts, then the answer: wait for the answer)
                 if all.first().is_some_and(|c| c.rows.len() >= 3) || std::time::Instant::now() > end {
                     return all;
@@ -6442,7 +6488,7 @@ mod tests {
         std::fs::write(&outside, "a = 1\n").unwrap();
         let open = |ed: &Editor, p: &Path| ed.docs.iter().any(|d| d.path.as_deref() == Some(p));
         let mut ed = editor("");
-        ed.project_root = Some(dir.clone());
+        ed.root = dir.clone();
         ed.open(&main).unwrap();
         let edit = json!({"file_path": outside, "old_string": "a = 1", "new_string": "a = 2"});
         fake_asks(&mut ed, &dir, &[("Edit", edit)], true);
@@ -6589,7 +6635,7 @@ mod tests {
         store: &Path,
         ok: impl Fn(&crate::checkpoint::Stored) -> bool,
     ) -> crate::checkpoint::Stored {
-        let root = std::env::current_dir().unwrap();
+        let root = test_root();
         let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             let kept = crate::checkpoint::load(store, &root);
@@ -6819,6 +6865,124 @@ mod tests {
         feed(&mut ed, "d");
         settle_until(&mut ed, |_| !repo.join("b.txt").exists());
         std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// git's output in `dir` (trimmed) — the test fails if git does.
+    fn git_out(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Whether git succeeds in `dir`.
+    fn git_ok(dir: &Path, args: &[&str]) -> bool {
+        let out = std::process::Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
+        out.status.success()
+    }
+
+    /// `file` written and committed in `dir` as `msg`.
+    fn commit_in(dir: &Path, file: &str, text: &str, msg: &str) {
+        std::fs::write(dir.join(file), text).unwrap();
+        git_in(dir, &["add", file]);
+        git_in(
+            dir,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-qm",
+                msg,
+            ],
+        );
+    }
+
+    /// A remote of the test's own — never the network: a bare repository in its temp folder, made
+    /// `work`'s `origin` (nothing pushed yet). (the bare repository, the folder holding it)
+    fn bare_remote(name: &str, work: &Path) -> (PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!("tarae-remote-{name}-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::create_dir_all(&base).unwrap();
+        let base = std::fs::canonicalize(base).unwrap();
+        git_in(&base, &["init", "-q", "--bare", "-b", "main", "origin.git"]);
+        let bare = base.join("origin.git");
+        git_in(work, &["remote", "add", "origin", bare.to_str().unwrap()]);
+        (bare, base)
+    }
+
+    /// Push, pull and fetch in the git tab as they are, against a remote of the test's own: the first `P`
+    /// sets the upstream, the next pushes what's ahead; `p` takes in what someone else pushed (fast-forward)
+    /// and says when there's nothing; `f` fetches and prunes. Over diverged history a push or a pull fails
+    /// as git does, said as an error — nothing forced, nothing merged. A remote that isn't there fails at
+    /// once, said.
+    #[test]
+    fn git_tab_pushes_pulls_and_fetches_with_a_remote_of_its_own() {
+        let work = git_repo("remote", &[("a.txt", "one\n")]);
+        let (bare, base) = bare_remote("remote", &work);
+        let said = |ed: &Editor, kind: ToastKind, what: &str| {
+            ed.messages.iter().filter(|m| m.1 == kind && m.2.contains(what)).count()
+        };
+        let status = |ed: &Editor| ed.git_status.clone().unwrap_or_default();
+        let mut ed = editor("");
+        ed.root = work.clone();
+        feed(&mut ed, "<space>g");
+        settle_until(&mut ed, |ed| ed.git_status.is_some());
+        assert_eq!(status(&ed).upstream, None, "nothing pushed yet");
+        // The first push sets the upstream
+        feed(&mut ed, "P");
+        settle_until(&mut ed, |ed| {
+            said(ed, ToastKind::Success, "Pushed main") == 1 && status(ed).upstream.is_some()
+        });
+        assert_eq!(git_out(&bare, &["rev-parse", "main"]), git_out(&work, &["rev-parse", "HEAD"]));
+        assert_eq!(status(&ed).upstream.as_deref(), Some("origin/main"));
+        // One of ours ahead: pushed
+        commit_in(&work, "a.txt", "one\ntwo\n", "two");
+        ed.git_refresh();
+        settle_until(&mut ed, |ed| status(ed).ahead == 1);
+        feed(&mut ed, "P");
+        settle_until(&mut ed, |ed| said(ed, ToastKind::Success, "Pushed main") == 2 && status(ed).ahead == 0);
+        assert_eq!(git_out(&bare, &["rev-parse", "main"]), git_out(&work, &["rev-parse", "HEAD"]));
+        // Someone else pushes: `p` takes it in; again, nothing to take
+        git_in(&base, &["clone", "-q", bare.to_str().unwrap(), "other"]);
+        let other = base.join("other");
+        commit_in(&other, "b.txt", "theirs\n", "theirs");
+        git_in(&other, &["push", "-q"]);
+        feed(&mut ed, "p");
+        settle_until(&mut ed, |ed| said(ed, ToastKind::Success, "Pulled into main") == 1);
+        assert_eq!(git_out(&work, &["rev-parse", "HEAD"]), git_out(&other, &["rev-parse", "HEAD"]));
+        feed(&mut ed, "p");
+        settle_until(&mut ed, |ed| said(ed, ToastKind::Info, "Already up to date") == 1);
+        // `f`: a branch pushed elsewhere arrives; deleted there, it goes (pruned)
+        git_in(&other, &["push", "-q", "origin", "HEAD:feature"]);
+        feed(&mut ed, "f");
+        settle_until(&mut ed, |ed| said(ed, ToastKind::Success, "Fetched") == 1);
+        assert!(git_ok(&work, &["rev-parse", "--verify", "-q", "refs/remotes/origin/feature"]), "fetched");
+        git_in(&other, &["push", "-q", "origin", "--delete", "feature"]);
+        feed(&mut ed, "f");
+        settle_until(&mut ed, |ed| said(ed, ToastKind::Success, "Fetched") == 2);
+        assert!(!git_ok(&work, &["rev-parse", "--verify", "-q", "refs/remotes/origin/feature"]), "pruned");
+        // Diverged — theirs pushed, ours not: the push is refused, nothing forced; the pull won't merge
+        commit_in(&other, "b.txt", "theirs\nagain\n", "theirs again");
+        git_in(&other, &["push", "-q"]);
+        commit_in(&work, "a.txt", "one\ntwo\nours\n", "ours");
+        let (theirs, ours) =
+            (git_out(&other, &["rev-parse", "HEAD"]), git_out(&work, &["rev-parse", "HEAD"]));
+        feed(&mut ed, "P");
+        settle_until(&mut ed, |ed| said(ed, ToastKind::Error, "push: ") == 1);
+        assert_eq!(git_out(&bare, &["rev-parse", "main"]), theirs, "the remote kept theirs");
+        feed(&mut ed, "p");
+        settle_until(&mut ed, |ed| said(ed, ToastKind::Error, "pull: ") == 1);
+        assert_eq!(git_out(&work, &["rev-parse", "HEAD"]), ours, "ours as it was — no merge");
+        // A remote that isn't there: said at once
+        git_in(&work, &["remote", "set-url", "origin", base.join("missing.git").to_str().unwrap()]);
+        feed(&mut ed, "f");
+        settle_until(&mut ed, |ed| said(ed, ToastKind::Error, "fetch: ") == 1);
+        drop(ed);
+        std::fs::remove_dir_all(&work).ok();
+        std::fs::remove_dir_all(&base).ok();
     }
 
     /// Sizes you set (U1): `C-w >`/`<` on the chat — from the chat's empty input too (with text there, `C-w`
@@ -7568,6 +7732,107 @@ mod tests {
         assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
     }
 
+    /// Events until `done`, or 5 s — without failing (the caller says what didn't come).
+    fn wait_for(ed: &mut Editor, done: impl Fn(&Editor) -> bool) {
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !done(ed) && std::time::Instant::now() < end {
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
+    }
+
+    /// The editor's root — here a repository of the test's own, not the folder the tests run in (later a
+    /// session's worktree) — is where everything runs and what paths are from: the terminal, a task (its
+    /// folder from the root), Claude, `:sh`, a pipe, the git tab, the branch watch, `:open` and `:diff` of
+    /// relative paths, the file picker, the search. Every miss is listed (one run shows them all). The
+    /// stand-ins write `pwd` into a folder of the test's own, by absolute path.
+    #[test]
+    fn a_root_of_its_own_is_where_everything_runs() {
+        let root = git_repo("own-root", &[("a.txt", "tarae-root-marker\n"), ("b.txt", "old\n")]);
+        git_in(&root, &["switch", "-q", "-c", "tarae-own-root"]);
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        let out = std::env::temp_dir().join(format!("tarae-own-root-out-{}", std::process::id()));
+        std::fs::remove_dir_all(&out).ok();
+        std::fs::create_dir_all(&out).unwrap();
+        let here = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+        assert!(!here.starts_with(&root) && !root.starts_with(&here), "the tests run elsewhere");
+        let pwd = |name: &str| format!("pwd -P > '{}'", out.join(name).display());
+        let mut ed = editor("");
+        ed.root = root.clone();
+        let mut wrong: Vec<String> = Vec::new();
+        let mut ran_in = |ed: &mut Editor, what: &str, want: &Path| {
+            let file = out.join(what);
+            wait_for(ed, |_| std::fs::read_to_string(&file).is_ok_and(|s| s.ends_with('\n')));
+            let got = std::fs::read_to_string(&file).map(|s| s.trim().to_string()).ok();
+            if got.as_deref() != want.to_str() {
+                wrong.push(format!("{what} ran in {got:?}"));
+            }
+        };
+        // What runs
+        ed.terminal_run(vec!["/bin/sh".into(), "-c".into(), pwd("terminal")], Vec::new());
+        ran_in(&mut ed, "terminal", &root);
+        ed.task_start(crate::task::Task { name: "where".into(), cmd: pwd("task"), cwd: "sub".into() });
+        ran_in(&mut ed, "task", &root.join("sub"));
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), format!("{}; cat > /dev/null", pwd("claude"))];
+        crate::chat::open(&mut ed);
+        ran_in(&mut ed, "claude", &root);
+        ed.chat.as_mut().unwrap().focused = false;
+        crate::typed::execute(&mut ed, &format!("sh {}", pwd("sh"))).unwrap();
+        ran_in(&mut ed, "sh", &root);
+        ed.shell_pipe(crate::shell::Pipe::To, &pwd("pipe"));
+        ran_in(&mut ed, "pipe", &root);
+        // Git: the tab's repository and the branch watched
+        feed(&mut ed, "<space>g");
+        wait_for(&mut ed, |ed| ed.git_status.is_some());
+        let top = ed.git_status.as_ref().map(|s| s.top.clone());
+        if top.as_deref() != Some(root.as_path()) {
+            wrong.push(format!("the git tab read {top:?}"));
+        }
+        feed(&mut ed, "<esc>");
+        ed.sidebar = None;
+        crate::git::watch(ed.events.sender(), ed.root.clone());
+        wait_for(&mut ed, |ed| ed.git_branch.is_some());
+        if ed.git_branch.as_deref() != Some("tarae-own-root") {
+            wrong.push(format!("the branch watched is {:?}", ed.git_branch));
+        }
+        // Relative paths are from the root
+        let a = root.join("a.txt");
+        match crate::typed::execute(&mut ed, "open a.txt") {
+            Ok(()) if ed.doc().path.as_deref() == Some(a.as_path()) => {}
+            r => wrong.push(format!(":open a.txt: {r:?}, {:?}", ed.doc().path)),
+        }
+        if ed.doc().path.as_deref() == Some(a.as_path()) {
+            crate::typed::execute(&mut ed, "diff b.txt").unwrap();
+            wait_for(&mut ed, |ed| ed.doc().diff_of.is_some() || ed.status.is_some());
+            if ed.doc().diff_of.as_deref() != Some("b.txt") {
+                wrong.push(format!(":diff b.txt: {:?} {:?}", ed.doc().diff_of, ed.status));
+            }
+            crate::typed::execute(&mut ed, "diff-off").ok();
+        }
+        // The file picker and the search look in the root
+        feed(&mut ed, "<space>f");
+        wait_for(&mut ed, |ed| ed.picker.as_ref().is_some_and(|p| !p.loading));
+        let listed = ed.picker.as_ref().is_some_and(|p| {
+            p.items().iter().any(|i| matches!(&i.action, crate::picker::Action::Open(p) if *p == a))
+        });
+        if !listed {
+            wrong.push("the file picker doesn't list a.txt".into());
+        }
+        feed(&mut ed, "<esc><space>/tarae-root-marker");
+        wait_for(&mut ed, |ed| ed.picker.as_ref().is_some_and(|p| !p.searching && p.current().is_some()));
+        let hit = ed.picker.as_ref().and_then(|p| p.current()).map(|i| i.action.clone());
+        if !matches!(&hit, Some(crate::picker::Action::Goto { path, .. }) if *path == a) {
+            wrong.push(format!("the search found {hit:?}"));
+        }
+        feed(&mut ed, "<esc>");
+        assert!(wrong.is_empty(), "not in the root:\n{}", wrong.join("\n"));
+        drop(ed);
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&out).ok();
+    }
+
     /// The whole review: changes against HEAD file by file (a changed file, a deleted one, a new one), `]g`
     /// running on across files and back, a draft comment, viewed, sent to Claude with its diff, ended.
     #[test]
@@ -7883,7 +8148,7 @@ mod tests {
     fn tutor_is_a_throwaway_buffer() {
         let mut ed = editor("");
         feed(&mut ed, ":tutor<ret>");
-        assert_eq!(ed.doc().display_name(), "tutor");
+        assert_eq!(ed.doc().display_name(&ed.root), "tutor");
         assert!(ed.doc().text.to_string().starts_with("# tarae tutorial"));
         feed(&mut ed, "ihello<esc>:q<ret>");
         assert!(ed.should_quit, "an edited tutorial doesn't block quitting");
@@ -8246,7 +8511,7 @@ mod tests {
         let m = c.msgs.iter().rev().find(|m| m.role == crate::chat::Role::User).unwrap();
         assert!(m.chip.ends_with(" · screen 100×30"), "{}", m.chip);
         let copy = m.attached.clone().expect("a copy").path;
-        assert!(c.links().iter().any(|l| l.path == copy), "C-] reaches it");
+        assert!(c.links(&ed.root).iter().any(|l| l.path == copy), "C-] reaches it");
         // On its chip row it looks like the link it is: `screen 100×30` underlined, the rest of the chip not
         // (the panel back while Claude works, as `space l` brings it)
         ed.chat.as_mut().unwrap().unfolded = true;
@@ -8818,6 +9083,7 @@ q = \"delete_selection\"\n",
     fn file_picker_and_global_search_open_files() {
         // On this repo itself: the file list fills, and a search result jumps to its line.
         let mut ed = editor("");
+        ed.root = this_repo();
         feed(&mut ed, " f");
         settle(&mut ed);
         let p = ed.picker.as_ref().unwrap();
@@ -8828,8 +9094,7 @@ q = \"delete_selection\"\n",
             "{:?}",
             ed.doc().path
         );
-        // (the live search looks in the project — this repo here)
-        ed.project_root = std::fs::canonicalize(cwd()).ok();
+        // (the live search looks in the project too)
         feed(&mut ed, " /fn put_cursor");
         settle_for(&mut ed, |ed| ed.picker.as_ref().is_some_and(|p| !p.searching && p.current().is_some()));
         feed(&mut ed, "<ret>");
@@ -8977,7 +9242,7 @@ q = \"delete_selection\"\n",
         std::fs::write(dir.join("a.rs"), "fn alpha() {}\nlet Beta = alpha();\n").unwrap();
         std::fs::write(dir.join("b.txt"), "ALPHA beta\n").unwrap();
         let mut ed = editor("");
-        ed.project_root = Some(dir.clone());
+        ed.root = dir.clone();
         feed(&mut ed, "<space>/");
         let p = ed.picker.as_ref().expect("the search");
         assert!(p.live && p.title == "search" && p.current().is_none());
@@ -9728,7 +9993,7 @@ q = \"delete_selection\"\n",
     fn the_start_screen_continues_the_last_session() {
         let (dir, main, util, _) = follow_project("last-session");
         let gone = dir.join("gone.rs");
-        let cwd = std::env::current_dir().unwrap();
+        let cwd = test_root();
         let mut ed = editor("");
         feed(&mut ed, "r");
         assert!(ed.welcome(), "nothing to continue: r does nothing");

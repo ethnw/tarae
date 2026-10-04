@@ -344,7 +344,7 @@ impl Editor {
             ranges: sel.ranges().iter().map(|r| (r.anchor, r.head)).collect(),
             primary: sel.primary_index(),
             path: doc.path.as_ref().map(|p| p.display().to_string()),
-            name: doc.display_name(),
+            name: doc.display_name(&self.root),
             language: doc.lang_name().map(str::to_string),
             version: doc.version(),
             modified: doc.is_modified(),
@@ -397,7 +397,8 @@ impl Editor {
                 // `path:line` (from 1): there, if `path` alone is the file
                 Action::Open(path) => match path.rsplit_once(':') {
                     Some((file, line))
-                        if !Path::new(path).exists() && line.parse::<usize>().is_ok_and(|l| l > 0) =>
+                        if !self.path_of(Path::new(path)).exists()
+                            && line.parse::<usize>().is_ok_and(|l| l > 0) =>
                     {
                         let line = line.parse::<usize>().expect("checked") - 1;
                         self.run_picker_action(crate::picker::Action::Goto {

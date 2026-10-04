@@ -162,9 +162,9 @@ pub fn state_dir() -> Option<PathBuf> {
     Some(state.join("tarae"))
 }
 
-/// `.tarae.toml` found by walking up from the current directory.
-pub fn project_path() -> Option<PathBuf> {
-    let mut dir = std::env::current_dir().ok()?;
+/// `.tarae.toml` found by walking up from `root` (the editor's).
+pub fn project_path(root: &Path) -> Option<PathBuf> {
+    let mut dir = root.to_path_buf();
     loop {
         let p = dir.join(".tarae.toml");
         if p.is_file() {
@@ -176,9 +176,9 @@ pub fn project_path() -> Option<PathBuf> {
     }
 }
 
-fn layers() -> Vec<PathBuf> {
+fn layers(root: &Path) -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = config_path().into_iter().collect();
-    if let Some(p) = project_path()
+    if let Some(p) = project_path(root)
         && !v.contains(&p)
     {
         v.push(p);
@@ -187,16 +187,16 @@ fn layers() -> Vec<PathBuf> {
 }
 
 /// The project layer, unless it's the user's own file (started in the config folder).
-fn project_layer() -> Option<PathBuf> {
-    project_path().filter(|p| config_path().as_ref() != Some(p))
+fn project_layer(root: &Path) -> Option<PathBuf> {
+    project_path(root).filter(|p| config_path().as_ref() != Some(p))
 }
 
-/// `.tarae.local.toml` — yours, for one project: beside its `.tarae.toml`, or in the folder tarae started
-/// in (whether it's there or not: the watch picks it up once made).
-fn local_path() -> Option<PathBuf> {
-    let dir = match project_path() {
+/// `.tarae.local.toml` — yours, for one project: beside its `.tarae.toml`, or in the root (whether it's
+/// there or not: the watch picks it up once made).
+fn local_path(root: &Path) -> Option<PathBuf> {
+    let dir = match project_path(root) {
         Some(p) => p.parent()?.to_path_buf(),
-        None => std::env::current_dir().ok()?,
+        None => root.to_path_buf(),
     };
     Some(dir.join(".tarae.local.toml"))
 }
@@ -241,11 +241,12 @@ fn short(p: &Path) -> String {
 // ── Reading ──────────────────────────────────────────────────────────────────
 
 /// Read the layers in order. Problems come back as `file:line: message` warnings (startup isn't blocked).
-/// The project's file goes in through `trust.rs`: what runs commands only once the project is trusted.
-pub fn load() -> (Config, Vec<String>) {
+/// The project's file (found from `root`, the editor's) goes in through `trust.rs`: what runs commands only
+/// once the project is trusted.
+pub fn load(root: &Path) -> (Config, Vec<String>) {
     let store = crate::trust::Store::read(crate::trust::Store::path().as_deref());
-    let local = local_path().filter(|p| p.is_file());
-    load_layers(config_path(), project_layer(), local, &store)
+    let local = local_path(root).filter(|p| p.is_file());
+    load_layers(config_path(), project_layer(root), local, &store)
 }
 
 /// (tests: the layers without a local one)
@@ -434,8 +435,8 @@ fn apply_source(
                 warnings.push(format!("{file}: task.{name}: needs cmd = \"...\""));
                 continue;
             };
-            let cwd = std::env::current_dir().unwrap_or_default();
-            let cwd = v.get("cwd").and_then(Value::as_str).map_or(cwd.clone(), |c| cwd.join(c));
+            // (from the editor's root — resolved when it starts, `task_spawn`)
+            let cwd = v.get("cwd").and_then(Value::as_str).map_or_else(PathBuf::new, PathBuf::from);
             config.editor.tasks.retain(|t| t.name != *name);
             config.editor.tasks.push(crate::task::Task { name: name.clone(), cmd: cmd.to_string(), cwd });
         }
@@ -490,15 +491,14 @@ fn drop_typed(t: &mut toml::Table, path: &str, pass: &mut impl FnMut(String, &Va
 
 /// Config file watcher thread — sleeps until the files may have changed (inotify/kqueue, see `fswatch`),
 /// then compares mtimes. On change, it reads and parses here and sends only the result to the main loop.
-pub fn watch(tx: Sender<Event>) {
-    let mut paths = layers();
-    if let Ok(cwd) = std::env::current_dir() {
-        let p = cwd.join(".tarae.toml");
-        if !paths.contains(&p) {
-            paths.push(p); // even if missing yet — picked up as soon as it's created
-        }
+/// The project's files are `root`'s (the editor's).
+pub fn watch(tx: Sender<Event>, root: PathBuf) {
+    let mut paths = layers(&root);
+    let p = root.join(".tarae.toml");
+    if !paths.contains(&p) {
+        paths.push(p); // even if missing yet — picked up as soon as it's created
     }
-    if let Some(p) = local_path().filter(|p| !paths.contains(p)) {
+    if let Some(p) = local_path(&root).filter(|p| !paths.contains(p)) {
         paths.push(p);
     }
     thread::spawn(move || {
@@ -524,7 +524,7 @@ pub fn watch(tx: Sender<Event>) {
             let now = stamps();
             if now != last {
                 last = now;
-                let (config, warnings) = load();
+                let (config, warnings) = load(&root);
                 let apply = move |ed: &mut Editor| ed.reload_config(config, warnings);
                 if tx.send(Event::Job(Box::new(apply))).is_err() {
                     break;
@@ -868,6 +868,27 @@ Z = ["move_line_down", ":sh touch marker"]
         let (p, _) = load_from(None, Some(plain), &crate::trust::Store::default());
         assert!(p.project.is_none());
         assert_eq!(p.editor.scrolloff, 3);
+    }
+
+    /// The project's files are the editor's root's — found walking up from it, not from the folder tarae
+    /// runs in (the tests run in this repository, which has a `.tarae.toml` of its own); a task's folder
+    /// stays as written, for the root to resolve when it starts.
+    #[test]
+    fn the_project_layer_is_the_roots() {
+        let root = std::env::temp_dir().join(format!("tarae-config-root-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(root.join("deep/er")).unwrap();
+        let root = fs::canonicalize(&root).unwrap();
+        assert_eq!(local_path(&root), Some(root.join(".tarae.local.toml")), "none yet: beside the root");
+        fs::write(root.join(".tarae.toml"), "[task.t]\ncmd = \"true\"\ncwd = \"sub\"\n").unwrap();
+        assert_eq!(project_path(&root.join("deep/er")), Some(root.join(".tarae.toml")), "walking up");
+        assert_eq!(project_layer(&root), Some(root.join(".tarae.toml")));
+        assert_eq!(local_path(&root.join("deep")), Some(root.join(".tarae.local.toml")));
+        // (read as your own file: a project's tasks wait for trust)
+        let (c, _) = load_from(project_layer(&root), None, &crate::trust::Store::default());
+        let t = c.editor.tasks.iter().find(|t| t.name == "t").map(|t| t.cwd.clone());
+        assert_eq!(t, Some(PathBuf::from("sub")), "as written");
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

@@ -1049,8 +1049,7 @@ impl Editor {
                 if let Some((id, places)) = self.lsp.refs.shown.clone()
                     && let Some(p) = self.picker.as_mut().filter(|p| p.id == id)
                 {
-                    let root = std::env::current_dir().unwrap_or_default();
-                    p.set_items(place_items(&root, places, &declared));
+                    p.set_items(place_items(&self.root, places, &declared));
                 }
                 // (none while the server is busy: asked again with the references)
                 self.lsp.refs.declared = (!declared.is_empty()).then_some(declared);
@@ -1185,7 +1184,7 @@ impl Editor {
 
     fn on_workspace_symbols(&mut self, result: &Value) {
         let Some(p) = self.picker.as_mut().filter(|p| p.requery) else { return };
-        let root = std::env::current_dir().unwrap_or_default();
+        let root = &self.root;
         let items: Vec<Item> = result
             .as_array()
             .into_iter()
@@ -1196,7 +1195,7 @@ impl Editor {
                 let start = &loc["range"]["start"];
                 let line = start["line"].as_u64().unwrap_or(0) as usize;
                 let col = start["character"].as_u64().unwrap_or(0) as usize;
-                let rel = path.strip_prefix(&root).unwrap_or(&path).display().to_string();
+                let rel = path.strip_prefix(root).unwrap_or(&path).display().to_string();
                 let container = s["containerName"].as_str().filter(|c| !c.is_empty());
                 let hint = match container {
                     Some(c) => format!("{c} · {rel}:{}", line + 1),
@@ -1632,7 +1631,8 @@ impl Editor {
                 && let Some(l) = doc.lsp.link(cid)
                 && (i64::from(l.version) != v || l.behind())
             {
-                return Err(format!("{} changed since the server computed this edit", doc.display_name()));
+                let name = doc.display_name(&self.root);
+                return Err(format!("{name} changed since the server computed this edit"));
             }
         }
         for dc in doc_changes.into_iter().flatten() {
@@ -2309,10 +2309,10 @@ impl Editor {
             return;
         }
         let generation = self.lsp.refs.generation;
-        let here = std::env::current_dir().unwrap_or_else(|_| root.clone());
+        let here = self.root.clone();
         let asked = std::time::Instant::now();
         self.events.jobs().spawn(move || {
-            // (paths as the server's list shows them — from where tarae runs, not the server's root)
+            // (paths as the server's list shows them — from the editor's root, not the server's)
             let found = crate::picker::word_matches(&root, &name).map(|items| {
                 items
                     .into_iter()
@@ -2440,9 +2440,8 @@ impl Editor {
                 if let Some(t) = ed.lsp.trace.as_mut() {
                     t.step("lines read");
                 }
-                let root = std::env::current_dir().unwrap_or_default();
                 let declared = ed.lsp.refs.declared.clone().unwrap_or_default();
-                let items = place_items(&root, places.clone(), &declared);
+                let items = place_items(&ed.root, places.clone(), &declared);
                 // The text matches shown while the server loaded (N3): its answer takes their place — said;
                 // once they were left (one picked, or closed), the answer isn't pushed on you
                 if let Some(id) = ed.lsp.refs.texts {
@@ -2459,7 +2458,7 @@ impl Editor {
                     }
                     return;
                 }
-                let mut picker = Picker::new(goto.noun(), items, true).grouped(root);
+                let mut picker = Picker::new(goto.noun(), items, true).grouped(ed.root.clone());
                 let name = &ed.lsp.refs.name;
                 picker.emphasis = (!name.is_empty())
                     .then(|| regex::Regex::new(&format!(r"\b{}\b", regex::escape(name))).ok())
@@ -2555,7 +2554,7 @@ impl Editor {
     /// `space D` — diagnostics in every file the servers reported: open ones (live), then the rest; errors
     /// first.
     pub fn workspace_diagnostics_picker(&mut self) {
-        let root = std::env::current_dir().unwrap_or_default();
+        let root = self.root.clone();
         let rel = |p: &std::path::Path| p.strip_prefix(&root).unwrap_or(p).display().to_string();
         let mut rows: Vec<(u8, String, Item)> = Vec::new();
         let mut push = |sev: u8, path: &std::path::Path, line: usize, col: usize, msg: &str| {
@@ -3896,7 +3895,7 @@ mod tests {
         let other = dir.join("other.rs");
         std::fs::write(&other, "// other\nuse crate::a;\n\npub fn a() {}\n").unwrap();
         let other = std::fs::canonicalize(&other).unwrap();
-        ed.project_root = Some(dir.clone());
+        ed.root = dir.clone();
         let cid = ed.doc().lsp.client.unwrap();
         let caps =
             json!({ "positionEncoding": "utf-8", "definitionProvider": true, "referencesProvider": true });
@@ -3953,7 +3952,7 @@ mod tests {
     fn the_references_tool_gives_text_matches_while_the_server_cannot() {
         let (mut ed, file, _log) = setup("tool-refs-loading", "fn a() {}\nfn b() { a() }\n// ab, A\n");
         let dir = file.parent().unwrap().to_path_buf();
-        ed.project_root = Some(dir.clone());
+        ed.root = dir.clone();
         let args = json!({"path": "main.rs", "symbol": "a"});
         let t = ask_tool(&mut ed, 1, args.clone()).unwrap();
         assert!(t.contains("— fake is starting, so these are the whole-word text matches of `a`"), "{t}");
@@ -3986,7 +3985,7 @@ mod tests {
         let (mut ed, file, log) =
             setup("tool-syms", "struct S;\nimpl S {\n    fn f(&self) {\n        1;\n    }\n}\n");
         let dir = file.parent().unwrap().to_path_buf();
-        ed.project_root = Some(dir.clone());
+        ed.root = dir.clone();
         let syms = |ed: &mut Editor, id: u64, args: Value| {
             crate::nav::symbols(ed, crate::tools::Call::test(id), &args).unwrap();
             settle_for(ed, 10, |_| tool_answer(id).is_some());

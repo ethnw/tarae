@@ -329,7 +329,7 @@ impl Editor {
 
     /// Where the preflight runs: the project.
     fn preflight_root(&self) -> std::path::PathBuf {
-        self.project_root.clone().unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+        self.root.clone()
     }
 
     /// Err while a task runs (the panel is one run's).

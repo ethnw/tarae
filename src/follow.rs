@@ -223,9 +223,10 @@ enum Mention {
     Name(String, Option<String>),
 }
 
-/// Mentions in `text` (with where they end), in order. `in_code`: the text starts inside a `code span`.
-fn mentions(text: &str, in_code: bool) -> Vec<(usize, Mention)> {
-    let mut out: Vec<(usize, Mention)> = refs_in(text)
+/// Mentions in `text` (with where they end), in order — relative places from `root`. `in_code`: the text
+/// starts inside a `code span`.
+fn mentions(root: &Path, text: &str, in_code: bool) -> Vec<(usize, Mention)> {
+    let mut out: Vec<(usize, Mention)> = refs_in(root, text)
         .into_iter()
         .map(|(r, link)| {
             // `path:12-30` / `path:12–30`: to 30
@@ -291,7 +292,8 @@ pub fn on_words(ed: &mut Editor, all: bool) {
         .enumerate()
         .skip(seen)
         .filter_map(|(k, (_, at, why))| {
-            let (_, m) = mentions(at, false).into_iter().find(|m| matches!(m.1, Mention::Place(..)))?;
+            let (_, m) =
+                mentions(&ed.root, at, false).into_iter().find(|m| matches!(m.1, Mention::Place(..)))?;
             let Mention::Place(path, lines) = m else { return None };
             let ours = path.is_file() && in_project(ed, &path);
             ours.then(|| (k, Stop { path, lines, why: why.clone(), shown: true }))
@@ -299,7 +301,7 @@ pub fn on_words(ed: &mut Editor, all: bool) {
         .collect();
     let taken = tags.len();
     // Places inside a tag are the tag's
-    let found: Vec<(usize, Mention)> = mentions(&text[from..cut], in_code)
+    let found: Vec<(usize, Mention)> = mentions(&ed.root, &text[from..cut], in_code)
         .into_iter()
         .filter(|(at, _)| !tags.iter().any(|t| t.0.contains(&(from + at - 1))))
         .collect();
@@ -343,6 +345,7 @@ fn look_at(ed: &mut Editor, path: &Path, lines: Range<usize>, why: String, paced
     if !path.is_file() || !in_project(ed, path) {
         return;
     }
+    let what = crate::chat::shown(&ed.root, path);
     let Some(f) = follow(ed) else { return };
     f.wanted = None;
     let stop = Stop { path: path.to_path_buf(), lines: lines.clone(), why, shown: false };
@@ -361,7 +364,7 @@ fn look_at(ed: &mut Editor, path: &Path, lines: Range<usize>, why: String, paced
     };
     let look = Look {
         verb: "look",
-        what: crate::chat::shown(path),
+        what,
         pattern: false,
         range,
         link: Some(crate::chat::Link { path: path.to_path_buf(), line: lines.start }),
@@ -383,6 +386,7 @@ fn look_at(ed: &mut Editor, path: &Path, lines: Range<usize>, why: String, paced
 /// The walk-through's next stop, once the one showing has had its time (the explanation after it, at
 /// reading speed: 2.5–8 s) — then it wakes itself for the one after. Not while the user has taken over.
 fn play(ed: &mut Editor) {
+    let root = ed.root.clone();
     let Some(f) = follow(ed) else { return };
     if !f.active() || f.playing.is_some_and(|(until, _)| std::time::Instant::now() < until) {
         return;
@@ -404,7 +408,7 @@ fn play(ed: &mut Editor) {
     };
     let look = Look {
         verb: "show",
-        what: crate::chat::shown(&stop.path),
+        what: crate::chat::shown(&root, &stop.path),
         pattern: false,
         range,
         link: Some(crate::chat::Link { path: stop.path.clone(), line: lines.start }),
@@ -508,11 +512,14 @@ fn find_wanted(ed: &mut Editor) {
 
 /// A tool finished — a content-mode Grep moves to its first hit.
 pub fn on_result(ed: &mut Editor, id: &str, text: &str) {
+    let root = ed.root.clone();
     let Some(f) = follow(ed) else { return };
     if !f.calls.iter().any(|(i, n)| i == id && n == "Grep") {
         return;
     }
-    let Some((_, hit)) = text.lines().take(20).find_map(|l| refs_in(l).into_iter().next()) else { return };
+    let Some((_, hit)) = text.lines().take(20).find_map(|l| refs_in(&root, l).into_iter().next()) else {
+        return;
+    };
     if let Some(g) = &mut f.gaze {
         g.path = Some(hit.path.clone());
         g.lines = Some(hit.line..hit.line + 1);
@@ -546,7 +553,7 @@ pub fn on_done(ed: &mut Editor) {
                 .iter()
                 .rev()
                 .filter(|m| m.role == Role::Assistant)
-                .find_map(|m| refs_in(&m.text).into_iter().next())
+                .find_map(|m| refs_in(&ed.root, &m.text).into_iter().next())
                 .map(|(_, l)| l)
         });
         if let Some(link) = &first {
@@ -621,12 +628,11 @@ pub fn reading(ed: &mut Editor) -> bool {
 /// The list a walk-through leaves.
 const TOUR: &str = "Claude's walk-through";
 
-/// Whether `path` is in the project (`Editor::project_root` — the folder tarae started in, links resolved):
+/// Whether `path` is in the project (`Editor::root` — the folder tarae started in, links resolved):
 /// follow goes nowhere else — a file Claude reads elsewhere (its memory under `~/.claude`, a temp file)
 /// isn't opened; the card still says what it reads.
 fn in_project(ed: &Editor, path: &Path) -> bool {
-    let root = ed.project_root.as_deref();
-    root.is_some_and(|root| std::fs::canonicalize(path).is_ok_and(|p| p.starts_with(root)))
+    std::fs::canonicalize(path).is_ok_and(|p| p.starts_with(&ed.root))
 }
 
 /// Moves the editor there (when following and the user hasn't taken over) — in the project only.
@@ -734,8 +740,9 @@ mod tests {
 
     #[test]
     fn places_and_names_in_what_claude_says() {
-        let cwd = std::env::current_dir().unwrap();
+        let cwd = Path::new("/proj");
         let m = mentions(
+            cwd,
             "Built in src/filetree.rs:120-140, then `Tree::rows()` lays it out (see `open`).",
             false,
         );
@@ -747,12 +754,15 @@ mod tests {
                 &Mention::Name("open".into(), None),
             ]
         );
-        assert!(mentions("a `let x = 1` and ```rust\nfn a() {}\n```", false).is_empty(), "code, not names");
+        assert!(
+            mentions(cwd, "a `let x = 1` and ```rust\nfn a() {}\n```", false).is_empty(),
+            "code, not names"
+        );
         assert_eq!(
-            mentions("src/a.rs:7–9 and 12:30", false)[0].1,
+            mentions(cwd, "src/a.rs:7–9 and 12:30", false)[0].1,
             Mention::Place(cwd.join("src/a.rs"), 6..9)
         );
         // Started inside a span: the next backtick closes it
-        assert_eq!(mentions("still code` then `wind`", true).len(), 1);
+        assert_eq!(mentions(cwd, "still code` then `wind`", true).len(), 1);
     }
 }

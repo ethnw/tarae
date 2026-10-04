@@ -9,7 +9,7 @@
 //!   by file then line, each hit its line of code (and context lines when asked), capped and said so; or
 //!   the files, or counts.
 //!
-//! Both only read, inside the project (`Editor::project_root`) — no card. Disk and searching go to workers.
+//! Both only read, inside the project (`Editor::root`) — no card. Disk and searching go to workers.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -1069,7 +1069,7 @@ fn files_text(rows: Vec<(String, bool)>, tests: bool, counts: bool, offset: usiz
 
 /// The project — where both tools look.
 fn project_root(ed: &Editor) -> PathBuf {
-    ed.project_root.clone().unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+    ed.root.clone()
 }
 
 /// `path` relative to `root` when inside it.

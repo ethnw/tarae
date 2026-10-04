@@ -12,6 +12,7 @@
 //! shown in a preview card. Cancel = kill the process.
 
 use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{Sender, channel};
 use std::time::{Duration, Instant};
@@ -152,46 +153,57 @@ impl Default for LlmConfig {
 
 // ── Spare process ───────────────────────────────────────────────────────
 
-/// A pre-spawned process for the next request (at most one).
+/// A pre-spawned process for the next request (at most one), and the folder it runs in.
 #[derive(Default)]
 pub struct Warm {
-    child: Option<Child>,
+    child: Option<(Child, PathBuf)>,
 }
 
 impl Warm {
-    /// Spawns one if there's no live spare. spawn itself returns at once (slow init happens in the child).
-    pub fn ensure(&mut self, cfg: &LlmConfig) -> Result<(), String> {
-        if let Some(c) = &mut self.child
+    /// Spawns one in `dir` if there's no live spare there (one elsewhere goes). spawn itself returns at once
+    /// (slow init happens in the child).
+    pub fn ensure(&mut self, cfg: &LlmConfig, dir: &Path) -> Result<(), String> {
+        if let Some((c, at)) = &mut self.child
             && matches!(c.try_wait(), Ok(None))
         {
-            return Ok(());
+            if at == dir {
+                return Ok(());
+            }
+            // Spared for another folder: it goes (reaped off the main thread)
+            let (mut old, _) = self.child.take().expect("just seen");
+            std::thread::spawn(move || {
+                let _ = old.kill();
+                let _ = old.wait();
+            });
         }
-        self.child = Some(spawn(cfg, &[]).map_err(|e| format!("{}: {e}", cfg.command))?);
+        let child = spawn(cfg, &[], dir).map_err(|e| format!("{}: {e}", cfg.command))?;
+        self.child = Some((child, dir.to_path_buf()));
         Ok(())
     }
 
     /// The spare's process (`:procs`).
     pub fn pid(&self) -> Option<u32> {
-        self.child.as_ref().map(Child::id)
+        self.child.as_ref().map(|(c, _)| c.id())
     }
 
-    fn take(&mut self, cfg: &LlmConfig) -> Result<Child, String> {
-        self.ensure(cfg)?;
-        Ok(self.child.take().expect("ensured"))
+    fn take(&mut self, cfg: &LlmConfig, dir: &Path) -> Result<Child, String> {
+        self.ensure(cfg, dir)?;
+        Ok(self.child.take().expect("ensured").0)
     }
 }
 
 impl Drop for Warm {
     fn drop(&mut self) {
-        if let Some(c) = &mut self.child {
+        if let Some((c, _)) = &mut self.child {
             let _ = c.kill();
         }
     }
 }
 
-pub fn spawn(cfg: &LlmConfig, extra: &[&str]) -> std::io::Result<Child> {
+/// Claude, started in `dir` (the project root — its relative paths, its tools and its sessions are there).
+pub fn spawn(cfg: &LlmConfig, extra: &[&str], dir: &Path) -> std::io::Result<Child> {
     let mut cmd = Command::new(&cfg.command);
-    cmd.args(&cfg.args).args(extra);
+    cmd.current_dir(dir).args(&cfg.args).args(extra);
     if let Some(m) = &cfg.model {
         cmd.args(["--model", m]);
     }
@@ -733,7 +745,7 @@ impl Review {
 /// When the ask prompt opens or "ask" starts being typed — spawns the spare process (overlapping typing).
 pub fn prewarm(ed: &mut Editor) {
     let cfg = ed.config.llm.clone();
-    if let Err(e) = ed.llm_warm.ensure(&cfg) {
+    if let Err(e) = ed.llm_warm.ensure(&cfg, &ed.root) {
         ed.set_error(e);
     }
 }
@@ -757,7 +769,8 @@ pub fn ask(ed: &mut Editor, instruction: &str) -> Result<(), String> {
             (r.from(), r.to())
         })
         .collect();
-    let prompt = build_prompt(instruction, &doc.display_name(), &doc.text, &ranges, cfg.context_lines);
+    let prompt =
+        build_prompt(instruction, &doc.display_name(&ed.root), &doc.text, &ranges, cfg.context_lines);
     let hunks = ranges
         .iter()
         .map(|&(from, to)| Hunk {
@@ -802,7 +815,7 @@ fn start(
     hunks: Vec<Hunk>,
 ) -> Result<(), String> {
     let cfg = ed.config.llm.clone();
-    let mut child = ed.llm_warm.take(&cfg)?;
+    let mut child = ed.llm_warm.take(&cfg, &ed.root)?;
     // Write the message and close stdin — the process exits on its own after this one turn.
     // Before anything is installed: a failed write leaves no review waiting forever.
     let sent = child.stdin.take().ok_or_else(|| "claude: no stdin".to_string()).and_then(|mut stdin| {

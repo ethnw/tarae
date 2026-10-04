@@ -241,11 +241,6 @@ fn path_matches_in(pat: &Path, path: &Path) -> bool {
     go(&names(pat), &names(path))
 }
 
-/// The project's folder (where tarae started), resolved — what the `project` permission reads.
-pub(super) fn project_root() -> Option<PathBuf> {
-    std::env::current_dir().ok().and_then(|d| std::fs::canonicalize(d).ok())
-}
-
 /// A connection's host:port, as approvals keep it (an IPv6 address in brackets).
 pub(super) fn target(c: &Connect) -> String {
     if c.host.contains(':') { format!("[{}]:{}", c.host, c.port) } else { format!("{}:{}", c.host, c.port) }
@@ -392,7 +387,7 @@ impl Editor {
             .iter()
             .filter_map(|p| if let Permission::Read(pat) = p { Some(pat.clone()) } else { None })
             .collect();
-        let project = declared.contains(&Permission::Project).then(project_root).flatten();
+        let project = declared.contains(&Permission::Project).then(|| self.root.clone());
         if patterns.is_empty() && project.is_none() {
             return Err(Some("it didn't ask to read files (permissions())".into()));
         }

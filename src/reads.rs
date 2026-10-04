@@ -89,10 +89,10 @@ pub fn request(ed: &mut Editor, request_id: &str, req: &Value) -> Option<Value> 
     let input = req["input"].clone();
     let request_id = request_id.to_string();
     let store = ed.allow_path.clone();
-    let cwd = std::env::current_dir().unwrap_or_default();
+    // (the root, a real path, is where claude runs — its relative paths are from there)
+    let root = ed.root.clone();
     ed.events.jobs().spawn(move || {
-        let root = std::fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
-        let look = look(&tool, &input, &cwd);
+        let look = look(&tool, &input, &root);
         let kept = crate::allow::Store::read(store.as_deref()).get(&root);
         let ok = covered(&look, &root, &chat, &kept);
         move |ed: &mut Editor| {

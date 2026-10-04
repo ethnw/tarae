@@ -288,9 +288,7 @@ impl Editor {
                     s.focus |= focus;
                 }
                 None => {
-                    let cwd = std::env::current_dir().unwrap_or_default();
-                    let root = std::fs::canonicalize(&cwd).unwrap_or(cwd);
-                    let mut s = crate::sidebar::Sidebar::new(crate::sidebar::Mode::Plugin, root);
+                    let mut s = crate::sidebar::Sidebar::new(crate::sidebar::Mode::Plugin, self.root.clone());
                     s.focus = focus;
                     self.sidebar = Some(s);
                 }

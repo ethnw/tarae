@@ -203,7 +203,7 @@ impl Editor {
                 let line = doc.text.byte_to_line(sel.primary().cursor(&doc.text));
                 let text: String = doc.text.line(line).chars().take(200).collect();
                 Some(crate::picker::Item {
-                    label: format!("{}:{}", doc.display_name(), line + 1),
+                    label: format!("{}:{}", doc.display_name(&self.root), line + 1),
                     action: crate::picker::Action::Jump { index, doc: j.doc, line },
                     hint: text.trim().to_string(),
                     glyph: None,

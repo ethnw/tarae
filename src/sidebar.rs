@@ -566,10 +566,7 @@ impl Editor {
                 s.list_of = None; // another view may have used the rows
                 s.git_of = None;
             }
-            None => {
-                let cwd = std::env::current_dir().unwrap_or_default();
-                self.sidebar = Some(Sidebar::new(mode, std::fs::canonicalize(&cwd).unwrap_or(cwd)));
-            }
+            None => self.sidebar = Some(Sidebar::new(mode, self.root.clone())),
         }
         if let Some(c) = self.chat.as_mut() {
             c.focused = false;

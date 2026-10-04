@@ -174,7 +174,8 @@ impl Editor {
             ([], []) => {}
             ([one], []) => {
                 if let Some(doc) = self.docs.iter().find(|d| d.id == *one) {
-                    let msg = format!("Saved {} · {} lines", doc.display_name(), doc.text.len_lines());
+                    let msg =
+                        format!("Saved {} · {} lines", doc.display_name(&self.root), doc.text.len_lines());
                     self.set_success(msg);
                 }
             }

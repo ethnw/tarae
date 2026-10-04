@@ -48,10 +48,12 @@ struct Run {
     err: String,
 }
 
-fn run(cmd: &str, input: Option<&str>) -> Result<Run, String> {
+/// `cmd` run in `dir` (the editor's root).
+fn run(cmd: &str, input: Option<&str>, dir: &std::path::Path) -> Result<Run, String> {
     let mut child = Command::new("sh")
         .arg("-c")
         .arg(cmd)
+        .current_dir(dir)
         .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -101,11 +103,12 @@ impl Editor {
             ranges.iter().map(|r| doc.text.byte_slice(r.from()..r.to()).to_string()).collect();
         // Quiet note, not a toast — most commands finish before it would be read, and the change shows
         self.note(format!("running {cmd}…"));
+        let dir = self.root.clone();
         self.events.jobs().spawn(move || {
             let runs: Result<Vec<Run>, String> = if kind.feeds() {
-                inputs.iter().map(|s| run(&cmd, Some(s))).collect()
+                inputs.iter().map(|s| run(&cmd, Some(s), &dir)).collect()
             } else {
-                run(&cmd, None).map(|r| vec![r])
+                run(&cmd, None, &dir).map(|r| vec![r])
             };
             move |ed: &mut Editor| ed.shell_done(kind, &cmd, id, version, &ranges, &inputs, runs)
         });
@@ -185,10 +188,11 @@ mod tests {
 
     #[test]
     fn runs_with_input_and_reports_failure() {
-        let r = run("tr a-z A-Z", Some("hi")).unwrap();
+        let dir = std::env::temp_dir();
+        let r = run("tr a-z A-Z", Some("hi"), &dir).unwrap();
         assert!(r.ok);
         assert_eq!(r.out, "HI");
-        let r = run("echo nope >&2; exit 3", None).unwrap();
+        let r = run("echo nope >&2; exit 3", None, &dir).unwrap();
         assert!(!r.ok);
         assert_eq!(r.err, "nope");
     }

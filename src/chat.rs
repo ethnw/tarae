@@ -310,13 +310,14 @@ impl Chat {
         blocks.pop()
     }
 
-    /// Every place the conversation points at, oldest first (repeats in a row collapsed).
-    pub fn links(&self) -> Vec<Link> {
+    /// Every place the conversation points at, oldest first (repeats in a row collapsed); relative ones
+    /// from `root`.
+    pub fn links(&self, root: &Path) -> Vec<Link> {
         let mut out: Vec<Link> = Vec::new();
         for m in &self.msgs {
             let found: Vec<Link> = match m.role {
                 Role::Tool => m.look.iter().filter_map(|l| l.link.clone()).collect(),
-                Role::Assistant => refs_in(&m.text).into_iter().map(|(_, l)| l).collect(),
+                Role::Assistant => refs_in(root, &m.text).into_iter().map(|(_, l)| l).collect(),
                 Role::User => m.attached.iter().cloned().collect(),
                 _ => Vec::new(),
             };
@@ -382,7 +383,7 @@ pub fn open(ed: &mut Editor) {
             // The project's conversations, read on a worker — a recent one continues (the process spawned
             // meanwhile gives way to one resuming it, unless something was said already)
             if let Some(dir) = ed.chats_dir.clone() {
-                let root = std::env::current_dir().unwrap_or_default();
+                let root = ed.root.clone();
                 ed.events.jobs().spawn(move || {
                     let saved = crate::chats::load(&dir, &root);
                     move |ed: &mut Editor| loaded(ed, saved)
@@ -429,7 +430,7 @@ pub fn continue_with(ed: &mut Editor, saved: crate::chats::Saved) {
 pub fn past_picker(ed: &mut Editor) {
     use crate::picker::{Action, Item};
     let Some(dir) = ed.chats_dir.clone() else { return ed.set_status("conversations aren't kept here") };
-    let root = std::env::current_dir().unwrap_or_default();
+    let root = ed.root.clone();
     let now_id = ed.chat.as_ref().and_then(|c| c.session.clone());
     let fill: crate::picker::Fill = Box::new(move || {
         let now = crate::chats::now();
@@ -456,7 +457,7 @@ pub fn past_picker(ed: &mut Editor) {
 /// `:chat-resume <id>` — continue that conversation (read on a worker).
 pub fn resume(ed: &mut Editor, id: &str) {
     let Some(dir) = ed.chats_dir.clone() else { return };
-    let root = std::env::current_dir().unwrap_or_default();
+    let root = ed.root.clone();
     let id = id.to_string();
     if ed.chat.is_none() {
         open(ed);
@@ -499,7 +500,7 @@ pub fn restore(ed: &mut Editor, r: Restored) {
     c.edits.at_end = r.at_end;
     ed.chat = Some(c);
     let (Some(id), Some(dir)) = (r.session, ed.chats_dir.clone()) else { return ensure_proc(ed) };
-    let root = std::env::current_dir().unwrap_or_default();
+    let root = ed.root.clone();
     ed.events.jobs().spawn(move || {
         let saved = crate::chats::load(&dir, &root);
         move |ed: &mut Editor| {
@@ -531,7 +532,7 @@ fn kept(ed: &Editor) -> Option<(std::path::PathBuf, std::path::PathBuf, crate::c
         plan,
         seq: crate::chats::seq(),
     };
-    Some((dir, std::env::current_dir().unwrap_or_default(), saved))
+    Some((dir, ed.root.clone(), saved))
 }
 
 /// The turn ended: the conversation is kept (on a worker) — its rows and claude's session.
@@ -607,7 +608,7 @@ fn ensure_proc(ed: &mut Editor) {
     if !c.no_thought_flag {
         extra.extend(["--thinking-display", "summarized"]);
     }
-    let mut child = match llm::spawn(&cfg, &extra) {
+    let mut child = match llm::spawn(&cfg, &extra, &ed.root) {
         Ok(child) => child,
         Err(e) => {
             c.msgs.push(Msg::new(Role::Note, format!("{}: {e}", cfg.command), ""));
@@ -652,7 +653,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
                 return;
             }
             c.state = State::Thinking;
-            let mut look = look(&name, &input);
+            let mut look = look(&ed.root, &name, &input);
             // A reply points at its note
             if let Some(n) =
                 input["reply_to"].as_u64().and_then(|id| ed.notes.list.iter().find(|n| n.id == id))
@@ -1049,7 +1050,7 @@ pub fn stop(ed: &mut Editor) {
 fn context(ed: &Editor) -> (String, String, Vec<(DocId, u64)>) {
     let doc = ed.doc();
     let text = &doc.text;
-    let name = doc.display_name();
+    let name = doc.display_name(&ed.root);
     let lang = doc.syntax.as_ref().map(|s| s.lang.name.clone()).unwrap_or_default();
     let sel = doc.selection().primary();
     let head = sel.cursor(text);
@@ -1068,7 +1069,12 @@ fn context(ed: &Editor) -> (String, String, Vec<(DocId, u64)>) {
     }
     for (id, r) in screen.iter().filter(|s| s.0 != doc.id) {
         if let Some(d) = ed.docs.iter().find(|d| d.id == *id) {
-            ctx.push_str(&format!("also on screen: {} lines {}-{}\n", d.display_name(), r.start + 1, r.end));
+            ctx.push_str(&format!(
+                "also on screen: {} lines {}-{}\n",
+                d.display_name(&ed.root),
+                r.start + 1,
+                r.end
+            ));
         }
     }
     let mut chip = doc.display_name_short();
@@ -1134,7 +1140,7 @@ fn context(ed: &Editor) -> (String, String, Vec<(DocId, u64)>) {
     if !others.is_empty() {
         ctx.push_str("<open-files>\n");
         for d in others.iter().take(30) {
-            ctx.push_str(&d.display_name());
+            ctx.push_str(&d.display_name(&ed.root));
             ctx.push_str(if d.is_modified() { " (unsaved)\n" } else { "\n" });
         }
         ctx.push_str("</open-files>\n");
@@ -1147,7 +1153,7 @@ fn context(ed: &Editor) -> (String, String, Vec<(DocId, u64)>) {
             budget -= n;
             ctx.push_str(&format!(
                 "<unsaved-file path=\"{}\">\n{}</unsaved-file>\n",
-                d.display_name(),
+                d.display_name(&ed.root),
                 d.text
             ));
             sent.push((d.id, d.version()));
@@ -1177,10 +1183,12 @@ fn on_screen(ed: &Editor) -> Vec<(DocId, Range<usize>)> {
 
 // ── Links ─────────────────────────────────────────────────────────────────
 
-/// A tool call → its row.
-fn look(name: &str, input: &serde_json::Value) -> Look {
+/// A tool call → its row (paths from `root`).
+fn look(root: &Path, name: &str, input: &serde_json::Value) -> Look {
     let s = |k: &str| input[k].as_str().unwrap_or_default().to_string();
     let n = |k: &str| input[k].as_u64().map(|v| v as usize);
+    let shown = |p: &Path| shown(root, p);
+    let resolve = |p: &str| resolve(root, p);
     let within =
         |p: String| if p.is_empty() { String::new() } else { format!("in {}", shown(Path::new(&p))) };
     match name {
@@ -1295,15 +1303,15 @@ fn look(name: &str, input: &serde_json::Value) -> Look {
     }
 }
 
-/// Relative to the project root when inside it.
-pub fn shown(p: &Path) -> String {
-    let cwd = std::env::current_dir().unwrap_or_default();
-    p.strip_prefix(&cwd).unwrap_or(p).display().to_string()
+/// Relative to the project root (`Editor::root`) when inside it.
+pub fn shown(root: &Path, p: &Path) -> String {
+    p.strip_prefix(root).unwrap_or(p).display().to_string()
 }
 
-pub fn resolve(p: &str) -> PathBuf {
+/// A path Claude gave: a relative one is from the project root (where its process runs).
+pub fn resolve(root: &Path, p: &str) -> PathBuf {
     let p = Path::new(p);
-    if p.is_absolute() { p.to_path_buf() } else { std::env::current_dir().unwrap_or_default().join(p) }
+    if p.is_absolute() { p.to_path_buf() } else { root.join(p) }
 }
 
 /// A stop of a walk-through, as Claude writes it in its answer: `<show at="path:start-end">why</show>`
@@ -1345,8 +1353,8 @@ pub fn displayed(text: &str) -> std::borrow::Cow<'_, str> {
 }
 
 /// `path:line` references in text (byte range of `path:line` · target). Paths must look like files
-/// (a `/` or an extension) — no disk access, a miss only shows when followed.
-pub fn refs_in(text: &str) -> Vec<(Range<usize>, Link)> {
+/// (a `/` or an extension) — no disk access, a miss only shows when followed. Relative ones are from `root`.
+pub fn refs_in(root: &Path, text: &str) -> Vec<(Range<usize>, Link)> {
     let is_path = |c: char| c.is_ascii_alphanumeric() || "_./-~+@".contains(c);
     let b = text.as_bytes();
     let mut out = Vec::new();
@@ -1372,7 +1380,7 @@ pub fn refs_in(text: &str) -> Vec<(Range<usize>, Link)> {
             continue;
         }
         let Ok(line) = text[i + 1..i + 1 + digits].parse::<usize>() else { continue };
-        out.push((start..i + 1 + digits, Link { path: resolve(path), line: line.saturating_sub(1) }));
+        out.push((start..i + 1 + digits, Link { path: resolve(root, path), line: line.saturating_sub(1) }));
     }
     out
 }
@@ -1380,7 +1388,7 @@ pub fn refs_in(text: &str) -> Vec<(Range<usize>, Link)> {
 /// Opens a link (keeps the chat's focus — the code shows beside the conversation).
 pub fn jump(ed: &mut Editor, link: Link) {
     if !link.path.is_file() {
-        return ed.set_status(format!("{} isn't a file here", shown(&link.path)));
+        return ed.set_status(format!("{} isn't a file here", shown(&ed.root, &link.path)));
     }
     match ed.open_at(&link.path, link.line, 0) {
         // Centered — the code around it is what the conversation is about
@@ -1392,7 +1400,7 @@ pub fn jump(ed: &mut Editor, link: Link) {
 /// `C-]` (`C-g`): the newest link, then one further back each press (wraps).
 pub fn follow(ed: &mut Editor) {
     let Some(c) = &mut ed.chat else { return };
-    let links = c.links();
+    let links = c.links(&ed.root);
     if links.is_empty() {
         return ed.set_status("nothing to go to yet");
     }
@@ -1591,22 +1599,25 @@ mod tests {
     #[test]
     fn refs_in_answers() {
         let text = "See `src/lib.rs:12` and main.rs:3-5 — 파일 /abs/p.rs:7. Not 12:30 or http://x.com:80.";
+        let root = Path::new("/proj");
         let got: Vec<(String, usize)> =
-            refs_in(text).into_iter().map(|(r, l)| (text[r].to_string(), l.line)).collect();
+            refs_in(root, text).into_iter().map(|(r, l)| (text[r].to_string(), l.line)).collect();
         assert_eq!(got, [("src/lib.rs:12".into(), 11), ("main.rs:3".into(), 2), ("/abs/p.rs:7".into(), 6)]);
-        assert_eq!(refs_in("/abs/p.rs:7")[0].1.path, Path::new("/abs/p.rs"));
-        assert!(refs_in("no refs: 1, v1.2:3").is_empty());
+        assert_eq!(refs_in(root, "/abs/p.rs:7")[0].1.path, Path::new("/abs/p.rs"));
+        assert_eq!(refs_in(root, "src/lib.rs:12")[0].1.path, root.join("src/lib.rs"), "from the root");
+        assert!(refs_in(root, "no refs: 1, v1.2:3").is_empty());
     }
 
     /// A command's row: the command in a line, ended by how it ended once its result comes.
     #[test]
     fn a_command_row_ends_with_how_it_ended() {
-        let r = look("mcp__tarae__run", &serde_json::json!({"command": "cargo  test\n  -p tarae"}));
+        let root = Path::new("/proj");
+        let r = look(root, "mcp__tarae__run", &serde_json::json!({"command": "cargo  test\n  -p tarae"}));
         assert_eq!(
             (r.verb, r.what.as_str(), r.pattern, r.link.is_none()),
             ("run", "cargo test -p tarae", true, true)
         );
-        let long = look("mcp__tarae__run", &serde_json::json!({"command": "x".repeat(60)}));
+        let long = look(root, "mcp__tarae__run", &serde_json::json!({"command": "x".repeat(60)}));
         assert_eq!(long.what.chars().count(), 48);
         let mut ed = editor("");
         let mut c = Chat::new();
@@ -1621,17 +1632,20 @@ mod tests {
 
     #[test]
     fn tool_calls_become_rows() {
-        let cwd = std::env::current_dir().unwrap();
+        let cwd = Path::new("/proj");
         let file = cwd.join("src/lib.rs");
-        let r = look("Read", &serde_json::json!({"file_path": file, "offset": 10, "limit": 40}));
+        let r = look(cwd, "Read", &serde_json::json!({"file_path": file, "offset": 10, "limit": 40}));
         assert_eq!((r.verb, r.what.as_str(), r.range.as_str()), ("read", "src/lib.rs", "L10–49"));
-        assert_eq!(r.link, Some(Link { path: file, line: 9 }));
-        let g = look("Grep", &serde_json::json!({"pattern": "fn add", "path": cwd.join("src")}));
+        assert_eq!(r.link, Some(Link { path: file.clone(), line: 9 }));
+        // (a relative path is from the root)
+        let rel = look(cwd, "Read", &serde_json::json!({"file_path": "src/lib.rs"}));
+        assert_eq!(rel.link, Some(Link { path: file, line: 0 }));
+        let g = look(cwd, "Grep", &serde_json::json!({"pattern": "fn add", "path": cwd.join("src")}));
         assert_eq!(
             (g.verb, g.what.as_str(), g.range.as_str(), g.pattern),
             ("search", "fn add", "in src", true)
         );
-        let f = look("Glob", &serde_json::json!({"pattern": "**/*.rs"}));
+        let f = look(cwd, "Glob", &serde_json::json!({"pattern": "**/*.rs"}));
         assert_eq!((f.verb, f.range.as_str(), f.link), ("find", "", None));
     }
 

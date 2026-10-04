@@ -22,7 +22,7 @@ use crossterm::{execute, queue};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::config::{CursorShape, LineNumber};
-use crate::editor::{Editor, Mode, cwd};
+use crate::editor::{Editor, Mode};
 use crate::event::Event;
 use crate::filetree::Kind;
 use crate::graphemes;
@@ -146,8 +146,8 @@ const RESTING_REDRAW: std::time::Duration = std::time::Duration::from_millis(500
 
 fn event_loop(editor: &mut Editor) -> Result<()> {
     spawn_input(editor.events.sender());
-    crate::config::watch(editor.events.sender());
-    crate::git::watch(editor.events.sender());
+    crate::config::watch(editor.events.sender(), editor.root.clone());
+    crate::git::watch(editor.events.sender(), editor.root.clone());
     editor.procs_start_sampling();
     let mut out = io::stdout();
     let mut draw = true;
@@ -689,7 +689,7 @@ fn draw_debug_panel(
     let cw = [w * 45 / 100, w * 25 / 100];
     let cols = [(0, cw[0]), (cw[0] + 1, cw[1]), (cw[0] + cw[1] + 2, w.saturating_sub(cw[0] + cw[1] + 2))];
     let var_scope = color("variable").or(ui.base.fg);
-    let cwd = canonical_cwd();
+    let root = editor.root();
     let fn_color = color("function");
     for r in 0..rows {
         let y = (y0 + 1 + r) as u16;
@@ -774,9 +774,8 @@ fn draw_debug_panel(
                         continue;
                     };
                     let current = i == 0;
-                    // Only my code's frames (inside the working dir) are crisp — stdlib/runtime frames dimmed
-                    let mine =
-                        f.path.as_ref().is_some_and(|p| cwd.as_ref().is_some_and(|c| p.starts_with(c)));
+                    // Only my code's frames (inside the project) are crisp — stdlib/runtime frames dimmed
+                    let mine = f.path.as_ref().is_some_and(|p| p.starts_with(root));
                     apply(out, if current { Style { fg: color("warning"), ..card } } else { faint })?;
                     queue!(out, Print(if current { "▶ " } else { "  " }))?;
                     let file = f
@@ -2034,12 +2033,6 @@ fn draw_test_panel(
     Ok(())
 }
 
-/// The working directory, canonical (frame paths are) — `canonicalize` hits the disk, so only once.
-fn canonical_cwd() -> Option<&'static std::path::Path> {
-    static CANON: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
-    CANON.get_or_init(|| std::fs::canonicalize(cwd()).ok()).as_deref()
-}
-
 /// Strip test names' shared prefix (up to a `::` · `.` · `/` boundary) — if only one, keep the last segment.
 fn short_names<'a>(names: impl Iterator<Item = &'a str> + Clone) -> Vec<String> {
     let seps = |s: &str| {
@@ -2120,7 +2113,7 @@ fn draw_pane_title(
         if focused { Style { fg: ui.accent.fg, ..base } } else { Style { fg: ui.linenr.fg, ..base } },
     )?;
     queue!(out, Print(" ▎ "))?;
-    let name = fit_ellipsis(&doc.display_name(), r.w.saturating_sub(8));
+    let name = fit_ellipsis(&doc.display_name(&editor.root), r.w.saturating_sub(8));
     let name_style = if focused {
         base.patch(t.try_get("ui.text.focus").unwrap_or(Style { bold: true, ..Style::default() }))
     } else {
@@ -4475,17 +4468,15 @@ fn draw_picker(
     // Preview target
     let target = p.current().map(|i| i.action.clone());
     let preview_title = match &target {
-        Some(Action::Open(path) | Action::Goto { path, .. }) => {
-            path.strip_prefix(cwd()).unwrap_or(path).display().to_string()
-        }
+        Some(Action::Open(path) | Action::Goto { path, .. }) => rel_path(editor, path),
         Some(Action::Buffer(id) | Action::Jump { doc: id, .. }) => {
-            editor.docs.iter().find(|d| d.id == *id).map(|d| d.display_name()).unwrap_or_default()
+            editor.docs.iter().find(|d| d.id == *id).map(|d| d.display_name(&editor.root)).unwrap_or_default()
         }
         Some(Action::Code(i)) => match editor.action_preview(*i) {
             Some(crate::lsp_editor::ActionPreview::Ready(files)) => match files.as_slice() {
                 [f] => format!(
                     "{}  {}",
-                    rel_path(&f.path),
+                    rel_path(editor, &f.path),
                     crate::editdiff::summary(files).split("  ").nth(1).unwrap_or("")
                 ),
                 _ => crate::editdiff::summary(files),
@@ -4496,7 +4487,7 @@ fn draw_picker(
         Some(Action::ChangedFile(n)) => match editor.changed_files.get(*n) {
             Some(c) => format!(
                 "{}  {}",
-                rel_path(&c.path),
+                rel_path(editor, &c.path),
                 crate::editdiff::summary(&c.diff).split("  ").nth(1).unwrap_or("")
             ),
             None => String::new(),
@@ -4504,7 +4495,7 @@ fn draw_picker(
         Some(Action::ReplaceFile(n)) => match editor.replace_plan.get(*n) {
             Some(f) => format!(
                 "{}  {}",
-                rel_path(&f.path),
+                rel_path(editor, &f.path),
                 crate::editdiff::summary(&f.diff).split("  ").nth(1).unwrap_or("")
             ),
             None => String::new(),
@@ -4872,9 +4863,9 @@ fn draw_preview_row(
     }
 }
 
-/// Path relative to the current folder (unchanged if outside).
-fn rel_path(p: &std::path::Path) -> String {
-    p.strip_prefix(cwd()).unwrap_or(p).display().to_string()
+/// Path relative to the editor's root (unchanged if outside).
+fn rel_path(editor: &Editor, p: &std::path::Path) -> String {
+    editor.shown(p).display().to_string()
 }
 
 /// Code action preview line: file header (what it does + path + lines added/removed) or one diff line
@@ -4901,7 +4892,7 @@ fn draw_diff_row(
     let (minus_fg, plus_fg) = (ui.diff_minus.fg, ui.diff_plus.fg);
     let Some(li) = li else {
         // File header
-        let path = rel_path(&f.path);
+        let path = rel_path(editor, &f.path);
         let mut parts: Vec<(String, Style)> = match &f.op {
             FileOp::Edit => vec![("● ".into(), Style { fg: ui.accent.fg, ..card }), (path, strong)],
             FileOp::Create => vec![
@@ -4911,7 +4902,7 @@ fn draw_diff_row(
             ],
             FileOp::Rename(from) => vec![
                 ("→ ".into(), Style { fg: ui.accent.fg, bold: true, ..card }),
-                (rel_path(from), dim),
+                (rel_path(editor, from), dim),
                 ("  →  ".into(), faint),
                 (path, strong),
             ],
@@ -5035,7 +5026,7 @@ fn draw_header(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> 
         ui.base.patch(t.try_get("ui.text.focus").unwrap_or(Style { bold: true, ..Style::default() }));
     let sep = |keep| Seg { text: "  ›  ".into(), style: faint, keep };
     let mut left = vec![Seg { text: " ".into(), style: ui.base, keep: 255 }];
-    let project = cwd().file_name().map(|p| p.to_string_lossy().into_owned());
+    let project = editor.root.file_name().map(|p| p.to_string_lossy().into_owned());
     // Tests: a fixed project name (the checkout folder's name varies — worktrees, CI)
     #[cfg(test)]
     let project = project.map(|_| "tarae".to_string());
@@ -5043,7 +5034,7 @@ fn draw_header(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> 
         left.push(Seg { text: p, style: dim, keep: 20 });
         left.push(sep(20));
     }
-    let rel = doc.path.as_ref().map(|p| p.strip_prefix(cwd()).unwrap_or(p));
+    let rel = doc.path.as_deref().map(|p| editor.shown(p));
     let dirs: Vec<String> = rel
         .and_then(|r| r.parent())
         .map(|d| d.iter().map(|c| c.to_string_lossy().into_owned()).collect())
@@ -5196,7 +5187,7 @@ fn draw_statusline(
     }
     if !lay.header {
         let modified = if doc.is_modified() { " ●" } else { "" };
-        left.push(Seg { text: format!("  {}", doc.display_name()), style: strong, keep: 200 });
+        left.push(Seg { text: format!("  {}", doc.display_name(&editor.root)), style: strong, keep: 200 });
         left.push(Seg { text: modified.into(), style: accent, keep: 200 });
     }
     if let Some(b) = &editor.git_branch {
@@ -7670,7 +7661,7 @@ fn draw_chat(
                 }
                 // `path:line` in an answer: underlined, clickable
                 None => {
-                    let (l, found) = underline_refs(l);
+                    let (l, found) = underline_refs(&editor.root, l);
                     for (a, b, link) in found {
                         chat_links.push((y, text_x + a, text_x + b, link));
                     }
@@ -7766,7 +7757,7 @@ fn draw_chat(
         if code {
             hints.push(("C-r", "apply"));
         }
-        if !c.links().is_empty() {
+        if !c.links(&editor.root).is_empty() {
             hints.push(("C-]", "go to"));
         }
         // (how the screen goes along — after what the answer offers, where the row has room)
@@ -8022,13 +8013,15 @@ fn thought_rows(
 /// A clickable span in the chat pane: (start col, end col, target).
 type RefSpot = (usize, usize, crate::chat::Link);
 
-/// Underlines the `path:line` references in one answer row → (row, where they are).
-fn underline_refs(
-    row: &[crate::markdown::Span],
-) -> (std::borrow::Cow<'_, [crate::markdown::Span]>, Vec<RefSpot>) {
+/// Underlines the `path:line` references in one answer row → (row, where they are — relative ones from
+/// `root`).
+fn underline_refs<'a>(
+    root: &std::path::Path,
+    row: &'a [crate::markdown::Span],
+) -> (std::borrow::Cow<'a, [crate::markdown::Span]>, Vec<RefSpot>) {
     use crate::markdown::Span;
     let joined: String = row.iter().map(|s| s.text.as_str()).collect();
-    let refs = crate::chat::refs_in(&joined);
+    let refs = crate::chat::refs_in(root, &joined);
     if refs.is_empty() {
         return (std::borrow::Cow::Borrowed(row), Vec::new());
     }

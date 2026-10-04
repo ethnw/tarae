@@ -721,11 +721,11 @@ impl Editor {
             }
             Ok(()) => None,
         };
-        let root = super::perm::project_root();
-        let (Some(root), None) = (root, why.clone()) else {
-            let why = why.unwrap_or_else(|| "no project folder".into());
+        // (the project's folder — the editor's root — is what the `project` permission reads)
+        if let Some(why) = why {
             return self.plugin_events(plugin, vec![HostEvent::Failed(id, why)]);
-        };
+        }
+        let root = self.root.clone();
         let Some(generation) = self.plugin_generation(plugin) else { return };
         let (plugin, pattern) = (plugin.to_string(), pattern.to_string());
         self.events.jobs().spawn(move || {

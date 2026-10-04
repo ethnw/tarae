@@ -1748,16 +1748,16 @@ fn diagnostics_picker(cx: &mut Context) {
 // ── Pickers ──────────────────────────────────────────────────────────────
 
 fn file_picker(cx: &mut Context) {
-    let root = std::env::current_dir().unwrap_or_default();
+    // (the root is a real path, as buffers' are)
+    let root = cx.editor.root.clone();
     let title = format!("files in {}", root.file_name().map(|n| n.to_string_lossy()).unwrap_or_default());
     // Nothing typed: a folder tree opened up to the file being edited
-    let real_root = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone()); // buffers hold real paths
     let reveal = cx
         .editor
         .doc()
         .path
         .as_deref()
-        .and_then(|p| p.strip_prefix(&real_root).ok())
+        .and_then(|p| p.strip_prefix(&root).ok())
         .map(|r| r.to_string_lossy().replace('\\', "/"));
     let picker = crate::picker::Picker::new(title, Vec::new(), true).with_tree(root.clone(), reveal);
     cx.editor.open_picker(picker, Some(Box::new(move || Ok(crate::picker::file_items(&root)))));
@@ -2146,7 +2146,11 @@ fn buffer_picker(cx: &mut Context) {
         .docs
         .iter()
         .map(|d| crate::picker::Item {
-            label: format!("{}{}", d.display_name(), if d.is_modified() { " [+]" } else { "" }),
+            label: format!(
+                "{}{}",
+                d.display_name(&cx.editor.root),
+                if d.is_modified() { " [+]" } else { "" }
+            ),
             action: crate::picker::Action::Buffer(d.id),
             hint: String::new(),
             glyph: None,

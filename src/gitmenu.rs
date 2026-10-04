@@ -422,8 +422,7 @@ impl Editor {
     /// Changed and untracked files (`git status`), status letters in the gutter's colors, each
     /// file's diff against HEAD as the preview (computed on a worker thread), `+N −M` on the right.
     pub fn git_changed_files(&mut self) {
-        let cwd = std::env::current_dir().unwrap_or_default();
-        self.git_changed_files_in(cwd);
+        self.git_changed_files_in(self.root.clone());
     }
 
     /// Changed files of `cwd`'s repository, labels relative to it.

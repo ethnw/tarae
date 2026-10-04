@@ -14,7 +14,7 @@
 //! - `references`, `search` and `symbols` find code the way the user does — the language server's
 //!   references, the project search, a file's outline — read-only, no card (`nav.rs`).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
@@ -164,13 +164,14 @@ fn run_tests_schema() -> Value {
 /// the run's end (`tests_done`). Err = answered now.
 fn run_tests(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
     let path = args["path"].as_str().filter(|p| !p.is_empty()).ok_or("path is required")?;
-    let path = crate::chat::resolve(path);
+    let path = crate::chat::resolve(&ed.root, path);
     let line = args["line"].as_u64().map(|l| l.max(1) as usize - 1);
     busy(ed)?;
     // The buffer's text when it's open (unsaved edits are what gets saved and run)
     let text = ed.docs.iter().find(|d| d.path.as_deref() == Some(path.as_path())).map(|d| d.text.clone());
+    let root = ed.root.clone();
     ed.events.jobs().spawn(move || {
-        let found = find(&path, text, line);
+        let found = find(&root, &path, text, line);
         move |ed: &mut Editor| match found {
             Ok(target) => start(ed, call, target),
             Err(Found::NoGrammar(spec)) => {
@@ -204,13 +205,14 @@ enum Found {
     Not(String),
 }
 
-/// The test to run in `path` (at `line`, else the whole file) — on a worker.
+/// The test to run in `path` (at `line`, else the whole file) — on a worker; `root` the project's.
 fn find(
+    root: &Path,
     path: &std::path::Path,
     text: Option<ropey::Rope>,
     line: Option<usize>,
 ) -> Result<crate::testing::Target, Found> {
-    let shown = crate::chat::shown(path);
+    let shown = crate::chat::shown(root, path);
     let path: PathBuf = std::fs::canonicalize(path).map_err(|e| Found::Not(format!("{shown}: {e}")))?;
     let spec = crate::syntax::detect(&path);
     crate::testing::supported(spec.map_or("", |s| s.name.as_str())).map_err(Found::Not)?;
@@ -267,11 +269,11 @@ fn start_tests(ed: &mut Editor, who: For, target: crate::testing::Target, guard:
 pub fn tests_done(ed: &mut Editor) {
     let Some(r) = ed.test_run.as_mut() else { return };
     if let Some(head) = r.tell.take() {
-        let text = report(r);
+        let text = report(&ed.root, r);
         return told(ed, head, text);
     }
     let Some(call) = r.chat.take() else { return };
-    let text = report(r);
+    let text = report(&ed.root, r);
     let failed = r.failures().first().map(|&i| r.cases[i].clone());
     answer(ed, call, Ok(text));
     if let Some(case) = failed
@@ -516,7 +518,7 @@ fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
         false => None,
     };
     run_busy(ed)?;
-    let cwd = run_cwd(args["cwd"].as_str())?;
+    let cwd = run_cwd(&ed.root, args["cwd"].as_str())?;
     let mut extra = ed.config.llm.run_allow.clone();
     extra.extend(ed.chat.as_ref().map(|c| c.run_allow.clone()).unwrap_or_default());
     if outside.is_none() && allowed(cmd, &extra) {
@@ -537,8 +539,9 @@ fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
     if unseen.is_empty() {
         return ask(ed, cmd, cwd, call, Vec::new(), outside);
     }
+    let root = ed.root.clone();
     ed.events.jobs().spawn(move || {
-        let shown = named(&cmd, &cwd, &unseen);
+        let shown = named(&root, &cmd, &cwd, &unseen);
         move |ed: &mut Editor| {
             // (the turn ended meanwhile: nobody waits for a card)
             if ed.chat.as_ref().is_some_and(|c| c.generation() != call.generation || !c.busy()) {
@@ -553,17 +556,17 @@ fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// Where a command runs: the project root, or `cwd` in it (relative to the root, or absolute) — a folder
-/// that's there, inside the project (real path), so a `cd` isn't needed (#27).
-fn run_cwd(cwd: Option<&str>) -> Result<PathBuf, String> {
-    let root = std::env::current_dir().map_err(|e| e.to_string())?;
-    let Some(cwd) = cwd.map(str::trim).filter(|c| !c.is_empty() && *c != ".") else { return Ok(root) };
-    let real_root = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+/// Where a command runs: the project root (`root`, a real path), or `cwd` in it (relative to the root, or
+/// absolute) — a folder that's there, inside the project (real path), so a `cd` isn't needed (#27).
+fn run_cwd(root: &Path, cwd: Option<&str>) -> Result<PathBuf, String> {
+    let Some(cwd) = cwd.map(str::trim).filter(|c| !c.is_empty() && *c != ".") else {
+        return Ok(root.to_path_buf());
+    };
     let dir = std::fs::canonicalize(root.join(cwd)).map_err(|e| format!("cwd {cwd}: {e}"))?;
     if !dir.is_dir() {
         return Err(format!("cwd {cwd} isn't a folder"));
     }
-    if !dir.starts_with(&real_root) {
+    if !dir.starts_with(root) {
         return Err(format!("cwd {cwd} is outside the project — commands run in it"));
     }
     Ok(dir)
@@ -573,10 +576,8 @@ fn run_cwd(cwd: Option<&str>) -> Result<PathBuf, String> {
 /// project, or in places allowed, and it runs now; anything else is on its card.
 fn read_only(ed: &mut Editor, call: Call, cmd: String, cwd: PathBuf) -> Result<(), String> {
     let chat = ed.chat.as_ref().map(|c| c.allowed.clone()).unwrap_or_default();
-    let store = ed.allow_path.clone();
-    let project = std::env::current_dir().map_err(|e| e.to_string())?;
+    let (store, root) = (ed.allow_path.clone(), ed.root.clone());
     ed.events.jobs().spawn(move || {
-        let root = std::fs::canonicalize(&project).unwrap_or_else(|_| project.clone());
         let kept = crate::allow::Store::read(store.as_deref()).get(&root);
         let reads = crate::readonly::outside(&cmd, &cwd, &root, &chat, &kept);
         move |ed: &mut Editor| {
@@ -640,9 +641,7 @@ fn ask_with(
     // What's decided: the command (and where it runs, when not at the root), what it reads outside (one
     // place a line)
     let mut decided = 0..cmd.split('\n').count();
-    if let Ok(root) = std::env::current_dir()
-        && let Some(rel) =
-            std::fs::canonicalize(&root).ok().and_then(|r| cwd.strip_prefix(r).ok().map(|p| p.to_path_buf()))
+    if let Ok(rel) = cwd.strip_prefix(&ed.root).map(Path::to_path_buf)
         && !rel.as_os_str().is_empty()
     {
         question.push_str(&format!("\n  in {}", rel.display()));
@@ -679,7 +678,7 @@ fn ask_with(
         let text = text.replace("\r\n", "\n").replace('\t', "    ");
         question.push_str(&format!(
             "\n\n{} — written this turn, unseen:\n{}",
-            crate::chat::shown(path),
+            crate::chat::shown(&ed.root, path),
             text.trim_end_matches('\n')
         ));
     }
@@ -725,8 +724,14 @@ const SHOWN_LINE_MAX: usize = 160;
 
 /// The files among `unseen` (real paths) that `cmd` names, with their text — on a worker. The words are
 /// read the way the shell would join them (quotes and backslashes gone) and split at its operators; a
-/// name made up while it runs (a variable, a glob) isn't seen. Err: one can't be shown whole.
-fn named(cmd: &str, cwd: &std::path::Path, unseen: &[PathBuf]) -> Result<Vec<(PathBuf, String)>, String> {
+/// name made up while it runs (a variable, a glob) isn't seen. Err: one can't be shown whole (said from
+/// `root`, the project's).
+fn named(
+    root: &Path,
+    cmd: &str,
+    cwd: &std::path::Path,
+    unseen: &[PathBuf],
+) -> Result<Vec<(PathBuf, String)>, String> {
     let joined: String = cmd.chars().filter(|c| !matches!(c, '\'' | '"' | '\\')).collect();
     let mut out: Vec<(PathBuf, String)> = Vec::new();
     for word in joined.split(|c: char| c.is_whitespace() || ";&|`$()<>={}".contains(c)) {
@@ -735,7 +740,7 @@ fn named(cmd: &str, cwd: &std::path::Path, unseen: &[PathBuf]) -> Result<Vec<(Pa
         }
         let Ok(real) = std::fs::canonicalize(cwd.join(word)) else { continue };
         if unseen.contains(&real) && !out.iter().any(|(p, _)| *p == real) {
-            let text = showable(&real)?;
+            let text = showable(root, &real)?;
             out.push((real, text));
         }
     }
@@ -744,8 +749,8 @@ fn named(cmd: &str, cwd: &std::path::Path, unseen: &[PathBuf]) -> Result<Vec<(Pa
 
 /// The file's text if a card can show it as it is: text, short, and nothing that draws as something else
 /// (control characters, bidi and zero-width marks).
-fn showable(path: &std::path::Path) -> Result<String, String> {
-    let shown = crate::chat::shown(path);
+fn showable(root: &Path, path: &std::path::Path) -> Result<String, String> {
+    let shown = crate::chat::shown(root, path);
     let unseen = format!("{shown} was written this turn without the user seeing it, and");
     let bytes = std::fs::read(path).map_err(|e| format!("{shown}: {e}"))?;
     let text = String::from_utf8(bytes).map_err(|_| format!("{unseen} it isn't text the card can show"))?;
@@ -885,10 +890,11 @@ pub fn run_answer(ed: &mut Editor, id: u64, what: RunCard, scope: Option<crate::
     if shown.is_empty() {
         return run_now(ed, cmd, cwd, call, unprotected, outside);
     }
+    let root = ed.root.clone();
     ed.events.jobs().spawn(move || {
         let changed =
             shown.iter().find(|(p, text)| std::fs::read(p).ok().as_deref() != Some(text.as_bytes()));
-        let changed = changed.map(|(p, _)| crate::chat::shown(p));
+        let changed = changed.map(|(p, _)| crate::chat::shown(&root, p));
         move |ed: &mut Editor| match changed {
             Some(name) => answer(
                 ed,
@@ -985,8 +991,7 @@ pub fn guard_and_go(ed: &mut Editor, who: For, job: Job, asked: bool, extra: Ext
     }
     let llm = ed.config.llm.clone();
     let chat = ed.chat.as_ref().map(|c| c.allowed.clone()).unwrap_or_default();
-    let store = ed.allow_path.clone();
-    let root = std::env::current_dir().unwrap_or_default();
+    let (store, root) = (ed.allow_path.clone(), ed.root.clone());
     ed.events.jobs().spawn(move || {
         let found = match found {
             Availability::Unknown => crate::sandbox::probe(),
@@ -1104,12 +1109,12 @@ pub fn run_done(ed: &mut Editor) {
     // (its own places — the user's list has them only when it was a check, #28)
     if let Some(head) = r.tell.take() {
         let r = &*r;
-        let text = run_report(r, &r.places);
+        let text = run_report(&ed.root, r, &r.places);
         return told(ed, head, text);
     }
     let Some(call) = r.chat.take() else { return };
     let items = &r.places;
-    let text = run_report(r, items);
+    let text = run_report(&ed.root, r, items);
     let first =
         items.iter().find(|i| i.severity == 1).filter(|_| r.state != crate::task::State::Passed).cloned();
     let label = r.task.name.clone();
@@ -1137,8 +1142,9 @@ const OUTPUT_TAIL: usize = 150;
 /// Characters per output line, at most (a minified bundle on one line).
 const LINE_MAX: usize = 500;
 
-/// How the command ended as Claude reads it: the verdict, the places it pointed at, its output.
-fn run_report(r: &crate::task::Run, places: &[crate::quickfix::Item]) -> String {
+/// How the command ended as Claude reads it: the verdict, the places it pointed at (from `root`, the
+/// project's), its output.
+fn run_report(root: &Path, r: &crate::task::Run, places: &[crate::quickfix::Item]) -> String {
     use crate::task::State;
     let took = r.took.map(|d| format!(" in {:.1}s", d.as_secs_f32())).unwrap_or_default();
     let verdict = match r.state {
@@ -1170,7 +1176,7 @@ fn run_report(r: &crate::task::Run, places: &[crate::quickfix::Item]) -> String 
             };
             out.push_str(&format!(
                 "  {}:{}:{} {kind}{}\n",
-                crate::chat::shown(&it.path),
+                crate::chat::shown(root, &it.path),
                 it.line + 1,
                 it.col + 1,
                 it.message
@@ -1247,8 +1253,8 @@ const NAMES_MAX: usize = 50;
 const TAIL: usize = 80;
 
 /// The results as Claude reads them: the verdict, counts, each failure with where and why — and the
-/// output's tail when the run failed with no failed test to show for it (a build error).
-fn report(r: &TestRun) -> String {
+/// output's tail when the run failed with no failed test to show for it (a build error). Paths from `root`.
+fn report(root: &Path, r: &TestRun) -> String {
     let took = r.took.map(|d| format!(" in {:.1}s", d.as_secs_f32())).unwrap_or_default();
     let verdict = match r.state {
         RunState::Passed => "passed".to_string(),
@@ -1261,7 +1267,7 @@ fn report(r: &TestRun) -> String {
         "{verdict}{took} — {}\n$ {}  (in {})\n",
         r.target.label,
         r.target.argv().join(" "),
-        crate::chat::shown(&r.target.cwd)
+        crate::chat::shown(root, &r.target.cwd)
     );
     if r.state == RunState::NoTests {
         out.push_str("The run ended without running a test — nothing matched what it asked for (the output says what the runner saw).\n");
@@ -1279,7 +1285,7 @@ fn report(r: &TestRun) -> String {
         out.push('\n');
     }
     let fails = r.failures();
-    out.push_str(&failures(&r.cases, &fails));
+    out.push_str(&failures(root, &r.cases, &fails));
     // Skipped with a why: they skipped themselves (`test_results::SELF_SKIP`) — nothing was checked
     let said: Vec<_> =
         r.cases.iter().filter(|c| c.status == Status::Skipped && !c.message.is_empty()).collect();
@@ -1305,9 +1311,11 @@ fn report(r: &TestRun) -> String {
 
 /// The failed cases (indices into `cases`): the first `FAILURES_MAX` with where and why, the rest by name
 /// and place — so every failure is known, but the long messages stay few.
-fn failures(cases: &[crate::test_results::Case], fails: &[usize]) -> String {
+fn failures(root: &Path, cases: &[crate::test_results::Case], fails: &[usize]) -> String {
     let at = |c: &crate::test_results::Case| {
-        c.at.as_ref().map(|(p, l)| format!(" at {}:{}", crate::chat::shown(p), l + 1)).unwrap_or_default()
+        c.at.as_ref()
+            .map(|(p, l)| format!(" at {}:{}", crate::chat::shown(root, p), l + 1))
+            .unwrap_or_default()
     };
     let mut out = String::new();
     for &i in fails.iter().take(FAILURES_MAX) {
@@ -1350,6 +1358,11 @@ pub fn verdict(result: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// A project root none of the reports' paths are under (they're shown whole).
+    fn elsewhere() -> &'static std::path::Path {
+        std::path::Path::new("/elsewhere")
+    }
+
     #[test]
     fn verdict_is_the_report_in_a_few_words() {
         let v = super::verdict;
@@ -1372,7 +1385,7 @@ mod tests {
         ];
         let mut r = crate::testing::TestRun::finished("term_snapshots::shows", Vec::new(), output);
         r.state = crate::testing::RunState::NoTests;
-        let text = super::report(&r);
+        let text = super::report(elsewhere(), &r);
         assert!(text.starts_with("no tests ran — term_snapshots::shows\n"), "{text}");
         assert!(text.contains("running 0 tests\n"), "the output says why: {text}");
         assert_eq!(super::verdict(&text), "no tests ran");
@@ -1586,7 +1599,7 @@ mod tests {
         std::fs::write(&seen, "echo seen\n").unwrap();
         let unseen = vec![x.clone(), g.clone()];
         let names = |cmd: &str| -> Vec<std::path::PathBuf> {
-            super::named(cmd, &dir, &unseen).unwrap().into_iter().map(|(p, _)| p).collect()
+            super::named(&dir, cmd, &dir, &unseen).unwrap().into_iter().map(|(p, _)| p).collect()
         };
         assert_eq!(names("sh x.sh"), vec![x.clone()]);
         assert_eq!(names("sh 'x'.sh"), vec![x.clone()], "quotes joined as the shell does");
@@ -1597,25 +1610,25 @@ mod tests {
         assert!(names("sh seen.sh x.sh.bak").is_empty(), "only what was written unseen");
         assert_eq!(names("sh x.sh x.sh"), vec![x.clone()], "once each");
         std::fs::write(&x, "echo a\u{202E}b\n").unwrap();
-        let e = super::named("sh x.sh", &dir, &unseen).unwrap_err();
+        let e = super::named(&dir, "sh x.sh", &dir, &unseen).unwrap_err();
         assert!(e.contains("can't show"), "{e}");
         std::fs::write(&x, "echo x\r\n").unwrap();
         assert_eq!(names("sh x.sh"), vec![x.clone()], "CRLF is fine");
         // The limit it crossed, not every limit: too many lines · one line too long (#15: a 12-line script
         // with a long line was told "12 lines; at most 16")
         std::fs::write(&x, "a\n".repeat(super::SHOWN_LINES_MAX + 1)).unwrap();
-        let e = super::named("sh x.sh", &dir, &unseen).unwrap_err();
+        let e = super::named(&dir, "sh x.sh", &dir, &unseen).unwrap_err();
         assert!(
             e.contains("too long to show") && e.contains("it has 17 lines — a card shows at most 16"),
             "{e}"
         );
         assert!(!e.contains("characters"), "{e}");
         std::fs::write(&x, format!("echo a\n{}\necho b\n", "a".repeat(super::SHOWN_LINE_MAX + 1))).unwrap();
-        let e = super::named("sh x.sh", &dir, &unseen).unwrap_err();
+        let e = super::named(&dir, "sh x.sh", &dir, &unseen).unwrap_err();
         assert!(e.contains("its line 2 is 161 characters — a card shows lines of at most 160"), "{e}");
         assert!(!e.contains("lines —"), "3 lines isn't the reason: {e}");
         std::fs::write(&x, format!("{}{}\n", "a\n".repeat(20), "a".repeat(200))).unwrap();
-        let e = super::named("sh x.sh", &dir, &unseen).unwrap_err();
+        let e = super::named(&dir, "sh x.sh", &dir, &unseen).unwrap_err();
         assert!(e.contains("21 lines") && e.contains(", and its line 21 is 200 characters"), "both: {e}");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1640,13 +1653,13 @@ mod tests {
             (true, "tarae-test: skipped sandbox::tests::real — Seatbelt can't start inside a sandbox".into()),
             (false, "test result: ok. 1 passed".into()),
         ];
-        let text = super::run_report(&r, &[]);
+        let text = super::run_report(elsewhere(), &r, &[]);
         assert!(
             text.contains("1 test skipped itself — libtest says ok, but nothing was checked:\n  sandbox::tests::real — Seatbelt"),
             "{text}"
         );
         r.output.retain(|(err, _)| !err);
-        assert!(!super::run_report(&r, &[]).contains("skipped"));
+        assert!(!super::run_report(elsewhere(), &r, &[]).contains("skipped"));
     }
 
     /// #38: a run that isn't a check or a build (a grep) leaves the user's list alone (#28) — and its report
@@ -1669,7 +1682,7 @@ mod tests {
             mark: None,
         };
         let places: Vec<_> = [957, 971, 991, 1013, 1044].into_iter().map(hit).collect();
-        let text = super::run_report(&r, &places);
+        let text = super::run_report(elsewhere(), &r, &places);
         assert!(!r.feeds, "a grep isn't a check");
         assert!(!text.contains("user's list (]q)") && !text.contains("error:"), "{text}");
         assert!(
@@ -1697,7 +1710,7 @@ mod tests {
             severity: 1,
             mark: None,
         };
-        let text = super::run_report(&r, &[place]);
+        let text = super::run_report(elsewhere(), &r, &[place]);
         assert!(text.starts_with("exit 101\n$ cargo build\n"), "{text}");
         assert!(
             text.contains(
@@ -1714,7 +1727,7 @@ mod tests {
         r.output.truncate(3);
         r.output[0].1 = "line 0".into();
         r.state = State::Passed;
-        let text = super::run_report(&r, &[]);
+        let text = super::run_report(elsewhere(), &r, &[]);
         assert!(text.contains("Output:\n") && text.ends_with("line 2\n") && !text.contains("…"), "{text}");
     }
 
@@ -1730,13 +1743,13 @@ mod tests {
             at: None,
         };
         let cases: Vec<Case> = (0..70).map(case).collect();
-        let few = super::failures(&cases, &(0..12).collect::<Vec<_>>());
+        let few = super::failures(elsewhere(), &cases, &(0..12).collect::<Vec<_>>());
         assert!(few.contains("FAILED t9\n  why 9\n"), "{few}");
         assert!(few.contains("\n2 more failed (names only):\n  t10\n  t11\n"), "{few}");
         assert!(!few.contains("why 10"), "{few}");
-        let many = super::failures(&cases, &(0..70).collect::<Vec<_>>());
+        let many = super::failures(elsewhere(), &cases, &(0..70).collect::<Vec<_>>());
         assert!(many.contains("60 more failed") && many.contains("  t59\n"), "{many}");
         assert!(!many.contains("  t60\n") && many.ends_with("  … and 10 more\n"), "{many}");
-        assert!(super::failures(&cases, &[]).is_empty());
+        assert!(super::failures(elsewhere(), &cases, &[]).is_empty());
     }
 }

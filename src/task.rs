@@ -19,6 +19,7 @@ pub struct Task {
     pub name: String,
     /// Run by `sh -c`.
     pub cmd: String,
+    /// Where it runs: a relative folder is from the editor's root (empty = the root), resolved as it starts.
     pub cwd: PathBuf,
 }
 
@@ -33,10 +34,9 @@ pub fn detect(root: &Path) -> Vec<Task> {
 
 /// Every task: the configured ones (`[task.<name>]`), then what the project suggests (it reads the
 /// project's files — on a worker).
-fn all_tasks(configured: Vec<Task>) -> Vec<Task> {
-    let root = std::env::current_dir().unwrap_or_default();
+fn all_tasks(configured: Vec<Task>, root: &Path) -> Vec<Task> {
     let mut out = configured;
-    for t in detect(&root) {
+    for t in detect(root) {
         if !out.iter().any(|x| x.name == t.name) {
             out.push(t);
         }
@@ -278,8 +278,9 @@ impl Editor {
     /// `space m p` — pick a task (the last one first). The project is looked at on a worker.
     pub fn task_picker(&mut self) {
         let (configured, last) = (self.config.tasks.clone(), self.task_last.as_ref().map(|t| t.name.clone()));
+        let root = self.root.clone();
         let fill = move || {
-            let mut tasks = all_tasks(configured);
+            let mut tasks = all_tasks(configured, &root);
             if let Some(i) = last.and_then(|l| tasks.iter().position(|t| t.name == l)) {
                 let t = tasks.remove(i);
                 tasks.insert(0, t);
@@ -305,9 +306,9 @@ impl Editor {
 
     /// `:task <name>` — found on a worker, then started.
     pub fn task_named(&mut self, name: &str) -> Result<(), String> {
-        let (configured, name) = (self.config.tasks.clone(), name.to_string());
+        let (configured, name, root) = (self.config.tasks.clone(), name.to_string(), self.root.clone());
         self.events.jobs().spawn(move || {
-            let found = all_tasks(configured).into_iter().find(|t| t.name == name);
+            let found = all_tasks(configured, &root).into_iter().find(|t| t.name == name);
             move |ed: &mut Editor| match found {
                 Some(t) => ed.task_start(t),
                 None => ed.set_error(format!("no task \"{name}\"")),
@@ -413,6 +414,8 @@ impl Editor {
         feeds: bool,
         claudes: bool,
     ) {
+        // (a configured task's folder is as written — from the root, the root itself when it says none)
+        let task = Task { cwd: self.path_of(&task.cwd), ..task };
         let install = after.is_some();
         let watched = sandbox.is_some_and(|p| p.watch.is_some());
         let mut cmd = crate::sandbox::command(sandbox, "sh", &["-c".into(), task.cmd.clone()]);

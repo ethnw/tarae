@@ -239,17 +239,13 @@ pub fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from).filter(|h| h.is_absolute())
 }
 
-/// The project as the kept answers know it (its real path).
-pub fn project() -> PathBuf {
-    let cwd = std::env::current_dir().unwrap_or_default();
-    std::fs::canonicalize(&cwd).unwrap_or(cwd)
-}
-
-/// Keeps `change` for the project, on a worker (an error says so).
+/// Keeps `change` for the project (the editor's root — the real path the kept answers know it by), on a
+/// worker (an error says so).
 fn keep_later(ed: &mut crate::editor::Editor, change: impl FnOnce(&mut Allowed) + Send + 'static) {
     let Some(path) = ed.allow_path.clone() else { return };
+    let project = ed.root.clone();
     ed.events.jobs().spawn(move || {
-        let r = keep(&path, &project(), change);
+        let r = keep(&path, &project, change);
         move |ed: &mut crate::editor::Editor| {
             if let Err(e) = r {
                 ed.set_error(format!("couldn't keep it: {e}"));
@@ -307,9 +303,9 @@ impl crate::editor::Editor {
     pub fn sandbox_allowed(&mut self) {
         use crate::picker::{Action, FillError, Item};
         let chat = self.chat.as_ref().map(|c| c.allowed.clone()).unwrap_or_default();
-        let path = self.allow_path.clone();
+        let (path, project) = (self.allow_path.clone(), self.root.clone());
         let fill: crate::picker::Fill = Box::new(move || {
-            let kept = Store::read(path.as_deref()).get(&project());
+            let kept = Store::read(path.as_deref()).get(&project);
             let row = |label: String, hint: String| Item {
                 action: Action::Typed(format!("sandbox-disallow {label}")),
                 label,

@@ -102,7 +102,7 @@ fn blocker(ed: &Editor, in_turn: bool) -> Option<String> {
         .docs
         .iter()
         .filter(|d| d.is_modified() && !d.throwaway && (d.path.is_none() || d.disk_conflict))
-        .map(|d| d.display_name())
+        .map(|d| d.display_name(&ed.root))
         .collect();
     if !stuck.is_empty() {
         return Some(format!("unsaved changes in {} — save or close them first", stuck.join(", ")));
@@ -182,8 +182,12 @@ fn claudes_writes(ed: &mut Editor) -> bool {
 fn clear_to_go(ed: &mut Editor) -> bool {
     ed.auto_save(" · before restarting");
     let saved = ed.flush_saves();
-    let unsaved: Vec<String> =
-        ed.docs.iter().filter(|d| d.is_modified() && !d.throwaway).map(|d| d.display_name()).collect();
+    let unsaved: Vec<String> = ed
+        .docs
+        .iter()
+        .filter(|d| d.is_modified() && !d.throwaway)
+        .map(|d| d.display_name(&ed.root))
+        .collect();
     let why = match blocker(ed, false) {
         Some(why) => why,
         None if !saved => "still saving — the disk is slow".into(),
@@ -205,8 +209,9 @@ fn go(ed: &mut Editor) {
     let id = r.id;
     let build = Some(ed.config.restart_build.trim().to_string()).filter(|c| r.build && !c.is_empty());
     let binary = ed.config.restart_binary.clone();
+    let root = ed.root.clone();
     ed.events.jobs().spawn(move || {
-        let root = project_root();
+        let root = project_root(&root);
         let bin = resolve(&binary, &root);
         move |ed: &mut Editor| {
             if !at(ed, id, &Stage::Finding) {
@@ -360,12 +365,11 @@ fn resolve(binary: &str, root: &Path) -> Result<PathBuf, String> {
     Ok(if p.is_absolute() { p } else { root.join(p) })
 }
 
-/// Where `.tarae.toml` is (its relative paths are from there), else where tarae runs.
-fn project_root() -> PathBuf {
-    crate::config::project_path()
+/// Where `.tarae.toml` is (its relative paths are from there), else the editor's root.
+fn project_root(root: &Path) -> PathBuf {
+    crate::config::project_path(root)
         .and_then(|p| p.parent().map(Path::to_path_buf))
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_default()
+        .unwrap_or_else(|| root.to_path_buf())
 }
 
 // ── Becoming the new one ────────────────────────────────────────────────────
@@ -747,7 +751,8 @@ mod tests {
     fn the_chat_comes_back_with_its_conversation_and_draft() {
         use crate::chat::{Msg, Role};
         let dir = temp("chat");
-        let (store, cwd) = (dir.join("chats"), std::env::current_dir().unwrap());
+        // (the editor's root is the test's folder — its conversations are kept under it)
+        let (store, cwd) = (dir.join("chats"), dir.clone());
         let keep = |id: &str, ago: u64, said: &str| {
             let msgs = [Msg::new(Role::User, "hello", ""), Msg::new(Role::Assistant, said, "")];
             let saved = crate::chats::Saved {
@@ -764,6 +769,7 @@ mod tests {
         keep("s-2", 0, "Another one.");
         let argv = dir.join("argv.log");
         let mut ed = Editor::new(Config::default());
+        ed.root = cwd;
         ed.chats_dir = Some(store);
         ed.config.llm.command = "sh".into();
         ed.config.llm.args =

@@ -190,8 +190,10 @@ fn main() -> Result<()> {
     if let Some(light) = light.or_else(term::detect_light_background) {
         theme::set_light(light);
     }
-    let (config, warnings) = config::load();
-    let mut editor = editor::Editor::new(config);
+    // (the one look at where tarae runs — from here on the editor's root is what everything goes by)
+    let root = editor::started_in();
+    let (config, warnings) = config::load(&root);
+    let mut editor = editor::Editor::with_root(config, root);
     // Started without a file: recent files on the start screen (existing ones only; reads one small file)
     editor.recent = recent::load();
     editor.session = session::State::load();

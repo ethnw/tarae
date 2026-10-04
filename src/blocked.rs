@@ -126,7 +126,7 @@ impl Editor {
             return self.set_status("the sandbox blocked nothing in that run — its panel says when it does");
         };
         let home = crate::allow::home().unwrap_or_else(|| PathBuf::from("/"));
-        let list = choices(&run.denials, &home, &crate::allow::project(), &path_dirs());
+        let list = choices(&run.denials, &home, &self.root, &path_dirs());
         use crate::picker::{Action, Item};
         let mut items: Vec<Item> = list
             .iter()

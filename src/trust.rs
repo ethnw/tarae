@@ -176,9 +176,9 @@ pub fn record(path: PathBuf, file: PathBuf, hash: u64, trusted: bool) -> Result<
         .map_err(|e| e.to_string())
 }
 
-/// The card's text: the file, then each held-back item as written.
-pub fn question(p: &Project) -> String {
-    let mut q = format!("{} sets what runs commands as you:\n", crate::chat::shown(&p.file));
+/// The card's text: the file (from `root`, the editor's), then each held-back item as written.
+pub fn question(root: &Path, p: &Project) -> String {
+    let mut q = format!("{} sets what runs commands as you:\n", crate::chat::shown(root, &p.file));
     for (k, v) in &p.items {
         if v.chars().count() > SHOWN_MAX {
             q.push_str(&format!(
@@ -209,8 +209,14 @@ impl crate::editor::Editor {
     fn project_trust_offer(&mut self, p: &Project) {
         let what = crate::offer::What::ProjectTrust { hash: p.hash };
         // (what's decided: the settings, under the line naming the file)
-        let o = crate::offer::Offer::new(TITLE.into(), &question(p), "", "Project settings".into(), what)
-            .deciding(2..2 + p.items.len());
+        let o = crate::offer::Offer::new(
+            TITLE.into(),
+            &question(&self.root, p),
+            "",
+            "Project settings".into(),
+            what,
+        )
+        .deciding(2..2 + p.items.len());
         self.push_offer(o);
     }
 
@@ -347,7 +353,7 @@ mod tests {
         let path = project_file("long", &format!("[editor]\nrestart-build = \"{long}\"\n"));
         let (c, _) = crate::config::load_from(None, Some(path.clone()), &Store::default());
         let p = c.project.unwrap();
-        assert!(question(&p).contains("too long to show"));
+        assert!(question(Path::new("/"), &p).contains("too long to show"));
         let mut store = Store::default();
         store.answer(&path, p.hash, true);
         let (t, _) = crate::config::load_from(None, Some(path), &store);

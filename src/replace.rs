@@ -137,7 +137,7 @@ impl crate::editor::Editor {
             Err(e) => return self.set_error(e),
         };
         self.status = None;
-        let root = std::env::current_dir().unwrap_or_default();
+        let root = self.root.clone();
         let items = plans
             .iter()
             .enumerate()

@@ -174,8 +174,9 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
         }
         "sandbox-grant" => editor.sandbox_grant(rest),
         "config-reload" => {
-            editor.events.jobs().spawn(|| {
-                let (c, w) = config::load();
+            let root = editor.root.clone();
+            editor.events.jobs().spawn(move || {
+                let (c, w) = config::load(&root);
                 move |ed: &mut Editor| ed.reload_config(c, w)
             });
             Ok(())
@@ -369,7 +370,8 @@ fn write(editor: &mut Editor, path: &str, force: bool) -> Result<(), String> {
     let id = editor.doc().id;
     let target = match shell_words(path).into_iter().next() {
         Some(p) => {
-            let p = std::path::absolute(&p).map_err(|e| e.to_string())?;
+            let p =
+                std::path::absolute(editor.path_of(std::path::Path::new(&p))).map_err(|e| e.to_string())?;
             let p = std::fs::canonicalize(&p).unwrap_or(p); // same form as `open`
             (editor.doc().path.as_ref() != Some(&p)).then_some(p)
         }
@@ -442,7 +444,7 @@ pub(crate) fn save_doc(editor: &mut Editor, id: crate::document::DocId, force: b
 
 fn saved(editor: &mut Editor, id: crate::document::DocId) {
     let Some(doc) = editor.docs.iter().find(|d| d.id == id) else { return };
-    let msg = format!("Saved {} · {} lines", doc.display_name(), doc.text.len_lines());
+    let msg = format!("Saved {} · {} lines", doc.display_name(&editor.root), doc.text.len_lines());
     editor.set_success(msg);
     editor.lsp_did_save(id);
     editor.undo_persist(id);
@@ -461,7 +463,7 @@ pub(crate) fn quit(editor: &mut Editor, force: bool) -> Result<(), String> {
             .docs
             .iter()
             .filter(|d| d.is_modified() && !d.throwaway)
-            .map(|d| d.display_name())
+            .map(|d| d.display_name(&editor.root))
             .collect();
         if !dirty.is_empty() {
             return Err(format!("unsaved changes: {} (use :q! to discard)", dirty.join(", ")));
@@ -478,9 +480,9 @@ fn shell(editor: &mut Editor, cmd: &str) -> Result<(), String> {
     if cmd.is_empty() {
         return Err("usage: :sh <command>".into());
     }
-    let cmd = cmd.to_string();
+    let (cmd, dir) = (cmd.to_string(), editor.root.clone());
     editor.events.jobs().spawn(move || {
-        let result = run_shell(&cmd);
+        let result = run_shell(&cmd, &dir);
         move |ed: &mut Editor| match result {
             Ok(Some(line)) => ed.set_status(line),
             Ok(None) => {}
@@ -490,9 +492,10 @@ fn shell(editor: &mut Editor, cmd: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn run_shell(cmd: &str) -> Result<Option<String>, String> {
+/// `:sh`'s command, run by your shell in `dir` (the editor's root).
+fn run_shell(cmd: &str, dir: &std::path::Path) -> Result<Option<String>, String> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".into());
-    let out = Command::new(shell).arg("-c").arg(cmd).output().map_err(|e| e.to_string())?;
+    let out = Command::new(shell).arg("-c").arg(cmd).current_dir(dir).output().map_err(|e| e.to_string())?;
     let text = String::from_utf8_lossy(if out.status.success() { &out.stdout } else { &out.stderr });
     let first = text.lines().find(|l| !l.trim().is_empty()).map(str::to_string);
     if out.status.success() {

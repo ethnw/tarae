@@ -11,10 +11,10 @@ use crate::document::DocId;
 use crate::editor::Editor;
 use crate::gitmenu::git;
 
-/// The text to compare `path` with: `against` empty = HEAD's version, an existing file = its text, else the
-/// version at that git revision. (On a worker thread.)
-fn base_text(path: &Path, against: &str) -> Result<(String, String), String> {
-    let as_file = PathBuf::from(against);
+/// The text to compare `path` with: `against` empty = HEAD's version, an existing file (`as_file`: what
+/// `against` names as a file, from the editor's root) = its text, else the version at that git revision.
+/// (On a worker thread.)
+fn base_text(path: &Path, against: &str, as_file: PathBuf) -> Result<(String, String), String> {
     // A file — or `/dev/null` (git difftool's side for a new file): anything readable that isn't a folder
     if !against.is_empty() && as_file.exists() && !as_file.is_dir() {
         let text = std::fs::read_to_string(&as_file).map_err(|e| format!("{against}: {e}"))?;
@@ -44,9 +44,9 @@ impl Editor {
             return Err("the review is showing this file's changes — space v q ends it".into());
         }
         let (id, version, text) = (doc.id, doc.version(), doc.text.clone());
-        let against = against.to_string();
+        let (as_file, against) = (self.path_of(Path::new(against)), against.to_string());
         self.events.jobs().spawn(move || {
-            let result = base_text(&path, &against).map(|(base, label)| {
+            let result = base_text(&path, &against, as_file).map(|(base, label)| {
                 let hunks = crate::git::hunks(&base, &text.to_string());
                 (base, label, hunks)
             });
@@ -119,10 +119,12 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("old.txt"), "a\nb\n").unwrap();
         let old = dir.join("old.txt");
-        let (text, label) = base_text(&dir.join("new.txt"), &old.to_string_lossy()).unwrap();
+        let (text, label) = base_text(&dir.join("new.txt"), &old.to_string_lossy(), old.clone()).unwrap();
         assert_eq!((text.as_str(), label.as_str()), ("a\nb\n", "old.txt"));
+        // (named relative to the editor's root: the file there)
+        assert_eq!(base_text(&dir.join("new.txt"), "old.txt", old.clone()).unwrap().0, "a\nb\n");
         // git difftool's side for a new file
-        assert_eq!(base_text(&dir.join("new.txt"), "/dev/null").unwrap().0, "");
+        assert_eq!(base_text(&dir.join("new.txt"), "/dev/null", "/dev/null".into()).unwrap().0, "");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

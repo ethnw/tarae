@@ -197,10 +197,10 @@ pub fn to_json(ed: &Editor) -> Vec<Value> {
         .collect()
 }
 
-/// At start: this folder's notes from the last session.
+/// At start: this folder's (the root's) notes from the last session.
 pub fn restore(ed: &mut Editor) {
-    let Ok(cwd) = std::env::current_dir() else { return };
-    restore_from(ed, ed.session.notes(&cwd));
+    let saved = ed.session.notes(&ed.root);
+    restore_from(ed, saved);
 }
 
 fn restore_from(ed: &mut Editor, saved: Vec<Value>) {
@@ -272,7 +272,7 @@ pub fn tool_call(ed: &mut Editor, args: &Value) -> Result<String, String> {
     }
     let path =
         args["path"].as_str().filter(|p| !p.is_empty()).ok_or("path and line are required for a new note")?;
-    let path = crate::chat::resolve(path);
+    let path = crate::chat::resolve(&ed.root, path);
     let path = std::fs::canonicalize(&path).unwrap_or(path);
     if !path.is_file() {
         return Err(format!("{} isn't a file", path.display()));
@@ -280,7 +280,7 @@ pub fn tool_call(ed: &mut Editor, args: &Value) -> Result<String, String> {
     let line = args["line"].as_u64().ok_or("path and line are required for a new note")?.max(1) as usize - 1;
     let end = args["end_line"].as_u64().map_or(line, |e| (e.max(1) as usize - 1).max(line));
     let id = add(ed, &path, line..end + 1, By::Claude, text);
-    Ok(format!("note #{id} pinned at {}:{}", crate::chat::shown(&path), line + 1))
+    Ok(format!("note #{id} pinned at {}:{}", crate::chat::shown(&ed.root, &path), line + 1))
 }
 
 /// The chat turn ended: notes still waiting stop waiting — a single one gets Claude's plain answer (it didn't
@@ -407,7 +407,7 @@ fn message(ed: &Editor, n: &Note) -> String {
     let mut s = format!(
         "<note id=\"{}\" path=\"{}\" lines=\"{}-{}\">\n<code>\n{}</code>\n",
         n.id,
-        crate::chat::shown(&n.path),
+        crate::chat::shown(&ed.root, &n.path),
         n.lines.start + 1,
         n.lines.end,
         code
@@ -470,7 +470,7 @@ pub fn picker(ed: &mut Editor) {
         .iter()
         .rev()
         .map(|n| Item {
-            label: format!("{}:{}  {}", crate::chat::shown(&n.path), n.lines.start + 1, n.gist()),
+            label: format!("{}:{}  {}", crate::chat::shown(&ed.root, &n.path), n.lines.start + 1, n.gist()),
             action: Action::Goto { path: n.path.clone(), line: n.lines.start, col: 0 },
             hint: match n.thread.len() {
                 1 => String::new(),

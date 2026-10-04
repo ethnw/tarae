@@ -87,11 +87,9 @@ pub fn at_end_set(ed: &mut Editor, on: bool) {
             c.unfolded = false;
         }
     }
+    let root = ed.root.clone();
     let Some(c) = &mut ed.chat else { return };
-    c.edits.at_end = on.then(|| {
-        let cwd = std::env::current_dir().unwrap_or_default();
-        std::fs::canonicalize(&cwd).unwrap_or(cwd)
-    });
+    c.edits.at_end = on.then_some(root);
     let row = match on {
         true => "review at the end · space v a turns it off",
         false => "Claude's edits come one at a time again",
@@ -158,7 +156,7 @@ pub fn request(ed: &mut Editor, request_id: &str, req: &Value) -> Option<Value> 
 /// leads, and the file's text before it — then it's allowed as claude asked (claude writes it; the watch
 /// brings an open buffer along), or shown as a review after all.
 fn unasked(ed: &mut Editor, root: PathBuf, p: Pending) {
-    let path = crate::chat::resolve(p.input["file_path"].as_str().unwrap_or_default());
+    let path = crate::chat::resolve(&ed.root, p.input["file_path"].as_str().unwrap_or_default());
     let ask = ed.config.llm.review_ask.clone();
     let generation = ed.chat.as_ref().map(crate::chat::Chat::generation);
     ed.events.jobs().spawn(move || {
@@ -269,7 +267,7 @@ pub fn next(ed: &mut Editor) {
 
 fn show(ed: &mut Editor, p: Pending) {
     let s = |k: &str| p.input[k].as_str().unwrap_or_default().to_string();
-    let path = crate::chat::resolve(&s("file_path"));
+    let path = crate::chat::resolve(&ed.root, &s("file_path"));
     // (a file Claude creates goes again when its turn is undone)
     let open_before = ed.docs.iter().any(|d| d.path.as_deref() == Some(path.as_path()));
     let existed = open_before || path.exists();
@@ -277,9 +275,9 @@ fn show(ed: &mut Editor, p: Pending) {
         return answer(ed, &p.request_id, deny(&format!("tarae couldn't open {}: {e:#}", path.display())));
     }
     // Outside the project and opened for this: it goes when the turn ends, unless you take it up (#37)
-    let root = ed.project_root.clone();
+    let root = ed.root.clone();
     let doc = ed.doc_mut();
-    if !open_before && root.is_some_and(|r| doc.path.as_ref().is_some_and(|p| !p.starts_with(&r))) {
+    if !open_before && doc.path.as_ref().is_some_and(|p| !p.starts_with(&root)) {
         doc.aside = true;
     }
     if ed.doc().loading {
@@ -324,7 +322,7 @@ fn show(ed: &mut Editor, p: Pending) {
         .as_ref()
         .and_then(|c| c.msgs.iter().rev().find(|m| m.role == crate::chat::Role::User))
         .map(|m| m.text.lines().next().unwrap_or_default().to_string())
-        .unwrap_or_else(|| format!("an edit to {}", crate::chat::shown(&path)));
+        .unwrap_or_else(|| format!("an edit to {}", crate::chat::shown(&ed.root, &path)));
     let reason = p.reason.clone();
     // The keys go to the review; the file is the user's now (follow won't close it as a preview)
     if let Some(c) = &mut ed.chat {

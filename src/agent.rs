@@ -284,7 +284,8 @@ impl Editor {
         if !self.config.agent_claude_code || self.agent.is_some() {
             return;
         }
-        let (Some(dir), Ok(cwd)) = (lock_dir(), std::env::current_dir()) else { return };
+        let Some(dir) = lock_dir() else { return };
+        let cwd = self.root.clone();
         let token = token();
         // A lock file already named for our port (one left by a program that had it before) isn't ours to
         // overwrite: another port, a few tries
@@ -454,7 +455,7 @@ impl Editor {
                 json_text(json!({ "tabs": tabs }))
             }
             "getWorkspaceFolders" => {
-                let cwd = std::env::current_dir().unwrap_or_default();
+                let cwd = self.root.clone();
                 let name = cwd.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 json_text(
                     json!({ "success": true, "folders": [{ "name": name, "uri": crate::lsp::uri(&cwd), "path": cwd }],
@@ -642,8 +643,11 @@ impl Editor {
         let doc_id = self.doc().id;
         let n = changes.len();
         // The tab name (`✻ [Claude Code] a.rs (473e33) ⧉`) is for VS Code tabs — here just the file name
-        let title =
-            format!("proposes {n} change{} to {}", if n == 1 { "" } else { "s" }, self.doc().display_name());
+        let title = format!(
+            "proposes {n} change{} to {}",
+            if n == 1 { "" } else { "s" },
+            self.doc().display_name(&self.root)
+        );
         if let Some(a) = &mut self.agent {
             a.active_tab = Some(d.tab.clone());
         }
@@ -721,7 +725,7 @@ impl Editor {
         }
         let env = format!("CLAUDE_CODE_SSE_PORT={} ENABLE_IDE_INTEGRATION=true", a.port);
         // Claude matches the lock file's workspace against its own folder — launch from the same folder
-        let cwd = std::env::current_dir().unwrap_or_default().to_string_lossy().replace('\'', "'\\''");
+        let cwd = self.root.to_string_lossy().replace('\'', "'\\''");
         let cmd = if std::env::var_os("ZELLIJ").is_some() {
             format!(
                 "zellij run --name claude --direction right --close-on-exit --cwd '{cwd}' -- env {env} claude"
