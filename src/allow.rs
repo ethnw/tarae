@@ -235,15 +235,17 @@ pub fn secret(real: &Path, home: Option<&Path>) -> bool {
 
 /// Places under home that run something later when written — and so are never offered for writing (a
 /// folder holding one isn't either): shells' and git's settings, launch agents, tarae's own config, cargo's
-/// unpacked crates (every project's build runs them — `sandbox::Policy::sources`). Keys (`SECRETS`) neither.
-const NEVER_WRITE: [&str; 7] = [
+/// caches (every project's build uses the crates and checkouts there; with the network closed the profile
+/// keeps them whatever is granted — `sandbox::Policy::caches`). Keys (`SECRETS`) neither.
+const NEVER_WRITE: [&str; 8] = [
     ".config/fish",
     ".config/git",
     ".config/tarae",
     ".oh-my-zsh",
     "Library/LaunchAgents",
     ".zsh",
-    ".cargo/registry/src",
+    ".cargo/registry",
+    ".cargo/git",
 ];
 
 /// Folders offered for one denied write, at most; and how deep one must be (`/opt`, `/private/var` aren't).
@@ -785,7 +787,17 @@ pub(crate) mod tests {
         let base = std::env::temp_dir().join(format!("tarae-choices-{}", std::process::id()));
         std::fs::remove_dir_all(&base).ok();
         let home = base.join("home");
-        for d in [".npm/_cacache", ".local/bin", ".config/tarae", "Library/LaunchAgents", "work/proj"] {
+        for d in [
+            ".npm/_cacache",
+            ".local/bin",
+            ".config/tarae",
+            "Library/LaunchAgents",
+            "work/proj",
+            ".cargo/registry/index/i/.cache",
+            ".cargo/registry/cache/i",
+            ".cargo/git/db/dep-1",
+            ".cargo/git/checkouts/dep-1/abc",
+        ] {
             std::fs::create_dir_all(home.join(d)).unwrap();
         }
         let home = std::fs::canonicalize(&home).unwrap();
@@ -801,6 +813,16 @@ pub(crate) mod tests {
         assert!(at("Library/LaunchAgents/x.plist").is_empty(), "runs at login; Library holds it");
         assert!(at("work/proj/.git/index.lock").is_empty(), "the project");
         assert_eq!(at("work/other.txt"), Vec::<PathBuf>::new(), "work holds the project");
+        // Cargo's caches: the profile keeps them while the network is closed, whatever is granted
+        for t in [
+            ".cargo/registry/index/i/.cache/se/rd/serde",
+            ".cargo/registry/cache/i/serde-1.0.0.crate",
+            ".cargo/registry/src/i/serde-1.0.0/build.rs",
+            ".cargo/git/db/dep-1/HEAD",
+            ".cargo/git/checkouts/dep-1/abc/src/lib.rs",
+        ] {
+            assert!(at(t).is_empty(), "{t}: {:?}", at(t));
+        }
         // Outside home: a few, none shallow
         let deep = base.join("o/a/b/c/d");
         std::fs::create_dir_all(&deep).unwrap();

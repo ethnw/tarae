@@ -371,9 +371,13 @@ What Claude runs, with `run` and `run_tests`, runs in a sandbox (macOS: Seatbelt
   kept and to change it with Edit, which you review. Inside `target/` and `node_modules/` those names are
   tools' output (cmake's `Makefile`s, each package's `package.json`) and are written as usual. A command can
   hard-link only files it may write, so nothing from outside is brought into the project under another name.
-  It can also write in the temp folders and the toolchain's own folders: cargo's registry (but not the
-  crates it has unpacked, `~/.cargo/registry/src`, while the network is closed: every project's build runs
-  what's there, and offline there's nothing new to unpack), Go's caches, and cargo's target
+  It can also write in the temp folders and the toolchain's own folders: cargo's caches (`~/.cargo/registry`
+  and `~/.cargo/git`) only while the network is open — closed, they stay as they are, so nothing a command
+  leaves there is picked up by your own builds later (every project's build uses the crates and git
+  checkouts there, and cargo doesn't check them again). An offline build writes only cargo's lock and
+  last-use files, the caches' `CACHEDIR.TAG` and the mark that keeps file sync off them. A build that needs a
+  crate unpacked or a git dependency checked out fails, and Claude
+  is told to ask you: a build or `cargo fetch` of yours puts it there. Go's caches, and cargo's target
   and build dirs (tarae asks `cargo metadata`) — those only when they're the checkout's own: inside it, its
   per-checkout build dir under cargo's home (`build/xx/yyyy`, worked out from your own `build-dir` setting,
   never the checkout's), or a temp folder. A cargo config in the checkout can name any folder, and Claude can
