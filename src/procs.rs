@@ -1349,8 +1349,14 @@ impl Editor {
             };
         let sessions = !self.sessions.is_empty();
         for c in &self.lsp.clients {
-            let session = self.session_of(&c.root).filter(|_| sessions);
-            add(c.pid(), Kind::Lsp(c.id), &c.name, crate::allow::tilde(&c.root), session);
+            // (a shared server — several checkouts, or one being swapped — is no one session's)
+            match self.share_procs(c) {
+                Some(what) => add(c.pid(), Kind::Lsp(c.id), &c.name, what, None),
+                None => {
+                    let session = self.session_of(&c.root).filter(|_| sessions);
+                    add(c.pid(), Kind::Lsp(c.id), &c.name, crate::allow::tilde(&c.root), session);
+                }
+            }
         }
         if let Some(d) = &self.dap {
             let (adapter, helper) = d.pids();

@@ -473,8 +473,13 @@ impl Editor {
 
     /// Session `l`'s processes: its chat, terminal, task, tests, and its checkout's language servers.
     pub fn session_pids(&self, l: &Session) -> Vec<u32> {
-        let servers =
-            self.lsp.clients.iter().filter(|c| self.session_of(&c.root) == Some(l.id)).map(|c| c.pid());
+        // (a shared server is no one session's)
+        let servers = self
+            .lsp
+            .clients
+            .iter()
+            .filter(|c| c.roots.len() == 1 && self.session_of(&c.root) == Some(l.id))
+            .map(|c| c.pid());
         let mine = [
             l.chat.as_ref().and_then(|c| c.pid()),
             l.terminal.as_ref().and_then(|t| t.pid()),
@@ -490,6 +495,8 @@ impl Editor {
     pub(crate) fn sessions_sync(&mut self) {
         self.session_list_sync();
         self.asking_sync();
+        // (a shared server's folders follow the checkouts — `share.rs`)
+        self.share_sync();
         if self.sessions.is_empty() {
             return;
         }
@@ -506,9 +513,12 @@ impl Editor {
             .clients
             .iter()
             .map(|c| {
-                let behind = self.sessions.iter().find(|l| Some(l.id) == self.session_of(&c.root));
-                let idle = behind.is_some_and(|l| !l.chat.as_ref().is_some_and(crate::chat::Chat::busy));
-                (c.id, idle && !in_front(self, c.id))
+                // (a shared server: every checkout it serves behind and idle; never mid-swap)
+                let idle = c.roots.iter().all(|r| {
+                    let behind = self.sessions.iter().find(|l| Some(l.id) == self.session_of(r));
+                    behind.is_some_and(|l| !l.chat.as_ref().is_some_and(crate::chat::Chat::busy))
+                });
+                (c.id, idle && !in_front(self, c.id) && !self.lsp.share.swapping(c.id))
             })
             .collect();
         self.lsp_rest(&resting);
@@ -654,6 +664,8 @@ impl Editor {
         session.views.push(View::new(view, doc));
         (session.current_doc, session.scratch, session.docs) = (doc, Some(doc), vec![doc]);
         self.sessions.push(session);
+        // (its checkout joins its repository's shared language server now — `share.rs`)
+        self.share_session(&root);
         if self.git_auto {
             // (its results are its session's — tagged so while the watch is made)
             self.events.set_session(id);

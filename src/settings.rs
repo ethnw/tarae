@@ -288,6 +288,16 @@ pub static SETTINGS: &[Setting] = &[
         set: |c, v| c.lsp.enabled = b(v),
     },
     Setting {
+        path: "editor.lsp-share",
+        kind: Kind::StrList,
+        doc: "Language servers one of which serves every checkout of a repository (a session each) on the same toolchain — swapped as checkouts come and go",
+        get: |c| Value::Array(c.lsp.share.iter().map(|a| Value::from(a.as_str())).collect()),
+        set: |c, v| {
+            c.lsp.share =
+                v.as_array().into_iter().flatten().filter_map(|a| a.as_str().map(str::to_string)).collect()
+        },
+    },
+    Setting {
         path: "editor.cursor.normal",
         kind: Kind::Enum(SHAPES),
         doc: "Cursor shape in normal mode",

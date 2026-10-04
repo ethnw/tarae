@@ -81,6 +81,7 @@ mod seeing;
 mod selection;
 mod session;
 mod settings;
+mod share;
 mod shell;
 mod sidebar;
 mod signature;

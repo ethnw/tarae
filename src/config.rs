@@ -128,7 +128,11 @@ impl Default for EditorConfig {
             session_worktrees: String::new(),
             theme: "default".into(),
             llm: LlmConfig::default(),
-            lsp: crate::lsp::LspConfig { enabled: true, ..Default::default() },
+            lsp: crate::lsp::LspConfig {
+                enabled: true,
+                share: vec!["rust-analyzer".into()],
+                ..Default::default()
+            },
             attach: Vec::new(),
             tasks: Vec::new(),
             preflight: Vec::new(),

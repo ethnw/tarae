@@ -201,6 +201,8 @@ pub struct LspConfig {
     pub languages: HashMap<String, Vec<String>>,
     /// `[lang.<lang>] also` — servers that start beside it.
     pub also: HashMap<String, Vec<String>>,
+    /// `editor.lsp-share` — servers one of which serves every checkout of a repository (`share.rs`).
+    pub share: Vec<String>,
 }
 
 /// Project markers of any language (`.git` is handled by `root_by_markers`).
@@ -341,17 +343,26 @@ pub type MakeOptions = Box<dyn FnOnce() -> Options + Send>;
 /// `given`, and the server's pack's `leave-out` (`packs::LeaveOut`) filled with `nested_checkouts` — so a
 /// server that scans the workspace leaves worktrees and checkouts inside it alone, through its own setting.
 /// The server is looked for by its name, else by the built-in one its command is (`[lsp.py] command =
-/// "pyright-langserver"` is pyright).
-pub fn options_for(spec: &ServerSpec, root: &Path, given: Value) -> MakeOptions {
+/// "pyright-langserver"` is pyright). Several folders (a shared server): the first one's are relative to it,
+/// as the server reads them, the others' whole paths.
+pub fn options_for(spec: &ServerSpec, roots: &[PathBuf], given: Value) -> MakeOptions {
     let mut names = vec![spec.name.clone()];
     let program = Path::new(&spec.command).file_name().map(|n| n.to_string_lossy().into_owned());
     let builtin = DEFAULTS.iter().chain(DEFAULT_ALSO).flat_map(|(_, l)| l.iter());
     names.extend(builtin.filter(|(_, c, _)| program.as_deref() == Some(*c)).map(|(n, ..)| n.to_string()));
-    let (root, name) = (root.to_path_buf(), spec.name.clone());
+    let (roots, name) = (roots.to_vec(), spec.name.clone());
     Box::new(move || {
         let mut o = Options { init: given, config: Value::Null };
         let Some(leave) = names.iter().find_map(|n| crate::packs::leave_out(n)) else { return o };
-        let found = nested_checkouts(&root);
+        let found: Vec<String> = roots
+            .iter()
+            .enumerate()
+            .flat_map(|(i, r)| {
+                nested_checkouts(r)
+                    .into_iter()
+                    .map(move |rel| if i == 0 { rel } else { r.join(rel).display().to_string() })
+            })
+            .collect();
         if found.is_empty() {
             return o;
         }
@@ -367,7 +378,7 @@ pub fn options_for(spec: &ServerSpec, root: &Path, given: Value) -> MakeOptions 
 }
 
 /// `x` at the dotted `path` in `v`, the objects on the way made (what's beside them kept).
-fn put(v: &mut Value, path: &str, x: Value) {
+pub(crate) fn put(v: &mut Value, path: &str, x: Value) {
     let mut at = v;
     for key in path.split('.') {
         if !at.is_object() {
@@ -525,7 +536,25 @@ impl Progress {
 pub struct Client {
     pub id: ClientId,
     pub name: String,
+    /// What it was started as (a swap starts its next one the same way — `share.rs`).
+    pub spec: ServerSpec,
+    /// Its first workspace folder (its working folder).
     pub root: PathBuf,
+    /// Every workspace folder it serves, `root` first — several when checkouts of a repository share it.
+    pub roots: Vec<PathBuf>,
+    /// The repository and toolchain it's shared by (None: one folder's own server).
+    pub share: Option<crate::share::Key>,
+    /// `checkOnSave` held off — a swap's new server until it takes over, a restarted one until it's loaded
+    /// (`share.rs`; measured: that skips a check of every folder at its start).
+    pub checks_off: bool,
+    /// rust-analyzer's `experimental/serverStatus`: quiescent now (None until it says) · whether it ever was
+    /// (a server still loading is restarted, not swapped) · its health.
+    pub quiescent: Option<bool>,
+    pub settled_once: bool,
+    pub health: String,
+    /// The `initializationOptions` it was started with (set on the writer thread) — a shared server's
+    /// settings answer is these.
+    pub init_sent: std::sync::Arc<std::sync::OnceLock<Value>>,
     tx: Sender<Out>,
     next_req: u64,
     /// Whether the initialize response has arrived — until then, outgoing messages are queued.
@@ -566,13 +595,20 @@ impl Client {
         self.child.as_ref().map(Child::id)
     }
 
+    /// Whether it serves `path` (it's under one of its folders).
+    pub fn serves(&self, path: &Path) -> bool {
+        self.roots.iter().any(|r| path.starts_with(r))
+    }
+
+    /// Started for the workspace folders `roots` (the first is its working folder).
     pub fn start(
         id: ClientId,
         spec: &ServerSpec,
-        root: &Path,
+        roots: &[PathBuf],
         options: MakeOptions,
         events: crate::event::Tx,
     ) -> Result<Client, String> {
+        let root = roots.first().ok_or("no folder")?.as_path();
         let mut child = Command::new(&spec.command)
             .args(&spec.args)
             .current_dir(root)
@@ -648,7 +684,15 @@ impl Client {
         let client = Client {
             id,
             name: spec.name.clone(),
+            spec: spec.clone(),
             root: root.to_path_buf(),
+            roots: roots.to_vec(),
+            share: None,
+            checks_off: false,
+            quiescent: None,
+            settled_once: false,
+            health: String::new(),
+            init_sent: Default::default(),
             tx,
             next_req: 1,
             ready: false,
@@ -662,6 +706,10 @@ impl Client {
             config: Default::default(),
         };
         let root_uri = uri(root);
+        let folders: Vec<Value> = roots
+            .iter()
+            .map(|r| json!({ "uri": uri(r), "name": r.file_name().map(|n| n.to_string_lossy()).unwrap_or_default() }))
+            .collect();
         let mut init = json!({
             "jsonrpc": "2.0", "id": 0, "method": "initialize",
             "params": {
@@ -670,7 +718,7 @@ impl Client {
                 "clientInfo": { "name": "tarae", "version": env!("CARGO_PKG_VERSION") },
                 "rootUri": root_uri,
                 "rootPath": root.to_string_lossy(),
-                "workspaceFolders": [{ "uri": root_uri, "name": root.file_name().map(|n| n.to_string_lossy()).unwrap_or_default() }],
+                "workspaceFolders": folders,
                 "capabilities": {
                     "general": { "positionEncodings": ["utf-8", "utf-16"] },
                     "window": { "workDoneProgress": true, "showMessage": {} },
@@ -733,12 +781,16 @@ impl Client {
                 },
             },
         });
+        // rust-analyzer says when it's quiescent (a swap switches then — `share.rs`)
+        init["params"]["capabilities"]["experimental"] = json!({ "serverStatusNotification": true });
         // The options are made on the writer thread: some need the disk (`nested_checkouts` walks the project).
         // Its settings are in place before `initialize` goes, so before the server can ask for them.
         let config = std::sync::Arc::clone(&client.config);
+        let init_sent = std::sync::Arc::clone(&client.init_sent);
         let _ = client.tx.send(Out::Lazy(Box::new(move || {
             let o = options();
             let _ = config.set(o.config);
+            let _ = init_sent.set(o.init.clone());
             init["params"]["initializationOptions"] = o.init;
             init.to_string()
         })));
@@ -1054,7 +1106,8 @@ mod tests {
         let strs = |v: &Value| -> Vec<String> {
             v.as_array().into_iter().flatten().filter_map(|s| s.as_str().map(str::to_string)).collect()
         };
-        let ra = options_for(&spec("rust-analyzer", "rust-analyzer"), &root, Value::Null)();
+        let ra =
+            options_for(&spec("rust-analyzer", "rust-analyzer"), std::slice::from_ref(&root), Value::Null)();
         let mut ex = strs(&ra.init["files"]["exclude"]);
         ex.sort();
         assert_eq!(ex, [".claude/worktrees", "src/a/b/c4", "vendor/clone"]);
@@ -1062,7 +1115,9 @@ mod tests {
 
         let given =
             json!({ "bundles": ["x.jar"], "settings": { "java": { "maven": { "downloadSources": true } } } });
-        let jdtls = options_for(&spec("jdtls", "/opt/jdtls/bin/jdtls"), &root, given.clone())().init;
+        let jdtls =
+            options_for(&spec("jdtls", "/opt/jdtls/bin/jdtls"), std::slice::from_ref(&root), given.clone())()
+                .init;
         assert_eq!(
             (&jdtls["bundles"], &jdtls["settings"]["java"]["maven"]),
             (&given["bundles"], &json!({ "downloadSources": true })),
@@ -1079,7 +1134,11 @@ mod tests {
         }
         assert_eq!(ex.len(), 4 + 3 * 2, "{ex:?}");
 
-        let py = options_for(&spec("py", "/usr/local/bin/pyright-langserver"), &root, Value::Null)();
+        let py = options_for(
+            &spec("py", "/usr/local/bin/pyright-langserver"),
+            std::slice::from_ref(&root),
+            Value::Null,
+        )();
         assert_eq!(py.init, Value::Null, "pyright asks for it");
         let ex = strs(&section(&py.config, Some("python.analysis"))["exclude"]);
         assert!(ex.starts_with(&["**/node_modules", "**/__pycache__", "**/.*"].map(String::from)), "{ex:?}");
@@ -1090,19 +1149,32 @@ mod tests {
         );
         assert_eq!(section(&py.config, Some("pyright")), Value::Null);
 
-        let gopls = options_for(&spec("gopls", "gopls"), &root, Value::Null)().init;
+        let gopls = options_for(&spec("gopls", "gopls"), std::slice::from_ref(&root), Value::Null)().init;
         let f = strs(&gopls["directoryFilters"]);
         assert!(
             f.first().is_some_and(|d| d == "-**/node_modules") && f.contains(&"-vendor/clone".into()),
             "{f:?}"
         );
 
-        let taplo = options_for(&spec("taplo", "taplo"), &root, Value::Null)();
+        let taplo = options_for(&spec("taplo", "taplo"), std::slice::from_ref(&root), Value::Null)();
         assert_eq!((taplo.init, taplo.config), (Value::Null, Value::Null), "no leave-out in its pack");
         let plain = t.join("plain");
         std::fs::create_dir_all(plain.join("src")).unwrap();
-        let ra = options_for(&spec("rust-analyzer", "rust-analyzer"), &plain, Value::Null)();
+        let ra =
+            options_for(&spec("rust-analyzer", "rust-analyzer"), std::slice::from_ref(&plain), Value::Null)();
         assert_eq!(ra.init, Value::Null, "nothing nested: nothing said");
+        // A shared server's second folder: its nested ones as whole paths (the server reads them from its first)
+        let ra = options_for(
+            &spec("rust-analyzer", "rust-analyzer"),
+            &[plain.clone(), root.clone()],
+            Value::Null,
+        )();
+        let mut ex = strs(&ra.init["files"]["exclude"]);
+        ex.sort();
+        let whole: Vec<String> = [".claude/worktrees", "src/a/b/c4", "vendor/clone"]
+            .map(|r| root.join(r).display().to_string())
+            .into();
+        assert_eq!(ex, whole);
         let _ = std::fs::remove_dir_all(&t);
     }
 }

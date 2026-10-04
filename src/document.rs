@@ -28,6 +28,9 @@ pub struct Link {
     pub version: i32,
     /// The server uses UTF-16 columns.
     pub u16: bool,
+    /// Told the document and every change, asked nothing — a swap's new server until it takes over
+    /// (`share.rs`).
+    pub shadow: bool,
 }
 
 impl Link {
@@ -53,10 +56,41 @@ pub struct DocLsp {
 }
 
 impl DocLsp {
-    /// Every server attached, the main one first.
+    /// Every server attached, the main one first (a shadow isn't — it's asked nothing).
     pub fn clients(&self) -> impl Iterator<Item = ClientId> + '_ {
         let main = self.client;
-        main.into_iter().chain(self.links.iter().map(|l| l.client).filter(move |&c| Some(c) != main))
+        let plain = self.links.iter().filter(|l| !l.shadow).map(|l| l.client);
+        main.into_iter().chain(plain.filter(move |&c| Some(c) != main))
+    }
+
+    /// The shadows: servers told the document, asked nothing yet.
+    pub fn shadows(&self) -> impl Iterator<Item = ClientId> + '_ {
+        self.links.iter().filter(|l| l.shadow).map(|l| l.client)
+    }
+
+    /// Server `cid` is told the document and its changes, asked nothing (a swap's new server).
+    pub fn attach_shadow(&mut self, cid: ClientId, u16: bool) {
+        self.links.retain(|l| l.client != cid);
+        self.links.push(Link {
+            client: cid,
+            changes: Vec::new(),
+            full_sync: false,
+            version: 0,
+            u16,
+            shadow: true,
+        });
+    }
+
+    /// `to` takes over from `from`: its link a plain one (kept where it was — its versions go on), the main
+    /// one if `from` was; `from`'s link gone.
+    pub fn take_over(&mut self, from: ClientId, to: ClientId) {
+        if let Some(l) = self.links.iter_mut().find(|l| l.client == to) {
+            l.shadow = false;
+        }
+        self.links.retain(|l| l.client != from);
+        if self.client == Some(from) {
+            self.client = Some(to);
+        }
     }
 
     /// The servers beside the main one.
@@ -71,7 +105,14 @@ impl DocLsp {
     /// Server `cid` is attached (as the main one, or beside it) — its queue starts empty at version 0.
     pub fn attach(&mut self, cid: ClientId, u16: bool, main: bool) {
         self.links.retain(|l| l.client != cid);
-        self.links.push(Link { client: cid, changes: Vec::new(), full_sync: false, version: 0, u16 });
+        self.links.push(Link {
+            client: cid,
+            changes: Vec::new(),
+            full_sync: false,
+            version: 0,
+            u16,
+            shadow: false,
+        });
         if main {
             self.client = Some(cid);
         }

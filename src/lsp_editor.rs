@@ -52,7 +52,7 @@ pub struct LspState {
     /// Servers that failed to start or exited, by name → why (the status line's red dot) · which server a
     /// language uses · languages whose servers aren't installed (faint dot; logged once).
     pub(crate) failed: HashMap<String, String>,
-    server_for: HashMap<String, String>,
+    pub(crate) server_for: HashMap<String, String>,
     missing: std::collections::HashSet<String>,
     /// Diagnostics for files that aren't open (`space D`): path → (server, severity, line, column, message).
     pub(crate) elsewhere: HashMap<std::path::PathBuf, Vec<Elsewhere>>,
@@ -92,6 +92,14 @@ pub struct LspState {
     /// Documents written from outside whose didSave is held, since their latest write
     /// (`lsp_saved_outside`).
     held_saves: HashMap<DocId, std::time::Instant>,
+    /// The saves each server heard lately (path, when) · those to send it again once its changes are quiet ·
+    /// when each was last sent a change — a didChange right after a didSave can cancel the check the save
+    /// starts (`RESAVE_WITHIN`), so that save goes again (`saves_again`).
+    recent_saves: HashMap<ClientId, Vec<(std::path::PathBuf, std::time::Instant)>>,
+    resaves: HashMap<ClientId, Vec<std::path::PathBuf>>,
+    changed_at: HashMap<ClientId, std::time::Instant>,
+    /// One server for a repository's checkouts, and swapping it (`share.rs`).
+    pub(crate) share: crate::share::Shares,
     /// (tests: the trace lines written — the log writes nothing in tests)
     #[cfg(test)]
     pub traced: Vec<String>,
@@ -216,6 +224,14 @@ const ROOT_GONE: std::time::Duration =
 /// cargo runs).
 pub(crate) const SAVE_QUIET: std::time::Duration =
     std::time::Duration::from_millis(if cfg!(test) { 100 } else { 1500 });
+
+/// A change sent this soon after a save may have cancelled the check the save started: rust-analyzer works
+/// the check out from a snapshot that an edit landing meanwhile cancels — measured (ra-open 2026-10-04) 0 of
+/// 12 checks started with the change ≤ 2 ms after, some at 5–10 ms, every one from 20 ms (5× that here); a
+/// save alone or a request in between never lost one. Such a save goes again once the server's changes are
+/// quiet for `RESAVE_QUIET` (8 of 8 brought back, a typing burst between).
+const RESAVE_WITHIN: std::time::Duration = std::time::Duration::from_millis(100);
+const RESAVE_QUIET: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// How long `g r`'s text matches wait for a busy server's own answer before they show (N3) — one that
 /// answers by then (warm rust-analyzer: 35–68 ms) isn't preceded by a flash of text matches.
@@ -365,6 +381,12 @@ pub enum Kind {
         uri: String,
         pos: Value,
     },
+    /// A swap's definition in folder `root`, asked of both servers to see they agree (`share.rs`).
+    SwapCheck {
+        root: std::path::PathBuf,
+    },
+    /// A replaced server's `shutdown` (`share.rs`).
+    Shutdown,
 }
 
 impl Kind {
@@ -460,11 +482,17 @@ impl Editor {
             match lsp::find_server(&spec.name, &self.config.lsp) {
                 Some(server) => {
                     self.lsp.server_for.insert(spec.name.clone(), server.name.clone());
-                    if let Some(cid) = self.lsp_spawn(&server, &spec.name, &path) {
+                    // (one for a repository's checkouts: `share.rs` — None while it's being arranged)
+                    let cid = match self.config.lsp.share.contains(&server.name) {
+                        true => self.share_attach(&server, &spec.name, &path, id),
+                        false => self.lsp_spawn(&server, &spec.name, &path),
+                    };
+                    if let Some(cid) = cid {
                         let u16 = self.client(cid).is_some_and(|c| c.ready && c.encoding == Encoding::Utf16);
                         let doc = self.docs.iter_mut().find(|d| d.id == id).expect("checked above");
                         doc.lsp.attach(cid, u16, true);
                         self.lsp_did_open(cid, id, &spec.name);
+                        self.share_shadow(cid, id, &spec.name);
                     }
                 }
                 None => {
@@ -518,7 +546,7 @@ impl Editor {
     }
 
     /// The running server `server` for this file's project, or a new one — None if it couldn't start.
-    fn lsp_spawn(
+    pub(crate) fn lsp_spawn(
         &mut self,
         server: &lsp::ServerSpec,
         lang: &str,
@@ -528,16 +556,32 @@ impl Editor {
         if let Some(c) = self.lsp.clients.iter().find(|c| c.name == server.name && c.root == root) {
             return Some(c.id);
         }
+        self.lsp_start(server, &[root], false)
+    }
+
+    /// A new `server` for the workspace folders `roots` (`checks_off`: rust-analyzer's `checkOnSave` held
+    /// off until it's turned on) — None if it couldn't start, or keeps exiting.
+    pub(crate) fn lsp_start(
+        &mut self,
+        server: &lsp::ServerSpec,
+        roots: &[std::path::PathBuf],
+        checks_off: bool,
+    ) -> Option<ClientId> {
+        let root = roots.first()?;
         // It kept exiting: held until `r` in `:procs` (its red dot stays)
-        if self.procs_held(&server.name, &root) {
+        if self.procs_held(&server.name, root) {
             return None;
         }
         self.lsp.next_id += 1;
         let cid = self.lsp.next_id;
-        let (server, options) = crate::java::prepare(server, &root);
-        let options = lsp::options_for(&server, &root, options);
-        match Client::start(cid, &server, &root, options, self.events.shared_sender()) {
-            Ok(c) => {
+        let (server, options) = crate::java::prepare(server, root);
+        let mut options = lsp::options_for(&server, roots, options);
+        if checks_off {
+            options = crate::share::checks_held(options);
+        }
+        match Client::start(cid, &server, roots, options, self.events.shared_sender()) {
+            Ok(mut c) => {
+                c.checks_off = checks_off;
                 // (started again after it exited: no longer the status line's red dot)
                 self.lsp.failed.remove(&server.name);
                 self.lsp.clients.push(c);
@@ -552,7 +596,7 @@ impl Editor {
         }
     }
 
-    fn lsp_did_open(&mut self, cid: ClientId, id: DocId, lang: &str) {
+    pub(crate) fn lsp_did_open(&mut self, cid: ClientId, id: DocId, lang: &str) {
         let Some(doc) = self.docs.iter().find(|d| d.id == id) else { return };
         let Some(path) = doc.path.as_deref() else { return };
         let (text, uri, lang) = (doc.text.clone(), lsp::uri(path), lsp::language_id(lang).to_string());
@@ -592,6 +636,7 @@ impl Editor {
     /// to every server a doc has, each from its own queue once it's ready.
     pub fn lsp_flush(&mut self) {
         let clients = &mut self.lsp.clients;
+        let mut sent = Vec::new();
         for doc in &mut self.docs {
             let uri = || lsp::uri(doc.path.as_deref().unwrap_or(std::path::Path::new("")));
             for l in doc.lsp.links.iter_mut().filter(|l| l.behind()) {
@@ -601,7 +646,80 @@ impl Editor {
                 let changes = std::mem::take(&mut l.changes);
                 let full = std::mem::take(&mut l.full_sync);
                 send_changes(client, uri(), &doc.text, l.version, changes, full);
+                sent.push(l.client);
             }
+        }
+        self.lsp_changed(sent);
+    }
+
+    /// Servers `sent` were just sent changes: a save each heard within `RESAVE_WITHIN` goes again once its
+    /// changes are quiet (`saves_again`).
+    fn lsp_changed(&mut self, sent: Vec<ClientId>) {
+        if sent.is_empty() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let mut again = false;
+        for cid in sent {
+            self.lsp.changed_at.insert(cid, now);
+            let Some(saves) = self.lsp.recent_saves.get_mut(&cid) else { continue };
+            let hit: Vec<std::path::PathBuf> = saves
+                .drain(..)
+                .filter(|(_, t)| now.duration_since(*t) < RESAVE_WITHIN)
+                .map(|(p, _)| p)
+                .collect();
+            let list = self.lsp.resaves.entry(cid).or_default();
+            for p in hit {
+                if !list.contains(&p) {
+                    list.push(p);
+                    again = true;
+                }
+            }
+        }
+        if again {
+            self.events.jobs().spawn(|| {
+                std::thread::sleep(RESAVE_QUIET);
+                |ed: &mut Editor| ed.saves_again()
+            });
+        }
+    }
+
+    /// The saves a change came right after go again to each server whose changes have been quiet for
+    /// `RESAVE_QUIET` — the others wait on (and are looked at again then). A file closed meanwhile isn't.
+    fn saves_again(&mut self) {
+        self.lsp_flush();
+        let now = std::time::Instant::now();
+        let cids: Vec<ClientId> = self.lsp.resaves.keys().copied().collect();
+        let mut later = false;
+        for cid in cids {
+            if self.lsp.changed_at.get(&cid).is_some_and(|t| now.duration_since(*t) < RESAVE_QUIET) {
+                later = true;
+                continue;
+            }
+            let paths = self.lsp.resaves.remove(&cid).unwrap_or_default();
+            let open = |p: &std::path::PathBuf| {
+                self.docs.iter().any(|d| d.path.as_ref() == Some(p) && d.lsp.clients().any(|c| c == cid))
+            };
+            let paths: Vec<std::path::PathBuf> = paths.into_iter().filter(open).collect();
+            let Some(c) = self.client_mut(cid) else { continue };
+            for p in &paths {
+                c.notify("textDocument/didSave", json!({ "textDocument": { "uri": lsp::uri(p) } }));
+            }
+            if !paths.is_empty() {
+                let names: Vec<String> = paths
+                    .iter()
+                    .map(|p| p.file_name().unwrap_or_default().to_string_lossy().into_owned())
+                    .collect();
+                let msg = format!("save of {} sent again — a change came right after it", names.join(", "));
+                crate::log::line(&c.name, "save", &msg);
+                self.lsp.recent_saves.entry(cid).or_default().extend(paths.into_iter().map(|p| (p, now)));
+            }
+        }
+        if later {
+            self.events.jobs().spawn(|| {
+                std::thread::sleep(RESAVE_QUIET);
+                |ed: &mut Editor| ed.saves_again()
+            });
         }
     }
 
@@ -654,9 +772,13 @@ impl Editor {
         let Some(doc) = self.docs.iter().find(|d| d.id == id) else { return };
         let Some(path) = doc.path.clone() else { return };
         let clients: Vec<ClientId> = doc.lsp.clients().collect();
+        let now = std::time::Instant::now();
         for cid in clients {
             if let Some(c) = self.client_mut(cid) {
                 c.notify("textDocument/didSave", json!({ "textDocument": { "uri": lsp::uri(&path) } }));
+                let saves = self.lsp.recent_saves.entry(cid).or_default();
+                saves.retain(|(p, t)| *p != path && now.duration_since(*t) < RESAVE_WITHIN);
+                saves.push((path.clone(), now));
             }
         }
     }
@@ -705,6 +827,12 @@ impl Editor {
                 // (Claude's tools: in the session that asked — its chat, its root, its jobs)
                 let session = p.session;
                 match &p.kind {
+                    // (a swap's: the two servers' answers compared · the replaced one's shutdown answered)
+                    Kind::SwapCheck { root } => {
+                        let root = root.clone();
+                        self.swap_answer(cid, &root, error.is_none().then_some(result));
+                    }
+                    Kind::Shutdown => self.share_drop(cid),
                     Kind::JavaDebug => self.java_debug_reply(cid, id, error, result),
                     Kind::ClassFile { uri, pos } => {
                         self.class_file_reply(cid, uri.clone(), pos, error, result)
@@ -788,13 +916,26 @@ impl Editor {
                         let config =
                             self.client(cid).and_then(|c| c.config.get().cloned()).unwrap_or_default();
                         let items = msg["params"]["items"].as_array().cloned().unwrap_or_default();
+                        // (a shared server's own settings: what it started with, its checks as they are now)
+                        let shared = self.client(cid).and_then(crate::share::settings);
                         Value::Array(
-                            items.iter().map(|i| lsp::section(&config, i["section"].as_str())).collect(),
+                            items
+                                .iter()
+                                .map(|i| match &shared {
+                                    Some(s) => s.clone(),
+                                    None => lsp::section(&config, i["section"].as_str()),
+                                })
+                                .collect(),
                         )
                     }
                     "workspace/workspaceFolders" => {
-                        let root = self.lsp.clients.iter().find(|c| c.id == cid).map(|c| c.root.clone());
-                        json!([{ "uri": root.as_deref().map(lsp::uri), "name": "root" }])
+                        let roots = self.client(cid).map(|c| c.roots.clone()).unwrap_or_default();
+                        let folder = |r: &std::path::PathBuf| {
+                            let name =
+                                r.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                            json!({ "uri": lsp::uri(r), "name": name })
+                        };
+                        Value::Array(roots.iter().map(folder).collect())
                     }
                     // Many code action commands send their edits this way.
                     "workspace/applyEdit" => match self.apply_workspace_edit(cid, &msg["params"]["edit"]) {
@@ -819,7 +960,9 @@ impl Editor {
     fn on_notification(&mut self, cid: ClientId, method: &str, params: &Value) {
         match method {
             "textDocument/publishDiagnostics" => {
-                if !self.allows(cid, "diagnostics") {
+                // (a swap's new server is asked nothing yet — the one in use says what's wrong until it
+                // takes over, and what that one found stays then)
+                if !self.allows(cid, "diagnostics") || self.lsp.share.incoming(cid) {
                     return;
                 }
                 let Some(path) = params["uri"].as_str().and_then(lsp::path_from_uri) else { return };
@@ -908,10 +1051,31 @@ impl Editor {
                         let mut p =
                             lsp::Progress { began: Some(std::time::Instant::now()), ..Default::default() };
                         p.update(v);
+                        // (rust-analyzer loading its workspaces again: a folder's toolchain may have changed)
+                        let refetch = c.share.is_some() && p.title == "Fetching";
                         c.progress.insert(token, p);
+                        if refetch {
+                            self.share_refetch(cid);
+                        }
                     }
                     Some(_) => c.progress.entry(token).or_default().update(v),
                     None => {}
+                }
+            }
+            // rust-analyzer: quiescent (nothing left to load) or not, and its health
+            "experimental/serverStatus" => {
+                let Some(c) = self.client_mut(cid) else { return };
+                let quiescent = params["quiescent"].as_bool().unwrap_or(false);
+                let health = params["health"].as_str().unwrap_or("ok").to_string();
+                if health != c.health && !(c.health.is_empty() && health == "ok") {
+                    let msg =
+                        params["message"].as_str().unwrap_or_default().lines().next().unwrap_or_default();
+                    crate::log::line(&c.name, "health", format!("{health} {msg}").trim_end());
+                }
+                (c.quiescent, c.health) = (Some(quiescent), health);
+                c.settled_once |= quiescent;
+                if quiescent {
+                    self.share_quiescent(cid);
                 }
             }
             // jdtls startup progress (project import, indexing)
@@ -1012,6 +1176,8 @@ impl Editor {
         }
         let enc = self.encoding_of(cid);
         match p.kind {
+            // (handled as they arrive — `on_lsp_message`)
+            Kind::SwapCheck { .. } | Kind::Shutdown => {}
             Kind::CodeAction { list } => self.on_code_actions(cid, list, result),
             Kind::ResolveAction => self.run_code_action_value(cid, result.clone(), false),
             Kind::ResolvePreview { list, index } => {
@@ -1079,7 +1245,7 @@ impl Editor {
                 }
             }
             Kind::DocumentSymbols => self.on_document_symbols(p.doc, result),
-            Kind::WorkspaceSymbols => self.on_workspace_symbols(result),
+            Kind::WorkspaceSymbols => self.on_workspace_symbols(cid, result),
             Kind::Highlights => {
                 let doc = self.doc();
                 let ranges: Vec<Range> = result
@@ -1171,7 +1337,7 @@ impl Editor {
     }
 
     /// A request about document `id` (not necessarily the current one — `:wa` formats every file).
-    fn lsp_send_for(
+    pub(crate) fn lsp_send_for(
         &mut self,
         id: DocId,
         cid: ClientId,
@@ -1289,7 +1455,9 @@ impl Editor {
         });
     }
 
-    fn on_workspace_symbols(&mut self, result: &Value) {
+    fn on_workspace_symbols(&mut self, cid: ClientId, result: &Value) {
+        // (a shared server answers for every checkout it serves — only this session's are its)
+        let roots = self.client(cid).map(|c| c.roots.clone()).unwrap_or_default();
         let Some(p) = self.picker.as_mut().filter(|p| p.requery) else { return };
         let root = &self.session.root;
         let items: Vec<Item> = result
@@ -1299,6 +1467,9 @@ impl Editor {
             .filter_map(|s| {
                 let loc = &s["location"];
                 let path = lsp::path_from_uri(loc["uri"].as_str()?)?;
+                if crate::share::foreign(&roots, root, &path) {
+                    return None;
+                }
                 let start = &loc["range"]["start"];
                 let line = start["line"].as_u64().unwrap_or(0) as usize;
                 let col = start["character"].as_u64().unwrap_or(0) as usize;
@@ -1868,11 +2039,12 @@ impl Editor {
         let Some(doc) = self.docs.iter_mut().find(|d| d.id == id) else { return };
         let Some(path) = doc.path.clone() else { return };
         let clients: Vec<ClientId> = doc.lsp.clients().collect();
+        let shadows: Vec<ClientId> = doc.lsp.shadows().collect();
         doc.lsp.client = None;
         doc.lsp.links.clear();
         doc.lsp.diagnostics.clear();
         doc.lsp.inlay.clear();
-        for &cid in &clients {
+        for &cid in clients.iter().chain(&shadows) {
             if let Some(c) = self.client_mut(cid) {
                 c.notify("textDocument/didClose", json!({ "textDocument": { "uri": lsp::uri(&path) } }));
             }
@@ -1888,9 +2060,10 @@ impl Editor {
             .lsp
             .clients
             .iter()
-            .filter(|c| clients.contains(&c.id) || path.starts_with(&c.root))
-            .filter(|c| !serves(c.id))
-            .map(|c| (c.id, root_open(&c.root)))
+            .filter(|c| clients.contains(&c.id) || c.serves(&path))
+            // (a swap's new server serves files only once it takes over)
+            .filter(|c| !serves(c.id) && !self.lsp.share.incoming(c.id))
+            .map(|c| (c.id, c.roots.iter().any(|r| root_open(r))))
             .filter(|&(cid, open)| clients.contains(&cid) || !open)
             .collect();
         for (cid, open) in waits {
@@ -1942,16 +2115,20 @@ impl Editor {
         }
         self.lsp.resting.remove(&cid);
         let Some(root) = self.client(cid).map(|c| c.root.clone()) else { return };
-        let served: Vec<DocId> =
-            self.docs.iter().filter(|d| d.lsp.clients().any(|c| c == cid)).map(|d| d.id).collect();
+        // (each file's own session — a shared server serves several)
+        let served: Vec<(DocId, Option<crate::event::SessionId>)> = self
+            .docs
+            .iter()
+            .filter(|d| d.lsp.clients().any(|c| c == cid))
+            .map(|d| (d.id, d.path.as_deref().and_then(|p| self.session_of(p))))
+            .collect();
         let Some(name) = self.lsp_stopped(cid) else { return };
         // (its files get it back when their session is in front again, or its Claude asks)
-        let owner = self.session_of(&root);
-        if let Some(l) = self.sessions.iter_mut().find(|l| Some(l.id) == owner) {
-            for d in served {
-                if !l.asleep.contains(&d) {
-                    l.asleep.push(d);
-                }
+        for (d, owner) in served {
+            if let Some(l) = self.sessions.iter_mut().find(|l| Some(l.id) == owner)
+                && !l.asleep.contains(&d)
+            {
+                l.asleep.push(d);
             }
         }
         let idle = crate::term::duration(wait.as_secs_f32());
@@ -2887,6 +3064,10 @@ impl Editor {
 
     /// For the status line — what the current document's server is doing.
     pub fn lsp_progress(&self) -> Option<String> {
+        // (its shared server being swapped, or its folder waiting to join one)
+        if let Some(s) = self.share_said(self.doc()) {
+            return Some(s);
+        }
         let c = self.client(self.doc().lsp.client?)?;
         if !c.ready {
             return Some(format!("{}: starting", c.name));
@@ -2897,6 +3078,10 @@ impl Editor {
     /// Server `cid` closed its stdout (exited or crashed) — forget it and everything waiting on it; its docs
     /// go without a server (reopening the file starts a new one).
     pub fn lsp_exited(&mut self, cid: ClientId) {
+        // (a swapped-out server exiting as it was told to)
+        if self.lsp.share.leaving(cid) {
+            return self.share_drop(cid);
+        }
         let root = self.client(cid).map(|c| c.root.clone()).unwrap_or_default();
         if let Some(name) = self.lsp_stopped(cid) {
             // (reaped as it's dropped; the next file of its project starts it again — unless it keeps
@@ -2941,6 +3126,9 @@ impl Editor {
         self.lsp.elsewhere.retain(|_, l| !l.is_empty());
         self.lsp.published.retain(|(c, _), _| *c != cid);
         self.lsp.work_ended.remove(&cid);
+        self.lsp.recent_saves.remove(&cid);
+        self.lsp.resaves.remove(&cid);
+        self.lsp.changed_at.remove(&cid);
         self.lsp.pending.retain(|(c, _), _| *c != cid);
         self.lsp.completion_waiting.retain(|w| w.0 != cid);
         (self.lsp.signature_inflight, self.lsp.signature_again) = (false, false);
@@ -2964,6 +3152,7 @@ impl Editor {
         if self.java_debug.as_ref().is_some_and(|p| p.cid == cid) {
             self.java_debug_fail(format!("{name} exited"));
         }
+        self.share_forget(cid);
         Some(name)
     }
 }
@@ -3339,6 +3528,47 @@ mod tests {
         assert_eq!(reply["result"][1], Value::Null, "nothing set there");
         assert_eq!(reply["result"][2]["python"]["analysis"]["exclude"], *ex, "no section: all of them");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A save followed at once by a change to the same server (the same file typed on, or another
+    /// checkout's file the server shares) is sent again once that server's changes are quiet — the change
+    /// may have cancelled the check the save started. A change later than that, or none, leaves it alone;
+    /// a burst of changes after it makes one more, after the burst.
+    #[test]
+    fn a_save_with_a_change_right_after_is_sent_again_once_quiet() {
+        let (mut ed, file, log) = setup("resave", "fn main() {}\n");
+        ready(&mut ed);
+        let id = ed.doc().id;
+        let saves = |log: &PathBuf| sent(log).matches("textDocument/didSave").count();
+        // A save alone: once
+        ed.lsp_did_save(id);
+        settle_for_ms(&mut ed, 200, |_| false);
+        assert_eq!(saves(&log), 1, "a save alone goes once");
+        // A change right after it: again, once the change is quiet — and after the change
+        ed.lsp_did_save(id);
+        feed(&mut ed, "ix<esc>");
+        settle_for_ms(&mut ed, 300, |_| false);
+        let out = sent(&log);
+        assert_eq!(out.matches("textDocument/didSave").count(), 3, "sent again: {out}");
+        let (last_change, last_save) = (out.rfind("didChange").unwrap(), out.rfind("didSave").unwrap());
+        assert!(last_save > last_change, "the save went again after the change");
+        // A burst of changes right after a save: one more save, after the burst
+        ed.lsp_did_save(id);
+        for _ in 0..5 {
+            feed(&mut ed, "iy<esc>");
+            settle_for_ms(&mut ed, 20, |_| false);
+        }
+        settle_for_ms(&mut ed, 300, |_| false);
+        let out = sent(&log);
+        assert_eq!(out.matches("textDocument/didSave").count(), 5, "one more for the whole burst: {out}");
+        assert!(out.rfind("didSave").unwrap() > out.rfind("didChange").unwrap());
+        // A change well after the save: not again
+        ed.lsp_did_save(id);
+        std::thread::sleep(Duration::from_millis(150));
+        feed(&mut ed, "iz<esc>");
+        settle_for_ms(&mut ed, 300, |_| false);
+        assert_eq!(saves(&log), 6, "a change 150 ms after its save doesn't send it again");
+        std::fs::remove_dir_all(file.parent().unwrap()).ok();
     }
 
     #[test]

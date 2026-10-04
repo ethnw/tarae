@@ -1001,6 +1001,9 @@ pub fn def_answered(ed: &mut Editor, n: u64, cid: ClientId, result: Result<&Valu
         let titles: Vec<String> = c.progress.values().map(|p| p.title.clone()).collect();
         format!("{} is still loading ({})", c.name, titles.join(", "))
     });
+    // (a shared server answers by name for every checkout it serves — only the asking session's are its)
+    let roots = ed.client(cid).map(|c| c.roots.clone()).unwrap_or_default();
+    let mine = ed.session.root.clone();
     let Some(a) = ed.lsp.tool_defs.get_mut(&n) else { return };
     let Some(i) = a.waiting.iter().position(|w| w.0 == cid) else { return };
     let (_, server) = a.waiting.remove(i);
@@ -1011,6 +1014,9 @@ pub fn def_answered(ed: &mut Editor, n: u64, cid: ClientId, result: Result<&Valu
                 let Some(path) = s["location"]["uri"].as_str().and_then(crate::lsp::path_from_uri) else {
                     continue;
                 };
+                if crate::share::foreign(&roots, &mine, &path) {
+                    continue;
+                }
                 let line = s["location"]["range"]["start"]["line"].as_u64().unwrap_or(0) as usize;
                 let name = s["name"].as_str().unwrap_or_default();
                 let kind = lsp_kind(s["kind"].as_u64().unwrap_or(0), name);

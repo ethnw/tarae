@@ -671,6 +671,8 @@ mod tests {
         s.outside(&mine);
         assert!(!s.ed.doc().is_modified());
         assert_eq!(s.saves_reach(n + 1, true), n + 1, "the buffer's text written");
+        // (an edit right after a save sends the save again — `lsp_editor::RESAVE_WITHIN`; this one comes later)
+        std::thread::sleep(Duration::from_millis(150));
         feed(&mut s.ed, "ggid<esc>");
         s.outside("something else\n");
         assert!(s.ed.doc().disk_conflict);
