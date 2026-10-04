@@ -150,12 +150,12 @@ fn main() -> Result<()> {
     let mut files = Vec::new();
     let mut diff_against: Option<PathBuf> = None;
     // `:restart`: the state the last tarae left (restart.rs)
-    let mut restarted = None;
+    let (mut restarted, mut old_children) = (None, Vec::new());
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--restart" => {
-                restart::reap();
+                old_children = restart::reap();
                 restarted = args.next().and_then(|f| restart::read(std::path::Path::new(&f)));
             }
             "--diff" => match (args.next(), args.next()) {
@@ -217,6 +217,8 @@ fn main() -> Result<()> {
     // The UI state's socket — now, while no thread runs (its umask, and for a long path its folder, are the
     // process's for a moment); served once the editor is there
     let ui = uisocket::bind();
+    // (threads may start now: the last tarae's children still running, waited for as they end — #136)
+    restart::wait_for(old_children);
     // Theme "default" (meok/hanji) follows the terminal background — before reading config (config reads it).
     // A restart knows it already (and the query's answer could mix with keys typed meanwhile).
     let light = restarted.as_ref().and_then(|s| s["light"].as_bool());

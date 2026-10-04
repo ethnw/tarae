@@ -389,8 +389,10 @@ root), `y` runs it, `n` tells Claude you said no. When the command starts with p
 rest of the conversation — the card says which words. It's never offered for a program that runs whatever
 follows it (`sh`, `env`, `python`, `xargs` …), nor for git (what of it reads runs already; what writes goes to
 `.git`, which the sandbox keeps), and never kept beyond the conversation. A pattern that sets names in front
-(`A=… B=… cargo xtask shot`) covers the same command setting more names or fewer, each one a pattern may set
-(never `PATH`, `RUSTC_WRAPPER`, `CARGO_HOME`, `RUSTUP_TOOLCHAIN`, `CARGO_ALIAS_…` and the like). A command
+(`A=… B=… cargo xtask shot`) covers the same command setting those names, any values, or fewer of them — never
+a name the card didn't show: one more asks again, and that card's `a` names them all (no list of names that
+make a program run another is whole — `CC=x cargo build` runs x from a build script). A name that does is
+never on a card at all (`PATH`, `RUSTC_WRAPPER`, `CARGO_HOME`, `RUSTUP_TOOLCHAIN`, `CARGO_ALIAS_…` and the like). A command
 that runs a file of code — `sh x.sh`, `./x`, `python x.py`, `perl x.pl`, `awk -f x.awk`, `sed -f x.sed` — shows
 that file's text on its card, since what runs is in it, not in the line (a long one is named, with its length);
 `y` reads it again and runs nothing if it changed since. A command too long to

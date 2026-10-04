@@ -975,8 +975,9 @@ pub struct Procs {
     wake: Option<Sender<Wake>>,
     pub panel: Option<Panel>,
     pub rows: Vec<Row>,
-    /// What the last look cost.
+    /// What the last look cost · when it was (the UI state says how long ago — #143).
     pub took: Option<Duration>,
+    pub looked: Option<Instant>,
     pub checks: Vec<Check>,
     /// cpu ≥ `BUSY_PCT` since · the most it took so far in its first `SETTLE` (and whether that's kept) ·
     /// servers serving no file since · zombies seen last look.
@@ -1216,6 +1217,11 @@ impl Procs {
     /// What the status line says: the newest check that still holds.
     pub fn mark(&self) -> Option<&Check> {
         self.checks.iter().rev().find(|c| c.ended.is_none())
+    }
+
+    /// The checks that hold now, oldest first: what each found, and what tarae did.
+    pub fn holding(&self) -> Vec<String> {
+        self.checks.iter().filter(|c| c.ended.is_none()).map(|c| format!("{} — {}", c.what, c.did)).collect()
     }
 
     /// A server exited: the third time within `CRASH_WINDOW`, it's held. The check, if it was.
@@ -1494,7 +1500,11 @@ impl Editor {
         with_queued(&mut rows, &self.procs_queued(), &groups);
         let (found, learned) = self.procs.check(&rows, &self.procs_lsp_facts(), Instant::now());
         let flagged: HashSet<u32> = found.iter().map(|f| f.pid).filter(|&p| p > 0).collect();
+        let held_before = self.procs.holding();
         self.procs_found(found, now);
+        if self.ui_watch.watching() {
+            self.procs_said(&rows, &held_before);
+        }
         for r in &mut rows {
             r.flagged |= flagged.contains(&r.pid);
         }
@@ -1506,11 +1516,49 @@ impl Editor {
         }
         self.procs.rows = rows;
         self.procs.took = Some(s.took);
+        self.procs.looked = Some(Instant::now());
         if learned {
             self.procs_keep_usual();
         }
         let up = self.procs_up();
         self.unchanged = !up && !self.procs_mark_changed();
+    }
+
+    /// For watchers (`--watch procs`, #143): what a look found changed since the one before — processes
+    /// started and ended, checks that came or went. Said only when something did: a look is every
+    /// `QUIET_EVERY` (each second while `:procs` is open), and most find nothing new.
+    fn procs_said(&mut self, rows: &[Row], held_before: &[String]) {
+        let name = |r: &Row| match r.what.is_empty() {
+            true => format!("{} ({})", r.title, r.pid),
+            false => format!("{} ({}) — {}", r.title, r.pid, r.what),
+        };
+        let live =
+            |rs: &[Row]| -> Vec<(u32, u64)> { rs.iter().filter(|r| r.pid != 0).map(Row::key).collect() };
+        let (was, now) = (live(&self.procs.rows), live(rows));
+        // (the first look has nothing before it: everything would be "started")
+        if self.procs.looked.is_none() {
+            return;
+        }
+        let started: Vec<String> =
+            rows.iter().filter(|r| r.pid != 0 && !was.contains(&r.key())).map(name).collect();
+        let ended: Vec<String> =
+            self.procs.rows.iter().filter(|r| r.pid != 0 && !now.contains(&r.key())).map(name).collect();
+        let holding = self.procs.holding();
+        let found: Vec<&String> = holding.iter().filter(|c| !held_before.contains(c)).collect();
+        let over: Vec<&String> = held_before.iter().filter(|c| !holding.contains(c)).collect();
+        if started.is_empty() && ended.is_empty() && found.is_empty() && over.is_empty() {
+            return;
+        }
+        let mut said = Vec::new();
+        for (word, list) in [("started", &started), ("ended", &ended)] {
+            if !list.is_empty() {
+                said.push(format!("{word}: {}", list.join(", ")));
+            }
+        }
+        said.extend(found.iter().map(|c| format!("▲ {c}")));
+        said.extend(over.iter().map(|c| format!("no longer: {c}")));
+        self.ui_said(serde_json::json!({ "event": "procs", "started": started, "ended": ended,
+            "found": found, "over": over, "said": format!("procs — {}", said.join(" · ")) }));
     }
 
     /// The status line's mark isn't what was drawn last.
@@ -1662,7 +1710,7 @@ fn stop_unknown(pid: u32, started: u64) {
     // SAFETY: SIGTERM to a descendant of tarae's, as read a moment ago.
     unsafe { libc::kill(pid as i32, libc::SIGTERM) };
     if o.ppid == std::process::id() {
-        std::thread::spawn(move || crate::spawn::wait(pid));
+        std::thread::spawn(move || crate::spawn::wait_once(pid));
     }
 }
 
@@ -1867,6 +1915,56 @@ mod tests {
             flagged: false,
             session: None,
         }
+    }
+
+    /// #143: what `:procs` lists is in the UI state (JSON and text) as of its last look, and a watcher of
+    /// `procs` hears what a look found changed — a process started, one ended — and nothing when nothing did.
+    #[test]
+    fn procs_are_in_the_state_and_a_watcher_hears_what_changed() {
+        let mut ed = Editor::new(crate::config::Config::default());
+        let me = std::process::id();
+        // (started now: one started long ago and not known is a stray, flagged)
+        let secs = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
+        let os = |pid, ppid, name| Os { started: secs, ..os(pid, ppid, name) };
+        assert!(ed.ui_state().procs.rows.is_empty(), "no look yet");
+        ed.procs_sampled(sample(vec![os(me, 1, "tarae"), os(50_001, me, "sleep")]));
+        let s = ed.ui_state();
+        let rows: Vec<(u32, &str, &str)> =
+            s.procs.rows.iter().map(|r| (r.pid, r.kind, r.title.as_str())).collect();
+        assert_eq!(rows, [(me, "tarae", "tarae"), (50_001, "other", "sleep")]);
+        let json = s.json();
+        assert_eq!(json["procs"]["rows"][1]["pid"], 50_001);
+        assert_eq!(json["procs"]["rows"][1]["memory"], 10 * MB);
+        assert!(json["procs"]["looked_ms"].is_u64(), "{}", json["procs"]);
+        let text = s.text();
+        assert!(text.contains("procs: 2 processes · 20 MB"), "{text}");
+        assert!(text.contains("\n  50001 sleep · cpu 1.0% · 10 MB\n"), "{text}");
+        // A watcher of procs: the next look's changes, said once
+        let (tx, rx) = std::sync::mpsc::sync_channel(crate::uistate::watch::UNREAD);
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        ed.ui_watch_add(crate::uistate::watch::Watcher { tx, kinds: vec!["procs".into()], overflowed: flag });
+        let gone = Os { zombie: true, ..os(50_002, me, "cargo") };
+        ed.procs_sampled(sample(vec![os(me, 1, "tarae"), gone.clone()]));
+        crate::term::render(&mut ed, &mut Vec::new(), 120, 40).unwrap();
+        let e: Vec<serde_json::Value> = rx.try_iter().map(|l| serde_json::from_str(&l).unwrap()).collect();
+        assert_eq!(e.len(), 1, "{e:?}");
+        assert_eq!(
+            (e[0]["started"][0].as_str(), e[0]["ended"][0].as_str()),
+            (Some("cargo (50002)"), Some("sleep (50001)"))
+        );
+        assert_eq!(e[0]["said"], "procs — started: cargo (50002) · ended: sleep (50001)");
+        assert!(ed.ui_state().text().contains("50002 cargo · cpu 1.0% · 10 MB · ended, not reaped"));
+        // Still unreaped at the next look: the check that found it, said
+        ed.procs_sampled(sample(vec![os(me, 1, "tarae"), gone.clone()]));
+        crate::term::render(&mut ed, &mut Vec::new(), 120, 40).unwrap();
+        let e: Vec<serde_json::Value> = rx.try_iter().map(|l| serde_json::from_str(&l).unwrap()).collect();
+        assert_eq!(e.len(), 1, "{e:?}");
+        assert!(e[0]["found"][0].as_str().unwrap().starts_with("cargo (pid 50002) ended"), "{e:?}");
+        // Nothing new: nothing said
+        ed.procs_sampled(sample(vec![os(me, 1, "tarae"), gone]));
+        crate::term::render(&mut ed, &mut Vec::new(), 120, 40).unwrap();
+        let e: Vec<String> = rx.try_iter().collect();
+        assert!(e.is_empty(), "{e:?}");
     }
 
     /// `/proc/<pid>/stat`: the fields after the name — which may hold spaces and parentheses — its parent,
@@ -2534,6 +2632,48 @@ mod tests {
         keys(&mut ed, "q");
         assert!(!ed.procs_up(), "q closes it");
         std::fs::remove_dir_all(root).ok();
+    }
+
+    /// #131: `s` on a task whose program left a child behind that ignores the stop and holds its output:
+    /// the task's own process is reaped at once — not a zombie until that child goes — and the run ends
+    /// soon after (`DRAIN_AFTER_EXIT`). (Every process here is the test's own stand-in; the child left
+    /// behind is a `sleep` it ends itself.)
+    #[test]
+    fn s_on_a_task_reaps_it_whoever_holds_its_output() {
+        let dir = std::env::temp_dir().join(format!("tarae-procs-reap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ed = Editor::new(crate::config::Config::default());
+        let cmd = "(trap '' TERM; exec sleep 8) & echo $! > left.pid; echo started; wait".to_string();
+        ed.task_start(crate::task::Task { name: "holder".into(), cmd, cwd: dir.clone() });
+        let pid = ed.session.task_run.as_ref().and_then(|r| r.pid()).expect("its process");
+        let left = dir.join("left.pid");
+        settle(&mut ed, |_| std::fs::read_to_string(&left).is_ok_and(|s| s.ends_with('\n')));
+        let child: i32 = std::fs::read_to_string(&left).unwrap().trim().parse().unwrap();
+        crate::typed::execute(&mut ed, "procs").unwrap();
+        settle(&mut ed, |ed| ed.procs.rows.iter().any(|r| r.kind == Kind::Task));
+        let at = ed.procs.rows.iter().position(|r| r.kind == Kind::Task).expect("its row");
+        ed.procs.panel.as_mut().unwrap().selected = at;
+        keys(&mut ed, "s");
+        let gone = |pid: i32| {
+            // SAFETY: signal 0 only asks whether the process is there (a zombie still is).
+            unsafe { libc::kill(pid, 0) != 0 }
+        };
+        let end = Instant::now() + Duration::from_secs(2);
+        while !gone(pid as i32) && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let reaped = gone(pid as i32);
+        let still = !gone(child);
+        settle(&mut ed, |ed| {
+            ed.session.task_run.as_ref().is_some_and(|r| r.state != crate::task::State::Running)
+        });
+        let ended = ed.session.task_run.as_ref().is_some_and(|r| r.state != crate::task::State::Running);
+        // SAFETY: the `sleep` this test's own command left behind (its pid from its own file).
+        unsafe { libc::kill(child, libc::SIGKILL) };
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(still, "the child left behind still held its output while it was stopped");
+        assert!(reaped, "the task's process reaped, not a zombie while that child lives");
+        assert!(ended, "the run ended without waiting for that child");
     }
 
     /// Two sessions, each with its checkout's server and a chat (the test's stand-ins): `:procs` heads

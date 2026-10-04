@@ -595,6 +595,16 @@ impl Editor {
     fn share_change(&mut self, a: ClientId, want: Vec<PathBuf>) {
         let Some(c) = self.client(a) else { return };
         let why = change_said(&c.roots, &want);
+        // Only folders going (a session ended), its first one staying: told, nothing reloads from scratch
+        // (#148 — a restart re-indexed every checkout left at 729% CPU)
+        let leaves_only = want.iter().all(|r| c.roots.contains(r)) && want.first() == c.roots.first();
+        if leaves_only && c.takes_folder_changes() {
+            return self.share_leave(a, want, why);
+        }
+        if leaves_only {
+            let msg = format!("{} doesn't take workspace folder changes — so not told", c.name);
+            crate::log::line(&c.name, "share", &msg);
+        }
         if !c.settled_once {
             return self.share_restart(a, want, format!("{why} — it was still loading, so a restart"));
         }
@@ -605,6 +615,19 @@ impl Editor {
             let footprint = pid.and_then(crate::procs::read).map(|o| o.footprint.unwrap_or(o.rss));
             move |ed: &mut Editor| ed.share_decided(a, want, why, room, footprint)
         });
+    }
+
+    /// Server `a` keeps only `want` (its folders less those gone): `workspace/didChangeWorkspaceFolders`
+    /// with the rest removed — the same process, its index of the folders left kept.
+    fn share_leave(&mut self, a: ClientId, want: Vec<PathBuf>, why: String) {
+        let Some(c) = self.client_mut(a) else { return };
+        let gone: Vec<Value> = c.roots.iter().filter(|r| !want.contains(r)).map(|r| lsp::folder(r)).collect();
+        let event = json!({ "event": { "added": [], "removed": gone } });
+        c.notify("workspace/didChangeWorkspaceFolders", event);
+        c.roots = want;
+        let name = c.name.clone();
+        crate::log::line(&name, "share", &format!("{why} — told it the folders that went; no restart"));
+        self.share_unpark();
     }
 
     fn share_decided(&mut self, a: ClientId, want: Vec<PathBuf>, why: String, room: Room, fp: Option<u64>) {
@@ -1398,6 +1421,44 @@ mod tests {
         let (sa, c) = the_swap(&ed).unwrap();
         assert_eq!(sa, b);
         assert_eq!(ed.client(c).unwrap().roots, [t.join("main"), t.join("wt1")]);
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    /// #148: a checkout leaving a server that takes folder changes (rust-analyzer says so in its `initialize`
+    /// answer) is told it — the same server goes on for the rest, no swap, no restart. (One that doesn't
+    /// take them swaps: the test above.)
+    #[test]
+    fn a_checkout_that_ends_leaves_by_a_folder_change_when_the_server_takes_them() {
+        let (t, mut ed) = fixture("leave", &["wt1"], plenty);
+        let takes = |ed: &mut Editor, cid: ClientId| {
+            let caps = json!({ "positionEncoding": "utf-8",
+                "workspace": { "workspaceFolders": { "supported": true, "changeNotifications": true } } });
+            ed.on_lsp_message(cid, json!({ "jsonrpc": "2.0", "id": 0, "result": { "capabilities": caps } }));
+            quiescent(ed, cid);
+        };
+        let (_, a) = open(&mut ed, &t.join("main/src/main.rs"));
+        let a = a.unwrap();
+        takes(&mut ed, a);
+        ed.open(&t.join("wt1/src/main.rs")).unwrap();
+        let wt = ed.doc().id;
+        assert!(settle(&mut ed, 3000, |ed| the_swap(ed).is_some()), "joining is still a swap");
+        let (_, b) = the_swap(&ed).unwrap();
+        takes(&mut ed, b);
+        let place = json!([{ "uri": "file:///x.rs", "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 1 } } }]);
+        round(&mut ed, a, b, &place, &place);
+        shut(&mut ed, a);
+        // wt1's file closed, no session for it: told, and the same server serves main
+        ed.close_doc(wt);
+        let left = |ed: &Editor| ed.client(b).is_some_and(|c| c.roots == [t.join("main")]);
+        assert!(settle(&mut ed, 3000, left), "{:?}", ed.client(b).map(|c| c.roots.clone()));
+        assert!(the_swap(&ed).is_none() && ed.lsp.clients.len() == 1, "no swap, no second server");
+        let out = sent(&t, &ed, b, &["didChangeWorkspaceFolders"]);
+        let told = out.lines().find(|l| l.contains("didChangeWorkspaceFolders")).unwrap_or_default();
+        assert!(
+            told.contains(&format!(r#""removed":[{{"name":"wt1","uri":"{}"}}]"#, lsp::uri(&t.join("wt1")))),
+            "{told}"
+        );
+        assert!(told.contains(r#""added":[]"#), "{told}");
         let _ = std::fs::remove_dir_all(&t);
     }
 

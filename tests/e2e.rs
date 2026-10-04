@@ -298,7 +298,8 @@ fn side_panel_lists_opens_and_closes() {
 
 /// The built-in terminal through a real terminal: `space T` starts the shell with the keys, what's typed
 /// runs there (not in the buffer), a real `C-\` byte (0x1c — crossterm reads it as Ctrl-4) gives the keys
-/// back, `space T` hides it.
+/// back; `space T` from the code gives them to it again (#144), and from inside — `C-w j`, tarae's keys on
+/// its panel — hides it.
 #[test]
 fn terminal_panel_runs_the_shell_and_gives_the_keys_back() {
     let sb = Sandbox::new("terminal");
@@ -315,6 +316,11 @@ fn terminal_panel_runs_the_shell_and_gives_the_keys_back() {
     t.send("i");
     t.wait_for("INSERT mode in the code", |s| s.status().contains("INSERT"));
     t.normal_mode();
+    t.send(" T");
+    t.send("echo again-$((1+1))\r");
+    t.wait_text("again-2");
+    t.send("\x1c");
+    t.send("\x17j");
     t.send(" T");
     t.wait_for("the terminal hidden", |s| !s.contains("TERMINAL") && !s.contains("sum-42"));
     t.command("q");

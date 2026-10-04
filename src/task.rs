@@ -696,23 +696,20 @@ impl Editor {
         std::thread::spawn(move || {
             // (the packs read here — one of one's own is a file)
             let waits = std::sync::Arc::new(crate::waits::Rules::load());
-            let err_reader = stderr.map(|e| {
-                let tx = tx.clone();
-                let send_lines = send_lines.clone();
-                let waits = waits.clone();
+            let (eof, read_all) = std::sync::mpsc::channel();
+            let mut readers = 0;
+            for (stream, err) in [(stdout, false), (stderr, true)] {
+                let Some(s) = stream else { continue };
+                let (tx, send_lines, waits, eof) =
+                    (tx.clone(), send_lines.clone(), waits.clone(), eof.clone());
+                readers += 1;
                 std::thread::spawn(move || {
                     let mut matcher = Matcher::default();
-                    read_batches(e, |lines| send_lines(&tx, &mut matcher, &waits, true, lines));
-                })
-            });
-            if let Some(o) = stdout {
-                let mut matcher = Matcher::default();
-                read_batches(o, |lines| send_lines(&tx, &mut matcher, &waits, false, lines));
+                    read_batches(s, |lines| send_lines(&tx, &mut matcher, &waits, err, lines));
+                    let _ = eof.send(());
+                });
             }
-            if let Some(h) = err_reader {
-                let _ = h.join();
-            }
-            let status = crate::spawn::wait(pid).ok();
+            let status = crate::spawn::wait_and_drain(pid, &read_all, readers).ok();
             // Its last denials reach the watch before its end is told (here, not on the main loop)
             if watched {
                 std::thread::sleep(crate::sandbox::WATCH_LAST);

@@ -69,6 +69,8 @@ impl Editor {
             c.asks = c.title.clone();
         }
         s.runs.retain(|r| r.session == own);
+        // (its `procs` tool says these, each process's command line and folder with them)
+        s.procs = Default::default();
         s.gone = self.ui_gone.iter().rev().filter(|g| g.session == own).take(3).cloned().collect();
         s.front = own;
         s

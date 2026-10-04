@@ -1278,10 +1278,14 @@ fn draw_terminal_panel(
         // (filling the screen, its escape leaves the keys on it: `C-w z` from there)
         (None, true, _) if zoomed => vec![(esc, "stop typing")],
         (None, true, _) => vec![(esc, "back to the code")],
-        (None, false, true) => {
-            vec![("i", "type in it"), ("j k", "scroll"), ("C-w z", zoom), ("esc", "to the code")]
-        }
-        (None, false, false) => vec![(esc, "type in it"), ("space T", "hide")],
+        (None, false, true) => vec![
+            ("i", "type in it"),
+            ("j k", "scroll"),
+            ("C-w z", zoom),
+            ("space T", "hide"),
+            ("esc", "to the code"),
+        ],
+        (None, false, false) => vec![(esc, "type in it")],
     };
     // The program has the mouse: how to select in it anyway
     if t.exited.is_none() && screen.mouse_protocol_mode() != vt100::MouseProtocolMode::None {

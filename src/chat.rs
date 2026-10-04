@@ -1785,8 +1785,10 @@ pub fn acts_unseen(key: Key) -> bool {
 }
 
 /// The chat minimized while Claude works has the keys, its input not on screen (slip 3, 2026-10-04): a key
-/// that would type, edit or send there brings the panel back instead — it isn't typed, and that's said. True
-/// if it was that key.
+/// that would type, edit or send there brings the panel back first. A letter comes back typed — the input
+/// is in sight with it, and nothing is sent (#151: the first letter of a follow-up was swallowed); space
+/// (the leader: slip 3 was `space W` typed into it), Enter and editing keys only bring it back, said so.
+/// True if it was that key.
 pub fn unfold_key(ed: &mut Editor, key: Key) -> bool {
     if !ed.pending.is_empty() {
         return false;
@@ -1797,9 +1799,20 @@ pub fn unfold_key(ed: &mut Editor, key: Key) -> bool {
         return false;
     }
     c.unfolded = true;
-    ed.set_status(format!("{key} brought the chat back — it wasn't typed; its input is in sight now"));
+    match key.code {
+        Code::Char(x) if !key.ctrl && !key.alt && !x.is_whitespace() => {
+            c.input.insert(c.cursor, x);
+            c.cursor += x.len_utf8();
+        }
+        _ => {
+            ed.set_status(format!("{key} brought the chat back — it wasn't typed; its input is in sight now"))
+        }
+    }
     true
 }
+
+/// Lines a page key scrolls the conversation.
+const PAGE: usize = 10;
 
 pub fn key(ed: &mut Editor, key: Key) -> bool {
     // (the second key of a sequence — `C-w >` from an empty input — is the keymap's)
@@ -1858,6 +1871,10 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
             }
             None => ed.set_status("no code block in the last answer"),
         },
+        // The editor's page keys page the conversation (#153) — `C-u` from an empty input (with text it
+        // clears up to the cursor, as readline's; `↑` scrolls only from an empty input too)
+        (Code::Char('d'), true, _) => c.scroll = c.scroll.saturating_sub(PAGE),
+        (Code::Char('u'), true, _) if c.input.is_empty() => c.scroll += PAGE,
         (Code::Char('u'), true, _) => {
             c.input.drain(..c.cursor);
             c.cursor = 0;
@@ -1888,10 +1905,10 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
             c.cursor = c.input.len();
         }
         (Code::PageUp, ..) | (Code::Up, ..) if c.input.is_empty() || key.code == Code::PageUp => {
-            c.scroll += if key.code == Code::PageUp { 10 } else { 1 };
+            c.scroll += if key.code == Code::PageUp { PAGE } else { 1 };
         }
         (Code::PageDown, ..) | (Code::Down, ..) if c.input.is_empty() || key.code == Code::PageDown => {
-            c.scroll = c.scroll.saturating_sub(if key.code == Code::PageDown { 10 } else { 1 });
+            c.scroll = c.scroll.saturating_sub(if key.code == Code::PageDown { PAGE } else { 1 });
         }
         // Tab in an empty chat = cycles through example questions
         (Code::Tab, ..) if c.msgs.is_empty() => {
@@ -1944,6 +1961,30 @@ mod tests {
             let ev = ed.events.recv_timeout(left).expect("event before timeout");
             ed.handle_event(ev);
         }
+    }
+
+    /// #153: the editor's page keys page the conversation — `C-u` up from an empty input, `C-d` down; with
+    /// text in the input `C-u` still clears up to the cursor.
+    #[test]
+    fn page_keys_page_the_chat() {
+        let mut ed = editor("");
+        let mut c = Chat::new();
+        c.focused = true;
+        ed.session.chat = Some(c);
+        let press = |ed: &mut Editor, k: &str| assert!(key(ed, k.parse().unwrap()), "{k} is the chat's");
+        let scroll = |ed: &Editor| ed.session.chat.as_ref().unwrap().scroll;
+        press(&mut ed, "C-u");
+        press(&mut ed, "C-u");
+        assert_eq!(scroll(&ed), 2 * PAGE);
+        press(&mut ed, "C-d");
+        assert_eq!(scroll(&ed), PAGE);
+        let c = ed.session.chat.as_mut().unwrap();
+        (c.input, c.cursor) = ("draft".into(), 5);
+        press(&mut ed, "C-u");
+        let c = ed.session.chat.as_ref().unwrap();
+        assert_eq!((c.input.as_str(), c.scroll), ("", PAGE), "with text: cleared, not scrolled");
+        press(&mut ed, "C-d");
+        assert_eq!(scroll(&ed), 0);
     }
 
     /// One character (a multi-byte grapheme) under the cursor isn't a selection; two are.

@@ -1122,13 +1122,18 @@ fn probe_now() -> Availability {
     }
 }
 
+const INSIDE: &str = "tarae itself runs in a sandbox, and another can't start inside it";
+
+/// Whether tarae itself runs inside a sandbox — started by a sandboxed run (`MARK`), or `sandbox-exec`
+/// can't start one inside it (`probe`: blocks the first time — a worker's). What it starts is inside too
+/// (#140: the terminal panel).
+pub fn inside() -> bool {
+    std::env::var_os(MARK).is_some() || matches!(probe(), Availability::Missing(w) if w == INSIDE)
+}
+
 /// Why `sandbox-exec` couldn't start one, from what it said.
 pub fn missing_why(stderr: &str) -> String {
-    if stderr.contains("sandbox_apply") {
-        "tarae itself runs in a sandbox, and another can't start inside it".into()
-    } else {
-        format!("sandbox-exec: {}", stderr.trim())
-    }
+    if stderr.contains("sandbox_apply") { INSIDE.into() } else { format!("sandbox-exec: {}", stderr.trim()) }
 }
 
 /// The policy for the project at `root` with these settings — the toolchain's folders found (blocks).

@@ -153,6 +153,11 @@
       ]
     }
   },
+  "procs": {
+    "checks": [],
+    "looked_ms": null,
+    "rows": []
+  },
   "prompt": null,
   "runs": [
     {

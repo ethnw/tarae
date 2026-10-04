@@ -589,10 +589,13 @@ pub fn allowed(cmd: &str, extra: &[String]) -> bool {
     env_allowed_words(&names, &words, extra)
 }
 
-/// A command setting `names` (`NAME=value` in front, or through `env`) allowed: by a rule that sets names
-/// too — any of them then, more or fewer than it named (#114: `A=… B=… cargo xtask shot` covers `A=… C=…
-/// cargo xtask shot`), each one a pattern may set (`readonly::env_allowed`) — not by the built-in checks
-/// nor a rule setting none: `RUSTC_WRAPPER=x cargo build` runs x.
+/// A command setting `names` (`NAME=value` in front, or through `env`) allowed: by a rule naming each of
+/// them — the card said `A=… B=… cargo xtask shot`, so those, or fewer, with any values; never a name it
+/// didn't show (#132, user: an allowance must never widen what runs unasked past what they meant — #114 had
+/// let any name a pattern may set through, and no list of names that run something is whole: `CC=x cargo
+/// build` runs x from a build script). One more name asks again, its card's `a` naming them all. Each a
+/// pattern may set (`readonly::env_allowed`) — not by the built-in checks nor a rule setting none:
+/// `RUSTC_WRAPPER=x cargo build` runs x.
 fn env_allowed_words(names: &[String], words: &[String], extra: &[String]) -> bool {
     if names.is_empty() {
         return allowed_words(words, extra);
@@ -603,7 +606,7 @@ fn env_allowed_words(names: &[String], words: &[String], extra: &[String]) -> bo
     !words.iter().any(|w| WRITES.iter().any(|o| w.starts_with(o)))
         && extra.iter().any(|rule| {
             let (set, rest) = rule_env(rule);
-            !set.is_empty() && rule_matches(words, &rest)
+            !set.is_empty() && names.iter().all(|n| set.contains(&n.as_str())) && rule_matches(words, &rest)
         })
 }
 
@@ -3525,12 +3528,31 @@ mod tests {
         assert!(super::allowed("TARAE_BACKGROUND=light cargo xtask shot /tmp/b.png", &chat), "fewer names");
         assert!(super::allowed("cargo xtask shot /tmp/b.png", &chat), "none");
         assert!(!super::allowed("RUSTC_WRAPPER=/tmp/w cargo xtask shot x", &chat), "a never-name");
-        // #114: more names, or others — each one a pattern may set
-        assert!(super::allowed(
-            "TARAE_SHOT_XDG=/tmp/x TARAE_BACKGROUND=dark TARAE_SHOT_COLS=120 cargo xtask shot /tmp/c.png",
-            &chat
-        ));
-        assert!(super::allowed("sh -c 'RUST_LOG=debug cargo xtask shot /tmp/d.png'", &chat), "another name");
+        // #132: a name the card didn't show asks again — `CC` runs a program from a build script, and no list
+        // of such names is whole; that card's `a` names them all, and covers it then
+        let more =
+            "TARAE_SHOT_XDG=/tmp/x TARAE_BACKGROUND=dark TARAE_SHOT_COLS=120 cargo xtask shot /tmp/c.png";
+        for c in [
+            more,
+            "env TARAE_SHOT_XDG=/tmp/x TARAE_BACKGROUND=dark TARAE_SHOT_COLS=120 cargo xtask shot /tmp/c.png",
+            "sh -c 'RUST_LOG=debug cargo xtask shot /tmp/d.png'",
+            "TARAE_BACKGROUND=dark CC=/tmp/evil cargo xtask shot /tmp/e.png",
+        ] {
+            assert!(!super::allowed(c, &chat) && !super::chain_allowed(c, &chat, false), "{c}");
+        }
+        let wider = vec![p(more).unwrap()];
+        assert_eq!(
+            super::pattern_shown(&wider[0]),
+            "TARAE_SHOT_XDG=… TARAE_BACKGROUND=… TARAE_SHOT_COLS=… cargo xtask shot"
+        );
+        assert!(
+            super::allowed(more, &wider) && super::allowed(shot, &wider),
+            "its card's a: all three, or fewer"
+        );
+        assert!(
+            super::chain_allowed("env TARAE_BACKGROUND=dark cargo xtask shot /tmp/f.png", &chat, false),
+            "fewer names through env, in a line"
+        );
         for c in [
             "TARAE_BACKGROUND=dark CARGO_ALIAS_XTASK=run cargo xtask shot",
             "TARAE_BACKGROUND=dark RUSTUP_TOOLCHAIN=./tc cargo xtask shot",

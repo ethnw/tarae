@@ -663,11 +663,23 @@ impl Signals {
 }
 
 /// First thing after a restart: the last tarae's children that were stopped but not waited for are this
-/// process's now (same pid) — waited for, so they don't linger as zombies.
-pub fn reap() {
+/// process's now (same pid) — waited for, so they don't linger as zombies. Those still running (#136: its
+/// own build, told to stop a moment before the exec and not yet gone) are returned, for `wait_for` — every
+/// child this process has now is the last one's: nothing else has been started yet.
+pub fn reap() -> Vec<u32> {
     let mut status = 0;
     // SAFETY: waitpid with WNOHANG on any child; nothing else has been started yet.
     while unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) } > 0 {}
+    crate::procs::children(std::process::id())
+}
+
+/// The last tarae's children still running at the restart, each waited for on a thread of its own as it
+/// ends — nothing here started them, so nothing else would (once threads may start: `main`).
+pub fn wait_for(pids: Vec<u32>) {
+    for pid in pids {
+        let _ =
+            std::thread::Builder::new().name("tarae-reap".into()).spawn(move || crate::spawn::wait_once(pid));
+    }
 }
 
 // ── What comes along ────────────────────────────────────────────────────────
@@ -756,8 +768,10 @@ fn restore_quietly(ed: &mut Editor, v: &Value) -> usize {
     // The sessions, the one in front in front — the files below open in it
     crate::worktree::restore(ed, &v["sessions"]);
     crate::codereview::viewed_restore(ed, &v["viewed"]);
-    // Saved index → the document it is now
+    // Saved index → the document it is now (outside the checkouts, a file's server waits until it's
+    // shown — #141)
     let mut ids = Vec::new();
+    ed.lsp.unseen_later = true;
     for d in v["docs"].as_array().into_iter().flatten() {
         let opened =
             d["path"].as_str().filter(|p| Path::new(p).is_file()).and_then(|p| ed.open(Path::new(p)).ok());
@@ -785,6 +799,7 @@ fn restore_quietly(ed: &mut Editor, v: &Value) -> usize {
             doc.id
         }));
     }
+    ed.lsp.unseen_later = false;
     let opened = ids.iter().flatten().count();
     if opened > 0 {
         layout(ed, v, &ids);
@@ -921,6 +936,24 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::canonicalize(dir).unwrap()
+    }
+
+    /// #136: a child of the last tarae still running at the restart (nothing here holds it) is waited for
+    /// as it ends — not left a zombie. (The test's own `sleep`, its handle dropped as an exec drops it;
+    /// `reap` itself waits for any child, so it isn't run in the test binary.)
+    #[test]
+    fn a_child_still_running_at_the_restart_is_reaped_when_it_ends() {
+        let child = std::process::Command::new("sleep").arg("0.3").spawn().unwrap();
+        let pid = child.id();
+        drop(child);
+        wait_for(vec![pid]);
+        // SAFETY: signal 0 only asks whether the process is there (a zombie still is).
+        let gone = || unsafe { libc::kill(pid as i32, 0) } != 0;
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !gone() && std::time::Instant::now() < end {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(gone(), "reaped once it ended");
     }
 
     /// Files, multi-cursor selections, scroll, panes and `:set`s go through the state as they were; a

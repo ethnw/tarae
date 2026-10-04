@@ -238,6 +238,43 @@ pub fn wait(pid: u32) -> io::Result<ExitStatus> {
     }
 }
 
+/// Waits for `pid`, a child nothing else holds — unless another `wait_once` already waits for it (a second
+/// waiter could, after the first reaped it, wait on a later child given the same pid).
+pub fn wait_once(pid: u32) {
+    static WAITING: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+    {
+        let mut w = WAITING.lock().unwrap_or_else(|e| e.into_inner());
+        if w.contains(&pid) {
+            return;
+        }
+        w.push(pid);
+    }
+    let _ = wait(pid);
+    WAITING.lock().unwrap_or_else(|e| e.into_inner()).retain(|&p| p != pid);
+}
+
+/// How long a run's output is still read once its process has ended.
+pub const DRAIN_AFTER_EXIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Waits for `pid` — reaped the moment it ends, whoever still holds its output open (#131: a grandchild
+/// that ignored the stop, or left its group, kept the pipe, and the process stopped from `:procs` stayed a
+/// zombie until tarae exited) — then up to `DRAIN_AFTER_EXIT` for `readers` reader threads to say they
+/// reached the end of it (`eof`).
+pub fn wait_and_drain(
+    pid: u32,
+    eof: &std::sync::mpsc::Receiver<()>,
+    readers: usize,
+) -> io::Result<ExitStatus> {
+    let status = wait(pid);
+    let end = std::time::Instant::now() + DRAIN_AFTER_EXIT;
+    for _ in 0..readers {
+        if eof.recv_timeout(end.saturating_duration_since(std::time::Instant::now())).is_err() {
+            break;
+        }
+    }
+    status
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

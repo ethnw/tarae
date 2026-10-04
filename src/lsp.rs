@@ -589,7 +589,19 @@ impl Drop for Client {
     }
 }
 
+/// A workspace folder as LSP says it.
+pub fn folder(r: &Path) -> Value {
+    json!({ "uri": uri(r), "name": r.file_name().map(|n| n.to_string_lossy()).unwrap_or_default() })
+}
+
 impl Client {
+    /// Whether it takes `workspace/didChangeWorkspaceFolders` (its `initialize` answer says so: `true`, or
+    /// the id it registers them under).
+    pub fn takes_folder_changes(&self) -> bool {
+        let n = &self.caps["workspace"]["workspaceFolders"]["changeNotifications"];
+        n.as_bool() == Some(true) || n.is_string()
+    }
+
     /// The server's process id (`:procs`; tests: is it gone, reaped?).
     pub fn pid(&self) -> Option<u32> {
         self.child.as_ref().map(Child::id)
@@ -706,10 +718,7 @@ impl Client {
             config: Default::default(),
         };
         let root_uri = uri(root);
-        let folders: Vec<Value> = roots
-            .iter()
-            .map(|r| json!({ "uri": uri(r), "name": r.file_name().map(|n| n.to_string_lossy()).unwrap_or_default() }))
-            .collect();
+        let folders: Vec<Value> = roots.iter().map(|r| folder(r)).collect();
         let mut init = json!({
             "jsonrpc": "2.0", "id": 0, "method": "initialize",
             "params": {

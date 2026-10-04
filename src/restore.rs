@@ -118,6 +118,8 @@ impl Editor {
         // Saved `current` indexes the saved list — missing files shift it. Take the file itself, or the
         // nearest opened one before it (else the first).
         let mut pick = None;
+        // (outside the checkouts, a file's server waits until it's shown — #141)
+        self.lsp.unseen_later = true;
         for (i, f) in files.iter().enumerate() {
             if !f.is_file() || self.open(f).is_err() {
                 continue;
@@ -127,6 +129,7 @@ impl Editor {
                 pick = Some(self.current);
             }
         }
+        self.lsp.unseen_later = false;
         if let Some(pick) = pick {
             self.current = pick;
             let name = if opened == 1 { "1 file".to_string() } else { format!("{opened} files") };

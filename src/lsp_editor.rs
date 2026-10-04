@@ -67,6 +67,14 @@ pub struct LspState {
     /// `rest_after`, `IDLE_STOP` unless a test says).
     resting: HashMap<ClientId, std::time::Instant>,
     pub(crate) rest_after: Option<std::time::Duration>,
+    /// Servers rooted outside every session's checkout with no file of theirs in sight, since when
+    /// (`servers_follow_sight` — they stop after `sight_after`, `IDLE_STOP` unless a test says) · files whose
+    /// server waits until they're shown (theirs stopped so, or reopened unseen at startup) · while
+    /// reopening files at startup (`restore_files`): such a file's server waits for it to be shown.
+    unseen: HashMap<ClientId, std::time::Instant>,
+    pub(crate) sight_after: Option<std::time::Duration>,
+    waits_sight: std::collections::HashSet<DocId>,
+    pub(crate) unseen_later: bool,
     /// How long `g r`'s text matches wait for a busy server's answer — `TEXT_GRACE` unless a test says.
     pub(crate) text_grace: Option<std::time::Duration>,
     /// How long Claude's tools wait for a server before standing in for it — `nav::REFS_WAIT` unless a
@@ -461,6 +469,11 @@ impl Editor {
         }
         let Some(path) = doc.path.clone() else { return };
         let Some(spec) = crate::syntax::detect(&path) else { return };
+        // (reopened at startup outside every checkout: its server once it's shown — #141)
+        if self.lsp.unseen_later && !self.in_a_checkout(&path) {
+            self.lsp.waits_sight.insert(id);
+            return;
+        }
         // No project for a server that needs one: none started (said once per folder, in the log — not a
         // message on screen at every open)
         if let Some(markers) = lsp::project_markers(&spec.name)
@@ -2038,6 +2051,7 @@ impl Editor {
 
     /// Tell the server "this document was closed" (buffer closed or renamed).
     pub fn lsp_did_close(&mut self, id: DocId) {
+        self.lsp.waits_sight.remove(&id);
         let Some(doc) = self.docs.iter_mut().find(|d| d.id == id) else { return };
         let Some(path) = doc.path.clone() else { return };
         let clients: Vec<ClientId> = doc.lsp.clients().collect();
@@ -2136,6 +2150,74 @@ impl Editor {
         let idle = crate::term::duration(wait.as_secs_f32());
         let msg = format!("{name} for {} stopped — its session idle behind for {idle}", root.display());
         crate::log::line(&name, "stop", &msg);
+        // (nothing of it is on screen)
+        self.unchanged = true;
+    }
+
+    /// Whether `path` is in one of the sessions' checkouts.
+    fn in_a_checkout(&self, path: &std::path::Path) -> bool {
+        std::iter::once(&self.session).chain(&self.sessions).any(|l| path.starts_with(&l.root))
+    }
+
+    /// Every event (#141 — servers for one-off files outside the project, reopened at startup and never
+    /// looked at, ran for hours): a file shown whose server waits for it gets it; a server rooted outside
+    /// every session's checkout (nor holding one) with no file of it in sight stops after `sight_after`,
+    /// its files getting it back when shown. The projects' own servers aren't touched (rust-analyzer takes
+    /// minutes to load again) — they stop when their files close, or rest with their session.
+    pub(crate) fn servers_follow_sight(&mut self, now: std::time::Instant) {
+        let current = self.doc().id;
+        let shown: Vec<DocId> =
+            std::iter::once(current).chain(self.session.views.iter().map(|v| v.doc)).collect();
+        for &id in &shown {
+            if self.lsp.waits_sight.remove(&id) {
+                self.attach_lsp(id);
+            }
+        }
+        let roots: Vec<&std::path::Path> =
+            std::iter::once(&self.session).chain(&self.sessions).map(|l| l.root.as_path()).collect();
+        let in_sight: Vec<ClientId> = self
+            .docs
+            .iter()
+            .filter(|d| shown.contains(&d.id))
+            .flat_map(|d| d.lsp.clients().collect::<Vec<_>>())
+            .collect();
+        let mut out: Vec<ClientId> = Vec::new();
+        for c in &self.lsp.clients {
+            let outside = c.roots.iter().all(|r| !roots.iter().any(|s| r.starts_with(s) || s.starts_with(r)));
+            if !outside || in_sight.contains(&c.id) || self.lsp.share.incoming(c.id) {
+                self.lsp.unseen.remove(&c.id);
+            } else if !self.lsp.unseen.contains_key(&c.id) {
+                out.push(c.id);
+            }
+        }
+        let wait = self.lsp.sight_after.unwrap_or(IDLE_STOP);
+        for cid in out {
+            self.lsp.unseen.insert(cid, now);
+            self.events.shared_jobs().spawn(move || {
+                std::thread::sleep(wait);
+                move |ed: &mut Editor| ed.lsp_stop_unseen(cid, now, wait)
+            });
+        }
+        let clients: Vec<ClientId> = self.lsp.clients.iter().map(|c| c.id).collect();
+        self.lsp.unseen.retain(|c, _| clients.contains(c));
+    }
+
+    fn lsp_stop_unseen(&mut self, cid: ClientId, since: std::time::Instant, wait: std::time::Duration) {
+        if self.lsp.unseen.get(&cid) != Some(&since) {
+            return;
+        }
+        self.lsp.unseen.remove(&cid);
+        let Some(root) = self.client(cid).map(|c| c.root.display().to_string()) else { return };
+        let served: Vec<DocId> =
+            self.docs.iter().filter(|d| d.lsp.clients().any(|c| c == cid)).map(|d| d.id).collect();
+        let Some(name) = self.lsp_stopped(cid) else { return };
+        self.lsp.waits_sight.extend(served);
+        let idle = crate::term::duration(wait.as_secs_f32());
+        crate::log::line(
+            &name,
+            "stop",
+            &format!("{name} for {root} stopped — no file of it in sight for {idle}"),
+        );
         // (nothing of it is on screen)
         self.unchanged = true;
     }
@@ -3492,6 +3574,53 @@ mod tests {
         ed.session_switch(idle);
         assert!(ed.doc().lsp.client.is_some_and(|c| c != idle_srv), "a new one for its file");
         ed.sessions.clear();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #141: a server rooted outside the project with no file of it in sight stops after its wait, its file
+    /// open still and getting a server back once shown; the project's own server out of sight stays. A file
+    /// outside reopened at startup starts none until it's shown.
+    #[test]
+    fn servers_outside_the_project_follow_sight() {
+        let dir = std::env::temp_dir().join(format!("tarae-lsp-sight-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        for d in ["proj", "elsewhere", "later"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+            std::fs::write(dir.join(d).join("a.toml"), "x = 1\n").unwrap();
+        }
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let cfg = "[lsp.tomlfake]\ncommand = \"sh\"\nargs = [\"-c\", \"cat > /dev/null\"]\n\
+                   [lang.toml]\nlsp = [\"tomlfake\"]\n";
+        let (config, w) = crate::config::parse(cfg);
+        assert!(w.is_empty(), "{w:?}");
+        let mut ed = Editor::new(config);
+        ed.session.root = dir.join("proj");
+        ed.lsp.sight_after = Some(Duration::from_millis(50));
+        let (outside, inside) = (dir.join("elsewhere/a.toml"), dir.join("proj/a.toml"));
+        ed.open(&outside).unwrap();
+        let out_srv = ed.doc().lsp.client.expect("the outside file's server");
+        ed.open(&inside).unwrap();
+        let in_srv = ed.doc().lsp.client.expect("the project's");
+        assert_ne!(out_srv, in_srv);
+        // The project's file in sight: the outside one's server stops, its file stays open
+        ed.handle_event(crate::event::Event::Resize);
+        settle_for(&mut ed, 5, |ed| ed.client(out_srv).is_none());
+        assert!(ed.client(out_srv).is_none(), "out of sight, outside the project: stopped");
+        assert!(ed.docs.iter().any(|d| d.path.as_ref() == Some(&outside)), "its file stays open");
+        // Shown again: a server back for it — while the project's, out of sight now, stays
+        ed.open(&outside).unwrap();
+        ed.handle_event(crate::event::Event::Resize);
+        let back = ed.doc().lsp.client.expect("a server back once shown");
+        assert_ne!(back, out_srv);
+        settle_for_ms(&mut ed, 300, |_| false);
+        assert!(ed.client(in_srv).is_some(), "the project's own server out of sight stays");
+        // Reopened at startup, never shown: no server until it is
+        ed.lsp.unseen_later = true;
+        ed.open(&dir.join("later/a.toml")).unwrap();
+        ed.lsp.unseen_later = false;
+        assert_eq!(ed.doc().lsp.client, None, "none for a file reopened unseen");
+        ed.handle_event(crate::event::Event::Resize);
+        assert!(ed.doc().lsp.client.is_some(), "shown: its server");
         std::fs::remove_dir_all(&dir).ok();
     }
 

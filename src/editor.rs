@@ -2731,7 +2731,9 @@ impl Editor {
     /// Starts a background parse for each edited document not already parsing (at the end of every event) —
     /// not those whose trees went (`trees_follow_sight`), until they're shown.
     pub fn schedule_parses(&mut self) {
-        self.trees_follow_sight(std::time::Instant::now());
+        let now = std::time::Instant::now();
+        self.trees_follow_sight(now);
+        self.servers_follow_sight(now);
         for doc in &mut self.docs {
             let Some(syn) = doc.syntax.as_mut() else { continue };
             if doc.loading || !syn.dirty || syn.in_flight || syn.dormant {
@@ -6273,10 +6275,10 @@ mod tests {
         settle_for(&mut ed, |ed| !ed.offers.is_empty());
         // A draft in the chat's input: what's typed is the draft's, the card says how to reach it
         ed.session.chat.as_mut().unwrap().focused = true;
-        // (minimized while Claude works: the first key brings it back, untyped — slip 3 — then the draft)
+        // (minimized while Claude works: its first letter brings it back, typed — #151 — then the rest)
         assert!(ed.session.chat.as_ref().unwrap().compact());
         feed(&mut ed, "m");
-        feed(&mut ed, "my draft y");
+        feed(&mut ed, "y draft y");
         let input = |ed: &Editor| ed.session.chat.as_ref().unwrap().input.clone();
         assert_eq!(input(&ed), "my draft y");
         assert!(!made.exists() && ed.offers.len() == 1);

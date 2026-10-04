@@ -171,6 +171,11 @@ side git · 4 rows · in hand git:src/term.rs
   - State: `queued` · `running` · `waiting` (with `Waiting::shown`) · `passed` · `failed` · `stopped`.
   - `since`.
   - A run id, new: a sequence number given with its `RunTrace`.
+- **`procs`** (#143, 2026-10-05) — what `:procs` lists, as of its last look (`looked_ms` ago: every 30 s, each
+  second while it's open): each row's pid, parent, depth, kind, title, what for, session, `up_s`, CPU, memory
+  (footprint, else resident), resident, `zombie` (ended, not reaped), `flagged`; and `checks`, the self-checks
+  holding now. Full level only — Claude has its `procs` tool. The text form lists them a step in under what
+  started them.
 
 ## Element ids
 
@@ -288,6 +293,7 @@ A snapshot is one question. An event stream tells you about change without polli
 | `turn` | session, `started` / `ended` (`chat` Done), calls, edits | explicit |
 | `run` | id, `queued` · `started` · `waiting <what>` · `ended <how> <took>` | explicit, beside the `RunTrace` steps phase 0 already logs (and `Waiting::line`) |
 | `toast` | the toast | diff |
+| `procs` | processes `started`, `ended`; checks `found`, `over` — only when a look found something changed | explicit, at each `:procs` look (`procs_said`) |
 
 - **The diff:** after each batch of events, `uistate` compares a small summary (keys, card ids and revs,
   session `doing`, run states, toast ids) with the last one sent. That happens only while someone watches:
@@ -567,8 +573,10 @@ one-word question in the same project, the kept phase-2 build against this one (
 ## No silent state change (user decision, 2026-10-04)
 
 Whatever changes state the user didn't see change, or refuses a key, says so where they're looking.
-- **The minimized chat**: the first key that would type, edit or send there brings it back instead, isn't
-  typed, and says so (`chat::unfold_key`; `takes: "unfold"` in the state). Its own keys (Esc, `C-c` stop,
+- **The minimized chat**: the first key that would type, edit or send there brings it back first
+  (`chat::unfold_key`; `takes: "unfold"` in the state). A letter comes back typed, in sight (#151, 2026-10-05:
+  a follow-up lost its first letter); space (the leader — slip 3), Enter and editing keys aren't, and that's
+  said. Its own keys (Esc, `C-c` stop,
   `C-f` …) act as before. A paste into it brings it back with what was pasted.
 - **Cards**: a key a card refuses — a `y` before its text was read, a key as it came up, one that isn't an
   answer, a click as it came up — is said on the card itself (a row in the warning colour over its answers,

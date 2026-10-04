@@ -572,20 +572,36 @@ impl Editor {
         let events = self.events.shared_sender();
         let done = ended.clone();
         thread("tarae-plugin-run", move || {
-            let send = |ev: HostEvent| {
-                let (who, flow) = (who.clone(), flow.clone());
-                let w = weight(&ev);
-                flow.add(w);
-                let job = move |ed: &mut Editor| {
-                    ed.plugin_process_from(&who, serial, ev, &flow, w);
-                    ed.unchanged = true; // (for the plugin: nothing on screen yet)
-                };
-                events.send(Event::Job(Box::new(job))).is_ok()
+            let reader_flow = flow.clone();
+            let sender = move || {
+                let (who, flow, events) = (who.clone(), flow.clone(), events.clone());
+                move |ev: HostEvent| {
+                    let (who, flow) = (who.clone(), flow.clone());
+                    let w = weight(&ev);
+                    flow.add(w);
+                    let job = move |ed: &mut Editor| {
+                        ed.plugin_process_from(&who, serial, ev, &flow, w);
+                        ed.unchanged = true; // (for the plugin: nothing on screen yet)
+                    };
+                    events.send(Event::Job(Box::new(job))).is_ok()
+                }
             };
+            // Its output read beside the wait: the program is reaped as it ends, whatever still holds its
+            // output (#131), and what's left to read gets `DRAIN_AFTER_EXIT`
+            let (eof, read_all) = std::sync::mpsc::channel();
+            let readers = usize::from(stdout.is_some());
             if let Some(out) = stdout {
-                crate::task::read_batches(out, |lines| flow.wait() && send(HostEvent::Lines(id, lines)));
+                let (send, flow) = (sender(), reader_flow);
+                std::thread::spawn(move || {
+                    crate::task::read_batches(out, |lines| flow.wait() && send(HostEvent::Lines(id, lines)));
+                    let _ = eof.send(());
+                });
             }
+            let send = sender();
             let code = child.wait().ok().and_then(|s| s.code()).map(|c| c as u64);
+            for _ in 0..readers {
+                let _ = read_all.recv_timeout(crate::spawn::DRAIN_AFTER_EXIT);
+            }
             done.store(true, Ordering::SeqCst);
             // (stderr's reader is done by now, or nearly: what it has is what there is)
             let err: Vec<String> = tail.lock().expect("never poisoned").iter().cloned().collect();

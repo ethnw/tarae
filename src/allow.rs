@@ -281,10 +281,24 @@ pub fn write_choices(target: &Path, home: &Path, root: &Path, path: &[PathBuf]) 
 /// What `a`/`A` on a read's card allow for `reads` (real paths) — each place itself, or its folder when
 /// another read there asks too or was let through once (`others` — #102: twelve shots in one folder were
 /// twelve cards): the folder then, with everything in it. Only a folder that can be kept (`keepable`), deep
-/// enough not to be a whole area (`/private/tmp`, `/opt` — `WRITE_DEPTH`), not home's own folders
+/// enough not to be a whole area (`/private/tmp`, `/opt` — `WRITE_DEPTH`; a folder in a temp folder is,
+/// as Linux's `/tmp/x` is one level above macOS's `/private/tmp/x`), not home's own folders
 /// (`~/Downloads`), nor a temp folder itself.
 pub fn grant_places(reads: &[PathBuf], others: &[PathBuf], home: Option<&Path>) -> Vec<PathBuf> {
     let temp = crate::sandbox::profile_path(&std::env::temp_dir());
+    grant_places_in(reads, others, home, &temp, &crate::sandbox::profile_path(Path::new("/tmp")))
+}
+
+/// `grant_places` with the temp folders given (`temp`: the user's, `tmp`: `/tmp`'s real path).
+fn grant_places_in(
+    reads: &[PathBuf],
+    others: &[PathBuf],
+    home: Option<&Path>,
+    temp: &Path,
+    tmp: &Path,
+) -> Vec<PathBuf> {
+    let tmp = [tmp.to_path_buf(), temp.to_path_buf()];
+    let temp = temp.to_path_buf();
     let roots = [
         PathBuf::from("/private/tmp"),
         temp.clone(),
@@ -294,9 +308,10 @@ pub fn grant_places(reads: &[PathBuf], others: &[PathBuf], home: Option<&Path>) 
     for r in reads {
         let folder = r.parent().filter(|dir| {
             let sibling = reads.iter().chain(others).any(|o| o != r && o.parent() == Some(dir));
+            let deep = dir.components().count() > WRITE_DEPTH || tmp.iter().any(|t| dir.parent() == Some(t));
             sibling
                 && keepable(dir, home)
-                && dir.components().count() > WRITE_DEPTH
+                && deep
                 && home.is_none_or(|h| dir.parent() != Some(h))
                 && !roots.iter().any(|t| t == dir)
         });
@@ -660,6 +675,29 @@ pub(crate) mod tests {
         assert!(!keepable(Path::new("/Users/u/.ssh/id_ed25519"), home));
         assert!(!keepable(Path::new("/Users/u/.config/gh"), home));
         assert!(keepable(Path::new("/Users/u/.sshrc"), home), "by path parts, not by prefix");
+    }
+
+    /// Two reads in a folder offer the folder — on Linux too, where `/tmp/x` is a level above macOS's
+    /// `/private/tmp/x`: a folder in a temp folder is deep enough; one in `/` (Linux's temp's parent) isn't,
+    /// and the temp folders themselves never are.
+    #[test]
+    fn a_folder_in_tmp_is_offered_on_linux_too() {
+        let p = |s: &str| PathBuf::from(s);
+        let linux = |reads: &[PathBuf]| {
+            grant_places_in(reads, &[], Some(Path::new("/home/u")), Path::new("/tmp"), Path::new("/tmp"))
+        };
+        assert_eq!(linux(&[p("/tmp/shots/a.png"), p("/tmp/shots/b.png")]), [p("/tmp/shots")]);
+        let mac = grant_places_in(
+            &[p("/private/tmp/shots/a.png"), p("/private/tmp/shots/b.png")],
+            &[],
+            Some(Path::new("/Users/u")),
+            Path::new("/private/var/folders/xx/yyy/T"),
+            Path::new("/private/tmp"),
+        );
+        assert_eq!(mac, [p("/private/tmp/shots")]);
+        // A whole area stays each file: /etc's folders, /tmp itself
+        assert_eq!(linux(&[p("/etc/x/a"), p("/etc/x/b")]), [p("/etc/x/a"), p("/etc/x/b")]);
+        assert_eq!(linux(&[p("/tmp/a"), p("/tmp/b")]), [p("/tmp/a"), p("/tmp/b")]);
     }
 
     /// #112: the code folders are the toolchains' sources and cargo's downloaded crates — never cargo's own

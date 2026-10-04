@@ -371,6 +371,11 @@ mod tests {
             "`o`",
             "A preflight step's whole output in a buffer — the failed one's, else the one in view (`:preflight-output <step>`)",
         ),
+        (
+            "The chat",
+            "`C-u` `C-d`, `PageUp` `PageDown`, `↑` `↓`, wheel",
+            "Scroll the conversation — `C-u` and the arrows from an empty input (with text `C-u` clears to the cursor)",
+        ),
     ];
 
     /// `docs/reference/keymap.md` — the default keymap per mode and submode (descriptions = command docs,

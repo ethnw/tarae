@@ -171,7 +171,9 @@ configs carry over as they are.
   list as it comes, so `]q` walks the errors. Modified files are saved first
 - **Terminal** `space T` — your shell in a panel below the code, with the keys: everything you type goes to it
   (colors, full-screen programs, the lot). `C-\` moves the keys between the code and it, both ways (inside it the key
-  is `editor.terminal-escape`); `space T` hides it (it keeps running) and shows it again. The wheel over it scrolls
+  is `editor.terminal-escape`); `space T` shows it with the keys — from wherever it is, behind another tab or
+  shown without them — and hides it (it keeps running) only from inside: tarae's keys on its panel (`C-w j`, a
+  click on its header). The wheel over it scrolls
   back; a click in it gives it the keys, a click outside takes them back; a drag selects text and copies it. A
   program that asks for the mouse (htop, vim, lazygit) gets clicks and the wheel instead (alt+drag still selects —
   the panel's title says so), a full-screen one that

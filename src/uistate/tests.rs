@@ -495,6 +495,29 @@ fn slip_3_the_minimized_chat_comes_back_before_anything_is_typed() {
     assert!(ed.screen.chat_w > 0 && ed.keys_to().drawn && ed.keys_to().takes == Takes::Text);
 }
 
+/// #151: a follow-up typed into the minimized chat (follow mode, Claude working) keeps its first letter —
+/// it brings the panel back and is typed there, in sight; Enter only brings it back (nothing is sent unseen).
+#[test]
+fn the_first_letter_into_the_minimized_chat_is_typed() {
+    let mut ed = editor();
+    chat_minimized(&mut ed);
+    frame(&mut ed);
+    feed(&mut ed, &["h", "i"]);
+    let c = ed.session.chat.as_ref().unwrap();
+    assert!(!c.compact() && c.focused, "back, with the keys");
+    assert_eq!(c.input, "hi", "the first letter isn't swallowed");
+    frame(&mut ed);
+    assert!(ed.screen.chat_w > 0, "in sight");
+    // Minimized again: Enter brings it back, sends nothing
+    chat_minimized(&mut ed);
+    let c = ed.session.chat.as_mut().unwrap();
+    (c.input, c.cursor) = ("hi".into(), 2);
+    let queued = c.queued.clone();
+    feed(&mut ed, &["<ret>"]);
+    let c = ed.session.chat.as_ref().unwrap();
+    assert!(!c.compact() && c.queued == queued && c.input == "hi", "not sent: {:?}", c.queued);
+}
+
 /// Slip 4: a card nobody noticed for minutes. Every card is in the state — up front, stacked behind it,
 /// parked in a session behind — with how long it has waited and how long it has been in sight.
 #[test]
@@ -582,6 +605,10 @@ fn steady(mut v: Value) -> Value {
     }
     for g in v["gone"].as_array_mut().unwrap() {
         g["ago_ms"] = json!(0);
+    }
+    // (the inbox's waits too — a loaded machine took 2 ms between the cards going up and the state)
+    for e in v["inbox"].as_array_mut().unwrap() {
+        e["waited_ms"] = json!(0);
     }
     v
 }

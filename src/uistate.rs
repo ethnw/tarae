@@ -560,6 +560,134 @@ pub struct UiState {
     pub runs: Vec<panels::Run>,
     /// The cards that went last, and how (`watch.rs`' ring — newest first, `GONE_SHOWN` of them).
     pub gone: Vec<watch::Gone>,
+    /// What `:procs` lists, as of its last look (#143 — every `procs::QUIET_EVERY`, each second while open).
+    pub procs: ProcsState,
+}
+
+/// `:procs`' rows and the checks holding now, as of its last look.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ProcsState {
+    /// How long ago the look was (None: none yet).
+    pub looked_ms: Option<u64>,
+    pub rows: Vec<ProcRow>,
+    /// Tarae's own checks that hold now (`Procs.checks` not ended): what each says.
+    pub checks: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProcRow {
+    /// 0: no process (a session's heading, a held server, a run waiting in line).
+    pub pid: u32,
+    pub parent: u32,
+    pub depth: usize,
+    /// `tarae` `server` `held` `debugger` `helper` `task` `tests` `terminal` `chat` `ask` `spare` `plugin`
+    /// `other` `session` `queued`.
+    pub kind: &'static str,
+    pub title: String,
+    pub what: String,
+    pub session: Option<String>,
+    pub up_s: Option<u64>,
+    pub cpu: Option<f32>,
+    pub memory: u64,
+    pub resident: u64,
+    /// It ended and nobody reaped it.
+    pub zombie: bool,
+    /// A check holds about it now.
+    pub flagged: bool,
+}
+
+impl ProcsState {
+    pub fn of(p: &crate::procs::Procs) -> ProcsState {
+        use crate::procs::Kind;
+        let rows = p
+            .rows
+            .iter()
+            .map(|r| ProcRow {
+                pid: r.pid,
+                parent: r.ppid,
+                depth: r.depth,
+                kind: match r.kind {
+                    Kind::Tarae => "tarae",
+                    Kind::Lsp(_) => "server",
+                    Kind::Held(..) => "held",
+                    Kind::Debug => "debugger",
+                    Kind::Helper => "helper",
+                    Kind::Task => "task",
+                    Kind::Test => "tests",
+                    Kind::Terminal => "terminal",
+                    Kind::Chat => "chat",
+                    Kind::Ask => "ask",
+                    Kind::Spare => "spare",
+                    Kind::Plugin(..) => "plugin",
+                    Kind::Other => "other",
+                    Kind::Session(_) => "session",
+                    Kind::Queued(_) => "queued",
+                },
+                title: r.title.clone(),
+                what: r.what.clone(),
+                session: r.session.map(session_id),
+                up_s: r.up.map(|d| d.as_secs()),
+                cpu: r.cpu.map(|c| (c * 10.0).round() / 10.0),
+                memory: r.memory(),
+                resident: r.rss,
+                zombie: r.zombie,
+                flagged: r.flagged,
+            })
+            .collect();
+        ProcsState { looked_ms: p.looked.map(|t| ms(t.elapsed())), rows, checks: p.holding() }
+    }
+
+    pub fn json(&self) -> Value {
+        let rows: Vec<Value> = self
+            .rows
+            .iter()
+            .map(|r| {
+                json!({ "pid": r.pid, "parent": r.parent, "depth": r.depth, "kind": r.kind, "title": r.title,
+                        "what": r.what, "session": r.session, "up_s": r.up_s, "cpu": r.cpu,
+                        "memory": r.memory, "resident": r.resident, "zombie": r.zombie, "flagged": r.flagged })
+            })
+            .collect();
+        json!({ "looked_ms": self.looked_ms, "rows": rows, "checks": self.checks })
+    }
+
+    /// Its lines in the text form: a total, each process a step in under what started it (a session's
+    /// heading as `── name`), then the checks holding.
+    fn text(&self, out: &mut Vec<String>) {
+        let live: Vec<&ProcRow> = self.rows.iter().filter(|r| r.pid != 0).collect();
+        if live.is_empty() {
+            return;
+        }
+        let memory = crate::procs::mem(live.iter().map(|r| r.memory).sum());
+        let ago = self.looked_ms.map_or(String::new(), |m| format!(" · looked {}s ago", m / 1000));
+        out.push(format!("procs: {} processes · {memory}{ago}", live.len()));
+        for r in &self.rows {
+            let pad = "  ".repeat(r.depth + 1);
+            let what = if r.what.is_empty() { String::new() } else { format!(" — {}", r.what) };
+            let line = match (r.kind, r.pid) {
+                ("session", _) => format!("  ── {}{what}", r.title),
+                ("queued", _) => format!("{pad}{}{what} · queued", r.title),
+                (_, 0) => format!("{pad}{}{what} · held", r.title),
+                _ => {
+                    let cpu = r.cpu.map_or("—".into(), |c| format!("{c:.1}%"));
+                    let mut s = format!(
+                        "{pad}{} {}{what} · cpu {cpu} · {}",
+                        r.pid,
+                        r.title,
+                        crate::procs::mem(r.memory)
+                    );
+                    if r.zombie {
+                        s += " · ended, not reaped";
+                    }
+                    if r.flagged {
+                        s += " · ▲";
+                    }
+                    s
+                }
+            };
+            out.push(line);
+        }
+        out.extend(self.checks.iter().map(|c| format!("  ▲ {c}")));
+    }
 }
 
 /// Cards the state lists of the gone ring (it keeps `watch::GONE_KEPT`).
@@ -808,6 +936,7 @@ impl Editor {
             panels: self.ui_panels(),
             runs: self.ui_runs(),
             gone: watch::recent(&self.ui_gone, GONE_SHOWN),
+            procs: ProcsState::of(&self.procs),
         }
     }
 
@@ -953,6 +1082,7 @@ impl UiState {
             "gone": self.gone.iter().map(|g| json!({
                 "id": g.id, "title": g.title, "how": g.how, "ago_ms": g.at.elapsed().as_millis() as u64,
             })).collect::<Vec<_>>(),
+            "procs": self.procs.json(),
         })
     }
 
@@ -990,6 +1120,7 @@ impl UiState {
         if let Some(g) = self.gone.first() {
             out.push(format!("last gone: {} {:?} — {}", g.id, g.title, g.how));
         }
+        self.procs.text(&mut out);
         out.join("\n") + "\n"
     }
 

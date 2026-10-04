@@ -436,6 +436,7 @@ Keys of what's up on the screen — not rebindable, so not in `default_keys.toml
 | Code review | `space v q` | End it — asked on a card while files aren't viewed |
 | Task panel | click on a preflight step | Its output; wheel, `C-u` `C-d` scroll |
 | Task panel | `o` | A preflight step's whole output in a buffer — the failed one's, else the one in view (`:preflight-output &lt;step>`) |
+| The chat | `C-u` `C-d`, `PageUp` `PageDown`, `↑` `↓`, wheel | Scroll the conversation — `C-u` and the arrows from an empty input (with text `C-u` clears to the cursor) |
 
 ## `:` commands
 

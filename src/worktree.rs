@@ -1595,11 +1595,23 @@ impl Editor {
         let shown_elsewhere = |ed: &Editor, d| {
             std::iter::once(&ed.session).chain(&ed.sessions).any(|l| l.views.iter().any(|v| v.doc == d))
         };
+        // (a file outside it that only it had open — `~/.cargo/config.toml` — goes too, with its server:
+        // #141; your unsaved edits keep it, in front)
+        let only_its = |ed: &Editor, d: &crate::document::Document| {
+            session.docs.contains(&d.id)
+                && !std::iter::once(&ed.session).chain(&ed.sessions).any(|l| l.docs.contains(&d.id))
+                && !shown_elsewhere(ed, d.id)
+        };
+        let adopt: Vec<crate::document::DocId> =
+            self.docs.iter().filter(|d| only_its(self, d) && d.is_modified()).map(|d| d.id).collect();
+        for d in adopt {
+            self.session_keeps(d);
+        }
         let gone: Vec<crate::document::DocId> = self
             .docs
             .iter()
             .filter(|d| match &d.path {
-                Some(p) => p.starts_with(&session.root),
+                Some(p) => p.starts_with(&session.root) || only_its(self, d),
                 // (its blank scratch — not one another session shows)
                 None => {
                     !d.is_modified()
@@ -2281,7 +2293,14 @@ mod tests {
         );
         assert!(toast.ends_with(&why), "{toast}");
         assert!(!wt.exists() && main_build.join("debug/marker").is_file());
-        // Can't be removed whole (a folder in it without write permission): a warning, the end goes on
+        // Can't be removed whole (a folder in it without write permission): a warning, the end goes on.
+        // (Root removes it anyway — a Linux container; CI's runner and macOS aren't root.)
+        // SAFETY: geteuid only reads.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("a_sessions_own_build_dir_goes_with_it: as root a 0o555 folder is removed — not tried");
+            std::fs::remove_dir_all(&dir).ok();
+            return;
+        }
         let wt = new_session(&mut ed, "stuck");
         let stuck = builds.join("cc/stuck");
         builds_in(&wt, &stuck, 1);
@@ -2296,6 +2315,44 @@ mod tests {
         });
         assert!(warned, "a warning says it: {}", said(&ed));
         assert!(!wt.exists() && (ed.session.id, ed.sessions.len()) == (0, 0), "it ended all the same");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #141: an ended session's files close — those in its checkout and one outside it that only it had open
+    /// — and their servers stop soon after; a file outside it another session has open stays.
+    #[test]
+    fn an_ended_sessions_servers_stop_with_it() {
+        let (repo, dir) = place("servers");
+        std::fs::write(repo.join(".git/info/exclude"), "notes.md\n").unwrap();
+        for d in ["elsewhere", "shared"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+            std::fs::write(dir.join(d).join("config.toml"), "x = 1\n").unwrap();
+        }
+        let mut ed = editor(&repo, &dir);
+        let cfg = "[lsp.mdfake]\ncommand = \"sh\"\nargs = [\"-c\", \"cat > /dev/null\"]\n\
+                   [lsp.tomlfake]\ncommand = \"sh\"\nargs = [\"-c\", \"cat > /dev/null\"]\n\
+                   [lang.markdown]\nlsp = [\"mdfake\"]\n[lang.toml]\nlsp = [\"tomlfake\"]\n";
+        let (config, w) = crate::config::parse(cfg);
+        assert!(w.is_empty(), "{w:?}");
+        ed.config.lsp = config.editor.lsp;
+        let shared = dir.join("shared/config.toml");
+        ed.open(&shared).unwrap();
+        let wt = new_session(&mut ed, "docs");
+        std::fs::write(wt.join("notes.md"), "# notes\n").unwrap();
+        let server = |ed: &mut Editor, p: &Path| {
+            ed.open(p).unwrap();
+            ed.doc().lsp.client.expect("its server")
+        };
+        let md = server(&mut ed, &wt.join("notes.md"));
+        let toml = server(&mut ed, &dir.join("elsewhere/config.toml"));
+        let kept = server(&mut ed, &shared);
+        feed(&mut ed, ":session-end<ret>");
+        settle_until(&mut ed, |ed| says(ed, "Ended docs") || says(ed, "end docs:"));
+        assert!(says(&ed, "Ended docs"), "{}", said(&ed));
+        settle_until(&mut ed, |ed| ed.client(md).is_none() && ed.client(toml).is_none());
+        let open = |p: &Path| ed.docs.iter().any(|d| d.path.as_deref() == Some(p));
+        assert!(!open(&dir.join("elsewhere/config.toml")), "the file outside only it had open closed");
+        assert!(open(&shared) && ed.client(kept).is_some(), "one another session has open stays");
         std::fs::remove_dir_all(&dir).ok();
     }
 

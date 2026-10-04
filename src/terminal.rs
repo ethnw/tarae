@@ -190,6 +190,17 @@ pub fn encode(key: Key, app_cursor: bool) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// The terminal's environment additions, `inside` a sandbox (tarae's own — what it starts is in it too):
+/// `GIT_OPTIONAL_LOCKS=0`, as Claude's runs have it (`sandbox::inside_env`) — a plain `git status` there
+/// otherwise refreshes the index on the side, a write into the repository's `.git` (a session's
+/// `.git/worktrees/<name>/index.lock`) the sandbox denies (#140).
+fn inside_env(mut env: Vec<(String, String)>, inside: bool) -> Vec<(String, String)> {
+    if inside && !env.iter().any(|(k, _)| k == "GIT_OPTIONAL_LOCKS") {
+        env.push(("GIT_OPTIONAL_LOCKS".into(), "0".into()));
+    }
+    env
+}
+
 /// Starts `argv` in `cwd` on a new pseudo-terminal of `rows` × `cols`, `env` added.
 fn spawn(
     argv: &[String],
@@ -241,6 +252,17 @@ fn spawn(
     // Output → events (batched by what one read returns); the end → its exit code
     let mut reader = std::fs::File::from(master.try_clone().map_err(|e| e.to_string())?);
     let fd = reader.as_raw_fd();
+    let (eof, read_all) = std::sync::mpsc::channel::<()>();
+    let reading = events.clone();
+    // The shell waited for as it ends — a program it left behind holding the terminal (one that ignored
+    // the hangup) mustn't keep it a zombie (#131); then what's left to read, `DRAIN_AFTER_EXIT` at most
+    std::thread::spawn(move || {
+        let code = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
+        let _ = read_all.recv_timeout(crate::spawn::DRAIN_AFTER_EXIT);
+        let done = move |ed: &mut Editor| ended(ed, generation, code);
+        let _ = events.send(crate::event::Event::Job(Box::new(done)));
+    });
+    let events = reading;
     std::thread::spawn(move || {
         let mut buf = vec![0u8; 64 * 1024];
         // One batch at a time on the main loop: the next is read while it's shown and sent once it has
@@ -275,9 +297,8 @@ fn spawn(
                 }
             }
         }
-        let code = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
-        let done = move |ed: &mut Editor| ended(ed, generation, code);
-        let _ = events.send(crate::event::Event::Job(Box::new(done)));
+        // (its batches are queued before its end is told)
+        let _ = eof.send(());
     });
     // Keys → the program (a full pty buffer blocks this thread, never the editor)
     let (writer, keys) = std::sync::mpsc::channel::<Vec<u8>>();
@@ -387,12 +408,14 @@ impl Drop for Terminal {
 }
 
 impl Editor {
-    /// `space T` — showing: hide it (it keeps running); hidden: show it with the keys (your `$SHELL`, started
-    /// if nothing runs there).
+    /// `space T` — the terminal with the keys: shown (your `$SHELL`, started if nothing runs there), brought
+    /// in front of the slot's other tabs, given the keys. It hides (running on) only from inside — tarae's
+    /// keys on its panel (#144: shown without the keys, it was hidden in front of the other tabs and given
+    /// the keys behind them). From the program's keys `space T` is the program's.
     pub fn terminal_toggle(&mut self) {
-        // (shown but behind another tab of the slot: to the front, with the keys)
         let front = self.slot() == Some(crate::sizes::Slot::Terminal);
-        if !front && self.session.terminal.as_ref().is_some_and(|t| t.visible && t.exited.is_none()) {
+        let inside = front && self.bottom_focus;
+        if !inside && self.session.terminal.as_ref().is_some_and(|t| t.visible && t.exited.is_none()) {
             self.session.slot_front = Some(crate::sizes::Slot::Terminal);
             if let Some(t) = self.session.terminal.as_mut() {
                 t.focus = true;
@@ -450,6 +473,7 @@ impl Editor {
         let cwd = self.session.root.clone();
         let events = self.events.sender();
         self.events.jobs().spawn(move || {
+            let env = inside_env(env, crate::sandbox::inside());
             let result = spawn(&argv, &cwd, &env, rows, cols, events, generation);
             move |ed: &mut Editor| {
                 if ed.session.terminal_run != generation {
@@ -658,6 +682,100 @@ mod tests {
         assert!(contents.contains("E[?62;22c|"), "{contents:?}");
         assert_eq!(answers(b"x\x1b[0cy\x1b[c"), [b"\x1b[?62;22c"; 2], "both forms, each answered");
         assert!(answers(b"\x1b[>c\x1b[?1;2c").is_empty(), "not the secondary query, nor a reply");
+    }
+
+    /// #144: `space T` with the terminal shown but without the keys gives it the keys — in front of the
+    /// slot or behind another tab alike; it hides only from inside (tarae's keys on its panel). (The
+    /// program is the test's own `sleep`.)
+    #[test]
+    fn space_t_gives_a_shown_terminal_the_keys_and_hides_it_only_from_inside() {
+        let (config, _) = crate::config::parse("");
+        let mut ed = Editor::new(config);
+        ed.terminal_run(vec!["/bin/sh".into(), "-c".into(), "sleep 10".into()], Vec::new());
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while ed.session.terminal.is_none() && std::time::Instant::now() < end {
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(50)) {
+                ed.handle_event(ev);
+            }
+        }
+        let space_t = |ed: &mut Editor| {
+            ed.handle_key(crate::key::Key::plain(crate::key::Code::Char(' ')));
+            ed.handle_key(crate::key::Key::plain(crate::key::Code::Char('T')));
+        };
+        let state = |ed: &Editor| ed.session.terminal.as_ref().map(|t| (t.visible, t.focus)).unwrap();
+        // Shown, in front, the keys back in the code
+        ed.session.terminal.as_mut().unwrap().focus = false;
+        assert_eq!(ed.slot(), Some(crate::sizes::Slot::Terminal));
+        space_t(&mut ed);
+        assert_eq!(state(&ed), (true, true), "shown without the keys: given them, not hidden");
+        // From inside — tarae's keys on its panel: hidden, running on
+        ed.bottom_take_keys();
+        space_t(&mut ed);
+        assert_eq!(state(&ed), (false, false), "hidden from inside");
+        assert!(ed.session.terminal.as_ref().unwrap().exited.is_none(), "running on");
+        // Hidden: shown with the keys
+        space_t(&mut ed);
+        assert_eq!(state(&ed), (true, true));
+        ed.session.terminal = None;
+    }
+
+    /// #140: inside a sandbox the terminal's `git status` leaves the index alone (`GIT_OPTIONAL_LOCKS=0`, as
+    /// Claude's runs have it) — the side refresh is a write into `.git` the sandbox denies. Outside one
+    /// nothing's added; a value the terminal is given stays. (A repository of the test's own; a file
+    /// written again, same bytes, so status would refresh its stat in the index.)
+    #[test]
+    fn inside_a_sandbox_the_terminals_git_status_leaves_the_index_alone() {
+        assert!(inside_env(Vec::new(), false).is_empty(), "outside one: nothing added");
+        let given = vec![("GIT_OPTIONAL_LOCKS".to_string(), "1".to_string())];
+        assert_eq!(inside_env(given.clone(), true), given, "a value it's given stays");
+        // (said, not inherited: a test run inside tarae's sandbox has it from there already)
+        assert_eq!(inside_env(Vec::new(), true), [("GIT_OPTIONAL_LOCKS".to_string(), "0".to_string())]);
+        let dir = std::env::temp_dir().join(format!("tarae-term-git-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "core.hooksPath=/dev/null"])
+                .args(args)
+                .current_dir(&dir)
+                .env_remove("GIT_OPTIONAL_LOCKS")
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        for args in [&["init", "-q"][..], &["add", "a.txt"], &["commit", "-q", "-m", "one"]] {
+            git(args);
+        }
+        // `git status` in the terminal with `env`: whether it wrote the index
+        let writes_index = |env: Vec<(String, String)>| {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+            let before = std::fs::metadata(dir.join(".git/index")).unwrap().modified().unwrap();
+            let (config, _) = crate::config::parse("");
+            let mut ed = Editor::new(config);
+            (ed.terminal_generation, ed.session.terminal_run) = (1, 1);
+            let argv = ["/bin/sh".to_string(), "-c".into(), "git status --porcelain".into()];
+            let t = spawn(&argv, &dir, &inside_env(env, true), 5, 60, ed.events.sender(), 1).unwrap();
+            install(&mut ed, t);
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while ed.session.terminal.as_ref().is_none_or(|t| t.exited.is_none())
+                && std::time::Instant::now() < end
+            {
+                if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(100)) {
+                    ed.handle_event(ev);
+                }
+            }
+            assert_eq!(ed.session.terminal.as_ref().and_then(|t| t.exited), Some(0));
+            std::fs::metadata(dir.join(".git/index")).unwrap().modified().unwrap() != before
+        };
+        let refreshes = writes_index(vec![("GIT_OPTIONAL_LOCKS".into(), "1".into())]);
+        let inside = writes_index(Vec::new());
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(refreshes, "a status may refresh the index (else this test sees nothing)");
+        assert!(!inside, "inside a sandbox: no write into .git");
     }
 
     /// Output (and the end) that comes before the terminal is in place isn't lost — the reader thread starts
@@ -912,10 +1030,12 @@ mod tests {
         ed.handle_key(key('i'));
         assert_eq!(ed.mode, crate::editor::Mode::Insert, "the code has the keys again");
         ed.handle_key(Key::plain(Code::Esc));
-        // C-\\ from the code gives the keys back to it; space T hides it, again shows it
+        // C-\\ from the code gives the keys back to it; from inside (tarae's keys on its panel) space T
+        // hides it, again shows it (#144)
         ed.handle_key(Key { code: Code::Char('\\'), ctrl: true, alt: false });
         assert!(ed.session.terminal.as_ref().unwrap().focus);
         ed.handle_key(Key { code: Code::Char('\\'), ctrl: true, alt: false });
+        ed.bottom_take_keys();
         for k in [' ', 'T'] {
             ed.handle_key(key(k));
         }
