@@ -59,6 +59,7 @@ The name is also the `:set` path: `:set editor.scrolloff 8` changes it for this 
 | `llm.model` | string | `""` | Model for llm.command, e.g. "haiku" ("" = the CLI's default) |
 | `llm.effort` | `""` · `"low"` · `"medium"` · `"high"` · `"xhigh"` · `"max"` | `""` | How hard Claude thinks, for models that take it ("" = the model's default) |
 | `llm.follow` | bool | `true` | Chat: the editor follows the code Claude is reading, with its thoughts beside it (C-f toggles per session) |
+| `llm.follow-resume` | integer 0–3600 | `20` | Chat: seconds after your last key that follow takes over again while Claude still works (0 = only C-f) |
 | `llm.review-at-end` | bool | `false` | Chat: Claude's edits go in as it makes them, and you review its turn when it ends — every new chat starts so (space v a turns it on and off, and saves it here) |
 | `llm.chat-settings` | bool | `true` | Chat: read your CLAUDE.md files and Claude Code settings, like `claude` does (hooks stay off, edits always ask) |
 | `llm.screen-terminal` | bool | `true` | Chat: when Claude looks at your screen (you say yes on a card), the terminal panel's contents go too — off: its rows go blank |

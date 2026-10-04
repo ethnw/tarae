@@ -171,6 +171,9 @@ pub struct Document {
     /// it closes when the turn ends, and `:restart` doesn't bring it back (#37 — such tabs stayed, each
     /// root keeping a language server).
     pub aside: bool,
+    /// An edit of Claude's that follow or replay shows here (`follow::sync_shown` — only while the buffer is
+    /// the version it was seen in): its lines on the review's wash, the ones they replaced above them.
+    pub shown: Option<Vec<crate::replay::Hunk>>,
 }
 
 impl Document {
@@ -210,6 +213,7 @@ impl Document {
             next_mark: 0,
             seen: None,
             aside: false,
+            shown: None,
         }
     }
 

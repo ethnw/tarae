@@ -91,9 +91,7 @@ pub fn run(args: &[String]) -> Result<()> {
         let text =
             format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         if !out.status.success() {
-            let tail: Vec<&str> = text.lines().rev().take(40).collect();
-            let tail: Vec<&str> = tail.into_iter().rev().collect();
-            return Err(format!("a budget broke on a quiet machine:\n{}", tail.join("\n")));
+            return Err(format!("run {} of {RUNS} failed:\n{}", i + 1, failures(&text)));
         }
         runs.push(parse(&text));
     }
@@ -218,6 +216,31 @@ fn sizes(cargo: &std::ffi::OsStr, root: &Path, all: bool) -> Result<Vec<Perf>> {
         }
     }
     Ok(out)
+}
+
+/// What failed, from libtest's output: each failed test with its panic's message — a budget's number, or
+/// what a scenario waited for (the screen dump after it left out: a 40-line tail once held only that) — and
+/// the load now. Without a failures section, the output's last lines.
+fn failures(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = Vec::new();
+    for (i, l) in lines.iter().enumerate() {
+        let Some(name) = l.strip_prefix("---- ").and_then(|r| r.strip_suffix(" stdout ----")) else {
+            continue;
+        };
+        let section = lines[i + 1..].iter().take_while(|l| !l.starts_with("---- ") && **l != "failures:");
+        let why = section
+            .skip_while(|l| !l.contains("panicked at"))
+            .nth(1)
+            .map_or("(no panic message)", |w| w.trim());
+        out.push(format!("  {name}: {why}"));
+    }
+    if out.is_empty() {
+        let tail: Vec<&str> = lines.iter().rev().take(20).rev().copied().collect();
+        return tail.join("\n");
+    }
+    let load = busy().map_or(format!("under {BUSY}"), |l| format!("{l:.1}"));
+    format!("{}\n(load now: {load})", out.join("\n"))
 }
 
 /// None once the machine is quiet — waiting up to `WAIT` for it, saying so; else the load it stayed at.
@@ -370,6 +393,31 @@ mod tests {
             .unwrap();
         assert_ne!(bundled_key(&dir), k2, "the grammar list");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A failed run names each failed test and why — a broken budget, a scenario's wait — not the screen
+    /// dump that followed the wait's message.
+    #[test]
+    fn a_failed_run_says_which_test_and_why() {
+        let screen: String = (0..40).map(|r| format!("{r:>3} │ row\n")).collect();
+        let out = format!(
+            "PERF a 1 budget=16\nrunning 3 tests\ntest perf_a ... ok\ntest perf_b ... FAILED\n\
+             test perf_c ... FAILED\n\nfailures:\n\n---- perf_b stdout ----\nPERF b 30 budget=16\n\n\
+             thread 'perf_b' (1) panicked at tests/perf.rs:34:5:\nb: 30.000 (budget 16)\n\
+             note: run with `RUST_BACKTRACE=1`\n\n---- perf_c stdout ----\n\n\
+             thread 'perf_c' (2) panicked at tests/harness/mod.rs:458:17:\n\
+             timed out after 10s waiting for the answer — tarae still running\n{screen}\n\
+             failures:\n    perf_b\n    perf_c\n\ntest result: FAILED. 1 passed; 2 failed\n\
+             error: test failed, to rerun pass `--test perf`\n"
+        );
+        let said = failures(&out);
+        let lines: Vec<&str> = said.lines().collect();
+        assert_eq!(lines[0], "  perf_b: b: 30.000 (budget 16)", "{said}");
+        assert_eq!(lines[1], "  perf_c: timed out after 10s waiting for the answer — tarae still running");
+        assert!(lines[2].starts_with("(load now: "), "{said}");
+        assert_eq!(lines.len(), 3, "no screen dump: {said}");
+        // (no failures section — a build error: its last lines)
+        assert_eq!(failures("a\nerror: could not compile"), "a\nerror: could not compile");
     }
 
     /// The long session runs in the first run only; a number measured once is that run's value.

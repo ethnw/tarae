@@ -255,6 +255,8 @@ pub struct Screen {
     pub popup: std::cell::Cell<Option<(usize, usize, usize, usize)>>,
     /// Clickable spots in the chat pane: (row, start col, end col, where it points) — drawing fills them in.
     pub chat_links: std::cell::RefCell<Vec<(usize, usize, usize, crate::chat::Link)>>,
+    /// The chat's rows of tool calls: (row, call id) — a click goes to that call's replay stop.
+    pub chat_calls: std::cell::RefCell<Vec<(usize, String)>>,
     /// The minimized chat card (x, y, width, height) — a click on it brings the panel back.
     pub chat_mini: std::cell::Cell<Option<(usize, usize, usize, usize)>>,
     /// The sessions' tabs (the chat's top row) and the status line's chip: (row, start col, end col, what a
@@ -403,6 +405,9 @@ pub struct Editor {
     pub llm_pid: Option<u32>,
     /// (document, line, byte column) to put the cursor on once that document finishes loading.
     pub goto_after_load: Option<(DocId, usize, usize)>,
+    /// Keys, clicks, drags, the wheel over the code and pastes so far — follow tells the user moving the
+    /// cursor from a reload moving it.
+    pub input_seq: u64,
     /// Debug session · breakpoints (kept without a session) · session generation (drops late messages).
     pub dap: Option<crate::dap::Dap>,
     pub breakpoints: crate::dap::Breakpoints,
@@ -598,6 +603,7 @@ impl Editor {
             llm_generation: 0,
             llm_pid: None,
             goto_after_load: None,
+            input_seq: 0,
             dap: None,
             breakpoints: Default::default(),
             agent: None,
@@ -1397,6 +1403,7 @@ impl Editor {
     /// into a picker, prompt, or the chat (one line — newlines as spaces; the chat keeps them); else into
     /// the buffer as one edit.
     pub fn handle_paste(&mut self, text: String) {
+        self.input_seq += 1;
         if self.picker.is_none() && self.prompt.is_none() && self.terminal_paste(&text) {
             return;
         }
@@ -1466,6 +1473,12 @@ impl Editor {
 
     pub fn handle_mouse(&mut self, m: crate::event::Mouse) {
         use crate::event::MouseKind as K;
+        // Input for follow = what can move the code's cursor: a press or a drag (anywhere — a chat link, a
+        // side panel row, a pane), and the wheel over the code (below). A release, or the wheel over a
+        // panel, moves nothing — counted, a reload in the same moment read as you taking over.
+        if matches!(m.kind, K::Down | K::Drag) {
+            self.input_seq += 1;
+        }
         let s = self.screen.clone();
         let (x, y) = (m.x as usize, m.y as usize);
         self.status = None;
@@ -1721,7 +1734,11 @@ impl Editor {
                     c.focused = true;
                     let links = s.chat_links.borrow();
                     if let Some((.., link)) = links.iter().find(|l| l.0 == y && (l.1..l.2).contains(&x)) {
-                        crate::chat::jump(self, link.clone());
+                        // A tool call's row: its replay stop (an edit's changes shown), else the place
+                        let call = s.chat_calls.borrow().iter().find(|c| c.0 == y).map(|c| c.1.clone());
+                        if !call.is_some_and(|call| crate::follow::replay_call(self, &call)) {
+                            crate::chat::jump(self, link.clone());
+                        }
                     }
                 }
                 K::ScrollUp => c.scroll += 3,
@@ -1743,6 +1760,9 @@ impl Editor {
         else {
             return;
         };
+        if matches!(m.kind, K::ScrollUp | K::ScrollDown) {
+            self.input_seq += 1;
+        }
         if matches!(m.kind, K::Down | K::ScrollUp | K::ScrollDown) {
             self.focus_view(pid);
         }
@@ -2560,6 +2580,7 @@ impl Editor {
     }
 
     pub fn handle_key(&mut self, key: Key) {
+        self.input_seq += 1;
         self.sessions.keyed = true;
         // A key after an error has been read (`ERROR_MIN`) lets it go — it fades out
         for t in self.toasts.iter_mut().filter(|t| t.kind == ToastKind::Error) {
@@ -4215,6 +4236,8 @@ mod tests {
         let (dir, main, util, lib) = follow_project("pause");
         let read = |id: &str, p: &PathBuf| json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": id, "name": "Read", "input": {"file_path": p}}]}});
         let mut ed = editor("");
+        // (only C-f follows again here — the quiet while has its own test)
+        ed.config.llm.follow_resume = 0;
         ed.open(&main).unwrap();
         fake_claude_stream(
             &mut ed,
@@ -4233,6 +4256,395 @@ mod tests {
         assert!(ed.lane.chat.as_ref().unwrap().follow.paused);
         assert_eq!(ed.doc().path.as_deref(), Some(util.as_path()), "stayed with the user");
         assert_eq!(cursor_line(&ed), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Paused by a move, follow takes over again on its own a quiet while after the last key
+    /// (`llm.follow-resume`) while Claude still works — back where Claude is, then on to what comes next.
+    /// A key before then starts the wait over.
+    #[test]
+    fn chat_follow_resumes_after_a_quiet_while() {
+        use serde_json::json;
+        let (dir, main, util, lib) = follow_project("resume");
+        let read = |id: &str, p: &PathBuf| json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": id, "name": "Read", "input": {"file_path": p}}]}});
+        let mut ed = editor("");
+        // (5 "seconds" = 100 ms in tests)
+        ed.config.llm.follow_resume = 5;
+        ed.open(&main).unwrap();
+        fake_claude_stream(
+            &mut ed,
+            &[
+                read("r1", &util),
+                json!("sleep 0.6"),
+                read("r2", &lib),
+                json!({"type": "result", "result": "done"}),
+            ],
+        );
+        feed(&mut ed, "<space>lwhere?<ret>");
+        settle_until(&mut ed, |ed| ed.doc().path.as_deref() == Some(util.as_path()));
+        let t0 = std::time::Instant::now();
+        feed(&mut ed, "<esc>j");
+        settle_until(&mut ed, |ed| ed.lane.chat.as_ref().unwrap().follow.paused);
+        // Another key 60 ms on: the wait starts over from it
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        feed(&mut ed, "j");
+        let last_key = std::time::Instant::now();
+        settle_until(&mut ed, |ed| !ed.lane.chat.as_ref().unwrap().follow.paused);
+        assert!(
+            last_key.elapsed() >= std::time::Duration::from_millis(95),
+            "a quiet while after the last key"
+        );
+        assert!(t0.elapsed() < std::time::Duration::from_millis(550), "before the next read");
+        assert_eq!(
+            (ed.doc().path.as_deref(), cursor_line(&ed)),
+            (Some(util.as_path()), 0),
+            "back where Claude is"
+        );
+        assert!(ed.status.as_ref().is_some_and(|(m, _)| m.contains("following Claude again")));
+        settle_until(&mut ed, |ed| !ed.lane.chat.as_ref().unwrap().busy());
+        assert_eq!(ed.doc().path.as_deref(), Some(lib.as_path()), "and on with it");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A cursor moved with no key, click or paste since — Claude's edit reloading the open file shifts it —
+    /// isn't the user: follow goes on (it used to pause there for the rest of the turn).
+    #[test]
+    fn a_reload_moving_the_cursor_doesnt_pause_follow() {
+        use serde_json::json;
+        let (dir, main, util, lib) = follow_project("reload");
+        let read = |id: &str, p: &PathBuf, offset: u64| json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": id, "name": "Read", "input": {"file_path": p, "offset": offset, "limit": 2}}]}});
+        let mut ed = editor("");
+        ed.config.llm.follow_resume = 0;
+        ed.open(&main).unwrap();
+        let grown = format!("new top\n{}", std::fs::read_to_string(&util).unwrap());
+        fake_claude_stream(
+            &mut ed,
+            &[
+                read("r1", &util, 4),
+                json!("sleep 0.3"),
+                read("r2", &lib, 1),
+                json!({"type": "result", "result": "done"}),
+            ],
+        );
+        feed(&mut ed, "<space>lwhere?<ret><esc>");
+        settle_until(&mut ed, |ed| ed.doc().path.as_deref() == Some(util.as_path()));
+        assert_eq!(cursor_line(&ed), 3);
+        // The file changes on disk (a line on top): the reload moves the cursor a line down
+        std::fs::write(&util, &grown).unwrap();
+        ed.disk_take(&util, &ropey::Rope::from_str(&grown), crate::disk::stamp(&util));
+        assert_eq!(cursor_line(&ed), 4, "the reload kept the cursor on its line");
+        settle_until(&mut ed, |ed| !ed.lane.chat.as_ref().unwrap().busy());
+        assert!(!ed.lane.chat.as_ref().unwrap().follow.paused, "not the user");
+        assert_eq!(ed.doc().path.as_deref(), Some(lib.as_path()), "followed on");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The mouse is input only where it can move the code's cursor: the wheel over the chat and a release
+    /// just before a reload moves the cursor don't pause follow; the wheel over the code does.
+    #[test]
+    fn only_the_mouse_that_moves_the_cursor_pauses_follow() {
+        use crate::event::{Mouse, MouseKind as K};
+        use serde_json::json;
+        let (dir, main, util, lib) = follow_project("wheel");
+        let read = |id: &str, p: &PathBuf, offset: u64| json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": id, "name": "Read", "input": {"file_path": p, "offset": offset, "limit": 2}}]}});
+        let mouse = |kind, x| Mouse { kind, x, y: 2, alt: false };
+        let mut ed = editor("");
+        ed.config.llm.follow_resume = 0;
+        ed.open(&main).unwrap();
+        let grown = format!("new top\n{}", std::fs::read_to_string(&util).unwrap());
+        fake_claude_stream(
+            &mut ed,
+            &[
+                read("r1", &util, 4),
+                json!("sleep 0.3"),
+                read("r2", &lib, 1),
+                json!("sleep 0.8"),
+                json!({"type": "result", "result": "done"}),
+            ],
+        );
+        feed(&mut ed, "<space>lwhere?<ret><esc>");
+        settle_until(&mut ed, |ed| ed.doc().path.as_deref() == Some(util.as_path()));
+        // The chat from column 40, the code left of it
+        ed.screen.chat_x = Some(40);
+        ed.screen.panes = vec![(ed.lane.focus, crate::split::Rect { x: 0, y: 0, w: 40, h: 10 }, 3, vec![])];
+        ed.handle_mouse(mouse(K::ScrollUp, 50));
+        ed.handle_mouse(mouse(K::Up, 10));
+        std::fs::write(&util, &grown).unwrap();
+        ed.disk_take(&util, &ropey::Rope::from_str(&grown), crate::disk::stamp(&util));
+        ed.handle_event(crate::event::Event::Resize);
+        assert!(!ed.lane.chat.as_ref().unwrap().follow.paused, "the chat's wheel and a release aren't you");
+        settle_until(&mut ed, |ed| ed.doc().path.as_deref() == Some(lib.as_path()));
+        // The wheel over the code is you: paused, and (as after a key) following again a quiet while later
+        ed.config.llm.follow_resume = 5;
+        ed.screen.panes[0].0 = ed.lane.focus;
+        ed.handle_mouse(mouse(K::ScrollDown, 10));
+        ed.handle_event(crate::event::Event::Resize);
+        assert!(ed.lane.chat.as_ref().unwrap().follow.paused, "the wheel over the code is you");
+        settle_until(&mut ed, |ed| !ed.lane.chat.as_ref().unwrap().follow.paused);
+        assert!(ed.lane.chat.as_ref().unwrap().busy(), "resumed while Claude still works");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Switching sessions isn't taking over: while a session is behind, Claude's edits reload its files
+    /// (the docs are shared — a cursor shifts), and the click that brings it back is input; it used to stay
+    /// paused after that until `C-f` (nine minutes, watched live). Back in front it follows on.
+    #[test]
+    fn switching_sessions_doesnt_pause_follow() {
+        use serde_json::json;
+        let (dir, main, util, lib) = follow_project("lanes");
+        let other = dir.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        let read = |id: &str, p: &PathBuf| json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": id, "name": "Read", "input": {"file_path": p, "offset": 4, "limit": 2}}]}});
+        let mut ed = editor("");
+        ed.config.llm.follow_resume = 0;
+        ed.lane.root = dir.clone();
+        ed.open(&main).unwrap();
+        fake_claude_stream(
+            &mut ed,
+            &[
+                read("r1", &util),
+                json!("sleep 0.8"),
+                read("r2", &lib),
+                json!({"type": "result", "result": "done"}),
+            ],
+        );
+        feed(&mut ed, "<space>lwhere?<ret><esc>");
+        settle_until(&mut ed, |ed| ed.doc().path.as_deref() == Some(util.as_path()));
+        let (a, b) = (ed.lane.id, ed.lane_add(other.clone()));
+        // A click on the other session's tab (input), then back while the file changed under the first
+        ed.input_seq += 1;
+        assert!(ed.lane_switch(b));
+        ed.handle_event(crate::event::Event::Resize);
+        let grown = format!("new top\n{}", std::fs::read_to_string(&util).unwrap());
+        std::fs::write(&util, &grown).unwrap();
+        ed.disk_take(&util, &ropey::Rope::from_str(&grown), crate::disk::stamp(&util));
+        ed.input_seq += 1;
+        assert!(ed.lane_switch(a));
+        ed.handle_event(crate::event::Event::Resize);
+        assert!(!ed.lane.chat.as_ref().unwrap().follow.paused, "a session switch isn't the user taking over");
+        settle_until(&mut ed, |ed| !ed.lane.chat.as_ref().unwrap().busy());
+        assert_eq!(ed.doc().path.as_deref(), Some(lib.as_path()), "followed on");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Paused, then the session goes behind before follow's wake-up comes: back in front and quiet, follow
+    /// still takes over again on its own (the wake-up that landed behind once left it waiting for the rest
+    /// of the chat).
+    #[test]
+    fn follow_resumes_after_its_session_was_behind() {
+        use serde_json::json;
+        let (dir, main, util, _) = follow_project("behind");
+        let other = dir.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        let read = |id: &str, p: &PathBuf| json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": id, "name": "Read", "input": {"file_path": p}}]}});
+        let mut ed = editor("");
+        // (5 "seconds" = 100 ms in tests)
+        ed.config.llm.follow_resume = 5;
+        ed.lane.root = dir.clone();
+        ed.open(&main).unwrap();
+        fake_claude_stream(
+            &mut ed,
+            &[read("r1", &util), json!("sleep 2"), json!({"type": "result", "result": "done"})],
+        );
+        feed(&mut ed, "<space>lwhere?<ret>");
+        settle_until(&mut ed, |ed| ed.doc().path.as_deref() == Some(util.as_path()));
+        feed(&mut ed, "<esc>j");
+        settle_until(&mut ed, |ed| ed.lane.chat.as_ref().unwrap().follow.paused);
+        let (a, b) = (ed.lane.id, ed.lane_add(other.clone()));
+        assert!(ed.lane_switch(b));
+        // The wake-up lands while it's behind: follow doesn't take over in a session you aren't in
+        let end = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        while let Some(left) = end.checked_duration_since(std::time::Instant::now()) {
+            if let Some(ev) = ed.events.recv_timeout(left) {
+                ed.handle_event(ev);
+            }
+        }
+        assert!(ed.lane_by_id(a).unwrap().chat.as_ref().unwrap().follow.paused, "not while behind");
+        assert!(!ed.messages.iter().any(|m| m.2.contains("following Claude again")), "nor said in front");
+        // Back in front and quiet: a quiet while from coming back, then follow again
+        assert!(ed.lane_switch(a));
+        let back = std::time::Instant::now();
+        ed.handle_event(crate::event::Event::Resize);
+        assert!(ed.lane.chat.as_ref().unwrap().follow.paused, "still yours right after coming back");
+        settle_until(&mut ed, |ed| !ed.lane.chat.as_ref().unwrap().follow.paused);
+        assert!(back.elapsed() >= std::time::Duration::from_millis(95), "a quiet while after coming back");
+        assert!(ed.lane.chat.as_ref().unwrap().busy(), "taken over while Claude still works");
+        assert_eq!(
+            (ed.doc().path.as_deref(), cursor_line(&ed)),
+            (Some(util.as_path()), 0),
+            "back where Claude is"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The way follow failed (watched live): review at the end on, Claude reads, edits a file four times,
+    /// searches and reads again. Live, the editor goes to each edit once it's written — its changed lines
+    /// on the review's wash, the replaced ones above them, the card naming it — and to the search's first
+    /// hit with its count; nothing skipped. Then the turn replays stop by stop with `[r`, earlier edits
+    /// shown where later ones moved them, and `]r` past the newest says so.
+    #[test]
+    fn chat_follow_shows_each_edit_and_replays_the_turn() {
+        use serde_json::json;
+        let (dir, main, _, lib) = follow_project("edit-replay");
+        let file = dir.join("edit.rs");
+        let base: String = (1..=30).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&file, &base).unwrap();
+        // The four edits: (old, new) and the file after each
+        let edits = [
+            ("line 3\n", "three\n"),
+            ("line 10\n", "line 10\nadded a\nadded b\n"),
+            ("line 20\n", ""),
+            ("line 1\n", "zero\nline 1\n"),
+        ];
+        let mut texts = Vec::new();
+        let mut text = base.clone();
+        for (old, new) in edits {
+            text = text.replacen(old, new, 1);
+            texts.push(text.clone());
+        }
+        let tool = |id: &str, name: &str, input: serde_json::Value| json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": id, "name": name, "input": input}]}});
+        let result = |id: &str, text: &str| json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": id, "content": text}]}});
+        let mut steps: Vec<serde_json::Value> = vec![
+            tool("r1", "Read", json!({"file_path": main, "offset": 1, "limit": 3})),
+            result("r1", "1\tline 1"),
+            json!("sleep 0.15"),
+        ];
+        for (k, (old, new)) in edits.iter().enumerate() {
+            let id = format!("e{k}");
+            let input = json!({"file_path": file, "old_string": old, "new_string": new});
+            steps.push(tool(&id, "Edit", input.clone()));
+            steps.push(json!({"type": "control_request", "request_id": format!("q{k}"),
+                "request": {"subtype": "can_use_tool", "tool_name": "Edit", "input": input}}));
+            // (claude waits for the answer, writes the file, then says it's done)
+            steps.push(json!(format!(
+                "while read -r l; do case \"$l\" in *'\"request_id\":\"q{k}\"'*) break;; esac; done; printf '%s' '{}' > '{}'",
+                texts[k],
+                file.display()
+            )));
+            steps.push(result(&id, "The file has been updated."));
+            steps.push(json!("sleep 0.15"));
+        }
+        steps.push(tool("s1", "mcp__tarae__search", json!({"pattern": "line 5"})));
+        steps.push(result("s1", "1 matching line in 1 file:\nlib.rs\n    5: line 5\n"));
+        steps.push(json!("sleep 0.15"));
+        steps.push(tool("r2", "Read", json!({"file_path": lib, "offset": 8, "limit": 2})));
+        steps.push(result("r2", "8\tline 8"));
+        steps.push(json!("sleep 0.15"));
+        steps.push(json!({"type": "result", "result": "done"}));
+        let mut ed = editor("");
+        ed.lane.root = dir.clone();
+        ed.config.llm.review_at_end = true;
+        ed.open(&main).unwrap();
+        fake_claude_stream(&mut ed, &steps);
+        feed(&mut ed, "<space>lchange it<ret><esc>");
+        assert!(crate::edits::at_end(&ed), "review at the end is on");
+        // Live: what the editor showed, event by event — (file, cursor line, the edit's changed lines, card)
+        // (the changed lines as (start, end) — each hunk's)
+        type Seen = (Option<PathBuf>, usize, Option<Vec<(usize, usize)>>, String);
+        let snap = |ed: &Editor| -> Seen {
+            let d = ed.doc();
+            let shown = d.shown.as_ref().map(|h| h.iter().map(|h| (h.lines.start, h.lines.end)).collect());
+            let card = ed
+                .lane
+                .chat
+                .as_ref()
+                .and_then(|c| c.follow.gaze.as_ref())
+                .map_or(String::new(), |g| format!("{} {} {}", g.look.verb, g.look.what, g.look.range));
+            (d.path.clone(), cursor_line(ed), shown, card)
+        };
+        let mut seen: Vec<Seen> = Vec::new();
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut started = false;
+        while !started || ed.lane.chat.as_ref().unwrap().busy() {
+            started |= ed.lane.chat.as_ref().unwrap().busy();
+            let left = end.saturating_duration_since(std::time::Instant::now());
+            let ev = ed.events.recv_timeout(left).expect("the turn goes on");
+            ed.handle_event(ev);
+            let s = snap(&ed);
+            if seen.last() != Some(&s) {
+                seen.push(s);
+            }
+        }
+        let at = |path: &PathBuf, line: usize, lines: Option<Vec<(usize, usize)>>, card: &str| {
+            seen.iter().any(|s| s.0.as_ref() == Some(path) && s.1 == line && s.2 == lines && s.3 == card)
+        };
+        assert!(at(&main, 0, None, "read main.rs L1–3"), "the read: {seen:#?}");
+        assert!(at(&file, 2, Some(vec![(2, 3)]), "edit edit.rs L3"), "edit 1 with its line: {seen:#?}");
+        assert!(at(&file, 10, Some(vec![(10, 12)]), "edit edit.rs L11–12"), "edit 2: {seen:#?}");
+        assert!(at(&file, 21, Some(vec![(21, 21)]), "edit edit.rs L22"), "edit 3 (a line gone): {seen:#?}");
+        assert!(at(&file, 0, Some(vec![(0, 1)]), "edit edit.rs L1"), "edit 4: {seen:#?}");
+        assert!(at(&lib, 4, None, "search line 5 1 matching line in 1 file"), "the search's hit: {seen:#?}");
+        assert!(at(&lib, 7, None, "read lib.rs L8–9"), "the last read: {seen:#?}");
+        // Each edit's replaced lines are what the review shows above them
+        let c = ed.lane.chat.as_ref().unwrap();
+        assert!(!c.follow.paused, "never paused — no key was pressed");
+        let stops: Vec<String> = c
+            .follow
+            .replay
+            .turns
+            .back()
+            .unwrap()
+            .stops
+            .iter()
+            .map(|s| format!("{} {}", s.look.verb, s.look.range))
+            .collect();
+        assert_eq!(
+            stops,
+            [
+                "read L1–3",
+                "edit L4",
+                "edit L12–13",
+                "edit L23",
+                "edit L1",
+                "search 1 matching line in 1 file",
+                "read L8–9"
+            ],
+            "every stop, in order — earlier edits where the later ones moved them"
+        );
+        // Replay, stop by stop: back from the newest
+        let card = |ed: &mut Editor| {
+            let mut out = Vec::new();
+            crate::term::render(ed, &mut out, 120, 40).unwrap();
+            let mut vt = vt100::Parser::new(40, 120, 0);
+            vt.process(&out);
+            vt.screen().contents()
+        };
+        feed(&mut ed, "[r");
+        assert_eq!((ed.doc().path.as_deref(), cursor_line(&ed)), (Some(lib.as_path()), 7));
+        feed(&mut ed, "[r");
+        assert_eq!(
+            (ed.doc().path.as_deref(), cursor_line(&ed)),
+            (Some(lib.as_path()), 4),
+            "the search's hit"
+        );
+        assert!(card(&mut ed).contains("search (project)"), "named as the tool");
+        feed(&mut ed, "[r");
+        assert_eq!((ed.doc().path.as_deref(), cursor_line(&ed)), (Some(file.as_path()), 0));
+        assert_eq!(ed.doc().shown.as_ref().map(|h| h[0].lines.clone()), Some(0..1), "edit 4's line");
+        feed(&mut ed, "[r[r[r");
+        assert_eq!(cursor_line(&ed), 3, "edit 1, a line down since edit 4");
+        assert_eq!(
+            ed.doc().shown.as_ref().map(|h| (h[0].lines.clone(), h[0].removed.clone())),
+            Some((3..4, vec!["line 3".to_string()]))
+        );
+        let screen = card(&mut ed);
+        assert!(
+            screen.contains("edit") && screen.contains("L4") && screen.contains("2/7"),
+            "the card on it:\n{screen}"
+        );
+        assert!(screen.contains("−") && screen.contains("line 3"), "the replaced line above it:\n{screen}");
+        feed(&mut ed, "[r");
+        assert_eq!(ed.doc().path.as_deref(), Some(main.as_path()));
+        assert!(ed.doc().shown.is_none() && ed.docs.iter().all(|d| d.shown.is_none()), "no edit at a read");
+        feed(&mut ed, "[r");
+        assert!(ed.status.as_ref().is_some_and(|(m, _)| m.contains("first stop")));
+        // Moving away ends its showing; forward to the newest and past it
+        feed(&mut ed, "]r");
+        feed(&mut ed, "j");
+        ed.handle_event(crate::event::Event::Resize);
+        assert!(ed.lane.chat.as_ref().unwrap().follow.replaying.is_none(), "you moved: its card goes");
+        feed(&mut ed, "]r]r]r]r]r]r");
+        assert!(ed.status.as_ref().is_some_and(|(m, _)| m.contains("newest stop")), "{:?}", ed.status);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -5106,11 +5518,12 @@ mod tests {
         feed(&mut ed, "<space>lmake it<ret>");
         settle_for(&mut ed, |ed| !ed.offers.is_empty());
         let screen = draw(&mut ed);
-        assert!(screen.contains("● waiting for you") && !screen.contains("● running"), "{screen}");
+        assert!(screen.contains("● waiting for you") && !screen.contains("● run "), "{screen}");
         ed.offer_accept();
         settle_for(&mut ed, |ed| ed.lane.task_run.is_some());
         let screen = draw(&mut ed);
-        assert!(screen.contains("● running") && !screen.contains("waiting for you"), "{screen}");
+        // (the card names the tool, as its chat row does)
+        assert!(screen.contains("● run  sleep 1") && !screen.contains("waiting for you"), "{screen}");
         settle_for(&mut ed, |ed| !ed.lane.chat.as_ref().unwrap().busy());
         std::fs::remove_dir_all(&dir).ok();
     }

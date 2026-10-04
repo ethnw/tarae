@@ -354,6 +354,13 @@ pub static SETTINGS: &[Setting] = &[
         set: |c, v| c.llm.follow = b(v),
     },
     Setting {
+        path: "llm.follow-resume",
+        kind: Kind::Int { min: 0, max: 3600 },
+        doc: "Chat: seconds after your last key that follow takes over again while Claude still works (0 = only C-f)",
+        get: |c| Value::from(c.llm.follow_resume as i64),
+        set: |c, v| c.llm.follow_resume = n(v) as u64,
+    },
+    Setting {
         path: "llm.review-at-end",
         kind: Kind::Bool,
         doc: "Chat: Claude's edits go in as it makes them, and you review its turn when it ends — every new chat starts so (space v a turns it on and off, and saves it here)",

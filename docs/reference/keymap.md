@@ -133,6 +133,7 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `[ n` | `goto_prev_note` | Previous note |
 | `[ p` | `goto_prev_paragraph` | Previous paragraph |
 | `[ q` | `goto_prev_quickfix` | Previous place in the list |
+| `[ r` | `replay_prev` | Claude's previous stop (replay) |
 | `[ t` | `goto_prev_class` | Previous type |
 | `[ T` | `goto_prev_test` | Previous test |
 | `[ x` | `goto_prev_test_failure` | Previous failed test |
@@ -153,6 +154,7 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `] n` | `goto_next_note` | Next note |
 | `] p` | `goto_next_paragraph` | Next paragraph |
 | `] q` | `goto_next_quickfix` | Next place in the list |
+| `] r` | `replay_next` | Claude's next stop (replay) |
 | `] t` | `goto_next_class` | Next type |
 | `] T` | `goto_next_test` | Next test |
 | `] x` | `goto_next_test_failure` | Next failed test |

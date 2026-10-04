@@ -117,16 +117,33 @@ each one while the chat keeps the keys.
 ([hanji theme](screenshots/follow-hanji.png))
 
 Follow is on by default (`C-f` in the chat toggles it; `llm.follow = false` starts with it off). The editor goes
-where Claude is reading while it works. Each file it reads opens with the cursor on the first line read, centered, and those lines
-get a faint accent wash. A search jumps to its first hit, and the finished answer takes you to its first
-`path:line`. A card beside the code shows what Claude is doing (`● reading  src/llm.rs  L230–249`) and what it's
-thinking, as a running log of the turn: a new thought goes under the last one instead of replacing it, so you
+where Claude is reading while it works. Each file it reads opens with the cursor on the first line read and
+the range placed as a whole: left where it is if it's all on screen already, centred if it fits, and starting
+near the top if it's taller than the screen. Those lines get a faint accent wash. Each edit is shown once it's
+written, review at the end included: its new lines on the review's green wash, the lines it replaced in red
+above them. A search or a lookup jumps to its first hit, with the count on the card (`1 matching line in 1
+file`), and the finished answer takes you to its first `path:line`. A card beside the code names the tool and
+what it's on (`● edit  src/trust.rs  L15–20`, `● grep …`, `● search (project) …`, `● definition Lane`) and
+shows what Claude is thinking, as a running log of the turn: a new thought goes under the last one instead of replacing it, so you
 can follow the reasoning at your own pace ([screenshot](screenshots/follow-thinking.png)). Claude's thinking arrives as summaries, and the chat keeps each one as a folded italic aside. While
 Claude works, the chat minimizes to a small card at the bottom right: your question, its last few lookups
 (each a link) and the keys. The code gets the whole width, and the thought card takes the room above the lines
 being read. The panel comes back with the finished answer, or right away with `space l` or a click on the card.
 While Claude waits on you (a command or a read on its card, an edit under review), the card says `waiting for
 your answer`, and over an edit's review it keeps to the room between the changes.
+
+Moving in the editor (a key, a click or a paste that moves the cursor or switches files) pauses following.
+Claude's edit reloading the file you're in doesn't, and neither does switching sessions. Follow takes over again
+by itself `llm.follow-resume` seconds (20 by default; 0 = only `C-f`) after your last key if Claude is still
+working. The next question also turns it back on.
+
+**Replay.** Live, stops can come faster than anyone reads, so every stop of a turn is kept: each read with its
+range, each edit with its changes, each search with its first hit and count, each command with how it ended,
+each note. `[r` and `]r` step back and forward through them at any time, during the turn or after it. The editor
+goes to each stop's lines, an edit shows its changes as the review does (where later edits have moved them), and
+the card says which stop it is (`3/7`) and what Claude said right before it. Stepping past the newest stop
+follows Claude again. A click on a tool's row in the chat, or `C-]` there, goes to that call's stop. The last
+eight turns of the chat are kept. The chat's last row says `[r ]r replay its 7 stops`.
 
 It follows what Claude talks about, too, not only what it reads. While it thinks, every `path:line` or
 `path:start-end` it mentions shows at once, and a `name` in backticks goes to that definition in a file open here.

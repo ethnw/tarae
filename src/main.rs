@@ -66,6 +66,7 @@ mod recent;
 mod refactor;
 mod repeat;
 mod replace;
+mod replay;
 mod restart;
 mod runtime;
 mod sandbox;

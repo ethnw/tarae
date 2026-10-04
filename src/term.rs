@@ -310,6 +310,7 @@ fn render_frame(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io
         popup: std::cell::Cell::new(None),
         offer_buttons: offer.as_ref().map(|c| c.buttons.clone()).unwrap_or_default(),
         chat_links: Default::default(),
+        chat_calls: Default::default(),
         chat_mini: Default::default(),
         lane_spots: Default::default(),
         review_rail: Default::default(),
@@ -2192,8 +2193,8 @@ fn scroll_to_cursor(editor: &mut Editor, lay: &Layout) {
     let doc = editor.doc_mut();
     let pos = cursor_idx(mode, doc.selection().primary(), &doc.text);
     let line = mv::line_of(&doc.text, pos);
-    // Rows a line takes: its wrapped rows, plus the removed rows a code review shows above it
-    let reviewing = doc.review_base.is_some();
+    // Rows a line takes: its wrapped rows, plus the removed rows a code review (or a shown edit) puts above it
+    let reviewing = doc.review_base.is_some() || doc.shown.is_some();
     if wrap_w.is_some() || reviewing {
         let doc = &*doc;
         let wrapped = |l: usize| match wrap_w {
@@ -2579,7 +2580,8 @@ fn draw(
     // its keys too (U4). After the turn, a walk-through's stop keeps it while the cursor is in it.
     let mut follow_rect = None;
     if let Some(c) = editor.lane.chat.as_ref().filter(|c| {
-        c.follow.on && (c.busy() || c.follow.touring() || crate::follow::stop_here(editor).is_some())
+        (c.follow.on && (c.busy() || c.follow.touring() || crate::follow::stop_here(editor).is_some()))
+            || c.follow.replaying.is_some()
     }) && (editor.lane.review.is_none() || c.compact())
         && !lay.code_hidden()
         && !editor.welcome()
@@ -2866,25 +2868,28 @@ fn draw_text(
     };
     let label_style =
         Style { fg: ui.accent.fg, bg: blend(ui.accent.fg, ui.tint, 0.16), bold: true, ..Style::default() };
-    // Lines Claude is reading right now (chat) — a faint accent wash
+    // Lines Claude is reading right now (chat), or a replay's stop — a faint accent wash (an edit shown here
+    // has the review's instead)
     let gaze = editor
         .lane
         .chat
         .as_ref()
-        .and_then(|c| c.follow.gaze.as_ref())
-        .filter(|g| g.path.is_some() && g.path == doc.path)
+        .and_then(|c| c.follow.shown())
+        .filter(|g| g.path.is_some() && g.path == doc.path && doc.shown.is_none())
         .and_then(|g| g.lines.clone());
     let gaze_bg = blend(ui.accent.fg, ui.tint, 0.09).or(ui.base.bg);
-    // Code review: added and changed lines on a green wash; removed ones are rows of their own (red)
+    // Code review: added and changed lines on a green wash; removed ones are rows of their own (red) — and
+    // so an edit of Claude's that follow or replay shows
     let reviewing = doc.review_base.is_some();
     let added_bg = blend(ui.diff_plus.fg, ui.tint, 0.10).or(ui.base.bg);
     let removed_bg = blend(ui.diff_minus.fg, ui.tint, 0.14).or(ui.base.bg);
     let added = |line: usize| {
-        reviewing
+        (reviewing
             && doc
                 .git_hunks
                 .iter()
-                .any(|h| h.kind != crate::git::HunkKind::Deleted && h.lines.contains(&line))
+                .any(|h| h.kind != crate::git::HunkKind::Deleted && h.lines.contains(&line)))
+            || doc.shown.iter().flatten().any(|h| h.lines.contains(&line))
     };
     let code_lang = doc.syntax.as_ref().map(|s| s.lang.name.clone());
     // Merge conflicts: ours on the green wash, theirs on the changed one's, the base and markers fainter
@@ -3560,6 +3565,14 @@ fn draw_text(
 
 /// The review base's removed lines that go above lines `from..=to`: (line they go above, text).
 fn removed_rows(doc: &crate::document::Document, from: usize, to: usize) -> Vec<(usize, String)> {
+    // An edit of Claude's that follow or replay shows: the lines it replaced, above its own
+    if let Some(hunks) = doc.shown.as_ref().filter(|_| doc.review_base.is_none()) {
+        return hunks
+            .iter()
+            .filter(|h| (from..=to).contains(&h.lines.start))
+            .flat_map(|h| h.removed.iter().map(|t| (h.lines.start, t.clone())))
+            .collect();
+    }
     let Some(base) = &doc.review_base else { return Vec::new() };
     let mut out = Vec::new();
     for h in doc.git_hunks.iter().filter(|h| h.removed > 0 && (from..=to).contains(&h.lines.start)) {
@@ -3574,7 +3587,8 @@ fn removed_rows(doc: &crate::document::Document, from: usize, to: usize) -> Vec<
 /// How many removed rows a code review puts above `line`.
 pub fn removed_above(doc: &crate::document::Document, line: usize) -> usize {
     if doc.review_base.is_none() {
-        return 0;
+        let shown = doc.shown.iter().flatten();
+        return shown.filter(|h| h.lines.start == line).map(|h| h.removed.len()).sum();
     }
     doc.git_hunks.iter().filter(|h| h.lines.start == line).map(|h| h.removed).sum()
 }
@@ -3619,8 +3633,9 @@ fn build_view(
             view.push(ViewRow::Part { line, row, index, last: index + 1 == n });
         }
     };
-    // Code review: the base's removed lines go in above the line they preceded (raw text — no folding)
-    if doc.review_base.is_some() {
+    // Code review (or an edit follow shows): the base's removed lines go in above the line they preceded
+    // (raw text — no folding)
+    if doc.review_base.is_some() || doc.shown.is_some() {
         let removed = removed_rows(doc, top, top + rows);
         let mut next = removed.iter().peekable();
         let mut view = Vec::with_capacity(rows);
@@ -6670,57 +6685,47 @@ fn draw_follow_card(
         card.patch(editor.theme.try_get("ui.text.focus").unwrap_or(Style { bold: true, ..Style::default() }));
     let key = Style { bold: true, ..dim };
     let string = card.patch(editor.theme.try_get("string").unwrap_or(dim));
-    // Header: what it's doing
-    let gaze = c.follow.gaze.as_ref();
+    // Header: what it's doing — or, stepping through the replay, the stop showing
+    let gaze = c.follow.shown();
+    let replaying = c.follow.replaying.is_some();
     // Its call waits on the user — a card of Claude's asking (a command, a read, the screen) or an edit's
     // review: said so, not "running" while nothing runs (what it waits on is that card's — not repeated)
     let asks = editor.offers.iter().any(|o| {
         use crate::offer::What;
         matches!(o.what, What::Run(_) | What::NoSandbox { .. } | What::Read { .. } | What::Screen { .. })
     });
-    let waiting =
-        |verb: &str| c.busy() && (asks || matches!(verb, "edit" | "write") && editor.lane.review.is_some());
+    let waiting = |verb: &str| {
+        c.busy() && !replaying && (asks || matches!(verb, "edit" | "write") && editor.lane.review.is_some())
+    };
+    let mut sub: Option<Vec<Span>> = None;
     let mut head: Vec<Span> = match gaze {
         Some(g) if waiting(g.look.verb) => vec![
             Span { text: "● ".into(), style: accent },
             Span { text: "waiting for your answer".into(), style: Style { bold: true, ..dim } },
         ],
         Some(g) => {
+            // The tool by its name (`grep`, `search (project)`, `definition`) — as its chat row says it
             let verb = match g.look.verb {
-                "read" => "reading",
-                "search" => "searching",
-                "find" => "finding",
-                "uses" => "finding uses of",
-                "map" => "mapping",
-                "where" => "looking up",
-                "about" => "asking about",
-                "check" => "checking",
-                "note" => "pinning a note",
-                "reply" => "replying on",
-                "show" => "showing",
-                "look" => "looking at",
-                "test" => "testing",
-                "run" => "running",
-                "plan" => "planning",
-                "edit" => "editing",
-                "write" => "writing",
-                "rename" => "renaming",
-                "replace" => "replacing",
                 "failed" => "test failed",
-                _ => "using",
+                v => crate::chat::label(v),
             };
             // The target first; the range/folder gets what's left (dropped if that's too little)
             let room = inner.saturating_sub(2 + verb.len() + 2 + 8);
             let what =
                 if g.look.pattern { fit_ellipsis(&g.look.what, room) } else { fit_left(&g.look.what, room) };
             let left = room.saturating_sub(what.width() + 2);
-            // A note's words are in its own card
+            // A note's words are in its own card; a range (a search's count) with no room beside the target
+            // gets a row of its own under it
             let range = match g.look.range.width() {
                 _ if matches!(g.look.verb, "note" | "reply") => String::new(),
                 0 => String::new(),
                 n if n <= left => format!("  {}", g.look.range),
                 _ if left >= 8 => format!("  {}", fit_left(&g.look.range, left)),
-                _ => String::new(),
+                _ => {
+                    let text = fit_ellipsis(&g.look.range, inner.saturating_sub(2));
+                    sub = Some(vec![Span { text: format!("  {text}"), style: faint }]);
+                    String::new()
+                }
             };
             // A failure speaks like the test pane's: `▲` in the error color
             let glyph = match g.look.verb {
@@ -6739,9 +6744,11 @@ fn draw_follow_card(
             Span { text: " thinking".into(), style: Style { bold: true, ..dim } },
         ],
     };
-    // Working: how long · a walk-through after the answer: which stop
+    // Working: how long · a walk-through after the answer, or the replay: which stop (`‹1` turns back)
+    let back = c.follow.replay.at.map_or(0, |at| c.follow.replay.position(at).2);
     let secs = match gaze.and_then(|g| g.step) {
-        Some((k, n)) if !c.busy() => format!("{k}/{n}"),
+        Some((k, n)) if replaying && back > 0 => format!("‹{back} {k}/{n}"),
+        Some((k, n)) if replaying || !c.busy() => format!("{k}/{n}"),
         _ => format!("{:>4.1}s", c.started.elapsed().as_secs_f32()),
     };
     // (minimized, the time goes on the title row — the wave beside "thinking" once)
@@ -6797,14 +6804,23 @@ fn draw_follow_card(
         && crate::follow::stop_here(editor).is_some()
         && !crate::codereview::drafting(editor);
     let sp = |text: &str, style: Style| Span { text: text.into(), style };
-    // Its keys: a stop's question after the turn; minimized, how to stop it or bring the panel back
-    let hint = if compact {
+    // Its keys: a stop's question after the turn; minimized, how to stop it or bring the panel back; the
+    // replay's pair once there are stops (in the code — the chat's input would take them as letters)
+    let stops = c.follow.replay.latest() > 0 && !c.focused;
+    let hint = if replaying {
+        Some(vec![sp("[r", key), sp(" ", faint), sp("]r", key), sp(" stop by stop", faint)])
+    } else if compact {
         Some(match c.focused {
             true => vec![sp("C-c", key), sp(" stop  ", faint), sp("C-f", key), sp(" unfollow", faint)],
+            false if stops => {
+                vec![sp("space l", key), sp(" open the chat  ", faint), sp("[r", key), sp(" replay", faint)]
+            }
             false => vec![sp("space l", key), sp(" open the chat", faint)],
         })
+    } else if asking {
+        Some(vec![sp("space n", key), sp(" ask about this", faint)])
     } else {
-        asking.then(|| vec![sp("space n", key), sp(" ask about this", faint)])
+        (stops && c.busy()).then(|| vec![sp("[r", key), sp(" replay what it did", faint)])
     };
     // Minimized, the panel's part above the lookup: who and how it goes, the question, the plan's step
     let mut top: Vec<Vec<Span>> = Vec::new();
@@ -6841,7 +6857,7 @@ fn draw_follow_card(
         }
     }
     // Its rows but the words (a blank row between the words and the keys)
-    let fixed = top.len() + 1 + 2 * usize::from(hint.is_some()) + 2 * pad;
+    let fixed = top.len() + 1 + usize::from(sub.is_some()) + 2 * usize::from(hint.is_some()) + 2 * pad;
     let width = inner + 4;
     let x0 = (px + pw).saturating_sub(width + 1);
     // The lines being read stay readable: their rows, where their text reaches into the card's columns
@@ -6924,6 +6940,7 @@ fn draw_follow_card(
     let link = if compact { gaze.and_then(|g| g.look.link.clone()) } else { None };
     let mut rows: Vec<(Vec<Span>, Option<crate::chat::Link>)> = top.into_iter().map(|r| (r, None)).collect();
     rows.push((head, link));
+    rows.extend(sub.map(|s| (s, None)));
     rows.extend(body.into_iter().map(|r| (r, None)));
     if let Some(h) = hint {
         rows.push((Vec::new(), None));
@@ -7588,8 +7605,10 @@ fn draw_chat(
     // ── Message rows (filled from the bottom)
     let area = rows.saturating_sub(input_h + 4 + plan_h + tabs_h); // tabs + title·divider + plan + divider·hint
     let mut lines: Vec<Vec<Span>> = Vec::new();
-    // Rows that are links as a whole (tool calls), parallel to `lines`
+    // Rows that are links as a whole (tool calls), parallel to `lines` — and the call each tool row is (a
+    // click goes to its replay stop)
     let mut row_links: Vec<Option<crate::chat::Link>> = Vec::new();
+    let mut row_calls: Vec<(usize, &str)> = Vec::new();
     let sp = |text: String, style: Style| Span { text, style };
     let n = c.msgs.len();
     let string = card.patch(t.try_get("string").unwrap_or(dim));
@@ -7679,11 +7698,29 @@ fn draw_chat(
                 lines.push(trail_row(look, exploring && i + 1 == n, w, false, &styles));
                 row_links.resize(lines.len(), None);
                 *row_links.last_mut().expect("just pushed") = look.link.clone();
+                row_calls.push((lines.len() - 1, m.call.as_str()));
             }
             // Elapsed time dimmed at the right end; stopped/error on the left
             Role::Note => {
                 let timing = m.text.ends_with('s') && m.text[..m.text.len() - 1].parse::<f32>().is_ok();
-                if timing {
+                // The last turn's end: how to replay its stops (in the code — or `C-]` from here), left
+                // of its time
+                let stops = c.follow.replay.latest();
+                let last_end = !c.busy() && c.msgs[i + 1..].iter().all(|m| m.role != Role::User);
+                if timing && last_end && stops > 0 {
+                    let keys = if c.focused { "C-]" } else { "[r ]r" };
+                    let said = format!(" replay its {stops} stop{}", if stops == 1 { "" } else { "s" });
+                    let gap = w.saturating_sub(keys.width() + said.width() + m.text.width());
+                    if gap >= 2 {
+                        lines.push(vec![
+                            sp(keys.into(), Style { bold: true, ..dim }),
+                            sp(said, faint),
+                            sp(format!("{}{}", " ".repeat(gap), m.text), faint),
+                        ]);
+                    } else {
+                        lines.push(vec![sp(format!("{:>w$}", m.text), faint)]);
+                    }
+                } else if timing {
                     lines.push(vec![sp(format!("{:>w$}", m.text), faint)]);
                 } else {
                     lines.push(vec![sp(fit_ellipsis(&format!("· {}", m.text), w), dim)]);
@@ -7743,6 +7780,7 @@ fn draw_chat(
     let from = lines.len().saturating_sub(area + scroll);
     let shown = &lines[from..lines.len() - scroll];
     let mut chat_links = editor.screen.chat_links.borrow_mut();
+    let mut chat_calls = editor.screen.chat_calls.borrow_mut();
 
     // ── Draw row by row: [edge][margin 2][text w][margin 1]
     // (the edge in the accent while it's being dragged — U1)
@@ -7860,6 +7898,9 @@ fn draw_chat(
             Some(l) => match &row_links[from + i] {
                 Some(link) => {
                     chat_links.push((y, text_x, text_x + w, link.clone()));
+                    if let Some((_, call)) = row_calls.iter().find(|r| r.0 == from + i) {
+                        chat_calls.push((y, call.to_string()));
+                    }
                     chat_spans(out, l, card, w)?
                 }
                 // `path:line` in an answer: underlined, clickable
@@ -8143,7 +8184,7 @@ fn trail_row(
     use crate::markdown::Span;
     let sp = |text: String, style: Style| Span { text, style };
     let glyph = if live { sp("●".into(), st.accent) } else { sp("◦".into(), st.faint) };
-    let head = if slim { " ".to_string() } else { format!(" {:<6} ", look.verb) };
+    let head = if slim { " ".to_string() } else { format!(" {:<6} ", crate::chat::label(look.verb)) };
     let name = match std::path::Path::new(&look.what).file_name() {
         // (only files — a plan's title may have a `/` in it)
         Some(f) if slim && !look.pattern && look.link.is_some() => f.to_string_lossy().into_owned(),

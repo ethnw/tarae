@@ -88,6 +88,8 @@ pub struct LlmConfig {
     pub context_lines: usize,
     /// Chat: the editor follows where Claude is reading (`C-f` in the chat toggles it per session).
     pub follow: bool,
+    /// Chat: seconds after your last key that follow takes over again while Claude works (0 = only `C-f`).
+    pub follow_resume: u64,
     /// Chat: Claude's edits go in as it makes them, the turn reviewed when it ends — every new chat starts
     /// so (`space v a` turns it on and off, and keeps it here).
     pub review_at_end: bool,
@@ -140,6 +142,7 @@ impl Default for LlmConfig {
             effort: String::new(),
             context_lines: 20,
             follow: true,
+            follow_resume: 20,
             review_at_end: false,
             chat_settings: true,
             run_allow: Vec::new(),
@@ -264,7 +267,7 @@ pub enum StreamEv {
     /// A tool call (chat panel — Read·Grep·Glob with its full input).
     Tool { id: String, name: String, input: serde_json::Value },
     /// What a tool returned (its first 4 KB — enough to see where a search landed).
-    ToolResult { id: String, text: String },
+    ToolResult { id: String, text: String, error: bool },
     /// claude asks the host something (`mcp_message` for tarae's own tools) — needs a `control_response`.
     Control { request_id: String, request: serde_json::Value },
     /// The process's claude session and the model it runs (`system init`) — the chat resumes it later
@@ -429,7 +432,8 @@ fn tool_events(ev: &serde_json::Value) -> Vec<StreamEv> {
                     let cut = (0..=4096).rev().find(|&i| text.is_char_boundary(i)).unwrap_or(0);
                     text.truncate(cut);
                 }
-                StreamEv::ToolResult { id: id(b, "tool_use_id"), text }
+                let error = b["is_error"].as_bool() == Some(true);
+                StreamEv::ToolResult { id: id(b, "tool_use_id"), text, error }
             })
             .collect(),
         _ => Vec::new(),
@@ -1291,7 +1295,7 @@ mod tests {
         let result = serde_json::json!({"type": "user", "message": {"content": [
             {"type": "tool_result", "tool_use_id": "t1", "content": [{"type": "text", "text": "a.rs:3:fn a"}]}]}});
         assert!(matches!(&tool_events(&result)[..],
-            [StreamEv::ToolResult { id, text }] if id == "t1" && text == "a.rs:3:fn a"));
+            [StreamEv::ToolResult { id, text, error: false }] if id == "t1" && text == "a.rs:3:fn a"));
         // Summarized thinking carries text; the omitted kind is just a signal
         let delta = |t: &str| {
             serde_json::json!({"type": "stream_event", "event": {"type": "content_block_delta",

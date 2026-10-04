@@ -776,3 +776,108 @@ fn undo_history_comes_along_on_restart() {
     t.command("q!");
     assert_eq!(t.wait_exit().code(), Some(0));
 }
+
+/// Follow mode the way it failed when watched live: review at the end on, a stand-in claude reads, edits a
+/// file four times (each asked for, allowed unseen, written by claude), searches and reads again — a stop
+/// every 0.4 s. Each reaches the screen in order within a bound, nothing skipped: an edit with its new lines
+/// and the replaced ones above them (`−`), the card naming it; the search with its count. Then the turn
+/// replays stop by stop with `[r` / `]r`.
+#[test]
+fn follow_shows_each_edit_and_replays_the_turn() {
+    use serde_json::json;
+    let sb = Sandbox::new("follow-replay");
+    let lines = |n: usize| (1..=n).map(|i| format!("line {i}\n")).collect::<String>();
+    let main = sb.write("main.txt", &lines(3));
+    let lib = sb.write("lib.txt", &lines(10));
+    let file = sb.write("edit.txt", &lines(30));
+    let edits = [
+        ("line 3\n", "three\n"),
+        ("line 10\n", "line 10\nadded a\nadded b\n"),
+        ("line 20\n", ""),
+        ("line 1\n", "zero\nline 1\n"),
+    ];
+    let mut text = lines(30);
+    let tool = |id: &str, name: &str, input: serde_json::Value| json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": id, "name": name, "input": input}]}});
+    let result = |id: &str, text: &str| json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": id, "content": text}]}});
+    let say = |v: serde_json::Value| format!("  printf '%s\\n' '{v}'\n");
+    let mut turn = say(tool("r1", "Read", json!({"file_path": main, "offset": 1, "limit": 3})));
+    turn += &say(result("r1", "1\tline 1"));
+    turn += "  sleep 0.4\n";
+    for (k, (old, new)) in edits.iter().enumerate() {
+        text = text.replacen(old, new, 1);
+        let input = json!({"file_path": file, "old_string": old, "new_string": new});
+        turn += &say(tool(&format!("e{k}"), "Edit", input.clone()));
+        turn += &say(json!({"type": "control_request", "request_id": format!("q{k}"),
+            "request": {"subtype": "can_use_tool", "tool_name": "Edit", "input": input}}));
+        // (claude waits for tarae's answer, writes the file, then says it's done)
+        turn += &format!(
+            "  while read -r l; do case \"$l\" in *'\"request_id\":\"q{k}\"'*) break;; esac; done\n  printf '%s' '{text}' > '{}'\n",
+            file.display()
+        );
+        turn += &say(result(&format!("e{k}"), "The file has been updated."));
+        turn += "  sleep 0.4\n";
+    }
+    turn += &say(tool("s1", "mcp__tarae__search", json!({"pattern": "line 5"})));
+    turn += &say(result("s1", "1 matching line in 1 file:\nlib.txt\n    5: line 5\n"));
+    turn += "  sleep 0.4\n";
+    turn += &say(tool("r2", "Read", json!({"file_path": lib, "offset": 8, "limit": 2})));
+    turn += &say(result("r2", "8\tline 8"));
+    turn += "  sleep 0.4\n";
+    turn += &say(json!({"type": "result", "result": "done"}));
+    let fake = format!(
+        "while read -r line; do\n  case \"$line\" in '{{\"message\"'*) ;; *) continue;; esac\n{turn}done\n"
+    );
+    let script = sb.write("fake-claude.sh", &fake);
+    sb.write_config(&format!(
+        "{BASE_CONFIG}[llm]\ncommand = \"sh\"\nargs = [\"{}\"]\nreview-at-end = true\n",
+        script.display()
+    ));
+    let mut t = Term::spawn(&sb, &["main.txt"], 120, 40);
+    t.send(" l");
+    t.send("change it\r");
+    // Live: each stop in order, each within a bound of the one before (they come 0.4 s apart)
+    let removed = |s: &Screen, gone: &str| s.rows.iter().any(|r| r.contains('−') && r.contains(gone));
+    type Seen = Box<dyn Fn(&Screen) -> bool>;
+    let stops: [(&str, Seen); 7] = [
+        ("the read", Box::new(|s| s.contains("● read  main.txt  L1–3"))),
+        (
+            "edit 1, its line and the one it replaced",
+            Box::new(move |s| {
+                s.contains("● edit  edit.txt  L3 ") && s.contains("three") && removed(s, "line 3")
+            }),
+        ),
+        ("edit 2", Box::new(|s| s.contains("● edit  edit.txt  L11–12") && s.contains("added b"))),
+        (
+            "edit 3, a line gone",
+            Box::new(move |s| s.contains("● edit  edit.txt  L22") && removed(s, "line 20")),
+        ),
+        ("edit 4", Box::new(|s| s.contains("● edit  edit.txt  L1 ") && s.contains("zero"))),
+        (
+            "the search, named, with its count",
+            Box::new(|s| s.contains("● search (project)  line 5") && s.contains("1 matching line in 1 file")),
+        ),
+        ("the last read", Box::new(|s| s.contains("● read  lib.txt  L8–9"))),
+    ];
+    for (what, seen) in &stops {
+        if t.poll_for(Duration::from_millis(1500), |s| seen(s)).is_none() {
+            panic!("{what} never reached the screen in time\n{}", t.screen());
+        }
+    }
+    // The turn over: its review opens (review at the end) and takes the keys from the chat, so the chat's
+    // row says how to replay the turn from the code — then stop by stop, back from the newest. (`C-]`, said
+    // while the chat still has the keys, shows only until the turn's files are gathered on a worker.)
+    t.wait_for("the review, with the keys, and the replay's hint", |s| {
+        s.contains("reviewing them now") && s.contains("[r ]r replay its 7 stops")
+    });
+    let step = |t: &mut Term, keys: &str, what: &str, seen: &dyn Fn(&Screen) -> bool| {
+        t.send(keys);
+        t.wait_for(what, seen);
+    };
+    step(&mut t, "[r", "the newest stop", &|s| s.contains("● read  lib.txt  L8–9") && s.contains("7/7"));
+    step(&mut t, "[r", "the search", &|s| s.contains("● search (project)") && s.contains("6/7"));
+    step(&mut t, "[r", "edit 4", &|s| s.contains("● edit  edit.txt  L1 ") && s.contains("5/7"));
+    step(&mut t, "[r[r[r", "edit 1, a line down since edit 4", &|s| {
+        s.contains("● edit  edit.txt  L4") && s.contains("2/7") && removed(s, "line 3")
+    });
+    step(&mut t, "]r]r]r]r]r]r", "past the newest", &|s| s.contains("that was the newest stop"));
+}

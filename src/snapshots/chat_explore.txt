@@ -9,8 +9,8 @@
 06   5 pub fn word_counts(text: &str) -> HashMap<&str, usize>  ▐  ▎ Finding the callers
 07     {                                                       ▐  ▎ It's public, so other modules may…
 08   6     let mut counts = HashMap::new();                    ▐
-09   7     for word in text.split_whitespace() {               ▐  ◦ search word_counts\(  in src
-10   8     │   *counts.entry(word).or_insert(0) += 1;          ▐  ◦ find   src/**/*.rs
+09   7     for word in text.split_whitespace() {               ▐  ◦ grep   word_counts\(  in src
+10   8     │   *counts.entry(word).or_insert(0) += 1;          ▐  ◦ glob   src/**/*.rs
 11   9     }                                                   ▐  ◦ read   src/lib.rs  L1–40
 12  10     counts                                              ▐
 13  11 }                                                       ▐  Only main does, at src/demo.rs:15.
@@ -71,7 +71,7 @@
 06   f                                                            f DDDDDDD DDD DDDDDDD
 07                                                                f dddd ddddddd dd ddddd ddddddd dddf
 08   f
-09   f                                                            f ffffff ggggggggggggg  ff fff
+09   f                                                            f ffff   ggggggggggggg  ff fff
 10   f                                                            f ffff   ggggggggggg
 11   f                                                            f ffff   dddddddddd  fffff
 12  ff

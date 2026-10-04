@@ -14,6 +14,8 @@
 //!   `target/perf/history.tsv` and compared with the last runs (see [`perf`]).
 //! - `linux [clippy|test]` — the checks on Linux in Docker, on the pinned toolchain, the tree read-only (see
 //!   [`linux`]).
+//! - `stream [--model M] [prompt]`, `stream --file F` — one real streamed answer from the chat's model (`llm.model`),
+//!   timed line by line: its bursts, and what tarae's text batching adds to them (see [`stream`]).
 
 use std::collections::BTreeSet;
 use std::io::Write as _;
@@ -23,6 +25,7 @@ use std::process::Command;
 mod linux;
 mod perf;
 mod shot;
+mod stream;
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -33,10 +36,11 @@ fn main() {
         Some("shot") => shot::run(&args[1..]),
         Some("perf") => perf::run(&args[1..]),
         Some("linux") => linux::run(&args[1..]),
-        _ => {
-            Err("usage: cargo xtask vendor-grammars | shot out.png [keys …] | perf | linux [clippy|test]"
-                .into())
-        }
+        Some("stream") => stream::run(&args[1..]),
+        _ => Err(
+            "usage: cargo xtask vendor-grammars | shot out.png [keys …] | perf | linux [clippy|test] | stream [--model M] [prompt] | stream --file F"
+                .into(),
+        ),
     };
     if let Err(e) = result {
         eprintln!("error: {e}");

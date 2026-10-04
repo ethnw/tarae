@@ -211,6 +211,8 @@ fn unasked(ed: &mut Editor, root: PathBuf, p: Pending) {
             };
             match found {
                 Some((before, real)) if at_end(ed) && !dirty(&real) => {
+                    // (follow shows the edit against what it was, once it's written)
+                    crate::follow::before_edit(ed, real.clone(), before.clone());
                     // (allowed once what it was is on disk)
                     let before = before.map(ropey::Rope::from);
                     crate::checkpoint::record_unseen(ed, real, before, move |ed: &mut Editor| {
@@ -431,6 +433,11 @@ unsaved edits — the file on disk changes when they save. Treat the edit as don
         && let Some(doc) = ed.docs.iter_mut().find(|d| d.id == doc_id)
     {
         doc.agent_will_write();
+        // (its replay stop: what you accepted, against what it was — once Claude has written it)
+        let real = doc.path.clone();
+        if let Some(real) = real {
+            crate::follow::before_edit(ed, real, existed.then_some(base));
+        }
     }
     answer(ed, &p.request_id, r);
     crate::follow::settle(ed);

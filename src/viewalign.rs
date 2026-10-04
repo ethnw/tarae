@@ -55,6 +55,40 @@ impl Editor {
         self.doc_mut().top = top;
     }
 
+    /// Puts `lines` in sight as a whole (a follow or replay stop — the cursor on its first line): left as
+    /// it is when it's all on screen already; centred as a block when it fits (equal room above and
+    /// below); taller than the screen, its first line near the top with `RANGE_CONTEXT` lines above (or the
+    /// scrolloff margin, if wider).
+    pub fn show_range(&mut self, lines: std::ops::Range<usize>) {
+        const RANGE_CONTEXT: usize = 3;
+        let rows = self.viewport.0.max(1);
+        let so = self.scrolloff();
+        let doc = self.doc();
+        let last = mv::last_line(&doc.text);
+        let start = lines.start.min(last);
+        let end = lines.end.min(last + 1).max(start + 1);
+        let top = doc.top;
+        // Rows of lines `a..b`, counted no further than a screen and a row
+        let rows_in = |a: usize, b: usize| {
+            let mut n = 0;
+            for l in a..b {
+                n += self.rows_of(l);
+                if n > rows {
+                    break;
+                }
+            }
+            n
+        };
+        let first_seen = start >= top && (top == 0 || start >= top + so);
+        if first_seen && rows_in(top, end) <= rows {
+            return;
+        }
+        let tall = rows_in(start, end);
+        let above = if tall <= rows { ((rows - tall) / 2).max(so) } else { RANGE_CONTEXT.max(so) };
+        let top = self.top_for(start, above);
+        self.doc_mut().top = top;
+    }
+
     /// First and last lines fully on screen, inside the scrolloff margin.
     fn inner_lines(&self) -> (usize, usize) {
         let doc = self.doc();
@@ -104,5 +138,40 @@ impl Editor {
             Place::Center => first + (bottom - first) / 2,
         };
         self.cursor_to_line(line, extend);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::config::Config;
+    use crate::editor::Editor;
+
+    /// A stop is placed by its whole range: one that fits is centred as a block, a taller one starts near
+    /// the top with three lines above it, and one already on screen doesn't move the view.
+    #[test]
+    fn a_stop_is_placed_by_its_whole_range() {
+        let mut ed = Editor::new(Config::default());
+        ed.docs[0].text =
+            ropey::Rope::from_str(&(0..1000).map(|i| format!("line {i}\n")).collect::<String>());
+        ed.viewport = (40, 80);
+        ed.config.scrolloff = 3;
+        // 20 lines in 40 rows: 10 above, 10 below
+        ed.show_range(500..520);
+        assert_eq!(ed.doc().top, 490, "centred as a block");
+        // Already all on screen: left alone
+        ed.show_range(495..515);
+        assert_eq!(ed.doc().top, 490, "on screen — no scroll");
+        ed.show_range(493..530);
+        assert_eq!(ed.doc().top, 490, "the whole screen's worth, still on it");
+        // Taller than the screen: its first line three rows below the top
+        ed.show_range(600..830);
+        assert_eq!(ed.doc().top, 597, "starts 3 rows below the top");
+        // Partly on screen (its end below): placed again
+        ed.show_range(630..660);
+        assert_eq!(ed.doc().top, 625, "centred: (40 - 30) / 2 above");
+        // The scrolloff margin wins when it's wider than the context
+        ed.config.scrolloff = 5;
+        ed.show_range(100..400);
+        assert_eq!(ed.doc().top, 95);
     }
 }

@@ -343,17 +343,25 @@ impl Chat {
     /// Every place the conversation points at, oldest first (repeats in a row collapsed); relative ones
     /// from `root`.
     pub fn links(&self, root: &Path) -> Vec<Link> {
-        let mut out: Vec<Link> = Vec::new();
+        self.targets(root).into_iter().map(|t| t.0).collect()
+    }
+
+    /// `links`, each with the tool call whose row it is (its replay stop).
+    pub fn targets(&self, root: &Path) -> Vec<(Link, Option<String>)> {
+        let mut out: Vec<(Link, Option<String>)> = Vec::new();
         for m in &self.msgs {
-            let found: Vec<Link> = match m.role {
-                Role::Tool => m.look.iter().filter_map(|l| l.link.clone()).collect(),
-                Role::Assistant => refs_in(root, &m.text).into_iter().map(|(_, l)| l).collect(),
-                Role::User => m.attached.iter().cloned().collect(),
+            let found: Vec<(Link, Option<String>)> = match m.role {
+                Role::Tool => {
+                    m.look.iter().filter_map(|l| Some((l.link.clone()?, Some(m.call.clone())))).collect()
+                }
+                Role::Assistant => refs_in(root, &m.text).into_iter().map(|(_, l)| (l, None)).collect(),
+                Role::User => m.attached.iter().map(|l| (l.clone(), None)).collect(),
                 _ => Vec::new(),
             };
-            for l in found {
-                if out.last() != Some(&l) {
-                    out.push(l);
+            for t in found {
+                // (two edits of one file are two stops — repeats collapse only for plain places)
+                if t.1.is_some() || out.last().is_none_or(|l| l.0 != t.0) {
+                    out.push(t);
                 }
             }
         }
@@ -727,7 +735,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
         }
         StreamEv::Models(list) => c.models = list,
         StreamEv::Answered(model) => c.model = model,
-        StreamEv::ToolResult { id, text } => {
+        StreamEv::ToolResult { id, text, error } => {
             // What it did on disk (an edit, a write, a command): the git tab reads the status again (#29 — it
             // said "the tree is clean" over files Claude had changed, until reopened)
             let wrote = c
@@ -748,10 +756,20 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
                 };
                 m.cache.replace(None);
             }
-            // A lookup's row ends with what it found (`12 references in 3 files`) — Grep's answers aren't read
+            // A lookup's row ends with what it found (`12 references in 3 files`) — Grep's count is follow's
+            // (`follow::found`, from its hits)
             if let Some(m) = c.msgs.iter_mut().rev().find(|m| m.call == id)
                 && let Some(l) = m.look.as_mut().filter(|l| {
-                    matches!(l.verb, "uses" | "search" | "map" | "where" | "check" | "rename" | "replace")
+                    matches!(
+                        l.verb,
+                        "references"
+                            | "search"
+                            | "symbols"
+                            | "definition"
+                            | "diagnostics"
+                            | "rename"
+                            | "replace"
+                    )
                 })
                 && let Some(v) = crate::nav::verdict(&text)
             {
@@ -759,7 +777,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
                 m.cache.replace(None);
             }
             if c.state != State::Idle {
-                crate::follow::on_result(ed, &id, &text);
+                crate::follow::on_result(ed, &id, &text, error);
             }
             if wrote {
                 ed.git_tab_follow();
@@ -1249,12 +1267,13 @@ fn look(root: &Path, name: &str, input: &serde_json::Value) -> Look {
             let line = n("offset").unwrap_or(1).saturating_sub(1);
             Look { verb: "read", what: shown(&path), pattern: false, range, link: Some(Link { path, line }) }
         }
+        // Named as the tool it is — Claude's own Grep and Glob, or tarae's search (`search (project)`)
         "Grep" => {
             let place = if input["glob"].is_string() { s("glob") } else { s("path") };
-            Look { verb: "search", what: s("pattern"), pattern: true, range: within(place), link: None }
+            Look { verb: "grep", what: s("pattern"), pattern: true, range: within(place), link: None }
         }
         "Glob" => {
-            Look { verb: "find", what: s("pattern"), pattern: true, range: within(s("path")), link: None }
+            Look { verb: "glob", what: s("pattern"), pattern: true, range: within(s("path")), link: None }
         }
         "Edit" | "Write" => {
             let path = resolve(&s("file_path"));
@@ -1325,7 +1344,7 @@ fn look(root: &Path, name: &str, input: &serde_json::Value) -> Look {
             };
             let what = s("symbol");
             Look {
-                verb: "uses",
+                verb: "references",
                 what,
                 pattern: true,
                 range: format!("in {place}"),
@@ -1342,11 +1361,17 @@ fn look(root: &Path, name: &str, input: &serde_json::Value) -> Look {
                 Some(l) => (format!("{}:{}", shown(&path), l.max(1)), l.max(1) - 1),
                 None => (shown(&path), 0),
             };
-            Look { verb: "map", what, pattern: false, range: String::new(), link: Some(Link { path, line }) }
+            Look {
+                verb: "symbols",
+                what,
+                pattern: false,
+                range: String::new(),
+                link: Some(Link { path, line }),
+            }
         }
         // At a place: the editor goes there; by name (definition), or the files (diagnostics): nowhere
         "mcp__tarae__definition" | "mcp__tarae__hover" => {
-            let verb = if name == "mcp__tarae__hover" { "about" } else { "where" };
+            let verb = if name == "mcp__tarae__hover" { "hover" } else { "definition" };
             let what = match (s("symbol"), n("column")) {
                 (w, _) if !w.is_empty() => w,
                 (_, Some(c)) => format!("column {c}"),
@@ -1377,7 +1402,7 @@ fn look(root: &Path, name: &str, input: &serde_json::Value) -> Look {
                 n => format!("{}, … {} files", paths[0], n),
             };
             let range = n("wait").filter(|&w| w > 0).map_or(String::new(), |w| format!("waits up to {w}s"));
-            Look { verb: "check", what, pattern: false, range, link: None }
+            Look { verb: "diagnostics", what, pattern: false, range, link: None }
         }
         // (the editor goes to the name renamed; a replace goes nowhere — its review shows the files)
         "mcp__tarae__rename" => {
@@ -1408,6 +1433,15 @@ fn look(root: &Path, name: &str, input: &serde_json::Value) -> Look {
         other => {
             Look { verb: "use", what: other.to_string(), pattern: false, range: String::new(), link: None }
         }
+    }
+}
+
+/// What a row and the follow card call a call's tool — its own name, so Claude's Grep reads apart from
+/// tarae's project search (the editor's `space /`).
+pub fn label(verb: &str) -> &str {
+    match verb {
+        "search" => "search (project)",
+        v => v,
     }
 }
 
@@ -1505,16 +1539,19 @@ pub fn jump(ed: &mut Editor, link: Link) {
     }
 }
 
-/// `C-]` (`C-g`): the newest link, then one further back each press (wraps).
+/// `C-]` (`C-g`): the newest link, then one further back each press (wraps) — a tool call's row goes to its
+/// replay stop (an edit's changes shown).
 pub fn follow(ed: &mut Editor) {
     let Some(c) = &mut ed.lane.chat else { return };
-    let links = c.links(&ed.lane.root);
+    let links = c.targets(&ed.lane.root);
     if links.is_empty() {
         return ed.set_status("nothing to go to yet");
     }
-    let link = links[links.len() - 1 - c.hop % links.len()].clone();
+    let (link, call) = links[links.len() - 1 - c.hop % links.len()].clone();
     c.hop = (c.hop + 1) % links.len();
-    jump(ed, link);
+    if !call.is_some_and(|call| crate::follow::replay_call(ed, &call)) {
+        jump(ed, link);
+    }
 }
 
 // ── Keys ───────────────────────────────────────────────────────────────────
@@ -1733,7 +1770,7 @@ mod tests {
         let generation = c.generation;
         ed.lane.chat = Some(c);
         let text = "exit 101 in 2.0s\n$ cargo test -p tarae\n".to_string();
-        on_event(&mut ed, generation, StreamEv::ToolResult { id: "t1".into(), text });
+        on_event(&mut ed, generation, StreamEv::ToolResult { id: "t1".into(), text, error: false });
         let c = ed.lane.chat.as_ref().unwrap();
         assert_eq!(c.msgs[0].look.as_ref().unwrap().range, "exit 101");
     }
@@ -1751,10 +1788,18 @@ mod tests {
         let g = look(cwd, "Grep", &serde_json::json!({"pattern": "fn add", "path": cwd.join("src")}));
         assert_eq!(
             (g.verb, g.what.as_str(), g.range.as_str(), g.pattern),
-            ("search", "fn add", "in src", true)
+            ("grep", "fn add", "in src", true)
         );
         let f = look(cwd, "Glob", &serde_json::json!({"pattern": "**/*.rs"}));
-        assert_eq!((f.verb, f.range.as_str(), f.link), ("find", "", None));
+        assert_eq!((f.verb, f.range.as_str(), f.link), ("glob", "", None));
+        // Each named as the tool it is: tarae's search over the project, a definition by name
+        let s = look(cwd, "mcp__tarae__search", &serde_json::json!({"pattern": "fn add"}));
+        assert_eq!((label(s.verb), label(g.verb)), ("search (project)", "grep"));
+        let d = look(cwd, "mcp__tarae__definition", &serde_json::json!({"symbol": "Lane"}));
+        assert_eq!((d.verb, d.what.as_str()), ("definition", "Lane"));
+        let r =
+            look(cwd, "mcp__tarae__references", &serde_json::json!({"path": "src/lib.rs", "symbol": "a"}));
+        assert_eq!(r.verb, "references");
     }
 
     /// A walk-through's stops as Claude writes them: parsed from its words, shown as link lines, a tag

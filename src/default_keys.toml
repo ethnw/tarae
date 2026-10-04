@@ -125,6 +125,8 @@ F = "goto_next_review_file"
 n = "goto_next_note"
 q = "goto_next_quickfix"
 m = "goto_next_conflict"
+# Claude's turns, stop by stop (what it read, edited, found) — past the newest, follow goes on
+r = "replay_next"
 
 [normal."["]
 d = "goto_prev_diag"
@@ -142,6 +144,7 @@ F = "goto_prev_review_file"
 n = "goto_prev_note"
 q = "goto_prev_quickfix"
 m = "goto_prev_conflict"
+r = "replay_prev"
 
 [normal.space.G]
 a = "dap_attach"

@@ -736,7 +736,7 @@ fn snapshot_chat_empty() {
 }
 
 /// Chat panel after Claude explored the project in follow mode: a folded thought, tool rows
-/// (search·find·read) and an answer whose `path:line` references are underlined links.
+/// (grep·glob·read, as Claude's own tools are named) and an answer whose `path:line` references are underlined links.
 #[test]
 fn snapshot_chat_explore() {
     use crate::chat::{Link, Look, Msg, Role};
@@ -767,8 +767,8 @@ fn snapshot_chat_explore() {
             "",
             None,
         ),
-        msg(Role::Tool, "", "", look("search", "word_counts\\(", true, "in src", None)),
-        msg(Role::Tool, "", "", look("find", "src/**/*.rs", true, "", None)),
+        msg(Role::Tool, "", "", look("grep", "word_counts\\(", true, "in src", None)),
+        msg(Role::Tool, "", "", look("glob", "src/**/*.rs", true, "", None)),
         msg(
             Role::Tool,
             "",
@@ -983,13 +983,7 @@ fn follow_is_one_card_in_one_place() {
         let c = s.ed.lane.chat.as_mut().unwrap();
         c.follow.on = true;
         c.msgs.push(Msg::new(Role::Thought, "Reading where it starts.", ""));
-        c.follow.gaze = Some(crate::follow::Gaze {
-            look,
-            path: Some(path.clone()),
-            lines: Some(lines),
-            why: None,
-            step: None,
-        });
+        c.follow.gaze = Some(crate::follow::Gaze::new(look, Some(path.clone()), Some(lines)));
         s.frame();
         let card = s.ed.screen.thought_card.get().expect("the card shows");
         assert_eq!(s.ed.screen.chat_mini.get(), Some(card), "the minimized chat is this card");
@@ -1053,13 +1047,7 @@ fn floating_cards_never_overlap() {
             attached: None,
             cache: Default::default(),
         });
-        c.follow.gaze = Some(crate::follow::Gaze {
-            look,
-            path: Some(path.clone()),
-            lines: Some(39..60),
-            why: None,
-            step: None,
-        });
+        c.follow.gaze = Some(crate::follow::Gaze::new(look, Some(path.clone()), Some(39..60)));
         s.ed.set_status("Saved src/demo.rs · 80 lines");
         let bytes = s.frame();
         // (the minimized chat and the thought card are one card — U4)

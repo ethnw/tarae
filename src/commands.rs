@@ -226,6 +226,8 @@ commands! {
         goto_prev_note => "Previous note",
         goto_next_quickfix => "Next place in the list",
         goto_prev_quickfix => "Previous place in the list",
+        replay_next => "Claude's next stop (replay)",
+        replay_prev => "Claude's previous stop (replay)",
         quickfix_panel => "Show the list (quickfix)",
         task_again => "Run the task (again)",
         task_picker => "Pick a task to run",
@@ -1971,6 +1973,14 @@ fn note_picker(cx: &mut Context) {
 
 fn goto_next_quickfix(cx: &mut Context) {
     cx.editor.qlist_step(true);
+}
+
+fn replay_next(cx: &mut Context) {
+    crate::follow::replay_step(cx.editor, true);
+}
+
+fn replay_prev(cx: &mut Context) {
+    crate::follow::replay_step(cx.editor, false);
 }
 
 fn goto_prev_quickfix(cx: &mut Context) {
