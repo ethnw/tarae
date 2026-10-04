@@ -18,6 +18,8 @@
 //!   footprint, command line, folder — read on a worker, no card (`procs.rs`).
 //! - `rename` and `replace` are the editor's own refactoring — one call, one change set that lands as
 //!   Claude's edits do, in the review (`refactor.rs`).
+//! - `ui` says what's on the screen by id — the cards and what they ask, toasts, panes, panels, runs — at
+//!   Claude's level, answered at once, no card (`uistate/claude.rs`).
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -93,6 +95,7 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
                 crate::refactor::rename_schema(),
                 crate::refactor::replace_schema(),
                 crate::procs::tool_schema(),
+                crate::uistate::claude::tool_schema(),
             ];
             Ok(json!({ "tools": tools.map(annotated) }))
         }
@@ -102,6 +105,7 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
             let r = match params["name"].as_str() {
                 Some("note") => crate::notes::tool_call(ed, args),
                 Some("plan") => crate::plan::tool_call(ed, args),
+                Some("ui") => crate::uistate::claude::tool_call(ed),
                 Some("run_tests") => match run_tests(ed, call(), args) {
                     Ok(()) => return None,
                     Err(e) => Err(e),
@@ -179,6 +183,7 @@ fn annotated(mut schema: Value) -> Value {
         "rename" => ("Rename a symbol", Some("destructiveHint")),
         "replace" => ("Replace in files", Some("destructiveHint")),
         "procs" => ("The editor's processes", Some("readOnlyHint")),
+        "ui" => ("What's on screen, by id", Some("readOnlyHint")),
         _ => return schema,
     };
     let mut a = json!({ "title": title });
@@ -2412,7 +2417,8 @@ mod tests {
         for t in list["result"]["tools"].as_array().unwrap() {
             assert!(t["annotations"]["title"].is_string(), "{t}");
         }
-        for name in ["references", "search", "symbols", "definition", "hover", "diagnostics", "screen"] {
+        for name in ["references", "search", "symbols", "definition", "hover", "diagnostics", "screen", "ui"]
+        {
             assert_eq!(annotations(&list, name)["readOnlyHint"], true, "{name}");
         }
         for name in ["run", "rename", "replace"] {

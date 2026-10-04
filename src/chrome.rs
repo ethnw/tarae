@@ -110,6 +110,8 @@ pub enum Keys {
     Program,
     /// A card given the keys with `C-q` (#78: the status line still said CHAT).
     Card,
+    /// Labels up for pointing at an element: letters pick one (`uistate/point.rs`).
+    Point,
 }
 
 impl Keys {
@@ -133,6 +135,7 @@ impl Keys {
             Keys::Slot(Slot::Debug) => "DEBUG",
             Keys::Slot(Slot::Plugin) => "PANEL",
             Keys::Card => "CARD",
+            Keys::Point => "POINT",
         })
     }
 
@@ -144,7 +147,11 @@ impl Keys {
     /// The key hint the status line puts after the label (key, what it does): on the terminal with tarae's
     /// keys, that typing isn't the program's yet — the label alone was the program's too.
     pub fn hint(self) -> Option<(&'static str, &'static str)> {
-        (self == Keys::Slot(Slot::Terminal)).then_some(("i", "type in it"))
+        match self {
+            Keys::Slot(Slot::Terminal) => Some(("i", "type in it")),
+            Keys::Point => Some(("esc", "stop pointing")),
+            _ => None,
+        }
     }
 }
 
@@ -174,6 +181,7 @@ impl Editor {
             R::Side(m) => Keys::Side(m),
             R::Slot(s) => Keys::Slot(s),
             R::Program => Keys::Program,
+            R::Point => Keys::Point,
             R::Code | R::Prompt | R::NextCard | R::Popup => Keys::Code,
         }
     }
@@ -205,7 +213,7 @@ const ORDER: [Slot; 6] = [Slot::Terminal, Slot::Task, Slot::Test, Slot::Debug, S
 
 impl Editor {
     /// Whether `s` has something to show in the slot (a hidden terminal is a tab, not shown).
-    fn slot_there(&self, s: Slot, shown: bool) -> bool {
+    pub(crate) fn slot_there(&self, s: Slot, shown: bool) -> bool {
         match s {
             Slot::Procs => self.procs_up(),
             Slot::Debug => self.dap.is_some(),

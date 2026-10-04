@@ -184,6 +184,7 @@ commands! {
         replay_macro => "Replay macro",
         llm_ask => "Ask Claude to edit selection",
         chat_open => "Chat with Claude",
+        chat_point => "Point Claude at something",
         command_palette => "Find a command",
         theme_picker => "Choose a theme (live preview)",
         symbol_picker => "Symbols in this file",
@@ -2254,6 +2255,11 @@ fn chat_open(cx: &mut Context) {
 
 fn chat_close(cx: &mut Context) {
     crate::chat::close(cx.editor);
+}
+
+/// `space @`: labels on the elements on screen — the one picked goes to the chat's next message.
+fn chat_point(cx: &mut Context) {
+    crate::uistate::point::start(cx.editor);
 }
 
 fn llm_ask(cx: &mut Context) {

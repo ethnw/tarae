@@ -57,6 +57,11 @@ struct Shared {
 /// Run ids, one sequence for the process (`:restart` starts it again — the UI state's `boot` says so).
 static RUN_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+/// The id the next run gets — every run so far has one below it (a `run#N` link past it was never a run).
+pub fn next_id() -> u64 {
+    RUN_IDS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// A step of a run, for the UI state's watchers (`uistate.rs`): the run, what it is, the step, how long the
 /// run has been going, and whether it ended there.
 #[derive(Clone, Debug, PartialEq, Eq)]

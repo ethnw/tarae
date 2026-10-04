@@ -1,6 +1,6 @@
 # UI state — what's on screen, as data
 
-Status: design approved (2026-10-04) with the five recommendations (see "Decided"); phases 1 and 2 built,
+Status: design approved (2026-10-04) with the five recommendations (see "Decided"); phases 1, 2 and 3 built,
 phase 4 dropped for now. The direction was approved after queue phase 0 (1085db8).
 
 ## Why
@@ -334,7 +334,7 @@ A chat key starts pointing:
 - typing a label (or clicking an element) puts its id as a chip in the chat input;
 - the message carries `<pointed>`.
 
-The key isn't chosen yet (it goes in `default_keys.toml`).
+The key: `C-o` in the chat, `space @` (`default_keys.toml`) from the code — see "Phase 3".
 
 All three are new screen elements, so each is committed only after a `cargo xtask shot`. The shots cover
 meok and hanji, a narrow screen, the stacked-card case, and a mark next to the `1/N` counter.
@@ -457,13 +457,42 @@ Built as below (`uistate/panels.rs`, `uistate/watch.rs`), with these choices:
   frame.
 - Event volume while Claude streams. The summary excludes chat text, so a stream of words is no events.
 
-### Phase 3 — Claude
+### Phase 3 — Claude — built 2026-10-05
 
 - The `ui` tool at Claude's level, the context line, the system-prompt sentence.
 - Cited ids as links (jump and flash, the ring for gone elements); pointing (labels, then a chip, then
   `<pointed>`); given and cited marks.
 
-**Size:** ~1,200–1,600 lines, plus a design pass with shots for each of the three looks.
+Built as below (`uistate/claude.rs`, `uistate/point.rs`), with these choices:
+- **Claude's level** is the full state filtered (`ui_state_claude`), never built apart: no prompt or picker
+  query, no chat draft; other sessions as id, name, `doing`, card count; only its own session's cards, runs
+  and gone cards (the ring now keeps each card's session); a plugin's card by title. A session behind gets
+  its parked cards and runs only — nothing of the screen is its. Its text form (`text_claude`) drops pid,
+  frame and input, and adds the panes and, per panel, the rows on screen by id (`rows git: …`, 12 at most).
+- **Given** = the context line's ids, what was pointed at, and what a `ui` answer names one by one (cards,
+  toasts, runs, panes, the row in hand) — not the `rows …` lists: every row on screen marked after one call
+  would be noise. **Cited** = the ids in this turn's answer, read again as it streams and at its end.
+- **Links**: ids are parsed beside `refs_in` (`ids_in`: not inside a word, a path or a URL; a `path:line`
+  inside a row id is the id's). `C-]` walks places and ids in the order written (`chat::Hop`). An id that was
+  never an element here (`ui_known`: not up, parked, in the ring, said, run, a view or a note) is drawn faint,
+  not underlined; followed, it says `no such element` (an info toast, no flash). Rows are taken as written and
+  found when followed (`… isn't in the git tab now`).
+- **Flash**: the selected row's colour behind the element for `FLASH` (1.2 s) — a row that's already the
+  selected one flashes in the labels' accent wash instead (else nothing would show). One wake-up at its end
+  (`tick_wanted`), nothing between.
+- **Marks**: a card's at its title row's end before `1/N` (only where the row has room — the card never
+  widens for it), a stacked card's at its peek row's end, a row's in its right padding, the pane's after the
+  file in the path bar. Only the front session's chat's, only this turn's.
+- **Pointing's key** (decided here): `C-o` in the chat — unused there and in Helix's insert mode (Helix's
+  `C-o` is normal mode's jump back, which the chat input doesn't have); "o" for *object* / *on screen*.
+  From the code, `space @` — unbound in Helix's space menu and tarae's; `@` reads as "mention". Both run
+  `chat_point` (`:chat-point` too). While labels are up every key is pointing's (`keys_to` region `point`,
+  takes `label`, the status line `POINT · esc stop pointing`); after the first letter only the matching labels
+  stay, their second letter shown, as `gw` does. Labels sit on margins, never over words: a card's on its
+  margin and `▎`, a row's in its left padding, the path bar's and a slot tab's on the rule under it.
+
+**Size:** ~1,200–1,600 lines, plus a design pass with shots for each of the three looks. Built: ~1,240 lines
+of code, ~525 of tests.
 
 **Risks:**
 - Marks as noise. They're faint, only for the current turn, and none on toasts. Look at them in a shot of a
@@ -521,6 +550,20 @@ What the routing test and the pulled-out answers found:
 | Round trip | socket 0.69 ms, `tarae state --json` 2.8 ms |
 | Release binary | 9,329,424 → 9,428,608 B (+99 KB, +1.1%) |
 
+## Phase 3, measured (2026-10-05, this Mac)
+
+Tokens from claude's own `usage` (input + cache written + cache read of a request — the whole prompt), the same
+one-word question in the same project, the kept phase-2 build against this one (`tests/live.rs`:
+`chat_prompt_tokens*`, `chat_ui_call_tokens`):
+
+| | |
+|---|---|
+| Fixed part every request carries (system prompt, tools' definitions) | 13,062 → 13,271 tokens (+209; budget +300) |
+| The context line, one toast up | +26 tokens (13,071 → 13,306 with it, less the +209) |
+| A `ui` call, small scene (the call and its 144-byte answer) | +116 tokens between its two requests |
+| Busy scene (3 sessions, 3 cards, an edit's review, a task, toasts) | `ui` answer 678 B (~170 tokens); context line 252 B (~63) |
+| Release binary | 9,362,624 → 9,428,784 B (+66 KB, +0.7%) |
+
 ## No silent state change (user decision, 2026-10-04)
 
 Whatever changes state the user didn't see change, or refuses a key, says so where they're looking.
@@ -546,7 +589,8 @@ Whatever changes state the user didn't see change, or refuses a key, says so whe
 2. **The socket:** on by default — same uid, 0600, Claude's sandbox can't reach it, nothing idle.
 3. **Guarded keys for drivers:** left out; no direct actions for drivers for now. They come back only if
    phases 1–2 show a need (phase 4).
-4. **Pointing's key** in the chat: decided in phase 3.
+4. **Pointing's key** in the chat: decided in phase 3 — `C-o` in the chat, `space @` from the code (see
+   "Phase 3").
 5. **Other sessions in Claude's view:** counts only (name, `doing`, how many cards), never their titles.
 
 The format: JSON (JSON Lines for events) for drivers and scripts — `serde_json` is in already, no new

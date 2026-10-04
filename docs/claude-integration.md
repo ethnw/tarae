@@ -94,6 +94,35 @@ waits, `C-q` never says nothing does.
 
 ![Claude wants to see your screen: a card says it goes as text, 140×40, that Claude can only look, and that it includes the terminal panel (14 rows), with y Once, a This chat and n No](screenshots/chat-screen.png)
 
+### What's on screen, by id
+
+Claude also knows **what's on your screen by name**, without seeing it. Each message's context has one more
+line when something's up beyond the code and the chat — the cards, the toasts, the runs under way, each by id:
+`ui: card#12 run "cargo test" (claude, front) · toast#3 warning "…"`. So "why did this come up?" is answered
+about the right card. Its `ui` tool says the rest: where the keys go, what each card asks and its answers,
+the panes, the side panel's and the review's rows on screen, runs, and cards that went and how. It only reads,
+asks no card, and is less than the screen: your own session in detail, other sessions only as a name, what
+they're doing and how many cards; nothing you haven't sent (your draft, a prompt's text), no terminal output.
+
+The ids Claude writes are **links**, underlined like `path:line`: `card#12`, `run#7`, `pane#2`,
+`git:src/a.rs`, `review:src/a.rs`, `files:src/`. A click (or `C-]`) brings the element into sight — another
+session to the front, a side tab shown and scrolled to the row, a run's panel in front of the bottom slot — and
+it flashes for a moment. What the keys answer doesn't change: a card stacked behind flashes where it is. A card
+that went says how (`card#12 went 2m ago: answered y — …`); an id that never was one is drawn faint, and says
+`no such element`.
+
+**Pointing**: `C-o` in the chat (`space @` from the code, `:chat-point`) puts a two-letter label on every
+element on screen that has an id — the cards, the toasts, the side panel's and the review's rows, the slot's
+tabs, the path bar. Type a label, or click the element, and its id goes into the chat as a chip over the input
+(`card#12 goes with it`; Backspace in the empty input takes it off). The message tells Claude what you pointed
+at. Esc stops pointing ([screenshot](screenshots/chat-point-hanji.png)).
+
+For the turn in hand, what went to Claude carries a faint `◦` — a card at its title row's end (before `1/N`), a
+panel row in its right margin, the path bar after the file — and what its answer cites a `•`. They go with the
+next question. Toasts carry none.
+
+![Claude's answer cites card#1 and git:src/main.rs as links (card#9, made up, is faint); the card and the cited row carry a faint •, the path bar a ◦](screenshots/chat-ids.png)
+
 The chat reads your CLAUDE.md files and Claude Code settings the way `claude` does, so project rules apply to its
 answers and edits. Two things differ on purpose: hooks don't run, and edits always come to you as a review, even
 if a settings file allows them. `llm.chat-settings = false` starts it clean.
@@ -116,7 +145,8 @@ each one while the chat keeps the keys.
 | `C-r` | Replace the selection with the answer's code — through the same review |
 | `C-y` | Copy the code |
 | `C-s` | Send the screen with your next message: what you see, as text (`:chat-screen` from anywhere). The line over the input says `screen 140×40 goes with it`; Backspace in the empty input takes it off. The message's row opens a copy of what went |
-| `C-]` (`C-g`) | Go to where Claude looked or pointed (again = one further back) |
+| `C-o` | Point at something on screen: labels on the cards, rows, tabs and the path bar — a label's two letters (or a click) put its id in the message ([more](#whats-on-screen-by-id)) |
+| `C-]` (`C-g`) | Go to where Claude looked or pointed, or to an element it cites by id (again = one further back) |
 | `C-f` | Follow mode on/off (resumes if you took over) |
 | `C-z` | Undo what Claude changed in its last turn ([more](#undoing-a-turn)) |
 | `C-l` | New conversation |

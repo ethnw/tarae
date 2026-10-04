@@ -261,6 +261,8 @@ pub struct Screen {
     pub chat_links: std::cell::RefCell<Vec<(usize, usize, usize, crate::chat::Link)>>,
     /// The chat's rows of tool calls: (row, call id) — a click goes to that call's replay stop.
     pub chat_calls: std::cell::RefCell<Vec<(usize, String)>>,
+    /// UI elements' ids in Claude's answers: (row, start col, end col, the id) — a click brings it into sight.
+    pub chat_ids: std::cell::RefCell<Vec<(usize, usize, usize, String)>>,
     /// The minimized chat card (x, y, width, height) — a click on it brings the panel back.
     pub chat_mini: std::cell::Cell<Option<(usize, usize, usize, usize)>>,
     /// The sessions' tabs (the chat's top row) and the status line's chip: (row, start col, end col, what a
@@ -315,6 +317,9 @@ pub struct Screen {
     /// The notification card (x, y, width, height) — None when there's none, or it's folded into the status
     /// line.
     pub toast_card: std::cell::Cell<Option<(usize, usize, usize, usize)>>,
+    /// The elements Claude can be told about, where they're drawn (a card's title row, a toast's, a panel
+    /// row, the path bar, a slot tab) — pointing labels them (`uistate/point.rs`).
+    pub spots: std::cell::RefCell<Vec<crate::uistate::point::Spot>>,
     /// The prompt's card (x, y, width, height) — a click on it is its own, not the code's under it.
     pub prompt_card: std::cell::Cell<Option<(usize, usize, usize, usize)>>,
 }
@@ -568,8 +573,13 @@ pub struct Editor {
     /// parked as of the last frame · how a card went, said where it went (`uistate/watch.rs`).
     pub ui_watch: crate::uistate::watch::Watch,
     pub ui_gone: std::collections::VecDeque<crate::uistate::watch::Gone>,
-    pub(crate) ui_cards_seen: Vec<(u64, String)>,
+    pub(crate) ui_cards_seen: Vec<(u64, String, crate::event::SessionId)>,
     pub(crate) ui_card_how: HashMap<u64, String>,
+    /// An element brought into sight from a link in Claude's answer, behind it the selected row's colour
+    /// for a moment: (its id, since when) — `uistate/claude.rs`.
+    pub ui_flash: Option<(String, std::time::Instant)>,
+    /// Pointing at an element for the chat: its labels on screen (`uistate/point.rs`).
+    pub pointing: Option<crate::uistate::point::Pointing>,
     /// The last key a card refused, and why: (its id, its rev, what it says) — on the card (`offer_refused`).
     pub offer_said: Option<(u64, u64, String)>,
     /// The keys of the command waiting for a character (`on_next_char`) — the status line shows them.
@@ -725,6 +735,8 @@ impl Editor {
             ui_gone: Default::default(),
             ui_cards_seen: Vec::new(),
             ui_card_how: HashMap::new(),
+            ui_flash: None,
+            pointing: None,
             offer_said: None,
             char_for: String::new(),
             sandbox: if cfg!(test) { crate::sandbox::Availability::Bypass } else { Default::default() },
@@ -1605,8 +1617,15 @@ impl Editor {
         if matches!(m.kind, K::Down | K::Drag) {
             self.input_seq += 1;
         }
-        let s = self.screen.clone();
         let (x, y) = (m.x as usize, m.y as usize);
+        // Labels up for pointing: a click picks the element under it, or stops pointing; nothing else moves
+        if self.pointing.is_some() {
+            if m.kind == K::Down {
+                crate::uistate::point::click(self, x, y);
+            }
+            return;
+        }
+        let s = self.screen.clone();
         self.status = None;
         // The prompt's card: what's under it isn't clicked through it
         if let Some((px, py, pw, ph)) = s.prompt_card.get()
@@ -1908,6 +1927,11 @@ impl Editor {
             match m.kind {
                 K::Down => {
                     c.focused = true;
+                    // An element's id in an answer: into sight, the keys where they are
+                    let ids = s.chat_ids.borrow();
+                    if let Some((.., id)) = ids.iter().find(|l| l.0 == y && (l.1..l.2).contains(&x)) {
+                        return self.ui_jump(id);
+                    }
                     let links = s.chat_links.borrow();
                     if let Some((.., link)) = links.iter().find(|l| l.0 == y && (l.1..l.2).contains(&x)) {
                         // A tool call's row: its replay stop (an edit's changes shown), else the place
@@ -2060,7 +2084,7 @@ impl Editor {
     /// When a frame is next wanted with nothing else happening: the waiting animation's next step while
     /// something is waited on, else a toast's (`toast_wake`) — None: no frame. Not the animation while the
     /// terminal says it's unfocused (`unfocused`): nobody sees it, and focus coming back draws it again.
-    fn tick_wanted(&self) -> Option<std::time::Duration> {
+    pub(crate) fn tick_wanted(&self) -> Option<std::time::Duration> {
         // (a task's or tests' wave and wait counter are in the bottom slot — its panel and tabs — only: no
         // frames for them while the last frame didn't draw it; one that does asks again, `frame_drawn`)
         let slot_drawn = self.screen.bottom_h > 0 || self.screen.width.is_none();
@@ -2072,7 +2096,20 @@ impl Editor {
             || self.dap.as_ref().is_some_and(|d| d.state == crate::dap::State::Building)
             || (run && slot_drawn)
             || self.offer_busy();
-        if waiting && !self.unfocused { Some(step_in(anim_clock().elapsed())) } else { self.toast_wake() }
+        let next = if waiting && !self.unfocused {
+            Some(step_in(anim_clock().elapsed()))
+        } else {
+            self.toast_wake()
+        };
+        // An element flashing (a link followed): one frame when its flash is over, to take it away
+        let flash = self.ui_flash.as_ref().and_then(|(_, at)| {
+            let left = crate::uistate::claude::FLASH.checked_sub(at.elapsed())?;
+            Some(left + std::time::Duration::from_millis(2))
+        });
+        match (next, flash) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     fn schedule_tick(&mut self) {
@@ -2837,6 +2874,10 @@ impl Editor {
         }
         // (whoever took the keys since — a click, a job — has them)
         self.focus_sync();
+        // Labels up for pointing at an element (`uistate/point.rs`): every key is theirs
+        if crate::uistate::point::key(self, key) {
+            return took(Handler::Point);
+        }
         // A card is answered from anywhere (#24): `C-q` gives it the keys — what you were typing stays
         if self.card_key(key) {
             return took(Handler::Card);

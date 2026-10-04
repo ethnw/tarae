@@ -111,7 +111,7 @@ fn rel(ed: &Editor, p: &std::path::Path) -> String {
 }
 
 /// A side panel row's id: what it stands for, in its tab's words.
-fn side_id(ed: &Editor, tab: &str, l: &crate::sidebar::Line) -> String {
+pub(crate) fn side_id(ed: &Editor, tab: &str, l: &crate::sidebar::Line) -> String {
     use crate::sidebar::Target as T;
     match &l.target {
         T::Dir(d) => format!("{tab}:{}/", d.trim_end_matches('/')),

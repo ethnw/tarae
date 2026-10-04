@@ -394,6 +394,7 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
         offer_card: offer.as_ref().map(OfferCard::rect),
         chat_links: Default::default(),
         chat_calls: Default::default(),
+        chat_ids: Default::default(),
         chat_mini: Default::default(),
         session_spots: Default::default(),
         review_rail: Default::default(),
@@ -434,6 +435,7 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
         thought_card: Default::default(),
         toast_card: Default::default(),
         prompt_card: Default::default(),
+        spots: Default::default(),
     };
     editor.refresh_search(focus_lay.text_rows);
     // During `/` preview the screen follows the match, not the cursor
@@ -1014,11 +1016,18 @@ fn slot_header(
             used += 3;
         }
         let start = x0 + used;
-        apply(out, if Some(t.slot) == front { strong } else { dim })?;
+        // (a run's tab flashes, brought into sight from a link to it)
+        let run = match t.slot {
+            crate::sizes::Slot::Task => editor.session.task_run.as_ref().map(|r| r.trace.id()),
+            crate::sizes::Slot::Test => editor.session.test_run.as_ref().map(|r| r.trace.id()),
+            _ => None,
+        };
+        let lit = |s: Style| run.map_or(s, |n| flashed(ui, editor, &format!("run#{n}"), s));
+        apply(out, lit(if Some(t.slot) == front { strong } else { dim }))?;
         queue!(out, Print(label))?;
         used += label.width();
         if let Some((g, fg)) = badge_glyph(t.badge, editor, ui) {
-            apply(out, Style { fg, ..card })?;
+            apply(out, lit(Style { fg, ..card }))?;
             queue!(out, Print(format!(" {g}")))?;
             used += 1 + g.width();
         }
@@ -2967,6 +2976,10 @@ fn draw(
         None => None,
     };
     let prompt_cursor = prompt_cursor.or(picker_cursor).or(chat_cursor).or(terminal_cursor);
+    // Pointing: a label on every element with an id, over everything
+    if let Some(p) = &editor.pointing {
+        draw_point_labels(p, ui, out)?;
+    }
     // Every card's edges sit on what's drawn under them — no strip of ground between a card and the code,
     // a panel or a wash it floats over
     // (seated as the frame is read for the terminal — `Screen::present`)
@@ -2978,8 +2991,9 @@ fn draw(
         Some(p) => (Some(p), CursorShape::Bar),
         None => (text_cursor, cursor_shape(editor)),
     };
-    // (a list whose letters are keys has nothing to type into: no cursor, there or under it)
+    // (a list whose letters are keys has nothing to type into: no cursor, there or under it — nor labels up)
     let pos = pos.filter(|_| editor.prompt.is_some() || !editor.picker.as_ref().is_some_and(|p| p.keys));
+    let pos = pos.filter(|_| editor.pointing.is_none());
     if let Some((x, y)) = pos {
         let style = match shape {
             CursorShape::Block => SetCursorStyle::SteadyBlock,
@@ -5550,6 +5564,15 @@ fn draw_header(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> 
     } else if doc.is_modified() {
         left.push(Seg { text: " ●".into(), style: ui.base.patch(ui.accent), keep: 245 });
     }
+    // The focused pane, as Claude names it: given or cited this turn, a faint mark after its file
+    let pane = format!("pane#{}", editor.session.focus);
+    let of = crate::uistate::point::Of::Pane(editor.session.focus);
+    // (its label on the rule under the bar, where the bar's words start — none hidden)
+    let at = (x0 + SIGNS, usize::from(lay.text_top as usize >= crate::chrome::HEAD));
+    editor.screen.spots.borrow_mut().push(crate::uistate::point::Spot { of, x: x0, y: 0, w: width, at });
+    if let Some((m, st)) = ui_mark(ui, editor, &pane, ui.base).filter(|_| !editor.welcome()) {
+        left.push(Seg { text: format!(" {m}"), style: st, keep: 245 });
+    }
     // A review with no room for its rail (the chat beside it, a phone): which of its files this is
     if let Some(r) =
         editor.session.code_review.as_ref().filter(|_| lay.rail_w == 0 || !editor.review_rail_up())
@@ -5607,18 +5630,20 @@ fn draw_header(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> 
     // (the buffers' list ends in its own two blanks — the padding on the right)
     let room = width.saturating_sub(if right.is_empty() { PAD_R } else { 0 });
     fit_segments(&mut left, &mut right, room);
+    // (brought into sight from a link: the bar flashes)
+    let lit = |s: Style| flashed(ui, editor, &pane, s);
     queue!(out, MoveTo(x0 as u16, 0))?;
     let mut used = 0;
     for s in &left {
-        apply(out, s.style)?;
+        apply(out, lit(s.style))?;
         queue!(out, Print(&s.text))?;
         used += s.text.width();
     }
     let right_w: usize = right.iter().map(|s| s.text.width()).sum();
-    apply(out, ui.base)?;
+    apply(out, lit(ui.base))?;
     queue!(out, Spaces(width.saturating_sub(used + right_w)))?;
     for s in &right {
-        apply(out, s.style)?;
+        apply(out, lit(s.style))?;
         queue!(out, Print(&s.text))?;
     }
     if lay.text_top as usize >= crate::chrome::HEAD {
@@ -6458,8 +6483,9 @@ fn draw_toasts(
     let faint = Style { fg: fade(ui.linenr.fg.or(card.fg)), bg, ..Style::default() };
     let bar = |kind| Style { fg: fade(toast_color(editor, ui, kind)), bg, ..Style::default() };
 
-    // (bar, text, style) per row
+    // (bar, text, style) per row · the toast each one starts
     let mut rows: Vec<(Option<Style>, String, Style)> = Vec::new();
+    let mut starts: Vec<(usize, u64)> = vec![(0, newest.id)];
     // The newest: messages with newlines (language server notices etc.) wrap per paragraph
     let para: Vec<crate::markdown::Line> = newest
         .text
@@ -6488,9 +6514,11 @@ fn draw_toasts(
             ToastKind::Error | ToastKind::Warning => (bar(t.kind), body),
             _ => (Style { fg: blend(toast_color(editor, ui, t.kind), bg, 0.45), ..bar(t.kind) }, dim),
         };
+        starts.push((rows.len(), t.id));
         rows.push((Some(b), fit_ellipsis(first.trim_end(), max_inner), style));
     }
     if older > TOAST_OLDER {
+        starts.push((rows.len(), 0));
         rows.push((None, format!("+{} earlier · :messages", older - TOAST_OLDER), faint));
     }
     let inner = rows.iter().map(|r| r.1.width()).max().unwrap_or(0);
@@ -6502,18 +6530,30 @@ fn draw_toasts(
     editor.screen.toast_card.set(Some((x0, y0, width, h)));
     let edge_card = Style { bg, ..card };
     card_edge(out, ui, edge_card, x0, y0, width, pad, true)?;
+    let mut spots = editor.screen.spots.borrow_mut();
+    // (a toast's rows: from the one it starts on to the next one's — the `+N earlier` row is none's)
+    let mut of = None;
     for (i, (b, text, style)) in rows.iter().enumerate() {
-        queue!(out, MoveTo(x0 as u16, (y0 + pad + i) as u16))?;
-        apply(out, body)?;
+        let y = y0 + pad + i;
+        if let Some(&(_, id)) = starts.iter().find(|s| s.0 == i) {
+            of = (id > 0).then(|| format!("toast#{id}"));
+            if id > 0 {
+                let of = crate::uistate::point::Of::Toast(id);
+                spots.push(crate::uistate::point::Spot { of, x: x0, y, w: width, at: (x0, y) });
+            }
+        }
+        let lit = |s: Style| of.as_deref().map_or(s, |id| flashed(ui, editor, id, s));
+        queue!(out, MoveTo(x0 as u16, y as u16))?;
+        apply(out, lit(body))?;
         queue!(out, Print(" "))?;
         match b {
             Some(b) => {
-                apply(out, *b)?;
+                apply(out, lit(*b))?;
                 queue!(out, Print("▎"))?;
             }
             None => queue!(out, Print(" "))?,
         }
-        apply(out, *style)?;
+        apply(out, lit(*style))?;
         queue!(out, Print(" "), Print(text), Spaces(inner - text.width() + 2))?;
     }
     card_edge(out, ui, edge_card, x0, y0 + pad + rows.len(), width, pad, false)?;
@@ -6533,6 +6573,8 @@ fn draw_toasts(
 ///
 /// While downloading, a wave + "Fetching and building…"; on failure the reason + `y Retry` `n Dismiss`.
 struct OfferCard {
+    /// The front card's id (`Offer.id`).
+    id: u64,
     x: usize,
     y: usize,
     inner: usize,
@@ -6555,8 +6597,8 @@ struct OfferCard {
     badge: String,
     /// Downloading — the wave at the start of the second line in accent.
     busy: bool,
-    /// Cards stacked behind (nearest first): (depth 1.., title, start time if downloading, failed?).
-    peeks: Vec<(usize, String, Option<std::time::Instant>, bool)>,
+    /// Cards stacked behind (nearest first): (depth 1.., title, start time if downloading, failed?, id).
+    peeks: Vec<(usize, String, Option<std::time::Instant>, bool, u64)>,
     /// Lines left out for want of room (0: shown whole).
     cut: usize,
     /// Stepped aside to a one-row bar while its text is read in its buffer (U8): `lines` = title, how far.
@@ -6716,6 +6758,7 @@ impl OfferCard {
             };
             let title = lines.first().map(|l| l.0.clone()).unwrap_or_default();
             return Some(Self {
+                id: o.id,
                 x: 0,
                 y,
                 inner: width.saturating_sub(5),
@@ -6824,7 +6867,7 @@ impl OfferCard {
                     OfferState::Installing(t) => Some(t),
                     _ => None,
                 };
-                (k + 1, p.title.clone(), started, matches!(p.state, OfferState::Failed(_)))
+                (k + 1, p.title.clone(), started, matches!(p.state, OfferState::Failed(_)), p.id)
             })
             .collect::<Vec<_>>();
         let buttons_row = has_buttons.then_some(y + pad + lines.len() + 1);
@@ -6850,6 +6893,7 @@ impl OfferCard {
         // (a row cut away isn't drawn — nor its color)
         warn.retain(|&i| i < lines.len());
         Some(Self {
+            id: o.id,
             x,
             y,
             inner,
@@ -6892,7 +6936,14 @@ impl OfferCard {
         let key = Style { fg: ui.accent.fg, bold: true, ..body };
         // (the color of the panel's `▲ sandbox blocked` row)
         let warning = Style { fg: editor.theme.try_get("warning").and_then(|s| s.fg).or(body.fg), ..body };
+        // (a title row's label over its margin and `▎`)
+        let spot = |id: u64, x: usize, y: usize, w: usize| {
+            let of = crate::uistate::point::Of::Card(id);
+            editor.screen.spots.borrow_mut().push(crate::uistate::point::Spot { of, x, y, w, at: (x, y) });
+        };
+        let id = format!("card#{}", self.id);
         if self.bar {
+            spot(self.id, self.x, self.y, self.inner + 5);
             // (what it says after its title: how far the reading is, dim — or a key it refused, a warning)
             let how = if self.warn.contains(&1) { warning } else { dim };
             return self.draw_bar(body, how, bar, strong, key, out);
@@ -6900,31 +6951,46 @@ impl OfferCard {
         let width = self.inner + 5;
         // Back cards first (deeper = narrower, dimmer) — one title row each, the topmost up to the top edge
         let peek_bg = |k: usize| blend(card.bg, ui.tint, 1.0 - 0.3 * k as f32).or(card.bg);
-        for (k, title, started, failed) in self.peeks.iter().rev() {
+        for (k, title, started, failed, peek) in self.peeks.iter().rev() {
             let (px, pw, py) = (self.x + PEEK_INSET * k, width - 2 * PEEK_INSET * k, self.y - k);
-            let bg = peek_bg(*k);
+            let peek_id = format!("card#{peek}");
+            spot(*peek, px, py, pw);
+            // (it flashes where it is — brought forward, `y` would answer it)
+            let bg = flashed(ui, editor, &peek_id, Style { bg: peek_bg(*k), ..Style::default() }).bg;
+            let mark = ui_mark(ui, editor, &peek_id, Style { bg, ..Style::default() });
             let text = Style { fg: blend(card.fg, bg, 0.5).or(card.fg), bg, ..Style::default() };
-            let mark = Style {
+            let bar_st = Style {
                 fg: blend(if *failed { ui.error.fg } else { ui.accent.fg }, bg, 0.6),
                 bg,
                 ..Style::default()
             };
             if self.pad > 0 && *k == self.peeks.len() {
                 ui.edges.borrow_mut().push(crate::screen::Edge { x: px, y: py - 1, width: pw });
-                apply(out, Style { fg: bg, bg: ui.base.bg, ..Style::default() })?;
+                apply(out, Style { fg: peek_bg(*k), bg: ui.base.bg, ..Style::default() })?;
                 queue!(out, MoveTo(px as u16, (py - 1) as u16), Print("▄".repeat(pw)))?;
             }
             let tail = started.map(|_| format!(" {}", wave())).unwrap_or_default();
-            let room = pw.saturating_sub(5 + tail.width());
+            // (its mark at the right end, before the wave)
+            let mark_w = if mark.is_some() { 2 } else { 0 };
+            let room = pw.saturating_sub(5 + tail.width() + mark_w);
             let t = fit_ellipsis(title, room);
             queue!(out, MoveTo(px as u16, py as u16))?;
             apply(out, text)?;
             queue!(out, Print(" "))?;
-            apply(out, mark)?;
+            apply(out, bar_st)?;
             queue!(out, Print("▎"))?;
             apply(out, text)?;
-            queue!(out, Print(" "), Print(&t), Spaces(pw.saturating_sub(3 + t.width() + tail.width())))?;
-            apply(out, mark)?;
+            queue!(
+                out,
+                Print(" "),
+                Print(&t),
+                Spaces(pw.saturating_sub(3 + t.width() + tail.width() + mark_w))
+            )?;
+            if let Some((m, st)) = mark {
+                apply(out, st)?;
+                queue!(out, Print(m), Print(" "))?;
+            }
+            apply(out, bar_st)?;
             queue!(out, Print(&tail))?;
         }
         // Front card's top edge: over the back card's color where there is one (so they look stacked)
@@ -6948,11 +7014,15 @@ impl OfferCard {
             |scope: &str| Style { fg: editor.theme.try_get(scope).and_then(|s| s.fg).or(body.fg), ..body };
         let (plus, minus) = (sign("diff.plus"), sign("diff.minus"));
         let mut row = self.y + self.pad;
+        spot(self.id, self.x, row, width);
         for (i, (text, faint)) in self.lines.iter().enumerate() {
+            // (its title row flashes, brought into sight from a link)
+            let lit = |s: Style| if i == 0 { flashed(ui, editor, &id, s) } else { s };
+            let (body, dim) = (lit(body), lit(dim));
             queue!(out, MoveTo(self.x as u16, row as u16))?;
             apply(out, body)?;
             queue!(out, Print(" "))?;
-            apply(out, bar)?;
+            apply(out, lit(bar))?;
             queue!(out, Print(if i == 0 { "▎" } else { " " }))?;
             apply(out, body)?;
             queue!(out, Print(" "))?;
@@ -6960,7 +7030,7 @@ impl OfferCard {
             let diff = self.diff.iter().find(|d| d.0 == i).map(|d| d.1);
             apply(
                 out,
-                if self.warn.contains(&i) {
+                lit(if self.warn.contains(&i) {
                     warning
                 } else if let Some(c) = diff {
                     // (the lines around a change dim: what came and went, and where, stand out)
@@ -6976,7 +7046,7 @@ impl OfferCard {
                     strong
                 } else {
                     body
-                },
+                }),
             )?;
             match text.split_once(' ').filter(|_| self.busy && i == 1) {
                 // Downloading: wave in accent, text dimmed
@@ -6988,8 +7058,22 @@ impl OfferCard {
                 }
                 None => queue!(out, Print(text))?,
             }
+            // Given to Claude or cited by it this turn: a faint mark before the count, where there's room
+            let gap = self.inner - text.width() - badge.width();
+            let mark = ui_mark(ui, editor, &id, body)
+                .filter(|_| i == 0 && gap >= 2 + usize::from(!badge.is_empty()));
             apply(out, body)?;
-            queue!(out, Spaces(self.inner - text.width() - badge.width()))?;
+            match mark {
+                Some((m, st)) => {
+                    let after = usize::from(!badge.is_empty());
+                    queue!(out, Spaces(gap - 1 - after))?;
+                    apply(out, st)?;
+                    queue!(out, Print(m))?;
+                    apply(out, body)?;
+                    queue!(out, Spaces(after))?;
+                }
+                None => queue!(out, Spaces(gap))?,
+            }
             apply(out, dim)?;
             queue!(out, Print(badge))?;
             apply(out, body)?;
@@ -7718,7 +7802,11 @@ fn draw_sidebar(
     };
     let mut links = editor.screen.sidebar.borrow_mut();
     let mut overflow = None;
+    // (a row's id, looked up only while something's marked or flashing — `Editor::ui_lit`)
+    let lit = editor.ui_lit();
+    let tab = crate::uistate::side_tab(sb.mode);
     for y in 0..lay.body_h {
+        let mut given = None;
         queue!(out, MoveTo(0, y as u16))?;
         apply(out, card)?;
         if y == 1 {
@@ -7758,8 +7846,14 @@ fn draw_sidebar(
                     if row.selected && sb.focus && whole > w {
                         overflow = Some((y, row.clone(), whole));
                     }
+                    // Brought into sight from a link: the row flashes; given or cited: its mark at the right
+                    let id = lit.then(|| crate::uistate::panels::side_id(editor, tab, l));
+                    let base = id.as_deref().map_or(card, |id| flashed(ui, editor, id, card));
+                    let selected =
+                        id.as_deref().map_or(selected, |id| flashed_selected(ui, editor, id, selected));
+                    given = id.as_deref().and_then(|id| ui_mark(ui, editor, id, card));
                     // The row's own background runs on to the padding (its bar in the padding before it)
-                    let used = draw_list_row(out, &row, w + PAD - 2, editor, ui, card, selected, sb.focus)?;
+                    let used = draw_list_row(out, &row, w + PAD - 2, editor, ui, base, selected, sb.focus)?;
                     queue!(out, Spaces((w + PAD - 2).saturating_sub(used)))?;
                     w
                 }
@@ -7775,7 +7869,11 @@ fn draw_sidebar(
             _ => 0,
         };
         apply(out, card)?;
-        queue!(out, Spaces(w.saturating_sub(used) + PAD_R))?;
+        queue!(out, Spaces(w.saturating_sub(used) + PAD_R - usize::from(given.is_some())))?;
+        if let Some((m, st)) = given {
+            apply(out, st)?;
+            queue!(out, Print(m))?;
+        }
         gutter_cell(out, ui, lay, card, dragged)?;
     }
     // The whole name on its row, running on over the code — ending in a half cell of the row's color
@@ -8155,6 +8253,28 @@ fn draw_review_rail(
             continue;
         }
         queue!(out, MoveTo(0, y as u16))?;
+        // Brought into sight from a link: the file's row flashes; given or cited: its mark at the right
+        let id = file.filter(|_| editor.ui_lit()).map(|i| format!("review:{}", r.files[i].rel));
+        let flash = id.as_deref().is_some_and(|id| editor.ui_flashing(id));
+        let mark = id.as_deref().and_then(|id| ui_mark(ui, editor, id, card));
+        // (the file in hand has the selected colour already: it flashes in the labels' wash)
+        let here = file.is_some() && *file == marked;
+        let bg = &match (flash, here) {
+            (true, true) => flashed_selected(ui, editor, id.as_deref().unwrap_or_default(), *bg),
+            (true, false) => flashed(ui, editor, id.as_deref().unwrap_or_default(), *bg),
+            (false, _) => *bg,
+        };
+        let lit: Vec<Span>;
+        let row = match flash {
+            true => {
+                lit = row
+                    .iter()
+                    .map(|s| Span { text: s.text.clone(), style: Style { bg: bg.bg, ..s.style } })
+                    .collect();
+                &lit
+            }
+            false => row,
+        };
         apply(out, *bg)?;
         // (a file row's bar is in the padding)
         let used = match file {
@@ -8167,7 +8287,11 @@ fn draw_review_rail(
         apply(out, *bg)?;
         queue!(out, Spaces(w.saturating_sub(used)))?;
         apply(out, card)?;
-        queue!(out, Spaces(PAD_R))?;
+        queue!(out, Spaces(PAD_R - usize::from(mark.is_some())))?;
+        if let Some((m, st)) = mark {
+            apply(out, st)?;
+            queue!(out, Print(m))?;
+        }
         gutter_cell(out, ui, lay, card, false)?;
         if let Some(i) = file {
             links.push((y, *i));
@@ -8703,12 +8827,14 @@ fn draw_chat(
                     }
                     chat_spans(out, l, card, w)?
                 }
-                // `path:line` in an answer: underlined, clickable
+                // `path:line` and an element's id in an answer: underlined, clickable
                 None => {
-                    let (l, found) = underline_refs(&editor.session.root, l);
+                    let (l, found, ids) = underline_refs(editor, l, faint);
                     for (a, b, link) in found {
                         chat_links.push((y, text_x + a, text_x + b, link));
                     }
+                    let mut spots = editor.screen.chat_ids.borrow_mut();
+                    spots.extend(ids.into_iter().map(|(a, b, id)| (y, text_x + a, text_x + b, id)));
                     chat_spans(out, &l, card, w)?
                 }
             },
@@ -8732,15 +8858,29 @@ fn draw_chat(
         queue!(out, Print(&shown))?;
         queue!(out, Print(" "))?;
         used = 8 + shown.width();
-    } else if let Some(s) = &c.screen {
-        let size = format!("screen {}×{}", s.cols, s.rows);
-        let said = " goes with it ";
-        if size.width() + said.width() + 2 <= w {
-            apply(out, accent)?;
-            queue!(out, Print(&size))?;
+    } else if c.screen.is_some() || !c.pointed.is_empty() {
+        // What goes with the message: the elements pointed at (`C-o`), the screen (`C-s`) — or how many
+        let mut what: Vec<String> = c.pointed.clone();
+        what.extend(c.screen.as_ref().map(|s| format!("screen {}×{}", s.cols, s.rows)));
+        let said = if what.len() == 1 { " goes with it " } else { " go with it " };
+        let whole = what.iter().map(|s| s.width()).sum::<usize>() + 3 * (what.len() - 1);
+        let what = match whole + said.width() + 2 <= w {
+            true => what,
+            false => vec![format!("{} things", what.len())],
+        };
+        let wide = what.iter().map(|s| s.width()).sum::<usize>() + 3 * (what.len() - 1) + said.width();
+        if wide + 2 <= w {
+            for (i, s) in what.iter().enumerate() {
+                if i > 0 {
+                    apply(out, faint)?;
+                    queue!(out, Print(" · "))?;
+                }
+                apply(out, accent)?;
+                queue!(out, Print(s))?;
+            }
             apply(out, faint)?;
             queue!(out, Print(said))?;
-            used = size.width() + said.width();
+            used = wide;
         }
     }
     // The input's border: the accent while it has the keys; without them, what's typed in it is a draft —
@@ -8801,8 +8941,10 @@ fn draw_chat(
         if c.queued.is_some() && c.input.is_empty() {
             hints.push(("↑", "edit queued"));
         }
-        // The screen waiting: how it comes off (early — the one way back)
-        if c.screen.is_some() && c.input.is_empty() {
+        // What waits to go with it: how it comes off (early — the one way back)
+        if !c.pointed.is_empty() && c.input.is_empty() {
+            hints.push(("backspace", "take it off"));
+        } else if c.screen.is_some() && c.input.is_empty() {
             hints.push(("backspace", "no screen"));
         }
         hints.push(("esc", "editor"));
@@ -8812,13 +8954,14 @@ fn draw_chat(
         if code {
             hints.push(("C-r", "apply"));
         }
-        if !c.links(&editor.session.root).is_empty() {
+        if !c.hops(&editor.session.root).is_empty() {
             hints.push(("C-]", "go to"));
         }
-        // (how the screen goes along — after what the answer offers, where the row has room)
+        // (how the screen, or a thing on it, goes along — after what the answer offers, where the row has room)
         if c.screen.is_none() {
             hints.push(("C-s", "screen"));
         }
+        hints.push(("C-o", "point"));
         if code {
             hints.push(("C-y", "copy"));
         }
@@ -9067,26 +9210,34 @@ fn thought_rows(
 
 /// A clickable span in the chat pane: (start col, end col, target).
 type RefSpot = (usize, usize, crate::chat::Link);
+/// …one that's a UI element's id (`card#12`, `git:src/a.rs`).
+type IdSpot = (usize, usize, String);
 
-/// Underlines the `path:line` references in one answer row → (row, where they are — relative ones from
-/// `root`).
+/// Underlines the `path:line` references in one answer row, and the UI elements' ids (`card#12` — one that
+/// never was an element here stays plain, in `faint`) → (row, where they are — relative ones from `root`).
 fn underline_refs<'a>(
-    root: &std::path::Path,
+    editor: &Editor,
     row: &'a [crate::markdown::Span],
-) -> (std::borrow::Cow<'a, [crate::markdown::Span]>, Vec<RefSpot>) {
+    faint: Style,
+) -> (std::borrow::Cow<'a, [crate::markdown::Span]>, Vec<RefSpot>, Vec<IdSpot>) {
     use crate::markdown::Span;
     let joined: String = row.iter().map(|s| s.text.as_str()).collect();
-    let refs = crate::chat::refs_in(root, &joined);
-    if refs.is_empty() {
-        return (std::borrow::Cow::Borrowed(row), Vec::new());
+    let ids = if joined.contains(['#', ':']) { crate::uistate::claude::ids_in(&joined) } else { Vec::new() };
+    let refs: Vec<_> = crate::chat::refs_in(&editor.session.root, &joined)
+        .into_iter()
+        .filter(|(r, _)| !ids.iter().any(|(i, _)| i.start <= r.start && r.end <= i.end))
+        .collect();
+    if refs.is_empty() && ids.is_empty() {
+        return (std::borrow::Cow::Borrowed(row), Vec::new(), Vec::new());
     }
+    let known: Vec<bool> = ids.iter().map(|(_, id)| editor.ui_known(id)).collect();
     let mut out = Vec::new();
     let mut at = 0; // byte offset of the span in `joined`
     for s in row {
         let end = at + s.text.len();
         // Cut the span at every ref edge inside it
         let mut cuts = vec![at, end];
-        for (r, _) in &refs {
+        for r in refs.iter().map(|r| &r.0).chain(ids.iter().map(|i| &i.0)) {
             cuts.extend([r.start, r.end].into_iter().filter(|&b| b > at && b < end));
         }
         cuts.sort_unstable();
@@ -9094,16 +9245,20 @@ fn underline_refs<'a>(
         for pair in cuts.windows(2) {
             let (a, b) = (pair[0], pair[1]);
             let inside = refs.iter().any(|(r, _)| r.start <= a && b <= r.end);
-            out.push(Span {
-                text: joined[a..b].to_string(),
-                style: Style { underline: s.style.underline || inside, ..s.style },
-            });
+            let id = ids.iter().position(|(r, _)| r.start <= a && b <= r.end);
+            let style = match id {
+                Some(i) if !known[i] => Style { fg: faint.fg, ..s.style },
+                Some(_) => Style { underline: true, ..s.style },
+                None => Style { underline: s.style.underline || inside, ..s.style },
+            };
+            out.push(Span { text: joined[a..b].to_string(), style });
         }
         at = end;
     }
     let col = |b: usize| joined[..b].width();
     let found = refs.into_iter().map(|(r, link)| (col(r.start), col(r.end), link)).collect();
-    (std::borrow::Cow::Owned(out), found)
+    let elements = ids.into_iter().map(|(r, id)| (col(r.start), col(r.end), id)).collect();
+    (std::borrow::Cow::Owned(out), found, elements)
 }
 
 /// `s` right-aligned in `width` cells — by display width (`format!("{:>w$}")` counts chars, so Korean or
@@ -9191,6 +9346,48 @@ fn hint_spans(pairs: &[(&str, &str)], key: Style, faint: Style) -> Vec<crate::ma
 /// accent `▎` at its start.
 fn selected_row(ui: &Ui, editor: &Editor, card: Style) -> Style {
     card.patch(editor.theme.try_get("ui.menu.selected").unwrap_or(ui.selection_primary))
+}
+
+/// Pointing's labels (`uistate/point.rs`): two letters on each element that has an id, in the `gw` look
+/// (accent, bold, on a wash of it); once a first letter is typed, as `gw` does, only the labels it starts —
+/// their second letter, the one left to type.
+fn draw_point_labels(p: &crate::uistate::point::Pointing, ui: &Ui, out: &mut impl Write) -> io::Result<()> {
+    let label =
+        Style { fg: ui.accent.fg, bg: blend(ui.accent.fg, ui.tint, 0.16), bold: true, ..Style::default() };
+    apply(out, label)?;
+    for (i, t) in p.targets.iter().enumerate() {
+        let (a, b) = crate::labels::Labels::label(i);
+        queue!(out, MoveTo(t.at.0 as u16, t.at.1 as u16))?;
+        match p.typed {
+            None => queue!(out, Print(a), Print(b))?,
+            Some(c) if c == a => queue!(out, Print(b))?,
+            Some(_) => {}
+        }
+    }
+    Ok(())
+}
+
+/// `style` behind element `id` — the selected row's colour while it flashes (brought into sight from a link
+/// in Claude's answer: `Editor::ui_flashing`), else as it is.
+fn flashed(ui: &Ui, editor: &Editor, id: &str, style: Style) -> Style {
+    match editor.ui_flashing(id) {
+        true => Style { bg: selected_row(ui, editor, style).bg, ..style },
+        false => style,
+    }
+}
+
+/// A selected row's `style` while it flashes: the selected colour is what it has already, so the labels'
+/// wash of the accent instead (else the flash wouldn't show).
+fn flashed_selected(ui: &Ui, editor: &Editor, id: &str, style: Style) -> Style {
+    match editor.ui_flashing(id) {
+        true => Style { bg: blend(ui.accent.fg, ui.tint, 0.16).or(style.bg), ..style },
+        false => style,
+    }
+}
+
+/// The mark element `id` carries this turn (`Editor::ui_mark`: `•` cited, `◦` given) — faint, on `bg`.
+fn ui_mark(ui: &Ui, editor: &Editor, id: &str, bg: Style) -> Option<(&'static str, Style)> {
+    editor.ui_mark(id).map(|m| (m, Style { fg: ui.linenr.fg, ..bg }))
 }
 
 /// Background of floating cards (ui.menu / ui.popup, else the built-in theme's).

@@ -76,9 +76,15 @@ replaced in many files — use rename (the language server's, every use and no s
 search's), one call and one review for the user, instead of many Edits; replace with preview first to see what \
 it would touch.";
 
-/// The system prompt: `SYSTEM`, the refactoring tools, and where tarae's own log is (#45).
+/// What's on the screen, by id (`uistate/claude.rs`): the context's `ui:` line, the `ui` tool, what the user
+/// pointed at — and an id written in the answer is a link.
+const SYSTEM_UI: &str = " The context's ui: line and the ui tool name what's on the user's screen by id \
+(card#12, toast#3, run#7, pane#2, git:src/a.rs); write an id as given and it's a link to that element — never \
+make one up. <pointed id=…> is what the user pointed at.";
+
+/// The system prompt: `SYSTEM`, the refactoring tools, the screen by id, and where tarae's own log is (#45).
 fn system() -> String {
-    let mut s = format!("{SYSTEM}{SYSTEM_REFACTOR}");
+    let mut s = format!("{SYSTEM}{SYSTEM_REFACTOR}{SYSTEM_UI}");
     if let Some(log) = crate::log::path() {
         s.push_str(&format!(
             " tarae's own log, {}, says what the language servers are doing (starting, indexing, ready, \
@@ -99,10 +105,12 @@ const TOOLS: &str = "Read,Grep,Glob,Edit,Write";
 /// (`screen` asks the user itself — `seeing.rs`)
 /// (`references`, `search`, `symbols`, `definition`, `hover` and `diagnostics` read inside the project
 /// only — `nav.rs`; `rename` and `replace` land as Claude's edits do, in the review — `refactor.rs`; `procs`
-/// reads what `:procs` shows — `procs.rs`)
+/// reads what `:procs` shows — `procs.rs`; `ui` the screen's structure at Claude's level, less than `screen`
+/// sends — `uistate/claude.rs`)
 const ALLOWED: &str = "mcp__tarae__note,mcp__tarae__run_tests,mcp__tarae__run,mcp__tarae__plan,\
 mcp__tarae__screen,mcp__tarae__references,mcp__tarae__search,mcp__tarae__symbols,mcp__tarae__definition,\
-mcp__tarae__hover,mcp__tarae__diagnostics,mcp__tarae__rename,mcp__tarae__replace,mcp__tarae__procs";
+mcp__tarae__hover,mcp__tarae__diagnostics,mcp__tarae__rename,mcp__tarae__replace,mcp__tarae__procs,\
+mcp__tarae__ui";
 
 /// Settings laid over the user's and the project's when they're loaded (`llm.chat-settings`).
 const CHAT_SETTINGS: &str = r#"{"permissions":{"ask":["Edit","Write"]},"disableAllHooks":true}"#;
@@ -139,6 +147,27 @@ pub struct Link {
     pub path: PathBuf,
     /// 0-based.
     pub line: usize,
+}
+
+/// A stop of `C-]`: a place (with the tool call whose row it is), or a UI element an answer cites.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Hop {
+    Place(Link, Option<String>),
+    Element(String),
+}
+
+/// An answer's places and element ids, in the order written — a place inside an id (`list:src/a.rs:12`)
+/// is the id's.
+fn answer_hops(root: &Path, text: &str) -> Vec<Hop> {
+    let ids = crate::uistate::claude::ids_in(text);
+    let mut all: Vec<(usize, Hop)> = refs_in(root, text)
+        .into_iter()
+        .filter(|(r, _)| !ids.iter().any(|(i, _)| i.start <= r.start && r.end <= i.end))
+        .map(|(r, l)| (r.start, Hop::Place(l, None)))
+        .collect();
+    all.extend(ids.into_iter().map(|(r, id)| (r.start, Hop::Element(id))));
+    all.sort_by_key(|h| h.0);
+    all.into_iter().map(|h| h.1).collect()
 }
 
 /// One tool call as a row: `◦ read  src/lib.rs  L10–49` · `◦ search  fn add  in src/`.
@@ -281,6 +310,12 @@ pub struct Chat {
     /// Its tool calls this turn whose result hasn't come yet, in the order claude made them (#87: claude
     /// makes them one after another, so what comes after a run card waits on it unseen).
     pub calls: Vec<Called>,
+    /// This turn's UI elements given to Claude (the context's `ui:` line, what was pointed at, its `ui`
+    /// calls) · the ones its answer cites · the elements pointed at for the next message, its chips
+    /// (`uistate/claude.rs`, `uistate/point.rs`).
+    pub given: Vec<String>,
+    pub cited: Vec<String>,
+    pub pointed: Vec<String>,
 }
 
 /// A tool call claude made (a `tool_use` block) — its id, tool and input.
@@ -373,6 +408,9 @@ impl Chat {
             models: Vec::new(),
             model: String::new(),
             calls: Vec::new(),
+            given: Vec::new(),
+            cited: Vec::new(),
+            pointed: Vec::new(),
         }
     }
 
@@ -417,26 +455,41 @@ impl Chat {
 
     /// Every place the conversation points at, oldest first (repeats in a row collapsed); relative ones
     /// from `root`.
+    #[cfg(test)]
     pub fn links(&self, root: &Path) -> Vec<Link> {
-        self.targets(root).into_iter().map(|t| t.0).collect()
+        self.hops(root)
+            .into_iter()
+            .filter_map(|h| match h {
+                Hop::Place(l, _) => Some(l),
+                Hop::Element(_) => None,
+            })
+            .collect()
     }
 
-    /// `links`, each with the tool call whose row it is (its replay stop).
-    pub fn targets(&self, root: &Path) -> Vec<(Link, Option<String>)> {
-        let mut out: Vec<(Link, Option<String>)> = Vec::new();
+    /// Everything `C-]` goes to, oldest first: the places (`targets`) and, in Claude's answers, the UI
+    /// elements it cites by id (`card#12`, `git:src/a.rs`) in the order written.
+    pub fn hops(&self, root: &Path) -> Vec<Hop> {
+        let mut out: Vec<Hop> = Vec::new();
         for m in &self.msgs {
-            let found: Vec<(Link, Option<String>)> = match m.role {
-                Role::Tool => {
-                    m.look.iter().filter_map(|l| Some((l.link.clone()?, Some(m.call.clone())))).collect()
-                }
-                Role::Assistant => refs_in(root, &m.text).into_iter().map(|(_, l)| (l, None)).collect(),
-                Role::User => m.attached.iter().map(|l| (l.clone(), None)).collect(),
+            let found: Vec<Hop> = match m.role {
+                Role::Tool => m
+                    .look
+                    .iter()
+                    .filter_map(|l| Some(Hop::Place(l.link.clone()?, Some(m.call.clone()))))
+                    .collect(),
+                Role::Assistant => answer_hops(root, &m.text),
+                Role::User => m.attached.iter().map(|l| Hop::Place(l.clone(), None)).collect(),
                 _ => Vec::new(),
             };
-            for t in found {
+            for h in found {
                 // (two edits of one file are two stops — repeats collapse only for plain places)
-                if t.1.is_some() || out.last().is_none_or(|l| l.0 != t.0) {
-                    out.push(t);
+                let again = match (&h, out.last()) {
+                    (Hop::Place(l, None), Some(Hop::Place(k, _))) => l == k,
+                    (Hop::Element(a), Some(Hop::Element(b))) => a == b,
+                    _ => false,
+                };
+                if !again {
+                    out.push(h);
                 }
             }
         }
@@ -871,9 +924,14 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
                 return;
             }
             c.state = State::Writing;
+            // (an id cited marks its element as it's written — the whole answer is read again at its end)
+            let ids = t.contains(['#', ':']);
             match c.msgs.last_mut() {
                 Some(m) if m.role == Role::Assistant => m.text.push_str(&t),
                 _ => c.msgs.push(Msg::new(Role::Assistant, t, "")),
+            }
+            if ids {
+                crate::uistate::claude::cite(c);
             }
             crate::follow::on_words(ed, false);
         }
@@ -899,6 +957,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
                     if !text.is_empty() && !c.msgs.last().is_some_and(|m| m.role == Role::Assistant) {
                         c.msgs.push(Msg::new(Role::Assistant, text, ""));
                     }
+                    crate::uistate::claude::cite(c);
                     c.msgs.push(Msg::new(Role::Note, format!("{secs:.1}s"), ""));
                 }
                 Err(e) => {
@@ -1041,7 +1100,18 @@ pub fn submit(ed: &mut Editor, question: &str, about: Option<String>, chip: Opti
     }
     // Process first — a newly spawned one clears `sent`, so the context carries the whole file again
     ensure_proc(ed);
-    let (context, ctx_chip, sent) = context(ed);
+    // What's up on screen by id (the `ui:` line, when there's something), and what the user pointed at
+    let ui = ed.ui_state_claude().context_line();
+    let (context, ctx_chip, sent) = context(ed, ui.as_ref().map(|u| u.0.as_str()));
+    let pointed: Vec<String> = ed.session.chat.as_ref().map(|c| c.pointed.clone()).unwrap_or_default();
+    let context = match pointed.is_empty() {
+        true => context,
+        false => {
+            let blocks: Vec<String> =
+                pointed.iter().map(|id| crate::uistate::claude::pointed(ed, id)).collect();
+            format!("{context}\n{}", blocks.join("\n"))
+        }
+    };
     let Some(c) = &mut ed.session.chat else { return false };
     let Some(p) = &mut c.proc else { return false };
     // What happened to its edits since (a turn undone): Claude's memory still has them
@@ -1076,7 +1146,19 @@ pub fn submit(ed: &mut Editor, question: &str, about: Option<String>, chip: Opti
     c.hop = 0;
     c.follow.new_turn();
     c.unfolded = false;
+    // A new turn: what went to Claude is what this message carries (marks of the last one go)
+    c.pointed.clear();
+    c.cited.clear();
+    c.given = ui.map(|u| u.1).unwrap_or_default();
+    for id in &pointed {
+        if !c.given.contains(id) {
+            c.given.push(id.clone());
+        }
+    }
     let mut chip = chip.unwrap_or(ctx_chip);
+    for id in &pointed {
+        chip.push_str(&format!(" · {id}"));
+    }
     let mut msg = Msg::new(Role::User, question, String::new());
     if let Some(s) = shot {
         // A copy of what went, to open from its row (written on a worker)
@@ -1195,8 +1277,9 @@ pub fn stop(ed: &mut Editor) {
     }
 }
 
-/// Context to send + summary chip + the document versions whose full text went along.
-fn context(ed: &Editor) -> (String, String, Vec<(DocId, u64)>) {
+/// Context to send + summary chip + the document versions whose full text went along. `ui`: the line naming
+/// what's up on screen by id (`UiState::context_line`).
+fn context(ed: &Editor, ui: Option<&str>) -> (String, String, Vec<(DocId, u64)>) {
     let doc = ed.doc();
     let text = &doc.text;
     let name = doc.display_name(&ed.session.root);
@@ -1225,6 +1308,10 @@ fn context(ed: &Editor) -> (String, String, Vec<(DocId, u64)>) {
                 r.end
             ));
         }
+    }
+    if let Some(ui) = ui {
+        ctx.push_str(ui);
+        ctx.push('\n');
     }
     let mut chip = doc.display_name_short();
     let mut sent = Vec::new();
@@ -1420,6 +1507,13 @@ fn look(root: &Path, name: &str, input: &serde_json::Value) -> Look {
         "mcp__tarae__screen" => {
             Look { verb: "look", what: "your screen".into(), pattern: true, range: String::new(), link: None }
         }
+        "mcp__tarae__ui" => Look {
+            verb: "ui",
+            what: "what's on screen".into(),
+            pattern: true,
+            range: String::new(),
+            link: None,
+        },
         "mcp__tarae__procs" => {
             let what =
                 if input["all"].as_bool() == Some(true) { "every session's" } else { "this session's" };
@@ -1632,14 +1726,19 @@ pub fn jump(ed: &mut Editor, link: Link) {
 /// replay stop (an edit's changes shown).
 pub fn follow(ed: &mut Editor) {
     let Some(c) = &mut ed.session.chat else { return };
-    let links = c.targets(&ed.session.root);
-    if links.is_empty() {
+    let hops = c.hops(&ed.session.root);
+    if hops.is_empty() {
         return ed.set_status("nothing to go to yet");
     }
-    let (link, call) = links[links.len() - 1 - c.hop % links.len()].clone();
-    c.hop = (c.hop + 1) % links.len();
-    if !call.is_some_and(|call| crate::follow::replay_call(ed, &call)) {
-        jump(ed, link);
+    let hop = hops[hops.len() - 1 - c.hop % hops.len()].clone();
+    c.hop = (c.hop + 1) % hops.len();
+    match hop {
+        Hop::Place(link, call) => {
+            if !call.is_some_and(|call| crate::follow::replay_call(ed, &call)) {
+                jump(ed, link);
+            }
+        }
+        Hop::Element(id) => ed.ui_jump(&id),
     }
 }
 
@@ -1713,7 +1812,12 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
                 ed.set_status(e);
             }
         }
-        // An empty input: Backspace takes the screen off
+        // Point at an element on screen: its id goes with the message (`uistate/point.rs`)
+        (Code::Char('o'), true, _) => crate::uistate::point::start(ed),
+        // An empty input: Backspace takes off what goes with it — the last element pointed at, the screen
+        (Code::Backspace, ..) if c.input.is_empty() && !c.pointed.is_empty() => {
+            c.pointed.pop();
+        }
         (Code::Backspace, ..) if c.input.is_empty() && c.screen.is_some() => c.screen = None,
         // (C-g too — zellij takes it for its lock mode)
         (Code::Char(']') | Code::Char('g'), true, _) => follow(ed),
@@ -1819,9 +1923,9 @@ mod tests {
         use crate::selection::{Range, Selection};
         let mut ed = editor("한글\n");
         ed.doc_mut().set_selection(Selection::single(Range::new(0, 3)));
-        assert!(!context(&ed).0.contains("<selection"));
+        assert!(!context(&ed, None).0.contains("<selection"));
         ed.doc_mut().set_selection(Selection::single(Range::new(0, 6)));
-        assert!(context(&ed).0.contains("<selection lines=\"1-1\">\n한글\n</selection>"));
+        assert!(context(&ed, None).0.contains("<selection lines=\"1-1\">\n한글\n</selection>"));
     }
 
     /// claude exits after each turn: the next question goes to a new process, which gets the file again.

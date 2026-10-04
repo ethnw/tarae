@@ -54,13 +54,15 @@ pub struct Watch {
     pending: Vec<Value>,
 }
 
-/// A card that went: its id, title, how, and when.
+/// A card that went: its id, title, how, and when — and whose session it was (Claude's level lists only its
+/// own).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Gone {
     pub id: String,
     pub title: String,
     pub how: String,
     pub at: std::time::Instant,
+    pub session: String,
 }
 
 impl Watch {
@@ -160,23 +162,25 @@ impl Editor {
     /// Every frame: the cards that went since the last one go to the gone ring, with how (said where they
     /// went, else just `gone`) — and to watchers as `card-gone`.
     fn cards_sync(&mut self) {
+        let front = self.session.id;
         let all = || {
             std::iter::once(&self.session)
                 .chain(&self.sessions)
-                .flat_map(|l| &l.parked)
-                .chain(&self.offers)
-                .map(|o| (o.id, o.title.as_str()))
+                .flat_map(|l| l.parked.iter().map(move |o| (o, l.id)))
+                .chain(self.offers.iter().map(|o| (o, front)))
+                .map(|(o, l)| (o.id, o.title.as_str(), l))
         };
         let same = self.ui_cards_seen.len() == all().count()
-            && all().all(|(id, _)| self.ui_cards_seen.iter().any(|s| s.0 == id));
+            && all().all(|(id, ..)| self.ui_cards_seen.iter().any(|s| s.0 == id));
         if same {
             return;
         }
-        let now: Vec<(u64, String)> = all().map(|(id, t)| (id, t.to_string())).collect();
-        let went: Vec<(u64, String)> =
+        let now: Vec<(u64, String, crate::event::SessionId)> =
+            all().map(|(id, t, l)| (id, t.to_string(), l)).collect();
+        let went: Vec<(u64, String, crate::event::SessionId)> =
             self.ui_cards_seen.iter().filter(|s| !now.iter().any(|n| n.0 == s.0)).cloned().collect();
         self.ui_cards_seen = now;
-        for (id, title) in went {
+        for (id, title, session) in went {
             let how = self.ui_card_how.remove(&id).unwrap_or_else(|| "gone".into());
             let said = format!("card#{id} went: {how} — {title}");
             self.ui_said(
@@ -187,6 +191,7 @@ impl Editor {
                 title,
                 how,
                 at: std::time::Instant::now(),
+                session: super::session_id(session),
             });
             if self.ui_gone.len() > GONE_KEPT {
                 self.ui_gone.pop_front();

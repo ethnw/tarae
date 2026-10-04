@@ -49,6 +49,8 @@ pub enum Region {
     NextCard,
     /// Floating text (hover): Esc closes it, `C-d`/`C-u` scroll it.
     Popup,
+    /// Labels up for pointing at an element (`point.rs`): letters pick one, Esc stops.
+    Point,
 }
 
 impl Region {
@@ -68,6 +70,7 @@ impl Region {
             Region::Card(_) => "card".into(),
             Region::NextCard => "next-card".into(),
             Region::Popup => "popup".into(),
+            Region::Point => "point".into(),
         }
     }
 
@@ -90,12 +93,13 @@ impl Region {
             Region::Card(_) => Handler::Card,
             Region::NextCard => Handler::NextCard,
             Region::Popup => Handler::Popup,
+            Region::Point => Handler::Point,
         }
     }
 }
 
 /// The side panel's tab as the state names it.
-fn side_tab(m: crate::sidebar::Mode) -> &'static str {
+pub(crate) fn side_tab(m: crate::sidebar::Mode) -> &'static str {
     use crate::sidebar::Mode as S;
     match m {
         S::Files => "files",
@@ -120,6 +124,7 @@ fn slot_name(s: Slot) -> &'static str {
 /// Which handler of `handle_key`'s chain took a key — recorded under `cfg(test)` (`took`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Handler {
+    Point,
     Card,
     NextCard,
     Program,
@@ -162,6 +167,8 @@ pub enum Takes {
     Answers,
     /// The next key that would type brings the minimized chat back — it isn't typed.
     Unfold,
+    /// Letters pick a label (pointing at an element).
+    Label,
 }
 
 impl Takes {
@@ -172,6 +179,7 @@ impl Takes {
             Takes::Program => "program",
             Takes::Answers => "answers",
             Takes::Unfold => "unfold",
+            Takes::Label => "label",
         }
     }
 }
@@ -254,6 +262,10 @@ impl Editor {
         let layer = |region, filter| Layer { region, filter, shortcut: false };
         let shortcut = |region, filter| Layer { region, filter, shortcut: true };
         let mut v = Vec::new();
+        // `point::key`: labels up, every key is theirs
+        if self.pointing.is_some() {
+            v.push(layer(Region::Point, Filter::All));
+        }
         let modal = self.picker.is_some() || self.prompt.is_some();
         let next = self.next_up();
         // `card_key`: held, every key is the front card's (`C-q` lets go); not held, `C-q` gives it them when
@@ -427,6 +439,7 @@ impl Editor {
             Region::Card(_) | Region::EditReview => Takes::Answers,
             Region::Program => Takes::Program,
             Region::Unfold => Takes::Unfold,
+            Region::Point => Takes::Label,
             Region::Picker | Region::Prompt | Region::Chat => Takes::Text,
             Region::Code if self.mode == Mode::Insert => Takes::Text,
             _ => Takes::Commands,
@@ -482,6 +495,7 @@ impl Editor {
             Region::Card(id) => s.offer_card.is_some() && self.offers.first().is_some_and(|o| o.id == id),
             Region::NextCard => true,
             Region::Popup => s.popup.get().is_some(),
+            Region::Point => self.pointing.is_some(),
         }
     }
 
@@ -520,8 +534,8 @@ impl Editor {
 
 // ── The state ────────────────────────────────────────────────────────────
 
-/// The state at its full level — drivers' and tests' (Claude's strict subset comes with its `ui` tool, phase
-/// 3: no unsent text, other sessions as counts).
+/// The state at its full level — drivers' and tests' (Claude's strict subset is this filtered:
+/// `ui_state_claude` — no unsent text, other sessions as counts).
 #[derive(Clone, Debug, PartialEq)]
 pub struct UiState {
     pub pid: u32,
@@ -841,11 +855,40 @@ impl UiState {
         })
     }
 
-    /// The short text form, for people and Claude (not a contract — the JSON is).
+    /// The short text form, for people (not a contract — the JSON is; Claude's is `text_claude`).
     pub fn text(&self) -> String {
         let mut out = Vec::new();
         let size = self.size.map(|(w, h)| format!(" · {w}×{h}")).unwrap_or_default();
         out.push(format!("tarae {} · frame {} · input {}{size}", self.pid, self.frame, self.input));
+        out.extend(self.keys_line());
+        out.push(self.mode_line());
+        if self.sessions.len() > 1 {
+            let s: Vec<String> = self
+                .sessions
+                .iter()
+                .map(|s| {
+                    let front = if s.front { " (front)" } else { "" };
+                    let cards = match s.cards {
+                        0 => String::new(),
+                        1 => " · 1 card".into(),
+                        n => format!(" · {n} cards"),
+                    };
+                    format!("{} {}{front} · {}{cards}", s.id, s.name, s.doing)
+                })
+                .collect();
+            out.push(format!("sessions: {}", s.join("   ")));
+        }
+        out.extend(self.card_lines());
+        self.panels.text(&mut out);
+        out.extend(self.runs.iter().map(panels::Run::text));
+        if let Some(g) = self.gone.first() {
+            out.push(format!("last gone: {} {:?} — {}", g.id, g.title, g.how));
+        }
+        out.join("\n") + "\n"
+    }
+
+    /// Where the keys go, as the text forms say it.
+    fn keys_line(&self) -> Option<String> {
         let k = &self.keys;
         let mut keys = format!("keys → {} ({}", k.to, k.takes.name());
         if !k.answers.is_empty() {
@@ -868,28 +911,23 @@ impl UiState {
         if let Some(u) = k.under {
             keys += &format!(" · under it: {}", u.name());
         }
-        out.push(keys);
+        Some(keys)
+    }
+
+    fn mode_line(&self) -> String {
         let mut mode = format!("mode {}", self.mode);
         if let Some((label, text)) = &self.prompt {
-            mode += &format!(" · prompt {label} {text:?}");
+            mode += &match text.is_empty() {
+                true => format!(" · prompt {label}"),
+                false => format!(" · prompt {label} {text:?}"),
+            };
         }
-        out.push(mode);
-        if self.sessions.len() > 1 {
-            let s: Vec<String> = self
-                .sessions
-                .iter()
-                .map(|s| {
-                    let front = if s.front { " (front)" } else { "" };
-                    let cards = match s.cards {
-                        0 => String::new(),
-                        1 => " · 1 card".into(),
-                        n => format!(" · {n} cards"),
-                    };
-                    format!("{} {}{front} · {}{cards}", s.id, s.name, s.doing)
-                })
-                .collect();
-            out.push(format!("sessions: {}", s.join("   ")));
-        }
+        mode
+    }
+
+    /// A line a card, then one a toast.
+    fn card_lines(&self) -> Vec<String> {
+        let mut out = Vec::new();
         for c in &self.cards {
             let answers: Vec<String> =
                 c.answers.iter().map(|(k, d)| format!("{k} {}", d.to_lowercase())).collect();
@@ -916,12 +954,7 @@ impl UiState {
             let text = t.text.lines().next().unwrap_or_default();
             out.push(format!("{} {} {text:?} ({})", t.id, t.kind, t.place));
         }
-        self.panels.text(&mut out);
-        out.extend(self.runs.iter().map(panels::Run::text));
-        if let Some(g) = self.gone.first() {
-            out.push(format!("last gone: {} {:?} — {}", g.id, g.title, g.how));
-        }
-        out.join("\n") + "\n"
+        out
     }
 }
 
@@ -941,6 +974,10 @@ pub struct Ask {
 /// for it. Nobody asking — a branch each.
 pub fn after_frame(ed: &mut Editor) {
     watch::after_frame(ed);
+    // (a flash over: this frame drew it gone — nothing to look ids up for, no frame to ask for)
+    if ed.ui_flash.as_ref().is_some_and(|f| f.1.elapsed() >= claude::FLASH) {
+        ed.ui_flash = None;
+    }
     if ed.ui_asks.is_empty() {
         return;
     }
@@ -958,7 +995,9 @@ pub fn after_frame(ed: &mut Editor) {
     }
 }
 
+pub mod claude;
 pub mod panels;
+pub mod point;
 pub mod watch;
 
 #[cfg(test)]

@@ -853,6 +853,105 @@ fn chat_pins_a_note() {
     t.wait_for("the note in the notes picker", |s| s.contains("lib.rs"));
 }
 
+/// The chat's claude with its stream-json copied to `stream.jsonl` in the project as it goes (a `tee` in
+/// between) — what each of its requests cost is in that stream (`usage`).
+fn teed_chat(name: &str) -> (Sandbox, std::path::PathBuf) {
+    let sb = Sandbox::live(name);
+    let out = sb.file("stream.jsonl");
+    let script =
+        sb.write("claude-tee.sh", &format!("#!/bin/sh\nclaude \"$@\" | tee -a '{}'\n", out.display()));
+    std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    sb.write_config(&format!("{LIVE_CONFIG}lsp = false\n[llm]\ncommand = \"{}\"\n", script.display()));
+    (sb, out)
+}
+
+/// Each request's prompt as claude's `usage` counts it — input + cache written + cache read, the whole
+/// prompt whatever the cache did — in the order they went, one per message id.
+fn prompts(stream: &str) -> Vec<u64> {
+    let mut seen: Vec<String> = Vec::new();
+    let mut out = Vec::new();
+    for line in stream.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let m = &v["message"];
+        if v["type"] != "assistant" || m["usage"].is_null() {
+            continue;
+        }
+        let id = m["id"].as_str().unwrap_or_default().to_string();
+        if seen.contains(&id) {
+            continue;
+        }
+        seen.push(id);
+        let u = &m["usage"];
+        let n = |k: &str| u[k].as_u64().unwrap_or(0);
+        out.push(n("input_tokens") + n("cache_creation_input_tokens") + n("cache_read_input_tokens"));
+    }
+    out
+}
+
+/// Token cost: the fixed part every request carries (system prompt, tools' definitions, Claude Code's own) —
+/// the first request's prompt for a one-word question. Run against two builds (`TARAE_BIN`) to see what a
+/// change adds; the question and the project are the same each time.
+#[test]
+#[ignore = "live: run with `cargo live` (uses Claude)"]
+fn chat_prompt_tokens() {
+    if !have("claude") {
+        return;
+    }
+    let (sb, out) = teed_chat("chat-tokens");
+    sb.write("notes.txt", "alpha\n");
+    let mut t = sb.spawn(&["notes.txt"]);
+    chat_turn(&mut t, "Reply with the single word ok. Use no tools.");
+    let p = prompts(&std::fs::read_to_string(&out).unwrap_or_default());
+    eprintln!("TOKENS first request's prompt: {:?} (all requests: {p:?})", p.first());
+    assert!(!p.is_empty(), "claude's usage in its stream");
+}
+
+/// A turn whose context carries the `ui:` line (a toast up): its first request's prompt, beside
+/// `chat_prompt_tokens`' — the difference is the line.
+#[test]
+#[ignore = "live: run with `cargo live` (uses Claude)"]
+fn chat_prompt_tokens_with_a_toast_up() {
+    if !have("claude") {
+        return;
+    }
+    let (sb, out) = teed_chat("chat-tokens-toast");
+    sb.write("notes.txt", "alpha\n");
+    let mut t = sb.spawn(&["notes.txt"]);
+    // (`:w` says it saved — a toast up for a few seconds, the message sent under it)
+    t.command("w");
+    t.send(" l");
+    t.wait_for("the chat, focused", |s| s.contains("enter send"));
+    chat_turn(&mut t, "Reply with the single word ok. Use no tools.");
+    let p = prompts(&std::fs::read_to_string(&out).unwrap_or_default());
+    eprintln!("TOKENS first request's prompt: {:?}", p.first());
+}
+
+/// Token cost of one `ui` call: the second request's prompt less the first's is the call and its answer.
+#[test]
+#[ignore = "live: run with `cargo live` (uses Claude)"]
+fn chat_ui_call_tokens() {
+    if !have("claude") {
+        return;
+    }
+    let (sb, out) = teed_chat("chat-ui-tokens");
+    sb.write("notes.txt", "alpha\n");
+    let mut t = sb.spawn(&["notes.txt"]);
+    chat_turn(&mut t, "Call your ui tool once, then reply with the single word ok. Nothing else.");
+    let stream = std::fs::read_to_string(&out).unwrap_or_default();
+    let p = prompts(&stream);
+    let answer = stream
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|v| v["type"] == "user")
+        .find_map(|v| {
+            let c = v["message"]["content"].as_array()?.first()?.clone();
+            (c["type"] == "tool_result").then(|| c["content"].to_string())
+        })
+        .unwrap_or_default();
+    eprintln!("TOKENS requests' prompts: {p:?}; the ui answer: {} bytes\n{answer}", answer.len());
+    assert!(p.len() >= 2, "a request after the call: {p:?}");
+}
+
 /// A turn's edit, undone with `space u` (on disk too); after a restart the conversation goes on, and Claude
 /// remembers it.
 #[test]

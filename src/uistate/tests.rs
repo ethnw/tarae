@@ -233,6 +233,12 @@ const SCENES: &[Scene] = &[
         terminal(ed);
         light_card(ed);
     }),
+    ("pointing at something on screen, from the chat", |ed| {
+        chat(ed, "a draft");
+        light_card(ed);
+        frame(ed);
+        feed(ed, &["<C-o>"]);
+    }),
 ];
 
 /// Keys a driver sends: answers, commands, text, the prefixes, `C-q`, Esc. (No Enter: in the chat it would
@@ -1087,8 +1093,15 @@ fn perf_ui_state_busy_scene() {
     let text = times(&|ed| ed.ui_state().text().len());
     let s = ed.ui_state();
     let (jb, tb) = (s.json().to_string().len(), s.text().len());
+    // Claude's level: its `ui` answer, and the context's `ui:` line
+    let claude = times(&|ed| ed.ui_state_claude().text_claude(false).len());
+    let c = ed.ui_state_claude();
+    let (cb, lb) = (c.text_claude(false).len(), c.context_line().map_or(0, |l| l.0.len()));
     let us = |d: Duration| d.as_secs_f64() * 1e6;
     let lines = [
+        format!("PERF ui_state_claude_text_us {:.1} budget=1000 noise=5", us(claude)),
+        format!("PERF ui_state_claude_text_bytes {cb} budget=1536 noise=1"),
+        format!("PERF ui_state_context_line_bytes {lb} budget=512 noise=1"),
         format!("PERF ui_state_build_us {:.1} budget=1000 noise=5", us(build)),
         format!("PERF ui_state_json_us {:.1} budget=1000 noise=5", us(json)),
         format!("PERF ui_state_text_us {:.1} budget=1000 noise=5", us(text)),
@@ -1099,6 +1112,20 @@ fn perf_ui_state_busy_scene() {
     ];
     let _ = std::io::Write::write_all(&mut std::io::stderr(), (lines.join("\n") + "\n").as_bytes());
     frame(&mut ed);
+}
+
+/// What a `ui` call costs Claude on the busy scene (3 sessions, 3 cards, an edit's review, a task, toasts):
+/// its answer within the design's ~1.5 KB, the context's line a fraction of it — and nothing of the other
+/// sessions' cards in either.
+#[test]
+fn claudes_answer_stays_small_on_a_busy_scene() {
+    let ed = busy_scene();
+    let c = ed.ui_state_claude();
+    let text = c.text_claude(false);
+    let (line, _) = c.context_line().expect("cards and toasts are up");
+    assert!(text.len() <= 1536, "{} bytes:\n{text}", text.len());
+    assert!(line.len() <= 512, "{} bytes: {line}", line.len());
+    assert!(!text.contains("cargo test -p tarae") && !line.contains("cargo test"), "{text}\n{line}");
 }
 
 fn busy_scene() -> Editor {

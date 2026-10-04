@@ -241,6 +241,8 @@ r = "rename_symbol"
 i = "llm_ask"
 l = "chat_open"
 L = "chat_close"
+# Point at something on screen (a card, a row, a run) — it goes with your next chat message (C-o in the chat)
+"@" = "chat_point"
 n = "note_here"
 N = "note_picker"
 u = "undo_turn"

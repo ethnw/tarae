@@ -243,6 +243,10 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
         }
         "sandbox-disallow" => editor.sandbox_disallow(rest),
         "chat-screen" => crate::chat::attach_screen(editor),
+        "chat-point" => {
+            crate::uistate::point::start(editor);
+            Ok(())
+        }
         "sandbox-blocked" => {
             editor.sandbox_blocked(crate::blocked::Which::Either);
             Ok(())
