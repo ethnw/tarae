@@ -570,12 +570,15 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Ten writes 5 ms apart are one burst: the one wake comes after the last of them — it took them all in.
+    /// Ten writes `GAP` apart are one burst: the one wake comes after the last of them — it took them all in.
     /// Then, once the burst's late events are drained (an event can reach the queue after the wake — seen
-    /// on CI's macOS), nothing more wakes: an event is an edge, not a level. A try where the writer itself
-    /// stalled for half of `QUIET` or more (a busy runner) wasn't one burst — tried again.
+    /// on CI's macOS), nothing more wakes: an event is an edge, not a level. The gap is spun, not slept: CI's
+    /// macOS stretched a 5 ms sleep to 25 ms (`QUIET`/2) in every try. A try where the writer still stalled
+    /// for half of `QUIET` or more (preempted on a busy runner) wasn't one burst — tried again.
     #[test]
     fn a_burst_of_writes_is_one_wake() {
+        const GAP: Duration = Duration::from_millis(2);
+        const TRIES: u32 = 10;
         let dir = tmp("burst");
         let path = dir.join("a.log");
         for attempt in 1.. {
@@ -592,7 +595,9 @@ mod tests {
                         gap = gap.max(last.elapsed());
                     }
                     last = Instant::now();
-                    std::thread::sleep(Duration::from_millis(5));
+                    while last.elapsed() < GAP {
+                        std::hint::spin_loop();
+                    }
                 }
                 (last, gap)
             });
@@ -600,7 +605,10 @@ mod tests {
             let woke = Instant::now();
             let (last, gap) = t.join().unwrap();
             if gap >= QUIET / 2 {
-                assert!(attempt < 5, "the writer stalled ({gap:?} between writes) in each of 5 tries");
+                assert!(
+                    attempt < TRIES,
+                    "the writer stalled ({gap:?} between writes) in each of {TRIES} tries"
+                );
                 continue;
             }
             assert!(woke >= last, "woke {:?} before the last write — the burst was split", last - woke);

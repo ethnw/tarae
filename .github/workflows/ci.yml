@@ -69,4 +69,6 @@ jobs:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --locked -- --ignored
+      # installed_claude_speaks_a_revision_we_speak is ignored too, but it runs the installed claude CLI —
+      # the runner has none; it's a local check
+      - run: cargo test --locked -- --ignored --skip installed_claude_speaks_a_revision_we_speak

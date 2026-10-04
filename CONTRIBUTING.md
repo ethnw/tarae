@@ -57,7 +57,8 @@ multiplies the budget (CI does this).
 [CI](.github/workflows/ci.yml) runs the same checks when started by hand (Actions → CI → Run workflow) — fmt,
 clippy (warnings are errors), and tests on Linux and macOS, with and without bundled grammars — except `cargo perf`:
 shared runners are too noisy for numbers, so CI runs only the budgets, in the `perf` profile. It also downloads and
-builds a grammar from GitHub (`cargo test -- --ignored`: the tests that need the network). It builds with the pinned toolchain too
+builds a grammar from GitHub (`cargo test -- --ignored`: the tests that need the network — but not the one that needs claude installed,
+`installed_claude_speaks_a_revision_we_speak`, a local check). It builds with the pinned toolchain too
 (`rustup toolchain install` reads `rust-toolchain.toml`), so a check that passes here passes there.
 
 ### The toolchain

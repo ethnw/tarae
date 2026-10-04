@@ -1624,8 +1624,10 @@ mod tests {
     /// Which MCP revision the installed claude speaks to tarae's tools server — with no user message, so no
     /// model call (it registers and lists the tools at startup). Fails when a CLI upgrade changes it, saying
     /// to what: then check `mcp.rs` (a revision we don't speak means no tools in the chat) and move `KNOWN`.
+    /// A local check: it needs claude installed (and logged in), which CI's runners don't have — the network
+    /// job skips it by name (`.github/workflows/ci.yml`).
     #[test]
-    #[ignore = "runs the installed claude (no model call) — cargo test -- --ignored installed_claude"]
+    #[ignore = "needs claude installed; a local check, not run on CI — cargo test -- --ignored installed_claude"]
     fn installed_claude_speaks_a_revision_we_speak() {
         use serde_json::{Value, json};
         use std::io::{BufRead, Write};
