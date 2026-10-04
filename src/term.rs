@@ -9861,11 +9861,11 @@ fn key_hints(editor: &Editor) -> Option<Vec<(&'static str, String)>> {
     }
 }
 
-/// A prompt (`:`, `/`, `?`, `select:`, `rename:` …) — a card standing on the status line, its lower edge the
-/// half row of air over it, a cell in from the code's left and inside the code's columns (the screen's when
-/// no code is drawn): the input on its last row, the `:` menu above it in the same card — names under the
-/// word being completed, typed letters in the accent, folders in the directory colour, a scroll thumb past
-/// `ROWS`. The status line stays in sight under it. Returns the cursor.
+/// A prompt (`:`, `/`, `?`, `select:`, `rename:` …) — a card standing on the status line at the screen's
+/// bottom left, its lower edge the half row of air over it, a cell in from the edge (over the side panel's
+/// foot when that's up): the input on its last row, right above the mode pill, the `:` menu above it in the
+/// same card — names under the word being completed, typed letters in the accent, folders in the directory
+/// colour, a scroll thumb past `ROWS`. The status line stays in sight under it. Returns the cursor.
 ///
 /// ```text
 ///  ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
@@ -9890,9 +9890,11 @@ fn draw_prompt(
     const MIN: usize = 44;
     let t = &editor.theme;
     let head = prompt_head(p);
-    let code_w = lay.edit_w.saturating_sub(lay.rail_w + usize::from(lay.scrollbar));
-    let (ax, aw) = if lay.code_hidden() { (0, lay.width) } else { (lay.rail_w, code_w) };
-    let x0 = ax + 1;
+    // (at the screen's left — over the side panel's foot when it's up, a floating card — a cell in, so its
+    // text starts where the mode pill's label does; as wide as the editing area lets it, the chat kept clear)
+    let aw =
+        if lay.code_hidden() { lay.width } else { lay.edit_w.saturating_sub(usize::from(lay.scrollbar)) };
+    let x0 = 1;
     let card = card_style(ui, editor, "ui.menu");
     let pad = card_padding(ui, card);
     let cands = completion.map_or(&[][..], |c| &c.cands[..]);
@@ -10089,6 +10091,17 @@ mod tests {
         ed.handle_key("esc".parse().unwrap());
         let (rows, _) = draw(&mut ed);
         assert!(rows[27].contains("some code") && ed.screen.prompt_card.get().is_none());
+        // With the side panel up it stays at the screen's bottom left, over the panel's foot: the input
+        // right above the mode pill, its `:` where the pill's label starts
+        let mut side = crate::sidebar::Sidebar::with_files(std::env::temp_dir(), vec!["a.rs".into()]);
+        side.focus = false;
+        ed.session.sidebar = Some(side);
+        ed.handle_key(":".parse().unwrap());
+        let (rows, _) = draw(&mut ed);
+        assert!(ed.screen.side_w > 2, "the side panel is up");
+        assert_eq!(ed.screen.prompt_card.get().map(|r| r.0), Some(1), "a cell in from the screen's left");
+        let col = |row: &str, s: &str| row.find(s).map(|b| row[..b].chars().count());
+        assert_eq!(col(&rows[27], ":"), col(&rows[29], "NORMAL"), "{}\n{}", rows[27], rows[29]);
     }
 
     /// What used to sit under the status line is in it: a list's keys after the pill (whole pairs, as many
