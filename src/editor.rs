@@ -63,6 +63,8 @@ pub enum PromptKind {
     Note(Option<u64>),
     /// A plugin's line (its token; its label is the prompt's `label`).
     Plugin(u64),
+    /// `space W n`: a new session's name (`sessions.rs`; the label says what it's made from).
+    Session,
 }
 
 impl PromptKind {
@@ -84,6 +86,7 @@ impl PromptKind {
             PromptKind::Note(Some(_)) => "reply:",
             PromptKind::Note(None) => "ask claude:",
             PromptKind::Plugin(_) => ">",
+            PromptKind::Session => "new session:",
         }
     }
 }
@@ -475,6 +478,8 @@ pub struct Editor {
     pub git_auto: bool,
     /// Where the chat's conversations are kept (`chats.rs`) — None in tests (they set a temp dir).
     pub chats_dir: Option<std::path::PathBuf>,
+    /// The lanes kept per repository, and whether they're back (`sessions.rs`).
+    pub sessions: crate::sessions::Sessions,
     /// The project file's held-back settings and the answer about them (`trust.rs`).
     pub project_trust: Option<crate::trust::Project>,
     /// Where answers about projects are kept — None in tests.
@@ -617,6 +622,10 @@ impl Editor {
             git_diffing: false,
             git_auto: !cfg!(test),
             chats_dir: if cfg!(test) { None } else { crate::chats::default_dir() },
+            sessions: crate::sessions::Sessions {
+                dir: if cfg!(test) { None } else { crate::sessions::default_dir() },
+                ..Default::default()
+            },
             project_trust: None,
             trust_path: if cfg!(test) { None } else { crate::trust::Store::path() },
             allow_path: if cfg!(test) { None } else { crate::allow::Store::path() },
@@ -1377,12 +1386,15 @@ impl Editor {
             && let Some(&(_, _, _, k)) = s.offer_buttons.iter().find(|b| b.0 == y && (b.1..b.2).contains(&x))
         {
             match k {
-                'y' | 'a' | 'A' if !self.offer_seen_whole() => self.offer_see_all_first(),
+                'y' | 'a' | 'A' | 'D' | 'R' | 'c' if !self.offer_seen_whole() => self.offer_see_all_first(),
                 'y' if self.offer_settled() => self.offer_accept(),
                 'v' => self.offer_view_all(),
                 'a' if self.offer_settled() => self.offer_for_chat(),
                 'A' if self.offer_settled() => self.offer_always(),
-                'y' | 'a' | 'A' => {}
+                'D' if self.offer_settled() => self.offer_remove(true),
+                'R' if self.offer_settled() => self.offer_remove(false),
+                'c' if self.offer_settled() => self.offer_commit_first(),
+                'y' | 'a' | 'A' | 'D' | 'R' | 'c' => {}
                 'n' => self.offer_dismiss(),
                 'N' => self.offer_never(),
                 d => self.offer_to_front(d.to_digit(10).unwrap_or(0) as usize),
@@ -2407,6 +2419,7 @@ impl Editor {
     }
 
     pub fn handle_key(&mut self, key: Key) {
+        self.sessions.keyed = true;
         // A key after an error has been read (`ERROR_MIN`) lets it go — it fades out
         for t in self.toasts.iter_mut().filter(|t| t.kind == ToastKind::Error) {
             let age = t.age();
@@ -2897,6 +2910,12 @@ impl Editor {
                 }
             }
             (Code::Char('c'), true) if key.ctrl => self.cancel_prompt(),
+            // A new session's name: another base to make it from
+            (Code::Char('b'), true) if key.ctrl && prompt.kind == PromptKind::Session => {
+                let name = std::mem::take(&mut prompt.text);
+                self.prompt = None;
+                self.session_base_picker(name);
+            }
             (Code::Char(c), false) => {
                 prompt.cycle = None;
                 prompt.text.push(c);
@@ -2941,6 +2960,7 @@ impl Editor {
             PromptKind::Shell(p) => self.shell_pipe(p, &text),
             PromptKind::Replace => self.replace_plan_start(text),
             PromptKind::Note(target) => crate::notes::submit(self, target, &text),
+            PromptKind::Session => self.session_new(&text, None),
             PromptKind::Rename => {
                 if !text.is_empty() {
                     let extra = serde_json::json!({ "newName": text });
@@ -7003,8 +7023,7 @@ mod tests {
         let opened = |p: &Path| ed.docs.iter().any(|d| d.path.as_deref() == Some(p));
         assert!(!opened(&wt.join("a.txt")), "nor opened its file behind");
         assert_eq!(std::fs::read_to_string(&ran_in).unwrap().trim(), wt.to_str().unwrap());
-        let said =
-            ed.messages.iter().filter(|m| m.2.starts_with(&format!("{} · ", lane(&ed, behind).name())));
+        let said = ed.messages.iter().filter(|m| m.2.starts_with(&format!("{} · ", lane(&ed, behind).name)));
         assert_eq!(drawn, said.count(), "{events} events behind drew {drawn} frames in front");
         feed(&mut ed, ":lane-switch 1<ret>");
         assert!(ed.lane.chat.as_ref().unwrap().msgs.iter().any(|m| m.text.contains("from the worktree")));
@@ -7048,7 +7067,7 @@ mod tests {
         let repo = git_repo("lane-views", &[("a.txt", "one\ntwo\nthree\n")]);
         let wt = worktree(&repo, "views");
         let mut ed = editor("");
-        ed.lane.root = repo.clone();
+        (ed.lane.root, ed.lane.name) = (repo.clone(), "tarae-review-lane-views".into());
         feed(&mut ed, ":o a.txt<ret>jj<C-w>v");
         assert_eq!(ed.lane.views.len(), 2);
         feed(&mut ed, &format!(":lane-open {}<ret>", wt.display()));
@@ -7115,7 +7134,7 @@ mod tests {
         let told: Vec<&String> =
             ed.messages.iter().map(|m| &m.2).filter(|m| m.contains("Claude waits for your answer")).collect();
         assert_eq!(told.len(), 1, "said once: {told:?}");
-        assert!(told[0].starts_with(&format!("{} · ", lane(&ed, behind).name())), "named: {}", told[0]);
+        assert!(told[0].starts_with(&format!("{} · ", lane(&ed, behind).name)), "named: {}", told[0]);
         // In front: its card and its review are up, on its own file
         feed(&mut ed, ":lane-switch 1<ret>");
         assert!(ed.offers.iter().any(crate::offer::Offer::claudes), "the card");

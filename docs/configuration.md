@@ -28,7 +28,8 @@ the [keymap reference](reference/keymap.md).
 - **A project's file is trusted before it runs anything.** A `.tarae.toml` usually comes with the project, so
   someone else may have written it. What in it runs commands or loosens how Claude's commands are guarded waits
   until you trust the project: `llm.command`, `llm.args`, `llm.run-allow`, `llm.review-ask`, `llm.chat-settings`,
-  `llm.sandbox*`, `editor.restart-build` and `restart-binary`, `[task.*]`, `[preflight]` steps, a `[lsp.*]`
+  `llm.sandbox*`, `editor.restart-build` and `restart-binary`, `session.worktrees` (where checkouts are
+  written), `[task.*]`, `[preflight]` steps, a `[lsp.*]`
   `command` or `args`, an `[[attach]]` `before`, and keys bound to `:` commands. A card shows each one as written: `y` trusts the
   project, `n` ignores that part. The rest of the file applies either way. The answer is kept per project and
   asked again when any of those values change. `:project-trust` shows the card again, and `:project-untrust`

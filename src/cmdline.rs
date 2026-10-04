@@ -141,6 +141,9 @@ pub const COMMANDS: &[TypedCmd] = &[
     c(&["diff-off"], Arg::None, "Stop showing the diff"),
     c(&["lane-open"], Arg::File, "Work in another checkout beside this one"),
     c(&["lane-switch"], Arg::None, "Bring another checkout's work to the front"),
+    c(&["session-new"], Arg::None, "New session: a branch in its own checkout"),
+    c(&["session-end"], Arg::None, "End a session (its checkout goes)"),
+    c(&["session-bring"], Arg::None, "Move a session's base up to it (fast-forward)"),
 ];
 
 /// One candidate.

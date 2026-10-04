@@ -481,8 +481,8 @@ pub fn wrap_with(lines: &[Line], width: usize, rule: Style, label: Style) -> Vec
     out
 }
 
-/// One line's spans into rows of `width`, broken at the last space (else mid-word); rows after the first
-/// start with `indent` spaces.
+/// One line's spans into rows of `width`, broken at the last space (else after a word's last `/` — a path
+/// keeps its names whole — else mid-word); rows after the first start with `indent` spaces.
 fn wrap_row(spans: &[Span], indent: usize, width: usize, out: &mut Vec<Vec<Span>>) {
     // Narrow box: a deep indent mustn't leave no room for text
     let indent = indent.min(width / 2);
@@ -512,7 +512,10 @@ fn wrap_row(spans: &[Span], indent: usize, width: usize, out: &mut Vec<Vec<Span>
                     row.pop();
                     rest
                 }
-                None => Vec::new(),
+                None => match row.iter().rposition(|(x, _)| *x == '/').filter(|&p| p > indent) {
+                    Some(p) => row.split_off(p + 1),
+                    None => Vec::new(),
+                },
             };
             out.push(group(&row));
             row = vec![(' ', Style::default()); indent];
@@ -1013,5 +1016,18 @@ mod tests {
         let rows = plain(&wrap(&[text("ab타래", 2)], 3, Style::default()));
         assert_eq!(rows.concat().replace(' ', ""), "ab타래");
         assert!(plain(&wrap(&[text("xyz", 3)], 0, Style::default())).len() <= 3);
+    }
+
+    /// A path longer than the row breaks after a `/` — its folder names stay whole; a word with none still
+    /// breaks mid-word.
+    #[test]
+    fn a_long_path_breaks_after_a_slash() {
+        let text =
+            |s: &str| Line::Text { spans: vec![Span { text: s.into(), style: Style::default() }], indent: 6 };
+        let rows =
+            plain(&wrap(&[text("  ~/.local/share/tarae/worktrees/proj-ba8dcb47")], 34, Style::default()));
+        assert_eq!(rows, ["  ~/.local/share/tarae/worktrees/", "      proj-ba8dcb47"]);
+        let rows = plain(&wrap(&[text("abcdefghij")], 6, Style::default()));
+        assert_eq!(rows, ["abcdef", "   ghi", "   j"], "no slash: mid-word, as before");
     }
 }

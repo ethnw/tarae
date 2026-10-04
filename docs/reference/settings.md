@@ -71,6 +71,12 @@ The name is also the `:set` path: `:set editor.scrolloff 8` changes it for this 
 | `llm.sandbox-protect` | list of strings | `[]` | Chat: paths in the project the sandbox keeps Claude's commands from changing ("migrations/"); .git and .tarae.toml always |
 | `llm.context-lines` | integer 0–1000 | `20` | Lines of context sent around each selection |
 
+## `[session]`
+
+| Setting | Type | Default | Description |
+|---|---|---|---|
+| `session.worktrees` | string | `""` | Where sessions' checkouts go, a folder per repository ("" = $XDG_DATA_HOME/tarae/worktrees) |
+
 ## Tables you name yourself
 
 These are read alongside the settings above; see the [configuration guide](../configuration.md).

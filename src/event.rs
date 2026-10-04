@@ -80,6 +80,12 @@ impl Queue {
         Jobs { tx: self.sender() }
     }
 
+    /// Jobs whose results are applied in whatever lane is in front when they land — work about lanes
+    /// themselves (making, ending one: `sessions.rs`), never swapped into the lane it's about.
+    pub fn shared_jobs(&self) -> Jobs {
+        Jobs { tx: self.shared_sender() }
+    }
+
     /// Results made from now on are for `lane`.
     pub fn set_lane(&self, lane: LaneId) {
         self.lane.set(lane);

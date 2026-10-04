@@ -173,6 +173,10 @@ a = "review_at_end"
 t = "review_turn"
 u = "review_undo_change"
 
+# Sessions: a branch in a checkout of its own (n = new)
+[normal.space.W]
+n = "session_new"
+
 [normal.space.x]
 x = "test_nearest"
 d = "test_debug"

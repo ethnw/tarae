@@ -75,6 +75,7 @@ mod search;
 mod seeing;
 mod selection;
 mod session;
+mod sessions;
 mod settings;
 mod shell;
 mod sidebar;
@@ -214,6 +215,10 @@ fn main() -> Result<()> {
         if editor.config.restore_session {
             editor.restore_session();
         }
+    }
+    // This repository's sessions (lanes) from last time — a restart brought them already
+    if !editor.sessions.restored {
+        editor.lanes_restore();
     }
     // Claude's notes from last time in this folder (the open files get them right away)
     notes::restore(&mut editor);

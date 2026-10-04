@@ -86,6 +86,11 @@ pub enum What {
     BranchDelete { top: PathBuf, branch: String, tip: String },
     /// A push over the remote's commits (`gitpanel.rs`): `y` pushes with a lease on what the card listed.
     ForcePush(Box<crate::gitpanel::ForcePush>),
+    /// A new session (`sessions.rs`): `y` makes its branch and checkout as the card says.
+    SessionNew(Box<crate::sessions::Making>),
+    /// Ending a session that has something to lose (`sessions.rs`): `y` removes its checkout and keeps its
+    /// branch, `D` deletes the branch too, `n` keeps it all.
+    SessionEnd(Box<crate::sessions::Ending>),
 }
 
 /// Work that stopped for lack of a grammar — resumed once downloaded
@@ -161,7 +166,25 @@ impl Offer {
                 | What::Preflight { .. }
                 | What::BranchDelete { .. }
                 | What::ForcePush(_)
+                | What::SessionNew(_)
+                | What::SessionEnd(_)
         )
+    }
+
+    /// Whether `D` answers it: the end card of a session on a branch (removes both).
+    pub fn both(&self) -> bool {
+        matches!(&self.what, What::SessionEnd(e) if e.branch.is_some())
+    }
+
+    /// The end card of a session with work in no commit: no `y` (a reflex would throw it away) — `R`
+    /// removes the checkout, `c` commits first (`commits_first`).
+    pub fn end_dirty(&self) -> bool {
+        matches!(&self.what, What::SessionEnd(e) if e.dirty())
+    }
+
+    /// Whether `c` answers it: that card, on a branch to commit on.
+    pub fn commits_first(&self) -> bool {
+        matches!(&self.what, What::SessionEnd(e) if e.dirty() && e.branch.is_some())
     }
 
     /// Whether its answer can last longer than once (`a` this chat · `A` always — `A` only for reads).
@@ -255,10 +278,13 @@ impl crate::editor::Editor {
         // One that runs something: only from a card in sight (one too big for the screen isn't drawn) — and
         // settled: a key pressed as it appeared or changed is swallowed, not an answer
         if o.weighty() {
-            if !self.screen.offer_buttons.iter().any(|b| b.3 == 'y') {
+            // (drawn: its answers are on screen — a digit is a card stacked behind)
+            if !self.screen.offer_buttons.iter().any(|b| !b.3.is_ascii_digit()) {
                 return false;
             }
-            if !self.offer_settled() && matches!(key.code, Code::Char('y' | 'n' | 'N' | 'a' | 'A')) {
+            if !self.offer_settled()
+                && matches!(key.code, Code::Char('y' | 'n' | 'N' | 'a' | 'A' | 'D' | 'R' | 'c'))
+            {
                 return true;
             }
             // Cut to fit the screen: `v` shows it all, and `y` waits for that (not taken otherwise — it's
@@ -269,7 +295,7 @@ impl crate::editor::Editor {
                         self.offer_view_all();
                         return true;
                     }
-                    Code::Char('y' | 'a' | 'A') => {
+                    Code::Char('y' | 'a' | 'A' | 'D' | 'R' | 'c') => {
                         self.offer_see_all_first();
                         return true;
                     }
@@ -280,11 +306,14 @@ impl crate::editor::Editor {
         // (Esc isn't an answer — #25: it's how one leaves an input or a mode, and a "no" by accident told Claude
         // no; `n` says no)
         match key.code {
+            Code::Char('R') if o.end_dirty() => self.offer_remove(false),
+            Code::Char('c') if o.commits_first() => self.offer_commit_first(),
             Code::Char('y') => self.offer_accept(),
             Code::Char('n') => self.offer_dismiss(),
             Code::Char('N') if matches!(o.what, What::Install { .. }) => self.offer_never(),
             Code::Char('a') if o.lasts() => self.offer_for_chat(),
             Code::Char('A') if o.keeps() => self.offer_always(),
+            Code::Char('D') if o.both() => self.offer_remove(true),
             // An answer letter this card doesn't take isn't the code's either (`a`/`A` there start inserting —
             // and the `y` after it was typed)
             Code::Char('a' | 'A') if o.lasts() => self.set_status("this card asks y, a or n"),
@@ -298,6 +327,13 @@ impl crate::editor::Editor {
     pub fn offer_accept(&mut self) {
         if self.offers.first().is_none_or(Offer::installing) {
             return;
+        }
+        // (no yes that throws away work in no commit)
+        if self.offers.first().is_some_and(Offer::end_dirty) {
+            return self.set_status(match self.offers[0].commits_first() {
+                true => "its changes are in no commit — c commits them first, R removes them anyway",
+                false => "its changes are in no commit — R removes them anyway, n keeps them",
+            });
         }
         let mut o = self.offers.remove(0);
         o.state = OfferState::Installing(Instant::now());
@@ -337,6 +373,34 @@ impl crate::editor::Editor {
             What::Preflight { root, steps } => self.preflight_answer(id, root, steps, true),
             What::BranchDelete { top, branch, tip } => self.git_branch_delete_answer(id, top, branch, tip),
             What::ForcePush(f) => self.git_force_push(id, *f),
+            What::SessionNew(m) => self.session_make(id, *m),
+            What::SessionEnd(e) => self.session_remove(*e, false, Some(id)),
+        }
+    }
+
+    /// `D` on a session's end card: its checkout and its branch go · `R` (`both` false, work in no commit
+    /// there): its checkout goes anyway, the branch stays.
+    pub fn offer_remove(&mut self, both: bool) {
+        let fits = |o: &Offer| if both { o.both() } else { o.end_dirty() };
+        if !self.offers.first().is_some_and(fits) {
+            return;
+        }
+        let mut o = self.offers.remove(0);
+        o.state = OfferState::Installing(Instant::now());
+        let (id, what) = (o.id, o.what.clone());
+        self.offers.push(o);
+        if let What::SessionEnd(e) = what {
+            self.session_remove(*e, both, Some(id));
+        }
+    }
+
+    /// `c` on a session's end card with work in no commit: committed on its branch first, then asked again.
+    pub fn offer_commit_first(&mut self) {
+        if !self.offers.first().is_some_and(Offer::commits_first) {
+            return;
+        }
+        if let What::SessionEnd(e) = self.offers.remove(0).what {
+            self.session_commit_first(*e);
         }
     }
 
@@ -464,6 +528,8 @@ impl crate::editor::Editor {
             What::Preflight { root, steps } => self.preflight_answer(o.id, root, steps, false),
             What::BranchDelete { branch, .. } => self.set_status(format!("Kept {branch}")),
             What::ForcePush(f) => self.set_status(format!("Not pushed — {} as it was", f.upstream())),
+            What::SessionNew(m) => self.set_status(format!("No session {} — nothing was made", m.branch)),
+            What::SessionEnd(e) => self.set_status(format!("Kept {} as it is", e.name)),
         }
     }
 

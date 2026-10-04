@@ -215,6 +215,7 @@ commands! {
         review_at_end => "Claude's edits: review at end",
         review_turn => "Review Claude's last turn",
         review_undo_change => "Take this change back",
+        session_new => "New session (its own branch)",
         note_picker => "Claude's notes",
         undo_turn => "Undo Claude's last turn",
         model_picker => "Choose Claude's model",
@@ -1782,6 +1783,8 @@ const TYPED_IN_PALETTE: &[(&str, &str)] = &[
     ("Close buffer", "bc"),
     ("Next buffer", "bn"),
     ("Previous buffer", "bp"),
+    ("End this session", "session-end"),
+    ("Bring this session into its base", "session-bring"),
 ];
 
 /// Command palette (`space ?`): find every command by its description, bound keys on the right —
@@ -1917,6 +1920,10 @@ fn review_at_end(cx: &mut Context) {
 
 fn review_turn(cx: &mut Context) {
     crate::codereview::review_turn(cx.editor);
+}
+
+fn session_new(cx: &mut Context) {
+    cx.editor.session_prompt();
 }
 
 fn review_undo_change(cx: &mut Context) {

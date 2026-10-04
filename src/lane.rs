@@ -23,6 +23,13 @@ pub struct Lane {
     /// in `Editor::with_root`; nothing reads the process's folder after that. Tests with a project of their
     /// own in a temp folder set it.
     pub root: PathBuf,
+    /// What it's called (toasts from it start with it): a session's name, else its checkout's folder name.
+    pub name: String,
+    /// A session's branch, as it was made (`sessions.rs`) · what it was made from — a branch, or a commit
+    /// when that checkout was detached; what `:session-end` and `:session-bring` compare with (None:
+    /// the branch of the checkout tarae started in).
+    pub branch: Option<String>,
+    pub base: Option<String>,
     /// Panes, the split tree and the focused pane. The focused pane's scroll is its document's top/left
     /// (synced every event).
     pub views: Vec<View>,
@@ -70,6 +77,8 @@ pub struct Lane {
     pub git_status: Option<crate::gitpanel::Status>,
     pub git_discard_asked: Option<(String, std::time::Instant)>,
     pub committing: Option<crate::gitpanel::Committing>,
+    /// The commit message being opened is for ending the session after it (`sessions.rs`).
+    pub commit_then_end: bool,
     /// Git work waiting its turn (one at a time) · one running · reads of the status asked for (the latest
     /// lands).
     pub git_queue: std::collections::VecDeque<crate::gitpanel::GitJob>,
@@ -94,9 +103,14 @@ pub struct Lane {
 impl Lane {
     /// A lane for the checkout in `root` (a real path) — nothing open in it yet, its first pane `view`.
     pub fn new(id: LaneId, root: PathBuf, view: crate::split::ViewId) -> Self {
+        let name =
+            root.file_name().map_or_else(|| root.display().to_string(), |n| n.to_string_lossy().into());
         Self {
             id,
             root,
+            name,
+            branch: None,
+            base: None,
             views: Vec::new(),
             split: crate::split::Split::Leaf(view),
             focus: view,
@@ -125,6 +139,7 @@ impl Lane {
             git_status: None,
             git_discard_asked: None,
             committing: None,
+            commit_then_end: false,
             git_queue: Default::default(),
             git_busy: false,
             git_reads: 0,
@@ -136,11 +151,6 @@ impl Lane {
             parked: Vec::new(),
             waiting_told: false,
         }
-    }
-
-    /// What toasts from it start with — its checkout's folder name.
-    pub fn name(&self) -> String {
-        self.root.file_name().map_or_else(|| self.root.display().to_string(), |n| n.to_string_lossy().into())
     }
 
     /// Whether its Claude waits for the user: a card of its, or an edit (a rename's files) to review.
@@ -161,7 +171,7 @@ impl Editor {
     /// `msg` as a toast says it: from a lane behind, its name first.
     pub(crate) fn said_by_lane(&self, msg: String) -> String {
         match self.behind {
-            true => format!("{} · {msg}", self.lane.name()),
+            true => format!("{} · {msg}", self.lane.name.clone()),
             false => msg,
         }
     }
@@ -179,7 +189,7 @@ impl Editor {
         f(self);
         self.behind = false;
         let tell = self.lane.waits() && !std::mem::replace(&mut self.lane.waiting_told, true);
-        let name = self.lane.name();
+        let name = self.lane.name.clone();
         if let Some(d) = self.docs.get(self.current) {
             self.lane.current_doc = d.id;
         }
@@ -215,21 +225,31 @@ impl Editor {
             self.lane_switch(id);
             return Ok(id);
         }
+        let id = self.lane_add(root);
+        self.lane_switch(id);
+        Ok(id)
+    }
+
+    /// A lane for the checkout in `root` (a real path), behind — its first pane on a blank scratch, its
+    /// branch watched.
+    pub(crate) fn lane_add(&mut self, root: PathBuf) -> LaneId {
         self.next_lane += 1;
         let id = self.next_lane;
         let view = self.next_view;
         self.next_view += 1;
         let doc = self.alloc_id();
         self.docs.push(Document::from_str(doc, ""));
-        let mut lane = Lane::new(id, root, view);
+        let mut lane = Lane::new(id, root.clone(), view);
         lane.views.push(View::new(view, doc));
         (lane.current_doc, lane.scratch) = (doc, Some(doc));
         self.lanes.push(lane);
-        self.lane_switch(id);
         if self.git_auto {
-            crate::git::watch(self.events.sender(), self.lane.root.clone());
+            // (its results are its lane's — tagged so while the watch is made)
+            self.events.set_lane(id);
+            crate::git::watch(self.events.sender(), root);
+            self.events.set_lane(self.lane.id);
         }
-        Ok(id)
+        id
     }
 
     /// `:lane-switch <n>` — lane `id` to the front. What was up over the one in front closes (a picker, a
@@ -271,13 +291,15 @@ impl Editor {
         self.lane.waiting_told = false;
         crate::edits::next(self);
         crate::follow::lane_in(self);
+        // (which one is in front is kept too — `:restart` and the next start come back to it)
+        self.lanes_keep();
         true
     }
 
     /// The lanes in the order they were opened: (id, name, in front).
     pub fn lanes_listed(&self) -> Vec<(LaneId, String, bool)> {
-        let mut v: Vec<_> = std::iter::once((self.lane.id, self.lane.name(), true))
-            .chain(self.lanes.iter().map(|l| (l.id, l.name(), false)))
+        let mut v: Vec<_> = std::iter::once((self.lane.id, self.lane.name.clone(), true))
+            .chain(self.lanes.iter().map(|l| (l.id, l.name.clone(), false)))
             .collect();
         v.sort_by_key(|l| l.0);
         v

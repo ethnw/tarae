@@ -24,9 +24,9 @@
 21                               h  Select this symbol's uses       U  Bring Claude's turn back
 22                               i  Ask Claude to edit selection    v  Review …
 23                               j  Jump list                       w  Window …
-24                               k  Show docs under cursor          x  Tests …
-25                               l  Chat with Claude                y  Copy to clipboard
-26                               L  Close chat
+24                               k  Show docs under cursor          W  Sessions …
+25                               l  Chat with Claude                x  Tests …
+26                               L  Close chat                      y  Copy to clipboard
 27                             ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
 28  ▐ NORMAL ▌                                                                  rust   utf-8 LF   1:1
 29                                                                                                space
@@ -86,9 +86,9 @@
 21                               A                                  A
 22                               A                                  A  dddddd d
 23                               A                                  A  dddddd d
-24                               A                                  A  ddddd d
-25                               A                                  A
-26                               A
+24                               A                                  A  dddddddd d
+25                               A                                  A  ddddd d
+26                               A                                  A
 27
 28  a BBBBBB a                                                                  dddd   ddddd dd   TTT
 29

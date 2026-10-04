@@ -316,10 +316,10 @@ impl ForcePush {
 }
 
 /// Most commits listed on a card (the rest counted).
-const COMMITS_SHOWN: usize = 10;
+pub(crate) const COMMITS_SHOWN: usize = 10;
 
 /// `sha subject` rows of a `log --format=%h%x1f%s` (cut to `COMMITS_SHOWN`, the rest counted).
-fn commit_rows(lost: &[(String, String)]) -> String {
+pub(crate) fn commit_rows(lost: &[(String, String)]) -> String {
     let mut s: String = lost.iter().take(COMMITS_SHOWN).map(|(h, m)| format!("\n  {h} {m}")).collect();
     if lost.len() > COMMITS_SHOWN {
         s += &format!("\n  … and {} more", lost.len() - COMMITS_SHOWN);
@@ -327,12 +327,12 @@ fn commit_rows(lost: &[(String, String)]) -> String {
     s
 }
 
-fn parse_log(out: &str) -> Vec<(String, String)> {
+pub(crate) fn parse_log(out: &str) -> Vec<(String, String)> {
     out.lines().filter_map(|l| l.split_once('\x1f')).map(|(h, s)| (h.to_string(), s.to_string())).collect()
 }
 
 /// The commits of `rev` that would be gone with it: on no other branch, remote-tracking branch or tag.
-fn only_on(top: &Path, branch: &str) -> Result<Vec<(String, String)>, String> {
+pub(crate) fn only_on(top: &Path, branch: &str) -> Result<Vec<(String, String)>, String> {
     let full = format!("refs/heads/{branch}");
     let exclude = format!("--exclude={branch}");
     let out = git(
@@ -420,7 +420,7 @@ fn pushed(top: &Path) -> bool {
 pub const PUSHED_WARNING: &str = "this commit is pushed — pushing it again will need a force (asked)";
 
 /// The repository's top for `cwd`, real path.
-fn top_of(cwd: &Path) -> Result<PathBuf, String> {
+pub(crate) fn top_of(cwd: &Path) -> Result<PathBuf, String> {
     let top = PathBuf::from(git(cwd, &["rev-parse", "--show-toplevel"], None)?.trim());
     Ok(std::fs::canonicalize(&top).unwrap_or(top))
 }
@@ -477,7 +477,7 @@ pub fn worktree_shown(top: &Path, wt: &Path) -> String {
 }
 
 /// `name` as a new branch's name (`git check-ref-format --branch`), else why not.
-fn branch_name(top: &Path, name: &str) -> Result<String, String> {
+pub(crate) fn branch_name(top: &Path, name: &str) -> Result<String, String> {
     if name.is_empty() || name.starts_with('-') {
         return Err(format!("{name:?} isn't a branch name"));
     }
@@ -487,7 +487,7 @@ fn branch_name(top: &Path, name: &str) -> Result<String, String> {
 }
 
 /// The branch checked out in `top` (None: detached).
-fn current_branch(top: &Path) -> Option<String> {
+pub(crate) fn current_branch(top: &Path) -> Option<String> {
     git(top, &["symbolic-ref", "--short", "-q", "HEAD"], None).ok().map(|b| b.trim().to_string())
 }
 
@@ -499,11 +499,13 @@ pub enum Deleting {
     Ask { tip: String, lost: Vec<(String, String)> },
 }
 
-/// A commit being written: its message buffer, the repository, whether it amends.
+/// A commit being written: its message buffer, the repository, whether it amends · whether its session
+/// ends once it's in (`c` on a session's end card — `sessions.rs`).
 pub struct Committing {
     pub doc: DocId,
     pub top: PathBuf,
     pub amend: bool,
+    pub then_end: bool,
 }
 
 impl Editor {
@@ -801,9 +803,11 @@ impl Editor {
             }),
             Box::new(move |ed, r| match r {
                 Ok(file) if file.is_empty() => {
+                    ed.lane.commit_then_end = false;
                     ed.set_warning("nothing staged — s stages a file (or a folder, or the whole section)")
                 }
                 Ok(file) => {
+                    let then_end = std::mem::take(&mut ed.lane.commit_then_end);
                     if let Err(e) = ed.open(std::path::Path::new(&file)) {
                         return ed.set_error(format!("{e:#}"));
                     }
@@ -811,7 +815,7 @@ impl Editor {
                     doc.throwaway = true;
                     doc.set_selection(crate::selection::Selection::point(0));
                     let id = doc.id;
-                    ed.lane.committing = Some(Committing { doc: id, top, amend });
+                    ed.lane.committing = Some(Committing { doc: id, top, amend, then_end });
                     if let Some(s) = ed.lane.sidebar.as_mut() {
                         s.focus = false;
                     }
@@ -823,7 +827,10 @@ impl Editor {
                         ed.mode = crate::editor::Mode::Insert;
                     }
                 }
-                Err(e) => ed.set_error(format!("commit: {e}")),
+                Err(e) => {
+                    ed.lane.commit_then_end = false;
+                    ed.set_error(format!("commit: {e}"))
+                }
             }),
         );
     }
@@ -835,7 +842,7 @@ impl Editor {
             let Some(file) = self.docs.iter().find(|d| d.id == id).and_then(|d| d.path.clone()) else {
                 return;
             };
-            let (top, amend) = (c.top, c.amend);
+            let (top, amend, then_end) = (c.top, c.amend, c.then_end);
             // In the git queue — after a stage still running, never beside another git that writes
             self.git_do(
                 Box::new(move |top| {
@@ -851,10 +858,14 @@ impl Editor {
                     Ok(line) => {
                         ed.set_success(format!("Committed {}", line.trim()));
                         ed.close_doc(id);
+                        // (its session asked to end once its changes were in: asked again, now with none)
+                        if then_end && let Err(e) = ed.session_end("") {
+                            ed.set_error(e);
+                        }
                     }
                     // An empty message aborts — the buffer stays for another try
                     Err(e) => {
-                        ed.lane.committing = Some(Committing { doc: id, top, amend });
+                        ed.lane.committing = Some(Committing { doc: id, top, amend, then_end });
                         ed.set_error(format!("commit: {e}"));
                     }
                 }),

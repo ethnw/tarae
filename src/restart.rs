@@ -471,6 +471,8 @@ pub fn snapshot(ed: &mut Editor) -> Value {
         "sidebar": sidebar,
         "chat": chat,
         "overrides": overrides,
+        // (every lane — sessions — and which is in front; its files are the ones above)
+        "sessions": crate::sessions::snapshot(ed),
         // (its shell can't come along — the next tarae says so)
         "terminal": ed.lane.terminal.as_ref().is_some_and(|t| t.exited.is_none()),
     })
@@ -506,6 +508,8 @@ fn restore_quietly(ed: &mut Editor, v: &Value) -> usize {
     if set {
         ed.ensure_theme();
     }
+    // The lanes, the one in front in front — the files below open in it
+    crate::sessions::restore(ed, &v["sessions"]);
     // Saved index → the document it is now
     let mut ids = Vec::new();
     for d in v["docs"].as_array().into_iter().flatten() {
@@ -907,8 +911,12 @@ mod tests {
             assert!(err.contains(why), "{err}");
             assert!(ed.restart.is_none());
         };
-        ed.lane.committing =
-            Some(crate::gitpanel::Committing { doc: ed.doc().id, top: dir.clone(), amend: false });
+        ed.lane.committing = Some(crate::gitpanel::Committing {
+            doc: ed.doc().id,
+            top: dir.clone(),
+            amend: false,
+            then_end: false,
+        });
         try_it(&mut ed, "a commit message is open");
         ed.lane.committing = None;
         let task = crate::task::Task { name: "slow".into(), cmd: "sleep 5".into(), cwd: dir.clone() };

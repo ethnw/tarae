@@ -71,9 +71,12 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
         "theme" => set(editor, &format!("theme {rest}"), false),
         // A commit message: `:q` cancels (closes it), `:wq`/`:x` commits — not the whole editor
         "q" | "quit" | "q!" | "quit!" if editor.in_commit_message() => {
-            editor.lane.committing = None;
+            let then_end = editor.lane.committing.take().is_some_and(|c| c.then_end);
             editor.close_current(true)?;
-            editor.set_status("commit canceled");
+            editor.set_status(match then_end {
+                true => "commit canceled — the session stays, its changes staged",
+                false => "commit canceled",
+            });
             Ok(())
         }
         "wq" | "x" | "write-quit" if editor.in_commit_message() => write(editor, rest, false),
@@ -123,7 +126,7 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
         "diff-off" => editor.diff_off(),
         "lane-open" if !rest.trim().is_empty() => {
             let id = editor.lane_open(Path::new(rest.trim()))?;
-            editor.set_status(format!("lane {id} · {}", editor.lane.name()));
+            editor.set_status(format!("lane {id} · {}", editor.lane.name));
             Ok(())
         }
         "lane-open" => Err("usage: :lane-open <folder> (a worktree or another checkout)".into()),
@@ -140,6 +143,18 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
                 }
             }
         }
+        // Sessions — a branch in a checkout of its own, as a lane (sessions.rs)
+        "session-new" => {
+            match rest.split_whitespace().collect::<Vec<_>>()[..] {
+                [name] => editor.session_new(name, None),
+                [name, base] => editor.session_new(name, Some(base)),
+                [] => editor.session_prompt(),
+                _ => return Err("usage: :session-new <name> [<base>]".into()),
+            }
+            Ok(())
+        }
+        "session-end" => editor.session_end(rest),
+        "session-bring" => editor.session_bring(rest),
         "git-switch" if !rest.is_empty() => {
             editor.git_switch(rest);
             Ok(())

@@ -5965,6 +5965,23 @@ impl OfferCard {
                     crate::offer::What::Preflight { .. } => b = vec![('y', "Run them"), ('n', "Not now")],
                     crate::offer::What::BranchDelete { .. } => b = vec![('y', "Delete"), ('n', "Keep it")],
                     crate::offer::What::ForcePush(_) => b = vec![('y', "Push"), ('n', "No")],
+                    crate::offer::What::SessionNew(_) => b = vec![('y', "Make it"), ('n', "Not now")],
+                    // (work in no commit: no `y` — committing leads, removing takes a capital)
+                    crate::offer::What::SessionEnd(_) if o.commits_first() => {
+                        b = vec![
+                            ('c', "Commit, then end"),
+                            ('R', "Remove"),
+                            ('D', "Remove both"),
+                            ('n', "Cancel"),
+                        ]
+                    }
+                    crate::offer::What::SessionEnd(_) if o.end_dirty() => {
+                        b = vec![('R', "Remove"), ('n', "Cancel")]
+                    }
+                    crate::offer::What::SessionEnd(_) if o.both() => {
+                        b = vec![('y', "Remove checkout"), ('D', "Remove both"), ('n', "Cancel")]
+                    }
+                    crate::offer::What::SessionEnd(_) => b = vec![('y', "Remove it"), ('n', "Cancel")],
                     crate::offer::What::Screen { .. } => {
                         b = vec![('y', "Once"), ('a', "This chat"), ('n', "No")]
                     }

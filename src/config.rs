@@ -78,6 +78,8 @@ pub struct EditorConfig {
     /// Offer to install a missing language server or debugger the way its pack says (`install.rs`).
     pub offer_installs: bool,
     pub scrollbar: bool,
+    /// Where sessions' checkouts go ("" = `$XDG_DATA_HOME/tarae/worktrees`; `sessions.rs`).
+    pub session_worktrees: String,
     pub theme: String,
     pub llm: LlmConfig,
     pub lsp: crate::lsp::LspConfig,
@@ -123,6 +125,7 @@ impl Default for EditorConfig {
             offer_grammars: true,
             offer_installs: true,
             scrollbar: true,
+            session_worktrees: String::new(),
             theme: "default".into(),
             llm: LlmConfig::default(),
             lsp: crate::lsp::LspConfig { enabled: true, ..Default::default() },

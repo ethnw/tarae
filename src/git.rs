@@ -52,10 +52,20 @@ pub fn watch(tx: crate::event::Tx, dir: PathBuf) {
             let mut watcher = crate::fswatch::Watcher::new(); // (armed before the stat — see `fswatch`)
             watcher.file(&head);
             let now = stamp();
+            // (HEAD gone: the worktree was removed — a session ended — and so is its lane)
+            if now.is_none() && !first {
+                break;
+            }
             if first || now != last {
                 (last, first) = (now, false);
                 let branch = read_branch(&head);
-                let apply = move |ed: &mut Editor| ed.lane.git_branch = branch;
+                let dir = dir.clone();
+                // (only the lane it's for: one ended meanwhile sends it to the front)
+                let apply = move |ed: &mut Editor| {
+                    if ed.lane.root == dir {
+                        ed.lane.git_branch = branch;
+                    }
+                };
                 if tx.send(Event::Job(Box::new(apply))).is_err() {
                     break;
                 }

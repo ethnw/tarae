@@ -449,6 +449,13 @@ pub static SETTINGS: &[Setting] = &[
         get: |c| Value::from(c.llm.context_lines as i64),
         set: |c, v| c.llm.context_lines = n(v),
     },
+    Setting {
+        path: "session.worktrees",
+        kind: Kind::Str,
+        doc: "Where sessions' checkouts go, a folder per repository (\"\" = $XDG_DATA_HOME/tarae/worktrees)",
+        get: |c| Value::from(c.session_worktrees.as_str()),
+        set: |c, v| c.session_worktrees = s(v).to_string(),
+    },
 ];
 
 pub fn find(path: &str) -> Option<&'static Setting> {
