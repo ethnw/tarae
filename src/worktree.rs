@@ -170,6 +170,29 @@ fn cargo_dirs(program: &Path, top: &Path) -> Option<(PathBuf, PathBuf)> {
     Some((target, build))
 }
 
+/// Cargo's `build.build-dir` as the config says it for `top` — its `CARGO_BUILD_BUILD_DIR` (`env`), else the
+/// nearest `.cargo/config.toml` (or `config`) from `top` up, else `cargo_home`'s — unresolved, its
+/// `{workspace-path-hash}` and the like as written. None when nothing sets it.
+fn build_dir_setting(top: &Path, cargo_home: Option<&Path>, env: Option<String>) -> Option<String> {
+    if let Some(v) = env.filter(|v| !v.is_empty()) {
+        return Some(v);
+    }
+    let read = |dir: &Path| {
+        ["config.toml", "config"].iter().find_map(|f| {
+            let text = std::fs::read_to_string(dir.join(f)).ok()?;
+            let v: toml::Value = toml::from_str(&text).ok()?;
+            v.get("build")?.get("build-dir")?.as_str().map(str::to_string)
+        })
+    };
+    top.ancestors().find_map(|d| read(&d.join(".cargo"))).or_else(|| read(cargo_home?))
+}
+
+/// Whether a build-dir setting puts each checkout's builds apart (`{workspace-path-hash}`,
+/// `{workspace-root}` in it) — then a new checkout builds cold in its own.
+fn per_checkout(setting: &str) -> bool {
+    setting.contains("{workspace-path-hash}") || setting.contains("{workspace-root}")
+}
+
 /// `cargo_dirs`' answer by real paths (as far as they're there) — for comparing, never for removing.
 fn real_dirs((target, build): (PathBuf, PathBuf)) -> (PathBuf, PathBuf) {
     let real = |p: PathBuf| std::fs::canonicalize(&p).unwrap_or(p);
@@ -272,6 +295,9 @@ pub struct Making {
     pub files: (u64, bool),
     pub big: Vec<(String, (u64, bool))>,
     pub cargo: Option<(PathBuf, PathBuf)>,
+    /// Cargo's build-dir outside the checkout is one per checkout (`per_checkout` — #111: the card said
+    /// shared): this one's size, what the new checkout's first build makes again from cold.
+    pub build_own: Option<(u64, bool)>,
     /// The instruction files git doesn't have here (`instructions`) — copied into its checkout, so its
     /// Claude starts with the project's rules.
     pub copies: Vec<String>,
@@ -385,6 +411,17 @@ impl Making {
                     crate::allow::tilde(target)
                 )
             }
+            // (per checkout: its own, beside this one's — from cold, #111)
+            Some((_, build)) if shared(build) && self.build_own.is_some() => {
+                let beside = build.parent().map(crate::allow::tilde).unwrap_or_default();
+                q += &format!(
+                    "\nCargo builds it in a build-dir of its own in {beside}: its first build starts cold"
+                );
+                match self.build_own {
+                    Some(s) if s.0 > 0 => q += &format!(" — this checkout's is {}.", size_text(s)),
+                    _ => q += ".",
+                }
+            }
             Some((_, build)) if shared(build) => {
                 q += &format!(
                     "\nCargo's build-dir is shared ({}): sessions reuse its builds, one build at a time.",
@@ -462,8 +499,16 @@ pub fn making(root: &Path, name: &str, base: Option<&str>, setting: &str) -> Res
     // (where cargo builds, from the user's cargo config as it is)
     let cargo = top.join("Cargo.toml").is_file().then(|| cargo_dirs(Path::new("cargo"), &top)).flatten();
     let cargo = cargo.map(real_dirs);
+    // (a build-dir outside it that's per checkout: the new one builds cold — this one's size says how much)
+    let home = CargoAsk::real().map(|c| c.home);
+    let own = build_dir_setting(&top, home.as_deref(), std::env::var("CARGO_BUILD_BUILD_DIR").ok())
+        .is_some_and(|s| per_checkout(&s));
+    let build_own = match &cargo {
+        Some((_, build)) if own && !build.starts_with(&top) => Some(disk_size(build, until)),
+        _ => None,
+    };
     let copies = instructions(&top);
-    Ok(Making { top, branch, base, base_sha, path, files, big, cargo, copies, others })
+    Ok(Making { top, branch, base, base_sha, path, files, big, cargo, build_own, copies, others })
 }
 
 /// The repository's main branch, a local one: the remote's default (`origin/HEAD`), else `main` or
@@ -3119,6 +3164,61 @@ mod tests {
         let glyphs: Vec<&str> = rows.iter().map(|i| i.glyph.unwrap().0).collect();
         assert_eq!(glyphs, [" ", "●", "▲"]);
         assert_eq!(rows[2].action, crate::picker::Action::Session(2));
+    }
+
+    /// #111: a build-dir set per checkout (`{workspace-path-hash}`) — found where cargo looks: its variable,
+    /// the nearest `.cargo/config.toml` up from the checkout, then the cargo home's — makes the card say the
+    /// new checkout builds cold in its own, and what this one's weighs; a fixed one is still said shared.
+    #[test]
+    fn the_new_session_card_says_where_its_builds_go() {
+        let dir = std::env::temp_dir().join(format!("tarae-builddir-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let (top, home) = (dir.join("work/proj"), dir.join("cargo-home"));
+        std::fs::create_dir_all(top.join("sub")).unwrap();
+        std::fs::create_dir_all(dir.join("work/.cargo")).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let hashed = "[build]\nbuild-dir = \"{cargo-cache-home}/build/{workspace-path-hash}\"\n";
+        std::fs::write(home.join("config.toml"), hashed).unwrap();
+        let at = |env: Option<&str>| build_dir_setting(&top.join("sub"), Some(&home), env.map(String::from));
+        assert_eq!(at(None).as_deref(), Some("{cargo-cache-home}/build/{workspace-path-hash}"), "the home's");
+        std::fs::write(dir.join("work/.cargo/config.toml"), "[build]\nbuild-dir = \"/b/shared\"\n").unwrap();
+        assert_eq!(at(None).as_deref(), Some("/b/shared"), "the nearest config wins");
+        assert_eq!(
+            at(Some("{workspace-root}/b")).as_deref(),
+            Some("{workspace-root}/b"),
+            "the variable first"
+        );
+        assert!(
+            per_checkout("{cargo-cache-home}/build/{workspace-path-hash}")
+                && per_checkout("{workspace-root}/x")
+        );
+        assert!(!per_checkout("/b/shared"));
+        // The card's words
+        let making = |build_own| Making {
+            top: top.clone(),
+            branch: "fix".into(),
+            base: "main".into(),
+            base_sha: "a".repeat(40),
+            path: dir.join("checkouts/fix"),
+            files: (1 << 20, true),
+            big: Vec::new(),
+            cargo: Some((top.join("target"), home.join("build/1a/2b3c"))),
+            build_own,
+            copies: Vec::new(),
+            others: Vec::new(),
+        };
+        let q =
+            making(Some((3 << 30, true))).card().question.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(q.contains("Cargo builds it in a build-dir of its own in"), "{q}");
+        assert!(
+            q.contains("its first build starts cold — this checkout's is 3.0 GB") && !q.contains("shared"),
+            "{q}"
+        );
+        let q = making(Some((0, true))).card().question.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(q.contains("its first build starts cold.") && !q.contains("0 B"), "none built here yet: {q}");
+        let q = making(None).card().question.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(q.contains("build-dir is shared") && !q.contains("cold"), "{q}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

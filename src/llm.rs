@@ -698,6 +698,11 @@ pub struct Review {
     pub own_turn: bool,
     /// The answer's lines wrapped at this width when it lands (a commit message's body at 72 — `wrap_message`).
     pub wrap: Option<usize>,
+    /// It took the keys from the chat (a chat edit asked while you were in it): Esc gives them back there —
+    /// else to the code (#118).
+    pub from_chat: bool,
+    /// Esc gave the keys back to the code, the change unanswered: they're the editor's until `C-q`.
+    pub away: bool,
 }
 
 /// Called when the review ends (applied?).
@@ -737,6 +742,8 @@ impl Review {
             reason: String::new(),
             own_turn: true,
             wrap: None,
+            from_chat: false,
+            away: false,
         }
     }
 
@@ -1089,9 +1096,9 @@ fn relocate(h: &mut Hunk, text: &Rope) -> bool {
 
 /// Keys during review. True if handled. While it waits, the editor's own keys still work over it (#61): a
 /// picker or a prompt open, a key sequence under way (`space W`, `space m c`), `space`, `:` and `C-w` that
-/// start one — and `C-d` `C-u` `C-f` `C-b` `C-e` `C-y` (page keys too) scroll it. Esc goes back to the chat,
-/// the change unanswered (#70) — `C-q` brings the keys back to it; with no chat it's said and nothing
-/// happens (`n` rejects).
+/// start one — and `C-d` `C-u` `C-f` `C-b` `C-e` `C-y` (page keys too) scroll it. Esc gives the keys back
+/// where they were before it took them, the change unanswered (#70, #118): to the chat if it had them,
+/// else to the code — `C-q` brings them back to it.
 pub fn review_key(ed: &mut Editor, key: Key) -> bool {
     if ed.picker.is_some() || ed.prompt.is_some() || !ed.pending.is_empty() {
         return false;
@@ -1099,15 +1106,22 @@ pub fn review_key(ed: &mut Editor, key: Key) -> bool {
     let page = ed.viewport.0.max(2) as isize;
     let chat = ed.session.chat.as_ref().map(|c| c.focused);
     let Some(rev) = ed.session.review.as_mut().filter(|r| r.ready) else { return false };
+    let c_q = key.ctrl && !key.alt && key.code == Code::Char('q');
     // Back in the chat: its keys are the chat's until `C-q`
     if chat == Some(true) {
-        if key.ctrl && !key.alt && key.code == Code::Char('q') {
+        if c_q {
+            rev.away = false;
             if let Some(c) = ed.session.chat.as_mut() {
                 c.focused = false;
             }
             return true;
         }
         return false;
+    }
+    // Back in the code: the editor's until `C-q`
+    if rev.away {
+        rev.away = !c_q;
+        return c_q;
     }
     let scroll = |rev: &mut Review, by: isize| {
         rev.scroll = rev.scroll.saturating_add_signed(by);
@@ -1123,12 +1137,16 @@ pub fn review_key(ed: &mut Editor, key: Key) -> bool {
         (Code::Char('e'), true, false) => scroll(rev, 1),
         (Code::Char('y'), true, false) => scroll(rev, -1),
         (Code::Esc, ..) => {
-            match ed.session.chat.as_mut() {
+            match ed.session.chat.as_mut().filter(|_| rev.from_chat) {
                 Some(c) => {
                     c.focused = true;
                     ed.set_status("back to the chat — the change waits unanswered, C-q answers it");
                 }
-                None => ed.set_status("the change waits — y accepts, n rejects"),
+                None => {
+                    rev.away = true;
+                    ed.mode = crate::editor::Mode::Normal;
+                    ed.set_status("back to the code — the change waits unanswered, C-q answers it");
+                }
             }
             return true;
         }

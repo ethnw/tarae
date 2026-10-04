@@ -21,6 +21,9 @@ pub struct Allowed {
     pub write: Vec<PathBuf>,
     /// Ports on this machine Claude's commands may connect to.
     pub ports: Vec<u16>,
+    /// Unix sockets Claude's commands may connect to — each one file, by its real path (#119); this
+    /// conversation's at most, never kept.
+    pub sockets: Vec<PathBuf>,
 }
 
 impl Allowed {
@@ -48,10 +51,15 @@ impl Allowed {
         match g {
             Grant::Write(p) => self.add_write(p.clone()),
             Grant::Port(n) => self.add_port(*n),
+            Grant::Socket(s) => {
+                if !self.sockets.contains(s) {
+                    self.sockets.push(s.clone());
+                }
+            }
         }
     }
 
-    /// Takes back a place or a port (as `:sandbox-allowed` lists it).
+    /// Takes back a place, a port or a socket (as `:sandbox-allowed` lists it).
     pub fn remove(&mut self, what: &str) {
         let at = Path::new(what);
         self.read.retain(|p| p != at);
@@ -59,10 +67,13 @@ impl Allowed {
         if let Some(n) = what.strip_prefix("port ").and_then(|n| n.parse::<u16>().ok()) {
             self.ports.retain(|p| *p != n);
         }
+        if let Some(s) = what.strip_prefix("socket ") {
+            self.sockets.retain(|p| p != Path::new(s));
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.read.is_empty() && self.write.is_empty() && self.ports.is_empty()
+        self.read.is_empty() && self.write.is_empty() && self.ports.is_empty() && self.sockets.is_empty()
     }
 }
 
@@ -73,11 +84,14 @@ fn add_place(list: &mut Vec<PathBuf>, real: PathBuf) {
     }
 }
 
-/// What a command of Claude's may do more: write in a folder, connect to a port on this machine.
+/// What a command of Claude's may do more: write in a folder, connect to a port on this machine, or to one
+/// unix socket (#119 — colima's `docker.sock` for `cargo xtask linux`: the only way was the sandbox off).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Grant {
     Write(PathBuf),
     Port(u16),
+    /// That socket file only (its real path) — never a folder of them, never kept.
+    Socket(PathBuf),
 }
 
 impl Grant {
@@ -86,7 +100,26 @@ impl Grant {
         match self {
             Grant::Write(p) => format!("write in {} and everything in it", tilde(p)),
             Grant::Port(n) => format!("connect to port {n} on this machine"),
+            Grant::Socket(s) => format!("connect to the socket {} — that one file", tilde(s)),
         }
+    }
+
+    /// Whether it can be kept for the project (`A`): a socket can't — a server's socket is the server.
+    pub fn keepable(&self) -> bool {
+        !matches!(self, Grant::Socket(_))
+    }
+
+    /// For a socket that's Docker's (`docker.sock`, colima's, Docker Desktop's): what connecting to it
+    /// means, said on its card.
+    pub fn warning(&self) -> Option<&'static str> {
+        let Grant::Socket(s) = self else { return None };
+        let docker = s.file_name().is_some_and(|n| n == "docker.sock")
+            || s.components()
+                .any(|c| matches!(c.as_os_str().to_str(), Some(".colima" | ".docker" | ".orbstack")));
+        docker.then_some(
+            "It's Docker's: what connects to it can start a container that mounts any folder — as much as \
+             running outside the sandbox.",
+        )
     }
 }
 
@@ -131,7 +164,7 @@ impl Store {
             let ports = ports.filter_map(|p| u16::try_from(p).ok()).collect();
             projects.insert(
                 PathBuf::from(project),
-                Allowed { read: paths("read"), write: paths("write"), ports },
+                Allowed { read: paths("read"), write: paths("write"), ports, sockets: Vec::new() },
             );
         }
         Store { projects }
@@ -234,6 +267,99 @@ pub fn write_choices(target: &Path, home: &Path, root: &Path, path: &[PathBuf]) 
     out
 }
 
+/// What `a`/`A` on a read's card allow for `reads` (real paths) — each place itself, or its folder when
+/// another read there asks too or was let through once (`others` — #102: twelve shots in one folder were
+/// twelve cards): the folder then, with everything in it. Only a folder that can be kept (`keepable`), deep
+/// enough not to be a whole area (`/private/tmp`, `/opt` — `WRITE_DEPTH`), not home's own folders
+/// (`~/Downloads`), nor a temp folder itself.
+pub fn grant_places(reads: &[PathBuf], others: &[PathBuf], home: Option<&Path>) -> Vec<PathBuf> {
+    let temp = crate::sandbox::real(&std::env::temp_dir());
+    let roots = [
+        PathBuf::from("/private/tmp"),
+        temp.clone(),
+        temp.parent().map(Path::to_path_buf).unwrap_or_default(),
+    ];
+    let mut out: Vec<PathBuf> = Vec::new();
+    for r in reads {
+        let folder = r.parent().filter(|dir| {
+            let sibling = reads.iter().chain(others).any(|o| o != r && o.parent() == Some(dir));
+            sibling
+                && keepable(dir, home)
+                && dir.components().count() > WRITE_DEPTH
+                && home.is_none_or(|h| dir.parent() != Some(h))
+                && !roots.iter().any(|t| t == dir)
+        });
+        let place = folder.map_or_else(|| r.clone(), Path::to_path_buf);
+        if !out.contains(&place) {
+            out.push(place);
+        }
+    }
+    out
+}
+
+/// Folders of code read unasked, wherever they are (#112): the Rust toolchains' own sources
+/// (`<rustup home>/toolchains/*/lib/rustlib/src`) and the crates cargo downloaded (`<cargo home>/registry/
+/// src`) — real paths, those that are there. Never the cargo home itself (its `credentials.toml`) nor
+/// anything else in either home: a link in these trees that leads out is judged where it leads.
+pub fn code_trees(cargo_home: Option<&Path>, rustup_home: Option<&Path>) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = cargo_home.map(|c| c.join("registry/src")).into_iter().collect();
+    if let Some(toolchains) = rustup_home.and_then(|r| std::fs::read_dir(r.join("toolchains")).ok()) {
+        out.extend(toolchains.flatten().map(|t| t.path().join("lib/rustlib/src")));
+    }
+    out.into_iter().filter_map(|p| std::fs::canonicalize(p).ok()).filter(|p| p.is_dir()).collect()
+}
+
+/// `$CARGO_HOME` (else `~/.cargo`) and `$RUSTUP_HOME` (else `~/.rustup`), as this process sees them.
+fn rust_homes() -> (Option<PathBuf>, Option<PathBuf>) {
+    let at = |var: &str, dir: &str| {
+        std::env::var_os(var)
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .or_else(|| home().map(|h| h.join(dir)))
+    };
+    (at("CARGO_HOME", ".cargo"), at("RUSTUP_HOME", ".rustup"))
+}
+
+/// What a read of Claude's may read unasked besides the project and what the user allowed: the code
+/// folders (`code_trees`) and the project's own build folders outside it, as far as the sandbox has found
+/// them (`sandbox::build_dirs` — its target and build dirs: Claude's runs write there already). On a worker.
+pub fn also_readable(root: &Path) -> Vec<PathBuf> {
+    let (cargo, rustup) = rust_homes();
+    let mut v = code_trees(cargo.as_deref(), rustup.as_deref());
+    // (a cargo config can point them anywhere: never home or above it, nor where keys are)
+    let h = home();
+    v.extend(crate::sandbox::build_dirs(root).into_iter().filter(|d| keepable(d, h.as_deref())));
+    v
+}
+
+/// The real sysroot `$(rustc --print sysroot)` gives where a command runs (`cwd`), as rustup says it
+/// (`rustup show active-toolchain` — it reads the toolchain files; nothing of the project's runs): one of
+/// rustup's toolchains that's there, else None. On a worker.
+pub fn sysroot(cwd: &Path) -> Option<PathBuf> {
+    let out = std::process::Command::new("rustup")
+        .args(["show", "active-toolchain"])
+        .current_dir(cwd)
+        .env("RUSTUP_AUTO_INSTALL", "0")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    sysroot_of(&String::from_utf8_lossy(&out.stdout), rust_homes().1.as_deref()?)
+}
+
+/// The toolchain rustup names first in `said` (`1.99.0-aarch64-apple-darwin (overridden by …)`), as a
+/// folder of `rustup_home`'s that's there (real path) — a name that isn't one (a path, `..`) is None.
+pub fn sysroot_of(said: &str, rustup_home: &Path) -> Option<PathBuf> {
+    let name = said.split_whitespace().next()?;
+    let plain = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || "-._".contains(c));
+    if !plain || name.starts_with('.') {
+        return None;
+    }
+    let toolchains = std::fs::canonicalize(rustup_home.join("toolchains")).ok()?;
+    let dir = std::fs::canonicalize(toolchains.join(name)).ok()?;
+    (dir.parent() == Some(toolchains.as_path()) && dir.is_dir()).then_some(dir)
+}
+
 /// Home, as the process sees it.
 pub fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from).filter(|h| h.is_absolute())
@@ -280,6 +406,8 @@ pub fn grant(ed: &mut crate::editor::Editor, g: &Grant, scope: Scope) {
     if scope == Scope::Once {
         return;
     }
+    // (a socket is this conversation's at most)
+    let scope = if g.keepable() { scope } else { Scope::ThisChat };
     if let Some(c) = ed.session.chat.as_mut() {
         c.allowed.add(g);
     }
@@ -324,6 +452,9 @@ impl crate::editor::Editor {
                 for n in a.ports.iter().filter(|n| not_kept(kept.ports.contains(n))) {
                     items.push(row(format!("port {n}"), format!("connects · {when}")));
                 }
+                for s in &a.sockets {
+                    items.push(row(format!("socket {}", s.display()), format!("connects · {when}")));
+                }
             }
             match items.is_empty() {
                 true => Err(FillError::Nothing("nothing allowed past the defaults in this project".into())),
@@ -339,8 +470,11 @@ impl crate::editor::Editor {
     /// reading there, its commands can't write there or connect there.
     pub fn sandbox_disallow(&mut self, what: &str) -> Result<(), String> {
         let what = what.trim().to_string();
-        if !what.starts_with('/') && !what.starts_with("port ") {
-            return Err("usage: :sandbox-disallow <path | port N> — as :sandbox-allowed lists it".into());
+        if !what.starts_with('/') && !what.starts_with("port ") && !what.starts_with("socket /") {
+            return Err(
+                "usage: :sandbox-disallow <path | port N | socket path> — as :sandbox-allowed lists it"
+                    .into(),
+            );
         }
         if let Some(c) = self.session.chat.as_mut() {
             c.allowed.remove(&what);
@@ -409,6 +543,61 @@ mod tests {
         assert!(!keepable(Path::new("/Users/u/.ssh/id_ed25519"), home));
         assert!(!keepable(Path::new("/Users/u/.config/gh"), home));
         assert!(keepable(Path::new("/Users/u/.sshrc"), home), "by path parts, not by prefix");
+    }
+
+    /// #112: the code folders are the toolchains' sources and cargo's downloaded crates — never cargo's own
+    /// files beside them (its credentials) — and a read of one goes unasked while a link in them that
+    /// leads out is judged where it leads. The sysroot rustup names is one of its toolchains, or none.
+    #[test]
+    fn code_folders_are_the_sources_and_nothing_beside_them() {
+        let base = std::env::temp_dir().join(format!("tarae-code-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        let (cargo, rustup) = (base.join("cargo"), base.join("rustup"));
+        let krate = cargo.join("registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.170/src");
+        std::fs::create_dir_all(&krate).unwrap();
+        std::fs::create_dir_all(rustup.join("toolchains/stable-x/lib/rustlib/src/rust")).unwrap();
+        std::fs::create_dir_all(rustup.join("toolchains/bare-y/lib")).unwrap();
+        std::fs::create_dir_all(base.join("p")).unwrap();
+        std::fs::write(krate.join("lib.rs"), "x\n").unwrap();
+        std::fs::write(cargo.join("credentials.toml"), "marker\n").unwrap();
+        std::os::unix::fs::symlink(cargo.join("credentials.toml"), krate.join("leak.rs")).unwrap();
+        let base = std::fs::canonicalize(&base).unwrap();
+        let (cargo, rustup, p) = (base.join("cargo"), base.join("rustup"), base.join("p"));
+        let mut trees = code_trees(Some(&cargo), Some(&rustup));
+        trees.sort();
+        assert_eq!(
+            trees,
+            [cargo.join("registry/src"), rustup.join("toolchains/stable-x/lib/rustlib/src")],
+            "a toolchain without its sources adds nothing"
+        );
+        let kept = Allowed { read: trees, ..Default::default() };
+        let none = Allowed::default();
+        let at = |c: &str| crate::readonly::outside(c, &p, &p, &none, &kept, None).unwrap();
+        let lib = krate_at(&cargo).join("lib.rs");
+        assert!(at(&format!("sed -n '1,20p' {}", lib.display())).is_empty());
+        assert!(at(&format!("grep -rn fn {}", cargo.join("registry/src").display())).is_empty());
+        let creds = cargo.join("credentials.toml");
+        assert_eq!(at(&format!("cat {}", creds.display())), std::slice::from_ref(&creds));
+        assert_eq!(
+            at(&format!("cat {}", krate_at(&cargo).join("leak.rs").display())),
+            std::slice::from_ref(&creds)
+        );
+        assert_eq!(
+            at(&format!("ls {}", cargo.display())),
+            std::slice::from_ref(&cargo),
+            "the cargo home itself"
+        );
+        // The sysroot rustup names: one of its toolchains that's there
+        let tc = rustup.join("toolchains/stable-x");
+        assert_eq!(sysroot_of("stable-x (overridden by '/p/rust-toolchain.toml')\n", &rustup), Some(tc));
+        for said in ["", "nope-z", "..", "../../cargo", "/tmp/tc (path)", "stable-x/../bare-y"] {
+            assert_eq!(sysroot_of(said, &rustup), None, "{said}");
+        }
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    fn krate_at(cargo: &Path) -> PathBuf {
+        cargo.join("registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.170/src")
     }
 
     /// The folders offered for a denied write: its nearest existing folder up to just below home — never

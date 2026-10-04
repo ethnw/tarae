@@ -450,6 +450,12 @@ pub struct Editor {
     /// The card (id, rev) whose whole text `v` opened, in this buffer — seen whole once its last line has
     /// been on screen (opening it isn't reading it: a line 50 would go unseen).
     pub offer_view: std::cell::Cell<Option<(u64, u64, DocId)>>,
+    /// Every card's `v` buffer and the card it's of (E17: closed with that card, not with the last card of
+    /// its title — one "Claude wants to run" parked in another session kept them all open).
+    pub offer_views: Vec<(DocId, u64)>,
+    /// Config files auto-save held back because they don't parse (`disk::unparsed_config`) — the version
+    /// it was said for, so it's said once per change.
+    pub auto_held: Vec<(DocId, u64)>,
     /// The texts of cards seen whole since tarae started (`offer::text_hash`): the same card again — a script run
     /// again unchanged — isn't to be read again.
     pub offer_read: std::cell::RefCell<std::collections::HashSet<u64>>,
@@ -636,6 +642,8 @@ impl Editor {
             offer_whole: Default::default(),
             offer_early: Default::default(),
             offer_view: Default::default(),
+            offer_views: Vec::new(),
+            auto_held: Vec::new(),
             offer_read: Default::default(),
             offer_seq: 0,
             hook_waits: Vec::new(),
@@ -1412,6 +1420,7 @@ impl Editor {
         self.blame_schedule();
         self.sidebar_sync();
         self.sessions_sync();
+        crate::restart::sync(self);
         self.picker_filter();
         self.conflicts_sync();
         self.disk_sync();
@@ -2681,9 +2690,10 @@ impl Editor {
             };
             self.set_status(format!("the card asks {asks} — esc goes back"));
         }
-        // Answered (or gone): the keys go back where they were
+        // Answered (or gone): the keys go to the next card up here (#101 — card 2 of 3 waited for another
+        // `C-q`), else back where they were
         if self.offers.first().map(|o| o.id) != front {
-            self.card_keys = false;
+            self.card_keys = self.offers.first().is_some_and(|o| !o.installing());
         }
         true
     }
@@ -5536,7 +5546,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// #27: a card's `a` lets its pattern (`tools::pattern` — here the whole `echo one two`) run without
+    /// #27: a card's `a` lets its pattern (`tools::pattern` — here the whole `basename one two`) run without
     /// asking for the rest of the chat: the same command the next turn has no card. The card says so.
     #[test]
     fn a_cards_this_chat_allows_its_pattern() {
@@ -5545,17 +5555,17 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let dir = std::fs::canonicalize(&dir).unwrap();
         let mut ed = editor("");
-        let log = claude_calls(&mut ed, &dir, "run", &json!({ "command": "echo one two" }));
+        let log = claude_calls(&mut ed, &dir, "run", &json!({ "command": "basename one two" }));
         feed(&mut ed, "<space>lsay it<ret>");
         settle_for(&mut ed, |ed| !ed.offers.is_empty());
         let q = ed.offers[0].question.clone();
-        assert!(q.contains("a — also `echo one two …` unasked, this chat"), "{q}");
+        assert!(q.contains("a — also `basename one two …` unasked, this chat"), "{q}");
         assert!(ed.offers[0].lasts() && !ed.offers[0].keeps(), "a — this chat; never for good");
         // (`a`, as its key does once the card has been in sight)
         ed.offer_for_chat();
         settle_for(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
         assert!(tool_answer(&log).contains("exit 0"));
-        assert_eq!(ed.session.chat.as_ref().unwrap().run_allow, ["echo one two"]);
+        assert_eq!(ed.session.chat.as_ref().unwrap().run_allow, ["basename one two"]);
         ed.session.chat.as_mut().unwrap().focused = true;
         let answers = |log: &Path| std::fs::read_to_string(log).unwrap_or_default().matches("\"c7\"").count();
         feed(&mut ed, "again<ret>");
@@ -5564,7 +5574,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// #32: a check piped into filters is the check — unasked where the check alone is (`echo one` stands in
+    /// #32: a check piped into filters is the check — unasked where the check alone is (`basename one` stands in
     /// for it here, as an allowed pattern), and on a card its pattern is offered; a pipe into what isn't a
     /// filter (`tee`) still asks.
     #[test]
@@ -5574,10 +5584,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let dir = std::fs::canonicalize(&dir).unwrap();
         // (no `sh -c '…'` here: the fake claude's JSON goes in single quotes — tools.rs tests that form)
-        let piped = "echo one two 2>&1 | grep -E \"one|x\" | head -n 1";
+        let piped = "basename one two 2>&1 | grep -E \"one|x\" | head -n 1";
         // Allowed: no card, it ran
         let mut ed = editor("");
-        ed.config.llm.run_allow = vec!["echo one".into()];
+        ed.config.llm.run_allow = vec!["basename one".into()];
         let log = claude_calls(&mut ed, &dir, "run", &json!({ "command": piped }));
         feed(&mut ed, "<space>lsay it<ret>");
         settle_for(&mut ed, |ed| !ed.offers.is_empty() || !ed.session.chat.as_ref().unwrap().busy());
@@ -5591,12 +5601,12 @@ mod tests {
         feed(&mut ed, "<space>lsay it<ret>");
         settle_for(&mut ed, |ed| !ed.offers.is_empty());
         let q = ed.offers[0].question.clone();
-        assert!(q.contains("a — also `echo one two …` unasked, this chat"), "{q}");
+        assert!(q.contains("a — also `basename one two …` unasked, this chat"), "{q}");
         // A pipe into a writer isn't a filter
         std::fs::remove_file(&log).ok();
         let mut ed = editor("");
-        ed.config.llm.run_allow = vec!["echo one".into()];
-        let tee = format!("echo one two | tee {}", dir.join("out").display());
+        ed.config.llm.run_allow = vec!["basename one".into()];
+        let tee = format!("basename one two | tee {}", dir.join("out").display());
         claude_calls(&mut ed, &dir, "run", &json!({ "command": tee }));
         feed(&mut ed, "<space>lsay it<ret>");
         settle_for(&mut ed, |ed| !ed.offers.is_empty());
@@ -6020,6 +6030,26 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// #101: `C-q` gave card 1 of 2 the keys; once it's answered they stay with card 2 (it waited for another
+    /// `C-q`), and once that's answered they're back where they were (insert mode, its text as typed).
+    #[test]
+    fn the_keys_go_on_to_the_next_card_after_an_answer() {
+        let mut ed = editor("");
+        for t in ["Rust syntax colors", "Go syntax colors"] {
+            let what = crate::offer::What::Grammars { lang: t.into(), names: Vec::new(), then: None };
+            ed.push_offer(crate::offer::Offer::new(t.into(), "Download it?", "", String::new(), what));
+        }
+        feed(&mut ed, "iab");
+        assert!(!ed.card_has_keys(), "insert mode keeps its keys");
+        feed(&mut ed, "<C-q>n");
+        assert_eq!(ed.offers.len(), 1, "the first answered");
+        assert!(ed.card_keys, "the keys went on to the second");
+        feed(&mut ed, "n");
+        assert!(ed.offers.is_empty() && !ed.card_keys);
+        feed(&mut ed, "c");
+        assert_eq!((ed.mode, text(&ed).as_str()), (Mode::Insert, "abc"), "back where they were");
+    }
+
     /// #23: Enter while Claude works queues the message — said over the input, nothing sent yet; ↑ takes it
     /// back to edit (out of the queue), Enter queues it again; it goes as the next turn when this one ends.
     #[test]
@@ -6132,14 +6162,31 @@ mod tests {
         assert!(ed.picker.is_some(), "space b opened over the review");
         feed(&mut ed, "<esc>");
         assert!(ed.picker.is_none() && ed.session.review.is_some(), "the picker went, the review waits");
-        // No chat: Esc leaves it waiting, said
+        // #118: it took the keys from the code — Esc gives them back to the code, unanswered: NORMAL, its
+        // keys the editor's (a `j` moves the cursor, a `y` answers nothing) until C-q
         feed(&mut ed, "<esc>");
         assert!(ed.session.review.is_some(), "esc didn't answer it");
-        // A chat: Esc goes back to it, unanswered
+        assert_eq!(ed.mode, Mode::Normal);
+        // (the change's row, scrolled past above)
+        ed.session.review.as_mut().unwrap().follow = true;
+        let s = draw(&mut ed);
+        assert!(s.contains("C-q answer it — the code has the keys"), "{s}");
+        assert_eq!(ed.keys_at().label(), None, "the status line says the code's mode, not REVIEW");
+        let line = ed.cursor_line();
+        feed(&mut ed, "jy");
+        assert_eq!(ed.cursor_line(), line + 1, "the code's j");
+        let undecided = |ed: &Editor| {
+            ed.session.review.as_ref().is_some_and(|r| r.hunks[0].decision == crate::llm::Decision::Undecided)
+        };
+        assert!(undecided(&ed), "y was the code's");
+        feed(&mut ed, "<C-q>");
+        assert!(!ed.session.review.as_ref().unwrap().away, "C-q: the review has the keys again");
+        // A chat that had the keys when the review took them: Esc goes back to it, unanswered
         ed.config.llm.command = "sh".into();
         ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
         crate::chat::open(&mut ed);
         ed.session.chat.as_mut().unwrap().focused = false;
+        ed.session.review.as_mut().unwrap().from_chat = true;
         feed(&mut ed, "<tab>");
         let s = draw(&mut ed);
         assert!(s.contains("esc back, unanswered"), "{s}");
@@ -6471,8 +6518,8 @@ mod tests {
         assert!(ed.offers.is_empty() && made.exists(), "agreed for the conversation: no card");
         std::fs::remove_file(&made).ok();
         // A command that asks anyway: its own card says there's no sandbox, and `y` there is enough
-        // (`;` makes it more than a check)
-        let (mut ed, _) = start(&format!("{command}; true"));
+        // (`;` and what isn't a check make it more than a check)
+        let (mut ed, _) = start(&format!("{command}; basename x"));
         settle_for(&mut ed, |ed| !ed.offers.is_empty());
         let o = &ed.offers[0];
         assert!(matches!(&o.what, crate::offer::What::Run(r) if r.unprotected));
@@ -6571,7 +6618,7 @@ mod tests {
             cwd: std::env::temp_dir(),
         });
         run.state = crate::task::State::Running;
-        run.guard = Some(crate::sandbox::Guard::In(policy.clone()));
+        run.guard = Some(crate::sandbox::Guard::In(Box::new(policy.clone())));
         ed.session.task_run = Some(run);
         assert!(!screen(&mut ed).contains("sandbox blocked"), "nothing blocked: no line");
         let d = |op: &str, target: &str| crate::sandbox::Denial {
@@ -6589,7 +6636,7 @@ mod tests {
         // The test pane, the same
         ed.session.task_run = None;
         let mut t = crate::testing::TestRun::finished("tests", Vec::new(), vec!["running 1 test".into()]);
-        t.guard = Some(crate::sandbox::Guard::In(policy));
+        t.guard = Some(crate::sandbox::Guard::In(Box::new(policy)));
         ed.session.test_run = Some(t);
         let s = screen(&mut ed);
         assert!(
@@ -6636,7 +6683,7 @@ mod tests {
             cmd: cmd.into(),
             cwd: dir.clone(),
         });
-        run.guard = Some(crate::sandbox::Guard::In(policy));
+        run.guard = Some(crate::sandbox::Guard::In(Box::new(policy)));
         run.by_claude = true;
         ed.session.task_run = Some(run);
         let screen = |ed: &mut Editor| {
@@ -10981,6 +11028,18 @@ mod tests {
         ed.session.parked.push(o);
         ed.handle_event(Event::Resize);
         assert_eq!(card_buffers(&ed), ["card · Third card"]);
+        ed.session.parked.clear();
+        ed.handle_event(Event::Resize);
+        // E17: a card of the same title up elsewhere — another session's "Claude wants to run" — doesn't keep
+        // the answered one's buffer
+        ed.push_offer(card("Claude wants to run"));
+        ed.offer_view_all();
+        ed.session.parked.push(card("Claude wants to run"));
+        ed.handle_event(Event::Resize);
+        assert_eq!(card_buffers(&ed), ["card · Claude wants to run"]);
+        ed.offer_dismiss();
+        ed.handle_event(Event::Resize);
+        assert!(card_buffers(&ed).is_empty(), "went with its card: {:?}", card_buffers(&ed));
     }
 
     /// What a weighty card asks you to decide is its most visible text: its first paragraph (a command, a

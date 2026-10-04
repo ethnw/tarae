@@ -452,15 +452,18 @@ fn run_schema() -> Value {
         "description": "Run a shell command in the project, in the user's editor, and get how it ended and \
     its output — build, lint, format, test suites, git. The user watches it in their task panel. Both output \
     streams come back whole (long output: its start and end), so don't redirect or pipe to head/tail for \
-    that. Checks (cargo build/check/test/clippy/fmt, go build/test/vet, git status/diff/log/show) start at \
-    once — words only (quotes are fine), alone or piped into grep head tail wc sort cut uniq, sed -n 'a,bp'. \
-    So do read-only ones (ls cat head tail wc grep rg find tree stat file du diff sort uniq cut pwd, \
-    sed -n 'a,bp', git blame/rev-parse/ls-files/branch; git -C <dir> too) whose paths stay in the \
-    project — and lines of checks and reads joined by ; && || |, with cd, or the same in sh -c '…' (no $, backticks or \
-    redirects to files). To run somewhere other than the project root, give cwd rather than a cd. Any other \
-    command waits for the user to allow it — if they say no, don't retry it, ask. No stdin and no terminal: \
-    nothing interactive. For one test file or test, run_tests is better (it reads each failure). Commands \
-    run in a sandbox; when one can't work in it (it needs the network, or to write where the sandbox \
+    that. Checks (cargo build/check/test/clippy/fmt/tree/metadata, go build/test/vet, git status/diff/log/show) \
+    start at once — words only (quotes are fine), alone or piped into grep head tail wc sort cut uniq, sed -n \
+    'a,bp'. So do read-only ones (ls cat head tail wc grep rg find tree stat file du diff sort uniq cut pwd \
+    echo nm otool strings size, sed -n 'a,bp', git blame/rev-parse/ls-files/branch/show, git diff --no-index; \
+    git -C <dir> too) whose paths stay in the project, the Rust toolchain's sources ($(rustc --print \
+    sysroot)/lib/rustlib/src) or cargo's downloaded crates — and lines of checks and reads joined by ; && || |, \
+    with cd, for/while-read loops of reads, or the same in sh -c '…' (no other $, no backticks or redirects \
+    to files). To run somewhere other than the project root, give cwd rather than a cd. Any other command \
+    waits for the user to allow it — if they say no, don't retry it, ask. No stdin and no terminal: nothing \
+    interactive. For one test file or test, run_tests is better (it reads each failure). Commands run in a \
+    sandbox; when one needs one unix socket outside it (a server's — colima's docker.sock), ask for that: \
+    unix_socket with your reason; when it can't work in it otherwise (the network, writing where the sandbox \
     doesn't let it), you may ask to run it outside: outside_sandbox with your reason — the user decides on a \
     card, this once.",
         "inputSchema": {
@@ -469,7 +472,8 @@ fn run_schema() -> Value {
                 "command": { "type": "string", "description": "The command line (run by sh -c)" },
                 "cwd": { "type": "string", "description": "The folder it runs in, inside the project (relative to its root); the root if left out" },
                 "outside_sandbox": { "type": "boolean", "description": "Ask the user to run it outside the sandbox, this once (with reason)" },
-                "reason": { "type": "string", "description": "Why it can't run in the sandbox — required with outside_sandbox; the user reads it" }
+                "unix_socket": { "type": "string", "description": "Ask the user to let it connect to this one unix socket (its path; with reason) — the rest stays sandboxed" },
+                "reason": { "type": "string", "description": "Why it can't run in the sandbox as it is — required with outside_sandbox or unix_socket; the user reads it" }
             },
             "required": ["command"]
         }
@@ -480,13 +484,16 @@ fn run_schema() -> Value {
 const REASON_MAX: usize = 300;
 
 /// Commands that run without asking: the checks, and git's read-only ones — by whole words, and only
-/// when the line has nothing the shell would read as more than words (`allowed`).
-pub const RUN_ALLOW: [&str; 13] = [
+/// when the line has nothing the shell would read as more than words (`allowed`). `cargo tree` and `cargo
+/// metadata` read the dependency graph (#116) — cargo as the checks run it, in the sandbox.
+pub const RUN_ALLOW: [&str; 15] = [
     "cargo build",
     "cargo check",
     "cargo test",
     "cargo clippy",
     "cargo fmt",
+    "cargo tree",
+    "cargo metadata",
     "go build",
     "go test",
     "go vet",
@@ -518,8 +525,10 @@ pub fn allowed(cmd: &str, extra: &[String]) -> bool {
     env_allowed_words(&names, &words, extra)
 }
 
-/// A command setting `names` (`NAME=value` in front, or through `env`) allowed: by a rule naming each of
-/// them — not by the built-in checks: `RUSTC_WRAPPER=x cargo build` runs x.
+/// A command setting `names` (`NAME=value` in front, or through `env`) allowed: by a rule that sets names
+/// too — any of them then, more or fewer than it named (#114: `A=… B=… cargo xtask shot` covers `A=… C=…
+/// cargo xtask shot`), each one a pattern may set (`readonly::env_allowed`) — not by the built-in checks
+/// nor a rule setting none: `RUSTC_WRAPPER=x cargo build` runs x.
 fn env_allowed_words(names: &[String], words: &[String], extra: &[String]) -> bool {
     if names.is_empty() {
         return allowed_words(words, extra);
@@ -530,7 +539,7 @@ fn env_allowed_words(names: &[String], words: &[String], extra: &[String]) -> bo
     !words.iter().any(|w| WRITES.iter().any(|o| w.starts_with(o)))
         && extra.iter().any(|rule| {
             let (set, rest) = rule_env(rule);
-            names.iter().all(|n| set.contains(&n.as_str())) && rule_matches(words, &rest)
+            !set.is_empty() && rule_matches(words, &rest)
         })
 }
 
@@ -609,6 +618,15 @@ fn allowed_words(words: &[String], extra: &[String]) -> bool {
         return false;
     }
     let words = &crate::readonly::git_plain(words);
+    // (`git diff --no-index a b` reads the files it names: a read, judged where it reads — #110)
+    if let [git, args @ ..] = &words[..]
+        && git == "git"
+        && let [sub, rest @ ..] = crate::readonly::git_after_c(args)
+        && sub == "diff"
+        && rest.iter().any(|w| w == "--no-index")
+    {
+        return false;
+    }
     RUN_ALLOW
         .iter()
         .copied()
@@ -653,6 +671,10 @@ pub fn is_check(cmd: &str) -> bool {
     let mut any = false;
     for p in &parts {
         let crate::readonly::Part::Cmd(w) = p else { continue };
+        // (`&& echo clean` says a word — A9)
+        if crate::readonly::says(w) {
+            continue;
+        }
         if !check_words(&w.iter().map(|w| w.text.clone()).collect::<Vec<_>>()) {
             return false;
         }
@@ -669,10 +691,43 @@ fn check_words(w: &[String]) -> bool {
     })
 }
 
-/// Programs that run whatever follows them — a pattern ending in one would allow anything.
-const RUNNERS: [&str; 22] = [
-    "sh", "bash", "zsh", "dash", "fish", "env", "sudo", "doas", "xargs", "nohup", "time", "nice", "exec",
-    "eval", "command", "builtin", "source", "python", "python3", "node", "ruby", "perl",
+/// Programs that run whatever follows them — a pattern ending in one would allow anything. Interpreters
+/// among them run a script file (`INTERPRETERS` — its card shows it).
+const RUNNERS: [&str; 34] = [
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "fish",
+    "env",
+    "sudo",
+    "doas",
+    "xargs",
+    "nohup",
+    "time",
+    "nice",
+    "exec",
+    "eval",
+    "command",
+    "builtin",
+    "source",
+    "python",
+    "python3",
+    "node",
+    "ruby",
+    "perl",
+    "awk",
+    "gawk",
+    "mawk",
+    "nawk",
+    "lua",
+    "php",
+    "osascript",
+    "deno",
+    "bun",
+    "tsx",
+    "rustup",
+    "npx",
 ];
 
 /// Whether a program's name is a runner's (`RUNNERS`, any `python…`) — what follows it, it runs.
@@ -748,7 +803,7 @@ fn words_pattern(names: &[String], words: &[String]) -> Option<String> {
         .take_while(|w| {
             !w.is_empty()
                 && !w.starts_with(['-', '.', '@', '+'])
-                && !w.contains(['/', '=', ':', '@', '"', '\''])
+                && !w.contains(['/', '=', ':', '@', '"', '\'', '$'])
         })
         .take(3)
         .collect();
@@ -789,18 +844,25 @@ fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
             crossed.join(", and ")
         ));
     }
-    // Outside the sandbox: always asked, with Claude's reason on the card — a check or a read-only command too
-    let outside = match args["outside_sandbox"].as_bool() == Some(true) {
-        true => {
-            let reason = args["reason"].as_str().map(str::trim).filter(|r| !r.is_empty()).ok_or(
-                "outside_sandbox needs a reason: why it can't run in the sandbox — the user reads it on the card",
-            )?;
+    // Outside the sandbox, or with one socket past it: always asked, with Claude's reason on the card — a
+    // check or a read-only command too
+    let socket = args["unix_socket"].as_str().map(str::trim).filter(|s| !s.is_empty());
+    let outside = match (args["outside_sandbox"].as_bool() == Some(true), socket) {
+        (false, None) => None,
+        (whole, socket) => {
+            let asked = if socket.is_some() && !whole { "unix_socket" } else { "outside_sandbox" };
+            let reason = args["reason"].as_str().map(str::trim).filter(|r| !r.is_empty()).ok_or(format!(
+                "{asked} needs a reason: why it can't run in the sandbox as it is — the user reads it on the card"
+            ))?;
             if reason.chars().count() > REASON_MAX {
                 return Err(format!("keep the reason to {REASON_MAX} characters — the card shows it whole"));
             }
-            Some(reason.to_string())
+            let socket = match socket.filter(|_| !whole) {
+                Some(s) => Some(socket_at(s)?),
+                None => None,
+            };
+            Some(Beyond { reason: reason.to_string(), socket })
         }
-        false => None,
     };
     run_busy(ed)?;
     let cwd = run_cwd(&ed.session.root, args["cwd"].as_str())?;
@@ -827,14 +889,40 @@ fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
     card(ed, call, cmd.to_string(), cwd, outside)
 }
 
+/// What Claude asked to run past the sandbox, and why: outside it whole, or with one unix socket (#119).
+#[derive(Clone, Debug)]
+pub struct Beyond {
+    pub reason: String,
+    pub socket: Option<PathBuf>,
+}
+
+/// The socket `unix_socket` names — `~/` from home — by its real path: a unix socket that's there. Err says
+/// why not (said to Claude). Never a folder or a pattern: one file.
+fn socket_at(s: &str) -> Result<PathBuf, String> {
+    use std::os::unix::fs::FileTypeExt as _;
+    let path = match (s.strip_prefix("~/"), crate::allow::home()) {
+        (Some(rest), Some(home)) => home.join(rest),
+        _ => PathBuf::from(s),
+    };
+    if !path.is_absolute() || s.contains(['*', '?', '[']) {
+        return Err(format!("unix_socket {s}: give the socket's full path — one file"));
+    }
+    let real = std::fs::canonicalize(&path).map_err(|e| format!("unix_socket {s}: {e}"))?;
+    match std::fs::metadata(&real).is_ok_and(|m| m.file_type().is_socket()) {
+        true => Ok(real),
+        false => Err(format!("unix_socket {s} isn't a unix socket")),
+    }
+}
+
 /// `cmd`'s card. Review at the end: a file it names that Claude wrote unseen this turn goes on the card
-/// with it — which ones, and their text, found on a worker.
+/// with it — which ones, and their text, found on a worker. So does each script it runs (#117: `awk -f x`,
+/// `python x.py` — what runs is in the file, not the line).
 fn card(
     ed: &mut Editor,
     call: Call,
     cmd: String,
     cwd: PathBuf,
-    outside: Option<String>,
+    outside: Option<Beyond>,
 ) -> Result<(), String> {
     let checkpoints = &ed.session.checkpoints;
     let unseen: Vec<PathBuf> = checkpoints
@@ -844,12 +932,17 @@ fn card(
         .map(|t| t.path.clone())
         .chain(checkpoints.carried.iter().cloned())
         .collect();
-    if unseen.is_empty() {
-        return ask(ed, cmd, cwd, call, Vec::new(), outside);
+    let scripts = scripts_run(&cmd);
+    if unseen.is_empty() && scripts.is_empty() {
+        return ask(ed, cmd, cwd, call, Vec::new(), Vec::new(), outside);
     }
     let root = ed.session.root.clone();
     ed.events.jobs().spawn(move || {
-        let shown = named(&root, &cmd, &cwd, &unseen);
+        let shown = match unseen.is_empty() {
+            true => Ok(Vec::new()),
+            false => named(&root, &cmd, &cwd, &unseen),
+        };
+        let scripts = read_scripts(&root, &cwd, &scripts, shown.as_deref().unwrap_or_default());
         // A move or copy of an unseen file: where it goes is unseen too, from now on — before it runs, so no
         // later call reads it as a file the user saw (what's there now kept, when it's text or nothing)
         let carried: Vec<(PathBuf, Result<Option<ropey::Rope>, ()>)> = match crate::readonly::only_moves(&cmd)
@@ -882,12 +975,149 @@ fn card(
                 }
             }
             let c = call.clone();
-            if let Err(e) = shown.and_then(|shown| ask(ed, cmd, cwd, call, shown, outside)) {
+            if let Err(e) = shown.and_then(|shown| ask(ed, cmd, cwd, call, shown, scripts, outside)) {
                 answer(ed, c, Err(e));
             }
         }
     });
     Ok(())
+}
+
+/// Programs that run a file of code named in their words, and how to find it: `sh x.sh`, `python3 -u
+/// x.py`, `perl x.pl` — the first word not an option; `awk -f x.awk`, `sed -f x.sed` — the value of `-f`;
+/// `deno run x.ts`, `bun run x.ts` — after the subcommand. An option that takes the code inline (`-c`,
+/// `-e`, `-m` a module) names no file.
+const INTERPRETERS: [&str; 22] = [
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "fish",
+    "python",
+    "python3",
+    "perl",
+    "ruby",
+    "node",
+    "deno",
+    "bun",
+    "tsx",
+    "lua",
+    "php",
+    "osascript",
+    "Rscript",
+    "awk",
+    "gawk",
+    "mawk",
+    "nawk",
+    "sed",
+];
+
+/// The script files `cmd` runs (`INTERPRETERS`, or one run by its path — `./x`), as written from where it
+/// runs (after a `cd`: from there). A line the shell reader can't read (a redirect, `$`) is split at its
+/// operators instead: this only says more.
+fn scripts_run(cmd: &str) -> Vec<PathBuf> {
+    let mut here = PathBuf::new();
+    let commands: Vec<(PathBuf, Vec<String>)> = match crate::readonly::parse(cmd) {
+        Some(parts) => parts
+            .into_iter()
+            .filter_map(|p| match p {
+                crate::readonly::Part::Cmd(w) => {
+                    Some((here.clone(), w.into_iter().map(|w| w.text).collect()))
+                }
+                crate::readonly::Part::Cd(d) => {
+                    here.push(d);
+                    None
+                }
+            })
+            .collect(),
+        None => cmd
+            .split(['\n', ';', '|', '&', '(', ')', '`'])
+            .map(|c| {
+                (
+                    here.clone(),
+                    c.split_whitespace().map(|w| w.trim_matches(['\'', '"']).to_string()).collect(),
+                )
+            })
+            .collect(),
+    };
+    let mut out: Vec<PathBuf> = Vec::new();
+    for (at, words) in commands {
+        let words: Vec<String> = match crate::readonly::env_words(&words) {
+            Some((_, rest)) => rest,
+            None => words,
+        };
+        let Some((first, args)) = words.split_first() else { continue };
+        let name = Path::new(first).file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        let name = if name.starts_with("python") { "python" } else { name };
+        let file = if !INTERPRETERS.contains(&name) {
+            // (a program by its path that isn't one of them — the file itself, if it's text: `read_scripts`)
+            first.contains('/').then(|| first.clone())
+        } else if matches!(name, "awk" | "gawk" | "mawk" | "nawk" | "sed") {
+            args.iter().enumerate().find_map(|(i, a)| match a.as_str() {
+                "-f" | "--file" => args.get(i + 1).cloned(),
+                a => a
+                    .strip_prefix("--file=")
+                    .or_else(|| a.strip_prefix("-f"))
+                    .filter(|f| !f.is_empty())
+                    .map(String::from),
+            })
+        } else {
+            let args = match (name, args.first().map(String::as_str)) {
+                ("deno" | "bun", Some("run")) => &args[1..],
+                _ => args,
+            };
+            let inline =
+                |a: &String| matches!(a.as_str(), "-c" | "-e" | "-E" | "-m" | "-p" | "--eval" | "--print");
+            match args.iter().position(|a| !a.starts_with('-') || inline(a)) {
+                Some(i) if !inline(&args[i]) => Some(args[i].clone()),
+                _ => None,
+            }
+        };
+        if let Some(f) = file.filter(|f| !f.is_empty()).map(|f| at.join(f)).filter(|f| !out.contains(f)) {
+            out.push(f);
+        }
+    }
+    out
+}
+
+/// A script a run card shows: where it is, and its text — or why it isn't shown.
+#[derive(Clone, Debug)]
+pub struct Script {
+    pub path: PathBuf,
+    pub text: Result<String, String>,
+}
+
+/// A script longer than this isn't put on the card (its size and path are).
+const SCRIPT_LINES_MAX: usize = 400;
+
+/// The scripts a card shows (`scripts_run`, from `cwd`), each that's there and not already on it as written
+/// unseen (`shown`) — on a worker. One that isn't text, has characters a card can't show as they are, or is
+/// longer than `SCRIPT_LINES_MAX` is named, and why it isn't shown. A program (not text) isn't a script.
+fn read_scripts(root: &Path, cwd: &Path, scripts: &[PathBuf], shown: &[(PathBuf, String)]) -> Vec<Script> {
+    let mut out: Vec<Script> = Vec::new();
+    for s in scripts {
+        let Ok(path) = std::fs::canonicalize(cwd.join(s)) else { continue };
+        if !path.is_file() || shown.iter().any(|(p, _)| *p == path) || out.iter().any(|x| x.path == path) {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else { continue };
+        let name = crate::chat::shown(root, &path);
+        let text = match String::from_utf8(bytes) {
+            // (a binary run by its path is a program, not a script)
+            Err(_) => continue,
+            Ok(t) if t.contains('\0') => continue,
+            Ok(t) if !draws_as_itself(&t) => {
+                Err(format!("{name} has characters a card can't show as they are"))
+            }
+            Ok(t) if t.lines().count() > SCRIPT_LINES_MAX => Err(format!(
+                "{name} has {} lines — too long to show here; read it before you say yes",
+                t.lines().count()
+            )),
+            Ok(t) => Ok(t),
+        };
+        out.push(Script { path, text });
+    }
+    out
 }
 
 /// Where a command runs: the project root (`root`, a real path), or `cwd` in it (relative to the root, or
@@ -921,10 +1151,12 @@ fn read_only(
     let chat = ed.session.chat.as_ref().map(|c| c.allowed.clone()).unwrap_or_default();
     let (store, root) = (ed.allow_path.clone(), ed.session.root.clone());
     ed.events.jobs().spawn(move || {
-        let kept = crate::allow::Store::read(store.as_deref()).get(&root);
-        let reads = crate::readonly::outside(&cmd, &cwd, &root, &chat, &kept);
+        let mut kept = crate::allow::Store::read(store.as_deref()).get(&root);
+        kept.read.extend(crate::allow::also_readable(&root));
+        let sysroot = cmd.contains(crate::readonly::SYSROOT).then(|| crate::allow::sysroot(&cwd)).flatten();
+        let reads = crate::readonly::outside(&cmd, &cwd, &root, &chat, &kept, sysroot.as_deref());
         // (a check or git that would run outside the project: the plain card, whatever reads are allowed)
-        let runs_outside = crate::readonly::runs_outside(&cmd, &cwd, &root);
+        let runs_outside = crate::readonly::runs_outside(&cmd, &cwd, &root, sysroot.as_deref());
         let pinned = pins.is_empty()
             || crate::readonly::script_pins(&cmd, &cwd, &root)
                 .is_some_and(|s| s.iter().all(|p| pins.contains(p)));
@@ -936,7 +1168,7 @@ fn read_only(
             }
             if runs_outside {
                 let c = call.clone();
-                if let Err(e) = ask(ed, cmd, cwd, call, Vec::new(), None) {
+                if let Err(e) = card(ed, call, cmd, cwd, None) {
                     answer(ed, c, Err(e));
                 }
                 return;
@@ -956,7 +1188,7 @@ fn read_only(
                 Err(_) => Vec::new(),
             };
             let c = call.clone();
-            if let Err(e) = ask_with(ed, cmd, cwd, call, Vec::new(), reads, None) {
+            if let Err(e) = ask_with(ed, cmd, cwd, call, Default::default(), reads, None) {
                 answer(ed, c, Err(e));
             }
         }
@@ -974,20 +1206,22 @@ pub fn runs_unasked(cmd: &str, extra: &[String]) -> bool {
         || crate::readonly::read_only(cmd)
 }
 
-/// The card for `cmd` — with each file in `shown` (path, text) whole under it; `outside`: Claude asks to run
-/// it outside the sandbox, for this reason.
+/// The card for `cmd` — with each file in `shown` (path, text) whole under it, and each script it runs
+/// (`scripts`); `outside`: Claude asks to run it outside the sandbox, for this reason.
 fn ask(
     ed: &mut Editor,
     cmd: String,
     cwd: PathBuf,
     call: Call,
     shown: Vec<(PathBuf, String)>,
-    outside: Option<String>,
+    scripts: Vec<Script>,
+    outside: Option<Beyond>,
 ) -> Result<(), String> {
-    ask_with(ed, cmd, cwd, call, shown, Vec::new(), outside)
+    ask_with(ed, cmd, cwd, call, (shown, scripts), Vec::new(), outside)
 }
 
 pub const OUTSIDE_RUN_TITLE: &str = "Claude wants to run — outside the sandbox";
+pub const SOCKET_RUN_TITLE: &str = "Claude wants to run — with one socket";
 
 /// The card for `cmd`, saying too what it reads outside the project (`reads` — a read-only command's):
 /// those can be allowed for longer, as on a read's card, unless one of them never can. Outside the sandbox
@@ -998,9 +1232,9 @@ fn ask_with(
     cmd: String,
     cwd: PathBuf,
     call: Call,
-    shown: Vec<(PathBuf, String)>,
+    (shown, scripts): (Vec<(PathBuf, String)>, Vec<Script>),
     reads: Vec<PathBuf>,
-    outside: Option<String>,
+    outside: Option<Beyond>,
 ) -> Result<(), String> {
     // (a card up for another command already: this one waits under it, counted — #5: refused, Claude sent
     // the same command again and again)
@@ -1014,15 +1248,33 @@ fn ask_with(
         question.push_str(&format!("\n  in {}", rel.display()));
         decided.end += 1;
     }
-    // (outside: the reason faint — Claude's own words — and what yes means in the warning color)
+    // (outside: the reason faint — Claude's own words — and what yes means in the warning color; one
+    // socket: which, said as decided, and the rest staying sandboxed — Docker's in the warning color)
     let mut warning = None;
-    if let Some(reason) = &outside {
-        question.push_str(&format!("\n\nIts reason: {}\n\n", reason.replace('\n', " ")));
+    if let Some(b) = &outside {
+        question.push_str(&format!("\n\nIts reason: {}\n\n", b.reason.replace('\n', " ")));
         let at = question.split('\n').count() - 1;
-        question.push_str(
-            "Outside the sandbox it runs with all your permissions — your files, your network — this once.",
-        );
-        warning = Some(at..at + 1);
+        match &b.socket {
+            None => {
+                question.push_str(
+                    "Outside the sandbox it runs with all your permissions — your files, your network — this \
+                     once.",
+                );
+                warning = Some(at..at + 1);
+            }
+            Some(s) => {
+                let g = crate::allow::Grant::Socket(s.clone());
+                question.push_str(&format!(
+                    "It may connect to {} — that one file; everything else stays in the sandbox.",
+                    crate::allow::tilde(s)
+                ));
+                if let Some(w) = g.warning() {
+                    question.push_str(&format!("\n\n{w}"));
+                    let at = question.split('\n').count() - 1;
+                    warning = Some(at..at + 1);
+                }
+            }
+        }
     }
     if !reads.is_empty() {
         question.push_str("\n\nIt reads outside the project:");
@@ -1036,6 +1288,20 @@ fn ask_with(
     let keep = outside.is_none()
         && !reads.is_empty()
         && reads.iter().all(|p| crate::allow::keepable(p, home.as_deref()));
+    // What `a`/`A` allow: files beside each other (or beside one read once) as their folder (#102)
+    let once = ed.session.chat.as_ref().map(|c| c.read_once.clone()).unwrap_or_default();
+    let grants = match keep {
+        true => crate::allow::grant_places(&reads, &once, home.as_deref()),
+        false => Vec::new(),
+    };
+    let folders: Vec<&PathBuf> = grants.iter().filter(|g| !reads.contains(g)).collect();
+    if !folders.is_empty() {
+        let shown: Vec<String> = folders.iter().map(|f| f.display().to_string()).collect();
+        question.push_str(&format!(
+            "\n\na and A allow everything in {} — not only these files.",
+            shown.join(", ")
+        ));
+    }
     // (a command that only reads is asked for where it reads, not what it is)
     let pattern = card_pattern(&cmd).filter(|_| outside.is_none() && reads.is_empty());
     if let Some(p) = &pattern {
@@ -1049,9 +1315,26 @@ fn ask_with(
             text.trim_end_matches('\n')
         ));
     }
+    // What a script it runs says — what runs is in it (#117); one that can't be shown, why
+    for s in &scripts {
+        match &s.text {
+            Ok(text) => question.push_str(&format!(
+                "\n\n{} — what it runs:\n{}",
+                crate::chat::shown(&ed.session.root, &s.path),
+                text.replace("\r\n", "\n").replace('\t', "    ").trim_end_matches('\n')
+            )),
+            Err(why) => question.push_str(&format!("\n\n{why}")),
+        }
+    }
+    // (`y` reads them again, as the unseen files: not run if one changed since the card)
+    let shown: Vec<(PathBuf, String)> = shown
+        .into_iter()
+        .chain(scripts.into_iter().filter_map(|s| s.text.ok().map(|t| (s.path, t))))
+        .collect();
     // Where there's no sandbox, this card is where the user hears it (outside one, it said so already)
+    let socket = outside.as_ref().and_then(|b| b.socket.clone());
     let unprotected = match (&ed.sandbox, ed.config.llm.sandbox) {
-        _ if outside.is_some() => None,
+        _ if outside.is_some() && socket.is_none() => None,
         (Availability::Missing(why), true) => Some(format!("No sandbox here ({why})")),
         (_, false) => Some("The sandbox is off (llm.sandbox)".to_string()),
         _ => None,
@@ -1059,9 +1342,10 @@ fn ask_with(
     if let Some(u) = &unprotected {
         question.push_str(&format!("\n\n{u} — it runs with all your permissions."));
     }
-    let title = match outside {
-        Some(_) => OUTSIDE_RUN_TITLE.to_string(),
-        None => "Claude wants to run".to_string(),
+    let title = match (&outside, &socket) {
+        (_, Some(_)) => SOCKET_RUN_TITLE.to_string(),
+        (Some(_), None) => OUTSIDE_RUN_TITLE.to_string(),
+        (None, None) => "Claude wants to run".to_string(),
     };
     call.step("card up");
     let card = RunCard {
@@ -1071,8 +1355,10 @@ fn ask_with(
         shown,
         unprotected: unprotected.is_some(),
         reads,
+        grants,
         keep,
-        outside: outside.is_some(),
+        outside: outside.is_some() && socket.is_none(),
+        socket,
         pattern,
     };
     let what = crate::offer::What::Run(Box::new(card));
@@ -1283,46 +1569,64 @@ pub struct Extra {
 }
 
 /// The settings a run's policy is made from with what's allowed added — kept for the project, for this
-/// conversation, and `once` — and how its result says it.
+/// conversation, and `once` — the sockets it may connect to (no setting has those), and how its result
+/// says it.
 pub fn with_allowed(
     llm: &crate::llm::LlmConfig,
     scopes: &[&crate::allow::Allowed],
     once: Option<&crate::allow::Grant>,
-) -> (crate::llm::LlmConfig, Vec<String>) {
+) -> (crate::llm::LlmConfig, Vec<String>, Vec<PathBuf>) {
     use crate::allow::Grant;
     let mut llm = llm.clone();
     let mut granted: Vec<String> = Vec::new();
+    let mut sockets: Vec<PathBuf> = Vec::new();
     let grants = scopes
         .iter()
         .flat_map(|a| {
-            a.write.iter().map(|p| Grant::Write(p.clone())).chain(a.ports.iter().map(|n| Grant::Port(*n)))
+            a.write
+                .iter()
+                .map(|p| Grant::Write(p.clone()))
+                .chain(a.ports.iter().map(|n| Grant::Port(*n)))
+                .chain(a.sockets.iter().map(|s| Grant::Socket(s.clone())))
         })
         .chain(once.cloned());
     for g in grants {
         match &g {
             Grant::Write(p) => llm.sandbox_write.push(p.display().to_string()),
             Grant::Port(n) => llm.sandbox_ports.push(*n),
+            Grant::Socket(s) if !sockets.contains(s) => sockets.push(s.clone()),
+            Grant::Socket(_) => {}
         }
         let said = g.shown();
         if !granted.contains(&said) {
             granted.push(said);
         }
     }
-    (llm, granted)
+    (llm, granted, sockets)
 }
 
 /// The user's answer on the card: `y` runs it — the files it showed read again first (on a worker), and not
 /// run if one changed since — `a`/`A` too, and what it reads outside stays allowed (this chat · always);
 /// None tells Claude no. `unprotected`: the card said there's no sandbox.
 pub fn run_answer(ed: &mut Editor, id: u64, what: RunCard, scope: Option<crate::allow::Scope>) {
-    let RunCard { cmd, cwd, call, shown, unprotected, reads, keep, outside, pattern } = what;
+    let RunCard { cmd, cwd, call, shown, unprotected, reads, grants, keep, outside, socket, pattern } = what;
     ed.offer_finished(id, Ok(()));
     let Some(scope) = scope else {
         return answer(ed, call, Err(format!("the user chose not to run `{cmd}`")));
     };
     call.step("answered yes");
+    // One socket past the sandbox: this run's (`y`), or this conversation's (`a` — #119)
+    let socket = socket.map(crate::allow::Grant::Socket);
+    if let Some(g) = socket.as_ref().filter(|_| scope != crate::allow::Scope::Once) {
+        crate::allow::grant(ed, g, crate::allow::Scope::ThisChat);
+    }
+    let outside = Extra { grant: socket, outside };
     if keep {
-        crate::allow::grant_reads(ed, &reads, scope);
+        crate::allow::grant_reads(ed, &grants, scope);
+    }
+    // (read once: a read beside one later offers their folder)
+    if let Some(c) = ed.session.chat.as_mut().filter(|_| scope == crate::allow::Scope::Once) {
+        c.read_once.extend(reads.iter().filter(|r| !c.read_once.contains(r)).cloned().collect::<Vec<_>>());
     }
     // `a` (or `A` where reads are kept too): its pattern for the rest of this chat — never for good; its
     // scripts as they are now (pinned on the worker below)
@@ -1377,14 +1681,13 @@ pub fn run_answer(ed: &mut Editor, id: u64, what: RunCard, scope: Option<crate::
     });
 }
 
-fn run_now(ed: &mut Editor, cmd: String, cwd: PathBuf, call: Call, unprotected: bool, outside: bool) {
+fn run_now(ed: &mut Editor, cmd: String, cwd: PathBuf, call: Call, unprotected: bool, extra: Extra) {
     // A yes while another command runs (two cards answered one after the other): it runs next (#5)
     if run_busy(ed).is_err() {
         ed.note(format!("`{cmd}` runs once the command running ends"));
         call.step("queued");
-        return ed.session.runs_next.push_back(Next { cmd, cwd, call, unprotected, outside });
+        return ed.session.runs_next.push_back(Next { cmd, cwd, call, unprotected, extra });
     }
-    let extra = Extra { grant: None, outside };
     guard_and_go(ed, For::Claude(call), Job::Command(cmd, cwd), unprotected, extra);
 }
 
@@ -1394,7 +1697,7 @@ pub struct Next {
     cwd: PathBuf,
     call: Call,
     unprotected: bool,
-    outside: bool,
+    extra: Extra,
 }
 
 /// The task panel's run ended: the next command said yes to, if one waits — and its call still does.
@@ -1405,7 +1708,7 @@ pub fn run_next(ed: &mut Editor) {
     while let Some(n) = ed.session.runs_next.pop_front() {
         if ed.session.chat.as_ref().is_some_and(|c| c.generation() == n.call.generation && c.busy()) {
             n.call.step("its turn");
-            return run_now(ed, n.cmd, n.cwd, n.call, n.unprotected, n.outside);
+            return run_now(ed, n.cmd, n.cwd, n.call, n.unprotected, n.extra);
         }
     }
 }
@@ -1421,9 +1724,13 @@ pub struct RunCard {
     pub shown: Vec<(PathBuf, String)>,
     pub unprotected: bool,
     pub reads: Vec<PathBuf>,
+    /// What `a`/`A` allow of `reads` — files beside each other as their folder (`allow::grant_places`).
+    pub grants: Vec<PathBuf>,
     pub keep: bool,
     /// Claude asked to run it outside the sandbox (`y` runs it so, once).
     pub outside: bool,
+    /// Claude asked to let it connect to this one unix socket (#119): `y` this run, `a` this chat.
+    pub socket: Option<PathBuf>,
     /// What `a` lets run without asking for the rest of the chat (`card_pattern`).
     pub pattern: Option<Pattern>,
 }
@@ -1492,9 +1799,9 @@ pub fn guard_and_go(ed: &mut Editor, who: For, job: Job, asked: bool, extra: Ext
         };
         let policy = (found == Availability::Ready).then(|| {
             let kept = crate::allow::Store::read(store.as_deref()).get(&crate::sandbox::real(&root));
-            let (llm, granted) = with_allowed(&llm, &[&kept, &chat], extra.grant.as_ref());
+            let (llm, granted, sockets) = with_allowed(&llm, &[&kept, &chat], extra.grant.as_ref());
             let mut p = crate::sandbox::policy(&root, &llm);
-            p.granted = granted;
+            (p.granted, p.sockets) = (granted, sockets);
             // Its denials watched from before it starts (the stream up first — measured)
             if let Some(tag) = &p.tag {
                 p.watch = Some(crate::sandbox::Watch::start(tag));
@@ -1514,7 +1821,7 @@ pub fn guard_and_go(ed: &mut Editor, who: For, job: Job, asked: bool, extra: Ext
                 return;
             }
             match (policy, found, who) {
-                (Some(p), _, who) => go(ed, who, job, Some(Guard::In(p))),
+                (Some(p), _, who) => go(ed, who, job, Some(Guard::In(Box::new(p)))),
                 (None, Availability::Missing(why), For::Claude(call))
                     if !asked && !ed.session.chat.as_ref().is_some_and(|c| c.unprotected) =>
                 {
@@ -2121,7 +2428,7 @@ mod tests {
         let kept = Allowed { write: vec!["/w/kept".into()], ports: vec![5432], ..Default::default() };
         let chat = Allowed { write: vec!["/w/chat".into()], ports: vec![5432], ..Default::default() };
         let base = crate::llm::LlmConfig::default();
-        let (llm, granted) = super::with_allowed(&base, &[&kept, &chat], Some(&Grant::Port(3000)));
+        let (llm, granted, sockets) = super::with_allowed(&base, &[&kept, &chat], Some(&Grant::Port(3000)));
         assert_eq!(llm.sandbox_write, ["/w/kept", "/w/chat"]);
         assert_eq!(llm.sandbox_ports, [5432, 5432, 3000], "(the policy keeps each port once)");
         assert_eq!(
@@ -2133,8 +2440,17 @@ mod tests {
                 "connect to port 3000 on this machine"
             ]
         );
-        let (none, said) = super::with_allowed(&base, &[], None);
+        assert!(sockets.is_empty());
+        let (none, said, sockets) = super::with_allowed(&base, &[], None);
         assert!(none.sandbox_write.is_empty() && none.sandbox_ports.is_empty() && said.is_empty());
+        assert!(sockets.is_empty());
+        // #119: a socket — this chat's, or this run's — as itself, nothing wider
+        let chat = Allowed { sockets: vec!["/s/a.sock".into()], ..Default::default() };
+        let once = Grant::Socket("/s/b.sock".into());
+        let (llm, said, sockets) = super::with_allowed(&base, &[&chat], Some(&once));
+        assert_eq!(sockets, [std::path::PathBuf::from("/s/a.sock"), "/s/b.sock".into()]);
+        assert!(llm.sandbox_write.is_empty() && llm.sandbox_ports.is_empty());
+        assert_eq!(said[1], "connect to the socket /s/b.sock — that one file");
     }
 
     /// Checks run at once; anything the words don't fully say — or a read-only command made to write —
@@ -2439,6 +2755,135 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// #119: Claude asks for one unix socket past the sandbox, not the sandbox off: the card names that file,
+    /// its reason, that the rest stays sandboxed (Docker's said for what it is); `a` lets it for this chat.
+    /// A path that isn't a socket, a pattern, or no reason is refused before any card.
+    #[test]
+    fn claude_asks_for_one_socket_not_the_sandbox_off() {
+        use serde_json::json;
+        let dir = crate::sandbox::real(&std::env::temp_dir()).join(format!("q{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("c")).unwrap();
+        let sock = dir.join("c/docker.sock");
+        let _l = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        std::fs::write(dir.join("plain"), "marker").unwrap();
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        ed.session.root = dir.clone();
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        crate::chat::open(&mut ed);
+        let ask = |ed: &mut crate::editor::Editor, socket: &str, reason: &str| {
+            ed.offers.clear();
+            // (a stand-in for `cargo xtask linux test`: it runs, after `a`)
+            let args = json!({ "command": "true", "unix_socket": socket, "reason": reason });
+            super::run(ed, super::Call::test(1), &args)
+        };
+        ask(&mut ed, sock.to_str().unwrap(), "docker runs the Linux checks").unwrap();
+        let o = ed.offers.first().expect("its card");
+        assert_eq!(o.title, super::SOCKET_RUN_TITLE);
+        let q = o.question.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(q.contains(&format!(
+            "It may connect to {} — that one file; everything else stays",
+            sock.display()
+        )));
+        assert!(
+            q.contains("Its reason: docker runs the Linux checks") && q.contains("mounts any folder"),
+            "{q}"
+        );
+        assert!(o.lasts() && !o.keeps(), "this chat at most");
+        ed.offer_for_chat();
+        let c = ed.session.chat.as_ref().unwrap();
+        assert_eq!(c.allowed.sockets, std::slice::from_ref(&sock), "this chat's");
+        assert!(
+            ed.session.checkpoints.tell.iter().any(|t| t.contains("connect to the socket")),
+            "Claude hears it"
+        );
+        for (socket, reason, why) in [
+            (dir.join("plain").display().to_string(), "x", "isn't a unix socket"),
+            (format!("{}/c/*.sock", dir.display()), "x", "one file"),
+            ("docker.sock".to_string(), "x", "full path"),
+            (sock.display().to_string(), "", "needs a reason"),
+        ] {
+            let e = ask(&mut ed, &socket, reason).unwrap_err();
+            assert!(e.contains(why) && ed.offers.is_empty(), "{socket}: {e}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #117: a command that runs a file of code — `awk -f`, `sed -f`, `python x.py`, `perl x.pl`, `sh x.sh`,
+    /// `./x` — puts that file's text on its card (written by whoever, not only unseen this turn), and `y`
+    /// reads it again: changed since, nothing runs. A binary run by its path is a program, not a script; a
+    /// script too long or with hidden characters is named, and why. (Fixtures: files with a marker only —
+    /// nothing here runs them.)
+    #[test]
+    fn a_card_shows_the_script_a_command_runs() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-scripts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("tools")).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        for (f, text) in [
+            ("x.awk", "# marker-awk\n{ print }\n"),
+            ("x.sed", "# marker-sed\np\n"),
+            ("tools/gen.py", "# marker-py\nprint(1)\n"),
+            ("run.pl", "# marker-pl\n"),
+            ("setup.sh", "# marker-sh\n"),
+            ("tools/go", "#!/bin/sh\n# marker-go\n"),
+            ("hidden.py", "# marker \u{202E}x\n"),
+        ] {
+            std::fs::write(dir.join(f), text).unwrap();
+        }
+        std::fs::write(dir.join("long.py"), "# marker\n".repeat(super::SCRIPT_LINES_MAX + 1)).unwrap();
+        std::fs::write(dir.join("tool"), b"\xcf\xfa\xed\xfe\x00\x00binary").unwrap();
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        ed.session.root = dir.clone();
+        for (cmd, file, marker) in [
+            ("awk -f x.awk data.txt", "x.awk", "marker-awk"),
+            ("gawk --file=x.awk data.txt", "x.awk", "marker-awk"),
+            ("sed -n -f x.sed data.txt", "x.sed", "marker-sed"),
+            ("python3 -u tools/gen.py --fast", "tools/gen.py", "marker-py"),
+            ("perl run.pl > out.txt", "run.pl", "marker-pl"),
+            ("A=1 sh setup.sh", "setup.sh", "marker-sh"),
+            ("cd tools && ./go", "tools/go", "marker-go"),
+        ] {
+            let q = run_card(&mut ed, cmd);
+            assert!(q.contains(&format!("{file} — what it runs:\n")) && q.contains(marker), "{cmd}: {q}");
+        }
+        for (cmd, said) in [
+            ("python long.py", "long.py has 401 lines — too long to show here"),
+            ("python hidden.py", "hidden.py has characters a card can't show as they are"),
+        ] {
+            let q = run_card(&mut ed, cmd);
+            assert!(q.contains(said) && !q.contains("what it runs"), "{cmd}: {q}");
+        }
+        for cmd in ["./tool --x", "python3 -c 'print(1)'", "awk '{print}' x.awk", "perl -e 1 run.pl"] {
+            let q = run_card(&mut ed, cmd);
+            assert!(!q.contains("what it runs"), "{cmd}: {q}");
+        }
+        // `y` reads it again: changed since the card, nothing runs
+        run_card(&mut ed, "perl run.pl");
+        std::fs::write(dir.join("run.pl"), "# changed\n").unwrap();
+        ed.offer_accept();
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        // (every card here is call 1's: the ones cleared away were answered as lost)
+        let changed = || {
+            super::ANSWERED.with(|a| {
+                a.borrow().iter().any(|(id, r)| {
+                    *id == json!(1)
+                        && r.as_ref().is_err_and(|e| e.contains("run.pl changed after the user saw it"))
+                })
+            })
+        };
+        while !changed() {
+            assert!(std::time::Instant::now() < end, "answered: changed since");
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
+        assert!(ed.session.task_run.is_none(), "nothing ran");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Review note: a chain that `cd`s out of the project, or git with `-C` outside it, goes to a card through
     /// `run` — a build there runs that folder's build scripts, git its repository's config — even when
     /// reading that folder was allowed; inside, the same line runs at once.
@@ -2555,6 +3000,22 @@ mod tests {
         assert!(super::chain_allowed("cargo xtask shot a.png && cargo test", &chat, false), "the chat's own");
         assert!(super::filtered("cargo test | sed -n '1,40p'").is_some(), "sed -n is a filter");
         assert!(super::is_check("cargo fmt && cargo clippy"), "a chain of checks feeds the list");
+        // A9: an `echo` in a line of checks says a word — the line still runs unasked, and is still checks
+        let echo = "cargo clippy --all-targets -q && cargo fmt --check && echo clean";
+        assert!(ok(echo) && super::runs_unasked(echo, &[]) && super::is_check(echo));
+        assert!(!super::is_check("echo hi"), "nothing but words isn't a check");
+        // #116: cargo's own reads of the graph
+        for c in ["cargo tree -i libc -e normal", "cargo metadata --format-version 1 --no-deps"] {
+            assert!(super::allowed(c, &[]), "{c}");
+        }
+        // #110: `git diff --no-index` reads what it names — judged as a read, never a check's unasked run
+        assert!(!super::allowed("git diff --no-index --stat /tmp/a /tmp/b", &[]));
+        assert!(super::runs_unasked("git diff --no-index --stat a b", &[]), "(where: the worker's)");
+        assert!(super::runs_unasked("git show :2:src/a.rs | head -40", &[]));
+        // #117: a reader into an interpreter is the interpreter's run — never unasked by the built-in rules
+        for c in ["nm -n -C x | awk -f y.awk", "sh -c 'nm -n x | awk -f y.awk'", "cat a | sed -f s.sed"] {
+            assert!(!super::runs_unasked(c, &[]), "{c}");
+        }
     }
 
     /// The pattern a run card's `a` allows for the rest of the chat: a command's first plain words, two or
@@ -2775,7 +3236,22 @@ mod tests {
         assert!(super::allowed(shot, &chat));
         assert!(super::allowed("TARAE_BACKGROUND=light cargo xtask shot /tmp/b.png", &chat), "fewer names");
         assert!(super::allowed("cargo xtask shot /tmp/b.png", &chat), "none");
-        assert!(!super::allowed("RUSTC_WRAPPER=/tmp/w cargo xtask shot x", &chat), "a name it doesn't name");
+        assert!(!super::allowed("RUSTC_WRAPPER=/tmp/w cargo xtask shot x", &chat), "a never-name");
+        // #114: more names, or others — each one a pattern may set
+        assert!(super::allowed(
+            "TARAE_SHOT_XDG=/tmp/x TARAE_BACKGROUND=dark TARAE_SHOT_COLS=120 cargo xtask shot /tmp/c.png",
+            &chat
+        ));
+        assert!(super::allowed("sh -c 'RUST_LOG=debug cargo xtask shot /tmp/d.png'", &chat), "another name");
+        for c in [
+            "TARAE_BACKGROUND=dark CARGO_ALIAS_XTASK=run cargo xtask shot",
+            "TARAE_BACKGROUND=dark RUSTUP_TOOLCHAIN=./tc cargo xtask shot",
+            "TARAE_BACKGROUND=dark CARGO_HOME=/tmp/h cargo xtask shot",
+        ] {
+            assert!(!super::allowed(c, &chat), "{c}");
+        }
+        // A rule that sets no names takes none
+        assert!(!super::allowed("A=1 cargo xtask shot", &["cargo xtask shot".to_string()]));
         assert!(!super::allowed("TARAE_BACKGROUND=dark cargo xtask perf", &chat));
         assert!(!super::allowed("PATH=/tmp TARAE_BACKGROUND=dark cargo xtask shot", &chat));
         // The built-in checks don't take names: `RUSTC_WRAPPER` runs a program of its own

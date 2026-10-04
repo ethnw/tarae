@@ -667,6 +667,22 @@ fn a_folder_argument_opens_there_on_the_start_screen() {
     assert_eq!(t.wait_exit().code(), Some(0));
 }
 
+/// `:restart`'s card (which checkout it builds in, #108) answered `y` once it's in front and has been in sight
+/// a moment — the project's trust card, up since the start (its `.tarae.toml` sets the binary), set aside
+/// with `n` first.
+fn yes_to_restart(t: &mut Term) {
+    // (a card's answer counts once it has been in sight as it is — the stack changed as this one came)
+    let settle = || std::thread::sleep(std::time::Duration::from_millis(800));
+    t.wait_text("Restart into");
+    if t.screen().contains("Trust this project") {
+        settle();
+        t.send("n");
+        t.wait_for("the trust card gone", |s| !s.contains("Trust this project"));
+    }
+    settle();
+    t.send("y");
+}
+
 /// `:restart` on a real terminal: the build runs as a task, then the new binary (this same one here) takes
 /// the process over — same pid, the pty still its terminal — and comes back as it was: both panes, each
 /// file's cursor, the focused one current. Twice, so a restarted tarae restarts too; then it quits cleanly.
@@ -691,6 +707,7 @@ fn restart_becomes_the_new_binary_as_you_were() {
 
     let entered = |raw: &[u8]| raw.windows(8).filter(|w| *w == b"\x1b[?1049h").count();
     t.command("restart");
+    yes_to_restart(&mut t);
     t.wait_raw("a second tarae entering the alternate screen", |r| entered(r) >= 2);
     let s = t.wait_text("Restarted · 2 files as they were");
     assert!(t.running(), "the same process, still running");
@@ -703,6 +720,7 @@ fn restart_becomes_the_new_binary_as_you_were() {
     assert!(locks.is_empty(), "{locks:?}");
 
     t.command("restart!");
+    yes_to_restart(&mut t);
     t.wait_raw("a third tarae", |r| entered(r) >= 3);
     t.wait_for("a back at line 6, focused", |s| s.status().contains("6:1") && s.contains("bee two"));
     let state = sb.home().join(".local/state/tarae");
@@ -788,6 +806,7 @@ fn undo_history_comes_along_on_restart() {
     let mut t = sb.spawn(&["big.txt"]);
     edit_big_file(&sb, &mut t);
     t.command("restart");
+    yes_to_restart(&mut t);
     t.wait_text("Restarted · 1 file as it was");
     undo_reaches_back(&mut t);
     t.command("q!");

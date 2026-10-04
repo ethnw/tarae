@@ -476,7 +476,7 @@ impl Editor {
         trace.step("saved");
         let before = self.task_generation;
         let policy = match &guard {
-            Some(crate::sandbox::Guard::In(p)) => Some(p),
+            Some(crate::sandbox::Guard::In(p)) => Some(&**p),
             _ => None,
         };
         let feeds = crate::tools::is_check(&task.cmd);

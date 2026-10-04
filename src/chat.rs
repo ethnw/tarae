@@ -244,6 +244,9 @@ pub struct Chat {
     /// for their card (`reads.rs`).
     pub allowed: crate::allow::Allowed,
     pub reads: std::collections::VecDeque<crate::reads::Pending>,
+    /// Places outside the project the user let Claude read once this conversation — a read beside one of
+    /// them offers their folder (`allow::grant_places`, #102).
+    pub read_once: Vec<PathBuf>,
     /// This turn's sandboxed runs of Claude's — what they made is read unasked (#81, `reads::Ran`).
     pub ran: Vec<crate::reads::Ran>,
     /// Claude may look at the screen without asking for the rest of this conversation (`a` on its card —
@@ -351,6 +354,7 @@ impl Chat {
             unprotected: false,
             allowed: Default::default(),
             reads: Default::default(),
+            read_once: Vec::new(),
             ran: Vec::new(),
             sees: false,
             run_allow: Vec::new(),
@@ -1851,6 +1855,104 @@ mod tests {
         assert!(lines[1].contains("end of the question"));
         assert!(lines[2].contains("interrupt"), "{}", lines[2]);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #102: a read outside the project beside another one asking (or one let through once) offers its
+    /// folder for `a`/`A`, said on the card — and `a` lets the other through; a lone one offers the file.
+    #[test]
+    fn reads_beside_each_other_offer_their_folder() {
+        let shots = crate::sandbox::real(&std::env::temp_dir())
+            .join(format!("tarae-presplit-shot-{}", std::process::id()));
+        std::fs::create_dir_all(&shots).unwrap();
+        for f in ["a.png", "b.png", "c.png"] {
+            std::fs::write(shots.join(f), "marker").unwrap();
+        }
+        let mut ed = editor("");
+        let root = ed.session.root.clone();
+        ed.session.chat = Some(Chat::new());
+        let generation = ed.session.chat.as_ref().unwrap().generation;
+        let pending = |f: &str| crate::reads::Pending {
+            request_id: f.into(),
+            generation,
+            input: serde_json::json!({"file_path": shots.join(f)}),
+            look: crate::reads::look("Read", &serde_json::json!({"file_path": shots.join(f)}), &root),
+        };
+        let card = |ed: &Editor| match ed.offers.first().map(|o| (&o.what, o.question.clone(), o.id)) {
+            Some((crate::offer::What::Read { pending, folder, .. }, q, id)) => {
+                (pending.look.at.clone(), folder.clone(), q, id)
+            }
+            other => panic!("{other:?}"),
+        };
+        // One alone: the file
+        ed.session.chat.as_mut().unwrap().reads.push_back(pending("a.png"));
+        crate::reads::next(&mut ed);
+        let (at, folder, q, id) = card(&ed);
+        assert_eq!((at, folder), (Some(shots.join("a.png")), None));
+        assert!(!q.contains("everything in"), "{q}");
+        // `y` once — then one beside it offers the folder, said plainly
+        let p = pending("a.png");
+        crate::reads::answer(&mut ed, id, p, Some(crate::allow::Scope::Once), true, None);
+        ed.session.chat.as_mut().unwrap().reads.extend([pending("b.png"), pending("c.png")]);
+        crate::reads::next(&mut ed);
+        let (at, folder, q, id) = card(&ed);
+        assert_eq!((at, folder.clone()), (Some(shots.join("b.png")), Some(shots.clone())));
+        assert!(q.contains(&format!("a and A allow everything in {}", shots.display())), "{q}");
+        // `a`: the folder for this chat, and the one waiting beside it goes through without a card
+        crate::reads::answer(
+            &mut ed,
+            id,
+            pending("b.png"),
+            Some(crate::allow::Scope::ThisChat),
+            true,
+            folder,
+        );
+        let c = ed.session.chat.as_ref().unwrap();
+        assert_eq!(c.allowed.read, std::slice::from_ref(&shots));
+        assert!(c.reads.is_empty() && ed.offers.is_empty(), "{:?}", ed.offers.first().map(|o| &o.title));
+        std::fs::remove_dir_all(&shots).ok();
+    }
+
+    /// #102: Claude's reads ask one after another — one beside the read on the card, come after the card went
+    /// up, makes that card offer their folder (said on it; settled again before `a` counts).
+    #[test]
+    fn a_read_come_beside_the_card_widens_it() {
+        let shots = crate::sandbox::real(&std::env::temp_dir())
+            .join(format!("tarae-late-sibling-{}", std::process::id()));
+        std::fs::create_dir_all(&shots).unwrap();
+        for f in ["x.png", "y.png"] {
+            std::fs::write(shots.join(f), "marker").unwrap();
+        }
+        let mut ed = editor("");
+        ed.session.chat = Some(Chat::new());
+        let ask = |ed: &mut Editor, id: &str, f: &str| {
+            let req = serde_json::json!({"tool_name": "Read", "input": {"file_path": shots.join(f)}});
+            crate::reads::request(ed, id, &req);
+        };
+        let folder = |ed: &Editor| match ed.offers.first().map(|o| (&o.what, o.rev)) {
+            Some((crate::offer::What::Read { folder, .. }, rev)) => Some((folder.clone(), rev)),
+            _ => None,
+        };
+        let settle = |ed: &mut Editor, done: &dyn Fn(&Editor) -> bool| {
+            let end = Instant::now() + std::time::Duration::from_secs(5);
+            while !done(ed) {
+                assert!(Instant::now() < end, "timed out");
+                if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+                    ed.handle_event(ev);
+                }
+            }
+        };
+        ask(&mut ed, "r1", "x.png");
+        settle(&mut ed, &|ed| folder(ed).is_some());
+        let (f, rev) = folder(&ed).unwrap();
+        assert_eq!(f, None, "alone: the file");
+        ask(&mut ed, "r2", "y.png");
+        settle(&mut ed, &|ed| folder(ed).is_some_and(|(f, _)| f.is_some()));
+        let (f, rev2) = folder(&ed).unwrap();
+        assert_eq!(f.as_deref(), Some(shots.as_path()));
+        assert!(rev2 > rev, "settles again before `a` counts");
+        let q = &ed.offers[0].question;
+        assert!(q.contains(&format!("a and A allow everything in {}", shots.display())), "{q}");
+        std::fs::remove_dir_all(&shots).ok();
     }
 
     #[test]

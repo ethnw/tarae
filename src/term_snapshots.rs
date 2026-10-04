@@ -1736,7 +1736,7 @@ fn snapshot_sandbox_blocked() {
     r.state = crate::task::State::Failed(Some(1));
     r.took = Some(Duration::from_millis(2410));
     r.by_claude = true;
-    r.guard = Some(crate::sandbox::Guard::In(policy));
+    r.guard = Some(crate::sandbox::Guard::In(Box::new(policy)));
     r.output = vec![(true, "npm ERR! code EPERM".into()), (true, "npm ERR! syscall open".into())];
     s.ed.session.task_run = Some(r);
     let dump = |s: &mut Shot, name: &str| {

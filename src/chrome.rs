@@ -164,7 +164,8 @@ impl Editor {
         {
             return Keys::Slot(s);
         }
-        if self.session.review.as_ref().is_some_and(|r| r.ready) {
+        // (one whose keys Esc gave back to the code waits: the code's mode — #118)
+        if self.session.review.as_ref().is_some_and(|r| r.ready && !r.away) {
             return Keys::Review;
         }
         Keys::Code

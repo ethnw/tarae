@@ -193,7 +193,8 @@ When you ask for a change, Claude edits files from the chat too, across as many 
 written until you've seen it: each edit opens as the same in-buffer review as select → instruct → diff, headed
 by what you asked for. The change in hand says what its keys do: `y accept this one`, `a accept all 2` (every
 change still undecided), `n reject`, `esc back, unanswered` (shorter where the row is narrow); `q` rejects the
-rest. Esc goes back to the chat and leaves the change waiting — `C-q` answers it. While it waits, `C-d` `C-u` (and
+rest. Esc gives the keys back where they were before the review took them — the chat, or the code (NORMAL) —
+and leaves the change waiting; `C-q` answers it. While it waits, `C-d` `C-u` (and
 the wheel) scroll it, and `space`, `:` and `C-w` work over it. Under that title, Claude's own
 words from just before it made the edit say why ([screenshot](screenshots/chat-edit-why.png)): what it
 concluded, in a row or two. Its full reasoning is in the chat. The accepted changes are what gets
@@ -301,8 +302,9 @@ one command, run in the task panel the way `space m m` runs a task, and Claude w
 - Unsaved files are saved first, as with a task. There's no stdin and no terminal, so nothing interactive
 - It isn't the task `space m m` runs again: that stays yours
 
-**Checks run at once**: `cargo build`, `check`, `test`, `clippy` and `fmt`, `go build`, `test` and `vet`,
-`gofmt -l`, and git's `status`, `diff`, `log` and `show`. `llm.run-allow` adds your own, as word prefixes
+**Checks run at once**: `cargo build`, `check`, `test`, `clippy`, `fmt`, `tree` and `metadata`, `go build`,
+`test` and `vet`, `gofmt -l`, and git's `status`, `diff`, `log` and `show` (not `git diff --no-index`, which
+reads the files it names: that's a read, below). `llm.run-allow` adds your own, as word prefixes
 (`["npm test", "make lint"]`). A command only counts as one of those when it's one command and its words say
 what runs: quoted words are fine (`cargo test -- 'a b'`), and so is `2>&1`. `$`, backticks, a redirect to a
 file, pipes, `;`, `&&`, globs, a `VAR=value` before it, or an option that makes git write or run something
@@ -311,29 +313,46 @@ through filters that read it is still the check — `cargo test 2>&1 | grep -E '
 `grep`, `head`, `tail`, `wc`, `sort`, `cut`, `uniq` or `sed -n 'a,bp'` (none with an option that writes, runs or
 never ends). It runs where the check alone would, its places still go to your list, and a card for one offers its
 first words (below), as for the command alone. **A line of checks and reads** runs too when every part would on
-its own — `cargo fmt && cargo clippy`, `cargo test; cargo clippy`, `cd sub && cargo check` — where it reads judged
-as below.
+its own — `cargo fmt && cargo clippy`, `cargo test; cargo clippy`, `cd sub && cargo check`, `cargo clippy -q &&
+echo clean` — where it reads judged as below.
 
 **So do commands that only read, when they read in the project**: `ls`, `cat`, `head`, `tail`, `wc`, `grep`,
-`rg`, `find`, `tree`, `stat`, `file`, `du`, `diff`, `sort`, `uniq`, `cut`, `pwd`, `sed -n 'a,bp'` (line numbers
-only), and git's `blame`, `rev-parse`, `ls-files` and a bare `branch` — git's `-C <dir>` too, the folder read like
-any other. Not with an option that writes, runs something or never ends (`find
+`rg`, `find`, `tree`, `stat`, `file`, `du`, `diff`, `sort`, `uniq`, `cut`, `pwd`, `nm`, `otool`, `strings`, `size`,
+`sed -n 'a,bp'` (line numbers only), `echo`, `printf`, `true` and `false` (they read nothing), and git's `blame`,
+`rev-parse`, `ls-files`, `show` (`git show :2:src/a.rs`, `HEAD~1:a.rs`), `diff --no-index` and a bare `branch` —
+git's `-C <dir>` too, the folder read like any other. Besides the project, the Rust toolchains' own sources
+(`$(rustc --print sysroot)/lib/rustlib/src/…`, written out or just so — tarae asks rustup which toolchain that
+is) and the crates cargo downloaded (`~/.cargo/registry/src/…`) read the same: code, nothing of yours. Not
+cargo's home itself (its credentials), and a link in those folders is judged where it leads. So does the
+project's own build folder where cargo puts it outside the project. Not with an option that writes, runs something or never ends (`find
 -exec`/`-delete`/`-fprint`, `sort -o`, `tree -o`, `rg --pre`, `tail -f`, `uniq in out`, `git branch <name>`). A
 line of them reads too: joined by `;` `&&` `||` `|`, with a `cd`, or the same inside `sh -c '…'` — `cd src &&
 grep -n fn a.rs | sort | head`. Quotes keep what's in them as written: a `|` `<` `>` `*` inside them is part of a
 pattern (`grep -E 'a|b'`, `rg "sleep\(|a *[<>]"` — a `\` in double quotes is read as sh reads it). Anything the
 shell would fill in or run (`$`, backticks, a redirect to a file, `<`, a lone `&`, a `sh -c` inside the body) and
-it asks. Every path the line names is resolved where its part runs (after a `cd`, there — that folder is read
+it asks. A loop of reads reads too: `for f in a.rs src/*.rs; do wc -l "$f"; done` is judged as each value's
+read (a glob by its fixed folder), and `find src -name '*.rs' | while read -r f; do head -3 "$f"; done` when the
+lines come from a list of names (`ls`, `find`, `git ls-files`, `rg -l`, `grep -l`, through `sort` `head` `tail` or
+`grep` at most) and the variable is used in quotes at a word's start — as a name from that list, read where the
+loop runs. A loop whose body writes or runs something, nests another, or uses a variable no loop sets asks.
+Every path the line names is resolved where its part runs (after a `cd`, there — that folder is read
 too; a glob by its fixed folder; links followed, `..` gone through): if one lies outside the project, the card
 says which, since what it reads goes to Claude. `a` and `A` there work as on a
-[read's card](#reading-outside-the-project): those places stay allowed, for the conversation or always.
+[read's card](#reading-outside-the-project): those places stay allowed, for the conversation or always — and
+when two of them sit in one folder (or one sits beside a file you let it read once), the card offers that
+folder, saying so: `a and A allow everything in /private/tmp/shots — not only these files`.
 
 **Anything else asks first.** A card shows the whole command (and its folder, when it's not the project
 root), `y` runs it, `n` tells Claude you said no. When the command starts with plain words that say what it is
 (`cargo xtask shot …`), `a` runs it and lets commands starting with those words run without asking for the
 rest of the conversation — the card says which words. It's never offered for a program that runs whatever
 follows it (`sh`, `env`, `python`, `xargs` …), nor for git (what of it reads runs already; what writes goes to
-`.git`, which the sandbox keeps), and never kept beyond the conversation. A command too long to
+`.git`, which the sandbox keeps), and never kept beyond the conversation. A pattern that sets names in front
+(`A=… B=… cargo xtask shot`) covers the same command setting more names or fewer, each one a pattern may set
+(never `PATH`, `RUSTC_WRAPPER`, `CARGO_HOME`, `RUSTUP_TOOLCHAIN`, `CARGO_ALIAS_…` and the like). A command
+that runs a file of code — `sh x.sh`, `./x`, `python x.py`, `perl x.pl`, `awk -f x.awk`, `sed -f x.sed` — shows
+that file's text on its card, since what runs is in it, not in the line (a long one is named, with its length);
+`y` reads it again and runs nothing if it changed since. A command too long to
 show whole on a card isn't put to you at all: Claude is told to write it to a script (that goes through your
 review) and run that.
 
@@ -344,9 +363,14 @@ review) and run that.
 What Claude runs, with `run` and `run_tests`, runs in a sandbox (macOS: Seatbelt). What you run yourself doesn't.
 
 - It can write in the project, except `.git`, `.tarae.toml` and the paths in `llm.sandbox-protect`. It can also
-  write in the temp folders and the toolchain's own folders: cargo's target and build dirs wherever they are
-  (tarae asks `cargo metadata`), cargo's registry, and Go's caches. It can't write in `~/.cargo/bin` or anything
-  else on your `PATH`
+  write in the temp folders and the toolchain's own folders: cargo's registry, Go's caches, and cargo's target
+  and build dirs (tarae asks `cargo metadata`) — those only when they're the checkout's own: inside it, its
+  per-checkout build dir under cargo's home (`build/xx/yyyy`, worked out from your own `build-dir` setting,
+  never the checkout's), or a temp folder. A cargo config in the checkout can name any folder, and Claude can
+  write that config, so anything else it names — home, a folder holding the checkout, cargo's home, another
+  folder — stays closed, and the run's panel and Claude's result say which (`llm.sandbox-write` opens a folder
+  you choose). An edit to a `.cargo/config.toml` always asks first, even with review at the end. It can't
+  write in `~/.cargo/bin` or anything else on your `PATH`
 - It reaches nothing over the network, so a build that needs to download something fails.
   `llm.sandbox-network` lets it through, and `llm.sandbox-write` adds folders
 - Unix sockets work only in the project and in a temp folder made for each run, which the command gets as
@@ -387,9 +411,12 @@ What Claude runs, with `run` and `run_tests`, runs in a sandbox (macOS: Seatbelt
   the output's `Operation not permitted` lines instead
 - **What it blocked is yours to open**, never Claude's: `space m s` on a command's panel (`space x s` on a test
   run's, or `:sandbox-blocked`) lists what could open. For a write, each folder from the one written in up
-  to just below home, so you choose how wide. For a connection, that port on this machine. And, last, running
-  the command once outside the sandbox. A folder's or a port's card offers `y` once, `a` this conversation,
-  `A` always in this project; whichever you pick, the command runs again now with it open. "Always" is kept in
+  to just below home, so you choose how wide. For a connection, that port on this machine — or that unix
+  socket, the one file (colima's `docker.sock`), offered `y` this run or `a` this conversation, never kept;
+  Docker's says, in the warning color, that what connects to it can start a container that mounts any
+  folder. And, last, running the command once outside the sandbox. A folder's or a port's card offers `y` once,
+  `a` this conversation, `A` always in this project; whichever you pick, the command runs again now with it
+  open. "Always" is kept in
   your own state (`$XDG_STATE_HOME/tarae/sandbox.json`), and `:sandbox-allowed` lists it with what Claude may
   read, Enter taking one back. Some places are never offered, only set by hand in `llm.sandbox-write`: home and
   above it, folders that hold keys, folders on your `PATH`, shell, git and tarae settings, launch agents, the
@@ -399,7 +426,10 @@ What Claude runs, with `run` and `run_tests`, runs in a sandbox (macOS: Seatbelt
 - **Claude can ask to run a command outside the sandbox**, when one can't work in it (it needs the network,
   say), but only with a reason. Its card always asks, even for a command that would otherwise run at once.
   It shows the command, Claude's reason, and that it runs with all your permissions, this once: `y` or `n`,
-  nothing kept. A request without a reason is turned back before it reaches you
+  nothing kept. A request without a reason is turned back before it reaches you. When all it needs is one unix
+  socket (a server's — `cargo xtask linux` talks to colima's Docker), Claude asks for that instead
+  (`unix_socket`): the card names the file, says everything else stays in the sandbox, and offers `y` this
+  run or `a` this conversation
 - git's read-only commands run with `GIT_OPTIONAL_LOCKS=0`, so `git status` doesn't try to refresh the index
   in `.git` (a write the sandbox would deny and report)
 - **Where there's no sandbox** (Linux for now, or tarae itself running inside one), Claude's commands don't

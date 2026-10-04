@@ -28,16 +28,20 @@ const CHECK_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Stage {
-    /// The chat's turn ends first.
+    /// Every session's chat turn ends first (#109 — another session's was cut, silently).
     Turn,
     /// Claude's accepted edits land on disk first (`claudes_writes`).
     Writes,
     /// The files are saved, and written (`saved_then`).
     Saving,
-    /// The project root and the binary are looked up (a worker).
+    /// The checkouts it could build in and their binaries are looked up (a worker).
     Finding,
+    /// Its card says which checkout and commit — waiting for the answer (#108).
+    Choosing,
     /// The build runs as a task (its generation).
     Building(u64),
+    /// The binary didn't change though its checkout's HEAD is newer: its card says so.
+    Same,
     /// The binary answers `--version` (a worker).
     Checking,
     /// The loop ends; main runs it.
@@ -50,7 +54,47 @@ pub struct Restart {
     /// `:restart` builds, `:restart!` doesn't (nor after a wait that followed the build).
     build: bool,
     pub stage: Stage,
-    binary: Option<PathBuf>,
+    /// What it builds in and runs, once the card's answered.
+    target: Option<Target>,
+}
+
+/// A checkout a restart can build in and run (#108): whose it is (its session's label), where its build
+/// runs (where `.tarae.toml` is), the binary it runs, its HEAD (short) and when that was committed, and when
+/// the binary was last written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Target {
+    pub label: String,
+    pub root: PathBuf,
+    pub bin: PathBuf,
+    pub head: Option<String>,
+    head_time: Option<i64>,
+    bin_time: Option<std::time::SystemTime>,
+}
+
+impl Target {
+    /// `main (1085db8)`.
+    pub fn named(&self) -> String {
+        match &self.head {
+            Some(h) => format!("{} ({h})", self.label),
+            None => self.label.clone(),
+        }
+    }
+
+    /// Whether its binary was written before its HEAD was committed — it can't have HEAD in it.
+    fn older_than_head(&self) -> bool {
+        let secs = |t: std::time::SystemTime| {
+            t.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs() as i64)
+        };
+        matches!((self.bin_time.and_then(secs), self.head_time), (Some(b), Some(h)) if b < h)
+    }
+}
+
+/// What a restart's card asks: which of `targets` (the checkout tarae started in first) — `y` the first,
+/// `f` the session in front's; and, after a build that left the binary as it was, whether to go on anyway.
+#[derive(Clone, Debug)]
+pub struct Choice {
+    pub id: u64,
+    pub targets: Vec<Target>,
 }
 
 impl Restart {
@@ -77,22 +121,45 @@ pub fn start(ed: &mut Editor, build: bool) -> Result<(), String> {
     blocker(ed, in_turn).map_or(Ok(()), |why| Err(format!("can't restart: {why}")))?;
     static NEXT: AtomicU64 = AtomicU64::new(1);
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
-    ed.restart = Some(Restart { id, build, stage: Stage::Turn, binary: None });
-    if in_turn {
-        ed.set_status("tarae restarts when Claude's turn ends — :restart again cancels");
+    ed.restart = Some(Restart { id, build, stage: Stage::Turn, target: None });
+    // Every session's turn, not only the front's (#109)
+    let turns = turns(ed);
+    if !turns.is_empty() {
+        ed.set_status(format!("tarae restarts when {} — :restart again cancels", waits_for(&turns)));
         return Ok(());
     }
     go(ed);
     Ok(())
 }
 
-/// The chat's turn ended (or the chat closed, or the turn's files were read): a restart waiting for it goes
-/// on.
+/// The sessions whose Claude is in a turn, or whose turn's files are still being read — by name.
+fn turns(ed: &Editor) -> Vec<String> {
+    std::iter::once(&ed.session)
+        .chain(&ed.sessions)
+        .filter(|l| l.chat.as_ref().is_some_and(crate::chat::Chat::busy) || l.checkpoints.gathering)
+        .map(|l| l.label().to_string())
+        .collect()
+}
+
+/// What a restart waits for, said: `Claude's turn ends in main` · `Claude's turns end in main, fix-login`.
+fn waits_for(turns: &[String]) -> String {
+    match turns {
+        [one] => format!("Claude's turn ends in {one}"),
+        many => format!("Claude's turns end in {}", many.join(", ")),
+    }
+}
+
+/// A chat's turn ended (or the chat closed, or the turn's files were read): a restart waiting for every
+/// session's goes on — from the front (`sync`), not while a session behind is swapped in to apply it.
 pub fn turn_over(ed: &mut Editor) {
-    if ed.restart.as_ref().is_some_and(|r| r.stage == Stage::Turn)
-        && !ed.session.chat.as_ref().is_some_and(crate::chat::Chat::busy)
-        && !ed.session.checkpoints.gathering
-    {
+    if !ed.background() {
+        sync(ed);
+    }
+}
+
+/// Every event: a restart waiting for turns goes on once none is under way in any session.
+pub fn sync(ed: &mut Editor) {
+    if ed.restart.as_ref().is_some_and(|r| r.stage == Stage::Turn) && turns(ed).is_empty() {
         go(ed);
     }
 }
@@ -178,7 +245,7 @@ fn claudes_writes(ed: &mut Editor) -> bool {
                 return;
             }
             // (asked something meanwhile: after that turn)
-            if ed.session.chat.as_ref().is_some_and(crate::chat::Chat::busy) {
+            if !turns(ed).is_empty() {
                 if let Some(r) = ed.restart.as_mut() {
                     r.stage = Stage::Turn;
                 }
@@ -210,7 +277,13 @@ fn clear_to_go(ed: &mut Editor) -> bool {
         .docs
         .iter()
         .filter(|d| d.is_modified() && !d.throwaway)
-        .map(|d| d.display_name(&ed.session.root))
+        .map(|d| match d.path.as_deref().and_then(|p| crate::disk::unparsed_config(p, &d.text)) {
+            // (held back by auto-save, #19)
+            Some(_) => {
+                format!("{} (it doesn't parse — :w writes it anyway)", d.display_name(&ed.session.root))
+            }
+            None => d.display_name(&ed.session.root),
+        })
         .collect();
     let why = match blocker(ed, false) {
         Some(why) => why,
@@ -222,7 +295,9 @@ fn clear_to_go(ed: &mut Editor) -> bool {
     false
 }
 
-/// On from the wait: saved, the root and binary looked up, then built (or checked right away).
+/// On from the wait: saved, the checkouts it could build in looked up — the one tarae started in, and the
+/// session in front's when that's another (#108: it built in the front's, an old session's, silently) —
+/// then its card says which and at what commit.
 fn go(ed: &mut Editor) {
     if claudes_writes(ed) {
         return;
@@ -231,36 +306,112 @@ fn go(ed: &mut Editor) {
     saved_then(ed, id, move |ed| find(ed, id));
 }
 
-/// The project root and the binary looked up (a worker), then the build — or the check right away.
+/// The checkouts it could build in looked up (a worker), then its card — or, chosen and built already
+/// before a wait, the check right away.
 fn find(ed: &mut Editor, id: u64) {
     let Some(r) = ed.restart.as_mut() else { return };
+    // (on after a wait that came once it was chosen and built: as answered)
+    if let Some(t) = r.target.clone() {
+        return check(ed, t.bin, true);
+    }
     r.stage = Stage::Finding;
-    let build = Some(ed.config.restart_build.trim().to_string()).filter(|c| r.build && !c.is_empty());
     let binary = ed.config.restart_binary.clone();
-    let root = ed.session.root.clone();
+    let first = std::iter::once(&ed.session).chain(&ed.sessions).find(|l| l.id == 0).unwrap_or(&ed.session);
+    let mut places = vec![(first.label().to_string(), first.root.clone())];
+    if ed.session.root != first.root {
+        places.push((ed.session.label().to_string(), ed.session.root.clone()));
+    }
     ed.events.jobs().spawn(move || {
-        let root = project_root(&root);
-        let bin = resolve(&binary, &root);
+        let targets: Result<Vec<Target>, String> =
+            places.into_iter().map(|(label, root)| target(label, &root, &binary)).collect();
         move |ed: &mut Editor| {
             if !at(ed, id, &Stage::Finding) {
                 return;
             }
-            match (bin, build) {
-                (Err(e), _) => cancel(ed, e),
-                (Ok(bin), Some(cmd)) => {
-                    let task = crate::task::Task { name: "restart build".into(), cmd, cwd: root };
-                    let Some(generation) = ed.task_start_restart(task) else {
-                        return cancel(ed, "the build didn't start".into());
-                    };
-                    if let Some(r) = ed.restart.as_mut() {
-                        (r.stage, r.binary) = (Stage::Building(generation), Some(bin));
-                    }
-                    ed.set_status("building — tarae restarts when it's done (:restart again cancels)");
-                }
-                (Ok(bin), None) => check(ed, bin),
+            match targets {
+                Err(e) => cancel(ed, e),
+                Ok(targets) => ask(ed, id, targets),
             }
         }
     });
+}
+
+/// What a restart in the checkout at `root` builds in and runs, and their commit and times (on a worker).
+fn target(label: String, root: &Path, binary: &str) -> Result<Target, String> {
+    let root = project_root(root);
+    let bin = resolve(binary, &root)?;
+    let said = crate::gitmenu::git(&root, &["log", "-1", "--format=%h %ct"], None).unwrap_or_default();
+    let (head, head_time) = match said.trim().split_once(' ') {
+        Some((h, t)) => (Some(h.to_string()), t.parse().ok()),
+        None => (None, None),
+    };
+    let bin_time = std::fs::metadata(&bin).and_then(|m| m.modified()).ok();
+    Ok(Target { label, root, bin, head, head_time, bin_time })
+}
+
+pub const TITLE: &str = "Restart into";
+
+/// The card: which checkout it builds in, at what commit, and the binary it becomes — `y` the one tarae
+/// started in, `f` the session in front's (when it's another), `n` none.
+fn ask(ed: &mut Editor, id: u64, targets: Vec<Target>) {
+    let Some(r) = ed.restart.as_mut() else { return };
+    r.stage = Stage::Choosing;
+    let build = Some(ed.config.restart_build.trim()).filter(|c| r.build && !c.is_empty());
+    let tilde = |p: &Path| crate::allow::tilde(p);
+    // (the folder once; the binary from it when it's inside)
+    let bin = |t: &Target| match t.bin.strip_prefix(&t.root) {
+        Ok(rel) => format!("{} there", rel.display()),
+        Err(_) => tilde(&t.bin),
+    };
+    let says = |t: &Target| match build {
+        Some(cmd) => format!("`{cmd}` in\n  {}\nthen runs {}", tilde(&t.root), bin(t)),
+        None => format!("Runs {} as it is — no build (:restart builds)", tilde(&t.bin)),
+    };
+    let t = &targets[0];
+    let what = if build.is_some() { "build" } else { "binary" };
+    let title = format!(
+        "{TITLE} {}'s {what}{}?",
+        t.label,
+        t.head.as_ref().map(|h| format!(" ({h})")).unwrap_or_default()
+    );
+    let mut q = says(t);
+    if build.is_none() && t.older_than_head() {
+        q.push_str(&format!("\n\nIt was written before {} was committed — it doesn't have it.", t.named()));
+    }
+    if let Some(o) = targets.get(1) {
+        q.push_str(&format!(
+            "\n\nf — {}'s {what} instead: {}",
+            o.named(),
+            says(o).replace("\n  ", " ").replace('\n', " ")
+        ));
+    }
+    let what = crate::offer::What::Restart(Box::new(Choice { id, targets }));
+    ed.push_offer(crate::offer::Offer::new(title, &q, "Restarting…", "Not restarting".into(), what));
+}
+
+/// The answer on its card: build in (or run) `targets[which]` — None calls it off.
+pub fn chosen(ed: &mut Editor, card: u64, choice: Choice, which: Option<usize>) {
+    ed.offer_finished(card, Ok(()));
+    if !at(ed, choice.id, &Stage::Choosing) {
+        return;
+    }
+    let Some(t) = which.and_then(|i| choice.targets.into_iter().nth(i)) else {
+        ed.restart = None;
+        return ed.set_status("not restarting");
+    };
+    let r = ed.restart.as_mut().expect("at its stage");
+    let build = Some(ed.config.restart_build.trim().to_string()).filter(|c| r.build && !c.is_empty());
+    r.target = Some(t.clone());
+    // (no build: its card said whether the binary is older than HEAD)
+    let Some(cmd) = build else { return check(ed, t.bin, true) };
+    let task = crate::task::Task { name: "restart build".into(), cmd, cwd: t.root.clone() };
+    let Some(generation) = ed.task_start_restart(task) else {
+        return cancel(ed, "the build didn't start".into());
+    };
+    if let Some(r) = ed.restart.as_mut() {
+        r.stage = Stage::Building(generation);
+    }
+    ed.set_status(format!("building {} — tarae restarts when it's done (:restart again cancels)", t.named()));
 }
 
 /// The build task ended (`task.rs`) — true if it was this restart's (then the restart says what's next).
@@ -268,8 +419,8 @@ pub fn built(ed: &mut Editor, generation: u64, passed: bool, errors: usize) -> b
     let Some(r) = ed.restart.as_mut().filter(|r| r.stage == Stage::Building(generation)) else {
         return false;
     };
-    match (passed, r.binary.take()) {
-        (true, Some(bin)) => check(ed, bin),
+    match (passed, r.target.as_ref().map(|t| t.bin.clone())) {
+        (true, Some(bin)) => check(ed, bin, false),
         _ => {
             ed.restart = None;
             let next = if errors > 0 { "]q goes to the first error" } else { "the panel has why" };
@@ -277,6 +428,38 @@ pub fn built(ed: &mut Editor, generation: u64, passed: bool, errors: usize) -> b
         }
     }
     true
+}
+
+/// The card for a binary the build left as it was though its checkout's HEAD is newer: `y` restarts onto
+/// it anyway, `n` doesn't.
+fn same(ed: &mut Editor, id: u64, t: &Target) {
+    if let Some(r) = ed.restart.as_mut() {
+        r.stage = Stage::Same;
+    }
+    let title = format!("{} is the binary it was", crate::allow::tilde(&t.bin));
+    let q = format!(
+        "It was written before {} was committed, and the build left it as it was — restarting would run the \
+         same tarae.\n\neditor.restart-build and editor.restart-binary say what's built and run.",
+        t.named()
+    );
+    let what = crate::offer::What::RestartSame { id };
+    ed.push_offer(crate::offer::Offer::new(title, &q, "Restarting…", "Not restarting".into(), what));
+}
+
+/// The answer on that card: restart onto it anyway (`y`), or not.
+pub fn same_answer(ed: &mut Editor, card: u64, id: u64, yes: bool) {
+    ed.offer_finished(card, Ok(()));
+    if !at(ed, id, &Stage::Same) {
+        return;
+    }
+    let bin = ed.restart.as_ref().and_then(|r| r.target.as_ref()).map(|t| t.bin.clone());
+    match (yes, bin) {
+        (true, Some(bin)) => check(ed, bin, true),
+        _ => {
+            ed.restart = None;
+            ed.set_status("not restarting");
+        }
+    }
 }
 
 /// The task panel's run was stopped or replaced: a build being waited for won't finish.
@@ -287,13 +470,15 @@ pub fn run_dropped(ed: &mut Editor) {
     }
 }
 
-/// The binary answers `--version` as a tarae (on a worker) — then the loop ends and main runs it.
-fn check(ed: &mut Editor, bin: PathBuf) {
+/// The binary answers `--version` as a tarae (on a worker) — then the loop ends and main runs it. One the
+/// build left as it was though its checkout's HEAD is newer asks first (`same`), unless `anyway`.
+fn check(ed: &mut Editor, bin: PathBuf, anyway: bool) {
     let Some(r) = ed.restart.as_mut() else { return };
     r.stage = Stage::Checking;
     let id = r.id;
     ed.events.jobs().spawn(move || {
         let answer = answers(&bin);
+        let written = std::fs::metadata(&bin).and_then(|m| m.modified()).ok();
         move |ed: &mut Editor| {
             if !at(ed, id, &Stage::Checking) {
                 return;
@@ -301,15 +486,23 @@ fn check(ed: &mut Editor, bin: PathBuf) {
             if let Err(e) = answer {
                 return cancel(ed, e);
             }
+            // The same binary as before the build, and older than its HEAD: said, not run silently (#108)
+            if let Some(t) = ed.restart.as_ref().and_then(|r| r.target.clone())
+                && !anyway
+                && written.is_some()
+                && written == t.bin_time
+                && t.older_than_head()
+            {
+                return same(ed, id, &t);
+            }
             // Claude was asked something meanwhile, or its edits are still landing: on from that wait
-            // (built already)
-            let busy = ed.session.chat.as_ref().is_some_and(crate::chat::Chat::busy)
-                || ed.session.checkpoints.gathering;
-            if busy || pending_writes(ed).is_some() {
+            // (built already, the card answered)
+            let turns = turns(ed);
+            if !turns.is_empty() || pending_writes(ed).is_some() {
                 let r = ed.restart.as_mut().expect("checked above");
                 (r.stage, r.build) = (Stage::Turn, false);
-                if busy {
-                    ed.set_status("built — tarae restarts when Claude's turn ends");
+                if !turns.is_empty() {
+                    ed.set_status(format!("built — tarae restarts when {}", waits_for(&turns)));
                 }
                 return turn_over(ed);
             }
@@ -786,6 +979,20 @@ mod tests {
         }
     }
 
+    /// `settle_until`, a restart's card answered `y` (the checkout tarae started in) as it comes.
+    fn settle_answering(ed: &mut Editor, done: impl Fn(&Editor) -> bool) {
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !done(ed) {
+            if ed.offers.first().is_some_and(|o| matches!(o.what, crate::offer::What::Restart(_))) {
+                ed.offer_accept();
+                continue;
+            }
+            let left = end.saturating_duration_since(std::time::Instant::now());
+            let ev = ed.events.recv_timeout(left).expect("event before timeout");
+            ed.handle_event(ev);
+        }
+    }
+
     /// The chat comes back with its own conversation (not the latest one kept — that's a guess), resumed
     /// in claude, with the words being typed, the scroll and follow as they were; one note says so.
     #[test]
@@ -884,6 +1091,7 @@ mod tests {
         let file = dir.join("a.txt");
         std::fs::write(&file, "one\n").unwrap();
         let mut ed = Editor::new(Config::default());
+        ed.session.root = dir.to_path_buf();
         ed.open(&file).unwrap();
         feed(&mut ed, "iX<esc>");
         ed.config.restart_build = build.into();
@@ -899,7 +1107,7 @@ mod tests {
         let bin = fake_tarae(&dir, "tarae 9.9.9");
         let mut ed = editing(&dir, "true", &bin);
         feed(&mut ed, ":restart<ret>");
-        settle_until(&mut ed, |ed| ed.should_quit || ed.restart.is_none());
+        settle_answering(&mut ed, |ed| ed.should_quit || ed.restart.is_none());
         assert_eq!(ed.restart.as_ref().and_then(Restart::ready), Some(bin.as_path()), "{}", toasts(&ed));
         assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "Xone\n", "saved first");
         let run = ed.session.task_run.as_ref().expect("the build ran as a task");
@@ -921,7 +1129,7 @@ mod tests {
         let took = t.elapsed();
         assert!(took < Duration::from_millis(300), "the main loop waited {took:?} for the save");
         assert_eq!(ed.restart.as_ref().unwrap().stage, Stage::Saving, "{}", toasts(&ed));
-        settle_until(&mut ed, |ed| ed.should_quit || ed.restart.is_none());
+        settle_answering(&mut ed, |ed| ed.should_quit || ed.restart.is_none());
         assert_eq!(ed.restart.as_ref().and_then(Restart::ready), Some(bin.as_path()), "{}", toasts(&ed));
         assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "Xone\n", "saved first");
 
@@ -941,14 +1149,14 @@ mod tests {
         let bin = fake_tarae(&dir, "tarae 9.9.9");
         let mut ed = editing(&dir, "exit 3", &bin);
         feed(&mut ed, ":restart<ret>");
-        settle_until(&mut ed, |ed| ed.restart.is_none());
+        settle_answering(&mut ed, |ed| ed.restart.is_none());
         assert!(!ed.should_quit);
         assert!(toasts(&ed).contains("build failed — not restarting"), "{}", toasts(&ed));
 
         let not_tarae = fake_tarae(&dir, "something else");
         ed.config.restart_binary = not_tarae.display().to_string();
         feed(&mut ed, ":restart!<ret>");
-        settle_until(&mut ed, |ed| ed.restart.is_none());
+        settle_answering(&mut ed, |ed| ed.restart.is_none());
         assert!(!ed.should_quit);
         assert!(toasts(&ed).contains("isn't a tarae that runs here"), "{}", toasts(&ed));
         std::fs::remove_dir_all(&dir).ok();
@@ -994,7 +1202,7 @@ mod tests {
         try_it(&mut ed, "a debug run is on");
         ed.dap = Some(crate::dap::Dap::placeholder(crate::dap::State::Exited(Some(0)), "app".into()));
         crate::typed::execute(&mut ed, "restart!").unwrap();
-        settle_until(&mut ed, |ed| ed.should_quit || ed.restart.is_none());
+        settle_answering(&mut ed, |ed| ed.should_quit || ed.restart.is_none());
         assert!(ed.should_quit, "an ended debug run doesn't count: {}", toasts(&ed));
 
         let mut ed = Editor::new(Config::default());
@@ -1010,7 +1218,7 @@ mod tests {
         let bin = fake_tarae(&dir, "tarae 9.9.9");
         let mut ed = editing(&dir, "sleep 5", &bin);
         feed(&mut ed, ":restart<ret>");
-        settle_until(&mut ed, |ed| {
+        settle_answering(&mut ed, |ed| {
             ed.restart.as_ref().is_some_and(|r| matches!(r.stage, Stage::Building(_)))
         });
         feed(&mut ed, "<space>mc");
@@ -1046,6 +1254,7 @@ mod tests {
             "tool_name": "Write", "input": {"file_path": file, "content": "TWO\n"}}});
         let result = json!({"type": "result", "result": ""});
         let mut ed = Editor::new(Config::default());
+        ed.session.root = dir.clone();
         ed.open(&file).unwrap();
         ed.disk_watch();
         ed.config.restart_binary = bin.display().to_string();
@@ -1064,7 +1273,7 @@ mod tests {
         crate::typed::execute(&mut ed, "restart!").unwrap();
         assert_eq!(ed.restart.as_ref().unwrap().stage, Stage::Turn, "{}", toasts(&ed));
         feed(&mut ed, "y");
-        settle_until(&mut ed, |ed| ed.should_quit || ed.restart.is_none());
+        settle_answering(&mut ed, |ed| ed.should_quit || ed.restart.is_none());
         assert_eq!(ed.restart.as_ref().and_then(Restart::ready), Some(bin.as_path()), "{}", toasts(&ed));
         assert!(toasts(&ed).contains("once Claude's edits are on disk"), "it waited: {}", toasts(&ed));
         assert!(!ed.doc().is_modified(), "Claude's write was the save");
@@ -1080,6 +1289,7 @@ mod tests {
         let dir = temp("gather");
         let bin = fake_tarae(&dir, "tarae 9.9.9");
         let mut ed = Editor::new(Config::default());
+        ed.session.root = dir.clone();
         ed.config.restart_binary = bin.display().to_string();
         ed.session.checkpoints.gathering = true;
         crate::typed::execute(&mut ed, "restart!").unwrap();
@@ -1102,7 +1312,7 @@ mod tests {
         });
         crate::chat::turn_gathered(&mut ed, Some("a.txt".into()));
         assert!(ed.session.code_review.is_none(), "not over the restart");
-        settle_until(&mut ed, |ed| ed.should_quit || ed.restart.is_none());
+        settle_answering(&mut ed, |ed| ed.should_quit || ed.restart.is_none());
         assert_eq!(ed.restart.as_ref().and_then(Restart::ready), Some(bin.as_path()), "{}", toasts(&ed));
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1113,6 +1323,7 @@ mod tests {
         let dir = temp("turn");
         let bin = fake_tarae(&dir, "tarae 9.9.9");
         let mut ed = Editor::new(Config::default());
+        ed.session.root = dir.clone();
         ed.config.restart_binary = bin.display().to_string();
         let init = json!({"type": "system", "subtype": "init", "session_id": "s-1"});
         let result = json!({"type": "result", "result": "done"});
@@ -1132,8 +1343,171 @@ mod tests {
         crate::typed::execute(&mut ed, "restart!").unwrap();
         assert_eq!(ed.restart.as_ref().unwrap().stage, Stage::Turn);
         assert!(toasts(&ed).contains("when Claude's turn ends"), "{}", toasts(&ed));
-        settle_until(&mut ed, |ed| ed.should_quit || ed.restart.is_none());
+        settle_answering(&mut ed, |ed| ed.should_quit || ed.restart.is_none());
         assert!(!ed.session.chat.as_ref().unwrap().busy(), "only after the turn");
+        assert_eq!(ed.restart.as_ref().and_then(Restart::ready), Some(bin.as_path()), "{}", toasts(&ed));
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A repository in `dir` with what's there in one commit — its short HEAD.
+    fn repo(dir: &Path) -> String {
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &["config", "user.email", "t@t"],
+            &["config", "user.name", "t"],
+            &["config", "commit.gpgsign", "false"],
+            &["add", "-A"],
+            &["commit", "-q", "-m", "base"],
+        ] {
+            crate::gitmenu::git(dir, args, None).unwrap();
+        }
+        crate::gitmenu::git(dir, &["rev-parse", "--short", "HEAD"], None).unwrap().trim().to_string()
+    }
+
+    /// #108: the card says which checkout `:restart` builds in and at what commit — the one tarae started
+    /// in, and `f` for the session in front's when that's another (it built the front's, an old session's,
+    /// silently). `y` builds where tarae started; `f` there.
+    #[test]
+    fn the_restart_card_says_which_checkout_it_builds() {
+        let dir = temp("which");
+        let (main, other) = (dir.join("main"), dir.join("other"));
+        let mut heads = Vec::new();
+        for d in [&main, &other] {
+            std::fs::create_dir_all(d).unwrap();
+            std::fs::write(d.join("a.txt"), "x\n").unwrap();
+            heads.push(repo(d));
+        }
+        let bin = fake_tarae(&dir, "tarae 9.9.9");
+        let mut ed = Editor::new(Config::default());
+        (ed.session.root, ed.session.name) = (main.clone(), "main".into());
+        ed.config.restart_build = "pwd > built-here".into();
+        ed.config.restart_binary = bin.display().to_string();
+        let card = |ed: &mut Editor| {
+            settle_until(ed, |ed| !ed.offers.is_empty() || ed.restart.is_none());
+            let o = ed.offers.first().unwrap_or_else(|| panic!("a card: {}", toasts(ed)));
+            (o.title.clone(), o.question.clone(), o.restart_other())
+        };
+        // One session: where tarae started, nothing else to pick
+        crate::typed::execute(&mut ed, "restart").unwrap();
+        let (title, q, other_too) = card(&mut ed);
+        assert_eq!(title, format!("Restart into main's build ({})?", heads[0]));
+        assert!(
+            q.starts_with("`pwd > built-here` in\n  ") && q.contains("\nthen runs ") && !other_too,
+            "{q}"
+        );
+        ed.offer_dismiss();
+        assert!(ed.restart.is_none() && !main.join("built-here").exists(), "n: nothing built");
+        // Another session in front: the card still starts where tarae started, the front's is `f`
+        ed.session_open(&other).unwrap();
+        crate::typed::execute(&mut ed, "restart").unwrap();
+        let (title, q, other_too) = card(&mut ed);
+        assert_eq!(title, format!("Restart into main's build ({})?", heads[0]), "{q}");
+        assert!(other_too && q.contains(&format!("f — other ({})'s build instead", heads[1])), "{q}");
+        ed.offer_restart_other();
+        settle_until(&mut ed, |ed| ed.should_quit || ed.restart.is_none());
+        assert_eq!(ed.restart.as_ref().and_then(Restart::ready), Some(bin.as_path()), "{}", toasts(&ed));
+        assert!(
+            other.join("built-here").exists() && !main.join("built-here").exists(),
+            "built in the front's"
+        );
+        drop(ed);
+        // `y`: where tarae started, the front another
+        let mut ed = Editor::new(Config::default());
+        (ed.session.root, ed.session.name) = (main.clone(), "main".into());
+        ed.config.restart_build = "pwd > built-here".into();
+        ed.config.restart_binary = bin.display().to_string();
+        ed.session_open(&other).unwrap();
+        std::fs::remove_file(other.join("built-here")).unwrap();
+        crate::typed::execute(&mut ed, "restart").unwrap();
+        card(&mut ed);
+        settle_answering(&mut ed, |ed| ed.should_quit || ed.restart.is_none());
+        assert!(
+            main.join("built-here").exists() && !other.join("built-here").exists(),
+            "built where it started"
+        );
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #108: a binary the build left as it was, written before its checkout's HEAD was committed, is said on
+    /// a card — not run as if it were new; `y` restarts onto it anyway, `n` doesn't. One the build wrote goes
+    /// straight on.
+    #[test]
+    fn the_same_old_binary_is_said_not_run() {
+        let dir = temp("same");
+        let main = dir.join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        std::fs::write(main.join("a.txt"), "x\n").unwrap();
+        let head = repo(&main);
+        let bin = fake_tarae(&dir, "tarae 9.9.9");
+        let an_hour_ago = std::time::SystemTime::now() - Duration::from_secs(3600);
+        let age =
+            |bin: &Path| std::fs::File::options().write(true).open(bin).unwrap().set_modified(an_hour_ago);
+        age(&bin).unwrap();
+        let mut ed = Editor::new(Config::default());
+        (ed.session.root, ed.session.name) = (main.clone(), "main".into());
+        ed.config.restart_build = "true".into();
+        ed.config.restart_binary = bin.display().to_string();
+        let same = |ed: &Editor| {
+            ed.offers.first().is_some_and(|o| matches!(o.what, crate::offer::What::RestartSame { .. }))
+        };
+        crate::typed::execute(&mut ed, "restart").unwrap();
+        settle_answering(&mut ed, |ed| same(ed) || ed.restart.is_none());
+        let o = &ed.offers[0];
+        assert!(o.title.ends_with("tarae is the binary it was"), "{}", o.title);
+        assert!(
+            o.question.contains(&format!("written before main ({head}) was committed")),
+            "{}",
+            o.question
+        );
+        ed.offer_dismiss();
+        assert!(ed.restart.is_none() && !ed.should_quit, "n: not restarting");
+        // `y`: anyway
+        crate::typed::execute(&mut ed, "restart").unwrap();
+        settle_answering(&mut ed, |ed| same(ed) || ed.restart.is_none());
+        ed.offer_accept();
+        settle_until(&mut ed, |ed| ed.should_quit || ed.restart.is_none());
+        assert_eq!(ed.restart.as_ref().and_then(Restart::ready), Some(bin.as_path()), "{}", toasts(&ed));
+        // A build that writes it: on at once
+        let mut ed = Editor::new(Config::default());
+        (ed.session.root, ed.session.name) = (main.clone(), "main".into());
+        ed.config.restart_build = format!("touch '{}'", bin.display());
+        ed.config.restart_binary = bin.display().to_string();
+        crate::typed::execute(&mut ed, "restart").unwrap();
+        settle_answering(&mut ed, |ed| same(ed) || ed.should_quit || ed.restart.is_none());
+        assert_eq!(ed.restart.as_ref().and_then(Restart::ready), Some(bin.as_path()), "{}", toasts(&ed));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #109: a restart waits for every session's turn, not only the front's — saying whose — and goes on
+    /// once the last one ends (it ended another session's turn, silently).
+    #[test]
+    fn a_restart_waits_for_every_sessions_turn() {
+        let dir = temp("every-turn");
+        let (main, back) = (dir.join("main"), dir.join("back"));
+        for d in [&main, &back] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let bin = fake_tarae(&dir, "tarae 9.9.9");
+        let mut ed = Editor::new(Config::default());
+        (ed.session.root, ed.session.name) = (main.clone(), "main".into());
+        ed.config.restart_binary = bin.display().to_string();
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        let id = ed.session_open(&back).unwrap();
+        crate::chat::open(&mut ed);
+        ed.session.chat.as_mut().unwrap().state = crate::chat::State::Thinking;
+        assert!(ed.session_switch(0));
+        crate::typed::execute(&mut ed, "restart!").unwrap();
+        assert_eq!(ed.restart.as_ref().unwrap().stage, Stage::Turn);
+        assert!(toasts(&ed).contains("tarae restarts when Claude's turn ends in back"), "{}", toasts(&ed));
+        ed.handle_event(crate::event::Event::Resize);
+        assert_eq!(ed.restart.as_ref().unwrap().stage, Stage::Turn, "back's still at work");
+        let back_chat = ed.sessions.iter_mut().find(|l| l.id == id).and_then(|l| l.chat.as_mut()).unwrap();
+        back_chat.state = crate::chat::State::Idle;
+        ed.handle_event(crate::event::Event::Resize);
+        settle_answering(&mut ed, |ed| ed.should_quit || ed.restart.is_none());
         assert_eq!(ed.restart.as_ref().and_then(Restart::ready), Some(bin.as_path()), "{}", toasts(&ed));
         drop(ed);
         std::fs::remove_dir_all(&dir).ok();

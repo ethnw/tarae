@@ -57,14 +57,20 @@ pub fn piped(line: &str) -> Option<Vec<Vec<Word>>> {
 /// The line's parts (an `sh -c '…'` around it taken off) and, between each two, whether it's a single `|`.
 /// `env`: a command's leading `NAME=value` words are kept as its first words (else such a line is None).
 fn split(line: &str, env: bool) -> Option<(Vec<Part>, Vec<bool>)> {
-    let outer = parts(line, env)?;
+    split_with(line, env, false)
+}
+
+/// `split`, and with `vars` a variable's use (`$f`, `"${f}"`) kept in its word as a mark (`VAR`) for
+/// `unrolled` to fill in — a line of loops.
+fn split_with(line: &str, env: bool, vars: bool) -> Option<(Vec<Part>, Vec<bool>)> {
+    let outer = parts(line, env, vars)?;
     if let [Part::Cmd(w)] = &outer.0[..]
         && let [shell, c, body] = &w[..]
         && SHELLS.contains(&shell.text.as_str())
         && c.text == "-c"
         && !body.glob
     {
-        let inner = parts(&body.text, env)?;
+        let inner = parts(&body.text, env, vars)?;
         // (an `sh -c` inside that one isn't read)
         let nested =
             inner.0.iter().any(|p| matches!(p, Part::Cmd(w) if SHELLS.contains(&w[0].text.as_str())));
@@ -73,9 +79,46 @@ fn split(line: &str, env: bool) -> Option<(Vec<Part>, Vec<bool>)> {
     Some(outer)
 }
 
+/// The toolchain's sources' root as Claude spells it (#112): kept in its word as written, and filled in
+/// with the real sysroot where the word is judged (`outside`) — unknown, the line asks.
+pub const SYSROOT: &str = "$(rustc --print sysroot)";
+
+/// A variable's use in a word (`split_with`'s `vars`): `VAR.0`, `q` (in double quotes) or `u`, its name,
+/// `VAR.1`. Characters no line of Claude's has (one that does isn't read that way).
+const VAR: (char, char) = ('\u{E000}', '\u{E001}');
+
+/// What a `$` starts, the rest of the line after it in `chars`: `SYSROOT`, or with `vars` a variable's
+/// name (`$f`, `${f}`) as its mark — taken from `chars`. None for anything else (`$(…)`, `$1`, `$?` …).
+fn dollar(chars: &mut std::iter::Peekable<std::str::Chars>, vars: bool, quoted: bool) -> Option<String> {
+    let rest = &SYSROOT[1..];
+    if chars.clone().take(rest.len()).eq(rest.chars()) {
+        chars.nth(rest.len() - 1);
+        return Some(SYSROOT.to_string());
+    }
+    if !vars {
+        return None;
+    }
+    let braced = chars.peek() == Some(&'{');
+    if braced {
+        chars.next();
+    }
+    let mut name = String::new();
+    while let Some(&c) = chars.peek().filter(|c| c.is_ascii_alphanumeric() || **c == '_') {
+        name.push(c);
+        chars.next();
+    }
+    if braced && chars.next() != Some('}') || !env_name(&name) {
+        return None;
+    }
+    Some(format!("{}{}{name}{}", VAR.0, if quoted { 'q' } else { 'u' }, VAR.1))
+}
+
 /// The line's parts and their separators (`split`), without looking for an `sh -c` around them. `env`:
-/// leading `NAME=value` words stay in front of a command's words.
-fn parts(line: &str, env: bool) -> Option<(Vec<Part>, Vec<bool>)> {
+/// leading `NAME=value` words stay in front of a command's words; `vars`: see `split_with`.
+fn parts(line: &str, env: bool, vars: bool) -> Option<(Vec<Part>, Vec<bool>)> {
+    if line.contains([VAR.0, VAR.1]) {
+        return None;
+    }
     let mut parts = Vec::new();
     let mut piped = Vec::new();
     let mut words: Vec<Word> = Vec::new();
@@ -132,7 +175,8 @@ fn parts(line: &str, env: bool) -> Option<(Vec<Part>, Vec<bool>)> {
                         // A `$` nothing can follow as a name (a regex's end: `"^.*note$"`, `"a$|b"` — #92) is
                         // itself, as sh reads it; before anything else it may expand
                         '$' if chars.peek().is_some_and(|c| " \t\"|)/.,:]".contains(*c)) => w.text.push('$'),
-                        '$' | '`' => return None,
+                        '$' => w.text.push_str(&dollar(&mut chars, vars, true)?),
+                        '`' => return None,
                         // As sh reads it in double quotes: `\` takes `$ ` " \` as themselves, and stays
                         // before anything else (#80: `rg "sleep\(|a *[<>]"` went to a card) — a line
                         // continuation isn't read
@@ -187,7 +231,11 @@ fn parts(line: &str, env: bool) -> Option<(Vec<Part>, Vec<bool>)> {
                     return None;
                 }
             }
-            '$' | '`' | '\\' | '(' | ')' | '{' | '}' | '<' | '!' | '\n' | '\r' => return None,
+            '$' => {
+                let s = dollar(&mut chars, vars, false)?;
+                word.get_or_insert(Word { text: String::new(), glob: false }).text.push_str(&s);
+            }
+            '`' | '\\' | '(' | ')' | '{' | '}' | '<' | '!' | '\n' | '\r' => return None,
             '#' | '~' if word.is_none() => return None,
             c => {
                 let w = word.get_or_insert(Word { text: String::new(), glob: false });
@@ -202,6 +250,264 @@ fn parts(line: &str, env: bool) -> Option<(Vec<Part>, Vec<bool>)> {
     end_word(&mut word, &mut words, &mut at);
     end_part(&mut words, &mut parts, &mut at)?;
     Some((parts, piped))
+}
+
+/// The parts of `line` as `parse` reads them — or, for a line of loops (#113: `for f in a b; do wc -l "$f";
+/// done`, `find src -name '*.rs' | while read -r f; do head -3 "$f"; done`), unrolled: each `for` body
+/// once per value with the variable filled in (a glob value stays a glob, judged by its fixed folder), a
+/// `while read` body once with the variable read as "a path from the list" (`./*` where the body runs —
+/// see `unrolled`). What only judges a line (`read_only`, `outside`, `runs_outside`) reads it so; what
+/// matches a line word for word (checks, patterns, scripts) doesn't — a loop is never a check.
+pub fn flat(line: &str) -> Option<Vec<Part>> {
+    parse(line).or_else(|| {
+        let (parts, piped) = split_with(line, false, true)?;
+        unrolled(&parts, &piped)
+    })
+}
+
+/// Words that start a loop or a shell's own construct — never a command of a line `flat` judges.
+const KEYWORDS: [&str; 12] =
+    ["for", "while", "until", "do", "done", "if", "then", "else", "elif", "fi", "case", "esac"];
+
+/// Commands a `while read` loop may read its paths from (`lists`), and what they may go through before it
+/// (`keeps_lines`).
+fn lists(w: &[Word]) -> bool {
+    let words: Vec<&str> = w.iter().map(|w| w.text.as_str()).collect();
+    let short = |o: &str, allowed: &str| {
+        o.len() > 1
+            && o.starts_with('-')
+            && !o.starts_with("--")
+            && o[1..].chars().all(|c| allowed.contains(c))
+    };
+    match words.split_first() {
+        // Bare names (no long form: `-l` shows where a link leads)
+        Some((&"ls", args)) => args.iter().all(|a| !a.starts_with('-') || short(a, "1aAd")),
+        // Not following links, one path a line (`-print0`, `-ls`, `-printf` print otherwise)
+        Some((&"find", args)) => !args.iter().any(|a| {
+            matches!(*a, "-L" | "-H" | "-follow" | "-ls" | "-print0" | "-printf" | "-fprint" | "-fprint0")
+        }),
+        Some((&"git", args)) => match git_after_c(args) {
+            ["ls-files", opts @ ..] => opts.iter().all(|o| {
+                !o.starts_with('-')
+                    || matches!(
+                        *o,
+                        "-c" | "-o"
+                            | "-m"
+                            | "-d"
+                            | "--cached"
+                            | "--others"
+                            | "--modified"
+                            | "--deleted"
+                            | "--exclude-standard"
+                    )
+            }),
+            _ => false,
+        },
+        // Only the names of files (that match), links not followed
+        Some((&("rg" | "grep"), args)) => {
+            let names = |a: &&str| {
+                matches!(*a, "--files" | "--files-with-matches") || (short(a, "lriEFws") && a.contains('l'))
+            };
+            args.iter().any(names)
+                && args.iter().all(|a| {
+                    !a.starts_with('-')
+                        || matches!(*a, "--files" | "--files-with-matches" | "--hidden")
+                        || short(a, "lriEFws")
+                })
+        }
+        _ => false,
+    }
+}
+
+/// A filter that passes lines on whole (or drops them) — between a list and a `while read` loop.
+fn keeps_lines(w: &[Word]) -> bool {
+    let words: Vec<&str> = w.iter().map(|w| w.text.as_str()).collect();
+    match words.split_first() {
+        Some((&("sort" | "head" | "tail"), args)) => {
+            only_reads(w) && !args.iter().any(|a| a.starts_with("-k"))
+        }
+        Some((&"grep", args)) => {
+            only_reads(w)
+                && args.iter().all(|a| !a.starts_with('-') || matches!(*a, "-v" | "-E" | "-F" | "-i" | "-e"))
+        }
+        _ => false,
+    }
+}
+
+/// `flat` for the parts of a line read with variables: its loops unrolled. None for anything it can't
+/// say what it reads: a loop inside a loop, a variable no loop sets, a `for` value with a variable in it,
+/// a `for` value with a space used unquoted (split into more words), a `while read` not fed by a list
+/// (`lists` — what a file says could name anything) or using its variable unquoted, or with `..` after it.
+fn unrolled(parts: &[Part], piped: &[bool]) -> Option<Vec<Part>> {
+    let first = |p: &Part| match p {
+        Part::Cmd(w) => Some(w[0].text.clone()),
+        Part::Cd(_) => None,
+    };
+    let has_var = |p: &Part| match p {
+        Part::Cmd(w) => w.iter().any(|w| w.text.contains(VAR.0)),
+        Part::Cd(d) => d.contains(VAR.0),
+    };
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < parts.len() {
+        let Part::Cmd(w) = &parts[i] else {
+            if has_var(&parts[i]) {
+                return None;
+            }
+            out.push(parts[i].clone());
+            i += 1;
+            continue;
+        };
+        let head: Vec<&str> = w.iter().map(|w| w.text.as_str()).collect();
+        // The loop's head, its separator `;` (not `|`), then `do …` up to `done`
+        let (var, source) = match head.as_slice() {
+            ["for", name, "in", ..] if env_name(name) => (name.to_string(), Source::Values(w[3..].to_vec())),
+            ["while", rest @ ..] => {
+                let rest = match rest {
+                    ["IFS=", rest @ ..] => rest,
+                    r => r,
+                };
+                let name = match rest {
+                    ["read", "-r", name] | ["read", name] if env_name(name) => name.to_string(),
+                    _ => return None,
+                };
+                // Fed by a list, through filters that keep its lines whole
+                let mut at = i;
+                loop {
+                    at = at.checked_sub(1)?;
+                    if !*piped.get(at)? {
+                        return None;
+                    }
+                    let Part::Cmd(fw) = &parts[at] else { return None };
+                    if lists(fw) {
+                        break;
+                    }
+                    if !keeps_lines(fw) {
+                        return None;
+                    }
+                }
+                (name, Source::Listed)
+            }
+            [kw, ..] if KEYWORDS.contains(kw) => return None,
+            _ => {
+                if has_var(&parts[i]) {
+                    return None;
+                }
+                out.push(parts[i].clone());
+                i += 1;
+                continue;
+            }
+        };
+        if *piped.get(i)? {
+            return None;
+        }
+        // The body: `do`'s own words (if any) are its first command, then each part up to `[done]`
+        let mut body = Vec::new();
+        match parts.get(i + 1)? {
+            Part::Cmd(d) if d[0].text == "do" => {
+                if d.len() > 1 {
+                    body.push(Part::Cmd(d[1..].to_vec()));
+                }
+            }
+            _ => return None,
+        }
+        let mut j = i + 2;
+        loop {
+            let p = parts.get(j)?;
+            if matches!(p, Part::Cmd(d) if d.len() == 1 && d[0].text == "done") {
+                break;
+            }
+            if first(p).is_some_and(|f| KEYWORDS.contains(&f.as_str())) {
+                return None;
+            }
+            body.push(p.clone());
+            j += 1;
+        }
+        if body.is_empty()
+            || first(&body[0]).is_some_and(|f| KEYWORDS.contains(&f.as_str()))
+            || *piped.get(j - 1)?
+        {
+            return None;
+        }
+        match source {
+            // (no values: the body would go unjudged)
+            Source::Values(values) if values.is_empty() => return None,
+            Source::Values(values) => {
+                for v in &values {
+                    if v.text.contains(VAR.0) {
+                        return None;
+                    }
+                    for p in &body {
+                        out.push(fill(p, &var, Some(v))?);
+                    }
+                }
+            }
+            Source::Listed => {
+                for p in &body {
+                    out.push(fill(p, &var, None)?);
+                }
+            }
+        }
+        i = j + 1;
+    }
+    Some(out)
+}
+
+/// Where a loop's variable takes its values: the `for`'s words, or the lines of a list (`while read`).
+enum Source {
+    Values(Vec<Word>),
+    Listed,
+}
+
+/// `p` with `var`'s uses filled in: `value` (a `for`'s) — or, a list's line (None), as a glob of where the
+/// body runs (`./*`, its fixed folder `.`), only when used in quotes at a word's start without `..` after.
+/// None for any other variable, or a use that can't be told (see `unrolled`).
+fn fill(p: &Part, var: &str, value: Option<&Word>) -> Option<Part> {
+    let one = |text: &str, glob: bool| -> Option<Word> {
+        let mut out = String::new();
+        let mut glob = glob;
+        let mut rest = text;
+        while let Some(at) = rest.find(VAR.0) {
+            out.push_str(&rest[..at]);
+            let after = &rest[at + VAR.0.len_utf8()..];
+            let end = after.find(VAR.1)?;
+            let (quoted, name) = (after.starts_with('q'), &after[1..end]);
+            if name != var {
+                return None;
+            }
+            rest = &after[end + VAR.1.len_utf8()..];
+            match value {
+                Some(v) => {
+                    let wild = v.text.contains(['*', '?', '[', ']']);
+                    if !quoted && v.text.contains(char::is_whitespace) {
+                        return None;
+                    }
+                    glob |= v.glob || (!quoted && wild);
+                    out.push_str(&v.text);
+                }
+                None => {
+                    let dots = Path::new(rest).components().any(|c| c == std::path::Component::ParentDir);
+                    if !quoted || !out.is_empty() || dots || rest.contains(VAR.0) {
+                        return None;
+                    }
+                    glob = true;
+                    out.push_str("./*");
+                }
+            }
+        }
+        out.push_str(rest);
+        Some(Word { text: out, glob })
+    };
+    Some(match p {
+        Part::Cd(d) => {
+            let w = one(d, false)?;
+            if w.glob {
+                return None;
+            }
+            Part::Cd(w.text)
+        }
+        Part::Cmd(w) => Part::Cmd(w.iter().map(|w| one(&w.text, w.glob)).collect::<Option<_>>()?),
+    })
 }
 
 /// What `parts` knows of the word in hand and the part's leading assignments.
@@ -223,8 +529,16 @@ fn env_name(s: &str) -> bool {
 /// (`sandbox::inside_env`, its home and temp folders), and what makes a program run another program or
 /// load code (rustc and cargo's wrappers, runners, linkers and flags — `-C linker=` runs one —, git's ssh,
 /// helpers and config, interpreters' startup options and paths, editors, pagers and password askers). A
-/// name ending in `_` is a prefix, one starting with `_` a suffix (`CARGO_TARGET_<triple>_RUNNER`).
-const ENV_NEVER: [&str; 40] = [
+/// name ending in `_` is a prefix, one starting with `_` a suffix (`CARGO_TARGET_<triple>_RUNNER`). Since a
+/// pattern's names take others (#114), also what picks the toolchain, cargo's config and aliases, or git's
+/// repository.
+const ENV_NEVER: [&str; 46] = [
+    "CARGO_HOME",
+    "CARGO_ALIAS_",
+    "RUSTUP_HOME",
+    "RUSTUP_TOOLCHAIN",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
     "PATH",
     "HOME",
     "TMPDIR",
@@ -376,19 +690,31 @@ pub fn one_command(line: &str) -> Option<Vec<String>> {
     }
 }
 
-/// The commands that only read (with their options below), by name.
-const COMMANDS: [&str; 17] = [
+/// The commands that only read (with their options below), by name — `nm` `otool` `strings` `size` read
+/// a binary's tables and text (#116).
+const COMMANDS: [&str; 21] = [
     "ls", "cat", "head", "tail", "wc", "grep", "rg", "find", "tree", "stat", "file", "du", "diff", "sort",
-    "uniq", "cut", "pwd",
+    "uniq", "cut", "pwd", "nm", "otool", "strings", "size",
 ];
 
-/// git's that only read — `branch` only bare (with words it creates, renames, deletes).
-const GIT: [&str; 3] = ["blame", "rev-parse", "ls-files"];
+/// Commands that read nothing — what they say is their words (`cargo clippy -q && echo clean`): none of
+/// them a path.
+const SAYS: [&str; 4] = ["echo", "printf", "true", "false"];
 
-/// Whether `cmd` only reads: a line `parse` reads, each command in it one above with none of the options
-/// that make it write a file, run a program, or never end. Where it reads is `outside`'s.
+/// Whether a command only says its words (`SAYS`).
+pub fn says(w: &[Word]) -> bool {
+    w.first().is_some_and(|w| SAYS.contains(&w.text.as_str()))
+}
+
+/// git's that only read — `branch` only bare (with words it creates, renames, deletes); `show` reads the
+/// repository (`git show :2:src/a.rs`, `HEAD~1:a`, #110); `diff --no-index` the files it names (judged as
+/// reads, `outside` — never a check's unasked run).
+const GIT: [&str; 4] = ["blame", "rev-parse", "ls-files", "show"];
+
+/// Whether `cmd` only reads: a line `flat` reads (loops unrolled), each command in it one above with none
+/// of the options that make it write a file, run a program, or never end. Where it reads is `outside`'s.
 pub fn read_only(cmd: &str) -> bool {
-    let Some(parts) = parse(cmd) else { return false };
+    let Some(parts) = flat(cmd) else { return false };
     parts.iter().all(|p| match p {
         Part::Cd(_) => true,
         Part::Cmd(w) => only_reads(w),
@@ -520,8 +846,10 @@ fn reads_only(words: &[&str]) -> bool {
         "git" => match git_after_c(args) {
             [sub, ..] if GIT.contains(sub) => true,
             ["branch"] => true,
+            ["diff", rest @ ..] => rest.contains(&"--no-index"),
             _ => false,
         },
+        _ if SAYS.contains(&name) => true,
         "sed" => sed_prints(args),
         "find" => !any(&|w| ["-exec", "-ok", "-delete", "-fprint", "-fls"].iter().any(|o| w.starts_with(o))),
         "sort" => !any(&|w| short(w, 'o') || w.starts_with("--compress-program")),
@@ -539,6 +867,9 @@ fn reads_only(words: &[&str]) -> bool {
 /// value (`--file=x`, `-f/x`); a glob as its fixed folder (`../*.rs` reads `..`). A word that names nothing
 /// (a pattern) is left out by `outside`.
 fn candidates(words: &[Word]) -> Vec<String> {
+    if words.first().is_some_and(|w| SAYS.contains(&w.text.as_str())) {
+        return Vec::new();
+    }
     let mut rest = words.get(1..).unwrap_or_default();
     // (git: its subcommand names no path; each `-C <dir>`'s folder is read, and git goes there — the rest
     // is where it ends up)
@@ -565,7 +896,8 @@ fn candidates(words: &[Word]) -> Vec<String> {
                     .text
                     .split_once('=')
                     .map(|(_, v)| v)
-                    .or_else(|| w.text.find('/').map(|i| &w.text[i..]))?,
+                    // (`-f$(rustc --print sysroot)/…` from the sysroot on — `outside` fills it in)
+                    .or_else(|| w.text.find(SYSROOT).or_else(|| w.text.find('/')).map(|i| &w.text[i..]))?,
             };
             if !w.glob {
                 return Some(path.to_string());
@@ -583,14 +915,14 @@ fn candidates(words: &[Word]) -> Vec<String> {
 /// git (a repository's config runs its hooks, fsmonitor, pager): a read allowed outside (`allow.rs`) never
 /// lets those run there — code nobody saw (review note). A `cd` that can't be followed counts as outside. On
 /// a worker.
-pub fn runs_outside(cmd: &str, cwd: &Path, root: &Path) -> bool {
-    let Some(parts) = parse(cmd) else { return true };
+pub fn runs_outside(cmd: &str, cwd: &Path, root: &Path, sysroot: Option<&Path>) -> bool {
+    let Some(parts) = flat(cmd) else { return true };
     let inside = |p: &Path| std::fs::canonicalize(p).is_ok_and(|r| r.starts_with(root));
     let mut here = cwd.to_path_buf();
     for part in parts {
         match part {
-            Part::Cd(dir) => match std::fs::canonicalize(here.join(&dir)) {
-                Ok(d) if d.is_dir() => here = d,
+            Part::Cd(dir) => match expand(&dir, sysroot).map(|d| std::fs::canonicalize(here.join(d))) {
+                Ok(Ok(d)) if d.is_dir() => here = d,
                 _ => return true,
             },
             Part::Cmd(w) => {
@@ -617,19 +949,22 @@ pub fn runs_outside(cmd: &str, cwd: &Path, root: &Path) -> bool {
 /// A word that names nothing there isn't a path; `..` and links are resolved. Each command's words are
 /// where it runs: after a `cd`, in that folder (its real path) — which is read too. Err: a `cd` into
 /// what isn't a folder that's there — the shell would stay where it was and run the rest (after `;` or
-/// `||`) from there, so where those read can't be told: the line is asked about.
+/// `||`) from there, so where those read can't be told: the line is asked about. So is a word naming
+/// `SYSROOT` when `sysroot` (its real path, `allow::sysroot`) isn't known.
 pub fn outside(
     cmd: &str,
     cwd: &Path,
     root: &Path,
     chat: &Allowed,
     kept: &Allowed,
+    sysroot: Option<&Path>,
 ) -> Result<Vec<PathBuf>, String> {
     let mut out: Vec<PathBuf> = Vec::new();
     let mut here = cwd.to_path_buf();
-    for part in parse(cmd).unwrap_or_default() {
+    for part in flat(cmd).ok_or("a line that can't be read")? {
         let words = match part {
             Part::Cd(dir) => {
+                let dir = expand(&dir, sysroot)?;
                 here = std::fs::canonicalize(here.join(&dir))
                     .ok()
                     .filter(|d| d.is_dir())
@@ -639,6 +974,7 @@ pub fn outside(
             Part::Cmd(w) => candidates(&w),
         };
         for w in words {
+            let w = expand(&w, sysroot)?;
             let Ok(real) = std::fs::canonicalize(here.join(w)) else { continue };
             if real.starts_with(root)
                 || chat.reads(&real)
@@ -652,6 +988,21 @@ pub fn outside(
         }
     }
     Ok(out)
+}
+
+/// `word` with `SYSROOT` in it filled in with `sysroot`. Err: it names it and the sysroot isn't known, or
+/// one the shell would split or fill in (a space, a glob), or it's named twice, or climbs out of it (`..`
+/// after it).
+fn expand(word: &str, sysroot: Option<&Path>) -> Result<String, String> {
+    let Some(at) = word.find(SYSROOT) else { return Ok(word.to_string()) };
+    let unknown = || format!("where {SYSROOT} leads couldn't be told");
+    let root = sysroot.map(|p| p.to_string_lossy().into_owned()).ok_or_else(unknown)?;
+    let after = &word[at + SYSROOT.len()..];
+    let climbs = Path::new(after).components().any(|c| c == std::path::Component::ParentDir);
+    if root.contains(|c: char| c.is_whitespace() || "*?[]".contains(c)) || after.contains(SYSROOT) || climbs {
+        return Err(unknown());
+    }
+    Ok(word.replacen(SYSROOT, &root, 1))
 }
 
 #[cfg(test)]
@@ -911,7 +1262,6 @@ mod tests {
             "cd -",
             "cd a b",
             "xargs cat",
-            "echo hi",
             "ls; ",
             "; ls",
             "ls && && ls",
@@ -994,6 +1344,124 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// #113: a loop of reads is a read — each `for` value judged as a word of its own (a glob by its fixed
+    /// folder), a `while read` fed by a list judged where its body runs; a loop whose body writes or runs
+    /// something, a variable no loop sets, or a use that can't be told still asks. #116, #110, and an
+    /// `echo` in a line (A9) likewise.
+    #[test]
+    fn loops_of_reads_and_the_reads_seen_today() {
+        for c in [
+            "for f in a.rs b.rs; do wc -l $f; done",
+            "for f in src/*.rs; do echo \"== $f\"; head -20 \"$f\"; done",
+            "for f in a b; do grep -n x \"src/${f}.rs\" | head -3; done | sort",
+            "sh -c 'for d in src tests; do ls \"$d\"; done'",
+            "find src -name '*.rs' | while read -r f; do head -3 \"$f\"; done",
+            "git ls-files src | sort | while IFS= read -r f; do wc -l \"$f\"; done",
+            "rg -l fn src | while read f; do grep -c fn \"$f\"; done",
+            // #116, #110, A9
+            "nm -gU target/debug/tarae | head",
+            "otool -L target/debug/tarae",
+            "strings target/debug/tarae | grep -c x",
+            "size -m target/debug/tarae",
+            "du -sh target",
+            "git show :2:src/a.rs",
+            "git show HEAD~1:src/a.rs | sed -n '1,40p'",
+            "git diff --no-index --stat a.txt b.txt",
+            "wc -l src/a.rs | tail -3 && echo clean",
+            "echo hi",
+            "ls src || true",
+        ] {
+            assert!(read_only(c), "{c}");
+        }
+        for c in [
+            "for f in a b; do rm $f; done",
+            "for f in a b; do cat $f > out; done",
+            "for f in a b; do cat $g; done",
+            "for f in $(ls); do cat $f; done",
+            "for f in; do rm -rf x; done",
+            "for f in a; do for g in b; do cat $g; done; done",
+            "for f in 'a b'; do cat $f; done",
+            "for f in a b; do sh -c \"cat $f\"; done",
+            "for f in a b | cat; do cat $f; done",
+            "cat list.txt | while read f; do cat \"$f\"; done",
+            "ls -la | while read f; do cat \"$f\"; done",
+            "find . -L | while read f; do cat \"$f\"; done",
+            "find . | while read f; do cat $f; done",
+            "find . | while read f; do cat \"../$f\"; done",
+            "find . | while read f; do cat \"$f/../../x\"; done",
+            "find . | cut -c3- | while read f; do cat \"$f\"; done",
+            "find . | grep -o x | while read f; do cat \"$f\"; done",
+            "while read f; do cat \"$f\"; done",
+            "find . | while read f; do cat \"$f\"; done; cat $f",
+            "cat $HOME/x",
+            "git diff HEAD",
+            "otool -l x; rm y",
+            "echo $(id)",
+        ] {
+            assert!(!read_only(c), "{c}");
+        }
+        // The `for` values each a word of its own, a glob staying a glob
+        let w = |t: &str, glob: bool| Word { text: t.into(), glob };
+        assert_eq!(
+            flat("for f in a.rs src/*.rs; do wc -l \"$f\"; done | sort"),
+            Some(vec![
+                Part::Cmd(vec![w("wc", false), w("-l", false), w("a.rs", false)]),
+                Part::Cmd(vec![w("wc", false), w("-l", false), w("src/*.rs", true)]),
+                Part::Cmd(vec![w("sort", false)]),
+            ])
+        );
+        assert_eq!(
+            flat("cd src && ls | while read -r f; do head -1 \"$f\"; done"),
+            Some(vec![
+                Part::Cd("src".into()),
+                Part::Cmd(vec![w("ls", false)]),
+                Part::Cmd(vec![w("head", false), w("-1", false), w("./*", true)]),
+            ]),
+            "a listed line: anything where the body runs"
+        );
+    }
+
+    /// #112: `$(rustc --print sysroot)` is the sysroot rustup names for where it runs — judged there, as any
+    /// path: inside the toolchain's sources a read like any other; unknown, or climbing out of it, asked.
+    #[test]
+    fn the_sysroot_is_filled_in_where_it_is_judged() {
+        let base = std::env::temp_dir().join(format!("tarae-sysroot-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        let tc = base.join("rustup/toolchains/1.99.0-aarch64-apple-darwin");
+        std::fs::create_dir_all(tc.join("lib/rustlib/src/rust/library/core/src")).unwrap();
+        std::fs::create_dir_all(base.join("p")).unwrap();
+        std::fs::write(tc.join("lib/rustlib/src/rust/library/core/src/lib.rs"), "x\n").unwrap();
+        let base = std::fs::canonicalize(&base).unwrap();
+        let (tc, p) = (base.join("rustup/toolchains/1.99.0-aarch64-apple-darwin"), base.join("p"));
+        let trees = Allowed { read: vec![tc.join("lib/rustlib/src")], ..Default::default() };
+        let none = Allowed::default();
+        let core = "$(rustc --print sysroot)/lib/rustlib/src/rust/library/core/src/lib.rs";
+        for c in [
+            format!("sed -n '1,40p' {core}"),
+            format!("grep -n fn \"{core}\""),
+            "cd \"$(rustc --print sysroot)/lib/rustlib/src/rust/library\" && grep -rn fn core/src | head"
+                .into(),
+        ] {
+            assert!(read_only(&c), "{c}");
+            assert_eq!(outside(&c, &p, &p, &none, &trees, Some(&tc)), Ok(vec![]), "{c}");
+            assert!(!runs_outside(&c, &p, &p, Some(&tc)), "{c}");
+        }
+        let c = format!("cat {core}");
+        assert!(outside(&c, &p, &p, &none, &trees, None).is_err(), "not known: asked");
+        assert_eq!(
+            outside(&c, &p, &p, &none, &none, Some(&tc)),
+            Ok(vec![tc.join(&core[25..])]),
+            "not allowed"
+        );
+        let climbs = "cat $(rustc --print sysroot)/../../x";
+        assert!(outside(climbs, &p, &p, &none, &trees, Some(&tc)).is_err(), "out of it");
+        let opt = "grep -f$(rustc --print sysroot)/../../x src";
+        assert!(outside(opt, &p, &p, &none, &trees, Some(&tc)).is_err(), "an option's value");
+        assert_eq!(parse("cat $(rustc --print sysroot )"), None, "only as written");
+        assert_eq!(parse("cat $(rustc --print target-libdir)"), None);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     /// Paths it names are resolved where it runs: inside the project they're fine, outside they're what the
     /// card says — unless allowed; a word that names nothing isn't a path, and a link that leads out is out.
     #[test]
@@ -1007,7 +1475,7 @@ mod tests {
         std::fs::write(out.join("m.txt"), "x\n").unwrap();
         std::os::unix::fs::symlink(&out, p.join("link")).unwrap();
         let none = Allowed::default();
-        let at = |cmd: &str| outside(cmd, &p, &p, &none, &none).unwrap();
+        let at = |cmd: &str| outside(cmd, &p, &p, &none, &none, None).unwrap();
         assert!(at("cat src/a.rs").is_empty());
         assert!(at("grep -rn nothing-like-a-path src").is_empty(), "a pattern isn't a path");
         assert!(at("ls").is_empty());
@@ -1024,8 +1492,8 @@ mod tests {
         // #88: a -C behind git's harmless options is a read all the same, and where it runs (`runs_outside`)
         assert_eq!(at("git --no-pager -C ../out log"), std::slice::from_ref(&out));
         assert_eq!(at("git -C src --no-optional-locks ls-files ../../out"), std::slice::from_ref(&out));
-        assert!(runs_outside("git --no-optional-locks -C ../out status", &p, &p));
-        assert!(!runs_outside("git --no-optional-locks -C src status", &p, &p));
+        assert!(runs_outside("git --no-optional-locks -C ../out status", &p, &p, None));
+        assert!(!runs_outside("git --no-optional-locks -C src status", &p, &p, None));
         // A line of several: each part where it runs — a cd's folder read too; a glob by its fixed folder
         assert!(at("cd src && cat a.rs | wc -l").is_empty());
         assert_eq!(at("cd ../out && cat m.txt"), [out.clone(), out.join("m.txt")]);
@@ -1041,17 +1509,17 @@ mod tests {
             "cd nope && cat x",
             "sh -c 'cd nope; cat ../out/m.txt'",
         ] {
-            let r = outside(line, &p, &p, &none, &none);
+            let r = outside(line, &p, &p, &none, &none, None);
             assert!(r.as_ref().is_err_and(|e| e.contains("no such folder")), "{line}: {r:?}");
         }
         // One there is followed to its real path: a link into somewhere else is read there
         assert_eq!(at("cd link; cat m.txt"), [out.clone(), out.join("m.txt")]);
         let allowed = Allowed { read: vec![out.clone()], ..Default::default() };
         assert!(
-            outside("cat ../out/m.txt", &p, &p, &allowed, &none).unwrap().is_empty(),
+            outside("cat ../out/m.txt", &p, &p, &allowed, &none, None).unwrap().is_empty(),
             "allowed this chat"
         );
-        assert!(outside("cat ../out/m.txt", &p, &p, &none, &allowed).unwrap().is_empty(), "kept");
+        assert!(outside("cat ../out/m.txt", &p, &p, &none, &allowed, None).unwrap().is_empty(), "kept");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

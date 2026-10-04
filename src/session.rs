@@ -839,6 +839,39 @@ mod tests {
         std::fs::remove_dir_all(front.parent().unwrap()).ok();
     }
 
+    /// A message typed in a chat whose input isn't on screen is marked: a session behind's on its tab, the
+    /// front's on the status line while its chat is minimized (Claude at work, followed) — and not once the
+    /// chat is up, or the input empty.
+    #[test]
+    fn a_draft_out_of_sight_is_marked_unsent() {
+        let (mut ed, _front, back) = two_projects("unsent");
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        let id = ed.session_open(&back).unwrap();
+        crate::chat::open(&mut ed);
+        ed.session.chat.as_mut().unwrap().input = "and also the tests".into();
+        assert!(ed.session_switch(0));
+        crate::chat::open(&mut ed);
+        let rows = screen(&mut ed, 160, 24);
+        let tabs = rows.iter().find(|r| r.contains(" │ +")).cloned().unwrap_or_else(|| panic!("{rows:#?}"));
+        assert!(tabs.contains("back unsent │ +") && !tabs.contains("front unsent"), "{tabs}");
+        session_by_mut(&mut ed, id).chat.as_mut().unwrap().input.clear();
+        let rows = screen(&mut ed, 160, 24);
+        assert!(!rows.iter().any(|r| r.contains("unsent")), "{rows:#?}");
+        // The front's chat minimized while Claude works: its draft on the status line
+        let c = ed.session.chat.as_mut().unwrap();
+        (c.input, c.focused, c.follow.on, c.state) =
+            ("half a thought\nmore".into(), false, true, crate::chat::State::Thinking);
+        let rows = screen(&mut ed, 160, 24);
+        let status = rows.iter().find(|r| r.contains("NORMAL")).unwrap_or_else(|| panic!("{rows:#?}"));
+        assert!(status.contains("unsent half a thought"), "{status}");
+        ed.session.chat.as_mut().unwrap().unfolded = true;
+        let rows = screen(&mut ed, 160, 24);
+        assert!(!rows.iter().any(|r| r.contains("unsent")), "the chat up: its input says it");
+        ed.session.chat.as_mut().unwrap().state = crate::chat::State::Idle;
+        std::fs::remove_dir_all(back.parent().unwrap()).ok();
+    }
+
     /// #86: a session behind whose turn ends — its card that waited goes with the turn (the front's stays),
     /// and its tab says `done`, not the `▲ waits` of a card; looked at, the mark goes.
     #[test]

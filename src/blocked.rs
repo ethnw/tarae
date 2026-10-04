@@ -70,6 +70,16 @@ pub fn choices(denials: &[Denial], home: &Path, root: &Path, path: &[PathBuf]) -
         {
             let why = format!("{} was connecting to it", d.process);
             vec![Choice { grant: Grant::Port(n), hint: format!("{} connecting", d.process), why }]
+        } else if d.op == "network-outbound" && d.target.starts_with('/') {
+            // A unix socket (#119): that file, by its real path — one that's there and is a socket
+            use std::os::unix::fs::FileTypeExt as _;
+            let real = std::fs::canonicalize(&d.target).ok().filter(|p| {
+                std::fs::metadata(p).is_ok_and(|m| m.file_type().is_socket()) && !p.starts_with(root)
+            });
+            let why = format!("{} was connecting to it", d.process);
+            real.map(|s| Choice { grant: Grant::Socket(s), hint: format!("{} connecting", d.process), why })
+                .into_iter()
+                .collect()
         } else {
             Vec::new()
         };
@@ -135,6 +145,7 @@ impl Editor {
                 label: match &c.grant {
                     Grant::Write(p) => format!("allow writing in {}", crate::allow::tilde(p)),
                     Grant::Port(n) => format!("allow port {n} on this machine"),
+                    Grant::Socket(s) => format!("allow the socket {} only", crate::allow::tilde(s)),
                 },
                 action: Action::Typed(format!("sandbox-grant {i}")),
                 hint: c.hint.clone(),
@@ -172,13 +183,27 @@ impl Editor {
             n => {
                 let Choice { grant, why, .. } =
                     n.parse::<usize>().ok().and_then(|i| list.get(i).cloned()).ok_or("no such row")?;
-                let question = format!(
+                // (a socket: this run, or this conversation — everything else stays in the sandbox)
+                let lasts = match grant.keepable() {
+                    true => "Always lasts until :sandbox-allowed takes it back.",
+                    false => "Everything else stays in the sandbox; it's never kept past this conversation.",
+                };
+                let mut question = format!(
                     "Let Claude's commands {}\n\n{why}, in `{cmd}` — which runs again now with it open, whichever \
-                     you choose. Always lasts until :sandbox-allowed takes it back.",
+                     you choose. {lasts}",
                     grant.shown()
                 );
+                let warning = grant.warning().map(|w| {
+                    question.push_str(&format!("\n\n{w}"));
+                    let at = question.split('\n').count() - 1;
+                    at..at + 1
+                });
                 let what = crate::offer::What::Grant { grant, run };
-                crate::offer::Offer::new(GRANT_TITLE.into(), &question, "", String::new(), what)
+                let o = crate::offer::Offer::new(GRANT_TITLE.into(), &question, "", String::new(), what);
+                match warning {
+                    Some(lines) => o.warning(lines),
+                    None => o,
+                }
             }
         };
         self.push_offer(card);
@@ -248,6 +273,42 @@ mod tests {
             [Grant::Write(home.join(".npm/_cacache")), Grant::Write(home.join(".npm")), Grant::Port(5432)],
             "Docker's port and the project's .git aren't offered; each folder once"
         );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// #119: a denied connect to a unix socket offers that socket — its real path, the file only — and not
+    /// a path that isn't a socket, nor one in the project (that's open already); Docker's says what it is,
+    /// and none is kept for good.
+    #[test]
+    fn a_denied_socket_offers_that_socket_only() {
+        // (a socket's path has 104 bytes at most: short names — the temp folder is the home)
+        let base = crate::sandbox::real(&std::env::temp_dir()).join(format!("k{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::create_dir_all(base.join(".colima/t")).unwrap();
+        std::fs::create_dir_all(base.join("p")).unwrap();
+        let home = base.clone();
+        let (root, sock) = (home.join("p"), home.join(".colima/t/docker.sock"));
+        let _l = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let _in = std::os::unix::net::UnixListener::bind(root.join("own.sock")).unwrap();
+        std::os::unix::fs::symlink(&sock, home.join("docker.sock")).unwrap();
+        std::fs::write(home.join("plain.txt"), "marker").unwrap();
+        let d = |target: PathBuf| Denial {
+            process: "docker".into(),
+            op: "network-outbound".into(),
+            target: target.display().to_string(),
+        };
+        let denials = [
+            d(home.join("docker.sock")),
+            d(sock.clone()),
+            d(home.join("plain.txt")),
+            d(root.join("own.sock")),
+            d(home.join("gone.sock")),
+        ];
+        let got: Vec<Grant> = choices(&denials, &home, &root, &[]).into_iter().map(|c| c.grant).collect();
+        assert_eq!(got, [Grant::Socket(sock.clone())], "the link's socket, once — nothing else");
+        let g = Grant::Socket(sock);
+        assert!(!g.keepable() && g.warning().is_some_and(|w| w.contains("mounts any folder")));
+        assert!(Grant::Socket("/tmp/x/app.sock".into()).warning().is_none());
         std::fs::remove_dir_all(&base).ok();
     }
 }

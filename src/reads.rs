@@ -190,7 +190,8 @@ pub fn request(ed: &mut Editor, request_id: &str, req: &Value) -> Option<Value> 
     let root = ed.session.root.clone();
     ed.events.jobs().spawn(move || {
         let look = look(&tool, &input, &root);
-        let kept = crate::allow::Store::read(store.as_deref()).get(&root);
+        let mut kept = crate::allow::Store::read(store.as_deref()).get(&root);
+        kept.read.extend(crate::allow::also_readable(&root));
         let ok = covered(&look, &root, &chat, &kept, &made);
         move |ed: &mut Editor| {
             let Some(c) = ed.session.chat.as_mut().filter(|c| c.generation() == generation) else { return };
@@ -198,10 +199,36 @@ pub fn request(ed: &mut Editor, request_id: &str, req: &Value) -> Option<Value> 
                 return crate::chat::respond(ed, &request_id, allow(&input));
             }
             c.reads.push_back(Pending { request_id, generation, input, look });
+            refold(ed);
             next(ed);
         }
     });
     None
+}
+
+/// A read come to wait beside the one on the card up (it came after the card): the card offers their folder
+/// now — said on it, and settled again before `a` counts (#102: Claude's reads come one after another).
+fn refold(ed: &mut Editor) {
+    let Some(c) = ed.session.chat.as_ref() else { return };
+    let others: Vec<PathBuf> =
+        c.reads.iter().filter_map(|w| w.look.at.clone()).chain(c.read_once.iter().cloned()).collect();
+    let home = crate::allow::home();
+    let front = !ed.background();
+    for o in ed.session.parked.iter_mut().chain(ed.offers.iter_mut().filter(|_| front)) {
+        let crate::offer::What::Read { pending, keep: true, folder: folder @ None } = &mut o.what else {
+            continue;
+        };
+        let Some(at) = pending.look.at.clone().filter(|_| pending.look.file) else { continue };
+        let Some(f) = crate::allow::grant_places(std::slice::from_ref(&at), &others, home.as_deref())
+            .pop()
+            .filter(|f| *f != at)
+        else {
+            continue;
+        };
+        o.question = question(&pending.look, true, Some(&f));
+        *folder = Some(f);
+        o.rev += 1;
+    }
 }
 
 fn allow(input: &Value) -> Value {
@@ -215,16 +242,29 @@ pub fn next(ed: &mut Editor) {
     if ed.session_cards().any(|o| matches!(o.what, crate::offer::What::Read { .. })) {
         return;
     }
-    let Some(p) = ed.session.chat.as_mut().and_then(|c| c.reads.pop_front()) else { return };
-    let keep =
-        p.look.at.as_deref().is_some_and(|at| crate::allow::keepable(at, crate::allow::home().as_deref()));
-    let q = question(&p.look, keep);
-    let what = crate::offer::What::Read { pending: Box::new(p), keep };
+    let Some(c) = ed.session.chat.as_mut() else { return };
+    let Some(p) = c.reads.pop_front() else { return };
+    let home = crate::allow::home();
+    let keep = p.look.at.as_deref().is_some_and(|at| crate::allow::keepable(at, home.as_deref()));
+    // (beside another read waiting or let through once: its folder for longer — #102)
+    let others: Vec<PathBuf> =
+        c.reads.iter().filter_map(|w| w.look.at.clone()).chain(c.read_once.iter().cloned()).collect();
+    let folder = match (&p.look.at, keep) {
+        (Some(at), true) if p.look.file => {
+            crate::allow::grant_places(std::slice::from_ref(at), &others, home.as_deref())
+                .pop()
+                .filter(|f| f != at)
+        }
+        _ => None,
+    };
+    let q = question(&p.look, keep, folder.as_deref());
+    let what = crate::offer::What::Read { pending: Box::new(p), keep, folder };
     ed.push_offer(crate::offer::Offer::new(TITLE.into(), &q, "", String::new(), what));
 }
 
-/// The card's text: exactly what's read, and where it goes.
-pub fn question(look: &Look, keep: bool) -> String {
+/// The card's text: exactly what's read, and where it goes — and, when `a`/`A` allow its folder rather
+/// than the file (`folder`), that.
+pub fn question(look: &Look, keep: bool, folder: Option<&Path>) -> String {
     let at = match &look.at {
         Some(at) => at.display().to_string(),
         None => format!("{} (where it leads can't be told)", look.given),
@@ -245,12 +285,22 @@ pub fn question(look: &Look, keep: bool) -> String {
     if !keep && look.at.is_some() {
         q.push_str(" Only once — a place like this is never kept.");
     }
+    if let Some(f) = folder {
+        q.push_str(&format!("\n\na and A allow everything in {} — not only this file.", f.display()));
+    }
     q
 }
 
 /// The user's answer on the card: None = no; else allowed, for once or longer (`a`, `A` — only when the
-/// card offered it).
-pub fn answer(ed: &mut Editor, id: u64, p: Pending, scope: Option<Scope>, keep: bool) {
+/// card offered it; `folder`: what they allow, when the card said so).
+pub fn answer(
+    ed: &mut Editor,
+    id: u64,
+    p: Pending,
+    scope: Option<Scope>,
+    keep: bool,
+    folder: Option<PathBuf>,
+) {
     ed.offer_finished(id, Ok(()));
     if ed.session.chat.as_ref().is_none_or(|c| c.generation() != p.generation) {
         return;
@@ -262,7 +312,13 @@ pub fn answer(ed: &mut Editor, id: u64, p: Pending, scope: Option<Scope>, keep: 
         return next(ed);
     };
     crate::chat::respond(ed, &p.request_id, allow(&p.input));
-    let at = p.look.at.clone().filter(|_| keep && scope != Scope::Once);
+    if scope == Scope::Once
+        && let (Some(c), Some(at)) = (ed.session.chat.as_mut(), p.look.at.clone())
+        && !c.read_once.contains(&at)
+    {
+        c.read_once.push(at);
+    }
+    let at = folder.or_else(|| p.look.at.clone()).filter(|_| keep && scope != Scope::Once);
     if let Some(at) = at {
         crate::allow::grant_reads(ed, &[at], scope);
         // The ones waiting that this lets through
@@ -327,7 +383,8 @@ mod tests {
         std::fs::create_dir_all(dir.join("out")).unwrap();
         let dir = std::fs::canonicalize(&dir).unwrap();
         std::fs::write(dir.join("out/m.txt"), "marker\n").unwrap();
-        let q = |path: PathBuf| question(&look("Grep", &json!({"pattern": "x", "path": path}), &dir), true);
+        let q =
+            |path: PathBuf| question(&look("Grep", &json!({"pattern": "x", "path": path}), &dir), true, None);
         let (folder, file) = (dir.join("out"), dir.join("out/m.txt"));
         assert!(
             q(folder.clone())
@@ -482,9 +539,9 @@ mod tests {
         // (a command's words are only paths when they're there: the log must be)
         if log.exists() {
             let cmd = format!("grep -n ready {}", log.display());
-            assert_eq!(crate::readonly::outside(&cmd, root, root, &none, &none), Ok(vec![]));
+            assert_eq!(crate::readonly::outside(&cmd, root, root, &none, &none, None), Ok(vec![]));
             let cmd = format!("tail -n 40 {} {}", log.display(), dir.display());
-            let out = crate::readonly::outside(&cmd, root, root, &none, &none).unwrap();
+            let out = crate::readonly::outside(&cmd, root, root, &none, &none, None).unwrap();
             assert_eq!(out, vec![std::fs::canonicalize(dir).unwrap()], "the folder still asks");
         }
     }

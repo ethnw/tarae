@@ -1844,7 +1844,10 @@ fn draw_procs_panel<W: Write>(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut 
     let inner = w.saturating_sub(4);
     if p.checks.is_empty() && y < end {
         let every = crate::procs::QUIET_EVERY.as_secs();
-        let why = format!("none so far — tarae looks every {every}s, and every second while this is open");
+        let gone = crate::procs::ENDED_KEPT.as_secs() / 60;
+        let why = format!(
+            "none now · looked at every {every}s, each second while open · ended ones go after {gone}m"
+        );
         line(out, y, &[col(&why, inner, false, faint)], card, false)?;
         y += 1;
     }
@@ -4260,11 +4263,12 @@ fn draw_review(
                 let left =
                     rev.hunks.iter().filter(|h| h.decision == Decision::Undecided && !h.conflict).count();
                 let (all, all_short) = (format!("accept all {left}"), format!("all {left}"));
-                // Esc goes back to the chat unanswered (#70); from there `C-q` answers it. Each in a short form
-                // too, for when the row can't hold them whole (beside the chat it cut esc's off)
+                // Esc goes back where the keys were — the chat or the code — unanswered (#70, #118); from
+                // there `C-q` answers it. Each in a short form too, for when the row can't hold them whole
+                // (beside the chat it cut esc's off)
                 let chat = editor.session.chat.as_ref().map(|c| c.focused);
-                let esc: &[(&str, &str)] = if chat.is_some() { &[("esc", "back, unanswered")] } else { &[] };
-                let esc_short: &[(&str, &str)] = if chat.is_some() { &[("esc", "back")] } else { &[] };
+                let esc: &[(&str, &str)] = &[("esc", "back, unanswered")];
+                let esc_short: &[(&str, &str)] = &[("esc", "back")];
                 type Hints<'a> = Vec<(&'a str, &'a str)>;
                 let (full, short, st): (Hints, Hints, Style) = match (h.conflict, h.decision) {
                     (true, _) => {
@@ -4279,6 +4283,9 @@ fn draw_review(
                     }
                     _ if current && chat == Some(true) => {
                         (vec![("C-q", "answer it — the chat has the keys")], vec![("C-q", "answer it")], base)
+                    }
+                    _ if current && rev.away => {
+                        (vec![("C-q", "answer it — the code has the keys")], vec![("C-q", "answer it")], base)
                     }
                     _ if current && left > 1 => (
                         [
@@ -5576,6 +5583,18 @@ fn draw_statusline(
             }),
         }
     }
+    // A message typed in the chat while the chat isn't on screen (a review read wide, the minimized card, a
+    // zoom): what's there, so it isn't lost from sight
+    if let Some(text) = editor
+        .session
+        .chat
+        .as_ref()
+        .filter(|_| lay.chat_w == 0)
+        .and_then(|c| c.input.lines().map(str::trim).find(|l| !l.is_empty()))
+    {
+        left.push(Seg { text: "  unsent ".into(), style: accent, keep: 225 });
+        left.push(Seg { text: fit_ellipsis(text, 24), style: dim, keep: 225 });
+    }
     if !lay.header {
         let modified = if doc.is_modified() { " ●" } else { "" };
         left.push(Seg {
@@ -6371,6 +6390,10 @@ impl OfferCard {
                         b = vec![('y', "Allow"), ('n', "Not now")]
                     }
                     crate::offer::What::PluginAsk { .. } => b = vec![('y', "Allow"), ('n', "No")],
+                    // (one socket past the sandbox — #119)
+                    crate::offer::What::Run(ref r) if r.socket.is_some() => {
+                        b = vec![('y', "This run"), ('a', "This chat"), ('n', "No")]
+                    }
                     crate::offer::What::Run(ref r) if r.keep => {
                         b = vec![('y', "Run"), ('a', "This chat"), ('A', "Always"), ('n', "No")]
                     }
@@ -6388,6 +6411,9 @@ impl OfferCard {
                         b = vec![('y', "Once"), ('a', "This chat"), ('A', "Always"), ('n', "No")]
                     }
                     crate::offer::What::Read { keep: false, .. } => b = vec![('y', "Once"), ('n', "No")],
+                    crate::offer::What::Grant { ref grant, .. } if !grant.keepable() => {
+                        b = vec![('y', "This run"), ('a', "This chat"), ('n', "No")]
+                    }
                     crate::offer::What::Grant { .. } => {
                         b = vec![('y', "Once"), ('a', "This chat"), ('A', "Always"), ('n', "No")]
                     }
@@ -6439,6 +6465,13 @@ impl OfferCard {
                         ]
                     }
                     crate::offer::What::Hooks(_) => b = vec![('n', "Skip hooks")],
+                    crate::offer::What::Restart(_) if o.restart_other() => {
+                        b = vec![('y', "Restart"), ('f', "The front's instead"), ('n', "Not now")]
+                    }
+                    crate::offer::What::Restart(_) => b = vec![('y', "Restart"), ('n', "Not now")],
+                    crate::offer::What::RestartSame { .. } => {
+                        b = vec![('y', "Restart anyway"), ('n', "Don't")]
+                    }
                     crate::offer::What::ChangeSet { .. } => {
                         b = vec![
                             ('y', "Accept all"),
@@ -8035,6 +8068,10 @@ fn session_tabs(
         // (files came again from disk while it was behind — #6)
         if l.reloaded > 0 {
             end = put(&mut spans, " •".into(), dim);
+        }
+        // (a message typed in its chat, not sent — its input isn't on screen)
+        if l.id != editor.session.id && l.chat.as_ref().is_some_and(|c| !c.input.trim().is_empty()) {
+            end = put(&mut spans, " unsent".into(), dim);
         }
         spots.push((start, end, Spot::Session(l.id)));
     }

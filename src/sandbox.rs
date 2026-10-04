@@ -1,7 +1,8 @@
 //! Claude's commands in a sandbox. What Claude runs — `run` and `run_tests` (`tools.rs`) — goes through
 //! macOS's Seatbelt (`/usr/bin/sandbox-exec`) with a profile made here (`Policy::profile`): it may write
 //! in the project (but `.git`, `.tarae.toml` and `llm.sandbox-protect`), the temp folders and the
-//! toolchain's own folders (cargo's target and build dirs, its registry; Go's caches), connect to nothing
+//! toolchain's own folders (cargo's registry, its target and build dirs when they're the checkout's own —
+//! `cargo_dir_verdict`, #20: a cargo config in the checkout names them, and Claude can write it; Go's caches), connect to nothing
 //! over the network but the ports on this machine the user opened (`llm.sandbox-ports`, or all with
 //! `llm.sandbox-localhost` — `RISKY_PORTS` says why not all by default), and make or reach unix sockets
 //! only in the project and its own temp folder (`RunDir`, its `TMPDIR`). What the user runs themselves (`space m m`, `space x x`, installs,
@@ -45,7 +46,7 @@ pub enum Availability {
 /// How a command of Claude's runs.
 #[derive(Clone, Debug)]
 pub enum Guard {
-    In(Policy),
+    In(Box<Policy>),
     /// No sandbox here (why) — the user agreed.
     Without(String),
     /// `llm.sandbox` is off.
@@ -132,9 +133,25 @@ impl Guard {
                     true => String::new(),
                     false => format!(" The user also let it {}.", p.granted.join(", and ")),
                 };
+                // (what the checkout's cargo config named and stays closed — #20)
+                let refused = match p.refused.is_empty() {
+                    true => String::new(),
+                    false => {
+                        let each: Vec<String> = p
+                            .refused
+                            .iter()
+                            .map(|(d, why)| format!("{} ({why})", crate::allow::tilde(d)))
+                            .collect();
+                        format!(
+                            " It kept closed what the checkout's cargo config named: {} — a build writing \
+                             there fails; the user can open a folder with llm.sandbox-write.",
+                            each.join("; ")
+                        )
+                    }
+                };
                 format!(
                     "In tarae's sandbox: it could write only in the project (not .git or .tarae.toml), temp \
-                     folders and the toolchain's own{net}.{granted}"
+                     folders and the toolchain's own{net}.{granted}{refused}"
                 )
             }
             Guard::Without(why) => format!("Ran without a sandbox ({why}) — the user agreed."),
@@ -175,6 +192,50 @@ pub struct Policy {
     pub watch: Option<std::sync::Arc<Watch>>,
     /// What the user let Claude's commands do besides (`allow.rs`) — as the result says it.
     pub granted: Vec<String>,
+    /// Unix sockets outside the project it may connect to, each that one file (`allow::Grant::Socket`).
+    pub sockets: Vec<PathBuf>,
+    /// The folders cargo named that stay closed, and why (`cargo_dir_verdict`) — said with the result and on
+    /// the panel.
+    pub refused: Vec<(PathBuf, String)>,
+}
+
+/// Whether a folder cargo names for the checkout at `root` (`d`, a real path) may be written by its runs
+/// (#20 — the checkout's cargo config names it, and Claude can write that): `Ok(true)` it needs a rule of
+/// its own (this checkout's own per-checkout build dir, `own`, under cargo's home as `build/xx/yyyy`),
+/// `Ok(false)` it's writable already (inside the checkout, a temp folder); `Err` why it stays closed — home or
+/// above it, a folder holding the checkout, cargo's home or above it, or anything else.
+pub fn cargo_dir_verdict(
+    d: &Path,
+    root: &Path,
+    home: Option<&Path>,
+    cargo_home: Option<&Path>,
+    own: Option<&Path>,
+    tmp: Option<&Path>,
+) -> Result<bool, String> {
+    if home.is_some_and(|h| h.starts_with(d)) {
+        return Err(if home == Some(d) { "it's your home".into() } else { "it holds your home".into() });
+    }
+    if root.starts_with(d) && root != d {
+        return Err("it holds the checkout".into());
+    }
+    if cargo_home.is_some_and(|c| c.starts_with(d)) {
+        return Err("it's cargo's home".into());
+    }
+    if d.starts_with(root) {
+        return Ok(false);
+    }
+    let per_checkout = |o: &Path| {
+        let below = cargo_home.and_then(|c| o.strip_prefix(c.join("build")).ok());
+        below.is_some_and(|b| b.components().count() == 2)
+    };
+    if own.is_some_and(|o| o == d && per_checkout(o)) {
+        return Ok(true);
+    }
+    let temps = [Some(Path::new("/private/tmp")), tmp];
+    if temps.iter().flatten().any(|t| d.starts_with(t) && d != *t) {
+        return Ok(false);
+    }
+    Err("it isn't in the checkout, its own build dir under cargo's home, or a temp folder".into())
 }
 
 /// A run's own temp folder. Unix sockets anywhere else stay out of reach: in `/private/tmp` and `$TMPDIR`
@@ -404,6 +465,15 @@ impl Watch {
         w
     }
 
+    /// A watch whose child is `program args` — a stand-in for `log stream` (tests; killed with it).
+    #[cfg(test)]
+    pub fn spawned_for_test(program: &str, arg: &str) -> std::sync::Arc<Watch> {
+        let w = Watch::quiet("test.");
+        let child = Command::new(program).arg(arg).stdin(Stdio::null()).spawn().unwrap();
+        *w.child.lock().unwrap() = Some(child);
+        w
+    }
+
     /// A denial, as if reported (tests).
     #[cfg(test)]
     pub fn record(&self, d: Denial) {
@@ -416,6 +486,11 @@ impl Watch {
 
     pub fn blocked(&self) -> Blocked {
         self.blocked.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Its `log stream`'s pid while it watches — `:procs` knows it as the run's.
+    pub fn pid(&self) -> Option<u32> {
+        self.child.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(std::process::Child::id)
     }
 
     /// The run is done: no more watching (its last denials have had `WATCH_LAST`).
@@ -445,8 +520,18 @@ pub fn panel_line(
     running: bool,
     last_output: std::time::Instant,
 ) -> Option<(String, Option<String>)> {
-    let b = guard?.watch()?.blocked();
-    let first = b.seen.first()?;
+    let g = guard?;
+    let b = g.watch().map(|w| w.blocked()).unwrap_or_default();
+    // (nothing denied yet: what the checkout's cargo config named and stays closed — #20)
+    let Some(first) = b.seen.first() else {
+        let Guard::In(p) = g else { return None };
+        let (d, _) = p.refused.first()?;
+        let more = if p.refused.len() > 1 { format!("  +{}", p.refused.len() - 1) } else { String::new() };
+        return Some((
+            format!("sandbox kept {} closed — cargo's config named it{more}", crate::allow::tilde(d)),
+            None,
+        ));
+    };
     let more = if b.distinct > 1 { format!("  +{}", b.distinct - 1) } else { String::new() };
     let quiet = (running && last_output.elapsed() >= QUIET).then(|| {
         format!("quiet {}s — it may be waiting on what was blocked", last_output.elapsed().as_secs())
@@ -551,6 +636,14 @@ impl Policy {
             "(allow network-bind network-inbound (require-all (local unix-socket) {here}))\n\
              (allow network-outbound (require-all (remote unix-socket) {here}))\n"
         ));
+        // …and the sockets the user granted: each that one file, connecting only (#119)
+        let sockets: String =
+            (0..self.sockets.len()).map(|i| format!(" (literal (param \"S{i}\"))")).collect();
+        if !sockets.is_empty() {
+            p.push_str(&format!(
+                "(allow network-outbound (require-all (remote unix-socket) (require-any{sockets})))\n"
+            ));
+        }
         for rule in NO_WAY_OUT {
             p.push_str(&deny(rule));
         }
@@ -566,6 +659,7 @@ impl Policy {
         v.extend(self.write.iter().enumerate().map(|(i, p)| (format!("W{i}"), s(p))));
         v.extend(self.files.iter().enumerate().map(|(i, p)| (format!("F{i}"), s(p))));
         v.extend(self.keep.iter().enumerate().map(|(i, p)| (format!("K{i}"), s(p))));
+        v.extend(self.sockets.iter().enumerate().map(|(i, p)| (format!("S{i}"), s(p))));
         v
     }
 
@@ -598,6 +692,19 @@ impl Policy {
             write.extend([ch.join("registry"), ch.join("git")]);
         }
         write.extend(env.dirs.iter().cloned());
+        // Cargo's folders as the checkout's config names them: only its own (#20)
+        let mut refused = Vec::new();
+        for (d, which) in &env.cargo_dirs {
+            let (home, ch, own) = (env.home.as_deref(), env.cargo_home.as_deref(), env.own_build.as_deref());
+            match cargo_dir_verdict(d, &root, home, ch, own, env.tmp.as_deref()) {
+                Ok(true) => write.push(d.clone()),
+                Ok(false) => {}
+                Err(why) if !refused.iter().any(|(r, _)| r == d) => {
+                    refused.push((d.clone(), format!("cargo's {which} — {why}")))
+                }
+                Err(_) => {}
+            }
+        }
         for w in &env.write {
             let p = match (w.strip_prefix("~/"), &env.home) {
                 (Some(rest), Some(home)) => home.join(rest),
@@ -636,6 +743,8 @@ impl Policy {
             tag: None,
             watch: None,
             granted: Vec::new(),
+            sockets: Vec::new(),
+            refused,
         }
     }
 }
@@ -662,8 +771,14 @@ pub struct Env {
     pub tmp: Option<PathBuf>,
     /// `$CARGO_HOME` (or `~/.cargo`), real — when it exists.
     pub cargo_home: Option<PathBuf>,
-    /// The toolchain's own folders (`toolchain_dirs`).
+    /// The toolchain's own folders (`toolchain_dirs`) — Go's caches; cargo's apart, below.
     pub dirs: Vec<PathBuf>,
+    /// The folders cargo names for the checkout (real paths, which: `target-dir` · `build-dir`) — a cargo
+    /// config in the checkout sets them, so they open only as `cargo_dir_verdict` says (#20).
+    pub cargo_dirs: Vec<(PathBuf, &'static str)>,
+    /// This checkout's own per-checkout build dir: what cargo names with your own `build-dir` (`$CARGO_BUILD_
+    /// BUILD_DIR`, else cargo's home config) put over the checkout's — `cargo-home/build/xx/yyyy`.
+    pub own_build: Option<PathBuf>,
     /// `llm.sandbox-write` · `-protect` · `-network` · `-ports` · `-localhost`.
     pub write: Vec<String>,
     pub protect: Vec<String>,
@@ -737,10 +852,7 @@ pub fn missing_why(stderr: &str) -> String {
 /// The policy for the project at `root` with these settings — the toolchain's folders found (blocks).
 pub fn policy(root: &Path, llm: &crate::llm::LlmConfig) -> Policy {
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let cargo_home = std::env::var_os("CARGO_HOME")
-        .map(PathBuf::from)
-        .or_else(|| home.as_ref().map(|h| h.join(".cargo")))
-        .and_then(|p| std::fs::canonicalize(p).ok());
+    let cargo_home = cargo_home_of(home.as_deref());
     let tmp = std::fs::canonicalize(std::env::temp_dir()).ok();
     let mut env = Env {
         root: real(root),
@@ -748,6 +860,8 @@ pub fn policy(root: &Path, llm: &crate::llm::LlmConfig) -> Policy {
         tmp,
         cargo_home,
         dirs: Vec::new(),
+        cargo_dirs: Vec::new(),
+        own_build: None,
         write: llm.sandbox_write.clone(),
         protect: llm.sandbox_protect.clone(),
         network: llm.sandbox_network,
@@ -759,25 +873,89 @@ pub fn policy(root: &Path, llm: &crate::llm::LlmConfig) -> Policy {
         uid: unsafe { libc::getuid() },
     };
     // The toolchain is asked inside the sandbox it's for (it reads only)
-    env.dirs = toolchain_dirs(&Policy::for_project(&env));
+    let found = toolchain_dirs(&Policy::for_project(&env), env.cargo_home.as_deref());
+    (env.dirs, env.cargo_dirs, env.own_build) = (found.other, found.cargo, found.own_build);
     // (no folder of its own: no sockets but the project's, `TMPDIR` as it was, and no tag to watch by)
     let run = RunDir::new().ok();
     let tag = run.as_ref().map(|r| r.tag());
     Policy { run, tag, ..Policy::for_project(&env) }
 }
 
+/// What the project's toolchain names: Go's caches (`other`), cargo's target and build dirs (`cargo`, real
+/// paths, which), and this checkout's own per-checkout build dir (`own_build` — `Env`'s).
+#[derive(Clone, Debug, Default)]
+pub struct ToolDirs {
+    pub other: Vec<PathBuf>,
+    pub cargo: Vec<(PathBuf, &'static str)>,
+    pub own_build: Option<PathBuf>,
+}
+
+/// What `toolchain_dirs` found per project (real path): the stamps of the files that set them, the folders.
+type Seen = HashMap<PathBuf, (Vec<Option<SystemTime>>, ToolDirs)>;
+static SEEN: OnceLock<Mutex<Seen>> = OnceLock::new();
+
+/// The project's toolchain folders outside it as last found for a run of Claude's (`toolchain_dirs`) — only
+/// those its runs may write (`cargo_dir_verdict`); nothing looked up: none before its first run.
+pub fn build_dirs(root: &Path) -> Vec<PathBuf> {
+    let root = real(root);
+    let Some(found) =
+        SEEN.get().and_then(|s| s.lock().ok().and_then(|m| m.get(&root).map(|(_, d)| d.clone())))
+    else {
+        return Vec::new();
+    };
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let cargo_home = cargo_home_of(home.as_deref());
+    let tmp = std::fs::canonicalize(std::env::temp_dir()).ok();
+    let open = |d: &Path| {
+        cargo_dir_verdict(
+            d,
+            &root,
+            home.as_deref(),
+            cargo_home.as_deref(),
+            found.own_build.as_deref(),
+            tmp.as_deref(),
+        )
+        .is_ok()
+    };
+    let cargo = found.cargo.iter().map(|(d, _)| d).filter(|d| open(d));
+    found.other.iter().chain(cargo).filter(|d| !d.starts_with(&root)).cloned().collect()
+}
+
+/// `$CARGO_HOME` (else `~/.cargo`), real — when it exists.
+fn cargo_home_of(home: Option<&Path>) -> Option<PathBuf> {
+    std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| home.map(|h| h.join(".cargo")))
+        .and_then(|p| std::fs::canonicalize(p).ok())
+}
+
+/// Your own `build.build-dir` — `$CARGO_BUILD_BUILD_DIR`, else cargo's home config's — never the
+/// checkout's: what its per-checkout build dir is worked out from (#20).
+fn own_build_setting(cargo_home: Option<&Path>, var: Option<String>) -> Option<String> {
+    if let Some(v) = var.filter(|v| !v.is_empty()) {
+        return Some(v);
+    }
+    ["config.toml", "config"].iter().find_map(|f| {
+        let text = std::fs::read_to_string(cargo_home?.join(f)).ok()?;
+        let v: toml::Value = toml::from_str(&text).ok()?;
+        v.get("build")?.get("build-dir")?.as_str().map(str::to_string)
+    })
+}
+
 /// Folders the project's toolchain writes outside it: cargo's target and build dirs (`cargo metadata` —
-/// they can be anywhere: `CARGO_TARGET_DIR`, `build.build-dir` in a cargo config), Go's caches. Kept per
+/// they can be anywhere: `CARGO_TARGET_DIR`, `build.build-dir` in a cargo config), Go's caches — and the
+/// build dir cargo names with your own setting put over the checkout's (`ToolDirs::own_build`). Kept per
 /// project until a file that sets them changes.
-fn toolchain_dirs(base: &Policy) -> Vec<PathBuf> {
-    type Seen = HashMap<PathBuf, (Vec<Option<SystemTime>>, Vec<PathBuf>)>;
-    static SEEN: OnceLock<Mutex<Seen>> = OnceLock::new();
+fn toolchain_dirs(base: &Policy, cargo_home: Option<&Path>) -> ToolDirs {
     let root = &base.root;
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let cargo_config = cargo_home.map_or_else(|| home.join(".cargo"), Path::to_path_buf);
     let stamp_of = [
         root.join("Cargo.toml"),
         root.join(".cargo/config.toml"),
-        home.join(".cargo/config.toml"),
+        root.join(".cargo/config"),
+        cargo_config.join("config.toml"),
+        cargo_config.join("config"),
         root.join("go.mod"),
     ];
     let stamp: Vec<Option<SystemTime>> =
@@ -788,23 +966,29 @@ fn toolchain_dirs(base: &Policy) -> Vec<PathBuf> {
     {
         return dirs;
     }
-    let mut dirs = Vec::new();
+    let mut dirs = ToolDirs::default();
+    let metadata = ["metadata", "--no-deps", "--offline", "--format-version", "1"];
     if root.join("Cargo.toml").is_file()
-        && let Some(json) =
-            output_in(base, "cargo", &["metadata", "--no-deps", "--offline", "--format-version", "1"])
+        && let Some(json) = output_in(base, "cargo", &metadata, &[])
     {
-        for key in ["target_directory", "build_directory"] {
+        for (key, which) in [("target_directory", "target-dir"), ("build_directory", "build-dir")] {
             if let Some(d) = json[key].as_str() {
-                dirs.push(real(Path::new(d)));
+                dirs.cargo.push((real(Path::new(d)), which));
             }
+        }
+        // (your own build-dir over the checkout's — the variable wins over every config file)
+        if let Some(own) = own_build_setting(cargo_home, std::env::var("CARGO_BUILD_BUILD_DIR").ok())
+            && let Some(json) = output_in(base, "cargo", &metadata, &[("CARGO_BUILD_BUILD_DIR", &own)])
+        {
+            dirs.own_build = json["build_directory"].as_str().map(|d| real(Path::new(d)));
         }
     }
     if root.join("go.mod").is_file()
-        && let Some(json) = output_in(base, "go", &["env", "-json", "GOCACHE", "GOMODCACHE"])
+        && let Some(json) = output_in(base, "go", &["env", "-json", "GOCACHE", "GOMODCACHE"], &[])
     {
         for key in ["GOCACHE", "GOMODCACHE"] {
             if let Some(d) = json[key].as_str().filter(|d| !d.is_empty()) {
-                dirs.push(real(Path::new(d)));
+                dirs.other.push(real(Path::new(d)));
             }
         }
     }
@@ -814,12 +998,18 @@ fn toolchain_dirs(base: &Policy) -> Vec<PathBuf> {
     dirs
 }
 
-/// A program's JSON output, run in the project inside `policy`.
-fn output_in(policy: &Policy, program: &str, args: &[&str]) -> Option<serde_json::Value> {
+/// A program's JSON output, run in the project inside `policy`, with `env` set.
+fn output_in(
+    policy: &Policy,
+    program: &str,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> Option<serde_json::Value> {
     let out = Command::new(SANDBOX_EXEC)
         .args(policy.args())
         .arg(program)
         .args(args)
+        .envs(env.iter().copied())
         .current_dir(&policy.root)
         .env(MARK, "1")
         .stdin(Stdio::null())
@@ -921,7 +1111,12 @@ mod tests {
             home: Some("/Users/u".into()),
             tmp: Some("/private/var/folders/ab/cd/T".into()),
             cargo_home: Some("/Users/u/.cargo".into()),
-            dirs: vec!["/Users/u/.cargo/build/shared".into(), root.join("target")],
+            dirs: Vec::new(),
+            cargo_dirs: vec![
+                ("/Users/u/.cargo/build/ab/cd12".into(), "build-dir"),
+                (root.join("target"), "target-dir"),
+            ],
+            own_build: Some("/Users/u/.cargo/build/ab/cd12".into()),
             write: vec!["~/Library/Caches/thing".into(), "/".into(), "/Users".into()],
             protect: vec!["secrets".into(), "../outside".into(), "/etc".into()],
             network: false,
@@ -989,13 +1184,85 @@ mod tests {
                 "/private/var/folders/ab/cd",
                 "/Users/u/.cargo/registry",
                 "/Users/u/.cargo/git",
-                "/Users/u/.cargo/build/shared",
+                "/Users/u/.cargo/build/ab/cd12",
                 "/Users/u/Library/Caches/thing",
             ]
         );
         assert!(p.files.contains(&PathBuf::from("/Users/u/.cargo/.package-cache")));
         assert!(p.files.contains(&PathBuf::from("/Users/u/.cargo/.global-cache-wal")));
         assert!(!p.write.iter().chain(&p.files).any(|w| w.starts_with("/Users/u/.cargo/bin")));
+    }
+
+    /// #20: a cargo config in the checkout names the build or target dir, and Claude can write it: only the
+    /// checkout's own (inside it, or its per-checkout build dir under cargo's home) or a temp folder becomes
+    /// writable — never home or above it, a folder holding the checkout, a link to home, cargo's home, another
+    /// checkout's build dir, or a folder beside them (`~/.config/fish`). (Folders of the test's own.)
+    #[test]
+    fn a_cargo_dir_from_the_checkout_opens_only_its_own() {
+        let base = real(&std::env::temp_dir()).join(format!("tarae-sb-dirs-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        let (home, root) = (base.join("home"), base.join("work/proj"));
+        let cargo_home = home.join(".cargo");
+        for d in [
+            &root,
+            &home.join(".config/fish"),
+            &cargo_home.join("build/ab/cd1234"),
+            &cargo_home.join("build/ab/ffff"),
+        ] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::os::unix::fs::symlink(&home, root.join("homelink")).unwrap();
+        let own = cargo_home.join("build/ab/cd1234");
+        let bad = [
+            home.clone(),
+            PathBuf::from("/"),
+            base.join("work"),
+            real(&root.join("homelink")),
+            home.join(".config/fish"),
+            cargo_home.clone(),
+            cargo_home.join("build/ab/ffff"),
+        ];
+        let named: Vec<(PathBuf, &str)> =
+            bad.iter().cloned().chain([root.join("target"), own.clone()]).map(|d| (d, "build-dir")).collect();
+        let env = Env {
+            root: root.clone(),
+            home: Some(home.clone()),
+            cargo_home: Some(cargo_home.clone()),
+            cargo_dirs: named,
+            own_build: Some(own.clone()),
+            ..Env::default()
+        };
+        let p = Policy::for_project(&env);
+        for d in &bad {
+            assert!(!p.write.iter().any(|w| w == d), "{} became writable: {:?}", d.display(), p.write);
+            assert!(p.refused.iter().any(|(r, _)| r == d), "{} not said", d.display());
+        }
+        assert!(p.write.contains(&own), "its own per-checkout build dir: {:?}", p.write);
+        assert!(!p.refused.iter().any(|(r, _)| *r == root.join("target") || *r == own), "{:?}", p.refused);
+        // Said where Claude reads it, and on the panel
+        let g = Guard::In(Box::new(p));
+        let said = g.report(&[]);
+        assert!(said.contains(&format!("{} (cargo's build-dir", home.display())), "{said}");
+        let (line, _) = panel_line(Some(&g), false, std::time::Instant::now()).expect("the panel says it");
+        assert!(
+            line.starts_with("sandbox kept ") && line.contains(" closed — cargo's config named it"),
+            "{line}"
+        );
+        // Its own build dir is worked out from your setting — the variable, else cargo's home config — never
+        // the checkout's
+        std::fs::write(
+            cargo_home.join("config.toml"),
+            "[build]\nbuild-dir = \"{cargo-cache-home}/build/{workspace-path-hash}\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join(".cargo")).unwrap();
+        std::fs::write(root.join(".cargo/config.toml"), "[build]\nbuild-dir = \"/\"\n").unwrap();
+        let at = |var: Option<&str>| own_build_setting(Some(&cargo_home), var.map(String::from));
+        assert_eq!(at(None).as_deref(), Some("{cargo-cache-home}/build/{workspace-path-hash}"));
+        assert_eq!(at(Some("/x/{workspace-path-hash}")).as_deref(), Some("/x/{workspace-path-hash}"));
+        std::fs::remove_file(cargo_home.join("config.toml")).unwrap();
+        assert_eq!(at(None), None, "none of yours: no per-checkout dir to trust");
+        std::fs::remove_dir_all(&base).ok();
     }
 
     /// Paths are parameters, never text in the profile — a path can't change what it says.
@@ -1024,6 +1291,19 @@ mod tests {
         );
         assert!(!text.contains("RUN"), "no folder of its own: only the project's sockets");
         assert!(text.contains("(param \"K0\")"), "the socket folders stay kept, the network open or not");
+        // #119: a granted socket is that file — a literal, connecting only, after the sockets' deny
+        assert!(!text.contains("S0"));
+        let sock = Policy { sockets: vec!["/Users/u/.colima/t/docker.sock".into()], ..p.clone() };
+        let text = sock.profile();
+        let rule = "(allow network-outbound (require-all (remote unix-socket) (require-any (literal (param \"S0\")))))";
+        let deny = text.find("(deny network-outbound (remote unix-socket))").unwrap();
+        assert!(text.find(rule).is_some_and(|at| at > deny), "{text}");
+        assert!(
+            !text.contains("docker.sock")
+                && !text.contains("S0\")) (")
+                && !text.contains("subpath (param \"S")
+        );
+        assert!(sock.params().contains(&("S0".into(), "/Users/u/.colima/t/docker.sock".into())));
     }
 
     /// Connecting on this machine: the network closed, only the listed ports (`localhost:*` only when
@@ -1156,14 +1436,14 @@ mod tests {
         w.record(denial("file-write-create", &format!("{home}/marker")));
         w.record(denial("file-write-create", &format!("{home}/marker")));
         w.record(denial("network-outbound", "remote:*:9"));
-        let g = Guard::In(Policy { watch: Some(w), ..p.clone() });
+        let g = Guard::In(Box::new(Policy { watch: Some(w), ..p.clone() }));
         let r = g.report(&[]);
         assert!(r.starts_with("The sandbox blocked 2 things — 3 times:\n"), "{r}");
         // Plain words first, Seatbelt's after
         assert!(r.contains("  writing ~/marker (file-write-create, touch)\n"), "{r}");
         assert!(r.contains("  connecting to port 9 (network-outbound, touch)\n"), "{r}");
         assert!(r.contains("In tarae's sandbox") && r.contains("don't work around it"), "{r}");
-        let none = Guard::In(Policy { watch: Some(Watch::quiet("t.")), ..p.clone() }).report(&[]);
+        let none = Guard::In(Box::new(Policy { watch: Some(Watch::quiet("t.")), ..p.clone() })).report(&[]);
         assert!(
             none.starts_with("The sandbox blocked nothing.") && !none.contains("likely the sandbox"),
             "{none}"
@@ -1171,7 +1451,7 @@ mod tests {
         let failed = Watch::quiet("t.");
         failed.fail("log: Cannot run while sandboxed".into());
         let out = [(true, "touch: /x: Operation not permitted".to_string()), (false, "fine".to_string())];
-        let r = Guard::In(Policy { watch: Some(failed), ..p }).report(&out);
+        let r = Guard::In(Box::new(Policy { watch: Some(failed), ..p })).report(&out);
         assert!(
             r.starts_with("tarae couldn't watch what the sandbox blocked (log: Cannot run while sandboxed)"),
             "{r}"
@@ -1219,7 +1499,7 @@ mod tests {
     fn the_panel_line() {
         let p = Policy::for_project(&env(Path::new("/Users/u/p")));
         let w = Watch::quiet("t.");
-        let g = Guard::In(Policy { watch: Some(w.clone()), ..p });
+        let g = Guard::In(Box::new(Policy { watch: Some(w.clone()), ..p }));
         let now = std::time::Instant::now();
         assert_eq!(panel_line(Some(&g), true, now), None, "nothing blocked: no line");
         w.record(denial("file-write-create", "/a"));
@@ -1278,6 +1558,8 @@ mod tests {
             tag: None,
             watch: None,
             granted: Vec::new(),
+            sockets: Vec::new(),
+            refused: Vec::new(),
         };
         let sh = |script: &str| {
             let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
@@ -1340,6 +1622,8 @@ mod tests {
                 tag: None,
                 watch: None,
                 granted: Vec::new(),
+                sockets: Vec::new(),
+                refused: Vec::new(),
             };
             let sh = |script: &str| {
                 let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
@@ -1402,6 +1686,8 @@ mod tests {
             tag: Some(tag.to_string()),
             watch: None,
             granted: Vec::new(),
+            sockets: Vec::new(),
+            refused: Vec::new(),
         };
         let pid = std::process::id();
         let (mine, other) = (format!("tarae-test-{pid}-1."), format!("tarae-test-{pid}-10."));
@@ -1451,6 +1737,8 @@ mod tests {
             tag: None,
             watch: None,
             granted: Vec::new(),
+            sockets: Vec::new(),
+            refused: Vec::new(),
         };
         let sh = |script: &str| {
             let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
@@ -1506,18 +1794,28 @@ mod tests {
         })
         .unwrap();
         let from_store = crate::allow::Store::read(Some(&store)).get(&root);
+        // #119: a socket granted for this conversation is reached — that file only, not its sibling
+        // (a socket's path has 104 bytes at most: short names)
+        let socks = t.join("s");
+        std::fs::create_dir_all(&socks).unwrap();
+        let sock = std::os::unix::net::UnixListener::bind(socks.join("granted.sock")).unwrap();
+        let sock_other = std::os::unix::net::UnixListener::bind(socks.join("other.sock")).unwrap();
+        for l in [&sock, &sock_other] {
+            l.set_nonblocking(true).unwrap();
+        }
         let mut this_chat = Allowed::default();
         this_chat.add(&Grant::Write(chat.clone()));
-        let (llm, said) =
+        this_chat.add(&Grant::Socket(socks.join("granted.sock")));
+        let (llm, said, sockets) =
             crate::tools::with_allowed(&crate::llm::LlmConfig::default(), &[&from_store, &this_chat], None);
-        assert_eq!(said.len(), 3, "{said:?}");
+        assert_eq!(said.len(), 4, "{said:?}");
         let env = Env {
             root: root.clone(),
             write: llm.sandbox_write.clone(),
             ports: llm.sandbox_ports,
             ..Env::default()
         };
-        let p = Policy::for_project(&env);
+        let p = Policy { sockets, ..Policy::for_project(&env) };
         let sh = |script: &str| {
             let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
             c.current_dir(&root).stdin(Stdio::null()).output().unwrap()
@@ -1535,6 +1833,12 @@ mod tests {
         };
         assert!(reached(&granted), "the granted port");
         assert!(!reached(&other), "another port");
+        let knocked = |l: &std::os::unix::net::UnixListener, name: &str| {
+            sh(&format!("/usr/bin/nc -U -w 2 '{}' < /dev/null", socks.join(name).display()));
+            l.accept().is_ok()
+        };
+        assert!(knocked(&sock, "granted.sock"), "the granted socket");
+        assert!(!knocked(&sock_other, "other.sock"), "the socket beside it");
         std::fs::remove_dir_all(&t).ok();
     }
 
@@ -1577,6 +1881,8 @@ mod tests {
             tag: None,
             watch: None,
             granted: Vec::new(),
+            sockets: Vec::new(),
+            refused: Vec::new(),
         };
         let reached = |p: &Policy, l: &TcpListener| {
             let script = format!("/usr/bin/nc -z -w 2 127.0.0.1 {}", port(l));

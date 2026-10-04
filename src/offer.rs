@@ -74,7 +74,8 @@ pub enum What {
     ReviewAtEnd,
     /// Claude's Read, Grep or Glob outside the project (`reads.rs`): `y` once, `a` this chat, `A` always
     /// (those two only when `keep`), `n` no.
-    Read { pending: Box<crate::reads::Pending>, keep: bool },
+    /// `folder`: what `a`/`A` allow instead of the file — its folder, beside other reads (#102).
+    Read { pending: Box<crate::reads::Pending>, keep: bool, folder: Option<PathBuf> },
     /// The user opens the sandbox for what it blocked in `run` (`blocked.rs`): `y` once (it runs again with
     /// it), `a` this chat, `A` always — and runs again — `n` no.
     Grant { grant: crate::allow::Grant, run: Box<crate::blocked::BlockedRun> },
@@ -117,6 +118,12 @@ pub enum What {
     /// A git-tab action would run hooks from inside the checkout that its base doesn't have as they are
     /// (`hooks.rs`): `y` runs it as usual, `n` runs it with no hooks this time.
     Hooks(Box<crate::hooks::Ask>),
+    /// `:restart` (`restart.rs`, #108): which checkout it builds in and runs, at what commit — `y` the one
+    /// tarae started in, `f` the session in front's (when another), `n` none.
+    Restart(Box<crate::restart::Choice>),
+    /// The binary a restart would run is the one it was, older than its checkout's HEAD: `y` restarts onto
+    /// it anyway, `n` doesn't.
+    RestartSame { id: u64 },
 }
 
 /// A call of Claude's waiting on a card for the user's answer (`Session.asking`): the card, how the call is
@@ -246,7 +253,14 @@ impl Offer {
                 | What::Rebased(_)
                 | What::RebaseResolved { .. }
                 | What::Hooks(_)
+                | What::Restart(_)
+                | What::RestartSame { .. }
         )
+    }
+
+    /// Whether `f` answers it: a restart's card with the session in front's checkout to build instead.
+    pub fn restart_other(&self) -> bool {
+        matches!(&self.what, What::Restart(c) if c.targets.len() > 1)
     }
 
     /// Whether `p` answers it: the bring card after a rebase (the preflight, then the bring).
@@ -265,6 +279,7 @@ impl Offer {
         matches!(c, 'y' | 'a' | 'A' | 'D' | 'R' | 'c')
             || (c == 'p' && self.preflights())
             || (c == 'X' && self.aborts())
+            || (c == 'f' && self.restart_other())
     }
 
     /// The `(generation)` of a change set's card (`r` one by one, `v` every change).
@@ -304,7 +319,7 @@ impl Offer {
             | What::Grant { .. }
             | What::Screen { .. } => true,
             // (what it reads outside, or its pattern for the rest of the chat)
-            What::Run(r) => r.keep || r.pattern.is_some(),
+            What::Run(r) => r.keep || r.pattern.is_some() || r.socket.is_some(),
             _ => false,
         }
     }
@@ -314,7 +329,9 @@ impl Offer {
     pub fn keeps(&self) -> bool {
         match &self.what {
             What::Run(r) => r.keep,
-            _ => self.lasts() && matches!(self.what, What::Read { .. } | What::Grant { .. }),
+            // (a socket is this conversation's at most — #119)
+            What::Grant { grant, .. } => grant.keepable(),
+            _ => self.lasts() && matches!(self.what, What::Read { .. }),
         }
     }
 
@@ -475,6 +492,7 @@ impl crate::editor::Editor {
             Code::Char('p') if o.preflights() => self.offer_preflight_first(),
             Code::Char('X') if o.aborts() => self.offer_abort(),
             Code::Char('b') if o.base_steps() => self.offer_session_base(),
+            Code::Char('f') if o.restart_other() => self.offer_restart_other(),
             // An answer letter this card doesn't take isn't the code's either (`a`/`A` there start inserting —
             // and the `y` after it was typed)
             Code::Char('a' | 'A') if o.lasts() => self.set_status("this card asks y, a or n"),
@@ -528,8 +546,8 @@ impl crate::editor::Editor {
                 crate::edits::at_end_set(self, true);
             }
             What::ProjectTrust { hash } => self.project_trust_answer(id, hash, true),
-            What::Read { pending, keep } => {
-                crate::reads::answer(self, id, *pending, Some(crate::allow::Scope::Once), keep)
+            What::Read { pending, keep, folder } => {
+                crate::reads::answer(self, id, *pending, Some(crate::allow::Scope::Once), keep, folder)
             }
             What::Grant { grant, run } => {
                 crate::blocked::grant_answer(self, id, grant, *run, Some(crate::allow::Scope::Once))
@@ -560,6 +578,20 @@ impl crate::editor::Editor {
                 self.rebase_answer(&root, true);
             }
             What::Hooks(ask) => self.hooks_answer(id, *ask, true),
+            What::Restart(c) => crate::restart::chosen(self, id, *c, Some(0)),
+            What::RestartSame { id: r } => crate::restart::same_answer(self, id, r, true),
+        }
+    }
+
+    /// `f` on a restart's card: the session in front's checkout instead of the one tarae started in.
+    pub fn offer_restart_other(&mut self) {
+        if !self.offers.first().is_some_and(Offer::restart_other) {
+            return;
+        }
+        let o = self.offers.remove(0);
+        self.card_answered(o.id);
+        if let What::Restart(c) = o.what {
+            crate::restart::chosen(self, o.id, *c, Some(1));
         }
     }
 
@@ -661,7 +693,8 @@ impl crate::editor::Editor {
     /// Every event: the whole text of a card that's been answered (or has gone) closes with it (#55) — any
     /// `card · <title>` buffer whose card is gone, not only the last one viewed (#65: one viewed before
     /// another card's `v` stayed in the tab row after its answer). A card waiting in a session behind keeps
-    /// its own.
+    /// its own. By the card's id (E17): a card of the same title up elsewhere — another session's "Claude
+    /// wants to run" — doesn't keep it.
     pub(crate) fn offer_view_sync(&mut self) {
         if let Some((id, _, _)) = self.offer_view.get()
             && !self.offers.iter().any(|o| o.id == id)
@@ -672,24 +705,29 @@ impl crate::editor::Editor {
             d.throwaway && d.path.is_none() && d.title.as_deref().is_some_and(|t| t.starts_with(CARD_VIEW))
         };
         if !self.docs.iter().any(card) {
+            self.offer_views.clear();
             return;
         }
-        let up = |t: &str| {
-            std::iter::once(&self.session)
-                .chain(&self.sessions)
-                .flat_map(|s| &s.parked)
-                .chain(&self.offers)
-                .any(|o| t.strip_prefix(CARD_VIEW) == Some(o.title.as_str()))
-        };
-        let gone: Vec<_> = self
-            .docs
-            .iter()
-            .filter(|d| card(d) && !up(d.title.as_deref().unwrap_or_default()))
-            .map(|d| d.id)
+        let cards: Vec<(u64, &str)> = std::iter::once(&self.session)
+            .chain(&self.sessions)
+            .flat_map(|s| &s.parked)
+            .chain(&self.offers)
+            .map(|o| (o.id, o.title.as_str()))
             .collect();
+        let up = |d: &crate::document::Document| match self.offer_views.iter().find(|(doc, _)| *doc == d.id) {
+            Some((_, id)) => cards.iter().any(|(c, _)| c == id),
+            // (one of an earlier kind, its card not noted: by title, as before)
+            None => {
+                let t = d.title.as_deref().unwrap_or_default();
+                cards.iter().any(|(_, title)| t.strip_prefix(CARD_VIEW) == Some(title))
+            }
+        };
+        let gone: Vec<_> = self.docs.iter().filter(|d| card(d) && !up(d)).map(|d| d.id).collect();
         for doc in gone {
             self.close_doc(doc);
         }
+        let docs: Vec<_> = self.docs.iter().map(|d| d.id).collect();
+        self.offer_views.retain(|(doc, _)| docs.contains(doc));
     }
 
     /// `v` on the front card: a change set's every change, else its whole text.
@@ -739,6 +777,8 @@ impl crate::editor::Editor {
         let doc = self.open_virtual(&name, &text);
         // (seen whole once its last line has been on screen — `term::render_frame` looks)
         self.offer_view.set(Some((id, rev, doc)));
+        self.offer_views.retain(|(d, _)| *d != doc);
+        self.offer_views.push((doc, id));
         // The code has the keys, to read it (#55: the review's rail kept them, and keys did nothing)
         if let Some(c) = self.session.chat.as_mut() {
             c.focused = false;
@@ -783,7 +823,9 @@ impl crate::editor::Editor {
             What::NoSandbox { job, call } => {
                 crate::tools::unprotected_answer(self, o.id, job, call, crate::tools::Unprotected::ThisChat)
             }
-            What::Read { pending, keep } => crate::reads::answer(self, o.id, *pending, Some(scope), keep),
+            What::Read { pending, keep, folder } => {
+                crate::reads::answer(self, o.id, *pending, Some(scope), keep, folder)
+            }
             What::Run(card) => crate::tools::run_answer(self, o.id, *card, Some(scope)),
             What::Grant { grant, run } => crate::blocked::grant_answer(self, o.id, grant, *run, Some(scope)),
             What::Screen { call } => crate::seeing::answer(self, o.id, call, Some(scope)),
@@ -827,7 +869,9 @@ impl crate::editor::Editor {
             }
             What::ReviewAtEnd => self.set_status("Claude's edits come one at a time"),
             What::ProjectTrust { hash } => self.project_trust_answer(o.id, hash, false),
-            What::Read { pending, keep } => crate::reads::answer(self, o.id, *pending, None, keep),
+            What::Read { pending, keep, folder } => {
+                crate::reads::answer(self, o.id, *pending, None, keep, folder)
+            }
             What::Grant { grant, run } => crate::blocked::grant_answer(self, o.id, grant, *run, None),
             What::Outside { run } => crate::blocked::outside_answer(self, o.id, *run, false),
             What::Screen { call } => crate::seeing::answer(self, o.id, call, None),
@@ -851,6 +895,8 @@ impl crate::editor::Editor {
                 self.set_status("the rebase waits — :rebase-continue goes on, :rebase-abort ends it")
             }
             What::Hooks(ask) => self.hooks_answer(o.id, *ask, false),
+            What::Restart(c) => crate::restart::chosen(self, o.id, *c, None),
+            What::RestartSame { id } => crate::restart::same_answer(self, o.id, id, false),
         }
     }
 

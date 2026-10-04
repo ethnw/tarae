@@ -409,6 +409,20 @@ impl Editor {
                 continue; // Claude writes it
             }
             let (id, name) = (d.id, d.display_name_short());
+            // A config file that doesn't parse stays in the buffer (#19: a half-edited ~/.cargo/config.toml
+            // broke every cargo at once) — said once per version of it; `:w` writes it anyway
+            let held =
+                d.path.as_deref().and_then(|p| unparsed_config(p, &d.text)).map(|why| (why, d.version()));
+            if let Some((why, version)) = held {
+                if !self.auto_held.contains(&(id, version)) {
+                    self.auto_held.retain(|(doc, _)| *doc != id);
+                    self.auto_held.push((id, version));
+                    self.set_warning(format!(
+                        "{name} not auto-saved: it doesn't parse ({why}) — :w writes it anyway"
+                    ));
+                }
+                continue;
+            }
             match self.save_in_background(id, false, crate::saver::Then::Auto(why)) {
                 Ok(()) => {}
                 // Changed on disk to something else — the same conflict the watch reports, not a failure
@@ -431,6 +445,50 @@ impl Editor {
 /// changes the watched set, and `disk_sync` starts a round with the new fingerprint.
 fn watchable(d: &crate::document::Document) -> bool {
     !d.loading && d.saving == 0
+}
+
+/// Config files whose readers take them as soon as they're on disk — cargo, tarae, npm, Claude Code — and
+/// break at once on a syntax error, by name (or the folder it's in). JSON with comments (`tsconfig.json`,
+/// VS Code's) isn't among them: a strict parser would call it broken. YAML neither: no parser for it here.
+const TOML_CONFIGS: [&str; 11] = [
+    "Cargo.toml",
+    "rust-toolchain.toml",
+    "pyproject.toml",
+    "rustfmt.toml",
+    ".rustfmt.toml",
+    "clippy.toml",
+    ".clippy.toml",
+    "deny.toml",
+    ".tarae.toml",
+    ".tarae.local.toml",
+    "Pipfile",
+];
+const JSON_CONFIGS: [&str; 3] = ["package.json", "composer.json", ".claude.json"];
+
+/// The most text a parse check reads (a config this big is something else).
+const CONFIG_CHECK_MAX: usize = 512 << 10;
+
+/// Why `text` doesn't parse, when `path` is a known config file (`TOML_CONFIGS`, `JSON_CONFIGS`, cargo's
+/// `.cargo/config(.toml)`, tarae's own `tarae/*.toml`, Claude Code's `.claude/settings*.json`) — its
+/// parser's first line. None for anything else, or one that parses.
+pub fn unparsed_config(path: &Path, text: &ropey::Rope) -> Option<String> {
+    let name = path.file_name()?.to_str()?;
+    let dir = path.parent().and_then(Path::file_name).and_then(|d| d.to_str()).unwrap_or_default();
+    let toml = TOML_CONFIGS.contains(&name)
+        || (dir == ".cargo" && matches!(name, "config.toml" | "config" | "credentials.toml"))
+        || (dir == "tarae" && name.ends_with(".toml"))
+        || path.parent().and_then(Path::parent).is_some_and(|p| p.ends_with("tarae") && dir == "themes");
+    let json = JSON_CONFIGS.contains(&name)
+        || (dir == ".claude" && name.starts_with("settings") && name.ends_with(".json"));
+    if (!toml && !json) || text.len_bytes() > CONFIG_CHECK_MAX {
+        return None;
+    }
+    let s = text.to_string();
+    let err = match toml {
+        true => toml::from_str::<toml::Table>(&s).err().map(|e| e.message().to_string()),
+        false => serde_json::from_str::<serde_json::Value>(&s).err().map(|e| e.to_string()),
+    }?;
+    Some(err.lines().next().unwrap_or("a syntax error").trim().to_string())
 }
 
 fn changed_while_editing(name: &str) -> String {
@@ -811,6 +869,66 @@ mod tests {
         ed.flush_saves(); // (saves are written in the background)
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "mine theirs\n");
         assert!(!ed.doc().is_modified());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #19: auto-save holds a known config file that doesn't parse — a half-edited `.cargo/config.toml` broke
+    /// every cargo at once — and says so, once per change; `:w` writes it anyway, and once it parses again
+    /// auto-save writes it. Other files, and configs that parse, save as ever. (Its own temp folder.)
+    #[test]
+    fn autosave_holds_a_config_that_doesnt_parse() {
+        let dir = std::env::temp_dir().join(format!("tarae-disk-config-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join(".cargo")).unwrap();
+        let path = dir.join(".cargo/config.toml");
+        std::fs::write(&path, "[build]\njobs = 4\n").unwrap();
+        let mut ed = Editor::new(Config::default());
+        ed.open(&path).unwrap();
+        // Half way through an edit: a key with no value yet
+        feed(&mut ed, "geoincremental = <esc>");
+        let held = |ed: &Editor| {
+            ed.toasts.iter().filter(|t| t.text.contains("not auto-saved: it doesn't parse")).count()
+        };
+        ed.on_focus(false);
+        ed.flush_saves();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[build]\njobs = 4\n",
+            "held: the disk as it was"
+        );
+        assert!(
+            ed.doc().is_modified() && held(&ed) == 1,
+            "said: {:?}",
+            ed.toasts.iter().map(|t| &t.text).collect::<Vec<_>>()
+        );
+        let said = ed.toasts.iter().find(|t| t.text.contains("doesn't parse")).unwrap().text.clone();
+        assert!(
+            said.starts_with("config.toml not auto-saved") && said.ends_with(":w writes it anyway"),
+            "{said}"
+        );
+        ed.on_focus(false);
+        assert_eq!(held(&ed), 1, "said once for the same text");
+        // Finished: it parses, and auto-save writes it
+        feed(&mut ed, "Afalse<esc>");
+        ed.on_focus(false);
+        ed.flush_saves();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[build]\njobs = 4\nincremental = false\n");
+        // Broken again: `:w` writes it anyway
+        feed(&mut ed, "ojobs = <esc>:w<ret>");
+        ed.flush_saves();
+        assert!(std::fs::read_to_string(&path).unwrap().ends_with("jobs = \n") && !ed.doc().is_modified());
+        // Which files: by name and folder; JSON too; anything else (or JSON with comments) never
+        let text = |s: &str| ropey::Rope::from_str(s);
+        let at = |p: &str| dir.join(p);
+        assert!(unparsed_config(&at("Cargo.toml"), &text("[package\n")).is_some());
+        assert!(unparsed_config(&at("Cargo.toml"), &text("[package]\nname = \"x\"\n")).is_none());
+        assert!(unparsed_config(&at("package.json"), &text("{\"a\": 1,}")).is_some());
+        assert!(unparsed_config(&at(".claude/settings.local.json"), &text("{")).is_some());
+        assert!(unparsed_config(&at("x/tarae/config.toml"), &text("theme = ")).is_some());
+        assert!(unparsed_config(&at(".tarae.local.toml"), &text("[x")).is_some());
+        for (p, s) in [("notes.toml", "[x"), ("tsconfig.json", "{ // a comment\n}"), ("a.rs", "fn (")] {
+            assert!(unparsed_config(&at(p), &text(s)).is_none(), "{p}");
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 

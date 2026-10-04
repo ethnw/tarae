@@ -262,11 +262,16 @@ pub fn real(path: &Path) -> Option<PathBuf> {
     Some(real)
 }
 
-/// Whether an edit to `rel` (from the project's root) still asks first: anything in `.git`, or an entry of
-/// `llm.review-ask` — a name matches any part of the path, a path (with `/`) its start.
+/// Whether an edit to `rel` (from the project's root) still asks first: anything in `.git`, a cargo config
+/// (`.cargo/config.toml`, `.cargo/config` — its build and target dirs, its `[env]`, are what the sandbox
+/// opens and cargo runs with: #20, whatever `llm.review-ask` says), or an entry of `llm.review-ask` — a name
+/// matches any part of the path, a path (with `/`) its start.
 pub fn listed(rel: &Path, ask: &[String]) -> bool {
     let parts: Vec<&std::ffi::OsStr> = rel.iter().collect();
+    let cargo_config =
+        parts.windows(2).any(|w| w[0] == ".cargo" && (w[1] == "config.toml" || w[1] == "config"));
     parts.iter().any(|p| *p == ".git")
+        || cargo_config
         || ask
             .iter()
             .map(|a| a.trim().trim_end_matches('/'))
@@ -377,6 +382,7 @@ fn show(ed: &mut Editor, p: Pending) {
         .unwrap_or_else(|| format!("an edit to {}", crate::chat::shown(&ed.session.root, &path)));
     let reason = p.reason.clone();
     // The keys go to the review; the file is the user's now (follow won't close it as a preview)
+    let from_chat = ed.session.chat.as_ref().is_some_and(|c| c.focused);
     if let Some(c) = &mut ed.session.chat {
         c.focused = false;
         c.follow.keep(doc_id);
@@ -391,6 +397,7 @@ fn show(ed: &mut Editor, p: Pending) {
         })),
     );
     if let Some(r) = &mut ed.session.review {
+        r.from_chat = from_chat;
         r.reason = reason;
         // (its turn in the chat is the step)
         r.own_turn = false;
@@ -578,6 +585,11 @@ mod tests {
         assert!(!listed("lib/src/secret/key.rs"));
         assert!(!listed("src/build.rs.bak"));
         assert!(listed("Cargo.toml") && listed("crates/a/Cargo.toml"));
+        // #20: a cargo config always asks, as `.git` does — even with `.cargo` not in the list
+        for p in [".cargo/config.toml", ".cargo/config", "crates/a/.cargo/config.toml"] {
+            assert!(listed(p), "{p}");
+        }
+        assert!(!listed(".cargo/notes.md") && !listed("src/config.toml"));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&outside).ok();
     }

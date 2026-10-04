@@ -597,7 +597,7 @@ impl Editor {
         self.session.test_last = Some((target.clone(), false));
         let argv = target.argv();
         let policy = match &guard {
-            Some(crate::sandbox::Guard::In(p)) => Some(p),
+            Some(crate::sandbox::Guard::In(p)) => Some(&**p),
             _ => None,
         };
         let watched = policy.is_some_and(|p| p.watch.is_some());

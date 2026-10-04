@@ -50,8 +50,10 @@ const CRASH_WINDOW: Duration = Duration::from_secs(10 * 60);
 const LEFT_GRACE: Duration = Duration::from_secs(2 * 60);
 /// A child of tarae's it doesn't know, running this long.
 const STRAY_AFTER: Duration = Duration::from_secs(10 * 60);
-/// Self-checks kept (since tarae started — `:procs` shows them, newest first).
+/// Self-checks kept (since tarae started — `:procs` shows them, newest first) · how long one that ended
+/// stays in the list (the log keeps it — an hours-old ended one read as something wrong now).
 const CHECKS_KEPT: usize = 100;
+pub const ENDED_KEPT: Duration = Duration::from_secs(30 * 60);
 
 // ── What the OS says ─────────────────────────────────────────────────────
 
@@ -1157,9 +1159,12 @@ impl Procs {
         }
         for c in self.checks.iter_mut().filter(|c| c.ended.is_none()) {
             if !found.iter().any(|f| f.key == c.key) {
+                crate::log::line("procs", "check", &format!("ended: {}", c.what));
                 c.ended = Some(at);
             }
         }
+        // (ended a while ago: gone from the list — the log has it)
+        self.checks.retain(|c| c.ended.is_none_or(|e| at.duration_since(e).unwrap_or_default() < ENDED_KEPT));
         let n = self.checks.len();
         if n > CHECKS_KEPT {
             let mut over = n - CHECKS_KEPT;
@@ -1321,9 +1326,26 @@ impl Editor {
             if let Some(r) = &l.task_run {
                 let title = if r.by_claude { "claude's command" } else { r.task.name.as_str() };
                 add(r.pid(), Kind::Task, title, r.task.cmd.clone(), session);
+                // (its sandbox's `log stream`, watching what it blocks — a stray child otherwise, #E16)
+                let watch = r.guard.as_ref().and_then(|g| g.watch()).and_then(|w| w.pid());
+                add(
+                    watch,
+                    Kind::Helper,
+                    "sandbox watch",
+                    format!("what the sandbox blocks: {}", r.task.cmd),
+                    session,
+                );
             }
             if let Some(r) = &l.test_run {
                 add(r.pid(), Kind::Test, "tests", r.target.label.clone(), session);
+                let watch = r.guard.as_ref().and_then(|g| g.watch()).and_then(|w| w.pid());
+                add(
+                    watch,
+                    Kind::Helper,
+                    "sandbox watch",
+                    format!("what the sandbox blocks: tests {}", r.target.label),
+                    session,
+                );
             }
             if let Some(t) = &l.terminal {
                 add(t.pid(), Kind::Terminal, "terminal", t.title.clone(), session);
@@ -2271,6 +2293,38 @@ mod tests {
         assert_eq!(p.mark().map(|c| c.short.as_str()), Some("sleep running"));
         p.record(&[], at);
         assert!(p.mark().is_none(), "nothing abnormal: no mark");
+        // E16: ended ones leave the list after a while (the log keeps them); one that holds stays
+        assert_eq!(p.checks.len(), 3);
+        p.record(&found[..1], at + ENDED_KEPT - Duration::from_secs(1));
+        assert_eq!(p.checks.len(), 4, "ended a moment ago: still listed (and one on again)");
+        p.record(&found[..1], at + ENDED_KEPT);
+        let left: Vec<(&str, bool)> =
+            p.checks.iter().map(|c| (c.short.as_str(), c.ended.is_none())).collect();
+        assert_eq!(left, [("sleep running", true)], "the ones ended {}m ago gone", ENDED_KEPT.as_secs() / 60);
+    }
+
+    /// E16: the sandbox's own `log stream` beside a run of Claude's is a process tarae knows — not a stray
+    /// child flagged ten minutes on. (A stand-in watch: `sleep`, as its child.)
+    #[test]
+    fn the_sandbox_watch_is_known() {
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        let dir = std::env::temp_dir();
+        ed.task_start(crate::task::Task { name: "slow".into(), cmd: "sleep 5".into(), cwd: dir });
+        let watch = crate::sandbox::Watch::spawned_for_test("sleep", "5");
+        let wpid = watch.pid().expect("its child");
+        let policy = crate::sandbox::Policy::for_project(&crate::sandbox::Env::default());
+        ed.session.task_run.as_mut().unwrap().guard =
+            Some(crate::sandbox::Guard::In(Box::new(crate::sandbox::Policy {
+                watch: Some(watch),
+                ..policy
+            })));
+        let known = ed.procs_known();
+        let k = known.iter().find(|k| k.pid == wpid).expect("the watch is known");
+        assert_eq!(
+            (k.title.as_str(), k.what.as_str()),
+            ("sandbox watch", "what the sandbox blocks: sleep 5")
+        );
+        ed.task_close();
     }
 
     /// A project with a stand-in language server (`cat`, which reads what it's sent).
@@ -2334,7 +2388,7 @@ mod tests {
             "CPU",
             "RESIDENT",
             "SELF-CHECKS",
-            "none so far",
+            "none now",
             "s stop",
             "r restart",
         ] {

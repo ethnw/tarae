@@ -398,6 +398,7 @@ fn show(ed: &mut Editor, f: FileChange, title: String, reason: String) {
     let doc_id = doc.id;
     let changes = crate::agent::line_changes(&f.before.to_string(), &f.after.to_string());
     // The keys go to the review; the file is the user's now (follow won't close it as a preview)
+    let from_chat = ed.session.chat.as_ref().is_some_and(|c| c.focused);
     if let Some(c) = &mut ed.session.chat {
         c.focused = false;
         c.follow.keep(doc_id);
@@ -410,6 +411,7 @@ fn show(ed: &mut Editor, f: FileChange, title: String, reason: String) {
         Some(Box::new(move |ed: &mut Editor, applied: bool| reviewed(ed, f, doc_id, dirty, applied))),
     );
     if let Some(r) = &mut ed.session.review {
+        r.from_chat = from_chat;
         r.reason = reason;
         // (its turn in the chat is the step)
         r.own_turn = false;

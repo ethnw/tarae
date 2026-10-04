@@ -205,7 +205,10 @@ configs carry over as they are.
   If you have, you get a conflict notice and `▲ changed on disk` in the path bar: `:reload` takes the disk version, `:w!` keeps yours; plain `:w` is refused
   ([screenshot](screenshots/ux-toasts-sync.png))
 - **Auto-save** `editor.auto-save` — `"focus"` (default, when the terminal loses focus), `"idle"` (also after 2 s
-  without typing), or `"off"`. Saves (these and `:w`) are written in the background, so typing never waits on the
+  without typing), or `"off"`. A config file other programs read the moment it's on disk is held while it
+  doesn't parse — `Cargo.toml`, `.cargo/config.toml`, tarae's own, `.tarae.toml`, `package.json`, Claude Code's
+  `settings.json` and the like (TOML and JSON): `config.toml not auto-saved: it doesn't parse (…) — :w writes
+  it anyway`; once it parses again, auto-save writes it. Saves (these and `:w`) are written in the background, so typing never waits on the
   disk; quitting waits until they're written, and a test or task run waits too — they run the code on disk
 - **Restore** — launched without arguments, tarae reopens the files you had open in this folder, at their
   cursor and scroll positions; open a file by name and you land where you last were in it
@@ -343,7 +346,10 @@ comes up. Before it lets go, it checks that the new binary runs and answers as a
 broken build, the wrong file) is caught while the old tarae is still running, and you stay in it with a message
 saying why. Nothing is built by default. `editor.restart-binary` points it at another binary, and
 `editor.restart-build` makes it build one first, which is how tarae is developed in tarae
-([how](../CONTRIBUTING.md#developing-tarae-in-tarae)). `:restart!` skips that build.
+([how](../CONTRIBUTING.md#developing-tarae-in-tarae)). `:restart!` skips that build. A card says which checkout
+it builds in and at what commit — `Restart into main's build (1085db8)?` — the one tarae started in; with another
+session in front, `f` builds that one's instead. If the build leaves the binary as it was and it's older than
+that checkout's commit, a card says so rather than restarting into the same tarae (`y` restarts anyway).
 
 Some things don't come along. A shell in the terminal panel (`space T`) ends; the new tarae says so, and
 `space T` starts a fresh one. Language servers start again, so a large project is indexed again before
@@ -351,8 +357,8 @@ go-to-definition and the like answer. The turns `space u` can take back, notes, 
 the old tarae and stay behind. Undo within a file (`u`/`U`) keeps working, as after any restart
 (`editor.persistent-undo`).
 
-Some things make it wait, and some stop it. If Claude is answering in the chat, the restart waits for the turn
-to end, and for any edits you accepted to land on disk; `:restart` again cancels. It stops, with a message
+Some things make it wait, and some stop it. If Claude is answering in any session's chat, the restart waits for
+those turns to end (saying whose), and for any edits you accepted to land on disk; `:restart` again cancels. It stops, with a message
 saying what to do, if something open can't be carried over or would be cut short: text in a buffer that has no
 file, a file that changed on disk under your edits, an open review or code review, a commit message being
 written, a task or tests still running, or a debug run. When a file can't be saved, it stops too, and
