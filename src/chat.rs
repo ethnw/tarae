@@ -41,8 +41,9 @@ compiles as the language servers see it (before any build), then the run_tests t
 the change (a test file, and a line for a single test) — when they fail, read why and fix it; the user \
 watches the run in their editor. To build, lint, format, run a whole test suite or use git, use the run \
 tool: one command per call, its output comes back; checks start at once, other commands wait for the user's \
-yes. Both run in a sandbox: they can write only in the project (not .git or .tarae.toml), temp folders and the \
-toolchain's own, and connect to nothing over the network, this machine included, but the ports the user \
+yes. Both run in a sandbox: they can write only in the project (not .git, nor build scripts, manifests and tool \
+settings — build.rs, Cargo.toml, package.json, Makefile, .cargo, .github, .tarae*.toml…: change those with Edit), \
+temp folders and the toolchain's own, and connect to nothing over the network, this machine included, but the ports the user \
 opened (each result says which) — when it blocks something a command needs, tell the user (the settings \
 llm.sandbox-ports, llm.sandbox-localhost and llm.sandbox-network open more); never work around it. Tests of dangerous behavior (deleting, overwriting, killing \
 processes, the network) use a harmless stand-in — a marker file made in the test's own temp dir, then checked — \

@@ -363,8 +363,17 @@ review) and run that.
 
 What Claude runs, with `run` and `run_tests`, runs in a sandbox (macOS: Seatbelt). What you run yourself doesn't.
 
-- It can write in the project, except `.git`, `.tarae.toml` and the paths in `llm.sandbox-protect`. It can also
-  write in the temp folders and the toolchain's own folders: cargo's registry, Go's caches, and cargo's target
+- It can write in the project, except the paths in `llm.sandbox-protect` and what runs later outside the
+  sandbox or sets how things run, wherever it sits in the project and in any case: `.git`, `build.rs`,
+  `Cargo.toml`, `package.json`, `Makefile`, `justfile`, `.envrc`, `.tarae.toml`, `.tarae.local.toml`, `.cargo`,
+  `.github`, `.claude` and `.vscode` (`llm.review-ask`'s defaults, and the two your builds, `:preflight` and
+  git read). A command can't make, change, move, remove or hard-link them; Claude is told which write was
+  kept and to change it with Edit, which you review. Inside `target/` and `node_modules/` those names are
+  tools' output (cmake's `Makefile`s, each package's `package.json`) and are written as usual. A command can
+  hard-link only files it may write, so nothing from outside is brought into the project under another name.
+  It can also write in the temp folders and the toolchain's own folders: cargo's registry (but not the
+  crates it has unpacked, `~/.cargo/registry/src`, while the network is closed: every project's build runs
+  what's there, and offline there's nothing new to unpack), Go's caches, and cargo's target
   and build dirs (tarae asks `cargo metadata`) — those only when they're the checkout's own: inside it, its
   per-checkout build dir under cargo's home (`build/xx/yyyy`, worked out from your own `build-dir` setting,
   never the checkout's), or a temp folder. A cargo config in the checkout can name any folder, and Claude can

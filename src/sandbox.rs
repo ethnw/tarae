@@ -1,7 +1,8 @@
 //! Claude's commands in a sandbox. What Claude runs — `run` and `run_tests` (`tools.rs`) — goes through
 //! macOS's Seatbelt (`/usr/bin/sandbox-exec`) with a profile made here (`Policy::profile`): it may write
-//! in the project (but `.git`, `.tarae.toml` and `llm.sandbox-protect`), the temp folders and the
-//! toolchain's own folders (cargo's registry, its target and build dirs when they're the checkout's own —
+//! in the project (but `protected_names` — `.git`, `build.rs`, `Cargo.toml`, `.cargo`… wherever they sit —
+//! and `llm.sandbox-protect`), the temp folders and the toolchain's own folders (cargo's registry — its
+//! unpacked crates only with the network open —, its target and build dirs when they're the checkout's own —
 //! `cargo_dir_verdict`, #20: a cargo config in the checkout names them, and Claude can write it; Go's caches), connect to nothing
 //! over the network but the ports on this machine the user opened (`llm.sandbox-ports`, or all with
 //! `llm.sandbox-localhost` — `RISKY_PORTS` says why not all by default), and make or reach unix sockets
@@ -86,12 +87,17 @@ impl Guard {
             if b.distinct > b.seen.len() {
                 s.push_str(&format!("  … and {} more\n", b.distinct - b.seen.len()));
             }
-            s.push_str(&format!(
-                "{rules}\nIf the command needs one of these, tell the user — they can open it from the run's \
-                 panel (space m s), or llm.sandbox-write, llm.sandbox-ports, llm.sandbox-localhost and \
-                 llm.sandbox-network open more — or ask to run it outside the sandbox (outside_sandbox, with \
-                 your reason); don't work around it."
-            ));
+            let (kept, all) = self.kept(&b.seen);
+            s.push_str(&kept);
+            s.push_str(&rules);
+            if !all || b.distinct > b.seen.len() {
+                s.push_str(
+                    "\nIf the command needs one of these, tell the user — they can open it from the run's \
+                     panel (space m s), or llm.sandbox-write, llm.sandbox-ports, llm.sandbox-localhost and \
+                     llm.sandbox-network open more — or ask to run it outside the sandbox (outside_sandbox, \
+                     with your reason); don't work around it.",
+                );
+            }
             return s;
         }
         match b.failed {
@@ -109,6 +115,57 @@ impl Guard {
                 s
             }
         }
+    }
+
+    /// What among `seen` the profile keeps on purpose, each said with why and what to do instead — and
+    /// whether that's all of them.
+    fn kept(&self, seen: &[Denial]) -> (String, bool) {
+        let Guard::In(p) = self else { return (String::new(), false) };
+        let (mut names, mut git, mut crates, mut all) = (Vec::new(), false, false, true);
+        for d in seen {
+            let Some(path) = d.file() else {
+                all = false;
+                continue;
+            };
+            match path.strip_prefix(&p.root) {
+                Ok(rel) if protected_in(&p.root, path) => {
+                    match rel.iter().any(|c| c.eq_ignore_ascii_case(".git")) {
+                        true => git = true,
+                        false => names.push(rel.display().to_string()),
+                    }
+                }
+                _ if p.sources.as_ref().is_some_and(|s| path.starts_with(s)) => crates = true,
+                _ => all = false,
+            }
+        }
+        names.sort();
+        names.dedup();
+        let mut s = String::new();
+        if !names.is_empty() {
+            let it = if names.len() == 1 { "it" } else { "them" };
+            s.push_str(&format!(
+                "{}: tarae keeps {it} from your commands — what's in {it} runs later outside the sandbox (the \
+                 user's builds, their terminal) or sets how things run. To change {it}, use Edit: the user \
+                 reviews it. Don't work around it (another name, a copy, a link).\n",
+                names.join(", ")
+            ));
+        }
+        if git {
+            s.push_str(
+                "Git's own folder is kept from your commands: committing, staging, switching branches and the \
+                 like are the user's (their git tab) — ask them, or ask to run it outside the sandbox \
+                 (outside_sandbox, with your reason).\n",
+            );
+        }
+        if let (true, Some(src)) = (crates, &p.sources) {
+            s.push_str(&format!(
+                "Cargo's unpacked crates ({}) stay as they are while the network is closed: every project's \
+                 build outside the sandbox runs what's there. A build that needs a crate unpacked fails here — \
+                 tell the user (a build of theirs unpacks it; llm.sandbox-network opens it).\n",
+                crate::allow::tilde(src)
+            ));
+        }
+        (s, all)
     }
 
     /// What the sandbox allows (or that there was none).
@@ -149,9 +206,14 @@ impl Guard {
                         )
                     }
                 };
+                let names = protected_names().collect::<Vec<_>>().join(", ");
+                let crates = match p.sources {
+                    Some(_) => " (not cargo's unpacked crates while the network is closed)",
+                    None => "",
+                };
                 format!(
-                    "In tarae's sandbox: it could write only in the project (not .git or .tarae.toml), temp \
-                     folders and the toolchain's own{net}.{granted}{refused}"
+                    "In tarae's sandbox: it could write only in the project — not {names}, anywhere in it (Edit \
+                     changes those) — temp folders and the toolchain's own{crates}{net}.{granted}{refused}"
                 )
             }
             Guard::Without(why) => format!("Ran without a sandbox ({why}) — the user agreed."),
@@ -164,9 +226,9 @@ impl Guard {
 /// What a sandboxed command may do. Every path is real (canonical).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Policy {
-    /// The project: writable but for `protect`.
+    /// The project: writable but for `protect` and the names `protected_names` gives.
     pub root: PathBuf,
-    /// Inside `root`, kept as they are (`.git`, `.tarae.toml`, `llm.sandbox-protect`).
+    /// Inside `root`, kept as they are (`llm.sandbox-protect`).
     pub protect: Vec<PathBuf>,
     /// Folders writable besides the project (temp, the toolchain's, `llm.sandbox-write`).
     pub write: Vec<PathBuf>,
@@ -175,6 +237,11 @@ pub struct Policy {
     /// Folders inside writable ones kept as they are: the terminal multiplexers' sockets (`mux_dirs`) — a
     /// command could otherwise delete or replace the multiplexer the user works in.
     pub keep: Vec<PathBuf>,
+    /// Cargo's unpacked crates (`registry/src`), kept as they are while the network is closed: every
+    /// project's build outside the sandbox runs what's there (cargo doesn't check an unpacked crate again),
+    /// and with no download a build rarely has anything new to unpack — a crate downloaded and never built
+    /// (or one cargo's cleanup removed) fails here, and the report says why.
+    pub sources: Option<PathBuf>,
     /// The network beyond this machine (`llm.sandbox-network`).
     pub network: bool,
     /// Ports on this machine it may connect to (`llm.sandbox-ports`): the network closed, the only ones;
@@ -283,7 +350,22 @@ pub struct Denial {
     pub target: String,
 }
 
+/// A hard link refused because its source isn't writable — Seatbelt's `forbidden-link-priv<file-write*>
+/// <source> <link>` (measured).
+const LINK_PRIV: &str = "forbidden-link-priv";
+
 impl Denial {
+    /// The file it was about: the target — for a refused link, the file linked.
+    fn file(&self) -> Option<&Path> {
+        match self.op.as_str() {
+            op if op.starts_with(LINK_PRIV) => {
+                Some(Path::new(self.target.rsplit_once(" /").map_or(self.target.as_str(), |(s, _)| s)))
+            }
+            op if op.starts_with("file-") => Some(Path::new(&self.target)),
+            _ => None,
+        }
+    }
+
     /// The target, home spelled `~`.
     fn target_shown(&self) -> String {
         let home = std::env::var("HOME").unwrap_or_default();
@@ -309,6 +391,9 @@ impl Denial {
             "file-write-create" | "file-write-data" => format!("writing {t}"),
             "file-write-unlink" => format!("deleting {t}"),
             "file-write-rename" => format!("moving {t}"),
+            _ if op.starts_with(LINK_PRIV) => {
+                format!("linking {}", t.rsplit_once(" /").map_or(t.as_str(), |(s, _)| s))
+            }
             _ if op.starts_with("file-write") => format!("changing {t}"),
             "network-outbound" if t.starts_with('/') => format!("connecting to socket {t}"),
             "network-outbound" if t.starts_with("remote:") => match t.rsplit_once(':') {
@@ -549,6 +634,45 @@ pub fn refused_lines(output: &[(bool, String)]) -> Vec<String> {
         .collect()
 }
 
+/// What Claude's runs never write in the project, wherever the name sits in it (a crate's `build.rs`, a
+/// folder's `.cargo`): `llm.review-ask`'s defaults — what runs later outside the sandbox (the user's builds,
+/// `:preflight`, the terminal) or sets how things run — plus `.tarae.local.toml` (read as the user's own
+/// config, its preflight steps run unsandboxed: `config::personal`) and `.git`. Claude changes them with
+/// Edit, which the user reviews (`edits::listed`). Names, not paths — static in the profile — in any case:
+/// APFS opens `Build.rs` for `build.rs`, and so does cargo.
+pub fn protected_names() -> impl Iterator<Item = &'static str> {
+    crate::llm::REVIEW_ASK.iter().copied().chain([".tarae.local.toml", ".git"])
+}
+
+/// Folders of tools' output, where those names are what the tool writes: cmake's `Makefile`s and `cargo
+/// package`'s `Cargo.toml`s under `target/`, each package's `package.json` under `node_modules/`. What's
+/// there runs later anyway (build scripts, packages), so keeping the names closes nothing there — a name
+/// below one of these is let through (`.git/modules/target/hooks` isn't: the name comes first).
+const OUTPUTS: [&str; 2] = ["target", "node_modules"];
+
+/// A name as a Seatbelt regex in any case: `[bB][uU][iI][lL][dD]\.[rR][sS]`.
+fn any_case(name: &str) -> String {
+    name.chars()
+        .map(|c| match c {
+            c if c.is_ascii_alphabetic() => format!("[{}{}]", c.to_ascii_lowercase(), c.to_ascii_uppercase()),
+            c if c.is_ascii_digit() || c == '_' || c == '-' => c.to_string(),
+            c => format!("\\{c}"),
+        })
+        .collect()
+}
+
+/// Whether the profile keeps `path` (real) from a run in the project at `root` by its name
+/// (`protected_names`, `OUTPUTS`) — the profile's rule, in Rust: the report names what it denied.
+pub fn protected_in(root: &Path, path: &Path) -> bool {
+    let Ok(rel) = path.strip_prefix(root) else { return false };
+    let parts: Vec<&std::ffi::OsStr> = rel.iter().collect();
+    let named = |p: &&std::ffi::OsStr| {
+        p.to_str().is_some_and(|p| protected_names().any(|n| n.eq_ignore_ascii_case(p)))
+    };
+    let output = parts.iter().position(|p| OUTPUTS.iter().any(|o| p == o));
+    parts.iter().any(named) && !output.is_some_and(|o| parts[o + 1..].iter().any(named))
+}
+
 /// Device files every program writes to (`/dev/null`, terminals — a pty test hangs without them: measured).
 const DEVICES: &str = "(allow file-write* (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/tty\") \
 (literal \"/dev/ptmx\") (literal \"/dev/dtracehelper\") (regex #\"^/dev/ttys[0-9]+$\") (subpath \"/dev/fd\"))\n";
@@ -589,6 +713,10 @@ impl Policy {
         let with = self.tag.as_ref().map(|t| format!(" (with message \"{t}\")")).unwrap_or_default();
         let deny = |rule: &str| format!("(deny {rule}{with})\n");
         let mut p = String::from("(version 1)\n(allow default)\n");
+        // (A hard link needs these write rules to allow its source too — Seatbelt's own
+        // `forbidden-link-priv<file-write*>`, measured 2026-10-04, `target/sb/p1-links2.sh` — so a run can't
+        // link a file from outside into the project, nor give a kept one a second name to write through: no
+        // `file-link` rule of its own is needed)
         p.push_str(&deny("file-write*"));
         let protect: String =
             (0..self.protect.len()).map(|i| format!(" (require-not (subpath (param \"P{i}\")))")).collect();
@@ -599,10 +727,22 @@ impl Policy {
         if !run.is_empty() || !dirs.is_empty() || !files.is_empty() {
             p.push_str(&format!("(allow file-write*{run}{dirs}{files})\n"));
         }
-        // After the allows, so these win: the multiplexers' socket folders sit inside writable temp ones
+        // After the allows, so these win. The names a run keeps off, below the project's root however deep
+        // — the regex starts with as many path parts as the root has (no path in it), so a name in the
+        // root's own path (a checkout under `.claude/worktrees`) doesn't close the whole project
+        let depth = self.root.components().filter(|c| matches!(c, Component::Normal(_))).count();
+        let below = format!("^{}/(.*/)?", "/[^/]+".repeat(depth));
+        let names = protected_names().map(any_case).collect::<Vec<_>>().join("|");
+        p.push_str(&deny(&format!(
+            "file-write* (require-all (subpath (param \"ROOT\")) (regex #\"{below}({names})(/|$)\") \
+             (require-not (regex #\"{below}({})/(.*/)?({names})(/|$)\")))",
+            OUTPUTS.join("|")
+        )));
+        // …the multiplexers' socket folders (they sit inside writable temp ones), cargo's unpacked crates
         let keep: String = (0..self.keep.len()).map(|i| format!(" (subpath (param \"K{i}\"))")).collect();
-        if !keep.is_empty() {
-            p.push_str(&deny(&format!("file-write*{keep}")));
+        let sources = if self.sources.is_some() { " (subpath (param \"CRATES\"))" } else { "" };
+        if !keep.is_empty() || !sources.is_empty() {
+            p.push_str(&deny(&format!("file-write*{keep}{sources}")));
         }
         p.push_str(DEVICES);
         let open: String = self.ports.iter().map(|n| format!(" (remote ip \"localhost:{n}\")")).collect();
@@ -659,6 +799,7 @@ impl Policy {
         v.extend(self.write.iter().enumerate().map(|(i, p)| (format!("W{i}"), s(p))));
         v.extend(self.files.iter().enumerate().map(|(i, p)| (format!("F{i}"), s(p))));
         v.extend(self.keep.iter().enumerate().map(|(i, p)| (format!("K{i}"), s(p))));
+        v.extend(self.sources.iter().map(|p| ("CRATES".to_string(), s(p))));
         v.extend(self.sockets.iter().enumerate().map(|(i, p)| (format!("S{i}"), s(p))));
         v
     }
@@ -676,7 +817,8 @@ impl Policy {
     /// The policy for a project, from what's around it (`Env`, gathered on a worker — or made up in tests).
     pub fn for_project(env: &Env) -> Policy {
         let root = env.root.clone();
-        let mut protect = vec![root.join(".git"), root.join(".tarae.toml")];
+        // (`.git`, `.tarae.toml` and the rest are names the profile keeps itself: `protected_names`)
+        let mut protect = Vec::new();
         for p in &env.protect {
             let rel = Path::new(p);
             // Inside the project only (`..` would reach out of it)
@@ -736,6 +878,7 @@ impl Policy {
             write,
             files,
             keep: mux_dirs(env),
+            sources: env.cargo_home.as_ref().filter(|_| !env.network).map(|ch| ch.join("registry/src")),
             network: env.network,
             ports,
             localhost: env.localhost,
@@ -1171,11 +1314,10 @@ mod tests {
     fn a_projects_policy() {
         let root = Path::new("/Users/u/p");
         let p = Policy::for_project(&env(root));
-        assert_eq!(
-            p.protect,
-            [root.join(".git"), root.join(".tarae.toml"), root.join("secrets")],
-            "only paths inside the project"
-        );
+        assert_eq!(p.protect, [root.join("secrets")], "only paths inside the project");
+        // Cargo's unpacked crates stay as they are while the network is closed — writable with it open
+        assert_eq!(p.sources, Some("/Users/u/.cargo/registry/src".into()));
+        assert_eq!(Policy::for_project(&Env { network: true, ..env(root) }).sources, None);
         let w: Vec<&str> = p.write.iter().map(|w| w.to_str().unwrap()).collect();
         assert_eq!(
             w,
@@ -1276,14 +1418,18 @@ mod tests {
         assert!(text.contains("(subpath (param \"W5\"))") && !text.contains("W6"));
         assert!(text.contains("(deny network*)") && text.contains("(deny appleevent-send)"));
         assert!(
-            text.contains("(deny file-write* (subpath (param \"K0\")) (subpath (param \"K1\")))"),
+            text.contains(
+                "(deny file-write* (subpath (param \"K0\")) (subpath (param \"K1\")) (subpath (param \"CRATES\")))"
+            ),
             "{text}"
         );
         let params = p.params();
         assert_eq!(params[0], ("ROOT".into(), "/Users/u/a\"b (c)".into()));
-        assert!(params.iter().any(|(k, v)| k == "P0" && v.ends_with("/.git")));
-        let open = Policy { network: true, ..p.clone() };
+        assert!(params.iter().any(|(k, v)| k == "P0" && v.ends_with("/secrets")));
+        assert!(params.contains(&("CRATES".into(), "/Users/u/.cargo/registry/src".into())));
+        let open = Policy { network: true, sources: None, ..p.clone() };
         let text = open.profile();
+        assert!(!text.contains("CRATES"), "{text}");
         assert!(!text.contains("(deny network*)"), "{text}");
         assert!(
             text.contains("(deny network-outbound (remote unix-socket))"),
@@ -1304,6 +1450,108 @@ mod tests {
                 && !text.contains("subpath (param \"S")
         );
         assert!(sock.params().contains(&("S0".into(), "/Users/u/.colima/t/docker.sock".into())));
+    }
+
+    /// The names a run keeps off (card model P1), in Rust as in the profile: anywhere below the root, in any
+    /// case, but not below a tool's output folder (unless the name comes first: `.git/modules/target`); the
+    /// root's own path doesn't count (here it holds `.claude` and `target`). In the profile: names, never
+    /// the path — a regex that skips as many parts as the root has.
+    #[test]
+    fn what_a_run_keeps_off_by_name() {
+        let root = Path::new("/Users/u/.claude/worktrees/target/p");
+        let kept = |rel: &str| protected_in(root, &root.join(rel));
+        for rel in [
+            "build.rs",
+            "crates/a/build.rs",
+            "BUILD.RS",
+            "Cargo.toml",
+            "web/package.json",
+            "Makefile",
+            "justfile",
+            ".envrc",
+            ".tarae.toml",
+            ".tarae.local.toml",
+            ".cargo/config.toml",
+            "crates/a/.cargo",
+            ".github/workflows/ci.yml",
+            ".claude/settings.json",
+            ".vscode/tasks.json",
+            ".git",
+            ".git/hooks/pre-commit",
+            ".git/modules/target/hooks/pre-commit",
+        ] {
+            assert!(kept(rel), "{rel}");
+        }
+        for rel in [
+            "",
+            "src/main.rs",
+            "build.rs.bak",
+            "Cargo.lock",
+            ".gitignore",
+            "target/debug/build/x/out/Makefile",
+            "target/package/a-0.1.0/Cargo.toml",
+            "node_modules/a/package.json",
+            "web/node_modules/a/package.json",
+        ] {
+            assert!(!kept(rel), "{rel}");
+        }
+        assert!(!protected_in(root, Path::new("/Users/u/elsewhere/build.rs")));
+        let text = Policy::for_project(&env(root)).profile();
+        assert!(!text.contains("/Users") && !text.contains("worktrees"), "{text}");
+        let skip = "/[^/]+".repeat(6);
+        let rule = format!(
+            "(deny file-write* (require-all (subpath (param \"ROOT\")) (regex #\"^{skip}/(.*/)?\
+             ([bB][uU][iI][lL][dD]\\.[rR][sS]|[cC][aA][rR][gG][oO]\\.[tT][oO][mM][lL]|"
+        );
+        assert!(text.contains(&rule), "{text}");
+        assert!(
+            text.contains(&format!(
+                "|\\.[gG][iI][tT])(/|$)\") (require-not (regex #\"^{skip}/(.*/)?(target|node_modules)/(.*/)?("
+            )),
+            "{text}"
+        );
+        // Every name is plain enough for a regex in quotes (`any_case` escapes the rest)
+        for n in protected_names() {
+            assert!(n.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)), "{n}");
+        }
+    }
+
+    /// What Claude reads when the profile kept something on purpose: which names, and to use Edit (the user
+    /// reviews it); git's folder, and that git's writes are the user's; cargo's unpacked crates, and why —
+    /// with nothing else blocked, no "tell the user to open it" (they can't).
+    #[test]
+    fn the_report_says_what_was_kept_and_what_to_do_instead() {
+        let p = Policy::for_project(&env(Path::new("/Users/u/p")));
+        let w = Watch::quiet("t.");
+        w.record(denial("file-write-data", "/Users/u/p/build.rs"));
+        w.record(denial("file-write-create", "/Users/u/p/crates/a/.cargo"));
+        w.record(denial("forbidden-link-priv<file-write*>", "/Users/u/p/build.rs /Users/u/p/out/b"));
+        let g = Guard::In(Box::new(Policy { watch: Some(w.clone()), ..p.clone() }));
+        let r = g.report(&[]);
+        assert!(
+            r.contains("build.rs, crates/a/.cargo: tarae keeps them from your commands")
+                && r.contains("To change them, use Edit: the user reviews it."),
+            "{r}"
+        );
+        assert!(r.contains("  linking /Users/u/p/build.rs (forbidden-link-priv<file-write*>, touch)"), "{r}");
+        assert!(
+            r.contains("not build.rs, Cargo.toml, package.json")
+                && r.contains(".tarae.local.toml, .git, anywhere in it (Edit changes those)")
+                && r.contains("(not cargo's unpacked crates while the network is closed)"),
+            "{r}"
+        );
+        assert!(!r.contains("If the command needs one of these"), "all of it kept on purpose: {r}");
+        w.record(denial("file-write-create", "/Users/u/p/.git/index.lock"));
+        w.record(denial("file-write-create", "/Users/u/.cargo/registry/src/i/serde-1.0.0/build.rs"));
+        let r = g.report(&[]);
+        assert!(r.contains("Git's own folder is kept from your commands"), "{r}");
+        assert!(r.contains("registry/src) stay as they are while the network is closed"), "{r}");
+        assert!(!r.contains("If the command needs one of these"), "{r}");
+        w.record(denial("file-write-create", "/Users/u/marker"));
+        assert!(g.report(&[]).contains("If the command needs one of these"), "something else blocked");
+        // The network open: the crates aren't kept, and nothing says they are
+        let open = Guard::In(Box::new(Policy { network: true, sources: None, ..p }));
+        assert!(!open.report(&[]).contains("unpacked crates"));
     }
 
     /// Connecting on this machine: the network closed, only the listed ports (`localhost:*` only when
@@ -1475,6 +1723,11 @@ mod tests {
         assert_eq!(plain("file-write-unlink", "/a"), "deleting /a");
         assert_eq!(plain("file-write-rename", "/a"), "moving /a");
         assert_eq!(plain("file-write-mode", "/a"), "changing /a");
+        // A link refused for its source (measured: the source, then the link)
+        assert_eq!(
+            plain("forbidden-link-priv<file-write*>", &format!("{home}/.ssh/k /p/k")),
+            "linking ~/.ssh/k"
+        );
         assert_eq!(plain("network-outbound", "remote:*:9"), "connecting to port 9");
         assert_eq!(plain("network-outbound", "remote:*:40147"), "connecting to port 40147");
         assert_eq!(
@@ -1551,6 +1804,7 @@ mod tests {
             write: Vec::new(),
             files: Vec::new(),
             keep: Vec::new(),
+            sources: None,
             network: false,
             ports: vec![port],
             localhost: false,
@@ -1615,6 +1869,7 @@ mod tests {
                 write: vec!["/private/tmp".into(), user_temp(&real(&std::env::temp_dir()))],
                 files: Vec::new(),
                 keep: Vec::new(),
+                sources: None,
                 network,
                 ports: Vec::new(),
                 localhost: false,
@@ -1679,6 +1934,7 @@ mod tests {
             write: Vec::new(),
             files: Vec::new(),
             keep: Vec::new(),
+            sources: None,
             network: false,
             ports: Vec::new(),
             localhost: false,
@@ -1730,6 +1986,7 @@ mod tests {
             write: vec![tmp.clone()],
             files: Vec::new(),
             keep: kept.to_vec(),
+            sources: None,
             network: false,
             ports: Vec::new(),
             localhost: false,
@@ -1875,6 +2132,228 @@ mod tests {
         std::fs::remove_dir_all(&t).ok();
     }
 
+    /// For real, on macOS (card model P1) — what runs later outside the sandbox stays as it is: every name
+    /// `protected_names` gives, anywhere in the project and in any case, can't be made (a file, a folder),
+    /// written, appended to, moved onto, moved or removed, nor given a second name to write through; the
+    /// files beside them are written as before, and so are those names inside tools' output (`OUTPUTS`); a
+    /// checkout whose own path holds such names (`.claude/worktrees`, `target`) stays writable. A file from
+    /// outside (a stand-in key in a stand-in home) can't be linked into the project; the project's own files
+    /// can (cargo links its outputs). Claude reads what was kept and to use Edit, which asks the user
+    /// (`edits::listed`). Harmless: plain-text stand-ins in a folder of the test's own under `target/`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn what_runs_later_stays_as_it_is_under_the_real_profile() {
+        if skipped_inside("sandbox::tests::what_runs_later_stays_as_it_is_under_the_real_profile") {
+            return;
+        }
+        // (not `sb-kept`: editor.rs' sandbox test removes that folder when it ends)
+        let t = scratch("sb-names");
+        let (root, home, out) = (t.join(".claude/worktrees/p"), t.join("home"), t.join("out"));
+        for d in [&root, &home.join(".ssh"), &out] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let key = home.join(".ssh/id_stand_in");
+        std::fs::write(&key, "not a key\n").unwrap();
+        let p = Policy {
+            write: vec![out.clone()],
+            ..Policy::for_project(&Env { root: root.clone(), ..Env::default() })
+        };
+        let sh = |p: &Policy, script: &str| {
+            let mut c = command(Some(p), "/bin/sh", &["-c".into(), script.into()]);
+            c.current_dir(&root).stdin(Stdio::null()).output().unwrap()
+        };
+        let o = out.display();
+        for name in protected_names() {
+            std::fs::write(root.join(name), "kept\n").unwrap();
+            let upper = name.to_uppercase();
+            let ran = sh(
+                &p,
+                &format!(
+                    "mkdir -p a b c target/x node_modules/p; echo x > 'a/{name}'; mkdir 'b/{name}'; \
+                     echo x > 'b/{name}/x'; echo x > 'c/{upper}'; echo pwned >> '{name}'; mv '{name}' 'moved{name}'; \
+                     echo evil > '{o}/evil{name}'; mv '{o}/evil{name}' '{name}'; \
+                     ln '{name}' '{o}/second{name}' && echo pwned >> '{o}/second{name}'; rm -f '{name}'; \
+                     echo x > 'a/{name}.bak'; echo x > 'target/x/{name}'; echo x > 'node_modules/p/{name}'"
+                ),
+            );
+            let said = String::from_utf8_lossy(&ran.stderr);
+            for made in
+                [format!("a/{name}"), format!("b/{name}"), format!("c/{upper}"), format!("moved{name}")]
+            {
+                assert!(!root.join(&made).exists(), "{made}: made — {said}");
+            }
+            assert_eq!(
+                std::fs::read_to_string(root.join(name)).unwrap(),
+                "kept\n",
+                "{name}: changed — {said}"
+            );
+            assert!(!out.join(format!("second{name}")).exists(), "{name}: linked to a second name — {said}");
+            for beside in
+                [format!("a/{name}.bak"), format!("target/x/{name}"), format!("node_modules/p/{name}")]
+            {
+                assert!(root.join(&beside).exists(), "{beside}: not written — {said}");
+            }
+            // An Edit of it asks the user — where the report sends Claude
+            let defaults: Vec<String> = crate::llm::REVIEW_ASK.iter().map(|s| s.to_string()).collect();
+            assert!(crate::edits::listed(Path::new(name), &defaults), "{name}: an Edit wouldn't ask");
+        }
+        // Links: nothing from outside comes in; the project's own files link as before
+        sh(&p, &format!("ln '{}' stolen; echo x > own; ln own own2", key.display()));
+        assert!(!root.join("stolen").exists(), "a file from outside linked into the project");
+        assert!(root.join("own2").exists(), "a link of the project's own file");
+        // What Claude reads: what was kept, and to use Edit
+        let tag = format!("tarae-test-{}-kept.", std::process::id());
+        let w = Watch::start(&tag);
+        std::thread::sleep(WATCH_READY);
+        let watched = Policy { tag: Some(tag), watch: Some(w.clone()), ..p.clone() };
+        std::fs::write(root.join("build.rs"), "kept\n").unwrap();
+        sh(&watched, "echo pwned >> build.rs; mkdir -p d/.git");
+        std::thread::sleep(WATCH_LAST * 2);
+        w.finish();
+        assert_eq!(w.blocked().failed, None);
+        let r = Guard::In(Box::new(watched)).report(&[]);
+        assert!(r.contains("build.rs: tarae keeps it from your commands") && r.contains("use Edit"), "{r}");
+        assert!(r.contains("Git's own folder is kept"), "{r}");
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// For real, on macOS (card model P1) — cargo's unpacked crates under the real profile, the network
+    /// closed: a crate never unpacked can't be (a build needing it fails), an unpacked one can't be changed,
+    /// added to or given a neighbour; with the network open it unpacks. And a normal project still builds
+    /// offline — its build script, its tests, `cargo fmt` — once its crates are unpacked. Harmless and
+    /// offline: cargo's home, a local registry with one crate of the test's own, and the project are folders
+    /// of the test's own under `target/` (never the real `~/.cargo`).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cargo_works_offline_and_its_unpacked_crates_stay_under_the_real_profile() {
+        if skipped_inside(
+            "sandbox::tests::cargo_works_offline_and_its_unpacked_crates_stay_under_the_real_profile",
+        ) {
+            return;
+        }
+        let t = scratch("sb-cargo");
+        let (home, reg, root) = (t.join("cargo"), t.join("registry"), t.join("p"));
+        // A local registry with one crate: its index line and its .crate (a gzipped tar)
+        let stage = t.join("stage/tarae-dep-0.1.0");
+        std::fs::create_dir_all(stage.join("src")).unwrap();
+        std::fs::write(
+            stage.join("Cargo.toml"),
+            "[package]\nname = \"tarae-dep\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(stage.join("src/lib.rs"), "pub fn one() -> u8 {\n    1\n}\n").unwrap();
+        std::fs::create_dir_all(reg.join("index/ta/ra")).unwrap();
+        let krate = reg.join("tarae-dep-0.1.0.crate");
+        let tar = Command::new("/usr/bin/tar")
+            .env("COPYFILE_DISABLE", "1")
+            .arg("-czf")
+            .arg(&krate)
+            .arg("-C")
+            .arg(t.join("stage"))
+            .arg("tarae-dep-0.1.0")
+            .status()
+            .unwrap();
+        assert!(tar.success());
+        let sum = Command::new("/usr/bin/shasum").args(["-a", "256"]).arg(&krate).output().unwrap();
+        let sum = String::from_utf8_lossy(&sum.stdout).split_whitespace().next().unwrap().to_string();
+        std::fs::write(
+            reg.join("index/ta/ra/tarae-dep"),
+            format!(
+                "{{\"name\":\"tarae-dep\",\"vers\":\"0.1.0\",\"deps\":[],\"cksum\":\"{sum}\",\"features\":{{}},\"yanked\":false}}\n"
+            ),
+        )
+        .unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join("config.toml"),
+            format!(
+                "[source.crates-io]\nreplace-with = \"here\"\n[source.here]\nlocal-registry = \"{}\"\n",
+                reg.display()
+            ),
+        )
+        .unwrap();
+        // The project: a dependency, a build script, a test, a file `cargo fmt` changes
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"p\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\ntarae-dep = \"0.1\"\n\n\
+             [workspace]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("build.rs"),
+            "fn main() {\n    let out = std::env::var(\"OUT_DIR\").unwrap();\n    \
+             std::fs::write(format!(\"{out}/made\"), \"x\").unwrap();\n}\n",
+        )
+        .unwrap();
+        let unformatted = "pub fn f()->u8{tarae_dep::one()}\n#[test]\nfn t(){assert_eq!(f(),1);}\n";
+        std::fs::write(root.join("src/lib.rs"), unformatted).unwrap();
+        let env = Env {
+            root: root.clone(),
+            cargo_home: Some(home.clone()),
+            tmp: Some(real(&std::env::temp_dir())),
+            ..Env::default()
+        };
+        let (closed, open) = (Policy::for_project(&env), Policy::for_project(&Env { network: true, ..env }));
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+        let run = |p: &Policy, args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            let mut c = command(Some(p), &cargo, &args);
+            c.current_dir(&root)
+                .env("CARGO_HOME", &home)
+                .env("CARGO_NET_OFFLINE", "true")
+                .env_remove("CARGO_TARGET_DIR")
+                // (cargo also reads the cargo configs above this folder — yours, whose `build-dir` would put
+                // the build under this cargo home: a run's real policy asks `cargo metadata` for that dir,
+                // this one doesn't, so the build stays in the project)
+                .env("CARGO_BUILD_BUILD_DIR", root.join("target"))
+                .env_remove("RUSTC_WRAPPER")
+                .stdin(Stdio::null())
+                .output()
+                .unwrap()
+        };
+        let src = home.join("registry/src");
+        let unpacked = || {
+            std::fs::read_dir(&src)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|d| d.path().join("tarae-dep-0.1.0"))
+                .find(|d| d.exists())
+        };
+        // Never unpacked, the network closed: it can't be
+        let r = run(&closed, &["build", "--offline"]);
+        assert!(!r.status.success() && unpacked().is_none(), "unpacked offline: {r:?}");
+        // The network open: it is
+        let r = run(&open, &["build", "--offline"]);
+        assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+        let dep = unpacked().expect("unpacked with the network open");
+        // Unpacked: a normal build, its tests and fmt work offline with the network closed
+        std::fs::remove_dir_all(root.join("target")).unwrap();
+        for args in [&["build", "--offline"][..], &["test", "--offline"], &["fmt"]] {
+            let r = run(&closed, args);
+            assert!(r.status.success(), "cargo {args:?}: {}", String::from_utf8_lossy(&r.stderr));
+        }
+        assert_ne!(std::fs::read_to_string(root.join("src/lib.rs")).unwrap(), unformatted, "fmt wrote");
+        // …and what's unpacked stays as it is
+        let lib = std::fs::read_to_string(dep.join("src/lib.rs")).unwrap();
+        let sh = |script: &str| {
+            let mut c = command(Some(&closed), "/bin/sh", &["-c".into(), script.into()]);
+            c.current_dir(&root).stdin(Stdio::null()).output().unwrap()
+        };
+        let d = dep.display();
+        sh(&format!(
+            "echo pwned >> '{d}/src/lib.rs'; echo x > '{d}/build.rs'; mkdir '{d}-evil'; rm -f '{d}/Cargo.toml'"
+        ));
+        assert_eq!(std::fs::read_to_string(dep.join("src/lib.rs")).unwrap(), lib, "changed");
+        assert!(
+            !dep.join("build.rs").exists() && dep.join("Cargo.toml").exists(),
+            "added to or removed from"
+        );
+        assert!(!Path::new(&format!("{d}-evil")).exists(), "a neighbour");
+        std::fs::remove_dir_all(&t).ok();
+    }
+
     /// For real, on macOS — connecting to this machine's ports from inside:
     /// - the network closed (the default): an ordinary port isn't reached, a listed one
     ///   (`llm.sandbox-ports`) is;
@@ -1907,6 +2386,7 @@ mod tests {
             write: Vec::new(),
             files: Vec::new(),
             keep: Vec::new(),
+            sources: None,
             network,
             ports,
             localhost,

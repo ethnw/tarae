@@ -107,7 +107,8 @@ pub struct LlmConfig {
     pub sandbox_network: bool,
     /// More folders the sandbox may write to (`~/` for home).
     pub sandbox_write: Vec<String>,
-    /// Paths in the project the sandbox keeps as they are, besides `.git` and `.tarae.toml`.
+    /// Paths in the project the sandbox keeps as they are, besides the names it always keeps
+    /// (`sandbox::protected_names`).
     pub sandbox_protect: Vec<String>,
     /// Ports on this machine the sandbox lets Claude's commands connect to (the network closed: none else).
     pub sandbox_ports: Vec<u16>,

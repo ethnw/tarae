@@ -264,19 +264,22 @@ pub fn real(path: &Path) -> Option<PathBuf> {
 
 /// Whether an edit to `rel` (from the project's root) still asks first: anything in `.git`, a cargo config
 /// (`.cargo/config.toml`, `.cargo/config` — its build and target dirs, its `[env]`, are what the sandbox
-/// opens and cargo runs with: #20, whatever `llm.review-ask` says), or an entry of `llm.review-ask` — a name
-/// matches any part of the path, a path (with `/`) its start.
+/// opens and cargo runs with: #20, whatever `llm.review-ask` says), `.tarae.local.toml` (your own config,
+/// read with no trust card — its preflight steps run unsandboxed), or an entry of `llm.review-ask` — a name
+/// matches any part of the path in any case (APFS opens `Build.rs` for `build.rs`), a path (with `/`) its
+/// start. (Claude's runs can't write these at all — `sandbox::protected_names` — and are told to Edit them.)
 pub fn listed(rel: &Path, ask: &[String]) -> bool {
     let parts: Vec<&std::ffi::OsStr> = rel.iter().collect();
+    let is = |p: &std::ffi::OsStr, name: &str| p.eq_ignore_ascii_case(name);
     let cargo_config =
-        parts.windows(2).any(|w| w[0] == ".cargo" && (w[1] == "config.toml" || w[1] == "config"));
-    parts.iter().any(|p| *p == ".git")
+        parts.windows(2).any(|w| is(w[0], ".cargo") && (is(w[1], "config.toml") || is(w[1], "config")));
+    parts.iter().any(|p| is(p, ".git") || is(p, ".tarae.local.toml"))
         || cargo_config
         || ask
             .iter()
             .map(|a| a.trim().trim_end_matches('/'))
             .filter(|a| !a.is_empty())
-            .any(|a| if a.contains('/') { rel.starts_with(a) } else { parts.iter().any(|p| *p == a) })
+            .any(|a| if a.contains('/') { rel.starts_with(a) } else { parts.iter().any(|p| is(p, a)) })
 }
 
 /// The file's text before an edit (None inside: no such file) — None when it can't be told (not text, not
@@ -597,6 +600,13 @@ mod tests {
             assert!(listed(p), "{p}");
         }
         assert!(!listed(".cargo/notes.md") && !listed("src/config.toml"));
+        // Your own config always asks too (read with no trust card); a name in any case (APFS opens it)
+        assert!(listed(".tarae.local.toml") && listed("BUILD.RS") && listed(".Cargo/Config.toml"));
+        // Every name Claude's runs can't write is one its Edit asks about (the report sends it there)
+        let defaults: Vec<String> = crate::llm::REVIEW_ASK.iter().map(|s| s.to_string()).collect();
+        for name in crate::sandbox::protected_names() {
+            assert!(super::listed(&Path::new("a").join(name).join("x"), &defaults), "{name}");
+        }
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&outside).ok();
     }

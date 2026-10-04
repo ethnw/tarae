@@ -234,10 +234,17 @@ pub fn secret(real: &Path, home: Option<&Path>) -> bool {
 }
 
 /// Places under home that run something later when written — and so are never offered for writing (a
-/// folder holding one isn't either): shells' and git's settings, launch agents, tarae's own config. Keys
-/// (`SECRETS`) neither.
-const NEVER_WRITE: [&str; 6] =
-    [".config/fish", ".config/git", ".config/tarae", ".oh-my-zsh", "Library/LaunchAgents", ".zsh"];
+/// folder holding one isn't either): shells' and git's settings, launch agents, tarae's own config, cargo's
+/// unpacked crates (every project's build runs them — `sandbox::Policy::sources`). Keys (`SECRETS`) neither.
+const NEVER_WRITE: [&str; 7] = [
+    ".config/fish",
+    ".config/git",
+    ".config/tarae",
+    ".oh-my-zsh",
+    "Library/LaunchAgents",
+    ".zsh",
+    ".cargo/registry/src",
+];
 
 /// Folders offered for one denied write, at most; and how deep one must be (`/opt`, `/private/var` aren't).
 const WRITE_CHOICES: usize = 4;
