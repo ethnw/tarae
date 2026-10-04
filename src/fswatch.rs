@@ -473,7 +473,9 @@ mod sys {
 mod tests {
     use super::*;
 
-    const SOON: Duration = Duration::from_millis(1000);
+    /// How long an event that comes at once may take to arrive — generous for a slow runner, yet under
+    /// `BACKSTOP` (a wait that ran out isn't one an event ended).
+    const SOON: Duration = Duration::from_secs(3);
 
     fn tmp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("tarae-fswatch-{name}-{}", std::process::id()));

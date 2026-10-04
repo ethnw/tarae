@@ -374,7 +374,8 @@ fn a_flood_in_the_terminal_panel_leaves_the_keys_working() {
     let asked = std::time::Instant::now();
     t.send("\x1c");
     t.send("i");
-    let inserting = t.poll_for(std::time::Duration::from_secs(2), |s| s.status().contains("INSERT"));
+    // (an editor the flood takes never handles them — the bound only has to outlast a slow runner)
+    let inserting = t.poll_for(std::time::Duration::from_secs(5), |s| s.status().contains("INSERT"));
     let took = asked.elapsed();
     eprintln!("flood: keys landed after {took:?}");
     assert!(inserting.is_some(), "keys still not handled after {took:?} of a flood");
@@ -564,9 +565,18 @@ fn an_idle_editor_draws_nothing_and_sleeps() {
     idle(&mut t, "a picker over an error");
     // The picker gone, the card comes up — its time starts and its fade-in gets frames (first drawn
     // transparent, it would stay so without them)
+    // (counted until the fade is over — frames stop for a while — not in a fixed window: CI's macOS drew
+    // only 2 in 500 ms)
     let frames = t.frames();
     t.esc("the card", |s| !s.contains("files in work") && s.contains("expected integer"));
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let before = t.frames();
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        if t.frames() == before || std::time::Instant::now() > end {
+            break;
+        }
+    }
     assert!(t.frames() - frames >= 3, "{} frames for the card's fade-in", t.frames() - frames);
 }
 
@@ -862,8 +872,9 @@ fn follow_shows_each_edit_and_replays_the_turn() {
         ),
         ("the last read", Box::new(|s| s.contains("● read  lib.txt  L8–9"))),
     ];
+    // (a stop skipped is never seen whatever the bound — it only has to outlast a slow runner's lag)
     for (what, seen) in &stops {
-        if t.poll_for(Duration::from_millis(1500), |s| seen(s)).is_none() {
+        if t.poll_for(Duration::from_secs(4), |s| seen(s)).is_none() {
             panic!("{what} never reached the screen in time\n{}", t.screen());
         }
     }

@@ -29,9 +29,15 @@ use crate::lsp::ClientId;
 use crate::lsp_editor::{Goto, Kind, Place};
 use crate::tools::{Call, answer};
 
-/// How long a server has to answer before the text matches are the answer.
-const REFS_WAIT: std::time::Duration =
-    std::time::Duration::from_millis(if cfg!(test) { 300 } else { 20_000 });
+/// How long a server has to answer before the text matches are the answer — tests too: one that answers
+/// mustn't race it (300 ms lost to a slow runner's stalls); one about silence sets a short one
+/// (`LspState.refs_wait`).
+const REFS_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// `REFS_WAIT`, or the one a test set.
+fn refs_wait(ed: &Editor) -> std::time::Duration {
+    ed.lsp.refs_wait.unwrap_or(REFS_WAIT)
+}
 
 /// Rows of places a `references` answer lists at most (the rest summed up per file).
 const REFS_SHOWN: usize = 200;
@@ -237,11 +243,12 @@ fn ask(ed: &mut Editor, call: Call, path: PathBuf, line: Option<usize>, name: Na
             let ask = Ask { call, word, tests, server, cid, refs: None, declared };
             ed.lsp.tool_asks.insert(n, ask);
             // A server that says nothing in time: the text matches are the answer
+            let wait = refs_wait(ed);
             ed.events.jobs().spawn(move || {
-                std::thread::sleep(REFS_WAIT);
+                std::thread::sleep(wait);
                 move |ed: &mut Editor| {
                     if let Some(a) = ed.lsp.tool_asks.remove(&n) {
-                        let why = format!("{} didn't answer within {}", a.server, secs(REFS_WAIT));
+                        let why = format!("{} didn't answer within {}", a.server, secs(wait));
                         text_matches(ed, a.call, Name { word: a.word, tests: a.tests }, why, true);
                     }
                 }
@@ -568,11 +575,12 @@ fn ask_symbols(ed: &mut Editor, call: Call, path: PathBuf, line: Option<usize>) 
         Err(why) => outline(ed, call, path, line, why),
         Ok((cid, server)) => {
             ed.lsp.tool_symbols.insert(n, SymAsk { call, path, line, server, cid });
+            let wait = refs_wait(ed);
             ed.events.jobs().spawn(move || {
-                std::thread::sleep(REFS_WAIT);
+                std::thread::sleep(wait);
                 move |ed: &mut Editor| {
                     if let Some(a) = ed.lsp.tool_symbols.remove(&n) {
-                        let why = format!("{} didn't answer within {}", a.server, secs(REFS_WAIT));
+                        let why = format!("{} didn't answer within {}", a.server, secs(wait));
                         outline(ed, a.call, a.path, a.line, why);
                     }
                 }
@@ -972,12 +980,13 @@ impl DefAsk {
 /// Question `n` kept until its servers answer — the ones silent for `REFS_WAIT` are given up on.
 fn wait_defs(ed: &mut Editor, n: u64, a: DefAsk) {
     ed.lsp.tool_defs.insert(n, a);
+    let wait = refs_wait(ed);
     ed.events.jobs().spawn(move || {
-        std::thread::sleep(REFS_WAIT);
+        std::thread::sleep(wait);
         move |ed: &mut Editor| {
             let Some(a) = ed.lsp.tool_defs.get_mut(&n) else { return };
             for (_, server) in a.waiting.drain(..) {
-                a.why.push(format!("{server} didn't answer within {}", secs(REFS_WAIT)));
+                a.why.push(format!("{server} didn't answer within {}", secs(wait)));
                 a.later = true;
             }
             finish_defs(ed, n);
@@ -1398,11 +1407,12 @@ fn hover_at(ed: &mut Editor, call: Call, spot: Spot) {
         Ok((cid, server)) => {
             let at = format!("{shown}:{}", line + 1);
             ed.lsp.tool_hovers.insert(n, HoverAsk { call, word, at, server, cid });
+            let wait = refs_wait(ed);
             ed.events.jobs().spawn(move || {
-                std::thread::sleep(REFS_WAIT);
+                std::thread::sleep(wait);
                 move |ed: &mut Editor| {
                     if let Some(a) = ed.lsp.tool_hovers.remove(&n) {
-                        let why = format!("{} didn't answer within {}", a.server, secs(REFS_WAIT));
+                        let why = format!("{} didn't answer within {}", a.server, secs(wait));
                         tree_defs(ed, a.call, a.word, Goto::Definition, why, true);
                     }
                 }

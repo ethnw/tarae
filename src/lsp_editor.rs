@@ -69,6 +69,9 @@ pub struct LspState {
     pub(crate) rest_after: Option<std::time::Duration>,
     /// How long `g r`'s text matches wait for a busy server's answer — `TEXT_GRACE` unless a test says.
     pub(crate) text_grace: Option<std::time::Duration>,
+    /// How long Claude's tools wait for a server before standing in for it — `nav::REFS_WAIT` unless a
+    /// test says.
+    pub(crate) refs_wait: Option<std::time::Duration>,
     /// The `g r` in hand (N2): its list is laid out on a worker — the code of each place read there.
     refs: Refs,
     /// Claude's `references` calls waiting for their server (N5, `nav.rs`), by number · the next number.
@@ -97,7 +100,9 @@ pub struct LspState {
 /// One `g r`: the name asked about · where it's declared (the server's definition, asked beside it — None
 /// until it answers) · the list once shown (picker id and its places, to put the declaration first if
 /// that answer comes later).
-/// · while the server was loading, the text matches shown meanwhile (N3 — that picker's id).
+/// · while the server was loading, the text matches shown meanwhile (N3 — that picker's id) · the server's
+/// answer is in (its list on the way, or none for good) — the text matches held back for `TEXT_GRACE`
+/// don't come then, however long its lines take to read.
 #[derive(Default)]
 struct Refs {
     generation: u64,
@@ -105,6 +110,7 @@ struct Refs {
     declared: Option<Vec<(std::path::PathBuf, usize)>>,
     shown: Option<(u64, Vec<Place>)>,
     texts: Option<u64>,
+    answered: bool,
 }
 
 /// A place of a list with the code there: path, line and byte column (from 0), the line's text.
@@ -239,7 +245,8 @@ const ROOT_GONE: std::time::Duration =
 /// Claude's edits is one check, not one each (measured 2026-10-03: four writes in a second started three
 /// `cargo check`s, each restarting the last and holding the shared build dir's lock against Claude's own
 /// cargo runs).
-const SAVE_QUIET: std::time::Duration = std::time::Duration::from_millis(if cfg!(test) { 100 } else { 1500 });
+pub(crate) const SAVE_QUIET: std::time::Duration =
+    std::time::Duration::from_millis(if cfg!(test) { 100 } else { 1500 });
 
 /// How long `g r`'s text matches wait for a busy server's own answer before they show (N3) — one that
 /// answers by then (warm rust-analyzer: 35–68 ms) isn't preceded by a flash of text matches.
@@ -1147,6 +1154,7 @@ impl Editor {
                 match locs.as_slice() {
                     [] if self.wait_for_idle(cid, &p) => {}
                     [] => {
+                        self.lsp.refs.answered |= goto == Goto::References;
                         self.trace_ends("none");
                         self.set_status(format!("no {} found", goto.noun()))
                     }
@@ -2516,11 +2524,11 @@ impl Editor {
                     })
                     .collect::<Vec<_>>()
             });
-            // (a server that answers within the grace never shows text matches — no flash of a list)
+            // (a server that answers within the grace never shows text matches — no flash of a list, even
+            // while its answer's lines are still being read)
             std::thread::sleep(grace.saturating_sub(asked.elapsed()));
             move |ed: &mut Editor| {
-                if ed.lsp.refs.generation != generation || ed.lsp.refs.shown.is_some() || ed.picker.is_some()
-                {
+                if ed.lsp.refs.generation != generation || ed.lsp.refs.answered || ed.picker.is_some() {
                     return;
                 }
                 let items = match found {
@@ -2751,6 +2759,7 @@ impl Editor {
             .filter(|(p, _)| found.iter().any(|f| f.0 == *p))
             .collect();
         let generation = self.lsp.refs.generation;
+        self.lsp.refs.answered |= goto == Goto::References;
         self.events.jobs().spawn(move || {
             let places = read_places(found, &open);
             move |ed: &mut Editor| {
@@ -3104,9 +3113,30 @@ mod tests {
         (ed, file, log)
     }
 
+    /// What the stand-in server was sent, after a fixed while for the writer thread — only for checking
+    /// something was NOT sent (a slow runner only makes that easier). For what was, `sent_until`.
     fn sent(log: &PathBuf) -> String {
         std::thread::sleep(Duration::from_millis(150)); // writer thread
         std::fs::read_to_string(log).unwrap_or_default()
+    }
+
+    /// What it was sent, once every piece of `want` is in it — waited for, not a fixed while: the writer
+    /// thread and the stand-in's `cat` can take longer on a slow runner. After 10 s, what's there (the
+    /// assertion after says what's missing).
+    fn sent_until(log: &PathBuf, want: &[&str]) -> String {
+        let end = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let out = std::fs::read_to_string(log).unwrap_or_default();
+            if want.iter().all(|w| out.contains(w)) || std::time::Instant::now() >= end {
+                return out;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Whether it was sent `want` (waited for, as `sent_until`).
+    fn sent_has(log: &PathBuf, want: &str) -> bool {
+        sent_until(log, &[want]).contains(want)
     }
 
     fn ready(ed: &mut Editor) -> ClientId {
@@ -3224,12 +3254,12 @@ mod tests {
         ed.open(&dir.join("Cargo.toml")).unwrap();
         let toml = ed.doc().lsp.client.expect("toml's server");
         assert_ne!(rust, toml);
-        let out = sent(&rust_log);
+        let out = sent_until(&rust_log, &["initializationOptions"]);
         assert!(
             out.contains(r#""initializationOptions":{"files":{"exclude":[".claude/worktrees"]}}"#),
             "{out}"
         );
-        assert!(sent(&toml_log).contains(r#""initializationOptions":null"#), "others get none");
+        assert!(sent_has(&toml_log, r#""initializationOptions":null"#), "others get none");
         let pid = ed.client(toml).and_then(Client::pid).expect("its process");
         // Cargo.toml closed, main.rs still open in the same root: toml's server waits the long wait
         let id = ed.doc().id;
@@ -3324,10 +3354,10 @@ mod tests {
         let mut ed = Editor::new(config);
         ed.open(&dir.join("a.py")).unwrap();
         let cid = ready(&mut ed);
-        assert!(sent(&log).contains(r#""initializationOptions":null"#));
+        assert!(sent_has(&log, r#""initializationOptions":null"#));
         let items = json!([{ "section": "python.analysis" }, { "section": "python.pythonPath" }, {}]);
         ed.on_lsp_message(cid, json!({ "jsonrpc": "2.0", "id": 7, "method": "workspace/configuration", "params": { "items": items } }));
-        let out = sent(&log);
+        let out = sent_until(&log, &[r#""id":7"#]);
         let reply =
             out.lines().find(|l| l.contains(r#""id":7"#)).unwrap_or_else(|| panic!("no reply: {out}"));
         let reply: Value = serde_json::from_str(&reply[reply.find('{').unwrap()..]).unwrap();
@@ -3352,16 +3382,13 @@ mod tests {
         assert!(!sent(&log).contains("didChange"));
         ready(&mut ed);
         assert_eq!(ed.lsp.clients[0].encoding, Encoding::Utf8);
-        let out = sent(&log);
+        let change =
+            r#""range":{"end":{"character":18,"line":1},"start":{"character":18,"line":1}},"text":"x""#;
+        let out = sent_until(&log, &["\"method\":\"initialize\"", "textDocument/didOpen", change]);
         assert!(out.contains("\"method\":\"initialize\""));
         assert!(out.contains("textDocument/didOpen") && out.contains(&lsp::uri(&file)));
         // `gl` = line-end char (';'), x before it: line 1, byte col = "    let 타래 = 1" = 4+4+6+1+1+1+1 = 18
-        assert!(
-            out.contains(
-                r#""range":{"end":{"character":18,"line":1},"start":{"character":18,"line":1}},"text":"x""#
-            ),
-            "{out}"
-        );
+        assert!(out.contains(change), "{out}");
         std::fs::remove_dir_all(file.parent().unwrap()).ok();
     }
 
@@ -3652,7 +3679,7 @@ mod tests {
         let edit = |line: u64, from: u64, to: u64, text: &str| json!({ "range": { "start": { "line": line, "character": from }, "end": { "line": line, "character": to } }, "newText": text });
         // Code action: list → pick in picker → apply edit, one undo reverts it
         feed(&mut ed, "j8l<space>a");
-        assert!(sent(&log).contains("textDocument/codeAction"));
+        assert!(sent_has(&log, "textDocument/codeAction"));
         let id = pending_of(&ed, Kind::CodeAction { list: 0 });
         let actions = json!([
             { "title": "Rename to _x", "kind": "quickfix", "edit": { "changes": { uri.clone(): [edit(1, 8, 9, "_x")] } } },
@@ -3694,11 +3721,7 @@ mod tests {
         // Server-initiated edit (workspace/applyEdit) → apply and reply applied: true
         ed.on_lsp_message(cid, json!({ "id": 77, "method": "workspace/applyEdit", "params": { "edit": { "changes": { uri: [edit(0, 3, 7, "start")] } } } }));
         assert!(ed.doc().text.to_string().starts_with("fn start()"));
-        assert!(
-            sent(&log).contains(r#""id":77,"jsonrpc":"2.0","result":{"applied":true}"#),
-            "{}",
-            sent(&log)
-        );
+        assert!(sent_has(&log, r#""id":77,"jsonrpc":"2.0","result":{"applied":true}"#), "{}", sent(&log));
         std::fs::remove_dir_all(file.parent().unwrap()).ok();
     }
 
@@ -3726,7 +3749,7 @@ mod tests {
         ]);
         ed.on_lsp_message(cid, json!({ "id": id, "result": actions }));
         assert!(matches!(ed.action_preview(0), Some(ActionPreview::Working)));
-        assert!(sent(&log).contains("codeAction/resolve"));
+        assert!(sent_has(&log, "codeAction/resolve"));
         let rid = pending_of(&ed, Kind::ResolvePreview { list: 0, index: 0 });
         let resolved = json!({ "title": "Rename to _x", "edit": { "changes": { uri.clone(): [
             { "range": { "start": { "line": 1, "character": 8 }, "end": { "line": 1, "character": 9 } }, "newText": "_x" }
@@ -3800,7 +3823,7 @@ mod tests {
         ed.on_lsp_message(cid, json!({ "id": 0, "result": { "capabilities": caps } }));
         // Ask at '.' (trigger), and filter with chars typed before the response arrives
         feed(&mut ed, "jjAv.pu");
-        assert!(sent(&log).contains(r#""triggerCharacter":".""#), "{}", sent(&log));
+        assert!(sent_has(&log, r#""triggerCharacter":".""#), "{}", sent(&log));
         let id = pending_of(&ed, Kind::Completion);
         let items = json!({ "isIncomplete": false, "items": [
             { "label": "push", "kind": 2, "insertTextFormat": 2, "detail": "fn(&mut self, value: T)", "textEdit": {
@@ -3911,7 +3934,7 @@ mod tests {
         ed.on_lsp_message(cid, json!({ "id": 0, "result": { "capabilities": {} } }));
         assert_eq!(ed.lsp.clients[0].encoding, Encoding::Utf16);
         feed(&mut ed, "i타<esc>");
-        let out = sent(&log);
+        let out = sent_until(&log, &["contentChanges"]);
         assert!(out.contains(r#""contentChanges":[{"range""#), "incremental, not full sync: {out}");
         std::fs::remove_dir_all(file.parent().unwrap()).ok();
     }
@@ -3937,7 +3960,7 @@ mod tests {
         ed.on_lsp_message(cid, json!({ "id": 0, "result": { "capabilities": caps } }));
         ed.viewport = (10, 80);
         ed.inlay_request();
-        assert!(sent(&log).contains("textDocument/inlayHint"));
+        assert!(sent_has(&log, "textDocument/inlayHint"));
         assert!(!ed.inlay_stale(), "no re-ask while in flight");
         let hints = json!([
             { "position": { "line": 1, "character": 9 }, "label": ": i32", "kind": 1 },
@@ -3989,7 +4012,7 @@ mod tests {
         feed(&mut ed, "jAadd");
         assert!(ed.lsp.pending.values().all(|p| p.kind != Kind::SignatureHelp), "no ask before a trigger");
         feed(&mut ed, "(");
-        assert!(sent(&log).contains(r#""triggerCharacter":"(""#));
+        assert!(sent_has(&log, r#""triggerCharacter":"(""#));
         ed.on_lsp_message(cid, json!({ "id": pending_of(&ed, Kind::SignatureHelp), "result": help(0) }));
         assert_eq!(ed.signature.as_ref().and_then(|s| s.active), Some((7, 13)));
         // While shown, re-ask on every edit. Typing again (",") while in flight → stale reply: drop, re-ask
@@ -4028,7 +4051,7 @@ mod tests {
         assert!(ed.status.as_ref().is_some_and(|(m, _)| m.contains("declarations")), "{:?}", ed.status);
         // gi: several → picker titled after the kind
         feed(&mut ed, "gi");
-        assert!(sent(&log).contains(r#""method":"textDocument/implementation""#));
+        assert!(sent_has(&log, r#""method":"textDocument/implementation""#));
         let at = |line: u64| json!({ "uri": lsp::uri(&file), "range": { "start": { "line": line, "character": 0 }, "end": { "line": line, "character": 1 } } });
         let id = pending_of(&ed, Kind::Goto(Goto::Implementation));
         ed.on_lsp_message(cid, json!({ "id": id, "result": [at(1), at(2)] }));
@@ -4037,7 +4060,7 @@ mod tests {
         feed(&mut ed, "<esc>");
         // gy: one → straight there, and C-o comes back
         feed(&mut ed, "gy");
-        assert!(sent(&log).contains(r#""method":"textDocument/typeDefinition""#));
+        assert!(sent_has(&log, r#""method":"textDocument/typeDefinition""#));
         let id = pending_of(&ed, Kind::Goto(Goto::TypeDefinition));
         ed.on_lsp_message(cid, json!({ "id": id, "result": at(1) }));
         assert_eq!(ed.doc().selection().primary(), Range::point(11));
@@ -4064,7 +4087,7 @@ mod tests {
         ed.doc_mut().set_selection(Selection::point(9));
         feed(&mut ed, "gr");
         assert_eq!(ed.lsp.refs.name, "a");
-        let out = sent(&log);
+        let out = sent_until(&log, &["textDocument/references", "textDocument/definition"]);
         assert!(out.contains("textDocument/references") && out.contains("textDocument/definition"), "{out}");
         let at = |path: &PathBuf, line: u64, col: u64| {
             json!({ "uri": lsp::uri(path), "range": {
@@ -4273,6 +4296,37 @@ mod tests {
         std::fs::remove_dir_all(file.parent().unwrap()).ok();
     }
 
+    /// N3: the grace is about the server's answer arriving, not its list being up — an answer in time whose
+    /// lines are still being read (a big list, a slow disk) doesn't let the text matches flash up first.
+    /// (The text matches' result is taken off the queue before the answer and applied after it, while the
+    /// list's lines are unread: no clock involved.)
+    #[test]
+    fn an_answer_in_time_holds_the_text_matches_while_its_lines_are_read() {
+        let (mut ed, file, _log) = setup("refs-reading", "fn a() {}\nfn b() { a() }\n");
+        let cid = ready(&mut ed);
+        let progress = json!({ "method": "$/progress", "params": { "token": "t",
+            "value": { "kind": "begin", "title": "cargo check" } } });
+        ed.on_lsp_message(cid, progress);
+        ed.lsp.text_grace = Some(Duration::ZERO);
+        ed.doc_mut().set_selection(Selection::point(3));
+        feed(&mut ed, "gr");
+        // The text matches' result, held — the only job `g r` started
+        let held = ed.events.recv_timeout(Duration::from_secs(5)).expect("the text search's result");
+        let at = |line: u64, col: u64| {
+            json!({ "uri": lsp::uri(&file), "range": {
+            "start": { "line": line, "character": col }, "end": { "line": line, "character": col + 1 } } })
+        };
+        let id = pending_of(&ed, Kind::Goto(Goto::References));
+        ed.on_lsp_message(cid, json!({ "id": id, "result": [at(0, 3), at(1, 9)] }));
+        assert!(ed.lsp.refs.shown.is_none(), "the list's lines are still being read");
+        ed.handle_event(held);
+        assert!(ed.picker.is_none(), "no text matches: the answer is in");
+        assert!(ed.lsp.refs.texts.is_none());
+        settle_for(&mut ed, 5, |ed| ed.picker.is_some());
+        assert_eq!(ed.picker.as_ref().map(|p| p.title.as_str()), Some("references"));
+        std::fs::remove_dir_all(file.parent().unwrap()).ok();
+    }
+
     /// Claude's `references` call `id`'s answer, once it's given (`tools::ANSWERED`).
     fn tool_answer(id: u64) -> Option<Result<String, String>> {
         crate::tools::ANSWERED
@@ -4309,7 +4363,7 @@ mod tests {
         settle_for(&mut ed, 5, |ed| ed.lsp.pending.values().any(|p| matches!(p.kind, Kind::ToolRefs { .. })));
         assert_eq!(ed.doc().path.as_deref(), Some(file.as_path()), "the user's file stays in view");
         assert!(ed.docs.iter().any(|d| d.path.as_deref() == Some(other.as_path())), "opened aside");
-        let out = sent(&log);
+        let out = sent_until(&log, &["textDocument/references"]);
         let asked = out.lines().find(|l| l.contains("textDocument/references")).expect("asked");
         assert!(
             asked.contains(r#""position":{"character":7,"line":3}"#) && asked.contains("other.rs"),
@@ -4371,7 +4425,8 @@ mod tests {
         settle_for(&mut ed, 5, |_| tool_answer(2).is_some());
         let t = tool_answer(2).unwrap().unwrap();
         assert!(t.contains("fake is still loading (Indexing) and found none yet, so these are"), "{t}");
-        // Silent: the text matches after the wait
+        // Silent: the text matches after the wait (a short one — the rest of the test answers, so waits long)
+        ed.lsp.refs_wait = Some(Duration::from_millis(300));
         let t = ask_tool(&mut ed, 3, args).unwrap();
         assert!(t.contains("fake didn't answer within 300ms, so these are"), "{t}");
         assert!(ed.lsp.tool_asks.is_empty());
@@ -4407,7 +4462,7 @@ mod tests {
         settle_for(&mut ed, 5, |ed| {
             ed.lsp.pending.values().any(|p| matches!(p.kind, Kind::ToolSymbols { .. }))
         });
-        assert!(sent(&log).contains("textDocument/documentSymbol"));
+        assert!(sent_has(&log, "textDocument/documentSymbol"));
         let range = |a: u64, b: u64| json!({ "start": { "line": a, "character": 0 }, "end": { "line": b, "character": 1 } });
         let answer = json!([{ "name": "S", "kind": 23, "range": range(0, 0), "selectionRange": range(0, 0) },
             { "name": "impl S", "kind": 19, "range": range(1, 5), "selectionRange": range(1, 1),
@@ -4482,7 +4537,7 @@ mod tests {
         )
         .unwrap();
         settle_for(&mut ed, 5, |ed| ed.lsp.pending.values().any(|p| matches!(p.kind, Kind::ToolGoto { .. })));
-        let out = sent(&log);
+        let out = sent_until(&log, &["textDocument/definition"]);
         let asked = out.lines().find(|l| l.contains("textDocument/definition")).expect("asked");
         assert!(asked.contains(r#""position":{"character":9,"line":1}"#), "{asked}");
         feed(&mut ed, "j"); // (the user moves meanwhile: still answered)
@@ -4502,7 +4557,7 @@ mod tests {
         )
         .unwrap();
         settle_for(&mut ed, 5, |ed| ed.lsp.pending.values().any(|p| matches!(p.kind, Kind::ToolGoto { .. })));
-        assert!(sent(&log).contains("textDocument/implementation"));
+        assert!(sent_has(&log, "textDocument/implementation"));
         let id = pending_of(&ed, Kind::ToolGoto { ask: 0, goto: Goto::Definition });
         ed.on_lsp_message(cid, json!({ "id": id, "result": [loc(&file, 3, 0)] }));
         settle_for(&mut ed, 5, |_| tool_answer(2).is_some());
@@ -4512,7 +4567,7 @@ mod tests {
         );
         // By name: all symbols asked; the exact ones, S's first, each with what it is
         crate::nav::definition(&mut ed, crate::tools::Call::test(3), &json!({"symbol": "S::a"})).unwrap();
-        let asked = sent(&log);
+        let asked = sent_until(&log, &["workspace/symbol"]);
         let asked = asked.lines().find(|l| l.contains("workspace/symbol")).expect("asked by name");
         assert!(
             asked.contains(r#""query":"a""#) && asked.contains(r#""searchKind":"allSymbols""#),
@@ -4595,10 +4650,12 @@ mod tests {
         let t = tool_answer(4).unwrap().unwrap();
         assert!(t.contains("fake is still loading (Indexing) and found none yet"), "{t}");
         assert!(t.contains("ask again in a moment"), "{t}");
-        // Silent: given up on after the wait
+        // Silent: given up on after the wait (a short one — what's asked after this is answered)
+        ed.lsp.refs_wait = Some(Duration::from_millis(300));
         let t = tool(&mut ed, 5, def, json!({"path": "main.rs", "symbol": "a"})).unwrap();
         assert!(t.contains("fake didn't answer within 300ms"), "{t}");
         assert!(ed.lsp.tool_defs.is_empty());
+        ed.lsp.refs_wait = None;
         // Idle, and nothing there: said, not to be asked again
         ed.on_lsp_message(
             cid,
@@ -4655,7 +4712,7 @@ mod tests {
             json!({"path": "main.rs", "line": 2, "column": 10}),
             md("```rust\nfn a()\n```  \n\n\n\ndocs"),
         );
-        let asked = sent(&log);
+        let asked = sent_until(&log, &["textDocument/hover"]);
         let asked = asked.lines().find(|l| l.contains("textDocument/hover")).expect("asked");
         assert!(asked.contains(r#""position":{"character":9,"line":1}"#), "{asked}");
         assert_eq!(t.unwrap(), "`a` at main.rs:2 (fake):\n```rust\nfn a()\n```\n\ndocs");
@@ -4752,7 +4809,7 @@ mod tests {
         answered(&mut ed, 3, prepare.clone(), Value::Null);
         let e = tool_answer(3).unwrap().unwrap_err();
         assert!(e.starts_with("fake refused to rename `a` at main.rs:1: nothing it can rename there"), "{e}");
-        let asked = sent(&log);
+        let asked = sent_until(&log, &["textDocument/prepareRename"]);
         let asked = asked.lines().find(|l| l.contains("textDocument/prepareRename")).expect("asked");
         assert!(asked.contains(r#""position":{"character":9,"line":0}"#), "{asked}");
         // Yes, then the rename — its edit names a file outside the project: refused whole
@@ -4783,7 +4840,7 @@ mod tests {
             e.contains("this change reaches 1 file outside the project") && e.contains("refused whole"),
             "{e}"
         );
-        assert!(sent(&log).contains(r#""newName":"alpha""#));
+        assert!(sent_has(&log, r#""newName":"alpha""#));
         // A rename that moves a file: refused, said what it would have done
         let moving = json!({ "documentChanges": [
             { "kind": "rename", "oldUri": lsp::uri(&other), "newUri": lsp::uri(&dir.join("alpha.rs")) } ] });
@@ -5138,7 +5195,7 @@ mod tests {
         };
         let two = json!([{ "range": { "start": { "line": 1, "character": 0 }, "end": { "line": 1, "character": 4 } }, "newText": "  " }]);
         feed(&mut ed, "ggA//<esc>:w<ret>");
-        assert!(sent(&log).contains(r#""method":"textDocument/formatting""#));
+        assert!(sent_has(&log, r#""method":"textDocument/formatting""#));
         assert_eq!(disk(&mut ed), "fn main() {\n    let x = 1;\n}\n", "not saved before the answer");
         ed.on_lsp_message(
             cid,

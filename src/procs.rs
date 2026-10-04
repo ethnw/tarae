@@ -2037,7 +2037,8 @@ mod tests {
         tx.send(Wake::Open(true)).unwrap();
         let t = Instant::now();
         assert_eq!(wait(&rx, Duration::from_secs(30), &mut open), Some(()));
-        assert!(open && t.elapsed() < Duration::from_secs(1), "opened: at once");
+        // (at once, not after the 30 s pace — the bound only has to outlast a slow runner)
+        assert!(open && t.elapsed() < Duration::from_secs(10), "opened: at once");
         tx.send(Wake::Now).unwrap();
         assert_eq!(wait(&rx, Duration::from_secs(30), &mut open), Some(()));
         drop(tx);

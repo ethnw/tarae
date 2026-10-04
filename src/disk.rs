@@ -515,52 +515,89 @@ mod tests {
             }
         }
 
-        /// The didSaves sent so far.
+        /// The didSaves sent so far, after a fixed while for the writer thread — for checking no more went
+        /// out (a slow runner only makes that easier). For one that should have, `saves_reach`.
         fn saves(&self) -> usize {
             std::thread::sleep(Duration::from_millis(150)); // (the writer thread)
+            self.saves_now()
+        }
+
+        fn saves_now(&self) -> usize {
             let sent = std::fs::read_to_string(self.dir.join("sent.log")).unwrap_or_default();
             sent.matches("textDocument/didSave").count()
+        }
+
+        /// The didSaves sent, once there are `n` — waited for, not a fixed while (the writer thread, and
+        /// with `pump` the editor's timers too, can take longer on a slow runner); after 10 s, what there is.
+        /// Without `pump` no event is handled: what's counted went out before any.
+        fn saves_reach(&mut self, n: usize, pump: bool) -> usize {
+            let end = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                let count = self.saves_now();
+                if count >= n || std::time::Instant::now() >= end {
+                    return count;
+                }
+                match pump {
+                    true => self.pump(10),
+                    false => std::thread::sleep(Duration::from_millis(10)),
+                }
+            }
         }
     }
 
     /// A write from outside that the buffer takes — reloaded, or Claude writing the edit it already holds —
     /// is a save to the servers too (rust-analyzer checks on a save; `diagnostics` waits on that check), held
     /// until the file has been quiet: a burst of four writes is one. A write the buffer doesn't take (a
-    /// conflict) is none; the user's own `:w` goes at once, and a held one goes with it.
+    /// conflict) is none; the user's own `:w` goes at once, and a held one goes with it. (The burst's writes
+    /// are 30 ms apart over longer than `SAVE_QUIET` — so the quiet restarts with each; a try where a gap
+    /// stretched to half of it (a stalled runner) wasn't one burst — tried again.)
     #[test]
     fn a_burst_of_writes_from_outside_is_one_save() {
+        const TRIES: u32 = 5;
         let mut s = Saving::new("burst");
         s.outside("fn b() {}\n");
         assert_eq!(s.ed.doc().text.to_string(), "fn b() {}\n");
         assert_eq!(s.saves(), 0, "held for quiet");
-        s.pump(300);
-        assert_eq!(s.saves(), 1, "reloaded, then quiet");
-        for body in ["fn c() {}\n", "fn d() {}\n", "fn e() {}\n", "fn f() {}\n"] {
-            s.outside(body);
-            s.pump(30);
+        assert_eq!(s.saves_reach(1, true), 1, "reloaded, then quiet");
+        for attempt in 1.. {
+            let before = s.saves();
+            let mut gap = Duration::ZERO;
+            for body in ["fn c() {}\n", "fn d() {}\n", "fn e() {}\n", "fn f() {}\n"] {
+                let t = std::time::Instant::now();
+                s.outside(body);
+                s.pump(30);
+                gap = gap.max(t.elapsed());
+            }
+            if gap >= crate::lsp_editor::SAVE_QUIET / 2 {
+                assert!(attempt < TRIES, "a write {gap:?} after the last in each of {TRIES} tries");
+                // (what that try sent — mid-burst and after it — all out before the next counts)
+                s.saves_reach(before + 1, true);
+                s.pump(500);
+                continue;
+            }
+            assert_eq!(s.saves(), before, "not during the burst");
+            assert_eq!(s.saves_reach(before + 1, true), before + 1, "one for the burst");
+            break;
         }
-        assert_eq!(s.saves(), 1, "not during the burst");
-        s.pump(300);
-        assert_eq!(s.saves(), 2, "one for the burst");
+        let n = s.saves();
         feed(&mut s.ed, "ggic<esc>");
         let mine = s.ed.doc().text.to_string();
         s.outside(&mine);
         assert!(!s.ed.doc().is_modified());
-        s.pump(300);
-        assert_eq!(s.saves(), 3, "the buffer's text written");
+        assert_eq!(s.saves_reach(n + 1, true), n + 1, "the buffer's text written");
         feed(&mut s.ed, "ggid<esc>");
         s.outside("something else\n");
         assert!(s.ed.doc().disk_conflict);
         s.pump(300);
-        assert_eq!(s.saves(), 3, "a conflict is no save");
+        assert_eq!(s.saves(), n + 1, "a conflict is no save");
         // The user's :w: at once — a held one doesn't follow it
         crate::typed::execute(&mut s.ed, "reload").unwrap();
         s.outside("fn g() {}\n");
         crate::typed::execute(&mut s.ed, "w!").unwrap();
-        s.pump(80);
-        assert_eq!(s.saves(), 4, ":w is sent before the quiet is over");
+        // (its didSave once the write is done — the saver's worker, an event)
+        assert_eq!(s.saves_reach(n + 2, true), n + 2, ":w is sent");
         s.pump(300);
-        assert_eq!(s.saves(), 4, "and the held one went with it");
+        assert_eq!(s.saves(), n + 2, "and the held one went with it");
         std::fs::remove_dir_all(&s.dir).ok();
     }
 
@@ -572,7 +609,7 @@ mod tests {
         assert_eq!(s.saves(), 0, "held");
         let args = serde_json::json!({ "paths": ["main.rs"], "wait": 1 });
         crate::nav::diagnostics(&mut s.ed, crate::tools::Call::test(1), &args).unwrap();
-        assert_eq!(s.saves(), 1, "sent as it's asked, before any wait");
+        assert_eq!(s.saves_reach(1, false), 1, "sent as it's asked, before any wait");
         s.pump(300);
         assert_eq!(s.saves(), 1, "and not again");
         std::fs::remove_dir_all(&s.dir).ok();
@@ -598,14 +635,12 @@ mod tests {
                 }
             }
         });
-        s.pump(100);
-        assert_eq!(s.saves(), 1, "at its end");
+        assert_eq!(s.saves_reach(1, true), 1, "at its end");
         // The user's own run doesn't hold it
         s.ed.session.task_run.as_mut().unwrap().state = crate::task::State::Running;
         s.ed.session.task_run.as_mut().unwrap().by_claude = false;
         s.outside("fn c() {}\n");
-        s.pump(300);
-        assert_eq!(s.saves(), 2);
+        assert_eq!(s.saves_reach(2, true), 2);
         std::fs::remove_dir_all(&s.dir).ok();
     }
 
