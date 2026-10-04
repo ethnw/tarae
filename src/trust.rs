@@ -215,7 +215,7 @@ impl crate::editor::Editor {
         // (what's decided: the settings, under the line naming the file)
         let o = crate::offer::Offer::new(
             TITLE.into(),
-            &question(&self.lane.root, p),
+            &question(&self.session.root, p),
             "",
             "Project settings".into(),
             what,

@@ -1,13 +1,14 @@
-//! Sessions: work beside the rest — a branch of its own in a checkout of its own (a git worktree), opened as
-//! a lane (`lane.rs`). `space W n` · `:session-new <name> [<base>]` makes one: the name is the branch, made
-//! from the front lane's HEAD (`C-b` in the prompt picks another base); a card says where its checkout goes
-//! and what it costs on disk before anything is made. `:session-end` removes one — at once when nothing
-//! would be lost (no changes, merged into its base), else a card says what would be. `:session-bring` moves
-//! its base up to it, fast-forward only. The lanes are kept per repository (`$state/lanes/<hash of its git
-//! folder>.json`) and come back at startup and after `:restart`.
+//! Sessions' checkouts: work beside the rest — a branch of its own in a checkout of its own (a git
+//! worktree), opened as a session (`session.rs`). `space W n` · `:session-new <name> [<base>]` makes one:
+//! the name is the branch, made from the front session's HEAD (`C-b` in the prompt picks another base); a
+//! card says where its checkout goes and what it costs on disk before anything is made. `:session-end`
+//! removes one — at once when nothing would be lost (no changes, merged into its base), else a card says
+//! what would be. `:session-bring` moves its base up to it, fast-forward only. The list (`space W`). The
+//! sessions are kept per repository (`$state/sessions/<hash of its git folder>.json`) and come back at
+//! startup and after `:restart`.
 //!
-//! Git runs on workers whose results land in the lane in front (`Queue::shared_jobs`) — never swapped into
-//! the lane they're about, which may be gone by then.
+//! Git runs on workers whose results land in the session in front (`Queue::shared_jobs`) — never swapped
+//! into the session they're about, which may be gone by then.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -15,7 +16,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::editor::Editor;
-use crate::event::LaneId;
+use crate::event::SessionId;
 use crate::gitmenu::git;
 use crate::gitpanel::{branch_name, commit_rows, current_branch, only_on, parse_log, top_of};
 
@@ -30,18 +31,18 @@ const CARGO_WAIT: Duration = Duration::from_secs(3);
 const FILES_SHOWN: usize = 6;
 
 #[derive(Default)]
-pub struct Sessions {
-    /// Where the lanes are kept (`$state/lanes`) — None in tests (they set a temp folder).
+pub struct SessionStore {
+    /// Where the sessions are kept (`$state/sessions`) — None in tests (they set a temp folder).
     pub dir: Option<PathBuf>,
-    /// The kept lanes are back (or there were none): from then on a change is written.
+    /// The kept sessions are back (or there were none): from then on a change is written.
     pub restored: bool,
-    /// A key was pressed since startup — lanes coming back then stay behind (the front is where you are).
+    /// A key was pressed since startup — sessions coming back then stay behind (the front is where you are).
     pub keyed: bool,
-    /// What git last said of each lane for the list (read when it opens — shown meanwhile).
-    pub facts: std::collections::HashMap<LaneId, Facts>,
+    /// What git last said of each session for the list (read when it opens — shown meanwhile).
+    pub facts: std::collections::HashMap<SessionId, Facts>,
 }
 
-/// A lane as it's kept: its checkout, name, branch and base (`Lane`'s).
+/// A session as it's kept: its checkout, name, branch and base (`Session`'s).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Kept {
     pub root: PathBuf,
@@ -51,7 +52,7 @@ pub struct Kept {
 }
 
 impl Kept {
-    pub fn of(l: &crate::lane::Lane) -> Kept {
+    pub fn of(l: &crate::session::Session) -> Kept {
         Kept { root: l.root.clone(), name: l.name.clone(), branch: l.branch.clone(), base: l.base.clone() }
     }
 
@@ -181,7 +182,7 @@ fn local_branch(dir: &Path, b: &str) -> Result<String, String> {
     sha(dir, &format!("refs/heads/{b}")).map_err(|_| format!("{b} isn't a branch here"))
 }
 
-/// The base a lane compares with: its own, else the branch of the checkout tarae started in.
+/// The base a session compares with: its own, else the branch of the checkout tarae started in.
 fn base_or_start(base: Option<String>, start: &Path) -> Result<String, String> {
     base.or_else(|| current_branch(start))
         .ok_or_else(|| "no base to compare with — the checkout tarae started in is on no branch".into())
@@ -628,7 +629,7 @@ fn bring(root: &Path, base: Option<String>, start: &Path, unsaved: &[PathBuf]) -
 
 // ── The list ─────────────────────────────────────────────────────────────────
 
-/// What git says of a lane for its row in the list.
+/// What git says of a session for its row in the list.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Facts {
     /// Commits past its base · its base's commits it hasn't (none for the checkout tarae started in).
@@ -650,14 +651,14 @@ fn facts(root: &Path, base: Option<String>, start: &Path) -> Option<Facts> {
     Some(Facts { ahead: n.next().unwrap_or(0), behind: n.next().unwrap_or(0), changed })
 }
 
-/// A lane as its row in the list says it.
+/// A session as its row in the list says it.
 pub struct Shown {
-    pub id: LaneId,
+    pub id: SessionId,
     pub name: String,
     /// The branch checked out there (said when it isn't the name).
     pub branch: Option<String>,
     pub facts: Option<Facts>,
-    pub doing: crate::lane::Doing,
+    pub doing: crate::session::Doing,
     pub front: bool,
     /// CPU % and memory of its processes, summed (none seen yet: None).
     pub usage: Option<(f32, u64)>,
@@ -667,10 +668,10 @@ pub struct Shown {
 /// tool call unanswered too long — `stuck? symbols 42s`), and the
 /// rest in columns — branch, `↑ahead ↓behind`, what's changed, what it's doing, CPU and memory — each column
 /// as wide as its widest and empty ones left out, so the hints (right-aligned) line up row under row.
-pub fn items(lanes: &[Shown]) -> Vec<crate::picker::Item> {
-    use crate::lane::Doing;
+pub fn items(sessions: &[Shown]) -> Vec<crate::picker::Item> {
+    use crate::session::Doing;
     use unicode_width::UnicodeWidthStr as _;
-    let cols: Vec<[String; 5]> = lanes
+    let cols: Vec<[String; 5]> = sessions
         .iter()
         .map(|l| {
             let branch = l.branch.clone().filter(|b| *b != l.name).unwrap_or_default();
@@ -696,7 +697,7 @@ pub fn items(lanes: &[Shown]) -> Vec<crate::picker::Item> {
     let widths: Vec<usize> = (0..5).map(|c| cols.iter().map(|r| r[c].width()).max().unwrap_or(0)).collect();
     // (counts right-aligned, words left)
     let right = [false, true, true, false, true];
-    lanes
+    sessions
         .iter()
         .zip(cols)
         .map(|(l, row)| {
@@ -717,7 +718,7 @@ pub fn items(lanes: &[Shown]) -> Vec<crate::picker::Item> {
             };
             crate::picker::Item {
                 label: l.name.clone(),
-                action: crate::picker::Action::Lane(l.id),
+                action: crate::picker::Action::Session(l.id),
                 hint: parts.join("  "),
                 glyph: Some(glyph),
             }
@@ -729,26 +730,41 @@ pub fn items(lanes: &[Shown]) -> Vec<crate::picker::Item> {
 
 static SAVING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// The lanes kept for a repository: theirs, which was in front, the save's number.
+/// The sessions kept for a repository: theirs, which was in front, the save's number.
 #[derive(Default)]
 pub struct Stored {
-    pub lanes: Vec<Kept>,
+    pub sessions: Vec<Kept>,
     pub front: Option<PathBuf>,
     pub seq: u64,
 }
 
+/// The folder they're kept in (in the state folder) · what earlier builds called it, and the list in a file
+/// and in `:restart`'s state — still read, so nothing kept is lost on upgrade.
+const DIR: &str = "sessions";
+const OLD_NAME: &str = "lanes";
+
 pub fn default_dir() -> Option<PathBuf> {
-    Some(crate::config::state_dir()?.join("lanes"))
+    Some(crate::config::state_dir()?.join(DIR))
 }
 
 pub fn load(dir: &Path, common: &Path) -> Stored {
-    let Ok(body) = std::fs::read_to_string(crate::chats::file(dir, common)) else { return Stored::default() };
-    let Ok(v) = serde_json::from_str::<Value>(&body) else { return Stored::default() };
+    let read = |d: &Path| std::fs::read_to_string(crate::chats::file(d, common)).ok();
+    // (one an earlier build kept, while this folder has none of its own)
+    let old = || read(&dir.with_file_name(OLD_NAME)).filter(|_| dir.ends_with(DIR));
+    let Some(v) = read(dir).or_else(old).and_then(|b| serde_json::from_str::<Value>(&b).ok()) else {
+        return Stored::default();
+    };
     Stored {
-        lanes: v["lanes"].as_array().into_iter().flatten().filter_map(Kept::from_json).collect(),
+        sessions: kept_list(&v),
         front: v["front"].as_str().map(PathBuf::from),
         seq: v["seq"].as_u64().unwrap_or(0),
     }
+}
+
+/// The kept sessions in `v` (a file's, `:restart`'s state) — under their old name if an earlier build wrote it.
+fn kept_list(v: &Value) -> Vec<Kept> {
+    let list = v.get("sessions").or_else(|| v.get(OLD_NAME));
+    list.and_then(Value::as_array).into_iter().flatten().filter_map(Kept::from_json).collect()
 }
 
 /// Written — unless what's there was taken later (on a worker).
@@ -757,58 +773,59 @@ fn save(dir: &Path, common: &Path, s: Stored) {
     if load(dir, common).seq > s.seq {
         return;
     }
-    let lanes: Vec<Value> = s.lanes.iter().map(Kept::json).collect();
-    let body = json!({ "repo": common, "seq": s.seq, "front": s.front, "lanes": lanes }).to_string();
+    let sessions: Vec<Value> = s.sessions.iter().map(Kept::json).collect();
+    let body = json!({ "repo": common, "seq": s.seq, "front": s.front, "sessions": sessions }).to_string();
     let _ = std::fs::create_dir_all(dir);
     let _ = crate::disk::write_atomic(&crate::chats::file(dir, common), |w| {
         std::io::Write::write_all(w, body.as_bytes())
     });
 }
 
-/// The kept lanes still there (their checkout's top where it was) · the ones gone.
-fn still_there(lanes: Vec<Kept>) -> (Vec<Kept>, Vec<Kept>) {
-    lanes.into_iter().partition(|k| k.root.is_dir() && top_of(&k.root).is_ok_and(|t| t == k.root))
+/// The kept sessions still there (their checkout's top where it was) · the ones gone.
+fn still_there(sessions: Vec<Kept>) -> (Vec<Kept>, Vec<Kept>) {
+    sessions.into_iter().partition(|k| k.root.is_dir() && top_of(&k.root).is_ok_and(|t| t == k.root))
 }
 
-/// The lanes for `:restart`'s state (`restart.rs`): theirs and which is in front.
+/// The sessions for `:restart`'s state (`restart.rs`): theirs and which is in front.
 pub fn snapshot(ed: &Editor) -> Value {
-    let lanes: Vec<Value> = ed.lanes_in_order().iter().map(|l| Kept::of(l).json()).collect();
-    json!({ "lanes": lanes, "front": ed.lane.root })
+    let sessions: Vec<Value> = ed.sessions_in_order().iter().map(|l| Kept::of(l).json()).collect();
+    json!({ "sessions": sessions, "front": ed.session.root })
 }
 
 /// Back from `:restart`'s state, the front one in front — before its files open.
 pub fn restore(ed: &mut Editor, v: &Value) {
-    let lanes: Vec<Kept> = v["lanes"].as_array().into_iter().flatten().filter_map(Kept::from_json).collect();
-    if lanes.is_empty() {
+    let sessions = kept_list(v);
+    if sessions.is_empty() {
         return;
     }
-    let (here, gone): (Vec<Kept>, Vec<Kept>) = lanes.into_iter().partition(|k| k.root.is_dir());
-    ed.lanes_back(here, gone, v["front"].as_str().map(PathBuf::from), true);
+    let (here, gone): (Vec<Kept>, Vec<Kept>) = sessions.into_iter().partition(|k| k.root.is_dir());
+    ed.sessions_back(here, gone, v["front"].as_str().map(PathBuf::from), true);
 }
 
 impl Editor {
-    /// Every lane, the first opened first.
-    pub fn lanes_in_order(&self) -> Vec<&crate::lane::Lane> {
-        let mut all: Vec<&crate::lane::Lane> = std::iter::once(&self.lane).chain(&self.lanes).collect();
+    /// Every session, the first opened first.
+    pub fn sessions_in_order(&self) -> Vec<&crate::session::Session> {
+        let mut all: Vec<&crate::session::Session> =
+            std::iter::once(&self.session).chain(&self.sessions).collect();
         all.sort_by_key(|l| l.id);
         all
     }
 
-    pub(crate) fn lane_by_id(&mut self, id: LaneId) -> Option<&mut crate::lane::Lane> {
-        std::iter::once(&mut self.lane).chain(&mut self.lanes).find(|l| l.id == id)
+    pub(crate) fn session_by_id(&mut self, id: SessionId) -> Option<&mut crate::session::Session> {
+        std::iter::once(&mut self.session).chain(&mut self.sessions).find(|l| l.id == id)
     }
 
-    /// The checkout tarae started in (lane 0's).
+    /// The checkout tarae started in (session 0's).
     fn start_root(&self) -> PathBuf {
-        self.lanes_in_order().first().map(|l| l.root.clone()).unwrap_or_default()
+        self.sessions_in_order().first().map(|l| l.root.clone()).unwrap_or_default()
     }
 
-    /// The lane `which` names (its number or name), else the one in front.
-    fn lane_named(&self, which: &str) -> Result<(LaneId, String), String> {
+    /// The session `which` names (its number or name), else the one in front.
+    fn session_named(&self, which: &str) -> Result<(SessionId, String), String> {
         let which = which.trim();
-        let all = self.lanes_in_order();
+        let all = self.sessions_in_order();
         let found = match which {
-            "" => Some(&self.lane),
+            "" => Some(&self.session),
             w => all.iter().copied().find(|l| l.name == w || l.id.to_string() == w),
         };
         found.map(|l| (l.id, l.name.clone())).ok_or_else(|| {
@@ -817,13 +834,15 @@ impl Editor {
         })
     }
 
-    /// The lanes as they are now, kept for this repository (written on a worker).
-    pub fn lanes_keep(&self) {
-        let Some(dir) = self.sessions.dir.clone().filter(|_| self.sessions.restored) else { return };
+    /// The sessions as they are now, kept for this repository (written on a worker).
+    pub fn sessions_keep(&self) {
+        let Some(dir) = self.session_store.dir.clone().filter(|_| self.session_store.restored) else {
+            return;
+        };
         let start = self.start_root();
         let s = Stored {
-            lanes: self.lanes_in_order().into_iter().map(Kept::of).collect(),
-            front: Some(self.lane.root.clone()),
+            sessions: self.sessions_in_order().into_iter().map(Kept::of).collect(),
+            front: Some(self.session.root.clone()),
             seq: crate::chats::seq(),
         };
         self.events.shared_jobs().spawn(move || {
@@ -834,54 +853,60 @@ impl Editor {
         });
     }
 
-    /// At startup: this repository's kept lanes come back behind (read on a worker); the one that was in
+    /// At startup: this repository's kept sessions come back behind (read on a worker); the one that was in
     /// front comes to the front too, unless a key was pressed meanwhile. Ones whose checkout is gone are
     /// dropped, said once.
-    pub fn lanes_restore(&mut self) {
-        let Some(dir) = self.sessions.dir.clone() else {
-            self.sessions.restored = true;
+    pub fn sessions_restore(&mut self) {
+        let Some(dir) = self.session_store.dir.clone() else {
+            self.session_store.restored = true;
             return;
         };
         let start = self.start_root();
         self.events.shared_jobs().spawn(move || {
             let found = common_dir(&start).ok().map(|common| {
                 let s = load(&dir, &common);
-                let (here, gone) = still_there(s.lanes);
+                let (here, gone) = still_there(s.sessions);
                 (here, gone, s.front)
             });
             move |ed: &mut Editor| match found {
                 Some((here, gone, front)) => {
-                    let take = !ed.sessions.keyed;
-                    ed.lanes_back(here, gone, front, take);
+                    let take = !ed.session_store.keyed;
+                    ed.sessions_back(here, gone, front, take);
                 }
-                None => ed.sessions.restored = true,
+                None => ed.session_store.restored = true,
             }
         });
     }
 
-    /// Kept lanes back: lane 0's name and base onto it, the others behind (not twice); `front` in front
+    /// Kept sessions back: session 0's name and base onto it, the others behind (not twice); `front` in front
     /// when `take_front`; the gone ones said, and the list written again without them.
-    pub fn lanes_back(&mut self, here: Vec<Kept>, gone: Vec<Kept>, front: Option<PathBuf>, take_front: bool) {
+    pub fn sessions_back(
+        &mut self,
+        here: Vec<Kept>,
+        gone: Vec<Kept>,
+        front: Option<PathBuf>,
+        take_front: bool,
+    ) {
         let start = self.start_root();
         let mut changed = !gone.is_empty();
         for k in here {
-            let id = match std::iter::once(&self.lane).chain(&self.lanes).find(|l| l.root == k.root) {
+            let id = match std::iter::once(&self.session).chain(&self.sessions).find(|l| l.root == k.root) {
                 Some(l) => l.id,
                 None => {
                     changed = true;
-                    self.lane_add(k.root.clone())
+                    self.session_add(k.root.clone())
                 }
             };
-            if let Some(l) = self.lane_by_id(id) {
+            if let Some(l) = self.session_by_id(id) {
                 (l.name, l.branch, l.base) = (k.name, k.branch, k.base);
             }
         }
-        self.sessions.restored = true;
+        self.session_store.restored = true;
         if take_front
-            && let Some(f) = front.filter(|f| *f != self.lane.root && *f != start)
-            && let Some(id) = self.lanes.iter().find(|l| l.root == f).map(|l| l.id)
+            && let Some(f) = front.filter(|f| *f != self.session.root && *f != start)
+            && let Some(id) = self.sessions.iter().find(|l| l.root == f).map(|l| l.id)
         {
-            self.lane_switch(id);
+            self.session_switch(id);
         }
         if !gone.is_empty() {
             let names: Vec<&str> = gone.iter().map(|k| k.name.as_str()).collect();
@@ -892,15 +917,15 @@ impl Editor {
             ));
         }
         if changed {
-            self.lanes_keep();
+            self.sessions_keep();
         }
     }
 
     // ── Making ───────────────────────────────────────────────────────────────
 
-    /// `space W n` — the name of a new session, made from the front lane's HEAD (said; `C-b` another base).
+    /// `space W n` — the name of a new session, made from the front session's HEAD (said; `C-b` another base).
     pub fn session_prompt(&mut self) {
-        let base = self.lane.git_branch.clone().unwrap_or_else(|| "HEAD".into());
+        let base = self.session.git_branch.clone().unwrap_or_else(|| "HEAD".into());
         self.open_prompt(crate::editor::PromptKind::Session, "");
         if let Some(p) = self.prompt.as_mut() {
             p.label = Some(format!("new session from {base} (C-b another base):"));
@@ -914,7 +939,7 @@ impl Editor {
             self.session_prompt();
             return self.set_status("its name first — then C-b picks what it's made from");
         }
-        let root = self.lane.root.clone();
+        let root = self.session.root.clone();
         let picker = crate::picker::Picker::new(format!("{name} from"), Vec::new(), false).without_preview();
         self.open_picker(
             picker,
@@ -944,7 +969,7 @@ impl Editor {
         if name.is_empty() {
             return self.set_error("usage: :session-new <name> [<base>] — the name is its branch");
         }
-        let (root, base) = (self.lane.root.clone(), base.map(str::to_string));
+        let (root, base) = (self.session.root.clone(), base.map(str::to_string));
         let setting = self.config.session_worktrees.clone();
         self.set_step("session", format!("Looking at what {name} would take…"));
         self.events.shared_jobs().spawn(move || {
@@ -959,21 +984,21 @@ impl Editor {
         });
     }
 
-    /// `y` on the create card: the worktree made (a worker), then its lane in front, its chat open.
+    /// `y` on the create card: the worktree made (a worker), then its session in front, its chat open.
     pub fn session_make(&mut self, id: u64, m: Making) {
         self.events.shared_jobs().spawn(move || {
             let made = make(&m);
             move |ed: &mut Editor| match made {
                 Ok(root) => {
                     ed.offer_finished(id, Ok(()));
-                    let lane = ed.lane_add(root);
-                    if let Some(l) = ed.lane_by_id(lane) {
+                    let session = ed.session_add(root);
+                    if let Some(l) = ed.session_by_id(session) {
                         (l.name, l.branch, l.base) =
                             (m.branch.clone(), Some(m.branch.clone()), Some(m.base.clone()));
                     }
-                    ed.lane_switch(lane);
+                    ed.session_switch(session);
                     crate::chat::open(ed);
-                    if let Some(c) = ed.lane.chat.as_mut() {
+                    if let Some(c) = ed.session.chat.as_mut() {
                         c.focused = true;
                     }
                     ed.set_success(format!("Session {} — from {}", m.branch, m.base_said()));
@@ -989,13 +1014,14 @@ impl Editor {
     /// kept), else the card. Never the checkout tarae started in; not while files of it are unsaved or its
     /// Claude is answering.
     pub fn session_end(&mut self, which: &str) -> Result<(), String> {
-        let (id, name) = self.lane_named(which)?;
+        let (id, name) = self.session_named(which)?;
         if id == 0 {
             return Err(format!("{name} is the checkout tarae started in — it stays"));
         }
-        let lane = std::iter::once(&self.lane).chain(&self.lanes).find(|l| l.id == id).expect("named");
-        let root = lane.root.clone();
-        if lane.chat.as_ref().is_some_and(crate::chat::Chat::busy) {
+        let session =
+            std::iter::once(&self.session).chain(&self.sessions).find(|l| l.id == id).expect("named");
+        let root = session.root.clone();
+        if session.chat.as_ref().is_some_and(crate::chat::Chat::busy) {
             return Err(format!("{name}'s Claude is answering — stop it (C-c) or let it finish first"));
         }
         let unsaved: Vec<String> = self
@@ -1007,7 +1033,7 @@ impl Editor {
         if !unsaved.is_empty() {
             return Err(format!("unsaved changes in {} — save or close them first", unsaved.join(", ")));
         }
-        let (base, start) = (lane.base.clone(), self.start_root());
+        let (base, start) = (session.base.clone(), self.start_root());
         self.set_step("session", format!("Looking at {name} before it ends…"));
         self.events.shared_jobs().spawn(move || {
             let found = ending(name.clone(), &root, base, &start);
@@ -1023,11 +1049,11 @@ impl Editor {
         Ok(())
     }
 
-    /// Its lane closes (what it ran stops), then its checkout is removed on a worker — and its branch too
+    /// Its session closes (what it ran stops), then its checkout is removed on a worker — and its branch too
     /// when `both`. `card`: the end card's id (it waves meanwhile, and says a failure). A failure opens the
-    /// lane again.
+    /// session again.
     pub fn session_remove(&mut self, e: Ending, both: bool, card: Option<u64>) {
-        let kept = self.lane_close(&e.root);
+        let kept = self.session_close(&e.root);
         if card.is_none() {
             self.set_step("session", format!("Ending {}…", e.name));
         }
@@ -1054,7 +1080,7 @@ impl Editor {
                     }
                     Err(why) => {
                         if let Some(k) = kept.filter(|k| k.root.is_dir()) {
-                            ed.lanes_back(vec![k], Vec::new(), None, false);
+                            ed.sessions_back(vec![k], Vec::new(), None, false);
                         }
                         match card {
                             Some(id) => ed.offer_finished(id, Err(why)),
@@ -1066,20 +1092,20 @@ impl Editor {
         });
     }
 
-    /// `c` on the end card: its changes go into a commit on its branch first — its lane to the front, all
+    /// `c` on the end card: its changes go into a commit on its branch first — its session to the front, all
     /// of them staged, the message buffer open with Claude's draft (read it, `:w` commits). Once the commit
     /// is in, the end is asked again (`Committing.then_end`); `:q` in the message keeps the session, its
     /// changes staged.
     pub fn session_commit_first(&mut self, e: Ending) {
         let Some(id) =
-            std::iter::once(&self.lane).chain(&self.lanes).find(|l| l.root == e.root).map(|l| l.id)
+            std::iter::once(&self.session).chain(&self.sessions).find(|l| l.root == e.root).map(|l| l.id)
         else {
             return self.set_error(format!("{} isn't open any more", e.name));
         };
-        self.lane_switch(id);
+        self.session_switch(id);
         self.set_step("session", format!("Staging {}'s changes…", e.name));
         let root = e.root.clone();
-        // (its lane's: the status and the message are that lane's, wherever you are when they land)
+        // (its session's: the status and the message are that session's, wherever you are when they land)
         self.events.jobs().spawn(move || {
             let read = git(&root, &["add", "--all"], None)
                 .and_then(|_| crate::gitpanel::status(&root).map(crate::gitpanel::Status::with_rows));
@@ -1087,8 +1113,8 @@ impl Editor {
                 ed.step_done("session");
                 match read {
                     Ok(st) => {
-                        ed.lane.git_status = Some(st);
-                        ed.lane.commit_then_end = true;
+                        ed.session.git_status = Some(st);
+                        ed.session.commit_then_end = true;
                         ed.git_commit_open(false, true);
                     }
                     Err(why) => ed.set_error(format!("commit {}: {why}", e.name)),
@@ -1097,43 +1123,43 @@ impl Editor {
         });
     }
 
-    /// Lane `id` closes: the one tarae started in comes to the front first if it was there; what it ran
+    /// Session `id` closes: the one tarae started in comes to the front first if it was there; what it ran
     /// stops with it (its Claude, terminal, tests and tasks are dropped), its files close (their servers stop
     /// once nothing of theirs is open). What it was, to open it again.
-    fn lane_close(&mut self, root: &Path) -> Option<Kept> {
+    fn session_close(&mut self, root: &Path) -> Option<Kept> {
         // (by its checkout: one opened again after a failed end has another id)
-        let id = std::iter::once(&self.lane).chain(&self.lanes).find(|l| l.root == root)?.id;
+        let id = std::iter::once(&self.session).chain(&self.sessions).find(|l| l.root == root)?.id;
         if id == 0 {
             return None;
         }
-        if self.lane.id == id {
-            self.lane_switch(0);
+        if self.session.id == id {
+            self.session_switch(0);
         }
-        let i = self.lanes.iter().position(|l| l.id == id)?;
-        let lane = self.lanes.remove(i);
-        let kept = Kept::of(&lane);
+        let i = self.sessions.iter().position(|l| l.id == id)?;
+        let session = self.sessions.remove(i);
+        let kept = Kept::of(&session);
         let shown_elsewhere = |ed: &Editor, d| {
-            std::iter::once(&ed.lane).chain(&ed.lanes).any(|l| l.views.iter().any(|v| v.doc == d))
+            std::iter::once(&ed.session).chain(&ed.sessions).any(|l| l.views.iter().any(|v| v.doc == d))
         };
         let gone: Vec<crate::document::DocId> = self
             .docs
             .iter()
             .filter(|d| match &d.path {
-                Some(p) => p.starts_with(&lane.root),
-                // (its blank scratch — not one another lane shows)
+                Some(p) => p.starts_with(&session.root),
+                // (its blank scratch — not one another session shows)
                 None => {
                     !d.is_modified()
-                        && lane.views.iter().any(|v| v.doc == d.id)
+                        && session.views.iter().any(|v| v.doc == d.id)
                         && !shown_elsewhere(self, d.id)
                 }
             })
             .map(|d| d.id)
             .collect();
-        drop(lane);
+        drop(session);
         for d in gone {
             self.close_doc(d);
         }
-        self.lanes_keep();
+        self.sessions_keep();
         Some(kept)
     }
 
@@ -1146,21 +1172,21 @@ impl Editor {
     pub fn session_list(&mut self) {
         let mut p = crate::picker::Picker::new("sessions", self.session_items(), false).without_preview();
         p.keys = true;
-        let front = self.lane.id;
-        p.select_where(|a| *a == crate::picker::Action::Lane(front));
+        let front = self.session.id;
+        p.select_where(|a| *a == crate::picker::Action::Session(front));
         self.open_picker(p, None);
         self.procs_wake(crate::procs::Wake::Now);
         let start = self.start_root();
-        let asks: Vec<(LaneId, PathBuf, Option<String>)> =
-            self.lanes_in_order().iter().map(|l| (l.id, l.root.clone(), l.base.clone())).collect();
+        let asks: Vec<(SessionId, PathBuf, Option<String>)> =
+            self.sessions_in_order().iter().map(|l| (l.id, l.root.clone(), l.base.clone())).collect();
         self.events.shared_jobs().spawn(move || {
-            let found: Vec<(LaneId, Option<Facts>)> =
+            let found: Vec<(SessionId, Option<Facts>)> =
                 asks.into_iter().map(|(id, root, base)| (id, facts(&root, base, &start))).collect();
             move |ed: &mut Editor| {
                 for (id, f) in found {
                     match f {
-                        Some(f) => ed.sessions.facts.insert(id, f),
-                        None => ed.sessions.facts.remove(&id),
+                        Some(f) => ed.session_store.facts.insert(id, f),
+                        None => ed.session_store.facts.remove(&id),
                     };
                 }
             }
@@ -1170,16 +1196,16 @@ impl Editor {
     /// The list's rows as things are now.
     fn session_items(&self) -> Vec<crate::picker::Item> {
         let shown: Vec<Shown> = self
-            .lanes_in_order()
+            .sessions_in_order()
             .into_iter()
             .map(|l| Shown {
                 id: l.id,
                 name: l.label().to_string(),
                 branch: l.git_branch.clone().or_else(|| l.branch.clone()),
-                facts: self.sessions.facts.get(&l.id).cloned(),
+                facts: self.session_store.facts.get(&l.id).cloned(),
                 doing: self.doing(l),
-                front: l.id == self.lane.id,
-                usage: crate::procs::summed(&self.procs.rows, &self.lane_pids(l)),
+                front: l.id == self.session.id,
+                usage: crate::procs::summed(&self.procs.rows, &self.session_pids(l)),
             })
             .collect();
         items(&shown)
@@ -1204,7 +1230,7 @@ impl Editor {
         use crate::picker::Action;
         let Some(p) = self.picker.as_mut() else { return };
         let here = match p.current().map(|i| &i.action) {
-            Some(Action::Lane(id)) => Some(*id),
+            Some(Action::Session(id)) => Some(*id),
             _ => None,
         };
         match c {
@@ -1212,9 +1238,9 @@ impl Editor {
             'k' => p.move_by(-1),
             '1'..='9' => {
                 let row = c as usize - '1' as usize;
-                if let Some(Action::Lane(id)) = p.items().get(row).map(|i| i.action.clone()) {
+                if let Some(Action::Session(id)) = p.items().get(row).map(|i| i.action.clone()) {
                     self.picker = None;
-                    self.lane_switch(id);
+                    self.session_switch(id);
                 }
             }
             'n' => {
@@ -1238,12 +1264,13 @@ impl Editor {
 
     /// `:session-bring [<n|name>]` — its base moved up to its branch, fast-forward only (a worker).
     pub fn session_bring(&mut self, which: &str) -> Result<(), String> {
-        let (id, name) = self.lane_named(which)?;
+        let (id, name) = self.session_named(which)?;
         if id == 0 {
             return Err(format!("{name} is the checkout tarae started in — bring a session into it instead"));
         }
-        let lane = std::iter::once(&self.lane).chain(&self.lanes).find(|l| l.id == id).expect("named");
-        let (root, base, start) = (lane.root.clone(), lane.base.clone(), self.start_root());
+        let session =
+            std::iter::once(&self.session).chain(&self.sessions).find(|l| l.id == id).expect("named");
+        let (root, base, start) = (session.root.clone(), session.base.clone(), self.start_root());
         let unsaved: Vec<PathBuf> =
             self.docs.iter().filter(|d| d.is_modified()).filter_map(|d| d.path.clone()).collect();
         self.set_step("session", format!("Bringing {name} in…"));
@@ -1312,8 +1339,8 @@ mod tests {
     /// An editor in `repo` (on main), sessions' checkouts under `dir/wt`, a chat that's a quiet stand-in.
     fn editor(repo: &Path, dir: &Path) -> Editor {
         let mut ed = Editor::new(Config::default());
-        (ed.lane.root, ed.lane.name) = (repo.to_path_buf(), "proj".into());
-        ed.lane.git_branch = Some("main".into());
+        (ed.session.root, ed.session.name) = (repo.to_path_buf(), "proj".into());
+        ed.session.git_branch = Some("main".into());
         ed.config.session_worktrees = dir.join("wt").display().to_string();
         ed.config.llm.command = "sh".into();
         ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
@@ -1341,7 +1368,7 @@ mod tests {
         }
     }
 
-    /// Everything said this session, newest last.
+    /// Everything said since the editor started, newest last.
     fn said(ed: &Editor) -> String {
         ed.messages.iter().map(|m| m.2.as_str()).collect::<Vec<_>>().join(" | ")
     }
@@ -1353,18 +1380,18 @@ mod tests {
     /// `:session-new name [base]` from the checkout tarae started in, its card answered `y` — the session
     /// in front (its chat's input left without the keys, so the next `:` reaches the editor).
     fn new_session(ed: &mut Editor, line: &str) -> PathBuf {
-        ed.lane_switch(0);
+        ed.session_switch(0);
         let cards = ed.offers.len();
         feed(ed, &format!(":session-new {line}<ret>"));
         settle_until(ed, |ed| ed.offers.len() > cards || says(ed, "new session:"));
         assert!(ed.offers.len() > cards, "{}", said(ed));
-        let lanes = ed.lanes.len();
+        let sessions = ed.sessions.len();
         ed.offer_accept();
-        settle_until(ed, |ed| ed.lanes.len() > lanes);
-        if let Some(c) = ed.lane.chat.as_mut() {
+        settle_until(ed, |ed| ed.sessions.len() > sessions);
+        if let Some(c) = ed.session.chat.as_mut() {
             c.focused = false;
         }
-        ed.lane.root.clone()
+        ed.session.root.clone()
     }
 
     fn end_card(ed: &Editor) -> Option<&Ending> {
@@ -1375,8 +1402,8 @@ mod tests {
     }
 
     /// `space W n`: the prompt says what it's made from; the card says where its checkout goes and what's
-    /// big and ignored here — and nothing is made before `y`. Then: its branch from main's tip, its lane in
-    /// front with the chat open and focused, its name and base kept on the lane. A name taken (here, a
+    /// big and ignored here — and nothing is made before `y`. Then: its branch from main's tip, its session in
+    /// front with the chat open and focused, its name and base kept on the session. A name taken (here, a
     /// branch checked out in another worktree) or not a branch name is refused.
     #[test]
     fn a_new_session_is_a_branch_in_its_own_checkout_after_its_card() {
@@ -1403,25 +1430,25 @@ mod tests {
         assert!(o.question.contains("Ignored here, so not copied:\n  21 MB  target/"), "{}", o.question);
         assert!(!has_branch(&repo, "fix-login") && !wt.exists(), "nothing made before y");
         ed.offer_accept();
-        settle_until(&mut ed, |ed| !ed.lanes.is_empty());
-        assert_eq!(ed.lane.root, std::fs::canonicalize(&wt).unwrap(), "its lane in front");
+        settle_until(&mut ed, |ed| !ed.sessions.is_empty());
+        assert_eq!(ed.session.root, std::fs::canonicalize(&wt).unwrap(), "its session in front");
         assert_eq!(git_in(&wt, &["symbolic-ref", "--short", "HEAD"]), "fix-login");
         assert_eq!(git_in(&repo, &["rev-parse", "fix-login"]), main);
         assert_eq!(
-            (ed.lane.name.as_str(), ed.lane.branch.as_deref(), ed.lane.base.as_deref()),
+            (ed.session.name.as_str(), ed.session.branch.as_deref(), ed.session.base.as_deref()),
             ("fix-login", Some("fix-login"), Some("main"))
         );
-        assert!(ed.lane.chat.as_ref().is_some_and(|c| c.focused), "its chat open, with the keys");
+        assert!(ed.session.chat.as_ref().is_some_and(|c| c.focused), "its chat open, with the keys");
         assert!(says(&ed, &format!("Session fix-login — from main ({})", &main[..7])), "{}", said(&ed));
         assert!(ed.offers.is_empty());
         // Taken names: a branch there is (checked out in the session's checkout), and one git refuses
-        ed.lane.chat.as_mut().unwrap().focused = false;
+        ed.session.chat.as_mut().unwrap().focused = false;
         feed(&mut ed, ":session-switch 0<ret>:session-new fix-login<ret>");
         settle_until(&mut ed, |ed| says(ed, "new session: there's a branch fix-login already"));
         assert!(says(&ed, "already, checked out in "), "says where: {}", said(&ed));
         feed(&mut ed, ":session-new a..b<ret>");
         settle_until(&mut ed, |ed| says(ed, "isn't a branch name"));
-        assert!(ed.offers.is_empty() && ed.lanes.len() == 1);
+        assert!(ed.offers.is_empty() && ed.sessions.len() == 1);
         drop(ed);
         git_in(&repo, &["worktree", "remove", "--force", wt.to_str().unwrap()]);
         std::fs::remove_dir_all(&dir).ok();
@@ -1480,7 +1507,7 @@ mod tests {
         assert!(toast.ends_with(" freed · branch done kept"), "{toast}");
         let mb: f64 = toast.split(" — ").nth(1).unwrap().split(' ').next().unwrap().parse().unwrap();
         assert!(mb >= 3.0, "target/'s 3 MB counted in what was freed: {toast}");
-        assert!((ed.lane.id, ed.lanes.len()) == (0, 0), "the start's lane in front, alone");
+        assert!((ed.session.id, ed.sessions.len()) == (0, 0), "the start's session in front, alone");
         assert!(
             !ed.docs.iter().any(|d| d.path.as_ref().is_some_and(|p| p.starts_with(&wt))),
             "its file closed"
@@ -1541,19 +1568,19 @@ mod tests {
         assert!(end_card(&ed).is_some() && !ed.offers[0].installing(), "still asking: {}", said(&ed));
         assert!(says(&ed, "its changes are in no commit — c commits them first, R removes them anyway"));
         feed(&mut ed, "n");
-        assert!(says(&ed, "Kept wip as it is") && wt.exists() && ed.lanes.len() == 1);
+        assert!(says(&ed, "Kept wip as it is") && wt.exists() && ed.sessions.len() == 1);
         // c: committed on wip (Claude's draft, read and accepted, `:w`), then asked again — with only
         // commits to lose now, y removes the checkout and keeps the branch
         let reply = json!({"type": "result", "result": "Add the notes"});
         ed.config.llm.args = vec!["-c".into(), format!("read -r line; printf '%s\\n' '{reply}'")];
-        ed.lane_switch(0);
+        ed.session_switch(0);
         feed(&mut ed, ":session-end wip<ret>");
         settle_until(&mut ed, |ed| end_card(ed).is_some());
         card_in_sight(&mut ed);
         feed(&mut ed, "c");
-        assert_eq!(ed.lane.root, wt, "to its lane");
-        settle_until(&mut ed, |ed| ed.lane.review.as_ref().is_some_and(|r| r.ready));
-        assert!(ed.lane.committing.as_ref().is_some_and(|c| c.then_end));
+        assert_eq!(ed.session.root, wt, "to its session");
+        settle_until(&mut ed, |ed| ed.session.review.as_ref().is_some_and(|r| r.ready));
+        assert!(ed.session.committing.as_ref().is_some_and(|c| c.then_end));
         feed(&mut ed, "a:w<ret>");
         settle_until(&mut ed, |ed| end_card(ed).is_some_and(|e| !e.dirty()));
         assert_eq!(git_in(&wt, &["log", "-1", "--format=%s"]), "Add the notes");
@@ -1649,22 +1676,22 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// The lanes are kept per repository: a new start brings them back behind, the one that was in front
+    /// The sessions are kept per repository: a new start brings them back behind, the one that was in front
     /// in front (no key pressed yet); a checkout removed outside tarae is dropped and said once. `:restart`'s
-    /// state carries them too, and its files open in the lane that was in front.
+    /// state carries them too, and its files open in the session that was in front.
     #[test]
     fn sessions_come_back_at_startup_and_after_a_restart() {
         let (repo, dir) = place("kept");
-        let store = dir.join("lanes");
+        let store = dir.join("sessions");
         let mut ed = editor(&repo, &dir);
-        (ed.sessions.dir, ed.sessions.restored) = (Some(store.clone()), true);
+        (ed.session_store.dir, ed.session_store.restored) = (Some(store.clone()), true);
         let one = new_session(&mut ed, "one");
         let two = new_session(&mut ed, "two");
         feed(&mut ed, ":session-switch 1<ret>");
         let common = common_dir(&repo).unwrap();
         let written = |n: usize, front: &Path| {
             let s = load(&store, &common);
-            s.lanes.len() == n && s.front.as_deref() == Some(front)
+            s.sessions.len() == n && s.front.as_deref() == Some(front)
         };
         let end = Instant::now() + Duration::from_secs(5);
         while !written(3, &one) {
@@ -1676,41 +1703,41 @@ mod tests {
         // A new start: back behind, `one` in front
         let start = |keyed: bool| {
             let mut ed = editor(&repo, &dir);
-            ed.sessions.dir = Some(store.clone());
-            ed.sessions.keyed = keyed;
-            ed.lanes_restore();
-            settle_until(&mut ed, |ed| ed.sessions.restored);
+            ed.session_store.dir = Some(store.clone());
+            ed.session_store.keyed = keyed;
+            ed.sessions_restore();
+            settle_until(&mut ed, |ed| ed.session_store.restored);
             ed
         };
         let ed = start(false);
-        assert_eq!(ed.lane.root, one, "the one in front");
+        assert_eq!(ed.session.root, one, "the one in front");
         let names: Vec<(&str, Option<&str>)> =
-            ed.lanes_in_order().iter().map(|l| (l.name.as_str(), l.base.as_deref())).collect();
+            ed.sessions_in_order().iter().map(|l| (l.name.as_str(), l.base.as_deref())).collect();
         assert_eq!(names, [("proj", None), ("one", Some("main")), ("two", Some("main"))]);
         drop(ed);
         let ed = start(true);
-        assert_eq!((ed.lane.id, ed.lanes.len()), (0, 2), "a key pressed: they stay behind");
+        assert_eq!((ed.session.id, ed.sessions.len()), (0, 2), "a key pressed: they stay behind");
         drop(ed);
-        // :restart: the lanes, and the files in the one in front
+        // :restart: the sessions, and the files in the one in front
         std::fs::write(one.join("b.txt"), "b\n").unwrap();
         let mut snapshot = snapshot;
         snapshot["docs"] = json!([{ "path": one.join("b.txt") }]);
         snapshot["current"] = json!(0);
         let mut ed = editor(&repo, &dir);
         crate::restart::restore(&mut ed, &snapshot);
-        assert_eq!(ed.lane.root, one);
-        assert_eq!(ed.doc().path.as_deref(), Some(one.join("b.txt").as_path()), "its file, in its lane");
-        assert_eq!(ed.lanes.len(), 2);
+        assert_eq!(ed.session.root, one);
+        assert_eq!(ed.doc().path.as_deref(), Some(one.join("b.txt").as_path()), "its file, in its session");
+        assert_eq!(ed.sessions.len(), 2);
         drop(ed);
         // Removed outside: dropped, said once
         git_in(&repo, &["worktree", "remove", "--force", two.to_str().unwrap()]);
         let ed = start(false);
-        assert_eq!(ed.lanes_in_order().len(), 2, "proj and one");
+        assert_eq!(ed.sessions_in_order().len(), 2, "proj and one");
         let told = |ed: &Editor| ed.messages.iter().filter(|m| m.2.contains("removed outside tarae")).count();
         assert_eq!(told(&ed), 1, "{}", said(&ed));
         assert!(says(&ed, "two — its checkout was removed outside tarae; dropped"));
         let end = Instant::now() + Duration::from_secs(5);
-        while load(&store, &common).lanes.len() != 2 {
+        while load(&store, &common).sessions.len() != 2 {
             assert!(Instant::now() < end, "kept without it");
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -1739,7 +1766,7 @@ mod tests {
     /// in the list, they line up row under row. A session's branch is its name, so it isn't said twice.
     #[test]
     fn the_list_lines_its_columns_up() {
-        use crate::lane::Doing;
+        use crate::session::Doing;
         let shown = |id, name: &str, branch: Option<&str>, f: Option<Facts>, doing, usage| Shown {
             id,
             name: name.into(),
@@ -1766,12 +1793,38 @@ mod tests {
         );
         let glyphs: Vec<&str> = rows.iter().map(|i| i.glyph.unwrap().0).collect();
         assert_eq!(glyphs, [" ", "●", "▲"]);
-        assert_eq!(rows[2].action, crate::picker::Action::Lane(2));
+        assert_eq!(rows[2].action, crate::picker::Action::Session(2));
     }
 
     #[test]
     fn sizes_say_when_counting_stopped() {
         assert_eq!(size_text((3 << 30, true)), "3.0 GB");
         assert_eq!(size_text((48 << 20, false)), "over 48 MB");
+    }
+
+    /// What earlier builds kept — `$state/lanes/<hash>.json`, its list under `"lanes"`, and `:restart`'s state
+    /// the same — still comes back; once this build has written its own file, that one is read.
+    #[test]
+    fn sessions_kept_by_earlier_builds_come_back() {
+        let state = std::env::temp_dir().join(format!("tarae-kept-old-{}", std::process::id()));
+        std::fs::remove_dir_all(&state).ok();
+        let (dir, common) = (state.join(DIR), Path::new("/repo/.git"));
+        let kept = |name: &str| json!({ "root": format!("/wt/{name}"), "name": name, "branch": name });
+        let old = json!({ "repo": common, "seq": 3, "front": "/wt/a", OLD_NAME: [kept("a")] });
+        std::fs::create_dir_all(state.join(OLD_NAME)).unwrap();
+        std::fs::write(crate::chats::file(&state.join(OLD_NAME), common), old.to_string()).unwrap();
+        let s = load(&dir, common);
+        assert_eq!(s.sessions.iter().map(|k| k.name.as_str()).collect::<Vec<_>>(), ["a"]);
+        assert_eq!((s.front.as_deref(), s.seq), (Some(Path::new("/wt/a")), 3));
+        save(
+            &dir,
+            common,
+            Stored { sessions: vec![Kept::from_json(&kept("b")).unwrap()], front: None, seq: 4 },
+        );
+        assert_eq!(load(&dir, common).sessions[0].name, "b", "its own file wins");
+        // (a folder not named as the state's isn't paired with an old one)
+        assert!(load(&state.join("elsewhere"), common).sessions.is_empty());
+        assert_eq!(kept_list(&json!({ OLD_NAME: [kept("c")] }))[0].name, "c", ":restart's state");
+        std::fs::remove_dir_all(&state).ok();
     }
 }

@@ -98,7 +98,7 @@ pub fn read_file(path: &Path) -> Result<Rope> {
 }
 
 /// An undo step: the text, selection and version as they were — no parse tree (#36). Snapshots used to keep
-/// theirs so an undo was colored at once, and that cost a session hundreds of MB: injected layers (every
+/// theirs so an undo was colored at once, and that cost an hour's work hundreds of MB: injected layers (every
 /// comment, every macro's token tree as Rust) are parsed anew and share nothing between versions, and even
 /// the main tree's reparse rebuilds the lists an edit sits in (a third of a 1,200-line file's nodes, every
 /// edit). An undo now edits the current tree into the restored text instead (`restore`), as typing does.

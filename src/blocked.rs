@@ -96,7 +96,7 @@ impl Editor {
             let seen = g?.watch()?.blocked().seen;
             (!seen.is_empty()).then_some(seen)
         };
-        let task = self.lane.task_run.as_ref().and_then(|r| {
+        let task = self.session.task_run.as_ref().and_then(|r| {
             Some((
                 r.started,
                 BlockedRun {
@@ -105,7 +105,7 @@ impl Editor {
                 },
             ))
         });
-        let test = self.lane.test_run.as_ref().and_then(|r| {
+        let test = self.session.test_run.as_ref().and_then(|r| {
             let job = Job::Tests(Box::new(r.target.clone()));
             Some((r.started, BlockedRun { job, denials: denials(r.guard.as_ref())? }))
         });
@@ -126,7 +126,7 @@ impl Editor {
             return self.set_status("the sandbox blocked nothing in that run — its panel says when it does");
         };
         let home = crate::allow::home().unwrap_or_else(|| PathBuf::from("/"));
-        let list = choices(&run.denials, &home, &self.lane.root, &path_dirs());
+        let list = choices(&run.denials, &home, &self.session.root, &path_dirs());
         use crate::picker::{Action, Item};
         let mut items: Vec<Item> = list
             .iter()
@@ -147,7 +147,7 @@ impl Editor {
             hint: run.label(),
             glyph: Some(("▲", "warning")),
         });
-        self.lane.blocked = Some((run, list));
+        self.session.blocked = Some((run, list));
         let p = crate::picker::Picker::new("what the sandbox blocked", items, false).without_preview();
         self.open_picker(p, None);
     }
@@ -155,7 +155,7 @@ impl Editor {
     /// `:sandbox-grant <n | outside>` (the list's rows) — its card.
     pub fn sandbox_grant(&mut self, arg: &str) -> Result<(), String> {
         let (run, list) =
-            self.lane.blocked.clone().ok_or("nothing blocked to act on — space m s on a run's panel")?;
+            self.session.blocked.clone().ok_or("nothing blocked to act on — space m s on a run's panel")?;
         let cmd = run.label();
         let run = Box::new(run);
         let card = match arg.trim() {

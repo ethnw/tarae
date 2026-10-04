@@ -39,7 +39,7 @@ pub const LIVE_CONFIG: &str = "\
 offer-grammars = false
 ";
 
-/// Variables a live run doesn't pass on from the shell it was started in: the running Claude Code session's
+/// Variables a live run doesn't pass on from the shell it was started in: the running Claude Code's
 /// (a nested claude would take them as its own), multiplexers', and ones that change what tarae shows.
 const LIVE_DROP: &[&str] = &["CLAUDE", "TMUX", "ZELLIJ", "TARAE_", "XDG_", "COLORFGBG", "TERM", "NO_COLOR"];
 
@@ -350,7 +350,7 @@ impl Term {
         // SAFETY: only async-signal-safe calls between fork and exec.
         unsafe {
             cmd.pre_exec(|| {
-                // New session + the pty as its controlling terminal: /dev/tty works, SIGWINCH arrives.
+                // `setsid` + the pty as its controlling terminal: /dev/tty works, SIGWINCH arrives.
                 cvt(libc::setsid())?;
                 cvt(libc::ioctl(0, libc::TIOCSCTTY as _, 0))?;
                 Ok(())

@@ -47,12 +47,12 @@ pub enum Action {
         hash: String,
         root: PathBuf,
     },
-    /// An earlier chat conversation (claude session `id`) kept in the `store` file — its rows are the preview.
+    /// An earlier chat conversation (claude's `id` for it) kept in the `store` file — its rows are the preview.
     Conversation {
         id: String,
         store: PathBuf,
     },
-    /// A notification of this session (`:messages`) — nothing to do; the list is for reading.
+    /// A notification since tarae started (`:messages`) — nothing to do; the list is for reading.
     Message,
     /// A local branch (`B` in the git tab): Enter switches to it, `C-r` renames, `C-x` deletes. `held` = where
     /// it's checked out when that's another worktree (as shown — switching there is refused).
@@ -60,8 +60,8 @@ pub enum Action {
         name: String,
         held: Option<String>,
     },
-    /// A session (`space W`): Enter brings its lane to the front, `d` ends it, `b` brings it into its base.
-    Lane(crate::event::LaneId),
+    /// A session (`space W`): Enter brings its session to the front, `d` ends it, `b` brings it into its base.
+    Session(crate::event::SessionId),
     /// An item of a plugin's pick (the prompt token it answers, the item's id).
     Plugin {
         token: u64,
@@ -966,7 +966,7 @@ impl Action {
             | Action::Conversation { .. }
             | Action::Message
             | Action::Branch { .. }
-            | Action::Lane(_)
+            | Action::Session(_)
             | Action::Plugin { .. }
             | Action::Code(_)
             | Action::Command(_)

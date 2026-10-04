@@ -2,7 +2,7 @@
 //! the plugin's `on-events`:
 //!
 //! - **Programs** (`spawn`): found on `PATH` (its absolute folders only), run with argv — no shell — in
-//!   your home folder, in a session of their own (stopping one stops what it started: `SIGTERM`, then
+//!   your home folder, in a process group of their own (`setsid` — stopping one stops what it started: `SIGTERM`, then
 //!   `SIGKILL` 2 s later). They get a plain environment: `PATH`, `HOME`, `USER`, the locale, `TERM`,
 //!   `TMPDIR`, and the variables the plugin may read — which it may also set for them (`AWS_PROFILE`). What one prints comes back a batch of lines at a
 //!   time, then its end with the last lines of stderr (all of stderr goes to the log).
@@ -220,7 +220,7 @@ impl Drop for Proc {
         let (pid, ended) = (self.pid, self.ended.clone());
         let _ = self.clock.at(Instant::now() + KILL_AFTER, move |_| {
             if !ended.load(Ordering::SeqCst) {
-                // SAFETY: only signals the process group of a program started in a session of its own,
+                // SAFETY: only signals the process group of a program started in a process group of its own,
                 // whose leader hasn't been waited for (so its id isn't anyone else's yet).
                 unsafe {
                     libc::kill(-(pid as i32), libc::SIGKILL);
@@ -539,7 +539,7 @@ impl Editor {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let mut child =
-            crate::dap::new_session(&mut cmd).spawn().map_err(|e| format!("{}: {e}", shown(&sp.program)))?;
+            crate::dap::setsid(&mut cmd).spawn().map_err(|e| format!("{}: {e}", shown(&sp.program)))?;
         let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
         let tail = Arc::new(Mutex::new(VecDeque::new()));
         let ended = Arc::new(AtomicBool::new(false));
@@ -725,7 +725,7 @@ impl Editor {
         if let Some(why) = why {
             return self.plugin_events(plugin, vec![HostEvent::Failed(id, why)]);
         }
-        let root = self.lane.root.clone();
+        let root = self.session.root.clone();
         let Some(generation) = self.plugin_generation(plugin) else { return };
         let (plugin, pattern) = (plugin.to_string(), pattern.to_string());
         self.events.jobs().spawn(move || {

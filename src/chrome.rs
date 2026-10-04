@@ -133,14 +133,14 @@ impl Editor {
         if self.picker.is_some() {
             return Keys::Picker;
         }
-        if self.lane.chat.as_ref().is_some_and(|c| c.focused) {
+        if self.session.chat.as_ref().is_some_and(|c| c.focused) {
             return Keys::Chat;
         }
         let rail = self.review_rail_up();
-        if rail && self.lane.code_review.as_ref().is_some_and(|r| r.focus) {
+        if rail && self.session.code_review.as_ref().is_some_and(|r| r.focus) {
             return Keys::Review;
         }
-        if !rail && let Some(s) = self.lane.sidebar.as_ref().filter(|s| s.focus) {
+        if !rail && let Some(s) = self.session.sidebar.as_ref().filter(|s| s.focus) {
             return Keys::Side(s.mode);
         }
         if self.bottom_has_keys()
@@ -148,7 +148,7 @@ impl Editor {
         {
             return Keys::Slot(s);
         }
-        if self.lane.review.as_ref().is_some_and(|r| r.ready) {
+        if self.session.review.as_ref().is_some_and(|r| r.ready) {
             return Keys::Review;
         }
         Keys::Code
@@ -184,16 +184,16 @@ impl Editor {
         match s {
             Slot::Procs => self.procs_up(),
             Slot::Debug => self.dap.is_some(),
-            Slot::Terminal => self.lane.terminal.as_ref().is_some_and(|t| t.visible || !shown),
+            Slot::Terminal => self.session.terminal.as_ref().is_some_and(|t| t.visible || !shown),
             Slot::Plugin => self.plugins.as_ref().is_some_and(|p| p.panel.is_some()),
-            Slot::Test => self.lane.test_run.is_some(),
-            Slot::Task => self.lane.task_run.is_some(),
+            Slot::Test => self.session.test_run.is_some(),
+            Slot::Task => self.session.task_run.is_some(),
         }
     }
 
     /// The panel you put in front (a tab clicked, `C-w t`, one just opened), while it's there.
     pub(crate) fn slot_front(&self) -> Option<Slot> {
-        self.lane.slot_front.filter(|&s| self.slot_there(s, true))
+        self.session.slot_front.filter(|&s| self.slot_there(s, true))
     }
 
     /// Every panel the slot has, in `ORDER`, with how it's doing — the slot's title row.
@@ -205,7 +205,7 @@ impl Editor {
             .map(|&slot| {
                 let (label, badge) = match slot {
                     Slot::Terminal => {
-                        let t = self.lane.terminal.as_ref();
+                        let t = self.session.terminal.as_ref();
                         let badge = match t.and_then(|t| t.exited) {
                             Some(0) | None => Badge::None,
                             Some(_) => Badge::Failed,
@@ -213,7 +213,7 @@ impl Editor {
                         ("terminal".to_string(), badge)
                     }
                     Slot::Task => {
-                        let r = self.lane.task_run.as_ref().expect("there");
+                        let r = self.session.task_run.as_ref().expect("there");
                         let badge = match r.state {
                             crate::task::State::Running => Badge::Running,
                             crate::task::State::Passed if r.found == (0, 0) => Badge::Passed,
@@ -224,7 +224,7 @@ impl Editor {
                     }
                     Slot::Test => {
                         use crate::testing::RunState as R;
-                        let r = self.lane.test_run.as_ref().expect("there");
+                        let r = self.session.test_run.as_ref().expect("there");
                         let badge = match r.state {
                             R::Running => Badge::Running,
                             R::Passed => Badge::Passed,
@@ -264,12 +264,12 @@ impl Editor {
         }
         let keys = self.bottom_has_keys();
         if s == Slot::Terminal
-            && let Some(t) = self.lane.terminal.as_mut()
+            && let Some(t) = self.session.terminal.as_mut()
         {
             t.visible = true;
         }
-        self.lane.slot_front = Some(s);
-        if let Some(t) = self.lane.terminal.as_mut().filter(|_| s != Slot::Terminal) {
+        self.session.slot_front = Some(s);
+        if let Some(t) = self.session.terminal.as_mut().filter(|_| s != Slot::Terminal) {
             t.focus = false;
         }
         if s != Slot::Procs {
@@ -307,24 +307,25 @@ impl Editor {
             .filter(|&&s| self.slot_there(s, true))
             .map(|&s| {
                 let at = match s {
-                    Slot::Test => self.lane.test_run.as_ref().map(|r| r.started),
-                    Slot::Task => self.lane.task_run.as_ref().map(|r| r.started),
+                    Slot::Test => self.session.test_run.as_ref().map(|r| r.started),
+                    Slot::Task => self.session.task_run.as_ref().map(|r| r.started),
                     _ => None,
                 };
                 (s, at)
             })
             .collect();
-        let new: Vec<Slot> = now.iter().filter(|n| !self.lane.slot_seen.contains(n)).map(|n| n.0).collect();
+        let new: Vec<Slot> =
+            now.iter().filter(|n| !self.session.slot_seen.contains(n)).map(|n| n.0).collect();
         if !new.is_empty() {
             let keys = self.bottom_has_keys();
             // (several at once: the last in `ORDER` — the rarer, asked-for ones)
             if let Some(&s) = new.iter().rev().find(|s| !(keys && matches!(s, Slot::Test | Slot::Task))) {
-                self.lane.slot_front = Some(s);
+                self.session.slot_front = Some(s);
             }
         }
-        self.lane.slot_seen = now;
+        self.session.slot_seen = now;
         if self.slot() != Some(Slot::Terminal)
-            && let Some(t) = self.lane.terminal.as_mut().filter(|t| t.focus)
+            && let Some(t) = self.session.terminal.as_mut().filter(|t| t.focus)
         {
             t.focus = false;
         }

@@ -156,7 +156,7 @@ pub struct Policy {
     /// Single files writable (cargo's lock and cache databases).
     pub files: Vec<PathBuf>,
     /// Folders inside writable ones kept as they are: the terminal multiplexers' sockets (`mux_dirs`) — a
-    /// command could otherwise delete or replace the session the user works in.
+    /// command could otherwise delete or replace the multiplexer the user works in.
     pub keep: Vec<PathBuf>,
     /// The network beyond this machine (`llm.sandbox-network`).
     pub network: bool,
@@ -479,7 +479,7 @@ pub const RISKY_PORTS: [(u16, &str); 10] = [
     (2376, "Docker API over TLS — the same"),
     (4243, "Docker API on its old port — the same"),
     (8888, "Jupyter — runs code in its kernels"),
-    (9222, "Chrome DevTools — drives the browser, signed-in sessions included"),
+    (9222, "Chrome DevTools — drives the browser, signed in as you"),
     (9229, "Node inspector — runs code in the inspected program"),
     (6379, "Redis — its CONFIG and MODULE commands write files and load code"),
     (2379, "etcd — a cluster's state, its secrets included"),

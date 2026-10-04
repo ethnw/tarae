@@ -218,11 +218,11 @@ pub static SETTINGS: &[Setting] = &[
         set: |c, v| c.render_doc_comments = b(v),
     },
     Setting {
-        path: "editor.restore-session",
+        path: "editor.restore-files",
         kind: Kind::Bool,
         doc: "Reopen the files you had open in this folder (with cursor positions) when started without files",
-        get: |c| Value::from(c.restore_session),
-        set: |c, v| c.restore_session = b(v),
+        get: |c| Value::from(c.restore_files),
+        set: |c, v| c.restore_files = b(v),
     },
     Setting {
         path: "editor.inline-diagnostics",
@@ -349,7 +349,7 @@ pub static SETTINGS: &[Setting] = &[
     Setting {
         path: "llm.follow",
         kind: Kind::Bool,
-        doc: "Chat: the editor follows the code Claude is reading, with its thoughts beside it (C-f toggles per session)",
+        doc: "Chat: the editor follows the code Claude is reading, with its thoughts beside it (C-f toggles it in a chat)",
         get: |c| Value::from(c.llm.follow),
         set: |c, v| c.llm.follow = b(v),
     },
@@ -472,6 +472,10 @@ pub static SETTINGS: &[Setting] = &[
     },
 ];
 
+/// Settings that had another name: (old path, new path). A config file's old name still applies, and a
+/// warning names the new one.
+const RENAMED: [(&str, &str); 1] = [("editor.restore-session", "editor.restore-files")];
+
 pub fn find(path: &str) -> Option<&'static Setting> {
     SETTINGS.iter().find(|s| s.path == path)
 }
@@ -537,7 +541,14 @@ fn walk(
             Some(line) => format!("{file}:{line}: "),
             None => format!("{file}: "),
         };
-        if find(&path).is_some() {
+        if let Some(&(_, new)) = RENAMED.iter().find(|r| r.0 == path) {
+            if pass(new, v)
+                && let Err(e) = apply(cfg, new, v)
+            {
+                w.push(format!("{}{e}", at()));
+            }
+            w.push(format!("{}'{path}' is called '{new}' now — rename it there", at()));
+        } else if find(&path).is_some() {
             if !pass(&path, v) {
                 continue;
             }
@@ -580,7 +591,7 @@ pub fn locate(src: &str, path: &str) -> Option<usize> {
 /// The whole effective config as TOML (with description comments) — `:config-show`.
 pub fn show(cfg: &EditorConfig) -> String {
     let mut out = String::from(
-        "# tarae — effective settings\n# :set <path> <value> changes it for this session, :set! also saves it\n",
+        "# tarae — effective settings\n# :set <path> <value> changes it until you quit, :set! also saves it\n",
     );
     let mut section = "";
     for s in SETTINGS {
@@ -631,7 +642,7 @@ mod tests {
              `TARAE_BLESS=1 cargo test settings_reference`. -->\n\
              # Settings reference\n\n\
              Every setting tarae reads from `~/.config/tarae/config.toml` (or a project `.tarae.toml`).\n\
-             The name is also the `:set` path: `:set editor.scrolloff 8` changes it for this session,\n\
+             The name is also the `:set` path: `:set editor.scrolloff 8` changes it until you quit,\n\
              `:set!` also writes it to your config file. How files and layers work: \
              [configuration guide](../configuration.md).\n",
         );
@@ -711,6 +722,25 @@ mod tests {
         assert!(w.iter().any(|m| m.starts_with("config.toml:2: editor.scrolloff: expected integer 0..=100")));
         assert!(w.iter().any(|m| m.starts_with("config.toml:3: unknown setting 'editor.nope'")));
         assert!(w.iter().any(|m| m.starts_with("config.toml:4: editor.cursor.insert")));
+    }
+
+    /// A setting under its old name still applies, and the warning names the new one — nothing a user set
+    /// goes quietly unread. Every new name is a setting.
+    #[test]
+    fn an_old_name_still_applies_and_says_the_new_one() {
+        let src = "[editor]\nrestore-session = true\n";
+        let table: toml::Table = toml::from_str(src).unwrap();
+        let mut cfg = EditorConfig::default();
+        let mut w = Vec::new();
+        apply_table(&mut cfg, &table, src, "config.toml", &mut w);
+        assert!(cfg.restore_files);
+        assert_eq!(
+            w,
+            [
+                "config.toml:2: 'editor.restore-session' is called 'editor.restore-files' now — rename it there"
+            ]
+        );
+        assert!(RENAMED.iter().all(|r| find(r.1).is_some() && find(r.0).is_none()));
     }
 
     #[test]

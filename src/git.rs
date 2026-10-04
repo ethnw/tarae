@@ -52,7 +52,7 @@ pub fn watch(tx: crate::event::Tx, dir: PathBuf) {
             let mut watcher = crate::fswatch::Watcher::new(); // (armed before the stat — see `fswatch`)
             watcher.file(&head);
             let now = stamp();
-            // (HEAD gone: the worktree was removed — a session ended — and so is its lane)
+            // (HEAD gone: the worktree was removed — a session ended — and so is its session)
             if now.is_none() && !first {
                 break;
             }
@@ -60,10 +60,10 @@ pub fn watch(tx: crate::event::Tx, dir: PathBuf) {
                 (last, first) = (now, false);
                 let branch = read_branch(&head);
                 let dir = dir.clone();
-                // (only the lane it's for: one ended meanwhile sends it to the front)
+                // (only the session it's for: one ended meanwhile sends it to the front)
                 let apply = move |ed: &mut Editor| {
-                    if ed.lane.root == dir {
-                        ed.lane.git_branch = branch;
+                    if ed.session.root == dir {
+                        ed.session.git_branch = branch;
                     }
                 };
                 if tx.send(Event::Job(Box::new(apply))).is_err() {
@@ -167,7 +167,8 @@ impl Editor {
             return;
         }
         // In a code review the base is the review's (codereview.rs), not the index — also before it lands
-        let reviewed = move |ed: &Editor| ed.lane.code_review.as_ref().is_some_and(|r| r.docs.contains(&id));
+        let reviewed =
+            move |ed: &Editor| ed.session.code_review.as_ref().is_some_and(|r| r.docs.contains(&id));
         let Some(path) =
             self.docs.iter().find(|d| d.id == id && d.review_base.is_none()).and_then(|d| d.path.clone())
         else {

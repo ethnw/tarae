@@ -10,7 +10,7 @@
 //! - `TARAE_SHOT_XDG` — config home (`tarae/config.toml` under it; default `/tmp/tarae-shot/xdg`). Point it at
 //!   an empty folder so your own settings don't leak in. Folders given here must be absolute (and the config
 //!   and start folders there already) — else the shot refuses.
-//! - `TARAE_SHOT_STATE` — state home (session, recent files, undo, chats); default a fresh temp dir, removed
+//! - `TARAE_SHOT_STATE` — state home (files to restore, recent files, undo, chats); default a fresh temp dir, removed
 //!   afterwards — never the user's.
 //! - `TARAE_BACKGROUND=dark|light` — the theme (the virtual terminal doesn't answer the background query).
 //! - `TARAE_SHOT_FILES` (default `src/transaction.rs src/selection.rs`), `TARAE_SHOT_CWD` (default the repo),
@@ -127,7 +127,7 @@ fn drive(vt: &mut Vt, keys: &[String], state: &Path, cols: u16, rows: u16) -> Re
     // SAFETY: only async-signal-safe calls between fork and exec.
     unsafe {
         cmd.pre_exec(|| {
-            // New session + the pty as its controlling terminal: /dev/tty works, SIGWINCH arrives.
+            // `setsid` + the pty as its controlling terminal: /dev/tty works, SIGWINCH arrives.
             cvt(libc::setsid())?;
             cvt(libc::ioctl(0, libc::TIOCSCTTY as _, 0))?;
             Ok(())

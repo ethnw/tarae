@@ -51,7 +51,7 @@ The name of a setting is its `:set` path — the same dotted name as in the file
 | Command | Does |
 |---|---|
 | `:set editor.scrolloff` | Show the current value, its description, and the allowed values |
-| `:set editor.scrolloff 8` | Change it for this session (it stays even if the config file is reloaded) |
+| `:set editor.scrolloff 8` | Change it until you quit (it stays even if the config file is reloaded) |
 | `:set! editor.scrolloff 8` | Change it and write it to your config file — comments and formatting are kept |
 | `:toggle editor.color-modes` | Flip an on/off setting, or move a choice setting to its next value |
 | `:config-show` | The full effective configuration, with descriptions as comments, in a new buffer — usable as a config file as it is |

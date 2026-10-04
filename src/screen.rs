@@ -4,7 +4,7 @@
 //! of cells — tarae's own few escapes: cursor moves, SGR, erase to the line's end, cursor shape and
 //! visibility — and compared with the grid the terminal shows. What goes out is made from the grid: in each
 //! row, the stretch from a changed cell to the last changed one. Typing, a key is a handful of cells rather
-//! than a 24 KB screen (estimated from recorded sessions: 13% of the bytes typing, 5% saving, 30% in a picker).
+//! than a 24 KB screen (estimated from recorded use: 13% of the bytes typing, 5% saving, 30% in a picker).
 //!
 //! A frame with anything else (another escape, a control character, text past the edge, a cluster too long
 //! to keep) goes out as it is, and the next one redraws everything. So does the first frame, a resize, focus

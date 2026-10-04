@@ -49,7 +49,7 @@ pub struct Var {
 pub struct Dap {
     writer: Box<dyn Write + Send>,
     child: Option<Child>,
-    /// Helper launched before attaching (`kubectl port-forward` etc. — attach.rs) — stopped with the session.
+    /// Helper launched before attaching (`kubectl port-forward` etc. — attach.rs) — stopped with the debug run.
     pub(crate) helper: Option<Child>,
     /// Request sent after initialize — "launch" (start it) · "attach" (attach to a running one).
     pub(crate) request: &'static str,
@@ -87,7 +87,7 @@ pub struct Bp {
     pub rejected: Option<String>,
 }
 
-/// Breakpoints: file → line (0-based) → breakpoint. Kept even without a session.
+/// Breakpoints: file → line (0-based) → breakpoint. Kept even without a debug run.
 pub type Breakpoints = BTreeMap<PathBuf, BTreeMap<usize, Bp>>;
 
 /// A watch's value — re-evaluated on every stop.
@@ -186,10 +186,10 @@ impl Dap {
 
 // ── Process groups ───────────────────────────────────────────────────────
 
-/// Launch in a new session (setsid) — the process and whatever it starts (debuggee·test binaries) can't
+/// Launch in a process group of its own, with no controlling terminal (`setsid(2)`) — the process and whatever it starts (debuggee·test binaries) can't
 /// touch our controlling terminal and steal key input (measured: a program launched by debugpy grabbed
 /// it and later keys stopped arriving), and `term_group` stops them all together.
-pub(crate) fn new_session(c: &mut Command) -> &mut Command {
+pub(crate) fn setsid(c: &mut Command) -> &mut Command {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -204,16 +204,16 @@ pub(crate) fn new_session(c: &mut Command) -> &mut Command {
     c
 }
 
-/// SIGTERM to the process group of a process launched with `new_session`.
+/// SIGTERM to the process group of a process launched with `setsid`.
 pub(crate) fn term_group(pid: u32) {
     #[cfg(unix)]
-    // SAFETY: only sends a signal to the process group we launched in a new session.
+    // SAFETY: only sends a signal to the process group we launched with `setsid`.
     unsafe {
         libc::kill(-(pid as i32), libc::SIGTERM);
     }
 }
 
-/// Stops a `new_session` process with its whole group and reaps it.
+/// Stops a `setsid` process with its whole group and reaps it.
 pub(crate) fn kill_group(c: &mut Child) {
     term_group(c.id());
     let _ = c.kill();
@@ -302,7 +302,7 @@ fn resolve(lang: &str, cwd: &Path) -> Result<(Vec<String>, bool), String> {
     })
 }
 
-/// Launches the adapter in a new session in `cwd` and connects to it (worker thread — dlv's TCP port
+/// Launches the adapter in a process group of its own (`setsid`) in `cwd` and connects to it (worker thread — dlv's TCP port
 /// takes a moment to come up).
 fn spawn_adapter((cmd, tcp): (Vec<String>, bool), cwd: &Path) -> Result<Started, String> {
     let mut c = Command::new(&cmd[0]);
@@ -316,7 +316,7 @@ fn spawn_adapter((cmd, tcp): (Vec<String>, bool), cwd: &Path) -> Result<Started,
         c.args(["-l", &format!("127.0.0.1:{p}")]);
     }
     c.stdin(Stdio::piped()).stdout(if tcp { Stdio::null() } else { Stdio::piped() }).stderr(Stdio::piped());
-    let mut child = new_session(&mut c).spawn().map_err(|e| format!("{}: {e}", cmd[0]))?;
+    let mut child = setsid(&mut c).spawn().map_err(|e| format!("{}: {e}", cmd[0]))?;
     // Keep the last stderr lines (the reason if it dies — `No module named debugpy` etc.)
     let err = Arc::new(Mutex::new(Vec::new()));
     if let Some(e) = child.stderr.take() {
@@ -433,7 +433,7 @@ impl Editor {
     // ── Breakpoints ──────────────────────────────────────────────────────
 
     /// `F9` · `space G b` — toggles a breakpoint on the current line (sent to the adapter right away
-    /// during a session).
+    /// during a debug run).
     pub fn toggle_breakpoint(&mut self) {
         let Some((path, line)) = self.cursor_file_line() else {
             return self.set_status("save the file first");
@@ -550,7 +550,7 @@ impl Editor {
 
     // ── Start·control ────────────────────────────────────────────────────
 
-    /// `F5` · `space G l` — continue if stopped; with no session, start for the current file's language.
+    /// `F5` · `space G l` — continue if stopped; with no debug run, start for the current file's language.
     pub fn dap_launch(&mut self) {
         match self.dap.as_ref().map(|d| d.state.clone()) {
             Some(State::Stopped { .. }) => return self.dap_continue(),
@@ -626,9 +626,9 @@ impl Editor {
         }
     }
 
-    /// Launches `lang`'s adapter (resolve·spawn·connect on a worker thread) and starts a session with
+    /// Launches `lang`'s adapter (resolve·spawn·connect on a worker thread) and starts a debug run with
     /// `launch` (its `cwd` = where the adapter runs). Meanwhile "starting" in the debug pane — callers may
-    /// set `request`·`helper` on that placeholder; the session takes them over.
+    /// set `request`·`helper` on that placeholder; the debug run takes them over.
     pub(crate) fn dap_start(&mut self, lang: &str, launch: Value, program: String, generation: u64) {
         let Some(id) = adapter_id(lang) else {
             self.dap = None;
@@ -667,7 +667,7 @@ impl Editor {
         });
     }
 
-    /// The adapter is up (or couldn't start) — begins the session if it's still the current one.
+    /// The adapter is up (or couldn't start) — begins the debug run if it's still the current one.
     fn dap_started(&mut self, id: &str, started: Result<(Started, Value, String), String>, generation: u64) {
         // (built, or not: the debug panel says how it goes from here)
         self.step_done("debug-build");
@@ -698,7 +698,7 @@ impl Editor {
         }
     }
 
-    /// Starts a session with an adapter whose transport is ready
+    /// Starts a debug run with an adapter whose transport is ready
     /// (reader thread → initialize → launch on reply).
     /// `child` = the adapter we launched (None when attaching to one already running, like Java).
     #[allow(clippy::too_many_arguments)]
@@ -726,7 +726,7 @@ impl Editor {
             let _ = tx.send(Event::Job(Box::new(move |ed: &mut Editor| ed.on_dap_closed(generation))));
         });
         let mut d = Dap::placeholder(State::Starting, program);
-        // Take over what this session's placeholder holds (attach: `before` helper·request) — dropping it
+        // Take over what this debug run's placeholder holds (attach: `before` helper·request) — dropping it
         // would stop the helper (port-forward) right before attaching
         if let Some(old) = self.dap.as_mut() {
             d.helper = old.helper.take();
@@ -795,7 +795,7 @@ impl Editor {
         }
         self.dap = None;
         self.dap_generation += 1;
-        self.set_status("Debug session ended");
+        self.set_status("Debug run ended");
     }
 
     // ── Incoming ─────────────────────────────────────────────────────────
@@ -806,7 +806,7 @@ impl Editor {
         }
         let Some(d) = &mut self.dap else { return };
         match d.state {
-            // Quit before the session began (`No module named debugpy` etc.) — say why
+            // Quit before the debug run began (`No module named debugpy` etc.) — say why
             State::Starting => {
                 let why = d.adapter_err.lock().unwrap().clone();
                 self.dap = None;
@@ -1165,7 +1165,7 @@ mod tests {
         }
     }
 
-    fn session(src: &str) -> (Editor, Sent, PathBuf) {
+    fn debug_run(src: &str) -> (Editor, Sent, PathBuf) {
         let dir = std::env::temp_dir().join(format!("tarae-dap-{}-{}", std::process::id(), src.len()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("a.py");
@@ -1182,7 +1182,7 @@ mod tests {
 
     #[test]
     fn conditional_and_log_breakpoints_are_sent_and_rejections_kept() {
-        let (mut ed, sent, path) = session("n = 1\nfor i in range(9):\n    n += i\n");
+        let (mut ed, sent, path) = debug_run("n = 1\nfor i in range(9):\n    n += i\n");
         ed.handle_key("j".parse().unwrap());
         ed.handle_key("j".parse().unwrap());
         // A condition creates the breakpoint even if there isn't one
@@ -1211,7 +1211,7 @@ mod tests {
 
     #[test]
     fn watches_are_evaluated_in_the_stopped_frame() {
-        let (mut ed, sent, path) = session("a = 1\nb = 2\n");
+        let (mut ed, sent, path) = debug_run("a = 1\nb = 2\n");
         ed.add_watch("a + b");
         ed.add_watch("missing");
         ed.add_watch("a + b");
@@ -1273,11 +1273,11 @@ mod tests {
     }
 
     #[test]
-    fn session_takes_over_the_attach_helper_and_request() {
+    fn the_debug_run_takes_over_the_attach_helper_and_request() {
         let mut ed = Editor::new(crate::config::Config::default());
         // attach.rs puts the `before` helper (port-forward) on the placeholder while java-debug prepares
         let mut p = Dap::placeholder(State::Starting, "api".into());
-        p.helper = Some(new_session(Command::new("sleep").arg("30")).spawn().unwrap());
+        p.helper = Some(setsid(Command::new("sleep").arg("30")).spawn().unwrap());
         p.request = "attach";
         ed.dap = Some(p);
         let g = ed.dap_generation;
@@ -1293,19 +1293,19 @@ mod tests {
         );
         let d = ed.dap.as_mut().unwrap();
         assert_eq!(d.request, "attach");
-        let h = d.helper.as_mut().expect("the helper moved into the session");
+        let h = d.helper.as_mut().expect("the helper moved into the debug run");
         assert!(matches!(h.try_wait(), Ok(None)), "port-forward still running");
         let pid = h.id();
         ed.dap = None;
-        assert!(!alive(pid), "stopped with the session");
+        assert!(!alive(pid), "stopped with the debug run");
     }
 
     #[test]
-    fn ending_a_session_stops_the_adapter_and_its_debuggee() {
+    fn ending_a_debug_run_stops_the_adapter_and_its_debuggee() {
         // Adapter that ignores disconnect and whose debuggee (same process group) keeps running
         let mut c = Command::new("sh");
         c.args(["-c", "sleep 30 & echo $!; wait"]).stdout(Stdio::piped());
-        let mut child = new_session(&mut c).spawn().unwrap();
+        let mut child = setsid(&mut c).spawn().unwrap();
         let mut line = String::new();
         BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
         let debuggee: u32 = line.trim().parse().unwrap();

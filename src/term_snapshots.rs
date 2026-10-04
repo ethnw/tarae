@@ -102,6 +102,17 @@ struct Shot {
     ed: Editor,
     w: u16,
     h: u16,
+    /// Where `file` puts its files: the working directory, or `project()` (`in_project`).
+    root: PathBuf,
+}
+
+/// A project folder whose name is always `tarae` — for scenarios that show the project's name (the side
+/// panel's files tab), which the checkout's folder can't give: worktrees and other clones are named
+/// otherwise. Real and empty (a chat or a task can start in it); the files shown in it never touch disk.
+fn project() -> PathBuf {
+    let dir = std::env::temp_dir().join("tarae-snapshots").join("tarae");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::canonicalize(dir).unwrap()
 }
 
 impl Shot {
@@ -111,15 +122,22 @@ impl Shot {
         let mut ed = Editor::new(Config::default());
         assert_eq!(ed.theme.name, "meok", "snapshots are drawn with the dark built-in theme");
         ed.config.lsp.enabled = false;
-        let mut shot = Shot { ed, w, h };
+        let mut shot = Shot { ed, w, h, root: std::env::current_dir().unwrap() };
         shot.frame();
         shot
     }
 
-    /// Shows `text` as the file `rel` (relative to the working directory, so the path bar reads
-    /// `tarae › …`) without touching disk, and waits for its syntax tree (core grammars only).
+    /// The session rooted at `project()` from here on (its files too) — returned, for the side panel.
+    fn in_project(&mut self) -> PathBuf {
+        self.root = project();
+        self.ed.session.root = self.root.clone();
+        self.root.clone()
+    }
+
+    /// Shows `text` as the file `rel` (relative to the shot's root, so the path bar reads `tarae › …`)
+    /// without touching disk, and waits for its syntax tree (core grammars only).
     fn file(&mut self, rel: &str, text: &str) -> DocId {
-        let path = std::env::current_dir().unwrap().join(rel);
+        let path = self.root.join(rel);
         let doc = self.ed.doc_mut();
         doc.text = Rope::from_str(text);
         doc.path = Some(path.clone());
@@ -442,7 +460,7 @@ fn snapshot_statusline_widths() {
     ] {
         let mut s = Shot::new(w, 6);
         s.file("src/demo.rs", DEMO_RS);
-        s.ed.lane.git_branch = Some("main".into());
+        s.ed.session.git_branch = Some("main".into());
         let diag = |from, to, severity, message: &str| crate::lsp::Diagnostic {
             from,
             to,
@@ -744,7 +762,7 @@ fn snapshot_ask_review() {
     s.ed.config.llm.args = vec!["-c".into(), format!("read -r line; printf '%s\\n' '{json}'")];
     s.keys("17ggx i");
     s.keys("show the text too<ret>");
-    s.until("review", |ed| ed.lane.review.as_ref().is_some_and(|r| r.ready));
+    s.until("review", |ed| ed.session.review.as_ref().is_some_and(|r| r.ready));
     s.ed.toasts.clear(); // "claude answered in 0.0s" — wall-clock time
     s.check("ask_review");
 }
@@ -757,7 +775,7 @@ fn snapshot_chat_empty() {
     s.ed.config.llm.command = "sh".into();
     s.ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
     s.keys(" l");
-    assert!(s.ed.lane.chat.as_ref().is_some_and(|c| c.msgs.is_empty()), "chat opened without a note");
+    assert!(s.ed.session.chat.as_ref().is_some_and(|c| c.msgs.is_empty()), "chat opened without a note");
     s.check("chat_empty");
 }
 
@@ -784,8 +802,8 @@ fn snapshot_chat_explore() {
         Some(Look { verb, what: what.into(), pattern, range: range.into(), link })
     };
     let lib = std::path::PathBuf::from("/p/src/lib.rs");
-    s.ed.lane.chat.as_mut().unwrap().follow.on = true;
-    s.ed.lane.chat.as_mut().unwrap().msgs = vec![
+    s.ed.session.chat.as_mut().unwrap().follow.on = true;
+    s.ed.session.chat.as_mut().unwrap().msgs = vec![
         msg(Role::User, "Who calls word_counts?", "demo.rs · L5", None),
         msg(
             Role::Thought,
@@ -842,7 +860,7 @@ fn snapshot_chat_table() {
                   And a wide one, row by row:\n\n\
                   | 설정 | 기본값 | 범위 | 설명 | 예시 | 비고 |\n|---|---|---|---|---|---|\n\
                   | `chat.width` | `0.4` | `0.2–0.6` | 채팅 패널이 차지하는 화면 비율 | `:set chat.width 0.5` | 좁으면 전체 화면 |";
-    s.ed.lane.chat.as_mut().unwrap().msgs =
+    s.ed.session.chat.as_mut().unwrap().msgs =
         vec![msg(Role::User, "표는 어떻게 그릴까?"), msg(Role::Assistant, answer), msg(Role::Note, "3.1s")];
     s.check("chat_table");
 }
@@ -860,14 +878,14 @@ fn chat_minimizes_while_following() {
     let docked = s.ed.screen.chat_x;
     assert!(docked.is_some());
     s.keys("why?<ret>");
-    assert!(s.ed.lane.chat.as_ref().unwrap().busy());
+    assert!(s.ed.session.chat.as_ref().unwrap().busy());
     s.frame();
     assert_eq!(s.ed.screen.chat_x, None, "minimized: no docked panel");
     assert!(s.ed.screen.chat_mini.get().is_some(), "a floating card instead");
     s.keys("<esc> l");
     assert_eq!(s.ed.screen.chat_x, docked, "space l brings the panel back for this turn");
-    s.ed.lane.chat.as_mut().unwrap().unfolded = false;
-    s.ed.lane.chat.as_mut().unwrap().follow.on = false;
+    s.ed.session.chat.as_mut().unwrap().unfolded = false;
+    s.ed.session.chat.as_mut().unwrap().follow.on = false;
     s.frame();
     assert_eq!(s.ed.screen.chat_x, docked, "not following = docked");
 }
@@ -966,7 +984,7 @@ fn review_of(w: u16, h: u16, base: &str, now: &str) -> Shot {
         gone: false,
         binary: false,
     };
-    s.ed.lane.code_review = Some(CodeReview::for_test(Base::Head, cwd, vec![file]));
+    s.ed.session.code_review = Some(CodeReview::for_test(Base::Head, cwd, vec![file]));
     let doc = s.ed.doc_mut();
     doc.review_base = Some(Rope::from_str(base));
     doc.git_base = Some(std::sync::Arc::new(base.to_string()));
@@ -1023,7 +1041,7 @@ fn card_edges_sit_on_what_is_under_them() {
     s.ed.goto_line(11);
     let with = cells(&s.frame(), s.w, s.h);
     let rect = s.ed.screen.note_card.get().expect("the note card");
-    s.ed.lane.notes.list.clear();
+    s.ed.session.notes.list.clear();
     let without = cells(&s.frame(), s.w, s.h);
     let under = edges_seated(&with, &without, rect, surface);
     // (the pane's padding, left of the wash, is ground — per column)
@@ -1089,7 +1107,7 @@ fn a_note_card_stays_in_its_pane() {
         s.ed.goto_line(11);
         s.frame();
         let (x, _, w, _) = s.ed.screen.note_card.get().unwrap_or_else(|| panic!("{what}: the note card"));
-        let focused = s.ed.lane.focus;
+        let focused = s.ed.session.focus;
         let pane = s.ed.screen.panes.iter().find(|p| p.0 == focused).expect("the focused pane").1;
         assert!(
             pane.x <= x && x + w <= pane.x + pane.w,
@@ -1121,12 +1139,12 @@ fn a_card_over_a_panel_stands_apart_from_it() {
         if light {
             s.ed.theme = crate::theme::load("hanji").unwrap();
         }
+        let root = s.in_project();
         s.file("src/demo.rs", DEMO_RS);
-        let root = std::env::current_dir().unwrap();
         let rels = ["Cargo.toml", "README.md", "src/demo.rs"].map(String::from).to_vec();
         let mut sb = crate::sidebar::Sidebar::with_files(root, rels);
         sb.focus = false;
-        s.ed.lane.sidebar = Some(sb);
+        s.ed.session.sidebar = Some(sb);
         s.keys(":w");
         let (ground, surface, _) = chrome_colors(&s.ed);
         let p = cells(&s.frame(), s.w, s.h);
@@ -1156,7 +1174,7 @@ fn the_thought_card_keeps_the_turns_thinking() {
     s.ed.config.llm.command = "sh".into();
     s.ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
     s.keys(" lhow?<ret>");
-    let c = s.ed.lane.chat.as_mut().unwrap();
+    let c = s.ed.session.chat.as_mut().unwrap();
     c.follow.on = true;
     c.msgs.push(Msg::new(Role::Thought, "The user asks how the list is filtered, so I read the picker.", ""));
     c.msgs.push(Msg::new(Role::Assistant, "Let me check the worker side.", ""));
@@ -1200,7 +1218,7 @@ fn follow_is_one_card_in_one_place() {
             range: format!("L{}–{}", lines.start + 1, lines.end),
             link: None,
         };
-        let c = s.ed.lane.chat.as_mut().unwrap();
+        let c = s.ed.session.chat.as_mut().unwrap();
         c.follow.on = true;
         c.msgs.push(Msg::new(Role::Thought, "Reading where it starts.", ""));
         c.follow.gaze = Some(crate::follow::Gaze::new(look, Some(path.clone()), Some(lines)));
@@ -1241,7 +1259,7 @@ fn floating_cards_never_overlap() {
             crate::notes::add(&mut s.ed, &path, 39..40, crate::notes::By::Claude, long);
         }
         s.ed.goto_line(39);
-        let c = s.ed.lane.chat.as_mut().unwrap();
+        let c = s.ed.session.chat.as_mut().unwrap();
         c.msgs.push(Msg {
             role: Role::Thought,
             text: "Thinking hard about it for a while.\n".repeat(6),
@@ -1339,7 +1357,7 @@ fn snapshot_review() {
         file("src/lib.rs", 40, 0, true),
         file("README.md", 2, 1, false),
     ];
-    s.ed.lane.code_review = Some(CodeReview::for_test(Base::Head, cwd.clone(), files));
+    s.ed.session.code_review = Some(CodeReview::for_test(Base::Head, cwd.clone(), files));
     let doc = s.ed.doc_mut();
     doc.review_base = Some(Rope::from_str(DEMO_RS));
     doc.git_base = Some(std::sync::Arc::new(DEMO_RS.to_string()));
@@ -1348,8 +1366,8 @@ fn snapshot_review() {
     let path = doc.path.clone().unwrap();
     s.keys(":9<ret> vm");
     crate::notes::add(&mut s.ed, &path, 8..9, crate::notes::By::You, "Why split this into two lines?");
-    s.ed.lane.notes.list[0].thread[0].draft = true;
-    s.ed.lane.notes.list[0].waiting = false;
+    s.ed.session.notes.list[0].thread[0].draft = true;
+    s.ed.session.notes.list[0].waiting = false;
     s.keys("gg");
     s.check("review");
 }
@@ -1362,7 +1380,7 @@ fn review_keeps_the_cursor_on_screen_below_a_big_deletion() {
     let base: String = (0..60).map(|i| format!("line {i}\n")).collect();
     let now: String = (0..60).filter(|i| !(10..50).contains(i)).map(|i| format!("line {i}\n")).collect();
     s.file("src/demo.rs", &now);
-    s.ed.lane.code_review =
+    s.ed.session.code_review =
         Some(CodeReview::for_test(Base::Head, std::env::current_dir().unwrap(), Vec::new()));
     let doc = s.ed.doc_mut();
     doc.review_base = Some(Rope::from_str(&base));
@@ -1395,7 +1413,7 @@ fn review_rail_scrolls_by_itself_only_to_show_the_file() {
         .collect();
     let mut s = Shot::new(100, 24);
     s.ed.open(&dir.join("f00.txt")).unwrap();
-    s.ed.lane.code_review = Some(CodeReview::for_test(Base::Head, dir.clone(), files));
+    s.ed.session.code_review = Some(CodeReview::for_test(Base::Head, dir.clone(), files));
     s.frame();
     let rail = |s: &Shot| s.ed.screen.review_rail.borrow().clone();
     let click = |s: &mut Shot, kind, y: usize| {
@@ -1487,10 +1505,11 @@ fn snapshot_lsp_completion() {
 }
 
 /// The side panel's files tab beside the code, following the editor: the current file's folders open,
-/// its row marked; folded folders say how many files they hold.
+/// its row marked; folded folders say how many files they hold; the project's name at the right.
 #[test]
 fn snapshot_side_panel_files() {
     let mut s = Shot::new(112, 24);
+    let root = s.in_project();
     s.file("src/demo.rs", DEMO_RS);
     let rels = [
         "Cargo.toml",
@@ -1503,10 +1522,9 @@ fn snapshot_side_panel_files() {
         "src/ui/theme.rs",
         "tests/e2e.rs",
     ];
-    let root = std::env::current_dir().unwrap();
     let mut sb = crate::sidebar::Sidebar::with_files(root, rels.iter().map(|r| r.to_string()).collect());
     sb.focus = false;
-    s.ed.lane.sidebar = Some(sb);
+    s.ed.session.sidebar = Some(sb);
     s.keys("j");
     s.check("side_panel_files");
 }
@@ -1517,7 +1535,7 @@ fn snapshot_side_panel_outline() {
     let mut s = Shot::new(112, 24);
     s.file("src/demo.rs", DEMO_RS);
     s.ed.sidebar_show(crate::sidebar::Mode::Outline);
-    s.until("outline", |ed| ed.lane.sidebar.as_ref().is_some_and(|sb| !sb.lines().is_empty()));
+    s.until("outline", |ed| ed.session.sidebar.as_ref().is_some_and(|sb| !sb.lines().is_empty()));
     s.keys("j");
     s.check("side_panel_outline");
 }
@@ -1575,8 +1593,8 @@ fn snapshot_side_panel_git() {
     (st.staged[0].added, st.staged[0].removed) = (Some(2), Some(0));
     st.top = cwd.clone();
     st.generation = 1;
-    s.ed.lane.git_status = Some(st.with_rows());
-    s.ed.lane.sidebar = Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, cwd));
+    s.ed.session.git_status = Some(st.with_rows());
+    s.ed.session.sidebar = Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, cwd));
     s.keys("j");
     s.check("side_panel_git");
 }
@@ -1595,8 +1613,8 @@ fn snapshot_task_panel() {
             .into(),
         cwd,
     });
-    s.until("task", |ed| ed.lane.task_run.as_ref().is_some_and(|r| r.took.is_some()));
-    s.ed.lane.task_run.as_mut().unwrap().took = Some(Duration::from_millis(1830));
+    s.until("task", |ed| ed.session.task_run.as_ref().is_some_and(|r| r.took.is_some()));
+    s.ed.session.task_run.as_mut().unwrap().took = Some(Duration::from_millis(1830));
     s.ed.toasts.clear();
     s.check("task_panel");
 }
@@ -1631,7 +1649,7 @@ fn snapshot_sandbox_blocked() {
     r.by_claude = true;
     r.guard = Some(crate::sandbox::Guard::In(policy));
     r.output = vec![(true, "npm ERR! code EPERM".into()), (true, "npm ERR! syscall open".into())];
-    s.ed.lane.task_run = Some(r);
+    s.ed.session.task_run = Some(r);
     let dump = |s: &mut Shot, name: &str| {
         if let Some(dir) = std::env::var_os("TARAE_FRAMES_DIR") {
             std::fs::create_dir_all(&dir).unwrap();
@@ -1657,7 +1675,7 @@ fn claudes_command_offers_no_again() {
         let task = crate::task::Task { name: "cargo build".into(), cmd: "true".into(), cwd: "/p".into() };
         let mut r = crate::task::Run::for_test(task);
         (r.by_claude, r.found, r.took) = (by_claude, found, Some(Duration::from_millis(40)));
-        s.ed.lane.task_run = Some(r);
+        s.ed.session.task_run = Some(r);
         let mut vt = vt100::Parser::new(24, 100, 0);
         vt.process(&s.frame());
         let row = vt
@@ -1706,7 +1724,7 @@ fn snapshot_test_panel_scrolled() {
     run.target.cwd = std::env::current_dir().unwrap();
     run.selected = 1;
     run.took = Some(Duration::from_millis(1240));
-    s.ed.lane.test_run = Some(run);
+    s.ed.session.test_run = Some(run);
     s.frame();
     let (y0, _, _) = s.ed.screen.test_panel.get().expect("the panel is drawn");
     for _ in 0..4 {
@@ -1734,7 +1752,7 @@ fn test_panel_says_when_no_test_ran() {
     ];
     let mut run = crate::testing::TestRun::finished("orphan::forgotten", Vec::new(), output);
     run.state = crate::testing::RunState::NoTests;
-    s.ed.lane.test_run = Some(run);
+    s.ed.session.test_run = Some(run);
     let mut p = vt100::Parser::new(s.h, s.w, 0);
     p.process(&s.frame());
     let text = p.screen().contents();
@@ -1756,7 +1774,7 @@ fn snapshot_terminal_panel() {
     s.ed.terminal_run(vec!["/bin/sh".into(), "-c".into(), script.into()], Vec::new());
     // All of it — the line break after the last line too (it can come in a read of its own)
     s.until("output", |ed| {
-        ed.lane.terminal.as_ref().is_some_and(|t| {
+        ed.session.terminal.as_ref().is_some_and(|t| {
             let screen = t.parser.screen();
             screen.contents().contains("FAILED") && screen.cursor_position() == (4, 0)
         })
@@ -1772,7 +1790,7 @@ fn snapshot_terminal_panel() {
     mouse(&mut s, K::Down, 2);
     mouse(&mut s, K::Drag, 13);
     let bytes = mouse(&mut s, K::Up, 13);
-    assert_eq!(s.ed.lane.terminal.as_ref().unwrap().selected_text(), "$ cargo test");
+    assert_eq!(s.ed.session.terminal.as_ref().unwrap().selected_text(), "$ cargo test");
     assert!(s.ed.toasts.iter().any(|t| t.text == "copied 12 characters"));
     let shot = snapshot(&s.ed, "t", &bytes, s.w, s.h);
     let bg_row = shot.lines().skip_while(|l| !l.starts_with("## bg")).nth(17).unwrap();
@@ -1784,22 +1802,22 @@ fn snapshot_terminal_panel() {
     };
     at(&mut s, K::Down, 10, 3);
     assert!(
-        s.ed.lane.terminal.as_ref().unwrap().selection.is_none()
-            && !s.ed.lane.terminal.as_ref().unwrap().focus
+        s.ed.session.terminal.as_ref().unwrap().selection.is_none()
+            && !s.ed.session.terminal.as_ref().unwrap().focus
     );
     at(&mut s, K::Drag, 10, 17);
     at(&mut s, K::Up, 10, 17);
-    assert!(s.ed.lane.terminal.as_ref().unwrap().selection.is_none(), "not a terminal selection");
+    assert!(s.ed.session.terminal.as_ref().unwrap().selection.is_none(), "not a terminal selection");
     // A drag begun in it goes on outside it (clamped to its edge) and ends there
     at(&mut s, K::Down, 2, 17);
     at(&mut s, K::Drag, 31, 3);
     assert_eq!(
-        s.ed.lane.terminal.as_ref().unwrap().selected(),
+        s.ed.session.terminal.as_ref().unwrap().selected(),
         Some(((0, 29), (1, 0))),
         "clamped to its first row"
     );
     at(&mut s, K::Up, 31, 3);
-    assert!(!s.ed.lane.terminal.as_ref().unwrap().selecting, "released outside — done");
+    assert!(!s.ed.session.terminal.as_ref().unwrap().selecting, "released outside — done");
     let cursor = s.ed.doc().selection().primary();
     at(&mut s, K::Drag, 40, 5);
     assert_eq!(
@@ -1811,8 +1829,8 @@ fn snapshot_terminal_panel() {
     at(&mut s, K::Down, 2, 17);
     at(&mut s, K::Drag, 7, 17);
     at(&mut s, K::Down, 10, 3);
-    assert!(!s.ed.lane.terminal.as_ref().unwrap().selecting);
-    s.ed.lane.terminal = None; // hangs it up
+    assert!(!s.ed.session.terminal.as_ref().unwrap().selecting);
+    s.ed.session.terminal = None; // hangs it up
 }
 
 /// A merge conflict: ours on the green wash, theirs on the changed one, the card with the keys at the
@@ -1954,12 +1972,12 @@ fn reading_the_answer_moves_the_editor() {
     let answer = format!(
         "The tree is built in src/filetree.rs:30.\n\n{filler}The side panel keeps it at src/sidebar.rs:60."
     );
-    let c = s.ed.lane.chat.as_mut().unwrap();
+    let c = s.ed.session.chat.as_mut().unwrap();
     c.msgs = vec![Msg::new(Role::User, "how?", ""), Msg::new(Role::Assistant, answer, "")];
     c.follow.on = true;
     s.frame();
     // As a turn leaves it: at the bottom (the last place shows), read from here on
-    let c = s.ed.lane.chat.as_mut().unwrap();
+    let c = s.ed.session.chat.as_mut().unwrap();
     c.follow.read_at = Some(c.scroll);
     let at = |s: &Shot| {
         (
@@ -1968,10 +1986,10 @@ fn reading_the_answer_moves_the_editor() {
         )
     };
     let cwd = std::env::current_dir().unwrap();
-    s.ed.lane.chat.as_mut().unwrap().scroll = 1000; // to the top
+    s.ed.session.chat.as_mut().unwrap().scroll = 1000; // to the top
     s.frame();
     assert_eq!(at(&s), (cwd.join("src/filetree.rs"), 29), "the top of the answer");
-    s.ed.lane.chat.as_mut().unwrap().scroll = 0;
+    s.ed.session.chat.as_mut().unwrap().scroll = 0;
     s.frame();
     assert_eq!(at(&s), (cwd.join("src/sidebar.rs"), 59), "its end");
 }
@@ -1981,13 +1999,13 @@ fn reading_the_answer_moves_the_editor() {
 #[test]
 fn a_long_name_shows_whole_when_selected() {
     let mut s = Shot::new(112, 16);
+    let root = s.in_project();
     s.file("src/demo.rs", DEMO_RS);
     let long = "src/components/user_profile_settings_view_controller.tsx";
-    let root = std::env::current_dir().unwrap();
     let mut sb = crate::sidebar::Sidebar::with_files(root, vec![long.to_string(), "src/demo.rs".into()]);
     sb.set_open(["src", "src/components"], true);
     sb.focus = false;
-    s.ed.lane.sidebar = Some(sb);
+    s.ed.session.sidebar = Some(sb);
     let text = |s: &mut Shot| {
         let bytes = s.frame();
         snapshot(&s.ed, "t", &bytes, s.w, s.h)
@@ -1998,8 +2016,15 @@ fn a_long_name_shows_whole_when_selected() {
         "the end stays: {unfocused}"
     );
     let row =
-        s.ed.lane.sidebar.as_ref().unwrap().lines().iter().position(|l| l.label.ends_with(".tsx")).unwrap();
-    let sb = s.ed.lane.sidebar.as_mut().unwrap();
+        s.ed.session
+            .sidebar
+            .as_ref()
+            .unwrap()
+            .lines()
+            .iter()
+            .position(|l| l.label.ends_with(".tsx"))
+            .unwrap();
+    let sb = s.ed.session.sidebar.as_mut().unwrap();
     sb.focus = true;
     sb.selected = row;
     assert!(text(&mut s).contains("user_profile_settings_view_controller.tsx"), "whole when selected");
@@ -2106,17 +2131,17 @@ fn the_panels_follow_one_set_of_rules() {
     use crate::chrome::{GAP, HEAD, PAD, PAD_R};
     let (w, h) = (150u16, 36u16);
     let mut s = Shot::new(w, h);
+    let cwd = s.in_project();
     s.file("src/demo.rs", DEMO_RS);
-    let cwd = std::env::current_dir().unwrap();
     let mut sb =
         crate::sidebar::Sidebar::with_files(cwd.clone(), vec!["src/demo.rs".into(), "README.md".into()]);
     sb.focus = false;
-    s.ed.lane.sidebar = Some(sb);
+    s.ed.session.sidebar = Some(sb);
     s.ed.config.llm.command = "sh".into();
     s.ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
     s.keys(" l<esc>");
     s.ed.task_start(crate::task::Task { name: "check".into(), cmd: "echo all good".into(), cwd });
-    s.until("task", |ed| ed.lane.task_run.as_ref().is_some_and(|r| r.took.is_some()));
+    s.until("task", |ed| ed.session.task_run.as_ref().is_some_and(|r| r.took.is_some()));
     s.ed.toasts.clear();
     let (ground, surface, accent) = chrome_colors(&s.ed);
     let p = cells(&s.frame(), w, h);
@@ -2282,10 +2307,10 @@ fn the_bottom_slot_shows_its_panels_as_tabs() {
     let script = "printf 'hi\\r\\n'; sleep 30";
     s.ed.terminal_run(vec!["/bin/sh".into(), "-c".into(), script.into()], Vec::new());
     s.until("the terminal", |ed| {
-        ed.lane.terminal.as_ref().is_some_and(|t| t.parser.screen().contents().contains("hi"))
+        ed.session.terminal.as_ref().is_some_and(|t| t.parser.screen().contents().contains("hi"))
     });
     s.ed.terminal_focus();
-    let typing = |ed: &Editor| ed.lane.terminal.as_ref().is_some_and(|t| t.focus);
+    let typing = |ed: &Editor| ed.session.terminal.as_ref().is_some_and(|t| t.focus);
     assert!(typing(&s.ed));
     // A task started meanwhile (harmless: a pause and a failure) — a tab, running
     let cwd = std::env::temp_dir();
@@ -2304,7 +2329,7 @@ fn the_bottom_slot_shows_its_panels_as_tabs() {
     );
     assert_eq!((s.ed.slot(), typing(&s.ed)), (Some(Slot::Terminal), true), "the terminal keeps it all");
     // It fails behind the terminal: its tab says so, in the error colour — nothing else moves
-    s.until("the task", |ed| ed.lane.task_run.as_ref().is_some_and(|r| r.took.is_some()));
+    s.until("the task", |ed| ed.session.task_run.as_ref().is_some_and(|r| r.took.is_some()));
     s.ed.toasts.clear();
     let (row, spots, p) = tabs(&mut s);
     let at = row.find("check ▲").map(|b| row[..b].chars().count() + "check ".len()).expect(&row);
@@ -2328,5 +2353,5 @@ fn the_bottom_slot_shows_its_panels_as_tabs() {
     s.keys("<tab>");
     assert_eq!(s.ed.slot(), Some(Slot::Task));
     assert!(s.ed.bottom_focus, "the keys stayed in the slot");
-    s.ed.lane.terminal = None; // hangs it up
+    s.ed.session.terminal = None; // hangs it up
 }

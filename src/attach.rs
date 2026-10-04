@@ -16,7 +16,7 @@
 //! name = "api (k8s)"
 //! lang = "java"                  # defaults to the current file's language
 //! port = 5005                    # host defaults to 127.0.0.1
-//! before = "kubectl -n app port-forward deploy/api 5005:5005"   # run first, stopped with the session
+//! before = "kubectl -n app port-forward deploy/api 5005:5005"   # run first, stopped with the debug run
 //! remote-root = "/app"           # source root on the remote (container) ↔ this project's root
 //! ```
 
@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 
-use crate::dap::{kill_group, new_session};
+use crate::dap::{kill_group, setsid};
 use crate::editor::Editor;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -105,12 +105,12 @@ pub fn parse_addr(s: &str) -> Option<(String, u16)> {
     Some((host.trim_matches(['[', ']']).to_string(), port.parse().ok()?))
 }
 
-/// Launches the `before` command (new session — stopped with `kill_group`) and waits until it's ready
+/// Launches the `before` command (`setsid` — stopped with `kill_group`) and waits until it's ready
 /// (prints its first line, or 2 s) — if it dies first, its reason (on a worker thread).
 fn start_helper(cmd: &str, cwd: &Path) -> Result<Child, String> {
     let mut c = Command::new("sh");
     c.args(["-c", cmd]).current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = new_session(&mut c).spawn().map_err(|e| format!("before: {e}"))?;
+    let mut child = setsid(&mut c).spawn().map_err(|e| format!("before: {e}"))?;
     let (tx, rx) = std::sync::mpsc::channel();
     if let Some(out) = child.stdout.take() {
         let tx = tx.clone();
@@ -249,7 +249,7 @@ impl Editor {
         let root = file
             .as_deref()
             .map(|f| crate::lsp::find_root_for(&lang, f))
-            .unwrap_or_else(|| self.lane.root.clone());
+            .unwrap_or_else(|| self.session.root.clone());
         let root = std::fs::canonicalize(&root).unwrap_or(root);
         if !matches!(lang.as_str(), "python" | "go" | "java" | "rust" | "c" | "cpp") {
             return self.set_error(format!(
@@ -338,7 +338,7 @@ impl Editor {
                     return fail(self, helper, "Java attaches to host:port (JDWP)".into());
                 };
                 let file = file.unwrap_or_else(|| root.join("x.java"));
-                // (a leftover prep from an earlier session must not look like this one's)
+                // (a leftover prep from an earlier debug run must not look like this one's)
                 self.java_debug = None;
                 self.java_attach(file, root, t.host.clone(), port, generation);
                 if self.java_debug.is_none() {
@@ -383,7 +383,7 @@ impl Editor {
                 self.dap_start(adapter_lang, args, program, generation);
             }
         }
-        // On the session (or dap_start's placeholder, which the session takes over)
+        // On the debug run (or dap_start's placeholder, which the debug run takes over)
         match &mut self.dap {
             Some(d) => {
                 d.request = "attach";

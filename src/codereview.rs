@@ -169,7 +169,7 @@ fn gone_title(f: &File) -> String {
 
 // ── git (worker threads) ──────────────────────────────────────────────────────
 
-/// (the one way git runs — in a session of its own, so the fetch below can't ask for a password on the
+/// (the one way git runs — with no terminal of its own (`setsid`), so the fetch below can't ask for a password on the
 /// terminal)
 fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     crate::gitmenu::git(dir, args, None)
@@ -237,7 +237,7 @@ fn diff_text(root: &Path, rev: &str) -> String {
 
 /// `space v v` / `:review [branch]`: the changes against HEAD, or since `branch` (fetched first if remote).
 pub fn start(ed: &mut Editor, branch: Option<String>) {
-    start_in(ed, ed.lane.root.clone(), branch);
+    start_in(ed, ed.session.root.clone(), branch);
 }
 
 /// `start` for the repository around `cwd`.
@@ -284,7 +284,7 @@ pub fn start_in(ed: &mut Editor, cwd: PathBuf, branch: Option<String>) {
 
 /// `space v t` · `:review-turn`: what Claude changed in its latest turn (not taken back), as a review.
 pub fn review_turn(ed: &mut Editor) {
-    let list = &ed.lane.checkpoints.list;
+    let list = &ed.session.checkpoints.list;
     let Some(at) = list.iter().rposition(|c| !c.undone) else {
         return ed.set_status("no turn of Claude's changed files — nothing to review");
     };
@@ -310,12 +310,16 @@ pub fn start_turn(ed: &mut Editor, at: usize) {
 
 /// `start_turn`, saying once it's open that `earlier` turns before it went in unseen.
 fn start_turn_saying(ed: &mut Editor, at: usize, earlier: usize) {
-    let Some(cp) = ed.lane.checkpoints.list.get(at) else { return };
+    let Some(cp) = ed.session.checkpoints.list.get(at) else { return };
     let base = Base::Turn { at, question: cp.question.clone() };
     let files: Vec<(PathBuf, Option<ropey::Rope>)> =
         cp.files.iter().map(|t| (t.path.clone(), t.before.clone())).collect();
-    let root =
-        ed.lane.chat.as_ref().and_then(|c| c.edits.at_end.clone()).unwrap_or_else(|| ed.lane.root.clone());
+    let root = ed
+        .session
+        .chat
+        .as_ref()
+        .and_then(|c| c.edits.at_end.clone())
+        .unwrap_or_else(|| ed.session.root.clone());
     ed.events.jobs().spawn(move || {
         let files: Vec<File> = files
             .into_iter()
@@ -360,7 +364,7 @@ fn open(ed: &mut Editor, root: PathBuf, base: Base, mut files: Vec<File>) {
     let here = ed.doc().path.clone();
     let first = files.iter().position(|f| here.as_ref() == Some(&f.path)).unwrap_or(0);
     let turn = matches!(base, Base::Turn { .. });
-    ed.lane.code_review = Some(CodeReview {
+    ed.session.code_review = Some(CodeReview {
         base,
         root,
         files,
@@ -380,7 +384,7 @@ fn open(ed: &mut Editor, root: PathBuf, base: Base, mut files: Vec<File>) {
         false => format!("review: {n} file{s} changed — ]g walks the changes"),
     });
     show(ed, first, false);
-    if std::mem::take(&mut ed.lane.review_ask) {
+    if std::mem::take(&mut ed.session.review_ask) {
         claude_reviews(ed);
     }
 }
@@ -388,8 +392,8 @@ fn open(ed: &mut Editor, root: PathBuf, base: Base, mut files: Vec<File>) {
 /// `space v c` · `:review-claude [branch]` — Claude reviews the changes: a note on the lines of each finding,
 /// a verdict in the chat. Opens the review first (against HEAD, or since `branch`) if it isn't.
 pub fn ask_claude(ed: &mut Editor, branch: Option<String>) {
-    if ed.lane.code_review.is_none() || branch.is_some() {
-        ed.lane.review_ask = true;
+    if ed.session.code_review.is_none() || branch.is_some() {
+        ed.session.review_ask = true;
         return start(ed, branch);
     }
     claude_reviews(ed);
@@ -406,8 +410,8 @@ short verdict here.";
 
 /// The review's diff (untracked files as whole additions) to Claude, on a worker, then the ask.
 fn claude_reviews(ed: &mut Editor) {
-    let Some(r) = ed.lane.code_review.as_ref() else { return };
-    if ed.lane.chat.as_ref().is_some_and(|c| c.busy()) {
+    let Some(r) = ed.session.code_review.as_ref() else { return };
+    if ed.session.chat.as_ref().is_some_and(|c| c.busy()) {
         return ed.set_status("Claude is still answering — ask for its review once it's done");
     }
     let (root, rev, label) = (r.root.clone(), r.base.rev().map(str::to_string), r.base.label());
@@ -416,7 +420,7 @@ fn claude_reviews(ed: &mut Editor) {
     let turn: Vec<(String, PathBuf, Option<ropey::Rope>)> = match &r.base {
         Base::Turn { at, .. } => {
             let before = |p: &PathBuf| {
-                ed.lane.checkpoints.list.get(*at)?.files.iter().find(|t| &t.path == p)?.before.clone()
+                ed.session.checkpoints.list.get(*at)?.files.iter().find(|t| &t.path == p)?.before.clone()
             };
             r.files.iter().map(|f| (f.rel.clone(), f.path.clone(), before(&f.path))).collect()
         }
@@ -455,9 +459,9 @@ fn claude_reviews(ed: &mut Editor) {
             ed.step_done("review-ask");
             let about = format!("<changes of=\"{label}\">\n<diff>\n{diff}</diff>\n</changes>");
             let chip = format!("Claude reviews · {n} file{}", if n == 1 { "" } else { "s" });
-            if ed.lane.chat.is_none() {
+            if ed.session.chat.is_none() {
                 crate::chat::open(ed);
-                if let Some(c) = &mut ed.lane.chat {
+                if let Some(c) = &mut ed.session.chat {
                     c.focused = false;
                     c.unfolded = false;
                 }
@@ -489,19 +493,19 @@ fn turn_diff(files: &[(String, PathBuf, Option<ropey::Rope>)]) -> String {
 /// turn's: its changes count as seen (`space v t` doesn't count it among the earlier ones unseen) — and so
 /// do those of every turn whose files a git review (`space v v`, the one that warning points to) showed.
 pub fn close(ed: &mut Editor) {
-    if let Some(r) = ed.lane.code_review.as_ref() {
+    if let Some(r) = ed.session.code_review.as_ref() {
         let shown = |c: &crate::checkpoint::Checkpoint| {
             !c.files.is_empty() && c.files.iter().all(|t| r.files.iter().any(|f| f.path == t.path))
         };
         let seen: Vec<usize> = match &r.base {
             Base::Turn { at, .. } => vec![*at],
-            _ => {
-                (0..ed.lane.checkpoints.list.len()).filter(|&i| shown(&ed.lane.checkpoints.list[i])).collect()
-            }
+            _ => (0..ed.session.checkpoints.list.len())
+                .filter(|&i| shown(&ed.session.checkpoints.list[i]))
+                .collect(),
         };
         let mut changed = false;
         for i in seen {
-            if let Some(cp) = ed.lane.checkpoints.list.get_mut(i) {
+            if let Some(cp) = ed.session.checkpoints.list.get_mut(i) {
                 changed |= !std::mem::replace(&mut cp.seen, true);
             }
         }
@@ -514,7 +518,7 @@ pub fn close(ed: &mut Editor) {
 
 /// The review ends (closed, or another one taking its place).
 fn end(ed: &mut Editor) {
-    let Some(r) = ed.lane.code_review.take() else { return };
+    let Some(r) = ed.session.code_review.take() else { return };
     for id in r.docs {
         if let Some(d) = ed.docs.iter_mut().find(|d| d.id == id) {
             d.review_base = None;
@@ -530,11 +534,11 @@ fn end(ed: &mut Editor) {
 
 /// Opens file `i` of the review with its base; `at_end` = land on its last change (walking back).
 pub fn show(ed: &mut Editor, i: usize, at_end: bool) {
-    let Some(r) = &ed.lane.code_review else { return };
+    let Some(r) = &ed.session.code_review else { return };
     let Some(f) = r.files.get(i).cloned() else { return };
     let from = match &r.base {
         Base::Turn { at, .. } => From::Text(
-            ed.lane
+            ed.session
                 .checkpoints
                 .list
                 .get(*at)
@@ -563,7 +567,7 @@ pub fn show(ed: &mut Editor, i: usize, at_end: bool) {
         }
         ed.doc().id
     };
-    if let Some(r) = &mut ed.lane.code_review {
+    if let Some(r) = &mut ed.session.code_review {
         if !r.docs.contains(&id) {
             r.docs.push(id);
         }
@@ -616,12 +620,12 @@ fn load_base(ed: &mut Editor, id: DocId, from: From, f: File) {
 
 /// A file just shown: its first (last) change selected and centered, once its diff is there.
 pub fn land(ed: &mut Editor) {
-    let Some((id, at_end)) = ed.lane.code_review.as_ref().and_then(|r| r.land) else { return };
+    let Some((id, at_end)) = ed.session.code_review.as_ref().and_then(|r| r.land) else { return };
     let Some(d) = ed.docs.iter().find(|d| d.id == id) else { return };
     if d.git_version != d.version() || ed.doc().id != id {
         return;
     }
-    if let Some(r) = &mut ed.lane.code_review {
+    if let Some(r) = &mut ed.session.code_review {
         r.land = None;
     }
     let target = if at_end { d.git_hunks.last() } else { d.git_hunks.first() }.cloned();
@@ -638,7 +642,7 @@ pub fn land(ed: &mut Editor) {
 /// `]g`/`[g` past the last (first) change of a file: on to the next (previous) file of the review. True if
 /// it moved.
 pub fn next_file(ed: &mut Editor, forward: bool) -> bool {
-    let Some(r) = &ed.lane.code_review else { return false };
+    let Some(r) = &ed.session.code_review else { return false };
     let n = r.files.len();
     let Some(i) = r.current(ed) else { return false };
     let step = |k: usize| if forward { (k + 1) % n } else { (k + n - 1) % n };
@@ -656,7 +660,7 @@ pub fn next_file(ed: &mut Editor, forward: bool) -> bool {
 
 /// `]F` / `[F`: the review's next (previous) file, at its first change.
 pub fn step_file(ed: &mut Editor, forward: bool) {
-    let Some(r) = &ed.lane.code_review else {
+    let Some(r) = &ed.session.code_review else {
         return ed.set_status("no review here — space v v starts one");
     };
     let n = r.files.len();
@@ -677,11 +681,11 @@ pub fn step_file(ed: &mut Editor, forward: bool) {
 
 /// `space v m`: marks the current file viewed (again: unmarks).
 pub fn toggle_viewed(ed: &mut Editor) {
-    let Some(i) = ed.lane.code_review.as_ref().and_then(|r| r.current(ed)) else {
+    let Some(i) = ed.session.code_review.as_ref().and_then(|r| r.current(ed)) else {
         return ed.set_status("no review here — space v v starts one");
     };
     let (id, version) = (ed.doc().id, ed.doc().version());
-    let r = ed.lane.code_review.as_mut().expect("checked");
+    let r = ed.session.code_review.as_mut().expect("checked");
     let rel = r.files[i].rel.clone();
     let now = if r.viewed.get(&rel) == Some(&(id, version)) {
         r.viewed.remove(&rel);
@@ -700,13 +704,13 @@ pub fn toggle_viewed(ed: &mut Editor) {
 /// `space e` during a review: the keys to the rail (on the file being read), or back to the code. With the
 /// git tab in front: the rail back in its place, with the keys.
 pub fn rail_focus(ed: &mut Editor) {
-    let current = ed.lane.code_review.as_ref().and_then(|r| r.current(ed));
+    let current = ed.session.code_review.as_ref().and_then(|r| r.current(ed));
     let up = ed.review_rail_up();
-    let Some(r) = ed.lane.code_review.as_mut() else { return };
+    let Some(r) = ed.session.code_review.as_mut() else { return };
     if !up {
         r.behind = false;
         r.focus = false;
-        if let Some(s) = ed.lane.sidebar.as_mut() {
+        if let Some(s) = ed.session.sidebar.as_mut() {
             s.focus = false;
         }
     }
@@ -726,7 +730,7 @@ pub fn rail_key(ed: &mut Editor, key: Key) -> bool {
     if !ed.review_rail_up() {
         return false;
     }
-    let Some(r) = ed.lane.code_review.as_mut().filter(|r| r.focus) else { return false };
+    let Some(r) = ed.session.code_review.as_mut().filter(|r| r.focus) else { return false };
     let order = r.rail_order();
     let at = order.iter().position(|&i| i == r.selected).unwrap_or(0);
     let pick = |k: usize| order.get(k.min(order.len().saturating_sub(1))).copied();
@@ -749,7 +753,7 @@ pub fn rail_key(ed: &mut Editor, key: Key) -> bool {
             let i = r.selected;
             show(ed, i, false);
             toggle_viewed(ed);
-            if let Some(r) = ed.lane.code_review.as_mut() {
+            if let Some(r) = ed.session.code_review.as_mut() {
                 r.selected = pick(at + 1).unwrap_or(i);
             }
         }
@@ -763,7 +767,7 @@ impl Editor {
     /// Whether the review's rail has the left column: a review is open and the git tab isn't in front of
     /// it (closed, the tab gives the column back).
     pub fn review_rail_up(&self) -> bool {
-        self.lane.code_review.as_ref().is_some_and(|r| !r.behind || self.lane.sidebar.is_none())
+        self.session.code_review.as_ref().is_some_and(|r| !r.behind || self.session.sidebar.is_none())
     }
 }
 
@@ -771,7 +775,7 @@ impl Editor {
 
 /// Whether `space n` writes drafts: a review is open, or drafts are waiting to go.
 pub fn drafting(ed: &Editor) -> bool {
-    ed.lane.code_review.is_some() || ed.lane.notes.list.iter().any(|n| n.thread.iter().any(|e| e.draft))
+    ed.session.code_review.is_some() || ed.session.notes.list.iter().any(|n| n.thread.iter().any(|e| e.draft))
 }
 
 /// The lines around a note as a diff against the review's base: context, `-` removed, `+` added.
@@ -801,18 +805,18 @@ pub fn excerpt(doc: &crate::document::Document, lines: &std::ops::Range<usize>) 
 /// `space v s`: every draft to Claude in one message — each with its lines as a diff and the thread so far.
 pub fn send(ed: &mut Editor) {
     let drafts: Vec<u64> =
-        ed.lane.notes.list.iter().filter(|n| n.thread.iter().any(|e| e.draft)).map(|n| n.id).collect();
+        ed.session.notes.list.iter().filter(|n| n.thread.iter().any(|e| e.draft)).map(|n| n.id).collect();
     if drafts.is_empty() {
         return ed.set_status("no drafts — space n on a line writes one");
     }
-    if ed.lane.chat.as_ref().is_some_and(|c| c.busy()) {
+    if ed.session.chat.as_ref().is_some_and(|c| c.busy()) {
         return ed.set_status("Claude is still answering — send the review once it's done");
     }
-    let label = ed.lane.code_review.as_ref().map_or_else(|| "changes".to_string(), |r| r.base.label());
+    let label = ed.session.code_review.as_ref().map_or_else(|| "changes".to_string(), |r| r.base.label());
     let mut body = format!("<review of=\"{label}\" comments=\"{}\">\n", drafts.len());
     let mut files = std::collections::BTreeSet::new();
     for id in &drafts {
-        let Some(n) = ed.lane.notes.list.iter().find(|n| n.id == *id) else { continue };
+        let Some(n) = ed.session.notes.list.iter().find(|n| n.id == *id) else { continue };
         files.insert(n.path.clone());
         let diff = ed
             .docs
@@ -823,7 +827,7 @@ pub fn send(ed: &mut Editor) {
         body.push_str(&format!(
             "<comment note=\"{}\" path=\"{}\" lines=\"{}-{}\">\n<diff>\n{diff}</diff>\n",
             n.id,
-            crate::chat::shown(&ed.lane.root, &n.path),
+            crate::chat::shown(&ed.session.root, &n.path),
             n.lines.start + 1,
             n.lines.end
         ));
@@ -847,9 +851,9 @@ pub fn send(ed: &mut Editor) {
         if k == 1 { "" } else { "s" },
         if f == 1 { "" } else { "s" }
     );
-    if ed.lane.chat.is_none() {
+    if ed.session.chat.is_none() {
         crate::chat::open(ed);
-        if let Some(c) = &mut ed.lane.chat {
+        if let Some(c) = &mut ed.session.chat {
             c.focused = false;
             c.unfolded = false;
         }
@@ -857,13 +861,13 @@ pub fn send(ed: &mut Editor) {
     if !crate::chat::submit(ed, &question, Some(body), Some(chip)) {
         return ed.set_warning("couldn't reach claude — the chat panel says why (the drafts are kept)");
     }
-    for n in ed.lane.notes.list.iter_mut().filter(|n| drafts.contains(&n.id)) {
+    for n in ed.session.notes.list.iter_mut().filter(|n| drafts.contains(&n.id)) {
         for e in &mut n.thread {
             e.draft = false;
         }
         n.waiting = true;
     }
-    ed.lane.notes.turn = drafts;
+    ed.session.notes.turn = drafts;
     ed.set_success(format!("review sent — {k} comment{}", if k == 1 { "" } else { "s" }));
 }
 

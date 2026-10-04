@@ -48,7 +48,7 @@ pub struct EditorConfig {
     /// Render doc comments (`///` `//!` `/** */`) as markdown (raw text when the cursor enters).
     pub render_doc_comments: bool,
     /// When started without arguments, reopen the files last open in this folder where they were.
-    pub restore_session: bool,
+    pub restore_files: bool,
     /// Diagnostics at the end of their line (like Error Lens) + faint background on error/warning lines.
     pub inline_diagnostics: bool,
     /// Cursor on an underline whose message doesn't fit at the line end → the message in full in a card.
@@ -59,7 +59,7 @@ pub struct EditorConfig {
     pub soft_wrap: String,
     /// `:w` asks the language server to format first (lsp_editor.rs `format_then_save`).
     pub format_on_save: bool,
-    /// Blame at the cursor line's end (`b` in the git tab flips it for the session).
+    /// Blame at the cursor line's end (`b` in the git tab flips it until quit).
     pub git_blame: bool,
     /// Auto-save: "off" | "focus" (when the terminal loses focus) | "idle" (+ after 2 s without input).
     pub auto_save: String,
@@ -78,7 +78,7 @@ pub struct EditorConfig {
     /// Offer to install a missing language server or debugger the way its pack says (`install.rs`).
     pub offer_installs: bool,
     pub scrollbar: bool,
-    /// Where sessions' checkouts go ("" = `$XDG_DATA_HOME/tarae/worktrees`; `sessions.rs`).
+    /// Where sessions' checkouts go ("" = `$XDG_DATA_HOME/tarae/worktrees`; `worktree.rs`).
     pub session_worktrees: String,
     pub theme: String,
     pub llm: LlmConfig,
@@ -109,7 +109,7 @@ impl Default for EditorConfig {
             inlay_hints: true,
             indent_guides: true,
             render_doc_comments: true,
-            restore_session: false,
+            restore_files: false,
             inline_diagnostics: true,
             cursor_diagnostics: true,
             auto_pairs: true,
@@ -156,7 +156,7 @@ pub fn config_path() -> Option<PathBuf> {
     Some(base.join("tarae").join("config.toml"))
 }
 
-/// `$XDG_STATE_HOME/tarae` (default `~/.local/state/tarae`) — session, recent files, undo history.
+/// `$XDG_STATE_HOME/tarae` (default `~/.local/state/tarae`) — files to restore, recent files, undo history.
 pub fn state_dir() -> Option<PathBuf> {
     let state = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)

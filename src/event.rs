@@ -22,8 +22,8 @@ pub enum Event {
     /// Text pasted into the terminal tarae runs in (bracketed paste) — one event, not a key per character.
     Paste(String),
     Job(Apply),
-    /// A job's result for a lane (`Tx` makes these): applied in that lane (`Editor::with_lane`).
-    For(LaneId, Apply),
+    /// A job's result for a session (`Tx` makes these): applied in that session (`Editor::with_session`).
+    For(SessionId, Apply),
 }
 
 /// One mouse action (screen cell coordinates). Press, drag, release, wheel.
@@ -45,50 +45,50 @@ pub enum MouseKind {
     ScrollDown,
 }
 
-/// Which lane a result belongs to (`lane.rs`).
-pub type LaneId = u64;
+/// Which session a result belongs to (`session.rs`).
+pub type SessionId = u64;
 
 /// The queue the editor holds. The sending side is cloned and handed out to threads.
 pub struct Queue {
     tx: Sender<Event>,
     rx: Receiver<Event>,
-    /// The lane in front — what `sender` and `jobs` tag their results with (set on a switch, and while a
-    /// background lane's result is applied).
-    lane: std::cell::Cell<LaneId>,
+    /// The session in front — what `sender` and `jobs` tag their results with (set on a switch, and while a
+    /// background session's result is applied).
+    session: std::cell::Cell<SessionId>,
 }
 
 impl Default for Queue {
     fn default() -> Self {
         let (tx, rx) = mpsc::channel();
-        Self { tx, rx, lane: Default::default() }
+        Self { tx, rx, session: Default::default() }
     }
 }
 
 impl Queue {
-    /// A sender whose results are applied in the lane in front now, wherever the user is when they land.
+    /// A sender whose results are applied in the session in front now, wherever the user is when they land.
     pub fn sender(&self) -> Tx {
-        Tx { tx: self.tx.clone(), lane: Some(self.lane.get()) }
+        Tx { tx: self.tx.clone(), session: Some(self.session.get()) }
     }
 
-    /// A sender whose results are applied as they come, in whatever lane is in front then — for what every
-    /// lane shares (language servers, the saver, input, the config watch, plugins, the debugger).
+    /// A sender whose results are applied as they come, in whatever session is in front then — for what every
+    /// session shares (language servers, the saver, input, the config watch, plugins, the debugger).
     pub fn shared_sender(&self) -> Tx {
-        Tx { tx: self.tx.clone(), lane: None }
+        Tx { tx: self.tx.clone(), session: None }
     }
 
     pub fn jobs(&self) -> Jobs {
         Jobs { tx: self.sender() }
     }
 
-    /// Jobs whose results are applied in whatever lane is in front when they land — work about lanes
-    /// themselves (making, ending one: `sessions.rs`), never swapped into the lane it's about.
+    /// Jobs whose results are applied in whatever session is in front when they land — work about sessions
+    /// themselves (making, ending one: `worktree.rs`), never swapped into the session it's about.
     pub fn shared_jobs(&self) -> Jobs {
         Jobs { tx: self.shared_sender() }
     }
 
-    /// Results made from now on are for `lane`.
-    pub fn set_lane(&self, lane: LaneId) {
-        self.lane.set(lane);
+    /// Results made from now on are for `session`.
+    pub fn set_session(&self, session: SessionId) {
+        self.session.set(session);
     }
 
     pub fn recv(&self) -> Option<Event> {
@@ -114,18 +114,18 @@ impl Queue {
     }
 }
 
-/// The sending side: a job's result sent through it is applied in the lane it was made for (`None`: the
+/// The sending side: a job's result sent through it is applied in the session it was made for (`None`: the
 /// one in front when it lands).
 #[derive(Clone)]
 pub struct Tx {
     tx: Sender<Event>,
-    lane: Option<LaneId>,
+    session: Option<SessionId>,
 }
 
 impl Tx {
     pub fn send(&self, ev: Event) -> Result<(), mpsc::SendError<Event>> {
-        self.tx.send(match (ev, self.lane) {
-            (Event::Job(apply), Some(lane)) => Event::For(lane, apply),
+        self.tx.send(match (ev, self.session) {
+            (Event::Job(apply), Some(session)) => Event::For(session, apply),
             (ev, _) => ev,
         })
     }

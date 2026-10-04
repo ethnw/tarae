@@ -1,10 +1,10 @@
 //! The chat's conversations, kept per project — so closing tarae doesn't end one.
 //!
 //! - `$XDG_STATE_HOME/tarae/chats/<project hash>.json`: the latest `KEEP` conversations, newest first — each
-//!   its claude session id, a title (the first question), when it was last used, and its rows as the chat
+//!   claude's id for it, a title (the first question), when it was last used, and its rows as the chat
 //!   showed them. Written after each turn, read when the chat opens — both on worker threads.
-//! - Claude's memory of it is claude's own session (`--resume <id>`, measured: stream-json keeps the id and
-//!   the context); ours is only what the panel shows. A session claude no longer has ("No conversation
+//! - Claude's memory of it is claude's own (`--resume <id>`, measured: stream-json keeps the id and the
+//!   context); ours is only what the panel shows. A conversation claude no longer has ("No conversation
 //!   found") starts a fresh one with the rows still shown.
 //! - Opening the chat continues the latest conversation if it's recent (`FRESH`); `C-p` in the chat or
 //!   `:chat-resume` picks an earlier one.
@@ -27,7 +27,7 @@ pub const FRESH: u64 = 8 * 3600;
 /// One conversation as stored.
 #[derive(Clone, Debug)]
 pub struct Saved {
-    /// claude's session id.
+    /// claude's id for the conversation (its `session_id`).
     pub id: String,
     pub title: String,
     /// Unix seconds.

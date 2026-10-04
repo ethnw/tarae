@@ -83,7 +83,7 @@ pub fn land(
     files: Vec<FileChange>,
     note: String,
 ) {
-    let Some(c) = ed.lane.chat.as_ref() else { return answer(ed, call, Err("the chat is gone".into())) };
+    let Some(c) = ed.session.chat.as_ref() else { return answer(ed, call, Err("the chat is gone".into())) };
     let (generation, reason) = (c.generation(), crate::edits::reason(c));
     let files: Vec<FileChange> = files.into_iter().filter(|f| f.before != f.after).collect();
     if files.is_empty() {
@@ -157,7 +157,7 @@ fn write_file(f: &FileChange) -> Result<Option<crate::disk::Stamp>, Outcome> {
 
 /// Into the chat's queue of landings (answered at once when the chat it came from is gone).
 fn queue(ed: &mut Editor, l: Landing) {
-    match ed.lane.chat.as_mut().filter(|c| c.generation() == l.generation) {
+    match ed.session.chat.as_mut().filter(|c| c.generation() == l.generation) {
         Some(c) => c.edits.sets.push_back(l),
         None => return answer(ed, l.call.clone(), Ok(report(&l))),
     }
@@ -167,13 +167,13 @@ fn queue(ed: &mut Editor, l: Landing) {
 /// Every event: once no review is up, the front landing's next file in review — or, its files all done,
 /// its answer.
 pub fn next(ed: &mut Editor) {
-    if ed.lane.review.is_some() {
+    if ed.session.review.is_some() {
         return;
     }
     let background = ed.background();
-    let Some(c) = ed.lane.chat.as_mut() else { return };
+    let Some(c) = ed.session.chat.as_mut() else { return };
     let Some(l) = c.edits.sets.front_mut() else { return };
-    // (a lane behind: its files wait for their review until it's in front)
+    // (a session behind: its files wait for their review until it's in front)
     if background && !l.review.is_empty() {
         return;
     }
@@ -196,7 +196,7 @@ pub fn next(ed: &mut Editor) {
 
 /// What became of a file of the front landing.
 fn done_one(ed: &mut Editor, f: &FileChange, outcome: Outcome) {
-    if let Some(l) = ed.lane.chat.as_mut().and_then(|c| c.edits.sets.front_mut()) {
+    if let Some(l) = ed.session.chat.as_mut().and_then(|c| c.edits.sets.front_mut()) {
         l.done.push((f.rel.clone(), f.places, outcome));
     }
 }
@@ -218,7 +218,7 @@ fn show(ed: &mut Editor, f: FileChange, title: String, reason: String) {
     let doc_id = doc.id;
     let changes = crate::agent::line_changes(&f.before.to_string(), &f.after.to_string());
     // The keys go to the review; the file is the user's now (follow won't close it as a preview)
-    if let Some(c) = &mut ed.lane.chat {
+    if let Some(c) = &mut ed.session.chat {
         c.focused = false;
         c.follow.keep(doc_id);
     }
@@ -229,12 +229,12 @@ fn show(ed: &mut Editor, f: FileChange, title: String, reason: String) {
         changes,
         Some(Box::new(move |ed: &mut Editor, applied: bool| reviewed(ed, f, doc_id, dirty, applied))),
     );
-    if let Some(r) = &mut ed.lane.review {
+    if let Some(r) = &mut ed.session.review {
         r.reason = reason;
         // (its turn in the chat is the step)
         r.own_turn = false;
         let g = r.generation;
-        if let Some(c) = &mut ed.lane.chat {
+        if let Some(c) = &mut ed.session.chat {
             c.edits.review = Some(g);
         }
     }
@@ -243,7 +243,7 @@ fn show(ed: &mut Editor, f: FileChange, title: String, reason: String) {
 
 /// A file's review ended: kept for `space u` and saved (unless the user has unsaved edits there).
 fn reviewed(ed: &mut Editor, f: FileChange, doc_id: DocId, dirty: bool, applied: bool) {
-    if let Some(c) = &mut ed.lane.chat {
+    if let Some(c) = &mut ed.session.chat {
         c.edits.review = None;
     }
     let now = ed.docs.iter().find(|d| d.id == doc_id).map(|d| d.text.clone());
@@ -271,7 +271,7 @@ fn reviewed(ed: &mut Editor, f: FileChange, doc_id: DocId, dirty: bool, applied:
 /// The chat turn ended: landings still going are dropped (nobody waits for their answers; a review still
 /// up was closed by `edits::turn_over`).
 pub fn turn_over(ed: &mut Editor) {
-    if let Some(c) = ed.lane.chat.as_mut() {
+    if let Some(c) = ed.session.chat.as_mut() {
         c.edits.sets.clear();
     }
 }
@@ -582,7 +582,7 @@ fn edits_by_file(ed: &Editor, a: &RenameAsk, edit: &Value) -> Result<Vec<(PathBu
     let mut ops = Vec::new();
     for dc in doc_changes.into_iter().flatten() {
         if let Some(kind) = dc["kind"].as_str() {
-            let uri = |k: &str| path_of(&dc[k]).map(|p| nav::rel(&ed.lane.root, &p)).unwrap_or_default();
+            let uri = |k: &str| path_of(&dc[k]).map(|p| nav::rel(&ed.session.root, &p)).unwrap_or_default();
             ops.push(match kind {
                 "rename" => format!("moves {} to {}", uri("oldUri"), uri("newUri")),
                 "create" => format!("makes {}", uri("uri")),
@@ -599,7 +599,7 @@ fn edits_by_file(ed: &Editor, a: &RenameAsk, edit: &Value) -> Result<Vec<(PathBu
         {
             return Err(format!(
                 "{} changed since {} worked out the rename — call rename again",
-                nav::rel(&ed.lane.root, &path),
+                nav::rel(&ed.session.root, &path),
                 a.server
             ));
         }
@@ -620,7 +620,7 @@ fn edits_by_file(ed: &Editor, a: &RenameAsk, edit: &Value) -> Result<Vec<(PathBu
             && d.version() != *v
             && d.path.as_ref().is_some_and(|p| per.iter().any(|(q, _)| q == p))
         {
-            let name = d.display_name(&ed.lane.root);
+            let name = d.display_name(&ed.session.root);
             return Err(format!(
                 "{name} changed while {} worked out the rename — call rename again",
                 a.server

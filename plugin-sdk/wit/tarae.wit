@@ -268,7 +268,7 @@ interface types {
         /// permission needed): (id, name, bytes). Where it is comes back (`written`).
         write-own(tuple<u64, string, list<u8>>),
         /// Offers to install a tool the language packs know how to (`kustomize`): a card you answer. Once
-        /// it's in, `installed`; if the install fails, `failed`. Once a session per tool.
+        /// it's in, `installed`; if the install fails, `failed`. Once per tool until tarae quits.
         offer-install(tuple<u64, string>),
     }
 

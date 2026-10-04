@@ -2,7 +2,7 @@
 //! in the background with their output in the bottom panel, and every `file:line:col: message` they print
 //! goes into the list (quickfix.rs) as it streams, for `]q`.
 //!
-//! Tasks are found from the project's files, next to the ones in config. A run is a new session (stopping
+//! Tasks are found from the project's files, next to the ones in config. A run is a process group of its own (`setsid` — stopping
 //! it stops everything it started); its lines come to the main loop as events, one generation per run so a
 //! stopped run's late lines are dropped.
 
@@ -269,7 +269,7 @@ impl Drop for Run {
 impl Editor {
     /// `space m m` — run the last task again (or pick one, the first time).
     pub fn task_again(&mut self) {
-        match self.lane.task_last.clone() {
+        match self.session.task_last.clone() {
             Some(t) => self.task_start(t),
             None => self.task_picker(),
         }
@@ -278,8 +278,8 @@ impl Editor {
     /// `space m p` — pick a task (the last one first). The project is looked at on a worker.
     pub fn task_picker(&mut self) {
         let (configured, last) =
-            (self.config.tasks.clone(), self.lane.task_last.as_ref().map(|t| t.name.clone()));
-        let root = self.lane.root.clone();
+            (self.config.tasks.clone(), self.session.task_last.as_ref().map(|t| t.name.clone()));
+        let root = self.session.root.clone();
         let fill = move || {
             let mut tasks = all_tasks(configured, &root);
             if let Some(i) = last.and_then(|l| tasks.iter().position(|t| t.name == l)) {
@@ -307,7 +307,8 @@ impl Editor {
 
     /// `:task <name>` — found on a worker, then started.
     pub fn task_named(&mut self, name: &str) -> Result<(), String> {
-        let (configured, name, root) = (self.config.tasks.clone(), name.to_string(), self.lane.root.clone());
+        let (configured, name, root) =
+            (self.config.tasks.clone(), name.to_string(), self.session.root.clone());
         self.events.jobs().spawn(move || {
             let found = all_tasks(configured, &root).into_iter().find(|t| t.name == name);
             move |ed: &mut Editor| match found {
@@ -322,23 +323,23 @@ impl Editor {
     pub fn task_close(&mut self) {
         // An install stopped half-way: its card says so (and `y` tries again)
         if let Some(a) =
-            self.lane.task_run.as_mut().filter(|r| r.state == State::Running).and_then(|r| r.after.take())
+            self.session.task_run.as_mut().filter(|r| r.state == State::Running).and_then(|r| r.after.take())
         {
             self.offer_finished(a.offer, Err("stopped before it finished".into()));
         }
         crate::tools::run_dropped(self, "the user stopped it");
         crate::restart::run_dropped(self);
-        self.lane.task_run = None;
+        self.session.task_run = None;
     }
 
     pub fn task_start(&mut self, task: Task) {
         // Not over an install: stopping it half-way can leave a tool broken
-        if self.lane.task_run.as_ref().is_some_and(|r| r.install && r.state == State::Running) {
+        if self.session.task_run.as_ref().is_some_and(|r| r.install && r.state == State::Running) {
             return self.set_status("an install is running — space m c stops it");
         }
         self.auto_save(" · before the task");
         self.flush_saves();
-        self.lane.task_last = Some(task.clone());
+        self.session.task_last = Some(task.clone());
         self.task_spawn(task, None, None, true, false);
     }
 
@@ -353,7 +354,7 @@ impl Editor {
         who: crate::tools::For,
         guard: Option<crate::sandbox::Guard>,
     ) -> bool {
-        if self.lane.task_run.as_ref().is_some_and(|r| r.state == State::Running) {
+        if self.session.task_run.as_ref().is_some_and(|r| r.state == State::Running) {
             return false;
         }
         self.auto_save(" · before the command");
@@ -365,7 +366,7 @@ impl Editor {
         };
         let feeds = crate::tools::is_check(&task.cmd);
         self.task_spawn(task, None, policy, feeds, true);
-        match self.lane.task_run.as_mut().filter(|_| self.task_generation != before) {
+        match self.session.task_run.as_mut().filter(|_| self.task_generation != before) {
             Some(r) => {
                 match who {
                     crate::tools::For::Claude(call) => r.chat = Some(call),
@@ -382,7 +383,7 @@ impl Editor {
     /// `:restart`'s build (`restart.rs`): not the task `space m m` runs again — the restart waits for its
     /// end. Its generation; None if it didn't start (an install is running, or it couldn't spawn).
     pub(crate) fn task_start_restart(&mut self, task: Task) -> Option<u64> {
-        if self.lane.task_run.as_ref().is_some_and(|r| r.install && r.state == State::Running) {
+        if self.session.task_run.as_ref().is_some_and(|r| r.install && r.state == State::Running) {
             return None;
         }
         let before = self.task_generation;
@@ -429,7 +430,7 @@ impl Editor {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = match crate::dap::new_session(&mut cmd).spawn() {
+        let mut child = match crate::dap::setsid(&mut cmd).spawn() {
             Ok(c) => c,
             Err(e) => {
                 if let Some(a) = after {
@@ -439,8 +440,8 @@ impl Editor {
             }
         };
         // A finished test run gives the panel over
-        if self.lane.test_run.as_ref().is_some_and(|r| r.state != crate::testing::RunState::Running) {
-            self.lane.test_run = None;
+        if self.session.test_run.as_ref().is_some_and(|r| r.state != crate::testing::RunState::Running) {
+            self.session.test_run = None;
         }
         crate::tools::run_dropped(self, "another task took its place");
         crate::restart::run_dropped(self);
@@ -462,11 +463,11 @@ impl Editor {
                     })
                     .collect();
                 let apply = move |ed: &mut Editor| {
-                    let Some(r) = ed.lane.task_run.as_mut().filter(|r| r.generation == generation) else {
+                    let Some(r) = ed.session.task_run.as_mut().filter(|r| r.generation == generation) else {
                         return;
                     };
                     // (a preflight's markers move its steps on, and aren't shown — `preflight.rs`)
-                    let mut preflight = ed.lane.preflight.as_mut().filter(|p| p.generation == generation);
+                    let mut preflight = ed.session.preflight.as_mut().filter(|p| p.generation == generation);
                     let mut places = Vec::new();
                     r.last_output = Instant::now();
                     for (line, found) in lines {
@@ -484,7 +485,7 @@ impl Editor {
                         r.output.drain(..n - 5000);
                     }
                     for it in places {
-                        let Some(r) = ed.lane.task_run.as_mut() else { break };
+                        let Some(r) = ed.session.task_run.as_mut() else { break };
                         // Counted once (the same place twice isn't two) — the run's own, for its report; the
                         // user's list only from a run that feeds it (#28)
                         let seen =
@@ -527,7 +528,7 @@ impl Editor {
                 std::thread::sleep(crate::sandbox::WATCH_LAST);
             }
             let done = move |ed: &mut Editor| {
-                let Some(r) = ed.lane.task_run.as_mut().filter(|r| r.generation == generation) else {
+                let Some(r) = ed.session.task_run.as_mut().filter(|r| r.generation == generation) else {
                     return;
                 };
                 if let Some(w) = r.guard.as_ref().and_then(|g| g.watch()) {
@@ -543,7 +544,7 @@ impl Editor {
                 if crate::restart::built(ed, generation, passed, errors) || ed.preflight_done(generation) {
                     return;
                 }
-                let Some(r) = ed.lane.task_run.as_mut() else { return };
+                let Some(r) = ed.session.task_run.as_mut() else { return };
                 if let Some(after) = r.after.take() {
                     let passed = r.state == State::Passed;
                     return ed.install_done(after, passed);
@@ -571,8 +572,8 @@ impl Editor {
         }
         // The same task again: its panel starts as tall as it was (no shrink and grow back)
         let tall =
-            self.lane.task_run.as_ref().filter(|r| r.task.name == task.name).map_or(0, |r| r.tall.get());
-        self.lane.task_run = Some(Run {
+            self.session.task_run.as_ref().filter(|r| r.task.name == task.name).map_or(0, |r| r.tall.get());
+        self.session.task_run = Some(Run {
             task,
             state: State::Running,
             output: Vec::new(),

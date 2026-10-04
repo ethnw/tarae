@@ -161,7 +161,7 @@ enum Step {
     MainClass,
     Classpath,
     JavaExec,
-    Session,
+    Start,
 }
 
 #[derive(Clone, Debug)]
@@ -180,7 +180,7 @@ pub struct DebugPrep {
     java_exec: Value,
     /// Already loaded once (give up if "no command" again).
     reloaded: bool,
-    /// Attach to a running JVM (JDWP host:port) — straight to a session, no main class/classpath lookup.
+    /// Attach to a running JVM (JDWP host:port) — straight to the debug run, no main class/classpath lookup.
     attach: Option<(String, u16)>,
 }
 
@@ -264,7 +264,7 @@ impl crate::editor::Editor {
             cid,
             step: match (reload, &attach) {
                 (true, _) => Step::Reload,
-                (false, Some(_)) => Step::Session,
+                (false, Some(_)) => Step::Start,
                 (false, None) => Step::MainClass,
             },
             request: None,
@@ -293,7 +293,7 @@ impl crate::editor::Editor {
             Step::MainClass => ("vscode.java.resolveMainClass", json!([crate::lsp::uri(&p.root)])),
             Step::Classpath => ("vscode.java.resolveClasspath", json!([p.main, p.project])),
             Step::JavaExec => ("vscode.java.resolveJavaExecutable", json!([p.main, p.project])),
-            Step::Session => ("vscode.java.startDebugSession", json!([])),
+            Step::Start => ("vscode.java.startDebugSession", json!([])),
         };
         let params = json!({ "command": command, "arguments": args });
         match self.lsp_send(p.cid, crate::lsp_editor::Kind::JavaDebug, "workspace/executeCommand", params) {
@@ -347,7 +347,7 @@ impl crate::editor::Editor {
                 if result != &Value::Bool(true) {
                     return self.java_debug_fail("jdtls couldn't load java-debug — restart tarae".into());
                 }
-                p.step = if p.attach.is_some() { Step::Session } else { Step::MainClass };
+                p.step = if p.attach.is_some() { Step::Start } else { Step::MainClass };
                 p.reloaded = true;
             }
             Step::MainClass => {
@@ -370,9 +370,9 @@ impl crate::editor::Editor {
             }
             Step::JavaExec => {
                 p.java_exec = result.clone();
-                p.step = Step::Session;
+                p.step = Step::Start;
             }
-            Step::Session => {
+            Step::Start => {
                 let Some(port) = result.as_u64().and_then(|n| u16::try_from(n).ok()) else {
                     return self.java_debug_fail(format!("no debug port from jdtls ({result})"));
                 };
@@ -397,7 +397,7 @@ impl crate::editor::Editor {
                         }),
                     ),
                 };
-                // Connecting is a socket wait — worker thread; a newer/ended session drops the result
+                // Connecting is a socket wait — worker thread; a newer/ended debug run drops the result
                 let generation = p.generation;
                 self.events.jobs().spawn(move || {
                     let conn = std::net::TcpStream::connect(("127.0.0.1", port))

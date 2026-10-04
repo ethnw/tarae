@@ -1,6 +1,6 @@
 # side_panel_files · 112x24 · theme meok · cursor 3:37
 ## text
-00   files  outline  git             tarae  ›  src  ›  demo.rs
+00   files  outline  git  tarae      tarae  ›  src  ›  demo.rs
 01   ────────────────────────────    ─────────────────────────────────────────────────────────────────────────────
 02   + docs/                   2      1 use std::collections::HashMap;
 03   − src/                           2
@@ -50,7 +50,7 @@
 22   AAAAAAAA
 23
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00   TTTTT  fffffff  fff             ddddd  f  ddd  f  TTTTTTT
+00   TTTTT  fffffff  fff  fffff      ddddd  f  ddd  f  TTTTTTT
 01   ffffffffffffffffffffffffffff    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 02   d ddddf                   d      f
 03   d dddf                           A

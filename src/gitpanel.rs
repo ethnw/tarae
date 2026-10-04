@@ -221,7 +221,7 @@ fn git_remote(dir: &Path, args: &[&str]) -> Result<String, Refused> {
     #[cfg(test)]
     crate::gitmenu::not_in_this_repository(dir, args);
     let mut cmd = std::process::Command::new("git");
-    crate::dap::new_session(&mut cmd);
+    crate::dap::setsid(&mut cmd);
     let out = cmd
         .arg("-C")
         .arg(dir)
@@ -500,7 +500,7 @@ pub enum Deleting {
 }
 
 /// A commit being written: its message buffer, the repository, whether it amends · whether its session
-/// ends once it's in (`c` on a session's end card — `sessions.rs`).
+/// ends once it's in (`c` on a session's end card — `worktree.rs`).
 pub struct Committing {
     pub doc: DocId,
     pub top: PathBuf,
@@ -511,7 +511,7 @@ pub struct Committing {
 impl Editor {
     /// Where git runs: the side panel's folder, else the editor's root.
     fn git_cwd(&self) -> PathBuf {
-        self.lane.sidebar.as_ref().map_or_else(|| self.lane.root.clone(), |s| s.root().to_path_buf())
+        self.session.sidebar.as_ref().map_or_else(|| self.session.root.clone(), |s| s.root().to_path_buf())
     }
 
     /// `space g` — the side panel's git tab, with the keys; from the code, on the row for what's under the
@@ -519,24 +519,29 @@ impl Editor {
     /// review the tab and the review's rail take turns in the column: again = the rail back, with the keys
     /// (so the next one doesn't land in the code — `d` there would delete the selected change).
     pub fn git_panel(&mut self) {
-        if self.lane.code_review.is_some() && !self.review_rail_up() {
+        if self.session.code_review.is_some() && !self.review_rail_up() {
             return crate::codereview::rail_focus(self);
         }
-        let review = self.lane.code_review.is_some();
-        if let Some(r) = self.lane.code_review.as_mut() {
+        let review = self.session.code_review.is_some();
+        if let Some(r) = self.session.code_review.as_mut() {
             r.behind = true;
             r.focus = false;
             // (a tab focused behind the rail would close instead of coming to the front)
-            if let Some(s) = self.lane.sidebar.as_mut() {
+            if let Some(s) = self.session.sidebar.as_mut() {
                 s.focus = false;
             }
-        } else if self.lane.sidebar.as_ref().is_some_and(|s| s.mode == crate::sidebar::Mode::Git && s.focus) {
-            self.lane.sidebar = None;
+        } else if self
+            .session
+            .sidebar
+            .as_ref()
+            .is_some_and(|s| s.mode == crate::sidebar::Mode::Git && s.focus)
+        {
+            self.session.sidebar = None;
             return;
         }
         let aim = self.doc().path.clone().map(|p| (p, self.cursor_line()));
         self.sidebar_show(crate::sidebar::Mode::Git);
-        if let Some(s) = self.lane.sidebar.as_mut() {
+        if let Some(s) = self.session.sidebar.as_mut() {
             s.aim = aim;
             // (no quick `s`/`d` on the change under the cursor in a review: it's against the review's base)
             s.from_code = !review;
@@ -592,7 +597,7 @@ impl Editor {
     /// Something changed files outside the editor's own saves — Claude's edit, write or command, a turn's
     /// end (#29): the git tab, when it's shown, reads the status again.
     pub fn git_tab_follow(&mut self) {
-        if self.lane.sidebar.as_ref().is_some_and(|s| s.mode == crate::sidebar::Mode::Git) {
+        if self.session.sidebar.as_ref().is_some_and(|s| s.mode == crate::sidebar::Mode::Git) {
             self.git_refresh();
         }
     }
@@ -601,22 +606,22 @@ impl Editor {
     /// before a stage doesn't undo what the panel shows).
     pub fn git_refresh(&mut self) {
         let cwd = self.git_cwd();
-        self.lane.git_reads += 1;
-        let read = self.lane.git_reads;
+        self.session.git_reads += 1;
+        let read = self.session.git_reads;
         self.events.jobs().spawn(move || {
             let result = status(&cwd).map(Status::with_rows);
             move |ed: &mut Editor| {
-                if read != ed.lane.git_reads {
+                if read != ed.session.git_reads {
                     return;
                 }
                 match result {
                     Ok(mut st) => {
                         st.generation = read;
-                        ed.lane.git_status = Some(st);
+                        ed.session.git_status = Some(st);
                     }
                     Err(e) => {
-                        ed.lane.git_status = None;
-                        if ed.lane.sidebar.as_ref().is_some_and(|s| s.mode == crate::sidebar::Mode::Git) {
+                        ed.session.git_status = None;
+                        if ed.session.sidebar.as_ref().is_some_and(|s| s.mode == crate::sidebar::Mode::Git) {
                             ed.set_warning(format!("git: {e}"));
                         }
                     }
@@ -628,7 +633,7 @@ impl Editor {
     /// Queue work in the repository (on a worker, one at a time — two `git add`s at once fight over the
     /// index lock); `done` says how it went, then the status is read again.
     fn git_do(&mut self, work: GitWork, done: GitDone) {
-        if self.lane.git_status.is_none() {
+        if self.session.git_status.is_none() {
             return self.set_warning("not a git repository");
         }
         self.git_queued(work, done);
@@ -641,7 +646,7 @@ impl Editor {
         work: impl FnOnce(&Path) -> T + Send + 'static,
         done: impl FnOnce(&mut Editor, T) + Send + 'static,
     ) {
-        self.lane.git_queue.push_back(Box::new(move |top| {
+        self.session.git_queue.push_back(Box::new(move |top| {
             let result = work(top);
             Box::new(move |ed: &mut Editor| done(ed, result))
         }));
@@ -649,19 +654,19 @@ impl Editor {
     }
 
     fn git_next(&mut self) {
-        if self.lane.git_busy {
+        if self.session.git_busy {
             return;
         }
-        let top = self.lane.git_status.as_ref().map_or_else(|| self.git_cwd(), |s| s.top.clone());
-        let Some(job) = self.lane.git_queue.pop_front() else { return };
-        self.lane.git_busy = true;
+        let top = self.session.git_status.as_ref().map_or_else(|| self.git_cwd(), |s| s.top.clone());
+        let Some(job) = self.session.git_queue.pop_front() else { return };
+        self.session.git_busy = true;
         self.events.jobs().spawn(move || {
             let done = job(&top);
             move |ed: &mut Editor| {
-                ed.lane.git_busy = false;
+                ed.session.git_busy = false;
                 done(ed);
                 ed.git_next();
-                if ed.lane.git_queue.is_empty() {
+                if ed.session.git_queue.is_empty() {
                     ed.git_refresh();
                     ed.git_reload_bases();
                 }
@@ -695,7 +700,7 @@ impl Editor {
     /// one reloads, its old text one `u` away), the untracked files it lists are deleted, file by file (and
     /// folders that end up empty) — never a folder whole, never the repository.
     pub fn git_discard(&mut self, rel: &str) {
-        let Some(st) = self.lane.git_status.as_ref() else { return };
+        let Some(st) = self.session.git_status.as_ref() else { return };
         let under = |e: &&Entry| rel.is_empty() || e.rel == rel || e.rel.starts_with(&format!("{rel}/"));
         let tracked: Vec<String> =
             st.unstaged.iter().filter(under).filter(|e| e.letter != '?').map(|e| e.rel.clone()).collect();
@@ -704,10 +709,13 @@ impl Editor {
         if tracked.is_empty() && untracked.is_empty() {
             return;
         }
-        let fresh =
-            self.lane.git_discard_asked.as_ref().is_some_and(|(r, t)| r == rel && t.elapsed().as_secs() < 3);
+        let fresh = self
+            .session
+            .git_discard_asked
+            .as_ref()
+            .is_some_and(|(r, t)| r == rel && t.elapsed().as_secs() < 3);
         if !fresh {
-            self.lane.git_discard_asked = Some((rel.to_string(), Instant::now()));
+            self.session.git_discard_asked = Some((rel.to_string(), Instant::now()));
             let what = if rel.is_empty() { "all changes".to_string() } else { rel.to_string() };
             let mut parts = Vec::new();
             if !tracked.is_empty() {
@@ -726,7 +734,7 @@ impl Editor {
             }
             return self.set_warning(format!("d again {} — {what}", parts.join(" and ")));
         }
-        self.lane.git_discard_asked = None;
+        self.session.git_discard_asked = None;
         let n = tracked.len() + untracked.len();
         self.git_do(
             Box::new(move |top| {
@@ -763,7 +771,9 @@ impl Editor {
     }
 
     pub fn git_commit_open(&mut self, amend: bool, draft: bool) {
-        let Some(st) = self.lane.git_status.as_ref() else { return self.set_warning("not a git repository") };
+        let Some(st) = self.session.git_status.as_ref() else {
+            return self.set_warning("not a git repository");
+        };
         let (top, branch) = (st.top.clone(), st.branch.clone());
         if amend {
             // (read now, before the amend makes a new HEAD — said as the buffer opens)
@@ -803,11 +813,11 @@ impl Editor {
             }),
             Box::new(move |ed, r| match r {
                 Ok(file) if file.is_empty() => {
-                    ed.lane.commit_then_end = false;
+                    ed.session.commit_then_end = false;
                     ed.set_warning("nothing staged — s stages a file (or a folder, or the whole section)")
                 }
                 Ok(file) => {
-                    let then_end = std::mem::take(&mut ed.lane.commit_then_end);
+                    let then_end = std::mem::take(&mut ed.session.commit_then_end);
                     if let Err(e) = ed.open(std::path::Path::new(&file)) {
                         return ed.set_error(format!("{e:#}"));
                     }
@@ -815,8 +825,8 @@ impl Editor {
                     doc.throwaway = true;
                     doc.set_selection(crate::selection::Selection::point(0));
                     let id = doc.id;
-                    ed.lane.committing = Some(Committing { doc: id, top, amend, then_end });
-                    if let Some(s) = ed.lane.sidebar.as_mut() {
+                    ed.session.committing = Some(Committing { doc: id, top, amend, then_end });
+                    if let Some(s) = ed.session.sidebar.as_mut() {
                         s.focus = false;
                     }
                     // A new message: typed at once. Amending: the last message is there to change, not to
@@ -828,7 +838,7 @@ impl Editor {
                     }
                 }
                 Err(e) => {
-                    ed.lane.commit_then_end = false;
+                    ed.session.commit_then_end = false;
                     ed.set_error(format!("commit: {e}"))
                 }
             }),
@@ -838,7 +848,7 @@ impl Editor {
     /// A buffer was saved: the commit message's commits (and its buffer closes); the panel reads the status
     /// again.
     pub fn git_saved(&mut self, id: DocId) {
-        if let Some(c) = self.lane.committing.take_if(|c| c.doc == id) {
+        if let Some(c) = self.session.committing.take_if(|c| c.doc == id) {
             let Some(file) = self.docs.iter().find(|d| d.id == id).and_then(|d| d.path.clone()) else {
                 return;
             };
@@ -865,14 +875,14 @@ impl Editor {
                     }
                     // An empty message aborts — the buffer stays for another try
                     Err(e) => {
-                        ed.lane.committing = Some(Committing { doc: id, top, amend, then_end });
+                        ed.session.committing = Some(Committing { doc: id, top, amend, then_end });
                         ed.set_error(format!("commit: {e}"));
                     }
                 }),
             );
             return;
         }
-        if self.lane.sidebar.as_ref().is_some_and(|s| s.mode == crate::sidebar::Mode::Git) {
+        if self.session.sidebar.as_ref().is_some_and(|s| s.mode == crate::sidebar::Mode::Git) {
             self.git_refresh();
         }
     }
@@ -881,7 +891,7 @@ impl Editor {
     /// commit), in the style of the repository's recent messages. Read on a worker; the draft streams in and
     /// lands as the in-buffer review of the message part (above the `#` lines).
     pub fn commit_draft(&mut self) {
-        let Some(c) = self.lane.committing.as_ref().filter(|c| c.doc == self.doc().id) else {
+        let Some(c) = self.session.committing.as_ref().filter(|c| c.doc == self.doc().id) else {
             return self
                 .set_status("open a commit message first — c in the git tab (or C: Claude drafts it)");
         };
@@ -907,7 +917,7 @@ impl Editor {
                 match crate::llm::draft(ed, id, "a commit message", &prompt, 0, end) {
                     // (its body at 72, like every message — Claude doesn't always: #21)
                     Ok(()) => {
-                        if let Some(r) = ed.lane.review.as_mut() {
+                        if let Some(r) = ed.session.review.as_mut() {
                             r.wrap = Some(72);
                         }
                     }
@@ -919,14 +929,16 @@ impl Editor {
 
     /// Whether the current buffer is a commit message being written.
     pub fn in_commit_message(&self) -> bool {
-        self.lane.committing.as_ref().is_some_and(|c| c.doc == self.doc().id)
+        self.session.committing.as_ref().is_some_and(|c| c.doc == self.doc().id)
     }
 
     /// `P` / `p` — push (setting the upstream the first time) / pull fast-forward only. A branch gone a
     /// different way from its upstream (after an amend or a rebase) — or a push refused for it — gets the
     /// force card instead (`git_force_ask`).
     pub fn git_push_pull(&mut self, push: bool) {
-        let Some(st) = self.lane.git_status.clone() else { return self.set_warning("not a git repository") };
+        let Some(st) = self.session.git_status.clone() else {
+            return self.set_warning("not a git repository");
+        };
         if push && st.upstream.is_some() && st.ahead > 0 && st.behind > 0 {
             return self.git_force_ask(None);
         }
@@ -959,7 +971,7 @@ impl Editor {
     /// there — and `y` pushes with a lease on exactly that (`git_force_push`). `refused` = why the push
     /// before it was refused (said if the card can't be made).
     pub fn git_force_ask(&mut self, refused: Option<String>) {
-        let Some(top) = self.lane.git_status.as_ref().map(|s| s.top.clone()) else { return };
+        let Some(top) = self.session.git_status.as_ref().map(|s| s.top.clone()) else { return };
         self.set_step("git", "reading what the remote has…");
         self.events.jobs().spawn(move || {
             let ask = force_ask(&top);

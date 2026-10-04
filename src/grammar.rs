@@ -387,7 +387,7 @@ impl crate::editor::Editor {
     }
 
     /// When the file's language grammar is missing (called by `load_language`): offer a download —
-    /// once per language per session.
+    /// once per language until quit.
     pub fn offer_grammar(&mut self, spec: &crate::syntax::LangSpec) {
         if !self.grammar_hinted.insert(spec.grammar.clone()) {
             return;

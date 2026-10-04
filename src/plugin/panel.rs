@@ -72,7 +72,7 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
     if ed.mode != Mode::Normal || !ed.pending.is_empty() || ed.prompt.is_some() {
         return false;
     }
-    if ed.lane.sidebar.as_ref().is_some_and(|s| s.focus) || !ed.plugin_panel_in_sight() {
+    if ed.session.sidebar.as_ref().is_some_and(|s| s.focus) || !ed.plugin_panel_in_sight() {
         return false;
     }
     let Some(st) = ed.plugins.as_mut().and_then(|p| p.panel.as_mut()).filter(|s| s.focus) else {
@@ -153,10 +153,10 @@ impl Editor {
 
     /// The panel took the keys: nothing else keeps them.
     fn plugin_panel_took_keys(&mut self) {
-        if let Some(s) = self.lane.sidebar.as_mut() {
+        if let Some(s) = self.session.sidebar.as_mut() {
             s.focus = false;
         }
-        if let Some(c) = self.lane.chat.as_mut() {
+        if let Some(c) = self.session.chat.as_mut() {
             c.focused = false;
         }
     }
@@ -278,7 +278,7 @@ impl Editor {
         let (open, focus) = (std::mem::take(&mut side.open), std::mem::take(&mut side.focus));
         p.side = Some((plugin.to_string(), side));
         if open || focus {
-            match self.lane.sidebar.as_mut() {
+            match self.session.sidebar.as_mut() {
                 Some(s) => {
                     s.mode = crate::sidebar::Mode::Plugin;
                     s.shown = None;
@@ -286,20 +286,20 @@ impl Editor {
                 }
                 None => {
                     let mut s =
-                        crate::sidebar::Sidebar::new(crate::sidebar::Mode::Plugin, self.lane.root.clone());
+                        crate::sidebar::Sidebar::new(crate::sidebar::Mode::Plugin, self.session.root.clone());
                     s.focus = focus;
-                    self.lane.sidebar = Some(s);
+                    self.session.sidebar = Some(s);
                 }
             }
-            if focus && let Some(c) = self.lane.chat.as_mut() {
+            if focus && let Some(c) = self.session.chat.as_mut() {
                 c.focused = false;
             }
         }
         self.sidebar_sync();
         // Given the keys: on the row for the code under the cursor
         if focus
-            && let Some(h) = self.lane.sidebar.as_ref().and_then(|s| s.here(self))
-            && let Some(s) = self.lane.sidebar.as_mut()
+            && let Some(h) = self.session.sidebar.as_ref().and_then(|s| s.here(self))
+            && let Some(s) = self.session.sidebar.as_mut()
         {
             s.selected = h;
         }
@@ -374,7 +374,7 @@ impl Editor {
         // The buffer is what you're looking at now: its keys, not the panel's or the side tab's — not even
         // if this answer shows the panel again after it
         self.plugin_panel_unfocus();
-        if let Some(s) = self.lane.sidebar.as_mut().filter(|s| s.mode == crate::sidebar::Mode::Plugin) {
+        if let Some(s) = self.session.sidebar.as_mut().filter(|s| s.mode == crate::sidebar::Mode::Plugin) {
             s.focus = false;
         }
         if let Some(p) = &mut self.plugins {

@@ -34,7 +34,7 @@ fn fallback() -> Vec<ModelInfo> {
 }
 
 fn offered(ed: &Editor) -> Vec<ModelInfo> {
-    match ed.lane.chat.as_ref().map(|c| &c.models).filter(|m| !m.is_empty()) {
+    match ed.session.chat.as_ref().map(|c| &c.models).filter(|m| !m.is_empty()) {
         Some(m) => m.clone(),
         None => fallback(),
     }
@@ -49,7 +49,7 @@ fn chosen(ed: &Editor) -> String {
 /// when the model takes one — `Opus 5.5 · high`. When what answered isn't what's asked for (a chat started
 /// before `llm.model` changed), both: `claude-sonnet-5-5 · asked opus`. None before anything's known.
 pub fn label(ed: &Editor) -> Option<String> {
-    let c = ed.lane.chat.as_ref()?;
+    let c = ed.session.chat.as_ref()?;
     let models = &c.models;
     let value = chosen(ed);
     let m = models.iter().find(|m| m.value == value);
@@ -161,7 +161,7 @@ pub fn set(ed: &mut Editor, value: &str) -> Result<(), String> {
     save(ed, "llm.model", if value == "default" { "" } else { &value })?;
     crate::chat::request(ed, json!({ "subtype": "set_model", "model": value }));
     // (what answers is known again from the next answer — until then the title says what was asked for)
-    if let Some(c) = ed.lane.chat.as_mut() {
+    if let Some(c) = ed.session.chat.as_mut() {
         c.model.clear();
     }
     // An effort the new model doesn't take goes (it'd be refused)

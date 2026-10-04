@@ -1,7 +1,7 @@
 //! The MCP revisions tarae's two servers speak — the chat's tools (`tools.rs`, over stream-json) and Claude
 //! Code's IDE side (`agent.rs`, over WebSocket) — so a CLI that moves to a newer one still finds them.
 //!
-//! - Up to 2025-11-25 a session starts with `initialize` (the version negotiated there) and
+//! - Up to 2025-11-25 a connection starts with `initialize` (the version negotiated there) and
 //!   `notifications/initialized`; results are plain. Measured 2026-10-03 with claude 2.1.283: it sends
 //!   `initialize` 2025-11-25 → `notifications/initialized` → `tools/list` (`tools::tests::installed_claude_speaks_a_revision_we_speak`,
 //!   ignored — it notices an upgrade).

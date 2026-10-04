@@ -42,7 +42,7 @@ fn key(i: &Item) -> (PathBuf, usize, String) {
 
 /// Marks the list keeps in documents (so the jump list's pruning leaves them).
 pub fn marks(ed: &Editor) -> Vec<(DocId, u64)> {
-    ed.lane.qlist.iter().flat_map(|l| l.items.iter().filter_map(|i| i.mark)).collect()
+    ed.session.qlist.iter().flat_map(|l| l.items.iter().filter_map(|i| i.mark)).collect()
 }
 
 impl Editor {
@@ -59,7 +59,7 @@ impl Editor {
     /// How to walk the list, as a toast (`qlist_set` says it; a list set while something else has the
     /// screen says it later).
     pub fn qlist_announce(&mut self) {
-        if let Some(l) = self.lane.qlist.as_ref().filter(|l| !l.items.is_empty()) {
+        if let Some(l) = self.session.qlist.as_ref().filter(|l| !l.items.is_empty()) {
             let (title, n) = (l.title.clone(), l.items.len());
             self.set_status(format!("{title}: {n} in the list — ]q goes through them, space q shows them"));
         }
@@ -69,14 +69,14 @@ impl Editor {
     pub fn qlist_put(&mut self, title: impl Into<String>, items: Vec<Item>) {
         let title = title.into();
         let keys = items.iter().map(key).collect();
-        let generation = self.lane.qlist.as_ref().map_or(0, |l| l.generation) + 1;
-        self.lane.qlist = Some(List { title, items, current: None, keys, generation });
+        let generation = self.session.qlist.as_ref().map_or(0, |l| l.generation) + 1;
+        self.session.qlist = Some(List { title, items, current: None, keys, generation });
         self.qlist_mark_open();
     }
 
     /// One more item (a running task's) — false if it's there already.
     pub fn qlist_push(&mut self, mut item: Item) -> bool {
-        let Some(l) = self.lane.qlist.as_mut() else { return false };
+        let Some(l) = self.session.qlist.as_mut() else { return false };
         if !l.keys.insert(key(&item)) {
             return false;
         }
@@ -94,7 +94,7 @@ impl Editor {
     /// Items in open (loaded) documents without a mark get one — from their line and column as found. On
     /// making a list, opening a file, a file finishing loading.
     pub fn qlist_mark_open(&mut self) {
-        let Some(l) = self.lane.qlist.as_mut() else { return };
+        let Some(l) = self.session.qlist.as_mut() else { return };
         let open: std::collections::HashMap<PathBuf, usize> = self
             .docs
             .iter()
@@ -113,7 +113,7 @@ impl Editor {
     /// Document `id` is closing: its items keep where their marks got to, as line and column (a mark again
     /// when it's reopened).
     pub fn qlist_doc_closing(&mut self, id: DocId) {
-        let Some(l) = self.lane.qlist.as_mut() else { return };
+        let Some(l) = self.session.qlist.as_mut() else { return };
         let Some(doc) = self.docs.iter().find(|d| d.id == id) else { return };
         for it in l.items.iter_mut().filter(|i| i.mark.is_some_and(|(d, _)| d == id)) {
             if let Some(sel) = it.mark.and_then(|(_, m)| doc.mark(m)) {
@@ -127,7 +127,7 @@ impl Editor {
 
     /// `]q` / `[q` — the next / previous item (wrapping), its message as a toast.
     pub fn qlist_step(&mut self, forward: bool) {
-        let Some(l) = self.lane.qlist.as_ref().filter(|l| !l.items.is_empty()) else {
+        let Some(l) = self.session.qlist.as_ref().filter(|l| !l.items.is_empty()) else {
             return self
                 .set_status("the list is empty — C-q in a picker keeps its places, space m runs a task");
         };
@@ -143,8 +143,8 @@ impl Editor {
 
     /// Go to item `i` — where its mark got to, or (a file not open, or still loading) its line and column.
     pub fn qlist_goto(&mut self, i: usize) {
-        let Some(it) = self.lane.qlist.as_ref().and_then(|l| l.items.get(i)).cloned() else { return };
-        if let Some(l) = self.lane.qlist.as_mut() {
+        let Some(it) = self.session.qlist.as_ref().and_then(|l| l.items.get(i)).cloned() else { return };
+        if let Some(l) = self.session.qlist.as_mut() {
             l.current = Some(i);
             l.generation += 1;
         }
@@ -162,7 +162,7 @@ impl Editor {
         if let Err(e) = result {
             return self.set_error(format!("{e:#}"));
         }
-        let n = self.lane.qlist.as_ref().map_or(0, |l| l.items.len());
+        let n = self.session.qlist.as_ref().map_or(0, |l| l.items.len());
         let msg = it.message.lines().next().unwrap_or_default().to_string();
         let text = if msg.is_empty() { format!("{}/{n}", i + 1) } else { format!("{}/{n} · {msg}", i + 1) };
         match it.severity {
@@ -176,7 +176,7 @@ impl Editor {
     /// they match the documents').
     pub fn qlist_from_picker(&mut self) -> bool {
         let Some(p) = self.picker.as_ref() else { return false };
-        let root = &self.lane.root;
+        let root = &self.session.root;
         let items: Vec<Item> = p
             .shown()
             .filter_map(|i| {

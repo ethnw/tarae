@@ -67,11 +67,11 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
             editor.run_command_by_name("theme_picker");
             Ok(())
         }
-        // `:theme name` = this session only (to save: `:set! theme name` or the picker)
+        // `:theme name` = until quit only (to save: `:set! theme name` or the picker)
         "theme" => set(editor, &format!("theme {rest}"), false),
         // A commit message: `:q` cancels (closes it), `:wq`/`:x` commits — not the whole editor
         "q" | "quit" | "q!" | "quit!" if editor.in_commit_message() => {
-            let then_end = editor.lane.committing.take().is_some_and(|c| c.then_end);
+            let then_end = editor.session.committing.take().is_some_and(|c| c.then_end);
             editor.close_current(true)?;
             editor.set_status(match then_end {
                 true => "commit canceled — the session stays, its changes staged",
@@ -129,24 +129,22 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
         "sh" | "run-shell-command" => shell(editor, rest),
         "diff" => editor.diff_against(rest.trim()),
         "diff-off" => editor.diff_off(),
-        // (`lane-…`: their old names, still working — `cmdline::COMMANDS` keeps them out of sight)
-        "session-open" | "lane-open" if !rest.trim().is_empty() => {
-            let id = editor.lane_open(Path::new(rest.trim()))?;
-            let all = editor.lanes_in_order();
+        "session-open" if !rest.trim().is_empty() => {
+            let id = editor.session_open(Path::new(rest.trim()))?;
+            let all = editor.sessions_in_order();
             let at = all.iter().position(|l| l.id == id).map_or(all.len(), |i| i + 1);
-            let msg = format!("{} · session {at} of {} — space W lists them", editor.lane.label(), all.len());
+            let msg =
+                format!("{} · session {at} of {} — space W lists them", editor.session.label(), all.len());
             editor.set_status(msg);
             Ok(())
         }
-        "session-open" | "lane-open" => {
-            Err("usage: :session-open <folder> (a worktree or another checkout)".into())
-        }
-        "session-switch" | "lane-switch" => {
-            let lanes = editor.lanes_listed();
+        "session-open" => Err("usage: :session-open <folder> (a worktree or another checkout)".into()),
+        "session-switch" => {
+            let sessions = editor.sessions_listed();
             match rest.trim().parse() {
-                Ok(id) if editor.lane_switch(id) => Ok(()),
+                Ok(id) if editor.session_switch(id) => Ok(()),
                 _ => {
-                    let list: Vec<String> = lanes
+                    let list: Vec<String> = sessions
                         .iter()
                         .map(|(id, name, front)| format!("{id} {name}{}", if *front { " ●" } else { "" }))
                         .collect();
@@ -154,7 +152,7 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
                 }
             }
         }
-        // Sessions — a branch in a checkout of its own, as a lane (sessions.rs)
+        // Making, ending, bringing in a session — a branch in a checkout of its own (worktree.rs)
         "session-new" => {
             match rest.split_whitespace().collect::<Vec<_>>()[..] {
                 [name] => editor.session_new(name, None),
@@ -246,7 +244,7 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
         }
         "sandbox-grant" => editor.sandbox_grant(rest),
         "config-reload" => {
-            let root = editor.lane.root.clone();
+            let root = editor.session.root.clone();
             editor.events.jobs().spawn(move || {
                 let (c, w) = config::load(&root);
                 move |ed: &mut Editor| ed.reload_config(c, w)
@@ -298,7 +296,7 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
         "chat" => {
             crate::chat::open(editor);
             if !rest.is_empty()
-                && let Some(c) = &mut editor.lane.chat
+                && let Some(c) = &mut editor.session.chat
             {
                 c.input = rest.to_string();
                 c.cursor = rest.len();
@@ -375,8 +373,8 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
         "undo-turn" => crate::checkpoint::step(editor, true),
         "redo-turn" => crate::checkpoint::step(editor, false),
         "notes-clear" => {
-            let n = editor.lane.notes.list.len();
-            editor.lane.notes.list.clear();
+            let n = editor.session.notes.list.len();
+            editor.session.notes.list.clear();
             editor.set_status(format!("{n} note{} closed", if n == 1 { "" } else { "s" }));
             Ok(())
         }
@@ -390,7 +388,7 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
     }
 }
 
-/// `:set path` = show current value and description, `:set path value` = this session only,
+/// `:set path` = show current value and description, `:set path value` = until quit only,
 /// `:set! path value` = also write it to the file.
 fn set(editor: &mut Editor, rest: &str, persist: bool) -> Result<(), String> {
     let (path, raw) = rest.split_once(char::is_whitespace).map_or((rest, ""), |(p, v)| (p, v.trim()));
@@ -415,7 +413,7 @@ fn set_value(editor: &mut Editor, path: &str, v: toml::Value, persist: bool) -> 
         let file = config::persist(path, &v)?;
         editor.set_status(format!("{path} = {v}  (saved to {})", file.display()));
     } else {
-        editor.set_status(format!("{path} = {v}  (this session — :set! to save)"));
+        editor.set_status(format!("{path} = {v}  (until you quit — :set! to save)"));
         editor.overrides.push((path.to_string(), v));
     }
     Ok(())
@@ -514,7 +512,7 @@ pub(crate) fn save_doc(editor: &mut Editor, id: crate::document::DocId, force: b
 
 fn saved(editor: &mut Editor, id: crate::document::DocId) {
     let Some(doc) = editor.docs.iter().find(|d| d.id == id) else { return };
-    let msg = format!("Saved {} · {} lines", doc.display_name(&editor.lane.root), doc.text.len_lines());
+    let msg = format!("Saved {} · {} lines", doc.display_name(&editor.session.root), doc.text.len_lines());
     editor.set_success(msg);
     editor.lsp_did_save(id);
     editor.undo_persist(id);
@@ -533,7 +531,7 @@ pub(crate) fn quit(editor: &mut Editor, force: bool) -> Result<(), String> {
             .docs
             .iter()
             .filter(|d| d.is_modified() && !d.throwaway)
-            .map(|d| d.display_name(&editor.lane.root))
+            .map(|d| d.display_name(&editor.session.root))
             .collect();
         if !dirty.is_empty() {
             return Err(format!("unsaved changes: {} (use :q! to discard)", dirty.join(", ")));
@@ -550,7 +548,7 @@ fn shell(editor: &mut Editor, cmd: &str) -> Result<(), String> {
     if cmd.is_empty() {
         return Err("usage: :sh <command>".into());
     }
-    let (cmd, dir) = (cmd.to_string(), editor.lane.root.clone());
+    let (cmd, dir) = (cmd.to_string(), editor.session.root.clone());
     editor.events.jobs().spawn(move || {
         let result = run_shell(&cmd, &dir);
         move |ed: &mut Editor| match result {
@@ -705,7 +703,7 @@ mod tests {
         let dir = std::fs::canonicalize(&dir).unwrap();
         std::fs::write(dir.join("a.txt"), "one\ntwo\nthree\n").unwrap();
         let mut ed = Editor::new(config::Config::default());
-        ed.lane.root = dir.clone();
+        ed.session.root = dir.clone();
         execute(&mut ed, "open a.txt:3:2").unwrap();
         assert_eq!(ed.doc().path.as_deref(), Some(dir.join("a.txt").as_path()));
         let head = ed.doc().selection().primary().head;

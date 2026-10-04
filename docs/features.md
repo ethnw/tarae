@@ -28,7 +28,7 @@ You don't need to know the keys to start:
   ([screenshot](screenshots/ux-welcome.png))
 - **A folder** — `tarae .` or `tarae ~/src/app` works in that folder (its `.tarae.toml`), starting on the start
   screen. When you had files open there last time, the start screen's first row offers them back: `r` continues
-  where you left off ([screenshot](screenshots/ux-welcome-continue.png)). `editor.restore-session = true` reopens
+  where you left off ([screenshot](screenshots/ux-welcome-continue.png)). `editor.restore-files = true` reopens
   them right away instead
 - **Mouse** — click to place the cursor, drag to select, alt+click for another cursor, wheel to scroll. In pickers the
   wheel moves the selection and a click opens. (Your terminal's own text selection is usually shift+drag.)
@@ -51,7 +51,7 @@ configs carry over as they are.
   `C`/`A-C`
 - Regex selection `s` (select matches inside the selection), `S` (split on matches), `A-s` (split into lines),
   `K`/`A-K` (keep/remove selections that match)
-- Editing `i a I A o O` `d c y p P` `A-d A-c` `r` `~` `` ` `` `` A-` `` `> <` `J` · `u U` — a whole insert session is one
+- Editing `i a I A o O` `d c y p P` `A-d A-c` `r` `~` `` ` `` `` A-` `` `> <` `J` · `u U` — a whole stay in insert mode is one
   undo step · `.` repeats the last insert (the command that started it and
   what you typed, at the current selections; with a count) · `C-c` comments/uncomments the selected lines (block
   comments where a language has only those)
@@ -207,7 +207,7 @@ configs carry over as they are.
 - **Auto-save** `editor.auto-save` — `"focus"` (default, when the terminal loses focus), `"idle"` (also after 2 s
   without typing), or `"off"`. Saves (these and `:w`) are written in the background, so typing never waits on the
   disk; quitting waits until they're written, and a test or task run waits too — they run the code on disk
-- **Session restore** — launched without arguments, tarae reopens the files you had open in this folder, at their
+- **Restore** — launched without arguments, tarae reopens the files you had open in this folder, at their
   cursor and scroll positions; open a file by name and you land where you last were in it
 - **Persistent undo** — on save, the last 1000 undo steps are written next to your state, so `u`/`U` keep working after
   a restart. If the file changed outside tarae, the history is quietly dropped
@@ -251,7 +251,7 @@ SQL, Lua, Zig, YAML, Terraform (HCL), Dockerfile, and Helm templates ([screensho
 
 - The default build embeds TOML, Markdown, and comment (6.5 MB binary). Other languages, Rust included, are
   **offered on first open** — a card at the bottom right asks, `y` downloads and builds the grammar (needs git and a
-  C compiler), and colors switch on in place; `n` means not this session ([screenshot](screenshots/grammar-offer.png)). Several offers stack,
+  C compiler), and colors switch on in place; `n` means not until you quit ([screenshot](screenshots/grammar-offer.png)). Several offers stack,
   and only the front card takes keys ([screenshot](screenshots/offer-stack.png))
 - `cargo install --path . --features bundled-grammars` embeds 26 common grammars instead (9.8 MB binary, no network
   needed later)
@@ -344,12 +344,12 @@ saying why. Nothing is built by default. `editor.restart-binary` points it at an
 Some things don't come along. A shell in the terminal panel (`space T`) ends; the new tarae says so, and
 `space T` starts a fresh one. Language servers start again, so a large project is indexed again before
 go-to-definition and the like answer. The turns `space u` can take back, notes, and the list (`]q`) belong to
-the old session and stay behind. Undo within a file (`u`/`U`) keeps working, as after any restart
+the old tarae and stay behind. Undo within a file (`u`/`U`) keeps working, as after any restart
 (`editor.persistent-undo`).
 
 Some things make it wait, and some stop it. If Claude is answering in the chat, the restart waits for the turn
 to end, and for any edits you accepted to land on disk; `:restart` again cancels. It stops, with a message
 saying what to do, if something open can't be carried over or would be cut short: text in a buffer that has no
 file, a file that changed on disk under your edits, an open review or code review, a commit message being
-written, a task or tests still running, or a debug session. When a file can't be saved, it stops too, and
+written, a task or tests still running, or a debug run. When a file can't be saved, it stops too, and
 nothing is lost.

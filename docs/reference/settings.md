@@ -2,7 +2,7 @@
 # Settings reference
 
 Every setting tarae reads from `~/.config/tarae/config.toml` (or a project `.tarae.toml`).
-The name is also the `:set` path: `:set editor.scrolloff 8` changes it for this session,
+The name is also the `:set` path: `:set editor.scrolloff 8` changes it until you quit,
 `:set!` also writes it to your config file. How files and layers work: [configuration guide](../configuration.md).
 
 ## Top level
@@ -30,7 +30,7 @@ The name is also the `:set` path: `:set editor.scrolloff 8` changes it for this 
 | `editor.offer-grammars` | bool | `true` | When a file's language has no syntax grammar yet, offer to download and build it (y/n) |
 | `editor.offer-installs` | bool | `true` | When a language server or debugger is missing, offer to install it the way its pack says (y/n/N) |
 | `editor.render-doc-comments` | bool | `true` | Show doc comments (///, //!, /** */) rendered as Markdown; raw when the cursor enters the block |
-| `editor.restore-session` | bool | `false` | Reopen the files you had open in this folder (with cursor positions) when started without files |
+| `editor.restore-files` | bool | `false` | Reopen the files you had open in this folder (with cursor positions) when started without files |
 | `editor.inline-diagnostics` | bool | `true` | Show diagnostic messages at the end of their line and tint error/warning lines |
 | `editor.cursor-diagnostics` | bool | `true` | Cursor on an underlined problem whose message doesn't fit at the line end: show it in full in a card (Esc hides it) |
 | `editor.soft-wrap` | `"always"` · `"prose"` · `"never"` | `"always"` | Show long lines as several rows: always, in prose only (Markdown, commit messages, plain text), or never |
@@ -58,7 +58,7 @@ The name is also the `:set` path: `:set editor.scrolloff 8` changes it for this 
 | `llm.args` | list of strings | `["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--tools", "", "--no-session-persistence", "--strict-mcp-config", "--setting-sources", ""]` | Arguments for llm.command (default: claude -p with speed flags) |
 | `llm.model` | string | `""` | Model for llm.command, e.g. "haiku" ("" = the CLI's default) |
 | `llm.effort` | `""` · `"low"` · `"medium"` · `"high"` · `"xhigh"` · `"max"` | `""` | How hard Claude thinks, for models that take it ("" = the model's default) |
-| `llm.follow` | bool | `true` | Chat: the editor follows the code Claude is reading, with its thoughts beside it (C-f toggles per session) |
+| `llm.follow` | bool | `true` | Chat: the editor follows the code Claude is reading, with its thoughts beside it (C-f toggles it in a chat) |
 | `llm.follow-resume` | integer 0–3600 | `20` | Chat: seconds after your last key that follow takes over again while Claude still works (0 = only C-f) |
 | `llm.review-at-end` | bool | `false` | Chat: Claude's edits go in as it makes them, and you review its turn when it ends — every new chat starts so (space v a turns it on and off, and saves it here) |
 | `llm.chat-settings` | bool | `true` | Chat: read your CLAUDE.md files and Claude Code settings, like `claude` does (hooks stay off, edits always ask) |

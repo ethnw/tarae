@@ -79,7 +79,7 @@ pub fn record(ed: &mut Editor, id: crate::document::DocId, before: Option<Rope>)
     else {
         return;
     };
-    let turn = &mut ed.lane.checkpoints.turn;
+    let turn = &mut ed.session.checkpoints.turn;
     match turn.iter_mut().find(|t| t.path == path) {
         Some(t) => t.after = after,
         None => {
@@ -98,7 +98,7 @@ pub fn record_unseen(
     before: Option<Rope>,
     then: impl FnOnce(&mut Editor) + Send + 'static,
 ) {
-    let turn = &mut ed.lane.checkpoints.turn;
+    let turn = &mut ed.session.checkpoints.turn;
     match turn.iter_mut().find(|t| t.path == path) {
         Some(t) if t.unseen => then(ed),
         Some(t) => {
@@ -120,7 +120,7 @@ pub fn record_unseen_all(
     files: Vec<(PathBuf, Rope)>,
     then: impl FnOnce(&mut Editor) + Send + 'static,
 ) {
-    let turn = &mut ed.lane.checkpoints.turn;
+    let turn = &mut ed.session.checkpoints.turn;
     let mut new = false;
     for (path, before) in files {
         match turn.iter_mut().find(|t| t.path == path) {
@@ -150,14 +150,14 @@ pub fn single(ed: &mut Editor, id: crate::document::DocId, before: Rope, what: &
     }
     let question = what.lines().next().unwrap_or_default().to_string();
     let files = vec![Touched { path, before: Some(before), after, unseen: false }];
-    ed.lane.checkpoints.list.push(Checkpoint::new(question, files));
+    ed.session.checkpoints.list.push(Checkpoint::new(question, files));
     keep(ed);
 }
 
 /// The chat turn ended: its changes become a checkpoint (a chat row says so). The files it changed, as
 /// the row names them (`lib.rs, sub.rs` · `4 files`), if any.
 pub fn turn_over(ed: &mut Editor, question: &str) -> Option<String> {
-    let files = std::mem::take(&mut ed.lane.checkpoints.turn);
+    let files = std::mem::take(&mut ed.session.checkpoints.turn);
     finish(ed, question, files)
 }
 
@@ -165,11 +165,11 @@ pub fn turn_over(ed: &mut Editor, question: &str) -> Option<String> {
 /// worker, then the checkpoint is made and `chat::turn_gathered` takes it on. False: nothing unseen —
 /// `turn_over` it is.
 pub fn gather(ed: &mut Editor, question: &str) -> bool {
-    if !ed.lane.checkpoints.turn.iter().any(|t| t.unseen) {
+    if !ed.session.checkpoints.turn.iter().any(|t| t.unseen) {
         return false;
     }
-    let files = std::mem::take(&mut ed.lane.checkpoints.turn);
-    ed.lane.checkpoints.gathering = true;
+    let files = std::mem::take(&mut ed.session.checkpoints.turn);
+    ed.session.checkpoints.gathering = true;
     let question = question.to_string();
     let paths: Vec<PathBuf> = files.iter().filter(|t| t.unseen).map(|t| t.path.clone()).collect();
     ed.events.jobs().spawn(move || {
@@ -196,7 +196,7 @@ pub fn gather(ed: &mut Editor, question: &str) -> bool {
                     t.after = now;
                 }
             }
-            ed.lane.checkpoints.gathering = false;
+            ed.session.checkpoints.gathering = false;
             let n = finish(ed, &question, files);
             crate::chat::turn_gathered(ed, n);
         }
@@ -220,25 +220,25 @@ fn finish(ed: &mut Editor, question: &str, files: Vec<Touched>) -> Option<String
         .collect();
     let n = if names.len() <= 2 { names.join(", ") } else { format!("{} files", names.len()) };
     let question = question.lines().next().unwrap_or_default().to_string();
-    ed.lane.checkpoints.list.push(Checkpoint::new(question, files));
+    ed.session.checkpoints.list.push(Checkpoint::new(question, files));
     keep(ed);
     Some(n)
 }
 
 /// Whether there's a turn to undo (the chat's `C-z` hint).
 pub fn can_undo(ed: &Editor) -> bool {
-    ed.lane.checkpoints.list.iter().any(|c| !c.undone)
+    ed.session.checkpoints.list.iter().any(|c| !c.undone)
 }
 
 /// `C-z` · `:undo-turn` (`undo`) · `:redo-turn`.
 pub fn step(ed: &mut Editor, undo: bool) -> Result<(), String> {
-    if !ed.lane.checkpoints.turn.is_empty() || ed.lane.chat.as_ref().is_some_and(|c| c.busy()) {
+    if !ed.session.checkpoints.turn.is_empty() || ed.session.chat.as_ref().is_some_and(|c| c.busy()) {
         return Err("Claude is still working — stop it (C-c in the chat) or wait for the turn to end".into());
     }
-    if ed.lane.checkpoints.gathering {
+    if ed.session.checkpoints.gathering {
         return Err("reading what Claude wrote this turn — a moment".into());
     }
-    let list = &ed.lane.checkpoints.list;
+    let list = &ed.session.checkpoints.list;
     let i = if undo {
         list.iter().rposition(|c| !c.undone).ok_or("no turn of Claude's changed files — nothing to undo")?
     } else {
@@ -253,14 +253,14 @@ pub fn step(ed: &mut Editor, undo: bool) -> Result<(), String> {
             if undo { (Some(&f.after), f.before.as_ref()) } else { (f.before.as_ref(), Some(&f.after)) };
         match file(ed, &f.path, from, to) {
             Ok((true, k)) => {
-                changed.push(crate::chat::shown(&ed.lane.root, &f.path));
+                changed.push(crate::chat::shown(&ed.session.root, &f.path));
                 kept += k;
             }
             Ok((false, k)) => kept += k,
             Err(e) => problems.push(e),
         }
     }
-    ed.lane.checkpoints.list[i].undone = undo;
+    ed.session.checkpoints.list[i].undone = undo;
     keep(ed);
     let what = if undo { "undid" } else { "brought back" };
     let files = match changed.as_slice() {
@@ -272,7 +272,7 @@ pub fn step(ed: &mut Editor, undo: bool) -> Result<(), String> {
     if kept > 0 {
         msg.push_str(&format!(" · {kept} change(s) left as they are: you edited there since"));
     }
-    ed.lane.checkpoints.tell.push(format!(
+    ed.session.checkpoints.tell.push(format!(
         "The user {} your changes from the turn \"{}\" in {} — {}.",
         if undo { "undid" } else { "brought back" },
         cp.question,
@@ -280,7 +280,7 @@ pub fn step(ed: &mut Editor, undo: bool) -> Result<(), String> {
         if undo { "those files are as they were before that turn" } else { "they're applied again" },
     ));
     // The chat has the question right above: its row says only what happened
-    if let Some(c) = &mut ed.lane.chat {
+    if let Some(c) = &mut ed.session.chat {
         let row = match (undo, changed.as_slice()) {
             (_, []) => format!("{what} the turn — nothing to change"),
             (true, _) => format!("undid the turn ({files}) · space U brings it back"),
@@ -310,7 +310,7 @@ fn file(
     from: Option<&Rope>,
     to: Option<&Rope>,
 ) -> Result<(bool, usize), String> {
-    let shown = crate::chat::shown(&ed.lane.root, path);
+    let shown = crate::chat::shown(&ed.session.root, path);
     let open = ed.docs.iter().any(|d| d.path.as_deref() == Some(path));
     if !open && !path.exists() && from.is_some() {
         return Err(format!("{shown} is gone"));
@@ -473,11 +473,11 @@ fn keep_then(ed: &mut Editor, then: impl FnOnce(&mut Editor) + Send + 'static) {
 
 /// Writing the turns as they are now (for a worker) — None when they aren't kept.
 fn saving(ed: &Editor) -> Option<impl FnOnce() + Send + 'static> {
-    let dir = ed.lane.checkpoints.dir.clone()?;
-    let root = ed.lane.root.clone();
-    let list = &ed.lane.checkpoints.list;
+    let dir = ed.session.checkpoints.dir.clone()?;
+    let root = ed.session.root.clone();
+    let list = &ed.session.checkpoints.list;
     let question = ed
-        .lane
+        .session
         .chat
         .as_ref()
         .and_then(|c| c.msgs.iter().rev().find(|m| m.role == crate::chat::Role::User))
@@ -485,7 +485,7 @@ fn saving(ed: &Editor) -> Option<impl FnOnce() + Send + 'static> {
         .unwrap_or_default();
     let s = Stored {
         list: list[list.len().saturating_sub(KEEP)..].to_vec(),
-        turn: ed.lane.checkpoints.turn.clone(),
+        turn: ed.session.checkpoints.turn.clone(),
         question,
         seq: crate::chats::seq(),
     };
@@ -496,8 +496,8 @@ fn saving(ed: &Editor) -> Option<impl FnOnce() + Send + 'static> {
 /// tarae ended in the middle of becomes a checkpoint of its own, its files as they are now.
 pub fn restore(ed: &mut Editor) {
     // (nothing is kept until they're back — a save before would write over them)
-    let Some(dir) = ed.lane.checkpoints.dir.take() else { return };
-    let root = ed.lane.root.clone();
+    let Some(dir) = ed.session.checkpoints.dir.take() else { return };
+    let root = ed.session.root.clone();
     ed.events.jobs().spawn(move || {
         let back = dir.clone();
         let mut s = load(&dir, &root);
@@ -520,16 +520,16 @@ pub fn restore(ed: &mut Editor) {
             s.list.push(Checkpoint::new(question, cut));
         }
         move |ed: &mut Editor| {
-            ed.lane.checkpoints.dir = Some(back);
+            ed.session.checkpoints.dir = Some(back);
             let n = s.list.len();
             if n == 0 {
                 return keep(ed);
             }
-            let since = std::mem::take(&mut ed.lane.checkpoints.list);
-            ed.lane.checkpoints.list = s.list.into_iter().chain(since).collect();
+            let since = std::mem::take(&mut ed.session.checkpoints.list);
+            ed.session.checkpoints.list = s.list.into_iter().chain(since).collect();
             // (a turn's review open already points past the ones put before it)
             if let Some(crate::codereview::Base::Turn { at, .. }) =
-                ed.lane.code_review.as_mut().map(|r| &mut r.base)
+                ed.session.code_review.as_mut().map(|r| &mut r.base)
             {
                 *at += n;
             }

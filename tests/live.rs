@@ -321,7 +321,7 @@ fn debug_test_stops_at_breakpoint(sb: &Sandbox, open: &str, bp: &str, test_file:
     let s = t.wait_for("stopped at the breakpoint", |s| s.contains("F10 over") && s.contains("a = 1"));
     assert!(s.contains("VARIABLES"), "{s}");
     t.send(" Gt");
-    t.wait_for("the session over", |s| !s.contains("F10 over"));
+    t.wait_for("the debug run over", |s| !s.contains("F10 over"));
 }
 
 #[test]

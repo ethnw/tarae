@@ -35,7 +35,7 @@ Notes:
 
 ## When one is missing
 
-When a file opens and its language server isn't found (once per language a session), or debugging finds no debugger,
+When a file opens and its language server isn't found (once per language until you quit), or debugging finds no debugger,
 tarae offers to install it — a card with the command it would run, from the language's
 [pack](testing-and-debugging.md#language-packs):
 
@@ -49,7 +49,7 @@ tarae offers to install it — a card with the command it would run, from the la
 
 - **`y`** runs it in the task panel, output in sight; once it's in, the servers start for the open files that had
   none, or debugging starts again as it was (the file, the test, the attach). While it runs, no other task starts;
-  `space m c` stops it. **`n`**: not now (a server is asked about again next session, a debugger the next time you
+  `space m c` stops it. **`n`**: not now (a server is asked about again the next time tarae starts, a debugger the next time you
   debug). **`N`** never offers that tool again (the list is `~/.local/state/tarae/never-install`).
 - **Only with the language's own tools, or Homebrew:** `go install`, `rustup`, `npm`, `uv`/`pipx`, `cargo`, `brew` —
   the first way the language's pack lists whose program is on your `PATH`. Where none fits (Linux without Homebrew,

@@ -202,11 +202,11 @@ fn perf_e2e_waiting_for_claude() {
 /// CPU and its frames a second in front, which shows nothing of it — the session's results are applied
 /// (swapped in and out) but draw nothing.
 #[test]
-fn perf_e2e_busy_lane_behind() {
-    if unoptimized("perf_e2e_busy_lane_behind") {
+fn perf_e2e_busy_session_behind() {
+    if unoptimized("perf_e2e_busy_session_behind") {
         return;
     }
-    let sb = Sandbox::new("perf-lanes");
+    let sb = Sandbox::new("perf-sessions");
     fs::write(sb.git_config(), "[user]\n\tname = t\n\temail = t@t\n[commit]\n\tgpgsign = false\n").unwrap();
     big_file(&sb, "a.rs", 2_000);
     sb.git(&["init", "-q", "-b", "main"]);
@@ -242,8 +242,8 @@ fn perf_e2e_busy_lane_behind() {
     std::thread::sleep(Duration::from_secs_f64(secs));
     let used = t.usage() - before;
     let frames = (t.frames() - frames) as f64;
-    report("e2e_busy_lane_behind_cpu_ms_per_s", ms(used.cpu) / secs, 10.0, 0.5);
-    report("e2e_busy_lane_behind_frames_per_s", frames / secs, 1.0, 0.2);
+    report("e2e_busy_session_behind_cpu_ms_per_s", ms(used.cpu) / secs, 10.0, 0.5);
+    report("e2e_busy_session_behind_frames_per_s", frames / secs, 1.0, 0.2);
 }
 
 /// Memory with this repository open: its files (a copy, in a git repository of the test's own) listed in
@@ -387,13 +387,13 @@ fn perf_e2e_live_search_in_200k_files() {
     report("e2e_live_search_200k_done_ms", median(done), 4000.0, 150.0);
 }
 
-/// A long session's memory (#36): a copy of this repository, its two biggest files open, rounds of edits
+/// Memory over long editing (#36): a copy of this repository, its two biggest files open, rounds of edits
 /// (each reparsed — every doc comment is a layer of its own), files opened and closed, a code review
 /// started and ended, a chat answered with code. RSS at the end, and how much it grew past the first round
 /// — what a leak moves (an hour's work went 214 → 556 MB: every undo step kept a whole set of layers).
 #[test]
-fn perf_e2e_memory_over_a_long_session() {
-    if unoptimized("perf_e2e_memory_over_a_long_session") {
+fn perf_e2e_memory_over_long_editing() {
+    if unoptimized("perf_e2e_memory_over_long_editing") {
         return;
     }
     let sb = Sandbox::new("perf-long");
@@ -485,14 +485,14 @@ fn perf_e2e_memory_over_a_long_session() {
     std::thread::sleep(Duration::from_secs(1));
     let last = t.usage().rss;
     let mb = |b: u64| b as f64 / (1024.0 * 1024.0);
-    eprintln!("long session: {:.1} MB warmed up, {:.1} MB {rounds} rounds later", mb(first), mb(last));
+    eprintln!("long editing: {:.1} MB warmed up, {:.1} MB {rounds} rounds later", mb(first), mb(last));
     // (86 MB since undo keeps no trees — 138 MB when it kept 100, 1.4 GB when it kept them all)
-    report("e2e_rss_long_session_mb", mb(last), 150.0, 5.0);
+    report("e2e_rss_long_editing_mb", mb(last), 150.0, 5.0);
     // (before #36's fix this grew ~240 MB a round; bounded it's under a MB — the undo texts, the chat)
-    report("e2e_rss_long_session_growth_mb", mb(last.saturating_sub(first)), 20.0, 3.0);
+    report("e2e_rss_long_editing_growth_mb", mb(last.saturating_sub(first)), 20.0, 3.0);
 }
 
-/// Memory at the start of a working day (#36): a copy of this repository with the files a session of
+/// Memory at the start of a working day (#36): a copy of this repository with the files a day of
 /// tarae's development keeps open (its biggest sources among them), each looked at once, then left a while
 /// — only the five seen last keep their parse trees (footprint, as Activity Monitor shows it). Next to it,
 /// no file open. With `TARAE_HEAP` set, what's live at each step (`heap`'s count by size: tree-sitter's

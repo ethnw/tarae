@@ -86,11 +86,11 @@ pub enum What {
     BranchDelete { top: PathBuf, branch: String, tip: String },
     /// A push over the remote's commits (`gitpanel.rs`): `y` pushes with a lease on what the card listed.
     ForcePush(Box<crate::gitpanel::ForcePush>),
-    /// A new session (`sessions.rs`): `y` makes its branch and checkout as the card says.
-    SessionNew(Box<crate::sessions::Making>),
-    /// Ending a session that has something to lose (`sessions.rs`): `y` removes its checkout and keeps its
+    /// A new session (`worktree.rs`): `y` makes its branch and checkout as the card says.
+    SessionNew(Box<crate::worktree::Making>),
+    /// Ending a session that has something to lose (`worktree.rs`): `y` removes its checkout and keeps its
     /// branch, `D` deletes the branch too, `n` keeps it all.
-    SessionEnd(Box<crate::sessions::Ending>),
+    SessionEnd(Box<crate::worktree::Ending>),
     /// Closing a buffer whose change is under review (#54): `y` declines the change and closes it, `n` keeps
     /// both. Not `force`d, unsaved edits of yours keep it open still.
     CloseReviewed { doc: crate::document::DocId, force: bool },
@@ -220,7 +220,7 @@ impl Offer {
         }
     }
 
-    /// Whether Claude's call waits on it — it goes with its lane when another comes to the front.
+    /// Whether Claude's call waits on it — it goes with its session when another comes to the front.
     pub fn claudes(&self) -> bool {
         matches!(self.what, What::Run(_) | What::NoSandbox { .. } | What::Read { .. } | What::Screen { .. })
     }
@@ -245,11 +245,11 @@ impl crate::editor::Editor {
     /// Stacks an offer (at the back). If one with the same title exists, keeps it (untouched while
     /// downloading; only its content is refreshed while asking).
     pub fn push_offer(&mut self, mut o: Offer) {
-        // From a lane behind: it waits in that lane, and comes up when the lane is in front (`lane_in`)
+        // From a session behind: it waits in that session, and comes up when the session is in front (`session_in`)
         if self.background() {
             self.offer_seq += 1;
             o.id = self.offer_seq;
-            return self.lane.parked.push(o);
+            return self.session.parked.push(o);
         }
         if let Some(old) = self.offers.iter_mut().find(|x| x.title == o.title) {
             // Replaced whole — what it says with what it does — and it settles again before `y` counts
@@ -269,7 +269,7 @@ impl crate::editor::Editor {
         // being typed there (Claude asking mid-turn): the chat gives them to the card — as a review takes them. Mid-message, the
         // card waits (cards don't take keys from the chat's input — a `n` typed there was a "no")
         if (o.weighty() || matches!(o.what, What::Screen { .. }))
-            && let Some(c) = self.lane.chat.as_mut().filter(|c| c.focused && c.input.is_empty())
+            && let Some(c) = self.session.chat.as_mut().filter(|c| c.focused && c.input.is_empty())
         {
             c.focused = false;
         }
@@ -420,7 +420,7 @@ impl crate::editor::Editor {
     }
 
     /// Whether the front card has been in sight whole — drawn uncut, or opened with `v` — as it is now; or a
-    /// card with the very same text was, this session (#55: the same script run again was to be read again).
+    /// card with the very same text was, since tarae started (#55: the same script run again was to be read again).
     pub fn offer_seen_whole(&self) -> bool {
         self.offers.first().is_some_and(|o| {
             self.offer_whole.get() == Some((o.id, o.rev)) || self.offer_read.borrow().contains(&text_hash(o))
@@ -499,16 +499,16 @@ impl crate::editor::Editor {
         // (seen whole once its last line has been on screen — `term::render_frame` looks)
         self.offer_view.set(Some((id, rev, doc)));
         // The code has the keys, to read it (#55: the review's rail kept them, and keys did nothing)
-        if let Some(c) = self.lane.chat.as_mut() {
+        if let Some(c) = self.session.chat.as_mut() {
             c.focused = false;
         }
-        if let Some(s) = self.lane.sidebar.as_mut() {
+        if let Some(s) = self.session.sidebar.as_mut() {
             s.focus = false;
         }
-        if let Some(r) = self.lane.code_review.as_mut() {
+        if let Some(r) = self.session.code_review.as_mut() {
             r.focus = false;
         }
-        if let Some(t) = self.lane.terminal.as_mut() {
+        if let Some(t) = self.session.terminal.as_mut() {
             t.focus = false;
         }
         self.bottom_focus = false;
@@ -567,7 +567,7 @@ impl crate::editor::Editor {
             What::Grammars { lang, names, .. } => {
                 let first = names.first().cloned().unwrap_or_default();
                 self.set_status(format!(
-                    "No colors for {lang} this session — :grammar-install {first} anytime"
+                    "No colors for {lang} until you quit — :grammar-install {first} anytime"
                 ));
             }
             What::JavaDebug { .. } => self.set_status("Java debugging needs java-debug — F5 asks again"),

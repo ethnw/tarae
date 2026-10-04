@@ -40,7 +40,7 @@ impl Editor {
         let Some(path) = doc.path.clone() else {
             return Err("save the buffer first — a diff needs a file".into());
         };
-        if self.lane.code_review.as_ref().is_some_and(|r| r.docs.contains(&doc.id)) {
+        if self.session.code_review.as_ref().is_some_and(|r| r.docs.contains(&doc.id)) {
             return Err("the review is showing this file's changes — space v q ends it".into());
         }
         let (id, version, text) = (doc.id, doc.version(), doc.text.clone());

@@ -143,7 +143,7 @@ process, or the disk.
 ### Edits and positions
 
 - **Every edit goes through a `Transaction`** — that keeps multiple selections consistent, and LLM diffs and agent edits
-  take the same path. A whole insert-mode session is one undo step.
+  take the same path. A whole stay in insert mode is one undo step.
 - **Positions are byte offsets, always on character boundaries.** tree-sitter, regex, and LSP (UTF-8 negotiated) all use
   bytes, so there's no conversion layer; only ropey's editing API uses chars, and the conversion happens in one place,
   `Transaction::apply`.
@@ -255,7 +255,7 @@ process, or the disk.
   They run in full in your own `cargo test` and in CI. Under `cfg(test)` Claude's commands skip the sandbox
   (`Availability::Bypass`) unless a test sets it.
 - Background behavior that would make single-event tests flaky is off under `cfg(test)`: the git gutter
-  (`git_auto`), session and recent-file state, grammar download offers, and the waiting animation. The clipboard uses
+  (`git_auto`), restore and recent-file state, grammar download offers, and the waiting animation. The clipboard uses
   memory, so your real clipboard is never touched.
 - Tests that need a grammar the default build doesn't include **skip silently** when it's missing (see
   `highlights_rust_when_grammar_available`); run `cargo test --features bundled-grammars` to cover them.
@@ -293,7 +293,7 @@ TARAE_SHOT_XDG=/tmp/empty-config TARAE_BACKGROUND=dark cargo xtask shot out.png 
 The shot builds tarae's `shot` profile first — release's behavior, built incrementally without LTO, so a shot after
 an edit takes seconds rather than a release build's minute. `TARAE_SHOT_XDG` should point at an empty config so
 your own settings don't leak in, and `TARAE_BACKGROUND=dark|light` picks the theme (the virtual terminal can't
-answer the background-color query). Session, recent files, and undo history go to a fresh temp dir, never yours;
+answer the background-color query). Files to restore, recent files, and undo history go to a fresh temp dir, never yours;
 `@3` among the keys waits 3 s, `@?ready` until `ready` is on screen (a language server indexing). The other knobs
 are listed at the top of [`xtask/src/shot.rs`](xtask/src/shot.rs).
 

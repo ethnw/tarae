@@ -227,8 +227,8 @@ pub(crate) fn git(dir: &Path, args: &[&str], input: Option<&str>) -> Result<Stri
     #[cfg(test)]
     not_in_this_repository(dir, args);
     let mut cmd = Command::new("git");
-    // A session of its own: ssh or gpg asking for a passphrase can't take the terminal (it fails instead)
-    crate::dap::new_session(&mut cmd);
+    // No terminal of its own (`setsid`): ssh or gpg asking for a passphrase can't take ours (it fails instead)
+    crate::dap::setsid(&mut cmd);
     let mut child = cmd
         .arg("-C")
         .arg(dir)
@@ -422,7 +422,7 @@ impl Editor {
     /// Changed and untracked files (`git status`), status letters in the gutter's colors, each
     /// file's diff against HEAD as the preview (computed on a worker thread), `+N −M` on the right.
     pub fn git_changed_files(&mut self) {
-        self.git_changed_files_in(self.lane.root.clone());
+        self.git_changed_files_in(self.session.root.clone());
     }
 
     /// Changed files of `cwd`'s repository, labels relative to it.
@@ -457,7 +457,7 @@ impl Editor {
                         }
                     })
                     .collect();
-                ed.lane.changed_files = list;
+                ed.session.changed_files = list;
                 ed.open_picker(crate::picker::Picker::new("changed files", items, true).grouped(cwd), None);
             }
         });

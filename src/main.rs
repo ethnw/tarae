@@ -41,7 +41,6 @@ mod jumplist;
 mod key;
 mod keymap;
 mod labels;
-mod lane;
 mod llm;
 mod log;
 mod lsp;
@@ -69,6 +68,7 @@ mod repeat;
 mod replace;
 mod replay;
 mod restart;
+mod restore;
 mod runtime;
 mod sandbox;
 mod saver;
@@ -77,7 +77,6 @@ mod search;
 mod seeing;
 mod selection;
 mod session;
-mod sessions;
 mod settings;
 mod shell;
 mod sidebar;
@@ -101,6 +100,7 @@ mod typed;
 mod undofile;
 mod viewalign;
 mod wasm;
+mod worktree;
 mod wrap;
 mod ws;
 
@@ -112,7 +112,7 @@ const USAGE: &str = "\
 tarae — a selection-first modal editor in the spirit of Helix
 
 usage: tarae [FILE]...
-       tarae FOLDER                          work in FOLDER (its config and session)
+       tarae FOLDER                          work in FOLDER (its config, its last files)
        tarae --diff OLD NEW                  NEW, with its changes from OLD shown in place
                                              (git difftool -x 'tarae --diff')
        tarae grammar install [LANG]...       fetch and build syntax grammars (no LANG = all;
@@ -171,7 +171,7 @@ fn main() -> Result<()> {
     }
 
     // A folder (`tarae .`, `tarae ~/src/app`): tarae runs there, as if started in it — its project config and
-    // session (the files given beside it, read from where you were)
+    // the files last open there (the files given beside it, read from where you were)
     let mut folder = None;
     files = files
         .into_iter()
@@ -202,7 +202,7 @@ fn main() -> Result<()> {
     let mut editor = editor::Editor::with_root(config, root);
     // Started without a file: recent files on the start screen (existing ones only; reads one small file)
     editor.recent = recent::load();
-    editor.session = session::State::load();
+    editor.restore = restore::State::load();
     for f in &files {
         if let Err(e) = editor.open(f) {
             editor.set_error(format!("{e:#}"));
@@ -211,16 +211,16 @@ fn main() -> Result<()> {
     if let Some(state) = &restarted {
         restart::restore(&mut editor, state);
     } else if files.is_empty() {
-        // Started without files: the start screen (offering this folder's last session — `r`), or that
-        // session right away if `editor.restore-session` is on
-        editor.find_last_session();
-        if editor.config.restore_session {
-            editor.restore_session();
+        // Started without files: the start screen (offering this folder's last files — `r`), or those
+        // files right away if `editor.restore-files` is on
+        editor.find_restorable();
+        if editor.config.restore_files {
+            editor.restore_files();
         }
     }
-    // This repository's sessions (lanes) from last time — a restart brought them already
-    if !editor.sessions.restored {
-        editor.lanes_restore();
+    // This repository's sessions from last time — a restart brought them already
+    if !editor.session_store.restored {
+        editor.sessions_restore();
     }
     // Claude's notes from last time in this folder (the open files get them right away)
     notes::restore(&mut editor);
@@ -241,7 +241,7 @@ fn main() -> Result<()> {
     editor.disk_watch();
     // (Claude Code's IDE connection opens with the first `space c` — no lock file in ~/.claude/ide before)
     let result = term::run(&mut editor);
-    editor.save_session();
+    editor.save_restore();
     // The last saves' undo history is still being written on workers — exiting or exec'ing cuts it off
     editor.undo_flush();
     editor.agent = None; // remove our lock file (only ours)

@@ -46,8 +46,8 @@ struct Perf {
 }
 
 /// Scenarios run once, not `RUNS` times — a memory number, not a jittery timing, and the longest by far (the
-/// long session: 48 s a run, measured 2026-10-03).
-const ONCE: [&str; 1] = ["perf_e2e_memory_over_a_long_session"];
+/// long editing: 48 s a run, measured 2026-10-03).
+const ONCE: [&str; 1] = ["perf_e2e_memory_over_long_editing"];
 
 /// What run `i` (from 0) asks of the perf tests: all of them in the first, the `ONCE` ones left out after.
 fn filters(i: usize) -> Vec<&'static str> {
@@ -420,13 +420,13 @@ mod tests {
         assert_eq!(failures("a\nerror: could not compile"), "a\nerror: could not compile");
     }
 
-    /// The long session runs in the first run only; a number measured once is that run's value.
+    /// The long editing runs in the first run only; a number measured once is that run's value.
     #[test]
     fn a_once_only_number_is_its_one_value() {
         assert!(!filters(0).contains(&"--skip"));
         for i in 1..RUNS {
             let f = filters(i);
-            assert!(f.windows(2).any(|w| w == ["--skip", "perf_e2e_memory_over_a_long_session"]), "{f:?}");
+            assert!(f.windows(2).any(|w| w == ["--skip", "perf_e2e_memory_over_long_editing"]), "{f:?}");
         }
         let p = |name: &str, value: f64| Perf { name: name.into(), value, budget: 100.0, noise: 1.0 };
         let runs = vec![vec![p("a", 1.0), p("long", 80.0)], vec![p("a", 3.0)], vec![p("a", 2.0)]];

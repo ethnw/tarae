@@ -176,7 +176,7 @@ impl Editor {
                 if let Some(doc) = self.docs.iter().find(|d| d.id == *one) {
                     let msg = format!(
                         "Saved {} · {} lines",
-                        doc.display_name(&self.lane.root),
+                        doc.display_name(&self.session.root),
                         doc.text.len_lines()
                     );
                     self.set_success(msg);

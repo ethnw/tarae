@@ -126,7 +126,7 @@ pub fn tool_schema() -> Value {
 /// `plan` called by Claude.
 pub fn tool_call(ed: &mut Editor, args: &Value) -> Result<String, String> {
     let plan = Plan::from_json(args).ok_or("steps are required — at least one, each with text and status")?;
-    let c = ed.lane.chat.as_mut().ok_or("the chat is closed")?;
+    let c = ed.session.chat.as_mut().ok_or("the chat is closed")?;
     let reply = format!("plan shown ({}/{} done)", plan.done(), plan.steps.len());
     c.plan = Some(plan);
     Ok(reply)

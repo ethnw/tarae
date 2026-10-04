@@ -491,7 +491,7 @@ mod tests {
             let (config, _) = crate::config::parse(&cfg);
             let mut ed = Editor::new(config);
             ed.open(&file).unwrap();
-            ed.lane.root = dir.clone();
+            ed.session.root = dir.clone();
             let (id, cid) = (ed.doc().id, ed.doc().lsp.client.expect("attached"));
             ed.on_lsp_message(cid, serde_json::json!({ "id": 0, "result": { "capabilities": {} } }));
             let file = std::fs::canonicalize(&file).unwrap();
@@ -586,14 +586,14 @@ mod tests {
         let task = crate::task::Task { name: "cargo test".into(), cmd: "true".into(), cwd: s.dir.clone() };
         let mut run = crate::task::Run::for_test(task);
         (run.state, run.by_claude) = (crate::task::State::Running, true);
-        s.ed.lane.task_run = Some(run);
+        s.ed.session.task_run = Some(run);
         s.outside("fn b() {}\n");
         s.pump(400);
         assert_eq!(s.saves(), 0, "not while it builds");
         // Its end comes as an event, as a real run's does
         s.ed.events.jobs().spawn(|| {
             |ed: &mut Editor| {
-                if let Some(r) = ed.lane.task_run.as_mut() {
+                if let Some(r) = ed.session.task_run.as_mut() {
                     r.state = crate::task::State::Passed;
                 }
             }
@@ -601,8 +601,8 @@ mod tests {
         s.pump(100);
         assert_eq!(s.saves(), 1, "at its end");
         // The user's own run doesn't hold it
-        s.ed.lane.task_run.as_mut().unwrap().state = crate::task::State::Running;
-        s.ed.lane.task_run.as_mut().unwrap().by_claude = false;
+        s.ed.session.task_run.as_mut().unwrap().state = crate::task::State::Running;
+        s.ed.session.task_run.as_mut().unwrap().by_claude = false;
         s.outside("fn c() {}\n");
         s.pump(300);
         assert_eq!(s.saves(), 2);

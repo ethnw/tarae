@@ -26,7 +26,7 @@ use crate::key::{Code, Key};
 use crate::selection::{Range, Selection};
 use crate::transaction::{Assoc, Change, Transaction};
 
-/// Speed options: no tools (pure transform), skip MCP·user settings, no session saving (keeps /resume clean).
+/// Speed options: no tools (pure transform), skip MCP·user settings, no conversation kept by claude (keeps /resume clean).
 const DEFAULT_ARGS: &[&str] = &[
     "-p",
     "--input-format",
@@ -86,7 +86,7 @@ pub struct LlmConfig {
     pub effort: String,
     /// Lines of context sent before and after the selection.
     pub context_lines: usize,
-    /// Chat: the editor follows where Claude is reading (`C-f` in the chat toggles it per session).
+    /// Chat: the editor follows where Claude is reading (`C-f` in the chat toggles it for that chat).
     pub follow: bool,
     /// Chat: seconds after your last key that follow takes over again while Claude works (0 = only `C-f`).
     pub follow_resume: u64,
@@ -207,7 +207,7 @@ impl Drop for Warm {
     }
 }
 
-/// Claude, started in `dir` (the project root — its relative paths, its tools and its sessions are there).
+/// Claude, started in `dir` (the project root — its relative paths, its tools and its kept conversations are there).
 pub fn spawn(cfg: &LlmConfig, extra: &[&str], dir: &Path) -> std::io::Result<Child> {
     let mut cmd = Command::new(&cfg.command);
     cmd.current_dir(dir).args(&cfg.args).args(extra);
@@ -270,9 +270,9 @@ pub enum StreamEv {
     ToolResult { id: String, text: String, error: bool },
     /// claude asks the host something (`mcp_message` for tarae's own tools) — needs a `control_response`.
     Control { request_id: String, request: serde_json::Value },
-    /// The process's claude session and the model it runs (`system init`) — the chat resumes it later
-    /// (`--resume`).
-    Session { id: String, model: String },
+    /// The process's conversation (claude's `session_id`) and the model it runs (`system init`) — the chat
+    /// resumes it later (`--resume`).
+    Conversation { id: String, model: String },
     /// The model that wrote an answer (an assistant message's `message.model`, or a stream's
     /// `message_start`) — sent when it changes.
     Answered(String),
@@ -368,7 +368,7 @@ pub fn pump(
                             break;
                         }
                     }
-                    Some(e @ (StreamEv::Session { .. } | StreamEv::Models(_))) => {
+                    Some(e @ (StreamEv::Conversation { .. } | StreamEv::Models(_))) => {
                         if !send(e) {
                             break;
                         }
@@ -500,7 +500,7 @@ fn parse_line(ev: &serde_json::Value) -> Option<StreamEv> {
             }
         }
         "system" if ev["subtype"] == "thinking_tokens" => Some(StreamEv::Thinking),
-        "system" if ev["subtype"] == "init" => Some(StreamEv::Session {
+        "system" if ev["subtype"] == "init" => Some(StreamEv::Conversation {
             id: ev["session_id"].as_str()?.to_string(),
             model: ev["model"].as_str().unwrap_or_default().to_string(),
         }),
@@ -677,7 +677,7 @@ pub type OnDone = Box<dyn FnOnce(&mut Editor, bool)>;
 /// Closes the open review as rejected (before another review takes its place — so the waiter gets an answer).
 /// An ask still waiting for its answer is killed (its result would no longer find its review).
 pub fn close_review(ed: &mut Editor) {
-    let Some(mut rev) = ed.lane.review.take() else { return };
+    let Some(mut rev) = ed.session.review.take() else { return };
     if !rev.ready
         && let Some(pid) = ed.llm_pid.take()
     {
@@ -774,7 +774,7 @@ impl Review {
 /// When the ask prompt opens or "ask" starts being typed — spawns the spare process (overlapping typing).
 pub fn prewarm(ed: &mut Editor) {
     let cfg = ed.config.llm.clone();
-    if let Err(e) = ed.llm_warm.ensure(&cfg, &ed.lane.root) {
+    if let Err(e) = ed.llm_warm.ensure(&cfg, &ed.session.root) {
         ed.set_error(e);
     }
 }
@@ -784,7 +784,7 @@ pub fn ask(ed: &mut Editor, instruction: &str) -> Result<(), String> {
     if instruction.is_empty() {
         return Err("usage: :ask <instruction>".into());
     }
-    if ed.lane.review.is_some() {
+    if ed.session.review.is_some() {
         return Err("an ask is already in progress (:ask-cancel)".into());
     }
     let cfg = ed.config.llm.clone();
@@ -799,7 +799,7 @@ pub fn ask(ed: &mut Editor, instruction: &str) -> Result<(), String> {
         })
         .collect();
     let prompt =
-        build_prompt(instruction, &doc.display_name(&ed.lane.root), &doc.text, &ranges, cfg.context_lines);
+        build_prompt(instruction, &doc.display_name(&ed.session.root), &doc.text, &ranges, cfg.context_lines);
     let hunks = ranges
         .iter()
         .map(|&(from, to)| Hunk {
@@ -825,7 +825,7 @@ pub fn draft(
     from: usize,
     to: usize,
 ) -> Result<(), String> {
-    if ed.lane.review.is_some() {
+    if ed.session.review.is_some() {
         return Err("Claude is already answering (:ask-cancel)".into());
     }
     let doc = ed.docs.iter().find(|d| d.id == doc_id).ok_or("the buffer is gone")?;
@@ -844,7 +844,7 @@ fn start(
     hunks: Vec<Hunk>,
 ) -> Result<(), String> {
     let cfg = ed.config.llm.clone();
-    let mut child = ed.llm_warm.take(&cfg, &ed.lane.root)?;
+    let mut child = ed.llm_warm.take(&cfg, &ed.session.root)?;
     // Write the message and close stdin — the process exits on its own after this one turn.
     // Before anything is installed: a failed write leaves no review waiting forever.
     let sent = child.stdin.take().ok_or_else(|| "claude: no stdin".to_string()).and_then(|mut stdin| {
@@ -863,17 +863,17 @@ fn start(
     ed.llm_generation += 1;
     let generation = ed.llm_generation;
     let n = hunks.len();
-    ed.lane.review = Some(Review::new(generation, doc_id, instruction, hunks));
+    ed.session.review = Some(Review::new(generation, doc_id, instruction, hunks));
     ed.llm_pid = Some(child.id());
     pump(child, true, ed.events.sender(), move |ev| {
         Some(match ev {
             StreamEv::Thinking | StreamEv::Thought(_) => Box::new(move |ed: &mut Editor| {
-                if let Some(r) = ed.lane.review.as_mut().filter(|r| r.generation == generation) {
+                if let Some(r) = ed.session.review.as_mut().filter(|r| r.generation == generation) {
                     r.thinking = true;
                 }
             }),
             StreamEv::Text(t) => Box::new(move |ed: &mut Editor| {
-                if let Some(r) = ed.lane.review.as_mut().filter(|r| r.generation == generation) {
+                if let Some(r) = ed.session.review.as_mut().filter(|r| r.generation == generation) {
                     r.thinking = false;
                     r.streamed.push_str(&t);
                 }
@@ -882,8 +882,8 @@ fn start(
                 let result = r.and_then(|out| parse_replies(&out, n));
                 Box::new(move |ed: &mut Editor| on_result(ed, generation, result))
             }
-            // ask runs without tools, and its session isn't kept
-            StreamEv::Session { .. }
+            // ask runs without tools, and its conversation isn't kept
+            StreamEv::Conversation { .. }
             | StreamEv::Answered(_)
             | StreamEv::Models(_)
             | StreamEv::Tool { .. }
@@ -902,7 +902,7 @@ pub fn cancel(ed: &mut Editor) {
     if let Some(pid) = ed.llm_pid.take() {
         kill(pid);
     }
-    if ed.lane.review.is_some() {
+    if ed.session.review.is_some() {
         close_review(ed);
         ed.llm_generation += 1;
         ed.set_status("claude: cancelled");
@@ -937,7 +937,7 @@ pub fn review_with(
         }
         return ed.set_status("claude: no changes");
     }
-    ed.lane.review =
+    ed.session.review =
         Some(Review { ready: true, on_done, ..Review::new(ed.llm_generation, doc_id, instruction, hunks) });
 }
 
@@ -988,19 +988,19 @@ pub fn preview(streamed: &str, rows: usize) -> Vec<&str> {
 }
 
 fn on_result(ed: &mut Editor, generation: u64, result: Result<Vec<String>, String>) {
-    let Some(rev) = ed.lane.review.as_mut().filter(|r| r.generation == generation) else { return };
+    let Some(rev) = ed.session.review.as_mut().filter(|r| r.generation == generation) else { return };
     ed.llm_pid = None;
     let secs = rev.started.elapsed().as_secs_f32();
     let replies = match result {
         Ok(r) => r,
         Err(e) => {
-            ed.lane.review = None;
+            ed.session.review = None;
             ed.set_error(format!("claude: {e}"));
             return;
         }
     };
     let Some(doc_idx) = ed.docs.iter().position(|d| d.id == rev.doc_id) else {
-        ed.lane.review = None;
+        ed.session.review = None;
         ed.set_error("claude: buffer was closed");
         return;
     };
@@ -1024,7 +1024,7 @@ fn on_result(ed: &mut Editor, generation: u64, result: Result<Vec<String>, Strin
         } else {
             "claude: no changes"
         };
-        ed.lane.review = None;
+        ed.session.review = None;
         ed.set_status(msg);
         return;
     }
@@ -1060,7 +1060,7 @@ fn relocate(h: &mut Hunk, text: &Rope) -> bool {
 
 /// Keys during review. True if handled.
 pub fn review_key(ed: &mut Editor, key: Key) -> bool {
-    let Some(rev) = ed.lane.review.as_mut().filter(|r| r.ready) else { return false };
+    let Some(rev) = ed.session.review.as_mut().filter(|r| r.ready) else { return false };
     let decide = |rev: &mut Review, d: Decision| {
         rev.hunks[rev.current].decision = d;
         rev.follow = true;
@@ -1108,7 +1108,7 @@ pub fn review_key(ed: &mut Editor, key: Key) -> bool {
 
 /// Accepted changes as one transaction (= one undo).
 fn finish(ed: &mut Editor) {
-    let Some(mut rev) = ed.lane.review.take() else { return };
+    let Some(mut rev) = ed.session.review.take() else { return };
     let on_done = rev.on_done.take();
     let before = ed.docs.iter().find(|d| d.id == rev.doc_id).map(|d| d.text.clone());
     let applied = apply_accepted(ed, &rev);

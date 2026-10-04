@@ -4,7 +4,7 @@
 //! Once installed, the work goes on: language servers attach to the open files that have none, debugging
 //! starts again as it was (the file, the test, the attach).
 //!
-//! Asked once per language a session when a file opens and no server is found (quiet otherwise: the log
+//! Asked once per language until quit when a file opens and no server is found (quiet otherwise: the log
 //! says, the status line's dot is faint) — or when a rustup proxy says its component isn't installed — and
 //! each time debugging finds no debugger. A server the packs only have a `hint` for isn't offered; the hint
 //! goes to the log (a debugger's error says what to install).
@@ -86,7 +86,7 @@ impl Editor {
             && !never_path().is_some_and(|p| never_read(&p).contains(&found.tool))
     }
 
-    /// No language server (for a language, the first time this session; or one a rustup proxy says isn't
+    /// No language server (for a language, the first time since tarae started; or one a rustup proxy says isn't
     /// installed): offer to install the first of `tried` that a pack knows how to — else log what the pack
     /// says.
     pub(crate) fn offer_install_server(&mut self, tried: &[String]) {
@@ -148,7 +148,7 @@ impl Editor {
         cwd: PathBuf,
         then: Then,
     ) {
-        if self.lane.task_run.as_ref().is_some_and(|r| r.state == crate::task::State::Running) {
+        if self.session.task_run.as_ref().is_some_and(|r| r.state == crate::task::State::Running) {
             return self.offer_finished(offer, Err("a task is running — y once it's done".into()));
         }
         let task = crate::task::Task { name: format!("install {tool}"), cmd: shown(&run), cwd };
@@ -195,8 +195,8 @@ impl Editor {
         }
     }
 
-    /// A plugin's `offer-install`: the card for a tool a pack knows how to install — once a session per
-    /// tool. There already: said at once. Nothing to offer: it's told why.
+    /// A plugin's `offer-install`: the card for a tool a pack knows how to install — once per tool until
+    /// quit. There already: said at once. Nothing to offer: it's told why.
     pub(crate) fn plugin_offer_install(&mut self, plugin: &str, id: u64, tool: &str) {
         use crate::plugin::PluginHostEvent as E;
         if crate::packs::on_path(tool) || crate::packs::installed_at(tool).is_some() {
@@ -292,10 +292,10 @@ mod tests {
         ed.offer_popups = true;
         install(&mut ed, "echo installing; exit 0", "sh", |_| {});
         assert!(ed.offers.is_empty(), "installed: the card goes");
-        let r = ed.lane.task_run.as_ref().expect("in the task panel");
+        let r = ed.session.task_run.as_ref().expect("in the task panel");
         assert_eq!(r.task.name, "install sh");
         assert!(r.output.iter().any(|(_, l)| l == "installing"));
-        assert!(ed.lane.task_last.is_none(), "space m m still runs your task, not this");
+        assert!(ed.session.task_last.is_none(), "space m m still runs your task, not this");
         assert!(r.install, "the panel offers no `space m m again` for it");
         install(&mut ed, "exit 3", "sh", |_| {});
         assert!(
@@ -344,7 +344,7 @@ mod tests {
         install(&mut ed, "sleep 5", "sh", |ed| {
             ed.task_start(task.clone());
             assert_eq!(
-                ed.lane.task_run.as_ref().map(|r| r.task.name.as_str()),
+                ed.session.task_run.as_ref().map(|r| r.task.name.as_str()),
                 Some("install sh"),
                 "still running"
             );

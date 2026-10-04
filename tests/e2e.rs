@@ -603,9 +603,9 @@ fn the_project_search_needs_no_rg() {
     t.wait_for("src.rs at the hit", |s| s.rows[0].contains("›  src.rs") && s.status().contains(" 3:4 "));
 }
 
-/// `tarae <folder>`: tarae works there on the start screen — even with a session saved there — and the file
-/// picker lists its files; `editor.restore-session` brings the session back. A quit from the start screen
-/// keeps the session; closing every file clears it. A file given beside it is read from where the command ran.
+/// `tarae <folder>`: tarae works there on the start screen — even with files kept to reopen there — and the
+/// file picker lists its files; `editor.restore-files` reopens them. A quit from the start screen keeps
+/// them; closing every file clears them. A file given beside it is read from where the command ran.
 #[test]
 fn a_folder_argument_opens_there_on_the_start_screen() {
     let sb = Sandbox::new("folder");
@@ -622,7 +622,7 @@ fn a_folder_argument_opens_there_on_the_start_screen() {
     assert_eq!(t.wait_exit().code(), Some(0));
 
     // lib.rs was open on quit — the next start is the start screen all the same, and quitting from it
-    // leaves the session alone
+    // leaves them alone
     let mut t = sb.spawn(&["app"]);
     let s = t.wait_text("t a r a e");
     assert!(!s.contains("pub fn lib"), "{s}");
@@ -630,8 +630,8 @@ fn a_folder_argument_opens_there_on_the_start_screen() {
     t.command("q");
     assert_eq!(t.wait_exit().code(), Some(0));
 
-    // With the setting on it comes back; closing it before quitting clears the session
-    sb.write_config(&format!("{BASE_CONFIG}restore-session = true\n"));
+    // With the setting on it comes back; closing it before quitting clears what's kept
+    sb.write_config(&format!("{BASE_CONFIG}restore-files = true\n"));
     let mut t = sb.spawn(&["app"]);
     t.wait_text("pub fn lib");
     t.command("bc");

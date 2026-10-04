@@ -244,7 +244,7 @@ evaluated in the current frame on every pause and listed under WATCH at the top 
 | Java | `-agentlib:jdwp=transport=dt_socket,server=y,address=*:5005` | JDWP, through java-debug in jdtls |
 | Rust / C | `gdbserver`, `lldb-server gdbserver`, or `debugserver` — or a local process by `pid` | lldb-dap |
 
-In an attached session `space G t` **detaches** and leaves the program running. Give the targets you use often a name in
+In an attached debug run `space G t` **detaches** and leaves the program running. Give the targets you use often a name in
 your config (a project `.tarae.toml` works well for this):
 
 ```toml
@@ -252,13 +252,13 @@ your config (a project `.tarae.toml` works well for this):
 name = "api (k8s)"
 lang = "java"                                                # defaults to the current file's language
 port = 5005                                                  # host defaults to 127.0.0.1 · for a local process, pid = …
-before = "kubectl -n app port-forward deploy/api 5005:5005"  # started first, stopped with the session
+before = "kubectl -n app port-forward deploy/api 5005:5005"  # started first, stopped with the debug run
 remote-root = "/app"                                         # source root in the container ↔ this project
 # program = "target/debug/app"                               # Rust/C: the executable to read symbols from
 ```
 
 `before` runs a helper first (a port-forward, an ssh tunnel); tarae attaches once it prints a line or after 2 seconds,
-and stops it when the session ends. `remote-root` maps breakpoint paths when the program was built somewhere else —
+and stops it when the debug run ends. `remote-root` maps breakpoint paths when the program was built somewhere else —
 without it, breakpoints set in your copy won't match the paths the remote recorded.
 
 [Python](screenshots/attach-python.png) · [Go](screenshots/attach-go.png) ·

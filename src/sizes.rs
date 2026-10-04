@@ -216,7 +216,7 @@ pub fn bottom_key(ed: &mut crate::editor::Editor, key: Key) -> bool {
             return true;
         }
         (Code::Char('i' | 'a') | Code::Enter, false) if slot == Slot::Terminal => {
-            if let Some(t) = ed.lane.terminal.as_mut().filter(|t| t.exited.is_none()) {
+            if let Some(t) = ed.session.terminal.as_mut().filter(|t| t.exited.is_none()) {
                 t.focus = true;
                 ed.bottom_focus = false;
             }
@@ -232,12 +232,12 @@ pub fn bottom_key(ed: &mut crate::editor::Editor, key: Key) -> bool {
     };
     match slot {
         Slot::Test => {
-            if let Some(r) = ed.lane.test_run.as_mut() {
+            if let Some(r) = ed.session.test_run.as_mut() {
                 r.scroll_by(by, rows);
             }
         }
         Slot::Task => {
-            if let Some(r) = ed.lane.task_run.as_mut() {
+            if let Some(r) = ed.session.task_run.as_mut() {
                 r.scroll_by(by, rows);
             }
         }
@@ -251,12 +251,12 @@ impl crate::editor::Editor {
     /// What `C-w <`/`>` acts on: the chat or the side panel, whichever has the keys — from the code, the
     /// chat if it's shown as a panel, else the side panel.
     fn sized(&self) -> Option<Which> {
-        let chat = self.screen.chat_w > 0 && self.lane.chat.as_ref().is_some_and(|c| !c.compact());
-        let side = self.lane.sidebar.is_some() && !self.review_rail_up();
-        if chat && self.lane.chat.as_ref().is_some_and(|c| c.focused) {
+        let chat = self.screen.chat_w > 0 && self.session.chat.as_ref().is_some_and(|c| !c.compact());
+        let side = self.session.sidebar.is_some() && !self.review_rail_up();
+        if chat && self.session.chat.as_ref().is_some_and(|c| c.focused) {
             return Some(Which::Chat);
         }
-        if side && self.lane.sidebar.as_ref().is_some_and(|s| s.focus) {
+        if side && self.session.sidebar.as_ref().is_some_and(|s| s.focus) {
             return Some(Which::Side);
         }
         if chat { Some(Which::Chat) } else { side.then_some(Which::Side) }
@@ -403,8 +403,8 @@ impl crate::editor::Editor {
     /// little (`widths`). Not before the first frame, not while a review's rail holds its place.
     pub fn side_folded(&self) -> bool {
         let Some(total) = self.screen.width else { return false };
-        let chat_open = self.lane.chat.as_ref().is_some_and(|c| !c.compact());
-        self.lane.sidebar.is_some()
+        let chat_open = self.session.chat.as_ref().is_some_and(|c| !c.compact());
+        self.session.sidebar.is_some()
             && !self.review_rail_up()
             && widths(total, chat_open, true, self.sizes).side == 0
     }
@@ -430,13 +430,13 @@ impl crate::editor::Editor {
         if self.dap.is_some() {
             return Some(Slot::Debug);
         }
-        if self.lane.terminal.as_ref().is_some_and(|t| t.visible) {
+        if self.session.terminal.as_ref().is_some_and(|t| t.visible) {
             return Some(Slot::Terminal);
         }
         if self.plugins.as_ref().is_some_and(|p| p.panel.is_some()) {
             return Some(Slot::Plugin);
         }
-        match (&self.lane.test_run, &self.lane.task_run) {
+        match (&self.session.test_run, &self.session.task_run) {
             (Some(t), Some(k)) if k.started > t.started => Some(Slot::Task),
             (Some(_), _) => Some(Slot::Test),
             (None, Some(_)) => Some(Slot::Task),
@@ -460,7 +460,9 @@ impl crate::editor::Editor {
     /// plugin panel's.
     pub fn bottom_has_keys(&self) -> bool {
         match self.slot() {
-            Some(Slot::Terminal) => self.bottom_focus || self.lane.terminal.as_ref().is_some_and(|t| t.focus),
+            Some(Slot::Terminal) => {
+                self.bottom_focus || self.session.terminal.as_ref().is_some_and(|t| t.focus)
+            }
             Some(Slot::Plugin) => self.plugin_panel_focused(),
             Some(Slot::Procs) => self.procs_focused(),
             Some(Slot::Test | Slot::Task) => self.bottom_focus,
@@ -479,16 +481,16 @@ impl crate::editor::Editor {
             Some(Slot::Plugin) => self.plugin_panel_click(None),
             Some(Slot::Procs) => self.procs_click(None),
             Some(_) => {
-                if let Some(c) = self.lane.chat.as_mut() {
+                if let Some(c) = self.session.chat.as_mut() {
                     c.focused = false;
                 }
-                if let Some(s) = self.lane.sidebar.as_mut() {
+                if let Some(s) = self.session.sidebar.as_mut() {
                     s.focus = false;
                 }
-                if let Some(r) = self.lane.code_review.as_mut() {
+                if let Some(r) = self.session.code_review.as_mut() {
                     r.focus = false;
                 }
-                if let Some(t) = self.lane.terminal.as_mut() {
+                if let Some(t) = self.session.terminal.as_mut() {
                     t.focus = false;
                 }
                 self.bottom_focus = true;
@@ -499,20 +501,20 @@ impl crate::editor::Editor {
     /// What has the keys, as `C-w z` would fill the screen with it — None: the review's file list (it keeps
     /// its width).
     pub fn focused_area(&self) -> Option<Zoom> {
-        if self.lane.chat.as_ref().is_some_and(|c| c.focused && !c.compact()) {
+        if self.session.chat.as_ref().is_some_and(|c| c.focused && !c.compact()) {
             return Some(Zoom::Chat);
         }
         let rail = self.review_rail_up();
-        if rail && self.lane.code_review.as_ref().is_some_and(|r| r.focus) {
+        if rail && self.session.code_review.as_ref().is_some_and(|r| r.focus) {
             return None;
         }
-        if !rail && self.lane.sidebar.as_ref().is_some_and(|s| s.focus) {
+        if !rail && self.session.sidebar.as_ref().is_some_and(|s| s.focus) {
             return Some(Zoom::Side);
         }
         if self.bottom_has_keys() {
             return Some(Zoom::Bottom);
         }
-        Some(Zoom::Code(self.lane.focus))
+        Some(Zoom::Code(self.session.focus))
     }
 
     /// What fills the screen now: `C-w z`'s, while it still has the keys.
@@ -530,11 +532,11 @@ impl crate::editor::Editor {
             return self.set_status("the review's file list keeps its width — C-w z from the code");
         };
         let s = &self.screen;
-        let alone = self.lane.views.len() == 1
+        let alone = self.session.views.len() == 1
             && s.chat_w == 0
             && s.side_w == 0
             && s.bottom_h == 0
-            && !(self.lane.code_review.is_some() && self.review_rail_up());
+            && !(self.session.code_review.is_some() && self.review_rail_up());
         if matches!(z, Zoom::Code(_)) && alone {
             return self.set_status("the code has the whole screen already");
         }
@@ -546,10 +548,10 @@ impl crate::editor::Editor {
     pub fn focus_sync(&mut self) {
         self.slot_sync();
         if self.bottom_focus {
-            let program = self.lane.terminal.as_ref().is_some_and(|t| t.focus && t.visible);
-            let other = self.lane.chat.as_ref().is_some_and(|c| c.focused)
-                || self.lane.sidebar.as_ref().is_some_and(|s| s.focus)
-                || self.lane.code_review.as_ref().is_some_and(|r| r.focus);
+            let program = self.session.terminal.as_ref().is_some_and(|t| t.focus && t.visible);
+            let other = self.session.chat.as_ref().is_some_and(|c| c.focused)
+                || self.session.sidebar.as_ref().is_some_and(|s| s.focus)
+                || self.session.code_review.as_ref().is_some_and(|r| r.focus);
             let slot = matches!(self.slot(), Some(Slot::Terminal | Slot::Test | Slot::Task));
             if program || other || !slot {
                 self.bottom_focus = false;
@@ -557,13 +559,13 @@ impl crate::editor::Editor {
         }
         // `:procs`' panel: the same, when another place took the keys — and it gives the slot to the terminal
         // given them (`C-\`), which it covered
-        if self.procs_up() && self.lane.terminal.as_ref().is_some_and(|t| t.focus && t.visible) {
+        if self.procs_up() && self.session.terminal.as_ref().is_some_and(|t| t.focus && t.visible) {
             self.procs_close();
         }
         if self.procs_focused()
-            && (self.lane.chat.as_ref().is_some_and(|c| c.focused)
-                || self.lane.sidebar.as_ref().is_some_and(|s| s.focus)
-                || self.lane.code_review.as_ref().is_some_and(|r| r.focus))
+            && (self.session.chat.as_ref().is_some_and(|c| c.focused)
+                || self.session.sidebar.as_ref().is_some_and(|s| s.focus)
+                || self.session.code_review.as_ref().is_some_and(|r| r.focus))
         {
             self.procs_unfocus();
         }

@@ -2,7 +2,7 @@
 //! files to read (patterns), environment variables, the network — and nothing it didn't say is ever done.
 //!
 //! - **Approval**: a plugin that asks for any is held until you approve the whole list: a card shows it when
-//!   the plugin loads (once a session), and what you approved is kept (`plugin-permissions.json` in the
+//!   the plugin loads (once until quit), and what you approved is kept (`plugin-permissions.json` in the
 //!   state folder). If a new version asks for something else, it's asked again.
 //! - **At the moment of use**: a connection to a host:port it hasn't used before is asked about, once; so is
 //!   a file outside its read patterns (a kubeconfig `KUBECONFIG` points elsewhere) — when it asked for some
@@ -295,7 +295,7 @@ impl Editor {
         Ok(())
     }
 
-    /// A plugin loaded, asking for `declared`: held until you approve them (a card asks — once a session).
+    /// A plugin loaded, asking for `declared`: held until you approve them (a card asks — once until quit).
     pub(super) fn plugin_permissions_loaded(&mut self, plugin: &str, declared: &[Permission]) {
         if declared.is_empty() || self.plugin_approved(plugin) {
             return;
@@ -356,7 +356,7 @@ impl Editor {
         let r = self.approvals_change(|all| all.entry(plugin.clone()).or_default().granted = granted);
         match r {
             Ok(()) => self.set_success(format!("Plugin {plugin}: approved")),
-            Err(e) => self.set_warning(format!("approved for this session — couldn't keep it: {e}")),
+            Err(e) => self.set_warning(format!("approved until you quit — couldn't keep it: {e}")),
         }
     }
 
@@ -387,7 +387,7 @@ impl Editor {
             .iter()
             .filter_map(|p| if let Permission::Read(pat) = p { Some(pat.clone()) } else { None })
             .collect();
-        let project = declared.contains(&Permission::Project).then(|| self.lane.root.clone());
+        let project = declared.contains(&Permission::Project).then(|| self.session.root.clone());
         if patterns.is_empty() && project.is_none() {
             return Err(Some("it didn't ask to read files (permissions())".into()));
         }
@@ -485,7 +485,7 @@ impl Editor {
             if host { a.hosts.push(entry) } else { a.files.push(entry) }
         });
         if let Err(e) = r {
-            self.set_warning(format!("allowed for this session — couldn't keep it: {e}"));
+            self.set_warning(format!("allowed until you quit — couldn't keep it: {e}"));
         }
         match ask {
             Ask::Connect(c) => self.plugin_connect_now(&plugin, c),

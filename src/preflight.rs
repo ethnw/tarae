@@ -309,7 +309,7 @@ impl Editor {
         }
     }
 
-    /// `y` on that card: run, and no card again for this project this session.
+    /// `y` on that card: run, and no card again for this project until quit.
     pub(crate) fn preflight_answer(
         &mut self,
         id: u64,
@@ -329,12 +329,12 @@ impl Editor {
 
     /// Where the preflight runs: the project.
     fn preflight_root(&self) -> std::path::PathBuf {
-        self.lane.root.clone()
+        self.session.root.clone()
     }
 
     /// Err while a task runs (the panel is one run's).
     fn preflight_free(&self) -> Result<(), String> {
-        match self.lane.task_run.as_ref().filter(|r| r.state == crate::task::State::Running) {
+        match self.session.task_run.as_ref().filter(|r| r.state == crate::task::State::Running) {
             Some(r) => Err(format!("{} is running — let it finish, or stop it (space m c)", r.task.name)),
             None => Ok(()),
         }
@@ -348,18 +348,18 @@ impl Editor {
         let task =
             crate::task::Task { name: "preflight".into(), cmd: script(&steps), cwd: self.preflight_root() };
         let generation = self.task_start_preflight(task).ok_or("the preflight didn't start")?;
-        self.lane.preflight = Some(Preflight::new(generation, &steps));
+        self.session.preflight = Some(Preflight::new(generation, &steps));
         Ok(())
     }
 
     /// The task run `generation` ended — true if it was the preflight's (then its summary is said).
     pub fn preflight_done(&mut self, generation: u64) -> bool {
-        let Some(p) = self.lane.preflight.as_mut().filter(|p| p.generation == generation) else {
+        let Some(p) = self.session.preflight.as_mut().filter(|p| p.generation == generation) else {
             return false;
         };
         p.finish();
         let (summary, passed) = (p.summary(), p.passed());
-        let places = self.lane.task_run.as_ref().map_or(0, |r| r.found.0 + r.found.1);
+        let places = self.session.task_run.as_ref().map_or(0, |r| r.found.0 + r.found.1);
         let tail = if places > 0 { " — ]q goes to the first" } else { "" };
         if passed {
             self.set_success(format!("preflight: {summary}"));

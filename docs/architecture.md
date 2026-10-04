@@ -77,7 +77,7 @@ Early mockups that set the direction: [ink](design/a-ink.png) · [paper](design/
 | **M3** ✅ | LSP — diagnostics, navigation, hover, completion, signature help, inlay hints, code actions with preview, rename, format |
 | **M4** ✅ | Claude — select → instruct → diff, streaming answers, chat panel; the chat explores the project, the editor follows it with its thinking beside the code, notes pinned to lines you answer in place, its edits reviewed before they're written, and a pull-request-style review of all changes sent back in one go |
 | **M5** ✅ | Claude Code IDE protocol — selection sharing, diagnostics, in-buffer review of edits |
-| **Experience** ✅ | which-key, palette, tutor, start screen, mouse, toasts, git gutter, session restore, persistent undo, disk sync, doc comments, splits, tests, debugger, attach |
+| **Experience** ✅ | which-key, palette, tutor, start screen, mouse, toasts, git gutter, reopening the last files, persistent undo, disk sync, doc comments, splits, tests, debugger, attach |
 | **Workbench** ✅ | Side panel (files, outline, list, git), one folder tree for every list of files, indentation from `indents.scm`, several language servers per file, the list (quickfix) and build tasks, git tab (stage, commit, push, log, branches), merge conflicts, `:diff`, built-in terminal |
 | **M6** ✅ | Plugins — commands in Rust, compiled to WebAssembly, sandboxed on tarae's own runtime (interpreter + JIT); `tarae plugin new/dev/list` |
 | Next | ACP (hosting agents inside tarae) |
@@ -170,7 +170,7 @@ tarae's release build (wasmi's and wasmtime's without a host).
   connect/send, read-file, read-env, timer, stop, panel, prompt, show/append) and what comes back arrives at
   `on-events`, with the time and fresh randomness (a plugin has neither). Only what `permissions()` declared and you
   approved (kept in the state folder); a new host:port, or a file outside its patterns, is asked about once. Paths
-  are checked as written and resolved. Programs run in sessions of their own, with a plain environment, found on
+  are checked as written and resolved. Programs run in process groups of their own, with a plain environment, found on
   `PATH`'s absolute folders; connections are read and written on threads of their own; timers share one clock
   thread; a plugin has at most 16 programs, 16 connections and 256 timers. Everything a plugin started ends with it.
   What comes back while it's busy waits and goes in one call; past 4 MB waiting, its readers pause (backpressure,
@@ -232,7 +232,7 @@ src/
   disk.rs            sync with changes on disk, auto-save
   saver.rs           saving off the main loop, in order; quitting waits for it
   fswatch.rs         waking when files change (inotify, kqueue; a timer elsewhere)
-  session.rs         session restore
+  restore.rs         reopening the files last open in a folder, at their spots
   recent.rs          recent files (start screen)
   undofile.rs        persistent undo
   clipboard.rs       + register = system clipboard
@@ -243,6 +243,8 @@ src/
   gitpanel.rs        the git tab — status, stage, discard, commit, push/pull, log, branches
   conflict.rs        merge conflicts — found, drawn, resolved
   diffview.rs        :diff and tarae --diff
+  session.rs         sessions — a checkout's panes, chat, terminal, tests, tasks, git; one in front
+  worktree.rs        making, ending and bringing in a session (a git worktree), the list, keeping them
 
   syntax.rs          language detection, grammar loading, background parsing, highlights, injections
   languages.toml     language table (grammars, file types)

@@ -50,15 +50,15 @@ process lives for the whole conversation, so Claude remembers what came before.
 or "Choose Claude's model" in the palette) lists the models your `claude` offers, with the one in use marked
 ([screenshot](screenshots/chat-model.png)). `:effort` sets how hard it thinks, for models that take it. The
 choice applies to the conversation at once, with no restart and no lost context: the next answer comes from the
-new model. It's also saved (`llm.model`, `llm.effort`), so `space i` and later sessions use it too.
+new model. It's also saved (`llm.model`, `llm.effort`), so `space i` and later chats use it too.
 
-Conversations outlive tarae. Each one is kept for its project, and Claude's memory of it is its own session
+Conversations outlive tarae. Each one is kept for its project, and Claude keeps its own memory of it
 (`claude --resume`). Open the chat after a restart and the latest conversation carries on (`continued from 2 h
 ago`) if you used it in the last 8 hours. Otherwise you get a fresh chat, and the empty panel lists your earlier
 conversations. `C-p` in the chat (or `:chat-resume`) picks any of them, with the conversation as the preview
 ([screenshot](screenshots/chat-conversations.png)). The last 20 conversations of a project are kept, in
-`~/.local/state/tarae/chats/`. Because the chat's sessions are kept, they also show in `claude --resume` in
-that folder.
+`~/.local/state/tarae/chats/`. Because Claude keeps the chat's conversations too, they also show in `claude --resume`
+in that folder.
 
 Every message carries **the current file, cursor, selection, and diagnostics** as context, plus **what's on
 screen**: the lines you're looking at, and the file in the pane beside it when the window is split. So "this" and
@@ -123,7 +123,7 @@ near the top if it's taller than the screen. Those lines get a faint accent wash
 written, review at the end included: its new lines on the review's green wash, the lines it replaced in red
 above them. A search or a lookup jumps to its first hit, with the count on the card (`1 matching line in 1
 file`), and the finished answer takes you to its first `path:line`. A card beside the code names the tool and
-what it's on (`● edit  src/trust.rs  L15–20`, `● grep …`, `● search (project) …`, `● definition Lane`) and
+what it's on (`● edit  src/trust.rs  L15–20`, `● grep …`, `● search (project) …`, `● definition Session`) and
 shows what Claude is thinking, as a running log of the turn: a new thought goes under the last one instead of replacing it, so you
 can follow the reasoning at your own pace ([screenshot](screenshots/follow-thinking.png)). Claude's thinking arrives as summaries, and the chat keeps each one as a folded italic aside. While
 Claude works, the chat minimizes to a small card at the bottom right: your question, its last few lookups
@@ -343,7 +343,7 @@ What Claude runs, with `run` and `run_tests`, runs in a sandbox (macOS: Seatbelt
   `TMPDIR`. The sockets in `/tmp` and your own temp folder belong to programs running outside the sandbox
   (tmux, zellij, ssh-agent), and some of them would run whatever they're told. tmux's and zellij's socket
   folders (`$TMUX_TMPDIR` or `/tmp`, then `tmux-<uid>`; `$ZELLIJ_SOCKET_DIR` or `$TMPDIR/zellij-<uid>`) can't
-  be written either, so a command can't delete or replace the session you work in
+  be written either, so a command can't delete or replace the multiplexer you work in
 - **Programs on this machine are closed to it too, except on the ports you open.** It can still listen on a
   port; connecting is what's closed. Some ports belong to programs that run whatever they're asked, outside
   the sandbox (the table below), and macOS's sandbox can't open "all of this machine but those". So:
@@ -359,7 +359,7 @@ What Claude runs, with `run` and `run_tests`, runs in a sandbox (macOS: Seatbelt
   |---|---|
   | 2375, 2376, 4243 | Docker's API: it starts containers that mount any folder |
   | 8888 | Jupyter: it runs code in its kernels |
-  | 9222 | Chrome DevTools: it drives the browser, signed-in sessions included |
+  | 9222 | Chrome DevTools: it drives the browser, signed in as you |
   | 9229 | Node's inspector: it runs code in the program being inspected |
   | 6379 | Redis: its `CONFIG` and `MODULE` commands write files and load code |
   | 2379 | etcd: a cluster's state, its secrets included |
@@ -416,7 +416,7 @@ folder searched and what for. What's read goes to Claude.
 
 Claude can pin **notes** to lines of code: a bug, a risk, or a question tied to specific lines. A note shows as
 `¶ first words` at the end of its line, and with the cursor on those lines a card shows the whole thread. Notes
-ride edits (lines added above push them down) and last for the session.
+ride edits (lines added above push them down), and the next start in this folder brings them back.
 
 Talk back right there: `space n` on a note line replies. Your reply goes to Claude together with those lines and
 the thread so far, and Claude answers on the thread. `space n` on a line without a note asks Claude about that
@@ -510,7 +510,7 @@ so there's nothing to set up on the Claude Code side.
 - **Claude's edits come to you**: when it proposes an edit, tarae opens the file in the same in-buffer review as
   `space i`, headed `Claude Code`. `y`/`n` per change, `a` for all. Accept only part and Claude knows what you kept; it
   writes the file, and tarae treats that content arriving on disk as saved. A terminal bell gets your attention
-- Security: tarae listens only on `127.0.0.1` and checks a per-session 128-bit token (from `~/.claude/ide/<port>.lock`).
+- Security: tarae listens only on `127.0.0.1` and checks a 128-bit token, new each time it starts the server, (from `~/.claude/ide/<port>.lock`).
   That file is the only one tarae writes there, and the only one it removes, when it quits; other editors' and other
   tarae windows' files are never touched. Turn it off with `llm.claude-code = false`
 

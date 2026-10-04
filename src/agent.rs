@@ -287,7 +287,7 @@ impl Editor {
             return;
         }
         let Some(dir) = lock_dir() else { return };
-        let cwd = self.lane.root.clone();
+        let cwd = self.session.root.clone();
         let token = token();
         // A lock file already named for our port (one left by a program that had it before) isn't ours to
         // overwrite: another port, a few tries
@@ -476,7 +476,7 @@ impl Editor {
                 json_text(json!({ "tabs": tabs }))
             }
             "getWorkspaceFolders" => {
-                let cwd = self.lane.root.clone();
+                let cwd = self.session.root.clone();
                 let name = cwd.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 json_text(
                     json!({ "success": true, "folders": [{ "name": name, "uri": crate::lsp::uri(&cwd), "path": cwd }],
@@ -641,7 +641,7 @@ impl Editor {
     /// hanging. Only here is the queue popped (not from a review's callback — that would install a review
     /// inside `review_with`, which then overwrites it).
     pub fn agent_next_diff(&mut self) {
-        while self.lane.review.is_none() {
+        while self.session.review.is_none() {
             let Some(d) = self.agent.as_mut().and_then(|a| a.queue.pop_front()) else { return };
             self.agent_show_diff(d);
         }
@@ -667,7 +667,7 @@ impl Editor {
         let title = format!(
             "proposes {n} change{} to {}",
             if n == 1 { "" } else { "s" },
-            self.doc().display_name(&self.lane.root)
+            self.doc().display_name(&self.session.root)
         );
         if let Some(a) = &mut self.agent {
             a.active_tab = Some(d.tab.clone());
@@ -684,7 +684,7 @@ impl Editor {
                 ed.agent_diff_answer(d, applied);
             })),
         );
-        if let Some(r) = &mut self.lane.review {
+        if let Some(r) = &mut self.session.review {
             r.by = "Claude Code";
         }
         // Call whoever is waiting in the side pane (terminal bell)
@@ -746,7 +746,7 @@ impl Editor {
         }
         let env = format!("CLAUDE_CODE_SSE_PORT={} ENABLE_IDE_INTEGRATION=true", a.port);
         // Claude matches the lock file's workspace against its own folder — launch from the same folder
-        let cwd = self.lane.root.to_string_lossy().replace('\'', "'\\''");
+        let cwd = self.session.root.to_string_lossy().replace('\'', "'\\''");
         let cmd = if std::env::var_os("ZELLIJ").is_some() {
             format!(
                 "zellij run --name claude --direction right --close-on-exit --cwd '{cwd}' -- env {env} claude"
@@ -760,7 +760,7 @@ impl Editor {
                 ("ENABLE_IDE_INTEGRATION".to_string(), "true".to_string()),
             ];
             // Never in place of something running there (it's shown instead)
-            let busy = self.lane.terminal.as_ref().filter(|t| t.exited.is_none()).map(|t| t.title.clone());
+            let busy = self.session.terminal.as_ref().filter(|t| t.exited.is_none()).map(|t| t.title.clone());
             match busy {
                 Some(title) if title == "claude" => {
                     return self.set_status("Claude Code is in the terminal below");
@@ -952,11 +952,11 @@ mod tests {
             (v["id"].clone(), v["result"]["content"][0]["text"].clone()),
             (json!(1), json!("DIFF_REJECTED"))
         );
-        assert_eq!(ed.lane.review.as_ref().unwrap().by, "Claude");
+        assert_eq!(ed.session.review.as_ref().unwrap().by, "Claude");
         assert_eq!(ed.agent.as_ref().unwrap().queue.len(), 1);
         // The chat review ends → A2 shows
         ed.handle_event(Event::Key("q".parse().unwrap()));
-        assert_eq!(ed.lane.review.as_ref().map(|r| r.by), Some("Claude Code"));
+        assert_eq!(ed.session.review.as_ref().map(|r| r.by), Some("Claude Code"));
         ed.handle_event(Event::Key("y".parse().unwrap()));
         let v = sent_reply(&rx);
         assert_eq!(v["id"], 2);
@@ -1093,9 +1093,9 @@ mod tests {
             "params": { "name": "openDiff", "arguments": { "old_file_path": file, "new_file_path": file,
                 "new_file_contents": "one\nTWO\n", "tab_name": "✻ [Claude Code] a.txt" } } }),
         );
-        assert!(ed.lane.review.as_ref().is_some_and(|r| r.ready));
+        assert!(ed.session.review.as_ref().is_some_and(|r| r.ready));
         ed.handle_key("y".parse().unwrap());
-        assert!(ed.lane.review.is_none());
+        assert!(ed.session.review.is_none());
         let saved = reply(&mut r);
         assert_eq!(saved["id"], 4);
         assert_eq!(saved["result"]["content"][0]["text"], "FILE_SAVED");

@@ -97,13 +97,13 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
                     | "rename" | "replace"),
                 ) => {
                     let call = call();
-                    // (watched while it waits — one silent too long marks its session: `lane::Doing::Stuck`)
+                    // (watched while it waits — one silent too long marks its session: `session::Doing::Stuck`)
                     let tool = WATCHED.into_iter().find(|t| *t == name).unwrap_or("tool");
                     let wait = match name {
                         "diagnostics" => args["wait"].as_u64().unwrap_or(0).min(crate::nav::WAIT_MAX),
                         _ => 0,
                     };
-                    let after = crate::lane::STUCK_AFTER + std::time::Duration::from_secs(wait);
+                    let after = crate::session::STUCK_AFTER + std::time::Duration::from_secs(wait);
                     ed.tool_waits(generation, id.clone(), tool, after);
                     let asked = match name {
                         "rename" => crate::refactor::rename(ed, call, args),
@@ -118,7 +118,7 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
                     match asked {
                         Ok(()) => return None,
                         Err(e) => {
-                            ed.lane.tool_waits.retain(|w| !w.is(generation, &id));
+                            ed.session.tool_waits.retain(|w| !w.is(generation, &id));
                             Err(e)
                         }
                     }
@@ -190,31 +190,31 @@ impl Call {
     }
 }
 
-/// Answers a call that waited — only to the process that made it, in whichever lane it is.
+/// Answers a call that waited — only to the process that made it, in whichever session it is.
 pub fn answer(ed: &mut Editor, call: Call, r: Result<String, String>) {
     #[cfg(test)]
     ANSWERED.with(|a| a.borrow_mut().push((call.id.clone(), r.clone())));
     deliver(ed, call, r);
 }
 
-/// `answer`'s way to its chat: the lane in `ed.lane` if it's that chat's, else that lane swapped in — or,
-/// while another lane behind is swapped in, from the main loop next (never a swap inside a swap). That
-/// next turn isn't behind (`behind` is set only inside `with_lane`, and the main loop applies a shared
+/// `answer`'s way to its chat: the session in `ed.session` if it's that chat's, else that session swapped in — or,
+/// while another session behind is swapped in, from the main loop next (never a swap inside a swap). That
+/// next turn isn't behind (`behind` is set only inside `with_session`, and the main loop applies a shared
 /// result outside it), so it's one hop, never a loop.
 fn deliver(ed: &mut Editor, call: Call, r: Result<String, String>) {
-    let owner = std::iter::once(&ed.lane)
-        .chain(&ed.lanes)
+    let owner = std::iter::once(&ed.session)
+        .chain(&ed.sessions)
         .find(|l| l.chat.as_ref().is_some_and(|c| c.generation() == call.generation))
         .map(|l| l.id);
     match owner {
         // (its chat is gone, or another process took its place)
         None => {}
-        Some(lane) if lane == ed.lane.id => {
-            ed.lane.tool_waits.retain(|w| !w.is(call.generation, &call.id));
+        Some(session) if session == ed.session.id => {
+            ed.session.tool_waits.retain(|w| !w.is(call.generation, &call.id));
             let response = response(&call, r);
             crate::chat::respond(ed, &call.request_id, json!({ "mcp_response": response }));
         }
-        Some(lane) if !ed.background() => ed.with_lane(lane, move |ed| deliver(ed, call, r)),
+        Some(session) if !ed.background() => ed.with_session(session, move |ed| deliver(ed, call, r)),
         Some(_) => {
             let later = crate::event::Event::Job(Box::new(move |ed: &mut Editor| deliver(ed, call, r)));
             let _ = ed.events.shared_sender().send(later);
@@ -252,12 +252,12 @@ fn run_tests_schema() -> Value {
 /// the run's end (`tests_done`). Err = answered now.
 fn run_tests(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
     let path = args["path"].as_str().filter(|p| !p.is_empty()).ok_or("path is required")?;
-    let path = crate::chat::resolve(&ed.lane.root, path);
+    let path = crate::chat::resolve(&ed.session.root, path);
     let line = args["line"].as_u64().map(|l| l.max(1) as usize - 1);
     busy(ed)?;
     // The buffer's text when it's open (unsaved edits are what gets saved and run)
     let text = ed.docs.iter().find(|d| d.path.as_deref() == Some(path.as_path())).map(|d| d.text.clone());
-    let root = ed.lane.root.clone();
+    let root = ed.session.root.clone();
     ed.events.jobs().spawn(move || {
         let found = find(&root, &path, text, line);
         move |ed: &mut Editor| match found {
@@ -279,7 +279,7 @@ fn run_tests(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
 
 /// Tests already running (the user's or an earlier call) aren't cut short.
 fn busy(ed: &Editor) -> Result<(), String> {
-    match &ed.lane.test_run {
+    match &ed.session.test_run {
         Some(r) if r.state == RunState::Running => Err(format!(
             "tests are already running in the editor ({}) — wait for them to finish, then run again",
             r.target.label
@@ -343,7 +343,7 @@ fn start_tests(ed: &mut Editor, who: For, target: crate::testing::Target, guard:
     let before = ed.test_generation;
     let program = target.argv().first().cloned().unwrap_or_default();
     ed.test_start_guarded(target, guard);
-    match ed.lane.test_run.as_mut().filter(|_| ed.test_generation != before) {
+    match ed.session.test_run.as_mut().filter(|_| ed.test_generation != before) {
         Some(r) => match who {
             For::Claude(call) => r.chat = Some(call),
             For::User(head) => r.tell = Some(head),
@@ -355,13 +355,13 @@ fn start_tests(ed: &mut Editor, who: For, target: crate::testing::Target, guard:
 /// The run Claude asked for ended — its results go back, and the editor shows the first failure. One the
 /// user ran again (`blocked.rs`): Claude hears how it ended with the next message.
 pub fn tests_done(ed: &mut Editor) {
-    let Some(r) = ed.lane.test_run.as_mut() else { return };
+    let Some(r) = ed.session.test_run.as_mut() else { return };
     if let Some(head) = r.tell.take() {
-        let text = report(&ed.lane.root, r);
+        let text = report(&ed.session.root, r);
         return told(ed, head, text);
     }
     let Some(call) = r.chat.take() else { return };
-    let text = report(&ed.lane.root, r);
+    let text = report(&ed.session.root, r);
     let failed = r.failures().first().map(|&i| r.cases[i].clone());
     answer(ed, call, Ok(text));
     if let Some(case) = failed
@@ -376,11 +376,11 @@ pub fn tests_done(ed: &mut Editor) {
 /// The chat turn ended (stopped) with a run still going: it goes on for the user, unreported — and a
 /// command still waiting for the user's yes is no longer asked about.
 pub fn turn_over(ed: &mut Editor) {
-    ed.lane.tool_waits.clear();
-    if let Some(r) = ed.lane.test_run.as_mut() {
+    ed.session.tool_waits.clear();
+    if let Some(r) = ed.session.test_run.as_mut() {
         r.chat = None;
     }
-    if let Some(r) = ed.lane.task_run.as_mut() {
+    if let Some(r) = ed.session.task_run.as_mut() {
         r.chat = None;
     }
     ed.offers
@@ -391,7 +391,7 @@ pub fn turn_over(ed: &mut Editor) {
 
 /// A run Claude waited on is gone before it ended (closed, or another run took its place).
 pub fn tests_dropped(ed: &mut Editor, why: &str) {
-    if let Some(call) = ed.lane.test_run.as_mut().and_then(|r| r.chat.take()) {
+    if let Some(call) = ed.session.test_run.as_mut().and_then(|r| r.chat.take()) {
         answer(ed, call, Err(format!("the test run was stopped — {why}")));
     }
 }
@@ -654,9 +654,9 @@ fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
         false => None,
     };
     run_busy(ed)?;
-    let cwd = run_cwd(&ed.lane.root, args["cwd"].as_str())?;
+    let cwd = run_cwd(&ed.session.root, args["cwd"].as_str())?;
     let mut extra = ed.config.llm.run_allow.clone();
-    extra.extend(ed.lane.chat.as_ref().map(|c| c.run_allow.clone()).unwrap_or_default());
+    extra.extend(ed.session.chat.as_ref().map(|c| c.run_allow.clone()).unwrap_or_default());
     if outside.is_none() && allowed(cmd, &extra) {
         guarded(ed, call, Job::Command(cmd.to_string(), cwd), false);
         return Ok(());
@@ -670,17 +670,17 @@ fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
     // Review at the end: a file it names that Claude wrote unseen this turn goes on the card with it —
     // which ones, and their text, found on a worker
     let unseen: Vec<PathBuf> =
-        ed.lane.checkpoints.turn.iter().filter(|t| t.unseen).map(|t| t.path.clone()).collect();
+        ed.session.checkpoints.turn.iter().filter(|t| t.unseen).map(|t| t.path.clone()).collect();
     let cmd = cmd.to_string();
     if unseen.is_empty() {
         return ask(ed, cmd, cwd, call, Vec::new(), outside);
     }
-    let root = ed.lane.root.clone();
+    let root = ed.session.root.clone();
     ed.events.jobs().spawn(move || {
         let shown = named(&root, &cmd, &cwd, &unseen);
         move |ed: &mut Editor| {
             // (the turn ended meanwhile: nobody waits for a card)
-            if ed.lane.chat.as_ref().is_some_and(|c| c.generation() != call.generation || !c.busy()) {
+            if ed.session.chat.as_ref().is_some_and(|c| c.generation() != call.generation || !c.busy()) {
                 return;
             }
             let c = call.clone();
@@ -711,14 +711,14 @@ fn run_cwd(root: &Path, cwd: Option<&str>) -> Result<PathBuf, String> {
 /// A command that only reads (`readonly.rs`): where it reads is found on a worker — all of it in the
 /// project, or in places allowed, and it runs now; anything else is on its card.
 fn read_only(ed: &mut Editor, call: Call, cmd: String, cwd: PathBuf) -> Result<(), String> {
-    let chat = ed.lane.chat.as_ref().map(|c| c.allowed.clone()).unwrap_or_default();
-    let (store, root) = (ed.allow_path.clone(), ed.lane.root.clone());
+    let chat = ed.session.chat.as_ref().map(|c| c.allowed.clone()).unwrap_or_default();
+    let (store, root) = (ed.allow_path.clone(), ed.session.root.clone());
     ed.events.jobs().spawn(move || {
         let kept = crate::allow::Store::read(store.as_deref()).get(&root);
         let reads = crate::readonly::outside(&cmd, &cwd, &root, &chat, &kept);
         move |ed: &mut Editor| {
             // (the turn ended meanwhile: nobody waits for it)
-            if ed.lane.chat.as_ref().is_some_and(|c| c.generation() != call.generation || !c.busy()) {
+            if ed.session.chat.as_ref().is_some_and(|c| c.generation() != call.generation || !c.busy()) {
                 return;
             }
             // (a `cd` into what isn't a folder: where the rest reads can't be told — the plain card)
@@ -777,7 +777,7 @@ fn ask_with(
     // What's decided: the command (and where it runs, when not at the root), what it reads outside (one
     // place a line)
     let mut decided = 0..cmd.split('\n').count();
-    if let Ok(rel) = cwd.strip_prefix(&ed.lane.root).map(Path::to_path_buf)
+    if let Ok(rel) = cwd.strip_prefix(&ed.session.root).map(Path::to_path_buf)
         && !rel.as_os_str().is_empty()
     {
         question.push_str(&format!("\n  in {}", rel.display()));
@@ -814,7 +814,7 @@ fn ask_with(
         let text = text.replace("\r\n", "\n").replace('\t', "    ");
         question.push_str(&format!(
             "\n\n{} — written this turn, unseen:\n{}",
-            crate::chat::shown(&ed.lane.root, path),
+            crate::chat::shown(&ed.session.root, path),
             text.trim_end_matches('\n')
         ));
     }
@@ -922,7 +922,7 @@ fn showable(root: &Path, path: &std::path::Path) -> Result<String, String> {
 
 /// A task running in the panel isn't cut short (the user's, or an install).
 fn run_busy(ed: &Editor) -> Result<(), String> {
-    match &ed.lane.task_run {
+    match &ed.session.task_run {
         Some(r) if r.state == crate::task::State::Running => Err(format!(
             "a command is already running in the editor ({}) — wait for it to finish, then run again",
             r.task.name
@@ -963,7 +963,7 @@ fn fail(ed: &mut Editor, who: For, e: String) {
 
 /// A run the user started again ended: Claude reads how with the next message — the panel shows it now.
 fn told(ed: &mut Editor, head: String, report: String) {
-    ed.lane.checkpoints.tell.push(format!("{head}\n{report}"));
+    ed.session.checkpoints.tell.push(format!("{head}\n{report}"));
     ed.note("Claude hears how it ended with your next message");
 }
 
@@ -1017,7 +1017,7 @@ pub fn run_answer(ed: &mut Editor, id: u64, what: RunCard, scope: Option<crate::
     }
     // `a` (or `A` where reads are kept too): its pattern for the rest of this chat — never for good
     if let (Some(p), crate::allow::Scope::ThisChat | crate::allow::Scope::Always) = (&pattern, scope)
-        && let Some(chat) = ed.lane.chat.as_mut()
+        && let Some(chat) = ed.session.chat.as_mut()
         && !chat.run_allow.contains(p)
     {
         chat.run_allow.push(p.clone());
@@ -1026,7 +1026,7 @@ pub fn run_answer(ed: &mut Editor, id: u64, what: RunCard, scope: Option<crate::
     if shown.is_empty() {
         return run_now(ed, cmd, cwd, call, unprotected, outside);
     }
-    let root = ed.lane.root.clone();
+    let root = ed.session.root.clone();
     ed.events.jobs().spawn(move || {
         let changed =
             shown.iter().find(|(p, text)| std::fs::read(p).ok().as_deref() != Some(text.as_bytes()));
@@ -1126,8 +1126,8 @@ pub fn guard_and_go(ed: &mut Editor, who: For, job: Job, asked: bool, extra: Ext
         return go(ed, who, job, None);
     }
     let llm = ed.config.llm.clone();
-    let chat = ed.lane.chat.as_ref().map(|c| c.allowed.clone()).unwrap_or_default();
-    let (store, root) = (ed.allow_path.clone(), ed.lane.root.clone());
+    let chat = ed.session.chat.as_ref().map(|c| c.allowed.clone()).unwrap_or_default();
+    let (store, root) = (ed.allow_path.clone(), ed.session.root.clone());
     ed.events.jobs().spawn(move || {
         let found = match found {
             Availability::Unknown => crate::sandbox::probe(),
@@ -1149,14 +1149,14 @@ pub fn guard_and_go(ed: &mut Editor, who: For, job: Job, asked: bool, extra: Ext
             ed.sandbox = found.clone();
             // (Claude's turn ended meanwhile: nothing waits for it)
             if let For::Claude(call) = &who
-                && ed.lane.chat.as_ref().is_some_and(|c| c.generation() != call.generation || !c.busy())
+                && ed.session.chat.as_ref().is_some_and(|c| c.generation() != call.generation || !c.busy())
             {
                 return;
             }
             match (policy, found, who) {
                 (Some(p), _, who) => go(ed, who, job, Some(Guard::In(p))),
                 (None, Availability::Missing(why), For::Claude(call))
-                    if !asked && !ed.lane.chat.as_ref().is_some_and(|c| c.unprotected) =>
+                    if !asked && !ed.session.chat.as_ref().is_some_and(|c| c.unprotected) =>
                 {
                     ask_unprotected(ed, call, job, why)
                 }
@@ -1217,7 +1217,7 @@ pub fn unprotected_answer(ed: &mut Editor, id: u64, job: Job, call: Call, answer
         }
         Unprotected::Once => go(ed, For::Claude(call), job, Some(Guard::Without(why))),
         Unprotected::ThisChat => {
-            if let Some(c) = ed.lane.chat.as_mut() {
+            if let Some(c) = ed.session.chat.as_mut() {
                 c.unprotected = true;
             }
             ed.set_warning("Claude's commands run without a sandbox in this conversation");
@@ -1235,22 +1235,22 @@ pub enum Unprotected {
 
 /// Whether Claude's commands run without a sandbox now — the chat's title says so.
 pub fn unsandboxed(ed: &Editor) -> bool {
-    !ed.config.llm.sandbox || ed.lane.chat.as_ref().is_some_and(|c| c.unprotected)
+    !ed.config.llm.sandbox || ed.session.chat.as_ref().is_some_and(|c| c.unprotected)
 }
 
 /// The command Claude ran ended — how, and its output, go back; the editor shows the first error. One the
 /// user ran again (`blocked.rs`): Claude hears how it ended with the next message.
 pub fn run_done(ed: &mut Editor) {
-    let Some(r) = ed.lane.task_run.as_mut() else { return };
+    let Some(r) = ed.session.task_run.as_mut() else { return };
     // (its own places — the user's list has them only when it was a check, #28)
     if let Some(head) = r.tell.take() {
         let r = &*r;
-        let text = run_report(&ed.lane.root, r, &r.places);
+        let text = run_report(&ed.session.root, r, &r.places);
         return told(ed, head, text);
     }
     let Some(call) = r.chat.take() else { return };
     let items = &r.places;
-    let text = run_report(&ed.lane.root, r, items);
+    let text = run_report(&ed.session.root, r, items);
     let first =
         items.iter().find(|i| i.severity == 1).filter(|_| r.state != crate::task::State::Passed).cloned();
     let label = r.task.name.clone();
@@ -1263,7 +1263,7 @@ pub fn run_done(ed: &mut Editor) {
 /// A run Claude waited on is gone before it ended (stopped, or another task took its place).
 pub fn run_dropped(ed: &mut Editor, why: &str) {
     if let Some(call) = ed
-        .lane
+        .session
         .task_run
         .as_mut()
         .filter(|r| r.state == crate::task::State::Running)
@@ -1646,7 +1646,7 @@ mod tests {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        // (not the running Claude Code session's variables — a nested claude would take them as its own)
+        // (not the running Claude Code's variables — a nested claude would take them as its own)
         for (k, _) in std::env::vars_os() {
             if k.to_string_lossy().starts_with("CLAUDE") {
                 cmd.env_remove(k);

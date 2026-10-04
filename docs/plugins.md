@@ -166,7 +166,7 @@ fn permissions() -> Vec<Permission> {
 
 | Permission | Lets it | Asked about besides |
 |---|---|---|
-| `run(program)` | `spawn` that program (a plain name, found on `PATH`): argv, no shell, in your home folder, in a session of its own, with a plain environment — `PATH`, `HOME`, `USER`, the locale, `TERM`, `TMPDIR`, and the variables it may read (which it may also set for it: `AWS_PROFILE`) | — |
+| `run(program)` | `spawn` that program (a plain name, found on `PATH`): argv, no shell, in your home folder, in a process group of its own, with a plain environment — `PATH`, `HOME`, `USER`, the locale, `TERM`, `TMPDIR`, and the variables it may read (which it may also set for it: `AWS_PROFILE`) | — |
 | `read(pattern)` | `read-file` what the pattern covers (up to 16 MB) | a file outside the patterns, once — `..` and symlinks don't lead out |
 | `env(name)` | `read-env` that variable | — |
 | `network` | `connect` over TCP | each new host:port, once |
@@ -181,7 +181,7 @@ Requests are actions, and what they bring comes back later to `on-events(events,
 | `read-file`, `read-env` | `file` (its bytes), `env` (its value, or none) |
 | `find` (id, pattern) | `found` (the project's files it matches) |
 | `write-own` (id, name, bytes) | `written` (where): a file in the plugin's own folder (in tarae's state folder — nowhere else; no permission, up to 1 MB), readable by you alone |
-| `offer-install` (id, tool) | `installed` once you've installed it from the card (a tool a language pack knows how to install; once a session), or `failed` |
+| `offer-install` (id, tool) | `installed` once you've installed it from the card (a tool a language pack knows how to install; once until tarae quits), or `failed` |
 | `timer` (id, ms) | `tick` |
 | `stop` (id) | nothing more: the program is stopped, the connection closed, the timer dropped |
 
