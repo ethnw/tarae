@@ -133,6 +133,10 @@ pub const COMMANDS: &[TypedCmd] = &[
     c(&["tutor"], Arg::None, "Learn the keys — a 10-minute tutorial"),
     c(&["task", "make"], Arg::None, "Run a build task (by name; none: pick one)"),
     c(&["git-switch"], Arg::Branch, "Switch to a branch (none: pick one)"),
+    c(&["git-branch-new"], Arg::Branch, "Make a branch and switch to it"),
+    c(&["git-branch-rename"], Arg::Branch, "Rename a branch (one name: this one)"),
+    c(&["git-branch-delete"], Arg::Branch, "Delete a branch (asks if it loses commits)"),
+    c(&["git-amend"], Arg::None, "Put what's staged into the last commit"),
     c(&["diff"], Arg::File, "Show changes against HEAD, a file, or a revision"),
     c(&["diff-off"], Arg::None, "Stop showing the diff"),
 ];

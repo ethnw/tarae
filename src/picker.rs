@@ -54,6 +54,12 @@ pub enum Action {
     },
     /// A notification of this session (`:messages`) — nothing to do; the list is for reading.
     Message,
+    /// A local branch (`B` in the git tab): Enter switches to it, `C-r` renames, `C-x` deletes. `held` = where
+    /// it's checked out when that's another worktree (as shown — switching there is refused).
+    Branch {
+        name: String,
+        held: Option<String>,
+    },
     /// An item of a plugin's pick (the prompt token it answers, the item's id).
     Plugin {
         token: u64,
@@ -260,6 +266,10 @@ pub struct Picker {
     /// Preview cache (path → loading/content). Filled by a worker thread.
     pub previews: HashMap<PathBuf, Preview>,
     matcher: Matcher,
+    /// What a typed name no item has makes (what, the `:` command given the name) — a plain list's last
+    /// row, `+ ‹name›` (`making`) · that row, while the query asks for it.
+    pub make: Option<(&'static str, &'static str)>,
+    made: Option<Item>,
 }
 
 impl Picker {
@@ -296,6 +306,8 @@ impl Picker {
             center: false,
             previews: HashMap::new(),
             matcher: Matcher::new(config),
+            make: None,
+            made: None,
         };
         p.refilter();
         p
@@ -304,6 +316,36 @@ impl Picker {
     pub fn without_preview(mut self) -> Self {
         self.preview = false;
         self
+    }
+
+    /// A name typed that no item has is a last row making it — `+ fix-login`, hinted `new branch`; Enter
+    /// runs `:<command> <name>`. (A plain list's: not a tree's, nor a live search's.)
+    pub fn making(mut self, what: &'static str, command: &'static str) -> Self {
+        self.make = Some((what, command));
+        self
+    }
+
+    /// The `+` row for the query now.
+    fn remake(&mut self) {
+        let q = self.query.trim();
+        self.made = match self.make {
+            Some((what, command))
+                if self.tree.is_none()
+                    && !self.live
+                    && !self.loading
+                    && !q.is_empty()
+                    && !q.contains(char::is_whitespace)
+                    && !self.items.iter().any(|i| i.label == q) =>
+            {
+                Some(Item {
+                    label: q.to_string(),
+                    action: Action::Typed(format!("{command} {q}")),
+                    hint: format!("new {what}"),
+                    glyph: Some(("+", "diff.plus")),
+                })
+            }
+            _ => None,
+        };
     }
 
     pub fn set_items(&mut self, items: Vec<Item>) {
@@ -394,6 +436,7 @@ impl Picker {
 
     /// Refilter, and lay the matches out as tree rows when it's a tree (once they're in, if a worker filters).
     fn sync(&mut self) {
+        self.remake();
         if self.refilter() {
             self.layout();
         }
@@ -453,14 +496,14 @@ impl Picker {
     pub fn len(&self) -> usize {
         match &self.tree {
             Some(tm) => tm.rows.len(),
-            None => self.matches.len(),
+            None => self.matches.len() + usize::from(self.made.is_some()),
         }
     }
 
     fn pickable(&self, row: usize) -> bool {
         match &self.tree {
             Some(tm) => tm.rows.get(row).is_some_and(|r| r.item.is_some()),
-            None => row < self.matches.len(),
+            None => row < self.len(),
         }
     }
 
@@ -721,7 +764,10 @@ impl Picker {
     pub fn current(&self) -> Option<&Item> {
         match &self.tree {
             Some(tm) => self.item(tm.rows.get(self.selected)?.item?),
-            None => self.matches.get(self.selected).map(|&i| &self.items[i as usize]),
+            None => match self.matches.get(self.selected) {
+                Some(&i) => Some(&self.items[i as usize]),
+                None => self.made.as_ref().filter(|_| self.selected == self.matches.len()),
+            },
         }
     }
 
@@ -758,24 +804,24 @@ impl Picker {
             idx
         };
         let Some(tm) = &self.tree else {
+            let items = &self.items;
             return self
                 .matches
                 .iter()
+                .map(|&i| &items[i as usize])
+                .chain(self.made.as_ref())
                 .enumerate()
                 .skip(scroll)
                 .take(rows)
-                .map(|(row, &i)| {
-                    let item = &self.items[i as usize];
-                    Row {
-                        label: item.label.clone(),
-                        marks: marks(&item.label, &mut self.matcher),
-                        selected: row == selected,
-                        hint: item.hint.clone(),
-                        hint_first: false,
-                        glyph: item.glyph,
-                        tree: None,
-                        spots: Vec::new(),
-                    }
+                .map(|(row, item)| Row {
+                    label: item.label.clone(),
+                    marks: marks(&item.label, &mut self.matcher),
+                    selected: row == selected,
+                    hint: item.hint.clone(),
+                    hint_first: false,
+                    glyph: item.glyph,
+                    tree: None,
+                    spots: Vec::new(),
                 })
                 .collect();
         };
@@ -907,6 +953,7 @@ impl Action {
             | Action::Commit { .. }
             | Action::Conversation { .. }
             | Action::Message
+            | Action::Branch { .. }
             | Action::Plugin { .. }
             | Action::Code(_)
             | Action::Command(_)

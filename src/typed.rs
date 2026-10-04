@@ -129,6 +129,33 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
             editor.git_branch_picker();
             Ok(())
         }
+        "git-branch-new" => {
+            match rest.split_whitespace().collect::<Vec<_>>()[..] {
+                [name] => editor.git_branch_new(name, None),
+                [name, from] => editor.git_branch_new(name, Some(from)),
+                _ => return Err("usage: :git-branch-new <name> [<from>]".into()),
+            }
+            Ok(())
+        }
+        "git-branch-rename" => {
+            match rest.split_whitespace().collect::<Vec<_>>()[..] {
+                [new] => editor.git_branch_rename(None, new),
+                [old, new] => editor.git_branch_rename(Some(old), new),
+                _ => return Err("usage: :git-branch-rename [<branch>] <new name>".into()),
+            }
+            Ok(())
+        }
+        "git-branch-delete" => match rest.split_whitespace().collect::<Vec<_>>()[..] {
+            [name] => {
+                editor.git_branch_delete(name, false);
+                Ok(())
+            }
+            _ => Err("usage: :git-branch-delete <branch>".into()),
+        },
+        "git-amend" => {
+            editor.git_amend();
+            Ok(())
+        }
         "task" | "make" => match rest.trim() {
             "" => {
                 editor.task_picker();

@@ -490,5 +490,9 @@ Type `:` in normal mode. `Tab` completes command names and their arguments (path
 | `:tutor` |  | Learn the keys — a 10-minute tutorial |
 | `:task` | `:make` | Run a build task (by name; none: pick one) |
 | `:git-switch` |  | Switch to a branch (none: pick one) |
+| `:git-branch-new` |  | Make a branch and switch to it |
+| `:git-branch-rename` |  | Rename a branch (one name: this one) |
+| `:git-branch-delete` |  | Delete a branch (asks if it loses commits) |
+| `:git-amend` |  | Put what's staged into the last commit |
 | `:diff` |  | Show changes against HEAD, a file, or a revision |
 | `:diff-off` |  | Stop showing the diff |

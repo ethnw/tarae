@@ -82,6 +82,10 @@ pub enum What {
     Screen { call: crate::tools::Call },
     /// `:preflight`'s first run in a project with the packs' default steps (`preflight.rs`): `y` runs them.
     Preflight { root: PathBuf, steps: Vec<crate::preflight::Step> },
+    /// A branch with commits on no other (`gitpanel.rs`): `y` deletes it, if still at `tip`.
+    BranchDelete { top: PathBuf, branch: String, tip: String },
+    /// A push over the remote's commits (`gitpanel.rs`): `y` pushes with a lease on what the card listed.
+    ForcePush(Box<crate::gitpanel::ForcePush>),
 }
 
 /// Work that stopped for lack of a grammar — resumed once downloaded
@@ -155,6 +159,8 @@ impl Offer {
                 | What::Grant { .. }
                 | What::Outside { .. }
                 | What::Preflight { .. }
+                | What::BranchDelete { .. }
+                | What::ForcePush(_)
         )
     }
 
@@ -318,6 +324,8 @@ impl crate::editor::Editor {
             What::Outside { run } => crate::blocked::outside_answer(self, id, *run, true),
             What::Screen { call } => crate::seeing::answer(self, id, call, Some(crate::allow::Scope::Once)),
             What::Preflight { root, steps } => self.preflight_answer(id, root, steps, true),
+            What::BranchDelete { top, branch, tip } => self.git_branch_delete_answer(id, top, branch, tip),
+            What::ForcePush(f) => self.git_force_push(id, *f),
         }
     }
 
@@ -443,6 +451,8 @@ impl crate::editor::Editor {
             What::Outside { run } => crate::blocked::outside_answer(self, o.id, *run, false),
             What::Screen { call } => crate::seeing::answer(self, o.id, call, None),
             What::Preflight { root, steps } => self.preflight_answer(o.id, root, steps, false),
+            What::BranchDelete { branch, .. } => self.set_status(format!("Kept {branch}")),
+            What::ForcePush(f) => self.set_status(format!("Not pushed — {} as it was", f.upstream())),
         }
     }
 

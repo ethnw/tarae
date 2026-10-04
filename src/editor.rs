@@ -468,7 +468,7 @@ pub struct Editor {
     pub git_discard_asked: Option<(String, std::time::Instant)>,
     /// Git work waiting its turn (one at a time) · one running · reads of the status asked for (the latest
     /// lands).
-    pub git_queue: std::collections::VecDeque<(crate::gitpanel::GitWork, crate::gitpanel::GitDone)>,
+    pub git_queue: std::collections::VecDeque<crate::gitpanel::GitJob>,
     pub git_busy: bool,
     pub git_reads: u64,
     pub committing: Option<crate::gitpanel::Committing>,
@@ -583,8 +583,10 @@ impl Editor {
         Self::with_root(config, started_in())
     }
 
-    /// An editor for the project in `root` (a real path).
+    /// An editor for the project in `root` — taken as its real path (links resolved), which `run_cwd`, the
+    /// sandbox and every `starts_with(root)` compare against; one that isn't there stays as given.
     pub fn with_root(config: Config, root: PathBuf) -> Self {
+        let root = std::fs::canonicalize(&root).unwrap_or(root);
         let events = Queue::default();
         let saver = crate::saver::Saver::new(events.sender());
         let mut ed = Self {
@@ -2052,6 +2054,19 @@ impl Editor {
             }
             // Global search results: replace what's listed
             (Code::Char('r'), true) if p.grep.is_some() => return self.replace_ask(),
+            // A branch: rename it (the name to change, in a `:` line) · delete it
+            (Code::Char('r' | 'x'), true)
+                if matches!(p.current().map(|i| &i.action), Some(Action::Branch { .. })) =>
+            {
+                let Some(Action::Branch { name, .. }) = p.current().map(|i| i.action.clone()) else { return };
+                self.keep_last_picker();
+                return match key.code {
+                    Code::Char('r') => {
+                        self.open_prompt(PromptKind::Command, &format!("git-branch-rename {name} {name}"))
+                    }
+                    _ => self.git_branch_delete(&name, true),
+                };
+            }
             // Replace preview: Enter applies to every file still listed
             (Code::Enter, _) if p.current().is_some_and(|i| matches!(i.action, Action::ReplaceFile(_))) => {
                 let files: Vec<usize> = p
@@ -2146,6 +2161,11 @@ impl Editor {
             }
             Action::Commit { hash, root } => {
                 self.git_show(root, &hash);
+                Ok(())
+            }
+            // (one checked out in another worktree: refused there, naming it)
+            Action::Branch { name, .. } => {
+                self.git_switch(&name);
                 Ok(())
             }
             // Open it at its first change
@@ -3153,8 +3173,8 @@ mod tests {
         assert_eq!(text(&ed), "write", "Shift-Tab goes backward");
         feed(&mut ed, "<esc>:tut<tab>");
         assert_eq!(text(&ed), "tutor", "only one — argless command, no trailing space");
-        feed(&mut ed, "<esc>:them<tab>");
-        assert_eq!(text(&ed), "theme ", "command with an argument gets a trailing space");
+        feed(&mut ed, "<esc>:git-sw<tab>");
+        assert_eq!(text(&ed), "git-switch ", "command with an argument gets a trailing space");
         feed(&mut ed, "<esc>:set editor.auto-sa<tab><tab>");
         assert_eq!(text(&ed), "set editor.auto-save \"off\"", "unique path: trailing space, Tab = value");
         feed(&mut ed, "<esc>:toggle editor.inlay<right>");
@@ -6915,9 +6935,9 @@ mod tests {
 
     /// Push, pull and fetch in the git tab as they are, against a remote of the test's own: the first `P`
     /// sets the upstream, the next pushes what's ahead; `p` takes in what someone else pushed (fast-forward)
-    /// and says when there's nothing; `f` fetches and prunes. Over diverged history a push or a pull fails
-    /// as git does, said as an error — nothing forced, nothing merged. A remote that isn't there fails at
-    /// once, said.
+    /// and says when there's nothing; `f` fetches and prunes. Over diverged history a push is refused — the
+    /// force card asks, nothing forced unasked (`amend_then_push_over_the_remote_with_a_lease`) — and a pull
+    /// fails as git does, said — nothing merged. A remote that isn't there fails at once, said.
     #[test]
     fn git_tab_pushes_pulls_and_fetches_with_a_remote_of_its_own() {
         let work = git_repo("remote", &[("a.txt", "one\n")]);
@@ -6971,11 +6991,15 @@ mod tests {
         let (theirs, ours) =
             (git_out(&other, &["rev-parse", "HEAD"]), git_out(&work, &["rev-parse", "HEAD"]));
         feed(&mut ed, "P");
-        settle_until(&mut ed, |ed| said(ed, ToastKind::Error, "push: ") == 1);
+        settle_until(&mut ed, |ed| {
+            ed.offers.iter().any(|o| matches!(o.what, crate::offer::What::ForcePush(_)))
+        });
         assert_eq!(git_out(&bare, &["rev-parse", "main"]), theirs, "the remote kept theirs");
+        ed.offer_dismiss();
         feed(&mut ed, "p");
         settle_until(&mut ed, |ed| said(ed, ToastKind::Error, "pull: ") == 1);
         assert_eq!(git_out(&work, &["rev-parse", "HEAD"]), ours, "ours as it was — no merge");
+        assert_eq!(said(&ed, ToastKind::Error, "pull: hint:"), 0, "why, not git's hint: {:?}", ed.messages);
         // A remote that isn't there: said at once
         git_in(&work, &["remote", "set-url", "origin", base.join("missing.git").to_str().unwrap()]);
         feed(&mut ed, "f");
@@ -6983,6 +7007,313 @@ mod tests {
         drop(ed);
         std::fs::remove_dir_all(&work).ok();
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Messages of `kind` containing `what`, this session.
+    fn said(ed: &Editor, kind: ToastKind, what: &str) -> usize {
+        ed.messages.iter().filter(|m| m.1 == kind && m.2.contains(what)).count()
+    }
+
+    /// Branches in the picker (`:git-switch`, `B` in the git tab): a name no branch has is a `+` row that
+    /// makes it and switches there; `C-r` renames it (a `:` line holding the name to change); `C-x` deletes
+    /// one whose commits are kept elsewhere at once, and one with commits only on it after a card naming
+    /// them — `n` keeps it, `y` deletes it, unless it moved since the card. A branch checked out in another
+    /// worktree can't be switched to, renamed or deleted (said, naming where); nor can the one you're on be
+    /// deleted, nor a bad name be made.
+    #[test]
+    fn branches_are_made_renamed_and_deleted_in_the_picker() {
+        use crate::offer::What;
+        let repo = git_repo("branch-picker", &[("a.txt", "one\n")]);
+        let wt = repo.with_file_name(format!("tarae-wt-branches-{}", std::process::id()));
+        std::fs::remove_dir_all(&wt).ok();
+        let head = || git_out(&repo, &["symbolic-ref", "--short", "HEAD"]);
+        let exists = |b: &str| git_ok(&repo, &["rev-parse", "--verify", "-q", &format!("refs/heads/{b}")]);
+        let deleting =
+            |ed: &Editor| ed.offers.iter().filter(|o| matches!(o.what, What::BranchDelete { .. })).count();
+        let open = |ed: &mut Editor| {
+            feed(ed, ":git-switch<ret>");
+            settle_until(ed, |ed| ed.picker.as_ref().is_some_and(|p| !p.loading));
+        };
+        let current = |ed: &Editor| {
+            let i = ed.picker.as_ref().and_then(|p| p.current()).unwrap();
+            (i.label.clone(), i.hint.clone())
+        };
+        let mut ed = editor("");
+        ed.root = repo.clone();
+        // A name no branch has: the `+` row — Enter makes it and switches there
+        open(&mut ed);
+        feed(&mut ed, "fix-login");
+        assert_eq!(current(&ed), ("fix-login".into(), "new branch".into()));
+        feed(&mut ed, "<ret>");
+        settle_until(&mut ed, |ed| said(ed, ToastKind::Success, "On fix-login") == 1);
+        assert_eq!(head(), "fix-login");
+        commit_in(&repo, "b.txt", "b\n", "only on fix");
+        // An existing name has no `+` row
+        open(&mut ed);
+        feed(&mut ed, "main");
+        assert_eq!(current(&ed).0, "main");
+        assert_eq!(ed.picker.as_ref().unwrap().len(), 1, "no + row for a name that's there");
+        feed(&mut ed, "<ret>");
+        settle_until(&mut ed, |ed| said(ed, ToastKind::Success, "On main") == 1);
+        // C-r: the `:` line with the name to change
+        open(&mut ed);
+        feed(&mut ed, "fix-lo");
+        assert_eq!(current(&ed).0, "fix-login");
+        feed(&mut ed, "<C-r>");
+        assert!(ed.picker.is_none());
+        assert_eq!(
+            ed.prompt.as_ref().map(|p| p.text.as_str()),
+            Some("git-branch-rename fix-login fix-login")
+        );
+        feed(&mut ed, "<backspace><backspace><backspace><backspace><backspace>auth<ret>");
+        settle_until(&mut ed, |ed| said(ed, ToastKind::Success, "Renamed fix-login → fix-auth") == 1);
+        assert!(exists("fix-auth") && !exists("fix-login"));
+        // C-x on one with a commit only on it: a card naming it; n keeps it
+        open(&mut ed);
+        feed(&mut ed, "fix-auth<C-x>");
+        settle_until(&mut ed, |ed| deleting(ed) == 1);
+        let q = ed.offers[0].question.clone();
+        assert!(q.starts_with("This commit is on no other branch") && q.contains("only on fix\n"), "{q}");
+        assert!(q.contains("Gone with it — git's reflog keeps it a while"), "{q}");
+        ed.offer_dismiss();
+        assert!(exists("fix-auth"), "n keeps it");
+        // y deletes it
+        feed(&mut ed, ":git-branch-delete fix-auth<ret>");
+        settle_until(&mut ed, |ed| deleting(ed) == 1);
+        ed.offer_accept();
+        settle_until(&mut ed, |ed| said(ed, ToastKind::Success, "Deleted fix-auth") == 1);
+        assert!(!exists("fix-auth"));
+        // Moved since its card: not deleted
+        git_in(&repo, &["branch", "moving"]);
+        commit_in(&repo, "c.txt", "c\n", "on main");
+        git_in(&repo, &["switch", "-q", "moving"]);
+        commit_in(&repo, "d.txt", "d\n", "only on moving");
+        git_in(&repo, &["switch", "-q", "main"]);
+        feed(&mut ed, ":git-branch-delete moving<ret>");
+        settle_until(&mut ed, |ed| deleting(ed) == 1);
+        git_in(&repo, &["branch", "-f", "moving", "main"]);
+        ed.offer_accept();
+        settle_until(&mut ed, |ed| said(ed, ToastKind::Error, "moving moved since the card") == 1);
+        assert!(exists("moving"));
+        // Its commits elsewhere (now at main): deleted at once, no card
+        feed(&mut ed, ":git-branch-delete moving<ret>");
+        settle_until(&mut ed, |ed| said(ed, ToastKind::Success, "Deleted moving (was") == 1);
+        assert!(!exists("moving") && deleting(&ed) == 0);
+        // Checked out in another worktree: listed with where, and refused — naming it
+        git_in(&repo, &["worktree", "add", "-q", "-b", "held", wt.to_str().unwrap()]);
+        open(&mut ed);
+        feed(&mut ed, "held");
+        let (label, hint) = current(&ed);
+        let wt_name = wt.file_name().unwrap().to_str().unwrap();
+        // (named from beside the repository: the worktree is its sibling)
+        assert!(label == "held" && hint.starts_with(&format!("in {wt_name} · ")), "{hint}");
+        // Enter's hint there says where it's checked out, not "switch"
+        let mut bytes = Vec::new();
+        crate::term::render(&mut ed, &mut bytes, 160, 30).unwrap();
+        let mut parser = vt100::Parser::new(30, 160, 0);
+        parser.process(&bytes);
+        let s = parser.screen().contents();
+        assert!(s.contains(&format!("enter checked out in {wt_name}")) && !s.contains("enter switch"), "{s}");
+        feed(&mut ed, "<backspace><backspace><backspace><backspace>main");
+        assert_eq!(current(&ed).0, "main");
+        let mut bytes = Vec::new();
+        crate::term::render(&mut ed, &mut bytes, 160, 30).unwrap();
+        let mut parser = vt100::Parser::new(30, 160, 0);
+        parser.process(&bytes);
+        assert!(parser.screen().contents().contains("enter switch"), "a branch of this worktree: switch");
+        feed(&mut ed, "<backspace><backspace><backspace><backspace>held");
+        assert_eq!(current(&ed).0, "held");
+        feed(&mut ed, "<ret>");
+        settle_until(&mut ed, |ed| {
+            said(ed, ToastKind::Error, "can't switch to held — it's checked out in") == 1
+        });
+        assert_eq!(head(), "main");
+        assert!(ed.messages.iter().any(|m| m.2.contains(wt_name)), "names where");
+        feed(&mut ed, ":git-branch-delete held<ret>");
+        settle_until(&mut ed, |ed| said(ed, ToastKind::Error, "can't delete held") == 1);
+        feed(&mut ed, ":git-branch-rename held other<ret>");
+        settle_until(&mut ed, |ed| said(ed, ToastKind::Error, "can't rename held") == 1);
+        assert!(exists("held") && !exists("other"));
+        // The one you're on; a bad name
+        feed(&mut ed, ":git-branch-delete main<ret>");
+        settle_until(&mut ed, |ed| said(ed, ToastKind::Error, "you're on main") == 1);
+        feed(&mut ed, ":git-branch-new bad..name<ret>");
+        settle_until(&mut ed, |ed| said(ed, ToastKind::Error, "isn't a branch name") == 1);
+        assert!(exists("main") && !exists("bad..name") && head() == "main");
+        drop(ed);
+        std::fs::remove_dir_all(&repo).ok();
+        std::fs::remove_dir_all(&wt).ok();
+    }
+
+    /// `:git-amend` puts what's staged into the last commit, its message kept, and warns when that commit
+    /// was pushed (as `A` does). The branch has then gone a different way from its upstream: `P` shows a card
+    /// listing the remote's commit a push would replace. Someone pushing between the card and `y` makes the
+    /// lease refuse even after a fetch brought theirs in — theirs kept, said; asked again, `y` replaces what
+    /// that card listed. A push refused because the remote moved on unseen brings the card too; one the
+    /// remote's hook refuses says why — not git's last line.
+    #[test]
+    fn amend_then_push_over_the_remote_with_a_lease() {
+        use crate::offer::What;
+        let work = git_repo("amend-push", &[("a.txt", "one\n")]);
+        let (bare, base) = bare_remote("amend-push", &work);
+        git_in(&work, &["push", "-q", "-u", "origin", "main"]);
+        let first = git_out(&work, &["rev-parse", "HEAD"]);
+        let status = |ed: &Editor| ed.git_status.clone().unwrap_or_default();
+        let forcing = |ed: &Editor| ed.offers.iter().filter(|o| matches!(o.what, What::ForcePush(_))).count();
+        let mut ed = editor("");
+        ed.root = work.clone();
+        feed(&mut ed, "<space>g");
+        settle_until(&mut ed, |ed| ed.git_status.is_some());
+        // Nothing staged: said, nothing amended
+        crate::typed::execute(&mut ed, "git-amend").unwrap();
+        settle_until(&mut ed, |ed| said(ed, ToastKind::Error, "amend: nothing staged") == 1);
+        assert_eq!(git_out(&work, &["rev-parse", "HEAD"]), first);
+        // Staged: into the last commit, its message kept — and it was pushed: warned
+        std::fs::write(work.join("a.txt"), "one\ntwo\n").unwrap();
+        git_in(&work, &["add", "a.txt"]);
+        crate::typed::execute(&mut ed, "git-amend").unwrap();
+        settle_until(&mut ed, |ed| {
+            said(ed, ToastKind::Success, "Amended") == 1
+                && said(ed, ToastKind::Warning, crate::gitpanel::PUSHED_WARNING) == 1
+        });
+        assert_ne!(git_out(&work, &["rev-parse", "HEAD"]), first);
+        assert_eq!(git_out(&work, &["log", "-1", "--format=%s"]), "base");
+        assert_eq!(git_out(&work, &["show", "HEAD:a.txt"]), "one\ntwo");
+        assert_eq!(git_out(&work, &["rev-list", "--count", "HEAD"]), "1", "amended, not added");
+        ed.git_refresh();
+        settle_until(&mut ed, |ed| status(ed).ahead == 1 && status(ed).behind == 1);
+        // P: the card, listing the remote's commit that would go
+        ed.sidebar.as_mut().unwrap().focus = true;
+        feed(&mut ed, "P");
+        settle_until(&mut ed, |ed| forcing(ed) == 1);
+        let q = ed.offers[0].question.clone();
+        assert_eq!(ed.offers[0].title, "Push over origin/main?", "nothing of anyone else's goes");
+        assert!(
+            q.starts_with(&format!(
+                "Pushing main replaces 1 commit on origin/main.\nAn earlier version of yours:\n  {} base\n",
+                &first[..7]
+            )),
+            "the amended one: {q}"
+        );
+        assert!(ed.offers[0].warning.is_none(), "nothing of anyone else's goes");
+        assert_eq!(git_out(&bare, &["rev-parse", "main"]), first, "nothing pushed before y");
+        // A colleague pushes two meanwhile: y's lease refuses, theirs kept
+        git_in(&base, &["clone", "-q", bare.to_str().unwrap(), "other"]);
+        let other = base.join("other");
+        let colleague = |file: &str, text: &str, msg: &str| {
+            std::fs::write(other.join(file), text).unwrap();
+            git_in(&other, &["add", file]);
+            let who = ["-c", "user.email=kim@t", "-c", "user.name=Kim", "-c", "commit.gpgsign=false"];
+            git_in(&other, &[&who[..], &["commit", "-qm", msg]].concat());
+        };
+        colleague("CHANGELOG.md", "0.4.1\n", "Bump the version to 0.4.1");
+        let bump = git_out(&other, &["rev-parse", "HEAD"]);
+        colleague("CHANGELOG.md", "0.4.1\nfix\n", "Fix the crash on an empty config");
+        git_in(&other, &["push", "-q"]);
+        let theirs = git_out(&other, &["rev-parse", "HEAD"]);
+        // …and `f` fetches it before the y: a bare `--force-with-lease` would take theirs as the lease now
+        ed.git_fetch();
+        settle_until(&mut ed, |ed| said(ed, ToastKind::Success, "Fetched") == 1);
+        ed.offer_accept();
+        settle_until(&mut ed, |ed| {
+            said(ed, ToastKind::Error, "origin/main moved since the card was shown") == 1
+        });
+        assert_eq!(git_out(&bare, &["rev-parse", "main"]), theirs, "the lease kept theirs");
+        // Asked again: the colleague's two are named as not yours — first, warned, counted in the title — then
+        // ours as it was before the amend; y replaces exactly what it listed
+        ed.sidebar.as_mut().unwrap().focus = true;
+        feed(&mut ed, "P");
+        settle_until(&mut ed, |ed| forcing(ed) == 1);
+        let q = ed.offers[0].question.clone();
+        assert_eq!(ed.offers[0].title, "Push over 2 commits that aren't yours?");
+        let expect = format!(
+            "Pushing main replaces 3 commits on origin/main.\nNot in yours — lost if you push:\n  {} Fix the crash \
+             on an empty config\n  {} Bump the version to 0.4.1\nAn earlier version of yours:\n  {} base\n",
+            &theirs[..7],
+            &bump[..7],
+            &first[..7]
+        );
+        assert!(q.starts_with(&expect), "{q}");
+        assert_eq!(
+            ed.offers[0].warning,
+            Some(1..4),
+            "the heading and the colleague's two, in the warning color"
+        );
+        assert_eq!(ed.offers[0].decided_lines(), 1..6, "both groups are what's decided");
+        ed.offer_accept();
+        settle_until(&mut ed, |ed| said(ed, ToastKind::Success, "Pushed main over origin/main") == 1);
+        assert_eq!(git_out(&bare, &["rev-parse", "main"]), git_out(&work, &["rev-parse", "HEAD"]));
+        // `A` on a pushed commit warns too (`:q` cancels)
+        ed.git_commit_start(true);
+        settle_until(&mut ed, |ed| {
+            ed.committing.is_some() && said(ed, ToastKind::Warning, crate::gitpanel::PUSHED_WARNING) == 2
+        });
+        feed(&mut ed, ":q<ret>");
+        assert!(ed.committing.is_none());
+        // The remote moves on unseen and ours goes ahead: the push is refused — said why, the card comes. One
+        // of the remote's two we picked across and reworded: its change is ours (git cherry), its subject not
+        git_in(&other, &["fetch", "-q"]);
+        git_in(&other, &["reset", "-q", "--hard", "origin/main"]);
+        colleague("c.txt", "c\n", "Shared fix");
+        let shared = git_out(&other, &["rev-parse", "HEAD"]);
+        colleague("d.txt", "d\n", "theirs later");
+        git_in(&other, &["push", "-q"]);
+        let later = git_out(&other, &["rev-parse", "HEAD"]);
+        // (fetched by url: the remote-tracking branch stays as it was — the push is what finds out)
+        git_in(&work, &["fetch", "-q", bare.to_str().unwrap(), "main"]);
+        git_in(&work, &["cherry-pick", &shared]);
+        git_in(&work, &["commit", "-q", "--amend", "-m", "Pick up the shared fix"]);
+        commit_in(&work, "a.txt", "one\ntwo\nthree\n", "ours later");
+        ed.git_refresh();
+        settle_until(&mut ed, |ed| status(ed).ahead == 2 && status(ed).behind == 0);
+        ed.sidebar.as_mut().unwrap().focus = true;
+        feed(&mut ed, "P");
+        settle_until(&mut ed, |ed| forcing(ed) == 1);
+        let q = ed.offers[0].question.clone();
+        assert_eq!(ed.offers[0].title, "Push over a commit that isn't yours?");
+        let expect = format!(
+            "Not in yours — lost if you push:\n  {} theirs later\nAn earlier version of yours:\n  {} Shared fix\n\n",
+            &later[..7],
+            &shared[..7]
+        );
+        assert!(q.contains(&expect), "{q}");
+        assert!(ed.messages.iter().all(|m| !m.2.contains("hint:")), "{:?}", ed.messages);
+        ed.offer_dismiss();
+        assert_eq!(git_out(&bare, &["rev-parse", "main"]), later, "n: theirs as it was");
+        // A push the remote refuses (its hook): said why — git's own last line is `error: failed to push`
+        let hook = bare.join("hooks/pre-receive");
+        std::fs::write(&hook, "#!/bin/sh\necho 'main is protected' >&2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        git_in(&work, &["reset", "-q", "--hard", "origin/main"]);
+        commit_in(&work, "a.txt", "again\n", "ours again");
+        ed.git_refresh();
+        settle_until(&mut ed, |ed| status(ed).ahead == 1 && status(ed).behind == 0);
+        let pushes = said(&ed, ToastKind::Error, "push: ");
+        feed(&mut ed, "P");
+        settle_until(&mut ed, |ed| said(ed, ToastKind::Error, "push: ") == pushes + 1);
+        assert_eq!(
+            said(&ed, ToastKind::Error, "push: refused by the remote — main is protected"),
+            1,
+            "{:?}",
+            ed.messages
+        );
+        assert_eq!(forcing(&ed), 0, "not a card: forcing wouldn't get past a hook");
+        drop(ed);
+        std::fs::remove_dir_all(&work).ok();
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// The root is taken as its real path: a link to the project gives the project's own folder (the sandbox
+    /// and `run_cwd` compare real paths — a worktree reached through a link would be refused as outside).
+    #[test]
+    fn the_root_is_its_real_path() {
+        let dir = std::env::temp_dir().join(format!("tarae-root-real-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join("project")).unwrap();
+        std::os::unix::fs::symlink(dir.join("project"), dir.join("link")).unwrap();
+        let ed = Editor::with_root(Config::default(), dir.join("link"));
+        assert_eq!(ed.root(), std::fs::canonicalize(dir.join("project")).unwrap());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Sizes you set (U1): `C-w >`/`<` on the chat — from the chat's empty input too (with text there, `C-w`

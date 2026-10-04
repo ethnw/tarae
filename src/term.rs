@@ -4507,6 +4507,7 @@ fn draw_picker(
             | Action::Typed(_)
             | Action::Theme(_)
             | Action::Message
+            | Action::Branch { .. }
             | Action::Plugin { .. },
         )
         | None => String::new(),
@@ -5954,6 +5955,8 @@ impl OfferCard {
                     }
                     crate::offer::What::Outside { .. } => b = vec![('y', "Run"), ('n', "No")],
                     crate::offer::What::Preflight { .. } => b = vec![('y', "Run them"), ('n', "Not now")],
+                    crate::offer::What::BranchDelete { .. } => b = vec![('y', "Delete"), ('n', "Keep it")],
+                    crate::offer::What::ForcePush(_) => b = vec![('y', "Push"), ('n', "No")],
                     crate::offer::What::Screen { .. } => {
                         b = vec![('y', "Once"), ('a', "This chat"), ('n', "No")]
                     }
@@ -8783,16 +8786,30 @@ fn cursor_diagnostic(editor: &Editor) -> Option<&crate::lsp::Diagnostic> {
 }
 
 /// Keys for whatever is floating now (shown dimmed when the command line is empty).
-fn key_hints(editor: &Editor) -> Option<&'static [(&'static str, &'static str)]> {
+fn key_hints(editor: &Editor) -> Option<Vec<(&'static str, String)>> {
     let replace_list = |p: &Picker| p.current().is_some_and(|i| matches!(i.action, Action::ReplaceFile(_)));
+    let hints = |h: &[(&'static str, &str)]| Some(h.iter().map(|&(k, d)| (k, d.to_string())).collect());
     if editor.completion.is_some() {
-        Some(&[("tab", "select"), ("enter", "accept"), ("C-x", "complete"), ("esc", "close")])
+        hints(&[("tab", "select"), ("enter", "accept"), ("C-x", "complete"), ("esc", "close")])
     } else if editor.picker.as_ref().is_some_and(|p| p.grep.is_some()) {
-        Some(&[("enter", "open"), ("C-r", "replace the listed matches"), ("esc", "close")])
+        hints(&[("enter", "open"), ("C-r", "replace the listed matches"), ("esc", "close")])
+    } else if let Some(p) = editor.picker.as_ref().filter(|p| p.make.is_some()) {
+        match p.current().map(|i| &i.action) {
+            // (one checked out in another worktree can't be switched to here: Enter says where it is)
+            Some(Action::Branch { held: Some(at), .. }) => {
+                let at = format!("checked out in {at}");
+                hints(&[("enter", &at), ("C-r", "rename"), ("C-x", "delete"), ("esc", "close")])
+            }
+            Some(Action::Branch { .. }) => {
+                hints(&[("enter", "switch"), ("C-r", "rename"), ("C-x", "delete"), ("esc", "close")])
+            }
+            Some(_) => hints(&[("enter", "make it and switch"), ("esc", "close")]),
+            None => None,
+        }
     } else if editor.picker.as_ref().is_some_and(replace_list) {
-        Some(&[("enter", "replace in every listed file"), ("type", "narrow"), ("esc", "cancel")])
+        hints(&[("enter", "replace in every listed file"), ("type", "narrow"), ("esc", "cancel")])
     } else if editor.popup.is_some() {
-        Some(&[("C-d", "scroll down"), ("C-u", "scroll up"), ("esc", "close")])
+        hints(&[("C-d", "scroll down"), ("C-u", "scroll up"), ("esc", "close")])
     } else {
         None
     }
