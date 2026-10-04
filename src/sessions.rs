@@ -1413,7 +1413,7 @@ mod tests {
         assert!(ed.offers.is_empty());
         // Taken names: a branch there is (checked out in the session's checkout), and one git refuses
         ed.lane.chat.as_mut().unwrap().focused = false;
-        feed(&mut ed, ":lane-switch 0<ret>:session-new fix-login<ret>");
+        feed(&mut ed, ":session-switch 0<ret>:session-new fix-login<ret>");
         settle_until(&mut ed, |ed| says(ed, "new session: there's a branch fix-login already"));
         assert!(says(&ed, "already, checked out in "), "says where: {}", said(&ed));
         feed(&mut ed, ":session-new a..b<ret>");
@@ -1657,7 +1657,7 @@ mod tests {
         (ed.sessions.dir, ed.sessions.restored) = (Some(store.clone()), true);
         let one = new_session(&mut ed, "one");
         let two = new_session(&mut ed, "two");
-        feed(&mut ed, ":lane-switch 1<ret>");
+        feed(&mut ed, ":session-switch 1<ret>");
         let common = common_dir(&repo).unwrap();
         let written = |n: usize, front: &Path| {
             let s = load(&store, &common);

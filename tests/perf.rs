@@ -198,9 +198,9 @@ fn perf_e2e_waiting_for_claude() {
     report("e2e_waiting_bytes_per_frame", bytes / frames.max(1.0), 400.0, 20.0);
 }
 
-/// Two lanes (`:lane-open` on a worktree), Claude streaming a word every 50 ms in the one behind: tarae's CPU
-/// and its frames a second in front, which shows nothing of it — the lane's results are applied (swapped in
-/// and out) but draw nothing.
+/// Two sessions (`:session-open` on a worktree), Claude streaming a word every 50 ms in the one behind: tarae's
+/// CPU and its frames a second in front, which shows nothing of it — the session's results are applied
+/// (swapped in and out) but draw nothing.
 #[test]
 fn perf_e2e_busy_lane_behind() {
     if unoptimized("perf_e2e_busy_lane_behind") {
@@ -225,15 +225,16 @@ fn perf_e2e_busy_lane_behind() {
     sb.write_config(&format!("{BASE_CONFIG}[llm]\ncommand = \"sh\"\nargs = [\"{}\"]\n", script.display()));
     let mut t = Term::spawn(&sb, &["a.rs"], 160, 50);
     t.wait_text("fn f1(");
-    t.send(&format!(":lane-open {}\r", wt.display()));
-    t.wait_text("lane 1");
+    t.send(&format!(":session-open {}\r", wt.display()));
+    // (in front, the new session shows its blank scratch — whatever the toast says)
+    t.wait_for("the new session in front", |s| !s.contains("fn f1("));
     t.send(" l");
     t.send("go\r");
     t.wait_text("word word");
     // (Esc alone — with a key right behind it, it reads as alt+that key)
     t.esc("the chat let go of the keys", |s| s.contains("C-f unfollow"));
-    t.send(":lane-switch 0\r");
-    t.wait_for("lane 0 in front", |s| !s.contains("word word"));
+    t.send(":session-switch 0\r");
+    t.wait_for("the first session in front", |s| !s.contains("word word") && s.contains("fn f1("));
     // (past the toasts' fade and the switch's frames)
     std::thread::sleep(Duration::from_secs(4));
     let (before, frames) = (t.usage(), t.frames());

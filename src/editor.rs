@@ -6321,6 +6321,52 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// The title says the model that answered, not the one configured: a chat whose process started on
+    /// sonnet (its `init`) while `llm.model` now says opus names both; once an answer comes from opus
+    /// (`message.model`), just its name. (The claude is a stand-in.)
+    #[test]
+    fn the_chat_title_names_the_model_that_answered() {
+        use serde_json::json;
+        let models = json!([
+            {"value": "opus", "displayName": "Opus 5.5", "resolvedModel": "claude-opus-5-5",
+             "description": "For complex work"},
+            {"value": "sonnet", "displayName": "Sonnet 5.5", "resolvedModel": "claude-sonnet-5-5",
+             "description": "Efficient for routine tasks"}]);
+        let offer = json!({"type": "control_response", "response": {"subtype": "success", "request_id": "tarae-init",
+            "response": {"models": models}}});
+        let init =
+            json!({"type": "system", "subtype": "init", "session_id": "s1", "model": "claude-sonnet-5-5"});
+        let answer = json!({"type": "assistant", "message": {"model": "claude-opus-5-5", "role": "assistant",
+            "content": [{"type": "text", "text": "hi"}]}});
+        let result = json!({"type": "result", "result": "hi"});
+        let mut ed = editor("");
+        ed.config.llm.model = Some("opus".into());
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec![
+            "-c".into(),
+            format!(
+                "while read -r line; do case \"$line\" in *tarae-init*) printf '%s\\n' '{offer}' '{init}';; \
+                 '{{\"message\"'*) printf '%s\\n' '{answer}' '{result}';; esac; done"
+            ),
+        ];
+        // (wide: the chat's title has room for both)
+        let title = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 200, 24).unwrap();
+            let mut parser = vt100::Parser::new(24, 200, 0);
+            parser.process(&bytes);
+            parser.screen().rows(0, 200).find(|r| r.contains("claude")).unwrap_or_default()
+        };
+        feed(&mut ed, "<space>l");
+        settle_until(&mut ed, |ed| ed.lane.chat.as_ref().is_some_and(|c| !c.model.is_empty()));
+        assert!(title(&mut ed).contains("claude-sonnet-5-5 · asked opus"), "{}", title(&mut ed));
+        feed(&mut ed, "hello<ret>");
+        settle_until(&mut ed, |ed| ed.lane.chat.as_ref().is_some_and(|c| c.model == "claude-opus-5-5"));
+        settle_until(&mut ed, |ed| ed.lane.chat.as_ref().is_some_and(|c| !c.busy()));
+        let t = title(&mut ed);
+        assert!(t.contains("Opus 5.5") && !t.contains("asked"), "{t}");
+    }
+
     /// Declined → claude is told so and nothing changes.
     #[test]
     fn chat_edits_can_be_declined() {
@@ -7032,18 +7078,20 @@ mod tests {
                 json!({"type": "result", "result": "done"}),
             ],
         );
-        feed(&mut ed, &format!(":lane-open {}<ret>", wt.display()));
+        feed(&mut ed, &format!(":session-open {}<ret>", wt.display()));
         let behind = ed.lane.id;
         assert_eq!((behind, ed.lane.root.clone()), (1, wt.clone()));
-        feed(&mut ed, "<space>lhi<ret><esc>:lane-switch 0<ret>");
+        feed(&mut ed, "<space>lhi<ret><esc>:session-switch 0<ret>");
         assert_eq!(ed.lane.root, repo, "lane 0 in front");
         assert!(lane(&ed, behind).chat.as_ref().unwrap().busy(), "switched while Claude works");
+        // (what's said from here on — `:session-open`'s own toast names it too)
+        let before = ed.messages.len();
         let (mut events, mut drawn) = (0, 0);
         let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while lane(&ed, behind).chat.as_ref().unwrap().busy() {
             let left = end.saturating_duration_since(std::time::Instant::now());
             let ev = ed.events.recv_timeout(left).expect("the lane behind's answer");
-            // (the front's own results — `:lane-open`'s path completion — draw as ever)
+            // (the front's own results — `:session-open`'s path completion — draw as ever)
             let from_behind = matches!(ev, Event::For(id, _) if id == behind);
             ed.unchanged = false;
             ed.handle_event(ev);
@@ -7061,9 +7109,13 @@ mod tests {
         let opened = |p: &Path| ed.docs.iter().any(|d| d.path.as_deref() == Some(p));
         assert!(!opened(&wt.join("a.txt")), "nor opened its file behind");
         assert_eq!(std::fs::read_to_string(&ran_in).unwrap().trim(), wt.to_str().unwrap());
-        let said = ed.messages.iter().filter(|m| m.2.starts_with(&format!("{} · ", lane(&ed, behind).name)));
+        let said = ed
+            .messages
+            .iter()
+            .skip(before)
+            .filter(|m| m.2.starts_with(&format!("{} · ", lane(&ed, behind).name)));
         assert_eq!(drawn, said.count(), "{events} events behind drew {drawn} frames in front");
-        feed(&mut ed, ":lane-switch 1<ret>");
+        feed(&mut ed, ":session-switch 1<ret>");
         assert!(ed.lane.chat.as_ref().unwrap().msgs.iter().any(|m| m.text.contains("from the worktree")));
         git_in(&repo, &["worktree", "remove", "--force", wt.to_str().unwrap()]);
         std::fs::remove_dir_all(&repo).ok();
@@ -7098,8 +7150,9 @@ mod tests {
         std::fs::remove_dir_all(&repo).ok();
     }
 
-    /// A lane's panes, its document and the cursor in it come back when it does; `:lane-switch` alone lists
-    /// the lanes; a relative path opens in the lane's own checkout.
+    /// A lane's panes, its document and the cursor in it come back when it does; `:session-switch` alone lists
+    /// the lanes; a relative path opens in the lane's own checkout. `:lane-switch`/`:lane-open`, the old
+    /// names, still work.
     #[test]
     fn a_lanes_panes_come_back_when_it_does() {
         let repo = git_repo("lane-views", &[("a.txt", "one\ntwo\nthree\n")]);
@@ -7108,20 +7161,26 @@ mod tests {
         (ed.lane.root, ed.lane.name) = (repo.clone(), "tarae-review-lane-views".into());
         feed(&mut ed, ":o a.txt<ret>jj<C-w>v");
         assert_eq!(ed.lane.views.len(), 2);
-        feed(&mut ed, &format!(":lane-open {}<ret>", wt.display()));
+        feed(&mut ed, &format!(":session-open {}<ret>", wt.display()));
         assert_eq!(ed.lane.views.len(), 1, "a new lane starts with one pane");
+        // (said as a session — never "lane")
+        let (msg, _) = ed.status.clone().unwrap();
+        let name = wt.file_name().unwrap().to_string_lossy();
+        assert_eq!(msg, format!("{name} · session 2 of 2 — space W lists them"));
         feed(&mut ed, ":o a.txt<ret>j");
         assert_eq!(ed.doc().path.as_deref(), Some(wt.join("a.txt").as_path()));
         assert_eq!(ed.docs.len(), 2, "its first file took its blank scratch's place, as at startup");
-        feed(&mut ed, ":lane-switch 0<ret>");
+        feed(&mut ed, ":session-switch 0<ret>");
         assert_eq!(ed.lane.views.len(), 2);
         assert_eq!(ed.doc().path.as_deref(), Some(repo.join("a.txt").as_path()));
         assert_eq!(cursor_line(&ed), 2);
+        // (the old name still works, out of sight)
         feed(&mut ed, ":lane-switch 1<ret>");
         assert_eq!(ed.doc().path.as_deref(), Some(wt.join("a.txt").as_path()));
         assert_eq!(cursor_line(&ed), 1);
-        feed(&mut ed, ":lane-switch<ret>");
+        feed(&mut ed, ":session-switch<ret>");
         let (msg, _) = ed.status.clone().unwrap();
+        assert!(msg.starts_with("usage: :session-switch <n> — "), "{msg}");
         assert!(msg.contains("0 tarae-review-lane-views") && msg.contains("-views ●"), "{msg}");
         feed(&mut ed, &format!(":lane-open {}<ret>", repo.display()));
         assert_eq!((ed.lane.id, ed.lanes.len()), (0, 1), "a checkout with a lane gets that lane");
@@ -7159,7 +7218,7 @@ mod tests {
             ],
         );
         let behind = ed.lane_open(&wt).unwrap();
-        feed(&mut ed, "<space>lfix it<ret><esc>:lane-switch 0<ret>");
+        feed(&mut ed, "<space>lfix it<ret><esc>:session-switch 0<ret>");
         let waiting = |ed: &Editor| {
             let l = lane(ed, behind);
             l.parked.iter().any(crate::offer::Offer::claudes)
@@ -7174,7 +7233,7 @@ mod tests {
         assert_eq!(told.len(), 1, "said once: {told:?}");
         assert!(told[0].starts_with(&format!("{} · ", lane(&ed, behind).name)), "named: {}", told[0]);
         // In front: its card and its review are up, on its own file
-        feed(&mut ed, ":lane-switch 1<ret>");
+        feed(&mut ed, ":session-switch 1<ret>");
         assert!(ed.offers.iter().any(crate::offer::Offer::claudes), "the card");
         assert!(ed.lane.review.is_some(), "the review");
         assert_eq!(ed.doc().path.as_deref(), Some(file.as_path()));
@@ -7268,7 +7327,7 @@ mod tests {
             ed.picker.as_ref().unwrap().items().iter().map(|i| i.label.clone()).collect();
         assert_eq!(listed, ["a.txt", "c.txt"]);
         // The checkout tarae started in: its two
-        feed(&mut ed, "<esc>:lane-switch 0<ret>");
+        feed(&mut ed, "<esc>:session-switch 0<ret>");
         assert_eq!(shown(&ed), [repo.join("a.txt"), repo.join("b.txt")]);
         assert!(header(&mut ed).contains("a.txt  b.txt"));
         feed(&mut ed, ":bp<ret>");

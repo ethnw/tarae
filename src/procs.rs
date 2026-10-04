@@ -22,7 +22,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::editor::{Editor, Mode};
-use crate::event::Event;
+use crate::event::{Event, LaneId};
 use crate::key::{Code, Key};
 use crate::lsp::ClientId;
 
@@ -355,6 +355,8 @@ pub enum Kind {
     Plugin(String, u64),
     /// Not one tarae knows (or under one it does).
     Other,
+    /// A session's heading (no process): what's under it, summed.
+    Session(LaneId),
 }
 
 impl Kind {
@@ -370,6 +372,7 @@ impl Kind {
             Kind::Terminal => 6,
             Kind::Plugin(..) => 7,
             Kind::Other => 8,
+            Kind::Session(_) => 9,
         }
     }
 
@@ -392,6 +395,16 @@ pub struct Known {
     pub title: String,
     /// What for: a root, a command, a file.
     pub what: String,
+    /// The session it's for — None: shared (and with one session, every one).
+    pub lane: Option<LaneId>,
+}
+
+/// A session as `:procs` heads its processes: its name as its tab says it, its checkout.
+#[derive(Clone, Debug)]
+pub struct Group {
+    pub id: LaneId,
+    pub name: String,
+    pub root: PathBuf,
 }
 
 /// A row of the list.
@@ -416,11 +429,22 @@ pub struct Row {
     pub zombie: bool,
     /// A check holds about it now.
     pub flagged: bool,
+    /// The session it's under (its heading's, for a heading) — None: shared.
+    pub session: Option<LaneId>,
 }
 
 impl Row {
     fn key(&self) -> (u32, u64) {
         (self.pid, self.started)
+    }
+
+    /// Whether it's the row `other` was, a look later: the same process, or — for one with none (a held
+    /// server, a session's heading) — the same thing.
+    fn same(&self, other: &Row) -> bool {
+        match self.pid {
+            0 => self.kind == other.kind,
+            _ => self.key() == other.key(),
+        }
     }
 
     /// The memory it's judged by: its footprint, else what's resident.
@@ -430,8 +454,18 @@ impl Row {
 }
 
 /// The list: tarae first, then its children in `Kind::order` (each with what's under it, depth first) — the
-/// held servers after the running ones. `now`: epoch seconds.
-pub fn rows(sample: &Sample, known: &[Known], me: u32, held: &[Held], now: u64) -> Vec<Row> {
+/// held servers after the running ones. With sessions (`groups` — none while there's one), what's shared
+/// stays on top (plugins, `space i`'s claude, ones tarae doesn't know), then each session under a heading
+/// that sums its processes' CPU and memory: its chat, servers (a held one by its root), terminal, tasks and
+/// tests. `now`: epoch seconds.
+pub fn rows(
+    sample: &Sample,
+    known: &[Known],
+    me: u32,
+    held: &[Held],
+    groups: &[Group],
+    now: u64,
+) -> Vec<Row> {
     let by_pid: HashMap<u32, &Os> = sample.procs.iter().map(|(o, _)| (o.pid, o)).collect();
     let pct: HashMap<u32, Option<f32>> = sample.procs.iter().map(|(o, p)| (o.pid, *p)).collect();
     let mut kids: HashMap<u32, Vec<u32>> = HashMap::new();
@@ -440,7 +474,7 @@ pub fn rows(sample: &Sample, known: &[Known], me: u32, held: &[Held], now: u64) 
             kids.entry(o.ppid).or_default().push(o.pid);
         }
     }
-    let row = |os: &Os, depth: usize, kind: Kind, under: Kind, title: String, what: String| Row {
+    let row = |os: &Os, depth: usize, kind: Kind, under: Kind, title: String, what: String, session| Row {
         pid: os.pid,
         started: os.started,
         depth,
@@ -455,55 +489,103 @@ pub fn rows(sample: &Sample, known: &[Known], me: u32, held: &[Held], now: u64) 
         footprint: os.footprint,
         zombie: os.zombie,
         flagged: false,
+        session,
     };
-    let mut out = Vec::new();
-    if let Some(os) = by_pid.get(&me) {
-        out.push(row(os, 0, Kind::Tarae, Kind::Tarae, "tarae".into(), "this editor".into()));
-    }
-    let mut top: Vec<(Kind, String, String, &Os)> = kids
-        .get(&me)
-        .into_iter()
-        .flatten()
-        .filter_map(|pid| by_pid.get(pid))
-        .map(|os| match known.iter().find(|k| k.pid == os.pid) {
-            Some(k) => (k.kind.clone(), k.title.clone(), k.what.clone(), *os),
-            None => (Kind::Other, os.name.clone(), String::new(), *os),
-        })
-        .collect();
-    top.sort_by(|a, b| (a.0.order(), &a.1, a.3.pid).cmp(&(b.0.order(), &b.1, b.3.pid)));
-    for (kind, title, what, os) in top {
-        out.push(row(os, 0, kind.clone(), kind.clone(), title, what));
-        // What it started, depth first (a known one under it keeps its own name — a plugin's shell's child)
-        let mut todo: Vec<(u32, usize)> =
-            kids.get(&os.pid).into_iter().flatten().rev().map(|&p| (p, 1)).collect();
-        while let Some((pid, depth)) = todo.pop() {
-            let Some(o) = by_pid.get(&pid) else { continue };
-            let (k, t, w) = match known.iter().find(|k| k.pid == pid) {
-                Some(k) => (k.kind.clone(), k.title.clone(), k.what.clone()),
-                None => (Kind::Other, o.name.clone(), String::new()),
-            };
-            out.push(row(o, depth, k, kind.clone(), t, w));
-            todo.extend(kids.get(&pid).into_iter().flatten().rev().map(|&p| (p, depth + 1)));
-        }
-    }
-    let after = out.iter().position(|r| r.depth == 0 && r.kind.order() > 1).unwrap_or(out.len());
-    let held = held.iter().map(|h| Row {
+    // No process: a held server, a session's heading
+    let bare = |kind: Kind, under: Kind, title: &str, what: String, session| Row {
         pid: 0,
         started: 0,
         depth: 0,
-        kind: Kind::Held(h.name.clone(), h.root.clone()),
-        under: Kind::Lsp(0),
-        title: h.name.clone(),
-        what: crate::allow::tilde(&h.root),
-        program: h.name.clone(),
+        kind,
+        under,
+        title: title.to_string(),
+        what,
+        program: title.to_string(),
         up: None,
         cpu: None,
         rss: 0,
         footprint: None,
         zombie: false,
-        flagged: true,
-    });
-    out.splice(after..after, held);
+        flagged: false,
+        session,
+    };
+    let mut out = Vec::new();
+    if let Some(os) = by_pid.get(&me) {
+        out.push(row(os, 0, Kind::Tarae, Kind::Tarae, "tarae".into(), "this editor".into(), None));
+    }
+    // (a session that isn't among `groups` is no session here)
+    let grouped = |l: Option<LaneId>| l.filter(|l| groups.iter().any(|g| g.id == *l));
+    let mut top: Vec<(Kind, String, String, &Os, Option<LaneId>)> = kids
+        .get(&me)
+        .into_iter()
+        .flatten()
+        .filter_map(|pid| by_pid.get(pid))
+        .map(|os| match known.iter().find(|k| k.pid == os.pid) {
+            Some(k) => (k.kind.clone(), k.title.clone(), k.what.clone(), *os, grouped(k.lane)),
+            None => (Kind::Other, os.name.clone(), String::new(), *os, None),
+        })
+        .collect();
+    top.sort_by(|a, b| (a.0.order(), &a.1, a.3.pid).cmp(&(b.0.order(), &b.1, b.3.pid)));
+    // A held server goes with the session its root is in (the innermost)
+    let held_in = |h: &Held| {
+        groups
+            .iter()
+            .filter(|g| h.root.starts_with(&g.root))
+            .max_by_key(|g| g.root.as_os_str().len())
+            .map(|g| g.id)
+    };
+    for session in std::iter::once(None).chain(groups.iter().map(|g| Some(g.id))) {
+        let start = out.len();
+        if let Some(g) = groups.iter().find(|g| Some(g.id) == session) {
+            out.push(bare(
+                Kind::Session(g.id),
+                Kind::Session(g.id),
+                &g.name,
+                crate::allow::tilde(&g.root),
+                session,
+            ));
+        }
+        for (kind, title, what, os, _) in top.iter().filter(|t| t.4 == session) {
+            out.push(row(os, 0, kind.clone(), kind.clone(), title.clone(), what.clone(), session));
+            // What it started, depth first (a known one under it keeps its own name — a plugin's shell's child)
+            let mut todo: Vec<(u32, usize)> =
+                kids.get(&os.pid).into_iter().flatten().rev().map(|&p| (p, 1)).collect();
+            while let Some((pid, depth)) = todo.pop() {
+                let Some(o) = by_pid.get(&pid) else { continue };
+                let (k, t, w) = match known.iter().find(|k| k.pid == pid) {
+                    Some(k) => (k.kind.clone(), k.title.clone(), k.what.clone()),
+                    None => (Kind::Other, o.name.clone(), String::new()),
+                };
+                out.push(row(o, depth, k, kind.clone(), t, w, session));
+                todo.extend(kids.get(&pid).into_iter().flatten().rev().map(|&p| (p, depth + 1)));
+            }
+        }
+        // Its held servers after its running ones (past its heading)
+        let first = start + usize::from(session.is_some());
+        let after = out[first..]
+            .iter()
+            .position(|r| r.depth == 0 && r.kind.order() > 1)
+            .map_or(out.len(), |i| first + i);
+        let mine = held.iter().filter(|h| held_in(h) == session).map(|h| Row {
+            flagged: true,
+            ..bare(
+                Kind::Held(h.name.clone(), h.root.clone()),
+                Kind::Lsp(0),
+                &h.name,
+                crate::allow::tilde(&h.root),
+                session,
+            )
+        });
+        out.splice(after..after, mine.collect::<Vec<_>>());
+        // The heading: what's under it, summed
+        if session.is_some() {
+            let (head, under) = out.split_at_mut(start + 1);
+            let (h, live) = (&mut head[start], under.iter().filter(|r| r.pid != 0));
+            h.cpu = live.clone().filter_map(|r| r.cpu).reduce(|a, b| a + b);
+            h.rss = live.clone().map(|r| r.rss).sum();
+            h.footprint = live.clone().any(|r| r.footprint.is_some()).then(|| live.map(Row::memory).sum());
+        }
+    }
     out
 }
 
@@ -977,48 +1059,57 @@ impl Editor {
         }
     }
 
-    /// The processes the editor knows, and what each is for.
+    /// The processes the editor knows, what each is for, and — with sessions — whose: a session's chat,
+    /// terminal, task and tests, and the servers rooted in its checkout.
     pub fn procs_known(&self) -> Vec<Known> {
         let mut out = Vec::new();
-        let mut add = |pid: Option<u32>, kind: Kind, title: &str, what: String| {
+        let mut add = |pid: Option<u32>, kind: Kind, title: &str, what: String, lane: Option<LaneId>| {
             if let Some(pid) = pid.filter(|&p| p > 0) {
-                out.push(Known { pid, kind, title: title.to_string(), what });
+                out.push(Known { pid, kind, title: title.to_string(), what, lane });
             }
         };
+        let sessions = !self.lanes.is_empty();
         for c in &self.lsp.clients {
-            add(c.pid(), Kind::Lsp(c.id), &c.name, crate::allow::tilde(&c.root));
+            let lane = self.lane_of(&c.root).filter(|_| sessions);
+            add(c.pid(), Kind::Lsp(c.id), &c.name, crate::allow::tilde(&c.root), lane);
         }
         if let Some(d) = &self.dap {
             let (adapter, helper) = d.pids();
-            add(adapter, Kind::Debug, "debugger", d.program.clone());
-            add(helper, Kind::Helper, "debug helper", d.program.clone());
+            add(adapter, Kind::Debug, "debugger", d.program.clone(), None);
+            add(helper, Kind::Helper, "debug helper", d.program.clone(), None);
         }
-        // Every lane's (one behind says whose: `fix-login · the chat`)
         for l in std::iter::once(&self.lane).chain(&self.lanes) {
-            let whose = |what: String| match l.id == self.lane.id {
-                true => what,
-                false => format!("{} · {what}", l.name),
-            };
+            let lane = sessions.then_some(l.id);
             if let Some(r) = &l.task_run {
                 let title = if r.by_claude { "claude's command" } else { r.task.name.as_str() };
-                add(r.pid(), Kind::Task, title, whose(r.task.cmd.clone()));
+                add(r.pid(), Kind::Task, title, r.task.cmd.clone(), lane);
             }
             if let Some(r) = &l.test_run {
-                add(r.pid(), Kind::Test, "tests", whose(r.target.label.clone()));
+                add(r.pid(), Kind::Test, "tests", r.target.label.clone(), lane);
             }
             if let Some(t) = &l.terminal {
-                add(t.pid(), Kind::Terminal, "terminal", whose(t.title.clone()));
+                add(t.pid(), Kind::Terminal, "terminal", t.title.clone(), lane);
             }
             if let Some(c) = &l.chat {
-                add(c.pid(), Kind::Chat, "claude", whose("the chat".into()));
+                add(c.pid(), Kind::Chat, "claude", "the chat".into(), lane);
             }
         }
-        add(self.llm_pid, Kind::Ask, "claude", "space i".into());
-        add(self.llm_warm.pid(), Kind::Spare, "claude", "ready for space i".into());
+        add(self.llm_pid, Kind::Ask, "claude", "space i".into(), None);
+        add(self.llm_warm.pid(), Kind::Spare, "claude", "ready for space i".into(), None);
         for (plugin, id, pid, program) in self.plugin_pids() {
-            add(Some(pid), Kind::Plugin(plugin.clone(), id), &program, format!("plugin {plugin}"));
+            add(Some(pid), Kind::Plugin(plugin.clone(), id), &program, format!("plugin {plugin}"), None);
         }
         out
+    }
+
+    /// The sessions as `:procs` heads them, in the tabs' order — none while there's one.
+    fn procs_groups(&self) -> Vec<Group> {
+        if self.lanes.is_empty() {
+            return Vec::new();
+        }
+        let group =
+            |l: &crate::lane::Lane| Group { id: l.id, name: l.label().to_string(), root: l.root.clone() };
+        self.lanes_in_order().into_iter().map(group).collect()
     }
 
     fn procs_lsp_facts(&self) -> Vec<LspFact> {
@@ -1050,17 +1141,18 @@ impl Editor {
         }
         let now = SystemTime::now();
         let secs = now.duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        let mut rows = rows(&s, &self.procs_known(), std::process::id(), &self.procs.held, secs);
+        let groups = self.procs_groups();
+        let mut rows = rows(&s, &self.procs_known(), std::process::id(), &self.procs.held, &groups, secs);
         let (found, learned) = self.procs.check(&rows, &self.procs_lsp_facts(), Instant::now());
         let flagged: HashSet<u32> = found.iter().map(|f| f.pid).filter(|&p| p > 0).collect();
         self.procs_found(found, now);
         for r in &mut rows {
             r.flagged |= flagged.contains(&r.pid);
         }
-        // The selection stays on its process as rows come and go
-        let was = self.procs.panel.as_ref().and_then(|p| self.procs.rows.get(p.selected)).map(Row::key);
+        // The selection stays on its process (its heading, its held server) as rows come and go
+        let was = self.procs.panel.as_ref().and_then(|p| self.procs.rows.get(p.selected));
+        let now = was.and_then(|w| rows.iter().position(|r| w.same(r)));
         if let Some(p) = self.procs.panel.as_mut() {
-            let now = was.and_then(|k| rows.iter().position(|r| r.key() == k));
             p.selected = now.unwrap_or(p.selected).min(rows.len().saturating_sub(1));
         }
         self.procs.rows = rows;
@@ -1125,16 +1217,34 @@ impl Editor {
         self.procs.rows.get(p.selected).cloned()
     }
 
+    /// What `r` is called in a toast: from a session behind, its name first (`fix-login · claude`).
+    fn procs_whose(&self, r: &Row, what: &str) -> String {
+        let behind = r.session.filter(|&id| id != self.lane.id);
+        match behind.and_then(|id| self.lanes.iter().find(|l| l.id == id)) {
+            Some(l) => format!("{} · {what}", l.label()),
+            None => what.to_string(),
+        }
+    }
+
+    /// `f` in the session `r` is under (swapped in if it's behind — `with_lane`), the one in front for a
+    /// shared row.
+    fn procs_in(&mut self, r: &Row, f: impl FnOnce(&mut Editor)) {
+        self.with_lane(r.session.unwrap_or(self.lane.id), f);
+        // (a key did it: the panel is drawn, whatever the session behind said)
+        self.unchanged = false;
+    }
+
     /// `s` on the selected row: it stops (the way its owner stops it — a run keeps its output).
     fn procs_stop(&mut self) {
         let Some(r) = self.procs_selected() else { return };
         let gone = |ed: &mut Editor, what: &str, then: Option<&str>| {
-            ed.set_status(stopped(what, then));
+            ed.set_status(stopped(&ed.procs_whose(&r, what), then));
             ed.procs_wake(Wake::Now);
         };
         match r.kind {
             Kind::Tarae => self.set_status("that's tarae itself — :q quits it"),
             Kind::Held(..) => self.set_status(format!("{} isn't running — r starts it", r.title)),
+            Kind::Session(_) => self.set_status(format!("{} is a session — :session-end ends it", r.title)),
             Kind::Lsp(cid) => {
                 if let Some(name) = self.lsp_stopped(cid) {
                     crate::log::line(&name, "stop", &format!("{name} stopped from :procs"));
@@ -1155,9 +1265,11 @@ impl Editor {
                 gone(self, "the terminal", None);
             }
             Kind::Chat => {
-                if let Some(c) = self.lane.chat.as_mut() {
-                    c.stop_process();
-                }
+                self.procs_in(&r, |ed| {
+                    if let Some(c) = ed.lane.chat.as_mut() {
+                        c.stop_process();
+                    }
+                });
                 gone(self, "claude", Some(CHAT_AGAIN));
             }
             Kind::Ask => {
@@ -1211,24 +1323,39 @@ impl Editor {
                 }
                 self.set_success(format!("{name} let start again"));
             }
-            Kind::Task => match self.lane.task_run.as_ref().filter(|t| !t.by_claude && !t.install) {
-                Some(t) => {
-                    let task = t.task.clone();
-                    self.task_start(task);
+            Kind::Task => self.procs_in(&r, |ed| {
+                match ed.lane.task_run.as_ref().filter(|t| !t.by_claude && !t.install) {
+                    Some(t) => {
+                        let task = t.task.clone();
+                        ed.task_start(task);
+                    }
+                    None => ed.set_status("Claude's command — Claude runs it again if it needs to"),
                 }
-                None => self.set_status("Claude's command — Claude runs it again if it needs to"),
-            },
-            Kind::Test => self.test_rerun(),
-            Kind::Chat => crate::chat::restart_process(self),
+            }),
+            Kind::Test => self.procs_in(&r, Editor::test_rerun),
+            Kind::Chat => self.procs_in(&r, crate::chat::restart_process),
+            Kind::Session(_) => {
+                return self.set_status(format!("{} is a session — r restarts a process under it", r.title));
+            }
             _ => return self.set_status(format!("{} has no restart — s stops it", r.title)),
         }
         self.procs_wake(Wake::Now);
     }
 
-    /// `l` on the selected row: what it said — a run's or the terminal's panel, the chat, else tarae's log at
-    /// its last line.
+    /// `l` on the selected row: what it said — a run's or the terminal's panel, the chat (another session's
+    /// in that session, brought to the front), else tarae's log at its last line; on a session's heading,
+    /// that session to the front.
     fn procs_log(&mut self) {
         let Some(r) = self.procs_selected() else { return };
+        if let Kind::Session(id) = r.kind {
+            self.lane_switch(id);
+            return;
+        }
+        if matches!(r.under, Kind::Task | Kind::Test | Kind::Terminal | Kind::Chat)
+            && let Some(id) = r.session
+        {
+            self.lane_switch(id);
+        }
         match r.under {
             Kind::Task | Kind::Test => {
                 self.procs_close();
@@ -1364,6 +1491,7 @@ mod tests {
             footprint: Some(mb * MB),
             zombie: false,
             flagged: false,
+            session: None,
         }
     }
 
@@ -1463,11 +1591,17 @@ mod tests {
             os(4, 1, "git"),
         ]);
         let known = [
-            Known { pid: 2, kind: Kind::Lsp(7), title: "rust-analyzer".into(), what: "~/w".into() },
-            Known { pid: 5, kind: Kind::Terminal, title: "terminal".into(), what: "fish".into() },
+            Known {
+                pid: 2,
+                kind: Kind::Lsp(7),
+                title: "rust-analyzer".into(),
+                what: "~/w".into(),
+                lane: None,
+            },
+            Known { pid: 5, kind: Kind::Terminal, title: "terminal".into(), what: "fish".into(), lane: None },
         ];
         let held = [Held { name: "pyright".into(), root: "/w".into(), what: String::new() }];
-        let rows = rows(&s, &known, 1, &held, 1_060);
+        let rows = rows(&s, &known, 1, &held, &[], 1_060);
         let got: Vec<(u32, usize, &str, &Kind)> =
             rows.iter().map(|r| (r.pid, r.depth, r.title.as_str(), &r.kind)).collect();
         assert_eq!(
@@ -1483,6 +1617,74 @@ mod tests {
         );
         assert_eq!(rows[2].under, Kind::Lsp(7), "a child is judged as what it's under");
         assert_eq!(rows[1].up, Some(Duration::from_secs(60)));
+    }
+
+    /// Two sessions: what's shared stays on top (tarae, the spare claude, one tarae doesn't know); then each
+    /// session under its heading, the heading summing CPU and memory of everything under it (what a server
+    /// started too) — its server first, a held server by its root, then its chat and terminal.
+    #[test]
+    fn rows_group_by_session_under_headings_that_sum_them() {
+        let with = |mut o: Os, cpu: f32, mb: u64| {
+            o.rss = mb * MB;
+            (o, Some(cpu))
+        };
+        let s = Sample {
+            procs: vec![
+                with(os(1, 0, "tarae"), 3.0, 100),
+                with(os(2, 1, "claude"), 0.5, 300),
+                with(os(3, 1, "rust-analyzer"), 2.0, 900),
+                with(os(4, 3, "rust-analyzer-proc-macro-srv"), 0.5, 20),
+                with(os(5, 1, "claude"), 1.0, 200),
+                with(os(6, 1, "fish"), 40.0, 30),
+                with(os(7, 1, "git"), 0.0, 5),
+            ],
+            took: Duration::ZERO,
+            usual: None,
+        };
+        let k = |pid, kind, title: &str, lane| Known {
+            pid,
+            kind,
+            title: title.into(),
+            what: String::new(),
+            lane,
+        };
+        let known = [
+            k(2, Kind::Spare, "claude", None),
+            k(3, Kind::Lsp(7), "rust-analyzer", Some(0)),
+            k(5, Kind::Chat, "claude", Some(1)),
+            k(6, Kind::Terminal, "terminal", Some(1)),
+        ];
+        let held = [Held { name: "pyright".into(), root: "/wt/fix-login/py".into(), what: String::new() }];
+        let groups = [
+            Group { id: 0, name: "main".into(), root: "/w".into() },
+            Group { id: 1, name: "fix-login".into(), root: "/wt/fix-login".into() },
+        ];
+        let rows = rows(&s, &known, 1, &held, &groups, 1_060);
+        let got: Vec<(u32, usize, &str, Option<LaneId>)> =
+            rows.iter().map(|r| (r.pid, r.depth, r.title.as_str(), r.session)).collect();
+        assert_eq!(
+            got,
+            [
+                (1, 0, "tarae", None),
+                (2, 0, "claude", None),
+                (7, 0, "git", None),
+                (0, 0, "main", Some(0)),
+                (3, 0, "rust-analyzer", Some(0)),
+                (4, 1, "rust-analyzer-proc-macro-srv", Some(0)),
+                (0, 0, "fix-login", Some(1)),
+                (0, 0, "pyright", Some(1)),
+                (5, 0, "claude", Some(1)),
+                (6, 0, "terminal", Some(1)),
+            ]
+        );
+        let sums = |at: usize| (rows[at].kind.clone(), rows[at].cpu, rows[at].memory());
+        assert_eq!(sums(3), (Kind::Session(0), Some(2.5), 920 * MB), "the server with what it started");
+        assert_eq!(sums(6), (Kind::Session(1), Some(41.0), 230 * MB), "the held server has no process");
+        assert!(matches!(rows[7].kind, Kind::Held(..)) && rows[7].flagged);
+        // The panel's totals and a session list's share don't count a heading twice
+        assert_eq!(summed(&rows, &[5, 6]), Some((41.0, 230 * MB)));
+        // A heading keeps its row a look later, as a process does
+        assert!(rows[6].same(&rows[6].clone()) && !rows[6].same(&rows[3]) && !rows[6].same(&rows[7]));
     }
 
     /// Busy: most of a core at every look for `BUSY_FOR` — not sooner, not for the user's own runs (a
@@ -1682,6 +1884,102 @@ mod tests {
         keys(&mut ed, "q");
         assert!(!ed.procs_up(), "q closes it");
         std::fs::remove_dir_all(root).ok();
+    }
+
+    /// Two sessions, each with its checkout's server and a chat (the test's stand-ins): `:procs` heads
+    /// each — its name, its processes under it, their numbers summed on the heading. `j` walks across the
+    /// groups; `s` on the heading only says what it is; `s` on the session behind's server and chat stops
+    /// those (said with its session's name), not the front's; `l` on a heading brings that session to the
+    /// front.
+    #[test]
+    fn procs_heads_each_session_and_acts_on_the_right_ones() {
+        let (mut ed, root) = with_server("groups");
+        (ed.lane.root, ed.lane.name) = (root.clone(), "base".into());
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        let front = ed.doc().lsp.client.expect("attached");
+        crate::chat::open(&mut ed);
+        let second = root.with_file_name(format!("{}-second", root.file_name().unwrap().to_string_lossy()));
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(second.join("main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(second.join("Cargo.toml"), "[package]\nname = \"t\"\n").unwrap();
+        let id = ed.lane_open(&second).unwrap();
+        ed.lane.name = "second".into();
+        ed.open(&ed.lane.root.join("main.rs")).unwrap();
+        let behind = ed.doc().lsp.client.expect("its own server");
+        assert_ne!(front, behind);
+        crate::chat::open(&mut ed);
+        ed.lane_switch(0);
+        let chat_of = |ed: &Editor, l: LaneId| {
+            let lane = std::iter::once(&ed.lane).chain(&ed.lanes).find(|x| x.id == l).unwrap();
+            lane.chat.as_ref().and_then(crate::chat::Chat::pid)
+        };
+        let (chat0, chat1) = (chat_of(&ed, 0).expect("its claude"), chat_of(&ed, id).expect("its claude"));
+        crate::typed::execute(&mut ed, "procs").unwrap();
+        let listed = |ed: &Editor, c| ed.procs.rows.iter().position(|r| r.kind == Kind::Lsp(c));
+        let has = |ed: &Editor, pid| ed.procs.rows.iter().any(|r| r.pid == pid);
+        settle(&mut ed, |ed| {
+            listed(ed, front).is_some() && listed(ed, behind).is_some() && has(ed, chat0) && has(ed, chat1)
+        });
+        let session_of =
+            |ed: &Editor, pid| ed.procs.rows.iter().find(|r| r.pid == pid).and_then(|r| r.session);
+        assert_eq!(
+            (session_of(&ed, chat0), session_of(&ed, chat1)),
+            (Some(0), Some(id)),
+            "each chat its own"
+        );
+        let at = |ed: &Editor, k: Kind| ed.procs.rows.iter().position(|r| r.kind == k).expect("listed");
+        let (head0, head1) = (at(&ed, Kind::Session(0)), at(&ed, Kind::Session(id)));
+        let (s0, s1) = (at(&ed, Kind::Lsp(front)), at(&ed, Kind::Lsp(behind)));
+        assert!(head0 < s0 && s0 < head1 && head1 < s1, "each server under its heading: {:?}", ed.procs.rows);
+        assert_eq!(ed.procs.rows[head1].title, "second");
+        let h = &ed.procs.rows[head1];
+        let under: Vec<&Row> = ed.procs.rows[head1 + 1..].iter().filter(|r| r.session == Some(id)).collect();
+        let sum = |f: fn(&Row) -> u64| under.iter().map(|r| f(r)).sum::<u64>();
+        assert_eq!(
+            (h.rss, h.memory()),
+            (sum(|r| r.rss), sum(Row::memory)),
+            "the heading sums what's under it"
+        );
+        let summed = mem(h.memory());
+        // (on its heading, so it's in sight — other tests' children are listed on top too)
+        keys(&mut ed, &"j ".repeat(head1));
+        let shown = screen(&mut ed, 140, 40).join("\n");
+        // (its checkout's path names it — not the chat's session tabs, not the server's row)
+        let head = shown.lines().find(|l| l.contains("-second") && !l.contains("fake")).expect("its heading");
+        assert!(head.contains("second  "), "its name from the pid column: {head}");
+        assert!(head.contains(&summed), "summed on screen: {head}");
+        // Across the groups: on the heading, then the server behind
+        keys(&mut ed, "s");
+        assert_eq!(
+            ed.status.as_ref().map(|s| s.0.as_str()),
+            Some("second is a session — :session-end ends it")
+        );
+        keys(&mut ed, &"j ".repeat(s1 - head1));
+        keys(&mut ed, "s");
+        assert!(
+            ed.client(behind).is_none() && ed.client(front).is_some(),
+            "the one behind stopped, not the front's"
+        );
+        let said = ed.toasts.last().map(|t| t.text.as_str());
+        assert_eq!(said, Some("second · fake stopped · the next file of its project starts it again"));
+        // Its chat: that session's claude stops, the front's goes on
+        let c1 = ed.procs.rows.iter().position(|r| r.pid == chat1).expect("its row");
+        keys(&mut ed, "g");
+        keys(&mut ed, &"j ".repeat(c1));
+        keys(&mut ed, "s");
+        settle(&mut ed, |ed| chat_of(ed, id).is_none());
+        assert_eq!((chat_of(&ed, 0), chat_of(&ed, id)), (Some(chat0), None), "the one behind stopped");
+        let said = ed.toasts.last().map(|t| t.text.as_str());
+        assert_eq!(said, Some("second · claude stopped · the chat's next message starts it again"));
+        // `l` on a heading: that session to the front
+        keys(&mut ed, "g");
+        keys(&mut ed, &"j ".repeat(head1));
+        keys(&mut ed, "l");
+        assert_eq!(ed.lane.id, id, "brought to the front");
+        drop(ed);
+        std::fs::remove_dir_all(root).ok();
+        std::fs::remove_dir_all(second).ok();
     }
 
     /// A server exiting a third time is held: the status line says so (and nothing did before), the next

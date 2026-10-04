@@ -1539,13 +1539,14 @@ fn draw_procs_panel<W: Write>(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut 
     let sel = p.rows.get(panel.selected);
     let mut hints: Vec<(&str, &str)> = Vec::new();
     if panel.focus {
-        if sel.is_some_and(|r| !matches!(r.kind, Kind::Tarae | Kind::Held(..))) {
+        let heading = sel.is_some_and(|r| matches!(r.kind, Kind::Session(_)));
+        if sel.is_some_and(|r| !matches!(r.kind, Kind::Tarae | Kind::Held(..) | Kind::Session(_))) {
             hints.push(("s", "stop"));
         }
         if sel.is_some_and(|r| r.kind.restarts()) {
             hints.push(("r", "restart"));
         }
-        hints.extend([("l", "log"), ("q", "close"), ("esc", "back")]);
+        hints.extend([("l", if heading { "to front" } else { "log" }), ("q", "close"), ("esc", "back")]);
     } else {
         hints.push(("click", "keys"));
     }
@@ -1574,12 +1575,15 @@ fn draw_procs_panel<W: Write>(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut 
     panel_hints(out, &hints, used, w, card, dim, faint)?;
     // The columns: FOR takes what's left; narrow, the resident column goes first, then the pid, then the time
     let foot = p.rows.iter().any(|r| r.footprint.is_some());
-    // (a row with nothing to say for what it's for — what a server started — runs its name on into that column)
+    // (a row with nothing to say for what it's for — what a server started — runs its name on into that column;
+    // a session's rows sit a step in under its heading, which starts at the pid column)
+    let heading = |r: &crate::procs::Row| matches!(r.kind, Kind::Session(_));
+    let indent = |r: &crate::procs::Row| r.depth + usize::from(r.session.is_some() && !heading(r));
     let name_w = p
         .rows
         .iter()
-        .filter(|r| !r.what.is_empty())
-        .map(|r| r.title.width() + 2 * r.depth + if r.flagged { 2 } else { 0 })
+        .filter(|r| !r.what.is_empty() && !heading(r))
+        .map(|r| r.title.width() + 2 * indent(r) + if r.flagged { 2 } else { 0 })
         .max()
         .unwrap_or(7)
         .clamp(7, 24);
@@ -1663,8 +1667,46 @@ fn draw_procs_panel<W: Write>(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut 
         let mark = panel.focus && scroll + i == panel.selected;
         let base = if mark { selected } else { card };
         let plain = Style { fg: base.fg, ..card };
+        // A session's heading: its name from the pid column on, `●`/`▲` as its tab has them, its checkout,
+        // and what's under it summed
+        if let Kind::Session(id) = r.kind {
+            use crate::lane::Doing;
+            let lane = editor.lanes_in_order().into_iter().find(|l| l.id == id);
+            let glyph = match lane.map(|l| editor.doing(l)) {
+                Some(Doing::Working) => Some(("●", Style { fg: ui.accent.fg, ..card })),
+                Some(Doing::Waiting) => Some(("▲", warn)),
+                _ => None,
+            };
+            let name = glyph.map_or_else(|| r.title.clone(), |(g, _)| format!("{} {g}", r.title));
+            let mut lead = if pid { 9 } else { 0 } + name_w;
+            let mut cells =
+                vec![col(&name, lead, false, strong), col(&fit_left(&r.what, for_w), for_w, false, faint)];
+            // (a name too long for its room takes its checkout's — the path matters least)
+            if name.width() > lead && for_w > 0 {
+                lead += 2 + for_w;
+                cells = vec![col(&name, lead, false, strong)];
+            }
+            if up {
+                cells.push(col("", 7, true, faint));
+            }
+            cells.push(col(&r.cpu.map_or_else(|| "—".into(), |c| format!("{c:.1}%")), 6, true, dim));
+            cells.push(col(&mem(r.memory()), 9, true, dim));
+            if res {
+                cells.push(col(&mem(r.rss), 9, true, faint));
+            }
+            line(out, y, &cells, base, mark)?;
+            // (the glyph in its own color, over the name's end)
+            if let Some((g, st)) = glyph
+                && name.width() <= lead
+            {
+                apply(out, Style { bg: base.bg, ..st })?;
+                queue!(out, MoveTo((2 + name.width() - g.width()) as u16, y as u16), Print(g))?;
+            }
+            continue;
+        }
         let name = format!(
-            "{}{}{}",
+            "{}{}{}{}",
+            if r.session.is_some() { "  " } else { "" },
             if r.depth > 0 { format!("{}› ", "  ".repeat(r.depth - 1)) } else { String::new() },
             if r.flagged { "▲ " } else { "" },
             r.title

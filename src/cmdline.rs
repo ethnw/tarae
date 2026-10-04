@@ -32,12 +32,21 @@ pub enum Arg {
 pub struct TypedCmd {
     /// First = the name used when completing, the rest = aliases.
     pub names: &'static [&'static str],
+    /// Old names that still run it (and complete its arguments) but are never offered or listed.
+    pub hidden: &'static [&'static str],
     pub arg: Arg,
     pub doc: &'static str,
 }
 
 const fn c(names: &'static [&'static str], arg: Arg, doc: &'static str) -> TypedCmd {
-    TypedCmd { names, arg, doc }
+    TypedCmd { names, hidden: &[], arg, doc }
+}
+
+impl TypedCmd {
+    /// With old names kept working, out of sight (a renamed command).
+    const fn hiding(self, old: &'static [&'static str]) -> TypedCmd {
+        TypedCmd { hidden: old, ..self }
+    }
 }
 
 /// Every `:` command — new commands go in both typed.rs and here (test `every_typed_command_is_listed`).
@@ -139,8 +148,8 @@ pub const COMMANDS: &[TypedCmd] = &[
     c(&["git-amend"], Arg::None, "Put what's staged into the last commit"),
     c(&["diff"], Arg::File, "Show changes against HEAD, a file, or a revision"),
     c(&["diff-off"], Arg::None, "Stop showing the diff"),
-    c(&["lane-open"], Arg::File, "Work in another checkout beside this one"),
-    c(&["lane-switch"], Arg::None, "Bring another checkout's work to the front"),
+    c(&["session-open"], Arg::File, "Work in another checkout beside this one").hiding(&["lane-open"]),
+    c(&["session-switch"], Arg::None, "Bring another session to the front").hiding(&["lane-switch"]),
     c(&["session-new"], Arg::None, "New session: a branch in its own checkout"),
     c(&["session-end"], Arg::None, "End a session (its checkout goes)"),
     c(&["session-bring"], Arg::None, "Move a session's base up to it (fast-forward)"),
@@ -183,7 +192,7 @@ pub struct Lists {
 }
 
 pub fn find(name: &str) -> Option<&'static TypedCmd> {
-    COMMANDS.iter().find(|c| c.names.contains(&name))
+    COMMANDS.iter().find(|c| c.names.contains(&name) || c.hidden.contains(&name))
 }
 
 /// File argument: split the word into (folder to read, name typed within it). `~` = home.
@@ -506,6 +515,26 @@ mod tests {
         assert_eq!(apply("o README.md\u{a0}sr", &c, 0), "o README.md\u{a0}src/");
         let c = complete("theme\u{3000}ha", Path::new("/p/"), &l);
         assert_eq!(labels(&c), ["hanji"]);
+    }
+
+    /// A renamed command's old names run it and complete its arguments, but are never offered: not among
+    /// the names, not as an alias in a hint, not for what they start with.
+    #[test]
+    fn old_names_work_out_of_sight() {
+        let l = lists();
+        assert_eq!(find("lane-open").map(|c| c.names[0]), Some("session-open"));
+        assert_eq!(find("lane-switch").map(|c| c.names[0]), Some("session-switch"));
+        let shown =
+            |c: &Completion| c.cands.iter().any(|c| c.label.contains("lane") || c.hint.contains("lane"));
+        assert!(!shown(&complete("", Path::new("/p/"), &l)));
+        let typed = complete("lane", Path::new("/p/"), &l);
+        assert!(!shown(&typed), "{:?}", labels(&typed));
+        assert_eq!(labels(&complete("session-o", Path::new("/p/"), &l)), ["session-open"]);
+        assert_eq!(
+            labels(&complete("lane-open sr", Path::new("/p/"), &l)),
+            ["src/"],
+            "its argument completes"
+        );
     }
 
     /// Every command name in typed.rs is in the table (so no command is missing from completion).

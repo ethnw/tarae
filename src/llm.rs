@@ -266,6 +266,9 @@ pub enum StreamEv {
     /// The process's claude session and the model it runs (`system init`) — the chat resumes it later
     /// (`--resume`).
     Session { id: String, model: String },
+    /// The model that wrote an answer (an assistant message's `message.model`, or a stream's
+    /// `message_start`) — sent when it changes.
+    Answered(String),
     /// The models this claude offers (its answer to our `initialize`) — the chat's model picker.
     Models(Vec<ModelInfo>),
     /// End of a turn — final text or error (not logged in·stopped etc.).
@@ -308,9 +311,16 @@ pub fn pump(
         let mut last_flush = Instant::now();
         let mut thinking_sent = false;
         let mut done = false;
+        let mut model = String::new();
         if let Some(out) = child.stdout.take() {
             for line in BufReader::new(out).lines().map_while(Result::ok) {
                 let Ok(ev) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+                if let Some(m) = answered_by(&ev).filter(|m| *m != model) {
+                    model = m.to_string();
+                    if !send(StreamEv::Answered(model.clone())) {
+                        break;
+                    }
+                }
                 // Tool calls arrive whole in the assistant message — text streamed before them goes first
                 let tools = tool_events(&ev);
                 if !tools.is_empty() {
@@ -420,6 +430,17 @@ fn tool_events(ev: &serde_json::Value) -> Vec<StreamEv> {
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// The model that wrote this answer, if the line says — not claude's own stand-ins (`<synthetic>`, for an
+/// answer it made up after an error).
+fn answered_by(ev: &serde_json::Value) -> Option<&str> {
+    let m = match ev["type"].as_str()? {
+        "assistant" => &ev["message"]["model"],
+        "stream_event" if ev["event"]["type"] == "message_start" => &ev["event"]["message"]["model"],
+        _ => return None,
+    };
+    m.as_str().filter(|m| !m.is_empty() && !m.starts_with('<'))
 }
 
 /// `args` with `flag`'s value replaced (the flag appended if it wasn't there).
@@ -855,6 +876,7 @@ fn start(
             }
             // ask runs without tools, and its session isn't kept
             StreamEv::Session { .. }
+            | StreamEv::Answered(_)
             | StreamEv::Models(_)
             | StreamEv::Tool { .. }
             | StreamEv::ToolResult { .. }

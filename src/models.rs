@@ -6,7 +6,8 @@
 //!   the conversation at once: `set_model` and `apply_flag_settings {effortLevel}` control requests
 //!   (measured: the next answer comes from the new model; `low`/`max` changed the thinking 47 → 174 tokens).
 //!   Back to the model's own effort: `effortLevel: null` (measured: thinking back at the default's).
-//! - The chat's title says which (`Opus 5.5 · high`) while it's idle.
+//! - The chat's title says which (`Opus 5.5 · high`) while it's idle — the model that answered (`init`, then
+//!   each answer's `message.model`); when that isn't what's asked for, both (`claude-sonnet-5-5 · asked opus`).
 
 use serde_json::json;
 
@@ -45,11 +46,16 @@ fn chosen(ed: &Editor) -> String {
 }
 
 /// The model in use as the title says it: its name (for `default`, the model it stands for), and the effort
-/// when the model takes one — `Opus 5.5 · high`. None before anything's known.
+/// when the model takes one — `Opus 5.5 · high`. When what answered isn't what's asked for (a chat started
+/// before `llm.model` changed), both: `claude-sonnet-5-5 · asked opus`. None before anything's known.
 pub fn label(ed: &Editor) -> Option<String> {
-    let models = &ed.lane.chat.as_ref()?.models;
+    let c = ed.lane.chat.as_ref()?;
+    let models = &c.models;
     let value = chosen(ed);
     let m = models.iter().find(|m| m.value == value);
+    if !c.model.is_empty() && !asks_for(m, &value, &c.model) {
+        return Some(format!("{} · asked {value}", c.model));
+    }
     let name = match m {
         Some(m) if m.value == "default" => models
             .iter()
@@ -57,11 +63,23 @@ pub fn label(ed: &Editor) -> Option<String> {
             .map_or(m.name.clone(), |o| o.name.clone()),
         Some(m) => m.name.clone(),
         None if ed.config.llm.model.is_some() => value.clone(),
-        None => return None,
+        None => return Some(c.model.clone()).filter(|m| !m.is_empty()),
     };
     let effort = &ed.config.llm.effort;
     let takes = m.is_some_and(|m| m.efforts.iter().any(|e| e == effort));
     Some(if takes { format!("{name} · {effort}") } else { name })
+}
+
+/// Whether the model `answered` is what `value` asks for: the model it resolves to (an alias, `default`) —
+/// ids compared without a `[1m]`-style suffix, a dated one counting as the same — else, before claude has
+/// said what it offers, the value itself or a family alias in the id (`opus`).
+fn asks_for(m: Option<&ModelInfo>, value: &str, answered: &str) -> bool {
+    let bare = |s: &str| s.split('[').next().unwrap_or(s).to_string();
+    let a = bare(answered);
+    match m.map(|m| bare(&m.resolved)).filter(|r| !r.is_empty()) {
+        Some(r) => a.starts_with(&r) || r.starts_with(&a),
+        None => value == "default" || a.contains(value),
+    }
 }
 
 /// `C-t` · `:model` — the models, the one in use marked.
@@ -142,6 +160,10 @@ pub fn set(ed: &mut Editor, value: &str) -> Result<(), String> {
     let value = m.map_or(value.to_string(), |m| m.value.clone());
     save(ed, "llm.model", if value == "default" { "" } else { &value })?;
     crate::chat::request(ed, json!({ "subtype": "set_model", "model": value }));
+    // (what answers is known again from the next answer — until then the title says what was asked for)
+    if let Some(c) = ed.lane.chat.as_mut() {
+        c.model.clear();
+    }
     // An effort the new model doesn't take goes (it'd be refused)
     let effort = ed.config.llm.effort.clone();
     if m.is_some_and(|m| !m.resolved.is_empty() && !effort.is_empty() && !m.efforts.contains(&effort)) {

@@ -256,7 +256,8 @@ pub struct Chat {
     pub past: Vec<(String, String, u64)>,
     /// Claude's plan for this conversation (`plan.rs`) — pinned under the title.
     pub plan: Option<crate::plan::Plan>,
-    /// The models claude offers (its `initialize` answer) · the one this process runs (`init`).
+    /// The models claude offers (its `initialize` answer) · the one answering: what `init` said this process
+    /// runs, then what wrote its latest answer (empty after `:model` until the next answer says).
     pub models: Vec<crate::llm::ModelInfo>,
     pub model: String,
 }
@@ -711,6 +712,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             }
         }
         StreamEv::Models(list) => c.models = list,
+        StreamEv::Answered(model) => c.model = model,
         StreamEv::ToolResult { id, text } => {
             // What it did on disk (an edit, a write, a command): the git tab reads the status again (#29 — it
             // said "the tree is clean" over files Claude had changed, until reopened)

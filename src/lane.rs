@@ -298,10 +298,10 @@ impl Editor {
         }
     }
 
-    /// `msg` as a toast says it: from a lane behind, its name first.
+    /// `msg` as a toast says it: from a lane behind, its name first (as its tab says it).
     pub(crate) fn said_by_lane(&self, msg: String) -> String {
         match self.behind {
-            true => format!("{} · {msg}", self.lane.name.clone()),
+            true => format!("{} · {msg}", self.lane.label()),
             false => msg,
         }
     }
@@ -319,7 +319,7 @@ impl Editor {
         f(self);
         self.behind = false;
         let tell = self.lane.waits() && !std::mem::replace(&mut self.lane.waiting_told, true);
-        let name = self.lane.name.clone();
+        let name = self.lane.label().to_string();
         if let Some(id) = self.docs.get(self.current).map(|d| d.id) {
             self.lane.current_doc = id;
             self.lane_keeps(id);
@@ -342,7 +342,7 @@ impl Editor {
         self.docs.iter().position(|d| d.id == id).unwrap_or(0)
     }
 
-    /// `:lane-open <folder>` — a lane for that checkout (a worktree, a clone), in front; the one there
+    /// `:session-open <folder>` — a lane for that checkout (a worktree, a clone), in front; the one there
     /// already if it has a lane.
     pub fn lane_open(&mut self, folder: &Path) -> Result<LaneId, String> {
         let folder = self.path_of(folder);
@@ -383,7 +383,7 @@ impl Editor {
         id
     }
 
-    /// `:lane-switch <n>` — lane `id` to the front. What was up over the one in front closes (a picker, a
+    /// `:session-switch <n>` — lane `id` to the front. What was up over the one in front closes (a picker, a
     /// prompt, insert mode); Claude's cards there go with it. False: no such lane.
     pub fn lane_switch(&mut self, id: LaneId) -> bool {
         if id == self.lane.id {

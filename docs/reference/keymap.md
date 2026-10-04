@@ -497,8 +497,8 @@ Type `:` in normal mode. `Tab` completes command names and their arguments (path
 | `:git-amend` |  | Put what's staged into the last commit |
 | `:diff` |  | Show changes against HEAD, a file, or a revision |
 | `:diff-off` |  | Stop showing the diff |
-| `:lane-open` |  | Work in another checkout beside this one |
-| `:lane-switch` |  | Bring another checkout's work to the front |
+| `:session-open` |  | Work in another checkout beside this one |
+| `:session-switch` |  | Bring another session to the front |
 | `:session-new` |  | New session: a branch in its own checkout |
 | `:session-end` |  | End a session (its checkout goes) |
 | `:session-bring` |  | Move a session's base up to it (fast-forward) |

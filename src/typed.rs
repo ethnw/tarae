@@ -124,13 +124,19 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
         "sh" | "run-shell-command" => shell(editor, rest),
         "diff" => editor.diff_against(rest.trim()),
         "diff-off" => editor.diff_off(),
-        "lane-open" if !rest.trim().is_empty() => {
+        // (`lane-…`: their old names, still working — `cmdline::COMMANDS` keeps them out of sight)
+        "session-open" | "lane-open" if !rest.trim().is_empty() => {
             let id = editor.lane_open(Path::new(rest.trim()))?;
-            editor.set_status(format!("lane {id} · {}", editor.lane.name));
+            let all = editor.lanes_in_order();
+            let at = all.iter().position(|l| l.id == id).map_or(all.len(), |i| i + 1);
+            let msg = format!("{} · session {at} of {} — space W lists them", editor.lane.label(), all.len());
+            editor.set_status(msg);
             Ok(())
         }
-        "lane-open" => Err("usage: :lane-open <folder> (a worktree or another checkout)".into()),
-        "lane-switch" => {
+        "session-open" | "lane-open" => {
+            Err("usage: :session-open <folder> (a worktree or another checkout)".into())
+        }
+        "session-switch" | "lane-switch" => {
             let lanes = editor.lanes_listed();
             match rest.trim().parse() {
                 Ok(id) if editor.lane_switch(id) => Ok(()),
@@ -139,7 +145,7 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
                         .iter()
                         .map(|(id, name, front)| format!("{id} {name}{}", if *front { " ●" } else { "" }))
                         .collect();
-                    Err(format!("usage: :lane-switch <n> — {}", list.join(" · ")))
+                    Err(format!("usage: :session-switch <n> — {}", list.join(" · ")))
                 }
             }
         }
