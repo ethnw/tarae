@@ -75,9 +75,12 @@ fn glob_root(base: &Path, pattern: &str) -> Option<PathBuf> {
     Some(root)
 }
 
-/// Whether the call may go without asking: inside the project, or in a place allowed.
+/// Whether the call may go without asking: inside the project, in a place allowed, or tarae's own log
+/// (the file itself — `log::is_log_real`).
 pub fn covered(look: &Look, root: &Path, chat: &Allowed, kept: &Allowed) -> bool {
-    look.at.as_ref().is_some_and(|at| at.starts_with(root) || chat.reads(at) || kept.reads(at))
+    look.at.as_ref().is_some_and(|at| {
+        at.starts_with(root) || chat.reads(at) || kept.reads(at) || crate::log::is_log_real(at)
+    })
 }
 
 /// A `can_use_tool` ask for one of `TOOLS` — decided on a worker (paths resolved, the kept answers read),
@@ -258,5 +261,29 @@ mod tests {
         assert!(covered(&l(Some("/t/x/m.txt")), root, &some, &none), "this chat");
         assert!(covered(&l(Some("/t/x/m.txt")), root, &none, &some), "kept");
         assert!(!covered(&l(None), root, &some, &some), "can't be told: asks");
+    }
+
+    /// #45: tarae's own log is read unasked — Read, a Grep of it, a read-only command naming it — but only
+    /// the file: not the folder it's in, nor the previous run's beside it.
+    #[test]
+    fn the_editors_own_log_is_read_unasked() {
+        let Some(log) = crate::log::path() else { return };
+        let root = Path::new("/r/p");
+        let none = Allowed::default();
+        let at = |tool: &str, input: Value| covered(&look(tool, &input, root), root, &none, &none);
+        assert!(at("Read", json!({ "file_path": log })));
+        assert!(at("Grep", json!({ "pattern": "ready", "path": log })));
+        let dir = log.parent().unwrap();
+        assert!(!at("Read", json!({ "file_path": dir.join("tarae.log.old") })));
+        assert!(!at("Read", json!({ "file_path": dir.join("trust.json") })));
+        assert!(!at("Grep", json!({ "pattern": "x", "path": dir })));
+        // (a command's words are only paths when they're there: the log must be)
+        if log.exists() {
+            let cmd = format!("grep -n ready {}", log.display());
+            assert_eq!(crate::readonly::outside(&cmd, root, root, &none, &none), Ok(vec![]));
+            let cmd = format!("tail -n 40 {} {}", log.display(), dir.display());
+            let out = crate::readonly::outside(&cmd, root, root, &none, &none).unwrap();
+            assert_eq!(out, vec![std::fs::canonicalize(dir).unwrap()], "the folder still asks");
+        }
     }
 }

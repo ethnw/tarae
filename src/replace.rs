@@ -37,6 +37,27 @@ pub fn plan(
 ) -> Result<Vec<FilePlan>, String> {
     let re = crate::picker::smart_regex(pattern)?;
     let mut out = Vec::new();
+    for (path, base, edits, count) in plan_with(&re, replacement, true, targets, open) {
+        let edit = json!({ "changes": { crate::lsp::uri(&path): edits } });
+        let Some(diff) = crate::editdiff::build(&edit, Encoding::Utf8, |_: &Path| Some(base.clone())).pop()
+        else {
+            continue;
+        };
+        out.push(FilePlan { path, base, edits, diff: std::sync::Arc::new(vec![diff]), count });
+    }
+    Ok(out)
+}
+
+/// `plan`'s work for any regex: per file with something to replace, (path, its text, the edits, matches).
+/// `expand`: `$1`/`${name}` in `replacement` are the groups (else it's put in as written).
+pub fn plan_with(
+    re: &regex::Regex,
+    replacement: &str,
+    expand: bool,
+    targets: &[(PathBuf, Vec<usize>)],
+    open: &HashMap<PathBuf, Rope>,
+) -> Vec<(PathBuf, Rope, Vec<Value>, usize)> {
+    let mut out = Vec::new();
     for (path, lines) in targets {
         let base = match open.get(path) {
             Some(t) => t.clone(),
@@ -45,22 +66,22 @@ pub fn plan(
                 Err(_) => continue, // gone or unreadable since the search
             },
         };
-        let (edits, count) = line_edits(&re, replacement, &base, lines);
-        if edits.is_empty() {
-            continue;
+        let (edits, count) = line_edits(re, replacement, expand, &base, lines);
+        if !edits.is_empty() {
+            out.push((path.clone(), base, edits, count));
         }
-        let edit = json!({ "changes": { crate::lsp::uri(path): edits } });
-        let Some(diff) = crate::editdiff::build(&edit, Encoding::Utf8, |_: &Path| Some(base.clone())).pop()
-        else {
-            continue;
-        };
-        out.push(FilePlan { path: path.clone(), base, edits, diff: std::sync::Arc::new(vec![diff]), count });
     }
-    Ok(out)
+    out
 }
 
 /// Each listed line with a match → one edit replacing the whole line's text (newline kept).
-fn line_edits(re: &regex::Regex, replacement: &str, text: &Rope, lines: &[usize]) -> (Vec<Value>, usize) {
+fn line_edits(
+    re: &regex::Regex,
+    replacement: &str,
+    expand: bool,
+    text: &Rope,
+    lines: &[usize],
+) -> (Vec<Value>, usize) {
     let mut edits = Vec::new();
     let mut count = 0;
     let mut lines = lines.to_vec();
@@ -73,7 +94,10 @@ fn line_edits(re: &regex::Regex, replacement: &str, text: &Rope, lines: &[usize]
         if n == 0 {
             continue;
         }
-        let new = re.replace_all(&old, replacement);
+        let new = match expand {
+            true => re.replace_all(&old, replacement),
+            false => re.replace_all(&old, regex::NoExpand(replacement)),
+        };
         if new == old {
             continue;
         }

@@ -37,6 +37,8 @@ pub struct Edits {
     /// Review at the end (`space v a`, agreed on its card): edits under this folder go in as Claude makes
     /// them, and the turn is reviewed when it ends.
     pub at_end: Option<PathBuf>,
+    /// Claude's renames and replaces landing (`refactor.rs`): the front one's files reviewed one at a time.
+    pub sets: VecDeque<crate::refactor::Landing>,
 }
 
 // ── Review at the end ───────────────────────────────────────────────────────
@@ -121,21 +123,7 @@ pub fn request(ed: &mut Editor, request_id: &str, req: &Value) -> Option<Value> 
     }
     let c = ed.chat.as_mut()?;
     // Its words right before this call, this turn — taken now, so each queued edit keeps its own
-    // Why: its words right before this call (after the call's own row), not ones from before earlier calls —
-    // else the plan's step in hand
-    use crate::chat::Role;
-    let turn = c.msgs.iter().rposition(|m| m.role == Role::User).map_or(0, |i| i + 1);
-    let before: Vec<_> = c.msgs[turn..].iter().rev().skip_while(|m| m.role == Role::Tool).collect();
-    let words = before
-        .iter()
-        .take_while(|m| m.role != Role::Tool)
-        .find(|m| matches!(m.role, Role::Thought | Role::Assistant))
-        .map(|m| crate::chat::displayed(&m.text).split_whitespace().collect::<Vec<_>>().join(" "));
-    let step = c.plan.as_ref().and_then(|p| {
-        let i = p.current()?;
-        Some(format!("step {}/{}: {}", i + 1, p.steps.len(), p.steps[i].text))
-    });
-    let reason = words.filter(|w| !w.is_empty()).or(step).unwrap_or_default();
+    let reason = reason(c);
     let p = Pending {
         request_id: request_id.to_string(),
         tool: tool.to_string(),
@@ -150,6 +138,24 @@ pub fn request(ed: &mut Editor, request_id: &str, req: &Value) -> Option<Value> 
         }
     }
     None
+}
+
+/// Why Claude makes the change it's calling for now (its review shows it): its words right before this call
+/// (after the call's own row), not ones from before earlier calls — else the plan's step in hand.
+pub fn reason(c: &crate::chat::Chat) -> String {
+    use crate::chat::Role;
+    let turn = c.msgs.iter().rposition(|m| m.role == Role::User).map_or(0, |i| i + 1);
+    let before: Vec<_> = c.msgs[turn..].iter().rev().skip_while(|m| m.role == Role::Tool).collect();
+    let words = before
+        .iter()
+        .take_while(|m| m.role != Role::Tool)
+        .find(|m| matches!(m.role, Role::Thought | Role::Assistant))
+        .map(|m| crate::chat::displayed(&m.text).split_whitespace().collect::<Vec<_>>().join(" "));
+    let step = c.plan.as_ref().and_then(|p| {
+        let i = p.current()?;
+        Some(format!("step {}/{}: {}", i + 1, p.steps.len(), p.steps[i].text))
+    });
+    words.filter(|w| !w.is_empty()).or(step).unwrap_or_default()
 }
 
 /// Review at the end: whether the edit goes in unasked is worked out on a worker — where its path really

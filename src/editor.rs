@@ -1354,6 +1354,7 @@ impl Editor {
         crate::follow::watch(self);
         crate::notes::attach(self);
         crate::edits::next(self);
+        crate::refactor::next(self);
         crate::codereview::land(self);
         self.agent_selection_tick(false);
         self.plugin_front();
@@ -4353,6 +4354,115 @@ mod tests {
         sent.lines().find(|l| l.contains("\"c7\"")).expect("answered").to_string()
     }
 
+    /// One chat turn in which a fake claude calls tarae's `name` tool with `args` — in a fresh chat (review
+    /// at the end if `at_end`) — and tarae's answer to it, once the turn is over.
+    fn tool_turn(ed: &mut Editor, dir: &Path, name: &str, args: serde_json::Value, at_end: bool) -> String {
+        let _ = std::fs::remove_file(dir.join("stdin.log"));
+        let log = claude_calls(ed, dir, name, &args);
+        crate::chat::close(ed);
+        feed(ed, "<space>l");
+        if at_end {
+            ed.chat.as_mut().unwrap().edits.at_end = Some(dir.to_path_buf());
+        }
+        feed(ed, "do it<ret>");
+        let done = |ed: &Editor| {
+            ed.chat.as_ref().is_some_and(|c| !c.busy())
+                && !ed.checkpoints.gathering
+                && std::fs::read_to_string(dir.join("stdin.log")).is_ok_and(|s| s.contains("\"c7\""))
+        };
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !done(ed) && std::time::Instant::now() < end {
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(50)) {
+                ed.handle_event(ev);
+            }
+        }
+        assert!(
+            done(ed),
+            "{:?}\n{:?}",
+            std::fs::read_to_string(dir.join("stdin.log")),
+            ed.chat.as_ref().map(|c| c.msgs.iter().map(|m| m.text.clone()).collect::<Vec<_>>())
+        );
+        let line: serde_json::Value = serde_json::from_str(&tool_answer(&log)).unwrap();
+        let r = &line["response"]["response"]["mcp_response"]["result"];
+        let text = r["content"][0]["text"].as_str().unwrap_or_default().to_string();
+        if r["isError"] == true { format!("error: {text}") } else { text }
+    }
+
+    /// Claude's `replace`, through the chat: a preview lists what would change and changes nothing; past
+    /// `max_files` it's refused; applied under review at the end it's written in one go — never a gitignored
+    /// file, `.git`, or a case it wasn't asked for — the turn opens as a review of exactly those files, and
+    /// `space u` takes it all back.
+    #[test]
+    fn claude_replaces_across_a_tree_in_one_review() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-replace-tool-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for d in ["src/deep", "target", ".git"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let files = [
+            ("src/a.rs", "fn old_name() {}\nfn x() { old_name() }\n"),
+            ("src/b.rs", "use crate::old_name;\n"),
+            ("src/deep/c.rs", "// old_value here\n"),
+            ("target/gen.rs", "old_name\n"),
+            (".gitignore", "target/\n"),
+            ("README.md", "OLD_NAME stays\n"),
+            (".git/config", "old_name\n"),
+        ];
+        for (f, text) in files {
+            std::fs::write(dir.join(f), text).unwrap();
+        }
+        let read = |f: &str| std::fs::read_to_string(dir.join(f)).unwrap();
+        let mut ed = editor("");
+        ed.root = dir.clone();
+        let args = |extra: serde_json::Value| {
+            let mut a = json!({"pattern": r"old_(\w+)", "replacement": "new_$1"});
+            a.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            a
+        };
+        // A preview: what it would change, nothing changed
+        let t = tool_turn(&mut ed, &dir, "replace", args(json!({"preview": true})), false);
+        assert!(
+            t.starts_with("4 matches in 3 files — preview, nothing changed: `old_(\\w+)` → `new_$1`\nsrc/a.rs (2)\n  1: fn old_name() {}\n   → fn new_name() {}\n"),
+            "{t}"
+        );
+        assert!(t.contains("\nsrc/deep/c.rs (1)\n  1: // old_value here\n   → // new_value here"), "{t}");
+        assert_eq!(read("src/a.rs"), files[0].1);
+        // Past max_files: refused, said how to mean it
+        let t = tool_turn(&mut ed, &dir, "replace", args(json!({"max_files": 2})), true);
+        assert!(t.starts_with("error: this replace would change 3 files — more than max_files (2)"), "{t}");
+        assert!(t.contains("give max_files: 3"), "{t}");
+        assert!(ed.code_review.is_none());
+        // A path outside the project: refused
+        let t = tool_turn(&mut ed, &dir, "replace", args(json!({"path": ".."})), true);
+        assert!(t.starts_with("error: .. is outside the project"), "{t}");
+        // Applied, review at the end: written in one go, the turn reviewed when it ends
+        let t = tool_turn(&mut ed, &dir, "replace", args(json!({})), true);
+        assert_eq!(
+            t,
+            "4 matches in 3 files — replace `old_(\\w+)` → `new_$1`\nwritten: src/a.rs (2), src/b.rs (1), \
+             src/deep/c.rs (1) — the user reviews your turn when it ends (space u takes it back)"
+        );
+        assert_eq!(read("src/a.rs"), "fn new_name() {}\nfn x() { new_name() }\n");
+        assert_eq!(read("src/b.rs"), "use crate::new_name;\n");
+        assert_eq!(read("src/deep/c.rs"), "// new_value here\n");
+        assert_eq!(read("target/gen.rs"), "old_name\n", "gitignored");
+        assert_eq!(read(".git/config"), "old_name\n", "never .git");
+        assert_eq!(read("README.md"), "OLD_NAME stays\n", "case as written");
+        settle_for(&mut ed, reviewing);
+        let r = ed.code_review.as_ref().unwrap();
+        let rels: Vec<&str> = r.files.iter().map(|f| f.rel.as_str()).collect();
+        assert_eq!(rels, ["src/a.rs", "src/b.rs", "src/deep/c.rs"]);
+        // `space u`: the whole turn back
+        crate::codereview::close(&mut ed);
+        crate::checkpoint::step(&mut ed, true).unwrap();
+        for (f, text) in &files[..3] {
+            assert_eq!(read(f), *text, "{f}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Claude builds: a check runs at once in the task panel, the call waits for its end, and Claude reads
     /// how it ended, the places it pointed at and its output; the editor goes to the first error, and the
     /// It isn't the task `space m m` runs again.
@@ -5540,8 +5650,10 @@ mod tests {
             "sh".into(),
         ];
         feed(&mut ed, "<space>l");
+        // (respawned: a process after the first — generations are unique across chats)
+        let first = ed.chat.as_ref().unwrap().generation();
         settle_until(&mut ed, |ed| {
-            ed.chat.as_ref().unwrap().proc_alive() && ed.chat.as_ref().unwrap().generation() == 2
+            ed.chat.as_ref().unwrap().proc_alive() && ed.chat.as_ref().unwrap().generation() > first
         });
         feed(&mut ed, "hi<ret>");
         settle_until(&mut ed, |ed| !ed.chat.as_ref().unwrap().busy());

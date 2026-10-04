@@ -68,6 +68,26 @@ one to three sentences — and keep any chat text to one short line. A message w
 review: address every <comment note=N> (edit the code where it calls for it) and answer each with \
 note(reply_to=N); the chat answer is a short summary.";
 
+/// For a change across many places: the editor's own refactoring.
+const SYSTEM_REFACTOR: &str = " For one change across many places — renaming a symbol, or the same text \
+replaced in many files — use rename (the language server's, every use and no strangers) or replace (the project \
+search's), one call and one review for the user, instead of many Edits; replace with preview first to see what \
+it would touch.";
+
+/// The system prompt: `SYSTEM`, the refactoring tools, and where tarae's own log is (#45).
+fn system() -> String {
+    let mut s = format!("{SYSTEM}{SYSTEM_REFACTOR}");
+    if let Some(log) = crate::log::path() {
+        s.push_str(&format!(
+            " tarae's own log, {}, says what the language servers are doing (starting, indexing, ready, \
+             exited, what they printed) and every message the editor showed the user — the place to look when \
+             a server seems slow or something failed; Read or grep it without asking.",
+            log.display()
+        ));
+    }
+    s
+}
+
 /// The tools the chat process gets. Reading and tarae's own (`note`, `run_tests`, `run` — `tools.rs`) are
 /// allowed up front: the tests are the project's own, run the way the user runs them, in view, and any code
 /// Claude wrote for them was reviewed; `run` asks the user itself for anything but the checks. Edit and Write
@@ -76,10 +96,10 @@ const TOOLS: &str = "Read,Grep,Glob,Edit,Write";
 /// Not Read, Grep or Glob: allowed by name they read anywhere unasked (measured — `reads.rs` answers them).
 /// (`screen` asks the user itself — `seeing.rs`)
 /// (`references`, `search`, `symbols`, `definition`, `hover` and `diagnostics` read inside the project
-/// only — `nav.rs`)
+/// only — `nav.rs`; `rename` and `replace` land as Claude's edits do, in the review — `refactor.rs`)
 const ALLOWED: &str = "mcp__tarae__note,mcp__tarae__run_tests,mcp__tarae__run,mcp__tarae__plan,\
 mcp__tarae__screen,mcp__tarae__references,mcp__tarae__search,mcp__tarae__symbols,mcp__tarae__definition,\
-mcp__tarae__hover,mcp__tarae__diagnostics";
+mcp__tarae__hover,mcp__tarae__diagnostics,mcp__tarae__rename,mcp__tarae__replace";
 
 /// Settings laid over the user's and the project's when they're loaded (`llm.chat-settings`).
 const CHAT_SETTINGS: &str = r#"{"permissions":{"ask":["Edit","Write"]},"disableAllHooks":true}"#;
@@ -609,7 +629,8 @@ fn ensure_proc(ed: &mut Editor) {
         args = llm::with_flag(&args, "--permission-mode", "default");
     }
     let cfg = llm::LlmConfig { args, ..cfg };
-    let mut extra = vec!["--append-system-prompt", SYSTEM, "--permission-prompt-tool", "stdio"];
+    let system = system();
+    let mut extra = vec!["--append-system-prompt", system.as_str(), "--permission-prompt-tool", "stdio"];
     if !c.no_thought_flag {
         extra.extend(["--thinking-display", "summarized"]);
     }
@@ -625,7 +646,9 @@ fn ensure_proc(ed: &mut Editor) {
     let _ = writeln!(stdin, "{}", llm::initialize_message(&["tarae"])).and_then(|_| stdin.flush());
     // A fresh process has seen no file yet
     c.sent.clear();
-    c.generation += 1;
+    // (unique across chats too: a closed chat's process ending after a new chat's started isn't the new one's)
+    static GENERATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    c.generation = GENERATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let generation = c.generation;
     c.proc = Some(Proc { stdin, pid: child.id() });
     llm::pump(child, false, tx, move |ev| {
@@ -711,10 +734,9 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             }
             // A lookup's row ends with what it found (`12 references in 3 files`) — Grep's answers aren't read
             if let Some(m) = c.msgs.iter_mut().rev().find(|m| m.call == id)
-                && let Some(l) = m
-                    .look
-                    .as_mut()
-                    .filter(|l| matches!(l.verb, "uses" | "search" | "map" | "where" | "check"))
+                && let Some(l) = m.look.as_mut().filter(|l| {
+                    matches!(l.verb, "uses" | "search" | "map" | "where" | "check" | "rename" | "replace")
+                })
                 && let Some(v) = crate::nav::verdict(&text)
             {
                 l.range = v;
@@ -1339,6 +1361,32 @@ fn look(root: &Path, name: &str, input: &serde_json::Value) -> Look {
             };
             let range = n("wait").filter(|&w| w > 0).map_or(String::new(), |w| format!("waits up to {w}s"));
             Look { verb: "check", what, pattern: false, range, link: None }
+        }
+        // (the editor goes to the name renamed; a replace goes nowhere — its review shows the files)
+        "mcp__tarae__rename" => {
+            let path = resolve(&s("path"));
+            let (place, line) = match n("line") {
+                Some(l) => (format!("{}:{}", shown(&path), l.max(1)), l.max(1) - 1),
+                None => (shown(&path), 0),
+            };
+            let from = if s("symbol").is_empty() { "…".to_string() } else { s("symbol") };
+            let what = format!("{from} → {}", s("new_name"));
+            Look {
+                verb: "rename",
+                what,
+                pattern: true,
+                range: format!("in {place}"),
+                link: Some(Link { path, line }),
+            }
+        }
+        "mcp__tarae__replace" => {
+            let place = if input["glob"].is_string() { s("glob") } else { s("path") };
+            let what = format!("{} → {}", s("pattern"), s("replacement"));
+            let mut range = within(place);
+            if input["preview"].as_bool() == Some(true) {
+                range = format!("{range} preview").trim().to_string();
+            }
+            Look { verb: "replace", what, pattern: true, range, link: None }
         }
         other => {
             Look { verb: "use", what: other.to_string(), pattern: false, range: String::new(), link: None }

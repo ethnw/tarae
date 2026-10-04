@@ -61,6 +61,7 @@ mod quickfix;
 mod readonly;
 mod reads;
 mod recent;
+mod refactor;
 mod repeat;
 mod replace;
 mod restart;

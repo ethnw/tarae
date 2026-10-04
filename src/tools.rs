@@ -14,6 +14,8 @@
 //! - `references`, `search`, `symbols`, `definition`, `hover` and `diagnostics` find code the way the user
 //!   does — the language server's answers, the project search, a file's outline — read-only, no card
 //!   (`nav.rs`).
+//! - `rename` and `replace` are the editor's own refactoring — one call, one change set that lands as
+//!   Claude's edits do, in the review (`refactor.rs`).
 
 use std::path::{Path, PathBuf};
 
@@ -58,6 +60,8 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
                     crate::nav::definition_schema(),
                     crate::nav::hover_schema(),
                     crate::nav::diagnostics_schema(),
+                    crate::refactor::rename_schema(),
+                    crate::refactor::replace_schema(),
                 ] }))
         }
         "tools/call" => {
@@ -86,10 +90,13 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
                     return None;
                 }
                 Some(
-                    name @ ("references" | "search" | "symbols" | "definition" | "hover" | "diagnostics"),
+                    name @ ("references" | "search" | "symbols" | "definition" | "hover" | "diagnostics"
+                    | "rename" | "replace"),
                 ) => {
                     let call = Call { generation, request_id: request_id.to_string(), id: id.clone() };
                     let asked = match name {
+                        "rename" => crate::refactor::rename(ed, call, args),
+                        "replace" => crate::refactor::replace(ed, call, args),
                         "references" => crate::nav::references(ed, call, args),
                         "symbols" => crate::nav::symbols(ed, call, args),
                         "definition" => crate::nav::definition(ed, call, args),
@@ -306,6 +313,7 @@ pub fn turn_over(ed: &mut Editor) {
     ed.offers
         .retain(|o| !matches!(o.what, crate::offer::What::Run(_) | crate::offer::What::NoSandbox { .. }));
     crate::seeing::turn_over(ed);
+    crate::refactor::turn_over(ed);
 }
 
 /// A run Claude waited on is gone before it ended (closed, or another run took its place).
@@ -380,7 +388,35 @@ pub const WRITES: [&str; 6] = ["--output", "--ext-diff", "--textconv", "--config
 /// starting with one of the `RUN_ALLOW` or `extra` prefixes word for word (`extra`: `llm.run-allow`, this
 /// chat's patterns), and none of the options that make it write or run something.
 pub fn allowed(cmd: &str, extra: &[String]) -> bool {
-    crate::readonly::one_command(cmd).is_some_and(|words| allowed_words(&words, extra))
+    if let Some(words) = crate::readonly::one_command(cmd) {
+        return allowed_words(&words, extra);
+    }
+    // `NAME=value` words in front (#44): only a rule naming each of them lets it through (`A= cargo x`)
+    let Some((names, words)) = crate::readonly::one_command_env(cmd) else { return false };
+    if names.is_empty() || !names.iter().all(|n| crate::readonly::env_allowed(n)) {
+        return false;
+    }
+    // (only the rules that name them — not the built-in checks: `RUSTC_WRAPPER=x cargo build` runs x)
+    !words.iter().any(|w| WRITES.iter().any(|o| w.starts_with(o)))
+        && extra.iter().any(|rule| {
+            let (set, rest) = rule_env(rule);
+            names.iter().all(|n| set.contains(&n.as_str())) && rule_matches(&words, &rest)
+        })
+}
+
+/// Whether `words` start with `rule`'s, word for word (an empty rule matches nothing).
+fn rule_matches(words: &[String], rule: &[&str]) -> bool {
+    !rule.is_empty() && words.len() >= rule.len() && words.iter().zip(rule).all(|(w, r)| w == r)
+}
+
+/// A rule's leading `NAME=` words (the names a command may set — `A=…` reads the same) and the rest.
+fn rule_env(rule: &str) -> (Vec<&str>, Vec<&str>) {
+    let words: Vec<&str> = rule.split_whitespace().collect();
+    fn name(w: &str) -> Option<&str> {
+        w.strip_suffix("=…").or_else(|| w.strip_suffix('='))
+    }
+    let lead = words.iter().take_while(|w| name(w).is_some_and(crate::readonly::env_allowed)).count();
+    (words[..lead].iter().filter_map(|w| name(w)).collect(), words[lead..].to_vec())
 }
 
 /// Programs a check's output can go through and still count as the check (#32): they only read it.
@@ -407,10 +443,11 @@ fn allowed_words(words: &[String], extra: &[String]) -> bool {
     if words.iter().any(|w| WRITES.iter().any(|o| w.starts_with(o))) {
         return false;
     }
-    RUN_ALLOW.iter().copied().chain(extra.iter().map(String::as_str)).any(|rule| {
-        let rule: Vec<&str> = rule.split_whitespace().collect();
-        !rule.is_empty() && words.len() >= rule.len() && words.iter().zip(&rule).all(|(w, r)| w == r)
-    })
+    RUN_ALLOW
+        .iter()
+        .copied()
+        .chain(extra.iter().map(String::as_str))
+        .any(|rule| rule_matches(words, &rule_env(rule).1))
 }
 
 /// Commands whose places are worth the user's list (`]q`): builds, tests, linters — by whole words.
@@ -475,9 +512,14 @@ const RUNNERS: [&str; 22] = [
 /// The pattern a run card can allow for the rest of the chat (`a`): the command's first plain words — no
 /// option, path, value or glob — two or three of them (`cargo xtask shot`); a command piped into filters
 /// gives its own (`filtered`, #32). None for a line of other commands, one word, or a runner (`sh x.sh`,
-/// `env …`: anything could follow).
+/// `env …`: anything could follow). `NAME=value` words in front go in by name (`A= B= cargo xtask shot`,
+/// #44) — none for a name no pattern may set (`readonly::env_allowed`: PATH, LD_*, DYLD_* …).
 pub fn pattern(cmd: &str) -> Option<String> {
-    let words = crate::readonly::one_command(cmd).or_else(|| filtered(cmd))?;
+    let (names, words) =
+        crate::readonly::one_command_env(cmd).or_else(|| filtered(cmd).map(|w| (Vec::new(), w)))?;
+    if !names.iter().all(|n| crate::readonly::env_allowed(n)) {
+        return None;
+    }
     let lead: Vec<&str> = words
         .iter()
         .map(String::as_str)
@@ -491,7 +533,19 @@ pub fn pattern(cmd: &str) -> Option<String> {
     let runner = |w: &&str| RUNNERS.contains(w) || w.starts_with("python");
     // (git: what reads runs already; what writes goes to `.git`, which the sandbox denies)
     let git = lead.first() == Some(&"git");
-    (lead.len() >= 2 && !lead.iter().any(runner) && !git).then(|| lead.join(" "))
+    let names = names.iter().map(|n| format!("{n}="));
+    (lead.len() >= 2 && !lead.iter().any(runner) && !git)
+        .then(|| names.chain(lead.iter().map(|w| w.to_string())).collect::<Vec<_>>().join(" "))
+}
+
+/// A pattern as the card says it: each name's value left open (`A=… cargo xtask shot`).
+pub fn pattern_shown(p: &str) -> String {
+    let (set, rest) = rule_env(p);
+    set.iter()
+        .map(|n| format!("{n}=…"))
+        .chain(rest.iter().map(|w| w.to_string()))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Runs `command` now (allowed), or once the user says yes on its card — answered when it ends.
@@ -681,7 +735,7 @@ fn ask_with(
     // (a command that only reads is asked for where it reads, not what it is)
     let pattern = pattern(&cmd).filter(|_| outside.is_none() && reads.is_empty());
     if let Some(p) = &pattern {
-        question.push_str(&format!("\n\na — also `{p} …` unasked, this chat"));
+        question.push_str(&format!("\n\na — also `{} …` unasked, this chat", pattern_shown(p)));
     }
     for (path, text) in &shown {
         let text = text.replace("\r\n", "\n").replace('\t', "    ");
@@ -894,7 +948,7 @@ pub fn run_answer(ed: &mut Editor, id: u64, what: RunCard, scope: Option<crate::
         && !chat.run_allow.contains(p)
     {
         chat.run_allow.push(p.clone());
-        ed.note(format!("`{p}` runs without asking for the rest of this chat"));
+        ed.note(format!("`{}` runs without asking for the rest of this chat", pattern_shown(p)));
     }
     if shown.is_empty() {
         return run_now(ed, cmd, cwd, call, unprotected, outside);
@@ -1507,7 +1561,6 @@ mod tests {
             "touch /tmp/made",
             "ls | wc -l",
             "cargo build; rm x",
-            "FOO=1 cargo test",
         ] {
             assert_eq!(p(c), None, "{c}");
         }
@@ -1516,6 +1569,52 @@ mod tests {
         assert!(super::allowed("cargo xtask shot /tmp/a.png '@?files in'", &chat));
         assert!(!super::allowed("cargo xtask perf", &chat));
         assert!(!super::allowed("cargo xtask shot x; rm -rf y", &chat));
+    }
+
+    /// #44: assignments in front of the command go into the pattern by name, values left open — never a
+    /// name that finds programs or libraries, or one the sandbox sets; and a command setting a name its
+    /// rule doesn't name still asks.
+    #[test]
+    fn assignments_in_front_go_into_the_pattern_by_name() {
+        let p = |c: &str| super::pattern(c);
+        let shot =
+            "sh -c 'TARAE_SHOT_XDG=/tmp/x TARAE_BACKGROUND=dark cargo xtask shot /tmp/a.png \"@?ready\"'";
+        assert_eq!(p(shot).as_deref(), Some("TARAE_SHOT_XDG= TARAE_BACKGROUND= cargo xtask shot"));
+        assert_eq!(
+            super::pattern_shown(&p(shot).unwrap()),
+            "TARAE_SHOT_XDG=… TARAE_BACKGROUND=… cargo xtask shot"
+        );
+        assert_eq!(p("FOO=1 cargo test").as_deref(), Some("FOO= cargo test"), "not only in sh -c");
+        for c in [
+            "PATH=/tmp/bin cargo xtask shot",
+            "LD_PRELOAD=/tmp/x.so cargo xtask shot",
+            "DYLD_INSERT_LIBRARIES=/tmp/x cargo xtask shot",
+            "sh -c 'A=1 HOME=/tmp cargo xtask shot'",
+            "TMPDIR=/x cargo xtask shot",
+            "TARAE_SANDBOXED= cargo xtask shot",
+            "A=1 env cargo test",
+            "A=1 sh x.sh",
+            "'A=1' cargo test",
+            "A=$(id) cargo test",
+            "A=1 B=2",
+            "A=1 cd src",
+        ] {
+            assert_eq!(p(c), None, "{c}");
+        }
+        let chat = vec![p(shot).unwrap()];
+        assert!(super::allowed(shot, &chat));
+        assert!(super::allowed("TARAE_BACKGROUND=light cargo xtask shot /tmp/b.png", &chat), "fewer names");
+        assert!(super::allowed("cargo xtask shot /tmp/b.png", &chat), "none");
+        assert!(!super::allowed("RUSTC_WRAPPER=/tmp/w cargo xtask shot x", &chat), "a name it doesn't name");
+        assert!(!super::allowed("TARAE_BACKGROUND=dark cargo xtask perf", &chat));
+        assert!(!super::allowed("PATH=/tmp TARAE_BACKGROUND=dark cargo xtask shot", &chat));
+        // The built-in checks don't take names: `RUSTC_WRAPPER` runs a program of its own
+        assert!(!super::allowed("RUSTC_WRAPPER=/tmp/w cargo build", &[]));
+        assert!(!super::allowed("A=1 cargo build", &["A= make".to_string()]));
+        // A rule written by hand can't let a never-name in
+        assert!(!super::allowed("PATH=/tmp cargo test", &["PATH= cargo test".to_string()]));
+        // The read-only reading still refuses assignments
+        assert_eq!(crate::readonly::parse("PAGER=sh git log"), None);
     }
 
     /// #32: a check piped only into filters that read is the check — its words, for the rules, the

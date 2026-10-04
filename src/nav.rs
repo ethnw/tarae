@@ -150,7 +150,7 @@ fn name_of(symbol: &str) -> Result<String, String> {
 }
 
 /// `path`, real, if it's a file in the project — on a worker.
-fn file_in(root: &Path, path: &Path) -> Result<PathBuf, String> {
+pub(crate) fn file_in(root: &Path, path: &Path) -> Result<PathBuf, String> {
     let shown = rel(root, path);
     let real = std::fs::canonicalize(path).map_err(|e| format!("{shown}: {e}"))?;
     let root = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
@@ -252,7 +252,7 @@ fn ask(ed: &mut Editor, call: Call, path: PathBuf, line: Option<usize>, name: Na
 
 /// `path`'s buffer — opened aside when it isn't (its language server starts with it; the file in view
 /// stays in view).
-fn buffer_for(ed: &mut Editor, path: &Path) -> Result<crate::document::DocId, String> {
+pub(crate) fn buffer_for(ed: &mut Editor, path: &Path) -> Result<crate::document::DocId, String> {
     if let Some(d) = ed.docs.iter().find(|d| d.path.as_deref() == Some(path)) {
         return Ok(d.id);
     }
@@ -771,15 +771,15 @@ const DEF_ENDS: [&str; 7] =
 
 /// Where a `definition` or `hover` call points: the file, the line, and the name on it — or a column
 /// (from 0, in characters).
-struct Spot {
-    path: PathBuf,
-    line: Option<usize>,
-    column: Option<usize>,
-    word: Option<String>,
+pub(crate) struct Spot {
+    pub path: PathBuf,
+    pub line: Option<usize>,
+    pub column: Option<usize>,
+    pub word: Option<String>,
 }
 
 /// The call's place: `path` (from `root`), `line`, and the name in `symbol` or a `column`.
-fn spot_of(root: &Path, args: &Value) -> Result<Spot, String> {
+pub(crate) fn spot_of(root: &Path, args: &Value) -> Result<Spot, String> {
     let path = args["path"].as_str().map(str::trim).filter(|p| !p.is_empty()).ok_or("path is required")?;
     let one = |k: &str| args[k].as_u64().map(|l| l.max(1) as usize - 1);
     let (line, column) = (one("line"), one("column"));
@@ -794,7 +794,11 @@ fn spot_of(root: &Path, args: &Value) -> Result<Spot, String> {
 }
 
 /// The spot in `text`: (line, byte column, the name there — the one given, else the word at the column).
-fn place_in(text: &ropey::Rope, spot: &Spot, shown: &str) -> Result<(usize, usize, String), String> {
+pub(crate) fn place_in(
+    text: &ropey::Rope,
+    spot: &Spot,
+    shown: &str,
+) -> Result<(usize, usize, String), String> {
     let (Some(l), Some(c)) = (spot.line, spot.column) else {
         let word = spot.word.clone().unwrap_or_default();
         let (l, col) = locate(text, &word, spot.line, shown)?;
@@ -818,7 +822,7 @@ fn place_in(text: &ropey::Rope, spot: &Spot, shown: &str) -> Result<(usize, usiz
 }
 
 /// The question's next number (shared by the tools' questions).
-fn next_ask(ed: &mut Editor) -> u64 {
+pub(crate) fn next_ask(ed: &mut Editor) -> u64 {
     let n = ed.lsp.tool_ask_next;
     ed.lsp.tool_ask_next += 1;
     n
@@ -2108,17 +2112,17 @@ fn files_text(rows: Vec<(String, bool)>, tests: bool, counts: bool, offset: usiz
 // ── shared ──────────────────────────────────────────────────────────────────
 
 /// The project — where both tools look.
-fn project_root(ed: &Editor) -> PathBuf {
+pub(crate) fn project_root(ed: &Editor) -> PathBuf {
     ed.root.clone()
 }
 
 /// `path` relative to `root` when inside it.
-fn rel(root: &Path, path: &Path) -> String {
+pub(crate) fn rel(root: &Path, path: &Path) -> String {
     path.strip_prefix(root).unwrap_or(path).display().to_string()
 }
 
 /// `n` and the noun, plural when it isn't one (`1 file`, `3 files`, `2 text matches`).
-fn count(n: usize, noun: &str) -> String {
+pub(crate) fn count(n: usize, noun: &str) -> String {
     match n {
         1 => format!("1 {noun}"),
         _ if noun.ends_with("ch") => format!("{n} {noun}es"),
@@ -2139,14 +2143,14 @@ fn more(rest: &[(String, usize)], what: &str, tail: &str) -> String {
 }
 
 /// At most `max` chars, `…` when cut.
-fn clip(s: &str, max: usize) -> String {
+pub(crate) fn clip(s: &str, max: usize) -> String {
     match s.char_indices().nth(max) {
         Some((i, _)) => format!("{}…", &s[..i]),
         None => s.to_string(),
     }
 }
 
-fn secs(d: std::time::Duration) -> String {
+pub(crate) fn secs(d: std::time::Duration) -> String {
     crate::term::duration(d.as_secs_f32())
 }
 
@@ -2155,7 +2159,7 @@ fn secs(d: std::time::Duration) -> String {
 pub fn verdict(text: &str) -> Option<String> {
     let first = text.lines().next()?;
     let re = regex::Regex::new(
-        r"^(\d+\+? (?:references?|text match(?:es)?|matching lines?) in \d+ files?|\d+ files? with matches|\d+ symbols?|no (?:text )?matches|\d+ (?:type )?(?:definitions?|implementations?)|\d+ (?:errors?|warnings?|notes?|hints?)(?:, \d+ (?:errors?|warnings?|notes?|hints?))*|no diagnostics)",
+        r"^(\d+\+? (?:references?|text match(?:es)?|matching lines?|places?|match(?:es)?) in \d+ files?|\d+ files? with matches|\d+ symbols?|no (?:text )?matches|\d+ (?:type )?(?:definitions?|implementations?)|\d+ (?:errors?|warnings?|notes?|hints?)(?:, \d+ (?:errors?|warnings?|notes?|hints?))*|no diagnostics)",
     )
     .ok()?;
     re.find(first).map(|m| m.as_str().to_string())

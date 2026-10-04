@@ -159,6 +159,7 @@ pub fn on_tool(ed: &mut Editor, id: &str, name: &str, input: &serde_json::Value,
         | "mcp__tarae__references"
         | "mcp__tarae__symbols"
         | "mcp__tarae__definition"
+        | "mcp__tarae__rename"
         | "mcp__tarae__hover" => match &look.link {
             Some(l) => (Some(l.path.clone()), input["line"].is_u64().then(|| l.line..l.line + 1), l.line),
             None => (None, None, 0),

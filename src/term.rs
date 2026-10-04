@@ -6589,6 +6589,8 @@ fn draw_follow_card(
                 "plan" => "planning",
                 "edit" => "editing",
                 "write" => "writing",
+                "rename" => "renaming",
+                "replace" => "replacing",
                 "failed" => "test failed",
                 _ => "using",
             };

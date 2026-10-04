@@ -74,6 +74,8 @@ pub struct LspState {
     pub(crate) tool_defs: HashMap<u64, crate::nav::DefAsk>,
     pub(crate) tool_hovers: HashMap<u64, crate::nav::HoverAsk>,
     pub(crate) tool_diags: Vec<crate::nav::DiagWait>,
+    /// …and its `rename` calls (`refactor.rs`), by the same numbers.
+    pub(crate) tool_renames: HashMap<u64, crate::refactor::RenameAsk>,
     /// When each server last published diagnostics for a file (real path) · when each last ended a piece
     /// of work (`$/progress` end) — `diagnostics` tells "clean" from "not checked yet" by these.
     pub(crate) published: HashMap<(ClientId, std::path::PathBuf), std::time::Instant>,
@@ -295,6 +297,9 @@ pub enum LspDot {
     Missing,
 }
 
+/// A server initialized this recently that hasn't finished any work yet hasn't begun loading its project.
+pub(crate) const JUST_UP: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// Inlay hints: ask once input has paused this long.
 const INLAY_DEBOUNCE_MS: u64 = 120;
 
@@ -328,6 +333,14 @@ pub enum Kind {
     },
     /// Claude's `hover` question `ask` (N6).
     ToolHover {
+        ask: u64,
+    },
+    /// Claude's `rename` call `ask` (`refactor.rs`) — whether the name can be renamed there, then the
+    /// rename's edit.
+    ToolPrepareRename {
+        ask: u64,
+    },
+    ToolRename {
         ask: u64,
     },
     /// `space h` — this symbol's uses in the file become the selections.
@@ -388,7 +401,9 @@ impl Kind {
             Kind::Highlights => ("highlights", "documentHighlightProvider"),
             Kind::Hover => ("hover", "hoverProvider"),
             Kind::CodeAction { .. } => ("code-action", "codeActionProvider"),
-            Kind::Rename => ("rename", "renameProvider"),
+            Kind::Rename | Kind::ToolPrepareRename { .. } | Kind::ToolRename { .. } => {
+                ("rename", "renameProvider")
+            }
             Kind::Format | Kind::FormatSave { .. } => ("format", "documentFormattingProvider"),
             Kind::Completion => ("completion", "completionProvider"),
             Kind::SignatureHelp => ("signature-help", "signatureHelpProvider"),
@@ -721,6 +736,12 @@ impl Editor {
                     &Kind::ToolHover { ask } => {
                         crate::nav::hover_answered(self, ask, error.map_or(Ok(result), Err))
                     }
+                    &Kind::ToolPrepareRename { ask } => {
+                        crate::refactor::prepared(self, ask, error.map_or(Ok(result), Err))
+                    }
+                    &Kind::ToolRename { ask } => {
+                        crate::refactor::renamed(self, ask, error.map_or(Ok(result), Err))
+                    }
                     // One server failing leaves the others' actions (it's logged)
                     &Kind::CodeAction { list } if error.is_some() => {
                         let name = self.client(cid).map(|c| c.name.clone()).unwrap_or_default();
@@ -1034,7 +1055,9 @@ impl Editor {
             | Kind::ToolSymbols { .. }
             | Kind::ToolGoto { .. }
             | Kind::ToolNamed { .. }
-            | Kind::ToolHover { .. } => {}
+            | Kind::ToolHover { .. }
+            | Kind::ToolPrepareRename { .. }
+            | Kind::ToolRename { .. } => {}
             Kind::Rename => match self.apply_workspace_edit(cid, result) {
                 Ok(n) => self.set_status(format!("renamed in {n} file(s)")),
                 Err(e) => self.set_error(format!("rename: {e}")),
@@ -2515,6 +2538,48 @@ impl Editor {
             "position": lsp::to_position(&doc.text, byte, self.encoding_of(cid)) });
         match self.lsp_send_for(id, cid, kind, method, at) {
             Some(_) => Ok((cid, name)),
+            None => Err((format!("{name} couldn't be asked"), true)),
+        }
+    }
+
+    /// Claude's `rename` call `ask` at `byte` of document `id`: `textDocument/prepareRename` when its server
+    /// has it and `prepared` is false, else the rename itself to `new_name` — that server, its name, and
+    /// whether this was the prepare. Err as `tool_server`'s; a server still loading (work in progress) isn't
+    /// asked either — a rename then can miss uses, and text matches aren't a rename (said, never guessed).
+    pub(crate) fn ask_rename(
+        &mut self,
+        id: DocId,
+        byte: usize,
+        ask: u64,
+        new_name: &str,
+        prepared: bool,
+    ) -> Result<(ClientId, String, bool), (String, bool)> {
+        let cid = self.tool_server(id, &Kind::ToolRename { ask }, "no language server here renames")?;
+        let c = self.client(cid).ok_or(("its language server stopped".to_string(), true))?;
+        let name = c.name.clone();
+        if !c.progress.is_empty() {
+            let busy: Vec<String> = c.progress.values().map(|p| p.title.clone()).collect();
+            return Err((format!("{name} is still loading the project ({})", busy.join(", ")), true));
+        }
+        // Only just up and no work done yet: it hasn't begun loading the project (measured: rust-analyzer
+        // answers "No references found at position" then)
+        if c.ready_at.is_some_and(|t| t.elapsed() < JUST_UP) && !self.lsp.work_ended.contains_key(&cid) {
+            return Err((format!("{name} is starting"), true));
+        }
+        let prepare = !prepared && c.caps["renameProvider"]["prepareProvider"] == json!(true);
+        let doc = self.docs.iter().find(|d| d.id == id).ok_or(("the file was closed".to_string(), false))?;
+        let Some(path) = doc.path.as_deref() else { return Err(("the file has no path".into(), false)) };
+        let mut at = json!({ "textDocument": { "uri": lsp::uri(path) },
+            "position": lsp::to_position(&doc.text, byte, self.encoding_of(cid)) });
+        let (kind, method) = match prepare {
+            true => (Kind::ToolPrepareRename { ask }, "textDocument/prepareRename"),
+            false => {
+                at["newName"] = json!(new_name);
+                (Kind::ToolRename { ask }, "textDocument/rename")
+            }
+        };
+        match self.lsp_send_for(id, cid, kind, method, at) {
+            Some(_) => Ok((cid, name, prepare)),
             None => Err((format!("{name} couldn't be asked"), true)),
         }
     }
@@ -4471,6 +4536,207 @@ mod tests {
         let e = tool(&mut ed, 7, hover, json!({"path": "main.rs", "line": 1, "column": 40})).unwrap_err();
         assert!(e.contains("line 1 of main.rs has 14 characters — no column 40"), "{e}");
         std::fs::remove_dir_all(file.parent().unwrap()).ok();
+    }
+
+    /// Claude's `rename`: the server asked at the name — prepareRename first when it has it, then the rename
+    /// with the new name — and its edit lands as Claude's edits do: under review at the end written at once
+    /// and kept for `space u`; else a review per file (accepted, declined, or into a buffer with unsaved
+    /// edits). A server starting or loading, a refused prepare, a file outside the project or a file moved:
+    /// said, and nothing changes.
+    #[test]
+    fn the_rename_tool_lands_the_servers_edit_as_claudes_change() {
+        let (mut ed, file, other, log) = def_fixture("tool-rename");
+        let dir = file.parent().unwrap().to_path_buf();
+        std::fs::write(dir.join("third.rs"), "fn t() { crate::a(1); }\n").unwrap();
+        let third = dir.join("third.rs");
+        let away = dir.with_file_name(format!("tarae-rename-away-{}", std::process::id()));
+        std::fs::create_dir_all(&away).unwrap();
+        std::fs::write(away.join("x.rs"), "fn x() { a() }\n").unwrap();
+        let read = |p: &PathBuf| std::fs::read_to_string(p).unwrap();
+        let originals = [read(&file), read(&other), read(&third)];
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        crate::chat::open(&mut ed);
+        let rename = crate::refactor::rename;
+        let args = |new: &str| json!({"path": "main.rs", "line": 1, "symbol": "a", "new_name": new});
+        // Starting: said — never guessed with text
+        let e = tool(&mut ed, 1, rename, args("alpha")).unwrap_err();
+        assert!(e.contains("fake is starting — not renamed; try again once it's ready"), "{e}");
+        let cid = up(&mut ed, json!({ "renameProvider": { "prepareProvider": true } }));
+        // Only just up, nothing loaded yet: still starting (rust-analyzer finds no references then)
+        let e = tool(&mut ed, 20, rename, args("alpha")).unwrap_err();
+        assert!(e.contains("fake is starting — not renamed"), "{e}");
+        std::thread::sleep(Duration::from_millis(150)); // (past `refactor::SETTLE`: up a while)
+        // Loading: a rename now could miss uses
+        let progress = |kind: &str| {
+            json!({ "method": "$/progress", "params": { "token": "i",
+            "value": { "kind": kind, "title": "Indexing" } } })
+        };
+        ed.on_lsp_message(cid, progress("begin"));
+        let e = tool(&mut ed, 2, rename, args("alpha")).unwrap_err();
+        assert!(e.contains("fake is still loading the project (Indexing) — not renamed"), "{e}");
+        ed.on_lsp_message(cid, progress("end"));
+        // A request of `kind`'s sort is waiting for the server
+        let has = |ed: &Editor, kind: &Kind| {
+            ed.lsp.pending.values().any(|p| std::mem::discriminant(&p.kind) == std::mem::discriminant(kind))
+        };
+        // Asks, and the server answers `kind`'s request with `reply`
+        let answered = |ed: &mut Editor, id: u64, kind: Kind, reply: Value| {
+            settle_for(ed, 5, |ed| has(ed, &kind) || tool_answer(id).is_some());
+            assert!(has(ed, &kind), "{id} {kind:?}: {:?}", tool_answer(id));
+            let n = pending_of(ed, kind);
+            let mut msg = json!({ "id": n });
+            let k = if reply.get("code").is_some() { "error" } else { "result" };
+            msg[k] = reply;
+            ed.on_lsp_message(cid, msg);
+            settle_for(ed, 5, |_| tool_answer(id).is_some());
+        };
+        let prepare = Kind::ToolPrepareRename { ask: 0 };
+        let renaming = Kind::ToolRename { ask: 0 };
+        // Nothing from a server at work moments ago: its loading (between two pieces of work), not a no
+        crate::refactor::rename(&mut ed, crate::tools::Call::test(21), &args("alpha")).unwrap();
+        answered(&mut ed, 21, prepare.clone(), Value::Null);
+        let e = tool_answer(21).unwrap().unwrap_err();
+        assert!(e.contains("fake is still loading the project — not renamed; try again"), "{e}");
+        std::thread::sleep(Duration::from_millis(150));
+        // The prepare says no
+        crate::refactor::rename(&mut ed, crate::tools::Call::test(3), &args("alpha")).unwrap();
+        answered(&mut ed, 3, prepare.clone(), Value::Null);
+        let e = tool_answer(3).unwrap().unwrap_err();
+        assert!(e.starts_with("fake refused to rename `a` at main.rs:1: nothing it can rename there"), "{e}");
+        let asked = sent(&log);
+        let asked = asked.lines().find(|l| l.contains("textDocument/prepareRename")).expect("asked");
+        assert!(asked.contains(r#""position":{"character":9,"line":0}"#), "{asked}");
+        // Yes, then the rename — its edit names a file outside the project: refused whole
+        let te = |line: u64, col: u64, text: &str| {
+            json!({ "range": { "start": { "line": line, "character": col },
+            "end": { "line": line, "character": col + 1 } }, "newText": text })
+        };
+        let edit = |to: &str, extra: Option<&PathBuf>| {
+            let mut changes = json!({
+                lsp::uri(&file): [te(0, 9, to), te(1, 9, to), te(1, 14, to)],
+                lsp::uri(&other): [te(1, 11, to), te(3, 7, to)],
+                lsp::uri(&std::fs::canonicalize(&third).unwrap()): [te(0, 16, to)],
+            });
+            if let Some(x) = extra {
+                changes[lsp::uri(x)] = json!([te(0, 9, to)]);
+            }
+            json!({ "changes": changes })
+        };
+        let ok_prepare =
+            json!({ "start": { "line": 0, "character": 9 }, "end": { "line": 0, "character": 10 } });
+        crate::refactor::rename(&mut ed, crate::tools::Call::test(4), &args("alpha")).unwrap();
+        settle_for(&mut ed, 5, |ed| has(ed, &prepare));
+        let n = pending_of(&ed, prepare.clone());
+        ed.on_lsp_message(cid, json!({ "id": n, "result": ok_prepare }));
+        answered(&mut ed, 4, renaming.clone(), edit("alpha", Some(&away.join("x.rs"))));
+        let e = tool_answer(4).unwrap().unwrap_err();
+        assert!(
+            e.contains("this change reaches 1 file outside the project") && e.contains("refused whole"),
+            "{e}"
+        );
+        assert!(sent(&log).contains(r#""newName":"alpha""#));
+        // A rename that moves a file: refused, said what it would have done
+        let moving = json!({ "documentChanges": [
+            { "kind": "rename", "oldUri": lsp::uri(&other), "newUri": lsp::uri(&dir.join("alpha.rs")) } ] });
+        crate::refactor::rename(&mut ed, crate::tools::Call::test(5), &args("alpha")).unwrap();
+        settle_for(&mut ed, 5, |ed| has(ed, &prepare));
+        let n = pending_of(&ed, prepare.clone());
+        ed.on_lsp_message(cid, json!({ "id": n, "result": ok_prepare }));
+        answered(&mut ed, 5, renaming.clone(), moving);
+        let e = tool_answer(5).unwrap().unwrap_err();
+        assert!(e.contains("also moves other.rs to alpha.rs — this tool only changes text"), "{e}");
+        assert_eq!([read(&file), read(&other), read(&third)], originals, "nothing changed yet");
+        // Review at the end: written at once, kept for `space u` as unseen; the open buffer takes it
+        ed.chat.as_mut().unwrap().edits.at_end = Some(dir.clone());
+        crate::refactor::rename(&mut ed, crate::tools::Call::test(6), &args("alpha")).unwrap();
+        settle_for(&mut ed, 5, |ed| has(ed, &prepare));
+        let n = pending_of(&ed, prepare.clone());
+        ed.on_lsp_message(cid, json!({ "id": n, "result": ok_prepare }));
+        answered(&mut ed, 6, renaming.clone(), edit("alpha", None));
+        let t = tool_answer(6).unwrap().unwrap();
+        assert_eq!(
+            t,
+            "6 places in 3 files — rename `a` → `alpha`\nwritten: main.rs (3), other.rs (2), third.rs (1) — \
+             the user reviews your turn when it ends (space u takes it back)"
+        );
+        assert_eq!(
+            read(&file),
+            "fn b() { alpha() }\nfn c() { alpha(); alpha() }\nstruct S;\nimpl S { fn a(&self) {} }\n"
+        );
+        assert!(read(&other).contains("use crate::alpha;\n\npub fn alpha(\n"));
+        assert_eq!(read(&third), "fn t() { crate::alpha(1); }\n");
+        let main_doc = ed.docs.iter().find(|d| d.path.as_ref() == Some(&file)).unwrap();
+        assert_eq!(main_doc.text.to_string(), read(&file), "the open buffer took it");
+        let kept: Vec<(String, bool)> =
+            ed.checkpoints.turn.iter().map(|t| (t.before.as_ref().unwrap().to_string(), t.unseen)).collect();
+        assert_eq!(kept.len(), 3);
+        assert!(kept.iter().all(|(b, unseen)| *unseen && originals.contains(b)), "{kept:?}");
+        // One at a time: a review per file — accepted, declined, and into a buffer with unsaved edits
+        let c = ed.chat.as_mut().unwrap();
+        (c.edits.at_end, c.focused) = (None, false);
+        ed.open(&third).unwrap();
+        feed(&mut ed, "A // mine<esc>");
+        ed.open(&file).unwrap();
+        let again = json!({"path": "main.rs", "line": 1, "symbol": "alpha", "new_name": "beta"});
+        crate::refactor::rename(&mut ed, crate::tools::Call::test(7), &again).unwrap();
+        settle_for(&mut ed, 5, |ed| has(ed, &prepare));
+        let n = pending_of(&ed, prepare.clone());
+        ed.on_lsp_message(cid, json!({ "id": n, "result": ok_prepare }));
+        settle_for(&mut ed, 5, |ed| has(ed, &renaming));
+        let n = pending_of(&ed, renaming.clone());
+        // (`alpha` is five characters now)
+        let te5 = |line: u64, col: u64| {
+            json!({ "range": { "start": { "line": line, "character": col },
+            "end": { "line": line, "character": col + 5 } }, "newText": "beta" })
+        };
+        let changes = json!({ "changes": {
+            lsp::uri(&file): [te5(0, 9), te5(1, 9), te5(1, 18)],
+            lsp::uri(&other): [te5(1, 11), te5(3, 7)],
+            lsp::uri(&std::fs::canonicalize(&third).unwrap()): [te5(0, 16)] } });
+        ed.on_lsp_message(cid, json!({ "id": n, "result": changes }));
+        let title = |ed: &Editor| ed.review.as_ref().map(|r| r.instruction.clone());
+        settle_for(&mut ed, 5, |ed| ed.review.is_some());
+        assert_eq!(title(&ed).as_deref(), Some("rename `alpha` → `beta` · 1 of 3"));
+        assert_eq!(ed.doc().path.as_ref(), Some(&file));
+        feed(&mut ed, "a");
+        settle_for(&mut ed, 5, |ed| ed.review.is_some());
+        assert_eq!(title(&ed).as_deref(), Some("rename `alpha` → `beta` · 2 of 3"));
+        feed(&mut ed, "q");
+        settle_for(&mut ed, 5, |ed| ed.review.is_some());
+        assert_eq!(ed.doc().path.as_deref(), Some(std::fs::canonicalize(&third).unwrap().as_path()));
+        feed(&mut ed, "a");
+        settle_for(&mut ed, 5, |_| tool_answer(7).is_some());
+        let t = tool_answer(7).unwrap().unwrap();
+        assert!(
+            t.starts_with(
+                "4 places in 2 files — rename `alpha` → `beta`\naccepted by the user: main.rs (3)\n"
+            ),
+            "{t}"
+        );
+        assert!(
+            t.contains("\naccepted into the user's open buffer, which has unsaved edits: third.rs (1)"),
+            "{t}"
+        );
+        assert!(
+            t.contains("\ndeclined by the user, left as they were: other.rs (2)\nSome files weren't changed"),
+            "{t}"
+        );
+        settle_for(&mut ed, 5, |_| read(&file).contains("beta"));
+        assert_eq!(
+            read(&file),
+            "fn b() { beta() }\nfn c() { beta(); beta() }\nstruct S;\nimpl S { fn a(&self) {} }\n"
+        );
+        assert!(read(&other).contains("pub fn alpha("), "declined: as it was");
+        assert_eq!(read(&third), "fn t() { crate::alpha(1); }\n", "your unsaved buffer: not on disk");
+        let third_doc = ed
+            .docs
+            .iter()
+            .find(|d| d.path.as_deref() == Some(std::fs::canonicalize(&third).unwrap().as_path()))
+            .unwrap();
+        assert_eq!(third_doc.text.to_string(), "fn t() { crate::beta(1); } // mine\n");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&away).ok();
     }
 
     /// N6: `diagnostics` lists what's published — open files' live lists, closed ones' as kept — with

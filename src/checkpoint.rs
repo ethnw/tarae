@@ -102,6 +102,31 @@ pub fn record_unseen(
     }
 }
 
+/// `record_unseen` for many files at once (a rename or replace of Claude's, `refactor.rs`): `then` once
+/// what each was is on disk — kept once for them all.
+pub fn record_unseen_all(
+    ed: &mut Editor,
+    files: Vec<(PathBuf, Rope)>,
+    then: impl FnOnce(&mut Editor) + Send + 'static,
+) {
+    let turn = &mut ed.checkpoints.turn;
+    let mut new = false;
+    for (path, before) in files {
+        match turn.iter_mut().find(|t| t.path == path) {
+            Some(t) if t.unseen => {}
+            Some(t) => (t.unseen, new) = (true, true),
+            None => {
+                turn.push(Touched { path, before: Some(before.clone()), after: before, unseen: true });
+                new = true;
+            }
+        }
+    }
+    match new {
+        true => keep_then(ed, then),
+        false => then(ed),
+    }
+}
+
 /// A change of its own accepted in document `id` (a `space i` answer, Claude Code's diff): one step.
 pub fn single(ed: &mut Editor, id: crate::document::DocId, before: Rope, what: &str) {
     let Some((path, after)) =

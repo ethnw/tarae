@@ -35,13 +35,13 @@ const SHELLS: [&str; 4] = ["sh", "bash", "zsh", "dash"];
 /// The parts of `line` (an `sh -c '…'` around it taken off), if it's only words, `cd` and `;` `&&` `||` `|`
 /// — None for anything else (see the module's doc).
 pub fn parse(line: &str) -> Option<Vec<Part>> {
-    split(line).map(|(parts, _)| parts)
+    split(line, false).map(|(parts, _)| parts)
 }
 
 /// The commands of `line` when it's one command piped into others (`a 2>&1 | b | c`) and nothing else —
 /// every part a command, every separator a single `|`.
 pub fn piped(line: &str) -> Option<Vec<Vec<Word>>> {
-    let (parts, piped) = split(line)?;
+    let (parts, piped) = split(line, false)?;
     if !piped.iter().all(|p| *p) {
         return None;
     }
@@ -55,15 +55,16 @@ pub fn piped(line: &str) -> Option<Vec<Vec<Word>>> {
 }
 
 /// The line's parts (an `sh -c '…'` around it taken off) and, between each two, whether it's a single `|`.
-fn split(line: &str) -> Option<(Vec<Part>, Vec<bool>)> {
-    let outer = parts(line)?;
+/// `env`: a command's leading `NAME=value` words are kept as its first words (else such a line is None).
+fn split(line: &str, env: bool) -> Option<(Vec<Part>, Vec<bool>)> {
+    let outer = parts(line, env)?;
     if let [Part::Cmd(w)] = &outer.0[..]
         && let [shell, c, body] = &w[..]
         && SHELLS.contains(&shell.text.as_str())
         && c.text == "-c"
         && !body.glob
     {
-        let inner = parts(&body.text)?;
+        let inner = parts(&body.text, env)?;
         // (an `sh -c` inside that one isn't read)
         let nested =
             inner.0.iter().any(|p| matches!(p, Part::Cmd(w) if SHELLS.contains(&w[0].text.as_str())));
@@ -72,22 +73,31 @@ fn split(line: &str) -> Option<(Vec<Part>, Vec<bool>)> {
     Some(outer)
 }
 
-/// The line's parts and their separators (`split`), without looking for an `sh -c` around them.
-fn parts(line: &str) -> Option<(Vec<Part>, Vec<bool>)> {
+/// The line's parts and their separators (`split`), without looking for an `sh -c` around them. `env`:
+/// leading `NAME=value` words stay in front of a command's words.
+fn parts(line: &str, env: bool) -> Option<(Vec<Part>, Vec<bool>)> {
     let mut parts = Vec::new();
     let mut piped = Vec::new();
     let mut words: Vec<Word> = Vec::new();
     let mut word: Option<Word> = None;
-    let end_word = |word: &mut Option<Word>, words: &mut Vec<Word>| {
+    // The word in hand: it had a quote · it's an assignment (an unquoted name, then `=`); and how many of
+    // the part's words so far are assignments in front
+    let mut at = Assign::default();
+    let end_word = |word: &mut Option<Word>, words: &mut Vec<Word>, at: &mut Assign| {
         if let Some(w) = word.take() {
+            if at.assigns && at.lead == words.len() {
+                at.lead += 1;
+            }
             words.push(w);
         }
+        (at.quoted, at.assigns) = (false, false);
     };
-    let end_part = |words: &mut Vec<Word>, parts: &mut Vec<Part>| -> Option<()> {
+    let end_part = |words: &mut Vec<Word>, parts: &mut Vec<Part>, at: &mut Assign| -> Option<()> {
         let w = std::mem::take(words);
-        let first = w.first()?;
+        let lead = std::mem::take(&mut at.lead);
+        let first = w.get(if env { lead } else { 0 })?;
         // An assignment where the command goes (`PAGER=sh git log`) isn't a command's word
-        if first.text.contains('=') || first.glob {
+        if first.text.contains('=') || first.glob || (lead > 0 && first.text == "cd") {
             return None;
         }
         parts.push(match &w[..] {
@@ -102,8 +112,9 @@ fn parts(line: &str) -> Option<(Vec<Part>, Vec<bool>)> {
     let mut chars = line.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
-            ' ' | '\t' => end_word(&mut word, &mut words),
+            ' ' | '\t' => end_word(&mut word, &mut words, &mut at),
             '\'' => {
+                at.quoted = true;
                 let w = word.get_or_insert(Word { text: String::new(), glob: false });
                 loop {
                     match chars.next()? {
@@ -113,6 +124,7 @@ fn parts(line: &str) -> Option<(Vec<Part>, Vec<bool>)> {
                 }
             }
             '"' => {
+                at.quoted = true;
                 let w = word.get_or_insert(Word { text: String::new(), glob: false });
                 loop {
                     match chars.next()? {
@@ -123,7 +135,7 @@ fn parts(line: &str) -> Option<(Vec<Part>, Vec<bool>)> {
                 }
             }
             ';' | '|' | '&' => {
-                end_word(&mut word, &mut words);
+                end_word(&mut word, &mut words, &mut at);
                 let pipe = match (c, chars.peek()) {
                     ('&', Some('&')) | ('|', Some('|')) => {
                         chars.next();
@@ -132,7 +144,7 @@ fn parts(line: &str) -> Option<(Vec<Part>, Vec<bool>)> {
                     ('&', _) => return None,
                     (c, _) => c == '|',
                 };
-                end_part(&mut words, &mut parts)?;
+                end_part(&mut words, &mut parts, &mut at)?;
                 piped.push(pipe);
             }
             '>' => {
@@ -141,6 +153,7 @@ fn parts(line: &str) -> Option<(Vec<Part>, Vec<bool>)> {
                     return None;
                 }
                 word = None;
+                (at.quoted, at.assigns) = (false, false);
                 if chars.peek() == Some(&'>') {
                     chars.next();
                 }
@@ -164,14 +177,67 @@ fn parts(line: &str) -> Option<(Vec<Part>, Vec<bool>)> {
             '#' | '~' if word.is_none() => return None,
             c => {
                 let w = word.get_or_insert(Word { text: String::new(), glob: false });
+                if c == '=' && !at.quoted && !at.assigns && env_name(&w.text) {
+                    at.assigns = true;
+                }
                 w.glob |= matches!(c, '*' | '?' | '[' | ']');
                 w.text.push(c);
             }
         }
     }
-    end_word(&mut word, &mut words);
-    end_part(&mut words, &mut parts)?;
+    end_word(&mut word, &mut words, &mut at);
+    end_part(&mut words, &mut parts, &mut at)?;
     Some((parts, piped))
+}
+
+/// What `parts` knows of the word in hand and the part's leading assignments.
+#[derive(Default)]
+struct Assign {
+    quoted: bool,
+    assigns: bool,
+    lead: usize,
+}
+
+/// Whether `s` is a shell variable's name (`[A-Za-z_][A-Za-z0-9_]*`).
+fn env_name(s: &str) -> bool {
+    s.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Names a command's leading assignments may never set and still match a chat's pattern (#44): what
+/// finds programs and libraries, what shells read at their start, and what the sandbox sets or reads
+/// (`sandbox::inside_env`, its home and temp folders). `LD_`/`DYLD_` are prefixes.
+const ENV_NEVER: [&str; 11] = [
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    crate::sandbox::MARK,
+    "GIT_OPTIONAL_LOCKS",
+    "BASH_ENV",
+    "ENV",
+    "IFS",
+    "SHELLOPTS",
+    "LD_",
+    "DYLD_",
+];
+
+/// Whether a pattern may carry `name` among its assignments.
+pub fn env_allowed(name: &str) -> bool {
+    env_name(name)
+        && !ENV_NEVER.iter().any(|n| if n.ends_with('_') { name.starts_with(n) } else { name == *n })
+}
+
+/// `one_command` with `NAME=value` words in front (`A=1 B=x cargo xtask shot …`, in an `sh -c` or not):
+/// the names set, in order, and the command's words. None as for `one_command`.
+pub fn one_command_env(line: &str) -> Option<(Vec<String>, Vec<String>)> {
+    let (parts, _) = split(line, true)?;
+    let [Part::Cmd(w)] = &parts[..] else { return None };
+    if w.iter().any(|w| w.glob) {
+        return None;
+    }
+    let lead = w.iter().take_while(|w| w.text.split_once('=').is_some_and(|(n, _)| env_name(n))).count();
+    let names = w[..lead].iter().map(|w| w.text.split_once('=').map_or("", |(n, _)| n).to_string());
+    Some((names.collect(), w[lead..].iter().map(|w| w.text.clone()).collect()))
 }
 
 /// The words of `line` when it's one command and nothing else (quotes taken off, no glob) — what runs,
@@ -286,7 +352,12 @@ pub fn outside(
         };
         for w in words {
             let Ok(real) = std::fs::canonicalize(here.join(w)) else { continue };
-            if real.starts_with(root) || chat.reads(&real) || kept.reads(&real) || out.contains(&real) {
+            if real.starts_with(root)
+                || chat.reads(&real)
+                || kept.reads(&real)
+                || crate::log::is_log_real(&real)
+                || out.contains(&real)
+            {
                 continue;
             }
             out.push(real);

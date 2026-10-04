@@ -540,6 +540,8 @@ pub struct Client {
     child: Option<Child>,
     /// For the log: how long it took to be ready.
     pub started: std::time::Instant,
+    /// When the initialize response came (a server that's only just up hasn't begun loading yet).
+    pub ready_at: Option<std::time::Instant>,
     /// The settings `workspace/configuration` is answered from (`Options.config`, set on the writer thread
     /// before `initialize` is written).
     pub config: std::sync::Arc<std::sync::OnceLock<Value>>,
@@ -656,6 +658,7 @@ impl Client {
             caps: Value::Null,
             child: Some(child),
             started: std::time::Instant::now(),
+            ready_at: None,
             config: Default::default(),
         };
         let root_uri = uri(root);
@@ -779,6 +782,7 @@ impl Client {
             _ => Encoding::Utf16,
         };
         self.ready = true;
+        self.ready_at = Some(std::time::Instant::now());
         let _ = self
             .tx
             .send(Out::Body(json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }).to_string()));
