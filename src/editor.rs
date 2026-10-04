@@ -2477,6 +2477,10 @@ impl Editor {
                 self.session_switch(id);
                 Ok(())
             }
+            Action::Inbox(id) => {
+                self.inbox_go(&id);
+                Ok(())
+            }
             // Open it at its first change
             Action::ChangedFile(n) => match self.session.changed_files.get(n).cloned() {
                 Some(c) => {
@@ -2749,20 +2753,27 @@ impl Editor {
                     .is_some_and(|t| t.focus && t.visible && t.exited.is_none()))
     }
 
-    /// `C-q` while a card is up gives it the keys from wherever they are (#24); while it has them, its
-    /// answers answer it and Esc — or `C-q` again — gives them back unanswered (#25, #94), the card staying
-    /// up — other keys are swallowed, saying what it asks. True if the key was the card's.
+    /// `C-q` while a card is up — the one that has waited longest (else `C-q` goes to that one, `inbox.rs`) —
+    /// gives it the keys from wherever they are (#24); while it has them, its answers answer it and Esc — or
+    /// `C-q` again — gives them back unanswered (#25, #94), the card staying up — other keys are swallowed,
+    /// saying what it asks. True if the key was the card's.
     fn card_key(&mut self, key: Key) -> bool {
-        let up = self.offers.first().is_some_and(|o| !o.installing());
-        if !up || self.picker.is_some() || self.prompt.is_some() {
+        let up = self.offers.first().filter(|o| !o.installing()).map(|o| o.id);
+        let Some(id) = up.filter(|_| self.picker.is_none() && self.prompt.is_none()) else {
             self.card_keys = false;
             return false;
-        }
+        };
         if key.ctrl && !key.alt && key.code == Code::Char('q') {
-            self.card_keys = !self.card_keys;
-            if !self.card_keys {
+            if self.card_keys {
+                self.card_keys = false;
                 self.set_status("keys back — the card waits, C-q answers it");
+                return true;
             }
+            // (another has waited longer — in a session behind, stacked under it: `C-q` goes there)
+            if self.next_up() != crate::inbox::Next::Card(id) {
+                return false;
+            }
+            self.card_keys = true;
             return true;
         }
         if !self.card_keys {
@@ -2830,17 +2841,17 @@ impl Editor {
         if self.card_key(key) {
             return took(Handler::Card);
         }
-        // …and with none up here (nor an edit review), to the session whose Claude waits for you (#7)
+        // …else to the one that has waited longest, wherever it is (#7, #90, #94) — the front's own edit review
+        // takes its `C-q` itself
         if key.ctrl
             && !key.alt
             && key.code == Code::Char('q')
-            && self.offers.is_empty()
-            && self.session.review.is_none()
             && self.picker.is_none()
             && self.prompt.is_none()
+            && matches!(self.next_up(), crate::inbox::Next::Go(_) | crate::inbox::Next::None)
         {
             took(Handler::NextCard);
-            if !self.go_to_waiting_card() {
+            if !self.inbox_next() {
                 // (one about to come — its call held back until the run before it ends: said, #5)
                 match self.cards_coming().as_slice() {
                     [] => self.set_status("no card waits for you"),
@@ -9075,9 +9086,10 @@ mod tests {
         let tabs = r.iter().position(|r| r.contains("main │ fix-login-everywhere │ parser ▲ waits │ +"));
         let tabs = tabs.unwrap_or_else(|| panic!("the tabs: {r:#?}"));
         assert!(r[tabs - 2].contains("claude") && r[tabs - 1].contains("────"), "under its header: {r:#?}");
-        // Narrow: the dropdown
+        // Narrow: the dropdown — how many wait is the status line's, every session's
         let r = rows(&mut ed, 100);
-        assert!(r.iter().any(|r| r.contains("◂ main ▾ 1/3 ▲1 waiting ▸")), "{r:#?}");
+        assert!(r.iter().any(|r| r.contains("◂ main ▾ 1/3 ▸")), "{r:#?}");
+        assert!(r[23].contains("NORMAL ▌  ▲1 waiting"), "{}", r[23]);
         // A click on a tab: that session, whole
         let r = rows(&mut ed, 200);
         let x = r[tabs].find("fix-login").map(|b| r[tabs][..b].chars().count()).unwrap();

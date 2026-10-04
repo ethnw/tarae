@@ -5,29 +5,29 @@
 02   1 use std::collections::HashMap;
 03   1
 04   2 ▎ Counts how often each word appears.
-05     ▎
-06     ▎ Words are split on whi▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-07   5 pub fn word_counts(text:  space
-08   6     let mut counts = Has
-09   7     for word in text.spl  '  Reopen the last picker          m  Tasks …
-10   8     │   *counts.entry(wo  /  Search in project               n  Ask Claude here, or reply
-11   9     }                     ?  Find a command                  N  Claude's notes
-12  10     counts                a  Code actions                    o  Outline panel (this file)
-13  11 }                         b  Open buffer picker              p  Paste clipboard after
-14  12                           c  Comment or uncomment lines      P  Paste clipboard before
-15  13 fn main() {               C  Block-comment the selections    q  Show the list (quickfix)
-16  14     let text = "the quic  d  Diagnostics                     r  Rename symbol
-17  15     let counts = word_co  D  Diagnostics in every file       s  Symbols in this file
-18  16     println!("{} distinc  e  Files panel (tree)              S  Symbols in the workspace
-19  17 }                         f  Open file picker                t  Choose a theme (live preview)
-20                               g  Git: stage, commit, push        T  Terminal: show / hide
-21                               G  Debug …                         u  Undo Claude's last turn
-22                               h  Select this symbol's uses       U  Bring Claude's turn back
-23                               i  Ask Claude to edit selection    v  Review …
-24                               j  Jump list                       w  Window …
-25                               k  Show docs under cursor          W  Sessions: switch, end, new
-26                               l  Chat with Claude                x  Tests …
-27                               L  Close chat                      y  Copy to clipboard
+05     ▎                       ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+06     ▎ Words are split on whi  space
+07   5 pub fn word_counts(text:
+08   6     let mut counts = Has  '  Reopen the last picker          m  Tasks …
+09   7     for word in text.spl  /  Search in project               n  Ask Claude here, or reply
+10   8     │   *counts.entry(wo  ?  Find a command                  N  Claude's notes
+11   9     }                     a  Code actions                    o  Outline panel (this file)
+12  10     counts                b  Open buffer picker              p  Paste clipboard after
+13  11 }                         c  Comment or uncomment lines      P  Paste clipboard before
+14  12                           C  Block-comment the selections    q  Show the list (quickfix)
+15  13 fn main() {               d  Diagnostics                     r  Rename symbol
+16  14     let text = "the quic  D  Diagnostics in every file       s  Symbols in this file
+17  15     let counts = word_co  e  Files panel (tree)              S  Symbols in the workspace
+18  16     println!("{} distinc  f  Open file picker                t  Choose a theme (live preview)
+19  17 }                         g  Git: stage, commit, push        T  Terminal: show / hide
+20                               G  Debug …                         u  Undo Claude's last turn
+21                               h  Select this symbol's uses       U  Bring Claude's turn back
+22                               i  Ask Claude to edit selection    v  Review …
+23                               I  What waits for your answer      w  Window …
+24                               j  Jump list                       W  Sessions: switch, end, new
+25                               k  Show docs under cursor          x  Tests …
+26                               l  Chat with Claude                y  Copy to clipboard
+27                               L  Close chat
 28                             ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
 29  ▐ NORMAL ▌                                                                 rust   utf-8 LF   space
 ## bg · surface per cell, blank = ui.background
@@ -37,7 +37,7 @@
 03
 04     111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
 05     111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
-06     111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
+06     111111111111111111111111ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp1
 07                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 08                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 09                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
@@ -68,10 +68,10 @@
 03   f
 04   f
 05
-06
-07   f                           BBBBB
-08   f
-09   f                           A                                  A  ddddd d
+06                               BBBBB
+07   f
+08   f                           A                                  A  ddddd d
+09   f                           A                                  A
 10   f                           A                                  A
 11   f                           A                                  A
 12  ff                           A                                  A
@@ -82,14 +82,14 @@
 17  ff                           A                                  A
 18  ff              ggg ggggggg  A                                  A
 19  ff                           A                                  A
-20                               A                                  A
-21                               A  ddddd d                         A
-22                               A                                  A
+20                               A  ddddd d                         A
+21                               A                                  A
+22                               A                                  A  dddddd d
 23                               A                                  A  dddddd d
-24                               A                                  A  dddddd d
-25                               A                                  A
-26                               A                                  A  ddddd d
-27                               A                                  A
+24                               A                                  A
+25                               A                                  A  ddddd d
+26                               A                                  A
+27                               A
 28
 29  a BBBBBB a                                                                 dddd   ddddd dd   AAAAA
 ## legend

@@ -64,6 +64,8 @@ pub enum Action {
     },
     /// A session (`space W`): Enter brings its session to the front, `d` ends it, `b` brings it into its base.
     Session(crate::event::SessionId),
+    /// What waits for the user (`inbox.rs` — its entry's id): Enter goes to it.
+    Inbox(String),
     /// An item of a plugin's pick (the prompt token it answers, the item's id).
     Plugin {
         token: u64,
@@ -969,6 +971,7 @@ impl Action {
             | Action::Message
             | Action::Branch { .. }
             | Action::Session(_)
+            | Action::Inbox(_)
             | Action::Plugin { .. }
             | Action::Code(_)
             | Action::Command(_)

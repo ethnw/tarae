@@ -85,6 +85,8 @@ pub struct Landing {
     done: Vec<(String, usize, Outcome)>,
     /// Said after the files (unsaved buffers that weren't searched).
     note: String,
+    /// When it came — its place in the inbox (`inbox.rs`).
+    since: std::time::Instant,
 }
 
 /// Lands `files` as Claude's change (see the module's doc) — `call` is answered once every file is done.
@@ -127,6 +129,7 @@ pub fn land(
         review: review.into(),
         done: Vec::new(),
         note,
+        since: std::time::Instant::now(),
     };
     if unseen.is_empty() {
         return queue(ed, l);
@@ -224,6 +227,11 @@ impl Landing {
     /// How many of its files wait for their review, not on its card.
     pub(crate) fn waiting(&self) -> usize {
         if self.stage == Stage::Asking { 0 } else { self.review.len() }
+    }
+
+    /// What it changes (``rename `a` → `b` ``) · when it came.
+    pub(crate) fn what(&self) -> (&str, std::time::Instant) {
+        (&self.what, self.since)
     }
 }
 

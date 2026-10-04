@@ -110,9 +110,6 @@ pub struct Session {
     /// front · Claude's waiting on one has been said (once while it's behind).
     pub parked: Vec<crate::offer::Offer>,
     pub waiting_told: bool,
-    /// Since when its Claude has waited for you (`Doing::Waiting`, kept by `sessions_sync`) — with its cards'
-    /// own times, which session `C-q` goes to first (#90).
-    pub waiting_since: Option<Instant>,
     /// Its Claude ended a turn while it was behind, and it hasn't been in front since — its tab says `done`
     /// (#86: not the `▲` of a card waiting).
     pub turn_done: bool,
@@ -230,7 +227,6 @@ impl Session {
             restorable: None,
             parked: Vec::new(),
             waiting_told: false,
-            waiting_since: None,
             turn_done: false,
             asleep: Vec::new(),
             tool_waits: Vec::new(),
@@ -252,9 +248,11 @@ impl Session {
         }
     }
 
-    /// Whether its Claude waits for the user: a card of its, or an edit (a rename's files) to review.
+    /// Whether it waits for the user: a card of its (Claude's, or tarae's come while it was behind — a
+    /// rebase's, a trust card: #94, one counted nowhere was never found), or an edit (a rename's files) to
+    /// review.
     pub fn waits(&self) -> bool {
-        self.parked.iter().any(crate::offer::Offer::claudes)
+        self.parked.iter().any(|o| !o.installing())
             || self.chat.as_ref().is_some_and(|c| {
                 !c.edits.queue.is_empty() || c.edits.sets.iter().any(|l| !l.review.is_empty())
             })
@@ -285,6 +283,8 @@ pub enum Spot {
     /// The dropdown's `◂` · `▸`: the session before · after the one in front.
     Prev,
     Next,
+    /// The status line's `▲3 waiting`: the inbox.
+    Inbox,
 }
 
 /// What a session's Claude is doing, as its tab and its row in the session list say it.
@@ -389,35 +389,20 @@ impl Editor {
     }
 
     /// How many sessions behind wait for your answer.
+    #[cfg(test)]
     pub fn sessions_waiting(&self) -> usize {
         self.sessions.iter().filter(|l| self.doing(l) == Doing::Waiting).count()
     }
 
-    /// How many of Claude's questions wait — here: the cards up (the front one too), its chat's reads and
-    /// edits queued (parallel calls queued silently), a change set's files — and in sessions behind (#7; #91:
-    /// one `1/N` mixed the two, the card's `1/2 here · 1 elsewhere` keeps them apart).
+    /// How many things wait for you (the inbox, `inbox.rs`) — here: the cards up (the front one too), an edit
+    /// in its review, its chat's reads and edits queued (parallel calls queued silently), a change set's
+    /// files — and in sessions behind (#7; #91: one `1/N` mixed the two, the card's `1/2 here · 1 elsewhere`
+    /// keeps them apart).
     pub fn cards_waiting(&self) -> (usize, usize) {
-        let queued = |l: &Session| {
-            l.chat.as_ref().map_or(0, |c| {
-                c.reads.len() + c.edits.queue.len() + c.edits.sets.iter().map(|s| s.waiting()).sum::<usize>()
-            })
-        };
-        let elsewhere: usize =
-            self.sessions.iter().map(|l| l.parked.iter().filter(|o| o.claudes()).count() + queued(l)).sum();
-        (self.offers.len() + queued(&self.session), elsewhere)
-    }
-
-    /// `C-q` with no card up in front (#7): to the session behind whose Claude has waited for you longest —
-    /// its oldest card's time, else since it began to wait (#90: the first in the list wasn't the one you
-    /// expected) — its card comes up there. False: none waits.
-    pub(crate) fn go_to_waiting_card(&mut self) -> bool {
-        let since = |l: &Session| {
-            let cards = l.parked.iter().filter(|o| o.claudes()).map(|o| o.since);
-            cards.chain(l.waiting_since).min().unwrap_or_else(Instant::now)
-        };
-        let waiting = self.sessions.iter().filter(|l| self.doing(l) == Doing::Waiting);
-        let Some(id) = waiting.min_by_key(|l| since(l)).map(|l| l.id) else { return false };
-        self.session_switch(id)
+        let front = crate::uistate::session_id(self.session.id);
+        let inbox = self.inbox();
+        let here = inbox.iter().filter(|e| e.session == front).count();
+        (here, inbox.len() - here)
     }
 
     /// Sessions whose Claude is about to ask (its next call needs a card, held back by claude until the one
@@ -494,16 +479,12 @@ impl Editor {
     /// one of the front session's files uses never rests.
     pub(crate) fn sessions_sync(&mut self) {
         self.session_list_sync();
+        self.inbox_sync();
         self.asking_sync();
         // (a shared server's folders follow the checkouts — `share.rs`)
         self.share_sync();
         if self.sessions.is_empty() {
             return;
-        }
-        // (since when each one waits for you — `C-q` goes to the longest first)
-        let waits: Vec<bool> = self.sessions.iter().map(|l| self.doing(l) == Doing::Waiting).collect();
-        for (l, waits) in self.sessions.iter_mut().zip(waits) {
-            l.waiting_since = waits.then(|| l.waiting_since.unwrap_or_else(Instant::now));
         }
         let in_front = |ed: &Editor, cid| {
             ed.docs.iter().any(|d| ed.session.docs.contains(&d.id) && d.lsp.clients().any(|c| c == cid))
@@ -749,6 +730,7 @@ impl Editor {
             Spot::Next => {
                 self.session_switch(step(1));
             }
+            Spot::Inbox => self.inbox_open(),
         }
     }
 
@@ -785,7 +767,8 @@ mod tests {
     }
 
     /// #7: the card up says how many wait behind it — stacked, queued in its chat, in sessions behind — and
-    /// `C-q` with no card up here goes to the session whose Claude waits, its card up there.
+    /// `C-q` goes to the one that came first: the session behind's, its card up there, before the newer ones
+    /// up here; once it's the card up, `C-q` gives it the keys.
     #[test]
     fn the_card_counts_what_waits_and_c_q_goes_to_it() {
         use crate::offer::{Offer, What};
@@ -808,19 +791,23 @@ mod tests {
         parser.process(&bytes);
         let s = parser.screen().contents();
         assert!(s.contains("Claude asks 2") && s.contains("1/2 here · 1 elsewhere"), "{s}");
-        // C-q with cards up here: the card's (it takes the keys)
+        // C-q with cards up here — but back's came first: to it, its card up there
         feed(&mut ed, "<C-q>");
-        assert!(ed.card_keys && ed.session.id == 0);
+        assert_eq!(ed.session.id, back_id, "to the one that waited longest");
+        assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some("Claude asks 1"));
+        // C-q again: the keys
+        feed(&mut ed, "<C-q>");
+        assert!(ed.card_keys && ed.session.id == back_id);
         ed.offers.clear();
         ed.card_keys = false;
-        // None up here: C-q goes to the session that waits, its card up
+        // None up here: C-q goes back to front's, the first of them up
         feed(&mut ed, "<C-q>");
-        assert_eq!(ed.session.id, back_id, "to the session whose Claude waits");
-        assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some("Claude asks 1"));
+        assert_eq!(ed.session.id, 0);
+        assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some("Claude asks 2"));
         // Nothing waits anywhere: said
         ed.offers.clear();
         feed(&mut ed, "<C-q>");
-        assert_eq!(ed.session.id, back_id);
+        assert_eq!(ed.session.id, 0);
         assert!(ed.status.as_ref().is_some_and(|s| s.0.contains("no card waits")), "{:?}", ed.status);
     }
 

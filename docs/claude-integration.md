@@ -77,8 +77,20 @@ A card that asks something (this one, a command to run, a read outside the proje
 the editor. While you're typing in the chat, or in a review, it leaves your keys alone and says
 `C-q to answer it`: `C-q` gives the card the keys (the status line says `CARD`), your draft stays as it was, and
 Esc goes back unanswered. Esc never answers a card. `n` does. A card counts what waits behind it — `1/3`: cards
-under it, Claude's calls queued, cards in other sessions — and `C-q` with no card up here goes to the session
-whose Claude waits for you.
+under it, Claude's calls queued, cards in other sessions.
+
+**The inbox** is everything waiting for your answer, in every session, oldest first: Claude's run and read
+cards, its edits waiting for their review (`Change 1 of 2 · src/a.rs` — a protected file like `.tarae.toml`
+always asks), change sets, and tarae's own cards (trust, a rebase, a download). The status line counts them all
+(`▲3 waiting`) once anything waits beyond the card in front of you. `space I` (`:inbox`, or a click on the
+count) lists them: each row names its session, what it asks, its kind and how long it has waited. `enter` goes
+to it. Its session comes to the front and its card comes up with the keys, and you answer it there, on the card.
+The list never answers anything itself. `C-q` follows the same order: it goes to the one that has waited
+longest, whichever session it's in, and once that's the card up here, `C-q` gives it the keys. While anything
+waits, `C-q` never says nothing does.
+
+![The inbox over the code: three rows, oldest first — main · Claude wants to run outside the sandbox · cargo test -q parser:: (run · 13 s), api · Claude wants to see your screen (screen · 9 s), docs · Change 1 of 1 · README.md (edit · 6 s) — and the status line's main ▲3 waiting](screenshots/inbox.png)
+([hanji theme](screenshots/inbox-hanji.png))
 
 ![Claude wants to see your screen: a card says it goes as text, 140×40, that Claude can only look, and that it includes the terminal panel (14 rows), with y Once, a This chat and n No](screenshots/chat-screen.png)
 
@@ -442,6 +454,20 @@ What Claude runs, with `run` and `run_tests`, runs in a sandbox (macOS: Seatbelt
   socket (a server's — `cargo xtask linux` talks to colima's Docker), Claude asks for that instead
   (`unix_socket`): the card names the file, says everything else stays in the sandbox, and offers `y` this
   run or `a` this conversation
+- **Since your last y.** When Claude asks again for a command you already said `y` to outside the sandbox in
+  this conversation (the same command, from the same folder), its card says when that was and shows only what
+  changed since in what the command runs. For a command that runs the project's code (`cargo test … parser::`)
+  that's the project's changed hunks, the lines around each change dim, what came and went in the diff's
+  colours. For a script (`sh check.sh`, `python3 x.py`) it's the script's own diff, shown in place of the whole
+  script. Nothing changed: `Unchanged since your y at 01:12`. It never answers for you. The card waits for `y`
+  as before, but you only read what's new. Nothing outside the project is shown: a script there is named as
+  changed, never shown. At each `y`, tarae keeps a snapshot with the conversation: the scripts' text, or the
+  project's working tree as a git tree (staged into a temporary copy of the index, so your own index isn't
+  touched, with no hooks). A new conversation starts with none
+
+![Claude asks again to run cargo test -q parser:: outside the sandbox: the card says "Since your y at 02:28, changed in the project:", then src/parser.rs and its hunk, depth > 64 in red and depth > 128 in green, then Claude's reason and the warning](screenshots/since-your-y.png)
+([hanji theme](screenshots/since-your-y-hanji.png))
+
 - git's read-only commands run with `GIT_OPTIONAL_LOCKS=0`, so `git status` doesn't try to refresh the index
   in `.git` (a write the sandbox would deny and report)
 - **Where there's no sandbox** (Linux for now, or tarae itself running inside one), Claude's commands don't

@@ -691,6 +691,8 @@ pub struct Review {
     /// Whether the view follows the current change (off when scrolling directly with j/k).
     pub follow: bool,
     pub started: Instant,
+    /// When what it reviews was asked for (a chat edit waits in its queue first) — its place in the inbox.
+    pub asked: Instant,
     /// Streamed answer (preview before it's done) · whether thinking.
     pub streamed: String,
     pub thinking: bool,
@@ -741,6 +743,7 @@ impl Review {
             scroll: 0,
             follow: true,
             started: Instant::now(),
+            asked: Instant::now(),
             streamed: String::new(),
             thinking: false,
             on_done: None,

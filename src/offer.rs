@@ -37,6 +37,9 @@ pub struct Offer {
     /// The question's lines that warn what saying yes means — drawn in the warning color (the run-outside
     /// card's "with all your permissions").
     pub warning: Option<std::ops::Range<usize>>,
+    /// The question's lines that are a diff (`sinceyes.rs`): `+` and `-` lines in the diff's colours, `@@`
+    /// faint.
+    pub diff: Option<std::ops::Range<usize>>,
     /// When it came (`push_offer`) — `C-q` goes to the session whose card has waited longest (#90).
     pub since: Instant,
     /// When it was first drawn in front (`term::render_frame`) — its `card` line says how long it was up
@@ -210,6 +213,7 @@ impl Offer {
             rev: 0,
             decided: None,
             warning: None,
+            diff: None,
             since: Instant::now(),
             drawn: Default::default(),
             asked: None,
@@ -546,7 +550,7 @@ impl crate::editor::Editor {
             // Replaced whole — what it says with what it does — and it settles again before `y` counts
             if !old.installing() {
                 (old.question, old.working, old.failed) = (o.question, o.working, o.failed);
-                (old.decided, old.warning, old.asked) = (o.decided, o.warning, o.asked);
+                (old.decided, old.warning, old.asked, old.diff) = (o.decided, o.warning, o.asked, o.diff);
                 (old.what, old.state) = (o.what, OfferState::Asking);
                 old.rev += 1;
             }

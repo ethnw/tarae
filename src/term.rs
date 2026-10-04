@@ -4982,6 +4982,7 @@ fn draw_picker(
             | Action::Message
             | Action::Branch { .. }
             | Action::Session(_)
+            | Action::Inbox(_)
             | Action::Plugin { .. },
         )
         | None => String::new(),
@@ -5738,10 +5739,10 @@ fn draw_statusline(
         });
     }
     // The session in front, when there's more than one and the chat (whose top row has them all) isn't
-    // up: its name — a click opens the list — and how many others wait for you
+    // up: its name — a click opens the list — and how the others are
     let chip = !editor.sessions.is_empty() && lay.chat_w == 0;
+    let warn = t.try_get("warning").map(|s| Style { bg: None, ..s }).unwrap_or_default();
     if chip {
-        let warn = t.try_get("warning").map(|s| Style { bg: None, ..s }).unwrap_or_default();
         left.push(Seg {
             text: format!("  {}", fit_ellipsis(editor.session.label(), 24)),
             style: accent,
@@ -5753,10 +5754,25 @@ fn draw_statusline(
                 if r.stopped() { ui.status.patch(warn) } else { Style { fg: ui.virt.fg, ..ui.status } };
             left.push(Seg { text: format!(" {}", r.said()), style, keep: CHIP });
         }
-        // (the others: waiting for you · done, said apart — #86)
-        let [waiting, done] = sessions_counted(editor, false);
-        if !waiting.is_empty() {
-            left.push(Seg { text: waiting, style: ui.status.patch(warn), keep: CHIP });
+    }
+    // What waits for you, every session's — the inbox's count; a click lists them (`inbox.rs`). Not for
+    // the one card (or edit review) up here when that's all: it's in sight, and says so itself
+    let waiting = editor.inbox().len();
+    let only_in_sight =
+        waiting == 1 && matches!(editor.next_up(), crate::inbox::Next::Card(_) | crate::inbox::Next::Review);
+    if waiting > 0 && !only_in_sight {
+        let gap = if chip { " " } else { "  " };
+        left.push(Seg {
+            text: format!("{gap}▲{waiting} waiting"),
+            style: ui.status.patch(warn),
+            keep: INBOX,
+        });
+    }
+    if chip {
+        // (the others: possibly stuck · done — #86: said apart from what waits)
+        let [stuck, done] = sessions_counted(editor);
+        if !stuck.is_empty() {
+            left.push(Seg { text: stuck, style: ui.status.patch(warn), keep: CHIP });
         }
         if !done.is_empty() {
             left.push(Seg { text: done, style: accent, keep: CHIP });
@@ -5977,11 +5993,15 @@ fn draw_statusline(
     for s in &left {
         apply(out, s.style)?;
         queue!(out, Print(&s.text))?;
+        // (a click on the name: the list; on the count: the inbox — not the gap before them)
+        let lead = s.text.len() - s.text.trim_start().len();
+        let (a, b) = (used + lead, used + s.text.width());
         if s.keep == CHIP {
-            // (its click: the name and the count, not the gap before them)
-            let lead = s.text.len() - s.text.trim_start().len();
-            let (a, b) = (used + lead, used + s.text.width());
             chip_at = Some(chip_at.map_or((a, b), |(a0, _)| (a0, b)));
+        }
+        if s.keep == INBOX {
+            let spot = (lay.status_y as usize, a, b, crate::session::Spot::Inbox);
+            editor.screen.session_spots.borrow_mut().push(spot);
         }
         used += s.text.width();
     }
@@ -6006,6 +6026,10 @@ fn draw_statusline(
 /// The status line's session chip — its segments are told apart by this `keep` (it outlasts all but the
 /// mode, the position and a floating list's keys).
 const CHIP: u8 = 235;
+
+/// The status line's `▲3 waiting` (the inbox): it outlasts the chip — what waits for you is what's left
+/// when the room runs out.
+const INBOX: u8 = 245;
 
 /// The status line's `keep` for a floating list's keys (`key_hints`): only the mode and the position outlast
 /// them — and they're cut to fit beside those, whole pairs, so none is ever dropped half.
@@ -6516,6 +6540,9 @@ struct OfferCard {
     lines: Vec<(String, bool)>,
     /// Rows of `lines` that warn what yes means (`Offer::warning`) — the warning color.
     warn: Vec<usize>,
+    /// Rows of `lines` that are a diff's (`Offer::diff`) and their sign: `+` added, `-` removed, `@` a hunk's
+    /// header and ` ` the lines around (dim), `f` a file's path.
+    diff: Vec<(usize, char)>,
     /// Button row (None while downloading)
     buttons_row: Option<usize>,
     /// (row, start col, end col, key) — for mouse (`Screen.offer_buttons`; digit = bring back card N forward)
@@ -6598,6 +6625,7 @@ impl OfferCard {
             all
         };
         let mut warn = Vec::new();
+        let mut diff = Vec::new();
         let (mut lines, labels) = match &o.state {
             OfferState::Asking => {
                 let b = o.answers(editor.preflight_quick().is_some());
@@ -6608,6 +6636,7 @@ impl OfferCard {
                 // What's being decided at full strength (the path, the command, the settings) — the rest faint
                 let decided = o.decided_lines();
                 let warning = o.warning.clone().unwrap_or(0..0);
+                let diffs = o.diff.clone().unwrap_or(0..0);
                 for (k, part) in o.question.split('\n').enumerate() {
                     let mut rows = wrapped(part, most);
                     if decided.contains(&k) {
@@ -6615,6 +6644,12 @@ impl OfferCard {
                     }
                     if warning.contains(&k) {
                         warn.extend(v.len()..v.len() + rows.len());
+                    }
+                    // (a wrapped line's rows keep its sign's colour; `f` a file's path)
+                    if diffs.contains(&k) {
+                        let sign =
+                            part.chars().next().filter(|c| matches!(c, '+' | '-' | '@' | ' ')).unwrap_or('f');
+                        diff.extend((v.len()..v.len() + rows.len()).map(|r| (r, sign)));
                     }
                     v.extend(rows);
                 }
@@ -6686,6 +6721,7 @@ impl OfferCard {
                 inner: width.saturating_sub(5),
                 lines: vec![(title, false), (how, true)],
                 warn: if said.is_some() { vec![1] } else { Vec::new() },
+                diff: Vec::new(),
                 buttons_row: Some(y),
                 buttons,
                 labels,
@@ -6741,6 +6777,9 @@ impl OfferCard {
                 warn.push(lines.len() - 1);
             }
         }
+        // (the body's rows only: not the cut row, nor what's said under it)
+        let body = lines.len() - usize::from(cut > 0);
+        diff.retain(|&(i, _)| i < body);
         for row in said {
             if !row.0.is_empty() {
                 warn.push(lines.len());
@@ -6816,6 +6855,7 @@ impl OfferCard {
             inner,
             lines,
             warn,
+            diff,
             buttons_row,
             buttons,
             labels,
@@ -6903,6 +6943,10 @@ impl OfferCard {
                 queue!(out, Print("▄"))?;
             }
         }
+        // (a diff's lines: what came and went in the diff's colours, its hunks' headers faint)
+        let sign =
+            |scope: &str| Style { fg: editor.theme.try_get(scope).and_then(|s| s.fg).or(body.fg), ..body };
+        let (plus, minus) = (sign("diff.plus"), sign("diff.minus"));
         let mut row = self.y + self.pad;
         for (i, (text, faint)) in self.lines.iter().enumerate() {
             queue!(out, MoveTo(self.x as u16, row as u16))?;
@@ -6913,10 +6957,19 @@ impl OfferCard {
             apply(out, body)?;
             queue!(out, Print(" "))?;
             let badge = if i == 0 { self.badge.as_str() } else { "" };
+            let diff = self.diff.iter().find(|d| d.0 == i).map(|d| d.1);
             apply(
                 out,
                 if self.warn.contains(&i) {
                     warning
+                } else if let Some(c) = diff {
+                    // (the lines around a change dim: what came and went, and where, stand out)
+                    match c {
+                        '+' => plus,
+                        '-' => minus,
+                        'f' => body,
+                        _ => dim,
+                    }
                 } else if *faint {
                     dim
                 } else if i == 0 {
@@ -8147,25 +8200,22 @@ fn draw_review_rail(
 /// docs done │ +` — the one in front strong, `●` its Claude working, `▲ waits` a card (or an edit) waiting for
 /// you, `done` a turn that ended behind and hasn't been looked at, `◦ symbols 42s` possibly stuck (a tool
 /// call unanswered that long), `•` files came again from disk there (#6), `+` a new one. Where that doesn't
-/// fit, one dropdown: `◂ fix-login ● ▾ 2/3 ▲1 waiting 1 done •1 ▸` (the name opens the list, `◦1` possibly
-/// stuck, `•1` files came again from disk there, the arrows step). Styles: strong, dim, faint, accent,
-/// warning · where each click goes (from the row's start).
-/// The other sessions as the dropdown and the status line's chip count them: ` ▲2 waiting` (a card or an
-/// edit waits for you — `◦1` too when some may be stuck) · ` 1 done` (a turn ended, not looked at) —
-/// each empty when none (#86: one `▲N` counted both). `compact`: ` ▲2` (where the room is the name's).
-fn sessions_counted(editor: &Editor, compact: bool) -> [String; 2] {
-    let word = if compact { "" } else { " waiting" };
-    let waiting = match (editor.sessions_waiting(), editor.sessions_stuck()) {
-        (0, 0) => String::new(),
-        (n, 0) => format!(" ▲{n}{word}"),
-        (0, k) => format!(" ◦{k}"),
-        (n, k) => format!(" ▲{n}{word} ◦{k}"),
+/// fit, one dropdown: `◂ fix-login ● ▾ 2/3 ◦1 1 done •1 ▸` (the name opens the list, `◦1` possibly stuck,
+/// `•1` files came again from disk there, the arrows step — how many things wait for you is the status
+/// line's `▲3 waiting`, every session's). Styles: strong, dim, faint, accent, warning · where each click goes
+/// (from the row's start).
+/// The other sessions as the dropdown and the status line's chip count them: ` ◦1` (possibly stuck) ·
+/// ` 1 done` (a turn ended, not looked at) — each empty when none (#86: what waits is counted apart).
+fn sessions_counted(editor: &Editor) -> [String; 2] {
+    let stuck = match editor.sessions_stuck() {
+        0 => String::new(),
+        k => format!(" ◦{k}"),
     };
     let done = match editor.sessions_done() {
         0 => String::new(),
         n => format!(" {n} done"),
     };
-    [waiting, done]
+    [stuck, done]
 }
 
 fn session_tabs(
@@ -8241,11 +8291,7 @@ fn session_tabs(
         2 + marks_w + 2 + count.width() + waiting.width() + done.width() + reloaded.width() + 2
     };
     let label = editor.session.label();
-    let full = sessions_counted(editor, false);
-    let [waiting, done] = match w.saturating_sub(fixed(&full)) >= label.width().min(12) {
-        true => full,
-        false => sessions_counted(editor, true),
-    };
+    let [waiting, done] = sessions_counted(editor);
     let name = fit_ellipsis(label, w.saturating_sub(fixed(&[waiting.clone(), done.clone()])).max(1));
     // (the arrows dim, not faint — they're what a click steps with)
     let mut spans = vec![Span { text: "◂ ".into(), style: dim }, Span { text: name, style: strong }];
@@ -9856,6 +9902,9 @@ fn key_hints(editor: &Editor) -> Option<Vec<(&'static str, String)>> {
                 hints(&[("enter", "open"), ("C-x", "close the buffer"), ("type", "narrow"), ("esc", "close")])
             }
         }
+    } else if editor.picker.as_ref().is_some_and(|p| p.title == crate::inbox::INBOX) {
+        // (answered there, on its card — never from the list)
+        hints(&[("enter", "go to it"), ("type", "narrow"), ("esc", "close")])
     } else if editor.picker.as_ref().is_some_and(replace_list) {
         hints(&[("enter", "replace in every listed file"), ("type", "narrow"), ("esc", "cancel")])
     } else if editor.popup.is_some() {
@@ -10423,6 +10472,7 @@ mod tests {
                 rev: 0,
                 decided: None,
                 warning: None,
+                diff: None,
                 since: std::time::Instant::now(),
                 drawn: Default::default(),
                 asked: None,

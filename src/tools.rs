@@ -920,7 +920,7 @@ fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
                 Some(s) => Some(socket_at(s)?),
                 None => None,
             };
-            Some(Beyond { reason: reason.to_string(), socket })
+            Some(Beyond { reason: reason.to_string(), socket, since: None })
         }
     };
     let cwd = run_cwd(&ed.session.root, args["cwd"].as_str())?;
@@ -992,11 +992,13 @@ fn why_asked(cmd: &str, extra: &[String]) -> crate::cards::Why {
     Why::Unreadable
 }
 
-/// What Claude asked to run past the sandbox, and why: outside it whole, or with one unix socket (#119).
+/// What Claude asked to run past the sandbox, and why: outside it whole, or with one unix socket (#119) —
+/// and, the user having said yes to it before in this chat, what changed since (`sinceyes.rs`).
 #[derive(Clone, Debug)]
 pub struct Beyond {
     pub reason: String,
     pub socket: Option<PathBuf>,
+    pub since: Option<crate::sinceyes::Since>,
 }
 
 /// The socket `unix_socket` names — `~/` from home — by its real path: a unix socket that's there. Err says
@@ -1019,13 +1021,14 @@ fn socket_at(s: &str) -> Result<PathBuf, String> {
 
 /// `cmd`'s card. Review at the end: a file it names that Claude wrote unseen this turn goes on the card
 /// with it — which ones, and their text, found on a worker. So does each script it runs (#117: `awk -f x`,
-/// `python x.py` — what runs is in the file, not the line).
+/// `python x.py` — what runs is in the file, not the line). Outside the sandbox, said yes to before in this
+/// chat: what changed since that yes, in what it runs (`sinceyes.rs`).
 fn card(
     ed: &mut Editor,
     call: Call,
     cmd: String,
     cwd: PathBuf,
-    outside: Option<Beyond>,
+    mut outside: Option<Beyond>,
     why: crate::cards::Why,
 ) -> Result<(), String> {
     let checkpoints = &ed.session.checkpoints;
@@ -1037,11 +1040,19 @@ fn card(
         .chain(checkpoints.carried.iter().cloned())
         .collect();
     let scripts = scripts_run(&cmd);
-    if unseen.is_empty() && scripts.is_empty() {
+    let yes = outside.as_ref().filter(|b| b.socket.is_none()).and_then(|_| {
+        let c = ed.session.chat.as_ref()?;
+        c.outside_yes.iter().rev().find(|y| y.cmd == cmd && y.cwd == cwd).cloned()
+    });
+    if unseen.is_empty() && scripts.is_empty() && yes.is_none() {
         return ask_with(ed, cmd, cwd, call, Default::default(), (Vec::new(), why), outside);
     }
     let root = ed.session.root.clone();
     ed.events.jobs().spawn(move || {
+        let since = yes.map(|y| y.since(&root, &cwd, &cmd));
+        if let Some(b) = outside.as_mut() {
+            b.since = since;
+        }
         let shown = match unseen.is_empty() {
             true => Ok(Vec::new()),
             false => named(&root, &cmd, &cwd, &unseen),
@@ -1120,7 +1131,7 @@ const INTERPRETERS: [&str; 22] = [
 /// The script files `cmd` runs (`INTERPRETERS`, or one run by its path — `./x`), as written from where it
 /// runs (after a `cd`: from there). A line the shell reader can't read (a redirect, `$`) is split at its
 /// operators instead: this only says more.
-fn scripts_run(cmd: &str) -> Vec<PathBuf> {
+pub(crate) fn scripts_run(cmd: &str) -> Vec<PathBuf> {
     let mut here = PathBuf::new();
     let commands: Vec<(PathBuf, Vec<String>)> = match crate::readonly::parse(cmd) {
         Some(parts) => parts
@@ -1338,6 +1349,18 @@ fn ask_with(
         question.push_str(&format!("\n  in {}", rel.display()));
         decided.end += 1;
     }
+    // Said yes to before in this chat: when, and what changed since in what it runs — decided, the diff in
+    // its colours (`sinceyes.rs`)
+    let mut diff = None;
+    let since = outside.as_ref().and_then(|b| b.since.as_ref());
+    if let Some(s) = since {
+        let (lines, d) = s.card_lines();
+        let at = question.split('\n').count() + 1;
+        question.push_str("\n\n");
+        question.push_str(&lines.join("\n"));
+        decided = 0..at + lines.len();
+        diff = Some(at + d.start..at + d.end);
+    }
     // (outside: the reason faint — Claude's own words — and what yes means in the warning color; one
     // socket: which, said as decided, and the rest staying sandboxed — Docker's in the warning color)
     let mut warning = None;
@@ -1405,8 +1428,10 @@ fn ask_with(
             text.trim_end_matches('\n')
         ));
     }
-    // What a script it runs says — what runs is in it (#117); one that can't be shown, why
-    for s in &scripts {
+    // What a script it runs says — what runs is in it (#117); one that can't be shown, why. (Said yes to
+    // before: what changed in it since is on the card already — not all of it again.)
+    let told = since.is_some_and(|s| !matches!(s.changed, crate::sinceyes::Changed::Unknown(_)));
+    for s in scripts.iter().filter(|_| !told) {
         match &s.text {
             Ok(text) => question.push_str(&format!(
                 "\n\n{} — what it runs:\n{}",
@@ -1464,7 +1489,8 @@ fn ask_with(
     };
     let what = crate::offer::What::Run(Box::new(card));
     let o = crate::offer::Offer::new(title, &question, "Running…", "Claude's command".into(), what);
-    let o = o.deciding(decided).asked(asked);
+    let mut o = o.deciding(decided).asked(asked);
+    o.diff = diff;
     ed.push_offer(match warning {
         Some(lines) => o.warning(lines),
         None => o,
@@ -1705,6 +1731,9 @@ pub fn run_answer(ed: &mut Editor, id: u64, what: RunCard, scope: Option<crate::
         return answer(ed, call, Err(format!("the user chose not to run `{cmd}`")));
     };
     call.step("answered yes");
+    // Outside the sandbox: what it runs as it is at this yes, kept with the chat before it runs — its next
+    // ask shows only what changed since (`sinceyes.rs`)
+    let yes = outside.then(|| (ed.session.root.clone(), std::time::SystemTime::now()));
     // One socket past the sandbox: this run's (`y`), or this conversation's (`a` — #119)
     let socket = socket.map(crate::allow::Grant::Socket);
     if let Some(g) = socket.as_ref().filter(|_| scope != crate::allow::Scope::Once) {
@@ -1732,7 +1761,7 @@ pub fn run_answer(ed: &mut Editor, id: u64, what: RunCard, scope: Option<crate::
         }
         ed.note(format!("{} runs without asking for the rest of this chat", p.shown()));
     }
-    if shown.is_empty() && !pin {
+    if shown.is_empty() && !pin && yes.is_none() {
         return run_now(ed, cmd, cwd, call, unprotected, outside);
     }
     let root = ed.session.root.clone();
@@ -1742,7 +1771,20 @@ pub fn run_answer(ed: &mut Editor, id: u64, what: RunCard, scope: Option<crate::
         let changed = changed.map(|(p, _)| crate::chat::shown(&root, p));
         // (none: one isn't a text script in the checkout — `script_pins` — it runs this once only)
         let pins = pin.then(|| crate::readonly::script_pins(&cmd, &cwd, &root));
+        let yes = yes.filter(|_| changed.is_none()).map(|(root, at)| crate::sinceyes::Yes {
+            kept: crate::sinceyes::take(&root, &cwd, &cmd),
+            cmd: cmd.clone(),
+            cwd: cwd.clone(),
+            at,
+        });
         move |ed: &mut Editor| {
+            // (kept for the chat that asked — the last yes to the same command in the same folder)
+            if let Some(y) = yes
+                && let Some(c) = ed.session.chat.as_mut().filter(|c| c.generation() == call.generation)
+            {
+                c.outside_yes.retain(|o| (&o.cmd, &o.cwd) != (&y.cmd, &y.cwd));
+                c.outside_yes.push(y);
+            }
             // (its scripts as they are now, for the chat that asked — one pinned before gives way)
             if let Some(Some(pins)) = &pins
                 && let Some(c) = ed.session.chat.as_mut().filter(|c| c.generation() == call.generation)

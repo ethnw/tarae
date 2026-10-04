@@ -86,6 +86,7 @@ pub const COMMANDS: &[TypedCmd] = &[
     c(&["log-open"], Arg::None, "Open tarae's log (language servers, errors)"),
     c(&["procs"], Arg::None, "What tarae runs and what it costs"),
     c(&["messages"], Arg::None, "The notifications since tarae started, newest first"),
+    c(&["inbox"], Arg::None, "What waits for your answer, every session's, oldest first"),
     c(&["redraw"], Arg::None, "Draw the whole screen again (when something else wrote over it)"),
     c(&["lsp-restart"], Arg::None, "Restart this file's language server"),
     c(&["plugin-permissions"], Arg::None, "What each plugin may do beyond the buffer"),

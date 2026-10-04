@@ -45,7 +45,7 @@ pub enum Region {
     Program,
     /// Card `id`: its answers (`offer_key`), or every key once `C-q` gave it them (`card_key`).
     Card(u64),
-    /// `C-q` with no card up here: to the session whose Claude waits.
+    /// `C-q` to the one that has waited longest, elsewhere (`inbox.rs`).
     NextCard,
     /// Floating text (hover): Esc closes it, `C-d`/`C-u` scroll it.
     Popup,
@@ -255,15 +255,20 @@ impl Editor {
         let shortcut = |region, filter| Layer { region, filter, shortcut: true };
         let mut v = Vec::new();
         let modal = self.picker.is_some() || self.prompt.is_some();
-        // `card_key`: `C-q` toggles the front card's hold; held, every key is its
-        if let Some(o) = self.offers.first().filter(|o| !o.installing() && !modal) {
-            v.push(match self.card_keys {
-                true => layer(Region::Card(o.id), Filter::All),
-                false => shortcut(Region::Card(o.id), Filter::Only(vec![ctrl('q')])),
-            });
+        let next = self.next_up();
+        // `card_key`: held, every key is the front card's (`C-q` lets go); not held, `C-q` gives it them when
+        // it's the one that has waited longest
+        let up = self.offers.first().filter(|o| !o.installing() && !modal);
+        let held = up.is_some() && self.card_keys;
+        if let Some(o) = up {
+            if self.card_keys {
+                v.push(layer(Region::Card(o.id), Filter::All));
+            } else if next == crate::inbox::Next::Card(o.id) {
+                v.push(shortcut(Region::Card(o.id), Filter::Only(vec![ctrl('q')])));
+            }
         }
-        // `C-q` with no card up here (nor an edit review): to the session whose Claude waits
-        if self.offers.is_empty() && self.session.review.is_none() && !modal {
+        // `C-q` to the one that has waited longest, elsewhere (the front's edit review takes its own)
+        if !modal && !held && matches!(next, crate::inbox::Next::Go(_) | crate::inbox::Next::None) {
             v.push(shortcut(Region::NextCard, Filter::Only(vec![ctrl('q')])));
         }
         // `terminal_key`: the program has them all
@@ -532,6 +537,8 @@ pub struct UiState {
     pub front: String,
     pub sessions: Vec<SessionState>,
     pub cards: Vec<CardState>,
+    /// What waits for the user's answer, every session's, oldest first (`inbox.rs`) — the inbox's order.
+    pub inbox: Vec<crate::inbox::Entry>,
     pub toasts: Vec<ToastState>,
     /// The front session's panels — their rows on screen only (`panels.rs`).
     pub panels: panels::Panels,
@@ -606,7 +613,7 @@ pub fn boot() -> String {
     .clone()
 }
 
-fn session_id(id: crate::event::SessionId) -> String {
+pub(crate) fn session_id(id: crate::event::SessionId) -> String {
     format!("s{id}")
 }
 
@@ -640,46 +647,8 @@ impl Editor {
         let mut sessions = vec![session(front, true)];
         sessions.extend(self.sessions.iter().map(|l| session(l, false)));
         sessions.sort_by_key(|s| s.id[1..].parse::<u64>().unwrap_or(0));
-        let quick = self.preflight_quick().is_some();
-        let card = |o: &crate::offer::Offer, sid: crate::event::SessionId, up: &'static str| {
-            let is_front = up == "front";
-            CardState {
-                id: format!("card#{}", o.id),
-                session: session_id(sid),
-                whose: if o.claudes() { "claude" } else { "tarae" },
-                kind: o.kind(),
-                title: o.title.clone(),
-                asks: asks(o),
-                answers: o.answers(quick),
-                state: match o.state {
-                    crate::offer::OfferState::Asking => "asking",
-                    crate::offer::OfferState::Installing(_) => "installing",
-                    crate::offer::OfferState::Failed(_) => "failed",
-                },
-                weighty: o.weighty(),
-                settled: is_front && self.offer_settled(),
-                rev: o.rev,
-                up,
-                waited_ms: ms(o.since.elapsed()),
-                in_sight_ms: self
-                    .offer_seen
-                    .get()
-                    .filter(|&(id, rev, _)| (id, rev) == (o.id, o.rev))
-                    .map(|(.., at)| ms(at.elapsed())),
-                seen_whole: is_front && self.offer_seen_whole(),
-                at: self.screen.offer_card.filter(|_| is_front),
-            }
-        };
-        let mut cards: Vec<CardState> = self
-            .offers
-            .iter()
-            .enumerate()
-            .map(|(i, o)| card(o, front.id, if i == 0 { "front" } else { "stacked" }))
-            .collect();
-        cards.extend(front.parked.iter().map(|o| card(o, front.id, "parked")));
-        for l in &self.sessions {
-            cards.extend(l.parked.iter().map(|o| card(o, l.id, "parked")));
-        }
+        let cards = self.ui_cards();
+        let inbox = self.inbox_from(&cards);
         let on_card = self.screen.toast_card.get().is_some();
         let toasts = self
             .toasts
@@ -722,11 +691,60 @@ impl Editor {
             front: session_id(front.id),
             sessions,
             cards,
+            inbox,
             toasts,
             panels: self.ui_panels(),
             runs: self.ui_runs(),
             gone: watch::recent(&self.ui_gone, GONE_SHOWN),
         }
+    }
+
+    /// Every card of every session — up in front (the front one, the ones stacked behind it), parked in the
+    /// sessions behind — as the state lists them. The inbox is built on these (`inbox.rs`), so the two never
+    /// disagree.
+    pub fn ui_cards(&self) -> Vec<CardState> {
+        let front = &self.session;
+        let quick = self.preflight_quick().is_some();
+        let card = |o: &crate::offer::Offer, sid: crate::event::SessionId, up: &'static str| {
+            let is_front = up == "front";
+            CardState {
+                id: format!("card#{}", o.id),
+                session: session_id(sid),
+                whose: if o.claudes() { "claude" } else { "tarae" },
+                kind: o.kind(),
+                title: o.title.clone(),
+                asks: asks(o),
+                answers: o.answers(quick),
+                state: match o.state {
+                    crate::offer::OfferState::Asking => "asking",
+                    crate::offer::OfferState::Installing(_) => "installing",
+                    crate::offer::OfferState::Failed(_) => "failed",
+                },
+                weighty: o.weighty(),
+                settled: is_front && self.offer_settled(),
+                rev: o.rev,
+                up,
+                waited_ms: ms(o.since.elapsed()),
+                in_sight_ms: self
+                    .offer_seen
+                    .get()
+                    .filter(|&(id, rev, _)| (id, rev) == (o.id, o.rev))
+                    .map(|(.., at)| ms(at.elapsed())),
+                seen_whole: is_front && self.offer_seen_whole(),
+                at: self.screen.offer_card.filter(|_| is_front),
+            }
+        };
+        let mut cards: Vec<CardState> = self
+            .offers
+            .iter()
+            .enumerate()
+            .map(|(i, o)| card(o, front.id, if i == 0 { "front" } else { "stacked" }))
+            .collect();
+        cards.extend(front.parked.iter().map(|o| card(o, front.id, "parked")));
+        for l in &self.sessions {
+            cards.extend(l.parked.iter().map(|o| card(o, l.id, "parked")));
+        }
+        cards
     }
 }
 
@@ -813,6 +831,7 @@ impl UiState {
             "front": self.front,
             "sessions": sessions,
             "cards": cards,
+            "inbox": self.inbox.iter().map(crate::inbox::Entry::json).collect::<Vec<_>>(),
             "toasts": toasts,
             "panels": self.panels.json(),
             "runs": self.runs.iter().map(panels::Run::json).collect::<Vec<_>>(),
@@ -888,6 +907,10 @@ impl UiState {
                 line += if c.settled { " · settled" } else { " · settling" };
             }
             out.push(line);
+        }
+        if !self.inbox.is_empty() {
+            let ids: Vec<String> = self.inbox.iter().map(|e| format!("{} ({})", e.id, e.session)).collect();
+            out.push(format!("inbox, oldest first: {}", ids.join(" · ")));
         }
         for t in &self.toasts {
             let text = t.text.lines().next().unwrap_or_default();

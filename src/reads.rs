@@ -42,6 +42,8 @@ pub struct Pending {
     pub look: Look,
     /// Where it reads, as the capability model sorts places (its card's `card` line — `cards.rs`).
     pub class: crate::cards::Class,
+    /// When it came to wait — its place in the inbox (`inbox.rs`).
+    pub since: std::time::Instant,
 }
 
 /// Where the call reads — `cwd` is where relative paths start (claude's, the project's root).
@@ -202,7 +204,8 @@ pub fn request(ed: &mut Editor, request_id: &str, req: &Value) -> Option<Value> 
             if ok {
                 return crate::chat::respond(ed, &request_id, allow(&input));
             }
-            c.reads.push_back(Pending { request_id, generation, input, look, class });
+            let since = std::time::Instant::now();
+            c.reads.push_back(Pending { request_id, generation, input, look, class, since });
             refold(ed);
             next(ed);
         }

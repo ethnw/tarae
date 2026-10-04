@@ -27,6 +27,8 @@ pub struct Pending {
     pub input: Value,
     /// What Claude thought or said just before asking (the review shows it: why this edit).
     pub reason: String,
+    /// When it asked — its place in the inbox (`inbox.rs`).
+    pub since: std::time::Instant,
 }
 
 #[derive(Default)]
@@ -157,6 +159,7 @@ pub fn request(ed: &mut Editor, request_id: &str, req: &Value) -> Option<Value> 
         tool: tool.to_string(),
         input: req["input"].clone(),
         reason,
+        since: std::time::Instant::now(),
     };
     match c.edits.at_end.clone() {
         Some(root) => unasked(ed, root, p),
@@ -353,7 +356,7 @@ fn show(ed: &mut Editor, p: Pending) {
         .and_then(|c| c.msgs.iter().rev().find(|m| m.role == crate::chat::Role::User))
         .map(|m| m.text.lines().next().unwrap_or_default().to_string())
         .unwrap_or_else(|| format!("an edit to {}", crate::chat::shown(&ed.session.root, &path)));
-    let reason = p.reason.clone();
+    let (reason, since) = (p.reason.clone(), p.since);
     // The keys go to the review; the file is the user's now (follow won't close it as a preview)
     let from_chat = ed.session.chat.as_ref().is_some_and(|c| c.focused);
     if let Some(c) = &mut ed.session.chat {
@@ -372,6 +375,7 @@ fn show(ed: &mut Editor, p: Pending) {
     if let Some(r) = &mut ed.session.review {
         r.from_chat = from_chat;
         r.reason = reason;
+        r.asked = since;
         // (its turn in the chat is the step)
         r.own_turn = false;
         let g = r.generation;

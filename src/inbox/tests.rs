@@ -1,0 +1,223 @@
+//! The inbox's order, `C-q` across sessions (#94's case too), the status line's count, `enter`.
+
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use crate::editor::Editor;
+use crate::event::SessionId;
+use crate::key::{Code, Key};
+use crate::offer::{Offer, What};
+
+/// An editor in `front`, with sessions for `back` and `third` behind it — folders in the test's own temp
+/// folder.
+fn three(name: &str) -> (Editor, PathBuf, SessionId, SessionId) {
+    let dir = std::env::temp_dir().join(format!("tarae-inbox-{name}-{}", std::process::id()));
+    std::fs::remove_dir_all(&dir).ok();
+    for p in ["front", "back", "third"] {
+        std::fs::create_dir_all(dir.join(p)).unwrap();
+    }
+    let dir = std::fs::canonicalize(dir).unwrap();
+    let mut ed = Editor::new(crate::config::Config::default());
+    (ed.session.root, ed.session.name) = (dir.join("front"), "front".into());
+    let back = ed.session_open(&dir.join("back")).unwrap();
+    let third = ed.session_open(&dir.join("third")).unwrap();
+    assert!(ed.session_switch(0));
+    (ed, dir, back, third)
+}
+
+/// A card of Claude's (it asks to see the screen) that came `ago` seconds ago.
+fn claudes(n: u64, ago: u64) -> Offer {
+    let what = What::Screen { call: crate::tools::Call::test(n) };
+    let mut o = Offer::new(format!("Claude asks {n}"), "to see the screen", "", String::new(), what);
+    o.since = Instant::now() - Duration::from_secs(ago);
+    o
+}
+
+/// A card of tarae's own (the project's settings ask for trust) that came `ago` seconds ago.
+fn tarae(ago: u64) -> Offer {
+    let what = What::ProjectTrust { hash: 7 };
+    let mut o =
+        Offer::new("Trust this project's settings?".into(), "its .tarae.toml runs", "", String::new(), what);
+    o.since = Instant::now() - Duration::from_secs(ago);
+    o
+}
+
+fn session(ed: &mut Editor, id: SessionId) -> &mut crate::session::Session {
+    std::iter::once(&mut ed.session).chain(&mut ed.sessions).find(|l| l.id == id).expect("the session")
+}
+
+/// Card `o` waiting in session `id` (behind), with an id of its own as `push_offer` gives one.
+fn park(ed: &mut Editor, id: SessionId, mut o: Offer) {
+    ed.offer_seq += 1;
+    o.id = ed.offer_seq;
+    session(ed, id).parked.push(o);
+}
+
+/// Card `o` up in front, keeping when it came (`push_offer` says now).
+fn up(ed: &mut Editor, o: Offer) {
+    let since = o.since;
+    ed.push_offer(o);
+    ed.offers.last_mut().unwrap().since = since;
+}
+
+fn feed(ed: &mut Editor, keys: &str) {
+    let mut chars = keys.chars();
+    while let Some(c) = chars.next() {
+        let key = match c {
+            '<' => chars.by_ref().take_while(|&c| c != '>').collect::<String>().parse().unwrap(),
+            c => Key::plain(Code::Char(c)),
+        };
+        ed.handle_key(key);
+    }
+}
+
+fn screen(ed: &mut Editor, w: u16, h: u16) -> Vec<String> {
+    let mut bytes = Vec::new();
+    crate::term::render(ed, &mut bytes, w, h).unwrap();
+    let mut vt = vt100::Parser::new(h, w, 0);
+    vt.process(&bytes);
+    vt.screen().rows(0, w).collect()
+}
+
+/// Every session's cards — up in front, stacked, parked behind, Claude's and tarae's — and the edits waiting
+/// for their review, in one list, oldest first, whatever session each is in. A card downloading waits for
+/// nobody: not in it. The UI state lists the same, in the same order, and every card it lists that waits is
+/// in it.
+#[test]
+fn the_inbox_is_every_sessions_waiting_things_oldest_first() {
+    let (mut ed, dir, back, third) = three("order");
+    // Up in front: two cards (the stacked one older); parked behind: one in each
+    up(&mut ed, claudes(1, 30));
+    up(&mut ed, claudes(2, 300));
+    park(&mut ed, back, claudes(3, 120));
+    park(&mut ed, third, tarae(600));
+    // An edit of Claude's waiting for its review, behind
+    let mut chat = crate::chat::Chat::new();
+    chat.edits.queue.push_back(crate::edits::Pending {
+        request_id: "e1".into(),
+        tool: "Edit".into(),
+        input: serde_json::json!({ "file_path": "src/a.rs" }),
+        reason: String::new(),
+        since: Instant::now() - Duration::from_secs(60),
+    });
+    session(&mut ed, back).chat = Some(chat);
+    // One downloading: waits for nobody
+    let mut busy = tarae(900);
+    busy.state = crate::offer::OfferState::Installing(Instant::now());
+    park(&mut ed, back, busy);
+    let ids: Vec<String> = ed.inbox().into_iter().map(|e| e.id).collect();
+    let card = |o: &Offer| format!("card#{}", o.id);
+    let (front_new, front_old) = (card(&ed.offers[0]), card(&ed.offers[1]));
+    let parked = |ed: &mut Editor, id| card(&session(ed, id).parked[0]);
+    let (b, t) = (parked(&mut ed, back), parked(&mut ed, third));
+    let edit = format!("edit#s{back}:e1");
+    assert_eq!(ids, [t, front_old, b, edit.clone(), front_new], "oldest first, every session's");
+    let e = ed.inbox().into_iter().find(|e| e.id == edit).unwrap();
+    assert_eq!((e.kind, e.asks.as_str(), e.up), ("edit", "Claude's edit to src/a.rs", "queued"));
+    // The state: the same list in the same order — and it's built on the state's cards
+    let state = ed.ui_state();
+    assert_eq!(state.inbox.iter().map(|e| &e.id).collect::<Vec<_>>(), ids.iter().collect::<Vec<_>>());
+    for c in state.cards.iter().filter(|c| c.state != "installing") {
+        assert!(ids.contains(&c.id), "{} waits, so it's in the inbox", c.id);
+    }
+    assert!(!state.cards.iter().filter(|c| c.state == "installing").any(|c| ids.contains(&c.id)));
+    let json = state.json();
+    assert_eq!(json["inbox"][0]["id"], ids[0].as_str(), "{json}");
+    assert_eq!(json["inbox"][3]["kind"], "edit");
+    assert!(
+        state.text().contains(&format!("inbox, oldest first: {} (s{third})", ids[0])),
+        "{}",
+        state.text()
+    );
+    // The card's count says it, here and elsewhere
+    assert_eq!(ed.cards_waiting(), (2, 3));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// `C-q` goes to the one that has waited longest, in any session — before the card up in front, when one
+/// behind came first; once it's the card up, `C-q` gives it the keys. #94's case: a card of tarae's parked in
+/// a session behind whose turn ended (`done`, its Claude idle) — `C-q` said "no card waits for you" while it
+/// waited there; now it goes to it. Nothing anywhere: said.
+#[test]
+fn c_q_goes_to_the_oldest_in_any_session() {
+    let (mut ed, dir, back, third) = three("c-q");
+    up(&mut ed, claudes(1, 5));
+    park(&mut ed, back, claudes(2, 60));
+    // (#94: tarae's own card, parked in a session whose turn ended behind)
+    park(&mut ed, third, tarae(30));
+    session(&mut ed, third).turn_done = true;
+    // The status line counts all of them, every session's
+    let rows = screen(&mut ed, 160, 30);
+    assert!(rows[29].contains("▲3 waiting"), "{}", rows[29]);
+    // C-q: to back's (the oldest), its card up — not the keys to the front's
+    feed(&mut ed, "<C-q>");
+    assert_eq!(ed.session.id, back, "the one that waited longest");
+    assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some("Claude asks 2"));
+    assert!(!ed.card_keys);
+    assert_eq!(ed.keys_to().route(Key { code: Code::Char('q'), ctrl: true, alt: false }), {
+        crate::uistate::Region::Card(ed.offers[0].id)
+    });
+    // C-q: now the keys; `n` answers it there
+    feed(&mut ed, "<C-q>");
+    assert!(ed.card_keys, "the keys");
+    feed(&mut ed, "n");
+    assert!(ed.offers.is_empty() && !ed.card_keys);
+    // C-q: third's — tarae's own card, its turn over (#94) — before front's newer one
+    assert!(ed.status.as_ref().is_none_or(|s| !s.0.contains("no card waits")));
+    feed(&mut ed, "<C-q>");
+    assert_eq!(ed.session.id, third, "#94: found");
+    assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some("Trust this project's settings?"));
+    ed.offers.clear();
+    // …then front's
+    feed(&mut ed, "<C-q>");
+    assert_eq!((ed.session.id, ed.offers.first().map(|o| o.title.as_str())), (0, Some("Claude asks 1")));
+    feed(&mut ed, "<C-q>");
+    assert!(ed.card_keys);
+    // Nothing anywhere: said
+    ed.offers.clear();
+    feed(&mut ed, "<C-q>");
+    assert!(ed.status.as_ref().is_some_and(|s| s.0.contains("no card waits")), "{:?}", ed.status);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The list: `space I` (or a click on the status line's count) — a row each, its session named, what it
+/// asks, its kind and how long it has waited, the oldest in hand. `enter` goes to it — its session in front,
+/// its card up with the keys — and it's answered there. Nothing waiting: said, no list.
+#[test]
+fn the_list_goes_to_the_one_picked_and_its_card_takes_the_keys() {
+    let (mut ed, dir, back, third) = three("list");
+    park(&mut ed, back, claudes(1, 60));
+    park(&mut ed, third, tarae(400));
+    // A click on the count opens it
+    let rows = screen(&mut ed, 160, 30);
+    let x = rows[29].find("▲2 waiting").map(|b| rows[29][..b].chars().count()).expect("the count");
+    let click = crate::event::Mouse { kind: crate::event::MouseKind::Down, x: x as u16, y: 29, alt: false };
+    ed.handle_mouse(click);
+    let p = ed.picker.as_ref().expect("the inbox");
+    assert_eq!(p.title, super::INBOX);
+    let labels: Vec<&str> = p.items().iter().map(|i| i.label.as_str()).collect();
+    assert_eq!(labels.len(), 2);
+    assert!(labels[0].starts_with("third · Trust this project's settings?"), "{labels:?}");
+    assert!(labels[1].starts_with("back · Claude asks 1"), "{labels:?}");
+    assert!(p.items()[0].hint.starts_with("project-trust · 6 min"), "{}", p.items()[0].hint);
+    let rows = screen(&mut ed, 160, 30);
+    assert!(rows.iter().any(|r| r.contains("enter go to it")), "its keys: {rows:#?}");
+    // The second row, enter: back in front, its card up with the keys — `y` answers it there
+    feed(&mut ed, "<down><ret>");
+    assert!(ed.picker.is_none());
+    assert_eq!(ed.session.id, back);
+    assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some("Claude asks 1"));
+    assert!(ed.card_keys, "answered there");
+    // Answered meanwhile: the list follows; empty, it closes and says so
+    ed.inbox_open();
+    session(&mut ed, third).parked.clear();
+    ed.inbox_sync();
+    assert_eq!(ed.picker.as_ref().map(|p| p.items().len()), Some(1));
+    ed.offers.clear();
+    ed.inbox_sync();
+    assert!(ed.picker.is_none());
+    feed(&mut ed, "<space>I");
+    assert!(ed.picker.is_none());
+    assert!(ed.status.as_ref().is_some_and(|s| s.0.contains("nothing waits for you")), "{:?}", ed.status);
+    std::fs::remove_dir_all(&dir).ok();
+}

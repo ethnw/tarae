@@ -473,6 +473,18 @@ back (§8.2). P3 must not start before P2's measurements and the `file-link` res
 
 Next, from a few days of these lines: the real §7 table, and the stamp rate.
 
+**Before P2, a small batch (approved 2026-10-05)**, from a day of answering cards across six sessions — cards
+behind missed for minutes (#90, #94), one session asking to run the same test outside the sandbox ten times in an
+hour, each time read whole:
+
+- **The inbox** (`src/inbox.rs`): every waiting card and edit of every session, oldest first, built on the UI
+  state's cards (`Editor::ui_cards`) so the two can't disagree; `UiState.inbox` is its order. `space I` lists it
+  (a picker: it's empty most of the day, a moment's choice when it isn't); the status line counts it; `C-q` goes
+  to its first, any session.
+- **Since your last y** (`src/sinceyes.rs`): an `outside_sandbox` run said yes to before in the chat shows only
+  what changed since in what it runs — the project's hunks (a git tree per `y`, staged into a temp index), or a
+  script's diff — or `Unchanged since your y at 01:12`. It still waits for `y`.
+
 ---
 
 ## 10. Linux

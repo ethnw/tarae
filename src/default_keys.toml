@@ -247,6 +247,8 @@ u = "undo_turn"
 U = "redo_turn"
 # Sessions: a branch in a checkout of its own — the list (in it: n new · d end · b bring in · 1–9 switch)
 W = "session_list"
+# What waits for your answer, every session's, oldest first (C-q goes to the first)
+I = "inbox"
 # Comments, as in Helix: line comments over the selections' lines · a block comment around each selection
 c = "toggle_comments"
 C = "toggle_block_comments"

@@ -37,6 +37,20 @@ fn light_card(ed: &mut Editor) {
     ed.push_offer(o);
 }
 
+/// A light card up here, and an older one waiting in a session behind (`C-q` goes to that one first —
+/// `inbox.rs`).
+fn older_card_behind(ed: &mut Editor) {
+    let dir = std::env::temp_dir().join(format!("tarae-uistate-behind-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let id = ed.session_open(&dir).unwrap();
+    let mut o =
+        Offer::new("Restart anyway?".into(), "It's the binary it was.", "", String::new(), What::ReviewEnd);
+    o.since = Instant::now() - Duration::from_secs(60);
+    ed.session.parked.push(o);
+    assert!(ed.session_switch(0) && ed.session.id != id);
+    light_card(ed);
+}
+
 /// A weighty card whose answers do nothing here: a change set of a chat process that isn't there.
 fn weighty_card(ed: &mut Editor) {
     let q = "Claude renames `a` to `b` in 3 files.\n\nOne review for the set.";
@@ -166,6 +180,11 @@ const SCENES: &[Scene] = &[
     ("two cards stacked", |ed| {
         light_card(ed);
         weighty_card(ed);
+    }),
+    ("a card up, an older one in a session behind", older_card_behind),
+    ("a card up, an older one behind, the chat's draft", |ed| {
+        older_card_behind(ed);
+        chat(ed, "hello");
     }),
     ("the side panel", |ed| ed.sidebar_show(crate::sidebar::Mode::Outline)),
     ("the side panel in insert mode", |ed| {

@@ -88,6 +88,12 @@ JSON for programs, and a short text form for people and Claude, from the same st
       "state": "asking", "weighty": true, "settled": true, "rev": 0,
       "up": "front", "waited_ms": 4100, "in_sight_ms": 3900, "seen_whole": true, "at": [96, 30, 62, 9] }
   ],
+  "inbox": [
+    { "id": "card#12", "session": "s1", "kind": "run", "asks": "Claude wants to run a command · cargo test -p tarae",
+      "waited_ms": 4100, "up": "front" },
+    { "id": "edit#s0:review", "session": "s0", "kind": "edit", "asks": "Change 1 of 2 · src/a.rs",
+      "waited_ms": 900, "up": "review" }
+  ],
   "toasts": [ { "id": "toast#311", "kind": "warning", "text": "…", "where": "card", "shown": true } ],
   "panels": { "code": {…}, "side": {…}, "review": {…}, "edit_review": null, "picker": null,
               "slot": {…}, "chat": {…}, "follow": {…} },
@@ -142,6 +148,10 @@ side git · 4 rows · in hand git:src/term.rs
   - `seen_whole`: `offer_read`.
   - `waited_ms` / `in_sight_ms`: from `since` and `offer_seen`.
   - `at`: its rect, as drawn.
+- **`inbox`** (2026-10-05, `inbox.rs`) — what waits for the user, every session's, oldest first: the cards above
+  that wait (not downloading) and the edits waiting for their review (`edit#s0:review` up in its session,
+  `edit#s1:<request>` queued), reads queued for their card, a change set's files. Built from `cards` in the same
+  call, so the two can't disagree; `C-q` goes to its first.
 - **`toasts`** — the card's rows, and where they are: on a card, folded into the status line, or waiting for a
   card (U7).
 - **`panels`** — for the front session. Each holds what it shows and its *visible* rows (id + label +

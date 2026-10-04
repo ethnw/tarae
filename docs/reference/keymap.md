@@ -265,6 +265,7 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `space G` | … | More keys — see `space G` below |
 | `space h` | `select_references_to_symbol_under_cursor` | Select this symbol's uses |
 | `space i` | `llm_ask` | Ask Claude to edit selection |
+| `space I` | `inbox` | What waits for your answer |
 | `space j` | `jumplist_picker` | Jump list |
 | `space k` | `hover` | Show docs under cursor |
 | `space l` | `chat_open` | Chat with Claude |
@@ -480,6 +481,7 @@ Type `:` in normal mode. `Tab` completes command names and their arguments (path
 | `:log-open` |  | Open tarae's log (language servers, errors) |
 | `:procs` |  | What tarae runs and what it costs |
 | `:messages` |  | The notifications since tarae started, newest first |
+| `:inbox` |  | What waits for your answer, every session's, oldest first |
 | `:redraw` |  | Draw the whole screen again (when something else wrote over it) |
 | `:lsp-restart` |  | Restart this file's language server |
 | `:plugin-permissions` |  | What each plugin may do beyond the buffer |

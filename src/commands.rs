@@ -218,6 +218,7 @@ commands! {
         review_wide => "Read wide: hide rail and chat",
         session_new => "New session (its own branch)",
         session_list => "Sessions: switch, end, new",
+        inbox => "What waits for your answer",
         note_picker => "Claude's notes",
         undo_turn => "Undo Claude's last turn",
         model_picker => "Choose Claude's model",
@@ -1963,6 +1964,10 @@ fn session_new(cx: &mut Context) {
 
 fn session_list(cx: &mut Context) {
     cx.editor.session_list();
+}
+
+fn inbox(cx: &mut Context) {
+    cx.editor.inbox_open();
 }
 
 fn review_undo_change(cx: &mut Context) {

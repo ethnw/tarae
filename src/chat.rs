@@ -259,6 +259,9 @@ pub struct Chat {
     /// Scripts run by their path that run without asking for the rest of this conversation while they're
     /// what they were (real path, hash of what's in it — `a` on a run card, `readonly::script_pins`, #93).
     pub run_scripts: Vec<(PathBuf, u64)>,
+    /// The commands the user said yes to running outside the sandbox in this conversation, with what they ran
+    /// as it was then — the same one asked again says what changed since (`sinceyes.rs`).
+    pub outside_yes: Vec<crate::sinceyes::Yes>,
     /// A message sent while Claude works (#23) — it goes when the turn ends; `↑` on an empty input takes it
     /// back to edit (or drop).
     pub queued: Option<String>,
@@ -360,6 +363,7 @@ impl Chat {
             sees: false,
             run_allow: Vec::new(),
             run_scripts: Vec::new(),
+            outside_yes: Vec::new(),
             queued: None,
             screen: None,
             conversation: None,
@@ -688,6 +692,7 @@ pub fn reset(ed: &mut Editor) {
     c.plan = None;
     c.unprotected = false;
     c.allowed = Default::default();
+    c.outside_yes.clear();
     c.state = State::Idle;
     c.scroll = 0;
     c.follow.new_turn();
@@ -1907,6 +1912,7 @@ mod tests {
             input: serde_json::json!({"file_path": shots.join(f)}),
             look: crate::reads::look("Read", &serde_json::json!({"file_path": shots.join(f)}), &root),
             class: crate::cards::Class::Elsewhere,
+            since: std::time::Instant::now(),
         };
         let card = |ed: &Editor| match ed.offers.first().map(|o| (&o.what, o.question.clone(), o.id)) {
             Some((crate::offer::What::Read { pending, folder, .. }, q, id)) => {
