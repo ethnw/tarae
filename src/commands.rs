@@ -216,6 +216,7 @@ commands! {
         review_turn => "Review Claude's last turn",
         review_undo_change => "Take this change back",
         session_new => "New session (its own branch)",
+        session_list => "Sessions: switch, end, new",
         note_picker => "Claude's notes",
         undo_turn => "Undo Claude's last turn",
         model_picker => "Choose Claude's model",
@@ -1926,6 +1927,10 @@ fn session_new(cx: &mut Context) {
     cx.editor.session_prompt();
 }
 
+fn session_list(cx: &mut Context) {
+    cx.editor.session_list();
+}
+
 fn review_undo_change(cx: &mut Context) {
     // (the change at the cursor back to the review's base — `space g d`'s, where the git tab can't open)
     cx.editor.git_reset_hunk();
@@ -2148,10 +2153,12 @@ fn workspace_symbol_picker(cx: &mut Context) {
 }
 
 fn buffer_picker(cx: &mut Context) {
+    // (the front lane's)
     let items = cx
         .editor
-        .docs
-        .iter()
+        .buffers()
+        .into_iter()
+        .map(|i| &cx.editor.docs[i])
         .map(|d| crate::picker::Item {
             label: format!(
                 "{}{}",

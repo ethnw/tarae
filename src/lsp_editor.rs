@@ -63,6 +63,10 @@ pub struct LspState {
     pub(crate) arrived: Option<std::time::Instant>,
     /// Servers no open file uses, since when (`lsp_unused` — they stop after `IDLE_STOP`).
     unused: HashMap<ClientId, std::time::Instant>,
+    /// A lane behind's servers while its Claude is idle, since when (`lsp_rest` — they stop after
+    /// `rest_after`, `IDLE_STOP` unless a test says).
+    resting: HashMap<ClientId, std::time::Instant>,
+    pub(crate) rest_after: Option<std::time::Duration>,
     /// The `g r` in hand (N2): its list is laid out on a worker — the code of each place read there.
     refs: Refs,
     /// Claude's `references` calls waiting for their server (N5, `nav.rs`), by number · the next number.
@@ -1920,6 +1924,58 @@ impl Editor {
         });
     }
 
+    /// Every event, with lanes behind (`lanes_sync`): their servers whose Claude is idle rest — after
+    /// `rest_after` each stops, as if its files were closed (they stay open; the lane gets it back at the
+    /// front, or when its Claude starts a turn — `Lane.asleep`). One no longer resting (its lane came to
+    /// the front, its Claude is answering) has its wait called off.
+    pub(crate) fn lsp_rest(&mut self, resting: &[(ClientId, bool)]) {
+        for &(cid, rest) in resting {
+            match (rest, self.lsp.resting.contains_key(&cid)) {
+                (true, false) => {
+                    let since = std::time::Instant::now();
+                    self.lsp.resting.insert(cid, since);
+                    let wait = self.lsp.rest_after.unwrap_or(IDLE_STOP);
+                    self.events.shared_jobs().spawn(move || {
+                        std::thread::sleep(wait);
+                        move |ed: &mut Editor| ed.lsp_stop_resting(cid, since, wait)
+                    });
+                }
+                (false, true) => {
+                    self.lsp.resting.remove(&cid);
+                }
+                _ => {}
+            }
+        }
+        // (gone servers' waits)
+        let clients: Vec<ClientId> = self.lsp.clients.iter().map(|c| c.id).collect();
+        self.lsp.resting.retain(|c, _| clients.contains(c));
+    }
+
+    fn lsp_stop_resting(&mut self, cid: ClientId, since: std::time::Instant, wait: std::time::Duration) {
+        if self.lsp.resting.get(&cid) != Some(&since) {
+            return;
+        }
+        self.lsp.resting.remove(&cid);
+        let Some(root) = self.client(cid).map(|c| c.root.clone()) else { return };
+        let served: Vec<DocId> =
+            self.docs.iter().filter(|d| d.lsp.clients().any(|c| c == cid)).map(|d| d.id).collect();
+        let Some(name) = self.lsp_stopped(cid) else { return };
+        // (its files get it back when their lane is in front again, or its Claude asks)
+        let owner = self.lane_of(&root);
+        if let Some(l) = self.lanes.iter_mut().find(|l| Some(l.id) == owner) {
+            for d in served {
+                if !l.asleep.contains(&d) {
+                    l.asleep.push(d);
+                }
+            }
+        }
+        let idle = crate::term::duration(wait.as_secs_f32());
+        let msg = format!("{name} for {} stopped — its session idle behind for {idle}", root.display());
+        crate::log::line(&name, "stop", &msg);
+        // (nothing of it is on screen)
+        self.unchanged = true;
+    }
+
     fn lsp_stop_if_unused(&mut self, cid: ClientId, since: std::time::Instant, wait: std::time::Duration) {
         if self.lsp.unused.get(&cid) != Some(&since) {
             return;
@@ -3175,6 +3231,59 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(reaped(pid), "reaped");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A session behind rests: once its Claude is idle its servers stop after their wait (quietly — not a
+    /// failure), their files staying open; one whose Claude is answering keeps its server (its tools ask
+    /// it), until that turn ends. Coming to the front brings the server back for its files.
+    #[test]
+    fn a_resting_sessions_servers_stop_and_a_working_ones_stay() {
+        let dir = std::env::temp_dir().join(format!("tarae-lsp-rest-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        for d in ["front", "idle", "busy"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+            std::fs::write(dir.join(d).join("main.rs"), "fn main() {}\n").unwrap();
+            std::fs::write(dir.join(d).join("Cargo.toml"), "[package]\nname = \"t\"\n").unwrap();
+        }
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let cfg = "[lsp.rust-analyzer]\ncommand = \"sh\"\nargs = [\"-c\", \"cat > /dev/null\"]\n\
+                   [lang.rust]\nlsp = [\"rust-analyzer\"]\n";
+        let (config, w) = crate::config::parse(cfg);
+        assert!(w.is_empty(), "{w:?}");
+        let mut ed = Editor::new(config);
+        ed.lane.root = dir.join("front");
+        ed.lsp.rest_after = Some(Duration::from_millis(50));
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        let server_of = |ed: &mut Editor, lane: &str| {
+            let id = ed.lane_open(&dir.join(lane)).unwrap();
+            ed.open(std::path::Path::new("main.rs")).unwrap();
+            (id, ed.doc().lsp.client.expect("its server"))
+        };
+        let (idle, idle_srv) = server_of(&mut ed, "idle");
+        let (busy, busy_srv) = server_of(&mut ed, "busy");
+        // The busy one's Claude is answering (a stand-in that reads and says nothing)
+        crate::chat::open(&mut ed);
+        ed.lane.chat.as_mut().unwrap().state = crate::chat::State::Thinking;
+        ed.lane_switch(0);
+        ed.handle_event(crate::event::Event::Resize);
+        settle_for(&mut ed, 5, |ed| ed.client(idle_srv).is_none());
+        assert!(ed.client(idle_srv).is_none(), "the idle session's server stopped");
+        settle_for(&mut ed, 1, |_| false);
+        assert!(ed.client(busy_srv).is_some(), "the working one's is kept");
+        assert!(!ed.lsp.failed.contains_key("rust-analyzer"), "a rest isn't a failure");
+        assert!(ed.docs.iter().any(|d| d.path == Some(dir.join("idle/main.rs"))), "its file stays open");
+        // Its turn over: it rests too
+        let l = ed.lanes.iter_mut().find(|l| l.id == busy).unwrap();
+        l.chat.as_mut().unwrap().state = crate::chat::State::Idle;
+        ed.handle_event(crate::event::Event::Resize);
+        settle_for(&mut ed, 5, |ed| ed.client(busy_srv).is_none());
+        assert!(ed.client(busy_srv).is_none(), "stopped once its Claude was idle");
+        // In front again: its file gets a server back
+        ed.lane_switch(idle);
+        assert!(ed.doc().lsp.client.is_some_and(|c| c != idle_srv), "a new one for its file");
+        ed.lanes.clear();
         std::fs::remove_dir_all(&dir).ok();
     }
 

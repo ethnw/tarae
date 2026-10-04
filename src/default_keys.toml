@@ -173,10 +173,6 @@ a = "review_at_end"
 t = "review_turn"
 u = "review_undo_change"
 
-# Sessions: a branch in a checkout of its own (n = new)
-[normal.space.W]
-n = "session_new"
-
 [normal.space.x]
 x = "test_nearest"
 d = "test_debug"
@@ -239,6 +235,8 @@ n = "note_here"
 N = "note_picker"
 u = "undo_turn"
 U = "redo_turn"
+# Sessions: a branch in a checkout of its own — the list (in it: n new · d end · b bring in · 1–9 switch)
+W = "session_list"
 c = "claude_code"
 C = "claude_code_mention"
 "?" = "command_palette"

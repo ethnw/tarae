@@ -257,6 +257,9 @@ pub struct Screen {
     pub chat_links: std::cell::RefCell<Vec<(usize, usize, usize, crate::chat::Link)>>,
     /// The minimized chat card (x, y, width, height) — a click on it brings the panel back.
     pub chat_mini: std::cell::Cell<Option<(usize, usize, usize, usize)>>,
+    /// The sessions' tabs (the chat's top row) and the status line's chip: (row, start col, end col, what a
+    /// click does).
+    pub lane_spots: std::cell::RefCell<Vec<(usize, usize, usize, crate::lane::Spot)>>,
     /// The code review's file rail: (row, file index) — a click opens that file.
     pub review_rail: std::cell::RefCell<Vec<(usize, usize)>>,
     /// The side panel's rows: (screen row, list row) — a click opens it.
@@ -705,17 +708,20 @@ impl Editor {
     fn add_doc(&mut self, doc: Document) {
         let slot = self.replaceable_scratch();
         self.lane.scratch = None;
+        let id = doc.id;
         if let Some(i) = slot {
-            let (old, new) = (self.docs[i].id, doc.id);
+            let old = self.docs[i].id;
             for v in self.lane.views.iter_mut().filter(|v| v.doc == old) {
-                (v.doc, v.top, v.left) = (new, 0, 0);
+                (v.doc, v.top, v.left) = (id, 0, 0);
             }
+            self.lane.docs.retain(|&d| d != old);
             self.docs[i] = doc;
             self.current = i;
         } else {
             self.docs.push(doc);
             self.current = self.docs.len() - 1;
         }
+        self.lane_keeps(id);
     }
 
     /// A buffer with no file behind it (a deleted file in a review) — made current. Returns its id.
@@ -744,6 +750,7 @@ impl Editor {
         let id = self.alloc_id();
         self.docs.push(Document::from_str(id, ""));
         self.current = self.docs.len() - 1;
+        self.lane_keeps(id);
     }
 
     /// The project's folder (`root`).
@@ -767,6 +774,7 @@ impl Editor {
         let path = std::fs::canonicalize(&path).or_else(|_| std::path::absolute(&path))?;
         if let Some(i) = self.docs.iter().position(|d| d.path.as_deref() == Some(path.as_path())) {
             self.current = i;
+            self.lane_keeps(self.docs[i].id);
             return Ok(());
         }
         let id = self.alloc_id();
@@ -860,18 +868,29 @@ impl Editor {
         Ok(())
     }
 
-    /// Closes a document (without asking) — notifies servers; panes showing it switch to another document.
+    /// Closes a document (without asking) — notifies servers; panes showing it switch to another document
+    /// (the front lane's buffer after it, else the one before; none left: a blank one).
     pub fn close_doc(&mut self, gone: DocId) {
         let Some(i) = self.docs.iter().position(|d| d.id == gone) else { return };
         self.plugin_closing(gone);
         self.lsp_did_close(gone);
         self.qlist_doc_closing(gone);
+        let next = match i == self.current {
+            true => {
+                let mine = self.buffers();
+                let at = mine.iter().position(|&k| k == i);
+                at.and_then(|a| mine.get(a + 1).or_else(|| mine.get(a.checked_sub(1)?)))
+                    .map(|&k| self.docs[k].id)
+            }
+            false => Some(self.docs[self.current].id),
+        };
         self.docs.remove(i);
-        if self.docs.is_empty() {
-            self.new_scratch();
+        for l in std::iter::once(&mut self.lane).chain(&mut self.lanes) {
+            l.docs.retain(|&d| d != gone);
         }
-        if self.current > i || self.current >= self.docs.len() {
-            self.current = self.current.saturating_sub(1).min(self.docs.len() - 1);
+        match next.and_then(|id| self.docs.iter().position(|d| d.id == id)) {
+            Some(k) => self.current = k,
+            None => self.new_scratch(),
         }
         let now = self.docs[self.current].id;
         for v in self.lane.views.iter_mut() {
@@ -897,6 +916,7 @@ impl Editor {
             let d = self.doc();
             (d.id, d.top, d.left)
         };
+        self.lane_keeps(doc);
         let focus = self.lane.focus;
         if let Some(v) = self.view_mut(focus) {
             (v.doc, v.top, v.left) = (doc, top, left);
@@ -1006,9 +1026,11 @@ impl Editor {
         }
     }
 
+    /// `:bn`/`:bp` — through the front lane's buffers.
     pub fn cycle_buffer(&mut self, delta: isize) {
-        let n = self.docs.len() as isize;
-        self.current = (self.current as isize + delta).rem_euclid(n) as usize;
+        let mine = self.buffers();
+        let at = mine.iter().position(|&i| i == self.current).unwrap_or(0) as isize;
+        self.current = mine[(at + delta).rem_euclid(mine.len() as isize) as usize];
     }
 
     /// Opens `path` with the cursor at (line, byte column) — a jump point is left behind.
@@ -1287,6 +1309,7 @@ impl Editor {
         self.git_schedule();
         self.blame_schedule();
         self.sidebar_sync();
+        self.lanes_sync();
         self.picker_filter();
         self.conflicts_sync();
         self.disk_sync();
@@ -1420,6 +1443,14 @@ impl Editor {
         {
             self.dragging = Some(b);
             return;
+        }
+        // The sessions' tabs, dropdown, chip
+        if m.kind == K::Down
+            && self.picker.is_none()
+            && let Some(&(.., spot)) =
+                s.lane_spots.borrow().iter().find(|l| l.0 == y && (l.1..l.2).contains(&x))
+        {
+            return self.lane_spot(spot);
         }
         if let Some(p) = self.picker.as_mut() {
             // (a click acts on this query's rows, not the last one's)
@@ -1998,6 +2029,9 @@ impl Editor {
                 self.qlist_from_picker();
                 return;
             }
+            // The session list: its letters act on the row, a digit picks one (nothing is typed)
+            (Code::Char(c), false) if p.keys && !key.alt => return self.session_list_key(c),
+            (Code::Backspace, _) if p.keys => return,
             // Global search results: replace what's listed
             (Code::Char('r'), true) if p.grep.is_some() => return self.replace_ask(),
             // A branch: rename it (the name to change, in a `:` line) · delete it
@@ -2112,6 +2146,10 @@ impl Editor {
             // (one checked out in another worktree: refused there, naming it)
             Action::Branch { name, .. } => {
                 self.git_switch(&name);
+                Ok(())
+            }
+            Action::Lane(id) => {
+                self.lane_switch(id);
                 Ok(())
             }
             // Open it at its first change
@@ -7193,6 +7231,190 @@ mod tests {
         let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
         assert!(us < 1000.0, "{us:.1} µs (budget 1 ms)");
         git_in(&repo, &["worktree", "remove", "--force", wt.to_str().unwrap()]);
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// Each session has its own buffers: `:bn`, `space b` and the header's tabs go through the front lane's
+    /// documents only; closing a lane's last one leaves a blank one there, not another lane's file.
+    #[test]
+    fn each_session_has_its_own_buffers() {
+        let repo = git_repo("lane-bufs", &[("a.txt", "a\n"), ("b.txt", "b\n")]);
+        let wt = worktree(&repo, "bufs");
+        std::fs::write(wt.join("c.txt"), "c\n").unwrap();
+        let mut ed = editor("");
+        ed.lane.root = repo.clone();
+        feed(&mut ed, ":o a.txt<ret>:o b.txt<ret>");
+        let behind = ed.lane_open(&wt).unwrap();
+        feed(&mut ed, ":o a.txt<ret>:o c.txt<ret>");
+        let shown = |ed: &Editor| -> Vec<PathBuf> {
+            ed.buffers().iter().filter_map(|&i| ed.docs[i].path.clone()).collect()
+        };
+        let header = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 120, 20).unwrap();
+            let mut parser = vt100::Parser::new(20, 120, 0);
+            parser.process(&bytes);
+            parser.screen().rows(0, 120).next().unwrap()
+        };
+        assert_eq!(shown(&ed), [wt.join("a.txt"), wt.join("c.txt")]);
+        let h = header(&mut ed);
+        assert!(h.contains("a.txt  c.txt") && !h.contains("b.txt"), "{h}");
+        feed(&mut ed, ":bn<ret>");
+        assert_eq!(ed.doc().path.as_deref(), Some(wt.join("a.txt").as_path()), ":bn goes round in its lane");
+        feed(&mut ed, ":bn<ret>");
+        assert_eq!(ed.doc().path.as_deref(), Some(wt.join("c.txt").as_path()));
+        feed(&mut ed, "<space>b");
+        let listed: Vec<String> =
+            ed.picker.as_ref().unwrap().items().iter().map(|i| i.label.clone()).collect();
+        assert_eq!(listed, ["a.txt", "c.txt"]);
+        // The checkout tarae started in: its two
+        feed(&mut ed, "<esc>:lane-switch 0<ret>");
+        assert_eq!(shown(&ed), [repo.join("a.txt"), repo.join("b.txt")]);
+        assert!(header(&mut ed).contains("a.txt  b.txt"));
+        feed(&mut ed, ":bp<ret>");
+        assert_eq!(ed.doc().path.as_deref(), Some(repo.join("a.txt").as_path()));
+        // Its last ones closed: a blank buffer there, the other lane's files stay out of it
+        ed.lane_switch(behind);
+        feed(&mut ed, ":bc<ret>:bc<ret>");
+        assert_eq!((ed.doc().path.as_deref(), ed.buffers().len()), (None, 1), "{:?}", shown(&ed));
+        assert_eq!(ed.docs.iter().filter(|d| d.path.is_some()).count(), 2, "lane 0's files still open");
+        ed.lanes.clear();
+        git_in(&repo, &["worktree", "remove", "--force", wt.to_str().unwrap()]);
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// A Claude behind asking to see the screen — its card parks in its lane: that lane waits for you.
+    fn waits_for_you(ed: &mut Editor, id: crate::event::LaneId) {
+        let msg = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "screen", "arguments": {}}});
+        ed.with_lane(id, |ed| {
+            crate::tools::mcp(ed, 0, "c1", &msg);
+        });
+        assert!(lane(ed, id).parked.iter().any(crate::offer::Offer::claudes), "parked");
+    }
+
+    /// `space W`: the sessions, one row each, the one in front in hand — what git says of each against
+    /// its base, what its Claude does (`▲` waits for you); letters are keys, not a query: `j` and Enter or a
+    /// digit switch, `n` asks a new one's name, `d` on the checkout tarae started in is refused.
+    #[test]
+    fn the_session_list_shows_and_switches() {
+        let repo = git_repo("lane-list", &[("a.txt", "a\n")]);
+        let wt = worktree(&repo, "feat");
+        std::fs::write(wt.join("a.txt"), "feat\n").unwrap();
+        git_in(&wt, &["commit", "-qam", "feat"]);
+        std::fs::write(wt.join("new.txt"), "new\n").unwrap();
+        let other = worktree(&repo, "other");
+        let mut ed = editor("");
+        (ed.lane.root, ed.lane.name) = (repo.clone(), "proj".into());
+        ed.lane.git_branch = Some("main".into());
+        let feat = ed.lane_open(&wt).unwrap();
+        ed.lane.name = "feat".into();
+        let two = ed.lane_open(&other).unwrap();
+        ed.lane.name = "other".into();
+        waits_for_you(&mut ed, feat);
+        ed.lane_switch(0);
+        feed(&mut ed, "<space>W");
+        let rows = |ed: &Editor| -> Vec<(String, String)> {
+            let p = ed.picker.as_ref().expect("the list");
+            p.items().iter().map(|i| (i.label.clone(), i.hint.trim().to_string())).collect()
+        };
+        let p = ed.picker.as_ref().expect("the list");
+        assert!(p.keys && p.current().unwrap().action == Action::Lane(0), "the one in front in hand");
+        // Drawn: nothing to type into — what a digit does instead of `›`
+        let mut bytes = Vec::new();
+        crate::term::render(&mut ed, &mut bytes, 120, 20).unwrap();
+        let mut parser = vt100::Parser::new(20, 120, 0);
+        parser.process(&bytes);
+        assert!(parser.screen().contents().contains("1–3 switch to that row"));
+        assert!(parser.screen().hide_cursor(), "no cursor");
+        settle_until(&mut ed, |ed| rows(ed)[1].1.contains("changed"));
+        let r = rows(&ed);
+        // (the checkout tarae started in by its branch, as the sessions are)
+        assert_eq!(r.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(), ["main", "feat", "other"]);
+        assert!(r[1].1.starts_with("↑1  1 changed  waits for you"), "{r:?}");
+        assert!(r[0].1.starts_with("here"), "{r:?}");
+        assert_eq!(ed.picker.as_ref().unwrap().items()[1].glyph, Some(("▲", "warning")));
+        // Letters don't type: `j` moves, Enter switches
+        feed(&mut ed, "j");
+        assert_eq!(ed.picker.as_ref().unwrap().query, "");
+        feed(&mut ed, "j<ret>");
+        assert_eq!((ed.lane.id, ed.picker.is_none()), (two, true));
+        // A digit: that row's
+        feed(&mut ed, "<space>W1");
+        assert_eq!(ed.lane.id, 0);
+        assert!(ed.offers.is_empty(), "feat's card waits in feat");
+        // n: the new one's name
+        feed(&mut ed, "<space>Wn");
+        assert!(matches!(ed.prompt.as_ref().map(|p| &p.kind), Some(PromptKind::Session)));
+        feed(&mut ed, "<esc><space>Wd");
+        assert!(ed.messages.iter().any(|m| m.2.contains("is the checkout tarae started in — it stays")));
+        ed.lanes.clear();
+        for w in [&wt, &other] {
+            git_in(&repo, &["worktree", "remove", "--force", w.to_str().unwrap()]);
+        }
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// The chat shows the sessions: a tab row over it (`●` working, `▲` waiting for you, `+` new); where it
+    /// doesn't fit, one dropdown with how many others wait. A tab click switches the whole lane; with no
+    /// chat, the status line's chip names the session and the count, and a click on it opens the list.
+    #[test]
+    fn the_chat_shows_the_sessions_and_a_click_switches() {
+        use crate::event::{Mouse, MouseKind};
+        let repo = git_repo("lane-tabs", &[("a.txt", "a\n")]);
+        let (wt, other) = (worktree(&repo, "tabs-one"), worktree(&repo, "tabs-two"));
+        let mut ed = editor("");
+        (ed.lane.root, ed.lane.name) = (repo.clone(), "proj".into());
+        ed.lane.git_branch = Some("main".into());
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        let one = ed.lane_open(&wt).unwrap();
+        ed.lane.name = "fix-login-everywhere".into();
+        let two = ed.lane_open(&other).unwrap();
+        ed.lane.name = "parser".into();
+        ed.lane_switch(0);
+        waits_for_you(&mut ed, two);
+        crate::chat::open(&mut ed);
+        ed.lane.chat.as_mut().unwrap().focused = false;
+        let rows = |ed: &mut Editor, w: u16| -> Vec<String> {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, w, 24).unwrap();
+            let mut parser = vt100::Parser::new(24, w, 0);
+            parser.process(&bytes);
+            parser.screen().rows(0, w).collect()
+        };
+        let r = rows(&mut ed, 200);
+        // (the checkout tarae started in by its branch)
+        let tabs = r.iter().position(|r| r.contains("main │ fix-login-everywhere │ parser ▲ │ +"));
+        let tabs = tabs.unwrap_or_else(|| panic!("the tabs: {r:#?}"));
+        assert!(r[tabs + 1].contains("claude"), "over the chat's title: {r:#?}");
+        // Narrow: the dropdown
+        let r = rows(&mut ed, 100);
+        assert!(r.iter().any(|r| r.contains("◂ main ▾ 1/3 ▲1 ▸")), "{r:#?}");
+        // A click on a tab: that lane, whole
+        let r = rows(&mut ed, 200);
+        let x = r[tabs].find("fix-login").map(|b| r[tabs][..b].chars().count()).unwrap();
+        ed.handle_mouse(Mouse { kind: MouseKind::Down, x: x as u16 + 2, y: tabs as u16, alt: false });
+        assert_eq!(ed.lane.id, one);
+        // No chat there: the chip, then the list from it
+        let r = rows(&mut ed, 120);
+        let status = r.iter().position(|r| r.contains("NORMAL")).expect("the status line");
+        assert!(r[status].contains("NORMAL ▌  fix-login-everywhere ▲1"), "{}", r[status]);
+        let x = r[status].find("fix-login").map(|b| r[status][..b].chars().count()).unwrap();
+        ed.handle_mouse(Mouse { kind: MouseKind::Down, x: x as u16, y: status as u16, alt: false });
+        assert!(ed.picker.as_ref().is_some_and(|p| p.keys), "the list");
+        ed.picker = None;
+        // The dropdown's arrows step
+        ed.lane_switch(0);
+        let r = rows(&mut ed, 100);
+        let y = r.iter().position(|r| r.contains("◂ main")).unwrap();
+        let x = r[y].find('▸').map(|b| r[y][..b].chars().count()).unwrap();
+        ed.handle_mouse(Mouse { kind: MouseKind::Down, x: x as u16, y: y as u16, alt: false });
+        assert_eq!(ed.lane.id, one, "▸: the next one");
+        ed.lanes.clear();
+        for w in [&wt, &other] {
+            git_in(&repo, &["worktree", "remove", "--force", w.to_str().unwrap()]);
+        }
         std::fs::remove_dir_all(&repo).ok();
     }
 

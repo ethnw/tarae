@@ -40,6 +40,9 @@ pub struct Lane {
     /// The blank scratch it opened with, until a document is added in it — the first file opened takes
     /// its place, as at startup.
     pub scratch: Option<DocId>,
+    /// Its buffers: the documents opened or shown in it (`:bn`/`:bp`, the tab row, `space b` go through
+    /// these — `Editor::buffers`). A document can be another lane's too.
+    pub docs: Vec<DocId>,
     /// Chat pane on the right (if open).
     pub chat: Option<crate::chat::Chat>,
     /// Claude's notes pinned to code (`notes.rs`).
@@ -98,6 +101,9 @@ pub struct Lane {
     /// front · Claude's waiting on one has been said (once while it's behind).
     pub parked: Vec<crate::offer::Offer>,
     pub waiting_told: bool,
+    /// Its documents whose servers stopped while it rested behind (`lsp_rest`) — attached again when it's in
+    /// front, or its Claude starts a turn.
+    pub asleep: Vec<DocId>,
 }
 
 impl Lane {
@@ -116,6 +122,7 @@ impl Lane {
             focus: view,
             current_doc: 0,
             scratch: None,
+            docs: Vec::new(),
             chat: None,
             notes: Default::default(),
             checkpoints: crate::checkpoint::Checkpoints {
@@ -150,6 +157,16 @@ impl Lane {
             last_session: None,
             parked: Vec::new(),
             waiting_told: false,
+            asleep: Vec::new(),
+        }
+    }
+
+    /// What the tabs, the chip and the list call it: a session by its name (its branch), the checkout tarae
+    /// started in by its branch (`main │ fix-login ● │ …`) — its folder's name until the branch is known.
+    pub fn label(&self) -> &str {
+        match (self.id, &self.git_branch) {
+            (0, Some(b)) => b,
+            _ => &self.name,
         }
     }
 
@@ -162,10 +179,123 @@ impl Lane {
     }
 }
 
+/// What a click on the sessions' tabs or chip does (`Screen.lane_spots`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Spot {
+    /// That lane to the front.
+    Lane(LaneId),
+    /// `+`: a new session.
+    New,
+    /// The dropdown's name, the status line's chip: the list (`space W`).
+    List,
+    /// The dropdown's `◂` · `▸`: the lane before · after the one in front.
+    Prev,
+    Next,
+}
+
+/// What a lane's Claude is doing, as its tab and its row in the session list say it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Doing {
+    Idle,
+    /// Answering — `●`.
+    Working,
+    /// Waiting for your answer: a card of its, an edit to review — `▲` (before working: it's both).
+    Waiting,
+}
+
 impl Editor {
     /// Whether a result of a lane behind is being applied (`with_lane`): what would take the screen waits.
     pub fn background(&self) -> bool {
         self.behind
+    }
+
+    /// What lane `l`'s Claude is doing — in front, its cards are up in `offers`.
+    pub fn doing(&self, l: &Lane) -> Doing {
+        let front = l.id == self.lane.id && !self.behind;
+        if l.waits() || (front && self.offers.iter().any(crate::offer::Offer::claudes)) {
+            Doing::Waiting
+        } else if l.chat.as_ref().is_some_and(crate::chat::Chat::busy) {
+            Doing::Working
+        } else {
+            Doing::Idle
+        }
+    }
+
+    /// How many lanes behind wait for your answer.
+    pub fn lanes_waiting(&self) -> usize {
+        self.lanes.iter().filter(|l| self.doing(l) == Doing::Waiting).count()
+    }
+
+    /// The front lane's buffers as indexes into `docs`, in their order there (the one shown always among
+    /// them) — every document while there's one lane.
+    pub fn buffers(&self) -> Vec<usize> {
+        let mine = |i: usize, d: &Document| {
+            self.lanes.is_empty() || i == self.current || self.lane.docs.contains(&d.id)
+        };
+        self.docs.iter().enumerate().filter(|&(i, d)| mine(i, d)).map(|(i, _)| i).collect()
+    }
+
+    /// Document `id` is one of the front lane's buffers from now on.
+    pub(crate) fn lane_keeps(&mut self, id: DocId) {
+        if !self.lane.docs.contains(&id) {
+            self.lane.docs.push(id);
+        }
+    }
+
+    /// The lane whose checkout `path` is in (the innermost, when one is inside another).
+    pub fn lane_of(&self, path: &Path) -> Option<LaneId> {
+        std::iter::once(&self.lane)
+            .chain(&self.lanes)
+            .filter(|l| path.starts_with(&l.root))
+            .max_by_key(|l| l.root.as_os_str().len())
+            .map(|l| l.id)
+    }
+
+    /// Lane `l`'s processes: its chat, terminal, task, tests, and its checkout's language servers.
+    pub fn lane_pids(&self, l: &Lane) -> Vec<u32> {
+        let servers =
+            self.lsp.clients.iter().filter(|c| self.lane_of(&c.root) == Some(l.id)).map(|c| c.pid());
+        let mine = [
+            l.chat.as_ref().and_then(|c| c.pid()),
+            l.terminal.as_ref().and_then(|t| t.pid()),
+            l.task_run.as_ref().and_then(|r| r.pid()),
+            l.test_run.as_ref().and_then(|r| r.pid()),
+        ];
+        mine.into_iter().chain(servers).flatten().collect()
+    }
+
+    /// Every event: the session list says what's so now; with lanes behind, their servers rest while their
+    /// Claude is idle (and stop after a while — `lsp_rest`), and wake when it starts a turn. A server one of
+    /// the front lane's files uses never rests.
+    pub(crate) fn lanes_sync(&mut self) {
+        self.session_list_sync();
+        if self.lanes.is_empty() {
+            return;
+        }
+        let in_front = |ed: &Editor, cid| {
+            ed.docs.iter().any(|d| ed.lane.docs.contains(&d.id) && d.lsp.clients().any(|c| c == cid))
+        };
+        let resting: Vec<(crate::lsp::ClientId, bool)> = self
+            .lsp
+            .clients
+            .iter()
+            .map(|c| {
+                let behind = self.lanes.iter().find(|l| Some(l.id) == self.lane_of(&c.root));
+                let idle = behind.is_some_and(|l| !l.chat.as_ref().is_some_and(crate::chat::Chat::busy));
+                (c.id, idle && !in_front(self, c.id))
+            })
+            .collect();
+        self.lsp_rest(&resting);
+        // A lane behind whose Claude started a turn: its servers back (its tools ask them)
+        let woken: Vec<DocId> = self
+            .lanes
+            .iter_mut()
+            .filter(|l| l.chat.as_ref().is_some_and(crate::chat::Chat::busy))
+            .flat_map(|l| std::mem::take(&mut l.asleep))
+            .collect();
+        for id in woken {
+            self.attach_lsp(id);
+        }
     }
 
     /// `msg` as a toast says it: from a lane behind, its name first.
@@ -190,8 +320,9 @@ impl Editor {
         self.behind = false;
         let tell = self.lane.waits() && !std::mem::replace(&mut self.lane.waiting_told, true);
         let name = self.lane.name.clone();
-        if let Some(d) = self.docs.get(self.current) {
-            self.lane.current_doc = d.id;
+        if let Some(id) = self.docs.get(self.current).map(|d| d.id) {
+            self.lane.current_doc = id;
+            self.lane_keeps(id);
         }
         let i =
             self.lanes.iter().position(|l| l.id == front).expect("the front lane is behind while swapped");
@@ -199,7 +330,7 @@ impl Editor {
         self.current = self.doc_index(self.lane.current_doc);
         self.events.set_lane(front);
         if tell {
-            self.set_status(format!("{name} · Claude waits for your answer"));
+            self.set_status(format!("{name} · Claude waits for your answer — space W"));
         } else if self.messages.last().map(|m| m.0) == said {
             // (nothing of it is on screen — an idle front draws nothing for a busy lane behind)
             self.unchanged = true;
@@ -241,7 +372,7 @@ impl Editor {
         self.docs.push(Document::from_str(doc, ""));
         let mut lane = Lane::new(id, root.clone(), view);
         lane.views.push(View::new(view, doc));
-        (lane.current_doc, lane.scratch) = (doc, Some(doc));
+        (lane.current_doc, lane.scratch, lane.docs) = (doc, Some(doc), vec![doc]);
         self.lanes.push(lane);
         if self.git_auto {
             // (its results are its lane's — tagged so while the watch is made)
@@ -279,14 +410,23 @@ impl Editor {
         self.lane.parked = mine;
         self.lane.waiting_told = false;
         std::mem::swap(&mut self.lane, &mut self.lanes[i]);
-        // In: its panes on documents that are still there, its cards up, its tour going on
-        self.current = self.doc_index(self.lane.current_doc);
+        // In: its panes on documents that are still there (its own, else a blank one), its cards up, its tour
+        // going on
+        let here = |id: DocId| self.docs.iter().position(|d| d.id == id);
+        match here(self.lane.current_doc).or_else(|| self.lane.docs.iter().find_map(|&d| here(d))) {
+            Some(i) => self.current = i,
+            None => self.new_scratch(),
+        }
         let shown = self.docs[self.current].id;
         let docs: std::collections::HashSet<DocId> = self.docs.iter().map(|d| d.id).collect();
         for v in self.lane.views.iter_mut().filter(|v| !docs.contains(&v.doc)) {
             v.doc = shown;
         }
         self.events.set_lane(id);
+        // (servers that stopped while it rested: back for its files)
+        for d in std::mem::take(&mut self.lane.asleep) {
+            self.attach_lsp(d);
+        }
         self.offers.append(&mut self.lane.parked);
         self.lane.waiting_told = false;
         crate::edits::next(self);
@@ -294,6 +434,26 @@ impl Editor {
         // (which one is in front is kept too — `:restart` and the next start come back to it)
         self.lanes_keep();
         true
+    }
+
+    /// A click on the sessions' tabs, dropdown or chip.
+    pub fn lane_spot(&mut self, s: Spot) {
+        let order: Vec<LaneId> = self.lanes_in_order().iter().map(|l| l.id).collect();
+        let at = order.iter().position(|&id| id == self.lane.id).unwrap_or(0) as isize;
+        let step = |by: isize| order[(at + by).rem_euclid(order.len() as isize) as usize];
+        match s {
+            Spot::Lane(id) => {
+                self.lane_switch(id);
+            }
+            Spot::New => self.session_prompt(),
+            Spot::List => self.session_list(),
+            Spot::Prev => {
+                self.lane_switch(step(-1));
+            }
+            Spot::Next => {
+                self.lane_switch(step(1));
+            }
+        }
     }
 
     /// The lanes in the order they were opened: (id, name, in front).

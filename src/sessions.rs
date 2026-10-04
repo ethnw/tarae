@@ -37,6 +37,8 @@ pub struct Sessions {
     pub restored: bool,
     /// A key was pressed since startup — lanes coming back then stay behind (the front is where you are).
     pub keyed: bool,
+    /// What git last said of each lane for the list (read when it opens — shown meanwhile).
+    pub facts: std::collections::HashMap<LaneId, Facts>,
 }
 
 /// A lane as it's kept: its checkout, name, branch and base (`Lane`'s).
@@ -624,6 +626,102 @@ fn bring(root: &Path, base: Option<String>, start: &Path, unsaved: &[PathBuf]) -
     Ok(Brought { branch, base, count: n, tip: tip[..7].to_string() })
 }
 
+// ── The list ─────────────────────────────────────────────────────────────────
+
+/// What git says of a lane for its row in the list.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Facts {
+    /// Commits past its base · its base's commits it hasn't (none for the checkout tarae started in).
+    pub ahead: usize,
+    pub behind: usize,
+    /// Files changed and not in a commit (new ones too).
+    pub changed: usize,
+}
+
+/// What git says of the checkout in `root` against its base (on a worker) — None outside git.
+fn facts(root: &Path, base: Option<String>, start: &Path) -> Option<Facts> {
+    let status = git(root, &["status", "--porcelain", "--untracked-files=all"], None).ok()?;
+    let changed = status.lines().filter(|l| !l.trim().is_empty()).count();
+    let counts = base_or_start(base, start)
+        .ok()
+        .filter(|_| root != start)
+        .and_then(|b| git(root, &["rev-list", "--left-right", "--count", &format!("HEAD...{b}")], None).ok());
+    let mut n = counts.as_deref().unwrap_or("").split_whitespace().map(|x| x.parse().unwrap_or(0));
+    Some(Facts { ahead: n.next().unwrap_or(0), behind: n.next().unwrap_or(0), changed })
+}
+
+/// A lane as its row in the list says it.
+pub struct Shown {
+    pub id: LaneId,
+    pub name: String,
+    /// The branch checked out there (said when it isn't the name).
+    pub branch: Option<String>,
+    pub facts: Option<Facts>,
+    pub doing: crate::lane::Doing,
+    pub front: bool,
+    /// CPU % and memory of its processes, summed (none seen yet: None).
+    pub usage: Option<(f32, u64)>,
+}
+
+/// The list's rows: the name, a glyph for what its Claude does (`●` working, `▲` waiting for you), and the
+/// rest in columns — branch, `↑ahead ↓behind`, what's changed, what it's doing, CPU and memory — each column
+/// as wide as its widest and empty ones left out, so the hints (right-aligned) line up row under row.
+pub fn items(lanes: &[Shown]) -> Vec<crate::picker::Item> {
+    use crate::lane::Doing;
+    use unicode_width::UnicodeWidthStr as _;
+    let cols: Vec<[String; 5]> = lanes
+        .iter()
+        .map(|l| {
+            let branch = l.branch.clone().filter(|b| *b != l.name).unwrap_or_default();
+            let f = l.facts.clone().unwrap_or_default();
+            let ahead = (f.ahead > 0).then(|| format!("↑{}", f.ahead));
+            let behind = (f.behind > 0).then(|| format!("↓{}", f.behind));
+            let moved: Vec<String> = ahead.into_iter().chain(behind).collect();
+            let changed = if f.changed > 0 { format!("{} changed", f.changed) } else { String::new() };
+            let doing = match (l.doing, l.front) {
+                (Doing::Waiting, _) => "waits for you",
+                (Doing::Working, _) => "working",
+                (Doing::Idle, true) => "here",
+                (Doing::Idle, false) => "",
+            };
+            let usage = l
+                .usage
+                .map(|(cpu, bytes)| format!("{cpu:>3.0}%  {:>6}", crate::procs::mem(bytes)))
+                .unwrap_or_default();
+            [branch, moved.join(" "), changed, doing.to_string(), usage]
+        })
+        .collect();
+    let widths: Vec<usize> = (0..5).map(|c| cols.iter().map(|r| r[c].width()).max().unwrap_or(0)).collect();
+    // (counts right-aligned, words left)
+    let right = [false, true, true, false, true];
+    lanes
+        .iter()
+        .zip(cols)
+        .map(|(l, row)| {
+            let parts: Vec<String> = row
+                .iter()
+                .enumerate()
+                .filter(|&(c, _)| widths[c] > 0)
+                .map(|(c, s)| {
+                    let pad = " ".repeat(widths[c] - s.width());
+                    if right[c] { format!("{pad}{s}") } else { format!("{s}{pad}") }
+                })
+                .collect();
+            let glyph = match l.doing {
+                Doing::Working => ("●", "ui.accent"),
+                Doing::Waiting => ("▲", "warning"),
+                Doing::Idle => (" ", "ui.linenr"),
+            };
+            crate::picker::Item {
+                label: l.name.clone(),
+                action: crate::picker::Action::Lane(l.id),
+                hint: parts.join("  "),
+                glyph: Some(glyph),
+            }
+        })
+        .collect()
+}
+
 // ── Kept ─────────────────────────────────────────────────────────────────────
 
 static SAVING: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -693,7 +791,7 @@ impl Editor {
         all
     }
 
-    fn lane_by_id(&mut self, id: LaneId) -> Option<&mut crate::lane::Lane> {
+    pub(crate) fn lane_by_id(&mut self, id: LaneId) -> Option<&mut crate::lane::Lane> {
         std::iter::once(&mut self.lane).chain(&mut self.lanes).find(|l| l.id == id)
     }
 
@@ -1034,6 +1132,103 @@ impl Editor {
         }
         self.lanes_keep();
         Some(kept)
+    }
+
+    // ── The list ─────────────────────────────────────────────────────────────
+
+    /// `space W` — the sessions, one row each: what its Claude does, its branch against its base, what's
+    /// changed, what its processes use. Enter brings one to the front, a digit the one on that row; `d` ends
+    /// it, `b` brings it into its base, `n` makes a new one. Git's part is read on a worker (the last read
+    /// shown meanwhile); the processes are looked at once.
+    pub fn session_list(&mut self) {
+        let mut p = crate::picker::Picker::new("sessions", self.session_items(), false).without_preview();
+        p.keys = true;
+        let front = self.lane.id;
+        p.select_where(|a| *a == crate::picker::Action::Lane(front));
+        self.open_picker(p, None);
+        self.procs_wake(crate::procs::Wake::Now);
+        let start = self.start_root();
+        let asks: Vec<(LaneId, PathBuf, Option<String>)> =
+            self.lanes_in_order().iter().map(|l| (l.id, l.root.clone(), l.base.clone())).collect();
+        self.events.shared_jobs().spawn(move || {
+            let found: Vec<(LaneId, Option<Facts>)> =
+                asks.into_iter().map(|(id, root, base)| (id, facts(&root, base, &start))).collect();
+            move |ed: &mut Editor| {
+                for (id, f) in found {
+                    match f {
+                        Some(f) => ed.sessions.facts.insert(id, f),
+                        None => ed.sessions.facts.remove(&id),
+                    };
+                }
+            }
+        });
+    }
+
+    /// The list's rows as things are now.
+    fn session_items(&self) -> Vec<crate::picker::Item> {
+        let shown: Vec<Shown> = self
+            .lanes_in_order()
+            .into_iter()
+            .map(|l| Shown {
+                id: l.id,
+                name: l.label().to_string(),
+                branch: l.git_branch.clone().or_else(|| l.branch.clone()),
+                facts: self.sessions.facts.get(&l.id).cloned(),
+                doing: self.doing(l),
+                front: l.id == self.lane.id,
+                usage: crate::procs::summed(&self.procs.rows, &self.lane_pids(l)),
+            })
+            .collect();
+        items(&shown)
+    }
+
+    /// Every event: the list, while it's open, says what's so now (the row in hand stays).
+    pub(crate) fn session_list_sync(&mut self) {
+        if !self.picker.as_ref().is_some_and(|p| p.keys) {
+            return;
+        }
+        let items = self.session_items();
+        if let Some(p) = self.picker.as_mut()
+            && p.items().iter().map(|i| (&i.hint, i.glyph)).ne(items.iter().map(|i| (&i.hint, i.glyph)))
+        {
+            p.set_found(items);
+        }
+    }
+
+    /// A letter in the list: `j`/`k` move, a digit brings that row's session to the front, `n` makes a new
+    /// one, `d` ends the one in hand, `b` brings it into its base.
+    pub(crate) fn session_list_key(&mut self, c: char) {
+        use crate::picker::Action;
+        let Some(p) = self.picker.as_mut() else { return };
+        let here = match p.current().map(|i| &i.action) {
+            Some(Action::Lane(id)) => Some(*id),
+            _ => None,
+        };
+        match c {
+            'j' => p.move_by(1),
+            'k' => p.move_by(-1),
+            '1'..='9' => {
+                let row = c as usize - '1' as usize;
+                if let Some(Action::Lane(id)) = p.items().get(row).map(|i| i.action.clone()) {
+                    self.picker = None;
+                    self.lane_switch(id);
+                }
+            }
+            'n' => {
+                self.picker = None;
+                self.session_prompt();
+            }
+            'd' | 'b' => {
+                let Some(id) = here else { return };
+                self.picker = None;
+                let which = id.to_string();
+                let done = if c == 'd' { self.session_end(&which) } else { self.session_bring(&which) };
+                if let Err(e) = done {
+                    self.set_error(e);
+                }
+            }
+            _ => {}
+        }
     }
 
     // ── Bringing ─────────────────────────────────────────────────────────────
@@ -1534,6 +1729,41 @@ mod tests {
         assert_ne!(d, worktrees_dir("/wt", Path::new("/other/tarae/.git")).unwrap(), "two clones keep apart");
         assert_eq!(repo_folder(Path::new("/srv/proj.git")).split('-').next(), Some("proj"), "a bare one");
         assert!(worktrees_dir("wt", common).unwrap_err().contains("a full path"));
+    }
+
+    /// The list's rows: the glyph says what its Claude does; the rest in columns as wide as their widest
+    /// (counts right-aligned, empty columns left out), so every hint is as wide as the others — right-aligned
+    /// in the list, they line up row under row. A session's branch is its name, so it isn't said twice.
+    #[test]
+    fn the_list_lines_its_columns_up() {
+        use crate::lane::Doing;
+        let shown = |id, name: &str, branch: Option<&str>, f: Option<Facts>, doing, usage| Shown {
+            id,
+            name: name.into(),
+            branch: branch.map(str::to_string),
+            facts: f,
+            doing,
+            front: id == 0,
+            usage,
+        };
+        let f = |ahead, behind, changed| Some(Facts { ahead, behind, changed });
+        let rows = items(&[
+            shown(0, "tarae", Some("main"), f(0, 0, 0), Doing::Idle, Some((3.0, 40 << 20))),
+            shown(1, "fix-login", Some("fix-login"), f(12, 1, 3), Doing::Working, Some((104.0, 1 << 30))),
+            shown(2, "parser", Some("parser"), None, Doing::Waiting, None),
+        ]);
+        let hints: Vec<&str> = rows.iter().map(|i| i.hint.as_str()).collect();
+        assert_eq!(
+            hints,
+            [
+                "main                     here             3%   40 MB",
+                "      ↑12 ↓1  3 changed  working        104%  1.0 GB",
+                "                         waits for you              ",
+            ]
+        );
+        let glyphs: Vec<&str> = rows.iter().map(|i| i.glyph.unwrap().0).collect();
+        assert_eq!(glyphs, [" ", "●", "▲"]);
+        assert_eq!(rows[2].action, crate::picker::Action::Lane(2));
     }
 
     #[test]

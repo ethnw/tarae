@@ -278,7 +278,7 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `space U` | `redo_turn` | Bring Claude's turn back |
 | `space v` | … | More keys — see `space v` below |
 | `space w` | … | More keys — see `space w` below |
-| `space W` | … | More keys — see `space W` below |
+| `space W` | `session_list` | Sessions: switch, end, new |
 | `space x` | … | More keys — see `space x` below |
 | `space y` | `yank_to_clipboard` | Copy to clipboard |
 
@@ -344,12 +344,6 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `space w z` | `zoom_toggle` | Fill the screen with this, or back |
 | `space w C-w` | `rotate_view` | Next window |
 | `space w minus` | `bottom_shorter` | Shorter: the panel at the bottom |
-
-### `space W`
-
-| Key | Command | Description |
-|---|---|---|
-| `space W n` | `session_new` | New session (its own branch) |
 
 ### `space x`
 

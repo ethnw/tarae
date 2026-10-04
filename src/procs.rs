@@ -507,6 +507,23 @@ pub fn rows(sample: &Sample, known: &[Known], me: u32, held: &[Held], now: u64) 
     out
 }
 
+/// CPU % and memory of the processes `pids` among tarae's children, each with what it started — None when
+/// none of them is in the list.
+pub fn summed(rows: &[Row], pids: &[u32]) -> Option<(f32, u64)> {
+    let mut sum: Option<(f32, u64)> = None;
+    let mut inside = false;
+    for r in rows {
+        if r.depth == 0 {
+            inside = r.kind != Kind::Tarae && pids.contains(&r.pid);
+        }
+        if inside {
+            let (cpu, mem) = sum.get_or_insert((0.0, 0));
+            (*cpu, *mem) = (*cpu + r.cpu.unwrap_or(0.0), *mem + r.memory());
+        }
+    }
+    sum
+}
+
 // ── Checks ───────────────────────────────────────────────────────────────
 
 /// A language server as the checks see it.
@@ -945,7 +962,7 @@ impl Editor {
         self.procs_took_keys();
     }
 
-    fn procs_wake(&mut self, w: Wake) {
+    pub(crate) fn procs_wake(&mut self, w: Wake) {
         let open = matches!(w, Wake::Open(true) | Wake::Now);
         if let Some(tx) = &self.procs.wake {
             let _ = tx.send(w);
@@ -976,18 +993,25 @@ impl Editor {
             add(adapter, Kind::Debug, "debugger", d.program.clone());
             add(helper, Kind::Helper, "debug helper", d.program.clone());
         }
-        if let Some(r) = &self.lane.task_run {
-            let title = if r.by_claude { "claude's command" } else { r.task.name.as_str() };
-            add(r.pid(), Kind::Task, title, r.task.cmd.clone());
-        }
-        if let Some(r) = &self.lane.test_run {
-            add(r.pid(), Kind::Test, "tests", r.target.label.clone());
-        }
-        if let Some(t) = &self.lane.terminal {
-            add(t.pid(), Kind::Terminal, "terminal", t.title.clone());
-        }
-        if let Some(c) = &self.lane.chat {
-            add(c.pid(), Kind::Chat, "claude", "the chat".into());
+        // Every lane's (one behind says whose: `fix-login · the chat`)
+        for l in std::iter::once(&self.lane).chain(&self.lanes) {
+            let whose = |what: String| match l.id == self.lane.id {
+                true => what,
+                false => format!("{} · {what}", l.name),
+            };
+            if let Some(r) = &l.task_run {
+                let title = if r.by_claude { "claude's command" } else { r.task.name.as_str() };
+                add(r.pid(), Kind::Task, title, whose(r.task.cmd.clone()));
+            }
+            if let Some(r) = &l.test_run {
+                add(r.pid(), Kind::Test, "tests", whose(r.target.label.clone()));
+            }
+            if let Some(t) = &l.terminal {
+                add(t.pid(), Kind::Terminal, "terminal", whose(t.title.clone()));
+            }
+            if let Some(c) = &l.chat {
+                add(c.pid(), Kind::Chat, "claude", whose("the chat".into()));
+            }
         }
         add(self.llm_pid, Kind::Ask, "claude", "space i".into());
         add(self.llm_warm.pid(), Kind::Spare, "claude", "ready for space i".into());
@@ -1402,6 +1426,28 @@ mod tests {
         let tarae = look.procs.first().expect("itself first");
         assert_eq!(tarae.0.pid, me);
         assert!(look.took < Duration::from_millis(500), "a look took {:?}", look.took);
+    }
+
+    /// A session's share (the session list's column): its children's CPU and memory with what they started,
+    /// not tarae's own row nor another session's; none of its processes listed — nothing said.
+    #[test]
+    fn a_sessions_processes_are_summed_with_what_they_started() {
+        let deeper = |mut r: Row, depth| {
+            r.depth = depth;
+            r
+        };
+        let rows = vec![
+            row(1, Kind::Tarae, 3.0, 100, 9),
+            row(10, Kind::Chat, 2.0, 200, 9),
+            deeper(row(11, Kind::Other, 1.5, 50, 9), 1),
+            deeper(row(12, Kind::Other, 0.5, 25, 9), 2),
+            row(20, Kind::Terminal, 40.0, 30, 9),
+            row(30, Kind::Lsp(1), 1.0, 400, 9),
+        ];
+        assert_eq!(summed(&rows, &[10, 30]), Some((5.0, 675 * MB)), "the chat with its two, and the server");
+        assert_eq!(summed(&rows, &[20]), Some((40.0, 30 * MB)), "the terminal alone");
+        assert_eq!(summed(&rows, &[1]), None, "tarae itself is no session's");
+        assert_eq!(summed(&rows, &[99]), None);
     }
 
     /// The list: tarae first, its children by kind — what each is for from the editor — each with what it

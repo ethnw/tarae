@@ -24,7 +24,7 @@
 21                               h  Select this symbol's uses       U  Bring Claude's turn back
 22                               i  Ask Claude to edit selection    v  Review …
 23                               j  Jump list                       w  Window …
-24                               k  Show docs under cursor          W  Sessions …
+24                               k  Show docs under cursor          W  Sessions: switch, end, new
 25                               l  Chat with Claude                x  Tests …
 26                               L  Close chat                      y  Copy to clipboard
 27                             ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
@@ -86,7 +86,7 @@
 21                               A                                  A
 22                               A                                  A  dddddd d
 23                               A                                  A  dddddd d
-24                               A                                  A  dddddddd d
+24                               A                                  A
 25                               A                                  A  ddddd d
 26                               A                                  A
 27

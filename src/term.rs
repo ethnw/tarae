@@ -311,6 +311,7 @@ fn render_frame(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io
         offer_buttons: offer.as_ref().map(|c| c.buttons.clone()).unwrap_or_default(),
         chat_links: Default::default(),
         chat_mini: Default::default(),
+        lane_spots: Default::default(),
         review_rail: Default::default(),
         sidebar: Default::default(),
         width: Some(lay.width),
@@ -2601,6 +2602,8 @@ fn draw(
         Some(p) => (Some(p), CursorShape::Bar),
         None => (text_cursor, cursor_shape(editor)),
     };
+    // (a list whose letters are keys has nothing to type into: no cursor, there or under it)
+    let pos = pos.filter(|_| editor.prompt.is_some() || !editor.picker.as_ref().is_some_and(|p| p.keys));
     if let Some((x, y)) = pos {
         let style = match shape {
             CursorShape::Block => SetCursorStyle::SteadyBlock,
@@ -4512,6 +4515,7 @@ fn draw_picker(
             | Action::Theme(_)
             | Action::Message
             | Action::Branch { .. }
+            | Action::Lane(_)
             | Action::Plugin { .. },
         )
         | None => String::new(),
@@ -4568,6 +4572,18 @@ fn draw_picker(
                 apply(out, faint)?;
                 queue!(out, Print("─".repeat(left_w)))?;
             }
+        } else if row == 1 && p.keys {
+            // Nothing is typed in a list whose letters are keys: no `›` — what a digit does, faint
+            let n = p.items().len().min(9);
+            let right = format!("{}  {count} ", p.title);
+            let say = if n > 1 { format!("1–{n} switch to that row") } else { String::new() };
+            let say = fit_ellipsis(&say, (lw + 2).saturating_sub(3 + right.width() + 2));
+            apply(out, faint)?;
+            queue!(out, Print("   "), Print(&say))?;
+            apply(out, card)?;
+            queue!(out, Spaces((lw + 2).saturating_sub(3 + say.width() + right.width())))?;
+            apply(out, faint)?;
+            queue!(out, Print(&right))?;
         } else if row == 1 {
             // Input row: › query ……… title · count
             apply(out, Style { fg: ui.accent.fg, bold: true, ..card })?;
@@ -5095,9 +5111,11 @@ fn draw_header(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> 
         }
     }
     let mut right = Vec::new();
-    if editor.docs.len() > 1 {
-        for (i, d) in editor.docs.iter().enumerate() {
-            let current = i == editor.current;
+    // (the front lane's buffers)
+    let buffers = editor.buffers();
+    if buffers.len() > 1 {
+        for i in buffers {
+            let (d, current) = (&editor.docs[i], i == editor.current);
             let mark = if d.is_modified() { " ●" } else { "" };
             let keep = if current { 90 } else { 10 };
             right.push(Seg {
@@ -5190,6 +5208,21 @@ fn draw_statusline(
         }
         None => left.push(Seg { text: format!(" {} ", &mode[..3]), style: ui.status_mode, keep: 255 }),
     }
+    // The session in front, when there's more than one and the chat (whose top row has them all) isn't
+    // up: its name — a click opens the list — and how many others wait for you
+    let chip = !editor.lanes.is_empty() && lay.chat_w == 0;
+    if chip {
+        let warn = t.try_get("warning").map(|s| Style { bg: None, ..s }).unwrap_or_default();
+        left.push(Seg {
+            text: format!("  {}", fit_ellipsis(editor.lane.label(), 24)),
+            style: accent,
+            keep: CHIP,
+        });
+        match editor.lanes_waiting() {
+            0 => {}
+            n => left.push(Seg { text: format!(" ▲{n}"), style: ui.status.patch(warn), keep: CHIP }),
+        }
+    }
     if !lay.header {
         let modified = if doc.is_modified() { " ●" } else { "" };
         left.push(Seg {
@@ -5199,7 +5232,8 @@ fn draw_statusline(
         });
         left.push(Seg { text: modified.into(), style: accent, keep: 200 });
     }
-    if let Some(b) = &editor.lane.git_branch {
+    // (a session's branch is its name — the chip said it)
+    if let Some(b) = editor.lane.git_branch.as_ref().filter(|b| !chip || b.as_str() != editor.lane.label()) {
         left.push(Seg { text: format!("   {b}"), style: dim, keep: 80 });
     }
     // How much this file changed from HEAD: +added/modified lines −removed lines (colors match the git bar)
@@ -5352,10 +5386,20 @@ fn draw_statusline(
     fit_segments(&mut left, &mut right, lay.width);
     queue!(out, MoveTo(0, lay.status_y))?;
     let mut used = 0;
+    let mut chip_at: Option<(usize, usize)> = None;
     for s in &left {
         apply(out, s.style)?;
         queue!(out, Print(&s.text))?;
+        if s.keep == CHIP {
+            // (its click: the name and the count, not the gap before them)
+            let lead = s.text.len() - s.text.trim_start().len();
+            let (a, b) = (used + lead, used + s.text.width());
+            chip_at = Some(chip_at.map_or((a, b), |(a0, _)| (a0, b)));
+        }
         used += s.text.width();
+    }
+    if let Some((a, b)) = chip_at {
+        editor.screen.lane_spots.borrow_mut().push((lay.status_y as usize, a, b, crate::lane::Spot::List));
     }
     let right_w: usize = right.iter().map(|s| s.text.width()).sum();
     apply(out, ui.status)?;
@@ -5366,6 +5410,10 @@ fn draw_statusline(
     }
     clear_rest(out, ui.status)
 }
+
+/// The status line's session chip — its segments are told apart by this `keep` (it outlasts all but the
+/// mode and the position).
+const CHIP: u8 = 235;
 
 /// Completion list — below the word so the name column lines up with the typed word (above if no room).
 ///
@@ -7374,6 +7422,68 @@ fn draw_review_rail(
 /// ▐ enter send · esc editor · C-r apply
 /// ```
 /// Returns the input cursor position (when focused).
+/// The sessions at the top of the chat (with more than one): `main │ fix-login ● │ new-parser ▲ │ +` — the
+/// one in front strong, `●` its Claude working, `▲` waiting for you, `+` a new one. Where that doesn't fit,
+/// one dropdown: `◂ fix-login ● ▾ 2/3 ▲1 ▸` (the name opens the list, `▲1` = others waiting for you, the
+/// arrows step). Styles: strong, dim, faint, accent, warning · where each click goes (from the row's start).
+fn lane_tabs(
+    editor: &Editor,
+    w: usize,
+    [strong, dim, faint, accent, warn]: [Style; 5],
+) -> (Vec<crate::markdown::Span>, Vec<(usize, usize, crate::lane::Spot)>) {
+    use crate::lane::{Doing, Spot};
+    use crate::markdown::Span;
+    let lanes = editor.lanes_in_order();
+    let mark = |l: &crate::lane::Lane| match editor.doing(l) {
+        Doing::Working => Some(Span { text: " ●".into(), style: accent }),
+        Doing::Waiting => Some(Span { text: " ▲".into(), style: warn }),
+        Doing::Idle => None,
+    };
+    let (mut spans, mut spots, mut x) = (Vec::new(), Vec::new(), 0);
+    let mut put = |spans: &mut Vec<Span>, text: String, style: Style| {
+        x += text.width();
+        spans.push(Span { text, style });
+        x
+    };
+    for (i, l) in lanes.iter().enumerate() {
+        let start = if i > 0 { put(&mut spans, " │ ".into(), faint) } else { 0 };
+        let mut end =
+            put(&mut spans, l.label().to_string(), if l.id == editor.lane.id { strong } else { dim });
+        if let Some(m) = mark(l) {
+            end = put(&mut spans, m.text, m.style);
+        }
+        spots.push((start, end, Spot::Lane(l.id)));
+    }
+    let start = put(&mut spans, " │ ".into(), faint);
+    let end = put(&mut spans, "+".into(), dim);
+    spots.push((start, end, Spot::New));
+    if x <= w {
+        return (spans, spots);
+    }
+    // The dropdown
+    let at = lanes.iter().position(|l| l.id == editor.lane.id).unwrap_or(0) + 1;
+    let count = format!(" {at:>n$}/{}", lanes.len(), n = lanes.len().to_string().len());
+    let waiting = match editor.lanes_waiting() {
+        0 => String::new(),
+        n => format!(" ▲{n}"),
+    };
+    let mark = mark(&editor.lane);
+    let fixed = 2 + mark.as_ref().map_or(0, |m| m.text.width()) + 2 + count.width() + waiting.width() + 2;
+    let name = fit_ellipsis(editor.lane.label(), w.saturating_sub(fixed).max(1));
+    // (the arrows dim, not faint — they're what a click steps with)
+    let mut spans = vec![Span { text: "◂ ".into(), style: dim }, Span { text: name, style: strong }];
+    spans.extend(mark);
+    spans.push(Span { text: " ▾".into(), style: dim });
+    spans.push(Span { text: count, style: faint });
+    if !waiting.is_empty() {
+        spans.push(Span { text: waiting, style: warn });
+    }
+    let list_end: usize = spans.iter().map(|s| s.text.width()).sum();
+    spans.push(Span { text: " ▸".into(), style: dim });
+    let spots = vec![(0, 1, Spot::Prev), (2, list_end, Spot::List), (list_end + 1, list_end + 2, Spot::Next)];
+    (spans, spots)
+}
+
 fn draw_chat(
     c: &crate::chat::Chat,
     editor: &Editor,
@@ -7426,8 +7536,10 @@ fn draw_chat(
         None => Vec::new(),
     };
     let plan_h = plan_rows.len() + usize::from(!plan_rows.is_empty());
+    // ── The sessions over it all, when there's more than one
+    let tabs_h = usize::from(!editor.lanes.is_empty());
     // ── Message rows (filled from the bottom)
-    let area = rows.saturating_sub(input_h + 4 + plan_h); // title·divider + plan + divider·hint
+    let area = rows.saturating_sub(input_h + 4 + plan_h + tabs_h); // tabs + title·divider + plan + divider·hint
     let mut lines: Vec<Vec<Span>> = Vec::new();
     // Rows that are links as a whole (tool calls), parallel to `lines`
     let mut row_links: Vec<Option<crate::chat::Link>> = Vec::new();
@@ -7591,6 +7703,17 @@ fn draw_chat(
     let edge_fg = if dragged { accent_color(&editor.theme) } else { card.bg };
     let edge = Style { fg: edge_fg, bg: ui.base.bg, ..Style::default() };
     let mut y = top;
+    if tabs_h > 0 {
+        let warn =
+            t.try_get("warning").and_then(|s| s.fg).map_or(accent, |fg| Style { fg: Some(fg), ..card });
+        let (spans, spots) = lane_tabs(editor, w, [strong, dim, faint, accent, warn]);
+        chat_row_start(out, x0, y, edge, card)?;
+        let used = chat_spans(out, &spans, card, w)?;
+        chat_row_end(out, card, lay.chat_w, used)?;
+        let mut taken = editor.screen.lane_spots.borrow_mut();
+        taken.extend(spots.into_iter().map(|(a, b, s)| (y, x0 + 3 + a, x0 + 3 + b, s)));
+        y += 1;
+    }
     // Title
     chat_row_start(out, x0, y, edge, card)?;
     apply(out, if c.focused { strong } else { dim })?;
@@ -8836,6 +8959,18 @@ fn key_hints(editor: &Editor) -> Option<Vec<(&'static str, String)>> {
             Some(_) => hints(&[("enter", "make it and switch"), ("esc", "close")]),
             None => None,
         }
+    } else if let Some(p) = editor.picker.as_ref().filter(|p| p.keys) {
+        // The sessions: the checkout tarae started in can't be ended or brought in
+        match p.current().map(|i| &i.action) {
+            Some(Action::Lane(0)) | None => hints(&[("enter", "switch"), ("n", "new"), ("esc", "close")]),
+            Some(_) => hints(&[
+                ("enter", "switch"),
+                ("n", "new"),
+                ("d", "end"),
+                ("b", "bring into its base"),
+                ("esc", "close"),
+            ]),
+        }
     } else if editor.picker.as_ref().is_some_and(replace_list) {
         hints(&[("enter", "replace in every listed file"), ("type", "narrow"), ("esc", "cancel")])
     } else if editor.popup.is_some() {
@@ -9615,6 +9750,64 @@ mod tests {
             n += 1;
         }
         assert!(n >= 11, "found {n}");
+    }
+
+    /// Sessions cost a frame nothing: key → frame with the chat open, one session against three (the tab row,
+    /// one working, every event's `lanes_sync`) — medians of 300, both said for `cargo perf`; three may be
+    /// no more than a quarter slower (and 50 µs — noise on a sub-millisecond frame).
+    #[test]
+    fn perf_frames_with_three_sessions() {
+        if unoptimized("perf_frames_with_three_sessions") {
+            return;
+        }
+        let text: String = (0..2_000).map(|i| format!("fn f{i}() {{ let x = {i}; }}\n")).collect();
+        let frames = |lanes: usize| {
+            let mut ed = Editor::new(Config::default());
+            ed.config.llm.command = "sh".into();
+            ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+            ed.docs[0].text = Rope::from_str(&text);
+            for i in 1..lanes {
+                let id = ed.lane_add(std::env::temp_dir().join(format!("tarae-perf-lane-{i}")));
+                ed.lane_by_id(id).unwrap().name = format!("session-{i}");
+            }
+            if lanes > 1 {
+                ed.lane_switch(1);
+                crate::chat::open(&mut ed);
+                ed.lane.chat.as_mut().unwrap().state = crate::chat::State::Thinking;
+                ed.lane_switch(0);
+            }
+            crate::chat::open(&mut ed);
+            ed.lane.chat.as_mut().unwrap().focused = false;
+            let mut buf = Vec::with_capacity(1 << 16);
+            render(&mut ed, &mut buf, 140, 40).unwrap();
+            let mut runs: Vec<Duration> = (0..300)
+                .map(|i| {
+                    let t = Instant::now();
+                    ed.handle_event(crate::event::Event::Key(
+                        (if i % 2 == 0 { "j" } else { "k" }).parse().unwrap(),
+                    ));
+                    buf.clear();
+                    render(&mut ed, &mut buf, 140, 40).unwrap();
+                    t.elapsed()
+                })
+                .collect();
+            runs.sort();
+            runs[runs.len() / 2]
+        };
+        // (alternated, each its best — the first run in a process also pays the clock ramping up)
+        let (mut one, mut three) = (Duration::MAX, Duration::MAX);
+        for _ in 0..2 {
+            (one, three) = (one.min(frames(1)), three.min(frames(3)));
+        }
+        let us = |d: Duration| d.as_secs_f64() * 1e6;
+        for (name, d) in [("frame_one_session_us", one), ("frame_three_sessions_us", three)] {
+            let line = format!("PERF {name} {:.1} budget=16000 noise=20\n", us(d));
+            let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+        }
+        assert!(
+            three <= one.mul_f64(1.25) + Duration::from_micros(50),
+            "three sessions {three:?} against one {one:?}"
+        );
     }
 
     /// Performance budget: in a 200k-line file, key input → finished frame within one frame (16 ms, 60 Hz).

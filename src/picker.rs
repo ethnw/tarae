@@ -60,6 +60,8 @@ pub enum Action {
         name: String,
         held: Option<String>,
     },
+    /// A session (`space W`): Enter brings its lane to the front, `d` ends it, `b` brings it into its base.
+    Lane(crate::event::LaneId),
     /// An item of a plugin's pick (the prompt token it answers, the item's id).
     Plugin {
         token: u64,
@@ -270,6 +272,9 @@ pub struct Picker {
     /// row, `+ ‹name›` (`making`) · that row, while the query asks for it.
     pub make: Option<(&'static str, &'static str)>,
     made: Option<Item>,
+    /// Letters are the list's keys, not a query (the session list: `d` `b` `n`, a digit picks a row) — a
+    /// short list nobody needs to filter.
+    pub keys: bool,
 }
 
 impl Picker {
@@ -308,6 +313,7 @@ impl Picker {
             matcher: Matcher::new(config),
             make: None,
             made: None,
+            keys: false,
         };
         p.refilter();
         p
@@ -543,7 +549,7 @@ impl Picker {
         }
     }
 
-    fn select_where(&mut self, f: impl Fn(&Action) -> bool) {
+    pub(crate) fn select_where(&mut self, f: impl Fn(&Action) -> bool) {
         let at = match &self.tree {
             Some(tm) => {
                 tm.rows.iter().position(|r| r.item.and_then(|i| self.item(i)).is_some_and(|it| f(&it.action)))
@@ -954,6 +960,7 @@ impl Action {
             | Action::Conversation { .. }
             | Action::Message
             | Action::Branch { .. }
+            | Action::Lane(_)
             | Action::Plugin { .. }
             | Action::Code(_)
             | Action::Command(_)
