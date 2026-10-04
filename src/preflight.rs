@@ -4,9 +4,13 @@
 //! [preflight]
 //! steps = [
 //!   { name = "fmt", cmd = "cargo fmt --check" },
-//!   { name = "perf", cmd = "cargo perf", note = "not measured|SLOWER" },
+//!   { name = "perf", cmd = "cargo perf", note = "not measured|SLOWER", full = true },
 //! ]
 //! ```
+//!
+//! Two sets (`Set`): `:preflight` — and the bring card's `p`, before a session goes into its base — runs the
+//! quick one, every step but those marked `full = true`; `:preflight-full`, before publishing, runs them all.
+//! A project that marks none has one set: both run every step, and nothing says "quick".
 //!
 //! Where the steps come from: the project's `[preflight]` (`.tarae.toml`, or your config for every project),
 //! else the language packs' defaults for the kind of project it is (`packs::preflight` — Cargo.toml, go.mod
@@ -50,9 +54,37 @@ pub struct Step {
     pub note: Option<String>,
     /// Where it came from: `.tarae.toml`, `.tarae.local.toml`, `config.toml`, `rust pack`.
     pub from: String,
+    /// Only in the full set (`full = true`): left out of the quick one.
+    pub full: bool,
 }
 
-/// `[preflight] steps = [{ name, cmd, note? }, …]` from `file` (a path, or a pack's name) → the steps
+/// Which steps a run takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Set {
+    /// `:preflight`, and before a session is brought: every step but the `full` ones.
+    Quick,
+    /// `:preflight-full`, before publishing: every step.
+    Full,
+}
+
+impl Set {
+    /// The steps of `all` in this set.
+    pub fn of(self, all: &[Step]) -> Vec<Step> {
+        all.iter().filter(|s| self == Set::Full || !s.full).cloned().collect()
+    }
+
+    /// What a run of it over `all` is called — plain `preflight` when no step is marked `full` (both sets are
+    /// every step, nothing to tell apart).
+    pub fn title(self, all: &[Step]) -> &'static str {
+        match (all.iter().any(|s| s.full), self) {
+            (false, _) => "preflight",
+            (true, Set::Quick) => "quick preflight",
+            (true, Set::Full) => "full preflight",
+        }
+    }
+}
+
+/// `[preflight] steps = [{ name, cmd, note?, full? }, …]` from `file` (a path, or a pack's name) → the steps
 /// (what's wrong said in `warnings`).
 pub fn parse_config(v: &toml::Value, file: &str, warnings: &mut Vec<String>) -> Vec<Step> {
     let from = match file.contains('/') {
@@ -79,11 +111,19 @@ pub fn parse_config(v: &toml::Value, file: &str, warnings: &mut Vec<String>) -> 
             warnings.push(format!("{file}: preflight.steps[{i}].note: not a regex: {n}"));
             continue;
         }
+        let full = match s.get("full") {
+            None => false,
+            Some(toml::Value::Boolean(b)) => *b,
+            Some(_) => {
+                warnings.push(format!("{file}: preflight.steps[{i}].full: true or false"));
+                continue;
+            }
+        };
         if out.iter().any(|s: &Step| s.name == name) {
             warnings.push(format!("{file}: preflight.steps[{i}]: a second step named \"{name}\""));
             continue;
         }
-        out.push(Step { name, cmd, note, from: from.clone() });
+        out.push(Step { name, cmd, note, from: from.clone(), full });
     }
     out
 }
@@ -157,11 +197,17 @@ pub struct Preflight {
     pub started: Instant,
     /// When it ended.
     pub took: Option<Duration>,
+    /// `quick preflight` · `full preflight` · `preflight` (`Set::title`).
+    pub title: &'static str,
+    /// The steps the quick set left out (the full set's own).
+    pub left_out: usize,
 }
 
 impl Preflight {
-    pub fn new(generation: u64, steps: &[Step]) -> Preflight {
-        let steps = steps
+    /// A run of `set` out of `all` the steps.
+    pub fn new(generation: u64, all: &[Step], set: Set) -> Preflight {
+        let ours = set.of(all);
+        let steps = ours
             .iter()
             .map(|s| StepRun {
                 name: s.name.clone(),
@@ -172,7 +218,8 @@ impl Preflight {
                 note_re: s.note.as_deref().and_then(|n| regex::Regex::new(n).ok()),
             })
             .collect();
-        Preflight { generation, steps, started: Instant::now(), took: None }
+        let (title, left_out) = (set.title(all), all.len() - ours.len());
+        Preflight { generation, steps, started: Instant::now(), took: None, title, left_out }
     }
 
     /// A line of the run's output: a marker moves a step on (None: not shown — or the heading a step's
@@ -255,6 +302,24 @@ impl Preflight {
     pub fn passed(&self) -> bool {
         self.steps.iter().all(|s| s.state == State::Passed)
     }
+
+    /// What its end says, the set named: a quick one passed points at the full one; a failure, at `]q` when
+    /// the run put `places` in the list.
+    pub fn said(&self, places: usize) -> String {
+        let mut out = format!("{}: {}", self.title, self.summary());
+        if !self.passed() {
+            if places > 0 {
+                out.push_str(" — ]q goes to the first");
+            }
+        } else if self.left_out > 0 {
+            let n = self.left_out;
+            out.push_str(&format!(
+                " — the full set ({n} more step{}) runs before publish: :preflight-full",
+                if n == 1 { "" } else { "s" }
+            ));
+        }
+        out
+    }
 }
 
 /// `412ms` · `8.3s` · `4m 12s` — a run of minutes reads in minutes.
@@ -264,9 +329,10 @@ pub fn long_duration(d: Duration) -> String {
 }
 
 impl Editor {
-    /// `:preflight` — the project's steps (else the packs' defaults, looked for on a worker), then
-    /// `.tarae.local.toml`'s, run in the task panel. Err: why not now.
-    pub fn preflight_start(&mut self) -> Result<(), String> {
+    /// `:preflight` (`set` quick) / `:preflight-full` — the project's steps (else the packs' defaults,
+    /// looked for on a worker), then `.tarae.local.toml`'s, those of `set` run in the task panel. Err: why
+    /// not now.
+    pub fn preflight_start(&mut self, set: Set) -> Result<(), String> {
         self.preflight_free()?;
         // The project's own, held back until it's trusted: not the packs' instead
         if self.config_project_held("preflight.") {
@@ -274,19 +340,35 @@ impl Editor {
         }
         let (project, local) = (self.config.preflight.clone(), self.config.preflight_local.clone());
         if !project.is_empty() {
-            return self.preflight_run([project, local].concat());
+            return self.preflight_run([project, local].concat(), set);
         }
         let root = self.preflight_root();
         self.events.jobs().spawn(move || {
             let packs = crate::packs::preflight(&root);
-            move |ed: &mut Editor| ed.preflight_found(root, packs, local)
+            move |ed: &mut Editor| ed.preflight_found(root, packs, local, set)
         });
         Ok(())
     }
 
+    /// The quick set's step names, when the configured steps (the project's, yours) draw a line between the
+    /// sets — what the bring card says its `p` runs. None: one set (or the packs', unknown until looked for).
+    pub fn preflight_quick(&self) -> Option<Vec<String>> {
+        if self.config.preflight.is_empty() || self.config_project_held("preflight.") {
+            return None;
+        }
+        let all = [&self.config.preflight[..], &self.config.preflight_local[..]].concat();
+        all.iter().any(|s| s.full).then(|| Set::Quick.of(&all).into_iter().map(|s| s.name).collect())
+    }
+
     /// The packs' default steps for `root` came (none: not a kind of project they know), with yours after:
     /// the first time in a project, a card says what will run, and that it runs the project's code.
-    pub(crate) fn preflight_found(&mut self, root: std::path::PathBuf, packs: Vec<Step>, local: Vec<Step>) {
+    pub(crate) fn preflight_found(
+        &mut self,
+        root: std::path::PathBuf,
+        packs: Vec<Step>,
+        local: Vec<Step>,
+        set: Set,
+    ) {
         if packs.is_empty() && local.is_empty() {
             self.session.bring_after_preflight = false;
             return self.set_error(
@@ -297,7 +379,7 @@ impl Editor {
         let defaults = !packs.is_empty();
         let steps = [packs, local].concat();
         if defaults && !self.preflight_told.contains(&root) {
-            let question = format!("{}\n\n{DEFAULTS_SAY}\n{DEFAULTS_REPLACED}", shown(&steps));
+            let question = format!("{}\n\n{DEFAULTS_SAY}\n{DEFAULTS_REPLACED}", shown(&set.of(&steps)));
             // (what yes means — the project's code runs — in the warning color)
             let last = question.split('\n').count() - 2;
             let o = crate::offer::Offer::new(
@@ -305,12 +387,12 @@ impl Editor {
                 &question,
                 "running",
                 "didn't start".into(),
-                crate::offer::What::Preflight { root, steps },
+                crate::offer::What::Preflight { root, steps, set },
             )
             .warning(last..last + 1);
             return self.push_offer(o);
         }
-        if let Err(e) = self.preflight_run(steps) {
+        if let Err(e) = self.preflight_run(steps, set) {
             self.session.bring_after_preflight = false;
             self.set_error(e);
         }
@@ -321,7 +403,7 @@ impl Editor {
         &mut self,
         id: u64,
         root: std::path::PathBuf,
-        steps: Vec<Step>,
+        (steps, set): (Vec<Step>, Set),
         yes: bool,
     ) {
         self.offer_finished(id, Ok(()));
@@ -330,7 +412,8 @@ impl Editor {
             return self.set_status("preflight not run");
         }
         self.preflight_told.insert(root);
-        if let Err(e) = self.preflight_run(steps) {
+        if let Err(e) = self.preflight_run(steps, set) {
+            self.session.bring_after_preflight = false;
             self.set_error(e);
         }
     }
@@ -348,15 +431,19 @@ impl Editor {
         }
     }
 
-    /// `steps`, one after another, in the task panel.
-    fn preflight_run(&mut self, steps: Vec<Step>) -> Result<(), String> {
+    /// The steps of `set` out of `all`, one after another, in the task panel (its tab named for the set).
+    fn preflight_run(&mut self, all: Vec<Step>, set: Set) -> Result<(), String> {
         self.preflight_free()?;
+        let steps = set.of(&all);
+        if steps.is_empty() {
+            return Err("every preflight step is marked full = true — :preflight-full runs them".into());
+        }
         self.auto_save(" · before the preflight");
         self.flush_saves();
-        let task =
-            crate::task::Task { name: "preflight".into(), cmd: script(&steps), cwd: self.preflight_root() };
+        let name = set.title(&all).into();
+        let task = crate::task::Task { name, cmd: script(&steps), cwd: self.preflight_root() };
         let generation = self.task_start_preflight(task).ok_or("the preflight didn't start")?;
-        self.session.preflight = Some(Preflight::new(generation, &steps));
+        self.session.preflight = Some(Preflight::new(generation, &all, set));
         Ok(())
     }
 
@@ -366,15 +453,14 @@ impl Editor {
             return false;
         };
         p.finish();
-        let (summary, passed) = (p.summary(), p.passed());
         let places = self.session.task_run.as_ref().map_or(0, |r| r.found.0 + r.found.1);
-        let tail = if places > 0 { " — ]q goes to the first" } else { "" };
+        let (said, passed, title) = (p.said(places), p.passed(), p.title);
         if passed {
-            self.set_success(format!("preflight: {summary}"));
+            self.set_success(said);
         } else {
-            self.set_error(format!("preflight: {summary}{tail}"));
+            self.set_error(said);
         }
-        self.rebase_preflight_done(passed);
+        self.rebase_preflight_done(passed, title);
         true
     }
 
@@ -391,14 +477,15 @@ mod tests {
     use super::*;
 
     fn step(name: &str, cmd: &str) -> Step {
-        Step { name: name.into(), cmd: cmd.into(), note: None, from: ".tarae.toml".into() }
+        Step { name: name.into(), cmd: cmd.into(), note: None, from: ".tarae.toml".into(), full: false }
     }
 
     #[test]
     fn steps_from_the_config() {
         let v: toml::Value = toml::from_str(
             "steps = [{ name = \"fmt\", cmd = \"cargo fmt --check\" }, { name = \"perf\", cmd = \"cargo perf\", \
-             note = \"not measured\" }, { name = \"x\" }, { name = \"bad\", cmd = \"y\", note = \"(\" }]",
+             note = \"not measured\", full = true }, { name = \"x\" }, { name = \"bad\", cmd = \"y\", note = \
+             \"(\" }, { name = \"odd\", cmd = \"z\", full = \"yes\" }]",
         )
         .unwrap();
         let mut w = Vec::new();
@@ -407,13 +494,65 @@ mod tests {
             steps,
             [
                 step("fmt", "cargo fmt --check"),
-                Step { note: Some("not measured".into()), ..step("perf", "cargo perf") }
+                Step { note: Some("not measured".into()), full: true, ..step("perf", "cargo perf") }
             ]
         );
-        assert_eq!(w.len(), 2, "{w:?}");
+        assert_eq!(w.len(), 3, "{w:?}");
         assert!(w[0].contains("steps[2]: needs name") && w[1].contains("not a regex"), "{w:?}");
+        assert!(w[2].contains("steps[4].full: true or false"), "{w:?}");
         // A pack's steps say so
         assert_eq!(parse_config(&v, "rust pack", &mut Vec::new())[0].from, "rust pack");
+    }
+
+    /// The quick set leaves out the steps marked `full`, the full set is every step; a run says which — and
+    /// with none marked, there's one set, every step in both, said plainly `preflight`.
+    #[test]
+    fn the_quick_set_leaves_out_the_full_steps_and_says_so() {
+        let full = |name: &str| Step { full: true, ..step(name, "") };
+        let all = [step("fmt", ""), full("clippy bundled"), step("test", ""), full("perf")];
+        let names = |s: Vec<Step>| s.into_iter().map(|s| s.name).collect::<Vec<_>>();
+        assert_eq!(names(Set::Quick.of(&all)), ["fmt", "test"]);
+        assert_eq!(names(Set::Full.of(&all)), ["fmt", "clippy bundled", "test", "perf"]);
+        assert_eq!((Set::Quick.title(&all), Set::Full.title(&all)), ("quick preflight", "full preflight"));
+        // None marked: both run every step, and nothing says "quick"
+        let one = [step("fmt", ""), step("test", "")];
+        assert_eq!(names(Set::Quick.of(&one)), ["fmt", "test"]);
+        assert_eq!((Set::Quick.title(&one), Set::Full.title(&one)), ("preflight", "preflight"));
+        // Yours (`.tarae.local.toml`) can draw the line too — it's over every step
+        let yours = [step("fmt", ""), Step { from: ".tarae.local.toml".into(), ..full("linux clippy") }];
+        assert_eq!(Set::Quick.title(&yours), "quick preflight");
+    }
+
+    /// The end of a quick run that passed points at the full one; a full run's, a failed one's, and a run
+    /// with one set don't.
+    #[test]
+    fn the_end_says_which_set_ran() {
+        let full = |name: &str| Step { full: true, ..step(name, "") };
+        let all = [step("fmt", ""), step("test", ""), full("clippy bundled"), full("perf")];
+        let ran = |set: Set, all: &[Step], codes: &[i32]| {
+            let mut p = Preflight::new(1, all, set);
+            for (i, c) in codes.iter().enumerate() {
+                p.line(&format!("{MARK} start {i}"));
+                p.line(&format!("{MARK} end {i} {c}"));
+            }
+            p.finish();
+            p.took = Some(Duration::from_secs(62));
+            p
+        };
+        assert_eq!(
+            ran(Set::Quick, &all, &[0, 0]).said(0),
+            "quick preflight: all 2 passed · 1m 02s — the full set (2 more steps) runs before publish: \
+             :preflight-full"
+        );
+        assert_eq!(
+            ran(Set::Quick, &all, &[0, 1]).said(3),
+            "quick preflight: 1 of 2 passed — test failed · 1m 02s — ]q goes to the first"
+        );
+        assert_eq!(ran(Set::Full, &all, &[0, 0, 0, 0]).said(0), "full preflight: all 4 passed · 1m 02s");
+        let one = [step("fmt", "")];
+        assert_eq!(ran(Set::Quick, &one, &[0]).said(0), "preflight: all 1 passed · 1m 02s");
+        let p = Preflight::new(1, &all[..3], Set::Quick);
+        assert_eq!((p.steps.len(), p.left_out), (2, 1));
     }
 
     /// The checks are one set in three places: `.tarae.toml`'s `[preflight]` (what `:preflight` runs here),
@@ -496,7 +635,7 @@ mod tests {
     fn the_summary_says_what_failed_what_has_notes_and_how_long() {
         let steps =
             [step("fmt", ""), step("clippy", ""), Step { note: Some("busy".into()), ..step("perf", "") }];
-        let mut p = Preflight::new(1, &steps);
+        let mut p = Preflight::new(1, &steps, Set::Full);
         for l in [
             format!("{MARK} start 0"),
             format!("{MARK} end 0 0"),
@@ -514,7 +653,7 @@ mod tests {
         assert_eq!(p.summary(), "2 of 3 passed — clippy failed · perf: not measured (machine busy) · 4m 12s");
         assert!(!p.passed());
         // Stopped half-way: the one under way failed, the rest not run
-        let mut p = Preflight::new(1, &steps);
+        let mut p = Preflight::new(1, &steps, Set::Full);
         p.line(&format!("{MARK} start 0"));
         p.finish();
         p.took = Some(Duration::from_millis(1500));

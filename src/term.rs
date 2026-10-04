@@ -6415,8 +6415,13 @@ impl OfferCard {
                     }
                     crate::offer::What::ReviewEnd => b = vec![('y', "End it"), ('n', "Keep reviewing")],
                     crate::offer::What::Rebase(_) => b = vec![('y', "Rebase first"), ('n', "Leave it")],
+                    // (`p` runs the quick set when the project has two — the card names its steps)
                     crate::offer::What::Rebased(_) => {
-                        b = vec![('y', "Bring"), ('p', "Preflight, then bring"), ('n', "Not now")]
+                        let p = match editor.preflight_quick() {
+                            Some(_) => "Quick preflight, then bring",
+                            None => "Preflight, then bring",
+                        };
+                        b = vec![('y', "Bring"), ('p', p), ('n', "Not now")]
                     }
                     // (abort throws the resolution away: a capital, as removing does)
                     crate::offer::What::RebaseResolved { .. } => {

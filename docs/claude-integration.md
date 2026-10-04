@@ -521,8 +521,8 @@ its base up to it, fast-forward only. When the base has moved since the session 
 - `y` rebases it onto its base in its checkout. tarae runs git itself (Claude's sandbox can't write `.git`), as
   `git rebase <base>` in the task panel — with hooks off: a hooks folder inside the checkout is one Claude can
   write, and this git runs outside the sandbox. A stop at conflicts reads `stopped: 2 conflicts` there, not failed
-- Clean: a card offers to bring it now (`y`), to run [`:preflight`](configuration.md#checks-before-a-push-preflight) first and bring it once that
-  passes (`p`), or not now (`n`)
+- Clean: a card offers to bring it now (`y`), to run the quick [`:preflight`](configuration.md#checks-before-a-push-preflight) first and bring it once that
+  passes (`p` — the card names its steps; the `full = true` ones wait for `:preflight-full`, before publishing), or not now (`n`)
 - A conflict: the rebase stops, and the session's own Claude is asked in its chat to resolve the files. It's
   sent the files and both sides (what the commit being replayed changed, and what the base changed since that
   commit's parent), and told not to run git or commit. When its turn ends with no conflict markers left in

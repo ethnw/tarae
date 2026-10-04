@@ -167,10 +167,17 @@ steps = [
   { name = "fmt", cmd = "cargo fmt --all --check" },
   { name = "clippy", cmd = "cargo clippy --all-targets -- -D warnings" },
   { name = "test", cmd = "cargo test" },
-  # a line matching `note` (a regex) makes the pass one with a note
-  { name = "perf", cmd = "cargo perf", note = "not measured|SLOWER" },
+  # a line matching `note` (a regex) makes the pass one with a note; `full = true`: only before publishing
+  { name = "perf", cmd = "cargo perf", note = "not measured|SLOWER", full = true },
 ]
 ```
+
+Two sets, for the two moments: `:preflight` runs the **quick** one — every step but those marked `full = true` —
+and so does `p` on the card that brings a session into its base after a rebase. `:preflight-full` runs
+**every** step: the slow ones (a second feature build, measurements, a Linux run in Docker) are for before you
+publish. The panel's tab and the summary say which ran (`quick preflight: all 3 passed · 1m 02s — the full set (3
+more steps) runs before publish: :preflight-full`). A project that marks no step has one set: both commands run
+every step, as before.
 
 Where the steps come from:
 
@@ -189,7 +196,7 @@ Where the steps come from:
   check types their own way (`tsc -b`, `vue-tsc`, `svelte-check`); Python has no single standard to guess; a
   Java project builds with its own wrapper (`./mvnw`, `./gradlew`), a script from the repository that runs
   from the project's `[preflight]` once you trust it.
-- **Then yours**, from `.tarae.local.toml`'s `[preflight]`: added after either.
+- **Then yours**, from `.tarae.local.toml`'s `[preflight]`: added after either (`full = true` works there too).
 
 ## Custom themes
 

@@ -898,9 +898,10 @@ mod tests {
             cmd: cmd.into(),
             note: None,
             from: ".tarae.toml".into(),
+            full: false,
         };
         ed.config.preflight = vec![step("wait", "sleep 2")];
-        ed.preflight_start().unwrap();
+        ed.preflight_start(crate::preflight::Set::Quick).unwrap();
         // At once — no event handled since
         let tab = ed.slot_tabs().into_iter().find(|t| t.slot == crate::sizes::Slot::Task);
         assert!(

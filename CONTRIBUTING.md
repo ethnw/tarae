@@ -27,8 +27,9 @@ cargo clippy --all-targets               # must stay at 0 warnings
 cargo fmt                                # rustfmt.toml: max_width = 110
 ```
 
-Before sending a change, these checks must all pass — `:preflight` runs them in tarae (`.tarae.toml`'s
-`[preflight]`), and CI runs the same ones:
+Before sending a change, these checks must all pass — `:preflight-full` runs them in tarae (`.tarae.toml`'s
+`[preflight]`), and CI runs the same ones. `:preflight` alone — and bringing a session in — runs the quick
+set: fmt, clippy and test (the bundled-grammars builds and perf are marked `full = true`):
 
 <!-- the checks: the same as .tarae.toml's [preflight] and CI's jobs — a test keeps them so (preflight.rs) -->
 ```sh
@@ -42,7 +43,7 @@ cargo perf
 
 Checks of your own go in `.tarae.local.toml` at the root — its `[preflight] steps` run after these, for you only
 (`cargo xtask linux` is a good one: the Linux checks in Docker; with `note = "skipped"` its run without Docker
-reads as a pass with a note). The repository's `.gitignore` lists it: tarae reads that file only while git
+reads as a pass with a note, and with `full = true` it waits for `:preflight-full`). The repository's `.gitignore` lists it: tarae reads that file only while git
 ignores it ([docs](docs/configuration.md#where-it-lives)).
 
 `cargo perf` runs the performance budgets (a key → frame on a 200k-line file must stay under 16 ms) and
@@ -69,7 +70,7 @@ to a new stable release, as a change of its own:
 
 1. Set `channel` in `rust-toolchain.toml` to the new version (`1.100.0`), and `rust-version` in `Cargo.toml` to its
    `major.minor` (`1.100`).
-2. Run every check on it — `:preflight` in tarae, or `cargo fmt --all --check`, `cargo clippy --all-targets -- -D
+2. Run every check on it — `:preflight-full` in tarae, or `cargo fmt --all --check`, `cargo clippy --all-targets -- -D
    warnings` (and with `--features bundled-grammars`), `cargo test`, `cargo perf`. A new release brings new lints
    and deprecations: fix them in the same change (a deprecated call gets its replacement, not an `allow`).
    A new rustfmt may reformat — `cargo fmt` and commit that too.

@@ -8,13 +8,14 @@ restart-binary = "target/release/tarae"
 # the risky ones too
 sandbox-localhost = true
 
-# `:preflight` — what CI checks, before a push (perf on a busy machine or a slower number: a pass with a note)
+# What CI checks (perf on a busy machine or a slower number: a pass with a note). `:preflight` — and before a
+# session is brought — runs the quick set; `:preflight-full`, before publishing, every step (`full = true` too)
 [preflight]
 steps = [
   { name = "fmt", cmd = "cargo fmt --all --check" },
   { name = "clippy", cmd = "cargo clippy --all-targets -- -D warnings" },
-  { name = "clippy bundled", cmd = "cargo clippy --all-targets --features bundled-grammars -- -D warnings" },
+  { name = "clippy bundled", cmd = "cargo clippy --all-targets --features bundled-grammars -- -D warnings", full = true },
   { name = "test", cmd = "cargo test" },
-  { name = "test bundled", cmd = "cargo test --features bundled-grammars" },
-  { name = "perf", cmd = "cargo perf", note = "not measured|SLOWER" },
+  { name = "test bundled", cmd = "cargo test --features bundled-grammars", full = true },
+  { name = "perf", cmd = "cargo perf", note = "not measured|SLOWER", full = true },
 ]

@@ -85,8 +85,9 @@ pub enum What {
     ProjectTrust { hash: u64 },
     /// Claude asks to see the screen (`seeing.rs`): `y` once, `a` this chat, `n` no.
     Screen { call: crate::tools::Call },
-    /// `:preflight`'s first run in a project with the packs' default steps (`preflight.rs`): `y` runs them.
-    Preflight { root: PathBuf, steps: Vec<crate::preflight::Step> },
+    /// `:preflight`'s first run in a project with the packs' default steps (`preflight.rs`): `y` runs those
+    /// of `set`.
+    Preflight { root: PathBuf, steps: Vec<crate::preflight::Step>, set: crate::preflight::Set },
     /// A branch with commits on no other (`gitpanel.rs`): `y` deletes it, if still at `tip`.
     BranchDelete { top: PathBuf, branch: String, tip: String },
     /// A push over the remote's commits (`gitpanel.rs`): `y` pushes with a lease on what the card listed.
@@ -535,7 +536,7 @@ impl crate::editor::Editor {
             }
             What::Outside { run } => crate::blocked::outside_answer(self, id, *run, true),
             What::Screen { call } => crate::seeing::answer(self, id, call, Some(crate::allow::Scope::Once)),
-            What::Preflight { root, steps } => self.preflight_answer(id, root, steps, true),
+            What::Preflight { root, steps, set } => self.preflight_answer(id, root, (steps, set), true),
             What::BranchDelete { top, branch, tip } => self.git_branch_delete_answer(id, top, branch, tip),
             What::ForcePush(f) => self.git_force_push(id, *f),
             What::SessionNew(m) => self.session_make(id, *m),
@@ -830,7 +831,7 @@ impl crate::editor::Editor {
             What::Grant { grant, run } => crate::blocked::grant_answer(self, o.id, grant, *run, None),
             What::Outside { run } => crate::blocked::outside_answer(self, o.id, *run, false),
             What::Screen { call } => crate::seeing::answer(self, o.id, call, None),
-            What::Preflight { root, steps } => self.preflight_answer(o.id, root, steps, false),
+            What::Preflight { root, steps, set } => self.preflight_answer(o.id, root, (steps, set), false),
             What::BranchDelete { branch, .. } => self.set_status(format!("Kept {branch}")),
             What::ForcePush(f) => self.set_status(format!("Not pushed — {} as it was", f.upstream())),
             What::SessionNew(m) => self.set_status(format!("No session {} — nothing was made", m.branch)),

@@ -2038,6 +2038,43 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// The bring card's `p`, when the project has two preflight sets: the card names the quick one's steps,
+    /// `p` runs only those in the session's checkout (the full ones are for before publishing — a stand-in
+    /// that would leave a mark), and the bring follows once they pass.
+    #[test]
+    fn a_rebased_session_is_brought_after_its_quick_preflight() {
+        let (repo, dir) = place("rebase-quick");
+        let mut ed = editor(&repo, &dir);
+        let mark = dir.join("full-ran");
+        let step = |name: &str, cmd: String, full: bool| crate::preflight::Step {
+            name: name.into(),
+            cmd,
+            note: None,
+            from: ".tarae.toml".into(),
+            full,
+        };
+        ed.config.preflight = vec![
+            step("fmt", "echo formatted".into(), false),
+            step("perf", format!("touch '{}'", mark.display()), true),
+        ];
+        let (wt, _) = moved_apart(&mut ed, &repo, true);
+        rebase_asked(&mut ed);
+        settle_until(&mut ed, |ed| card(ed, "Rebased feat onto main").is_some() || says(ed, "rebase feat:"));
+        let q = card(&ed, "Rebased feat onto main").unwrap().question.clone();
+        assert!(q.contains("once the quick preflight passes?"), "{q}");
+        assert!(q.contains("Quick: fmt — :preflight-full runs the rest, before publishing."), "{q}");
+        assert_eq!(card_in_sight(&mut ed), ['y', 'p', 'n']);
+        feed(&mut ed, "p");
+        let run = ed.session.task_run.as_ref().map(|r| (r.task.name.clone(), r.task.cwd.clone()));
+        assert_eq!(run, Some(("quick preflight".into(), wt.clone())), "{}", said(&ed));
+        settle_until(&mut ed, |ed| says(ed, "Brought") || says(ed, "not brought") || says(ed, "bring feat:"));
+        assert!(says(&ed, "Brought 2 commits of feat into main"), "{}", said(&ed));
+        assert!(!mark.exists(), "the full set's step ran");
+        assert_eq!(git_in(&repo, &["rev-parse", "main"]), git_in(&wt, &["rev-parse", "HEAD"]));
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Roadmap #3, a conflict: the rebase stops at commit 1 of 2; the session's own Claude is asked in its
     /// chat (the file, both sides, no git, no commit); its turn ends with the markers gone, so the review
     /// shows the file against the commit being replayed and the card offers to go on. Meanwhile the session

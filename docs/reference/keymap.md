@@ -451,7 +451,8 @@ Type `:` in normal mode. `Tab` completes command names and their arguments (path
 | `:quit-all!` | `:qa!` | Quit tarae without saving |
 | `:restart` |  | Start tarae again, as you were (after an update) |
 | `:restart!` |  | Restart, skipping editor.restart-build |
-| `:preflight` |  | Run the project's checks before a push |
+| `:preflight` |  | Run the project's quick checks |
+| `:preflight-full` |  | Run every check, before publishing |
 | `:open` | `:o` `:e` `:edit` | Open files |
 | `:new` | `:n` | New scratch buffer |
 | `:reload` |  | Reload the file from disk (u brings your version back) |

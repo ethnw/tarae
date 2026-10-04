@@ -63,11 +63,19 @@ impl Moved {
         )
     }
 
-    /// The card once it's rebased: bring it now, or after the preflight.
-    fn bring_card(&self) -> Offer {
+    /// The card once it's rebased: bring it now, or after the preflight — the quick set (`quick`: its steps,
+    /// when the project has two sets), the full one being for before publishing.
+    fn bring_card(&self, quick: Option<Vec<String>>) -> Offer {
         let (base, them) = (&self.base, if self.ahead == 1 { "it" } else { "them" });
+        let which = match quick {
+            Some(steps) => format!(
+                "the quick preflight passes?\n\nQuick: {} — :preflight-full runs the rest, before publishing.",
+                steps.join(", ")
+            ),
+            None => "the preflight passes?".into(),
+        };
         let q = format!(
-            "{} on {base}'s tip now.\n\nBring {them} into {base} — now, or once the preflight passes?",
+            "{} on {base}'s tip now.\n\nBring {them} into {base} — now, or once {which}",
             crate::worktree::commits(self.ahead),
         );
         Offer::new(
@@ -526,7 +534,8 @@ impl Editor {
                 // (a session's: bring it now? The checkout tarae started in has no base to go into)
                 if self.session.id != 0 {
                     let root = self.session.root.clone();
-                    self.push_offer(Moved { root, name, branch, base, moved: 0, ahead }.bring_card());
+                    let quick = self.preflight_quick();
+                    self.push_offer(Moved { root, name, branch, base, moved: 0, ahead }.bring_card(quick));
                 }
             }
             Ended::Aborted => {
@@ -763,26 +772,27 @@ impl Editor {
         }
     }
 
-    /// `p` on the bring card: the preflight in its session, and the bring once it passes.
+    /// `p` on the bring card: the quick preflight in its session, and the bring once it passes (the full one
+    /// is for before publishing).
     pub fn rebase_preflight_then_bring(&mut self, m: Moved) {
         let Some(id) = self.session_at(&m.root) else { return };
         self.with_session(id, |ed| {
             ed.session.bring_after_preflight = true;
-            if let Err(e) = ed.preflight_start() {
+            if let Err(e) = ed.preflight_start(crate::preflight::Set::Quick) {
                 ed.session.bring_after_preflight = false;
                 ed.set_error(e);
             }
         });
     }
 
-    /// The preflight ended (`passed` or not): a bring waiting for it goes on, or doesn't.
-    pub(crate) fn rebase_preflight_done(&mut self, passed: bool) {
+    /// The preflight (`title`: which set) ended, `passed` or not: a bring waiting for it goes on, or doesn't.
+    pub(crate) fn rebase_preflight_done(&mut self, passed: bool, title: &str) {
         if !std::mem::take(&mut self.session.bring_after_preflight) {
             return;
         }
         let (id, name) = (self.session.id, self.session.label().to_string());
         if !passed {
-            return self.set_warning(format!("{name} not brought — the preflight didn't pass"));
+            return self.set_warning(format!("{name} not brought — the {title} didn't pass"));
         }
         if let Err(e) = self.session_bring(&id.to_string()) {
             self.set_error(e);

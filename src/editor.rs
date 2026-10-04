@@ -3557,7 +3557,7 @@ mod tests {
     /// one-line summary; the markers between steps aren't shown, each step's output is under its heading.
     #[test]
     fn preflight_runs_every_step_and_sums_up() {
-        use crate::preflight::{State, Step};
+        use crate::preflight::{Set, State, Step};
         let dir = std::env::temp_dir().join(format!("tarae-preflight-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let dir = std::fs::canonicalize(&dir).unwrap();
@@ -3567,11 +3567,12 @@ mod tests {
             cmd: cmd.into(),
             note: None,
             from: ".tarae.toml".into(),
+            full: false,
         };
         let mut ed = editor("");
         ed.session.root = dir.clone();
         // No steps, and no kind of project a pack knows (looked for on a worker)
-        ed.preflight_start().unwrap();
+        ed.preflight_start(Set::Quick).unwrap();
         settle_for(&mut ed, |ed| ed.status.is_some());
         let said = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
         assert!(
@@ -3584,8 +3585,12 @@ mod tests {
             Step { note: Some("not measured".into()), ..step("perf", "echo 'not measured (machine busy)'") },
             step("test", "cd / && echo 'all fine'; exit 0"),
         ];
-        ed.preflight_start().unwrap();
-        assert!(ed.preflight_start().unwrap_err().contains("preflight is running"), "not twice at once");
+        // (none marked full: one set, every step in it, and nothing says "quick")
+        ed.preflight_start(Set::Quick).unwrap();
+        assert!(
+            ed.preflight_start(Set::Full).unwrap_err().contains("preflight is running"),
+            "not twice at once"
+        );
         settle_for(&mut ed, |ed| {
             ed.session.task_run.as_ref().is_some_and(|r| r.state != crate::task::State::Running)
         });
@@ -3631,7 +3636,7 @@ mod tests {
     /// still go after, and no card asks.
     #[test]
     fn preflight_uses_the_packs_defaults_after_saying_so() {
-        use crate::preflight::{State, Step};
+        use crate::preflight::{Set, State, Step};
         let dir = std::env::temp_dir().join(format!("tarae-preflight-packs-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let dir = std::fs::canonicalize(&dir).unwrap();
@@ -3641,12 +3646,13 @@ mod tests {
             cmd: cmd.into(),
             note: None,
             from: from.into(),
+            full: false,
         };
         let mut ed = editor("");
         ed.session.root = dir.clone();
         ed.config.preflight_local = vec![step("mine", "echo mine", ".tarae.local.toml")];
         // A Cargo project: the rust pack's steps, on a card
-        ed.preflight_start().unwrap();
+        ed.preflight_start(Set::Quick).unwrap();
         settle_for(&mut ed, |ed| !ed.offers.is_empty());
         let q = ed.offers[0].question.clone();
         assert!(q.starts_with("The rust pack's defaults:"), "{q}");
@@ -3664,7 +3670,7 @@ mod tests {
         assert!(ed.session.task_run.is_none(), "n: nothing ran");
         // `y`: they run, yours after (stand-in pack steps — a real one would run cargo here)
         let pack = vec![step("fmt", "echo formatted", "rust pack")];
-        ed.preflight_found(dir.clone(), pack.clone(), ed.config.preflight_local.clone());
+        ed.preflight_found(dir.clone(), pack.clone(), ed.config.preflight_local.clone(), Set::Quick);
         assert_eq!(ed.offers.len(), 1);
         ed.offer_accept();
         let done = |ed: &Editor| {
@@ -3683,15 +3689,71 @@ mod tests {
         };
         assert_eq!(ran(&ed), [("fmt".to_string(), State::Passed), ("mine".to_string(), State::Passed)]);
         // Told once: not asked again in this project
-        ed.preflight_found(dir.clone(), pack, ed.config.preflight_local.clone());
+        ed.preflight_found(dir.clone(), pack, ed.config.preflight_local.clone(), Set::Quick);
         assert!(ed.offers.is_empty(), "no card the second time");
         settle_for(&mut ed, done);
         // The project's own replace the packs'; yours still after
         ed.config.preflight = vec![step("own", "echo own", ".tarae.toml")];
-        ed.preflight_start().unwrap();
+        ed.preflight_start(Set::Quick).unwrap();
         assert!(ed.offers.is_empty());
         settle_for(&mut ed, done);
         assert_eq!(ran(&ed).iter().map(|r| r.0.as_str()).collect::<Vec<_>>(), ["own", "mine"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Two sets: `:preflight` runs the quick one — every step but the ones marked `full` — named so in its
+    /// tab and its end, which points at the full one; `:preflight-full` runs them all. A step of yours can
+    /// be a full one too (the Linux run), and every step marked full leaves the quick set nothing to run.
+    #[test]
+    fn preflight_runs_the_quick_set_and_the_full_one_on_its_own() {
+        use crate::preflight::Step;
+        let dir = std::env::temp_dir().join(format!("tarae-preflight-sets-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let step = |name: &str, full: bool| Step {
+            name: name.into(),
+            cmd: format!("echo ran {name}"),
+            note: None,
+            from: ".tarae.toml".into(),
+            full,
+        };
+        let mut ed = editor("");
+        ed.session.root = dir.clone();
+        ed.config.preflight = vec![step("fmt", false), step("perf", true), step("test", false)];
+        ed.config.preflight_local = vec![Step { from: ".tarae.local.toml".into(), ..step("linux", true) }];
+        assert_eq!(ed.preflight_quick(), Some(vec!["fmt".to_string(), "test".to_string()]));
+        let done = |ed: &Editor| {
+            ed.session.task_run.as_ref().is_some_and(|r| r.state != crate::task::State::Running)
+        };
+        let ran = |ed: &Editor| -> Vec<String> {
+            ed.session.preflight.as_ref().unwrap().steps.iter().map(|s| s.name.clone()).collect()
+        };
+        let said = |ed: &Editor| ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        crate::typed::execute(&mut ed, "preflight").unwrap();
+        let tab = ed.slot_tabs().into_iter().find(|t| t.slot == crate::sizes::Slot::Task).unwrap();
+        assert_eq!(tab.label, "quick preflight");
+        settle_for(&mut ed, done);
+        assert_eq!(ran(&ed), ["fmt", "test"]);
+        let out: Vec<&str> =
+            ed.session.task_run.as_ref().unwrap().output.iter().map(|(_, l)| l.as_str()).collect();
+        assert!(!out.iter().any(|l| l.contains("ran perf") || l.contains("ran linux")), "{out:?}");
+        assert!(said(&ed).starts_with("quick preflight: all 2 passed · "), "{}", said(&ed));
+        assert!(
+            said(&ed).ends_with(" — the full set (2 more steps) runs before publish: :preflight-full"),
+            "{}",
+            said(&ed)
+        );
+        crate::typed::execute(&mut ed, "preflight-full").unwrap();
+        settle_for(&mut ed, done);
+        assert_eq!(ran(&ed), ["fmt", "perf", "test", "linux"]);
+        assert_eq!(ed.session.task_run.as_ref().unwrap().task.name, "full preflight");
+        assert!(said(&ed).starts_with("full preflight: all 4 passed · "), "{}", said(&ed));
+        assert!(!said(&ed).contains("before publish"), "{}", said(&ed));
+        // Every step full: nothing quick to run — said, not an empty pass
+        ed.config.preflight = vec![step("perf", true)];
+        ed.config.preflight_local.clear();
+        let e = crate::typed::execute(&mut ed, "preflight").unwrap_err();
+        assert!(e.contains(":preflight-full runs them"), "{e}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -5165,9 +5227,10 @@ mod tests {
                 cmd: String::new(),
                 note: None,
                 from: String::new(),
+                full: false,
             })
             .collect();
-        ed.session.preflight = Some(crate::preflight::Preflight::new(0, &steps));
+        ed.session.preflight = Some(crate::preflight::Preflight::new(0, &steps, crate::preflight::Set::Full));
         let draw = |ed: &mut Editor| {
             let mut bytes = Vec::new();
             crate::term::render(ed, &mut bytes, 120, 40).unwrap();
