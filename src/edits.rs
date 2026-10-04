@@ -59,7 +59,7 @@ const TELL_OFF: &str =
 
 /// Whether the chat's edits are reviewed at the end of its turn.
 pub fn at_end(ed: &Editor) -> bool {
-    ed.chat.as_ref().is_some_and(|c| c.edits.at_end.is_some())
+    ed.lane.chat.as_ref().is_some_and(|c| c.edits.at_end.is_some())
 }
 
 /// `space v a` · `:review-at-end [on|off]` (`want`; None flips it): on asks first, on its card.
@@ -82,15 +82,15 @@ pub fn at_end_toggle(ed: &mut Editor, want: Option<bool>) {
 
 /// `y` on the card (on) · turned off: for this chat, the project folder it was agreed for.
 pub fn at_end_set(ed: &mut Editor, on: bool) {
-    if ed.chat.is_none() {
+    if ed.lane.chat.is_none() {
         crate::chat::open(ed);
-        if let Some(c) = &mut ed.chat {
+        if let Some(c) = &mut ed.lane.chat {
             c.focused = false;
             c.unfolded = false;
         }
     }
-    let root = ed.root.clone();
-    let Some(c) = &mut ed.chat else { return };
+    let root = ed.lane.root.clone();
+    let Some(c) = &mut ed.lane.chat else { return };
     c.edits.at_end = on.then_some(root);
     let row = match on {
         true => "review at the end · space v a turns it off",
@@ -99,7 +99,7 @@ pub fn at_end_set(ed: &mut Editor, on: bool) {
     c.msgs.push(crate::chat::Msg::new(crate::chat::Role::Note, row, ""));
     // Claude hears the change with its next message — unless it never heard of the other
     let (say, unsay) = if on { (TELL_ON, TELL_OFF) } else { (TELL_OFF, TELL_ON) };
-    let tell = &mut ed.checkpoints.tell;
+    let tell = &mut ed.lane.checkpoints.tell;
     match tell.iter().position(|t| t == unsay) {
         Some(i) => {
             tell.remove(i);
@@ -121,7 +121,7 @@ pub fn request(ed: &mut Editor, request_id: &str, req: &Value) -> Option<Value> 
     if !matches!(tool, "Edit" | "Write") {
         return Some(deny(&format!("{tool} isn't available in tarae's chat")));
     }
-    let c = ed.chat.as_mut()?;
+    let c = ed.lane.chat.as_mut()?;
     // Its words right before this call, this turn — taken now, so each queued edit keeps its own
     let reason = reason(c);
     let p = Pending {
@@ -162,9 +162,9 @@ pub fn reason(c: &crate::chat::Chat) -> String {
 /// leads, and the file's text before it — then it's allowed as claude asked (claude writes it; the watch
 /// brings an open buffer along), or shown as a review after all.
 fn unasked(ed: &mut Editor, root: PathBuf, p: Pending) {
-    let path = crate::chat::resolve(&ed.root, p.input["file_path"].as_str().unwrap_or_default());
+    let path = crate::chat::resolve(&ed.lane.root, p.input["file_path"].as_str().unwrap_or_default());
     let ask = ed.config.llm.review_ask.clone();
-    let generation = ed.chat.as_ref().map(crate::chat::Chat::generation);
+    let generation = ed.lane.chat.as_ref().map(crate::chat::Chat::generation);
     ed.events.jobs().spawn(move || {
         // (Some: it goes in — the real path, and what's there now: None = no file)
         let found = inside(&root, &path)
@@ -172,7 +172,7 @@ fn unasked(ed: &mut Editor, root: PathBuf, p: Pending) {
             .and_then(|real| Some((before_text(&real)?, real)));
         move |ed: &mut Editor| {
             // (a new chat, claude restarted: no one waits for this answer)
-            if ed.chat.as_ref().map(crate::chat::Chat::generation) != generation {
+            if ed.lane.chat.as_ref().map(crate::chat::Chat::generation) != generation {
                 return;
             }
             // Unsaved edits of the user's: disk isn't what they see — the usual review
@@ -186,13 +186,13 @@ fn unasked(ed: &mut Editor, root: PathBuf, p: Pending) {
                     // (allowed once what it was is on disk)
                     let before = before.map(ropey::Rope::from);
                     crate::checkpoint::record_unseen(ed, real, before, move |ed: &mut Editor| {
-                        if ed.chat.as_ref().map(crate::chat::Chat::generation) == generation {
+                        if ed.lane.chat.as_ref().map(crate::chat::Chat::generation) == generation {
                             answer(ed, &p.request_id, allow(p.input));
                         }
                     });
                 }
                 _ => {
-                    if let Some(c) = &mut ed.chat {
+                    if let Some(c) = &mut ed.lane.chat {
                         c.edits.queue.push_back(p);
                     }
                     next(ed);
@@ -267,13 +267,13 @@ pub fn next(ed: &mut Editor) {
     if ed.review.is_some() {
         return;
     }
-    let Some(p) = ed.chat.as_mut().and_then(|c| c.edits.queue.pop_front()) else { return };
+    let Some(p) = ed.lane.chat.as_mut().and_then(|c| c.edits.queue.pop_front()) else { return };
     show(ed, p);
 }
 
 fn show(ed: &mut Editor, p: Pending) {
     let s = |k: &str| p.input[k].as_str().unwrap_or_default().to_string();
-    let path = crate::chat::resolve(&ed.root, &s("file_path"));
+    let path = crate::chat::resolve(&ed.lane.root, &s("file_path"));
     // (a file Claude creates goes again when its turn is undone)
     let open_before = ed.docs.iter().any(|d| d.path.as_deref() == Some(path.as_path()));
     let existed = open_before || path.exists();
@@ -281,7 +281,7 @@ fn show(ed: &mut Editor, p: Pending) {
         return answer(ed, &p.request_id, deny(&format!("tarae couldn't open {}: {e:#}", path.display())));
     }
     // Outside the project and opened for this: it goes when the turn ends, unless you take it up (#37)
-    let root = ed.root.clone();
+    let root = ed.lane.root.clone();
     let doc = ed.doc_mut();
     if !open_before && doc.path.as_ref().is_some_and(|p| !p.starts_with(&root)) {
         doc.aside = true;
@@ -324,14 +324,15 @@ fn show(ed: &mut Editor, p: Pending) {
     }
     // The header quotes what you asked for (the file is in the path bar above)
     let title = ed
+        .lane
         .chat
         .as_ref()
         .and_then(|c| c.msgs.iter().rev().find(|m| m.role == crate::chat::Role::User))
         .map(|m| m.text.lines().next().unwrap_or_default().to_string())
-        .unwrap_or_else(|| format!("an edit to {}", crate::chat::shown(&ed.root, &path)));
+        .unwrap_or_else(|| format!("an edit to {}", crate::chat::shown(&ed.lane.root, &path)));
     let reason = p.reason.clone();
     // The keys go to the review; the file is the user's now (follow won't close it as a preview)
-    if let Some(c) = &mut ed.chat {
+    if let Some(c) = &mut ed.lane.chat {
         c.focused = false;
         c.follow.keep(doc_id);
     }
@@ -349,7 +350,7 @@ fn show(ed: &mut Editor, p: Pending) {
         // (its turn in the chat is the step)
         r.own_turn = false;
         let g = r.generation;
-        if let Some(c) = &mut ed.chat {
+        if let Some(c) = &mut ed.lane.chat {
             c.edits.review = Some(g);
         }
     }
@@ -358,7 +359,7 @@ fn show(ed: &mut Editor, p: Pending) {
 
 /// The review ended: tell claude what to write (or not).
 fn done(ed: &mut Editor, p: Pending, doc_id: DocId, base: String, dirty: bool, existed: bool, applied: bool) {
-    if let Some(c) = &mut ed.chat {
+    if let Some(c) = &mut ed.lane.chat {
         c.edits.review = None;
     }
     if applied {
@@ -437,7 +438,7 @@ fn answer(ed: &mut Editor, request_id: &str, response: Value) {
 /// and the files outside the project its reviews opened go (`Document::aside` — not ones with unsaved
 /// edits of yours, nor ones you worked in since; an accepted edit Claude is still writing is its own).
 pub fn turn_over(ed: &mut Editor) {
-    let Some(c) = &mut ed.chat else { return };
+    let Some(c) = &mut ed.lane.chat else { return };
     c.edits.queue.clear();
     if let Some(g) = c.edits.review.take()
         && ed.review.as_ref().is_some_and(|r| r.generation == g)
@@ -463,10 +464,10 @@ pub fn taken_up(ed: &mut Editor) {
         || ed.review.is_some()
         || ed.picker.is_some()
         || ed.prompt.is_some()
-        || ed.chat.as_ref().is_some_and(|c| c.focused)
+        || ed.lane.chat.as_ref().is_some_and(|c| c.focused)
         || (!ed.offers.is_empty() && ed.card_has_keys())
-        || ed.terminal.as_ref().is_some_and(|t| t.focus && t.visible)
-        || ed.sidebar.as_ref().is_some_and(|s| s.focus)
+        || ed.lane.terminal.as_ref().is_some_and(|t| t.focus && t.visible)
+        || ed.lane.sidebar.as_ref().is_some_and(|s| s.focus)
         || ed.bottom_focus
     {
         return;

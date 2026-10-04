@@ -83,7 +83,7 @@ pub fn land(
     files: Vec<FileChange>,
     note: String,
 ) {
-    let Some(c) = ed.chat.as_ref() else { return answer(ed, call, Err("the chat is gone".into())) };
+    let Some(c) = ed.lane.chat.as_ref() else { return answer(ed, call, Err("the chat is gone".into())) };
     let (generation, reason) = (c.generation(), crate::edits::reason(c));
     let files: Vec<FileChange> = files.into_iter().filter(|f| f.before != f.after).collect();
     if files.is_empty() {
@@ -157,7 +157,7 @@ fn write_file(f: &FileChange) -> Result<Option<crate::disk::Stamp>, Outcome> {
 
 /// Into the chat's queue of landings (answered at once when the chat it came from is gone).
 fn queue(ed: &mut Editor, l: Landing) {
-    match ed.chat.as_mut().filter(|c| c.generation() == l.generation) {
+    match ed.lane.chat.as_mut().filter(|c| c.generation() == l.generation) {
         Some(c) => c.edits.sets.push_back(l),
         None => return answer(ed, l.call.clone(), Ok(report(&l))),
     }
@@ -170,7 +170,7 @@ pub fn next(ed: &mut Editor) {
     if ed.review.is_some() {
         return;
     }
-    let Some(c) = ed.chat.as_mut() else { return };
+    let Some(c) = ed.lane.chat.as_mut() else { return };
     let Some(l) = c.edits.sets.front_mut() else { return };
     match l.review.pop_front() {
         Some(f) => {
@@ -191,7 +191,7 @@ pub fn next(ed: &mut Editor) {
 
 /// What became of a file of the front landing.
 fn done_one(ed: &mut Editor, f: &FileChange, outcome: Outcome) {
-    if let Some(l) = ed.chat.as_mut().and_then(|c| c.edits.sets.front_mut()) {
+    if let Some(l) = ed.lane.chat.as_mut().and_then(|c| c.edits.sets.front_mut()) {
         l.done.push((f.rel.clone(), f.places, outcome));
     }
 }
@@ -213,7 +213,7 @@ fn show(ed: &mut Editor, f: FileChange, title: String, reason: String) {
     let doc_id = doc.id;
     let changes = crate::agent::line_changes(&f.before.to_string(), &f.after.to_string());
     // The keys go to the review; the file is the user's now (follow won't close it as a preview)
-    if let Some(c) = &mut ed.chat {
+    if let Some(c) = &mut ed.lane.chat {
         c.focused = false;
         c.follow.keep(doc_id);
     }
@@ -229,7 +229,7 @@ fn show(ed: &mut Editor, f: FileChange, title: String, reason: String) {
         // (its turn in the chat is the step)
         r.own_turn = false;
         let g = r.generation;
-        if let Some(c) = &mut ed.chat {
+        if let Some(c) = &mut ed.lane.chat {
             c.edits.review = Some(g);
         }
     }
@@ -238,7 +238,7 @@ fn show(ed: &mut Editor, f: FileChange, title: String, reason: String) {
 
 /// A file's review ended: kept for `space u` and saved (unless the user has unsaved edits there).
 fn reviewed(ed: &mut Editor, f: FileChange, doc_id: DocId, dirty: bool, applied: bool) {
-    if let Some(c) = &mut ed.chat {
+    if let Some(c) = &mut ed.lane.chat {
         c.edits.review = None;
     }
     let now = ed.docs.iter().find(|d| d.id == doc_id).map(|d| d.text.clone());
@@ -266,7 +266,7 @@ fn reviewed(ed: &mut Editor, f: FileChange, doc_id: DocId, dirty: bool, applied:
 /// The chat turn ended: landings still going are dropped (nobody waits for their answers; a review still
 /// up was closed by `edits::turn_over`).
 pub fn turn_over(ed: &mut Editor) {
-    if let Some(c) = ed.chat.as_mut() {
+    if let Some(c) = ed.lane.chat.as_mut() {
         c.edits.sets.clear();
     }
 }
@@ -577,7 +577,7 @@ fn edits_by_file(ed: &Editor, a: &RenameAsk, edit: &Value) -> Result<Vec<(PathBu
     let mut ops = Vec::new();
     for dc in doc_changes.into_iter().flatten() {
         if let Some(kind) = dc["kind"].as_str() {
-            let uri = |k: &str| path_of(&dc[k]).map(|p| nav::rel(&ed.root, &p)).unwrap_or_default();
+            let uri = |k: &str| path_of(&dc[k]).map(|p| nav::rel(&ed.lane.root, &p)).unwrap_or_default();
             ops.push(match kind {
                 "rename" => format!("moves {} to {}", uri("oldUri"), uri("newUri")),
                 "create" => format!("makes {}", uri("uri")),
@@ -594,7 +594,7 @@ fn edits_by_file(ed: &Editor, a: &RenameAsk, edit: &Value) -> Result<Vec<(PathBu
         {
             return Err(format!(
                 "{} changed since {} worked out the rename — call rename again",
-                nav::rel(&ed.root, &path),
+                nav::rel(&ed.lane.root, &path),
                 a.server
             ));
         }
@@ -615,7 +615,7 @@ fn edits_by_file(ed: &Editor, a: &RenameAsk, edit: &Value) -> Result<Vec<(PathBu
             && d.version() != *v
             && d.path.as_ref().is_some_and(|p| per.iter().any(|(q, _)| q == p))
         {
-            let name = d.display_name(&ed.root);
+            let name = d.display_name(&ed.lane.root);
             return Err(format!(
                 "{name} changed while {} worked out the rename — call rename again",
                 a.server

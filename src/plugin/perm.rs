@@ -387,7 +387,7 @@ impl Editor {
             .iter()
             .filter_map(|p| if let Permission::Read(pat) = p { Some(pat.clone()) } else { None })
             .collect();
-        let project = declared.contains(&Permission::Project).then(|| self.root.clone());
+        let project = declared.contains(&Permission::Project).then(|| self.lane.root.clone());
         if patterns.is_empty() && project.is_none() {
             return Err(Some("it didn't ask to read files (permissions())".into()));
         }

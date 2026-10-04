@@ -146,8 +146,8 @@ const RESTING_REDRAW: std::time::Duration = std::time::Duration::from_millis(500
 
 fn event_loop(editor: &mut Editor) -> Result<()> {
     spawn_input(editor.events.sender());
-    crate::config::watch(editor.events.sender(), editor.root.clone());
-    crate::git::watch(editor.events.sender(), editor.root.clone());
+    crate::config::watch(editor.events.sender(), editor.lane.root.clone());
+    crate::git::watch(editor.events.sender(), editor.lane.root.clone());
     editor.procs_start_sampling();
     let mut out = io::stdout();
     let mut draw = true;
@@ -323,7 +323,7 @@ fn render_frame(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io
         terminal_rows: (lay.debug_h > 0
             && editor.dap.is_none()
             && !editor.procs_up()
-            && editor.terminal.as_ref().is_some_and(|t| t.visible))
+            && editor.lane.terminal.as_ref().is_some_and(|t| t.visible))
         .then(|| {
             (lay.text_top as usize + lay.text_rows, lay.text_top as usize + lay.text_rows + lay.debug_h - 1)
         }),
@@ -358,21 +358,21 @@ fn render_frame(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io
     if lay.debug_h > 1
         && editor.dap.is_none()
         && !editor.procs_up()
-        && let Some(t) = editor.terminal.as_mut().filter(|t| t.visible)
+        && let Some(t) = editor.lane.terminal.as_mut().filter(|t| t.visible)
     {
         t.resize((lay.debug_h - 1) as u16, lay.edit_w.saturating_sub(2) as u16);
     }
     if lay.rail_w > 0
         && !editor.review_rail_up()
-        && let Some(sb) = editor.sidebar.as_mut()
+        && let Some(sb) = editor.lane.sidebar.as_mut()
     {
         let depths: Vec<usize> = sb.lines().iter().map(|l| l.depth).collect();
         sb.fit(sidebar_list_rows(&lay), &depths);
     }
     if lay.rail_w > 0
         && editor.review_rail_up()
-        && let Some(marked) = editor.code_review.as_ref().map(|r| r.marked(editor))
-        && let Some(r) = editor.code_review.as_mut()
+        && let Some(marked) = editor.lane.code_review.as_ref().map(|r| r.marked(editor))
+        && let Some(r) = editor.lane.code_review.as_mut()
     {
         let room = review_rail_room(&lay, r);
         r.fit(marked, room);
@@ -428,7 +428,7 @@ fn offer_text_read(editor: &Editor, doc: crate::document::DocId) -> bool {
     let lines = d.text.len_lines();
     let last = lines.saturating_sub(if lines > 1 && d.text.line(lines - 1).len_bytes() == 0 { 2 } else { 1 });
     editor.screen.panes.iter().any(|(view, _, _, rows)| {
-        editor.views.iter().find(|v| v.id == *view).is_some_and(|v| v.doc == doc)
+        editor.lane.views.iter().find(|v| v.id == *view).is_some_and(|v| v.doc == doc)
             && rows.iter().any(|r| r.0 >= last)
     })
 }
@@ -476,7 +476,7 @@ impl Layout {
         // A card stepped aside to a bar while its text is read (U8): the row over the status line is its
         let bar = usize::from(editor.offer_bar() && all > 6);
         let total = all - bar;
-        let terminal = editor.terminal.as_ref().is_some_and(|t| t.visible) && editor.dap.is_none();
+        let terminal = editor.lane.terminal.as_ref().is_some_and(|t| t.visible) && editor.dap.is_none();
         // `C-w z`: one thing fills the screen (`sizes::Zoom`)
         use crate::sizes::Zoom;
         let zoom = editor.zoomed();
@@ -490,8 +490,8 @@ impl Layout {
         } else if let Some(r) = task_in_the_slot(editor) {
             task_panel_h(r, preflight_of(editor, r).is_some(), total)
         } else if editor.dap.is_some()
-            || editor.test_run.is_some()
-            || editor.task_run.is_some()
+            || editor.lane.test_run.is_some()
+            || editor.lane.task_run.is_some()
             || editor.plugins.as_ref().is_some_and(|p| p.panel.is_some())
         {
             (total / 3).clamp(7, 14).min(total.saturating_sub(4))
@@ -516,8 +516,8 @@ impl Layout {
         // …or the side panel (files / outline): the chat's and its widths are yours or automatic, the panel
         // giving way when the code would get too narrow (`sizes::widths`)
         let review = editor.review_rail_up();
-        let chat_open = editor.chat.as_ref().is_some_and(|c| !c.compact());
-        let side_open = !review && editor.sidebar.is_some();
+        let chat_open = editor.lane.chat.as_ref().is_some_and(|c| !c.compact());
+        let side_open = !review && editor.lane.sidebar.is_some();
         let widths = match zoom {
             None => crate::sizes::widths(w as usize, chat_open, side_open, editor.sizes),
             Some(Zoom::Chat) => crate::sizes::Widths { chat: w as usize, side: 0 },
@@ -526,7 +526,7 @@ impl Layout {
         };
         let chat_w = widths.chat;
         let edit_w = w as usize - chat_w;
-        let rail_w = match editor.code_review.as_ref() {
+        let rail_w = match editor.lane.code_review.as_ref() {
             // The review's: as wide as its names (U6)
             Some(r) if review && zoom.is_none() && edit_w >= 90 => review_rail_w(r, edit_w),
             _ => widths.side,
@@ -601,13 +601,14 @@ fn panes(
         h: lay.text_rows,
     };
     // (`C-w z`: the focused pane alone, no title row)
-    let many = editor.views.len() > 1 && lay.zoom.is_none();
-    let tiles = if lay.zoom.is_some() { vec![(editor.focus, area)] } else { editor.split.layout(area) };
+    let many = editor.lane.views.len() > 1 && lay.zoom.is_none();
+    let tiles =
+        if lay.zoom.is_some() { vec![(editor.lane.focus, area)] } else { editor.lane.split.layout(area) };
     let mut out: Vec<_> = tiles
         .into_iter()
         .filter_map(|(id, r)| {
-            let v = editor.views.iter().find(|v| v.id == id)?;
-            let focused = id == editor.focus;
+            let v = editor.lane.views.iter().find(|v| v.id == id)?;
+            let focused = id == editor.lane.focus;
             let idx =
                 if focused { editor.current } else { editor.docs.iter().position(|d| d.id == v.doc)? };
             let doc = &editor.docs[idx];
@@ -922,17 +923,17 @@ fn value_and_type(
 /// The task run the bottom slot shows — none while the debugger, the terminal or a plugin's panel has it, or
 /// a test run started after it (`draw` picks the same).
 fn task_in_the_slot(editor: &Editor) -> Option<&crate::task::Run> {
-    let k = editor.task_run.as_ref()?;
+    let k = editor.lane.task_run.as_ref()?;
     let taken = editor.dap.is_some()
-        || editor.terminal.as_ref().is_some_and(|t| t.visible)
+        || editor.lane.terminal.as_ref().is_some_and(|t| t.visible)
         || editor.plugins.as_ref().is_some_and(|p| p.panel.is_some())
-        || editor.test_run.as_ref().is_some_and(|t| t.started >= k.started);
+        || editor.lane.test_run.as_ref().is_some_and(|t| t.started >= k.started);
     (!taken).then_some(k)
 }
 
 /// The preflight `r` is the run of, if it is one (`preflight.rs`) — its steps' row goes under the header.
 fn preflight_of<'a>(editor: &'a Editor, r: &crate::task::Run) -> Option<&'a crate::preflight::Preflight> {
-    editor.preflight.as_ref().filter(|p| p.generation == r.generation())
+    editor.lane.preflight.as_ref().filter(|p| p.generation == r.generation())
 }
 
 /// A preflight's steps in a row: `● fmt 0.4s   ▲ clippy 12s   ▂▅▇ test 3.2s   ◦ perf` — passed in the plus
@@ -2113,7 +2114,7 @@ fn draw_pane_title(
         if focused { Style { fg: ui.accent.fg, ..base } } else { Style { fg: ui.linenr.fg, ..base } },
     )?;
     queue!(out, Print(" ▎ "))?;
-    let name = fit_ellipsis(&doc.display_name(&editor.root), r.w.saturating_sub(8));
+    let name = fit_ellipsis(&doc.display_name(&editor.lane.root), r.w.saturating_sub(8));
     let name_style = if focused {
         base.patch(t.try_get("ui.text.focus").unwrap_or(Style { bold: true, ..Style::default() }))
     } else {
@@ -2487,14 +2488,14 @@ fn draw(
         }
         None => draw_panes(editor, ui, lay, out)?,
     };
-    if let Some(r) = editor.code_review.as_ref().filter(|_| editor.review_rail_up())
+    if let Some(r) = editor.lane.code_review.as_ref().filter(|_| editor.review_rail_up())
         && lay.rail_w > 0
         && lay.zoom.is_none()
         && !editor.review.as_ref().is_some_and(|r| r.ready)
         && !editor.welcome()
     {
         draw_review_rail(r, editor, ui, lay, out)?;
-    } else if let Some(sb) = &editor.sidebar
+    } else if let Some(sb) = &editor.lane.sidebar
         && lay.rail_w > 0
         && !editor.review_rail_up()
         && !editor.review.as_ref().is_some_and(|r| r.ready)
@@ -2507,13 +2508,13 @@ fn draw(
             draw_procs_panel(editor, ui, lay, out)?;
         } else if let Some(d) = &editor.dap {
             draw_debug_panel(d, editor, ui, lay, out)?;
-        } else if let Some(t) = editor.terminal.as_ref().filter(|t| t.visible) {
+        } else if let Some(t) = editor.lane.terminal.as_ref().filter(|t| t.visible) {
             terminal_cursor = draw_terminal_panel(t, editor, ui, lay, out)?;
         } else if let Some(st) = editor.plugins.as_ref().and_then(|p| p.panel.as_ref()) {
             draw_plugin_panel(st, editor, ui, lay, out)?;
         } else {
             // A test run and a task share the slot: the one started last shows
-            match (&editor.test_run, &editor.task_run) {
+            match (&editor.lane.test_run, &editor.lane.task_run) {
                 (Some(t), Some(k)) if k.started > t.started => draw_task_panel(k, editor, ui, lay, out)?,
                 (Some(t), _) => draw_test_panel(t, editor, ui, lay, out)?,
                 (None, Some(k)) => draw_task_panel(k, editor, ui, lay, out)?,
@@ -2521,7 +2522,7 @@ fn draw(
             }
         }
     }
-    let chat_cursor = match &editor.chat {
+    let chat_cursor = match &editor.lane.chat {
         Some(c) if lay.chat_w > 0 => draw_chat(c, editor, ui, lay, out)?,
         _ => None,
     };
@@ -2535,7 +2536,7 @@ fn draw(
     // Follow mode: one card — what Claude does and says, and while the panel is minimized the question and
     // its keys too (U4). After the turn, a walk-through's stop keeps it while the cursor is in it.
     let mut follow_rect = None;
-    if let Some(c) = editor.chat.as_ref().filter(|c| {
+    if let Some(c) = editor.lane.chat.as_ref().filter(|c| {
         c.follow.on && (c.busy() || c.follow.touring() || crate::follow::stop_here(editor).is_some())
     }) && (editor.review.is_none() || c.compact())
         && !lay.code_hidden()
@@ -2689,11 +2690,11 @@ fn draw_text(
     // (the note the card shows — the focused one, else the first — and how many start on that line)
     let mut note_at: Vec<Option<(&crate::notes::Note, usize)>> = vec![None; span];
     if let Some(p) = doc.path.as_deref() {
-        for n in editor.notes.list.iter().filter(|n| n.path == p) {
+        for n in editor.lane.notes.list.iter().filter(|n| n.path == p) {
             if let Some(slot) = n.lines.start.checked_sub(top).and_then(|r| note_at.get_mut(r)) {
                 *slot = Some(match *slot {
                     None => (n, 1),
-                    Some((m, k)) => (if Some(n.id) == editor.notes.focus { n } else { m }, k + 1),
+                    Some((m, k)) => (if Some(n.id) == editor.lane.notes.focus { n } else { m }, k + 1),
                 });
             }
         }
@@ -2706,7 +2707,7 @@ fn draw_text(
         }
     }
     // The list's places (a build's errors) where no diagnostic speaks already — they follow edits by mark
-    if let (Some(list), Some(p)) = (&editor.qlist, doc.path.as_deref()) {
+    if let (Some(list), Some(p)) = (&editor.lane.qlist, doc.path.as_deref()) {
         let marks: std::collections::HashMap<u64, usize> = if list.items.iter().any(|it| it.mark.is_some()) {
             doc.mark_heads().collect()
         } else {
@@ -2732,7 +2733,7 @@ fn draw_text(
     }
     // Failed test sites: same ▲ as the results panel + first message line (ahead of diagnostics — just run)
     let mut test_fail = vec![false; span];
-    if let (Some(r), Some(p)) = (&editor.test_run, doc.path.as_deref()) {
+    if let (Some(r), Some(p)) = (&editor.lane.test_run, doc.path.as_deref()) {
         for c in r.cases.iter().filter(|c| c.status == crate::test_results::Status::Failed) {
             let Some((fp, l)) = &c.at else { continue };
             if fp.as_path() != p {
@@ -2823,6 +2824,7 @@ fn draw_text(
         Style { fg: ui.accent.fg, bg: blend(ui.accent.fg, ui.tint, 0.16), bold: true, ..Style::default() };
     // Lines Claude is reading right now (chat) — a faint accent wash
     let gaze = editor
+        .lane
         .chat
         .as_ref()
         .and_then(|c| c.follow.gaze.as_ref())
@@ -4469,9 +4471,12 @@ fn draw_picker(
     let target = p.current().map(|i| i.action.clone());
     let preview_title = match &target {
         Some(Action::Open(path) | Action::Goto { path, .. }) => rel_path(editor, path),
-        Some(Action::Buffer(id) | Action::Jump { doc: id, .. }) => {
-            editor.docs.iter().find(|d| d.id == *id).map(|d| d.display_name(&editor.root)).unwrap_or_default()
-        }
+        Some(Action::Buffer(id) | Action::Jump { doc: id, .. }) => editor
+            .docs
+            .iter()
+            .find(|d| d.id == *id)
+            .map(|d| d.display_name(&editor.lane.root))
+            .unwrap_or_default(),
         Some(Action::Code(i)) => match editor.action_preview(*i) {
             Some(crate::lsp_editor::ActionPreview::Ready(files)) => match files.as_slice() {
                 [f] => format!(
@@ -4484,7 +4489,7 @@ fn draw_picker(
             _ => String::new(),
         },
         Some(Action::Dir(rel)) => format!("{rel}/"),
-        Some(Action::ChangedFile(n)) => match editor.changed_files.get(*n) {
+        Some(Action::ChangedFile(n)) => match editor.lane.changed_files.get(*n) {
             Some(c) => format!(
                 "{}  {}",
                 rel_path(editor, &c.path),
@@ -4720,7 +4725,7 @@ fn preview_lines<'a>(
             return Some(PreviewView::Note(format!("folder · {n} files — enter or → opens it, ← folds it")));
         }
         Action::ChangedFile(n) => {
-            let c = editor.changed_files.get(*n)?;
+            let c = editor.lane.changed_files.get(*n)?;
             if c.diff[0].lines.is_empty() {
                 return Some(PreviewView::Note("no line changes (mode or binary)".into()));
             }
@@ -5027,7 +5032,7 @@ fn draw_header(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> 
         ui.base.patch(t.try_get("ui.text.focus").unwrap_or(Style { bold: true, ..Style::default() }));
     let sep = |keep| Seg { text: "  ›  ".into(), style: faint, keep };
     let mut left = vec![Seg { text: " ".into(), style: ui.base, keep: 255 }];
-    let project = editor.root.file_name().map(|p| p.to_string_lossy().into_owned());
+    let project = editor.lane.root.file_name().map(|p| p.to_string_lossy().into_owned());
     // Tests: a fixed project name (the checkout folder's name varies — worktrees, CI)
     #[cfg(test)]
     let project = project.map(|_| "tarae".to_string());
@@ -5056,7 +5061,7 @@ fn draw_header(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> 
         left.push(Seg { text: " ●".into(), style: ui.base.patch(ui.accent), keep: 245 });
     }
     // A review with no room for its rail (the chat beside it, a phone): which of its files this is
-    if let Some(r) = editor.code_review.as_ref().filter(|_| lay.rail_w == 0 || !editor.review_rail_up())
+    if let Some(r) = editor.lane.code_review.as_ref().filter(|_| lay.rail_w == 0 || !editor.review_rail_up())
         && let Some(i) = r.current(editor)
     {
         let n = r.files.len();
@@ -5188,10 +5193,14 @@ fn draw_statusline(
     }
     if !lay.header {
         let modified = if doc.is_modified() { " ●" } else { "" };
-        left.push(Seg { text: format!("  {}", doc.display_name(&editor.root)), style: strong, keep: 200 });
+        left.push(Seg {
+            text: format!("  {}", doc.display_name(&editor.lane.root)),
+            style: strong,
+            keep: 200,
+        });
         left.push(Seg { text: modified.into(), style: accent, keep: 200 });
     }
-    if let Some(b) = &editor.git_branch {
+    if let Some(b) = &editor.lane.git_branch {
         left.push(Seg { text: format!("   {b}"), style: dim, keep: 80 });
     }
     // How much this file changed from HEAD: +added/modified lines −removed lines (colors match the git bar)
@@ -5640,7 +5649,7 @@ fn draw_welcome(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) ->
         vec![],
     ];
     // This folder's last session first — the most likely next step when there is one
-    if let Some(files) = editor.last_session.as_ref().filter(|f| !f.is_empty()) {
+    if let Some(files) = editor.lane.last_session.as_ref().filter(|f| !f.is_empty()) {
         let name = files[0].file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let more = if files.len() > 1 { format!(" +{}", files.len() - 1) } else { String::new() };
         rows.push(vec![
@@ -6534,10 +6543,10 @@ fn draw_follow_card(
     const BODY: usize = 6;
     let compact = c.compact();
     // The focused pane (else the editing area — a review in place of the panes)
-    let pane = editor.screen.panes.iter().find(|p| p.0 == editor.focus);
+    let pane = editor.screen.panes.iter().find(|p| p.0 == editor.lane.focus);
     let (px, py, pw, ph) = match pane {
         Some((_, rect, ..)) => {
-            let title = usize::from(editor.views.len() > 1 && lay.zoom.is_none());
+            let title = usize::from(editor.lane.views.len() > 1 && lay.zoom.is_none());
             (rect.x, rect.y + title, rect.w, rect.h.saturating_sub(title))
         }
         None => (lay.rail_w, lay.text_top as usize, lay.edit_w - lay.rail_w, lay.text_rows),
@@ -6894,12 +6903,12 @@ fn draw_sidebar(
     // at the right
     let tab_style = |m: SMode| if sb.mode == m { strong } else { faint };
     let side = editor.plugins.as_ref().and_then(|p| p.side.as_ref()).map(|(_, s)| s);
-    let has_list = editor.qlist.as_ref().is_some_and(|l| !l.items.is_empty());
+    let has_list = editor.lane.qlist.as_ref().is_some_and(|l| !l.items.is_empty());
     let of = match sb.mode {
         SMode::Files => sb.root_name(),
         SMode::Outline => editor.doc().display_name_short(),
-        SMode::List => editor.qlist.as_ref().map(|l| l.title.clone()).unwrap_or_default(),
-        SMode::Git => editor.git_status.as_ref().map(|s| s.branch_line()).unwrap_or_default(),
+        SMode::List => editor.lane.qlist.as_ref().map(|l| l.title.clone()).unwrap_or_default(),
+        SMode::Git => editor.lane.git_status.as_ref().map(|s| s.branch_line()).unwrap_or_default(),
         SMode::Plugin => side.map(|s| s.note.clone()).unwrap_or_default(),
     };
     let bar = Style { fg: if sb.focus { ui.accent.fg } else { ui.linenr.fg }, ..card };
@@ -6961,7 +6970,7 @@ fn draw_sidebar(
     };
     // In front of a review's rail (drawn here = the rail gave the column): it's still open, and how back
     // (under the tabs' names, in the accent — that it's still open is what went unseen, #19)
-    let behind = match editor.code_review.is_some() {
+    let behind = match editor.lane.code_review.is_some() {
         true => {
             let back = if w >= "  review behind  space g back to it".len() { "back to it" } else { "back" };
             let says = Style { fg: ui.accent.fg, ..card };
@@ -7195,9 +7204,9 @@ fn draw_review_rail(
     let sp = |text: String, style: Style| Span { text, style };
     let edge = Style { fg: card.bg, bg: ui.base.bg, ..Style::default() };
     let drafts_in = |f: &crate::codereview::File| {
-        editor.notes.list.iter().filter(|n| n.path == f.path && n.thread.iter().any(|e| e.draft)).count()
+        editor.lane.notes.list.iter().filter(|n| n.path == f.path && n.thread.iter().any(|e| e.draft)).count()
     };
-    let drafts: usize = editor.notes.list.iter().filter(|n| n.thread.iter().any(|e| e.draft)).count();
+    let drafts: usize = editor.lane.notes.list.iter().filter(|n| n.thread.iter().any(|e| e.draft)).count();
     let (added, removed): (usize, usize) =
         r.files.iter().fold((0, 0), |(a, b), f| (a + f.added, b + f.removed));
     let n = r.files.len();
@@ -7669,7 +7678,7 @@ fn draw_chat(
                 }
                 // `path:line` in an answer: underlined, clickable
                 None => {
-                    let (l, found) = underline_refs(&editor.root, l);
+                    let (l, found) = underline_refs(&editor.lane.root, l);
                     for (a, b, link) in found {
                         chat_links.push((y, text_x + a, text_x + b, link));
                     }
@@ -7765,7 +7774,7 @@ fn draw_chat(
         if code {
             hints.push(("C-r", "apply"));
         }
-        if !c.links(&editor.root).is_empty() {
+        if !c.links(&editor.lane.root).is_empty() {
             hints.push(("C-]", "go to"));
         }
         // (how the screen goes along — after what the answer offers, where the row has room)
@@ -8654,7 +8663,7 @@ fn draw_diagnostic_card(
         || editor.picker.is_some()
         || editor.prompt.is_some()
         || !editor.pending.is_empty()
-        || editor.chat.as_ref().is_some_and(|c| c.focused);
+        || editor.lane.chat.as_ref().is_some_and(|c| c.focused);
     if !editor.config.cursor_diagnostics
         || busy
         || editor.diag_card_hidden == Some((editor.doc().id, editor.cursor_line()))
@@ -9248,7 +9257,7 @@ mod tests {
             ed.docs[0].set_selection(crate::selection::Selection::point(at));
             if chat {
                 crate::chat::open(&mut ed);
-                ed.chat.as_mut().unwrap().focused = false;
+                ed.lane.chat.as_mut().unwrap().focused = false;
             }
             ed.push_offer(crate::offer::Offer {
                 id: 0,
@@ -9792,12 +9801,12 @@ mod tests {
                 })
                 .collect();
             let mut ed = Editor::new(Config::default());
-            ed.code_review = Some(CodeReview::for_test(Base::Head, PathBuf::from("/x"), files));
+            ed.lane.code_review = Some(CodeReview::for_test(Base::Head, PathBuf::from("/x"), files));
             ed
         };
         let rail = |ed: &Editor, w| Layout::new(ed, w, 40).rail_w;
         let short = review(&["a.rs", "b.rs"]);
-        let hints = review_rail_need(short.code_review.as_ref().unwrap()) + 4;
+        let hints = review_rail_need(short.lane.code_review.as_ref().unwrap()) + 4;
         assert!((24..31).contains(&hints), "two short names take what the hints need: {hints}");
         assert_eq!(rail(&short, 140), hints);
         assert_eq!(rail(&short, 240), hints, "not wider for a wide terminal");
@@ -9824,7 +9833,7 @@ mod tests {
         // A draft on a file doesn't move it
         let mut ed = long;
         crate::notes::add(&mut ed, &PathBuf::from("/x").join(name), 0..1, crate::notes::By::You, "draft");
-        ed.notes.list[0].thread[0].draft = true;
+        ed.lane.notes.list[0].thread[0].draft = true;
         assert_eq!(rail(&ed, 200), w);
     }
 
@@ -9843,12 +9852,13 @@ mod tests {
         };
         let mut r = Run::for_test(task("cargo fmt"));
         r.output = vec![(false, "formatted".into())];
-        ed.task_run = Some(r);
+        ed.lane.task_run = Some(r);
         let (h, total) = lay(&ed);
         assert_eq!(h, TASK_PANEL_MIN, "one line: a small panel");
         // More output: it grows to show it all
         let more = |ed: &mut Editor, n: usize| {
-            ed.task_run.as_mut().unwrap().output = (0..n).map(|i| (false, format!("line {i}"))).collect();
+            ed.lane.task_run.as_mut().unwrap().output =
+                (0..n).map(|i| (false, format!("line {i}"))).collect();
         };
         more(&mut ed, 9);
         assert_eq!(lay(&ed).0, 10, "the header and nine lines");
@@ -9862,7 +9872,7 @@ mod tests {
         assert_eq!(lay(&ed).0, total / 2, "the same task again: as tall as it was");
         ed.task_start(task("cargo build"));
         assert_eq!(lay(&ed).0, TASK_PANEL_MIN, "another task: from the bottom");
-        ed.task_run = None;
+        ed.lane.task_run = None;
         assert_eq!(lay(&ed).0, 0, "no panel without a run");
     }
 
@@ -9870,7 +9880,8 @@ mod tests {
     #[test]
     fn the_panel_is_wider_on_a_wide_terminal() {
         let mut ed = Editor::new(Config::default());
-        ed.sidebar = Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Files, PathBuf::from("/x")));
+        ed.lane.sidebar =
+            Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Files, PathBuf::from("/x")));
         let rail = |ed: &Editor, w| Layout::new(ed, w, 40).rail_w;
         assert_eq!(rail(&ed, 112), 32);
         assert_eq!(rail(&ed, 140), 36);
@@ -10050,8 +10061,8 @@ mod tests {
         let mut ed = Editor::new(Config::default());
         ed.docs[0].path = Some(root.join("d0/e29/f50.rs"));
         ed.docs[0].text = Rope::from_str("fn main() {}\n");
-        ed.sidebar = Some(sb);
-        let rows = ed.sidebar.as_ref().unwrap().lines().len();
+        ed.lane.sidebar = Some(sb);
+        let rows = ed.lane.sidebar.as_ref().unwrap().lines().len();
         let keys = [
             "j", "j", "k", "C-d", "G", "g", "l", "l", "h", "h", "k", "ret", "esc", "j", "w", "x", "i", "a",
             "esc",
@@ -10130,13 +10141,13 @@ mod tests {
         };
         let mut ed = Editor::new(Config::default());
         ed.docs[0].text = Rope::from_str("fn main() {}\n");
-        ed.git_status = Some(status(1));
-        ed.sidebar = Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, root.clone()));
+        ed.lane.git_status = Some(status(1));
+        ed.lane.sidebar = Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, root.clone()));
         let (worst, key) = events_to_frames(&mut ed, &["j", "j", "C-d", "G", "k", "g", "esc", "w"], 180, 50);
         measured("git_tab_with_20k_changes", worst, budget);
         assert!(worst < budget, "key {key:?} took {worst:?} (budget {budget:?})");
         // A new status: the rows are built again on the next event
-        ed.git_status = Some(status(2));
+        ed.lane.git_status = Some(status(2));
         let (fresh, _) = events_to_frames(&mut ed, &["j"], 180, 50);
         measured("git_tab_fresh_status_20k", fresh, budget);
         assert!(fresh < budget, "a fresh status took {fresh:?} to show (budget {budget:?})");
@@ -10153,12 +10164,12 @@ mod tests {
         let mut ed = Editor::new(Config::default());
         ed.terminal_run(vec!["/bin/sh".into(), "-c".into(), "sleep 30".into()], Vec::new());
         let end = Instant::now() + Duration::from_secs(5);
-        while ed.terminal.is_none() && Instant::now() < end {
+        while ed.lane.terminal.is_none() && Instant::now() < end {
             if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(100)) {
                 ed.handle_event(ev);
             }
         }
-        let Some(t) = ed.terminal.as_mut() else { panic!("the terminal didn't start") };
+        let Some(t) = ed.lane.terminal.as_mut() else { panic!("the terminal didn't start") };
         t.focus = false;
         let batch: String = (0..200)
             .map(|i| {
@@ -10173,12 +10184,12 @@ mod tests {
         let mut worst = Duration::ZERO;
         for _ in 0..30 {
             let t0 = Instant::now();
-            ed.terminal.as_mut().unwrap().parser.process(batch.as_bytes());
+            ed.lane.terminal.as_mut().unwrap().parser.process(batch.as_bytes());
             buf.clear();
             render(&mut ed, &mut buf, 180, 50).unwrap();
             worst = worst.max(t0.elapsed());
         }
-        ed.terminal = None; // hangs it up
+        ed.lane.terminal = None; // hangs it up
         measured("terminal_flood_batch", worst, budget);
         assert!(worst < budget, "a batch of output took {worst:?} to show (budget {budget:?})");
     }

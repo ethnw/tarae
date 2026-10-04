@@ -344,7 +344,7 @@ impl Editor {
             ranges: sel.ranges().iter().map(|r| (r.anchor, r.head)).collect(),
             primary: sel.primary_index(),
             path: doc.path.as_ref().map(|p| p.display().to_string()),
-            name: doc.display_name(&self.root),
+            name: doc.display_name(&self.lane.root),
             language: doc.lang_name().map(str::to_string),
             version: doc.version(),
             modified: doc.is_modified(),
@@ -1203,12 +1203,12 @@ mod tests {
         std::fs::write(&path, "kind: Deployment\nreplicas: 3\n").unwrap();
         ed.open(&path).unwrap();
         ed.plugin_run("side", "").unwrap();
-        settle_until(&mut ed, |ed| ed.sidebar.as_ref().is_some_and(|s| s.mode == SMode::Plugin));
-        let s = ed.sidebar.as_ref().unwrap();
+        settle_until(&mut ed, |ed| ed.lane.sidebar.as_ref().is_some_and(|s| s.mode == SMode::Plugin));
+        let s = ed.lane.sidebar.as_ref().unwrap();
         assert!(!s.focus, "shown, without the keys");
 
         let labels = |ed: &Editor| {
-            ed.sidebar.as_ref().unwrap().lines().iter().map(|l| l.label.clone()).collect::<Vec<_>>()
+            ed.lane.sidebar.as_ref().unwrap().lines().iter().map(|l| l.label.clone()).collect::<Vec<_>>()
         };
         assert_eq!(
             labels(&ed),
@@ -1223,24 +1223,24 @@ mod tests {
         // Asked to: with the keys, on the row for the code under the cursor — its name cut short, whole
         // (and its state after it) over the code
         ed.plugin_run("side", "focus").unwrap();
-        settle_until(&mut ed, |ed| ed.sidebar.as_ref().is_some_and(|s| s.focus));
-        assert_eq!(ed.sidebar.as_ref().unwrap().selected, 1);
+        settle_until(&mut ed, |ed| ed.lane.sidebar.as_ref().is_some_and(|s| s.focus));
+        assert_eq!(ed.lane.sidebar.as_ref().unwrap().selected, 1);
         let mut frame = Vec::new();
         crate::term::render(&mut ed, &mut frame, 140, 20).unwrap();
         let frame = String::from_utf8_lossy(&frame).into_owned();
         let whole = frame.find("payment-gateway-reconciler-canary").expect("its whole name");
         assert!(frame[whole..].contains("deploy detail"), "and its state");
         // h folds, l unfolds, enter on a row with no place and other keys go to the plugin
-        ed.sidebar.as_mut().unwrap().selected = 0;
+        ed.lane.sidebar.as_mut().unwrap().selected = 0;
         key(&mut ed, "h");
         assert_eq!(labels(&ed), ["web.txt …"], "folded, and saying so");
         key(&mut ed, "l");
         assert_eq!(labels(&ed).len(), 4);
         // (a note isn't a row to land on)
-        ed.sidebar.as_mut().unwrap().selected = 2;
+        ed.lane.sidebar.as_mut().unwrap().selected = 2;
         key(&mut ed, "j");
-        assert_eq!(ed.sidebar.as_ref().unwrap().selected, 2);
-        ed.sidebar.as_mut().unwrap().selected = 2;
+        assert_eq!(ed.lane.sidebar.as_ref().unwrap().selected, 2);
+        ed.lane.sidebar.as_mut().unwrap().selected = 2;
         key(&mut ed, "ret");
         until_said(&mut ed, r#"key ret Some(2) Some("pod")"#);
         key(&mut ed, "e");
@@ -1248,12 +1248,12 @@ mod tests {
         // A buffer it shows then takes the keys from its tab
         ed.plugin_run("view", "").unwrap();
         settle_until(&mut ed, |ed| ed.doc().title.as_deref() == Some("web-1 · demo"));
-        assert!(!ed.sidebar.as_ref().unwrap().focus);
-        ed.sidebar.as_mut().unwrap().focus = true;
+        assert!(!ed.lane.sidebar.as_ref().unwrap().focus);
+        ed.lane.sidebar.as_mut().unwrap().focus = true;
         // Enter on a row with a place: there, in the code
-        ed.sidebar.as_mut().unwrap().selected = 1;
+        ed.lane.sidebar.as_mut().unwrap().selected = 1;
         key(&mut ed, "ret");
-        assert!(!ed.sidebar.as_ref().unwrap().focus, "the code has the keys");
+        assert!(!ed.lane.sidebar.as_ref().unwrap().focus, "the code has the keys");
         ed.plugin_run("unside", "").unwrap();
         settle_until(&mut ed, |ed| {
             ed.plugins.as_ref().is_some_and(|p| p.side.is_none() && p.badge.is_none())

@@ -103,7 +103,7 @@ impl Editor {
             ranges.iter().map(|r| doc.text.byte_slice(r.from()..r.to()).to_string()).collect();
         // Quiet note, not a toast — most commands finish before it would be read, and the change shows
         self.note(format!("running {cmd}…"));
-        let dir = self.root.clone();
+        let dir = self.lane.root.clone();
         self.events.jobs().spawn(move || {
             let runs: Result<Vec<Run>, String> = if kind.feeds() {
                 inputs.iter().map(|s| run(&cmd, Some(s), &dir)).collect()

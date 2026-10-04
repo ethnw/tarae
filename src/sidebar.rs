@@ -301,7 +301,7 @@ impl Sidebar {
             Mode::Outline if self.outline_of.is_none() => "reading…",
             Mode::Outline => "nothing defined here",
             Mode::List => "the list is empty",
-            Mode::Git if ed.git_status.is_none() => "not a git repository (yet — reading…)",
+            Mode::Git if ed.lane.git_status.is_none() => "not a git repository (yet — reading…)",
             Mode::Git => "nothing to commit — the tree is clean",
             Mode::Plugin => "nothing to show yet",
         }
@@ -549,14 +549,14 @@ fn ancestors(rel: &str) -> impl Iterator<Item = &str> {
 impl Editor {
     /// `space e` / `space o` — show the panel in `mode` and focus it; on it already, close it.
     pub fn sidebar_show(&mut self, mode: Mode) {
-        self.side_last = mode;
+        self.lane.side_last = mode;
         // A review's rail holds the panel's place — `space e` gives it the keys
-        if mode == Mode::Files && self.code_review.is_some() {
+        if mode == Mode::Files && self.lane.code_review.is_some() {
             return crate::codereview::rail_focus(self);
         }
-        match self.sidebar.as_mut() {
+        match self.lane.sidebar.as_mut() {
             Some(s) if s.mode == mode && s.focus => {
-                self.sidebar = None;
+                self.lane.sidebar = None;
                 return;
             }
             Some(s) => {
@@ -566,9 +566,9 @@ impl Editor {
                 s.list_of = None; // another view may have used the rows
                 s.git_of = None;
             }
-            None => self.sidebar = Some(Sidebar::new(mode, self.root.clone())),
+            None => self.lane.sidebar = Some(Sidebar::new(mode, self.lane.root.clone())),
         }
-        if let Some(c) = self.chat.as_mut() {
+        if let Some(c) = self.lane.chat.as_mut() {
             c.focused = false;
         }
         if mode == Mode::Files {
@@ -581,8 +581,8 @@ impl Editor {
             ));
         }
         self.sidebar_sync();
-        let here = self.sidebar.as_ref().and_then(|s| s.here(self));
-        let Some(s) = self.sidebar.as_mut() else { return };
+        let here = self.lane.sidebar.as_ref().and_then(|s| s.here(self));
+        let Some(s) = self.lane.sidebar.as_mut() else { return };
         match here {
             Some(h) => s.selected = h,
             // Not on a heading (the list's folders and files — Enter does nothing there)
@@ -595,7 +595,7 @@ impl Editor {
 
     /// (Re)list the files — on a worker, the tree built there too.
     pub(crate) fn sidebar_list_files(&mut self) {
-        let Some(s) = self.sidebar.as_ref() else { return };
+        let Some(s) = self.lane.sidebar.as_ref() else { return };
         let root = s.root.clone();
         self.events.jobs().spawn(move || {
             let rels: Vec<String> = crate::picker::list_files(&root)
@@ -604,7 +604,7 @@ impl Editor {
                 .collect();
             let tree = Tree::build(rels.iter().enumerate().map(|(i, r)| (i, r.as_str(), r.len())), true);
             move |ed: &mut Editor| {
-                let Some(s) = ed.sidebar.as_mut().filter(|s| s.root == root) else { return };
+                let Some(s) = ed.lane.sidebar.as_mut().filter(|s| s.root == root) else { return };
                 s.rels = rels;
                 s.tree = Some(tree);
                 s.build_files();
@@ -612,8 +612,8 @@ impl Editor {
                 s.revealed = None; // open the current file's folders in the new tree
                 s.shown = None;
                 ed.sidebar_sync();
-                if let Some(h) = ed.sidebar.as_ref().and_then(|s| s.here(ed)) {
-                    ed.sidebar.as_mut().unwrap().selected = h;
+                if let Some(h) = ed.lane.sidebar.as_ref().and_then(|s| s.here(ed)) {
+                    ed.lane.sidebar.as_mut().unwrap().selected = h;
                 }
             }
         });
@@ -622,22 +622,22 @@ impl Editor {
     /// Every event: follow the editor — open the current file's folders, keep the outline current (worked
     /// out on a worker per document version), and, unfocused, select what the editor is on.
     pub fn sidebar_sync(&mut self) {
-        let Some(s) = self.sidebar.as_mut() else { return };
+        let Some(s) = self.lane.sidebar.as_mut() else { return };
         let doc = &self.docs[self.current];
         match s.mode {
             Mode::List => {
-                let now = self.qlist.as_ref().map(|l| l.generation);
+                let now = self.lane.qlist.as_ref().map(|l| l.generation);
                 if s.list_of != now || now.is_none() {
-                    let (list, here) = list_lines(self.qlist.as_ref(), &s.root);
+                    let (list, here) = list_lines(self.lane.qlist.as_ref(), &s.root);
                     (s.list, s.list_here) = (list.into(), here);
                     s.list_of = now;
                     s.git_of = None; // the git tab's rows need building again
                 }
             }
             Mode::Git => {
-                let top = self.git_status.as_ref().map(|st| st.top.clone());
+                let top = self.lane.git_status.as_ref().map(|st| st.top.clone());
                 // `space g` from the code: its file opens to its hunks (when it's among the changes)
-                if let (Some((p, _)), Some(top), Some(st)) = (&s.aim, &top, self.git_status.as_ref())
+                if let (Some((p, _)), Some(top), Some(st)) = (&s.aim, &top, self.lane.git_status.as_ref())
                     && let Ok(rel) = p.strip_prefix(top)
                 {
                     let rel = rel.to_string_lossy().into_owned();
@@ -657,10 +657,11 @@ impl Editor {
                     })
                     .collect();
                 opened.sort();
-                let now = (self.git_status.as_ref().map_or(0, |g| g.generation), doc.path.clone(), opened);
+                let now =
+                    (self.lane.git_status.as_ref().map_or(0, |g| g.generation), doc.path.clone(), opened);
                 if s.git_of.as_ref() != Some(&now) {
                     let first = s.list.is_empty();
-                    (s.list, s.list_here) = match self.git_status.as_ref() {
+                    (s.list, s.list_here) = match self.lane.git_status.as_ref() {
                         Some(st) if s.expanded.is_empty() => {
                             (st.rows.clone(), git_here(&st.rows, &st.top, doc.path.as_deref()))
                         }
@@ -706,7 +707,7 @@ impl Editor {
                         s.selected = r;
                     }
                     let settled = d.is_none_or(|d| d.git_base.is_none() || d.git_version == d.version());
-                    if row.is_some() || (self.git_status.is_some() && settled) {
+                    if row.is_some() || (self.lane.git_status.is_some() && settled) {
                         s.aim = None;
                     }
                 }
@@ -747,7 +748,7 @@ impl Editor {
                     self.events.jobs().spawn(move || {
                         let defs = crate::syntax::outline(&tree, &text);
                         move |ed: &mut Editor| {
-                            let Some(s) = ed.sidebar.as_mut() else { return };
+                            let Some(s) = ed.lane.sidebar.as_mut() else { return };
                             if s.pending == Some(want) {
                                 s.pending = None;
                             }
@@ -763,18 +764,18 @@ impl Editor {
                 }
             }
         }
-        let Some(s) = self.sidebar.as_ref() else { return };
+        let Some(s) = self.lane.sidebar.as_ref() else { return };
         if !s.focus
             && let Some(h) = s.here(self)
         {
-            self.sidebar.as_mut().unwrap().selected = h;
+            self.lane.sidebar.as_mut().unwrap().selected = h;
         }
     }
 
     /// Enter / a click: a folder folds or unfolds, a file opens, a definition is jumped to — the code gets
     /// the keys back.
     pub fn sidebar_activate(&mut self, row: usize) {
-        let Some(s) = self.sidebar.as_mut() else { return };
+        let Some(s) = self.lane.sidebar.as_mut() else { return };
         let Some(line) = s.lines().get(row).cloned() else { return };
         s.selected = row;
         match line.target {
@@ -798,7 +799,7 @@ impl Editor {
                 if s.expanded.remove(&rel) {
                     return;
                 }
-                let Some(top) = self.git_status.as_ref().map(|s| s.top.clone()) else { return };
+                let Some(top) = self.lane.git_status.as_ref().map(|s| s.top.clone()) else { return };
                 let path = top.join(&rel);
                 if !path.exists() {
                     return self.set_warning(format!("{rel} is deleted — nothing to open"));
@@ -809,7 +810,7 @@ impl Editor {
                 }
             }
             Target::Change { rel, file: true, .. } => {
-                let Some(top) = self.git_status.as_ref().map(|s| s.top.clone()) else { return };
+                let Some(top) = self.lane.git_status.as_ref().map(|s| s.top.clone()) else { return };
                 let path = top.join(&rel);
                 if !path.exists() {
                     return self.set_warning(format!("{rel} is deleted — nothing to open"));
@@ -895,7 +896,7 @@ fn git_key(ed: &mut Editor, key: Key, at: Option<Line>) -> bool {
         }
         _ => None,
     };
-    let from_code = ed.sidebar.as_mut().is_some_and(|s| std::mem::take(&mut s.from_code));
+    let from_code = ed.lane.sidebar.as_mut().is_some_and(|s| std::mem::take(&mut s.from_code));
     let Code::Char(c) = key.code else { return false };
     // Right after `space g` in the code: a hunk's and a conflict's keys act there — then back to the code.
     // Any other key makes it the tab, which keeps the keys (#18: after `r`, `b`, `f`… the code had them
@@ -909,7 +910,7 @@ fn git_key(ed: &mut Editor, key: Key, at: Option<Line>) -> bool {
             't' => ed.conflict_take(Pick::Theirs),
             _ => ed.conflict_take(Pick::Both),
         }
-        if let Some(s) = ed.sidebar.as_mut() {
+        if let Some(s) = ed.lane.sidebar.as_mut() {
             s.focus = false;
         }
         return true;
@@ -948,7 +949,7 @@ fn git_key(ed: &mut Editor, key: Key, at: Option<Line>) -> bool {
         ('d', _, Some(_)) => ed.set_status("staged — u unstages it first"),
         // Into the editor with the keys: the file · the hunk or conflict · the file against HEAD
         ('e' | 'D', _, Some((rel, _, _, true))) => {
-            let Some(top) = ed.git_status.as_ref().map(|s| s.top.clone()) else { return true };
+            let Some(top) = ed.lane.git_status.as_ref().map(|s| s.top.clone()) else { return true };
             let path = top.join(&rel);
             if !path.exists() {
                 ed.set_warning(format!("{rel} is deleted — nothing to open"));
@@ -958,7 +959,7 @@ fn git_key(ed: &mut Editor, key: Key, at: Option<Line>) -> bool {
                 ed.set_error(format!("{e:#}"));
                 return true;
             }
-            if let Some(s) = ed.sidebar.as_mut() {
+            if let Some(s) = ed.lane.sidebar.as_mut() {
                 s.focus = false;
             }
             if c == 'D'
@@ -968,18 +969,18 @@ fn git_key(ed: &mut Editor, key: Key, at: Option<Line>) -> bool {
             }
         }
         ('e', Some(t @ (Target::Hunk { .. } | Target::Conflict { .. })), _) => {
-            if let Some(s) = ed.sidebar.as_mut() {
+            if let Some(s) = ed.lane.sidebar.as_mut() {
                 s.focus = false;
             }
             ed.git_reveal(t);
         }
         // `l` / `h` open and close a changed file's hunks, like a folder
         ('l' | 'h', _, Some((rel, false, false, true))) => {
-            let open = ed.sidebar.as_ref().is_some_and(|s| s.expanded.contains(&rel));
+            let open = ed.lane.sidebar.as_ref().is_some_and(|s| s.expanded.contains(&rel));
             if open == (c == 'l') {
                 return false; // (already so: the tree's own l / h)
             }
-            let row = ed.sidebar.as_ref().map_or(0, |s| s.selected);
+            let row = ed.lane.sidebar.as_ref().map_or(0, |s| s.selected);
             ed.sidebar_activate(row);
         }
         ('c', ..) => ed.git_commit_start(false),
@@ -1007,7 +1008,7 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
     }
     // Folded away (the terminal is too narrow for it and the code): the keys are the code's
     let folded = ed.side_folded();
-    let Some(s) = ed.sidebar.as_mut().filter(|s| s.focus) else { return false };
+    let Some(s) = ed.lane.sidebar.as_mut().filter(|s| s.focus) else { return false };
     if folded {
         s.focus = false;
         return false;
@@ -1029,7 +1030,7 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
         let parent =
             rows.is_some_and(|rs| rs.get(i + 1).zip(rs.get(i)).is_some_and(|(n, r)| n.depth > r.depth));
         let id = rows.and_then(|rs| rs.get(i)).map(|r| r.id.clone());
-        let s = ed.sidebar.as_mut().expect("focused above");
+        let s = ed.lane.sidebar.as_mut().expect("focused above");
         match (key.code, key.ctrl) {
             (Code::Char('l') | Code::Right, false)
                 if parent && id.as_ref().is_some_and(|id| s.folded.remove(id)) =>
@@ -1051,8 +1052,8 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
             _ => {}
         }
     }
-    let before = ed.sidebar.as_ref().map(|s| s.selected);
-    let Some(s) = ed.sidebar.as_mut() else { return false };
+    let before = ed.lane.sidebar.as_ref().map(|s| s.selected);
+    let Some(s) = ed.lane.sidebar.as_mut() else { return false };
     match (key.code, key.ctrl) {
         // Still the editor's: the space menu, the command line, the windows (`C-w e` back to the code)
         (Code::Char(' ') | Code::Char(':'), false) | (Code::Char('w'), true) => return false,
@@ -1092,7 +1093,7 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
         }
         // files → outline → the list (when there is one) → git → a plugin's tab (when there is one) → files
         (Code::Tab, _) => {
-            let list = ed.qlist.as_ref().is_some_and(|l| !l.items.is_empty());
+            let list = ed.lane.qlist.as_ref().is_some_and(|l| !l.items.is_empty());
             let plugin = ed.plugins.as_ref().is_some_and(|p| p.side.is_some());
             let mode = match s.mode {
                 Mode::Files => Mode::Outline,
@@ -1108,16 +1109,16 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
             }
         }
         // (in front of a review's rail: the rail back, with the keys)
-        (Code::Esc, _) if ed.code_review.as_ref().is_some_and(|r| r.behind) => {
+        (Code::Esc, _) if ed.lane.code_review.as_ref().is_some_and(|r| r.behind) => {
             crate::codereview::rail_focus(ed)
         }
         (Code::Esc, _) => s.focus = false,
-        (Code::Char('q'), false) => ed.sidebar = None,
+        (Code::Char('q'), false) => ed.lane.sidebar = None,
         _ => {}
     }
     // Moving onto a hunk or conflict shows it in the code
     if let Some(s) =
-        ed.sidebar.as_ref().filter(|s| s.mode == Mode::Git && s.focus && Some(s.selected) != before)
+        ed.lane.sidebar.as_ref().filter(|s| s.mode == Mode::Git && s.focus && Some(s.selected) != before)
         && let Some(t) = s.lines().get(s.selected).map(|l| l.target.clone())
         && matches!(t, Target::Hunk { .. } | Target::Conflict { .. })
     {

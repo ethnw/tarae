@@ -243,7 +243,7 @@ pub fn home() -> Option<PathBuf> {
 /// worker (an error says so).
 fn keep_later(ed: &mut crate::editor::Editor, change: impl FnOnce(&mut Allowed) + Send + 'static) {
     let Some(path) = ed.allow_path.clone() else { return };
-    let project = ed.root.clone();
+    let project = ed.lane.root.clone();
     ed.events.jobs().spawn(move || {
         let r = keep(&path, &project, change);
         move |ed: &mut crate::editor::Editor| {
@@ -260,7 +260,7 @@ pub fn grant_reads(ed: &mut crate::editor::Editor, places: &[PathBuf], scope: Sc
     if scope == Scope::Once || places.is_empty() {
         return;
     }
-    if let Some(c) = ed.chat.as_mut() {
+    if let Some(c) = ed.lane.chat.as_mut() {
         for p in places {
             c.allowed.add_read(p.clone());
         }
@@ -280,7 +280,7 @@ pub fn grant(ed: &mut crate::editor::Editor, g: &Grant, scope: Scope) {
     if scope == Scope::Once {
         return;
     }
-    if let Some(c) = ed.chat.as_mut() {
+    if let Some(c) = ed.lane.chat.as_mut() {
         c.allowed.add(g);
     }
     let (when, toast) = match scope {
@@ -289,7 +289,7 @@ pub fn grant(ed: &mut crate::editor::Editor, g: &Grant, scope: Scope) {
         }
         _ => ("for the rest of this conversation", " in this conversation"),
     };
-    ed.checkpoints.tell.push(format!("The user let your commands {} — {when}.", g.shown()));
+    ed.lane.checkpoints.tell.push(format!("The user let your commands {} — {when}.", g.shown()));
     if scope == Scope::Always {
         let g = g.clone();
         keep_later(ed, move |a| a.add(&g));
@@ -302,8 +302,8 @@ impl crate::editor::Editor {
     /// conversation; Enter takes one back.
     pub fn sandbox_allowed(&mut self) {
         use crate::picker::{Action, FillError, Item};
-        let chat = self.chat.as_ref().map(|c| c.allowed.clone()).unwrap_or_default();
-        let (path, project) = (self.allow_path.clone(), self.root.clone());
+        let chat = self.lane.chat.as_ref().map(|c| c.allowed.clone()).unwrap_or_default();
+        let (path, project) = (self.allow_path.clone(), self.lane.root.clone());
         let fill: crate::picker::Fill = Box::new(move || {
             let kept = Store::read(path.as_deref()).get(&project);
             let row = |label: String, hint: String| Item {
@@ -342,7 +342,7 @@ impl crate::editor::Editor {
         if !what.starts_with('/') && !what.starts_with("port ") {
             return Err("usage: :sandbox-disallow <path | port N> — as :sandbox-allowed lists it".into());
         }
-        if let Some(c) = self.chat.as_mut() {
+        if let Some(c) = self.lane.chat.as_mut() {
             c.allowed.remove(&what);
         }
         let taken = what.clone();

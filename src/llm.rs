@@ -745,7 +745,7 @@ impl Review {
 /// When the ask prompt opens or "ask" starts being typed — spawns the spare process (overlapping typing).
 pub fn prewarm(ed: &mut Editor) {
     let cfg = ed.config.llm.clone();
-    if let Err(e) = ed.llm_warm.ensure(&cfg, &ed.root) {
+    if let Err(e) = ed.llm_warm.ensure(&cfg, &ed.lane.root) {
         ed.set_error(e);
     }
 }
@@ -770,7 +770,7 @@ pub fn ask(ed: &mut Editor, instruction: &str) -> Result<(), String> {
         })
         .collect();
     let prompt =
-        build_prompt(instruction, &doc.display_name(&ed.root), &doc.text, &ranges, cfg.context_lines);
+        build_prompt(instruction, &doc.display_name(&ed.lane.root), &doc.text, &ranges, cfg.context_lines);
     let hunks = ranges
         .iter()
         .map(|&(from, to)| Hunk {
@@ -815,7 +815,7 @@ fn start(
     hunks: Vec<Hunk>,
 ) -> Result<(), String> {
     let cfg = ed.config.llm.clone();
-    let mut child = ed.llm_warm.take(&cfg, &ed.root)?;
+    let mut child = ed.llm_warm.take(&cfg, &ed.lane.root)?;
     // Write the message and close stdin — the process exits on its own after this one turn.
     // Before anything is installed: a failed write leaves no review waiting forever.
     let sent = child.stdin.take().ok_or_else(|| "claude: no stdin".to_string()).and_then(|mut stdin| {

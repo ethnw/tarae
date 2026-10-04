@@ -416,7 +416,7 @@ fn snapshot_statusline_widths() {
     ] {
         let mut s = Shot::new(w, 6);
         s.file("src/demo.rs", DEMO_RS);
-        s.ed.git_branch = Some("main".into());
+        s.ed.lane.git_branch = Some("main".into());
         let diag = |from, to, severity, message: &str| crate::lsp::Diagnostic {
             from,
             to,
@@ -731,7 +731,7 @@ fn snapshot_chat_empty() {
     s.ed.config.llm.command = "sh".into();
     s.ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
     s.keys(" l");
-    assert!(s.ed.chat.as_ref().is_some_and(|c| c.msgs.is_empty()), "chat opened without a note");
+    assert!(s.ed.lane.chat.as_ref().is_some_and(|c| c.msgs.is_empty()), "chat opened without a note");
     s.check("chat_empty");
 }
 
@@ -758,8 +758,8 @@ fn snapshot_chat_explore() {
         Some(Look { verb, what: what.into(), pattern, range: range.into(), link })
     };
     let lib = std::path::PathBuf::from("/p/src/lib.rs");
-    s.ed.chat.as_mut().unwrap().follow.on = true;
-    s.ed.chat.as_mut().unwrap().msgs = vec![
+    s.ed.lane.chat.as_mut().unwrap().follow.on = true;
+    s.ed.lane.chat.as_mut().unwrap().msgs = vec![
         msg(Role::User, "Who calls word_counts?", "demo.rs · L5", None),
         msg(
             Role::Thought,
@@ -816,7 +816,7 @@ fn snapshot_chat_table() {
                   And a wide one, row by row:\n\n\
                   | 설정 | 기본값 | 범위 | 설명 | 예시 | 비고 |\n|---|---|---|---|---|---|\n\
                   | `chat.width` | `0.4` | `0.2–0.6` | 채팅 패널이 차지하는 화면 비율 | `:set chat.width 0.5` | 좁으면 전체 화면 |";
-    s.ed.chat.as_mut().unwrap().msgs =
+    s.ed.lane.chat.as_mut().unwrap().msgs =
         vec![msg(Role::User, "표는 어떻게 그릴까?"), msg(Role::Assistant, answer), msg(Role::Note, "3.1s")];
     s.check("chat_table");
 }
@@ -834,14 +834,14 @@ fn chat_minimizes_while_following() {
     let docked = s.ed.screen.chat_x;
     assert!(docked.is_some());
     s.keys("why?<ret>");
-    assert!(s.ed.chat.as_ref().unwrap().busy());
+    assert!(s.ed.lane.chat.as_ref().unwrap().busy());
     s.frame();
     assert_eq!(s.ed.screen.chat_x, None, "minimized: no docked panel");
     assert!(s.ed.screen.chat_mini.get().is_some(), "a floating card instead");
     s.keys("<esc> l");
     assert_eq!(s.ed.screen.chat_x, docked, "space l brings the panel back for this turn");
-    s.ed.chat.as_mut().unwrap().unfolded = false;
-    s.ed.chat.as_mut().unwrap().follow.on = false;
+    s.ed.lane.chat.as_mut().unwrap().unfolded = false;
+    s.ed.lane.chat.as_mut().unwrap().follow.on = false;
     s.frame();
     assert_eq!(s.ed.screen.chat_x, docked, "not following = docked");
 }
@@ -936,7 +936,7 @@ fn the_thought_card_keeps_the_turns_thinking() {
     s.ed.config.llm.command = "sh".into();
     s.ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
     s.keys(" lhow?<ret>");
-    let c = s.ed.chat.as_mut().unwrap();
+    let c = s.ed.lane.chat.as_mut().unwrap();
     c.follow.on = true;
     c.msgs.push(Msg::new(Role::Thought, "The user asks how the list is filtered, so I read the picker.", ""));
     c.msgs.push(Msg::new(Role::Assistant, "Let me check the worker side.", ""));
@@ -980,7 +980,7 @@ fn follow_is_one_card_in_one_place() {
             range: format!("L{}–{}", lines.start + 1, lines.end),
             link: None,
         };
-        let c = s.ed.chat.as_mut().unwrap();
+        let c = s.ed.lane.chat.as_mut().unwrap();
         c.follow.on = true;
         c.msgs.push(Msg::new(Role::Thought, "Reading where it starts.", ""));
         c.follow.gaze = Some(crate::follow::Gaze {
@@ -1027,7 +1027,7 @@ fn floating_cards_never_overlap() {
             crate::notes::add(&mut s.ed, &path, 39..40, crate::notes::By::Claude, long);
         }
         s.ed.goto_line(39);
-        let c = s.ed.chat.as_mut().unwrap();
+        let c = s.ed.lane.chat.as_mut().unwrap();
         c.msgs.push(Msg {
             role: Role::Thought,
             text: "Thinking hard about it for a while.\n".repeat(6),
@@ -1131,7 +1131,7 @@ fn snapshot_review() {
         file("src/lib.rs", 40, 0, true),
         file("README.md", 2, 1, false),
     ];
-    s.ed.code_review = Some(CodeReview::for_test(Base::Head, cwd.clone(), files));
+    s.ed.lane.code_review = Some(CodeReview::for_test(Base::Head, cwd.clone(), files));
     let doc = s.ed.doc_mut();
     doc.review_base = Some(Rope::from_str(DEMO_RS));
     doc.git_base = Some(std::sync::Arc::new(DEMO_RS.to_string()));
@@ -1140,8 +1140,8 @@ fn snapshot_review() {
     let path = doc.path.clone().unwrap();
     s.keys(":9<ret> vm");
     crate::notes::add(&mut s.ed, &path, 8..9, crate::notes::By::You, "Why split this into two lines?");
-    s.ed.notes.list[0].thread[0].draft = true;
-    s.ed.notes.list[0].waiting = false;
+    s.ed.lane.notes.list[0].thread[0].draft = true;
+    s.ed.lane.notes.list[0].waiting = false;
     s.keys("gg");
     s.check("review");
 }
@@ -1154,7 +1154,8 @@ fn review_keeps_the_cursor_on_screen_below_a_big_deletion() {
     let base: String = (0..60).map(|i| format!("line {i}\n")).collect();
     let now: String = (0..60).filter(|i| !(10..50).contains(i)).map(|i| format!("line {i}\n")).collect();
     s.file("src/demo.rs", &now);
-    s.ed.code_review = Some(CodeReview::for_test(Base::Head, std::env::current_dir().unwrap(), Vec::new()));
+    s.ed.lane.code_review =
+        Some(CodeReview::for_test(Base::Head, std::env::current_dir().unwrap(), Vec::new()));
     let doc = s.ed.doc_mut();
     doc.review_base = Some(Rope::from_str(&base));
     doc.git_hunks = crate::git::hunks(&base, &now);
@@ -1186,7 +1187,7 @@ fn review_rail_scrolls_by_itself_only_to_show_the_file() {
         .collect();
     let mut s = Shot::new(100, 24);
     s.ed.open(&dir.join("f00.txt")).unwrap();
-    s.ed.code_review = Some(CodeReview::for_test(Base::Head, dir.clone(), files));
+    s.ed.lane.code_review = Some(CodeReview::for_test(Base::Head, dir.clone(), files));
     s.frame();
     let rail = |s: &Shot| s.ed.screen.review_rail.borrow().clone();
     let click = |s: &mut Shot, kind, y: usize| {
@@ -1297,7 +1298,7 @@ fn snapshot_side_panel_files() {
     let root = std::env::current_dir().unwrap();
     let mut sb = crate::sidebar::Sidebar::with_files(root, rels.iter().map(|r| r.to_string()).collect());
     sb.focus = false;
-    s.ed.sidebar = Some(sb);
+    s.ed.lane.sidebar = Some(sb);
     s.keys("j");
     s.check("side_panel_files");
 }
@@ -1308,7 +1309,7 @@ fn snapshot_side_panel_outline() {
     let mut s = Shot::new(112, 24);
     s.file("src/demo.rs", DEMO_RS);
     s.ed.sidebar_show(crate::sidebar::Mode::Outline);
-    s.until("outline", |ed| ed.sidebar.as_ref().is_some_and(|sb| !sb.lines().is_empty()));
+    s.until("outline", |ed| ed.lane.sidebar.as_ref().is_some_and(|sb| !sb.lines().is_empty()));
     s.keys("j");
     s.check("side_panel_outline");
 }
@@ -1366,8 +1367,8 @@ fn snapshot_side_panel_git() {
     (st.staged[0].added, st.staged[0].removed) = (Some(2), Some(0));
     st.top = cwd.clone();
     st.generation = 1;
-    s.ed.git_status = Some(st.with_rows());
-    s.ed.sidebar = Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, cwd));
+    s.ed.lane.git_status = Some(st.with_rows());
+    s.ed.lane.sidebar = Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, cwd));
     s.keys("j");
     s.check("side_panel_git");
 }
@@ -1386,8 +1387,8 @@ fn snapshot_task_panel() {
             .into(),
         cwd,
     });
-    s.until("task", |ed| ed.task_run.as_ref().is_some_and(|r| r.took.is_some()));
-    s.ed.task_run.as_mut().unwrap().took = Some(Duration::from_millis(1830));
+    s.until("task", |ed| ed.lane.task_run.as_ref().is_some_and(|r| r.took.is_some()));
+    s.ed.lane.task_run.as_mut().unwrap().took = Some(Duration::from_millis(1830));
     s.ed.toasts.clear();
     s.check("task_panel");
 }
@@ -1422,7 +1423,7 @@ fn snapshot_sandbox_blocked() {
     r.by_claude = true;
     r.guard = Some(crate::sandbox::Guard::In(policy));
     r.output = vec![(true, "npm ERR! code EPERM".into()), (true, "npm ERR! syscall open".into())];
-    s.ed.task_run = Some(r);
+    s.ed.lane.task_run = Some(r);
     let dump = |s: &mut Shot, name: &str| {
         if let Some(dir) = std::env::var_os("TARAE_FRAMES_DIR") {
             std::fs::create_dir_all(&dir).unwrap();
@@ -1448,7 +1449,7 @@ fn claudes_command_offers_no_again() {
         let task = crate::task::Task { name: "cargo build".into(), cmd: "true".into(), cwd: "/p".into() };
         let mut r = crate::task::Run::for_test(task);
         (r.by_claude, r.found, r.took) = (by_claude, found, Some(Duration::from_millis(40)));
-        s.ed.task_run = Some(r);
+        s.ed.lane.task_run = Some(r);
         let mut vt = vt100::Parser::new(24, 100, 0);
         vt.process(&s.frame());
         let row = vt
@@ -1497,7 +1498,7 @@ fn snapshot_test_panel_scrolled() {
     run.target.cwd = std::env::current_dir().unwrap();
     run.selected = 1;
     run.took = Some(Duration::from_millis(1240));
-    s.ed.test_run = Some(run);
+    s.ed.lane.test_run = Some(run);
     s.frame();
     let (y0, _, _) = s.ed.screen.test_panel.get().expect("the panel is drawn");
     for _ in 0..4 {
@@ -1524,7 +1525,7 @@ fn test_panel_says_when_no_test_ran() {
     ];
     let mut run = crate::testing::TestRun::finished("orphan::forgotten", Vec::new(), output);
     run.state = crate::testing::RunState::NoTests;
-    s.ed.test_run = Some(run);
+    s.ed.lane.test_run = Some(run);
     let mut p = vt100::Parser::new(s.h, s.w, 0);
     p.process(&s.frame());
     let text = p.screen().contents();
@@ -1545,7 +1546,7 @@ fn snapshot_terminal_panel() {
     s.ed.terminal_run(vec!["/bin/sh".into(), "-c".into(), script.into()], Vec::new());
     // All of it — the line break after the last line too (it can come in a read of its own)
     s.until("output", |ed| {
-        ed.terminal.as_ref().is_some_and(|t| {
+        ed.lane.terminal.as_ref().is_some_and(|t| {
             let screen = t.parser.screen();
             screen.contents().contains("FAILED") && screen.cursor_position() == (4, 0)
         })
@@ -1561,7 +1562,7 @@ fn snapshot_terminal_panel() {
     mouse(&mut s, K::Down, 1);
     mouse(&mut s, K::Drag, 12);
     let bytes = mouse(&mut s, K::Up, 12);
-    assert_eq!(s.ed.terminal.as_ref().unwrap().selected_text(), "$ cargo test");
+    assert_eq!(s.ed.lane.terminal.as_ref().unwrap().selected_text(), "$ cargo test");
     assert!(s.ed.toasts.iter().any(|t| t.text == "copied 12 characters"));
     let shot = snapshot(&s.ed, "t", &bytes, s.w, s.h);
     let bg_row = shot.lines().skip_while(|l| !l.starts_with("## bg")).nth(16).unwrap();
@@ -1572,20 +1573,23 @@ fn snapshot_terminal_panel() {
         s.frame();
     };
     at(&mut s, K::Down, 10, 3);
-    assert!(s.ed.terminal.as_ref().unwrap().selection.is_none() && !s.ed.terminal.as_ref().unwrap().focus);
+    assert!(
+        s.ed.lane.terminal.as_ref().unwrap().selection.is_none()
+            && !s.ed.lane.terminal.as_ref().unwrap().focus
+    );
     at(&mut s, K::Drag, 10, 16);
     at(&mut s, K::Up, 10, 16);
-    assert!(s.ed.terminal.as_ref().unwrap().selection.is_none(), "not a terminal selection");
+    assert!(s.ed.lane.terminal.as_ref().unwrap().selection.is_none(), "not a terminal selection");
     // A drag begun in it goes on outside it (clamped to its edge) and ends there
     at(&mut s, K::Down, 1, 16);
     at(&mut s, K::Drag, 30, 3);
     assert_eq!(
-        s.ed.terminal.as_ref().unwrap().selected(),
+        s.ed.lane.terminal.as_ref().unwrap().selected(),
         Some(((0, 29), (1, 0))),
         "clamped to its first row"
     );
     at(&mut s, K::Up, 30, 3);
-    assert!(!s.ed.terminal.as_ref().unwrap().selecting, "released outside — done");
+    assert!(!s.ed.lane.terminal.as_ref().unwrap().selecting, "released outside — done");
     let cursor = s.ed.doc().selection().primary();
     at(&mut s, K::Drag, 40, 5);
     assert_eq!(
@@ -1597,8 +1601,8 @@ fn snapshot_terminal_panel() {
     at(&mut s, K::Down, 1, 16);
     at(&mut s, K::Drag, 6, 16);
     at(&mut s, K::Down, 10, 3);
-    assert!(!s.ed.terminal.as_ref().unwrap().selecting);
-    s.ed.terminal = None; // hangs it up
+    assert!(!s.ed.lane.terminal.as_ref().unwrap().selecting);
+    s.ed.lane.terminal = None; // hangs it up
 }
 
 /// A merge conflict: ours on the green wash, theirs on the changed one, the card with the keys at the
@@ -1740,12 +1744,12 @@ fn reading_the_answer_moves_the_editor() {
     let answer = format!(
         "The tree is built in src/filetree.rs:30.\n\n{filler}The side panel keeps it at src/sidebar.rs:60."
     );
-    let c = s.ed.chat.as_mut().unwrap();
+    let c = s.ed.lane.chat.as_mut().unwrap();
     c.msgs = vec![Msg::new(Role::User, "how?", ""), Msg::new(Role::Assistant, answer, "")];
     c.follow.on = true;
     s.frame();
     // As a turn leaves it: at the bottom (the last place shows), read from here on
-    let c = s.ed.chat.as_mut().unwrap();
+    let c = s.ed.lane.chat.as_mut().unwrap();
     c.follow.read_at = Some(c.scroll);
     let at = |s: &Shot| {
         (
@@ -1754,10 +1758,10 @@ fn reading_the_answer_moves_the_editor() {
         )
     };
     let cwd = std::env::current_dir().unwrap();
-    s.ed.chat.as_mut().unwrap().scroll = 1000; // to the top
+    s.ed.lane.chat.as_mut().unwrap().scroll = 1000; // to the top
     s.frame();
     assert_eq!(at(&s), (cwd.join("src/filetree.rs"), 29), "the top of the answer");
-    s.ed.chat.as_mut().unwrap().scroll = 0;
+    s.ed.lane.chat.as_mut().unwrap().scroll = 0;
     s.frame();
     assert_eq!(at(&s), (cwd.join("src/sidebar.rs"), 59), "its end");
 }
@@ -1773,7 +1777,7 @@ fn a_long_name_shows_whole_when_selected() {
     let mut sb = crate::sidebar::Sidebar::with_files(root, vec![long.to_string(), "src/demo.rs".into()]);
     sb.set_open(["src", "src/components"], true);
     sb.focus = false;
-    s.ed.sidebar = Some(sb);
+    s.ed.lane.sidebar = Some(sb);
     let text = |s: &mut Shot| {
         let bytes = s.frame();
         snapshot(&s.ed, "t", &bytes, s.w, s.h)
@@ -1783,8 +1787,9 @@ fn a_long_name_shows_whole_when_selected() {
         unfocused.contains("user_profile…") && unfocused.contains("ler.tsx"),
         "the end stays: {unfocused}"
     );
-    let row = s.ed.sidebar.as_ref().unwrap().lines().iter().position(|l| l.label.ends_with(".tsx")).unwrap();
-    let sb = s.ed.sidebar.as_mut().unwrap();
+    let row =
+        s.ed.lane.sidebar.as_ref().unwrap().lines().iter().position(|l| l.label.ends_with(".tsx")).unwrap();
+    let sb = s.ed.lane.sidebar.as_mut().unwrap();
     sb.focus = true;
     sb.selected = row;
     assert!(text(&mut s).contains("user_profile_settings_view_controller.tsx"), "whole when selected");

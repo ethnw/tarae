@@ -246,8 +246,10 @@ impl Editor {
             (None, None, Some(spec)) => spec.name.clone(),
             (None, None, None) => String::new(),
         };
-        let root =
-            file.as_deref().map(|f| crate::lsp::find_root_for(&lang, f)).unwrap_or_else(|| self.root.clone());
+        let root = file
+            .as_deref()
+            .map(|f| crate::lsp::find_root_for(&lang, f))
+            .unwrap_or_else(|| self.lane.root.clone());
         let root = std::fs::canonicalize(&root).unwrap_or(root);
         if !matches!(lang.as_str(), "python" | "go" | "java" | "rust" | "c" | "cpp") {
             return self.set_error(format!(

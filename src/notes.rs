@@ -92,18 +92,18 @@ pub fn tool_schema() -> Value {
 }
 
 fn find(ed: &Editor, id: u64) -> Option<&Note> {
-    ed.notes.list.iter().find(|n| n.id == id)
+    ed.lane.notes.list.iter().find(|n| n.id == id)
 }
 
 fn find_mut(ed: &mut Editor, id: u64) -> Option<&mut Note> {
-    ed.notes.list.iter_mut().find(|n| n.id == id)
+    ed.lane.notes.list.iter_mut().find(|n| n.id == id)
 }
 
 /// A new note on `lines` of `path`.
 pub fn add(ed: &mut Editor, path: &Path, lines: Range<usize>, by: By, text: &str) -> u64 {
-    ed.notes.next += 1;
-    let id = ed.notes.next;
-    ed.notes.list.push(Note {
+    ed.lane.notes.next += 1;
+    let id = ed.lane.notes.next;
+    ed.lane.notes.list.push(Note {
         id,
         path: path.to_path_buf(),
         at: None,
@@ -112,18 +112,18 @@ pub fn add(ed: &mut Editor, path: &Path, lines: Range<usize>, by: By, text: &str
         waiting: by == By::You,
         anchor: None,
     });
-    ed.notes.focus = Some(id);
+    ed.lane.notes.focus = Some(id);
     attach(ed);
     id
 }
 
 /// Every event: open documents get marks for their notes, and every note's lines follow its mark.
 pub fn attach(ed: &mut Editor) {
-    if ed.notes.list.is_empty() {
+    if ed.lane.notes.list.is_empty() {
         return;
     }
-    let Editor { notes, docs, .. } = ed;
-    for n in &mut notes.list {
+    let Editor { lane, docs, .. } = ed;
+    for n in &mut lane.notes.list {
         match n
             .at
             .and_then(|(d, m)| docs.iter().find(|doc| doc.id == d).and_then(|doc| Some((doc, doc.mark(m)?))))
@@ -178,7 +178,7 @@ fn nearest_line(text: &ropey::Rope, line: usize, want: &str) -> isize {
 
 /// Notes as saved in the session file: path, lines, the first line's text, the thread.
 pub fn to_json(ed: &Editor) -> Vec<Value> {
-    ed.notes
+    ed.lane.notes
         .list
         .iter()
         .map(|n| {
@@ -199,7 +199,7 @@ pub fn to_json(ed: &Editor) -> Vec<Value> {
 
 /// At start: this folder's (the root's) notes from the last session.
 pub fn restore(ed: &mut Editor) {
-    let saved = ed.session.notes(&ed.root);
+    let saved = ed.session.notes(&ed.lane.root);
     restore_from(ed, saved);
 }
 
@@ -223,9 +223,9 @@ fn restore_from(ed: &mut Editor, saved: Vec<Value>) {
         if thread.is_empty() || !Path::new(path).is_file() {
             continue;
         }
-        ed.notes.next += 1;
-        ed.notes.list.push(Note {
-            id: ed.notes.next,
+        ed.lane.notes.next += 1;
+        ed.lane.notes.list.push(Note {
+            id: ed.lane.notes.next,
             path: PathBuf::from(path),
             at: None,
             lines: a as usize..(b as usize).max(a as usize + 1),
@@ -239,7 +239,7 @@ fn restore_from(ed: &mut Editor, saved: Vec<Value>) {
 
 /// Marks notes point at (the jump list's pruning keeps them).
 pub fn marks(ed: &Editor) -> Vec<(DocId, u64)> {
-    ed.notes.list.iter().filter_map(|n| n.at).collect()
+    ed.lane.notes.list.iter().filter_map(|n| n.at).collect()
 }
 
 /// Notes over the cursor line in the current document, in (first line, age) order.
@@ -247,7 +247,7 @@ pub fn all_here(ed: &Editor) -> Vec<&Note> {
     let Some(path) = ed.doc().path.as_deref() else { return Vec::new() };
     let line = ed.cursor_line();
     let mut v: Vec<&Note> =
-        ed.notes.list.iter().filter(|n| n.path == path && n.lines.contains(&line)).collect();
+        ed.lane.notes.list.iter().filter(|n| n.path == path && n.lines.contains(&line)).collect();
     v.sort_by_key(|n| (n.lines.start, n.id));
     v
 }
@@ -256,7 +256,7 @@ pub fn all_here(ed: &Editor) -> Vec<&Note> {
 /// so `]n` reads a crowded line in order.
 pub fn here(ed: &Editor) -> Option<&Note> {
     let v = all_here(ed);
-    v.iter().find(|n| Some(n.id) == ed.notes.focus).or(v.first()).copied()
+    v.iter().find(|n| Some(n.id) == ed.lane.notes.focus).or(v.first()).copied()
 }
 
 // ── The tool ────────────────────────────────────────────────────────────────
@@ -272,7 +272,7 @@ pub fn tool_call(ed: &mut Editor, args: &Value) -> Result<String, String> {
     }
     let path =
         args["path"].as_str().filter(|p| !p.is_empty()).ok_or("path and line are required for a new note")?;
-    let path = crate::chat::resolve(&ed.root, path);
+    let path = crate::chat::resolve(&ed.lane.root, path);
     let path = std::fs::canonicalize(&path).unwrap_or(path);
     if !path.is_file() {
         return Err(format!("{} isn't a file", path.display()));
@@ -280,13 +280,13 @@ pub fn tool_call(ed: &mut Editor, args: &Value) -> Result<String, String> {
     let line = args["line"].as_u64().ok_or("path and line are required for a new note")?.max(1) as usize - 1;
     let end = args["end_line"].as_u64().map_or(line, |e| (e.max(1) as usize - 1).max(line));
     let id = add(ed, &path, line..end + 1, By::Claude, text);
-    Ok(format!("note #{id} pinned at {}:{}", crate::chat::shown(&ed.root, &path), line + 1))
+    Ok(format!("note #{id} pinned at {}:{}", crate::chat::shown(&ed.lane.root, &path), line + 1))
 }
 
 /// The chat turn ended: notes still waiting stop waiting — a single one gets Claude's plain answer (it didn't
 /// use `reply_to`); a review's are answered in the chat.
 pub fn turn_done(ed: &mut Editor, answer: Option<String>) {
-    let ids = std::mem::take(&mut ed.notes.turn);
+    let ids = std::mem::take(&mut ed.lane.notes.turn);
     let single = ids.len() == 1;
     for id in ids {
         let Some(n) = find_mut(ed, id) else { continue };
@@ -316,7 +316,7 @@ pub fn submit(ed: &mut Editor, target: Option<u64>, text: &str) {
     if text.is_empty() {
         return;
     }
-    if ed.chat.as_ref().is_some_and(|c| c.busy()) && !crate::codereview::drafting(ed) {
+    if ed.lane.chat.as_ref().is_some_and(|c| c.busy()) && !crate::codereview::drafting(ed) {
         return ed.set_status("Claude is still answering — reply once it's done (C-c in the chat stops it)");
     }
     // During a review it's a draft: it goes with the rest (`space v s`), nothing is sent now
@@ -354,7 +354,7 @@ pub fn submit(ed: &mut Editor, target: Option<u64>, text: &str) {
         }
     };
     if draft {
-        let k = ed.notes.list.iter().filter(|n| n.thread.iter().any(|e| e.draft)).count();
+        let k = ed.lane.notes.list.iter().filter(|n| n.thread.iter().any(|e| e.draft)).count();
         return ed.note(format!("draft saved — {k} in this review · space v s sends them"));
     }
     let n = find(ed, id).expect("just made");
@@ -369,20 +369,20 @@ pub fn submit(ed: &mut Editor, target: Option<u64>, text: &str) {
         about.insert_str(at, &format!("(a stop of your walk-through — you said: {why})\n"));
     }
     // The chat panel carries the conversation — opened in the background if closed; the keys stay here
-    if ed.chat.is_none() {
+    if ed.lane.chat.is_none() {
         crate::chat::open(ed);
-        if let Some(c) = &mut ed.chat {
+        if let Some(c) = &mut ed.lane.chat {
             c.focused = false;
             c.unfolded = false;
         }
     }
     if crate::chat::submit(ed, text, Some(about), Some(chip)) {
-        ed.notes.turn = vec![id];
+        ed.lane.notes.turn = vec![id];
         return;
     }
     // Claude never saw it — take it back (the chat panel says why)
     if fresh {
-        ed.notes.list.retain(|n| n.id != id);
+        ed.lane.notes.list.retain(|n| n.id != id);
     } else if let Some(n) = find_mut(ed, id) {
         n.thread.pop();
         n.waiting = false;
@@ -407,7 +407,7 @@ fn message(ed: &Editor, n: &Note) -> String {
     let mut s = format!(
         "<note id=\"{}\" path=\"{}\" lines=\"{}-{}\">\n<code>\n{}</code>\n",
         n.id,
-        crate::chat::shown(&ed.root, &n.path),
+        crate::chat::shown(&ed.lane.root, &n.path),
         n.lines.start + 1,
         n.lines.end,
         code
@@ -425,7 +425,7 @@ fn message(ed: &Editor, n: &Note) -> String {
 /// `:note-close` — drop the note here.
 pub fn close_here(ed: &mut Editor) -> Result<(), String> {
     let id = here(ed).map(|n| n.id).ok_or("no note on this line")?;
-    ed.notes.list.retain(|n| n.id != id);
+    ed.lane.notes.list.retain(|n| n.id != id);
     ed.set_status(format!("note #{id} closed"));
     Ok(())
 }
@@ -437,7 +437,7 @@ pub fn step(ed: &mut Editor, forward: bool) {
     let path = ed.doc().path.clone().unwrap_or_default();
     // From the note shown here, else from the cursor line
     let here = here(ed).map(key).unwrap_or((path, ed.cursor_line(), 0));
-    let mut all: Vec<(PathBuf, usize, u64)> = ed.notes.list.iter().map(key).collect();
+    let mut all: Vec<(PathBuf, usize, u64)> = ed.lane.notes.list.iter().map(key).collect();
     all.sort();
     let target = if forward {
         all.iter().find(|t| **t > here).or(all.first())
@@ -446,7 +446,7 @@ pub fn step(ed: &mut Editor, forward: bool) {
     };
     match target.cloned() {
         Some((p, l, id)) => {
-            ed.notes.focus = Some(id);
+            ed.lane.notes.focus = Some(id);
             if let Err(e) = ed.open_at(&p, l, 0) {
                 ed.set_error(format!("{e:#}"));
             }
@@ -460,17 +460,23 @@ pub fn step(ed: &mut Editor, forward: bool) {
 /// `space N` — every note, newest first.
 pub fn picker(ed: &mut Editor) {
     use crate::picker::{Action, Item};
-    if ed.notes.list.is_empty() {
+    if ed.lane.notes.list.is_empty() {
         return ed
             .set_status("no notes yet — Claude pins them while it explores, or space n asks about a line");
     }
     let items: Vec<Item> = ed
+        .lane
         .notes
         .list
         .iter()
         .rev()
         .map(|n| Item {
-            label: format!("{}:{}  {}", crate::chat::shown(&ed.root, &n.path), n.lines.start + 1, n.gist()),
+            label: format!(
+                "{}:{}  {}",
+                crate::chat::shown(&ed.lane.root, &n.path),
+                n.lines.start + 1,
+                n.gist()
+            ),
             action: Action::Goto { path: n.path.clone(), line: n.lines.start, col: 0 },
             hint: match n.thread.len() {
                 1 => String::new(),
@@ -512,12 +518,12 @@ mod tests {
         );
         let mut ed = editor();
         restore_from(&mut ed, saved);
-        assert_eq!(ed.notes.list.len(), 2);
+        assert_eq!(ed.lane.notes.list.len(), 2);
         ed.open(&f).unwrap();
         attach(&mut ed);
-        let n = &ed.notes.list[0];
+        let n = &ed.lane.notes.list[0];
         assert_eq!((n.lines.clone(), n.thread.len()), (4..5, 2), "re-anchored on its line's text");
-        assert_eq!(ed.notes.list[1].lines, 5..6, "clamped to the last line");
+        assert_eq!(ed.lane.notes.list[1].lines, 5..6, "clamped to the last line");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

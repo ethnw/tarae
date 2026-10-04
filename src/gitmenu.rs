@@ -422,7 +422,7 @@ impl Editor {
     /// Changed and untracked files (`git status`), status letters in the gutter's colors, each
     /// file's diff against HEAD as the preview (computed on a worker thread), `+N −M` on the right.
     pub fn git_changed_files(&mut self) {
-        self.git_changed_files_in(self.root.clone());
+        self.git_changed_files_in(self.lane.root.clone());
     }
 
     /// Changed files of `cwd`'s repository, labels relative to it.
@@ -457,7 +457,7 @@ impl Editor {
                         }
                     })
                     .collect();
-                ed.changed_files = list;
+                ed.lane.changed_files = list;
                 ed.open_picker(crate::picker::Picker::new("changed files", items, true).grouped(cwd), None);
             }
         });

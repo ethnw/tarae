@@ -40,6 +40,7 @@ mod jumplist;
 mod key;
 mod keymap;
 mod labels;
+mod lane;
 mod llm;
 mod log;
 mod lsp;

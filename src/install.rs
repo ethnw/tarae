@@ -148,7 +148,7 @@ impl Editor {
         cwd: PathBuf,
         then: Then,
     ) {
-        if self.task_run.as_ref().is_some_and(|r| r.state == crate::task::State::Running) {
+        if self.lane.task_run.as_ref().is_some_and(|r| r.state == crate::task::State::Running) {
             return self.offer_finished(offer, Err("a task is running — y once it's done".into()));
         }
         let task = crate::task::Task { name: format!("install {tool}"), cmd: shown(&run), cwd };
@@ -292,10 +292,10 @@ mod tests {
         ed.offer_popups = true;
         install(&mut ed, "echo installing; exit 0", "sh", |_| {});
         assert!(ed.offers.is_empty(), "installed: the card goes");
-        let r = ed.task_run.as_ref().expect("in the task panel");
+        let r = ed.lane.task_run.as_ref().expect("in the task panel");
         assert_eq!(r.task.name, "install sh");
         assert!(r.output.iter().any(|(_, l)| l == "installing"));
-        assert!(ed.task_last.is_none(), "space m m still runs your task, not this");
+        assert!(ed.lane.task_last.is_none(), "space m m still runs your task, not this");
         assert!(r.install, "the panel offers no `space m m again` for it");
         install(&mut ed, "exit 3", "sh", |_| {});
         assert!(
@@ -344,7 +344,7 @@ mod tests {
         install(&mut ed, "sleep 5", "sh", |ed| {
             ed.task_start(task.clone());
             assert_eq!(
-                ed.task_run.as_ref().map(|r| r.task.name.as_str()),
+                ed.lane.task_run.as_ref().map(|r| r.task.name.as_str()),
                 Some("install sh"),
                 "still running"
             );

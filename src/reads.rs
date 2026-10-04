@@ -87,19 +87,19 @@ pub fn covered(look: &Look, root: &Path, chat: &Allowed, kept: &Allowed) -> bool
 /// then allowed, or put to the user.
 pub fn request(ed: &mut Editor, request_id: &str, req: &Value) -> Option<Value> {
     let tool = req["tool_name"].as_str().unwrap_or_default().to_string();
-    let c = ed.chat.as_ref()?;
+    let c = ed.lane.chat.as_ref()?;
     let (generation, chat) = (c.generation(), c.allowed.clone());
     let input = req["input"].clone();
     let request_id = request_id.to_string();
     let store = ed.allow_path.clone();
     // (the root, a real path, is where claude runs — its relative paths are from there)
-    let root = ed.root.clone();
+    let root = ed.lane.root.clone();
     ed.events.jobs().spawn(move || {
         let look = look(&tool, &input, &root);
         let kept = crate::allow::Store::read(store.as_deref()).get(&root);
         let ok = covered(&look, &root, &chat, &kept);
         move |ed: &mut Editor| {
-            let Some(c) = ed.chat.as_mut().filter(|c| c.generation() == generation) else { return };
+            let Some(c) = ed.lane.chat.as_mut().filter(|c| c.generation() == generation) else { return };
             if ok {
                 return crate::chat::respond(ed, &request_id, allow(&input));
             }
@@ -121,7 +121,7 @@ pub fn next(ed: &mut Editor) {
     if ed.offers.iter().any(|o| matches!(o.what, crate::offer::What::Read { .. })) {
         return;
     }
-    let Some(p) = ed.chat.as_mut().and_then(|c| c.reads.pop_front()) else { return };
+    let Some(p) = ed.lane.chat.as_mut().and_then(|c| c.reads.pop_front()) else { return };
     let keep =
         p.look.at.as_deref().is_some_and(|at| crate::allow::keepable(at, crate::allow::home().as_deref()));
     let q = question(&p.look, keep);
@@ -158,7 +158,7 @@ pub fn question(look: &Look, keep: bool) -> String {
 /// card offered it).
 pub fn answer(ed: &mut Editor, id: u64, p: Pending, scope: Option<Scope>, keep: bool) {
     ed.offer_finished(id, Ok(()));
-    if ed.chat.as_ref().is_none_or(|c| c.generation() != p.generation) {
+    if ed.lane.chat.as_ref().is_none_or(|c| c.generation() != p.generation) {
         return;
     }
     let shown = p.look.at.as_ref().map_or_else(|| p.look.given.clone(), |a| a.display().to_string());
@@ -172,7 +172,7 @@ pub fn answer(ed: &mut Editor, id: u64, p: Pending, scope: Option<Scope>, keep: 
     if let Some(at) = at {
         crate::allow::grant_reads(ed, &[at], scope);
         // The ones waiting that this lets through
-        if let Some(c) = ed.chat.as_mut() {
+        if let Some(c) = ed.lane.chat.as_mut() {
             let (through, wait): (Vec<_>, Vec<_>) =
                 c.reads.drain(..).partition(|w| w.look.at.as_ref().is_some_and(|a| c.allowed.reads(a)));
             c.reads.extend(wait);
@@ -186,7 +186,7 @@ pub fn answer(ed: &mut Editor, id: u64, p: Pending, scope: Option<Scope>, keep: 
 
 /// The turn ended: nothing waits for these asks any more.
 pub fn turn_over(ed: &mut Editor) {
-    if let Some(c) = ed.chat.as_mut() {
+    if let Some(c) = ed.lane.chat.as_mut() {
         c.reads.clear();
     }
     ed.offers.retain(|o| !matches!(o.what, crate::offer::What::Read { .. }));

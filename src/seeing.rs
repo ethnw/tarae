@@ -28,7 +28,7 @@ pub fn tool_schema() -> Value {
 
 /// A `screen` call: sent with the next frame if this conversation allows it, else asked on a card.
 pub fn call(ed: &mut Editor, call: Call) {
-    if ed.chat.as_ref().is_some_and(|c| c.sees) {
+    if ed.lane.chat.as_ref().is_some_and(|c| c.sees) {
         return ed.screen_sends.push(call);
     }
     // (one card at a time — the same title would replace the card, and its call with it)
@@ -64,7 +64,7 @@ pub fn answer(ed: &mut Editor, id: u64, call: Call, scope: Option<Scope>) {
         None => crate::tools::answer(ed, call, Err("the user said no to showing their screen".into())),
         Some(scope) => {
             if scope != Scope::Once
-                && let Some(c) = ed.chat.as_mut()
+                && let Some(c) = ed.lane.chat.as_mut()
             {
                 c.sees = true;
             }

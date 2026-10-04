@@ -1521,8 +1521,8 @@ pub fn diagnostics(ed: &mut Editor, call: Call, args: &Value) -> Result<(), Stri
     };
     let (paths, which) = match given.is_empty() {
         false => (given, ""),
-        true if !ed.checkpoints.turn.is_empty() => (
-            ed.checkpoints.turn.iter().map(|t| t.path.clone()).collect(),
+        true if !ed.lane.checkpoints.turn.is_empty() => (
+            ed.lane.checkpoints.turn.iter().map(|t| t.path.clone()).collect(),
             " (the files you edited this turn)",
         ),
         true => {
@@ -2113,7 +2113,7 @@ fn files_text(rows: Vec<(String, bool)>, tests: bool, counts: bool, offset: usiz
 
 /// The project — where both tools look.
 pub(crate) fn project_root(ed: &Editor) -> PathBuf {
-    ed.root.clone()
+    ed.lane.root.clone()
 }
 
 /// `path` relative to `root` when inside it.

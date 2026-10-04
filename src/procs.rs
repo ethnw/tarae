@@ -909,13 +909,13 @@ impl Editor {
 
     /// The panel took the keys: nothing else keeps them.
     fn procs_took_keys(&mut self) {
-        if let Some(c) = self.chat.as_mut() {
+        if let Some(c) = self.lane.chat.as_mut() {
             c.focused = false;
         }
-        if let Some(s) = self.sidebar.as_mut() {
+        if let Some(s) = self.lane.sidebar.as_mut() {
             s.focus = false;
         }
-        if let Some(t) = self.terminal.as_mut() {
+        if let Some(t) = self.lane.terminal.as_mut() {
             t.focus = false;
         }
         self.bottom_focus = false;
@@ -976,17 +976,17 @@ impl Editor {
             add(adapter, Kind::Debug, "debugger", d.program.clone());
             add(helper, Kind::Helper, "debug helper", d.program.clone());
         }
-        if let Some(r) = &self.task_run {
+        if let Some(r) = &self.lane.task_run {
             let title = if r.by_claude { "claude's command" } else { r.task.name.as_str() };
             add(r.pid(), Kind::Task, title, r.task.cmd.clone());
         }
-        if let Some(r) = &self.test_run {
+        if let Some(r) = &self.lane.test_run {
             add(r.pid(), Kind::Test, "tests", r.target.label.clone());
         }
-        if let Some(t) = &self.terminal {
+        if let Some(t) = &self.lane.terminal {
             add(t.pid(), Kind::Terminal, "terminal", t.title.clone());
         }
-        if let Some(c) = &self.chat {
+        if let Some(c) = &self.lane.chat {
             add(c.pid(), Kind::Chat, "claude", "the chat".into());
         }
         add(self.llm_pid, Kind::Ask, "claude", "space i".into());
@@ -1131,7 +1131,7 @@ impl Editor {
                 gone(self, "the terminal", None);
             }
             Kind::Chat => {
-                if let Some(c) = self.chat.as_mut() {
+                if let Some(c) = self.lane.chat.as_mut() {
                     c.stop_process();
                 }
                 gone(self, "claude", Some(CHAT_AGAIN));
@@ -1187,7 +1187,7 @@ impl Editor {
                 }
                 self.set_success(format!("{name} let start again"));
             }
-            Kind::Task => match self.task_run.as_ref().filter(|t| !t.by_claude && !t.install) {
+            Kind::Task => match self.lane.task_run.as_ref().filter(|t| !t.by_claude && !t.install) {
                 Some(t) => {
                     let task = t.task.clone();
                     self.task_start(task);

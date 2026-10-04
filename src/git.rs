@@ -56,7 +56,7 @@ pub fn watch(tx: Sender<Event>, dir: PathBuf) {
             if first || now != last {
                 (last, first) = (now, false);
                 let branch = read_branch(&head);
-                let apply = move |ed: &mut Editor| ed.git_branch = branch;
+                let apply = move |ed: &mut Editor| ed.lane.git_branch = branch;
                 if tx.send(Event::Job(Box::new(apply))).is_err() {
                     break;
                 }
@@ -132,7 +132,7 @@ impl Editor {
             return;
         }
         // In a code review the base is the review's (codereview.rs), not the index — also before it lands
-        let reviewed = move |ed: &Editor| ed.code_review.as_ref().is_some_and(|r| r.docs.contains(&id));
+        let reviewed = move |ed: &Editor| ed.lane.code_review.as_ref().is_some_and(|r| r.docs.contains(&id));
         let Some(path) =
             self.docs.iter().find(|d| d.id == id && d.review_base.is_none()).and_then(|d| d.path.clone())
         else {

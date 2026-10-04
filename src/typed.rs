@@ -71,7 +71,7 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
         "theme" => set(editor, &format!("theme {rest}"), false),
         // A commit message: `:q` cancels (closes it), `:wq`/`:x` commits — not the whole editor
         "q" | "quit" | "q!" | "quit!" if editor.in_commit_message() => {
-            editor.committing = None;
+            editor.lane.committing = None;
             editor.close_current(true)?;
             editor.set_status("commit canceled");
             Ok(())
@@ -201,7 +201,7 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
         }
         "sandbox-grant" => editor.sandbox_grant(rest),
         "config-reload" => {
-            let root = editor.root.clone();
+            let root = editor.lane.root.clone();
             editor.events.jobs().spawn(move || {
                 let (c, w) = config::load(&root);
                 move |ed: &mut Editor| ed.reload_config(c, w)
@@ -253,7 +253,7 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
         "chat" => {
             crate::chat::open(editor);
             if !rest.is_empty()
-                && let Some(c) = &mut editor.chat
+                && let Some(c) = &mut editor.lane.chat
             {
                 c.input = rest.to_string();
                 c.cursor = rest.len();
@@ -331,8 +331,8 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
         "undo-turn" => crate::checkpoint::step(editor, true),
         "redo-turn" => crate::checkpoint::step(editor, false),
         "notes-clear" => {
-            let n = editor.notes.list.len();
-            editor.notes.list.clear();
+            let n = editor.lane.notes.list.len();
+            editor.lane.notes.list.clear();
             editor.set_status(format!("{n} note{} closed", if n == 1 { "" } else { "s" }));
             Ok(())
         }
@@ -471,7 +471,7 @@ pub(crate) fn save_doc(editor: &mut Editor, id: crate::document::DocId, force: b
 
 fn saved(editor: &mut Editor, id: crate::document::DocId) {
     let Some(doc) = editor.docs.iter().find(|d| d.id == id) else { return };
-    let msg = format!("Saved {} · {} lines", doc.display_name(&editor.root), doc.text.len_lines());
+    let msg = format!("Saved {} · {} lines", doc.display_name(&editor.lane.root), doc.text.len_lines());
     editor.set_success(msg);
     editor.lsp_did_save(id);
     editor.undo_persist(id);
@@ -490,7 +490,7 @@ pub(crate) fn quit(editor: &mut Editor, force: bool) -> Result<(), String> {
             .docs
             .iter()
             .filter(|d| d.is_modified() && !d.throwaway)
-            .map(|d| d.display_name(&editor.root))
+            .map(|d| d.display_name(&editor.lane.root))
             .collect();
         if !dirty.is_empty() {
             return Err(format!("unsaved changes: {} (use :q! to discard)", dirty.join(", ")));
@@ -507,7 +507,7 @@ fn shell(editor: &mut Editor, cmd: &str) -> Result<(), String> {
     if cmd.is_empty() {
         return Err("usage: :sh <command>".into());
     }
-    let (cmd, dir) = (cmd.to_string(), editor.root.clone());
+    let (cmd, dir) = (cmd.to_string(), editor.lane.root.clone());
     editor.events.jobs().spawn(move || {
         let result = run_shell(&cmd, &dir);
         move |ed: &mut Editor| match result {

@@ -70,7 +70,7 @@ pub fn start(ed: &mut Editor, build: bool) -> Result<(), String> {
         return Ok(());
     }
     // (a turn's files still being read belong to it)
-    let in_turn = ed.chat.as_ref().is_some_and(crate::chat::Chat::busy) || ed.checkpoints.gathering;
+    let in_turn = ed.lane.chat.as_ref().is_some_and(crate::chat::Chat::busy) || ed.lane.checkpoints.gathering;
     blocker(ed, in_turn).map_or(Ok(()), |why| Err(format!("can't restart: {why}")))?;
     static NEXT: AtomicU64 = AtomicU64::new(1);
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -87,8 +87,8 @@ pub fn start(ed: &mut Editor, build: bool) -> Result<(), String> {
 /// on.
 pub fn turn_over(ed: &mut Editor) {
     if ed.restart.as_ref().is_some_and(|r| r.stage == Stage::Turn)
-        && !ed.chat.as_ref().is_some_and(crate::chat::Chat::busy)
-        && !ed.checkpoints.gathering
+        && !ed.lane.chat.as_ref().is_some_and(crate::chat::Chat::busy)
+        && !ed.lane.checkpoints.gathering
     {
         go(ed);
     }
@@ -102,31 +102,31 @@ fn blocker(ed: &Editor, in_turn: bool) -> Option<String> {
         .docs
         .iter()
         .filter(|d| d.is_modified() && !d.throwaway && (d.path.is_none() || d.disk_conflict))
-        .map(|d| d.display_name(&ed.root))
+        .map(|d| d.display_name(&ed.lane.root))
         .collect();
     if !stuck.is_empty() {
         return Some(format!("unsaved changes in {} — save or close them first", stuck.join(", ")));
     }
     let claudes = |yes: bool| in_turn && yes;
-    if ed.review.is_some() && !claudes(ed.chat.as_ref().is_some_and(|c| c.edits.review.is_some())) {
+    if ed.review.is_some() && !claudes(ed.lane.chat.as_ref().is_some_and(|c| c.edits.review.is_some())) {
         return Some("a review is open — answer it first".into());
     }
     if crate::codereview::drafting(ed) {
         return Some("a code review is open — send it (space v s) or end it (space v q) first".into());
     }
     // (saved, it would come back as a plain file — `:wq` no longer committing)
-    if ed.committing.is_some() {
+    if ed.lane.committing.is_some() {
         return Some("a commit message is open — :wq commits it, :q drops it".into());
     }
     let running = crate::task::State::Running;
-    if let Some(r) = ed.task_run.as_ref().filter(|r| r.state == running && !claudes(r.by_claude)) {
+    if let Some(r) = ed.lane.task_run.as_ref().filter(|r| r.state == running && !claudes(r.by_claude)) {
         return Some(match r.install {
             true => format!("{} is installing — let it finish", r.task.name),
             false => format!("{} is running — let it finish, or stop it (space m c)", r.task.name),
         });
     }
     let testing = crate::testing::RunState::Running;
-    if ed.test_run.as_ref().is_some_and(|r| r.state == testing && !claudes(r.chat.is_some())) {
+    if ed.lane.test_run.as_ref().is_some_and(|r| r.state == testing && !claudes(r.chat.is_some())) {
         return Some("tests are running — let them finish, or stop them (space x c)".into());
     }
     if ed.dap.as_ref().is_some_and(|d| !matches!(d.state, crate::dap::State::Exited(_))) {
@@ -166,7 +166,7 @@ fn claudes_writes(ed: &mut Editor) -> bool {
                 return;
             }
             // (asked something meanwhile: after that turn)
-            if ed.chat.as_ref().is_some_and(crate::chat::Chat::busy) {
+            if ed.lane.chat.as_ref().is_some_and(crate::chat::Chat::busy) {
                 if let Some(r) = ed.restart.as_mut() {
                     r.stage = Stage::Turn;
                 }
@@ -186,7 +186,7 @@ fn clear_to_go(ed: &mut Editor) -> bool {
         .docs
         .iter()
         .filter(|d| d.is_modified() && !d.throwaway)
-        .map(|d| d.display_name(&ed.root))
+        .map(|d| d.display_name(&ed.lane.root))
         .collect();
     let why = match blocker(ed, false) {
         Some(why) => why,
@@ -209,7 +209,7 @@ fn go(ed: &mut Editor) {
     let id = r.id;
     let build = Some(ed.config.restart_build.trim().to_string()).filter(|c| r.build && !c.is_empty());
     let binary = ed.config.restart_binary.clone();
-    let root = ed.root.clone();
+    let root = ed.lane.root.clone();
     ed.events.jobs().spawn(move || {
         let root = project_root(&root);
         let bin = resolve(&binary, &root);
@@ -275,7 +275,8 @@ fn check(ed: &mut Editor, bin: PathBuf) {
             }
             // Claude was asked something meanwhile, or its edits are still landing: on from that wait
             // (built already)
-            let busy = ed.chat.as_ref().is_some_and(crate::chat::Chat::busy) || ed.checkpoints.gathering;
+            let busy =
+                ed.lane.chat.as_ref().is_some_and(crate::chat::Chat::busy) || ed.lane.checkpoints.gathering;
             if busy || pending_writes(ed).is_some() {
                 let r = ed.restart.as_mut().expect("checked above");
                 (r.stage, r.build) = (Stage::Turn, false);
@@ -448,13 +449,14 @@ pub fn snapshot(ed: &mut Editor) -> Value {
         })
         .collect();
     let views: Vec<Value> = ed
+        .lane
         .views
         .iter()
         .map(|v| json!({ "id": v.id, "doc": index(v.doc), "top": v.top, "left": v.left }))
         .collect();
     let sidebar =
-        ed.sidebar.as_ref().and_then(|s| Some(json!({ "mode": mode_name(s.mode)?, "focus": s.focus })));
-    let chat = ed.chat.as_ref().map(|c| {
+        ed.lane.sidebar.as_ref().and_then(|s| Some(json!({ "mode": mode_name(s.mode)?, "focus": s.focus })));
+    let chat = ed.lane.chat.as_ref().map(|c| {
         json!({ "session": c.session, "input": c.input, "cursor": c.cursor, "focused": c.focused,
                 "scroll": c.scroll, "follow": c.follow.on, "at_end": c.edits.at_end })
     });
@@ -464,13 +466,13 @@ pub fn snapshot(ed: &mut Editor) -> Value {
         "docs": files,
         "current": index(ed.doc().id),
         "views": views,
-        "split": split_json(&ed.split),
-        "focus": ed.focus,
+        "split": split_json(&ed.lane.split),
+        "focus": ed.lane.focus,
         "sidebar": sidebar,
         "chat": chat,
         "overrides": overrides,
         // (its shell can't come along — the next tarae says so)
-        "terminal": ed.terminal.as_ref().is_some_and(|t| t.exited.is_none()),
+        "terminal": ed.lane.terminal.as_ref().is_some_and(|t| t.exited.is_none()),
     })
 }
 
@@ -540,7 +542,7 @@ fn restore_quietly(ed: &mut Editor, v: &Value) -> usize {
     let sidebar = &v["sidebar"];
     if let Some(mode) = sidebar["mode"].as_str().and_then(mode_of) {
         ed.sidebar_show(mode);
-        if let Some(s) = ed.sidebar.as_mut() {
+        if let Some(s) = ed.lane.sidebar.as_mut() {
             s.focus = sidebar["focus"].as_bool().unwrap_or(false);
         }
     }
@@ -597,7 +599,7 @@ fn layout(ed: &mut Editor, v: &Value, ids: &[Option<crate::document::DocId>]) {
             ed.current = i;
             (ed.docs[i].top, ed.docs[i].left) = (f.top, f.left);
             ed.next_view = leaves.last().map_or(1, |l| l + 1);
-            (ed.views, ed.split, ed.focus) = (views, split, focus);
+            (ed.lane.views, ed.lane.split, ed.lane.focus) = (views, split, focus);
         }
     }
 }
@@ -701,8 +703,8 @@ mod tests {
         assert_eq!(doc_a.top, 1);
         assert_eq!(ed.doc().path.as_deref(), Some(b.as_path()), "the focused pane's file is current");
         assert_eq!(ed.doc().selection().primary().head, 3);
-        assert_eq!(ed.split.leaves().len(), 2, "both panes");
-        let other = ed.views.iter().find(|v| v.id != ed.focus).unwrap();
+        assert_eq!(ed.lane.split.leaves().len(), 2, "both panes");
+        let other = ed.lane.views.iter().find(|v| v.id != ed.lane.focus).unwrap();
         assert_eq!(other.doc, ed.doc().id, "the pane that showed the gone file shows the current one");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -769,7 +771,7 @@ mod tests {
         keep("s-2", 0, "Another one.");
         let argv = dir.join("argv.log");
         let mut ed = Editor::new(Config::default());
-        ed.root = cwd;
+        ed.lane.root = cwd;
         ed.chats_dir = Some(store);
         ed.config.llm.command = "sh".into();
         ed.config.llm.args =
@@ -777,8 +779,10 @@ mod tests {
         let state = json!({ "chat": { "session": "s-1", "input": "half 한", "cursor": 5, "focused": true,
                                       "scroll": 2, "follow": false, "at_end": dir } });
         assert_eq!(restore(&mut ed, &state), 0, "no files — the chat comes back all the same");
-        settle_until(&mut ed, |ed| ed.chat.as_ref().unwrap().msgs.iter().any(|m| m.text == "Hello back."));
-        let c = ed.chat.as_ref().unwrap();
+        settle_until(&mut ed, |ed| {
+            ed.lane.chat.as_ref().unwrap().msgs.iter().any(|m| m.text == "Hello back.")
+        });
+        let c = ed.lane.chat.as_ref().unwrap();
         assert_eq!((c.input.as_str(), c.cursor, c.focused, c.scroll), ("half 한", 5, true, 2));
         assert!(!c.follow.on);
         assert_eq!(c.edits.at_end.as_deref(), Some(dir.as_path()), "review at the end stays on");
@@ -803,7 +807,7 @@ mod tests {
         ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
         crate::chat::open(&mut ed);
         assert_eq!(snapshot(&mut ed)["chat"]["at_end"], Value::Null);
-        ed.chat.as_mut().unwrap().edits.at_end = Some("/p".into());
+        ed.lane.chat.as_mut().unwrap().edits.at_end = Some("/p".into());
         assert_eq!(snapshot(&mut ed)["chat"]["at_end"], "/p");
     }
 
@@ -855,9 +859,9 @@ mod tests {
         settle_until(&mut ed, |ed| ed.should_quit || ed.restart.is_none());
         assert_eq!(ed.restart.as_ref().and_then(Restart::ready), Some(bin.as_path()), "{}", toasts(&ed));
         assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "Xone\n", "saved first");
-        let run = ed.task_run.as_ref().expect("the build ran as a task");
+        let run = ed.lane.task_run.as_ref().expect("the build ran as a task");
         assert_eq!((run.task.cmd.as_str(), &run.state), ("true", &crate::task::State::Passed));
-        assert!(ed.task_last.is_none(), "not the task space m m runs again");
+        assert!(ed.lane.task_last.is_none(), "not the task space m m runs again");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -903,10 +907,10 @@ mod tests {
             assert!(err.contains(why), "{err}");
             assert!(ed.restart.is_none());
         };
-        ed.committing =
+        ed.lane.committing =
             Some(crate::gitpanel::Committing { doc: ed.doc().id, top: dir.clone(), amend: false });
         try_it(&mut ed, "a commit message is open");
-        ed.committing = None;
+        ed.lane.committing = None;
         let task = crate::task::Task { name: "slow".into(), cmd: "sleep 5".into(), cwd: dir.clone() };
         ed.task_start(task);
         try_it(&mut ed, "slow is running — let it finish, or stop it (space m c)");
@@ -1002,15 +1006,15 @@ mod tests {
         let bin = fake_tarae(&dir, "tarae 9.9.9");
         let mut ed = Editor::new(Config::default());
         ed.config.restart_binary = bin.display().to_string();
-        ed.checkpoints.gathering = true;
+        ed.lane.checkpoints.gathering = true;
         crate::typed::execute(&mut ed, "restart!").unwrap();
         assert_eq!(ed.restart.as_ref().unwrap().stage, Stage::Turn, "{}", toasts(&ed));
         turn_over(&mut ed);
         assert_eq!(ed.restart.as_ref().unwrap().stage, Stage::Turn, "still reading");
         let file = dir.join("a.txt");
         std::fs::write(&file, "two\n").unwrap();
-        ed.checkpoints.gathering = false;
-        ed.checkpoints.list.push(crate::checkpoint::Checkpoint {
+        ed.lane.checkpoints.gathering = false;
+        ed.lane.checkpoints.list.push(crate::checkpoint::Checkpoint {
             question: "q".into(),
             files: vec![crate::checkpoint::Touched {
                 path: file,
@@ -1021,7 +1025,7 @@ mod tests {
             undone: false,
         });
         crate::chat::turn_gathered(&mut ed, Some("a.txt".into()));
-        assert!(ed.code_review.is_none(), "not over the restart");
+        assert!(ed.lane.code_review.is_none(), "not over the restart");
         settle_until(&mut ed, |ed| ed.should_quit || ed.restart.is_none());
         assert_eq!(ed.restart.as_ref().and_then(Restart::ready), Some(bin.as_path()), "{}", toasts(&ed));
         std::fs::remove_dir_all(&dir).ok();
@@ -1045,7 +1049,7 @@ mod tests {
             ),
         ];
         feed(&mut ed, "<space>lhello<ret>");
-        assert!(ed.chat.as_ref().unwrap().busy());
+        assert!(ed.lane.chat.as_ref().unwrap().busy());
         crate::typed::execute(&mut ed, "restart!").unwrap();
         crate::typed::execute(&mut ed, "restart!").unwrap();
         assert!(ed.restart.is_none(), "again = canceled");
@@ -1053,7 +1057,7 @@ mod tests {
         assert_eq!(ed.restart.as_ref().unwrap().stage, Stage::Turn);
         assert!(toasts(&ed).contains("when Claude's turn ends"), "{}", toasts(&ed));
         settle_until(&mut ed, |ed| ed.should_quit || ed.restart.is_none());
-        assert!(!ed.chat.as_ref().unwrap().busy(), "only after the turn");
+        assert!(!ed.lane.chat.as_ref().unwrap().busy(), "only after the turn");
         assert_eq!(ed.restart.as_ref().and_then(Restart::ready), Some(bin.as_path()), "{}", toasts(&ed));
         drop(ed);
         std::fs::remove_dir_all(&dir).ok();

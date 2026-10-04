@@ -134,7 +134,7 @@ impl Follow {
 }
 
 fn follow(ed: &mut Editor) -> Option<&mut Follow> {
-    ed.chat.as_mut().map(|c| &mut c.follow)
+    ed.lane.chat.as_mut().map(|c| &mut c.follow)
 }
 
 /// Where the cursor is (document, selection) — compared with `placed`.
@@ -184,7 +184,7 @@ pub fn on_tool(ed: &mut Editor, id: &str, name: &str, input: &serde_json::Value,
 
 /// The walk-through's stop the cursor is on (its file, lines and why) — `space n` there asks about it.
 pub fn stop_here(ed: &Editor) -> Option<(PathBuf, Range<usize>, String)> {
-    let g = ed.chat.as_ref()?.follow.gaze.as_ref()?;
+    let g = ed.lane.chat.as_ref()?.follow.gaze.as_ref()?;
     let (path, lines, why) = (g.path.as_ref()?, g.lines.clone()?, g.why.clone()?);
     g.step?;
     let doc = ed.doc();
@@ -274,7 +274,7 @@ fn mentions(root: &Path, text: &str, in_code: bool) -> Vec<(usize, Mention)> {
 /// look — the editor goes there. Words are read up to their last blank (a half-written one waits) — all of
 /// them once the turn is over (`all`).
 pub fn on_words(ed: &mut Editor, all: bool) {
-    let Some(c) = ed.chat.as_ref() else { return };
+    let Some(c) = ed.lane.chat.as_ref() else { return };
     if !c.follow.active() {
         return;
     }
@@ -298,7 +298,7 @@ pub fn on_words(ed: &mut Editor, all: bool) {
         .skip(seen)
         .filter_map(|(k, (_, at, why))| {
             let (_, m) =
-                mentions(&ed.root, at, false).into_iter().find(|m| matches!(m.1, Mention::Place(..)))?;
+                mentions(&ed.lane.root, at, false).into_iter().find(|m| matches!(m.1, Mention::Place(..)))?;
             let Mention::Place(path, lines) = m else { return None };
             let ours = path.is_file() && in_project(ed, &path);
             ours.then(|| (k, Stop { path, lines, why: why.clone(), shown: true }))
@@ -306,7 +306,7 @@ pub fn on_words(ed: &mut Editor, all: bool) {
         .collect();
     let taken = tags.len();
     // Places inside a tag are the tag's
-    let found: Vec<(usize, Mention)> = mentions(&ed.root, &text[from..cut], in_code)
+    let found: Vec<(usize, Mention)> = mentions(&ed.lane.root, &text[from..cut], in_code)
         .into_iter()
         .filter(|(at, _)| !tags.iter().any(|t| t.0.contains(&(from + at - 1))))
         .collect();
@@ -350,7 +350,7 @@ fn look_at(ed: &mut Editor, path: &Path, lines: Range<usize>, why: String, paced
     if !path.is_file() || !in_project(ed, path) {
         return;
     }
-    let what = crate::chat::shown(&ed.root, path);
+    let what = crate::chat::shown(&ed.lane.root, path);
     let Some(f) = follow(ed) else { return };
     f.wanted = None;
     let stop = Stop { path: path.to_path_buf(), lines: lines.clone(), why, shown: false };
@@ -391,7 +391,7 @@ fn look_at(ed: &mut Editor, path: &Path, lines: Range<usize>, why: String, paced
 /// The walk-through's next stop, once the one showing has had its time (the explanation after it, at
 /// reading speed: 2.5–8 s) — then it wakes itself for the one after. Not while the user has taken over.
 fn play(ed: &mut Editor) {
-    let root = ed.root.clone();
+    let root = ed.lane.root.clone();
     let Some(f) = follow(ed) else { return };
     if !f.active() || f.playing.is_some_and(|(until, _)| std::time::Instant::now() < until) {
         return;
@@ -399,7 +399,7 @@ fn play(ed: &mut Editor) {
     let Some((msg, k, stop, step)) = f.queue.pop_front() else {
         f.playing = None;
         // The tour is over: now the list it left says how to walk it again
-        if std::mem::take(&mut f.announce) && ed.qlist.as_ref().is_some_and(|l| l.title == TOUR) {
+        if std::mem::take(&mut f.announce) && ed.lane.qlist.as_ref().is_some_and(|l| l.title == TOUR) {
             ed.qlist_announce();
         }
         return;
@@ -428,7 +428,7 @@ fn play(ed: &mut Editor) {
     f.tour_gen += 1;
     let generation = f.tour_gen;
     // How long its explanation is — the words from its tag to the next (or the end, so far)
-    let said = ed.chat.as_ref().and_then(|c| c.msgs.get(msg)).map_or(0, |m| {
+    let said = ed.lane.chat.as_ref().and_then(|c| c.msgs.get(msg)).map_or(0, |m| {
         let tags = crate::chat::show_tags(&m.text);
         let from = tags.get(k).map_or(m.text.len(), |t| t.0.end);
         let to = tags.get(k + 1).map_or(m.text.len(), |t| t.0.start);
@@ -443,7 +443,7 @@ fn play(ed: &mut Editor) {
         f.playing = Some((std::time::Instant::now() + dwell, generation));
     }
     // The list (a finished turn's) marks where the tour is
-    if let Some(l) = ed.qlist.as_mut().filter(|l| l.title == TOUR) {
+    if let Some(l) = ed.lane.qlist.as_mut().filter(|l| l.title == TOUR) {
         l.current = l.items.iter().position(|it| it.path == stop.path && it.line == lines.start);
     }
     go(ed, &stop.path, lines.start);
@@ -462,7 +462,7 @@ fn play(ed: &mut Editor) {
 /// The `name` Claude last mentioned, in the outline of a file open here (the one shown first) — worked out
 /// on a worker when it isn't yet, and looked for again when it lands.
 fn find_wanted(ed: &mut Editor) {
-    let Some((name, parent, why, paced)) = ed.chat.as_ref().and_then(|c| c.follow.wanted.clone()) else {
+    let Some((name, parent, why, paced)) = ed.lane.chat.as_ref().and_then(|c| c.follow.wanted.clone()) else {
         return;
     };
     let current = ed.doc().id;
@@ -476,7 +476,7 @@ fn find_wanted(ed: &mut Editor) {
             continue;
         };
         let version = doc.version();
-        let Some(f) = ed.chat.as_ref().map(|c| &c.follow) else { return };
+        let Some(f) = ed.lane.chat.as_ref().map(|c| &c.follow) else { return };
         let Some((_, _, defs)) = f.defs.iter().find(|d| d.0 == id && d.1 == version) else {
             if !f.outlining.contains(&(id, version)) {
                 missing.push((id, version, tree, doc.text.clone()));
@@ -517,7 +517,7 @@ fn find_wanted(ed: &mut Editor) {
 
 /// A tool finished — a content-mode Grep moves to its first hit.
 pub fn on_result(ed: &mut Editor, id: &str, text: &str) {
-    let root = ed.root.clone();
+    let root = ed.lane.root.clone();
     let Some(f) = follow(ed) else { return };
     if !f.calls.iter().any(|(i, n)| i == id && n == "Grep") {
         return;
@@ -538,7 +538,7 @@ pub fn on_result(ed: &mut Editor, id: &str, text: &str) {
 /// Scrolling the chat from now on moves the editor (`reading`).
 pub fn on_done(ed: &mut Editor) {
     on_words(ed, true);
-    let scroll = ed.chat.as_ref().map(|c| c.scroll);
+    let scroll = ed.lane.chat.as_ref().map(|c| c.scroll);
     let Some(f) = follow(ed) else { return };
     let mut stops = std::mem::take(&mut f.stops);
     let touring = f.touring();
@@ -552,24 +552,25 @@ pub fn on_done(ed: &mut Editor) {
         stops.retain(|s| s.shown);
     } else {
         // (the last of its words this turn that point anywhere — a closing line may not)
-        let first = ed.chat.as_ref().and_then(|c| {
+        let first = ed.lane.chat.as_ref().and_then(|c| {
             let turn = c.msgs.iter().rposition(|m| m.role == Role::User).map_or(0, |i| i + 1);
             c.msgs[turn..]
                 .iter()
                 .rev()
                 .filter(|m| m.role == Role::Assistant)
-                .find_map(|m| refs_in(&ed.root, &m.text).into_iter().next())
+                .find_map(|m| refs_in(&ed.lane.root, &m.text).into_iter().next())
                 .map(|(_, l)| l)
         });
         if let Some(link) = &first {
             go(ed, &link.path, link.line);
         }
     }
-    let free = ed.qlist.as_ref().is_none_or(|l| l.items.is_empty() || l.title == TOUR);
+    let free = ed.lane.qlist.as_ref().is_none_or(|l| l.items.is_empty() || l.title == TOUR);
     if stops.len() < 2 || !free {
         return;
     }
     let showing = ed
+        .lane
         .chat
         .as_ref()
         .and_then(|c| c.follow.gaze.as_ref())
@@ -587,7 +588,7 @@ pub fn on_done(ed: &mut Editor) {
         .collect();
     let at = showing.and_then(|(p, l)| items.iter().position(|it| it.path == p && it.line == l));
     // While the tour plays, its card has the screen — the list says itself when the tour is over
-    let touring = ed.chat.as_ref().is_some_and(|c| c.follow.touring());
+    let touring = ed.lane.chat.as_ref().is_some_and(|c| c.follow.touring());
     if touring {
         ed.qlist_put(TOUR, items);
     } else {
@@ -596,7 +597,7 @@ pub fn on_done(ed: &mut Editor) {
     if let Some(f) = follow(ed) {
         f.announce = touring;
     }
-    if let Some(l) = ed.qlist.as_mut() {
+    if let Some(l) = ed.lane.qlist.as_mut() {
         l.current = at;
     }
 }
@@ -604,7 +605,7 @@ pub fn on_done(ed: &mut Editor) {
 /// After the turn, while you read the answer: when the chat scrolls, the editor shows the first place the
 /// chat now shows (its links, as the last frame drew them). True when it moved — draw again.
 pub fn reading(ed: &mut Editor) -> bool {
-    let Some(c) = ed.chat.as_ref() else { return false };
+    let Some(c) = ed.lane.chat.as_ref() else { return false };
     // (read_at is set when a turn ends — before that there's no answer to read along)
     if c.busy()
         || !c.follow.active()
@@ -637,16 +638,16 @@ const TOUR: &str = "Claude's walk-through";
 /// follow goes nowhere else — a file Claude reads elsewhere (its memory under `~/.claude`, a temp file)
 /// isn't opened; the card still says what it reads.
 fn in_project(ed: &Editor, path: &Path) -> bool {
-    std::fs::canonicalize(path).is_ok_and(|p| p.starts_with(&ed.root))
+    std::fs::canonicalize(path).is_ok_and(|p| p.starts_with(&ed.lane.root))
 }
 
 /// Moves the editor there (when following and the user hasn't taken over) — in the project only.
 fn go(ed: &mut Editor, path: &Path, line: usize) {
-    if !ed.chat.as_ref().is_some_and(|c| c.follow.active()) || !path.is_file() || !in_project(ed, path) {
+    if !ed.lane.chat.as_ref().is_some_and(|c| c.follow.active()) || !path.is_file() || !in_project(ed, path) {
         return;
     }
     let already = ed.docs.iter().any(|d| d.path.as_deref() == Some(path));
-    if !ed.chat.as_ref().is_some_and(|c| c.follow.jumped) {
+    if !ed.lane.chat.as_ref().is_some_and(|c| c.follow.jumped) {
         ed.push_jump();
     }
     if let Err(e) = ed.open(path) {
@@ -685,7 +686,7 @@ fn go(ed: &mut Editor, path: &Path, line: usize) {
 pub fn watch(ed: &mut Editor) {
     let now = cursor_key(ed);
     // Waiting for a big file: once loaded (the editor put the cursor there), that's where follow is
-    if let Some(id) = ed.chat.as_ref().and_then(|c| c.follow.awaiting) {
+    if let Some(id) = ed.lane.chat.as_ref().and_then(|c| c.follow.awaiting) {
         let loaded = ed.docs.iter().any(|d| d.id == id && !d.loading);
         let gone = !ed.docs.iter().any(|d| d.id == id);
         if let Some(f) = follow(ed)

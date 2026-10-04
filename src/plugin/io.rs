@@ -725,7 +725,7 @@ impl Editor {
         if let Some(why) = why {
             return self.plugin_events(plugin, vec![HostEvent::Failed(id, why)]);
         }
-        let root = self.root.clone();
+        let root = self.lane.root.clone();
         let Some(generation) = self.plugin_generation(plugin) else { return };
         let (plugin, pattern) = (plugin.to_string(), pattern.to_string());
         self.events.jobs().spawn(move || {

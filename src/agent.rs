@@ -287,7 +287,7 @@ impl Editor {
             return;
         }
         let Some(dir) = lock_dir() else { return };
-        let cwd = self.root.clone();
+        let cwd = self.lane.root.clone();
         let token = token();
         // A lock file already named for our port (one left by a program that had it before) isn't ours to
         // overwrite: another port, a few tries
@@ -476,7 +476,7 @@ impl Editor {
                 json_text(json!({ "tabs": tabs }))
             }
             "getWorkspaceFolders" => {
-                let cwd = self.root.clone();
+                let cwd = self.lane.root.clone();
                 let name = cwd.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 json_text(
                     json!({ "success": true, "folders": [{ "name": name, "uri": crate::lsp::uri(&cwd), "path": cwd }],
@@ -667,7 +667,7 @@ impl Editor {
         let title = format!(
             "proposes {n} change{} to {}",
             if n == 1 { "" } else { "s" },
-            self.doc().display_name(&self.root)
+            self.doc().display_name(&self.lane.root)
         );
         if let Some(a) = &mut self.agent {
             a.active_tab = Some(d.tab.clone());
@@ -746,7 +746,7 @@ impl Editor {
         }
         let env = format!("CLAUDE_CODE_SSE_PORT={} ENABLE_IDE_INTEGRATION=true", a.port);
         // Claude matches the lock file's workspace against its own folder — launch from the same folder
-        let cwd = self.root.to_string_lossy().replace('\'', "'\\''");
+        let cwd = self.lane.root.to_string_lossy().replace('\'', "'\\''");
         let cmd = if std::env::var_os("ZELLIJ").is_some() {
             format!(
                 "zellij run --name claude --direction right --close-on-exit --cwd '{cwd}' -- env {env} claude"
@@ -760,7 +760,7 @@ impl Editor {
                 ("ENABLE_IDE_INTEGRATION".to_string(), "true".to_string()),
             ];
             // Never in place of something running there (it's shown instead)
-            let busy = self.terminal.as_ref().filter(|t| t.exited.is_none()).map(|t| t.title.clone());
+            let busy = self.lane.terminal.as_ref().filter(|t| t.exited.is_none()).map(|t| t.title.clone());
             match busy {
                 Some(title) if title == "claude" => {
                     return self.set_status("Claude Code is in the terminal below");

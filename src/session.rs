@@ -88,13 +88,13 @@ impl Editor {
     /// This folder's last session, if any of its files are still there — the start screen offers it (`r`).
     /// Read once at startup (a stat per file; never while drawing).
     pub fn find_last_session(&mut self) {
-        let found = self.session.session(&self.root);
-        self.last_session = found.map(|(files, _)| files.into_iter().filter(|f| f.is_file()).collect());
-        self.last_session.take_if(|f| f.is_empty());
+        let found = self.session.session(&self.lane.root);
+        self.lane.last_session = found.map(|(files, _)| files.into_iter().filter(|f| f.is_file()).collect());
+        self.lane.last_session.take_if(|f| f.is_empty());
     }
 
     pub fn restore_session(&mut self) -> usize {
-        let Some((files, current)) = self.session.session(&self.root) else { return 0 };
+        let Some((files, current)) = self.session.session(&self.lane.root) else { return 0 };
         let mut opened = 0;
         // Saved `current` indexes the saved list — missing files shift it. Take the file itself, or the
         // nearest opened one before it (else the first).
@@ -121,7 +121,7 @@ impl Editor {
         let Some(f) = file() else { return };
         let notes = crate::notes::to_json(self);
         let opened = self.session.opened;
-        let folder = self.root.to_str().map(str::to_string);
+        let folder = self.lane.root.to_str().map(str::to_string);
         let root = &mut self.session.root;
         // Sequence: each entry is [cursor, top line, seq] — on overflow, drop the smallest (oldest) seq first
         let mut seq = root.get("seq").and_then(Value::as_u64).unwrap_or(0);
@@ -198,7 +198,7 @@ mod tests {
         // (the session is the editor's root's — here the test's own folder)
         let cwd = std::fs::canonicalize(&dir).unwrap();
         let mut ed = Editor::new(crate::config::Config::default());
-        ed.root = cwd.clone();
+        ed.lane.root = cwd.clone();
         ed.session = State::from_json(json!({
             "positions": { c.to_str().unwrap(): [1, 0] }, // on the combining mark
             "sessions": { cwd.to_str().unwrap(): {

@@ -224,7 +224,7 @@ impl crate::editor::Editor {
         // being typed there (Claude asking mid-turn): the chat gives them to the card — as a review takes them. Mid-message, the
         // card waits (cards don't take keys from the chat's input — a `n` typed there was a "no")
         if (o.weighty() || matches!(o.what, What::Screen { .. }))
-            && let Some(c) = self.chat.as_mut().filter(|c| c.focused && c.input.is_empty())
+            && let Some(c) = self.lane.chat.as_mut().filter(|c| c.focused && c.input.is_empty())
         {
             c.focused = false;
         }

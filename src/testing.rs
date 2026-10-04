@@ -486,7 +486,7 @@ impl Editor {
 
     /// `space x l` — rerun the last one (as debug if it was debug).
     pub fn test_rerun(&mut self) {
-        match self.test_last.clone() {
+        match self.lane.test_last.clone() {
             Some((t, false)) => self.test_start(t),
             Some((t, true)) => self.test_debug_target(t),
             None => self.set_status("no test run yet — space x x runs the test at the cursor"),
@@ -500,7 +500,7 @@ impl Editor {
             let d = self.doc();
             (p, d.text.byte_to_line(d.selection().primary().cursor(&d.text)))
         });
-        let Some(r) = self.test_run.as_mut() else {
+        let Some(r) = self.lane.test_run.as_mut() else {
             return self.set_status("no test results — space x x runs a test");
         };
         let fails = r.failures();
@@ -535,7 +535,7 @@ impl Editor {
 
     /// `space x o` — the run's whole output in a buffer (search it, copy from it; the pane shows a window).
     pub fn test_output(&mut self) {
-        let Some(r) = &self.test_run else {
+        let Some(r) = &self.lane.test_run else {
             return self.set_status("no test run yet — space x x runs the test at the cursor");
         };
         let mut text: String = r.output.iter().map(|(_, l)| format!("{l}\n")).collect();
@@ -567,7 +567,7 @@ impl Editor {
     /// `space x c` — closes the test pane (stops the run if it's going).
     pub fn test_close(&mut self) {
         crate::tools::tests_dropped(self, "the user closed it");
-        self.test_run = None;
+        self.lane.test_run = None;
     }
 
     pub fn test_start(&mut self, target: Target) {
@@ -579,7 +579,7 @@ impl Editor {
         // Save modified files first — tests run the code on disk
         self.auto_save(" · before test");
         self.flush_saves();
-        self.test_last = Some((target.clone(), false));
+        self.lane.test_last = Some((target.clone(), false));
         let argv = target.argv();
         let policy = match &guard {
             Some(crate::sandbox::Guard::In(p)) => Some(p),
@@ -608,7 +608,9 @@ impl Editor {
         let send_lines =
             move |tx: &std::sync::mpsc::Sender<crate::event::Event>, err: bool, lines: Vec<String>| {
                 let apply = move |ed: &mut Editor| {
-                    let Some(r) = ed.test_run.as_mut().filter(|r| r.generation == generation) else { return };
+                    let Some(r) = ed.lane.test_run.as_mut().filter(|r| r.generation == generation) else {
+                        return;
+                    };
                     let mut attach = None;
                     for line in lines {
                         let line = strip_ansi(&line);
@@ -663,7 +665,9 @@ impl Editor {
             }
             let cases = junit.map(|(reports, src)| crate::test_results::junit(&reports, wall, &src));
             let done = move |ed: &mut Editor| {
-                let Some(r) = ed.test_run.as_mut().filter(|r| r.generation == generation) else { return };
+                let Some(r) = ed.lane.test_run.as_mut().filter(|r| r.generation == generation) else {
+                    return;
+                };
                 if r.state != RunState::Running {
                     return;
                 }
@@ -689,7 +693,7 @@ impl Editor {
             let _ = tx.send(crate::event::Event::Job(Box::new(done)));
         });
         let parser = crate::test_results::Parser::for_lang(parser_of(&target.how));
-        self.test_run = Some(TestRun {
+        self.lane.test_run = Some(TestRun {
             target,
             state: RunState::Running,
             output: Vec::new(),
@@ -723,9 +727,9 @@ impl Editor {
         if self.test_generation == before {
             return; // couldn't launch (reason shown)
         }
-        self.test_last = Some((target.clone(), true));
+        self.lane.test_last = Some((target.clone(), true));
         self.dap_test = Some(target);
-        if let Some(r) = self.test_run.as_mut() {
+        if let Some(r) = self.lane.test_run.as_mut() {
             r.java_attach = Some((file, root));
         }
         self.set_status("Building and starting the test JVM — attaching when it's ready");
@@ -740,7 +744,7 @@ impl Editor {
         // Save modified files first — tests run the code on disk
         self.auto_save(" · before test");
         self.flush_saves();
-        self.test_last = Some((target.clone(), true));
+        self.lane.test_last = Some((target.clone(), true));
         self.dap_test = Some(target.clone());
         self.dap_resume = Some(crate::offer::Resume::TestTarget(Box::new(target.clone())));
         let lang = lang_of(&target.how).to_string();
@@ -1201,13 +1205,13 @@ mod tests {
         let mut ed = Editor::new(crate::config::Config::default());
         ed.open(&d.join("src/term_snapshots.rs")).unwrap();
         ed.test_run(Scope::Nearest);
-        assert!(ed.test_run.is_none(), "found on a worker, not while the key is handled");
+        assert!(ed.lane.test_run.is_none(), "found on a worker, not while the key is handled");
         let end = Instant::now() + Duration::from_secs(10);
-        while ed.test_run.is_none() {
+        while ed.lane.test_run.is_none() {
             let ev = ed.events.recv_timeout(end.saturating_duration_since(Instant::now())).expect("event");
             ed.handle_event(ev);
         }
-        assert_eq!(ed.test_run.as_ref().unwrap().target.label, "term::snapshot_tests::shows");
+        assert_eq!(ed.lane.test_run.as_ref().unwrap().target.label, "term::snapshot_tests::shows");
         ed.test_close();
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -1233,12 +1237,12 @@ mod tests {
                 },
             });
             let end = Instant::now() + Duration::from_secs(10);
-            while ed.test_run.as_ref().is_some_and(|r| r.state == RunState::Running) {
+            while ed.lane.test_run.as_ref().is_some_and(|r| r.state == RunState::Running) {
                 let ev =
                     ed.events.recv_timeout(end.saturating_duration_since(Instant::now())).expect("event");
                 ed.handle_event(ev);
             }
-            ed.test_run.as_ref().unwrap().state.clone()
+            ed.lane.test_run.as_ref().unwrap().state.clone()
         };
         let none = "printf 'running 0 tests\\n\\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out\\n'";
         assert_eq!(run(&mut ed, "rust", none), RunState::NoTests);
@@ -1276,10 +1280,10 @@ mod tests {
         ed.test_start(target("sh"));
         ed.test_start(target("/nonexistent/python"));
         assert!(ed.status.as_ref().is_some_and(|s| s.0.contains("/nonexistent/python")), "{:?}", ed.status);
-        assert_eq!(ed.test_run.as_ref().map(|r| r.generation), Some(ed.test_generation));
+        assert_eq!(ed.lane.test_run.as_ref().map(|r| r.generation), Some(ed.test_generation));
         // …so its end still lands (not "running" forever)
         let end = Instant::now() + Duration::from_secs(10);
-        while ed.test_run.as_ref().is_some_and(|r| r.state == RunState::Running) {
+        while ed.lane.test_run.as_ref().is_some_and(|r| r.state == RunState::Running) {
             let ev = ed.events.recv_timeout(end.saturating_duration_since(Instant::now())).expect("event");
             ed.handle_event(ev);
         }
@@ -1341,25 +1345,25 @@ mod tests {
         let file = std::fs::canonicalize(file).unwrap();
         let mut ed = Editor::new(crate::config::Config::default());
         let output = ["collected 2", "a line 0", "a line 1", "b line 0", "2 failed"];
-        ed.test_run = Some(finished(
+        ed.lane.test_run = Some(finished(
             vec![failed("a", 30, Some((file.clone(), 0))), failed("b", 3, Some((file.clone(), 1)))],
             output.iter().map(|l| l.to_string()).collect(),
         ));
         ed.screen.test_panel.set(Some((20, 30, 9)));
         let wheel = |ed: &mut Editor, y| ed.handle_mouse(Mouse { kind: K::ScrollDown, x: 5, y, alt: false });
         wheel(&mut ed, 25);
-        assert_eq!(ed.test_run.as_ref().unwrap().detail_top(9), 3);
+        assert_eq!(ed.lane.test_run.as_ref().unwrap().detail_top(9), 3);
         wheel(&mut ed, 5);
         assert_eq!(
-            ed.test_run.as_ref().unwrap().detail_top(9),
+            ed.lane.test_run.as_ref().unwrap().detail_top(9),
             3,
             "the wheel over the code isn't the panel's"
         );
         // First `]x` goes to the picked one (a), the next to b — whose message starts at its top
         ed.test_failure_step(true);
-        assert_eq!(ed.test_run.as_ref().unwrap().detail_top(9), 3, "still a");
+        assert_eq!(ed.lane.test_run.as_ref().unwrap().detail_top(9), 3, "still a");
         ed.test_failure_step(true);
-        let r = ed.test_run.as_ref().unwrap();
+        let r = ed.lane.test_run.as_ref().unwrap();
         assert_eq!((r.selected, r.scroll), (1, None));
 
         ed.test_output();

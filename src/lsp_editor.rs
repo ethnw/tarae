@@ -654,8 +654,9 @@ impl Editor {
     /// A command or tests of Claude's are running — a check started now would hold the build dir's lock
     /// against its build (one build dir on this machine).
     fn claude_building(&self) -> bool {
-        self.task_run.as_ref().is_some_and(|r| r.state == crate::task::State::Running && r.by_claude)
+        self.lane.task_run.as_ref().is_some_and(|r| r.state == crate::task::State::Running && r.by_claude)
             || self
+                .lane
                 .test_run
                 .as_ref()
                 .is_some_and(|r| r.state == crate::testing::RunState::Running && r.chat.is_some())
@@ -1166,7 +1167,7 @@ impl Editor {
                 if let Some((id, places)) = self.lsp.refs.shown.clone()
                     && let Some(p) = self.picker.as_mut().filter(|p| p.id == id)
                 {
-                    p.set_items(place_items(&self.root, places, &declared));
+                    p.set_items(place_items(&self.lane.root, places, &declared));
                 }
                 // (none while the server is busy: asked again with the references)
                 self.lsp.refs.declared = (!declared.is_empty()).then_some(declared);
@@ -1301,7 +1302,7 @@ impl Editor {
 
     fn on_workspace_symbols(&mut self, result: &Value) {
         let Some(p) = self.picker.as_mut().filter(|p| p.requery) else { return };
-        let root = &self.root;
+        let root = &self.lane.root;
         let items: Vec<Item> = result
             .as_array()
             .into_iter()
@@ -1748,7 +1749,7 @@ impl Editor {
                 && let Some(l) = doc.lsp.link(cid)
                 && (i64::from(l.version) != v || l.behind())
             {
-                let name = doc.display_name(&self.root);
+                let name = doc.display_name(&self.lane.root);
                 return Err(format!("{name} changed since the server computed this edit"));
             }
         }
@@ -2426,7 +2427,7 @@ impl Editor {
             return;
         }
         let generation = self.lsp.refs.generation;
-        let here = self.root.clone();
+        let here = self.lane.root.clone();
         let asked = std::time::Instant::now();
         self.events.jobs().spawn(move || {
             // (paths as the server's list shows them — from the editor's root, not the server's)
@@ -2691,7 +2692,7 @@ impl Editor {
                     t.step("lines read");
                 }
                 let declared = ed.lsp.refs.declared.clone().unwrap_or_default();
-                let items = place_items(&ed.root, places.clone(), &declared);
+                let items = place_items(&ed.lane.root, places.clone(), &declared);
                 // The text matches shown while the server loaded (N3): its answer takes their place — said;
                 // once they were left (one picked, or closed), the answer isn't pushed on you
                 if let Some(id) = ed.lsp.refs.texts {
@@ -2708,7 +2709,7 @@ impl Editor {
                     }
                     return;
                 }
-                let mut picker = Picker::new(goto.noun(), items, true).grouped(ed.root.clone());
+                let mut picker = Picker::new(goto.noun(), items, true).grouped(ed.lane.root.clone());
                 let name = &ed.lsp.refs.name;
                 picker.emphasis = (!name.is_empty())
                     .then(|| regex::Regex::new(&format!(r"\b{}\b", regex::escape(name))).ok())
@@ -2804,7 +2805,7 @@ impl Editor {
     /// `space D` — diagnostics in every file the servers reported: open ones (live), then the rest; errors
     /// first.
     pub fn workspace_diagnostics_picker(&mut self) {
-        let root = self.root.clone();
+        let root = self.lane.root.clone();
         let rel = |p: &std::path::Path| p.strip_prefix(&root).unwrap_or(p).display().to_string();
         let mut rows: Vec<(u8, String, Item)> = Vec::new();
         let mut push = |sev: u8, path: &std::path::Path, line: usize, col: usize, msg: &str| {
@@ -4147,7 +4148,7 @@ mod tests {
         let other = dir.join("other.rs");
         std::fs::write(&other, "// other\nuse crate::a;\n\npub fn a() {}\n").unwrap();
         let other = std::fs::canonicalize(&other).unwrap();
-        ed.root = dir.clone();
+        ed.lane.root = dir.clone();
         let cid = ed.doc().lsp.client.unwrap();
         let caps =
             json!({ "positionEncoding": "utf-8", "definitionProvider": true, "referencesProvider": true });
@@ -4204,7 +4205,7 @@ mod tests {
     fn the_references_tool_gives_text_matches_while_the_server_cannot() {
         let (mut ed, file, _log) = setup("tool-refs-loading", "fn a() {}\nfn b() { a() }\n// ab, A\n");
         let dir = file.parent().unwrap().to_path_buf();
-        ed.root = dir.clone();
+        ed.lane.root = dir.clone();
         let args = json!({"path": "main.rs", "symbol": "a"});
         let t = ask_tool(&mut ed, 1, args.clone()).unwrap();
         assert!(t.contains("— fake is starting, so these are the whole-word text matches of `a`"), "{t}");
@@ -4237,7 +4238,7 @@ mod tests {
         let (mut ed, file, log) =
             setup("tool-syms", "struct S;\nimpl S {\n    fn f(&self) {\n        1;\n    }\n}\n");
         let dir = file.parent().unwrap().to_path_buf();
-        ed.root = dir.clone();
+        ed.lane.root = dir.clone();
         let syms = |ed: &mut Editor, id: u64, args: Value| {
             crate::nav::symbols(ed, crate::tools::Call::test(id), &args).unwrap();
             settle_for(ed, 10, |_| tool_answer(id).is_some());
@@ -4288,7 +4289,7 @@ mod tests {
             "// other\nuse crate::a;\n\npub fn a(\n    x: usize,\n) -> usize {\n    x\n}\n",
         )
         .unwrap();
-        ed.root = dir;
+        ed.lane.root = dir;
         (ed, file, std::fs::canonicalize(&other).unwrap(), log)
     }
 
@@ -4648,7 +4649,7 @@ mod tests {
         assert!(e.contains("also moves other.rs to alpha.rs — this tool only changes text"), "{e}");
         assert_eq!([read(&file), read(&other), read(&third)], originals, "nothing changed yet");
         // Review at the end: written at once, kept for `space u` as unseen; the open buffer takes it
-        ed.chat.as_mut().unwrap().edits.at_end = Some(dir.clone());
+        ed.lane.chat.as_mut().unwrap().edits.at_end = Some(dir.clone());
         crate::refactor::rename(&mut ed, crate::tools::Call::test(6), &args("alpha")).unwrap();
         settle_for(&mut ed, 5, |ed| has(ed, &prepare));
         let n = pending_of(&ed, prepare.clone());
@@ -4668,12 +4669,17 @@ mod tests {
         assert_eq!(read(&third), "fn t() { crate::alpha(1); }\n");
         let main_doc = ed.docs.iter().find(|d| d.path.as_ref() == Some(&file)).unwrap();
         assert_eq!(main_doc.text.to_string(), read(&file), "the open buffer took it");
-        let kept: Vec<(String, bool)> =
-            ed.checkpoints.turn.iter().map(|t| (t.before.as_ref().unwrap().to_string(), t.unseen)).collect();
+        let kept: Vec<(String, bool)> = ed
+            .lane
+            .checkpoints
+            .turn
+            .iter()
+            .map(|t| (t.before.as_ref().unwrap().to_string(), t.unseen))
+            .collect();
         assert_eq!(kept.len(), 3);
         assert!(kept.iter().all(|(b, unseen)| *unseen && originals.contains(b)), "{kept:?}");
         // One at a time: a review per file — accepted, declined, and into a buffer with unsaved edits
-        let c = ed.chat.as_mut().unwrap();
+        let c = ed.lane.chat.as_mut().unwrap();
         (c.edits.at_end, c.focused) = (None, false);
         ed.open(&third).unwrap();
         feed(&mut ed, "A // mine<esc>");
@@ -4793,7 +4799,7 @@ mod tests {
             after: ropey::Rope::new(),
             unseen: false,
         };
-        ed.checkpoints.turn.push(touched);
+        ed.lane.checkpoints.turn.push(touched);
         let t = tool(&mut ed, 4, diags, json!({})).unwrap();
         assert!(t.starts_with("1 warning in 1 of 1 file (the files you edited this turn):"), "{t}");
         // Waiting: not while the check runs — answered once it's over and published

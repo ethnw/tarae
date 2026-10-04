@@ -33,7 +33,7 @@ fn fallback() -> Vec<ModelInfo> {
 }
 
 fn offered(ed: &Editor) -> Vec<ModelInfo> {
-    match ed.chat.as_ref().map(|c| &c.models).filter(|m| !m.is_empty()) {
+    match ed.lane.chat.as_ref().map(|c| &c.models).filter(|m| !m.is_empty()) {
         Some(m) => m.clone(),
         None => fallback(),
     }
@@ -47,7 +47,7 @@ fn chosen(ed: &Editor) -> String {
 /// The model in use as the title says it: its name (for `default`, the model it stands for), and the effort
 /// when the model takes one — `Opus 5.5 · high`. None before anything's known.
 pub fn label(ed: &Editor) -> Option<String> {
-    let models = &ed.chat.as_ref()?.models;
+    let models = &ed.lane.chat.as_ref()?.models;
     let value = chosen(ed);
     let m = models.iter().find(|m| m.value == value);
     let name = match m {

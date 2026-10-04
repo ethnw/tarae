@@ -161,7 +161,7 @@ impl crate::editor::Editor {
             Err(e) => return self.set_error(e),
         };
         self.status = None;
-        let root = self.root.clone();
+        let root = self.lane.root.clone();
         let items = plans
             .iter()
             .enumerate()
