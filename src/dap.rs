@@ -1354,6 +1354,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(root.join("src/main.rs"), "fn main() {\n    let n: i32 = \"one\";\n}\n").unwrap();
+        crate::testing::cargo_builds_inside(&root);
         let e = cargo_build(&root).unwrap_err();
         assert!(e.starts_with("build failed\n") && e.contains("mismatched types"), "{e}");
         assert!(e.contains("src/main.rs:2"), "where, as rustc renders it: {e}");

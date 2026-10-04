@@ -36,6 +36,18 @@ pub struct Call {
     request_id: String,
     id: Value,
     rev: crate::mcp::Rev,
+    /// A `run`'s or `run_tests`' way from the ask to its end (`trace.rs`) — its card, the sandbox, the run
+    /// carry it on; logged at the end, or where it was dropped.
+    pub(crate) trace: Option<crate::trace::RunTrace>,
+}
+
+impl Call {
+    /// A step on its run's way (`trace.rs`), if it's a run's.
+    fn step(&self, what: &str) {
+        if let Some(t) = &self.trace {
+            t.step(what);
+        }
+    }
 }
 
 /// The tools whose calls wait on the editor's own work (servers, searches, a change set) — a run, tests and
@@ -54,7 +66,7 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
         Ok(rev) => rev,
         Err(e) => return Some(json!({ "jsonrpc": "2.0", "id": id, "error": e })),
     };
-    let call = || Call { generation, request_id: request_id.to_string(), id: id.clone(), rev };
+    let call = || Call { generation, request_id: request_id.to_string(), id: id.clone(), rev, trace: None };
     let method = msg["method"].as_str().unwrap_or_default();
     let result = match method {
         "tools/list" => {
@@ -189,19 +201,32 @@ thread_local! {
 impl Call {
     /// A call with this id from no chat process (its answer only goes to `ANSWERED`).
     pub fn test(id: u64) -> Call {
-        Call { generation: u64::MAX, request_id: String::new(), id: json!(id), rev: Default::default() }
+        Call {
+            generation: u64::MAX,
+            request_id: String::new(),
+            id: json!(id),
+            rev: Default::default(),
+            trace: None,
+        }
     }
 
     /// Call `id` (`request_id` its control request's) of chat process `generation`.
     pub fn of(generation: u64, request_id: &str, id: Value) -> Call {
-        Call { generation, request_id: request_id.into(), id, rev: Default::default() }
+        Call { generation, request_id: request_id.into(), id, rev: Default::default(), trace: None }
     }
 }
 
-/// Answers a call that waited — only to the process that made it, in whichever session it is.
+/// Answers a call that waited — only to the process that made it, in whichever session it is. A run's
+/// trace ends here unless its run's end said how (not run: why).
 pub fn answer(ed: &mut Editor, call: Call, r: Result<String, String>) {
     #[cfg(test)]
     ANSWERED.with(|a| a.borrow_mut().push((call.id.clone(), r.clone())));
+    if let Some(t) = &call.trace {
+        match &r {
+            Ok(_) => t.end("answered"),
+            Err(e) => t.end(format!("not run: {}", e.chars().take(80).collect::<String>())),
+        }
+    }
     deliver(ed, call, r);
 }
 
@@ -263,13 +288,20 @@ fn run_tests(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
     let path = crate::chat::resolve(&ed.session.root, path);
     let line = args["line"].as_u64().map(|l| l.max(1) as usize - 1);
     busy(ed)?;
+    let what = crate::chat::shown(&ed.session.root, &path);
+    let what = line.map_or(what.clone(), |l| format!("{what}:{}", l + 1));
+    let mut call = call;
+    call.trace = Some(crate::trace::RunTrace::new(format!("claude's tests: {what}")));
     // The buffer's text when it's open (unsaved edits are what gets saved and run)
     let text = ed.docs.iter().find(|d| d.path.as_deref() == Some(path.as_path())).map(|d| d.text.clone());
     let root = ed.session.root.clone();
     ed.events.jobs().spawn(move || {
         let found = find(&root, &path, text, line);
         move |ed: &mut Editor| match found {
-            Ok(target) => start(ed, call, target),
+            Ok(target) => {
+                call.step("found");
+                start(ed, call, target)
+            }
             Err(Found::NoGrammar(spec)) => {
                 ed.offer_grammar(spec);
                 let e = format!(
@@ -350,7 +382,11 @@ fn start_tests(ed: &mut Editor, who: For, target: crate::testing::Target, guard:
     }
     let before = ed.test_generation;
     let program = target.argv().first().cloned().unwrap_or_default();
-    ed.test_start_guarded(target, guard);
+    let trace = match &who {
+        For::Claude(call) => call.trace.clone(),
+        For::User(_) => None,
+    };
+    ed.test_start_guarded(target, guard, trace);
     match ed.session.test_run.as_mut().filter(|_| ed.test_generation != before) {
         Some(r) => match who {
             For::Claude(call) => r.chat = Some(call),
@@ -768,6 +804,8 @@ fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
     };
     run_busy(ed)?;
     let cwd = run_cwd(&ed.session.root, args["cwd"].as_str())?;
+    let mut call = call;
+    call.trace = Some(crate::trace::RunTrace::new(format!("claude's run: {}", crate::task::traced(cmd))));
     let mut extra = ed.config.llm.run_allow.clone();
     extra.extend(ed.session.chat.as_ref().map(|c| c.run_allow.clone()).unwrap_or_default());
     if outside.is_none() && allowed(cmd, &extra) {
@@ -832,6 +870,7 @@ fn card(
             false => Vec::new(),
         };
         move |ed: &mut Editor| {
+            call.step("files it names read");
             // (the turn ended meanwhile: nobody waits for a card)
             if ed.session.chat.as_ref().is_some_and(|c| c.generation() != call.generation || !c.busy()) {
                 return;
@@ -890,6 +929,7 @@ fn read_only(
             || crate::readonly::script_pins(&cmd, &cwd, &root)
                 .is_some_and(|s| s.iter().all(|p| pins.contains(p)));
         move |ed: &mut Editor| {
+            call.step("where it reads looked at");
             // (the turn ended meanwhile: nobody waits for it)
             if ed.session.chat.as_ref().is_some_and(|c| c.generation() != call.generation || !c.busy()) {
                 return;
@@ -1023,6 +1063,7 @@ fn ask_with(
         Some(_) => OUTSIDE_RUN_TITLE.to_string(),
         None => "Claude wants to run".to_string(),
     };
+    call.step("card up");
     let card = RunCard {
         cmd,
         cwd,
@@ -1279,6 +1320,7 @@ pub fn run_answer(ed: &mut Editor, id: u64, what: RunCard, scope: Option<crate::
     let Some(scope) = scope else {
         return answer(ed, call, Err(format!("the user chose not to run `{cmd}`")));
     };
+    call.step("answered yes");
     if keep {
         crate::allow::grant_reads(ed, &reads, scope);
     }
@@ -1339,6 +1381,7 @@ fn run_now(ed: &mut Editor, cmd: String, cwd: PathBuf, call: Call, unprotected: 
     // A yes while another command runs (two cards answered one after the other): it runs next (#5)
     if run_busy(ed).is_err() {
         ed.note(format!("`{cmd}` runs once the command running ends"));
+        call.step("queued");
         return ed.session.runs_next.push_back(Next { cmd, cwd, call, unprotected, outside });
     }
     let extra = Extra { grant: None, outside };
@@ -1361,6 +1404,7 @@ pub fn run_next(ed: &mut Editor) {
     }
     while let Some(n) = ed.session.runs_next.pop_front() {
         if ed.session.chat.as_ref().is_some_and(|c| c.generation() == n.call.generation && c.busy()) {
+            n.call.step("its turn");
             return run_now(ed, n.cmd, n.cwd, n.call, n.unprotected, n.outside);
         }
     }
@@ -1460,6 +1504,9 @@ pub fn guard_and_go(ed: &mut Editor, who: For, job: Job, asked: bool, extra: Ext
         });
         move |ed: &mut Editor| {
             ed.sandbox = found.clone();
+            if let For::Claude(call) = &who {
+                call.step("sandbox ready");
+            }
             // (Claude's turn ended meanwhile: nothing waits for it)
             if let For::Claude(call) = &who
                 && ed.session.chat.as_ref().is_some_and(|c| c.generation() != call.generation || !c.busy())
@@ -1510,6 +1557,7 @@ fn ask_unprotected(ed: &mut Editor, call: Call, job: Job, why: String) {
         "{}\n\nThere's none here ({why}) — it would run with all your permissions: your files, your network.",
         job.label()
     );
+    call.step("no-sandbox card up");
     let what = crate::offer::What::NoSandbox { job, call };
     ed.push_offer(crate::offer::Offer::new(NO_SANDBOX_TITLE.into(), &question, "", String::new(), what));
 }
@@ -1518,6 +1566,9 @@ fn ask_unprotected(ed: &mut Editor, call: Call, job: Job, why: String) {
 /// tells Claude no.
 pub fn unprotected_answer(ed: &mut Editor, id: u64, job: Job, call: Call, answer_is: Unprotected) {
     ed.offer_finished(id, Ok(()));
+    if answer_is != Unprotected::No {
+        call.step("answered yes");
+    }
     let why = match &ed.sandbox {
         Availability::Missing(why) => why.clone(),
         _ => "none here".into(),
@@ -1612,7 +1663,9 @@ fn run_report(root: &Path, r: &crate::task::Run, places: &[crate::quickfix::Item
         State::Stopped(ref why) => format!("stopped: {why}"),
         State::Running => "still running".to_string(),
     };
-    let mut out = format!("{verdict}{took}\n$ {}\n", r.task.cmd);
+    // (how much of it waited on what isn't its own — another cargo's lock — `waits.rs`)
+    let waited = r.took.and_then(|t| r.wait.said(t)).map(|w| format!("{w}\n")).unwrap_or_default();
+    let mut out = format!("{verdict}{took}\n{waited}$ {}\n", r.task.cmd);
     let (errors, warnings) = r.found;
     // Where its places are said as they are (#38): a check's or a build's went to the user's list; any
     // other run's (a grep's `path:line:` hits) are only in its output — not the user's, not errors
@@ -1722,8 +1775,10 @@ fn report(root: &Path, r: &TestRun) -> String {
         RunState::Running => "still running".to_string(),
         RunState::NoTests => "no tests ran".to_string(),
     };
+    // (how much of it waited on what isn't its own — another cargo's lock — `waits.rs`)
+    let waited = r.took.and_then(|t| r.wait.said(t)).map(|w| format!("{w}\n")).unwrap_or_default();
     let mut out = format!(
-        "{verdict}{took} — {}\n$ {}  (in {})\n",
+        "{verdict}{took} — {}\n{waited}$ {}  (in {})\n",
         r.target.label,
         r.target.argv().join(" "),
         crate::chat::shown(root, &r.target.cwd)
@@ -2233,6 +2288,86 @@ mod tests {
         ed.handle_key("C-q".parse().unwrap());
         let status = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
         assert!(status.contains("no card yet — solo's comes once its run ends"), "{status}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Phase 0 of docs/design/async.md: Claude's run whose output says it waits on another cargo's lock — a
+    /// stand-in `sh` printing cargo's line, then sleeping, nothing else — shows the wait as its state (the
+    /// panel, not its output), Claude's answer tells the wait from the run, and the log gets the run's way
+    /// from the ask, through its card, to its end.
+    #[test]
+    fn a_run_waiting_on_cargos_lock_is_said_and_traced() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-run-waits-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        ed.session.root = dir.clone();
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        crate::chat::open(&mut ed);
+        let c = ed.session.chat.as_mut().unwrap();
+        c.state = crate::chat::State::Thinking;
+        c.focused = false;
+        let call = super::Call::of(c.generation(), "r1", json!(41));
+        let cmd = "printf '    Blocking waiting for file lock on build directory\\n' >&2; sleep 0.5; \
+                   printf '   Compiling stand-in\\n' >&2; echo built";
+        super::run(&mut ed, call, &json!({ "command": cmd })).unwrap();
+        ed.offer_accept();
+        let pump = |ed: &mut crate::editor::Editor, until: &dyn Fn(&crate::editor::Editor) -> bool| {
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !until(ed) {
+                assert!(std::time::Instant::now() < end, "timed out");
+                if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(10)) {
+                    ed.handle_event(ev);
+                }
+            }
+        };
+        // Waiting: the panel says so, in the wave's place; cargo's line isn't output
+        pump(&mut ed, &|ed| ed.session.task_run.as_ref().is_some_and(|r| r.wait.now.is_some()));
+        let mut bytes = Vec::new();
+        crate::term::render(&mut ed, &mut bytes, 140, 36).unwrap();
+        let mut vt = vt100::Parser::new(36, 140, 0);
+        vt.process(&bytes);
+        let s = vt.screen().contents();
+        assert!(s.contains("waiting for cargo's lock · 0:0"), "{s}");
+        assert!(ed.session.task_run.as_ref().unwrap().output.is_empty(), "cargo's line isn't output");
+        // Its end: the answer says how much was the wait
+        let running = |ed: &crate::editor::Editor| {
+            ed.session.task_run.as_ref().is_some_and(|r| r.state == crate::task::State::Running)
+        };
+        pump(&mut ed, &|ed| !running(ed));
+        let r = ed.session.task_run.as_ref().unwrap();
+        assert!(r.wait.now.is_none() && !r.output.iter().any(|l| l.1.contains("Blocking")));
+        let said = super::ANSWERED.with(|a| a.borrow().iter().find(|(id, _)| *id == json!(41)).cloned());
+        let text = said.expect("answered").1.unwrap();
+        let second = text.lines().nth(1).unwrap_or_default();
+        let waited: f32 = second
+            .strip_prefix("Waited ")
+            .and_then(|w| w.split_once("s for cargo's build directory lock. Ran "))
+            .and_then(|(w, _)| w.parse().ok())
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(text.starts_with("exit 0") && (0.4..3.0).contains(&waited), "{text}");
+        let output = text.split("\nOutput:\n").nth(1).unwrap_or_default();
+        assert!(output.contains("Compiling stand-in") && !output.contains("Blocking"), "{text}");
+        // The log's line: each step on its way, in order
+        let line = crate::trace::LOGGED.with(|l| l.borrow().iter().find(|l| l.contains("stand-in")).cloned());
+        let line = line.expect("traced");
+        let mut at = 0;
+        for step in [
+            "card up",
+            "answered yes",
+            "saved",
+            "spawned",
+            "first output",
+            "waited for cargo's lock",
+            "exit 0",
+        ] {
+            let found = line[at..].find(&format!(" · {step} ")).unwrap_or_else(|| panic!("{step}: {line}"));
+            at += found + 1;
+        }
+        assert!(line.starts_with("claude's run: printf"), "{line}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

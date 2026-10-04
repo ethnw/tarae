@@ -253,6 +253,17 @@ impl Preflight {
         }
     }
 
+    /// The step a line of the run's output ends, as the run's trace says it (`clippy exit 1`) — None: not a
+    /// step's end marker.
+    pub fn ending(&self, line: &str) -> Option<String> {
+        let mut w = line.strip_prefix(MARK)?.split_whitespace();
+        if w.next() != Some("end") {
+            return None;
+        }
+        let s = self.steps.get(w.next()?.parse::<usize>().ok()?)?;
+        Some(format!("{} exit {}", s.name, w.next().unwrap_or("?")))
+    }
+
     /// The run ended (`stopped`: before every step had its end — stopped, or the script died).
     pub fn finish(&mut self) {
         self.took = Some(self.started.elapsed());
@@ -438,11 +449,15 @@ impl Editor {
         if steps.is_empty() {
             return Err("every preflight step is marked full = true — :preflight-full runs them".into());
         }
+        // (its trace named for the set, and the steps it runs)
+        let names: Vec<&str> = steps.iter().map(|s| s.name.as_str()).collect();
+        let title = set.title(&all);
+        let trace = crate::trace::RunTrace::new(format!("{title}: {}", names.join(", ")));
         self.auto_save(" · before the preflight");
         self.flush_saves();
-        let name = set.title(&all).into();
-        let task = crate::task::Task { name, cmd: script(&steps), cwd: self.preflight_root() };
-        let generation = self.task_start_preflight(task).ok_or("the preflight didn't start")?;
+        trace.step("saved");
+        let task = crate::task::Task { name: title.into(), cmd: script(&steps), cwd: self.preflight_root() };
+        let generation = self.task_start_preflight(task, trace).ok_or("the preflight didn't start")?;
         self.session.preflight = Some(Preflight::new(generation, &all, set));
         Ok(())
     }
@@ -658,5 +673,46 @@ mod tests {
         p.finish();
         p.took = Some(Duration::from_millis(1500));
         assert_eq!(p.summary(), "0 of 3 passed — fmt failed — stopped, 2 not run · 1.5s");
+    }
+
+    /// A preflight's trace says each step's end and a step's wait on another cargo's lock (a stand-in `sh`
+    /// printing cargo's line) — the wait isn't output, and the steps go on after it.
+    #[test]
+    fn a_preflights_trace_says_each_step_and_its_waits() {
+        let dir = std::env::temp_dir().join(format!("tarae-preflight-trace-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ed = Editor::new(crate::config::Config::default());
+        ed.session.root = dir.clone();
+        let waits =
+            "printf '    Blocking waiting for file lock on build directory\\n' >&2; sleep 0.2; echo built";
+        ed.preflight_run(vec![step("first", waits), step("second", "exit 3")], Set::Quick).unwrap();
+        let end = Instant::now() + Duration::from_secs(10);
+        while ed.session.task_run.as_ref().is_some_and(|r| r.state == crate::task::State::Running) {
+            assert!(Instant::now() < end, "it ended");
+            if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(10)) {
+                ed.handle_event(ev);
+            }
+        }
+        let r = ed.session.task_run.as_ref().unwrap();
+        assert!(!r.output.iter().any(|l| l.1.contains("Blocking")), "{:?}", r.output);
+        assert!(r.output.iter().any(|l| l.1 == "built"));
+        let line = crate::trace::LOGGED
+            .with(|l| l.borrow().iter().find(|l| l.starts_with("preflight: first, second")).cloned());
+        let line = line.expect("traced");
+        let mut at = 0;
+        for step in [
+            "saved",
+            "spawned",
+            "first output",
+            "ran",
+            "waited for cargo's lock",
+            "first exit 0",
+            "second exit 3",
+            "exit 1",
+        ] {
+            let found = line[at..].find(&format!(" · {step} ")).unwrap_or_else(|| panic!("{step}: {line}"));
+            at += found + 1;
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

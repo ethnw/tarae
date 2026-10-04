@@ -320,6 +320,10 @@ pub struct TestRun {
     pub guard: Option<crate::sandbox::Guard>,
     /// When it last printed (a sandboxed run quiet after a denial may be waiting on it — the panel says so).
     pub last_output: Instant,
+    /// What it waits on that isn't its own work — another cargo's lock — from its output (`waits.rs`).
+    pub wait: crate::waits::Waiting,
+    /// Its way from the ask to its end, for the log (`trace.rs`).
+    pub trace: crate::trace::RunTrace,
 }
 
 impl TestRun {
@@ -383,6 +387,8 @@ impl TestRun {
             tell: None,
             guard: None,
             last_output: Instant::now(),
+            wait: Default::default(),
+            trace: crate::trace::RunTrace::new("test run"),
         }
     }
 
@@ -412,6 +418,7 @@ impl TestRun {
             && self.state == RunState::Running
         {
             crate::dap::term_group(pid);
+            self.trace.end("stopped before its end");
         }
     }
 }
@@ -571,14 +578,22 @@ impl Editor {
     }
 
     pub fn test_start(&mut self, target: Target) {
-        self.test_start_guarded(target, None);
+        self.test_start_guarded(target, None, None);
     }
 
-    /// Claude's run (`tools.rs`): in the sandbox, unless `guard` says otherwise.
-    pub fn test_start_guarded(&mut self, target: Target, guard: Option<crate::sandbox::Guard>) {
+    /// Claude's run (`tools.rs`): in the sandbox, unless `guard` says otherwise; `trace` — its way from
+    /// Claude's ask (else it starts here).
+    pub fn test_start_guarded(
+        &mut self,
+        target: Target,
+        guard: Option<crate::sandbox::Guard>,
+        trace: Option<crate::trace::RunTrace>,
+    ) {
+        let trace = trace.unwrap_or_else(|| crate::trace::RunTrace::new(format!("tests: {}", target.label)));
         // Save modified files first — tests run the code on disk
         self.auto_save(" · before test");
         self.flush_saves();
+        trace.step("saved");
         self.session.test_last = Some((target.clone(), false));
         let argv = target.argv();
         let policy = match &guard {
@@ -597,8 +612,12 @@ impl Editor {
         let mut child = match crate::dap::setsid(&mut cmd).spawn() {
             Ok(c) => c,
             // (the previous run, if any, stays current — its lines·end still land)
-            Err(e) => return self.set_error(format!("test: {}: {e}", argv[0])),
+            Err(e) => {
+                trace.end(format!("didn't spawn: {e}"));
+                return self.set_error(format!("test: {}: {e}", argv[0]));
+            }
         };
+        trace.step("spawned");
         crate::tools::tests_dropped(self, "another run took its place");
         self.test_generation += 1;
         let generation = self.test_generation;
@@ -606,54 +625,72 @@ impl Editor {
         self.procs_spawned(pid, "tests", &target.label);
         let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
         let tx = self.events.sender();
-        let send_lines = move |tx: &crate::event::Tx, err: bool, lines: Vec<String>| {
-            let apply = move |ed: &mut Editor| {
-                let Some(r) = ed.session.test_run.as_mut().filter(|r| r.generation == generation) else {
-                    return;
+        // (a line a pack says is a wait — `waits.rs` — is told on the reader's thread)
+        let send_lines =
+            move |tx: &crate::event::Tx, waits: &crate::waits::Rules, err: bool, lines: Vec<String>| {
+                let at = Instant::now();
+                let lines: Vec<(String, Option<crate::waits::Hit>)> = lines
+                    .iter()
+                    .map(|l| {
+                        let line = strip_ansi(l);
+                        let hit = waits.hit(&line);
+                        (line, hit)
+                    })
+                    .collect();
+                let apply = move |ed: &mut Editor| {
+                    let Some(r) = ed.session.test_run.as_mut().filter(|r| r.generation == generation) else {
+                        return;
+                    };
+                    let mut attach = None;
+                    for (line, hit) in lines {
+                        // (a wait's line is the run's state — the panel says it — not output)
+                        if r.wait.line(hit, at, &r.trace) {
+                            continue;
+                        }
+                        // Java test debug: the test JVM waits for a debugger — attach to that port
+                        let listen = line
+                            .split_once("Listening for transport dt_socket at address:")
+                            .and_then(|(_, a)| a.trim().rsplit(':').next()?.parse::<u16>().ok());
+                        if let Some(port) = listen
+                            && let Some(a) = r.java_attach.take()
+                        {
+                            attach = Some((a, port, r.target.label.clone()));
+                        }
+                        r.parser.line(&r.target.cwd, &line, &mut r.cases);
+                        r.output.push((err, line));
+                    }
+                    r.last_output = Instant::now();
+                    let n = r.output.len();
+                    if n > 5000 {
+                        r.output.drain(..n - 5000);
+                    }
+                    if let Some(((file, root), port, label)) = attach {
+                        ed.dap_generation += 1;
+                        let g = ed.dap_generation;
+                        ed.java_attach(file, root, "127.0.0.1".into(), port, g);
+                        // Debug pane header = the test name, not the address
+                        if let Some(d) = ed.dap.as_mut() {
+                            d.program = label;
+                        }
+                    }
                 };
-                let mut attach = None;
-                for line in lines {
-                    let line = strip_ansi(&line);
-                    // Java test debug: the test JVM waits for a debugger — attach to that port
-                    let listen = line
-                        .split_once("Listening for transport dt_socket at address:")
-                        .and_then(|(_, a)| a.trim().rsplit(':').next()?.parse::<u16>().ok());
-                    if let Some(port) = listen
-                        && let Some(a) = r.java_attach.take()
-                    {
-                        attach = Some((a, port, r.target.label.clone()));
-                    }
-                    r.parser.line(&r.target.cwd, &line, &mut r.cases);
-                    r.output.push((err, line));
-                }
-                r.last_output = Instant::now();
-                let n = r.output.len();
-                if n > 5000 {
-                    r.output.drain(..n - 5000);
-                }
-                if let Some(((file, root), port, label)) = attach {
-                    ed.dap_generation += 1;
-                    let g = ed.dap_generation;
-                    ed.java_attach(file, root, "127.0.0.1".into(), port, g);
-                    // Debug pane header = the test name, not the address
-                    if let Some(d) = ed.dap.as_mut() {
-                        d.program = label;
-                    }
-                }
+                tx.send(crate::event::Event::Job(Box::new(apply))).is_ok()
             };
-            tx.send(crate::event::Event::Job(Box::new(apply))).is_ok()
-        };
         // `parse = "junit"`: results from the JUnit XML the build tool leaves (only files written since this
         // run) — read here on the waiter thread once it ends
         let How::Pack { junit, .. } = &target.how;
         let junit = junit.clone();
         std::thread::spawn(move || {
+            // (the packs read here — one of one's own is a file)
+            let waits = std::sync::Arc::new(crate::waits::Rules::load());
             let err_reader = stderr.map(|e| {
-                let tx = tx.clone();
-                std::thread::spawn(move || crate::task::read_batches(e, |lines| send_lines(&tx, true, lines)))
+                let (tx, waits) = (tx.clone(), waits.clone());
+                std::thread::spawn(move || {
+                    crate::task::read_batches(e, |lines| send_lines(&tx, &waits, true, lines))
+                })
             });
             if let Some(o) = stdout {
-                crate::task::read_batches(o, |lines| send_lines(&tx, false, lines));
+                crate::task::read_batches(o, |lines| send_lines(&tx, &waits, false, lines));
             }
             if let Some(h) = err_reader {
                 let _ = h.join();
@@ -688,6 +725,14 @@ impl Editor {
                     Some(0) => RunState::Passed,
                     code => RunState::Failed(code),
                 };
+                // (a wait it ended in — killed while it waited — ends with it)
+                r.wait.end(Instant::now(), &r.trace);
+                r.trace.end(match &r.state {
+                    RunState::Passed => "passed".to_string(),
+                    RunState::NoTests => "no tests ran".to_string(),
+                    RunState::Failed(Some(c)) => format!("failed, exit {c}"),
+                    RunState::Failed(None) | RunState::Running => "killed".to_string(),
+                });
                 crate::tools::tests_done(ed);
             };
             let _ = tx.send(crate::event::Event::Job(Box::new(done)));
@@ -710,6 +755,8 @@ impl Editor {
             tell: None,
             guard,
             last_output: Instant::now(),
+            wait: Default::default(),
+            trace,
         });
     }
 
@@ -783,6 +830,18 @@ fn with_binary(v: Value, exe: &str) -> Value {
         Value::Object(o) => Value::Object(o.into_iter().map(|(k, x)| (k, with_binary(x, exe))).collect()),
         v => v,
     }
+}
+
+/// Tests that run a real cargo in a temp project: its build goes inside the project (`target/build`) —
+/// the project's `.cargo/config.toml` (`build.build-dir`, as `CARGO_BUILD_BUILD_DIR`) over the user's,
+/// whose `build-dir` may be a folder per workspace under `~/.cargo/build`, which a sandbox the tests run
+/// in doesn't let them make. Only the cargo started in `root` reads it.
+#[cfg(test)]
+pub(crate) fn cargo_builds_inside(root: &Path) {
+    std::fs::create_dir_all(root.join(".cargo")).unwrap();
+    let dir = root.join("target/build");
+    std::fs::write(root.join(".cargo/config.toml"), format!("[build]\nbuild-dir = '{}'\n", dir.display()))
+        .unwrap();
 }
 
 #[cfg(test)]
@@ -1256,6 +1315,64 @@ mod tests {
         assert_eq!(run(&mut ed, "python", "echo 'no tests ran in 0.01s'; exit 5"), RunState::NoTests);
         assert_eq!(run(&mut ed, "python", "exit 1"), RunState::Failed(Some(1)));
         assert_eq!(run(&mut ed, "other", "true"), RunState::Passed, "not read per test: its exit code");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Tests whose cargo waits on another's lock (a stand-in `sh` printing cargo's line, then sleeping): the
+    /// wait is the run's state, not output or a result; Claude's answer tells it from the run; the trace
+    /// says where it began and ended.
+    #[test]
+    fn tests_waiting_on_cargos_lock_say_so() {
+        let d = tmp("waits");
+        let mut ed = Editor::new(crate::config::Config::default());
+        let script = "printf '    Blocking waiting for file lock on build directory\\n' >&2; sleep 0.4; \
+                      printf 'running 1 test\\ntest waits::stand_in ... ok\\n\\ntest result: ok. 1 passed; 0 failed\\n'";
+        ed.test_start(Target {
+            label: "waits::stand_in".into(),
+            cwd: d.clone(),
+            how: How::Pack {
+                lang: "rust".into(),
+                argv: vec!["sh".into(), "-c".into(), script.into()],
+                debug: None,
+                parse: "rust".into(),
+                build: None,
+                debug_run: None,
+                junit: None,
+            },
+        });
+        ed.session.test_run.as_mut().unwrap().chat = Some(crate::tools::Call::test(73));
+        let end = Instant::now() + Duration::from_secs(10);
+        let mut seen = false;
+        while ed.session.test_run.as_ref().is_some_and(|r| r.state == RunState::Running) {
+            let ev = ed.events.recv_timeout(end.saturating_duration_since(Instant::now())).expect("event");
+            ed.handle_event(ev);
+            let r = ed.session.test_run.as_ref().unwrap();
+            seen |=
+                r.wait.shown(Instant::now()).is_some_and(|w| w.starts_with("waiting for cargo's lock · 0:0"));
+        }
+        assert!(seen, "the wait was the run's state");
+        let r = ed.session.test_run.as_ref().unwrap();
+        assert_eq!(r.state, RunState::Passed);
+        assert!(!r.output.iter().any(|l| l.1.contains("Blocking")), "{:?}", r.output);
+        let answered = crate::tools::ANSWERED
+            .with(|a| a.borrow().iter().find(|(id, _)| *id == serde_json::json!(73)).cloned())
+            .expect("answered")
+            .1
+            .unwrap();
+        let second = answered.lines().nth(1).unwrap_or_default();
+        assert!(
+            second.starts_with("Waited 0.") && second.contains("s for cargo's build directory lock. Ran "),
+            "{answered}"
+        );
+        let line = crate::trace::LOGGED
+            .with(|l| l.borrow().iter().find(|l| l.starts_with("tests: waits::stand_in")).cloned());
+        let line = line.expect("traced");
+        assert!(
+            line.contains(" · first output ")
+                && line.contains(" · waited for cargo's lock ")
+                && line.contains(" · passed "),
+            "{line}"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 

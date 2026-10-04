@@ -197,6 +197,19 @@ steps = [
 ]
 ```
 
+A run can wait on something that isn't its own work — another cargo holding the build directory. `[[waits]]` names
+the lines that say so: such a line is the run's state, not output (the task or test panel shows `waiting for cargo's
+lock · 0:37` until the next line), and Claude's report tells the wait from the run (`Waited 16.0s for cargo's build
+directory lock. Ran 11.0s.`). Every pack's apply to every run; a language that declares none has none.
+
+```toml
+# runtime/packs/rust/pack.toml
+[[waits]]
+line = '^\s*Blocking waiting for file lock on (?<what>.+)$'   # its named groups go into the texts as {what}
+for = "cargo's lock"                  # the panel: waiting for …
+report = "cargo's {what} lock"        # Claude's report (`for` unless set)
+```
+
 ## Debugger
 
 DAP for Rust, C, and C++ (lldb-dap — Rust is built with `cargo build` first), Go (dlv), Python (debugpy), and Java

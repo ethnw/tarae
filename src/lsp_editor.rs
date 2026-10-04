@@ -182,38 +182,7 @@ fn place_items(
 /// took, written to `tarae.log` as one line once that frame is drawn (`Editor::trace_drawn`) —
 /// `references 1.84s · sent 3ms · waited for "cargo check" 1.20s · asked again 1ms · answered 600ms (412
 /// places) · main loop 2ms · list 4ms · drawn 6ms`.
-pub struct Trace {
-    what: &'static str,
-    start: std::time::Instant,
-    last: std::time::Instant,
-    steps: Vec<String>,
-    /// The answer has been dealt with (listed, jumped to, nothing found): the next frame ends it.
-    answered: bool,
-}
-
-impl Trace {
-    fn new(what: &'static str) -> Trace {
-        let now = std::time::Instant::now();
-        Trace { what, start: now, last: now, steps: Vec::new(), answered: false }
-    }
-
-    /// A step done now — what it took is the time since the step before.
-    fn step(&mut self, what: impl Into<String>) {
-        self.step_at(what, std::time::Instant::now());
-    }
-
-    fn step_at(&mut self, what: impl Into<String>, at: std::time::Instant) {
-        let took = at.saturating_duration_since(self.last);
-        self.steps.push(format!("{} {}", what.into(), crate::term::duration(took.as_secs_f32())));
-        self.last = self.last.max(at);
-    }
-
-    /// The log line.
-    pub fn line(&self) -> String {
-        let total = self.last.saturating_duration_since(self.start).as_secs_f32();
-        format!("{} {} · {}", self.what, crate::term::duration(total), self.steps.join(" · "))
-    }
-}
+pub use crate::trace::Trace;
 
 /// A diagnostic in a file that isn't open: (server, severity, line, column, message, where it's from and
 /// its code — `rustc E0308`).

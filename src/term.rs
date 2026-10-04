@@ -275,6 +275,8 @@ pub fn render(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io::
     editor.toasts_drawn(card);
     // (a go-to's answer on screen: its timing to the log — N1)
     editor.trace_drawn();
+    // (a run's wave and wait counter want frames only while their slot is drawn — this frame's say)
+    editor.frame_drawn();
     // (kept: the screen as the user sees it — `C-s` in the chat sends it as text, and so does Claude's
     // `screen` once the user said yes)
     editor.last_frame = Some((frame, w, h));
@@ -1283,9 +1285,6 @@ fn output_style(
     }
 }
 
-/// How the task panel and Claude's run row say a run waiting on another cargo's lock (`Run::lock_wait`).
-const LOCK_WAIT_SAID: &str = "waiting for another build (cargo's lock)";
-
 /// The build task's panel (below the code, where tests show theirs): the slot's header (its tab names the
 /// task — `slot_header`; here how it ended, what went into the list `● 2  ▲ 1`, the time, the keys); then
 /// its output, the end showing.
@@ -1320,23 +1319,25 @@ fn draw_task_panel(
     }
     // A preflight's: which step (its row has the wave), its whole time in minutes
     let steps = preflight_of(editor, r);
+    let running = matches!(r.state, State::Running);
+    // (waiting on what isn't its own — another session's cargo, likely — not stuck: #10, `waits.rs`)
+    let wait = r.wait.shown(std::time::Instant::now()).filter(|_| running);
     let when = match (&r.state, r.took, steps) {
         (State::Running, _, Some(p)) => {
             let at = p.steps.iter().filter(|s| s.state != crate::preflight::State::Waiting).count();
             format!("   step {} of {}", at.max(1), p.steps.len())
         }
+        (State::Running, _, None) if wait.is_some() => String::new(),
         (State::Running, _, None) => format!("   {}", wave()),
         (_, Some(d), Some(_)) => format!("   {}", crate::preflight::long_duration(d)),
         (_, Some(d), None) => format!("   {}", duration(d.as_secs_f32())),
         _ => String::new(),
     };
-    // The wave in the accent, as everywhere something is under way
-    let running = matches!(r.state, State::Running);
-    let waving = running && steps.is_none();
+    // The wave in the accent, as everywhere something is under way — a wait isn't, and is said dim
+    let waving = running && steps.is_none() && wait.is_none();
     summary.push((when, if waving { Style { fg: ui.accent.fg, ..card } } else { dim }));
-    // (waiting on another cargo — another session's build, likely — not stuck: #10)
-    if running && r.lock_wait {
-        summary.push((format!("   {LOCK_WAIT_SAID}"), dim));
+    if let Some(w) = wait {
+        summary.push((format!("   {w}"), dim));
     }
     // (`space m m` runs the user's task again — not an install, not Claude's command, not tarae's git)
     let mut hints: Vec<(&str, &str)> = match (&r.state, r.found) {
@@ -1942,13 +1943,17 @@ fn draw_test_panel(
             summary.push((n.to_string(), Style { bold: true, ..card }));
         }
     }
-    let when = match (&r.state, r.took) {
-        (RunState::Running, _) => format!("   {}", wave()),
-        (_, Some(d)) => format!("   {}", duration(d.as_secs_f32())),
+    let running = matches!(r.state, RunState::Running);
+    // (waiting on what isn't its own — another session's cargo, likely — said in the wave's place: #10)
+    let wait = r.wait.shown(std::time::Instant::now()).filter(|_| running);
+    let when = match (&r.state, r.took, &wait) {
+        (RunState::Running, _, Some(w)) => format!("   {w}"),
+        (RunState::Running, _, None) => format!("   {}", wave()),
+        (_, Some(d), _) => format!("   {}", duration(d.as_secs_f32())),
         _ => String::new(),
     };
-    let running = matches!(r.state, RunState::Running);
-    summary.push((when, if running { Style { fg: ui.accent.fg, ..card } } else { dim }));
+    let waving = running && wait.is_none();
+    summary.push((when, if waving { Style { fg: ui.accent.fg, ..card } } else { dim }));
     let mut hints = slot_hints(editor);
     hints.extend_from_slice(match r.state {
         RunState::Running => &[("space x c", "stop")],
@@ -8247,13 +8252,26 @@ fn draw_chat(
                 row_links.resize(lines.len(), None);
                 *row_links.last_mut().expect("just pushed") = look.link.clone();
                 row_calls.push((lines.len() - 1, m.call.as_str()));
-                // (its command waiting on another cargo's lock — said under it, not left looking stuck: #10)
-                let waits =
-                    editor.session.task_run.as_ref().is_some_and(|r| {
-                        r.by_claude && r.lock_wait && r.state == crate::task::State::Running
-                    });
-                if live && look.verb == "run" && waits {
-                    lines.push(vec![sp(format!("  {}", fit_ellipsis(LOCK_WAIT_SAID, w - 2)), faint)]);
+                // (its command or tests waiting on what isn't their own — another cargo's lock — said under
+                // it, not left looking stuck: #10, `waits.rs`)
+                let now = std::time::Instant::now();
+                let wait = match look.verb {
+                    "run" => editor
+                        .session
+                        .task_run
+                        .as_ref()
+                        .filter(|r| r.by_claude && r.state == crate::task::State::Running)
+                        .and_then(|r| r.wait.shown(now)),
+                    "test" => editor
+                        .session
+                        .test_run
+                        .as_ref()
+                        .filter(|r| r.chat.is_some() && r.state == crate::testing::RunState::Running)
+                        .and_then(|r| r.wait.shown(now)),
+                    _ => None,
+                };
+                if live && let Some(wait) = wait {
+                    lines.push(vec![sp(format!("  {}", fit_ellipsis(&wait, w - 2)), faint)]);
                 }
             }
             // Elapsed time dimmed at the right end; stopped/error on the left
@@ -10947,17 +10965,21 @@ mod tests {
         assert_eq!(b((2, 1), 60), "1/2 · +1", "the shortest when nothing fits");
     }
 
-    /// #10: a run whose cargo waits on another cargo's lock says so — in the task panel's header and under
-    /// Claude's run row — from cargo's "Blocking waiting for file lock" line until the next line comes.
+    /// #10: a run whose cargo waits on another cargo's lock says so — in the task panel's header, in the
+    /// wave's place, and under Claude's run row — from cargo's "Blocking waiting for file lock" line (the
+    /// rust pack's `[[waits]]`) until the next line comes.
     #[test]
     fn a_run_waiting_on_cargos_lock_says_so() {
         use crate::task::{Run, State, Task};
+        const SAID: &str = "waiting for cargo's lock · 0:0";
         let mut ed = Editor::new(Config::default());
         let cmd = "cargo test --lib";
         let mut r = Run::for_test(Task { name: cmd.into(), cmd: cmd.into(), cwd: std::env::temp_dir() });
         (r.state, r.by_claude) = (State::Running, true);
-        r.push_line(true, "    Blocking waiting for file lock on build directory".into(), false);
-        assert!(r.lock_wait);
+        let packs = crate::waits::Rules::load();
+        let now = std::time::Instant::now();
+        let hit = packs.hit("    Blocking waiting for file lock on build directory");
+        assert!(r.wait.line(hit, now, &r.trace), "the rust pack's line is a wait");
         ed.session.task_run = Some(r);
         ed.config.llm.command = "sh".into();
         ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
@@ -10984,12 +11006,12 @@ mod tests {
             vt.screen().contents()
         };
         let s = shown(&mut ed);
-        assert_eq!(s.matches(LOCK_WAIT_SAID).count(), 2, "the panel's header and the chat's row: {s}");
+        assert_eq!(s.matches(SAID).count(), 2, "the panel's header and the chat's row: {s}");
         // The lock taken: the next line, and it's gone
         let r = ed.session.task_run.as_mut().unwrap();
-        r.push_line(true, "   Compiling tarae v0.1.0".into(), false);
-        assert!(!r.lock_wait);
-        assert!(!shown(&mut ed).contains(LOCK_WAIT_SAID));
+        let hit = packs.hit("   Compiling tarae v0.1.0");
+        assert!(!r.wait.line(hit, std::time::Instant::now(), &r.trace));
+        assert!(!shown(&mut ed).contains("waiting for"));
     }
 
     /// The side panel grows with a wide terminal — up to 12 more columns, the code keeping 100.

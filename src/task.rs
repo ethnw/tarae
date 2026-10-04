@@ -211,13 +211,11 @@ pub struct Run {
     /// many), once it's been cut (`keep`).
     section: usize,
     cut: Option<(usize, usize)>,
-    /// It waits on another cargo's lock — from cargo's "Blocking waiting for file lock" line to the line
-    /// after it (#10: a check waited 37 of its 48 s on another session's build, and looked stuck).
-    pub lock_wait: bool,
+    /// What it waits on that isn't its own work — another cargo's lock — from its output (`waits.rs`).
+    pub wait: crate::waits::Waiting,
+    /// Its way from the ask to its end, for the log (`trace.rs`).
+    pub trace: crate::trace::RunTrace,
 }
-
-/// What cargo prints while another cargo holds the build directory, the package cache or the like.
-const LOCK_WAIT: &str = "Blocking waiting for file lock";
 
 impl Run {
     /// Which run this is (each spawn a new one).
@@ -256,7 +254,6 @@ impl Run {
             self.keep(0);
             (self.section, self.cut) = (self.output.len(), None);
         }
-        self.lock_wait = line.contains(LOCK_WAIT);
         self.output.push((err, line));
     }
 
@@ -325,7 +322,8 @@ impl Run {
             scroll: None,
             section: 0,
             cut: None,
-            lock_wait: false,
+            wait: Default::default(),
+            trace: crate::trace::RunTrace::new("test run"),
         }
     }
 }
@@ -336,7 +334,26 @@ impl Drop for Run {
             && self.state == State::Running
         {
             crate::dap::term_group(pid);
+            self.trace.end("stopped before its end");
         }
+    }
+}
+
+/// A command as a trace's name says it: its first line.
+pub(crate) fn traced(cmd: &str) -> String {
+    let mut lines = cmd.trim().lines();
+    let first = lines.next().unwrap_or_default();
+    if lines.next().is_some() { format!("{first} …") } else { first.to_string() }
+}
+
+/// How a run ended, as its trace's last step says it.
+fn ended(state: &State) -> String {
+    match state {
+        State::Passed => "exit 0".into(),
+        State::Failed(Some(c)) => format!("exit {c}"),
+        State::Failed(None) => "killed".into(),
+        State::Stopped(why) => format!("stopped: {why}"),
+        State::Running => "running".into(),
     }
 }
 
@@ -412,10 +429,12 @@ impl Editor {
         if self.session.task_run.as_ref().is_some_and(|r| r.install && r.state == State::Running) {
             return self.set_status("an install is running — space m c stops it");
         }
+        let trace = crate::trace::RunTrace::new(format!("task: {}", task.name));
         self.auto_save(" · before the task");
         self.flush_saves();
+        trace.step("saved");
         self.session.task_last = Some(task.clone());
-        self.task_spawn(task, None, None, true, false);
+        self.task_spawn(task, None, None, true, false, trace);
     }
 
     /// A command Claude runs (`tools.rs`): like a task, but not the one `space m m` runs again — the call
@@ -432,15 +451,24 @@ impl Editor {
         if self.session.task_run.as_ref().is_some_and(|r| r.state == State::Running) {
             return false;
         }
+        // (Claude's call's trace goes on — from its ask; the user's run again of it starts here)
+        let trace = match &who {
+            crate::tools::For::Claude(call) => call.trace.clone(),
+            crate::tools::For::User(_) => None,
+        };
+        let trace = trace.unwrap_or_else(|| {
+            crate::trace::RunTrace::new(format!("claude's run again: {}", traced(&task.cmd)))
+        });
         self.auto_save(" · before the command");
         self.flush_saves();
+        trace.step("saved");
         let before = self.task_generation;
         let policy = match &guard {
             Some(crate::sandbox::Guard::In(p)) => Some(p),
             _ => None,
         };
         let feeds = crate::tools::is_check(&task.cmd);
-        self.task_spawn(task, None, policy, feeds, true);
+        self.task_spawn(task, None, policy, feeds, true, trace);
         match self.session.task_run.as_mut().filter(|_| self.task_generation != before) {
             Some(r) => {
                 match who {
@@ -462,15 +490,16 @@ impl Editor {
             return None;
         }
         let before = self.task_generation;
-        self.task_spawn(task, None, None, true, false);
+        let trace = crate::trace::RunTrace::new(format!("restart's build: {}", traced(&task.cmd)));
+        self.task_spawn(task, None, None, true, false, trace);
         (self.task_generation != before).then_some(self.task_generation)
     }
 
-    /// `:preflight`'s run (`preflight.rs`): not the task `space m m` runs again; every step's places go to the
-    /// list. Its generation; None if it didn't start.
-    pub(crate) fn task_start_preflight(&mut self, task: Task) -> Option<u64> {
+    /// `:preflight`'s run (`preflight.rs`), `trace` from its ask: not the task `space m m` runs again; every
+    /// step's places go to the list. Its generation; None if it didn't start.
+    pub(crate) fn task_start_preflight(&mut self, task: Task, trace: crate::trace::RunTrace) -> Option<u64> {
         let before = self.task_generation;
-        self.task_spawn(task, None, None, true, false);
+        self.task_spawn(task, None, None, true, false, trace);
         (self.task_generation != before).then_some(self.task_generation)
     }
 
@@ -478,7 +507,8 @@ impl Editor {
     /// out of the list. Its generation; None if it didn't start.
     pub(crate) fn task_start_git(&mut self, task: Task) -> Option<u64> {
         let before = self.task_generation;
-        self.task_spawn(task, None, None, false, false);
+        let trace = crate::trace::RunTrace::new(format!("tarae's git: {}", traced(&task.cmd)));
+        self.task_spawn(task, None, None, false, false, trace);
         let r = self.session.task_run.as_mut().filter(|_| self.task_generation != before)?;
         r.git = true;
         Some(self.task_generation)
@@ -487,12 +517,14 @@ impl Editor {
     /// An install (`install.rs`) in the task panel: not the task `space m m` runs again, and its output's
     /// places stay out of the list.
     pub(crate) fn task_start_install(&mut self, task: Task, after: After) {
-        self.task_spawn(task, Some(after), None, false, false);
+        let trace = crate::trace::RunTrace::new(format!("install: {}", traced(&task.cmd)));
+        self.task_spawn(task, Some(after), None, false, false, trace);
     }
 
     /// `feeds`: its places make the list (`]q`) — the run takes it over from its start. `claudes`: a
     /// command of Claude's — without `CDPATH`, so a `cd` lands where `readonly::outside` resolved it (with
-    /// it set, `cd src` may go to another `src` on it, and the line read there unasked).
+    /// it set, `cd src` may go to another `src` on it, and the line read there unasked). `trace`: its way
+    /// so far, logged at its end.
     fn task_spawn(
         &mut self,
         task: Task,
@@ -500,6 +532,7 @@ impl Editor {
         sandbox: Option<&crate::sandbox::Policy>,
         feeds: bool,
         claudes: bool,
+        trace: crate::trace::RunTrace,
     ) {
         // (a configured task's folder is as written — from the root, the root itself when it says none)
         let task = Task { cwd: self.path_of(&task.cwd), ..task };
@@ -518,12 +551,14 @@ impl Editor {
         let mut child = match crate::dap::setsid(&mut cmd).spawn() {
             Ok(c) => c,
             Err(e) => {
+                trace.end(format!("didn't spawn: {e}"));
                 if let Some(a) = after {
                     return self.offer_finished(a.offer, Err(format!("{}: {e}", task.name)));
                 }
                 return self.set_error(format!("{}: {e}", task.name));
             }
         };
+        trace.step("spawned");
         // A finished test run gives the panel over
         if self.session.test_run.as_ref().is_some_and(|r| r.state != crate::testing::RunState::Running) {
             self.session.test_run = None;
@@ -540,72 +575,88 @@ impl Editor {
         let tx = self.events.sender();
         // Each stream reads its places on its own thread (a stat per `path:line` — never the main loop's)
         let cwd = task.cwd.clone();
-        let send_lines =
-            move |tx: &crate::event::Tx, matcher: &mut Matcher, err: bool, lines: Vec<String>| {
-                let lines: Vec<(String, Option<Item>)> = lines
-                    .iter()
-                    .map(|l| {
-                        // (as shown first: `strip_ansi` drops the carriage returns)
-                        let line = crate::testing::strip_ansi(as_shown(l));
-                        let found = matcher.line(&cwd, &line);
-                        (line, found)
-                    })
-                    .collect();
-                let apply = move |ed: &mut Editor| {
-                    let Some(r) = ed.session.task_run.as_mut().filter(|r| r.generation == generation) else {
-                        return;
-                    };
-                    // (a preflight's markers move its steps on, and aren't shown — `preflight.rs`)
-                    let mut preflight = ed.session.preflight.as_mut().filter(|p| p.generation == generation);
-                    let mut places = Vec::new();
-                    r.last_output = Instant::now();
-                    for (line, found) in lines {
-                        // (a step's start: its output kept as its own — `Run::keep`)
-                        let step = preflight.is_some() && crate::preflight::starts(&line);
-                        let shown = match preflight.as_deref_mut() {
-                            Some(p) => p.line(&line),
-                            None => Some(line),
-                        };
-                        if let Some(line) = shown {
-                            r.push_line(err, line, step);
-                        }
-                        places.extend(found.filter(|_| !install));
-                    }
-                    r.keep(TRIM_SLACK);
-                    for it in places {
-                        let Some(r) = ed.session.task_run.as_mut() else { break };
-                        // Counted once (the same place twice isn't two) — the run's own, for its report; the
-                        // user's list only from a run that feeds it (#28)
-                        let seen =
-                            |p: &Item| p.path == it.path && p.line == it.line && p.message == it.message;
-                        if r.places.iter().any(seen) || r.places.len() >= PLACES_KEPT {
-                            continue;
-                        }
-                        match it.severity {
-                            1 => r.found.0 += 1,
-                            2 => r.found.1 += 1,
-                            _ => {}
-                        }
-                        r.places.push(it.clone());
-                        if feeds {
-                            ed.qlist_push(it);
-                        }
-                    }
+        // (a line a pack says is a wait — `waits.rs` — is told here, off the main loop, as places are)
+        let send_lines = move |tx: &crate::event::Tx,
+                               matcher: &mut Matcher,
+                               waits: &crate::waits::Rules,
+                               err: bool,
+                               lines: Vec<String>| {
+            let at = Instant::now();
+            let lines: Vec<(String, Option<Item>, Option<crate::waits::Hit>)> = lines
+                .iter()
+                .map(|l| {
+                    // (as shown first: `strip_ansi` drops the carriage returns)
+                    let line = crate::testing::strip_ansi(as_shown(l));
+                    let found = matcher.line(&cwd, &line);
+                    let hit = waits.hit(&line);
+                    (line, found, hit)
+                })
+                .collect();
+            let apply = move |ed: &mut Editor| {
+                let Some(r) = ed.session.task_run.as_mut().filter(|r| r.generation == generation) else {
+                    return;
                 };
-                tx.send(crate::event::Event::Job(Box::new(apply))).is_ok()
+                // (a preflight's markers move its steps on, and aren't shown — `preflight.rs`)
+                let mut preflight = ed.session.preflight.as_mut().filter(|p| p.generation == generation);
+                let mut places = Vec::new();
+                r.last_output = Instant::now();
+                for (line, found, hit) in lines {
+                    // (a wait's line is the run's state — the panel says it — not output)
+                    if r.wait.line(hit, at, &r.trace) {
+                        continue;
+                    }
+                    // (a preflight step's end: the trace says how long it took)
+                    if let Some(ended) = preflight.as_deref().and_then(|p| p.ending(&line)) {
+                        r.trace.step_at(ended, at);
+                    }
+                    // (a step's start: its output kept as its own — `Run::keep`)
+                    let step = preflight.is_some() && crate::preflight::starts(&line);
+                    let shown = match preflight.as_deref_mut() {
+                        Some(p) => p.line(&line),
+                        None => Some(line),
+                    };
+                    if let Some(line) = shown {
+                        r.push_line(err, line, step);
+                    }
+                    places.extend(found.filter(|_| !install));
+                }
+                r.keep(TRIM_SLACK);
+                for it in places {
+                    let Some(r) = ed.session.task_run.as_mut() else { break };
+                    // Counted once (the same place twice isn't two) — the run's own, for its report; the
+                    // user's list only from a run that feeds it (#28)
+                    let seen = |p: &Item| p.path == it.path && p.line == it.line && p.message == it.message;
+                    if r.places.iter().any(seen) || r.places.len() >= PLACES_KEPT {
+                        continue;
+                    }
+                    match it.severity {
+                        1 => r.found.0 += 1,
+                        2 => r.found.1 += 1,
+                        _ => {}
+                    }
+                    r.places.push(it.clone());
+                    if feeds {
+                        ed.qlist_push(it);
+                    }
+                }
             };
+            tx.send(crate::event::Event::Job(Box::new(apply))).is_ok()
+        };
         std::thread::spawn(move || {
+            // (the packs read here — one of one's own is a file)
+            let waits = std::sync::Arc::new(crate::waits::Rules::load());
             let err_reader = stderr.map(|e| {
                 let tx = tx.clone();
                 let send_lines = send_lines.clone();
+                let waits = waits.clone();
                 std::thread::spawn(move || {
                     let mut matcher = Matcher::default();
-                    read_batches(e, |lines| send_lines(&tx, &mut matcher, true, lines));
+                    read_batches(e, |lines| send_lines(&tx, &mut matcher, &waits, true, lines));
                 })
             });
             if let Some(o) = stdout {
                 let mut matcher = Matcher::default();
-                read_batches(o, |lines| send_lines(&tx, &mut matcher, false, lines));
+                read_batches(o, |lines| send_lines(&tx, &mut matcher, &waits, false, lines));
             }
             if let Some(h) = err_reader {
                 let _ = h.join();
@@ -628,6 +679,9 @@ impl Editor {
                     Some(0) => State::Passed,
                     code => State::Failed(code),
                 };
+                // (a wait it ended in — killed while it waited — ends with it)
+                r.wait.end(Instant::now(), &r.trace);
+                r.trace.end(ended(&r.state));
                 // (a command of Claude's said yes to while this ran goes next — once this one's end is told)
                 if !ed.session.runs_next.is_empty() {
                     let next = crate::event::Event::Job(Box::new(crate::tools::run_next));
@@ -693,7 +747,8 @@ impl Editor {
             scroll: None,
             section: 0,
             cut: None,
-            lock_wait: false,
+            wait: Default::default(),
+            trace,
         });
     }
 }

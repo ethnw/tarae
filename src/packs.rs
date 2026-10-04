@@ -38,6 +38,7 @@
 //!   test ones; `file = false` keeps its tests out of a file's run.
 //!
 //! `[tasks]`: see `tasks`. `[install.<tool>]`: see `Install`. `[server.<name>]`: see `LeaveOut`.
+//! `[[waits]]`: see `waits`.
 //!
 //! Packs are read when a test or the tasks are looked for (a few small files), so an edited pack counts at
 //! once.
@@ -357,6 +358,48 @@ fn preflight_of(
             return Err(w.clone());
         }
         out.push((rank, steps));
+    }
+    Ok(out)
+}
+
+/// What runs' output says they wait on (`waits.rs`) — every pack's `[[waits]]`, whatever the project: a
+/// line only a cargo prints doesn't come from anything else. A pack that can't be read, or an entry that
+/// doesn't hold, is logged and skipped.
+///
+/// `[[waits]]`: `line` — a regular expression the waiting line matches, its named groups (`(?<what>…)`)
+/// put into the texts as `{what}`; `for` — what the run waits for, as its panel says it (`waiting for
+/// cargo's lock`); `report` — as Claude's report says it (`Waited 16.0s for cargo's build directory lock`),
+/// `for` unless set.
+pub fn waits() -> Vec<crate::waits::Rule> {
+    let mut out = Vec::new();
+    for lang in crate::runtime::pack_langs() {
+        let t = match manifest(&lang) {
+            Some(Ok(t)) => t,
+            Some(Err(e)) => {
+                crate::log::line("tarae", "warning", &e);
+                continue;
+            }
+            None => continue,
+        };
+        let Some(list) = t.get("waits") else { continue };
+        match waits_of(list) {
+            Ok(rules) => out.extend(rules),
+            Err(e) => crate::log::line("tarae", "warning", &format!("the {lang} pack: [[waits]]: {e}")),
+        }
+    }
+    out
+}
+
+fn waits_of(v: &toml::Value) -> Result<Vec<crate::waits::Rule>, String> {
+    let list = v.as_array().ok_or("isn't a list ([[waits]])")?;
+    let mut out = Vec::new();
+    for entry in list {
+        let t = entry.as_table().ok_or("an entry isn't a table")?;
+        known(t, &["line", "for", "report"], "[[waits]]")?;
+        let line = string(t, "line")?.ok_or("an entry has no `line`")?;
+        let line = regex::Regex::new(&line).map_err(|e| format!("`line`: {e}"))?;
+        let said = string(t, "for")?.ok_or("an entry has no `for`")?;
+        out.push(crate::waits::Rule::new(line, said, string(t, "report")?));
     }
     Ok(out)
 }

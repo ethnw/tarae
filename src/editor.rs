@@ -1958,21 +1958,37 @@ impl Editor {
     /// something is waited on, else a toast's (`toast_wake`) — None: no frame. Not the animation while the
     /// terminal says it's unfocused (`unfocused`): nobody sees it, and focus coming back draws it again.
     fn tick_wanted(&self) -> Option<std::time::Duration> {
+        // (a task's or tests' wave and wait counter are in the bottom slot — its panel and tabs — only: no
+        // frames for them while the last frame didn't draw it; one that does asks again, `frame_drawn`)
+        let slot_drawn = self.screen.bottom_h > 0 || self.screen.width.is_none();
+        let run =
+            self.session.test_run.as_ref().is_some_and(|r| r.state == crate::testing::RunState::Running)
+                || self.session.task_run.as_ref().is_some_and(|r| r.state == crate::task::State::Running);
         let waiting = self.session.review.as_ref().is_some_and(|r| !r.ready)
             || self.session.chat.as_ref().is_some_and(|c| c.busy())
             || self.dap.as_ref().is_some_and(|d| d.state == crate::dap::State::Building)
-            || self.session.test_run.as_ref().is_some_and(|r| r.state == crate::testing::RunState::Running)
-            || self.session.task_run.as_ref().is_some_and(|r| r.state == crate::task::State::Running)
+            || (run && slot_drawn)
             || self.offer_busy();
         if waiting && !self.unfocused { Some(step_in(anim_clock().elapsed())) } else { self.toast_wake() }
     }
 
     fn schedule_tick(&mut self) {
-        use std::time::{Duration, Instant};
         if !self.toasts.is_empty() && !self.toasts.iter().any(Toast::alive) {
             self.toasts.clear();
             self.unchanged = false; // gone from the screen — whatever event this is, it's drawn
         }
+        self.tick_ask();
+    }
+
+    /// After a frame: the frames what it drew wants — a slot it brought back into sight (`C-w z` back, a
+    /// panel shown) with a run's wave in it was judged by the frame before (`tick_wanted`).
+    pub fn frame_drawn(&mut self) {
+        self.tick_ask();
+    }
+
+    /// A wake-up for the next frame `tick_wanted` asks for, unless one due by then is set already.
+    fn tick_ask(&mut self) {
+        use std::time::{Duration, Instant};
         let Some(delay) = self.tick_wanted() else { return };
         let at = Instant::now() + delay;
         // One already due by then serves (a later one doesn't: a new toast must start fading in now)
@@ -4928,6 +4944,26 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// A running task's wave and wait counter ask for frames only while the bottom slot is drawn (its panel or
+    /// its tab) — zoomed elsewhere, a run waiting minutes on cargo's lock wakes nothing; a frame that draws
+    /// the slot again judges it by its own layout (`frame_drawn`).
+    #[test]
+    fn a_runs_counter_asks_for_frames_only_while_its_slot_is_drawn() {
+        let mut ed = editor("");
+        let task = crate::task::Task { name: "check".into(), cmd: "cargo check".into(), cwd: "/".into() };
+        let mut r = crate::task::Run::for_test(task);
+        r.state = crate::task::State::Running;
+        ed.session.task_run = Some(r);
+        ed.screen.width = Some(120);
+        ed.screen.bottom_h = 12;
+        assert!(ed.tick_wanted().is_some(), "in sight: its wave moves");
+        ed.screen.bottom_h = 0;
+        assert_eq!(ed.tick_wanted(), None, "not drawn: no frames for it");
+        ed.session.task_run.as_mut().unwrap().state = crate::task::State::Passed;
+        ed.screen.bottom_h = 12;
+        assert_eq!(ed.tick_wanted(), None, "ended: none either");
+    }
+
     /// Claude checks its work: `run_tests` runs the test at a line in the test pane (a real `cargo test`),
     /// the call waits for the run, the results go back (verdict, the failure with where and why), and the
     /// editor goes to the failure. The chat's row ends with the verdict.
@@ -4945,6 +4981,7 @@ mod tests {
             "[package]\nname = \"calc\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
         )
         .unwrap();
+        crate::testing::cargo_builds_inside(&dir);
         let lib = dir.join("src/lib.rs");
         std::fs::write(
             &lib,

@@ -43,6 +43,13 @@ steps = [
   { name = "test", cmd = "cargo test" },
 ]
 
+# Another cargo holds the build directory (or the package cache): the run waits — said as its state, not
+# as output, until cargo's next line; Claude's report tells the wait from the run
+[[waits]]
+line = '^\s*Blocking waiting for file lock on (?<what>.+)$'
+for = "cargo's lock"
+report = "cargo's {what} lock"
+
 # Worktrees and checkouts inside the project aren't scanned (paths from its root; no defaults to keep)
 [server.rust-analyzer]
 leave-out = { init = "files.exclude", each = "{rel}" }
