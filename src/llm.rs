@@ -315,6 +315,12 @@ pub enum StreamEv {
     Answered(String),
     /// The models this claude offers (its answer to our `initialize`) — the chat's model picker.
     Models(Vec<ModelInfo>),
+    /// A request goes out (`system` `status: "requesting"`), when it was read (unix ms) — `usage.rs`.
+    Requesting(u64),
+    /// A request's usage, as a line reported it (`message_start`, `message_delta`, an assistant message).
+    Usage(crate::usage::Seen),
+    /// The turn's result as far as usage goes — sent before its `Done`.
+    Spent(crate::usage::Spent),
     /// End of a turn — final text or error (not logged in·stopped etc.).
     Done(Result<String, String>),
     /// The process exited (for the chat panel — last stderr line).
@@ -359,6 +365,12 @@ pub fn pump(
         if let Some(out) = child.stdout.take() {
             for line in BufReader::new(out).lines().map_while(Result::ok) {
                 let Ok(ev) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+                // (what it costs — the same line may carry a tool call or the turn's end too)
+                if let Some(u) = usage_line(&ev, crate::usage::now_ms())
+                    && !send(u)
+                {
+                    break;
+                }
                 if let Some(m) = answered_by(&ev).filter(|m| *m != model) {
                     model = m.to_string();
                     if !send(StreamEv::Answered(model.clone())) {
@@ -486,6 +498,60 @@ fn answered_by(ev: &serde_json::Value) -> Option<&str> {
         _ => return None,
     };
     m.as_str().filter(|m| !m.is_empty() && !m.starts_with('<'))
+}
+
+/// What a line says about usage (`usage.rs` has what's where), read at `at_ms` — None: nothing.
+pub fn usage_line(ev: &serde_json::Value, at_ms: u64) -> Option<StreamEv> {
+    use crate::usage::{Counts, Seen, Spent, Ttl};
+    let seen = |id: Option<&serde_json::Value>, model: &serde_json::Value, u: &serde_json::Value| {
+        Some(StreamEv::Usage(Seen {
+            id: match id {
+                Some(id) => Some(id.as_str()?.to_string()),
+                None => None,
+            },
+            model: model.as_str().unwrap_or_default().to_string(),
+            counts: Some(Counts::of(u)).filter(Counts::any)?,
+            ttl: Ttl::of(u),
+            at_ms,
+        }))
+    };
+    match ev["type"].as_str()? {
+        "system" if ev["subtype"] == "status" && ev["status"] == "requesting" => {
+            Some(StreamEv::Requesting(at_ms))
+        }
+        "stream_event" => {
+            let e = &ev["event"];
+            match e["type"].as_str()? {
+                "message_start" => {
+                    seen(Some(&e["message"]["id"]), &e["message"]["model"], &e["message"]["usage"])
+                }
+                "message_delta" => seen(None, &serde_json::Value::Null, &e["usage"]),
+                _ => None,
+            }
+        }
+        // (claude's own stand-in after an error, `<synthetic>`, cost nothing)
+        "assistant" if !ev["message"]["model"].as_str().unwrap_or_default().starts_with('<') => {
+            let m = &ev["message"];
+            seen(Some(&m["id"]), &m["model"], &m["usage"])
+        }
+        "result" => {
+            let models = ev["modelUsage"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .map(|(name, m)| (name.clone(), m["contextWindow"].as_u64()))
+                .collect();
+            Some(StreamEv::Spent(Spent {
+                conversation: ev["session_id"].as_str().unwrap_or_default().to_string(),
+                counts: Counts::of(&ev["usage"]),
+                total_cost: ev["total_cost_usd"].as_f64(),
+                models,
+                ms: ev["duration_ms"].as_u64(),
+                at_ms,
+            }))
+        }
+        _ => None,
+    }
 }
 
 /// `args` with `flag`'s value replaced (the flag appended if it wasn't there).
@@ -926,8 +992,17 @@ fn start(
                 let result = r.and_then(|out| parse_replies(&out, n));
                 Box::new(move |ed: &mut Editor| on_result(ed, generation, result))
             }
+            // (what it cost is the session's too — a turn of its own, beside the chat's conversation; a
+            // result that reports nothing has nothing to add)
+            StreamEv::Spent(s) if !s.counts.any() && s.total_cost.is_none() => return None,
+            StreamEv::Spent(s) => Box::new(move |ed: &mut Editor| {
+                ed.session.usage.aside(s, "ask");
+                crate::usage::view_sync(ed);
+            }),
             // ask runs without tools, and its conversation isn't kept
-            StreamEv::Conversation { .. }
+            StreamEv::Requesting(_)
+            | StreamEv::Usage(_)
+            | StreamEv::Conversation { .. }
             | StreamEv::Answered(_)
             | StreamEv::Models(_)
             | StreamEv::Tool { .. }

@@ -509,7 +509,7 @@ impl crate::document::Document {
 }
 
 /// Replace the document with new content — changed range only, marked as saved. true if it changed.
-fn reload_text(doc: &mut crate::document::Document, body: &Rope) -> bool {
+pub(crate) fn reload_text(doc: &mut crate::document::Document, body: &Rope) -> bool {
     let Some(change) = minimal_change(&doc.text, body) else {
         doc.mark_saved();
         return false;

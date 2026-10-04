@@ -587,9 +587,15 @@ pub fn continue_with(ed: &mut Editor, saved: crate::chats::Saved) {
     c.msgs.push(Msg::new(Role::Note, format!("continued from {when}"), ""));
     c.plan = saved.plan.as_ref().and_then(crate::plan::Plan::from_json);
     c.conversation = Some(saved.id.clone());
-    c.resume = Some(saved.id);
+    c.resume = Some(saved.id.clone());
     c.scroll = 0;
     c.follow.new_turn();
+    // (its turns, cost so far and cache, as far as they were kept)
+    match &saved.usage {
+        Some(u) => ed.session.usage.restore(&saved.id, u),
+        None => ed.session.usage.resumed(&saved.id),
+    }
+    crate::usage::watch(ed);
     ensure_proc(ed);
 }
 
@@ -692,6 +698,7 @@ fn kept(ed: &Editor) -> Option<(std::path::PathBuf, std::path::PathBuf, crate::c
     let title = c.msgs.iter().find(|m| m.role == Role::User).map(|m| m.text.clone()).unwrap_or_default();
     let plan = c.plan.as_ref().map(crate::plan::Plan::to_json);
     let saved = crate::chats::Saved {
+        usage: ed.session.usage.conv_json(&id),
         id,
         title,
         updated: crate::chats::now(),
@@ -751,6 +758,7 @@ pub fn reset(ed: &mut Editor) {
     c.follow.new_turn();
     c.conversation = None;
     c.resume = None;
+    ed.session.usage.new_conversation();
     // (review at the end stays as it's set — `llm.review-at-end`)
     crate::edits::at_end_new_chat(ed);
     ensure_proc(ed);
@@ -854,6 +862,11 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
         // Kept from the first question on — a tarae closed mid-turn still has it
         StreamEv::Conversation { id, model } => {
             let new = c.conversation.as_deref() != Some(id.as_str());
+            // (a process that didn't resume one began it: it has cost nothing before)
+            match c.resume.is_none() {
+                true => ed.session.usage.fresh(&id),
+                false => ed.session.usage.resumed(&id),
+            }
             c.conversation = Some(id);
             c.model = model;
             if new {
@@ -861,6 +874,17 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             }
         }
         StreamEv::Models(list) => c.models = list,
+        // What it costs (`usage.rs`) — a request going out changes nothing on screen yet
+        StreamEv::Requesting(at) => {
+            ed.session.usage.requesting(at);
+            ed.unchanged = true;
+        }
+        StreamEv::Usage(seen) => ed.session.usage.seen(seen),
+        StreamEv::Spent(spent) => {
+            ed.session.usage.spent(spent);
+            crate::uistate::watch::usage(ed, "turn");
+            crate::usage::view_sync(ed);
+        }
         StreamEv::Answered(model) => c.model = model,
         StreamEv::ToolResult { id, text, error } => {
             c.calls.retain(|k| k.id != id);
@@ -970,6 +994,8 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             crate::tools::turn_over(ed);
             crate::reads::turn_over(ed);
             checkpoint_turn(ed);
+            // (its result came just before — `Spent`: the cache's TTL runs from its last request)
+            crate::usage::watch(ed);
             keep(ed);
             let answer = ok.then(|| {
                 ed.session.chat.as_ref().and_then(|c| {
@@ -1023,6 +1049,9 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
                 };
                 c.msgs.push(Msg::new(Role::Note, e, ""));
             }
+            // (a turn cut off: what its requests reported, no cost)
+            ed.session.usage.cut_off(crate::usage::now_ms());
+            crate::usage::watch(ed);
             // A review (or a command's card) claude was waiting on has no one to answer now
             crate::edits::turn_over(ed);
             crate::tools::turn_over(ed);

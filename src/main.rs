@@ -110,6 +110,7 @@ mod typed;
 mod uisocket;
 mod uistate;
 mod undofile;
+mod usage;
 mod viewalign;
 mod waits;
 mod wasm;

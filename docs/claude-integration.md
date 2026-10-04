@@ -553,6 +553,35 @@ small screen, a card with no room waits for the next frame that has room.
 Under the hood the chat process gets tarae's own `note` tool: an MCP server that lives inside tarae and speaks
 over the same stream as the conversation, so no server or port is involved.
 
+### What it costs
+
+The last row of the chat says how warm Claude's prompt cache is and what the conversation costs:
+
+```
+● warm until 14:32  ctx 4% of 200k  turn $0.018  read 7.9k write 8.1k in 18 out 185
+```
+
+- **Cache**: warm until its TTL runs out, by the clock — 5 minutes or an hour from the last request that wrote
+  or read it, as that request's cache write says; then `◦ cold`. Said as a time, it stays true while nothing
+  redraws; the only frame while you're idle is the one when it turns cold. (`tarae state` says the seconds
+  left.)
+- **Context**: the last request's input + cache read + cache write, against the model's window (the window comes
+  with the first turn's result, so the first turn shows the token count).
+- **The last turn**: its cost, then its tokens read from the cache, written to it, sent as input and written out.
+  Claude reports the cost as a whole; the four numbers are tokens, not dollars.
+
+When the chat is narrow the words fold first, then the split, then the context; the cache stays. The session list
+(`space W`) has a column with each session's cache and its total so far. `:usage` opens a buffer with a row per
+turn (time, model, input, cache write, cache read, output, hit rate, cost), the session's total, what every
+request in the conversation starts with (its first request: the system prompt, the tools, CLAUDE.md and the
+first message), and today's total across sessions. It updates as turns end.
+
+What claude doesn't send isn't guessed: another CLI's turn shows its counts as `not reported`, and a conversation
+continued from before tarae kept its cost says the first turn's cost wasn't reported (claude's total covers the
+whole conversation). The turns, the cost so far and the cache go with the conversation in `$state/chats/`, so a
+continued one picks up where it was. `tarae state` carries each session's usage, and `--watch usage` is told
+when a turn's result comes and when a cache goes cold.
+
 ## Commit messages
 
 ![A commit message Claude drafted, as an in-buffer review in COMMIT_EDITMSG: the subject "Fix add() subtracting instead of adding" and a body on why, above the # lines](screenshots/commit-draft.png)

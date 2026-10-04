@@ -812,6 +812,51 @@ fn a_watcher_hears_a_turn_begin_and_end() {
     );
 }
 
+/// A chat turn's usage on screen: a stand-in claude streaming what claude does (a request writing 4k to
+/// the 5m cache, its result with the conversation's cost and the model's window) — the line under the chat
+/// says until when the cache stays warm, the context's share, the turn's cost; `:usage` lists the turn; the
+/// state says the same (with seconds left).
+#[test]
+fn a_turns_usage_shows_under_the_chat_and_in_usage() {
+    let sb = Sandbox::new("usage");
+    let lines = [
+        r#"{"type":"system","subtype":"init","session_id":"c1","model":"claude-opus-5-5"}"#,
+        r#"{"type":"system","subtype":"status","status":"requesting"}"#,
+        r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"m1","model":"claude-opus-5-5","usage":{"input_tokens":6,"cache_creation_input_tokens":4000,"cache_read_input_tokens":20000,"cache_creation":{"ephemeral_5m_input_tokens":4000,"ephemeral_1h_input_tokens":0},"output_tokens":1}}}}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello."}}}"#,
+        r#"{"type":"stream_event","event":{"type":"message_delta","usage":{"input_tokens":6,"cache_creation_input_tokens":4000,"cache_read_input_tokens":20000,"output_tokens":120}}}"#,
+        r#"{"type":"result","subtype":"success","result":"Hello.","session_id":"c1","duration_ms":900,"total_cost_usd":0.0412,"usage":{"input_tokens":6,"cache_creation_input_tokens":4000,"cache_read_input_tokens":20000,"output_tokens":120},"modelUsage":{"claude-opus-5-5":{"costUSD":0.0412,"contextWindow":1000000}}}"#,
+    ];
+    let body: Vec<String> = lines.iter().map(|l| format!("  printf '%s\\n' '{l}'\n")).collect();
+    let fake = format!(
+        "while read -r line; do\n  case \"$line\" in '{{\"message\"'*) ;; *) continue;; esac\n{}done\n",
+        body.concat()
+    );
+    let script = sb.write("fake-claude.sh", &fake);
+    sb.write_config(&format!("{BASE_CONFIG}[llm]\ncommand = \"sh\"\nargs = [\"{}\"]\n", script.display()));
+    sb.write("a.txt", "one\n");
+    let mut t = sb.spawn(&["a.txt"]);
+    t.send(" l");
+    t.wait_state("the chat has the keys", |s| s["keys"]["region"] == "chat");
+    t.send("hello\r");
+    // (the chat is 40 wide here: the footer's short form; warm until five minutes on, by the clock)
+    t.wait_for("the usage line", |s| {
+        s.rows.iter().any(|r| r.contains("● warm until ") && r.contains("ctx 2%  $0.041"))
+    });
+    let s = t.wait_state("the session's usage", |s| s["sessions"][0]["usage"]["cache"] == "warm");
+    let u = &s["sessions"][0]["usage"];
+    assert_eq!((u["ttl"].as_str(), u["context"]["tokens"].as_u64()), (Some("5m"), Some(24_006)), "{u}");
+    assert_eq!(u["last_turn"]["cost"], 0.0412);
+    t.send("\x1b");
+    t.wait_state("the code has the keys", |s| s["keys"]["region"] == "code");
+    t.command("usage");
+    t.wait_for("the usage view", |s| {
+        s.contains("# Claude usage")
+            && s.contains("| total | 1 turn")
+            && s.contains("Every session: $0.041 in 1 turn")
+    });
+}
+
 /// A state folder past `sun_path`'s 104 bytes: the socket is bound from its folder, and `tarae state`
 /// reaches it the same way.
 #[test]

@@ -484,6 +484,7 @@ Type `:` in normal mode. `Tab` completes command names and their arguments (path
 | `:procs` |  | What tarae runs and what it costs |
 | `:messages` |  | The notifications since tarae started, newest first |
 | `:inbox` |  | What waits for your answer, every session's, oldest first |
+| `:usage` |  | What Claude's turns cost here and today, and its cache |
 | `:redraw` |  | Draw the whole screen again (when something else wrote over it) |
 | `:lsp-restart` |  | Restart this file's language server |
 | `:plugin-permissions` |  | What each plugin may do beyond the buffer |

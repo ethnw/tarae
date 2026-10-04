@@ -577,6 +577,102 @@ pub struct SessionState {
     pub rebasing: Option<String>,
     pub reloaded: usize,
     pub front: bool,
+    /// Its Claude's usage (`usage.rs`) — None: nothing reported yet.
+    pub usage: Option<UsageState>,
+}
+
+/// A session's usage as the state says it — None in a field: not reported.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UsageState {
+    /// `warm` · `cold` · `not reported`.
+    pub cache: &'static str,
+    pub seconds_left: Option<u64>,
+    pub ttl: Option<&'static str>,
+    /// The last request's input + cache read + cache write · its model's window (from a result).
+    pub context: Option<u64>,
+    pub window: Option<u64>,
+    pub last_turn: Option<crate::usage::Turn>,
+    pub totals: crate::usage::Totals,
+}
+
+impl UsageState {
+    pub fn of(u: &crate::usage::Usage, now_ms: u64) -> Option<UsageState> {
+        use crate::usage::Cache;
+        if !u.reported() {
+            return None;
+        }
+        let cache = u.cache(now_ms);
+        let (seconds_left, ttl) = match cache {
+            Cache::Warm { left_ms, ttl } => (Some(left_ms / 1000), Some(ttl.name())),
+            _ => (None, u.conv.as_ref().and_then(|c| c.ttl).map(crate::usage::Ttl::name)),
+        };
+        let (context, window) = u.context().map_or((None, None), |(n, w)| (Some(n), w));
+        Some(UsageState {
+            cache: cache.word(),
+            seconds_left,
+            ttl,
+            context,
+            window,
+            last_turn: u.last_turn().cloned(),
+            totals: u.totals(),
+        })
+    }
+
+    /// The context's share of the window, in percent.
+    pub fn percent(&self) -> Option<f64> {
+        Some(self.context? as f64 * 100.0 / self.window.filter(|&w| w > 0)? as f64)
+    }
+
+    pub fn json(&self) -> Value {
+        let c = |n: &crate::usage::Counts| json!({ "input": n.input, "cache_write": n.write, "cache_read": n.read, "output": n.output });
+        let last = self.last_turn.as_ref().map(|t| {
+            let mut v = c(&t.counts);
+            v["at_ms"] = json!(t.at_ms);
+            v["model"] = json!(t.model);
+            v["cost"] = json!(t.cost);
+            v["requests"] = json!(t.requests);
+            v
+        });
+        let mut totals = c(&self.totals.counts);
+        totals["turns"] = json!(self.totals.turns);
+        // (the cost of the turns that reported one — none did: null; `unpriced` counts the others)
+        let priced = self.totals.turns > self.totals.unpriced;
+        totals["cost"] = if priced { json!(self.totals.cost) } else { Value::Null };
+        totals["unpriced"] = json!(self.totals.unpriced);
+        json!({
+            "cache": self.cache, "seconds_left": self.seconds_left, "ttl": self.ttl,
+            "context": { "tokens": self.context, "window": self.window,
+                         "percent": self.percent().map(|p| (p * 10.0).round() / 10.0) },
+            "last_turn": last, "totals": totals,
+        })
+    }
+
+    /// One line: `cache warm 54m (1h) · context 4% of 200k · last turn $0.0011 … · total $0.020 in 3 turns`.
+    pub fn text(&self) -> String {
+        use crate::usage::{count, dollars, tokens};
+        let cache = match (self.seconds_left, self.ttl) {
+            (Some(s), Some(t)) => format!("cache warm {} ({t})", crate::usage::left(s * 1000)),
+            _ => format!("cache {}", self.cache),
+        };
+        let context = match (self.context, self.percent(), self.window) {
+            (Some(_), Some(p), Some(w)) => format!("context {p:.0}% of {}", tokens(w)),
+            (Some(n), ..) => format!("context {} (window not reported)", tokens(n)),
+            _ => "context not reported".into(),
+        };
+        let last = self.last_turn.as_ref().map_or_else(String::new, |t| {
+            let n = &t.counts;
+            format!(
+                " · last turn {} (read {} · write {} · in {} · out {})",
+                t.cost.map_or_else(|| "cost not reported".into(), dollars),
+                count(n.read),
+                count(n.write),
+                count(n.input),
+                count(n.output)
+            )
+        });
+        let turns = crate::usage::turns(self.totals.turns);
+        format!("{cache} · {context}{last} · total {} in {turns}", self.totals.cost_said())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -639,6 +735,7 @@ impl Editor {
     /// The state as of the last frame drawn.
     pub fn ui_state(&self) -> UiState {
         let front = &self.session;
+        let now_ms = crate::usage::now_ms();
         let session = |l: &crate::session::Session, is_front: bool| SessionState {
             id: session_id(l.id),
             name: l.label().to_string(),
@@ -657,6 +754,7 @@ impl Editor {
             rebasing: l.rebase.as_ref().map(|r| r.said()),
             reloaded: l.reloaded,
             front: is_front,
+            usage: UsageState::of(&l.usage, now_ms),
         };
         let mut sessions = vec![session(front, true)];
         sessions.extend(self.sessions.iter().map(|l| session(l, false)));
@@ -808,6 +906,9 @@ impl UiState {
                 if s.reloaded > 0 {
                     v["reloaded"] = json!(s.reloaded);
                 }
+                if let Some(u) = &s.usage {
+                    v["usage"] = u.json();
+                }
                 v
             })
             .collect();
@@ -877,6 +978,11 @@ impl UiState {
                 })
                 .collect();
             out.push(format!("sessions: {}", s.join("   ")));
+        }
+        for s in &self.sessions {
+            if let Some(u) = &s.usage {
+                out.push(format!("usage {}: {}", s.id, u.text()));
+            }
         }
         out.extend(self.card_lines());
         self.panels.text(&mut out);

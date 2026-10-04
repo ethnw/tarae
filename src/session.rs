@@ -138,6 +138,8 @@ pub struct Session {
     /// in `:messages` (`disk_said`), so its tab, the chip and its row in the list carry a `•` (#6) until it
     /// comes to the front.
     pub reloaded: usize,
+    /// What its Claude's turns cost and how warm its cache is (`usage.rs`).
+    pub usage: crate::usage::Usage,
 }
 
 /// How long a tool call may wait before its session is marked possibly stuck (a `diagnostics` call's own
@@ -236,6 +238,7 @@ impl Session {
             spawned: Vec::new(),
             viewed: Default::default(),
             reloaded: 0,
+            usage: Default::default(),
         }
     }
 
@@ -1379,6 +1382,7 @@ mod tests {
             usage: None,
             rebasing: None,
             reloaded: 0,
+            claude: None,
         };
         let row = &crate::worktree::items(&[shown(doing)])[0];
         assert!(row.hint.contains("stuck? symbols 42s"), "{}", row.hint);

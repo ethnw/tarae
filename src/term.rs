@@ -8495,8 +8495,14 @@ fn draw_chat(
     let plan_h = plan_rows.len() + usize::from(!plan_rows.is_empty());
     // ── The sessions over it all, when there's more than one
     let tabs_h = usize::from(!editor.sessions.is_empty());
+    // ── What the conversation costs, under it all (once something was reported)
+    let warn_fg = t.try_get("warning").and_then(|s| s.fg).map_or(accent, |fg| Style { fg: Some(fg), ..card });
+    let usage_row =
+        usage_spans(&editor.session.usage, crate::usage::now_ms(), w, [accent, dim, faint, warn_fg]);
+    let usage_h = usize::from(usage_row.is_some());
     // ── Message rows (filled from the bottom)
-    let area = rows.saturating_sub(input_h + 4 + plan_h + tabs_h); // tabs + title·divider + plan + divider·hint
+    // (tabs + title·divider + plan + divider·hint + usage)
+    let area = rows.saturating_sub(input_h + 4 + plan_h + tabs_h + usage_h);
     let mut lines: Vec<Vec<Span>> = Vec::new();
     // Rows that are links as a whole (tool calls), parallel to `lines` — and the call each tool row is (a
     // click goes to its replay stop)
@@ -8982,6 +8988,13 @@ fn draw_chat(
     }
     chat_row_end(out, card, lay.chat_w, used)?;
     y += 1;
+    // Usage: the cache, the context, the last turn's cost
+    if let Some(row) = &usage_row {
+        chat_row_start(out, x0, y, edge(y), card)?;
+        let used = chat_spans(out, row, card, w)?;
+        chat_row_end(out, card, lay.chat_w, used)?;
+        y += 1;
+    }
     // Remaining rows (when the panel is taller than the input)
     while y < top + rows {
         chat_row_start(out, x0, y, edge(y), card)?;
@@ -8992,6 +9005,99 @@ fn draw_chat(
         let r = cur_row.saturating_sub(first_input).min(input_h - 1);
         ((x0 + 3 + 2 + cur_col) as u16, (input_top + r) as u16)
     }))
+}
+
+/// The chat's usage row: `● warm until 14:32  ctx 4% of 200k  turn $0.0011  read 8.2k write 75 in 10 out 30`
+/// — the widest form that fits in `w`, folding the split first, then the context, then the cost (the cache
+/// stays; said by the clock, so it's true however long nothing redraws). None: nothing reported in this
+/// conversation yet. Styles: accent, dim, faint, warning.
+fn usage_spans(
+    u: &crate::usage::Usage,
+    now_ms: u64,
+    w: usize,
+    [accent, dim, faint, warn]: [Style; 4],
+) -> Option<Vec<crate::markdown::Span>> {
+    use crate::markdown::Span;
+    use crate::usage::{Cache, count, dollars, tokens, until};
+    let sp = |text: String, style: Style| Span { text, style };
+    let conv = u.conv.as_ref()?;
+    let turn = u.turns.iter().rev().find(|t| t.conversation == conv.id);
+    if conv.last.is_none() && turn.is_none() {
+        return None;
+    }
+    // Each part long and short (the cache has one form)
+    let cache = |_long: bool| match u.cache(now_ms) {
+        Cache::Warm { left_ms, .. } => {
+            vec![sp("● ".into(), accent), sp("warm until ".into(), faint), sp(until(now_ms + left_ms), dim)]
+        }
+        Cache::Cold { .. } => vec![sp("◦ ".into(), faint), sp("cold".into(), dim)],
+        Cache::NotReported => vec![sp("cache not reported".into(), faint)],
+    };
+    let context = |long: bool| -> Vec<Span> {
+        match u.context() {
+            Some((n, Some(win))) if win > 0 => {
+                let pct = n * 100 / win;
+                let shown = if pct >= 80 { warn } else { dim };
+                let mut v = vec![sp("ctx ".into(), faint), sp(format!("{pct}%"), shown)];
+                if long {
+                    v.push(sp(format!(" of {}", tokens(win)), faint));
+                }
+                v
+            }
+            Some((n, _)) => vec![sp("ctx ".into(), faint), sp(tokens(n), dim)],
+            None if long => vec![sp("ctx not reported".into(), faint)],
+            None => Vec::new(),
+        }
+    };
+    let cost = |long: bool| -> Vec<Span> {
+        let Some(t) = turn else { return Vec::new() };
+        let label = if long { "turn " } else { "" };
+        match t.cost {
+            Some(c) => vec![sp(label.into(), faint), sp(dollars(c), dim)],
+            None if long => vec![sp("cost not reported".into(), faint)],
+            None => Vec::new(),
+        }
+    };
+    let split = |long: bool| -> Vec<Span> {
+        let Some(t) = turn.filter(|t| t.counts.any()) else { return Vec::new() };
+        let n = &t.counts;
+        let parts =
+            [("read", "r", n.read), ("write", "w", n.write), ("in", "i", n.input), ("out", "o", n.output)];
+        // (short, a count not reported is left out — the long form says so)
+        let mut v = Vec::new();
+        for (word, letter, k) in parts.into_iter().filter(|p| long || p.2.is_some()) {
+            let gap = if v.is_empty() { "" } else { " " };
+            v.push(sp(format!("{gap}{} ", if long { word } else { letter }), faint));
+            v.push(sp(count(k), dim));
+        }
+        v
+    };
+    // (the split's words go last — its letters are the hardest to read)
+    let tiers: [[Option<Vec<Span>>; 4]; 7] = [
+        [Some(cache(true)), Some(context(true)), Some(cost(true)), Some(split(true))],
+        [Some(cache(false)), Some(context(true)), Some(cost(true)), Some(split(true))],
+        [Some(cache(false)), Some(context(false)), Some(cost(false)), Some(split(true))],
+        [Some(cache(false)), Some(context(false)), Some(cost(false)), Some(split(false))],
+        [Some(cache(false)), Some(context(false)), Some(cost(false)), None],
+        [Some(cache(false)), None, Some(cost(false)), None],
+        [Some(cache(false)), None, None, None],
+    ];
+    let width = |v: &[Span]| v.iter().map(|s| s.text.width()).sum::<usize>();
+    for tier in tiers {
+        let groups: Vec<Vec<Span>> = tier.into_iter().flatten().filter(|g| width(g) > 0).collect();
+        let total = groups.iter().map(|g| width(g)).sum::<usize>() + 2 * groups.len().saturating_sub(1);
+        if total <= w {
+            let mut row = Vec::new();
+            for (i, g) in groups.into_iter().enumerate() {
+                if i > 0 {
+                    row.push(sp("  ".into(), faint));
+                }
+                row.extend(g);
+            }
+            return Some(row);
+        }
+    }
+    Some(Vec::new())
 }
 
 /// Answer markdown → rows. Code blocks as a "well" of editor bg (sunk a tone inside the card) — text and

@@ -429,6 +429,8 @@ pub struct Editor {
     pub llm_generation: u64,
     /// The ask process awaiting an answer (killed on cancel).
     pub llm_pid: Option<u32>,
+    /// `:usage`'s buffer and the session it's about — said again as its turns end (`usage.rs`).
+    pub usage_view: Option<(DocId, crate::event::SessionId)>,
     /// (document, line, byte column) to put the cursor on once that document finishes loading.
     pub goto_after_load: Option<(DocId, usize, usize)>,
     /// Keys, clicks, drags, the wheel over the code and pastes so far — follow tells the user moving the
@@ -662,6 +664,7 @@ impl Editor {
             llm_warm: Warm::default(),
             llm_generation: 0,
             llm_pid: None,
+            usage_view: None,
             goto_after_load: None,
             input_seq: 0,
             dap: None,
@@ -4312,6 +4315,71 @@ mod tests {
                 body.join("; ")
             ),
         ];
+    }
+
+    /// A turn of the recorded stream (`usage_stream.jsonl`, its first) answered by a fake claude: the line
+    /// under the chat says the cache warm for the hour its 1h writes got, the context against the window
+    /// its result named, the turn's cost and its counts; `:usage` lists the turn, the total, what each
+    /// request starts with and today's total; the state carries the same.
+    #[test]
+    fn chat_usage_shows_under_the_chat_and_in_its_view() {
+        let conv = "cda055cc-67c1-4da7-9120-68435b027d4f";
+        let mut events =
+            vec![serde_json::json!({"type": "system", "subtype": "init", "session_id": conv, "model": "m"})];
+        for line in include_str!("usage_stream.jsonl").lines() {
+            events.push(serde_json::from_str(line).unwrap());
+            if line.contains("total_cost_usd") {
+                break;
+            }
+        }
+        let mut ed = editor("");
+        fake_claude_stream(&mut ed, &events);
+        feed(&mut ed, "<space>lhi<ret>");
+        settle_until(&mut ed, |ed| {
+            !ed.session.chat.as_ref().unwrap().busy() && ed.session.usage.turns.len() == 1
+        });
+        let rows = |ed: &mut Editor, w: u16| -> Vec<String> {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, w, 40).unwrap();
+            let mut vt = vt100::Parser::new(40, w, 0);
+            vt.process(&bytes);
+            vt.screen().rows(0, w).collect()
+        };
+        // (the last request: 8 in + 7,924 read + 201 written, of haiku's 200k; warm for the hour its 1h writes
+        // got, said by the clock)
+        let at = crate::usage::until(ed.session.usage.cold_at().unwrap());
+        let wide = rows(&mut ed, 240);
+        let footer = wide.iter().find(|r| r.contains("● warm")).unwrap_or_else(|| panic!("{wide:#?}"));
+        let long =
+            format!("● warm until {at}  ctx 4% of 200k  turn $0.018  read 7.9k write 8.1k in 18 out 185");
+        assert!(footer.contains(&long), "{footer:?}");
+        assert!(
+            wide.iter().position(|r| r.contains("● warm")) > wide.iter().position(|r| r.contains("enter"))
+        );
+        // Narrower, the words fold first
+        let narrow = rows(&mut ed, 160);
+        let footer = narrow.iter().find(|r| r.contains("● warm")).unwrap_or_else(|| panic!("{narrow:#?}"));
+        assert!(footer.contains(&format!("● warm until {at}  ctx 4%  $0.018")), "{footer:?}");
+        assert!(!footer.contains("of 200k") && !footer.contains("turn "), "{footer:?}");
+        feed(&mut ed, "<esc>:usage<ret>");
+        assert_eq!(ed.doc().title.as_deref(), Some("usage"));
+        let text = ed.doc().text.to_string();
+        for part in [
+            "| time  | model     | input | cache write | cache read | output | hit |   cost |",
+            "| haiku 4.5 |    18 |        8.1k |       7.9k |    185 | 49% | $0.018 |",
+            "| total | 1 turn    |    18 |        8.1k |       7.9k |    185 | 49% | $0.018 |",
+            "## Every request starts with\n\n7.9k tokens (cache write 7.9k · cache read 0) — what this",
+            "Every session: $0.018 in 1 turn",
+        ] {
+            assert!(text.contains(part), "{part:?} in\n{text}");
+        }
+        let cache = format!("cache warm until {at} (1h writes) · context 8.1k of 200k (4%)");
+        assert!(text.contains(&cache), "{cache:?} in\n{text}");
+        let s = ed.ui_state();
+        let u = s.sessions[0].usage.as_ref().expect("the session's usage");
+        assert_eq!((u.cache, u.ttl, u.context, u.window), ("warm", Some("1h"), Some(8133), Some(200_000)));
+        assert!(u.seconds_left.is_some_and(|s| s > 3590), "{u:?}");
+        assert!(s.text().contains("usage s0: cache warm 60m (1h) · context 4% of 200k"), "{}", s.text());
     }
 
     fn follow_project(name: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf) {

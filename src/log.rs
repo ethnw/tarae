@@ -72,6 +72,12 @@ pub fn clock(at: std::time::SystemTime) -> String {
     format!("{h:02}:{m:02}")
 }
 
+/// The local day `at` falls on (year, month, day).
+pub fn day(at: std::time::SystemTime) -> (i32, i32, i32) {
+    let (y, mo, d, ..) = local(at);
+    (y, mo, d)
+}
+
 fn local(at: std::time::SystemTime) -> (i32, i32, i32, i32, i32, i32) {
     let secs = at.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     let t = secs as libc::time_t;

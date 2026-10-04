@@ -1,0 +1,979 @@
+//! What Claude's work costs and how warm its prompt cache is — per session, from what claude's stream-json
+//! says (measured 2026-10-05, Claude Code 2.1.288; `usage_stream.jsonl` is a recorded stream):
+//!
+//! - Each API request: `system` `status: "requesting"` as it goes out, then `stream_event` `message_start`
+//!   whose `message.usage` has `input_tokens`, `cache_creation_input_tokens` (split in `cache_creation`'s
+//!   `ephemeral_5m_input_tokens` / `ephemeral_1h_input_tokens` — the TTL the write got),
+//!   `cache_read_input_tokens` and `output_tokens` so far; `message_delta` (no id: the message started last)
+//!   has the final `output_tokens`. The `assistant` messages carry the same usage once per content block,
+//!   with the output as it was then — merged by message id, the largest kept.
+//! - The turn's `result`: `usage` is this turn's (the sum of its requests), `duration_ms`; `total_cost_usd`
+//!   and `modelUsage.<model>` (`costUSD`, `contextWindow`) add up over the whole conversation — across turns
+//!   and across `--resume` — so a turn's cost is the difference from that conversation's last result (a
+//!   fresh one's first turn: all of it).
+//! - Nothing splits the cost into read / write / input / output (those are token counts), and `initialize`
+//!   names no context window — it comes with a result. What isn't sent (another CLI, a turn cut off) is
+//!   "not reported", never a guess.
+//! - The cache lives its TTL from the last request that wrote or read it (a read refreshes it): warm until
+//!   then, the TTL that of its last write.
+//!
+//! Kept in memory per session (`Session.usage`); a conversation's turns, cost so far and cache go with it in
+//! `$state/chats/` (`chats.rs`), so one continued (`:restart`, `C-p`) comes back with them.
+
+use serde_json::{Value, json};
+
+use crate::editor::Editor;
+
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+}
+
+/// How long a cache write lives (`cache_creation`'s split says which).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ttl {
+    Min5,
+    Hour1,
+}
+
+impl Ttl {
+    pub fn ms(self) -> u64 {
+        match self {
+            Ttl::Min5 => 5 * 60_000,
+            Ttl::Hour1 => 3_600_000,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Ttl::Min5 => "5m",
+            Ttl::Hour1 => "1h",
+        }
+    }
+
+    fn named(s: &str) -> Option<Ttl> {
+        [Ttl::Min5, Ttl::Hour1].into_iter().find(|t| t.name() == s)
+    }
+
+    /// The kind of write a `usage` object reports — None: it wrote nothing, or didn't say which.
+    pub fn of(usage: &Value) -> Option<Ttl> {
+        let split = &usage["cache_creation"];
+        let n = |k: &str| split[k].as_u64().unwrap_or(0);
+        match (n("ephemeral_1h_input_tokens"), n("ephemeral_5m_input_tokens")) {
+            (h, _) if h > 0 => Some(Ttl::Hour1),
+            (_, m) if m > 0 => Some(Ttl::Min5),
+            _ => None,
+        }
+    }
+}
+
+/// Token counts as reported — None where nothing was.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Counts {
+    pub input: Option<u64>,
+    /// Cache write · cache read.
+    pub write: Option<u64>,
+    pub read: Option<u64>,
+    pub output: Option<u64>,
+}
+
+impl Counts {
+    /// From an Anthropic `usage` object.
+    pub fn of(u: &Value) -> Counts {
+        Counts {
+            input: u["input_tokens"].as_u64(),
+            write: u["cache_creation_input_tokens"].as_u64(),
+            read: u["cache_read_input_tokens"].as_u64(),
+            output: u["output_tokens"].as_u64(),
+        }
+    }
+
+    fn fields(&mut self) -> [&mut Option<u64>; 4] {
+        [&mut self.input, &mut self.write, &mut self.read, &mut self.output]
+    }
+
+    /// The same request said again: each count its largest (output grows as it streams).
+    fn merge(&mut self, mut o: Counts) {
+        for (a, b) in self.fields().into_iter().zip(o.fields()) {
+            *a = match (*a, *b) {
+                (Some(x), Some(y)) => Some(x.max(y)),
+                (x, y) => x.or(y),
+            };
+        }
+    }
+
+    /// Summed — a count none of them reported stays None.
+    fn add(&mut self, mut o: Counts) {
+        for (a, b) in self.fields().into_iter().zip(o.fields()) {
+            *a = match (*a, *b) {
+                (Some(x), Some(y)) => Some(x + y),
+                (x, y) => x.or(y),
+            };
+        }
+    }
+
+    pub fn any(&self) -> bool {
+        [self.input, self.write, self.read, self.output].iter().any(Option::is_some)
+    }
+
+    /// What the request carried: input + cache read + cache write.
+    pub fn context(&self) -> Option<u64> {
+        let parts = [self.input, self.read, self.write];
+        parts.iter().any(Option::is_some).then(|| parts.iter().flatten().sum())
+    }
+
+    /// The share of it read from the cache.
+    pub fn hit(&self) -> Option<f64> {
+        let all = self.context().filter(|&n| n > 0)?;
+        Some(self.read? as f64 / all as f64)
+    }
+
+    fn json(&self) -> Value {
+        json!({ "input": self.input, "write": self.write, "read": self.read, "output": self.output })
+    }
+
+    fn from_json(v: &Value) -> Counts {
+        Counts {
+            input: v["input"].as_u64(),
+            write: v["write"].as_u64(),
+            read: v["read"].as_u64(),
+            output: v["output"].as_u64(),
+        }
+    }
+}
+
+/// Usage one stream line reports (`llm::usage_line`): its message (None: the one started last), model,
+/// counts, the kind of cache write, when it was read.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Seen {
+    pub id: Option<String>,
+    pub model: String,
+    pub counts: Counts,
+    pub ttl: Option<Ttl>,
+    pub at_ms: u64,
+}
+
+/// A turn's `result` as far as usage goes.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Spent {
+    pub conversation: String,
+    pub counts: Counts,
+    /// The conversation's cost so far (`total_cost_usd`).
+    pub total_cost: Option<f64>,
+    /// The models it ran (`modelUsage`'s keys) and their context windows.
+    pub models: Vec<(String, Option<u64>)>,
+    pub ms: Option<u64>,
+    pub at_ms: u64,
+}
+
+/// One API request.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Request {
+    pub id: String,
+    pub model: String,
+    pub sent_ms: u64,
+    pub counts: Counts,
+    pub ttl: Option<Ttl>,
+}
+
+impl Request {
+    fn touched(&self) -> bool {
+        self.counts.write.unwrap_or(0) > 0 || self.counts.read.unwrap_or(0) > 0
+    }
+
+    fn json(&self) -> Value {
+        json!({ "id": self.id, "model": self.model, "sent": self.sent_ms, "counts": self.counts.json(),
+                "ttl": self.ttl.map(Ttl::name) })
+    }
+
+    fn from_json(v: &Value) -> Option<Request> {
+        Some(Request {
+            id: v["id"].as_str()?.to_string(),
+            model: v["model"].as_str().unwrap_or_default().to_string(),
+            sent_ms: v["sent"].as_u64()?,
+            counts: Counts::from_json(&v["counts"]),
+            ttl: v["ttl"].as_str().and_then(Ttl::named),
+        })
+    }
+}
+
+/// One turn, as its result (else its requests) said.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Turn {
+    /// When it ended (unix ms).
+    pub at_ms: u64,
+    pub conversation: String,
+    pub model: String,
+    pub counts: Counts,
+    /// Its share of the conversation's cost — None: not reported, or the conversation's earlier cost isn't
+    /// known here (one continued that tarae didn't keep the cost of).
+    pub cost: Option<f64>,
+    pub requests: usize,
+    pub ms: Option<u64>,
+}
+
+impl Turn {
+    fn json(&self) -> Value {
+        json!({ "at": self.at_ms, "model": self.model, "counts": self.counts.json(), "cost": self.cost,
+                "requests": self.requests, "ms": self.ms })
+    }
+
+    fn from_json(conversation: &str, v: &Value) -> Option<Turn> {
+        Some(Turn {
+            at_ms: v["at"].as_u64()?,
+            conversation: conversation.to_string(),
+            model: v["model"].as_str().unwrap_or_default().to_string(),
+            counts: Counts::from_json(&v["counts"]),
+            cost: v["cost"].as_f64(),
+            requests: v["requests"].as_u64().unwrap_or(0) as usize,
+            ms: v["ms"].as_u64(),
+        })
+    }
+}
+
+/// The conversation in the chat now: its cache, its context, what each request starts with.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Conv {
+    pub id: String,
+    /// Its latest request — what the context holds.
+    pub last: Option<Request>,
+    /// When a request last wrote or read its cache (the TTL runs from there) · the TTL of its last write
+    /// (None: none seen, or one that didn't say).
+    pub touched_ms: Option<u64>,
+    pub ttl: Option<Ttl>,
+    /// Its first request — system prompt, tools, CLAUDE.md and the first message, what every later request
+    /// reads again.
+    pub fixed: Option<Request>,
+    /// A fresh conversation whose first request hasn't come yet.
+    first_next: bool,
+    /// Its cost so far, as its last result said (None: not known here).
+    pub cost_so_far: Option<f64>,
+}
+
+/// Warm (time left) · cold (since when) · not reported.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cache {
+    Warm { left_ms: u64, ttl: Ttl },
+    Cold { since_ms: u64 },
+    NotReported,
+}
+
+impl Cache {
+    /// `warm` · `cold` · `not reported` — the state's word.
+    pub fn word(self) -> &'static str {
+        match self {
+            Cache::Warm { .. } => "warm",
+            Cache::Cold { .. } => "cold",
+            Cache::NotReported => "not reported",
+        }
+    }
+}
+
+/// Turns summed.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Totals {
+    pub turns: usize,
+    pub counts: Counts,
+    /// The cost of the turns that reported one · how many didn't.
+    pub cost: f64,
+    pub unpriced: usize,
+}
+
+impl Totals {
+    fn add(&mut self, t: &Turn) {
+        self.turns += 1;
+        self.counts.add(t.counts);
+        match t.cost {
+            Some(c) => self.cost += c,
+            None => self.unpriced += 1,
+        }
+    }
+
+    /// `$1.23` · `$1.23 + 2 not reported` · `not reported`.
+    pub fn cost_said(&self) -> String {
+        match (self.turns - self.unpriced, self.unpriced) {
+            (0, _) => "not reported".into(),
+            (_, 0) => dollars(self.cost),
+            (_, n) => format!("{} + {n} not reported", dollars(self.cost)),
+        }
+    }
+}
+
+/// A session's Claude usage.
+#[derive(Debug, Default)]
+pub struct Usage {
+    /// Its turns, oldest first — every conversation it had since tarae started (and a continued one's
+    /// earlier turns).
+    pub turns: Vec<Turn>,
+    /// The requests of the turn under way.
+    pub requests: Vec<Request>,
+    pub conv: Option<Conv>,
+    /// The context windows results named, by model.
+    pub windows: Vec<(String, u64)>,
+    /// A request said to go out, its message not here yet.
+    requesting: Option<u64>,
+    /// When the TTL watch asleep wakes (`watch`).
+    pub watch: Option<u64>,
+}
+
+impl Usage {
+    /// A conversation this process began (no `--resume`): it has cost nothing before, its first request is
+    /// what every request starts with.
+    pub fn fresh(&mut self, id: &str) {
+        if self.conv.as_ref().is_some_and(|c| c.id == id) {
+            return;
+        }
+        self.conv = Some(Conv { id: id.into(), first_next: true, cost_so_far: Some(0.0), ..Conv::default() });
+    }
+
+    /// A conversation continued (`--resume`) — what came before is known only if it was kept (`restore`).
+    pub fn resumed(&mut self, id: &str) {
+        if self.conv.as_ref().is_some_and(|c| c.id == id) {
+            return;
+        }
+        self.conv = Some(Conv { id: id.into(), ..Conv::default() });
+    }
+
+    pub fn requesting(&mut self, at_ms: u64) {
+        self.requesting = Some(at_ms);
+    }
+
+    /// A stream line's usage: a new request, or more of one under way.
+    pub fn seen(&mut self, s: Seen) {
+        let at = match &s.id {
+            Some(id) => self.requests.iter().position(|r| r.id == *id),
+            None => self.requests.len().checked_sub(1),
+        };
+        let r = match (at, s.id) {
+            (Some(i), _) => {
+                let r = &mut self.requests[i];
+                r.counts.merge(s.counts);
+                r.ttl = r.ttl.or(s.ttl);
+                if r.model.is_empty() {
+                    r.model = s.model;
+                }
+                r.clone()
+            }
+            (None, Some(id)) => {
+                let sent_ms = self.requesting.take().unwrap_or(s.at_ms);
+                let r = Request { id, model: s.model, sent_ms, counts: s.counts, ttl: s.ttl };
+                self.requests.push(r.clone());
+                r
+            }
+            (None, None) => return,
+        };
+        let Some(c) = self.conv.as_mut() else { return };
+        if c.first_next || c.fixed.as_ref().is_some_and(|f| f.id == r.id) {
+            c.first_next = false;
+            c.fixed = Some(r.clone());
+        }
+        if r.touched() {
+            c.touched_ms = Some(r.sent_ms);
+        }
+        if r.counts.write.unwrap_or(0) > 0 {
+            c.ttl = r.ttl;
+        }
+        c.last = Some(r);
+    }
+
+    /// The turn's result: a turn of what it says (else of what its requests said).
+    pub fn spent(&mut self, s: Spent) -> &Turn {
+        let requests = std::mem::take(&mut self.requests);
+        let mut counts = s.counts;
+        let mut summed = Counts::default();
+        for r in &requests {
+            summed.add(r.counts);
+        }
+        for (a, b) in counts.fields().into_iter().zip(summed.fields()) {
+            *a = a.or(*b);
+        }
+        for (m, w) in &s.models {
+            if let Some(w) = w {
+                self.windows.retain(|(k, _)| k != m);
+                self.windows.push((m.clone(), *w));
+            }
+        }
+        let conv = match self.conv.as_mut() {
+            Some(c) if c.id == s.conversation || s.conversation.is_empty() => Some(c),
+            _ => None,
+        };
+        let cost = match (conv, s.total_cost) {
+            (Some(c), Some(total)) => {
+                let before = c.cost_so_far.replace(total);
+                before.map(|b| (total - b).max(0.0))
+            }
+            _ => None,
+        };
+        let mut model: Vec<String> = s.models.iter().map(|m| m.0.clone()).collect();
+        if model.is_empty() {
+            model = requests.iter().map(|r| r.model.clone()).filter(|m| !m.is_empty()).collect();
+            model.dedup();
+        }
+        self.turns.push(Turn {
+            at_ms: s.at_ms,
+            conversation: if s.conversation.is_empty() {
+                self.conv.as_ref().map(|c| c.id.clone()).unwrap_or_default()
+            } else {
+                s.conversation
+            },
+            model: model.join(", "),
+            counts,
+            cost,
+            requests: requests.len(),
+            ms: s.ms,
+        });
+        self.turns.last().expect("just pushed")
+    }
+
+    /// A one-turn process's result (`space i`, a commit draft — `what`): a turn of its own, beside the
+    /// chat's conversation; its process began with it, so its total is its cost.
+    pub fn aside(&mut self, s: Spent, what: &str) {
+        let model: Vec<String> = s.models.iter().map(|m| m.0.clone()).collect();
+        self.turns.push(Turn {
+            at_ms: s.at_ms,
+            conversation: what.into(),
+            model: model.join(", "),
+            counts: s.counts,
+            cost: s.total_cost,
+            requests: 0,
+            ms: s.ms,
+        });
+    }
+
+    /// The turn ended with no result (claude exited, cut off): what its requests said, no cost.
+    pub fn cut_off(&mut self, at_ms: u64) {
+        if self.requests.is_empty() {
+            return;
+        }
+        let conversation = self.conv.as_ref().map(|c| c.id.clone()).unwrap_or_default();
+        self.spent(Spent { conversation, at_ms, ..Spent::default() });
+    }
+
+    /// A new conversation is about to begin (`C-l`): the last one's cache and context aren't this one's.
+    pub fn new_conversation(&mut self) {
+        self.conv = None;
+        self.requests.clear();
+    }
+
+    /// Whether anything was reported at all.
+    pub fn reported(&self) -> bool {
+        !self.turns.is_empty()
+            || !self.requests.is_empty()
+            || self.conv.as_ref().is_some_and(|c| c.last.is_some())
+    }
+
+    /// When the conversation's cache goes cold (unix ms) — None: not reported.
+    pub fn cold_at(&self) -> Option<u64> {
+        let c = self.conv.as_ref()?;
+        Some(c.touched_ms? + c.ttl?.ms())
+    }
+
+    pub fn cache(&self, now_ms: u64) -> Cache {
+        let (Some(at), Some(ttl)) = (self.cold_at(), self.conv.as_ref().and_then(|c| c.ttl)) else {
+            return Cache::NotReported;
+        };
+        if now_ms < at { Cache::Warm { left_ms: at - now_ms, ttl } } else { Cache::Cold { since_ms: at } }
+    }
+
+    /// What the latest request carried, and its model's context window if a result named it.
+    pub fn context(&self) -> Option<(u64, Option<u64>)> {
+        let last = self.conv.as_ref()?.last.as_ref()?;
+        let used = last.counts.context()?;
+        let window = self.windows.iter().find(|(m, _)| *m == last.model).map(|w| w.1);
+        Some((used, window))
+    }
+
+    pub fn last_turn(&self) -> Option<&Turn> {
+        self.turns.last()
+    }
+
+    pub fn totals(&self) -> Totals {
+        let mut t = Totals::default();
+        for turn in &self.turns {
+            t.add(turn);
+        }
+        t
+    }
+
+    /// The conversation `id` as kept with it (`chats.rs`) — None: nothing about it here.
+    pub fn conv_json(&self, id: &str) -> Option<Value> {
+        let turns: Vec<Value> = self.turns.iter().filter(|t| t.conversation == id).map(Turn::json).collect();
+        let c = self.conv.as_ref().filter(|c| c.id == id);
+        if turns.is_empty() && c.is_none() {
+            return None;
+        }
+        let mut v = json!({ "turns": turns, "windows": self.windows.iter().map(|(m, w)| json!([m, w]))
+            .collect::<Vec<_>>() });
+        if let Some(c) = c {
+            v["cost_so_far"] = json!(c.cost_so_far);
+            v["last"] = c.last.as_ref().map_or(Value::Null, Request::json);
+            v["fixed"] = c.fixed.as_ref().map_or(Value::Null, Request::json);
+            v["touched"] = json!(c.touched_ms);
+            v["ttl"] = json!(c.ttl.map(Ttl::name));
+        }
+        Some(v)
+    }
+
+    /// Conversation `id` continued from what was kept: its turns (unless they're here already), its cache,
+    /// its cost so far.
+    pub fn restore(&mut self, id: &str, v: &Value) {
+        if !self.turns.iter().any(|t| t.conversation == id) {
+            let kept = v["turns"].as_array().into_iter().flatten().filter_map(|t| Turn::from_json(id, t));
+            self.turns.extend(kept);
+            self.turns.sort_by_key(|t| t.at_ms);
+        }
+        for w in v["windows"].as_array().into_iter().flatten() {
+            if let (Some(m), Some(n)) = (w[0].as_str(), w[1].as_u64())
+                && !self.windows.iter().any(|(k, _)| k == m)
+            {
+                self.windows.push((m.to_string(), n));
+            }
+        }
+        self.requests.clear();
+        self.conv = Some(Conv {
+            id: id.into(),
+            last: Request::from_json(&v["last"]),
+            touched_ms: v["touched"].as_u64(),
+            ttl: v["ttl"].as_str().and_then(Ttl::named),
+            fixed: Request::from_json(&v["fixed"]),
+            first_next: false,
+            cost_so_far: v["cost_so_far"].as_f64(),
+        });
+    }
+}
+
+/// The turns of every session that ended today (local time).
+pub fn today<'a>(all: impl Iterator<Item = &'a Usage>, now_ms: u64) -> Totals {
+    let day = |ms: u64| crate::log::day(std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms));
+    let today = day(now_ms);
+    let mut t = Totals::default();
+    for turn in all.flat_map(|u| &u.turns).filter(|t| day(t.at_ms) == today) {
+        t.add(turn);
+    }
+    t
+}
+
+// ── Said ────────────────────────────────────────────────────────────────────
+
+/// `191` · `2.3k` · `23k` · `1.2M` · `1M` (no `.0`).
+pub fn tokens(n: u64) -> String {
+    let s = match n {
+        0..1000 => return n.to_string(),
+        1000..10_000 => format!("{:.1}k", n as f64 / 1000.0),
+        10_000..1_000_000 => return format!("{}k", (n + 500) / 1000),
+        _ => format!("{:.1}M", n as f64 / 1e6),
+    };
+    s.replace(".0", "")
+}
+
+/// `$0.0012` · `$0.023` · `$0.50` · `$1.23`.
+pub fn dollars(x: f64) -> String {
+    match x {
+        x if x < 0.01 => format!("${x:.4}"),
+        x if x < 0.1 => format!("${x:.3}"),
+        x => format!("${x:.2}"),
+    }
+}
+
+/// Time left, whole minutes up (never `0m` while warm): `54m` · `5m`.
+pub fn left(ms: u64) -> String {
+    format!("{}m", ms.div_ceil(60_000))
+}
+
+/// When a cache warm until `at_ms` goes cold, local time (`14:32`) — what the footer, the list and `:usage`
+/// say: never stale while nothing redraws, as a countdown would be.
+pub fn until(at_ms: u64) -> String {
+    crate::log::clock(std::time::UNIX_EPOCH + std::time::Duration::from_millis(at_ms))
+}
+
+/// `1 turn` · `3 turns`.
+pub fn turns(n: usize) -> String {
+    if n == 1 { "1 turn".into() } else { format!("{n} turns") }
+}
+
+/// A token count, or `not reported`.
+pub fn count(n: Option<u64>) -> String {
+    n.map_or_else(|| "not reported".into(), tokens)
+}
+
+/// `opus 5.5` for `claude-opus-5-5` · `haiku 4.5` for `claude-haiku-4-5-20251001` — another name as it is.
+pub fn model_short(m: &str) -> String {
+    let Some(rest) = m.strip_prefix("claude-") else { return m.to_string() };
+    let parts: Vec<&str> = rest.split('-').filter(|p| p.len() < 8).collect();
+    match parts.split_first() {
+        Some((family, version)) if !version.is_empty() => format!("{family} {}", version.join(".")),
+        _ => m.to_string(),
+    }
+}
+
+// ── `:usage` ────────────────────────────────────────────────────────────────
+
+/// `:usage`'s text for session `name` (Markdown): the conversation now, a row per turn, the session's total,
+/// what each request starts with, and today's total across `all` sessions.
+pub fn report(name: &str, u: &Usage, all: &[(&str, &Usage)], now_ms: u64) -> String {
+    let clock = |ms: u64| crate::log::clock(std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms));
+    let pct = |n: u64, w: u64| n * 100 / w.max(1);
+    let mut out = format!("# Claude usage — {name}\n\n");
+    let cache = match u.cache(now_ms) {
+        Cache::Warm { left_ms, ttl } => {
+            format!("cache warm until {} ({} writes)", until(now_ms + left_ms), ttl.name())
+        }
+        Cache::Cold { since_ms } => format!("cache cold since {}", clock(since_ms)),
+        Cache::NotReported => "cache not reported".into(),
+    };
+    let context = match u.context() {
+        Some((n, Some(w))) => format!("context {} of {} ({}%)", tokens(n), tokens(w), pct(n, w)),
+        Some((n, None)) => format!("context {} (window not reported yet)", tokens(n)),
+        None => "context not reported".into(),
+    };
+    out += &format!("As of {} · {cache} · {context}\n\n## Turns\n\n", clock(now_ms));
+    if u.turns.is_empty() {
+        out += "No turn has ended yet.\n";
+    } else {
+        let hit =
+            |c: &Counts| c.hit().map_or_else(|| "not reported".into(), |h| format!("{:.0}%", h * 100.0));
+        let cells = |c: &Counts| [count(c.input), count(c.write), count(c.read), count(c.output), hit(c)];
+        let mut rows: Vec<Vec<String>> = Vec::new();
+        for t in &u.turns {
+            let models: Vec<String> =
+                t.model.split(", ").filter(|m| !m.is_empty()).map(model_short).collect();
+            let mut model = if models.is_empty() { "not reported".to_string() } else { models.join(", ") };
+            if t.conversation == "ask" {
+                model = format!("ask · {model}");
+            }
+            let mut row = vec![clock(t.at_ms), model];
+            row.extend(cells(&t.counts));
+            row.push(t.cost.map_or_else(|| "not reported".into(), dollars));
+            rows.push(row);
+        }
+        let totals = u.totals();
+        let mut row = vec!["total".to_string(), turns(totals.turns)];
+        row.extend(cells(&totals.counts));
+        row.push(totals.cost_said());
+        rows.push(row);
+        out +=
+            &table(&["time", "model", "input", "cache write", "cache read", "output", "hit", "cost"], &rows);
+    }
+    if let Some(c) = &u.conv {
+        out += "\n## Every request starts with\n\n";
+        out += &match &c.fixed {
+            Some(f) => format!(
+                "{} tokens (cache write {} · cache read {}) — what this conversation's first request carried: \
+                 the system prompt, the tools, CLAUDE.md and the first message, read again by every request \
+                 after it.\n",
+                f.counts.context().map_or_else(|| "not reported".into(), tokens),
+                count(f.counts.write),
+                count(f.counts.read)
+            ),
+            None => {
+                "Not known: this conversation's first request wasn't seen here (it was continued).\n".into()
+            }
+        };
+    }
+    let today_all = today(all.iter().map(|(_, u)| *u), now_ms);
+    out += "\n## Today\n\n";
+    if today_all.turns == 0 {
+        out += "Nothing yet today.\n";
+    } else {
+        out += &format!("Every session: {} in {}\n", today_all.cost_said(), turns(today_all.turns));
+        if all.len() > 1 {
+            out += "\n";
+            for (n, u) in all {
+                let t = today(std::iter::once(*u), now_ms);
+                if t.turns > 0 {
+                    out += &format!("- {n}: {} in {}\n", t.cost_said(), turns(t.turns));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// A Markdown table, its columns padded (numbers right-aligned — all but the first two).
+fn table(head: &[&str], rows: &[Vec<String>]) -> String {
+    use unicode_width::UnicodeWidthStr as _;
+    let widths: Vec<usize> = (0..head.len())
+        .map(|c| rows.iter().map(|r| r[c].width()).chain([head[c].width()]).max().unwrap_or(0))
+        .collect();
+    let line = |cells: Vec<String>| format!("| {} |\n", cells.join(" | "));
+    let pad = |c: usize, s: &str| {
+        let gap = " ".repeat(widths[c] - s.width());
+        if c < 2 { format!("{s}{gap}") } else { format!("{gap}{s}") }
+    };
+    let mut out = line(head.iter().enumerate().map(|(c, h)| pad(c, h)).collect());
+    let rule = widths
+        .iter()
+        .enumerate()
+        .map(|(c, w)| if c < 2 { "-".repeat(*w) } else { format!("{}:", "-".repeat(w - 1)) });
+    out += &line(rule.collect());
+    for r in rows {
+        out += &line(r.iter().enumerate().map(|(c, s)| pad(c, s)).collect());
+    }
+    out
+}
+
+/// The report for session `sid` as things are now.
+fn report_now(ed: &Editor, sid: crate::event::SessionId) -> Option<String> {
+    let sessions = ed.sessions_in_order();
+    let all: Vec<(&str, &Usage)> = sessions.iter().map(|l| (l.label(), &l.usage)).collect();
+    let l = sessions.iter().find(|l| l.id == sid)?;
+    Some(report(l.label(), &l.usage, &all, now_ms()))
+}
+
+/// `:usage` — the front session's usage in a buffer of its own (Markdown, nothing to save); said again as
+/// its turns end while it's open.
+pub fn open(ed: &mut Editor) {
+    let sid = ed.session.id;
+    let Some(text) = report_now(ed, sid) else { return };
+    let at = ed.usage_view.and_then(|(id, _)| ed.docs.iter().position(|d| d.id == id));
+    let id = match at {
+        Some(i) => {
+            crate::disk::reload_text(&mut ed.docs[i], &ropey::Rope::from_str(&text));
+            ed.current = i;
+            ed.docs[i].id
+        }
+        None => {
+            let id = ed.open_virtual("usage", &text);
+            if let Some(spec) = crate::syntax::spec("markdown") {
+                ed.load_language(id, spec);
+            }
+            id
+        }
+    };
+    ed.session_keeps(id);
+    ed.usage_view = Some((id, sid));
+}
+
+/// A turn ended or a cache went cold: `:usage`'s buffer, while it's open, says it.
+pub fn view_sync(ed: &mut Editor) {
+    let Some((id, sid)) = ed.usage_view else { return };
+    let Some(i) = ed.docs.iter().position(|d| d.id == id) else {
+        ed.usage_view = None;
+        return;
+    };
+    if let Some(text) = report_now(ed, sid) {
+        crate::disk::reload_text(&mut ed.docs[i], &ropey::Rope::from_str(&text));
+    }
+}
+
+// ── Cold, said once ─────────────────────────────────────────────────────────
+
+/// After a turn: the main loop is woken when this session's cache goes cold — one frame then (the footer and
+/// the list say so) and a `usage` event for watchers; nothing before. One watch asleep per session: one that
+/// wakes no later looks again when it wakes.
+pub fn watch(ed: &mut Editor) {
+    let now = now_ms();
+    let Some(at) = ed.session.usage.cold_at().filter(|&at| at > now) else { return };
+    if ed.session.usage.watch.is_some_and(|w| w <= at) || cfg!(test) {
+        return;
+    }
+    ed.session.usage.watch = Some(at);
+    ed.events.jobs().spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(at - now));
+        woke
+    });
+}
+
+/// What the watch finds when it wakes at `now_ms`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Woke {
+    /// Gone cold — said.
+    Cold,
+    /// A later request moved it: asleep again.
+    Later,
+    Nothing,
+}
+
+pub fn woke_at(u: &mut Usage, now_ms: u64) -> Woke {
+    u.watch = None;
+    match u.cold_at() {
+        Some(at) if at > now_ms => Woke::Later,
+        Some(_) => Woke::Cold,
+        None => Woke::Nothing,
+    }
+}
+
+fn woke(ed: &mut Editor) {
+    match woke_at(&mut ed.session.usage, now_ms()) {
+        Woke::Cold => {
+            crate::uistate::watch::usage(ed, "cold");
+            view_sync(ed);
+            // (behind, nothing on screen says it unless the list is open)
+            if ed.background() && !ed.picker.as_ref().is_some_and(|p| p.keys) {
+                ed.unchanged = true;
+            }
+        }
+        Woke::Later => {
+            watch(ed);
+            ed.unchanged = true;
+        }
+        Woke::Nothing => ed.unchanged = true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The recorded stream (`usage_stream.jsonl`: two turns in one process, then a third after `--resume`)
+    /// read as the chat reads it.
+    fn recorded() -> (Usage, Vec<Spent>) {
+        let mut u = Usage::default();
+        u.fresh("cda055cc-67c1-4da7-9120-68435b027d4f");
+        let mut results = Vec::new();
+        for (i, line) in include_str!("usage_stream.jsonl").lines().enumerate() {
+            let v: Value = serde_json::from_str(line).unwrap();
+            match crate::llm::usage_line(&v, 1_000 * i as u64) {
+                Some(crate::llm::StreamEv::Requesting(at)) => u.requesting(at),
+                Some(crate::llm::StreamEv::Usage(s)) => u.seen(s),
+                Some(crate::llm::StreamEv::Spent(s)) => {
+                    results.push(s.clone());
+                    u.spent(s);
+                }
+                _ => {}
+            }
+        }
+        (u, results)
+    }
+
+    #[test]
+    fn a_turns_requests_add_up_to_its_result() {
+        let (u, results) = recorded();
+        assert_eq!(u.turns.len(), 3);
+        assert_eq!(u.turns.iter().map(|t| t.requests).collect::<Vec<_>>(), [2, 1, 1]);
+        // Each turn's requests, summed as they streamed, are what its result says
+        let mut u2 = Usage::default();
+        let mut sums = vec![Counts::default()];
+        for (i, line) in include_str!("usage_stream.jsonl").lines().enumerate() {
+            let v: Value = serde_json::from_str(line).unwrap();
+            match crate::llm::usage_line(&v, i as u64) {
+                Some(crate::llm::StreamEv::Usage(s)) => u2.seen(s),
+                Some(crate::llm::StreamEv::Spent(_)) => {
+                    let mut sum = Counts::default();
+                    for r in std::mem::take(&mut u2.requests) {
+                        sum.add(r.counts);
+                    }
+                    *sums.last_mut().unwrap() = sum;
+                    sums.push(Counts::default());
+                }
+                _ => {}
+            }
+        }
+        sums.pop();
+        let said: Vec<Counts> = results.iter().map(|s| s.counts).collect();
+        assert_eq!(sums, said, "the requests' final counts (message_delta's output) sum to the result's");
+        assert_eq!(
+            said[0],
+            Counts { input: Some(18), write: Some(8125), read: Some(7924), output: Some(185) },
+            "as recorded"
+        );
+        // The costs: the result's total is the conversation's so far — a turn's is the difference
+        let costs: Vec<f64> = u.turns.iter().map(|t| t.cost.unwrap()).collect();
+        let totals: Vec<f64> = results.iter().map(|s| s.total_cost.unwrap()).collect();
+        assert!((costs.iter().sum::<f64>() - totals[2]).abs() < 1e-9, "{costs:?} vs {totals:?}");
+        assert!((costs[1] - (totals[1] - totals[0])).abs() < 1e-12);
+        assert!((u.totals().cost - totals[2]).abs() < 1e-9);
+        let mut whole = Counts::default();
+        for s in &results {
+            whole.add(s.counts);
+        }
+        assert_eq!(u.totals().counts, whole);
+        // The model's window came with the result; the context is the last request's
+        assert_eq!(u.context(), Some((10 + 75 + 8211, Some(200_000))));
+        let c = u.conv.as_ref().unwrap();
+        assert_eq!(c.fixed.as_ref().unwrap().counts.write, Some(7924), "the first request's cache write");
+        assert_eq!(c.ttl, Some(Ttl::Hour1), "it wrote to the 1h cache");
+        assert_eq!(u.turns[0].model, "claude-haiku-4-5-20251001");
+    }
+
+    /// A conversation continued without what tarae kept: its first turn's cost isn't known (the total is the
+    /// whole conversation's) — said as not reported; the next one's is.
+    #[test]
+    fn a_resumed_conversations_earlier_cost_isnt_guessed() {
+        let mut u = Usage::default();
+        u.resumed("c");
+        let spent = |total: f64, at_ms: u64| Spent {
+            conversation: "c".into(),
+            counts: Counts { input: Some(1), ..Counts::default() },
+            total_cost: Some(total),
+            at_ms,
+            ..Spent::default()
+        };
+        assert_eq!(u.spent(spent(5.0, 1)).cost, None);
+        assert_eq!(u.spent(spent(5.5, 2)).cost, Some(0.5));
+        assert_eq!(u.totals().cost_said(), "$0.50 + 1 not reported");
+        // Kept and continued: the cost so far comes back with it
+        let kept = u.conv_json("c").unwrap();
+        let mut back = Usage::default();
+        back.restore("c", &kept);
+        assert_eq!(back.turns.len(), 2);
+        assert_eq!(back.spent(spent(6.0, 3)).cost, Some(0.5));
+    }
+
+    #[test]
+    fn the_cache_goes_cold_at_its_ttl() {
+        let mut u = Usage::default();
+        u.fresh("c");
+        let usage = |w5: u64, w1: u64, read: u64| {
+            json!({ "input_tokens": 3, "cache_creation_input_tokens": w5 + w1, "cache_read_input_tokens": read,
+                    "cache_creation": { "ephemeral_5m_input_tokens": w5, "ephemeral_1h_input_tokens": w1 } })
+        };
+        let seen = |id: &str, v: &Value, at_ms: u64| Seen {
+            id: Some(id.into()),
+            model: "m".into(),
+            counts: Counts::of(v),
+            ttl: Ttl::of(v),
+            at_ms,
+        };
+        assert_eq!(u.cache(0), Cache::NotReported, "nothing sent yet");
+        u.requesting(1_000);
+        u.seen(seen("a", &usage(500, 0, 0), 1_400));
+        let five = Ttl::Min5.ms();
+        assert_eq!(
+            u.cache(1_000 + five - 1),
+            Cache::Warm { left_ms: 1, ttl: Ttl::Min5 },
+            "from when it went out"
+        );
+        assert_eq!(u.cache(1_000 + five), Cache::Cold { since_ms: 1_000 + five }, "cold at the boundary");
+        assert_eq!(left(1), "1m", "never 0m while warm");
+        // A read refreshes it; its TTL stays the last write's
+        u.seen(seen("b", &usage(0, 0, 500), 60_000));
+        assert_eq!(u.cache(1_000 + five), Cache::Warm { left_ms: 59_000, ttl: Ttl::Min5 });
+        u.seen(seen("c", &usage(0, 200, 700), 120_000));
+        assert_eq!(u.cold_at(), Some(120_000 + Ttl::Hour1.ms()), "a 1h write: an hour");
+        // The watch: woken early (a later request moved it) it sleeps again; at the time, cold
+        assert_eq!(woke_at(&mut u, 120_000 + five), Woke::Later);
+        assert_eq!(woke_at(&mut u, 120_000 + Ttl::Hour1.ms()), Woke::Cold);
+    }
+
+    /// Another CLI's stream with no usage in it: nothing made up.
+    #[test]
+    fn what_isnt_reported_stays_so() {
+        let mut u = Usage::default();
+        u.fresh("c");
+        let t = u.spent(Spent { conversation: "c".into(), at_ms: 1, ..Spent::default() });
+        assert_eq!((t.counts, t.cost), (Counts::default(), None));
+        assert_eq!(u.cache(5), Cache::NotReported);
+        assert_eq!(u.context(), None);
+        assert_eq!(u.totals().cost_said(), "not reported");
+        assert_eq!(count(None), "not reported");
+        // A write that doesn't say its kind (no `cache_creation` split, as parsed from the stream): the TTL isn't
+        // guessed
+        let v = json!({ "cache_creation_input_tokens": 9 });
+        assert_eq!(Ttl::of(&v), None);
+        u.seen(Seen { id: Some("x".into()), counts: Counts::of(&v), ttl: Ttl::of(&v), ..Seen::default() });
+        assert_eq!(u.cache(5), Cache::NotReported);
+    }
+
+    #[test]
+    fn numbers_are_said_short() {
+        assert_eq!(
+            [tokens(191), tokens(2_317), tokens(23_456), tokens(1_234_567)],
+            ["191", "2.3k", "23k", "1.2M"]
+        );
+        assert_eq!([tokens(1_000_000), tokens(2_040)], ["1M", "2k"]);
+        assert_eq!([dollars(0.0011445), dollars(0.0233754), dollars(1.234)], ["$0.0011", "$0.023", "$1.23"]);
+        assert_eq!(model_short("claude-opus-5-5"), "opus 5.5");
+        assert_eq!(model_short("claude-haiku-4-5-20251001"), "haiku 4.5");
+        assert_eq!(model_short("gemini-2.5-pro"), "gemini-2.5-pro");
+    }
+}

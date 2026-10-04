@@ -568,6 +568,9 @@ fn steady(mut v: Value) -> Value {
     }
     for s in v["sessions"].as_array_mut().unwrap() {
         s["root"] = json!(Path::new(s["root"].as_str().unwrap()).file_name().unwrap().to_string_lossy());
+        if s["usage"]["seconds_left"].is_u64() {
+            s["usage"]["seconds_left"] = json!(3600);
+        }
     }
     // (run ids are the process's sequence — other tests take theirs)
     for r in v["runs"].as_array_mut().unwrap() {
@@ -577,6 +580,32 @@ fn steady(mut v: Value) -> Value {
         g["ago_ms"] = json!(0);
     }
     v
+}
+
+/// A turn of one request (12 in, 3k written to the 1h cache, 9k read, 400 out) sent now, its result
+/// saying $0.0213 so far of a fresh conversation in a 200k window.
+fn usage_turn(u: &mut crate::usage::Usage) {
+    use crate::usage::{Counts, Seen, Spent, Ttl};
+    let usage = json!({ "input_tokens": 12, "cache_creation_input_tokens": 3000, "cache_read_input_tokens": 9000,
+                        "output_tokens": 400, "cache_creation": { "ephemeral_1h_input_tokens": 3000 } });
+    u.fresh("conv-1");
+    u.requesting(crate::usage::now_ms());
+    let model = "claude-opus-5-5".to_string();
+    u.seen(Seen {
+        id: Some("msg-1".into()),
+        model: model.clone(),
+        counts: Counts::of(&usage),
+        ttl: Ttl::of(&usage),
+        at_ms: 0,
+    });
+    u.spent(Spent {
+        conversation: "conv-1".into(),
+        counts: Counts::of(&usage),
+        total_cost: Some(0.0213),
+        models: vec![(model, Some(200_000))],
+        ms: Some(4200),
+        at_ms: 1_791_100_000_000,
+    });
 }
 
 /// The golden JSON: one fixed scene — two sessions, a card up and one parked behind, an edit's review in
@@ -599,6 +628,9 @@ fn the_state_as_json_is_pinned() {
             What::ChangeSet { generation: 7 },
         ),
     );
+    // (its Claude had a turn: a request writing to the 1h cache, then the result — `usage.rs`)
+    let u = &mut ed.session_by_id(id).unwrap().usage;
+    usage_turn(u);
     edit_review(&mut ed);
     task_panel(&mut ed);
     light_card(&mut ed);
@@ -1038,6 +1070,44 @@ fn a_watcher_is_told_what_changes() {
     frame(&mut ed);
     let e = events(&only);
     assert!(e.iter().all(|v| v["event"] == "card-up") && !e.is_empty(), "{e:?}");
+}
+
+/// What a session's Claude costs is a kind of its own (`usage`): said when a turn's result comes and when
+/// the cache goes cold — with the numbers the state has — and not to a watcher of `sessions` only.
+#[test]
+fn a_watcher_of_usage_hears_a_turn_and_the_cache_going_cold() {
+    let mut ed = editor();
+    frame(&mut ed);
+    let watcher = |ed: &mut Editor, kinds: &[&str]| {
+        let (tx, rx) = std::sync::mpsc::sync_channel(watch::UNREAD);
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        ed.ui_watch_add(watch::Watcher {
+            tx,
+            kinds: kinds.iter().map(|k| k.to_string()).collect(),
+            overflowed: flag,
+        });
+        rx
+    };
+    let (usage, sessions) = (watcher(&mut ed, &["usage"]), watcher(&mut ed, &["sessions"]));
+    usage_turn(&mut ed.session.usage);
+    watch::usage(&mut ed, "turn");
+    frame(&mut ed);
+    let e: Vec<Value> = usage.try_iter().map(|l| serde_json::from_str(&l).unwrap()).collect();
+    assert_eq!(e.len(), 1, "{e:?}");
+    assert_eq!(
+        (&e[0]["event"], &e[0]["what"], &e[0]["session"]),
+        (&json!("usage"), &json!("turn"), &json!("s0"))
+    );
+    assert_eq!(e[0]["last_turn"]["cost"], 0.0213);
+    assert!(e[0]["said"].as_str().unwrap().contains("cache warm 60m (1h) · context 6% of 200k"), "{e:?}");
+    // At its TTL: cold, said once
+    let at = ed.session.usage.cold_at().unwrap();
+    assert_eq!(crate::usage::woke_at(&mut ed.session.usage, at), crate::usage::Woke::Cold);
+    watch::usage(&mut ed, "cold");
+    frame(&mut ed);
+    let e: Vec<Value> = usage.try_iter().map(|l| serde_json::from_str(&l).unwrap()).collect();
+    assert_eq!(e.iter().map(|v| v["what"].as_str().unwrap()).collect::<Vec<_>>(), ["cold"]);
+    assert!(sessions.try_iter().next().is_none(), "a watcher of sessions isn't told what they cost");
 }
 
 /// A watcher that doesn't read is let go once `UNREAD` events wait for it — its flag says why (its

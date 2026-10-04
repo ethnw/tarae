@@ -267,6 +267,10 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
             editor.inbox_open();
             Ok(())
         }
+        "usage" => {
+            crate::usage::open(editor);
+            Ok(())
+        }
         "log-open" => {
             let path = crate::log::path().ok_or("no state directory for the log")?;
             if !path.exists() {

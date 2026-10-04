@@ -1046,17 +1046,40 @@ pub struct Shown {
     pub rebasing: Option<String>,
     /// Its files that came again from disk while it was behind (`Session.reloaded`, #6).
     pub reloaded: usize,
+    /// Its Claude's cache (`warm until 14:32` · `cold` · `cache not reported`) and what its turns cost so far
+    /// (`usage.rs`) — None: nothing reported.
+    pub claude: Option<(String, String)>,
+}
+
+impl Shown {
+    /// `claude` for a session's usage at `now_ms`.
+    pub fn claude_of(u: &crate::usage::Usage, now_ms: u64) -> Option<(String, String)> {
+        use crate::usage::Cache;
+        if !u.reported() {
+            return None;
+        }
+        let cache = match u.cache(now_ms) {
+            Cache::Warm { left_ms, .. } => format!("● warm until {}", crate::usage::until(now_ms + left_ms)),
+            Cache::Cold { .. } => "◦ cold".into(),
+            // (a session whose chat began a new conversation, or a CLI that doesn't say)
+            Cache::NotReported if u.conv.is_none() => String::new(),
+            Cache::NotReported => "cache not reported".into(),
+        };
+        let t = u.totals();
+        let total = if t.turns == 0 { String::new() } else { t.cost_said() };
+        Some((cache, total))
+    }
 }
 
 /// The list's rows: the name, a glyph for what its Claude does (`●` working, `▲` waiting for you, `◦` a
 /// tool call unanswered too long — `stuck? symbols 42s`; a turn ended behind says `done` in words), and the
 /// rest in columns — branch, `↑ahead ↓behind`, what's changed, files reloaded behind (`• 2 reloaded`), what
-/// it's doing, CPU and memory — each column as wide as its widest and empty ones left out, so the hints
-/// (right-aligned) line up row under row.
+/// it's doing, its Claude's cache and cost so far, CPU and memory — each column as wide as its widest and
+/// empty ones left out, so the hints (right-aligned) line up row under row.
 pub fn items(sessions: &[Shown]) -> Vec<crate::picker::Item> {
     use crate::session::Doing;
     use unicode_width::UnicodeWidthStr as _;
-    let cols: Vec<[String; 6]> = sessions
+    let cols: Vec<[String; 8]> = sessions
         .iter()
         .map(|l| {
             let branch = l.branch.clone().filter(|b| *b != l.name).unwrap_or_default();
@@ -1085,12 +1108,13 @@ pub fn items(sessions: &[Shown]) -> Vec<crate::picker::Item> {
                 .unwrap_or_default();
             let reloaded =
                 if l.reloaded > 0 { format!("• {} reloaded", l.reloaded) } else { String::new() };
-            [branch, moved.join(" "), changed, reloaded, doing, usage]
+            let (cache, cost) = l.claude.clone().unwrap_or_default();
+            [branch, moved.join(" "), changed, reloaded, doing, cache, cost, usage]
         })
         .collect();
-    let widths: Vec<usize> = (0..6).map(|c| cols.iter().map(|r| r[c].width()).max().unwrap_or(0)).collect();
+    let widths: Vec<usize> = (0..8).map(|c| cols.iter().map(|r| r[c].width()).max().unwrap_or(0)).collect();
     // (counts right-aligned, words left)
-    let right = [false, true, true, true, false, true];
+    let right = [false, true, true, true, false, false, true, true];
     sessions
         .iter()
         .zip(cols)
@@ -1600,6 +1624,7 @@ impl Editor {
 
     /// The list's rows as things are now.
     fn session_items(&self) -> Vec<crate::picker::Item> {
+        let now_ms = crate::usage::now_ms();
         let shown: Vec<Shown> = self
             .sessions_in_order()
             .into_iter()
@@ -1613,6 +1638,7 @@ impl Editor {
                 usage: crate::procs::summed(&self.procs.rows, &self.session_pids(l)),
                 rebasing: l.rebase.as_ref().map(crate::rebase::Rebase::said),
                 reloaded: l.reloaded,
+                claude: Shown::claude_of(&l.usage, now_ms),
             })
             .collect();
         items(&shown)
@@ -3131,6 +3157,7 @@ mod tests {
             usage,
             rebasing: None,
             reloaded: 0,
+            claude: None,
         };
         let f = |ahead, behind, changed| Some(Facts { ahead, behind, changed });
         let rows = items(&[
@@ -3150,6 +3177,52 @@ mod tests {
         let glyphs: Vec<&str> = rows.iter().map(|i| i.glyph.unwrap().0).collect();
         assert_eq!(glyphs, [" ", "●", "▲"]);
         assert_eq!(rows[2].action, crate::picker::Action::Session(2));
+        // Its Claude's cache and cost so far: a column each, the costs right-aligned
+        let claude = |cache: &str, cost: &str| Some((cache.to_string(), cost.to_string()));
+        let rows = items(&[
+            Shown {
+                claude: claude("● warm until 14:32", "$0.020"),
+                ..shown(0, "tarae", None, None, Doing::Idle, None)
+            },
+            Shown {
+                claude: claude("◦ cold", "$1.23"), ..shown(1, "fix", None, None, Doing::Working, None)
+            },
+            shown(2, "parser", None, None, Doing::Idle, None),
+        ]);
+        let hints: Vec<&str> = rows.iter().map(|i| i.hint.as_str()).collect();
+        assert_eq!(
+            hints,
+            [
+                "here     ● warm until 14:32  $0.020",
+                &format!("working  ◦ cold{}$1.23", " ".repeat(15)),
+                &" ".repeat(35),
+            ]
+        );
+    }
+
+    /// The column from a session's usage: its cache, warm until when (by the clock — true however long
+    /// nothing redraws) or cold, and its total — a session whose Claude reported nothing has none.
+    #[test]
+    fn the_list_says_each_sessions_cache_and_cost() {
+        use crate::usage::{Counts, Seen, Spent, Ttl, Usage};
+        let mut u = Usage::default();
+        assert_eq!(Shown::claude_of(&u, 0), None);
+        u.fresh("c");
+        let usage = serde_json::json!({ "cache_creation_input_tokens": 9,
+                                        "cache_creation": { "ephemeral_5m_input_tokens": 9 } });
+        u.requesting(1_000);
+        u.seen(Seen {
+            id: Some("m".into()),
+            counts: Counts::of(&usage),
+            ttl: Ttl::of(&usage),
+            ..Seen::default()
+        });
+        u.spent(Spent { conversation: "c".into(), total_cost: Some(0.02), at_ms: 2_000, ..Spent::default() });
+        // (warm until five minutes after the request went out, whenever it's asked)
+        let at = format!("● warm until {}", crate::usage::until(1_000 + Ttl::Min5.ms()));
+        assert_eq!(Shown::claude_of(&u, 61_000), Some((at.clone(), "$0.020".into())));
+        assert_eq!(Shown::claude_of(&u, 290_000), Some((at, "$0.020".into())));
+        assert_eq!(Shown::claude_of(&u, 1_000 + Ttl::Min5.ms()), Some(("◦ cold".into(), "$0.020".into())));
     }
 
     /// #111: a build-dir set per checkout (`{workspace-path-hash}`) — found where cargo looks: its variable,

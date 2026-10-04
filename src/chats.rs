@@ -35,6 +35,8 @@ pub struct Saved {
     pub rows: Vec<Value>,
     /// Its plan (`plan.rs`), if Claude made one.
     pub plan: Option<Value>,
+    /// What its turns cost and its cache, as far as tarae saw (`usage.rs` — `Usage::conv_json`).
+    pub usage: Option<Value>,
     /// When this snapshot was taken (ns) — saves run on workers and may finish out of order; an older one
     /// never replaces a newer (`save`).
     pub seq: u64,
@@ -80,6 +82,7 @@ pub fn load(dir: &Path, root: &Path) -> Vec<Saved> {
                         updated: c["updated"].as_u64().unwrap_or(0),
                         rows: c["rows"].as_array().cloned().unwrap_or_default(),
                         plan: c.get("plan").filter(|p| !p.is_null()).cloned(),
+                        usage: c.get("usage").filter(|u| !u.is_null()).cloned(),
                         seq: c["seq"].as_u64().unwrap_or(0),
                     })
                 })
@@ -100,9 +103,10 @@ pub fn save(dir: &Path, root: &Path, chat: Saved) {
     all.truncate(KEEP);
     let chats: Vec<Value> = all
         .into_iter()
-        .map(
-            |c| json!({ "id": c.id, "title": c.title, "updated": c.updated, "rows": c.rows, "plan": c.plan, "seq": c.seq }),
-        )
+        .map(|c| {
+            json!({ "id": c.id, "title": c.title, "updated": c.updated, "rows": c.rows, "plan": c.plan,
+                    "usage": c.usage, "seq": c.seq })
+        })
         .collect();
     let body = json!({ "root": root, "chats": chats }).to_string();
     let _ = std::fs::create_dir_all(dir);
@@ -275,6 +279,7 @@ mod tests {
             updated: t,
             rows: rows_of(&msgs),
             plan: Some(json!({"title": "t", "steps": [{"text": "a", "status": "doing"}]})),
+            usage: Some(json!({"turns": [], "cost_so_far": 0.25})),
             seq: t,
         };
         save(&dir, root, saved("s1", 10));
@@ -290,6 +295,7 @@ mod tests {
         );
         assert_eq!(all[0].rows.len(), 3, "the newer snapshot stays");
         assert_eq!(all[0].plan.as_ref().unwrap()["steps"][0]["status"], "doing", "its plan kept too");
+        assert_eq!(all[0].usage.as_ref().unwrap()["cost_so_far"], 0.25, "and what it cost");
         let back = msgs_of(&all[0].rows);
         assert_eq!(back.len(), 3);
         assert_eq!((back[0].role, back[0].chip.as_str()), (Role::User, "a.rs · L3"));

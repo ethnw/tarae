@@ -1028,6 +1028,7 @@ mod tests {
                 updated: crate::chats::now() - ago,
                 rows: crate::chats::rows_of(&msgs),
                 plan: None,
+                usage: None,
                 seq: crate::chats::seq(),
             };
             crate::chats::save(&store, &cwd, saved);
