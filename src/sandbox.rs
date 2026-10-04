@@ -525,13 +525,33 @@ pub fn parse_denial(json: &str, tag: &str) -> Option<Denial> {
 pub const WATCH_READY: std::time::Duration = std::time::Duration::from_millis(150);
 pub const WATCH_LAST: std::time::Duration = std::time::Duration::from_millis(150);
 
+/// How long a watch waits for its run to start (`Watch::run_started`) before it ends itself — the run's
+/// saves come first (`tools::go`), a few ms as a rule. Seen: a `log stream` living on 18 minutes after its
+/// run, held by nothing `:procs` knew; a watch no longer depends on its holders letting go.
+pub const WATCH_UNCLAIMED: std::time::Duration = std::time::Duration::from_secs(60);
+/// How often a watch looks whether its run's process is still there.
+const WATCH_LOOKS: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Every watch alive, wherever it's held — `:procs` knows each (`live_watches`).
+static LIVE: Mutex<Vec<std::sync::Weak<Watch>>> = Mutex::new(Vec::new());
+
+/// The watches alive now.
+pub fn live_watches() -> Vec<std::sync::Arc<Watch>> {
+    let mut live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
+    live.retain(|w| w.strong_count() > 0);
+    live.iter().filter_map(std::sync::Weak::upgrade).collect()
+}
+
 /// The kernel's denials for one run (`log stream`, only the lines with its tag), gathered on a thread of its
-/// own; stopped when the run is gone or done (`finish`).
+/// own; stopped when the run is done (`finish`), when its process is gone (`run_started`), when it never
+/// starts (`WATCH_UNCLAIMED`), or when the last holder lets go.
 pub struct Watch {
     tag: String,
     child: Mutex<Option<std::process::Child>>,
     blocked: std::sync::Arc<Mutex<Blocked>>,
     stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Its run started (`run_started`).
+    claimed: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for Watch {
@@ -551,12 +571,52 @@ impl Eq for Watch {}
 impl Watch {
     /// A watch with nothing behind it — the denials come from `record` (tests), or never.
     pub fn quiet(tag: &str) -> std::sync::Arc<Watch> {
-        std::sync::Arc::new(Watch {
+        let w = std::sync::Arc::new(Watch {
             tag: tag.to_string(),
             child: Mutex::new(None),
             blocked: Default::default(),
             stopped: Default::default(),
-        })
+            claimed: Default::default(),
+        });
+        LIVE.lock().unwrap_or_else(|e| e.into_inner()).push(std::sync::Arc::downgrade(&w));
+        w
+    }
+
+    /// It ends itself unless a run has started under it (`run_started`) `within` from now.
+    pub fn unless_claimed_within(self: &std::sync::Arc<Self>, within: std::time::Duration) {
+        let w = std::sync::Arc::downgrade(self);
+        std::thread::spawn(move || {
+            std::thread::sleep(within);
+            if let Some(w) = w.upgrade().filter(|w| !w.claimed.load(std::sync::atomic::Ordering::SeqCst)) {
+                w.fail(format!("its run didn't start within {}s", within.as_secs()));
+                w.finish();
+            }
+        });
+    }
+
+    /// Its run started as `pid` (the run's own process — `spawn::setsid`'s): watched until that's gone and
+    /// reaped (by the run's thread), its last denials given `WATCH_LAST` — however the run ends, and
+    /// whoever still holds the watch.
+    pub fn run_started(self: &std::sync::Arc<Self>, pid: u32) {
+        self.claimed.store(true, std::sync::atomic::Ordering::SeqCst);
+        let w = std::sync::Arc::downgrade(self);
+        std::thread::spawn(move || {
+            // SAFETY: signal 0 only asks whether the process is there.
+            let there = || unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+            let stopped = |w: &std::sync::Weak<Watch>| {
+                w.upgrade().is_none_or(|w| w.stopped.load(std::sync::atomic::Ordering::SeqCst))
+            };
+            while there() {
+                std::thread::sleep(WATCH_LOOKS);
+                if stopped(&w) {
+                    return;
+                }
+            }
+            std::thread::sleep(WATCH_LAST);
+            if let Some(w) = w.upgrade() {
+                w.finish();
+            }
+        });
     }
 
     /// Starts `log stream` for `tag` (on a worker: it returns at once, but give it `WATCH_READY` before the
@@ -597,6 +657,7 @@ impl Watch {
                 blocked.lock().unwrap_or_else(|e| e.into_inner()).failed = Some(why.to_string());
             }
         });
+        w.unless_claimed_within(WATCH_UNCLAIMED);
         w
     }
 
@@ -1287,6 +1348,54 @@ pub(crate) fn skipped_inside(test: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Whether `pid` is there at all — a zombie counts (signal 0 only asks).
+    fn there(pid: u32) -> bool {
+        // SAFETY: signal 0 sends nothing.
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+
+    /// Waits (5 s at most) for `pid` to be gone — killed and reaped.
+    fn gone(pid: u32) -> bool {
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while there(pid) && std::time::Instant::now() < end {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        !there(pid)
+    }
+
+    /// A watch ends with its run's process, though something still holds it (seen: a `log stream` 18
+    /// minutes past its run) — killed and reaped. (Stand-ins: `sleep` for `log stream`, `true` for the run.)
+    #[test]
+    fn a_watch_ends_with_its_run_whoever_still_holds_it() {
+        let held = Watch::spawned_for_test("sleep", "60");
+        let watching = held.pid().unwrap();
+        let run = crate::spawn::setsid(&Command::new("true")).unwrap();
+        held.run_started(run.pid);
+        crate::spawn::wait(run.pid).unwrap();
+        assert!(gone(watching), "the watch ({watching}) outlived its run");
+        assert_eq!(held.pid(), None);
+    }
+
+    /// A watch whose run never starts (the turn ended meanwhile, the run refused …) ends on its own, saying
+    /// why — and one whose run started isn't ended by that.
+    #[test]
+    fn a_watch_no_run_takes_up_ends_on_its_own() {
+        let held = Watch::spawned_for_test("sleep", "60");
+        let watching = held.pid().unwrap();
+        held.unless_claimed_within(std::time::Duration::from_millis(200));
+        let claimed = Watch::spawned_for_test("sleep", "60");
+        let runs = claimed.pid().unwrap();
+        let run = crate::spawn::setsid(Command::new("sleep").arg("2")).unwrap();
+        claimed.unless_claimed_within(std::time::Duration::from_millis(200));
+        claimed.run_started(run.pid);
+        assert!(gone(watching), "the watch ({watching}) no run took up lives on");
+        assert!(held.blocked().failed.is_some_and(|w| w.contains("didn't start")), "{:?}", held.blocked());
+        assert!(there(runs), "a watch whose run started watches on");
+        claimed.finish();
+        crate::spawn::wait(run.pid).unwrap();
+        assert!(gone(runs));
+    }
 
     /// git's read-only commands don't write in `.git` in a sandboxed run's environment: `git status` over a
     /// file whose stat changed would refresh the index (a write the sandbox denies, reported as noise) —

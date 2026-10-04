@@ -61,6 +61,7 @@ mod plan;
 mod plugin;
 mod preflight;
 mod procs;
+mod pty;
 mod queued;
 mod quickfix;
 mod readonly;
@@ -139,6 +140,8 @@ config: $XDG_CONFIG_HOME/tarae/config.toml (default ~/.config/tarae/config.toml)
         inside tarae: :set <path> [value], :set! (also saves), :toggle, :config-show";
 
 fn main() -> Result<()> {
+    // (what tarae was handed open goes no further than tarae)
+    spawn::close_on_exec();
     restart::remember_exe();
     let mut files = Vec::new();
     let mut diff_against: Option<PathBuf> = None;
@@ -205,6 +208,8 @@ fn main() -> Result<()> {
         std::process::exit(2);
     }
 
+    // (before any thread starts — SIGTERM and SIGHUP quit as `:q!` does, ending what tarae started)
+    term::catch_signals();
     // The UI state's socket — now, while no thread runs (its umask, and for a long path its folder, are the
     // process's for a moment); served once the editor is there
     let ui = uisocket::bind();

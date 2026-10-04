@@ -21,7 +21,6 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -106,20 +105,8 @@ fn drive(vt: &mut Vt, keys: &[String], state: &Path, cols: u16, rows: u16) -> Re
     let config = folder("TARAE_SHOT_XDG", std::env::var_os("TARAE_SHOT_XDG"), true)?
         .map_or_else(|| "/tmp/tarae-shot/xdg".into(), PathBuf::into_os_string);
 
-    let (mut master, mut slave) = (-1, -1);
-    let mut ws = libc::winsize { ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0 };
-    // SAFETY: out-pointers to live locals; no name buffer, default termios. The size is a raw pointer because
-    // libc declares it `*mut` on macOS and `*const` on Linux.
-    cvt(unsafe {
-        libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), &raw mut ws)
-    })
-    .map_err(|e| format!("openpty: {e}"))?;
-    // SAFETY: openpty just returned these fds and nothing else owns them.
-    let (mut master, slave) = unsafe { (File::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
-    for fd in [master.as_raw_fd(), slave.as_raw_fd()] {
-        // SAFETY: fcntl on an fd we own.
-        cvt(unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) }).map_err(|e| e.to_string())?;
-    }
+    let (master, slave) = crate::pty::open(rows, cols).map_err(|e| format!("pty: {e}"))?;
+    let mut master = File::from(master);
     let stdio = || slave.try_clone().map(Stdio::from).map_err(|e| e.to_string());
     let mut cmd = Command::new(&bin);
     cmd.args(files.split_whitespace()).current_dir(cwd);

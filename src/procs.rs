@@ -1396,6 +1396,25 @@ impl Editor {
                 add(c.pid(), Kind::Chat, "claude", "the chat".into(), session);
             }
         }
+        // (a watch held elsewhere — its run gone, not yet started, or never to: still tarae's, still known)
+        for w in crate::sandbox::live_watches() {
+            if let Some(pid) = w.pid().filter(|p| !out.iter().any(|k| k.pid == *p)) {
+                out.push(Known {
+                    pid,
+                    kind: Kind::Helper,
+                    title: "sandbox watch".into(),
+                    what: "what the sandbox blocks — its run not in a panel".into(),
+                    session: None,
+                    at: None,
+                });
+            }
+        }
+        let mut add =
+            |pid: Option<u32>, kind: Kind, title: &str, what: String, session: Option<SessionId>| {
+                if let Some(pid) = pid.filter(|&p| p > 0) {
+                    out.push(Known { pid, kind, title: title.to_string(), what, session, at: None });
+                }
+            };
         add(self.llm_pid, Kind::Ask, "claude", "space i".into(), None);
         add(self.llm_warm.pid(), Kind::Spare, "claude", "ready for space i".into(), None);
         for (plugin, id, pid, program) in self.plugin_pids() {
@@ -1589,6 +1608,14 @@ impl Editor {
                     gone(self, &name, Some(SERVER_AGAIN));
                 }
             }
+            // (a sandbox's watch is a helper too — it stops alone, killed and reaped by its holder)
+            Kind::Helper
+                if let Some(w) =
+                    crate::sandbox::live_watches().into_iter().find(|w| w.pid() == Some(r.pid)) =>
+            {
+                w.finish();
+                gone(self, "the sandbox watch", None);
+            }
             Kind::Debug | Kind::Helper => {
                 self.dap_terminate();
                 self.procs_wake(Wake::Now);
@@ -1620,15 +1647,26 @@ impl Editor {
             }
             Kind::Other => {
                 // (still the process the list showed: the same start, under tarae)
-                if read(r.pid).is_some_and(|o| o.started == r.started) {
-                    // SAFETY: SIGTERM to a descendant of tarae's, as read a moment ago.
-                    unsafe { libc::kill(r.pid as i32, libc::SIGTERM) };
-                }
+                stop_unknown(r.pid, r.started);
                 gone(self, &format!("{} (pid {})", r.title, r.pid), None);
             }
         }
     }
+}
 
+/// A process tarae started but doesn't know, stopped (`s`): SIGTERM while it's still the one listed (its
+/// `started`) — and, tarae's own child, waited for on a thread of its own: nothing here holds it, so nothing
+/// else would, and it'd stay a zombie until tarae exits (seen: a stray `log stream`, `<defunct>`).
+fn stop_unknown(pid: u32, started: u64) {
+    let Some(o) = read(pid).filter(|o| o.started == started) else { return };
+    // SAFETY: SIGTERM to a descendant of tarae's, as read a moment ago.
+    unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+    if o.ppid == std::process::id() {
+        std::thread::spawn(move || crate::spawn::wait(pid));
+    }
+}
+
+impl Editor {
     /// `r` on the selected row: started again, where that means something.
     fn procs_restart(&mut self) {
         let Some(r) = self.procs_selected() else {
@@ -2047,6 +2085,37 @@ mod tests {
         assert!(text[named..].contains(&format!("pid {pid}")), "{text}");
         let _ = other;
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// A sandbox watch held outside any run (its run gone, or never started) is still one tarae knows — not
+    /// a stray child flagged ten minutes on.
+    #[test]
+    fn a_watch_held_outside_any_run_is_known() {
+        let ed = Editor::new(crate::config::Config::default());
+        let watch = crate::sandbox::Watch::spawned_for_test("sleep", "5");
+        let wpid = watch.pid().expect("its child");
+        let known = ed.procs_known();
+        let k = known.iter().find(|k| k.pid == wpid);
+        assert!(k.is_some_and(|k| k.kind == Kind::Helper && k.title == "sandbox watch"), "not known");
+        watch.finish();
+    }
+
+    /// `s` on a child tarae doesn't know stops it and reaps it — nothing else holds it to (seen: a stray
+    /// `log stream` stopped from `:procs`, `<defunct>` under tarae until it quit). The stand-in is the test's
+    /// own `sleep`, its handle let go.
+    #[test]
+    fn a_stray_child_stopped_is_reaped() {
+        let pid = std::process::Command::new("sleep").arg("60").spawn().unwrap().id();
+        let started = read(pid).expect("running").started;
+        stop_unknown(pid, started);
+        // (signal 0: a zombie answers it — `read` may not see one)
+        // SAFETY: signal 0 sends nothing.
+        let there = || unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+        let end = Instant::now() + Duration::from_secs(5);
+        while there() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!there(), "the stray ({pid}) is still there, {:?}", read(pid).map(|o| o.zombie));
     }
 
     /// A session's share (the session list's column): its children's CPU and memory with what they started,

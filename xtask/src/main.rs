@@ -24,6 +24,9 @@ use std::process::Command;
 
 mod linux;
 mod perf;
+// (tarae's own: a pty close-on-exec from the start)
+#[path = "../../src/pty.rs"]
+mod pty;
 mod shot;
 mod stream;
 

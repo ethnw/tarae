@@ -147,6 +147,7 @@ const RESTING_REDRAW: std::time::Duration = std::time::Duration::from_millis(500
 
 fn event_loop(editor: &mut Editor) -> Result<()> {
     spawn_input(editor.events.shared_sender());
+    spawn_signals(editor.events.shared_sender());
     crate::config::watch(editor.events.shared_sender(), editor.session.root.clone());
     crate::git::watch(editor.events.sender(), editor.session.root.clone());
     editor.procs_start_sampling();
@@ -218,6 +219,73 @@ fn handle_noting(editor: &mut Editor, ev: crate::event::Event) -> bool {
     editor.unchanged = false;
     editor.handle_event(ev);
     std::mem::take(&mut editor.unchanged)
+}
+
+/// The write end the signal handler wakes `spawn_signals`' thread through, and the read end it takes.
+static SIGNAL_WRITE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+static SIGNAL_READ: std::sync::Mutex<Option<io::PipeReader>> = std::sync::Mutex::new(None);
+
+/// SIGTERM and SIGHUP (the terminal tarae runs in went away: a window closed, a test harness gone) quit
+/// tarae as `:q!` does, so what it started goes with it — the terminal panel's shell, runs, servers — where
+/// the default death runs no destructors. A second one acts as before (`SA_RESETHAND`); one ignored when
+/// tarae started (`nohup`) stays ignored. Called before any thread starts: on macOS a pipe's close-on-exec
+/// is set after it's made, and a program started meanwhile would keep it.
+pub fn catch_signals() {
+    use std::os::fd::{AsRawFd, IntoRawFd};
+    let Ok((read, write)) = io::pipe() else { return };
+    let fd = write.as_raw_fd();
+    // SAFETY: flags of our own pipe's write end — the handler mustn't wait on a full pipe (one byte will do).
+    unsafe { libc::fcntl(fd, libc::F_SETFL, libc::fcntl(fd, libc::F_GETFL) | libc::O_NONBLOCK) };
+    SIGNAL_WRITE.store(write.into_raw_fd(), std::sync::atomic::Ordering::SeqCst);
+    *SIGNAL_READ.lock().unwrap_or_else(|e| e.into_inner()) = Some(read);
+    for sig in [libc::SIGTERM, libc::SIGHUP] {
+        // SAFETY: a zeroed sigaction filled in before use; the handler only calls write(2).
+        unsafe {
+            let mut sa: libc::sigaction = std::mem::zeroed();
+            sa.sa_sigaction = on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+            sa.sa_flags = libc::SA_RESTART | libc::SA_RESETHAND;
+            libc::sigemptyset(&mut sa.sa_mask);
+            let mut was: libc::sigaction = std::mem::zeroed();
+            libc::sigaction(sig, &sa, &mut was);
+            if was.sa_sigaction == libc::SIG_IGN {
+                libc::sigaction(sig, &was, std::ptr::null_mut());
+            }
+        }
+    }
+}
+
+extern "C" fn on_signal(_: libc::c_int) {
+    let fd = SIGNAL_WRITE.load(std::sync::atomic::Ordering::Relaxed);
+    // SAFETY: write(2) is async-signal-safe; errno is left as the interrupted code had it.
+    unsafe {
+        #[cfg(target_os = "macos")]
+        let errno = libc::__error();
+        #[cfg(not(target_os = "macos"))]
+        let errno = libc::__errno_location();
+        let was = *errno;
+        libc::write(fd, [1u8].as_ptr().cast(), 1);
+        *errno = was;
+    }
+}
+
+/// The thread that turns a caught signal (`catch_signals`) into quitting.
+fn spawn_signals(tx: crate::event::Tx) {
+    use std::io::Read;
+    let Some(mut read) = SIGNAL_READ.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
+    thread::spawn(move || {
+        let mut byte = [0u8; 1];
+        loop {
+            match read.read(&mut byte) {
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Ok(1) => break,
+                _ => return,
+            }
+        }
+        let quit = |ed: &mut Editor| {
+            let _ = crate::typed::quit(ed, true);
+        };
+        let _ = tx.send(Event::Job(Box::new(quit)));
+    });
 }
 
 /// Input thread — so terminal reads don't block the main loop.

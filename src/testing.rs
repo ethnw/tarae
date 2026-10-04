@@ -660,6 +660,10 @@ impl Editor {
         self.test_generation += 1;
         let generation = self.test_generation;
         let pid = child.pid;
+        // (its watch ends with this process, whatever becomes of the run here)
+        if let Some(w) = policy.and_then(|p| p.watch.as_ref()) {
+            w.run_started(pid);
+        }
         self.procs_spawned(pid, "tests", &target.label);
         crate::queued::started(self, crate::queued::Slot::Tests, &format!("tests {}", target.label));
         let (stdout, stderr) = (child.stdout, child.stderr);

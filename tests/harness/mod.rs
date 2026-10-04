@@ -5,7 +5,7 @@
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -14,12 +14,17 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[path = "../../src/pty.rs"]
+mod pty;
+
 pub const BIN: &str = env!("CARGO_BIN_EXE_tarae");
 /// Generous — a loaded CI runner can be slow; a passing test never waits this long.
 pub const TIMEOUT: Duration = Duration::from_secs(10);
 /// Live runs wait on real tools: rust-analyzer indexing, cargo building, Claude thinking.
 pub const LIVE_TIMEOUT: Duration = Duration::from_secs(240);
 pub const POLL: Duration = Duration::from_millis(20);
+/// How long a dropped `Term`'s tarae has to quit on SIGTERM before it's killed.
+pub const QUIT_GRACE: Duration = Duration::from_secs(3);
 pub const COLS: u16 = 100;
 pub const ROWS: u16 = 30;
 
@@ -318,21 +323,11 @@ impl Term {
 
     /// `spawn`, working in `cwd` rather than the sandbox's work folder (its HOME and state stay the sandbox's).
     pub fn spawn_in(sb: &Sandbox, cwd: &Path, args: &[&str], cols: u16, rows: u16) -> Term {
-        let (mut master, mut slave) = (-1, -1);
-        let mut ws = libc::winsize { ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0 };
-        // SAFETY: out-pointers to live locals; no name buffer, default termios. The size is a raw pointer
-        // because libc declares it `*mut` on macOS and `*const` on Linux.
-        cvt(unsafe {
-            libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), &raw mut ws)
-        })
-        .expect("openpty");
-        // SAFETY: openpty just returned these fds and nothing else owns them.
-        let (master, slave) = unsafe { (File::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
-        // Tests run in parallel threads: don't let another test's child inherit this pty.
-        for fd in [master.as_raw_fd(), slave.as_raw_fd()] {
-            // SAFETY: fcntl on an fd we own.
-            cvt(unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) }).unwrap();
-        }
+        // Tests run in parallel threads: another test's tarae mustn't get this pty — close-on-exec from the
+        // start, or its master would outlive this test in that tarae (and in what it starts), and this
+        // tarae would never hang up when the test binary dies.
+        let (master, slave) = pty::open(rows, cols).expect("pty");
+        let master = File::from(master);
         let stdio = || Stdio::from(slave.try_clone().expect("dup slave"));
         // (`TARAE_BIN`: another build of tarae — a kept copy, to measure it against this one)
         let mut cmd = Command::new(std::env::var_os("TARAE_BIN").unwrap_or_else(|| BIN.into()));
@@ -670,7 +665,18 @@ impl Term {
 }
 
 impl Drop for Term {
+    /// tarae is asked to quit (SIGTERM: as `:q!`, ending what it started — the terminal panel's shell, runs,
+    /// servers), killed if it hasn't within `QUIT_GRACE`. A test binary that dies never gets here: its pty
+    /// master closes (nothing else holds it — `pty::open`) and the hangup's SIGHUP quits tarae the same way.
     fn drop(&mut self) {
+        if matches!(self.child.try_wait(), Ok(None)) {
+            // SAFETY: a signal to the tarae this harness started, still running (not yet waited for).
+            unsafe { libc::kill(self.child.id() as libc::pid_t, libc::SIGTERM) };
+            let grace = Instant::now() + QUIT_GRACE;
+            while matches!(self.child.try_wait(), Ok(None)) && Instant::now() < grace {
+                thread::sleep(POLL);
+            }
+        }
         if matches!(self.child.try_wait(), Ok(None)) {
             let _ = self.child.kill();
         }

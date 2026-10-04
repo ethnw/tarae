@@ -205,8 +205,12 @@ impl Warm {
 
 impl Drop for Warm {
     fn drop(&mut self) {
-        if let Some((c, _)) = &mut self.child {
-            let _ = c.kill();
+        // (reaped off the main thread — else a zombie until tarae exits)
+        if let Some((mut c, _)) = self.child.take() {
+            std::thread::spawn(move || {
+                let _ = c.kill();
+                let _ = c.wait();
+            });
         }
     }
 }

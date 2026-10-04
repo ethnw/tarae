@@ -193,6 +193,35 @@ fn executable(p: &Path) -> bool {
     std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
+/// Every descriptor past stdio closes on exec. First thing at startup: what tarae was handed open (a
+/// parent's leak — seen: four pty masters of another tarae's) would otherwise go on into every program std
+/// starts, and std's spawn doesn't close them. And before `:restart`'s exec. The ones it marked, for a failed
+/// exec to unmark.
+pub fn close_on_exec() -> Vec<i32> {
+    let fds: Vec<i32> = std::fs::read_dir("/dev/fd")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().to_str()?.parse().ok())
+        .filter(|&fd| fd > 2)
+        .collect();
+    let mut marked = Vec::new();
+    for fd in fds {
+        // SAFETY: reading and setting a flag on a descriptor number; one that's gone meanwhile (the
+        // listing's own) just fails.
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags != -1
+                && flags & libc::FD_CLOEXEC == 0
+                && libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) == 0
+            {
+                marked.push(fd);
+            }
+        }
+    }
+    marked
+}
+
 /// Waits for `pid` to end (on a run's own thread — never the main loop).
 pub fn wait(pid: u32) -> io::Result<ExitStatus> {
     use std::os::unix::process::ExitStatusExt;
@@ -306,6 +335,130 @@ mod tests {
         assert_eq!(e.kind(), io::ErrorKind::NotFound);
         assert_eq!(e.to_string(), "No such file or directory (os error 2)");
         std::fs::remove_dir_all(d).ok();
+    }
+
+    /// A child that lists the descriptors it has open: `/dev/fd` read, then each one still there once the
+    /// listing's own has closed (`ls` keeps the folder it started in open besides, on macOS).
+    const LIST_FDS: &str = "for f in /dev/fd/*; do [ -e \"$f\" ] && echo \"${f#/dev/fd/}\"; done";
+
+    /// What it printed, as numbers.
+    fn numbers(listing: &str) -> Vec<u32> {
+        let mut fds: Vec<u32> = listing.split_whitespace().filter_map(|w| w.parse().ok()).collect();
+        fds.sort_unstable();
+        fds
+    }
+
+    /// Every way tarae starts a program hands it its three streams and nothing else — not what tarae was
+    /// handed open (a pipe without close-on-exec, made before `close_on_exec` runs as it does at startup),
+    /// nor the pty of a terminal panel running meanwhile, nor one just opened (`pty::open`), nor a pipe std
+    /// made. Each child is `sh` listing its own (`LIST_FDS`). Run in a process of its own
+    /// (`descriptors_in_its_own_process`): `close_on_exec` marks every descriptor of the process it runs
+    /// in, and the handed pipe would slip into other tests' children here.
+    #[test]
+    fn every_way_of_starting_a_program_hands_it_only_its_own_descriptors() {
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "spawn::tests::descriptors_in_its_own_process", "--ignored", "--nocapture"])
+            .env("TARAE_DESCRIPTORS", "1")
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{said}");
+        assert!(said.contains("1 passed"), "the child ran it: {said}");
+    }
+
+    /// `every_way_of_starting_a_program_hands_it_only_its_own_descriptors`'s child. On macOS std makes a
+    /// pipe close-on-exec only a moment after it's made, so a pipe of another thread's can slip into a child
+    /// here: a path passes on any of three tries.
+    #[test]
+    #[ignore]
+    fn descriptors_in_its_own_process() {
+        use std::process::Stdio;
+        if std::env::var_os("TARAE_DESCRIPTORS").is_none() {
+            return;
+        }
+        let mut handed = [0; 2];
+        // SAFETY: pipe(2) with a valid two-int array; no close-on-exec, on purpose (closed at the end).
+        assert_eq!(unsafe { libc::pipe(handed.as_mut_ptr()) }, 0);
+        // (as `main` does first thing — and what the test binary was handed goes the same way)
+        close_on_exec();
+        let (config, _) = crate::config::parse("");
+        let mut ed = crate::editor::Editor::new(config);
+        // A terminal panel running, its master held here; a pty and a pipe held besides
+        ed.terminal_run(vec!["/bin/sh".into(), "-c".into(), "echo up; sleep 30".into()], Vec::new());
+        let end = Instant::now() + Duration::from_secs(5);
+        let shows = |ed: &crate::editor::Editor, s: &str| {
+            ed.session.terminal.as_ref().is_some_and(|t| t.parser.screen().contents().contains(s))
+        };
+        while !shows(&ed, "up") && Instant::now() < end {
+            if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(50)) {
+                ed.handle_event(ev);
+            }
+        }
+        assert!(
+            shows(&ed, "up"),
+            "the terminal panel's program started: {:?}",
+            ed.toasts.iter().map(|t| &t.text).collect::<Vec<_>>()
+        );
+        let held = (crate::pty::open(5, 20).unwrap(), io::pipe().unwrap());
+        let ls = || {
+            let mut c = Command::new("/bin/sh");
+            c.args(["-c", LIST_FDS]);
+            c
+        };
+        let out = |o: std::process::Output| String::from_utf8_lossy(&o.stdout).into_owned();
+        let paths: [(&str, &dyn Fn() -> String); 4] = [
+            // language servers, Claude, git — std's spawn
+            ("std", &|| {
+                let cfg = crate::llm::LlmConfig {
+                    command: "/bin/sh".into(),
+                    args: vec!["-c".into(), LIST_FDS.into()],
+                    ..Default::default()
+                };
+                out(crate::llm::spawn(&cfg, &[], Path::new("/")).unwrap().wait_with_output().unwrap())
+            }),
+            // the debugger, the git tab's remotes, plugins — std's fork with `pre_exec`
+            ("dap::setsid", &|| {
+                let mut c = ls();
+                c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+                out(crate::dap::setsid(&mut c).output().unwrap())
+            }),
+            // runs and tests
+            ("spawn::setsid", &|| output(setsid(&ls()).unwrap()).0),
+            // the terminal panel's next program
+            ("terminal", &|| {
+                let mut t = crate::editor::Editor::new(crate::config::parse("").0);
+                t.terminal_run(vec!["/bin/sh".into(), "-c".into(), LIST_FDS.into()], Vec::new());
+                let end = Instant::now() + Duration::from_secs(5);
+                while t.session.terminal.as_ref().is_none_or(|t| t.exited.is_none()) && Instant::now() < end {
+                    if let Some(ev) = t.events.recv_timeout(Duration::from_millis(50)) {
+                        t.handle_event(ev);
+                    }
+                }
+                t.session.terminal.as_ref().map(|t| t.parser.screen().contents()).unwrap_or_default()
+            }),
+        ];
+        let mut leaked = Vec::new();
+        for (path, list) in paths {
+            let mut tries = Vec::new();
+            while tries.len() < 3 {
+                let fds = numbers(&list());
+                let clean = fds == [0, 1, 2];
+                tries.push(fds);
+                if clean {
+                    break;
+                }
+            }
+            if tries.last().is_some_and(|fds| fds != &[0, 1, 2]) {
+                leaked.push(format!("{path}: {tries:?}"));
+            }
+        }
+        drop(held);
+        // SAFETY: closing the two descriptors made above.
+        unsafe {
+            libc::close(handed[0]);
+            libc::close(handed[1]);
+        }
+        assert!(leaked.is_empty(), "a child had more than 0–2 open:\n{}", leaked.join("\n"));
     }
 
     /// A descriptor the editor holds without close-on-exec (a pty's, say) isn't open in a run.

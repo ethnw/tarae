@@ -10,7 +10,7 @@
 //! thread sends output as events, a writer thread takes the keys.
 
 use std::io::{Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
@@ -200,24 +200,9 @@ fn spawn(
     events: crate::event::Tx,
     generation: u64,
 ) -> Result<Terminal, String> {
-    let (mut master, mut slave) = (0, 0);
-    let mut ws = libc::winsize { ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0 };
-    // SAFETY: openpty fills two fds; the name/termios pointers may be null. (Mutable pointers: macOS wants
-    // them, Linux's const ones take them too.)
-    let r = unsafe {
-        libc::openpty(
-            &mut master,
-            &mut slave,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::addr_of_mut!(ws),
-        )
-    };
-    if r != 0 {
-        return Err(format!("openpty: {}", std::io::Error::last_os_error()));
-    }
-    // SAFETY: both fds were just opened by openpty and are owned by nobody else.
-    let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+    // (close-on-exec from the start: no other program tarae starts holds the master, so when tarae goes —
+    // killed too — the program here hangs up)
+    let (master, slave) = crate::pty::open(rows, cols).map_err(|e| format!("pty: {e}"))?;
     let io = |fd: &OwnedFd| fd.try_clone().map(Stdio::from).map_err(|e| e.to_string());
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..])
@@ -380,14 +365,23 @@ pub(crate) fn ready(fd: std::os::fd::RawFd) -> bool {
 }
 
 impl Drop for Terminal {
-    /// The program and everything it started hang up (its reader thread then reads the end and stops) —
-    /// closing our end alone wouldn't do: the reader holds a copy.
+    /// The program hangs up, and so does what has the terminal in front (a shell's job), as when a terminal
+    /// window closes (its reader thread then reads the end and stops) — closing our end alone wouldn't do:
+    /// the reader holds a copy. A shell passes it on to its other jobs; one that ignores it (`nohup`) runs
+    /// on, its terminal gone. Killed, tarae can't: the master's last copy closes with it and the kernel
+    /// hangs the shell up (`pty::open` — no other program has one).
     fn drop(&mut self) {
-        if self.exited.is_none() {
-            // SAFETY: a signal to the process group we started for it (`setsid`).
-            unsafe {
-                libc::kill(-(self.pid as i32), libc::SIGHUP);
+        if self.exited.is_some() {
+            return;
+        }
+        // SAFETY: tcgetpgrp/getsid only read; the signals go to the process group we started (`setsid`) and
+        // to the one in front on our pty — only while it's in that program's session.
+        unsafe {
+            let (program, front) = (self.pid as libc::pid_t, libc::tcgetpgrp(self.master.as_raw_fd()));
+            if front > 0 && front != program && libc::getsid(front) == program {
+                libc::kill(-front, libc::SIGHUP);
             }
+            libc::kill(-program, libc::SIGHUP);
         }
     }
 }
@@ -682,6 +676,58 @@ mod tests {
         let t = ed.session.terminal.as_ref().unwrap();
         assert_eq!(t.parser.screen().contents().trim(), "early bird");
         assert_eq!(t.exited, Some(0));
+    }
+
+    /// The terminal going (a session ended, tarae quitting) hangs up the program in front on it, even under a
+    /// shell that wouldn't pass the hangup on (`trap : HUP`) — that shell itself runs on, as it would when a
+    /// terminal window closes.
+    #[test]
+    fn dropping_the_terminal_hangs_up_the_program_in_front() {
+        let dir = std::env::temp_dir().join(format!("tarae-terminal-hangup-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (config, _) = crate::config::parse("");
+        let mut ed = Editor::new(config);
+        ed.session.root = dir.clone();
+        ed.terminal_run(
+            vec!["/bin/sh".into()],
+            vec![("PS1".into(), "$ ".into()), ("HISTFILE".into(), "/dev/null".into())],
+        );
+        wait(&mut ed, |ed| ed.session.terminal.is_some());
+        let job = dir.join("job.pid");
+        let t = ed.session.terminal.as_ref().unwrap();
+        // (caught, not ignored: an ignored signal would stay ignored in the job too)
+        t.send(b"trap : HUP\r".to_vec());
+        t.send(format!("sh -c 'echo $$ > {}; exec sleep 60'\r", job.display()).into_bytes());
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let pid = loop {
+            if let Some(pid) = std::fs::read_to_string(&job).ok().and_then(|s| s.trim().parse::<i32>().ok()) {
+                break pid;
+            }
+            assert!(std::time::Instant::now() < end, "the job never started");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        let shell = t.pid as i32;
+        // SAFETY: signal 0 only asks whether the process is there.
+        let alive = |pid: i32| unsafe { libc::kill(pid, 0) == 0 };
+        assert!(alive(pid));
+        ed.session.terminal = None;
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while alive(pid) && std::time::Instant::now() < end {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let left = alive(pid);
+        let shell_left = alive(shell);
+        // SAFETY: the shell is this test's own child (started above), still running as it traps SIGHUP — its
+        // job goes with it (its process group, in the shell's session).
+        unsafe {
+            if left && libc::getsid(pid) == shell {
+                libc::kill(-libc::getpgid(pid), libc::SIGKILL);
+            }
+            libc::kill(shell, libc::SIGKILL);
+        }
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(!left, "the program in front ({pid}) lives on");
+        assert!(shell_left, "the shell trapping SIGHUP runs on");
     }
 
     #[test]

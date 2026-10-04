@@ -615,6 +615,10 @@ impl Editor {
         self.task_generation += 1;
         let generation = self.task_generation;
         let pid = child.pid;
+        // (its watch ends with this process, whatever becomes of the run here)
+        if let Some(w) = sandbox.and_then(|p| p.watch.as_ref()) {
+            w.run_started(pid);
+        }
         let title = if claudes { "claude's command" } else { task.name.as_str() };
         self.procs_spawned(pid, title, &task.cmd);
         crate::queued::started(self, crate::queued::Slot::Task, &traced(&task.name));

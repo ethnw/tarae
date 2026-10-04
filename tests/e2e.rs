@@ -348,6 +348,136 @@ fn a_flood_in_the_terminal_panel_leaves_the_keys_working() {
     assert_eq!(t.wait_exit().code(), Some(0));
 }
 
+/// tarae in `sb` with the terminal panel's shell running a program in front — (the shell's pid, the
+/// program's), as each wrote it into the work folder.
+fn a_shell_with_a_job(sb: &Sandbox) -> (Term, i32, i32) {
+    let mut t = sb.spawn(&[]);
+    t.send(" T");
+    t.wait_text("TERMINAL");
+    t.send("echo $$ > shell.pid\r");
+    t.send("sh -c 'echo $$ > job.pid; exec sleep 120'\r");
+    let pid = |name: &str| {
+        let deadline = std::time::Instant::now() + TIMEOUT;
+        loop {
+            match fs::read_to_string(sb.file(name)).ok().and_then(|s| s.trim().parse().ok()) {
+                Some(pid) => return pid,
+                None if std::time::Instant::now() < deadline => std::thread::sleep(POLL),
+                None => panic!("{name} never written\n{}", t.screen()),
+            }
+        }
+    };
+    let (shell, job) = (pid("shell.pid"), pid("job.pid"));
+    assert!(alive(shell) && alive(job));
+    (t, shell, job)
+}
+
+/// Whether `pid` is there (signal 0 only asks).
+fn alive(pid: i32) -> bool {
+    // SAFETY: signal 0 sends nothing.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// Waits (`TIMEOUT` at most) for both to be gone.
+fn gone(what: &str, shell: i32, job: i32) {
+    let deadline = std::time::Instant::now() + TIMEOUT;
+    while (alive(shell) || alive(job)) && std::time::Instant::now() < deadline {
+        std::thread::sleep(POLL);
+    }
+    assert!(!alive(shell), "{what}: the terminal panel's shell ({shell}) lives on");
+    assert!(!alive(job), "{what}: the program in front of it ({job}) lives on");
+}
+
+/// A tarae that quits takes its terminal panel's shell and the program running there with it.
+#[test]
+fn a_quit_tarae_leaves_no_shell_behind() {
+    let sb = Sandbox::new("quit-shell").with_env("HISTFILE", "/dev/null");
+    let (mut t, shell, job) = a_shell_with_a_job(&sb);
+    t.send("\x1c");
+    t.command("q!");
+    assert_eq!(t.wait_exit().code(), Some(0));
+    gone(":q!", shell, job);
+}
+
+/// Killed (no destructor runs), tarae still leaves no shell: the pty's master was its own alone, so it
+/// closes with it and the kernel hangs the shell up — which takes its program along.
+#[test]
+fn a_killed_tarae_leaves_no_shell_behind() {
+    let sb = Sandbox::new("killed-shell").with_env("HISTFILE", "/dev/null");
+    let (mut t, shell, job) = a_shell_with_a_job(&sb);
+    t.child.kill().unwrap();
+    t.wait_exit();
+    gone("SIGKILL", shell, job);
+}
+
+/// SIGTERM and SIGHUP (its terminal gone — a window closed, the test binary that ran it dead) quit tarae
+/// as `:q!` does — it exits rather than dying of the signal, and its shell goes with it.
+#[test]
+fn a_terminated_or_hung_up_tarae_quits_and_ends_its_shell() {
+    use std::os::unix::process::ExitStatusExt;
+    for sig in [libc::SIGTERM, libc::SIGHUP] {
+        let sb = Sandbox::new("term-shell").with_env("HISTFILE", "/dev/null");
+        let (mut t, shell, job) = a_shell_with_a_job(&sb);
+        // SAFETY: a signal to the tarae this test started, still running.
+        unsafe { libc::kill(t.pid() as i32, sig) };
+        let status = t.wait_exit();
+        assert_eq!(status.signal(), None, "signal {sig}: it quit, not killed by it ({status})");
+        gone(&format!("signal {sig}"), shell, job);
+    }
+}
+
+/// A tarae whose terminal goes away (SIGHUP — quitting as `:q!` does) leaves the next start at least what a
+/// killed one leaves: the files to continue with (a quit writes them, a kill keeps the last quit's), and the
+/// files on disk as they were — unsaved text is lost either way (nothing keeps it), never written.
+#[test]
+fn a_hung_up_tarae_leaves_the_next_start_at_least_what_a_killed_one_does() {
+    let names = ["a.txt", "b.txt"];
+    let among = |row: &str| -> Vec<&str> { names.iter().copied().filter(|n| row.contains(n)).collect() };
+    // (what `r` reopens — the header's tabs — and the start screen's recent files)
+    let offered = |how: libc::c_int| -> (Vec<&str>, Vec<&str>, String) {
+        let sb = Sandbox::new("hangup-keeps");
+        sb.write("a.txt", "alpha\n");
+        sb.write("b.txt", "beta\n");
+        // A quit before: a.txt kept to continue with
+        let mut t = sb.spawn(&["a.txt"]);
+        t.wait_text("alpha");
+        t.command("q");
+        assert_eq!(t.wait_exit().code(), Some(0));
+        // Then b.txt and a.txt open, b.txt changed and not saved — and the end
+        let mut t = sb.spawn(&["b.txt", "a.txt"]);
+        t.wait_text("beta");
+        t.insert("unsaved-edit ");
+        // SAFETY: a signal to the tarae this test started, still running.
+        unsafe { libc::kill(t.pid() as i32, how) };
+        t.wait_exit();
+        // What the next start offers, and what `r` brings back
+        let mut t = sb.spawn(&[]);
+        let s = t.wait_text("t a r a e");
+        let at = s.rows.iter().position(|r| r.contains("Recent")).unwrap_or(s.rows.len());
+        let recent = among(&s.rows[at..].join("\n"));
+        let continued = if s.contains("Continue where you left off") {
+            t.send("r");
+            let s = t.wait_for("the files continued with", |s| s.contains("alpha") || s.contains("beta"));
+            assert!(!s.contains("unsaved-edit"), "{s}");
+            among(&s.rows[0])
+        } else {
+            Vec::new()
+        };
+        t.command("q");
+        assert_eq!(t.wait_exit().code(), Some(0));
+        (continued, recent, sb.read("b.txt"))
+    };
+    let (killed, killed_recent, killed_b) = offered(libc::SIGKILL);
+    let (hung_up, hung_up_recent, hung_up_b) = offered(libc::SIGHUP);
+    assert_eq!(killed, ["a.txt"], "a kill keeps the last quit's");
+    for (n, list) in
+        killed.iter().map(|n| (n, &hung_up)).chain(killed_recent.iter().map(|n| (n, &hung_up_recent)))
+    {
+        assert!(list.contains(n), "{n}: a kill kept it, a hangup didn't ({list:?})");
+    }
+    assert_eq!(hung_up, ["a.txt", "b.txt"], "a hangup keeps what was open, as a quit does");
+    assert_eq!((killed_b.as_str(), hung_up_b.as_str()), ("beta\n", "beta\n"), "unsaved text never written");
+}
+
 /// A build task from the config: its output below the code, the place it printed goes into the list, `]q`
 /// goes there with the message as a toast, `space q` shows the list in the side panel.
 #[test]

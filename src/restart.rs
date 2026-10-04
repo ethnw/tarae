@@ -619,7 +619,8 @@ fn exec_with(mut ed: Editor, bin: &Path, file: &Path) -> String {
         return format!("{}: {e}", file.display());
     }
     drop(ed);
-    let marked = close_on_exec();
+    // (std's are marked already, but not all are std's — one left open would keep its holder from ending)
+    let marked = crate::spawn::close_on_exec();
     let signals = Signals::now();
     let err = std::process::Command::new(bin).arg("--restart").arg(file).exec();
     // Only a failed exec returns, and std's exec set this process up as a fork's child first: no signal
@@ -659,33 +660,6 @@ impl Signals {
             libc::pthread_sigmask(libc::SIG_SETMASK, &self.mask, std::ptr::null_mut());
         }
     }
-}
-
-/// Every descriptor past stdio closes on exec — std's are marked already, but not all are std's (a
-/// terminal's pty from `openpty`); one left open would keep its shell from hanging up. The ones it marked,
-/// for a failed exec to unmark.
-fn close_on_exec() -> Vec<i32> {
-    let fds: Vec<i32> = std::fs::read_dir("/dev/fd")
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| e.file_name().to_str()?.parse().ok())
-        .filter(|&fd| fd > 2)
-        .collect();
-    let mut marked = Vec::new();
-    for fd in fds {
-        // SAFETY: reading and setting a flag on a descriptor number; one that's gone meanwhile just fails.
-        unsafe {
-            let flags = libc::fcntl(fd, libc::F_GETFD);
-            if flags != -1
-                && flags & libc::FD_CLOEXEC == 0
-                && libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) == 0
-            {
-                marked.push(fd);
-            }
-        }
-    }
-    marked
 }
 
 /// First thing after a restart: the last tarae's children that were stopped but not waited for are this
