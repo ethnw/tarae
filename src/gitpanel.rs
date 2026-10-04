@@ -42,6 +42,47 @@ pub struct Status {
     pub generation: u64,
     /// The git tab's rows for it — built with it, on the worker (20k changed files: ~7 ms).
     pub rows: std::sync::Arc<[crate::sidebar::Line]>,
+    /// A clean tree's history, for the tab with nothing to commit (#147).
+    pub log: Option<Log>,
+}
+
+/// What a clean tree's git tab says instead of nothing: the branch's commits past its base — what bring
+/// takes (a session's base; else the upstream) — and the last commit.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Log {
+    /// The base, its commits counted, the newest few (`a1b2c3d subject`).
+    pub base: Option<String>,
+    pub ahead: usize,
+    pub commits: Vec<String>,
+    /// `a1b2c3d subject · 2 hours ago`.
+    pub last: Option<String>,
+}
+
+/// Commits a clean tab lists past its base at most.
+const LOG_COMMITS: usize = 5;
+
+/// `top`'s history against `base` (a branch, or the upstream when None) — on a worker.
+fn log(top: &Path, base: Option<String>, upstream: Option<&str>) -> Log {
+    let line = |l: &str| {
+        let mut p = l.splitn(3, '\x1f');
+        let (sha, subject, when) = (p.next().unwrap_or_default(), p.next().unwrap_or_default(), p.next());
+        match when {
+            Some(w) => format!("{sha} {subject} · {w}"),
+            None => format!("{sha} {subject}"),
+        }
+    };
+    let last = git(top, &["log", "-1", "--format=%h%x1f%s%x1f%cr"], None).ok().map(|l| line(l.trim()));
+    let base = base.or_else(|| upstream.map(str::to_string));
+    let Some(b) = base.clone() else { return Log { last, ..Log::default() } };
+    let range = format!("{b}..HEAD");
+    let ahead = git(top, &["rev-list", "--count", &range], None).ok().and_then(|n| n.trim().parse().ok());
+    let commits = match ahead {
+        Some(n) if n > 0 => git(top, &["log", "--format=%h%x1f%s", &format!("-{LOG_COMMITS}"), &range], None)
+            .map(|out| out.lines().map(line).collect())
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    Log { base: ahead.is_some().then_some(b), ahead: ahead.unwrap_or(0), commits, last }
 }
 
 impl Status {
@@ -132,8 +173,9 @@ fn numstat(out: &str) -> HashMap<String, (Option<usize>, Option<usize>)> {
     m
 }
 
-/// The status of `cwd`'s repository with line counts (on a worker thread).
-pub fn status(cwd: &Path) -> Result<Status, String> {
+/// The status of `cwd`'s repository with line counts (on a worker thread); clean, its history against
+/// `base` (a session's — else the upstream).
+pub fn status(cwd: &Path, base: Option<String>) -> Result<Status, String> {
     let top = PathBuf::from(git(cwd, &["rev-parse", "--show-toplevel"], None)?.trim());
     let top = std::fs::canonicalize(&top).unwrap_or(top);
     let out = git(&top, &["status", "--porcelain=v2", "-z", "--branch", "--untracked-files=all"], None)?;
@@ -159,6 +201,9 @@ pub fn status(cwd: &Path) -> Result<Status, String> {
                 (e.added, e.removed) = (n, Some(0));
             }
         }
+    }
+    if st.staged.is_empty() && st.unstaged.is_empty() {
+        st.log = Some(log(&top, base, st.upstream.as_deref()));
     }
     Ok(st)
 }
@@ -615,8 +660,12 @@ impl Editor {
         let cwd = self.git_cwd();
         self.session.git_reads += 1;
         let read = self.session.git_reads;
+        // (a session's base, as bring takes it — in its own checkout only)
+        let base = (cwd == self.session.root && self.session.id != 0)
+            .then(|| self.session.base.clone().or_else(|| self.start_branch()))
+            .flatten();
         self.events.jobs().spawn(move || {
-            let result = status(&cwd).map(Status::with_rows);
+            let result = status(&cwd, base).map(Status::with_rows);
             move |ed: &mut Editor| {
                 if read != ed.session.git_reads {
                     return;
@@ -1627,6 +1676,70 @@ mod tests {
         assert_eq!(m["logo.png"], (None, None), "binary");
     }
 
+    /// #147: a clean tree's git tab says more than "nothing to commit" — the branch's commits past its base
+    /// (what bring takes; the newest few, the rest counted) and the last commit. (A repository of the test's
+    /// own, in its temp folder.)
+    #[test]
+    fn a_clean_tree_shows_what_bring_takes_and_the_last_commit() {
+        let dir = std::env::temp_dir().join(format!("tarae-gitpanel-clean-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let run = |args: &[&str]| {
+            let id = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"];
+            let ok = std::process::Command::new("git").args(id).args(args).current_dir(&dir).output();
+            assert!(ok.unwrap().status.success(), "git {args:?}");
+        };
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        run(&["init", "-q", "-b", "main"]);
+        run(&["add", "a.txt"]);
+        run(&["commit", "-qm", "base"]);
+        run(&["checkout", "-qb", "feat"]);
+        for i in 1..=7 {
+            run(&["commit", "-q", "--allow-empty", "-m", &format!("step {i}")]);
+        }
+        let st = status(&dir, Some("main".into())).unwrap();
+        let log = st.log.clone().expect("clean: its history");
+        assert_eq!((log.base.as_deref(), log.ahead, log.commits.len()), (Some("main"), 7, LOG_COMMITS));
+        assert!(
+            log.commits[0].ends_with(" step 7")
+                && log.last.as_deref().is_some_and(|l| l.contains(" step 7 · "))
+        );
+        // Drawn: the tab says it in the list's place
+        let mut ed = Editor::new(crate::config::Config::default());
+        ed.session.root = dir.clone();
+        ed.session.sidebar = Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, dir.clone()));
+        ed.session.git_status = Some(st.with_rows());
+        let mut bytes = Vec::new();
+        crate::term::render(&mut ed, &mut bytes, 120, 30).unwrap();
+        let mut vt = vt100::Parser::new(30, 120, 0);
+        vt.process(&bytes);
+        let s = vt.screen().contents();
+        for part in [
+            "nothing to commit",
+            "7 commits past main — what",
+            "bring takes:",
+            " step 7",
+            " step 3",
+            "… 2 more",
+        ] {
+            assert!(s.contains(part), "{part:?} in\n{s}");
+        }
+        assert!(!s.contains("last commit"), "the last commit is the first listed — not twice: {s}");
+        // Nothing past the base: said, and the last commit under it
+        let st = status(&dir, Some("feat".into())).unwrap();
+        ed.session.git_status = Some(st.with_rows());
+        let mut bytes = Vec::new();
+        crate::term::render(&mut ed, &mut bytes, 120, 30).unwrap();
+        vt.process(&bytes);
+        let s = vt.screen().contents();
+        assert!(s.contains("nothing past feat — nothing") && s.contains("last commit"), "{s}");
+        // Changes to commit: no history — the list is the changes
+        std::fs::write(dir.join("a.txt"), "two\n").unwrap();
+        assert_eq!(status(&dir, Some("main".into())).unwrap().log, None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Reading the status never writes the index: `git diff` over a file whose stat changed refreshes it
     /// (taking the lock, whatever `GIT_OPTIONAL_LOCKS` says) — a commit made in a terminal meanwhile would
     /// fail on the lock. (A repository of the test's own, in its temp folder.)
@@ -1651,7 +1764,7 @@ mod tests {
         let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
         std::fs::File::options().write(true).open(dir.join("a.txt")).unwrap().set_modified(hour_ago).unwrap();
         let before = std::fs::read(dir.join(".git/index")).unwrap();
-        let st = status(&dir).unwrap();
+        let st = status(&dir, None).unwrap();
         let rows: Vec<_> = st.unstaged.iter().map(|e| (e.rel.as_str(), e.added, e.removed)).collect();
         assert_eq!(rows, [("b.txt", Some(1), Some(0))], "its counts still come");
         assert_eq!(std::fs::read(dir.join(".git/index")).unwrap(), before, "the index was rewritten");

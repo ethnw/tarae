@@ -554,6 +554,17 @@ impl Editor {
         if mode == Mode::Files && self.session.code_review.is_some() {
             return crate::codereview::rail_focus(self);
         }
+        // Another tab (`space o`, `space q`) goes in front of the rail, as the git tab does — #154: it had the
+        // keys while the rail stayed drawn in its place (`space g` gives the column back)
+        if let Some(r) = self.session.code_review.as_mut()
+            && !self.session.sidebar.as_ref().is_some_and(|s| s.mode == mode && s.focus && r.behind)
+        {
+            r.behind = true;
+            r.focus = false;
+            if let Some(s) = self.session.sidebar.as_mut() {
+                s.focus = false;
+            }
+        }
         match self.session.sidebar.as_mut() {
             Some(s) if s.mode == mode && s.focus => {
                 self.session.sidebar = None;

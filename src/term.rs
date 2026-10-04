@@ -637,7 +637,17 @@ impl Layout {
         let edit_w = w as usize - chat_w;
         let rail_w = match editor.session.code_review.as_ref() {
             // The review's: as wide as its names (U6)
-            Some(r) if review && zoom.is_none() && edit_w >= 90 => review_rail_w(r, edit_w),
+            Some(r) if review && zoom.is_none() && edit_w >= 90 => review_rail_w(r, edit_w, REVIEW_CODE_MIN),
+            // Narrower, while it has the keys (`space g` back from the git tab, `space e`) — in the room the
+            // side panel would have: they went to a rail that wasn't drawn (#146)
+            Some(r)
+                if review
+                    && zoom.is_none()
+                    && r.focus
+                    && edit_w >= REVIEW_RAIL_MIN + crate::sizes::CODE_MIN =>
+            {
+                review_rail_w(r, edit_w, crate::sizes::CODE_MIN)
+            }
             _ => widths.side,
         };
         Self {
@@ -1440,9 +1450,12 @@ fn draw_task_panel(
         (_, (0, 0)) => vec![("space m m", "again"), ("space m c", "close")],
         _ => vec![("]q", "next"), ("space q", "list"), ("space m m", "again"), ("space m c", "close")],
     };
-    // (a preflight is run again with `:preflight`, not as a task)
+    // (a preflight is run again with `:preflight`, not as a task — `o` shows a step's output whole, #126)
     if r.by_claude || steps.is_some() {
         hints.retain(|h| h.0 != "space m m");
+    }
+    if steps.is_some() {
+        hints.insert(0, ("o", "output"));
     }
     hints.splice(0..0, slot_hints(editor));
     let y0 = lay.slot_y();
@@ -2906,9 +2919,10 @@ fn draw(
         }
         _ => None,
     };
-    if let Some(rev) = editor.session.review.as_ref().filter(|r| !r.ready) {
-        draw_ask_stream(rev, editor, ui, lay, out)?;
-    }
+    let ask_rect = match editor.session.review.as_ref().filter(|r| !r.ready) {
+        Some(rev) => draw_ask_stream(rev, editor, ui, lay, out)?,
+        None => None,
+    };
     // Cards over the code share the screen without overlapping: the note at the cursor and an offer (a
     // command Claude wants to run) are placed first, the follow card takes a free corner (skipped if none is)
     let note_rect = text_cursor.and_then(|at| note_card_geom(editor, at, ui, lay)).map(|g| g.rect());
@@ -2948,7 +2962,7 @@ fn draw(
     let cursor_row = text_cursor.map(|(_, y)| line(y as usize, y as usize));
     let change = editor.screen.review_change.get().map(|(a, b)| line(a, b));
     let taken: Vec<Rect4> =
-        [note_rect, follow_rect, offer_rect, cursor_row, change].into_iter().flatten().collect();
+        [note_rect, follow_rect, offer_rect, ask_rect, cursor_row, change].into_iter().flatten().collect();
     let toast_folded = !draw_toasts(editor, ui, lay, &taken, out)?;
     if let Some(card) = offer {
         card.draw(editor, ui, out)?;
@@ -7261,13 +7275,16 @@ fn wave() -> String {
 
 /// While an ask answer streams: last few lines being written, in a card at the editing area's bottom right
 /// (in that language's colors). Editing isn't blocked — the card covers only the corner.
+/// The card while Claude writes an answer (`space i`, a commit draft): the bottom right of the code's room —
+/// right of the side panel or the review's rail, above the bottom slot (#139: placed by the screen's left
+/// edge, it ran under the rail, its start cut). Its place, for the toast to keep off; None: no room.
 fn draw_ask_stream(
     rev: &crate::llm::Review,
     editor: &Editor,
     ui: &Ui,
     lay: &Layout,
     out: &mut impl Write,
-) -> io::Result<()> {
+) -> io::Result<Option<Rect4>> {
     const ROWS: usize = 6;
     let card = card_style(ui, editor, "ui.popup");
     let pad = card_padding(ui, card);
@@ -7279,11 +7296,13 @@ fn draw_ask_stream(
         .map(|s| s.lang.name.clone());
     let preview = crate::llm::preview(&rev.streamed, ROWS);
     let code = crate::markdown::code_lines(&preview.join("\n"), lang.as_deref(), &editor.theme);
-    let inner = (lay.edit_w / 2).clamp(30, 72).min(lay.edit_w.saturating_sub(4));
+    // (the code's room: from the rail's edge — a cell of it kept — to the code's right edge)
+    let room = lay.edit_w.saturating_sub(lay.rail_w + 1);
+    let inner = (lay.edit_w / 2).clamp(30, 72).min(room.saturating_sub(5));
     let body = if rev.streamed.is_empty() { 0 } else { code.len().min(ROWS) };
     let h = 1 + body + 2 * pad;
-    if lay.text_rows < h + 1 {
-        return Ok(());
+    if lay.text_rows < h + 1 || inner < 24 {
+        return Ok(None);
     }
     let (x0, y0) = (lay.edit_w.saturating_sub(inner + 5), lay.text_top as usize + lay.text_rows - h);
     let width = inner + 4;
@@ -7332,7 +7351,8 @@ fn draw_ask_stream(
         apply(out, card)?;
         queue!(out, Spaces(inner - used + 2))?;
     }
-    card_edge(out, ui, card, x0, y + 1 + body, width, pad, false)
+    card_edge(out, ui, card, x0, y + 1 + body, width, pad, false)?;
+    Ok(Some((x0, y0, width, h)))
 }
 
 /// Follow mode's one card (U4), in one place — the bottom right of the code (the top right when a note or an
@@ -7795,8 +7815,38 @@ fn draw_sidebar(
     let shown = sb.shown_rows(list_rows, lines.len());
     let first = HEAD + usize::from(!behind.is_empty());
     let empty = if lines.is_empty() {
-        let note = crate::markdown::Line::Text { spans: vec![sp(sb.empty_note(editor), faint)], indent: 0 };
-        crate::markdown::wrap(&[note], w, faint)
+        let text = |spans| crate::markdown::Line::Text { spans, indent: 0 };
+        let mut note = vec![text(vec![sp(sb.empty_note(editor), faint)])];
+        // A clean tree: what bring takes (its commits past the base) and the last commit (#147)
+        let log = editor.session.git_status.as_ref().and_then(|s| s.log.as_ref());
+        if let Some(log) = log.filter(|_| sb.mode == crate::sidebar::Mode::Git) {
+            let dim = Style { fg: ui.virt.fg, ..card };
+            let commit = |l: &str| {
+                let (sha, rest) = l.split_once(' ').unwrap_or((l, ""));
+                text(vec![sp(sha, faint), sp(" ", card), sp(rest, dim)])
+            };
+            if let Some(base) = &log.base {
+                note.push(text(Vec::new()));
+                let n = crate::worktree::commits(log.ahead);
+                let head = match log.ahead {
+                    0 => format!("nothing past {base} — nothing to bring"),
+                    _ => format!("{n} past {base} — what bring takes:"),
+                };
+                note.push(text(vec![sp(&head, faint)]));
+                note.extend(log.commits.iter().map(|c| commit(c)));
+                if log.ahead > log.commits.len() {
+                    note.push(text(vec![sp(&format!("… {} more", log.ahead - log.commits.len()), faint)]));
+                }
+            }
+            if let Some(last) =
+                log.last.as_ref().filter(|l| !log.commits.iter().any(|c| l.starts_with(c.as_str())))
+            {
+                note.push(text(Vec::new()));
+                note.push(text(vec![sp("last commit", faint)]));
+                note.push(commit(last));
+            }
+        }
+        crate::markdown::wrap(&note, w, faint)
     } else {
         Vec::new()
     };
@@ -7986,13 +8036,12 @@ const REVIEW_CODE_MIN: usize = 60;
 /// The review rail's width: what its rows need — every file's whole (bar, guides, glyph, name, `+a −r`,
 /// `new`), its folders, the head and the key hints — between 24 and 48 columns, the code keeping 60. Measured
 /// once (the files don't change), so it never shifts while you read; a draft's `¶n` cuts the name a little
-/// rather than widening it. A name that still doesn't fit is cut from the left (its end stays).
-fn review_rail_w(r: &crate::codereview::CodeReview, edit_w: usize) -> usize {
+/// rather than widening it. A name that still doesn't fit is cut from the left (its end stays). The code
+/// keeps `code_min` (60; 48 — as beside the side panel — while the rail has the keys on a narrow screen).
+fn review_rail_w(r: &crate::codereview::CodeReview, edit_w: usize, code_min: usize) -> usize {
     use crate::chrome::{GAP, PAD, PAD_R};
     let need = *r.rail_need.get_or_init(|| review_rail_need(r));
-    (need + PAD + PAD_R + GAP)
-        .clamp(REVIEW_RAIL_MIN, REVIEW_RAIL_MAX)
-        .min(edit_w.saturating_sub(REVIEW_CODE_MIN))
+    (need + PAD + PAD_R + GAP).clamp(REVIEW_RAIL_MIN, REVIEW_RAIL_MAX).min(edit_w.saturating_sub(code_min))
 }
 
 /// The cells the review rail's widest row takes (inside its padding).
@@ -8007,7 +8056,7 @@ fn review_rail_need(r: &crate::codereview::CodeReview) -> usize {
         let guides = tree_guides(t.depth).width();
         let row = match t.item {
             None => guides + 2 + piece.width() + 1,
-            Some(i) => 2 + guides + piece.width() + rail_tail(&r.files[i]).width(),
+            Some(i) => 2 + guides + piece.width() + rail_tail(r, &r.files[i]).width(),
         };
         need = need.max(row);
     }
@@ -8021,8 +8070,9 @@ fn review_rail_need(r: &crate::codereview::CodeReview) -> usize {
     need
 }
 
-/// A file row's end: `+a −r`, `binary`, `new`/`gone` (as `draw_review_rail` puts it — drafts aside).
-fn rail_tail(f: &crate::codereview::File) -> String {
+/// A file row's end: `+a −r`, `binary`, `outside`/`new`/`gone` (as `draw_review_rail` puts it — drafts
+/// aside).
+fn rail_tail(r: &crate::codereview::CodeReview, f: &crate::codereview::File) -> String {
     let mut s = String::new();
     if f.binary {
         s += " binary";
@@ -8034,7 +8084,9 @@ fn rail_tail(f: &crate::codereview::File) -> String {
             s += &format!(" −{}", f.removed);
         }
     }
-    if f.new {
+    if r.outside(f) {
+        s += " outside";
+    } else if f.new {
         s += " new";
     } else if f.gone {
         s += " gone";
@@ -8083,10 +8135,12 @@ fn review_rail_hints(
     }
 }
 
-/// Rows the review rail has for its files (a turn's has its question under the head).
+/// Rows the review rail has for its files (a turn's has its question under the head; files outside the
+/// checkout, a row saying so).
 fn review_rail_room(lay: &Layout, r: &crate::codereview::CodeReview) -> usize {
     let question = usize::from(matches!(r.base, crate::codereview::Base::Turn { .. }));
-    lay.body_h.saturating_sub(RAIL_HEAD + question + RAIL_HINTS + 1).max(1)
+    let outside = usize::from(r.files.iter().any(|f| r.outside(f)));
+    lay.body_h.saturating_sub(RAIL_HEAD + question + outside + RAIL_HINTS + 1).max(1)
 }
 
 fn draw_review_rail(
@@ -8105,6 +8159,7 @@ fn draw_review_rail(
         card.patch(editor.theme.try_get("ui.text.focus").unwrap_or(Style { bold: true, ..Style::default() }));
     let plus = Style { fg: ui.diff_plus.fg, ..card };
     let minus = Style { fg: ui.diff_minus.fg, ..card };
+    let warn_fg = editor.theme.try_get("warning").and_then(|s| s.fg).or(ui.accent.fg);
     use crate::chrome::{GAP, PAD, PAD_R};
     let selected = selected_row(ui, editor, card);
     let key = Style { bold: true, ..dim };
@@ -8155,6 +8210,12 @@ fn draw_review_rail(
     }
     rows.push((summary, card, None));
     rows.push((vec![sp(format!("{viewed} of {n} viewed"), faint)], card, None));
+    // Files outside the checkout (a turn's temp files): said, they're not part of what's committed (#145)
+    let outside = r.files.iter().filter(|f| r.outside(f)).count();
+    if outside > 0 {
+        let said = format!("{outside} outside, not committed");
+        rows.push((vec![sp(fit_ellipsis(&said, w), Style { fg: warn_fg, ..card })], card, None));
+    }
     // Files under their folders (filetree.rs, in the review's order) — from its scroll (`CodeReview::fit`),
     // the files out of sight counted in the blank rows around them
     let room = review_rail_room(lay, r);
@@ -8201,7 +8262,10 @@ fn draw_review_rail(
                 tail.push(sp(format!(" −{}", f.removed), Style { fg: ui.diff_minus.fg, ..bg }));
             }
         }
-        if f.new {
+        if r.outside(f) {
+            // (not in the checkout — a turn's temp file: never committed, #145)
+            tail.push(sp(" outside".into(), Style { fg: warn_fg, ..bg }));
+        } else if f.new {
             tail.push(sp(" new".into(), Style { fg: ui.linenr.fg, ..bg }));
         } else if f.gone {
             tail.push(sp(" gone".into(), Style { fg: ui.linenr.fg, ..bg }));

@@ -277,6 +277,14 @@ fn deny(message: &str) -> Value {
 /// the command line, a picker): it waits, said once, and comes up when you stop (#54: it took the screen,
 /// and the next keys answered it).
 pub fn next(ed: &mut Editor) {
+    // A review whose buffer is gone draws nothing: it doesn't keep the keys, it ends and says so (#149 — one
+    // held them, invisible, for 80 minutes; `Editor::close_doc` ends them, this is what's left if it didn't)
+    if ed.session.review.as_ref().is_some_and(|r| r.ready && !ed.docs.iter().any(|d| d.id == r.doc_id)) {
+        crate::llm::close_review(ed);
+        ed.set_error(
+            "a change under review lost its buffer and can't be shown — it was declined, Claude was told",
+        );
+    }
     // (a session behind: its edits wait in their queue until it's in front)
     if ed.session.review.is_some() || ed.background() {
         return;
@@ -396,7 +404,12 @@ fn done(ed: &mut Editor, p: Pending, doc_id: DocId, base: String, dirty: bool, e
     }
     let applied_note = "The user accepted this change and tarae applied it to their open buffer, which has \
 unsaved edits — the file on disk changes when they save. Treat the edit as done.";
-    let r = if !applied {
+    let r = if !applied && !ed.docs.iter().any(|d| d.id == doc_id) {
+        // (its buffer was closed under the review — `Editor::close_doc`)
+        deny(
+            "The buffer this change was shown in was closed before the user answered — nothing was written. Ask again if it's still needed.",
+        )
+    } else if !applied {
         deny("The user declined this change in the editor.")
     } else if dirty {
         deny(applied_note)
@@ -477,7 +490,8 @@ fn answer(ed: &mut Editor, request_id: &str, response: Value) {
 
 /// The chat turn ended (or claude exited): a review still waiting for it closes, queued ones are dropped,
 /// and the files outside the project its reviews opened go (`Document::aside` — not ones with unsaved
-/// edits of yours, nor ones you worked in since; an accepted edit Claude is still writing is its own).
+/// edits of yours, nor ones you worked in since; an accepted edit Claude is still writing is its own). Only
+/// this session's: buffers are shared, and another session's Claude may be showing one in its review (#149).
 pub fn turn_over(ed: &mut Editor) {
     let Some(c) = &mut ed.session.chat else { return };
     c.edits.queue.clear();
@@ -486,10 +500,15 @@ pub fn turn_over(ed: &mut Editor) {
     {
         crate::llm::close_review(ed);
     }
+    let reviewed: Vec<DocId> = std::iter::once(&ed.session)
+        .chain(&ed.sessions)
+        .filter_map(|l| l.review.as_ref().map(|r| r.doc_id))
+        .collect();
     let aside: Vec<_> = ed
         .docs
         .iter()
         .filter(|d| d.aside && (!d.is_modified() || d.unsaved_is_claudes()))
+        .filter(|d| ed.session.docs.contains(&d.id) && !reviewed.contains(&d.id))
         .map(|d| d.id)
         .collect();
     for id in aside {

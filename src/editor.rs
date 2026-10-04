@@ -1043,6 +1043,19 @@ impl Editor {
             v.jumps.remove_doc(gone);
             v.last_doc = v.last_doc.filter(|&d| d != gone);
         }
+        // A review of a change to it, in any session, ends with it — Claude is told its buffer went (#149: one
+        // left on a closed buffer drew nothing and kept the keys for 80 minutes)
+        let reviewing: Vec<_> = std::iter::once(&self.session)
+            .chain(&self.sessions)
+            .filter(|l| l.review.as_ref().is_some_and(|r| r.doc_id == gone))
+            .map(|l| l.id)
+            .collect();
+        for id in reviewing {
+            self.with_session(id, |ed| {
+                crate::llm::close_review(ed);
+                ed.set_warning("the buffer of Claude's edit under review was closed — Claude was told");
+            });
+        }
     }
 
     // ── Splits ────────────────────────────────────────────────────────────
@@ -1516,8 +1529,9 @@ impl Editor {
     /// Press = place cursor (alt adds one) · drag = select · wheel = 3 lines. Clicking the chat pane
     /// focuses it; in a picker, wheel = move selection, click = open.
     /// Pasted text (the outer terminal's bracketed paste): to the built-in terminal when it has the keys; typed
-    /// into a picker, prompt, or the chat (one line — newlines as spaces; the chat keeps them); else into
-    /// the buffer as one edit.
+    /// into a picker, prompt, or the chat (one line — newlines as spaces; the chat keeps them); in insert mode
+    /// into the buffer as one edit; in normal or select mode held in the register for `p`/`P` (a `:` line: the
+    /// command line).
     pub fn handle_paste(&mut self, text: String) {
         self.input_seq += 1;
         if self.picker.is_none() && self.prompt.is_none() && self.terminal_paste(&text) {
@@ -1574,8 +1588,8 @@ impl Editor {
                 .set_status("a pasted : line — in the command line, not run: enter runs it, esc drops it");
         }
         // A file under review (a turn's, a branch's) took the keys when the turn ended — a paste in normal mode
-        // there was meant for the chat (#31: it landed in the file as an unsaved edit). It goes to the chat;
-        // without one it goes in, saying where. (In insert mode it's typed there on purpose.)
+        // there was meant for the chat (#31: it landed in the file as an unsaved edit). It goes to the chat.
+        // (In insert mode it's typed there on purpose.)
         let reviewing = self.session.code_review.is_some()
             && self.doc().review_base.is_some()
             && self.mode != Mode::Insert;
@@ -1586,9 +1600,17 @@ impl Editor {
             c.focused = true;
             return self.set_status("pasted into the chat — the file is under review (i pastes there)");
         }
-        if reviewing {
-            let name = self.doc().display_name(&self.session.root);
-            self.set_warning(format!("pasted into {name}, which is under review — u takes it back"));
+        // Normal or select mode: held, not put in (#124 — it went into the file, said only by a toast; a paste
+        // there is mostly meant elsewhere). In the default register, so `p` puts it after the selection and
+        // `P` before, as one edit; insert mode types it where you type.
+        if self.mode != Mode::Insert {
+            let lines = text.trim_end_matches('\n').lines().count().max(1);
+            let what = if lines == 1 { "a line".to_string() } else { format!("{lines} lines") };
+            self.write_register('"', vec![text]);
+            self.mode = Mode::Normal;
+            return self.set_status(format!(
+                "pasted {what} — held, not in the file: p puts it after the selection, P before (i to type it in)"
+            ));
         }
         if self.doc().loading {
             return self.set_warning("still loading — paste once it's read");
@@ -1602,14 +1624,8 @@ impl Editor {
         // A list or signature card for the text before it would be stale (accepting would replace the paste)
         self.completion = None;
         self.signature = None;
-        let lines = text.trim_end_matches('\n').lines().count().max(1);
+        // (insert mode: typed where you type)
         self.with_group(|cx| crate::commands::paste_text(cx, text));
-        // (in insert mode it's typed where you type; from normal or select mode it's said where it went)
-        if self.mode != Mode::Insert && !reviewing {
-            let name = self.doc().display_name(&self.session.root);
-            let what = if lines == 1 { "a line".to_string() } else { format!("{lines} lines") };
-            self.set_status(format!("pasted {what} into {name} — u takes it back"));
-        }
     }
 
     pub fn handle_mouse(&mut self, m: crate::event::Mouse) {
@@ -8367,6 +8383,82 @@ mod tests {
         std::fs::remove_dir_all(&away).ok();
     }
 
+    /// #149: buffers are shared between sessions — another session's turn ending closes its own aside files,
+    /// never the new file this session's Claude is showing in its review (it did: the review stayed, on a
+    /// closed buffer, drawing nothing and keeping the keys for 80 minutes). A review whose buffer goes anyway
+    /// ends with it and Claude is told why; one found without its buffer doesn't keep the keys.
+    #[test]
+    fn a_review_s_buffer_outlives_another_session_s_turn() {
+        use serde_json::json;
+        let (dir, main, ..) = follow_project("aside-149");
+        let away = dir.with_file_name(format!("tarae-aside-149-away-{}", std::process::id()));
+        std::fs::create_dir_all(&away).unwrap();
+        let away = std::fs::canonicalize(&away).unwrap();
+        let (setup, theirs) = (away.join("setup.sh"), away.join("theirs.toml"));
+        std::fs::write(&theirs, "c = 1\n").unwrap();
+        let open = |ed: &Editor, p: &Path| ed.docs.iter().any(|d| d.path.as_deref() == Some(p));
+        let mut ed = editor("");
+        ed.session.root = dir.clone();
+        ed.open(&main).unwrap();
+        let log = fake_asks(
+            &mut ed,
+            &dir,
+            &[("Write", json!({"file_path": setup, "content": "echo hi\n"}))],
+            false,
+        );
+        feed(&mut ed, "<space>l");
+        feed(&mut ed, "make it<ret>");
+        settle_until(&mut ed, |ed| ed.session.review.as_ref().is_some_and(|r| r.ready));
+        assert_eq!(ed.doc().path.as_deref(), Some(setup.as_path()), "its review, a new file");
+        // Another session: a file of its own opened aside, then its Claude's turn ends
+        let other = ed.session_add(away.clone());
+        ed.with_session(other, |ed| {
+            ed.open(&theirs).unwrap();
+            ed.doc_mut().aside = true;
+            ed.session.chat = Some(crate::chat::Chat::new());
+            crate::edits::turn_over(ed);
+        });
+        assert!(!open(&ed, &theirs), "its own aside file goes with its turn");
+        assert!(open(&ed, &setup), "the one under review here stays");
+        // #150: Claude waits on that review — its session says so, in front or behind, and the inbox has it
+        let front = ed.session.id;
+        assert_eq!(ed.doing(&ed.session), crate::session::Doing::Waiting);
+        ed.session_switch(other);
+        let behind = ed.sessions.iter().find(|l| l.id == front).unwrap();
+        assert_eq!(ed.doing(behind), crate::session::Doing::Waiting, "behind too");
+        assert_eq!(ed.cards_waiting(), (0, 1), "{:?}", ed.inbox());
+        ed.session_switch(front);
+        ed.handle_event(Event::Key("y".parse().unwrap()));
+        assert_eq!(permission_answer_to(&log, "p1")["behavior"], "allow", "answered");
+        // Closed under a review all the same: the review ends with it, Claude told why
+        let reviewed = |ed: &mut Editor, id: &str, doc: &Path| {
+            ed.session.chat.as_mut().unwrap().edits.queue.push_back(crate::edits::Pending {
+                request_id: id.into(),
+                tool: "Write".into(),
+                input: json!({"file_path": doc, "content": "echo bye\n"}),
+                reason: String::new(),
+                since: std::time::Instant::now(),
+            });
+            ed.handle_event(Event::Job(Box::new(|_| {})));
+            ed.session.review.as_ref().filter(|r| r.ready).map(|r| r.doc_id).expect("its review")
+        };
+        let doc = reviewed(&mut ed, "p9", &setup);
+        ed.close_doc(doc);
+        assert!(ed.session.review.is_none(), "the review went with its buffer");
+        let a = permission_answer_to(&log, "p9");
+        assert!(a["behavior"] == "deny" && a["message"].as_str().unwrap().contains("was closed"), "{a}");
+        // Found without its buffer (gone some other way): it ends and says so — the keys stay the editor's
+        let doc = reviewed(&mut ed, "p10", &setup);
+        ed.session.review.as_mut().unwrap().doc_id = doc + 1000;
+        ed.handle_event(Event::Job(Box::new(|_| {})));
+        assert!(ed.session.review.is_none(), "not kept with nothing to draw");
+        assert!(ed.messages.last().unwrap().2.contains("can't be shown"), "{:?}", ed.messages.last());
+        assert_eq!(permission_answer_to(&log, "p10")["behavior"], "deny");
+        assert!(!matches!(ed.keys_to().region, crate::uistate::Region::EditReview));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&away).ok();
+    }
+
     /// Review at the end, on a fake claude that edits main.rs and lib.rs and makes src/new.rs (turns kept in
     /// `store`, if given).
     fn turn_of_three(name: &str, store: Option<&Path>) -> (Editor, PathBuf, [PathBuf; 3]) {
@@ -8709,6 +8801,72 @@ mod tests {
         turns_kept(&store, |k| k.turn.iter().any(was) || k.list.iter().any(|c| c.files.iter().any(was)));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&store).ok();
+    }
+
+    /// #154: `space o` in a review — the outline goes in front of the rail, as the git tab does (it had the
+    /// keys, the status line said OUTLINE, and the rail stayed drawn in its place); again: the rail back.
+    #[test]
+    fn space_o_in_a_review_shows_the_outline() {
+        let (mut ed, dir, _) = turn_of_three("turn-review-space-o", None);
+        settle_until(&mut ed, reviewing);
+        let screen = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 220, 30).unwrap();
+            let mut parser = vt100::Parser::new(30, 220, 0);
+            parser.process(&bytes);
+            parser.screen().contents()
+        };
+        assert!(screen(&mut ed).contains("undo the whole turn"), "the rail");
+        feed(&mut ed, "<space>o");
+        let s = screen(&mut ed);
+        assert!(
+            ed.session.sidebar.as_ref().is_some_and(|s| s.focus && s.mode == crate::sidebar::Mode::Outline)
+        );
+        assert!(!ed.review_rail_up() && ed.screen.side_w > 0, "the outline is drawn: {s}");
+        assert!(s.contains("review behind") && !s.contains("undo the whole turn"), "{s}");
+        feed(&mut ed, "<space>o");
+        assert!(ed.review_rail_up() && ed.session.sidebar.is_none(), "closed: the rail back");
+        assert!(screen(&mut ed).contains("undo the whole turn"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #146: on a screen where the git tab fits beside the code but the review's rail doesn't (the rail wants
+    /// the code 90 wide), "review behind · space g back to it" was a promise `space g` didn't keep — the keys
+    /// went to a rail nobody could see. Back with the keys, it's drawn in the tab's room; once it lets the
+    /// keys go (a file opened), it gives the code its columns again.
+    #[test]
+    fn space_g_back_to_the_review_shows_the_rail_on_a_narrow_screen() {
+        let (mut ed, dir, _) = turn_of_three("turn-review-narrow", None);
+        settle_until(&mut ed, reviewing);
+        let mut sb = crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, dir.clone());
+        sb.focus = false;
+        ed.session.sidebar = Some(sb);
+        let screen = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            // (the chat open: the code gets 84 — the tab fits beside it, the rail not)
+            crate::term::render(ed, &mut bytes, 120, 30).unwrap();
+            let mut parser = vt100::Parser::new(30, 120, 0);
+            parser.process(&bytes);
+            parser.screen().contents()
+        };
+        screen(&mut ed);
+        assert_eq!(ed.screen.rail_w, 0, "unfocused, the rail gives way at this width");
+        feed(&mut ed, "<space>g");
+        let s = screen(&mut ed);
+        assert!(s.contains("review behind") && s.contains("space g back"), "{s}");
+        feed(&mut ed, "<space>g");
+        let s = screen(&mut ed);
+        assert!(
+            ed.review_rail_up() && ed.session.code_review.as_ref().unwrap().focus,
+            "the rail has the keys"
+        );
+        assert!(ed.screen.rail_w > 0 && !ed.screen.review_rail.borrow().is_empty(), "and it's drawn: {s}");
+        assert!(!s.contains("review behind"), "{s}");
+        // A file opened from it: the keys go to the code, and so do the columns
+        feed(&mut ed, "<ret>");
+        screen(&mut ed);
+        assert_eq!(ed.screen.rail_w, 0);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// While a review is open, its rail and the git tab take turns in the left column (#19 — a status line
@@ -12587,7 +12745,8 @@ q = \"delete_selection\"\n",
     }
 
     /// A paste (bracketed) goes in as it is — no auto-indent, no auto-pairs — as one undo step: at the
-    /// cursor while inserting, before the selection in normal mode; into a picker's query on one line.
+    /// cursor while inserting; into a picker's query on one line. In normal and select mode it's held, not
+    /// put in (#124): `p` puts it after the selection, `P` before, one undo step each.
     #[test]
     fn a_paste_goes_in_as_it_is() {
         let mut ed = editor("fn main() {\n}\n");
@@ -12602,18 +12761,24 @@ q = \"delete_selection\"\n",
         assert_eq!(ed.doc().text.to_string(), "fn main() {\n}\n", "one undo step with the insert");
         feed(&mut ed, "gg");
         ed.handle_event(crate::event::Event::Paste("x".into()));
-        assert_eq!(ed.doc().text.to_string(), "xfn main() {\n}\n", "normal mode: before the selection");
+        assert_eq!(ed.doc().text.to_string(), "fn main() {\n}\n", "normal mode: held, not put in");
+        let said = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        assert!(said.starts_with("pasted a line — held, not in the file: p puts it after"), "{said}");
+        feed(&mut ed, "P");
+        assert_eq!(ed.doc().text.to_string(), "xfn main() {\n}\n", "P: before the selection");
         feed(&mut ed, "u");
         assert_eq!(ed.doc().text.to_string(), "fn main() {\n}\n");
         feed(&mut ed, " b");
         ed.handle_event(crate::event::Event::Paste("two\nwords".into()));
         assert_eq!(ed.picker.as_ref().map(|p| p.query.as_str()), Some("two words"));
         assert_eq!(ed.doc().text.to_string(), "fn main() {\n}\n", "the buffer untouched");
-        // Select mode: at the selection's cursor (its last character, not past it), then normal mode
+        // Select mode: held too, and back to normal mode; `p` puts it after the selection
         feed(&mut ed, "<esc>ggvl");
         ed.handle_event(crate::event::Event::Paste("_".into()));
-        assert_eq!(ed.doc().text.to_string(), "f_n main() {\n}\n");
+        assert_eq!(ed.doc().text.to_string(), "fn main() {\n}\n");
         assert_eq!(ed.mode, Mode::Normal);
+        feed(&mut ed, "p");
+        assert_eq!(ed.doc().text.to_string(), "fn_ main() {\n}\n");
     }
 
     /// The editor runs a big picker's filtering on a worker and takes the result; Enter right after typing

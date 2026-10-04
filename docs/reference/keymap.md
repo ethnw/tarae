@@ -435,6 +435,7 @@ Keys of what's up on the screen — not rebindable, so not in `default_keys.toml
 | Code review rail | click on `↑ N more` / `↓ N more`, wheel | Scroll the files |
 | Code review | `space v q` | End it — asked on a card while files aren't viewed |
 | Task panel | click on a preflight step | Its output; wheel, `C-u` `C-d` scroll |
+| Task panel | `o` | A preflight step's whole output in a buffer — the failed one's, else the one in view (`:preflight-output &lt;step>`) |
 
 ## `:` commands
 
@@ -455,6 +456,7 @@ Type `:` in normal mode. `Tab` completes command names and their arguments (path
 | `:restart!` |  | Restart, skipping editor.restart-build |
 | `:preflight` |  | Run the project's quick checks |
 | `:preflight-full` |  | Run every check, before publishing |
+| `:preflight-output` |  | A preflight step's output in a buffer |
 | `:open` | `:o` `:e` `:edit` | Open files |
 | `:new` | `:n` | New scratch buffer |
 | `:reload` |  | Reload the file from disk (u brings your version back) |

@@ -314,6 +314,39 @@ impl Preflight {
         self.steps.iter().all(|s| s.state == State::Passed)
     }
 
+    /// Step `k`'s output in `output` (the run's, as kept): the lines under its heading, up to the next
+    /// step's. None: it hasn't printed its heading (or it's gone from what's kept).
+    pub fn output_of(&self, k: usize, output: &[(bool, String)]) -> Option<Vec<String>> {
+        let heading = |s: &StepRun| format!("── {} ──", s.name);
+        let head = heading(self.steps.get(k)?);
+        let start = output.iter().position(|l| l.1 == head)? + 1;
+        let others: Vec<String> =
+            self.steps.iter().enumerate().filter(|(i, _)| *i != k).map(|(_, s)| heading(s)).collect();
+        let end =
+            output[start..].iter().position(|l| others.contains(&l.1)).map_or(output.len(), |e| start + e);
+        Some(output[start..end].iter().map(|l| l.1.clone()).collect())
+    }
+
+    /// The step whose output a key asks for: one named (`which`), else the first that failed, else the one
+    /// whose output is at line `top` of the panel (None: its end — the last that started).
+    pub fn step_for(&self, which: &str, top: Option<usize>, output: &[(bool, String)]) -> Option<usize> {
+        let which = which.trim();
+        if !which.is_empty() {
+            return self.steps.iter().position(|s| s.name == which);
+        }
+        if let Some(k) = self.steps.iter().position(|s| matches!(s.state, State::Failed(_))) {
+            return Some(k);
+        }
+        let started = |k: &usize| self.steps[*k].state != State::Waiting;
+        match top {
+            Some(top) => (0..self.steps.len()).filter(started).rfind(|&k| {
+                let head = format!("── {} ──", self.steps[k].name);
+                output.iter().position(|l| l.1 == head).is_some_and(|at| at <= top)
+            }),
+            None => (0..self.steps.len()).rfind(started),
+        }
+    }
+
     /// What its end says, the set named: a quick one passed points at the full one; a failure, at `]q` when
     /// the run put `places` in the list.
     pub fn said(&self, places: usize) -> String {
@@ -340,6 +373,56 @@ pub fn long_duration(d: Duration) -> String {
 }
 
 impl Editor {
+    /// `o` in the task panel · `:preflight-output [step]` — a step's whole output (as kept) in a buffer of its
+    /// own, to read and search: the step named, else the first that failed, else the one in view (#126: a
+    /// failed step's output was hard to reach — the panel is a few rows, and the `▲ test` that was clicked
+    /// was the test panel's tab).
+    pub fn preflight_output(&mut self, which: &str) -> Result<(), String> {
+        let run =
+            self.session.task_run.as_ref().ok_or("no preflight in the task panel — :preflight runs one")?;
+        let p = self
+            .session
+            .preflight
+            .as_ref()
+            .filter(|p| p.generation == run.generation())
+            .ok_or("the task panel's run isn't a preflight")?;
+        let k = p.step_for(which, run.scroll, &run.output).ok_or_else(|| match which.trim() {
+            "" => "no step has printed anything yet".to_string(),
+            w => format!(
+                "no step {w} — {}",
+                p.steps.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", ")
+            ),
+        })?;
+        let name = p.steps[k].name.clone();
+        let lines = p.output_of(k, &run.output).ok_or(format!("{name} hasn't printed anything yet"))?;
+        let title = format!("{} · {name}", p.title);
+        let mut text = lines.join("\n");
+        text.push('\n');
+        // One buffer per step: an earlier one gives way to this output
+        let old: Vec<_> = self
+            .docs
+            .iter()
+            .filter(|d| d.throwaway && d.title.as_deref() == Some(title.as_str()))
+            .map(|d| d.id)
+            .collect();
+        for id in old {
+            self.close_doc(id);
+        }
+        self.open_virtual(&title, &text);
+        self.bottom_focus = false;
+        // (on the failure, when it says where: the last `error`/`FAILED`/`panicked` line)
+        let at = lines
+            .iter()
+            .rposition(|l| l.contains("FAILED") || l.contains("panicked") || l.starts_with("error"));
+        if let Some(line) = at {
+            let doc = self.doc_mut();
+            let at = crate::movement::line_start(&doc.text, line);
+            doc.set_selection(crate::selection::Selection::point(at));
+            self.align_view(crate::viewalign::Place::Center);
+        }
+        Ok(())
+    }
+
     /// `:preflight` (`set` quick) / `:preflight-full` — the project's steps (else the packs' defaults,
     /// looked for on a worker), then `.tarae.local.toml`'s, those of `set` run in the task panel. Err: why
     /// not now.
@@ -734,6 +817,48 @@ mod tests {
             let found = line[at..].find(&format!(" · {step} ")).unwrap_or_else(|| panic!("{step}: {line}"));
             at += found + 1;
         }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #126: a failed step's output one key away — `o` in the task panel opens it whole in a buffer (only
+    /// its lines, on its failure), `:preflight-output <step>` any step's; a test step and a step named
+    /// `test bundled` don't get mixed up.
+    #[test]
+    fn a_failed_steps_output_is_one_key_away() {
+        let dir = std::env::temp_dir().join(format!("tarae-preflight-output-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ed = Editor::new(crate::config::Config::default());
+        ed.session.root = dir.clone();
+        let failing = "echo 'running 3 tests'; echo 'test a ... ok'; echo 'test b ... FAILED'; echo 'failures:'; exit 101";
+        let steps = vec![
+            step("fmt", "echo formatted"),
+            step("test", failing),
+            step("test bundled", "echo bundled ok"),
+        ];
+        ed.preflight_run(steps, Set::Quick).unwrap();
+        let end = Instant::now() + Duration::from_secs(10);
+        while ed.session.task_run.as_ref().is_some_and(|r| r.state == crate::task::State::Running) {
+            assert!(Instant::now() < end, "it ended");
+            if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(10)) {
+                ed.handle_event(ev);
+            }
+        }
+        // The panel has the keys (a click on it, `C-w j`): `o`
+        ed.bottom_focus = true;
+        ed.handle_key(crate::key::Key::plain(crate::key::Code::Char('o')));
+        let title = ed.doc().title.clone();
+        assert_eq!(title.as_deref(), Some("preflight · test"), "{:?}", ed.messages.last());
+        let text = ed.doc().text.to_string();
+        assert_eq!(text, "running 3 tests\ntest a ... ok\ntest b ... FAILED\nfailures:\n", "its lines alone");
+        assert_eq!(ed.cursor_line(), 2, "on its failure");
+        assert!(!ed.bottom_focus, "the keys in the buffer");
+        // Any step by name
+        crate::typed::execute(&mut ed, "preflight-output test bundled").unwrap();
+        assert_eq!(ed.doc().title.as_deref(), Some("preflight · test bundled"));
+        assert_eq!(ed.doc().text.to_string(), "bundled ok\n");
+        assert!(
+            crate::typed::execute(&mut ed, "preflight-output lint").unwrap_err().starts_with("no step lint")
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

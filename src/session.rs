@@ -253,9 +253,10 @@ impl Session {
 
     /// Whether it waits for the user: a card of its (Claude's, or tarae's come while it was behind — a
     /// rebase's, a trust card: #94, one counted nowhere was never found), or an edit (a rename's files) to
-    /// review.
+    /// review — the one up in its review too (#150: Claude waited on it while its session said `working`).
     pub fn waits(&self) -> bool {
         self.parked.iter().any(|o| !o.installing())
+            || self.review.as_ref().is_some_and(|r| r.ready)
             || self.chat.as_ref().is_some_and(|c| {
                 !c.edits.queue.is_empty() || c.edits.sets.iter().any(|l| !l.review.is_empty())
             })

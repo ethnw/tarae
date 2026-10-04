@@ -566,6 +566,10 @@ fn steady(mut v: Value) -> Value {
             c["in_sight_ms"] = json!(0);
         }
     }
+    // (the inbox's entries wait as long as the test took to get there)
+    for e in v["inbox"].as_array_mut().into_iter().flatten() {
+        e["waited_ms"] = json!(0);
+    }
     for s in v["sessions"].as_array_mut().unwrap() {
         s["root"] = json!(Path::new(s["root"].as_str().unwrap()).file_name().unwrap().to_string_lossy());
         if s["usage"]["seconds_left"].is_u64() {
@@ -867,8 +871,8 @@ fn a_card_says_why_y_waits_and_lets_its_text_be_read_from_it() {
 }
 
 /// A paste in normal mode: a `:` line opens the command line with it, not run (`:w` pasted into a commit
-/// message became part of its subject, unsaid); any other text goes in and is said; into the minimized
-/// chat, it comes back with it.
+/// message became part of its subject, unsaid); any other text is held for `p`, not put in, and said
+/// (#124); into the minimized chat, it comes back with it.
 #[test]
 fn a_paste_in_normal_mode_is_never_silent() {
     let mut ed = editor();
@@ -879,8 +883,10 @@ fn a_paste_in_normal_mode_is_never_silent() {
     feed(&mut ed, &["<esc>"]);
     let said = ed.said;
     ed.handle_paste("pasted text".into());
-    assert!(ed.doc().text.to_string().contains("pasted text") && ed.said > said, "in, and said");
-    assert!(ed.messages.last().unwrap().2.starts_with("pasted a line into"));
+    assert!(!ed.doc().text.to_string().contains("pasted text") && ed.said > said, "held, and said");
+    assert!(ed.messages.last().unwrap().2.starts_with("pasted a line — held, not in the file"));
+    feed(&mut ed, &["p"]);
+    assert!(ed.doc().text.to_string().contains("pasted text"), "p puts it in");
     // In insert mode it's typed where you type: nothing to say
     feed(&mut ed, &["i"]);
     let said = ed.said;

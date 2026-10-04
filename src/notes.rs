@@ -307,7 +307,14 @@ pub fn start(ed: &mut Editor) {
     let target = here(ed).map(|n| n.id);
     // On a walk-through's stop: it holds still while you ask
     crate::follow::hold(ed);
+    // In a review a new one is a comment, kept as a draft — said so, on its line (#134: "ask claude:" wasn't
+    // taken for the review's comment input the rail's `space n comment` promised)
+    let comment = (target.is_none() && crate::codereview::drafting(ed))
+        .then(|| format!("comment on line {}:", ed.cursor_line() + 1));
     ed.open_prompt(crate::editor::PromptKind::Note(target), "");
+    if let Some(p) = ed.prompt.as_mut().filter(|_| comment.is_some()) {
+        p.label = comment;
+    }
 }
 
 /// The prompt was sent.

@@ -366,6 +366,11 @@ mod tests {
         ("Code review rail", "click on `↑ N more` / `↓ N more`, wheel", "Scroll the files"),
         ("Code review", "`space v q`", "End it — asked on a card while files aren't viewed"),
         ("Task panel", "click on a preflight step", "Its output; wheel, `C-u` `C-d` scroll"),
+        (
+            "Task panel",
+            "`o`",
+            "A preflight step's whole output in a buffer — the failed one's, else the one in view (`:preflight-output <step>`)",
+        ),
     ];
 
     /// `docs/reference/keymap.md` — the default keymap per mode and submode (descriptions = command docs,

@@ -63,9 +63,10 @@ impl Moved {
         )
     }
 
-    /// The card once it's rebased: bring it now, or after the preflight — the quick set (`quick`: its steps,
-    /// when the project has two sets), the full one being for before publishing.
-    fn bring_card(&self, quick: Option<Vec<String>>) -> Offer {
+    /// The card once it's rebased (`rebased`), or asked to bring one already on its base's tip (#155: `b` in
+    /// the list brought it at once, no `p`): bring it now, or after the preflight — the quick set (`quick`:
+    /// its steps, when the project has two sets), the full one being for before publishing.
+    pub fn bring_card(&self, quick: Option<Vec<String>>, rebased: bool) -> Offer {
         let (base, them) = (&self.base, if self.ahead == 1 { "it" } else { "them" });
         let which = match quick {
             Some(steps) => format!(
@@ -78,8 +79,12 @@ impl Moved {
             "{} on {base}'s tip now.\n\nBring {them} into {base} — now, or once {which}",
             crate::worktree::commits(self.ahead),
         );
+        let title = match rebased {
+            true => format!("Rebased {} onto {base}", self.branch),
+            false => format!("Bring {} into {base}", self.branch),
+        };
         Offer::new(
-            format!("Rebased {} onto {base}", self.branch),
+            title,
             &q,
             "Bringing…",
             format!("Couldn't bring {}", self.branch),
@@ -126,6 +131,8 @@ pub struct Rebase {
     /// the turn under way to end.
     pub asked: bool,
     waiting: Option<Ask>,
+    /// What the resolution changed besides the conflicted files (#129): in its review, staged with them.
+    pub also: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -309,6 +316,26 @@ fn marked(root: &Path, files: Vec<(String, Option<ropey::Rope>)>) -> Vec<String>
         .collect()
 }
 
+/// Every file `git add -A` would stage in the checkout (relative): changed against the index, unmerged,
+/// untracked. `status` with optional locks off, as Claude's runs and the git tab read it — never a `git diff`
+/// over the working tree (it refreshes the index).
+fn unstaged(root: &Path) -> Vec<String> {
+    let out = git(root, &["status", "--porcelain", "-z", "--untracked-files=all"], None).unwrap_or_default();
+    let mut v = Vec::new();
+    let mut entries = out.split('\0').filter(|e| !e.is_empty());
+    while let Some(e) = entries.next() {
+        let (xy, path) = (e.get(..2).unwrap_or_default(), e.get(3..).unwrap_or_default());
+        // (a rename or copy in the index: its old path comes next)
+        if xy.starts_with(['R', 'C']) {
+            entries.next();
+        }
+        if !xy.ends_with(' ') && !path.is_empty() {
+            v.push(path.to_string());
+        }
+    }
+    v
+}
+
 /// `a.txt, b.rs` — the first few, the rest counted.
 fn named(files: &[String]) -> String {
     let mut s = files.iter().take(4).cloned().collect::<Vec<_>>().join(", ");
@@ -394,12 +421,14 @@ pub fn turn_over(ed: &mut Editor) {
     if r.stage != Stage::Stopped || !r.asked {
         return;
     }
-    let files = r.stop.files.clone();
-    let files = ed.rebase_texts(&files);
+    let conflicted = r.stop.files.clone();
+    let files = ed.rebase_texts(&conflicted);
     let root = ed.session.root.clone();
     ed.events.jobs().spawn(move || {
         let left = marked(&root, files);
-        move |ed: &mut Editor| ed.rebase_checked(left)
+        // (what else the resolution changed — a snapshot blessed again: #129, left unstaged it stopped git)
+        let also = unstaged(&root).into_iter().filter(|f| !conflicted.contains(f)).collect();
+        move |ed: &mut Editor| ed.rebase_checked(left, also)
     });
 }
 
@@ -476,6 +505,7 @@ impl Editor {
             stop: Stop::default(),
             asked: false,
             waiting: None,
+            also: Vec::new(),
         });
         let cmd = format!("{GIT} rebase {}", crate::packs::sh_quote(&m.base));
         if let Err(e) = self.rebase_git(&format!("rebase onto {}", m.base), cmd, false) {
@@ -516,6 +546,7 @@ impl Editor {
                 if let Some(r) = self.session.rebase.as_mut() {
                     (r.stage, r.step, r.asked) = (Stage::Stopped, stop.step, false);
                     r.stop = *stop;
+                    r.also.clear();
                 }
                 match ask {
                     Some(a) => self.rebase_ask(a),
@@ -535,7 +566,9 @@ impl Editor {
                 if self.session.id != 0 {
                     let root = self.session.root.clone();
                     let quick = self.preflight_quick();
-                    self.push_offer(Moved { root, name, branch, base, moved: 0, ahead }.bring_card(quick));
+                    self.push_offer(
+                        Moved { root, name, branch, base, moved: 0, ahead }.bring_card(quick, true),
+                    );
                 }
             }
             Ended::Aborted => {
@@ -580,8 +613,9 @@ impl Editor {
     }
 
     /// The markers looked for after Claude's turn: some left — named; none — the review of the resolved
-    /// files against the commit being replayed, and the card.
-    fn rebase_checked(&mut self, left: Vec<String>) {
+    /// files, and of what else it changed (`also`, staged with them), against the commit being replayed, and
+    /// the card.
+    fn rebase_checked(&mut self, left: Vec<String>, also: Vec<String>) {
         let Some(r) = self.session.rebase.as_mut().filter(|r| r.stage == Stage::Stopped) else { return };
         if !left.is_empty() {
             return self.set_warning(format!(
@@ -590,7 +624,9 @@ impl Editor {
             ));
         }
         r.stage = Stage::Resolved;
-        let stop = r.stop.clone();
+        r.also = also;
+        let mut stop = r.stop.clone();
+        stop.files.extend(r.also.iter().cloned());
         match stop.commit {
             // (the card once the review is open — it's about what the review shows)
             Some((sha, short, subject)) => {
@@ -616,11 +652,15 @@ impl Editor {
     fn rebase_resolved_card(&mut self) {
         let Some(r) = self.session.rebase.as_ref().filter(|r| r.stage == Stage::Resolved) else { return };
         let (stop, branch) = (&r.stop, &r.branch);
-        let n = stop.files.len();
+        let n = stop.files.len() + r.also.len();
         // (short: the card shares the code's room with the review it's about and the task panel — what `y`
         // does, its button says)
+        let also = match r.also.is_empty() {
+            true => String::new(),
+            false => format!(" It also changed {} — staged with them.", named(&r.also)),
+        };
         let q = format!(
-            "{} resolved for {}. The review shows {} against that commit.\n\n\
+            "{} resolved for {}.{also} The review shows {} against that commit.\n\n\
              X aborts the rebase: {branch} goes back as it was.",
             named(&stop.files),
             stop.at(),
@@ -649,8 +689,11 @@ impl Editor {
         });
     }
 
-    /// `:rebase-continue` — the stopped rebase's files, with no markers left, staged and `git rebase
-    /// --continue` (it may stop again). A rebase tarae didn't start is taken up first.
+    /// `:rebase-continue` — the stopped rebase's files, with no markers left, staged with what else the
+    /// resolution changed (its review showed them — `Rebase.also`) and `git rebase --continue` (it may stop
+    /// again). Anything else changed in the checkout isn't staged unseen: named, and the next
+    /// `:rebase-continue` stages it (#129: left unstaged, git refused to go on). A rebase tarae didn't start
+    /// is taken up first.
     pub fn rebase_continue(&mut self) -> Result<(), String> {
         let name = self.session.label().to_string();
         let Some(r) = self.session.rebase.as_ref() else {
@@ -660,18 +703,30 @@ impl Editor {
             return Err(r.why(&name));
         }
         self.rebase_free()?;
-        let files = r.stop.files.clone();
-        let texts = self.rebase_texts(&files);
+        let mut files = r.stop.files.clone();
+        files.extend(r.also.iter().cloned());
+        let texts = self.rebase_texts(&r.stop.files);
         let root = self.session.root.clone();
         self.events.jobs().spawn(move || {
             let left = marked(&root, texts);
+            let unseen: Vec<String> = unstaged(&root).into_iter().filter(|f| !files.contains(f)).collect();
             move |ed: &mut Editor| {
-                if ed.session.rebase.as_ref().is_none_or(|r| !r.stopped()) {
-                    return;
-                }
+                let Some(r) = ed.session.rebase.as_mut().filter(|r| r.stopped()) else { return };
                 if !left.is_empty() {
                     return ed
                         .set_warning(format!("conflict markers still in {} — not going on", named(&left)));
+                }
+                if !unseen.is_empty() {
+                    let msg = format!(
+                        "not going on — {} changed too and {} unstaged: look at {} (space g), then \
+                         :rebase-continue stages {} with the rest",
+                        named(&unseen),
+                        if unseen.len() == 1 { "is" } else { "are" },
+                        if unseen.len() == 1 { "it" } else { "them" },
+                        if unseen.len() == 1 { "it" } else { "them" },
+                    );
+                    r.also.extend(unseen);
+                    return ed.set_warning(msg);
                 }
                 ed.rebase_review_gone();
                 ed.rebase_cards_gone();
@@ -741,6 +796,7 @@ impl Editor {
             stop,
             asked: false,
             waiting: None,
+            also: Vec::new(),
         });
     }
 
@@ -767,7 +823,7 @@ impl Editor {
     /// `y` on the bring card.
     pub fn rebase_bring(&mut self, m: Moved) {
         let Some(id) = self.session_at(&m.root) else { return };
-        if let Err(e) = self.session_bring(&id.to_string()) {
+        if let Err(e) = self.session_bring_now(&id.to_string()) {
             self.set_error(e);
         }
     }
@@ -794,7 +850,7 @@ impl Editor {
         if !passed {
             return self.set_warning(format!("{name} not brought — the {title} didn't pass"));
         }
-        if let Err(e) = self.session_bring(&id.to_string()) {
+        if let Err(e) = self.session_bring_now(&id.to_string()) {
             self.set_error(e);
         }
     }
@@ -823,6 +879,7 @@ mod tests {
             stop: Stop::default(),
             asked: false,
             waiting: None,
+            also: Vec::new(),
         };
         assert_eq!(r.said(), "rebasing 2/5");
         assert_eq!(r.why("feat"), "feat is rebasing 2/5 — :rebase-continue or :rebase-abort first");

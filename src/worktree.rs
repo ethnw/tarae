@@ -928,6 +928,8 @@ enum Bringing {
     Brought(Brought),
     /// The base moved since: the rebase card.
     Moved(crate::rebase::Moved),
+    /// On its base's tip: the bring card (`moved` 0).
+    Ready(crate::rebase::Moved),
     /// A rebase is under way in its checkout (tarae's or not — taken up then).
     Rebasing(crate::rebase::Stop),
     Refused(String),
@@ -946,6 +948,24 @@ fn moved(root: &Path, name: &str, base: Option<String>, start: &Path) -> Option<
     }
     let moved = count(root, &format!("{tip}..{base_tip}"));
     Some(crate::rebase::Moved { root: root.to_path_buf(), name: name.into(), branch, base, moved, ahead })
+}
+
+/// It can be brought as it is (its base not moved since): how far ahead — for the bring card. What `bring`
+/// would refuse first is said now.
+fn ready(
+    root: &Path,
+    name: &str,
+    base: Option<String>,
+    start: &Path,
+) -> Result<crate::rebase::Moved, String> {
+    let branch = current_branch(root).ok_or("its checkout is on no branch — nothing to bring")?;
+    let base = base_or_start(base, start)?;
+    let base_tip = local_branch(root, &base)?;
+    let ahead = count(root, &format!("{base_tip}..HEAD"));
+    if ahead == 0 {
+        return Err(format!("nothing to bring — {branch} has no commits past {base}"));
+    }
+    Ok(crate::rebase::Moved { root: root.to_path_buf(), name: name.into(), branch, base, moved: 0, ahead })
 }
 
 /// Its base moved up to its branch — fast-forward only, in the checkout that has the base (refused if that
@@ -1237,6 +1257,11 @@ impl Editor {
     /// The checkout tarae started in (session 0's).
     fn start_root(&self) -> PathBuf {
         self.sessions_in_order().first().map(|l| l.root.clone()).unwrap_or_default()
+    }
+
+    /// Its branch, as its watch last read it — a session's base when it has none of its own.
+    pub(crate) fn start_branch(&self) -> Option<String> {
+        self.sessions_in_order().first().and_then(|l| l.git_branch.clone())
     }
 
     /// The session `which` names (its number or name), else the one in front.
@@ -1539,7 +1564,7 @@ impl Editor {
         let root = e.root.clone();
         let work = move || {
             git_no_hooks(&root, &["add", "--all"])
-                .and_then(|_| crate::gitpanel::status(&root).map(crate::gitpanel::Status::with_rows))
+                .and_then(|_| crate::gitpanel::status(&root, None).map(crate::gitpanel::Status::with_rows))
         };
         // (its session's: the status and the message are that session's, wherever you are when they land)
         self.step(self.events.jobs(), "session", said, work, move |ed, read| match read {
@@ -1695,9 +1720,20 @@ impl Editor {
 
     // ── Bringing ─────────────────────────────────────────────────────────────
 
-    /// `:session-bring [<n|name>]` — its base moved up to its branch, fast-forward only (a worker). The base
-    /// moved since: a card offers to rebase it first (`rebase.rs`). Not while a rebase is under way there.
+    /// `:session-bring [<n|name>]`, `b` in the list — asked on the bring card first (`y` brings · `p` the
+    /// quick preflight, then brings: #155, it brought at once). The base moved since: a card offers to rebase
+    /// it first (`rebase.rs`). Not while a rebase is under way there.
     pub fn session_bring(&mut self, which: &str) -> Result<(), String> {
+        self.bringing(which, false)
+    }
+
+    /// The bring card's `y` (or its preflight passed): its base moved up to its branch, fast-forward only (a
+    /// worker).
+    pub(crate) fn session_bring_now(&mut self, which: &str) -> Result<(), String> {
+        self.bringing(which, true)
+    }
+
+    fn bringing(&mut self, which: &str, now: bool) -> Result<(), String> {
         let (id, name) = self.session_named(which)?;
         if id == 0 {
             return Err(format!("{name} is the checkout tarae started in — bring a session into it instead"));
@@ -1716,6 +1752,9 @@ impl Editor {
             Some(stop) => Bringing::Rebasing(stop),
             None => match moved(&root, &who, base.clone(), &start) {
                 Some(m) => Bringing::Moved(m),
+                None if !now => {
+                    ready(&root, &who, base, &start).map_or_else(Bringing::Refused, Bringing::Ready)
+                }
                 None => {
                     bring(&root, base, &start, &unsaved).map_or_else(Bringing::Refused, Bringing::Brought)
                 }
@@ -1731,6 +1770,11 @@ impl Editor {
                     b.tip
                 )),
                 Bringing::Moved(m) => ed.push_offer(m.card()),
+                Bringing::Ready(m) => {
+                    let mut quick = None;
+                    ed.with_session(id, |ed| quick = ed.preflight_quick());
+                    ed.push_offer(m.bring_card(quick, false));
+                }
                 // (one tarae didn't start: taken up, so continue and abort know it)
                 Bringing::Rebasing(stop) => ed.with_session(id, |ed| {
                     if ed.session.rebase.is_none() {
@@ -2418,6 +2462,16 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// `:session-bring` (or `b` in the list) on a session its base hasn't moved from: the bring card, as after
+    /// a rebase (#155: it brought at once) — `y` brings it.
+    fn bring_asked(ed: &mut Editor, branch: &str, base: &str) {
+        let title = format!("Bring {branch} into {base}");
+        feed(ed, ":session-bring<ret>");
+        settle_until(ed, |ed| card(ed, &title).is_some() || says(ed, &format!("bring {branch}:")));
+        assert_eq!(card_in_sight(ed), ['y', 'p', 'n'], "{}", said(ed));
+        feed(ed, "y");
+    }
+
     /// Bringing in: main moves up to the session's branch in main's checkout (its files follow); main moved
     /// meanwhile: a card offers to rebase first (with how far — `n` leaves it all); refused when main's
     /// checkout has changes in a file it brings; a base no checkout has moves as a ref alone.
@@ -2425,12 +2479,28 @@ mod tests {
     fn a_session_is_brought_into_its_base_fast_forward_only() {
         let (repo, dir) = place("bring");
         let mut ed = editor(&repo, &dir);
-        // Fast-forward: main's checkout follows
+        // Fast-forward: main's checkout follows — asked first (#155), `n` leaves it, `b` in the list asks too
         let wt = new_session(&mut ed, "feat");
         std::fs::write(wt.join("a.txt"), "feat\n").unwrap();
         git_in(&wt, &["commit", "-qam", "feat"]);
         let tip = git_in(&wt, &["rev-parse", "HEAD"]);
-        feed(&mut ed, ":session-bring<ret>");
+        let main_was = git_in(&repo, &["rev-parse", "main"]);
+        ed.session_list();
+        let row = |ed: &Editor| ed.picker.as_ref().and_then(|p| p.current()).map(|i| i.label.clone());
+        for _ in 0..3 {
+            if !row(&ed).is_some_and(|l| l.contains("feat")) {
+                feed(&mut ed, "j");
+            }
+        }
+        assert!(row(&ed).is_some_and(|l| l.contains("feat")), "{:?}", row(&ed));
+        feed(&mut ed, "b");
+        settle_until(&mut ed, |ed| card(ed, "Bring feat into main").is_some() || says(ed, "bring feat:"));
+        let q = &card(&ed, "Bring feat into main").unwrap().question;
+        assert!(q.starts_with("1 commit on main's tip now.\n\nBring it into main"), "{q}");
+        assert_eq!(card_in_sight(&mut ed), ['y', 'p', 'n']);
+        feed(&mut ed, "n");
+        assert_eq!(git_in(&repo, &["rev-parse", "main"]), main_was, "nothing brought yet");
+        bring_asked(&mut ed, "feat", "main");
         settle_until(&mut ed, |ed| says(ed, "Brought") || says(ed, "bring feat:"));
         assert!(
             says(&ed, &format!("Brought 1 commit of feat into main — now at {}", &tip[..7])),
@@ -2465,7 +2535,7 @@ mod tests {
         std::fs::write(wt.join("a.txt"), "edit\n").unwrap();
         git_in(&wt, &["commit", "-qam", "edit"]);
         std::fs::write(repo.join("a.txt"), "mine, unsaved in git\n").unwrap();
-        feed(&mut ed, ":session-bring<ret>");
+        bring_asked(&mut ed, "edit", "main");
         settle_until(&mut ed, |ed| says(ed, "bring edit:"));
         assert!(says(&ed, "main's checkout has changes in a file it brings (a.txt)"), "{}", said(&ed));
         assert_eq!(git_in(&repo, &["rev-parse", "main"]), main);
@@ -2482,7 +2552,7 @@ mod tests {
         git_in(&wt, &["commit", "-q", "--allow-empty", "-m", "topic"]);
         marked_by_hand(&marks);
         let tip = git_in(&wt, &["rev-parse", "HEAD"]);
-        feed(&mut ed, ":session-bring<ret>");
+        bring_asked(&mut ed, "topic", "side");
         settle_until(&mut ed, |ed| says(ed, "of topic into side") || says(ed, "bring topic:"));
         assert_eq!(git_in(&repo, &["rev-parse", "side"]), tip, "{}", said(&ed));
         assert!(!marks.exists(), "a hook ran: {}", std::fs::read_to_string(&marks).unwrap_or_default());
@@ -2686,6 +2756,56 @@ mod tests {
         assert_eq!(git_in(&wt, &["log", "-1", "--format=%s", "HEAD~1"]), "feat a", "its message kept");
         assert!(ed.session.rebase.is_none() && ed.session.code_review.is_none());
         assert!(card(&ed, "feat: conflicts resolved").is_none());
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #129: resolving, Claude changed another file too (a snapshot blessed again) — it's in the review beside
+    /// the conflicted one, the card names it, and `y` stages it with them (left unstaged, git refused to go
+    /// on). One changed after the review isn't staged unseen: named, and the next `:rebase-continue` takes it.
+    #[test]
+    fn what_else_a_resolution_changed_is_reviewed_and_staged() {
+        let (repo, dir) = place("rebase-also");
+        let (log, answer) = (dir.join("claude.log"), dir.join("answer.txt"));
+        std::fs::write(&answer, "one\nmain\nfeat\n").unwrap();
+        let mut ed = editor(&repo, &dir);
+        claude_does(
+            &mut ed,
+            &log,
+            &format!("cp '{}' a.txt; printf 'target/\\nsnap/\\n' > .gitignore;", answer.display()),
+        );
+        let (wt, _) = moved_apart(&mut ed, &repo, false);
+        rebase_asked(&mut ed);
+        settle_until(&mut ed, |ed| {
+            card(ed, "feat: conflicts resolved").is_some() || says(ed, "rebase feat:")
+        });
+        let review = ed.session.code_review.as_ref().expect("the review");
+        let mut files: Vec<&str> = review.files.iter().map(|f| f.rel.as_str()).collect();
+        files.sort_unstable();
+        assert_eq!(files, [".gitignore", "a.txt"], "what else it changed is in the review");
+        let q = &card(&ed, "feat: conflicts resolved").unwrap().question;
+        assert!(q.contains(" It also changed .gitignore — staged with them. The review shows them"), "{q}");
+        // Changed after the review: named, not staged unseen
+        std::fs::write(wt.join("late.txt"), "late\n").unwrap();
+        card_in_sight(&mut ed);
+        feed(&mut ed, "y");
+        settle_until(&mut ed, |ed| says(ed, "not going on") || says(ed, "Rebased feat"));
+        assert!(
+            says(&ed, "not going on — late.txt changed too and is unstaged: look at it (space g), then"),
+            "{}",
+            said(&ed)
+        );
+        assert!(crate::rebase::under_way(&wt).is_some(), "still stopped");
+        feed(&mut ed, ":rebase-continue<ret>");
+        settle_until(&mut ed, |ed| card(ed, "Rebased feat onto main").is_some() || says(ed, "rebase feat:"));
+        assert_eq!(git_in(&wt, &["log", "--format=%s", "main..HEAD"]), "add b\nfeat a", "{}", said(&ed));
+        assert_eq!(
+            git_in(&wt, &["show", "HEAD~1:.gitignore"]),
+            "target/\nsnap/",
+            "staged with the resolution"
+        );
+        assert_eq!(git_in(&wt, &["show", "HEAD~1:late.txt"]), "late", "the next continue took it");
+        assert_eq!(git_in(&wt, &["status", "--porcelain"]), "", "nothing left unstaged");
         drop(ed);
         std::fs::remove_dir_all(&dir).ok();
     }

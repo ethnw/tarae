@@ -1390,6 +1390,141 @@ fn snapshot_review() {
     s.check("review");
 }
 
+/// #134: `space n` in a review file — from the code, from the rail, read wide — opens the comment's input,
+/// said as one (`comment on line N:`, where outside a review it's `ask claude:`), and enter keeps it as a
+/// draft on that line.
+#[test]
+fn space_n_in_a_review_opens_a_comment() {
+    use crate::codereview::{Base, CodeReview, File};
+    let screen = |s: &mut Shot| {
+        let mut vt = vt100::Parser::new(s.h, s.w, 0);
+        vt.process(&s.frame());
+        vt.screen().contents()
+    };
+    for keys in ["<space>n", "<space>e<space>n", "<space>vz<space>n"] {
+        let mut s = Shot::new(112, 30);
+        s.file("src/demo.rs", DEMO_RS);
+        let cwd = std::env::current_dir().unwrap();
+        let files = vec![File {
+            rel: "src/demo.rs".into(),
+            path: cwd.join("src/demo.rs"),
+            added: 1,
+            removed: 0,
+            new: false,
+            gone: false,
+            binary: false,
+        }];
+        s.ed.session.code_review = Some(CodeReview::for_test(Base::Head, cwd.clone(), files));
+        s.keys(":6<ret>");
+        s.keys(keys);
+        let text = screen(&mut s);
+        assert!(text.contains("comment on line 6: "), "{keys}\n{text}");
+        s.keys("why?<ret>");
+        let n = s.ed.session.notes.list.last().expect("a note");
+        assert!(n.thread[0].draft && n.lines == (5..6), "{keys}: a draft on its line");
+    }
+    // Outside a review: a question to Claude, as before
+    let mut s = Shot::new(112, 30);
+    s.file("src/demo.rs", DEMO_RS);
+    s.keys("<space>n");
+    assert!(screen(&mut s).contains("ask claude: "));
+}
+
+/// #135: the rail's `m` marks the file on its row — a deleted binary file too, which opens nothing in the
+/// code (it marked the file the code showed, or nothing: the review never reached N of N).
+#[test]
+fn the_rail_marks_a_deleted_binary_file_viewed() {
+    use crate::codereview::{Base, CodeReview, File};
+    let mut s = Shot::new(112, 30);
+    s.file("src/demo.rs", DEMO_RS);
+    let cwd = std::env::current_dir().unwrap();
+    let files = vec![
+        File {
+            rel: "assets/logo.png".into(),
+            path: cwd.join("assets/logo.png"),
+            added: 0,
+            removed: 0,
+            new: false,
+            gone: true,
+            binary: true,
+        },
+        File {
+            rel: "src/demo.rs".into(),
+            path: cwd.join("src/demo.rs"),
+            added: 0,
+            removed: 0,
+            new: false,
+            gone: false,
+            binary: false,
+        },
+    ];
+    s.ed.session.code_review = Some(CodeReview::for_test(Base::Head, cwd.clone(), files));
+    let doc = s.ed.doc_mut();
+    doc.review_base = Some(Rope::from_str(DEMO_RS));
+    doc.git_base = Some(std::sync::Arc::new(DEMO_RS.to_string()));
+    s.keys("<space>e");
+    let viewed = |s: &Shot| {
+        let r = s.ed.session.code_review.as_ref().unwrap();
+        r.files.iter().filter(|f| r.viewed(&s.ed, f)).map(|f| f.rel.clone()).collect::<Vec<_>>()
+    };
+    let order = s.ed.session.code_review.as_ref().unwrap().rail_order();
+    let png = order.iter().position(|&i| i == 0).unwrap();
+    s.keys("gg");
+    for _ in 0..png {
+        s.keys("j");
+    }
+    assert_eq!(s.ed.session.code_review.as_ref().unwrap().selected, 0, "on the binary file's row");
+    s.keys("m");
+    assert_eq!(viewed(&s), ["assets/logo.png"], "{:?}", s.ed.messages.last());
+    s.keys("gg");
+    for _ in 0..order.iter().position(|&i| i == 1).unwrap() {
+        s.keys("j");
+    }
+    s.keys("m");
+    s.until("demo.rs's mark", |ed| {
+        let r = ed.session.code_review.as_ref().unwrap();
+        r.files.iter().all(|f| r.viewed(ed, f))
+    });
+    let mut vt = vt100::Parser::new(30, 112, 0);
+    vt.process(&s.frame());
+    assert!(vt.screen().contents().contains("2 of 2 viewed"), "{}", vt.screen().contents());
+}
+
+/// #145: a turn's review lists Claude's temp files outside the checkout beside `src/` — the rail says they
+/// aren't in it (its head counts them, each row ends `outside` instead of `new`): they won't be committed.
+#[test]
+fn the_rail_says_which_files_are_outside_the_checkout() {
+    use crate::codereview::{Base, CodeReview, File};
+    let mut s = Shot::new(112, 30);
+    s.file("src/demo.rs", DEMO_RS);
+    let cwd = std::env::current_dir().unwrap();
+    let file = |path: PathBuf, rel: String| File {
+        rel,
+        path,
+        added: 2,
+        removed: 0,
+        new: true,
+        gone: false,
+        binary: false,
+    };
+    let outside = PathBuf::from("/tmp/x/setup.sh");
+    let files = vec![
+        file(cwd.join("src/demo.rs"), "src/demo.rs".into()),
+        file(outside.clone(), outside.display().to_string()),
+    ];
+    let base = Base::Turn { at: 0, question: "set it up".into() };
+    s.ed.session.code_review = Some(CodeReview::for_test(base, cwd.clone(), files));
+    let mut vt = vt100::Parser::new(30, 112, 0);
+    vt.process(&s.frame());
+    let rows: Vec<String> = vt.screen().rows(0, 112).collect();
+    let all = rows.join("\n");
+    assert!(all.contains("1 outside, not committed "), "the head says it, whole\n{all}");
+    let row =
+        |name: &str| rows.iter().find(|r| r.contains(&format!("◦ {name}"))).cloned().unwrap_or_default();
+    assert!(row("setup.sh").contains(" +2 outside"), "{}\n{all}", row("setup.sh"));
+    assert!(row("demo.rs").contains(" +2 new") && !row("demo.rs").contains("outside"), "{all}");
+}
+
 /// Many removed lines above the cursor: the view scrolls by screen rows, so the cursor stays on screen.
 #[test]
 fn review_keeps_the_cursor_on_screen_below_a_big_deletion() {
@@ -1683,6 +1818,74 @@ fn snapshot_side_panel_git() {
     s.ed.session.sidebar = Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, cwd));
     s.keys("j");
     s.check("side_panel_git");
+}
+
+/// #139: the commit draft's card (git tab `C` — Claude writing, streamed) stands in the code's room: right
+/// of the side panel or the review's rail, above the bottom slot, its text whole — placed by the screen's
+/// edge, it ran into a side panel widened by hand (`C-w >`), and the task's toast covered its end.
+#[test]
+fn the_draft_card_stays_in_the_codes_room() {
+    use crate::codereview::{Base, CodeReview, File};
+    // (screen, a review's rail or the side panel kept this wide)
+    for (w, h, side) in [(160, 30, None), (184, 30, None), (140, 30, Some(72)), (150, 26, Some(64))] {
+        let mut s = Shot::new(w, h);
+        let doc = s.file("src/demo.rs", DEMO_RS);
+        let cwd = std::env::current_dir().unwrap();
+        let file = |rel: &str| File {
+            rel: rel.into(),
+            path: cwd.join(rel),
+            added: 1,
+            removed: 0,
+            new: false,
+            gone: false,
+            binary: false,
+        };
+        match side {
+            None => {
+                let files =
+                    vec![file("src/demo.rs"), file("src/a_rather_long_name_for_a_module_of_the_review.rs")];
+                s.ed.session.code_review = Some(CodeReview::for_test(Base::Head, cwd.clone(), files));
+            }
+            Some(k) => {
+                s.ed.sizes.side = Some(k);
+                s.in_project();
+                s.keys("<space>e");
+                s.keys("<C-w>l");
+            }
+        }
+        s.ed.task_start(crate::task::Task { name: "check".into(), cmd: "echo built".into(), cwd });
+        s.until("task", |ed| ed.session.task_run.as_ref().is_some_and(|r| r.took.is_some()));
+        // (a claude that hears the prompt and says nothing yet: the card says it's thinking — the chat open
+        // beside the code, as in #139)
+        s.ed.config.llm.command = "sh".into();
+        s.ed.config.llm.args = vec!["-c".into(), "read -r line; sleep 5".into()];
+        if side.is_none() {
+            crate::chat::open(&mut s.ed);
+            s.ed.session.chat.as_mut().unwrap().focused = false;
+        }
+        crate::llm::draft(&mut s.ed, doc, "a commit message", "draft it", 0, 0).unwrap();
+        let mut vt = vt100::Parser::new(h, w, 0);
+        vt.process(&s.frame());
+        let rows: Vec<String> = vt.screen().rows(0, w).collect();
+        let (y, row) = rows
+            .iter()
+            .enumerate()
+            .find(|(_, r)| r.contains("claude thinking"))
+            .unwrap_or_else(|| panic!("{w}×{h}: no card\n{}", rows.join("\n")));
+        let x =
+            row.find("claude thinking").map(|b| unicode_width::UnicodeWidthStr::width(&row[..b])).unwrap();
+        let sc = &s.ed.screen;
+        let all = rows.join("\n");
+        // (the card's left edge: two cells of margin and the wave before the words)
+        let (left, edge) = (sc.rail_w.max(sc.side_w), x - 6);
+        assert!(left > 0 && sc.bottom_h > 0, "{w}×{h}: the panel and the slot are up\n{all}");
+        assert!(edge > left, "{w}×{h}: right of the panel ({left}) — at {edge}\n{all}");
+        assert!(y + 2 <= (h as usize) - 1 - sc.bottom_h, "{w}×{h}: above the slot — at row {y}\n{all}");
+        // (the task's toast keeps off it: its instruction and its time are whole)
+        assert!(row.contains("“a commit message”") && row.trim_end().ends_with('s'), "{w}×{h}: {row}\n{all}");
+        assert!(!all.lines().nth(y).unwrap().contains("check — all good"), "{w}×{h}\n{all}");
+        crate::llm::cancel(&mut s.ed);
+    }
 }
 
 /// The task panel after a failed build: its output, the places it found counted, how long it took.

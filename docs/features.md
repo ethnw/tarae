@@ -79,11 +79,10 @@ configs carry over as they are.
   `:pipe-to`, `:insert-output`, `:append-output`). Commands run in the background; nothing changes if they fail
 - Registers `"x`, `_` (black hole), and `+` = the system clipboard (`space y`, `space p`, `space P`) · macros: `Q`
   records, `q` replays (with a count), `"xQ` records into a named register
-- Pasting with your terminal's paste goes in as it is — no auto-indent, no auto-pairs — as one undo step: at the
-  cursor while typing, before the selection in normal mode (as Helix does). While a code review is open, a
-  paste in normal mode doesn't edit the file you're reviewing: it goes into the chat's input when the chat is
-  open, and the toast says so (`i` pastes into the file). With no chat, it goes in and the toast says where
-  (`u` takes it back)
+- Pasting with your terminal's paste goes in as it is — no auto-indent, no auto-pairs — as one undo step, at the
+  cursor while typing. In normal mode it's held, not put in: `p` puts it after the selection, `P` before (a
+  `:` line opens the command line instead). While a code review is open, a paste in normal mode goes into the
+  chat's input when the chat is open, and the toast says so (`i` pastes into the file)
 - Grapheme-cluster aware everywhere — movement, deletion, `r`, `f`, and drawing treat `é`, NFD Hangul, 👍🏽, 👨‍👩‍👧, and
   `\r\n` as one character; wide characters get the right width
 - **Soft wrap** `editor.soft-wrap` — long lines show as several rows, broken after a space (mid-word only when a word is

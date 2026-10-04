@@ -170,7 +170,7 @@
   "sessions": [
     {
       "cards": 1,
-      "doing": "idle",
+      "doing": "waiting",
       "id": "s0",
       "name": "main",
       "root": "tarae-uistate-main"

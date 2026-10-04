@@ -92,6 +92,7 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
         // them before publishing
         "preflight" => editor.preflight_start(crate::preflight::Set::Quick),
         "preflight-full" => editor.preflight_start(crate::preflight::Set::Full),
+        "preflight-output" => editor.preflight_output(rest),
         "wa" | "write-all" => write_all(editor, false),
         "wqa" | "xa" | "write-quit-all" => write_all(editor, true),
         "wq" | "x" | "write-quit" if rest.is_empty() && editor.format_then_save(true) => Ok(()),

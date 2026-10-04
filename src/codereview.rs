@@ -151,6 +151,11 @@ impl CodeReview {
         .rows(None)
     }
 
+    /// Whether `f` is outside the checkout (a turn's temp file, #145): not in it, never committed.
+    pub fn outside(&self, f: &File) -> bool {
+        !f.path.starts_with(&self.root)
+    }
+
     /// The files in the rail's order (under their folders).
     pub fn rail_order(&self) -> Vec<usize> {
         self.rail_rows().into_iter().filter_map(|t| t.item).collect()
@@ -878,7 +883,14 @@ pub fn toggle_viewed(ed: &mut Editor) {
     let Some(i) = r.current(ed) else {
         return ed.set_status("this file isn't one of the review's");
     };
-    let f = &r.files[i];
+    toggle_viewed_at(ed, i);
+}
+
+/// File `i` marked viewed (again: unmarked) — the rail's `m` on its row, whatever the code shows: a binary
+/// file opens nothing (#135: `m` on a deleted binary marked nothing, and the review never reached N of N).
+fn toggle_viewed_at(ed: &mut Editor, i: usize) {
+    let Some(r) = ed.session.code_review.as_ref() else { return };
+    let Some(f) = r.files.get(i) else { return };
     if r.viewed(ed, f) {
         let path = f.path.clone();
         ed.session.viewed.remove(&path);
@@ -967,7 +979,7 @@ pub fn rail_key(ed: &mut Editor, key: Key) -> bool {
         (Code::Char('m'), false) => {
             let i = r.selected;
             show(ed, i, false);
-            toggle_viewed(ed);
+            toggle_viewed_at(ed, i);
             if let Some(r) = ed.session.code_review.as_mut() {
                 r.selected = pick(at + 1).unwrap_or(i);
             }

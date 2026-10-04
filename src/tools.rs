@@ -1241,6 +1241,47 @@ fn read_scripts(root: &Path, cwd: &Path, scripts: &[PathBuf], shown: &[(PathBuf,
     out
 }
 
+/// The folders `cmd`'s commands run in that aren't the checkout's root, as its run card says them (#152: a
+/// `cd` in the line took it elsewhere, unsaid): from `cwd`, after each `cd` — relative to `root`, or the
+/// whole path (`~` for home) outside it. Worked out from the words alone (`..` taken lexically, no disk);
+/// a line the shell reader can't read says only `cwd`.
+pub(crate) fn runs_in(root: &Path, cwd: &Path, cmd: &str) -> Vec<String> {
+    let lexical = |p: PathBuf| {
+        let mut out = PathBuf::new();
+        for c in p.components() {
+            match c {
+                std::path::Component::ParentDir => {
+                    out.pop();
+                }
+                std::path::Component::CurDir => {}
+                c => out.push(c),
+            }
+        }
+        out
+    };
+    let mut here = cwd.to_path_buf();
+    let mut at: Vec<PathBuf> = Vec::new();
+    match crate::readonly::parse(cmd) {
+        Some(parts) => {
+            for p in parts {
+                match p {
+                    crate::readonly::Part::Cd(d) => here = lexical(here.join(d)),
+                    crate::readonly::Part::Cmd(_) if !at.contains(&here) => at.push(here.clone()),
+                    crate::readonly::Part::Cmd(_) => {}
+                }
+            }
+        }
+        None => at.push(here),
+    }
+    at.into_iter()
+        .filter(|f| f != root)
+        .map(|f| match f.strip_prefix(root) {
+            Ok(rel) => rel.display().to_string(),
+            Err(_) => crate::allow::tilde(&f),
+        })
+        .collect()
+}
+
 /// Where a command runs: the project root (`root`, a real path), or `cwd` in it (relative to the root, or
 /// absolute) — a folder that's there, inside the project (real path), so a `cd` isn't needed (#27).
 fn run_cwd(root: &Path, cwd: Option<&str>) -> Result<PathBuf, String> {
@@ -1348,10 +1389,9 @@ fn ask_with(
     // What's decided: the command (and where it runs, when not at the root), what it reads outside (one
     // place a line)
     let mut decided = 0..cmd.split('\n').count();
-    if let Ok(rel) = cwd.strip_prefix(&ed.session.root).map(Path::to_path_buf)
-        && !rel.as_os_str().is_empty()
-    {
-        question.push_str(&format!("\n  in {}", rel.display()));
+    let folders = runs_in(&ed.session.root, &cwd, &cmd);
+    if !folders.is_empty() {
+        question.push_str(&format!("\n  in {}", folders.join(", ")));
         decided.end += 1;
     }
     // Said yes to before in this chat: when, and what changed since in what it runs — decided, the diff in
@@ -3162,6 +3202,10 @@ mod tests {
                 assert!(ed.session.task_run.is_none(), "{cmd}: nothing ran");
             }
         }
+        // #152: and where it runs — the folder after its `cd`s, decided, under the command
+        let q = decided(&mut ed, "cd ../other && cargo test").unwrap();
+        assert_eq!(q.lines().nth(1), Some(format!("  in {}", other.display()).as_str()), "{q}");
+        assert_eq!(ed.offers[0].decided_lines(), 0..2, "said as decided");
         // Inside the project: at once
         assert_eq!(decided(&mut ed, "cd sub && git status"), None, "inside: runs");
         ed.session.task_run = None;
@@ -3178,6 +3222,23 @@ mod tests {
         assert_eq!(decided(&mut ed, line), None, "there: runs");
         ed.session.task_run = None;
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #152: where a run card says a command runs — every folder its commands run in that isn't the root,
+    /// after its `cd`s, from the words alone; a line the reader can't read says its `cwd` only.
+    #[test]
+    fn a_run_card_says_the_folder_it_runs_in() {
+        use std::path::Path;
+        let root = Path::new("/r/proj");
+        let at = |cwd: &str, cmd: &str| super::runs_in(root, Path::new(cwd), cmd);
+        assert!(at("/r/proj", "cargo test").is_empty(), "the root: nothing to say");
+        assert_eq!(at("/r/proj/crates/a", "cargo test"), ["crates/a"], "a cwd inside");
+        assert_eq!(at("/r/proj", "cd sub && make"), ["sub"]);
+        assert!(at("/r/proj/sub", "cd .. && make").is_empty(), "back at the root");
+        assert_eq!(at("/r/proj", "cd ../other && cargo test"), ["/r/other"], "outside: the whole path");
+        assert_eq!(at("/r/proj", "cd a && make; cd ../b && make && make check"), ["a", "b"], "each once");
+        assert!(at("/r/proj", "cd /tmp/x").is_empty(), "a cd alone runs nothing there");
+        assert_eq!(at("/r/proj/sub", "echo $HOME"), ["sub"], "unreadable: its cwd");
     }
 
     /// #57, #66: a line of parts each allowed on its own runs unasked (where it reads still judged) —

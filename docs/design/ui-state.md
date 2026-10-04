@@ -576,8 +576,9 @@ Whatever changes state the user didn't see change, or refuses a key, says so whe
   keys over its own text in its buffer, the keys that read it (`g e`, `G`, `j`/`k`, `C-d`…) move that buffer.
 - **A paste in normal mode**: a `:` line opens the command line with it, not run (Enter runs it) — a pasted
   `:w` meant a command, and landed in a commit message's subject unsaid; making it text would have kept the
-  slip, and running it would run what nobody saw. Any other paste outside insert mode goes in as before, and
-  says where (`pasted 3 lines into a.rs — u takes it back`).
+  slip, and running it would run what nobody saw. Any other paste outside insert mode is held, not put in
+  (#124, 2026-10-05 — it went into the file with only a toast to say so): in the default register, `p` puts
+  it after the selection, `P` before (`pasted 3 lines — held, not in the file: p puts it after …`).
 - **Keys a panel has no use for** (the side panel, the review's list, `:procs`, the bottom slot, an edit's
   review, `C-` keys in the chat and the command line) are said; `f`/`r`/`"` waiting for a character show on
   the status line (`f…`). The routing matrix pins it: `no_key_is_refused_in_silence` (what's left does nothing

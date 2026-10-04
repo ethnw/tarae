@@ -55,6 +55,7 @@ pub const COMMANDS: &[TypedCmd] = &[
     c(&["restart!"], Arg::None, "Restart, skipping editor.restart-build"),
     c(&["preflight"], Arg::None, "Run the project's quick checks"),
     c(&["preflight-full"], Arg::None, "Run every check, before publishing"),
+    c(&["preflight-output"], Arg::None, "A preflight step's output in a buffer"),
     c(&["open", "o", "e", "edit"], Arg::File, "Open files"),
     c(&["new", "n"], Arg::None, "New scratch buffer"),
     c(&["reload"], Arg::None, "Reload the file from disk (u brings your version back)"),

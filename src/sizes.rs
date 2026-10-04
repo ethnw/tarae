@@ -222,6 +222,13 @@ pub fn bottom_key(ed: &mut crate::editor::Editor, key: Key) -> bool {
             }
             return true;
         }
+        // A preflight's step output, whole, in a buffer (#126)
+        (Code::Char('o'), false) if slot == Slot::Task => {
+            if let Err(e) = ed.preflight_output("") {
+                ed.set_status(e);
+            }
+            return true;
+        }
         // The user's own run waiting behind Claude's: now, Claude's stopping (`queued.rs`)
         (Code::Enter, false) => {
             let which =
