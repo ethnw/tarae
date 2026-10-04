@@ -151,6 +151,20 @@ impl Jobs {
     }
 }
 
+/// Lets `x` go on a worker — a big file's parse trees take milliseconds to free (`editor.rs`'s, perf
+/// profile: 4.6 ms the main tree, 1.1 ms its layers — and those go at every parse). No result comes back.
+pub fn drop_later<T: Send + 'static>(x: T) {
+    #[cfg(test)]
+    DROPPED_LATER.with(|n| n.set(n.get() + 1));
+    run(Box::new(move || drop(x)));
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many `drop_later`s this thread asked for (tests: what a test's own editor handed off).
+    pub static DROPPED_LATER: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// One copy of the thread-spawn machinery for every job, not one per job type.
 fn run(job: Box<dyn FnOnce() + Send>) {
     #[cfg(not(test))]

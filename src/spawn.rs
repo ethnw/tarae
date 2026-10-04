@@ -328,8 +328,19 @@ mod tests {
     /// A run's start costs the same whatever the editor's memory: posix_spawn, not a fork of the editor —
     /// measured beside the fork it replaces (`dap::setsid`'s `pre_exec`) with 230 MB touched and 64 parked
     /// threads (tarae's size in the design doc's measure). The median of 20 for `cargo perf`; the fork's said.
+    /// At opt-level 0 (the test profile, and a full parallel run) it skips itself, saying so past libtest's
+    /// capture — its 1 ms budget is for the `perf` profile, run alone.
     #[test]
     fn perf_run_spawn_with_a_big_heap() {
+        if !cfg!(tarae_optimized) {
+            let line = format!(
+                "{}spawn::tests::perf_run_spawn_with_a_big_heap — built at opt-level 0 (the test profile); \
+                 `cargo perf` runs it\n",
+                crate::test_results::SELF_SKIP
+            );
+            let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+            return;
+        }
         const MB: usize = 1 << 20;
         let mut heap = vec![0u8; 230 * MB];
         for b in heap.iter_mut().step_by(4096) {

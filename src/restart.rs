@@ -619,15 +619,52 @@ fn exec_with(mut ed: Editor, bin: &Path, file: &Path) -> String {
         return format!("{}: {e}", file.display());
     }
     drop(ed);
-    close_on_exec();
+    let marked = close_on_exec();
+    let signals = Signals::now();
     let err = std::process::Command::new(bin).arg("--restart").arg(file).exec();
+    // Only a failed exec returns, and std's exec set this process up as a fork's child first: no signal
+    // blocked, SIGPIPE at its default — a write to a closed pipe would end it now. Put back as they were
+    signals.restore();
+    for fd in marked {
+        // SAFETY: clearing the flag set above on a descriptor number; one that's gone just fails.
+        unsafe {
+            libc::fcntl(fd, libc::F_SETFD, 0);
+        }
+    }
     let _ = std::fs::remove_file(file);
     format!("couldn't run {}: {err}", bin.display())
 }
 
+/// SIGPIPE's disposition and this thread's signal mask — what std's exec changes before it tries.
+struct Signals {
+    pipe: libc::sigaction,
+    mask: libc::sigset_t,
+}
+
+impl Signals {
+    fn now() -> Signals {
+        // SAFETY: queries into zeroed out-structs of the right types.
+        unsafe {
+            let mut s = Signals { pipe: std::mem::zeroed(), mask: std::mem::zeroed() };
+            libc::sigaction(libc::SIGPIPE, std::ptr::null(), &mut s.pipe);
+            libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), &mut s.mask);
+            s
+        }
+    }
+
+    fn restore(&self) {
+        // SAFETY: putting back what `now` read, as it was.
+        unsafe {
+            libc::sigaction(libc::SIGPIPE, &self.pipe, std::ptr::null_mut());
+            libc::pthread_sigmask(libc::SIG_SETMASK, &self.mask, std::ptr::null_mut());
+        }
+    }
+}
+
 /// Every descriptor past stdio closes on exec — std's are marked already, but not all are std's (a
-/// terminal's pty from `openpty`); one left open would keep its shell from hanging up.
-fn close_on_exec() {
+/// terminal's pty from `openpty`); one left open would keep its shell from hanging up. The ones it marked,
+/// for a failed exec to unmark.
+fn close_on_exec() -> Vec<i32> {
     let fds: Vec<i32> = std::fs::read_dir("/dev/fd")
         .into_iter()
         .flatten()
@@ -635,12 +672,20 @@ fn close_on_exec() {
         .filter_map(|e| e.file_name().to_str()?.parse().ok())
         .filter(|&fd| fd > 2)
         .collect();
+    let mut marked = Vec::new();
     for fd in fds {
-        // SAFETY: setting a flag on a descriptor number; one that's gone meanwhile just fails.
+        // SAFETY: reading and setting a flag on a descriptor number; one that's gone meanwhile just fails.
         unsafe {
-            libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags != -1
+                && flags & libc::FD_CLOEXEC == 0
+                && libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) == 0
+            {
+                marked.push(fd);
+            }
         }
     }
+    marked
 }
 
 /// First thing after a restart: the last tarae's children that were stopped but not waited for are this
@@ -1227,15 +1272,80 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A binary that can't be run: exec returns why, and the state it wrote for it is gone again.
+    /// A binary that can't be run: exec returns why, the state it wrote for it is gone again, and the process
+    /// is as it was — std's exec first sets the process up as a fork's child would be (SIGPIPE at its default,
+    /// no signal blocked), so a write to a closed pipe after a failed exec killed it. In the test binary that
+    /// was every run that came after: a fake claude gone, its writer's EPIPE a SIGPIPE, the run dead
+    /// ("signal: 13"). Run in a process of its own (`failed_exec_in_its_own_process`), so this one's signals
+    /// are never touched.
     #[test]
-    fn a_failed_exec_says_why_and_leaves_no_state() {
+    fn a_failed_exec_says_why_and_leaves_the_process_as_it_was() {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "restart::tests::failed_exec_in_its_own_process", "--ignored", "--nocapture"])
+            .env("TARAE_FAILED_EXEC", "1")
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+        use std::os::unix::process::ExitStatusExt as _;
+        assert_eq!(out.status.signal(), None, "it died of a signal (13 = SIGPIPE): {said}");
+        assert!(out.status.success(), "{said}");
+        assert!(said.contains("1 passed"), "the child ran it: {said}");
+    }
+
+    /// `a_failed_exec_says_why_and_leaves_the_process_as_it_was`'s child.
+    #[test]
+    #[ignore]
+    fn failed_exec_in_its_own_process() {
+        if std::env::var_os("TARAE_FAILED_EXEC").is_none() {
+            return;
+        }
+        let pipe_disposition = || {
+            // SAFETY: a query only.
+            unsafe {
+                let mut now: libc::sigaction = std::mem::zeroed();
+                libc::sigaction(libc::SIGPIPE, std::ptr::null(), &mut now);
+                now.sa_sigaction
+            }
+        };
+        let blocked = || {
+            // SAFETY: a query of this thread's mask only.
+            unsafe {
+                let mut set: libc::sigset_t = std::mem::zeroed();
+                libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), &mut set);
+                libc::sigismember(&set, libc::SIGUSR2)
+            }
+        };
+        // As tarae runs: SIGPIPE ignored (std's main does it); and one signal blocked, and a descriptor
+        // made without close-on-exec (a pty's, say), to see them come back
+        assert_eq!(pipe_disposition(), libc::SIG_IGN);
+        let mut fds = [0; 2];
+        // SAFETY: blocking one signal on this thread; a pipe(2) into a two-int array, no close-on-exec.
+        unsafe {
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, libc::SIGUSR2);
+            libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+            assert_eq!(libc::pipe(fds.as_mut_ptr()), 0);
+        }
         let dir = temp("exec");
         let file = dir.join("restart-state.json");
         let said = exec_with(Editor::new(Config::default()), &dir.join("no-such-tarae"), &file);
         assert!(said.starts_with("couldn't run ") && said.contains("no-such-tarae"), "{said}");
         assert!(!file.exists());
         std::fs::remove_dir_all(&dir).ok();
+        // A write into a pipe whose reader is gone: an error, not the end of this process
+        // SAFETY: closing the reading end made above, then writing a byte into the other.
+        let wrote = unsafe {
+            libc::close(fds[0]);
+            libc::write(fds[1], b"x".as_ptr().cast(), 1)
+        };
+        assert_eq!(wrote, -1);
+        assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EPIPE));
+        assert_eq!(pipe_disposition(), libc::SIG_IGN, "SIGPIPE is ignored again");
+        assert_eq!(blocked(), 1, "the signal mask is back");
+        // SAFETY: reading a descriptor's flags.
+        let flags = unsafe { libc::fcntl(fds[1], libc::F_GETFD) };
+        assert_eq!(flags & libc::FD_CLOEXEC, 0, "a descriptor's close-on-exec is as it was");
     }
 
     /// Claude's edit waiting in its review is part of the turn — `:restart` waits instead of refusing. Once

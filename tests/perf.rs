@@ -552,6 +552,10 @@ fn perf_e2e_memory_with_a_working_set_open() {
     }
     // (files unseen for 2 s let their trees go, not 3 minutes — the most recent five keep theirs)
     let sb = Sandbox::new("perf-working-set").with_env("TARAE_TREES_UNSEEN", "2");
+    // (TARAE_MSL: malloc's stacks kept, and at the end what allocated what's live — `malloc_history -callTree`
+    // into target/tarae-msl.txt)
+    let msl = std::env::var_os("TARAE_MSL").is_some();
+    let sb = if msl { sb.with_env("MallocStackLogging", "lite") } else { sb };
     copy_repo(&sb);
     let files = [
         "src/editor.rs",
@@ -574,7 +578,18 @@ fn perf_e2e_memory_with_a_working_set_open() {
             .output()
             .map(|o| {
                 let out = String::from_utf8_lossy(&o.stdout).to_string();
-                out.lines().filter(|l| l.contains("nodes malloced")).collect::<Vec<_>>().join("\n")
+                let mut s =
+                    out.lines().filter(|l| l.contains("nodes malloced")).collect::<Vec<_>>().join("\n");
+                // (TARAE_VMMAP too: the regions behind the footprint — malloc's, the binary's, stacks)
+                if std::env::var_os("TARAE_VMMAP").is_some() {
+                    let v = std::process::Command::new("/usr/bin/vmmap")
+                        .args(["--summary", &t.pid().to_string()])
+                        .output()
+                        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                        .unwrap_or_default();
+                    s += &v[v.find("REGION TYPE").unwrap_or(0)..];
+                }
+                s
             })
             .unwrap_or_default(),
         None => String::new(),
@@ -620,14 +635,57 @@ fn perf_e2e_memory_with_a_working_set_open() {
     settled(&mut t);
     let later = t.usage();
     say("a while later", later, &t);
+    if msl {
+        let out = std::process::Command::new("/usr/bin/malloc_history")
+            .args([&t.pid().to_string(), "-callTree", "-invert"])
+            .output()
+            .unwrap();
+        let to = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/tarae-msl.txt");
+        fs::write(&to, &out.stdout).unwrap();
+    }
     // (measured 2026-10-03: 96.5 MB when every open file kept its trees — 815k live blocks; 30 MB with the
     // five seen last — 338k. Just opened, the footprint is mostly a parse's working memory not yet given
     // back: not a number to keep)
     report("e2e_footprint_working_set_mb", mb(later.footprint), 60.0, 5.0);
 }
 
+/// The repository's files as of this commit — what the scenes that copy "this repository" open and search.
+/// Pinned: the files keep growing, and a scene's number moved with them (the working set's footprint went
+/// 31.7 → 50.3 MB from Oct 2 to 4 with tarae's own part +0.5 MB — `editor.rs` grew 477 → 643 KB). Moving it
+/// is a new baseline for those numbers.
+const CORPUS: &str = "53843b6";
+const CORPUS_PATHS: [&str; 8] =
+    ["src", "runtime", "docs", "tests", "xtask/src", "Cargo.toml", "README.md", "CONTRIBUTING.md"];
+
 fn copy_repo(sb: &Sandbox) {
     let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    // (TARAE_PERF_REPO: another tree's files instead — to tell the code's growth from the files')
+    if let Some(from) = std::env::var_os("TARAE_PERF_REPO") {
+        return copy_tree(std::path::Path::new(&from), sb);
+    }
+    fs::create_dir_all(sb.work()).unwrap();
+    let mut archive = std::process::Command::new("git")
+        .args(["-C", here.to_str().unwrap(), "archive", "--format=tar", CORPUS, "--"])
+        .args(CORPUS_PATHS)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let untarred = std::process::Command::new("tar")
+        .args(["-x", "-C", sb.work().to_str().unwrap()])
+        .stdin(archive.stdout.take().unwrap())
+        .status()
+        .is_ok_and(|s| s.success());
+    let archived = archive.wait().is_ok_and(|s| s.success());
+    let ok = archived && untarred && sb.file("src/editor.rs").exists();
+    if !ok {
+        // (a clone without that commit: today's files — a number not to compare with the history)
+        eprintln!("perf: no commit {CORPUS} here — copying the working tree's files");
+        copy_tree(here, sb);
+    }
+}
+
+fn copy_tree(here: &std::path::Path, sb: &Sandbox) {
     for d in ["src", "runtime", "docs", "tests", "xtask/src"] {
         copy_dir(&here.join(d), &sb.file(d));
     }

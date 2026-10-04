@@ -553,6 +553,9 @@ impl Syntax {
     /// Not looked at for a while: its trees go (a big file's are ~15 MB), and it isn't parsed until it's
     /// woken (`dormant = false` — it's dirty, so the next round parses it whole).
     pub fn sleep(&mut self) {
+        if self.tree.is_some() {
+            crate::event::drop_later((self.tree.take(), std::mem::take(&mut self.layers)));
+        }
         self.reset();
         self.dormant = true;
     }
@@ -596,8 +599,12 @@ impl Syntax {
                     l.tree.edit(&e);
                 }
             }
-            self.tree = Some(tree);
-            self.layers = Arc::new(layers);
+            // (the old layers are all freed — they're parsed afresh each time — and that's a millisecond for a
+            // big file: on a worker)
+            let old = (self.tree.replace(tree), std::mem::replace(&mut self.layers, Arc::new(layers)));
+            if !old.1.is_empty() {
+                crate::event::drop_later(old);
+            }
             self.highlighted.get_mut().clear();
         }
     }
@@ -1096,6 +1103,88 @@ fn query_all(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a file's trees are made of: subtrees in the main tree and in each injected language's layers
+    /// (`cargo test -- --ignored subtrees_by_layer --nocapture`; `TARAE_COUNT` = paths, space-separated).
+    #[test]
+    #[ignore]
+    fn subtrees_by_layer() {
+        fn count(tree: &Tree) -> usize {
+            let mut seen = std::collections::HashSet::new();
+            let mut c = tree.walk();
+            'down: loop {
+                if seen.insert(c.node().id()) && c.goto_first_child() {
+                    continue;
+                }
+                loop {
+                    if c.goto_next_sibling() {
+                        continue 'down;
+                    }
+                    if !c.goto_parent() {
+                        break 'down;
+                    }
+                }
+            }
+            seen.len()
+        }
+        let paths = std::env::var("TARAE_COUNT").unwrap_or("src/editor.rs src/term.rs".into());
+        for p in paths.split_whitespace() {
+            let Some(lang) = detect(Path::new(p)).and_then(|s| Loader::global().load(s).ok()) else {
+                continue;
+            };
+            let text = Rope::from_str(&std::fs::read_to_string(p).unwrap());
+            let syn = Syntax::parsed(lang, &text);
+            let mut by: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
+            for l in syn.layers.iter() {
+                let e = by.entry(l.lang.name.clone()).or_default();
+                e.0 += 1;
+                e.1 += count(&l.tree);
+            }
+            let main = syn.tree.as_ref().map(count).unwrap_or(0);
+            eprintln!("{p} {} KB: main {main}, layers {by:?}", text.len_bytes() / 1024);
+            // (a reparse landing on the main loop after one typed character)
+            let mut syn = syn;
+            let mut text = text;
+            text.insert(0, " ");
+            syn.edit(&[input_edit(&Rope::from_str(""), 0, 0, " ")]);
+            let job = syn.start_parse(&text);
+            let generation = job.generation;
+            let parsed = job.run();
+            let t = std::time::Instant::now();
+            syn.finish_parse(generation, parsed);
+            eprintln!("  finish_parse after an edit: {:?}", t.elapsed());
+            // (what letting them go costs — `Syntax::sleep`, and the old layers at every `finish_parse`)
+            let (tree, layers) = (syn.tree.clone(), syn.layers.clone());
+            drop(syn);
+            let t = std::time::Instant::now();
+            drop(layers);
+            let l = t.elapsed();
+            let t = std::time::Instant::now();
+            drop(tree);
+            eprintln!("  dropping: layers {l:?}, main tree {:?}", t.elapsed());
+        }
+    }
+
+    /// A big file's trees take milliseconds to free: a reparse's old layers and a sleeping document's trees
+    /// go on a worker, not the main loop.
+    #[test]
+    fn old_trees_are_freed_off_the_main_loop() {
+        let Some(lang) = spec("rust").and_then(|s| Loader::global().load(s).ok()) else { return };
+        let dropped = || crate::event::DROPPED_LATER.with(|n| n.get());
+        let mut text = Rope::from_str("fn a() {\n    // a comment\n    println!(\"{}\", 1);\n}\n");
+        let mut syn = Syntax::parsed(lang, &text);
+        assert!(!syn.layers.is_empty(), "the comment and the macro are layers");
+        let before = dropped();
+        syn.edit(&[input_edit(&text, 0, 0, " ")]);
+        text.insert(0, " ");
+        let job = syn.start_parse(&text);
+        let generation = job.generation;
+        syn.finish_parse(generation, job.run());
+        assert_eq!(dropped(), before + 1, "the old layers (and the old tree's handle) went to a worker");
+        syn.sleep();
+        assert_eq!(dropped(), before + 2, "a sleeping document's trees too");
+        assert!(syn.tree.is_none() && syn.layers.is_empty());
+    }
 
     #[test]
     fn detects_languages() {
