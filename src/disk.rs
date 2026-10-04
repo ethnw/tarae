@@ -229,6 +229,10 @@ impl Editor {
     }
 
     fn on_disk(&mut self, stats: Vec<Stat>) {
+        // Buffers that are the file on disk again after a write from outside (Claude's edit landing, a
+        // checkout): saved, as far as the language servers go — rust-analyzer checks on a save (held while
+        // a burst of writes goes on, `lsp_saved_outside`)
+        let mut saved = Vec::new();
         for (id, known, now, body) in stats {
             let Some(doc) = self.docs.iter_mut().find(|d| d.id == id) else { continue };
             // Saved (or reloaded) since the stat started — the change it saw may be our own write; or a save
@@ -257,6 +261,9 @@ impl Editor {
                     let changed = reload_text(doc, &body);
                     doc.disk = Some(stamp);
                     doc.disk_conflict = false;
+                    if changed && !log {
+                        saved.push(id);
+                    }
                     if log {
                         if changed && at_end {
                             let last = crate::movement::last_line(&doc.text);
@@ -278,6 +285,7 @@ impl Editor {
                     doc.disk = Some(stamp);
                     doc.disk_conflict = false;
                     doc.mark_saved();
+                    saved.push(id);
                 }
                 // Only the trailing newline is missing — Claude Code does that when writing accepted content
                 // (measured). Write back the buffer (= accepted content)
@@ -285,8 +293,9 @@ impl Editor {
                     if doc.is_modified() && is_plus_newline(&doc.text, body.slice(..)) =>
                 {
                     doc.disk = Some(stamp);
-                    if let Err(e) = doc.save_as(true) {
-                        self.set_error(format!("{name}: {e:#}"));
+                    match doc.save_as(true) {
+                        Ok(_) => saved.push(id),
+                        Err(e) => self.set_error(format!("{name}: {e:#}")),
                     }
                 }
                 (Some(stamp), _) => {
@@ -297,6 +306,9 @@ impl Editor {
                     }
                 }
             }
+        }
+        for id in saved {
+            self.lsp_saved_outside(id);
         }
     }
 
@@ -454,6 +466,147 @@ mod tests {
             let ev = ed.events.recv_timeout(Duration::from_secs(5)).expect("disk stat");
             ed.handle_event(ev);
         }
+    }
+
+    /// A Rust file open with a stand-in server (`cat` into `sent.log`), up: writes from outside, and the
+    /// didSaves it was sent.
+    struct Saving {
+        ed: Editor,
+        dir: PathBuf,
+        file: PathBuf,
+        id: crate::document::DocId,
+    }
+
+    impl Saving {
+        fn new(name: &str) -> Saving {
+            let dir = std::env::temp_dir().join(format!("tarae-disk-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let file = dir.join("main.rs");
+            std::fs::write(&file, "fn a() {}\n").unwrap();
+            std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"t\"\n").unwrap();
+            let cfg = format!(
+                "[lsp.fake]\ncommand = \"sh\"\nargs = [\"-c\", \"cat > '{}'\"]\n[lang.rust]\nlsp = [\"fake\"]\n",
+                dir.join("sent.log").display()
+            );
+            let (config, _) = crate::config::parse(&cfg);
+            let mut ed = Editor::new(config);
+            ed.open(&file).unwrap();
+            ed.root = dir.clone();
+            let (id, cid) = (ed.doc().id, ed.doc().lsp.client.expect("attached"));
+            ed.on_lsp_message(cid, serde_json::json!({ "id": 0, "result": { "capabilities": {} } }));
+            let file = std::fs::canonicalize(&file).unwrap();
+            Saving { ed, dir, file, id }
+        }
+
+        /// `body` written to the file from outside, as the disk watch sees it.
+        fn outside(&mut self, body: &str) {
+            std::fs::write(&self.file, body).unwrap();
+            let known = self.ed.doc().disk;
+            self.ed.on_disk(vec![(self.id, known, stamp(&self.file), Some(body.into()))]);
+        }
+
+        /// The editor's events for `ms` (its timers land).
+        fn pump(&mut self, ms: u64) {
+            let end = std::time::Instant::now() + Duration::from_millis(ms);
+            while let Some(left) = end.checked_duration_since(std::time::Instant::now()) {
+                if let Some(ev) = self.ed.events.recv_timeout(left.min(Duration::from_millis(10))) {
+                    self.ed.handle_event(ev);
+                }
+            }
+        }
+
+        /// The didSaves sent so far.
+        fn saves(&self) -> usize {
+            std::thread::sleep(Duration::from_millis(150)); // (the writer thread)
+            let sent = std::fs::read_to_string(self.dir.join("sent.log")).unwrap_or_default();
+            sent.matches("textDocument/didSave").count()
+        }
+    }
+
+    /// A write from outside that the buffer takes — reloaded, or Claude writing the edit it already holds —
+    /// is a save to the servers too (rust-analyzer checks on a save; `diagnostics` waits on that check), held
+    /// until the file has been quiet: a burst of four writes is one. A write the buffer doesn't take (a
+    /// conflict) is none; the user's own `:w` goes at once, and a held one goes with it.
+    #[test]
+    fn a_burst_of_writes_from_outside_is_one_save() {
+        let mut s = Saving::new("burst");
+        s.outside("fn b() {}\n");
+        assert_eq!(s.ed.doc().text.to_string(), "fn b() {}\n");
+        assert_eq!(s.saves(), 0, "held for quiet");
+        s.pump(300);
+        assert_eq!(s.saves(), 1, "reloaded, then quiet");
+        for body in ["fn c() {}\n", "fn d() {}\n", "fn e() {}\n", "fn f() {}\n"] {
+            s.outside(body);
+            s.pump(30);
+        }
+        assert_eq!(s.saves(), 1, "not during the burst");
+        s.pump(300);
+        assert_eq!(s.saves(), 2, "one for the burst");
+        feed(&mut s.ed, "ggic<esc>");
+        let mine = s.ed.doc().text.to_string();
+        s.outside(&mine);
+        assert!(!s.ed.doc().is_modified());
+        s.pump(300);
+        assert_eq!(s.saves(), 3, "the buffer's text written");
+        feed(&mut s.ed, "ggid<esc>");
+        s.outside("something else\n");
+        assert!(s.ed.doc().disk_conflict);
+        s.pump(300);
+        assert_eq!(s.saves(), 3, "a conflict is no save");
+        // The user's :w: at once — a held one doesn't follow it
+        crate::typed::execute(&mut s.ed, "reload").unwrap();
+        s.outside("fn g() {}\n");
+        crate::typed::execute(&mut s.ed, "w!").unwrap();
+        s.pump(80);
+        assert_eq!(s.saves(), 4, ":w is sent before the quiet is over");
+        s.pump(300);
+        assert_eq!(s.saves(), 4, "and the held one went with it");
+        std::fs::remove_dir_all(&s.dir).ok();
+    }
+
+    /// `diagnostics` sends the held saves first — the check they start is what it waits for.
+    #[test]
+    fn diagnostics_sends_the_held_saves_first() {
+        let mut s = Saving::new("diags");
+        s.outside("fn b() {}\n");
+        assert_eq!(s.saves(), 0, "held");
+        let args = serde_json::json!({ "paths": ["main.rs"], "wait": 1 });
+        crate::nav::diagnostics(&mut s.ed, crate::tools::Call::test(1), &args).unwrap();
+        assert_eq!(s.saves(), 1, "sent as it's asked, before any wait");
+        s.pump(300);
+        assert_eq!(s.saves(), 1, "and not again");
+        std::fs::remove_dir_all(&s.dir).ok();
+    }
+
+    /// While a command or tests of Claude's build, a held save waits for its end — a check then would hold
+    /// the build dir's lock against it.
+    #[test]
+    fn a_write_during_claudes_run_is_saved_after_it() {
+        let mut s = Saving::new("run");
+        let task = crate::task::Task { name: "cargo test".into(), cmd: "true".into(), cwd: s.dir.clone() };
+        let mut run = crate::task::Run::for_test(task);
+        (run.state, run.by_claude) = (crate::task::State::Running, true);
+        s.ed.task_run = Some(run);
+        s.outside("fn b() {}\n");
+        s.pump(400);
+        assert_eq!(s.saves(), 0, "not while it builds");
+        // Its end comes as an event, as a real run's does
+        s.ed.events.jobs().spawn(|| {
+            |ed: &mut Editor| {
+                if let Some(r) = ed.task_run.as_mut() {
+                    r.state = crate::task::State::Passed;
+                }
+            }
+        });
+        s.pump(100);
+        assert_eq!(s.saves(), 1, "at its end");
+        // The user's own run doesn't hold it
+        s.ed.task_run.as_mut().unwrap().state = crate::task::State::Running;
+        s.ed.task_run.as_mut().unwrap().by_claude = false;
+        s.outside("fn c() {}\n");
+        s.pump(300);
+        assert_eq!(s.saves(), 2);
+        std::fs::remove_dir_all(&s.dir).ok();
     }
 
     /// The open log follows new lines quietly — a toast would be logged, change the file, and loop.

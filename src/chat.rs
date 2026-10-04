@@ -30,13 +30,16 @@ use crate::llm::{self, StreamEv};
 use crate::markdown::Span;
 
 const SYSTEM: &str = "You are Claude, built into tarae — a terminal code editor, working in the user's project \
-(your current directory). Explore it with Read, Glob and tarae's own references, search and symbols tools — \
-look at the code you need across files instead of guessing. For where something is used, references (the \
-language server's) beats any text search; for finding code or text, search (the editor's project search); for \
-a file's outline or which function a line is in, symbols — Grep is for what those can't do. You can change files with Edit and Write when the user asks for changes: each one is shown to them as \
+(your current directory). Explore it with Read, Glob and tarae's own code tools — look at the code you need \
+across files instead of guessing. The language server's answers beat any text search and reading around: for \
+where something is defined (or a trait's implementations), definition — at a place, or by name alone; for a \
+value's type or a function's signature and docs, hover; for where something is used, references. For finding \
+code or text, search (the editor's project search); for a file's outline or which function a line is in, \
+symbols — Grep is for what those can't do. You can change files with Edit and Write when the user asks for changes: each one is shown to them as \
 a diff they accept or reject (maybe in part), so keep edits focused, and if one is declined, ask before trying \
-another way. After you change code, check your work with the run_tests tool: run the tests that cover the \
-change (a test file, and a line for a single test), and when they fail, read why and fix it — the user \
+another way. After you change code, check your work: diagnostics with wait says in seconds whether it \
+compiles as the language servers see it (before any build), then the run_tests tool runs the tests that cover \
+the change (a test file, and a line for a single test) — when they fail, read why and fix it; the user \
 watches the run in their editor. To build, lint, format, run a whole test suite or use git, use the run \
 tool: one command per call, its output comes back; checks start at once, other commands wait for the user's \
 yes. Both run in a sandbox: they can write only in the project (not .git or .tarae.toml), temp folders and the \
@@ -72,9 +75,11 @@ note(reply_to=N); the chat answer is a short summary.";
 const TOOLS: &str = "Read,Grep,Glob,Edit,Write";
 /// Not Read, Grep or Glob: allowed by name they read anywhere unasked (measured — `reads.rs` answers them).
 /// (`screen` asks the user itself — `seeing.rs`)
-/// (`references`, `search` and `symbols` read inside the project only — `nav.rs`)
+/// (`references`, `search`, `symbols`, `definition`, `hover` and `diagnostics` read inside the project
+/// only — `nav.rs`)
 const ALLOWED: &str = "mcp__tarae__note,mcp__tarae__run_tests,mcp__tarae__run,mcp__tarae__plan,\
-mcp__tarae__screen,mcp__tarae__references,mcp__tarae__search,mcp__tarae__symbols";
+mcp__tarae__screen,mcp__tarae__references,mcp__tarae__search,mcp__tarae__symbols,mcp__tarae__definition,\
+mcp__tarae__hover,mcp__tarae__diagnostics";
 
 /// Settings laid over the user's and the project's when they're loaded (`llm.chat-settings`).
 const CHAT_SETTINGS: &str = r#"{"permissions":{"ask":["Edit","Write"]},"disableAllHooks":true}"#;
@@ -706,7 +711,10 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             }
             // A lookup's row ends with what it found (`12 references in 3 files`) — Grep's answers aren't read
             if let Some(m) = c.msgs.iter_mut().rev().find(|m| m.call == id)
-                && let Some(l) = m.look.as_mut().filter(|l| matches!(l.verb, "uses" | "search" | "map"))
+                && let Some(l) = m
+                    .look
+                    .as_mut()
+                    .filter(|l| matches!(l.verb, "uses" | "search" | "map" | "where" | "check"))
                 && let Some(v) = crate::nav::verdict(&text)
             {
                 l.range = v;
@@ -1296,6 +1304,41 @@ fn look(root: &Path, name: &str, input: &serde_json::Value) -> Look {
                 None => (shown(&path), 0),
             };
             Look { verb: "map", what, pattern: false, range: String::new(), link: Some(Link { path, line }) }
+        }
+        // At a place: the editor goes there; by name (definition), or the files (diagnostics): nowhere
+        "mcp__tarae__definition" | "mcp__tarae__hover" => {
+            let verb = if name == "mcp__tarae__hover" { "about" } else { "where" };
+            let what = match (s("symbol"), n("column")) {
+                (w, _) if !w.is_empty() => w,
+                (_, Some(c)) => format!("column {c}"),
+                _ => String::new(),
+            };
+            if s("path").is_empty() {
+                return Look { verb, what, pattern: true, range: "by name".into(), link: None };
+            }
+            let path = resolve(&s("path"));
+            let (place, line) = match n("line") {
+                Some(l) => (format!("{}:{}", shown(&path), l.max(1)), l.max(1) - 1),
+                None => (shown(&path), 0),
+            };
+            let link = Some(Link { path, line });
+            Look { verb, what, pattern: true, range: format!("in {place}"), link }
+        }
+        "mcp__tarae__diagnostics" => {
+            let paths: Vec<String> = input["paths"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|p| p.as_str())
+                .map(|p| shown(&resolve(p)))
+                .collect();
+            let what = match paths.len() {
+                0 => "your edits".to_string(),
+                1..=2 => paths.join(", "),
+                n => format!("{}, … {} files", paths[0], n),
+            };
+            let range = n("wait").filter(|&w| w > 0).map_or(String::new(), |w| format!("waits up to {w}s"));
+            Look { verb: "check", what, pattern: false, range, link: None }
         }
         other => {
             Look { verb: "use", what: other.to_string(), pattern: false, range: String::new(), link: None }

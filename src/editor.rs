@@ -1349,6 +1349,7 @@ impl Editor {
         self.picker_filter();
         self.conflicts_sync();
         self.disk_sync();
+        self.saves_due(false);
         self.agent_next_diff();
         crate::follow::watch(self);
         crate::notes::attach(self);

@@ -68,8 +68,19 @@ pub struct LspState {
     /// Claude's `references` calls waiting for their server (N5, `nav.rs`), by number · the next number.
     pub(crate) tool_asks: HashMap<u64, crate::nav::Ask>,
     pub(crate) tool_ask_next: u64,
-    /// …and its `symbols` calls (N5b), by the same numbers.
+    /// …and its `symbols` calls (N5b), its `definition` and `hover` calls (N6), by the same numbers · its
+    /// `diagnostics` calls waiting for the servers to settle.
     pub(crate) tool_symbols: HashMap<u64, crate::nav::SymAsk>,
+    pub(crate) tool_defs: HashMap<u64, crate::nav::DefAsk>,
+    pub(crate) tool_hovers: HashMap<u64, crate::nav::HoverAsk>,
+    pub(crate) tool_diags: Vec<crate::nav::DiagWait>,
+    /// When each server last published diagnostics for a file (real path) · when each last ended a piece
+    /// of work (`$/progress` end) — `diagnostics` tells "clean" from "not checked yet" by these.
+    pub(crate) published: HashMap<(ClientId, std::path::PathBuf), std::time::Instant>,
+    pub(crate) work_ended: HashMap<ClientId, std::time::Instant>,
+    /// Documents written from outside whose didSave is held, since their latest write
+    /// (`lsp_saved_outside`).
+    held_saves: HashMap<DocId, std::time::Instant>,
     /// (tests: the trace lines written — the log writes nothing in tests)
     #[cfg(test)]
     pub traced: Vec<String>,
@@ -190,8 +201,9 @@ impl Trace {
     }
 }
 
-/// A diagnostic in a file that isn't open: (server, severity, line, column, message).
-pub(crate) type Elsewhere = (ClientId, u8, usize, usize, String);
+/// A diagnostic in a file that isn't open: (server, severity, line, column, message, where it's from and
+/// its code — `rustc E0308`).
+pub(crate) type Elsewhere = (ClientId, u8, usize, usize, String, String);
 
 /// What applying one code action would change (picker's right pane).
 #[derive(Clone)]
@@ -214,6 +226,12 @@ pub(crate) const IDLE_STOP: std::time::Duration =
 /// folders stayed the full ten minutes): a grace for a quick reopen, then it stops.
 const ROOT_GONE: std::time::Duration =
     std::time::Duration::from_millis(if cfg!(test) { 30 } else { 30 * 1000 });
+
+/// How long a file written from outside is quiet before its servers hear it was saved — a burst of
+/// Claude's edits is one check, not one each (measured 2026-10-03: four writes in a second started three
+/// `cargo check`s, each restarting the last and holding the shared build dir's lock against Claude's own
+/// cargo runs).
+const SAVE_QUIET: std::time::Duration = std::time::Duration::from_millis(if cfg!(test) { 100 } else { 1500 });
 
 /// How long `g r`'s text matches wait for a busy server's own answer before they show (N3) — one that
 /// answers by then (warm rust-analyzer: 35–68 ms) isn't preceded by a flash of text matches.
@@ -300,6 +318,18 @@ pub enum Kind {
     ToolSymbols {
         ask: u64,
     },
+    /// Claude's `definition` question `ask` (N6) — a go-to at a place, or a name asked of the workspace.
+    ToolGoto {
+        ask: u64,
+        goto: Goto,
+    },
+    ToolNamed {
+        ask: u64,
+    },
+    /// Claude's `hover` question `ask` (N6).
+    ToolHover {
+        ask: u64,
+    },
     /// `space h` — this symbol's uses in the file become the selections.
     Highlights,
     Hover,
@@ -348,7 +378,11 @@ impl Kind {
     fn route(&self) -> Option<(&'static str, &'static str)> {
         Some(match self {
             Kind::Goto(Goto::References) => ("goto", "referencesProvider"),
-            Kind::Goto(g) => ("goto", g.provider().unwrap_or("definitionProvider")),
+            Kind::Goto(g) | Kind::ToolGoto { goto: g, .. } => {
+                ("goto", g.provider().unwrap_or("definitionProvider"))
+            }
+            Kind::ToolNamed { .. } => ("symbols", "workspaceSymbolProvider"),
+            Kind::ToolHover { .. } => ("hover", "hoverProvider"),
             Kind::Declared { .. } | Kind::ToolDeclared { .. } => ("goto", "definitionProvider"),
             Kind::ToolRefs { .. } => ("goto", "referencesProvider"),
             Kind::Highlights => ("highlights", "documentHighlightProvider"),
@@ -571,7 +605,50 @@ impl Editor {
         }
     }
 
+    /// Document `id` was written from outside and the buffer took it (Claude's edit landing, a checkout):
+    /// a save to its servers too — rust-analyzer checks on one — but held until the file has been quiet
+    /// for `SAVE_QUIET`, and while a run or test of Claude's builds (`saves_due`).
+    pub(crate) fn lsp_saved_outside(&mut self, id: DocId) {
+        self.lsp.held_saves.insert(id, std::time::Instant::now());
+        self.events.jobs().spawn(|| {
+            std::thread::sleep(SAVE_QUIET);
+            |ed: &mut Editor| ed.saves_due(false)
+        });
+    }
+
+    /// The held saves whose file has been quiet for `SAVE_QUIET` go out — none while a run or test of
+    /// Claude's is building (looked at every event, so they go at its end); `now`: all at once
+    /// (`diagnostics` asks — what it waits for is the check they start).
+    pub(crate) fn saves_due(&mut self, now: bool) {
+        if self.lsp.held_saves.is_empty() || !now && self.claude_building() {
+            return;
+        }
+        let due: Vec<DocId> = self
+            .lsp
+            .held_saves
+            .iter()
+            .filter(|(_, t)| now || t.elapsed() >= SAVE_QUIET)
+            .map(|(id, _)| *id)
+            .collect();
+        // (each taken off the held ones by `lsp_did_save`)
+        for id in due {
+            self.lsp_did_save(id);
+        }
+    }
+
+    /// A command or tests of Claude's are running — a check started now would hold the build dir's lock
+    /// against its build (one build dir on this machine).
+    fn claude_building(&self) -> bool {
+        self.task_run.as_ref().is_some_and(|r| r.state == crate::task::State::Running && r.by_claude)
+            || self
+                .test_run
+                .as_ref()
+                .is_some_and(|r| r.state == crate::testing::RunState::Running && r.chat.is_some())
+    }
+
+    /// The servers hear `id` was saved — at once (the user's `:w`; a held one goes with it).
     pub fn lsp_did_save(&mut self, id: DocId) {
+        self.lsp.held_saves.remove(&id);
         self.lsp_flush();
         let Some(doc) = self.docs.iter().find(|d| d.id == id) else { return };
         let Some(path) = doc.path.clone() else { return };
@@ -637,6 +714,12 @@ impl Editor {
                     }
                     &Kind::ToolSymbols { ask } => {
                         crate::nav::symbols_answered(self, ask, error.map_or(Ok(result), Err))
+                    }
+                    &Kind::ToolGoto { ask, .. } | &Kind::ToolNamed { ask } => {
+                        crate::nav::def_answered(self, ask, cid, error.map_or(Ok(result), Err))
+                    }
+                    &Kind::ToolHover { ask } => {
+                        crate::nav::hover_answered(self, ask, error.map_or(Ok(result), Err))
                     }
                     // One server failing leaves the others' actions (it's logged)
                     &Kind::CodeAction { list } if error.is_some() => {
@@ -752,6 +835,7 @@ impl Editor {
                                 n("line"),
                                 n("character"),
                                 d["message"].as_str().unwrap_or_default().trim().to_string(),
+                                crate::nav::code_of(d),
                             )
                         })
                         .collect();
@@ -763,8 +847,12 @@ impl Editor {
                     if all.is_empty() {
                         self.lsp.elsewhere.remove(&path);
                     }
-                    return;
+                    self.lsp.published.insert((cid, path), std::time::Instant::now());
+                    return crate::nav::diagnostics_moved(self);
                 };
+                if let Some(p) = self.docs[i].path.clone() {
+                    self.lsp.published.insert((cid, p), std::time::Instant::now());
+                }
                 let doc = &mut self.docs[i];
                 let mut list: Vec<Diagnostic> = params["diagnostics"]
                     .as_array()
@@ -787,6 +875,7 @@ impl Editor {
                 list.extend(doc.lsp.diagnostics.drain(..).filter(|d| d.source != cid));
                 list.sort_by_key(|d| (d.from, d.severity));
                 doc.lsp.diagnostics = list;
+                crate::nav::diagnostics_moved(self);
             }
             "$/progress" => {
                 let token = params["token"].to_string();
@@ -801,7 +890,9 @@ impl Editor {
                             let took = crate::term::duration(began.elapsed().as_secs_f32());
                             crate::log::line(&c.name, "progress", &format!("{} took {took}", p.title));
                         }
+                        self.lsp.work_ended.insert(cid, std::time::Instant::now());
                         self.ask_again(cid);
+                        crate::nav::diagnostics_moved(self);
                     }
                     Some("begin") => {
                         let mut p =
@@ -940,7 +1031,10 @@ impl Editor {
             | Kind::ClassFile { .. }
             | Kind::ToolRefs { .. }
             | Kind::ToolDeclared { .. }
-            | Kind::ToolSymbols { .. } => {}
+            | Kind::ToolSymbols { .. }
+            | Kind::ToolGoto { .. }
+            | Kind::ToolNamed { .. }
+            | Kind::ToolHover { .. } => {}
             Kind::Rename => match self.apply_workspace_edit(cid, result) {
                 Ok(n) => self.set_status(format!("renamed in {n} file(s)")),
                 Err(e) => self.set_error(format!("rename: {e}")),
@@ -2362,21 +2456,9 @@ impl Editor {
         byte: usize,
         ask: u64,
     ) -> Result<(ClientId, String, bool), (String, bool)> {
-        self.lsp_flush();
-        let doc = self.docs.iter().find(|d| d.id == id).ok_or(("the file was closed".to_string(), false))?;
-        let lang = doc.syntax.as_ref().map(|s| s.lang.name.clone());
-        let lang = lang.or_else(|| crate::syntax::detect(doc.path.as_deref()?).map(|s| s.name.clone()));
-        if doc.lsp.clients().next().is_none() {
-            let lang = lang.map_or(String::new(), |l| format!("{l} "));
-            return Err((format!("there's no language server for {lang}files here"), false));
-        }
         let kind = Kind::ToolRefs { ask };
-        let cid =
-            self.server_for_doc(id, &kind).ok_or(("no server here finds references".to_string(), false))?;
+        let cid = self.tool_server(id, &kind, "no server here finds references")?;
         let c = self.client(cid).ok_or(("its language server stopped".to_string(), true))?;
-        if !c.ready {
-            return Err((format!("{} is starting", c.name), true));
-        }
         let name = c.name.clone();
         let defines = !c.caps["definitionProvider"].is_null() && c.caps["definitionProvider"] != json!(false);
         let doc = self.docs.iter().find(|d| d.id == id).expect("found above");
@@ -2399,18 +2481,9 @@ impl Editor {
     /// and its name. Err: why it can't be asked now (the answer is tarae's outline then); the answer goes
     /// to `nav::symbols_answered`.
     pub(crate) fn ask_symbols(&mut self, id: DocId, ask: u64) -> Result<(ClientId, String), String> {
-        self.lsp_flush();
-        let doc = self.docs.iter().find(|d| d.id == id).ok_or("the file was closed")?;
-        if doc.lsp.clients().next().is_none() {
-            return Err("there's no language server for it".into());
-        }
         let kind = Kind::ToolSymbols { ask };
-        let cid = self.server_for_doc(id, &kind).ok_or("its language server doesn't list symbols")?;
-        let c = self.client(cid).ok_or("its language server stopped")?;
-        if !c.ready {
-            return Err(format!("{} is starting", c.name));
-        }
-        let name = c.name.clone();
+        let cid = self.tool_server(id, &kind, "its language server doesn't list symbols").map_err(|e| e.0)?;
+        let name = self.client(cid).map(|c| c.name.clone()).unwrap_or_default();
         let Some(path) = self.docs.iter().find(|d| d.id == id).and_then(|d| d.path.clone()) else {
             return Err("the file has no path".into());
         };
@@ -2418,6 +2491,118 @@ impl Editor {
         self.lsp_send_for(id, cid, kind, "textDocument/documentSymbol", params)
             .ok_or_else(|| format!("{name} couldn't be asked"))?;
         Ok((cid, name))
+    }
+
+    /// Claude's `definition` or `hover` question at `byte` of document `id` (N6): `kind`'s request asked of
+    /// its server — that server and its name. Err as `tool_server`'s; the answer goes to
+    /// `nav::def_answered`/`hover_answered`.
+    pub(crate) fn ask_at(
+        &mut self,
+        id: DocId,
+        byte: usize,
+        kind: Kind,
+        cannot: &str,
+    ) -> Result<(ClientId, String), (String, bool)> {
+        let method = match kind {
+            Kind::ToolGoto { goto, .. } => goto.method(),
+            _ => "textDocument/hover",
+        };
+        let cid = self.tool_server(id, &kind, cannot)?;
+        let name = self.client(cid).map(|c| c.name.clone()).unwrap_or_default();
+        let doc = self.docs.iter().find(|d| d.id == id).ok_or(("the file was closed".to_string(), false))?;
+        let Some(path) = doc.path.as_deref() else { return Err(("the file has no path".into(), false)) };
+        let at = json!({ "textDocument": { "uri": lsp::uri(path) },
+            "position": lsp::to_position(&doc.text, byte, self.encoding_of(cid)) });
+        match self.lsp_send_for(id, cid, kind, method, at) {
+            Some(_) => Ok((cid, name)),
+            None => Err((format!("{name} couldn't be asked"), true)),
+        }
+    }
+
+    /// Claude's `definition` by name (N6): `workspace/symbol` asked of every ready server rooted in or
+    /// around the project (`root`) that searches its workspace — those asked, with their names. Err: why
+    /// none could be, and whether one can be soon (one starting).
+    pub(crate) fn ask_named(
+        &mut self,
+        query: &str,
+        ask: u64,
+        root: &std::path::Path,
+    ) -> Result<Vec<(ClientId, String)>, (String, bool)> {
+        self.lsp_flush();
+        let kind = Kind::ToolNamed { ask };
+        let (feature, cap) = kind.route().expect("routed");
+        let near = |c: &Client| c.root.starts_with(root) || root.starts_with(&c.root);
+        let ids: Vec<ClientId> = self.lsp.clients.iter().filter(|c| near(c)).map(|c| c.id).collect();
+        let (mut asked, mut starting) = (Vec::new(), Vec::new());
+        for cid in ids {
+            let Some(c) = self.client(cid) else { continue };
+            let can = !c.caps[cap].is_null() && c.caps[cap] != json!(false);
+            if !self.allows(cid, feature) || c.ready && !can {
+                continue;
+            }
+            if !c.ready {
+                starting.push(c.name.clone());
+                continue;
+            }
+            let name = c.name.clone();
+            // (a request is kept against a document — any of this server's)
+            let Some(doc) = self.docs.iter().find(|d| d.lsp.clients().any(|x| x == cid)).map(|d| d.id) else {
+                continue;
+            };
+            // `searchKind`/`searchScope`: rust-analyzer's extension — by default it lists types only;
+            // others ignore them
+            let params = json!({ "query": query, "searchKind": "allSymbols", "searchScope": "workspace" });
+            if self.lsp_send_for(doc, cid, kind.clone(), "workspace/symbol", params).is_some() {
+                asked.push((cid, name));
+            }
+        }
+        match (asked.is_empty(), starting.is_empty()) {
+            (false, _) => Ok(asked),
+            (true, false) => Err((format!("{} is starting", starting.join(" and ")), true)),
+            (true, true) => Err((
+                "no language server that searches by name is running for this project — give the path of a \
+                 file where the name is written to start its server"
+                    .into(),
+                false,
+            )),
+        }
+    }
+
+    /// The servers that report on `path` (N6 `diagnostics`): its document's when it's open, else the running
+    /// main server of its language whose project holds it.
+    pub(crate) fn servers_of_path(&self, path: &std::path::Path) -> Vec<ClientId> {
+        if let Some(d) = self.docs.iter().find(|d| d.path.as_deref() == Some(path)) {
+            return d.lsp.clients().collect();
+        }
+        let Some(main) = crate::syntax::detect(path).and_then(|l| self.lsp.server_for.get(&l.name)) else {
+            return Vec::new();
+        };
+        self.lsp
+            .clients
+            .iter()
+            .filter(|c| c.name == *main && path.starts_with(&c.root))
+            .map(|c| c.id)
+            .collect()
+    }
+
+    /// The server of document `id` that Claude's question of `kind` goes to (N5): attached, allowed, able
+    /// — and ready. Err: why it can't be asked now, and whether it can be soon (a server starting); `cannot`
+    /// = what's said when no server here does that.
+    fn tool_server(&mut self, id: DocId, kind: &Kind, cannot: &str) -> Result<ClientId, (String, bool)> {
+        self.lsp_flush();
+        let doc = self.docs.iter().find(|d| d.id == id).ok_or(("the file was closed".to_string(), false))?;
+        let lang = doc.syntax.as_ref().map(|s| s.lang.name.clone());
+        let lang = lang.or_else(|| crate::syntax::detect(doc.path.as_deref()?).map(|s| s.name.clone()));
+        if doc.lsp.clients().next().is_none() {
+            let lang = lang.map_or(String::new(), |l| format!("{l} "));
+            return Err((format!("there's no language server for {lang}files here"), false));
+        }
+        let cid = self.server_for_doc(id, kind).ok_or((cannot.to_string(), false))?;
+        let c = self.client(cid).ok_or(("its language server stopped".to_string(), true))?;
+        if !c.ready {
+            return Err((format!("{} is starting", c.name), true));
+        }
+        Ok(cid)
     }
 
     /// A go-to's places as a list (N2): each row the code there, the name it's about standing out, by file
@@ -2574,7 +2759,7 @@ impl Editor {
             if self.docs.iter().any(|d| d.path.as_deref() == Some(path.as_path())) {
                 continue; // open — its live list is above
             }
-            for (_, sev, line, col, msg) in list {
+            for (_, sev, line, col, msg, _) in list {
                 push(*sev, path, *line, *col, msg);
             }
         }
@@ -2640,6 +2825,8 @@ impl Editor {
             list.retain(|d| d.0 != cid);
         }
         self.lsp.elsewhere.retain(|_, l| !l.is_empty());
+        self.lsp.published.retain(|(c, _), _| *c != cid);
+        self.lsp.work_ended.remove(&cid);
         self.lsp.pending.retain(|(c, _), _| *c != cid);
         self.lsp.completion_waiting.retain(|w| w.0 != cid);
         (self.lsp.signature_inflight, self.lsp.signature_again) = (false, false);
@@ -4021,6 +4208,370 @@ mod tests {
         );
         let e = syms(&mut ed, 3, json!({"path": "main.rs", "line": 99})).unwrap_err();
         assert!(e.contains("main.rs has 6 lines — no line 99"), "{e}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// N6's fixture: `a` used in main.rs and defined in other.rs (its signature over three lines), and a
+    /// method `a` of `S` in main.rs.
+    fn def_fixture(name: &str) -> (Editor, PathBuf, PathBuf, PathBuf) {
+        let src = "fn b() { a() }\nfn c() { a(); a() }\nstruct S;\nimpl S { fn a(&self) {} }\n";
+        let (mut ed, file, log) = setup(name, src);
+        let dir = file.parent().unwrap().to_path_buf();
+        let other = dir.join("other.rs");
+        std::fs::write(
+            &other,
+            "// other\nuse crate::a;\n\npub fn a(\n    x: usize,\n) -> usize {\n    x\n}\n",
+        )
+        .unwrap();
+        ed.root = dir;
+        (ed, file, std::fs::canonicalize(&other).unwrap(), log)
+    }
+
+    fn tool(
+        ed: &mut Editor,
+        id: u64,
+        f: fn(&mut Editor, crate::tools::Call, &Value) -> Result<(), String>,
+        args: Value,
+    ) -> Result<String, String> {
+        f(ed, crate::tools::Call::test(id), &args)?;
+        settle_for(ed, 10, |_| tool_answer(id).is_some());
+        tool_answer(id).expect("answered")
+    }
+
+    fn up(ed: &mut Editor, caps: Value) -> ClientId {
+        let cid = ed.doc().lsp.client.unwrap();
+        let mut caps = caps;
+        caps["positionEncoding"] = json!("utf-8");
+        ed.on_lsp_message(cid, json!({ "id": 0, "result": { "capabilities": caps } }));
+        cid
+    }
+
+    fn loc(path: &std::path::Path, line: u64, col: u64) -> Value {
+        json!({ "uri": lsp::uri(path), "range": {
+            "start": { "line": line, "character": col }, "end": { "line": line, "character": col + 1 } } })
+    }
+
+    /// N6: `definition` asks the server at the name on the line given (go-to-definition, or its
+    /// implementations) and answers with each place's signature — lines joined while a bracket is open;
+    /// by name it asks `workspace/symbol` (all symbols, not rust-analyzer's types only), exact names
+    /// listed, the container's first. Outside the project refused; an unknown kind said.
+    #[test]
+    fn the_definition_tool_asks_at_the_place_and_by_name() {
+        let (mut ed, file, other, log) = def_fixture("tool-def");
+        let caps = json!({ "definitionProvider": true, "implementationProvider": true,
+            "workspaceSymbolProvider": true });
+        let cid = up(&mut ed, caps);
+        let def = crate::nav::definition;
+        crate::nav::definition(
+            &mut ed,
+            crate::tools::Call::test(1),
+            &json!({"path": "main.rs", "line": 2, "symbol": "a"}),
+        )
+        .unwrap();
+        settle_for(&mut ed, 5, |ed| ed.lsp.pending.values().any(|p| matches!(p.kind, Kind::ToolGoto { .. })));
+        let out = sent(&log);
+        let asked = out.lines().find(|l| l.contains("textDocument/definition")).expect("asked");
+        assert!(asked.contains(r#""position":{"character":9,"line":1}"#), "{asked}");
+        feed(&mut ed, "j"); // (the user moves meanwhile: still answered)
+        let id = pending_of(&ed, Kind::ToolGoto { ask: 0, goto: Goto::Definition });
+        ed.on_lsp_message(cid, json!({ "id": id, "result": [loc(&other, 3, 7)] }));
+        settle_for(&mut ed, 5, |_| tool_answer(1).is_some());
+        assert_eq!(
+            tool_answer(1).unwrap().unwrap(),
+            "1 definition (fake):\nother.rs\n  4: pub fn a(x: usize) -> usize {"
+        );
+        assert!(ed.lsp.tool_defs.is_empty());
+        // Implementations: the server's own request
+        crate::nav::definition(
+            &mut ed,
+            crate::tools::Call::test(2),
+            &json!({"path": "main.rs", "line": 3, "symbol": "S", "kind": "implementation"}),
+        )
+        .unwrap();
+        settle_for(&mut ed, 5, |ed| ed.lsp.pending.values().any(|p| matches!(p.kind, Kind::ToolGoto { .. })));
+        assert!(sent(&log).contains("textDocument/implementation"));
+        let id = pending_of(&ed, Kind::ToolGoto { ask: 0, goto: Goto::Definition });
+        ed.on_lsp_message(cid, json!({ "id": id, "result": [loc(&file, 3, 0)] }));
+        settle_for(&mut ed, 5, |_| tool_answer(2).is_some());
+        assert_eq!(
+            tool_answer(2).unwrap().unwrap(),
+            "1 implementation (fake):\nmain.rs\n  4: impl S { fn a(&self) {} }"
+        );
+        // By name: all symbols asked; the exact ones, S's first, each with what it is
+        crate::nav::definition(&mut ed, crate::tools::Call::test(3), &json!({"symbol": "S::a"})).unwrap();
+        let asked = sent(&log);
+        let asked = asked.lines().find(|l| l.contains("workspace/symbol")).expect("asked by name");
+        assert!(
+            asked.contains(r#""query":"a""#) && asked.contains(r#""searchKind":"allSymbols""#),
+            "{asked}"
+        );
+        let sym = |name: &str, kind: u64, container: &str, at: Value| json!({ "name": name, "kind": kind, "containerName": container, "location": at });
+        let found = json!([
+            sym("a", 12, "", loc(&other, 3, 7)),
+            sym("a", 6, "S", loc(&file, 3, 12)),
+            sym("ab", 12, "", loc(&file, 0, 3))
+        ]);
+        let id = pending_of(&ed, Kind::ToolNamed { ask: 0 });
+        ed.on_lsp_message(cid, json!({ "id": id, "result": found }));
+        settle_for(&mut ed, 5, |_| tool_answer(3).is_some());
+        assert_eq!(
+            tool_answer(3).unwrap().unwrap(),
+            "2 definitions of `a` by name (fake), those in S first:\nmain.rs\n  4: impl S { fn a(&self) {} }  \
+             (method in S)\nother.rs\n  4: pub fn a(x: usize) -> usize {  (fn)"
+        );
+        // Only close names: those, said so
+        crate::nav::definition(&mut ed, crate::tools::Call::test(4), &json!({"symbol": "A"})).unwrap();
+        let id = pending_of(&ed, Kind::ToolNamed { ask: 0 });
+        ed.on_lsp_message(cid, json!({ "id": id, "result": [sym("ab", 12, "", loc(&file, 0, 3))] }));
+        settle_for(&mut ed, 5, |_| tool_answer(4).is_some());
+        assert_eq!(
+            tool_answer(4).unwrap().unwrap(),
+            "nothing named exactly `A` (fake, by name); close names:\nmain.rs\n  1: fn b() { a() }  (ab: fn)"
+        );
+        // Outside the project: refused · a kind it doesn't know: said
+        let e = tool(&mut ed, 5, def, json!({"path": "/etc/hosts", "symbol": "localhost"})).unwrap_err();
+        assert!(e.contains("outside the project"), "{e}");
+        let e = tool(&mut ed, 6, def, json!({"path": "main.rs", "symbol": "a", "kind": "uses"})).unwrap_err();
+        assert!(e.contains("kind is definition, implementation or type"), "{e}");
+        std::fs::remove_dir_all(file.parent().unwrap()).ok();
+    }
+
+    /// N6: while the server can't give its definitions — starting, still loading with nothing yet, silent
+    /// for `REFS_WAIT` — the syntax tree's definitions of the name among its text matches stand in (the
+    /// `impl`s naming it for implementations), said so; an idle server's nothing is said too.
+    #[test]
+    fn the_definition_tool_falls_back_to_the_tree() {
+        let (mut ed, file, _other, _log) = def_fixture("tool-def-tree");
+        let rust =
+            crate::syntax::spec("rust").is_some_and(|s| crate::syntax::Loader::global().load(s).is_ok());
+        let def = crate::nav::definition;
+        let t = tool(&mut ed, 1, def, json!({"path": "main.rs", "line": 1, "symbol": "a"})).unwrap();
+        let both = "main.rs\n  4: impl S { fn a(&self) {} }  (function)\nother.rs\n  4: pub fn a(x: usize) -> usize {  \
+                    (function)";
+        if rust {
+            assert_eq!(
+                t,
+                format!(
+                    "2 definitions of `a` by the syntax tree among its text matches — fake is starting, so not \
+                     the server's answer — ask again in a moment for the server's:\n{both}"
+                )
+            );
+            let t =
+                tool(&mut ed, 2, def, json!({"path": "main.rs", "symbol": "S", "kind": "implementation"}))
+                    .unwrap();
+            assert!(t.starts_with("1 implementation of `S` by the syntax tree"), "{t}");
+            assert!(t.ends_with(":\nmain.rs\n  4: impl S { fn a(&self) {} }  (impl)"), "{t}");
+            let t = tool(&mut ed, 3, def, json!({"symbol": "a"})).unwrap();
+            assert!(t.contains("— fake is starting, so not the server's answer"), "by name too: {t}");
+        }
+        // Up, but loading, and nothing found yet
+        let cid = up(&mut ed, json!({ "definitionProvider": true }));
+        let progress = json!({ "method": "$/progress", "params": { "token": "i",
+            "value": { "kind": "begin", "title": "Indexing" } } });
+        ed.on_lsp_message(cid, progress);
+        crate::nav::definition(
+            &mut ed,
+            crate::tools::Call::test(4),
+            &json!({"path": "main.rs", "symbol": "a"}),
+        )
+        .unwrap();
+        settle_for(&mut ed, 5, |ed| ed.lsp.pending.values().any(|p| matches!(p.kind, Kind::ToolGoto { .. })));
+        let id = pending_of(&ed, Kind::ToolGoto { ask: 0, goto: Goto::Definition });
+        ed.on_lsp_message(cid, json!({ "id": id, "result": [] }));
+        settle_for(&mut ed, 5, |_| tool_answer(4).is_some());
+        let t = tool_answer(4).unwrap().unwrap();
+        assert!(t.contains("fake is still loading (Indexing) and found none yet"), "{t}");
+        assert!(t.contains("ask again in a moment"), "{t}");
+        // Silent: given up on after the wait
+        let t = tool(&mut ed, 5, def, json!({"path": "main.rs", "symbol": "a"})).unwrap();
+        assert!(t.contains("fake didn't answer within 300ms"), "{t}");
+        assert!(ed.lsp.tool_defs.is_empty());
+        // Idle, and nothing there: said, not to be asked again
+        ed.on_lsp_message(
+            cid,
+            json!({ "method": "$/progress", "params": { "token": "i", "value": { "kind": "end" } } }),
+        );
+        // (the silent one's request is still there — wait for this one's)
+        let asked =
+            |ed: &Editor| ed.lsp.pending.values().filter(|p| matches!(p.kind, Kind::ToolGoto { .. })).count();
+        let before = asked(&ed);
+        crate::nav::definition(
+            &mut ed,
+            crate::tools::Call::test(6),
+            &json!({"path": "main.rs", "symbol": "b"}),
+        )
+        .unwrap();
+        settle_for(&mut ed, 5, |ed| asked(ed) > before);
+        let id = pending_of(&ed, Kind::ToolGoto { ask: 0, goto: Goto::Definition });
+        ed.on_lsp_message(cid, json!({ "id": id, "result": null }));
+        settle_for(&mut ed, 5, |_| tool_answer(6).is_some());
+        let t = tool_answer(6).unwrap().unwrap();
+        assert!(t.contains("fake found no definitions there"), "{t}");
+        assert!(!t.contains("ask again"), "{t}");
+        if rust {
+            assert!(
+                t.ends_with("so not the server's answer:\nmain.rs\n  1: fn b() { a() }  (function)"),
+                "{t}"
+            );
+        }
+        std::fs::remove_dir_all(file.parent().unwrap()).ok();
+    }
+
+    /// N6: `hover` asks at the name (or a column) and answers with the server's text — blank runs one, a
+    /// long one cut and said; none said; a loading server's nothing is the tree's stand-in.
+    #[test]
+    fn the_hover_tool_gives_the_servers_text_trimmed() {
+        let (mut ed, file, _other, log) = def_fixture("tool-hover");
+        let hover = crate::nav::hover;
+        let t = tool(&mut ed, 1, hover, json!({"path": "main.rs", "line": 2, "symbol": "a"})).unwrap();
+        assert!(t.contains("fake is starting"), "{t}");
+        let cid = up(&mut ed, json!({ "hoverProvider": true }));
+        let ask = |ed: &mut Editor, id: u64, args: Value, result: Value| {
+            crate::nav::hover(ed, crate::tools::Call::test(id), &args).unwrap();
+            settle_for(ed, 5, |ed| ed.lsp.pending.values().any(|p| matches!(p.kind, Kind::ToolHover { .. })));
+            let n = pending_of(ed, Kind::ToolHover { ask: 0 });
+            ed.on_lsp_message(cid, json!({ "id": n, "result": result }));
+            settle_for(ed, 5, |_| tool_answer(id).is_some());
+            tool_answer(id).unwrap()
+        };
+        let md = |v: &str| json!({ "contents": { "kind": "markdown", "value": v } });
+        // (line 2, column 10 = its first `a`)
+        let t = ask(
+            &mut ed,
+            2,
+            json!({"path": "main.rs", "line": 2, "column": 10}),
+            md("```rust\nfn a()\n```  \n\n\n\ndocs"),
+        );
+        let asked = sent(&log);
+        let asked = asked.lines().find(|l| l.contains("textDocument/hover")).expect("asked");
+        assert!(asked.contains(r#""position":{"character":9,"line":1}"#), "{asked}");
+        assert_eq!(t.unwrap(), "`a` at main.rs:2 (fake):\n```rust\nfn a()\n```\n\ndocs");
+        let t = ask(&mut ed, 3, json!({"path": "main.rs", "symbol": "b"}), Value::Null).unwrap();
+        assert_eq!(t, "fake has no hover information for `b` at main.rs:1");
+        let long: String = (0..200).map(|i| format!("line {i}\n")).collect();
+        let t = ask(&mut ed, 4, json!({"path": "main.rs", "symbol": "b"}), md(&long)).unwrap();
+        assert!(t.ends_with("line 79\n… cut (200 lines) — the definition has the rest"), "{t}");
+        // Content modified: still loading — the tree stands in
+        crate::nav::hover(&mut ed, crate::tools::Call::test(5), &json!({"path": "main.rs", "symbol": "a"}))
+            .unwrap();
+        settle_for(&mut ed, 5, |ed| {
+            ed.lsp.pending.values().any(|p| matches!(p.kind, Kind::ToolHover { .. }))
+        });
+        let n = pending_of(&ed, Kind::ToolHover { ask: 0 });
+        ed.on_lsp_message(
+            cid,
+            json!({ "id": n, "error": { "code": -32801, "message": "content modified" } }),
+        );
+        settle_for(&mut ed, 5, |_| tool_answer(5).is_some());
+        let t = tool_answer(5).unwrap().unwrap();
+        assert!(t.contains("fake is still loading the project"), "{t}");
+        // Neither a name nor a column: said
+        let e = tool(&mut ed, 6, hover, json!({"path": "main.rs", "line": 1})).unwrap_err();
+        assert!(e.contains("or a line and a column"), "{e}");
+        let e = tool(&mut ed, 7, hover, json!({"path": "main.rs", "line": 1, "column": 40})).unwrap_err();
+        assert!(e.contains("line 1 of main.rs has 14 characters — no column 40"), "{e}");
+        std::fs::remove_dir_all(file.parent().unwrap()).ok();
+    }
+
+    /// N6: `diagnostics` lists what's published — open files' live lists, closed ones' as kept — with
+    /// codes, and says clean from not checked yet and what the server is at; with a wait, it answers once
+    /// the server settles (its check over), or when the wait is up, saying which.
+    #[test]
+    fn the_diagnostics_tool_tells_clean_from_not_checked() {
+        let (mut ed, file, other, _log) = def_fixture("tool-diags");
+        let dir = file.parent().unwrap().to_path_buf();
+        std::fs::write(dir.join("third.rs"), "fn t() {}\n").unwrap();
+        let diags = crate::nav::diagnostics;
+        let cid = up(&mut ed, json!({}));
+        let publish = |ed: &mut Editor, path: &PathBuf, list: Value| {
+            let params = json!({ "uri": lsp::uri(path), "diagnostics": list });
+            ed.on_lsp_message(cid, json!({ "method": "textDocument/publishDiagnostics", "params": params }));
+        };
+        let d = |line: u64, col: u64, sev: u64, msg: &str, code: Value| {
+            json!({ "range": { "start": { "line": line, "character": col }, "end": { "line": line, "character": col + 1 } },
+                "severity": sev, "message": msg, "source": "rustc", "code": code })
+        };
+        publish(
+            &mut ed,
+            &file,
+            json!([d(0, 3, 1, "mismatched types\nexpected `usize`, found `&str`", json!("E0308"))]),
+        );
+        publish(&mut ed, &other, json!([d(1, 0, 2, "unused import", Value::Null)]));
+        let args = json!({"paths": ["main.rs", "other.rs", "third.rs", "/etc/hosts"]});
+        let t = tool(&mut ed, 1, diags, args).unwrap();
+        let lines: Vec<&str> = t.lines().collect();
+        assert_eq!(
+            lines[..6],
+            [
+                "1 error, 1 warning in 2 of 3 files:",
+                "main.rs",
+                "  1:4 error: mismatched types — expected `usize`, found `&str` [rustc E0308]",
+                "other.rs",
+                "  2:1 warning: unused import [rustc]",
+                "third.rs — not checked yet (fake hasn't published for it)",
+            ],
+            "{t}"
+        );
+        assert!(lines[6].starts_with("fake: idle; last published ") && lines[6].ends_with(" ago"), "{t}");
+        assert!(lines[7].contains("/etc/hosts is outside the project"), "{t}");
+        // Clean: said with when
+        publish(&mut ed, &file, json!([]));
+        let t = tool(&mut ed, 2, diags, json!({"paths": ["main.rs"]})).unwrap();
+        assert!(t.starts_with("no diagnostics in 1 file\nmain.rs — clean (fake published for it "), "{t}");
+        // Without paths: the files edited this turn, else the open ones
+        let t = tool(&mut ed, 3, diags, json!({})).unwrap();
+        assert!(t.starts_with("no diagnostics in 1 file (the files open in the editor)"), "{t}");
+        let touched = crate::checkpoint::Touched {
+            path: other.clone(),
+            before: None,
+            after: ropey::Rope::new(),
+            unseen: false,
+        };
+        ed.checkpoints.turn.push(touched);
+        let t = tool(&mut ed, 4, diags, json!({})).unwrap();
+        assert!(t.starts_with("1 warning in 1 of 1 file (the files you edited this turn):"), "{t}");
+        // Waiting: not while the check runs — answered once it's over and published
+        let progress = |kind: &str| {
+            json!({ "method": "$/progress", "params": { "token": "c",
+            "value": { "kind": kind, "title": "cargo check" } } })
+        };
+        ed.on_lsp_message(cid, progress("begin"));
+        crate::nav::diagnostics(
+            &mut ed,
+            crate::tools::Call::test(5),
+            &json!({"paths": ["main.rs"], "wait": 5}),
+        )
+        .unwrap();
+        settle_for(&mut ed, 1, |_| tool_answer(5).is_some());
+        assert!(tool_answer(5).is_none(), "the check is still running");
+        publish(&mut ed, &file, json!([d(1, 9, 1, "cannot find `a`", json!("E0425"))]));
+        assert!(tool_answer(5).is_none(), "nor while it publishes");
+        ed.on_lsp_message(cid, progress("end"));
+        settle_for(&mut ed, 2, |_| tool_answer(5).is_some());
+        let t = tool_answer(5).expect("answered once settled").unwrap();
+        assert!(
+            t.starts_with("1 error in 1 of 1 file:\nmain.rs\n  2:10 error: cannot find `a` [rustc E0425]"),
+            "{t}"
+        );
+        assert!(
+            t.contains("\nfake: idle;")
+                && t.contains("(waited ")
+                && t.ends_with("for the servers to settle)"),
+            "{t}"
+        );
+        // A check that doesn't end: answered when the wait is up, saying so and what it's at
+        ed.on_lsp_message(cid, progress("begin"));
+        let t = tool(&mut ed, 6, diags, json!({"paths": ["main.rs"], "wait": 1})).unwrap();
+        assert!(t.contains("\nfake: at work (cargo check for "), "{t}");
+        assert!(t.contains("what's above may still change") && t.contains("— not settled yet)"), "{t}");
+        assert!(ed.lsp.tool_diags.is_empty());
+        // Many: capped, the rest counted
+        let many: Vec<Value> = (0..160).map(|i| d(0, 0, 2, &format!("w{i}"), Value::Null)).collect();
+        publish(&mut ed, &file, Value::Array(many));
+        let t = tool(&mut ed, 7, diags, json!({"paths": ["main.rs"]})).unwrap();
+        assert!(t.starts_with("160 warnings in 1 of 1 file:"), "{t}");
+        assert_eq!(t.lines().filter(|l| l.starts_with("  1:1 warning")).count(), 150, "{t}");
+        assert!(t.contains("\n  … 10 more not shown\n"), "{t}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

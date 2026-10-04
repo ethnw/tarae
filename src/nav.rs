@@ -8,8 +8,15 @@
 //! - `search` runs the project search `space /` runs (`grep.rs` — ripgrep's crates, a regex, smart case):
 //!   by file then line, each hit its line of code (and context lines when asked), capped and said so; or
 //!   the files, or counts.
+//! - `symbols` lists a file's outline (the server's document symbols, else tarae's from the tree).
+//! - `definition` (N6) asks a name's definition, implementations or type definition at a place (`g d`,
+//!   `g i`, `g y`), or finds it by name (`workspace/symbol`) — each place with its signature. While the
+//!   server can't say, the syntax tree's definitions among the name's text matches, said so.
+//! - `hover` gives the server's hover text at a place (type, signature, docs), trimmed.
+//! - `diagnostics` says what the servers have published for some files now — and whether they've checked
+//!   them yet or are still at it — optionally after waiting (bounded) for them to settle.
 //!
-//! Both only read, inside the project (`Editor::root`) — no card. Disk and searching go to workers.
+//! All only read, inside the project (`Editor::root`) — no card. Disk and searching go to workers.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -19,7 +26,7 @@ use serde_json::{Value, json};
 use crate::editor::Editor;
 use crate::grep::Case;
 use crate::lsp::ClientId;
-use crate::lsp_editor::Place;
+use crate::lsp_editor::{Goto, Kind, Place};
 use crate::tools::{Call, answer};
 
 /// How long a server has to answer before the text matches are the answer.
@@ -148,7 +155,7 @@ fn file_in(root: &Path, path: &Path) -> Result<PathBuf, String> {
     let real = std::fs::canonicalize(path).map_err(|e| format!("{shown}: {e}"))?;
     let root = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
     if !real.starts_with(&root) {
-        return Err(format!("{shown} is outside the project — references looks inside it only"));
+        return Err(format!("{shown} is outside the project — these tools look inside it only"));
     }
     if !real.is_file() {
         return Err(format!("{shown} isn't a file"));
@@ -178,8 +185,28 @@ fn locate(
                 clip(reads.trim(), 120)
             )
         }),
-        None => (0..lines).find_map(find).ok_or_else(|| format!("`{word}` isn't in {shown}")),
+        // (its first line in code: a module's doc comment naming it came first, and hover found nothing
+        // there — a comment's only when that's all there is)
+        None => {
+            let mut first = None;
+            for l in 0..lines {
+                if let Some(at) = find(l) {
+                    if !commented(&text.line(l).to_string()) {
+                        return Ok(at);
+                    }
+                    first.get_or_insert(at);
+                }
+            }
+            first.ok_or_else(|| format!("`{word}` isn't in {shown}"))
+        }
     }
+}
+
+/// Whether a line is a comment's, by how it starts (`//`, `/*`, `*`, `--`, `# ` — not `#[`).
+fn commented(line: &str) -> bool {
+    let t = line.trim_start();
+    ["//", "/*", "*", "--"].iter().any(|m| t.starts_with(m))
+        || t.strip_prefix('#').is_some_and(|r| r.is_empty() || r.starts_with(char::is_whitespace))
 }
 
 /// On the main loop: the file's buffer (opened aside when it isn't — its server starts with it; the
@@ -358,7 +385,8 @@ fn refs_text(
     if places.is_empty() {
         return head.trim_end_matches(':').to_string();
     }
-    format!("{head}\n{}", grouped(root, places, &|p| is_decl(p).then_some("declaration"), REFS_SHOWN))
+    let mark = |p: &Place| is_decl(p).then(|| "declaration".to_string());
+    format!("{head}\n{}", grouped(root, places, &mark, REFS_SHOWN))
 }
 
 /// The name's whole-word text matches in the project (case as written), as the answer — `why` the
@@ -414,7 +442,7 @@ fn text_matches(ed: &mut Editor, call: Call, name: Name, why: String, later: boo
 fn grouped(
     root: &Path,
     places: Vec<(Place, bool)>,
-    mark: &dyn Fn(&Place) -> Option<&'static str>,
+    mark: &dyn Fn(&Place) -> Option<String>,
     max: usize,
 ) -> String {
     let mut files: Vec<(PathBuf, bool, Vec<Place>)> = Vec::new();
@@ -700,6 +728,1018 @@ fn symbols_text(shown: &str, syms: &[Sym], line: Option<usize>, from: &str) -> S
         }
     };
     text.trim_end().to_string()
+}
+
+// ── definition ──────────────────────────────────────────────────────────────
+
+pub fn definition_schema() -> Value {
+    json!({
+        "name": "definition",
+        "description": "Where something is defined — the language server's go-to-definition, each place \
+    with its signature (the definition's first lines, joined). Give the file and line where the name is \
+    written (any use of it) and the name, or a column on that line instead of the name; kind implementation \
+    lists a trait's or type's implementations, kind type where the value's type is defined. Or give only \
+    the symbol (a type, function, const …; `Editor::root` puts the ones in Editor first) to find it by \
+    name across the project — fields aren't found by name, ask at a use. Reach for it instead of searching for `fn name` and reading files. While the \
+    server is still loading, the answer is the syntax tree's definitions among the name's text matches, \
+    and says so.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": { "type": "string", "description": "The name as written in the code (`goto_ask`; `Editor::goto_ask`)" },
+                "path": { "type": "string", "description": "A file where the name is written, relative to the project root — left out: found by name" },
+                "line": { "type": "integer", "description": "The line it's on, 1-based — left out: its first appearance in the file" },
+                "column": { "type": "integer", "description": "Its column on that line, 1-based (characters) — instead of the name" },
+                "kind": { "type": "string", "enum": ["definition", "implementation", "type"], "description": "definition (default) · implementation: a trait's or type's implementations · type: where the value's type is defined" }
+            }
+        }
+    })
+}
+
+/// Lines of a definition joined into its signature at most (while brackets stay open — a parameter list
+/// over lines).
+const SIG_LINES: usize = 12;
+
+/// The syntax tree's stand-in: files parsed at most, and how big one may be.
+const TREE_FILES: usize = 400;
+const TREE_FILE_MAX: usize = 4 << 20;
+
+/// Kinds of nodes that define what their `name` names, by their ends (`function_item`, `class_definition`,
+/// `method_declaration`, `type_spec`, `variable_declarator` …).
+const DEF_ENDS: [&str; 7] =
+    ["_item", "_definition", "_declaration", "_specifier", "_spec", "_declarator", "_signature"];
+
+/// Where a `definition` or `hover` call points: the file, the line, and the name on it — or a column
+/// (from 0, in characters).
+struct Spot {
+    path: PathBuf,
+    line: Option<usize>,
+    column: Option<usize>,
+    word: Option<String>,
+}
+
+/// The call's place: `path` (from `root`), `line`, and the name in `symbol` or a `column`.
+fn spot_of(root: &Path, args: &Value) -> Result<Spot, String> {
+    let path = args["path"].as_str().map(str::trim).filter(|p| !p.is_empty()).ok_or("path is required")?;
+    let one = |k: &str| args[k].as_u64().map(|l| l.max(1) as usize - 1);
+    let (line, column) = (one("line"), one("column"));
+    let word = match args["symbol"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => Some(name_of(s)?),
+        None => None,
+    };
+    if word.is_none() && (line.is_none() || column.is_none()) {
+        return Err("give the symbol (the name as written), or a line and a column".into());
+    }
+    Ok(Spot { path: root.join(path), line, column, word })
+}
+
+/// The spot in `text`: (line, byte column, the name there — the one given, else the word at the column).
+fn place_in(text: &ropey::Rope, spot: &Spot, shown: &str) -> Result<(usize, usize, String), String> {
+    let (Some(l), Some(c)) = (spot.line, spot.column) else {
+        let word = spot.word.clone().unwrap_or_default();
+        let (l, col) = locate(text, &word, spot.line, shown)?;
+        return Ok((l, col, word));
+    };
+    let lines = crate::movement::last_line(text) + 1;
+    if l >= lines {
+        return Err(format!("{shown} has {lines} lines — no line {}", l + 1));
+    }
+    let s = text.line(l).to_string();
+    let s = s.trim_end_matches(['\n', '\r']);
+    let Some((byte, _)) = s.char_indices().nth(c) else {
+        let n = s.chars().count();
+        return Err(format!("line {} of {shown} has {n} characters — no column {}", l + 1, c + 1));
+    };
+    let word = |ch: char| ch.is_alphanumeric() || ch == '_';
+    let start =
+        s[..byte].char_indices().rev().find(|&(_, ch)| !word(ch)).map_or(0, |(i, ch)| i + ch.len_utf8());
+    let end = s[byte..].find(|ch: char| !word(ch)).map_or(s.len(), |i| byte + i);
+    Ok((l, byte, spot.word.clone().unwrap_or_else(|| s[start..end].to_string())))
+}
+
+/// The question's next number (shared by the tools' questions).
+fn next_ask(ed: &mut Editor) -> u64 {
+    let n = ed.lsp.tool_ask_next;
+    ed.lsp.tool_ask_next += 1;
+    n
+}
+
+/// What `definition` lists, one of them.
+fn what_of(goto: Goto) -> &'static str {
+    match goto {
+        Goto::Implementation => "implementation",
+        Goto::TypeDefinition => "type definition",
+        _ => "definition",
+    }
+}
+
+fn goto_of(args: &Value) -> Result<Goto, String> {
+    match args["kind"].as_str().map(str::trim).unwrap_or_default() {
+        "" | "definition" => Ok(Goto::Definition),
+        "implementation" | "implementations" => Ok(Goto::Implementation),
+        "type" | "type_definition" | "typeDefinition" => Ok(Goto::TypeDefinition),
+        k => Err(format!("kind is definition, implementation or type — not `{k}`")),
+    }
+}
+
+/// The container a qualified name gives (`Editor` of `Editor::root`, `a::Editor::root`).
+fn container_of(symbol: &str) -> Option<String> {
+    let s = symbol.trim().trim_end_matches("()");
+    let (before, _) = s.rsplit_once("::").or_else(|| s.rsplit_once('.'))?;
+    before.rsplit([':', '.']).find(|p| !p.is_empty()).map(str::to_string)
+}
+
+/// A `definition` question asked of its servers: what's come back so far.
+pub struct DefAsk {
+    call: Call,
+    word: String,
+    goto: Goto,
+    /// Asked by name (`workspace/symbol`), and the container named (`Editor` of `Editor::root`).
+    by_name: bool,
+    container: Option<String>,
+    /// Servers yet to answer · the names of those asked.
+    waiting: Vec<(ClientId, String)>,
+    servers: Vec<String>,
+    /// Places found: path, line, what it is (by name: its kind and container) · by name, those whose name
+    /// isn't exactly it.
+    found: Vec<(PathBuf, usize, String)>,
+    near: Vec<(PathBuf, usize, String)>,
+    /// Why a server gave nothing (an error, still loading — `later`: it will, ask again).
+    why: Vec<String>,
+    later: bool,
+}
+
+/// The tool: at a place — the file checked on a worker, then asked about (`def_at`); or by name. Err =
+/// answered now.
+pub fn definition(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
+    let goto = goto_of(args)?;
+    let root = project_root(ed);
+    if args["path"].as_str().is_none_or(|p| p.trim().is_empty()) {
+        let symbol = args["symbol"].as_str().unwrap_or_default();
+        let word = name_of(symbol)?;
+        if goto != Goto::Definition {
+            return Err(
+                "kind implementation and type need the place: the path (and line) where the name is \
+                        written"
+                    .into(),
+            );
+        }
+        by_name(ed, call, word, container_of(symbol));
+        return Ok(());
+    }
+    let spot = spot_of(&root, args)?;
+    ed.events.jobs().spawn(move || {
+        let file = file_in(&root, &spot.path);
+        move |ed: &mut Editor| match file {
+            Ok(path) => def_at(ed, call, Spot { path, ..spot }, goto),
+            Err(e) => answer(ed, call, Err(e)),
+        }
+    });
+    Ok(())
+}
+
+/// On the main loop: the file's buffer (opened aside), the name found in it, the go-to sent — or the
+/// syntax tree's stand-in when the server can't be asked now.
+fn def_at(ed: &mut Editor, call: Call, spot: Spot, goto: Goto) {
+    let shown = rel(&project_root(ed), &spot.path);
+    let id = match buffer_for(ed, &spot.path) {
+        Ok(id) => id,
+        Err(e) => return answer(ed, call, Err(format!("{shown}: {e}"))),
+    };
+    let Some(doc) = ed.docs.iter().find(|d| d.id == id) else { return };
+    if doc.loading {
+        let word = spot.word.unwrap_or_default();
+        return tree_defs(ed, call, word, goto, format!("{shown} is still loading"), true);
+    }
+    let (line, col, word) = match place_in(&doc.text, &spot, &shown) {
+        Ok(at) => at,
+        Err(e) => return answer(ed, call, Err(e)),
+    };
+    let byte = doc.text.line_to_byte(line) + col;
+    let n = next_ask(ed);
+    let cannot = format!("no server here finds {}s", what_of(goto));
+    match ed.ask_at(id, byte, Kind::ToolGoto { ask: n, goto }, &cannot) {
+        Err((why, later)) => tree_defs(ed, call, word, goto, why, later),
+        Ok((cid, server)) => {
+            let waiting = vec![(cid, server.clone())];
+            wait_defs(ed, n, DefAsk::new(call, word, goto, None, waiting, vec![server]));
+        }
+    }
+}
+
+/// By name: the project's servers asked (`workspace/symbol`) — or the syntax tree's stand-in.
+fn by_name(ed: &mut Editor, call: Call, word: String, container: Option<String>) {
+    let n = next_ask(ed);
+    let root = project_root(ed);
+    match ed.ask_named(&word, n, &root) {
+        Err((why, later)) => tree_defs(ed, call, word, Goto::Definition, why, later),
+        Ok(asked) => {
+            let servers = asked.iter().map(|a| a.1.clone()).collect();
+            wait_defs(ed, n, DefAsk::new(call, word, Goto::Definition, Some(container), asked, servers));
+        }
+    }
+}
+
+impl DefAsk {
+    fn new(
+        call: Call,
+        word: String,
+        goto: Goto,
+        by_name: Option<Option<String>>,
+        waiting: Vec<(ClientId, String)>,
+        servers: Vec<String>,
+    ) -> DefAsk {
+        DefAsk {
+            call,
+            word,
+            goto,
+            by_name: by_name.is_some(),
+            container: by_name.flatten(),
+            waiting,
+            servers,
+            found: Vec::new(),
+            near: Vec::new(),
+            why: Vec::new(),
+            later: false,
+        }
+    }
+}
+
+/// Question `n` kept until its servers answer — the ones silent for `REFS_WAIT` are given up on.
+fn wait_defs(ed: &mut Editor, n: u64, a: DefAsk) {
+    ed.lsp.tool_defs.insert(n, a);
+    ed.events.jobs().spawn(move || {
+        std::thread::sleep(REFS_WAIT);
+        move |ed: &mut Editor| {
+            let Some(a) = ed.lsp.tool_defs.get_mut(&n) else { return };
+            for (_, server) in a.waiting.drain(..) {
+                a.why.push(format!("{server} didn't answer within {}", secs(REFS_WAIT)));
+                a.later = true;
+            }
+            finish_defs(ed, n);
+        }
+    });
+}
+
+/// A server's answer to question `n` (Err: its error) — places (`textDocument/definition` and kin), or
+/// symbols by name (`workspace/symbol`: the name exactly, else close ones).
+pub fn def_answered(ed: &mut Editor, n: u64, cid: ClientId, result: Result<&Value, &Value>) {
+    let busy = ed.client(cid).filter(|c| !c.progress.is_empty()).map(|c| {
+        let titles: Vec<String> = c.progress.values().map(|p| p.title.clone()).collect();
+        format!("{} is still loading ({})", c.name, titles.join(", "))
+    });
+    let Some(a) = ed.lsp.tool_defs.get_mut(&n) else { return };
+    let Some(i) = a.waiting.iter().position(|w| w.0 == cid) else { return };
+    let (_, server) = a.waiting.remove(i);
+    let before = a.found.len() + a.near.len();
+    match result {
+        Ok(v) if a.by_name => {
+            for s in v.as_array().into_iter().flatten() {
+                let Some(path) = s["location"]["uri"].as_str().and_then(crate::lsp::path_from_uri) else {
+                    continue;
+                };
+                let line = s["location"]["range"]["start"]["line"].as_u64().unwrap_or(0) as usize;
+                let name = s["name"].as_str().unwrap_or_default();
+                let kind = lsp_kind(s["kind"].as_u64().unwrap_or(0), name);
+                let what = match s["containerName"].as_str().filter(|c| !c.is_empty()) {
+                    Some(c) => format!("{kind} in {c}").trim_start().to_string(),
+                    None => kind.to_string(),
+                };
+                match name == a.word {
+                    true => a.found.push((path, line, what)),
+                    false => {
+                        a.near.push((path, line, format!("{name}: {what}").trim_end_matches(": ").into()))
+                    }
+                }
+            }
+        }
+        Ok(v) => a.found.extend(
+            crate::lsp::locations(v)
+                .into_iter()
+                .map(|(path, pos)| (path, pos["line"].as_u64().unwrap_or(0) as usize, String::new())),
+        ),
+        // (content modified / server cancelled: the project changed under the question — it's loading)
+        Err(e) if matches!(e["code"].as_i64(), Some(-32801 | -32802)) => {
+            a.why.push(format!("{server} is still loading the project"));
+            a.later = true;
+        }
+        Err(e) => a.why.push(format!("{server}: {}", e["message"].as_str().unwrap_or("the request failed"))),
+    }
+    if a.found.len() + a.near.len() == before
+        && let Some(busy) = busy
+    {
+        a.why.push(format!("{busy} and found none yet"));
+        a.later = true;
+    }
+    finish_defs(ed, n);
+}
+
+/// All answers in: the places listed with their signatures (read on a worker) — none, and it's the syntax
+/// tree's stand-in, saying why.
+fn finish_defs(ed: &mut Editor, n: u64) {
+    if ed.lsp.tool_defs.get(&n).is_none_or(|a| !a.waiting.is_empty()) {
+        return;
+    }
+    let Some(a) = ed.lsp.tool_defs.remove(&n) else { return };
+    let servers = a.servers.join(" and ");
+    if a.found.is_empty() && (a.near.is_empty() || a.later) {
+        let why = match a.why.is_empty() {
+            false => a.why.join("; "),
+            true if a.by_name => format!("{servers} found nothing named `{}`", a.word),
+            true => format!("{servers} found no {}s there", what_of(a.goto)),
+        };
+        return tree_defs(ed, a.call, a.word, a.goto, why, a.later);
+    }
+    let all: Vec<&PathBuf> = a.found.iter().chain(&a.near).map(|f| &f.0).collect();
+    let open: HashMap<PathBuf, ropey::Rope> = ed
+        .docs
+        .iter()
+        .filter_map(|d| Some((d.path.clone()?, d.text.clone())))
+        .filter(|(p, _)| all.contains(&p))
+        .collect();
+    let root = project_root(ed);
+    ed.events.jobs().spawn(move || {
+        let text = defs_text(&root, &a, &servers, &open);
+        move |ed: &mut Editor| answer(ed, a.call, Ok(text))
+    });
+}
+
+/// The answer: how many and from which server, then the places by file — each its signature (one outside
+/// the project named, not read); by name, those in the container asked for first, close names after
+/// when there's no exact one.
+fn defs_text(root: &Path, a: &DefAsk, servers: &str, open: &HashMap<PathBuf, ropey::Rope>) -> String {
+    let real = std::fs::canonicalize(root).ok();
+    let inside = |p: &Path| p.starts_with(root) || real.as_ref().is_some_and(|r| p.starts_with(r));
+    let read = |found: &[(PathBuf, usize, String)]| -> Vec<(Place, String)> {
+        let mut files: HashMap<&Path, Vec<String>> = HashMap::new();
+        let mut out: Vec<(Place, String)> = found
+            .iter()
+            .map(|(path, line, what)| {
+                let text = if !inside(path) {
+                    "(outside the project — not read)".to_string()
+                } else if let Some(rope) = open.get(path) {
+                    signature(&|k| (k < rope.len_lines()).then(|| rope.line(k).to_string()), *line)
+                } else {
+                    let lines = files.entry(path.as_path()).or_insert_with(|| {
+                        std::fs::read(path)
+                            .map(|b| String::from_utf8_lossy(&b).lines().map(str::to_string).collect())
+                            .unwrap_or_default()
+                    });
+                    signature(&|k| lines.get(k).cloned(), *line)
+                };
+                (Place { path: path.clone(), line: *line, col: 0, text }, what.clone())
+            })
+            .collect();
+        let first = |w: &str| a.container.as_ref().is_some_and(|c| w.ends_with(&format!(" in {c}")));
+        out.sort_by(|x, y| (!first(&x.1), &x.0.path, x.0.line).cmp(&(!first(&y.1), &y.0.path, y.0.line)));
+        out.dedup_by(|x, y| x.0.path == y.0.path && x.0.line == y.0.line);
+        out
+    };
+    let list = |places: Vec<(Place, String)>| {
+        let marks: HashMap<(PathBuf, usize), String> =
+            places.iter().map(|(p, w)| ((p.path.clone(), p.line), w.clone())).collect();
+        let mark = |p: &Place| marks.get(&(p.path.clone(), p.line)).filter(|w| !w.is_empty()).cloned();
+        grouped(root, places.into_iter().map(|(p, _)| (p, false)).collect(), &mark, REFS_SHOWN)
+    };
+    let found = read(&a.found);
+    if found.is_empty() {
+        let near = read(&a.near);
+        return format!(
+            "nothing named exactly `{}` ({servers}, by name); close names:\n{}",
+            a.word,
+            list(near)
+        );
+    }
+    // Places outside the project (the standard library, dependencies) are listed only when there are no
+    // others — sorted in by path they took the cap from the project's own (`impl Drop`: 200 of 218 rows)
+    let (mine, outside): (Vec<_>, Vec<_>) = found.into_iter().partition(|f| inside(&f.0.path));
+    let (found, outside) = if mine.is_empty() { (outside, Vec::new()) } else { (mine, outside) };
+    let by = if a.by_name { format!(" of `{}` by name", a.word) } else { String::new() };
+    let first = match &a.container {
+        Some(c) if found.iter().any(|f| f.1.ends_with(&format!(" in {c}"))) => {
+            format!(", those in {c} first")
+        }
+        _ => String::new(),
+    };
+    let more = match outside.len() {
+        0 => String::new(),
+        n => format!("; {n} more outside the project ({}), not listed", owners(&outside)),
+    };
+    format!("{}{by} ({servers}){first}{more}:\n{}", count(found.len(), what_of(a.goto)), list(found))
+}
+
+/// Whose places outside the project are, in a few words — their crates, the most first (`std 80, hashbrown
+/// 9, …`): a toolchain library's name, a registry folder's without its version.
+fn owners(places: &[(Place, String)]) -> String {
+    let crate_of = |p: &Path| -> String {
+        let parts: Vec<String> =
+            p.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+        let library = parts.windows(2).find(|w| w[0] == "library").map(|w| w[1].clone());
+        let versioned = || {
+            parts.iter().find_map(|c| {
+                let (name, version) = c.rsplit_once('-')?;
+                let numbered =
+                    version.split('.').count() >= 3 && version.starts_with(|d: char| d.is_ascii_digit());
+                numbered.then(|| name.to_string())
+            })
+        };
+        library.or_else(versioned).unwrap_or_else(|| "elsewhere".into())
+    };
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for (p, _) in places {
+        *counts.entry(crate_of(&p.path)).or_default() += 1;
+    }
+    let mut counts: Vec<(String, usize)> = counts.into_iter().collect();
+    counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let mut said: Vec<String> = counts.iter().take(6).map(|(c, n)| format!("{c} {n}")).collect();
+    if counts.len() > 6 {
+        said.push("…".into());
+    }
+    said.join(", ")
+}
+
+/// A definition's signature from its first line: while brackets stay open, the next lines joined (at
+/// most `SIG_LINES`), cut at `LINE_MAX`.
+fn signature(line: &dyn Fn(usize) -> Option<String>, at: usize) -> String {
+    let mut out = String::new();
+    let mut depth = 0i32;
+    for k in at..at + SIG_LINES {
+        let Some(l) = line(k) else { break };
+        let l = l.trim();
+        if !out.is_empty() && !l.is_empty() {
+            if l.starts_with([')', ']']) {
+                out.truncate(out.trim_end_matches(',').len());
+            } else if !out.ends_with(['(', '[']) {
+                out.push(' ');
+            }
+        }
+        out.push_str(l);
+        for c in l.chars() {
+            match c {
+                '(' | '[' => depth += 1,
+                ')' | ']' => depth -= 1,
+                _ => {}
+            }
+        }
+        if depth <= 0 {
+            break;
+        }
+    }
+    clip(&out, LINE_MAX)
+}
+
+/// The syntax tree's definitions of `word` (its implementations for `goto` implementation) among its
+/// whole-word text matches in the project, as the answer — `why` the server's isn't (`later`: it will be,
+/// ask again).
+fn tree_defs(ed: &mut Editor, call: Call, word: String, goto: Goto, why: String, later: bool) {
+    if word.is_empty() {
+        return answer(ed, call, Ok(format!("{why} — and there's no name at that column to look for")));
+    }
+    let root = project_root(ed);
+    ed.events.jobs().spawn(move || {
+        let r = tree_found(&root, &word, goto).map(|(places, no_grammar)| {
+            let then = if later { " — ask again in a moment for the server's" } else { "" };
+            let what = if goto == Goto::Implementation { "implementation" } else { "definition" };
+            let langs = match no_grammar.is_empty() {
+                true => String::new(),
+                false => format!(
+                    " ({} files weren't looked at — no grammar installed)",
+                    no_grammar.into_iter().collect::<Vec<_>>().join(", ")
+                ),
+            };
+            if places.is_empty() {
+                return format!(
+                    "no {what}s of `{word}` found by the syntax tree either — {why}{then}{langs}"
+                );
+            }
+            let caveat = match goto {
+                Goto::TypeDefinition => " (where the name itself is defined — its type needs the server)",
+                _ => "",
+            };
+            let n = places.len();
+            let marks: HashMap<(PathBuf, usize), String> =
+                places.iter().map(|(p, w)| ((p.path.clone(), p.line), w.clone())).collect();
+            let mark = |p: &Place| marks.get(&(p.path.clone(), p.line)).cloned();
+            let places = places.into_iter().map(|(p, _)| (p, false)).collect();
+            format!(
+                "{} of `{word}` by the syntax tree among its text matches — {why}, so not the server's \
+                 answer{then}{caveat}{langs}:\n{}",
+                count(n, what),
+                grouped(&root, places, &mark, REFS_SHOWN)
+            )
+        });
+        move |ed: &mut Editor| answer(ed, call, r)
+    });
+}
+
+/// The places the tree says define `word` (or implement it), each with its signature and what defines it
+/// (`function`, `struct`, `impl`) — and the languages of files with hits that have no grammar here. On a
+/// worker: a search, then each file with hits parsed (at most `TREE_FILES`).
+type TreeFound = (Vec<(Place, String)>, std::collections::BTreeSet<String>);
+fn tree_found(root: &Path, word: &str, goto: Goto) -> Result<TreeFound, String> {
+    let q = crate::grep::Query {
+        pattern: word,
+        literal: true,
+        case: Case::Sensitive,
+        word: true,
+        globs: &[],
+        context: 0,
+        mode: crate::grep::Mode::Lines,
+    };
+    let mut files: Vec<(PathBuf, Vec<usize>)> = Vec::new();
+    crate::grep::search(root, None, &q, &|| false, &mut |f| {
+        files.push((root.join(&f.rel), f.rows.iter().filter(|r| r.hit).map(|r| r.line - 1).collect()));
+        files.len() < TREE_FILES
+    })?;
+    files.sort();
+    let re = regex::Regex::new(&format!(r"\b{}\b", regex::escape(word))).map_err(|e| e.to_string())?;
+    let (mut out, mut no_grammar) = (Vec::new(), std::collections::BTreeSet::new());
+    let mut parser = tree_sitter::Parser::new();
+    for (path, hits) in files {
+        let Some(spec) = crate::syntax::detect(&path) else { continue };
+        let Ok(lang) = crate::syntax::Loader::global().load(spec) else {
+            no_grammar.insert(spec.name.clone());
+            continue;
+        };
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        if text.len() > TREE_FILE_MAX || parser.set_language(&lang.language).is_err() {
+            continue;
+        }
+        let Some(tree) = parser.parse(&text, None) else { continue };
+        let starts: Vec<usize> =
+            std::iter::once(0).chain(text.match_indices('\n').map(|(i, _)| i + 1)).collect();
+        let lines: Vec<&str> = text.lines().collect();
+        let line_of = |b: usize| starts.partition_point(|&s| s <= b) - 1;
+        for l in hits {
+            let (Some(&s), e) = (starts.get(l), starts.get(l + 1).map_or(text.len(), |e| e - 1)) else {
+                continue;
+            };
+            for m in re.find_iter(&text[s..e.max(s)]) {
+                let b = s + m.start();
+                let Some(node) = tree.root_node().descendant_for_byte_range(b, b + m.len()) else { continue };
+                let Some((what, at)) = defines(node, goto) else { continue };
+                let line = line_of(at);
+                let text = signature(&|k| lines.get(k).map(|l| l.to_string()), line);
+                out.push((Place { path: path.clone(), line, col: 0, text }, what));
+            }
+        }
+    }
+    out.dedup_by(|a, b| a.0.path == b.0.path && a.0.line == b.0.line);
+    Ok((out, no_grammar))
+}
+
+/// Whether `node` (a name) is what a definition defines — its node's `name` (`function_item` →
+/// `function`) — or, for implementations, in what an `impl` (or a class's superclasses) is for: (what
+/// it is, where it starts).
+fn defines(node: tree_sitter::Node, goto: Goto) -> Option<(String, usize)> {
+    if goto == Goto::Implementation {
+        let mut up = node.parent();
+        while let Some(x) = up {
+            for field in ["trait", "type", "superclass", "interfaces", "superclasses"] {
+                if field == "type" && x.kind() != "impl_item" {
+                    continue;
+                }
+                if let Some(f) = x.child_by_field_name(field)
+                    && f.start_byte() <= node.start_byte()
+                    && node.end_byte() <= f.end_byte()
+                {
+                    let what = x.kind().split('_').next().unwrap_or_default().to_string();
+                    return Some((what, x.start_byte()));
+                }
+            }
+            up = x.parent();
+        }
+        return None;
+    }
+    let parent = node.parent()?;
+    if parent.child_by_field_name("name").is_none_or(|n| n.id() != node.id()) {
+        return None;
+    }
+    let k = parent.kind();
+    let what =
+        if k == "enum_variant" { "variant" } else { DEF_ENDS.iter().find_map(|e| k.strip_suffix(e))? };
+    Some((what.replace('_', " "), node.start_byte()))
+}
+
+// ── hover ───────────────────────────────────────────────────────────────────
+
+pub fn hover_schema() -> Value {
+    json!({
+        "name": "hover",
+        "description": "What the language server says about a name at a place — its type, signature and \
+    docs (an editor's hover). Give the file, the line and the name on it (or a column). Reach for it to \
+    learn a variable's or an expression's type, what a function takes and returns, or which method a call \
+    resolves to, instead of reading definitions. While the server is still loading, the syntax tree's \
+    definitions of the name stand in, and it says so.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "The file, relative to the project root" },
+                "line": { "type": "integer", "description": "The line, 1-based — left out: the name's first appearance in the file" },
+                "symbol": { "type": "string", "description": "The name as written on that line" },
+                "column": { "type": "integer", "description": "Its column, 1-based (characters) — instead of the name" }
+            },
+            "required": ["path"]
+        }
+    })
+}
+
+/// Hover text at most: lines, chars.
+const HOVER_LINES: usize = 80;
+const HOVER_MAX: usize = 4000;
+
+/// A `hover` question asked of a server.
+pub struct HoverAsk {
+    call: Call,
+    word: String,
+    /// `path:line` as answered.
+    at: String,
+    server: String,
+    cid: ClientId,
+}
+
+/// The tool: the file checked on a worker, then asked about (`hover_at`). Err = answered now.
+pub fn hover(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
+    let root = project_root(ed);
+    let spot = spot_of(&root, args)?;
+    ed.events.jobs().spawn(move || {
+        let file = file_in(&root, &spot.path);
+        move |ed: &mut Editor| match file {
+            Ok(path) => hover_at(ed, call, Spot { path, ..spot }),
+            Err(e) => answer(ed, call, Err(e)),
+        }
+    });
+    Ok(())
+}
+
+fn hover_at(ed: &mut Editor, call: Call, spot: Spot) {
+    let shown = rel(&project_root(ed), &spot.path);
+    let id = match buffer_for(ed, &spot.path) {
+        Ok(id) => id,
+        Err(e) => return answer(ed, call, Err(format!("{shown}: {e}"))),
+    };
+    let Some(doc) = ed.docs.iter().find(|d| d.id == id) else { return };
+    if doc.loading {
+        let word = spot.word.unwrap_or_default();
+        return tree_defs(ed, call, word, Goto::Definition, format!("{shown} is still loading"), true);
+    }
+    let (line, col, word) = match place_in(&doc.text, &spot, &shown) {
+        Ok(at) => at,
+        Err(e) => return answer(ed, call, Err(e)),
+    };
+    let byte = doc.text.line_to_byte(line) + col;
+    let n = next_ask(ed);
+    match ed.ask_at(id, byte, Kind::ToolHover { ask: n }, "no server here gives hover information") {
+        Err((why, later)) => tree_defs(ed, call, word, Goto::Definition, why, later),
+        Ok((cid, server)) => {
+            let at = format!("{shown}:{}", line + 1);
+            ed.lsp.tool_hovers.insert(n, HoverAsk { call, word, at, server, cid });
+            ed.events.jobs().spawn(move || {
+                std::thread::sleep(REFS_WAIT);
+                move |ed: &mut Editor| {
+                    if let Some(a) = ed.lsp.tool_hovers.remove(&n) {
+                        let why = format!("{} didn't answer within {}", a.server, secs(REFS_WAIT));
+                        tree_defs(ed, a.call, a.word, Goto::Definition, why, true);
+                    }
+                }
+            });
+        }
+    }
+}
+
+/// The server's hover for question `n` (Err: its error): its text, trimmed — nothing from a server still at
+/// work, and the syntax tree's definitions stand in.
+pub fn hover_answered(ed: &mut Editor, n: u64, result: Result<&Value, &Value>) {
+    let Some(a) = ed.lsp.tool_hovers.remove(&n) else { return };
+    let busy = ed
+        .client(a.cid)
+        .filter(|c| !c.progress.is_empty())
+        .map(|c| c.progress.values().map(|p| p.title.clone()).collect::<Vec<_>>().join(", "));
+    match result {
+        Ok(v) => match (hover_trim(&crate::lsp::hover_text(v)), busy) {
+            (t, _) if !t.is_empty() => {
+                answer(ed, a.call, Ok(format!("`{}` at {} ({}):\n{t}", a.word, a.at, a.server)))
+            }
+            (_, Some(busy)) => {
+                let why = format!("{} is still loading ({busy}) and has nothing for it yet", a.server);
+                tree_defs(ed, a.call, a.word, Goto::Definition, why, true)
+            }
+            (_, None) => {
+                let t = format!("{} has no hover information for `{}` at {}", a.server, a.word, a.at);
+                answer(ed, a.call, Ok(t))
+            }
+        },
+        Err(e) if matches!(e["code"].as_i64(), Some(-32801 | -32802)) => {
+            let why = format!("{} is still loading the project", a.server);
+            tree_defs(ed, a.call, a.word, Goto::Definition, why, true)
+        }
+        Err(e) => {
+            let why = e["message"].as_str().unwrap_or("the request failed");
+            answer(ed, a.call, Err(format!("{}: {why}", a.server)))
+        }
+    }
+}
+
+/// Hover text as an answer: trailing spaces off, runs of blank lines one, at most `HOVER_LINES` lines and
+/// `HOVER_MAX` chars — said when cut.
+fn hover_trim(text: &str) -> String {
+    let mut lines: Vec<&str> = Vec::new();
+    for l in text.lines().map(str::trim_end) {
+        if !(l.is_empty() && lines.last().is_none_or(|p| p.is_empty())) {
+            lines.push(l);
+        }
+    }
+    let n = lines.len();
+    lines.truncate(HOVER_LINES);
+    let mut out = lines.join("\n").trim_end().to_string();
+    if out.chars().count() > HOVER_MAX || n > HOVER_LINES {
+        out = clip(&out, HOVER_MAX);
+        out.push_str(&format!("\n… cut ({n} lines) — the definition has the rest"));
+    }
+    out
+}
+
+// ── diagnostics ─────────────────────────────────────────────────────────────
+
+pub fn diagnostics_schema() -> Value {
+    json!({
+        "name": "diagnostics",
+        "description": "What the language servers report for files right now — errors, warnings and the rest, \
+    each with its line, message and code — and whether they have checked those files yet or are still at \
+    it (rust-analyzer's cargo check), so clean can be told from not checked yet. Without paths: the files \
+    you edited this turn, else the files open in the editor. After an edit, give wait (seconds) to wait for \
+    the servers to settle first — a quick way to learn whether a change compiles before a build; the \
+    build and the tests stay the final word.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "paths": { "type": "array", "items": { "type": "string" }, "description": "Files, relative to the project root — left out: the files you edited this turn, else the open ones" },
+                "wait": { "type": "integer", "description": "Seconds to wait at most for the servers to settle (their check done) before answering — after an edit; at most 120. Left out: what's there now" }
+            }
+        }
+    })
+}
+
+/// The longest wait asked for, and what's waited at least / for quiet before a server counts as settled:
+/// a check a save starts begins within `SETTLE`; one with nothing begun or published for `QUIET` has
+/// nothing to say.
+const WAIT_MAX: u64 = 120;
+const SETTLE: std::time::Duration = std::time::Duration::from_millis(if cfg!(test) { 20 } else { 400 });
+const QUIET: std::time::Duration = std::time::Duration::from_millis(if cfg!(test) { 100 } else { 1500 });
+
+/// Rows of diagnostics an answer lists at most.
+const DIAGS_SHOWN: usize = 150;
+
+/// A `diagnostics` call waiting for its files' servers to settle.
+pub struct DiagWait {
+    call: Call,
+    paths: Vec<PathBuf>,
+    /// Paths given that aren't files in the project (why, each) · which files these are, when not given.
+    unread: Vec<String>,
+    which: &'static str,
+    since: std::time::Instant,
+    until: std::time::Instant,
+}
+
+/// The tool: the files checked on a worker, then what's published for them — now, or once their servers
+/// settle (`diagnostics_moved`). Err = answered now.
+pub fn diagnostics(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
+    let root = project_root(ed);
+    // Writes whose save is held for quiet (`lsp_saved_outside`): their servers hear now — the check they
+    // start is what a wait waits for
+    ed.saves_due(true);
+    let since = std::time::Instant::now();
+    let wait = std::time::Duration::from_secs(args["wait"].as_u64().unwrap_or(0).min(WAIT_MAX));
+    let given: Vec<PathBuf> = match &args["paths"] {
+        Value::Array(a) => a.iter().filter_map(Value::as_str).map(|p| root.join(p.trim())).collect(),
+        Value::String(p) if !p.trim().is_empty() => vec![root.join(p.trim())],
+        _ => Vec::new(),
+    };
+    let (paths, which) = match given.is_empty() {
+        false => (given, ""),
+        true if !ed.checkpoints.turn.is_empty() => (
+            ed.checkpoints.turn.iter().map(|t| t.path.clone()).collect(),
+            " (the files you edited this turn)",
+        ),
+        true => {
+            let open = ed.docs.iter().filter(|d| !crate::log::is_log(d.path.as_deref()));
+            (open.filter_map(|d| d.path.clone()).collect::<Vec<_>>(), " (the files open in the editor)")
+        }
+    };
+    if paths.is_empty() {
+        return Err("no files to look at — you edited none this turn and none is open; give paths".into());
+    }
+    ed.events.jobs().spawn(move || {
+        let (mut ok, mut unread) = (Vec::new(), Vec::new());
+        for p in &paths {
+            match file_in(&root, p) {
+                Ok(p) if !ok.contains(&p) => ok.push(p),
+                Ok(_) => {}
+                Err(e) => unread.push(e),
+            }
+        }
+        move |ed: &mut Editor| {
+            if ok.is_empty() {
+                return answer(ed, call, Err(unread.join("\n")));
+            }
+            let w = DiagWait { call, paths: ok, unread, which, since, until: since + wait };
+            if wait.is_zero() {
+                let text = diags_text(ed, &w, None);
+                return answer(ed, w.call, Ok(text));
+            }
+            ed.lsp.tool_diags.push(w);
+            // (looked at again when it may have settled with nothing to wake it, and at the end)
+            for after in [SETTLE, QUIET, wait] {
+                ed.events.jobs().spawn(move || {
+                    std::thread::sleep(after.saturating_sub(since.elapsed()));
+                    crate::nav::diagnostics_moved
+                });
+            }
+        }
+    });
+    Ok(())
+}
+
+/// A server published, ended a piece of work or went: the `diagnostics` calls waiting whose servers have
+/// all settled (or whose wait is up) are answered.
+pub fn diagnostics_moved(ed: &mut Editor) {
+    if ed.lsp.tool_diags.is_empty() {
+        return;
+    }
+    let now = std::time::Instant::now();
+    for w in std::mem::take(&mut ed.lsp.tool_diags) {
+        let servers: Vec<ClientId> = w.paths.iter().flat_map(|p| ed.servers_of_path(p)).collect();
+        let settled = servers.iter().all(|&c| settled(ed, c, w.since));
+        if settled || now >= w.until {
+            let text = diags_text(ed, &w, Some(settled));
+            answer(ed, w.call, Ok(text));
+        } else {
+            ed.lsp.tool_diags.push(w);
+        }
+    }
+}
+
+/// Whether server `cid` has settled since `since`: up, at no work, at least `SETTLE` on — and it has
+/// published or ended work since, or been quiet for `QUIET`. One gone has nothing more to say.
+fn settled(ed: &Editor, cid: ClientId, since: std::time::Instant) -> bool {
+    let Some(c) = ed.client(cid) else { return true };
+    let after = |t: &std::time::Instant| *t > since;
+    let moved = ed.lsp.work_ended.get(&cid).is_some_and(after)
+        || ed.lsp.published.iter().any(|((s, _), t)| *s == cid && after(t));
+    c.ready && c.progress.is_empty() && since.elapsed() >= SETTLE && (moved || since.elapsed() >= QUIET)
+}
+
+/// Where a diagnostic is from and its code, as one label (`rustc E0308`, `clippy needless_return`).
+pub(crate) fn code_of(d: &Value) -> String {
+    let code = match &d["code"] {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        _ => String::new(),
+    };
+    format!("{} {code}", d["source"].as_str().unwrap_or_default()).trim().to_string()
+}
+
+/// One diagnostic as listed: severity, line and column (from 1), message, code.
+struct Diag {
+    severity: u8,
+    line: usize,
+    col: usize,
+    message: String,
+    code: String,
+}
+
+/// The answer: counts, each file's diagnostics by line (or whether it's clean or not checked yet), then
+/// each server's state — at work and since when, its last publish. `settled`: how a wait ended (None: none
+/// asked).
+fn diags_text(ed: &Editor, w: &DiagWait, settled: Option<bool>) -> String {
+    let root = project_root(ed);
+    let ago = |t: &std::time::Instant| secs(t.elapsed());
+    let name = |c: &ClientId| ed.client(*c).map(|c| c.name.clone()).unwrap_or_default();
+    let mut servers: Vec<ClientId> = Vec::new();
+    let (mut listed, mut quiet) = (Vec::new(), Vec::new());
+    let mut counts = [0usize; 5];
+    for path in &w.paths {
+        let mut rows: Vec<Diag> = match ed.docs.iter().find(|d| d.path.as_deref() == Some(path.as_path())) {
+            Some(doc) => doc
+                .lsp
+                .diagnostics
+                .iter()
+                .map(|d| {
+                    let line = crate::movement::line_of(&doc.text, d.from);
+                    let start = crate::movement::line_start(&doc.text, line);
+                    let col = doc.text.byte_slice(start..d.from.max(start)).len_chars() + 1;
+                    let (message, code) = (d.message.clone(), code_of(&d.raw));
+                    Diag { severity: d.severity, line: line + 1, col, message, code }
+                })
+                .collect(),
+            None => ed
+                .lsp
+                .elsewhere
+                .get(path)
+                .into_iter()
+                .flatten()
+                .map(|(_, severity, line, col, message, code)| Diag {
+                    severity: *severity,
+                    line: line + 1,
+                    col: col + 1,
+                    message: message.clone(),
+                    code: code.clone(),
+                })
+                .collect(),
+        };
+        rows.sort_by_key(|d| (d.line, d.col, d.severity));
+        let theirs = ed.servers_of_path(path);
+        for c in &theirs {
+            if !servers.contains(c) {
+                servers.push(*c);
+            }
+        }
+        let shown = rel(&root, path);
+        if !rows.is_empty() {
+            for d in &rows {
+                counts[d.severity.clamp(1, 4) as usize] += 1;
+            }
+            listed.push((shown, rows));
+            continue;
+        }
+        let names = theirs.iter().map(name).collect::<Vec<_>>().join(" and ");
+        let last = theirs.iter().filter_map(|c| ed.lsp.published.get(&(*c, path.clone()))).max();
+        quiet.push(match (theirs.is_empty(), last) {
+            (true, _) => format!("{shown} — no language server reports on it"),
+            (false, Some(t)) => format!("{shown} — clean ({names} published for it {} ago)", ago(t)),
+            (false, None) => format!("{shown} — not checked yet ({names} hasn't published for it)"),
+        });
+    }
+    let n = w.paths.len();
+    let said: Vec<String> = [(1, "error"), (2, "warning"), (3, "note"), (4, "hint")]
+        .iter()
+        .filter(|(s, _)| counts[*s] > 0)
+        .map(|(s, what)| count(counts[*s], what))
+        .collect();
+    let unchecked = quiet.iter().filter(|q| q.contains("not checked yet")).count();
+    let mut out = match said.is_empty() {
+        true => {
+            let not = if unchecked > 0 { format!(" — {unchecked} not checked yet") } else { String::new() };
+            format!("no diagnostics in {}{}{not}", count(n, "file"), w.which)
+        }
+        false => format!("{} in {} of {}{}:", said.join(", "), listed.len(), count(n, "file"), w.which),
+    };
+    let mut rows_left = DIAGS_SHOWN;
+    for (shown, rows) in &listed {
+        out.push_str(&format!("\n{shown}"));
+        for d in rows.iter().take(rows_left) {
+            let sev = ["", "error", "warning", "note", "hint"][d.severity.clamp(1, 4) as usize];
+            let msg: Vec<&str> = d.message.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+            let code = if d.code.is_empty() { String::new() } else { format!(" [{}]", d.code) };
+            out.push_str(&format!(
+                "\n  {}:{} {sev}: {}{code}",
+                d.line,
+                d.col,
+                clip(&msg.join(" — "), 2 * LINE_MAX)
+            ));
+        }
+        if rows.len() > rows_left {
+            out.push_str(&format!("\n  … {} more not shown", rows.len() - rows_left));
+        }
+        rows_left = rows_left.saturating_sub(rows.len());
+    }
+    for q in &quiet {
+        out.push_str(&format!("\n{q}"));
+    }
+    // Each server: at work (since when) or idle, and its last publish — whether what's above is the news
+    for c in &servers {
+        let Some(s) = ed.client(*c) else { continue };
+        let state = match (s.ready, s.progress.is_empty()) {
+            (false, _) => "starting".to_string(),
+            (true, true) => "idle".to_string(),
+            (true, false) => {
+                let work: Vec<String> = s
+                    .progress
+                    .values()
+                    .map(|p| match p.began {
+                        Some(b) => format!("{} for {}", p.title, ago(&b)),
+                        None => p.title.clone(),
+                    })
+                    .collect();
+                format!("at work ({}) — what's above may still change", work.join(", "))
+            }
+        };
+        let last = ed.lsp.published.iter().filter(|((x, _), _)| x == c).map(|(_, t)| t).max();
+        let last = match last {
+            Some(t) => format!("last published {} ago", ago(t)),
+            None => "hasn't published anything yet".into(),
+        };
+        out.push_str(&format!("\n{}: {state}; {last}", s.name));
+    }
+    match settled {
+        Some(true) => out.push_str(&format!("\n(waited {} for the servers to settle)", ago(&w.since))),
+        Some(false) => out.push_str(&format!("\n(waited the full {} — not settled yet)", ago(&w.since))),
+        None => {}
+    }
+    for u in &w.unread {
+        out.push_str(&format!("\n{u}"));
+    }
+    out
 }
 
 // ── search ──────────────────────────────────────────────────────────────────
@@ -1115,7 +2155,7 @@ fn secs(d: std::time::Duration) -> String {
 pub fn verdict(text: &str) -> Option<String> {
     let first = text.lines().next()?;
     let re = regex::Regex::new(
-        r"^(\d+\+? (?:references?|text match(?:es)?|matching lines?) in \d+ files?|\d+ files? with matches|\d+ symbols?|no (?:text )?matches)",
+        r"^(\d+\+? (?:references?|text match(?:es)?|matching lines?) in \d+ files?|\d+ files? with matches|\d+ symbols?|no (?:text )?matches|\d+ (?:type )?(?:definitions?|implementations?)|\d+ (?:errors?|warnings?|notes?|hints?)(?:, \d+ (?:errors?|warnings?|notes?|hints?))*|no diagnostics)",
     )
     .ok()?;
     re.find(first).map(|m| m.as_str().to_string())
@@ -1147,6 +2187,36 @@ mod tests {
         assert!(e.contains("isn't on line 1 of f — it reads `let ab = 1;`"), "{e}");
         assert!(locate(&text, "a", Some(9), "f").unwrap_err().contains("f has 2 lines — no line 10"));
         assert_eq!(locate(&text, "zz", None, "f").unwrap_err(), "`zz` isn't in f");
+        // Without a line: its first line in code — a comment's only when it's nowhere else
+        let text = ropey::Rope::from_str("//! what ab is\n#[ab]\n# ab\nlet ab = 1;\n");
+        assert_eq!(locate(&text, "ab", None, "f").unwrap(), (1, 2), "an attribute is code");
+        let text = ropey::Rope::from_str("//! what ab is\n    // ab\n# ab\nlet ab = 1;\n");
+        assert_eq!(locate(&text, "ab", None, "f").unwrap(), (3, 4));
+        let text = ropey::Rope::from_str("/* ab */\n");
+        assert_eq!(locate(&text, "ab", None, "f").unwrap(), (0, 3), "only in a comment");
+    }
+
+    /// The project's places are listed; those outside it (the standard library, dependencies) only counted
+    /// by crate — unless they're all there is.
+    #[test]
+    fn places_outside_the_project_are_counted_not_listed() {
+        let outside = [
+            "/h/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hashbrown-0.15.5/src/raw/mod.rs",
+            "/h/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hashbrown-0.15.5/src/scopeguard.rs",
+            "/h/.rustup/toolchains/1.99.0-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/path.rs",
+        ];
+        let mut a =
+            DefAsk::new(Call::test(0), "Drop".into(), Goto::Implementation, None, vec![], vec!["ra".into()]);
+        a.found = outside.iter().map(|p| (PathBuf::from(p), 9, String::new())).collect();
+        let open = HashMap::new();
+        let text = defs_text(Path::new("/p"), &a, "ra", &open);
+        assert!(text.starts_with("3 implementations (ra):\n/h/.cargo/"), "all outside: listed — {text}");
+        assert!(text.contains("  10: (outside the project — not read)"), "{text}");
+        a.found.push((PathBuf::from("/p/a.rs"), 2, String::new()));
+        assert_eq!(
+            defs_text(Path::new("/p"), &a, "ra", &open),
+            "1 implementation (ra); 3 more outside the project (hashbrown 2, std 1), not listed:\na.rs\n  3:"
+        );
     }
 
     /// The declaration's file first and its row first in it, marked; the rest by file then line; one row a
@@ -1303,6 +2373,63 @@ mod tests {
         );
         assert_eq!(v("no matches for `x`").unwrap(), "no matches");
         assert_eq!(v("src/a.rs:12:fn main"), None, "Grep's answer isn't one");
+        assert_eq!(v("2 definitions of `a` by name (ra):").unwrap(), "2 definitions");
+        assert_eq!(v("1 type definition (ra):").unwrap(), "1 type definition");
+        assert_eq!(v("3 implementations of `S` by the syntax tree …").unwrap(), "3 implementations");
+        assert_eq!(v("1 error, 2 warnings in 1 of 3 files:").unwrap(), "1 error, 2 warnings");
+        assert_eq!(v("no diagnostics in 2 files").unwrap(), "no diagnostics");
+    }
+
+    /// A definition's signature: its lines joined while a bracket is open, a trailing comma before the
+    /// closer dropped; one line when it closes there; cut at `SIG_LINES`.
+    #[test]
+    fn a_signature_joins_the_lines_its_brackets_span() {
+        let lines = |src: &'static str| move |k: usize| src.lines().nth(k).map(str::to_string);
+        let src = "    pub(crate) fn ask_at(\n        &mut self,\n        id: DocId,\n    ) -> Result<(), String> {\n        x\n";
+        assert_eq!(
+            signature(&lines(src), 0),
+            "pub(crate) fn ask_at(&mut self, id: DocId) -> Result<(), String> {"
+        );
+        assert_eq!(signature(&lines("struct S;\nfn x() {}\n"), 0), "struct S;");
+        let open = format!("f(\n{}", "a,\n".repeat(20));
+        let open = |k: usize| open.lines().nth(k).map(str::to_string);
+        assert_eq!(signature(&open, 0).matches("a,").count(), SIG_LINES - 1);
+    }
+
+    /// A column (characters, not bytes) names the word there; past the line's end it's said.
+    #[test]
+    fn a_column_is_counted_in_characters() {
+        let text = ropey::Rope::from_str("let 한글 = foo(바);\n");
+        // (from 0 here — the call's 1-based column less one)
+        let spot =
+            |column: usize| Spot { path: PathBuf::new(), line: Some(0), column: Some(column), word: None };
+        assert_eq!(place_in(&text, &spot(5), "f").unwrap(), (0, 7, "한글".to_string()), "inside the word");
+        assert_eq!(place_in(&text, &spot(9), "f").unwrap(), (0, 13, "foo".to_string()));
+        assert!(place_in(&text, &spot(40), "f").unwrap_err().contains("has 16 characters — no column 41"));
+        assert_eq!(container_of("Editor::root").as_deref(), Some("Editor"));
+        assert_eq!(container_of("crate::editor::Editor::root()").as_deref(), Some("Editor"));
+        assert_eq!(container_of("root"), None);
+    }
+
+    /// The syntax tree's guess: a node's `name` in a defining node (any language's `_item`, `_definition`
+    /// …), not a use; for implementations, an `impl` naming it.
+    #[test]
+    fn the_tree_tells_a_definition_from_a_use() {
+        let Some(spec) = crate::syntax::spec("rust") else { return };
+        let Ok(lang) = crate::syntax::Loader::global().load(spec) else { return }; // (no Rust grammar)
+        let src = "const N: usize = 1;\nfn f() -> N { N }\nenum E { N }\nimpl Tr for N {}\n";
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&lang.language).unwrap();
+        let tree = parser.parse(src, None).unwrap();
+        let at =
+            |b: usize, goto| defines(tree.root_node().descendant_for_byte_range(b, b + 1).unwrap(), goto);
+        let ns: Vec<usize> = src.match_indices('N').map(|(i, _)| i).collect();
+        assert_eq!(at(ns[0], Goto::Definition), Some(("const".to_string(), ns[0])));
+        assert_eq!(at(ns[1], Goto::Definition), None, "a use right under a definition (its return type)");
+        assert_eq!(at(ns[2], Goto::Definition), None, "a use");
+        assert_eq!(at(ns[3], Goto::Definition), Some(("variant".to_string(), ns[3])));
+        assert_eq!(at(ns[4], Goto::Implementation), Some(("impl".to_string(), src.find("impl").unwrap())));
+        assert_eq!(at(ns[1], Goto::Implementation), None);
     }
 
     /// The search itself (in-process — rg or not): smart case, a glob, a folder, context, hidden files in
