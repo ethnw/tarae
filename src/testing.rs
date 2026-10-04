@@ -8,7 +8,6 @@
 //! of its own (`setsid`) so closing kills the whole process group (including the test binaries cargo spawned).
 
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -578,11 +577,15 @@ impl Editor {
     }
 
     pub fn test_start(&mut self, target: Target) {
-        self.test_start_guarded(target, None, None);
+        // (its trace from the ask — the saves' time is in it)
+        let trace = crate::trace::RunTrace::new(format!("tests: {}", target.label));
+        // Save modified files first — tests run the code on disk (started once they're written)
+        self.auto_save(" · before test");
+        self.after_saves(move |ed| ed.test_start_guarded(target, None, Some(trace)));
     }
 
-    /// Claude's run (`tools.rs`): in the sandbox, unless `guard` says otherwise; `trace` — its way from
-    /// Claude's ask (else it starts here).
+    /// Started now, the saves before it written (`test_start`; Claude's run, `tools::go`): in the sandbox,
+    /// unless `guard` says otherwise; `trace` — its way from the ask (else it starts here).
     pub fn test_start_guarded(
         &mut self,
         target: Target,
@@ -590,9 +593,6 @@ impl Editor {
         trace: Option<crate::trace::RunTrace>,
     ) {
         let trace = trace.unwrap_or_else(|| crate::trace::RunTrace::new(format!("tests: {}", target.label)));
-        // Save modified files first — tests run the code on disk
-        self.auto_save(" · before test");
-        self.flush_saves();
         trace.step("saved");
         self.session.test_last = Some((target.clone(), false));
         let argv = target.argv();
@@ -602,14 +602,10 @@ impl Editor {
         };
         let watched = policy.is_some_and(|p| p.watch.is_some());
         let mut cmd = crate::sandbox::command(policy, &argv[0], &argv[1..]);
-        cmd.current_dir(&target.cwd)
-            .env("NO_COLOR", "1")
-            .env("CARGO_TERM_COLOR", "never")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        cmd.current_dir(&target.cwd).env("NO_COLOR", "1").env("CARGO_TERM_COLOR", "never");
         let wall = std::time::SystemTime::now();
-        let mut child = match crate::dap::setsid(&mut cmd).spawn() {
+        // (its own session and group, not a fork of the editor — `spawn.rs`)
+        let child = match crate::spawn::setsid(&cmd) {
             Ok(c) => c,
             // (the previous run, if any, stays current — its lines·end still land)
             Err(e) => {
@@ -621,9 +617,9 @@ impl Editor {
         crate::tools::tests_dropped(self, "another run took its place");
         self.test_generation += 1;
         let generation = self.test_generation;
-        let pid = child.id();
+        let pid = child.pid;
         self.procs_spawned(pid, "tests", &target.label);
-        let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
+        let (stdout, stderr) = (child.stdout, child.stderr);
         let tx = self.events.sender();
         // (a line a pack says is a wait — `waits.rs` — is told on the reader's thread)
         let send_lines =
@@ -695,7 +691,7 @@ impl Editor {
             if let Some(h) = err_reader {
                 let _ = h.join();
             }
-            let status = child.wait().ok();
+            let status = crate::spawn::wait(pid).ok();
             // Its last denials reach the watch before its end is told (here, not on the main loop)
             if watched {
                 std::thread::sleep(crate::sandbox::WATCH_LAST);
@@ -770,7 +766,8 @@ impl Editor {
         *run = argv;
         let root = target.cwd.clone();
         let before = self.test_generation;
-        self.test_start(t);
+        // (saved already — `test_debug_target`)
+        self.test_start_guarded(t, None, None);
         if self.test_generation == before {
             return; // couldn't launch (reason shown)
         }
@@ -788,9 +785,12 @@ impl Editor {
     }
 
     pub fn test_debug_target(&mut self, target: Target) {
-        // Save modified files first — tests run the code on disk
+        // Save modified files first — tests run the code on disk (started once they're written)
         self.auto_save(" · before test");
-        self.flush_saves();
+        self.after_saves(move |ed| ed.test_debug_saved(target));
+    }
+
+    fn test_debug_saved(&mut self, target: Target) {
         self.session.test_last = Some((target.clone(), true));
         self.dap_test = Some(target.clone());
         self.dap_resume = Some(crate::offer::Resume::TestTarget(Box::new(target.clone())));

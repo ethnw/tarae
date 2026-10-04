@@ -515,6 +515,8 @@ pub struct Editor {
     pub trust_path: Option<std::path::PathBuf>,
     /// Where what's always allowed is kept (`allow.rs`) — None in tests (they set a temp file).
     pub allow_path: Option<std::path::PathBuf>,
+    /// The clock a run of Claude's starts by (`reads::run_started`) — `reads::file_clock` unless a test says.
+    pub(crate) run_clock: Option<fn() -> std::time::SystemTime>,
     /// The user's config file, where a toggle that's kept is written (`space v a`) — None in tests (they
     /// set a temp file).
     pub config_file: Option<std::path::PathBuf>,
@@ -666,6 +668,7 @@ impl Editor {
             project_trust: None,
             trust_path: if cfg!(test) { None } else { crate::trust::Store::path() },
             allow_path: if cfg!(test) { None } else { crate::allow::Store::path() },
+            run_clock: None,
             config_file: if cfg!(test) { None } else { crate::config::config_path() },
             last_frame: None,
             unfocused: false,
@@ -5598,6 +5601,30 @@ mod tests {
         feed(&mut ed, "<space>lsay it<ret>");
         settle_for(&mut ed, |ed| !ed.offers.is_empty());
         assert!(!dir.join("out").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Claude's command runs what's on disk: the user's unsaved file is saved first, and the run starts once
+    /// it's written (a slow disk's stand-in here) — the saver's event, not a wait on the main loop.
+    #[test]
+    fn claudes_run_reads_the_users_file_as_saved() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-run-saved-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let file = dir.join("a.txt");
+        std::fs::write(&file, "one\n").unwrap();
+        let mut ed = editor("");
+        ed.open(&file).unwrap();
+        feed(&mut ed, "cTWO<esc>");
+        ed.saver.slow = std::time::Duration::from_millis(500);
+        let log =
+            claude_calls(&mut ed, &dir, "run", &json!({ "command": format!("cat {}", file.display()) }));
+        feed(&mut ed, "<space>lsay it<ret>");
+        settle_for(&mut ed, |ed| !ed.offers.is_empty() || !ed.session.chat.as_ref().unwrap().busy());
+        assert!(ed.offers.is_empty(), "a read inside the project runs unasked");
+        let answer = tool_answer(&log);
+        assert!(answer.contains("exit 0") && answer.contains("TWOne"), "{answer}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -11329,6 +11356,24 @@ mod tests {
         settle(&mut ed);
         feed(&mut ed, "a");
         assert_eq!(text(&ed), "zzfoo BAR");
+    }
+
+    /// A big ask (a 200 KB selection) to a claude still starting — not reading yet — goes out off the main
+    /// loop, and the answer still comes.
+    #[test]
+    fn a_big_ask_to_a_claude_still_starting_doesnt_hold_the_main_loop() {
+        let mut ed = editor(&"word ".repeat(40 * 1024));
+        let json = serde_json::json!({"type": "result", "is_error": false, "result": "<r i=\"1\">X</r>"});
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), format!("sleep 1; read -r line; printf '%s\\n' '{json}'")];
+        feed(&mut ed, "%");
+        let t = std::time::Instant::now();
+        feed(&mut ed, ":ask x<ret>");
+        let took = t.elapsed();
+        assert!(took < std::time::Duration::from_millis(500), "the main loop waited {took:?} on the pipe");
+        settle_until(&mut ed, |ed| ed.session.review.as_ref().is_some_and(|r| r.ready));
+        feed(&mut ed, "y");
+        assert_eq!(text(&ed), "X");
     }
 
     #[test]

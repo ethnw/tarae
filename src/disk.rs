@@ -397,7 +397,7 @@ impl Editor {
 
     /// Save all modified files (skipping conflicts, loading, and unnamed ones) — in the background: "Saved"
     /// and what follows a save come when they're written (`saver.rs`). Before running code on disk (tests, a
-    /// task), wait for them with `flush_saves`.
+    /// task), start it once they're written with `after_saves`.
     pub(crate) fn auto_save(&mut self, why: &'static str) {
         let (mut failed, mut conflicts) = (Vec::new(), Vec::new());
         for i in 0..self.docs.len() {

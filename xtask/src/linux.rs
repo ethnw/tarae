@@ -10,7 +10,7 @@
 //! Docker not reachable: it says `skipped — …` and exits 0, so a `:preflight` step with `note = "skipped"`
 //! reads it as a pass with a note. Not in tarae's own `.tarae.toml` — a step of yours (`.tarae.local.toml`).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::{Result, root};
@@ -39,7 +39,7 @@ pub fn run(args: &[String]) -> Result<()> {
     }
     eprintln!("Linux checks on {} (Rust {pin}) …", image(&pin));
     let st = Command::new("docker")
-        .args(docker_args(&root, &pin, what))
+        .args(docker_args(&root, common_git_dir(&root).as_deref(), &pin, what))
         .status()
         .map_err(|e| format!("docker: {e}"))?;
     if !st.success() {
@@ -80,11 +80,29 @@ fn skipped(why: &str) -> String {
     )
 }
 
-/// `docker run …` for the checks: the tree read-only at /src, the caches in volumes, the pinned image.
-fn docker_args(root: &Path, pin: &str, what: What) -> Vec<String> {
+/// The repository's git folder when it isn't the tree's own `.git` — a worktree (every tarae session is
+/// one): its `.git` is a file naming a folder under the main checkout's, which the clone inside reads.
+fn common_git_dir(root: &Path) -> Option<PathBuf> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let dir = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    (!dir.starts_with(root)).then_some(dir)
+}
+
+/// `docker run …` for the checks: the tree read-only at /src (a worktree's git folder read-only too, where
+/// its `.git` file says), the caches in volumes, the pinned image.
+fn docker_args(root: &Path, git: Option<&Path>, pin: &str, what: What) -> Vec<String> {
     let mut a: Vec<String> = ["run", "--rm"].map(String::from).into();
     let mount = |a: &mut Vec<String>, v: String| a.extend(["-v".to_string(), v]);
     mount(&mut a, format!("{}:/src:ro", root.display()));
+    if let Some(git) = git {
+        mount(&mut a, format!("{0}:{0}:ro", git.display()));
+    }
     mount(&mut a, format!("tarae-target-{pin}:/target"));
     mount(&mut a, "tarae-registry:/usr/local/cargo/registry".into());
     // (seeded from the image the first time: the file's components and targets are fetched once)
@@ -140,7 +158,7 @@ mod tests {
     /// brought over), on the pinned image, with caches per version — and `clippy`/`test` run only theirs.
     #[test]
     fn the_tree_is_read_only_and_the_checks_run_in_a_clone() {
-        let a = docker_args(Path::new("/r/tarae"), "1.99.0", What::Both);
+        let a = docker_args(Path::new("/r/tarae"), None, "1.99.0", What::Both);
         assert!(a.windows(2).any(|w| w == ["-v", "/r/tarae:/src:ro"]), "{a:?}");
         assert!(
             !a.iter().any(|v| v.starts_with("/r/tarae:") && !v.ends_with(":ro")),
@@ -160,6 +178,39 @@ mod tests {
         assert!(clippy.contains("cargo clippy") && !clippy.contains("cargo test"));
         let test = script(What::Test);
         assert!(test.contains("cargo test") && !test.contains("cargo clippy"));
+    }
+
+    /// A worktree (a tarae session): the main checkout's git folder goes in read-only, at the path its `.git`
+    /// file names — and only then. Found from a real worktree of a temp repository.
+    #[test]
+    fn a_worktrees_git_folder_goes_in_read_only() {
+        let a = docker_args(Path::new("/w/s"), Some(Path::new("/r/tarae/.git")), "1.99.0", What::Clippy);
+        assert!(a.windows(2).any(|w| w == ["-v", "/r/tarae/.git:/r/tarae/.git:ro"]), "{a:?}");
+        assert!(!a.iter().any(|v| v.contains(':') && v.starts_with('/') && !v.ends_with(":ro")), "{a:?}");
+        let dir = std::env::temp_dir().join(format!("tarae-xtask-wt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let git = |cwd: &Path, args: &[&str]| {
+            let ok = Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "core.hooksPath=/dev/null"])
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        let (main, wt) = (dir.join("main"), dir.join("wt"));
+        std::fs::create_dir_all(&main).unwrap();
+        git(&main, &["init", "-q"]);
+        git(&main, &["commit", "-q", "--allow-empty", "-m", "one"]);
+        git(&main, &["worktree", "add", "-q", wt.to_str().unwrap()]);
+        assert_eq!(common_git_dir(&main), None, "a plain checkout's own .git is in the tree");
+        assert_eq!(common_git_dir(&wt), Some(main.join(".git")));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// No Docker to talk to: said in a line a preflight note can match, not an error.

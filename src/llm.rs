@@ -254,6 +254,35 @@ pub fn kill(pid: u32) {
     }
 }
 
+// ── Writing to it ───────────────────────────────────────────────────────
+
+/// A claude's stdin, written on a thread of its own, lines in the order sent. A claude still starting (a
+/// cold start is 8–10 s) reads nothing yet, and a pipe takes 64 KB before a write waits — one message can
+/// carry the file, other unsaved buffers and a screen: measured, a 200 KB message held the main loop as long
+/// as the reader didn't read (2.0 s for a stand-in sleeping 2 s). Dropped: what's queued still goes, then
+/// stdin closes.
+pub struct Lines(std::sync::mpsc::Sender<String>);
+
+impl Lines {
+    pub fn new(mut stdin: std::process::ChildStdin) -> Lines {
+        let (tx, rx) = channel::<String>();
+        std::thread::spawn(move || {
+            while let Ok(line) = rx.recv() {
+                // (a failed write: the process is gone — `pump` tells its end)
+                if writeln!(stdin, "{line}").and_then(|_| stdin.flush()).is_err() {
+                    break;
+                }
+            }
+        });
+        Lines(tx)
+    }
+
+    /// Err: an earlier write failed — the process doesn't read anymore.
+    pub fn send(&self, line: String) -> std::io::Result<()> {
+        self.0.send(line).map_err(|_| std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+    }
+}
+
 // ── Reading the streamed answer ─────────────────────────────────────────
 
 /// What one stdout line means.
@@ -845,13 +874,13 @@ fn start(
 ) -> Result<(), String> {
     let cfg = ed.config.llm.clone();
     let mut child = ed.llm_warm.take(&cfg, &ed.session.root)?;
-    // Write the message and close stdin — the process exits on its own after this one turn.
-    // Before anything is installed: a failed write leaves no review waiting forever.
-    let sent = child.stdin.take().ok_or_else(|| "claude: no stdin".to_string()).and_then(|mut stdin| {
-        writeln!(stdin, "{}", user_message(prompt))
-            .and_then(|_| stdin.flush())
-            .map_err(|e| format!("claude: {e}"))
-    });
+    // Write the message and close stdin — the process exits on its own after this one turn (written off the
+    // main loop: a commit draft's prompt can be 80 KB, and a spare still starting reads nothing yet).
+    // Before anything is installed: a process without stdin leaves no review waiting forever.
+    let sent =
+        child.stdin.take().ok_or_else(|| "claude: no stdin".to_string()).and_then(|stdin| {
+            Lines::new(stdin).send(user_message(prompt)).map_err(|e| format!("claude: {e}"))
+        });
     if let Err(e) = sent {
         // Reaped off the main thread
         std::thread::spawn(move || {

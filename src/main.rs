@@ -84,6 +84,7 @@ mod shell;
 mod sidebar;
 mod signature;
 mod sizes;
+mod spawn;
 mod split;
 mod structure;
 mod syntax;

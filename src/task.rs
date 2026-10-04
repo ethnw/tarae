@@ -8,7 +8,6 @@
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use crate::editor::Editor;
@@ -425,23 +424,37 @@ impl Editor {
     }
 
     pub fn task_start(&mut self, task: Task) {
-        // Not over an install: stopping it half-way can leave a tool broken
-        if self.session.task_run.as_ref().is_some_and(|r| r.install && r.state == State::Running) {
-            return self.set_status("an install is running — space m c stops it");
+        if self.install_running() {
+            return;
         }
         let trace = crate::trace::RunTrace::new(format!("task: {}", task.name));
         self.auto_save(" · before the task");
-        self.flush_saves();
-        trace.step("saved");
         self.session.task_last = Some(task.clone());
-        self.task_spawn(task, None, None, true, false, trace);
+        // (it runs what's on disk: once the saves are written — `after_saves`)
+        self.after_saves(move |ed| {
+            trace.step("saved");
+            if ed.install_running() {
+                return trace.end("an install was running");
+            }
+            ed.task_spawn(task, None, None, true, false, trace);
+        });
+    }
+
+    /// Not over an install: stopping it half-way can leave a tool broken (said).
+    fn install_running(&mut self) -> bool {
+        let running = self.session.task_run.as_ref().is_some_and(|r| r.install && r.state == State::Running);
+        if running {
+            self.set_status("an install is running — space m c stops it");
+        }
+        running
     }
 
     /// A command Claude runs (`tools.rs`): like a task, but not the one `space m m` runs again — the call
     /// waits for its end (or, the user's run of it again, Claude hears it later); in the sandbox, unless
     /// `guard` says otherwise. Its places go to the list only when it's a check or a build
     /// (`tools::is_check`, #28) — a grep of Claude's looking around doesn't replace the user's list. False:
-    /// it didn't start (an install is running, or it couldn't spawn).
+    /// it didn't start (an install is running, or it couldn't spawn). Saves first: `tools::go` starts it
+    /// `after_saves`.
     pub(crate) fn task_start_for(
         &mut self,
         task: Task,
@@ -459,8 +472,7 @@ impl Editor {
         let trace = trace.unwrap_or_else(|| {
             crate::trace::RunTrace::new(format!("claude's run again: {}", traced(&task.cmd)))
         });
-        self.auto_save(" · before the command");
-        self.flush_saves();
+        // (saved and written by now — `tools::go` started this `after_saves`)
         trace.step("saved");
         let before = self.task_generation;
         let policy = match &guard {
@@ -542,13 +554,9 @@ impl Editor {
         if claudes {
             cmd.env_remove("CDPATH");
         }
-        cmd.current_dir(&task.cwd)
-            .env("NO_COLOR", "1")
-            .env("CARGO_TERM_COLOR", "never")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = match crate::dap::setsid(&mut cmd).spawn() {
+        cmd.current_dir(&task.cwd).env("NO_COLOR", "1").env("CARGO_TERM_COLOR", "never");
+        // (its own session and group, not a fork of the editor — `spawn.rs`)
+        let child = match crate::spawn::setsid(&cmd) {
             Ok(c) => c,
             Err(e) => {
                 trace.end(format!("didn't spawn: {e}"));
@@ -568,10 +576,10 @@ impl Editor {
         crate::rebase::run_dropped(self);
         self.task_generation += 1;
         let generation = self.task_generation;
-        let pid = child.id();
+        let pid = child.pid;
         let title = if claudes { "claude's command" } else { task.name.as_str() };
         self.procs_spawned(pid, title, &task.cmd);
-        let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
+        let (stdout, stderr) = (child.stdout, child.stderr);
         let tx = self.events.sender();
         // Each stream reads its places on its own thread (a stat per `path:line` — never the main loop's)
         let cwd = task.cwd.clone();
@@ -661,7 +669,7 @@ impl Editor {
             if let Some(h) = err_reader {
                 let _ = h.join();
             }
-            let status = child.wait().ok();
+            let status = crate::spawn::wait(pid).ok();
             // Its last denials reach the watch before its end is told (here, not on the main loop)
             if watched {
                 std::thread::sleep(crate::sandbox::WATCH_LAST);
@@ -794,7 +802,7 @@ pub fn read_batches(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
+    use std::process::{Command, Stdio};
 
     /// Progress redrawn in place shows as a terminal leaves it: the text after the last carriage return.
     #[test]

@@ -52,7 +52,17 @@ pub struct Done {
 struct Shared {
     /// Asked but not written yet
     pending: usize,
+    /// Saves asked and written since the start — a run waits for the count asked before it (`after_saves`)
+    asked: u64,
+    written: u64,
     done: Vec<Done>,
+}
+
+/// What waits for the saves asked before it (`Editor::after_saves`), in the session that asked.
+struct Wait {
+    asked: u64,
+    session: crate::event::SessionId,
+    then: Box<dyn FnOnce(&mut Editor)>,
 }
 
 pub struct Saver {
@@ -60,20 +70,36 @@ pub struct Saver {
     /// The thread, started with the first save
     tx: Option<Sender<Job>>,
     shared: Arc<(Mutex<Shared>, Condvar)>,
+    /// Oldest first
+    waits: Vec<Wait>,
+    /// Tests: a slow disk's stand-in — each write takes this long first (set before the first save)
+    #[cfg(test)]
+    pub slow: Duration,
 }
 
 impl Saver {
     pub fn new(events: crate::event::Tx) -> Saver {
-        Saver { events, tx: None, shared: Arc::default() }
+        Saver {
+            events,
+            tx: None,
+            shared: Arc::default(),
+            waits: Vec::new(),
+            #[cfg(test)]
+            slow: Duration::ZERO,
+        }
     }
 
     fn push(&mut self, job: Job) {
         let shared = self.shared.clone();
         let events = self.events.clone();
+        #[cfg(test)]
+        let slow = self.slow;
         let tx = self.tx.get_or_insert_with(|| {
             let (tx, rx) = channel::<Job>();
             std::thread::spawn(move || {
                 while let Ok(job) = rx.recv() {
+                    #[cfg(test)]
+                    std::thread::sleep(slow);
                     let result = crate::disk::write_atomic(&job.path, |w| job.text.write_to(w))
                         .map(|()| crate::disk::stamp(&job.path))
                         .map_err(|e| format!("writing {}: {e}", job.path.display()));
@@ -83,10 +109,12 @@ impl Saver {
                         let Job { id, path, version, then, .. } = job;
                         s.done.push(Done { id, path, version, then, result });
                         s.pending -= 1;
+                        s.written += 1;
                         s.pending == 0
                     };
                     cv.notify_all();
-                    // Out of work: the main loop finishes the batch (one message for `:wa`)
+                    // Out of work: the main loop finishes the batch (one message for `:wa`), and starts what
+                    // waited for it
                     if idle && events.send(Event::Job(Box::new(|ed: &mut Editor| ed.saves_done()))).is_err() {
                         return;
                     }
@@ -94,13 +122,23 @@ impl Saver {
             });
             tx
         });
-        self.shared.0.lock().unwrap_or_else(|p| p.into_inner()).pending += 1;
+        {
+            let mut s = self.shared.0.lock().unwrap_or_else(|p| p.into_inner());
+            s.pending += 1;
+            s.asked += 1;
+        }
         let _ = tx.send(job);
     }
 
     /// Saves written since last asked.
     pub fn take_done(&self) -> Vec<Done> {
         std::mem::take(&mut self.shared.0.lock().unwrap_or_else(|p| p.into_inner()).done)
+    }
+
+    /// (saves asked so far, written so far)
+    fn counts(&self) -> (u64, u64) {
+        let s = self.shared.0.lock().unwrap_or_else(|p| p.into_inner());
+        (s.asked, s.written)
     }
 
     /// Until nothing is left to write, or `within` passes — whether it's all written.
@@ -116,6 +154,10 @@ impl Saver {
 /// waited for forever — the quit is refused, the saves go on).
 const QUIT_WAIT: Duration = Duration::from_secs(10);
 
+/// A run waiting this long for its saves says so (`after_saves`) — a usual save is a few ms, never seen.
+const SAY_WAITING: Duration = Duration::from_secs(1);
+const WAITING: &str = "saves-before-run";
+
 impl Editor {
     /// Save document `id` in the background. Err: it can't be saved (nothing was asked) — the same
     /// errors a save always gave, at once.
@@ -128,12 +170,50 @@ impl Editor {
         Ok(())
     }
 
-    /// Finish the saves written so far (the saver's wake-up, `flush_saves`).
+    /// Finish the saves written so far (the saver's wake-up, `flush_saves`), then start what waited for them.
     pub fn saves_done(&mut self) {
         let done = self.saver.take_done();
-        if done.is_empty() {
-            return;
+        if !done.is_empty() {
+            self.saves_finish(done);
         }
+        let (_, written) = self.saver.counts();
+        let (ready, waiting) =
+            std::mem::take(&mut self.saver.waits).into_iter().partition(|w| w.asked <= written);
+        self.saver.waits = waiting;
+        if self.saver.waits.is_empty() {
+            self.step_done(WAITING);
+        }
+        for w in ready {
+            self.with_session(w.session, w.then);
+        }
+    }
+
+    /// `then` once the saves asked so far are on disk — what runs the code on disk (a task, tests, the
+    /// preflight) asks it after `auto_save`. Not a wait: the saver's idle event starts it (in the session
+    /// that asked), and with nothing being written it runs at once. Saves keep their order, and so do
+    /// these. A slow disk once held the screen here (`flush_saves`, up to 10 s); now a step says it.
+    pub fn after_saves(&mut self, then: impl FnOnce(&mut Editor) + 'static) {
+        let (asked, written) = self.saver.counts();
+        if written >= asked {
+            // (what's written finished first — its marks, its "Saved" — and earlier waits go first)
+            self.saves_done();
+            return then(self);
+        }
+        let first = self.saver.waits.is_empty();
+        self.saver.waits.push(Wait { asked, session: self.session.id, then: Box::new(then) });
+        if first {
+            self.events.jobs().spawn(|| {
+                std::thread::sleep(SAY_WAITING);
+                |ed: &mut Editor| {
+                    if !ed.saver.waits.is_empty() {
+                        ed.set_step(WAITING, "still writing files — going on once they're saved");
+                    }
+                }
+            });
+        }
+    }
+
+    fn saves_finish(&mut self, done: Vec<Done>) {
         let (mut saved, mut auto, mut failed) = (Vec::new(), Vec::new(), Vec::new());
         let mut why = "";
         for d in done {
@@ -308,6 +388,85 @@ mod tests {
         assert!(ed.should_quit, "{:?}", toasts(&ed, ToastKind::Error));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "TWOne\n");
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    /// Events until `done` (5 s at most).
+    fn settle_until(ed: &mut Editor, done: impl Fn(&Editor) -> bool) {
+        let end = std::time::Instant::now() + Duration::from_secs(5);
+        while !done(ed) {
+            let left = end.saturating_duration_since(std::time::Instant::now());
+            let ev = ed.events.recv_timeout(left).expect("event before timeout");
+            ed.handle_event(ev);
+        }
+    }
+
+    /// A run starts once the saves before it are written — the saver's idle event, not a wait on the main
+    /// loop (a slow disk held the screen up to 10 s) — and it reads what was saved.
+    #[test]
+    fn a_run_starts_once_its_saves_are_written() {
+        let (mut ed, path) = opened("run");
+        ed.saver.slow = Duration::from_millis(800);
+        feed(&mut ed, "cTWO<esc>");
+        let dir = path.parent().unwrap().to_path_buf();
+        let task = crate::task::Task { name: "cat".into(), cmd: "cat a.txt".into(), cwd: dir.clone() };
+        let t = std::time::Instant::now();
+        ed.task_start(task);
+        let took = t.elapsed();
+        eprintln!("run asked with a save being written: {:.2} ms on the main loop", took.as_secs_f64() * 1e3);
+        assert!(took < Duration::from_millis(300), "the main loop waited {took:?} for the save");
+        assert!(ed.session.task_run.is_none(), "started before its save was written");
+        settle_until(&mut ed, |ed| {
+            ed.session.task_run.as_ref().is_some_and(|r| r.state != crate::task::State::Running)
+        });
+        let r = ed.session.task_run.as_ref().unwrap();
+        assert_eq!(r.state, crate::task::State::Passed);
+        let out: Vec<&str> = r.output.iter().map(|(_, l)| l.as_str()).collect();
+        assert_eq!(out, ["TWOne"], "it read the saved file");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A run asked in one session starts in that session, though another is in front once its saves are
+    /// written.
+    #[test]
+    fn a_run_waiting_for_its_saves_stays_its_sessions() {
+        let (mut ed, path) = opened("session");
+        let dir = path.parent().unwrap().to_path_buf();
+        let other = dir.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        let first = ed.session.id;
+        let second = ed.session_add(other.canonicalize().unwrap());
+        ed.saver.slow = Duration::from_millis(300);
+        feed(&mut ed, "cTWO<esc>");
+        ed.task_start(crate::task::Task { name: "cat".into(), cmd: "cat a.txt".into(), cwd: dir.clone() });
+        assert!(ed.session_switch(second));
+        let ended = |ed: &Editor| {
+            let s = std::iter::once(&ed.session).chain(&ed.sessions).find(|s| s.id == first).unwrap();
+            s.task_run.as_ref().is_some_and(|r| r.state != crate::task::State::Running)
+        };
+        settle_until(&mut ed, ended);
+        assert_eq!(ed.session.id, second);
+        assert!(ed.session.task_run.is_none(), "not the session in front's");
+        let s = ed.sessions.iter().find(|s| s.id == first).unwrap();
+        let out: Vec<&str> = s.task_run.as_ref().unwrap().output.iter().map(|(_, l)| l.as_str()).collect();
+        assert_eq!(out, ["TWOne"]);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A save that takes long (a network drive): after a second the run says it's waiting for it — and that
+    /// goes once it starts.
+    #[test]
+    fn a_run_waiting_long_for_its_saves_says_so() {
+        let (mut ed, path) = opened("long");
+        let dir = path.parent().unwrap().to_path_buf();
+        ed.saver.slow = SAY_WAITING + Duration::from_millis(400);
+        feed(&mut ed, "cTWO<esc>");
+        ed.task_start(crate::task::Task { name: "cat".into(), cmd: "cat a.txt".into(), cwd: dir.clone() });
+        let said = |ed: &Editor| ed.toasts.iter().any(|t| t.text.starts_with("still writing files"));
+        settle_until(&mut ed, said);
+        assert!(ed.session.task_run.is_none());
+        settle_until(&mut ed, |ed| ed.session.task_run.is_some());
+        assert!(!said(&ed), "gone once it started");
+        std::fs::remove_dir_all(dir).ok();
     }
 
     /// Auto-save (focus leaving) saves every modified file in the background, one message for them all.

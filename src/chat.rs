@@ -17,10 +17,8 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io::Write;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::process::ChildStdin;
 use std::time::Instant;
 
 use crate::document::DocId;
@@ -205,7 +203,8 @@ pub enum State {
 }
 
 struct Proc {
-    stdin: ChildStdin,
+    /// Its stdin, written off the main loop (`llm::Lines`)
+    stdin: llm::Lines,
     pid: u32,
 }
 
@@ -330,7 +329,7 @@ impl Chat {
 }
 
 impl Chat {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Chat {
             msgs: Vec::new(),
             input: String::new(),
@@ -731,9 +730,9 @@ fn ensure_proc(ed: &mut Editor) {
             return;
         }
     };
-    let Some(mut stdin) = child.stdin.take() else { return };
+    let Some(stdin) = child.stdin.take().map(llm::Lines::new) else { return };
     // tarae's MCP server (the note tool) — registered before anything else is said
-    let _ = writeln!(stdin, "{}", llm::initialize_message(&["tarae"])).and_then(|_| stdin.flush());
+    let _ = stdin.send(llm::initialize_message(&["tarae"]));
     // A fresh process has seen no file yet
     c.sent.clear();
     // (unique across chats too: a closed chat's process ending after a new chat's started isn't the new one's)
@@ -1056,8 +1055,7 @@ pub fn submit(ed: &mut Editor, question: &str, about: Option<String>, chip: Opti
         Some(a) => format!("{context}\n{a}\n\n{question}"),
         None => format!("{context}\n\n{question}"),
     };
-    let ok = writeln!(p.stdin, "{}", llm::user_message(&content)).and_then(|_| p.stdin.flush());
-    if let Err(e) = ok {
+    if let Err(e) = p.stdin.send(llm::user_message(&content)) {
         // (said again with the next message that goes)
         ed.session.checkpoints.tell = told;
         c.screen = shot;
@@ -1146,15 +1144,14 @@ pub fn request(ed: &mut Editor, request: serde_json::Value) {
     if let Some(p) = ed.session.chat.as_mut().and_then(|c| c.proc.as_mut()) {
         let id = format!("tarae-{}", N.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
         let line = serde_json::json!({ "type": "control_request", "request_id": id, "request": request });
-        let _ = writeln!(p.stdin, "{line}").and_then(|_| p.stdin.flush());
+        let _ = p.stdin.send(line.to_string());
     }
 }
 
 /// Our answer to one of claude's control requests (the chat process of now).
 pub fn respond(ed: &mut Editor, request_id: &str, response: serde_json::Value) {
     if let Some(p) = ed.session.chat.as_mut().and_then(|c| c.proc.as_mut()) {
-        let line = llm::control_response(request_id, response);
-        let _ = writeln!(p.stdin, "{line}").and_then(|_| p.stdin.flush());
+        let _ = p.stdin.send(llm::control_response(request_id, response));
     }
 }
 
@@ -1184,7 +1181,7 @@ pub fn stop(ed: &mut Editor) {
     }
     if let Some(p) = &mut c.proc {
         c.stopping = true;
-        let _ = writeln!(p.stdin, "{}", llm::interrupt_message()).and_then(|_| p.stdin.flush());
+        let _ = p.stdin.send(llm::interrupt_message());
     }
 }
 
@@ -1813,6 +1810,46 @@ mod tests {
         let sent = std::fs::read_to_string(&log).unwrap();
         assert_eq!(sent.lines().count(), 2, "{sent}");
         assert!(sent.lines().all(|l| l.contains("<file-content>")), "{sent}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A claude still starting doesn't read its stdin yet (a cold start is 8–10 s), and a pipe takes 64 KB
+    /// before a write waits: a big message (the file, other unsaved buffers, a screen) goes out on the
+    /// writer thread, the main loop going on — and what's written keeps its order.
+    #[test]
+    fn a_big_message_to_a_claude_still_starting_doesnt_hold_the_main_loop() {
+        let dir = std::env::temp_dir().join(format!("tarae-chat-cold-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("stdin.log");
+        // (a stand-in: reads nothing for two seconds, then everything into the log)
+        let script = format!("sleep 2; cat > '{}'", log.display());
+        let mut ed = editor("fn main() {}\n");
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), script];
+        open(&mut ed);
+        let question = format!("{}\nend of the question", "x".repeat(200 * 1024));
+        ed.session.chat.as_mut().unwrap().input = question;
+        let t = Instant::now();
+        send(&mut ed);
+        let took = t.elapsed();
+        stop(&mut ed);
+        eprintln!("chat write: send took {:.2} ms with a 200 KB message", took.as_secs_f64() * 1000.0);
+        assert!(ed.session.chat.as_ref().unwrap().busy(), "sent");
+        assert!(took < std::time::Duration::from_millis(500), "the main loop waited {took:?} on the pipe");
+        // Everything arrives, in the order it was written: initialize, the message, the interrupt
+        let end = Instant::now() + std::time::Duration::from_secs(10);
+        let sent = loop {
+            let s = std::fs::read_to_string(&log).unwrap_or_default();
+            if s.lines().count() >= 3 || Instant::now() > end {
+                break s;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        let lines: Vec<&str> = sent.lines().collect();
+        assert_eq!(lines.len(), 3, "{}", &sent[..sent.len().min(300)]);
+        assert!(lines[0].contains("initialize"), "{}", &lines[0][..lines[0].len().min(200)]);
+        assert!(lines[1].contains("end of the question"));
+        assert!(lines[2].contains("interrupt"), "{}", lines[2]);
         std::fs::remove_dir_all(&dir).ok();
     }
 

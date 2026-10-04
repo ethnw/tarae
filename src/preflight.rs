@@ -442,7 +442,8 @@ impl Editor {
         }
     }
 
-    /// The steps of `set` out of `all`, one after another, in the task panel (its tab named for the set).
+    /// The steps of `set` out of `all`, one after another, in the task panel (its tab named for the set) —
+    /// started once the saves before it are written (`after_saves`; what stops it then is said there).
     fn preflight_run(&mut self, all: Vec<Step>, set: Set) -> Result<(), String> {
         self.preflight_free()?;
         let steps = set.of(&all);
@@ -454,11 +455,31 @@ impl Editor {
         let title = set.title(&all);
         let trace = crate::trace::RunTrace::new(format!("{title}: {}", names.join(", ")));
         self.auto_save(" · before the preflight");
-        self.flush_saves();
-        trace.step("saved");
-        let task = crate::task::Task { name: title.into(), cmd: script(&steps), cwd: self.preflight_root() };
-        let generation = self.task_start_preflight(task, trace).ok_or("the preflight didn't start")?;
-        self.session.preflight = Some(Preflight::new(generation, &all, set));
+        self.after_saves(move |ed| {
+            trace.step("saved");
+            let started = match ed.preflight_free() {
+                Err(e) => {
+                    trace.end(format!("didn't start: {e}"));
+                    Err(e)
+                }
+                Ok(()) => {
+                    let task = crate::task::Task {
+                        name: title.into(),
+                        cmd: script(&steps),
+                        cwd: ed.preflight_root(),
+                    };
+                    ed.task_start_preflight(task, trace)
+                        .ok_or_else(|| "the preflight didn't start".to_string())
+                }
+            };
+            match started {
+                Ok(generation) => ed.session.preflight = Some(Preflight::new(generation, &all, set)),
+                Err(e) => {
+                    ed.session.bring_after_preflight = false;
+                    ed.set_error(e);
+                }
+            }
+        });
         Ok(())
     }
 

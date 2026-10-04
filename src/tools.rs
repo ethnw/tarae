@@ -1527,7 +1527,30 @@ pub fn guard_and_go(ed: &mut Editor, who: For, job: Job, asked: bool, extra: Ext
     });
 }
 
+/// It runs what's on disk: the user's unsaved files are saved, and it starts once they're written
+/// (`after_saves` — an event, not a wait).
 fn go(ed: &mut Editor, who: For, job: Job, guard: Option<Guard>) {
+    ed.auto_save(match &job {
+        Job::Command(..) => " · before the command",
+        Job::Tests(_) => " · before test",
+    });
+    let turn = |ed: &Editor, call: &Call| {
+        ed.session.chat.as_ref().is_some_and(|c| c.generation() == call.generation && c.busy())
+    };
+    let asked_in_turn = matches!(&who, For::Claude(call) if turn(ed, call));
+    ed.after_saves(move |ed| {
+        // (Claude's turn ended while the saves were written: nothing waits for it)
+        if asked_in_turn
+            && let For::Claude(call) = &who
+            && !turn(ed, call)
+        {
+            return;
+        }
+        go_now(ed, who, job, guard)
+    });
+}
+
+fn go_now(ed: &mut Editor, who: For, job: Job, guard: Option<Guard>) {
     if matches!(who, For::Claude(_)) {
         let dir = match &guard {
             Some(Guard::In(p)) => p.run.clone(),

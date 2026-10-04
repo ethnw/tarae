@@ -111,13 +111,17 @@ impl Made {
     /// Whether `at` (a real path) is in a run's folder, or was made in the temp folders while a run went
     /// (a folder made then counts with what's in it — a Grep or Glob of it). Made = its birth time.
     pub fn covers(&self, at: &Path, now: SystemTime) -> bool {
+        self.covers_with(at, now, |p| std::fs::symlink_metadata(p).and_then(|m| m.created()).ok())
+    }
+
+    /// `covers` with the birth times `born` gives (tests stand in the kernel's stamps).
+    fn covers_with(&self, at: &Path, now: SystemTime, born: impl Fn(&Path) -> Option<SystemTime>) -> bool {
         if self.dirs.iter().any(|d| at.starts_with(d)) {
             return true;
         }
         if !self.temp.iter().any(|t| at.starts_with(t) && at != t) || self.runs.is_empty() {
             return false;
         }
-        let born = |p: &Path| std::fs::symlink_metadata(p).and_then(|m| m.created()).ok();
         let during = |t: SystemTime| self.runs.iter().any(|&(from, to)| from <= t && t <= to.unwrap_or(now));
         // The path, else a folder it's in made then (up to the temp folder itself)
         at.ancestors().take_while(|p| !self.temp.iter().any(|t| t == p)).any(|p| born(p).is_some_and(during))
@@ -136,11 +140,31 @@ pub fn covered(look: &Look, root: &Path, chat: &Allowed, kept: &Allowed, made: &
     })
 }
 
-/// One of Claude's runs started (`tools::go`).
+/// One of Claude's runs started (`tools::go`) — by the clock its files are stamped by (`file_clock`).
 pub fn run_started(ed: &mut Editor, dir: Option<std::sync::Arc<crate::sandbox::RunDir>>) {
+    let from = ed.run_clock.unwrap_or(file_clock)();
     if let Some(c) = ed.session.chat.as_mut() {
-        c.ran.push(Ran { from: SystemTime::now(), to: None, dir });
+        c.ran.push(Ran { from, to: None, dir });
     }
+}
+
+/// Now, as the kernel stamps a file made now. Linux stamps from its coarse clock — the time of the last
+/// tick, 1–10 ms behind the fine one — so a file a run made a moment after `SystemTime::now()` was read
+/// for its start was born "before" it, and asked (seen in the Linux container: a shot written right after
+/// the start). Its own coarse clock is never past such a stamp. macOS stamps from the fine clock.
+#[cfg(target_os = "linux")]
+pub fn file_clock() -> SystemTime {
+    // SAFETY: a timespec is plain integers (all-zero is valid); clock_gettime writes the one it's given.
+    let mut t: libc::timespec = unsafe { std::mem::zeroed() };
+    if unsafe { libc::clock_gettime(libc::CLOCK_REALTIME_COARSE, &mut t) } != 0 {
+        return SystemTime::now();
+    }
+    SystemTime::UNIX_EPOCH + std::time::Duration::new(t.tv_sec as u64, t.tv_nsec as u32)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn file_clock() -> SystemTime {
+    SystemTime::now()
 }
 
 /// Claude's run ended (or was dropped): its time is over.
@@ -379,6 +403,64 @@ mod tests {
         // No run this turn: nothing
         assert!(!Made { runs: vec![], dirs: vec![], ..made }.covers(&shot, now));
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    const TICK: std::time::Duration = std::time::Duration::from_millis(4);
+
+    /// `t` as a coarse clock tells it: the time of the tick before (Linux stamps new files so).
+    fn coarse(t: SystemTime) -> SystemTime {
+        let d = t.duration_since(SystemTime::UNIX_EPOCH).unwrap();
+        t - std::time::Duration::from_nanos((d.as_nanos() % TICK.as_nanos()) as u64)
+    }
+
+    /// A fine "now" 3 ms past a tick.
+    fn fine_start() -> SystemTime {
+        SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(1_000_003)
+    }
+
+    fn coarse_start() -> SystemTime {
+        coarse(fine_start())
+    }
+
+    /// A file a run makes 50 µs after it starts is stamped one coarse tick before the fine start (Linux):
+    /// a run started by the coarse clock (`file_clock` there) counts it as its own; one started by the
+    /// fine clock doesn't, as before (it asked).
+    #[test]
+    fn a_file_stamped_by_the_coarse_clock_is_the_runs_that_started_by_it() {
+        let temp = PathBuf::from("/t/tmp");
+        let shot = temp.join("shot.png");
+        let born = |_: &Path| Some(coarse(fine_start() + std::time::Duration::from_micros(50)));
+        assert!(born(&shot).unwrap() < fine_start(), "stamped before the fine start");
+        let mut ed = Editor::new(crate::config::Config::default());
+        let mut made = |clock: fn() -> SystemTime| {
+            ed.session.chat = Some(crate::chat::Chat::new());
+            ed.run_clock = Some(clock);
+            run_started(&mut ed, None);
+            run_ended(&mut ed);
+            Made { temp: vec![temp.clone()], ..Made::of(&ed.session.chat.as_ref().unwrap().ran) }
+        };
+        let now = SystemTime::now();
+        assert!(made(coarse_start).covers_with(&shot, now, born), "by the coarse clock: the run's");
+        assert!(!made(fine_start).covers_with(&shot, now, born), "by the fine clock: before it");
+    }
+
+    /// The real clock: a file made right after `file_clock` is read is never born before it — on Linux the
+    /// coarse clock against the kernel's own stamps (`SystemTime::now()` failed this there).
+    #[test]
+    fn a_file_made_after_the_file_clock_is_read_is_never_older() {
+        let dir = crate::sandbox::real(&std::env::temp_dir())
+            .join(format!("tarae-file-clock-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..200 {
+            let t = file_clock();
+            let p = dir.join(i.to_string());
+            std::fs::write(&p, "x").unwrap();
+            // (a filesystem with no birth times: nothing to compare)
+            let Ok(born) = std::fs::metadata(&p).and_then(|m| m.created()) else { break };
+            assert!(born >= t, "file {i} born {born:?}, the clock read {t:?} before it");
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// #45: tarae's own log is read unasked — Read, a Grep of it, a read-only command naming it — but only

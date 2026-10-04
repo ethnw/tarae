@@ -1823,7 +1823,9 @@ mod tests {
     }
 
     /// A process's command line and working folder, read from the OS (a stand-in child of the test's own,
-    /// in its temp folder, stopped at its end).
+    /// in its temp folder, stopped at its end). Read until they're what it was started with, a second at
+    /// most: right after the spawn it can still be on its way into `sleep` (on Linux its command line read
+    /// as nothing then).
     #[test]
     fn a_processs_command_line_and_folder_are_read() {
         let dir = std::fs::canonicalize(std::env::temp_dir())
@@ -1832,6 +1834,14 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mut child =
             std::process::Command::new("sleep").arg("30").current_dir(&dir).spawn().expect("sleep");
+        let until = |want: &dyn Fn() -> bool| {
+            let end = std::time::Instant::now() + Duration::from_secs(1);
+            while !want() && std::time::Instant::now() < end {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        until(&|| command(child.id()).as_deref() == Some("sleep 30"));
+        until(&|| cwd(child.id()).as_ref() == Some(&dir));
         let (cmd, folder) = (command(child.id()), cwd(child.id()));
         let _ = child.kill();
         let _ = child.wait();

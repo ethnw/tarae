@@ -32,6 +32,8 @@ pub enum Stage {
     Turn,
     /// Claude's accepted edits land on disk first (`claudes_writes`).
     Writes,
+    /// The files are saved, and written (`saved_then`).
+    Saving,
     /// The project root and the binary are looked up (a worker).
     Finding,
     /// The build runs as a task (its generation).
@@ -188,10 +190,22 @@ fn claudes_writes(ed: &mut Editor) -> bool {
     true
 }
 
-/// Files saved, nothing in the way? Else the restart is called off, with why.
-fn clear_to_go(ed: &mut Editor) -> bool {
+/// Files saved, then — once they're written (`after_saves`: the saver's event, not a wait; a slow disk says
+/// so meanwhile) and nothing's in the way — `next`. Else the restart is called off, with why.
+fn saved_then(ed: &mut Editor, id: u64, next: impl FnOnce(&mut Editor) + 'static) {
+    let Some(r) = ed.restart.as_mut() else { return };
+    r.stage = Stage::Saving;
     ed.auto_save(" · before restarting");
-    let saved = ed.flush_saves();
+    // (`:restart` again meanwhile: canceled, or another one's)
+    ed.after_saves(move |ed| {
+        if at(ed, id, &Stage::Saving) && clear_to_go(ed) {
+            next(ed);
+        }
+    });
+}
+
+/// Saved, nothing in the way? Else the restart is called off, with why.
+fn clear_to_go(ed: &mut Editor) -> bool {
     let unsaved: Vec<String> = ed
         .docs
         .iter()
@@ -200,7 +214,6 @@ fn clear_to_go(ed: &mut Editor) -> bool {
         .collect();
     let why = match blocker(ed, false) {
         Some(why) => why,
-        None if !saved => "still saving — the disk is slow".into(),
         None if !unsaved.is_empty() => format!("couldn't save {}", unsaved.join(", ")),
         None => return true,
     };
@@ -211,12 +224,17 @@ fn clear_to_go(ed: &mut Editor) -> bool {
 
 /// On from the wait: saved, the root and binary looked up, then built (or checked right away).
 fn go(ed: &mut Editor) {
-    if claudes_writes(ed) || !clear_to_go(ed) {
+    if claudes_writes(ed) {
         return;
     }
+    let Some(id) = ed.restart.as_ref().map(|r| r.id) else { return };
+    saved_then(ed, id, move |ed| find(ed, id));
+}
+
+/// The project root and the binary looked up (a worker), then the build — or the check right away.
+fn find(ed: &mut Editor, id: u64) {
     let Some(r) = ed.restart.as_mut() else { return };
     r.stage = Stage::Finding;
-    let id = r.id;
     let build = Some(ed.config.restart_build.trim().to_string()).filter(|c| r.build && !c.is_empty());
     let binary = ed.config.restart_binary.clone();
     let root = ed.session.root.clone();
@@ -295,12 +313,12 @@ fn check(ed: &mut Editor, bin: PathBuf) {
                 }
                 return turn_over(ed);
             }
-            if clear_to_go(ed)
-                && let Some(r) = ed.restart.as_mut()
-            {
-                r.stage = Stage::Ready(bin);
-                ed.should_quit = true;
-            }
+            saved_then(ed, id, move |ed| {
+                if let Some(r) = ed.restart.as_mut() {
+                    r.stage = Stage::Ready(bin);
+                    ed.should_quit = true;
+                }
+            });
         }
     });
 }
@@ -890,6 +908,32 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// A slow disk doesn't hold the screen: `:restart` saves and goes on once the files are written (the
+    /// saver's event, not a wait) — and `:restart` again meanwhile cancels it.
+    #[test]
+    fn a_slow_save_is_waited_for_off_the_main_loop() {
+        let dir = temp("slow");
+        let bin = fake_tarae(&dir, "tarae 9.9.9");
+        let mut ed = editing(&dir, "", &bin);
+        ed.saver.slow = Duration::from_millis(500);
+        let t = Instant::now();
+        feed(&mut ed, ":restart!<ret>");
+        let took = t.elapsed();
+        assert!(took < Duration::from_millis(300), "the main loop waited {took:?} for the save");
+        assert_eq!(ed.restart.as_ref().unwrap().stage, Stage::Saving, "{}", toasts(&ed));
+        settle_until(&mut ed, |ed| ed.should_quit || ed.restart.is_none());
+        assert_eq!(ed.restart.as_ref().and_then(Restart::ready), Some(bin.as_path()), "{}", toasts(&ed));
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "Xone\n", "saved first");
+
+        let mut ed = editing(&dir, "", &bin);
+        ed.saver.slow = Duration::from_millis(300);
+        feed(&mut ed, ":restart!<ret>:restart!<ret>");
+        assert!(ed.restart.is_none());
+        settle_until(&mut ed, |ed| !ed.doc().is_modified());
+        assert!(ed.restart.is_none() && !ed.should_quit, "{}", toasts(&ed));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// A failed build, or a binary that isn't a tarae, calls it off — tarae stays, and says why.
     #[test]
     fn a_failed_build_or_a_wrong_binary_calls_it_off() {
@@ -942,6 +986,8 @@ mod tests {
         ed.session.committing = None;
         let task = crate::task::Task { name: "slow".into(), cmd: "sleep 5".into(), cwd: dir.clone() };
         ed.task_start(task);
+        // (it starts once the modified file is saved)
+        settle_until(&mut ed, |ed| ed.session.task_run.is_some());
         try_it(&mut ed, "slow is running — let it finish, or stop it (space m c)");
         ed.task_close();
         ed.dap = Some(crate::dap::Dap::placeholder(crate::dap::State::Starting, "app".into()));
