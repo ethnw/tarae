@@ -201,6 +201,11 @@ impl Run {
         self.generation
     }
 
+    /// Its process, while it runs (`:procs`).
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
+    }
+
     /// The output's first line in `rows` rows: where it was scrolled to, else the end (the newest in sight).
     pub fn top(&self, rows: usize) -> usize {
         let max = self.output.len().saturating_sub(rows);

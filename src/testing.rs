@@ -402,6 +402,11 @@ impl Drop for TestRun {
 }
 
 impl TestRun {
+    /// Its process, while it runs (`:procs`).
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
+    }
+
     fn kill(&mut self) {
         if let Some(pid) = self.pid.take()
             && self.state == RunState::Running

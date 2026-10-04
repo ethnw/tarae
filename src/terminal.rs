@@ -43,6 +43,11 @@ pub struct Terminal {
 }
 
 impl Terminal {
+    /// Its program's process, while it runs (`:procs`).
+    pub fn pid(&self) -> Option<u32> {
+        self.exited.is_none().then_some(self.pid)
+    }
+
     /// Rows × columns the program sees — the panel's; it's told when that changes (SIGWINCH).
     pub fn resize(&mut self, rows: u16, cols: u16) {
         let (rows, cols) = (rows.max(2), cols.max(10));

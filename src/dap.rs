@@ -177,6 +177,13 @@ impl Drop for Dap {
     }
 }
 
+impl Dap {
+    /// (the adapter's process, the helper's) — `:procs`.
+    pub fn pids(&self) -> (Option<u32>, Option<u32>) {
+        (self.child.as_ref().map(Child::id), self.helper.as_ref().map(Child::id))
+    }
+}
+
 // ── Process groups ───────────────────────────────────────────────────────
 
 /// Launch in a new session (setsid) — the process and whatever it starts (debuggee·test binaries) can't

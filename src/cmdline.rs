@@ -84,6 +84,7 @@ pub const COMMANDS: &[TypedCmd] = &[
     c(&["chat-screen"], Arg::None, "Send the screen, as text, with your next chat message"),
     c(&["sandbox-grant"], Arg::None, "A row of :sandbox-blocked's list, on its card"),
     c(&["log-open"], Arg::None, "Open tarae's log (language servers, errors)"),
+    c(&["procs"], Arg::None, "What tarae runs and what it costs"),
     c(&["messages"], Arg::None, "This session's notifications again, newest first"),
     c(&["redraw"], Arg::None, "Draw the whole screen again (when something else wrote over it)"),
     c(&["lsp-restart"], Arg::None, "Restart this file's language server"),

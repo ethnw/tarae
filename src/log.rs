@@ -55,7 +55,17 @@ fn sender() -> Option<&'static Sender<String>> {
 
 /// Local (year, month, day, hour, minute, second).
 fn now() -> (i32, i32, i32, i32, i32, i32) {
-    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    local(std::time::SystemTime::now())
+}
+
+/// `14:02` — when `at` was, local time.
+pub fn clock(at: std::time::SystemTime) -> String {
+    let (.., h, m, _) = local(at);
+    format!("{h:02}:{m:02}")
+}
+
+fn local(at: std::time::SystemTime) -> (i32, i32, i32, i32, i32, i32) {
+    let secs = at.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     let t = secs as libc::time_t;
     // SAFETY: localtime_r only writes the `tm` we own; a zeroed `tm` is a valid value to start from.
     let tm = unsafe {

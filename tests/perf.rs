@@ -130,6 +130,52 @@ fn perf_e2e_idle_cpu() {
     report("e2e_idle_cpu_ms_per_s", ms(used.cpu) / 3.0, 10.0, 0.5);
 }
 
+/// What `:procs` costs — its looks at tarae's processes (here tarae, the shell in its terminal): one look,
+/// from tarae's CPU looking every 50 ms (`TARAE_PROCS_EVERY` standing in for its 30 s) against the same
+/// tarae at its own pace; what that makes a second while `:procs` is closed; and while it's open (a look and
+/// a frame a second).
+#[test]
+fn perf_e2e_procs_sampling() {
+    if unoptimized("perf_e2e_procs_sampling") {
+        return;
+    }
+    let secs = 3.0;
+    let idle = |sb: Sandbox, open: bool| {
+        sb.write("a.txt", "one\n");
+        let mut t = sb.spawn(&["a.txt"]);
+        t.wait_text("one");
+        t.send(" T");
+        t.wait_for("the terminal", |s| s.contains("TERMINAL") && (s.contains("$ ") || s.contains("# ")));
+        t.send("\x1c");
+        t.wait_for("the code has the keys", |s| s.contains("C-\\ type in it"));
+        if open {
+            t.send(":procs\r");
+            t.wait_text("SELF-CHECKS");
+        }
+        std::thread::sleep(Duration::from_secs(1));
+        let (before, frames) = (t.usage(), t.frames());
+        std::thread::sleep(Duration::from_secs_f64(secs));
+        let used = t.usage() - before;
+        // Closed, a look draws nothing (measured 2026-10-03: 0 frames, ~2.5 thread wakes a look)
+        if !open {
+            assert_eq!(t.frames() - frames, 0, "a look drew a frame while :procs was closed");
+        }
+        ms(used.cpu) / secs
+    };
+    let every_ms = 50.0;
+    let fast = idle(Sandbox::new("perf-procs-fast").with_env("TARAE_PROCS_EVERY", "50"), false);
+    let own = idle(Sandbox::new("perf-procs-own"), false);
+    let open = idle(Sandbox::new("perf-procs-open"), true);
+    // (ms a second over 1000/every looks a second: µs a look — a cold wake of two threads, not the ~40 µs a
+    // look takes warm)
+    let look_us = (fast - own).max(0.0) * every_ms;
+    let closed_us = look_us / 30.0;
+    eprintln!("procs: {fast:.3} ms/s looking every {every_ms} ms, {own:.3} at its own pace, {open:.3} open");
+    report("e2e_procs_look_us", look_us, 2000.0, 40.0);
+    report("e2e_procs_closed_cpu_us_per_s", closed_us, 100.0, 2.0);
+    report("e2e_procs_open_cpu_ms_per_s", open, 10.0, 2.0);
+}
+
 /// A chat turn's wait (N6): nothing on screen moves but the waiting animation — tarae's CPU, its frames a
 /// second and the bytes a frame writes, over 4 s of it.
 #[test]

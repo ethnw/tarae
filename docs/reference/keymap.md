@@ -449,6 +449,7 @@ Type `:` in normal mode. `Tab` completes command names and their arguments (path
 | `:chat-screen` |  | Send the screen, as text, with your next chat message |
 | `:sandbox-grant` |  | A row of :sandbox-blocked's list, on its card |
 | `:log-open` |  | Open tarae's log (language servers, errors) |
+| `:procs` |  | What tarae runs and what it costs |
 | `:messages` |  | This session's notifications again, newest first |
 | `:redraw` |  | Draw the whole screen again (when something else wrote over it) |
 | `:lsp-restart` |  | Restart this file's language server |

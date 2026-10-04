@@ -278,6 +278,8 @@ pub struct Screen {
     pub task_panel: std::cell::Cell<Option<(usize, usize, usize)>>,
     /// A plugin's panel: (its first screen line, its last, its first row's line, the first row shown).
     pub plugin_panel: std::cell::Cell<Option<(usize, usize, usize, usize)>>,
+    /// `:procs`' panel as drawn (for the mouse).
+    pub procs_panel: std::cell::Cell<Option<crate::procs::Area>>,
     /// The note card and the thought card this frame (x, y, width, height).
     pub note_card: std::cell::Cell<Option<(usize, usize, usize, usize)>>,
     pub thought_card: std::cell::Cell<Option<(usize, usize, usize, usize)>>,
@@ -418,6 +420,8 @@ pub struct Editor {
     pub agent: Option<crate::agent::Agent>,
     /// WebAssembly plugins: their thread and the commands they registered (`None` until there are some).
     pub plugins: Option<crate::plugin::Plugins>,
+    /// The processes tarae started, their costs and its checks on them (`:procs`, `procs.rs`).
+    pub procs: crate::procs::Procs,
     /// Lists used by `:` completion (folders, themes — filled by a worker thread) · folders being read.
     pub cmd_lists: crate::cmdline::Lists,
     /// Grammars already offered for download (this session).
@@ -633,6 +637,7 @@ impl Editor {
             breakpoints: Default::default(),
             agent: None,
             plugins: None,
+            procs: Default::default(),
             cmd_lists: Default::default(),
             grammar_hinted: Default::default(),
             offers: Vec::new(),
@@ -995,6 +1000,7 @@ impl Editor {
             if dy < 0 {
                 self.bottom_focus = false;
                 self.plugin_panel_unfocus();
+                self.procs_unfocus();
             }
             return;
         }
@@ -1530,6 +1536,26 @@ impl Editor {
             }
             return;
         }
+        // `:procs`' panel: the same
+        if let Some(a) = s.procs_panel.get()
+            && (a.top..=a.bottom).contains(&y)
+            && s.chat_x.is_none_or(|cx| x < cx)
+            && self.procs_up()
+        {
+            match m.kind {
+                K::Down => self
+                    .procs_click((a.first..a.first + a.shown).contains(&y).then(|| a.scroll + y - a.first)),
+                K::ScrollDown | K::ScrollUp => {
+                    let n = self.procs.rows.len();
+                    if let Some(p) = self.procs.panel.as_mut() {
+                        let by = if m.kind == K::ScrollDown { 3 } else { -3 };
+                        p.selected = p.selected.saturating_add_signed(by).min(n.saturating_sub(1));
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
         // A plugin's panel: a click takes the keys there (on a row, selects it); the wheel moves through it
         if let Some((y0, y1, first, scroll)) = s.plugin_panel.get()
             && (y0..=y1).contains(&y)
@@ -1662,6 +1688,7 @@ impl Editor {
             c.focused = false;
         }
         self.plugin_panel_unfocus();
+        self.procs_unfocus();
         self.bottom_focus = false;
         self.completion = None;
         self.popup = None;
@@ -2507,6 +2534,9 @@ impl Editor {
             return;
         }
         if crate::sidebar::key(self, key) {
+            return;
+        }
+        if crate::procs::key(self, key) {
             return;
         }
         if crate::plugin::plugin_panel_key(self, key) {

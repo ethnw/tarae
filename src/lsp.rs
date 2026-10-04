@@ -559,8 +559,7 @@ impl Drop for Client {
 }
 
 impl Client {
-    /// The server's process id (tests: is it gone, reaped?).
-    #[cfg(test)]
+    /// The server's process id (`:procs`; tests: is it gone, reaped?).
     pub fn pid(&self) -> Option<u32> {
         self.child.as_ref().map(Child::id)
     }

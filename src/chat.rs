@@ -334,6 +334,31 @@ impl Chat {
             llm::kill(p.pid);
         }
     }
+
+    /// Its claude's process (`:procs`).
+    pub fn pid(&self) -> Option<u32> {
+        self.proc.as_ref().map(|p| p.pid)
+    }
+
+    /// `s` in `:procs`: its claude stops — as if it had exited (said in the chat, a turn under way ends);
+    /// the next message starts one again.
+    pub fn stop_process(&mut self) {
+        if let Some(p) = &self.proc {
+            llm::kill(p.pid);
+        }
+    }
+}
+
+/// `r` in `:procs`: the chat's claude started again, the conversation kept (`--resume`) — between turns
+/// only (mid-turn, `s` stops it).
+pub fn restart_process(ed: &mut Editor) {
+    let Some(c) = ed.chat.as_mut() else { return };
+    if c.state != State::Idle {
+        return ed.set_status("claude is answering — s stops it, or wait for the end of its turn");
+    }
+    c.kill();
+    ensure_proc(ed);
+    ed.set_success("claude restarted · the conversation goes on");
 }
 
 impl Drop for Chat {

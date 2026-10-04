@@ -192,6 +192,10 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
             editor.open(&path).map_err(|e| format!("{e:#}"))
         }
         "lsp-restart" => editor.lsp_restart(),
+        "procs" => {
+            editor.procs_toggle();
+            Ok(())
+        }
         "plugin-permissions" => editor.plugin_permissions_list(),
         "plugin-revoke" => editor.plugin_revoke(rest),
         "plugin-approve" => editor.plugin_approve(rest),

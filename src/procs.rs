@@ -1,0 +1,1690 @@
+//! `:procs` — every process tarae started, what it's for and what it costs, a way to stop, restart or read
+//! about each, and tarae's own checks on them.
+//!
+//! - **What's there** comes from the OS, not from bookkeeping: tarae's descendants (`tree` — libproc's child
+//!   lists on macOS, `/proc` on Linux), each read for its CPU time, resident memory and (macOS) physical
+//!   footprint. What each one is *for* comes from the editor (`Editor::procs_known` — its language servers,
+//!   the debugger, runs, the terminal, Claude, plugins' programs); one it doesn't know is listed by name,
+//!   under its parent. tarae itself is the first row.
+//! - **Sampling** is a thread of its own (`start`): every `QUIET_EVERY` while `:procs` is closed, every
+//!   `OPEN_EVERY` while it's open. A sample goes to the main loop, which draws nothing for it unless the panel
+//!   is up or the status line's mark changed — an idle tarae stays idle (measured: `perf_e2e_procs_sampling`).
+//! - **Checks** (`Procs::check`, each sample): busy for minutes, memory far above what that program usually
+//!   takes (`$state/procs.json` — its first minutes' peak, over its last runs), a server left running with no
+//!   file of it open (stopped), a child tarae doesn't know, one left unreaped; and, as it happens, a server
+//!   exiting again and again (`procs_server_exited` — held: not started again until `r`). Each is recorded
+//!   with what tarae did (`Procs.checks`, under the list, and the log); while one holds, the status line
+//!   says so (`Procs::mark`) — nothing otherwise.
+
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::time::{Duration, Instant, SystemTime};
+
+use crate::editor::{Editor, Mode};
+use crate::event::Event;
+use crate::key::{Code, Key};
+use crate::lsp::ClientId;
+
+/// How often tarae looks while `:procs` is closed (`TARAE_PROCS_EVERY` ms stands in, for measurements).
+pub const QUIET_EVERY: Duration = Duration::from_secs(30);
+/// …and while it's open.
+pub const OPEN_EVERY: Duration = Duration::from_secs(1);
+/// The most processes a sample reads (a fork bomb under a task mustn't make the sample one).
+const MAX_PROCS: usize = 512;
+/// Busy: at least this much of a core, every sample for `BUSY_FOR`.
+const BUSY_PCT: f32 = 80.0;
+const BUSY_FOR: Duration = Duration::from_secs(5 * 60);
+/// A process's usual memory = the most it took in its first `SETTLE` (its last `USUAL_KEPT` runs' median);
+/// far above = `MEMORY_TIMES` that and `MEMORY_OVER` more.
+const SETTLE: Duration = Duration::from_secs(5 * 60);
+const USUAL_KEPT: usize = 8;
+const MEMORY_TIMES: u64 = 3;
+const MEMORY_OVER: u64 = 512 << 20;
+/// A server exiting `CRASHES` times within `CRASH_WINDOW` is held.
+const CRASHES: usize = 3;
+const CRASH_WINDOW: Duration = Duration::from_secs(10 * 60);
+/// A server with no file of it open past its own stop (`IDLE_STOP`) and this much more was left running.
+const LEFT_GRACE: Duration = Duration::from_secs(2 * 60);
+/// A child of tarae's it doesn't know, running this long.
+const STRAY_AFTER: Duration = Duration::from_secs(10 * 60);
+/// Self-checks kept (the session's — `:procs` shows them, newest first).
+const CHECKS_KEPT: usize = 100;
+
+// ── What the OS says ─────────────────────────────────────────────────────
+
+/// One process as the OS reports it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Os {
+    pub pid: u32,
+    pub ppid: u32,
+    pub name: String,
+    /// When it started, in seconds since the epoch (with the pid, which process this is — pids are reused).
+    pub started: u64,
+    /// CPU time so far (user + system).
+    pub cpu: Duration,
+    pub rss: u64,
+    /// Physical footprint (macOS — what Activity Monitor shows); None elsewhere.
+    pub footprint: Option<u64>,
+    /// It ended and nobody waited for it.
+    pub zombie: bool,
+}
+
+/// A C string in a fixed buffer.
+#[cfg(target_os = "macos")]
+fn c_str(b: &[libc::c_char]) -> String {
+    let bytes: Vec<u8> = b.iter().take_while(|&&c| c != 0).map(|&c| c as u8).collect();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// Mach time units → nanoseconds (not 1:1 on Apple silicon).
+#[cfg(target_os = "macos")]
+#[allow(deprecated)] // (libc's mach_timebase_info — the one call the mach2 crate would be added for)
+fn timebase() -> (u128, u128) {
+    static TB: std::sync::OnceLock<(u128, u128)> = std::sync::OnceLock::new();
+    *TB.get_or_init(|| {
+        let mut tb = libc::mach_timebase_info { numer: 0, denom: 0 };
+        // SAFETY: fills in the struct we own.
+        unsafe { libc::mach_timebase_info(&mut tb) };
+        (tb.numer.max(1) as u128, tb.denom.max(1) as u128)
+    })
+}
+
+/// Process `pid` now — None if it's gone (or not ours to read).
+#[cfg(target_os = "macos")]
+pub fn read(pid: u32) -> Option<Os> {
+    // SAFETY: plain out-structs of the sizes given; the calls only fill them in.
+    unsafe {
+        let mut bsd: libc::proc_bsdinfo = std::mem::zeroed();
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        if libc::proc_pidinfo(pid as i32, libc::PROC_PIDTBSDINFO, 0, (&raw mut bsd).cast(), size) != size {
+            return None;
+        }
+        let mut ri: libc::rusage_info_v2 = std::mem::zeroed();
+        let ok = libc::proc_pid_rusage(pid as i32, libc::RUSAGE_INFO_V2, (&raw mut ri).cast()) == 0;
+        let (numer, denom) = timebase();
+        let ticks = if ok { (ri.ri_user_time + ri.ri_system_time) as u128 } else { 0 };
+        let name = match c_str(&bsd.pbi_name) {
+            n if n.is_empty() => c_str(&bsd.pbi_comm),
+            n => n,
+        };
+        Some(Os {
+            pid,
+            ppid: bsd.pbi_ppid,
+            name,
+            started: bsd.pbi_start_tvsec,
+            cpu: Duration::from_nanos((ticks * numer / denom) as u64),
+            rss: if ok { ri.ri_resident_size } else { 0 },
+            footprint: ok.then_some(ri.ri_phys_footprint),
+            zombie: bsd.pbi_status == libc::SZOMB,
+        })
+    }
+}
+
+/// `pid`'s children.
+#[cfg(target_os = "macos")]
+pub fn children(pid: u32) -> Vec<u32> {
+    let mut buf: Vec<libc::pid_t> = vec![0; 64];
+    loop {
+        let bytes = (buf.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
+        buf.iter_mut().for_each(|p| *p = 0);
+        // SAFETY: the buffer is `bytes` long; the call writes pids into it.
+        let n = unsafe { libc::proc_listchildpids(pid as i32, buf.as_mut_ptr().cast(), bytes) };
+        if n <= 0 {
+            return Vec::new();
+        }
+        // (a full buffer may have left some out: a bigger one)
+        if n as usize >= buf.len() && buf.len() < 1 << 16 {
+            buf.resize(buf.len() * 4, 0);
+            continue;
+        }
+        return buf.iter().take(n as usize).filter(|&&p| p > 0).map(|&p| p as u32).collect();
+    }
+}
+
+/// `/proc/<pid>/stat` read (fields after the name's closing parenthesis — the name may hold spaces).
+/// `hz`: clock ticks a second · `page`: bytes a page · `boot`: when the machine started (epoch seconds).
+#[cfg(any(target_os = "linux", test))]
+fn parse_stat(pid: u32, stat: &str, hz: u64, page: u64, boot: u64) -> Option<Os> {
+    let open = stat.find('(')?;
+    let close = stat.rfind(')')?;
+    let name = stat.get(open + 1..close)?.to_string();
+    let f: Vec<&str> = stat.get(close + 1..)?.split_whitespace().collect();
+    let num = |i: usize| f.get(i).and_then(|v| v.parse::<u64>().ok());
+    let ticks = num(11)? + num(12)?;
+    Some(Os {
+        pid,
+        ppid: num(1)? as u32,
+        name,
+        started: boot + num(19)? / hz.max(1),
+        cpu: Duration::from_nanos(ticks.saturating_mul(1_000_000_000) / hz.max(1)),
+        rss: num(21)? * page,
+        footprint: None,
+        zombie: f.first() == Some(&"Z"),
+    })
+}
+
+#[cfg(target_os = "linux")]
+pub fn read(pid: u32) -> Option<Os> {
+    static CONST: std::sync::OnceLock<(u64, u64, u64)> = std::sync::OnceLock::new();
+    let (hz, page, boot) = *CONST.get_or_init(|| {
+        // SAFETY: sysconf only reads constants.
+        let (hz, page) = unsafe { (libc::sysconf(libc::_SC_CLK_TCK), libc::sysconf(libc::_SC_PAGESIZE)) };
+        let boot = std::fs::read_to_string("/proc/stat")
+            .ok()
+            .and_then(|s| s.lines().find_map(|l| l.strip_prefix("btime ")?.trim().parse().ok()))
+            .unwrap_or(0);
+        (hz.max(1) as u64, page.max(1) as u64, boot)
+    });
+    parse_stat(pid, &std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?, hz, page, boot)
+}
+
+/// `pid`'s children: its threads' `children` lists, or (a kernel without them) every process's parent.
+#[cfg(target_os = "linux")]
+pub fn children(pid: u32) -> Vec<u32> {
+    let mut out = Vec::new();
+    let mut listed = false;
+    for t in std::fs::read_dir(format!("/proc/{pid}/task")).into_iter().flatten().flatten() {
+        if let Ok(s) = std::fs::read_to_string(t.path().join("children")) {
+            listed = true;
+            out.extend(s.split_whitespace().filter_map(|p| p.parse::<u32>().ok()));
+        }
+    }
+    if !listed {
+        for e in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+            let Some(p) = e.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else { continue };
+            if read(p).is_some_and(|o| o.ppid == pid) {
+                out.push(p);
+            }
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn read(_pid: u32) -> Option<Os> {
+    None
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn children(_pid: u32) -> Vec<u32> {
+    Vec::new()
+}
+
+/// `root` and everything under it, parents before their children (at most `MAX_PROCS`). A pid listed under
+/// one parent but found under another by the time it's read was reused — left out.
+pub fn tree(root: u32) -> Vec<Os> {
+    let mut out = Vec::new();
+    let mut todo = vec![(root, None)];
+    while let Some((pid, parent)) = todo.pop() {
+        if out.len() >= MAX_PROCS {
+            break;
+        }
+        let Some(os) = read(pid) else { continue };
+        if parent.is_some_and(|p| p != os.ppid) {
+            continue;
+        }
+        if !os.zombie {
+            todo.extend(children(pid).into_iter().rev().map(|c| (c, Some(pid))));
+        }
+        out.push(os);
+    }
+    out
+}
+
+// ── Samples ──────────────────────────────────────────────────────────────
+
+/// One look at the tree: each process with its share of a core since the look before (None: its first).
+pub struct Sample {
+    pub procs: Vec<(Os, Option<f32>)>,
+    /// What the look cost (the sampling thread's time for it).
+    pub took: Duration,
+    /// What `$state/procs.json` held (the thread's first sample only).
+    usual: Option<Usual>,
+}
+
+/// Each process's CPU time at the look before — for its share since.
+#[derive(Default)]
+pub struct Sampler {
+    prev: HashMap<(u32, u64), Duration>,
+    at: Option<Instant>,
+}
+
+impl Sampler {
+    pub fn sample(&mut self, root: u32) -> Sample {
+        let t0 = Instant::now();
+        let wall = self.at.map(|a| t0.duration_since(a)).filter(|w| *w >= Duration::from_millis(50));
+        let procs: Vec<(Os, Option<f32>)> = tree(root)
+            .into_iter()
+            .map(|os| {
+                let before = self.prev.get(&(os.pid, os.started));
+                let pct = wall
+                    .zip(before)
+                    .map(|(w, c)| os.cpu.saturating_sub(*c).as_secs_f32() / w.as_secs_f32() * 100.0);
+                (os, pct)
+            })
+            .collect();
+        self.prev = procs.iter().map(|(o, _)| ((o.pid, o.started), o.cpu)).collect();
+        self.at = Some(t0);
+        Sample { procs, took: t0.elapsed(), usual: None }
+    }
+}
+
+/// What the editor tells the sampling thread.
+pub enum Wake {
+    /// `:procs` opened (look now, then every second) or closed.
+    Open(bool),
+    /// Look now (an action changed what's there).
+    Now,
+}
+
+fn quiet_every() -> Duration {
+    std::env::var("TARAE_PROCS_EVERY")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map_or(QUIET_EVERY, |ms| Duration::from_millis(ms.max(10)))
+}
+
+/// The sampling thread: a look now, then one every `QUIET_EVERY` (`OPEN_EVERY` while `:procs` is open), each
+/// sent to the main loop. It ends with the editor.
+pub fn start(events: Sender<Event>, usual_path: Option<PathBuf>) -> Sender<Wake> {
+    let (tx, rx) = channel();
+    let run = move || {
+        let mut s = Sampler::default();
+        let (quiet, mut open) = (quiet_every(), false);
+        let mut usual = Some(usual_path.as_deref().map(load_usual).unwrap_or_default());
+        loop {
+            let mut sample = s.sample(std::process::id());
+            sample.usual = usual.take();
+            let job = move |ed: &mut Editor| ed.procs_sampled(sample);
+            if events.send(Event::Job(Box::new(job))).is_err() {
+                return;
+            }
+            match wait(&rx, if open { OPEN_EVERY } else { quiet }, &mut open) {
+                Some(()) => {}
+                None => return,
+            }
+        }
+    };
+    let _ = std::thread::Builder::new().name("tarae-procs".into()).spawn(run);
+    tx
+}
+
+/// Until the next look is due — or sooner, opened or asked. None: the editor is gone.
+fn wait(rx: &Receiver<Wake>, every: Duration, open: &mut bool) -> Option<()> {
+    let due = Instant::now() + every;
+    loop {
+        match rx.recv_timeout(due.saturating_duration_since(Instant::now())) {
+            Ok(Wake::Open(o)) => {
+                let opened = o && !*open;
+                *open = o;
+                if opened {
+                    return Some(());
+                }
+            }
+            Ok(Wake::Now) => return Some(()),
+            Err(RecvTimeoutError::Timeout) => return Some(()),
+            Err(RecvTimeoutError::Disconnected) => return None,
+        }
+    }
+}
+
+// ── What each one is for ─────────────────────────────────────────────────
+
+/// What a process is to tarae.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Tarae,
+    Lsp(ClientId),
+    /// A server held after exiting again and again — no process; `r` starts it.
+    Held(String, PathBuf),
+    Debug,
+    /// What a debug attach started before it (a port-forward).
+    Helper,
+    Task,
+    Test,
+    Terminal,
+    Chat,
+    /// `space i`'s claude, answering.
+    Ask,
+    /// The claude kept started for the next `space i`.
+    Spare,
+    /// A plugin's program: (plugin, its id for it).
+    Plugin(String, u64),
+    /// Not one tarae knows (or under one it does).
+    Other,
+}
+
+impl Kind {
+    /// The list's order of tarae's children.
+    fn order(&self) -> u8 {
+        match self {
+            Kind::Tarae => 0,
+            Kind::Lsp(_) | Kind::Held(..) => 1,
+            Kind::Chat | Kind::Ask | Kind::Spare => 2,
+            Kind::Debug | Kind::Helper => 3,
+            Kind::Task => 4,
+            Kind::Test => 5,
+            Kind::Terminal => 6,
+            Kind::Plugin(..) => 7,
+            Kind::Other => 8,
+        }
+    }
+
+    /// What the user's own programs run under: busy or big there is their business, not a fault.
+    fn users(&self) -> bool {
+        matches!(self, Kind::Task | Kind::Test | Kind::Terminal | Kind::Debug)
+    }
+
+    /// Whether `r` means something for it.
+    pub fn restarts(&self) -> bool {
+        matches!(self, Kind::Lsp(_) | Kind::Held(..) | Kind::Task | Kind::Test | Kind::Chat)
+    }
+}
+
+/// A process the editor knows: what it's for.
+pub struct Known {
+    pub pid: u32,
+    pub kind: Kind,
+    /// Its name in the list (the server's, the task's).
+    pub title: String,
+    /// What for: a root, a command, a file.
+    pub what: String,
+}
+
+/// A row of the list.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Row {
+    /// 0 for a held server (no process).
+    pub pid: u32,
+    started: u64,
+    /// Under tarae's child (0) — its children 1, theirs 2.
+    pub depth: usize,
+    pub kind: Kind,
+    /// The kind of tarae's child it's under (its own, for one).
+    under: Kind,
+    pub title: String,
+    pub what: String,
+    /// The program's own name (what its usual memory is kept under).
+    program: String,
+    pub up: Option<Duration>,
+    pub cpu: Option<f32>,
+    pub rss: u64,
+    pub footprint: Option<u64>,
+    pub zombie: bool,
+    /// A check holds about it now.
+    pub flagged: bool,
+}
+
+impl Row {
+    fn key(&self) -> (u32, u64) {
+        (self.pid, self.started)
+    }
+
+    /// The memory it's judged by: its footprint, else what's resident.
+    pub fn memory(&self) -> u64 {
+        self.footprint.unwrap_or(self.rss)
+    }
+}
+
+/// The list: tarae first, then its children in `Kind::order` (each with what's under it, depth first) — the
+/// held servers after the running ones. `now`: epoch seconds.
+pub fn rows(sample: &Sample, known: &[Known], me: u32, held: &[Held], now: u64) -> Vec<Row> {
+    let by_pid: HashMap<u32, &Os> = sample.procs.iter().map(|(o, _)| (o.pid, o)).collect();
+    let pct: HashMap<u32, Option<f32>> = sample.procs.iter().map(|(o, p)| (o.pid, *p)).collect();
+    let mut kids: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (o, _) in &sample.procs {
+        if o.pid != me {
+            kids.entry(o.ppid).or_default().push(o.pid);
+        }
+    }
+    let row = |os: &Os, depth: usize, kind: Kind, under: Kind, title: String, what: String| Row {
+        pid: os.pid,
+        started: os.started,
+        depth,
+        kind,
+        under,
+        title,
+        what,
+        program: os.name.clone(),
+        up: (os.started > 0).then(|| Duration::from_secs(now.saturating_sub(os.started))),
+        cpu: pct.get(&os.pid).copied().flatten(),
+        rss: os.rss,
+        footprint: os.footprint,
+        zombie: os.zombie,
+        flagged: false,
+    };
+    let mut out = Vec::new();
+    if let Some(os) = by_pid.get(&me) {
+        out.push(row(os, 0, Kind::Tarae, Kind::Tarae, "tarae".into(), "this editor".into()));
+    }
+    let mut top: Vec<(Kind, String, String, &Os)> = kids
+        .get(&me)
+        .into_iter()
+        .flatten()
+        .filter_map(|pid| by_pid.get(pid))
+        .map(|os| match known.iter().find(|k| k.pid == os.pid) {
+            Some(k) => (k.kind.clone(), k.title.clone(), k.what.clone(), *os),
+            None => (Kind::Other, os.name.clone(), String::new(), *os),
+        })
+        .collect();
+    top.sort_by(|a, b| (a.0.order(), &a.1, a.3.pid).cmp(&(b.0.order(), &b.1, b.3.pid)));
+    for (kind, title, what, os) in top {
+        out.push(row(os, 0, kind.clone(), kind.clone(), title, what));
+        // What it started, depth first (a known one under it keeps its own name — a plugin's shell's child)
+        let mut todo: Vec<(u32, usize)> =
+            kids.get(&os.pid).into_iter().flatten().rev().map(|&p| (p, 1)).collect();
+        while let Some((pid, depth)) = todo.pop() {
+            let Some(o) = by_pid.get(&pid) else { continue };
+            let (k, t, w) = match known.iter().find(|k| k.pid == pid) {
+                Some(k) => (k.kind.clone(), k.title.clone(), k.what.clone()),
+                None => (Kind::Other, o.name.clone(), String::new()),
+            };
+            out.push(row(o, depth, k, kind.clone(), t, w));
+            todo.extend(kids.get(&pid).into_iter().flatten().rev().map(|&p| (p, depth + 1)));
+        }
+    }
+    let after = out.iter().position(|r| r.depth == 0 && r.kind.order() > 1).unwrap_or(out.len());
+    let held = held.iter().map(|h| Row {
+        pid: 0,
+        started: 0,
+        depth: 0,
+        kind: Kind::Held(h.name.clone(), h.root.clone()),
+        under: Kind::Lsp(0),
+        title: h.name.clone(),
+        what: crate::allow::tilde(&h.root),
+        program: h.name.clone(),
+        up: None,
+        cpu: None,
+        rss: 0,
+        footprint: None,
+        zombie: false,
+        flagged: true,
+    });
+    out.splice(after..after, held);
+    out
+}
+
+// ── Checks ───────────────────────────────────────────────────────────────
+
+/// A language server as the checks see it.
+pub struct LspFact {
+    pub cid: ClientId,
+    pub pid: Option<u32>,
+    pub name: String,
+    /// A file open uses it.
+    pub serving: bool,
+    /// Its oldest work in progress: (since, what).
+    pub busy: Option<(Instant, String)>,
+}
+
+/// What a check makes tarae do.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Act {
+    Nothing,
+    StopServer(ClientId),
+}
+
+/// Something abnormal now.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Finding {
+    /// One per thing (the same thing found again isn't another).
+    pub key: String,
+    pub pid: u32,
+    /// What it is, in a sentence · the status line's few words · what tarae did about it.
+    pub what: String,
+    pub short: String,
+    pub did: String,
+    pub act: Act,
+}
+
+/// A self-check, as recorded: what was abnormal, when, what tarae did about it, when it ended.
+#[derive(Clone, Debug)]
+pub struct Check {
+    key: String,
+    pub what: String,
+    pub short: String,
+    pub did: String,
+    pub at: SystemTime,
+    pub ended: Option<SystemTime>,
+}
+
+/// A server that exited again and again, not started again until `r`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Held {
+    pub name: String,
+    pub root: PathBuf,
+    what: String,
+}
+
+/// Programs' usual memory: their last runs' first-minutes peaks (bytes), newest last.
+pub type Usual = HashMap<String, Vec<u64>>;
+
+fn load_usual(path: &Path) -> Usual {
+    std::fs::read_to_string(path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+}
+
+/// The median of `program`'s kept peaks.
+fn usual_of(usual: &Usual, program: &str) -> Option<u64> {
+    let mut v = usual.get(program)?.clone();
+    v.sort_unstable();
+    v.get(v.len() / 2).copied()
+}
+
+/// The panel's state while `:procs` is open.
+pub struct Panel {
+    pub selected: usize,
+    /// The first row in sight (drawing keeps the selected one in sight).
+    pub scroll: std::cell::Cell<usize>,
+    pub focus: bool,
+    /// The tallest it's been (`term::procs_panel_h` — it doesn't shrink while it's open).
+    pub tall: std::cell::Cell<usize>,
+}
+
+/// The panel as drawn last frame: its first screen line and its last, its first row's line, how many rows
+/// show, the first row shown.
+#[derive(Clone, Copy, Debug)]
+pub struct Area {
+    pub top: usize,
+    pub bottom: usize,
+    pub first: usize,
+    pub shown: usize,
+    pub scroll: usize,
+}
+
+/// tarae's processes: the last look, the checks' memory, the panel.
+#[derive(Default)]
+pub struct Procs {
+    /// To the sampling thread (None in tests — a look is then a one-off job).
+    wake: Option<Sender<Wake>>,
+    pub panel: Option<Panel>,
+    pub rows: Vec<Row>,
+    /// What the last look cost.
+    pub took: Option<Duration>,
+    pub checks: Vec<Check>,
+    /// cpu ≥ `BUSY_PCT` since · the most it took so far in its first `SETTLE` (and whether that's kept) ·
+    /// servers serving no file since · zombies seen last look.
+    busy: HashMap<(u32, u64), Instant>,
+    peak: HashMap<(u32, u64), (u64, bool)>,
+    unused: HashMap<ClientId, Instant>,
+    zombies: HashSet<u32>,
+    pub usual: Usual,
+    usual_path: Option<PathBuf>,
+    /// Servers' exits (name, root, when) · the ones held.
+    exits: Vec<(String, PathBuf, Instant)>,
+    pub held: Vec<Held>,
+    /// The mark the status line last had (a look that changes it is drawn).
+    marked: Option<String>,
+}
+
+/// `412 KB` · `48 MB` · `1.4 GB`.
+pub fn mem(bytes: u64) -> String {
+    let b = bytes as f64;
+    if b >= (1u64 << 30) as f64 {
+        format!("{:.1} GB", b / (1u64 << 30) as f64)
+    } else if b >= (1u64 << 20) as f64 {
+        format!("{:.0} MB", b / (1u64 << 20) as f64)
+    } else {
+        format!("{:.0} KB", b / 1024.0)
+    }
+}
+
+/// `42s` · `12m` · `3h 05m` · `2d 04h`.
+pub fn age(d: Duration) -> String {
+    let s = d.as_secs();
+    match s {
+        0..60 => format!("{s}s"),
+        60..3600 => format!("{}m", s / 60),
+        3600..86400 => format!("{}h {:02}m", s / 3600, s % 3600 / 60),
+        _ => format!("{}d {:02}h", s / 86400, s % 86400 / 3600),
+    }
+}
+
+impl Procs {
+    /// What's abnormal in this look (`now`: when it was taken) — and the checks' memory brought up to it.
+    /// true in `.1`: a program's usual memory was learned (to be kept).
+    pub fn check(&mut self, rows: &[Row], lsp: &[LspFact], now: Instant) -> (Vec<Finding>, bool) {
+        let mut out = Vec::new();
+        let mut learned = false;
+        let seen: HashSet<(u32, u64)> = rows.iter().map(Row::key).collect();
+        self.busy.retain(|k, _| seen.contains(k));
+        self.peak.retain(|k, _| seen.contains(k));
+        // A server's work in progress for minutes (its own words say what)
+        for f in lsp {
+            if let Some((since, doing)) = &f.busy
+                && now.saturating_duration_since(*since) >= BUSY_FOR
+            {
+                let long = age(now.saturating_duration_since(*since));
+                out.push(Finding {
+                    key: format!("busy:server:{}", f.cid),
+                    pid: f.pid.unwrap_or(0),
+                    what: format!("{} busy for {long} ({doing})", f.name),
+                    short: format!("{} busy {long}", f.name),
+                    did: "nothing yet — r restarts it".into(),
+                    act: Act::Nothing,
+                });
+            }
+        }
+        for r in rows.iter().filter(|r| r.pid != 0) {
+            let ours = !r.under.users();
+            // Busy: most of a core, every look for minutes
+            if r.cpu.is_some_and(|c| c >= BUSY_PCT) {
+                self.busy.entry(r.key()).or_insert(now);
+            } else {
+                self.busy.remove(&r.key());
+            }
+            if ours
+                && let Some(since) = self.busy.get(&r.key())
+                && now.saturating_duration_since(*since) >= BUSY_FOR
+                && !out.iter().any(|f| f.pid == r.pid)
+            {
+                let long = age(now.saturating_duration_since(*since));
+                out.push(Finding {
+                    key: format!("busy:{}:{}", r.pid, r.started),
+                    pid: r.pid,
+                    what: format!("{} at {:.0}% CPU for {long}", r.title, r.cpu.unwrap_or(0.0)),
+                    short: format!("{} busy {long}", r.title),
+                    did: if r.kind.restarts() {
+                        "nothing yet — r restarts it"
+                    } else {
+                        "nothing yet — s stops it"
+                    }
+                    .into(),
+                    act: Act::Nothing,
+                });
+            }
+            // Memory: its first minutes' peak is learned; far above its program's usual is said
+            let m = r.memory();
+            match r.up {
+                Some(up) if up < SETTLE => {
+                    let p = self.peak.entry(r.key()).or_insert((0, false));
+                    p.0 = p.0.max(m);
+                }
+                Some(_) => {
+                    if let Some(p) = self.peak.get_mut(&r.key()).filter(|p| !p.1 && p.0 > 0) {
+                        p.1 = true;
+                        let v = self.usual.entry(r.program.clone()).or_default();
+                        v.push(p.0);
+                        let n = v.len();
+                        v.drain(..n.saturating_sub(USUAL_KEPT));
+                        learned = true;
+                    }
+                }
+                None => {}
+            }
+            if ours
+                && let Some(u) = usual_of(&self.usual, &r.program)
+                && m >= u.saturating_mul(MEMORY_TIMES)
+                && m >= u.saturating_add(MEMORY_OVER)
+            {
+                let did = match r.kind {
+                    Kind::Tarae => "nothing — :restart starts it afresh",
+                    ref k if k.restarts() => "nothing yet — r restarts it",
+                    _ => "nothing yet — s stops it",
+                };
+                out.push(Finding {
+                    key: format!("memory:{}:{}", r.pid, r.started),
+                    pid: r.pid,
+                    what: format!("{} at {} — usually {}", r.title, mem(m), mem(u)),
+                    short: format!("{} {}", r.title, mem(m)),
+                    did: did.into(),
+                    act: Act::Nothing,
+                });
+            }
+            // A child of tarae's it doesn't know, running long; one nobody waited for
+            if r.depth == 0 && r.kind == Kind::Other && !r.zombie && r.up.is_some_and(|u| u >= STRAY_AFTER) {
+                out.push(Finding {
+                    key: format!("stray:{}:{}", r.pid, r.started),
+                    pid: r.pid,
+                    what: format!(
+                        "{} (pid {}), started by tarae but not one it knows, running {}",
+                        r.title,
+                        r.pid,
+                        age(r.up.unwrap_or_default())
+                    ),
+                    short: format!("{} running", r.title),
+                    did: "nothing — s stops it".into(),
+                    act: Act::Nothing,
+                });
+            }
+            if r.depth == 0 && r.zombie && self.zombies.contains(&r.pid) {
+                out.push(Finding {
+                    key: format!("zombie:{}:{}", r.pid, r.started),
+                    pid: r.pid,
+                    what: format!("{} (pid {}) ended, and tarae didn't wait for it", r.title, r.pid),
+                    short: format!("{} not reaped", r.title),
+                    did: "nothing — it goes when tarae does".into(),
+                    act: Act::Nothing,
+                });
+            }
+        }
+        self.zombies = rows.iter().filter(|r| r.depth == 0 && r.zombie).map(|r| r.pid).collect();
+        // A server with no file of it open, past its own stop
+        let left = crate::lsp_editor::IDLE_STOP + LEFT_GRACE;
+        self.unused.retain(|cid, _| lsp.iter().any(|f| f.cid == *cid));
+        for f in lsp {
+            if f.serving {
+                self.unused.remove(&f.cid);
+                continue;
+            }
+            let since = *self.unused.entry(f.cid).or_insert(now);
+            if now.saturating_duration_since(since) >= left {
+                out.push(Finding {
+                    key: format!("left:{}", f.cid),
+                    pid: f.pid.unwrap_or(0),
+                    what: format!(
+                        "{} kept running with no file of it open for {}",
+                        f.name,
+                        age(now.saturating_duration_since(since))
+                    ),
+                    short: format!("{} left running", f.name),
+                    did: "stopped it".into(),
+                    act: Act::StopServer(f.cid),
+                });
+            }
+        }
+        for h in &self.held {
+            out.push(Finding {
+                key: format!("loop:{}:{}", h.name, h.root.display()),
+                pid: 0,
+                what: h.what.clone(),
+                short: format!("{} keeps exiting", h.name),
+                did: "not started again — r in :procs starts it".into(),
+                act: Act::Nothing,
+            });
+        }
+        (out, learned)
+    }
+
+    /// The checks recorded as `found` says (a new one is logged; one no longer found has ended). The new ones.
+    pub fn record(&mut self, found: &[Finding], at: SystemTime) -> Vec<Finding> {
+        let mut new = Vec::new();
+        for f in found {
+            if !self.checks.iter().any(|c| c.key == f.key && c.ended.is_none()) {
+                crate::log::line("procs", "check", &format!("{} — {}", f.what, f.did));
+                self.checks.push(Check {
+                    key: f.key.clone(),
+                    what: f.what.clone(),
+                    short: f.short.clone(),
+                    did: f.did.clone(),
+                    at,
+                    ended: None,
+                });
+                new.push(f.clone());
+            } else if let Some(c) = self.checks.iter_mut().find(|c| c.key == f.key && c.ended.is_none()) {
+                // (still so: its words follow — "busy 6m" → "busy 7m")
+                c.what.clone_from(&f.what);
+                c.short.clone_from(&f.short);
+            }
+        }
+        for c in self.checks.iter_mut().filter(|c| c.ended.is_none()) {
+            if !found.iter().any(|f| f.key == c.key) {
+                c.ended = Some(at);
+            }
+        }
+        let n = self.checks.len();
+        if n > CHECKS_KEPT {
+            let mut over = n - CHECKS_KEPT;
+            self.checks.retain(|c| {
+                let drop = over > 0 && c.ended.is_some();
+                over -= usize::from(drop);
+                !drop
+            });
+        }
+        new
+    }
+
+    /// What the status line says: the newest check that still holds.
+    pub fn mark(&self) -> Option<&Check> {
+        self.checks.iter().rev().find(|c| c.ended.is_none())
+    }
+
+    /// A server exited: the third time within `CRASH_WINDOW`, it's held. The check, if it was.
+    fn exited(&mut self, name: &str, root: &Path, now: Instant) -> Option<Finding> {
+        self.exits.retain(|e| now.saturating_duration_since(e.2) < CRASH_WINDOW);
+        self.exits.push((name.to_string(), root.to_path_buf(), now));
+        let n = self.exits.iter().filter(|e| e.0 == name && e.1 == root).count();
+        if n < CRASHES || self.is_held(name, root) {
+            return None;
+        }
+        let what =
+            format!("{name} for {} exited {n} times in {}", crate::allow::tilde(root), age(CRASH_WINDOW));
+        self.held.push(Held { name: name.to_string(), root: root.to_path_buf(), what: what.clone() });
+        Some(Finding {
+            key: format!("loop:{name}:{}", root.display()),
+            pid: 0,
+            what,
+            short: format!("{name} keeps exiting"),
+            did: "not started again — r in :procs starts it".into(),
+            act: Act::Nothing,
+        })
+    }
+
+    pub fn is_held(&self, name: &str, root: &Path) -> bool {
+        self.held.iter().any(|h| h.name == name && h.root == root)
+    }
+}
+
+// ── The editor's side ────────────────────────────────────────────────────
+
+impl Editor {
+    /// The sampling thread, from the event loop (not in tests).
+    pub fn procs_start_sampling(&mut self) {
+        let path = crate::config::state_dir().map(|d| d.join("procs.json"));
+        self.procs.usual_path.clone_from(&path);
+        self.procs.wake = Some(start(self.events.sender(), path));
+    }
+
+    /// Whether the panel is up (it takes the bottom slot first).
+    pub fn procs_up(&self) -> bool {
+        self.procs.panel.is_some()
+    }
+
+    /// `:procs` — the panel, with the keys, looked at every second while it's open; again: closed.
+    pub fn procs_toggle(&mut self) {
+        if self.procs.panel.as_ref().is_some_and(|p| p.focus) {
+            return self.procs_close();
+        }
+        match self.procs.panel.as_mut() {
+            Some(p) => p.focus = true,
+            None => {
+                self.procs.panel = Some(Panel {
+                    selected: 0,
+                    scroll: Default::default(),
+                    focus: true,
+                    tall: Default::default(),
+                });
+                self.procs_wake(Wake::Open(true));
+            }
+        }
+        self.procs_took_keys();
+    }
+
+    pub fn procs_close(&mut self) {
+        self.procs.panel = None;
+        self.procs_wake(Wake::Open(false));
+    }
+
+    /// The panel took the keys: nothing else keeps them.
+    fn procs_took_keys(&mut self) {
+        if let Some(c) = self.chat.as_mut() {
+            c.focused = false;
+        }
+        if let Some(s) = self.sidebar.as_mut() {
+            s.focus = false;
+        }
+        if let Some(t) = self.terminal.as_mut() {
+            t.focus = false;
+        }
+        self.bottom_focus = false;
+        self.plugin_panel_unfocus();
+    }
+
+    /// Whether the panel has the keys.
+    pub fn procs_focused(&self) -> bool {
+        self.procs.panel.as_ref().is_some_and(|p| p.focus)
+    }
+
+    /// The panel gives the keys back (the code was clicked, another place took them).
+    pub fn procs_unfocus(&mut self) {
+        if let Some(p) = self.procs.panel.as_mut() {
+            p.focus = false;
+        }
+    }
+
+    /// A click on the panel's row `row` (None: its header): the keys, that row selected.
+    pub fn procs_click(&mut self, row: Option<usize>) {
+        let n = self.procs.rows.len();
+        let Some(p) = self.procs.panel.as_mut() else { return };
+        p.focus = true;
+        if let Some(r) = row.filter(|&r| r < n) {
+            p.selected = r;
+        }
+        self.procs_took_keys();
+    }
+
+    fn procs_wake(&mut self, w: Wake) {
+        let open = matches!(w, Wake::Open(true) | Wake::Now);
+        if let Some(tx) = &self.procs.wake {
+            let _ = tx.send(w);
+            return;
+        }
+        // No thread (tests): a one-off look on a worker
+        if open {
+            self.events.jobs().spawn(|| {
+                let s = Sampler::default().sample(std::process::id());
+                move |ed: &mut Editor| ed.procs_sampled(s)
+            });
+        }
+    }
+
+    /// The processes the editor knows, and what each is for.
+    pub fn procs_known(&self) -> Vec<Known> {
+        let mut out = Vec::new();
+        let mut add = |pid: Option<u32>, kind: Kind, title: &str, what: String| {
+            if let Some(pid) = pid.filter(|&p| p > 0) {
+                out.push(Known { pid, kind, title: title.to_string(), what });
+            }
+        };
+        for c in &self.lsp.clients {
+            add(c.pid(), Kind::Lsp(c.id), &c.name, crate::allow::tilde(&c.root));
+        }
+        if let Some(d) = &self.dap {
+            let (adapter, helper) = d.pids();
+            add(adapter, Kind::Debug, "debugger", d.program.clone());
+            add(helper, Kind::Helper, "debug helper", d.program.clone());
+        }
+        if let Some(r) = &self.task_run {
+            let title = if r.by_claude { "claude's command" } else { r.task.name.as_str() };
+            add(r.pid(), Kind::Task, title, r.task.cmd.clone());
+        }
+        if let Some(r) = &self.test_run {
+            add(r.pid(), Kind::Test, "tests", r.target.label.clone());
+        }
+        if let Some(t) = &self.terminal {
+            add(t.pid(), Kind::Terminal, "terminal", t.title.clone());
+        }
+        if let Some(c) = &self.chat {
+            add(c.pid(), Kind::Chat, "claude", "the chat".into());
+        }
+        add(self.llm_pid, Kind::Ask, "claude", "space i".into());
+        add(self.llm_warm.pid(), Kind::Spare, "claude", "ready for space i".into());
+        for (plugin, id, pid, program) in self.plugin_pids() {
+            add(Some(pid), Kind::Plugin(plugin.clone(), id), &program, format!("plugin {plugin}"));
+        }
+        out
+    }
+
+    fn procs_lsp_facts(&self) -> Vec<LspFact> {
+        self.lsp
+            .clients
+            .iter()
+            .map(|c| LspFact {
+                cid: c.id,
+                pid: c.pid(),
+                name: c.name.clone(),
+                serving: self.docs.iter().any(|d| d.lsp.clients().any(|x| x == c.id)),
+                busy: c
+                    .progress
+                    .values()
+                    .filter_map(|p| Some((p.began?, p.title.clone())))
+                    .min_by_key(|(at, _)| *at),
+            })
+            .collect()
+    }
+
+    /// A look arrived: the list, the checks — and what they do. Nothing is drawn for it unless the panel is
+    /// up or the status line's mark changed.
+    pub fn procs_sampled(&mut self, s: Sample) {
+        if let Some(u) = s.usual.clone() {
+            // (kept ones first; what this session learned before they came stays)
+            for (k, v) in u {
+                self.procs.usual.entry(k).or_insert(v);
+            }
+        }
+        let now = SystemTime::now();
+        let secs = now.duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let mut rows = rows(&s, &self.procs_known(), std::process::id(), &self.procs.held, secs);
+        let (found, learned) = self.procs.check(&rows, &self.procs_lsp_facts(), Instant::now());
+        let flagged: HashSet<u32> = found.iter().map(|f| f.pid).filter(|&p| p > 0).collect();
+        self.procs_found(found, now);
+        for r in &mut rows {
+            r.flagged |= flagged.contains(&r.pid);
+        }
+        // The selection stays on its process as rows come and go
+        let was = self.procs.panel.as_ref().and_then(|p| self.procs.rows.get(p.selected)).map(Row::key);
+        if let Some(p) = self.procs.panel.as_mut() {
+            let now = was.and_then(|k| rows.iter().position(|r| r.key() == k));
+            p.selected = now.unwrap_or(p.selected).min(rows.len().saturating_sub(1));
+        }
+        self.procs.rows = rows;
+        self.procs.took = Some(s.took);
+        if learned {
+            self.procs_keep_usual();
+        }
+        let up = self.procs_up();
+        self.unchanged = !up && !self.procs_mark_changed();
+    }
+
+    /// The status line's mark isn't what was drawn last.
+    fn procs_mark_changed(&mut self) -> bool {
+        let now = self.procs.mark().map(|c| c.short.clone());
+        let was = std::mem::replace(&mut self.procs.marked, now.clone());
+        was != now
+    }
+
+    /// Checks recorded; what the new ones say to do, done.
+    fn procs_found(&mut self, found: Vec<Finding>, at: SystemTime) {
+        for f in self.procs.record(&found, at) {
+            if let Act::StopServer(cid) = f.act
+                && let Some(name) = self.lsp_stopped(cid)
+            {
+                crate::log::line(&name, "stop", &format!("{name} stopped by tarae's check: {}", f.what));
+            }
+        }
+    }
+
+    /// A server exited (`lsp_exited`): the third time in a while, it's held — the next file of its project
+    /// doesn't start it again until `r` in `:procs`.
+    pub fn procs_server_exited(&mut self, name: &str, root: &Path) {
+        if let Some(f) = self.procs.exited(name, root, Instant::now()) {
+            // (said where it shows, not only at the next look)
+            let found: Vec<Finding> = self
+                .procs
+                .checks
+                .iter()
+                .filter(|c| c.ended.is_none())
+                .map(|c| Finding {
+                    key: c.key.clone(),
+                    pid: 0,
+                    what: c.what.clone(),
+                    short: c.short.clone(),
+                    did: c.did.clone(),
+                    act: Act::Nothing,
+                })
+                .chain(std::iter::once(f))
+                .collect();
+            self.procs_found(found, SystemTime::now());
+            self.procs_wake(Wake::Now);
+        }
+    }
+
+    /// Whether `name` for `root` is held (`lsp_spawn` doesn't start it).
+    pub fn procs_held(&self, name: &str, root: &Path) -> bool {
+        self.procs.is_held(name, root)
+    }
+
+    fn procs_selected(&self) -> Option<Row> {
+        let p = self.procs.panel.as_ref()?;
+        self.procs.rows.get(p.selected).cloned()
+    }
+
+    /// `s` on the selected row: it stops (the way its owner stops it — a run keeps its output).
+    fn procs_stop(&mut self) {
+        let Some(r) = self.procs_selected() else { return };
+        let gone = |ed: &mut Editor, what: &str, then: Option<&str>| {
+            ed.set_status(stopped(what, then));
+            ed.procs_wake(Wake::Now);
+        };
+        match r.kind {
+            Kind::Tarae => self.set_status("that's tarae itself — :q quits it"),
+            Kind::Held(..) => self.set_status(format!("{} isn't running — r starts it", r.title)),
+            Kind::Lsp(cid) => {
+                if let Some(name) = self.lsp_stopped(cid) {
+                    crate::log::line(&name, "stop", &format!("{name} stopped from :procs"));
+                    gone(self, &name, Some(SERVER_AGAIN));
+                }
+            }
+            Kind::Debug | Kind::Helper => {
+                self.dap_terminate();
+                self.procs_wake(Wake::Now);
+            }
+            Kind::Task | Kind::Test | Kind::Plugin(..) => {
+                crate::dap::term_group(r.pid);
+                gone(self, &r.title, None);
+            }
+            Kind::Terminal => {
+                // SAFETY: a hangup to the process group of the terminal's session, which tarae started.
+                unsafe { libc::kill(-(r.pid as i32), libc::SIGHUP) };
+                gone(self, "the terminal", None);
+            }
+            Kind::Chat => {
+                if let Some(c) = self.chat.as_mut() {
+                    c.stop_process();
+                }
+                gone(self, "claude", Some(CHAT_AGAIN));
+            }
+            Kind::Ask => {
+                crate::llm::kill(r.pid);
+                gone(self, "space i's claude", None);
+            }
+            Kind::Spare => {
+                self.llm_warm = Default::default();
+                gone(self, "the spare claude", None);
+            }
+            Kind::Other => {
+                // (still the process the list showed: the same start, under tarae)
+                if read(r.pid).is_some_and(|o| o.started == r.started) {
+                    // SAFETY: SIGTERM to a descendant of tarae's, as read a moment ago.
+                    unsafe { libc::kill(r.pid as i32, libc::SIGTERM) };
+                }
+                gone(self, &format!("{} (pid {})", r.title, r.pid), None);
+            }
+        }
+    }
+
+    /// `r` on the selected row: started again, where that means something.
+    fn procs_restart(&mut self) {
+        let Some(r) = self.procs_selected() else { return };
+        match r.kind {
+            Kind::Lsp(cid) => {
+                let docs: Vec<_> =
+                    self.docs.iter().filter(|d| d.lsp.clients().any(|c| c == cid)).map(|d| d.id).collect();
+                let Some(name) = self.lsp_stopped(cid) else { return };
+                crate::log::line(&name, "stop", &format!("{name} restarted from :procs"));
+                if docs.is_empty() {
+                    self.set_status(format!("{name} stopped — no file uses it, so it starts with the next"));
+                } else {
+                    for id in docs {
+                        self.attach_lsp(id);
+                    }
+                    self.set_success(format!("{name} restarted"));
+                }
+            }
+            Kind::Held(name, root) => {
+                self.procs.held.retain(|h| !(h.name == name && h.root == root));
+                self.procs.exits.retain(|e| !(e.0 == name && e.1 == root));
+                let docs: Vec<_> = self
+                    .docs
+                    .iter()
+                    .filter(|d| d.path.as_deref().is_some_and(|p| p.starts_with(&root)))
+                    .map(|d| d.id)
+                    .collect();
+                for id in docs {
+                    self.attach_lsp(id);
+                }
+                self.set_success(format!("{name} let start again"));
+            }
+            Kind::Task => match self.task_run.as_ref().filter(|t| !t.by_claude && !t.install) {
+                Some(t) => {
+                    let task = t.task.clone();
+                    self.task_start(task);
+                }
+                None => self.set_status("Claude's command — Claude runs it again if it needs to"),
+            },
+            Kind::Test => self.test_rerun(),
+            Kind::Chat => crate::chat::restart_process(self),
+            _ => return self.set_status(format!("{} has no restart — s stops it", r.title)),
+        }
+        self.procs_wake(Wake::Now);
+    }
+
+    /// `l` on the selected row: what it said — a run's or the terminal's panel, the chat, else tarae's log at
+    /// its last line.
+    fn procs_log(&mut self) {
+        let Some(r) = self.procs_selected() else { return };
+        match r.under {
+            Kind::Task | Kind::Test => {
+                self.procs_close();
+                self.bottom_take_keys();
+            }
+            Kind::Terminal => {
+                self.procs_close();
+                self.terminal_focus();
+            }
+            Kind::Chat => crate::chat::open(self),
+            _ => {
+                let Some(path) = crate::log::path().filter(|p| p.exists()) else {
+                    return self.set_status("no log yet");
+                };
+                // Its last line there (a plugin's program logs under the plugin's name)
+                let source = match &r.kind {
+                    Kind::Plugin(p, _) => p.clone(),
+                    Kind::Lsp(_) | Kind::Held(..) => r.title.clone(),
+                    _ => "procs".to_string(),
+                };
+                self.events.jobs().spawn(move || {
+                    let text = std::fs::read_to_string(&path).unwrap_or_default();
+                    let line = last_line_of(&text, &source);
+                    move |ed: &mut Editor| {
+                        if let Err(e) = ed.open_at(&path, line, 0) {
+                            ed.set_error(format!("{e:#}"));
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    /// The usual memory kept (worker).
+    fn procs_keep_usual(&mut self) {
+        let Some(path) = self.procs.usual_path.clone() else { return };
+        let usual = self.procs.usual.clone();
+        self.events.jobs().spawn(move || {
+            if let Ok(s) = serde_json::to_string(&usual) {
+                let tmp = path.with_extension("json.tmp");
+                if std::fs::write(&tmp, s).is_ok() {
+                    let _ = std::fs::rename(&tmp, &path);
+                }
+            }
+            |ed: &mut Editor| ed.unchanged = true
+        });
+    }
+}
+
+/// What comes after a stopped server and the chat's claude: how they come back.
+const SERVER_AGAIN: &str = "the next file of its project starts it again";
+const CHAT_AGAIN: &str = "the chat's next message starts it again";
+
+/// `s`'s word: `taplo stopped`, and how it comes back after it — `taplo stopped · the next file …`.
+fn stopped(what: &str, then: Option<&str>) -> String {
+    match then {
+        Some(then) => format!("{what} stopped · {then}"),
+        None => format!("{what} stopped"),
+    }
+}
+
+/// The last line of the log from `source` (its column after the time) — else its end.
+fn last_line_of(text: &str, source: &str) -> usize {
+    let lines: Vec<&str> = text.lines().collect();
+    lines
+        .iter()
+        .rposition(|l| l.get(10..).is_some_and(|rest| rest.split_whitespace().next() == Some(source)))
+        .unwrap_or(lines.len().saturating_sub(1))
+}
+
+/// The panel's keys, while it has them: `j`/`k` (`g`/`G`, `C-d`/`C-u`) through the rows, `s` stop, `r`
+/// restart, `l` its log, `q` close, Esc back to the code (it stays, looking every second). The space menu,
+/// `:` and `C-w` stay the editor's. true if taken.
+pub fn key(ed: &mut Editor, key: Key) -> bool {
+    if ed.mode != Mode::Normal || !ed.pending.is_empty() || ed.prompt.is_some() {
+        return false;
+    }
+    let n = ed.procs.rows.len();
+    let Some(p) = ed.procs.panel.as_mut().filter(|p| p.focus) else { return false };
+    let step =
+        |p: &mut Panel, by: isize| p.selected = p.selected.saturating_add_signed(by).min(n.saturating_sub(1));
+    match (key.code, key.ctrl, key.alt) {
+        (Code::Char(' ' | ':'), false, false) | (Code::Char('w'), true, false) => return false,
+        (Code::Esc, ..) => p.focus = false,
+        (Code::Char('j') | Code::Down, false, false) | (Code::Char('n'), true, false) => step(p, 1),
+        (Code::Char('k') | Code::Up, false, false) | (Code::Char('p'), true, false) => step(p, -1),
+        (Code::Char('d'), true, false) | (Code::PageDown, ..) => step(p, 10),
+        (Code::Char('u'), true, false) | (Code::PageUp, ..) => step(p, -10),
+        (Code::Char('g') | Code::Home, false, false) => p.selected = 0,
+        (Code::Char('G') | Code::End, false, false) => p.selected = n.saturating_sub(1),
+        (Code::Char('q'), false, false) => ed.procs_close(),
+        (Code::Char('s'), false, false) => ed.procs_stop(),
+        (Code::Char('r'), false, false) => ed.procs_restart(),
+        (Code::Char('l'), false, false) => ed.procs_log(),
+        _ => {}
+    }
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MB: u64 = 1 << 20;
+
+    fn os(pid: u32, ppid: u32, name: &str) -> Os {
+        Os { pid, ppid, name: name.into(), started: 1_000, rss: 10 * MB, ..Default::default() }
+    }
+
+    fn sample(procs: Vec<Os>) -> Sample {
+        Sample {
+            procs: procs.into_iter().map(|o| (o, Some(1.0))).collect(),
+            took: Duration::ZERO,
+            usual: None,
+        }
+    }
+
+    /// A row as the checks see one: tarae's child (`under` its own kind), `cpu`% of a core, `mb` of memory,
+    /// up `up` seconds.
+    fn row(pid: u32, kind: Kind, cpu: f32, mb: u64, up: u64) -> Row {
+        Row {
+            pid,
+            started: 1,
+            depth: 0,
+            under: kind.clone(),
+            kind,
+            title: format!("p{pid}"),
+            what: String::new(),
+            program: format!("prog{pid}"),
+            up: Some(Duration::from_secs(up)),
+            cpu: Some(cpu),
+            rss: mb * MB,
+            footprint: Some(mb * MB),
+            zombie: false,
+            flagged: false,
+        }
+    }
+
+    /// `/proc/<pid>/stat`: the fields after the name — which may hold spaces and parentheses — its parent,
+    /// CPU ticks, start and resident pages; `Z` is a zombie.
+    #[test]
+    fn proc_stat_is_read_past_the_name() {
+        let stat = "4242 (rust (an) alyzer) S 77 4242 4242 0 -1 4194560 100 0 0 0 250 50 0 0 20 0 9 0 \
+                    6000 123456789 2560 18446744073709551615";
+        let o = parse_stat(4242, stat, 100, 4096, 1_700_000_000).expect("read");
+        assert_eq!((o.ppid, o.name.as_str(), o.zombie), (77, "rust (an) alyzer", false));
+        assert_eq!(o.cpu, Duration::from_secs(3), "250 + 50 ticks at 100 a second");
+        assert_eq!(o.started, 1_700_000_060, "boot + 6000 ticks");
+        assert_eq!(o.rss, 2560 * 4096);
+        let z = stat.replacen(") S ", ") Z ", 1);
+        assert!(parse_stat(4242, &z, 100, 4096, 0).expect("read").zombie);
+        assert_eq!(parse_stat(1, "1 (x", 100, 4096, 0), None, "cut short: nothing made up");
+    }
+
+    /// A look sees tarae's (here: the test's) child and what it started, with real CPU time — a busy loop's
+    /// is about its wall time (Mach ticks aren't nanoseconds on Apple silicon) — and real memory. (The
+    /// children are the test's own stand-ins, stopped at its end.)
+    #[test]
+    fn a_look_sees_children_their_cpu_and_memory() {
+        use std::os::unix::process::CommandExt;
+        let me = std::process::id();
+        let spin = std::process::Command::new("sh")
+            .args(["-c", "while :; do :; done"])
+            .process_group(0)
+            .spawn()
+            .expect("sh");
+        let nest = std::process::Command::new("sh")
+            .args(["-c", "sleep 30 & wait"])
+            .process_group(0)
+            .spawn()
+            .expect("sh");
+        let mut s = Sampler::default();
+        s.sample(me);
+        std::thread::sleep(Duration::from_millis(400));
+        let look = s.sample(me);
+        let find = |pid: u32| look.procs.iter().find(|(o, _)| o.pid == pid).cloned();
+        let (spun, pct) = find(spin.id()).expect("the child is listed");
+        let nested = look.procs.iter().any(|(o, _)| o.ppid == nest.id() && o.name.contains("sleep"));
+        for c in [&spin, &nest] {
+            // SAFETY: stops the process groups of this test's own stand-ins.
+            unsafe { libc::kill(-(c.id() as i32), libc::SIGKILL) };
+        }
+        let (mut spin, mut nest) = (spin, nest);
+        let _ = (spin.wait(), nest.wait());
+        assert_eq!(spun.ppid, me);
+        assert!(nested, "what a child started is listed too");
+        assert!(
+            spun.cpu > Duration::from_millis(50) && spun.cpu < Duration::from_secs(5),
+            "a busy loop for ~0.4 s took {:?} of CPU",
+            spun.cpu
+        );
+        assert!(pct.is_some_and(|p| p > 10.0 && p < 150.0), "its share of a core: {pct:?}");
+        assert!(spun.rss > 0, "resident memory read");
+        assert_eq!(spun.footprint.is_some(), cfg!(target_os = "macos"), "footprint where there is one");
+        let tarae = look.procs.first().expect("itself first");
+        assert_eq!(tarae.0.pid, me);
+        assert!(look.took < Duration::from_millis(500), "a look took {:?}", look.took);
+    }
+
+    /// The list: tarae first, its children by kind — what each is for from the editor — each with what it
+    /// started under it; one the editor doesn't know by its own name; a held server with the running ones,
+    /// with no process.
+    #[test]
+    fn rows_say_what_each_is_for_and_nest_the_rest() {
+        let s = sample(vec![
+            os(1, 0, "tarae"),
+            os(5, 1, "bash"),
+            os(2, 1, "rust-analyzer"),
+            os(3, 2, "rust-analyzer-proc-macro-srv"),
+            os(4, 1, "git"),
+        ]);
+        let known = [
+            Known { pid: 2, kind: Kind::Lsp(7), title: "rust-analyzer".into(), what: "~/w".into() },
+            Known { pid: 5, kind: Kind::Terminal, title: "terminal".into(), what: "fish".into() },
+        ];
+        let held = [Held { name: "pyright".into(), root: "/w".into(), what: String::new() }];
+        let rows = rows(&s, &known, 1, &held, 1_060);
+        let got: Vec<(u32, usize, &str, &Kind)> =
+            rows.iter().map(|r| (r.pid, r.depth, r.title.as_str(), &r.kind)).collect();
+        assert_eq!(
+            got,
+            [
+                (1, 0, "tarae", &Kind::Tarae),
+                (2, 0, "rust-analyzer", &Kind::Lsp(7)),
+                (3, 1, "rust-analyzer-proc-macro-srv", &Kind::Other),
+                (0, 0, "pyright", &Kind::Held("pyright".into(), "/w".into())),
+                (5, 0, "terminal", &Kind::Terminal),
+                (4, 0, "git", &Kind::Other),
+            ]
+        );
+        assert_eq!(rows[2].under, Kind::Lsp(7), "a child is judged as what it's under");
+        assert_eq!(rows[1].up, Some(Duration::from_secs(60)));
+    }
+
+    /// Busy: most of a core at every look for `BUSY_FOR` — not sooner, not for the user's own runs (a
+    /// build is busy by design), and not once it rests; a server's own work in progress counts too.
+    #[test]
+    fn busy_for_minutes_is_found_but_not_in_the_users_runs() {
+        let mut p = Procs::default();
+        let t0 = Instant::now();
+        let looks = |p: &mut Procs, cpu: f32, at: Duration| {
+            let rows = [row(2, Kind::Lsp(1), cpu, 100, 600), row(3, Kind::Task, cpu, 100, 600)];
+            p.check(&rows, &[], t0 + at).0
+        };
+        let mut at = Duration::ZERO;
+        while at < BUSY_FOR {
+            assert!(looks(&mut p, 95.0, at).is_empty(), "nothing at {at:?}");
+            at += QUIET_EVERY;
+        }
+        let found = looks(&mut p, 95.0, at);
+        assert_eq!(
+            found.iter().map(|f| f.pid).collect::<Vec<_>>(),
+            [2],
+            "the server, not the task: {found:?}"
+        );
+        assert_eq!(found[0].short, "p2 busy 5m");
+        assert!(looks(&mut p, 3.0, at + QUIET_EVERY).is_empty(), "it rested");
+        assert!(looks(&mut p, 95.0, at + 2 * QUIET_EVERY).is_empty(), "busy again: the time starts over");
+        // Its work in progress, for minutes
+        let lsp = |since: Instant| LspFact {
+            cid: 1,
+            pid: Some(2),
+            name: "ra".into(),
+            serving: true,
+            busy: Some((since, "Indexing".into())),
+        };
+        let now = t0 + Duration::from_secs(3600);
+        assert!(p.check(&[], &[lsp(now - BUSY_FOR / 2)], now).0.is_empty());
+        let found = p.check(&[], &[lsp(now - BUSY_FOR)], now).0;
+        assert_eq!(found.iter().map(|f| f.what.as_str()).collect::<Vec<_>>(), ["ra busy for 5m (Indexing)"]);
+    }
+
+    /// Memory: a program's usual is the most it took in its first minutes (kept over its runs); far above it
+    /// — three times and half a GB more — is found; a run of the user's isn't judged.
+    #[test]
+    fn memory_far_above_its_usual_is_found() {
+        let mut p = Procs::default();
+        let now = Instant::now();
+        let early = SETTLE.as_secs() - 60;
+        let late = SETTLE.as_secs() + 60;
+        // Its first minutes: 300 MB at most; then it settles — learned
+        p.check(&[row(2, Kind::Lsp(1), 1.0, 300, early)], &[], now);
+        p.check(&[row(2, Kind::Lsp(1), 1.0, 200, early + 30)], &[], now);
+        let (found, learned) = p.check(&[row(2, Kind::Lsp(1), 1.0, 250, late)], &[], now);
+        assert!(found.is_empty() && learned);
+        assert_eq!(p.usual.get("prog2"), Some(&vec![300 * MB]));
+        // Twice that: not far above; four times and over half a GB more: found
+        assert!(p.check(&[row(2, Kind::Lsp(1), 1.0, 600, late)], &[], now).0.is_empty());
+        let found = p.check(&[row(2, Kind::Lsp(1), 1.0, 1300, late)], &[], now).0;
+        assert_eq!(
+            found.iter().map(|f| f.what.as_str()).collect::<Vec<_>>(),
+            ["p2 at 1.3 GB — usually 300 MB"]
+        );
+        // Small programs: three times isn't enough without the half GB
+        p.usual.insert("prog4".into(), vec![10 * MB]);
+        assert!(p.check(&[row(4, Kind::Lsp(2), 1.0, 100, late)], &[], now).0.is_empty());
+        // The user's run: not judged
+        p.usual.insert("prog3".into(), vec![10 * MB]);
+        assert!(p.check(&[row(3, Kind::Task, 1.0, 4000, late)], &[], now).0.is_empty());
+    }
+
+    /// A server with no file of it open past its own stop is stopped by the check; one that exits three
+    /// times in a while is held; a child tarae doesn't know, running long, and one left unreaped are said.
+    /// Each is recorded once, ends when it's no longer so, and the status line's mark is the newest still on.
+    #[test]
+    fn the_other_checks_and_how_they_are_recorded() {
+        let mut p = Procs::default();
+        let t0 = Instant::now();
+        let fact = |serving| LspFact { cid: 9, pid: Some(2), name: "ra".into(), serving, busy: None };
+        assert!(p.check(&[], &[fact(false)], t0).0.is_empty());
+        let late = t0 + crate::lsp_editor::IDLE_STOP + LEFT_GRACE;
+        let found = p.check(&[], &[fact(false)], late).0;
+        assert_eq!(found.iter().map(|f| &f.act).collect::<Vec<_>>(), [&Act::StopServer(9)]);
+        assert!(p.check(&[], &[fact(true)], late).0.is_empty(), "a file of it open again: fine");
+        // Exits: the third within the window holds it
+        let root = Path::new("/w");
+        assert!(p.exited("ra", root, t0).is_none() && p.exited("ra", root, t0).is_none());
+        let held = p.exited("ra", root, t0).expect("the third");
+        assert!(p.is_held("ra", root) && !p.is_held("ra", Path::new("/other")));
+        assert_eq!(held.short, "ra keeps exiting");
+        // A stranger running long; a zombie seen twice
+        let mut stray = row(5, Kind::Other, 0.0, 1, STRAY_AFTER.as_secs());
+        stray.title = "sleep".into();
+        let mut zombie = row(6, Kind::Other, 0.0, 0, 1);
+        zombie.zombie = true;
+        let rows = [stray, zombie];
+        let first: Vec<String> = p.check(&rows, &[], late).0.iter().map(|f| f.key.clone()).collect();
+        assert_eq!(first, ["stray:5:1", "loop:ra:/w"], "a zombie once may be on its way to being reaped");
+        let found = p.check(&rows, &[], late).0;
+        let keys: Vec<&str> = found.iter().map(|f| f.key.as_str()).collect();
+        assert_eq!(keys, ["stray:5:1", "zombie:6:1", "loop:ra:/w"]);
+        // Recorded once each; the mark is the newest still on; gone, ended
+        let at = SystemTime::now();
+        assert_eq!(p.record(&found, at).len(), 3);
+        assert!(p.record(&found, at).is_empty(), "the same things again aren't new");
+        assert_eq!(p.mark().map(|c| c.short.as_str()), Some("ra keeps exiting"));
+        p.record(&found[..1], at);
+        assert_eq!(p.checks.iter().filter(|c| c.ended.is_some()).count(), 2);
+        assert_eq!(p.mark().map(|c| c.short.as_str()), Some("sleep running"));
+        p.record(&[], at);
+        assert!(p.mark().is_none(), "nothing abnormal: no mark");
+    }
+
+    /// A project with a stand-in language server (`cat`, which reads what it's sent).
+    fn with_server(name: &str) -> (Editor, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("tarae-procs-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"t\"\n").unwrap();
+        let cfg = "[lsp.fake]\ncommand = \"sh\"\nargs = [\"-c\", \"cat > /dev/null\"]\n[lang.rust]\nlsp = [\"fake\"]\n";
+        let (config, w) = crate::config::parse(cfg);
+        assert!(w.is_empty(), "{w:?}");
+        let mut ed = Editor::new(config);
+        ed.open(&dir.join("main.rs")).unwrap();
+        (ed, std::fs::canonicalize(&dir).unwrap())
+    }
+
+    /// Events until `done` (or 5 s pass).
+    fn settle(ed: &mut Editor, done: impl Fn(&Editor) -> bool) {
+        let end = Instant::now() + Duration::from_secs(5);
+        while !done(ed) && Instant::now() < end {
+            if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
+    }
+
+    fn screen(ed: &mut Editor, w: u16, h: u16) -> Vec<String> {
+        let mut bytes = Vec::new();
+        crate::term::render(ed, &mut bytes, w, h).unwrap();
+        let mut vt = vt100::Parser::new(h, w, 0);
+        vt.process(&bytes);
+        vt.screen().rows(0, w).collect()
+    }
+
+    fn keys(ed: &mut Editor, keys: &str) {
+        for k in keys.split_whitespace() {
+            ed.handle_key(k.parse().unwrap());
+        }
+    }
+
+    /// `:procs` lists tarae and its language server — what it's for, its numbers — in the bottom slot;
+    /// `s` on the server's row stops it (its process reaped). (The server is the test's stand-in.)
+    #[test]
+    fn procs_lists_the_server_and_s_stops_it() {
+        let (mut ed, root) = with_server("stop");
+        let cid = ed.doc().lsp.client.expect("attached");
+        let pid = ed.client(cid).and_then(crate::lsp::Client::pid).expect("its process");
+        crate::typed::execute(&mut ed, "procs").unwrap();
+        settle(&mut ed, |ed| ed.procs.rows.iter().any(|r| r.kind == Kind::Lsp(cid)));
+        let rows: Vec<(&Kind, &str)> =
+            ed.procs.rows.iter().take(2).map(|r| (&r.kind, r.title.as_str())).collect();
+        assert_eq!(rows, [(&Kind::Tarae, "tarae"), (&Kind::Lsp(cid), "fake")]);
+        assert_eq!(ed.procs.rows[1].what, crate::allow::tilde(&root));
+        keys(&mut ed, "j");
+        let shown = screen(&mut ed, 140, 30).join("\n");
+        for s in [
+            "PROCS",
+            "PID",
+            "PROCESS",
+            "FOR",
+            "CPU",
+            "RESIDENT",
+            "SELF-CHECKS",
+            "none so far",
+            "s stop",
+            "r restart",
+        ] {
+            assert!(shown.contains(s), "{s:?} in\n{shown}");
+        }
+        let line = shown.lines().find(|l| l.contains(" fake ")).expect("the server's row");
+        assert!(line.contains(&pid.to_string()) && line.contains('▎'), "selected: {line}");
+        keys(&mut ed, "s");
+        assert!(ed.client(cid).is_none(), "stopped");
+        // Said as it happened: what stopped first, then how it comes back
+        let said = ed.toasts.last().map(|t| t.text.as_str());
+        assert_eq!(said, Some("fake stopped · the next file of its project starts it again"));
+        assert_eq!(
+            stopped("claude", Some(CHAT_AGAIN)),
+            "claude stopped · the chat's next message starts it again"
+        );
+        assert_eq!(stopped("the terminal", None), "the terminal stopped");
+        let end = Instant::now() + Duration::from_secs(5);
+        // SAFETY: signal 0 only asks whether the process is there.
+        while unsafe { libc::kill(pid as i32, 0) } == 0 && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_ne!(unsafe { libc::kill(pid as i32, 0) }, 0, "its process is gone");
+        keys(&mut ed, "q");
+        assert!(!ed.procs_up(), "q closes it");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// A server exiting a third time is held: the status line says so (and nothing did before), the next
+    /// file of its project doesn't start it; `r` on its row in `:procs` lets it start, and it does.
+    #[test]
+    fn a_server_that_keeps_exiting_is_held_until_r() {
+        let (mut ed, root) = with_server("held");
+        let status = |ed: &mut Editor| screen(ed, 140, 30)[28].clone();
+        assert!(!status(&mut ed).contains('▲'), "no mark while all is well: {}", status(&mut ed));
+        for _ in 0..3 {
+            let cid = ed.doc().lsp.client.expect("attached");
+            let pid = ed.client(cid).and_then(crate::lsp::Client::pid).expect("its process");
+            // SAFETY: a signal to this test's stand-in server.
+            unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+            settle(&mut ed, |ed| ed.client(cid).is_none());
+            let id = ed.doc().id;
+            ed.close_doc(id);
+            ed.open(&root.join("main.rs")).unwrap();
+        }
+        assert!(ed.doc().lsp.client.is_none(), "held: not started again");
+        assert!(status(&mut ed).contains("▲ fake keeps exiting"), "{}", status(&mut ed));
+        crate::typed::execute(&mut ed, "procs").unwrap();
+        settle(&mut ed, |ed| ed.procs.rows.iter().any(|r| matches!(r.kind, Kind::Held(..))));
+        let at = ed.procs.rows.iter().position(|r| matches!(r.kind, Kind::Held(..))).expect("its row");
+        keys(&mut ed, &"j ".repeat(at));
+        keys(&mut ed, "r");
+        assert!(ed.doc().lsp.client.is_some(), "started again");
+        settle(&mut ed, |ed| ed.procs.mark().is_none());
+        assert!(ed.procs.mark().is_none(), "the check ended");
+        assert!(ed.procs.checks.iter().any(|c| c.what.contains("exited 3 times")), "and is recorded");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// The sampling thread's waits: closed, the slow pace; opened, a look at once; asked, at once; the editor
+    /// gone, it ends.
+    #[test]
+    fn the_sampler_waits_its_pace_and_wakes_when_asked() {
+        let (tx, rx) = channel();
+        let mut open = false;
+        let t = Instant::now();
+        assert_eq!(wait(&rx, Duration::from_millis(60), &mut open), Some(()));
+        assert!(t.elapsed() >= Duration::from_millis(60), "its pace");
+        tx.send(Wake::Open(true)).unwrap();
+        let t = Instant::now();
+        assert_eq!(wait(&rx, Duration::from_secs(30), &mut open), Some(()));
+        assert!(open && t.elapsed() < Duration::from_secs(1), "opened: at once");
+        tx.send(Wake::Now).unwrap();
+        assert_eq!(wait(&rx, Duration::from_secs(30), &mut open), Some(()));
+        drop(tx);
+        assert_eq!(wait(&rx, Duration::from_secs(30), &mut open), None, "the editor is gone");
+    }
+}

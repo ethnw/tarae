@@ -113,6 +113,15 @@ configs carry over as they are.
   endings · selection count · position. When the terminal is narrow, the least important items fold away first
 - **Log** `:log-open` — what language servers print, when they start, get ready, or exit, what's missing from PATH, and
   every message tarae showed, with local times (`$XDG_STATE_HOME/tarae/tarae.log`, the previous run's kept as `.old`)
+- **Processes** `:procs` — every process tarae started (language servers by project, the debugger, tasks and test
+  runs, the terminal's shell, Claude, plugins' programs, and what each of them started), with what it's for, how long
+  it's run, its CPU and its memory (the footprint Activity Monitor shows, on macOS, beside what's resident) — tarae
+  itself first. `s` stops one, `r` restarts it where that means something, `l` shows what it said (its panel, or
+  tarae's log at its last line). tarae looks every 30 s while the list is closed (well under a thousandth of a
+  core) and checks what it sees: busy for minutes, memory far above what that program usually takes, a server
+  left running with no file of it open (stopped), one that keeps exiting (not started again until `r`), a child
+  it doesn't know. Each check is listed with when and what tarae did, and while one holds, the status line says
+  so with a `▲` — nothing otherwise
 - **Toasts** — status messages fade in as cards at the top right, the left bar colored by kind (info, saved, warning,
   error). The more serious, the longer they stay. The command line is left for input, key hints, and the diagnostic at
   the cursor ([screenshot](screenshots/ux-toasts-sync.png))

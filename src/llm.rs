@@ -170,6 +170,11 @@ impl Warm {
         Ok(())
     }
 
+    /// The spare's process (`:procs`).
+    pub fn pid(&self) -> Option<u32> {
+        self.child.as_ref().map(Child::id)
+    }
+
     fn take(&mut self, cfg: &LlmConfig) -> Result<Child, String> {
         self.ensure(cfg)?;
         Ok(self.child.take().expect("ensured"))

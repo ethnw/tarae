@@ -148,6 +148,7 @@ fn event_loop(editor: &mut Editor) -> Result<()> {
     spawn_input(editor.events.sender());
     crate::config::watch(editor.events.sender());
     crate::git::watch(editor.events.sender());
+    editor.procs_start_sampling();
     let mut out = io::stdout();
     let mut draw = true;
     // Frames are drawn whole, but only what changed goes to the terminal (`screen.rs`): the main loop
@@ -321,6 +322,7 @@ fn render_frame(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io
         text_top: lay.text_top as usize,
         terminal_rows: (lay.debug_h > 0
             && editor.dap.is_none()
+            && !editor.procs_up()
             && editor.terminal.as_ref().is_some_and(|t| t.visible))
         .then(|| {
             (lay.text_top as usize + lay.text_rows, lay.text_top as usize + lay.text_rows + lay.debug_h - 1)
@@ -341,6 +343,7 @@ fn render_frame(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io
         review_rows: Default::default(),
         task_panel: Default::default(),
         plugin_panel: Default::default(),
+        procs_panel: Default::default(),
         note_card: Default::default(),
         thought_card: Default::default(),
         toast_card: Default::default(),
@@ -351,10 +354,11 @@ fn render_frame(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io
         scroll_to_cursor(editor, &focus_lay);
     }
     // The terminal is told its panel's size (it redraws for it)
-    // (not while the debugger has the slot — the program would draw for a size nobody sees)
-    if let Some(t) = editor.terminal.as_mut().filter(|t| t.visible)
-        && lay.debug_h > 1
+    // (not while the debugger or `:procs` has the slot — the program would draw for a size nobody sees)
+    if lay.debug_h > 1
         && editor.dap.is_none()
+        && !editor.procs_up()
+        && let Some(t) = editor.terminal.as_mut().filter(|t| t.visible)
     {
         t.resize((lay.debug_h - 1) as u16, lay.edit_w.saturating_sub(2) as u16);
     }
@@ -479,6 +483,8 @@ impl Layout {
         // What the slot's panel wants — unless you set its size (`C-w +`/`-`, a drag): that wins (U1)
         let natural = if zoom.is_some_and(|z| z != Zoom::Bottom) {
             0
+        } else if editor.procs_up() {
+            procs_panel_h(editor, total)
         } else if terminal {
             terminal_panel_h(total)
         } else if let Some(r) = task_in_the_slot(editor) {
@@ -1482,6 +1488,293 @@ fn draw_plugin_panel<W: Write>(
     Ok(())
 }
 
+/// `:procs`' panel height: its header and column names, its rows, the self-checks under them — half the
+/// editing area at most, and never shorter while it's open (rows coming and going don't move the code).
+fn procs_panel_h(editor: &Editor, total: usize) -> usize {
+    let p = &editor.procs;
+    let want = 2 + p.rows.len().max(1) + 1 + p.checks.len().clamp(1, 4);
+    let cap = (total / 2).min(total.saturating_sub(4));
+    let tall = p.panel.as_ref().map_or(0, |s| s.tall.get());
+    let h = want.max(8).max(tall).min(cap);
+    if let Some(s) = p.panel.as_ref() {
+        s.tall.set(tall.max(h));
+    }
+    h
+}
+
+/// `:procs`' panel (the bottom slot, first while it's open): what tarae started — each with what it's for,
+/// how long it's run, its CPU and memory — and tarae's own checks on them, newest first.
+///
+/// ```text
+/// ▎▐ PROCS ▌  6 processes · 1.9 GB · 3% CPU                     s stop  r restart  l log  q close  esc back
+///      PID  PROCESS            FOR                        UP     CPU  FOOTPRINT   RESIDENT
+/// ▎  41231  tarae              this editor            2h 03m    1.2%     118 MB     140 MB
+///    41250  rust-analyzer      ~/Workspace/tarae      2h 02m    0.0%     1.4 GB     1.5 GB
+///    41262    › proc-macro-srv                        2h 01m    0.0%      48 MB      52 MB
+///    SELF-CHECKS
+///    14:02  ▲ rust-analyzer busy for 6m (Indexing) · nothing yet — r restarts it
+/// ```
+fn draw_procs_panel<W: Write>(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut W) -> io::Result<()> {
+    use crate::procs::{Kind, age, mem};
+    let p = &editor.procs;
+    let Some(panel) = p.panel.as_ref() else { return Ok(()) };
+    let t = &editor.theme;
+    let card = card_style(ui, editor, "ui.popup");
+    let dim = Style { fg: ui.virt.fg, ..card };
+    let faint = Style { fg: ui.linenr.fg, ..card };
+    let strong = card.patch(t.try_get("ui.text.focus").unwrap_or(Style { bold: true, ..Style::default() }));
+    let warn = Style { fg: t.try_get("warning").and_then(|s| s.fg), ..card };
+    let selected = selected_row(ui, editor, card);
+    let y0 = lay.text_top as usize + lay.text_rows;
+    let w = lay.edit_w;
+    // The header: the pill, the totals, the keys
+    queue!(out, MoveTo(0, y0 as u16))?;
+    let pill = if panel.focus { ui.accent.fg } else { ui.linenr.fg };
+    let mut used = panel_pill(out, card, pill, "PROCS", keys_bar(editor))?;
+    let live: Vec<&crate::procs::Row> = p.rows.iter().filter(|r| r.pid != 0).collect();
+    let total_mem: u64 = live.iter().map(|r| r.memory()).sum();
+    // (none yet at the first look — its share needs one before it)
+    let cpus: Vec<f32> = live.iter().filter_map(|r| r.cpu).collect();
+    let total_cpu = (!cpus.is_empty()).then(|| cpus.iter().fold(0.0, |a, c| a + c.max(0.0)));
+    let sel = p.rows.get(panel.selected);
+    let mut hints: Vec<(&str, &str)> = Vec::new();
+    if panel.focus {
+        if sel.is_some_and(|r| !matches!(r.kind, Kind::Tarae | Kind::Held(..))) {
+            hints.push(("s", "stop"));
+        }
+        if sel.is_some_and(|r| r.kind.restarts()) {
+            hints.push(("r", "restart"));
+        }
+        hints.extend([("l", "log"), ("q", "close"), ("esc", "back")]);
+    } else {
+        hints.push(("click", "keys"));
+    }
+    let hints_w: usize = hints.iter().map(|(k, v)| k.width() + v.width() + 3).sum();
+    let mut summary: Vec<(String, Style)> = Vec::new();
+    if !live.is_empty() {
+        let n = live.len();
+        summary.push((format!("  {n} process{}", if n == 1 { "" } else { "es" }), strong));
+        let cpu = total_cpu.map_or(String::new(), |c| format!(" · {c:.0}% CPU"));
+        summary.push((format!(" · {}{cpu}", mem(total_mem)), dim));
+        if let Some(took) = p.took {
+            summary.push((format!(" · a look took {:.1} ms", took.as_secs_f64() * 1000.0), faint));
+        }
+    }
+    // (the keys keep their room: the look's cost goes first, then the totals)
+    while summary.iter().map(|(s, _)| s.width()).sum::<usize>() + used + hints_w + 3 > w
+        && !summary.is_empty()
+    {
+        summary.pop();
+    }
+    for (s, st) in &summary {
+        apply(out, *st)?;
+        queue!(out, Print(s))?;
+        used += s.width();
+    }
+    panel_hints(out, &hints, used, w, card, dim, faint)?;
+    // The columns: FOR takes what's left; narrow, the resident column goes first, then the pid, then the time
+    let foot = p.rows.iter().any(|r| r.footprint.is_some());
+    // (a row with nothing to say for what it's for — what a server started — runs its name on into that column)
+    let name_w = p
+        .rows
+        .iter()
+        .filter(|r| !r.what.is_empty())
+        .map(|r| r.title.width() + 2 * r.depth + if r.flagged { 2 } else { 0 })
+        .max()
+        .unwrap_or(7)
+        .clamp(7, 24);
+    let fixed = |(pid, up, res): (bool, bool, bool)| {
+        2 + if pid { 9 } else { 0 }
+            + name_w
+            + 2
+            + if up { 9 } else { 0 }
+            + 8
+            + 9
+            + if res { 11 } else { 0 }
+            + 2
+    };
+    let (pid, up, res) =
+        [(true, true, foot), (true, true, false), (false, true, false), (false, false, false)]
+            .into_iter()
+            .find(|&c| w.saturating_sub(fixed(c)) >= 14)
+            .unwrap_or((false, false, false));
+    let mut for_w = w.saturating_sub(fixed((pid, up, res)));
+    if for_w < 8 {
+        for_w = 0;
+    }
+    let mem_label = if foot { "FOOTPRINT" } else { "RESIDENT" };
+    // One line: (text, width, right-aligned, style) cells, two cells apart
+    let line = |out: &mut W, y: usize, cells: &[(String, usize, bool, Style)], base: Style, mark: bool| {
+        queue!(out, MoveTo(0, y as u16))?;
+        apply(out, base)?;
+        queue!(out, Spaces(w))?;
+        if mark {
+            apply(out, Style { fg: ui.accent.fg, ..base })?;
+            queue!(out, MoveTo(0, y as u16), Print("▎"))?;
+        }
+        let mut x = 2;
+        for (text, cw, right, st) in cells {
+            if *cw == 0 || x + cw > w {
+                continue;
+            }
+            let s = if *right { pad_left(text, *cw) } else { fit_ellipsis(text, *cw) };
+            apply(out, Style { bg: base.bg, ..*st })?;
+            queue!(out, MoveTo(x as u16, y as u16), Print(s))?;
+            x += cw + 2;
+        }
+        io::Result::Ok(())
+    };
+    let col = |text: &str, cw: usize, right: bool, st: Style| (text.to_string(), cw, right, st);
+    let mut head = Vec::new();
+    if pid {
+        head.push(col("PID", 7, true, faint));
+    }
+    head.push(col("PROCESS", name_w, false, faint));
+    head.push(col("FOR", for_w, false, faint));
+    if up {
+        head.push(col("UP", 7, true, faint));
+    }
+    head.push(col("CPU", 6, true, faint));
+    head.push(col(mem_label, 9, true, faint));
+    if res {
+        head.push(col("RESIDENT", 9, true, faint));
+    }
+    line(out, y0 + 1, &head, card, false)?;
+    // The rows and the checks under them: the rows first, the checks what's left (one at least)
+    let room = lay.debug_h.saturating_sub(2);
+    let n = p.rows.len();
+    let checks_want = 1 + p.checks.len().clamp(1, 4);
+    let list = n.max(1).min(room.saturating_sub(checks_want).max(room.min(4)));
+    let mut scroll = panel.scroll.get().min(n.saturating_sub(list));
+    if panel.selected < scroll {
+        scroll = panel.selected;
+    } else if list > 0 && panel.selected >= scroll + list {
+        scroll = panel.selected + 1 - list;
+    }
+    panel.scroll.set(scroll);
+    let first = y0 + 2;
+    for i in 0..list {
+        let y = first + i;
+        let Some(r) = p.rows.get(scroll + i) else {
+            let why = if n == 0 && i == 0 { "looking…" } else { "" };
+            line(out, y, &[col(why, w.saturating_sub(4), false, faint)], card, false)?;
+            continue;
+        };
+        let mark = panel.focus && scroll + i == panel.selected;
+        let base = if mark { selected } else { card };
+        let plain = Style { fg: base.fg, ..card };
+        let name = format!(
+            "{}{}{}",
+            if r.depth > 0 { format!("{}› ", "  ".repeat(r.depth - 1)) } else { String::new() },
+            if r.flagged { "▲ " } else { "" },
+            r.title
+        );
+        let name_st = match () {
+            _ if r.flagged => warn,
+            _ if r.depth == 0 => strong,
+            _ => dim,
+        };
+        let what = match r.kind {
+            Kind::Lsp(_) | Kind::Held(..) => fit_left(&r.what, for_w),
+            _ => r.what.clone(),
+        };
+        let none = || "—".to_string();
+        let up_text = match (&r.kind, r.zombie, r.up) {
+            (Kind::Held(..), ..) => "held".to_string(),
+            (_, true, _) => "ended".to_string(),
+            (_, _, Some(d)) => age(d),
+            _ => none(),
+        };
+        let cpu = r.cpu.map_or_else(none, |c| format!("{c:.1}%"));
+        let cpu_st = match r.cpu {
+            None => faint,
+            Some(c) if c >= 80.0 => warn,
+            Some(_) => plain,
+        };
+        let mut cells = Vec::new();
+        if pid {
+            let text = if r.pid == 0 { none() } else { r.pid.to_string() };
+            cells.push(col(&text, 7, true, faint));
+        }
+        if r.what.is_empty() && for_w > 0 {
+            cells.push(col(&name, name_w + 2 + for_w, false, name_st));
+        } else {
+            cells.push(col(&name, name_w, false, name_st));
+            cells.push(col(&what, for_w, false, if r.depth == 0 { dim } else { faint }));
+        }
+        if up {
+            cells.push(col(&up_text, 7, true, dim));
+        }
+        cells.push(col(&cpu, 6, true, cpu_st));
+        let (memory, rss, mem_st) = match (r.pid, r.flagged) {
+            (0, _) => (none(), none(), faint),
+            (_, true) => (mem(r.memory()), mem(r.rss), warn),
+            _ => (mem(r.memory()), mem(r.rss), plain),
+        };
+        cells.push(col(&memory, 9, true, mem_st));
+        if res {
+            cells.push(col(&rss, 9, true, if r.pid == 0 { faint } else { dim }));
+        }
+        line(out, y, &cells, base, mark)?;
+    }
+    // Self-checks: newest first — what was abnormal, when, what tarae did; ended ones say when
+    let mut y = first + list;
+    let end = y0 + lay.debug_h;
+    if y < end {
+        line(out, y, &[col("SELF-CHECKS", 12, false, faint)], card, false)?;
+        y += 1;
+    }
+    let inner = w.saturating_sub(4);
+    if p.checks.is_empty() && y < end {
+        let every = crate::procs::QUIET_EVERY.as_secs();
+        let why = format!("none so far — tarae looks every {every}s, and every second while this is open");
+        line(out, y, &[col(&why, inner, false, faint)], card, false)?;
+        y += 1;
+    }
+    for c in p.checks.iter().rev() {
+        if y >= end {
+            break;
+        }
+        queue!(out, MoveTo(0, y as u16))?;
+        apply(out, card)?;
+        queue!(out, Spaces(w), MoveTo(2, y as u16))?;
+        let ended = c.ended.map(|e| format!("ended {}", crate::log::clock(e)));
+        let right = ended.as_ref().map_or(0, |e| e.width() + 2);
+        apply(out, faint)?;
+        queue!(out, Print(format!("{}  ", crate::log::clock(c.at))))?;
+        let (glyph, st) = if c.ended.is_none() { ("▲ ", warn) } else { ("· ", faint) };
+        apply(out, st)?;
+        queue!(out, Print(glyph))?;
+        let room = inner.saturating_sub(7 + 2 + right);
+        let what = fit_ellipsis(&c.what, room);
+        apply(out, if c.ended.is_none() { card } else { dim })?;
+        queue!(out, Print(&what))?;
+        let rest = room.saturating_sub(what.width());
+        if rest > 6 {
+            apply(out, faint)?;
+            queue!(out, Print(fit_ellipsis(&format!(" · {}", c.did), rest)))?;
+        }
+        if let Some(e) = &ended {
+            apply(out, faint)?;
+            queue!(out, MoveTo((w - 2 - e.width()) as u16, y as u16), Print(e))?;
+        }
+        y += 1;
+    }
+    while y < end {
+        line(out, y, &[], card, false)?;
+        y += 1;
+    }
+    let shown = list.min(n);
+    editor.screen.procs_panel.set(Some(crate::procs::Area {
+        top: y0,
+        bottom: end - 1,
+        first,
+        shown,
+        scroll,
+    }));
+    Ok(())
+}
+
 /// Test panel (in place of the debug panel):
 ///
 /// ```text
@@ -2217,7 +2510,9 @@ fn draw(
     }
     let mut terminal_cursor = None;
     if lay.debug_h > 0 && lay.edit_w > 0 {
-        if let Some(d) = &editor.dap {
+        if editor.procs_up() {
+            draw_procs_panel(editor, ui, lay, out)?;
+        } else if let Some(d) = &editor.dap {
             draw_debug_panel(d, editor, ui, lay, out)?;
         } else if let Some(t) = editor.terminal.as_ref().filter(|t| t.visible) {
             terminal_cursor = draw_terminal_panel(t, editor, ui, lay, out)?;
@@ -4980,6 +5275,17 @@ fn draw_statusline(
         };
         right.push(Seg { text: text.clone(), style, keep: 190 });
         right.push(gap(190));
+    }
+    // Something abnormal among tarae's processes (`:procs` says what) — nothing at all otherwise
+    if let Some(c) = editor.procs.mark() {
+        let warn = t.try_get("warning").map(|s| Style { bg: None, ..s }).unwrap_or_default();
+        right.push(Seg {
+            text: format!("▲ {}", fit_ellipsis(&c.short, 32)),
+            style: ui.status.patch(warn),
+            keep: 195,
+        });
+        right.push(Seg { text: " :procs".into(), style: Style { fg: ui.linenr.fg, ..ui.status }, keep: 120 });
+        right.push(gap(195));
     }
     let [errors, warnings] = doc.diagnostic_counts();
     if errors > 0 {

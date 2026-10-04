@@ -598,6 +598,16 @@ impl Editor {
         Ok(())
     }
 
+    /// The plugins' programs running: (plugin, its id for it, process, program) — `:procs`.
+    pub(crate) fn plugin_pids(&self) -> Vec<(String, u64, u32, String)> {
+        let Some(p) = &self.plugins else { return Vec::new() };
+        p.procs
+            .iter()
+            .filter(|(_, r)| r.pid != 0)
+            .map(|((plugin, id), r)| (plugin.clone(), *id, r.pid, r.program.clone()))
+            .collect()
+    }
+
     /// Output from run `serial` of a plugin's program: to the plugin, if that run is still its.
     fn plugin_process_from(&mut self, plugin: &str, serial: u64, ev: HostEvent, flow: &Flow, w: usize) {
         let id = match &ev {

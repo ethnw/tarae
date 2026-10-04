@@ -237,6 +237,7 @@ src/
   undofile.rs        persistent undo
   clipboard.rs       + register = system clipboard
   log.rs             tarae's log (:log-open)
+  procs.rs           :procs — the processes tarae started, their cost, its checks on them
   git.rs             branch and changed-line hunks
   gitmenu.rs         space g — changed files, hunk card, reset, stage, blame
   gitpanel.rs        the git tab — status, stage, discard, commit, push/pull, log, branches

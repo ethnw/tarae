@@ -207,7 +207,7 @@ pub enum ActionPreview {
 /// How long a server stays up once no open file uses it while another file of its project is still open —
 /// a file reopened soon after needn't wait for it to load again (rust-analyzer took minutes on this
 /// repository — N1); after that it stops (it ran on for hours).
-const IDLE_STOP: std::time::Duration =
+pub(crate) const IDLE_STOP: std::time::Duration =
     std::time::Duration::from_millis(if cfg!(test) { 60_000 } else { 10 * 60 * 1000 });
 
 /// …and once no file under its root is open at all (#34 — taplo and bash-language-server for closed temp
@@ -493,6 +493,10 @@ impl Editor {
         let root = lsp::find_root_for(lang, path);
         if let Some(c) = self.lsp.clients.iter().find(|c| c.name == server.name && c.root == root) {
             return Some(c.id);
+        }
+        // It kept exiting: held until `r` in `:procs` (its red dot stays)
+        if self.procs_held(&server.name, &root) {
+            return None;
         }
         self.lsp.next_id += 1;
         let cid = self.lsp.next_id;
@@ -2595,12 +2599,14 @@ impl Editor {
     /// Server `cid` closed its stdout (exited or crashed) — forget it and everything waiting on it; its docs
     /// go without a server (reopening the file starts a new one).
     pub fn lsp_exited(&mut self, cid: ClientId) {
-        let root = self.client(cid).map(|c| c.root.display().to_string()).unwrap_or_default();
+        let root = self.client(cid).map(|c| c.root.clone()).unwrap_or_default();
         if let Some(name) = self.lsp_stopped(cid) {
-            // (reaped as it's dropped; the next file of its project starts it again)
-            crate::log::line(&name, "exit", &format!("{name} for {root} exited"));
+            // (reaped as it's dropped; the next file of its project starts it again — unless it keeps
+            // exiting: then `:procs` holds it)
+            crate::log::line(&name, "exit", &format!("{name} for {} exited", root.display()));
             self.lsp.failed.insert(name.clone(), "exited".into());
             self.set_error(format!("{name} exited · :log-open shows why"));
+            self.procs_server_exited(&name, &root);
         }
     }
 
@@ -2627,7 +2633,7 @@ impl Editor {
     }
 
     /// Drop client `cid` (the process is killed) and everything that hung on it — its name, if it was there.
-    fn lsp_stopped(&mut self, cid: ClientId) -> Option<String> {
+    pub(crate) fn lsp_stopped(&mut self, cid: ClientId) -> Option<String> {
         let i = self.lsp.clients.iter().position(|c| c.id == cid)?;
         let name = self.lsp.clients.remove(i).name.clone();
         // Its diagnostics in closed files go; the other servers' stay

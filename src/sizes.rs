@@ -169,10 +169,11 @@ pub enum Zoom {
     Side,
 }
 
-/// What the bottom slot shows — one at a time, the debugger first, then the terminal (when shown), a plugin's
-/// panel, and the test run or task started last.
+/// What the bottom slot shows — one at a time: `:procs` while it's open (asked for just now), the debugger,
+/// then the terminal (when shown), a plugin's panel, and the test run or task started last.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Slot {
+    Procs,
     Debug,
     Terminal,
     Plugin,
@@ -406,6 +407,9 @@ impl crate::editor::Editor {
 
     /// What the bottom slot shows, if anything (the order `term::draw` follows).
     pub fn slot(&self) -> Option<Slot> {
+        if self.procs_up() {
+            return Some(Slot::Procs);
+        }
         if self.dap.is_some() {
             return Some(Slot::Debug);
         }
@@ -441,6 +445,7 @@ impl crate::editor::Editor {
         match self.slot() {
             Some(Slot::Terminal) => self.bottom_focus || self.terminal.as_ref().is_some_and(|t| t.focus),
             Some(Slot::Plugin) => self.plugin_panel_focused(),
+            Some(Slot::Procs) => self.procs_focused(),
             Some(Slot::Test | Slot::Task) => self.bottom_focus,
             Some(Slot::Debug) | None => false,
         }
@@ -455,6 +460,7 @@ impl crate::editor::Editor {
                 self.set_status("the debug panel follows the code — its keys work from there")
             }
             Some(Slot::Plugin) => self.plugin_panel_click(None),
+            Some(Slot::Procs) => self.procs_click(None),
             Some(_) => {
                 if let Some(c) = self.chat.as_mut() {
                     c.focused = false;
@@ -530,6 +536,18 @@ impl crate::editor::Editor {
             if program || other || !slot {
                 self.bottom_focus = false;
             }
+        }
+        // `:procs`' panel: the same, when another place took the keys — and it gives the slot to the terminal
+        // given them (`C-\`), which it covered
+        if self.procs_up() && self.terminal.as_ref().is_some_and(|t| t.focus && t.visible) {
+            self.procs_close();
+        }
+        if self.procs_focused()
+            && (self.chat.as_ref().is_some_and(|c| c.focused)
+                || self.sidebar.as_ref().is_some_and(|s| s.focus)
+                || self.code_review.as_ref().is_some_and(|r| r.focus))
+        {
+            self.procs_unfocus();
         }
         if self.zoom.is_some() && self.zoomed().is_none() {
             self.zoom = None;

@@ -187,6 +187,7 @@ impl Editor {
     /// Whether the panel is drawn: it shares its place with the debugger and the terminal, which come first.
     pub fn plugin_panel_in_sight(&self) -> bool {
         self.plugins.as_ref().is_some_and(|p| p.panel.is_some())
+            && !self.procs_up()
             && self.dap.is_none()
             && !self.terminal.as_ref().is_some_and(|t| t.visible)
     }
