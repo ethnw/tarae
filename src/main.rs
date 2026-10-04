@@ -45,6 +45,7 @@ mod log;
 mod lsp;
 mod lsp_editor;
 mod markdown;
+mod mcp;
 mod models;
 mod movement;
 mod nav;

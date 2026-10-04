@@ -205,9 +205,12 @@ fn env_name(s: &str) -> bool {
 }
 
 /// Names a command's leading assignments may never set and still match a chat's pattern (#44): what
-/// finds programs and libraries, what shells read at their start, and what the sandbox sets or reads
-/// (`sandbox::inside_env`, its home and temp folders). `LD_`/`DYLD_` are prefixes.
-const ENV_NEVER: [&str; 11] = [
+/// finds programs and libraries, what shells read at their start, what the sandbox sets or reads
+/// (`sandbox::inside_env`, its home and temp folders), and what makes a program run another program or
+/// load code (rustc and cargo's wrappers, runners, linkers and flags — `-C linker=` runs one —, git's ssh,
+/// helpers and config, interpreters' startup options and paths, editors, pagers and password askers). A
+/// name ending in `_` is a prefix, one starting with `_` a suffix (`CARGO_TARGET_<triple>_RUNNER`).
+const ENV_NEVER: [&str; 40] = [
     "PATH",
     "HOME",
     "TMPDIR",
@@ -219,12 +222,49 @@ const ENV_NEVER: [&str; 11] = [
     "SHELLOPTS",
     "LD_",
     "DYLD_",
+    "RUSTC",
+    "RUSTDOC",
+    "RUSTFLAGS",
+    "RUSTDOCFLAGS",
+    "CARGO_BUILD_RUSTC",
+    "CARGO_BUILD_RUSTDOC",
+    "_WRAPPER",
+    "_RUNNER",
+    "_LINKER",
+    "_RUSTFLAGS",
+    "_RUSTDOCFLAGS",
+    "GIT_SSH",
+    "GIT_SSH_COMMAND",
+    "GIT_EXEC_PATH",
+    "GIT_EXTERNAL_DIFF",
+    "GIT_CONFIG",
+    "GIT_CONFIG_",
+    "NODE_OPTIONS",
+    "PYTHONPATH",
+    "PYTHONSTARTUP",
+    "PERL5OPT",
+    "PERL5LIB",
+    "RUBYOPT",
+    "EDITOR",
+    "VISUAL",
+    "PAGER",
+    "_PAGER",
+    "_EDITOR",
+    "_ASKPASS",
 ];
 
 /// Whether a pattern may carry `name` among its assignments.
 pub fn env_allowed(name: &str) -> bool {
     env_name(name)
-        && !ENV_NEVER.iter().any(|n| if n.ends_with('_') { name.starts_with(n) } else { name == *n })
+        && !ENV_NEVER.iter().any(|n| {
+            if n.ends_with('_') {
+                name.starts_with(n)
+            } else if n.starts_with('_') {
+                name.ends_with(n)
+            } else {
+                name == *n
+            }
+        })
 }
 
 /// `one_command` with `NAME=value` words in front (`A=1 B=x cargo xtask shot …`, in an `sh -c` or not):
@@ -369,6 +409,51 @@ pub fn outside(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// No pattern may set a name that makes the command run another program or load code — by name, by
+    /// prefix, or by suffix (cargo's per-target runners and linkers) — while plain ones stay settable.
+    #[test]
+    fn names_that_run_or_load_code_are_never_settable() {
+        for n in [
+            "RUSTC_WRAPPER",
+            "RUSTC",
+            "RUSTC_WORKSPACE_WRAPPER",
+            "CARGO_BUILD_RUSTC_WRAPPER",
+            "CARGO_BUILD_RUSTC",
+            "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER",
+            "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER",
+            "CARGO_HOST_LINKER",
+            "RUSTFLAGS",
+            "CARGO_ENCODED_RUSTFLAGS",
+            "GIT_SSH_COMMAND",
+            "GIT_EXEC_PATH",
+            "GIT_CONFIG_COUNT",
+            "GIT_CONFIG_KEY_0",
+            "GIT_PAGER",
+            "GIT_EDITOR",
+            "SSH_ASKPASS",
+            "NODE_OPTIONS",
+            "PYTHONPATH",
+            "PYTHONSTARTUP",
+            "PERL5OPT",
+            "RUBYOPT",
+            "EDITOR",
+            "VISUAL",
+            "PAGER",
+            "PATH",
+            "LD_PRELOAD",
+            "DYLD_INSERT_LIBRARIES",
+        ] {
+            assert!(!env_allowed(n), "{n}");
+        }
+        for n in
+            ["TARAE_SHOT_XDG", "CARGO_TARGET_DIR", "RUST_LOG", "RUST_BACKTRACE", "CARGO_BUILD_JOBS", "FOO"]
+        {
+            assert!(env_allowed(n), "{n}");
+        }
+        // Not a name at all
+        assert!(!env_allowed("1A") && !env_allowed("A-B") && !env_allowed(""));
+    }
 
     /// The list, and each option that makes one of them write, run something, or never end.
     #[test]

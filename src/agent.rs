@@ -7,7 +7,8 @@
 //!   there is ever touched). `space c` launches `claude` in a side pane, attached directly via
 //!   `CLAUDE_CODE_SSE_PORT`; a `claude` started by hand in the same folder can attach with `/ide` from then on. Auth = token (128-bit random) in the
 //!   `x-claude-code-ide-authorization` header. Bound to localhost only.
-//! - Speaks MCP (JSON-RPC 2.0) over WebSocket text frames. Tools: `openFile` · **`openDiff`** ·
+//! - Speaks MCP (JSON-RPC 2.0) over WebSocket text frames, the handshake revisions and the stateless one
+//!   (`mcp.rs`). Tools: `openFile` · **`openDiff`** ·
 //!   `getCurrentSelection` · `getLatestSelection` · `getOpenEditors` · `getWorkspaceFolders` ·
 //!   `getDiagnostics` · `checkDocumentDirty` · `saveDocument` · `close_tab` · `closeAllDiffTabs`.
 //!   Notifications: `selection_changed` when the selection changes, `at_mentioned` via `space C`.
@@ -46,6 +47,7 @@ enum Out {
 struct PendingDiff {
     conn: u64,
     id: Value,
+    rev: crate::mcp::Rev,
     path: PathBuf,
     contents: String,
     tab: String,
@@ -344,53 +346,71 @@ impl Editor {
         }
     }
 
+    /// A connection is ready for notifications: `notifications/initialized`, or (2026-07-28, no handshake)
+    /// its first request in that revision.
+    fn agent_ready(&mut self, conn: u64) {
+        let Some((_, ready)) = self.agent.as_mut().and_then(|a| a.conns.get_mut(&conn)) else { return };
+        if std::mem::replace(ready, true) {
+            return;
+        }
+        self.set_success("Claude Code connected — it sees your selection, diagnostics and open files");
+        self.agent_selection_tick(true);
+    }
+
+    /// An MCP message — either revision (`mcp.rs`).
     pub fn on_agent_message(&mut self, conn: u64, msg: Value) {
         let Some(method) = msg["method"].as_str().map(str::to_string) else { return }; // reply to ours — none
         let id = msg["id"].clone();
         let params = &msg["params"];
-        let result = match method.as_str() {
-            "initialize" => json!({
-                "protocolVersion": params["protocolVersion"].as_str().unwrap_or("2025-03-26"),
-                "capabilities": { "tools": { "listChanged": true }, "prompts": { "listChanged": true }, "logging": {} },
-                "serverInfo": { "name": "tarae", "version": env!("CARGO_PKG_VERSION") },
-            }),
-            "notifications/initialized" => {
-                if let Some((_, ready)) = self.agent.as_mut().and_then(|a| a.conns.get_mut(&conn)) {
-                    *ready = true;
-                }
-                self.set_success(
-                    "Claude Code connected — it sees your selection, diagnostics and open files",
-                );
-                self.agent_selection_tick(true);
-                return;
+        let error = |ed: &Editor, e: Value| {
+            if let Some(a) = &ed.agent {
+                a.send(conn, &json!({ "jsonrpc": "2.0", "id": id, "error": e }));
             }
+        };
+        let rev = match crate::mcp::rev(&msg) {
+            Ok(rev) => rev,
+            Err(_) if id.is_null() => return,
+            Err(e) => return error(self, e),
+        };
+        if rev == crate::mcp::Rev::Stateless {
+            self.agent_ready(conn);
+        }
+        let result = match method.as_str() {
+            "notifications/initialized" => return self.agent_ready(conn),
             "tools/list" => json!({ "tools": tools() }),
             "tools/call" => {
                 let name = params["name"].as_str().unwrap_or_default().to_string();
                 let args = params["arguments"].clone();
-                match self.agent_tool(conn, &id, &name, &args) {
+                match self.agent_tool(conn, &id, rev, &name, &args) {
                     Some(r) => r,
                     None => return, // deferred answer (openDiff)
                 }
             }
-            "ping" => json!({}),
             "prompts/list" => json!({ "prompts": [] }),
             "resources/list" => json!({ "resources": [] }),
             "resources/templates/list" => json!({ "resourceTemplates": [] }),
             _ if id.is_null() => return, // unknown notification
             m => {
-                let err = json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": format!("method not found: {m}") } });
-                if let Some(a) = &self.agent {
-                    a.send(conn, &err);
+                let capabilities = json!({ "tools": { "listChanged": true }, "prompts": { "listChanged": true },
+                                           "logging": {} });
+                match crate::mcp::common(m, &msg, rev, capabilities) {
+                    Some(r) => r,
+                    None => return error(self, crate::mcp::not_found(m)),
                 }
-                return;
             }
         };
-        self.agent_reply(conn, &id, result);
+        self.agent_reply(conn, &id, crate::mcp::finish(rev, &method, result));
     }
 
     /// One tool. None if the answer is deferred.
-    fn agent_tool(&mut self, conn: u64, id: &Value, name: &str, args: &Value) -> Option<Value> {
+    fn agent_tool(
+        &mut self,
+        conn: u64,
+        id: &Value,
+        rev: crate::mcp::Rev,
+        name: &str,
+        args: &Value,
+    ) -> Option<Value> {
         let path_arg = |k: &str| args[k].as_str().map(PathBuf::from);
         Some(match name {
             "openFile" => {
@@ -423,6 +443,7 @@ impl Editor {
                 let d = PendingDiff {
                     conn,
                     id: id.clone(),
+                    rev,
                     path,
                     contents: args["new_file_contents"].as_str().unwrap_or_default().to_string(),
                     tab: args["tab_name"].as_str().unwrap_or("Proposed changes").to_string(),
@@ -689,7 +710,7 @@ impl Editor {
         } else {
             rejected(&d.tab)
         };
-        self.agent_reply(d.conn, &d.id, result);
+        self.agent_reply(d.conn, &d.id, crate::mcp::finish(d.rev, "tools/call", result));
     }
 
     /// Closes agent diffs (that tab name only / all) — pending ones are answered as rejected. Returns count.
@@ -701,7 +722,7 @@ impl Editor {
         let active = a.active_tab.clone().filter(|t| tab.is_none_or(|x| x == t));
         let mut n = gone.len();
         for d in gone {
-            self.agent_reply(d.conn, &d.id, rejected(&d.tab));
+            self.agent_reply(d.conn, &d.id, crate::mcp::finish(d.rev, "tools/call", rejected(&d.tab)));
         }
         if active.is_some() {
             n += 1;
@@ -852,6 +873,58 @@ mod tests {
             assert_eq!(v["id"], id);
             assert!(v["result"]["content"][0]["text"].as_str().unwrap().contains("required"), "{v}");
         }
+    }
+
+    /// The IDE side speaks both revisions too: `initialize` answers only a version it speaks; a stateless
+    /// client (no handshake) is ready at its first request, gets `resultType`/serverInfo and the lists'
+    /// caching, `server/discover`, and a refusal for a version it doesn't speak.
+    #[test]
+    fn the_ide_server_speaks_both_revisions() {
+        let mut ed = Editor::new(crate::config::Config::default());
+        let rx = fake_agent(&mut ed);
+        let ask = |ed: &mut Editor, msg: Value| {
+            ed.on_agent_message(1, msg);
+            sent_reply(&rx)
+        };
+        let init = |ed: &mut Editor, v: &str| {
+            let r = ask(
+                ed,
+                json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                                    "params": { "protocolVersion": v } }),
+            );
+            assert!(r["result"]["capabilities"]["prompts"].is_object(), "{r}");
+            r["result"]["protocolVersion"].as_str().unwrap_or_default().to_string()
+        };
+        assert_eq!(init(&mut ed, "2025-03-26"), "2025-03-26", "an older IDE client's, kept");
+        assert_eq!(init(&mut ed, "2024-10-07"), "2025-11-25", "never an echo");
+        // A stateless client on a fresh connection
+        ed.agent.as_mut().unwrap().conns.get_mut(&1).unwrap().1 = false;
+        let meta = |v: &str| json!({ "io.modelcontextprotocol/protocolVersion": v });
+        let found = ask(&mut ed, json!({ "jsonrpc": "2.0", "id": 2, "method": "server/discover" }));
+        assert_eq!(found["result"]["supportedVersions"], json!(crate::mcp::SUPPORTED), "{found}");
+        assert_eq!(found["result"]["resultType"], "complete");
+        assert_eq!(found["result"]["cacheScope"], "private");
+        assert_eq!(found["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"], "tarae");
+        assert!(found["result"].get("serverInfo").is_none(), "only in _meta: {found}");
+        for (id, method) in [(3, "tools/list"), (4, "prompts/list")] {
+            let r = ask(
+                &mut ed,
+                json!({ "jsonrpc": "2.0", "id": id, "method": method,
+                                         "params": { "_meta": meta("2026-07-28") } }),
+            );
+            assert_eq!(r["result"]["resultType"], "complete", "{r}");
+            assert_eq!(r["result"]["cacheScope"], "private");
+            assert_eq!(r["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"], "tarae");
+        }
+        assert!(ed.agent.as_ref().unwrap().connected(), "ready without notifications/initialized");
+        let r = ask(
+            &mut ed,
+            json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/list",
+                                     "params": { "_meta": meta("1999-01-01") } }),
+        );
+        assert_eq!(r["error"]["code"], crate::mcp::UNSUPPORTED_VERSION, "{r}");
+        let r = ask(&mut ed, json!({ "jsonrpc": "2.0", "id": 6, "method": "nope" }));
+        assert_eq!(r["error"]["code"], -32601, "{r}");
     }
 
     /// A diff queued behind a review that isn't the agent's (chat `C-r`) shows once that one ends —

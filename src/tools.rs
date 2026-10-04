@@ -26,43 +26,48 @@ use crate::sandbox::{Availability, Guard};
 use crate::test_results::Status;
 use crate::testing::{RunState, Scope, TestRun};
 
-/// A tool call answered later: the chat process it came from and the ids to answer with.
+/// A tool call answered later: the chat process it came from, the ids to answer with, and the MCP revision
+/// the answer is in.
 #[derive(Clone, Debug)]
 pub struct Call {
     generation: u64,
     request_id: String,
     id: Value,
+    rev: crate::mcp::Rev,
 }
 
-/// An MCP message from claude → the `mcp_response` (None = answered later with `answer`).
+/// An MCP message from claude → the `mcp_response` (None = answered later with `answer`). Either revision
+/// (`mcp.rs`): after `initialize`, or each request naming its own.
 pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> Option<Value> {
     // Notifications get the empty answer the SDK gives
     let Some(id) = msg.get("id").cloned() else {
         return Some(json!({ "jsonrpc": "2.0", "result": {}, "id": 0 }));
     };
-    let result = match msg["method"].as_str().unwrap_or_default() {
-        "initialize" => Ok(json!({
-            "protocolVersion": msg["params"]["protocolVersion"].as_str().unwrap_or("2025-06-18"),
-            "capabilities": { "tools": {} },
-            "serverInfo": { "name": "tarae", "version": env!("CARGO_PKG_VERSION") },
-        })),
+    let rev = match crate::mcp::rev(msg) {
+        Ok(rev) => rev,
+        Err(e) => return Some(json!({ "jsonrpc": "2.0", "id": id, "error": e })),
+    };
+    let call = || Call { generation, request_id: request_id.to_string(), id: id.clone(), rev };
+    let method = msg["method"].as_str().unwrap_or_default();
+    let result = match method {
         "tools/list" => {
             sandbox_look(ed);
-            Ok(json!({ "tools": [
-                    crate::notes::tool_schema(),
-                    run_tests_schema(),
-                    run_schema(),
-                    crate::plan::tool_schema(),
-                    crate::seeing::tool_schema(),
-                    crate::nav::references_schema(),
-                    crate::nav::search_schema(),
-                    crate::nav::symbols_schema(),
-                    crate::nav::definition_schema(),
-                    crate::nav::hover_schema(),
-                    crate::nav::diagnostics_schema(),
-                    crate::refactor::rename_schema(),
-                    crate::refactor::replace_schema(),
-                ] }))
+            let tools = [
+                crate::notes::tool_schema(),
+                run_tests_schema(),
+                run_schema(),
+                crate::plan::tool_schema(),
+                crate::seeing::tool_schema(),
+                crate::nav::references_schema(),
+                crate::nav::search_schema(),
+                crate::nav::symbols_schema(),
+                crate::nav::definition_schema(),
+                crate::nav::hover_schema(),
+                crate::nav::diagnostics_schema(),
+                crate::refactor::rename_schema(),
+                crate::refactor::replace_schema(),
+            ];
+            Ok(json!({ "tools": tools.map(annotated) }))
         }
         "tools/call" => {
             let params = &msg["params"];
@@ -70,30 +75,23 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
             let r = match params["name"].as_str() {
                 Some("note") => crate::notes::tool_call(ed, args),
                 Some("plan") => crate::plan::tool_call(ed, args),
-                Some("run_tests") => {
-                    let call = Call { generation, request_id: request_id.to_string(), id: id.clone() };
-                    match run_tests(ed, call, args) {
-                        Ok(()) => return None,
-                        Err(e) => Err(e),
-                    }
-                }
-                Some("run") => {
-                    let call = Call { generation, request_id: request_id.to_string(), id: id.clone() };
-                    match run(ed, call, args) {
-                        Ok(()) => return None,
-                        Err(e) => Err(e),
-                    }
-                }
+                Some("run_tests") => match run_tests(ed, call(), args) {
+                    Ok(()) => return None,
+                    Err(e) => Err(e),
+                },
+                Some("run") => match run(ed, call(), args) {
+                    Ok(()) => return None,
+                    Err(e) => Err(e),
+                },
                 Some("screen") => {
-                    let call = Call { generation, request_id: request_id.to_string(), id: id.clone() };
-                    crate::seeing::call(ed, call);
+                    crate::seeing::call(ed, call());
                     return None;
                 }
                 Some(
                     name @ ("references" | "search" | "symbols" | "definition" | "hover" | "diagnostics"
                     | "rename" | "replace"),
                 ) => {
-                    let call = Call { generation, request_id: request_id.to_string(), id: id.clone() };
+                    let call = call();
                     let asked = match name {
                         "rename" => crate::refactor::rename(ed, call, args),
                         "replace" => crate::refactor::replace(ed, call, args),
@@ -113,13 +111,39 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
             };
             Ok(content(r))
         }
-        "ping" => Ok(json!({})),
-        m => Err(json!({ "code": -32601, "message": format!("no method {m}") })),
+        m => crate::mcp::common(m, msg, rev, json!({ "tools": {} })).ok_or_else(|| crate::mcp::not_found(m)),
     };
     Some(match result {
-        Ok(r) => json!({ "jsonrpc": "2.0", "id": id, "result": r }),
+        Ok(r) => json!({ "jsonrpc": "2.0", "id": id, "result": crate::mcp::finish(rev, method, r) }),
         Err(e) => json!({ "jsonrpc": "2.0", "id": id, "error": e }),
     })
+}
+
+/// A tool's schema with its annotations: a title, and whether it only reads or may change things the
+/// user has (hints for the client — tarae's own cards and reviews still decide).
+fn annotated(mut schema: Value) -> Value {
+    let (title, hint) = match schema["name"].as_str().unwrap_or_default() {
+        "note" => ("Pin a note", None),
+        "run_tests" => ("Run tests", None),
+        "run" => ("Run a command", Some("destructiveHint")),
+        "plan" => ("Show the plan", None),
+        "screen" => ("See the screen", Some("readOnlyHint")),
+        "references" => ("Find references", Some("readOnlyHint")),
+        "search" => ("Search the project", Some("readOnlyHint")),
+        "symbols" => ("File outline", Some("readOnlyHint")),
+        "definition" => ("Go to definition", Some("readOnlyHint")),
+        "hover" => ("Type and docs", Some("readOnlyHint")),
+        "diagnostics" => ("Diagnostics", Some("readOnlyHint")),
+        "rename" => ("Rename a symbol", Some("destructiveHint")),
+        "replace" => ("Replace in files", Some("destructiveHint")),
+        _ => return schema,
+    };
+    let mut a = json!({ "title": title });
+    if let Some(hint) = hint {
+        a[hint] = json!(true);
+    }
+    schema["annotations"] = a;
+    schema
 }
 
 /// A tool's text as MCP content (Err = a tool error Claude can correct).
@@ -141,7 +165,7 @@ thread_local! {
 impl Call {
     /// A call with this id from no chat process (its answer only goes to `ANSWERED`).
     pub fn test(id: u64) -> Call {
-        Call { generation: u64::MAX, request_id: String::new(), id: json!(id) }
+        Call { generation: u64::MAX, request_id: String::new(), id: json!(id), rev: Default::default() }
     }
 }
 
@@ -152,8 +176,14 @@ pub fn answer(ed: &mut Editor, call: Call, r: Result<String, String>) {
     if ed.chat.as_ref().is_none_or(|c| c.generation() != call.generation) {
         return;
     }
-    let response = json!({ "jsonrpc": "2.0", "id": call.id, "result": content(r) });
+    let response = response(&call, r);
     crate::chat::respond(ed, &call.request_id, json!({ "mcp_response": response }));
+}
+
+/// A waited call's answer, in its request's revision.
+fn response(call: &Call, r: Result<String, String>) -> Value {
+    let result = crate::mcp::finish(call.rev, "tools/call", content(r));
+    json!({ "jsonrpc": "2.0", "id": call.id, "result": result })
 }
 
 // ── run_tests ───────────────────────────────────────────────────────────────
@@ -1437,6 +1467,189 @@ mod tests {
         assert_eq!(v("failed (exit 101) in 3s — a.rs\n$ cargo test\n\nOutput (last 9 lines):\n"), "failed");
         assert_eq!(v("the test run was stopped — the user closed it"), "not run");
         assert_eq!(v("no tests ran in 0.3s — a::b\n$ cargo test -- a::b --exact\n"), "no tests ran");
+    }
+
+    /// The server through both revisions' sequences: the handshake (`initialize` →
+    /// `notifications/initialized` → `tools/list` → a call, results plain) and the stateless one
+    /// (`server/discover`, then requests naming their version in `_meta`, nothing before them; results
+    /// with `resultType`, serverInfo, and the list's caching) — a version it doesn't speak is refused, and
+    /// a waited call's late answer is in its request's revision too.
+    #[test]
+    fn the_tools_server_speaks_both_revisions() {
+        use crate::mcp::{Rev, SUPPORTED, UNSUPPORTED_VERSION};
+        use serde_json::{Value, json};
+        const VERSION: &str = "io.modelcontextprotocol/protocolVersion";
+        const INFO: &str = "io.modelcontextprotocol/serverInfo";
+        let names = |r: &Value| -> Vec<String> {
+            let tools = r["result"]["tools"].as_array().expect("tools");
+            tools.iter().map(|t| t["name"].as_str().unwrap().to_string()).collect()
+        };
+        let annotations = |r: &Value, name: &str| -> Value {
+            let tools = r["result"]["tools"].as_array().unwrap();
+            tools.iter().find(|t| t["name"] == name).unwrap()["annotations"].clone()
+        };
+
+        // The handshake, as claude 2.1.283 speaks it
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        let mut send = |msg: Value| super::mcp(&mut ed, 0, "c1", &msg).expect("answered now");
+        let init = send(json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize",
+            "params": { "protocolVersion": "2025-11-25", "capabilities": {},
+                        "clientInfo": { "name": "claude-code", "version": "2.1.283" } } }));
+        assert_eq!(init["result"]["protocolVersion"], "2025-11-25", "{init}");
+        assert_eq!(init["result"]["serverInfo"]["name"], "tarae");
+        assert!(init["result"].get("resultType").is_none(), "plain: {init}");
+        let older = send(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": { "protocolVersion": "2025-03-26" } }));
+        assert_eq!(older["result"]["protocolVersion"], "2025-03-26", "an older one we speak: {older}");
+        let unknown = send(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": { "protocolVersion": "2024-10-07" } }));
+        assert_eq!(unknown["result"]["protocolVersion"], "2025-11-25", "never an echo: {unknown}");
+        send(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
+        let list = send(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
+        let old_names = names(&list);
+        assert_eq!(old_names.first().map(String::as_str), Some("note"), "{old_names:?}");
+        assert!(list["result"].get("ttlMs").is_none() && list["result"].get("resultType").is_none());
+        // Annotations: a title for each, read-only and destructive hints
+        for t in list["result"]["tools"].as_array().unwrap() {
+            assert!(t["annotations"]["title"].is_string(), "{t}");
+        }
+        for name in ["references", "search", "symbols", "definition", "hover", "diagnostics", "screen"] {
+            assert_eq!(annotations(&list, name)["readOnlyHint"], true, "{name}");
+        }
+        for name in ["run", "rename", "replace"] {
+            let a = annotations(&list, name);
+            assert!(a["destructiveHint"] == true && a.get("readOnlyHint").is_none(), "{name}: {a}");
+        }
+        let call = send(json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": { "name": "nope", "arguments": {} } }));
+        assert_eq!(call["result"]["isError"], true, "{call}");
+        assert!(call["result"].get("resultType").is_none());
+        let ping = send(json!({ "jsonrpc": "2.0", "id": 4, "method": "ping" }));
+        assert_eq!(ping["result"], json!({}), "kept for the older revisions");
+
+        // Stateless: a fresh server, no initialize — discover, then each request says its version
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        let mut send = |msg: Value| super::mcp(&mut ed, 0, "c1", &msg).expect("answered now");
+        let meta = |v: &str| json!({ VERSION: v, "io.modelcontextprotocol/clientCapabilities": {} });
+        let found = send(json!({ "jsonrpc": "2.0", "id": 1, "method": "server/discover", "params": {} }));
+        assert_eq!(found["result"]["supportedVersions"], json!(SUPPORTED), "{found}");
+        assert_eq!(found["result"]["capabilities"], json!({ "tools": {} }));
+        assert_eq!(found["result"]["_meta"][INFO]["name"], "tarae");
+        assert!(found["result"].get("serverInfo").is_none(), "only in _meta: {found}");
+        assert_eq!(found["result"]["resultType"], "complete");
+        assert_eq!(found["result"]["cacheScope"], "private", "cacheable, as the lists");
+        assert!(found["result"]["ttlMs"].as_u64().is_some_and(|t| t > 0));
+        let list = send(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list",
+            "params": { "_meta": meta("2026-07-28") } }));
+        assert_eq!(list["result"]["resultType"], "complete", "{list}");
+        assert_eq!(list["result"]["_meta"][INFO]["name"], "tarae");
+        assert_eq!(list["result"]["cacheScope"], "private");
+        assert!(list["result"]["ttlMs"].as_u64().is_some_and(|t| t > 0));
+        assert_eq!(names(&list), old_names, "the same tools, in the same order");
+        let call = send(json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": { "name": "nope", "arguments": {}, "_meta": meta("2026-07-28") } }));
+        assert_eq!(call["result"]["resultType"], "complete", "{call}");
+        assert_eq!(call["result"]["isError"], true);
+        assert!(call["result"].get("ttlMs").is_none(), "only lists hold");
+        let ping = send(json!({ "jsonrpc": "2.0", "id": 4, "method": "ping",
+            "params": { "_meta": meta("2026-07-28") } }));
+        assert_eq!(ping["error"]["code"], -32601, "gone in 2026-07-28: {ping}");
+        let refused = send(json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/list",
+            "params": { "_meta": meta("2031-01-01") } }));
+        assert_eq!(refused["error"]["code"], UNSUPPORTED_VERSION, "{refused}");
+        assert_eq!(refused["error"]["data"]["requested"], "2031-01-01");
+        assert!(refused.get("result").is_none());
+        // An older version named in _meta: plain results
+        let list = send(json!({ "jsonrpc": "2.0", "id": 6, "method": "tools/list",
+            "params": { "_meta": meta("2025-06-18") } }));
+        assert!(list["result"].get("resultType").is_none(), "{list}");
+
+        // A waited call answers in its request's revision
+        let mut late = super::Call::test(9);
+        assert!(super::response(&late, Ok("done".into()))["result"].get("resultType").is_none());
+        late.rev = Rev::Stateless;
+        let r = super::response(&late, Ok("done".into()));
+        assert_eq!(r["result"]["resultType"], "complete", "{r}");
+        assert_eq!(r["result"]["content"][0]["text"], "done");
+        assert_eq!(r["id"], 9);
+    }
+
+    /// Which MCP revision the installed claude speaks to tarae's tools server — with no user message, so no
+    /// model call (it registers and lists the tools at startup). Fails when a CLI upgrade changes it, saying
+    /// to what: then check `mcp.rs` (a revision we don't speak means no tools in the chat) and move `KNOWN`.
+    #[test]
+    #[ignore = "runs the installed claude (no model call) — cargo test -- --ignored installed_claude"]
+    fn installed_claude_speaks_a_revision_we_speak() {
+        use serde_json::{Value, json};
+        use std::io::{BufRead, Write};
+        use std::process::{Command, Stdio};
+        /// Measured 2026-10-03, claude 2.1.283.
+        const KNOWN: &str = "2025-11-25";
+        let dir = std::env::temp_dir().join(format!("tarae-mcp-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let version = Command::new("claude")
+            .arg("--version")
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+        let Ok(version) = version else { panic!("no claude on PATH") };
+        let mut cmd = Command::new("claude");
+        cmd.args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"])
+            .args(["--tools", "", "--no-session-persistence", "--strict-mcp-config", "--setting-sources", ""])
+            .current_dir(&dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        // (not the running Claude Code session's variables — a nested claude would take them as its own)
+        for (k, _) in std::env::vars_os() {
+            if k.to_string_lossy().starts_with("CLAUDE") {
+                cmd.env_remove(k);
+            }
+        }
+        let mut child = cmd.spawn().expect("claude starts");
+        let mut stdin = child.stdin.take().unwrap();
+        writeln!(stdin, "{}", crate::llm::initialize_message(&["tarae"])).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let out = std::io::BufReader::new(child.stdout.take().unwrap());
+        std::thread::spawn(move || {
+            for line in out.lines().map_while(Result::ok) {
+                if tx.send(line).is_err() {
+                    return;
+                }
+            }
+        });
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        // (method, the version it named — initialize's, or _meta's)
+        let mut seen: Vec<(String, Option<String>)> = Vec::new();
+        let mut listed = false;
+        while !listed {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            let Ok(line) = rx.recv_timeout(left) else { break };
+            let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+            let req = &v["request"];
+            if v["type"] != "control_request" || req["subtype"] != "mcp_message" {
+                continue;
+            }
+            let msg = &req["message"];
+            let method = msg["method"].as_str().unwrap_or_default().to_string();
+            let named = msg["params"]["protocolVersion"]
+                .as_str()
+                .or(msg["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"].as_str());
+            seen.push((method.clone(), named.map(str::to_string)));
+            let request_id = v["request_id"].as_str().unwrap_or_default();
+            let answer = super::mcp(&mut ed, 0, request_id, msg).expect("answered now");
+            let line = crate::llm::control_response(request_id, json!({ "mcp_response": answer }));
+            writeln!(stdin, "{line}").unwrap();
+            listed = method == "tools/list" && answer["result"]["tools"].is_array();
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        std::fs::remove_dir_all(&dir).ok();
+        eprintln!("MCP {version}: {seen:?}");
+        assert!(listed, "{version} never listed tarae's tools: {seen:?}");
+        let spoken = seen.iter().find_map(|(_, v)| v.clone()).unwrap_or_default();
+        assert!(crate::mcp::SUPPORTED.contains(&spoken.as_str()), "{version} speaks {spoken}: {seen:?}");
+        assert_eq!(spoken, KNOWN, "{version} moved from {KNOWN} to {spoken} — check mcp.rs, then KNOWN");
     }
 
     /// A run where no test ran is reported as that — not "passed" — with the output to see why.
