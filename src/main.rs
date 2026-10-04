@@ -7,6 +7,7 @@ mod blocked;
 mod chat;
 mod chats;
 mod checkpoint;
+mod chrome;
 mod clipboard;
 mod cmdline;
 mod codereview;

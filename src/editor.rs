@@ -275,8 +275,12 @@ pub struct Screen {
     /// The rows of code and bottom slot together, from row `text_top`.
     pub body_h: usize,
     pub text_top: usize,
-    /// The terminal panel: its rows on screen (first, last) when it shows · the size a terminal gets.
+    /// The terminal panel: its rows on screen (first — its tabs —, last) when it shows · the size a
+    /// terminal gets.
     pub terminal_rows: Option<(usize, usize)>,
+    /// The bottom slot's first column · its tabs as drawn: (row, start col, end col, the panel).
+    pub slot_x: usize,
+    pub slot_tabs: std::cell::RefCell<Vec<(usize, usize, usize, crate::sizes::Slot)>>,
     pub terminal_size: std::cell::Cell<Option<(u16, u16)>>,
     /// The test panel: its rows (first, last) and how many of them the detail has — the wheel scrolls it.
     pub test_panel: std::cell::Cell<Option<(usize, usize, usize)>>,
@@ -284,6 +288,8 @@ pub struct Screen {
     pub review_change: std::cell::Cell<Option<(usize, usize)>>,
     /// The in-buffer review's changes: every screen row of one (its header, its lines) — cards keep off them.
     pub review_rows: std::cell::RefCell<Vec<usize>>,
+    /// The cards' half-block edges this frame — `screen::Screen::present` seats them on what's under them.
+    pub edges: std::cell::RefCell<Vec<crate::screen::Edge>>,
     /// The task panel's: (first, last, rows of output).
     pub task_panel: std::cell::Cell<Option<(usize, usize, usize)>>,
     /// A plugin's panel: (its first screen line, its last, its first row's line, the first row shown).
@@ -1529,6 +1535,14 @@ impl Editor {
         {
             return self.lane_spot(spot);
         }
+        // The bottom slot's tabs: that panel in front
+        if m.kind == K::Down
+            && self.picker.is_none()
+            && let Some(&(.., slot)) =
+                s.slot_tabs.borrow().iter().find(|t| t.0 == y && (t.1..t.2).contains(&x))
+        {
+            return self.slot_show(slot);
+        }
         if let Some(p) = self.picker.as_mut() {
             // (a click acts on this query's rows, not the last one's)
             if m.kind == K::Down {
@@ -1591,9 +1605,10 @@ impl Editor {
             crate::codereview::show(self, i, false);
             return;
         }
+        // The bottom slot's columns: under the code, between the side panel and the chat
+        let in_slot = x >= s.slot_x && s.chat_x.is_none_or(|cx| x < cx);
         // The terminal: the wheel scrolls back, a click gives it the keys (a click anywhere else takes them)
-        let in_terminal = s.terminal_rows.is_some_and(|(y0, y1)| (y0..=y1).contains(&y))
-            && s.chat_x.is_none_or(|cx| x < cx);
+        let in_terminal = s.terminal_rows.is_some_and(|(y0, y1)| (y0..=y1).contains(&y)) && in_slot;
         // A press anywhere ends a selection whose release was lost (a pane switch mid-drag)
         let owned = std::mem::replace(&mut self.mouse_in_terminal, false) && m.kind != K::Down;
         if m.kind == K::Down
@@ -1609,10 +1624,13 @@ impl Editor {
         // program that has the mouse always gets its release)
         let wheel = matches!(m.kind, K::ScrollUp | K::ScrollDown);
         if owned || (in_terminal && (m.kind == K::Down || wheel)) {
-            // Its screen starts a row below the title, a column in from the edge
+            // Its screen starts under the header (`chrome::HEAD`), the padding in from the slot's edge
+            let (head, x0) = (crate::chrome::HEAD, s.slot_x + crate::chrome::PAD);
             let cell = s.terminal_rows.and_then(|(y0, y1)| {
-                let inside = in_terminal && y > y0 && x >= 1;
-                (inside || owned).then(|| ((y.clamp(y0 + 1, y1) - y0 - 1) as u16, x.saturating_sub(1) as u16))
+                let inside = in_terminal && y >= y0 + head && x >= x0;
+                (inside || owned).then(|| {
+                    ((y.clamp(y0 + head, y1.max(y0 + head)) - y0 - head) as u16, x.saturating_sub(x0) as u16)
+                })
             });
             self.mouse_in_terminal = (owned && m.kind == K::Drag) || (m.kind == K::Down && cell.is_some());
             self.terminal_mouse(m.kind, cell, m.alt);
@@ -1628,8 +1646,8 @@ impl Editor {
         // `:procs`' panel: the same
         if let Some(a) = s.procs_panel.get()
             && (a.top..=a.bottom).contains(&y)
-            && s.chat_x.is_none_or(|cx| x < cx)
-            && self.procs_up()
+            && in_slot
+            && self.slot() == Some(crate::sizes::Slot::Procs)
         {
             match m.kind {
                 K::Down => self
@@ -1648,8 +1666,8 @@ impl Editor {
         // A plugin's panel: a click takes the keys there (on a row, selects it); the wheel moves through it
         if let Some((y0, y1, first, scroll)) = s.plugin_panel.get()
             && (y0..=y1).contains(&y)
-            && s.chat_x.is_none_or(|cx| x < cx)
-            && self.plugins.as_ref().is_some_and(|p| p.panel.is_some())
+            && in_slot
+            && self.plugin_panel_in_sight()
         {
             match m.kind {
                 // (the rows: not the header, not the status line under them)
@@ -1666,7 +1684,7 @@ impl Editor {
         if let Some((y0, y1, rows)) = s.test_panel.get()
             && slot == Some(crate::sizes::Slot::Test)
             && (y0..=y1).contains(&y)
-            && s.chat_x.is_none_or(|cx| x < cx)
+            && in_slot
         {
             match (m.kind, self.lane.test_run.as_mut()) {
                 (K::ScrollDown, Some(r)) => r.scroll_by(3, rows),
@@ -1680,7 +1698,7 @@ impl Editor {
         if let Some((y0, y1, rows)) = s.task_panel.get()
             && slot == Some(crate::sizes::Slot::Task)
             && (y0..=y1).contains(&y)
-            && s.chat_x.is_none_or(|cx| x < cx)
+            && in_slot
         {
             match (m.kind, self.lane.task_run.as_mut()) {
                 (K::ScrollDown, Some(r)) => r.scroll_by(3, rows),
@@ -3608,10 +3626,10 @@ mod tests {
             b
         };
         let first = frame(&mut ed);
-        let whole = screen.present(&first, 160, 50).len();
+        let whole = screen.present(&first, 160, 50, &[]).len();
         std::thread::sleep(ed.tick_wanted().unwrap());
         let next = frame(&mut ed);
-        let out = String::from_utf8(screen.present(&next, 160, 50).to_vec()).unwrap();
+        let out = String::from_utf8(screen.present(&next, 160, 50, &[]).to_vec()).unwrap();
         let escapes = regex::Regex::new(r"\x1b\[[0-9;:?]*[ -/]*[@-~]").unwrap();
         let text = escapes.replace_all(&out, "");
         assert!(text.chars().any(|c| "▂▃▄▅▆▇".contains(c)), "the wave moved: {text:?}");
@@ -8214,9 +8232,10 @@ mod tests {
         std::fs::remove_dir_all(&repo).ok();
     }
 
-    /// The chat shows the sessions: a tab row over it (`●` working, `▲` waiting for you, `+` new); where it
-    /// doesn't fit, one dropdown with how many others wait. A tab click switches the whole lane; with no
-    /// chat, the status line's chip names the session and the count, and a click on it opens the list.
+    /// The chat shows the sessions: a tab row under its header (`●` working, `▲` waiting for you, `+` new);
+    /// where it doesn't fit, one dropdown with how many others wait. A tab click switches the whole lane;
+    /// with no chat, the status line's chip names the session and the count, and a click on it opens the
+    /// list.
     #[test]
     fn the_chat_shows_the_sessions_and_a_click_switches() {
         use crate::event::{Mouse, MouseKind};
@@ -8246,7 +8265,7 @@ mod tests {
         // (the checkout tarae started in by its branch)
         let tabs = r.iter().position(|r| r.contains("main │ fix-login-everywhere │ parser ▲ │ +"));
         let tabs = tabs.unwrap_or_else(|| panic!("the tabs: {r:#?}"));
-        assert!(r[tabs + 1].contains("claude"), "over the chat's title: {r:#?}");
+        assert!(r[tabs - 2].contains("claude") && r[tabs - 1].contains("────"), "under its header: {r:#?}");
         // Narrow: the dropdown
         let r = rows(&mut ed, 100);
         assert!(r.iter().any(|r| r.contains("◂ main ▾ 1/3 ▲1 ▸")), "{r:#?}");
@@ -8829,15 +8848,15 @@ mod tests {
         ed.lane.task_run = Some(run);
         ed.lane.sidebar.as_mut().unwrap().focus = false;
         draw(&mut ed, 140);
-        assert_eq!(ed.screen.bottom_h, 3, "its own: a small one");
+        assert_eq!(ed.screen.bottom_h, 4, "its own: a small one (its title, rule, two rows)");
         feed(&mut ed, "<C-w>+<C-w>+");
         draw(&mut ed, 140);
-        assert_eq!((ed.sizes.bottom, ed.screen.bottom_h), (Some(7), 7));
+        assert_eq!((ed.sizes.bottom, ed.screen.bottom_h), (Some(8), 8));
         // C-w =: all automatic again
         feed(&mut ed, "<C-w>=");
         draw(&mut ed, 140);
         assert_eq!(ed.sizes, crate::sizes::Sizes::default());
-        assert_eq!((ed.screen.bottom_h, ed.screen.side_w), (3, side));
+        assert_eq!((ed.screen.bottom_h, ed.screen.side_w), (4, side));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -8961,12 +8980,13 @@ mod tests {
         assert_eq!(top(&ed), 0);
         feed(&mut ed, "G");
         assert_eq!(ed.lane.task_run.as_ref().unwrap().scroll, None, "at the end: follows it again");
-        // Its header says it has the keys, and what they do
+        // Its header says what the keys do there, and the status line that they're its
         draw(&mut ed);
         let (frame, w, h) = ed.last_frame.clone().unwrap();
         let screen = crate::screen::text(&frame, w, h).unwrap();
-        let head = screen.lines().find(|l| l.contains(" OK ")).unwrap();
-        assert!(head.starts_with('▎') && head.contains("j k scroll"), "{head}");
+        let head = screen.lines().find(|l| l.contains("j k scroll")).unwrap();
+        assert!(head.contains(" ok "), "{head}");
+        assert!(screen.lines().any(|l| l.starts_with(" ▐ TASK ▌")), "{screen}");
         feed(&mut ed, "<esc>j");
         assert!(!ed.bottom_focus);
         assert_eq!(ed.cursor_line(), 1, "the code's again");

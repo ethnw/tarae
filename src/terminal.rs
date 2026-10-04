@@ -392,6 +392,15 @@ impl Editor {
     /// `space T` — showing: hide it (it keeps running); hidden: show it with the keys (your `$SHELL`, started
     /// if nothing runs there).
     pub fn terminal_toggle(&mut self) {
+        // (shown but behind another tab of the slot: to the front, with the keys)
+        let front = self.slot() == Some(crate::sizes::Slot::Terminal);
+        if !front && self.lane.terminal.as_ref().is_some_and(|t| t.visible && t.exited.is_none()) {
+            self.lane.slot_front = Some(crate::sizes::Slot::Terminal);
+            if let Some(t) = self.lane.terminal.as_mut() {
+                t.focus = true;
+            }
+            return;
+        }
         match self.lane.terminal.as_mut() {
             Some(t) if t.visible => {
                 t.visible = false;
@@ -414,6 +423,7 @@ impl Editor {
             Some(t) if t.exited.is_none() => {
                 t.visible = true;
                 t.focus = true;
+                self.lane.slot_front = Some(crate::sizes::Slot::Terminal);
             }
             _ => self.terminal_toggle(),
         }
@@ -428,6 +438,7 @@ impl Editor {
                 t.visible = true;
                 t.focus = true;
             }
+            self.lane.slot_front = Some(crate::sizes::Slot::Terminal);
             return false;
         }
         let (rows, cols) = self.screen.terminal_size.get().unwrap_or((12, 80));

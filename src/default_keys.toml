@@ -207,6 +207,7 @@ lt = "panel_narrower"
 minus = "bottom_shorter"
 "=" = "sizes_auto"
 z = "zoom_toggle"
+t = "slot_next"
 
 [normal.space.w]
 v = "vsplit"
@@ -226,6 +227,7 @@ lt = "panel_narrower"
 minus = "bottom_shorter"
 "=" = "sizes_auto"
 z = "zoom_toggle"
+t = "slot_next"
 
 [normal.space]
 e = "file_explorer"

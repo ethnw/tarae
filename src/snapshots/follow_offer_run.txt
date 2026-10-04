@@ -1,25 +1,25 @@
-# follow_offer_run · 100x30 · theme meok · cursor 1:4
+# follow_offer_run · 100x30 · theme meok · cursor 2:5
 ## text
-00  tarae  ›  src  ›  demo.rs
-01   1 use std::collections::HashMap;                           ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-02   1                                                            claude › follow               0.0s
-03   2 ▎ Counts how often each word appears.                      ▎ commit it
-04     ▎                                                          ▂▅▆ thinking
-05     ▎ Words are split on whitespace; case is kept.
-06   5 pub fn word_counts(text: &str) -> HashMap<&str, usize> {   space l open the chat
-07   6     let mut counts = HashMap::new();                     ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
-08   7     for word in text.split_whitespace() {
-09   8     │   *counts.entry(word).or_insert(0) += 1;
-10   9     }
-11  10     counts
-12  11 }
-13  12
-14  13 fn main() {
-15  14     let text = "the quick brown fox jumps over the lazy dog";
-16  15     let counts = word_counts(text);
-17  16     println!("{} distinct words", counts.len()); // 타래
-18  17 }
-19
+00   tarae  ›  src  ›  demo.rs
+01   ─────────────────────────────────────────────────────────────────────────────────────────────────
+02    1 use std::collections::HashMap;                          ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+03    1                                                           claude › follow               0.0s
+04    2 ▎ Counts how often each word appears.                     ▎ commit it
+05      ▎                                                         ▂▅▆ thinking
+06      ▎ Words are split on whitespace; case is kept.
+07    5 pub fn word_counts(text: &str) -> HashMap<&str, usize> {  space l open the chat
+08    6     let mut counts = HashMap::new();                    ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+09    7     for word in text.split_whitespace() {
+10    8     │   *counts.entry(word).or_insert(0) += 1;
+11    9     }
+12   10     counts
+13   11 }
+14   12
+15   13 fn main() {
+16   14     let text = "the quick brown fox jumps over the lazy dog";
+17   15     let counts = word_counts(text);
+18   16     println!("{} distinct words", counts.len()); // 타래
+19   17 }
 20
 21                                                                   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
 22                                                                    ▎ Claude wants to run
@@ -32,13 +32,13 @@
 29
 ## bg · surface per cell, blank = ui.background
 00
-01     Acccccccccccccccccccccccccccccccccccccccccccccccccccccccc                                      c
-02                                                              pppppppppppppppppppppppppppppppppppppp
-03     111111111111111111111111111111111111111111111111111111111pppppppppppppppppppppppppppppppppppppp1
-04     111111111111111111111111111111111111111111111111111111111pppppppppppppppppppppppppppppppppppppp1
-05     111111111111111111111111111111111111111111111111111111111pppppppppppppppppppppppppppppppppppppp1
-06                                                              pppppppppppppppppppppppppppppppppppppp
-07
+01
+02      Acccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+03                                                              pppppppppppppppppppppppppppppppppppppp
+04      11111111111111111111111111111111111111111111111111111111pppppppppppppppppppppppppppppppppppppp1
+05      11111111111111111111111111111111111111111111111111111111pppppppppppppppppppppppppppppppppppppp1
+06      11111111111111111111111111111111111111111111111111111111pppppppppppppppppppppppppppppppppppppp1
+07                                                              pppppppppppppppppppppppppppppppppppppp
 08
 09
 10
@@ -62,26 +62,26 @@
 28   AAAAAAAA
 29
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00  ddddd  f  ddd  f  TTTTTTT
-01   A
-02   f                                                            dddddd a aaaaaa               ffff
-03   f                                                            a TTTTTT TT
-04                                                                aaa DDDDDDDD
-05
-06   f                                                            DDDDD D ffff fff ffff
-07   f
-08   f
-09   f
-10   f
-11  ff
-12  ff
-13  ff
-14  ff
-15  ff                gggg ggggg ggggg ggg ggggg gggg ggg gggg gggg
-16  ff
-17  ff              ggg gggggggg gggggg
-18  ff
-19
+00   ddddd  f  ddd  f  TTTTTTT
+01   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+02    A
+03    f                                                           dddddd a aaaaaa               ffff
+04    f                                                           a TTTTTT TT
+05                                                                aaa DDDDDDDD
+06
+07    f                                                           DDDDD D ffff fff ffff
+08    f
+09    f
+10    f
+11    f
+12   ff
+13   ff
+14   ff
+15   ff
+16   ff                gggg ggggg ggggg ggg ggggg gggg ggg gggg gggg
+17   ff
+18   ff              ggg gggggggg gggggg
+19   ff
 20
 21
 22                                                                    a BBBBBB BBBBB BB BBB

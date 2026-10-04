@@ -22,7 +22,8 @@
 //!
 //! The marks name theme keys rather than RGB values, so tweaking a palette color doesn't churn every file,
 //! while a surface or accent moving to the wrong cells does show up. When two keys share a color the
-//! first key in `BG`/`FG` wins.
+//! first key in `BG`/`FG` wins. Text a region without the keys draws faded (`chrome::FADE`) gets its key's
+//! mark too — the fade itself is the rules' tests' to check (`the_panels_follow_one_set_of_rules`).
 //!
 //! Determinism: fixed theme (meok), no language servers or git unless faked, only the built-in (core)
 //! grammars, toasts frozen at full opacity, and every worker job the frame depends on is awaited
@@ -167,7 +168,15 @@ impl Shot {
         });
     }
 
+    /// The frame as the terminal gets it, whole: the cards seated as it's read (`Screen::present`).
     fn frame(&mut self) -> Vec<u8> {
+        let buf = self.drawn();
+        let edges = self.ed.screen.edges.borrow();
+        crate::screen::Screen::new().present(&buf, self.w, self.h, &edges).to_vec()
+    }
+
+    /// The frame as `render` draws it, before `Screen::present` reads it.
+    fn drawn(&mut self) -> Vec<u8> {
         let mut buf = Vec::new();
         render(&mut self.ed, &mut buf, self.w, self.h).unwrap();
         buf
@@ -264,7 +273,24 @@ fn snapshot(ed: &Editor, name: &str, bytes: &[u8], w: u16, h: u16) -> String {
             }
             bl.push(bm);
             let visible = c.has_contents() && !c.contents().trim().is_empty();
-            let fm = match fg_keys.iter().find(|k| k.0 == c.fgcolor()) {
+            // (a region without the keys draws its text faded toward its background — `chrome::FADE`: the
+            // same key's mark)
+            let faded_from = |k: &(vt100::Color, char, &str)| match (k.0, c.fgcolor(), c.bgcolor()) {
+                (vt100::Color::Rgb(r, g, b), vt100::Color::Rgb(fr, fg, fb), bg) => {
+                    let bg = match (bg, base_bg) {
+                        (vt100::Color::Rgb(r, g, b), _)
+                        | (vt100::Color::Default, vt100::Color::Rgb(r, g, b)) => [r, g, b],
+                        _ => return false,
+                    };
+                    crate::chrome::fade([r, g, b], bg, crate::chrome::FADE) == [fr, fg, fb]
+                }
+                _ => false,
+            };
+            let key = fg_keys
+                .iter()
+                .find(|k| k.0 == c.fgcolor())
+                .or_else(|| fg_keys.iter().find(|k| faded_from(k)));
+            let fm = match key {
                 _ if !visible => ' ',
                 Some(k) if c.bold() => k.1.to_ascii_uppercase(),
                 Some(k) => k.1,
@@ -925,6 +951,200 @@ fn a_cut_note_keeps_who_is_talking() {
     assert!(card.last().unwrap().contains("space n"), "and the keys: {card:#?}");
 }
 
+/// `now` under code review against `base` on a `w`×`h` screen, the rail of files up (as `snapshot_review`).
+fn review_of(w: u16, h: u16, base: &str, now: &str) -> Shot {
+    use crate::codereview::{Base, CodeReview, File};
+    let mut s = Shot::new(w, h);
+    s.file("src/demo.rs", now);
+    let cwd = std::env::current_dir().unwrap();
+    let file = File {
+        rel: "src/demo.rs".into(),
+        path: cwd.join("src/demo.rs"),
+        added: now.lines().count() - base.lines().count(),
+        removed: 0,
+        new: false,
+        gone: false,
+        binary: false,
+    };
+    s.ed.lane.code_review = Some(CodeReview::for_test(Base::Head, cwd, vec![file]));
+    let doc = s.ed.doc_mut();
+    doc.review_base = Some(Rope::from_str(base));
+    doc.git_base = Some(std::sync::Arc::new(base.to_string()));
+    doc.git_hunks = crate::git::hunks(base, now);
+    doc.git_version = doc.version();
+    s.frame();
+    s
+}
+
+/// Five lines, then thirty added — under review, the added ones on the wash.
+fn five_and_thirty_added() -> (String, String) {
+    let base: String = (1..=5).map(|i| format!("let line_{i} = {i};\n")).collect();
+    let added: String = (1..=30).map(|i| format!("let added_{i} = {i};\n")).collect();
+    let now = format!("{base}{added}");
+    (base, now)
+}
+
+/// A card's top and bottom rows (`rect`, as `editor.screen` has it) are its half-block edges, and each
+/// edge cell's outer half has the background `without` (the same screen with no card) shows in that cell —
+/// what's under the card. Those backgrounds.
+fn edges_seated(
+    with: &vt100::Parser,
+    without: &vt100::Parser,
+    (x, y, w, h): (usize, usize, usize, usize),
+    surface: vt100::Color,
+) -> Vec<vt100::Color> {
+    let mut under = Vec::new();
+    for row in [y, y + h - 1] {
+        for col in x..x + w {
+            let c = with.screen().cell(row as u16, col as u16).unwrap();
+            assert!(
+                ["▄", "▀"].contains(&c.contents()) && c.fgcolor() == surface,
+                "{row},{col}: {:?} isn't the card's edge",
+                c.contents()
+            );
+            let was = without.screen().cell(row as u16, col as u16).unwrap().bgcolor();
+            assert_eq!(c.bgcolor(), was, "{row},{col}: the edge's outer half on what's under it");
+            under.push(was);
+        }
+    }
+    under
+}
+
+/// A card's half-row edges sit on what's under them — no strip of ground between the card and a review's
+/// wash, nor the code.
+#[test]
+fn card_edges_sit_on_what_is_under_them() {
+    // Over a review's wash: a note on an added line, its card on the added lines below
+    let (base, now) = five_and_thirty_added();
+    let mut s = review_of(112, 30, &base, &now);
+    let (ground, surface, _) = chrome_colors(&s.ed);
+    let path = s.ed.doc().path.clone().unwrap();
+    crate::notes::add(&mut s.ed, &path, 11..12, crate::notes::By::Claude, "A remark about this added line.");
+    s.ed.goto_line(11);
+    let with = cells(&s.frame(), s.w, s.h);
+    let rect = s.ed.screen.note_card.get().expect("the note card");
+    s.ed.lane.notes.list.clear();
+    let without = cells(&s.frame(), s.w, s.h);
+    let under = edges_seated(&with, &without, rect, surface);
+    // (the pane's padding, left of the wash, is ground — per column)
+    let washed = under.iter().filter(|&&c| c != ground).count();
+    assert!(washed > under.len() / 2, "the wash is under it: {under:?}");
+    // Over the code: hover docs
+    let mut s = Shot::new(100, 24);
+    s.file("src/demo.rs", DEMO_RS);
+    s.ed.goto_line(5);
+    s.ed.popup = Some(crate::markdown::render("Counts how often each word appears.", &s.ed.theme, None));
+    let with = cells(&s.frame(), s.w, s.h);
+    let rect = s.ed.screen.popup.get().expect("the hover card");
+    s.ed.popup = None;
+    let without = cells(&s.frame(), s.w, s.h);
+    edges_seated(&with, &without, rect, surface);
+}
+
+/// Seated through the main loop's diffs too: its `Screen`, which showed the frames before, sends what makes
+/// the screen a whole seated frame makes — as a card comes, moves over the wash, and goes.
+#[test]
+fn card_edges_stay_seated_through_diffs() {
+    let (base, now) = five_and_thirty_added();
+    let mut s = review_of(112, 30, &base, &now);
+    let path = s.ed.doc().path.clone().unwrap();
+    for line in [11, 20] {
+        crate::notes::add(&mut s.ed, &path, line..line + 1, crate::notes::By::Claude, "A remark about this.");
+    }
+    let mut screen = crate::screen::Screen::new();
+    let mut through_diffs = vt100::Parser::new(s.h, s.w, 0);
+    let mut cards = Vec::new();
+    for line in [3, 11, 20, 11, 3] {
+        s.ed.goto_line(line);
+        let drawn = s.drawn();
+        through_diffs.process(screen.present(&drawn, s.w, s.h, &s.ed.screen.edges.borrow()));
+        cards.push(s.ed.screen.note_card.get().map(|r| r.1));
+        let whole = cells(&s.frame(), s.w, s.h);
+        for (y, x) in (0..s.h).flat_map(|y| (0..s.w).map(move |x| (y, x))) {
+            let (a, b) = (through_diffs.screen().cell(y, x).unwrap(), whole.screen().cell(y, x).unwrap());
+            assert_eq!(
+                (a.contents(), a.fgcolor(), a.bgcolor()),
+                (b.contents(), b.fgcolor(), b.bgcolor()),
+                "line {line}, cell {y},{x}"
+            );
+        }
+    }
+    // (by its top row)
+    let [none, a, b, a2, none2] = cards[..] else { unreachable!() };
+    assert!(
+        none.is_none() && none2.is_none() && a.is_some() && a == a2 && b > a,
+        "came, moved, went: {cards:?}"
+    );
+}
+
+/// A note's card stays inside the code of the pane it's about — never over the review's rail of files
+/// (it once cut their names), nor into the pane beside.
+#[test]
+fn a_note_card_stays_in_its_pane() {
+    let long = "A long remark that runs on well past the width of any card, so the card is as wide as \
+                cards get and has to be kept inside the pane rather than wherever it would fit.";
+    let inside = |s: &mut Shot, what: &str| {
+        let path = s.ed.doc().path.clone().unwrap();
+        crate::notes::add(&mut s.ed, &path, 11..12, crate::notes::By::Claude, long);
+        s.ed.goto_line(11);
+        s.frame();
+        let (x, _, w, _) = s.ed.screen.note_card.get().unwrap_or_else(|| panic!("{what}: the note card"));
+        let focused = s.ed.lane.focus;
+        let pane = s.ed.screen.panes.iter().find(|p| p.0 == focused).expect("the focused pane").1;
+        assert!(
+            pane.x <= x && x + w <= pane.x + pane.w,
+            "{what}: the card {x}..{} out of its pane {}..{}",
+            x + w,
+            pane.x,
+            pane.x + pane.w
+        );
+    };
+    // Beside the review's rail
+    let (base, now) = five_and_thirty_added();
+    let mut s = review_of(100, 30, &base, &now);
+    assert!(s.ed.screen.panes[0].1.x > 0, "the rail is up");
+    inside(&mut s, "review");
+    // The left of two panes side by side
+    let mut s = Shot::new(140, 30);
+    s.file("src/demo.rs", &now);
+    s.keys("<C-w>v<C-w>h");
+    assert_eq!(s.ed.screen.panes.len(), 2, "two panes");
+    inside(&mut s, "split");
+}
+
+/// A card over a panel — the `:` menu over the side panel, both `ui.popup` — is a tone up from it, so it
+/// stands apart from the panel as it does from the ground, in the light theme too.
+#[test]
+fn a_card_over_a_panel_stands_apart_from_it() {
+    for light in [false, true] {
+        let mut s = Shot::new(112, 24);
+        if light {
+            s.ed.theme = crate::theme::load("hanji").unwrap();
+        }
+        s.file("src/demo.rs", DEMO_RS);
+        let root = std::env::current_dir().unwrap();
+        let rels = ["Cargo.toml", "README.md", "src/demo.rs"].map(String::from).to_vec();
+        let mut sb = crate::sidebar::Sidebar::with_files(root, rels);
+        sb.focus = false;
+        s.ed.lane.sidebar = Some(sb);
+        s.keys(":w");
+        let (ground, surface, _) = chrome_colors(&s.ed);
+        let p = cells(&s.frame(), s.w, s.h);
+        let rows: Vec<String> = p.screen().rows(0, s.w).collect();
+        let y = rows.iter().rposition(|r| r.contains("write-all")).expect("the menu");
+        let bg = |x: usize| p.screen().cell(y as u16, x as u16).unwrap().bgcolor();
+        let (over_side, side_w) = (bg(1), s.ed.screen.side_w);
+        assert!(side_w > 2, "the side panel is up");
+        assert!(
+            over_side != surface && over_side != ground,
+            "light {light}: the menu over the panel {over_side:?}"
+        );
+        // (beside the panel, under the code's rows, the panel's own surface is still there)
+        let panel = p.screen().cell(2, 1).unwrap().bgcolor();
+        assert_eq!(panel, surface, "light {light}: the panel");
+    }
+}
+
 /// The thought card is the turn's words as a log: a new thought goes under the last one (thinking comes in
 /// bursts — a lone "I should" must not wipe the whole thought before it).
 #[test]
@@ -1501,7 +1721,8 @@ fn snapshot_test_panel_scrolled() {
     s.check("test_panel_scrolled");
 }
 
-/// A run where no test ran: the pill says so, and the first row says why above the runner's own "ok".
+/// A run where no test ran: the header says so (its tab's badge in the warning colour), and the first row
+/// under the rule says why above the runner's own "ok".
 #[test]
 fn test_panel_says_when_no_test_ran() {
     let mut s = Shot::new(100, 24);
@@ -1519,9 +1740,10 @@ fn test_panel_says_when_no_test_ran() {
     let text = p.screen().contents();
     let (y0, _, _) = s.ed.screen.test_panel.get().expect("the panel is drawn");
     let rows: Vec<&str> = text.lines().skip(y0).collect();
-    assert!(rows[0].contains("NO TESTS") && rows[0].contains("orphan::forgotten"), "{text}");
-    assert!(rows[1].contains("no test ran — nothing matched it"), "{text}");
-    assert!(rows[2..].iter().any(|r| r.contains("test result: ok. 0 passed")), "the output under it: {text}");
+    assert!(rows[0].contains("tests ▲") && rows[0].contains("orphan::forgotten  no tests"), "{text}");
+    assert!(rows[1].trim().chars().all(|c| c == '─'), "the header's rule: {text}");
+    assert!(rows[2].contains("no test ran — nothing matched it"), "{text}");
+    assert!(rows[3..].iter().any(|r| r.contains("test result: ok. 0 passed")), "the output under it: {text}");
 }
 
 /// The terminal panel under the code with a program's colored output, the keys in it.
@@ -1540,21 +1762,21 @@ fn snapshot_terminal_panel() {
         })
     });
     s.check("terminal_panel");
-    // A drag over its first line (screen row 15; its text starts a column in): selected on the selection's
-    // color, copied on release
+    // A drag over its first line (screen row 16, under the slot's tabs and rule; its text starts at the
+    // padding, two columns in): selected on the selection's color, copied on release
     let mouse = |s: &mut Shot, kind, x| {
-        s.ed.handle_event(Event::Mouse(crate::event::Mouse { kind, x, y: 15, alt: false }));
+        s.ed.handle_event(Event::Mouse(crate::event::Mouse { kind, x, y: 16, alt: false }));
         s.frame()
     };
     use crate::event::MouseKind as K;
-    mouse(&mut s, K::Down, 1);
-    mouse(&mut s, K::Drag, 12);
-    let bytes = mouse(&mut s, K::Up, 12);
+    mouse(&mut s, K::Down, 2);
+    mouse(&mut s, K::Drag, 13);
+    let bytes = mouse(&mut s, K::Up, 13);
     assert_eq!(s.ed.lane.terminal.as_ref().unwrap().selected_text(), "$ cargo test");
     assert!(s.ed.toasts.iter().any(|t| t.text == "copied 12 characters"));
     let shot = snapshot(&s.ed, "t", &bytes, s.w, s.h);
-    let bg_row = shot.lines().skip_while(|l| !l.starts_with("## bg")).nth(16).unwrap();
-    assert_eq!(&bg_row[3..17], "pVVVVVVVVVVVVp", "the selected cells: {bg_row:?}");
+    let bg_row = shot.lines().skip_while(|l| !l.starts_with("## bg")).nth(17).unwrap();
+    assert_eq!(&bg_row[4..18], "pVVVVVVVVVVVVp", "the selected cells: {bg_row:?}");
     // A drag begun in the code isn't the terminal's when it crosses it — nor is its cursor moved by it
     let at = |s: &mut Shot, kind, x, y| {
         s.ed.handle_event(Event::Mouse(crate::event::Mouse { kind, x, y, alt: false }));
@@ -1565,18 +1787,18 @@ fn snapshot_terminal_panel() {
         s.ed.lane.terminal.as_ref().unwrap().selection.is_none()
             && !s.ed.lane.terminal.as_ref().unwrap().focus
     );
-    at(&mut s, K::Drag, 10, 16);
-    at(&mut s, K::Up, 10, 16);
+    at(&mut s, K::Drag, 10, 17);
+    at(&mut s, K::Up, 10, 17);
     assert!(s.ed.lane.terminal.as_ref().unwrap().selection.is_none(), "not a terminal selection");
     // A drag begun in it goes on outside it (clamped to its edge) and ends there
-    at(&mut s, K::Down, 1, 16);
-    at(&mut s, K::Drag, 30, 3);
+    at(&mut s, K::Down, 2, 17);
+    at(&mut s, K::Drag, 31, 3);
     assert_eq!(
         s.ed.lane.terminal.as_ref().unwrap().selected(),
         Some(((0, 29), (1, 0))),
         "clamped to its first row"
     );
-    at(&mut s, K::Up, 30, 3);
+    at(&mut s, K::Up, 31, 3);
     assert!(!s.ed.lane.terminal.as_ref().unwrap().selecting, "released outside — done");
     let cursor = s.ed.doc().selection().primary();
     at(&mut s, K::Drag, 40, 5);
@@ -1586,8 +1808,8 @@ fn snapshot_terminal_panel() {
         "a stray drag after it doesn't move the code's cursor"
     );
     // A release that never came: the next press anywhere ends that selection
-    at(&mut s, K::Down, 1, 16);
-    at(&mut s, K::Drag, 6, 16);
+    at(&mut s, K::Down, 2, 17);
+    at(&mut s, K::Drag, 7, 17);
     at(&mut s, K::Down, 10, 3);
     assert!(!s.ed.lane.terminal.as_ref().unwrap().selecting);
     s.ed.lane.terminal = None; // hangs it up
@@ -1789,10 +2011,10 @@ fn a_long_name_shows_whole_when_selected() {
 fn screen_diffs_replay_real_frames() {
     let mut s = Shot::new(100, 24);
     s.file("src/demo.rs", DEMO_RS);
-    let mut frames = vec![s.frame()];
+    let mut frames = vec![s.drawn()];
     let mut step = |s: &mut Shot, keys: &str| {
         s.keys(keys);
-        frames.push(s.frame());
+        frames.push(s.drawn());
     };
     for keys in
         ["jjw", "iabc<esc>", " ", "<esc>", " ?", "open", "<esc>", ":se", "<esc>", "<C-d>", "<C-u>", "ddu"]
@@ -1856,4 +2078,255 @@ fn a_far_scrolled_line_draws_the_same_from_the_edge() {
         assert!(fast == slow, "differs at {:?}", s.ed.doc().selection().primary());
         s.keys("hhhhhhb");
     }
+}
+
+// ── The panels' chrome (`chrome.rs`) ─────────────────────────────────────
+
+/// A frame as cells.
+fn cells(bytes: &[u8], w: u16, h: u16) -> vt100::Parser {
+    let mut p = vt100::Parser::new(h, w, 0);
+    p.process(bytes);
+    p
+}
+
+/// What the colors are: the ground, the panels' surface, the accent.
+fn chrome_colors(ed: &Editor) -> (vt100::Color, vt100::Color, vt100::Color) {
+    let ui = Ui::new(ed);
+    let surface = card_style(&ui, ed, "ui.popup").bg;
+    (vt_color(ui.base.bg).unwrap(), vt_color(surface).unwrap(), vt_color(ui.accent.fg).unwrap())
+}
+
+/// The side panel, the code with a task under it, the chat — one set of rules: every title on the screen's
+/// first row with a thin rule under it, text `PAD` in from each panel's edge (the code's numbers too), one
+/// cell of ground between regions — the same everywhere — and the rule of what has the keys in the accent,
+/// following them from the code to the chat, the side panel and the bottom slot, the status line naming
+/// each; what hasn't them keeps `FADE` of its text's contrast.
+#[test]
+fn the_panels_follow_one_set_of_rules() {
+    use crate::chrome::{GAP, HEAD, PAD, PAD_R};
+    let (w, h) = (150u16, 36u16);
+    let mut s = Shot::new(w, h);
+    s.file("src/demo.rs", DEMO_RS);
+    let cwd = std::env::current_dir().unwrap();
+    let mut sb =
+        crate::sidebar::Sidebar::with_files(cwd.clone(), vec!["src/demo.rs".into(), "README.md".into()]);
+    sb.focus = false;
+    s.ed.lane.sidebar = Some(sb);
+    s.ed.config.llm.command = "sh".into();
+    s.ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+    s.keys(" l<esc>");
+    s.ed.task_start(crate::task::Task { name: "check".into(), cmd: "echo all good".into(), cwd });
+    s.until("task", |ed| ed.lane.task_run.as_ref().is_some_and(|r| r.took.is_some()));
+    s.ed.toasts.clear();
+    let (ground, surface, accent) = chrome_colors(&s.ed);
+    let p = cells(&s.frame(), w, h);
+    let at = |y: usize, x: usize| p.screen().cell(y as u16, x as u16).unwrap().clone();
+    let blank = |y: usize, x: usize| at(y, x).contents().trim().is_empty();
+    let sc = &s.ed.screen;
+    let (side, chat, slot_x) = (sc.side_w, sc.chat_x.unwrap(), sc.slot_x);
+    let end = sc.text_top + sc.body_h;
+    let slot_y = end - sc.bottom_h;
+    assert!(side > 0 && sc.bottom_h > 0 && slot_x == side, "the slot under the code only");
+    // One gutter of ground between regions, the whole height
+    for y in 0..end {
+        for x in [side - GAP, chat] {
+            assert_eq!((at(y, x).bgcolor(), blank(y, x)), (ground, true), "row {y}: the gutter at {x}");
+        }
+        assert_eq!(at(y, side - GAP - 1).bgcolor(), surface, "row {y}: the side panel up to its gutter");
+        assert_eq!(at(y, chat + GAP).bgcolor(), surface, "row {y}: the chat from its gutter");
+    }
+    for y in slot_y..end {
+        assert_eq!(at(y, slot_x).bgcolor(), surface, "row {y}: the slot right after the side's gutter");
+        assert_eq!(at(y, chat - 1).bgcolor(), surface, "row {y}: …up to the chat's");
+    }
+    // Every title on the first row, its text at the padding; the slot's tabs too
+    let first = |y: usize, a: usize, b: usize| (a..b).find(|&x| !blank(y, x));
+    assert_eq!(first(0, 0, side), Some(PAD), "the side panel's title");
+    assert_eq!(first(0, side, chat), Some(side + PAD), "the code's path bar");
+    assert_eq!(first(0, chat, w as usize), Some(chat + GAP + PAD), "the chat's title");
+    assert_eq!(first(slot_y, slot_x, chat), Some(slot_x + PAD), "the slot's tabs");
+    // …a thin rule under each, from padding to padding
+    let regions =
+        [(1, 0, side - GAP), (1, side, chat), (1, chat + GAP, w as usize), (slot_y + 1, slot_x, chat)];
+    for (y, a, b) in regions {
+        let line: String = (a + PAD..b - PAD_R).map(|x| at(y, x).contents().to_string()).collect();
+        assert!(line.chars().all(|c| c == '─'), "row {y} from {a}: {line:?}");
+        assert!(blank(y, a + PAD - 1) && blank(y, b - 1), "row {y} from {a}: inside the padding");
+    }
+    // The bodies' text at the padding too: the code's numbers, the chat's words, the task's output
+    assert_eq!(sc.text_top, HEAD);
+    assert!(first(HEAD, side, chat).is_some_and(|x| x >= side + PAD), "the numbers start at the padding");
+    let row_with = |t: &str| (0..end).find(|&y| p.screen().rows(0, w).nth(y).is_some_and(|r| r.contains(t)));
+    let ask = row_with("Ask Claude").expect("the chat's empty state");
+    assert_eq!(first(ask, chat, w as usize), Some(chat + GAP + PAD));
+    assert_eq!(first(slot_y + HEAD, slot_x, chat), Some(slot_x + PAD), "the task's output");
+    // What has the keys: its rule in the accent, the status line's label naming it
+    let rules = [(1, PAD), (1, side + PAD), (1, chat + GAP + PAD), (slot_y + 1, slot_x + PAD)];
+    let keys = |s: &mut Shot| -> (Vec<bool>, String) {
+        let p = cells(&s.frame(), w, h);
+        let lit =
+            rules.iter().map(|&(y, x)| p.screen().cell(y as u16, x as u16).unwrap().fgcolor() == accent);
+        let status = p.screen().rows(0, w).nth(end).unwrap_or_default();
+        (lit.collect(), status.split('▌').next().unwrap_or_default().trim().to_string())
+    };
+    assert_eq!(keys(&mut s), (vec![false, true, false, false], "▐ NORMAL".into()), "the code");
+    s.keys(" l");
+    assert_eq!(keys(&mut s), (vec![false, false, true, false], "▐ CHAT".into()), "the chat");
+    s.keys("<esc><C-w>e");
+    assert_eq!(keys(&mut s), (vec![true, false, false, false], "▐ FILES".into()), "the side panel");
+    s.keys("<esc><C-w>j");
+    assert_eq!(keys(&mut s), (vec![false, false, false, true], "▐ TASK".into()), "the bottom slot");
+    // …and what hasn't them, faded: the chat's title, the code's file name (the slot has the keys)
+    let ui = Ui::new(&s.ed);
+    let p = cells(&s.frame(), w, h);
+    let fg = |y: usize, x: usize| match p.screen().cell(y as u16, x as u16).unwrap().fgcolor() {
+        vt100::Color::Rgb(r, g, b) => [r, g, b],
+        c => panic!("{c:?}"),
+    };
+    let rgb = |c: Option<crossterm::style::Color>| c.and_then(crate::chrome::rgb).unwrap();
+    let (ground_rgb, surface_rgb) = (rgb(ui.base.bg), rgb(card_style(&ui, &s.ed, "ui.popup").bg));
+    let dim = rgb(ui.virt.fg);
+    let fade = |c, bg| crate::chrome::fade(c, bg, crate::chrome::FADE);
+    assert_eq!(fg(0, chat + GAP + PAD), fade(dim, surface_rgb), "the chat's title, faded");
+    let name = p.screen().rows(0, w).next().unwrap().find("demo.rs").unwrap();
+    let focus = rgb(s.ed.theme.try_get("ui.text.focus").and_then(|s| s.fg));
+    assert_eq!(fg(0, name), fade(focus, ground_rgb), "the code's file name, faded");
+    assert_ne!(fade(focus, ground_rgb), focus);
+}
+
+/// The chat's input says whether it has the keys: its border in the accent and the caret in it while it
+/// does; without them a message half-written is a draft, said at the border's end, the caret elsewhere.
+#[test]
+fn the_chat_input_says_where_the_keys_are() {
+    let (w, h) = (120u16, 30u16);
+    let mut s = Shot::new(w, h);
+    s.file("src/demo.rs", DEMO_RS);
+    s.ed.config.llm.command = "sh".into();
+    s.ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+    s.keys(" lhalf a thought");
+    let (_, _, accent) = chrome_colors(&s.ed);
+    let chat = s.ed.screen.chat_x.unwrap();
+    let look = |s: &mut Shot| {
+        let p = cells(&s.frame(), w, h);
+        let rows: Vec<String> = p.screen().rows(0, w).collect();
+        let input = rows.iter().position(|r| r.contains("› half a thought")).expect("the input");
+        let border = input - 1;
+        let at = |x: usize| p.screen().cell(border as u16, x as u16).unwrap().clone();
+        let lit = at(chat + 3).fgcolor() == accent;
+        let caret = (!p.screen().hide_cursor()).then(|| p.screen().cursor_position());
+        (rows[border].clone(), lit, caret, input)
+    };
+    let (border, lit, caret, input) = look(&mut s);
+    assert!(lit && !border.contains("draft"), "with the keys: {border}");
+    assert_eq!(caret.map(|c| c.0 as usize), Some(input), "the caret in it");
+    s.keys("<esc>");
+    let (border, lit, caret, input) = look(&mut s);
+    assert!(!lit && border.trim_end().ends_with("draft ──"), "without them: {border}");
+    assert_ne!(caret.map(|c| c.0 as usize), Some(input), "the caret back in the code");
+}
+
+/// The picker floats over the editor area — the chat beside it stays whole — with the same margin all round
+/// (`PICKER_MX` columns, `PICKER_MY` rows: they look alike) and only the ground in it.
+#[test]
+fn the_picker_floats_with_equal_margins() {
+    use crate::chrome::{PICKER_MX, PICKER_MY};
+    let (w, h) = (150u16, 36u16);
+    let mut s = Shot::new(w, h);
+    s.file("src/demo.rs", DEMO_RS);
+    s.ed.config.llm.command = "sh".into();
+    s.ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+    s.keys(" l<esc>");
+    let root = fixtures().join("demo");
+    s.ed.open_picker(
+        crate::picker::Picker::new("files", Vec::new(), true).with_tree(root.clone(), None),
+        Some(Box::new(move || Ok(crate::picker::file_items(&root)))),
+    );
+    s.until("file list", |ed| ed.picker.as_ref().is_some_and(|p| !p.loading));
+    let (ground, surface, _) = chrome_colors(&s.ed);
+    let p = cells(&s.frame(), w, h);
+    let at = |y: usize, x: usize| p.screen().cell(y as u16, x as u16).unwrap().clone();
+    let chat = s.ed.screen.chat_x.unwrap();
+    let end = s.ed.screen.text_top + s.ed.screen.body_h;
+    // The card: its surface and its half-row edges
+    let card = |y, x| {
+        let c = at(y, x);
+        c.bgcolor() == surface || (["▄", "▀"].contains(&c.contents()) && c.fgcolor() == surface)
+    };
+    let rows: Vec<usize> = (0..end).filter(|&y| (0..chat).any(|x| card(y, x))).collect();
+    let cols: Vec<usize> = (0..chat).filter(|&x| (0..end).any(|y| card(y, x))).collect();
+    let (top, bottom) = (rows[0], end - 1 - rows[rows.len() - 1]);
+    let (left, right) = (cols[0], chat - 1 - cols[cols.len() - 1]);
+    assert_eq!((left, right, top, bottom), (PICKER_MX, PICKER_MX, PICKER_MY, PICKER_MY));
+    for (y, x) in (0..end).flat_map(|y| (0..chat).map(move |x| (y, x))) {
+        if !rows.contains(&y) || !cols.contains(&x) {
+            assert_eq!(at(y, x).bgcolor(), ground, "the margin at {y},{x}");
+        }
+    }
+    // The chat whole beside it: its title, its rule, its input
+    let screen: Vec<String> = p.screen().rows(0, w).collect();
+    let beside = |r: &str| r.chars().skip(chat).collect::<String>();
+    assert!(beside(&screen[0]).contains("claude") && beside(&screen[1]).contains("────"), "{screen:#?}");
+    assert!(screen.iter().any(|r| r.contains("› Ask about demo.rs")), "{screen:#?}");
+    assert!(screen[end].contains("▐ PICKER ▌"));
+}
+
+/// The bottom slot's panels are tabs on its title row: a task started while the terminal has the keys is a
+/// tab — its badge running, then failed — and never takes the slot or the keys; a click on its tab brings it
+/// in front (the keys staying in the slot), `C-w t` and `tab` step through them.
+#[test]
+fn the_bottom_slot_shows_its_panels_as_tabs() {
+    use crate::sizes::Slot;
+    let (w, h) = (120u16, 30u16);
+    let mut s = Shot::new(w, h);
+    s.file("src/demo.rs", DEMO_RS);
+    let script = "printf 'hi\\r\\n'; sleep 30";
+    s.ed.terminal_run(vec!["/bin/sh".into(), "-c".into(), script.into()], Vec::new());
+    s.until("the terminal", |ed| {
+        ed.lane.terminal.as_ref().is_some_and(|t| t.parser.screen().contents().contains("hi"))
+    });
+    s.ed.terminal_focus();
+    let typing = |ed: &Editor| ed.lane.terminal.as_ref().is_some_and(|t| t.focus);
+    assert!(typing(&s.ed));
+    // A task started meanwhile (harmless: a pause and a failure) — a tab, running
+    let cwd = std::env::temp_dir();
+    s.ed.task_start(crate::task::Task { name: "check".into(), cmd: "sleep 0.3; exit 1".into(), cwd });
+    let tabs = |s: &mut Shot| {
+        let p = cells(&s.frame(), w, h);
+        let y = s.ed.screen.slot_tabs.borrow().first().map(|t| t.0).expect("the tabs");
+        let row = p.screen().rows(0, w).nth(y).unwrap();
+        let spots = s.ed.screen.slot_tabs.borrow().clone();
+        (row, spots, p)
+    };
+    let (row, ..) = tabs(&mut s);
+    assert!(
+        row.trim_start().starts_with("terminal   check ") && row.chars().any(|c| "▂▃▄▅▆▇".contains(c)),
+        "{row}"
+    );
+    assert_eq!((s.ed.slot(), typing(&s.ed)), (Some(Slot::Terminal), true), "the terminal keeps it all");
+    // It fails behind the terminal: its tab says so, in the error colour — nothing else moves
+    s.until("the task", |ed| ed.lane.task_run.as_ref().is_some_and(|r| r.took.is_some()));
+    s.ed.toasts.clear();
+    let (row, spots, p) = tabs(&mut s);
+    let at = row.find("check ▲").map(|b| row[..b].chars().count() + "check ".len()).expect(&row);
+    let y = spots[0].0;
+    let error = vt_color(Ui::new(&s.ed).error.fg).unwrap();
+    assert_eq!(p.screen().cell(y as u16, at as u16).unwrap().fgcolor(), error, "{row}");
+    assert_eq!((s.ed.slot(), typing(&s.ed)), (Some(Slot::Terminal), true), "never takes the keys");
+    // A click on its tab: in front, the keys still the slot's (tarae's there — not the shell's)
+    let &(y, x, ..) = spots.iter().find(|t| t.3 == Slot::Task).unwrap();
+    s.ed.handle_event(Event::Mouse(crate::event::Mouse {
+        kind: crate::event::MouseKind::Down,
+        x: x as u16,
+        y: y as u16,
+        alt: false,
+    }));
+    s.frame();
+    assert_eq!((s.ed.slot(), s.ed.bottom_focus, typing(&s.ed)), (Some(Slot::Task), true, false));
+    // `C-w t`: the next tab, round to the first; `tab` while the slot has the keys too
+    s.keys("<C-w>t");
+    assert_eq!(s.ed.slot(), Some(Slot::Terminal));
+    s.keys("<tab>");
+    assert_eq!(s.ed.slot(), Some(Slot::Task));
+    assert!(s.ed.bottom_focus, "the keys stayed in the slot");
+    s.ed.lane.terminal = None; // hangs it up
 }

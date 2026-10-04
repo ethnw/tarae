@@ -1,31 +1,31 @@
-# split_vertical · 100x16 · theme meok · cursor 8:55
+# split_vertical · 100x16 · theme meok · cursor 8:56
 ## text
-00  tarae  ›  src  ›  demo.rs  ›  ƒ main
-01  ▎ src/demo.rs                                    │ ▎ src/demo.rs
-02  17 use std::collections::HashMap;               ▐│  4 fn main() {
-03  16                                              ▐│  3     let text = "the quick brown fox jumps
-04  15 ▎ Counts how often each word appears.        ▐│        over the lazy dog";
-05     ▎                                            ▐│  2     let counts = word_counts(text);
-06     ▎ Words are split on whitespace; case is     ▐│  1     println!("{} distinct words",
-07     ▎ kept.                                      ▐│        counts.len()); // 타래
-08  12 pub fn word_counts(text: &str) ->            ▐│ 18 }
-09     HashMap<&str, usize> {                       ▐│
-10  11     let mut counts = HashMap::new();          │                                                ▐
-11  10     for word in text.split_whitespace() {     │                                                ▐
-12   9     │   *counts.entry(word).or_insert(0) +=   │                                                ▐
-13         │   1;                                    │                                                ▐
+00   tarae  ›  src  ›  demo.rs  ›  ƒ main
+01   ─────────────────────────────────────────────────────────────────────────────────────────────────
+02  ▎ src/demo.rs                                    │ ▎ src/demo.rs
+03   17 use std::collections::HashMap;              ▐│   3     let text = "the quick brown fox jumps
+04   16                                             ▐│         over the lazy dog";
+05   15 ▎ Counts how often each word appears.       ▐│   2     let counts = word_counts(text);
+06      ▎                                           ▐│   1     println!("{} distinct words",
+07      ▎ Words are split on whitespace; case is    ▐│         counts.len()); // 타래
+08      ▎ kept.                                     ▐│  18 }
+09   12 pub fn word_counts(text: &str) ->           ▐│
+10      HashMap<&str, usize> {                       │
+11   11     let mut counts = HashMap::new();         │                                                ▐
+12   10     for word in text.split_whitespace() {    │                                                ▐
+13    9     │   *counts.entry(word).or_insert(0) +=  │                                                ▐
 14  ▐ NORMAL ▌                                                                 rust   utf-8 LF   18:1
 15
 ## bg · surface per cell, blank = ui.background
 00
-01                                                    1111111111111111111111111111111111111111111111111
-02
+01
+02                                                    1111111111111111111111111111111111111111111111111
 03
-04     222222222222222222222222222222222222222222222
-05     222222222222222222222222222222222222222222222
-06     222222222222222222222222222222222222222222222
-07     222222222222222222222222222222222222222222222
-08                                                        Accccccccccccccccccccccccccccccccccccccccccc
+04
+05      22222222222222222222222222222222222222222222
+06      22222222222222222222222222222222222222222222
+07      22222222222222222222222222222222222222222222
+08      22222222222222222222222222222222222222222222       Acccccccccccccccccccccccccccccccccccccccccc
 09
 10
 11
@@ -34,20 +34,20 @@
 14   AAAAAAAA
 15
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00  ddddd  f  ddd  f  TTTTTTT  f    dddd
-01  f ddddddddddd                                    f a TTTTTTTTTTT
-02  ff                                              ff  f
-03  ff                                              ff  f                gggg ggggg ggggg ggg ggggg
-04  ff                                              ff        gggg ggg gggg gggg
-05                                                  ff  f
-06                                                  ff  f              ggg gggggggg gggggg
+00   ddddd  f  ddd  f  TTTTTTT  f    dddd
+01   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+02  f ddddddddddd                                    f a TTTTTTTTTTT
+03   ff                                             ff   f                gggg ggggg ggggg ggg ggggg
+04   ff                                             ff         gggg ggg gggg gggg
+05   ff                                             ff   f
+06                                                  ff   f              ggg gggggggg gggggg
 07                                                  ff
-08  ff                                              ff AA
-09                                                  ff
-10  ff                                               f                                                f
-11  ff                                               f                                                f
-12   f                                               f                                                f
-13                                                   f                                                f
+08                                                  ff  AA
+09   ff                                             ff
+10                                                   f
+11   ff                                              f                                                f
+12   ff                                              f                                                f
+13    f                                              f                                                f
 14  a BBBBBB a                                                                 dddd   ddddd dd   TTTT
 15
 ## legend

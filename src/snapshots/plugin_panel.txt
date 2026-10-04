@@ -1,10 +1,10 @@
-# plugin_panel · 100x30 · theme meok · cursor 1:4
+# plugin_panel · 100x30 · theme meok · cursor 2:5
 ## text
-00  tarae  ›  app.yaml
-01   1 kind: Deployment
-02   1 metadata:
-03   2   name: web
-04
+00   tarae  ›  app.yaml
+01   ─────────────────────────────────────────────────────────────────────────────────────────────────
+02    1 kind: Deployment
+03    1 metadata:
+04    2   name: web
 05
 06
 07
@@ -19,21 +19,21 @@
 16
 17
 18
-19 ▎▐ DEMO ▌  pods · default                                            d describe  l logs  esc back
-20   NAME    READY  STATUS
-21   web-0   1/1    Running
-22   web-1   1/1    Running
-23 ▎ web-2   1/1    Running
-24   web-3   1/1    Running
-25   web-4   1/1    Running
-26   web-5   1/1    Running
+19
+20   demo  │  pods · default                                            d describe  l logs  esc back
+21   ─────────────────────────────────────────────────────────────────────────────────────────────────
+22   NAME    READY  STATUS
+23   web-0   1/1    Running
+24   web-1   1/1    Running
+25 ▎ web-2   1/1    Running
+26   web-3   1/1    Running
 27   30 pods · watching
-28  ▐ NORMAL ▌                                                                         utf-8 LF   1:1
+28  ▐ PANEL ▌                                                                          utf-8 LF   1:1
 29
 ## bg · surface per cell, blank = ui.background
 00
-01     Accccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-02
+01
+02      Acccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 03
 04
 05
@@ -50,23 +50,23 @@
 16
 17
 18
-19 ppAAAAAApppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+19
 20 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 21 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 22 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-23 PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP
+23 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 24 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-25 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+25 PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP
 26 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 27 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-28   AAAAAAAA
+28   AAAAAAA
 29
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00  ddddd  f  TTTTTTTT
-01   A
-02   f
-03   f
-04
+00   ddddd  f  TTTTTTTT
+01   fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+02    A
+03    f
+04    f
 05
 06
 07
@@ -81,16 +81,16 @@
 16
 17
 18
-19 aa BBBB a  TTTT T TTTTTTT                                            D ffffffff  D ffff  DDD ffff
-20   ffff    fffff  ffffff
-21
-22
-23 a ttttt   ttt    ttttttt
+19
+20   TTTT  f  TTTT T TTTTTTT                                            D ffffffff  D ffff  DDD ffff
+21   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+22   ffff    fffff  ffffff
+23
 24
-25
+25 a ttttt   ttt    ttttttt
 26
 27   dd dddd d dddddddd
-28  a BBBBBB a                                                                         ddddd dd   TTT
+28  a BBBBB a                                                                          ddddd dd   TTT
 29
 ## legend
 bg: c=ui.cursorline.primary  p=ui.popup  P=ui.menu.selected  A=ui.cursor.primary

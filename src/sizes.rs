@@ -182,7 +182,8 @@ pub enum Slot {
 }
 
 /// Keys while the bottom slot has them (test and task output, the terminal's scrollback): `j`/`k` a line,
-/// `C-d`/`C-u` half the panel, `g`/`G` the start/end; on the terminal `i` (Enter) types in it; Esc back to
+/// `C-d`/`C-u` half the panel, `g`/`G` the start/end, `tab`/`S-tab` its other tabs; on the terminal `i`
+/// (Enter) types in it; Esc back to
 /// the code. The space menu, `:`, `[`/`]` and `C-w` stay the editor's; other keys do nothing here (the code
 /// may not be in sight). False = not the slot's.
 pub fn bottom_key(ed: &mut crate::editor::Editor, key: Key) -> bool {
@@ -201,6 +202,15 @@ pub fn bottom_key(ed: &mut crate::editor::Editor, key: Key) -> bool {
     let half = (rows / 2).max(1) as isize;
     let by = match (key.code, key.ctrl) {
         (Code::Char(' ' | ':' | '[' | ']'), false) | (Code::Char('w'), true) => return false,
+        // The slot's other tabs
+        (Code::Tab, false) => {
+            ed.slot_step(1);
+            return true;
+        }
+        (Code::BackTab, _) => {
+            ed.slot_step(-1);
+            return true;
+        }
         (Code::Esc, _) => {
             ed.bottom_focus = false;
             return true;
@@ -271,8 +281,9 @@ impl crate::editor::Editor {
         self.screen.body_h.saturating_sub(BOTTOM_CODE).max(BOTTOM_MIN)
     }
 
-    /// The border at screen cell (`x`, `y`) — as last drawn: the chat's edge column (`▐`), the side panel's
-    /// (`▌`), the bottom panel's top row (its title) left of the chat.
+    /// The border at screen cell (`x`, `y`) — as last drawn: the gutter left of the chat, the one right of
+    /// the side panel (both the whole height — `chrome.rs`), the bottom panel's top row between them (not
+    /// its tabs — a click there brings that tab in front).
     pub fn border_at(&self, x: usize, y: usize) -> Option<Border> {
         // (one thing fills the screen: no borders)
         if self.zoomed().is_some() {
@@ -280,15 +291,16 @@ impl crate::editor::Editor {
         }
         let s = &self.screen;
         let total = s.width?;
-        let (top, end) = (s.text_top, s.text_top + s.body_h);
+        let end = s.text_top + s.body_h;
         let bottom_y = end - s.bottom_h;
-        if s.chat_w > 0 && s.chat_w < total && x == total - s.chat_w && (top..end).contains(&y) {
+        if s.chat_w > 0 && s.chat_w < total && x == total - s.chat_w && y < end {
             return Some(Border::Chat);
         }
-        if s.side_w > 0 && x + 1 == s.side_w && (top..bottom_y).contains(&y) {
+        if s.side_w > 0 && x + 1 == s.side_w && y < end {
             return Some(Border::Side);
         }
-        if s.bottom_h > 0 && y == bottom_y && x < total - s.chat_w {
+        let tab = || s.slot_tabs.borrow().iter().any(|t| t.0 == y && (t.1..t.2).contains(&x));
+        if s.bottom_h > 0 && y == bottom_y && x >= s.slot_x && x < total - s.chat_w && !tab() {
             return Some(Border::Bottom);
         }
         None
@@ -405,8 +417,13 @@ impl crate::editor::Editor {
         self.set_status("sizes automatic again");
     }
 
-    /// What the bottom slot shows, if anything (the order `term::draw` follows).
+    /// What the bottom slot shows, if anything: the panel put in front (`chrome.rs` — a tab, one just
+    /// opened), else the first there of `:procs`, the debugger, the terminal, a plugin's panel, the test run
+    /// or task started last.
     pub fn slot(&self) -> Option<Slot> {
+        if let Some(s) = self.slot_front() {
+            return Some(s);
+        }
         if self.procs_up() {
             return Some(Slot::Procs);
         }
@@ -527,6 +544,7 @@ impl crate::editor::Editor {
     /// Every key and event: the bottom slot's keys go when something else took them (or it emptied), and
     /// `C-w z` ends once what it filled the screen with doesn't have them.
     pub fn focus_sync(&mut self) {
+        self.slot_sync();
         if self.bottom_focus {
             let program = self.lane.terminal.as_ref().is_some_and(|t| t.focus && t.visible);
             let other = self.lane.chat.as_ref().is_some_and(|c| c.focused)

@@ -74,6 +74,10 @@ pub struct Lane {
     /// The build task running or last run (task.rs) · the last one started (`space m m`).
     pub task_run: Option<crate::task::Run>,
     pub task_last: Option<crate::task::Task>,
+    /// The bottom slot's panel put in front (a tab, `C-w t`, one just opened) · what was there last event,
+    /// so a new one is told from one already seen (`chrome::slot_sync`).
+    pub slot_front: Option<crate::sizes::Slot>,
+    pub slot_seen: Vec<(crate::sizes::Slot, Option<std::time::Instant>)>,
     /// The list `]q` goes through (quickfix.rs).
     pub qlist: Option<crate::quickfix::List>,
     /// Git: the repository's status (the side panel's git tab) · a discard waiting for its second `d` · a
@@ -178,6 +182,8 @@ impl Lane {
             test_last: None,
             task_run: None,
             task_last: None,
+            slot_front: None,
+            slot_seen: Vec::new(),
             qlist: None,
             git_status: None,
             git_discard_asked: None,

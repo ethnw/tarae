@@ -1,19 +1,19 @@
 # ask_review · 100x30 · theme meok · cursor hidden
 ## text
-00  tarae  ›  src  ›  demo.rs  ›  ƒ main
-01  ▎ Claude   “show the text too”                                                      0 of 1 decided
-02  11       counts
-03  12   }
-04  13
-05  14   fn main() {
-06  15       let text = "the quick brown fox jumps over the lazy dog";
-07  16       let counts = word_counts(text);
-08     ▎ Change 1 of 1 · line 17   y accept   n reject
-09  17 −     println!("{} distinct words", counts.len()); // 타래
-10     ▎     println!("{} distinct words in {:?}", counts.len(), text);
-11  18   }
-12  19
-13
+00   tarae  ›  src  ›  demo.rs  ›  ƒ main
+01   ─────────────────────────────────────────────────────────────────────────────────────────────────
+02  ▎ Claude   “show the text too”                                                      0 of 1 decided
+03  11       counts
+04  12   }
+05  13
+06  14   fn main() {
+07  15       let text = "the quick brown fox jumps over the lazy dog";
+08  16       let counts = word_counts(text);
+09     ▎ Change 1 of 1 · line 17   y accept   n reject
+10  17 −     println!("{} distinct words", counts.len()); // 타래
+11     ▎     println!("{} distinct words in {:?}", counts.len(), text);
+12  18   }
+13  19
 14
 15
 16
@@ -28,7 +28,7 @@
 25
 26
 27
-28  ▐ NORMAL ▌                                               claude ● review   rust   utf-8 LF   17:55
+28  ▐ REVIEW ▌                                               claude ● review   rust   utf-8 LF   17:55
 29
 ## bg · surface per cell, blank = ui.background
 00
@@ -39,10 +39,10 @@
 05
 06
 07
-08 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-09 1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
-10 2222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222
-11
+08
+09 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+10 1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
+11 2222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222
 12
 13
 14
@@ -62,20 +62,20 @@
 28   AAAAAAAA
 29
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00  ddddd  f  ddd  f  TTTTTTT  f    dddd
-01  a TTTTTT   ddddd ddd dddd dddd                                                      f ff f fffffff
-02  ff
+00   ddddd  f  ddd  f  TTTTTTT  f    dddd
+01   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+02  a TTTTTT   ddddd ddd dddd dddd                                                      f ff f fffffff
 03  ff
 04  ff
 05  ff
-06  ff                  gggg ggggg ggggg ggg ggggg gggg ggg gggg gggg
-07  ff
-08     a AAAAAA A AA A A AAAA AA   A dddddd   A dddddd
-09  ff E              ggg gggggggg gggggg
-10     g              ggg gggggggg ggggg gg ggggg
-11  ff
+06  ff
+07  ff                  gggg ggggg ggggg ggg ggggg gggg ggg gggg gggg
+08  ff
+09     a AAAAAA A AA A A AAAA AA   A dddddd   A dddddd
+10  ff E              ggg gggggggg gggggg
+11     g              ggg gggggggg ggggg gg ggggg
 12  ff
-13
+13  ff
 14
 15
 16

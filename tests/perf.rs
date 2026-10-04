@@ -176,8 +176,8 @@ fn perf_e2e_procs_sampling() {
     report("e2e_procs_open_cpu_ms_per_s", open, 10.0, 2.0);
 }
 
-/// A chat turn's wait (N6): nothing on screen moves but the waiting animation — tarae's CPU, its frames a
-/// second and the bytes a frame writes, over 4 s of it.
+/// A chat turn's wait (N6): nothing on screen moves but the waiting animation (on the follow card, its edges
+/// seated each frame) — tarae's CPU, its frames a second and the bytes a frame writes, over 4 s of it.
 #[test]
 fn perf_e2e_waiting_for_claude() {
     if unoptimized("perf_e2e_waiting_for_claude") {

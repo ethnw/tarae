@@ -1,21 +1,21 @@
-# test_panel_scrolled · 100x24 · theme meok · cursor 1:4
+# test_panel_scrolled · 100x24 · theme meok · cursor 2:5
 ## text
-00  tarae  ›  src  ›  demo.rs
-01   1 use std::collections::HashMap;                                                                 ▐
-02   1                                                                                                ▐
-03   2 ▎ Counts how often each word appears.                                                          ▐
-04     ▎                                                                                              ▐
-05     ▎ Words are split on whitespace; case is kept.                                                 ▐
-06   5 pub fn word_counts(text: &str) -> HashMap<&str, usize> {                                       ▐
-07   6     let mut counts = HashMap::new();                                                           ▐
-08   7     for word in text.split_whitespace() {                                                      ▐
-09   8     │   *counts.entry(word).or_insert(0) += 1;                                                 ▐
-10   9     }                                                                                          ▐
-11  10     counts                                                                                     ▐
-12  11 }
-13  12
-14  13 fn main() {
-15  ▐ FAILED ▌  tests   ● 1   ▲ 2   1.2s          space x l again  space x o output  space x c close
+00   tarae  ›  src  ›  demo.rs
+01   ─────────────────────────────────────────────────────────────────────────────────────────────────
+02    1 use std::collections::HashMap;                                                                ▐
+03    1                                                                                               ▐
+04    2 ▎ Counts how often each word appears.                                                         ▐
+05      ▎                                                                                             ▐
+06      ▎ Words are split on whitespace; case is kept.                                                ▐
+07    5 pub fn word_counts(text: &str) -> HashMap<&str, usize> {                                      ▐
+08    6     let mut counts = HashMap::new();                                                          ▐
+09    7     for word in text.split_whitespace() {                                                     ▐
+10    8     │   *counts.entry(word).or_insert(0) += 1;
+11    9     }
+12   10     counts
+13   11 }
+14   tests ▲  │  tests   ● 1   ▲ 2   1.2s         space x l again  space x o output  space x c close
+15   ─────────────────────────────────────────────────────────────────────────────────────────────────
 16   TESTS                           │ FAILURE  src/demo.rs:92                 ]x next  [x prev   1/2
 17   ● word_counts_splits       20ms │   - 09 the quick brown fox, row 9
 18 ▎ ▲ word_counts_distinct     20ms │   - 10 the quick brown fox, row 10                             ▐
@@ -26,12 +26,12 @@
 23
 ## bg · surface per cell, blank = ui.background
 00
-01     Acccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-02
-03     11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
-04     11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
-05     11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
-06
+01
+02      Accccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+03
+04      1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
+05      1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
+06      1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
 07
 08
 09
@@ -39,8 +39,8 @@
 11
 12
 13
-14
-15 pp22222222pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+14 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+15 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 16 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 17 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 18 PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPpppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
@@ -50,22 +50,22 @@
 22   AAAAAAAA
 23
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00  ddddd  f  ddd  f  TTTTTTT
-01   A                                                                                                f
-02   f                                                                                                f
-03   f                                                                                                f
-04                                                                                                    f
+00   ddddd  f  ddd  f  TTTTTTT
+01   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+02    A                                                                                               f
+03    f                                                                                               f
+04    f                                                                                               f
 05                                                                                                    f
-06   f                                                                                                f
-07   f                                                                                                f
-08   f                                                                                                f
-09   f                                                                                                f
-10   f                                                                                                f
-11  ff                                                                                                f
-12  ff
-13  ff
-14  ff
-15  e BBBBBB e  TTTTT   g B   e B   dddd          DDDDD D D fffff  DDDDD D D ffffff  DDDDD D D fffff
+06                                                                                                    f
+07    f                                                                                               f
+08    f                                                                                               f
+09    f                                                                                               f
+10    f
+11    f
+12   ff
+13   ff
+14   TTTTT e  f  TTTTT   g B   e B   dddd         DDDDD D D fffff  DDDDD D D ffffff  DDDDD D D fffff
+15   fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 16   FFFFF                           f FFFFFFF  ffffffffffffff                 ff ffff  ff ffff   fff
 17   g dddddddddddddddddd       ffff f
 18 a e TTTTTTTTTTTTTTTTTTTT     ffff f                                                                f
@@ -75,5 +75,5 @@
 22  a BBBBBB a                                                                  dddd   ddddd dd   TTT
 23
 ## legend
-bg: c=ui.cursorline.primary  p=ui.popup  P=ui.menu.selected  A=ui.cursor.primary  1=other  2=other
+bg: c=ui.cursorline.primary  p=ui.popup  P=ui.menu.selected  A=ui.cursor.primary  1=other
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  e=error  g=diff.plus  B=bold

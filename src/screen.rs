@@ -90,11 +90,14 @@ struct Grid {
     cursor: Option<(usize, usize)>,
     /// `CSI n SP q`
     shape: u8,
+    /// Kept only while a frame with cards is read (`seat`): per cell, the background it had before a half
+    /// block (`▄`/`▀`) was drawn over it
+    under: Option<Vec<Option<Color>>>,
 }
 
 impl Grid {
     fn new(w: usize, h: usize) -> Grid {
-        Grid { w, h, cells: vec![Cell::blank(PLAIN); w * h], cursor: None, shape: 0 }
+        Grid { w, h, cells: vec![Cell::blank(PLAIN); w * h], cursor: None, shape: 0, under: None }
     }
 
     fn row(&self, y: usize) -> &[Cell] {
@@ -110,6 +113,13 @@ impl Grid {
         }
         if self.cells[i].width == 2 && x + 1 < self.w {
             self.cells[i + 1] = Cell::blank(cell.style);
+        }
+        // (the same half block drawn again keeps what was under the first)
+        if let Some(under) = self.under.as_mut()
+            && HALVES.contains(&cell.text())
+            && self.cells[i] != cell
+        {
+            under[i] = Some(self.cells[i].style.bg);
         }
         self.cells[i] = cell;
         if cell.width == 2 {
@@ -455,6 +465,8 @@ pub struct Screen {
     /// The last frame, to pass over one just like it without reading it (none after `invalidate`)
     last: Vec<u8>,
     out: Vec<u8>,
+    /// `Grid.under`'s cells, kept from frame to frame
+    under: Vec<Option<Color>>,
     warned: bool,
 }
 
@@ -467,6 +479,7 @@ impl Screen {
             patched: false,
             last: Vec::new(),
             out: Vec::new(),
+            under: Vec::new(),
             warned: false,
         }
     }
@@ -478,8 +491,9 @@ impl Screen {
     }
 
     /// What to write for `frame`, drawn for a `w`×`h` terminal: what changed — everything after
-    /// `invalidate` — or the frame itself when it can't be read. Empty when nothing changed.
-    pub fn present<'a>(&'a mut self, frame: &'a [u8], w: u16, h: u16) -> &'a [u8] {
+    /// `invalidate` — or the frame itself when it can't be read. Empty when nothing changed. Its cards'
+    /// `edges` are seated on what's under them as it's read (`Grid::seat` — no second reading).
+    pub fn present<'a>(&'a mut self, frame: &'a [u8], w: u16, h: u16, edges: &[Edge]) -> &'a [u8] {
         let (w, h) = (w as usize, h as usize);
         if (w, h) != (self.shown.w, self.shown.h) {
             self.shown = Grid::new(w, h);
@@ -491,7 +505,20 @@ impl Screen {
         self.last.clear();
         self.last.extend_from_slice(frame);
         self.next.clone_from(&self.shown);
-        if w == 0 || h == 0 || self.next.apply(frame).is_none() {
+        if !edges.is_empty() {
+            let mut under = std::mem::take(&mut self.under);
+            under.clear();
+            under.resize(w * h, None);
+            self.next.under = Some(under);
+        }
+        let read = w > 0 && h > 0 && self.next.apply(frame).is_some();
+        if let Some(under) = self.next.under.take() {
+            if read {
+                self.next.seat(&under, edges);
+            }
+            self.under = under;
+        }
+        if !read {
             if !self.warned {
                 self.warned = true;
                 crate::log::line(
@@ -517,6 +544,35 @@ impl Screen {
     /// Whether only parts of the screen went out since it last went whole — see `event_loop`'s resting redraw.
     pub fn patched(&self) -> bool {
         self.patched
+    }
+}
+
+/// The half blocks a card's top and bottom edges are drawn with (`term::card_edge`).
+const HALVES: [&[u8]; 2] = ["▄".as_bytes(), "▀".as_bytes()];
+
+/// A card's edge row: `width` cells from (`x`, `y`), drawn in half blocks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Edge {
+    pub x: usize,
+    pub y: usize,
+    pub width: usize,
+}
+
+impl Grid {
+    /// Seats the cards on what's under them: each edge cell still showing its half block gets as background
+    /// — the half outside the card — the one that cell had before the edge was drawn over it (`under`: the
+    /// code, a cursor line, a review's wash, a panel, another card).
+    fn seat(&mut self, under: &[Option<Color>], edges: &[Edge]) {
+        for e in edges.iter().filter(|e| e.y < self.h) {
+            for x in e.x..(e.x + e.width).min(self.w) {
+                let i = e.y * self.w + x;
+                if let Some(bg) = under[i]
+                    && HALVES.contains(&self.cells[i].text())
+                {
+                    self.cells[i].style.bg = bg;
+                }
+            }
+        }
     }
 }
 
@@ -594,7 +650,7 @@ pub fn assert_replays(w: u16, h: u16, frames: impl IntoIterator<Item = Vec<u8>>)
     let mut through_diffs = vt100::Parser::new(h, w, 0);
     let mut whole = vt100::Parser::new(h, w, 0);
     for (n, f) in frames.into_iter().enumerate() {
-        let out = screen.present(&f, w, h).to_vec();
+        let out = screen.present(&f, w, h, &[]).to_vec();
         assert!(out != f, "frame {n} wasn't read — went out as it is");
         through_diffs.process(&out);
         whole.process(&f);
@@ -685,14 +741,14 @@ mod tests {
         let row = |t: &str| {
             format!("\x1b[?25l\x1b[1;1H\x1b[0m{t:<60}\x1b[2;1H{:<60}\x1b[1;1H\x1b[?25h", "second line")
         };
-        let first = s.present(row("hello").as_bytes(), 60, 2).len();
+        let first = s.present(row("hello").as_bytes(), 60, 2, &[]).len();
         assert!(first > 120, "the first frame is drawn whole");
-        assert!(s.present(row("hello").as_bytes(), 60, 2).is_empty());
-        let small = s.present(row("hellO").as_bytes(), 60, 2).to_vec();
+        assert!(s.present(row("hello").as_bytes(), 60, 2, &[]).is_empty());
+        let small = s.present(row("hellO").as_bytes(), 60, 2, &[]).to_vec();
         assert!(small.len() * 2 < first, "{} {:?}", small.len(), String::from_utf8_lossy(&small));
         assert!(s.patched(), "only a part went out");
         s.invalidate();
-        assert!(s.present(row("hellO").as_bytes(), 60, 2).len() > 120, "redrawn whole");
+        assert!(s.present(row("hellO").as_bytes(), 60, 2, &[]).len() > 120, "redrawn whole");
         assert!(!s.patched());
     }
 
@@ -700,9 +756,9 @@ mod tests {
     fn an_unreadable_frame_goes_out_as_it_is_and_the_next_is_whole() {
         let mut s = Screen::new();
         let good = b"\x1b[1;1Habc".as_slice();
-        s.present(good, 10, 1);
+        s.present(good, 10, 1, &[]);
         let odd = b"\x1b[1;1Habd\x1b[5n".as_slice();
-        assert_eq!(s.present(odd, 10, 1), odd);
-        assert!(s.present(good, 10, 1).len() > 10, "everything again");
+        assert_eq!(s.present(odd, 10, 1, &[]), odd);
+        assert!(s.present(good, 10, 1, &[]).len() > 10, "everything again");
     }
 }

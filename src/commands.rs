@@ -254,6 +254,7 @@ commands! {
         bottom_shorter => "Shorter: the panel at the bottom",
         sizes_auto => "Sizes back to automatic",
         zoom_toggle => "Fill the screen with this, or back",
+        slot_next => "Next tab of the bottom panel",
         workspace_symbol_picker => "Symbols in the workspace",
         chat_close => "Close chat",
         code_action => "Code actions",
@@ -2173,6 +2174,10 @@ fn sizes_auto(cx: &mut Context) {
 
 fn zoom_toggle(cx: &mut Context) {
     cx.editor.zoom_toggle();
+}
+
+fn slot_next(cx: &mut Context) {
+    cx.editor.slot_step(1);
 }
 
 fn wonly(cx: &mut Context) {

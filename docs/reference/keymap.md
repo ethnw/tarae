@@ -239,6 +239,7 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `C-w o` | `wonly` | Close all other windows |
 | `C-w q` | `wclose` | Close this window |
 | `C-w s` | `hsplit` | Split the window top / bottom |
+| `C-w t` | `slot_next` | Next tab of the bottom panel |
 | `C-w v` | `vsplit` | Split the window side by side |
 | `C-w w` | `rotate_view` | Next window |
 | `C-w z` | `zoom_toggle` | Fill the screen with this, or back |
@@ -345,6 +346,7 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `space w o` | `wonly` | Close all other windows |
 | `space w q` | `wclose` | Close this window |
 | `space w s` | `hsplit` | Split the window top / bottom |
+| `space w t` | `slot_next` | Next tab of the bottom panel |
 | `space w v` | `vsplit` | Split the window side by side |
 | `space w w` | `rotate_view` | Next window |
 | `space w z` | `zoom_toggle` | Fill the screen with this, or back |

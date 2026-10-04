@@ -1,7 +1,7 @@
 # diagnostic_card · 90x24 · theme meok · cursor 16:22
 ## text
-00  tarae  ›  src  ›  demo.rs  ›  ƒ main
-01   15 use std::collections::HashMap;
+00   tarae  ›  src  ›  demo.rs  ›  ƒ main
+01   ───────────────────────────────────────────────────────────────────────────────────────
 02   14
 03   13 ▎ Counts how often each word appears.
 04      ▎
@@ -16,7 +16,7 @@
 13    3
 14    2 fn main() {      · expected due to this
 15    1     let text = ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
-16 ▎ 16     let counts = word_counts(text);   ● mismatched types  +1
+16  ▎16     let counts = word_counts(text);   ● mismatched types  +1
 17    1     println!("{} distinct words", counts.len()); // 타래
 18    2 }
 19
@@ -50,8 +50,8 @@
 22   AAAAAAAA
 23
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00  ddddd  f  ddd  f  TTTTTTT  f    dddd
-01   ff
+00   ddddd  f  ddd  f  TTTTTTT  f    dddd
+01   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 02   ff
 03   ff
 04
@@ -66,7 +66,7 @@
 13    f
 14    f                  d dddddddd ddd dd dddd
 15    f
-16 e AA                                       e                   ff
+16  eAA                                       e                   ff
 17    f              ggg gggggggg gggggg
 18    f
 19

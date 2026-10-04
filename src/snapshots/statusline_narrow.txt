@@ -1,7 +1,7 @@
 # statusline_narrow · 30x6 · theme meok · cursor hidden
 ## text
-00  tarae  ›  src  ›  demo.rs
-01 ▎  1 use                     ▐
+00   tarae  ›  src  ›  demo.rs
+01  ▎ 1 use                     ▐
 02      std::collections::HashM
 03      ap;   ● unresolved…  +1
 04  ▐ NORMAL ▌  ● 1   ▲ 1   2:1
@@ -14,8 +14,8 @@
 04   AAAAAAAA
 05
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00  ddddd  f  ddd  f  TTTTTTT
-01 e  f                         e
+00   ddddd  f  ddd  f  TTTTTTT
+01  e f                         e
 02
 03            e              ff
 04  a BBBBBB a  e e   w w   TTT
