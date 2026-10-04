@@ -41,6 +41,27 @@ pub struct SessionStore {
     pub keyed: bool,
     /// What git last said of each session for the list (read when it opens — shown meanwhile).
     pub facts: std::collections::HashMap<SessionId, Facts>,
+    /// Asked at a session's end where its checkout built — None in tests (they set a stand-in: never the
+    /// real cargo home).
+    pub cargo: Option<CargoAsk>,
+}
+
+/// How a session's end asks cargo where its checkout built (`cargo metadata`'s `build_directory`): the
+/// program, and the cargo home — a build dir is only ever removed from its `build/`.
+#[derive(Clone, Debug)]
+pub struct CargoAsk {
+    pub program: PathBuf,
+    pub home: PathBuf,
+}
+
+impl CargoAsk {
+    /// `cargo`, and `$CARGO_HOME` (else `~/.cargo`) — what `{cargo-cache-home}` in a build-dir is.
+    pub fn real() -> Option<CargoAsk> {
+        let home = std::env::var_os("CARGO_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")))?;
+        Some(CargoAsk { program: "cargo".into(), home })
+    }
 }
 
 /// A session as it's kept: its checkout, name, branch and base (`Session`'s).
@@ -111,11 +132,13 @@ fn size_text((bytes, whole): (u64, bool)) -> String {
 }
 
 /// Where cargo puts builds for the project in `top`: its target folder and build-dir (`cargo metadata`,
-/// which reads every cargo config as it is) — None when it doesn't say within `CARGO_WAIT`.
-fn cargo_dirs(top: &Path) -> Option<(PathBuf, PathBuf)> {
+/// which reads every cargo config as it is; `program`: `cargo`, a stand-in in tests), as cargo prints them
+/// — a configured one with its `..` and links (`real_dirs` for comparing) — None when it doesn't say within
+/// `CARGO_WAIT`.
+fn cargo_dirs(program: &Path, top: &Path) -> Option<(PathBuf, PathBuf)> {
     use std::io::Read as _;
     use std::process::{Command, Stdio};
-    let mut child = Command::new("cargo")
+    let mut child = Command::new(program)
         .args(["metadata", "--no-deps", "--offline", "--format-version", "1"])
         .current_dir(top)
         .stdin(Stdio::null())
@@ -142,10 +165,15 @@ fn cargo_dirs(top: &Path) -> Option<(PathBuf, PathBuf)> {
         }
     }
     let v: Value = serde_json::from_slice(&reader.join().ok()?).ok()?;
-    let dir = |k: &str| v[k].as_str().map(|d| std::fs::canonicalize(d).unwrap_or_else(|_| PathBuf::from(d)));
-    let target = dir("target_directory")?;
-    let build = dir("build_directory").unwrap_or_else(|| target.clone());
+    let target = PathBuf::from(v["target_directory"].as_str()?);
+    let build = v["build_directory"].as_str().map_or_else(|| target.clone(), PathBuf::from);
     Some((target, build))
+}
+
+/// `cargo_dirs`' answer by real paths (as far as they're there) — for comparing, never for removing.
+fn real_dirs((target, build): (PathBuf, PathBuf)) -> (PathBuf, PathBuf) {
+    let real = |p: PathBuf| std::fs::canonicalize(&p).unwrap_or(p);
+    (real(target), real(build))
 }
 
 // ── Git ──────────────────────────────────────────────────────────────────────
@@ -432,7 +460,8 @@ pub fn making(root: &Path, name: &str, base: Option<&str>, setting: &str) -> Res
     let big = big_ignored(&top, until);
     let files = tracked_size(&top, until);
     // (where cargo builds, from the user's cargo config as it is)
-    let cargo = top.join("Cargo.toml").is_file().then(|| cargo_dirs(&top)).flatten();
+    let cargo = top.join("Cargo.toml").is_file().then(|| cargo_dirs(Path::new("cargo"), &top)).flatten();
+    let cargo = cargo.map(real_dirs);
     let copies = instructions(&top);
     Ok(Making { top, branch, base, base_sha, path, files, big, cargo, copies, others })
 }
@@ -642,14 +671,185 @@ fn ending(name: String, root: &Path, base: Option<String>, start: &Path) -> Resu
     Ok(Ending { root: root.to_path_buf(), common, name, branch, tip, base, changed, ahead, lost })
 }
 
-/// Its checkout removed (and its branch, `both`, if it's still where the checks saw it) — what that freed.
-fn remove(e: &Ending, both: bool) -> Result<(u64, bool), String> {
+/// What a session's end did with its checkout's cargo build dir.
+#[derive(Debug, PartialEq)]
+pub enum BuildDir {
+    /// Nothing to do: not asked, not a cargo project, never built, or inside the checkout (gone with it).
+    Nothing,
+    /// Removed — what it took.
+    Freed((u64, bool)),
+    /// Left where it is: why, said whole (`its build dir … stays: …`).
+    Left(String),
+    /// Removing it failed partway — why.
+    Failed(String),
+}
+
+/// A build dir to remove: the cargo home's `build/` (its real path) and the two folders below it
+/// (`{workspace-path-hash}`'s `xx/yyyy…`).
+#[derive(Debug, PartialEq)]
+pub struct Doomed {
+    builds: PathBuf,
+    rel: PathBuf,
+}
+
+impl Doomed {
+    /// Still as it was checked — `build/` its own real path, each folder below it a folder, not a link —
+    /// its path then. Asked again right before removing (a link put there since would be followed).
+    fn still(&self) -> Result<PathBuf, String> {
+        if std::fs::canonicalize(&self.builds).ok().as_deref() != Some(self.builds.as_path()) {
+            return Err(format!("{} isn't where it was", crate::allow::tilde(&self.builds)));
+        }
+        let mut p = self.builds.clone();
+        for c in self.rel.components() {
+            p.push(c);
+            // (`symlink_metadata`: a link is a link here, never what it points to)
+            match std::fs::symlink_metadata(&p) {
+                Ok(m) if m.is_dir() => {}
+                Ok(_) => return Err(format!("{} is a link, not a folder", crate::allow::tilde(&p))),
+                Err(e) => return Err(format!("{}: {e}", crate::allow::tilde(&p))),
+            }
+        }
+        Ok(p)
+    }
+}
+
+/// Why a checkout's own `.cargo/config.toml` (or `.cargo/config`) has its say on where it builds — it
+/// sets `build-dir` (however it's written: parsed, not searched), or can't be read — None when it has none.
+/// What cargo prints for a checkout is the checkout's to choose (its Claude can write that file); a build
+/// dir it chose is never removed.
+fn own_build_dir(root: &Path) -> Option<String> {
+    for name in [".cargo/config.toml", ".cargo/config"] {
+        let path = root.join(name);
+        if std::fs::symlink_metadata(&path).is_err() {
+            continue;
+        }
+        let Ok(table) = std::fs::read_to_string(&path)
+            .map_err(|_| ())
+            .and_then(|t| toml::from_str::<toml::Table>(&t).map_err(|_| ()))
+        else {
+            return Some(format!("its {name} can't be read"));
+        };
+        if table.get("build").and_then(|b| b.get("build-dir")).is_some() {
+            return Some(format!("its own {name} sets build-dir"));
+        }
+    }
+    None
+}
+
+/// Whether the ended checkout's build dir goes, before its checkout does (cargo has to read its
+/// `Cargo.toml`). `ours`: what cargo printed for the checkout at `root` — which the checkout chooses, so
+/// it goes only when it's plainly the cargo home's `build/xx/yyyy`: absolute, no `.` or `..`, exactly two
+/// folders below `build/`, no link at any level (`Doomed::still`), not set by the checkout's own config
+/// (`own_build_dir`); not its target dir nor holding it; and no other checkout of the repository builds
+/// there (`others`, asked only then: each one that's a cargo project and what cargo said there).
+/// `Ok` = what to remove once the checkout is gone (`remove_build` checks it again).
+fn build_dir_fate(
+    root: &Path,
+    ours: Option<(PathBuf, PathBuf)>,
+    home: &Path,
+    others: impl FnOnce() -> Vec<(PathBuf, Option<(PathBuf, PathBuf)>)>,
+) -> Result<Doomed, BuildDir> {
+    use std::path::Component;
+    let Some((target, build)) = ours else {
+        return Err(BuildDir::Left("cargo didn't say where it built: no build dir removed".into()));
+    };
+    let stays = |why: String| {
+        Err(BuildDir::Left(format!("its build dir {} stays: {why}", crate::allow::tilde(&build))))
+    };
+    if !build.is_absolute()
+        || build.components().any(|c| matches!(c, Component::CurDir | Component::ParentDir))
+    {
+        return stays("its path has `.` or `..` in it".into());
+    }
+    if build.starts_with(root) || std::fs::symlink_metadata(&build).is_err() {
+        return Err(BuildDir::Nothing);
+    }
+    if let Some(why) = own_build_dir(root) {
+        return stays(why);
+    }
+    let Ok(builds) = std::fs::canonicalize(home.join("build")) else {
+        return stays(format!("there's no {}", crate::allow::tilde(&home.join("build"))));
+    };
+    // (`{cargo-cache-home}` as cargo spelled it, or its real path)
+    let Some(rel) = build.strip_prefix(home.join("build")).or_else(|_| build.strip_prefix(&builds)).ok()
+    else {
+        return stays(format!("it isn't in {}", crate::allow::tilde(&builds)));
+    };
+    if rel.components().count() != 2 {
+        return stays(format!(
+            "it isn't a checkout's own folder in {} (xx/yyyy)",
+            crate::allow::tilde(&builds)
+        ));
+    }
+    let doomed = Doomed { builds, rel: rel.to_path_buf() };
+    let real = match doomed.still() {
+        Ok(p) => p,
+        Err(why) => return stays(why),
+    };
+    // (one inside the other either way: removing one takes some of the other)
+    let overlap = |a: &Path, b: &Path| a.starts_with(b) || b.starts_with(a);
+    if overlap(&real, &std::fs::canonicalize(&target).unwrap_or(target)) {
+        return stays("cargo's target dir is there".into());
+    }
+    for (other, said) in others() {
+        match said.map(real_dirs) {
+            None => return stays(format!("cargo didn't say where {} builds", crate::allow::tilde(&other))),
+            Some((t, b)) if overlap(&real, &b) || overlap(&real, &t) => {
+                return stays(format!("{} builds there too", crate::allow::tilde(&other)));
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(doomed)
+}
+
+/// The doomed build dir removed — checked again first (`Doomed::still`); links inside it are removed, never
+/// followed (`remove_dir_all`, `disk_size`).
+fn remove_build(d: &Doomed) -> BuildDir {
+    let path = match d.still() {
+        Ok(p) => p,
+        Err(why) => {
+            let at = crate::allow::tilde(&d.builds.join(&d.rel));
+            return BuildDir::Left(format!("its build dir {at} stays: {why}"));
+        }
+    };
+    let size = disk_size(&path, Instant::now() + MEASURE_FOR);
+    match std::fs::remove_dir_all(&path) {
+        Ok(()) => BuildDir::Freed(size),
+        Err(why) => BuildDir::Failed(format!("{}: {why}", crate::allow::tilde(&path))),
+    }
+}
+
+/// The repository's other checkouts that are cargo projects (`git worktree list` — the main one, every
+/// session's, ones made outside tarae) and where cargo says each builds.
+fn other_builds(e: &Ending, program: &Path) -> Vec<(PathBuf, Option<(PathBuf, PathBuf)>)> {
+    let list = git(&e.common, &["worktree", "list", "--porcelain"], None).unwrap_or_default();
+    crate::gitpanel::parse_worktrees(&list)
+        .into_iter()
+        .map(|(p, _)| std::fs::canonicalize(&p).unwrap_or(p))
+        .filter(|p| *p != e.root && p.join("Cargo.toml").is_file())
+        .map(|p| {
+            let said = cargo_dirs(program, &p);
+            (p, said)
+        })
+        .collect()
+}
+
+/// Its checkout removed (and its branch, `both`, if it's still where the checks saw it) — what that freed,
+/// and then its build dir when nothing else builds there (`build_dir_fate`; `cargo`: how to ask).
+fn remove(e: &Ending, both: bool, cargo: Option<&CargoAsk>) -> Result<((u64, bool), BuildDir), String> {
     let branch = e.branch.as_deref().filter(|_| both);
     if let Some(b) = branch
         && sha(&e.common, &format!("refs/heads/{b}")).ok().as_deref() != Some(e.tip.as_str())
     {
         return Err(format!("{b} moved since the card was shown — nothing removed"));
     }
+    let fate = match cargo {
+        Some(c) if e.root.join("Cargo.toml").is_file() => {
+            build_dir_fate(&e.root, cargo_dirs(&c.program, &e.root), &c.home, || other_builds(e, &c.program))
+        }
+        _ => Err(BuildDir::Nothing),
+    };
     let freed = disk_size(&e.root, Instant::now() + MEASURE_FOR);
     let root = e.root.to_str().ok_or("a checkout path that isn't UTF-8")?;
     // (with changes, git asks for --force — the card said they go; without, a change made since stops it)
@@ -662,7 +862,11 @@ fn remove(e: &Ending, both: bool) -> Result<(u64, bool), String> {
     if let Some(b) = branch {
         git_no_hooks(&e.common, &["branch", "-D", "--", b])?;
     }
-    Ok(freed)
+    let build = match fate {
+        Ok(doomed) => remove_build(&doomed),
+        Err(said) => said,
+    };
+    Ok((freed, build))
 }
 
 // ── Bringing one into its base ───────────────────────────────────────────────
@@ -1200,19 +1404,20 @@ impl Editor {
     }
 
     /// Its session closes (what it ran stops), then its checkout is removed on a worker — and its branch too
-    /// when `both`. `card`: the end card's id (it waves meanwhile, and says a failure). A failure opens the
-    /// session again.
+    /// when `both`, and its cargo build dir when only it built there (`build_dir_fate`). `card`: the end
+    /// card's id (it waves meanwhile, and says a failure). A failure opens the session again.
     pub fn session_remove(&mut self, e: Ending, both: bool, card: Option<u64>) {
         let kept = self.session_close(&e.root);
         if card.is_none() {
             self.set_step("session", format!("Ending {}…", e.name));
         }
+        let cargo = self.session_store.cargo.clone();
         self.events.shared_jobs().spawn(move || {
-            let result = remove(&e, both);
+            let result = remove(&e, both, cargo.as_ref());
             move |ed: &mut Editor| {
                 ed.step_done("session");
                 match result {
-                    Ok(freed) => {
+                    Ok((mut freed, build)) => {
                         if let Some(id) = card {
                             ed.offer_finished(id, Ok(()));
                         }
@@ -1226,7 +1431,23 @@ impl Editor {
                             }
                             (None, _) => String::new(),
                         };
-                        ed.set_success(format!("Ended {} — {} freed{branch}", e.name, size_text(freed)));
+                        let (mut of_it, mut left) = (String::new(), String::new());
+                        match &build {
+                            BuildDir::Freed(b) => {
+                                freed = (freed.0 + b.0, freed.1 && b.1);
+                                of_it = format!(", {} of it its build dir", size_text(*b));
+                            }
+                            BuildDir::Left(why) => left = format!(" · {why}"),
+                            BuildDir::Nothing | BuildDir::Failed(_) => {}
+                        }
+                        ed.set_success(format!(
+                            "Ended {} — {} freed{of_it}{branch}{left}",
+                            e.name,
+                            size_text(freed)
+                        ));
+                        if let BuildDir::Failed(why) = build {
+                            ed.set_warning(format!("{}'s build dir isn't all removed — {why}", e.name));
+                        }
                     }
                     Err(why) => {
                         if let Some(k) = kept.filter(|k| k.root.is_dir()) {
@@ -1794,6 +2015,255 @@ mod tests {
     /// The card up titled `title`.
     fn card<'a>(ed: &'a Editor, title: &str) -> Option<&'a crate::offer::Offer> {
         ed.offers.iter().find(|o| o.title == title)
+    }
+
+    /// A stand-in cargo in `dir` and a cargo home of its own (`dir/cargo-home`) — never the real ones. Its
+    /// `metadata` says the target dir is the checkout's `target/` and the build dir is what the checkout's
+    /// `.fake-build` holds. (Both files are ignored by the repository's `info/exclude`, which every checkout
+    /// of it shares: a session with them is still one with nothing to lose.)
+    fn fake_cargo(repo: &Path, dir: &Path) -> CargoAsk {
+        std::fs::write(repo.join(".git/info/exclude"), "Cargo.toml\n.fake-build\n").unwrap();
+        CargoAsk { program: fake_cargo_program(dir), home: dir.join("cargo-home") }
+    }
+
+    /// The stand-in cargo itself: it prints `.fake-build` as it is, `..` and links and all (as cargo prints
+    /// a configured build-dir).
+    fn fake_cargo_program(dir: &Path) -> PathBuf {
+        let program = dir.join("fake-cargo");
+        let script = "#!/bin/sh\nprintf '{\"target_directory\":\"%s/target\",\"build_directory\":\"%s\"}' \
+                      \"$(pwd -P)\" \"$(cat .fake-build)\"\n";
+        std::fs::write(&program, script).unwrap();
+        std::fs::set_permissions(&program, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        program
+    }
+
+    /// Review: what cargo says is the checkout's to choose (its own `.cargo/config.toml`, which its Claude
+    /// can write; a link in the cargo home's `build/`, which sandboxed runs can make) — so a build dir
+    /// goes only when it's plainly the cargo home's `build/xx/yyyy`: no `..`, no link at any level, two
+    /// folders below `build/`, not set by the checkout's own config. Each case leaves its marker. Through
+    /// what `:session-end` runs: the stand-in cargo, the fate, the removal.
+    #[test]
+    fn a_build_dir_that_isnt_plainly_the_cargo_homes_build_xx_yyyy_is_never_removed() {
+        use std::os::unix::fs::symlink;
+        let dir = std::env::temp_dir().join(format!("tarae-build-escape-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(dir).unwrap();
+        let program = fake_cargo_program(&dir);
+        let (home, root) = (dir.join("cargo-home"), dir.join("wt/x"));
+        let builds = home.join("build");
+        for d in [&builds.join("ab"), &root.join(".cargo")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(root.join("Cargo.toml"), "[package]\n").unwrap();
+        let marked = |d: &Path| {
+            std::fs::create_dir_all(d).unwrap();
+            std::fs::write(d.join("marker"), "keep me").unwrap();
+            d.join("marker")
+        };
+        symlink(dir.join("outside-mid"), builds.join("ln")).unwrap();
+        symlink(dir.join("outside-end"), builds.join("ab/ln")).unwrap();
+        let cases = [
+            // `..` out of the build folder — the checkout's own config can say that (`../../Documents`)
+            ("`..` escape", builds.join("../../outside-dotdot"), marked(&dir.join("outside-dotdot"))),
+            ("`..` back in", builds.join("ab/../ab/dd"), marked(&builds.join("ab/dd"))),
+            ("a link in the middle", builds.join("ln/victim"), marked(&dir.join("outside-mid/victim"))),
+            ("a link at the end", builds.join("ab/ln"), marked(&dir.join("outside-end"))),
+            ("one level deep", builds.join("one"), marked(&builds.join("one"))),
+            ("three levels deep", builds.join("ab/cd/ef"), marked(&builds.join("ab/cd/ef"))),
+            ("the build folder", builds.clone(), marked(&builds)),
+            ("the cargo home itself", home.clone(), marked(&home)),
+        ];
+        let mut removed = Vec::new();
+        let mut run = |name: &str, printed: &Path, marker: &Path| {
+            std::fs::write(root.join(".fake-build"), printed.display().to_string()).unwrap();
+            // (and the fate on its own, given the path as printed — it mustn't count on anyone cleaning it)
+            let raw =
+                build_dir_fate(&root, Some((root.join("target"), printed.to_path_buf())), &home, Vec::new);
+            if let Ok(doomed) = &raw {
+                let _ = remove_build(doomed);
+            }
+            if !marker.is_file() {
+                removed.push(format!("{name}, as printed ({})", printed.display()));
+                return;
+            }
+            let fate = build_dir_fate(&root, cargo_dirs(&program, &root), &home, Vec::new);
+            if let Ok(doomed) = &fate {
+                let _ = remove_build(doomed);
+            }
+            if !marker.is_file() {
+                removed.push(format!("{name} ({})", printed.display()));
+            } else if !matches!(&fate, Err(BuildDir::Left(_))) {
+                removed.push(format!("{name}: not said ({fate:?})"));
+            }
+        };
+        for (name, printed, marker) in &cases {
+            run(name, printed, marker);
+        }
+        // Set by the checkout's own config — even in the right shape — and a config that can't be read
+        let own = marked(&builds.join("ab/own"));
+        for (name, config) in [
+            ("its own config", "[build]\nbuild-dir = \"anywhere\"\n"),
+            ("its own config, dotted and escaped", "build.\"build\\u002Ddir\" = \"anywhere\"\n"),
+            ("its own config unreadable", "[build\n"),
+        ] {
+            std::fs::write(root.join(".cargo/config.toml"), config).unwrap();
+            run(name, &builds.join("ab/own"), &own);
+        }
+        std::fs::remove_file(root.join(".cargo/config.toml")).unwrap();
+        assert!(removed.is_empty(), "removed, or kept without a word:\n  {}", removed.join("\n  "));
+        // And plainly its own: goes
+        let fine = marked(&builds.join("ab/fine"));
+        std::fs::write(root.join(".fake-build"), builds.join("ab/fine").display().to_string()).unwrap();
+        let fate = build_dir_fate(&root, cargo_dirs(&program, &root), &home, Vec::new);
+        let doomed = fate.unwrap_or_else(|f| panic!("its own: {f:?}"));
+        assert!(matches!(remove_build(&doomed), BuildDir::Freed(_)) && !fine.exists());
+        // Checked, then a link put in the middle before the removal: checked again, nothing removed
+        marked(&builds.join("sw/ap"));
+        std::fs::write(root.join(".fake-build"), builds.join("sw/ap").display().to_string()).unwrap();
+        let doomed = build_dir_fate(&root, cargo_dirs(&program, &root), &home, Vec::new).unwrap();
+        let victim = marked(&dir.join("outside-swap/ap"));
+        std::fs::rename(builds.join("sw"), dir.join("moved-sw")).unwrap();
+        symlink(dir.join("outside-swap"), builds.join("sw")).unwrap();
+        let said = remove_build(&doomed);
+        assert!(matches!(&said, BuildDir::Left(w) if w.contains("is a link")), "{said:?}");
+        assert!(victim.is_file(), "what the link points to stays");
+        assert!(dir.join("moved-sw/ap/marker").is_file(), "the folder checked, moved aside, stays too");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `checkout` is a cargo project that built into `build` (a marker of `mb` MB there).
+    fn builds_in(checkout: &Path, build: &Path, mb: usize) {
+        std::fs::write(checkout.join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(checkout.join(".fake-build"), build.display().to_string()).unwrap();
+        std::fs::create_dir_all(build.join("debug")).unwrap();
+        std::fs::write(build.join("debug/marker"), vec![1u8; mb << 20]).unwrap();
+    }
+
+    /// `:session-end` asks cargo (on its worker, before the checkout goes) where the session built: its own
+    /// build dir in the cargo home's `build/` goes, its size said within what was freed — the main
+    /// checkout's beside it stays. One the main checkout builds in too stays, and the end note says why.
+    /// One that can't all be removed is a warning; the session still ends.
+    #[test]
+    fn a_sessions_own_build_dir_goes_with_it() {
+        let (repo, dir) = place("builddir");
+        let cargo = fake_cargo(&repo, &dir);
+        let builds = dir.join("cargo-home/build");
+        let main_build = builds.join("aa/main");
+        builds_in(&repo, &main_build, 1);
+        let mut ed = editor(&repo, &dir);
+        ed.session_store.cargo = Some(cargo);
+        let ended = |ed: &mut Editor, name: &str| {
+            feed(ed, ":session-end<ret>");
+            settle_until(ed, |ed| says(ed, &format!("Ended {name}")) || says(ed, &format!("end {name}:")));
+            ed.messages.iter().map(|m| m.2.clone()).find(|m| m.contains(&format!("Ended {name}"))).unwrap()
+        };
+        // Its own: removed, counted
+        let wt = new_session(&mut ed, "own");
+        let own = builds.join("bb/own");
+        builds_in(&wt, &own, 2);
+        let toast = ended(&mut ed, "own");
+        assert!(toast.ends_with(", 2 MB of it its build dir · branch own kept"), "{toast}");
+        let mb: f64 = toast.split(" — ").nth(1).unwrap().split(' ').next().unwrap().parse().unwrap();
+        assert!(mb >= 2.0, "the build dir counted in what was freed: {toast}");
+        assert!(!wt.exists() && !own.exists(), "its checkout and its build dir are gone");
+        assert!(builds.join("bb").is_dir(), "only its own folder");
+        assert!(main_build.join("debug/marker").is_file(), "the main checkout's build dir stays");
+        // Shared with the main checkout: left, and why
+        let wt = new_session(&mut ed, "shared");
+        builds_in(&wt, &main_build, 1);
+        let toast = ended(&mut ed, "shared");
+        let why = format!(
+            "· its build dir {} stays: {} builds there too",
+            crate::allow::tilde(&main_build),
+            crate::allow::tilde(&repo)
+        );
+        assert!(toast.ends_with(&why), "{toast}");
+        assert!(!wt.exists() && main_build.join("debug/marker").is_file());
+        // Can't be removed whole (a folder in it without write permission): a warning, the end goes on
+        let wt = new_session(&mut ed, "stuck");
+        let stuck = builds.join("cc/stuck");
+        builds_in(&wt, &stuck, 1);
+        let locked = stuck.join("debug");
+        std::fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(0o555)).unwrap();
+        let toast = ended(&mut ed, "stuck");
+        std::fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        assert!(toast.ends_with(" freed · branch stuck kept"), "{toast}");
+        let warned = ed.messages.iter().any(|m| {
+            m.1 == crate::editor::ToastKind::Warning
+                && m.2.starts_with("stuck's build dir isn't all removed — ")
+        });
+        assert!(warned, "a warning says it: {}", said(&ed));
+        assert!(!wt.exists() && (ed.session.id, ed.sessions.len()) == (0, 0), "it ended all the same");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Each check that keeps a build dir — and the other checkouts asked only once the ended one's own
+    /// checks pass.
+    #[test]
+    fn a_build_dir_goes_only_from_the_cargo_homes_build_folder_and_only_when_no_one_else_builds_there() {
+        let dir = std::env::temp_dir().join(format!("tarae-build-fate-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(dir).unwrap();
+        let (root, home) = (dir.join("wt/x"), dir.join("cargo-home"));
+        let builds = home.join("build");
+        let (own, elsewhere) = (builds.join("ab/cdef"), dir.join("elsewhere/build"));
+        for d in [&root, &own, &elsewhere, &root.join("target")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let target = root.join("target");
+        let asked = std::cell::Cell::new(false);
+        let none = || {
+            asked.set(true);
+            Vec::new()
+        };
+        let fate = |ours: Option<(PathBuf, PathBuf)>, others: Vec<(PathBuf, Option<(PathBuf, PathBuf)>)>| {
+            build_dir_fate(&root, ours, &home, || others).map(|d| d.builds.join(d.rel))
+        };
+        let left = |r: Result<PathBuf, BuildDir>| match r {
+            Err(BuildDir::Left(why)) => why,
+            r => panic!("left expected: {r:?}"),
+        };
+        // Its own, no one else's: goes
+        let goes = build_dir_fate(&root, Some((target.clone(), own.clone())), &home, none);
+        assert_eq!(goes.map(|d| d.builds.join(d.rel)), Ok(own.clone()));
+        assert!(asked.take(), "the others asked");
+        // Inside the checkout, or never built: nothing to do here
+        assert_eq!(fate(Some((target.clone(), target.clone())), vec![]), Err(BuildDir::Nothing));
+        assert_eq!(fate(Some((target.clone(), builds.join("ab/never"))), vec![]), Err(BuildDir::Nothing));
+        // Each refusal before the others are asked
+        let refused = [
+            (None, "cargo didn't say where it built"),
+            (Some((target.clone(), elsewhere.clone())), "stays: it isn't in "),
+            (Some((target.clone(), builds.clone())), "stays: it isn't a checkout's own folder in "),
+            (Some((own.clone(), own.clone())), "stays: cargo's target dir is there"),
+            (Some((own.join("target"), own.clone())), "stays: cargo's target dir is there"),
+        ];
+        for (ours, why) in refused {
+            let said = left(build_dir_fate(&root, ours.clone(), &home, none).map(|d| d.builds.join(d.rel)));
+            assert!(said.contains(why), "{ours:?}: {said}");
+            assert!(!asked.take(), "{ours:?}: the others not asked");
+        }
+        // Another checkout building there, in a folder of it, or around it — or one cargo didn't answer for
+        let main = dir.join("main");
+        let ours = || Some((target.clone(), own.clone()));
+        let other = |b: PathBuf| vec![(main.clone(), Some((main.join("target"), b)))];
+        for b in [own.clone(), own.join("sub"), builds.join("ab")] {
+            let said = left(fate(ours(), other(b.clone())));
+            assert!(
+                said.ends_with(&format!("{} builds there too", crate::allow::tilde(&main))),
+                "{b:?}: {said}"
+            );
+        }
+        let said = left(fate(ours(), vec![(main.clone(), None)]));
+        assert!(
+            said.ends_with(&format!("cargo didn't say where {} builds", crate::allow::tilde(&main))),
+            "{said}"
+        );
+        // A neighbour in build/ is no one's business
+        assert_eq!(fate(ours(), other(builds.join("ab/other"))), Ok(own.clone()));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The card drawn and in sight long enough (`offer::SETTLE`) for its keys to answer it.

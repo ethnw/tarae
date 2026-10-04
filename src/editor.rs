@@ -660,6 +660,7 @@ impl Editor {
             chats_dir: if cfg!(test) { None } else { crate::chats::default_dir() },
             session_store: crate::worktree::SessionStore {
                 dir: if cfg!(test) { None } else { crate::worktree::default_dir() },
+                cargo: if cfg!(test) { None } else { crate::worktree::CargoAsk::real() },
                 ..Default::default()
             },
             project_trust: None,

@@ -5,16 +5,22 @@
 //!    commits as the queries) and compiles them in parallel with the C compiler. The default build has only
 //!    `core = true` (toml·markdown·comment), debug builds also `dev = true` (rust), `--features
 //!    bundled-grammars` all of `bundle = true`. The rest are downloaded at run time.
+//!
+//! Nothing it prints or writes names the checkout. Every checkout's build of tarae shares one build
+//! script run in the shared `build-dir` (`~/.cargo/build/shared` — the unit's hash is the same for the
+//! same package): an absolute `rerun-if-changed` path didn't match the next checkout's, so every check after
+//! another checkout's re-ran this and rebuilt tarae (≈ 10 s). The paths are relative (cargo reads them from
+//! the package root, this script's working directory), and the generated code holds the files' text
+//! rather than an `include_str!` of a path that would point into whichever checkout ran this last.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 fn main() {
-    let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    embed(&manifest.join("runtime/queries"), &["scm"], "QUERIES", &out.join("queries.rs"));
-    embed(&manifest.join("runtime/packs"), &["toml", "scm"], "PACKS", &out.join("packs.rs"));
-    grammars(&manifest, &out);
+    embed(Path::new("runtime/queries"), &["scm"], "QUERIES", &out.join("queries.rs"));
+    embed(Path::new("runtime/packs"), &["toml", "scm"], "PACKS", &out.join("packs.rs"));
+    grammars(&out);
     // The perf budgets measure an optimized build (`cargo perf`); the test profile's opt-level 0 (a fast
     // edit-test loop) has them skip themselves
     println!("cargo::rustc-check-cfg=cfg(tarae_optimized)");
@@ -25,11 +31,10 @@ fn main() {
 
 /// Grammar names to embed (`core` from languages.toml `[[grammar]]`, `dev` in debug builds, plus `bundle` if
 /// the feature is on).
-fn wanted(manifest: &Path) -> Vec<String> {
-    let path = manifest.join("src/languages.toml");
-    println!("cargo:rerun-if-changed={}", path.display());
-    let table: toml::Table =
-        toml::from_str(&std::fs::read_to_string(&path).unwrap()).expect("languages.toml");
+fn wanted() -> Vec<String> {
+    let path = "src/languages.toml";
+    println!("cargo:rerun-if-changed={path}");
+    let table: toml::Table = toml::from_str(&std::fs::read_to_string(path).unwrap()).expect("languages.toml");
     let all = cfg!(feature = "bundled-grammars");
     // `cargo run`/`cargo test` (the debug profile): the tests and screen snapshots are written against these,
     // and working on tarae itself wants them without a download. So do builds with debug info (`cargo
@@ -50,7 +55,8 @@ fn wanted(manifest: &Path) -> Vec<String> {
         .collect()
 }
 
-/// `static NAME: &[(&str, &str)]` of every `<lang>/<file>` under `root` with one of `exts`.
+/// `static NAME: &[(&str, &str)]` of every `<lang>/<file>` under `root` (relative) with one of `exts`, and
+/// its text.
 fn embed(root: &Path, exts: &[&str], name: &str, out: &Path) {
     // A directory is scanned recursively by cargo — covers every language folder
     println!("cargo:rerun-if-changed={}", root.display());
@@ -71,20 +77,22 @@ fn embed(root: &Path, exts: &[&str], name: &str, out: &Path) {
     entries.sort();
     let mut s = format!("pub static {name}: &[(&str, &str)] = &[\n");
     for (rel, p) in entries {
-        writeln!(s, "    ({rel:?}, include_str!({:?})),", p.display().to_string()).unwrap();
+        // The text itself (a Rust literal by `{:?}`), not `include_str!` of a path: see the top
+        let text = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+        writeln!(s, "    ({rel:?}, {text:?}),").unwrap();
     }
     s.push_str("];\n");
     std::fs::write(out, s).unwrap();
 }
 
-fn grammars(manifest: &Path, out: &Path) {
-    let archive = manifest.join("runtime/grammars.tar.gz");
-    println!("cargo:rerun-if-changed={}", archive.display());
+fn grammars(out: &Path) {
+    let archive = "runtime/grammars.tar.gz";
+    println!("cargo:rerun-if-changed={archive}");
     let dir = out.join("grammars");
     let _ = std::fs::remove_dir_all(&dir);
-    let file = std::fs::File::open(&archive).expect("runtime/grammars.tar.gz (cargo xtask vendor-grammars)");
+    let file = std::fs::File::open(archive).expect("runtime/grammars.tar.gz (cargo xtask vendor-grammars)");
     tar::Archive::new(flate2::read::GzDecoder::new(file)).unpack(&dir).expect("unpack grammars");
-    let mut names = wanted(manifest);
+    let mut names = wanted();
     for n in &names {
         assert!(dir.join(n).is_dir(), "{n}: not in runtime/grammars.tar.gz (cargo xtask vendor-grammars)");
     }
