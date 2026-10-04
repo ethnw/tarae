@@ -36,6 +36,11 @@ pub struct Call {
     rev: crate::mcp::Rev,
 }
 
+/// The tools whose calls wait on the editor's own work (servers, searches, a change set) — a run, tests and
+/// the screen wait on what may take long or on the user, and aren't watched.
+const WATCHED: [&str; 8] =
+    ["references", "search", "symbols", "definition", "hover", "diagnostics", "rename", "replace"];
+
 /// An MCP message from claude → the `mcp_response` (None = answered later with `answer`). Either revision
 /// (`mcp.rs`): after `initialize`, or each request naming its own.
 pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> Option<Value> {
@@ -92,6 +97,14 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
                     | "rename" | "replace"),
                 ) => {
                     let call = call();
+                    // (watched while it waits — one silent too long marks its session: `lane::Doing::Stuck`)
+                    let tool = WATCHED.into_iter().find(|t| *t == name).unwrap_or("tool");
+                    let wait = match name {
+                        "diagnostics" => args["wait"].as_u64().unwrap_or(0).min(crate::nav::WAIT_MAX),
+                        _ => 0,
+                    };
+                    let after = crate::lane::STUCK_AFTER + std::time::Duration::from_secs(wait);
+                    ed.tool_waits(generation, id.clone(), tool, after);
                     let asked = match name {
                         "rename" => crate::refactor::rename(ed, call, args),
                         "replace" => crate::refactor::replace(ed, call, args),
@@ -104,7 +117,10 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
                     };
                     match asked {
                         Ok(()) => return None,
-                        Err(e) => Err(e),
+                        Err(e) => {
+                            ed.lane.tool_waits.retain(|w| !w.is(generation, &id));
+                            Err(e)
+                        }
                     }
                 }
                 other => Err(format!("no tool {}", other.unwrap_or_default())),
@@ -167,17 +183,43 @@ impl Call {
     pub fn test(id: u64) -> Call {
         Call { generation: u64::MAX, request_id: String::new(), id: json!(id), rev: Default::default() }
     }
+
+    /// Call `id` (`request_id` its control request's) of chat process `generation`.
+    pub fn of(generation: u64, request_id: &str, id: Value) -> Call {
+        Call { generation, request_id: request_id.into(), id, rev: Default::default() }
+    }
 }
 
-/// Answers a call that waited — only to the process that made it.
+/// Answers a call that waited — only to the process that made it, in whichever lane it is.
 pub fn answer(ed: &mut Editor, call: Call, r: Result<String, String>) {
     #[cfg(test)]
     ANSWERED.with(|a| a.borrow_mut().push((call.id.clone(), r.clone())));
-    if ed.lane.chat.as_ref().is_none_or(|c| c.generation() != call.generation) {
-        return;
+    deliver(ed, call, r);
+}
+
+/// `answer`'s way to its chat: the lane in `ed.lane` if it's that chat's, else that lane swapped in — or,
+/// while another lane behind is swapped in, from the main loop next (never a swap inside a swap). That
+/// next turn isn't behind (`behind` is set only inside `with_lane`, and the main loop applies a shared
+/// result outside it), so it's one hop, never a loop.
+fn deliver(ed: &mut Editor, call: Call, r: Result<String, String>) {
+    let owner = std::iter::once(&ed.lane)
+        .chain(&ed.lanes)
+        .find(|l| l.chat.as_ref().is_some_and(|c| c.generation() == call.generation))
+        .map(|l| l.id);
+    match owner {
+        // (its chat is gone, or another process took its place)
+        None => {}
+        Some(lane) if lane == ed.lane.id => {
+            ed.lane.tool_waits.retain(|w| !w.is(call.generation, &call.id));
+            let response = response(&call, r);
+            crate::chat::respond(ed, &call.request_id, json!({ "mcp_response": response }));
+        }
+        Some(lane) if !ed.background() => ed.with_lane(lane, move |ed| deliver(ed, call, r)),
+        Some(_) => {
+            let later = crate::event::Event::Job(Box::new(move |ed: &mut Editor| deliver(ed, call, r)));
+            let _ = ed.events.shared_sender().send(later);
+        }
     }
-    let response = response(&call, r);
-    crate::chat::respond(ed, &call.request_id, json!({ "mcp_response": response }));
 }
 
 /// A waited call's answer, in its request's revision.
@@ -334,6 +376,7 @@ pub fn tests_done(ed: &mut Editor) {
 /// The chat turn ended (stopped) with a run still going: it goes on for the user, unreported — and a
 /// command still waiting for the user's yes is no longer asked about.
 pub fn turn_over(ed: &mut Editor) {
+    ed.lane.tool_waits.clear();
     if let Some(r) = ed.lane.test_run.as_mut() {
         r.chat = None;
     }

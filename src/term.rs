@@ -1676,6 +1676,7 @@ fn draw_procs_panel<W: Write>(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut 
             let glyph = match lane.map(|l| editor.doing(l)) {
                 Some(Doing::Working) => Some(("●", Style { fg: ui.accent.fg, ..card })),
                 Some(Doing::Waiting) => Some(("▲", warn)),
+                Some(Doing::Stuck { .. }) => Some(("◦", warn)),
                 _ => None,
             };
             let name = glyph.map_or_else(|| r.title.clone(), |(g, _)| format!("{} {g}", r.title));
@@ -5279,6 +5280,10 @@ fn draw_statusline(
             0 => {}
             n => left.push(Seg { text: format!(" ▲{n}"), style: ui.status.patch(warn), keep: CHIP }),
         }
+        match editor.lanes_stuck() {
+            0 => {}
+            n => left.push(Seg { text: format!(" ◦{n}"), style: ui.status.patch(warn), keep: CHIP }),
+        }
     }
     if !lay.header {
         let modified = if doc.is_modified() { " ●" } else { "" };
@@ -7487,9 +7492,10 @@ fn draw_review_rail(
 /// ```
 /// Returns the input cursor position (when focused).
 /// The sessions at the top of the chat (with more than one): `main │ fix-login ● │ new-parser ▲ │ +` — the
-/// one in front strong, `●` its Claude working, `▲` waiting for you, `+` a new one. Where that doesn't fit,
-/// one dropdown: `◂ fix-login ● ▾ 2/3 ▲1 ▸` (the name opens the list, `▲1` = others waiting for you, the
-/// arrows step). Styles: strong, dim, faint, accent, warning · where each click goes (from the row's start).
+/// one in front strong, `●` its Claude working, `▲` waiting for you, `◦ symbols 42s` possibly stuck (a tool
+/// call unanswered that long), `+` a new one. Where that doesn't fit,
+/// one dropdown: `◂ fix-login ● ▾ 2/3 ▲1 ▸` (the name opens the list, `▲1` = others waiting for you, `◦1`
+/// possibly stuck, the arrows step). Styles: strong, dim, faint, accent, warning · where each click goes (from the row's start).
 fn lane_tabs(
     editor: &Editor,
     w: usize,
@@ -7501,6 +7507,7 @@ fn lane_tabs(
     let mark = |l: &crate::lane::Lane| match editor.doing(l) {
         Doing::Working => Some(Span { text: " ●".into(), style: accent }),
         Doing::Waiting => Some(Span { text: " ▲".into(), style: warn }),
+        d @ Doing::Stuck { .. } => Some(Span { text: format!(" ◦ {}", d.said()), style: warn }),
         Doing::Idle => None,
     };
     let (mut spans, mut spots, mut x) = (Vec::new(), Vec::new(), 0);
@@ -7527,9 +7534,11 @@ fn lane_tabs(
     // The dropdown
     let at = lanes.iter().position(|l| l.id == editor.lane.id).unwrap_or(0) + 1;
     let count = format!(" {at:>n$}/{}", lanes.len(), n = lanes.len().to_string().len());
-    let waiting = match editor.lanes_waiting() {
-        0 => String::new(),
-        n => format!(" ▲{n}"),
+    let waiting = match (editor.lanes_waiting(), editor.lanes_stuck()) {
+        (0, 0) => String::new(),
+        (n, 0) => format!(" ▲{n}"),
+        (0, k) => format!(" ◦{k}"),
+        (n, k) => format!(" ▲{n} ◦{k}"),
     };
     let mark = mark(&editor.lane);
     let fixed = 2 + mark.as_ref().map_or(0, |m| m.text.width()) + 2 + count.width() + waiting.width() + 2;

@@ -426,6 +426,9 @@ pub struct Pending {
     doc: DocId,
     version: u64,
     head: usize,
+    /// The lane that asked — Claude's tools are answered there (a server's reply lands in whichever lane is
+    /// in front; a call of a lane behind waited forever).
+    lane: crate::event::LaneId,
 }
 
 impl Editor {
@@ -720,6 +723,9 @@ impl Editor {
                 }
                 let Some(p) = self.lsp.pending.remove(&(cid, id)) else { return };
                 let (error, result) = (msg.get("error"), &msg["result"]);
+                let answered = error.map_or(Ok(result), Err);
+                // (Claude's tools: in the lane that asked — its chat, its root, its jobs)
+                let lane = p.lane;
                 match &p.kind {
                     Kind::JavaDebug => self.java_debug_reply(cid, id, error, result),
                     Kind::ClassFile { uri, pos } => {
@@ -727,25 +733,25 @@ impl Editor {
                     }
                     Kind::InlayHint { range } => self.on_inlay(cid, &p, *range, result),
                     &Kind::ToolRefs { ask } => {
-                        crate::nav::refs_answered(self, ask, error.map_or(Ok(result), Err))
+                        self.with_lane(lane, |ed| crate::nav::refs_answered(ed, ask, answered))
                     }
-                    &Kind::ToolDeclared { ask } => {
-                        crate::nav::declared_answered(self, ask, error.is_none().then_some(result))
-                    }
+                    &Kind::ToolDeclared { ask } => self.with_lane(lane, |ed| {
+                        crate::nav::declared_answered(ed, ask, error.is_none().then_some(result))
+                    }),
                     &Kind::ToolSymbols { ask } => {
-                        crate::nav::symbols_answered(self, ask, error.map_or(Ok(result), Err))
+                        self.with_lane(lane, |ed| crate::nav::symbols_answered(ed, ask, answered))
                     }
                     &Kind::ToolGoto { ask, .. } | &Kind::ToolNamed { ask } => {
-                        crate::nav::def_answered(self, ask, cid, error.map_or(Ok(result), Err))
+                        self.with_lane(lane, |ed| crate::nav::def_answered(ed, ask, cid, answered))
                     }
                     &Kind::ToolHover { ask } => {
-                        crate::nav::hover_answered(self, ask, error.map_or(Ok(result), Err))
+                        self.with_lane(lane, |ed| crate::nav::hover_answered(ed, ask, answered))
                     }
                     &Kind::ToolPrepareRename { ask } => {
-                        crate::refactor::prepared(self, ask, error.map_or(Ok(result), Err))
+                        self.with_lane(lane, |ed| crate::refactor::prepared(ed, ask, answered))
                     }
                     &Kind::ToolRename { ask } => {
-                        crate::refactor::renamed(self, ask, error.map_or(Ok(result), Err))
+                        self.with_lane(lane, |ed| crate::refactor::renamed(ed, ask, answered))
                     }
                     // One server failing leaves the others' actions (it's logged)
                     &Kind::CodeAction { list } if error.is_some() => {
@@ -1196,7 +1202,7 @@ impl Editor {
     ) -> Option<u64> {
         let doc = self.docs.iter().find(|d| d.id == id)?;
         let head = doc.selection().primary().cursor(&doc.text);
-        let p = Pending { kind, doc: doc.id, version: doc.version(), head };
+        let p = Pending { kind, doc: doc.id, version: doc.version(), head, lane: self.lane.id };
         let id = self.client_mut(cid).filter(|c| c.ready)?.request(method, params);
         self.lsp.pending.insert((cid, id), p);
         Some(id)
@@ -2430,7 +2436,8 @@ impl Editor {
         {
             let d = self.doc();
             let head = d.selection().primary().cursor(&d.text);
-            let p = Pending { kind: Kind::Goto(goto), doc: d.id, version: d.version(), head };
+            let p =
+                Pending { kind: Kind::Goto(goto), doc: d.id, version: d.version(), head, lane: self.lane.id };
             self.put_off(cid, &p);
             self.text_matches(cid);
             if let Some(t) = self.lsp.trace.as_mut() {

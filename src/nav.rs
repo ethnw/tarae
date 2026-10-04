@@ -1487,7 +1487,7 @@ pub fn diagnostics_schema() -> Value {
 /// The longest wait asked for, and what's waited at least / for quiet before a server counts as settled:
 /// a check a save starts begins within `SETTLE`; one with nothing begun or published for `QUIET` has
 /// nothing to say.
-const WAIT_MAX: u64 = 120;
+pub(crate) const WAIT_MAX: u64 = 120;
 const SETTLE: std::time::Duration = std::time::Duration::from_millis(if cfg!(test) { 20 } else { 400 });
 const QUIET: std::time::Duration = std::time::Duration::from_millis(if cfg!(test) { 100 } else { 1500 });
 
@@ -1503,6 +1503,8 @@ pub struct DiagWait {
     which: &'static str,
     since: std::time::Instant,
     until: std::time::Instant,
+    /// The lane whose chat asked — answered there.
+    lane: crate::event::LaneId,
 }
 
 /// The tool: the files checked on a worker, then what's published for them — now, or once their servers
@@ -1546,7 +1548,7 @@ pub fn diagnostics(ed: &mut Editor, call: Call, args: &Value) -> Result<(), Stri
             if ok.is_empty() {
                 return answer(ed, call, Err(unread.join("\n")));
             }
-            let w = DiagWait { call, paths: ok, unread, which, since, until: since + wait };
+            let w = DiagWait { call, paths: ok, unread, which, since, until: since + wait, lane: ed.lane.id };
             if wait.is_zero() {
                 let text = diags_text(ed, &w, None);
                 return answer(ed, w.call, Ok(text));
@@ -1565,13 +1567,35 @@ pub fn diagnostics(ed: &mut Editor, call: Call, args: &Value) -> Result<(), Stri
 }
 
 /// A server published, ended a piece of work or went: the `diagnostics` calls waiting whose servers have
-/// all settled (or whose wait is up) are answered.
+/// all settled (or whose wait is up) are answered — each in its lane (a server's news lands in the one in
+/// front). While a lane behind is swapped in, only its own: the others' are looked at by their own timers
+/// or the next news.
 pub fn diagnostics_moved(ed: &mut Editor) {
     if ed.lsp.tool_diags.is_empty() {
         return;
     }
-    let now = std::time::Instant::now();
-    for w in std::mem::take(&mut ed.lsp.tool_diags) {
+    // (a lane that's gone has no chat to answer)
+    let lanes: Vec<crate::event::LaneId> = std::iter::once(&ed.lane).chain(&ed.lanes).map(|l| l.id).collect();
+    ed.lsp.tool_diags.retain(|w| lanes.contains(&w.lane));
+    let mut asking: Vec<crate::event::LaneId> = ed.lsp.tool_diags.iter().map(|w| w.lane).collect();
+    asking.sort_unstable();
+    asking.dedup();
+    for lane in asking {
+        if lane == ed.lane.id {
+            diagnostics_moved_here(ed);
+        } else if !ed.background() {
+            ed.with_lane(lane, diagnostics_moved_here);
+        }
+    }
+}
+
+/// `diagnostics_moved` for the calls of the lane in `ed.lane`.
+fn diagnostics_moved_here(ed: &mut Editor) {
+    let (now, here) = (std::time::Instant::now(), ed.lane.id);
+    let (mine, others): (Vec<DiagWait>, Vec<DiagWait>) =
+        std::mem::take(&mut ed.lsp.tool_diags).into_iter().partition(|w| w.lane == here);
+    ed.lsp.tool_diags = others;
+    for w in mine {
         let servers: Vec<ClientId> = w.paths.iter().flat_map(|p| ed.servers_of_path(p)).collect();
         let settled = servers.iter().all(|&c| settled(ed, c, w.since));
         if settled || now >= w.until {

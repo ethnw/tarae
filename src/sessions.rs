@@ -663,7 +663,8 @@ pub struct Shown {
     pub usage: Option<(f32, u64)>,
 }
 
-/// The list's rows: the name, a glyph for what its Claude does (`●` working, `▲` waiting for you), and the
+/// The list's rows: the name, a glyph for what its Claude does (`●` working, `▲` waiting for you, `◦` a
+/// tool call unanswered too long — `stuck? symbols 42s`), and the
 /// rest in columns — branch, `↑ahead ↓behind`, what's changed, what it's doing, CPU and memory — each column
 /// as wide as its widest and empty ones left out, so the hints (right-aligned) line up row under row.
 pub fn items(lanes: &[Shown]) -> Vec<crate::picker::Item> {
@@ -679,16 +680,17 @@ pub fn items(lanes: &[Shown]) -> Vec<crate::picker::Item> {
             let moved: Vec<String> = ahead.into_iter().chain(behind).collect();
             let changed = if f.changed > 0 { format!("{} changed", f.changed) } else { String::new() };
             let doing = match (l.doing, l.front) {
-                (Doing::Waiting, _) => "waits for you",
-                (Doing::Working, _) => "working",
-                (Doing::Idle, true) => "here",
-                (Doing::Idle, false) => "",
+                (Doing::Waiting, _) => "waits for you".to_string(),
+                (d @ Doing::Stuck { .. }, _) => format!("stuck? {}", d.said()),
+                (Doing::Working, _) => "working".to_string(),
+                (Doing::Idle, true) => "here".to_string(),
+                (Doing::Idle, false) => String::new(),
             };
             let usage = l
                 .usage
                 .map(|(cpu, bytes)| format!("{cpu:>3.0}%  {:>6}", crate::procs::mem(bytes)))
                 .unwrap_or_default();
-            [branch, moved.join(" "), changed, doing.to_string(), usage]
+            [branch, moved.join(" "), changed, doing, usage]
         })
         .collect();
     let widths: Vec<usize> = (0..5).map(|c| cols.iter().map(|r| r[c].width()).max().unwrap_or(0)).collect();
@@ -710,6 +712,7 @@ pub fn items(lanes: &[Shown]) -> Vec<crate::picker::Item> {
             let glyph = match l.doing {
                 Doing::Working => ("●", "ui.accent"),
                 Doing::Waiting => ("▲", "warning"),
+                Doing::Stuck { .. } => ("◦", "warning"),
                 Doing::Idle => (" ", "ui.linenr"),
             };
             crate::picker::Item {
