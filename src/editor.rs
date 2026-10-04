@@ -4295,7 +4295,8 @@ mod tests {
 
     /// Paused by a move, follow takes over again on its own a quiet while after the last key
     /// (`llm.follow-resume`) while Claude still works — back where Claude is, then on to what comes next.
-    /// A key before then starts the wait over.
+    /// A key before then starts the wait over. (Claude's next read waits for the test's word, not a sleep: a
+    /// slow runner could take the quiet while past a timed one, and the resume would follow that read.)
     #[test]
     fn chat_follow_resumes_after_a_quiet_while() {
         use serde_json::json;
@@ -4305,18 +4306,25 @@ mod tests {
         // (5 "seconds" = 100 ms in tests)
         ed.config.llm.follow_resume = 5;
         ed.open(&main).unwrap();
+        let go = dir.join("next-read");
+        std::fs::remove_file(&go).ok();
         fake_claude_stream(
             &mut ed,
             &[
                 read("r1", &util),
-                json!("sleep 0.6"),
+                // (given up 10 s on by the clock — a test that fails before its word leaves no loop behind;
+                // a count of short sleeps ran past that, each `sleep` a process of its own)
+                json!(format!(
+                    "end=$(($(date +%s) + 10)); \
+                     while [ ! -e '{}' ] && [ \"$(date +%s)\" -lt \"$end\" ]; do sleep 0.02; done",
+                    go.display()
+                )),
                 read("r2", &lib),
                 json!({"type": "result", "result": "done"}),
             ],
         );
         feed(&mut ed, "<space>lwhere?<ret>");
         settle_until(&mut ed, |ed| ed.doc().path.as_deref() == Some(util.as_path()));
-        let t0 = std::time::Instant::now();
         feed(&mut ed, "<esc>j");
         settle_until(&mut ed, |ed| ed.session.chat.as_ref().unwrap().follow.paused);
         // Another key 60 ms on: the wait starts over from it
@@ -4328,13 +4336,13 @@ mod tests {
             last_key.elapsed() >= std::time::Duration::from_millis(95),
             "a quiet while after the last key"
         );
-        assert!(t0.elapsed() < std::time::Duration::from_millis(550), "before the next read");
         assert_eq!(
             (ed.doc().path.as_deref(), cursor_line(&ed)),
             (Some(util.as_path()), 0),
-            "back where Claude is"
+            "back where Claude is — its next read is still held"
         );
         assert!(ed.status.as_ref().is_some_and(|(m, _)| m.contains("following Claude again")));
+        std::fs::write(&go, "").unwrap();
         settle_until(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
         assert_eq!(ed.doc().path.as_deref(), Some(lib.as_path()), "and on with it");
         std::fs::remove_dir_all(&dir).ok();

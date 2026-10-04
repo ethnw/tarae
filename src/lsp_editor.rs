@@ -67,6 +67,8 @@ pub struct LspState {
     /// `rest_after`, `IDLE_STOP` unless a test says).
     resting: HashMap<ClientId, std::time::Instant>,
     pub(crate) rest_after: Option<std::time::Duration>,
+    /// How long `g r`'s text matches wait for a busy server's answer — `TEXT_GRACE` unless a test says.
+    pub(crate) text_grace: Option<std::time::Duration>,
     /// The `g r` in hand (N2): its list is laid out on a worker — the code of each place read there.
     refs: Refs,
     /// Claude's `references` calls waiting for their server (N5, `nav.rs`), by number · the next number.
@@ -2496,7 +2498,7 @@ impl Editor {
         }
         let generation = self.lsp.refs.generation;
         let here = self.session.root.clone();
-        let asked = std::time::Instant::now();
+        let (asked, grace) = (std::time::Instant::now(), self.lsp.text_grace.unwrap_or(TEXT_GRACE));
         self.events.jobs().spawn(move || {
             // (paths as the server's list shows them — from the editor's root, not the server's)
             let found = crate::picker::word_matches(&root, &name).map(|items| {
@@ -2515,7 +2517,7 @@ impl Editor {
                     .collect::<Vec<_>>()
             });
             // (a server that answers within the grace never shows text matches — no flash of a list)
-            std::thread::sleep(TEXT_GRACE.saturating_sub(asked.elapsed()));
+            std::thread::sleep(grace.saturating_sub(asked.elapsed()));
             move |ed: &mut Editor| {
                 if ed.lsp.refs.generation != generation || ed.lsp.refs.shown.is_some() || ed.picker.is_some()
                 {
@@ -3116,7 +3118,11 @@ mod tests {
 
     /// Events until `done` (or `secs` pass) — the language server's own messages and our timers.
     fn settle_for(ed: &mut Editor, secs: u64, done: impl Fn(&Editor) -> bool) {
-        let end = std::time::Instant::now() + Duration::from_secs(secs);
+        settle_for_ms(ed, secs * 1000, done);
+    }
+
+    fn settle_for_ms(ed: &mut Editor, ms: u64, done: impl Fn(&Editor) -> bool) {
+        let end = std::time::Instant::now() + Duration::from_millis(ms);
         while !done(ed) && std::time::Instant::now() < end {
             if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
                 ed.handle_event(ev);
@@ -4231,19 +4237,39 @@ mod tests {
             Some("references"),
             "asked once up, replaced"
         );
-        // Busy, but its answer comes within the grace: the list only — no text matches before or after
-        feed(&mut ed, "<esc>");
+        // Busy, but its answer comes within the grace: the list only — no text matches before or after. The
+        // grace is one no runner's stretched sleeps come near (CI's macOS once took a 60 ms sleep and the
+        // list's lines past the real 150 ms); a try whose list still came after it (a stalled runner) proves
+        // nothing — tried again.
+        const GRACE: Duration = Duration::from_secs(2);
+        const TRIES: u32 = 5;
+        ed.lsp.text_grace = Some(GRACE);
         let progress = json!({ "method": "$/progress", "params": { "token": "t",
             "value": { "kind": "begin", "title": "cargo check" } } });
         ed.on_lsp_message(cid, progress);
-        feed(&mut ed, "gr");
-        // (the answer after the text search is done — a tiny folder — but within the grace)
-        std::thread::sleep(Duration::from_millis(60));
-        let id = pending_of(&ed, Kind::Goto(Goto::References));
-        ed.on_lsp_message(cid, json!({ "id": id, "result": [at(0, 3), at(1, 9)] }));
-        settle_for(&mut ed, 1, |ed| ed.picker.as_ref().is_some_and(|p| p.title != "references"));
-        assert_eq!(ed.picker.as_ref().map(|p| p.title.as_str()), Some("references"));
-        assert!(ed.lsp.refs.texts.is_none(), "no text matches came up");
+        for attempt in 1.. {
+            feed(&mut ed, "<esc>");
+            let asked = std::time::Instant::now();
+            feed(&mut ed, "gr");
+            // The text search is long done by now (a tiny folder): without the grace, its list would be up
+            settle_for_ms(&mut ed, 300, |ed| ed.picker.is_some());
+            let early = ed.picker.as_ref().map(|p| p.title.clone());
+            assert_eq!(early, None, "nothing shows before the grace is over");
+            let id = pending_of(&ed, Kind::Goto(Goto::References));
+            ed.on_lsp_message(cid, json!({ "id": id, "result": [at(0, 3), at(1, 9)] }));
+            settle_for(&mut ed, 5, |ed| ed.picker.is_some());
+            if asked.elapsed() >= GRACE {
+                assert!(attempt < TRIES, "the list came after the grace in each of {TRIES} tries");
+                continue;
+            }
+            assert_eq!(ed.picker.as_ref().map(|p| p.title.as_str()), Some("references"));
+            // …and once the grace is over, the text matches it held back don't come either
+            let after = GRACE.saturating_sub(asked.elapsed()) + Duration::from_millis(300);
+            settle_for_ms(&mut ed, after.as_millis() as u64, |ed| ed.lsp.refs.texts.is_some());
+            assert_eq!(ed.picker.as_ref().map(|p| p.title.as_str()), Some("references"));
+            assert!(ed.lsp.refs.texts.is_none(), "no text matches came up");
+            break;
+        }
         std::fs::remove_dir_all(file.parent().unwrap()).ok();
     }
 

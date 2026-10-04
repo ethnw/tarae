@@ -465,20 +465,24 @@ fn the_waiting_animation_rests_while_the_terminal_is_unfocused() {
     sb.write("a.txt", "some text\n");
     let mut t = sb.waiting_turn(&["a.txt"], COLS, ROWS, 60);
     let frames_in = |t: &Term, d: Duration| {
-        let before = t.frames();
+        let (before, start) = (t.frames(), std::time::Instant::now());
         std::thread::sleep(d);
-        t.frames() - before
+        (t.frames() - before, start.elapsed())
     };
+    // Frames a second over the time that actually passed — a runner stretches a sleep (CI's macOS: 5 ms → 25)
+    let per_second = |(n, took): (usize, Duration)| (n as f64 / took.as_secs_f64()).round() as usize;
     let second = Duration::from_secs(1);
-    let n = frames_in(&t, second);
-    assert!((7..=12).contains(&n), "{n} frames in a second, no focus event yet");
+    let n = per_second(frames_in(&t, second));
+    assert!((7..=12).contains(&n), "{n} frames a second, no focus event yet");
     t.send("\x1b[O");
-    // (the tick already set, then the redraw of the whole screen when nothing more came)
-    std::thread::sleep(Duration::from_millis(800));
-    assert_eq!(frames_in(&t, Duration::from_millis(1500)), 0, "unfocused: nothing drawn");
+    // The tick already set, then the redraw of the whole screen when nothing more came (`RESTING_REDRAW`,
+    // half a second): waited for — a stretch with no frame longer than that — not a fixed time
+    let end = std::time::Instant::now() + Duration::from_secs(10);
+    while frames_in(&t, Duration::from_millis(700)).0 > 0 && std::time::Instant::now() < end {}
+    assert_eq!(frames_in(&t, Duration::from_millis(1500)).0, 0, "unfocused: nothing drawn");
     t.send("\x1b[I");
-    let n = frames_in(&t, second);
-    assert!((7..=13).contains(&n), "{n} frames in a second after focus came back");
+    let n = per_second(frames_in(&t, second));
+    assert!((7..=13).contains(&n), "{n} frames a second after focus came back");
 }
 
 /// `space f` in the real binary: the tree picker's first frame (the list still coming from its worker —
