@@ -69,5 +69,4 @@ config.
 | `git` + a C compiler | Downloading and building grammars on first open | Build with `--features bundled-grammars` for 26 grammars built in |
 | `git` | File picker in a repository (`git ls-files`, respects `.gitignore`) | A plain directory walk |
 | `claude` ([Claude Code](https://claude.com/claude-code)) | [Claude features](claude-integration.md) | Everything else works |
-| zellij or tmux | `space c` — Claude Code in a side pane | It runs in the built-in terminal below the code |
 | `pbcopy` (macOS) · `wl-copy` / `xclip` / `xsel` (Linux) · `win32yank` or PowerShell (WSL) | The `+` register — `space y`, `space p` | Clipboard commands report an error |

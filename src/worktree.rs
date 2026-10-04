@@ -1240,11 +1240,10 @@ impl Editor {
             front: Some(self.session.root.clone()),
             seq: crate::chats::seq(),
         };
-        self.events.shared_jobs().spawn(move || {
+        self.events.shared_jobs().background(move || {
             if let Ok(common) = common_dir(&start) {
                 save(&dir, &common, s);
             }
-            |ed: &mut Editor| ed.unchanged = true
         });
     }
 
@@ -1366,16 +1365,11 @@ impl Editor {
         }
         let (root, base) = (self.session.root.clone(), base.map(str::to_string));
         let setting = self.config.session_worktrees.clone();
-        self.set_step("session", format!("Looking at what {name} would take…"));
-        self.events.shared_jobs().spawn(move || {
-            let found = making(&root, &name, base.as_deref(), &setting);
-            move |ed: &mut Editor| {
-                ed.step_done("session");
-                match found {
-                    Ok(m) => ed.push_offer(m.card()),
-                    Err(e) => ed.set_error(format!("new session: {e}")),
-                }
-            }
+        let said = format!("Looking at what {name} would take…");
+        let work = move || making(&root, &name, base.as_deref(), &setting);
+        self.step(self.events.shared_jobs(), "session", said, work, |ed, found| match found {
+            Ok(m) => ed.push_offer(m.card()),
+            Err(e) => ed.set_error(format!("new session: {e}")),
         });
     }
 
@@ -1435,17 +1429,13 @@ impl Editor {
             return Err(format!("unsaved changes in {} — save or close them first", unsaved.join(", ")));
         }
         let (base, start) = (session.base.clone(), self.start_root());
-        self.set_step("session", format!("Looking at {name} before it ends…"));
-        self.events.shared_jobs().spawn(move || {
-            let found = ending(name.clone(), &root, base, &start);
-            move |ed: &mut Editor| {
-                ed.step_done("session");
-                match found {
-                    Ok(e) if e.quiet() => ed.session_remove(e, false, None),
-                    Ok(e) => ed.push_offer(e.card()),
-                    Err(e) => ed.set_error(format!("end {name}: {e}")),
-                }
-            }
+        let said = format!("Looking at {name} before it ends…");
+        let n = name.clone();
+        let work = move || ending(n, &root, base, &start);
+        self.step(self.events.shared_jobs(), "session", said, work, move |ed, found| match found {
+            Ok(e) if e.quiet() => ed.session_remove(e, false, None),
+            Ok(e) => ed.push_offer(e.card()),
+            Err(e) => ed.set_error(format!("end {name}: {e}")),
         });
         Ok(())
     }
@@ -1521,23 +1511,20 @@ impl Editor {
             return self.set_error(format!("{} isn't open any more", e.name));
         };
         self.session_switch(id);
-        self.set_step("session", format!("Staging {}'s changes…", e.name));
+        let said = format!("Staging {}'s changes…", e.name);
         let root = e.root.clone();
+        let work = move || {
+            git_no_hooks(&root, &["add", "--all"])
+                .and_then(|_| crate::gitpanel::status(&root).map(crate::gitpanel::Status::with_rows))
+        };
         // (its session's: the status and the message are that session's, wherever you are when they land)
-        self.events.jobs().spawn(move || {
-            let read = git_no_hooks(&root, &["add", "--all"])
-                .and_then(|_| crate::gitpanel::status(&root).map(crate::gitpanel::Status::with_rows));
-            move |ed: &mut Editor| {
-                ed.step_done("session");
-                match read {
-                    Ok(st) => {
-                        ed.session.git_status = Some(st);
-                        ed.session.commit_then_end = true;
-                        ed.git_commit_open(false, true);
-                    }
-                    Err(why) => ed.set_error(format!("commit {}: {why}", e.name)),
-                }
+        self.step(self.events.jobs(), "session", said, work, move |ed, read| match read {
+            Ok(st) => {
+                ed.session.git_status = Some(st);
+                ed.session.commit_then_end = true;
+                ed.git_commit_open(false, true);
             }
+            Err(why) => ed.set_error(format!("commit {}: {why}", e.name)),
         });
     }
 
@@ -1697,42 +1684,39 @@ impl Editor {
         let (root, base, start) = (session.root.clone(), session.base.clone(), self.start_root());
         let unsaved: Vec<PathBuf> =
             self.docs.iter().filter(|d| d.is_modified()).filter_map(|d| d.path.clone()).collect();
-        self.set_step("session", format!("Bringing {name} in…"));
+        let said = format!("Bringing {name} in…");
         let who = name.clone();
-        self.events.shared_jobs().spawn(move || {
-            let result = match crate::rebase::under_way(&root) {
-                Some(stop) => Bringing::Rebasing(stop),
-                None => match moved(&root, &who, base.clone(), &start) {
-                    Some(m) => Bringing::Moved(m),
-                    None => {
-                        bring(&root, base, &start, &unsaved).map_or_else(Bringing::Refused, Bringing::Brought)
-                    }
-                },
-            };
-            move |ed: &mut Editor| {
-                ed.step_done("session");
-                match result {
-                    Bringing::Brought(b) => ed.set_success(format!(
-                        "Brought {} of {} into {} — now at {}",
-                        commits(b.count),
-                        b.branch,
-                        b.base,
-                        b.tip
-                    )),
-                    Bringing::Moved(m) => ed.push_offer(m.card()),
-                    // (one tarae didn't start: taken up, so continue and abort know it)
-                    Bringing::Rebasing(stop) => ed.with_session(id, |ed| {
-                        if ed.session.rebase.is_none() {
-                            ed.rebase_adopt(stop);
-                        }
-                        let why = ed.session.rebase.as_ref().map(|r| r.why(&name)).unwrap_or_default();
-                        ed.set_error(format!("bring {name}: {why}"));
-                    }),
-                    Bringing::Refused(e) => ed.set_error(format!("bring {name}: {e}")),
+        let work = move || match crate::rebase::under_way(&root) {
+            Some(stop) => Bringing::Rebasing(stop),
+            None => match moved(&root, &who, base.clone(), &start) {
+                Some(m) => Bringing::Moved(m),
+                None => {
+                    bring(&root, base, &start, &unsaved).map_or_else(Bringing::Refused, Bringing::Brought)
                 }
-                ed.git_refresh();
-                ed.git_reload_bases();
+            },
+        };
+        self.step(self.events.shared_jobs(), "session", said, work, move |ed, result| {
+            match result {
+                Bringing::Brought(b) => ed.set_success(format!(
+                    "Brought {} of {} into {} — now at {}",
+                    commits(b.count),
+                    b.branch,
+                    b.base,
+                    b.tip
+                )),
+                Bringing::Moved(m) => ed.push_offer(m.card()),
+                // (one tarae didn't start: taken up, so continue and abort know it)
+                Bringing::Rebasing(stop) => ed.with_session(id, |ed| {
+                    if ed.session.rebase.is_none() {
+                        ed.rebase_adopt(stop);
+                    }
+                    let why = ed.session.rebase.as_ref().map(|r| r.why(&name)).unwrap_or_default();
+                    ed.set_error(format!("bring {name}: {why}"));
+                }),
+                Bringing::Refused(e) => ed.set_error(format!("bring {name}: {e}")),
             }
+            ed.git_refresh();
+            ed.git_reload_bases();
         });
         Ok(())
     }

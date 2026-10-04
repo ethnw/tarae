@@ -32,8 +32,8 @@ pub struct Panels {
     pub side: Option<(String, bool, Vec<Row>, usize)>,
     /// The code review: its base, its files, how many viewed, the file in hand, its rail's rows on screen.
     pub review: Option<Review>,
-    /// An edit's review in the buffer: by, file, the change in hand (i of n), undecided, the reason's first
-    /// line.
+    /// An edit's review in the buffer (Claude's — the only author since `space c` went): file, the change in
+    /// hand (i of n), undecided, the reason's first line.
     pub edit_review: Option<EditReview>,
     /// A picker: title, query, its rows on screen, how many match, loading or searching.
     pub picker: Option<Picker>,
@@ -63,7 +63,6 @@ pub struct Review {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct EditReview {
-    pub by: &'static str,
     pub file: String,
     pub change: (usize, usize),
     pub undecided: usize,
@@ -208,7 +207,6 @@ impl Editor {
             let file =
                 self.docs.iter().find(|d| d.id == r.doc_id).map(|d| d.display_name(&self.session.root));
             p.edit_review = Some(EditReview {
-                by: r.by,
                 file: file.unwrap_or_default(),
                 change: (r.current + 1, r.hunks.len()),
                 undecided: r.hunks.iter().filter(|h| h.decision == crate::llm::Decision::Undecided).count(),
@@ -375,7 +373,7 @@ impl Panels {
                 "rows": rows_json(&r.rows),
             })),
             "edit_review": self.edit_review.as_ref().map(|r| json!({
-                "by": r.by, "file": r.file, "change": [r.change.0, r.change.1], "undecided": r.undecided,
+                "file": r.file, "change": [r.change.0, r.change.1], "undecided": r.undecided,
                 "reason": r.reason,
             })),
             "picker": self.picker.as_ref().map(|p| json!({
@@ -413,8 +411,8 @@ impl Panels {
         }
         if let Some(r) = &self.edit_review {
             out.push(format!(
-                "edit review by {} · {} · change {}/{} · {} undecided",
-                r.by, r.file, r.change.0, r.change.1, r.undecided
+                "edit review · {} · change {}/{} · {} undecided",
+                r.file, r.change.0, r.change.1, r.undecided
             ));
         }
         if let Some(p) = &self.picker {

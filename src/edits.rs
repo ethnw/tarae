@@ -195,7 +195,7 @@ fn unasked(ed: &mut Editor, root: PathBuf, p: Pending) {
     let generation = ed.session.chat.as_ref().map(crate::chat::Chat::generation);
     ed.events.jobs().spawn(move || {
         // (Some: it goes in — the real path, and what's there now: None = no file)
-        let found = inside(&root, &path)
+        let found = crate::paths::inside(&root, &path)
             .filter(|real| !real.strip_prefix(&root).is_ok_and(|rel| listed(rel, &ask)))
             .and_then(|real| Some((before_text(&real)?, real)));
         move |ed: &mut Editor| {
@@ -230,36 +230,6 @@ fn unasked(ed: &mut Editor, root: PathBuf, p: Pending) {
             }
         }
     });
-}
-
-/// Where `path` really leads — its deepest existing folder resolved (links followed, `..` gone through) —
-/// if that's inside `root` (resolved itself).
-pub fn inside(root: &Path, path: &Path) -> Option<PathBuf> {
-    let root = std::fs::canonicalize(root).ok()?;
-    real(path).filter(|real| real.starts_with(&root))
-}
-
-/// Where `path` really leads: its deepest existing folder resolved (links followed, `..` gone through),
-/// the names below it as they are — None if one of those is `.`/`..` (it would climb unseen).
-pub fn real(path: &Path) -> Option<PathBuf> {
-    let mut rest = Vec::new();
-    let mut at = path.to_path_buf();
-    let real = loop {
-        if let Ok(real) = std::fs::canonicalize(&at) {
-            break real;
-        }
-        rest.push(at.file_name()?.to_os_string());
-        at = at.parent()?.to_path_buf();
-    };
-    // What doesn't exist yet: plain names only (a `..` there would climb out unseen)
-    let mut real = real;
-    for name in rest.iter().rev() {
-        if name == ".." || name == "." {
-            return None;
-        }
-        real.push(name);
-    }
-    Some(real)
 }
 
 /// Whether an edit to `rel` (from the project's root) still asks first: anything in `.git`, a cargo config
@@ -371,7 +341,7 @@ fn show(ed: &mut Editor, p: Pending) {
             if all { base.replace(&old, &new) } else { base.replacen(&old, &new, 1) }
         }
     };
-    let changes = crate::agent::line_changes(&base, &proposed);
+    let changes = crate::editdiff::line_changes(&base, &proposed);
     if changes.is_empty() {
         return answer(ed, &p.request_id, allow(p.input.clone()));
     }
@@ -560,30 +530,10 @@ pub fn aside_path(root: &Path, path: &Path) -> bool {
 mod tests {
     use super::*;
 
-    /// Review at the end lets in only edits that land inside the project — where the path really leads,
-    /// links followed and `..` gone through — and not to `.git` or a listed name (anywhere) or path (from
-    /// the root).
+    /// Review at the end lets in only edits that land inside the project (`paths::inside` — where the path
+    /// really leads) and not to `.git` or a listed name (anywhere) or path (from the root).
     #[test]
     fn which_edits_go_in_unasked() {
-        let dir = std::env::temp_dir().join(format!("tarae-edits-inside-{}", std::process::id()));
-        let outside = std::env::temp_dir().join(format!("tarae-edits-outside-{}", std::process::id()));
-        std::fs::create_dir_all(dir.join("src")).unwrap();
-        std::fs::create_dir_all(&outside).unwrap();
-        let root = std::fs::canonicalize(&dir).unwrap();
-        std::os::unix::fs::symlink(&outside, root.join("away")).ok();
-        let at = |p: &str| inside(&root, &root.join(p));
-        assert_eq!(at("src/main.rs"), Some(root.join("src/main.rs")));
-        assert_eq!(
-            at("src/new/deeper/file.rs"),
-            Some(root.join("src/new/deeper/file.rs")),
-            "folders to come"
-        );
-        assert_eq!(at("src/../src/lib.rs"), Some(root.join("src/lib.rs")));
-        assert_eq!(at("../elsewhere.rs"), None);
-        assert_eq!(at("away/x.rs"), None, "a link out of the project");
-        assert_eq!(inside(&root, Path::new("/etc/hosts")), None);
-        // (the root as given: /tmp → /private/tmp on macOS)
-        assert_eq!(inside(&root, &dir.join("src/main.rs")), Some(root.join("src/main.rs")));
         let ask: Vec<String> =
             ["build.rs", ".github", "src/secret/", "Cargo.toml"].iter().map(|s| s.to_string()).collect();
         let listed = |p: &str| listed(Path::new(p), &ask);
@@ -607,8 +557,6 @@ mod tests {
         for name in crate::sandbox::protected_names() {
             assert!(super::listed(&Path::new("a").join(name).join("x"), &defaults), "{name}");
         }
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&outside).ok();
     }
 
     #[test]

@@ -287,7 +287,7 @@ pub fn write_choices(target: &Path, home: &Path, root: &Path, path: &[PathBuf]) 
 /// enough not to be a whole area (`/private/tmp`, `/opt` — `WRITE_DEPTH`), not home's own folders
 /// (`~/Downloads`), nor a temp folder itself.
 pub fn grant_places(reads: &[PathBuf], others: &[PathBuf], home: Option<&Path>) -> Vec<PathBuf> {
-    let temp = crate::sandbox::real(&std::env::temp_dir());
+    let temp = crate::sandbox::profile_path(&std::env::temp_dir());
     let roots = [
         PathBuf::from("/private/tmp"),
         temp.clone(),
@@ -373,8 +373,8 @@ pub fn defaults(root: &Path, temp: bool) -> Defaults {
 /// `/private/tmp` and the user's temp folder (`$TMPDIR` itself — not its parent, which holds apps'
 /// caches), real paths.
 pub fn temp_folders() -> Vec<PathBuf> {
-    let mut v = vec![crate::sandbox::real(Path::new("/private/tmp"))];
-    let t = crate::sandbox::real(&std::env::temp_dir());
+    let mut v = vec![crate::sandbox::profile_path(Path::new("/private/tmp"))];
+    let t = crate::sandbox::profile_path(&std::env::temp_dir());
     if !v.contains(&t) {
         v.push(t);
     }
@@ -770,8 +770,8 @@ pub(crate) mod tests {
         // The temp folders only when asked for
         assert!(defaults(&main, false).temp.is_empty());
         let t = defaults(&main, true).temp;
-        assert!(t.contains(&crate::sandbox::real(&std::env::temp_dir())), "{t:?}");
-        assert!(t.contains(&crate::sandbox::real(Path::new("/private/tmp"))), "{t:?}");
+        assert!(t.contains(&crate::sandbox::profile_path(&std::env::temp_dir())), "{t:?}");
+        assert!(t.contains(&crate::sandbox::profile_path(Path::new("/private/tmp"))), "{t:?}");
         std::fs::remove_dir_all(&base).ok();
     }
 

@@ -28,6 +28,8 @@ pub enum Action {
     /// Command palette: named commands / `:` command line.
     Command(&'static str),
     Typed(String),
+    /// A row of what the sandbox blocked (`blocked.rs`): a grant's number, or `outside` — its card.
+    Grant(String),
     /// Theme selection (previewed while choosing).
     Theme(String),
     /// Entry `index` of the pane's jump list — in open document `doc`, at `line` (for the preview).
@@ -971,6 +973,7 @@ impl Action {
             | Action::Code(_)
             | Action::Command(_)
             | Action::Typed(_)
+            | Action::Grant(_)
             | Action::Theme(_) => None,
         }
     }

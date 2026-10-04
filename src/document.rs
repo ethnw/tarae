@@ -383,33 +383,15 @@ impl Document {
     /// undo history keeps none (#36) — this is its current trees, for tests that hold memory to a bound.
     #[cfg(test)]
     pub fn tree_nodes(&self) -> (usize, usize) {
-        use std::collections::HashSet;
-        fn count(tree: &tree_sitter::Tree, seen: &mut HashSet<usize>) {
-            let mut c = tree.walk();
-            'down: loop {
-                // (a subtree seen already — shared with another version — is counted once, its insides too)
-                if seen.insert(c.node().id()) && c.goto_first_child() {
-                    continue;
-                }
-                loop {
-                    if c.goto_next_sibling() {
-                        continue 'down;
-                    }
-                    if !c.goto_parent() {
-                        break 'down;
-                    }
-                }
-            }
-        }
-        let (mut main, mut layers) = (HashSet::new(), HashSet::new());
-        // (all held through the count: a node's id is its slot's address — a root's is inside its `Tree`, and
-        // a clone dropped mid-count let the next one reuse that address, skipping its whole tree as "seen")
+        use crate::syntax::count_subtrees;
+        let (mut main, mut layers) = (Default::default(), Default::default());
+        // (all held through the count — `count_subtrees`)
         let trees: Vec<crate::syntax::Trees> =
             self.syntax.as_ref().and_then(|s| s.trees()).into_iter().collect();
         for (tree, ls) in &trees {
-            count(tree, &mut main);
+            count_subtrees(tree, &mut main);
             for l in ls.iter() {
-                count(&l.tree, &mut layers);
+                count_subtrees(&l.tree, &mut layers);
             }
         }
         (main.len(), layers.len())

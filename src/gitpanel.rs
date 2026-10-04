@@ -907,33 +907,30 @@ impl Editor {
                 .set_status("open a commit message first — c in the git tab (or C: Claude drafts it)");
         };
         let (top, amend, id) = (c.top.clone(), c.amend, c.doc);
-        self.set_step("commit-draft", "Claude is drafting the commit message…");
-        self.events.jobs().spawn(move || {
-            let prompt = commit_prompt(&top, amend);
-            move |ed: &mut Editor| {
-                // (from here the draft streams into its review)
-                ed.step_done("commit-draft");
-                let prompt = match prompt {
-                    Ok(p) => p,
-                    Err(e) => return ed.set_error(format!("commit draft: {e}")),
-                };
-                let Some(doc) = ed.docs.iter().find(|d| d.id == id) else { return };
-                // The message part: all before the first `#` line
-                let text = doc.text.to_string();
-                let end = text.match_indices('\n').map(|(i, _)| i + 1).find(|&i| text[i..].starts_with('#'));
-                let end = end.unwrap_or(text.len());
-                // Nothing written yet: the draft goes in at the top (a plain insertion to read, the blank
-                // lines under it the gap before the `#` lines); amending: it's a new version of the message
-                let end = if text[..end].trim().is_empty() { 0 } else { end };
-                match crate::llm::draft(ed, id, "a commit message", &prompt, 0, end) {
-                    // (its body at 72, like every message — Claude doesn't always: #21)
-                    Ok(()) => {
-                        if let Some(r) = ed.session.review.as_mut() {
-                            r.wrap = Some(72);
-                        }
+        let said = "Claude is drafting the commit message…";
+        // (once it's read, the draft streams into its review)
+        let work = move || commit_prompt(&top, amend);
+        self.step(self.events.jobs(), "commit-draft", said, work, move |ed, prompt| {
+            let prompt = match prompt {
+                Ok(p) => p,
+                Err(e) => return ed.set_error(format!("commit draft: {e}")),
+            };
+            let Some(doc) = ed.docs.iter().find(|d| d.id == id) else { return };
+            // The message part: all before the first `#` line
+            let text = doc.text.to_string();
+            let end = text.match_indices('\n').map(|(i, _)| i + 1).find(|&i| text[i..].starts_with('#'));
+            let end = end.unwrap_or(text.len());
+            // Nothing written yet: the draft goes in at the top (a plain insertion to read, the blank lines
+            // under it the gap before the `#` lines); amending: it's a new version of the message
+            let end = if text[..end].trim().is_empty() { 0 } else { end };
+            match crate::llm::draft(ed, id, "a commit message", &prompt, 0, end) {
+                // (its body at 72, like every message — Claude doesn't always: #21)
+                Ok(()) => {
+                    if let Some(r) = ed.session.review.as_mut() {
+                        r.wrap = Some(72);
                     }
-                    Err(e) => ed.set_error(e),
                 }
+                Err(e) => ed.set_error(e),
             }
         });
     }
@@ -960,25 +957,22 @@ impl Editor {
         };
         let (what, names) = if push { ("push", hooks::PUSH) } else { ("pull", hooks::PULL) };
         self.git_hooked(what, names, move |ed, pre| {
-            ed.set_step("git", if push { "Pushing…" } else { "Pulling…" });
             let top = st.top.clone();
-            ed.events.jobs().spawn(move || {
+            let work = move || {
                 let a: Vec<&str> = args.iter().map(String::as_str).collect();
-                let result = git_remote(&top, &hooks::with(pre, &a));
-                move |ed: &mut Editor| {
-                    ed.step_done("git");
-                    match result {
-                        Ok(_) if push => ed.set_success(format!("Pushed {}", st.branch)),
-                        Ok(out) if out.contains("Already up to date") => ed.set_status("Already up to date"),
-                        Ok(_) => ed.set_success(format!("Pulled into {}", st.branch)),
-                        Err(r) if push && r.diverged() && st.upstream.is_some() => {
-                            ed.git_force_ask(Some(r.why))
-                        }
-                        Err(r) => ed.set_error(format!("{}: {}", if push { "push" } else { "pull" }, r.why)),
-                    }
-                    ed.git_refresh();
-                    ed.git_reload_bases();
+                git_remote(&top, &hooks::with(pre, &a))
+            };
+            let said = if push { "Pushing…" } else { "Pulling…" };
+            ed.step(ed.events.jobs(), "git", said, work, move |ed, result| {
+                match result {
+                    Ok(_) if push => ed.set_success(format!("Pushed {}", st.branch)),
+                    Ok(out) if out.contains("Already up to date") => ed.set_status("Already up to date"),
+                    Ok(_) => ed.set_success(format!("Pulled into {}", st.branch)),
+                    Err(r) if push && r.diverged() && st.upstream.is_some() => ed.git_force_ask(Some(r.why)),
+                    Err(r) => ed.set_error(format!("{}: {}", if push { "push" } else { "pull" }, r.why)),
                 }
+                ed.git_refresh();
+                ed.git_reload_bases();
             });
         });
     }
@@ -988,11 +982,13 @@ impl Editor {
     /// before it was refused (said if the card can't be made).
     pub fn git_force_ask(&mut self, refused: Option<String>) {
         let Some(top) = self.session.git_status.as_ref().map(|s| s.top.clone()) else { return };
-        self.set_step("git", "reading what the remote has…");
-        self.events.jobs().spawn(move || {
-            let ask = force_ask(&top);
-            move |ed: &mut Editor| {
-                ed.step_done("git");
+        let said = "reading what the remote has…";
+        self.step(
+            self.events.jobs(),
+            "git",
+            said,
+            move || force_ask(&top),
+            move |ed, ask| {
                 let f = match ask {
                     Ok(f) => f,
                     Err(e) => {
@@ -1015,8 +1011,8 @@ impl Editor {
                     o = o.warning(w);
                 }
                 ed.push_offer(o);
-            }
-        });
+            },
+        );
     }
 
     /// `y` on the force card: the push, with a lease on the sha the card showed. Refused if the remote
@@ -1024,28 +1020,26 @@ impl Editor {
     pub fn git_force_push(&mut self, id: u64, f: ForcePush) {
         self.offer_finished(id, Ok(()));
         self.git_hooked("push", hooks::PUSH, move |ed, pre| {
-            ed.set_step("git", "Pushing…");
-            ed.events.jobs().spawn(move || {
-                let args = f.args();
+            let (args, top) = (f.args(), f.top.clone());
+            let work = move || {
                 let a: Vec<&str> = args.iter().map(String::as_str).collect();
-                let result = git_remote(&f.top, &hooks::with(pre, &a));
-                move |ed: &mut Editor| {
-                    ed.step_done("git");
-                    let (up, n) = (f.upstream(), f.lost.len());
-                    match result {
-                        Ok(_) => ed.set_success(format!(
-                            "Pushed {} over {up} — {n} commit{} of it replaced",
-                            f.branch,
-                            if n == 1 { "" } else { "s" }
-                        )),
-                        Err(r) if r.rejected.as_deref() == Some("stale info") => ed.set_error(format!(
-                            "push: {up} moved since the card was shown — nothing replaced; P looks again"
-                        )),
-                        Err(r) => ed.set_error(format!("push: {}", r.why)),
-                    }
-                    ed.git_refresh();
-                    ed.git_reload_bases();
+                git_remote(&top, &hooks::with(pre, &a))
+            };
+            ed.step(ed.events.jobs(), "git", "Pushing…", work, move |ed, result| {
+                let (up, n) = (f.upstream(), f.lost.len());
+                match result {
+                    Ok(_) => ed.set_success(format!(
+                        "Pushed {} over {up} — {n} commit{} of it replaced",
+                        f.branch,
+                        if n == 1 { "" } else { "s" }
+                    )),
+                    Err(r) if r.rejected.as_deref() == Some("stale info") => ed.set_error(format!(
+                        "push: {up} moved since the card was shown — nothing replaced; P looks again"
+                    )),
+                    Err(r) => ed.set_error(format!("push: {}", r.why)),
                 }
+                ed.git_refresh();
+                ed.git_reload_bases();
             });
         });
     }
@@ -1190,15 +1184,11 @@ impl Editor {
         let what = if names == hooks::SWITCH { "switch" } else { "branch change" };
         self.git_hooked(what, names, move |ed, pre| {
             let cwd = ed.git_cwd();
-            ed.set_step("git", step);
-            ed.events.jobs().spawn(move || {
-                let result = top_of(&cwd).and_then(|top| work(&top, pre));
-                move |ed: &mut Editor| {
-                    ed.step_done("git");
-                    done(ed, result);
-                    ed.git_refresh();
-                    ed.git_reload_bases();
-                }
+            let job = move || top_of(&cwd).and_then(|top| work(&top, pre));
+            ed.step(ed.events.jobs(), "git", step, job, move |ed, result| {
+                done(ed, result);
+                ed.git_refresh();
+                ed.git_reload_bases();
             });
         });
     }
@@ -1348,30 +1338,27 @@ impl Editor {
     pub fn git_branch_delete_answer(&mut self, id: u64, top: PathBuf, branch: String, tip: String) {
         self.offer_finished(id, Ok(()));
         self.git_hooked("branch change", hooks::REFS, move |ed, pre| {
-            ed.set_step("git", format!("Deleting {branch}…"));
-            ed.events.jobs().spawn(move || {
-                let result = (|| {
-                    not_held(&top, &branch, "delete")?;
-                    let now =
-                        git(&top, &["rev-parse", "--verify", "-q", &format!("refs/heads/{branch}")], None)
-                            .map_err(|_| format!("there's no branch {branch} any more"))?;
-                    if now.trim() != tip {
-                        return Err(format!("{branch} moved since the card was shown — nothing deleted"));
-                    }
-                    git(&top, &hooks::with(pre, &["branch", "-D", "--", &branch]), None)
-                })();
-                move |ed: &mut Editor| {
-                    ed.step_done("git");
-                    match result {
-                        Ok(_) => ed.set_success(format!(
-                            "Deleted {branch} — `git branch {branch} {}` brings it back",
-                            &tip[..7]
-                        )),
-                        Err(e) => ed.set_error(format!("delete: {e}")),
-                    }
-                    ed.git_refresh();
-                    ed.git_reload_bases();
+            let said = format!("Deleting {branch}…");
+            let (b, t) = (branch.clone(), tip.clone());
+            let work = move || {
+                not_held(&top, &b, "delete")?;
+                let now = git(&top, &["rev-parse", "--verify", "-q", &format!("refs/heads/{b}")], None)
+                    .map_err(|_| format!("there's no branch {b} any more"))?;
+                if now.trim() != t {
+                    return Err(format!("{b} moved since the card was shown — nothing deleted"));
                 }
+                git(&top, &hooks::with(pre, &["branch", "-D", "--", &b]), None)
+            };
+            ed.step(ed.events.jobs(), "git", said, work, move |ed, result| {
+                match result {
+                    Ok(_) => ed.set_success(format!(
+                        "Deleted {branch} — `git branch {branch} {}` brings it back",
+                        &tip[..7]
+                    )),
+                    Err(e) => ed.set_error(format!("delete: {e}")),
+                }
+                ed.git_refresh();
+                ed.git_reload_bases();
             });
         });
     }

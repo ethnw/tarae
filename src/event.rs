@@ -149,6 +149,12 @@ impl Jobs {
             let _ = tx.send(Event::Job(Box::new(apply)));
         }));
     }
+
+    /// Runs `work` on a thread with nothing to bring back (a state file saved, history written): no result, so
+    /// the main loop isn't woken for it — a result, even one that does nothing, is an event and a frame.
+    pub fn background(&self, work: impl FnOnce() + Send + 'static) {
+        run(Box::new(work));
+    }
 }
 
 /// Lets `x` go on a worker — a big file's parse trees take milliseconds to free (`editor.rs`'s, perf
@@ -176,5 +182,26 @@ fn run(job: Box<dyn FnOnce() + Send>) {
         let name = thread::current().name().map(str::to_string);
         let worker = name.map_or_else(thread::Builder::new, |n| thread::Builder::new().name(n));
         worker.spawn(job).expect("failed to spawn thread");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// Work with nothing to bring back (a state file saved) sends nothing: the main loop isn't woken, and no
+    /// frame is drawn for it — a spawned job's result, even an empty one, is an event.
+    #[test]
+    fn background_work_sends_nothing_back() {
+        let q = Queue::default();
+        let (done, ran) = mpsc::channel();
+        q.jobs().background(move || {
+            let _ = done.send(());
+        });
+        ran.recv_timeout(Duration::from_secs(5)).expect("it ran");
+        assert!(q.recv_timeout(Duration::from_millis(100)).is_none(), "nothing came back");
+        q.jobs().spawn(|| |_: &mut Editor| {});
+        assert!(q.recv_timeout(Duration::from_secs(5)).is_some(), "a spawned job's result does");
     }
 }

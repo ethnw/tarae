@@ -4268,15 +4268,10 @@ fn draw_review(
     apply(out, accent)?;
     queue!(out, Print(" ▎ "))?;
     apply(out, strong)?;
-    queue!(out, Print(rev.by))?;
+    queue!(out, Print("Claude"))?;
     let right = format!("{decided} of {n} decided ");
-    // Human instructions in quotes, agent proposals as their description as-is
-    let said = if rev.by == "Claude" {
-        format!("   “{}”", rev.instruction)
-    } else {
-        format!("   {}", rev.instruction)
-    };
-    let head = 3 + rev.by.width();
+    let said = format!("   “{}”", rev.instruction);
+    let head = 3 + "Claude".width();
     // Which file it changes — the path bar names the one in front, which may be another (#82)
     // (cut from the left — its name matters most — leaving the instruction a few words)
     let room = width.saturating_sub(head + right.len() + 2);
@@ -4914,6 +4909,7 @@ fn draw_picker(
         Some(
             Action::Command(_)
             | Action::Typed(_)
+            | Action::Grant(_)
             | Action::Theme(_)
             | Action::Message
             | Action::Branch { .. }
@@ -5789,11 +5785,6 @@ fn draw_statusline(
             right.push(gap(220));
         }
         None => {}
-    }
-    // Claude Code in the adjacent pane is attached (sees selection/diagnostics; edits come here as reviews)
-    if editor.agent.as_ref().is_some_and(|a| a.connected()) && editor.session.review.is_none() {
-        right.push(Seg { text: "◦ claude code".into(), style: accent, keep: 150 });
-        right.push(gap(150));
     }
     // A plugin's badge (the cluster it's on), on every buffer — its tone's color when it's not just fine
     if let Some((_, text, tone)) = editor.plugins.as_ref().and_then(|p| p.badge.as_ref()) {
@@ -10655,47 +10646,12 @@ mod tests {
         Duration::from_millis(16) * slack.max(1)
     }
 
-    /// The budgets measure an optimized build: the test profile builds at opt-level 0 (a fast edit-test
-    /// loop), where a key costs several times as much — there a budget skips itself, saying so past libtest's
-    /// capture (`test_results::SELF_SKIP`), and `cargo perf` runs them in the `perf` profile (release).
-    fn unoptimized(test: &str) -> bool {
-        if cfg!(tarae_optimized) {
-            return false;
-        }
-        let line = format!(
-            "{}term::tests::{test} — built at opt-level 0 (the test profile); `cargo perf` runs the budgets\n",
-            crate::test_results::SELF_SKIP
-        );
-        let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
-        true
-    }
-
     /// The number behind a budget, for `cargo perf`'s history (`xtask perf`): `PERF <name> <ms> budget=<ms>`,
     /// written past libtest's capture so a passing run shows it too.
     fn measured(name: &str, took: Duration, budget: Duration) {
         let ms = |d: Duration| d.as_secs_f64() * 1000.0;
         let line = format!("PERF {name} {:.3} budget={:.0}\n", ms(took), ms(budget));
         let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
-    }
-
-    /// Every budget skips itself by its own name at opt-level 0 (else the skip lands on another test's row).
-    #[test]
-    fn every_budget_says_its_own_name_when_it_skips() {
-        let src = include_str!("term.rs");
-        let mut n = 0;
-        for (i, line) in src.lines().enumerate() {
-            let Some(name) = line.trim().strip_prefix("fn perf_budget_").and_then(|r| r.strip_suffix("() {"))
-            else {
-                continue;
-            };
-            let next = src.lines().nth(i + 1).unwrap_or_default();
-            assert!(
-                next.contains(&format!("unoptimized(\"perf_budget_{name}\")")),
-                "perf_budget_{name}: {next}"
-            );
-            n += 1;
-        }
-        assert!(n >= 11, "found {n}");
     }
 
     /// A program in an unfocused terminal drawing a gradient (100k colours of its own) leaves the faded
@@ -10723,7 +10679,7 @@ mod tests {
     /// frame (it was a second reading of the frame, a quarter of it — 70 µs of 290 at 200×50; now ~5).
     #[test]
     fn perf_frames_with_cards() {
-        if unoptimized("perf_frames_with_cards") {
+        if crate::test_results::unoptimized("term::tests::perf_frames_with_cards") {
             return;
         }
         let dir = std::env::temp_dir().join(format!("tarae-perf-seat-{}", std::process::id()));
@@ -10813,7 +10769,7 @@ mod tests {
     /// no more than a quarter slower (and 50 µs — noise on a sub-millisecond frame).
     #[test]
     fn perf_frames_with_three_sessions() {
-        if unoptimized("perf_frames_with_three_sessions") {
+        if crate::test_results::unoptimized("term::tests::perf_frames_with_three_sessions") {
             return;
         }
         let text: String = (0..2_000).map(|i| format!("fn f{i}() {{ let x = {i}; }}\n")).collect();
@@ -10870,7 +10826,7 @@ mod tests {
     /// Held even for debug builds — release is much faster.
     #[test]
     fn perf_budget_key_to_frame_on_large_file() {
-        if unoptimized("perf_budget_key_to_frame_on_large_file") {
+        if crate::test_results::unoptimized("term::tests::perf_budget_key_to_frame_on_large_file") {
             return;
         }
         let budget = frame_budget();
@@ -10900,7 +10856,7 @@ mod tests {
     /// for the ones on screen and the one under the cursor).
     #[test]
     fn perf_budget_with_many_notes() {
-        if unoptimized("perf_budget_with_many_notes") {
+        if crate::test_results::unoptimized("term::tests::perf_budget_with_many_notes") {
             return;
         }
         let budget = frame_budget();
@@ -10944,7 +10900,7 @@ mod tests {
     /// that gets the whole text): plugins have their own thread, and asking one copies nothing.
     #[test]
     fn perf_budget_with_a_runaway_plugin() {
-        if unoptimized("perf_budget_with_a_runaway_plugin") {
+        if crate::test_results::unoptimized("term::tests::perf_budget_with_a_runaway_plugin") {
             return;
         }
         let budget = frame_budget();
@@ -10991,7 +10947,7 @@ mod tests {
     /// must not read every sibling method above the screen on every frame.
     #[test]
     fn perf_budget_with_locals_in_a_huge_item() {
-        if unoptimized("perf_budget_with_locals_in_a_huge_item") {
+        if crate::test_results::unoptimized("term::tests::perf_budget_with_locals_in_a_huge_item") {
             return;
         }
         let budget = frame_budget();
@@ -11263,7 +11219,7 @@ mod tests {
     /// halving, and copying them all a line down (`C`) sorts and merges once — both were per cursor.
     #[test]
     fn perf_budget_with_20k_cursors() {
-        if unoptimized("perf_budget_with_20k_cursors") {
+        if crate::test_results::unoptimized("term::tests::perf_budget_with_20k_cursors") {
             return;
         }
         let budget = frame_budget();
@@ -11299,7 +11255,7 @@ mod tests {
     /// Same budget with syntax highlighting on — a big Rust file (only on machines with the grammar).
     #[test]
     fn perf_budget_with_syntax_highlighting() {
-        if unoptimized("perf_budget_with_syntax_highlighting") {
+        if crate::test_results::unoptimized("term::tests::perf_budget_with_syntax_highlighting") {
             return;
         }
         let budget = frame_budget();
@@ -11376,7 +11332,7 @@ mod tests {
     /// built when a folder opens or closes, not on every frame.
     #[test]
     fn perf_budget_side_panel_with_200k_files() {
-        if unoptimized("perf_budget_side_panel_with_200k_files") {
+        if crate::test_results::unoptimized("term::tests::perf_budget_side_panel_with_200k_files") {
             return;
         }
         let budget = frame_budget();
@@ -11406,7 +11362,7 @@ mod tests {
     /// best matches out as a tree.
     #[test]
     fn perf_budget_file_picker_typing_in_200k_files() {
-        if unoptimized("perf_budget_file_picker_typing_in_200k_files") {
+        if crate::test_results::unoptimized("term::tests::perf_budget_file_picker_typing_in_200k_files") {
             return;
         }
         let budget = frame_budget();
@@ -11457,7 +11413,7 @@ mod tests {
     /// built then, once).
     #[test]
     fn perf_budget_git_tab_with_20k_changes() {
-        if unoptimized("perf_budget_git_tab_with_20k_changes") {
+        if crate::test_results::unoptimized("term::tests::perf_budget_git_tab_with_20k_changes") {
             return;
         }
         let budget = frame_budget();
@@ -11487,7 +11443,7 @@ mod tests {
     /// colored lines, as the reader thread sends it) processed and drawn.
     #[test]
     fn perf_budget_terminal_flood() {
-        if unoptimized("perf_budget_terminal_flood") {
+        if crate::test_results::unoptimized("term::tests::perf_budget_terminal_flood") {
             return;
         }
         let budget = frame_budget();
@@ -11527,7 +11483,7 @@ mod tests {
     /// Same budget moving between merge conflicts in a 200k-line file (500 of them, the card on each).
     #[test]
     fn perf_budget_conflicts_in_a_huge_file() {
-        if unoptimized("perf_budget_conflicts_in_a_huge_file") {
+        if crate::test_results::unoptimized("term::tests::perf_budget_conflicts_in_a_huge_file") {
             return;
         }
         let budget = frame_budget();

@@ -1053,18 +1053,14 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
     match (key.code, key.ctrl) {
         // Still the editor's: the space menu, the command line, the windows (`C-w e` back to the code)
         (Code::Char(' ') | Code::Char(':'), false) | (Code::Char('w'), true) => return false,
-        (Code::Char('j') | Code::Down, false) | (Code::Char('n'), true) => s.move_by(1, &lines),
-        (Code::Char('k') | Code::Up, false) | (Code::Char('p'), true) => s.move_by(-1, &lines),
-        (Code::Char('d'), true) | (Code::PageDown, _) => s.move_by(10, &lines),
-        (Code::Char('u'), true) | (Code::PageUp, _) => s.move_by(-10, &lines),
-        (Code::Char('g') | Code::Home, false) => {
-            s.selected = 0;
-            s.move_by(0, &lines);
-        }
-        (Code::Char('G') | Code::End, false) => {
-            s.selected = n.saturating_sub(1);
-            s.move_by(0, &lines);
-        }
+        _ if let Some(m) = crate::key::list_move(key) => match m {
+            crate::key::ListMove::By(by) => s.move_by(by, &lines),
+            // (onto the nearest row that's pickable)
+            end => {
+                s.selected = end.from(s.selected, n);
+                s.move_by(0, &lines);
+            }
+        },
         // l / → : unfold a folder, or step into it
         (Code::Char('l') | Code::Right, false) => match at.map(|l| &l.target) {
             Some(Target::Dir(d)) if !s.is_open(d) => s.set_open([d.as_str()], true),

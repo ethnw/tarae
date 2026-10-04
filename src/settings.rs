@@ -319,13 +319,6 @@ pub static SETTINGS: &[Setting] = &[
         set: |c, v| c.cursor_shape.2 = shape(v),
     },
     Setting {
-        path: "llm.claude-code",
-        kind: Kind::Bool,
-        doc: "Let Claude Code connect (space c opens the connection; then `claude` → /ide works too): it sees your selection and diagnostics, and its edits come here as a y/n diff",
-        get: |c| Value::from(c.agent_claude_code),
-        set: |c, v| c.agent_claude_code = b(v),
-    },
-    Setting {
         path: "llm.command",
         kind: Kind::Str,
         doc: "LLM CLI speaking claude's stream-json protocol",

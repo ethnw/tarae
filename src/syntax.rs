@@ -35,7 +35,7 @@ pub struct LangSpec {
     path_suffixes: Vec<String>,
     /// Path-suffix patterns — up to one `*` per segment (`templates/*.yaml` = Helm chart templates).
     globs: Vec<String>,
-    /// Line comment token (`//`) · block comment (`/*`, `*/`) — `C-c` toggles them.
+    /// Line comment token (`//`) · block comment (`/*`, `*/`) — `space c`/`C-c` and `space C` toggle them.
     pub comment_token: Option<String>,
     pub block_comment: Option<(String, String)>,
     /// Insert-mode pairs (open, close) — None = the defaults.
@@ -473,14 +473,14 @@ pub type Spans = Vec<(usize, usize, u32)>;
 
 /// Tree + injected layers (tests count what a document keeps — `Document::tree_nodes`).
 #[cfg(test)]
-pub type Trees = (Tree, Arc<Vec<Layer>>);
+pub type Trees = (Tree, Vec<Layer>);
 
 pub struct Syntax {
     pub lang: Arc<LangData>,
     pub tree: Option<Tree>,
-    /// Injected languages — outer layers first, inner later (later ones paint on top). Shared with undo
-    /// snapshots (every command takes one, and a file can have thousands of layers) — copied on an edit.
-    pub layers: Arc<Vec<Layer>>,
+    /// Injected languages — outer layers first, inner later (later ones paint on top). This document's only:
+    /// undo snapshots keep no trees (#36), and a parse makes a fresh set.
+    pub layers: Vec<Layer>,
     /// Whether a background parse is running.
     pub in_flight: bool,
     /// Its trees let go: not looked at for a while (`Editor::trees_follow_sight`) — not parsed until it's
@@ -504,7 +504,7 @@ impl Syntax {
         Self {
             lang,
             tree: None,
-            layers: Arc::default(),
+            layers: Vec::new(),
             in_flight: false,
             dormant: false,
             dirty: true,
@@ -532,7 +532,7 @@ impl Syntax {
             }
         }
         if !self.layers.is_empty() {
-            for l in Arc::make_mut(&mut self.layers) {
+            for l in &mut self.layers {
                 for e in edits {
                     l.tree.edit(e);
                 }
@@ -563,7 +563,7 @@ impl Syntax {
     /// Text replaced with no edit to follow it (a file finished loading) — parsed afresh. (Undo and redo edit
     /// the trees instead: `Document::restore`.)
     pub fn reset(&mut self) {
-        (self.tree, self.layers) = (None, Arc::default());
+        (self.tree, self.layers) = (None, Vec::new());
         self.pending_edits.clear();
         self.generation += 1;
         self.dirty = true;
@@ -601,7 +601,7 @@ impl Syntax {
             }
             // (the old layers are all freed — they're parsed afresh each time — and that's a millisecond for a
             // big file: on a worker)
-            let old = (self.tree.replace(tree), std::mem::replace(&mut self.layers, Arc::new(layers)));
+            let old = (self.tree.replace(tree), std::mem::replace(&mut self.layers, layers));
             if !old.1.is_empty() {
                 crate::event::drop_later(old);
             }
@@ -852,10 +852,23 @@ impl Injector<'_> {
             let tree = parse_rope(parser, self.text, None, None);
             self.spent += t.elapsed();
             let Some(tree) = tree else { continue };
+            // A comment with nothing its grammar colours (no tag, `#123`, `@user` or link) — most of a file's —
+            // keeps no layer: it would paint nothing and hold its tree (~1 MB in a big Rust file)
+            if data.name == "comment" && !colours(&data, &tree, self.text) {
+                continue;
+            }
             out.push(Layer { lang: data.clone(), tree: tree.clone() });
             self.run(&data, &tree, depth + 1, out);
         }
     }
+}
+
+/// Whether `tree`'s own highlights capture anything in it.
+fn colours(data: &LangData, tree: &Tree, text: &Rope) -> bool {
+    let provider = |node: Node| node_slice(text, node).chunks().map(str::as_bytes);
+    let mut cursor = QueryCursor::new();
+    let mut captures = cursor.captures(&data.highlights, tree.root_node(), provider);
+    captures.next().is_some()
 }
 
 // ── Definition location (header path) ─────────────────────────────────
@@ -1100,6 +1113,28 @@ fn query_all(
     out
 }
 
+/// Adds `tree`'s visible subtrees to `seen` (by id) — tests that count what trees cost. A subtree seen already
+/// (shared with another version) is counted once, its insides too. Keep every tree counted into one `seen`
+/// alive through the count: a node's id is its slot's address — a root's is inside its `Tree` — and a clone
+/// dropped mid-count lets the next one reuse that address, its whole tree skipped as "seen".
+#[cfg(test)]
+pub fn count_subtrees(tree: &Tree, seen: &mut std::collections::HashSet<usize>) {
+    let mut c = tree.walk();
+    'down: loop {
+        if seen.insert(c.node().id()) && c.goto_first_child() {
+            continue;
+        }
+        loop {
+            if c.goto_next_sibling() {
+                continue 'down;
+            }
+            if !c.goto_parent() {
+                break 'down;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1109,24 +1144,11 @@ mod tests {
     #[test]
     #[ignore]
     fn subtrees_by_layer() {
-        fn count(tree: &Tree) -> usize {
+        let count = |tree: &Tree| {
             let mut seen = std::collections::HashSet::new();
-            let mut c = tree.walk();
-            'down: loop {
-                if seen.insert(c.node().id()) && c.goto_first_child() {
-                    continue;
-                }
-                loop {
-                    if c.goto_next_sibling() {
-                        continue 'down;
-                    }
-                    if !c.goto_parent() {
-                        break 'down;
-                    }
-                }
-            }
+            count_subtrees(tree, &mut seen);
             seen.len()
-        }
+        };
         let paths = std::env::var("TARAE_COUNT").unwrap_or("src/editor.rs src/term.rs".into());
         for p in paths.split_whitespace() {
             let Some(lang) = detect(Path::new(p)).and_then(|s| Loader::global().load(s).ok()) else {
@@ -1163,6 +1185,35 @@ mod tests {
             drop(tree);
             eprintln!("  dropping: layers {l:?}, main tree {:?}", t.elapsed());
         }
+    }
+
+    /// A comment keeps a layer only when its grammar colours something in it — a tag, an issue number, a
+    /// mention, a link — and that's still coloured; plain prose (capitals and colons too) keeps none.
+    #[test]
+    fn only_comments_with_something_to_colour_keep_a_layer() {
+        let Some(lang) = spec("rust").and_then(|s| Loader::global().load(s).ok()) else { return };
+        let text = Rope::from_str(
+            "// plain words, no tag\n\
+             fn a() {}\n\
+             // TODO: this one\n\
+             // see #12\n\
+             // ask @someone\n\
+             // read https://example.com/x\n\
+             // Capital Words: but no tag\n",
+        );
+        let syn = Syntax::parsed(lang, &text);
+        let rows: Vec<usize> = syn
+            .layers
+            .iter()
+            .filter(|l| l.lang.name == "comment")
+            .map(|l| l.tree.root_node().start_position().row)
+            .collect();
+        assert_eq!(rows, [2, 3, 4, 5], "the tag, the issue, the mention, the link");
+        let todo = text.line_to_byte(2) + 3;
+        let spans = highlights(&syn, &text, 0..text.len_bytes(), &mut QueryCursor::new());
+        let names: Vec<String> =
+            spans.iter().filter(|s| s.0 <= todo && todo < s.1).map(|s| capture_name(s.2)).collect();
+        assert!(names.iter().any(|n| n == "info"), "TODO still coloured: {names:?}");
     }
 
     /// A big file's trees take milliseconds to free: a reparse's old layers and a sleeping document's trees

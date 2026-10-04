@@ -1,5 +1,4 @@
-//! The built-in terminal — your shell (or Claude Code, when there's no zellij or tmux to open it beside
-//! tarae) in the bottom panel. `space T` shows it with the keys, and hides it (it keeps running); `C-\`
+//! The built-in terminal — your shell in the bottom panel. `space T` shows it with the keys, and hides it (it keeps running); `C-\`
 //! moves the keys between the code and it (`editor.terminal-escape` inside it, a keymap command outside).
 //! The wheel over it scrolls back; a click in it gives it the keys, a click outside takes them back; a drag
 //! selects text and copies it. A program that asks for the mouse (`htop`, `vim`, `lazygit`) gets it instead,

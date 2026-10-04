@@ -397,44 +397,36 @@ pub fn start(ed: &mut Editor, branch: Option<String>) {
 
 /// `start` for the repository around `cwd`.
 pub fn start_in(ed: &mut Editor, cwd: PathBuf, branch: Option<String>) {
-    ed.set_step(
-        "review",
-        match &branch {
-            Some(b) => format!("review: gathering changes since {b}…"),
-            None => "review: gathering changes…".into(),
-        },
-    );
-    ed.events.jobs().spawn(move || {
-        let found = (|| -> Result<(PathBuf, Base, Vec<File>), String> {
-            let root = PathBuf::from(git(&cwd, &["rev-parse", "--show-toplevel"])?.trim());
-            let base = match branch {
-                None => Base::Head,
-                Some(name) => {
-                    // origin/main → bring origin's main up to date (offline: the last fetch will do)
-                    let remotes = git(&root, &["remote"]).unwrap_or_default();
-                    if let Some((remote, rest)) = name.split_once('/')
-                        && remotes.lines().any(|r| r == remote)
-                    {
-                        // (tarae's own step: no hooks — `gitmenu::NO_HOOKS`)
-                        let _ = crate::gitmenu::git_no_hooks(&root, &["fetch", "--quiet", remote, rest]);
-                    }
-                    let commit = git(&root, &["merge-base", "HEAD", &name])
-                        .map_err(|e| format!("{name}: {e}"))?
-                        .trim()
-                        .to_string();
-                    Base::Branch { name, commit }
+    let said = match &branch {
+        Some(b) => format!("review: gathering changes since {b}…"),
+        None => "review: gathering changes…".into(),
+    };
+    let work = move || -> Result<(PathBuf, Base, Vec<File>), String> {
+        let root = PathBuf::from(git(&cwd, &["rev-parse", "--show-toplevel"])?.trim());
+        let base = match branch {
+            None => Base::Head,
+            Some(name) => {
+                // origin/main → bring origin's main up to date (offline: the last fetch will do)
+                let remotes = git(&root, &["remote"]).unwrap_or_default();
+                if let Some((remote, rest)) = name.split_once('/')
+                    && remotes.lines().any(|r| r == remote)
+                {
+                    // (tarae's own step: no hooks — `gitmenu::NO_HOOKS`)
+                    let _ = crate::gitmenu::git_no_hooks(&root, &["fetch", "--quiet", remote, rest]);
                 }
-            };
-            let files = changed(&root, &base)?;
-            Ok((root, base, files))
-        })();
-        move |ed: &mut Editor| {
-            ed.step_done("review");
-            match found {
-                Err(e) => ed.set_error(format!("review: {e}")),
-                Ok((root, base, files)) => open(ed, root, base, files),
+                let commit = git(&root, &["merge-base", "HEAD", &name])
+                    .map_err(|e| format!("{name}: {e}"))?
+                    .trim()
+                    .to_string();
+                Base::Branch { name, commit }
             }
-        }
+        };
+        let files = changed(&root, &base)?;
+        Ok((root, base, files))
+    };
+    ed.step(ed.events.jobs(), "review", said, work, |ed, found| match found {
+        Err(e) => ed.set_error(format!("review: {e}")),
+        Ok((root, base, files)) => open(ed, root, base, files),
     });
 }
 
@@ -626,8 +618,7 @@ fn claude_reviews(ed: &mut Editor) {
         _ => Vec::new(),
     };
     let n = r.files.len();
-    ed.set_step("review-ask", "Claude is reading the changes…");
-    ed.events.jobs().spawn(move || {
+    let work = move || {
         let mut diff = match &rev {
             Some(rev) => diff_text(&root, rev),
             None => turn_diff(&turn),
@@ -653,21 +644,21 @@ fn claude_reviews(ed: &mut Editor) {
         if more > 0 {
             diff.push_str(&format!("\n… ({more} more bytes — read those files yourself)\n"));
         }
-        move |ed: &mut Editor| {
-            // (from here the chat says how Claude is getting on)
-            ed.step_done("review-ask");
-            let about = format!("<changes of=\"{label}\">\n<diff>\n{diff}</diff>\n</changes>");
-            let chip = format!("Claude reviews · {n} file{}", if n == 1 { "" } else { "s" });
-            if ed.session.chat.is_none() {
-                crate::chat::open(ed);
-                if let Some(c) = &mut ed.session.chat {
-                    c.focused = false;
-                    c.unfolded = false;
-                }
+        diff
+    };
+    // (once it's read, the chat says how Claude is getting on)
+    ed.step(ed.events.jobs(), "review-ask", "Claude is reading the changes…", work, move |ed, diff| {
+        let about = format!("<changes of=\"{label}\">\n<diff>\n{diff}</diff>\n</changes>");
+        let chip = format!("Claude reviews · {n} file{}", if n == 1 { "" } else { "s" });
+        if ed.session.chat.is_none() {
+            crate::chat::open(ed);
+            if let Some(c) = &mut ed.session.chat {
+                c.focused = false;
+                c.unfolded = false;
             }
-            if !crate::chat::submit(ed, REVIEW_ASK, Some(about), Some(chip)) {
-                ed.set_warning("couldn't reach claude — the chat panel says why");
-            }
+        }
+        if !crate::chat::submit(ed, REVIEW_ASK, Some(about), Some(chip)) {
+            ed.set_warning("couldn't reach claude — the chat panel says why");
         }
     });
 }
@@ -962,16 +953,12 @@ pub fn rail_key(ed: &mut Editor, key: Key) -> bool {
     let order = r.rail_order();
     let at = order.iter().position(|&i| i == r.selected).unwrap_or(0);
     let pick = |k: usize| order.get(k.min(order.len().saturating_sub(1))).copied();
+    if let Some(m) = crate::key::list_move(key) {
+        r.selected = pick(m.from(at, order.len())).unwrap_or(r.selected);
+        return true;
+    }
     match (key.code, key.ctrl) {
         (Code::Char(' ') | Code::Char(':'), false) => return false,
-        (Code::Char('j') | Code::Down, false) | (Code::Char('n'), true) => {
-            r.selected = pick(at + 1).unwrap_or(r.selected)
-        }
-        (Code::Char('k') | Code::Up, false) | (Code::Char('p'), true) => {
-            r.selected = pick(at.saturating_sub(1)).unwrap_or(r.selected)
-        }
-        (Code::Char('g') | Code::Home, false) => r.selected = pick(0).unwrap_or(r.selected),
-        (Code::Char('G') | Code::End, false) => r.selected = pick(usize::MAX).unwrap_or(r.selected),
         (Code::Enter | Code::Char('l') | Code::Right, false) => {
             let i = r.selected;
             r.focus = false;

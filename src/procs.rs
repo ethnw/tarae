@@ -1733,14 +1733,13 @@ impl Editor {
     fn procs_keep_usual(&mut self) {
         let Some(path) = self.procs.usual_path.clone() else { return };
         let usual = self.procs.usual.clone();
-        self.events.jobs().spawn(move || {
+        self.events.jobs().background(move || {
             if let Ok(s) = serde_json::to_string(&usual) {
                 let tmp = path.with_extension("json.tmp");
                 if std::fs::write(&tmp, s).is_ok() {
                     let _ = std::fs::rename(&tmp, &path);
                 }
             }
-            |ed: &mut Editor| ed.unchanged = true
         });
     }
 }
@@ -1775,17 +1774,13 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
     }
     let n = ed.procs.rows.len();
     let Some(p) = ed.procs.panel.as_mut().filter(|p| p.focus) else { return false };
-    let step =
-        |p: &mut Panel, by: isize| p.selected = p.selected.saturating_add_signed(by).min(n.saturating_sub(1));
+    if let Some(m) = crate::key::list_move(key) {
+        p.selected = m.from(p.selected, n);
+        return true;
+    }
     match (key.code, key.ctrl, key.alt) {
         (Code::Char(' ' | ':'), false, false) | (Code::Char('w'), true, false) => return false,
         (Code::Esc, ..) => p.focus = false,
-        (Code::Char('j') | Code::Down, false, false) | (Code::Char('n'), true, false) => step(p, 1),
-        (Code::Char('k') | Code::Up, false, false) | (Code::Char('p'), true, false) => step(p, -1),
-        (Code::Char('d'), true, false) | (Code::PageDown, ..) => step(p, 10),
-        (Code::Char('u'), true, false) | (Code::PageUp, ..) => step(p, -10),
-        (Code::Char('g') | Code::Home, false, false) => p.selected = 0,
-        (Code::Char('G') | Code::End, false, false) => p.selected = n.saturating_sub(1),
         (Code::Char('q'), false, false) => ed.procs_close(),
         (Code::Char('s'), false, false) => ed.procs_stop(),
         (Code::Char('r'), false, false) => ed.procs_restart(),

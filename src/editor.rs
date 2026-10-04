@@ -432,8 +432,6 @@ pub struct Editor {
     /// Debug run · breakpoints (kept without a debug run) · debug run generation (drops late messages).
     pub dap: Option<crate::dap::Dap>,
     pub breakpoints: crate::dap::Breakpoints,
-    /// Claude Code IDE server (if running).
-    pub agent: Option<crate::agent::Agent>,
     /// WebAssembly plugins: their thread and the commands they registered (`None` until there are some).
     pub plugins: Option<crate::plugin::Plugins>,
     /// The processes tarae started, their costs and its checks on them (`:procs`, `procs.rs`).
@@ -658,7 +656,6 @@ impl Editor {
             input_seq: 0,
             dap: None,
             breakpoints: Default::default(),
-            agent: None,
             plugins: None,
             procs: Default::default(),
             cmd_lists: Default::default(),
@@ -897,10 +894,7 @@ impl Editor {
         self.recent = crate::recent::bump(&self.recent, &path);
         if !cfg!(test) {
             let list = self.recent.clone();
-            self.events.jobs().spawn(move || {
-                crate::recent::save(&list);
-                |_: &mut Editor| {}
-            });
+            self.events.jobs().background(move || crate::recent::save(&list));
         }
         Ok(())
     }
@@ -1254,6 +1248,30 @@ impl Editor {
         self.toasts.retain(|t| t.step != Some(key));
     }
 
+    /// A step that is one job: said (`set_step`) while `work` runs on `jobs`' worker, and over (`step_done`)
+    /// before `then` gets its result — so the step never lingers under what came of it.
+    pub fn step<W, R, T>(
+        &mut self,
+        jobs: crate::event::Jobs,
+        key: &'static str,
+        msg: impl Into<String>,
+        work: W,
+        then: T,
+    ) where
+        W: FnOnce() -> R + Send + 'static,
+        R: Send + 'static,
+        T: FnOnce(&mut Editor, R) + Send + 'static,
+    {
+        self.set_step(key, msg);
+        jobs.spawn(move || {
+            let result = work();
+            move |ed: &mut Editor| {
+                ed.step_done(key);
+                then(ed, result)
+            }
+        });
+    }
+
     /// Record only, no toast — `status` is never drawn. Only for what the screen shows already (the
     /// diagnostic at the cursor, the selections just made); anything else the user has to see is a toast.
     pub fn note(&mut self, msg: impl Into<String>) {
@@ -1468,14 +1486,12 @@ impl Editor {
         self.conflicts_sync();
         self.disk_sync();
         self.saves_due(false);
-        self.agent_next_diff();
         crate::follow::watch(self);
         crate::notes::attach(self);
         crate::edits::next(self);
         crate::refactor::next(self);
         crate::codereview::land(self);
         self.offer_view_sync();
-        self.agent_selection_tick(false);
         self.plugin_front();
         self.schedule_tick();
     }
@@ -2484,6 +2500,7 @@ impl Editor {
                 Ok(())
             }
             Action::Typed(line) => typed::execute(self, &line).map_err(|e| anyhow::anyhow!(e)),
+            Action::Grant(row) => self.sandbox_grant(&row).map_err(|e| anyhow::anyhow!(e)),
             Action::Theme(name) => typed::execute(self, &format!("set! theme {name}"))
                 .map_err(|e| anyhow::anyhow!(e))
                 .map(|_| {
@@ -6782,6 +6799,29 @@ mod tests {
     /// commands write there this conversation and runs the command again now; `A` keeps one for the
     /// project; outside runs it once with no sandbox. Each run again is the user's: Claude hears how it ended
     /// with the next message. Harmless: the command is an `echo`, the folders this test's temp ones.
+    /// A step that's one job (`Editor::step`): said while its work runs, and over before what came of it is
+    /// said — it never lingers under its own result.
+    #[test]
+    fn a_step_is_said_until_its_result_lands() {
+        let mut ed = editor("");
+        let (go, wait) = std::sync::mpsc::channel::<()>();
+        let work = move || {
+            let _ = wait.recv();
+            7
+        };
+        ed.step(ed.events.jobs(), "t", "working…", work, |ed, n| {
+            assert!(!ed.toasts.iter().any(|t| t.step == Some("t")), "over before its result");
+            ed.set_success(format!("got {n}"));
+        });
+        assert!(
+            ed.toasts.iter().any(|t| t.step == Some("t") && t.text.contains("working…")),
+            "said meanwhile"
+        );
+        go.send(()).unwrap();
+        settle_for(&mut ed, |ed| ed.toasts.iter().any(|t| t.text.contains("got 7")));
+        assert!(!ed.toasts.iter().any(|t| t.step.is_some()));
+    }
+
     #[test]
     fn the_user_opens_what_the_sandbox_blocked() {
         let dir = std::env::temp_dir().join(format!("tarae-blocked-ks-{}", std::process::id()));
@@ -6858,9 +6898,12 @@ mod tests {
         assert!(told(&ed, "The user let your commands write in"));
         settle_until(&mut ed, ran_again);
         assert!(told(&ed, &format!("The user ran `{cmd}` again, letting it write in")));
+        // The rows are the list's own (`Action::Grant`), not a `:` command to complete or type
+        assert!(crate::cmdline::find("sandbox-grant").is_none());
+        assert!(crate::typed::execute(&mut ed, "sandbox-grant 1").is_err());
         // `A` on the wider one: kept for the project
         ed.session.checkpoints.tell.clear();
-        crate::typed::execute(&mut ed, "sandbox-grant 1").unwrap();
+        ed.sandbox_grant("1").unwrap();
         settled(&mut ed, crate::blocked::GRANT_TITLE);
         feed(&mut ed, "A");
         let project = ed.session.root.clone();
@@ -6869,7 +6912,7 @@ mod tests {
         settle_until(&mut ed, |ed| kept(&cache) && ran_again(ed));
         // Outside, once
         ed.session.checkpoints.tell.clear();
-        crate::typed::execute(&mut ed, "sandbox-grant outside").unwrap();
+        ed.sandbox_grant("outside").unwrap();
         let s = settled(&mut ed, crate::blocked::OUTSIDE_TITLE);
         assert!(s.contains("y Run") && !s.contains("A Always"), "{s}");
         feed(&mut ed, "y");
@@ -7179,7 +7222,7 @@ mod tests {
     #[test]
     fn what_claudes_run_made_this_turn_reads_unasked() {
         use serde_json::json;
-        let dir = crate::sandbox::real(&std::env::temp_dir())
+        let dir = crate::sandbox::profile_path(&std::env::temp_dir())
             .join(format!("tarae-made-ask-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
@@ -8837,13 +8880,7 @@ mod tests {
     /// lookups, whatever is open). At opt-level 0 it skips itself, saying so past libtest's capture.
     #[test]
     fn perf_session_switch_with_twenty_files_each() {
-        if !cfg!(tarae_optimized) {
-            let line = format!(
-                "{}editor::tests::perf_session_switch_with_twenty_files_each — built at opt-level 0 (the test \
-                 profile); `cargo perf` runs it\n",
-                crate::test_results::SELF_SKIP
-            );
-            let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+        if crate::test_results::unoptimized("editor::tests::perf_session_switch_with_twenty_files_each") {
             return;
         }
         let files: Vec<(String, String)> = (0..20)
@@ -11493,7 +11530,7 @@ mod tests {
         assert_eq!(mv::line_of(&ed.doc().text, ed.doc().selection().primary().head), 3);
     }
 
-    /// An accepted `space i` answer (like Claude Code's diffs) is a step of its own for `space u` / `space U`.
+    /// An accepted `space i` answer is a step of its own for `space u` / `space U`.
     #[test]
     fn an_ask_is_a_step_space_u_takes_back() {
         let (dir, main, ..) = follow_project("ask-turn");
@@ -11997,7 +12034,8 @@ q = \"delete_selection\"\n",
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("big.rs");
         let text: String = (0..400)
-            .map(|i| format!("/// Item {i} — does `thing_{i}` for [`Other`].\n// note {i}\nfn f{i}(x: u32) -> u32 {{ x + {i} }}\n"))
+            // (a comment with a tag keeps its layer — one with nothing to colour keeps none)
+            .map(|i| format!("/// Item {i} — does `thing_{i}` for [`Other`].\n// NOTE: {i}\nfn f{i}(x: u32) -> u32 {{ x + {i} }}\n"))
             .collect();
         std::fs::write(&file, &text).unwrap();
         let mut ed = editor("");
@@ -12007,7 +12045,7 @@ q = \"delete_selection\"\n",
         };
         settle_for(&mut ed, parsed);
         let Some(syn) = ed.doc().syntax.as_ref() else { return }; // (no rust grammar in this build)
-        assert!(!syn.layers.is_empty(), "doc comments are injected layers");
+        assert!(!syn.layers.is_empty(), "tagged comments are injected layers");
         let one = ed.doc().tree_nodes();
         // The tree as a fresh parse of the text would have it — what an incremental one must come to
         let fresh = |ed: &Editor| {
@@ -12619,6 +12657,64 @@ q = \"delete_selection\"\n",
         assert_eq!(text(&ed), "fn a() {\n    x();\n}\n", "one undo step");
         let ed = run("x\n", "<C-c>");
         assert_eq!(text(&ed), "x\n", "unknown language: nothing");
+    }
+
+    /// `space c` toggles line comments, as `C-c` does (Helix's keys): on, and back off.
+    #[test]
+    fn space_c_toggles_line_comments() {
+        let mut ed = rust_editor("fn a() {\n    x();\n}\n");
+        feed(&mut ed, "j<space>c");
+        assert_eq!(text(&ed), "fn a() {\n    // x();\n}\n");
+        feed(&mut ed, "<space>c");
+        assert_eq!(text(&ed), "fn a() {\n    x();\n}\n");
+    }
+
+    /// `space C` puts a block comment around a selection — its text, not its lines — and takes it off again;
+    /// a cursor's line is wrapped whole.
+    #[test]
+    fn space_capital_c_toggles_a_block_comment_around_the_selection() {
+        let mut ed = rust_editor("call(alpha, beta);\n");
+        feed(&mut ed, "w<space>C");
+        assert_eq!(text(&ed), "/* call */(alpha, beta);\n");
+        feed(&mut ed, "<space>C");
+        assert_eq!(text(&ed), "call(alpha, beta);\n", "the selection still covers it: off again");
+        let mut ed = rust_editor("    x();\n");
+        feed(&mut ed, "<space>C");
+        assert_eq!(text(&ed), "    /* x(); */\n", "a cursor: its line, inside its indentation");
+        feed(&mut ed, "<space>C");
+        assert_eq!(text(&ed), "    x();\n");
+    }
+
+    /// A language with no block comment (Python): `space C` gives line comments, as Helix does.
+    #[test]
+    fn space_capital_c_falls_back_to_line_comments() {
+        let mut ed = editor("x = 1\n");
+        ed.docs[0].path = Some("/tmp/tarae-test.py".into());
+        feed(&mut ed, "<space>C");
+        assert_eq!(text(&ed), "# x = 1\n");
+        feed(&mut ed, "<space>C");
+        assert_eq!(text(&ed), "x = 1\n");
+    }
+
+    /// Several cursors: `space c` comments each one's line, `space C` wraps each — two on one line wrap it
+    /// once — and each comes off again.
+    #[test]
+    fn comment_toggles_take_every_cursor() {
+        let mut ed = rust_editor("a();\nb();\n");
+        feed(&mut ed, "C<space>c");
+        assert_eq!(ed.doc().selection().ranges().len(), 2);
+        assert_eq!(text(&ed), "// a();\n// b();\n");
+        feed(&mut ed, "<space>c");
+        assert_eq!(text(&ed), "a();\nb();\n");
+        feed(&mut ed, "<space>C");
+        assert_eq!(text(&ed), "/* a(); */\n/* b(); */\n");
+        feed(&mut ed, "<space>C");
+        assert_eq!(text(&ed), "a();\nb();\n");
+        let mut ed = rust_editor("one two\n");
+        let sel = Selection::new(vec![Range::point(0), Range::point(4)], 0);
+        ed.doc_mut().set_selection(sel);
+        feed(&mut ed, "<space>C");
+        assert_eq!(text(&ed), "/* one two */\n", "two cursors on one line: one comment");
     }
 
     /// A Rust document with its tree parsed now — None when the grammar isn't built in.

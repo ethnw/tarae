@@ -234,8 +234,6 @@ commands! {
         task_picker => "Pick a task to run",
         task_close => "Stop the task, close its panel",
         task_sandbox => "What the sandbox blocked: open it",
-        claude_code => "Open Claude Code beside",
-        claude_code_mention => "Send selection to Claude Code",
         dap_edit_condition => "Break only when… (condition)",
         dap_edit_log => "Log here instead of stopping",
         dap_watch => "Watch an expression",
@@ -311,6 +309,7 @@ commands! {
         commit_undo_checkpoint => "Make what's typed an undo step",
         repeat_last_insert => "Repeat last insert",
         toggle_comments => "Comment or uncomment lines",
+        toggle_block_comments => "Block-comment the selections",
         shell_pipe => "Pipe selections through a command",
         shell_pipe_to => "Send selections to a command",
         shell_insert_output => "Insert a command's output before",
@@ -2060,12 +2059,6 @@ fn dap_pause(cx: &mut Context) {
     cx.editor.dap_pause();
 }
 
-fn claude_code(cx: &mut Context) {
-    cx.editor.agent_open_claude();
-}
-fn claude_code_mention(cx: &mut Context) {
-    cx.editor.agent_mention();
-}
 fn dap_edit_condition(cx: &mut Context) {
     let now = cx.editor.breakpoint_field(false).unwrap_or_default();
     cx.editor.open_prompt(PromptKind::BreakCondition, &now);
@@ -2493,7 +2486,6 @@ fn repeat_last_insert(cx: &mut Context) {
     cx.editor.repeat_last_insert(n);
 }
 
-/// `C-c` — line comments over the selections' lines (block comments where a language has only those).
 fn shell_pipe(cx: &mut Context) {
     cx.editor.open_prompt(PromptKind::Shell(crate::shell::Pipe::Replace), "");
 }
@@ -2510,14 +2502,27 @@ fn shell_keep_pipe(cx: &mut Context) {
     cx.editor.open_prompt(PromptKind::Shell(crate::shell::Pipe::Keep), "");
 }
 
+/// `space c` · `C-c` — line comments over the selections' lines (block comments where a language has only
+/// those).
 fn toggle_comments(cx: &mut Context) {
+    comment_with(cx, crate::comment::toggle);
+}
+
+/// `space C` — a block comment around each selection (line comments where a language has no block comment).
+fn toggle_block_comments(cx: &mut Context) {
+    comment_with(cx, crate::comment::toggle_block);
+}
+
+type Toggle = fn(&ropey::Rope, &Selection, Option<&str>, Option<(&str, &str)>) -> Option<Transaction>;
+
+/// The language's comment tokens through `toggle`, applied — the selections kept on what they covered.
+fn comment_with(cx: &mut Context, toggle: Toggle) {
     let Some(spec) = cx.editor.lang_spec() else {
         return cx.editor.set_status("no comment syntax for this file");
     };
     let block = spec.block_comment.as_ref().map(|(a, b)| (a.as_str(), b.as_str()));
     let doc = cx.editor.doc_mut();
-    let Some(tx) = crate::comment::toggle(&doc.text, doc.selection(), spec.comment_token.as_deref(), block)
-    else {
+    let Some(tx) = toggle(&doc.text, doc.selection(), spec.comment_token.as_deref(), block) else {
         if spec.comment_token.is_none() && block.is_none() {
             cx.editor.set_status(format!("{} has no comments", spec.name));
         }

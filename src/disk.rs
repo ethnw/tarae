@@ -283,7 +283,7 @@ impl Editor {
                         said.push((id, format!("{name} reloaded from disk{lines}"), false));
                     }
                 }
-                // Written outside = my buffer (agent saving an edit I accepted, etc.) — counts as saved
+                // Written outside = my buffer (Claude writing an edit I accepted, etc.) — counts as saved
                 (Some(stamp), Some(body)) if doc.text == body => {
                     doc.disk = Some(stamp);
                     doc.disk_conflict = false;

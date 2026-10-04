@@ -4,7 +4,7 @@ restart-build = "cargo build --release"
 restart-binary = "target/release/tarae"
 
 [llm]
-# tarae's own tests (agent.rs, attach.rs …) connect to their own port-0 listeners — opens every local port,
+# tarae's own tests (attach.rs, dap.rs, plugin …) connect to their own port-0 listeners — opens every local port,
 # the risky ones too
 sandbox-localhost = true
 

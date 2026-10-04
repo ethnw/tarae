@@ -55,8 +55,8 @@ pub fn look(tool: &str, input: &Value, cwd: &Path) -> Look {
     };
     let at = match tool {
         // Glob: the pattern's fixed folders are part of where it looks (`../../x/*.txt`, `/etc/*`)
-        "Glob" => glob_root(&rel(&given), &pattern).and_then(|p| crate::edits::real(&p)),
-        _ => crate::edits::real(&rel(&given)),
+        "Glob" => glob_root(&rel(&given), &pattern).and_then(|p| crate::paths::real(&p)),
+        _ => crate::paths::real(&rel(&given)),
     };
     let file = at.as_ref().is_some_and(|p| p.is_file());
     Look { tool: tool.to_string(), at, pattern, filter, given, file }
@@ -102,7 +102,7 @@ pub struct Made {
 
 impl Made {
     pub fn of(ran: &[Ran]) -> Made {
-        let temp = [PathBuf::from("/private/tmp"), crate::sandbox::real(&std::env::temp_dir())];
+        let temp = [PathBuf::from("/private/tmp"), crate::sandbox::profile_path(&std::env::temp_dir())];
         Made {
             runs: ran.iter().map(|r| (r.from, r.to)).collect(),
             dirs: ran.iter().filter_map(|r| r.dir.as_ref().map(|d| d.path().to_path_buf())).collect(),
@@ -425,8 +425,8 @@ mod tests {
     /// (`Editor.read_temp`); and a card's read is sorted where the capability model sorts it.
     #[test]
     fn other_checkouts_and_the_temp_folders_read_unasked() {
-        let base =
-            crate::sandbox::real(&std::env::temp_dir()).join(format!("tarae-dflt-{}", std::process::id()));
+        let base = crate::sandbox::profile_path(&std::env::temp_dir())
+            .join(format!("tarae-dflt-{}", std::process::id()));
         std::fs::remove_dir_all(&base).ok();
         std::fs::create_dir_all(&base).unwrap();
         let (main, wt) = crate::allow::tests::repo_with_worktree(&base);
@@ -454,8 +454,8 @@ mod tests {
     /// came after it ended, nor what it made outside the temp folders, nor the temp folder itself.
     #[test]
     fn what_a_run_made_reads_unasked() {
-        let base =
-            crate::sandbox::real(&std::env::temp_dir()).join(format!("tarae-made-{}", std::process::id()));
+        let base = crate::sandbox::profile_path(&std::env::temp_dir())
+            .join(format!("tarae-made-{}", std::process::id()));
         std::fs::remove_dir_all(&base).ok();
         let (temp, elsewhere, own) = (base.join("tmp"), base.join("elsewhere"), base.join("tmp/run-1"));
         for d in [&temp, &elsewhere, &own] {
@@ -539,7 +539,7 @@ mod tests {
     /// coarse clock against the kernel's own stamps (`SystemTime::now()` failed this there).
     #[test]
     fn a_file_made_after_the_file_clock_is_read_is_never_older() {
-        let dir = crate::sandbox::real(&std::env::temp_dir())
+        let dir = crate::sandbox::profile_path(&std::env::temp_dir())
             .join(format!("tarae-file-clock-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();

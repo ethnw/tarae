@@ -690,15 +690,13 @@ pub struct Review {
     /// Streamed answer (preview before it's done) · whether thinking.
     pub streamed: String,
     pub thinking: bool,
-    /// What to call when done (applied?) — an agent-sent diff is awaiting an answer (agent.rs).
+    /// What to call when done (applied?) — a chat edit or a change set waiting for its answer.
     pub on_done: Option<OnDone>,
-    /// Who proposed it (in the header) — "Claude" for ask·chat, "Claude Code" for the side-pane agent.
-    pub by: &'static str,
     /// Why, in Claude's words: what it thought or said just before it asked for this edit (the chat's — a
     /// row or two under the title, the rest is in the chat).
     pub reason: String,
-    /// Accepted, it's a step of its own for `space u` (`space i`, Claude Code's) — a chat edit is part of
-    /// its turn instead (`checkpoint.rs`).
+    /// Accepted, it's a step of its own for `space u` (`space i`'s) — a chat edit is part of its turn instead
+    /// (`checkpoint.rs`).
     pub own_turn: bool,
     /// The answer's lines wrapped at this width when it lands (a commit message's body at 72 — `wrap_message`).
     pub wrap: Option<usize>,
@@ -742,7 +740,6 @@ impl Review {
             streamed: String::new(),
             thinking: false,
             on_done: None,
-            by: "Claude",
             reason: String::new(),
             own_turn: true,
             wrap: None,
@@ -949,7 +946,7 @@ pub fn cancel(ed: &mut Editor) {
     }
 }
 
-/// Opens a review directly with changes in hand (chat code apply, agent diffs — same y/n flow·one undo as
+/// Opens a review directly with changes in hand (chat code apply, chat edits, change sets — same y/n flow·one undo as
 /// ask) + what to call when done (applied?).
 pub fn review_with(
     ed: &mut Editor,
@@ -1231,12 +1228,7 @@ fn finish(ed: &mut Editor) {
         && rev.own_turn
         && let Some(before) = before
     {
-        let what = if rev.by == "Claude" {
-            rev.instruction.clone()
-        } else {
-            format!("{} {}", rev.by, rev.instruction)
-        };
-        crate::checkpoint::single(ed, rev.doc_id, before, &what);
+        crate::checkpoint::single(ed, rev.doc_id, before, &rev.instruction);
     }
     if let Some(cb) = on_done {
         cb(ed, applied);

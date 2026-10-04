@@ -79,19 +79,14 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
         return false;
     };
     let n = st.panel.rows.len();
-    let step = |st: &mut PanelState, by: isize| {
-        st.selected = st.selected.saturating_add_signed(by).min(n.saturating_sub(1));
-    };
+    if let Some(m) = crate::key::list_move(key) {
+        st.selected = m.from(st.selected, n);
+        return true;
+    }
     match (key.code, key.ctrl, key.alt) {
         // Still the editor's: the space menu, the command line
         (Code::Char(' ') | Code::Char(':'), false, false) => return false,
         (Code::Esc, ..) => st.focus = false,
-        (Code::Char('j') | Code::Down, false, false) | (Code::Char('n'), true, false) => step(st, 1),
-        (Code::Char('k') | Code::Up, false, false) | (Code::Char('p'), true, false) => step(st, -1),
-        (Code::Char('d'), true, false) | (Code::PageDown, ..) => step(st, 10),
-        (Code::Char('u'), true, false) | (Code::PageUp, ..) => step(st, -10),
-        (Code::Char('g') | Code::Home, false, false) => st.selected = 0,
-        (Code::Char('G') | Code::End, false, false) => st.selected = n.saturating_sub(1),
         _ => {
             let (plugin, row) = (st.plugin.clone(), (n > 0).then_some(st.selected as u64));
             let id = row.and_then(|_| st.panel.ids.get(st.selected).cloned());

@@ -54,7 +54,7 @@ pub fn choices(denials: &[Denial], home: &Path, root: &Path, path: &[PathBuf]) -
     let mut out: Vec<Choice> = Vec::new();
     for d in denials {
         let found: Vec<Choice> = if d.op.starts_with("file-write") && d.target.starts_with('/') {
-            let target = crate::sandbox::real(Path::new(&d.target));
+            let target = crate::sandbox::profile_path(Path::new(&d.target));
             crate::allow::write_choices(&target, home, root, path)
                 .into_iter()
                 .map(|dir| {
@@ -147,14 +147,14 @@ impl Editor {
                     Grant::Port(n) => format!("allow port {n} on this machine"),
                     Grant::Socket(s) => format!("allow the socket {} only", crate::allow::tilde(s)),
                 },
-                action: Action::Typed(format!("sandbox-grant {i}")),
+                action: Action::Grant(i.to_string()),
                 hint: c.hint.clone(),
                 glyph: Some(("◦", "ui.virtual")),
             })
             .collect();
         items.push(Item {
             label: "run it outside the sandbox, once".into(),
-            action: Action::Typed("sandbox-grant outside".into()),
+            action: Action::Grant("outside".into()),
             hint: run.label(),
             glyph: Some(("▲", "warning")),
         });
@@ -163,7 +163,7 @@ impl Editor {
         self.open_picker(p, None);
     }
 
-    /// `:sandbox-grant <n | outside>` (the list's rows) — its card.
+    /// A row of the list (`Action::Grant`: a grant's number, or `outside`) — its card.
     pub fn sandbox_grant(&mut self, arg: &str) -> Result<(), String> {
         let (run, list) =
             self.session.blocked.clone().ok_or("nothing blocked to act on — space m s on a run's panel")?;
@@ -288,7 +288,8 @@ mod tests {
     #[test]
     fn a_denied_socket_offers_that_socket_only() {
         // (a socket's path has 104 bytes at most: short names — the temp folder is the home)
-        let base = crate::sandbox::real(&std::env::temp_dir()).join(format!("k{}", std::process::id()));
+        let base =
+            crate::sandbox::profile_path(&std::env::temp_dir()).join(format!("k{}", std::process::id()));
         std::fs::remove_dir_all(&base).ok();
         std::fs::create_dir_all(base.join(".colima/t")).unwrap();
         std::fs::create_dir_all(base.join("p")).unwrap();

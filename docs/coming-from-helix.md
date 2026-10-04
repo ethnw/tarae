@@ -7,7 +7,7 @@ everything else to fix what bothered us about Helix. It is not a fork.
 |---|---|
 | Settings are a chore to change | One TOML file, applied on save; `:set` at runtime with descriptions and completion |
 | Slow when a language server attaches | Keystrokes and rendering never wait — LSP, parsing, disk, and git all run in the background |
-| No LLM support | Select → instruct → diff review, a chat panel, and Claude Code integration, built in |
+| No LLM support | Select → instruct → diff review and a chat panel with Claude, built in |
 | Immature plugins | Features go straight into the core; for the rest, [plugins](plugins.md) in Rust run sandboxed on tarae's own small WebAssembly runtime |
 
 ## Keys
@@ -17,7 +17,6 @@ as it is (put it in tarae's config). Where tarae needed a key for something Heli
 
 | Key | In tarae | In Helix |
 |---|---|---|
-| `space c` · `space C` | Claude Code beside tarae · send it the selection | Toggle comments — here `C-c` |
 | `space g` | The git panel, lazygit-style: files → their hunks and conflicts (`s` stage, `d` discard, `o`/`t`/`a`), commit (`C`: Claude drafts the message), `p`/`P` pull/push, `B` branches, `L` log, stash — `?` lists them | Changed files (a picker) |
 | `space e` · `space o` · `space q` | Side panel: files · outline · the list (quickfix) | File explorer (a picker) |
 | `space i` · `space l` · `space n` · `space v` | Ask Claude to edit the selection · chat · a note on the line · review your changes | — |

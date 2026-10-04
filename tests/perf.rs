@@ -34,6 +34,27 @@ fn report(name: &str, value: f64, budget: f64, noise: f64) {
     assert!(value < budget, "{name}: {value:.3} (budget {budget})");
 }
 
+/// What's live in `pid`'s heap — `heap`'s count by size (tree-sitter's subtrees are its 96- and 112-byte
+/// blocks; a freed page malloc keeps is RSS, not here). With `TARAE_VMMAP`, the regions behind the footprint
+/// too (malloc's, the binary's, stacks).
+fn heap(pid: u32) -> String {
+    let out = std::process::Command::new("/usr/bin/heap")
+        .arg(pid.to_string())
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+    let mut s = out.lines().filter(|l| l.contains("nodes malloced")).collect::<Vec<_>>().join("\n");
+    if std::env::var_os("TARAE_VMMAP").is_some() {
+        let v = std::process::Command::new("/usr/bin/vmmap")
+            .args(["--summary", &pid.to_string()])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
+        s += &v[v.find("REGION TYPE").unwrap_or(0)..];
+    }
+    s
+}
+
 fn ms(d: Duration) -> f64 {
     d.as_secs_f64() * 1000.0
 }
@@ -575,20 +596,7 @@ fn perf_e2e_memory_over_long_editing() {
     for r in 2..2 + rounds {
         round(&mut t, r);
         // (TARAE_LONG_HEAP: what's live in the heap, beside the RSS — a freed page malloc keeps is RSS)
-        let heap = match std::env::var_os("TARAE_LONG_HEAP") {
-            Some(_) => std::process::Command::new("/usr/bin/heap")
-                .arg(t.pid().to_string())
-                .output()
-                .map(|o| {
-                    String::from_utf8_lossy(&o.stdout)
-                        .lines()
-                        .find(|l| l.contains("nodes malloced"))
-                        .unwrap_or("")
-                        .to_string()
-                })
-                .unwrap_or_default(),
-            None => String::new(),
-        };
+        let heap = if std::env::var_os("TARAE_LONG_HEAP").is_some() { heap(t.pid()) } else { String::new() };
         eprintln!("round {r}: {:.1} MB  {heap}", t.usage().rss as f64 / (1024.0 * 1024.0));
     }
     std::thread::sleep(Duration::from_secs(1));
@@ -633,28 +641,8 @@ fn perf_e2e_memory_with_a_working_set_open() {
         "CONTRIBUTING.md",
         "README.md",
     ];
-    let heap = |t: &Term| match std::env::var_os("TARAE_HEAP") {
-        Some(_) => std::process::Command::new("/usr/bin/heap")
-            .arg(t.pid().to_string())
-            .output()
-            .map(|o| {
-                let out = String::from_utf8_lossy(&o.stdout).to_string();
-                let mut s =
-                    out.lines().filter(|l| l.contains("nodes malloced")).collect::<Vec<_>>().join("\n");
-                // (TARAE_VMMAP too: the regions behind the footprint — malloc's, the binary's, stacks)
-                if std::env::var_os("TARAE_VMMAP").is_some() {
-                    let v = std::process::Command::new("/usr/bin/vmmap")
-                        .args(["--summary", &t.pid().to_string()])
-                        .output()
-                        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-                        .unwrap_or_default();
-                    s += &v[v.find("REGION TYPE").unwrap_or(0)..];
-                }
-                s
-            })
-            .unwrap_or_default(),
-        None => String::new(),
-    };
+    let heap =
+        |t: &Term| if std::env::var_os("TARAE_HEAP").is_some() { heap(t.pid()) } else { String::new() };
     let settled = |t: &mut Term| {
         // (every file read and parsed — the frames stop)
         let mut last = t.frames();

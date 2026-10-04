@@ -14,8 +14,8 @@
 11   9     }                     ?  Find a command                  N  Claude's notes
 12  10     counts                a  Code actions                    o  Outline panel (this file)
 13  11 }                         b  Open buffer picker              p  Paste clipboard after
-14  12                           c  Open Claude Code beside         P  Paste clipboard before
-15  13 fn main() {               C  Send selection to Claude Code   q  Show the list (quickfix)
+14  12                           c  Comment or uncomment lines      P  Paste clipboard before
+15  13 fn main() {               C  Block-comment the selections    q  Show the list (quickfix)
 16  14     let text = "the quic  d  Diagnostics                     r  Rename symbol
 17  15     let counts = word_co  D  Diagnostics in every file       s  Symbols in this file
 18  16     println!("{} distinc  e  Files panel (tree)              S  Symbols in the workspace

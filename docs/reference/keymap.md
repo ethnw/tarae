@@ -255,8 +255,8 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `space ?` | `command_palette` | Find a command |
 | `space a` | `code_action` | Code actions |
 | `space b` | `buffer_picker` | Open buffer picker |
-| `space c` | `claude_code` | Open Claude Code beside |
-| `space C` | `claude_code_mention` | Send selection to Claude Code |
+| `space c` | `toggle_comments` | Comment or uncomment lines |
+| `space C` | `toggle_block_comments` | Block-comment the selections |
 | `space d` | `diagnostics_picker` | Diagnostics |
 | `space D` | `workspace_diagnostics_picker` | Diagnostics in every file |
 | `space e` | `file_explorer` | Files panel (tree) |
@@ -477,7 +477,6 @@ Type `:` in normal mode. `Tab` completes command names and their arguments (path
 | `:sandbox-disallow` |  | Take back a path or port :sandbox-allowed lists |
 | `:sandbox-blocked` |  | What the sandbox blocked in Claude's last run: open it |
 | `:chat-screen` |  | Send the screen, as text, with your next chat message |
-| `:sandbox-grant` |  | A row of :sandbox-blocked's list, on its card |
 | `:log-open` |  | Open tarae's log (language servers, errors) |
 | `:procs` |  | What tarae runs and what it costs |
 | `:messages` |  | The notifications since tarae started, newest first |

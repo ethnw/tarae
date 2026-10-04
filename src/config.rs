@@ -71,8 +71,6 @@ pub struct EditorConfig {
     /// a relative path is from the project root (`restart.rs`).
     pub restart_build: String,
     pub restart_binary: String,
-    /// Open an IDE server so Claude Code can connect (`agent.rs`).
-    pub agent_claude_code: bool,
     /// Ask whether to download when opening a file whose language has no grammar (`grammar.rs` notice).
     pub offer_grammars: bool,
     /// Offer to install a missing language server or debugger the way its pack says (`install.rs`).
@@ -121,7 +119,6 @@ impl Default for EditorConfig {
             persistent_undo: true,
             restart_build: String::new(),
             restart_binary: String::new(),
-            agent_claude_code: true,
             offer_grammars: true,
             offer_installs: true,
             scrollbar: true,

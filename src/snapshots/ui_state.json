@@ -105,7 +105,6 @@
     ],
     "covered_by_picker": false,
     "edit_review": {
-      "by": "Claude",
       "change": [
         1,
         1
@@ -176,5 +175,5 @@
       "where": "waiting"
     }
   ],
-  "v": 1
+  "v": 2
 }

@@ -247,7 +247,6 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
             editor.sandbox_blocked(crate::blocked::Which::Either);
             Ok(())
         }
-        "sandbox-grant" => editor.sandbox_grant(rest),
         "config-reload" => {
             let root = editor.session.root.clone();
             editor.events.jobs().spawn(move || {

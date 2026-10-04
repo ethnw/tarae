@@ -64,7 +64,7 @@ JSON for programs, and a short text form for people and Claude, from the same st
 
 ```json
 {
-  "v": 1,
+  "v": 2,
   "tarae": { "pid": 4182, "boot": "9f3ac1d0", "version": "0.9.0" },
   "frame": 4812,
   "input": 1033,
@@ -150,7 +150,8 @@ side git · 4 rows · in hand git:src/term.rs
   - `code`: panes (id, path, lines on screen, focused, cursor line), the follow or replay stop.
   - `side`: tab, focused, rows.
   - `review`: base, files, viewed n/m, the file in hand, the change in hand i/n.
-  - `edit_review`: by, file, change i/n, undecided count, the first line of the reason.
+  - `edit_review`: file, change i/n, undecided count, the first line of the reason (always Claude's — its `by`
+    went with `space c` in `v` 2).
   - `picker`: title, query (full level), rows, total, loading or searching.
   - `slot`: tabs with their badges, which is in front, has the keys.
   - `chat`: open, focused, minimized, busy, queued count, conversation, plan step, last call. Draft length

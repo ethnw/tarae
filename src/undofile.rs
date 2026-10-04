@@ -200,7 +200,7 @@ impl Editor {
         let text = doc.text.clone();
         let (undo, redo) = doc.history();
         let writing = self.undo_writes.start();
-        self.events.jobs().spawn(move || {
+        self.events.jobs().background(move || {
             let _writing = writing;
             let file = file_for(&dir, &path);
             match encode(&path, &text, &undo, &redo) {
@@ -215,7 +215,6 @@ impl Editor {
                     let _ = std::fs::remove_file(&file);
                 }
             }
-            |_: &mut Editor| {}
         });
     }
 

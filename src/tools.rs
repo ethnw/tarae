@@ -1231,12 +1231,10 @@ fn run_cwd(root: &Path, cwd: Option<&str>) -> Result<PathBuf, String> {
     let Some(cwd) = cwd.map(str::trim).filter(|c| !c.is_empty() && *c != ".") else {
         return Ok(root.to_path_buf());
     };
-    let dir = std::fs::canonicalize(root.join(cwd)).map_err(|e| format!("cwd {cwd}: {e}"))?;
+    let dir =
+        crate::paths::existing_inside(root, &root.join(cwd), &format!("cwd {cwd}"), "commands run in it")?;
     if !dir.is_dir() {
         return Err(format!("cwd {cwd} isn't a folder"));
-    }
-    if !dir.starts_with(root) {
-        return Err(format!("cwd {cwd} is outside the project — commands run in it"));
     }
     Ok(dir)
 }
@@ -1871,7 +1869,7 @@ pub(crate) fn guard_then_go(ed: &mut Editor, who: For, job: Job, ride: Ride) {
             f => f,
         };
         let policy = (found == Availability::Ready).then(|| {
-            let kept = crate::allow::Store::read(store.as_deref()).get(&crate::sandbox::real(&root));
+            let kept = crate::allow::Store::read(store.as_deref()).get(&crate::sandbox::profile_path(&root));
             let (llm, granted, sockets) = with_allowed(&llm, &[&kept, &chat], grant.as_ref());
             let mut p = crate::sandbox::policy(&root, &llm);
             (p.granted, p.sockets) = (granted, sockets);
@@ -2941,7 +2939,8 @@ mod tests {
     #[test]
     fn claude_asks_for_one_socket_not_the_sandbox_off() {
         use serde_json::json;
-        let dir = crate::sandbox::real(&std::env::temp_dir()).join(format!("q{}", std::process::id()));
+        let dir =
+            crate::sandbox::profile_path(&std::env::temp_dir()).join(format!("q{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("c")).unwrap();
         let sock = dir.join("c/docker.sock");

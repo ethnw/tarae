@@ -594,10 +594,7 @@ impl crate::editor::Editor {
         let Some(path) = self.sizes_path.clone() else { return };
         self.sizes_seq += 1;
         let (sizes, seq) = (self.sizes, self.sizes_seq);
-        self.events.jobs().spawn(move || {
-            save(&path, sizes, seq);
-            |_: &mut crate::editor::Editor| {}
-        });
+        self.events.jobs().background(move || save(&path, sizes, seq));
     }
 }
 

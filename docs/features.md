@@ -54,8 +54,9 @@ configs carry over as they are.
   `K`/`A-K` (keep/remove selections that match)
 - Editing `i a I A o O` `d c y p P` `A-d A-c` `r` `~` `` ` `` `` A-` `` `> <` `J` · `u U` — a whole stay in insert mode is one
   undo step · `.` repeats the last insert (the command that started it and
-  what you typed, at the current selections; with a count) · `C-c` comments/uncomments the selected lines (block
-  comments where a language has only those)
+  what you typed, at the current selections; with a count) · `space c` (or `C-c`) comments/uncomments the selected
+  lines (block comments where a language has only those) · `space C` puts a block comment around each selection
+  (a cursor's line; line comments where a language has no block comment)
 - **Auto-indent** — Enter, `o`, and `O` indent the new line from the syntax tree (`indents.scm` in 36 languages):
   into a block or an argument list, back out after one, a closer moved to its own line lines up with its
   opener's line, Python's `return` ends its block, a continued parameter list aligns under the first
@@ -175,8 +176,7 @@ configs carry over as they are.
   back; a click in it gives it the keys, a click outside takes them back; a drag selects text and copies it. A
   program that asks for the mouse (htop, vim, lazygit) gets clicks and the wheel instead (alt+drag still selects —
   the panel's title says so), a full-screen one that
-  doesn't gets the wheel as arrow keys, and a paste arrives marked as one (a shell doesn't run it line by line). Without zellij or tmux, `space c` runs
-  Claude Code there
+  doesn't gets the wheel as arrow keys, and a paste arrives marked as one (a shell doesn't run it line by line)
 - **One tree for every list of files** — the file picker while you type, `space /` results, changed files, the
   replace preview, references, `space D`, and the code review's rail all show files under their folders, with faint
   guides. While typing, the best match comes first and its folders come with it (a folder holding just one folder

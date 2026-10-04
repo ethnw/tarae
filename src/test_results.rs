@@ -57,6 +57,20 @@ fn file_line(s: &str, ext: &str) -> Option<(String, usize)> {
 /// run inside a sandbox (`sandbox::skipped_inside`). The case reads as skipped, with the why.
 pub const SELF_SKIP: &str = "tarae-test: skipped ";
 
+/// A `perf_` test measures an optimized build: at the test profile's opt-level 0 (a fast edit-test loop, where
+/// a key costs several times as much) it skips itself — true — saying so past libtest's capture by its full
+/// name (`term::tests::perf_…`, else the skip lands on another test's row); `cargo perf` runs it in the `perf`
+/// profile.
+#[cfg(test)]
+pub fn unoptimized(name: &str) -> bool {
+    if cfg!(tarae_optimized) {
+        return false;
+    }
+    let line = format!("{SELF_SKIP}{name} — built at opt-level 0 (the test profile); `cargo perf` runs it\n");
+    let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+    true
+}
+
 /// Per-runner parse state.
 #[derive(Clone, Debug, Default)]
 pub enum Parser {
@@ -361,6 +375,48 @@ pub fn junit(report_dirs: &[PathBuf], since: SystemTime, src_roots: &[PathBuf]) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every `perf_` test in the editor starts by skipping itself at opt-level 0 (`unoptimized`), by its own
+    /// full name — one that didn't held a release budget in the test profile and failed under load.
+    #[test]
+    fn every_perf_test_skips_itself_by_its_own_name() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        walk(&src, &mut files);
+        let mut n = 0;
+        for file in files {
+            let text = std::fs::read_to_string(&file).unwrap();
+            // The module the tests are in: `a/b.rs` → `a::b::tests`, `a/tests.rs` → `a::tests`
+            let rel = file.strip_prefix(&src).unwrap().with_extension("");
+            let module: Vec<String> = rel.iter().map(|s| s.to_string_lossy().to_string()).collect();
+            let module = match module.last().map(String::as_str) {
+                Some("tests") => module.join("::"),
+                _ => format!("{}::tests", module.join("::")),
+            };
+            let lines: Vec<&str> = text.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                let Some(name) = line.trim().strip_prefix("fn perf_").and_then(|r| r.strip_suffix("() {"))
+                else {
+                    continue;
+                };
+                let next = lines.get(i + 1).copied().unwrap_or_default();
+                let want = format!("crate::test_results::unoptimized(\"{module}::perf_{name}\")");
+                assert!(next.contains(&want), "{}: perf_{name} starts with `{want}`: {next}", file.display());
+                n += 1;
+            }
+        }
+        assert!(n >= 17, "found {n}");
+    }
 
     /// A test that skipped itself (`SELF_SKIP`, written past the capture) reads as skipped — with the why —
     /// though libtest calls it `ok` after; others are as libtest says.

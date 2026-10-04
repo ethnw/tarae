@@ -1,6 +1,5 @@
 //! tarae (타래) — a selection-first modal editor carrying on helix's spirit and keymap.
 
-mod agent;
 mod allow;
 mod attach;
 mod blocked;
@@ -56,6 +55,7 @@ mod notes;
 mod offer;
 mod packs;
 mod pairs;
+mod paths;
 mod picker;
 mod plan;
 mod plugin;
@@ -112,7 +112,6 @@ mod waits;
 mod wasm;
 mod worktree;
 mod wrap;
-mod ws;
 
 use std::path::PathBuf;
 
@@ -262,14 +261,12 @@ fn main() -> Result<()> {
         Ok(listener) => uisocket::serve(listener, editor.events.shared_sender()),
         Err(e) => log::line("ui", "info", &format!("no UI state socket: {e}")),
     }
-    // (Claude Code's IDE connection opens with the first `space c` — no lock file in ~/.claude/ide before)
     let result = term::run(&mut editor);
     // (`:restart`'s new binary binds its own at the same path; a failed one ends here too)
     uisocket::remove();
     editor.save_restore();
     // The last saves' undo history is still being written on workers — exiting or exec'ing cuts it off
     editor.undo_flush();
-    editor.agent = None; // remove our lock file (only ours)
     if result.is_ok()
         && let Some(bin) = editor.restart.as_ref().and_then(|r| r.ready()).map(PathBuf::from)
     {

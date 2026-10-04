@@ -368,7 +368,7 @@ impl RunDir {
         use std::os::unix::fs::DirBuilderExt;
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
-        let base = real(&std::env::temp_dir());
+        let base = profile_path(&std::env::temp_dir());
         let dir = base.join(format!("tarae-{}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
         std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
         Ok(std::sync::Arc::new(RunDir(dir)))
@@ -938,7 +938,7 @@ impl Policy {
                 (Some(rest), Some(home)) => home.join(rest),
                 _ => root.join(w),
             };
-            write.push(real(&p));
+            write.push(profile_path(&p));
         }
         // Never the project or what holds it (that would open .git again); inside it, the project's rule
         write.retain(|w| !root.starts_with(w) && !w.starts_with(&root));
@@ -972,9 +972,9 @@ impl Policy {
 /// `$ZELLIJ_SOCKET_DIR` (else `$TMPDIR/zellij-<uid>`). Real paths.
 fn mux_dirs(env: &Env) -> Vec<PathBuf> {
     let tmux_base = env.tmux_tmpdir.as_deref().unwrap_or(Path::new("/private/tmp"));
-    let mut v = vec![real(tmux_base).join(format!("tmux-{}", env.uid))];
+    let mut v = vec![profile_path(tmux_base).join(format!("tmux-{}", env.uid))];
     match (&env.zellij_dir, &env.tmp) {
-        (Some(d), _) => v.push(real(d)),
+        (Some(d), _) => v.push(profile_path(d)),
         (None, Some(t)) => v.push(t.join(format!("zellij-{}", env.uid))),
         (None, None) => {}
     }
@@ -1010,13 +1010,15 @@ pub struct Env {
     pub uid: u32,
 }
 
-/// The real path; for one that isn't there yet, its folder's real path joined with its name.
-pub fn real(p: &Path) -> PathBuf {
+/// A path as the profile writes it: the real path; for one that isn't there yet, its folder's real path
+/// joined with what's below as it is (`..` too — Seatbelt resolves it; for an "is it inside" check use
+/// `paths::inside`, which refuses a `..` below what's there).
+pub fn profile_path(p: &Path) -> PathBuf {
     if let Ok(r) = std::fs::canonicalize(p) {
         return r;
     }
     match (p.parent(), p.file_name()) {
-        (Some(dir), Some(name)) if dir != p => real(dir).join(name),
+        (Some(dir), Some(name)) if dir != p => profile_path(dir).join(name),
         _ => p.to_path_buf(),
     }
 }
@@ -1074,7 +1076,7 @@ pub fn policy(root: &Path, llm: &crate::llm::LlmConfig) -> Policy {
     let cargo_home = cargo_home_of(home.as_deref());
     let tmp = std::fs::canonicalize(std::env::temp_dir()).ok();
     let mut env = Env {
-        root: real(root),
+        root: profile_path(root),
         home,
         tmp,
         cargo_home,
@@ -1116,7 +1118,7 @@ static SEEN: OnceLock<Mutex<Seen>> = OnceLock::new();
 /// The project's toolchain folders outside it as last found for a run of Claude's (`toolchain_dirs`) — only
 /// those its runs may write (`cargo_dir_verdict`); nothing looked up: none before its first run.
 pub fn build_dirs(root: &Path) -> Vec<PathBuf> {
-    let root = real(root);
+    let root = profile_path(root);
     let Some(found) =
         SEEN.get().and_then(|s| s.lock().ok().and_then(|m| m.get(&root).map(|(_, d)| d.clone())))
     else {
@@ -1192,14 +1194,14 @@ fn toolchain_dirs(base: &Policy, cargo_home: Option<&Path>) -> ToolDirs {
     {
         for (key, which) in [("target_directory", "target-dir"), ("build_directory", "build-dir")] {
             if let Some(d) = json[key].as_str() {
-                dirs.cargo.push((real(Path::new(d)), which));
+                dirs.cargo.push((profile_path(Path::new(d)), which));
             }
         }
         // (your own build-dir over the checkout's — the variable wins over every config file)
         if let Some(own) = own_build_setting(cargo_home, std::env::var("CARGO_BUILD_BUILD_DIR").ok())
             && let Some(json) = output_in(base, "cargo", &metadata, &[("CARGO_BUILD_BUILD_DIR", &own)])
         {
-            dirs.own_build = json["build_directory"].as_str().map(|d| real(Path::new(d)));
+            dirs.own_build = json["build_directory"].as_str().map(|d| profile_path(Path::new(d)));
         }
     }
     if root.join("go.mod").is_file()
@@ -1207,7 +1209,7 @@ fn toolchain_dirs(base: &Policy, cargo_home: Option<&Path>) -> ToolDirs {
     {
         for key in ["GOCACHE", "GOMODCACHE"] {
             if let Some(d) = json[key].as_str().filter(|d| !d.is_empty()) {
-                dirs.other.push(real(Path::new(d)));
+                dirs.other.push(profile_path(Path::new(d)));
             }
         }
     }
@@ -1355,7 +1357,7 @@ mod tests {
         assert_eq!(
             keep,
             [
-                real(Path::new("/private/tmp")).join("tmux-501"),
+                profile_path(Path::new("/private/tmp")).join("tmux-501"),
                 "/private/var/folders/ab/cd/T/zellij-501".into()
             ]
         );
@@ -1420,7 +1422,7 @@ mod tests {
     /// checkout's build dir, or a folder beside them (`~/.config/fish`). (Folders of the test's own.)
     #[test]
     fn a_cargo_dir_from_the_checkout_opens_only_its_own() {
-        let base = real(&std::env::temp_dir()).join(format!("tarae-sb-dirs-{}", std::process::id()));
+        let base = profile_path(&std::env::temp_dir()).join(format!("tarae-sb-dirs-{}", std::process::id()));
         std::fs::remove_dir_all(&base).ok();
         let (home, root) = (base.join("home"), base.join("work/proj"));
         let cargo_home = home.join(".cargo");
@@ -1438,7 +1440,7 @@ mod tests {
             home.clone(),
             PathBuf::from("/"),
             base.join("work"),
-            real(&root.join("homelink")),
+            profile_path(&root.join("homelink")),
             home.join(".config/fish"),
             cargo_home.clone(),
             cargo_home.join("build/ab/ffff"),
@@ -1925,7 +1927,7 @@ mod tests {
         let (root, out) = (t.join("project"), t.join("outside"));
         std::fs::create_dir_all(root.join(".git")).unwrap();
         std::fs::create_dir_all(&out).unwrap();
-        let (root, out) = (real(&root), real(&out));
+        let (root, out) = (profile_path(&root), profile_path(&out));
         std::os::unix::fs::symlink(&out, root.join("link")).ok();
         // A server of this test's own, its port opened for the sandbox
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1988,7 +1990,7 @@ mod tests {
             return;
         }
         let pid = std::process::id();
-        let t = real(&std::env::temp_dir()).join(format!("tarae-sock-{pid}"));
+        let t = profile_path(&std::env::temp_dir()).join(format!("tarae-sock-{pid}"));
         let root = t.join("project");
         std::fs::create_dir_all(&root).unwrap();
         let in_tmp = PathBuf::from(format!("/private/tmp/tarae-sock-{pid}"));
@@ -1999,7 +2001,7 @@ mod tests {
             let p = Policy {
                 root: root.clone(),
                 protect: vec![root.join(".git")],
-                write: vec!["/private/tmp".into(), user_temp(&real(&std::env::temp_dir()))],
+                write: vec!["/private/tmp".into(), user_temp(&profile_path(&std::env::temp_dir()))],
                 files: Vec::new(),
                 keep: Vec::new(),
                 caches: Vec::new(),
@@ -2045,7 +2047,7 @@ mod tests {
         let t = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("target/{name}-{}", std::process::id()));
         std::fs::remove_dir_all(&t).ok();
         std::fs::create_dir_all(&t).unwrap();
-        real(&t)
+        profile_path(&t)
     }
 
     /// For real, on macOS: a watch sees its own run's denials, and not another's sandboxed at the same time
@@ -2163,7 +2165,7 @@ mod tests {
         if skipped_inside("sandbox::tests::what_the_user_granted_opens_under_the_real_profile") {
             return;
         }
-        let t = real(&std::env::temp_dir()).join(format!("tarae-sb-granted-{}", std::process::id()));
+        let t = profile_path(&std::env::temp_dir()).join(format!("tarae-sb-granted-{}", std::process::id()));
         std::fs::remove_dir_all(&t).ok();
         let (root, kept, chat, sibling) =
             (t.join("project"), t.join("kept"), t.join("chat"), t.join("sibling"));
@@ -2241,7 +2243,7 @@ mod tests {
         if skipped_inside("sandbox::tests::claudes_runs_cant_reach_the_ui_state_socket") {
             return;
         }
-        let t = real(&std::env::temp_dir()).join(format!("tarae-sb-ui-{}", std::process::id()));
+        let t = profile_path(&std::env::temp_dir()).join(format!("tarae-sb-ui-{}", std::process::id()));
         std::fs::remove_dir_all(&t).ok();
         let root = t.join("project");
         std::fs::create_dir_all(&root).unwrap();
@@ -2480,7 +2482,7 @@ mod tests {
         let env = Env {
             root: root.clone(),
             cargo_home: Some(home.clone()),
-            tmp: Some(real(&std::env::temp_dir())),
+            tmp: Some(profile_path(&std::env::temp_dir())),
             ..Env::default()
         };
         let (closed, open) = (Policy::for_project(&env), Policy::for_project(&Env { network: true, ..env }));

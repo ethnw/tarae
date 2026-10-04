@@ -20,7 +20,7 @@ changing the code, see [CONTRIBUTING.md](../CONTRIBUTING.md).
 4. **Never make you wait.** Keystrokes and screen updates never block on LSP, the LLM, disk, or parsing. Slow work runs
    in the background, late results are discarded, and performance budgets are tests.
 5. **The LLM is a first-class verb.** In a selection-first editor, the LLM takes the action slot — instruct, review the
-   diff, accept. Editor state is open to external agents such as Claude Code.
+   diff, accept. What's on screen is open to outside drivers as data (`tarae state`).
 6. **Makes you want to try it at a glance.** Design weighs as much as features. Floating things speak the same color
    language as the code, breathe with whitespace, and fold by priority when space runs out.
 7. **Small and testable.** The core doesn't know about the terminal; it's tested whole by feeding it key sequences
@@ -76,7 +76,7 @@ Early mockups that set the direction: [ink](design/a-ink.png) · [paper](design/
 | **M2** ✅ | Byte positions, tree-sitter highlighting, themes, `m` mode, pickers, global search, status line |
 | **M3** ✅ | LSP — diagnostics, navigation, hover, completion, signature help, inlay hints, code actions with preview, rename, format |
 | **M4** ✅ | Claude — select → instruct → diff, streaming answers, chat panel; the chat explores the project, the editor follows it with its thinking beside the code, notes pinned to lines you answer in place, its edits reviewed before they're written, and a pull-request-style review of all changes sent back in one go |
-| **M5** ✅ | Claude Code IDE protocol — selection sharing, diagnostics, in-buffer review of edits |
+| **M5** (retired 2026-10-04) | Claude Code IDE protocol — selection sharing, diagnostics, in-buffer review of edits; removed once the chat (`space l`) did all of it in tarae |
 | **Experience** ✅ | which-key, palette, tutor, start screen, mouse, toasts, git gutter, reopening the last files, persistent undo, disk sync, doc comments, splits, tests, debugger, attach |
 | **Workbench** ✅ | Side panel (files, outline, list, git), one folder tree for every list of files, indentation from `indents.scm`, several language servers per file, the list (quickfix) and build tasks, git tab (stage, commit, push, log, branches), merge conflicts, `:diff`, built-in terminal |
 | **M6** ✅ | Plugins — commands in Rust, compiled to WebAssembly, sandboxed on tarae's own runtime (interpreter + JIT); `tarae plugin new/dev/list` |
@@ -84,8 +84,8 @@ Early mockups that set the direction: [ink](design/a-ink.png) · [paper](design/
 
 Non-goals: a GUI, vim emulation, copying Helix behavior for its own sake.
 
-For the Claude Code integration, the IDE protocol (MCP over WebSocket) was chosen over ACP because it attaches with zero
-configuration to the `claude` people already run. Hosting agents inside tarae via ACP remains a later candidate.
+Claude runs inside tarae as the chat's `claude -p` process (stream-json, with tarae's tools as an in-process MCP
+server). Hosting other agents inside tarae via ACP remains a later candidate.
 
 ## Plugins
 
@@ -282,7 +282,6 @@ src/
   notes.rs           notes pinned to lines (the chat's MCP tool)
   edits.rs           the chat's edits, reviewed before they're written
   codereview.rs      pull-request-style review sent to Claude in one go
-  agent.rs ws.rs     Claude Code IDE protocol over an in-house WebSocket server
 
   wasm/              the plugin runtime (see Plugins): mod.rs the API · read.rs bytes · module.rs sections ·
                      compile.rs validation → register ops · exec.rs the interpreter · jit/ machine code —

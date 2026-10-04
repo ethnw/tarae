@@ -159,7 +159,7 @@ pub fn record_all(
     keep_then(ed, then);
 }
 
-/// A change of its own accepted in document `id` (a `space i` answer, Claude Code's diff): one step.
+/// A change of its own accepted in document `id` (a `space i` answer): one step.
 pub fn single(ed: &mut Editor, id: crate::document::DocId, before: Rope, what: &str) {
     let Some((path, after)) =
         ed.docs.iter().find(|d| d.id == id).and_then(|d| Some((d.path.clone()?, d.text.clone())))
@@ -356,7 +356,7 @@ fn file(
         return Ok((false, kept));
     }
     let clean = !ed.doc().is_modified();
-    let changes: Vec<Change> = crate::agent::line_changes(&now, &target)
+    let changes: Vec<Change> = crate::editdiff::line_changes(&now, &target)
         .into_iter()
         .map(|(from, to, _, insert)| Change { from, to, insert })
         .collect();
@@ -477,10 +477,7 @@ fn save(dir: &Path, root: &Path, s: Stored) {
 /// The turns as they are now, kept (the texts are written out on a worker).
 pub(crate) fn keep(ed: &Editor) {
     if let Some(save) = saving(ed) {
-        ed.events.jobs().spawn(move || {
-            save();
-            |_: &mut Editor| {}
-        });
+        ed.events.jobs().background(save);
     }
 }
 
@@ -568,8 +565,8 @@ pub fn rebase(base: &str, theirs: &str, ours: &str) -> (String, usize) {
     if base == ours {
         return (theirs.to_string(), 0);
     }
-    let mine = crate::agent::line_changes(base, ours);
-    let wanted = crate::agent::line_changes(base, theirs);
+    let mine = crate::editdiff::line_changes(base, ours);
+    let wanted = crate::editdiff::line_changes(base, theirs);
     // Touching counts: two edits on neighboring lines are one place
     let near =
         |a: &(usize, usize, String, String), b: &(usize, usize, String, String)| a.0 <= b.1 && b.0 <= a.1;

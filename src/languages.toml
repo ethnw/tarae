@@ -1,7 +1,8 @@
 # Language table — name (= query directory queries/<name>/), grammar (= grammars/<grammar>.so, defaults to the name),
 # extensions, exact file names, path suffixes (path-suffixes — narrow common names by path), path patterns (globs — one `*` per segment). Grammars and queries themselves are looked up in the runtime directory (runtime.rs).
 # Names match the directory names of the queries (runtime/queries, taken from Helix).
-# comment-token / block-comment-tokens — what `C-c` toggles (line comments when there's a token, else block).
+# comment-token / block-comment-tokens — what `space c`/`C-c` toggle (line comments when there's a token, else
+# block) and `space C` (block, else line).
 # auto-pairs — pairs typed in insert mode, each "oc" (default: () [] {} "" '' ``).
 
 [[language]]

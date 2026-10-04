@@ -168,17 +168,6 @@ impl Sandbox {
         fs::write(self.home().join(".config/tarae/config.toml"), content).unwrap();
     }
 
-    /// Where Claude Code IDE lock files go (`$CLAUDE_CONFIG_DIR/ide`).
-    pub fn claude_ide(&self) -> PathBuf {
-        self.root.join("claude/ide")
-    }
-
-    /// Claude Code IDE lock files there (`$CLAUDE_CONFIG_DIR/ide/*.lock`).
-    pub fn lock_files(&self) -> Vec<PathBuf> {
-        let Ok(rd) = fs::read_dir(self.claude_ide()) else { return Vec::new() };
-        rd.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "lock")).collect()
-    }
-
     /// The whole environment the child sees — everything else is cleared (CLAUDE_*, TMUX, ZELLIJ*,
     /// TARAE_*, COLORFGBG, TERM_PROGRAM … can't leak in from the developer's shell or CI).
     pub fn env(&self) -> Vec<(OsString, OsString)> {

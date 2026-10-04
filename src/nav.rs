@@ -158,11 +158,7 @@ fn name_of(symbol: &str) -> Result<String, String> {
 /// `path`, real, if it's a file in the project — on a worker.
 pub(crate) fn file_in(root: &Path, path: &Path) -> Result<PathBuf, String> {
     let shown = rel(root, path);
-    let real = std::fs::canonicalize(path).map_err(|e| format!("{shown}: {e}"))?;
-    let root = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
-    if !real.starts_with(&root) {
-        return Err(format!("{shown} is outside the project — these tools look inside it only"));
-    }
+    let real = crate::paths::existing_inside(root, path, &shown, "these tools look inside it only")?;
     if !real.is_file() {
         return Err(format!("{shown} isn't a file"));
     }
@@ -1899,13 +1895,7 @@ struct Row {
 fn run_search(root: &Path, path: Option<&str>, q: &Query, unsaved: &[PathBuf]) -> Result<String, String> {
     let root = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
     let scope = match path {
-        Some(p) => {
-            let real = std::fs::canonicalize(root.join(p)).map_err(|e| format!("{p}: {e}"))?;
-            if !real.starts_with(&root) {
-                return Err(format!("{p} is outside the project — search looks inside it only"));
-            }
-            real
-        }
+        Some(p) => crate::paths::existing_inside(&root, &root.join(p), p, "search looks inside it only")?,
         None => root.clone(),
     };
     let query = crate::grep::Query {
@@ -2619,13 +2609,7 @@ mod tests {
     /// capture (`test_results::SELF_SKIP`) — `cargo perf` runs it.
     #[test]
     fn perf_search_wide_with_test_code() {
-        if !cfg!(tarae_optimized) {
-            let line = format!(
-                "{}nav::tests::perf_search_wide_with_test_code — built at opt-level 0 (the test profile); \
-                 `cargo perf` runs it\n",
-                crate::test_results::SELF_SKIP
-            );
-            let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+        if crate::test_results::unoptimized("nav::tests::perf_search_wide_with_test_code") {
             return;
         }
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));

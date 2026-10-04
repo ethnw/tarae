@@ -1048,12 +1048,7 @@ fn a_watcher_that_doesnt_read_is_let_go() {
 /// (estimated: a token per 4 bytes of English/JSON — no tokenizer here). For `cargo perf`.
 #[test]
 fn perf_ui_state_busy_scene() {
-    if !cfg!(tarae_optimized) {
-        let line = format!(
-            "{}uistate::tests::perf_ui_state_busy_scene — built at opt-level 0 (the test profile); `cargo perf` runs it\n",
-            crate::test_results::SELF_SKIP
-        );
-        let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+    if crate::test_results::unoptimized("uistate::tests::perf_ui_state_busy_scene") {
         return;
     }
     let mut ed = busy_scene();

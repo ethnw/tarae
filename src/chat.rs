@@ -648,10 +648,7 @@ fn kept(ed: &Editor) -> Option<(std::path::PathBuf, std::path::PathBuf, crate::c
 /// The turn ended: the conversation is kept (on a worker) — its rows and claude's id for it.
 fn keep(ed: &Editor) {
     let Some((dir, root, saved)) = kept(ed) else { return };
-    ed.events.jobs().spawn(move || {
-        crate::chats::save(&dir, &root, saved);
-        |_: &mut Editor| {}
-    });
+    ed.events.jobs().background(move || crate::chats::save(&dir, &root, saved));
 }
 
 /// Kept now, on this thread — the last thing before `:restart` replaces this process (a worker's save
@@ -1894,7 +1891,7 @@ mod tests {
     /// folder for `a`/`A`, said on the card — and `a` lets the other through; a lone one offers the file.
     #[test]
     fn reads_beside_each_other_offer_their_folder() {
-        let shots = crate::sandbox::real(&std::env::temp_dir())
+        let shots = crate::sandbox::profile_path(&std::env::temp_dir())
             .join(format!("tarae-presplit-shot-{}", std::process::id()));
         std::fs::create_dir_all(&shots).unwrap();
         for f in ["a.png", "b.png", "c.png"] {
@@ -1950,7 +1947,7 @@ mod tests {
     /// up, makes that card offer their folder (said on it; settled again before `a` counts).
     #[test]
     fn a_read_come_beside_the_card_widens_it() {
-        let shots = crate::sandbox::real(&std::env::temp_dir())
+        let shots = crate::sandbox::profile_path(&std::env::temp_dir())
             .join(format!("tarae-late-sibling-{}", std::process::id()));
         std::fs::create_dir_all(&shots).unwrap();
         for f in ["x.png", "y.png"] {

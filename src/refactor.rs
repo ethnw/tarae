@@ -363,7 +363,7 @@ fn changes_text(files: &[FileChange]) -> String {
     for f in files {
         out.push_str(&format!("── {} ({})\n", f.rel, f.places));
         let before = f.before.to_string();
-        for (from, _, old, new) in crate::agent::line_changes(&before, &f.after.to_string()) {
+        for (from, _, old, new) in crate::editdiff::line_changes(&before, &f.after.to_string()) {
             let line = before[..from].matches('\n').count() + 1;
             out.push_str(&format!("\n  line {line}\n"));
             for l in old.lines() {
@@ -400,7 +400,7 @@ fn show(ed: &mut Editor, f: FileChange, title: String, reason: String) {
     }
     let dirty = doc.is_modified() && !doc.unsaved_is_claudes();
     let doc_id = doc.id;
-    let changes = crate::agent::line_changes(&f.before.to_string(), &f.after.to_string());
+    let changes = crate::editdiff::line_changes(&f.before.to_string(), &f.after.to_string());
     // The keys go to the review; the file is the user's now (follow won't close it as a preview)
     let from_chat = ed.session.chat.as_ref().is_some_and(|c| c.focused);
     if let Some(c) = &mut ed.session.chat {
@@ -830,7 +830,7 @@ fn file_changes(
     let mut out: Vec<FileChange> = Vec::new();
     let mut outside = Vec::new();
     for (path, edits) in per {
-        let Some(real) = crate::edits::inside(&real_root, &path) else {
+        let Some(real) = crate::paths::inside(&real_root, &path) else {
             outside.push(path.display().to_string());
             continue;
         };
@@ -983,11 +983,7 @@ fn plan(
     let root = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
     let scope = match &q.path {
         Some(p) => {
-            let real = std::fs::canonicalize(root.join(p)).map_err(|e| format!("{p}: {e}"))?;
-            if !real.starts_with(&root) {
-                return Err(format!("{p} is outside the project — replace changes files inside it only"));
-            }
-            real
+            crate::paths::existing_inside(&root, &root.join(p), p, "replace changes files inside it only")?
         }
         None => root.clone(),
     };
@@ -1090,7 +1086,8 @@ fn preview(q: &Replace, files: &[FileChange], over: bool) -> String {
             continue;
         }
         out.push_str(&format!("\n{} ({})", f.rel, f.places));
-        for (from, _, old, new) in crate::agent::line_changes(&f.before.to_string(), &f.after.to_string()) {
+        for (from, _, old, new) in crate::editdiff::line_changes(&f.before.to_string(), &f.after.to_string())
+        {
             let line = f.before.byte_to_line(from) + 1;
             let (old, new): (Vec<&str>, Vec<&str>) = (old.lines().collect(), new.lines().collect());
             for (i, (o, n)) in old.iter().zip(&new).enumerate() {

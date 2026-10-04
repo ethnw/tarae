@@ -23,7 +23,7 @@ pub fn is_log(p: Option<&std::path::Path>) -> bool {
 /// tarae's own messages are there); on a worker (the log's own path is resolved).
 pub fn is_log_real(real: &std::path::Path) -> bool {
     let Some(log) = path() else { return false };
-    let log = std::fs::canonicalize(&log).ok().or_else(|| crate::edits::real(&log));
+    let log = std::fs::canonicalize(&log).ok().or_else(|| crate::paths::real(&log));
     log.is_some_and(|l| l == real)
 }
 

@@ -1,7 +1,7 @@
 # Claude
 
-tarae works with Claude in two ways: it asks Claude itself (edit a selection, or chat in a side panel), and it lets the
-Claude Code you already run in a terminal pane see and edit what's in the editor.
+tarae works with Claude inside the editor: edit a selection, or chat in a side panel where Claude reads, runs and
+edits the project with you watching and answering.
 
 tarae runs the `claude` CLI as a subprocess — there's no HTTP client, SDK, or API key in the editor; it uses your
 Claude Code login as it is. You need [Claude Code](https://claude.com/claude-code) installed and
@@ -11,7 +11,6 @@ logged in.
 - [Chat panel](#chat-panel) — [follow mode](#follow-mode), [the plan](#the-plan), [edits](#edits), [undoing a turn](#undoing-a-turn), [running the tests](#running-the-tests), [running commands](#running-commands), [notes](#notes)
 - [Commit messages](#commit-messages)
 - [Code review](#code-review)
-- [Claude Code integration](#claude-code-integration)
 - [Settings](#settings)
 
 ## Select → instruct → diff
@@ -245,8 +244,7 @@ chat notes it (`changed sub.rs, lib.rs · space u undo`). Press `space u` anywhe
 `:undo-turn`) to put every one of those files back as it was before the turn. A file the turn created is
 removed. `space U` (`:redo-turn`) brings the turn back. Press `space u` again to go back one more turn.
 
-An accepted `space i` answer and an accepted Claude Code diff are steps of their own too: `space u` takes the
-latest back, whichever it was.
+An accepted `space i` answer is a step of its own too: `space u` takes the latest back, whichever it was.
 
 Your own edits since the turn stay. Only Claude's changes are taken out. Where you edited on or right next to
 one of Claude's changes, that change is left alone too, and the toast says how many were left. Each file
@@ -587,27 +585,6 @@ While it's under way the session's tab, the status line's chip and its row in th
 Both also take up a rebase tarae didn't start — one begun by hand in the session's terminal, or from before a
 restart.
 
-## Claude Code integration
-
-![Edits from Claude Code in a side pane arrive as a review inside the tarae buffer — y/n/a](screenshots/m5-agent-review.png)
-
-tarae speaks Claude Code's IDE protocol — the same one the VS Code and JetBrains extensions use (MCP over WebSocket) —
-so there's nothing to set up on the Claude Code side.
-
-- `space c` launches `claude` in a zellij or tmux side pane, already connected. tarae opens the connection (and
-  its file in `~/.claude/ide`) only then, so until your first `space c` nothing of it is there. From then on a
-  `claude` you started yourself in this folder connects with `/ide` → tarae. Once connected, the status line shows
-  `◦ claude code` ([screenshot](screenshots/m5-agent-connected.png))
-- Claude sees your current selection (updated as it changes — its input shows `⧉ 1 line selected`), your open files
-  and unsaved edits, and language-server diagnostics, so "fix this error" just works
-- `space C` inserts the selected lines into Claude's input as `@file#L10-20`
-- **Claude's edits come to you**: when it proposes an edit, tarae opens the file in the same in-buffer review as
-  `space i`, headed `Claude Code`. `y`/`n` per change, `a` for all. Accept only part and Claude knows what you kept; it
-  writes the file, and tarae treats that content arriving on disk as saved. A terminal bell gets your attention
-- Security: tarae listens only on `127.0.0.1` and checks a 128-bit token, new each time it starts the server, (from `~/.claude/ide/<port>.lock`).
-  That file is the only one tarae writes there, and the only one it removes, when it quits; other editors' and other
-  tarae windows' files are never touched. Turn it off with `llm.claude-code = false`
-
 ## Settings
 
 ```toml
@@ -615,7 +592,6 @@ so there's nothing to set up on the Claude Code side.
 command = "claude"   # a CLI speaking Claude Code's stream-json protocol
 model = "haiku"      # "" = the CLI's default model
 context-lines = 20   # lines around each selection sent along
-claude-code = true   # let Claude Code connect (space c opens the connection)
 ```
 
 All of them, with defaults: [settings reference](reference/settings.md#llm).

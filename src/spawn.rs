@@ -332,13 +332,7 @@ mod tests {
     /// capture — its 1 ms budget is for the `perf` profile, run alone.
     #[test]
     fn perf_run_spawn_with_a_big_heap() {
-        if !cfg!(tarae_optimized) {
-            let line = format!(
-                "{}spawn::tests::perf_run_spawn_with_a_big_heap — built at opt-level 0 (the test profile); \
-                 `cargo perf` runs it\n",
-                crate::test_results::SELF_SKIP
-            );
-            let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+        if crate::test_results::unoptimized("spawn::tests::perf_run_spawn_with_a_big_heap") {
             return;
         }
         const MB: usize = 1 << 20;

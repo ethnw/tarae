@@ -76,6 +76,44 @@ impl Key {
     }
 }
 
+/// A move through a list panel's rows — the side panel, the review's rail, `:procs`, a plugin's panel all take
+/// the same keys for it (`list_move`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListMove {
+    By(isize),
+    First,
+    Last,
+}
+
+/// Rows a page key moves in a list panel.
+const LIST_PAGE: isize = 10;
+
+/// `j`/`k` (↓/↑, `C-n`/`C-p`) a row, `C-d`/`C-u` (the page keys) `LIST_PAGE`, `g`/`G` (Home/End) the ends.
+pub fn list_move(key: Key) -> Option<ListMove> {
+    use ListMove::*;
+    Some(match (key.code, key.ctrl, key.alt) {
+        (Code::Char('j') | Code::Down, false, false) | (Code::Char('n'), true, false) => By(1),
+        (Code::Char('k') | Code::Up, false, false) | (Code::Char('p'), true, false) => By(-1),
+        (Code::Char('d'), true, false) | (Code::PageDown, ..) => By(LIST_PAGE),
+        (Code::Char('u'), true, false) | (Code::PageUp, ..) => By(-LIST_PAGE),
+        (Code::Char('g') | Code::Home, false, false) => First,
+        (Code::Char('G') | Code::End, false, false) => Last,
+        _ => return None,
+    })
+}
+
+impl ListMove {
+    /// The row it lands on from `at`, in a list of `n` (kept in it).
+    pub fn from(self, at: usize, n: usize) -> usize {
+        let last = n.saturating_sub(1);
+        match self {
+            ListMove::By(by) => at.saturating_add_signed(by).min(last),
+            ListMove::First => 0,
+            ListMove::Last => last,
+        }
+    }
+}
+
 impl FromStr for Key {
     type Err = String;
 
@@ -168,6 +206,25 @@ mod tests {
 
     fn k(s: &str) -> Key {
         s.parse().unwrap()
+    }
+
+    /// Every list panel moves by the same keys, and stays in its list.
+    #[test]
+    fn list_panels_move_by_the_same_keys() {
+        let to = |key: &str, at: usize| list_move(k(key)).map(|m| m.from(at, 30));
+        assert_eq!((to("j", 3), to("down", 3), to("C-n", 3)), (Some(4), Some(4), Some(4)));
+        assert_eq!((to("k", 3), to("up", 3), to("C-p", 3)), (Some(2), Some(2), Some(2)));
+        assert_eq!(
+            (to("C-d", 3), to("pagedown", 3), to("C-u", 3), to("pageup", 3)),
+            (Some(13), Some(13), Some(0), Some(0))
+        );
+        assert_eq!(
+            (to("g", 12), to("home", 12), to("G", 2), to("end", 2)),
+            (Some(0), Some(0), Some(29), Some(29))
+        );
+        assert_eq!((to("j", 29), to("C-d", 25)), (Some(29), Some(29)), "kept in the list");
+        assert_eq!(list_move(k("j")).map(|m| m.from(0, 0)), Some(0), "an empty list");
+        assert_eq!((to("A-j", 3), to("x", 3), to("space", 3)), (None, None, None), "not a move");
     }
 
     #[test]

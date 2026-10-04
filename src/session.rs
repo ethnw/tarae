@@ -50,7 +50,7 @@ pub struct Session {
     pub notes: crate::notes::Notes,
     /// What Claude changed per chat turn — undone as one (`checkpoint.rs`).
     pub checkpoints: crate::checkpoint::Checkpoints,
-    /// The in-buffer review (`llm.rs`) — `space i`'s, a chat edit's, Claude Code's.
+    /// The in-buffer review (`llm.rs`) — `space i`'s, a chat edit's.
     pub review: Option<crate::llm::Review>,
     /// The code review in progress (`codereview.rs`).
     pub code_review: Option<crate::codereview::CodeReview>,

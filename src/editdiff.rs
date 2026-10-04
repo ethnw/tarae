@@ -157,6 +157,31 @@ pub fn build(edit: &Value, enc: Encoding, mut old: impl FnMut(&Path) -> Option<R
         .collect()
 }
 
+/// Line-level changes old text → new text: (start byte, end byte, old piece, new piece) — one per review
+/// change (an edit's review, a turn's undo, a change set).
+pub fn line_changes(old: &str, new: &str) -> Vec<(usize, usize, String, String)> {
+    use imara_diff::intern::InternedInput;
+    use imara_diff::{Algorithm, diff};
+    let input = InternedInput::new(old, new);
+    let starts = |s: &str| {
+        let mut v = vec![0];
+        v.extend(s.match_indices('\n').map(|(i, _)| i + 1));
+        if *v.last().unwrap() != s.len() {
+            v.push(s.len());
+        }
+        v
+    };
+    let (os, ns) = (starts(old), starts(new));
+    let at = |v: &Vec<usize>, i: u32| v.get(i as usize).copied().unwrap_or(*v.last().unwrap());
+    let mut out = Vec::new();
+    diff(Algorithm::Histogram, &input, |b: std::ops::Range<u32>, a: std::ops::Range<u32>| {
+        let (bf, bt) = (at(&os, b.start), at(&os, b.end));
+        let (af, at_) = (at(&ns, a.start), at(&ns, a.end));
+        out.push((bf, bt, old[bf..bt].to_string(), new[af..at_].to_string()));
+    });
+    out
+}
+
 /// One file: line diff + context + highlight + syntax colors.
 pub fn diff_file(path: PathBuf, op: FileOp, before: Rope, after: Rope) -> FileDiff {
     use imara_diff::intern::InternedInput;
@@ -307,6 +332,19 @@ fn emphasis(a: &str, b: &str) -> Option<((usize, usize), (usize, usize))> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn line_changes_cover_edits_inserts_and_deletes() {
+        let c = line_changes("a\nb\nc\n", "a\nB\nc\nd\n");
+        assert_eq!(
+            c,
+            [(2, 4, "b\n".to_string(), "B\n".to_string()), (6, 6, String::new(), "d\n".to_string())]
+        );
+        // even without a trailing newline on the last line
+        let c = line_changes("x\ny", "x\nz");
+        assert_eq!(c, [(2, 3, "y".to_string(), "z".to_string())]);
+        assert!(line_changes("same\n", "same\n").is_empty());
+    }
     use serde_json::json;
 
     fn edit(line: u64, from: u64, to: u64, text: &str) -> Value {

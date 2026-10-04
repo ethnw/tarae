@@ -236,42 +236,6 @@ fn which_key_and_command_palette_open_and_close() {
     assert_eq!(t.wait_exit().code(), Some(0));
 }
 
-#[test]
-fn claude_code_lock_file_stays_in_the_sandbox_and_is_removed_on_quit() {
-    let sb = Sandbox::new("lock");
-    sb.write("x.txt", "x\n");
-    // Others' lock files in the sandbox's CLAUDE_CONFIG_DIR (its HOME is a temp one): a dead tarae's and
-    // another IDE's
-    let ide = sb.claude_ide();
-    fs::create_dir_all(&ide).unwrap();
-    let others =
-        [("1.lock", r#"{"pid":999999,"ideName":"tarae"}"#), ("2.lock", r#"{"pid":1,"ideName":"VS Code"}"#)];
-    for (name, body) in others {
-        fs::write(ide.join(name), body).unwrap();
-    }
-    let mut t = sb.spawn(&["x.txt"]);
-    t.wait_text("x");
-    assert_eq!(sb.lock_files().len(), 2, "nothing of tarae's before space c, nothing of others' gone");
-    // space c: the connection opens (claude isn't on the sandbox's PATH — it just doesn't start)
-    t.send(" c");
-    let ours =
-        |sb: &Sandbox| sb.lock_files().into_iter().find(|p| !others.iter().any(|(n, _)| p.ends_with(n)));
-    let deadline = std::time::Instant::now() + sb.timeout();
-    while ours(&sb).is_none() && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    let lock = ours(&sb).expect("our lock file after space c");
-    let body = fs::read_to_string(&lock).unwrap();
-    assert!(body.contains("\"ideName\":\"tarae\""), "{body}");
-    assert!(body.contains(&format!("\"pid\":{}", t.child.id())), "{body}");
-    t.command("q");
-    assert_eq!(t.wait_exit().code(), Some(0));
-    assert!(!lock.exists(), "ours removed on quit");
-    for (name, body) in others {
-        assert_eq!(fs::read_to_string(ide.join(name)).unwrap(), body, "{name} left as it was");
-    }
-}
-
 /// A key that arrives together with a resize must not be lost. crossterm's default (mio, edge-triggered)
 /// input source returned the resize and left the key unread until the next input — tarae uses the
 /// `use-dev-tty` source (level-triggered poll) instead.
@@ -627,7 +591,7 @@ fn a_driver_reads_where_the_keys_go() {
     let mut t = sb.spawn(&["a.txt"]);
     t.wait_text("one");
     let s = t.state_json(0);
-    assert_eq!(s["v"], 1);
+    assert_eq!(s["v"], 2, "the schema's version (`uistate::V`)");
     assert_eq!((s["keys"]["region"].as_str(), s["keys"]["takes"].as_str()), (Some("code"), Some("commands")));
     assert_eq!(s["tarae"]["pid"], t.pid());
     let input = s["input"].as_u64().unwrap();
@@ -871,9 +835,6 @@ fn restart_becomes_the_new_binary_as_you_were() {
     assert!(s.status().contains("2:1"), "b focused, its cursor kept:\n{s}");
     t.send("\x17w");
     t.wait_for("the other pane: a at line 6", |s| s.status().contains("6:1"));
-    // No Claude Code lock file: none before `space c`, none left behind by the restart
-    let locks = sb.lock_files();
-    assert!(locks.is_empty(), "{locks:?}");
 
     t.command("restart!");
     yes_to_restart(&mut t);

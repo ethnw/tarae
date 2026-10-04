@@ -54,7 +54,6 @@ The name is also the `:set` path: `:set editor.scrolloff 8` changes it until you
 
 | Setting | Type | Default | Description |
 |---|---|---|---|
-| `llm.claude-code` | bool | `true` | Let Claude Code connect (space c opens the connection; then `claude` → /ide works too): it sees your selection and diagnostics, and its edits come here as a y/n diff |
 | `llm.command` | string | `"claude"` | LLM CLI speaking claude's stream-json protocol |
 | `llm.args` | list of strings | `["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--tools", "", "--no-session-persistence", "--strict-mcp-config", "--setting-sources", ""]` | Arguments for llm.command (default: claude -p with speed flags) |
 | `llm.model` | string | `""` | Model for llm.command, e.g. "haiku" ("" = the CLI's default) |

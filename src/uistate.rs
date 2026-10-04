@@ -16,7 +16,8 @@ use crate::key::{Code, Key};
 use crate::sizes::Slot;
 
 /// The schema's version: a field removed, renamed or meaning something else bumps it; one added doesn't.
-pub const V: u64 = 1;
+/// 2: `panels.edit_review.by` went (an edit's review is always Claude's).
+pub const V: u64 = 2;
 
 /// A card's `asks`: the title and what's decided, cut here (the rest is the card's — `v` shows it).
 const ASKS_MAX: usize = 300;
