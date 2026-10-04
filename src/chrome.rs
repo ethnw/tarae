@@ -96,6 +96,8 @@ pub enum Keys {
     /// The review's file rail, or an edit's review in the buffer (its `y`/`n`).
     Review,
     Slot(Slot),
+    /// A card given the keys with `C-q` (#78: the status line still said CHAT).
+    Card,
 }
 
 impl Keys {
@@ -118,6 +120,7 @@ impl Keys {
             Keys::Slot(Slot::Procs) => "PROCS",
             Keys::Slot(Slot::Debug) => "DEBUG",
             Keys::Slot(Slot::Plugin) => "PANEL",
+            Keys::Card => "CARD",
         })
     }
 
@@ -132,6 +135,10 @@ impl Editor {
     pub fn keys_at(&self) -> Keys {
         if self.picker.is_some() {
             return Keys::Picker;
+        }
+        // (given with `C-q` from wherever they were — the chat stays focused underneath, its draft kept)
+        if self.card_keys && self.offers.first().is_some_and(|o| !o.installing()) {
+            return Keys::Card;
         }
         if self.session.chat.as_ref().is_some_and(|c| c.focused) {
             return Keys::Chat;

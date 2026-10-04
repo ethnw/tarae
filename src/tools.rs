@@ -405,10 +405,10 @@ fn run_schema() -> Value {
     its output — build, lint, format, test suites, git. The user watches it in their task panel. Both output \
     streams come back whole (long output: its start and end), so don't redirect or pipe to head/tail for \
     that. Checks (cargo build/check/test/clippy/fmt, go build/test/vet, git status/diff/log/show) start at \
-    once — one command, words only (quotes are fine), alone or piped into grep head tail wc sort cut uniq. \
-    So do read-only ones (ls cat head tail wc grep rg find tree stat file du diff sort uniq cut pwd, git \
-    blame/rev-parse/ls-files/branch) whose paths stay in the \
-    project — and lines of them joined by ; && || |, with cd, or the same in sh -c '…' (no $, backticks or \
+    once — words only (quotes are fine), alone or piped into grep head tail wc sort cut uniq, sed -n 'a,bp'. \
+    So do read-only ones (ls cat head tail wc grep rg find tree stat file du diff sort uniq cut pwd, \
+    sed -n 'a,bp', git blame/rev-parse/ls-files/branch; git -C <dir> too) whose paths stay in the \
+    project — and lines of checks and reads joined by ; && || |, with cd, or the same in sh -c '…' (no $, backticks or \
     redirects to files). To run somewhere other than the project root, give cwd rather than a cd. Any other \
     command waits for the user to allow it — if they say no, don't retry it, ask. No stdin and no terminal: \
     nothing interactive. For one test file or test, run_tests is better (it reads each failure). Commands \
@@ -492,8 +492,9 @@ fn rule_env(rule: &str) -> (Vec<&str>, Vec<&str>) {
     (words[..lead].iter().filter_map(|w| name(w)).collect(), words[lead..].to_vec())
 }
 
-/// Programs a check's output can go through and still count as the check (#32): they only read it.
-const FILTERS: [&str; 7] = ["grep", "head", "tail", "wc", "sort", "cut", "uniq"];
+/// Programs a check's output can go through and still count as the check (#32): they only read it
+/// (`sed` only as `sed -n '3,40p'` — `readonly::only_reads`).
+const FILTERS: [&str; 8] = ["grep", "head", "tail", "wc", "sort", "cut", "uniq", "sed"];
 
 /// The first command's words when `cmd` is one command piped into filters and nothing else (`cargo test
 /// 2>&1 | grep -E "a|b" | head`): each filter one of `FILTERS` with no option that writes, runs or never
@@ -509,6 +510,31 @@ pub fn filtered(cmd: &str) -> Option<Vec<String>> {
         any = true;
     }
     (any && !head.iter().any(|w| w.glob)).then(|| head.into_iter().map(|w| w.text).collect())
+}
+
+/// Whether `cmd` is a line of parts each allowed on its own (#57, #66): `cargo fmt && cargo clippy`,
+/// `cargo test; cargo clippy`, `cd sub && git -C x log | sort` — every command one that runs unasked
+/// (`allowed_words`, no glob; git's after `-C <dir>` as without it) or only reads, joined by `;` `&&` `||`
+/// `|`, a `cd` aside. Where it reads (a `cd`'s or `-C`'s folder, the files named) is then judged as any
+/// read's (`read_only`).
+fn chain_allowed(cmd: &str, extra: &[String]) -> bool {
+    let Some(parts) = crate::readonly::parse(cmd) else { return false };
+    let mut any = false;
+    for p in &parts {
+        let crate::readonly::Part::Cmd(w) = p else { continue };
+        let mut words: Vec<String> = w.iter().map(|w| w.text.clone()).collect();
+        if words.first().is_some_and(|w| w == "git") {
+            let rest = crate::readonly::git_after_c(&words[1..]).to_vec();
+            words.truncate(1);
+            words.extend(rest);
+        }
+        let plain = !w.iter().any(|w| w.glob) && allowed_words(&words, extra);
+        if !plain && !crate::readonly::only_reads(w) {
+            return false;
+        }
+        any = true;
+    }
+    any
 }
 
 /// `allowed` for one command's words.
@@ -662,15 +688,23 @@ fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
         return Ok(());
     }
     // (a check piped into filters: the check's rule, and what the filters name is read as any read's — #32)
-    let checked = filtered(cmd).is_some_and(|head| allowed_words(&head, &extra));
+    // (a chain of allowed parts likewise — #57, #66)
+    let checked =
+        filtered(cmd).is_some_and(|head| allowed_words(&head, &extra)) || chain_allowed(cmd, &extra);
     if outside.is_none() && (checked || crate::readonly::read_only(cmd)) {
         return read_only(ed, call, cmd.to_string(), cwd);
     }
     asked(ed)?;
     // Review at the end: a file it names that Claude wrote unseen this turn goes on the card with it —
     // which ones, and their text, found on a worker
-    let unseen: Vec<PathBuf> =
-        ed.session.checkpoints.turn.iter().filter(|t| t.unseen).map(|t| t.path.clone()).collect();
+    let checkpoints = &ed.session.checkpoints;
+    let unseen: Vec<PathBuf> = checkpoints
+        .turn
+        .iter()
+        .filter(|t| t.unseen)
+        .map(|t| t.path.clone())
+        .chain(checkpoints.carried.iter().cloned())
+        .collect();
     let cmd = cmd.to_string();
     if unseen.is_empty() {
         return ask(ed, cmd, cwd, call, Vec::new(), outside);
@@ -678,10 +712,35 @@ fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
     let root = ed.session.root.clone();
     ed.events.jobs().spawn(move || {
         let shown = named(&root, &cmd, &cwd, &unseen);
+        // A move or copy of an unseen file: where it goes is unseen too, from now on — before it runs, so no
+        // later call reads it as a file the user saw (what's there now kept, when it's text or nothing)
+        let carried: Vec<(PathBuf, Result<Option<ropey::Rope>, ()>)> = match crate::readonly::only_moves(&cmd)
+        {
+            true => moved(&cmd, &cwd, &unseen)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|p| {
+                    let before = match std::fs::read(&p) {
+                        Err(_) => Ok(None),
+                        Ok(b) => {
+                            String::from_utf8(b).map(|s| Some(ropey::Rope::from_str(&s))).map_err(|_| ())
+                        }
+                    };
+                    (p, before)
+                })
+                .collect(),
+            false => Vec::new(),
+        };
         move |ed: &mut Editor| {
             // (the turn ended meanwhile: nobody waits for a card)
             if ed.session.chat.as_ref().is_some_and(|c| c.generation() != call.generation || !c.busy()) {
                 return;
+            }
+            for (path, before) in carried {
+                match before {
+                    Ok(before) => crate::checkpoint::record_unseen(ed, path, before, |_: &mut Editor| {}),
+                    Err(()) => ed.session.checkpoints.carried.push(path),
+                }
             }
             let c = call.clone();
             if let Err(e) = shown.and_then(|shown| ask(ed, cmd, cwd, call, shown, outside)) {
@@ -708,17 +767,28 @@ fn run_cwd(root: &Path, cwd: Option<&str>) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// A command that only reads (`readonly.rs`): where it reads is found on a worker — all of it in the
-/// project, or in places allowed, and it runs now; anything else is on its card.
+/// A command that only reads (`readonly.rs`) — or a line of checks and reads (`chain_allowed`, `filtered`):
+/// where it reads is found on a worker — all of it in the project, or in places allowed, and it runs now;
+/// anything else is on its card. A part that runs something (a check, git) outside the project is the plain
+/// card, reads allowed there or not (`readonly::runs_outside`).
 fn read_only(ed: &mut Editor, call: Call, cmd: String, cwd: PathBuf) -> Result<(), String> {
     let chat = ed.session.chat.as_ref().map(|c| c.allowed.clone()).unwrap_or_default();
     let (store, root) = (ed.allow_path.clone(), ed.session.root.clone());
     ed.events.jobs().spawn(move || {
         let kept = crate::allow::Store::read(store.as_deref()).get(&root);
         let reads = crate::readonly::outside(&cmd, &cwd, &root, &chat, &kept);
+        // (a check or git that would run outside the project: the plain card, whatever reads are allowed)
+        let runs_outside = crate::readonly::runs_outside(&cmd, &cwd, &root);
         move |ed: &mut Editor| {
             // (the turn ended meanwhile: nobody waits for it)
             if ed.session.chat.as_ref().is_some_and(|c| c.generation() != call.generation || !c.busy()) {
+                return;
+            }
+            if runs_outside {
+                let c = call.clone();
+                if let Err(e) = ask(ed, cmd, cwd, call, Vec::new(), None) {
+                    answer(ed, c, Err(e));
+                }
                 return;
             }
             // (a `cd` into what isn't a folder: where the rest reads can't be told — the plain card)
@@ -868,6 +938,12 @@ fn named(
     cwd: &std::path::Path,
     unseen: &[PathBuf],
 ) -> Result<Vec<(PathBuf, String)>, String> {
+    // Moving, copying, removing or reading a file runs none of it (#76: `mv src/a.rs src/b.rs` was refused)
+    // — where it goes is marked unseen in its stead (`moved`); a line that runs anything else may run what
+    // it moved, so it names them all, and so does a move whose targets can't be told
+    if crate::readonly::only_moves(cmd) && moved(cmd, cwd, unseen).is_some() {
+        return Ok(Vec::new());
+    }
     let joined: String = cmd.chars().filter(|c| !matches!(c, '\'' | '"' | '\\')).collect();
     let mut out: Vec<(PathBuf, String)> = Vec::new();
     for word in joined.split(|c: char| c.is_whitespace() || ";&|`$()<>={}".contains(c)) {
@@ -881,6 +957,63 @@ fn named(
         }
     }
     Ok(out)
+}
+
+/// Where a line that only moves files (`readonly::only_moves`) puts what was written unseen (`unseen`, real
+/// paths): for each `mv`, `cp`, `ln` and `git mv`, its target for every unseen file among its sources or
+/// under a folder it moves — real paths, made up from the real folder for a target not there yet. The
+/// source of a `mv` is gone after it, so its mark goes nowhere else. On a worker. None: a part whose targets
+/// can't be told (a glob, an option that picks the target — `-t` —, a long option, `git -C`) — then every
+/// unseen file the line names counts as named, as for any command.
+fn moved(cmd: &str, cwd: &Path, unseen: &[PathBuf]) -> Option<Vec<PathBuf>> {
+    use crate::readonly::Part;
+    let real = |p: &Path| -> Option<PathBuf> {
+        std::fs::canonicalize(p)
+            .ok()
+            .or_else(|| Some(std::fs::canonicalize(p.parent()?).ok()?.join(p.file_name()?)))
+    };
+    let mut here = cwd.to_path_buf();
+    let mut out = Vec::new();
+    for part in crate::readonly::parse(cmd)? {
+        let w = match part {
+            Part::Cd(d) => {
+                here = std::fs::canonicalize(here.join(d)).ok()?;
+                continue;
+            }
+            Part::Cmd(w) => w,
+        };
+        let words: Vec<&str> = w.iter().map(|w| w.text.as_str()).collect();
+        let args = match words.as_slice() {
+            ["mv" | "cp" | "ln", rest @ ..] => rest,
+            ["git", "mv", rest @ ..] => rest,
+            ["git", ..] if words.contains(&"-C") => return None,
+            _ => continue,
+        };
+        let picks = |a: &&str| a.starts_with("--") || (a.starts_with('-') && a[1..].contains(['t', 'T']));
+        if w.iter().any(|w| w.glob) || args.iter().any(picks) {
+            return None;
+        }
+        let paths: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).copied().collect();
+        let Some((dest, sources)) = paths.split_last().filter(|(_, s)| !s.is_empty()) else { continue };
+        let dest = here.join(dest);
+        let into = sources.len() > 1 || dest.is_dir();
+        for s in sources {
+            let Ok(s) = std::fs::canonicalize(here.join(s)) else { continue };
+            let target = match into {
+                true => real(&dest)?.join(s.file_name()?),
+                false => real(&dest)?,
+            };
+            for u in unseen {
+                if let Ok(rest) = u.strip_prefix(&s) {
+                    let t = if rest.as_os_str().is_empty() { target.clone() } else { target.join(rest) };
+                    if !out.contains(&t) {
+                        out.push(t);
+                    }
+                }
+            }
+        }
+    }
+    Some(out)
 }
 
 /// The file's text if a card can show it as it is: text, short, and nothing that draws as something else
@@ -1800,6 +1933,161 @@ mod tests {
         assert!(!super::allowed("npm testx", &extra), "word for word");
     }
 
+    /// The card `run` puts up for `cmd` (through the worker it asks on, as Claude's call does) — its text.
+    fn run_card(ed: &mut crate::editor::Editor, cmd: &str) -> String {
+        ed.offers.clear();
+        super::run(ed, super::Call::test(1), &serde_json::json!({ "command": cmd })).unwrap();
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while ed.offers.is_empty() && std::time::Instant::now() < end {
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(50)) {
+                ed.handle_event(ev);
+            }
+        }
+        ed.offers.first().map(|o| o.question.clone()).unwrap_or_else(|| panic!("a card for {cmd}"))
+    }
+
+    /// Review note: a copy, move or link of a file written unseen this turn is unseen too — a later call that
+    /// runs the copy still shows it on its card (`cp evil.sh ok.sh`, then `sh ok.sh`, had lost the mark).
+    /// Into a folder too, over a file that wasn't text, and a move whose target can't be told names the
+    /// unseen file on its own card instead.
+    #[test]
+    fn a_copy_of_an_unseen_file_is_unseen_too() {
+        use crate::checkpoint::Touched;
+        let dir = std::env::temp_dir().join(format!("tarae-carried-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        std::fs::write(dir.join("evil.sh"), "echo evil\n").unwrap();
+        std::fs::write(dir.join("blob.bin"), [0xff, 0xfe, 0x00]).unwrap();
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        ed.session.root = dir.clone();
+        ed.session.checkpoints.turn.push(Touched {
+            path: dir.join("evil.sh"),
+            before: None,
+            after: ropey::Rope::new(),
+            unseen: true,
+        });
+        let shown = |q: &str, f: &str| q.contains(&format!("{f} — written this turn, unseen:\necho evil"));
+        // The copy: nothing on its own card (copying runs nothing) — then, run in a second call, flagged
+        let q = run_card(&mut ed, "cp evil.sh ok.sh");
+        assert!(!q.contains("written this turn"), "{q}");
+        std::fs::copy(dir.join("evil.sh"), dir.join("ok.sh")).unwrap();
+        let q = run_card(&mut ed, "sh ok.sh");
+        assert!(shown(&q, "ok.sh"), "the copy still unseen: {q}");
+        // Moved into a folder, then run from there
+        run_card(&mut ed, "mv ok.sh bin");
+        std::fs::rename(dir.join("ok.sh"), dir.join("bin/ok.sh")).unwrap();
+        let q = run_card(&mut ed, "./bin/ok.sh");
+        assert!(shown(&q, "bin/ok.sh"), "{q}");
+        // Over a file that wasn't text (nothing kept of it for `space u` — still unseen for the guard)
+        run_card(&mut ed, "cp evil.sh blob.bin");
+        std::fs::copy(dir.join("evil.sh"), dir.join("blob.bin")).unwrap();
+        assert!(shown(&run_card(&mut ed, "sh blob.bin"), "blob.bin"));
+        // A target it can't tell: the unseen source is named on the card itself
+        let q = run_card(&mut ed, "cp -t bin evil.sh");
+        assert!(shown(&q, "evil.sh"), "{q}");
+        // The copy is in the turn's files: its review shows it, `space u` takes it back
+        assert!(ed.session.checkpoints.turn.iter().any(|t| t.unseen && t.path == dir.join("ok.sh")));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Review note: a chain that `cd`s out of the project, or git with `-C` outside it, goes to a card through
+    /// `run` — a build there runs that folder's build scripts, git its repository's config — even when
+    /// reading that folder was allowed; inside, the same line runs at once.
+    #[test]
+    fn a_chain_that_runs_outside_the_project_asks() {
+        let dir = std::env::temp_dir().join(format!("tarae-chain-out-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for d in ["proj/sub", "other"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let (proj, other) = (dir.join("proj"), dir.join("other"));
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        ed.session.root = proj.clone();
+        // A card, or the run started at once — what `run` decided
+        let decided = |ed: &mut crate::editor::Editor, cmd: &str| -> Option<String> {
+            ed.offers.clear();
+            ed.session.task_run = None;
+            super::run(ed, super::Call::test(1), &serde_json::json!({ "command": cmd })).unwrap();
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while ed.offers.is_empty() && ed.session.task_run.is_none() && std::time::Instant::now() < end {
+                if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(50)) {
+                    ed.handle_event(ev);
+                }
+            }
+            assert!(!ed.offers.is_empty() || ed.session.task_run.is_some(), "{cmd}: neither");
+            ed.offers.first().map(|o| o.question.clone())
+        };
+        let outside = [
+            "cd ../other && cargo test",
+            "cd /tmp && cargo build",
+            &format!("git -C {} status", other.display()),
+            "cd ../other; cargo fmt && cargo clippy",
+            "git -C .. log | sort",
+            "cd .. && git ls-files",
+        ];
+        // (then reading all of it allowed for good, `A` on a read's card: still not a build or git run there)
+        let store = dir.join("sandbox.json");
+        crate::allow::keep(&store, &proj, |a| a.read.push(dir.clone())).unwrap();
+        for allowed in [false, true] {
+            ed.allow_path = allowed.then(|| store.clone());
+            for cmd in outside {
+                let q =
+                    decided(&mut ed, cmd).unwrap_or_else(|| panic!("{cmd} ran (reads allowed: {allowed})"));
+                assert!(q.starts_with(cmd), "the plain card, the command on it: {q}");
+                assert!(ed.session.task_run.is_none(), "{cmd}: nothing ran");
+            }
+        }
+        // Inside the project: at once
+        assert_eq!(decided(&mut ed, "cd sub && git status"), None, "inside: runs");
+        ed.session.task_run = None;
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #57, #66: a line of parts each allowed on its own runs unasked (where it reads still judged) —
+    /// checks chained, git's reads with `-C <dir>`, a check or a read piped into `sort` or `sed -n 'a,bp'`;
+    /// one part that isn't, and the line asks.
+    #[test]
+    fn a_chain_of_allowed_parts_is_allowed() {
+        let ok = |c: &str| super::chain_allowed(c, &[]);
+        for c in [
+            "cargo fmt && cargo clippy",
+            "cargo test; cargo clippy",
+            "cargo build || cargo check",
+            "cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test",
+            "git -C sub log -5",
+            "git -C a -C b status",
+            "git -C sub diff HEAD -- x | sort",
+            "cargo test 2>&1 | sed -n '1,40p'",
+            "git log --oneline | sort",
+            "cd src && cargo check && ls",
+            "sh -c 'cargo test; cargo clippy'",
+        ] {
+            assert!(ok(c), "{c}");
+        }
+        for c in [
+            "cargo fmt && rm x",
+            "cargo test; git push",
+            "git -C sub push",
+            "git -C sub -c core.pager=x log",
+            "git -C sub diff --ext-diff",
+            "cargo test | sed 's/a/b/w out'",
+            "cargo test | sed -n '1,4w out'",
+            "cargo test | sh",
+            "cargo test src/* && ls",
+            "cargo test > out; cargo clippy",
+            "cd src",
+            "",
+        ] {
+            assert!(!ok(c), "{c}");
+        }
+        let chat = vec!["cargo xtask shot".to_string()];
+        assert!(super::chain_allowed("cargo xtask shot a.png && cargo test", &chat), "the chat's own");
+        assert!(super::filtered("cargo test | sed -n '1,40p'").is_some(), "sed -n is a filter");
+        assert!(super::is_check("cargo fmt && cargo clippy"), "a chain of checks feeds the list");
+    }
+
     /// The pattern a run card's `a` allows for the rest of the chat: a command's first plain words, two or
     /// three — none for a runner (anything could follow it), one word, or a line of several.
     #[test]
@@ -1979,6 +2267,13 @@ mod tests {
         assert_eq!(names(&format!("sh {}", x.display())), vec![x.clone()], "a full path");
         assert!(names("sh seen.sh x.sh.bak").is_empty(), "only what was written unseen");
         assert_eq!(names("sh x.sh x.sh"), vec![x.clone()], "once each");
+        // #76: moving, copying or removing runs nothing — unless the line runs something else too
+        for c in ["mv x.sh y.sh", "git mv tools/gen.py tools/g.py", "rm x.sh", "cp x.sh x2.sh && ls"] {
+            assert!(names(c).is_empty(), "{c}");
+        }
+        assert_eq!(names("cp x.sh y.sh && sh y.sh"), vec![x.clone()], "what it moved may run");
+        assert_eq!(names("./x.sh"), vec![x.clone()]);
+        assert_eq!(names("source x.sh"), vec![x.clone()]);
         std::fs::write(&x, "echo a\u{202E}b\n").unwrap();
         let e = super::named(&dir, "sh x.sh", &dir, &unseen).unwrap_err();
         assert!(e.contains("can't show"), "{e}");

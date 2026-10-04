@@ -243,6 +243,68 @@ pub struct Making {
     pub files: (u64, bool),
     pub big: Vec<(String, (u64, bool))>,
     pub cargo: Option<(PathBuf, PathBuf)>,
+    /// The instruction files git doesn't have here (`instructions`) — copied into its checkout, so its
+    /// Claude starts with the project's rules.
+    pub copies: Vec<String>,
+}
+
+/// The instruction files a session's checkout gets from this one when git doesn't carry them (#17: CLAUDE.md
+/// is ignored here, and a session's Claude started without the project's rules) — `.claude/settings*.json`
+/// too, never the rest of `.claude/`.
+const INSTRUCTIONS: [&str; 3] = ["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"];
+
+/// An instruction file bigger than this isn't one — not copied.
+const INSTRUCTIONS_MAX: u64 = 1 << 20;
+
+/// The instruction files in `top` that git doesn't track (ignored or untracked), small and plain files —
+/// relative paths, in `INSTRUCTIONS`' order, then `.claude/`'s settings by name. On a worker.
+fn instructions(top: &Path) -> Vec<String> {
+    let mut settings: Vec<String> = std::fs::read_dir(top.join(".claude"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n.starts_with("settings") && n.ends_with(".json"))
+        .map(|n| format!(".claude/{n}"))
+        .collect();
+    settings.sort();
+    let found: Vec<String> = INSTRUCTIONS
+        .iter()
+        .map(|n| n.to_string())
+        .chain(settings)
+        .filter(|rel| {
+            std::fs::metadata(top.join(rel)).is_ok_and(|m| m.is_file() && m.len() <= INSTRUCTIONS_MAX)
+        })
+        .collect();
+    if found.is_empty() {
+        return found;
+    }
+    // (tracked ones come with the checkout)
+    let mut args = vec!["ls-files", "-z", "--"];
+    args.extend(found.iter().map(String::as_str));
+    let tracked = git(top, &args, None).unwrap_or_default();
+    let tracked: Vec<&str> = tracked.split('\0').collect();
+    found.into_iter().filter(|rel| !tracked.contains(&rel.as_str())).collect()
+}
+
+/// `files` (relative) from `top` into the new checkout `path` — never over a file that's there. What
+/// couldn't be copied, said.
+fn copy_instructions(top: &Path, path: &Path, files: &[String]) -> Vec<String> {
+    let mut failed = Vec::new();
+    for rel in files {
+        let to = path.join(rel);
+        if to.exists() {
+            continue;
+        }
+        let copied = to
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|_| std::fs::copy(top.join(rel), &to).map(|_| ()));
+        if let Err(e) = copied {
+            failed.push(format!("{rel}: {e}"));
+        }
+    }
+    failed
 }
 
 impl Making {
@@ -298,6 +360,9 @@ impl Making {
             }
             _ => {}
         }
+        if !self.copies.is_empty() {
+            q += &format!("\n\nCopied into it (not in git here):\n  {}", self.copies.join("  "));
+        }
         crate::offer::Offer::new(
             format!("New session: {}", self.branch),
             &q,
@@ -349,7 +414,8 @@ pub fn making(root: &Path, name: &str, base: Option<&str>, setting: &str) -> Res
     let files = tracked_size(&top, until);
     // (where cargo builds, from the user's cargo config as it is)
     let cargo = top.join("Cargo.toml").is_file().then(|| cargo_dirs(&top)).flatten();
-    Ok(Making { top, branch, base, base_sha, path, files, big, cargo })
+    let copies = instructions(&top);
+    Ok(Making { top, branch, base, base_sha, path, files, big, cargo, copies })
 }
 
 /// The tracked files' size on disk — what a new checkout writes.
@@ -385,8 +451,9 @@ fn big_ignored(top: &Path, until: Instant) -> Vec<(String, (u64, bool))> {
     big
 }
 
-/// `git worktree add -b` for the card's plan (on a worker) — the checkout's real path.
-fn make(m: &Making) -> Result<PathBuf, String> {
+/// `git worktree add -b` for the card's plan (on a worker), its instruction files copied in — the
+/// checkout's real path, and what couldn't be copied.
+fn make(m: &Making) -> Result<(PathBuf, Vec<String>), String> {
     if let Some(parent) = m.path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", crate::allow::tilde(parent)))?;
     }
@@ -395,7 +462,8 @@ fn make(m: &Making) -> Result<PathBuf, String> {
     }
     let path = m.path.to_str().ok_or("a checkout path that isn't UTF-8")?;
     git(&m.top, &["worktree", "add", "-q", "-b", &m.branch, path, &m.base_sha], None)?;
-    Ok(std::fs::canonicalize(&m.path).unwrap_or_else(|_| m.path.clone()))
+    let failed = copy_instructions(&m.top, &m.path, &m.copies);
+    Ok((std::fs::canonicalize(&m.path).unwrap_or_else(|_| m.path.clone()), failed))
 }
 
 // ── Ending one ───────────────────────────────────────────────────────────────
@@ -989,7 +1057,7 @@ impl Editor {
         self.events.shared_jobs().spawn(move || {
             let made = make(&m);
             move |ed: &mut Editor| match made {
-                Ok(root) => {
+                Ok((root, failed)) => {
                     ed.offer_finished(id, Ok(()));
                     let session = ed.session_add(root);
                     if let Some(l) = ed.session_by_id(session) {
@@ -1002,6 +1070,9 @@ impl Editor {
                         c.focused = true;
                     }
                     ed.set_success(format!("Session {} — from {}", m.branch, m.base_said()));
+                    if !failed.is_empty() {
+                        ed.set_warning(format!("not copied into it: {}", failed.join(", ")));
+                    }
                 }
                 Err(e) => ed.offer_finished(id, Err(e)),
             }
@@ -1449,6 +1520,57 @@ mod tests {
         feed(&mut ed, ":session-new a..b<ret>");
         settle_until(&mut ed, |ed| says(ed, "isn't a branch name"));
         assert!(ed.offers.is_empty() && ed.sessions.len() == 1);
+        drop(ed);
+        git_in(&repo, &["worktree", "remove", "--force", wt.to_str().unwrap()]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #17: the instruction files git doesn't have here (CLAUDE.md, CLAUDE.local.md, AGENTS.md,
+    /// `.claude/settings*.json`) go into a new session's checkout, as its card says — not one git tracks
+    /// (the checkout has its own), not a big one, never the rest of `.claude/` or `target/`.
+    #[test]
+    fn a_new_session_gets_the_projects_instruction_files() {
+        let (repo, dir) = place("instructions");
+        std::fs::write(repo.join(".gitignore"), "target/\nCLAUDE.md\nCLAUDE.local.md\n.claude/\n").unwrap();
+        std::fs::write(repo.join("AGENTS.md"), "as committed\n").unwrap();
+        git_in(&repo, &["add", "-A"]);
+        git_in(&repo, &["commit", "-q", "-m", "agents"]);
+        let files = [
+            ("CLAUDE.md", "# rules\n"),
+            ("AGENTS.md", "edited, not committed\n"),
+            (".claude/settings.json", "{}\n"),
+            (".claude/settings.local.json", "{\"a\": 1}\n"),
+            (".claude/commands/x.md", "not this\n"),
+            (".claude/other.json", "not this\n"),
+            ("target/notes.md", "not this\n"),
+        ];
+        for (rel, text) in files {
+            std::fs::create_dir_all(repo.join(rel).parent().unwrap()).unwrap();
+            std::fs::write(repo.join(rel), text).unwrap();
+        }
+        std::fs::write(repo.join("CLAUDE.local.md"), "x".repeat(INSTRUCTIONS_MAX as usize + 1)).unwrap();
+        let mut ed = editor(&repo, &dir);
+        feed(&mut ed, ":session-new rules<ret>");
+        settle_until(&mut ed, |ed| !ed.offers.is_empty() || says(ed, "new session:"));
+        let q = ed.offers.first().map(|o| o.question.clone()).unwrap_or_else(|| said(&ed));
+        assert!(
+            q.ends_with(
+                "Copied into it (not in git here):\n  CLAUDE.md  .claude/settings.json  \
+                 .claude/settings.local.json"
+            ),
+            "{q}"
+        );
+        ed.offer_accept();
+        settle_until(&mut ed, |ed| !ed.sessions.is_empty());
+        let wt = ed.session.root.clone();
+        let read = |rel: &str| std::fs::read_to_string(wt.join(rel)).ok();
+        assert_eq!(read("CLAUDE.md").as_deref(), Some("# rules\n"));
+        assert_eq!(read(".claude/settings.json").as_deref(), Some("{}\n"));
+        assert_eq!(read(".claude/settings.local.json").as_deref(), Some("{\"a\": 1}\n"));
+        assert_eq!(read("AGENTS.md").as_deref(), Some("as committed\n"), "tracked: the checkout's own");
+        for rel in ["CLAUDE.local.md", ".claude/commands/x.md", ".claude/other.json", "target/notes.md"] {
+            assert!(read(rel).is_none(), "{rel} not copied");
+        }
         drop(ed);
         git_in(&repo, &["worktree", "remove", "--force", wt.to_str().unwrap()]);
         std::fs::remove_dir_all(&dir).ok();

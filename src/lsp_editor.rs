@@ -4906,6 +4906,12 @@ mod tests {
             lsp::uri(&std::fs::canonicalize(&third).unwrap()): [te5(0, 16)] } });
         ed.on_lsp_message(cid, json!({ "id": n, "result": changes }));
         let title = |ed: &Editor| ed.session.review.as_ref().map(|r| r.instruction.clone());
+        // Several files: one card for them all first (#75) — `r`, one by one
+        settle_for(&mut ed, 5, |ed| !ed.offers.is_empty());
+        assert!(ed.session.review.is_none());
+        let q = &ed.offers[0].question;
+        assert!(q.starts_with("rename `alpha` → `beta`\n\n6 places in 3 files:"), "{q}");
+        ed.offer_one_by_one();
         settle_for(&mut ed, 5, |ed| ed.session.review.is_some());
         assert_eq!(title(&ed).as_deref(), Some("rename `alpha` → `beta` · 1 of 3"));
         assert_eq!(ed.doc().path.as_ref(), Some(&file));

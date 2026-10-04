@@ -154,8 +154,17 @@ pub enum State {
     Failed(Option<i32>),
 }
 
-/// Places a run keeps, at most (its output keeps 5000 lines).
+/// Places a run keeps, at most.
 const PLACES_KEPT: usize = 5000;
+
+/// The output a run keeps (#72: a long step pushed the steps before it out — a failed test's name with
+/// them): each step's (a preflight's; a plain run is one step) first `STEP_HEAD` lines and its last, up to
+/// `STEP_KEPT` in all, the lines between said on one line — trimmed a batch at a time, once it's
+/// `TRIM_SLACK` over; and `OUTPUT_KEPT` lines in all, the oldest going first.
+const STEP_HEAD: usize = 200;
+const STEP_KEPT: usize = 3000;
+const TRIM_SLACK: usize = 500;
+const OUTPUT_KEPT: usize = 20_000;
 
 pub struct Run {
     pub task: Task,
@@ -193,6 +202,10 @@ pub struct Run {
     pub tall: std::cell::Cell<usize>,
     /// The output's first line shown, scrolled back (`sizes::bottom_key`, the wheel) — None: its end.
     pub scroll: Option<usize>,
+    /// Where the step whose output comes now starts in `output` · its line saying what was cut (and how
+    /// many), once it's been cut (`keep`).
+    section: usize,
+    cut: Option<(usize, usize)>,
 }
 
 impl Run {
@@ -217,6 +230,51 @@ impl Run {
         let max = self.output.len().saturating_sub(rows);
         let top = self.top(rows).saturating_add_signed(by).min(max);
         self.scroll = (top < max).then_some(top);
+    }
+
+    /// Scrolled to line `at` at the top (the end follows the output again).
+    pub fn scroll_to(&mut self, at: usize, rows: usize) {
+        let max = self.output.len().saturating_sub(rows);
+        self.scroll = (at < max).then_some(at);
+    }
+
+    /// A line of output; `step`: it begins a step of its own (a preflight's heading) — the one before is
+    /// trimmed first.
+    pub fn push_line(&mut self, err: bool, line: String, step: bool) {
+        if step {
+            self.keep(0);
+            (self.section, self.cut) = (self.output.len(), None);
+        }
+        self.output.push((err, line));
+    }
+
+    /// The output trimmed to what's kept (see `STEP_KEPT`) — once the step in hand is `slack` lines over.
+    pub fn keep(&mut self, slack: usize) {
+        let len = self.output.len() - self.section;
+        if len > STEP_KEPT + slack {
+            let excess = len - STEP_KEPT;
+            let (marker, before) = match self.cut {
+                Some(c) => c,
+                None => {
+                    let at = self.section + STEP_HEAD;
+                    self.output.insert(at, (false, String::new()));
+                    (at, 0)
+                }
+            };
+            let from = marker + 1;
+            self.output.drain(from..from + excess);
+            self.cut = Some((marker, before + excess));
+            self.output[marker].1 = format!("… {} lines not kept …", before + excess);
+            self.scroll = self.scroll.map(|t| if t >= from + excess { t - excess } else { t.min(from) });
+        }
+        let n = self.output.len();
+        if n > OUTPUT_KEPT {
+            let k = n - OUTPUT_KEPT;
+            self.output.drain(..k);
+            self.section = self.section.saturating_sub(k);
+            self.cut = self.cut.and_then(|(m, d)| (m >= k).then_some((m - k, d)));
+            self.scroll = self.scroll.map(|t| t.saturating_sub(k));
+        }
     }
 }
 
@@ -252,6 +310,8 @@ impl Run {
             last_output: Instant::now(),
             tall: Default::default(),
             scroll: None,
+            section: 0,
+            cut: None,
         }
     }
 }
@@ -471,19 +531,18 @@ impl Editor {
                     let mut places = Vec::new();
                     r.last_output = Instant::now();
                     for (line, found) in lines {
+                        // (a step's start: its output kept as its own — `Run::keep`)
+                        let step = preflight.is_some() && crate::preflight::starts(&line);
                         let shown = match preflight.as_deref_mut() {
                             Some(p) => p.line(&line),
                             None => Some(line),
                         };
                         if let Some(line) = shown {
-                            r.output.push((err, line));
+                            r.push_line(err, line, step);
                         }
                         places.extend(found.filter(|_| !install));
                     }
-                    let n = r.output.len();
-                    if n > 5000 {
-                        r.output.drain(..n - 5000);
-                    }
+                    r.keep(TRIM_SLACK);
                     for it in places {
                         let Some(r) = ed.session.task_run.as_mut() else { break };
                         // Counted once (the same place twice isn't two) — the run's own, for its report; the
@@ -593,6 +652,8 @@ impl Editor {
             last_output: Instant::now(),
             tall: std::cell::Cell::new(tall),
             scroll: None,
+            section: 0,
+            cut: None,
         });
     }
 }
@@ -652,6 +713,54 @@ mod tests {
         assert_eq!(lines.len(), 3 + 3000 + 1);
         assert_eq!(lines.last().unwrap(), "last");
         assert!(batches.len() < 100, "{} batches", batches.len());
+    }
+
+    /// #72: each step's output is kept on its own — its start and its end, the lines between said on one
+    /// line — so a long step after it doesn't push a failed test's name out (5000 lines in all did); a
+    /// line scrolled to stays in sight as lines go.
+    #[test]
+    fn each_steps_output_is_kept_its_start_and_its_end() {
+        let task = Task { name: "preflight".into(), cmd: String::new(), cwd: PathBuf::from("/") };
+        let mut r = Run::for_test(task);
+        let batch = |r: &mut Run, lines: Vec<String>, step: bool| {
+            for (k, l) in lines.into_iter().enumerate() {
+                r.push_line(false, l, step && k == 0);
+            }
+            r.keep(TRIM_SLACK);
+        };
+        batch(&mut r, vec!["── test ──".into()], true);
+        for chunk in 0..10 {
+            batch(&mut r, (0..1000).map(|i| format!("test t{chunk}_{i} ... ok")).collect(), false);
+        }
+        batch(&mut r, vec!["test tricky ... FAILED".into(), "failures:".into(), "    tricky".into()], false);
+        let lines = |r: &Run| r.output.iter().map(|l| l.1.clone()).collect::<Vec<_>>();
+        let out = lines(&r);
+        assert!(out.len() <= STEP_KEPT + TRIM_SLACK + 1, "{}", out.len());
+        assert_eq!(out[1], "test t0_0 ... ok", "its start");
+        assert!(
+            out[STEP_HEAD].starts_with("… ") && out[STEP_HEAD].ends_with(" lines not kept …"),
+            "{}",
+            out[STEP_HEAD]
+        );
+        assert!(out.ends_with(&["test tricky ... FAILED".into(), "failures:".into(), "    tricky".into()]));
+        // Scrolled to its failure, then a long step after it
+        let at = r.output.iter().position(|l| l.1 == "test tricky ... FAILED").unwrap();
+        r.scroll_to(at, 1);
+        batch(&mut r, vec!["── clippy ──".into()], true);
+        for chunk in 0..8 {
+            batch(&mut r, (0..1000).map(|i| format!("warning: w{chunk}_{i}")).collect(), false);
+        }
+        let out = lines(&r);
+        assert!(out.contains(&"    tricky".to_string()), "the failed test's name is kept");
+        assert!(out.contains(&"── clippy ──".to_string()) && out.last().unwrap() == "warning: w7_999");
+        let top = r.scroll.expect("still scrolled back");
+        assert_eq!(r.output[top].1, "test tricky ... FAILED", "the line scrolled to stays in sight");
+        // All of it is bounded
+        for chunk in 0..40 {
+            batch(&mut r, vec![format!("── s{chunk} ──")], true);
+            batch(&mut r, (0..2000).map(|i| format!("s{chunk} {i}")).collect(), false);
+        }
+        assert!(r.output.len() <= OUTPUT_KEPT, "{}", r.output.len());
     }
 
     fn dir() -> PathBuf {

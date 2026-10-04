@@ -190,7 +190,9 @@ impl Editor {
         if let Some((old, _)) = self.disk_round.replace((waker.clone(), watched)) {
             old.wake();
         }
-        self.events.jobs().spawn(move || {
+        // (every session's files: applied in the one in front — never swapped into the session that happened
+        // to start the round, whose name its toasts then carried, #59)
+        self.events.shared_jobs().spawn(move || {
             let stats: Vec<Stat> = loop {
                 // Armed before the stat: a change made while it runs still ends the wait
                 let mut watcher = wait.then(|| crate::fswatch::Watcher::with_waker(waker.clone()));
@@ -233,6 +235,7 @@ impl Editor {
         // checkout): saved, as far as the language servers go — rust-analyzer checks on a save (held while
         // a burst of writes goes on, `lsp_saved_outside`)
         let mut saved = Vec::new();
+        let mut said: Vec<(DocId, String, bool)> = Vec::new();
         for (id, known, now, body) in stats {
             let Some(doc) = self.docs.iter_mut().find(|d| d.id == id) else { continue };
             // Saved (or reloaded) since the stat started — the change it saw may be our own write; or a save
@@ -250,7 +253,7 @@ impl Editor {
                 (None, _) => {
                     if doc.disk.is_some() {
                         doc.disk = None;
-                        self.set_warning(format!("{name} was deleted on disk — :w to write it back"));
+                        said.push((id, format!("{name} was deleted on disk — :w to write it back"), true));
                     }
                 }
                 (Some(stamp), Some(body)) if !doc.is_modified() => {
@@ -277,7 +280,7 @@ impl Editor {
                             0 => String::new(),
                             d => format!(" · {}{} lines", if d > 0 { "+" } else { "" }, d),
                         };
-                        self.set_status(format!("{name} reloaded from disk{lines}"));
+                        said.push((id, format!("{name} reloaded from disk{lines}"), false));
                     }
                 }
                 // Written outside = my buffer (agent saving an edit I accepted, etc.) — counts as saved
@@ -302,13 +305,33 @@ impl Editor {
                     doc.disk = Some(stamp);
                     if !doc.disk_conflict {
                         doc.disk_conflict = true;
-                        self.set_warning(changed_while_editing(&name));
+                        said.push((id, changed_while_editing(&name), true));
                     }
                 }
             }
         }
+        for (id, msg, warn) in said {
+            self.disk_said(id, msg, warn);
+        }
         for id in saved {
             self.lsp_saved_outside(id);
+        }
+    }
+
+    /// What became of document `id` on disk, said for its session (#59): with several sessions, named after
+    /// it; shown only when it's the one in front — a session behind's goes to `:messages`.
+    fn disk_said(&mut self, id: DocId, msg: String, warn: bool) {
+        if self.sessions.is_empty() {
+            return if warn { self.set_warning(msg) } else { self.set_status(msg) };
+        }
+        let behind = self.sessions.iter().find(|l| l.docs.contains(&id) && !self.session.docs.contains(&id));
+        let label = behind.map_or_else(|| self.session.label(), |l| l.label()).to_string();
+        let msg = format!("{label} · {msg}");
+        let kind = if warn { crate::editor::ToastKind::Warning } else { crate::editor::ToastKind::Info };
+        match (behind.is_some(), warn) {
+            (true, _) => self.recorded(kind, msg),
+            (false, true) => self.set_warning(msg),
+            (false, false) => self.set_status(msg),
         }
     }
 
@@ -664,6 +687,66 @@ mod tests {
         assert!(ed.status.is_none() && ed.toasts.is_empty(), "no toast");
         let head = ed.doc().selection().primary().head;
         assert_eq!(ed.doc().text.byte_to_line(head), 3, "followed to the new last line");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #59: with several sessions, a reload is said for the session whose buffer it is — named after it,
+    /// and shown only when that's the one in front; a session behind's goes to `:messages` (it showed in
+    /// front with no name, once as another session's).
+    #[test]
+    fn a_reload_is_said_for_its_own_session() {
+        let dir = std::env::temp_dir().join(format!("tarae-disk-sessions-{}", std::process::id()));
+        for s in ["front", "back"] {
+            std::fs::create_dir_all(dir.join(s)).unwrap();
+            std::fs::write(dir.join(s).join(format!("{s}.txt")), "one\n").unwrap();
+        }
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let mut ed = Editor::new(Config::default());
+        ed.session.root = dir.join("front");
+        let back = ed.session_open(&dir.join("back")).unwrap();
+        ed.open(&dir.join("back/back.txt")).unwrap();
+        let back_doc = ed.doc().id;
+        assert!(ed.session_switch(0));
+        ed.open(&dir.join("front/front.txt")).unwrap();
+        let front_doc = ed.doc().id;
+        let stats: Vec<Stat> = [(front_doc, "front"), (back_doc, "back")]
+            .iter()
+            .map(|&(id, s)| {
+                let path = dir.join(s).join(format!("{s}.txt"));
+                std::fs::write(&path, "one\ntwo\n").unwrap();
+                let known = ed.docs.iter().find(|d| d.id == id).unwrap().disk;
+                (id, known, stamp(&path), Some(Rope::from_str("one\ntwo\n")))
+            })
+            .collect();
+        ed.toasts.clear();
+        ed.on_disk(stats);
+        let shown: Vec<String> = ed.toasts.iter().map(|t| t.text.clone()).collect();
+        let front = ed.session.label().to_string();
+        assert_eq!(shown, [format!("{front} · front.txt reloaded from disk · +1 lines")]);
+        let back_label = ed.sessions.iter().find(|l| l.id == back).unwrap().label().to_string();
+        assert!(
+            ed.messages
+                .iter()
+                .any(|m| m.2 == format!("{back_label} · back.txt reloaded from disk · +1 lines")),
+            "the session behind's, in :messages: {:?}",
+            ed.messages.iter().map(|m| &m.2).collect::<Vec<_>>()
+        );
+        // A round started while the other session was in front lands in the one in front now — said there,
+        // named after it (not swapped into the one that started it)
+        assert!(ed.session_switch(back));
+        std::fs::write(dir.join("front/front.txt"), "one\ntwo\nthree\n").unwrap();
+        ed.disk_poll(false);
+        assert!(ed.session_switch(0));
+        ed.toasts.clear();
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let reloaded = |ed: &Editor| ed.docs.iter().any(|d| d.id == front_doc && d.text.len_lines() == 4);
+        while !reloaded(&ed) && std::time::Instant::now() < end {
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(50)) {
+                ed.handle_event(ev);
+            }
+        }
+        let shown: Vec<String> = ed.toasts.iter().map(|t| t.text.clone()).collect();
+        assert_eq!(shown, [format!("{front} · front.txt reloaded from disk · +1 lines")]);
         std::fs::remove_dir_all(&dir).ok();
     }
 

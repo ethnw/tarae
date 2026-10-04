@@ -877,6 +877,49 @@ mod tests {
         assert!(t.visible && t.focus, "shown with the keys, the same shell");
     }
 
+    /// #58: a `:preflight` started while the terminal holds the bottom slot shows at once — its tab in the
+    /// slot's row, with the running badge — the terminal staying in front.
+    #[test]
+    fn a_preflight_behind_the_terminal_shows_its_tab_at_once() {
+        let (config, _) = crate::config::parse("");
+        let mut ed = Editor::new(config);
+        let dir = std::env::temp_dir().join(format!("tarae-preflight-behind-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        ed.session.root = std::fs::canonicalize(&dir).unwrap();
+        ed.terminal_run(vec!["/bin/sh".into()], vec![("HISTFILE".into(), "/dev/null".into())]);
+        while ed.session.terminal.is_none() {
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_secs(5)) {
+                ed.handle_event(ev);
+            }
+        }
+        assert_eq!(ed.slot(), Some(crate::sizes::Slot::Terminal));
+        let step = |name: &str, cmd: &str| crate::preflight::Step {
+            name: name.into(),
+            cmd: cmd.into(),
+            note: None,
+            from: ".tarae.toml".into(),
+        };
+        ed.config.preflight = vec![step("wait", "sleep 2")];
+        ed.preflight_start().unwrap();
+        // At once — no event handled since
+        let tab = ed.slot_tabs().into_iter().find(|t| t.slot == crate::sizes::Slot::Task);
+        assert!(
+            tab.as_ref().is_some_and(|t| t.label == "preflight" && t.badge == crate::chrome::Badge::Running),
+            "{:?}",
+            tab.map(|t| (t.label, t.badge))
+        );
+        let mut bytes = Vec::new();
+        crate::term::render(&mut ed, &mut bytes, 120, 30).unwrap();
+        let mut parser = vt100::Parser::new(30, 120, 0);
+        parser.process(&bytes);
+        let s = parser.screen().contents();
+        let row = s.lines().find(|l| l.contains("terminal")).unwrap_or_default();
+        assert!(row.contains("preflight"), "its tab beside the terminal's: {s}");
+        assert_eq!(ed.slot(), Some(crate::sizes::Slot::Terminal), "the terminal stays in front");
+        ed.session.task_run = None;
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// `C-w j` puts tarae's keys on the terminal (not the program's — `C-w z` can be typed there), `C-w z`
     /// fills the screen with it, `i` types in it; its escape key then leaves the keys on it while it fills
     /// the screen, and Esc goes back to the code — which ends it.

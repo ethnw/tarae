@@ -231,8 +231,14 @@ fn perf_e2e_busy_session_behind() {
     t.send(" l");
     t.send("go\r");
     t.wait_text("word word");
-    // (Esc alone — with a key right behind it, it reads as alt+that key)
-    t.esc("the chat let go of the keys", |s| s.contains("C-f unfollow"));
+    // (Esc alone — with a key right behind it, it reads as alt+that key. So wait for what's so only once it
+    // took: the follow card without the keys, `space l open the chat`. It waited for "C-f unfollow" — what
+    // the card says while it *has* the keys (`C-c stop  C-f unfollow`), so the wait passed at once, the `:`
+    // went out right behind the Esc, and on a loaded machine both came in one read: alt+`:`, the switch
+    // typed into the chat, a timeout — :preflight 2026-10-04, while main ran its own test loops)
+    let let_go = |s: &Screen| s.contains("space l open the chat") && !s.contains("C-f unfollow");
+    assert!(!let_go(&t.screen()), "what's waited for isn't on screen before the Esc");
+    t.esc("the chat let go of the keys", let_go);
     t.send(":session-switch 0\r");
     t.wait_for("the first session in front", |s| !s.contains("word word") && s.contains("fn f1("));
     // (past the toasts' fade and the switch's frames)

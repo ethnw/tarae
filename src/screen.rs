@@ -6,8 +6,9 @@
 //! row, the stretch from a changed cell to the last changed one. Typing, a key is a handful of cells rather
 //! than a 24 KB screen (estimated from recorded use: 13% of the bytes typing, 5% saving, 30% in a picker).
 //!
-//! A frame with anything else (another escape, a control character, text past the edge, a cluster too long
-//! to keep) goes out as it is, and the next one redraws everything. So does the first frame, a resize, focus
+//! A control character in text is a blank cell — none ever reaches the terminal to move its cursor (#18).
+//! A frame with anything else (another escape, text past the edge, a cluster too long to keep) goes out as
+//! it is (its control characters but ESC and BEL as spaces), and the next one redraws everything. So does the first frame, a resize, focus
 //! coming back, `:redraw`, and input resting after a write in parts — which is how the screen heals when
 //! something else wrote to the terminal, the terminal measured a character differently, or left something
 //! of its own behind (Terminal.app: a cursor drawn past its cell).
@@ -194,8 +195,16 @@ impl Grid {
                 }
                 continue;
             }
+            // A control character in a cell's text moves nothing: a blank cell of its own (#18: a raw LF
+            // from a message went out as it was — the cursor down without going back, rows drawn over)
             if b < 0x20 || b == 0x7f {
-                return None;
+                let (x, y) = pos?;
+                if x >= self.w {
+                    return None;
+                }
+                self.put(x, y, Cell::blank(style));
+                (pos, i) = (Some((x + 1, y)), i + 1);
+                continue;
             }
             // Text up to the next escape
             let end = frame[i..].iter().position(|&c| c < 0x20 || c == 0x7f).map_or(frame.len(), |n| i + n);
@@ -211,11 +220,16 @@ impl Grid {
             let text = std::str::from_utf8(&frame[i..end]).ok()?;
             for c in cells_from(text, 0, x, 8) {
                 let g = &text[c.bytes.clone()];
-                if !(1..=2).contains(&c.width)
-                    || x + c.width > self.w
-                    || g.len() > TEXT
-                    || g.chars().any(char::is_control)
-                {
+                // (a C1 control — U+0080…U+009F — the same: blank)
+                if g.chars().any(char::is_control) {
+                    if x >= self.w {
+                        return None;
+                    }
+                    self.put(x, y, Cell::blank(style));
+                    x += 1;
+                    continue;
+                }
+                if !(1..=2).contains(&c.width) || x + c.width > self.w || g.len() > TEXT {
                     return None;
                 }
                 let mut cell = Cell { text: [0; TEXT], len: g.len() as u8, width: c.width as u8, style };
@@ -529,7 +543,10 @@ impl Screen {
             }
             self.known = false;
             self.patched = false;
-            return frame;
+            // (as it is — but no control character but the escapes' own and BEL: none moves the cursor)
+            self.out.clear();
+            self.out.extend(frame.iter().map(|&b| if b < 0x20 && b != 0x1b && b != 0x07 { b' ' } else { b }));
+            return &self.out;
         }
         self.out.clear();
         diff(&self.shown, &self.next, !self.known, &mut self.out);
@@ -700,7 +717,7 @@ mod tests {
     fn what_it_cant_read_is_refused() {
         for frame in [
             &b"\x1b[1;1Habc\x1b[2J"[..], // another escape
-            b"\x1b[1;1Ha\tb",            // a control character
+            b"\x1b[1;5Hab\nc",           // a control character past the edge
             b"abc",                      // text before any move
             b"\x1b[1;4Habcd",            // past the edge
             b"\x1b[1;5H\xea\xb0\x80",    // a wide character in the last column
@@ -750,6 +767,22 @@ mod tests {
         s.invalidate();
         assert!(s.present(row("hellO").as_bytes(), 60, 2, &[]).len() > 120, "redrawn whole");
         assert!(!s.patched());
+    }
+
+    /// #18: a control character in text never reaches the terminal — read, it's a blank cell where it was
+    /// (the text after it stays on its row); in a frame that goes out as it is, a space. Only the escapes'
+    /// own ESC (and BEL) go out.
+    #[test]
+    fn no_control_character_moves_the_cursor() {
+        let g = grid(12, 2, "\x1b[1;1Hab\ncd\r\te\u{85}f\x1b[2;1Hx".as_bytes());
+        assert_eq!(row_text(&g, 0), "ab cd  e f  ");
+        assert_eq!(row_text(&g, 1), "x           ");
+        let mut s = Screen::new();
+        let out = s.present("\x1b[1;1Hab\ncd\r\x08x".as_bytes(), 12, 2, &[]).to_vec();
+        assert!(!out.iter().any(|&b| b < 0x20 && b != 0x1b), "{:?}", String::from_utf8_lossy(&out));
+        // Unreadable (another escape): as it is, its control characters spaces
+        let out = s.present(b"\x1b[1;1Ha\nb\x1b[5n", 12, 2, &[]).to_vec();
+        assert_eq!(out, b"\x1b[1;1Ha b\x1b[5n");
     }
 
     #[test]

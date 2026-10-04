@@ -112,6 +112,9 @@ pub struct Session {
     /// Its Claude's tool calls waiting for the editor's answer (`tools::WATCHED`) — one silent past its time
     /// marks the session possibly stuck (`Doing::Stuck`).
     pub tool_waits: Vec<ToolWait>,
+    /// The code review's viewed marks, by file — kept past the review (#9: reopened, they were gone) while the
+    /// file's diff is what it was when marked (`codereview::Viewed`).
+    pub viewed: std::collections::HashMap<PathBuf, crate::codereview::Viewed>,
 }
 
 /// How long a tool call may wait before its session is marked possibly stuck (a `diagnostics` call's own
@@ -201,6 +204,7 @@ impl Session {
             waiting_told: false,
             asleep: Vec::new(),
             tool_waits: Vec::new(),
+            viewed: Default::default(),
         }
     }
 
@@ -342,6 +346,29 @@ impl Editor {
         self.sessions.iter().filter(|l| self.doing(l) == Doing::Waiting).count()
     }
 
+    /// How many of Claude's questions wait behind the card up — cards stacked under it, its chat's reads and
+    /// edits queued (parallel calls queued silently), a change set's files, and what waits in sessions
+    /// behind (#7: the card's `1/N`).
+    pub fn cards_behind(&self) -> usize {
+        let queued = |l: &Session| {
+            l.chat.as_ref().map_or(0, |c| {
+                c.reads.len() + c.edits.queue.len() + c.edits.sets.iter().map(|s| s.waiting()).sum::<usize>()
+            })
+        };
+        let behind: usize =
+            self.sessions.iter().map(|l| l.parked.iter().filter(|o| o.claudes()).count() + queued(l)).sum();
+        self.offers.len().saturating_sub(1) + queued(&self.session) + behind
+    }
+
+    /// `C-q` with no card up in front (#7): to the first session behind whose Claude waits for you — its card
+    /// comes up there. False: none waits.
+    pub(crate) fn go_to_waiting_card(&mut self) -> bool {
+        let Some(id) = self.sessions.iter().find(|l| self.doing(l) == Doing::Waiting).map(|l| l.id) else {
+            return false;
+        };
+        self.session_switch(id)
+    }
+
     /// How many sessions behind are possibly stuck (`Doing::Stuck`) — `◦n` where their tabs aren't drawn.
     pub fn sessions_stuck(&self) -> usize {
         self.sessions.iter().filter(|l| matches!(self.doing(l), Doing::Stuck { .. })).count()
@@ -455,7 +482,7 @@ impl Editor {
         self.current = self.doc_index(self.session.current_doc);
         self.events.set_session(front);
         if tell {
-            self.set_status(format!("{name} · Claude waits for your answer — space W"));
+            self.set_status(format!("{name} · Claude waits for your answer — C-q goes there"));
         } else if self.messages.last().map(|m| m.0) == said {
             // (nothing of it is on screen — an idle front draws nothing for a busy session behind)
             self.unchanged = true;
@@ -611,6 +638,46 @@ mod tests {
             ed.handle_key(key);
         }
         ed.lsp_flush();
+    }
+
+    /// #7: the card up says how many wait behind it — stacked, queued in its chat, in sessions behind — and
+    /// `C-q` with no card up here goes to the session whose Claude waits, its card up there.
+    #[test]
+    fn the_card_counts_what_waits_and_c_q_goes_to_it() {
+        use crate::offer::{Offer, What};
+        let (mut ed, front, back) = two_projects("waiting-cards");
+        let screen_card = |n: u64| {
+            let what = What::Screen { call: crate::tools::Call::test(n) };
+            Offer::new(format!("Claude asks {n}"), "to see the screen", "", String::new(), what)
+        };
+        let back_id = ed.session_open(&back).unwrap();
+        ed.session.parked.push(screen_card(1));
+        assert!(ed.session_switch(0) && ed.session.root == front);
+        assert_eq!(ed.sessions_waiting(), 1);
+        // In front: one card up, one under it — and the one behind
+        ed.push_offer(screen_card(2));
+        ed.push_offer(screen_card(3));
+        assert_eq!(ed.cards_behind(), 2);
+        let mut bytes = Vec::new();
+        crate::term::render(&mut ed, &mut bytes, 120, 30).unwrap();
+        let mut parser = vt100::Parser::new(30, 120, 0);
+        parser.process(&bytes);
+        let s = parser.screen().contents();
+        assert!(s.contains("Claude asks 2") && s.contains("1/3"), "{s}");
+        // C-q with cards up here: the card's (it takes the keys)
+        feed(&mut ed, "<C-q>");
+        assert!(ed.card_keys && ed.session.id == 0);
+        ed.offers.clear();
+        ed.card_keys = false;
+        // None up here: C-q goes to the session that waits, its card up
+        feed(&mut ed, "<C-q>");
+        assert_eq!(ed.session.id, back_id, "to the session whose Claude waits");
+        assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some("Claude asks 1"));
+        // Nothing waits anywhere: said
+        ed.offers.clear();
+        feed(&mut ed, "<C-q>");
+        assert_eq!(ed.session.id, back_id);
+        assert!(ed.status.as_ref().is_some_and(|s| s.0.contains("no card waits")), "{:?}", ed.status);
     }
 
     /// Two checkouts, `front` and `back`, each a cargo project with a `main.rs` — and an editor whose rust

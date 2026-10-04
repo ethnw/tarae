@@ -317,6 +317,9 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
         chat_mini: Default::default(),
         session_spots: Default::default(),
         review_rail: Default::default(),
+        review_rail_marks: Default::default(),
+        review_rail_more: Default::default(),
+        task_steps: Default::default(),
         sidebar: Default::default(),
         width: Some(lay.width),
         chat_w: lay.chat_w,
@@ -1026,24 +1029,25 @@ fn preflight_of<'a>(editor: &'a Editor, r: &crate::task::Run) -> Option<&'a crat
 
 /// A preflight's steps in a row: `● fmt 0.4s   ▲ clippy 12s   ▂▅▇ test 3.2s   ◦ perf` — passed in the plus
 /// color (a note's pass in warning), failed in the error color, the one running with the wave, the ones to
-/// come faint. Too wide: the times go, then names are cut from the end.
+/// come faint. Too wide: the times go, then names are cut from the end. Each piece with its step (a click
+/// there scrolls to its output — #72; the gaps between: none).
 fn preflight_row(
     p: &crate::preflight::Preflight,
     w: usize,
     card: Style,
     ui: &Ui,
     colors: (Option<Color>, Option<Color>, Option<Color>),
-) -> Vec<(String, Style)> {
+) -> Vec<(String, Style, Option<usize>)> {
     use crate::preflight::State;
     let (good, bad, warn) = colors;
     let faint = Style { fg: ui.linenr.fg, ..card };
     let dim = Style { fg: ui.virt.fg, ..card };
     let accent = Style { fg: ui.accent.fg, ..card };
-    let cells = |timed: bool| -> Vec<(String, Style)> {
+    let cells = |timed: bool| -> Vec<(String, Style, Option<usize>)> {
         let mut out = Vec::new();
         for (k, s) in p.steps.iter().enumerate() {
             if k > 0 {
-                out.push(("   ".to_string(), card));
+                out.push(("   ".to_string(), card, None));
             }
             let time = |d: Option<std::time::Duration>| match d {
                 Some(d) if timed => format!(" {}", crate::preflight::long_duration(d)),
@@ -1056,19 +1060,19 @@ fn preflight_row(
                 State::Passed => ("●".into(), Style { fg: good, ..card }, card),
                 State::Failed(_) => ("▲".into(), Style { fg: bad, ..card }, Style { bold: true, ..card }),
             };
-            out.push((format!("{glyph} "), gs));
-            out.push((s.name.clone(), name));
+            out.push((format!("{glyph} "), gs, Some(k)));
+            out.push((s.name.clone(), name, Some(k)));
             let t = match s.state {
                 State::Running => time(s.started.map(|t| t.elapsed())),
                 _ => time(s.took),
             };
             if !t.is_empty() {
-                out.push((t, dim));
+                out.push((t, dim, Some(k)));
             }
         }
         out
     };
-    let width = |c: &[(String, Style)]| c.iter().map(|(s, _)| s.width()).sum::<usize>();
+    let width = |c: &[(String, Style, Option<usize>)]| c.iter().map(|(s, ..)| s.width()).sum::<usize>();
     let room = w.saturating_sub(4);
     let timed = cells(true);
     if width(&timed) <= room {
@@ -1081,13 +1085,13 @@ fn preflight_row(
     // Cut where the room ends
     let mut out = Vec::new();
     let mut used = 0;
-    for (s, st) in bare {
+    for (s, st, k) in bare {
         let left = room.saturating_sub(used);
         if s.width() <= left {
             used += s.width();
-            out.push((s, st));
+            out.push((s, st, k));
         } else {
-            out.push((fit_ellipsis(&s, left), st));
+            out.push((fit_ellipsis(&s, left), st, k));
             break;
         }
     }
@@ -1342,9 +1346,15 @@ fn draw_task_panel(
         queue!(out, MoveTo(x0 as u16, body as u16))?;
         apply(out, card)?;
         queue!(out, Spaces(w), MoveTo((x0 + PAD) as u16, body as u16))?;
-        for (s, st) in preflight_row(p, w, card, ui, (good, bad, warn)) {
+        let mut chips = editor.screen.task_steps.borrow_mut();
+        let mut x = x0 + PAD;
+        for (s, st, k) in preflight_row(p, w, card, ui, (good, bad, warn)) {
             apply(out, st)?;
-            queue!(out, Print(s))?;
+            queue!(out, Print(&s))?;
+            if let Some(k) = k {
+                chips.push((body, x, x + s.width(), k));
+            }
+            x += s.width();
         }
     }
     // The sandbox's line, when it blocked something: the bottom row, under the output
@@ -4199,20 +4209,59 @@ fn draw_review(
                 // was "a all" — one `y` left the rest waiting, easy to miss)
                 let left =
                     rev.hunks.iter().filter(|h| h.decision == Decision::Undecided && !h.conflict).count();
-                let all = format!("accept all {left}");
-                let (status, st): (Vec<(&str, &str)>, Style) = match (h.conflict, h.decision) {
-                    (true, _) => (vec![("", "text changed while waiting — skipped")], base.patch(ui.error)),
-                    (_, Decision::Accept) => (vec![("", "accepted")], Style { fg: plus_fg, ..base }),
-                    (_, Decision::Reject) => (vec![("", "rejected")], Style { fg: minus_fg, ..base }),
-                    _ if current && left > 1 => {
-                        (vec![("y", "accept this one"), ("a", &all), ("n", "reject"), ("tab", "next")], base)
+                let (all, all_short) = (format!("accept all {left}"), format!("all {left}"));
+                // Esc goes back to the chat unanswered (#70); from there `C-q` answers it. Each in a short form
+                // too, for when the row can't hold them whole (beside the chat it cut esc's off)
+                let chat = editor.session.chat.as_ref().map(|c| c.focused);
+                let esc: &[(&str, &str)] = if chat.is_some() { &[("esc", "back, unanswered")] } else { &[] };
+                let esc_short: &[(&str, &str)] = if chat.is_some() { &[("esc", "back")] } else { &[] };
+                type Hints<'a> = Vec<(&'a str, &'a str)>;
+                let (full, short, st): (Hints, Hints, Style) = match (h.conflict, h.decision) {
+                    (true, _) => {
+                        let v = vec![("", "text changed while waiting — skipped")];
+                        (v.clone(), v, base.patch(ui.error))
                     }
-                    _ if current => (vec![("y", "accept"), ("n", "reject")], base),
-                    _ => (vec![("", "pending")], Style { fg: ui.linenr.fg, ..base }),
+                    (_, Decision::Accept) => {
+                        (vec![("", "accepted")], vec![("", "accepted")], Style { fg: plus_fg, ..base })
+                    }
+                    (_, Decision::Reject) => {
+                        (vec![("", "rejected")], vec![("", "rejected")], Style { fg: minus_fg, ..base })
+                    }
+                    _ if current && chat == Some(true) => {
+                        (vec![("C-q", "answer it — the chat has the keys")], vec![("C-q", "answer it")], base)
+                    }
+                    _ if current && left > 1 => (
+                        [
+                            &[("y", "accept this one"), ("a", all.as_str()), ("n", "reject")][..],
+                            esc,
+                            &[("tab", "next")],
+                        ]
+                        .concat(),
+                        [
+                            &[("y", "this one"), ("a", all_short.as_str()), ("n", "no")][..],
+                            esc_short,
+                            &[("tab", "next")],
+                        ]
+                        .concat(),
+                        base,
+                    ),
+                    _ if current => (
+                        [&[("y", "accept"), ("n", "reject")][..], esc].concat(),
+                        [&[("y", "yes"), ("n", "no")][..], esc_short].concat(),
+                        base,
+                    ),
+                    _ => (vec![("", "pending")], vec![("", "pending")], Style { fg: ui.linenr.fg, ..base }),
                 };
+                let room = |v: &Hints, gap: usize| -> usize {
+                    v.iter()
+                        .map(|(k, d)| gap + if k.is_empty() { 0 } else { k.width() + 1 } + d.width())
+                        .sum()
+                };
+                let (status, gap) = if used + room(&full, 3) <= width { (full, 3) } else { (short, 2) };
                 for (key, desc) in status {
+                    let lead = " ".repeat(gap);
                     let piece =
-                        if key.is_empty() { format!("   {desc}") } else { format!("   {key} {desc}") };
+                        if key.is_empty() { format!("{lead}{desc}") } else { format!("{lead}{key} {desc}") };
                     if used + piece.width() > width {
                         break;
                     }
@@ -4221,7 +4270,7 @@ fn draw_review(
                         queue!(out, Print(&piece))?;
                     } else {
                         apply(out, Style { fg: ui.accent.fg, bold: true, ..base })?;
-                        queue!(out, Print(format!("   {key}")))?;
+                        queue!(out, Print(format!("{lead}{key}")))?;
                         apply(out, Style { fg: ui.virt.fg, ..base })?;
                         queue!(out, Print(format!(" {desc}")))?;
                     }
@@ -6185,7 +6234,8 @@ impl OfferCard {
         }
         let pad = card_padding(ui, card_style(ui, editor, "ui.popup"));
         let max_inner = (lay.edit_w / 2).clamp(30, 56).min(lay.edit_w.saturating_sub(8));
-        let count = editor.offers.len();
+        // (what waits behind it too — queued calls, other sessions' cards, #7)
+        let count = 1 + editor.cards_behind();
         let badge = if count > 1 { format!("1/{count}") } else { String::new() };
         let title = o.title.clone();
         // A paragraph wrapped to the card, up to `n` lines (a command to run is shown whole)
@@ -6263,6 +6313,15 @@ impl OfferCard {
                     crate::offer::What::SessionEnd(_) => b = vec![('y', "Remove it"), ('n', "Cancel")],
                     crate::offer::What::Screen { .. } => {
                         b = vec![('y', "Once"), ('a', "This chat"), ('n', "No")]
+                    }
+                    crate::offer::What::ReviewEnd => b = vec![('y', "End it"), ('n', "Keep reviewing")],
+                    crate::offer::What::ChangeSet { .. } => {
+                        b = vec![
+                            ('y', "Accept all"),
+                            ('r', "One by one"),
+                            ('v', "See them"),
+                            ('n', "Decline all"),
+                        ]
                     }
                     _ => {}
                 }
@@ -7583,6 +7642,12 @@ fn draw_review_rail(
         let text = if k > 0 { vec![sp(format!("{arrow} {k} more"), faint)] } else { Vec::new() };
         (text, card, None)
     };
+    // (a click on `↑ N more` / `↓ N more` scrolls it a page — #73; on a file's mark, marks it viewed — #67)
+    let mut scrolls: Vec<(usize, isize)> = Vec::new();
+    let mut marks: Vec<(usize, usize, usize)> = Vec::new();
+    if r.scroll > 0 {
+        scrolls.push((rows.len(), -(room as isize)));
+    }
     rows.push(more(files_in(&tree[..r.scroll.min(tree.len())]), "↑"));
     // The keys in the rail: its selection is the row marked (else the file being read)
     let marked = r.marked(editor);
@@ -7643,9 +7708,14 @@ fn draw_review_rail(
         // (the counts end at the padding)
         row.push(sp(" ".repeat((w + PAD).saturating_sub(used + tail_w)), bg));
         row.extend(tail);
+        marks.push((rows.len(), i, 2 + indent));
         rows.push((row, bg, Some(i)));
     }
-    rows.push(more(files_in(tree.get(r.scroll + room..).unwrap_or_default()), "↓"));
+    let below = files_in(tree.get(r.scroll + room..).unwrap_or_default());
+    if below > 0 {
+        scrolls.push((rows.len(), room as isize));
+    }
+    rows.push(more(below, "↓"));
     // Keys at the bottom
     let fill = lay.body_h.saturating_sub(rows.len() + RAIL_HINTS);
     rows.extend(std::iter::repeat_n((Vec::new(), card, None), fill));
@@ -7679,6 +7749,9 @@ fn draw_review_rail(
             links.push((y, *i));
         }
     }
+    let shown = |y: usize| y < lay.body_h;
+    editor.screen.review_rail_marks.borrow_mut().extend(marks.into_iter().filter(|m| shown(m.0)));
+    editor.screen.review_rail_more.borrow_mut().extend(scrolls.into_iter().filter(|s| shown(s.0)));
     Ok(())
 }
 
@@ -7857,11 +7930,20 @@ fn draw_chat(
                     row_links.resize(lines.len(), None);
                     *row_links.last_mut().expect("just pushed") = m.attached.clone();
                 }
-                let para = [md::Line::Text { spans: vec![sp(m.text.clone(), strong)], indent: 0 }];
-                for l in md::wrap(&para, w - 2, faint) {
-                    let mut row = vec![sp("▎ ".into(), accent)];
-                    row.extend(l);
-                    lines.push(row);
+                // Each line of it rows of its own, blank ones kept, as written (#18: one span with its line
+                // breaks in it reached the terminal as raw LFs — rows overlapped, paragraphs lost their starts)
+                for part in m.text.split('\n').map(|l| l.trim_end_matches('\r')) {
+                    let para = [md::Line::Text { spans: vec![sp(part.to_string(), strong)], indent: 0 }];
+                    let rows =
+                        if part.trim().is_empty() { Vec::new() } else { md::wrap(&para, w - 2, faint) };
+                    if rows.is_empty() {
+                        lines.push(vec![sp("▎".into(), accent)]);
+                    }
+                    for l in rows {
+                        let mut row = vec![sp("▎ ".into(), accent)];
+                        row.extend(l);
+                        lines.push(row);
+                    }
                 }
             }
             Role::Assistant => {

@@ -1058,8 +1058,61 @@ fn relocate(h: &mut Hunk, text: &Rope) -> bool {
     }
 }
 
-/// Keys during review. True if handled.
+/// Keys during review. True if handled. While it waits, the editor's own keys still work over it (#61): a
+/// picker or a prompt open, a key sequence under way (`space W`, `space m c`), `space`, `:` and `C-w` that
+/// start one — and `C-d` `C-u` `C-f` `C-b` `C-e` `C-y` (page keys too) scroll it. Esc goes back to the chat,
+/// the change unanswered (#70) — `C-q` brings the keys back to it; with no chat it's said and nothing
+/// happens (`n` rejects).
 pub fn review_key(ed: &mut Editor, key: Key) -> bool {
+    if ed.picker.is_some() || ed.prompt.is_some() || !ed.pending.is_empty() {
+        return false;
+    }
+    let page = ed.viewport.0.max(2) as isize;
+    let chat = ed.session.chat.as_ref().map(|c| c.focused);
+    let Some(rev) = ed.session.review.as_mut().filter(|r| r.ready) else { return false };
+    // Back in the chat: its keys are the chat's until `C-q`
+    if chat == Some(true) {
+        if key.ctrl && !key.alt && key.code == Code::Char('q') {
+            if let Some(c) = ed.session.chat.as_mut() {
+                c.focused = false;
+            }
+            return true;
+        }
+        return false;
+    }
+    let scroll = |rev: &mut Review, by: isize| {
+        rev.scroll = rev.scroll.saturating_add_signed(by);
+        rev.follow = false;
+        false
+    };
+    let done = match (key.code, key.ctrl, key.alt) {
+        (Code::Char(' ' | ':'), false, false) | (Code::Char('w'), true, false) => return false,
+        (Code::Char('d'), true, false) => scroll(rev, page / 2),
+        (Code::Char('u'), true, false) => scroll(rev, -page / 2),
+        (Code::Char('f'), true, false) | (Code::PageDown, false, false) => scroll(rev, page),
+        (Code::Char('b'), true, false) | (Code::PageUp, false, false) => scroll(rev, -page),
+        (Code::Char('e'), true, false) => scroll(rev, 1),
+        (Code::Char('y'), true, false) => scroll(rev, -1),
+        (Code::Esc, ..) => {
+            match ed.session.chat.as_mut() {
+                Some(c) => {
+                    c.focused = true;
+                    ed.set_status("back to the chat — the change waits unanswered, C-q answers it");
+                }
+                None => ed.set_status("the change waits — y accepts, n rejects"),
+            }
+            return true;
+        }
+        _ => return review_answer(ed, key),
+    };
+    if done {
+        finish(ed);
+    }
+    true
+}
+
+/// The review's own keys: `y` `n` `a` answer, `q` ends it, `j` `k` scroll, `tab` goes to the next change.
+fn review_answer(ed: &mut Editor, key: Key) -> bool {
     let Some(rev) = ed.session.review.as_mut().filter(|r| r.ready) else { return false };
     let decide = |rev: &mut Review, d: Decision| {
         rev.hunks[rev.current].decision = d;
@@ -1082,7 +1135,7 @@ pub fn review_key(ed: &mut Editor, key: Key) -> bool {
                 .for_each(|h| h.decision = Decision::Accept);
             true
         }
-        (Code::Char('q'), false) | (Code::Esc, _) => true,
+        (Code::Char('q'), false) => true,
         (Code::Char('j') | Code::Down, false) => {
             rev.scroll += 1;
             rev.follow = false;
@@ -1111,6 +1164,12 @@ fn finish(ed: &mut Editor) {
     let Some(mut rev) = ed.session.review.take() else { return };
     let on_done = rev.on_done.take();
     let before = ed.docs.iter().find(|d| d.id == rev.doc_id).map(|d| d.text.clone());
+    // (the editor's keys work while it waits — #61: a change of the text since is found again, or skipped)
+    if let Some(text) = &before {
+        for h in rev.hunks.iter_mut().filter(|h| h.decision == Decision::Accept && !h.conflict) {
+            h.conflict = !relocate(h, text);
+        }
+    }
     let applied = apply_accepted(ed, &rev);
     // A step `space u` takes back on its own
     if applied

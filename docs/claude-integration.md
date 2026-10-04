@@ -76,8 +76,10 @@ To send the screen yourself, use `C-s` (below).
 
 A card that asks something (this one, a command to run, a read outside the project) takes its answer keys in
 the editor. While you're typing in the chat, or in a review, it leaves your keys alone and says
-`C-q to answer it`: `C-q` gives the card the keys, your draft stays as it was, and Esc goes back unanswered.
-Esc never answers a card. `n` does.
+`C-q to answer it`: `C-q` gives the card the keys (the status line says `CARD`), your draft stays as it was, and
+Esc goes back unanswered. Esc never answers a card. `n` does. A card counts what waits behind it — `1/3`: cards
+under it, Claude's calls queued, cards in other sessions — and `C-q` with no card up here goes to the session
+whose Claude waits for you.
 
 ![Claude wants to see your screen: a card says it goes as text, 140×40, that Claude can only look, and that it includes the terminal panel (14 rows), with y Once, a This chat and n No](screenshots/chat-screen.png)
 
@@ -190,11 +192,15 @@ plan belongs to its conversation: it's kept and continued with it, and `C-l` sta
 When you ask for a change, Claude edits files from the chat too, across as many files as it takes. Nothing is
 written until you've seen it: each edit opens as the same in-buffer review as select → instruct → diff, headed
 by what you asked for. The change in hand says what its keys do: `y accept this one`, `a accept all 2` (every
-change still undecided), `n reject`; `q` rejects the rest. Under that title, Claude's own
+change still undecided), `n reject`, `esc back, unanswered` (shorter where the row is narrow); `q` rejects the
+rest. Esc goes back to the chat and leaves the change waiting — `C-q` answers it. While it waits, `C-d` `C-u` (and
+the wheel) scroll it, and `space`, `:` and `C-w` work over it. Under that title, Claude's own
 words from just before it made the edit say why ([screenshot](screenshots/chat-edit-why.png)): what it
 concluded, in a row or two. Its full reasoning is in the chat. The accepted changes are what gets
 written. Accept part of a change, and only that part is written. Decline, and Claude is told so. Several edits
-queue up one after another.
+queue up one after another. A rename or replace of Claude's across several files comes as one card instead
+(`Claude changes 10 files`, the change, each file's count): `y` accepts them all, `r` reviews them one by one,
+`v` shows every change in a buffer, `n` declines them all.
 
 A file with unsaved edits is a special case, because disk isn't what you're looking at. The accepted change stays
 in your buffer, and Claude is told the file changes when you save.
@@ -302,18 +308,22 @@ what runs: quoted words are fine (`cargo test -- 'a b'`), and so is `2>&1`. `$`,
 file, pipes, `;`, `&&`, globs, a `VAR=value` before it, or an option that makes git write or run something
 (`--output`, `--ext-diff`) and it asks like any other. One exception for pipes: a check whose output only goes
 through filters that read it is still the check — `cargo test 2>&1 | grep -E 'FAILED|panicked' | head`, through
-`grep`, `head`, `tail`, `wc`, `sort`, `cut` or `uniq` (none with an option that writes, runs or never ends).
-It runs where the check alone would, its places still go to your list, and a card for one offers its first
-words (below), as for the command alone.
+`grep`, `head`, `tail`, `wc`, `sort`, `cut`, `uniq` or `sed -n 'a,bp'` (none with an option that writes, runs or
+never ends). It runs where the check alone would, its places still go to your list, and a card for one offers its
+first words (below), as for the command alone. **A line of checks and reads** runs too when every part would on
+its own — `cargo fmt && cargo clippy`, `cargo test; cargo clippy`, `cd sub && cargo check` — where it reads judged
+as below.
 
 **So do commands that only read, when they read in the project**: `ls`, `cat`, `head`, `tail`, `wc`, `grep`,
-`rg`, `find`, `tree`, `stat`, `file`, `du`, `diff`, `sort`, `uniq`, `cut`, `pwd`, and git's `blame`, `rev-parse`,
-`ls-files` and a bare `branch`. Not with an option that writes, runs something or never ends (`find
+`rg`, `find`, `tree`, `stat`, `file`, `du`, `diff`, `sort`, `uniq`, `cut`, `pwd`, `sed -n 'a,bp'` (line numbers
+only), and git's `blame`, `rev-parse`, `ls-files` and a bare `branch` — git's `-C <dir>` too, the folder read like
+any other. Not with an option that writes, runs something or never ends (`find
 -exec`/`-delete`/`-fprint`, `sort -o`, `tree -o`, `rg --pre`, `tail -f`, `uniq in out`, `git branch <name>`). A
 line of them reads too: joined by `;` `&&` `||` `|`, with a `cd`, or the same inside `sh -c '…'` — `cd src &&
-grep -n fn a.rs | sort | head`. A `|` inside quotes is part of a pattern (`grep -E 'a|b'`). Anything the shell
-would fill in or run (`$`, backticks, a redirect to a file, `<`, a lone `&`, a `sh -c` inside the body) and it
-asks. Every path the line names is resolved where its part runs (after a `cd`, there — that folder is read
+grep -n fn a.rs | sort | head`. Quotes keep what's in them as written: a `|` `<` `>` `*` inside them is part of a
+pattern (`grep -E 'a|b'`, `rg "sleep\(|a *[<>]"` — a `\` in double quotes is read as sh reads it). Anything the
+shell would fill in or run (`$`, backticks, a redirect to a file, `<`, a lone `&`, a `sh -c` inside the body) and
+it asks. Every path the line names is resolved where its part runs (after a `cd`, there — that folder is read
 too; a glob by its fixed folder; links followed, `..` gone through): if one lies outside the project, the card
 says which, since what it reads goes to Claude. `a` and `A` there work as on a
 [read's card](#reading-outside-the-project): those places stay allowed, for the conversation or always.
@@ -461,13 +471,15 @@ back in one go. It works on the real buffers, so every motion, go-to-definition,
 - A rail on the left lists the changed files with their `+added −removed` counts and your comments. Removed lines show
   in red where they were; added and changed lines sit on a green wash. `]g`/`[g` walk the changes and go on into the
   next or previous file. `space e` gives the rail the keys: `j`/`k` over the files, Enter opens one, `m` marks it
-  viewed and goes on to the next, Esc back to the code (a click on a file opens it too)
+  viewed and goes on to the next, Esc back to the code. A click on a file opens it, a click on its `◦` marks it
+  viewed too (a second click leaves it marked), and a click on `↑ N more` / `↓ N more` or the wheel scrolls the list
 - `space n` on a line writes a **draft** comment (the same key as everywhere else; during a review it drafts instead of
   sending). Drafts show as `¶ draft · …` and in the rail, and `]n` walks them
 - `space v s` sends every draft to Claude in one message, each with its lines as a diff. Claude answers every comment
   on its note and makes the changes, which come to you as the usual [edit review](#edits)
-- `space v m` marks a file viewed (a later change to it takes the mark back). `space v q` ends the review, and the gutter
-  goes back to comparing against the index
+- `space v m` marks a file viewed, again unmarks it. The mark stays while the file's diff is what it was — ended and
+  opened again, the review keeps it — and a change to the diff takes it back. `space v q` ends the review (with files
+  not viewed it asks first, on a card naming them), and the gutter goes back to comparing against the index
 
 ### Claude reviews your changes
 
@@ -484,12 +496,13 @@ draft, and `space v s` sends your answers together.
 | `space v v` / `:review [branch]` | Start (against HEAD / since a branch) |
 | `]g` / `[g` | Next / previous change, across files |
 | `space n` | Draft a comment (or a reply) on this line |
-| `space v m` | Mark this file viewed |
+| `space v m` | Mark this file viewed (again: not viewed) |
 | `space e` | The rail: `j`/`k` files, Enter open, `m` viewed and next, Esc back |
+| click on a file's `◦` | Open it and mark it viewed |
 | `space v u` | Take the change at the cursor back |
 | `space v s` / `:review-send` | Send the drafts to Claude |
 | `space v c` / `:review-claude` | Claude reviews the changes: notes on the lines, a verdict in the chat |
-| `space v q` / `:review-close` | End the review |
+| `space v q` / `:review-close` | End the review (asks first while files aren't viewed) |
 | `space v t` / `:review-turn` | Review what Claude changed in its latest turn |
 | `space v a` / `:review-at-end` | [Review at the end](#review-at-the-end): Claude's edits go in as it works (asks first) |
 

@@ -42,28 +42,53 @@ pub fn read_branch(head: &Path) -> Option<String> {
     parse_head(&std::fs::read_to_string(head).ok()?)
 }
 
-/// Watcher thread for `dir`'s repository — reads once at first, then whenever HEAD changes.
+/// The loose ref file a symbolic HEAD points to (`ref: refs/heads/x`) — in a worktree's own git folder, or
+/// the repository's common one (`commondir`). None: HEAD is detached (or unreadable).
+fn head_ref(head: &Path) -> Option<PathBuf> {
+    let name = std::fs::read_to_string(head).ok()?.strip_prefix("ref:")?.trim().to_string();
+    let gitdir = head.parent()?;
+    let common = std::fs::read_to_string(gitdir.join("commondir"))
+        .ok()
+        .map(|c| gitdir.join(c.trim()))
+        .unwrap_or_else(|| gitdir.to_path_buf());
+    let own = gitdir.join(&name);
+    Some(if own.exists() { own } else { common.join(&name) })
+}
+
+/// Watcher thread for `dir`'s repository — reads once at first, then whenever HEAD moves: its file (a
+/// checkout, a rebase) or the ref it points to (a commit, a rebase's end, a reset). Then the branch is read
+/// again and the session's buffers take the index as it is now (#74: after a rebase in a session's
+/// terminal the status line said +62 −62 over a clean tree).
 pub fn watch(tx: crate::event::Tx, dir: PathBuf) {
     thread::spawn(move || {
         let Some(head) = find_head(&dir) else { return };
-        let stamp = || std::fs::metadata(&head).and_then(|m| m.modified()).ok();
+        let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
         let (mut last, mut first) = (None, true);
         loop {
             let mut watcher = crate::fswatch::Watcher::new(); // (armed before the stat — see `fswatch`)
             watcher.file(&head);
-            let now = stamp();
+            let reference = head_ref(&head);
+            if let Some(r) = &reference {
+                watcher.file(r);
+            }
+            let now = mtime(&head);
             // (HEAD gone: the worktree was removed — a session ended — and so is its session)
             if now.is_none() && !first {
                 break;
             }
-            if first || now != last {
-                (last, first) = (now, false);
+            let now = (now, reference.as_deref().and_then(mtime));
+            if first || Some(now) != last {
+                let moved = !first;
+                (last, first) = (Some(now), false);
                 let branch = read_branch(&head);
                 let dir = dir.clone();
                 // (only the session it's for: one ended meanwhile sends it to the front)
                 let apply = move |ed: &mut Editor| {
                     if ed.session.root == dir {
                         ed.session.git_branch = branch;
+                        if moved {
+                            ed.git_reload_bases_in(&dir);
+                        }
                     }
                 };
                 if tx.send(Event::Job(Box::new(apply))).is_err() {
@@ -199,6 +224,19 @@ impl Editor {
 
     pub fn git_reload_bases(&mut self) {
         let ids: Vec<_> = self.docs.iter().filter(|d| d.path.is_some()).map(|d| d.id).collect();
+        for id in ids {
+            self.git_load_base(id);
+        }
+    }
+
+    /// The buffers of files under `dir` (a checkout whose HEAD moved) take the index as it is now.
+    pub fn git_reload_bases_in(&mut self, dir: &Path) {
+        let ids: Vec<_> = self
+            .docs
+            .iter()
+            .filter(|d| d.path.as_deref().is_some_and(|p| p.starts_with(dir)))
+            .map(|d| d.id)
+            .collect();
         for id in ids {
             self.git_load_base(id);
         }

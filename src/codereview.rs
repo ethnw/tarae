@@ -9,10 +9,10 @@
 //! - Comments are notes; while a review is open (or has drafts) `space n` writes a draft, and `space v s`
 //!   sends them all in one message with their diffs — Claude answers each on its note, its edits come as the
 //!   usual review.
-//! - `space v m` marks a file viewed (a later change to it takes the mark back); `space v q` ends the review
-//!   and puts the index back as the diff base.
+//! - `space v m` marks a file viewed (a click on its `◦` in the rail too); the mark stays — past the review,
+//!   reopened — while the file's diff is what it was, and a change takes it back; `space v q` ends the
+//!   review (asked first while files are left not viewed) and puts the index back as the diff base.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -67,8 +67,9 @@ pub struct CodeReview {
     pub base: Base,
     pub root: PathBuf,
     pub files: Vec<File>,
-    /// rel → the document version it was marked viewed at (a later change takes the mark back).
-    viewed: HashMap<String, (DocId, u64)>,
+    /// Files marked viewed before their base was there (a click on a file still opening, #67) — marked
+    /// once it is. The marks themselves are the session's (`Session.viewed`, kept past the review).
+    pending: Vec<PathBuf>,
     /// Documents diffed against the review's base (back to the index when it ends).
     pub docs: Vec<DocId>,
     /// Once this document's diff arrives, select its first (or, going back, last) change.
@@ -94,7 +95,7 @@ impl CodeReview {
             base,
             root,
             files,
-            viewed: HashMap::new(),
+            pending: Vec::new(),
             docs: Vec::new(),
             land: None,
             focus: false,
@@ -106,10 +107,28 @@ impl CodeReview {
         }
     }
 
+    /// Whether `f` is marked viewed and its diff is still what it was then (#9): its counts, and — its
+    /// document open with the review's base — the base's and the text's content (checked once a version).
+    /// A mark waiting for the file's base counts.
     pub fn viewed(&self, ed: &Editor, f: &File) -> bool {
-        self.viewed
-            .get(&f.rel)
-            .is_some_and(|&(id, v)| ed.docs.iter().find(|d| d.id == id).is_none_or(|d| d.version() == v))
+        if self.pending.contains(&f.path) {
+            return true;
+        }
+        let Some(v) = ed.session.viewed.get(&f.path) else { return false };
+        if v.counts != (f.added, f.removed) {
+            return false;
+        }
+        let Some((d, base)) = doc_of(ed, f).and_then(|d| Some((d, d.review_base.as_ref()?))) else {
+            return true;
+        };
+        if let Some((id, version, same)) = v.checked.get()
+            && (id, version) == (d.id, d.version())
+        {
+            return same;
+        }
+        let same = rope_hash(base) == v.base && rope_hash(&d.text) == v.text;
+        v.checked.set(Some((d.id, d.version(), same)));
+        same
     }
 
     /// The rail's rows: the files under their folders.
@@ -165,6 +184,93 @@ impl CodeReview {
 
 fn gone_title(f: &File) -> String {
     format!("{} (deleted)", f.rel)
+}
+
+/// File `f`'s document, if it's open (a gone one's: its empty stand-in).
+fn doc_of<'a>(ed: &'a Editor, f: &File) -> Option<&'a crate::document::Document> {
+    ed.docs.iter().find(|d| match &d.path {
+        Some(p) => *p == f.path,
+        None => f.gone && d.title.as_deref() == Some(gone_title(f).as_str()),
+    })
+}
+
+/// A file's viewed mark (#9): what its diff was when marked — its base's and its text's content, its counts
+/// — and the document version last checked against it, and how that went (drawing asks every frame).
+#[derive(Clone, Debug)]
+pub struct Viewed {
+    base: u64,
+    text: u64,
+    counts: (usize, usize),
+    checked: std::cell::Cell<Option<(DocId, u64, bool)>>,
+}
+
+fn rope_hash(r: &ropey::Rope) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for c in r.chunks() {
+        h.write(c.as_bytes());
+    }
+    h.finish()
+}
+
+/// File `i` marked viewed as its diff is now — or, its base still on the way (a click on a file opening,
+/// #67), once it's there. Marking a marked file leaves it marked.
+fn mark(ed: &mut Editor, i: usize) {
+    let Some(r) = ed.session.code_review.as_ref() else { return };
+    let Some(f) = r.files.get(i) else { return };
+    let counts = (f.added, f.removed);
+    // (a binary file has no diff to show: its counts are all there is)
+    let now = match doc_of(ed, f).filter(|d| !d.loading) {
+        _ if f.binary => Some((0, 0, None)),
+        Some(d) => d
+            .review_base
+            .as_ref()
+            .map(|b| (rope_hash(b), rope_hash(&d.text), Some((d.id, d.version(), true)))),
+        None => None,
+    };
+    let path = f.path.clone();
+    let r = ed.session.code_review.as_mut().expect("checked");
+    match now {
+        Some((base, text, checked)) => {
+            r.pending.retain(|p| *p != path);
+            let checked = std::cell::Cell::new(checked);
+            ed.session.viewed.insert(path, Viewed { base, text, counts, checked });
+        }
+        None if !r.pending.contains(&path) => r.pending.push(path),
+        None => {}
+    }
+}
+
+/// A file's base just came: the marks waiting for it.
+fn marks_due(ed: &mut Editor) {
+    let Some(r) = ed.session.code_review.as_ref() else { return };
+    let due: Vec<usize> =
+        r.files.iter().enumerate().filter(|(_, f)| r.pending.contains(&f.path)).map(|(i, _)| i).collect();
+    for i in due {
+        mark(ed, i);
+    }
+}
+
+/// A click on a file's mark in the rail (`◦`/`●`): it's opened if it isn't the one being read, and marked
+/// viewed — once, however many clicks (#67: a second click right after the first took the mark back).
+pub fn mark_clicked(ed: &mut Editor, i: usize) {
+    let Some(r) = ed.session.code_review.as_ref() else { return };
+    if r.current(ed) != Some(i) {
+        show(ed, i, false);
+    }
+    mark(ed, i);
+    viewed_said(ed, i);
+}
+
+/// The toast after a file's mark changed: viewed or not, and how many are.
+fn viewed_said(ed: &mut Editor, i: usize) {
+    let Some(r) = ed.session.code_review.as_ref() else { return };
+    let Some(f) = r.files.get(i) else { return };
+    let marked = r.viewed(ed, f);
+    let done = r.files.iter().filter(|f| r.viewed(ed, f)).count();
+    let n = r.files.len();
+    let rel = f.rel.clone();
+    ed.note(format!("{rel} {} — {done} of {n} viewed", if marked { "viewed" } else { "not viewed" }));
 }
 
 // ── git (worker threads) ──────────────────────────────────────────────────────
@@ -368,7 +474,7 @@ fn open(ed: &mut Editor, root: PathBuf, base: Base, mut files: Vec<File>) {
         base,
         root,
         files,
-        viewed: HashMap::new(),
+        pending: Vec::new(),
         docs: Vec::new(),
         land: None,
         focus: false,
@@ -614,6 +720,7 @@ fn load_base(ed: &mut Editor, id: DocId, from: From, f: File) {
                 d.git_version = u64::MAX;
             }
             land(ed);
+            marks_due(ed);
         }
     });
 }
@@ -681,23 +788,51 @@ pub fn step_file(ed: &mut Editor, forward: bool) {
 
 /// `space v m`: marks the current file viewed (again: unmarks).
 pub fn toggle_viewed(ed: &mut Editor) {
-    let Some(i) = ed.session.code_review.as_ref().and_then(|r| r.current(ed)) else {
+    let Some(r) = ed.session.code_review.as_ref() else {
         return ed.set_status("no review here — space v v starts one");
     };
-    let (id, version) = (ed.doc().id, ed.doc().version());
-    let r = ed.session.code_review.as_mut().expect("checked");
-    let rel = r.files[i].rel.clone();
-    let now = if r.viewed.get(&rel) == Some(&(id, version)) {
-        r.viewed.remove(&rel);
-        false
-    } else {
-        r.viewed.insert(rel.clone(), (id, version));
-        true
+    let Some(i) = r.current(ed) else {
+        return ed.set_status("this file isn't one of the review's");
     };
-    let done = r.files.iter().filter(|f| r.viewed.contains_key(&f.rel)).count();
-    let n = r.files.len();
-    ed.note(format!("{rel} {} — {done} of {n} viewed", if now { "viewed" } else { "not viewed" }));
+    let f = &r.files[i];
+    if r.viewed(ed, f) {
+        let path = f.path.clone();
+        ed.session.viewed.remove(&path);
+        if let Some(r) = ed.session.code_review.as_mut() {
+            r.pending.retain(|p| *p != path);
+        }
+    } else {
+        // (opened some other way: its base comes first, the mark with it)
+        if doc_of(ed, f).is_none_or(|d| d.review_base.is_none()) && !f.binary {
+            show(ed, i, false);
+        }
+        mark(ed, i);
+    }
+    viewed_said(ed, i);
 }
+
+/// `space v q` · `:review-close`: the review ends — asked first on a card while files are left not viewed
+/// (#10: it ended without a word).
+pub fn close_asked(ed: &mut Editor) {
+    let Some(r) = ed.session.code_review.as_ref() else { return };
+    let left: Vec<&File> = r.files.iter().filter(|f| !r.viewed(ed, f)).collect();
+    if left.is_empty() {
+        return close(ed);
+    }
+    let mut q = format!("{} not viewed — end the review anyway?\n", crate::nav::count(left.len(), "file"));
+    for f in left.iter().take(CLOSE_FILES) {
+        q.push_str(&format!("\n  {}", f.rel));
+    }
+    if left.len() > CLOSE_FILES {
+        q.push_str(&format!("\n  … {} more", left.len() - CLOSE_FILES));
+    }
+    q.push_str("\n\nDrafts stay. Opened again, its marks are kept while a file's diff is the same.");
+    let what = crate::offer::What::ReviewEnd;
+    ed.push_offer(crate::offer::Offer::new("End the review?".into(), &q, "", String::new(), what));
+}
+
+/// The end card names this many files left at most.
+const CLOSE_FILES: usize = 6;
 
 // ── The rail's keys ───────────────────────────────────────────────────────────
 

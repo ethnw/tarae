@@ -339,6 +339,35 @@ mod tests {
         }
     }
 
+    /// The keys of cards, reviews and panels (`offer.rs`, `llm::review_key`, `codereview.rs`, the task
+    /// panel) — where, which, what.
+    const ON_SCREEN: &[(&str, &str, &str)] = &[
+        ("A card", "`y` `n`", "Yes · no (some take `a` this chat, `A` always); Esc never answers one"),
+        (
+            "A card",
+            "`C-q`",
+            "Give it the keys from wherever they are (the status line says CARD); Esc goes back, unanswered",
+        ),
+        ("No card here", "`C-q`", "To the session whose Claude waits for you — its card comes up there"),
+        ("A card cut to fit", "`v`", "All of it in a buffer — `y` waits until its end was on screen"),
+        (
+            "Claude's change to several files",
+            "`y` `r` `v` `n`",
+            "Accept them all · review them one by one · every change in a buffer · decline them all",
+        ),
+        ("An edit's review", "`y` `n` `a` `tab`", "Accept this change · reject it · accept all left · next"),
+        ("An edit's review", "Esc", "Back to the chat, the change unanswered — `C-q` answers it"),
+        (
+            "An edit's review",
+            "`C-d` `C-u` `C-f` `C-b` `C-e` `C-y`, wheel",
+            "Scroll it — `space`, `:` and `C-w` work over it too",
+        ),
+        ("Code review rail", "click on `◦`", "Mark the file viewed (a second click leaves it marked)"),
+        ("Code review rail", "click on `↑ N more` / `↓ N more`, wheel", "Scroll the files"),
+        ("Code review", "`space v q`", "End it — asked on a card while files aren't viewed"),
+        ("Task panel", "click on a preflight step", "Its output; wheel, `C-u` `C-d` scroll"),
+    ];
+
     /// `docs/reference/keymap.md` — the default keymap per mode and submode (descriptions = command docs,
     /// the same text which-key and the palette show), then every `:` command from `cmdline::COMMANDS`.
     fn reference() -> String {
@@ -372,6 +401,14 @@ mod tests {
         }
 
         node_tables(&mut out, &km.insert, &mut Vec::new(), "## Insert mode");
+
+        out.push_str(
+            "\n## Cards, reviews and panels\n\nKeys of what's up on the screen — not rebindable, so not in \
+             `default_keys.toml`:\n\n| Where | Key | What it does |\n|---|---|---|\n",
+        );
+        for (at, key, what) in ON_SCREEN {
+            out.push_str(&format!("| {at} | {key} | {} |\n", md_cell(what)));
+        }
 
         out.push_str(
             "\n## `:` commands\n\nType `:` in normal mode. `Tab` completes command names and their arguments \

@@ -55,8 +55,22 @@ enum Outcome {
     Failed(String),
 }
 
+/// Where a landing with several files to review is (#75: a project-wide rename came as a card per change).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Stage {
+    /// Not put to the user yet.
+    Fresh,
+    /// On its card — accept them all, one by one, or none.
+    Asking,
+    /// Accepted whole, being written.
+    Writing,
+    /// In the in-buffer review, a file at a time.
+    OneByOne,
+}
+
 /// A rename or replace landing: its files in review one at a time, what became of each.
 pub struct Landing {
+    stage: Stage,
     call: Call,
     generation: u64,
     /// For the review's title and the answer (``rename `a` → `b` ``).
@@ -103,6 +117,7 @@ pub fn land(
         .into_iter()
         .partition(|f| at_end && !dirty(&f.path) && !crate::edits::listed(Path::new(&f.rel), &ask));
     let l = Landing {
+        stage: Stage::Fresh,
         call,
         generation,
         what,
@@ -177,6 +192,16 @@ pub fn next(ed: &mut Editor) {
     if background && !l.review.is_empty() {
         return;
     }
+    // Several files: one card for them all first (#75)
+    match l.stage {
+        Stage::Asking | Stage::Writing => return,
+        Stage::Fresh if l.review.len() > 1 => {
+            l.stage = Stage::Asking;
+            let o = card(l);
+            return ed.push_offer(o);
+        }
+        Stage::Fresh | Stage::OneByOne => {}
+    }
     match l.review.pop_front() {
         Some(f) => {
             let n = l.reviews - l.review.len();
@@ -192,6 +217,161 @@ pub fn next(ed: &mut Editor) {
             answer(ed, l.call.clone(), Ok(report(&l)));
         }
     }
+}
+
+impl Landing {
+    /// How many of its files wait for their review, not on its card.
+    pub(crate) fn waiting(&self) -> usize {
+        if self.stage == Stage::Asking { 0 } else { self.review.len() }
+    }
+}
+
+/// The card's file list shows this many files at most (the rest: `… N more`; `v` shows them all).
+const CARD_FILES: usize = 8;
+
+/// The card for a landing's files in review: how many places in how many files, which — `y` accepts them
+/// all, `r` reviews them one by one, `v` shows every change, `n` declines them all.
+fn card(l: &Landing) -> crate::offer::Offer {
+    let places: usize = l.review.iter().map(|f| f.places).sum();
+    let mut files: Vec<&FileChange> = l.review.iter().collect();
+    files.sort_by(|a, b| a.rel.cmp(&b.rel));
+    // The change itself first, at full strength (in the title it was cut); then where, counts in a column
+    let mut q =
+        format!("{}\n\n{} in {}:", l.what, nav::count(places, l.noun), nav::count(files.len(), "file"));
+    let shown = &files[..files.len().min(CARD_FILES)];
+    let name_w = shown.iter().map(|f| f.rel.chars().count()).max().unwrap_or(0);
+    let num_w = shown.iter().map(|f| f.places.to_string().len()).max().unwrap_or(0);
+    for f in shown {
+        let pad = " ".repeat(name_w - f.rel.chars().count());
+        q.push_str(&format!("\n  {}{pad}  {:>num_w$}", f.rel, f.places));
+    }
+    if files.len() > CARD_FILES {
+        q.push_str(&format!("\n  … {} more — v shows every change", files.len() - CARD_FILES));
+    }
+    crate::offer::Offer::new(
+        format!("Claude changes {}", nav::count(files.len(), "file")),
+        &q,
+        "Writing…",
+        "Claude's change".into(),
+        crate::offer::What::ChangeSet { generation: l.generation },
+    )
+}
+
+/// The front landing, while its card is up (`generation`: the chat it came from).
+fn asking(ed: &mut Editor, generation: u64) -> Option<&mut Landing> {
+    let c = ed.session.chat.as_mut()?;
+    c.edits.sets.front_mut().filter(|l| l.generation == generation && l.stage == Stage::Asking)
+}
+
+/// `y` on the card: every file written at once (on a worker, each only while still the text the change
+/// was worked out against — kept for `space u` first); a file with your unsaved edits still comes up in
+/// the in-buffer review.
+pub fn accept_all(ed: &mut Editor, id: u64, generation: u64) {
+    ed.offer_finished(id, Ok(()));
+    let dirty: Vec<PathBuf> = ed
+        .docs
+        .iter()
+        .filter(|d| d.is_modified() && !d.unsaved_is_claudes())
+        .filter_map(|d| d.path.clone())
+        .collect();
+    let Some(l) = asking(ed, generation) else { return };
+    let (later, now): (Vec<FileChange>, Vec<FileChange>) =
+        l.review.drain(..).partition(|f| dirty.contains(&f.path));
+    l.reviews = later.len();
+    l.review = later.into();
+    l.stage = Stage::Writing;
+    let files = now.iter().map(|f| (f.path.clone(), f.before.clone(), f.after.clone())).collect();
+    crate::checkpoint::record_all(ed, files, move |ed: &mut Editor| {
+        ed.events.jobs().spawn(move || {
+            let written: Vec<_> = now.into_iter().map(|f| (write_file(&f), f)).collect();
+            move |ed: &mut Editor| {
+                let mut done = Vec::new();
+                for (r, f) in written {
+                    let outcome = match r {
+                        Ok(stamp) => {
+                            ed.disk_take(&f.path, &f.after, stamp);
+                            Outcome::Accepted
+                        }
+                        Err(o) => o,
+                    };
+                    done.push((f.rel, f.places, outcome));
+                }
+                let Some(c) = ed.session.chat.as_mut() else { return };
+                if let Some(l) = c.edits.sets.front_mut().filter(|l| l.generation == generation) {
+                    l.done.extend(done);
+                    l.stage = Stage::OneByOne;
+                }
+                next(ed);
+            }
+        });
+    });
+}
+
+/// `r` on the card: each file in the in-buffer review, one after another.
+pub fn one_by_one(ed: &mut Editor, id: u64, generation: u64) {
+    ed.offer_finished(id, Ok(()));
+    if let Some(l) = asking(ed, generation) {
+        l.stage = Stage::OneByOne;
+    }
+    next(ed);
+}
+
+/// `n` on the card (it's gone already): every file left as it was.
+pub fn decline_all(ed: &mut Editor, generation: u64) {
+    if let Some(l) = asking(ed, generation) {
+        let declined: Vec<_> = l.review.drain(..).map(|f| (f.rel, f.places, Outcome::Declined)).collect();
+        l.done.extend(declined);
+        l.stage = Stage::OneByOne;
+    }
+    next(ed);
+}
+
+/// `v` on the card: every change, file by file, in a buffer of its own (worked out on a worker) — it
+/// closes with the card.
+pub fn view_all(ed: &mut Editor, generation: u64) {
+    let Some(l) = asking(ed, generation) else { return };
+    let title = format!("{}Claude changes {}", crate::offer::CARD_VIEW, nav::count(l.review.len(), "file"));
+    let mut files: Vec<FileChange> = l.review.iter().cloned().collect();
+    files.sort_by(|a, b| a.rel.cmp(&b.rel));
+    ed.events.jobs().spawn(move || {
+        let text = changes_text(&files);
+        move |ed: &mut Editor| {
+            if asking(ed, generation).is_none() {
+                return;
+            }
+            let old: Vec<DocId> =
+                ed.docs.iter().filter(|d| d.title.as_deref() == Some(&title)).map(|d| d.id).collect();
+            for d in old {
+                ed.close_doc(d);
+            }
+            ed.open_virtual(&title, &text);
+            if let Some(c) = ed.session.chat.as_mut() {
+                c.focused = false;
+            }
+        }
+    });
+}
+
+/// Every change of `files`, as `v` shows them: each file's name and count, then each change's line and its
+/// old (`-`) and new (`+`) lines.
+fn changes_text(files: &[FileChange]) -> String {
+    let mut out = String::new();
+    for f in files {
+        out.push_str(&format!("── {} ({})\n", f.rel, f.places));
+        let before = f.before.to_string();
+        for (from, _, old, new) in crate::agent::line_changes(&before, &f.after.to_string()) {
+            let line = before[..from].matches('\n').count() + 1;
+            out.push_str(&format!("\n  line {line}\n"));
+            for l in old.lines() {
+                out.push_str(&format!("  - {l}\n"));
+            }
+            for l in new.lines() {
+                out.push_str(&format!("  + {l}\n"));
+            }
+        }
+        out.push('\n');
+    }
+    out
 }
 
 /// What became of a file of the front landing.
@@ -274,6 +454,8 @@ pub fn turn_over(ed: &mut Editor) {
     if let Some(c) = ed.session.chat.as_mut() {
         c.edits.sets.clear();
     }
+    // (and a card for one: nobody waits for its answer)
+    ed.offers.retain(|o| !matches!(o.what, crate::offer::What::ChangeSet { .. }));
 }
 
 /// The answer: how many places in how many files changed, then per file what became of it.

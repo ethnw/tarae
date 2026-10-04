@@ -124,6 +124,11 @@ pub fn script(steps: &[Step]) -> String {
     s
 }
 
+/// Whether a line of the run's output is a step's start marker (its output begins after it).
+pub fn starts(line: &str) -> bool {
+    line.strip_prefix(MARK).is_some_and(|rest| rest.starts_with(" start "))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum State {
     Waiting,

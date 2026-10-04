@@ -129,7 +129,18 @@ fn parts(line: &str, env: bool) -> Option<(Vec<Part>, Vec<bool>)> {
                 loop {
                     match chars.next()? {
                         '"' => break,
-                        '$' | '`' | '\\' => return None,
+                        '$' | '`' => return None,
+                        // As sh reads it in double quotes: `\` takes `$ ` " \` as themselves, and stays
+                        // before anything else (#80: `rg "sleep\(|a *[<>]"` went to a card) — a line
+                        // continuation isn't read
+                        '\\' => match chars.next()? {
+                            '\n' => return None,
+                            c @ ('$' | '`' | '"' | '\\') => w.text.push(c),
+                            c => {
+                                w.text.push('\\');
+                                w.text.push(c);
+                            }
+                        },
                         c => w.text.push(c),
                     }
                 }
@@ -308,10 +319,61 @@ pub fn read_only(cmd: &str) -> bool {
     })
 }
 
+/// Programs that move, copy or remove files and run none of them; git's below (#76).
+const MOVES: [&str; 7] = ["mv", "cp", "rm", "ln", "mkdir", "rmdir", "touch"];
+const GIT_MOVES: [&str; 3] = ["mv", "rm", "add"];
+
+/// Whether every part of `line` only moves, copies, removes or reads files (a `cd` aside): nothing in it
+/// runs what a file says — `mv src/a.rs src/b.rs`, `git mv a b && ls` (#76). What it writes is the
+/// sandbox's and its card's.
+pub fn only_moves(line: &str) -> bool {
+    let Some(parts) = parse(line) else { return false };
+    parts.iter().all(|p| match p {
+        Part::Cd(_) => true,
+        Part::Cmd(w) => {
+            let words: Vec<&str> = w.iter().map(|w| w.text.as_str()).collect();
+            only_reads(w)
+                || match words.split_first() {
+                    Some((&"git", args)) => matches!(git_after_c(args), [sub, ..] if GIT_MOVES.contains(sub)),
+                    Some((name, _)) => MOVES.contains(name),
+                    None => false,
+                }
+        }
+    })
+}
+
 /// Whether one command only reads (`read_only`'s rule for each part of a line).
 pub fn only_reads(w: &[Word]) -> bool {
     let words: Vec<&str> = w.iter().map(|w| w.text.as_str()).collect();
     !words.iter().any(|w| crate::tools::WRITES.iter().any(|o| w.starts_with(o))) && reads_only(&words)
+}
+
+/// git's words after the `-C <dir>`s in front of them (`git -C sub log` reads as `git log`, run in `sub` —
+/// #57; the folder is a read, `candidates`').
+pub fn git_after_c<T: AsRef<str>>(mut args: &[T]) -> &[T] {
+    while let [c, _, rest @ ..] = args
+        && c.as_ref() == "-C"
+    {
+        args = rest;
+    }
+    args
+}
+
+/// `sed` that only prints lines by number (`sed -n '3,40p'`, `-n '$p'`, #66): no script that writes (`w`),
+/// runs (`e`) or edits in place (`-i`) gets this far.
+fn sed_prints(args: &[&str]) -> bool {
+    let (opts, rest): (Vec<&str>, Vec<&str>) = args.iter().partition(|w| w.starts_with('-'));
+    let Some(script) = rest.first() else { return false };
+    let line = |a: &str| a == "$" || (!a.is_empty() && a.chars().all(|c| c.is_ascii_digit()));
+    let prints = |item: &str| {
+        item.trim().strip_suffix('p').is_some_and(|at| match at.split_once(',') {
+            Some((a, b)) => line(a) && line(b),
+            None => line(at),
+        })
+    };
+    opts.contains(&"-n")
+        && opts.iter().all(|o| matches!(*o, "-n" | "-E" | "-r"))
+        && script.split(';').all(prints)
 }
 
 /// One command's words: a command above, without the options that make it write, run, or never end.
@@ -321,11 +383,12 @@ fn reads_only(words: &[&str]) -> bool {
     let short = |w: &str, c: char| w.starts_with('-') && !w.starts_with("--") && w[1..].contains(c);
     let any = |f: &dyn Fn(&str) -> bool| args.iter().any(|w| f(w));
     match name {
-        "git" => match args {
+        "git" => match git_after_c(args) {
             [sub, ..] if GIT.contains(sub) => true,
             ["branch"] => true,
             _ => false,
         },
+        "sed" => sed_prints(args),
         "find" => !any(&|w| ["-exec", "-ok", "-delete", "-fprint", "-fls"].iter().any(|o| w.starts_with(o))),
         "sort" => !any(&|w| short(w, 'o') || w.starts_with("--compress-program")),
         "tree" => !any(&|w| short(w, 'o')),
@@ -342,10 +405,27 @@ fn reads_only(words: &[&str]) -> bool {
 /// value (`--file=x`, `-f/x`); a glob as its fixed folder (`../*.rs` reads `..`). A word that names nothing
 /// (a pattern) is left out by `outside`.
 fn candidates(words: &[Word]) -> Vec<String> {
-    let skip = if words.first().is_some_and(|w| w.text == "git") { 2 } else { 1 };
-    words
+    let mut rest = words.get(1..).unwrap_or_default();
+    // (git: its subcommand names no path; each `-C <dir>`'s folder is read, and git goes there — the rest
+    // is where it ends up)
+    let mut base = PathBuf::new();
+    let mut dirs = Vec::new();
+    if words.first().is_some_and(|w| w.text == "git") {
+        while let [c, dir, more @ ..] = rest
+            && c.text == "-C"
+        {
+            base = base.join(&dir.text);
+            dirs.push(base.to_string_lossy().into_owned());
+            rest = more;
+        }
+        rest = rest.get(1..).unwrap_or_default();
+    }
+    let at = |p: String| match base.as_os_str().is_empty() {
+        true => p,
+        false => base.join(p).to_string_lossy().into_owned(),
+    };
+    let named = rest
         .iter()
-        .skip(skip)
         .filter_map(|w| {
             let path = match w.text.strip_prefix('-') {
                 None => w.text.as_str(),
@@ -362,7 +442,46 @@ fn candidates(words: &[Word]) -> Vec<String> {
             Some(fixed.rfind('/').map_or(".".to_string(), |i| fixed[..i.max(1)].to_string()))
         })
         .filter(|w| !w.is_empty())
-        .collect()
+        .map(at);
+    dirs.into_iter().chain(named).collect()
+}
+
+/// Whether a part of `cmd` that runs something would run outside `root` — after a `cd` there, or git with a
+/// `-C` there. Anything but a read runs something (a build runs the folder's build scripts), and so does
+/// git (a repository's config runs its hooks, fsmonitor, pager): a read allowed outside (`allow.rs`) never
+/// lets those run there — code nobody saw (review note). A `cd` that can't be followed counts as outside. On
+/// a worker.
+pub fn runs_outside(cmd: &str, cwd: &Path, root: &Path) -> bool {
+    let Some(parts) = parse(cmd) else { return true };
+    let inside = |p: &Path| std::fs::canonicalize(p).is_ok_and(|r| r.starts_with(root));
+    let mut here = cwd.to_path_buf();
+    for part in parts {
+        match part {
+            Part::Cd(dir) => match std::fs::canonicalize(here.join(&dir)) {
+                Ok(d) if d.is_dir() => here = d,
+                _ => return true,
+            },
+            Part::Cmd(w) => {
+                let git = w.first().is_some_and(|w| w.text == "git");
+                if only_reads(&w) && !git {
+                    continue;
+                }
+                let mut at = here.clone();
+                let mut rest = w.get(1..).unwrap_or_default();
+                while git
+                    && let [c, dir, more @ ..] = rest
+                    && c.text == "-C"
+                {
+                    at = at.join(&dir.text);
+                    rest = more;
+                }
+                if !inside(&at) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// The places `cmd` reads outside `root` (real paths, links followed) that aren't allowed — on a worker.
@@ -481,6 +600,14 @@ mod tests {
             "git rev-parse HEAD",
             "git ls-files src",
             "git branch",
+            // #57: `-C <dir>` as without it (its folder is a read — `where_a_command_reads`)
+            "git -C /x blame a",
+            "git -C sub -C deeper ls-files",
+            // #66: sed printing lines by number
+            "sed -n '3,40p' src/a.rs",
+            "sed -n 10p",
+            "sed -n -E '$p'",
+            "sed -n '1,5p;9p'",
         ] {
             assert!(read_only(c), "{c}");
         }
@@ -506,8 +633,18 @@ mod tests {
             "uniq in.txt out.txt",
             "git branch new",
             "git branch -D main",
-            "git -C /x blame a",
+            "git -C /x push",
+            "git -C /x -c core.pager=sh log",
+            "git -C",
             "git push",
+            "sed 1,5p x",
+            "sed -n '1,5w out' x",
+            "sed -n 1e x",
+            "sed -n s/a/b/p x",
+            "sed -n -i 1p x",
+            "sed -n -e 1p x",
+            "sed -n '/x/p' a",
+            "sed -n",
             "cat a | sh",
             "cat ~/.ssh/id_ed25519",
             "cat $HOME/x",
@@ -518,6 +655,35 @@ mod tests {
             "",
         ] {
             assert!(!read_only(c), "{c}");
+        }
+    }
+
+    /// #76: a line that only moves, copies, removes or reads files runs none of them; anything else in it
+    /// might run what was moved.
+    #[test]
+    fn lines_that_only_move_files() {
+        for c in [
+            "mv src/a.rs src/b.rs",
+            "git mv src/a.rs src/b.rs",
+            "git -C sub rm -r old",
+            "cp x.sh y.sh && rm x.sh",
+            "cd src && mkdir m && mv a.rs m/ && ls m",
+            "git add src/b.rs; git ls-files src",
+        ] {
+            assert!(only_moves(c), "{c}");
+        }
+        for c in [
+            "sh x.sh",
+            "mv a b && sh b",
+            "cp x.sh y.sh; ./y.sh",
+            "git mv a b && cargo test",
+            "source x.sh",
+            "python3 tools/gen.py",
+            "git -c alias.mv=x mv a b",
+            "mv $(cat x) y",
+            "",
+        ] {
+            assert!(!only_moves(c), "{c}");
         }
     }
 
@@ -538,9 +704,23 @@ mod tests {
             "find . -name '*.rs' | wc -l",
             "cat 'a file with spaces.txt'",
             "git ls-files src | grep -c rs",
+            // #80: quotes keep `|` `<` `>` `*` `{}` as they are, and a `\` in them as sh reads it
+            r#"rg -n "thread::sleep\(|elapsed\(\) *[<>]|assert!\(.*elapsed|< *SOON|recv_timeout\(Duration::from_millis\([0-9]{1,3}\)\)" src tests --glob "*.rs""#,
+            "grep \"a\\b\" x",
         ] {
             assert!(read_only(c), "{c}");
         }
+        let w = |t: &str| Word { text: t.into(), glob: false };
+        assert_eq!(
+            parse(r#"rg "sleep\(|a *[<>]" --glob "*.rs""#),
+            Some(vec![Part::Cmd(vec![w("rg"), w(r"sleep\(|a *[<>]"), w("--glob"), w("*.rs")])]),
+            "one pattern, one glob — nothing the shell would split or fill in"
+        );
+        assert_eq!(
+            parse(r#"grep "a\"b\\c\$d" x"#),
+            Some(vec![Part::Cmd(vec![w("grep"), w(r#"a"b\c$d"#), w("x")])]),
+            "\\ before \" \\ $ ` is the character itself"
+        );
         for c in [
             // Redirects to a file
             "ls > out.txt",
@@ -579,7 +759,7 @@ mod tests {
             "; ls",
             "ls && && ls",
             "grep 'unterminated",
-            "grep \"a\\b\" x",
+            "grep \"a\\",
         ] {
             assert!(!read_only(c), "{c}");
         }
@@ -631,6 +811,10 @@ mod tests {
         assert_eq!(at(&format!("grep --file={}/m.txt src", out.display())), [out.join("m.txt")]);
         assert_eq!(at(&format!("grep -f{}/m.txt src", out.display())), [out.join("m.txt")]);
         assert_eq!(at("git ls-files ../out"), std::slice::from_ref(&out));
+        // `git -C <dir>`: the folder is a read, the subcommand isn't a path (#57)
+        assert_eq!(at("git -C ../out log"), std::slice::from_ref(&out));
+        assert!(at("git -C src ls-files a.rs").is_empty());
+        assert_eq!(at("git -C src ls-files ../../out"), std::slice::from_ref(&out), "from where -C goes");
         // A line of several: each part where it runs — a cd's folder read too; a glob by its fixed folder
         assert!(at("cd src && cat a.rs | wc -l").is_empty());
         assert_eq!(at("cd ../out && cat m.txt"), [out.clone(), out.join("m.txt")]);

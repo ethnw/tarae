@@ -63,6 +63,10 @@ pub struct Checkpoints {
     pub list: Vec<Checkpoint>,
     /// The turn in flight.
     pub turn: Vec<Touched>,
+    /// Where a move or copy of Claude's put a file it wrote unseen this turn, when that place held something
+    /// that isn't text before (no `before` to keep for it in `turn`): named like the unseen ones all the same
+    /// (`tools::moved`). Gone with the turn.
+    pub carried: Vec<PathBuf>,
     /// What Claude hears with the next message (it undid or redid a turn).
     pub tell: Vec<String>,
     /// The turn that just ended wrote files unseen, being read (`gather`): its checkpoint comes after.
@@ -138,6 +142,23 @@ pub fn record_unseen_all(
     }
 }
 
+/// Accepted changes of Claude's to many files at once (a rename or replace accepted whole on its card,
+/// `refactor.rs`): each `(path, before, after)` — `then` once what each was is on disk, before any is written.
+pub fn record_all(
+    ed: &mut Editor,
+    files: Vec<(PathBuf, Rope, Rope)>,
+    then: impl FnOnce(&mut Editor) + Send + 'static,
+) {
+    let turn = &mut ed.session.checkpoints.turn;
+    for (path, before, after) in files {
+        match turn.iter_mut().find(|t| t.path == path) {
+            Some(t) => t.after = after,
+            None => turn.push(Touched { path, before: Some(before), after, unseen: false }),
+        }
+    }
+    keep_then(ed, then);
+}
+
 /// A change of its own accepted in document `id` (a `space i` answer, Claude Code's diff): one step.
 pub fn single(ed: &mut Editor, id: crate::document::DocId, before: Rope, what: &str) {
     let Some((path, after)) =
@@ -157,6 +178,7 @@ pub fn single(ed: &mut Editor, id: crate::document::DocId, before: Rope, what: &
 /// The chat turn ended: its changes become a checkpoint (a chat row says so). The files it changed, as
 /// the row names them (`lib.rs, sub.rs` · `4 files`), if any.
 pub fn turn_over(ed: &mut Editor, question: &str) -> Option<String> {
+    ed.session.checkpoints.carried.clear();
     let files = std::mem::take(&mut ed.session.checkpoints.turn);
     finish(ed, question, files)
 }
@@ -168,6 +190,7 @@ pub fn gather(ed: &mut Editor, question: &str) -> bool {
     if !ed.session.checkpoints.turn.iter().any(|t| t.unseen) {
         return false;
     }
+    ed.session.checkpoints.carried.clear();
     let files = std::mem::take(&mut ed.session.checkpoints.turn);
     ed.session.checkpoints.gathering = true;
     let question = question.to_string();

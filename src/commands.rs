@@ -1940,7 +1940,7 @@ fn review_send(cx: &mut Context) {
 }
 
 fn review_close(cx: &mut Context) {
-    crate::codereview::close(cx.editor);
+    crate::codereview::close_asked(cx.editor);
 }
 
 fn review_at_end(cx: &mut Context) {

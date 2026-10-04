@@ -264,6 +264,13 @@ pub struct Screen {
     pub session_spots: std::cell::RefCell<Vec<(usize, usize, usize, crate::session::Spot)>>,
     /// The code review's file rail: (row, file index) — a click opens that file.
     pub review_rail: std::cell::RefCell<Vec<(usize, usize)>>,
+    /// The rail's file rows' viewed marks: (row, file index, column) — a click there marks it viewed (#67) ·
+    /// its `↑ N more` / `↓ N more` rows: (row, rows to scroll by) — a click scrolls it (#73).
+    pub review_rail_marks: std::cell::RefCell<Vec<(usize, usize, usize)>>,
+    pub review_rail_more: std::cell::RefCell<Vec<(usize, isize)>>,
+    /// A preflight's step chips in the task panel: (row, from column, to column, step) — a click scrolls its
+    /// output to that step's (#72).
+    pub task_steps: std::cell::RefCell<Vec<(usize, usize, usize, usize)>>,
     /// The side panel's rows: (screen row, list row) — a click opens it.
     pub sidebar: std::cell::RefCell<Vec<(usize, usize)>>,
     /// The whole screen's width (None before the first frame — tests) · the chat's, the side panel's (0: not shown — folded away if it's open) and
@@ -1153,19 +1160,25 @@ impl Editor {
     }
 
     fn report_as_is(&mut self, kind: ToastKind, msg: String) {
+        self.recorded(kind, msg.clone());
+        self.toast(kind, msg.clone());
+        let severity = if kind == ToastKind::Error { Severity::Error } else { Severity::Info };
+        self.status = Some((msg, severity));
+    }
+
+    /// Into `:messages` and the log, no toast — what's of a session behind (its chip and list say it waits;
+    /// the words are here when you look).
+    pub fn recorded(&mut self, kind: ToastKind, msg: String) {
         let level = match kind {
             ToastKind::Error => "error",
             ToastKind::Warning => "warning",
             _ => "info",
         };
         crate::log::line("tarae", level, &msg);
-        self.messages.push((std::time::Instant::now(), kind, msg.clone()));
+        self.messages.push((std::time::Instant::now(), kind, msg));
         if self.messages.len() > MESSAGES_KEPT {
             self.messages.remove(0);
         }
-        self.toast(kind, msg.clone());
-        let severity = if kind == ToastKind::Error { Severity::Error } else { Severity::Info };
-        self.status = Some((msg, severity));
     }
 
     /// A step under way (`fetching…`): its toast stays up until `step_done(key)` says it's over (at most
@@ -1498,7 +1511,8 @@ impl Editor {
             match k {
                 'y' | 'a' | 'A' | 'D' | 'R' | 'c' if !self.offer_seen_whole() => self.offer_see_all_first(),
                 'y' if self.offer_settled() => self.offer_accept(),
-                'v' => self.offer_view_all(),
+                'v' => self.offer_view(),
+                'r' => self.offer_one_by_one(),
                 'a' if self.offer_settled() => self.offer_for_chat(),
                 'A' if self.offer_settled() => self.offer_always(),
                 'D' if self.offer_settled() => self.offer_remove(true),
@@ -1592,22 +1606,35 @@ impl Editor {
                 _ => {}
             }
         }
-        // The review's file rail: a click opens that file, the wheel scrolls it (`CodeReview::fit` clamps)
-        let on_rail =
-            x < s.panes.iter().map(|p| p.1.x).min().unwrap_or(0) && !s.review_rail.borrow().is_empty();
+        // The review's file rail: a click opens that file — on its mark, marks it viewed too (#67) — a click
+        // on `↑/↓ N more` or the wheel scrolls it (`CodeReview::fit` clamps; #73: the rail is its columns, left
+        // of where the code and the slot under it start — not "left of the first pane")
+        let on_rail = self.review_rail_up() && x < s.slot_x && !s.review_rail.borrow().is_empty();
         if on_rail && let Some(r) = self.session.code_review.as_mut() {
-            match m.kind {
-                K::ScrollDown => return r.scroll += 3,
-                K::ScrollUp => return r.scroll = r.scroll.saturating_sub(3),
-                _ => {}
+            let by = match m.kind {
+                K::ScrollDown => 3,
+                K::ScrollUp => -3,
+                K::Down => s.review_rail_more.borrow().iter().find(|r| r.0 == y).map_or(0, |r| r.1),
+                _ => 0,
+            };
+            if by != 0 {
+                r.scroll = r.scroll.saturating_add_signed(by);
+                return;
             }
         }
-        if m.kind == K::Down
-            && let Some(&(_, i)) = s.review_rail.borrow().iter().find(|r| r.0 == y)
-            && on_rail
-        {
-            crate::codereview::show(self, i, false);
-            return;
+        if m.kind == K::Down && on_rail {
+            let mark = s
+                .review_rail_marks
+                .borrow()
+                .iter()
+                .find(|r| r.0 == y && (r.2..r.2 + 2).contains(&x))
+                .map(|r| r.1);
+            if let Some(i) = mark {
+                return crate::codereview::mark_clicked(self, i);
+            }
+            if let Some(&(_, i)) = s.review_rail.borrow().iter().find(|r| r.0 == y) {
+                return crate::codereview::show(self, i, false);
+            }
         }
         // The bottom slot's columns: under the code, between the side panel and the chat
         let in_slot = x >= s.slot_x && s.chat_x.is_none_or(|cx| x < cx);
@@ -1704,9 +1731,22 @@ impl Editor {
             && (y0..=y1).contains(&y)
             && in_slot
         {
+            // (a preflight's step chip: its output from its heading — #72)
+            let chip =
+                s.task_steps.borrow().iter().find(|c| c.0 == y && (c.1..c.2).contains(&x)).map(|c| c.3);
+            let heading = chip
+                .and_then(|k| self.session.preflight.as_ref()?.steps.get(k))
+                .map(|step| format!("── {} ──", step.name));
             match (m.kind, self.session.task_run.as_mut()) {
                 (K::ScrollDown, Some(r)) => r.scroll_by(3, rows),
                 (K::ScrollUp, Some(r)) => r.scroll_by(-3, rows),
+                (K::Down, Some(r)) if heading.is_some() => {
+                    match r.output.iter().position(|l| Some(&l.1) == heading.as_ref()) {
+                        Some(at) => r.scroll_to(at, rows),
+                        None => self.set_status("that step hasn't printed anything yet"),
+                    }
+                    self.bottom_take_keys();
+                }
                 (K::Down, _) => self.bottom_take_keys(),
                 _ => {}
             }
@@ -1768,6 +1808,16 @@ impl Editor {
                 _ => {}
             }
             return;
+        }
+        // The wheel over a change in review scrolls it (#61: a long insertion ran off the screen)
+        if let Some(r) = self.session.review.as_mut().filter(|r| r.ready)
+            && x < s.chat_x.unwrap_or(usize::MAX)
+        {
+            match m.kind {
+                K::ScrollDown => (r.scroll, r.follow) = (r.scroll + 3, false),
+                K::ScrollUp => (r.scroll, r.follow) = (r.scroll.saturating_sub(3), false),
+                _ => {}
+            }
         }
         if self.session.review.is_some() || self.welcome() {
             return;
@@ -2619,6 +2669,20 @@ impl Editor {
         self.focus_sync();
         // A card is answered from anywhere (#24): `C-q` gives it the keys — what you were typing stays
         if self.card_key(key) {
+            return;
+        }
+        // …and with none up here (nor an edit review), to the session whose Claude waits for you (#7)
+        if key.ctrl
+            && !key.alt
+            && key.code == Code::Char('q')
+            && self.offers.is_empty()
+            && self.session.review.is_none()
+            && self.picker.is_none()
+            && self.prompt.is_none()
+        {
+            if !self.go_to_waiting_card() {
+                self.set_status("no card waits for you");
+            }
             return;
         }
         // The terminal has the keys: all of them go to its program (`C-\` gives them back)
@@ -5039,6 +5103,175 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// #74: when HEAD moves under an open buffer — a commit, a rebase's end, made outside (a session's
+    /// terminal) — its git base is the index as it is now, not the one it had (+62 −62 over a clean tree).
+    #[test]
+    fn git_bases_follow_head_when_it_moves() {
+        let dir = git_repo("head-moves", &[("a.txt", "one\n")]);
+        std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
+        let mut ed = editor("");
+        ed.git_auto = true;
+        ed.session.root = dir.clone();
+        ed.open(&dir.join("a.txt")).unwrap();
+        let base = |ed: &Editor| ed.doc().git_base.as_deref().map(|b| b.to_string());
+        settle_until(&mut ed, |ed| base(ed).as_deref() == Some("one\n"));
+        crate::git::watch(ed.events.sender(), dir.clone());
+        settle_until(&mut ed, |ed| ed.session.git_branch.is_some());
+        // Committed outside: the branch's ref moves (HEAD's own file doesn't)
+        git_in(&dir, &["commit", "-q", "-am", "two"]);
+        settle_until(&mut ed, |ed| base(ed).as_deref() == Some("one\ntwo\n"));
+        // A reset back, as a rebase's end rewrites HEAD: back again
+        git_in(&dir, &["reset", "-q", "--mixed", "HEAD~1"]);
+        settle_until(&mut ed, |ed| base(ed).as_deref() == Some("one\n"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #72: a preflight's output scrolls back — a click on a step's chip goes to its output (and gives the
+    /// panel the keys), the wheel and C-u/C-d move from there.
+    #[test]
+    fn a_preflights_step_chips_scroll_its_output() {
+        let mut ed = editor("");
+        let task = crate::task::Task { name: "preflight".into(), cmd: String::new(), cwd: test_root() };
+        let mut r = crate::task::Run::for_test(task);
+        for (name, n) in [("fmt", 3), ("test", 120), ("clippy", 60)] {
+            r.push_line(false, format!("── {name} ──"), true);
+            for i in 0..n {
+                r.push_line(false, format!("{name} line {i}"), false);
+            }
+        }
+        ed.session.task_run = Some(r);
+        let steps: Vec<crate::preflight::Step> = ["fmt", "test", "clippy"]
+            .iter()
+            .map(|n| crate::preflight::Step {
+                name: n.to_string(),
+                cmd: String::new(),
+                note: None,
+                from: String::new(),
+            })
+            .collect();
+        ed.session.preflight = Some(crate::preflight::Preflight::new(0, &steps));
+        let draw = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 120, 40).unwrap();
+            let mut parser = vt100::Parser::new(40, 120, 0);
+            parser.process(&bytes);
+            parser.screen().contents()
+        };
+        let s = draw(&mut ed);
+        assert!(s.contains("clippy line 59") && !s.contains("test line 0\n"), "its end: {s}");
+        let click = |ed: &mut Editor, kind, x: usize, y: usize| {
+            ed.handle_mouse(crate::event::Mouse { kind, x: x as u16, y: y as u16, alt: false });
+        };
+        let (y, x, _, _) =
+            *ed.screen.task_steps.borrow().iter().find(|c| c.3 == 1).expect("the test step's chip");
+        click(&mut ed, crate::event::MouseKind::Down, x, y);
+        let heading = ed.session.task_run.as_ref().unwrap().output.iter().position(|l| l.1 == "── test ──");
+        assert_eq!(ed.session.task_run.as_ref().unwrap().scroll, heading, "at the test step's heading");
+        assert!(ed.bottom_focus, "the panel has the keys");
+        let s = draw(&mut ed);
+        assert!(s.contains("test line 0"), "{s}");
+        // The wheel and C-u: further back
+        click(&mut ed, crate::event::MouseKind::ScrollUp, x, y + 3);
+        assert_eq!(ed.session.task_run.as_ref().unwrap().scroll, heading.map(|h| h - 3));
+        feed(&mut ed, "<C-u>");
+        let s = draw(&mut ed);
+        assert!(s.contains("fmt line 0"), "{s}");
+    }
+
+    /// #75: a replace across several files, not under review at the end, is one card — not a card per
+    /// change: `v` shows every change in a buffer, `y` writes them all (kept for `space u`), `n` leaves them
+    /// all, and the card's buffer goes with it.
+    #[test]
+    fn claudes_change_across_files_is_one_card() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-change-set-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/deep")).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let files = [
+            ("src/a.rs", "fn old_name() {}\nfn x() { old_name() }\n"),
+            ("src/b.rs", "use crate::old_name;\n"),
+            ("src/deep/c.rs", "// old_value here\n"),
+        ];
+        let put = || {
+            for (f, text) in files {
+                std::fs::write(dir.join(f), text).unwrap();
+            }
+        };
+        put();
+        let read = |f: &str| std::fs::read_to_string(dir.join(f)).unwrap();
+        let mut ed = editor("");
+        ed.session.root = dir.clone();
+        let log = claude_calls(
+            &mut ed,
+            &dir,
+            "replace",
+            &json!({"pattern": r"old_(\w+)", "replacement": "new_$1"}),
+        );
+        let screen = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 140, 30).unwrap();
+            let mut parser = vt100::Parser::new(30, 140, 0);
+            parser.process(&bytes);
+            parser.screen().contents()
+        };
+        let settled = |ed: &mut Editor| {
+            let o = ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
+            ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
+        };
+        let answered = |ed: &Editor| {
+            std::fs::read_to_string(dir.join("stdin.log")).is_ok_and(|s| s.contains("\"c7\""))
+                && ed.session.chat.as_ref().is_some_and(|c| !c.busy())
+        };
+        let card_buffers = |ed: &Editor| {
+            ed.docs.iter().filter(|d| d.title.as_deref().is_some_and(|t| t.starts_with("card ·"))).count()
+        };
+        feed(&mut ed, "<space>ldo it<ret>");
+        settle_for(&mut ed, |ed| !ed.offers.is_empty());
+        assert!(!ed.session.chat.as_ref().unwrap().focused, "the card took the keys from the empty input");
+        assert!(ed.session.review.is_none(), "no change of it in review yet");
+        let s = screen(&mut ed);
+        assert!(s.contains("Claude changes 3 files") && s.contains("replace `old_(\\w+)` → `new_$1`"), "{s}");
+        assert!(s.contains("4 matches in 3 files:") && s.contains("src/deep/c.rs  1"), "{s}");
+        assert!(s.contains("y Accept all") && s.contains("r One by one") && s.contains("v See them"), "{s}");
+        settled(&mut ed);
+        // `v`: every change, file by file
+        feed(&mut ed, "v");
+        settle_for(&mut ed, |ed| card_buffers(ed) == 1);
+        let all = text(&ed);
+        assert!(all.contains("── src/a.rs (2)") && all.contains("  - fn old_name() {}"), "{all}");
+        assert!(all.contains("  + fn new_name() {}") && all.contains("── src/deep/c.rs (1)"), "{all}");
+        assert_eq!(read("src/a.rs"), files[0].1, "nothing written yet");
+        // `y`: all of them written at once
+        screen(&mut ed);
+        settled(&mut ed);
+        feed(&mut ed, "y");
+        settle_for(&mut ed, answered);
+        assert_eq!(read("src/a.rs"), "fn new_name() {}\nfn x() { new_name() }\n");
+        assert_eq!(read("src/deep/c.rs"), "// new_value here\n");
+        let t = tool_answer(&log);
+        assert!(t.contains("accepted by the user: src/a.rs (2), src/b.rs (1), src/deep/c.rs (1)"), "{t}");
+        assert_eq!(card_buffers(&ed), 0, "its buffer went with the answer");
+        assert!(ed.offers.is_empty() && ed.session.review.is_none());
+        // `space u` takes them back
+        crate::checkpoint::step(&mut ed, true).unwrap();
+        assert_eq!(read("src/a.rs"), files[0].1);
+        // Again, `n`: every file left as it was
+        put();
+        std::fs::remove_file(&log).unwrap();
+        ed.session.chat.as_mut().unwrap().focused = true;
+        feed(&mut ed, "again<ret>");
+        settle_for(&mut ed, |ed| !ed.offers.is_empty());
+        screen(&mut ed);
+        settled(&mut ed);
+        feed(&mut ed, "n");
+        settle_for(&mut ed, answered);
+        let t = tool_answer(&log);
+        assert!(t.contains("nothing changed") && t.contains("declined by the user"), "{t}");
+        assert_eq!(read("src/b.rs"), files[1].1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Claude builds: a check runs at once in the task panel, the call waits for its end, and Claude reads
     /// how it ended, the places it pointed at and its output; the editor goes to the first error, and the
     /// It isn't the task `space m m` runs again.
@@ -5612,14 +5845,20 @@ mod tests {
         assert_eq!(ed.offers.len(), 1, "Esc never answers a card");
         // Back in the input: C-q — the card has the keys, the draft stays
         ed.session.chat.as_mut().unwrap().focused = true;
+        // (the status line's label names where the keys go — #78: it said CHAT while the card had them)
+        let label = |s: &str| s.lines().nth(38).unwrap_or_default().to_string();
+        assert!(label(&draw(&mut ed)).contains(" CHAT "), "{}", label(&draw(&mut ed)));
         feed(&mut ed, "<C-q>");
         assert!(ed.card_keys);
-        assert!(draw(&mut ed).contains("esc goes back, unanswered"));
+        let s = draw(&mut ed);
+        assert!(s.contains("esc goes back, unanswered"));
+        assert!(label(&s).contains(" CARD ") && !label(&s).contains("CHAT"), "{}", label(&s));
         feed(&mut ed, "x");
         assert!(ed.status.as_ref().is_some_and(|s| s.0.contains("the card asks y or n")), "{:?}", ed.status);
         feed(&mut ed, "<esc>");
         assert!(!ed.card_keys && ed.offers.len() == 1 && ed.session.chat.as_ref().unwrap().focused);
         assert_eq!(input(&ed), "my draft y", "back where it was");
+        assert!(label(&draw(&mut ed)).contains(" CHAT "), "the chat's again");
         // C-q, y (once the card has been in sight a moment): answered, the keys back in the draft
         feed(&mut ed, "<C-q>");
         draw(&mut ed);
@@ -5707,6 +5946,79 @@ mod tests {
         feed(&mut ed, "y");
         let s = draw(&mut ed);
         assert!(s.contains("y accept   n reject") && !s.contains("accept all"), "{s}");
+    }
+
+    /// #61, #70: while an edit review waits, the editor's keys still work over it — C-d/C-u and the wheel
+    /// scroll it (a long insertion was cut off), `space` opens what it opens, the picker has the keys — and
+    /// Esc goes back to the chat with the change unanswered (it declined it): typed keys are the chat's
+    /// until C-q gives them back to the review. With no chat, Esc leaves it waiting.
+    #[test]
+    fn an_edit_review_waits_while_you_look_around() {
+        let mut ed = editor("one\ntwo\n");
+        let id = ed.doc().id;
+        let long: String = (1..=80).map(|i| format!("new line {i}\n")).collect();
+        crate::llm::review_with(&mut ed, id, "grow", vec![(0, 4, "one\n".into(), long.clone())], None);
+        let draw = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 140, 30).unwrap();
+            let mut parser = vt100::Parser::new(30, 140, 0);
+            parser.process(&bytes);
+            parser.screen().contents()
+        };
+        let s = draw(&mut ed);
+        assert!(!s.contains("new line 60"), "below the screen");
+        // Scrolling: keys and the wheel
+        feed(&mut ed, "<C-d><C-d><C-d><C-d>");
+        let s = draw(&mut ed);
+        assert!(s.contains("new line 60"), "scrolled to it: {s}");
+        let at = ed.session.review.as_ref().unwrap().scroll;
+        feed(&mut ed, "<C-u>");
+        assert!(ed.session.review.as_ref().unwrap().scroll < at);
+        let wheel = |ed: &mut Editor, kind| {
+            ed.handle_mouse(crate::event::Mouse { kind, x: 20, y: 10, alt: false });
+        };
+        let at = ed.session.review.as_ref().unwrap().scroll;
+        wheel(&mut ed, crate::event::MouseKind::ScrollDown);
+        assert_eq!(ed.session.review.as_ref().unwrap().scroll, at + 3, "the wheel scrolls it");
+        // `space`: its keys open what they open; the picker has the keys, the review waits
+        feed(&mut ed, "<space>b");
+        assert!(ed.picker.is_some(), "space b opened over the review");
+        feed(&mut ed, "<esc>");
+        assert!(ed.picker.is_none() && ed.session.review.is_some(), "the picker went, the review waits");
+        // No chat: Esc leaves it waiting, said
+        feed(&mut ed, "<esc>");
+        assert!(ed.session.review.is_some(), "esc didn't answer it");
+        // A chat: Esc goes back to it, unanswered
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        crate::chat::open(&mut ed);
+        ed.session.chat.as_mut().unwrap().focused = false;
+        feed(&mut ed, "<tab>");
+        let s = draw(&mut ed);
+        assert!(s.contains("esc back, unanswered"), "{s}");
+        // Narrower (the chat beside it): the short form, esc's still there
+        let mut bytes = Vec::new();
+        crate::term::render(&mut ed, &mut bytes, 100, 30).unwrap();
+        let mut parser = vt100::Parser::new(30, 100, 0);
+        parser.process(&bytes);
+        let s = parser.screen().contents();
+        assert!(s.contains("y yes  n no  esc back"), "{s}");
+        feed(&mut ed, "<esc>");
+        assert!(ed.session.chat.as_ref().unwrap().focused, "back in the chat");
+        let s = draw(&mut ed);
+        assert!(s.contains("C-q answer it — the chat has the keys"), "{s}");
+        feed(&mut ed, "yn");
+        assert_eq!(ed.session.chat.as_ref().unwrap().input, "yn", "typed into the chat, not an answer");
+        assert!(
+            ed.session
+                .review
+                .as_ref()
+                .is_some_and(|r| r.hunks[0].decision == crate::llm::Decision::Undecided)
+        );
+        // C-q: the review has the keys again
+        feed(&mut ed, "<C-q>y");
+        assert!(ed.session.review.is_none(), "answered");
+        assert!(text(&ed).starts_with("new line 1\n") && text(&ed).ends_with("new line 80\ntwo\n"));
     }
 
     /// #29: the git tab reads the status again when Claude edits, writes or runs something — not only when
@@ -7559,7 +7871,8 @@ mod tests {
         // auto-save as usual)
         feed(&mut ed, "<space>vu");
         assert_eq!(text(&ed), "line 1\nline 2\nline 3\n");
-        feed(&mut ed, "<space>vq");
+        // (files not viewed: asked first — #10)
+        feed(&mut ed, "<space>vqy");
         assert!(ed.session.code_review.is_none());
         feed(&mut ed, "<space>vt");
         settle_until(&mut ed, reviewing);
@@ -7633,7 +7946,7 @@ mod tests {
         feed(&mut ed, "<space>vt");
         settle_until(&mut ed, reviewing);
         assert_eq!(ed.session.code_review.as_ref().unwrap().files.len(), 3);
-        feed(&mut ed, "<space>vq<space>u");
+        feed(&mut ed, "<space>vqy<space>u");
         assert!(!std::fs::read_to_string(&lib).unwrap().contains("LINE 9"));
         assert!(!new.exists());
         turns_kept(&store, |k| k.list.first().is_some_and(|c| c.undone));
@@ -7668,8 +7981,8 @@ mod tests {
         feed(&mut ed, "<space>vt");
         settle_until(&mut ed, reviewing);
         assert_eq!(unseen(&ed), ["2 earlier turns unseen — space v v for all"]);
-        // Ended by you: seen — the next turn's review says nothing of it
-        feed(&mut ed, "<space>vq");
+        // Ended by you (its file not viewed: `y` on the card): seen — the next turn's review says nothing of it
+        feed(&mut ed, "<space>vqy");
         ed.session.checkpoints.list.push(turn("four"));
         ed.messages.clear();
         feed(&mut ed, "<space>vt");
@@ -7691,9 +8004,9 @@ mod tests {
             let r =
                 crate::codereview::CodeReview::for_test(crate::codereview::Base::Head, dir.clone(), vec![f]);
             ed.session.code_review = Some(r);
-            feed(ed, "<space>vq");
+            feed(ed, "<space>vqy");
         };
-        feed(&mut ed, "<space>vq");
+        feed(&mut ed, "<space>vqy");
         for q in ["five", "six"] {
             ed.session.checkpoints.list.push(turn(q));
         }
@@ -7703,7 +8016,7 @@ mod tests {
         feed(&mut ed, "<space>vt");
         settle_until(&mut ed, reviewing);
         assert_eq!(unseen(&ed), ["2 earlier turns unseen — space v v for all"], "util.rs isn't theirs");
-        feed(&mut ed, "<space>vq");
+        feed(&mut ed, "<space>vqy");
         ed.session.checkpoints.list.push(turn("eight"));
         git_review(&mut ed, &main);
         ed.session.checkpoints.list.push(turn("nine"));
@@ -9308,6 +9621,9 @@ mod tests {
         assert_eq!(ed.session.code_review.as_ref().unwrap().selected, 0);
         feed(&mut ed, "m");
         let r = ed.session.code_review.as_ref().unwrap();
+        assert!(r.viewed(&ed, &r.files[0]), "b.rs viewed (its base on the way)");
+        settle_until(&mut ed, |ed| ed.doc().review_base.is_some());
+        let r = ed.session.code_review.as_ref().unwrap();
         assert!(r.viewed(&ed, &r.files[0]), "b.rs viewed");
         assert_eq!(r.selected, 2, "on to the next");
         feed(&mut ed, "<esc>");
@@ -9782,10 +10098,36 @@ mod tests {
         ] {
             assert!(sent.contains(want), "{want} in {sent}");
         }
-        // Ended: back to the index as the diff base
+        // Ending it with files not viewed: asked first, on a card naming them (#10) — n keeps reviewing
+        ed.session.chat.as_mut().unwrap().focused = false;
         feed(&mut ed, "<space>vq");
+        assert!(ed.session.code_review.is_some(), "not ended without a word");
+        let card = ed.offers.first().map(|o| (o.title.clone(), o.question.clone())).unwrap();
+        assert_eq!(card.0, "End the review?");
+        assert!(
+            card.1.starts_with("2 files not viewed — end the review anyway?\n\n  b.rs\n  c.rs"),
+            "{}",
+            card.1
+        );
+        feed(&mut ed, "n");
+        assert!(ed.session.code_review.is_some() && ed.offers.is_empty());
+        // y: ended — back to the index as the diff base
+        feed(&mut ed, "<space>vqy");
         assert!(ed.session.code_review.is_none());
         assert!(ed.docs.iter().all(|d| d.review_base.is_none()));
+        // Opened again: a.rs is still viewed — its diff is what it was (#9)
+        crate::codereview::start_in(&mut ed, dir.clone(), None);
+        settle_until(&mut ed, |ed| ed.session.code_review.is_some() && ready(ed));
+        let viewed = |ed: &Editor| {
+            let r = ed.session.code_review.as_ref().unwrap();
+            r.files.iter().filter(|f| r.viewed(ed, f)).map(|f| f.rel.clone()).collect::<Vec<_>>()
+        };
+        assert_eq!(viewed(&ed), ["a.rs"], "kept past the review");
+        // Its diff changes: the mark goes; back as it was, it's there again
+        feed(&mut ed, "ggix<esc>");
+        assert!(viewed(&ed).is_empty(), "a changed diff isn't viewed");
+        feed(&mut ed, "u");
+        assert_eq!(viewed(&ed), ["a.rs"], "the same diff again");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -10244,6 +10586,50 @@ mod tests {
         settled(&mut ed);
         feed(&mut ed, "y");
         assert!(ed.offers.is_empty());
+    }
+
+    /// #65: a card's `v` buffer goes when the card is answered — also one viewed before another card's `v`
+    /// (only the last one viewed was closed: the first stayed in the tab row); a card waiting in a session
+    /// behind keeps its own.
+    #[test]
+    fn every_cards_buffer_goes_with_its_answer() {
+        use crate::offer::{Offer, What};
+        let mut ed = editor("text\n");
+        // (a file's buffer: the blank startup one would be handed over to the first view)
+        ed.docs[0].path = Some(test_root().join("x.rs"));
+        let long: String = (1..=80).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let card =
+            |title: &str| Offer::new(title.into(), &long, "", String::new(), What::ProjectTrust { hash: 0 });
+        let card_buffers = |ed: &Editor| -> Vec<String> {
+            let mut t: Vec<String> = ed
+                .docs
+                .iter()
+                .filter_map(|d| d.title.clone().filter(|t| t.starts_with(crate::offer::CARD_VIEW)))
+                .collect();
+            t.sort();
+            t
+        };
+        ed.push_offer(card("First card"));
+        ed.push_offer(card("Second card"));
+        ed.offer_view_all();
+        ed.offer_to_front(1);
+        ed.offer_view_all();
+        ed.handle_event(Event::Resize);
+        assert_eq!(card_buffers(&ed), ["card · First card", "card · Second card"]);
+        // The second answered: its buffer goes; then the first's, viewed before it, too
+        ed.offer_dismiss();
+        ed.handle_event(Event::Resize);
+        assert_eq!(card_buffers(&ed), ["card · First card"]);
+        ed.offer_dismiss();
+        ed.handle_event(Event::Resize);
+        assert!(card_buffers(&ed).is_empty(), "{:?}", card_buffers(&ed));
+        // A card parked in a session behind keeps its buffer
+        ed.push_offer(card("Third card"));
+        ed.offer_view_all();
+        let o = ed.offers.remove(0);
+        ed.session.parked.push(o);
+        ed.handle_event(Event::Resize);
+        assert_eq!(card_buffers(&ed), ["card · Third card"]);
     }
 
     /// What a weighty card asks you to decide is its most visible text: its first paragraph (a command, a

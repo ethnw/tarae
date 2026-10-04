@@ -1163,6 +1163,27 @@ fn a_card_over_a_panel_stands_apart_from_it() {
     }
 }
 
+/// #18: a message of yours with line breaks is drawn line by line, blank lines kept — one span with its
+/// breaks in it reached the terminal as raw LFs (rows overlapped, paragraphs lost their starts).
+#[test]
+fn a_users_message_keeps_its_lines() {
+    use crate::chat::{Msg, Role};
+    let mut s = Shot::new(112, 30);
+    s.ed.config.llm.command = "sh".into();
+    s.ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+    s.keys(" l");
+    let c = s.ed.session.chat.as_mut().unwrap();
+    c.msgs.push(Msg::new(Role::User, "First paragraph here.\n\nSecond paragraph\r\nthird line", ""));
+    let mut parser = vt100::Parser::new(s.h, s.w, 0);
+    parser.process(&s.frame());
+    let rows: Vec<String> = parser.screen().rows(0, s.w).collect();
+    let at = rows.iter().position(|r| r.contains("▎ First paragraph here.")).expect("its first line");
+    let next: Vec<&str> = rows[at + 1..at + 4].iter().map(|r| r.trim()).collect();
+    assert!(next[0].ends_with('▎'), "the blank line, kept: {rows:#?}");
+    assert!(next[1].ends_with("▎ Second paragraph"), "{rows:#?}");
+    assert!(next[2].ends_with("▎ third line"), "{rows:#?}");
+}
+
 /// The thought card is the turn's words as a log: a new thought goes under the last one (thinking comes in
 /// bursts — a lone "I should" must not wipe the whole thought before it).
 #[test]
@@ -1452,6 +1473,74 @@ fn review_rail_scrolls_by_itself_only_to_show_the_file() {
     crate::codereview::show(&mut s.ed, 5, false);
     s.frame();
     assert!(rail(&s).iter().any(|r| r.1 == 5), "{:?}", rail(&s));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// #73, #67: a turn's review with folders, the chat open beside it: the wheel scrolls the rail, a click on
+/// `↓ N more` / `↑ N more` scrolls it a page; a click on a file's `◦` opens it and marks it viewed — a
+/// second click right after (the file still opening) leaves it marked, and `space v m` still toggles.
+#[test]
+fn review_rail_scrolls_by_click_and_marks_by_click() {
+    use crate::codereview::{Base, CodeReview, File};
+    use crate::event::{Mouse, MouseKind};
+    let dir = std::env::temp_dir().join(format!("tarae-rail-marks-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = std::fs::canonicalize(dir).unwrap();
+    let files: Vec<File> = (0..30)
+        .map(|i| {
+            let rel = format!("src/m{}/f{i:02}.txt", i / 5);
+            std::fs::create_dir_all(dir.join(&rel).parent().unwrap()).unwrap();
+            std::fs::write(dir.join(&rel), "x\n").unwrap();
+            File { path: dir.join(&rel), rel, added: 1, removed: 0, new: true, gone: false, binary: false }
+        })
+        .collect();
+    let mut s = Shot::new(160, 24);
+    s.ed.session.root = dir.clone();
+    s.ed.config.llm.command = "sh".into();
+    s.ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+    crate::chat::open(&mut s.ed);
+    s.ed.open(&dir.join("src/m0/f00.txt")).unwrap();
+    let turn = Base::Turn { at: 0, question: "tidy the modules".into() };
+    s.ed.session.code_review = Some(CodeReview::for_test(turn, dir.clone(), files));
+    s.frame();
+    let rail = |s: &Shot| s.ed.screen.review_rail.borrow().clone();
+    let more = |s: &Shot| s.ed.screen.review_rail_more.borrow().clone();
+    let at = |s: &mut Shot, kind, x: usize, y: usize| {
+        s.ed.handle_event(Event::Mouse(Mouse { kind, x: x as u16, y: y as u16, alt: false }));
+        s.frame();
+    };
+    let before = rail(&s);
+    assert!(before.len() < 30 && !before.is_empty(), "{before:?}");
+    // The wheel
+    at(&mut s, MouseKind::ScrollDown, 4, before[0].0);
+    assert!(rail(&s)[0].1 > before[0].1, "the wheel scrolled it: {:?}", rail(&s));
+    at(&mut s, MouseKind::ScrollUp, 4, before[0].0);
+    assert_eq!(rail(&s), before);
+    // `↓ N more`: a page down; then `↑ N more`: back
+    let (down, by) = *more(&s).iter().find(|m| m.1 > 0).expect("a ↓ row");
+    at(&mut s, MouseKind::Down, 4, down);
+    assert_eq!(s.ed.session.code_review.as_ref().unwrap().scroll, by as usize, "a page");
+    assert_ne!(rail(&s), before);
+    let (up, _) = *more(&s).iter().find(|m| m.1 < 0).expect("an ↑ row");
+    at(&mut s, MouseKind::Down, 4, up);
+    assert_eq!(rail(&s), before);
+    // A click on a file's mark: opened and viewed, a second click right after keeps it so
+    let (y, i, x) = s.ed.screen.review_rail_marks.borrow().iter().copied().rfind(|m| m.1 != 0).unwrap();
+    at(&mut s, MouseKind::Down, x, y);
+    at(&mut s, MouseKind::Down, x, y);
+    let path = dir.join(format!("src/m{}/f{i:02}.txt", i / 5));
+    assert_eq!(s.ed.doc().path.as_deref(), Some(path.as_path()), "opened");
+    s.until("its base", |ed| ed.doc().review_base.is_some());
+    let viewed = |s: &Shot| {
+        let r = s.ed.session.code_review.as_ref().unwrap();
+        r.files.iter().filter(|f| r.viewed(&s.ed, f)).count()
+    };
+    assert_eq!(viewed(&s), 1, "marked once, not toggled back");
+    // A click on its name opens it, nothing more; `space v m` takes the mark back
+    s.ed.session.chat.as_mut().unwrap().focused = false;
+    s.keys(" vm");
+    assert_eq!(viewed(&s), 0, "space v m toggles");
     std::fs::remove_dir_all(&dir).ok();
 }
 

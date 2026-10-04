@@ -414,6 +414,25 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `tab` | `insert_tab` | Insert tab char |
 | `up` | `move_visual_line_up` | Move up (visual line) |
 
+## Cards, reviews and panels
+
+Keys of what's up on the screen — not rebindable, so not in `default_keys.toml`:
+
+| Where | Key | What it does |
+|---|---|---|
+| A card | `y` `n` | Yes · no (some take `a` this chat, `A` always); Esc never answers one |
+| A card | `C-q` | Give it the keys from wherever they are (the status line says CARD); Esc goes back, unanswered |
+| No card here | `C-q` | To the session whose Claude waits for you — its card comes up there |
+| A card cut to fit | `v` | All of it in a buffer — `y` waits until its end was on screen |
+| Claude's change to several files | `y` `r` `v` `n` | Accept them all · review them one by one · every change in a buffer · decline them all |
+| An edit's review | `y` `n` `a` `tab` | Accept this change · reject it · accept all left · next |
+| An edit's review | Esc | Back to the chat, the change unanswered — `C-q` answers it |
+| An edit's review | `C-d` `C-u` `C-f` `C-b` `C-e` `C-y`, wheel | Scroll it — `space`, `:` and `C-w` work over it too |
+| Code review rail | click on `◦` | Mark the file viewed (a second click leaves it marked) |
+| Code review rail | click on `↑ N more` / `↓ N more`, wheel | Scroll the files |
+| Code review | `space v q` | End it — asked on a card while files aren't viewed |
+| Task panel | click on a preflight step | Its output; wheel, `C-u` `C-d` scroll |
+
 ## `:` commands
 
 Type `:` in normal mode. `Tab` completes command names and their arguments (paths, themes, settings, languages).

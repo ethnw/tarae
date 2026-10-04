@@ -39,6 +39,9 @@ pub struct Offer {
     pub warning: Option<std::ops::Range<usize>>,
 }
 
+/// A card's text in a buffer of its own (`v`) is titled this, then the card's title.
+pub const CARD_VIEW: &str = "card · ";
+
 /// How long a card that runs something must have been in sight, as it is, before `y` answers it — a key
 /// pressed as it appears, or as its text changes, isn't an answer.
 pub const SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
@@ -94,6 +97,11 @@ pub enum What {
     /// Closing a buffer whose change is under review (#54): `y` declines the change and closes it, `n` keeps
     /// both. Not `force`d, unsaved edits of yours keep it open still.
     CloseReviewed { doc: crate::document::DocId, force: bool },
+    /// Claude's rename or replace across several files (`refactor.rs`, #75): `y` accepts them all, `r`
+    /// reviews them one by one, `v` shows every change, `n` declines them all. `generation` = its chat's.
+    ChangeSet { generation: u64 },
+    /// Ending a code review with files not viewed (`codereview.rs`, #10): `y` ends it, `n` keeps reviewing.
+    ReviewEnd,
 }
 
 /// A card's text, as `offer_read` knows it: its title and question.
@@ -179,7 +187,16 @@ impl Offer {
                 | What::ForcePush(_)
                 | What::SessionNew(_)
                 | What::SessionEnd(_)
+                | What::ChangeSet { .. }
         )
+    }
+
+    /// The `(generation)` of a change set's card (`r` one by one, `v` every change).
+    pub fn change_set(&self) -> Option<u64> {
+        match self.what {
+            What::ChangeSet { generation } => Some(generation),
+            _ => None,
+        }
     }
 
     /// Whether `D` answers it: the end card of a session on a branch (removes both).
@@ -222,7 +239,14 @@ impl Offer {
 
     /// Whether Claude's call waits on it — it goes with its session when another comes to the front.
     pub fn claudes(&self) -> bool {
-        matches!(self.what, What::Run(_) | What::NoSandbox { .. } | What::Read { .. } | What::Screen { .. })
+        matches!(
+            self.what,
+            What::Run(_)
+                | What::NoSandbox { .. }
+                | What::Read { .. }
+                | What::Screen { .. }
+                | What::ChangeSet { .. }
+        )
     }
 
     pub fn installing(&self) -> bool {
@@ -297,6 +321,21 @@ impl crate::editor::Editor {
                 && matches!(key.code, Code::Char('y' | 'n' | 'N' | 'a' | 'A' | 'D' | 'R' | 'c'))
             {
                 return true;
+            }
+            // A change set's card: `r` one by one, `v` every change in a buffer (not a cut card's text)
+            if let Some(generation) = o.change_set() {
+                match key.code {
+                    Code::Char('r') => {
+                        let id = o.id;
+                        crate::refactor::one_by_one(self, id, generation);
+                        return true;
+                    }
+                    Code::Char('v') => {
+                        crate::refactor::view_all(self, generation);
+                        return true;
+                    }
+                    _ => {}
+                }
             }
             // Cut to fit the screen: `v` shows it all, and `y` waits for that (not taken otherwise — it's
             // select mode in the code)
@@ -390,6 +429,11 @@ impl crate::editor::Editor {
                 self.offer_finished(id, Ok(()));
                 self.close_reviewed(doc, force);
             }
+            What::ChangeSet { generation } => crate::refactor::accept_all(self, id, generation),
+            What::ReviewEnd => {
+                self.offer_finished(id, Ok(()));
+                crate::codereview::close(self);
+            }
         }
     }
 
@@ -454,15 +498,52 @@ impl crate::editor::Editor {
         self.set_status(msg);
     }
 
-    /// Every event: the whole text of a card that's been answered (or has gone) closes with it (#55).
+    /// Every event: the whole text of a card that's been answered (or has gone) closes with it (#55) — any
+    /// `card · <title>` buffer whose card is gone, not only the last one viewed (#65: one viewed before
+    /// another card's `v` stayed in the tab row after its answer). A card waiting in a session behind keeps
+    /// its own.
     pub(crate) fn offer_view_sync(&mut self) {
-        let Some((id, _, doc)) = self.offer_view.get() else { return };
-        if self.offers.iter().any(|o| o.id == id) {
+        if let Some((id, _, _)) = self.offer_view.get()
+            && !self.offers.iter().any(|o| o.id == id)
+        {
+            self.offer_view.set(None);
+        }
+        let card = |d: &crate::document::Document| {
+            d.throwaway && d.path.is_none() && d.title.as_deref().is_some_and(|t| t.starts_with(CARD_VIEW))
+        };
+        if !self.docs.iter().any(card) {
             return;
         }
-        self.offer_view.set(None);
-        if self.docs.iter().any(|d| d.id == doc && d.throwaway) {
+        let up = |t: &str| {
+            std::iter::once(&self.session)
+                .chain(&self.sessions)
+                .flat_map(|s| &s.parked)
+                .chain(&self.offers)
+                .any(|o| t.strip_prefix(CARD_VIEW) == Some(o.title.as_str()))
+        };
+        let gone: Vec<_> = self
+            .docs
+            .iter()
+            .filter(|d| card(d) && !up(d.title.as_deref().unwrap_or_default()))
+            .map(|d| d.id)
+            .collect();
+        for doc in gone {
             self.close_doc(doc);
+        }
+    }
+
+    /// `v` on the front card: a change set's every change, else its whole text.
+    pub fn offer_view(&mut self) {
+        match self.offers.first().and_then(Offer::change_set) {
+            Some(generation) => crate::refactor::view_all(self, generation),
+            None => self.offer_view_all(),
+        }
+    }
+
+    /// `r` on a change set's card: one by one.
+    pub fn offer_one_by_one(&mut self) {
+        if let Some((id, generation)) = self.offers.first().and_then(|o| Some((o.id, o.change_set()?))) {
+            crate::refactor::one_by_one(self, id, generation);
         }
     }
 
@@ -485,7 +566,7 @@ impl crate::editor::Editor {
         let Some(o) = self.offers.first() else { return };
         let (id, rev, title) = (o.id, o.rev, o.title.clone());
         let text = format!("{title}\n\n{}\n", o.question);
-        let name = format!("card · {title}");
+        let name = format!("{CARD_VIEW}{title}");
         let old: Vec<_> = self
             .docs
             .iter()
@@ -596,6 +677,8 @@ impl crate::editor::Editor {
             What::CloseReviewed { .. } => {
                 self.set_status("kept open — Claude's change still waits for y or n")
             }
+            What::ChangeSet { generation } => crate::refactor::decline_all(self, generation),
+            What::ReviewEnd => self.set_status("still reviewing — space v m marks a file viewed"),
         }
     }
 

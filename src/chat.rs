@@ -31,11 +31,12 @@ use crate::markdown::Span;
 
 const SYSTEM: &str = "You are Claude, built into tarae — a terminal code editor, working in the user's project \
 (your current directory). Explore it with Read, Glob and tarae's own code tools — look at the code you need \
-across files instead of guessing. The language server's answers beat any text search and reading around: for \
-where something is defined (or a trait's implementations), definition — at a place, or by name alone; for a \
-value's type or a function's signature and docs, hover; for where something is used, references. For finding \
-code or text, search (the editor's project search); for a file's outline or which function a line is in, \
-symbols — Grep is for what those can't do. You can change files with Edit and Write when the user asks for changes: each one is shown to them as \
+across files instead of guessing. The language server's answers beat any text search and reading around — \
+reach for them first: \"where is X defined\" is definition by name (symbol X, no file or line needed) — never a \
+grep for `fn X`, `struct X` or `class X`; for a trait's implementations, definition with kind implementation; \
+for a value's type or a function's signature and docs, hover; for where something is used or what a change \
+would touch, references. For finding code or text, search (the editor's project search); for a file's outline \
+or which function a line is in, symbols — Grep is for what those can't do. You can change files with Edit and Write when the user asks for changes: each one is shown to them as \
 a diff they accept or reject (maybe in part), so keep edits focused, and if one is declined, ask before trying \
 another way. After you change code, check your work: diagnostics with wait says in seconds whether it \
 compiles as the language servers see it (before any build), then the run_tests tool runs the tests that cover \
@@ -1802,6 +1803,20 @@ mod tests {
         let r =
             look(cwd, "mcp__tarae__references", &serde_json::json!({"path": "src/lib.rs", "symbol": "a"}));
         assert_eq!(r.verb, "references");
+    }
+
+    /// The system prompt sends "where is X defined" to the language server by name (never a grep for `fn X`
+    /// / `struct X`), a type to hover, uses to references — Grep for what those can't do.
+    #[test]
+    fn the_prompt_prefers_the_language_server() {
+        let s = system();
+        let at = |w: &str| s.find(w).unwrap_or_else(|| panic!("{w:?} in the prompt"));
+        assert!(
+            s.contains("\"where is X defined\" is definition by name (symbol X, no file or line needed)")
+        );
+        assert!(s.contains("never a grep for `fn X`, `struct X` or `class X`"));
+        assert!(at("definition by name") < at(", hover;") && at(", hover;") < at("references."));
+        assert!(at("references.") < at("Grep is for what those can't do"));
     }
 
     /// A walk-through's stops as Claude writes them: parsed from its words, shown as link lines, a tag

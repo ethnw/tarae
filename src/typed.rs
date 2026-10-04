@@ -327,7 +327,7 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
             Ok(())
         }
         "review-close" => {
-            crate::codereview::close(editor);
+            crate::codereview::close_asked(editor);
             Ok(())
         }
         "review-turn" => {
