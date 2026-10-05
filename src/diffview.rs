@@ -58,7 +58,7 @@ impl Editor {
         Ok(())
     }
 
-    fn diff_show(
+    pub(crate) fn diff_show(
         &mut self,
         id: DocId,
         version: u64,

@@ -598,6 +598,9 @@ pub struct Editor {
     pub preflight_told: std::collections::HashSet<PathBuf>,
     /// Undo history files being written (`undofile.rs`) — the process ending waits for them.
     pub undo_writes: crate::undofile::Writes,
+    /// Copies of the buffers with unsaved edits, and the ones a gone tarae left (`recovery.rs`). None in
+    /// tests (a test gives one its own folder).
+    pub recovery: Option<crate::recovery::Recovery>,
     pub idle_save_gen: u64,
     /// When the scheduled animation tick lands (None: none scheduled).
     ticking: Option<std::time::Instant>,
@@ -621,6 +624,11 @@ impl Editor {
     /// sandbox and every `starts_with(root)` compare against; one that isn't there stays as given.
     pub fn with_root(config: Config, root: PathBuf) -> Self {
         let root = std::fs::canonicalize(&root).unwrap_or(root);
+        let recovery = match cfg!(test) {
+            true => None,
+            false => crate::config::state_dir()
+                .map(|d| crate::recovery::Recovery::new(d.join("recovery"), root.clone())),
+        };
         let events = Queue::default();
         let saver = crate::saver::Saver::new(events.shared_sender());
         let mut ed = Self {
@@ -752,6 +760,7 @@ impl Editor {
             restart: None,
             preflight_told: Default::default(),
             undo_writes: Default::default(),
+            recovery,
             idle_save_gen: 0,
             recent: Vec::new(),
             restore: crate::restore::State::default(),
@@ -943,6 +952,7 @@ impl Editor {
                     self.docs[i].display_name(&self.session.root)
                 ));
                 self.plugin_event(crate::plugin::PluginEvent::Opened, id);
+                self.recovery_loaded(id);
             }
             Err(e) => {
                 self.close_doc(id);
@@ -1536,6 +1546,7 @@ impl Editor {
         self.picker_filter();
         self.conflicts_sync();
         self.disk_sync();
+        self.recovery_sync();
         self.saves_due(false);
         crate::follow::watch(self);
         crate::notes::attach(self);

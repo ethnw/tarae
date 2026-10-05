@@ -67,6 +67,10 @@ pub struct EditorConfig {
     pub terminal_escape: String,
     /// On save, record the undo history; restore it on reopen (`undofile.rs`).
     pub persistent_undo: bool,
+    /// Keep a copy of every buffer with unsaved edits, offered back after a crash (`recovery.rs`) · files
+    /// never kept besides the ones that hold keys: names anywhere, paths from the project root.
+    pub recovery: bool,
+    pub recovery_skip: Vec<String>,
     /// `:restart` builds with this first ("" = no build) and runs this binary ("" = the one running) —
     /// a relative path is from the project root (`restart.rs`).
     pub restart_build: String,
@@ -117,6 +121,8 @@ impl Default for EditorConfig {
             auto_save: "focus".into(),
             terminal_escape: "C-\\".into(),
             persistent_undo: true,
+            recovery: true,
+            recovery_skip: Vec::new(),
             restart_build: String::new(),
             restart_binary: String::new(),
             offer_grammars: true,

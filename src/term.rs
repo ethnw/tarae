@@ -282,6 +282,11 @@ fn spawn_signals(tx: crate::event::Tx) {
             }
         }
         let quit = |ed: &mut Editor| {
+            // (the terminal or its pane went, or someone ended tarae: what's unsaved is kept for the next
+            // start — `recovery.rs`)
+            if let Some(r) = ed.recovery.as_mut() {
+                r.keep = true;
+            }
             let _ = crate::typed::quit(ed, true);
         };
         let _ = tx.send(Event::Job(Box::new(quit)));
@@ -11432,6 +11437,67 @@ mod tests {
             }
         }
         measured("key_to_frame_on_large_file", worst.0, budget);
+        assert!(worst.0 < budget, "key {:?} took {:?} (budget {:?})", worst.1, worst.0, budget);
+    }
+
+    /// The same keys in a 6.6 MB file with unsaved-buffer recovery on (`recovery.rs`), each as a whole event
+    /// (its after-event work tells the keeper what changed): within the frame budget while the keeper writes
+    /// copies of the whole file on its thread. And what a copy of it costs there — never on the main loop.
+    #[test]
+    fn perf_budget_key_to_frame_with_recovery() {
+        if crate::test_results::unoptimized("term::tests::perf_budget_key_to_frame_with_recovery") {
+            return;
+        }
+        let budget = frame_budget();
+        let dir = std::env::temp_dir().join(format!("tarae-perf-recovery-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let text: String =
+            (0..150_000).map(|i| format!("line {i} 타래 fn main() {{ let x = {i}; }}\n")).collect();
+        let keys = ["j", "j", "w", "x", "x", "C", "g", "e", "g", "g", "i", "a", "b", "esc", "u", "x", "C-d"];
+        // (the same keys with it off, beside it — what it adds, not what the events cost anyway)
+        let run = |on: bool| {
+            let mut ed = Editor::new(Config::default());
+            ed.docs[0].text = Rope::from_str(&text);
+            ed.docs[0].path = Some(dir.join("big.txt"));
+            if on {
+                let mut r = crate::recovery::Recovery::new(dir.join("state"), ed.session.root.clone());
+                r.quiet = Duration::ZERO;
+                ed.recovery = Some(r);
+            }
+            let mut buf = Vec::with_capacity(1 << 16);
+            render(&mut ed, &mut buf, 120, 40).unwrap();
+            let mut worst = (Duration::ZERO, "");
+            for k in keys {
+                let t = Instant::now();
+                ed.handle_event(crate::event::Event::Key(k.parse().unwrap()));
+                let key = t.elapsed();
+                let frame = (0..3)
+                    .map(|_| {
+                        buf.clear();
+                        let t = Instant::now();
+                        render(&mut ed, &mut buf, 120, 40).unwrap();
+                        t.elapsed()
+                    })
+                    .min()
+                    .unwrap();
+                if key + frame > worst.0 {
+                    worst = (key + frame, k);
+                }
+            }
+            (ed, worst)
+        };
+        let (_, off) = run(false);
+        let (mut ed, worst) = run(true);
+        eprintln!("the same keys without recovery: worst {:?} ({:?})", off.0, off.1);
+        // A copy of the whole file, on the keeper (fsync'd, as a save)
+        ed.handle_event(crate::event::Event::Key("x".parse().unwrap()));
+        let t = Instant::now();
+        assert!(ed.recovery.as_mut().unwrap().flush());
+        let copy = t.elapsed();
+        std::fs::remove_dir_all(&dir).ok();
+        measured("key_to_frame_with_recovery", worst.0, budget);
+        measured("recovery_copy_6mb", copy, Duration::from_millis(1000));
         assert!(worst.0 < budget, "key {:?} took {:?} (budget {:?})", worst.1, worst.0, budget);
     }
 

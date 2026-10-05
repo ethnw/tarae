@@ -69,6 +69,7 @@ mod readonly;
 mod reads;
 mod rebase;
 mod recent;
+mod recovery;
 mod refactor;
 mod repeat;
 mod replace;
@@ -256,6 +257,8 @@ fn main() -> Result<()> {
     notes::restore(&mut editor);
     // Claude's turns here, for `space u` and `space v t` (a restart's, or ones a crash cut short)
     checkpoint::restore(&mut editor);
+    // Unsaved edits a tarae that's gone kept (a crash, a kill) — a card each (`recovery.rs`)
+    editor.recovery_scan();
     if !files.is_empty() {
         editor.current = 0;
     }
@@ -279,6 +282,10 @@ fn main() -> Result<()> {
     editor.save_restore();
     // The last saves' undo history is still being written on workers — exiting or exec'ing cuts it off
     editor.undo_flush();
+    // Copies of unsaved buffers: removed by a quit; kept, written to the last key, for `:restart`'s exec (and
+    // its failure), an error, or a signal (`Recovery.keep`)
+    let restarting = editor.restart.as_ref().is_some_and(|r| r.ready().is_some());
+    editor.recovery_end(result.is_err() || restarting);
     if result.is_ok()
         && let Some(bin) = editor.restart.as_ref().and_then(|r| r.ready()).map(PathBuf::from)
     {

@@ -216,6 +216,15 @@ configs carry over as they are.
   `settings.json` and the like (TOML and JSON): `config.toml not auto-saved: it doesn't parse (…) — :w writes
   it anyway`; once it parses again, auto-save writes it. Saves (these and `:w`) are written in the background, so typing never waits on the
   disk; quitting waits until they're written, and a test or task run waits too — they run the code on disk
+- **Recovery** `editor.recovery` — a buffer with unsaved edits is copied into your state folder after a pause in
+  typing (1 s; at most 10 s apart while you type on), on a thread of its own, so a crash, a kill, a power cut or a
+  closed terminal loses nothing. The next tarae started in that project shows a card per file: `y` puts the text
+  back in the buffer (unsaved — `u` goes back to the file, nothing is written until you save), `c` shows it
+  against the file the way `:diff` does, `D` throws it away, `n` asks again at the next start. The card says when
+  the file changed on disk since, or was deleted. Saving, undoing back to the file or closing the buffer removes
+  the copy; `:q` removes them all, a hangup or `:restart` keeps them. Never copied: files where keys are (`~/.ssh`,
+  `~/.aws`, `~/.gnupg`, credentials …, by their real path), files named like keys anywhere (`.env`, `*.pem`,
+  `*.key`, `id_ed25519` …), files over 8 MB, and what `editor.recovery-skip` lists
 - **Restore** — launched without arguments, tarae reopens the files you had open in this folder, at their
   cursor and scroll positions; open a file by name and you land where you last were in it
 - **Persistent undo** — on save, the last 1000 undo steps are written next to your state, so `u`/`U` keep working after

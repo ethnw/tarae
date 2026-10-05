@@ -183,6 +183,23 @@ pub static SETTINGS: &[Setting] = &[
         set: |c, v| c.persistent_undo = b(v),
     },
     Setting {
+        path: "editor.recovery",
+        kind: Kind::Bool,
+        doc: "Keep a copy of each buffer with unsaved edits (after a pause in typing, in your state folder) — after a crash or a kill, the next start offers them back",
+        get: |c| Value::from(c.recovery),
+        set: |c, v| c.recovery = b(v),
+    },
+    Setting {
+        path: "editor.recovery-skip",
+        kind: Kind::StrList,
+        doc: "Files whose unsaved edits are never copied — a name matches anywhere, in any case (\"*.secret\"), a path is from the project root (\"private/\") or ~/; keys and tokens never are (~/.ssh, .env, *.pem…)",
+        get: |c| Value::Array(c.recovery_skip.iter().map(|a| Value::from(a.as_str())).collect()),
+        set: |c, v| {
+            c.recovery_skip =
+                v.as_array().into_iter().flatten().filter_map(|a| a.as_str().map(str::to_string)).collect()
+        },
+    },
+    Setting {
         path: "editor.restart-build",
         kind: Kind::Str,
         doc: "For working on tarae itself: a command :restart runs first, e.g. \"cargo build --release\" (\"\" = none; :restart! skips it)",

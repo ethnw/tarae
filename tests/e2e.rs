@@ -433,7 +433,8 @@ fn a_terminated_or_hung_up_tarae_quits_and_ends_its_shell() {
 
 /// A tarae whose terminal goes away (SIGHUP — quitting as `:q!` does) leaves the next start at least what a
 /// killed one leaves: the files to continue with (a quit writes them, a kill keeps the last quit's), and the
-/// files on disk as they were — unsaved text is lost either way (nothing keeps it), never written.
+/// files on disk as they were — unsaved text is never written to them (a copy of it may be kept for the next
+/// start to offer back: `a_killed_taraes_unsaved_edits_come_back`).
 #[test]
 fn a_hung_up_tarae_leaves_the_next_start_at_least_what_a_killed_one_does() {
     let names = ["a.txt", "b.txt"];
@@ -482,6 +483,50 @@ fn a_hung_up_tarae_leaves_the_next_start_at_least_what_a_killed_one_does() {
     }
     assert_eq!(hung_up, ["a.txt", "b.txt"], "a hangup keeps what was open, as a quit does");
     assert_eq!((killed_b.as_str(), hung_up_b.as_str()), ("beta\n", "beta\n"), "unsaved text never written");
+}
+
+/// The copies of unsaved buffers in a sandbox's state, any tarae's.
+fn recovery_copies(sb: &Sandbox) -> Vec<std::path::PathBuf> {
+    let folders = fs::read_dir(sb.state().join("recovery")).into_iter().flatten().flatten();
+    let files = folders.flat_map(|d| fs::read_dir(d.path()).into_iter().flatten().flatten());
+    files.map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "txt")).collect()
+}
+
+/// Killed (no destructor runs) with an edit not saved: the copy kept after the pause in typing brings it
+/// back — the next start's card, `y`, and the text is in the buffer, unsaved; the file was never written. A
+/// quit then leaves no copy behind (the answered one went, and its own with the quit).
+#[test]
+fn a_killed_taraes_unsaved_edits_come_back() {
+    let sb = Sandbox::new("recover");
+    sb.write("a.txt", "alpha\n");
+    let mut t = sb.spawn(&["a.txt"]);
+    t.wait_text("alpha");
+    t.insert("unsaved-edit ");
+    // (kept after a pause in typing — waited for where it's written)
+    let deadline = std::time::Instant::now() + sb.timeout();
+    while recovery_copies(&sb).is_empty() {
+        assert!(std::time::Instant::now() < deadline, "no copy of the unsaved buffer was kept");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    t.child.kill().unwrap();
+    t.wait_exit();
+    assert_eq!(sb.read("a.txt"), "alpha\n");
+
+    let mut t = sb.spawn(&["a.txt"]);
+    t.wait_state("the recovery card settled in front", |s| {
+        s["cards"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|c| c["up"] == "front" && c["kind"] == "recover" && c["settled"] == true)
+    });
+    t.wait_text("Unsaved edits · a.txt");
+    t.send("y");
+    t.wait_text("unsaved-edit alpha");
+    assert_eq!(sb.read("a.txt"), "alpha\n", "restored into the buffer, not written");
+    t.command("q!");
+    assert_eq!(t.wait_exit().code(), Some(0));
+    assert!(recovery_copies(&sb).is_empty(), "{:?}", recovery_copies(&sb));
 }
 
 /// A build task from the config: its output below the code, the place it printed goes into the list, `]q`

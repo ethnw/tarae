@@ -133,6 +133,9 @@ pub enum What {
     /// The binary a restart would run is the one it was, older than its checkout's HEAD: `y` restarts onto
     /// it anyway, `n` doesn't.
     RestartSame { id: u64 },
+    /// A buffer's unsaved edits a gone tarae kept (`recovery.rs`): `y` restores them into the buffer, `c`
+    /// compares them with the file, `D` discards them, `n` leaves them for the next start.
+    Recover(Box<crate::recovery::Found>),
 }
 
 /// A call of Claude's waiting on a card for the user's answer (`Session.asking`): the card, how the call is
@@ -278,7 +281,13 @@ impl Offer {
                 | What::Hooks(_)
                 | What::Restart(_)
                 | What::RestartSame { .. }
+                | What::Recover(_)
         )
+    }
+
+    /// Whether `c` (compare) and `D` (discard) answer it: unsaved edits a gone tarae kept.
+    pub fn recovers(&self) -> bool {
+        matches!(self.what, What::Recover(_))
     }
 
     /// Whether `f` answers it: a restart's card with the session in front's checkout to build instead.
@@ -450,6 +459,8 @@ impl Offer {
             }
             W::Restart(_) => vec![('y', "Restart"), ('n', "Not now")],
             W::RestartSame { .. } => vec![('y', "Restart anyway"), ('n', "Don't")],
+            // (throwing them away takes a capital, as removing does)
+            W::Recover(_) => vec![('y', "Restore"), ('c', "Compare"), ('D', "Discard"), ('n', "Not now")],
             W::ChangeSet { .. } => {
                 vec![('y', "Accept all"), ('r', "One by one"), ('v', "See them"), ('n', "Decline all")]
             }
@@ -487,6 +498,7 @@ impl Offer {
             W::Hooks(_) => "hooks",
             W::Restart(_) => "restart",
             W::RestartSame { .. } => "restart-same",
+            W::Recover(_) => "recover",
         }
     }
 }
@@ -636,6 +648,8 @@ impl crate::editor::Editor {
         match key.code {
             Code::Char('R') if o.end_dirty() => self.offer_remove(false),
             Code::Char('c') if o.commits_first() => self.offer_commit_first(),
+            Code::Char('c') if o.recovers() => crate::recovery::compare(self),
+            Code::Char('D') if o.recovers() => self.offer_discard(),
             Code::Char('y') => self.offer_accept(),
             Code::Char('n') => self.offer_dismiss(),
             Code::Char('N') if matches!(o.what, What::Install { .. }) => self.offer_never(),
@@ -670,6 +684,12 @@ impl crate::editor::Editor {
         // (a hook the card couldn't show isn't run on a yes)
         if matches!(&self.offers[0].what, What::Hooks(a) if !a.runnable()) {
             return self.set_status("a hook here can't be shown — n goes on without hooks");
+        }
+        // (no restore over edits of yours, nor into a file still loading — said on the card, which stays)
+        if let What::Recover(f) = &self.offers[0].what
+            && let Some(why) = crate::recovery::refuses(self, f)
+        {
+            return self.offer_refused(why);
         }
         let mut o = self.offers.remove(0);
         o.said(self.session.label(), "y");
@@ -735,6 +755,21 @@ impl crate::editor::Editor {
             What::Hooks(ask) => self.hooks_answer(id, *ask, true),
             What::Restart(c) => crate::restart::chosen(self, id, *c, Some(0)),
             What::RestartSame { id: r } => crate::restart::same_answer(self, id, r, true),
+            What::Recover(f) => crate::recovery::restore(self, id, *f),
+        }
+    }
+
+    /// `D` on a card of unsaved edits a gone tarae kept: they're thrown away.
+    pub fn offer_discard(&mut self) {
+        if !self.offers.first().is_some_and(Offer::recovers) {
+            return;
+        }
+        let o = self.offers.remove(0);
+        o.said(self.session.label(), "D");
+        self.card_how(o.id, "answered D");
+        self.card_answered(o.id);
+        if let What::Recover(f) = o.what {
+            crate::recovery::discard(self, *f);
         }
     }
 
@@ -1092,6 +1127,7 @@ impl crate::editor::Editor {
             What::Hooks(ask) => self.hooks_answer(o.id, *ask, false),
             What::Restart(c) => crate::restart::chosen(self, o.id, *c, None),
             What::RestartSame { id } => crate::restart::same_answer(self, o.id, id, false),
+            What::Recover(f) => crate::recovery::not_now(self, *f),
         }
     }
 
