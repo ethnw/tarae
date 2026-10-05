@@ -257,7 +257,7 @@ Each top-level key of a `pack.toml` says how a pack of your own counts for it:
 | `[install.<tool>]`, `[grammar.<name>]`, `[debugger.<name>]` | replaces that entry; the others stay |
 | `[language.<name>]`, `[server.<name>]` | replaces the keys it sets; the entry's other keys stay — in whichever folder the language is |
 | `config-files` | adds to the built-in list; nothing can be taken out |
-| `outputs`, `first-made`, `protect` | ignored, and said at the start: tarae reads them from its own packs only (they decide what Claude's runs may reach or make) |
+| `outputs`, `first-made`, `protect`, `[builds]` | ignored, and said at the start: tarae reads them from its own packs only (they decide what Claude's runs may reach or make, and — `[builds]`: where a checkout builds — what a session's end may delete) |
 
 A key no pack knows is a mistake in that pack, said with its name as one that doesn't parse is. Your
 `[language]`, `[grammar]` and `[server]` are read once, when tarae starts — after editing them, `:restart`.

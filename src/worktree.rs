@@ -16,18 +16,17 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+use crate::builds::{BuildDir, Builds, Doomed, remove_build};
 use crate::editor::Editor;
 use crate::event::SessionId;
 use crate::gitmenu::{git, git_no_hooks};
 use crate::gitpanel::{branch_name, commit_rows, current_branch, only_on, parse_log, top_of};
 
 /// How long sizes on disk are measured for, at most (then the card says "over").
-const MEASURE_FOR: Duration = Duration::from_millis(1500);
+pub(crate) const MEASURE_FOR: Duration = Duration::from_millis(1500);
 /// An ignored folder this big is on the create card · at most this many of them.
 const BIG: u64 = 20 << 20;
 const BIG_SHOWN: usize = 3;
-/// How long `cargo metadata` gets to say where builds go.
-const CARGO_WAIT: Duration = Duration::from_secs(3);
 /// Changed files listed on the end card (the rest counted).
 const FILES_SHOWN: usize = 6;
 
@@ -41,27 +40,9 @@ pub struct SessionStore {
     pub keyed: bool,
     /// What git last said of each session for the list (read when it opens — shown meanwhile).
     pub facts: std::collections::HashMap<SessionId, Facts>,
-    /// Asked at a session's end where its checkout built — None in tests (they set a stand-in: never the
-    /// real cargo home).
-    pub cargo: Option<CargoAsk>,
-}
-
-/// How a session's end asks cargo where its checkout built (`cargo metadata`'s `build_directory`): the
-/// program, and the cargo home — a build dir is only ever removed from its `build/`.
-#[derive(Clone, Debug)]
-pub struct CargoAsk {
-    pub program: PathBuf,
-    pub home: PathBuf,
-}
-
-impl CargoAsk {
-    /// `cargo`, and `$CARGO_HOME` (else `~/.cargo`) — what `{cargo-cache-home}` in a build-dir is.
-    pub fn real() -> Option<CargoAsk> {
-        let home = std::env::var_os("CARGO_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")))?;
-        Some(CargoAsk { program: "cargo".into(), home })
-    }
+    /// Where a checkout's tool builds (the built-in packs' `[builds]`): said on the create card, asked at a
+    /// session's end — None in tests (they set a stand-in: never a real tool nor its home).
+    pub builds: Option<crate::builds::Builds>,
 }
 
 /// A session as it's kept: its checkout, name, branch and base (`Session`'s).
@@ -129,74 +110,6 @@ fn size_text((bytes, whole): (u64, bool)) -> String {
         true => crate::procs::mem(bytes),
         false => format!("over {}", crate::procs::mem(bytes)),
     }
-}
-
-/// Where cargo puts builds for the project in `top`: its target folder and build-dir (`cargo metadata`,
-/// which reads every cargo config as it is; `program`: `cargo`, a stand-in in tests), as cargo prints them
-/// — a configured one with its `..` and links (`real_dirs` for comparing) — None when it doesn't say within
-/// `CARGO_WAIT`.
-fn cargo_dirs(program: &Path, top: &Path) -> Option<(PathBuf, PathBuf)> {
-    use std::io::Read as _;
-    use std::process::{Command, Stdio};
-    let mut child = Command::new(program)
-        .args(["metadata", "--no-deps", "--offline", "--format-version", "1"])
-        .current_dir(top)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let mut out = child.stdout.take()?;
-    let reader = std::thread::spawn(move || {
-        let mut s = Vec::new();
-        let _ = out.read_to_end(&mut s);
-        s
-    });
-    let end = Instant::now() + CARGO_WAIT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(s)) if s.success() => break,
-            Ok(None) if Instant::now() < end => std::thread::sleep(Duration::from_millis(20)),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
-    }
-    let v: Value = serde_json::from_slice(&reader.join().ok()?).ok()?;
-    let target = PathBuf::from(v["target_directory"].as_str()?);
-    let build = v["build_directory"].as_str().map_or_else(|| target.clone(), PathBuf::from);
-    Some((target, build))
-}
-
-/// Cargo's `build.build-dir` as the config says it for `top` — its `CARGO_BUILD_BUILD_DIR` (`env`), else the
-/// nearest `.cargo/config.toml` (or `config`) from `top` up, else `cargo_home`'s — unresolved, its
-/// `{workspace-path-hash}` and the like as written. None when nothing sets it.
-fn build_dir_setting(top: &Path, cargo_home: Option<&Path>, env: Option<String>) -> Option<String> {
-    if let Some(v) = env.filter(|v| !v.is_empty()) {
-        return Some(v);
-    }
-    let read = |dir: &Path| {
-        ["config.toml", "config"].iter().find_map(|f| {
-            let text = std::fs::read_to_string(dir.join(f)).ok()?;
-            let v: toml::Value = toml::from_str(&text).ok()?;
-            v.get("build")?.get("build-dir")?.as_str().map(str::to_string)
-        })
-    };
-    top.ancestors().find_map(|d| read(&d.join(".cargo"))).or_else(|| read(cargo_home?))
-}
-
-/// Whether a build-dir setting puts each checkout's builds apart (`{workspace-path-hash}`,
-/// `{workspace-root}` in it) — then a new checkout builds cold in its own.
-fn per_checkout(setting: &str) -> bool {
-    setting.contains("{workspace-path-hash}") || setting.contains("{workspace-root}")
-}
-
-/// `cargo_dirs`' answer by real paths (as far as they're there) — for comparing, never for removing.
-fn real_dirs((target, build): (PathBuf, PathBuf)) -> (PathBuf, PathBuf) {
-    let real = |p: PathBuf| std::fs::canonicalize(&p).unwrap_or(p);
-    (real(target), real(build))
 }
 
 // ── Git ──────────────────────────────────────────────────────────────────────
@@ -291,12 +204,12 @@ pub struct Making {
     /// Where its checkout goes.
     pub path: PathBuf,
     /// The checkout's own files on disk · the big ignored folders here (not copied), biggest first ·
-    /// where cargo builds (target folder, build-dir), if it's a cargo project.
+    /// where its tool builds (its name, target folder, build-dir — `[builds]`), if it's that tool's project.
     pub files: (u64, bool),
     pub big: Vec<(String, (u64, bool))>,
-    pub cargo: Option<(PathBuf, PathBuf)>,
-    /// Cargo's build-dir outside the checkout is one per checkout (`per_checkout` — #111: the card said
-    /// shared): this one's size, what the new checkout's first build makes again from cold.
+    pub builds: Option<(String, PathBuf, PathBuf)>,
+    /// The tool's build-dir outside the checkout is one per checkout (`Tool::per_checkout` — #111: the card
+    /// said shared): this one's size, what the new checkout's first build makes again from cold.
     pub build_own: Option<(u64, bool)>,
     /// The instruction files git doesn't have here (`instructions`) — copied into its checkout, so its
     /// Claude starts with the project's rules.
@@ -398,33 +311,33 @@ impl Making {
         let w = sizes.iter().map(String::len).max().unwrap_or(0);
         for ((p, _), size) in self.big.iter().zip(&sizes) {
             let builds = self
-                .cargo
+                .builds
                 .as_ref()
-                .is_some_and(|(t, b)| top.join(p.trim_end_matches('/')) == *t && !shared(b));
+                .is_some_and(|(_, t, b)| top.join(p.trim_end_matches('/')) == *t && !shared(b));
             let note = if builds { " — a session builds its own" } else { "" };
             q += &format!("\n  {size:>w$}  {p}{note}");
         }
-        match &self.cargo {
-            Some((target, _)) if shared(target) => {
+        match &self.builds {
+            Some((tool, target, _)) if shared(target) => {
                 q += &format!(
-                    "\nCargo builds into {} (your config): shared, one build at a time.",
+                    "\n{tool} builds into {} (your config): shared, one build at a time.",
                     crate::allow::tilde(target)
                 )
             }
             // (per checkout: its own, beside this one's — from cold, #111)
-            Some((_, build)) if shared(build) && self.build_own.is_some() => {
+            Some((tool, _, build)) if shared(build) && self.build_own.is_some() => {
                 let beside = build.parent().map(crate::allow::tilde).unwrap_or_default();
                 q += &format!(
-                    "\nCargo builds it in a build-dir of its own in {beside}: its first build starts cold"
+                    "\n{tool} builds it in a build-dir of its own in {beside}: its first build starts cold"
                 );
                 match self.build_own {
                     Some(s) if s.0 > 0 => q += &format!(" — this checkout's is {}.", size_text(s)),
                     _ => q += ".",
                 }
             }
-            Some((_, build)) if shared(build) => {
+            Some((tool, _, build)) if shared(build) => {
                 q += &format!(
-                    "\nCargo's build-dir is shared ({}): sessions reuse its builds, one build at a time.",
+                    "\n{tool}'s build-dir is shared ({}): sessions reuse its builds, one build at a time.",
                     crate::allow::tilde(build)
                 )
             }
@@ -448,8 +361,14 @@ impl Making {
 }
 
 /// Looked at before the card: the name as a branch (new), the base, where the checkout goes and what it
-/// costs (on a worker).
-pub fn making(root: &Path, name: &str, base: Option<&str>, setting: &str) -> Result<Making, String> {
+/// costs (on a worker); `builds`: how to ask its tool where it builds.
+pub fn making(
+    root: &Path,
+    name: &str,
+    base: Option<&str>,
+    setting: &str,
+    builds: Option<&crate::builds::Builds>,
+) -> Result<Making, String> {
     let top = top_of(root)?;
     let branch = branch_name(&top, name.trim())?;
     if sha(&top, &format!("refs/heads/{branch}")).is_ok() {
@@ -496,19 +415,20 @@ pub fn making(root: &Path, name: &str, base: Option<&str>, setting: &str) -> Res
     let until = Instant::now() + MEASURE_FOR;
     let big = big_ignored(&top, until);
     let files = tracked_size(&top, until);
-    // (where cargo builds, from the user's cargo config as it is)
-    let cargo = top.join("Cargo.toml").is_file().then(|| cargo_dirs(Path::new("cargo"), &top)).flatten();
-    let cargo = cargo.map(real_dirs);
+    // (where its tool builds, from the tool's own config as it is)
+    let tool = builds.and_then(|b| Some((b, b.tool_for(&top)?.ok()?)));
+    let said = tool.and_then(|(b, t)| {
+        let (target, build) = crate::builds::real_dirs(b.ask(t, &top)?);
+        Some((t.name.clone(), target, build))
+    });
     // (a build-dir outside it that's per checkout: the new one builds cold — this one's size says how much)
-    let home = CargoAsk::real().map(|c| c.home);
-    let own = build_dir_setting(&top, home.as_deref(), std::env::var("CARGO_BUILD_BUILD_DIR").ok())
-        .is_some_and(|s| per_checkout(&s));
-    let build_own = match &cargo {
-        Some((_, build)) if own && !build.starts_with(&top) => Some(disk_size(build, until)),
+    let own = tool.is_some_and(|(b, t)| b.setting(t, &top).is_some_and(|s| t.per_checkout(&s)));
+    let build_own = match &said {
+        Some((_, _, build)) if own && !build.starts_with(&top) => Some(disk_size(build, until)),
         _ => None,
     };
     let copies = instructions(&top);
-    Ok(Making { top, branch, base, base_sha, path, files, big, cargo, build_own, copies, others })
+    Ok(Making { top, branch, base, base_sha, path, files, big, builds: said, build_own, copies, others })
 }
 
 /// The repository's main branch, a local one: the remote's default (`origin/HEAD`), else `main` or
@@ -716,185 +636,36 @@ fn ending(name: String, root: &Path, base: Option<String>, start: &Path) -> Resu
     Ok(Ending { root: root.to_path_buf(), common, name, branch, tip, base, changed, ahead, lost })
 }
 
-/// What a session's end did with its checkout's cargo build dir.
-#[derive(Debug, PartialEq)]
-pub enum BuildDir {
-    /// Nothing to do: not asked, not a cargo project, never built, or inside the checkout (gone with it).
-    Nothing,
-    /// Removed — what it took.
-    Freed((u64, bool)),
-    /// Left where it is: why, said whole (`its build dir … stays: …`).
-    Left(String),
-    /// Removing it failed partway — why.
-    Failed(String),
-}
-
-/// A build dir to remove: the cargo home's `build/` (its real path) and the two folders below it
-/// (`{workspace-path-hash}`'s `xx/yyyy…`).
-#[derive(Debug, PartialEq)]
-pub struct Doomed {
-    builds: PathBuf,
-    rel: PathBuf,
-}
-
-impl Doomed {
-    /// Still as it was checked — `build/` its own real path, each folder below it a folder, not a link —
-    /// its path then. Asked again right before removing (a link put there since would be followed).
-    fn still(&self) -> Result<PathBuf, String> {
-        if std::fs::canonicalize(&self.builds).ok().as_deref() != Some(self.builds.as_path()) {
-            return Err(format!("{} isn't where it was", crate::allow::tilde(&self.builds)));
-        }
-        let mut p = self.builds.clone();
-        for c in self.rel.components() {
-            p.push(c);
-            // (`symlink_metadata`: a link is a link here, never what it points to)
-            match std::fs::symlink_metadata(&p) {
-                Ok(m) if m.is_dir() => {}
-                Ok(_) => return Err(format!("{} is a link, not a folder", crate::allow::tilde(&p))),
-                Err(e) => return Err(format!("{}: {e}", crate::allow::tilde(&p))),
-            }
-        }
-        Ok(p)
-    }
-}
-
-/// Why a checkout's own `.cargo/config.toml` (or `.cargo/config`) has its say on where it builds — it
-/// sets `build-dir` (however it's written: parsed, not searched), or can't be read — None when it has none.
-/// What cargo prints for a checkout is the checkout's to choose (its Claude can write that file); a build
-/// dir it chose is never removed.
-fn own_build_dir(root: &Path) -> Option<String> {
-    for name in [".cargo/config.toml", ".cargo/config"] {
-        let path = root.join(name);
-        if std::fs::symlink_metadata(&path).is_err() {
-            continue;
-        }
-        let Ok(table) = std::fs::read_to_string(&path)
-            .map_err(|_| ())
-            .and_then(|t| toml::from_str::<toml::Table>(&t).map_err(|_| ()))
-        else {
-            return Some(format!("its {name} can't be read"));
-        };
-        if table.get("build").and_then(|b| b.get("build-dir")).is_some() {
-            return Some(format!("its own {name} sets build-dir"));
-        }
-    }
-    None
-}
-
-/// Whether the ended checkout's build dir goes, before its checkout does (cargo has to read its
-/// `Cargo.toml`). `ours`: what cargo printed for the checkout at `root` — which the checkout chooses, so
-/// it goes only when it's plainly the cargo home's `build/xx/yyyy`: absolute, no `.` or `..`, exactly two
-/// folders below `build/`, no link at any level (`Doomed::still`), not set by the checkout's own config
-/// (`own_build_dir`); not its target dir nor holding it; and no other checkout of the repository builds
-/// there (`others`, asked only then: each one that's a cargo project and what cargo said there).
-/// `Ok` = what to remove once the checkout is gone (`remove_build` checks it again).
-fn build_dir_fate(
-    root: &Path,
-    ours: Option<(PathBuf, PathBuf)>,
-    home: &Path,
-    others: impl FnOnce() -> Vec<(PathBuf, Option<(PathBuf, PathBuf)>)>,
-) -> Result<Doomed, BuildDir> {
-    use std::path::Component;
-    let Some((target, build)) = ours else {
-        return Err(BuildDir::Left("cargo didn't say where it built: no build dir removed".into()));
-    };
-    let stays = |why: String| {
-        Err(BuildDir::Left(format!("its build dir {} stays: {why}", crate::allow::tilde(&build))))
-    };
-    if !build.is_absolute()
-        || build.components().any(|c| matches!(c, Component::CurDir | Component::ParentDir))
-    {
-        return stays("its path has `.` or `..` in it".into());
-    }
-    if build.starts_with(root) || std::fs::symlink_metadata(&build).is_err() {
-        return Err(BuildDir::Nothing);
-    }
-    if let Some(why) = own_build_dir(root) {
-        return stays(why);
-    }
-    let Ok(builds) = std::fs::canonicalize(home.join("build")) else {
-        return stays(format!("there's no {}", crate::allow::tilde(&home.join("build"))));
-    };
-    // (`{cargo-cache-home}` as cargo spelled it, or its real path)
-    let Some(rel) = build.strip_prefix(home.join("build")).or_else(|_| build.strip_prefix(&builds)).ok()
-    else {
-        return stays(format!("it isn't in {}", crate::allow::tilde(&builds)));
-    };
-    if rel.components().count() != 2 {
-        return stays(format!(
-            "it isn't a checkout's own folder in {} (xx/yyyy)",
-            crate::allow::tilde(&builds)
-        ));
-    }
-    let doomed = Doomed { builds, rel: rel.to_path_buf() };
-    let real = match doomed.still() {
-        Ok(p) => p,
-        Err(why) => return stays(why),
-    };
-    // (one inside the other either way: removing one takes some of the other)
-    let overlap = |a: &Path, b: &Path| a.starts_with(b) || b.starts_with(a);
-    if overlap(&real, &std::fs::canonicalize(&target).unwrap_or(target)) {
-        return stays("cargo's target dir is there".into());
-    }
-    for (other, said) in others() {
-        match said.map(real_dirs) {
-            None => return stays(format!("cargo didn't say where {} builds", crate::allow::tilde(&other))),
-            Some((t, b)) if overlap(&real, &b) || overlap(&real, &t) => {
-                return stays(format!("{} builds there too", crate::allow::tilde(&other)));
-            }
-            Some(_) => {}
-        }
-    }
-    Ok(doomed)
-}
-
-/// The doomed build dir removed — checked again first (`Doomed::still`); links inside it are removed, never
-/// followed (`remove_dir_all`, `disk_size`).
-fn remove_build(d: &Doomed) -> BuildDir {
-    let path = match d.still() {
-        Ok(p) => p,
-        Err(why) => {
-            let at = crate::allow::tilde(&d.builds.join(&d.rel));
-            return BuildDir::Left(format!("its build dir {at} stays: {why}"));
-        }
-    };
-    let size = disk_size(&path, Instant::now() + MEASURE_FOR);
-    match std::fs::remove_dir_all(&path) {
-        Ok(()) => BuildDir::Freed(size),
-        Err(why) => BuildDir::Failed(format!("{}: {why}", crate::allow::tilde(&path))),
-    }
-}
-
-/// The repository's other checkouts that are cargo projects (`git worktree list` — the main one, every
-/// session's, ones made outside tarae) and where cargo says each builds.
-fn other_builds(e: &Ending, program: &Path) -> Vec<(PathBuf, Option<(PathBuf, PathBuf)>)> {
-    let list = git(&e.common, &["worktree", "list", "--porcelain"], None).unwrap_or_default();
+/// The repository's checkouts (`git worktree list` — the main one, every session's, ones made outside
+/// tarae), real paths.
+fn checkouts(common: &Path) -> Vec<PathBuf> {
+    let list = git(common, &["worktree", "list", "--porcelain"], None).unwrap_or_default();
     crate::gitpanel::parse_worktrees(&list)
         .into_iter()
         .map(|(p, _)| std::fs::canonicalize(&p).unwrap_or(p))
-        .filter(|p| *p != e.root && p.join("Cargo.toml").is_file())
-        .map(|p| {
-            let said = cargo_dirs(program, &p);
-            (p, said)
-        })
         .collect()
 }
 
+/// The ended checkout's build dir: whether it goes, before its checkout does (its tool has to read the
+/// checkout) — `Builds::decide`, the repository's git folder and its checkouts never removed. `Ok` = what to
+/// remove once the checkout is gone (`builds::remove_build` checks it again).
+fn build_dir_fate(e: &Ending, builds: Option<&Builds>) -> Result<Doomed, BuildDir> {
+    match builds {
+        Some(b) => b.decide(&e.root, &e.common, &checkouts(&e.common)),
+        None => Err(BuildDir::Nothing),
+    }
+}
+
 /// Its checkout removed (and its branch, `both`, if it's still where the checks saw it) — what that freed,
-/// and then its build dir when nothing else builds there (`build_dir_fate`; `cargo`: how to ask).
-fn remove(e: &Ending, both: bool, cargo: Option<&CargoAsk>) -> Result<((u64, bool), BuildDir), String> {
+/// and then its build dir when nothing else builds there (`build_dir_fate`; `builds`: how to ask).
+fn remove(e: &Ending, both: bool, builds: Option<&Builds>) -> Result<((u64, bool), BuildDir), String> {
     let branch = e.branch.as_deref().filter(|_| both);
     if let Some(b) = branch
         && sha(&e.common, &format!("refs/heads/{b}")).ok().as_deref() != Some(e.tip.as_str())
     {
         return Err(format!("{b} moved since the card was shown — nothing removed"));
     }
-    let fate = match cargo {
-        Some(c) if e.root.join("Cargo.toml").is_file() => {
-            build_dir_fate(&e.root, cargo_dirs(&c.program, &e.root), &c.home, || other_builds(e, &c.program))
-        }
-        _ => Err(BuildDir::Nothing),
-    };
+    let fate = build_dir_fate(e, builds);
     let freed = disk_size(&e.root, Instant::now() + MEASURE_FOR);
     let root = e.root.to_str().ok_or("a checkout path that isn't UTF-8")?;
     // (with changes, git asks for --force — the card said they go; without, a change made since stops it)
@@ -1436,7 +1207,8 @@ impl Editor {
         let (root, base) = (self.session.root.clone(), base.map(str::to_string));
         let setting = self.config.session_worktrees.clone();
         let said = format!("Looking at what {name} would take…");
-        let work = move || making(&root, &name, base.as_deref(), &setting);
+        let builds = self.session_store.builds.clone();
+        let work = move || making(&root, &name, base.as_deref(), &setting, builds.as_ref());
         self.step(self.events.shared_jobs(), "session", said, work, |ed, found| match found {
             Ok(m) => ed.push_offer(m.card()),
             Err(e) => ed.set_error(format!("new session: {e}")),
@@ -1518,9 +1290,9 @@ impl Editor {
         if card.is_none() {
             self.set_step("session", format!("Ending {}…", e.name));
         }
-        let cargo = self.session_store.cargo.clone();
+        let builds = self.session_store.builds.clone();
         self.events.shared_jobs().spawn(move || {
-            let result = remove(&e, both, cargo.as_ref());
+            let result = remove(&e, both, builds.as_ref());
             move |ed: &mut Editor| {
                 ed.step_done("session");
                 match result {
@@ -2205,13 +1977,14 @@ mod tests {
         ed.offers.iter().find(|o| o.title == title)
     }
 
-    /// A stand-in cargo in `dir` and a cargo home of its own (`dir/cargo-home`) — never the real ones. Its
-    /// `metadata` says the target dir is the checkout's `target/` and the build dir is what the checkout's
-    /// `.fake-build` holds. (Both files are ignored by the repository's `info/exclude`, which every checkout
-    /// of it shares: a session with them is still one with nothing to lose.)
-    fn fake_cargo(repo: &Path, dir: &Path) -> CargoAsk {
+    /// The rust pack's `[builds]` with a stand-in cargo in `dir`, a cargo home of its own (`dir/cargo-home`)
+    /// and a user's home of its own (`dir/user-home`) — never the real ones. Its `metadata` says the target dir
+    /// is the checkout's `target/` and the build dir is what the checkout's `.fake-build` holds. (Both files
+    /// are ignored by the repository's `info/exclude`, which every checkout of it shares: a session with them
+    /// is still one with nothing to lose.)
+    fn fake_cargo(repo: &Path, dir: &Path) -> Builds {
         std::fs::write(repo.join(".git/info/exclude"), "Cargo.toml\n.fake-build\n").unwrap();
-        CargoAsk { program: fake_cargo_program(dir), home: dir.join("cargo-home") }
+        Builds::stand_in(&fake_cargo_program(dir), &dir.join("cargo-home"), &dir.join("user-home"))
     }
 
     /// The stand-in cargo itself: it prints `.fake-build` as it is, `..` and links and all (as cargo prints
@@ -2239,6 +2012,8 @@ mod tests {
         let dir = std::fs::canonicalize(dir).unwrap();
         let program = fake_cargo_program(&dir);
         let (home, root) = (dir.join("cargo-home"), dir.join("wt/x"));
+        let b = Builds::stand_in(&program, &home, &dir.join("user-home"));
+        let tool = b.tool("rust");
         let builds = home.join("build");
         for d in [&builds.join("ab"), &root.join(".cargo")] {
             std::fs::create_dir_all(d).unwrap();
@@ -2266,8 +2041,7 @@ mod tests {
         let mut run = |name: &str, printed: &Path, marker: &Path| {
             std::fs::write(root.join(".fake-build"), printed.display().to_string()).unwrap();
             // (and the fate on its own, given the path as printed — it mustn't count on anyone cleaning it)
-            let raw =
-                build_dir_fate(&root, Some((root.join("target"), printed.to_path_buf())), &home, Vec::new);
+            let raw = b.fate(tool, &root, Some((root.join("target"), printed.to_path_buf())), &[], Vec::new);
             if let Ok(doomed) = &raw {
                 let _ = remove_build(doomed);
             }
@@ -2275,7 +2049,7 @@ mod tests {
                 removed.push(format!("{name}, as printed ({})", printed.display()));
                 return;
             }
-            let fate = build_dir_fate(&root, cargo_dirs(&program, &root), &home, Vec::new);
+            let fate = b.fate(tool, &root, b.ask(tool, &root), &[], Vec::new);
             if let Ok(doomed) = &fate {
                 let _ = remove_build(doomed);
             }
@@ -2303,13 +2077,13 @@ mod tests {
         // And plainly its own: goes
         let fine = marked(&builds.join("ab/fine"));
         std::fs::write(root.join(".fake-build"), builds.join("ab/fine").display().to_string()).unwrap();
-        let fate = build_dir_fate(&root, cargo_dirs(&program, &root), &home, Vec::new);
+        let fate = b.fate(tool, &root, b.ask(tool, &root), &[], Vec::new);
         let doomed = fate.unwrap_or_else(|f| panic!("its own: {f:?}"));
         assert!(matches!(remove_build(&doomed), BuildDir::Freed(_)) && !fine.exists());
         // Checked, then a link put in the middle before the removal: checked again, nothing removed
         marked(&builds.join("sw/ap"));
         std::fs::write(root.join(".fake-build"), builds.join("sw/ap").display().to_string()).unwrap();
-        let doomed = build_dir_fate(&root, cargo_dirs(&program, &root), &home, Vec::new).unwrap();
+        let doomed = b.fate(tool, &root, b.ask(tool, &root), &[], Vec::new).unwrap();
         let victim = marked(&dir.join("outside-swap/ap"));
         std::fs::rename(builds.join("sw"), dir.join("moved-sw")).unwrap();
         symlink(dir.join("outside-swap"), builds.join("sw")).unwrap();
@@ -2340,7 +2114,7 @@ mod tests {
         let main_build = builds.join("aa/main");
         builds_in(&repo, &main_build, 1);
         let mut ed = editor(&repo, &dir);
-        ed.session_store.cargo = Some(cargo);
+        ed.session_store.builds = Some(cargo);
         let ended = |ed: &mut Editor, name: &str| {
             feed(ed, ":session-end<ret>");
             settle_until(ed, |ed| says(ed, &format!("Ended {name}")) || says(ed, &format!("end {name}:")));
@@ -2446,21 +2220,23 @@ mod tests {
             std::fs::create_dir_all(d).unwrap();
         }
         let target = root.join("target");
+        let b = Builds::stand_in(Path::new("/nonexistent/fake-cargo"), &home, &dir.join("user-home"));
+        let tool = b.tool("rust");
         let asked = std::cell::Cell::new(false);
         let none = || {
             asked.set(true);
             Vec::new()
         };
         let fate = |ours: Option<(PathBuf, PathBuf)>, others: Vec<(PathBuf, Option<(PathBuf, PathBuf)>)>| {
-            build_dir_fate(&root, ours, &home, || others).map(|d| d.builds.join(d.rel))
+            b.fate(tool, &root, ours, &[], || others).map(|d| d.path())
         };
         let left = |r: Result<PathBuf, BuildDir>| match r {
             Err(BuildDir::Left(why)) => why,
             r => panic!("left expected: {r:?}"),
         };
         // Its own, no one else's: goes
-        let goes = build_dir_fate(&root, Some((target.clone(), own.clone())), &home, none);
-        assert_eq!(goes.map(|d| d.builds.join(d.rel)), Ok(own.clone()));
+        let goes = b.fate(tool, &root, Some((target.clone(), own.clone())), &[], none);
+        assert_eq!(goes.map(|d| d.path()), Ok(own.clone()));
         assert!(asked.take(), "the others asked");
         // Inside the checkout, or never built: nothing to do here
         assert_eq!(fate(Some((target.clone(), target.clone())), vec![]), Err(BuildDir::Nothing));
@@ -2474,7 +2250,7 @@ mod tests {
             (Some((own.join("target"), own.clone())), "stays: cargo's target dir is there"),
         ];
         for (ours, why) in refused {
-            let said = left(build_dir_fate(&root, ours.clone(), &home, none).map(|d| d.builds.join(d.rel)));
+            let said = left(b.fate(tool, &root, ours.clone(), &[], none).map(|d| d.path()));
             assert!(said.contains(why), "{ours:?}: {said}");
             assert!(!asked.take(), "{ours:?}: the others not asked");
         }
@@ -3652,20 +3428,20 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         let hashed = "[build]\nbuild-dir = \"{cargo-cache-home}/build/{workspace-path-hash}\"\n";
         std::fs::write(home.join("config.toml"), hashed).unwrap();
-        let at = |env: Option<&str>| build_dir_setting(&top.join("sub"), Some(&home), env.map(String::from));
-        assert_eq!(at(None).as_deref(), Some("{cargo-cache-home}/build/{workspace-path-hash}"), "the home's");
+        // The rust pack's `[builds]` setting, its variable a stand-in's
+        let mut b = Builds::stand_in(Path::new("/nonexistent/fake-cargo"), &home, &dir.join("user-home"));
+        let at = |b: &Builds| b.setting(b.tool("rust"), &top.join("sub"));
+        assert_eq!(at(&b).as_deref(), Some("{cargo-cache-home}/build/{workspace-path-hash}"), "the home's");
         std::fs::write(dir.join("work/.cargo/config.toml"), "[build]\nbuild-dir = \"/b/shared\"\n").unwrap();
-        assert_eq!(at(None).as_deref(), Some("/b/shared"), "the nearest config wins");
-        assert_eq!(
-            at(Some("{workspace-root}/b")).as_deref(),
-            Some("{workspace-root}/b"),
-            "the variable first"
-        );
+        assert_eq!(at(&b).as_deref(), Some("/b/shared"), "the nearest config wins");
+        b.env = |k| (k == "CARGO_BUILD_BUILD_DIR").then(|| "{workspace-root}/b".to_string());
+        assert_eq!(at(&b).as_deref(), Some("{workspace-root}/b"), "the variable first");
+        let rust = b.tool("rust");
         assert!(
-            per_checkout("{cargo-cache-home}/build/{workspace-path-hash}")
-                && per_checkout("{workspace-root}/x")
+            rust.per_checkout("{cargo-cache-home}/build/{workspace-path-hash}")
+                && rust.per_checkout("{workspace-root}/x")
         );
-        assert!(!per_checkout("/b/shared"));
+        assert!(!rust.per_checkout("/b/shared"));
         // The card's words
         let making = |build_own| Making {
             top: top.clone(),
@@ -3675,7 +3451,7 @@ mod tests {
             path: dir.join("checkouts/fix"),
             files: (1 << 20, true),
             big: Vec::new(),
-            cargo: Some((top.join("target"), home.join("build/1a/2b3c"))),
+            builds: Some(("Cargo".into(), top.join("target"), home.join("build/1a/2b3c"))),
             build_own,
             copies: Vec::new(),
             others: Vec::new(),

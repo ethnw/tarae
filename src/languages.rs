@@ -698,6 +698,13 @@ mod tests {
             writeln!(s, "  {said}").unwrap();
         }
 
+        // Tools' build folders (`builds.rs`) — the built-in packs' only
+        writeln!(s, "\n[builds]").unwrap();
+        for (pack, _, t) in crate::builds::Builds::of(crate::packs::builtin_manifests()) {
+            let said = t.map_or_else(|e| format!("broken: {e}"), |t| t.summary());
+            writeln!(s, "  {pack}: {said}").unwrap();
+        }
+
         writeln!(s, "\n[grammars]").unwrap();
         let mut grammars = crate::grammar::sources();
         grammars.sort_by(|a, b| a.name.cmp(&b.name));

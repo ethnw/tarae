@@ -3,6 +3,7 @@
 mod allow;
 mod attach;
 mod blocked;
+mod builds;
 mod cards;
 mod chat;
 mod chats;

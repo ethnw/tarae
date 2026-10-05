@@ -387,6 +387,8 @@ pub(crate) const KEYS: &[(&str, Reach)] = &[
     ("first-made", Reach::BuiltIn),
     // (narrows: becomes `Added` with `sandbox::protected_names`)
     ("protect", Reach::BuiltIn),
+    // Tools' build folders: decides what a session's end deletes (`builds.rs`)
+    ("builds", Reach::BuiltIn),
 ];
 
 /// `key`'s reach — None: no pack has that key.

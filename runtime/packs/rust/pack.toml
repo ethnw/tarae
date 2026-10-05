@@ -79,6 +79,22 @@ take = "executable"
 error = { pick = { reason = "compiler-message", "message.level" = "error" }, text = ["message.rendered", "message.message"] }
 none = "no binary target to debug"
 
+# Where a checkout builds — cargo asked, as every cargo config of the checkout's has it (`builds.rs`). A
+# build-dir with {workspace-path-hash} is one folder per checkout in the cargo home's build/xx/yyyy: a new
+# session's checkout builds cold there, and an ended one's goes with it when nothing else builds there.
+# Read from tarae's own packs only: it decides what's deleted.
+[builds]
+name = "Cargo"
+when = ["Cargo.toml"]
+ask = ["cargo", "metadata", "--no-deps", "--offline", "--format-version", "1"]
+target = "target_directory"
+build = "build_directory"
+home = { env = "CARGO_HOME", else = "~/.cargo" }
+setting = { env = "CARGO_BUILD_BUILD_DIR", files = [".cargo/config.toml", ".cargo/config"], home-files = ["config.toml", "config"], key = "build.build-dir", per-checkout = ["{workspace-path-hash}", "{workspace-root}"] }
+remove = { under = "build", depth = 2 }
+# Every project's crates and git checkouts: never removed
+keep = ["registry", "git"]
+
 [tasks]
 when = ["Cargo.toml"]
 rank = 10

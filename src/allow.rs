@@ -246,8 +246,9 @@ pub fn secret(real: &Path, home: Option<&Path>) -> bool {
 /// Places under home that run something later when written — and so are never offered for writing (a
 /// folder holding one isn't either): shells' and git's settings, launch agents, tarae's own config, cargo's
 /// caches (every project's build uses the crates and checkouts there; with the network closed the profile
-/// keeps them whatever is granted — `sandbox::Policy::caches`). Keys (`SECRETS`) neither.
-const NEVER_WRITE: [&str; 8] = [
+/// keeps them whatever is granted — `sandbox::Policy::caches`). Keys (`SECRETS`) neither. Nor are they ever
+/// removed as a session's build folder (`builds::Builds::fate`).
+pub(crate) const NEVER_WRITE: [&str; 8] = [
     ".config/fish",
     ".config/git",
     ".config/tarae",

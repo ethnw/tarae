@@ -365,6 +365,9 @@
   dlv (id go): dlv · run {found} dap · listen -l 127.0.0.1:{port} · quiet ^Type 'dlv help' · own-first ^Building 
   lldb-dap (id lldb-dap): lldb-dap lldb-vscode lldb-dap-22 lldb-dap-21 lldb-dap-20 lldb-dap-19 lldb-dap-18 lldb-dap-17 lldb-dap-16 lldb-dap-15 lldb-dap-14 lldb-vscode-22 lldb-vscode-21 lldb-vscode-20 lldb-vscode-19 lldb-vscode-18 lldb-vscode-17 lldb-vscode-16 lldb-vscode-15 lldb-vscode-14 ask:xcrun -f lldb-dap · run {found} · slow-start 8s macos · quiet ^\s*(?:->)?\s*0x\S*.* <\+.*>: · quiet ^\s*(?:->)?\s*\S*`\S*:$
 
+[builds]
+  rust: Cargo: when Cargo.toml · ask cargo metadata --no-deps --offline --format-version 1 · target_directory build_directory · home CARGO_HOME else ~/.cargo · setting build.build-dir in .cargo/config.toml .cargo/config / home config.toml config (CARGO_BUILD_BUILD_DIR) per checkout {workspace-path-hash} {workspace-root} · remove build depth 2 · keep registry git
+
 [grammars]
   bash https://github.com/tree-sitter/tree-sitter-bash 487734f87fd87118028a65a4599352fa99c9cde8 bundle
   c https://github.com/tree-sitter/tree-sitter-c 7175a6dd5fc1cee660dce6fe23f6043d75af424a bundle

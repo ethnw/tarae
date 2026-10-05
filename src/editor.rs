@@ -727,7 +727,7 @@ impl Editor {
             turns_dir,
             session_store: crate::worktree::SessionStore {
                 dir: if cfg!(test) { None } else { crate::worktree::default_dir() },
-                cargo: if cfg!(test) { None } else { crate::worktree::CargoAsk::real() },
+                builds: if cfg!(test) { None } else { Some(crate::builds::Builds::real()) },
                 ..Default::default()
             },
             project_trust: None,
