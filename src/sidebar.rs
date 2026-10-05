@@ -1020,6 +1020,9 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
         s.focus = false;
         return false;
     }
+    // A key here: the selection is the user's — `space g`'s aim at the row under the code's cursor goes (#187:
+    // until that file's hunks settled it put the selection back every event, so `k` never got past its folder)
+    s.aim = None;
     let lines = s.lines().into_owned();
     let n = lines.len();
     let at = lines.get(s.selected);

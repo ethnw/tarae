@@ -246,6 +246,8 @@ configs carry over as they are.
   switches branch, `L` is the log (each commit's diff as the preview), `z` stashes, `Z` takes it back, `b` flips
   blame, `?` lists every key. From the code, `space g` lands on the row for what's under the cursor, and the next
   key acts there: `space g s` stages the hunk you're in, `space g t` keeps theirs — then the code has the keys again.
+  Moving is yours from the first key: `k` and `g` reach a section's header (`Changes`, `Staged`) even while the
+  file's hunks are still being read, and `s` there stages the whole section.
   When the repository's hooks folder (`core.hooksPath`) is inside the checkout — a folder Claude can write — a
   file there that's new, changed or untracked is shown on a card before any commit, push, pull, switch or other
   git-tab action (the hooks it's likely to run are marked): `y` runs them, `n` goes on without hooks this time.

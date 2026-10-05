@@ -9803,6 +9803,92 @@ mod tests {
         std::fs::remove_dir_all(&repo).ok();
     }
 
+    /// #187: a section's header row is reachable — `k` from the rows under it and `gg` both land on
+    /// "Changes", drawn as the panel draws it — and `s` there stages the whole section in one go (one `s` per
+    /// folder before). The keys win over `space g`'s aim at the code's row: until that file's hunks settled,
+    /// the aim put the selection back every event, so `k` never got past the file's folder.
+    #[test]
+    fn git_tab_section_header_is_reachable_and_stages_the_section() {
+        let repo = git_repo("gittab-section", &[("README", "r\n")]);
+        // (more rows than the panel holds: it scrolls, and pins the rows over the top)
+        let files: Vec<String> =
+            (0..12).flat_map(|d| [format!("d{d:02}/a.rs"), format!("d{d:02}/b.rs")]).collect();
+        for f in &files {
+            std::fs::create_dir_all(repo.join(f).parent().unwrap()).unwrap();
+            std::fs::write(repo.join(f), "one\n").unwrap();
+        }
+        git_in(&repo, &["add", "-A"]);
+        git_in(&repo, &["commit", "-qm", "folders"]);
+        // (each file's change below the line the cursor is on)
+        for f in &files {
+            std::fs::write(repo.join(f), "one\ntwo\n").unwrap();
+        }
+        let mut ed = editor("");
+        ed.session.root = repo.clone();
+        // (the gutter's hunks on, as outside tests — the tab opens a file's hunks from them)
+        ed.git_auto = true;
+        // Keys as the main loop takes them — each with its event's work after it (`sidebar_sync` and the rest)
+        let press = |ed: &mut Editor, c: char| {
+            ed.handle_event(crate::event::Event::Key(Key::plain(crate::key::Code::Char(c))));
+        };
+        let space_g = |ed: &mut Editor| {
+            press(ed, ' ');
+            press(ed, 'g');
+        };
+        let settled = |ed: &Editor| {
+            let d = ed.doc();
+            ed.session.git_status.is_some() && d.git_base.is_some() && d.git_version == d.version()
+        };
+        // (opened as it's used: `space g` from a changed file in the code — its hunks read)
+        feed(&mut ed, ":o d05/a.rs<ret>");
+        space_g(&mut ed);
+        settle_until(&mut ed, settled);
+        let draw = |ed: &mut Editor| {
+            let mut out = Vec::new();
+            crate::term::render(ed, &mut out, 120, 30).unwrap();
+        };
+        let on = |ed: &mut Editor| -> String {
+            let s = ed.session.sidebar.as_ref().unwrap();
+            s.lines()[s.selected].label.clone()
+        };
+        // Back in the code, an edit — its hunks not read again yet — and `space g` once more: `k` moves off the
+        // file's row and stays off it (no event between gives the hunks time to settle)
+        ed.handle_event(crate::event::Event::Key(Key::plain(crate::key::Code::Esc)));
+        feed(&mut ed, "ix<esc>");
+        assert!(!settled(&ed), "its hunks behind the edit");
+        space_g(&mut ed);
+        let file = ed.session.sidebar.as_ref().unwrap().selected;
+        assert_eq!(on(&mut ed), "a.rs", "on the code's file");
+        press(&mut ed, 'k');
+        draw(&mut ed);
+        press(&mut ed, 'k');
+        draw(&mut ed);
+        assert_eq!(ed.session.sidebar.as_ref().unwrap().selected, file - 2, "two rows up, not put back");
+        settle_until(&mut ed, settled);
+        let labels: Vec<String> =
+            ed.session.sidebar.as_ref().unwrap().lines().iter().map(|l| l.label.clone()).collect();
+        assert_eq!(labels[0], "Changes", "{labels:?}");
+        // k all the way up reaches the header
+        let last = labels.len() - 1;
+        for _ in 0..last {
+            press(&mut ed, 'k');
+            draw(&mut ed);
+        }
+        assert_eq!(on(&mut ed), "Changes", "k reaches the header");
+        // gg from below: the header too
+        ed.session.sidebar.as_mut().unwrap().selected = last;
+        draw(&mut ed);
+        press(&mut ed, 'g');
+        press(&mut ed, 'g');
+        draw(&mut ed);
+        assert_eq!(on(&mut ed), "Changes", "gg reaches the header");
+        // s on it: the whole section staged at once
+        press(&mut ed, 's');
+        settle_until(&mut ed, |ed| ed.session.git_status.as_ref().is_some_and(|s| s.unstaged.is_empty()));
+        assert_eq!(ed.session.git_status.as_ref().unwrap().staged.len(), files.len());
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
     /// git's output in `dir` (trimmed) — the test fails if git does.
     fn git_out(dir: &Path, args: &[&str]) -> String {
         let out = std::process::Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();

@@ -683,7 +683,7 @@ fn git_tab_stages_and_commits() {
     sb.write("a.txt", "one\ntwo\n");
     let mut t = Term::spawn(&sb, &["a.txt"], 130, ROWS);
     t.wait_text("two");
-    t.send(" gg");
+    t.send(" g");
     t.wait_for("the change listed", |s| s.contains("Changes") && s.contains("a.txt"));
     // The selection starts on the file being edited
     t.send("s");
@@ -700,6 +700,58 @@ fn git_tab_stages_and_commits() {
     t.wait_for("committed — the tree clean", |s| s.contains("nothing to commit"));
     let log = Command::new("git").args(["log", "-1", "--format=%s"]).current_dir(sb.work()).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&log.stdout).trim(), "second line");
+    t.command("q");
+    assert_eq!(t.wait_exit().code(), Some(0));
+}
+
+/// #187: in the real binary, the git tab's "Changes" header is reached with `k` from the files under it, and
+/// `s` there stages the whole section at once (one `s` per folder before).
+#[test]
+fn git_tab_section_header_takes_k_and_stages_all() {
+    let sb = Sandbox::new("gittab-section");
+    fs::write(
+        sb.home().join(".gitconfig"),
+        "[user]\n\tname = t\n\temail = t@t\n[commit]\n\tgpgsign = false\n",
+    )
+    .unwrap();
+    let git = |args: &[&str]| {
+        let st = Command::new("git")
+            .args(args)
+            .current_dir(sb.work())
+            .env("HOME", sb.home())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("git");
+        assert!(st.success(), "git {args:?}");
+    };
+    let files = ["docs/b.md", "src/a.rs", "tests/c.rs"];
+    for f in files {
+        fs::create_dir_all(sb.work().join(f).parent().unwrap()).unwrap();
+        sb.write(f, "one\n");
+    }
+    git(&["init", "-q", "-b", "main"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "base"]);
+    for f in files {
+        sb.write(f, "one\ntwo\n");
+    }
+    let mut t = Term::spawn(&sb, &["tests/c.rs"], 130, ROWS);
+    t.wait_text("two");
+    t.send(" g");
+    t.wait_for("the changes listed", |s| s.contains("Changes") && s.contains("c.rs"));
+    // Up from the file being edited (the last one) to the top — at once, as a quick hand does, while the
+    // file's hunks may still be read (they put the selection back on its row then)
+    t.send("kkkkkk");
+    t.send("s");
+    t.wait_for("all of them staged", |s| s.contains("Staged everything"));
+    let st = Command::new("git")
+        .args(["diff", "--cached", "--name-only"])
+        .current_dir(sb.work())
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&st.stdout).trim(), "docs/b.md\nsrc/a.rs\ntests/c.rs");
     t.command("q");
     assert_eq!(t.wait_exit().code(), Some(0));
 }
