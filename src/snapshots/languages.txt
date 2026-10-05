@@ -1,0 +1,507 @@
+[bash] Bash
+  grammar: bash
+  extensions: sh bash zsh
+  filenames: .bashrc .bash_profile .zshrc .zprofile .profile PKGBUILD
+  comments: #
+  language-id: shellscript
+  lsp: bash-language-server (bash-language-server start)
+  installs: bash comment
+[c] C
+  grammar: c
+  extensions: c h
+  comments: // /* */
+  flags: doc-comments
+  roots: compile_commands.json CMakeLists.txt
+  lsp: clangd (clangd)
+  installs: c comment
+[c-sharp] C#
+  grammar: c-sharp
+  extensions: cs
+  comments: // /* */
+  flags: doc-comments
+  installs: c-sharp comment
+[cmake] CMake
+  grammar: cmake
+  extensions: cmake
+  filenames: CMakeLists.txt
+  comments: #
+  installs: cmake comment
+[comment] Comment
+  grammar: comment
+  installs: comment
+[cpp] C++
+  grammar: cpp
+  extensions: cc cpp cxx hpp hh hxx c++
+  comments: // /* */
+  flags: doc-comments
+  roots: compile_commands.json CMakeLists.txt
+  lsp: clangd (clangd)
+  installs: cpp comment
+[css] CSS
+  grammar: css
+  extensions: css
+  comments: /* */
+  installs: css comment
+[dart] Dart
+  grammar: dart
+  extensions: dart
+  comments: // /* */
+  flags: doc-comments
+  installs: dart comment
+[diff] Diff
+  grammar: diff
+  extensions: diff patch
+  installs: diff comment
+[dockerfile] Dockerfile
+  grammar: dockerfile
+  extensions: dockerfile
+  filenames: Dockerfile Containerfile
+  comments: #
+  installs: dockerfile comment
+[elixir] Elixir
+  grammar: elixir
+  extensions: ex exs
+  comments: #
+  installs: elixir comment
+[fish] Fish
+  grammar: fish
+  extensions: fish
+  comments: #
+  installs: fish comment
+[git-commit] Git commit
+  grammar: gitcommit
+  filenames: COMMIT_EDITMSG MERGE_MSG TAG_EDITMSG
+  comments: #
+  flags: simple-indent prose
+  installs: gitcommit comment
+[git-config] Git config
+  grammar: git-config
+  filenames: .gitconfig .gitmodules
+  comments: #
+  installs: git-config comment
+[git-ignore] .gitignore
+  grammar: gitignore
+  filenames: .gitignore .dockerignore .ignore
+  comments: #
+  installs: gitignore comment
+[go] Go
+  grammar: go
+  extensions: go
+  comments: // /* */
+  flags: tabs
+  roots: go.work go.mod
+  lsp: gopls (gopls)
+  installs: go comment
+[gomod] go.mod
+  grammar: gomod
+  filenames: go.mod
+  comments: //
+  installs: gomod comment
+[gotmpl] Gotmpl
+  grammar: gotmpl
+  extensions: gotmpl
+  comments: {{/* */}}
+  installs: gotmpl comment
+[graphql] GraphQL
+  grammar: graphql
+  extensions: graphql gql
+  comments: #
+  installs: graphql comment
+[haskell] Haskell
+  grammar: haskell
+  extensions: hs
+  comments: -- {- -}
+  pairs: () [] {} "" ``
+  installs: haskell comment
+[hcl] Terraform
+  grammar: hcl
+  extensions: hcl tf tfvars
+  comments: # /* */
+  installs: hcl comment
+[helm] Helm
+  grammar: gotmpl
+  globs: templates/*.yaml templates/*.yml templates/*/*.yaml templates/*/*.yml templates/_*.tpl templates/NOTES.txt
+  comments: {{/* */}}
+  lsp: helm_ls (helm_ls serve)
+  installs: gotmpl comment
+[html] HTML
+  grammar: html
+  extensions: html htm
+  comments: <!-- -->
+  installs: html comment
+[ini] INI
+  grammar: ini
+  extensions: ini cfg
+  comments: #
+  installs: ini comment
+[java] Java
+  grammar: java
+  extensions: java
+  comments: // /* */
+  flags: doc-comments
+  roots: pom.xml build.gradle build.gradle.kts settings.gradle settings.gradle.kts
+  lsp: jdtls (jdtls)
+  installs: java comment
+[javascript] JavaScript
+  grammar: javascript
+  extensions: js mjs cjs
+  comments: // /* */
+  flags: doc-comments
+  roots: package.json tsconfig.json jsconfig.json
+  lsp: typescript-language-server (typescript-language-server --stdio)
+  installs: javascript comment
+[json] JSON
+  grammar: json
+  extensions: json jsonc json5
+  filenames: flake.lock .prettierrc .babelrc
+  installs: json comment
+[jsx] Jsx
+  grammar: javascript
+  extensions: jsx
+  comments: // /* */
+  flags: doc-comments
+  language-id: javascriptreact
+  roots: package.json tsconfig.json jsconfig.json
+  lsp: typescript-language-server (typescript-language-server --stdio)
+  installs: javascript comment
+[just] Just
+  grammar: just
+  extensions: just
+  filenames: justfile Justfile .justfile
+  comments: #
+  installs: just comment
+[kdl] Kdl
+  grammar: kdl
+  extensions: kdl
+  comments: // /* */
+  installs: kdl comment
+[kotlin] Kotlin
+  grammar: kotlin
+  extensions: kt kts
+  comments: // /* */
+  flags: doc-comments
+  installs: kotlin comment
+[lua] Lua
+  grammar: lua
+  extensions: lua
+  comments: -- --[[ ]]
+  lsp: lua-language-server (lua-language-server)
+  installs: lua comment
+[make] Make
+  grammar: make
+  extensions: mk
+  filenames: Makefile makefile GNUmakefile
+  comments: #
+  flags: tabs
+  installs: make comment
+[markdown] Markdown
+  grammar: markdown
+  extensions: md markdown
+  comments: <!-- -->
+  flags: prose
+  lsp: marksman (marksman server)
+  installs: markdown markdown_inline comment
+[markdown.inline] Markdown.inline
+  grammar: markdown_inline
+  installs: markdown_inline comment
+[nix] Nix
+  grammar: nix
+  extensions: nix
+  comments: # /* */
+  lsp: nil (nil)
+  installs: nix comment
+[nu] Nu
+  grammar: nu
+  extensions: nu
+  comments: #
+  installs: nu comment
+[ocaml] Ocaml
+  grammar: ocaml
+  extensions: ml
+  comments: (* *)
+  pairs: () [] {} "" ``
+  installs: ocaml comment
+[php] PHP
+  grammar: php
+  extensions: php
+  comments: // /* */
+  flags: doc-comments
+  installs: php comment
+[protobuf] Protobuf
+  grammar: proto
+  extensions: proto
+  comments: // /* */
+  installs: proto comment
+[python] Python
+  grammar: python
+  extensions: py pyi pyw
+  comments: #
+  flags: colon
+  roots: pyproject.toml setup.py setup.cfg
+  lsp: basedpyright (basedpyright-langserver --stdio) pyright (pyright-langserver --stdio) pylsp (pylsp)
+  also: ruff (ruff server)
+  installs: python comment
+[ruby] Ruby
+  grammar: ruby
+  extensions: rb
+  filenames: Gemfile Rakefile
+  comments: #
+  installs: ruby comment
+[rust] Rust
+  grammar: rust
+  extensions: rs
+  comments: // /* */
+  pairs: () [] {} "" ``
+  flags: doc-comments
+  roots: Cargo.toml
+  needs-project: Cargo.toml rust-project.json
+  lsp: rust-analyzer (rust-analyzer)
+  installs: rust comment
+[scala] Scala
+  grammar: scala
+  extensions: scala sc
+  comments: // /* */
+  flags: doc-comments
+  installs: scala comment
+[scss] SCSS
+  grammar: scss
+  extensions: scss
+  comments: // /* */
+  installs: scss comment
+[sql] SQL
+  grammar: sql
+  extensions: sql
+  comments: -- /* */
+  installs: sql comment
+[sshclientconfig] SSH config
+  grammar: sshclientconfig
+  path-suffixes: .ssh/config
+  comments: #
+  installs: sshclientconfig comment
+[svelte] Svelte
+  grammar: svelte
+  extensions: svelte
+  comments: <!-- -->
+  installs: svelte comment
+[swift] Swift
+  grammar: swift
+  extensions: swift
+  comments: // /* */
+  flags: doc-comments
+  installs: swift comment
+[toml] TOML
+  grammar: toml
+  extensions: toml
+  filenames: Cargo.lock uv.lock
+  comments: #
+  lsp: taplo (taplo lsp stdio)
+  installs: toml comment
+[tsx] Tsx
+  grammar: tsx
+  extensions: tsx
+  comments: // /* */
+  flags: doc-comments
+  language-id: typescriptreact
+  roots: package.json tsconfig.json jsconfig.json
+  lsp: typescript-language-server (typescript-language-server --stdio)
+  installs: tsx comment
+[typescript] TypeScript
+  grammar: typescript
+  extensions: ts mts cts
+  comments: // /* */
+  flags: doc-comments
+  roots: package.json tsconfig.json jsconfig.json
+  lsp: typescript-language-server (typescript-language-server --stdio)
+  installs: typescript comment
+[vue] Vue
+  grammar: vue
+  extensions: vue
+  comments: <!-- -->
+  installs: vue comment
+[xml] XML
+  grammar: xml
+  extensions: xml svg plist
+  comments: <!-- -->
+  installs: xml comment
+[yaml] YAML
+  grammar: yaml
+  extensions: yml yaml
+  comments: #
+  flags: colon
+  lsp: yaml-language-server (yaml-language-server --stdio)
+  installs: yaml comment
+[zig] Zig
+  grammar: zig
+  extensions: zig zon
+  comments: //
+  flags: doc-comments
+  lsp: zls (zls)
+  installs: zig comment
+
+[any language]
+  roots: CMakeLists.txt Cargo.toml build.gradle build.gradle.kts compile_commands.json go.mod go.work jsconfig.json package.json pom.xml pyproject.toml settings.gradle settings.gradle.kts setup.cfg setup.py tsconfig.json
+
+[grammars]
+  bash https://github.com/tree-sitter/tree-sitter-bash 487734f87fd87118028a65a4599352fa99c9cde8 bundle
+  c https://github.com/tree-sitter/tree-sitter-c 7175a6dd5fc1cee660dce6fe23f6043d75af424a bundle
+  c-sharp https://github.com/tree-sitter/tree-sitter-c-sharp b5eb5742f6a7e9438bee22ce8026d6b927be2cd7
+  cmake https://github.com/uyha/tree-sitter-cmake 6e51463ef3052dd3b328322c22172eda093727ad
+  comment https://github.com/stsewd/tree-sitter-comment aefcc2813392eb6ffe509aa0fc8b4e9b57413ee1 bundle
+  cpp https://github.com/tree-sitter/tree-sitter-cpp 56455f4245baf4ea4e0881c5169de69d7edd5ae7
+  css https://github.com/tree-sitter/tree-sitter-css 769203d0f9abe1a9a691ac2b9fe4bb4397a73c51 bundle
+  dart https://github.com/UserNobody14/tree-sitter-dart e398400a0b785af3cf571f5a57eccab242f0cdf9
+  diff https://github.com/the-mikedavis/tree-sitter-diff fd74c78fa88a20085dbc7bbeaba066f4d1692b63 bundle
+  dockerfile https://github.com/camdencheek/tree-sitter-dockerfile 087daa20438a6cc01fa5e6fe6906d77c869d19fe bundle
+  elixir https://github.com/elixir-lang/tree-sitter-elixir 02a6f7fd4be28dd94ee4dd2ca19cb777053ea74e
+  fish https://github.com/ram02z/tree-sitter-fish a78aef9abc395c600c38a037ac779afc7e3cc9e0 bundle
+  git-config https://github.com/the-mikedavis/tree-sitter-git-config 9c2a1b7894e6d9eedfe99805b829b4ecd871375e
+  gitcommit https://github.com/gbprod/tree-sitter-gitcommit a716678c0f00645fed1e6f1d0eb221481dbd6f6d
+  gitignore https://github.com/shunsambongi/tree-sitter-gitignore f4685bf11ac466dd278449bcfe5fd014e94aa504 bundle
+  go https://github.com/tree-sitter/tree-sitter-go 64457ea6b73ef5422ed1687178d4545c3e91334a bundle
+  gomod https://github.com/camdencheek/tree-sitter-go-mod 6efb59652d30e0e9cd5f3b3a669afd6f1a926d3c bundle
+  gotmpl https://github.com/ngalaiko/tree-sitter-go-template aa71f63de226c5592dfbfc1f29949522d7c95fac bundle
+  graphql https://github.com/bkegley/tree-sitter-graphql 5e66e961eee421786bdda8495ed1db045e06b5fe
+  haskell https://github.com/tree-sitter/tree-sitter-haskell 0975ef72fc3c47b530309ca93937d7d143523628
+  hcl https://github.com/tree-sitter-grammars/tree-sitter-hcl 9e3ec9848f28d26845ba300fd73c740459b83e9b bundle
+  html https://github.com/tree-sitter/tree-sitter-html cbb91a0ff3621245e890d1c50cc811bffb77a26b bundle
+  ini https://github.com/justinmk/tree-sitter-ini 32b31863f222bf22eb43b07d4e9be8017e36fb31
+  java https://github.com/tree-sitter/tree-sitter-java 09d650def6cdf7f479f4b78f595e9ef5b58ce31e bundle
+  javascript https://github.com/tree-sitter/tree-sitter-javascript f772967f7b7bc7c28f845be2420a38472b16a8ee bundle
+  json https://github.com/tree-sitter/tree-sitter-json 73076754005a460947cafe8e03a8cf5fa4fa2938 bundle
+  just https://github.com/poliorcetics/tree-sitter-just 8d03cfdd7ab89ff76d935827de1b93450fa0ec0a bundle
+  kdl https://github.com/amaanq/tree-sitter-kdl 3ca569b9f9af43593c24f9e7a21f02f43a13bb88
+  kotlin https://github.com/fwcd/tree-sitter-kotlin c4ddea359a7ff4d92360b2efcd6cfce5dc25afe6
+  lua https://github.com/tree-sitter-grammars/tree-sitter-lua 88e446476a1e97a8724dff7a23e2d709855077f2
+  make https://github.com/alemuller/tree-sitter-make a4b9187417d6be349ee5fd4b6e77b4172c6827dd bundle
+  markdown https://github.com/tree-sitter-grammars/tree-sitter-markdown 62516e8c78380e3b51d5b55727995d2c511436d8 tree-sitter-markdown bundle
+  markdown_inline https://github.com/tree-sitter-grammars/tree-sitter-markdown 62516e8c78380e3b51d5b55727995d2c511436d8 tree-sitter-markdown-inline bundle
+  nix https://github.com/nix-community/tree-sitter-nix 1b69cf1fa92366eefbe6863c184e5d2ece5f187d
+  nu https://github.com/nushell/tree-sitter-nu 358c4f509eb97f0148bbd25ad36acc729819b9c1
+  ocaml https://github.com/tree-sitter/tree-sitter-ocaml 9965d208337d88bbf1a38ad0b0fe49e5f5ec9677 ocaml
+  php https://github.com/tree-sitter/tree-sitter-php f860e598194f4a71747f91789bf536b393ad4a56
+  proto https://github.com/sdoerner/tree-sitter-proto 778ab6ed18a7fcf82c83805a87d63376c51e80bc bundle
+  python https://github.com/tree-sitter/tree-sitter-python 4bfdd9033a2225cc95032ce77066b7aeca9e2efc bundle
+  ruby https://github.com/tree-sitter/tree-sitter-ruby 206c7077164372c596ffa8eaadb9435c28941364
+  rust https://github.com/tree-sitter/tree-sitter-rust 1f63b33efee17e833e0ea29266dd3d713e27e321 bundle
+  scala https://github.com/tree-sitter/tree-sitter-scala 7891815f42dca9ed6aeb464c2edc39d479ab965c
+  scss https://github.com/serenadeai/tree-sitter-scss c478c6868648eff49eb04a4df90d703dc45b312a
+  sql https://github.com/DerekStride/tree-sitter-sql b9d109588d5b5ed986c857464830c2f0bef53f18
+  sshclientconfig https://github.com/metio/tree-sitter-ssh-client-config e45c6d5c71657344d4ecaf87dafae7736f776c57
+  svelte https://github.com/Himujjal/tree-sitter-svelte 60ea1d673a1a3eeeb597e098d9ada9ed0c79ef4b
+  swift https://github.com/alex-pinkus/tree-sitter-swift 57c1c6d6ffa1c44b330182d41717e6fe37430704
+  toml https://github.com/ikatyang/tree-sitter-toml 7cff70bbcbbc62001b465603ca1ea88edd668704 bundle
+  tsx https://github.com/tree-sitter/tree-sitter-typescript b1bf4825d9eaa0f3bdeb1e52f099533328acfbdf tsx
+  typescript https://github.com/tree-sitter/tree-sitter-typescript b1bf4825d9eaa0f3bdeb1e52f099533328acfbdf typescript
+  vue https://github.com/ikatyang/tree-sitter-vue 91fe2754796cd8fba5f229505a23fa08f3546c06
+  xml https://github.com/RenjiSann/tree-sitter-xml 48a7c2b6fb9d515577e115e6788937e837815651 bundle
+  yaml https://github.com/ikatyang/tree-sitter-yaml 0e36bed171768908f331ff7dff9d956bae016efb bundle
+  zig https://github.com/tree-sitter-grammars/tree-sitter-zig eb7d58c2dc4fbeea4745019dee8df013034ae66b
+
+[resolve]
+  "sh" bash
+  "shell" bash
+  "zsh" bash
+  "console" bash
+  "shellsession" bash
+  "golang" go
+  "c++" cpp
+  "cxx" cpp
+  "py" python
+  "python3" python
+  "py3" python
+  "node" javascript
+  "js" javascript
+  "mjs" javascript
+  "cjs" javascript
+  "yml" yaml
+  "jsonc" json
+  "json5" json
+  "cs" c-sharp
+  "csharp" c-sharp
+  "kt" kotlin
+  "hs" haskell
+  "rb" ruby
+  "text" -
+  "txt" -
+  "plain" -
+  "plaintext" -
+  "" -
+  "rs" rust
+  "ts" typescript
+  "tsx" tsx
+  "md" markdown
+  "Python3" python
+  "{.rust}" -
+  "dockerfile" dockerfile
+  "make" make
+  "toml" toml
+  "h" c
+  "go" go
+  "proto" protobuf
+  "tf" hcl
+  "no-such-language" -
+
+[config files]
+  Cargo.toml checked
+  rust-toolchain.toml checked
+  pyproject.toml checked
+  rustfmt.toml checked
+  .rustfmt.toml checked
+  clippy.toml checked
+  .clippy.toml checked
+  deny.toml checked
+  .tarae.toml checked
+  .tarae.local.toml checked
+  Pipfile checked
+  package.json checked
+  composer.json checked
+  .claude.json checked
+  p/.cargo/config.toml checked
+  p/.cargo/config checked
+  p/.cargo/credentials.toml checked
+  p/cargo/config.toml -
+  h/.config/tarae/config.toml checked
+  h/.config/tarae/themes/x.toml checked
+  p/.claude/settings.local.json checked
+  p/.claude/other.json -
+  tsconfig.json -
+  go.mod -
+  config.toml -
+  pom.xml -
+
+[skipped folders]
+  .git picker nested-checkouts
+  objects tokens
+  target picker tokens nested-checkouts
+  node_modules picker tokens nested-checkouts
+  .venv picker tokens nested-checkouts
+  __pycache__ picker tokens nested-checkouts
+  build -
+  dist -
+  src -
+
+[test files by name]
+  src/a_test.go test
+  src/a.go -
+  test_x.go -
+  tests/x.rs test
+  src/a.rs -
+  src/test/A.java test
+  pkg/test_a.py test
+  pkg/a_test.py test
+  pkg/a.py -
+  spec/a_spec.rb test
+  lib/a_spec.rb test
+  lib/a_test.rb test
+  lib/a.rb -
+  src/ATest.java test
+  src/ATests.kt test
+  src/AT.scala -
+  src/FooTest.cs test
+  src/a.test.ts test
+  src/a.spec.jsx test
+  src/a.test.mjs test
+  src/a.test.cjs test
+  src/a.spec.tsx test
+  src/__tests__/a.js test
+  specs/x.c test

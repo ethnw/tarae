@@ -1,0 +1,12 @@
+# Protocol Buffers.
+
+[language.protobuf]
+grammar = "proto"
+extensions = ["proto"]
+comment-token = "//"
+block-comment-tokens = { start = "/*", end = "*/" }
+
+[grammar.proto]
+git = "https://github.com/sdoerner/tree-sitter-proto"
+rev = "778ab6ed18a7fcf82c83805a87d63376c51e80bc"
+bundle = true

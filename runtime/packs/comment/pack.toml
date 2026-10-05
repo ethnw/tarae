@@ -1,0 +1,11 @@
+# Comments: TODO, NOTE, `#123`, `@user` and links inside any language's comments — injected only (no file
+# of its own), so its grammar comes with every grammar (`everywhere`) and is in every build (`core`).
+
+[language.comment]
+
+[grammar.comment]
+git = "https://github.com/stsewd/tree-sitter-comment"
+rev = "aefcc2813392eb6ffe509aa0fc8b4e9b57413ee1"
+bundle = true
+core = true
+everywhere = true

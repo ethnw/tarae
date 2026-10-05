@@ -85,6 +85,26 @@ pub fn pack_manifests_builtin() -> impl Iterator<Item = (&'static str, &'static 
     PACKS.iter().filter_map(|(r, s)| Some((r.strip_suffix("/pack.toml")?, *s)))
 }
 
+/// Every runtime folder's `packs/<pack>/pack.toml`: (pack, text) — the first folder's where two have one.
+/// Reads the disk: `languages::get` once, before the first frame.
+pub fn pack_manifests_user() -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for d in dirs() {
+        let mut found: Vec<_> = std::fs::read_dir(d.join("packs")).into_iter().flatten().flatten().collect();
+        found.sort_by_key(|e| e.file_name());
+        for e in found {
+            let pack = e.file_name().to_string_lossy().into_owned();
+            if out.iter().any(|(p, _)| *p == pack) {
+                continue;
+            }
+            if let Ok(text) = std::fs::read_to_string(e.path().join("pack.toml")) {
+                out.push((pack, text));
+            }
+        }
+    }
+    out
+}
+
 /// Every language with a pack: built in, or in a runtime folder's `packs/`.
 pub fn pack_langs() -> Vec<String> {
     let mut out: Vec<String> =

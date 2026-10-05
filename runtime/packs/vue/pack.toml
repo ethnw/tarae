@@ -1,0 +1,9 @@
+# Vue single-file components.
+
+[language.vue]
+extensions = ["vue"]
+block-comment-tokens = { start = "<!--", end = "-->" }
+
+[grammar.vue]
+git = "https://github.com/ikatyang/tree-sitter-vue"
+rev = "91fe2754796cd8fba5f229505a23fa08f3546c06"

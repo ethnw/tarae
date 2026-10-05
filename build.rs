@@ -1,9 +1,9 @@
 //! Embeds three things into the binary at build time.
 //! 1. Queries — `runtime/queries/<lang>/*.scm` (so colors work even without the files at run time).
 //! 2. Language packs — `runtime/packs/<lang>/` (`pack.toml` and its queries).
-//! 3. Grammars — unpacks `runtime/grammars.tar.gz` (C sources of `bundle = true` in languages.toml, same
-//!    commits as the queries) and compiles them in parallel with the C compiler. The default build has only
-//!    `core = true` (toml·markdown·comment), debug builds also `dev = true` (rust), `--features
+//! 3. Grammars — unpacks `runtime/grammars.tar.gz` (C sources of the packs' `[grammar.<name>]` with `bundle =
+//!    true`, same commits as the queries) and compiles them in parallel with the C compiler. The default build
+//!    has only `core = true` (toml·markdown·comment), debug builds also `dev = true` (rust), `--features
 //!    bundled-grammars` all of `bundle = true`. The rest are downloaded at run time.
 //!
 //! Nothing it prints or writes names the checkout. Every checkout's build of tarae shares one build
@@ -29,12 +29,21 @@ fn main() {
     }
 }
 
-/// Grammar names to embed (`core` from languages.toml `[[grammar]]`, `dev` in debug builds, plus `bundle` if
-/// the feature is on).
+/// Grammar names to embed (`core` from the packs' `[grammar.<name>]`, `dev` in debug builds, plus `bundle` if
+/// the feature is on). The packs' folder is already watched (`files`, for embedding them).
 fn wanted() -> Vec<String> {
-    let path = "src/languages.toml";
-    println!("cargo:rerun-if-changed={path}");
-    let table: toml::Table = toml::from_str(&std::fs::read_to_string(path).unwrap()).expect("languages.toml");
+    let mut grammars: Vec<(String, toml::Value)> = Vec::new();
+    for (rel, p) in files(Path::new("runtime/packs"), &["toml"]) {
+        let text = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+        let table: toml::Table = toml::from_str(&text).unwrap_or_else(|e| panic!("{rel}: {e}"));
+        for (name, g) in table.get("grammar").and_then(|g| g.as_table()).into_iter().flatten() {
+            assert!(
+                !grammars.iter().any(|(n, _)| n == name),
+                "{rel}: [grammar.{name}] is in another pack too"
+            );
+            grammars.push((name.clone(), g.clone()));
+        }
+    }
     let all = cfg!(feature = "bundled-grammars");
     // `cargo run`/`cargo test` (the debug profile): the tests and screen snapshots are written against these,
     // and working on tarae itself wants them without a download. So do builds with debug info (`cargo
@@ -46,12 +55,10 @@ fn wanted() -> Vec<String> {
         println!("cargo::rustc-cfg=tarae_dev_grammars");
     }
     let flag = |g: &toml::Value, key: &str| g.get(key).and_then(|v| v.as_bool()) == Some(true);
-    table["grammar"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|g| flag(g, "core") || (dev && flag(g, "dev")) || (all && flag(g, "bundle")))
-        .map(|g| g["name"].as_str().unwrap().to_string())
+    grammars
+        .into_iter()
+        .filter(|(_, g)| flag(g, "core") || (dev && flag(g, "dev")) || (all && flag(g, "bundle")))
+        .map(|(name, _)| name)
         .collect()
 }
 

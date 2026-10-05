@@ -1,0 +1,12 @@
+# HCL — Terraform's language, and what most people open it for.
+
+[language.hcl]
+title = "Terraform"
+extensions = ["hcl", "tf", "tfvars"]
+comment-token = "#"
+block-comment-tokens = { start = "/*", end = "*/" }
+
+[grammar.hcl]
+git = "https://github.com/tree-sitter-grammars/tree-sitter-hcl"
+rev = "9e3ec9848f28d26845ba300fd73c740459b83e9b"
+bundle = true

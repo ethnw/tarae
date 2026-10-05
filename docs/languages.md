@@ -33,6 +33,53 @@ Notes:
 - **java-debug** is a jdtls extension that jdtls doesn't ship. `F5` offers to download it from Maven Central (with
   `curl` or `wget`); copies installed by VS Code or Neovim's mason are found too
 
+## Adding a language
+
+A language is a folder: [`runtime/packs/<language>/pack.toml`](../runtime/packs) says how its files are recognised,
+commented and indented, which grammar parses them and where it comes from, which servers start, and what makes a
+project — tarae's code knows no language by name. One of your own in `~/.local/share/tarae/packs/<language>/` adds a
+language, or changes one key of a built-in one; it counts from the next start (`:restart`). Its colors come from
+`~/.local/share/tarae/queries/<language>/highlights.scm` (Helix's queries work as they are).
+
+```toml
+# ~/.local/share/tarae/packs/gleam/pack.toml
+[language.gleam]
+extensions = ["gleam"]               # also: filenames, path-suffixes (".ssh/config"), globs ("templates/*.yaml")
+comment-token = "//"                 # block-comment-tokens = { start = "/*", end = "*/" }
+# auto-pairs = ["()", "[]", "{}", "\"\""]   # typed in pairs (all six unless set)
+# title = "Gleam"                    # as it's called (the name with its first letter up unless set)
+# aliases = ["gleam-lang"]           # code fence and shebang names besides its name and extensions
+# doc-comments = true                # ///, //! and /** */ rendered as Markdown
+# indent-tabs = true                 # tabs when the file doesn't say (Go, Makefiles)
+# indent-after-colon = true          # a line ending in `:` opens a block, without the grammar (Python, YAML)
+# indent-heuristic = "simple"        # a new line takes the line before's indentation as it is (commit messages)
+# prose = true                       # long lines wrap with `editor.soft-wrap = "prose"`
+roots = ["gleam.toml"]               # what makes its project (the topmost below the repository); none: any language's
+# needs-project = ["gleam.toml"]     # its server starts only inside one
+lsp = ["gleam"]                      # the first on PATH starts; `also = [...]` start beside it
+# language-id = "gleam"              # LSP's name for it (the language's unless set)
+# test-files = ["*_test.gleam"]      # test code by name (Claude's search and references tell it apart);
+# test-dirs = ["test"]               # `tests` and `test` folders are already
+
+[grammar.gleam]
+git = "https://github.com/gleam-lang/tree-sitter-gleam"
+rev = "…"                            # the commit the queries were written for (40 hex digits)
+# subpath = "…"                      # where the grammar is inside the repository
+
+[server.gleam]
+args = ["lsp"]                       # command = "…" when it isn't the server's name
+```
+
+- **Pinned.** The built-in packs' languages are pinned in
+  [`src/snapshots/languages.txt`](../src/snapshots/languages.txt): a change shows there.
+- **No ties.** No two built-in languages claim one extension, file name or pattern. One of yours wins a tie with a
+  built-in one (a `[language.cpp]` of yours with `"h"` takes `.h` files from C).
+- **Grammars** are fetched and built only after you say `y` on the card, as for the built-in ones. `core`, `dev` and
+  `bundle` (which grammars tarae's build embeds) are tarae's own: in a pack of yours they're said and left out.
+- **Config files** a toolchain reads as soon as they're saved (`Cargo.toml`, `package.json`) are listed in its pack's
+  `config-files = { toml = [...], json = [...] }`: a save of one that doesn't parse stays in the buffer.
+- What else a pack of yours can change, and what it can't: [Tests and debugging](testing-and-debugging.md#what-a-pack-of-yours-can-change).
+
 ## When one is missing
 
 When a file opens and its language server isn't found (once per language until you quit), or debugging finds no debugger,

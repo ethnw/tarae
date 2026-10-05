@@ -1,0 +1,11 @@
+# SQL.
+
+[language.sql]
+title = "SQL"
+extensions = ["sql"]
+comment-token = "--"
+block-comment-tokens = { start = "/*", end = "*/" }
+
+[grammar.sql]
+git = "https://github.com/DerekStride/tree-sitter-sql"
+rev = "b9d109588d5b5ed986c857464830c2f0bef53f18"

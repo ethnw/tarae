@@ -1,0 +1,11 @@
+# Dart.
+
+[language.dart]
+extensions = ["dart"]
+comment-token = "//"
+block-comment-tokens = { start = "/*", end = "*/" }
+doc-comments = true
+
+[grammar.dart]
+git = "https://github.com/UserNobody14/tree-sitter-dart"
+rev = "e398400a0b785af3cf571f5a57eccab242f0cdf9"

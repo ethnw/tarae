@@ -1,9 +1,21 @@
 # Make: the default target.
 
 # What runs later outside Claude's sandbox, in every project (`packs::protect`; names match in any case, so
-# `makefile` too): make reads `GNUmakefile` before `Makefile`; just, a make-like runner with no pack of its
-# own, reads `justfile` and `.justfile`
+# `makefile` too): make reads `GNUmakefile` before `Makefile`; just, a make-like runner (the just pack),
+# reads `justfile` and `.justfile`
 protect = ["Makefile", "GNUmakefile", "justfile", ".justfile"]
+
+# A recipe's lines start with a tab
+[language.make]
+extensions = ["mk"]
+filenames = ["Makefile", "makefile", "GNUmakefile"]
+comment-token = "#"
+indent-tabs = true
+
+[grammar.make]
+git = "https://github.com/alemuller/tree-sitter-make"
+rev = "a4b9187417d6be349ee5fd4b6e77b4172c6827dd"
+bundle = true
 
 [tasks]
 when = ["Makefile", "makefile", "GNUmakefile"]

@@ -38,10 +38,12 @@
 //!   test ones; `file = false` keeps its tests out of a file's run.
 //!
 //! `[tasks]`: see `tasks`. `[install.<tool>]`: see `Install`. `[server.<name>]`: see `LeaveOut`.
-//! `[[waits]]`: see `waits`.
+//! `[[waits]]`: see `waits`. `[language.<name>]`, `[grammar.<name>]`, `[server.<name>]`'s `command` and `args`,
+//! `config-files`, `outputs`: the language table, `languages.rs`. How a runtime folder's pack counts for each
+//! key: `Reach`.
 //!
-//! Packs are read when a test or the tasks are looked for (a few small files), so an edited pack counts at
-//! once.
+//! Packs are read when a test or the tasks are looked for (the built-in ones parsed once, a runtime folder's
+//! read each time), so an edited pack counts at once — but for the language table, read once at the start.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -198,46 +200,170 @@ pub fn tests(lang: &str, language: &Language) -> Option<Result<Tests, String>> {
     Some(Tests::from_table(&t, language, read).map_err(|e| format!("the {lang} pack: {e}")))
 }
 
-/// `lang`'s `pack.toml`: the built-in one, with each table a runtime folder's sets (`[test]`, `[tasks]`) in
-/// its place — so a pack of one's own can add tests without losing the built-in tasks, or the other way.
-fn manifest(lang: &str) -> Option<Result<Table, String>> {
-    let rel = format!("{lang}/pack.toml");
-    merged(lang, crate::runtime::pack_builtin(&rel), crate::runtime::pack_user(&rel))
+/// How a runtime folder's pack counts for a top-level key — every key a pack may have is in `KEYS`, so a
+/// new one has to say.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Reach {
+    /// Its value is used in place of the built-in one: a table whole (`[test]`, `[tasks]`), or by name —
+    /// `[install.<tool>]` and `[grammar.<name>]` entry by entry, `[language.<name>]` and `[server.<name>]`
+    /// key by key within the entry.
+    Yours,
+    /// Added to the built-in packs' and the core's own: nothing can be taken out — a key that narrows (more
+    /// guarded).
+    Added,
+    /// The built-in packs' only, from the binary — a key that widens what Claude's runs may do. A runtime
+    /// folder's is said and left out.
+    BuiltIn,
 }
 
-/// The built-in `pack.toml` with the tables of one's own in their place (`[install]` and `[server]`: tool by
-/// tool).
-fn merged(lang: &str, builtin: Option<String>, user: Option<String>) -> Option<Result<Table, String>> {
-    let read = |s: String, whose: &str| {
-        s.parse::<Table>().map_err(|e| format!("the {lang} pack ({whose}): {}", e.message()))
-    };
-    let builtin = builtin.map(|s| read(s, "built in"));
-    let user = user.map(|s| read(s, "yours"));
+/// Every top-level key of a `pack.toml`, and how a runtime folder's pack counts for it.
+pub(crate) const KEYS: &[(&str, Reach)] = &[
+    ("test", Reach::Yours),
+    ("tasks", Reach::Yours),
+    ("preflight", Reach::Yours),
+    ("waits", Reach::Yours),
+    ("install", Reach::Yours),
+    ("server", Reach::Yours),
+    ("language", Reach::Yours),
+    ("grammar", Reach::Yours),
+    ("config-files", Reach::Added),
+    // Tools' output folders: skipped by walks — the token scan's among them, so one of one's own would hide
+    // a token from it
+    ("outputs", Reach::BuiltIn),
+    // (narrows: becomes `Added` with `sandbox::protected_names`)
+    ("protect", Reach::BuiltIn),
+];
+
+/// `key`'s reach — None: no pack has that key.
+pub(crate) fn reach(key: &str) -> Option<Reach> {
+    KEYS.iter().find(|(k, _)| *k == key).map(|(_, r)| *r)
+}
+
+/// Tables of named entries whose entries go key by key (the others' entry by entry).
+const KEY_BY_KEY: &[&str] = &["language", "server"];
+
+/// `lang`'s `pack.toml`: the built-in one, with a runtime folder's tables in their place by their `Reach` —
+/// so a pack of one's own can add tests without losing the built-in tasks, or the other way.
+fn manifest(lang: &str) -> Option<Result<Table, String>> {
+    let rel = format!("{lang}/pack.toml");
+    let builtin = builtin_manifests().iter().find(|(l, _)| l == lang).map(|(_, t)| t.clone());
+    let user = crate::runtime::pack_user(&rel).map(|s| read_pack(lang, &s, "yours"));
+    merged_tables(builtin, user)
+}
+
+/// Every built-in pack's `pack.toml`, read once (they're in the binary and never change): (pack, table).
+pub(crate) fn builtin_manifests() -> &'static [(String, Result<Table, String>)] {
+    static READ: std::sync::OnceLock<Vec<(String, Result<Table, String>)>> = std::sync::OnceLock::new();
+    READ.get_or_init(|| {
+        crate::runtime::pack_manifests_builtin()
+            .map(|(lang, text)| (lang.to_string(), read_pack(lang, text, "built in")))
+            .collect()
+    })
+}
+
+/// One `pack.toml`'s text, read: a table whose every top-level key is one a pack may have.
+pub(crate) fn read_pack(lang: &str, text: &str, whose: &str) -> Result<Table, String> {
+    let t = text.parse::<Table>().map_err(|e| format!("the {lang} pack ({whose}): {}", e.message()))?;
+    match t.keys().find(|k| reach(k).is_none()) {
+        Some(k) => Err(format!("the {lang} pack ({whose}) has no `{k}`")),
+        None => Ok(t),
+    }
+}
+
+/// The built-in `pack.toml` with the tables of one's own in their place.
+#[cfg(test)]
+pub(crate) fn merged(
+    lang: &str,
+    builtin: Option<String>,
+    user: Option<String>,
+) -> Option<Result<Table, String>> {
+    let builtin = builtin.map(|s| read_pack(lang, &s, "built in"));
+    merged_tables(builtin, user.map(|s| read_pack(lang, &s, "yours")))
+}
+
+fn merged_tables(
+    builtin: Option<Result<Table, String>>,
+    user: Option<Result<Table, String>>,
+) -> Option<Result<Table, String>> {
     Some(match (builtin, user) {
         (None, None) => return None,
         (Some(b), None) => b,
-        (None, Some(u)) => u,
-        (Some(b), Some(u)) => u.and_then(|mut u| {
+        (None, Some(u)) => u.map(|mut u| {
+            u.retain(|k, _| reach(k) != Some(Reach::BuiltIn));
+            u
+        }),
+        (Some(b), Some(u)) => u.and_then(|u| {
             let mut b = b?;
-            // `[install]` and `[server]` go tool by tool: one of one's own keeps the built-in others
-            let mine: Vec<_> = BY_TOOL.iter().map(|k| (*k, u.remove(*k))).collect();
-            b.extend(u);
-            for (key, mine) in mine {
-                match (mine, b.get_mut(key)) {
-                    (Some(toml::Value::Table(m)), Some(toml::Value::Table(t))) => t.extend(m),
-                    (Some(m), _) => {
-                        b.insert(key.into(), m);
-                    }
-                    (None, _) => {}
-                }
-            }
+            over(&mut b, u);
             Ok(b)
         }),
     })
 }
 
-/// A pack's tables of tools, merged with one's own tool by tool.
-const BY_TOOL: &[&str] = &["install", "server"];
+/// A runtime folder's pack `u` over the built-in `b`, each key by its `Reach`.
+pub(crate) fn over(b: &mut Table, u: Table) {
+    for (key, mine) in u {
+        match reach(&key) {
+            Some(Reach::BuiltIn) | None => {}
+            Some(Reach::Added) => match b.get_mut(&key) {
+                Some(theirs) => add_value(theirs, mine),
+                None => {
+                    b.insert(key, mine);
+                }
+            },
+            Some(Reach::Yours) => match (mine, b.get_mut(&key)) {
+                // By name: one of one's own keeps the built-in others
+                (toml::Value::Table(m), Some(toml::Value::Table(t))) if is_by_name(&key) => {
+                    for (name, entry) in m {
+                        match (entry, t.get_mut(&name)) {
+                            (toml::Value::Table(e), Some(toml::Value::Table(te)))
+                                if KEY_BY_KEY.contains(&key.as_str()) =>
+                            {
+                                te.extend(e)
+                            }
+                            (entry, _) => {
+                                t.insert(name, entry);
+                            }
+                        }
+                    }
+                }
+                (m, _) => {
+                    b.insert(key, m);
+                }
+            },
+        }
+    }
+}
+
+/// Whether a `Yours` table holds entries by name (`[install.<tool>]`), not settings of its own (`[test]`).
+fn is_by_name(key: &str) -> bool {
+    ["install", "server", "language", "grammar"].contains(&key)
+}
+
+/// `mine` added to `theirs`: lists joined (what's in both once), tables key by key.
+pub(crate) fn add_value(theirs: &mut toml::Value, mine: toml::Value) {
+    match (theirs, mine) {
+        (toml::Value::Array(t), toml::Value::Array(m)) => {
+            for v in m {
+                if !t.contains(&v) {
+                    t.push(v);
+                }
+            }
+        }
+        (toml::Value::Table(t), toml::Value::Table(m)) => {
+            for (k, v) in m {
+                match t.get_mut(&k) {
+                    Some(tv) => add_value(tv, v),
+                    None => {
+                        t.insert(k, v);
+                    }
+                }
+            }
+        }
+        // A different shape can't take anything out: the built-in one stays
+        _ => {}
+    }
+}
 
 /// A task a pack suggests: its name and command.
 pub type Suggested = (String, String);
@@ -468,6 +594,8 @@ pub fn on_path(cmd: &str) -> bool {
 ///   one (rustup: the project's toolchain). Or a `download` way — tarae fetches a release itself
 ///   (`fetch.rs`, `download_way`), taken if what it needs is on `PATH`.
 /// - `hint`: what to tell when no way fits ("comes with Xcode's command line tools").
+/// - `missing-says`: what the program prints when it's there but not installed (a rustup proxy whose
+///   component isn't): a line holding one of these offers it as if it weren't there (`missing_says`).
 ///
 /// The tool is named as it's run (`gopls`, `basedpyright-langserver`). tarae only offers: `y` runs `run`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -501,6 +629,12 @@ impl Install {
 /// `tool`'s `[install.<tool>]`, from whichever pack has it (a pack that can't be read is logged).
 pub fn install(tool: &str) -> Option<Install> {
     install_in(tool, install_tables()).map(|i| i.pick(on_path))
+}
+
+/// What `tool` prints when it's there but not installed (`[install.<tool>] missing-says`) — none: it doesn't.
+/// Reads the packs: a worker's (a server's stderr thread).
+pub fn missing_says(tool: &str) -> Vec<String> {
+    install_in(tool, install_tables()).map(|r| r.missing_says).unwrap_or_default()
 }
 
 /// Where `tool` is when it isn't on `PATH`: in a `bin` of one of its ways (`go install` → `~/go/bin`), or
@@ -588,7 +722,8 @@ fn leave_out_in(server: &str, tables: Vec<(String, Table)>) -> Option<LeaveOut> 
 
 fn server_table(v: &toml::Value) -> Result<Option<LeaveOut>, String> {
     let t = v.as_table().ok_or("isn't a table")?;
-    known(t, &["leave-out"], "it")?;
+    // (`command`, `args`: the language table's — `languages.rs`)
+    known(t, &["leave-out", "command", "args"], "it")?;
     let Some(l) = t.get("leave-out") else { return Ok(None) };
     let l = l.as_table().ok_or("`leave-out` isn't a table")?;
     known(l, &["init", "config", "each", "keep"], "`leave-out`")?;
@@ -617,6 +752,7 @@ struct Recipe {
     ways: Vec<Way>,
     bins: Vec<PathBuf>,
     hint: Option<String>,
+    missing_says: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -665,7 +801,7 @@ fn install_in(tool: &str, tables: Vec<(String, Table)>) -> Option<Recipe> {
 
 fn recipe(tool: &str, v: &toml::Value) -> Result<Recipe, String> {
     let t = v.as_table().ok_or("isn't a table")?;
-    known(t, &["what", "ways", "hint"], "it")?;
+    known(t, &["what", "ways", "hint", "missing-says"], "it")?;
     let what = string(t, "what")?.ok_or("has no `what`")?;
     let mut ways = Vec::new();
     let mut bins = Vec::new();
@@ -687,7 +823,8 @@ fn recipe(tool: &str, v: &toml::Value) -> Result<Recipe, String> {
         };
         ways.push(Way::Run { run, needs, project });
     }
-    Ok(Recipe { tool: tool.to_string(), what, ways, bins, hint: string(t, "hint")? })
+    let missing_says = strings(t.get("missing-says"), "missing-says")?.unwrap_or_default();
+    Ok(Recipe { tool: tool.to_string(), what, ways, bins, hint: string(t, "hint")?, missing_says })
 }
 
 /// A `download` way (docs/languages.md, "Downloads"): where the file is, how its version and name are found,
@@ -802,21 +939,21 @@ pub(crate) fn sh_quote(s: &str) -> String {
 }
 
 /// A key `t` doesn't know is a mistake to say, not to skip (`runn = [...]`).
-fn known(t: &Table, keys: &[&str], what: &str) -> Result<(), String> {
+pub(crate) fn known(t: &Table, keys: &[&str], what: &str) -> Result<(), String> {
     match t.keys().find(|k| !keys.contains(&k.as_str())) {
         Some(k) => Err(format!("{what} has no `{k}`")),
         None => Ok(()),
     }
 }
 
-fn strings(v: Option<&toml::Value>, what: &str) -> Result<Option<Vec<String>>, String> {
+pub(crate) fn strings(v: Option<&toml::Value>, what: &str) -> Result<Option<Vec<String>>, String> {
     let Some(v) = v else { return Ok(None) };
     let arr = v.as_array().ok_or(format!("`{what}` isn't a list"))?;
     let each = |x: &toml::Value| x.as_str().map(str::to_string).ok_or(format!("`{what}` holds a non-string"));
     arr.iter().map(each).collect::<Result<_, _>>().map(Some)
 }
 
-fn string(t: &Table, key: &str) -> Result<Option<String>, String> {
+pub(crate) fn string(t: &Table, key: &str) -> Result<Option<String>, String> {
     match t.get(key) {
         None => Ok(None),
         Some(v) => v.as_str().map(|s| Some(s.to_string())).ok_or(format!("`{key}` isn't a string")),
@@ -1186,8 +1323,8 @@ struct Java {
 
 fn java(path: &Path, src: &str, tree: &Tree) -> Result<Java, String> {
     let root = crate::java::project_root(path).ok_or("no pom.xml or build.gradle above this file")?;
-    let module_dir =
-        up_to(path, |d| crate::java::BUILD_FILES.iter().any(|f| d.join(f).is_file())).unwrap_or(root.clone());
+    let module_dir = up_to(path, |d| crate::java::build_files().iter().any(|f| d.join(f).is_file()))
+        .unwrap_or(root.clone());
     let rel: Vec<String> = module_dir
         .strip_prefix(&root)
         .map(|r| r.iter().map(|c| c.to_string_lossy().into_owned()).collect())
@@ -1767,5 +1904,53 @@ mod tests {
         assert!(["go", "python", "rust", "java"].iter().all(|l| has_tests(l) == Ok(true)));
         assert_eq!(has_tests("markdown"), Ok(false));
         assert_eq!(has_tests("typescript"), Ok(false), "tasks only");
+        assert!(builtin_manifests().len() >= 52);
+        for (pack, t) in builtin_manifests() {
+            assert!(t.is_ok(), "the {pack} pack: {t:?}");
+        }
+    }
+
+    /// Every top-level key a pack may have says how a runtime folder's pack counts for it; one that doesn't
+    /// is refused when read, whoever's pack it is.
+    #[test]
+    fn every_top_level_pack_key_has_a_reach() {
+        for (i, (k, _)) in KEYS.iter().enumerate() {
+            assert!(!KEYS[i + 1..].iter().any(|(o, _)| o == k), "{k} twice");
+        }
+        assert!(read_pack("x", "[tset]\n", "yours").unwrap_err().contains("has no `tset`"));
+        assert!(read_pack("x", "whatever = 1\n", "built in").unwrap_err().contains("built in"));
+        assert_eq!(reach("outputs"), Some(Reach::BuiltIn));
+        assert_eq!(reach("config-files"), Some(Reach::Added));
+        assert_eq!(reach("language"), Some(Reach::Yours));
+    }
+
+    /// A runtime folder's pack over a built-in one, key by key as each one's reach says: whole tables
+    /// replaced, named entries by name (languages and servers key by key), lists that narrow added to,
+    /// what widens left out.
+    #[test]
+    fn a_runtime_pack_counts_by_reach() {
+        let builtin = "outputs = [\"target\"]\nconfig-files = { toml = [\"A.toml\"] }\n\
+                       [language.l]\nextensions = [\"l\"]\ncomment-token = \"#\"\n\
+                       [server.s]\nargs = [\"x\"]\nleave-out = { init = \"a\", each = \"{rel}\" }\n\
+                       [install.s]\nwhat = \"a\"\nhint = \"h\"\n";
+        let user = "outputs = [\"src\"]\nconfig-files = { toml = [\"B.toml\"], json = [\"b.json\"] }\n\
+                    [language.l]\nextensions = [\"l\", \"ll\"]\n\
+                    [server.s]\ncommand = \"/opt/s\"\n\
+                    [install.s]\nwhat = \"mine\"\n";
+        let m = merged("p", Some(builtin.into()), Some(user.into())).unwrap().unwrap();
+        assert_eq!(m["outputs"].as_array().unwrap().len(), 1, "built-in only");
+        let toml: Vec<&str> =
+            m["config-files"]["toml"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
+        assert_eq!(toml, ["A.toml", "B.toml"], "added to");
+        assert_eq!(m["config-files"]["json"].as_array().unwrap().len(), 1);
+        assert_eq!(m["language"]["l"]["comment-token"].as_str(), Some("#"), "key by key");
+        assert_eq!(m["language"]["l"]["extensions"].as_array().unwrap().len(), 2);
+        assert_eq!(m["server"]["s"]["command"].as_str(), Some("/opt/s"));
+        assert!(m["server"]["s"].get("leave-out").is_some(), "key by key");
+        assert_eq!(m["install"]["s"]["what"].as_str(), Some("mine"));
+        assert!(m["install"]["s"].get("hint").is_none(), "a recipe is replaced whole");
+        // A pack of one's own with no built-in one beside it: what widens is left out all the same
+        let m = merged("new", None, Some(user.into())).unwrap().unwrap();
+        assert!(!m.contains_key("outputs") && m.contains_key("config-files"));
     }
 }

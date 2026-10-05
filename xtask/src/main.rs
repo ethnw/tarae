@@ -1,6 +1,6 @@
 //! tarae development tasks — `cargo xtask <task>`. Not part of the user binary.
 //!
-//! - `vendor-grammars` — fetches `bundle = true` entries of `languages.toml` `[[grammar]]` at their commits
+//! - `vendor-grammars` — fetches the packs' `[grammar.<name>]` with `bundle = true` at their commits
 //!   (reuses what's in `~/.local/share/tarae/sources` — same place and marker as `tarae grammar install`)
 //!   and packs `src/` parser.c·scanner.c|cc|cpp·*.h plus the upstream LICENSE into `runtime/grammars.tar.gz`.
 //!   Also follows
@@ -69,26 +69,28 @@ struct Grammar {
     subpath: Option<String>,
 }
 
+/// Every pack's `[grammar.<name>]` with `bundle = true`.
 fn bundled_grammars() -> Result<Vec<Grammar>> {
-    let path = root().join("src/languages.toml");
-    let src = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let table: toml::Table = toml::from_str(&src).map_err(|e| format!("languages.toml: {e}"))?;
+    let packs = root().join("runtime/packs");
     let str_of = |g: &toml::Value, k: &str| g.get(k).and_then(|v| v.as_str()).map(str::to_string);
-    let mut out: Vec<Grammar> = table
-        .get("grammar")
-        .and_then(|g| g.as_array())
-        .ok_or("languages.toml: no [[grammar]]")?
-        .iter()
-        .filter(|g| g.get("bundle").and_then(|b| b.as_bool()) == Some(true))
-        .map(|g| {
-            Ok(Grammar {
-                name: str_of(g, "name").ok_or("grammar without name")?,
-                git: str_of(g, "git").ok_or("grammar without git")?,
-                rev: str_of(g, "rev").ok_or("grammar without rev")?,
+    let mut out: Vec<Grammar> = Vec::new();
+    let dirs = std::fs::read_dir(&packs).map_err(|e| format!("{}: {e}", packs.display()))?;
+    for dir in dirs.flatten() {
+        let path = dir.path().join("pack.toml");
+        let Ok(src) = std::fs::read_to_string(&path) else { continue };
+        let table: toml::Table = toml::from_str(&src).map_err(|e| format!("{}: {e}", path.display()))?;
+        for (name, g) in table.get("grammar").and_then(|g| g.as_table()).into_iter().flatten() {
+            if g.get("bundle").and_then(|b| b.as_bool()) != Some(true) {
+                continue;
+            }
+            out.push(Grammar {
+                name: name.clone(),
+                git: str_of(g, "git").ok_or(format!("{name}: grammar without git"))?,
+                rev: str_of(g, "rev").ok_or(format!("{name}: grammar without rev"))?,
                 subpath: str_of(g, "subpath"),
-            })
-        })
-        .collect::<Result<_>>()?;
+            });
+        }
+    }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(out)
 }

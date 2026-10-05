@@ -2,8 +2,8 @@
 //! Grammars built into the binary (default = `core = true`; debug builds also `dev = true`; with
 //! `--features bundled-grammars`, also `bundle = true`) are not downloaded.
 //!
-//! Source = `[[grammar]]` in `languages.toml` (git URL · commit · subfolder — pinned to a commit that
-//! matches the queries). Fetch = `git` (one commit, shallow), build = the system C compiler (`$CC`,
+//! Source = a pack's `[grammar.<name>]` (`languages.rs`: git URL · commit · subfolder — pinned to a commit
+//! that matches the queries). Fetch = `git` (one commit, shallow), build = the system C compiler (`$CC`,
 //! default `cc` · `$CXX`/`c++` for C++ scanners) into `~/.local/share/tarae/grammars/<name>.so`.
 //! The same repo+commit is fetched only once (markdown·markdown_inline etc.), and several are built
 //! in parallel. Skipped if already built at that commit (`<name>.rev`).
@@ -24,24 +24,9 @@ pub struct Source {
     pub subpath: Option<String>,
 }
 
-/// All grammar sources in `languages.toml`.
+/// Every grammar source the packs have (`[grammar.<name>]`).
 pub fn sources() -> Vec<Source> {
-    let table: toml::Table = toml::from_str(include_str!("languages.toml")).expect("languages.toml parses");
-    table
-        .get("grammar")
-        .and_then(|g| g.as_array())
-        .into_iter()
-        .flatten()
-        .filter_map(|g| {
-            Some(Source {
-                name: g.get("name")?.as_str()?.to_string(),
-                bundle: g.get("bundle").and_then(|b| b.as_bool()).unwrap_or(false),
-                git: g.get("git")?.as_str()?.to_string(),
-                rev: g.get("rev")?.as_str()?.to_string(),
-                subpath: g.get("subpath").and_then(|s| s.as_str()).map(str::to_string),
-            })
-        })
-        .collect()
+    crate::languages::get().grammars.clone()
 }
 
 pub fn grammars_dir() -> Option<PathBuf> {
@@ -291,48 +276,35 @@ fn sweep(src_dir: &Path, out_dir: &Path, all: &[Source]) {
     }
 }
 
-/// Language name (or grammar name) → grammars to install: its own + companions
-/// (TODO in comments, inline markdown in paragraphs).
+/// Language name (or grammar name) → grammars to install: its own, the ones its pack installs along
+/// (`grammars-with`: inline markdown in paragraphs), and those every grammar brings (`everywhere`: TODO in
+/// comments).
 pub fn for_language(lang: &str) -> Vec<String> {
     let mut v = Vec::new();
     if let Some(spec) = crate::syntax::spec(lang) {
         v.push(spec.grammar.clone());
+        v.extend(spec.grammars_with.iter().cloned());
     } else if sources().iter().any(|s| s.name == lang) {
         v.push(lang.to_string());
     }
-    if lang == "markdown" {
-        v.push("markdown_inline".into());
-    }
-    if !v.is_empty() && lang != "comment" {
-        v.push("comment".into());
+    if !v.is_empty() {
+        for g in &crate::languages::get().everywhere {
+            if !v.contains(g) {
+                v.push(g.clone());
+            }
+        }
     }
     v
 }
 
 // ── Editor: offer a download for a newly opened language (card in offer.rs) ───
 
-/// Language name → human-readable name.
+/// Language name → human-readable name (its pack's `title`).
 pub fn pretty(lang: &str) -> String {
-    match lang {
-        "cpp" => "C++".into(),
-        "c-sharp" => "C#".into(),
-        "javascript" => "JavaScript".into(),
-        "typescript" => "TypeScript".into(),
-        "hcl" => "Terraform".into(),
-        "gomod" => "go.mod".into(),
-        "git-commit" => "Git commit".into(),
-        "git-config" => "Git config".into(),
-        "git-ignore" => ".gitignore".into(),
-        "sshclientconfig" => "SSH config".into(),
-        "graphql" => "GraphQL".into(),
-        "protobuf" => "Protobuf".into(),
-        "json" | "yaml" | "toml" | "html" | "css" | "scss" | "xml" | "sql" | "ini" | "svg" | "php" => {
-            lang.to_uppercase()
-        }
-        "cmake" => "CMake".into(),
-        "latex" => "LaTeX".into(),
-        l => {
-            let mut c = l.chars();
+    match crate::syntax::spec(lang) {
+        Some(s) => s.title.clone(),
+        None => {
+            let mut c = lang.chars();
             c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
         }
     }
@@ -508,11 +480,12 @@ mod tests {
     fn every_language_has_a_grammar_source() {
         let s = sources();
         assert!(s.len() >= 50);
-        let table: toml::Table = toml::from_str(include_str!("languages.toml")).unwrap();
-        for l in table["language"].as_array().unwrap() {
-            let name = l["name"].as_str().unwrap();
-            let grammar = l.get("grammar").and_then(|g| g.as_str()).unwrap_or(name);
-            assert!(s.iter().any(|x| x.name == grammar), "{name}: no [[grammar]] {grammar}");
+        for l in &crate::languages::get().langs {
+            let grammar = &l.grammar;
+            assert!(s.iter().any(|x| x.name == *grammar), "{}: no [grammar.{grammar}]", l.name);
+            for with in &l.grammars_with {
+                assert!(s.iter().any(|x| x.name == *with), "{}: no [grammar.{with}]", l.name);
+            }
         }
         assert!(s.iter().all(|x| x.rev.len() == 40 && x.git.starts_with("https://")));
     }

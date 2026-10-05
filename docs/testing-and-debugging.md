@@ -51,10 +51,11 @@ reports. While results can't be read yet (still building, a compile error), the 
 ### Language packs
 
 Tests are found and run through **language packs**: data, not code. A pack is a `pack.toml` and a tree-sitter
-query, built in from [`runtime/packs/`](../runtime/packs). One of your own in `~/.local/share/tarae/packs/<language>/`
+query, built in from [`runtime/packs/`](../runtime/packs) — the same folder that says what the language is
+([Adding a language](languages.md#adding-a-language)). One of your own in `~/.local/share/tarae/packs/<language>/`
 adds a language tarae doesn't know, or changes one it does — no rebuild. Yours replaces the built-in pack a table at
-a time: a `[test]` of your own keeps the built-in `[tasks]`, and the other way round. A query file of yours replaces
-the built-in one of the same name.
+a time: a `[test]` of your own keeps the built-in `[tasks]`, and the other way round ([what a pack of yours can
+change](#what-a-pack-of-yours-can-change)). A query file of yours replaces the built-in one of the same name.
 
 ```toml
 # ~/.local/share/tarae/packs/go/pack.toml — run from the module root, with the race detector
@@ -224,6 +225,22 @@ line = '^\s*Blocking waiting for file lock on (?<what>.+)$'   # its named groups
 for = "cargo's lock"                  # the panel: waiting for …
 report = "cargo's {what} lock"        # Claude's report (`for` unless set)
 ```
+
+### What a pack of yours can change
+
+Each top-level key of a `pack.toml` says how a pack of your own counts for it:
+
+| Keys | A pack of yours |
+|---|---|
+| `[test]`, `[tasks]`, `[[preflight]]`, `[[waits]]` | replaces the built-in table |
+| `[install.<tool>]`, `[grammar.<name>]` | replaces that entry; the others stay |
+| `[language.<name>]`, `[server.<name>]` | replaces the keys it sets; the entry's other keys stay — in whichever folder the language is |
+| `config-files` | adds to the built-in list; nothing can be taken out |
+| `outputs`, `protect` | ignored, and said at the start: tarae reads them from its own packs only (they decide what Claude's runs may reach) |
+
+A key no pack knows is a mistake in that pack, said with its name as one that doesn't parse is. Your
+`[language]`, `[grammar]` and `[server]` are read once, when tarae starts — after editing them, `:restart`.
+`[test]`, `[tasks]`, `[[preflight]]`, `[[waits]]` and `[install]` are read when they're used, so they count at once.
 
 ## Debugger
 

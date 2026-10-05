@@ -1,3 +1,16 @@
+# Helm chart templates: Go templates (the gotmpl pack's grammar) whose text between `{{ }}` is YAML
+# (queries/helm/injections.scm); helm_ls.
+
+# A chart's templates, and a folder under them (`templates/tests/`)
+[language.helm]
+grammar = "gotmpl"
+globs = ["templates/*.yaml", "templates/*.yml", "templates/*/*.yaml", "templates/*/*.yml", "templates/_*.tpl", "templates/NOTES.txt"]
+block-comment-tokens = { start = "{{/*", end = "*/}}" }
+lsp = ["helm_ls"]
+
+[server.helm_ls]
+args = ["serve"]
+
 [install.helm_ls]
 what = "Helm's language server"
 ways = [{ run = ["brew", "install", "helm-ls"] }]

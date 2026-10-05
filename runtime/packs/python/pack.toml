@@ -1,4 +1,31 @@
-# Python: pytest from the project's root, with its virtualenv's Python; debugpy to debug.
+# Python: basedpyright, pyright or pylsp, and ruff beside it; pytest from the project's root, with its
+# virtualenv's Python; debugpy to debug.
+
+# The virtualenv, and compiled bytecode
+outputs = [".venv", "__pycache__"]
+# Read by pip, uv, poetry and pipenv as soon as they're on disk
+config-files = { toml = ["pyproject.toml", "Pipfile"] }
+
+[language.python]
+extensions = ["py", "pyi", "pyw"]
+comment-token = "#"
+indent-after-colon = true
+aliases = ["python3", "py3"]
+roots = ["pyproject.toml", "setup.py", "setup.cfg"]
+lsp = ["basedpyright", "pyright", "pylsp"]
+also = ["ruff"]
+test-files = ["test_*.py", "*_test.py"]
+
+[grammar.python]
+git = "https://github.com/tree-sitter/tree-sitter-python"
+rev = "4bfdd9033a2225cc95032ce77066b7aeca9e2efc"
+bundle = true
+
+[server.pylsp]
+
+# A linter and formatter with a server of its own
+[server.ruff]
+args = ["server"]
 
 [test]
 query = "tests.scm"
@@ -40,9 +67,13 @@ needs = "mypy"
 # list replaces the default one, so it's kept (dot-folders are in it — `.claude/worktrees` already was; the
 # four "Auto-excluding" lines pyright 1.1.414 logs).
 [server.pyright]
+command = "pyright-langserver"
+args = ["--stdio"]
 leave-out = { config = "python.analysis.exclude", each = "{rel}", keep = ["**/node_modules", "**/__pycache__", "**/.*", "**/__editable__.*"] }
 
 [server.basedpyright]
+command = "basedpyright-langserver"
+args = ["--stdio"]
 leave-out = { config = "basedpyright.analysis.exclude", each = "{rel}", keep = ["**/node_modules", "**/__pycache__", "**/.*", "**/__editable__.*"] }
 
 # The first of Python's servers tarae looks for; uv and pipx put it in ~/.local/bin

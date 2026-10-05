@@ -1,3 +1,21 @@
+# YAML: yaml-language-server.
+
+# A key ending in `:` opens a block
+[language.yaml]
+title = "YAML"
+extensions = ["yml", "yaml"]
+comment-token = "#"
+indent-after-colon = true
+lsp = ["yaml-language-server"]
+
+[grammar.yaml]
+git = "https://github.com/ikatyang/tree-sitter-yaml"
+rev = "0e36bed171768908f331ff7dff9d956bae016efb"
+bundle = true
+
+[server.yaml-language-server]
+args = ["--stdio"]
+
 [install.yaml-language-server]
 what = "YAML's language server"
 ways = [

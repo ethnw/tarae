@@ -1,0 +1,12 @@
+# Scala.
+
+[language.scala]
+extensions = ["scala", "sc"]
+comment-token = "//"
+block-comment-tokens = { start = "/*", end = "*/" }
+doc-comments = true
+test-files = ["*Test.scala", "*Tests.scala"]
+
+[grammar.scala]
+git = "https://github.com/tree-sitter/tree-sitter-scala"
+rev = "7891815f42dca9ed6aeb464c2edc39d479ab965c"

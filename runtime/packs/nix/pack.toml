@@ -1,5 +1,17 @@
-# Nix: only said, not run. Nix setups add packages in their own config, and `nix profile` needs flakes on
-# and has changed its commands between versions.
+# Nix: nil — only said, not run. Nix setups add packages in their own config, and `nix profile` needs
+# flakes on and has changed its commands between versions.
+
+[language.nix]
+extensions = ["nix"]
+comment-token = "#"
+block-comment-tokens = { start = "/*", end = "*/" }
+lsp = ["nil"]
+
+[grammar.nix]
+git = "https://github.com/nix-community/tree-sitter-nix"
+rev = "1b69cf1fa92366eefbe6863c184e5d2ece5f187d"
+
+[server.nil]
 
 [install.nil]
 what = "Nix's language server (nil)"

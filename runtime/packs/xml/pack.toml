@@ -1,0 +1,11 @@
+# XML, and the files written in it (SVG, property lists).
+
+[language.xml]
+title = "XML"
+extensions = ["xml", "svg", "plist"]
+block-comment-tokens = { start = "<!--", end = "-->" }
+
+[grammar.xml]
+git = "https://github.com/RenjiSann/tree-sitter-xml"
+rev = "48a7c2b6fb9d515577e115e6788937e837815651"
+bundle = true

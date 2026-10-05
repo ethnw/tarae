@@ -66,8 +66,8 @@ const FG: &[(char, &str)] = &[
     ('g', "diff.plus"),
 ];
 
-/// Languages whose grammars are always compiled into a test build (`core = true` and `dev = true` in
-/// languages.toml).
+/// Languages whose grammars are always compiled into a test build (`core = true` and `dev = true` in their
+/// packs' `[grammar.<name>]`).
 const CORE: &[&str] = &["rust", "toml", "markdown"];
 
 /// Fixture root for scenarios that need real files (picker listing and preview).

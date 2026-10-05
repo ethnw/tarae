@@ -1,0 +1,10 @@
+# fish, the shell.
+
+[language.fish]
+extensions = ["fish"]
+comment-token = "#"
+
+[grammar.fish]
+git = "https://github.com/ram02z/tree-sitter-fish"
+rev = "a78aef9abc395c600c38a037ac779afc7e3cc9e0"
+bundle = true

@@ -1,0 +1,11 @@
+# Dockerfiles (and Podman's Containerfiles).
+
+[language.dockerfile]
+extensions = ["dockerfile"]
+filenames = ["Dockerfile", "Containerfile"]
+comment-token = "#"
+
+[grammar.dockerfile]
+git = "https://github.com/camdencheek/tree-sitter-dockerfile"
+rev = "087daa20438a6cc01fa5e6fe6906d77c869d19fe"
+bundle = true

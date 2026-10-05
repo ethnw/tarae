@@ -1,3 +1,17 @@
+# Zig: zls.
+
+[language.zig]
+extensions = ["zig", "zon"]
+comment-token = "//"
+doc-comments = true
+lsp = ["zls"]
+
+[grammar.zig]
+git = "https://github.com/tree-sitter-grammars/tree-sitter-zig"
+rev = "eb7d58c2dc4fbeea4745019dee8df013034ae66b"
+
+[server.zls]
+
 [install.zls]
 what = "Zig's language server"
 ways = [{ run = ["brew", "install", "zls"] }]

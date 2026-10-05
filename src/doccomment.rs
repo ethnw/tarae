@@ -5,31 +5,10 @@
 //! cursor math hold. When the cursor (or selection) enters a block, that whole block shows as source (so it
 //! can be edited). Drawing: term.rs.
 
-/// Whether `///`·`//!`·`/** */` are doc comments in this language — `///` inside a markdown code block or
-/// in an unknown file is not a doc comment (must be left as is).
+/// Whether `///`·`//!`·`/** */` are doc comments in this language (its pack's `doc-comments`) — `///` inside a
+/// markdown code block or in an unknown file is not a doc comment (must be left as is).
 pub fn applies(lang: Option<&str>) -> bool {
-    matches!(
-        lang,
-        Some(
-            "rust"
-                | "c"
-                | "cpp"
-                | "c-sharp"
-                | "swift"
-                | "java"
-                | "kotlin"
-                | "scala"
-                | "javascript"
-                | "jsx"
-                | "typescript"
-                | "tsx"
-                | "zig"
-                | "dart"
-                | "php"
-                | "groovy"
-                | "objc"
-        )
-    )
+    lang.and_then(crate::syntax::spec).is_some_and(|s| s.doc_comments)
 }
 
 /// One doc comment line, unwrapped.

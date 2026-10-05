@@ -537,8 +537,11 @@ const NOT_SETTINGS: [&str; 30] = [
     "rs", "py", "js", "mjs", "ts", "tsx", "jsx", "go", "java", "kt", "c", "h", "cc", "cpp", "hpp", "swift",
     "rb", "php", "cs", "scala", "lua", "md", "html", "css", "svg", "png", "jpg", "pdf", "lock", "sum",
 ];
-/// Folders of tools' output, never looked in.
-const OUTPUT: [&str; 5] = ["node_modules", "target", ".venv", "__pycache__", "objects"];
+/// A folder of tools' output, never looked in (below the place asked about): git's `objects`, and the
+/// packs' `outputs` — the built-in packs' only (`packs::Reach::BuiltIn`): one of one's own would hide a token.
+pub(crate) fn output_dir(name: &str) -> bool {
+    name == "objects" || crate::languages::get().outputs.iter().any(|o| o == name)
+}
 
 /// The files in `place` (a file, or a folder and everything in it — links not followed) that hold a
 /// token-like line: settings-like files only, within bounds (`Found::cut` says when they were met). Blocks:
@@ -551,7 +554,7 @@ pub fn found_in(place: &Path) -> Found {
         let Ok(meta) = std::fs::symlink_metadata(&p) else { continue };
         if meta.is_dir() {
             let name = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-            if p != place && OUTPUT.contains(&name) {
+            if p != place && output_dir(name) {
                 continue;
             }
             let Ok(rd) = std::fs::read_dir(&p) else { continue };

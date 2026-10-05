@@ -1,0 +1,15 @@
+# A commit message (and a merge's, a tag's): prose, its long lines wrap.
+
+[language.git-commit]
+title = "Git commit"
+grammar = "gitcommit"
+filenames = ["COMMIT_EDITMSG", "MERGE_MSG", "TAG_EDITMSG"]
+comment-token = "#"
+# A new line takes the line before's indentation as it is, whatever the queries say (#176) — Helix's
+# fallback for prose
+indent-heuristic = "simple"
+prose = true
+
+[grammar.gitcommit]
+git = "https://github.com/gbprod/tree-sitter-gitcommit"
+rev = "a716678c0f00645fed1e6f1d0eb221481dbd6f6d"

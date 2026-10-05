@@ -1,0 +1,11 @@
+# just, a make-like command runner (its justfile is protected in the make pack).
+
+[language.just]
+extensions = ["just"]
+filenames = ["justfile", "Justfile", ".justfile"]
+comment-token = "#"
+
+[grammar.just]
+git = "https://github.com/poliorcetics/tree-sitter-just"
+rev = "8d03cfdd7ab89ff76d935827de1b93450fa0ec0a"
+bundle = true

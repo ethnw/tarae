@@ -1,8 +1,36 @@
-# Rust: `cargo test` in the package, filtered by module path; lldb-dap on the test binary to debug.
+# Rust: rust-analyzer; `cargo test` in the package, filtered by module path; lldb-dap on the test binary to
+# debug.
 
 # What runs later outside Claude's sandbox, in every project (`packs::protect`): a crate's build script, its
 # manifest (dependencies, build settings), cargo's config (build and target dirs, `[env]`, runners — #20)
 protect = ["build.rs", "Cargo.toml", ".cargo"]
+# cargo's builds
+outputs = ["target"]
+# Read by cargo, rustup and their tools as soon as they're on disk: a half-edited one breaks every cargo run
+# (#19 — `~/.cargo/config.toml`), so a save that doesn't parse stays in the buffer
+config-files = { toml = [
+    "Cargo.toml", "rust-toolchain.toml", "rustfmt.toml", ".rustfmt.toml", "clippy.toml", ".clippy.toml",
+    "deny.toml", ".cargo/config.toml", ".cargo/config", ".cargo/credentials.toml",
+] }
+
+# No '' pair: a lifetime's quote
+[language.rust]
+extensions = ["rs"]
+comment-token = "//"
+block-comment-tokens = { start = "/*", end = "*/" }
+auto-pairs = ["()", "[]", "{}", "\"\"", "``"]
+doc-comments = true
+roots = ["Cargo.toml"]
+# rust-analyzer in a lone .rs finds no workspace ("Failed to discover workspace" at every open)
+needs-project = ["Cargo.toml", "rust-project.json"]
+lsp = ["rust-analyzer"]
+
+# In debug builds (`dev`): tarae's own tests and screen snapshots are written against it
+[grammar.rust]
+git = "https://github.com/tree-sitter/tree-sitter-rust"
+rev = "1f63b33efee17e833e0ea29266dd3d713e27e321"
+bundle = true
+dev = true
 
 [test]
 query = "tests.scm"
@@ -58,9 +86,11 @@ report = "cargo's {what} lock"
 [server.rust-analyzer]
 leave-out = { init = "files.exclude", each = "{rel}" }
 
-# rustup's proxy lands in ~/.cargo/bin; run in the project, so its rust-toolchain.toml counts
+# rustup's proxy lands in ~/.cargo/bin; run in the project, so its rust-toolchain.toml counts. The proxy is
+# on PATH even when the component isn't installed: it says so, and exits
 [install.rust-analyzer]
 what = "Rust's language server"
+missing-says = ["is not installed for the toolchain", "Unknown binary"]
 ways = [
     { run = ["rustup", "component", "add", "rust-analyzer"], bin = ["~/.cargo/bin"], project = true },
     { run = ["brew", "install", "rust-analyzer"] },

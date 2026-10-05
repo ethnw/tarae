@@ -99,23 +99,17 @@ impl Tests {
     }
 }
 
-/// A test folder or file by its name (`rel` from the project root).
+/// A test folder or file by its name (`rel` from the project root): in `tests`/`test`, or in a folder or by a
+/// name the packs' languages keep tests in (`test-dirs`, `test-files`).
 pub fn by_name(rel: &Path) -> bool {
+    let table = crate::languages::get();
     let dirs: Vec<&str> =
         rel.parent().into_iter().flat_map(|p| p.iter()).filter_map(|c| c.to_str()).collect();
-    if dirs.iter().any(|d| matches!(*d, "tests" | "test" | "__tests__" | "spec" | "specs")) {
+    if dirs.iter().any(|d| matches!(*d, "tests" | "test") || table.test_dirs.iter().any(|t| t == d)) {
         return true;
     }
     let Some(name) = rel.file_name().and_then(|n| n.to_str()) else { return false };
-    let (stem, ext) = name.rsplit_once('.').unwrap_or((name, ""));
-    match ext {
-        "go" => stem.ends_with("_test"),
-        "py" => stem.starts_with("test_") || stem.ends_with("_test"),
-        "rb" => stem.ends_with("_spec") || stem.ends_with("_test"),
-        "java" | "kt" | "scala" | "cs" => stem.ends_with("Test") || stem.ends_with("Tests"),
-        "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" => stem.ends_with(".test") || stem.ends_with(".spec"),
-        _ => false,
-    }
+    table.test_files.iter().any(|p| crate::syntax::wildcard(p, name))
 }
 
 /// Whether an attribute says what follows is test code: `#[cfg(test)]` (and `cfg(all(test, …))`, not

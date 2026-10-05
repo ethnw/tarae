@@ -1,3 +1,36 @@
+# Markdown: marksman. tarae draws Markdown itself (hover, docs, the chat), so its grammars are in every
+# build (`core`).
+
+[language.markdown]
+extensions = ["md", "markdown"]
+block-comment-tokens = { start = "<!--", end = "-->" }
+prose = true
+lsp = ["marksman"]
+# Bold, code and links inside paragraphs
+grammars-with = ["markdown_inline"]
+
+# Injected only (no file of its own): what's inside a paragraph
+[language."markdown.inline"]
+grammar = "markdown_inline"
+
+# Two grammars in one repository
+[grammar.markdown]
+git = "https://github.com/tree-sitter-grammars/tree-sitter-markdown"
+rev = "62516e8c78380e3b51d5b55727995d2c511436d8"
+subpath = "tree-sitter-markdown"
+bundle = true
+core = true
+
+[grammar.markdown_inline]
+git = "https://github.com/tree-sitter-grammars/tree-sitter-markdown"
+rev = "62516e8c78380e3b51d5b55727995d2c511436d8"
+subpath = "tree-sitter-markdown-inline"
+bundle = true
+core = true
+
+[server.marksman]
+args = ["server"]
+
 [install.marksman]
 what = "Markdown's language server (marksman)"
 ways = [{ run = ["brew", "install", "marksman"] }]

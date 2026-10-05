@@ -1,3 +1,17 @@
+# Lua: lua-language-server.
+
+[language.lua]
+extensions = ["lua"]
+comment-token = "--"
+block-comment-tokens = { start = "--[[", end = "]]" }
+lsp = ["lua-language-server"]
+
+[grammar.lua]
+git = "https://github.com/tree-sitter-grammars/tree-sitter-lua"
+rev = "88e446476a1e97a8724dff7a23e2d709855077f2"
+
+[server.lua-language-server]
+
 [install.lua-language-server]
 what = "Lua's language server"
 ways = [{ run = ["brew", "install", "lua-language-server"] }]

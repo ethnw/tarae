@@ -1,5 +1,20 @@
-# C and C++: clangd, and lldb-dap to debug (Rust's debugger too). Both come with the system's toolchain,
-# so tarae only says where to get them.
+# C (and C++'s server): clangd, and lldb-dap to debug (Rust's debugger too). Both come with the system's
+# toolchain, so tarae only says where to get them.
+
+[language.c]
+extensions = ["c", "h"]
+comment-token = "//"
+block-comment-tokens = { start = "/*", end = "*/" }
+doc-comments = true
+roots = ["compile_commands.json", "CMakeLists.txt"]
+lsp = ["clangd"]
+
+[grammar.c]
+git = "https://github.com/tree-sitter/tree-sitter-c"
+rev = "7175a6dd5fc1cee660dce6fe23f6043d75af424a"
+bundle = true
+
+[server.clangd]
 
 [install.clangd]
 what = "C and C++'s language server"

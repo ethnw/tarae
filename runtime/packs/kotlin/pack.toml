@@ -1,0 +1,12 @@
+# Kotlin.
+
+[language.kotlin]
+extensions = ["kt", "kts"]
+comment-token = "//"
+block-comment-tokens = { start = "/*", end = "*/" }
+doc-comments = true
+test-files = ["*Test.kt", "*Tests.kt"]
+
+[grammar.kotlin]
+git = "https://github.com/fwcd/tree-sitter-kotlin"
+rev = "c4ddea359a7ff4d92360b2efcd6cfce5dc25afe6"

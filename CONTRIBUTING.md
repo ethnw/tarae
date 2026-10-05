@@ -187,8 +187,9 @@ process, or the disk.
 ### Syntax and language features
 
 - tarae never reads a Helix installation — not its config, themes, or grammars.
-- Grammars are built from their **upstream C sources** at the commit pinned in [`src/languages.toml`](src/languages.toml)
-  (`[[grammar]]` git, rev, subpath) — not from crates.io grammar crates. The default build embeds only the grammars marked
+- Grammars are built from their **upstream C sources** at the commit pinned in their language's pack,
+  [`runtime/packs/<lang>/pack.toml`](runtime/packs) (`[grammar.<name>]` git, rev, subpath) — not from crates.io grammar
+  crates. The default build embeds only the grammars marked
   `core = true` (TOML, Markdown, comment). Debug builds — `cargo run`, `cargo test` — also embed the `dev = true` one,
   Rust: the tests and screen snapshots are written against it. `bundle = true` ones are embedded with
   `--features bundled-grammars`.

@@ -25,15 +25,16 @@ pub fn is_jdtls(spec: &ServerSpec) -> bool {
         || Path::new(&spec.command).file_name().is_some_and(|n| n == "jdtls" || n == "jdtls.py")
 }
 
-/// Java build markers (Maven·Gradle).
-pub(crate) const BUILD_FILES: &[&str] =
-    &["pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"];
+/// Java build markers (Maven·Gradle) — the java pack's `roots`.
+pub(crate) fn build_files() -> &'static [String] {
+    crate::syntax::spec("java").map_or(&[], |s| &s.roots)
+}
 
 /// Project root = walking up, the dir with the **topmost** build file (never past the repo root `.git`).
 /// Avoids a jdtls per module in multi-module builds (parent pom · settings.gradle) — each is hundreds of MB.
 /// None if there's no build file (→ generic rule: .git etc.).
 pub fn project_root(file: &Path) -> Option<PathBuf> {
-    crate::lsp::root_by_markers(file, BUILD_FILES)
+    crate::lsp::root_by_markers(file, build_files())
 }
 
 /// Before launching the server: (adjusted command, initializationOptions).

@@ -44,6 +44,7 @@ mod jumplist;
 mod key;
 mod keymap;
 mod labels;
+mod languages;
 mod llm;
 mod log;
 mod lsp;
@@ -232,6 +233,9 @@ fn main() -> Result<()> {
     }
     // (the one look at where tarae runs — from here on the editor's root is what everything goes by)
     let root = editor::started_in();
+    // The language table — the packs, a runtime folder's read from disk here, once: files opened, fences drawn
+    // and servers started from now on read memory (the config checks its servers against it)
+    let packs = languages::get();
     let (config, warnings) = config::load(&root);
     let mut editor = editor::Editor::with_root(config, root);
     // Started without a file: recent files on the start screen (existing ones only; reads one small file)
@@ -273,6 +277,9 @@ fn main() -> Result<()> {
     }
     if !warnings.is_empty() {
         editor.set_error(format!("config: {}", warnings.join("; ")));
+    }
+    if !packs.said.is_empty() {
+        editor.set_warning(format!("packs: {}", packs.said.join("; ")));
     }
     editor.disk_watch();
     match ui {

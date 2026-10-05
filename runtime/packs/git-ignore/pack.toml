@@ -1,0 +1,12 @@
+# .gitignore and the files written like it.
+
+[language.git-ignore]
+title = ".gitignore"
+grammar = "gitignore"
+filenames = [".gitignore", ".dockerignore", ".ignore"]
+comment-token = "#"
+
+[grammar.gitignore]
+git = "https://github.com/shunsambongi/tree-sitter-gitignore"
+rev = "f4685bf11ac466dd278449bcfe5fd014e94aa504"
+bundle = true

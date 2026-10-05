@@ -1,0 +1,9 @@
+# Svelte.
+
+[language.svelte]
+extensions = ["svelte"]
+block-comment-tokens = { start = "<!--", end = "-->" }
+
+[grammar.svelte]
+git = "https://github.com/Himujjal/tree-sitter-svelte"
+rev = "60ea1d673a1a3eeeb597e098d9ada9ed0c79ef4b"

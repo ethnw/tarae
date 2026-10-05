@@ -681,7 +681,7 @@ fn new_line_indents(cx: &Context, breaks: &[(usize, bool)]) -> Vec<String> {
     let tree = syn
         .filter(|_| ix.is_some())
         .and_then(|s| s.fresh_tree(&doc.text, std::time::Duration::from_millis(3)));
-    let colon = matches!(cx.editor.lang_spec().map(|s| s.name.as_str()), Some("python" | "yaml"));
+    let colon = crate::syntax::colon_indents(cx.editor.lang_spec().map(|s| s.name.as_str()));
     breaks
         .iter()
         .map(|&(at, follows)| {
@@ -978,7 +978,7 @@ fn indent_unit(cx: &Context) -> crate::indent::Unit {
     }
     // The language by its grammar, else its path — Go or a Makefile without the grammar still gets tabs
     let lang = cx.editor.lang_spec().map(|s| s.name.as_str());
-    let unit = crate::indent::detect(&doc.text, tab, matches!(lang, Some("go" | "make")));
+    let unit = crate::indent::detect(&doc.text, tab, crate::syntax::tabs_by_default(lang));
     doc.indent_unit.set(Some((doc.version(), tab, unit)));
     unit
 }

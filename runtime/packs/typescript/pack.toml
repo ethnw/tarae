@@ -1,4 +1,38 @@
-# TypeScript: type-checking the project.
+# TypeScript (and TSX): typescript-language-server (JavaScript's too); type-checking the project.
+
+[language.typescript]
+extensions = ["ts", "mts", "cts"]
+comment-token = "//"
+block-comment-tokens = { start = "/*", end = "*/" }
+doc-comments = true
+title = "TypeScript"
+roots = ["package.json", "tsconfig.json", "jsconfig.json"]
+lsp = ["typescript-language-server"]
+test-files = ["*.test.ts", "*.spec.ts"]
+
+[language.tsx]
+extensions = ["tsx"]
+comment-token = "//"
+block-comment-tokens = { start = "/*", end = "*/" }
+doc-comments = true
+language-id = "typescriptreact"
+roots = ["package.json", "tsconfig.json", "jsconfig.json"]
+lsp = ["typescript-language-server"]
+test-files = ["*.test.tsx", "*.spec.tsx"]
+
+# Two grammars in one repository
+[grammar.typescript]
+git = "https://github.com/tree-sitter/tree-sitter-typescript"
+rev = "b1bf4825d9eaa0f3bdeb1e52f099533328acfbdf"
+subpath = "typescript"
+
+[grammar.tsx]
+git = "https://github.com/tree-sitter/tree-sitter-typescript"
+rev = "b1bf4825d9eaa0f3bdeb1e52f099533328acfbdf"
+subpath = "tsx"
+
+[server.typescript-language-server]
+args = ["--stdio"]
 
 [tasks]
 when = ["tsconfig.json"]

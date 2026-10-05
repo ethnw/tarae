@@ -1,0 +1,10 @@
+# git's settings.
+
+[language.git-config]
+title = "Git config"
+filenames = [".gitconfig", ".gitmodules"]
+comment-token = "#"
+
+[grammar.git-config]
+git = "https://github.com/the-mikedavis/tree-sitter-git-config"
+rev = "9c2a1b7894e6d9eedfe99805b829b4ecd871375e"

@@ -26,73 +26,19 @@ use crate::runtime;
 
 // ── Language table ──────────────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
-pub struct LangSpec {
-    pub name: String,
-    pub grammar: String,
-    extensions: Vec<String>,
-    filenames: Vec<String>,
-    path_suffixes: Vec<String>,
-    /// Path-suffix patterns — up to one `*` per segment (`templates/*.yaml` = Helm chart templates).
-    globs: Vec<String>,
-    /// Line comment token (`//`) · block comment (`/*`, `*/`) — `space c`/`C-c` and `space C` toggle them.
-    pub comment_token: Option<String>,
-    pub block_comment: Option<(String, String)>,
-    /// Insert-mode pairs (open, close) — None = the defaults.
-    pub auto_pairs: Option<Vec<(char, char)>>,
-    /// `indent-heuristic = "simple"`: a new line takes the line before's indentation as it is (`indent::simple`).
-    pub simple_indent: bool,
-}
+/// A language, as its pack says it (`languages.rs`).
+pub use crate::languages::LangSpec;
 
 /// Insert-mode pairs when the language doesn't say.
 pub const DEFAULT_PAIRS: &[(char, char)] =
     &[('(', ')'), ('[', ']'), ('{', '}'), ('"', '"'), ('\'', '\''), ('`', '`')];
 
 fn specs() -> &'static [LangSpec] {
-    static SPECS: OnceLock<Vec<LangSpec>> = OnceLock::new();
-    SPECS.get_or_init(|| {
-        let table: toml::Table =
-            toml::from_str(include_str!("languages.toml")).expect("languages.toml parses");
-        let strings = |v: Option<&toml::Value>| -> Vec<String> {
-            v.and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect())
-                .unwrap_or_default()
-        };
-        table["language"]
-            .as_array()
-            .expect("[[language]]")
-            .iter()
-            .filter_map(|l| {
-                let name = l.get("name")?.as_str()?.to_string();
-                Some(LangSpec {
-                    grammar: l.get("grammar").and_then(|g| g.as_str()).unwrap_or(&name).to_string(),
-                    extensions: strings(l.get("extensions")),
-                    filenames: strings(l.get("filenames")),
-                    path_suffixes: strings(l.get("path-suffixes")),
-                    globs: strings(l.get("globs")),
-                    comment_token: l.get("comment-token").and_then(|t| t.as_str()).map(str::to_string),
-                    block_comment: l.get("block-comment-tokens").and_then(|b| {
-                        Some((b.get("start")?.as_str()?.to_string(), b.get("end")?.as_str()?.to_string()))
-                    }),
-                    auto_pairs: l.get("auto-pairs").map(|_| {
-                        strings(l.get("auto-pairs"))
-                            .iter()
-                            .filter_map(|p| {
-                                let mut c = p.chars();
-                                Some((c.next()?, c.next()?))
-                            })
-                            .collect()
-                    }),
-                    simple_indent: l.get("indent-heuristic").and_then(|h| h.as_str()) == Some("simple"),
-                    name,
-                })
-            })
-            .collect()
-    })
+    &crate::languages::get().langs
 }
 
 /// Up to one `*` per segment (`_*.tpl`, `*.yaml`).
-fn wildcard(pat: &str, s: &str) -> bool {
+pub(crate) fn wildcard(pat: &str, s: &str) -> bool {
     match pat.split_once('*') {
         Some((a, b)) => s.len() >= a.len() + b.len() && s.starts_with(a) && s.ends_with(b),
         None => pat == s,
@@ -109,18 +55,40 @@ fn glob_match(pat: &str, path: &Path) -> bool {
 
 /// Picks a language by path: path suffix → path pattern → exact file name → extension.
 pub fn detect(path: &Path) -> Option<&'static LangSpec> {
+    detect_in(specs(), path)
+}
+
+/// `detect` in `specs`: the first that claims the path, tier by tier.
+pub(crate) fn detect_in<'a>(specs: &'a [LangSpec], path: &Path) -> Option<&'a LangSpec> {
     let full = path.to_string_lossy();
     let file = path.file_name()?.to_string_lossy();
     let ext = path.extension().map(|e| e.to_string_lossy());
-    specs()
+    specs
         .iter()
         .find(|s| s.path_suffixes.iter().any(|p| full.ends_with(p.as_str())))
-        .or_else(|| specs().iter().find(|s| s.globs.iter().any(|g| glob_match(g, path))))
-        .or_else(|| specs().iter().find(|s| s.filenames.iter().any(|f| *f == file)))
+        .or_else(|| specs.iter().find(|s| s.globs.iter().any(|g| glob_match(g, path))))
+        .or_else(|| specs.iter().find(|s| s.filenames.iter().any(|f| *f == file)))
         .or_else(|| {
             let ext = ext?;
-            specs().iter().find(|s| s.extensions.iter().any(|e| *e == ext))
+            specs.iter().find(|s| s.extensions.iter().any(|e| *e == ext))
         })
+}
+
+/// Whether a file of `lang` with nothing to go by indents with tabs (its pack's `indent-tabs`).
+pub fn tabs_by_default(lang: Option<&str>) -> bool {
+    lang.and_then(spec).is_some_and(|s| s.indent_tabs)
+}
+
+/// Whether a line ending in `:` opens a block in `lang` (the indentation heuristic, without the grammar —
+/// its pack's `indent-after-colon`).
+pub fn colon_indents(lang: Option<&str>) -> bool {
+    lang.and_then(spec).is_some_and(|s| s.indent_after_colon)
+}
+
+/// Whether `lang` is prose — its long lines wrap (`editor.soft-wrap = "prose"`; its pack's `prose`); no
+/// language is too.
+pub fn prose(lang: Option<&str>) -> bool {
+    lang.is_none_or(|l| spec(l).is_some_and(|s| s.prose))
 }
 
 /// Known language names (`:lang` completion).
@@ -132,25 +100,18 @@ pub fn spec(name: &str) -> Option<&'static LangSpec> {
     specs().iter().find(|s| s.name == name)
 }
 
-/// Picks a language by a human-written name (code block header `rust`·`rs`·`sh`·`py` …, shebang `python3`).
+/// Picks a language by a human-written name (code block header `rust`·`rs`·`sh`·`py` …, shebang `python3`):
+/// a language's name or one of its `aliases`, else an extension.
 pub fn resolve(name: &str) -> Option<&'static LangSpec> {
     let n = name.trim().trim_start_matches('{').trim_start_matches('.').to_ascii_lowercase();
-    let n = match n.as_str() {
-        "sh" | "shell" | "zsh" | "console" | "shellsession" => "bash",
-        "golang" => "go",
-        "c++" | "cxx" => "cpp",
-        "py" | "python3" | "py3" => "python",
-        "node" | "js" | "mjs" | "cjs" => "javascript",
-        "yml" => "yaml",
-        "jsonc" | "json5" => "json",
-        "cs" | "csharp" => "c-sharp",
-        "kt" => "kotlin",
-        "hs" => "haskell",
-        "rb" => "ruby",
-        "text" | "txt" | "plain" | "plaintext" | "" => return None,
-        x => x,
-    };
-    spec(n).or_else(|| detect(Path::new(&format!("x.{n}"))))
+    if ["text", "txt", "plain", "plaintext", ""].contains(&n.as_str()) {
+        return None;
+    }
+    specs()
+        .iter()
+        .find(|s| s.aliases.contains(&n))
+        .or_else(|| spec(&n))
+        .or_else(|| detect(Path::new(&format!("x.{n}"))))
 }
 
 // ── Global capture names ────────────────────────────────────────────────

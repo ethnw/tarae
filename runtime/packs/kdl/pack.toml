@@ -1,0 +1,10 @@
+# KDL (zellij's settings among others).
+
+[language.kdl]
+extensions = ["kdl"]
+comment-token = "//"
+block-comment-tokens = { start = "/*", end = "*/" }
+
+[grammar.kdl]
+git = "https://github.com/amaanq/tree-sitter-kdl"
+rev = "3ca569b9f9af43593c24f9e7a21f02f43a13bb88"

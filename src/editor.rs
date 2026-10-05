@@ -1473,9 +1473,7 @@ impl Editor {
         match self.config.soft_wrap.as_str() {
             "always" => true,
             "never" => false,
-            _ => {
-                matches!(doc.lang_name(), None | Some("markdown" | "git-commit"))
-            }
+            _ => crate::syntax::prose(doc.lang_name()),
         }
     }
 

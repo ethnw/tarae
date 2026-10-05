@@ -1,0 +1,9 @@
+# Elixir.
+
+[language.elixir]
+extensions = ["ex", "exs"]
+comment-token = "#"
+
+[grammar.elixir]
+git = "https://github.com/elixir-lang/tree-sitter-elixir"
+rev = "02a6f7fd4be28dd94ee4dd2ca19cb777053ea74e"

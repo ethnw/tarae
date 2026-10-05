@@ -1,4 +1,30 @@
-# Go: `go test` in the package's folder, dlv to debug.
+# Go: gopls; `go test` in the package's folder, dlv to debug. go.mod has a language of its own here.
+
+# gofmt indents with tabs
+[language.go]
+extensions = ["go"]
+comment-token = "//"
+block-comment-tokens = { start = "/*", end = "*/" }
+indent-tabs = true
+aliases = ["golang"]
+roots = ["go.work", "go.mod"]
+lsp = ["gopls"]
+test-files = ["*_test.go"]
+
+[language.gomod]
+title = "go.mod"
+filenames = ["go.mod"]
+comment-token = "//"
+
+[grammar.go]
+git = "https://github.com/tree-sitter/tree-sitter-go"
+rev = "64457ea6b73ef5422ed1687178d4545c3e91334a"
+bundle = true
+
+[grammar.gomod]
+git = "https://github.com/camdencheek/tree-sitter-go-mod"
+rev = "6efb59652d30e0e9cd5f3b3a669afd6f1a926d3c"
+bundle = true
 
 [test]
 query = "tests.scm"

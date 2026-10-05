@@ -247,7 +247,7 @@ src/
   worktree.rs        making, ending and bringing in a session (a git worktree), the list, keeping them
 
   syntax.rs          language detection, grammar loading, background parsing, highlights, injections
-  languages.toml     language table (grammars, file types)
+  languages.rs       the language table — every pack's languages, grammars and servers, read once
   grammar.rs         grammar download and build
   runtime.rs         embedded queries and grammars
   offer.rs           download offer cards

@@ -1,8 +1,41 @@
-# JavaScript (and TypeScript) projects: every script in package.json.
+# JavaScript (and JSX): TypeScript's language server (the typescript pack's); every script in package.json.
 
 # What runs later outside Claude's sandbox, in every project (`packs::protect`): the scripts and lifecycle
 # hooks npm runs (`postinstall`…), and the dependencies a build fetches
 protect = ["package.json"]
+# What npm installs
+outputs = ["node_modules"]
+# Read by npm as soon as it's on disk
+config-files = { json = ["package.json"] }
+
+# `__tests__`: Jest's folder
+[language.javascript]
+extensions = ["js", "mjs", "cjs"]
+comment-token = "//"
+block-comment-tokens = { start = "/*", end = "*/" }
+doc-comments = true
+title = "JavaScript"
+aliases = ["node"]
+roots = ["package.json", "tsconfig.json", "jsconfig.json"]
+lsp = ["typescript-language-server"]
+test-files = ["*.test.js", "*.spec.js", "*.test.mjs", "*.spec.mjs", "*.test.cjs", "*.spec.cjs"]
+test-dirs = ["__tests__"]
+
+[language.jsx]
+grammar = "javascript"
+extensions = ["jsx"]
+comment-token = "//"
+block-comment-tokens = { start = "/*", end = "*/" }
+doc-comments = true
+language-id = "javascriptreact"
+roots = ["package.json", "tsconfig.json", "jsconfig.json"]
+lsp = ["typescript-language-server"]
+test-files = ["*.test.jsx", "*.spec.jsx"]
+
+[grammar.javascript]
+git = "https://github.com/tree-sitter/tree-sitter-javascript"
+rev = "f772967f7b7bc7c28f845be2420a38472b16a8ee"
+bundle = true
 
 [tasks]
 when = ["package.json"]

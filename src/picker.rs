@@ -1079,8 +1079,12 @@ pub fn list_files(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-const SKIP_DIRS: &[&str] = &["target", "node_modules", ".git", ".venv", "__pycache__"];
 const MAX_FILES: usize = 200_000;
+
+/// What the walk leaves out: hidden files and folders (`.git`), and tools' output (the packs' `outputs`).
+pub(crate) fn skips(name: &str) -> bool {
+    name.starts_with('.') || crate::languages::get().outputs.iter().any(|o| o == name)
+}
 
 fn walk(root: &Path, rel: &Path, out: &mut Vec<PathBuf>) {
     let Ok(rd) = std::fs::read_dir(root.join(rel)) else { return };
@@ -1092,7 +1096,7 @@ fn walk(root: &Path, rel: &Path, out: &mut Vec<PathBuf>) {
         }
         let name = e.file_name();
         let name = name.to_string_lossy();
-        if name.starts_with('.') || SKIP_DIRS.contains(&name.as_ref()) {
+        if skips(&name) {
             continue;
         }
         let path = rel.join(name.as_ref());

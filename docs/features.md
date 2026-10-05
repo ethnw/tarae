@@ -268,7 +268,7 @@ configs carry over as they are.
 
 Tree-sitter, parsed incrementally in the background — edits apply to the existing tree immediately, so colors keep
 up, and queries run only on the visible lines. Grammars are built from their upstream C sources at the commits pinned
-in [`src/languages.toml`](../src/languages.toml): 54 languages, including C, C++, Java, Python, JS/TS, Go, Rust, Bash,
+in each language's [pack](languages.md#adding-a-language): 54 languages, including C, C++, Java, Python, JS/TS, Go, Rust, Bash,
 SQL, Lua, Zig, YAML, Terraform (HCL), Dockerfile, and Helm templates ([screenshot](screenshots/syntax-helm.png)).
 
 - The default build embeds TOML, Markdown, and comment (6.5 MB binary). Other languages, Rust included, are

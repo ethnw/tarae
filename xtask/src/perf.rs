@@ -153,11 +153,11 @@ const SIZE_NOISE: f64 = 0.05;
 /// What the bundled binary has beyond the default one (which every run measures): which grammars are in
 /// it, their sources, how they're built, and the release profile. Its size is measured again only when
 /// these changed since it last was (`BUNDLED_KEY`), or with `--sizes` — a release build of ~80 s saved
-/// otherwise.
-const BUNDLED_INPUTS: [&str; 3] = ["src/languages.toml", "runtime/grammars.tar.gz", "build.rs"];
+/// otherwise. The packs' `pack.toml`s (their `[grammar.<name>]`) count too.
+const BUNDLED_INPUTS: [&str; 2] = ["runtime/grammars.tar.gz", "build.rs"];
 const BUNDLED_KEY: &str = "target/perf/bundled-size.key";
 
-/// FNV-1a of `BUNDLED_INPUTS` and `Cargo.toml`'s `[profile.release]` section.
+/// FNV-1a of `BUNDLED_INPUTS`, the packs and `Cargo.toml`'s `[profile.release]` section.
 fn bundled_key(root: &Path) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let mut eat = |bytes: &[u8]| {
@@ -168,6 +168,16 @@ fn bundled_key(root: &Path) -> String {
     };
     for f in BUNDLED_INPUTS {
         eat(&std::fs::read(root.join(f)).unwrap_or_default());
+    }
+    let mut packs: Vec<_> = std::fs::read_dir(root.join("runtime/packs"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path().join("pack.toml"))
+        .collect();
+    packs.sort();
+    for p in packs {
+        eat(&std::fs::read(p).unwrap_or_default());
     }
     eat(release_profile(&std::fs::read_to_string(root.join("Cargo.toml")).unwrap_or_default()).as_bytes());
     format!("{h:016x}")
@@ -375,12 +385,12 @@ mod tests {
     #[test]
     fn the_bundled_size_waits_for_what_makes_it_differ() {
         let dir = std::env::temp_dir().join(format!("tarae-xtask-key-{}", std::process::id()));
-        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("runtime/packs/a")).unwrap();
         let cargo =
             "[dependencies]\nx = \"1\"\n\n[profile.release]\nlto = true\n\n[profile.shot]\nlto = false\n";
         std::fs::write(dir.join("Cargo.toml"), cargo).unwrap();
-        std::fs::write(dir.join("src/languages.toml"), "[[language]]\nname = \"a\"\nbundle = true\n")
-            .unwrap();
+        let pack = dir.join("runtime/packs/a/pack.toml");
+        std::fs::write(&pack, "[grammar.a]\nbundle = true\n").unwrap();
         let k = bundled_key(&dir);
         assert_eq!(bundled_key(&dir), k, "nothing changed");
         std::fs::write(
@@ -392,8 +402,7 @@ mod tests {
         std::fs::write(dir.join("Cargo.toml"), cargo.replace("lto = true", "lto = \"thin\"")).unwrap();
         let k2 = bundled_key(&dir);
         assert_ne!(k2, k, "the release profile");
-        std::fs::write(dir.join("src/languages.toml"), "[[language]]\nname = \"a\"\nbundle = false\n")
-            .unwrap();
+        std::fs::write(&pack, "[grammar.a]\nbundle = false\n").unwrap();
         assert_ne!(bundled_key(&dir), k2, "the grammar list");
         std::fs::remove_dir_all(&dir).ok();
     }

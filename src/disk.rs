@@ -457,38 +457,38 @@ fn watchable(d: &crate::document::Document) -> bool {
     !d.loading && d.saving == 0
 }
 
-/// Config files whose readers take them as soon as they're on disk — cargo, tarae, npm, Claude Code — and
-/// break at once on a syntax error, by name (or the folder it's in). JSON with comments (`tsconfig.json`,
-/// VS Code's) isn't among them: a strict parser would call it broken. YAML neither: no parser for it here.
-const TOML_CONFIGS: [&str; 11] = [
-    "Cargo.toml",
-    "rust-toolchain.toml",
-    "pyproject.toml",
-    "rustfmt.toml",
-    ".rustfmt.toml",
-    "clippy.toml",
-    ".clippy.toml",
-    "deny.toml",
-    ".tarae.toml",
-    ".tarae.local.toml",
-    "Pipfile",
-];
-const JSON_CONFIGS: [&str; 3] = ["package.json", "composer.json", ".claude.json"];
+/// Config files whose readers take them as soon as they're on disk — tarae's own and Claude Code's here, the
+/// toolchains' in their packs (`config-files`) — and break at once on a syntax error, by name (or the folder
+/// it's in). JSON with comments (`tsconfig.json`, VS Code's) isn't among them: a strict parser would call it
+/// broken. YAML neither: no parser for it here.
+const TOML_CONFIGS: [&str; 2] = [".tarae.toml", ".tarae.local.toml"];
+const JSON_CONFIGS: [&str; 1] = [".claude.json"];
 
 /// The most text a parse check reads (a config this big is something else).
 const CONFIG_CHECK_MAX: usize = 512 << 10;
 
-/// Why `text` doesn't parse, when `path` is a known config file (`TOML_CONFIGS`, `JSON_CONFIGS`, cargo's
-/// `.cargo/config(.toml)`, tarae's own `tarae/*.toml`, Claude Code's `.claude/settings*.json`) — its
-/// parser's first line. None for anything else, or one that parses.
+/// Whether `path` is one of `names` — a name with a `/` is the path's last parts (`.cargo/config.toml`).
+fn named(path: &Path, names: &[String]) -> bool {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    names.iter().any(|n| match n.contains('/') {
+        true => path.ends_with(n),
+        false => n == name,
+    })
+}
+
+/// Why `text` doesn't parse, when `path` is a known config file (`TOML_CONFIGS`, `JSON_CONFIGS`, the packs'
+/// `config-files`, tarae's own `tarae/*.toml`, Claude Code's `.claude/settings*.json`) — its parser's first
+/// line. None for anything else, or one that parses.
 pub fn unparsed_config(path: &Path, text: &ropey::Rope) -> Option<String> {
     let name = path.file_name()?.to_str()?;
     let dir = path.parent().and_then(Path::file_name).and_then(|d| d.to_str()).unwrap_or_default();
+    let packs = crate::languages::get();
     let toml = TOML_CONFIGS.contains(&name)
-        || (dir == ".cargo" && matches!(name, "config.toml" | "config" | "credentials.toml"))
+        || named(path, &packs.config_toml)
         || (dir == "tarae" && name.ends_with(".toml"))
         || path.parent().and_then(Path::parent).is_some_and(|p| p.ends_with("tarae") && dir == "themes");
     let json = JSON_CONFIGS.contains(&name)
+        || named(path, &packs.config_json)
         || (dir == ".claude" && name.starts_with("settings") && name.ends_with(".json"));
     if (!toml && !json) || text.len_bytes() > CONFIG_CHECK_MAX {
         return None;

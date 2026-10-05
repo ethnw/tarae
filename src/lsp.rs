@@ -52,50 +52,11 @@ pub const FEATURES: &[&str] = &[
     "highlights",
 ];
 
-/// (name, command, args)
-type Candidate = (&'static str, &'static str, &'static [&'static str]);
-
-/// Servers that run beside a language's main one (each if on PATH) — linters and formatters with their own
-/// server. Overridden by `[lang.<lang>] also`.
-const DEFAULT_ALSO: &[(&str, &[Candidate])] = &[("python", &[("ruff", "ruff", &["server"])])];
-
-/// Default servers per language — the first on PATH wins. Overridden by `[lsp.<name>]`·`[lang.<lang>] lsp`.
-const DEFAULTS: &[(&str, &[Candidate])] = &[
-    ("rust", &[("rust-analyzer", "rust-analyzer", &[])]),
-    ("go", &[("gopls", "gopls", &[])]),
-    (
-        "python",
-        &[
-            ("basedpyright", "basedpyright-langserver", &["--stdio"]),
-            ("pyright", "pyright-langserver", &["--stdio"]),
-            ("pylsp", "pylsp", &[]),
-        ],
-    ),
-    ("typescript", &[("typescript-language-server", "typescript-language-server", &["--stdio"])]),
-    ("tsx", &[("typescript-language-server", "typescript-language-server", &["--stdio"])]),
-    ("javascript", &[("typescript-language-server", "typescript-language-server", &["--stdio"])]),
-    ("jsx", &[("typescript-language-server", "typescript-language-server", &["--stdio"])]),
-    ("c", &[("clangd", "clangd", &[])]),
-    ("cpp", &[("clangd", "clangd", &[])]),
-    ("lua", &[("lua-language-server", "lua-language-server", &[])]),
-    ("zig", &[("zls", "zls", &[])]),
-    ("bash", &[("bash-language-server", "bash-language-server", &["start"])]),
-    ("toml", &[("taplo", "taplo", &["lsp", "stdio"])]),
-    ("yaml", &[("yaml-language-server", "yaml-language-server", &["--stdio"])]),
-    ("helm", &[("helm_ls", "helm_ls", &["serve"])]),
-    ("markdown", &[("marksman", "marksman", &["server"])]),
-    ("nix", &[("nil", "nil", &[])]),
-    // jdtls workspace dir and debug plugin are added by java.rs
-    ("java", &[("jdtls", "jdtls", &[])]),
-];
-
-/// Language id (LSP languageId) — mostly the language name as-is.
+/// Language id (LSP languageId) — its pack's `language-id`, else the language name as-is.
 pub fn language_id(lang: &str) -> &str {
-    match lang {
-        "tsx" => "typescriptreact",
-        "jsx" => "javascriptreact",
-        "bash" => "shellscript",
-        other => other,
+    match crate::syntax::spec(lang) {
+        Some(s) => &s.language_id,
+        None => lang,
     }
 }
 
@@ -113,47 +74,37 @@ pub fn find_server(lang: &str, config: &LspConfig) -> Option<ServerSpec> {
     })
 }
 
-/// The servers configured for `lang` (or the defaults), installed or not.
+/// The servers configured for `lang` (or its pack's `lsp`), installed or not.
 pub fn candidates(lang: &str, config: &LspConfig) -> Vec<ServerSpec> {
-    let names: Vec<&str> = match config.languages.get(lang) {
-        Some(names) => names.iter().map(String::as_str).collect(),
-        None => DEFAULTS
-            .iter()
-            .find(|(l, _)| *l == lang)
-            .map(|(_, list)| list.iter().map(|(name, ..)| *name).collect())
-            .unwrap_or_default(),
+    let names: &[String] = match config.languages.get(lang) {
+        Some(names) => names,
+        None => crate::syntax::spec(lang).map_or(&[], |s| &s.lsp),
     };
-    names.into_iter().filter_map(|n| config.servers.get(n).cloned().or_else(|| default_spec(n))).collect()
+    names.iter().filter_map(|n| config.servers.get(n).cloned().or_else(|| default_spec(n))).collect()
 }
 
 /// The servers that start beside the main one for `lang` (`[lang.<lang>] also`, else the defaults): those on
 /// PATH, and the names of those that aren't (for the log).
 pub fn also_servers(lang: &str, config: &LspConfig) -> (Vec<ServerSpec>, Vec<String>) {
-    let names: Vec<&str> = match config.also.get(lang) {
-        Some(names) => names.iter().map(String::as_str).collect(),
-        None => DEFAULT_ALSO
-            .iter()
-            .find(|(l, _)| *l == lang)
-            .map(|(_, list)| list.iter().map(|(name, ..)| *name).collect())
-            .unwrap_or_default(),
-    };
-    let (on, off): (Vec<ServerSpec>, Vec<ServerSpec>) = names
+    let (on, off): (Vec<ServerSpec>, Vec<ServerSpec>) = also_names(lang, config)
         .into_iter()
-        .filter_map(|n| config.servers.get(n).cloned().or_else(|| default_spec(n)))
+        .filter_map(|n| config.servers.get(&n).cloned().or_else(|| default_spec(&n)))
         .partition(|s| on_path(&s.command));
     (on, off.into_iter().map(|s| s.name).collect())
 }
 
-/// A built-in server by name (a main one or one that runs beside).
+/// The names of the servers that start beside the main one for `lang` (`[lang.<lang>] also`, else its
+/// pack's `also`), installed or not.
+pub fn also_names(lang: &str, config: &LspConfig) -> Vec<String> {
+    match config.also.get(lang) {
+        Some(names) => names.clone(),
+        None => crate::syntax::spec(lang).map(|s| s.also.clone()).unwrap_or_default(),
+    }
+}
+
+/// A server the packs know, by name (`[server.<name>]` — a main one or one that runs beside).
 pub fn default_spec(name: &str) -> Option<ServerSpec> {
-    DEFAULTS.iter().chain(DEFAULT_ALSO).flat_map(|(_, l)| l.iter()).find(|(n, _, _)| *n == name).map(
-        |(n, c, a)| ServerSpec {
-            name: n.to_string(),
-            command: c.to_string(),
-            args: a.iter().map(|s| s.to_string()).collect(),
-            except: Vec::new(),
-        },
-    )
+    crate::languages::get().servers.iter().find(|s| s.name == name).cloned()
 }
 
 fn on_path(cmd: &str) -> bool {
@@ -205,47 +156,26 @@ pub struct LspConfig {
     pub share: Vec<String>,
 }
 
-/// Project markers of any language (`.git` is handled by `root_by_markers`).
-const MARKERS: &[&str] = &[
-    "Cargo.toml",
-    "go.mod",
-    "package.json",
-    "pyproject.toml",
-    "compile_commands.json",
-    "pom.xml",
-    "build.gradle",
-    "build.gradle.kts",
-    "settings.gradle",
-    "settings.gradle.kts",
-];
-
-/// Markers that make a project root for this language — other languages' don't count (a Python file under
-/// a repo-root package.json). Unknown languages take any marker.
-fn markers_for(lang: &str) -> &'static [&'static str] {
-    match lang {
-        "rust" => &["Cargo.toml"],
-        "go" => &["go.work", "go.mod"],
-        "python" => &["pyproject.toml", "setup.py", "setup.cfg"],
-        "typescript" | "tsx" | "javascript" | "jsx" => &["package.json", "tsconfig.json", "jsconfig.json"],
-        "c" | "cpp" => &["compile_commands.json", "CMakeLists.txt"],
-        "java" => crate::java::BUILD_FILES,
-        _ => MARKERS,
+/// Markers that make a project root for this language (its pack's `roots`) — other languages' don't count
+/// (a Python file under a repo-root package.json). A language with none, or an unknown one, takes any
+/// language's (`.git` is handled by `root_by_markers`).
+pub(crate) fn markers_for(lang: &str) -> &'static [String] {
+    match crate::syntax::spec(lang) {
+        Some(s) if !s.roots.is_empty() => &s.roots,
+        _ => &crate::languages::get().roots_any,
     }
 }
 
-/// Languages whose server can't work without a project, and the markers that make one: rust-analyzer in a
-/// lone `.rs` finds no workspace ("Failed to discover workspace" on the status line at every open) — so a
-/// file with none of these above it gets no server.
-pub fn project_markers(lang: &str) -> Option<&'static [&'static str]> {
-    match lang {
-        "rust" => Some(&["Cargo.toml", "rust-project.json"]),
-        _ => None,
-    }
+/// Whether `lang`'s server can't work without a project, and the markers that make one (its pack's
+/// `needs-project`): rust-analyzer in a lone `.rs` finds no workspace ("Failed to discover workspace" on the
+/// status line at every open) — so a file with none of these above it gets no server.
+pub fn project_markers(lang: &str) -> Option<&'static [String]> {
+    crate::syntax::spec(lang).map(|s| s.needs_project.as_slice()).filter(|m| !m.is_empty())
 }
 
 /// The **topmost** dir with a marker, walking up but never past the repo root (`.git`) or into `$HOME` —
 /// one server per workspace, not one per member crate/module (each is hundreds of MB). None if no marker.
-pub fn root_by_markers(file: &Path, markers: &[&str]) -> Option<PathBuf> {
+pub fn root_by_markers<S: AsRef<str>>(file: &Path, markers: &[S]) -> Option<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let mut dir = file.parent()?.to_path_buf();
     let mut top = None;
@@ -253,7 +183,7 @@ pub fn root_by_markers(file: &Path, markers: &[&str]) -> Option<PathBuf> {
         if home.as_deref() == Some(dir.as_path()) {
             return top;
         }
-        if markers.iter().any(|m| dir.join(m).is_file()) {
+        if markers.iter().any(|m| dir.join(m.as_ref()).is_file()) {
             top = Some(dir.clone());
         }
         if dir.join(".git").exists() || !dir.pop() {
@@ -270,7 +200,7 @@ fn repo_or_dir(file: &Path) -> PathBuf {
 
 /// Project root by any language's markers (`root_by_markers`), else the repo root, else the file's dir.
 pub fn find_root(file: &Path) -> PathBuf {
-    root_by_markers(file, MARKERS).unwrap_or_else(|| repo_or_dir(file))
+    root_by_markers(file, &crate::languages::get().roots_any).unwrap_or_else(|| repo_or_dir(file))
 }
 
 /// Per-language project root — the topmost of this language's markers below the repo root.
@@ -283,6 +213,11 @@ const WORKTREE_HOMES: &[&str] = &[".claude/worktrees"];
 /// How deep `nested_checkouts` looks, and how many folders at most (a huge tree mustn't hold up the start).
 const NESTED_DEPTH: usize = 4;
 const NESTED_BUDGET: usize = 5000;
+
+/// Folders `nested_checkouts` doesn't go into: git's own, and tools' output (the packs' `outputs`).
+pub(crate) fn nested_skips(name: &str) -> bool {
+    name == ".git" || crate::languages::get().outputs.iter().any(|o| o == name)
+}
 
 /// Checkouts inside `root` that aren't part of its project — a folder with its own `.git` (worktrees,
 /// clones; not submodules, `.gitmodules` — those may be workspace members), and `WORKTREE_HOMES` — relative
@@ -310,10 +245,7 @@ pub fn nested_checkouts(root: &Path) -> Vec<String> {
             let Some(rel) = path.strip_prefix(root).ok().map(|r| r.to_string_lossy().into_owned()) else {
                 continue;
             };
-            let name = e.file_name();
-            if [".git", "target", "node_modules"].iter().any(|n| name == *n)
-                || WORKTREE_HOMES.contains(&rel.as_str())
-            {
+            if nested_skips(&e.file_name().to_string_lossy()) || WORKTREE_HOMES.contains(&rel.as_str()) {
                 continue;
             }
             seen += 1;
@@ -348,8 +280,8 @@ pub type MakeOptions = Box<dyn FnOnce() -> Options + Send>;
 pub fn options_for(spec: &ServerSpec, roots: &[PathBuf], given: Value) -> MakeOptions {
     let mut names = vec![spec.name.clone()];
     let program = Path::new(&spec.command).file_name().map(|n| n.to_string_lossy().into_owned());
-    let builtin = DEFAULTS.iter().chain(DEFAULT_ALSO).flat_map(|(_, l)| l.iter());
-    names.extend(builtin.filter(|(_, c, _)| program.as_deref() == Some(*c)).map(|(n, ..)| n.to_string()));
+    let builtin = crate::languages::get().servers.iter();
+    names.extend(builtin.filter(|s| program.as_deref() == Some(s.command.as_str())).map(|s| s.name.clone()));
     let (roots, name) = (roots.to_vec(), spec.name.clone());
     Box::new(move || {
         let mut o = Options { init: given, config: Value::Null };
@@ -663,7 +595,8 @@ impl Client {
             let _ = events.send(Event::Job(Box::new(move |ed: &mut Editor| ed.lsp_exited(id))));
         });
         // stderr → the log (`:log-open`) — also keeps the pipe from filling up and stalling the server. A
-        // rustup proxy whose component isn't installed says so here, and exits: offer it
+        // program that's there but not installed (a rustup proxy whose component isn't) says so here, as its
+        // pack's `missing-says` has it, and exits: offer it
         let name = spec.name.clone();
         let tool = Path::new(&spec.command).file_name().map(|n| n.to_string_lossy().into_owned());
         let events = events_err;
@@ -671,17 +604,17 @@ impl Client {
             let mut lines = BufReader::new(&mut stderr);
             let mut line = String::new();
             let mut said = false;
+            let mut missing: Option<Vec<String>> = None;
             loop {
                 line.clear();
                 match lines.read_line(&mut line) {
                     Ok(0) | Err(_) => break,
                     Ok(_) => crate::log::line(&name, "stderr", &line),
                 }
-                if !said
-                    && (line.contains("is not installed for the toolchain")
-                        || line.contains("Unknown binary"))
-                    && let Some(tool) = tool.clone()
-                {
+                let Some(tool) = tool.clone() else { continue };
+                // (read at the first line: most servers never print one)
+                let missing = missing.get_or_insert_with(|| crate::packs::missing_says(&tool));
+                if !said && missing.iter().any(|m| line.contains(m.as_str())) {
                     said = true;
                     let _ = events
                         .send(Event::Job(Box::new(move |ed: &mut Editor| ed.offer_install_server(&[tool]))));
@@ -977,8 +910,13 @@ mod tests {
 
     #[test]
     fn every_default_server_says_how_to_get_it() {
-        let first = DEFAULTS.iter().map(|(_, c)| c[0].1);
-        for tool in first.chain(["dlv", "lldb-dap"]) {
+        let config = LspConfig::default();
+        let first: Vec<String> = crate::syntax::names()
+            .filter_map(|l| candidates(l, &config).into_iter().next())
+            .map(|s| s.command)
+            .collect();
+        assert!(first.len() >= 15, "the packs' servers: {first:?}");
+        for tool in first.iter().map(String::as_str).chain(["dlv", "lldb-dap"]) {
             let found = crate::packs::install(tool);
             assert!(found.is_some(), "no [install.{tool}] in the packs (or it doesn't read)");
             let found = found.unwrap();

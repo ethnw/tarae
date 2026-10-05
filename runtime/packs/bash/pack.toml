@@ -1,3 +1,22 @@
+# Bash and the shells that read like it (zsh, sh): bash-language-server.
+
+[language.bash]
+extensions = ["sh", "bash", "zsh"]
+filenames = [".bashrc", ".bash_profile", ".zshrc", ".zprofile", ".profile", "PKGBUILD"]
+comment-token = "#"
+# Code fences of a shell session
+aliases = ["shell", "console", "shellsession"]
+language-id = "shellscript"
+lsp = ["bash-language-server"]
+
+[grammar.bash]
+git = "https://github.com/tree-sitter/tree-sitter-bash"
+rev = "487734f87fd87118028a65a4599352fa99c9cde8"
+bundle = true
+
+[server.bash-language-server]
+args = ["start"]
+
 [install.bash-language-server]
 what = "Bash's language server"
 ways = [

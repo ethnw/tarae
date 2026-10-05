@@ -1,3 +1,21 @@
+# TOML: taplo. tarae's own settings are TOML, so its grammar is in every build (`core`).
+
+[language.toml]
+title = "TOML"
+extensions = ["toml"]
+filenames = ["Cargo.lock", "uv.lock"]
+comment-token = "#"
+lsp = ["taplo"]
+
+[grammar.toml]
+git = "https://github.com/ikatyang/tree-sitter-toml"
+rev = "7cff70bbcbbc62001b465603ca1ea88edd668704"
+bundle = true
+core = true
+
+[server.taplo]
+args = ["lsp", "stdio"]
+
 [install.taplo]
 what = "TOML's language server (taplo)"
 ways = [

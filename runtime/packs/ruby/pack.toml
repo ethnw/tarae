@@ -1,0 +1,13 @@
+# Ruby.
+
+# `spec`, `specs`: RSpec's folders
+[language.ruby]
+extensions = ["rb"]
+filenames = ["Gemfile", "Rakefile"]
+comment-token = "#"
+test-files = ["*_spec.rb", "*_test.rb"]
+test-dirs = ["spec", "specs"]
+
+[grammar.ruby]
+git = "https://github.com/tree-sitter/tree-sitter-ruby"
+rev = "206c7077164372c596ffa8eaadb9435c28941364"

@@ -1,0 +1,11 @@
+# CSS.
+
+[language.css]
+title = "CSS"
+extensions = ["css"]
+block-comment-tokens = { start = "/*", end = "*/" }
+
+[grammar.css]
+git = "https://github.com/tree-sitter/tree-sitter-css"
+rev = "769203d0f9abe1a9a691ac2b9fe4bb4397a73c51"
+bundle = true

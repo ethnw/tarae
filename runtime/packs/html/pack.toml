@@ -1,0 +1,11 @@
+# HTML.
+
+[language.html]
+title = "HTML"
+extensions = ["html", "htm"]
+block-comment-tokens = { start = "<!--", end = "-->" }
+
+[grammar.html]
+git = "https://github.com/tree-sitter/tree-sitter-html"
+rev = "cbb91a0ff3621245e890d1c50cc811bffb77a26b"
+bundle = true

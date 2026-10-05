@@ -1,0 +1,11 @@
+# Swift.
+
+[language.swift]
+extensions = ["swift"]
+comment-token = "//"
+block-comment-tokens = { start = "/*", end = "*/" }
+doc-comments = true
+
+[grammar.swift]
+git = "https://github.com/alex-pinkus/tree-sitter-swift"
+rev = "57c1c6d6ffa1c44b330182d41717e6fe37430704"

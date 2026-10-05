@@ -1,0 +1,11 @@
+# CMake.
+
+[language.cmake]
+title = "CMake"
+extensions = ["cmake"]
+filenames = ["CMakeLists.txt"]
+comment-token = "#"
+
+[grammar.cmake]
+git = "https://github.com/uyha/tree-sitter-cmake"
+rev = "6e51463ef3052dd3b328322c22172eda093727ad"

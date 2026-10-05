@@ -1,0 +1,10 @@
+# Go templates (Helm's charts are written in them — the helm pack).
+
+[language.gotmpl]
+extensions = ["gotmpl"]
+block-comment-tokens = { start = "{{/*", end = "*/}}" }
+
+[grammar.gotmpl]
+git = "https://github.com/ngalaiko/tree-sitter-go-template"
+rev = "aa71f63de226c5592dfbfc1f29949522d7c95fac"
+bundle = true

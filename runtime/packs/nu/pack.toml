@@ -1,0 +1,9 @@
+# Nushell.
+
+[language.nu]
+extensions = ["nu"]
+comment-token = "#"
+
+[grammar.nu]
+git = "https://github.com/nushell/tree-sitter-nu"
+rev = "358c4f509eb97f0148bbd25ad36acc729819b9c1"
