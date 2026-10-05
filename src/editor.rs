@@ -7088,14 +7088,14 @@ mod tests {
         std::fs::remove_dir_all(&kept).ok();
     }
 
-    /// Landlock below ABI 3 (a stand-in: this kernel's rules, the availability said partial): every run of
-    /// Claude's asks first, saying why — `n` tells Claude, `y` runs it in the sandbox, `a` for the rest of
-    /// the conversation (still sandboxed: the title doesn't say "no sandbox").
+    /// Landlock ABI 2 (a stand-in: this kernel's rules, the availability ABI 2 has): every run of Claude's
+    /// asks first, saying why — `n` tells Claude, `y` runs it in the sandbox, `a` for the rest of the
+    /// conversation (still sandboxed: the title doesn't say "no sandbox").
     #[cfg(target_os = "linux")]
     #[test]
     fn a_partial_sandbox_asks_each_run() {
         use serde_json::json;
-        if landlock_at_least(1, "a_partial_sandbox_asks_each_run").is_none() {
+        if landlock_at_least(2, "a_partial_sandbox_asks_each_run").is_none() {
             return;
         }
         let dir = std::env::temp_dir().join(format!("tarae-run-partial-{}", std::process::id()));
@@ -7107,7 +7107,7 @@ mod tests {
             std::fs::remove_file(&made).ok();
             std::fs::remove_file(dir.join("stdin.log")).ok();
             let mut ed = editor("");
-            ed.sandbox = crate::sandbox::Availability::Partial(why.into());
+            ed.sandbox = crate::sandbox::linux::availability(Ok(2), true);
             ed.config.llm.run_allow = vec!["touch".into()];
             let command = format!("touch {}", made.display());
             let log = claude_calls(&mut ed, &dir, "run", &json!({ "command": command }));
@@ -7131,6 +7131,35 @@ mod tests {
         ed.offer_for_chat();
         settle_for(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
         assert!(made.exists() && !crate::tools::unsandboxed(&ed), "agreed, and still sandboxed");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Landlock ABI 1 is no sandbox (the user's decision, 2026-10-05): the no-sandbox card, saying why, and
+    /// `y` runs the command without one, as on a kernel without Landlock.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn landlock_abi_1_is_no_sandbox() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-run-abi1-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let made = dir.join("made");
+        let mut ed = editor("");
+        ed.sandbox = crate::sandbox::linux::availability(Ok(1), true);
+        ed.config.llm.run_allow = vec!["touch".into()];
+        let log =
+            claude_calls(&mut ed, &dir, "run", &json!({ "command": format!("touch {}", made.display()) }));
+        feed(&mut ed, "<space>ltouch it<ret>");
+        settle_for(&mut ed, |ed| !ed.offers.is_empty());
+        let o = &ed.offers[0];
+        let why = "this kernel's Landlock (ABI 1) refuses every move across folders, so tarae doesn't use it";
+        assert!(matches!(o.what, crate::offer::What::NoSandbox { .. }), "{}", o.title);
+        assert!(o.question.contains(why), "{}", o.question);
+        ed.offer_accept();
+        settle_for(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
+        assert!(made.exists());
+        let answer = tool_answer(&log);
+        assert!(answer.contains(&format!("Ran without a sandbox ({why})")), "{answer}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -123,6 +123,11 @@ impl Guard {
             if b.distinct > b.seen.len() {
                 s.push_str(&format!("  … and {} more\n", b.distinct - b.seen.len()));
             }
+            // (Linux: what came from Landlock's audit log, and where that is here)
+            if let Some(log) = p.audit_log().filter(|_| b.seen.iter().any(|d| d.process == SEEN_IN_AUDIT_LOG))
+            {
+                s.push_str(&format!("(Read from Landlock's audit log — {log} here.)\n"));
+            }
             match p.denials_from() {
                 // (Linux: what's said in the output is from its error lines, whatever the rest came from)
                 Some(_) if b.seen.iter().any(|d| d.process == SEEN_IN_OUTPUT) => s.push_str(&format!(
@@ -700,6 +705,8 @@ const LINK_PRIV: &str = "forbidden-link-priv";
 /// A denial read from the run's output (`Policy::said_in_output`): its process, and its operation when the
 /// profile denies both reading and writing the path — the output doesn't say which was tried.
 const SEEN_IN_OUTPUT: &str = "said in the output";
+/// A denial read from Landlock's audit log (`linux::Audit`): its process — the record names only its domain.
+pub(crate) const SEEN_IN_AUDIT_LOG: &str = "the run";
 pub(crate) const EITHER: &str = "file-read* file-write*";
 
 impl Denial {
@@ -957,7 +964,7 @@ pub struct Watch {
     claimed: std::sync::atomic::AtomicBool,
     /// Linux: the thread that confined its run (`owned_by`) — its audit records name it.
     #[cfg(target_os = "linux")]
-    owner: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    owner: std::sync::Arc<Mutex<Option<linux::Owner>>>,
 }
 
 impl std::fmt::Debug for Watch {
@@ -990,10 +997,10 @@ impl Watch {
         w
     }
 
-    /// Linux: its run was confined by thread `tid` (`spawn`).
+    /// Linux: its run was confined by thread `owner` (`spawn`).
     #[cfg(target_os = "linux")]
-    pub fn owned_by(&self, tid: u32) {
-        self.owner.store(tid, std::sync::atomic::Ordering::SeqCst);
+    pub fn owned_by(&self, owner: linux::Owner) {
+        *self.owner.lock().unwrap_or_else(|e| e.into_inner()) = Some(owner);
     }
 
     /// It ends itself unless a run has started under it (`run_started`) `within` from now.
@@ -1046,11 +1053,11 @@ impl Watch {
         w
     }
 
-    /// Linux: Landlock's audit records (`linux::audit_stream`), its run's domain told by the thread that
-    /// confined it (`owned_by`). As `start`.
+    /// Linux: Landlock's audit records, read from `source` (where `linux::audit_readable` found them), its
+    /// run's domain told by the thread that confined it (`owned_by`). As `start`.
     #[cfg(target_os = "linux")]
-    pub fn start_audit(tag: &str) -> std::sync::Arc<Watch> {
-        Watch::start_audit_from(tag, linux::audit_stream())
+    pub fn start_audit(tag: &str, source: &linux::AuditSource) -> std::sync::Arc<Watch> {
+        Watch::start_audit_from(tag, source.stream())
     }
 
     /// `start_audit` reading `stream` (a stand-in for `journalctl` in tests).
@@ -1059,8 +1066,7 @@ impl Watch {
         let w = Watch::quiet(tag);
         let (owner, mut audit) = (w.owner.clone(), linux::Audit::default());
         w.read(stream, move |line| {
-            let tid = owner.load(std::sync::atomic::Ordering::SeqCst);
-            audit.owner = (tid != 0).then_some(tid);
+            audit.owner = owner.lock().unwrap_or_else(|e| e.into_inner()).clone();
             audit.line(line)
         });
         w
@@ -1617,11 +1623,21 @@ impl Policy {
         #[cfg(target_os = "linux")]
         if let Some(Ok(c)) = &self.confine {
             return match &c.audit {
-                Ok(()) => "Landlock's audit log didn't have it".into(),
+                Ok(_) => "Landlock's audit log didn't have it".into(),
                 Err(why) => why.clone(),
             };
         }
         String::new()
+    }
+
+    /// Linux: where Landlock's audit log is read here (`linux::AuditSource::said`) — None without one, and
+    /// elsewhere.
+    fn audit_log(&self) -> Option<&'static str> {
+        #[cfg(target_os = "linux")]
+        if let Some(Ok(c)) = &self.confine {
+            return c.audit.as_ref().ok().map(linux::AuditSource::said);
+        }
+        None
     }
 
     /// Linux: where what a run refused is told from — Landlock's audit log, or the run's own error lines and
@@ -1630,7 +1646,7 @@ impl Policy {
         #[cfg(target_os = "linux")]
         if let Some(Ok(c)) = &self.confine {
             return Some(match &c.audit {
-                Ok(()) => "from Landlock's audit log".into(),
+                Ok(_) => "from Landlock's audit log".into(),
                 Err(why) => format!("from its own error lines — {why}"),
             });
         }
@@ -2322,8 +2338,11 @@ pub fn watch_for(p: &Policy) -> Option<std::sync::Arc<Watch>> {
     let tag = p.tag.as_ref()?;
     #[cfg(target_os = "linux")]
     return match &p.confine {
-        Some(Ok(c)) if c.audit.is_ok() => Some(Watch::start_audit(tag)),
-        Some(Ok(c)) if c.serve.is_ok() => Some(Watch::quiet(tag)),
+        Some(Ok(c)) => match &c.audit {
+            Ok(source) => Some(Watch::start_audit(tag, source)),
+            Err(_) if c.serve.is_ok() => Some(Watch::quiet(tag)),
+            Err(_) => None,
+        },
         _ => None,
     };
     #[cfg(not(target_os = "linux"))]
@@ -2343,9 +2362,9 @@ pub fn spawn(policy: Option<&Policy>, cmd: &Command) -> std::io::Result<crate::s
             None => return Err(std::io::Error::other("the sandbox wasn't made for this run")),
         };
         let watch = p.watch.clone();
-        let owner = move |tid| {
+        let owner = move |o| {
             if let Some(w) = &watch {
-                w.owned_by(tid);
+                w.owned_by(o);
             }
         };
         let serve = std::sync::Arc::new(p.clone());

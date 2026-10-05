@@ -105,13 +105,10 @@ pub fn abi() -> io::Result<u32> {
     Ok(n as u32)
 }
 
-/// The rights a ruleset made for ABI `abi` handles: `ALL` but those that version doesn't know (it'd refuse
-/// the ruleset).
+/// The rights a ruleset made for ABI `abi` (2 or later — tarae doesn't use 1: `sandbox::linux::availability`)
+/// handles: `ALL` but those that version doesn't know (it'd refuse the ruleset).
 pub fn handled(abi: u32) -> u64 {
     let mut fs = ALL;
-    if abi < 2 {
-        fs &= !REFER;
-    }
     if abi < 3 {
         fs &= !TRUNCATE;
     }
@@ -240,9 +237,29 @@ pub fn open_unlinked(path: &Path, flags: libc::c_int) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
 }
 
+/// A name of its own for a thread about to confine itself (`confined`, the audit probe): Landlock's audit
+/// record of a domain names tarae's process (`pid=` is the process's id, not the thread's — the user's VM)
+/// and the thread's name as it was then (`comm=`), so the name is what tells one run's records from another's.
+/// Within the kernel's 15 bytes.
+pub fn thread_name() -> String {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    format!("tl-{}", SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+}
+
+/// The calling thread's name as the kernel has it (`comm`) — what Landlock's audit records name.
+pub fn comm() -> io::Result<String> {
+    let mut buf = [0u8; 16];
+    // SAFETY: PR_GET_NAME writes at most 16 bytes, NUL included, into the buffer given.
+    if unsafe { libc::prctl(libc::PR_GET_NAME, buf.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    Ok(String::from_utf8_lossy(&buf[..end]).into_owned())
+}
+
 /// `start` on a short-lived thread of its own confined to `rules` — `also` applied after them (the seccomp
 /// filter), what it gives handed to `start` — leaving the caller as it was: the confinement ends with the
-/// thread. Waits for `start` only.
+/// thread, which has a name of its own (`thread_name`). Waits for `start` only.
 ///
 /// Why a process `start` starts is confined: Landlock's domain (and `no_new_privs`) belong to a thread's
 /// credentials, and a new process takes its credentials from the thread that starts it. glibc's
@@ -257,7 +274,7 @@ pub fn confined<A, T: Send>(
     start: impl FnOnce(A) -> io::Result<T> + Send,
 ) -> io::Result<T> {
     std::thread::scope(|s| {
-        let confined = std::thread::Builder::new().name("tarae-landlock".into()).spawn_scoped(s, || {
+        let confined = std::thread::Builder::new().name(thread_name()).spawn_scoped(s, || {
             rules.apply()?;
             start(also()?)
         })?;
@@ -279,11 +296,19 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::mpsc;
 
-    /// The kernel's ABI, or None after saying the test skips itself (a kernel without Landlock — any other
-    /// error is a failure, not a skip).
+    /// The kernel's ABI, or None after saying the test skips itself (a kernel without Landlock, or with ABI 1,
+    /// which tarae doesn't use — any other error is a failure, not a skip).
     fn kernel_abi(test: &str) -> Option<u32> {
         match abi() {
-            Ok(n) => Some(n),
+            Ok(n) if n >= 2 => Some(n),
+            Ok(n) => {
+                let line = format!(
+                    "{}landlock::tests::{test} — this kernel's Landlock is ABI {n}, which tarae doesn't use\n",
+                    crate::test_results::SELF_SKIP
+                );
+                let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+                None
+            }
             Err(e) if ![libc::ENOSYS, libc::EOPNOTSUPP].contains(&e.raw_os_error().unwrap_or(0)) => {
                 panic!("asking the ABI: {e}")
             }
@@ -377,6 +402,20 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Each confining thread has a name of its own as the kernel has it (`comm` — what Landlock's audit record
+    /// of a domain names, beside tarae's process id, not the thread's): two runs' records are told apart by
+    /// it. Within the kernel's 15 bytes.
+    #[test]
+    fn each_confining_thread_has_a_name_of_its_own() {
+        let Some(abi) = kernel_abi("each_confining_thread_has_a_name_of_its_own") else { return };
+        let rules = Ruleset::new(abi).unwrap();
+        // (asked, not read from `/proc`: the ruleset grants no file)
+        let name = || confined(&rules, || Ok(()), |()| comm()).unwrap();
+        let (a, b) = (name(), name());
+        assert_ne!(a, b);
+        assert!(a.starts_with("tl-") && b.starts_with("tl-"), "{a} {b}");
+    }
+
     /// The kernel says its version, and a ruleset leaves out the rights older versions don't know.
     #[test]
     fn the_abi_is_read_and_sets_the_rights() {
@@ -386,8 +425,7 @@ mod tests {
         let specials = MAKE_CHAR | MAKE_SOCK | MAKE_FIFO | MAKE_BLOCK | RESOLVE_UNIX;
         assert_eq!(FILE | folder | specials, ALL, "every right is in ALL");
         assert_eq!(FILE & (folder | specials), 0);
-        assert_eq!(handled(1), ALL & !(REFER | TRUNCATE | IOCTL_DEV | RESOLVE_UNIX));
-        assert_eq!(handled(2), handled(1) | REFER);
+        assert_eq!(handled(2), ALL & !(TRUNCATE | IOCTL_DEV | RESOLVE_UNIX));
         assert_eq!((handled(3), handled(4)), (handled(2) | TRUNCATE, handled(2) | TRUNCATE));
         assert_eq!((handled(5), handled(8)), (handled(3) | IOCTL_DEV, handled(3) | IOCTL_DEV));
         assert_eq!((handled(9), handled(99)), (ALL, ALL));

@@ -615,8 +615,8 @@ thread of tarae's that confined itself first, and everything it starts stays con
   | Landlock ABI (Linux) | Claude's commands |
   |---|---|
   | none (before 5.13, or left out of the boot's `lsm=`) | no sandbox: each command asks first (the card above) |
-  | 1 (5.13) | a partial sandbox: truncating a file isn't controlled, and every move or link across folders is refused. Each command asks first, saying why — `y` this one, `a` this conversation (still in the sandbox), `n` |
-  | 2 (5.19) | partial, as 1, but moves across folders work |
+  | 1 (5.13) | no sandbox, as with none, the card saying why: this version refuses every move or link across folders, which builds do all the time, so tarae doesn't use it |
+  | 2 (5.19) | a partial sandbox: truncating a file isn't controlled. Each command asks first, saying why — `y` this one, `a` this conversation (still in the sandbox), `n` |
   | 3–4 (6.2) | the full sandbox, unasked, as on macOS. Device `ioctl`s aren't controlled |
   | 5 (6.10) | + device `ioctl`s controlled |
   | 6 (6.12) | + a command can't send a signal to a process outside its own (below 6, Claude's result says it could) |

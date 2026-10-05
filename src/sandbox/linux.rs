@@ -25,7 +25,8 @@ use super::{Availability, Denial, Policy};
 use crate::landlock::{self, Ruleset};
 
 /// Full support from this Landlock ABI (≈ Linux 6.2): it controls truncating (3) and moving across folders
-/// (2). Below it the sandbox goes as far as it can and every run asks (the user's decision, 2026-10-05).
+/// (2). At 2 the sandbox goes as far as it can and every run asks; at 1 there's none (the user's decisions,
+/// 2026-10-05).
 pub const FULL: u32 = 3;
 
 /// Reading, listing, running.
@@ -50,18 +51,16 @@ const DEVICES: [(&str, u64); 7] = [
 
 /// Whether this system can sandbox Claude's runs, from the kernel's Landlock ABI (`landlock::abi`) and
 /// whether seccomp has a filter for this architecture: full from `FULL`, partial (every run asks, saying
-/// why) at 1–2, none without Landlock.
+/// why) at 2, none at 1 (saying why) or without Landlock.
 pub fn availability(abi: io::Result<u32>, seccomp: bool) -> Availability {
     if !seccomp {
         return Availability::Missing("tarae has no seccomp filter for this architecture".into());
     }
     match abi {
         Ok(n) if n >= FULL => Availability::Ready,
-        Ok(1) => Availability::Partial(
-            "this kernel's Landlock (ABI 1) can't control truncating files, and refuses every move across \
-             folders"
-                .into(),
-        ),
+        Ok(n) if n < 2 => Availability::Missing(format!(
+            "this kernel's Landlock (ABI {n}) refuses every move across folders, so tarae doesn't use it"
+        )),
         Ok(n) => Availability::Partial(format!(
             "this kernel's Landlock (ABI {n}) can't control truncating files — a command could empty any \
              file of yours"
@@ -75,8 +74,8 @@ pub fn availability(abi: io::Result<u32>, seccomp: bool) -> Availability {
 }
 
 /// A policy made into Landlock's rules for this kernel's ABI — applied, with the seccomp filter, by the
-/// thread that starts each run (`spawn`). `audit`: the denials come from Landlock's audit log (`audit_readable`
-/// — seen working here); else why not, and they come from the run's own error lines. `serve`: what a run
+/// thread that starts each run (`spawn`). `audit`: the denials come from Landlock's audit log, read where
+/// `audit_readable` saw it work here; else why not, and they come from the run's own error lines. `serve`: what a run
 /// reaches by address is tarae's to decide (`supervisor.rs`) — or why it can't be here, and every socket but
 /// netlink is refused. `made`: what was made first, beside protected names, for the run to write in. `closed`:
 /// the project's folders a run can't make, remove or rename an entry in — each holds a protected name, or one
@@ -84,7 +83,7 @@ pub fn availability(abi: io::Result<u32>, seccomp: bool) -> Availability {
 #[derive(Clone)]
 pub struct Confine {
     pub abi: u32,
-    pub audit: Result<(), String>,
+    pub audit: Result<AuditSource, String>,
     pub serve: Result<(), String>,
     pub made: Arc<Made>,
     pub closed: Vec<PathBuf>,
@@ -321,7 +320,12 @@ fn closed_folders(root: &Path, found: &[PathBuf]) -> Vec<PathBuf> {
 /// `p` as Landlock's rules for ABI `abi`. Reads everywhere but home, and in it where `p.reads` says around what
 /// it keeps (none of that when reads aren't confined); writes as `writes_allow` has them; the devices. With
 /// `make_first`, what a first build makes beside a protected name is made before (`Made`) — and so granted.
-pub fn confine(p: &Policy, abi: u32, audit: Result<(), String>, make_first: bool) -> io::Result<Confine> {
+pub fn confine(
+    p: &Policy,
+    abi: u32,
+    audit: Result<AuditSource, String>,
+    make_first: bool,
+) -> io::Result<Confine> {
     let mut r = Ruleset::new(abi)?;
     let hidden: Vec<PathBuf> = p.reads.copies.hidden.iter().map(|(f, _)| f.clone()).collect();
     match &p.reads.home {
@@ -382,12 +386,12 @@ pub fn confine(p: &Policy, abi: u32, audit: Result<(), String>, make_first: bool
 /// `start` (a spawn) on a short-lived thread confined to `c` and under the seccomp filter — what it starts is
 /// in the sandbox, the caller isn't (`landlock::confined`). `serve`: the run's policy, when tarae decides
 /// what it reaches by address (`supervisor::serve`, started from here: an unconfined thread) — else the
-/// plain filter. `owner` hears the thread's id before (a watch reading Landlock's audit log tells its run's
-/// domain by it).
+/// plain filter. `owner` hears the thread before (a watch reading Landlock's audit log tells its run's domain
+/// by it).
 pub fn confined<T: Send>(
     c: &Confine,
     serve: Option<Arc<Policy>>,
-    owner: impl FnOnce(u32) + Send,
+    owner: impl FnOnce(Owner) + Send,
     start: impl FnOnce() -> io::Result<T> + Send,
 ) -> io::Result<T> {
     use crate::seccomp::Mode;
@@ -403,11 +407,26 @@ pub fn confined<T: Send>(
             if let (Some(to), Some(l)) = (to, listener) {
                 to.send(l).map_err(|_| io::Error::other("tarae's supervisor ended before its run"))?;
             }
-            // SAFETY: gettid has no preconditions.
-            owner(unsafe { libc::gettid() } as u32);
+            owner(Owner::this_thread());
             start()
         },
     )
+}
+
+/// The thread that confined a run, as Landlock's domain record names it: tarae's process (`pid=` is the
+/// process's id, not the thread's) and the thread's own name (`comm=`, one per confining thread —
+/// `landlock::thread_name`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Owner {
+    pub pid: u32,
+    pub comm: String,
+}
+
+impl Owner {
+    /// The calling thread.
+    pub fn this_thread() -> Owner {
+        Owner { pid: std::process::id(), comm: landlock::comm().unwrap_or_default() }
+    }
 }
 
 /// What the report says of what was made first (`Made`) — nothing when nothing was.
@@ -455,28 +474,35 @@ pub enum AuditSource {
 }
 
 impl AuditSource {
-    /// The command that prints its records as they come (from its end).
+    /// Where it is, in a few words, for a run's report.
+    pub fn said(&self) -> &'static str {
+        match self {
+            AuditSource::Journal => "the journal",
+            AuditSource::Auditd(_) => "auditd's log",
+        }
+    }
+
+    /// The command that prints its records as they come, from now — where its end is as this is called, not
+    /// when the command gets to open it: a domain's record is written once, with its first denial, and a
+    /// run (or the probe's thread) can deny before its reader has started (the user's VM: the probe missed
+    /// its own). The journal from this second on (a record of the second before can come too — told apart
+    /// by its domain's record like any other); auditd's log from its length now (`tail -c +N -F`, which
+    /// follows it through a rotation too).
     pub fn stream(&self) -> std::process::Command {
         match self {
             AuditSource::Journal => {
                 let mut c = std::process::Command::new("journalctl");
-                let args = [
-                    "-f",
-                    "-n",
-                    "0",
-                    "-q",
-                    "-o",
-                    "cat",
-                    "--no-pager",
-                    "_TRANSPORT=kernel",
-                    "_TRANSPORT=audit",
-                ];
-                c.args(args);
+                let now =
+                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+                c.args(["-f", "-n", "all", "-q", "-o", "cat", "--no-pager"])
+                    .arg(format!("--since=@{}", now.as_secs()))
+                    .args(["_TRANSPORT=kernel", "_TRANSPORT=audit"]);
                 c
             }
             AuditSource::Auditd(log) => {
+                let len = std::fs::metadata(log).map(|m| m.len()).unwrap_or(0);
                 let mut c = std::process::Command::new("tail");
-                c.args(["-n", "0", "-F"]).arg(log);
+                c.args(["-c", &format!("+{}", len + 1), "-F"]).arg(log);
                 c
             }
         }
@@ -517,20 +543,17 @@ fn auditd_log() -> Option<Result<PathBuf, String>> {
     })
 }
 
-/// Where this tarae reads Landlock's records (`audit_readable` finds it; the journal until then).
-static AUDIT_SOURCE: std::sync::OnceLock<AuditSource> = std::sync::OnceLock::new();
-
-/// Whether a run's denials come from Landlock's audit records here — Err why not (said with the result): below
+/// Where a run's denials come from Landlock's audit records here — Err why not (said with the result): below
 /// ABI 7 none are made; they must be readable where they go (`audit_source`: auditd's log when it runs, else
 /// the journal); and the kernel's audit must be on (`auditd`, or `audit=1` at boot) — off, as on a stock
 /// Ubuntu 24.04, Landlock emits nothing, which no setting says: the result said "blocked nothing" for two real
 /// denials (the user, kernel 7.0). So it's tried for real there (`audit_probe`). Blocks up to `AUDIT_PROBE`
 /// (a worker's), once.
-pub fn audit_readable(abi: u32) -> Result<(), String> {
+pub fn audit_readable(abi: u32) -> Result<AuditSource, String> {
     if abi < 7 {
         return Err(format!("this kernel's Landlock (ABI {abi}) doesn't log what it refuses"));
     }
-    static FOUND: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+    static FOUND: std::sync::OnceLock<Result<AuditSource, String>> = std::sync::OnceLock::new();
     FOUND
         .get_or_init(|| {
             let journal = std::process::Command::new("journalctl")
@@ -540,9 +563,7 @@ pub fn audit_readable(abi: u32) -> Result<(), String> {
                 .output()
                 .is_ok_and(|o| o.status.success() && !o.stdout.is_empty());
             let source = audit_source(auditd_log(), journal)?;
-            let found = audit_probe(abi, |_, _| source.stream(), AUDIT_PROBE);
-            let _ = AUDIT_SOURCE.set(source);
-            found
+            audit_probe(abi, |_, _| source.stream(), AUDIT_PROBE).map(|()| source)
         })
         .clone()
 }
@@ -550,13 +571,15 @@ pub fn audit_readable(abi: u32) -> Result<(), String> {
 /// How long `audit_probe` waits for its record.
 const AUDIT_PROBE: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// A denial of a throwaway thread's own — confined to nothing, it tries to make a file in a temp folder of the
-/// probe's, again every 100 ms — and its record looked for in `stream` (made with that thread's id and that
-/// folder: a refused new file's record names its folder, measured) for up to `wait`. Ok: it came, and `Audit`
-/// tells it as that thread's run's; Err why not.
+/// A denial of a throwaway thread's own — named as a run's confining thread is (`landlock::thread_name`),
+/// confined to nothing, it tries to make a file in a temp folder of the probe's, again every 100 ms — and its
+/// record looked for in `stream` (made with that thread's process and name, and that folder: a refused new
+/// file's record names its folder, measured) for up to `wait`. The reader is asked for before the thread
+/// starts: its domain's record comes once, with its first denial (the user's VM: a probe whose thread denied
+/// first missed it). Ok: it came, and `Audit` tells it as that thread's run's; Err why not.
 fn audit_probe(
     abi: u32,
-    stream: impl FnOnce(u32, &Path) -> std::process::Command,
+    stream: impl FnOnce(&Owner, &Path) -> std::process::Command,
     wait: std::time::Duration,
 ) -> Result<(), String> {
     use std::sync::mpsc::{RecvTimeoutError, channel};
@@ -565,15 +588,28 @@ fn audit_probe(
     let folder = std::env::temp_dir().join(format!("tarae-audit-probe-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&folder).map_err(|e| format!("{}: {e}", folder.display()))?;
     let name = folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let owner = Owner { pid: std::process::id(), comm: landlock::thread_name() };
+    // Its records' reader first, from now: the thread's domain record comes once, with its first denial
+    let mut cmd = stream(&owner, &folder);
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let spawned = cmd.spawn();
+    let mut child = match spawned {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&folder);
+            return Err(format!("tarae can't read the kernel's log here ({e})"));
+        }
+    };
     // The thread that's denied: confined to nothing (it ends with the probe)
-    let ((tid_tx, tid_rx), (stop, stopped)) = (channel(), channel::<()>());
+    let ((ready, confined), (stop, stopped)) = (channel(), channel::<()>());
     let tried = folder.join("x");
-    std::thread::spawn(move || {
+    let spawned = std::thread::Builder::new().name(owner.comm.clone()).spawn(move || {
         if Ruleset::new(abi).and_then(|r| r.apply()).is_err() {
             return;
         }
-        // SAFETY: gettid has no preconditions.
-        let _ = tid_tx.send(unsafe { libc::gettid() } as u32);
+        let _ = ready.send(Owner::this_thread());
         loop {
             let _ = std::fs::OpenOptions::new().write(true).create_new(true).open(&tried);
             if stopped.recv_timeout(std::time::Duration::from_millis(100)) != Err(RecvTimeoutError::Timeout) {
@@ -581,13 +617,18 @@ fn audit_probe(
             }
         }
     });
-    let tid =
-        tid_rx.recv_timeout(std::time::Duration::from_secs(1)).map_err(|_| "Landlock confined no thread")?;
-    let mut cmd = stream(tid, &folder);
-    cmd.stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
-    let mut child = cmd.spawn().map_err(|e| format!("tarae can't read the kernel's log here ({e})"))?;
+    let confined = spawned.ok().and_then(|_| confined.recv_timeout(std::time::Duration::from_secs(1)).ok());
+    if confined.as_ref() != Some(&owner) {
+        let _ = child.kill();
+        std::thread::spawn(move || child.wait());
+        let _ = std::fs::remove_dir_all(&folder);
+        return Err(match confined {
+            None => "Landlock confined no thread".into(),
+            Some(o) => {
+                format!("the probe's thread is named {:?} to the kernel, not {:?}", o.comm, owner.comm)
+            }
+        });
+    }
     let (lines_tx, lines) = channel::<String>();
     let out = child.stdout.take();
     std::thread::spawn(move || {
@@ -598,7 +639,7 @@ fn audit_probe(
             }
         }
     });
-    let (mut audit, mut seen, mut told) = (Audit { owner: Some(tid), ..Default::default() }, false, false);
+    let (mut audit, mut seen, mut told) = (Audit { owner: Some(owner), ..Default::default() }, false, false);
     let end = std::time::Instant::now() + wait;
     while !told {
         let Ok(line) = lines.recv_timeout(end.saturating_duration_since(std::time::Instant::now())) else {
@@ -626,12 +667,6 @@ fn audit_probe(
     }
 }
 
-/// The command a watch reads Landlock's audit records from, as they come: where `audit_readable` found them
-/// (auditd's log, or the journal).
-pub fn audit_stream() -> std::process::Command {
-    AUDIT_SOURCE.get().unwrap_or(&AuditSource::Journal).stream()
-}
-
 /// A value in an audit record's `key=value` words: quoted, or hex (how audit writes a string with spaces).
 fn audit_value(line: &str, key: &str) -> Option<String> {
     let at = line.split(' ').position(|w| w.starts_with(&format!("{key}=")))?;
@@ -651,10 +686,11 @@ fn audit_value(line: &str, key: &str) -> Option<String> {
 }
 
 /// What one run's Landlock audit records say, read line by line: its domain is the one whose record names
-/// the thread that confined it (`owner`); access records of a domain not told yet wait for it.
+/// the thread that confined it (`owner`: tarae's process and the thread's name); access records of a domain
+/// not told yet wait for it.
 #[derive(Debug, Default)]
 pub struct Audit {
-    pub owner: Option<u32>,
+    pub owner: Option<Owner>,
     ours: Vec<String>,
     others: Vec<String>,
     waiting: Vec<(String, Denial)>,
@@ -666,12 +702,14 @@ const AUDIT_WAITING: usize = 64;
 impl Audit {
     /// The denials `line` adds: an access record of the run's domain (`LANDLOCK_ACCESS`: `domain=… blockers=…
     /// path=…`), or those waiting for a domain record that turned out the run's (`LANDLOCK_DOMAIN`:
-    /// `domain=… status=allocated … pid=…`). Said in the profile's words (`file-write*`, `file-read-data`).
+    /// `domain=… status=allocated … pid=… comm=…`). Said in the profile's words (`file-write*`,
+    /// `file-read-data`).
     pub fn line(&mut self, line: &str) -> Vec<Denial> {
         let Some(domain) = audit_value(line, "domain") else { return Vec::new() };
         if let Some(blockers) = audit_value(line, "blockers") {
             let target = audit_value(line, "path").unwrap_or_default();
-            let d = Denial { process: "the run".into(), op: audit_op(&blockers).into(), target };
+            let d =
+                Denial { process: super::SEEN_IN_AUDIT_LOG.into(), op: audit_op(&blockers).into(), target };
             if self.ours.contains(&domain) {
                 return vec![d];
             }
@@ -684,7 +722,10 @@ impl Audit {
         if audit_value(line, "status").is_none() || pid.is_none() {
             return Vec::new();
         }
-        let mine = self.owner.is_some() && pid == self.owner;
+        let comm = audit_value(line, "comm");
+        let mine = self.owner.as_ref().is_some_and(|o| {
+            !o.comm.is_empty() && pid == Some(o.pid) && comm.as_deref() == Some(o.comm.as_str())
+        });
         let (keep, rest): (Vec<_>, Vec<_>) =
             std::mem::take(&mut self.waiting).into_iter().partition(|(d, _)| *d == domain);
         self.waiting = rest;
@@ -725,13 +766,14 @@ mod tests {
     use super::*;
     use crate::sandbox::{Env, Guard, Reads, RunDir};
 
-    /// The kernel's ABI, or None after saying the test skips itself (no Landlock here).
+    /// The kernel's ABI, or None after saying the test skips itself (no Landlock here, or ABI 1 — tarae
+    /// doesn't use it).
     fn kernel_abi(test: &str) -> Option<u32> {
         match landlock::abi() {
-            Ok(n) => Some(n),
-            Err(e) => {
+            Ok(n) if n >= 2 => Some(n),
+            got => {
                 let line = format!(
-                    "{}sandbox::linux::tests::{test} — this kernel has no Landlock ({e})\n",
+                    "{}sandbox::linux::tests::{test} — needs Landlock ABI 2, this kernel: {got:?}\n",
                     crate::test_results::SELF_SKIP
                 );
                 let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
@@ -740,22 +782,25 @@ mod tests {
         }
     }
 
-    /// The floor: full from ABI 3, partial (saying why) at 1–2, none without Landlock or a seccomp filter.
+    /// The tiers (the user's, 2026-10-05): full from ABI 3; partial (saying why) at 2; none at 1 — saying why
+    /// — as without Landlock or a seccomp filter.
     #[test]
     fn availability_follows_the_kernels_abi() {
         let err = |n| Err(io::Error::from_raw_os_error(n));
         assert_eq!(availability(Ok(3), true), Availability::Ready);
         assert_eq!(availability(Ok(8), true), Availability::Ready);
-        let partial = |a| match availability(Ok(a), true) {
-            Availability::Partial(why) => why,
-            other => panic!("ABI {a}: {other:?}"),
-        };
-        assert!(partial(2).contains("can't control truncating files"), "{}", partial(2));
-        assert!(partial(1).contains("refuses every move across folders"), "{}", partial(1));
+        match availability(Ok(2), true) {
+            Availability::Partial(why) => assert!(why.contains("can't control truncating files"), "{why}"),
+            other => panic!("ABI 2: {other:?}"),
+        }
         let missing = |a: io::Result<u32>, seccomp| match availability(a, seccomp) {
             Availability::Missing(why) => why,
             other => panic!("{other:?}"),
         };
+        assert_eq!(
+            missing(Ok(1), true),
+            "this kernel's Landlock (ABI 1) refuses every move across folders, so tarae doesn't use it"
+        );
         assert!(missing(err(libc::ENOSYS), true).contains("no Landlock (it came with Linux 5.13)"));
         assert!(missing(err(libc::EOPNOTSUPP), true).contains("turned off"));
         assert!(missing(Ok(8), false).contains("seccomp"));
@@ -1122,8 +1167,10 @@ mod tests {
 
     /// Whether Landlock's records come is tried for real: a denial of a thread's own, its record looked for. A
     /// stand-in for `journalctl`: silent (the kernel's audit off — a stock Ubuntu's) is said so, within the
-    /// wait; the probe's own record, its domain naming the thread that confined it, is the log working; one
-    /// whose domain names another (the record's `pid=` not the confining thread's) can't be told as a run's.
+    /// wait; the probe's own record is the log working — its domain named as the kernel names it: tarae's
+    /// process id (`pid=`, the process's, not the thread's) and the confining thread's name (`comm=`); one
+    /// naming another thread of tarae's (the name every confining thread had once — the user's VM), or the
+    /// thread's name in another process, can't be told as a run's.
     #[test]
     fn the_audit_log_is_tried_for_real() {
         let Some(abi) = kernel_abi("the_audit_log_is_tried_for_real") else { return };
@@ -1133,23 +1180,35 @@ mod tests {
             c
         };
         // (auditd's form, as its log has them: the new file refused named by its folder, `UID=` glued on)
-        let records = |pid: String, path: &Path| {
+        let records = |pid: u32, comm: &str, path: &Path| {
             format!(
                 "echo 'type=UNKNOWN[1424] msg=audit(1:2): domain=7a status=allocated mode=enforcing pid={pid} \
-                 uid=1001 exe=\"/t/tarae\" comm=\"tarae-landlock\"UID=\"wq\"'; \
+                 uid=1001 exe=\"/t/tarae\" comm=\"{comm}\"UID=\"wq\"'; \
                  echo 'type=UNKNOWN[1423] msg=audit(1:2): domain=7a blockers=fs.make_reg path=\"{}\" dev=\"sda1\" \
                  ino=1'; exec sleep 5",
                 path.display()
             )
         };
+        // (the thread's name the probe gives: the kernel's too, or the probe says so)
+        let pid = std::process::id();
+        assert_eq!(pid, Owner::this_thread().pid);
         let wait = std::time::Duration::from_millis(500);
         let t = std::time::Instant::now();
         let off = audit_probe(abi, |_, _| sh("exec sleep 5".into()), wait);
         assert_eq!(off, Err("kernel audit is off (no auditd or audit=1)".into()));
         assert!(t.elapsed() < std::time::Duration::from_secs(2), "{:?}: within its wait", t.elapsed());
-        assert_eq!(audit_probe(abi, |tid, path| sh(records(tid.to_string(), path)), wait), Ok(()));
-        let other = audit_probe(abi, |_, path| sh(records("1".into(), path)), wait);
-        assert!(other.as_ref().is_err_and(|w| w.contains("don't name the thread")), "{other:?}");
+        assert_eq!(audit_probe(abi, |o, path| sh(records(pid, &o.comm, path)), wait), Ok(()));
+        for (pid, name) in [(pid, "tarae-landlock".to_string()), (1, String::new())] {
+            let other = audit_probe(
+                abi,
+                |o, path| sh(records(pid, if name.is_empty() { &o.comm } else { &name }, path)),
+                wait,
+            );
+            assert!(
+                other.as_ref().is_err_and(|w| w.contains("don't name the thread")),
+                "{pid} {name}: {other:?}"
+            );
+        }
     }
 
     /// What a Linux run's output says the sandbox refused, though the policy lets it write there: making,
@@ -1163,7 +1222,7 @@ mod tests {
         let s = Scratch::new("said");
         let mut p = s.policy();
         if let Some(Ok(c)) = &mut p.confine {
-            (c.abi, c.audit) = (6, Ok(()));
+            (c.abi, c.audit) = (6, Ok(AuditSource::Journal));
         }
         p.watch = Some(crate::sandbox::Watch::quiet("t."));
         let lib = s.root.join("sub/lib.rs");
@@ -1193,7 +1252,7 @@ mod tests {
         let r = r.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(r.contains("The sandbox blocked 3 things"), "{r}");
         assert!(
-            r.contains("(Read from its own error lines") && !r.contains("from Landlock's audit log,"),
+            r.contains("(Read from its own error lines") && !r.contains("(Read from Landlock's audit log"),
             "{r}"
         );
         assert!(r.contains("make it in a folder without one") && r.contains("can't signal"), "{r}");
@@ -1203,6 +1262,46 @@ mod tests {
             c.abi = 5;
         }
         assert_eq!(plain(&p).len(), 2);
+    }
+
+    /// Where a run's refusals were read is said beside them, each source in its own words: Landlock's audit
+    /// log — auditd's log or the journal, wherever it was found — or the run's own error lines, and why.
+    #[test]
+    fn the_report_says_where_it_read_the_refusals() {
+        let Some(_) = kernel_abi("the_report_says_where_it_read_the_refusals") else { return };
+        let s = Scratch::new("read-from");
+        let report = |audit, seen: &[Denial], out: &[(bool, String)]| {
+            let mut p = s.policy();
+            if let Some(Ok(c)) = &mut p.confine {
+                c.audit = audit;
+            }
+            let w = crate::sandbox::Watch::quiet("t.");
+            for d in seen {
+                w.record(d.clone());
+            }
+            p.watch = Some(w);
+            let r = Guard::In(Box::new(p)).report(out);
+            r.split_whitespace().collect::<Vec<_>>().join(" ")
+        };
+        let kept = s.root.join("Cargo.toml").display().to_string();
+        let logged = Denial { process: "the run".into(), op: "file-write*".into(), target: kept.clone() };
+        let auditd = AuditSource::Auditd("/var/log/audit/audit.log".into());
+        for (source, said) in [(auditd, "auditd's log"), (AuditSource::Journal, "the journal")] {
+            let r = report(Ok(source), std::slice::from_ref(&logged), &[]);
+            assert!(r.contains(&format!("(Read from Landlock's audit log — {said} here.)")), "{r}");
+            assert!(!r.contains("error lines"), "{r}");
+        }
+        // From its own error lines: why — and not the log
+        let out = [(true, format!("touch: cannot touch '{kept}': Permission denied"))];
+        let r = report(Err("kernel audit is off (no auditd or audit=1)".into()), &[], &out);
+        assert!(
+            r.contains(
+                "(Read from its own error lines — kernel audit is off (no auditd or audit=1), judged by the \
+                 sandbox's rules.)"
+            ),
+            "{r}"
+        );
+        assert!(!r.contains("Read from Landlock's audit log"), "{r}");
     }
 
     /// Without an audit log, what a run refused is read from its error lines: Landlock's "Permission
@@ -1232,18 +1331,18 @@ mod tests {
                 "audit: type=1423 audit(1729738800.268:30): domain={d} blockers={b} path={path} dev=\"vda2\" ino=9"
             )
         };
-        let domain = |d: &str, pid: u32| {
+        let domain = |d: &str, comm: &str| {
             format!(
-                "audit: type=1424 audit(1729738800.268:30): domain={d} status=allocated mode=enforcing pid={pid} \
-                 uid=0 exe=\"/usr/bin/tarae\" comm=\"tarae-landlock\""
+                "audit: type=1424 audit(1729738800.268:30): domain={d} status=allocated mode=enforcing pid=300 \
+                 uid=0 exe=\"/usr/bin/tarae\" comm=\"{comm}\""
             )
         };
-        let mut a = Audit { owner: Some(300), ..Default::default() };
+        let mut a = Audit { owner: Some(Owner { pid: 300, comm: "tl-1".into() }), ..Default::default() };
         assert!(
             a.line(&access("1a", "fs.write_file", "\"/w/p/Cargo.toml\"")).is_empty(),
             "waits for its domain"
         );
-        let d = a.line(&domain("1a", 300));
+        let d = a.line(&domain("1a", "tl-1"));
         assert_eq!(d.len(), 1);
         assert_eq!((d[0].op.as_str(), d[0].target.as_str()), ("file-write*", "/w/p/Cargo.toml"));
         let d = a.line(&access("1a", "fs.read_file", "2F686F6D652F752F612062"));
@@ -1252,41 +1351,232 @@ mod tests {
             a.line(&access("1a", "scope.signal", "\"\"")).first().map(|d| d.op.clone()),
             Some("signal".into())
         );
-        // Another run's domain
+        // Another run's domain: tarae's process, another thread's name
         assert!(a.line(&access("2b", "fs.make_reg", "\"/x\"")).is_empty());
-        assert!(a.line(&domain("2b", 301)).is_empty(), "not this run's");
+        assert!(a.line(&domain("2b", "tl-11")).is_empty(), "not this run's");
         assert!(a.line(&access("2b", "fs.make_reg", "\"/x\"")).is_empty());
         assert!(a.line("audit: type=1400 apparmor=\"DENIED\"").is_empty());
     }
 
-    /// auditd's records, verbatim from its log on a kernel 7.0 (the user's VM): its enrichment glued on
-    /// (`comm="…"UID="wq"`, no space) changes nothing; a refused new file names its folder (`file-make-in`),
-    /// whichever record comes first. Where they're read: auditd's log when it runs (why not, when this user
-    /// can't read it), else the journal — followed from its end.
+    /// auditd's records, verbatim from its log on a kernel 7.0 (the user's VM): the domain is told by tarae's
+    /// process id (`pid=`, the process's — not the confining thread's) and the thread's name (`comm=`), its
+    /// enrichment glued on (`comm="…"UID="wq"`, no space); another thread of the same tarae, or the name in
+    /// another process, isn't the run. A refused new file names its folder (`file-make-in`), whichever record
+    /// comes first. Where they're read: auditd's log when it runs (why not, when this user can't read it),
+    /// else the journal — followed from its end.
     #[test]
     fn auditds_records_are_read_where_they_go() {
         let domain = r#"type=UNKNOWN[1424] msg=audit(1791187720.409:280): domain=107163519 status=allocated mode=enforcing pid=127026 uid=1001 exe="/home/wq/tarae/target-ll/release/tarae" comm="tarae-landlock"UID="wq""#;
         let access = r#"type=UNKNOWN[1423] msg=audit(1791187720.409:280): domain=107163519 blockers=fs.make_reg path="/home/wq/proj" dev="sda1" ino=264783"#;
         let made =
             Denial { process: "the run".into(), op: "file-make-in".into(), target: "/home/wq/proj".into() };
-        let mut a = Audit { owner: Some(127026), ..Default::default() };
+        let owned = |pid: u32, comm: &str| Audit {
+            owner: Some(Owner { pid, comm: comm.into() }),
+            ..Default::default()
+        };
+        let mut a = owned(127026, "tarae-landlock");
         assert!(a.line(domain).is_empty());
         assert_eq!(a.line(access), std::slice::from_ref(&made));
-        let mut a = Audit { owner: Some(127026), ..Default::default() };
+        let mut a = owned(127026, "tarae-landlock");
         assert!(a.line(access).is_empty(), "waits for its domain");
-        assert_eq!(a.line(domain), [made]);
+        assert_eq!(a.line(domain), std::slice::from_ref(&made));
+        for (pid, comm) in [(127026, "tl-3"), (1, "tarae-landlock")] {
+            let mut a = owned(pid, comm);
+            assert!(a.line(access).is_empty() && a.line(domain).is_empty(), "{pid} {comm}: not the run");
+            assert!(a.line(access).is_empty(), "{pid} {comm}: nor what comes after");
+        }
         let log = PathBuf::from("/var/log/audit/audit.log");
         let unreadable = "audit goes to auditd's log, which this user can't read".to_string();
         assert_eq!(audit_source(Some(Ok(log.clone())), true), Ok(AuditSource::Auditd(log.clone())));
         assert_eq!(audit_source(Some(Err(unreadable.clone())), true), Err(unreadable));
         assert_eq!(audit_source(None, true), Ok(AuditSource::Journal));
         assert!(audit_source(None, false).is_err_and(|w| w.contains("can't read the kernel's log")));
-        let tail = AuditSource::Auditd(log).stream();
-        let args: Vec<_> = tail.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        // (followed from where it ends as the reader is asked for: auditd's log from its length then, the
+        // journal from that second)
+        let words = |c: &std::process::Command| {
+            let args: Vec<_> = c.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+            (c.get_program().to_string_lossy().into_owned(), args.join(" "))
+        };
+        let log = auditd_log("args");
+        let len = std::fs::metadata(&log).unwrap().len();
         assert_eq!(
-            (tail.get_program().to_string_lossy(), args.join(" ")),
-            ("tail".into(), "-n 0 -F /var/log/audit/audit.log".into())
+            words(&AuditSource::Auditd(log.clone()).stream()),
+            ("tail".into(), format!("-c +{} -F {}", len + 1, log.display()))
         );
+        std::fs::remove_dir_all(log.parent().unwrap()).ok();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let (program, args) = words(&AuditSource::Journal.stream());
+        assert_eq!(program, "journalctl");
+        assert!(
+            args.starts_with("-f -n all ") && args.ends_with("_TRANSPORT=kernel _TRANSPORT=audit"),
+            "{args}"
+        );
+        let since: u64 =
+            args.split("--since=@").nth(1).and_then(|s| s.split(' ').next()?.parse().ok()).unwrap();
+        assert!(since.abs_diff(now) <= 1, "{since} {now}");
+    }
+
+    /// A stand-in for auditd's log: a file of its own, with a line already in it.
+    fn auditd_log(test: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("tarae-auditd-{}-{test}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("audit.log");
+        std::fs::write(&log, "type=DAEMON_START msg=audit(1791193000.000:1): op=start ver=3.1.2\n").unwrap();
+        log
+    }
+
+    /// `lines` appended to `log`, as auditd writes them.
+    fn append(log: &Path, lines: &[String]) {
+        let mut f = std::fs::OpenOptions::new().append(true).open(log).unwrap();
+        io::Write::write_all(&mut f, lines.iter().map(|l| format!("{l}\n")).collect::<String>().as_bytes())
+            .unwrap();
+    }
+
+    /// The user's VM's records (verbatim but for the process, the thread's name and the path): a domain's
+    /// record, one of its access records, its end.
+    fn vm_records(pid: u32, comm: &str, path: &Path) -> [String; 3] {
+        [
+            format!(
+                "type=UNKNOWN[1424] msg=audit(1791193258.514:942): domain=107163549 status=allocated \
+                 mode=enforcing pid={pid} uid=1001 exe=\"/home/wq/tarae/target-ll/release/tarae\" \
+                 comm=\"{comm}\"UID=\"wq\""
+            ),
+            format!(
+                "type=UNKNOWN[1423] msg=audit(1791193258.614:943): domain=107163549 blockers=fs.make_reg \
+                 path=\"{}\" dev=\"sda1\" ino=266488",
+                path.display()
+            ),
+            "type=UNKNOWN[1424] msg=audit(1791193259.032:947): domain=107163549 status=deallocated denials=5"
+                .to_string(),
+        ]
+    }
+
+    /// The probe reading auditd's log as tarae does (`AuditSource::Auditd`), the kernel's records written as
+    /// on the user's VM: the domain's comes once, with the first denial — which can be before the reader has
+    /// the file open — then an access record at each retry. Both orders of the first two: the probe's there
+    /// (domain first) and a run's (its access record first, the same instant). The reader is asked for before
+    /// the thread that's denied is there. (What said "don't name the thread" on the VM, the records right.)
+    #[test]
+    fn the_audit_probe_reads_records_logged_before_its_reader_opens() {
+        let Some(abi) = kernel_abi("the_audit_probe_reads_records_logged_before_its_reader_opens") else {
+            return;
+        };
+        let threads = || -> Vec<String> {
+            let tasks = std::fs::read_dir("/proc/self/task").unwrap().flatten();
+            tasks
+                .filter_map(|t| std::fs::read_to_string(t.path().join("comm")).ok())
+                .map(|c| c.trim_end().into())
+                .collect()
+        };
+        for domain_first in [true, false] {
+            let log = auditd_log(&format!("probe-{domain_first}"));
+            let source = AuditSource::Auditd(log.clone());
+            let found = audit_probe(
+                abi,
+                |o, folder| {
+                    assert!(!threads().contains(&o.comm), "{} is there already: it may have denied", o.comm);
+                    let stream = source.stream();
+                    let [domain, access, _] = vm_records(o.pid, &o.comm, folder);
+                    // (the first denial's records: before the reader starts)
+                    let first = match domain_first {
+                        true => [domain, access.clone()],
+                        false => [access.clone(), domain],
+                    };
+                    append(&log, &first);
+                    // (each retry's, after)
+                    let (log, access) = (log.clone(), access);
+                    std::thread::spawn(move || {
+                        for _ in 0..4 {
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                            append(&log, std::slice::from_ref(&access));
+                        }
+                    });
+                    stream
+                },
+                std::time::Duration::from_secs(2),
+            );
+            assert_eq!(found, Ok(()), "domain record first: {domain_first}");
+            std::fs::remove_dir_all(log.parent().unwrap()).ok();
+        }
+    }
+
+    /// Whether the watch's reader (`tail -F` on auditd's log) has `log` open within `within` — the file among
+    /// its descriptors.
+    fn opened(w: &crate::sandbox::Watch, log: &Path, within: std::time::Duration) -> bool {
+        let end = std::time::Instant::now() + within;
+        while std::time::Instant::now() < end {
+            let fds = w.pid().and_then(|p| std::fs::read_dir(format!("/proc/{p}/fd")).ok());
+            if fds
+                .into_iter()
+                .flatten()
+                .flatten()
+                .any(|e| std::fs::read_link(e.path()).is_ok_and(|t| t == log))
+            {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        false
+    }
+
+    /// The run's denial, `within` — or what the watch had.
+    fn the_runs(w: &crate::sandbox::Watch, within: std::time::Duration) -> Vec<Denial> {
+        let end = std::time::Instant::now() + within;
+        while w.blocked().seen.is_empty() && std::time::Instant::now() < end {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        w.blocked().seen
+    }
+
+    /// A run's watch on auditd's log, its reader open before the records come (as the user asked: lines
+    /// appended after it opened), in both orders — the run's on the VM (access first) and the other.
+    #[test]
+    fn a_watch_reads_records_logged_after_its_reader_opened() {
+        let made = Denial { process: "the run".into(), op: "file-make-in".into(), target: "/w/proj".into() };
+        for domain_first in [true, false] {
+            let log = std::fs::canonicalize(auditd_log(&format!("after-{domain_first}"))).unwrap();
+            let w = crate::sandbox::Watch::start_audit_from("t.", AuditSource::Auditd(log.clone()).stream());
+            w.owned_by(Owner { pid: 134330, comm: "tl-2".into() });
+            assert!(opened(&w, &log, std::time::Duration::from_secs(5)), "tail opened the log");
+            let [domain, access, end] = vm_records(134330, "tl-2", Path::new("/w/proj"));
+            append(&log, &if domain_first { [domain, access, end] } else { [access, domain, end] });
+            assert_eq!(
+                the_runs(&w, std::time::Duration::from_secs(5)),
+                std::slice::from_ref(&made),
+                "{domain_first}"
+            );
+            w.finish();
+            std::fs::remove_dir_all(log.parent().unwrap()).ok();
+        }
+    }
+
+    /// A run's watch on auditd's log: what's logged after the watch was asked for is its run's, though its
+    /// reader opens the file later (a run starting at once — the probe's case too).
+    #[test]
+    fn a_watch_reads_records_logged_before_its_reader_opens() {
+        let made = Denial { process: "the run".into(), op: "file-make-in".into(), target: "/w/proj".into() };
+        for domain_first in [true, false] {
+            let log = std::fs::canonicalize(auditd_log(&format!("before-{domain_first}"))).unwrap();
+            let stream = AuditSource::Auditd(log.clone()).stream();
+            let [domain, access, end] = vm_records(134330, "tl-2", Path::new("/w/proj"));
+            append(&log, &if domain_first { [domain, access, end] } else { [access, domain, end] });
+            // (the same command, held until the watch knows its run — as a real run's is before it starts)
+            let go = log.with_file_name("go");
+            let mut gated = std::process::Command::new("sh");
+            gated.args(["-c", "until [ -e \"$0\" ]; do sleep 0.01; done; exec \"$@\""]).arg(&go);
+            gated.arg(stream.get_program()).args(stream.get_args());
+            let w = crate::sandbox::Watch::start_audit_from("t.", gated);
+            w.owned_by(Owner { pid: 134330, comm: "tl-2".into() });
+            std::fs::write(&go, "").unwrap();
+            assert_eq!(
+                the_runs(&w, std::time::Duration::from_secs(2)),
+                std::slice::from_ref(&made),
+                "{domain_first}"
+            );
+            w.finish();
+            std::fs::remove_dir_all(log.parent().unwrap()).ok();
+        }
     }
 
     /// A refused new file's record names only its folder: the file the output names there takes its place
@@ -1345,13 +1635,14 @@ mod tests {
         let mut stream = std::process::Command::new("sh");
         stream.arg("-c").arg(format!(
             "until [ -e '{}' ]; do sleep 0.01; done; \
-             echo 'audit: type=1424 audit(1:2): domain=9f status=allocated mode=enforcing pid=4242 uid=1'; \
+             echo 'audit: type=1424 audit(1:2): domain=9f status=allocated mode=enforcing pid=4242 uid=1 \
+             exe=\"/t/tarae\" comm=\"tl-9\"'; \
              echo 'audit: type=1423 audit(1:2): domain=9f blockers=fs.write_file path=\"/w/p/build.rs\" ino=1'; \
              exec sleep 30",
             go.display()
         ));
         let w = crate::sandbox::Watch::start_audit_from("t.", stream);
-        w.owned_by(4242);
+        w.owned_by(Owner { pid: 4242, comm: "tl-9".into() });
         std::fs::write(&go, "").unwrap();
         let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while w.blocked().seen.is_empty() && std::time::Instant::now() < end {

@@ -859,11 +859,13 @@ mod tests {
         assert_eq!(open_real(&s.base.join("link"), true).err(), Some(libc::ELOOP));
     }
 
-    /// Whether tarae serves its runs here — else the test says it skips itself: no Landlock, or no
-    /// supervisor (inside another one's filter, a container's filter refusing `pidfd_getfd` …).
+    /// Whether tarae serves its runs here — else the test says it skips itself: no Landlock (or ABI 1, which
+    /// tarae doesn't use), or no supervisor (inside another one's filter, a container's filter refusing
+    /// `pidfd_getfd` …).
     fn served(test: &str) -> bool {
         let why = match (crate::landlock::abi(), unavailable()) {
-            (Ok(_), None) => return true,
+            (Ok(n), None) if n >= 2 => return true,
+            (Ok(n), None) => format!("Landlock ABI {n}, which tarae doesn't use"),
             (Err(e), _) => format!("no Landlock ({e})"),
             (_, Some(why)) => why,
         };
