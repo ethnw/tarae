@@ -118,6 +118,9 @@ pub struct LlmConfig {
     /// Chat: Claude's `screen` tool shows the terminal panel's contents too (`seeing.rs`) — off, its rows go
     /// blank.
     pub screen_terminal: bool,
+    /// Chat: minutes a run of Claude's prints nothing at next to no CPU before a card asks whether it's
+    /// stuck (`stuck.rs`; 0 = never).
+    pub stuck_after: u64,
 }
 
 impl Default for LlmConfig {
@@ -141,6 +144,7 @@ impl Default for LlmConfig {
             sandbox_ports: Vec::new(),
             sandbox_localhost: false,
             screen_terminal: true,
+            stuck_after: 10,
         }
     }
 }

@@ -302,6 +302,118 @@ pub fn cwd(pid: u32) -> Option<PathBuf> {
     std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
 }
 
+/// One thread of a process, as an unprivileged reader is told it: what it waits in (`stuck.rs`, #181).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Thread {
+    pub name: String,
+    /// Its state in words: `sleeping`, `running`, `in uninterruptible wait` …
+    pub state: String,
+    /// The kernel function it sleeps in (Linux's `wchan`) — None where it isn't told.
+    pub wchan: Option<String>,
+    /// CPU time so far (user + system).
+    pub cpu: Duration,
+}
+
+/// The most threads read of one process.
+const THREADS_MAX: usize = 256;
+
+/// A thread's `/proc/<pid>/task/<tid>/stat` and `wchan` read (`hz`: clock ticks a second).
+#[cfg(any(target_os = "linux", test))]
+fn parse_thread(stat: &str, wchan: Option<&str>, hz: u64) -> Option<Thread> {
+    let name = stat.get(stat.find('(')? + 1..stat.rfind(')')?)?.to_string();
+    let f: Vec<&str> = stat.get(stat.rfind(')')? + 1..)?.split_whitespace().collect();
+    let num = |i: usize| f.get(i).and_then(|v| v.parse::<u64>().ok());
+    let state = match *f.first()? {
+        "R" => "running",
+        "S" => "sleeping",
+        "D" => "in uninterruptible wait",
+        "T" => "stopped",
+        "t" => "stopped by a tracer",
+        "Z" => "ended",
+        "I" => "idle",
+        "X" => "dead",
+        other => other,
+    };
+    let ticks = num(11)? + num(12)?;
+    Some(Thread {
+        name,
+        state: state.into(),
+        // (`0`: not sleeping, or the kernel hides its addresses — kptr_restrict)
+        wchan: wchan.map(str::trim).filter(|w| !w.is_empty() && *w != "0").map(str::to_string),
+        cpu: Duration::from_nanos(ticks.saturating_mul(1_000_000_000) / hz.max(1)),
+    })
+}
+
+/// Process `pid`'s threads, at most `THREADS_MAX` — empty when it's gone or not ours to read.
+#[cfg(target_os = "linux")]
+pub fn threads(pid: u32) -> Vec<Thread> {
+    // SAFETY: sysconf only reads a constant.
+    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u64;
+    let dir = PathBuf::from(format!("/proc/{pid}/task"));
+    let mut tids: Vec<u64> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().to_str()?.parse().ok())
+        .collect();
+    tids.sort_unstable();
+    tids.iter()
+        .take(THREADS_MAX)
+        .filter_map(|tid| {
+            let t = dir.join(tid.to_string());
+            let stat = std::fs::read_to_string(t.join("stat")).ok()?;
+            parse_thread(&stat, std::fs::read_to_string(t.join("wchan")).ok().as_deref(), hz)
+        })
+        .collect()
+}
+
+/// Process `pid`'s threads, at most `THREADS_MAX` — empty when it's gone or not ours to read. macOS tells
+/// an unprivileged reader each thread's state and CPU time, not where it waits.
+#[cfg(target_os = "macos")]
+pub fn threads(pid: u32) -> Vec<Thread> {
+    // (libproc's flavour listing a process's thread handles — not in the libc crate)
+    const PROC_PIDLISTTHREADS: libc::c_int = 6;
+    let mut ids = vec![0u64; THREADS_MAX];
+    let bytes = (ids.len() * std::mem::size_of::<u64>()) as libc::c_int;
+    // SAFETY: the buffer is `bytes` long; the call writes thread handles into it.
+    let n = unsafe { libc::proc_pidinfo(pid as i32, PROC_PIDLISTTHREADS, 0, ids.as_mut_ptr().cast(), bytes) };
+    let count = (n.max(0) as usize / std::mem::size_of::<u64>()).min(ids.len());
+    ids[..count]
+        .iter()
+        .filter_map(|&id| {
+            // SAFETY: a plain out-struct of the size given; the call only fills it in.
+            let ti = unsafe {
+                let mut ti: libc::proc_threadinfo = std::mem::zeroed();
+                let size = std::mem::size_of::<libc::proc_threadinfo>() as libc::c_int;
+                let got =
+                    libc::proc_pidinfo(pid as i32, libc::PROC_PIDTHREADINFO, id, (&raw mut ti).cast(), size);
+                (got == size).then_some(ti)
+            }?;
+            let state = match ti.pth_run_state {
+                libc::TH_STATE_RUNNING => "running",
+                libc::TH_STATE_STOPPED => "stopped",
+                libc::TH_STATE_WAITING if ti.pth_flags & libc::TH_FLAGS_IDLE != 0 => "idle",
+                libc::TH_STATE_WAITING => "waiting",
+                libc::TH_STATE_UNINTERRUPTIBLE => "in uninterruptible wait",
+                libc::TH_STATE_HALTED => "halted",
+                _ => "in an unknown state",
+            };
+            Some(Thread {
+                name: c_str(&ti.pth_name),
+                state: state.into(),
+                wchan: None,
+                // (nanoseconds — thread_basic_info's, unlike the task's Mach ticks)
+                cpu: Duration::from_nanos(ti.pth_user_time.saturating_add(ti.pth_system_time)),
+            })
+        })
+        .collect()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn threads(_pid: u32) -> Vec<Thread> {
+    Vec::new()
+}
+
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn command(_pid: u32) -> Option<String> {
     None
@@ -321,6 +433,14 @@ pub struct Sample {
     pub took: Duration,
     /// What `$state/procs.json` held (the thread's first sample only).
     usual: Option<Usual>,
+}
+
+impl Sample {
+    /// A look of these processes, as the sampling thread sends one (tests).
+    #[cfg(test)]
+    pub fn of(procs: Vec<(Os, Option<f32>)>) -> Sample {
+        Sample { procs, took: Duration::ZERO, usual: None }
+    }
 }
 
 /// Each process's CPU time at the look before — for its share since.
@@ -1499,6 +1619,8 @@ impl Editor {
         let mut rows = rows(&s, &self.procs_known(), std::process::id(), &self.procs.held, &groups, secs);
         with_queued(&mut rows, &self.procs_queued(), &groups);
         let (found, learned) = self.procs.check(&rows, &self.procs_lsp_facts(), Instant::now());
+        // (a run of Claude's printing nothing at next to no CPU — `stuck.rs`)
+        crate::stuck::look(self, &rows, Instant::now());
         let flagged: HashSet<u32> = found.iter().map(|f| f.pid).filter(|&p| p > 0).collect();
         let held_before = self.procs.holding();
         self.procs_found(found, now);
@@ -1981,6 +2103,21 @@ mod tests {
         let z = stat.replacen(") S ", ") Z ", 1);
         assert!(parse_stat(4242, &z, 100, 4096, 0).expect("read").zombie);
         assert_eq!(parse_stat(1, "1 (x", 100, 4096, 0), None, "cut short: nothing made up");
+    }
+
+    /// A thread's `stat` and `wchan` (#181): its name, its state in words, where it sleeps — `0` (not
+    /// sleeping, or addresses hidden) is no place — and its CPU time.
+    #[test]
+    fn a_threads_state_and_wait_channel_are_read() {
+        let stat = "4243 (tokio-rt (w)) D 77 4242 4242 0 -1 4194560 100 0 0 0 30 20 0 0 20 0 9 0 6000 1 1 1";
+        let t = parse_thread(stat, Some("folio_wait_bit\n"), 100).expect("read");
+        assert_eq!(t.name, "tokio-rt (w)");
+        assert_eq!(t.state, "in uninterruptible wait");
+        assert_eq!(t.wchan.as_deref(), Some("folio_wait_bit"));
+        assert_eq!(t.cpu, Duration::from_millis(500));
+        let s = parse_thread(&stat.replacen(") D ", ") S ", 1), Some("0"), 100).expect("read");
+        assert_eq!((s.state.as_str(), s.wchan), ("sleeping", None));
+        assert_eq!(parse_thread("1 (x", None, 100), None, "cut short: nothing made up");
     }
 
     /// A look sees tarae's (here: the test's) child and what it started, with real CPU time — a busy loop's

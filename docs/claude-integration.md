@@ -91,6 +91,15 @@ longest, whichever session it's in, and once that's the card up here, `C-q` give
 waits, `C-q` never says nothing does. A run of Claude's that has printed nothing for minutes is in the list too,
 but after everything that asks for an answer: it may only be slow, and a card surely waits.
 
+**A run that looks stuck** gets a card of its own: when a run of Claude's has printed nothing *and* used next to
+no CPU for `llm.stuck-after` minutes (10 by default; 0 = never), the card says `Stuck? … No output for 12 min,
+0% CPU`. Before it shows, tarae reads what each of the run's threads is waiting in and puts it in the run's
+output, so it's still there if you stop the run: on Linux each thread's state and kernel wait channel
+(`/proc/<pid>/task/*/stat` and `wchan`), on macOS each thread's state (macOS doesn't tell an unprivileged
+reader where a thread waits; `sample <pid>` in a terminal shows its stacks). Nothing needs root. `y` stops the
+run (its panel and output stay, and Claude hears how it ended), `w` shows those lines in its panel, `n` keeps
+waiting and asks again after as long again. If the run prints or ends, the card goes away.
+
 **News of sessions behind** is said where you are, inside tarae — no system notification, no bell. When a session
 behind starts waiting for you, or its Claude's turn ends, a toast names it: `fix-login · waits for you — C-q goes
 there`, `fix-login · turn ended — C-q goes there` (a stopped turn says `turn stopped`; a failed one, its error, as a
@@ -812,6 +821,12 @@ its base up to it, fast-forward only. When the base has moved since the session 
 While it's under way the session's tab, the status line's chip and its row in the list say `rebasing 2/5`, and
 `:session-end` and `:restart` wait for it (they say why). `:session-bring` on a session whose rebase stopped
 puts its card up again — `y` goes on, `X` aborts.
+
+A session with no commits of its own, behind its base (it was made, nothing was committed, and the base moved
+on), has nothing to bring. `:session-bring` then offers to move it up to its base's tip instead: the card says
+it's a fast-forward in its checkout (`behind has no commits past main — nothing to bring. It's 2 commits
+behind: move it up to main's tip?`), `y` moves it, `n` leaves it. With changes in its checkout (files git has
+changed, or buffers unsaved there) it says which, and that they need a commit or a stash first.
 
 | Command | What it does |
 |---|---|

@@ -386,6 +386,13 @@ pub static SETTINGS: &[Setting] = &[
         set: |c, v| c.llm.follow_resume = n(v) as u64,
     },
     Setting {
+        path: "llm.stuck-after",
+        kind: Kind::Int { min: 0, max: 1440 },
+        doc: "Chat: minutes a run of Claude's may print nothing at next to no CPU before a card asks whether it's stuck (0 = never)",
+        get: |c| Value::from(c.llm.stuck_after as i64),
+        set: |c, v| c.llm.stuck_after = n(v) as u64,
+    },
+    Setting {
         path: "llm.review-at-end",
         kind: Kind::Bool,
         doc: "Chat: Claude's edits go in as it makes them, and you review its turn when it ends — every new chat starts so (space v a turns it on and off, and saves it here)",

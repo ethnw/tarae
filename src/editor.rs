@@ -1572,6 +1572,7 @@ impl Editor {
         crate::refactor::next(self);
         crate::codereview::land(self);
         self.offer_view_sync();
+        crate::stuck::sync(self);
         self.plugin_front();
         self.schedule_tick();
     }
@@ -11635,7 +11636,7 @@ mod tests {
                 q,
                 "",
                 String::new(),
-                What::ProjectTrust { hash: 0 },
+                What::ProjectTrust { hash: [0; 32] },
             )
         };
         ed.push_offer(card(&question));
@@ -11738,8 +11739,9 @@ mod tests {
         // (a file's buffer: the blank startup one would be handed over to the first view)
         ed.docs[0].path = Some(test_root().join("x.rs"));
         let long: String = (1..=80).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
-        let card =
-            |title: &str| Offer::new(title.into(), &long, "", String::new(), What::ProjectTrust { hash: 0 });
+        let card = |title: &str| {
+            Offer::new(title.into(), &long, "", String::new(), What::ProjectTrust { hash: [0; 32] })
+        };
         let card_buffers = |ed: &Editor| -> Vec<String> {
             let mut t: Vec<String> = ed
                 .docs
@@ -11809,7 +11811,7 @@ mod tests {
             "make deploy-all\n\nNo sandbox here — it runs with all your permissions.",
             "",
             String::new(),
-            What::ProjectTrust { hash: 0 },
+            What::ProjectTrust { hash: [0; 32] },
         ));
         let (cmd, why) = (fg(&mut ed, "make deploy-all"), fg(&mut ed, "No sandbox here"));
         assert_ne!(cmd, why, "the command stands out");
@@ -11821,7 +11823,7 @@ mod tests {
                 ".tarae.toml sets what runs commands as you:\n\n  task.x = rm-it\n\nIgnored, the rest applies.",
                 "",
                 String::new(),
-                What::ProjectTrust { hash: 1 },
+                What::ProjectTrust { hash: [1; 32] },
             )
             .deciding(2..3),
         );
@@ -11996,7 +11998,7 @@ mod tests {
             ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
         };
         let card = |title: &str| {
-            Offer::new(title.into(), "x = 1", "", String::new(), What::ProjectTrust { hash: 0 })
+            Offer::new(title.into(), "x = 1", "", String::new(), What::ProjectTrust { hash: [0; 32] })
         };
         // A card up, in sight and settled — then the chat, and a message with `n`s in it
         ed.push_offer(card("Trust this project's settings?"));

@@ -951,17 +951,37 @@ fn moved(root: &Path, name: &str, base: Option<String>, start: &Path) -> Option<
 }
 
 /// It can be brought as it is (its base not moved since): how far ahead — for the bring card. What `bring`
-/// would refuse first is said now.
+/// would refuse first is said now. Nothing ahead but behind: `ahead` 0 — moved up to its base instead
+/// (`rebase::up_card`, #186), unless it has changes (`unsaved`: the editor's buffers).
 fn ready(
     root: &Path,
     name: &str,
     base: Option<String>,
     start: &Path,
+    unsaved: &[PathBuf],
 ) -> Result<crate::rebase::Moved, String> {
     let branch = current_branch(root).ok_or("its checkout is on no branch — nothing to bring")?;
     let base = base_or_start(base, start)?;
     let base_tip = local_branch(root, &base)?;
     let ahead = count(root, &format!("{base_tip}..HEAD"));
+    let behind = if ahead == 0 { count(root, &format!("HEAD..{base_tip}")) } else { 0 };
+    if ahead == 0 && behind > 0 {
+        let why = crate::rebase::held_up(root, unsaved);
+        let nothing = format!("nothing to bring — {branch} has no commits past {base}");
+        return match why {
+            Some(why) => {
+                Err(format!("{nothing}, and it can't move up to {base}'s {}: {why}", commits(behind)))
+            }
+            None => Ok(crate::rebase::Moved {
+                root: root.into(),
+                name: name.into(),
+                branch,
+                base,
+                moved: behind,
+                ahead,
+            }),
+        };
+    }
     if ahead == 0 {
         return Err(format!("nothing to bring — {branch} has no commits past {base}"));
     }
@@ -1776,7 +1796,7 @@ impl Editor {
             None => match moved(&root, &who, base.clone(), &start) {
                 Some(m) => Bringing::Moved(m),
                 None if !now => {
-                    ready(&root, &who, base, &start).map_or_else(Bringing::Refused, Bringing::Ready)
+                    ready(&root, &who, base, &start, &unsaved).map_or_else(Bringing::Refused, Bringing::Ready)
                 }
                 None => {
                     bring(&root, base, &start, &unsaved).map_or_else(Bringing::Refused, Bringing::Brought)
@@ -1793,6 +1813,8 @@ impl Editor {
                     b.tip
                 )),
                 Bringing::Moved(m) => ed.push_offer(m.card()),
+                // (nothing of its own, behind: moved up instead — #186)
+                Bringing::Ready(m) if m.ahead == 0 => ed.push_offer(m.up_card()),
                 Bringing::Ready(m) => {
                     let mut quick = None;
                     ed.with_session(id, |ed| quick = ed.preflight_quick());
@@ -2669,6 +2691,51 @@ mod tests {
         // Nothing to bring
         feed(&mut ed, ":session-bring<ret>");
         settle_until(&mut ed, |ed| says(ed, "nothing to bring"));
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #186: a session with nothing of its own, behind its base — `:session-bring` offers to move it up (a
+    /// fast-forward, its card says so) and `y` does; with changes in its checkout it says why it can't.
+    #[test]
+    fn a_clean_session_behind_its_base_is_moved_up_to_it() {
+        let (repo, dir) = place("behind");
+        let mut ed = editor(&repo, &dir);
+        let wt = new_session(&mut ed, "behind");
+        std::fs::write(repo.join("c.txt"), "c\n").unwrap();
+        git_in(&repo, &["add", "-A"]);
+        git_in(&repo, &["commit", "-qm", "main moves"]);
+        git_in(&repo, &["commit", "-q", "--allow-empty", "-m", "and again"]);
+        let main = git_in(&repo, &["rev-parse", "main"]);
+        feed(&mut ed, ":session-bring<ret>");
+        let title = "Move behind up to main";
+        settle_until(&mut ed, |ed| card(ed, title).is_some() || says(ed, "bring behind:"));
+        let q = &card(&ed, title).unwrap_or_else(|| panic!("{}", said(&ed))).question;
+        assert!(
+            q.starts_with("behind has no commits past main — nothing to bring. It's 2 commits behind: move it up to main's tip?"),
+            "{q}"
+        );
+        assert!(q.contains("A fast-forward"), "{q}");
+        assert_eq!(card_in_sight(&mut ed), ['y', 'n']);
+        feed(&mut ed, "y");
+        settle_until(&mut ed, |ed| says(ed, "Moved behind up to main") || says(ed, "move behind up:"));
+        assert!(says(&ed, &format!("Moved behind up to main — now at {}", &main[..7])), "{}", said(&ed));
+        assert_eq!(git_in(&wt, &["rev-parse", "HEAD"]), main);
+        assert_eq!(std::fs::read_to_string(wt.join("c.txt")).unwrap(), "c\n", "its checkout followed");
+        // Changes in its checkout: said why not, nothing moves
+        git_in(&repo, &["commit", "-q", "--allow-empty", "-m", "main again"]);
+        std::fs::write(wt.join("a.txt"), "mine\n").unwrap();
+        feed(&mut ed, ":session-bring<ret>");
+        settle_until(&mut ed, |ed| says(ed, "bring behind:") || card(ed, title).is_some());
+        assert!(
+            says(
+                &ed,
+                "can't move up to main's 1 commit: it has changes in a.txt — commit or stash them first"
+            ),
+            "{}",
+            said(&ed)
+        );
+        assert_eq!(git_in(&wt, &["rev-parse", "HEAD"]), main);
         drop(ed);
         std::fs::remove_dir_all(&dir).ok();
     }

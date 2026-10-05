@@ -10678,7 +10678,7 @@ mod tests {
             question,
             "",
             String::new(),
-            What::ProjectTrust { hash: 0 },
+            What::ProjectTrust { hash: [0; 32] },
         ));
         let mut bytes = Vec::new();
         render(&mut ed, &mut bytes, 100, 30).unwrap();

@@ -104,6 +104,7 @@ mod sorting;
 mod spawn;
 mod split;
 mod structure;
+mod stuck;
 mod syntax;
 mod task;
 mod term;

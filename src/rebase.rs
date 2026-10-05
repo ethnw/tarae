@@ -92,6 +92,58 @@ impl Moved {
             What::Rebased(Box::new(self.clone())),
         )
     }
+
+    /// The card for a session with nothing to bring, behind its base (`ahead` 0, #186): move it up to its
+    /// base's tip — a fast-forward in its checkout.
+    pub fn up_card(&self) -> Offer {
+        let (base, branch) = (&self.base, &self.branch);
+        let q = format!(
+            "{branch} has no commits past {base} — nothing to bring. It's {} behind: move it up to {base}'s \
+             tip?\n\nA fast-forward in its checkout: nothing of its own to replay, nothing lost.",
+            crate::worktree::commits(self.moved),
+        );
+        Offer::new(
+            format!("Move {} up to {base}", self.name),
+            &q,
+            "Moving up…",
+            format!("Couldn't move {branch} up"),
+            What::UpTo(Box::new(self.clone())),
+        )
+    }
+}
+
+/// Why a session's checkout can't be moved up to its base: changes in no commit — files git has changed
+/// (new ones untracked don't count: git refuses only one in the way, and says so), or buffers unsaved there
+/// (`unsaved`). None: nothing holds it (or git can't say — the move itself will).
+pub fn held_up(root: &Path, unsaved: &[PathBuf]) -> Option<String> {
+    let status = git(root, &["status", "--porcelain", "-z", "--untracked-files=no"], None).ok()?;
+    let mut files: Vec<String> = status.split('\0').filter_map(|e| e.get(3..)).map(str::to_string).collect();
+    for p in unsaved.iter().filter_map(|p| p.strip_prefix(root).ok()) {
+        let p = p.to_string_lossy().into_owned();
+        if !files.contains(&p) {
+            files.push(p);
+        }
+    }
+    files.retain(|f| !f.is_empty());
+    let some: Vec<&str> = files.iter().take(3).map(String::as_str).collect();
+    let more = if files.len() > 3 { ", …" } else { "" };
+    (!files.is_empty())
+        .then(|| format!("it has changes in {}{more} — commit or stash them first", some.join(", ")))
+}
+
+/// Session `m`'s branch moved up to its base's tip — checked again first (nothing of its own since, no
+/// changes): the tip it's at now, short (on a worker).
+fn move_up(m: &Moved, unsaved: &[PathBuf]) -> Result<String, String> {
+    let base_tip = crate::worktree::sha(&m.root, &format!("refs/heads/{}", m.base))?;
+    let head = crate::worktree::sha(&m.root, "HEAD")?;
+    if crate::worktree::count(&m.root, &format!("{base_tip}..{head}")) > 0 {
+        return Err(format!("{} has commits of its own since — :session-bring again", m.branch));
+    }
+    if let Some(why) = held_up(&m.root, unsaved) {
+        return Err(why);
+    }
+    crate::gitmenu::git_no_hooks(&m.root, &["merge", "--ff-only", "-q", &base_tip])?;
+    Ok(base_tip.chars().take(7).collect())
 }
 
 /// Where a rebase stopped (read on a worker).
@@ -974,6 +1026,26 @@ impl Editor {
         if let Err(e) = self.session_bring_now(&id.to_string()) {
             self.set_error(e);
         }
+    }
+
+    /// `y` on the move-up card: its branch fast-forwarded to its base's tip, in its checkout (a worker).
+    pub fn rebase_move_up(&mut self, id: u64, m: Moved) {
+        self.offer_finished(id, Ok(()));
+        let unsaved: Vec<PathBuf> =
+            self.docs.iter().filter(|d| d.is_modified()).filter_map(|d| d.path.clone()).collect();
+        let said = format!("Moving {} up to {}…", m.name, m.base);
+        let work = move || {
+            let r = move_up(&m, &unsaved);
+            (m, r)
+        };
+        self.step(self.events.shared_jobs(), "session", said, work, |ed, (m, r)| {
+            match r {
+                Ok(tip) => ed.set_success(format!("Moved {} up to {} — now at {tip}", m.name, m.base)),
+                Err(e) => ed.set_error(format!("move {} up: {e}", m.name)),
+            }
+            ed.git_refresh();
+            ed.git_reload_bases();
+        });
     }
 
     /// `p` on the bring card: the quick preflight in its session, and the bring once it passes (the full one

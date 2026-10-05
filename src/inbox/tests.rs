@@ -35,7 +35,7 @@ fn claudes(n: u64, ago: u64) -> Offer {
 
 /// A card of tarae's own (the project's settings ask for trust) that came `ago` seconds ago.
 fn tarae(ago: u64) -> Offer {
-    let what = What::ProjectTrust { hash: 7 };
+    let what = What::ProjectTrust { hash: [7; 32] };
     let mut o =
         Offer::new("Trust this project's settings?".into(), "its .tarae.toml runs", "", String::new(), what);
     o.since = Instant::now() - Duration::from_secs(ago);

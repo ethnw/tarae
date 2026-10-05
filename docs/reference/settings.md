@@ -62,6 +62,7 @@ The name is also the `:set` path: `:set editor.scrolloff 8` changes it until you
 | `llm.effort` | `""` · `"low"` · `"medium"` · `"high"` · `"xhigh"` · `"max"` | `""` | How hard Claude thinks, for models that take it ("" = the model's default) |
 | `llm.follow` | bool | `true` | Chat: the editor follows the code Claude is reading, with its thoughts beside it (C-f toggles it in a chat) |
 | `llm.follow-resume` | integer 0–3600 | `20` | Chat: seconds after your last key that follow takes over again while Claude still works (0 = only C-f) |
+| `llm.stuck-after` | integer 0–1440 | `10` | Chat: minutes a run of Claude's may print nothing at next to no CPU before a card asks whether it's stuck (0 = never) |
 | `llm.review-at-end` | bool | `false` | Chat: Claude's edits go in as it makes them, and you review its turn when it ends — every new chat starts so (space v a turns it on and off, and saves it here) |
 | `llm.chat-settings` | bool | `true` | Chat: read your CLAUDE.md files and Claude Code settings, like `claude` does (hooks stay off, edits always ask) |
 | `llm.screen-terminal` | bool | `true` | Chat: when Claude looks at your screen (you say yes on a card), the terminal panel's contents go too — off: its rows go blank |

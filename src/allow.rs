@@ -467,7 +467,7 @@ pub fn checkouts(root: &Path) -> Vec<PathBuf> {
 
 /// The repository's common git folder for the checkout at `root` (real): its `.git` folder, or — a linked
 /// checkout — the `commondir` of the folder its `.git` file names, when that folder names it back.
-fn common_dir(root: &Path) -> Option<PathBuf> {
+pub(crate) fn common_dir(root: &Path) -> Option<PathBuf> {
     let dot = root.join(".git");
     if dot.is_dir() {
         return std::fs::canonicalize(dot).ok();

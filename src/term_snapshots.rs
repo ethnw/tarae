@@ -723,6 +723,37 @@ fn snapshot_offer_install() {
     s.check("offer_install");
 }
 
+/// A run of Claude's that looks stuck (#181): how long it's been quiet and idle, what its threads wait in,
+/// `y Stop it` · `w What it waits on` · `n Keep waiting`.
+#[test]
+fn snapshot_offer_stuck() {
+    let mut s = Shot::new(100, 30);
+    s.ed.offer_popups = true;
+    s.file("src/demo.rs", DEMO_RS);
+    let stuck = crate::stuck::Stuck {
+        slot: crate::sizes::Slot::Task,
+        run: 1,
+        pid: 4242,
+        asked: std::time::Instant::now(),
+        quiet: std::time::Duration::from_secs(12 * 60 + 4),
+        cpu: 0.0,
+        at: 0,
+    };
+    s.ed.push_offer(crate::offer::Offer::new(
+        "Stuck? Claude's command".into(),
+        "No output for 12 min, 0% CPU — Claude's command cargo test --target aarch64-unknown-linux-gnu in the \
+         task panel. Claude's turn waits on it, and only you can stop it.\n\nWhat each of its threads waits in \
+         is in its output now (w), kept if you stop it:\n    pid 4242 · cargo test --target \
+         aarch64-unknown-linux-gnu · 1 thread\n      cargo — sleeping in do_wait · 0.84 s CPU\n    pid 4250 · \
+         qemu-aarch64 target/debug/deps/tarae-1f2e · 3 threads\n      3 × qemu-aarch64 — sleeping in \
+         futex_wait_queue · 0.02 s CPU\n    …",
+        "Stopping…",
+        String::new(),
+        crate::offer::What::Stuck(Box::new(stuck)),
+    ));
+    s.check("offer_stuck");
+}
+
 /// A command Claude wants to run — shown whole (a commit message past four lines too), `y Run` · `n No`.
 #[test]
 fn snapshot_offer_run() {

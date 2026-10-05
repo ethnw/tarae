@@ -14,6 +14,9 @@ use crate::trace::RunTrace;
 /// closed showed only `● run` for 27 minutes).
 pub const SILENT: Duration = Duration::from_secs(180);
 
+/// Under this share of a core, all its processes told, a run is doing nothing (`Waiting::looked`).
+pub const IDLE_PCT: f32 = 1.0;
+
 /// Claude's report's line on a run that ended (or was stopped) at `end` after printing nothing since `last`
 /// for `SILENT` or more: `It printed nothing for its last 27:04.`
 pub fn silent_line(last: Instant, end: Instant) -> Option<String> {
@@ -87,6 +90,13 @@ pub struct Waiting {
     pub waited: Vec<(String, Duration)>,
     /// A line has come (the trace's `first output` is said).
     output: bool,
+    /// Since when its processes have used next to no CPU, as `:procs`' looks saw them (`stuck.rs`) — None:
+    /// they're working, or haven't been looked at.
+    pub idle: Option<Instant>,
+    /// Its share of a core at the last look, all its processes told.
+    pub cpu: Option<f32>,
+    /// When the stuck card last asked about it — it asks again only after as long again.
+    pub stuck_asked: Option<Instant>,
 }
 
 impl Waiting {
@@ -142,6 +152,26 @@ impl Waiting {
     pub fn silent_in(&self, last: Instant, now: Instant) -> Option<Duration> {
         let d = (last + SILENT).checked_duration_since(now)?;
         (self.now.is_none() && !d.is_zero()).then_some(d)
+    }
+
+    /// A look at its processes at `now`: `pct` of a core, all told — under `IDLE_PCT`, idle from then on
+    /// (unless it already was).
+    pub fn looked(&mut self, pct: f32, now: Instant) {
+        self.cpu = Some(pct);
+        match pct < IDLE_PCT {
+            true => _ = self.idle.get_or_insert(now),
+            false => self.idle = None,
+        }
+    }
+
+    /// How long a running run has printed nothing, when it has also used next to no CPU for `after` or
+    /// more, and wasn't asked about within `after` — it looks stuck (#181: cargo hung under qemu, `no output
+    /// for 68:11` at 0% CPU, and nothing asked). Never when it says what it waits on, nor `after` zero.
+    pub fn stuck_for(&self, last: Instant, now: Instant, after: Duration) -> Option<Duration> {
+        let quiet = now.saturating_duration_since(last);
+        let idle = now.saturating_duration_since(self.idle?);
+        let asked = self.stuck_asked.is_some_and(|a| now.saturating_duration_since(a) < after);
+        (!after.is_zero() && self.now.is_none() && quiet >= after && idle >= after && !asked).then_some(quiet)
     }
 
     /// The chat's row, `tarae state`'s runs, the inbox: `no output for 27:04` (`silent_for`).

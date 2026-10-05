@@ -31,9 +31,10 @@ the [keymap reference](reference/keymap.md).
   `llm.chat-settings`, `llm.sandbox*`, `editor.restart-build` and `restart-binary`, `session.worktrees` (where checkouts are
   written), `[task.*]`, `[preflight]` steps, a `[lsp.*]`
   `command` or `args`, an `[[attach]]` `before`, and keys bound to `:` commands. A card shows each one as written: `y` trusts the
-  project, `n` ignores that part. The rest of the file applies either way. The answer is kept per project and
-  asked again when any of those values change. `:project-trust` shows the card again, and `:project-untrust`
-  takes trust back
+  project, `n` ignores that part. The rest of the file applies either way. Each answer is kept for that version
+  of those values, for the whole repository: every checkout of it (each session) shares every version you
+  answered, so going back to one you trusted doesn't ask, and a version never seen does. `:project-trust`
+  shows the card again, and `:project-untrust` takes trust back (for the version in hand)
 
 One file holds everything — editor, keys, languages, language servers, and Claude. There's no separate
 `languages.toml`.

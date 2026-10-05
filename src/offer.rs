@@ -100,7 +100,7 @@ pub enum What {
     Outside { run: Box<crate::blocked::BlockedRun> },
     /// The project's `.tarae.toml` sets what runs commands (`trust.rs`): `y` trusts it, `n` ignores that
     /// part. `hash` = what the card showed.
-    ProjectTrust { hash: u64 },
+    ProjectTrust { hash: crate::trust::Digest },
     /// Claude asks to see the screen (`seeing.rs`): `y` once, `a` this chat, `n` no.
     Screen { call: crate::tools::Call },
     /// `:preflight`'s first run in a project with the packs' default steps (`preflight.rs`): `y` runs those
@@ -133,6 +133,9 @@ pub enum What {
     /// A rebase stopped at a conflict its Claude resolved (`rebase.rs`): `y` stages the files and goes on,
     /// `X` aborts the rebase, `n` leaves it stopped.
     RebaseResolved { root: PathBuf },
+    /// A session with nothing to bring, behind its base (`rebase.rs`, #186): `y` moves it up to its base's tip
+    /// (a fast-forward in its checkout), `n` leaves it.
+    UpTo(Box<crate::rebase::Moved>),
     /// A git-tab action would run hooks from inside the checkout that its base doesn't have as they are
     /// (`hooks.rs`): `y` runs it as usual, `n` runs it with no hooks this time.
     Hooks(Box<crate::hooks::Ask>),
@@ -145,6 +148,9 @@ pub enum What {
     /// A buffer's unsaved edits a gone tarae kept (`recovery.rs`): `y` restores them into the buffer, `c`
     /// compares them with the file, `D` discards them, `n` leaves them for the next start.
     Recover(Box<crate::recovery::Found>),
+    /// A run of Claude's printing nothing at next to no CPU for minutes (`stuck.rs`, #181): `y` stops it, `w`
+    /// shows what its threads wait in (its output), `n` keeps waiting. Gone once it prints or ends.
+    Stuck(Box<crate::stuck::Stuck>),
 }
 
 /// A call of Claude's waiting on a card for the user's answer (`Session.asking`): the card, how the call is
@@ -288,11 +294,21 @@ impl Offer {
                 | What::Rebase(_)
                 | What::Rebased(_)
                 | What::RebaseResolved { .. }
+                | What::UpTo(_)
                 | What::Hooks(_)
                 | What::Restart(_)
                 | What::RestartSame { .. }
                 | What::Recover(_)
+                | What::Stuck(_)
         )
+    }
+
+    /// The stuck run it asks about, if it's that card (`w` shows what it waits in).
+    pub fn stuck(&self) -> Option<&crate::stuck::Stuck> {
+        match &self.what {
+            What::Stuck(s) => Some(s),
+            _ => None,
+        }
     }
 
     /// Whether `c` (compare) and `D` (discard) answer it: unsaved edits a gone tarae kept.
@@ -392,7 +408,7 @@ impl Offer {
     /// Whether it parks with its session when another comes to the front: Claude's, and a review's end
     /// (#159: it stayed up in the other session, and `y` there ended that one's review).
     pub fn goes_with_session(&self) -> bool {
-        self.claudes() || matches!(self.what, What::ReviewEnd { .. })
+        self.claudes() || matches!(self.what, What::ReviewEnd { .. } | What::Stuck(_))
     }
 
     pub fn installing(&self) -> bool {
@@ -460,6 +476,7 @@ impl Offer {
             }
             // (abort throws the resolution away: a capital, as removing does)
             W::RebaseResolved { .. } => vec![('y', "Continue"), ('X', "Abort"), ('n', "Not now")],
+            W::UpTo(_) => vec![('y', "Move it up"), ('n', "Leave it")],
             W::Hooks(a) if a.runnable() => {
                 vec![('y', if a.hooks.len() == 1 { "Run it" } else { "Run them" }), ('n', "Skip hooks")]
             }
@@ -474,6 +491,7 @@ impl Offer {
             W::ChangeSet { .. } => {
                 vec![('y', "Accept all"), ('r', "One by one"), ('v', "See them"), ('n', "Decline all")]
             }
+            W::Stuck(_) => vec![('y', "Stop it"), ('w', "What it waits on"), ('n', "Keep waiting")],
         }
     }
 
@@ -506,10 +524,12 @@ impl Offer {
             W::Rebase(_) => "rebase",
             W::Rebased(_) => "rebased",
             W::RebaseResolved { .. } => "rebase-resolved",
+            W::UpTo(_) => "up-to",
             W::Hooks(_) => "hooks",
             W::Restart(_) => "restart",
             W::RestartSame { .. } => "restart-same",
             W::Recover(_) => "recover",
+            W::Stuck(_) => "stuck",
         }
     }
 }
@@ -541,6 +561,11 @@ impl crate::editor::Editor {
     /// session behind ended its turn swapped in, so its cards were parked — they stayed, its tab said `▲`
     /// after its turn was over, and the front's cards went instead).
     pub fn drop_cards(&mut self, gone: impl Fn(&What) -> bool) {
+        self.drop_cards_for(gone, "dropped — its turn ended");
+    }
+
+    /// `drop_cards`, the gone ring told `why`.
+    pub fn drop_cards_for(&mut self, gone: impl Fn(&What) -> bool, why: &str) {
         let front = !self.background();
         let label = self.session.label();
         let mut dropped = Vec::new();
@@ -551,7 +576,7 @@ impl crate::editor::Editor {
             }
         }
         for id in dropped {
-            self.card_how(id, "dropped — its turn ended");
+            self.card_how(id, why);
         }
         self.session.parked.retain(|o| !gone(&o.what));
         if front {
@@ -674,6 +699,11 @@ impl crate::editor::Editor {
             Code::Char('X') if o.aborts() => self.offer_abort(),
             Code::Char('b') if o.base_steps() => self.offer_session_base(),
             Code::Char('f') if o.restart_other() => self.offer_restart_other(),
+            // (the card stays: shown, it's still to answer)
+            Code::Char('w') if o.stuck().is_some() => {
+                let s = o.stuck().cloned().expect("just seen");
+                crate::stuck::show(self, &s);
+            }
             // An answer letter this card doesn't take isn't the code's either (`a`/`A` there start inserting —
             // and the `y` after it was typed)
             Code::Char('a' | 'A') if o.lasts() => self.set_status("this card asks y, a or n"),
@@ -770,10 +800,15 @@ impl crate::editor::Editor {
                 self.offer_finished(id, Ok(()));
                 self.rebase_answer(&root, true);
             }
+            What::UpTo(m) => self.rebase_move_up(id, *m),
             What::Hooks(ask) => self.hooks_answer(id, *ask, true),
             What::Restart(c) => crate::restart::chosen(self, id, *c, Some(0)),
             What::RestartSame { id: r } => crate::restart::same_answer(self, id, r, true),
             What::Recover(f) => crate::recovery::restore(self, id, *f),
+            What::Stuck(s) => {
+                self.offer_finished(id, Ok(()));
+                crate::stuck::stop(self, &s);
+            }
         }
     }
 
@@ -1143,10 +1178,12 @@ impl crate::editor::Editor {
             What::RebaseResolved { .. } => {
                 self.set_status("the rebase waits — :rebase-continue goes on, :rebase-abort ends it")
             }
+            What::UpTo(m) => self.set_status(format!("Left {} where it is, behind {}", m.name, m.base)),
             What::Hooks(ask) => self.hooks_answer(o.id, *ask, false),
             What::Restart(c) => crate::restart::chosen(self, o.id, *c, None),
             What::RestartSame { id } => crate::restart::same_answer(self, o.id, id, false),
             What::Recover(f) => crate::recovery::not_now(self, *f),
+            What::Stuck(s) => crate::stuck::keep_waiting(self, &s),
         }
     }
 
