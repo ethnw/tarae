@@ -7091,6 +7091,60 @@ mod tests {
         std::fs::remove_dir_all(&kept).ok();
     }
 
+    /// For real, on Linux: a command of Claude's that removes the empty folders inside `.git` (its refs packed
+    /// — `REMOVE_DIR` reaches there) leaves a repository git still finds: they're made again before its end
+    /// is told, and Claude reads that they were. (The test's own repository in a temp folder; git's search
+    /// upward stops there.)
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_claude_run_cant_leave_git_without_its_refs() {
+        use serde_json::json;
+        if landlock_at_least(crate::sandbox::linux::FULL, "a_claude_run_cant_leave_git_without_its_refs")
+            .is_none()
+        {
+            return;
+        }
+        // (under the build's `target/`, not in `/tmp`, where a run may write anything — the project's)
+        let dir =
+            std::env::current_dir().unwrap().join(format!("target/tarae-run-refs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\n").unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false"])
+                .args(["-c", "user.email=t@example.invalid", "-c", "user.name=t"])
+                .args(args)
+                .env("GIT_CEILING_DIRECTORIES", dir.parent().unwrap())
+                .output()
+                .unwrap()
+        };
+        for args in
+            [&["init", "-q"][..], &["add", "-A"], &["commit", "-q", "-m", "base"], &["pack-refs", "--all"]]
+        {
+            assert!(git(args).status.success(), "git {args:?}");
+        }
+        let mut ed = editor("");
+        ed.session.root = dir.clone();
+        ed.sandbox = crate::sandbox::Availability::Ready;
+        ed.config.llm.run_allow = vec!["rmdir".into()];
+        let refs = dir.join(".git/refs");
+        let command = format!("rmdir {0}/heads {0}/tags {0}", refs.display());
+        let log = claude_calls(&mut ed, &dir, "run", &json!({ "command": command }));
+        feed(&mut ed, "<space>lempty them<ret>");
+        settle_for(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
+        let answer = tool_answer(&log).replace("\\n", " ");
+        let answer = answer.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(answer.contains("exit 0"), "it ran: {answer}");
+        assert!(dir.join(".git/refs/heads").is_dir() && dir.join(".git/refs/tags").is_dir(), "{answer}");
+        assert!(git(&["rev-parse", "--git-dir"]).status.success(), "git finds it");
+        assert!(answer.contains("It removed empty folders inside protected ones — .git/refs"), "{answer}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Landlock ABI 2 (a stand-in: this kernel's rules, the availability ABI 2 has): every run of Claude's
     /// asks first, saying why — `n` tells Claude, `y` runs it in the sandbox, `a` for the rest of the
     /// conversation (still sandboxed: the title doesn't say "no sandbox").

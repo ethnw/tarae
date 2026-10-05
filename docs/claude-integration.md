@@ -672,8 +672,16 @@ thread of tarae's that confined itself first, and everything it starts stays con
   card naming it: `y` runs it, `n` tells Claude no (asked again next time). The file is among the turn's
   changes, and `space u` takes the turn back. tmux's and zellij's
   folders in `/tmp`, which stay writable (Java writes its temp files in `/tmp` whatever `TMPDIR` says). The
-  other way round, a folder that holds a protected name is closed to new entries: next to `Cargo.toml` a
-  command can change the files that are there, but not make, remove or rename one.
+  other way round, a folder that holds a protected name is closed to new files: next to `Cargo.toml` a
+  command can change the files that are there, but not make, remove or rename one. It can remove a folder
+  there once it has emptied it — `cargo clean`, `rm -rf target` — and that reaches into the protected
+  folders too: an empty one (an empty `.github`), or the empty folders inside `.git` (with its refs packed,
+  `refs/` itself — without it git no longer takes `.git` for a repository). So tarae notes those before a
+  command runs and makes again any that went the moment it's over, before Claude reads its result (which
+  says so). A protected folder with files in it can't go. New files there can't be allowed
+  without allowing writes to every file beside them (Landlock's rights go by folder), so tools that write
+  a temporary file beside their manifest and rename it in fail there: **pnpm install** in a project with a
+  `package.json`, `make`'s first build beside its `Makefile`.
 - **So what a first build makes there is made first.** Before a command runs, tarae makes, empty, what the
   language packs say a build makes beside their protected names when it isn't there yet: `target/` beside
   `Cargo.toml` (and `Cargo.lock` in the outermost crate), `node_modules/` and `package-lock.json` beside

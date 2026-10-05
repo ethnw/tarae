@@ -2036,9 +2036,7 @@ pub(crate) fn guard_then_go(ed: &mut Editor, who: For, job: Job, ride: Ride) {
             cargo = crate::tokens::cargo_to_tell(&p.reads.copies.cargo, said.as_deref());
             // Its denials watched from before it starts (the stream up first — measured)
             p.watch = crate::sandbox::watch_for(&p);
-            if p.watch.as_ref().is_some_and(|w| w.pid().is_some()) {
-                std::thread::sleep(crate::sandbox::WATCH_READY);
-            }
+            std::thread::sleep(crate::sandbox::watch_wait(&p));
             p
         });
         move |ed: &mut Editor| {

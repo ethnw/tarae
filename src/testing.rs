@@ -622,6 +622,7 @@ impl Editor {
             _ => None,
         };
         let watched = policy.is_some_and(|p| p.watch.is_some());
+        let after_run = crate::sandbox::after_run(policy);
         let mut cmd = crate::sandbox::command(policy, &argv[0], &argv[1..]);
         cmd.current_dir(&target.cwd);
         crate::task::color_off(&mut cmd);
@@ -720,6 +721,8 @@ impl Editor {
                 });
             }
             let status = crate::spawn::wait_and_drain(pid, &ended, readers).ok();
+            // What it removed inside protected folders is made again before its end is told (`sandbox::after_run`)
+            after_run();
             // Its last denials reach the watch before its end is told (here, not on the main loop)
             if watched {
                 std::thread::sleep(crate::sandbox::WATCH_LAST);

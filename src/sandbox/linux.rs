@@ -4,7 +4,10 @@
 //!
 //! Landlock grants; Seatbelt denies after it allows. So what the profile keeps inside a place it allows is a
 //! hole here, and the place is granted entry by entry around it (`grant`) — its own entries then can't be
-//! made, removed or renamed (the user's decision): reads everywhere but home (home a hole in `/`), in home
+//! made, removed or renamed (the user's decision), but a folder there may go once emptied (`cargo clean`;
+//! the user's decision A, 2026-10-05 — new files there would take write rights over the protected ones,
+//! and making folders there would let `.git` be renamed away: measured, `what_a_folder_holding_a_protected_
+//! name_may_be_given`): reads everywhere but home (home a hole in `/`), in home
 //! the project and its places (`Reads`) around what's kept and the token files the tools read copies of;
 //! writes in the project around every protected name that's there (`protected_there`) and
 //! `llm.sandbox-protect`, in the run's folder, the temp and toolchain folders, the single files cargo and
@@ -78,7 +81,8 @@ pub fn availability(abi: io::Result<u32>, seccomp: bool) -> Availability {
 /// `audit_readable` saw it work here; else why not, and they come from the run's own error lines. `serve`: what a run
 /// reaches by address is tarae's to decide (`supervisor.rs`) — or why it can't be here, and every socket but
 /// netlink is refused. `made`: what was made first, beside protected names, for the run to write in. `closed`:
-/// the project's folders a run can't make, remove or rename an entry in — each holds a protected name, or one
+/// the project's folders a run can't make a file in, nor remove or rename one (a folder in them it may remove,
+/// once emptied) — each holds a protected name, or one
 /// below it (`grant`).
 #[derive(Clone)]
 pub struct Confine {
@@ -87,6 +91,8 @@ pub struct Confine {
     pub serve: Result<(), String>,
     pub made: Arc<Made>,
     pub closed: Vec<PathBuf>,
+    /// The fileless folders under protected ones, made again after a run (`Kept`).
+    pub kept: Arc<Kept>,
     rules: Arc<Ruleset>,
 }
 
@@ -107,6 +113,7 @@ impl PartialEq for Confine {
             && self.serve == other.serve
             && self.closed == other.closed
             && Arc::ptr_eq(&self.made, &other.made)
+            && Arc::ptr_eq(&self.kept, &other.kept)
             && Arc::ptr_eq(&self.rules, &other.rules)
     }
 }
@@ -170,6 +177,114 @@ fn tidy(paths: &[(PathBuf, bool)]) {
                 }
             }
         }
+    }
+}
+
+/// Folders a run can remove where it mustn't: the `REMOVE_DIR` a folder holding a protected name gets
+/// (`confine`) reaches beneath it, into the protected folders too — a rule can't leave one out. Measured
+/// (`empty_folders_inside_git_stay_after_a_run`): with its refs packed, `.git/refs/heads` and `refs/tags`
+/// are empty, a run removed them and `refs/`, and git took `.git` for no repository (its search went on
+/// upward). So every folder under a protected folder that holds no file — nothing, or only such folders —
+/// is noted before a run with its mode (`of`), and made again once the run is over (`restore`, on the run's
+/// own thread before its end is told — `sandbox::after_run`); the report says which (`kept_said`). During
+/// the run itself they can be gone.
+pub struct Kept {
+    /// Parents before their folders.
+    dirs: Vec<(PathBuf, u32)>,
+    restored: std::sync::Mutex<Vec<PathBuf>>,
+}
+
+/// Entries a `Kept` walk reads at most (a huge `llm.sandbox-protect` folder): past it, the rest isn't noted.
+const KEPT_WALK_MAX: usize = 200_000;
+
+impl Kept {
+    pub fn none() -> Kept {
+        Kept { dirs: Vec::new(), restored: Default::default() }
+    }
+
+    /// The fileless folders at and under each folder of `found` (`protected_there`). Links aren't followed.
+    /// Blocks (a worker's).
+    pub fn of(found: &[PathBuf]) -> Kept {
+        use std::os::unix::fs::PermissionsExt;
+        // (whether `dir` holds no file; its fileless folders, parents first, pushed to `out`)
+        fn walk(dir: &Path, mode: u32, budget: &mut usize, out: &mut Vec<(PathBuf, u32)>) -> bool {
+            let Ok(entries) = std::fs::read_dir(dir) else { return false };
+            let (mut fileless, mut below) = (true, Vec::new());
+            for e in entries.flatten() {
+                if *budget == 0 {
+                    return false;
+                }
+                *budget -= 1;
+                match e.file_type() {
+                    Ok(t) if t.is_dir() => {
+                        let mode = e.metadata().map(|m| m.permissions().mode()).unwrap_or(0o755);
+                        fileless &= walk(&e.path(), mode, budget, &mut below);
+                    }
+                    _ => fileless = false,
+                }
+            }
+            if fileless {
+                out.push((dir.to_path_buf(), mode));
+            }
+            out.append(&mut below);
+            fileless
+        }
+        let mut dirs = Vec::new();
+        let mut budget = KEPT_WALK_MAX;
+        for f in found {
+            let Ok(m) = f.symlink_metadata() else { continue };
+            if m.is_dir() {
+                walk(f, m.permissions().mode(), &mut budget, &mut dirs);
+            }
+        }
+        Kept { dirs, restored: Default::default() }
+    }
+
+    /// The noted folders a run removed, made again (parents first, each through its folder opened through no
+    /// link, with its mode) — and noted as restored. Blocks: the run's own thread, once it's over.
+    pub fn restore(&self) {
+        let mut restored = Vec::new();
+        for (path, mode) in &self.dirs {
+            if !path.symlink_metadata().is_err_and(|e| e.kind() == io::ErrorKind::NotFound) {
+                continue;
+            }
+            let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else { continue };
+            let Ok(dir) = landlock::open_unlinked(parent, libc::O_PATH | libc::O_DIRECTORY) else { continue };
+            let Ok(c) = std::ffi::CString::new(name.as_encoded_bytes()) else { continue };
+            let fd = std::os::fd::AsRawFd::as_raw_fd(&dir);
+            // SAFETY: a folder descriptor of ours and a name, live for the calls.
+            let made = unsafe {
+                libc::mkdirat(fd, c.as_ptr(), 0o700) == 0
+                    && libc::fchmodat(fd, c.as_ptr(), (*mode & 0o7777) as libc::mode_t, 0) == 0
+            };
+            if made {
+                restored.push(path.clone());
+            }
+        }
+        self.restored.lock().unwrap_or_else(|e| e.into_inner()).extend(restored);
+    }
+
+    /// What `restore` made again.
+    pub fn restored(&self) -> Vec<PathBuf> {
+        self.restored.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
+
+/// What the report says of folders made again after the run (`Kept`) — the outermost of each — or nothing.
+pub fn kept_said(kept: &Kept, root: &Path) -> String {
+    let restored = kept.restored();
+    let top: Vec<String> = restored
+        .iter()
+        .filter(|p| !restored.iter().any(|q| q != *p && p.starts_with(q)))
+        .map(|p| p.strip_prefix(root).unwrap_or(p).display().to_string())
+        .collect();
+    match top.is_empty() {
+        true => String::new(),
+        false => format!(
+            " It removed empty folders inside protected ones — {} — which tarae made again once it was over: \
+             they're what makes them what they are (git takes .git for a repository by its refs/).",
+            top.join(", ")
+        ),
     }
 }
 
@@ -258,7 +373,8 @@ impl Eq for Confine {}
 
 /// `access` beneath `path`, around `holes`: none at or under it → one rule; `path` itself one (or in one) →
 /// nothing; one deeper → each of its entries on its own, and nothing for the folder itself (its own entries
-/// can't be made, removed or renamed). A path not there is skipped; a symlink gets no rule (`allow`).
+/// can't be made, removed or renamed — `confine` lets a folder there go, once emptied). A path not there is
+/// skipped; a symlink gets no rule (`allow`).
 fn grant(r: &mut Ruleset, path: &Path, access: u64, holes: &[PathBuf]) -> io::Result<()> {
     if holes.iter().any(|h| path.starts_with(h)) {
         return Ok(());
@@ -362,25 +478,49 @@ pub fn confine(
         false => Made::none(),
     };
     grant(&mut r, &p.root, landlock::ALL, &found)?;
+    // A folder holding a protected name: a folder in it may go once emptied (`cargo clean`, `rm -rf target` —
+    // the user's decision, 2026-10-05). Nothing else: no file there is removed (no `REMOVE_FILE`), no entry
+    // made (a rename there is a remove and a make — `.git` renamed away), and what's written is granted
+    // entry by entry. An empty protected folder can go too: a rule can't leave a name out.
+    let closed = closed_folders(&p.root, &found);
+    for dir in &closed {
+        match r.allow(dir, landlock::REMOVE_DIR) {
+            Err(e) if !matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied) => {
+                return Err(io::Error::new(e.kind(), format!("{}: {e}", dir.display())));
+            }
+            _ => {}
+        }
+    }
+    // Every other place a run writes in leaves the project's protected names out where it holds them — a
+    // project in `/dev/shm` (measured: its Cargo.toml written and `.git` renamed away through that grant);
+    // `p.write` drops what holds the project already (`Policy::for_project`). None there: one rule.
+    let protected_in =
+        |place: &Path| found.iter().filter(|f| f.starts_with(place)).cloned().collect::<Vec<_>>();
     if let Some(run) = &p.run {
-        grant(&mut r, run.path(), landlock::ALL, &[])?;
+        grant(&mut r, run.path(), landlock::ALL, &protected_in(run.path()))?;
     }
     for w in &p.write {
-        let holes: Vec<PathBuf> = p.caches.iter().filter(|c| c.starts_with(w)).cloned().collect();
+        let mut holes: Vec<PathBuf> = p.caches.iter().filter(|c| c.starts_with(w)).cloned().collect();
+        holes.extend(protected_in(w));
         grant(&mut r, w, landlock::ALL, &holes)?;
     }
     for f in &p.files {
-        grant(&mut r, f, WRITE_ONE, &[])?;
+        grant(&mut r, f, WRITE_ONE, &protected_in(f))?;
     }
     for (d, access) in DEVICES {
-        grant(&mut r, Path::new(d), access, &[])?;
+        grant(&mut r, Path::new(d), access, &protected_in(Path::new(d)))?;
     }
     let serve = match super::supervisor::unavailable() {
         None => Ok(()),
         Some(why) => Err(why),
     };
-    let closed = closed_folders(&p.root, &found);
-    Ok(Confine { abi, audit, serve, made: Arc::new(made), closed, rules: Arc::new(r) })
+    // (`REMOVE_DIR` reaches into the protected folders too: what it could take there is noted, made again
+    // after the run — `Kept`)
+    let kept = match closed.is_empty() {
+        true => Kept::none(),
+        false => Kept::of(&found),
+    };
+    Ok(Confine { abi, audit, serve, made: Arc::new(made), closed, kept: Arc::new(kept), rules: Arc::new(r) })
 }
 
 /// `start` (a spawn) on a short-lived thread confined to `c` and under the seccomp filter — what it starts is
@@ -844,6 +984,75 @@ mod tests {
         std::fs::remove_dir_all(&outside).ok();
     }
 
+    /// What rights on a folder holding a protected name give, the kernel asked (its entries granted one by
+    /// one as `grant` does, the protected ones not; the folder's own rule varied): with none (today) a run
+    /// rewrites what's there and nothing else; `REMOVE_DIR` lets it remove a folder it emptied (`rm -rf
+    /// target`, `cargo clean`) — no protected one, nor any rename; `MAKE_REG | MAKE_DIR` besides lets it
+    /// make entries it then can't write (write rights go by the folder, Cargo.toml's too) — and rename a
+    /// protected folder away (a rename in one folder is a remove and a make there).
+    #[test]
+    fn what_a_folder_holding_a_protected_name_may_be_given() {
+        let Some(abi) = kernel_abi("what_a_folder_holding_a_protected_name_may_be_given") else { return };
+        let base = std::env::temp_dir().join(format!("tarae-own-rights-{}", std::process::id()));
+        // Each try in a fresh project: (what, done)
+        let tries = |own: u64| -> Vec<(&'static str, bool)> {
+            let f = base.join(format!("p{own}"));
+            let _ = std::fs::remove_dir_all(&f);
+            for (p, text) in [("Cargo.toml", "kept\n"), (".git/HEAD", "ref\n"), ("target/debug/x", "o\n")] {
+                std::fs::create_dir_all(f.join(p).parent().unwrap()).unwrap();
+                std::fs::write(f.join(p), text).unwrap();
+            }
+            std::fs::create_dir_all(f.join(".github")).unwrap();
+            let mut r = Ruleset::new(abi).unwrap();
+            grant(&mut r, Path::new("/"), READ, &[]).unwrap();
+            let holes = [f.join("Cargo.toml"), f.join(".git"), f.join(".github")];
+            grant(&mut r, &f, landlock::ALL, &holes).unwrap();
+            if own != 0 {
+                r.allow(&f, own).unwrap();
+            }
+            let f2 = f.clone();
+            let done = landlock::confined(
+                &r,
+                || Ok(()),
+                |()| {
+                    let ok = |r: io::Result<()>| r.is_ok();
+                    Ok(vec![
+                        ("remove target/ whole", ok(std::fs::remove_dir_all(f2.join("target")))),
+                        ("write a new file", ok(std::fs::write(f2.join("new.txt"), "x"))),
+                        ("make dist/ and write in it", {
+                            ok(std::fs::create_dir(f2.join("dist"))
+                                .and_then(|_| std::fs::write(f2.join("dist/a"), "x")))
+                        }),
+                        ("write Cargo.toml", ok(std::fs::write(f2.join("Cargo.toml"), "changed"))),
+                        ("remove Cargo.toml", ok(std::fs::remove_file(f2.join("Cargo.toml")))),
+                        ("rename .git away", ok(std::fs::rename(f2.join(".git"), f2.join("git-old")))),
+                        ("remove .git whole", ok(std::fs::remove_dir_all(f2.join(".git")))),
+                        ("remove the empty .github", ok(std::fs::remove_dir(f2.join(".github")))),
+                    ])
+                },
+            )
+            .unwrap();
+            assert_eq!(std::fs::read_to_string(f.join("Cargo.toml")).unwrap(), "kept\n", "{own:#x}");
+            done
+        };
+        let only = |done: Vec<(&'static str, bool)>| {
+            done.into_iter().filter(|d| d.1).map(|d| d.0).collect::<Vec<_>>()
+        };
+        assert_eq!(only(tries(0)), Vec::<&str>::new(), "today");
+        assert_eq!(
+            only(tries(landlock::REMOVE_DIR)),
+            ["remove target/ whole", "remove the empty .github"],
+            "A"
+        );
+        let b = landlock::REMOVE_DIR | landlock::MAKE_REG | landlock::MAKE_DIR;
+        assert_eq!(
+            only(tries(b)),
+            ["remove target/ whole", "rename .git away", "remove the empty .github"],
+            "A + B"
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     /// A scratch project and home for a real policy, under the build's `target/` (not in `/tmp`: the
     /// policy writes there, and leaves out what holds the project).
     struct Scratch {
@@ -903,6 +1112,213 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.base);
         }
+    }
+
+    /// For real (the user's decision A, 2026-10-05): in a folder holding a protected name a run may remove a
+    /// folder it emptied — `rm -rf target`, and cargo's own `cargo clean` — but `Cargo.toml`, `package.json`
+    /// and `.git` stay as they are: not written, truncated, removed, renamed over or away; no new file there.
+    #[test]
+    fn a_run_removes_folders_beside_protected_names_and_nothing_protected() {
+        let Some(_) = kernel_abi("a_run_removes_folders_beside_protected_names_and_nothing_protected") else {
+            return;
+        };
+        let s = Scratch::new("remove-dir");
+        // (a workspace of its own: under tarae's tree, cargo would take tarae's for its)
+        let manifest = "[package]\nname = \"p\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n";
+        std::fs::write(s.root.join("Cargo.toml"), manifest).unwrap();
+        std::fs::write(s.root.join("package.json"), "{}\n").unwrap();
+        for f in ["target/debug/x", "sub/target/y", "build/z"] {
+            std::fs::create_dir_all(s.root.join(f).parent().unwrap()).unwrap();
+            std::fs::write(s.root.join(f), "o").unwrap();
+        }
+        let p = s.policy();
+        let script = r#"
+            t() { if ( eval "$2" ) >/dev/null 2>&1; then echo "$1 ok"; else echo "$1 no"; fi; }
+            t rm-target 'rm -rf "$R/target"'
+            t rm-sub-target 'rm -rf "$R/sub/target"'
+            t cargo-clean 'mkdir -p "$R/build/t" && CARGO_TARGET_DIR="$R/build" cargo clean --offline'
+            t write-manifest 'printf x >> "$R/Cargo.toml"'
+            t truncate-manifest 'truncate -s 0 "$R/Cargo.toml"'
+            t remove-manifest 'rm -f "$R/Cargo.toml"'
+            t rename-over-manifest 'printf "[x]\n" > "$R/src/c" && mv -f "$R/src/c" "$R/Cargo.toml"'
+            t write-package-json 'printf x >> "$R/package.json"'
+            t remove-package-json 'rm -f "$R/package.json"'
+            t rename-git-away 'mv "$R/.git" "$R/git-old"'
+            t remove-git 'rm -rf "$R/.git"'
+            t new-file-at-root 'printf x > "$R/new.txt"'
+            t new-build-rs-at-root 'printf "fn main() {}\n" > "$R/build.rs"'
+        "#;
+        let mut cmd = crate::sandbox::command(Some(&p), "sh", &["-c".into(), script.into()]);
+        cmd.env("R", &s.root).env_remove("CARGO_TARGET_DIR");
+        let spawned = crate::sandbox::spawn(Some(&p), &cmd).unwrap();
+        let mut out = String::new();
+        io::Read::read_to_string(&mut spawned.stdout.unwrap(), &mut out).unwrap();
+        crate::spawn::wait(spawned.pid).unwrap();
+        let got: Vec<&str> = out.lines().collect();
+        let cargo = match std::process::Command::new("cargo").arg("--version").output() {
+            Ok(o) if o.status.success() => "cargo-clean ok",
+            _ => "cargo-clean no",
+        };
+        let want = [
+            "rm-target ok",
+            "rm-sub-target ok",
+            cargo,
+            "write-manifest no",
+            "truncate-manifest no",
+            "remove-manifest no",
+            "rename-over-manifest no",
+            "write-package-json no",
+            "remove-package-json no",
+            "rename-git-away no",
+            "remove-git no",
+            "new-file-at-root no",
+            "new-build-rs-at-root no",
+        ];
+        assert_eq!(got, want);
+        assert!(!s.root.join("target").exists() && !s.root.join("build").exists(), "removed");
+        assert_eq!(std::fs::read_to_string(s.root.join("Cargo.toml")).unwrap(), manifest);
+        assert_eq!(std::fs::read_to_string(s.root.join("package.json")).unwrap(), "{}\n");
+        assert!(s.root.join(".git/HEAD").exists() && !s.root.join("build.rs").exists());
+    }
+
+    /// For real: a project inside a place a run may write anything in keeps its protected names, as on macOS
+    /// — the temp folder, a place `llm.sandbox-write` opens, `/dev/shm` (a device folder runs write in). Its
+    /// own files are written; `Cargo.toml` and `.git` aren't, however they're tried.
+    #[test]
+    fn a_project_inside_a_writable_place_keeps_its_protected_names() {
+        let Some(_) = kernel_abi("a_project_inside_a_writable_place_keeps_its_protected_names") else {
+            return;
+        };
+        let pid = std::process::id();
+        let under_target = std::env::current_dir().unwrap().join(format!("target/tarae-in-write-{pid}"));
+        let places = [
+            ("temp", std::env::temp_dir().join(format!("tarae-in-tmp-{pid}"))),
+            ("sandbox-write", under_target),
+            ("dev-shm", PathBuf::from(format!("/dev/shm/tarae-in-shm-{pid}"))),
+        ];
+        let script = r#"
+            t() { if ( eval "$2" ) >/dev/null 2>&1; then echo "$1 ok"; else echo "$1 no"; fi; }
+            t own-file 'printf x > "$R/src/new.rs"'
+            t write-manifest 'printf x >> "$R/Cargo.toml"'
+            t truncate-manifest 'truncate -s 0 "$R/Cargo.toml"'
+            t remove-manifest 'rm -f "$R/Cargo.toml"'
+            t write-git 'printf x >> "$R/.git/HEAD"'
+            t rename-git-away 'mv "$R/.git" "$R/git-old"'
+        "#;
+        let want = [
+            "own-file ok",
+            "write-manifest no",
+            "truncate-manifest no",
+            "remove-manifest no",
+            "write-git no",
+            "rename-git-away no",
+        ];
+        for (name, base) in places {
+            if !base.parent().is_some_and(Path::is_dir) {
+                continue;
+            }
+            let _ = std::fs::remove_dir_all(&base);
+            for (f, text) in
+                [("proj/Cargo.toml", "kept\n"), ("proj/.git/HEAD", "ref\n"), ("proj/src/main.rs", "x")]
+            {
+                std::fs::create_dir_all(base.join(f).parent().unwrap()).unwrap();
+                std::fs::write(base.join(f), text).unwrap();
+            }
+            let base = std::fs::canonicalize(&base).unwrap();
+            let root = base.join("proj");
+            let env = Env {
+                root: root.clone(),
+                tmp: Some(crate::sandbox::profile_path(&std::env::temp_dir())),
+                write: if name == "sandbox-write" { vec![base.display().to_string()] } else { Vec::new() },
+                ..Default::default()
+            };
+            let p = crate::sandbox::confined(Policy { run: RunDir::new().ok(), ..Policy::for_project(&env) });
+            let mut cmd = crate::sandbox::command(Some(&p), "sh", &["-c".into(), script.into()]);
+            cmd.env("R", &root);
+            let spawned = crate::sandbox::spawn(Some(&p), &cmd).unwrap();
+            let mut out = String::new();
+            io::Read::read_to_string(&mut spawned.stdout.unwrap(), &mut out).unwrap();
+            crate::spawn::wait(spawned.pid).unwrap();
+            let got: Vec<&str> = out.lines().collect();
+            let kept = std::fs::read_to_string(root.join("Cargo.toml")).unwrap_or_default();
+            let _ = std::fs::remove_dir_all(&base);
+            assert_eq!(got, want, "a project in {name}");
+            assert_eq!(kept, "kept\n", "a project in {name}");
+        }
+    }
+
+    /// For real: `REMOVE_DIR` on the project's folders reaches beneath them, into the protected folders too
+    /// (a rule can't leave one out) — in a repository whose refs are all packed, `refs/heads`, `refs/tags`,
+    /// then `refs/` are empty, and without `refs/` git no longer takes `.git` for a repository. A run's
+    /// `rmdir` of those (and of `objects/info`, `branches`) leaves them as they were once it's over, and
+    /// git still finds its repository there. (git's search upward stops at the test's own folder.)
+    #[test]
+    fn empty_folders_inside_git_stay_after_a_run() {
+        let Some(_) = kernel_abi("empty_folders_inside_git_stay_after_a_run") else { return };
+        let s = Scratch::new("git-empty");
+        std::fs::remove_dir_all(s.root.join(".git")).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&s.root)
+                .args(["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false"])
+                .args(["-c", "user.email=t@example.invalid", "-c", "user.name=t"])
+                .args(args)
+                .env("GIT_CEILING_DIRECTORIES", &s.base)
+                .output()
+                .unwrap()
+        };
+        assert!(git(&["init", "-q"]).status.success());
+        std::fs::create_dir_all(s.root.join(".git/branches")).unwrap();
+        assert!(git(&["add", "-A"]).status.success());
+        assert!(git(&["commit", "-q", "-m", "base"]).status.success());
+        assert!(git(&["tag", "t1"]).status.success());
+        assert!(git(&["pack-refs", "--all"]).status.success());
+        let empty = ["refs/heads", "refs/tags", "objects/info", "branches"];
+        for d in empty {
+            let n = std::fs::read_dir(s.root.join(".git").join(d)).unwrap().count();
+            assert_eq!(n, 0, ".git/{d} is empty once the refs are packed");
+        }
+        let p = s.policy();
+        let script = r#"
+            for d in refs/heads refs/tags refs objects/info branches; do
+                if rmdir "$R/.git/$d" 2>/dev/null; then echo "$d removed"; else echo "$d kept"; fi
+            done
+        "#;
+        let mut cmd = crate::sandbox::command(Some(&p), "sh", &["-c".into(), script.into()]);
+        cmd.env("R", &s.root);
+        let after_run = crate::sandbox::after_run(Some(&p));
+        let spawned = crate::sandbox::spawn(Some(&p), &cmd).unwrap();
+        let mut out = String::new();
+        io::Read::read_to_string(&mut spawned.stdout.unwrap(), &mut out).unwrap();
+        crate::spawn::wait(spawned.pid).unwrap();
+        // (as a run's own thread does once it's reaped — `task.rs`, `testing.rs`)
+        after_run();
+        // The run removed them all (`REMOVE_DIR` reaches there) …
+        assert_eq!(
+            out.lines().collect::<Vec<_>>(),
+            [
+                "refs/heads removed",
+                "refs/tags removed",
+                "refs removed",
+                "objects/info removed",
+                "branches removed"
+            ]
+        );
+        // … and the report says what was made again
+        let r = crate::sandbox::Guard::In(Box::new(p.clone())).report(&[]);
+        let r = r.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            r.contains("It removed empty folders inside protected ones — .git/refs, .git/objects/info, .git/branches — which tarae made again"),
+            "{r}"
+        );
+        let gone: Vec<&str> = ["refs/heads", "refs/tags", "refs", "objects/info", "branches"]
+            .into_iter()
+            .filter(|d| !s.root.join(".git").join(d).is_dir())
+            .collect();
+        let found = git(&["rev-parse", "--git-dir"]);
+        assert!(found.status.success(), "git: {} (gone: {gone:?})", String::from_utf8_lossy(&found.stderr));
+        assert_eq!(gone, Vec::<&str>::new(), "folders inside .git gone after the run");
     }
 
     /// For real: a run started through `sandbox::spawn` keeps to its policy — writes in the project but its
@@ -1306,6 +1722,29 @@ mod tests {
         assert!(!r.contains("Read from Landlock's audit log"), "{r}");
     }
 
+    /// cargo says what it couldn't do on one line and why below (`Caused by:` … `Permission denied`, the
+    /// same form `cargo clean` failed in, step 7): a file of a folder holding protected names it couldn't
+    /// remove is said as Landlock's own rule — not "blocked nothing".
+    #[test]
+    fn cargos_two_line_refusal_is_read() {
+        let Some(_) = kernel_abi("cargos_two_line_refusal_is_read") else { return };
+        let s = Scratch::new("cargo-said");
+        let p = s.policy();
+        let lock = s.root.join("Cargo.lock");
+        let out = [
+            (true, format!("error: failed to remove file `{}`", lock.display())),
+            (true, String::new()),
+            (true, "Caused by:".to_string()),
+            (true, "  Permission denied (os error 13)".to_string()),
+        ];
+        let said: Vec<String> = p.said_in_output(&out, &[]).iter().map(Denial::plain).collect();
+        let lock = crate::sandbox::home_shown(&lock.display().to_string());
+        assert_eq!(
+            said,
+            [format!("removing {lock} — a folder holding protected names keeps its files on Linux")]
+        );
+    }
+
     /// Without an audit log, what a run refused is read from its error lines: Landlock's "Permission
     /// denied" on a path the policy keeps, as the profile's words — paths as they are (no `/private`).
     #[test]
@@ -1665,5 +2104,119 @@ mod tests {
         // SAFETY: as above.
         assert_ne!(unsafe { libc::kill(pid as i32, 0) }, 0, "the stream stopped with it");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The toolchains in the sandbox, measured (`target/sb/landlock-measured.md`, step 7): each command
+    /// `TARAE_MEASURE` lists — a file, a line each: `name<TAB>project<TAB>localhost 0|1<TAB>command`, projects
+    /// with warm caches (`target/sb/measure-toolchains.sh` makes them) — run as Claude's runs go: the
+    /// project's own policy (`sandbox::policy`: the toolchains' folders asked, what a first build makes made
+    /// first, the protected names walked), the run's environment (`sandbox::command`), its spawn
+    /// (`sandbox::spawn`: Landlock, seccomp, tarae's supervisor) — and plain, `TARAE_MEASURE_N` times each (3),
+    /// taking turns. Prints wall times, exits, the policy's own time and what the report says it blocked.
+    /// Skips without the file.
+    #[test]
+    fn perf_toolchains_in_the_sandbox() {
+        if crate::test_results::unoptimized("sandbox::linux::tests::perf_toolchains_in_the_sandbox") {
+            return;
+        }
+        use std::time::{Duration, Instant};
+        let Some(list) = std::env::var_os("TARAE_MEASURE") else {
+            let line = format!(
+                "{}sandbox::linux::tests::perf_toolchains_in_the_sandbox — no TARAE_MEASURE list\n",
+                crate::test_results::SELF_SKIP
+            );
+            let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+            return;
+        };
+        let n: usize = std::env::var("TARAE_MEASURE_N").ok().and_then(|n| n.parse().ok()).unwrap_or(3);
+        let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+        let median = |mut v: Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        let list = std::fs::read_to_string(list).unwrap();
+        let mut out = vec![
+            "| command | plain (ms, median) | sandboxed (ms, median) | + | policy (ms) | exits plain / sandboxed | \
+             the report |"
+                .to_string(),
+            "|---|---|---|---|---|---|---|".to_string(),
+        ];
+        for line in list.lines().filter(|l| !l.trim().is_empty() && !l.starts_with('#')) {
+            let [name, dir, localhost, cmd] = line.splitn(4, '\t').collect::<Vec<_>>()[..] else {
+                panic!("not name<TAB>project<TAB>0|1<TAB>command: {line:?}")
+            };
+            let root = std::fs::canonicalize(dir).unwrap();
+            let llm = crate::llm::LlmConfig { sandbox_localhost: localhost == "1", ..Default::default() };
+            // One run: (wall ms, exit code, policy ms, the report's first line — sandboxed only)
+            let run = |sandboxed: bool| {
+                let t = Instant::now();
+                let p = sandboxed.then(|| {
+                    let mut p = crate::sandbox::policy(&root, &llm, &[]);
+                    p.watch = crate::sandbox::watch_for(&p);
+                    p
+                });
+                let policy_ms = ms(t.elapsed());
+                let mut c = crate::sandbox::command(p.as_ref(), "sh", &["-c".into(), cmd.to_string()]);
+                c.current_dir(&root);
+                let t = Instant::now();
+                let s = crate::sandbox::spawn(p.as_ref(), &c).unwrap();
+                let read = |r: Option<std::io::PipeReader>, err: bool| {
+                    std::thread::spawn(move || {
+                        let mut text = String::new();
+                        if let Some(mut r) = r {
+                            let _ = io::Read::read_to_string(&mut r, &mut text);
+                        }
+                        text.lines().map(|l| (err, l.to_string())).collect::<Vec<_>>()
+                    })
+                };
+                let (o, e) = (read(s.stdout, false), read(s.stderr, true));
+                let status = crate::spawn::wait(s.pid).unwrap();
+                let wall = ms(t.elapsed());
+                let lines: Vec<(bool, String)> =
+                    o.join().unwrap().into_iter().chain(e.join().unwrap()).collect();
+                let report = p.map(|p| {
+                    let r = crate::sandbox::Guard::In(Box::new(p)).report(&lines);
+                    let first =
+                        r.lines().take_while(|l| !l.starts_with("In tarae's sandbox")).collect::<Vec<_>>();
+                    first.join(" / ")
+                });
+                if !status.success() {
+                    let tail: Vec<&str> = lines.iter().rev().take(15).map(|(_, l)| l.as_str()).collect();
+                    let _ = io::Write::write_all(
+                        &mut io::stderr(),
+                        format!(
+                            "{name} ({}): exit {status}\n  {}\n",
+                            if sandboxed { "sandboxed" } else { "plain" },
+                            tail.into_iter().rev().collect::<Vec<_>>().join("\n  ")
+                        )
+                        .as_bytes(),
+                    );
+                }
+                (wall, status.code().unwrap_or(-1), policy_ms, report)
+            };
+            run(false); // (warm: the first run of a command isn't counted)
+            let (mut plain, mut sandboxed, mut policy) = (Vec::new(), Vec::new(), Vec::new());
+            let (mut exits, mut said) = ((Vec::new(), Vec::new()), String::new());
+            for _ in 0..n {
+                let (w, code, _, _) = run(false);
+                plain.push(w);
+                exits.0.push(code);
+                let (w, code, p, r) = run(true);
+                sandboxed.push(w);
+                policy.push(p);
+                exits.1.push(code);
+                said = r.unwrap_or_default();
+            }
+            let (pl, sb) = (median(plain), median(sandboxed));
+            out.push(format!(
+                "| `{name}` | {pl:.0} | {sb:.0} | {:+.0}% | {:.0} | {:?} / {:?} | {} |",
+                (sb / pl - 1.0) * 100.0,
+                median(policy),
+                exits.0,
+                exits.1,
+                said.replace('|', "\\|")
+            ));
+        }
+        let _ = io::Write::write_all(&mut io::stderr(), format!("{}\n", out.join("\n")).as_bytes());
     }
 }

@@ -682,6 +682,7 @@ impl Editor {
         let task = Task { cwd: self.path_of(&task.cwd), ..task };
         let install = after.is_some();
         let watched = sandbox.is_some_and(|p| p.watch.is_some());
+        let after_run = crate::sandbox::after_run(sandbox);
         let mut cmd = crate::sandbox::command(sandbox, "sh", &["-c".into(), task.cmd.clone()]);
         // (the user's own find this tarae's UI state — `tarae state`; Claude's never get a socket's path, and
         // couldn't reach it from the sandbox anyway)
@@ -819,6 +820,8 @@ impl Editor {
                 });
             }
             let status = crate::spawn::wait_and_drain(pid, &read_all, readers).ok();
+            // What it removed inside protected folders is made again before its end is told (`sandbox::after_run`)
+            after_run();
             // Its last denials reach the watch before its end is told (here, not on the main loop)
             if watched {
                 std::thread::sleep(crate::sandbox::WATCH_LAST);

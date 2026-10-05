@@ -938,6 +938,16 @@ pub fn parse_denial(json: &str, tag: &str) -> Option<Denial> {
 pub const WATCH_READY: std::time::Duration = std::time::Duration::from_millis(150);
 pub const WATCH_LAST: std::time::Duration = std::time::Duration::from_millis(150);
 
+/// How long a run in `p` waits for its watch to be up before it starts (`tools::guard_then_go`, on a worker):
+/// `WATCH_READY` when the watch reads `log stream` (macOS — it reads from when it's up). Linux's audit
+/// stream reads from a mark taken when it was asked for (`linux::AuditSource::stream`): no wait.
+pub fn watch_wait(p: &Policy) -> std::time::Duration {
+    match !cfg!(target_os = "linux") && p.watch.as_ref().is_some_and(|w| w.pid().is_some()) {
+        true => WATCH_READY,
+        false => std::time::Duration::ZERO,
+    }
+}
+
 /// How long a watch waits for its run to start (`Watch::run_started`) before it ends itself — the run's
 /// saves come first (`tools::go`), a few ms as a rule. Seen: a `log stream` living on 18 minutes after its
 /// run, held by nothing `:procs` knew; a watch no longer depends on its holders letting go.
@@ -1604,9 +1614,10 @@ impl Policy {
             let notes = format!(
                 " On Linux a protected name it makes where none is yet isn't refused (the user is asked about \
                  it before your next run), and the terminal multiplexers' folders in /tmp stay writable.\
-                 {beyond}{}{}",
+                 {beyond}{}{}{}",
                 linux::notes(c.abi),
-                linux::made_said(&c.made, &self.root)
+                linux::made_said(&c.made, &self.root),
+                linux::kept_said(&c.kept, &self.root)
             );
             return Some((net, notes));
         }
@@ -1721,12 +1732,17 @@ impl Policy {
             words.iter().any(|w| l.contains(w))
         };
         let mut near = vec![false; output.len()];
-        for (i, _) in output.iter().enumerate().filter(|(_, (_, l))| refused(l)) {
+        // (Landlock's own: "Permission denied" at or just after it — cargo says the path, then why)
+        let mut denied = vec![false; output.len()];
+        for (i, (_, l)) in output.iter().enumerate().filter(|(_, (_, l))| refused(l)) {
             near[i.saturating_sub(BEFORE)..=i].fill(true);
+            if l.to_ascii_lowercase().contains("permission denied") {
+                denied[i.saturating_sub(BEFORE)..=i].fill(true);
+            }
         }
         let mut out: Vec<Denial> = Vec::new();
-        let lines = output.iter().zip(&near).filter(|(_, n)| **n).map(|((_, l), _)| l);
-        for l in lines.filter(|l| failed(l)) {
+        let lines = output.iter().zip(near.iter().zip(&denied)).filter(|(_, (n, _))| **n);
+        for (l, denied) in lines.map(|((_, l), (_, d))| (l, *d)).filter(|(l, _)| failed(l)) {
             for real in paths_in(l, &self.root) {
                 let op = match (self.reads_allow(&real), self.writes_allow(&real)) {
                     (true, true) => continue,
@@ -1739,7 +1755,7 @@ impl Policy {
                 let target = real.display().to_string();
                 out.push(Denial { process: SEEN_IN_OUTPUT.into(), op: op.into(), target });
             }
-            for d in self.landlock_said_in(l) {
+            for d in self.landlock_said_in(l, denied) {
                 if !seen.iter().chain(&out).any(|s| s.op == d.op && s.target == d.target) {
                     out.push(d);
                 }
@@ -1785,15 +1801,15 @@ impl Policy {
 
     /// Linux: what a line of output says Landlock refused though the rules above let it write — making,
     /// removing or moving an entry of a folder that holds a protected name, or one below it
-    /// (`linux::Confine::closed`; "Permission denied" — by a path, or a name from where the run is, as `sh`
-    /// says it); from ABI 6, a signal to a process outside the run's own ("Operation not permitted" from
-    /// `kill`). None elsewhere.
-    fn landlock_said_in(&self, line: &str) -> Vec<Denial> {
+    /// (`linux::Confine::closed`; "Permission denied" on it or, `denied`, just after it as cargo says it —
+    /// by a path, or a name from where the run is, as `sh` says it); from ABI 6, a signal to a process
+    /// outside the run's own ("Operation not permitted" from `kill`). None elsewhere.
+    fn landlock_said_in(&self, line: &str, denied: bool) -> Vec<Denial> {
         #[cfg(target_os = "linux")]
         if let Some(Ok(c)) = &self.confine {
             let low = line.to_ascii_lowercase();
             let mut out: Vec<Denial> = Vec::new();
-            if low.contains("permission denied") {
+            if denied || low.contains("permission denied") {
                 let op = match () {
                     _ if low.contains("remove") || low.contains("unlink") => "file-entry-remove",
                     _ if low.contains("move") || low.contains("rename") => "file-entry-move",
@@ -1820,7 +1836,7 @@ impl Policy {
             }
             return out;
         }
-        let _ = line;
+        let _ = (line, denied);
         Vec::new()
     }
 
@@ -2391,6 +2407,25 @@ pub fn spawn(policy: Option<&Policy>, cmd: &Command) -> std::io::Result<crate::s
     crate::spawn::setsid(cmd)
 }
 
+/// What a run in `policy` needs done once it's over, before its end is told (the run's own thread, after it's
+/// reaped): on Linux, the folders it could remove inside protected ones made again (`linux::Kept`) — the
+/// report says which. Nothing elsewhere.
+pub fn after_run(policy: Option<&Policy>) -> impl FnOnce() + Send + 'static {
+    #[cfg(target_os = "linux")]
+    let kept = match policy.map(|p| &p.confine) {
+        Some(Some(Ok(c))) => Some(c.kept.clone()),
+        _ => None,
+    };
+    #[cfg(not(target_os = "linux"))]
+    let _ = policy;
+    move || {
+        #[cfg(target_os = "linux")]
+        if let Some(k) = kept {
+            k.restore();
+        }
+    }
+}
+
 /// `program args` inside `policy` — or as it is, without one. On Linux the sandbox comes with the spawn
 /// (`spawn`); here only what a sandboxed run's environment says.
 pub fn command(policy: Option<&Policy>, program: &str, args: &[String]) -> Command {
@@ -2474,6 +2509,20 @@ mod tests {
         crate::spawn::wait(run.pid).unwrap();
         assert!(gone(watching), "the watch ({watching}) outlived its run");
         assert_eq!(held.pid(), None);
+    }
+
+    /// A run waits for its watch's stream before it starts only on macOS: `log stream` reads from when it's
+    /// up; Linux's audit stream reads from a mark taken when it was asked for (5c), so a run there doesn't
+    /// wait. No stream, no wait. (A stand-in stream: `sleep`.)
+    #[test]
+    fn only_macos_runs_wait_for_their_watch() {
+        let mut p = Policy::for_project(&Env { root: PathBuf::from("/w/p"), ..Default::default() });
+        assert_eq!(watch_wait(&p), std::time::Duration::ZERO, "no watch");
+        let w = Watch::spawned_for_test("sleep", "5");
+        p.watch = Some(w.clone());
+        let want = if cfg!(target_os = "linux") { std::time::Duration::ZERO } else { WATCH_READY };
+        assert_eq!(watch_wait(&p), want);
+        w.finish();
     }
 
     /// A watch whose run never starts (the turn ended meanwhile, the run refused …) ends on its own, saying
