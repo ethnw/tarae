@@ -3859,6 +3859,20 @@ mod tests {
             said.starts_with("no preflight steps — no language pack knows this kind of project"),
             "{said}"
         );
+        // A Maven project with its own wrapper: no defaults — the wrapper is the repository's script, run from
+        // the project's own [preflight] once trusted — and it says so, how to list it
+        for f in ["pom.xml", "mvnw"] {
+            std::fs::write(dir.join(f), "").unwrap();
+        }
+        ed.status = None;
+        ed.preflight_start(Set::Quick).unwrap();
+        settle_for(&mut ed, |ed| ed.status.is_some());
+        let said = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        assert!(said.starts_with("no preflight steps — this project builds with its own ./mvnw"), "{said}");
+        assert!(ed.offers.is_empty() && ed.session.task_run.is_none(), "nothing asked, nothing ran");
+        for f in ["pom.xml", "mvnw"] {
+            std::fs::remove_file(dir.join(f)).unwrap();
+        }
         ed.config.preflight = vec![
             step("fmt", "echo formatted"),
             step("clippy", "echo 'a.rs:2:1: error: not like that' >&2; exit 3"),

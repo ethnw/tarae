@@ -269,9 +269,11 @@ as a review again, whether or not it was made this way.
 Some edits still ask first, one at a time:
 
 - files outside the project (where the link or `..` really leads)
-- anything in `.git`, and the files in `llm.review-ask`: build scripts, manifests, and settings that decide what
-  runs (`build.rs`, `Cargo.toml`, `package.json`, `Makefile`, `.tarae.toml`, `.cargo/`, `.github/`, `.claude/`, …).
-  A name matches anywhere in the project, and a path with `/` matches from its root
+- anything in `.git`, and the protected names: build scripts, manifests, and settings that decide what runs
+  (`build.rs`, `Cargo.toml`, `package.json`, `Makefile`, `pom.xml`, `build.gradle`, `.tarae.toml`, `.cargo/`,
+  `.github/`, `.claude/`, … — the list below). They always ask, whatever the project or its config says.
+  `llm.review-ask` adds yours: a name matches anywhere in the project, and a path with `/` matches from its
+  root
 - a file with unsaved edits of yours
 
 The turns are kept on disk per project, so `:restart` (or a crash in the middle of a turn) doesn't lose them.
@@ -417,10 +419,14 @@ review) and run that.
 What Claude runs, with `run` and `run_tests`, runs in a sandbox (macOS: Seatbelt). What you run yourself doesn't.
 
 - It can write in the project, except the paths in `llm.sandbox-protect` and what runs later outside the
-  sandbox or sets how things run, wherever it sits in the project and in any case: `.git`, `build.rs`,
-  `Cargo.toml`, `package.json`, `Makefile`, `justfile`, `.envrc`, `.tarae.toml`, `.tarae.local.toml`, `.cargo`,
-  `.github`, `.claude` and `.vscode` (`llm.review-ask`'s defaults, and the two your builds, `:preflight` and
-  git read). A command can't make, change, move, remove or hard-link them; Claude is told which write was
+  sandbox or sets how things run, wherever it sits in the project and in any case. Every language pack lists
+  its own (`protect` in its `pack.toml`), and every pack's apply in every project, whatever its languages (a
+  Rust project can hold a `pom.xml`): Rust's `build.rs`, `Cargo.toml` and `.cargo`; npm's `package.json`;
+  make's `Makefile` and `GNUmakefile`, and just's `justfile` and `.justfile`; Java's `build.gradle(.kts)`,
+  `settings.gradle(.kts)`, `gradle.properties`, `gradlew`, `gradle/wrapper`, `buildSrc`, `pom.xml`, `mvnw` and
+  `.mvn` (your builds run them, and jdtls when it imports the project). tarae adds `.git`, `.tarae.toml`,
+  `.tarae.local.toml`, `.envrc`, `.github`, `.claude` and `.vscode`. Nothing a project or your config sets
+  takes one out. A command can't make, change, move, remove or hard-link them; Claude is told which write was
   kept and to change it with Edit, which you review. Inside `target/` and `node_modules/` those names are
   tools' output (cmake's `Makefile`s, each package's `package.json`) and are written as usual. A command can
   hard-link only files it may write, so nothing from outside is brought into the project under another name.
@@ -446,8 +452,20 @@ What Claude runs, with `run` and `run_tests`, runs in a sandbox (macOS: Seatbelt
   `~/.config/git`, `~/.CFUserTextEncoding`, Go's `~/go`, `~/Library/Caches/go-build` and
   `~/Library/Application Support/go`, `~/.npm`, `~/Library/Fonts`, pip's settings files, tarae's downloaded
   grammars, the folders on your `PATH`, and the `.cargo/config.toml` files in the folders above the project.
+  For Java, measured with Gradle and Maven: the JDKs in `~/Library/Java/JavaVirtualMachines`, Maven's
+  `~/.m2/repository` and `~/.m2/wrapper` (not `settings.xml`), Gradle's downloaded dependencies
+  (`caches/modules-2`) and wrapper distributions in your Gradle home (`$GRADLE_USER_HOME`, else `~/.gradle`).
   A file's metadata (that it's there, its size and time) stays readable: every program looks at home and the
   folders above the project.
+- **Gradle gets a home of its own for each command** (`GRADLE_USER_HOME` in the run's temp folder, gone with
+  it). Your Gradle home holds what your own builds run later — compiled build scripts, the wrapper's
+  distributions, the dependencies — so a command never writes there: it reads your downloaded dependencies in
+  place (`GRADLE_RO_DEP_CACHE`) and your wrapper's distributions through a link, writing only the wrapper's
+  lock file beside each. Your `gradle.properties` and init scripts aren't read. No daemon is kept after the
+  build (`-Dorg.gradle.daemon=false`, after your own `GRADLE_OPTS`). Gradle's client talks to its daemon and
+  test workers over this machine's ports, so a Gradle build in the sandbox needs `llm.sandbox-localhost`; your
+  own daemons stay out of reach even then, since their registry (`daemon/` in your Gradle home) is never read —
+  with it readable, a sandboxed build was measured running in a daemon started outside the sandbox.
 - **Settings that hold a token are read from a copy without it.** Some of what the tools read can hold a
   token: git's settings (`http.extraHeader`, a token in a `url.<…>.insteadOf`), Go's env file (`go env -w
   GOPROXY=https://user:…@…`), pip's (an `index-url` with `user:pass@`), npm's `~/.npmrc` (`_authToken`).
@@ -466,7 +484,8 @@ What Claude runs, with `run` and `run_tests`, runs in a sandbox (macOS: Seatbelt
 - **Some places it never reads, whatever you allow**: `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`,
   `~/.kube`, `~/.docker`, `~/.netrc`, `~/.npmrc`, `~/.pypirc`, `~/.password-store`, `~/Library/Keychains`,
   git's credential store (`~/.git-credentials`, `~/.config/git/credentials`),
-  Claude's own `~/.claude` and `~/.claude.json`, cargo's `credentials.toml`, and tarae's state (its
+  Claude's own `~/.claude` and `~/.claude.json`, cargo's `credentials.toml`, Gradle's daemons' registry
+  (`~/.gradle/daemon`), and tarae's state (its
   conversations, what you allowed). The one exception is tarae's log. It can't reach the clipboard or the
   keychain's server either. Nothing it can't read can be hard-linked into the project.
 - When it's denied a read, the run's panel says so. `space m s` offers to let it read that file's folder

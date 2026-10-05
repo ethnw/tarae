@@ -581,6 +581,31 @@ beside them:
   going is. P3 decides whether such deletes ask. Links, submodules and mode-only changes aren't covered either
   (named in the report).
 
+**Java under P2 (2026-10-05)** — measured with Gradle 9.8.0 (Homebrew), a 9.7.1 wrapper, and Maven 3.9.16
+(the wrapper's cached distribution) on small offline projects, every read and write in home reported
+(`target/sb/java-plan.md`, `java-checkpoint.md`, the scripts beside them):
+
+- **Reads added**: `~/Library/Java/JavaVirtualMachines` (the `/usr/bin/java` stub finds no JDK without it),
+  `~/.m2/repository`, `~/.m2/wrapper`, and in the Gradle home `caches/modules-2` and `wrapper/dists`.
+- **Gradle's home isn't the run's to write** — compiled build scripts, distributions and dependencies run in
+  the user's later builds. Each run gets its own (`sandbox::gradle_run_home`): the dependencies read in place
+  (`GRADLE_RO_DEP_CACHE`), the distributions linked in (only the wrapper's `.zip.lck` files are written —
+  `gradle_locks`), no daemon after the build. A small `./gradlew clean test` took 4.5 s cold and 3.7 s warm.
+- **The daemons' registry is kept** (`GRADLE_KEPT`): with it readable and localhost open, a sandboxed
+  `./gradlew` handed its build to a daemon started outside, and that build wrote a file the sandbox keeps.
+- **Gradle needs localhost**: its client reaches its own daemon, even with `--no-daemon`'s single-use one, over
+  a random port. With the ports closed it can't build at all, and the report says so (`llm.sandbox-localhost`).
+- Maven `compile` passes offline under the profile with no denials. Its `test` couldn't be measured offline
+  here: surefire's dependencies were never downloaded.
+- **Protected names are the packs' (user decision, 2026-10-05)**: each `pack.toml` lists what runs later
+  outside (`protect`). Rust has `build.rs`, `Cargo.toml` and `.cargo`; JavaScript `package.json`; make
+  `Makefile`, `GNUmakefile` and just's files; Java its build files, wrappers, `buildSrc` and `.mvn`. The core
+  keeps only `.tarae.toml`, `.envrc`, `.claude`, `.github`, `.vscode`, `.tarae.local.toml` and `.git`
+  (`sandbox::CORE_NAMES`). Every built-in pack's list applies in every project, read once from the binary
+  (`sandbox::protected_names`): the profile, the report and Edit's ask all use it, and `llm.review-ask` only
+  adds (its default is now empty). The names go into the profile as several regexes, because Seatbelt refuses
+  a string literal past about 1 KB ("Error reading string": 1032 characters refused, every run failing).
+
 ---
 
 ## 10. Linux

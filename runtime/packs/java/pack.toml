@@ -2,6 +2,16 @@
 # Results come from the JUnit XML the build writes. Debugging makes the test JVM wait, then attaches
 # java-debug (it comes with jdtls).
 
+# What runs later outside Claude's sandbox, in every project (`packs::protect`) — the user's builds,
+# `:preflight`, and jdtls, which imports a Gradle or Maven build when the project opens: Gradle's build and
+# settings scripts, its properties (JVM arguments, init settings), the wrapper's script and its folder (the
+# distribution it downloads and runs), `buildSrc/` (code compiled into the build); Maven's pom, its wrapper and
+# `.mvn/` (JVM and Maven arguments, extensions)
+protect = [
+    "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "gradle.properties",
+    "gradlew", "gradle/wrapper", "buildSrc", "pom.xml", "mvnw", ".mvn",
+]
+
 [test]
 query = "tests.scm"
 files = ["*.java"]
@@ -30,10 +40,22 @@ run-file = ["{java-tool}", "-B", "test", "{java-pl}", "-Dtest={package}{first-gr
 reports = ["{java-module-dir}/target/surefire-reports"]
 debug-args = ["-Dmaven.surefire.debug"]
 
-# No `[[preflight]]` defaults: a Java project's real build is its wrapper (./mvnw, ./gradlew — a script
-# from the repository, which tarae's defaults never run), so a default would work only where mvn or gradle
-# happen to be installed, rarely what the project builds with. `[preflight]` in .tarae.toml lists this
-# project's steps — its wrapper among them, run once you trust the project.
+# `:preflight` in a project with no steps of its own: its tests, with the Gradle or Maven installed here. A
+# project with its own wrapper (./gradlew, ./mvnw) builds with that — a script from the repository, which
+# tarae's defaults never run: `[preflight]` in .tarae.toml lists it, run once you trust the project.
+[[preflight]]
+when = ["settings.gradle.kts", "settings.gradle", "build.gradle.kts", "build.gradle"]
+unless = ["gradlew"]
+held = "this project builds with its own ./gradlew, a script from the repository: list it in .tarae.toml — [preflight] steps = [{ name = \"test\", cmd = \"./gradlew test --console=plain\" }] — it runs once you trust the project"
+rank = 30
+steps = [{ name = "gradle test", cmd = "gradle test --console=plain" }]
+
+[[preflight]]
+when = ["pom.xml"]
+unless = ["mvnw"]
+held = "this project builds with its own ./mvnw, a script from the repository: list it in .tarae.toml — [preflight] steps = [{ name = \"test\", cmd = \"./mvnw -B test\" }] — it runs once you trust the project"
+rank = 30
+steps = [{ name = "mvn test", cmd = "mvn -B test" }]
 
 # A pom.xml or build.gradle in a checkout inside the project is imported as a project of its own when the
 # root has no build file (measured: ext/clone/pom.xml became project "v"; dot-folders it skips itself).

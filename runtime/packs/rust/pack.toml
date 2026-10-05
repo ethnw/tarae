@@ -1,5 +1,9 @@
 # Rust: `cargo test` in the package, filtered by module path; lldb-dap on the test binary to debug.
 
+# What runs later outside Claude's sandbox, in every project (`packs::protect`): a crate's build script, its
+# manifest (dependencies, build settings), cargo's config (build and target dirs, `[env]`, runners — #20)
+protect = ["build.rs", "Cargo.toml", ".cargo"]
+
 [test]
 query = "tests.scm"
 cwd = { nearest = ["Cargo.toml"] }

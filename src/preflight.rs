@@ -13,9 +13,10 @@
 //! A project that marks none has one set: both run every step, and nothing says "quick".
 //!
 //! Where the steps come from: the project's `[preflight]` (`.tarae.toml`, or your config for every project),
-//! else the language packs' defaults for the kind of project it is (`packs::preflight` — Cargo.toml, go.mod
-//! …; the commands are tarae's, but they build and run the project's code, so the first run in a project shows
-//! them on a card that says so — `DEFAULTS_SAY`); then
+//! else the language packs' defaults for the kind of project it is (`packs::preflight` — Cargo.toml, go.mod,
+//! a Gradle or Maven build without its own wrapper …; the commands are tarae's, but they build and run the
+//! project's code, so the first run in a project shows them on a card that says so — `DEFAULTS_SAY`; a
+//! project with a wrapper is told to list it, since the wrapper is the repository's own script); then
 //! `.tarae.local.toml`'s steps, yours, added after either (`config.rs` — read only while git ignores it).
 //!
 //! One task run (`task.rs`, the task panel): an `sh` script runs the steps one after another — every one,
@@ -439,7 +440,14 @@ impl Editor {
         let root = self.preflight_root();
         self.events.jobs().spawn(move || {
             let packs = crate::packs::preflight(&root);
-            move |ed: &mut Editor| ed.preflight_found(root, packs, local, set)
+            move |ed: &mut Editor| match packs.held.first() {
+                // (a kind of project the packs know, but it runs its checks its own way: say how)
+                Some(why) if packs.steps.is_empty() && local.is_empty() => {
+                    ed.session.bring_after_preflight = false;
+                    ed.set_error(format!("no preflight steps — {why}"));
+                }
+                _ => ed.preflight_found(root, packs.steps, local, set),
+            }
         });
         Ok(())
     }

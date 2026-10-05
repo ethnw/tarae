@@ -144,11 +144,17 @@ impl Guard {
         let Guard::In(p) = self else { return (String::new(), false) };
         let (mut names, mut git, mut crates, mut all) = (Vec::new(), false, false, true);
         let (mut secret, mut services, mut copied) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut gradle, mut daemon) = (false, false);
         for d in seen {
             let Some(path) = d.file() else {
                 match d.plain().as_str() {
                     "the clipboard" => services.push("the clipboard"),
                     "the keychain" => services.push("the keychain"),
+                    // (a JVM refused a port on this machine: Gradle's client and its daemon)
+                    w if d.process == "java" && w.starts_with("connecting to port") => {
+                        daemon |= !p.network && !p.localhost;
+                        all = false;
+                    }
                     _ => all = false,
                 }
                 continue;
@@ -165,6 +171,11 @@ impl Guard {
                 _ if p.reads.copies.instead_of(path).is_some() => {
                     let var = p.reads.copies.instead_of(path).unwrap_or_default();
                     copied.push(format!("{} (${var})", crate::allow::tilde(path)))
+                }
+                _ if d.op.starts_with("file-write")
+                    && p.gradle.user.as_ref().is_some_and(|g| path.starts_with(g)) =>
+                {
+                    gradle = true
                 }
                 _ => all = false,
             }
@@ -213,6 +224,24 @@ impl Guard {
         }
         if crates {
             s.push_str(&caches_kept(p));
+        }
+        if gradle && let Some(home) = &p.gradle.user {
+            s.push_str(&format!(
+                "{}: the user's Gradle home stays as it is — their own builds run what's there. Your commands \
+                 have a Gradle home of their own and read the downloaded dependencies and the wrapper's \
+                 distributions from theirs: Gradle trying to write there is expected, and the build goes on. A \
+                 dependency or distribution not downloaded yet fails here — tell the user; a build of theirs \
+                 fetches it.\n",
+                crate::allow::tilde(home)
+            ));
+        }
+        if daemon {
+            s.push_str(
+                "Java was refused a port on this machine: Gradle's client talks to its build daemon and test \
+                 workers over this machine's ports, so a Gradle build can't run while they're closed. Tell the \
+                 user: llm.sandbox-localhost (in the project's .tarae.toml) opens them. Their own Gradle \
+                 daemons stay out of reach — the registry that names them is kept from your commands.\n",
+            );
         }
         (s, all)
     }
@@ -349,6 +378,17 @@ pub struct Policy {
     pub refused: Vec<(PathBuf, String)>,
     /// Where it may read (card model P2).
     pub reads: Reads,
+    /// Gradle in it: a home of the run's own (`gradle_run_home`).
+    pub gradle: Gradle,
+}
+
+/// Gradle in a run: the user's Gradle home, and the environment that points Gradle at the run's own.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Gradle {
+    /// The user's Gradle home (`gradle_home_of`), when it's there — kept as it is.
+    pub user: Option<PathBuf>,
+    /// `GRADLE_USER_HOME`, `GRADLE_RO_DEP_CACHE`, `GRADLE_OPTS` (`gradle_run_home`).
+    pub env: Vec<(String, String)>,
 }
 
 /// Where a run reads (card model P2): anywhere outside home; in home the project, where it may write, and
@@ -387,8 +427,11 @@ impl Reads {
 /// homes, git's settings, the text encoding CoreFoundation reads in every process, Go's GOPATH, cache and
 /// settings, npm's cache, the fonts a shot draws with — and pip's settings files (2026-10-05,
 /// `target/sb/tokens-checkpoint.md`: denied, pip loses its index and the rest without a word). Those that
-/// can hold a token are read from a copy without it when one does (`tokens.rs`).
-const HOME_READS: [&str; 13] = [
+/// can hold a token are read from a copy without it when one does (`tokens.rs`). Java's
+/// (`target/sb/java-checkpoint.md`): the JDKs `/usr/bin/java` looks for, Maven's downloaded repository and its
+/// wrapper's distributions — not `~/.m2/settings.xml` (a repository's password lives there); Gradle's are
+/// where its home is (`GRADLE_READS`).
+const HOME_READS: [&str; 16] = [
     ".cargo",
     ".rustup",
     ".gitconfig",
@@ -402,17 +445,40 @@ const HOME_READS: [&str; 13] = [
     ".pip/pip.conf",
     ".config/pip/pip.conf",
     "Library/Application Support/pip/pip.conf",
+    "Library/Java/JavaVirtualMachines",
+    ".m2/repository",
+    ".m2/wrapper",
 ];
+
+/// What a Gradle build reads in the user's Gradle home (measured, `target/sb/java-checkpoint.md`) — it runs
+/// with a home of its own (`gradle_run_home`): the dependencies downloaded (`caches/modules-2`, read in place
+/// as `GRADLE_RO_DEP_CACHE`) and the wrapper's distributions. Not its settings (`gradle.properties` holds
+/// repository passwords), and never its daemons' registry (`GRADLE_KEPT`).
+const GRADLE_READS: [&str; 2] = ["caches/modules-2", "wrapper/dists"];
+
+/// The user's Gradle daemons' registry: their ports and the token each takes — kept from every run, whatever
+/// is granted. Measured (`target/sb/java-checkpoint.md`, c0): with it readable and this machine's ports open, a
+/// sandboxed `./gradlew` hands its build to a daemon started outside, and the build runs outside the sandbox.
+const GRADLE_KEPT: &str = "daemon";
+
+/// The user's Gradle home — `$GRADLE_USER_HOME` (absolute), else `~/.gradle` — as the profile writes it.
+fn gradle_home_of(home: &Path) -> PathBuf {
+    let set = std::env::var_os("GRADLE_USER_HOME").map(PathBuf::from).filter(|g| g.is_absolute());
+    profile_path(&set.unwrap_or_else(|| home.join(".gradle")))
+}
 
 /// Claude's own, in home: its settings, conversations and token cache — kept from its runs like keys.
 const CLAUDES: [&str; 3] = [".claude", ".claude.json", ".claude.json.backup"];
 
-/// Where a run reads in `home` (real): `HOME_READS`, cargo's and rustup's homes wherever they are, tarae's
-/// grammars (its own tests and shots load them), the folders on PATH (what's there runs), and `also` (the
-/// repository's other checkouts, what the user let Claude read) — none that's home itself or in a kept place.
+/// Where a run reads in `home` (real): `HOME_READS`, cargo's and rustup's homes wherever they are, Gradle's
+/// `GRADLE_READS`, tarae's grammars (its own tests and shots load them), the folders on PATH (what's there
+/// runs), and `also` (the repository's other checkouts, what the user let Claude read) — none that's home
+/// itself or in a kept place.
 pub fn reads_for(home: &Path, also: &[PathBuf]) -> Reads {
     let cargo_home = cargo_home_of(Some(home));
     let mut allow: Vec<PathBuf> = HOME_READS.iter().map(|r| profile_path(&home.join(r))).collect();
+    let gradle = gradle_home_of(home);
+    allow.extend(GRADLE_READS.iter().map(|r| gradle.join(r)));
     allow.extend(cargo_home.clone());
     allow.extend(std::env::var_os("RUSTUP_HOME").map(|r| profile_path(Path::new(&r))));
     allow.extend(crate::grammar::grammars_dir().map(|d| profile_path(&d)));
@@ -439,14 +505,17 @@ pub fn cargo_configs_above(root: &Path, home: &Path) -> Vec<PathBuf> {
 }
 
 /// What a run never reads, whatever is granted: the places that hold keys (`allow::SECRETS`, and git's
-/// credential store where `$XDG_CONFIG_HOME` puts it), Claude's own (`CLAUDES`), cargo's credentials, and
-/// tarae's state (its conversations, what was allowed — its log aside).
+/// credential store where `$XDG_CONFIG_HOME` puts it), Claude's own (`CLAUDES`), cargo's credentials, Gradle's
+/// daemons' registry (`GRADLE_KEPT`), and tarae's state (its conversations, what was allowed — its log aside).
 pub fn kept_reads(home: &Path, cargo_home: Option<&Path>) -> Vec<PathBuf> {
     let at = |p: PathBuf| profile_path(&p);
     let mut v: Vec<PathBuf> =
         crate::allow::SECRETS.iter().chain(&CLAUDES).map(|s| at(home.join(s))).collect();
     for cargo in [Some(home.join(".cargo")), cargo_home.map(Path::to_path_buf)].into_iter().flatten() {
         v.extend(["credentials", "credentials.toml"].map(|c| at(cargo.join(c))));
+    }
+    for gradle in [at(home.join(".gradle")), gradle_home_of(home)] {
+        v.push(gradle.join(GRADLE_KEPT));
     }
     let xdg = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|x| x.is_absolute());
     v.extend(xdg.map(|x| at(x.join("git/credentials"))));
@@ -991,14 +1060,47 @@ pub fn refused_lines(output: &[(bool, String)]) -> Vec<String> {
         .collect()
 }
 
+/// The names every project keeps, whatever its languages: tarae's project config (its trusted settings and
+/// steps), direnv's, Claude's, the CI's and VS Code's settings and tasks, `.tarae.local.toml` (read as the
+/// user's own config, its preflight steps run unsandboxed: `config::personal`) and `.git`. The ecosystems'
+/// own — `build.rs`, `package.json`, `pom.xml` … — are their packs' (`packs::protect`).
+const CORE_NAMES: [&str; 7] =
+    [".tarae.toml", ".envrc", ".claude", ".github", ".vscode", ".tarae.local.toml", ".git"];
+
 /// What Claude's runs never write in the project, wherever the name sits in it (a crate's `build.rs`, a
-/// folder's `.cargo`): `llm.review-ask`'s defaults — what runs later outside the sandbox (the user's builds,
-/// `:preflight`, the terminal) or sets how things run — plus `.tarae.local.toml` (read as the user's own
-/// config, its preflight steps run unsandboxed: `config::personal`) and `.git`. Claude changes them with
-/// Edit, which the user reviews (`edits::listed`). Names, not paths — static in the profile — in any case:
-/// APFS opens `Build.rs` for `build.rs`, and so does cargo.
+/// folder's `.cargo`) — what runs later outside the sandbox (the user's builds, `:preflight`, the terminal,
+/// a language server importing the project) or sets how things run: every pack's `protect` and the core's
+/// (`CORE_NAMES`), whatever the project's languages, read once from the binary — nothing configured takes
+/// one out. Claude changes them with Edit, which always asks (`edits::listed`). Names, not paths — static in
+/// the profile — in any case: APFS opens `Build.rs` for `build.rs`, and so does cargo. One of several parts
+/// (`gradle/wrapper`) is those names in a row.
 pub fn protected_names() -> impl Iterator<Item = &'static str> {
-    crate::llm::REVIEW_ASK.iter().copied().chain([".tarae.local.toml", ".git"])
+    static NAMES: OnceLock<Vec<String>> = OnceLock::new();
+    let names = NAMES.get_or_init(|| {
+        let mut v = crate::packs::protect();
+        v.extend(CORE_NAMES.iter().map(|n| n.to_string()));
+        let mut seen = std::collections::HashSet::new();
+        v.retain(|n| seen.insert(n.to_ascii_lowercase()));
+        v
+    });
+    names.iter().map(String::as_str)
+}
+
+/// Where a protected name (`protected_names`) starts among `parts` (a path's, from the project's root) —
+/// each name's parts matched in a row, in any case.
+pub fn protected_at(parts: &[&std::ffi::OsStr]) -> Vec<usize> {
+    let mut at = Vec::new();
+    for name in protected_names() {
+        let want: Vec<&str> = name.split('/').collect();
+        for (i, w) in parts.windows(want.len()).enumerate() {
+            if w.iter().zip(&want).all(|(p, n)| p.eq_ignore_ascii_case(n)) {
+                at.push(i);
+            }
+        }
+    }
+    at.sort_unstable();
+    at.dedup();
+    at
 }
 
 /// Folders of tools' output, where those names are what the tool writes: cmake's `Makefile`s and `cargo
@@ -1006,6 +1108,28 @@ pub fn protected_names() -> impl Iterator<Item = &'static str> {
 /// there runs later anyway (build scripts, packages), so keeping the names closes nothing there — a name
 /// below one of these is let through (`.git/modules/target/hooks` isn't: the name comes first).
 const OUTPUTS: [&str; 2] = ["target", "node_modules"];
+
+/// The longest run of names (`a|b|…`) in one regex of the profile. Seatbelt refuses a string literal past
+/// about a kilobyte — "Error reading string", exit 65 (measured: 1032 characters refused, 578 taken) — and
+/// every pack's names in any case are past it, so they go in several regexes of this much at most.
+const NAMES_PER_REGEX: usize = 400;
+
+/// The protected names (`protected_names`) as Seatbelt regex alternatives in any case, a name of several
+/// parts joined with `/`, split in runs of at most `NAMES_PER_REGEX` characters.
+fn name_regexes() -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for n in protected_names() {
+        let n = n.split('/').map(any_case).collect::<Vec<_>>().join("/");
+        match out.last_mut() {
+            Some(last) if last.len() + 1 + n.len() <= NAMES_PER_REGEX => {
+                last.push('|');
+                last.push_str(&n);
+            }
+            _ => out.push(n),
+        }
+    }
+    out
+}
 
 /// A name as a Seatbelt regex in any case: `[bB][uU][iI][lL][dD]\.[rR][sS]`.
 fn any_case(name: &str) -> String {
@@ -1023,11 +1147,9 @@ fn any_case(name: &str) -> String {
 pub fn protected_in(root: &Path, path: &Path) -> bool {
     let Ok(rel) = path.strip_prefix(root) else { return false };
     let parts: Vec<&std::ffi::OsStr> = rel.iter().collect();
-    let named = |p: &&std::ffi::OsStr| {
-        p.to_str().is_some_and(|p| protected_names().any(|n| n.eq_ignore_ascii_case(p)))
-    };
+    let at = protected_at(&parts);
     let output = parts.iter().position(|p| OUTPUTS.iter().any(|o| p == o));
-    parts.iter().any(named) && !output.is_some_and(|o| parts[o + 1..].iter().any(named))
+    !at.is_empty() && !output.is_some_and(|o| at.iter().any(|&i| i > o))
 }
 
 /// Device files every program writes to (`/dev/null`, terminals — a pty test hangs without them: measured).
@@ -1136,11 +1258,15 @@ impl Policy {
         // root's own path (a checkout under `.claude/worktrees`) doesn't close the whole project
         let depth = self.root.components().filter(|c| matches!(c, Component::Normal(_))).count();
         let below = format!("^{}/(.*/)?", "/[^/]+".repeat(depth));
-        let names = protected_names().map(any_case).collect::<Vec<_>>().join("|");
+        let outputs = OUTPUTS.join("|");
+        let (mut named, mut in_output) = (String::new(), String::new());
+        for names in name_regexes() {
+            named.push_str(&format!(" (regex #\"{below}({names})(/|$)\")"));
+            in_output.push_str(&format!(" (regex #\"{below}({outputs})/(.*/)?({names})(/|$)\")"));
+        }
         p.push_str(&deny(&format!(
-            "file-write* (require-all (subpath (param \"ROOT\")) (regex #\"{below}({names})(/|$)\") \
-             (require-not (regex #\"{below}({})/(.*/)?({names})(/|$)\")))",
-            OUTPUTS.join("|")
+            "file-write* (require-all (subpath (param \"ROOT\")) (require-any{named}) \
+             (require-not (require-any{in_output})))"
         )));
         // …the multiplexers' socket folders (they sit inside writable temp ones), cargo's caches
         let keep: String = (0..self.keep.len()).map(|i| format!(" (subpath (param \"K{i}\"))")).collect();
@@ -1387,7 +1513,9 @@ impl Policy {
         // Never the project or what holds it (that would open .git again); inside it, the project's rule
         write.retain(|w| !root.starts_with(w) && !w.starts_with(&root));
         write.dedup();
-        let files = env.cargo_home.iter().flat_map(|ch| CARGO_FILES.map(|f| ch.join(f))).collect();
+        let mut files: Vec<PathBuf> =
+            env.cargo_home.iter().flat_map(|ch| CARGO_FILES.map(|f| ch.join(f))).collect();
+        files.extend(env.gradle_locks.iter().cloned());
         let mut ports: Vec<u16> = env.ports.clone();
         ports.sort_unstable();
         ports.dedup();
@@ -1409,6 +1537,7 @@ impl Policy {
             sockets: Vec::new(),
             refused,
             reads: env.reads.clone(),
+            gradle: Gradle { user: env.gradle.clone(), env: Vec::new() },
         }
     }
 }
@@ -1455,6 +1584,10 @@ pub struct Env {
     pub uid: u32,
     /// Where it reads (`reads_for`; the default: reads not confined).
     pub reads: Reads,
+    /// The user's Gradle home (real, when it's there), and the lock files its wrapper writes beside each
+    /// distribution (`gradle_locks`).
+    pub gradle: Option<PathBuf>,
+    pub gradle_locks: Vec<PathBuf>,
 }
 
 /// A path as the profile writes it: the real path; for one that isn't there yet, its folder's real path
@@ -1538,7 +1671,10 @@ pub fn policy(root: &Path, llm: &crate::llm::LlmConfig, reads: &[PathBuf]) -> Po
     let above: Vec<PathBuf> =
         real_home.iter().flat_map(|h| cargo_configs_above(&profile_path(root), h)).collect();
     also.extend(above.iter().cloned());
+    let gradle = real_home.as_deref().map(gradle_home_of).filter(|g| g.is_dir());
     let mut env = Env {
+        gradle_locks: gradle.as_deref().map(gradle_locks).unwrap_or_default(),
+        gradle,
         reads: real_home.as_ref().map(|h| reads_for(h, &also)).unwrap_or_default(),
         root: profile_path(root),
         home,
@@ -1571,7 +1707,60 @@ pub fn policy(root: &Path, llm: &crate::llm::LlmConfig, reads: &[PathBuf]) -> Po
         env.reads.copies = crate::tokens::copies(&sources, dir, h, reads, &env.reads.kept);
         env.reads.copies.cargo = crate::tokens::cargo_holders(env.cargo_home.as_deref(), &above);
     }
-    Policy { run, tag, ..Policy::for_project(&env) }
+    let opts = std::env::var("GRADLE_OPTS").ok();
+    let gradle = Gradle {
+        env: run.as_ref().map(|r| gradle_run_home(r.path(), env.gradle.as_deref(), opts)).unwrap_or_default(),
+        user: env.gradle.clone(),
+    };
+    Policy { run, tag, gradle, ..Policy::for_project(&env) }
+}
+
+/// The lock file Gradle's wrapper takes beside each distribution it unpacked in the user's Gradle home
+/// (`wrapper/dists/<name>/<hash>/<name>.zip.lck`) — every run, though the distribution is there (measured:
+/// denied, `./gradlew` fails). The only writes a run makes in the user's Gradle home. Blocks (a worker's).
+fn gradle_locks(user: &Path) -> Vec<PathBuf> {
+    let dirs = |d: &Path| -> Vec<PathBuf> {
+        let entries = std::fs::read_dir(d).into_iter().flatten().flatten();
+        entries.map(|e| e.path()).filter(|p| p.is_dir()).collect()
+    };
+    let mut out = Vec::new();
+    for dist in dirs(&user.join("wrapper/dists")) {
+        let Some(name) = dist.file_name().map(|n| n.to_string_lossy().into_owned()) else { continue };
+        out.extend(dirs(&dist).into_iter().map(|h| h.join(format!("{name}.zip.lck"))));
+    }
+    out.sort();
+    out
+}
+
+/// A run's own Gradle home, made in its folder `run`: the environment that points Gradle there. The user's
+/// (`user`) holds what their own builds run later — compiled build scripts, the wrapper's distributions, the
+/// dependencies — and the registry of their daemons, so a run never writes there, nor reads that registry
+/// (measured: a sandboxed build that found it ran in a daemon started outside). In the run's own: the
+/// wrapper's distributions linked from the user's (read; only their lock files written — `gradle_locks`),
+/// the user's downloaded dependencies read in place (`GRADLE_RO_DEP_CACHE`), and no daemon kept after the
+/// build (`org.gradle.daemon=false`, after the user's `GRADLE_OPTS`): it would live on past the run, inside
+/// its sandbox, for nobody. Gone with the run's folder — a small build took 4.5 s from nothing, 3.7 s again
+/// (measured). Blocks (a worker's).
+fn gradle_run_home(run: &Path, user: Option<&Path>, opts: Option<String>) -> Vec<(String, String)> {
+    let home = run.join("gradle");
+    let _ = std::fs::create_dir_all(home.join("wrapper"));
+    let mut env = vec![("GRADLE_USER_HOME".to_string(), home.display().to_string())];
+    if let Some(user) = user {
+        let dists = user.join("wrapper/dists");
+        if dists.is_dir() {
+            let _ = std::os::unix::fs::symlink(&dists, home.join("wrapper/dists"));
+        }
+        if user.join("caches/modules-2").is_dir() {
+            env.push(("GRADLE_RO_DEP_CACHE".into(), user.join("caches").display().to_string()));
+        }
+    }
+    let no_daemon = "-Dorg.gradle.daemon=false";
+    let opts = match opts.as_deref().map(str::trim).filter(|o| !o.is_empty()) {
+        Some(o) => format!("{o} {no_daemon}"),
+        None => no_daemon.into(),
+    };
+    env.push(("GRADLE_OPTS".into(), opts));
+    env
 }
 
 /// What the project's toolchain names: Go's caches (`other`), cargo's target and build dirs (`cargo`, real
@@ -1726,7 +1915,7 @@ pub fn command(policy: Option<&Policy>, program: &str, args: &[String]) -> Comma
         Some(p) => {
             let mut c = Command::new(SANDBOX_EXEC);
             c.args(p.args()).arg(program).args(args);
-            inside_env(&mut c);
+            inside_env(&mut c).envs(p.gradle.env.iter().map(|(k, v)| (k, v)));
             if let Some(run) = &p.run {
                 c.env("TMPDIR", run.path());
                 // npm's debug log in the run's own folder, not `~/.npm/_logs` (closed): measured, every npm
@@ -1886,6 +2075,10 @@ mod tests {
                 log: Some("/Users/u/.local/state/tarae/tarae.log".into()),
                 copies: Default::default(),
             },
+            gradle: Some("/Users/u/.gradle".into()),
+            gradle_locks: vec![
+                "/Users/u/.gradle/wrapper/dists/gradle-9.7.1-bin/h1/gradle-9.7.1-bin.zip.lck".into(),
+            ],
         }
     }
 
@@ -2223,9 +2416,33 @@ mod tests {
             ".config/pip/pip.conf",
             "Library/Application Support/pip/pip.conf",
             "src/other",
+            "Library/Java/JavaVirtualMachines",
+            ".m2/repository",
+            ".m2/wrapper",
         ] {
             assert!(r.allow.contains(&home.join(p)), "{p}: {:?}", r.allow);
         }
+        // Java's: Gradle's downloaded dependencies and wrapper distributions, never its daemons' registry nor
+        // either tool's settings (repository passwords)
+        let gradle = gradle_home_of(&home);
+        for p in ["caches/modules-2", "wrapper/dists"] {
+            assert!(r.allow.contains(&gradle.join(p)), "{p}: {:?}", r.allow);
+        }
+        assert!(r.kept.contains(&home.join(".gradle/daemon")) && r.kept.contains(&gradle.join("daemon")));
+        let policy =
+            Policy::for_project(&Env { root: home.join("proj"), reads: r.clone(), ..Env::default() });
+        for (path, read) in [
+            (gradle.join("caches/modules-2/files-2.1/a.jar"), true),
+            (gradle.join("daemon/9.7.1/registry.bin"), false),
+            (gradle.join("gradle.properties"), false),
+            (gradle.join("caches/9.7.1/scripts/x"), false),
+            (home.join(".m2/settings.xml"), false),
+        ] {
+            assert_eq!(policy.reads_allow(&path), read, "{}", path.display());
+        }
+        assert!(
+            crate::allow::read_choices(&gradle.join("daemon/9.7.1/registry.bin"), &home, &r.kept).is_empty()
+        );
         for p in [home.clone(), home.join(".ssh/x"), home.join(".claude/x"), "/opt/x".into()] {
             assert!(!r.allow.contains(&p), "{}: {:?}", p.display(), r.allow);
         }
@@ -2256,6 +2473,100 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
     }
 
+    /// A run's own Gradle home (Java under P2): `GRADLE_USER_HOME` in the run's folder, the user's wrapper
+    /// distributions linked in — their lock files the only writes in the user's Gradle home — the user's
+    /// dependencies read in place, no daemon after the build, after the user's own `GRADLE_OPTS`. Removing the
+    /// run's folder takes the link, never what it points at. (Stand-ins in the test's own temp folder.)
+    #[test]
+    fn a_runs_own_gradle_home() {
+        let t = profile_path(&std::env::temp_dir()).join(format!("tarae-sb-gradle-{}", std::process::id()));
+        std::fs::remove_dir_all(&t).ok();
+        let (user, run) = (t.join("user/.gradle"), t.join("run"));
+        let dist = user.join("wrapper/dists/gradle-9.7.1-bin/h1");
+        for d in [dist.join("gradle-9.7.1-bin"), user.join("wrapper/dists/gradle-8.9-bin/h2"), run.clone()] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::create_dir_all(user.join("caches/modules-2")).unwrap();
+        std::fs::write(dist.join("gradle-9.7.1-bin/marker"), "kept").unwrap();
+        assert_eq!(
+            gradle_locks(&user),
+            [
+                user.join("wrapper/dists/gradle-8.9-bin/h2/gradle-8.9-bin.zip.lck"),
+                dist.join("gradle-9.7.1-bin.zip.lck")
+            ]
+        );
+        let vars = gradle_run_home(&run, Some(&user), Some(" -Xmx1g ".into()));
+        let get = |k: &str| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        assert_eq!(get("GRADLE_USER_HOME"), Some(run.join("gradle").display().to_string()));
+        assert_eq!(get("GRADLE_RO_DEP_CACHE"), Some(user.join("caches").display().to_string()));
+        assert_eq!(get("GRADLE_OPTS").as_deref(), Some("-Xmx1g -Dorg.gradle.daemon=false"));
+        let linked = run.join("gradle/wrapper/dists/gradle-9.7.1-bin/h1/gradle-9.7.1-bin/marker");
+        assert_eq!(std::fs::read_to_string(linked).unwrap(), "kept");
+        std::fs::remove_dir_all(&run).unwrap();
+        assert!(dist.join("gradle-9.7.1-bin/marker").exists(), "the run's folder took the distribution");
+        // No Gradle home of the user's: the run's own all the same, nothing to link or read in place
+        let bare = gradle_run_home(&t.join("run2"), None, Some("  ".into()));
+        let keys: Vec<&str> = bare.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, ["GRADLE_USER_HOME", "GRADLE_OPTS"]);
+        assert_eq!(bare[1].1, "-Dorg.gradle.daemon=false");
+        assert!(t.join("run2/gradle/wrapper").is_dir() && !t.join("run2/gradle/wrapper/dists").exists());
+        // In the policy: the lock files are writable files, the environment goes with every command
+        let e = Env {
+            gradle: Some(user.clone()),
+            gradle_locks: gradle_locks(&user),
+            ..env(Path::new("/Users/u/p"))
+        };
+        let p = Policy { gradle: Gradle { user: Some(user.clone()), env: vars }, ..Policy::for_project(&e) };
+        assert!(p.files.contains(&dist.join("gradle-9.7.1-bin.zip.lck")), "{:?}", p.files);
+        let c = command(Some(&p), "true", &[]);
+        let set: Vec<_> = c.get_envs().filter_map(|(k, v)| Some((k.to_str()?, v?.to_str()?))).collect();
+        assert!(set.contains(&("GRADLE_OPTS", "-Xmx1g -Dorg.gradle.daemon=false")), "{set:?}");
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// What Claude reads about Gradle (Java under P2): its writes in the user's Gradle home — the read-only
+    /// dependency cache's index, measured in every build — are expected and said so, not offered to open; a
+    /// JVM refused a port on this machine says Gradle needs this machine's ports, only while they're closed.
+    #[test]
+    fn what_a_run_is_told_about_gradle() {
+        let p = Policy {
+            gradle: Gradle { user: Some("/Users/u/.gradle".into()), env: Vec::new() },
+            ..Policy::for_project(&env(Path::new("/Users/u/p")))
+        };
+        let report = |p: &Policy, d: &[Denial]| {
+            let w = Watch::quiet("g.");
+            for d in d {
+                w.record(d.clone());
+            }
+            Guard::In(Box::new(Policy { watch: Some(w), ..p.clone() })).report(&[])
+        };
+        let java =
+            |op: &str, target: &str| Denial { process: "java".into(), op: op.into(), target: target.into() };
+        let index =
+            java("file-write-data", "/Users/u/.gradle/caches/modules-2/metadata-2.107/module-artifact.bin");
+        let r = report(&p, std::slice::from_ref(&index));
+        assert!(r.contains("/Users/u/.gradle: the user's Gradle home stays as it is"), "{r}");
+        assert!(
+            !r.contains("If the command needs one of these") && !r.contains("Gradle build can't run"),
+            "{r}"
+        );
+        // (a read there isn't Gradle's own doing: the run reads its own home)
+        let read = java("file-read-data", "/Users/u/.gradle/gradle.properties");
+        assert!(!report(&p, &[read]).contains("Gradle home stays"));
+        let port = java("network-outbound", "remote:*:55417");
+        let r = report(&p, &[port.clone(), index]);
+        assert!(
+            r.contains("a Gradle build can't run while they're closed")
+                && r.contains("llm.sandbox-localhost"),
+            "{r}"
+        );
+        for open in [Policy { localhost: true, ..p.clone() }, Policy { network: true, ..p.clone() }] {
+            assert!(!report(&open, std::slice::from_ref(&port)).contains("Gradle build can't run"));
+        }
+        let other = Denial { process: "curl".into(), ..port };
+        assert!(!report(&p, &[other]).contains("Gradle build can't run"));
+    }
+
     /// The names a run keeps off (card model P1), in Rust as in the profile: anywhere below the root, in any
     /// case, but not below a tool's output folder (unless the name comes first: `.git/modules/target`); the
     /// root's own path doesn't count (here it holds `.claude` and `target`). In the profile: names, never
@@ -2283,6 +2594,17 @@ mod tests {
             ".git",
             ".git/hooks/pre-commit",
             ".git/modules/target/hooks/pre-commit",
+            // the Java pack's, here as anywhere — a name of several parts in a row
+            "build.gradle.kts",
+            "app/Build.Gradle",
+            "settings.gradle",
+            "gradle.properties",
+            "gradlew",
+            "gradle/wrapper/gradle-wrapper.properties",
+            "buildSrc/src/main/kotlin/x.kt",
+            "pom.xml",
+            "mvnw",
+            ".mvn/jvm.config",
         ] {
             assert!(kept(rel), "{rel}");
         }
@@ -2296,6 +2618,10 @@ mod tests {
             "target/package/a-0.1.0/Cargo.toml",
             "node_modules/a/package.json",
             "web/node_modules/a/package.json",
+            "gradle/libs.versions.toml",
+            "src/main/java/org/gradle/Api.java",
+            "wrapper/x",
+            "target/classes/META-INF/maven/p/pom.xml",
         ] {
             assert!(!kept(rel), "{rel}");
         }
@@ -2303,21 +2629,104 @@ mod tests {
         let text = Policy::for_project(&env(root)).profile();
         assert!(!text.contains("/Users") && !text.contains("worktrees"), "{text}");
         let skip = "/[^/]+".repeat(6);
+        // Every name in any case, a name of several parts joined with `/`, in regexes Seatbelt reads: none past
+        // its string limit (a profile with one refuses every run — measured at 1032 characters)
+        let regexes = name_regexes();
+        assert!(regexes.len() > 1, "every pack's names fit one regex no more: {regexes:?}");
+        let mut each = String::new();
+        for names in &regexes {
+            each.push_str(&format!(" (regex #\"^{skip}/(.*/)?({names})(/|$)\")"));
+        }
         let rule = format!(
-            "(deny file-write* (require-all (subpath (param \"ROOT\")) (regex #\"^{skip}/(.*/)?\
-             ([bB][uU][iI][lL][dD]\\.[rR][sS]|[cC][aA][rR][gG][oO]\\.[tT][oO][mM][lL]|"
+            "(deny file-write* (require-all (subpath (param \"ROOT\")) (require-any{each}) (require-not"
         );
         assert!(text.contains(&rule), "{text}");
         assert!(
-            text.contains(&format!(
-                "|\\.[gG][iI][tT])(/|$)\") (require-not (regex #\"^{skip}/(.*/)?(target|node_modules)/(.*/)?("
-            )),
-            "{text}"
+            text.contains(&format!("(regex #\"^{skip}/(.*/)?(target|node_modules)/(.*/)?({})", regexes[0]))
         );
-        // Every name is plain enough for a regex in quotes (`any_case` escapes the rest)
         for n in protected_names() {
-            assert!(n.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)), "{n}");
+            let n = n.split('/').map(any_case).collect::<Vec<_>>().join("/");
+            assert_eq!(regexes.iter().filter(|r| r.split('|').any(|a| a == n)).count(), 1, "{n}");
         }
+        assert!(text.contains("[gG][rR][aA][dD][lL][eE]/[wW][rR][aA][pP][pP][eE][rR]"), "{text}");
+        for literal in text.split("#\"").skip(1).map(|s| s.split('"').next().unwrap_or("")) {
+            assert!(literal.len() < 600, "a regex of {} characters: {literal}", literal.len());
+        }
+        // Every name is plain enough for a regex in quotes (`any_case` escapes the rest), its parts too
+        for n in protected_names() {
+            assert!(n.chars().all(|c| c.is_ascii_alphanumeric() || "._-/".contains(c)), "{n}");
+            assert!(n.split('/').all(|p| !p.is_empty() && p != "." && p != ".."), "{n}");
+        }
+    }
+
+    /// The protected names (card model P1, now the packs'): every pack's `protect` with the core's — today's
+    /// names (what `llm.review-ask` held, `.tarae.local.toml` and `.git`) and the Java pack's, nothing more or
+    /// less; the core holds none of an ecosystem's.
+    #[test]
+    fn the_protected_names_are_the_packs_and_the_cores() {
+        let mut names: Vec<String> = protected_names().map(str::to_string).collect();
+        let today = [
+            "build.rs",
+            "Cargo.toml",
+            "package.json",
+            "Makefile",
+            "GNUmakefile",
+            "justfile",
+            ".justfile",
+            ".envrc",
+            ".tarae.toml",
+            ".cargo",
+            ".github",
+            ".claude",
+            ".vscode",
+            ".tarae.local.toml",
+            ".git",
+        ];
+        let java = [
+            "build.gradle",
+            "build.gradle.kts",
+            "settings.gradle",
+            "settings.gradle.kts",
+            "gradle.properties",
+            "gradlew",
+            "gradle/wrapper",
+            "buildSrc",
+            "pom.xml",
+            "mvnw",
+            ".mvn",
+        ];
+        let mut want: Vec<String> = today.iter().chain(&java).map(|s| s.to_string()).collect();
+        names.sort();
+        want.sort();
+        assert_eq!(names, want);
+        for ecosystem in
+            ["build.rs", "Cargo.toml", ".cargo", "package.json", "Makefile", "justfile", "pom.xml"]
+        {
+            assert!(!CORE_NAMES.contains(&ecosystem), "{ecosystem}: the core's");
+        }
+    }
+
+    /// A pack's names are kept whatever the project's languages: a Java build file in a Rust project, a
+    /// Rust one in a Java project, an npm one in either — the files that mark the project don't matter.
+    /// (Stand-in projects in the test's own temp folder.)
+    #[test]
+    fn a_packs_names_are_kept_in_a_project_of_another_language() {
+        let t = profile_path(&std::env::temp_dir()).join(format!("tarae-sb-langs-{}", std::process::id()));
+        let (rust, java) = (t.join("rust"), t.join("java"));
+        for (dir, marker) in [(&rust, "Cargo.toml"), (&java, "settings.gradle.kts")] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join(marker), "").unwrap();
+        }
+        for (root, other) in
+            [(&rust, "pom.xml"), (&rust, "build.gradle"), (&java, "build.rs"), (&java, "package.json")]
+        {
+            assert!(protected_in(root, &root.join(other)), "{other} in {}", root.display());
+            assert!(crate::edits::listed(Path::new(other), &[]), "{other}: an Edit wouldn't ask");
+            let profile = Policy::for_project(&Env { root: root.clone(), ..Env::default() }).profile();
+            let first = other.split('/').next().map(any_case).unwrap();
+            assert!(profile.contains(&first), "{other}: not in {}'s profile", root.display());
+        }
+        std::fs::remove_dir_all(&t).ok();
     }
 
     /// What Claude reads when the profile kept something on purpose: which names, and to use Edit (the user
@@ -2338,9 +2747,10 @@ mod tests {
             "{r}"
         );
         assert!(r.contains("  linking /Users/u/p/build.rs (forbidden-link-priv<file-write*>, touch)"), "{r}");
+        // Every protected name said, the packs' and the core's
+        assert!(protected_names().all(|n| r.contains(&format!(" {n},"))), "{r}");
         assert!(
-            r.contains("not build.rs, Cargo.toml, package.json")
-                && r.contains(".tarae.local.toml, .git, anywhere in it (Edit changes those)")
+            r.contains(".tarae.local.toml, .git, anywhere in it (Edit changes those)")
                 && r.contains(
                     "(not cargo's caches — its crates and git checkouts — while the network is closed)"
                 ),
@@ -2760,6 +3170,7 @@ mod tests {
             sockets: Vec::new(),
             refused: Vec::new(),
             reads: Reads::default(),
+            gradle: Gradle::default(),
         };
         let sh = |script: &str| {
             let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
@@ -2826,6 +3237,7 @@ mod tests {
                 sockets: Vec::new(),
                 refused: Vec::new(),
                 reads: Reads::default(),
+                gradle: Gradle::default(),
             };
             let sh = |script: &str| {
                 let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
@@ -2892,6 +3304,7 @@ mod tests {
             sockets: Vec::new(),
             refused: Vec::new(),
             reads: Reads::default(),
+            gradle: Gradle::default(),
         };
         let pid = std::process::id();
         let (mine, other) = (format!("tarae-test-{pid}-1."), format!("tarae-test-{pid}-10."));
@@ -2945,6 +3358,7 @@ mod tests {
             sockets: Vec::new(),
             refused: Vec::new(),
             reads: Reads::default(),
+            gradle: Gradle::default(),
         };
         let sh = |script: &str| {
             let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
@@ -3124,12 +3538,29 @@ mod tests {
         };
         let o = out.display();
         for name in protected_names() {
+            std::fs::create_dir_all(root.join(name).parent().unwrap()).unwrap();
             std::fs::write(root.join(name), "kept\n").unwrap();
             let upper = name.to_uppercase();
+            // (a name of several parts, `gradle/wrapper`: the folders it sits in made first, so every try is one)
+            let parents: Vec<String> = [
+                format!("a/{name}"),
+                format!("b/{name}"),
+                format!("c/{upper}"),
+                format!("moved{name}"),
+                format!("{o}/evil{name}"),
+                format!("{o}/second{name}"),
+                format!("target/x/{name}"),
+                format!("node_modules/p/{name}"),
+            ]
+            .iter()
+            .filter_map(|p| Path::new(p).parent().filter(|d| !d.as_os_str().is_empty()))
+            .map(|d| format!("'{}'", d.display()))
+            .collect();
+            let parents = parents.join(" ");
             let ran = sh(
                 &p,
                 &format!(
-                    "mkdir -p a b c target/x node_modules/p; echo x > 'a/{name}'; mkdir 'b/{name}'; \
+                    "mkdir -p {parents}; echo x > 'a/{name}'; mkdir 'b/{name}'; \
                      echo x > 'b/{name}/x'; echo x > 'c/{upper}'; echo pwned >> '{name}'; mv '{name}' 'moved{name}'; \
                      echo evil > '{o}/evil{name}'; mv '{o}/evil{name}' '{name}'; \
                      ln '{name}' '{o}/second{name}' && echo pwned >> '{o}/second{name}'; rm -f '{name}'; \
@@ -3154,8 +3585,7 @@ mod tests {
                 assert!(root.join(&beside).exists(), "{beside}: not written — {said}");
             }
             // An Edit of it asks the user — where the report sends Claude
-            let defaults: Vec<String> = crate::llm::REVIEW_ASK.iter().map(|s| s.to_string()).collect();
-            assert!(crate::edits::listed(Path::new(name), &defaults), "{name}: an Edit wouldn't ask");
+            assert!(crate::edits::listed(Path::new(name), &[]), "{name}: an Edit wouldn't ask");
         }
         // Links: nothing from outside comes in; the project's own files link as before
         sh(&p, &format!("ln '{}' stolen; echo x > own; ln own own2", key.display()));
@@ -3412,6 +3842,99 @@ mod tests {
             let (ok, out) = sh("pip3 config list");
             assert!(ok && out.contains("global.timeout='7'"), "pip: {out}");
         }
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// For real, on macOS (Java under P2): Java's places in a stand-in home as a run gets them. Read: the JDKs,
+    /// Maven's repository, Gradle's downloaded dependencies and wrapper distributions — through the run's own
+    /// Gradle home too, which it writes. Written in the user's Gradle home: the wrapper's lock file, nothing
+    /// else. Unread: the Gradle daemons' registry (measured: a sandboxed build that read it ran in a daemon
+    /// started outside) and both tools' settings (repository passwords). Harmless: markers under `target/`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn javas_places_under_the_real_profile() {
+        if skipped_inside("sandbox::tests::javas_places_under_the_real_profile") {
+            return;
+        }
+        // (the stand-in Gradle home is where `GRADLE_USER_HOME` would point instead: not one to write markers in)
+        if std::env::var_os("GRADLE_USER_HOME").is_some() {
+            eprintln!("javas_places_under_the_real_profile: GRADLE_USER_HOME is set — skipped");
+            return;
+        }
+        let t = scratch("sb-java");
+        let (home, run_dir) = (t.join("home"), RunDir::new().unwrap());
+        let (root, g) = (home.join("proj"), home.join(".gradle"));
+        let dist = g.join("wrapper/dists/gradle-9.7.1-bin/h1");
+        let read = [
+            home.join("Library/Java/JavaVirtualMachines/jdk/release"),
+            home.join(".m2/repository/junit/junit.jar"),
+            g.join("caches/modules-2/files-2.1/junit/junit.jar"),
+            dist.join("gradle-9.7.1-bin/lib/gradle.jar"),
+        ];
+        let unread =
+            [g.join("daemon/9.7.1/registry.bin"), g.join("gradle.properties"), home.join(".m2/settings.xml")];
+        for f in read.iter().chain(&unread) {
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(f, "marker\n").unwrap();
+        }
+        std::fs::create_dir_all(&root).unwrap();
+        let env = Env {
+            root: root.clone(),
+            reads: reads_for(&home, &[]),
+            gradle: Some(g.clone()),
+            gradle_locks: gradle_locks(&g),
+            ..Env::default()
+        };
+        let vars = gradle_run_home(run_dir.path(), Some(&g), None);
+        let p = Policy {
+            run: Some(run_dir.clone()),
+            gradle: Gradle { user: Some(g.clone()), env: vars },
+            ..Policy::for_project(&env)
+        };
+        let sh = |script: &str| {
+            let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
+            c.current_dir(&root).stdin(Stdio::null()).output().unwrap().status.success()
+        };
+        let cat = |f: &Path| sh(&format!("[ \"$(cat '{}' 2>/dev/null)\" = marker ]", f.display()));
+        for f in &read {
+            assert!(cat(f), "{}: not read", f.display());
+        }
+        for f in &unread {
+            assert!(!cat(f), "{}: read", f.display());
+        }
+        let jar = "wrapper/dists/gradle-9.7.1-bin/h1/gradle-9.7.1-bin/lib/gradle.jar";
+        assert!(
+            sh(&format!("[ \"$(cat \"$GRADLE_USER_HOME/{jar}\")\" = marker ]")),
+            "the distribution, linked"
+        );
+        assert!(sh("mkdir -p \"$GRADLE_USER_HOME/native\" && touch \"$GRADLE_USER_HOME/caches.lock\""));
+        let touch = |f: &Path| sh(&format!("touch '{}' 2>/dev/null", f.display()));
+        assert!(touch(&dist.join("gradle-9.7.1-bin.zip.lck")), "the wrapper's lock");
+        for f in [dist.join("gradle-9.7.1-bin.zip.ok"), g.join("caches/modules-2/x"), g.join("init.gradle")] {
+            assert!(!touch(&f) && !f.exists(), "{}: written", f.display());
+        }
+        // In the project: the Java pack's names can't be made or changed (they run in the user's builds and
+        // when jdtls imports the project); the code beside them is written as usual
+        std::fs::write(root.join("build.gradle"), "kept\n").unwrap();
+        for f in [
+            "settings.gradle.kts",
+            "app/pom.xml",
+            "gradle/wrapper/gradle-wrapper.properties",
+            ".mvn/jvm.config",
+        ] {
+            let dir = Path::new(f).parent().filter(|d| !d.as_os_str().is_empty());
+            let mk = dir.map_or(String::new(), |d| format!("mkdir -p '{}' 2>/dev/null; ", d.display()));
+            assert!(
+                !sh(&format!("{mk}echo evil > '{f}' 2>/dev/null")) && !root.join(f).exists(),
+                "{f}: made"
+            );
+        }
+        assert!(!sh("echo evil >> build.gradle 2>/dev/null"), "build.gradle: appended to");
+        assert_eq!(std::fs::read_to_string(root.join("build.gradle")).unwrap(), "kept\n");
+        assert!(
+            sh("mkdir -p src/main/java && echo 'class A {}' > src/main/java/A.java"),
+            "the code: not written"
+        );
         std::fs::remove_dir_all(&t).ok();
     }
 
@@ -3869,6 +4392,7 @@ mod tests {
             sockets: Vec::new(),
             refused: Vec::new(),
             reads: Reads::default(),
+            gradle: Gradle::default(),
         };
         let reached = |p: &Policy, l: &TcpListener| {
             let script = format!("/usr/bin/nc -z -w 2 127.0.0.1 {}", port(l));

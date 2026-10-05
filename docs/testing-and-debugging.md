@@ -197,6 +197,20 @@ steps = [
 ]
 ```
 
+`unless` holds an entry back when one of its files is there too, and `held` says why when nothing else runs. The
+Java pack's Gradle entry has `unless = ["gradlew"]`: a project with its own wrapper lists it in its own
+`[preflight]`.
+
+What runs later outside Claude's sandbox — build scripts, manifests, wrappers — each pack lists in `protect`:
+Claude's commands can't write these and its edits of them always ask. Every built-in pack's names apply in every
+project, whatever its languages, and a pack of your own can't take one out (`llm.review-ask` adds yours):
+
+```toml
+# runtime/packs/rust/pack.toml
+protect = ["build.rs", "Cargo.toml", ".cargo"]   # names, anywhere in the project, in any case;
+                                                 # "gradle/wrapper": those names in a row
+```
+
 A run can wait on something that isn't its own work — another cargo holding the build directory. `[[waits]]` names
 the lines that say so: such a line is the run's state, not output (the task or test panel shows `waiting for cargo's
 lock · 0:37` until the next line), and Claude's report tells the wait from the run (`Waited 16.0s for cargo's build

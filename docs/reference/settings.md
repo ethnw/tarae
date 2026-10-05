@@ -66,13 +66,13 @@ The name is also the `:set` path: `:set editor.scrolloff 8` changes it until you
 | `llm.chat-settings` | bool | `true` | Chat: read your CLAUDE.md files and Claude Code settings, like `claude` does (hooks stay off, edits always ask) |
 | `llm.screen-terminal` | bool | `true` | Chat: when Claude looks at your screen (you say yes on a card), the terminal panel's contents go too — off: its rows go blank |
 | `llm.run-allow` | list of strings | `[]` | Chat: commands Claude runs without asking, past the checks (cargo build/test/clippy/fmt, git status/diff/log…) — word prefixes, like "npm test" |
-| `llm.review-ask` | list of strings | `["build.rs", "Cargo.toml", "package.json", "Makefile", "GNUmakefile", "justfile", ".justfile", ".envrc", ".tarae.toml", ".cargo", ".github", ".claude", ".vscode"]` | Chat, review at the end (space v a): files whose edits still ask first — a name matches anywhere, in any case ("build.rs"), a path from the project root ("src/secret/"); .git and .tarae.local.toml always ask |
-| `llm.sandbox` | bool | `true` | Chat: Claude's commands run in a sandbox — they write only in the project (not .git, build.rs, Cargo.toml, .cargo… — llm.review-ask's defaults), temp and the build's folders, and connect to nothing but the ports you open (macOS) |
+| `llm.review-ask` | list of strings | `[]` | Chat, review at the end (space v a): more files whose edits still ask first — a name matches anywhere, in any case ("schema.sql"), a path from the project root ("src/secret/"); the protected ones (.git, .tarae.toml, build.rs, pom.xml… — every language pack's) always ask |
+| `llm.sandbox` | bool | `true` | Chat: Claude's commands run in a sandbox — they write only in the project (not .git, build.rs, pom.xml… — the protected names, every language pack's), temp and the build's folders, and connect to nothing but the ports you open (macOS) |
 | `llm.sandbox-network` | bool | `false` | Chat: the sandbox lets Claude's commands reach the network — but not this machine's risky ports (Docker, Jupyter…) unless in llm.sandbox-ports |
 | `llm.sandbox-ports` | list of ports (at most 200) | `[]` | Chat: ports on this machine Claude's commands may connect to in the sandbox — a dev server, a test's database ([3000, 5432]) |
 | `llm.sandbox-localhost` | bool | `false` | Chat: every port on this machine open to Claude's commands (tests that talk to their own servers) — the risky ones too (Docker, Jupyter…): the sandbox can't leave some out |
 | `llm.sandbox-write` | list of strings | `[]` | Chat: more folders the sandbox lets Claude's commands write to ("~/.npm") — never the project's own folders above it |
-| `llm.sandbox-protect` | list of strings | `[]` | Chat: paths in the project the sandbox keeps Claude's commands from changing ("migrations/"); .git, .tarae.local.toml and llm.review-ask's defaults always, anywhere in it |
+| `llm.sandbox-protect` | list of strings | `[]` | Chat: paths in the project the sandbox keeps Claude's commands from changing ("migrations/"); the protected names (.git, .tarae.toml, build.rs, pom.xml… — every language pack's) always, anywhere in it |
 | `llm.context-lines` | integer 0–1000 | `20` | Lines of context sent around each selection |
 
 ## `[session]`

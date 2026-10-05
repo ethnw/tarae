@@ -645,7 +645,7 @@ pub(crate) mod tests {
                     let pack: Result<toml::Table, _> = toml::from_str(block);
                     assert!(
                         pack.is_ok_and(|p| {
-                            ["test", "tasks", "install", "preflight", "waits"]
+                            ["test", "tasks", "install", "preflight", "waits", "protect"]
                                 .iter()
                                 .any(|k| p.contains_key(*k))
                         }),

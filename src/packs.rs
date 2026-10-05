@@ -318,37 +318,87 @@ fn tasks_of(v: &toml::Value, root: &Path) -> Result<Option<(i64, Vec<Suggested>)
 /// project, their steps together. Each step says where it came from (`rust pack`). A pack that can't be
 /// read is logged and skipped. The commands are tarae's, what they run (tests, build scripts) the project's:
 /// the first run in a project says so on a card (`preflight::DEFAULTS_SAY`). Only where the language's own
-/// toolchain defines the check — Rust, Go; the other packs' pack.toml says why they have none.
+/// toolchain defines the check — Rust, Go, Java's installed Gradle and Maven; the other packs' pack.toml says
+/// why they have none.
 ///
-/// `[[preflight]]`: `when` — the files that say it's this kind of project (any); `rank` (50 unless set);
+/// `[[preflight]]`: `when` — the files that say it's this kind of project (any); `unless` — files that say
+/// the project runs it its own way (a build wrapper: the repository's own script, run only from the
+/// project's trusted `[preflight]`), with `held` saying so when nothing else runs; `rank` (50 unless set);
 /// `steps = [{ name, cmd, note? }]` as in `.tarae.toml`.
-pub fn preflight(root: &Path) -> Vec<crate::preflight::Step> {
-    let mut found = Vec::new();
+pub fn preflight(root: &Path) -> Defaults {
+    let (mut found, mut held) = (Vec::new(), Vec::new());
     for lang in crate::runtime::pack_langs() {
         let Some(Ok(t)) = manifest(&lang) else { continue };
         let Some(list) = t.get("preflight") else { continue };
-        match preflight_of(list, root, &lang) {
+        match preflight_of(list, root, &lang, &mut held) {
             Ok(sets) => found.extend(sets.into_iter().map(|(rank, steps)| (rank, lang.clone(), steps))),
             Err(e) => crate::log::line("tarae", "warning", &format!("the {lang} pack: [[preflight]]: {e}")),
         }
     }
     crate::sorting::by(&mut found, |a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
-    found.into_iter().flat_map(|(_, _, steps)| steps).collect()
+    Defaults { steps: found.into_iter().flat_map(|(_, _, steps)| steps).collect(), held }
 }
 
-/// One pack's `[[preflight]]` entries that `root` is a project of: (rank, steps).
+/// The packs' default preflight steps for a project, and why some were held back (`[[preflight]] held`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Defaults {
+    pub steps: Vec<crate::preflight::Step>,
+    pub held: Vec<String>,
+}
+
+/// What every built-in pack lists as running later outside the sandbox, or setting how things run
+/// (`protect = [...]`: build scripts, manifests, wrappers) — every pack's, whatever the project's languages
+/// (a Rust project can hold a `pom.xml`). Names, matched anywhere in the project in any case; one of several
+/// parts (`gradle/wrapper`) matches them in a row. Built-in packs only, from the binary: a runtime folder's
+/// pack can't take a name out (`llm.review-ask` adds yours). A name that can't be one (empty, absolute, `.`,
+/// `..`) is a mistake in tarae's pack — left out and logged. `sandbox::protected_names` adds the core's.
+pub fn protect() -> Vec<String> {
+    let mut out = Vec::new();
+    for (lang, text) in crate::runtime::pack_manifests_builtin() {
+        match protect_of(text) {
+            Ok(names) => out.extend(names),
+            Err(e) => crate::log::line("tarae", "warning", &format!("the {lang} pack: protect: {e}")),
+        }
+    }
+    out
+}
+
+/// One pack's `protect` names (none: no `protect`).
+fn protect_of(text: &str) -> Result<Vec<String>, String> {
+    let t = text.parse::<Table>().map_err(|e| e.message().to_string())?;
+    let names = strings(t.get("protect"), "protect")?.unwrap_or_default();
+    let mut out = Vec::new();
+    for name in names {
+        let parts: Vec<&str> = name.split('/').collect();
+        if parts.iter().any(|p| p.is_empty() || *p == "." || *p == "..") {
+            crate::log::line("tarae", "warning", &format!("protect: `{name}` isn't a name or names"));
+            continue;
+        }
+        out.push(name);
+    }
+    Ok(out)
+}
+
+/// One pack's `[[preflight]]` entries that `root` is a project of: (rank, steps); those its `unless` holds
+/// back say why in `held`.
 fn preflight_of(
     v: &toml::Value,
     root: &Path,
     lang: &str,
+    held: &mut Vec<String>,
 ) -> Result<Vec<(i64, Vec<crate::preflight::Step>)>, String> {
     let list = v.as_array().ok_or("isn't a list ([[preflight]])")?;
     let mut out = Vec::new();
     for entry in list {
         let t = entry.as_table().ok_or("an entry isn't a table")?;
-        known(t, &["when", "rank", "steps"], "[[preflight]]")?;
+        known(t, &["when", "unless", "held", "rank", "steps"], "[[preflight]]")?;
         let when = strings(t.get("when"), "when")?.unwrap_or_default();
         if !when.iter().any(|f| root.join(f).is_file()) {
+            continue;
+        }
+        let unless = strings(t.get("unless"), "unless")?.unwrap_or_default();
+        if unless.iter().any(|f| root.join(f).is_file()) {
+            held.extend(string(t, "held")?);
             continue;
         }
         let rank = t.get("rank").map_or(Ok(50), |r| r.as_integer().ok_or("`rank` isn't a number"))?;
@@ -1259,19 +1309,23 @@ mod tests {
     }
 
     /// `:preflight`'s defaults come by the files that mark a project — several kinds, their steps together
-    /// by rank, each saying its pack. Only where the language's own toolchain defines the check (cargo, go):
-    /// none for JavaScript and TypeScript (many runners, a project's own tsc), Python (no single standard),
-    /// Java (its build is its wrapper, a project's own); a folder that's no kind of project, none.
+    /// by rank, each saying its pack. Only where the language's own toolchain defines the check (cargo, go,
+    /// an installed Gradle or Maven): none for JavaScript and TypeScript (many runners, a project's own tsc),
+    /// Python (no single standard), nor a Java project with its own wrapper (a script from the repository —
+    /// held back, saying how to list it); a folder that's no kind of project, none.
     #[test]
     fn preflight_defaults_by_the_project_files() {
         let dir = std::env::temp_dir().join(format!("tarae-pack-preflight-{}", std::process::id()));
-        let steps = |files: &[&str]| {
+        let found = |files: &[&str]| {
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             for f in files {
                 std::fs::write(dir.join(f), "").unwrap();
             }
-            preflight(&dir).iter().map(|s| format!("{}: {}", s.from, s.name)).collect::<Vec<_>>()
+            preflight(&dir)
+        };
+        let steps = |files: &[&str]| {
+            found(files).steps.iter().map(|s| format!("{}: {}", s.from, s.name)).collect::<Vec<_>>()
         };
         let rust = ["rust pack: fmt", "rust pack: clippy", "rust pack: test"];
         assert_eq!(steps(&["Cargo.toml"]), rust);
@@ -1279,17 +1333,51 @@ mod tests {
         assert_eq!(both[..3], rust, "rust first (rank 10)");
         assert_eq!(both[3..], ["go pack: gofmt", "go pack: go vet", "go pack: go test"]);
         assert_eq!(steps(&["Cargo.toml", "package.json", "tsconfig.json"]), rust, "only rust's beside them");
-        for none in [
-            "package.json",
-            "tsconfig.json",
-            "pom.xml",
-            "build.gradle",
-            "build.gradle.kts",
-            "pyproject.toml",
-            "notes.txt",
-        ] {
+        for none in ["package.json", "tsconfig.json", "pyproject.toml", "notes.txt"] {
             assert!(steps(&[none]).is_empty(), "no defaults for {none}");
         }
+        // Java: the installed tool's tests — the wrapper only from the project's own [preflight]
+        for gradle in ["build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"] {
+            assert_eq!(steps(&[gradle]), ["java pack: gradle test"], "{gradle}");
+        }
+        let gradle = found(&["build.gradle"]).steps;
+        assert_eq!(gradle[0].cmd, "gradle test --console=plain");
+        assert_eq!(steps(&["pom.xml"]), ["java pack: mvn test"]);
+        assert_eq!(found(&["pom.xml"]).steps[0].cmd, "mvn -B test");
+        for (files, wrapper) in
+            [(["build.gradle.kts", "gradlew"], "./gradlew"), (["pom.xml", "mvnw"], "./mvnw")]
+        {
+            let d = found(&files);
+            assert!(d.steps.is_empty(), "{files:?}: {:?}", d.steps);
+            let why = d.held.join(" ");
+            assert!(why.contains(&format!("builds with its own {wrapper}")), "{why}");
+            assert!(why.contains(&format!("cmd = \"{wrapper} ")) && why.contains("once you trust"), "{why}");
+        }
+        assert!(found(&["Cargo.toml"]).held.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A pack's `[[preflight]]` read whole: `unless` holds an entry back and its `held` says why; an unknown
+    /// key is refused, as everywhere in a pack.
+    #[test]
+    fn a_preflight_entry_held_back_by_a_file() {
+        let dir = std::env::temp_dir().join(format!("tarae-pack-unless-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.build"), "").unwrap();
+        let v: toml::Value = toml::from_str(
+            "[[preflight]]\nwhen = [\"a.build\"]\nunless = [\"wrap\"]\nheld = \"its own wrap\"\n\
+             steps = [{ name = \"t\", cmd = \"b test\" }]",
+        )
+        .unwrap();
+        let mut held = Vec::new();
+        let ran = preflight_of(&v["preflight"], &dir, "x", &mut held).unwrap();
+        assert_eq!((ran.len(), held.len()), (1, 0), "no wrapper: it runs");
+        std::fs::write(dir.join("wrap"), "").unwrap();
+        let ran = preflight_of(&v["preflight"], &dir, "x", &mut held).unwrap();
+        assert!(ran.is_empty() && held == ["its own wrap"], "{held:?}");
+        let odd: toml::Value =
+            toml::from_str("[[preflight]]\nwhen = [\"a.build\"]\nunles = [\"wrap\"]").unwrap();
+        assert!(preflight_of(&odd["preflight"], &dir, "x", &mut held).is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
 

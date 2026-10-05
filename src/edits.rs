@@ -235,19 +235,15 @@ fn unasked(ed: &mut Editor, root: PathBuf, p: Pending) {
     });
 }
 
-/// Whether an edit to `rel` (from the project's root) still asks first: anything in `.git`, a cargo config
-/// (`.cargo/config.toml`, `.cargo/config` — its build and target dirs, its `[env]`, are what the sandbox
-/// opens and cargo runs with: #20, whatever `llm.review-ask` says), `.tarae.local.toml` (your own config,
-/// read with no trust card — its preflight steps run unsandboxed), or an entry of `llm.review-ask` — a name
-/// matches any part of the path in any case (APFS opens `Build.rs` for `build.rs`), a path (with `/`) its
-/// start. (Claude's runs can't write these at all — `sandbox::protected_names` — and are told to Edit them.)
+/// Whether an edit to `rel` (from the project's root) still asks first: a name Claude's runs can't write
+/// (`sandbox::protected_names` — `.git`, `.tarae.local.toml`, every pack's build scripts and manifests,
+/// whatever the project's languages; nothing configured takes one out), or an entry of `llm.review-ask`,
+/// yours, on top — a name matches any part of the path in any case (APFS opens `Build.rs` for `build.rs`), a
+/// path (with `/`) its start. (The report sends Claude here for the protected ones.)
 pub fn listed(rel: &Path, ask: &[String]) -> bool {
     let parts: Vec<&std::ffi::OsStr> = rel.iter().collect();
     let is = |p: &std::ffi::OsStr, name: &str| p.eq_ignore_ascii_case(name);
-    let cargo_config =
-        parts.windows(2).any(|w| is(w[0], ".cargo") && (is(w[1], "config.toml") || is(w[1], "config")));
-    parts.iter().any(|p| is(p, ".git") || is(p, ".tarae.local.toml"))
-        || cargo_config
+    !crate::sandbox::protected_at(&parts).is_empty()
         || ask
             .iter()
             .map(|a| a.trim().trim_end_matches('/'))
@@ -568,18 +564,24 @@ mod tests {
         assert!(!listed("lib/src/secret/key.rs"));
         assert!(!listed("src/build.rs.bak"));
         assert!(listed("Cargo.toml") && listed("crates/a/Cargo.toml"));
-        // #20: a cargo config always asks, as `.git` does — even with `.cargo` not in the list
+        // #20: a cargo config always asks, as `.git` does (the rust pack protects `.cargo`)
         for p in [".cargo/config.toml", ".cargo/config", "crates/a/.cargo/config.toml"] {
             assert!(listed(p), "{p}");
         }
-        assert!(!listed(".cargo/notes.md") && !listed("src/config.toml"));
+        assert!(!listed("src/config.toml"));
         // Your own config always asks too (read with no trust card); a name in any case (APFS opens it)
         assert!(listed(".tarae.local.toml") && listed("BUILD.RS") && listed(".Cargo/Config.toml"));
-        // Every name Claude's runs can't write is one its Edit asks about (the report sends it there)
-        let defaults: Vec<String> = crate::llm::REVIEW_ASK.iter().map(|s| s.to_string()).collect();
+        // Every name Claude's runs can't write is one its Edit asks about (the report sends it there) — with
+        // `llm.review-ask` empty, as a project could set it: it only adds
         for name in crate::sandbox::protected_names() {
-            assert!(super::listed(&Path::new("a").join(name).join("x"), &defaults), "{name}");
+            assert!(super::listed(&Path::new("a").join(name).join("x"), &[]), "{name}");
         }
+        // Every pack's, whatever the project: a Java build file asks in any project; the wrapper's folder is
+        // its names in a row, not `gradle` alone
+        for p in ["build.gradle.kts", "app/pom.xml", "gradle/wrapper/gradle-wrapper.properties", "Gradlew"] {
+            assert!(super::listed(Path::new(p), &[]), "{p}");
+        }
+        assert!(!super::listed(Path::new("src/main/java/org/gradle/Api.java"), &[]));
     }
 
     #[test]

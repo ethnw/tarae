@@ -80,6 +80,11 @@ pub fn pack_builtin(rel: &str) -> Option<String> {
     PACKS.iter().find(|(r, _)| *r == rel).map(|(_, s)| s.to_string())
 }
 
+/// Every built-in pack's `pack.toml`: (language, text) — no disk.
+pub fn pack_manifests_builtin() -> impl Iterator<Item = (&'static str, &'static str)> {
+    PACKS.iter().filter_map(|(r, s)| Some((r.strip_suffix("/pack.toml")?, *s)))
+}
+
 /// Every language with a pack: built in, or in a runtime folder's `packs/`.
 pub fn pack_langs() -> Vec<String> {
     let mut out: Vec<String> =

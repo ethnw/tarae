@@ -1,5 +1,9 @@
 # JavaScript (and TypeScript) projects: every script in package.json.
 
+# What runs later outside Claude's sandbox, in every project (`packs::protect`): the scripts and lifecycle
+# hooks npm runs (`postinstall`…), and the dependencies a build fetches
+protect = ["package.json"]
+
 [tasks]
 when = ["package.json"]
 rank = 40

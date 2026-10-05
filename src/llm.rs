@@ -98,8 +98,9 @@ pub struct LlmConfig {
     /// Chat: commands Claude's `run` starts without asking, past the built-in checks (`tools::RUN_ALLOW`) —
     /// each a prefix of whole words (`"npm test"`).
     pub run_allow: Vec<String>,
-    /// Chat, review at the end (`edits.rs`): files whose edits still ask first — a name matches anywhere, a
-    /// path (with `/`) from the project's root.
+    /// Chat, review at the end (`edits.rs`): more files whose edits still ask first, past the protected ones
+    /// (`sandbox::protected_names`, which always ask) — a name matches anywhere, a path (with `/`) from the
+    /// project's root.
     pub review_ask: Vec<String>,
     /// Chat: Claude's commands run in a sandbox (`sandbox.rs`) — writes in the project, temp and the
     /// toolchain's folders; no network but this machine.
@@ -119,24 +120,6 @@ pub struct LlmConfig {
     pub screen_terminal: bool,
 }
 
-/// `llm.review-ask`'s default: what runs or sets how things run, and the dependencies a build fetches.
-/// (make reads `GNUmakefile` before `Makefile`; just reads `.justfile` too — names match in any case)
-pub const REVIEW_ASK: [&str; 13] = [
-    "build.rs",
-    "Cargo.toml",
-    "package.json",
-    "Makefile",
-    "GNUmakefile",
-    "justfile",
-    ".justfile",
-    ".envrc",
-    ".tarae.toml",
-    ".cargo",
-    ".github",
-    ".claude",
-    ".vscode",
-];
-
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
@@ -150,7 +133,7 @@ impl Default for LlmConfig {
             review_at_end: false,
             chat_settings: true,
             run_allow: Vec::new(),
-            review_ask: REVIEW_ASK.iter().map(|s| s.to_string()).collect(),
+            review_ask: Vec::new(),
             sandbox: true,
             sandbox_network: false,
             sandbox_write: Vec::new(),

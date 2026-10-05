@@ -414,7 +414,7 @@ pub static SETTINGS: &[Setting] = &[
     Setting {
         path: "llm.review-ask",
         kind: Kind::StrList,
-        doc: "Chat, review at the end (space v a): files whose edits still ask first — a name matches anywhere, in any case (\"build.rs\"), a path from the project root (\"src/secret/\"); .git and .tarae.local.toml always ask",
+        doc: "Chat, review at the end (space v a): more files whose edits still ask first — a name matches anywhere, in any case (\"schema.sql\"), a path from the project root (\"src/secret/\"); the protected ones (.git, .tarae.toml, build.rs, pom.xml… — every language pack's) always ask",
         get: |c| Value::Array(c.llm.review_ask.iter().map(|a| Value::from(a.as_str())).collect()),
         set: |c, v| {
             c.llm.review_ask =
@@ -424,7 +424,7 @@ pub static SETTINGS: &[Setting] = &[
     Setting {
         path: "llm.sandbox",
         kind: Kind::Bool,
-        doc: "Chat: Claude's commands run in a sandbox — they write only in the project (not .git, build.rs, Cargo.toml, .cargo… — llm.review-ask's defaults), temp and the build's folders, and connect to nothing but the ports you open (macOS)",
+        doc: "Chat: Claude's commands run in a sandbox — they write only in the project (not .git, build.rs, pom.xml… — the protected names, every language pack's), temp and the build's folders, and connect to nothing but the ports you open (macOS)",
         get: |c| Value::from(c.llm.sandbox),
         set: |c, v| c.llm.sandbox = b(v),
     },
@@ -469,7 +469,7 @@ pub static SETTINGS: &[Setting] = &[
     Setting {
         path: "llm.sandbox-protect",
         kind: Kind::StrList,
-        doc: "Chat: paths in the project the sandbox keeps Claude's commands from changing (\"migrations/\"); .git, .tarae.local.toml and llm.review-ask's defaults always, anywhere in it",
+        doc: "Chat: paths in the project the sandbox keeps Claude's commands from changing (\"migrations/\"); the protected names (.git, .tarae.toml, build.rs, pom.xml… — every language pack's) always, anywhere in it",
         get: |c| Value::Array(c.llm.sandbox_protect.iter().map(|a| Value::from(a.as_str())).collect()),
         set: |c, v| {
             c.llm.sandbox_protect =

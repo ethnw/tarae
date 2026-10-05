@@ -185,17 +185,19 @@ Where the steps come from:
   it's for every project.)
 - **Else the language packs' defaults**, by the files that mark the project — only where the language's own
   toolchain defines the check: Rust (`Cargo.toml`: `cargo fmt --all --check`, `cargo clippy --all-targets -- -D
-  warnings`, `cargo test`) and Go (`go.mod`: `gofmt -l` must list nothing, `go vet ./...`, `go test ./...`),
-  both together in a project that is both. The commands are tarae's, but what they run is the project's code —
-  its tests and build scripts — so the first run in a project shows them on a card that says so (`y` runs
-  them): run them only for code you trust.
+  warnings`, `cargo test`), Go (`go.mod`: `gofmt -l` must list nothing, `go vet ./...`, `go test ./...`) and
+  Java with the Gradle or Maven installed here (`build.gradle(.kts)` or `settings.gradle(.kts)`: `gradle test
+  --console=plain`; `pom.xml`: `mvn -B test`), together in a project that is several. The commands are
+  tarae's, but what they run is the project's code — its tests and build scripts — so the first run in a
+  project shows them on a card that says so (`y` runs them): run them only for code you trust.
 
-  Other languages have none, and their steps go in the project's `[preflight]`: JavaScript has npm, pnpm, yarn
-  and bun to run it and jest, vitest, mocha … to test it (and `npm init`'s default `test` script fails on
-  purpose); TypeScript's `tsc` usually lives in the project's `node_modules/.bin`, and monorepos and frameworks
-  check types their own way (`tsc -b`, `vue-tsc`, `svelte-check`); Python has no single standard to guess; a
-  Java project builds with its own wrapper (`./mvnw`, `./gradlew`), a script from the repository that runs
-  from the project's `[preflight]` once you trust it.
+  A Java project with its own wrapper (`./gradlew`, `./mvnw`) builds with that, a script from the repository:
+  tarae's defaults never run it, and `:preflight` says to list it in the project's `[preflight]` — `{ name =
+  "test", cmd = "./gradlew test --console=plain" }` — which runs once you trust the project. Other languages
+  have none, and their steps go in the project's `[preflight]`: JavaScript has npm, pnpm, yarn and bun to run
+  it and jest, vitest, mocha … to test it (and `npm init`'s default `test` script fails on purpose);
+  TypeScript's `tsc` usually lives in the project's `node_modules/.bin`, and monorepos and frameworks check
+  types their own way (`tsc -b`, `vue-tsc`, `svelte-check`); Python has no single standard to guess.
 - **Then yours**, from `.tarae.local.toml`'s `[preflight]`: added after either (`full = true` works there too).
 
 ## Custom themes
