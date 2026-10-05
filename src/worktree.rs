@@ -1265,7 +1265,7 @@ impl Editor {
     }
 
     /// The session `which` names (its number or name), else the one in front.
-    fn session_named(&self, which: &str) -> Result<(SessionId, String), String> {
+    pub(crate) fn session_named(&self, which: &str) -> Result<(SessionId, String), String> {
         let which = which.trim();
         let all = self.sessions_in_order();
         let found = match which {
@@ -1752,8 +1752,9 @@ impl Editor {
         }
         let session =
             std::iter::once(&self.session).chain(&self.sessions).find(|l| l.id == id).expect("named");
-        if let Some(r) = session.rebase.as_ref() {
-            return Err(format!("bring {name}: {}", r.why(&name)));
+        // (a rebase stopped there: its card, to go on or abort — #175)
+        if session.rebase.is_some() {
+            return self.rebase_offer(id).map_err(|e| format!("bring {name}: {e}"));
         }
         let (root, base, start) = (session.root.clone(), session.base.clone(), self.start_root());
         let unsaved: Vec<PathBuf> =
@@ -1787,14 +1788,17 @@ impl Editor {
                     ed.with_session(id, |ed| quick = ed.preflight_quick());
                     ed.push_offer(m.bring_card(quick, false));
                 }
-                // (one tarae didn't start: taken up, so continue and abort know it)
-                Bringing::Rebasing(stop) => ed.with_session(id, |ed| {
-                    if ed.session.rebase.is_none() {
-                        ed.rebase_adopt(stop);
+                // (one tarae didn't start: taken up, so continue and abort know it — and its card up)
+                Bringing::Rebasing(stop) => {
+                    ed.with_session(id, |ed| {
+                        if ed.session.rebase.is_none() {
+                            ed.rebase_adopt(stop);
+                        }
+                    });
+                    if let Err(e) = ed.rebase_offer(id) {
+                        ed.set_error(format!("bring {name}: {e}"));
                     }
-                    let why = ed.session.rebase.as_ref().map(|r| r.why(&name)).unwrap_or_default();
-                    ed.set_error(format!("bring {name}: {why}"));
-                }),
+                }
                 Bringing::Refused(e) => ed.set_error(format!("bring {name}: {e}")),
             }
             ed.git_refresh();
@@ -2776,7 +2780,15 @@ mod tests {
         assert_eq!(review.files.iter().map(|f| f.rel.as_str()).collect::<Vec<_>>(), ["a.txt"]);
         let q = &card(&ed, "feat: conflicts resolved").unwrap().question;
         assert!(q.starts_with("a.txt resolved for commit 1 of 2 ("), "{q}");
-        assert!(q.ends_with(" feat a). The review shows it against that commit.\n\nX aborts the rebase: feat goes back as it was."));
+        // (#175: unmerged in git until `y` — the card says so)
+        assert_eq!(git_in(&wt, &["status", "--porcelain", "a.txt"]), "UU a.txt");
+        assert!(
+            q.ends_with(
+                " feat a). The review shows it against that commit — not staged yet: y stages it and goes \
+                 on.\n\nX aborts the rebase: feat goes back as it was."
+            ),
+            "{q}"
+        );
         // It says so — the tabs over its chat, its row in the list
         let mut out = Vec::new();
         crate::term::render(&mut ed, &mut out, 112, 30).unwrap();
@@ -2786,9 +2798,12 @@ mod tests {
         assert!(shown.contains("feat rebasing 1/2"), "{shown}");
         assert!(shown.contains("stopped: 1 conflict") && !shown.contains("failed"), "{shown}");
         assert!(ed.session_items()[1].hint.contains("rebasing 1/2"), "{}", ed.session_items()[1].hint);
-        // What would get in its way waits for it
+        // What would get in its way waits for it — bringing it puts its card up again (one, not two)
         feed(&mut ed, ":session-bring<ret>");
-        assert!(says(&ed, "bring feat: feat is rebasing 1/2 — :rebase-continue or :rebase-abort first"));
+        assert!(!says(&ed, "bring feat:"), "{}", said(&ed));
+        let resolved = |o: &&crate::offer::Offer| matches!(o.what, crate::offer::What::RebaseResolved { .. });
+        assert_eq!(ed.offers.iter().filter(resolved).count(), 1);
+        assert!(card(&ed, "feat: conflicts resolved").is_some());
         feed(&mut ed, ":session-end<ret>");
         assert!(says(&ed, "end feat: feat is rebasing 1/2"), "{}", said(&ed));
         let restart = crate::restart::start(&mut ed, false).unwrap_err();
@@ -2813,6 +2828,49 @@ mod tests {
         assert_eq!(git_in(&wt, &["log", "-1", "--format=%s", "HEAD~1"]), "feat a", "its message kept");
         assert!(ed.session.rebase.is_none() && ed.session.code_review.is_none());
         assert!(card(&ed, "feat: conflicts resolved").is_none());
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #175: the rebase stopped in `feat`, its card answered `n`, and the user went to another session (as an
+    /// inbox jump does): `:session-bring feat` from there puts its card up in front — saying the file isn't
+    /// staged, `y` going on — and `:rebase-continue` typed there goes on in feat, not "no rebase under way" in
+    /// the session in front.
+    #[test]
+    fn a_stopped_rebase_is_gone_on_with_from_another_session() {
+        let (repo, dir) = place("rebase-elsewhere");
+        let (log, answer) = (dir.join("claude.log"), dir.join("answer.txt"));
+        std::fs::write(&answer, "one\nmain\nfeat\n").unwrap();
+        let mut ed = editor(&repo, &dir);
+        claude_does(&mut ed, &log, &format!("cp '{}' a.txt;", answer.display()));
+        let (wt, _) = moved_apart(&mut ed, &repo, false);
+        let feat = ed.session.id;
+        rebase_asked(&mut ed);
+        settle_until(&mut ed, |ed| {
+            card(ed, "feat: conflicts resolved").is_some() || says(ed, "rebase feat:")
+        });
+        card_in_sight(&mut ed);
+        feed(&mut ed, "n");
+        assert!(says(&ed, "the rebase waits"), "{}", said(&ed));
+        assert!(ed.session_switch(0));
+        // Bringing feat from here: its card, in front
+        feed(&mut ed, ":session-bring feat<ret>");
+        assert!(!says(&ed, "bring feat:"), "{}", said(&ed));
+        let q = card(&ed, "feat: conflicts resolved").expect("its card, here").question.clone();
+        assert!(q.contains("not staged yet: y stages it and goes on"), "{q}");
+        assert_eq!(card_in_sight(&mut ed), ['y', 'X', 'n']);
+        feed(&mut ed, "n");
+        // Typed here: feat's rebase goes on, the front staying where it is
+        feed(&mut ed, ":rebase-continue<ret>");
+        let rebasing = |ed: &Editor| {
+            std::iter::once(&ed.session).chain(&ed.sessions).any(|l| l.id == feat && l.rebase.is_some())
+        };
+        settle_until(&mut ed, |ed| !rebasing(ed) || says(ed, "rebase: ") || says(ed, "no rebase under way"));
+        assert!(!says(&ed, "no rebase under way"), "{}", said(&ed));
+        assert_eq!(ed.session.id, 0, "the front stays");
+        assert!(says(&ed, "feat's rebase goes on — its task panel shows it"), "{}", said(&ed));
+        assert_eq!(git_in(&wt, &["log", "--format=%s", "main..HEAD"]), "add b\nfeat a", "{}", said(&ed));
+        assert_eq!(git_in(&wt, &["show", "HEAD~1:a.txt"]), "one\nmain\nfeat", "Claude's resolution, staged");
         drop(ed);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -3208,7 +3266,8 @@ mod tests {
     }
 
     /// A rebase tarae didn't start (by hand in the session's terminal, or from before a restart): bring
-    /// refuses and takes it up — `:rebase-abort` then knows it.
+    /// takes it up and puts up its card (#175: it only said to type `:rebase-continue`) — the file unmerged,
+    /// `y` going on, `X` aborting it.
     #[test]
     fn a_rebase_by_hand_is_taken_up() {
         let (repo, dir) = place("rebase-hand");
@@ -3218,15 +3277,20 @@ mod tests {
             std::process::Command::new("git").arg("-C").arg(&wt).args(["rebase", "main"]).output().unwrap();
         assert!(!out.status.success(), "stopped at the conflict");
         feed(&mut ed, ":session-bring<ret>");
-        settle_until(&mut ed, |ed| says(ed, "bring feat:"));
+        settle_until(&mut ed, |ed| card(ed, "feat: rebasing 1/2").is_some() || says(ed, "bring feat:"));
+        let q = &card(&ed, "feat: rebasing 1/2").unwrap().question;
+        assert!(q.starts_with("Rebasing feat onto main stopped at commit 1 of 2 ("), "{q}");
         assert!(
-            says(&ed, "bring feat: feat is rebasing 1/2 — :rebase-continue or :rebase-abort first"),
-            "{}",
-            said(&ed)
+            q.ends_with(
+                " feat a). a.txt is unmerged: y stages it once no conflict markers are left, and goes on.\n\n\
+                 X aborts the rebase: feat goes back as it was."
+            ),
+            "{q}"
         );
         let r = ed.session.rebase.as_ref().expect("taken up");
         assert_eq!((r.branch.as_str(), r.stop.files.clone()), ("feat", vec!["a.txt".to_string()]));
-        feed(&mut ed, ":rebase-abort<ret>");
+        assert_eq!(card_in_sight(&mut ed), ['y', 'X', 'n']);
+        feed(&mut ed, "X");
         settle_until(&mut ed, |ed| says(ed, "Rebase aborted") || says(ed, "rebase feat:"));
         assert_eq!(git_in(&wt, &["rev-parse", "HEAD"]), tip, "{}", said(&ed));
         drop(ed);

@@ -699,6 +699,31 @@ mod tests {
         std::fs::remove_dir_all(&s.dir).ok();
     }
 
+    /// A save held for quiet (a write from outside the buffer took, `:reload`) and the user's `:w` meanwhile:
+    /// one save, the `:w`'s — also when writing takes longer than `SAVE_QUIET`. (The Linux suite's flake in
+    /// `a_burst_of_writes_from_outside_is_one_save`: under load the `:w`'s write on the saver's thread outlasted
+    /// the quiet, the held save went out first, then the `:w`'s — two.)
+    #[test]
+    fn a_held_save_goes_with_a_slow_w() {
+        let mut s = Saving::new("slow-w");
+        s.ed.saver.slow = crate::lsp_editor::SAVE_QUIET * 3;
+        s.outside("fn b() {}\n");
+        crate::typed::execute(&mut s.ed, "w!").unwrap();
+        assert_eq!(s.saves_reach(1, true), 1, ":w is sent");
+        s.pump(300);
+        assert_eq!(s.saves(), 1, "and the held one went with it");
+        // Its write failed: the held one still goes, once quiet
+        s.outside("fn c() {}\n");
+        std::fs::remove_dir_all(&s.dir).unwrap();
+        assert!(crate::typed::execute(&mut s.ed, "w!").is_ok());
+        s.pump(SAVE_PUMP);
+        assert!(s.ed.messages.iter().any(|m| m.2.contains("not saved")), "the write failed");
+        assert!(!s.ed.lsp_holds(s.id), "the held save went once the write was over");
+    }
+
+    /// Long enough for a slow write (`a_held_save_goes_with_a_slow_w`) and the quiet after it.
+    const SAVE_PUMP: u64 = 800;
+
     /// #160: a file the buffer takes from disk elsewhere than the watch — the end of a turn whose edits went
     /// in unseen (a rebase's conflicts resolved), `:reload` — is a change and a save to its servers, as the
     /// watch's reload is: what they say follows the file (rust-analyzer checks on a save), not the conflict

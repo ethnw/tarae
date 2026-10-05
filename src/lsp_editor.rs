@@ -760,22 +760,31 @@ impl Editor {
 
     /// The held saves whose file has been quiet for `SAVE_QUIET` go out — none while a run or test of
     /// Claude's is building (looked at every event, so they go at its end); `now`: all at once
-    /// (`diagnostics` asks — what it waits for is the check they start).
+    /// (`diagnostics` asks — what it waits for is the check they start). Never one whose buffer is being
+    /// written (the user's `:w`): its didSave follows and takes the held one with it — under load the write
+    /// outlasted the quiet and both went (a Linux flake); a write that fails leaves it held.
     pub(crate) fn saves_due(&mut self, now: bool) {
         if self.lsp.held_saves.is_empty() || !now && self.claude_building() {
             return;
         }
+        let writing = |id: &DocId| self.docs.iter().any(|d| d.id == *id && d.saving > 0);
         let due: Vec<DocId> = self
             .lsp
             .held_saves
             .iter()
-            .filter(|(_, t)| now || t.elapsed() >= SAVE_QUIET)
+            .filter(|(id, t)| (now || t.elapsed() >= SAVE_QUIET) && !writing(id))
             .map(|(id, _)| *id)
             .collect();
         // (each taken off the held ones by `lsp_did_save`)
         for id in due {
             self.lsp_did_save(id);
         }
+    }
+
+    /// (tests) Whether `id`'s save is held.
+    #[cfg(test)]
+    pub(crate) fn lsp_holds(&self, id: DocId) -> bool {
+        self.lsp.held_saves.contains_key(&id)
     }
 
     /// A command or tests of Claude's are running — a check started now would hold the build dir's lock

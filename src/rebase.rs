@@ -6,8 +6,9 @@
 //! them, a review shows them against the commit being replayed and a card (`What::RebaseResolved`) offers
 //! continue (staged, `git rebase --continue` — it may stop again: the same loop) or abort. Markers left: the
 //! files are named. While it's under way the session's tab, chip and row say `rebasing n/m`, and
-//! `:session-end`, `:session-bring` and `:restart` wait for it. `:rebase-continue` · `:rebase-abort` do the
-//! card's work by hand — and take up a rebase tarae didn't start (one from before a restart).
+//! `:session-end` and `:restart` wait for it; `:session-bring` puts its card up again. `:rebase-continue` ·
+//! `:rebase-abort` do the card's work by hand, in the session rebasing whichever is in front — and take up a
+//! rebase tarae didn't start (one from before a restart).
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -650,32 +651,179 @@ impl Editor {
 
     /// The resolved card: continue · abort · not now — while the rebase is still resolved and waiting.
     fn rebase_resolved_card(&mut self) {
-        let Some(r) = self.session.rebase.as_ref().filter(|r| r.stage == Stage::Resolved) else { return };
-        let (stop, branch) = (&r.stop, &r.branch);
+        if self.session.rebase.as_ref().is_some_and(|r| r.stage == Stage::Resolved) {
+            let o = self.rebase_card();
+            self.push_offer(o);
+        }
+    }
+
+    /// The card of the front session's rebase, stopped (not git at work): `y` stages its files and goes on ·
+    /// `X` aborts · `n` not now. Resolved, it's about the review up; stopped short of that, about where it
+    /// stopped. Either way it says the files aren't staged yet — `y` stages them (#175: the card offered to
+    /// continue while the git tab showed them unmerged, and nothing said `y` would stage them).
+    fn rebase_card(&self) -> Offer {
+        let r = self.session.rebase.as_ref().expect("a rebase");
+        let (stop, branch, name) = (&r.stop, &r.branch, self.session.label());
         let n = stop.files.len() + r.also.len();
+        let them = if n == 1 { "it" } else { "them" };
         // (short: the card shares the code's room with the review it's about and the task panel — what `y`
         // does, its button says)
         let also = match r.also.is_empty() {
             true => String::new(),
             false => format!(" It also changed {} — staged with them.", named(&r.also)),
         };
-        let q = format!(
-            "{} resolved for {}.{also} The review shows {} against that commit.\n\n\
-             X aborts the rebase: {branch} goes back as it was.",
-            named(&stop.files),
-            stop.at(),
-            if n == 1 { "it" } else { "them" },
-        );
+        let (title, first) = match (r.stage, stop.files.is_empty()) {
+            (Stage::Resolved, _) => (
+                format!("{name}: conflicts resolved"),
+                format!(
+                    "{} resolved for {}.{also} The review shows {them} against that commit — not staged yet: y \
+                     stages {them} and goes on.",
+                    named(&stop.files),
+                    stop.at(),
+                ),
+            ),
+            (_, false) => (
+                format!("{name}: {}", r.said()),
+                format!(
+                    "Rebasing {branch} onto {} stopped at {}. {} {} unmerged: y stages {them} once no conflict \
+                     markers are left, and goes on.",
+                    r.base,
+                    stop.at(),
+                    named(&stop.files),
+                    if stop.files.len() == 1 { "is" } else { "are" },
+                ),
+            ),
+            (_, true) => (
+                format!("{name}: {}", r.said()),
+                format!(
+                    "Rebasing {branch} onto {} stopped at {} — the task panel says why. y goes on.",
+                    r.base,
+                    stop.at(),
+                ),
+            ),
+        };
+        let q = format!("{first}\n\nX aborts the rebase: {branch} goes back as it was.");
         let root = self.session.root.clone();
-        let o = Offer::new(
-            format!("{}: conflicts resolved", self.session.label()),
+        Offer::new(
+            title,
             &q,
             "Going on with the rebase…",
             "Couldn't go on with the rebase".into(),
             What::RebaseResolved { root },
         )
-        .warning(2..3);
+        .warning(2..3)
+    }
+
+    /// Session `id`'s rebase met where it's in the way (`:session-bring`, #175): its card up in front — `y`
+    /// goes on, `X` aborts — instead of a line saying what to type. Git at work there: Err says so.
+    pub(crate) fn rebase_offer(&mut self, id: crate::event::SessionId) -> Result<(), String> {
+        let mut card = Err(String::new());
+        self.with_session(id, |ed| {
+            let name = ed.session.label().to_string();
+            card = match ed.session.rebase.as_ref() {
+                Some(r) if !r.stopped() => Err(r.why(&name)),
+                Some(_) => Ok((ed.session.root.clone(), ed.rebase_card())),
+                None => Err(format!("no rebase under way in {name}")),
+            };
+        });
+        let (root, o) = card?;
+        // (one card for it: one left from before goes)
+        let mine = |o: &Offer| matches!(&o.what, What::RebaseResolved { root: r } if *r == root);
+        self.offers.retain(|o| !mine(o));
+        for l in std::iter::once(&mut self.session).chain(&mut self.sessions) {
+            l.parked.retain(|o| !mine(o));
+        }
         self.push_offer(o);
+        Ok(())
+    }
+
+    /// `:rebase-continue [<session>]` · `:rebase-abort [<session>]`: the rebase of the session named — else
+    /// of the session rebasing: the one in front if it is, the only one if one is, a pick if several (#175:
+    /// after the inbox brought another session to the front, it went to that one — "no rebase under way").
+    /// None known: each session's checkout is looked at (one from before a restart, or by hand).
+    pub fn rebase_by_hand(&mut self, which: &str, go_on: bool) -> Result<(), String> {
+        if !which.trim().is_empty() {
+            let (id, _) = self.session_named(which)?;
+            return self.rebase_in(id, go_on);
+        }
+        let rebasing: Vec<_> = std::iter::once(&self.session)
+            .chain(&self.sessions)
+            .filter(|l| l.rebase.is_some())
+            .map(|l| l.id)
+            .collect();
+        if !rebasing.is_empty() {
+            return self.rebase_choose(&rebasing, go_on);
+        }
+        let roots: Vec<_> =
+            std::iter::once(&self.session).chain(&self.sessions).map(|l| (l.id, l.root.clone())).collect();
+        self.events.shared_jobs().spawn(move || {
+            let found: Vec<_> =
+                roots.into_iter().filter_map(|(id, r)| under_way(&r).map(|s| (id, s))).collect();
+            move |ed: &mut Editor| {
+                let ids: Vec<_> = found.iter().map(|f| f.0).collect();
+                for (id, stop) in found {
+                    ed.with_session(id, |ed| {
+                        if ed.session.rebase.is_none() {
+                            ed.rebase_adopt(stop);
+                        }
+                    });
+                }
+                if let Err(e) = ed.rebase_choose(&ids, go_on) {
+                    ed.set_error(e);
+                }
+            }
+        });
+        Ok(())
+    }
+
+    /// Of the sessions rebasing (`ids`), the one to go on with or abort: the front one, the only one, or
+    /// the user's pick.
+    fn rebase_choose(&mut self, ids: &[crate::event::SessionId], go_on: bool) -> Result<(), String> {
+        let front = self.session.id;
+        match ids {
+            [] if self.sessions.is_empty() => Err(format!("no rebase under way in {}", self.session.label())),
+            [] => Err("no rebase under way in any session".into()),
+            _ if ids.contains(&front) => self.rebase_in(front, go_on),
+            [id] => self.rebase_in(*id, go_on),
+            _ => {
+                let cmd = if go_on { "rebase-continue" } else { "rebase-abort" };
+                let items = self
+                    .sessions_in_order()
+                    .into_iter()
+                    .filter(|l| ids.contains(&l.id))
+                    .map(|l| crate::picker::Item {
+                        label: l.label().to_string(),
+                        hint: l
+                            .rebase
+                            .as_ref()
+                            .map(|r| format!("{} onto {}", r.said(), r.base))
+                            .unwrap_or_default(),
+                        action: crate::picker::Action::Typed(format!("{cmd} {}", l.id)),
+                        glyph: None,
+                    })
+                    .collect();
+                let mut p = crate::picker::Picker::new(format!("{cmd}: which session?"), items, false)
+                    .without_preview();
+                p.compact = true;
+                self.open_picker(p, None);
+                Ok(())
+            }
+        }
+    }
+
+    /// Session `id`'s rebase gone on with (`go_on`) or aborted — in its own task panel; from behind, said.
+    fn rebase_in(&mut self, id: crate::event::SessionId, go_on: bool) -> Result<(), String> {
+        let mut done = Ok(());
+        let mut name = String::new();
+        self.with_session(id, |ed| {
+            name = ed.session.label().to_string();
+            done = if go_on { ed.rebase_continue() } else { ed.rebase_abort() };
+        });
+        if done.is_ok() && id != self.session.id {
+            let what = if go_on { "goes on" } else { "is aborted" };
+            self.set_status(format!("{name}'s rebase {what} — its task panel shows it (space W goes there)"));
+        }
+        done
     }
 
     /// The resolved card's, a session's rebase (wherever it is): `y` continue · `X` abort.
@@ -884,5 +1032,65 @@ mod tests {
         assert_eq!(r.said(), "rebasing 2/5");
         assert_eq!(r.why("feat"), "feat is rebasing 2/5 — :rebase-continue or :rebase-abort first");
         assert!(cut("é".repeat(10), 5).starts_with("éé\n… (16 more bytes"));
+    }
+
+    /// #175: `:rebase-continue` and `:rebase-abort` go to the session rebasing, not the one in front — the
+    /// front one when it is, the only one, or the user's pick of several; a session named goes first.
+    #[test]
+    fn by_hand_it_goes_to_the_session_rebasing() {
+        let dir = std::env::temp_dir().join(format!("tarae-rebase-which-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        for p in ["front", "a", "b"] {
+            std::fs::create_dir_all(dir.join(p)).unwrap();
+        }
+        let dir = std::fs::canonicalize(dir).unwrap();
+        let mut ed = Editor::new(crate::config::Config::default());
+        (ed.session.root, ed.session.name) = (dir.join("front"), "front".into());
+        let a = ed.session_open(&dir.join("a")).unwrap();
+        let b = ed.session_open(&dir.join("b")).unwrap();
+        assert!(ed.session_switch(0));
+        // (git at work in each: the answer says so — nothing runs)
+        let running = |base: &str| Rebase {
+            branch: "x".into(),
+            base: base.into(),
+            stage: Stage::Running { generation: 0, aborting: false },
+            step: Some((1, 3)),
+            stop: Stop::default(),
+            asked: false,
+            waiting: None,
+            also: Vec::new(),
+        };
+        ed.with_session(a, |ed| ed.session.rebase = Some(running("main")));
+        let label = |ed: &mut Editor, id| {
+            let mut n = String::new();
+            ed.with_session(id, |ed| n = ed.session.label().to_string());
+            n
+        };
+        let name_a = label(&mut ed, a);
+        // One, behind: that one
+        assert_eq!(ed.rebase_by_hand("", true), Err(format!("{name_a} is rebasing 1/3 — let it finish")));
+        // Two, behind: asked which
+        ed.with_session(b, |ed| ed.session.rebase = Some(running("dev")));
+        assert_eq!(ed.rebase_by_hand("", false), Ok(()));
+        let p = ed.picker.take().expect("a pick");
+        assert_eq!(p.title, "rebase-abort: which session?");
+        let rows: Vec<_> = p.items().iter().map(|i| (i.hint.as_str(), i.action.clone())).collect();
+        assert_eq!(
+            rows,
+            [
+                ("rebasing 1/3 onto main", crate::picker::Action::Typed(format!("rebase-abort {a}"))),
+                ("rebasing 1/3 onto dev", crate::picker::Action::Typed(format!("rebase-abort {b}"))),
+            ]
+        );
+        // Named: that one
+        let name_b = label(&mut ed, b);
+        assert_eq!(
+            ed.rebase_by_hand(&b.to_string(), true),
+            Err(format!("{name_b} is rebasing 1/3 — let it finish"))
+        );
+        // The front one rebasing too: the front's
+        ed.session.rebase = Some(running("main"));
+        assert_eq!(ed.rebase_by_hand("", true), Err("front is rebasing 1/3 — let it finish".to_string()));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

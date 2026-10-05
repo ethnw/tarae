@@ -168,8 +168,8 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
         "session-end" => editor.session_end(rest),
         "session-bring" => editor.session_bring(rest),
         // A session's rebase stopped at a conflict (rebase.rs)
-        "rebase-continue" => editor.rebase_continue(),
-        "rebase-abort" => editor.rebase_abort(),
+        "rebase-continue" => editor.rebase_by_hand(rest, true),
+        "rebase-abort" => editor.rebase_by_hand(rest, false),
         "git-switch" if !rest.is_empty() => {
             editor.git_switch(rest);
             Ok(())

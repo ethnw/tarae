@@ -669,9 +669,12 @@ fn insert_at_line_end(cx: &mut Context) {
 }
 /// The indentation for lines broken at each `(at, follows)` — `follows` = the text after `at` moves down
 /// with it — from the language's `indents.scm` (the tree reparsed right here, for at most 3 ms, when it's
-/// behind the text), else the heuristic.
+/// behind the text), else the heuristic; a language set to the simple one (a commit message) takes that.
 fn new_line_indents(cx: &Context, breaks: &[(usize, bool)]) -> Vec<String> {
     let doc = cx.editor.doc();
+    if cx.editor.lang_spec().is_some_and(|s| s.simple_indent) {
+        return breaks.iter().map(|&(at, _)| crate::indent::simple(&doc.text, at)).collect();
+    }
     let unit = indent_unit(cx);
     let syn = doc.syntax.as_ref();
     let ix = syn.and_then(|s| s.lang.indents.as_ref());

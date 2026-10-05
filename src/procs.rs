@@ -2643,7 +2643,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("tarae-procs-reap-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut ed = Editor::new(crate::config::Config::default());
-        let cmd = "(trap '' TERM; exec sleep 8) & echo $! > left.pid; echo started; wait".to_string();
+        // (the child says its pid once it ignores TERM — said by the parent, a loaded runner's TERM came
+        // before the trap and it died: a Linux flake)
+        let cmd = "sh -c 'trap \"\" TERM; echo $$ > left.pid; exec sleep 8' & echo started; wait".to_string();
         ed.task_start(crate::task::Task { name: "holder".into(), cmd, cwd: dir.clone() });
         let pid = ed.session.task_run.as_ref().and_then(|r| r.pid()).expect("its process");
         let left = dir.join("left.pid");

@@ -11,7 +11,8 @@
 //! the keys — and it's answered there, on its card, as ever: never from the list.
 //!
 //! `C-q` takes the same order: to the one that has waited longest, in any session (#90, #94) — once it's the
-//! card up, `C-q` gives it the keys. While anything waits, `C-q` never says nothing does.
+//! card up, `C-q` gives it the keys. While anything waits, `C-q` never says nothing does. Claude's runs gone
+//! quiet are listed after everything that asks for an answer (#171).
 
 use std::time::Instant;
 
@@ -111,10 +112,15 @@ impl Editor {
     }
 
     /// The inbox from the state's cards (`ui_state` lists both from one call) and every session's edits,
-    /// change sets and reads waiting. Ties (the same millisecond) keep the order things came in.
+    /// change sets and reads waiting. What asks for an answer comes first, oldest first; quiet runs after
+    /// it, however long they've been quiet — a slow run is only maybe stuck, a card surely waits (#171).
+    /// The order is by when each came, not by how long each has waited as read (whole milliseconds, each at
+    /// its own moment: two cards come within one swapped between `keys_to`'s read and `handle_key`'s — the
+    /// routing test, now and then); things that came at the same instant keep the order they came in.
     pub(crate) fn inbox_from(&self, cards: &[CardState]) -> Vec<Entry> {
+        let now = Instant::now();
         // (`seq`: a card's id counts up as cards come — the tie-break)
-        let mut v: Vec<(Entry, u64)> = cards
+        let mut v: Vec<(Entry, Instant, u64)> = cards
             .iter()
             .filter(|c| c.state != "installing")
             .map(|c| {
@@ -123,18 +129,17 @@ impl Editor {
                     session: c.session.clone(),
                     kind: c.kind,
                     asks: c.asks.clone(),
-                    waited_ms: c.waited_ms,
+                    waited_ms: ms(c.since, now),
                     up: c.up,
                 };
                 let seq = e.card().unwrap_or(0);
-                (e, seq)
+                (e, c.since, seq)
             })
             .collect();
-        let now = Instant::now();
         for l in std::iter::once(&self.session).chain(&self.sessions) {
             let s = session_id(l.id);
             let entry = |id: String, kind, asks: String, since, up| {
-                (Entry { id, session: s.clone(), kind, asks, waited_ms: ms(since, now), up }, u64::MAX)
+                (Entry { id, session: s.clone(), kind, asks, waited_ms: ms(since, now), up }, since, u64::MAX)
             };
             if let Some(r) = l.review.as_ref().filter(|r| r.ready) {
                 let file = self.docs.iter().find(|d| d.id == r.doc_id).map(|d| d.display_name(&l.root));
@@ -168,8 +173,9 @@ impl Editor {
                 v.push(entry(format!("set#{s}:{i}"), "change-set", asks, since, "queued"));
             }
         }
-        v.sort_by(|a, b| b.0.waited_ms.cmp(&a.0.waited_ms).then(a.1.cmp(&b.1)));
-        v.into_iter().map(|(e, _)| e).collect()
+        let quiet = |e: &Entry| e.kind == "silent-run";
+        v.sort_by(|a, b| (quiet(&a.0).cmp(&quiet(&b.0))).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+        v.into_iter().map(|(e, ..)| e).collect()
     }
 
     /// When a run of Claude's in any session next goes silent (`waits::SILENT`) — a frame then, for the

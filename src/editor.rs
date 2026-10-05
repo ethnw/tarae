@@ -3610,6 +3610,27 @@ mod tests {
         assert_eq!(text(&run("  a", "A<ret>b<esc>")), "  a\n  b");
     }
 
+    /// #176: in a commit message (`indent-heuristic = "simple"` — Helix's fallback, git-commit having no
+    /// indent query) a new line takes the indentation of the line right before it: after a blank line none,
+    /// so `O` on a heading below an indented bullet's paragraph starts at the margin; right under the bullet
+    /// it goes on with it, as in Helix. Elsewhere the nearest non-blank line's, as before.
+    #[test]
+    fn a_commit_message_carries_no_indent_past_a_blank_line() {
+        let msg = "Subject\n\n- a bullet\n  wrapped on\n\nLinux checks\n";
+        let commit = |keys: &str| {
+            let mut ed = editor(msg);
+            ed.docs[0].path = Some(test_root().join(".git/COMMIT_EDITMSG"));
+            feed(&mut ed, keys);
+            text(&ed)
+        };
+        let after = |head: &str| format!("Subject\n\n- a bullet\n  wrapped on\n\n{head}Linux checks\n");
+        assert_eq!(commit("5jOHeading<esc>"), after("Heading\n"));
+        assert_eq!(commit("4joX<esc>"), after("X\n"));
+        assert_eq!(commit("5jI<ret><esc>"), after("\n"));
+        assert_eq!(commit("3joY<esc>"), "Subject\n\n- a bullet\n  wrapped on\n  Y\n\nLinux checks\n");
+        assert_eq!(text(&run(msg, "5jOH<esc>")), after("  H\n"), "no language: the nearest non-blank's");
+    }
+
     #[test]
     fn multi_cursor_insert() {
         assert_eq!(text(&run("a\nb\nc\n", "Ci-<esc>")), "-a\n-b\nc\n");

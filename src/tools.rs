@@ -596,6 +596,12 @@ const COMMAND_LINES_MAX: usize = 12;
 /// Options that make a command that otherwise reads write a file or run a program.
 pub const WRITES: [&str; 6] = ["--output", "--ext-diff", "--textconv", "--config", "--exec", "--upload-pack"];
 
+/// The option of `WRITES` one of `words` passes, if any — no rule lets such a command through, so no card
+/// offers one for it (#169).
+fn writes_option(words: &[String]) -> Option<&'static str> {
+    WRITES.iter().copied().find(|o| words.iter().any(|w| w.starts_with(o)))
+}
+
 /// Whether `cmd` runs without asking: one command and nothing else (`readonly::one_command` — quoted words
 /// are fine; expansion, redirection, chaining, globs or an assignment and the words don't say what runs),
 /// starting with one of the `RUN_ALLOW` or `extra` prefixes word for word (`extra`: `llm.run-allow`, this
@@ -624,7 +630,7 @@ fn env_allowed_words(names: &[String], words: &[String], extra: &[String]) -> bo
     if !names.iter().all(|n| crate::readonly::env_allowed(n)) {
         return false;
     }
-    !words.iter().any(|w| WRITES.iter().any(|o| w.starts_with(o)))
+    writes_option(words).is_none()
         && extra.iter().any(|rule| {
             let (set, rest) = rule_env(rule);
             !set.is_empty() && names.iter().all(|n| set.contains(&n.as_str())) && rule_matches(words, &rest)
@@ -702,7 +708,7 @@ fn chain_allowed(cmd: &str, extra: &[String], scripts: bool) -> bool {
 /// `allowed` for one command's words — git's harmless options before its subcommand read as if not there
 /// (`git --no-pager log`, #88).
 fn allowed_words(words: &[String], extra: &[String]) -> bool {
-    if words.iter().any(|w| WRITES.iter().any(|o| w.starts_with(o))) {
+    if writes_option(words).is_some() {
         return false;
     }
     let words = &crate::readonly::git_plain(words);
@@ -880,9 +886,10 @@ pub fn card_pattern(cmd: &str) -> Option<Pattern> {
     (!rules.is_empty() || !scripts.is_empty()).then_some(Pattern { rules, scripts })
 }
 
-/// `pattern` for one command's words and the names set in front of them.
+/// `pattern` for one command's words and the names set in front of them — none for words passing an
+/// option no rule lets through (`writes_option`): `a` would promise what it can't keep (#169).
 fn words_pattern(names: &[String], words: &[String]) -> Option<String> {
-    if !names.iter().all(|n| crate::readonly::env_allowed(n)) {
+    if !names.iter().all(|n| crate::readonly::env_allowed(n)) || writes_option(words).is_some() {
         return None;
     }
     let lead: Vec<&str> = words
@@ -1018,6 +1025,10 @@ fn why_asked(cmd: &str, extra: &[String]) -> crate::cards::Why {
         }
         let words: Vec<String> = w.iter().map(|w| w.text.clone()).collect();
         if !part_allowed(&words, extra) && !crate::readonly::only_reads(w) {
+            // (`cargo test --config …`: the check's words, but no rule takes that option — #169)
+            if let Some(o) = writes_option(&words) {
+                return Why::Writes(o);
+            }
             // (with its subcommand, when it has one: `cargo xtask`, `git commit` — `cargo test` is a check)
             let sub =
                 |s: &&String| s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
@@ -3573,6 +3584,38 @@ mod tests {
         assert!(super::allowed("cargo xtask shot /tmp/a.png '@?files in'", &chat));
         assert!(!super::allowed("cargo xtask perf", &chat));
         assert!(!super::allowed("cargo xtask shot x; rm -rf y", &chat));
+    }
+
+    /// #169: a card's `a` promised `cargo test …`, and the next `cargo test` with other arguments asked
+    /// again — `--config` was what asked, and no allowance lifts it. What `a` offers, once taken, lets the
+    /// same command and others of its pattern through; a card it can't keep that for offers no `a` and
+    /// says what asks.
+    #[test]
+    fn what_a_cards_a_offers_is_what_it_lets_through() {
+        use crate::cards::Why;
+        let theirs = [
+            "cargo test --target x86_64-unknown-linux-gnu --config 'target.x86_64-unknown-linux-gnu.runner=\"x\"' \
+             zz_drive -- --ignored --nocapture | grep -E 'ok|FAILED' | tail -20",
+            "cargo test --target aarch64-unknown-linux-gnu --config 'build.rustflags=[]' zz_drive -- --ignored \
+             --nocapture",
+        ];
+        for c in theirs {
+            assert_eq!(super::card_pattern(c), None, "{c}");
+            assert_eq!(super::why_asked(c, &[]), Why::Writes("--config"), "{c}");
+            assert!(Why::Writes("--config").said().unwrap().contains("--config"));
+        }
+        // Each card's `a`, taken: the command itself and another of its pattern run unasked
+        for (c, other) in [
+            ("cargo xtask shot /tmp/x.png '@?ready'", "cargo xtask shot /tmp/y.png"),
+            ("cargo xtask shot x.png 2>&1 | grep -E 'a|b' | tail -3", "cargo xtask shot z.png"),
+            ("TARAE_BACKGROUND=dark cargo xtask shot a.png", "TARAE_BACKGROUND=light cargo xtask shot b.png"),
+            ("npm run build:prod", "npm run lint"),
+            ("cargo test --target x86_64-unknown-linux-gnu zz_drive -- --ignored", "cargo test --release"),
+            ("cargo bench --bench x | tail", "cargo bench"),
+        ] {
+            let p = super::card_pattern(c).unwrap_or_else(|| panic!("{c}: no a"));
+            assert!(super::runs_unasked(c, &p.rules) && super::runs_unasked(other, &p.rules), "{c}: {p:?}");
+        }
     }
 
     /// #93: a line of several commands gets a pattern for each part — a script run by its path as it is

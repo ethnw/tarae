@@ -88,7 +88,8 @@ count) lists them: each row names its session, what it asks, its kind and how lo
 to it. Its session comes to the front and its card comes up with the keys, and you answer it there, on the card.
 The list never answers anything itself. `C-q` follows the same order: it goes to the one that has waited
 longest, whichever session it's in, and once that's the card up here, `C-q` gives it the keys. While anything
-waits, `C-q` never says nothing does.
+waits, `C-q` never says nothing does. A run of Claude's that has printed nothing for minutes is in the list too,
+but after everything that asks for an answer: it may only be slow, and a card surely waits.
 
 ![The inbox over the code: three rows, oldest first — main · Claude wants to run outside the sandbox · cargo test -q parser:: (run · 13 s), api · Claude wants to see your screen (screen · 9 s), docs · Change 1 of 1 · README.md (edit · 6 s) — and the status line's main ▲3 waiting](screenshots/inbox.png)
 ([hanji theme](screenshots/inbox-hanji.png))
@@ -732,17 +733,18 @@ its base up to it, fast-forward only. When the base has moved since the session 
 - A conflict: the rebase stops, and the session's own Claude is asked in its chat to resolve the files. It's
   sent the files and both sides (what the commit being replayed changed, and what the base changed since that
   commit's parent), and told not to run git or commit. When its turn ends with no conflict markers left in
-  those files, a review shows them against the commit being replayed, and a card offers to continue (`y`: tarae
-  stages them and runs `git rebase --continue`, which may stop again — the same loop) or abort (`X`: back to
-  where the branch was). Markers left: the files are named, and the rebase waits
+  those files, a review shows them against the commit being replayed, and a card says they aren't staged yet and
+  offers to continue (`y`: tarae stages them and runs `git rebase --continue`, which may stop again — the same
+  loop) or abort (`X`: back to where the branch was). Markers left: the files are named, and the rebase waits
 
 While it's under way the session's tab, the status line's chip and its row in the list say `rebasing 2/5`, and
-`:session-end`, `:session-bring` and `:restart` wait for it (they say why).
+`:session-end` and `:restart` wait for it (they say why). `:session-bring` on a session whose rebase stopped
+puts its card up again — `y` goes on, `X` aborts.
 
 | Command | What it does |
 |---|---|
-| `:rebase-continue` | Stage the stopped rebase's files (no markers left) and go on |
-| `:rebase-abort` | `git rebase --abort`: the branch back where it was |
+| `:rebase-continue [<session>]` | Stage the stopped rebase's files (no markers left) and go on — in the session rebasing (asked which if several) |
+| `:rebase-abort [<session>]` | `git rebase --abort`: the branch back where it was — in the session rebasing |
 
 Both also take up a rebase tarae didn't start — one begun by hand in the session's terminal, or from before a
 restart.

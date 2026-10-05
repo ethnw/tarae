@@ -824,6 +824,9 @@ pub struct CardState {
     /// `front` (up, taking its answers) · `stacked` (up behind it) · `parked` (in a session behind).
     pub up: &'static str,
     pub waited_ms: u64,
+    /// When it came — the inbox's order (`waited_ms` is cut to milliseconds, each read at its own moment:
+    /// two cards come within one could swap between two reads).
+    pub since: std::time::Instant,
     pub in_sight_ms: Option<u64>,
     pub seen_whole: bool,
     pub at: Option<(usize, usize, usize, usize)>,
@@ -971,6 +974,7 @@ impl Editor {
                 rev: o.rev,
                 up,
                 waited_ms: ms(o.since.elapsed()),
+                since: o.since,
                 in_sight_ms: self
                     .offer_seen
                     .get()

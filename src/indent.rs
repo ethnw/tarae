@@ -177,6 +177,13 @@ pub fn new_line(
     Some(unit.fill(add(width_of(text, r, unit.tab), new.total - old.total, unit)))
 }
 
+/// Helix's "simple" (`indent-heuristic = "simple"`, a commit message — #176): the indentation of the line the
+/// break is on, as it is — a blank line gives none; nothing is carried from above it, no bracket counted.
+pub fn simple(text: &Rope, at: usize) -> String {
+    let start = text.line_to_byte(text.byte_to_line(at));
+    text.byte_slice(start..at).chars().take_while(|c| matches!(c, ' ' | '\t')).collect()
+}
+
 /// Without a query: the nearest non-blank line's indentation, one level more after an opening bracket (or
 /// a `:` in `colon` languages) — the last text before the break, blank lines skipped; a closer that moves
 /// down with it (`follows`, Enter at `[|]`) stays at the opener's line's level.

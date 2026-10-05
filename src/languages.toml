@@ -4,6 +4,8 @@
 # comment-token / block-comment-tokens — what `space c`/`C-c` toggle (line comments when there's a token, else
 # block) and `space C` (block, else line).
 # auto-pairs — pairs typed in insert mode, each "oc" (default: () [] {} "" '' ``).
+# indent-heuristic = "simple" — a new line takes the indentation of the line right before it, as it is (a blank
+# line: none), whatever the queries say: Helix's "simple", what its fallback does for prose like a commit message.
 
 [[language]]
 name = "rust"
@@ -303,6 +305,7 @@ extensions = ["diff", "patch"]
 [[language]]
 name = "git-commit"
 comment-token = "#"
+indent-heuristic = "simple"
 grammar = "gitcommit"
 filenames = ["COMMIT_EDITMSG", "MERGE_MSG", "TAG_EDITMSG"]
 

@@ -95,6 +95,9 @@ pub enum Why {
     ScriptChanged,
     /// It sets names in front of the command (#44, #114).
     EnvName,
+    /// It passes an option that makes a command write or run what it names (`tools::WRITES`: `--config`,
+    /// `--output` …) — asked each time, whatever the chat allowed (#169).
+    Writes(&'static str),
     /// A glob where a command's words must be plain.
     Glob,
     /// It reads outside the project, where nothing allowed it (its places' classes).
@@ -125,6 +128,7 @@ impl Why {
             Why::Script => "script".into(),
             Why::ScriptChanged => "script-changed".into(),
             Why::EnvName => "env-name".into(),
+            Why::Writes(o) => format!("writes:{o}"),
             Why::Glob => "glob".into(),
             Why::ReadsOutside(_) => "reads-outside".into(),
             Why::CdUnknown(_) => "cd-unknown".into(),
@@ -149,6 +153,10 @@ impl Why {
             Why::Script => "It runs a script — what runs is in the file.".into(),
             Why::ScriptChanged => "A script it runs isn't as it was when this chat allowed it.".into(),
             Why::EnvName => "It sets names in front of the command.".into(),
+            Why::Writes(o) => format!(
+                "It passes {o}, which can make it write or run what that names — asked each time, nothing \
+                 in this chat allows it."
+            ),
             Why::Glob => "A pattern in a command that isn't a read — what it runs on can't be told.".into(),
             Why::CdUnknown(why) => format!("Where it reads can't be told — {why}."),
             Why::RunsOutside => {

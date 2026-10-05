@@ -40,6 +40,8 @@ pub struct LangSpec {
     pub block_comment: Option<(String, String)>,
     /// Insert-mode pairs (open, close) — None = the defaults.
     pub auto_pairs: Option<Vec<(char, char)>>,
+    /// `indent-heuristic = "simple"`: a new line takes the line before's indentation as it is (`indent::simple`).
+    pub simple_indent: bool,
 }
 
 /// Insert-mode pairs when the language doesn't say.
@@ -81,6 +83,7 @@ fn specs() -> &'static [LangSpec] {
                             })
                             .collect()
                     }),
+                    simple_indent: l.get("indent-heuristic").and_then(|h| h.as_str()) == Some("simple"),
                     name,
                 })
             })

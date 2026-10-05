@@ -180,6 +180,64 @@ fn c_q_goes_to_the_oldest_in_any_session() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// The order is when each came, however it's read: two cards come within a millisecond, their waits read a
+/// moment apart in whole milliseconds (`keys_to`, then `handle_key` — each reads every card's at its own
+/// instant) — the newer one's read later, rounded up past the older one's. Read so, the order swapped: the
+/// routing test's "two cards stacked" now and then (`C-q`: `keys_to` said NextCard, `handle_key` took Card).
+#[test]
+fn the_order_is_when_each_came_however_it_is_read() {
+    let (mut ed, dir, _, _) = three("instant");
+    let t = Instant::now() - Duration::from_secs(5);
+    let (mut older, mut newer) = (claudes(1, 0), claudes(2, 0));
+    (older.since, newer.since) = (t, t + Duration::from_micros(400));
+    up(&mut ed, older);
+    up(&mut ed, newer);
+    let cards = ed.ui_cards();
+    let ids = |cards: &[crate::uistate::CardState]| -> Vec<String> {
+        ed.inbox_from(cards).into_iter().map(|e| e.id).collect()
+    };
+    let first = ids(&cards);
+    assert_eq!(first[0], format!("card#{}", ed.offers.iter().find(|o| o.since == t).unwrap().id));
+    let mut later = cards.clone();
+    let most = later.iter().map(|c| c.waited_ms).max().unwrap();
+    later.iter_mut().find(|c| c.since > t).unwrap().waited_ms = most + 1;
+    assert_eq!(ids(&later), first, "the same order, read a moment later");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// #171: a run of Claude's quiet for minutes (a slow `apt-get` in docker) is in the inbox, but after a card
+/// that waits for an answer — even one that came long after it went quiet, in another session. `C-q` goes to
+/// the card first; the quiet run stays reachable after it.
+#[test]
+fn a_card_waiting_comes_before_a_run_only_quiet() {
+    use crate::task::{Run, State, Task};
+    let (mut ed, dir, back, _) = three("quiet");
+    let cmd = "docker run --rm img sh -c 'apt-get install -y x'";
+    let mut r = Run::for_test(Task { name: cmd.into(), cmd: cmd.into(), cwd: dir.join("front") });
+    (r.state, r.by_claude) = (State::Running, true);
+    let Some(then) = Instant::now().checked_sub(Duration::from_secs(228)) else { return };
+    r.last_output = then;
+    ed.session.task_run = Some(r);
+    park(&mut ed, back, claudes(1, 20));
+    let inbox = ed.inbox();
+    let kinds: Vec<&str> = inbox.iter().map(|e| e.kind).collect();
+    assert_eq!(kinds, ["screen", "silent-run"], "{inbox:?}");
+    assert!(inbox[1].waited_ms > inbox[0].waited_ms, "quiet for longer than the card has waited");
+    assert_eq!(ed.ui_state().inbox.iter().map(|e| e.kind).collect::<Vec<_>>(), kinds);
+    // C-q: to back's card, not the quiet run's panel here
+    feed(&mut ed, "<C-q>");
+    assert_eq!(ed.session.id, back);
+    assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some("Claude asks 1"));
+    feed(&mut ed, "<C-q>n");
+    assert!(ed.offers.is_empty());
+    // Answered: C-q now goes to the quiet run, its panel with the keys
+    feed(&mut ed, "<C-q>");
+    assert_eq!(ed.session.id, 0);
+    assert_eq!(ed.slot(), Some(crate::sizes::Slot::Task));
+    assert!(ed.bottom_has_keys());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// The list: `space I` (or a click on the status line's count) — a row each, its session named, what it
 /// asks, its kind and how long it has waited, the oldest in hand. `enter` goes to it — its session in front,
 /// its card up with the keys — and it's answered there. Nothing waiting: said, no list.

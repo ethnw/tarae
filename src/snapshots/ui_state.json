@@ -81,19 +81,19 @@
       "waited_ms": 0
     },
     {
-      "asks": "End the review?",
-      "id": "card#2",
-      "kind": "review-end",
-      "session": "s0",
-      "up": "front",
-      "waited_ms": 0
-    },
-    {
       "asks": "Change 1 of 1 · [scratch]",
       "id": "edit#s0:review",
       "kind": "edit",
       "session": "s0",
       "up": "review",
+      "waited_ms": 0
+    },
+    {
+      "asks": "End the review?",
+      "id": "card#2",
+      "kind": "review-end",
+      "session": "s0",
+      "up": "front",
       "waited_ms": 0
     }
   ],
