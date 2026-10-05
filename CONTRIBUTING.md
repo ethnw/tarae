@@ -288,6 +288,30 @@ process, or the disk.
   in the buffer). tarae's config and state still live in the temp dir; PATH and HOME are yours. They aren't part of
   `cargo test` — they take a while and the Claude ones use your plan's usage — so run them before a release and after
   touching the language server, test, or Claude paths. A run whose tool isn't installed says so and passes.
+- **Measuring on Linux with eBPF** (`trace/`, its own workspace — `--workspace` never builds it): `tarae-trace`
+  attaches to a tarae and measures it without changing it. Its probes:
+  - `offcpu`: where its threads wait, by stack;
+  - `syscalls`: its syscall mix, with `--stacks mprotect,…` for where a syscall is called from;
+  - `pty`: its writes to the terminal, start to end.
+
+  It runs privileged (root, or `CAP_BPF` + `CAP_PERFMON`; `CAP_SYSLOG` to name kernel frames) and needs clang,
+  bpftool and libbpf/libelf headers to build. On a Linux machine:
+  `sudo tarae-trace offcpu --pid <tarae's pid> [--children] [--for 1m]` — it ends at Ctrl-C, `--for` (10 min
+  if not given) or the target's exit, and writes `<probe>-<name>.json` and folded stacks.
+
+  For good stacks, build tarae with `RUSTFLAGS='-C force-frame-pointers=yes' cargo build --profile perf`.
+
+  On x86_64, user stacks are short for now. They're walked by frame pointers, which Rust's std and glibc
+  (Debian's) don't keep there, so the program's frame that called into them is lost: the frame above a
+  cancellable syscall (read, write, poll, nanosleep), and at times everything above libc. Times and kernel
+  stacks are right. aarch64 keeps every frame. Two fixture assertions are aarch64-only for this, and say so
+  when skipped. DWARF unwinding is the fix, next.
+
+  Reproducibly, in one Docker container on the Docker your CLI reaches (colima here), with tarae built and driven
+  there by `tests/perf.rs`'s scenarios:
+  - `cargo xtask trace [offcpu|syscalls [--stacks …]|pty] [scenario …]` — results in `target/trace/<time>/`;
+  - `cargo xtask trace test` — the tool's tests against fixtures;
+  - `cargo xtask trace clippy`.
 
 ## Design and UI
 

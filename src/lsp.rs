@@ -10,7 +10,6 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Sender};
-use std::thread;
 
 use ropey::Rope;
 use serde_json::{Value, json};
@@ -764,7 +763,7 @@ impl Drop for Client {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
-            thread::spawn(move || {
+            crate::event::thread("tarae-reap", move || {
                 let _ = child.wait();
             });
         }
@@ -816,7 +815,7 @@ impl Client {
         let mut stderr = child.stderr.take().ok_or("no stderr")?;
         let (tx, rx) = mpsc::channel::<Out>();
         let events_err = events.clone();
-        thread::spawn(move || {
+        crate::event::thread("tarae-lsp-write", move || {
             while let Ok(out) = rx.recv() {
                 let body = match out {
                     Out::Body(s) => s,
@@ -828,7 +827,7 @@ impl Client {
                 }
             }
         });
-        thread::spawn(move || {
+        crate::event::thread("tarae-lsp-read", move || {
             let mut reader = BufReader::new(stdout);
             while let Some(msg) = read_message(&mut reader) {
                 // (when it was read — what it then waits for the main loop is ours, not the server's)
@@ -850,7 +849,7 @@ impl Client {
         let name = spec.name.clone();
         let tool = Path::new(&spec.command).file_name().map(|n| n.to_string_lossy().into_owned());
         let events = events_err;
-        thread::spawn(move || {
+        crate::event::thread("tarae-lsp-err", move || {
             let mut lines = BufReader::new(&mut stderr);
             let mut line = String::new();
             let mut said = false;

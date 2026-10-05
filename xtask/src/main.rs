@@ -16,6 +16,9 @@
 //!   [`linux`]).
 //! - `stream [--model M] [prompt]`, `stream --file F` — one real streamed answer from the chat's model (`llm.model`),
 //!   timed line by line: its bursts, and what tarae's text batching adds to them (see [`stream`]).
+//! - `trace [offcpu|syscalls|pty] [scenario …]`, `trace test` — tarae measured with eBPF on Linux, in a
+//!   container: off-CPU time by stack, the syscall mix, terminal write latency, over perf scenarios (see
+//!   [`trace`]).
 
 use std::collections::BTreeSet;
 use std::io::Write as _;
@@ -29,6 +32,7 @@ mod perf;
 mod pty;
 mod shot;
 mod stream;
+mod trace;
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -42,8 +46,9 @@ fn main() {
         Some("linux") if args.get(1).is_some_and(|a| a == "prune") => linux::prune(),
         Some("linux") => linux::run(&args[1..]),
         Some("stream") => stream::run(&args[1..]),
+        Some("trace") => trace::run(&args[1..]),
         _ => Err(
-            "usage: cargo xtask vendor-grammars | shot out.png [keys …] | perf | linux [--platform P] [clippy|test] | stream [--model M] [prompt] | stream --file F"
+            "usage: cargo xtask vendor-grammars | shot out.png [keys …] | perf | linux [--platform P] [clippy|test] | stream [--model M] [prompt] | stream --file F | trace [offcpu|syscalls|pty] [scenario …] | trace test|clippy"
                 .into(),
         ),
     };

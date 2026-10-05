@@ -800,7 +800,7 @@ impl Editor {
             };
             tx.send(crate::event::Event::Job(Box::new(apply))).is_ok()
         };
-        std::thread::spawn(move || {
+        crate::event::thread("tarae-task", move || {
             // (the packs read here — one of one's own is a file)
             let waits = std::sync::Arc::new(crate::waits::Rules::load());
             let places = std::sync::Arc::new(crate::packs::places());
@@ -812,7 +812,7 @@ impl Editor {
                     (tx.clone(), send_lines.clone(), waits.clone(), eof.clone());
                 let places = places.clone();
                 readers += 1;
-                std::thread::spawn(move || {
+                crate::event::thread("tarae-task-read", move || {
                     let mut matcher = Matcher::new(places);
                     read_batches(s, |lines| send_lines(&tx, &mut matcher, &waits, err, lines));
                     let _ = eof.send(());

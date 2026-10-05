@@ -256,14 +256,14 @@ fn spawn(
     let reading = events.clone();
     // The shell waited for as it ends — a program it left behind holding the terminal (one that ignored
     // the hangup) mustn't keep it a zombie (#131); then what's left to read, `DRAIN_AFTER_EXIT` at most
-    std::thread::spawn(move || {
+    crate::event::thread("tarae-term-wait", move || {
         let code = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
         let _ = read_all.recv_timeout(crate::spawn::DRAIN_AFTER_EXIT);
         let done = move |ed: &mut Editor| ended(ed, generation, code);
         let _ = events.send(crate::event::Event::Job(Box::new(done)));
     });
     let events = reading;
-    std::thread::spawn(move || {
+    crate::event::thread("tarae-term-read", move || {
         let mut buf = vec![0u8; 64 * 1024];
         // One batch at a time on the main loop: the next is read while it's shown and sent once it has
         // been. A program writing faster than the screen reads it (vt100 takes ~10 ms a MB) then waits on
@@ -303,7 +303,7 @@ fn spawn(
     // Keys → the program (a full pty buffer blocks this thread, never the editor)
     let (writer, keys) = std::sync::mpsc::channel::<Vec<u8>>();
     let mut out = std::fs::File::from(master.try_clone().map_err(|e| e.to_string())?);
-    std::thread::spawn(move || {
+    crate::event::thread("tarae-term-keys", move || {
         for bytes in keys {
             if out.write_all(&bytes).is_err() {
                 break;

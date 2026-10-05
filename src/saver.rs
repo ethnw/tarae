@@ -96,7 +96,7 @@ impl Saver {
         let slow = self.slow;
         let tx = self.tx.get_or_insert_with(|| {
             let (tx, rx) = channel::<Job>();
-            std::thread::spawn(move || {
+            crate::event::thread("tarae-saver", move || {
                 while let Ok(job) = rx.recv() {
                     #[cfg(test)]
                     std::thread::sleep(slow);

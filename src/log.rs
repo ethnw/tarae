@@ -35,7 +35,7 @@ fn sender() -> Option<&'static Sender<String>> {
         }
         let path = path()?;
         let (tx, rx) = channel::<String>();
-        std::thread::spawn(move || {
+        crate::event::thread("tarae-log", move || {
             if let Some(dir) = path.parent() {
                 let _ = std::fs::create_dir_all(dir);
             }

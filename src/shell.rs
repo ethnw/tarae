@@ -63,7 +63,7 @@ fn run(cmd: &str, input: Option<&str>, dir: &std::path::Path) -> Result<Run, Str
     // otherwise deadlock against us
     let feeder = input.zip(child.stdin.take()).map(|(s, mut stdin)| {
         let s = s.to_string();
-        std::thread::spawn(move || {
+        crate::event::thread("tarae-sh-feed", move || {
             let _ = stdin.write_all(s.as_bytes());
         })
     });

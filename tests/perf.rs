@@ -226,6 +226,45 @@ fn perf_e2e_scrolling() {
     report("e2e_scroll_to_frame_ms", median(runs), 16.0, 0.05);
 }
 
+/// Scrolling on a terminal that reads slowly — 4 KiB every 10 ms, ≈ 400 KB/s (a remote terminal, a busy
+/// multiplexer): 200 half-pages of a 200k-line file typed 2 ms apart, without waiting for their frames, on a
+/// 200×60 screen. tarae writes faster than that is read, so the pty fills and its writes wait for room — the
+/// number is how long until the last frame has been read; `cargo xtask trace pty` shows the writes' waits.
+#[test]
+fn perf_e2e_scrolling_slow_terminal() {
+    if unoptimized("perf_e2e_scrolling_slow_terminal") {
+        return;
+    }
+    let sb = Sandbox::new("perf-slow-terminal");
+    big_file(&sb, "big.rs", 200_000);
+    let pace = Pace { chunk: 4096, pause: Duration::from_millis(10) };
+    let mut t = Term::spawn_paced(&sb, &["big.rs"], 200, 60, pace);
+    t.wait_text("fn f1(");
+    std::thread::sleep(Duration::from_millis(600));
+    let (frames, written) = (t.frames(), t.written());
+    let t0 = Instant::now();
+    for _ in 0..200 {
+        t.send("\x04"); // C-d
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    // Done when nothing more comes for a while: every frame written has been read
+    let mut last = (t.written(), Instant::now());
+    while last.1.elapsed() < Duration::from_millis(500) {
+        assert!(t0.elapsed() < Duration::from_secs(60), "still writing after 60 s");
+        std::thread::sleep(Duration::from_millis(20));
+        if t.written() != last.0 {
+            last = (t.written(), Instant::now());
+        }
+    }
+    let took = t.last_frame_at().map_or(0.0, |at| ms(at.saturating_duration_since(t0)));
+    eprintln!(
+        "slow terminal: {} frames, {:.0} KB in {took:.0} ms",
+        t.frames() - frames,
+        (t.written() - written) as f64 / 1024.0
+    );
+    report("e2e_scrolling_slow_terminal_ms", took, 30_000.0, 250.0);
+}
+
 /// CPU an idle tarae uses, a file open in a git repository and settled.
 #[test]
 fn perf_e2e_idle_cpu() {

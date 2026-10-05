@@ -135,7 +135,7 @@ pub fn run(args: &[String]) -> Result<()> {
 }
 
 /// `rust-toolchain.toml`'s `channel`.
-fn pin(toolchain: &str) -> Result<String> {
+pub(crate) fn pin(toolchain: &str) -> Result<String> {
     let t: toml::Table = toolchain.parse().map_err(|e| format!("rust-toolchain.toml: {e}"))?;
     t.get("toolchain")
         .and_then(|t| t.get("channel"))
@@ -145,7 +145,7 @@ fn pin(toolchain: &str) -> Result<String> {
 }
 
 /// Whether the Docker `docker` would talk to answers — Err: why not, in a line.
-fn reachable(docker: &mut Command) -> std::result::Result<(), String> {
+pub(crate) fn reachable(docker: &mut Command) -> std::result::Result<(), String> {
     let out = docker
         .args(["version", "--format", "{{.Server.Version}}"])
         .stdin(std::process::Stdio::null())
@@ -160,7 +160,7 @@ fn reachable(docker: &mut Command) -> std::result::Result<(), String> {
 }
 
 /// The line said when there's no Docker to run in — what a preflight note matches.
-fn skipped(why: &str) -> String {
+pub(crate) fn skipped(why: &str) -> String {
     format!(
         "skipped — Docker isn't reachable: {why} (start it — colima start -p tarae-test — or set DOCKER_CONTEXT)"
     )
@@ -168,7 +168,7 @@ fn skipped(why: &str) -> String {
 
 /// The repository's git folder when it isn't the tree's own `.git` — a worktree (every tarae session is
 /// one): its `.git` is a file naming a folder under the main checkout's, which the clone inside reads.
-fn common_git_dir(root: &Path) -> Option<PathBuf> {
+pub(crate) fn common_git_dir(root: &Path) -> Option<PathBuf> {
     let out = Command::new("git")
         .arg("-C")
         .arg(root)
@@ -304,7 +304,7 @@ fn prune_volumes(shared: bool) -> usize {
 /// The image for `pin`: `rust:<major.minor>` — rustup in it then takes `rust-toolchain.toml`'s exact version
 /// (installing it, into the rustup volume, when the image's patch release differs). The exact tag would be a
 /// pull of its own for every patch release, for the same compiler.
-fn image(pin: &str) -> String {
+pub(crate) fn image(pin: &str) -> String {
     let minor: Vec<&str> = pin.split('.').take(2).collect();
     format!("rust:{}", minor.join("."))
 }

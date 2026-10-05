@@ -4,7 +4,6 @@
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::sync::OnceLock;
-use std::thread;
 
 use anyhow::Result;
 use crossterm::cursor::{Hide, MoveTo, SetCursorStyle, Show};
@@ -275,7 +274,7 @@ extern "C" fn on_signal(_: libc::c_int) {
 fn spawn_signals(tx: crate::event::Tx) {
     use std::io::Read;
     let Some(mut read) = SIGNAL_READ.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
-    thread::spawn(move || {
+    crate::event::thread("tarae-signals", move || {
         let mut byte = [0u8; 1];
         loop {
             match read.read(&mut byte) {
@@ -298,7 +297,7 @@ fn spawn_signals(tx: crate::event::Tx) {
 
 /// Input thread — so terminal reads don't block the main loop.
 fn spawn_input(tx: crate::event::Tx) {
-    thread::spawn(move || {
+    crate::event::thread("tarae-input", move || {
         while let Ok(ev) = event::read() {
             let ev = match ev {
                 CtEvent::Key(k) if k.kind != KeyEventKind::Release => Key::from_event(k).map(Event::Key),

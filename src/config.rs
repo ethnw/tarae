@@ -5,7 +5,6 @@
 use std::fs;
 use std::io::{ErrorKind, Write as _};
 use std::path::{Path, PathBuf};
-use std::thread;
 
 use toml::Value;
 use toml_edit::DocumentMut;
@@ -506,7 +505,7 @@ pub fn watch(tx: crate::event::Tx, root: PathBuf) {
     if let Some(p) = local_path(&root).filter(|p| !paths.contains(p)) {
         paths.push(p);
     }
-    thread::spawn(move || {
+    crate::event::thread("tarae-config", move || {
         let stamps =
             || -> Vec<_> { paths.iter().map(|p| fs::metadata(p).and_then(|m| m.modified()).ok()).collect() };
         let mut last = stamps();

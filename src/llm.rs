@@ -169,7 +169,7 @@ impl Warm {
             }
             // Spared for another folder: it goes (reaped off the main thread)
             let (mut old, _) = self.child.take().expect("just seen");
-            std::thread::spawn(move || {
+            crate::event::thread("tarae-reap", move || {
                 let _ = old.kill();
                 let _ = old.wait();
             });
@@ -194,7 +194,7 @@ impl Drop for Warm {
     fn drop(&mut self) {
         // (reaped off the main thread — else a zombie until tarae exits)
         if let Some((mut c, _)) = self.child.take() {
-            std::thread::spawn(move || {
+            crate::event::thread("tarae-reap", move || {
                 let _ = c.kill();
                 let _ = c.wait();
             });
@@ -295,7 +295,7 @@ pub struct Lines(std::sync::mpsc::Sender<String>);
 impl Lines {
     pub fn new(mut stdin: std::process::ChildStdin) -> Lines {
         let (tx, rx) = channel::<String>();
-        std::thread::spawn(move || {
+        crate::event::thread("tarae-llm-write", move || {
             while let Ok(line) = rx.recv() {
                 // (a failed write: the process is gone — `pump` tells its end)
                 if writeln!(stdin, "{line}").and_then(|_| stdin.flush()).is_err() {
@@ -359,11 +359,11 @@ pub fn pump(
     tx: crate::event::Tx,
     route: impl Fn(StreamEv) -> Option<Apply> + Send + 'static,
 ) {
-    std::thread::spawn(move || {
+    crate::event::thread("tarae-llm-read", move || {
         // stderr's last line arrives when the pipe closes
         let (err_tx, err_rx) = channel::<String>();
         if let Some(err) = child.stderr.take() {
-            std::thread::spawn(move || {
+            crate::event::thread("tarae-llm-err", move || {
                 let mut last = String::new();
                 for line in BufReader::new(err).lines().map_while(Result::ok) {
                     if !line.trim().is_empty() {
@@ -992,7 +992,7 @@ fn start(
         });
     if let Err(e) = sent {
         // Reaped off the main thread
-        std::thread::spawn(move || {
+        crate::event::thread("tarae-reap", move || {
             let _ = child.kill();
             let _ = child.wait();
         });

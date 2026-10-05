@@ -30,6 +30,46 @@ fn version_and_help_print_without_a_terminal() {
     assert!(String::from_utf8_lossy(&out.stdout).contains("usage: tarae [FILE]"));
 }
 
+/// Every thread tarae starts has a name of its own (`event::thread`: `tarae-input`, `tarae-job`, …), so `top
+/// -H`, a profiler or `tarae-trace` tells them apart — unnamed, each is called `tarae` like the main thread.
+/// Sampled from /proc while it starts on a file in a git repository, moves and saves. Linux only: elsewhere a
+/// process's thread names aren't there for a test to read.
+#[cfg(target_os = "linux")]
+#[test]
+fn every_thread_tarae_starts_has_a_name() {
+    use std::collections::BTreeMap;
+    let sb = Sandbox::new("thread-names");
+    sb.git(&["init", "-q"]);
+    sb.write("a.rs", "fn main() {}\n");
+    let mut t = sb.spawn(&["a.rs"]);
+    t.wait_text("fn main");
+    let pid = t.pid();
+    let mut seen: BTreeMap<u32, String> = BTreeMap::new();
+    let look = |seen: &mut BTreeMap<u32, String>| {
+        for e in fs::read_dir(format!("/proc/{pid}/task")).into_iter().flatten().flatten() {
+            let tid: u32 = e.file_name().to_string_lossy().parse().unwrap_or(0);
+            if let Ok(name) = fs::read_to_string(e.path().join("comm")) {
+                seen.insert(tid, name.trim().to_string());
+            }
+        }
+    };
+    look(&mut seen);
+    t.send("j");
+    t.command("w");
+    // (threads come and go — a job's lives as long as its work: sampled for a second, not waited for)
+    for _ in 0..50 {
+        look(&mut seen);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let unnamed: Vec<_> =
+        seen.iter().filter(|(tid, name)| **tid != pid && name.as_str() == "tarae").collect();
+    assert!(unnamed.is_empty(), "threads without a name of their own: {unnamed:?}\nall: {seen:?}");
+    assert!(
+        seen.values().any(|n| n == "tarae-input") && seen.values().any(|n| n == "tarae-signals"),
+        "{seen:?}"
+    );
+}
+
 #[test]
 fn starts_shows_the_file_and_quits_restoring_the_terminal() {
     let sb = Sandbox::new("quit");

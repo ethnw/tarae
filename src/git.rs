@@ -2,7 +2,6 @@
 //! A watcher thread waits for HEAD to change (`fswatch`) and notifies the main loop (checkout in lazygit etc.).
 
 use std::path::{Path, PathBuf};
-use std::thread;
 
 use crate::editor::Editor;
 use crate::event::Event;
@@ -60,7 +59,7 @@ fn head_ref(head: &Path) -> Option<PathBuf> {
 /// again and the session's buffers take the index as it is now (#74: after a rebase in a session's
 /// terminal the status line said +62 −62 over a clean tree).
 pub fn watch(tx: crate::event::Tx, dir: PathBuf) {
-    thread::spawn(move || {
+    crate::event::thread("tarae-git-watch", move || {
         let Some(head) = find_head(&dir) else { return };
         let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
         let (mut last, mut first) = (None, true);

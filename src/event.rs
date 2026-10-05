@@ -171,10 +171,20 @@ thread_local! {
     pub static DROPPED_LATER: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// A thread of tarae's, by name — `tarae-<what>`, at most 15 bytes (what Linux keeps) — so `top -H`, a
+/// profiler or `tarae-trace` tells tarae's threads apart (unnamed, every one is called `tarae`).
+pub fn thread<T: Send + 'static>(
+    name: &str,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> thread::JoinHandle<T> {
+    debug_assert!(name.len() <= 15, "{name}: Linux keeps 15 bytes of a thread's name");
+    thread::Builder::new().name(name.into()).spawn(f).expect("failed to spawn thread")
+}
+
 /// One copy of the thread-spawn machinery for every job, not one per job type.
 fn run(job: Box<dyn FnOnce() + Send>) {
     #[cfg(not(test))]
-    thread::spawn(job);
+    thread("tarae-job", job);
     // Tests: the worker carries the test's name (libtest names its threads after them), so a failure on
     // it says which test it ran for
     #[cfg(test)]

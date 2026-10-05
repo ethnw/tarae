@@ -705,7 +705,7 @@ impl Editor {
         // run) — read here on the waiter thread once it ends
         let How::Pack { junit, .. } = &target.how;
         let junit = junit.clone();
-        std::thread::spawn(move || {
+        crate::event::thread("tarae-test", move || {
             // (the packs read here — one of one's own is a file)
             let waits = std::sync::Arc::new(crate::waits::Rules::load());
             let (eof, ended) = std::sync::mpsc::channel();
@@ -714,7 +714,7 @@ impl Editor {
                 let Some(s) = stream else { continue };
                 let (tx, waits, eof) = (tx.clone(), waits.clone(), eof.clone());
                 readers += 1;
-                std::thread::spawn(move || {
+                crate::event::thread("tarae-test-read", move || {
                     crate::task::read_batches(s, |lines| send_lines(&tx, &waits, err, lines));
                     let _ = eof.send(());
                 });

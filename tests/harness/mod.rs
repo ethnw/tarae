@@ -320,13 +320,30 @@ pub fn cvt(rc: libc::c_int) -> io::Result<libc::c_int> {
     if rc == -1 { Err(io::Error::last_os_error()) } else { Ok(rc) }
 }
 
+/// A terminal that reads slowly (a remote one, a busy multiplexer): at most `chunk` bytes a read, then a
+/// `pause` — what tarae writes faster than that fills the pty, and its writes wait for room.
+#[derive(Clone, Copy, Debug)]
+pub struct Pace {
+    pub chunk: usize,
+    pub pause: Duration,
+}
+
 impl Term {
     pub fn spawn(sb: &Sandbox, args: &[&str], cols: u16, rows: u16) -> Term {
         Term::spawn_in(sb, &sb.work(), args, cols, rows)
     }
 
+    /// `spawn` on a terminal that reads at `pace`.
+    pub fn spawn_paced(sb: &Sandbox, args: &[&str], cols: u16, rows: u16, pace: Pace) -> Term {
+        Term::spawn_with(sb, &sb.work(), args, cols, rows, Some(pace))
+    }
+
     /// `spawn`, working in `cwd` rather than the sandbox's work folder (its HOME and state stay the sandbox's).
     pub fn spawn_in(sb: &Sandbox, cwd: &Path, args: &[&str], cols: u16, rows: u16) -> Term {
+        Term::spawn_with(sb, cwd, args, cols, rows, None)
+    }
+
+    fn spawn_with(sb: &Sandbox, cwd: &Path, args: &[&str], cols: u16, rows: u16, pace: Option<Pace>) -> Term {
         // Tests run in parallel threads: another test's tarae mustn't get this pty — close-on-exec from the
         // start, or its master would outlive this test in that tarae (and in what it starts), and this
         // tarae would never hang up when the test binary dies.
@@ -370,8 +387,12 @@ impl Term {
         // Linux) — i.e. after the drop.
         thread::spawn(move || {
             let mut buf = [0u8; 16 * 1024];
+            let chunk = pace.map_or(buf.len(), |p| p.chunk.clamp(1, buf.len()));
             loop {
-                match reader.read(&mut buf) {
+                if let Some(p) = pace {
+                    thread::sleep(p.pause);
+                }
+                match reader.read(&mut buf[..chunk]) {
                     Ok(0) => break,
                     Ok(n) => {
                         let at = Instant::now();
@@ -526,6 +547,16 @@ impl Term {
     /// When the first frame ended (startup's end).
     pub fn first_frame_at(&self) -> Option<Instant> {
         lock(&self.out).first_frame_at
+    }
+
+    /// When the latest frame ended — as its bytes were read.
+    pub fn last_frame_at(&self) -> Option<Instant> {
+        lock(&self.out).last_frame_at
+    }
+
+    /// Bytes tarae has written so far.
+    pub fn written(&self) -> usize {
+        lock(&self.out).raw.len()
     }
 
     /// `keys` sent, then how long until the next frame has ended — polled finely, the frame's time taken
