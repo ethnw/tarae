@@ -198,6 +198,64 @@ fn a_stuck_run_is_captured_then_asked_about() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// #200: a stuck card parked in a session behind, its run still silent, is looked at after every event
+/// (`sync`) — and that look must not say the event changed nothing. It did: every key, resize and job came
+/// back unchanged, nothing was drawn for 30 minutes (no card settled, no toast aged) until the run ended.
+/// (The run is the test's own `sleep`, stopped at the end.)
+#[test]
+fn a_stuck_card_behind_leaves_the_front_drawn() {
+    use crate::event::Event;
+    let dir = std::fs::canonicalize(std::env::temp_dir())
+        .unwrap()
+        .join(format!("tarae-stuck-behind-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("back")).unwrap();
+    let mut ed = Editor::new(crate::config::Config::default());
+    ed.session.root = dir.clone();
+    let back = ed.session_add(dir.join("back"));
+    let ago = |m: u32| Instant::now().checked_sub(MIN * m).unwrap();
+    ed.with_session(back, |ed| {
+        let task = crate::task::Task { name: "hangs".into(), cmd: "sleep 30".into(), cwd: dir.join("back") };
+        let user = crate::tools::For::User("h".into());
+        assert!(ed.task_start_for(task, user, None, Default::default()).is_ok());
+        let r = ed.session.task_run.as_mut().unwrap();
+        (r.by_claude, r.last_output) = (true, ago(11));
+        let s = Stuck {
+            slot: Slot::Task,
+            run: r.trace.id(),
+            pid: r.pid().unwrap(),
+            asked: Instant::now(),
+            quiet: 11 * MIN,
+            cpu: 0.0,
+            at: 0,
+        };
+        let o = crate::offer::Offer::new(
+            "Stuck? Claude's command".into(),
+            "No output for 11 min",
+            "Stopping…",
+            String::new(),
+            crate::offer::What::Stuck(Box::new(s)),
+        );
+        ed.push_offer(o);
+    });
+    let parked = |ed: &Editor| ed.sessions.iter().any(|l| l.parked.iter().any(|o| o.stuck().is_some()));
+    assert!(parked(&ed), "parked behind");
+    // (its "waits for you" said once — what follows is the steady state that froze the screen)
+    ed.handle_event(Event::Resize);
+    let changed = |ed: &mut Editor, ev: Event| {
+        ed.unchanged = false;
+        ed.handle_event(ev);
+        !std::mem::take(&mut ed.unchanged)
+    };
+    assert!(changed(&mut ed, Event::Key(Key::plain(Code::Char(':')))), "a key is drawn");
+    assert!(ed.prompt.is_some(), "the command line opened");
+    assert!(changed(&mut ed, Event::Resize), "a resize is drawn");
+    assert!(changed(&mut ed, Event::Job(Box::new(|_: &mut Editor| {}))), "a job is drawn");
+    assert!(parked(&ed), "its run still silent: the card stays");
+    // (its `sleep` stopped as a dropped run is)
+    ed.with_session(back, |ed| ed.session.task_run = None);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// The card goes once its run prints — it wasn't stuck after all; `n` keeps waiting, said.
 #[test]
 fn a_stuck_card_goes_when_its_run_prints() {

@@ -209,7 +209,7 @@ fn event_loop(editor: &mut Editor) -> Result<()> {
             }
             unchanged &= handle_noting(editor, ev);
         }
-        draw = !unchanged;
+        draw = editor.frame_due(unchanged);
     }
     // (quitting waited for them already — this covers any other way out)
     editor.flush_saves();
@@ -348,6 +348,9 @@ pub fn render(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io::
     // (an error under a picker waits for the card — U7)
     let card = editor.screen.toast_card.get().is_some();
     editor.toasts_drawn(card);
+    // (what came before this is drawn, input too — `Editor::frame_due`; after `toasts_drawn`, which restarts
+    // the time of an error shown at last)
+    (editor.frame_at, editor.frame_input) = (Some(std::time::Instant::now()), editor.input_seq);
     // (a go-to's answer on screen: its timing to the log — N1)
     editor.trace_drawn();
     // (a run's wave and wait counter want frames only while their slot is drawn — this frame's say)

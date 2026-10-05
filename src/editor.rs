@@ -147,6 +147,16 @@ const MESSAGES_KEPT: usize = 300;
 /// An error stays up until a key is pressed — but at least this long, so a key already on its way doesn't
 /// take it before it's read.
 const ERROR_MIN: std::time::Duration = std::time::Duration::from_secs(4);
+
+#[cfg(test)]
+thread_local! {
+    /// The `frames owed` lines this thread's editors logged (`Editor::frame_due` — the log writes nothing in
+    /// tests).
+    pub static FRAMES_OWED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// A test's own step after every event's work, among the syncs (`handle_event`) — one that says, as
+    /// #200's look at a card behind did, that the event changed nothing.
+    pub static AFTER_EVENT: std::cell::Cell<Option<fn(&mut Editor)>> = const { std::cell::Cell::new(None) };
+}
 /// The fade-out at the end of a toast's life.
 const TOAST_FADE: std::time::Duration = std::time::Duration::from_millis(400);
 /// …and the fade-in when a card first shows.
@@ -526,6 +536,10 @@ pub struct Editor {
     /// Set by a job result that changed nothing on screen (a disk round that found nothing) — when a batch
     /// of events is all such, the main loop doesn't draw it.
     pub unchanged: bool,
+    /// When the last frame was drawn (`term::render`) and the input it drew (`input_seq` then) — what came
+    /// after it is owed a frame (`frame_due`).
+    pub frame_at: Option<std::time::Instant>,
+    pub frame_input: u64,
     /// `:redraw` — the next frame draws the whole screen, not only what changed (the main loop takes it).
     pub redraw: bool,
     /// A git diff is running on a worker thread.
@@ -726,6 +740,8 @@ impl Editor {
             disk_poll_gen: 0,
             disk_round: None,
             unchanged: false,
+            frame_at: None,
+            frame_input: 0,
             redraw: false,
             git_diffing: false,
             git_auto: !cfg!(test),
@@ -1555,8 +1571,11 @@ impl Editor {
                 self.plugin_input_went_in();
             }
             Event::Job(apply) => apply(self),
-            Event::For(session, apply) => self.with_session(session, apply),
+            Event::For(session, apply) => self.for_session(session, apply),
         }
+        // Whether the event changed nothing on screen is the event's to say: what runs after every event below
+        // can make it drawn, never not (#200: a look at a card behind said "nothing" for every key for 30 min)
+        let unchanged = self.unchanged;
         if let Some(before) = before {
             crate::edits::taken_up(self, before);
         }
@@ -1584,6 +1603,12 @@ impl Editor {
         crate::stuck::sync(self);
         self.plugin_front();
         self.schedule_tick();
+        #[cfg(test)]
+        if let Some(step) = AFTER_EVENT.get() {
+            step(self);
+        }
+        // (one of them can clear it — `schedule_tick` when toasts went: drawn whatever the event was)
+        self.unchanged &= unchanged;
     }
 
     // ── Mouse ────────────────────────────────────────────────────────────
@@ -2203,6 +2228,45 @@ impl Editor {
         });
         // A run of Claude's going silent, in any session: one frame then — the inbox counts it (#157)
         [next, flash, self.silent_wake()].into_iter().flatten().min()
+    }
+
+    /// Whether the main loop draws after a batch of events (`unchanged`: every one of them said it changed
+    /// nothing on screen) — and even then when something came that no frame has shown yet (#200: a wrong
+    /// "nothing changed" held the screen for 30 minutes — no card settled, no toast aged, `tarae state` timed
+    /// out). Owed is a bug somewhere: the log says what was. Once a frame is drawn nothing is owed, shown or
+    /// not (a card under a picker), so an idle tarae stays idle.
+    pub fn frame_due(&self, unchanged: bool) -> bool {
+        if !unchanged {
+            return true;
+        }
+        let Some(what) = self.frame_owed() else { return false };
+        let line =
+            format!("{what} came after the last frame, and every event since said nothing changed — drawn");
+        crate::log::line("frames", "owed", &line);
+        #[cfg(test)]
+        FRAMES_OWED.with(|o| o.borrow_mut().push(line));
+        true
+    }
+
+    /// What came that no frame has shown yet: input (a key, a click, a paste — whatever it changed, you look
+    /// for it), a card, a toast (since the last frame), a UI-state ask whose input has come (answered after
+    /// the next frame — `uistate::after_frame`).
+    fn frame_owed(&self) -> Option<String> {
+        if self.input_seq > self.frame_input {
+            return Some("input (a key, click or paste)".into());
+        }
+        let after = |t: std::time::Instant| self.frame_at.is_none_or(|f| t > f);
+        if let Some(o) = self.offers.iter().find(|o| after(o.since)) {
+            return Some(format!("card \"{}\"", o.title));
+        }
+        if let Some(t) = self.toasts.iter().find(|t| after(t.at)) {
+            return Some(format!("toast \"{}\"", t.text.chars().take(80).collect::<String>()));
+        }
+        let now = std::time::Instant::now();
+        self.ui_asks
+            .iter()
+            .any(|a| self.input_seq >= a.after_input && a.until > now)
+            .then(|| "a UI-state ask".to_string())
     }
 
     fn schedule_tick(&mut self) {
@@ -9517,6 +9581,111 @@ mod tests {
         assert!(ed.session.chat.as_ref().unwrap().msgs.iter().any(|m| m.text.contains("from the worktree")));
         git_in(&repo, &["worktree", "remove", "--force", wt.to_str().unwrap()]);
         std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// A job that does `what` — then says, wrongly, that it changed nothing on screen; whether the main loop
+    /// draws after it (`frame_due`, as `term::event_loop` asks) and what the log said.
+    fn wrongly_unchanged(
+        ed: &mut Editor,
+        what: impl FnOnce(&mut Editor) + Send + 'static,
+    ) -> (bool, Vec<String>) {
+        FRAMES_OWED.with(|o| o.borrow_mut().clear());
+        ed.unchanged = false;
+        ed.handle_event(Event::Job(Box::new(move |ed: &mut Editor| {
+            what(ed);
+            ed.unchanged = true;
+        })));
+        let unchanged = std::mem::take(&mut ed.unchanged);
+        assert!(unchanged, "the event said nothing changed");
+        (ed.frame_due(unchanged), FRAMES_OWED.with(|o| o.borrow().clone()))
+    }
+
+    /// #200's guard: an event that wrongly says it changed nothing still gets its frame when something came
+    /// that no frame has shown — a card, a toast, a UI-state ask whose input has come — and the log says what
+    /// was owed. Once drawn, nothing more is owed.
+    #[test]
+    fn a_wrong_nothing_changed_still_draws_what_came() {
+        let mut ed = editor("one\n");
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 30).unwrap();
+        let (due, said) = wrongly_unchanged(&mut ed, |_| {});
+        assert!(!due && said.is_empty(), "nothing came: no frame — {said:?}");
+        // A card
+        let (due, said) = wrongly_unchanged(&mut ed, |ed| {
+            let what = crate::offer::What::ReviewAtEnd;
+            ed.push_offer(crate::offer::Offer::new("Owed card".into(), "q", "w", String::new(), what));
+        });
+        assert!(due, "the card is drawn");
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("card \"Owed card\""), "{said:?}");
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 30).unwrap();
+        assert!(!wrongly_unchanged(&mut ed, |_| {}).0, "drawn: nothing owed");
+        // A toast
+        let (due, said) = wrongly_unchanged(&mut ed, |ed| ed.set_status("an owed toast"));
+        assert!(due && said.len() == 1 && said[0].contains("toast \"an owed toast\""), "{said:?}");
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 30).unwrap();
+        // A UI-state ask, its input come — answered by the frame that's drawn for it
+        let (tx, rx) = std::sync::mpsc::channel();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let ask = crate::uistate::Ask { after_input: ed.input_seq, json: true, reply: tx, until };
+        let (due, said) = wrongly_unchanged(&mut ed, move |ed| ed.ui_asks.push(ask));
+        assert!(due && said.len() == 1 && said[0].contains("a UI-state ask"), "{said:?}");
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 30).unwrap();
+        assert!(rx.try_recv().is_ok(), "answered by that frame");
+        assert!(!wrongly_unchanged(&mut ed, |_| {}).0);
+        // A key (#200 as met: every key came back "unchanged") — whatever it changed, you look for it
+        let (due, said) = wrongly_unchanged(&mut ed, |ed| ed.handle_key(Key::plain(Code::Char(':'))));
+        assert!(due && said.len() == 1 && said[0].contains("input (a key, click or paste)"), "{said:?}");
+        assert!(ed.prompt.is_some(), "the command line it opened is what that frame shows");
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 30).unwrap();
+        assert!(!wrongly_unchanged(&mut ed, |_| {}).0, "drawn: nothing owed");
+    }
+
+    /// The guard costs an idle tarae nothing: a card under a picker (never drawn), an error waiting for its
+    /// card under it, an ask waiting for input still to come, a key in the picker — after one frame none of
+    /// it is owed again, and twenty events saying nothing changed draw no frame and log nothing.
+    #[test]
+    fn what_stays_undrawn_is_owed_one_frame_only() {
+        let mut ed = editor("one\n");
+        let what = crate::offer::What::ReviewAtEnd;
+        ed.push_offer(crate::offer::Offer::new("Hidden".into(), "q", "w", String::new(), what));
+        ed.picker = Some(Picker::new("files", Vec::new(), true));
+        ed.set_error("an error under the picker");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let ask = crate::uistate::Ask { after_input: ed.input_seq + 1, json: true, reply: tx, until };
+        ed.ui_asks.push(ask);
+        ed.handle_key(Key::plain(Code::Down));
+        assert!(ed.picker.is_some(), "the key went to the picker");
+        assert!(ed.frame_due(true), "never drawn: owed");
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 30).unwrap();
+        assert!(
+            ed.screen.toast_card.get().is_none() && ed.toasts.iter().any(Toast::waiting),
+            "still undrawn"
+        );
+        for i in 0..20 {
+            let (due, said) = wrongly_unchanged(&mut ed, |_| {});
+            assert!(!due && said.is_empty(), "event {i}: {said:?}");
+        }
+    }
+
+    /// #200's guard in `handle_event`: what runs after every event can make it drawn, never not — a step there
+    /// that says "nothing changed" leaves a key, a resize and a job drawn; a job that said so itself stays so.
+    #[test]
+    fn what_runs_after_an_event_never_says_it_changed_nothing() {
+        let mut ed = editor("one\n");
+        AFTER_EVENT.set(Some(|ed: &mut Editor| ed.unchanged = true));
+        let mut drawn = |ev: Event| {
+            ed.unchanged = false;
+            ed.handle_event(ev);
+            !std::mem::take(&mut ed.unchanged)
+        };
+        let key = drawn(Event::Key(Key::plain(Code::Char('l'))));
+        let resize = drawn(Event::Resize);
+        let job = drawn(Event::Job(Box::new(|_: &mut Editor| {})));
+        let quiet = drawn(Event::Job(Box::new(|ed: &mut Editor| ed.unchanged = true)));
+        AFTER_EVENT.set(None);
+        assert!(key && resize && job, "drawn: key {key}, resize {resize}, job {job}");
+        assert!(!quiet, "an event that said it changed nothing stays so");
     }
 
     /// A session behind's terminal goes on and its output is read into it — a terminal started in front

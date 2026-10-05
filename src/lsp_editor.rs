@@ -882,25 +882,25 @@ impl Editor {
                     Kind::Virtual { uri, pos } => self.server_doc_reply(cid, uri.clone(), pos, error, result),
                     Kind::InlayHint { range } => self.on_inlay(cid, &p, *range, result),
                     &Kind::ToolRefs { ask } => {
-                        self.with_session(session, |ed| crate::nav::refs_answered(ed, ask, answered))
+                        self.for_session(session, |ed| crate::nav::refs_answered(ed, ask, answered))
                     }
-                    &Kind::ToolDeclared { ask } => self.with_session(session, |ed| {
+                    &Kind::ToolDeclared { ask } => self.for_session(session, |ed| {
                         crate::nav::declared_answered(ed, ask, error.is_none().then_some(result))
                     }),
                     &Kind::ToolSymbols { ask } => {
-                        self.with_session(session, |ed| crate::nav::symbols_answered(ed, ask, answered))
+                        self.for_session(session, |ed| crate::nav::symbols_answered(ed, ask, answered))
                     }
                     &Kind::ToolGoto { ask, .. } | &Kind::ToolNamed { ask } => {
-                        self.with_session(session, |ed| crate::nav::def_answered(ed, ask, cid, answered))
+                        self.for_session(session, |ed| crate::nav::def_answered(ed, ask, cid, answered))
                     }
                     &Kind::ToolHover { ask } => {
-                        self.with_session(session, |ed| crate::nav::hover_answered(ed, ask, answered))
+                        self.for_session(session, |ed| crate::nav::hover_answered(ed, ask, answered))
                     }
                     &Kind::ToolPrepareRename { ask } => {
-                        self.with_session(session, |ed| crate::refactor::prepared(ed, ask, answered))
+                        self.for_session(session, |ed| crate::refactor::prepared(ed, ask, answered))
                     }
                     &Kind::ToolRename { ask } => {
-                        self.with_session(session, |ed| crate::refactor::renamed(ed, ask, answered))
+                        self.for_session(session, |ed| crate::refactor::renamed(ed, ask, answered))
                     }
                     // One server failing leaves the others' actions (it's logged)
                     &Kind::CodeAction { list } if error.is_some() => {

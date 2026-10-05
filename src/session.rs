@@ -628,7 +628,9 @@ impl Editor {
             };
             match id == front {
                 true => tell(self),
-                false => self.with_session(id, tell),
+                false => {
+                    self.with_session(id, tell);
+                }
             }
         }
     }
@@ -641,9 +643,23 @@ impl Editor {
         }
     }
 
+    /// An event's whole work, for session `id` (`Event::For`): `with_session`, and the event draws nothing when
+    /// nothing of it is on screen — an idle front draws nothing for a busy session behind.
+    pub fn for_session(&mut self, id: SessionId, f: impl FnOnce(&mut Editor)) {
+        if self.with_session(id, f) {
+            self.unchanged = true;
+        }
+    }
+
     /// Applies `f` in session `id` — swapped in for it if it's behind, as it is if it's in front or gone.
-    pub fn with_session(&mut self, id: SessionId, f: impl FnOnce(&mut Editor)) {
-        let Some(i) = self.sessions.iter().position(|l| l.id == id) else { return f(self) };
+    /// Whether nothing of it is on screen (behind, nothing said, no turn ended); `unchanged` isn't touched — it's
+    /// the event's, and `f` is often only part of it (#200: a look at a card behind after every event made
+    /// every key, resize and job draw nothing for 30 minutes). `for_session` is the form for a whole event.
+    pub fn with_session(&mut self, id: SessionId, f: impl FnOnce(&mut Editor)) -> bool {
+        let Some(i) = self.sessions.iter().position(|l| l.id == id) else {
+            f(self);
+            return false;
+        };
         let front = self.session.id;
         self.session.current_doc = self.doc().id;
         std::mem::swap(&mut self.session, &mut self.sessions[i]);
@@ -689,10 +705,8 @@ impl Editor {
         if tell {
             let msg = format!("{name} · waits for you — {}", self.c_q_says(id, true));
             self.said_for(id, crate::editor::ToastKind::Info, msg);
-        } else if ended.is_none() && self.messages.last().map(|m| m.0) == said {
-            // (nothing of it is on screen — an idle front draws nothing for a busy session behind)
-            self.unchanged = true;
         }
+        !tell && ended.is_none() && self.messages.last().map(|m| m.0) == said
     }
 
     /// The index of document `id` — the first one's if it's gone (closed from another session).
@@ -1332,6 +1346,76 @@ mod tests {
         assert!(ed.offers.is_empty(), "answered");
         assert!(ed.session.code_review.is_some(), "the review begun since stays");
         std::fs::remove_dir_all(front.parent().unwrap()).ok();
+    }
+
+    /// #200: `with_session` says whether nothing of it is on screen and leaves the event's `unchanged` alone —
+    /// only `for_session` (an event's whole work, `Event::For`) sets it from that. Saying something behind is
+    /// on screen; the front or a gone session is applied as is, never "nothing".
+    #[test]
+    fn with_session_says_what_it_showed_and_leaves_the_event_alone() {
+        let mut ed = Editor::new(crate::config::Config::default());
+        let back = ed.session_add(std::env::temp_dir());
+        ed.unchanged = false;
+        assert!(ed.with_session(back, |_| {}), "nothing of it on screen");
+        assert!(!ed.unchanged, "the event's own flag untouched");
+        assert!(!ed.with_session(back, |ed| ed.set_status("from behind")), "said: on screen");
+        assert!(!ed.with_session(ed.session.id, |_| {}), "the front's");
+        assert!(!ed.with_session(99, |_| {}), "a gone one: applied in front");
+        assert!(!ed.unchanged);
+        ed.for_session(back, |_| {});
+        assert!(ed.unchanged, "an event that only did that draws nothing");
+    }
+
+    /// An idle front draws nothing for a busy session behind: a tool call of its Claude's answered in an event
+    /// of its own — a job's result or a server's reply (`Event::For`), or the hop an answer made inside another
+    /// session's swap takes (`tools::deliver`) — goes to its chat behind, and that event, through every step
+    /// after it, changed nothing: no frame.
+    #[test]
+    fn a_tool_answer_behind_draws_no_frame_in_front() {
+        use crate::event::Event;
+        let mut ed = Editor::new(crate::config::Config::default());
+        (ed.config.llm.command, ed.config.llm.args) =
+            ("sh".into(), vec!["-c".into(), "cat > /dev/null".into()]);
+        let back = ed.session_add(std::env::temp_dir());
+        let other = ed.session_add(std::env::temp_dir());
+        let mut generation = 0;
+        ed.with_session(back, |ed| {
+            crate::chat::open(ed);
+            let c = ed.session.chat.as_mut().unwrap();
+            (c.state, c.focused) = (crate::chat::State::Thinking, false);
+            generation = c.generation();
+            for id in [1, 2] {
+                let (id, tool, since, after) = (json!(id), "symbols", Instant::now(), STUCK_AFTER);
+                ed.session.tool_waits.push(ToolWait { generation, id, tool, since, after });
+            }
+        });
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 30).unwrap();
+        let waits = |ed: &Editor| session_by(ed, back).tool_waits.len();
+        let quiet = |ed: &mut Editor, ev: Event| {
+            ed.unchanged = false;
+            ed.handle_event(ev);
+            let unchanged = std::mem::take(&mut ed.unchanged);
+            unchanged && !ed.frame_due(unchanged)
+        };
+        // Its own event
+        let call = crate::tools::Call::of(generation, "r1", json!(1));
+        let answer = move |ed: &mut Editor| crate::tools::answer(ed, call, Ok("one".into()));
+        assert!(quiet(&mut ed, Event::For(back, Box::new(answer))), "its own event: no frame");
+        assert_eq!(waits(&ed), 1, "answered behind");
+        // Made inside another session's swap: delivered by the hop after it
+        let call = crate::tools::Call::of(generation, "r2", json!(2));
+        ed.with_session(other, |ed| crate::tools::answer(ed, call, Ok("two".into())));
+        assert_eq!(waits(&ed), 1, "not inside that swap");
+        let end = Instant::now() + Duration::from_secs(10);
+        loop {
+            let left = end.saturating_duration_since(Instant::now());
+            let ev = ed.events.recv_timeout(left).expect("the hop");
+            let quiet = quiet(&mut ed, ev);
+            if waits(&ed) == 0 {
+                assert!(quiet, "the hop: no frame");
+                break;
+            }
+        }
     }
 
     /// Two checkouts, `front` and `back`, each a cargo project with a `main.rs` — and an editor whose rust

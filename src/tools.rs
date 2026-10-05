@@ -244,8 +244,8 @@ pub fn answer(ed: &mut Editor, call: Call, r: Result<String, String>) {
 
 /// `answer`'s way to its chat: the session in `ed.session` if it's that chat's, else that session swapped in — or,
 /// while another session behind is swapped in, from the main loop next (never a swap inside a swap). That
-/// next turn isn't behind (`behind` is set only inside `with_session`, and the main loop applies a shared
-/// result outside it), so it's one hop, never a loop.
+/// next turn is the owner's own event (`Event::For`, swapped in for it, so delivered at once), so it's one
+/// hop, never a loop.
 fn deliver(ed: &mut Editor, call: Call, r: Result<String, String>) {
     let owner = std::iter::once(&ed.session)
         .chain(&ed.sessions)
@@ -259,10 +259,13 @@ fn deliver(ed: &mut Editor, call: Call, r: Result<String, String>) {
             let response = response(&call, r);
             crate::chat::respond(ed, &call.request_id, json!({ "mcp_response": response }));
         }
-        Some(session) if !ed.background() => ed.with_session(session, move |ed| deliver(ed, call, r)),
-        Some(_) => {
-            let later = crate::event::Event::Job(Box::new(move |ed: &mut Editor| deliver(ed, call, r)));
-            let _ = ed.events.shared_sender().send(later);
+        Some(session) if !ed.background() => {
+            ed.with_session(session, move |ed| deliver(ed, call, r));
+        }
+        // (its own event, the answer its whole work — `for_session`: nothing of it on screen, no frame)
+        Some(session) => {
+            let later = move |ed: &mut Editor| deliver(ed, call, r);
+            let _ = ed.events.shared_sender().send(crate::event::Event::For(session, Box::new(later)));
         }
     }
 }

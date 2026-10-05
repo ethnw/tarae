@@ -115,7 +115,7 @@ impl Saver {
                     cv.notify_all();
                     // Out of work: the main loop finishes the batch (one message for `:wa`), and starts what
                     // waited for it
-                    if idle && events.send(Event::Job(Box::new(|ed: &mut Editor| ed.saves_done()))).is_err() {
+                    if idle && events.send(Event::Job(Box::new(|ed: &mut Editor| ed.saves_woke()))).is_err() {
                         return;
                     }
                 }
@@ -170,9 +170,19 @@ impl Editor {
         Ok(())
     }
 
+    /// The saver's wake-up, an event of its own: `saves_done`, and nothing drawn when nothing of it is on
+    /// screen (the saves taken by a flush before it, what waited for them started in a session behind).
+    fn saves_woke(&mut self) {
+        if self.saves_done() {
+            self.unchanged = true;
+        }
+    }
+
     /// Finish the saves written so far (the saver's wake-up, `flush_saves`), then start what waited for them.
-    pub fn saves_done(&mut self) {
+    /// Whether nothing of it is on screen (no save finished, no step went, every wait started behind).
+    pub fn saves_done(&mut self) -> bool {
         let done = self.saver.take_done();
+        let mut quiet = done.is_empty();
         if !done.is_empty() {
             self.saves_finish(done);
         }
@@ -181,11 +191,14 @@ impl Editor {
             std::mem::take(&mut self.saver.waits).into_iter().partition(|w| w.asked <= written);
         self.saver.waits = waiting;
         if self.saver.waits.is_empty() {
+            let toasts = self.toasts.len();
             self.step_done(WAITING);
+            quiet &= self.toasts.len() == toasts;
         }
         for w in ready {
-            self.with_session(w.session, w.then);
+            quiet &= self.with_session(w.session, w.then);
         }
+        quiet
     }
 
     /// `then` once the saves asked so far are on disk — what runs the code on disk (a task, tests, the
@@ -452,6 +465,34 @@ mod tests {
         let out: Vec<&str> = s.task_run.as_ref().unwrap().output.iter().map(|(_, l)| l.as_str()).collect();
         assert_eq!(out, ["TWOne"]);
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// The saver's wake-up is an event of its own: when nothing of it is on screen — its saves taken by a
+    /// flush before it, what waited for them started in a session behind — it draws nothing; a wait started in
+    /// front, or the "still writing" step going, is drawn.
+    #[test]
+    fn the_wake_up_for_a_session_behind_draws_nothing() {
+        let mut ed = Editor::new(Config::default());
+        let back = ed.session_add(std::env::temp_dir());
+        let ran = std::rc::Rc::new(std::cell::Cell::new(None));
+        let woke = |ed: &mut Editor, session, step: bool| {
+            let r = ran.clone();
+            let then = Box::new(move |ed: &mut Editor| r.set(Some(ed.session.id)));
+            ed.saver.waits.push(Wait { asked: 0, session, then });
+            if step {
+                ed.set_step(WAITING, "still writing files");
+            }
+            ed.unchanged = false;
+            ed.handle_event(Event::Job(Box::new(|ed: &mut Editor| ed.saves_woke())));
+            std::mem::take(&mut ed.unchanged)
+        };
+        assert!(woke(&mut ed, back, false), "started behind: nothing drawn");
+        assert_eq!(ran.take(), Some(back), "in its session");
+        let front = ed.session.id;
+        assert!(!woke(&mut ed, front, false), "started in front: drawn");
+        assert_eq!(ran.take(), Some(front));
+        assert!(!woke(&mut ed, back, true), "the step went: drawn");
+        assert!(ed.toasts.is_empty() && ran.take() == Some(back));
     }
 
     /// A save that takes long (a network drive): after a second the run says it's waiting for it — and that

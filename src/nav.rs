@@ -2212,6 +2212,22 @@ pub fn verdict(text: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// #200's kind: a server's news (a publish for a file in front) answers a `diagnostics` call of a session
+    /// behind, swapped in for it — nothing of that is on screen, but the news is: the event stays drawn.
+    #[test]
+    fn a_call_answered_behind_leaves_the_news_drawn() {
+        let mut ed = Editor::new(crate::config::Config::default());
+        let back = ed.session_add(std::env::temp_dir());
+        let now = std::time::Instant::now();
+        let call = Call::of(1, "r", json!(1));
+        let (paths, unread, which, session) = (Vec::new(), Vec::new(), "", back);
+        ed.lsp.tool_diags.push(DiagWait { call, paths, unread, which, since: now, until: now, session });
+        ed.unchanged = false;
+        ed.handle_event(crate::event::Event::Job(Box::new(diagnostics_moved)));
+        assert!(ed.lsp.tool_diags.is_empty(), "answered behind");
+        assert!(!ed.unchanged, "the news is drawn");
+    }
+
     fn place(path: &str, line: usize, text: &str) -> Place {
         Place { path: PathBuf::from(path), line, col: 0, text: text.into() }
     }

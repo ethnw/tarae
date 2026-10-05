@@ -1754,8 +1754,6 @@ impl Editor {
     /// shared row.
     fn procs_in(&mut self, r: &Row, f: impl FnOnce(&mut Editor)) {
         self.with_session(r.session.unwrap_or(self.session.id), f);
-        // (a key did it: the panel is drawn, whatever the session behind said)
-        self.unchanged = false;
     }
 
     /// `s` on the selected row: it stops (the way its owner stops it — a run keeps its output).

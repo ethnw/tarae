@@ -2452,6 +2452,32 @@ mod tests {
         feed(ed, "y");
     }
 
+    /// #200's kind: the bring card for a session behind comes from a job that swapped that session in first
+    /// (its preflight, what its reviewer found) — that swap said nothing, and the event it was part of was
+    /// taken for one that changed nothing: the card stayed undrawn, never settled, its `y` not taken.
+    #[test]
+    fn a_bring_card_for_a_session_behind_is_drawn() {
+        let (repo, dir) = place("bring-behind");
+        let mut ed = editor(&repo, &dir);
+        let wt = new_session(&mut ed, "feat");
+        std::fs::write(wt.join("a.txt"), "feat\n").unwrap();
+        git_in(&wt, &["commit", "-qam", "feat"]);
+        assert!(ed.session_switch(0) && ed.sessions.iter().any(|l| l.root == wt), "feat behind");
+        ed.session_bring("feat").unwrap();
+        let title = "Bring feat into main";
+        let end = Instant::now() + Duration::from_secs(10);
+        while card(&ed, title).is_none() {
+            assert!(!says(&ed, "bring feat:"), "{}", said(&ed));
+            let left = end.saturating_duration_since(Instant::now());
+            let ev = ed.events.recv_timeout(left).unwrap_or_else(|| panic!("timed out: {}", said(&ed)));
+            ed.unchanged = false;
+            ed.handle_event(ev);
+        }
+        assert!(!ed.unchanged, "the event that put the card up is drawn");
+        assert_eq!(card_in_sight(&mut ed), ['y', 'p', 'n']);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Bringing in: main moves up to the session's branch in main's checkout (its files follow); main moved
     /// meanwhile: a card offers to rebase first (with how far — `n` leaves it all); refused when main's
     /// checkout has changes in a file it brings; a base no checkout has moves as a ref alone.
