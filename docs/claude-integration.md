@@ -610,10 +610,13 @@ thread of tarae's that confined itself first, and everything it starts stays con
   | 3–4 (6.2) | the full sandbox, unasked, as on macOS. Device `ioctl`s aren't controlled |
   | 5 (6.10) | + device `ioctl`s controlled |
   | 6 (6.12) | + a command can't send a signal to a process outside its own (below 6, Claude's result says it could) |
-  | 7 and later (6.15) | + what was refused comes from Landlock's own log, when tarae can read the kernel's messages (`journalctl -k`). Its records are read as the kernel's documentation describes them; not yet checked against a live kernel |
+  | 7 and later (6.15) | + what was refused can come from Landlock's own log — only when the kernel's audit is on (`auditd` running, or `audit=1` at boot; a stock Ubuntu has it off) and tarae can read where the records go: auditd's log when auditd runs (`/var/log/audit/audit.log` — on Ubuntu, being in the `adm` group), else the kernel's messages (`journalctl -k`). tarae tries it once: a denial of its own, its record looked for |
 
-  Below 7, or without that log, what a command was refused in files is read from its own error lines
-  (`Permission denied` on a path the rules keep), and Claude's result says that's where it came from.
+  Otherwise what a command was refused is read from its own error lines, and Claude's result says that's
+  where it came from, and why: `Permission denied` on a path the rules keep, or on a new file in a folder
+  that holds a protected name (Landlock's own rule — `making Cargo.toml.bak — a folder holding protected names
+  takes no new files on Linux`), and from ABI 6 a `kill` refused with `Operation not permitted` (a process
+  outside the command's own).
 - **Connections are tarae's to make.** A command's calls that name an address — connecting, binding, sending
   to an address — wait for tarae, which reads the address once, decides on its own copy with the rules above
   (`llm.sandbox-ports`, `llm.sandbox-localhost`, the project's and the run's own unix sockets, a socket you
@@ -633,14 +636,20 @@ thread of tarae's that confined itself first, and everything it starts stays con
     calls. At 1, the default on Ubuntu, only a process that left the command's tree (a daemon that detached
     itself) has its connections refused
   - when tarae itself runs inside such a sandbox (a tarae started by one of Claude's commands)
-- **Gradle runs in the sandbox** with `llm.sandbox-localhost`, as on macOS. But a Gradle project that has never
-  been built fails for now: its folder holds `build.gradle`, so the command can't make `.gradle/` and
-  `build/` there (below). Build it once yourself, and Claude's builds work from then on.
+- **Gradle runs in the sandbox** with `llm.sandbox-localhost`, as on macOS.
 - **What Landlock can't keep, said in Claude's result:** a protected name made in a folder that holds none yet
   (a `.cargo` folder inside `src/`, say — Landlock rules are on paths that are there); tmux's and zellij's
   folders in `/tmp`, which stay writable (Java writes its temp files in `/tmp` whatever `TMPDIR` says). The
   other way round, a folder that holds a protected name is closed to new entries: next to `Cargo.toml` a
   command can change the files that are there, but not make, remove or rename one.
+- **So what a first build makes there is made first.** Before a command runs, tarae makes, empty, what the
+  language packs say a build makes beside their protected names when it isn't there yet: `target/` beside
+  `Cargo.toml` (and `Cargo.lock` in the outermost crate), `node_modules/` and `package-lock.json` beside
+  `package.json`, `.gradle/`, `build/` and Maven's `target/` beside `build.gradle` or `pom.xml`. A fresh clone
+  builds as one built before. What's still empty when the command is over is taken away again, so a command
+  that built nothing leaves nothing behind; Claude's result says what was made. Nothing made is, or could
+  hold, a protected name (`gradle/`, which would hold `gradle/wrapper`, never is). Other tools that build
+  beside their manifest — `make` writing objects next to its `Makefile` — still can't there.
 
 ### Reading outside the project
 

@@ -582,6 +582,13 @@ mod tests {
             writeln!(s, "  {n} {}", if by.is_empty() { "-".to_string() } else { by.join(" ") }).unwrap();
         }
 
+        writeln!(s, "\n[made first on Linux: pack — beside — what]").unwrap();
+        for m in crate::packs::made_beside() {
+            let made: Vec<String> =
+                m.folders.iter().map(|f| format!("{f}/")).chain(m.files.clone()).collect();
+            writeln!(s, "  {} — {} — {}", m.pack, m.protect.join(" "), made.join(" ")).unwrap();
+        }
+
         writeln!(s, "\n[test files by name]").unwrap();
         for p in [
             "src/a_test.go",

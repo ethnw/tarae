@@ -11,6 +11,8 @@ protect = [
     "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "gradle.properties",
     "gradlew", "gradle/wrapper", "buildSrc", "pom.xml", "mvnw", ".mvn",
 ]
+# What a first build makes beside those names: Gradle's builds and its project cache, Maven's builds
+first-made = [".gradle/", "build/", "target/"]
 
 # The project is the topmost build file's folder: one jdtls for a multi-module build (parent pom,
 # settings.gradle), not one per module — each is hundreds of MB

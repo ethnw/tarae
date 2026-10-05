@@ -97,7 +97,8 @@ impl Guard {
             None => " \"Operation not permitted\" is likely the sandbox.".into(),
         };
         let mut b = self.watch().map(|w| w.blocked()).unwrap_or_default();
-        for d in p.said_in_output(output, &b.seen) {
+        let said = p.said_in_output(output, &b.seen);
+        for d in p.merge_made(&mut b.seen, said) {
             b.add(d);
         }
         if (self.watch().is_none() || p.files_unwatched()) && b.total == 0 {
@@ -123,9 +124,11 @@ impl Guard {
                 s.push_str(&format!("  … and {} more\n", b.distinct - b.seen.len()));
             }
             match p.denials_from() {
-                Some(from) if b.seen.iter().any(|d| d.process == SEEN_IN_OUTPUT) => {
-                    s.push_str(&format!("(Read {from}, judged by the sandbox's rules.)\n"))
-                }
+                // (Linux: what's said in the output is from its error lines, whatever the rest came from)
+                Some(_) if b.seen.iter().any(|d| d.process == SEEN_IN_OUTPUT) => s.push_str(&format!(
+                    "(Read from its own error lines — {}, judged by the sandbox's rules.)\n",
+                    p.output_read_why()
+                )),
                 None if b.seen.iter().any(|d| d.process == SEEN_IN_OUTPUT) => s.push_str(
                     "(What's said in the output is from its own error lines, judged by the sandbox's rules: the \
                      kernel's report of a denial gets lost now and then.)\n",
@@ -171,11 +174,17 @@ impl Guard {
         let (mut names, mut git, mut crates, mut all) = (Vec::new(), false, false, true);
         let (mut secret, mut services, mut copied) = (Vec::new(), Vec::new(), Vec::new());
         let (mut gradle, mut daemon) = (false, false);
+        let (mut entries, mut signals) = (false, false);
         for d in seen {
+            if d.op.starts_with("file-entry-") {
+                entries = true;
+                continue;
+            }
             let Some(path) = d.file() else {
                 match d.plain().as_str() {
                     "the clipboard" => services.push("the clipboard"),
                     "the keychain" => services.push("the keychain"),
+                    _ if d.op == "signal" => signals = true,
                     // (a JVM refused a port on this machine: Gradle's client and its daemon)
                     w if d.process == "java" && w.starts_with("connecting to port") => {
                         // (Linux: the open network isn't this machine's ports)
@@ -268,6 +277,20 @@ impl Guard {
                  workers over this machine's ports, so a Gradle build can't run while they're closed. Tell the \
                  user: llm.sandbox-localhost (in the project's .tarae.toml) opens them. Their own Gradle \
                  daemons stay out of reach — the registry that names them is kept from your commands.\n",
+            );
+        }
+        if entries {
+            s.push_str(
+                "On Linux a folder that holds a protected name, or one below it, takes no new files and keeps \
+                 the ones it has (Landlock's rules are on what's there; what a build makes there is made \
+                 first). For a file of your own, make it in a folder without one — the run's own folder \
+                 ($TMPDIR) always is; for one the build needs there, tell the user.\n",
+            );
+        }
+        if signals {
+            s.push_str(
+                "A command can't signal a process outside its own (Landlock keeps it in) — tarae's, the \
+                 user's others. If one needs to, say so to the user.\n",
             );
         }
         (s, all)
@@ -740,6 +763,24 @@ impl Denial {
             _ if op.starts_with(LINK_PRIV) => {
                 format!("linking {}", t.rsplit_once(" /").map_or(t.as_str(), |(s, _)| s))
             }
+            // (Linux: Landlock's own rule, and its signal scope — `landlock_said_in`)
+            "file-entry-make" => {
+                format!("making {t} — a folder holding protected names takes no new files on Linux")
+            }
+            "file-entry-remove" => {
+                format!("removing {t} — a folder holding protected names keeps its files on Linux")
+            }
+            "file-entry-move" => {
+                format!("moving {t} — a folder holding protected names keeps its files on Linux")
+            }
+            "file-entry-make-in" => {
+                format!(
+                    "making a new file in {t} — a folder holding protected names takes no new files on Linux"
+                )
+            }
+            "file-make-in" => format!("making a new file in {t}"),
+            "signal" if t.is_empty() => "signalling a process outside the run's own processes".into(),
+            "signal" => format!("signalling process {t} — outside the run's own processes"),
             _ if op.starts_with("file-write") => format!("changing {t}"),
             "network-outbound" if t.starts_with('/') => format!("connecting to socket {t}"),
             "network-outbound" if t.starts_with("remote:") => match self.port_here() {
@@ -1172,6 +1213,43 @@ fn paths_in(line: &str, root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// The relative names a line of output gives files by — quoted (`'src/x'`, `‘x’`, `"x"`), or `sh`'s `cannot
+/// create x:` — as paths from `root` (where the run is, as a rule), folded. No disk.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // (Landlock's — `landlock_said_in`)
+fn named_in(line: &str, root: &Path) -> Vec<PathBuf> {
+    let mut names: Vec<&str> = Vec::new();
+    for (open, close) in [('\'', '\''), ('‘', '’'), ('"', '"')] {
+        let mut rest = line;
+        while let Some(a) = rest.find(open) {
+            let after = &rest[a + open.len_utf8()..];
+            let Some(b) = after.find(close) else { break };
+            names.push(&after[..b]);
+            rest = &after[b + close.len_utf8()..];
+        }
+    }
+    if let Some((name, _)) = line.split_once("cannot create ").and_then(|(_, after)| after.split_once(": ")) {
+        names.push(name);
+    }
+    let relative = |n: &&str| !n.is_empty() && !n.starts_with(['/', '~']) && !n.contains(char::is_whitespace);
+    names
+        .into_iter()
+        .filter(relative)
+        .map(|n| {
+            let mut out = PathBuf::new();
+            for c in root.join(n).components() {
+                match c {
+                    Component::ParentDir => {
+                        out.pop();
+                    }
+                    Component::CurDir => {}
+                    other => out.push(other),
+                }
+            }
+            out
+        })
+        .collect()
+}
+
 /// Lines of output that say a permission was refused — what's left to go by when nothing watched.
 pub fn refused_lines(output: &[(bool, String)]) -> Vec<String> {
     output.iter().filter(|(_, l)| refusal(l)).take(5).map(|(_, l)| l.clone()).collect()
@@ -1515,8 +1593,9 @@ impl Policy {
             };
             let notes = format!(
                 " On Linux a protected name it makes where none is yet isn't refused, and the terminal \
-                 multiplexers' folders in /tmp stay writable.{beyond}{}",
-                linux::notes(c.abi)
+                 multiplexers' folders in /tmp stay writable.{beyond}{}{}",
+                linux::notes(c.abi),
+                linux::made_said(&c.made, &self.root)
             );
             return Some((net, notes));
         }
@@ -1527,9 +1606,22 @@ impl Policy {
     /// only, though its watch hears what the supervisor refused.
     fn files_unwatched(&self) -> bool {
         #[cfg(target_os = "linux")]
-        return matches!(&self.confine, Some(Ok(c)) if !c.audit);
+        return matches!(&self.confine, Some(Ok(c)) if c.audit.is_err());
         #[cfg(not(target_os = "linux"))]
         false
+    }
+
+    /// Linux: why what a run refused was read from its own error lines — why there's no audit log, or that
+    /// the log didn't have it (Landlock's own rule for new entries isn't the policy's; a signal).
+    fn output_read_why(&self) -> String {
+        #[cfg(target_os = "linux")]
+        if let Some(Ok(c)) = &self.confine {
+            return match &c.audit {
+                Ok(()) => "Landlock's audit log didn't have it".into(),
+                Err(why) => why.clone(),
+            };
+        }
+        String::new()
     }
 
     /// Linux: where what a run refused is told from — Landlock's audit log, or the run's own error lines and
@@ -1537,14 +1629,9 @@ impl Policy {
     pub fn denials_from(&self) -> Option<String> {
         #[cfg(target_os = "linux")]
         if let Some(Ok(c)) = &self.confine {
-            return Some(match (c.audit, c.abi) {
-                (true, _) => "from Landlock's audit log".into(),
-                (false, n) if n < 7 => {
-                    format!(
-                        "from its own error lines — this kernel's Landlock (ABI {n}) doesn't log what it refuses"
-                    )
-                }
-                _ => "from its own error lines — tarae can't read the kernel's log here".into(),
+            return Some(match &c.audit {
+                Ok(()) => "from Landlock's audit log".into(),
+                Err(why) => format!("from its own error lines — {why}"),
             });
         }
         None
@@ -1631,9 +1718,89 @@ impl Policy {
                 let target = real.display().to_string();
                 out.push(Denial { process: SEEN_IN_OUTPUT.into(), op: op.into(), target });
             }
+            for d in self.landlock_said_in(l) {
+                if !seen.iter().chain(&out).any(|s| s.op == d.op && s.target == d.target) {
+                    out.push(d);
+                }
+            }
         }
         out.truncate(DENIALS_KEPT);
         out
+    }
+
+    /// `said` (what the output says, `said_in_output`) put with `seen` (the kernel's): Landlock's record of a
+    /// refused new file names only its folder (`file-make-in`) — the file the output names in that folder
+    /// takes its place, the kernel's line kept; without one, the folder is said with Landlock's own rule
+    /// where that's it (a folder holding protected names: `file-entry-make-in`), else as a write there. What
+    /// of `said` is left.
+    pub fn merge_made(&self, seen: &mut [Denial], mut said: Vec<Denial>) -> Vec<Denial> {
+        for d in seen.iter_mut().filter(|d| d.op == "file-make-in") {
+            let folder = PathBuf::from(&d.target);
+            let named = said.iter().position(|s| {
+                ["file-entry-make", "file-write*", EITHER].contains(&s.op.as_str())
+                    && Path::new(&s.target).parent() == Some(folder.as_path())
+            });
+            match named {
+                Some(i) => {
+                    let s = said.remove(i);
+                    (d.op, d.target) = (s.op, s.target);
+                }
+                None if self.closed_holds(&folder) => d.op = "file-entry-make-in".into(),
+                None => d.op = "file-write*".into(),
+            }
+        }
+        said
+    }
+
+    /// Linux: whether `folder` is one of the project's that take no new entry (`linux::Confine::closed`).
+    fn closed_holds(&self, folder: &Path) -> bool {
+        #[cfg(target_os = "linux")]
+        if let Some(Ok(c)) = &self.confine {
+            return c.closed.iter().any(|f| f == folder);
+        }
+        let _ = folder;
+        false
+    }
+
+    /// Linux: what a line of output says Landlock refused though the rules above let it write — making,
+    /// removing or moving an entry of a folder that holds a protected name, or one below it
+    /// (`linux::Confine::closed`; "Permission denied" — by a path, or a name from where the run is, as `sh`
+    /// says it); from ABI 6, a signal to a process outside the run's own ("Operation not permitted" from
+    /// `kill`). None elsewhere.
+    fn landlock_said_in(&self, line: &str) -> Vec<Denial> {
+        #[cfg(target_os = "linux")]
+        if let Some(Ok(c)) = &self.confine {
+            let low = line.to_ascii_lowercase();
+            let mut out: Vec<Denial> = Vec::new();
+            if low.contains("permission denied") {
+                let op = match () {
+                    _ if low.contains("remove") || low.contains("unlink") => "file-entry-remove",
+                    _ if low.contains("move") || low.contains("rename") => "file-entry-move",
+                    _ => "file-entry-make",
+                };
+                for real in paths_in(line, &self.root).into_iter().chain(named_in(line, &self.root)) {
+                    let closed = real.parent().is_some_and(|d| c.closed.iter().any(|f| f == d));
+                    let target = real.display().to_string();
+                    if closed && self.writes_allow(&real) && !out.iter().any(|d| d.target == target) {
+                        out.push(Denial { process: SEEN_IN_OUTPUT.into(), op: op.into(), target });
+                    }
+                }
+            }
+            if c.abi >= 6 && low.contains("kill") && low.contains("not permitted") {
+                let pid = line
+                    .split(['(', ')'])
+                    .nth(1)
+                    .filter(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+                out.push(Denial {
+                    process: SEEN_IN_OUTPUT.into(),
+                    op: "signal".into(),
+                    target: pid.unwrap_or_default().into(),
+                });
+            }
+            return out;
+        }
+        let _ = line;
+        Vec::new()
     }
 
     /// The profile's parameters (name, value).
@@ -1932,10 +2099,12 @@ pub fn policy(root: &Path, llm: &crate::llm::LlmConfig, reads: &[PathBuf]) -> Po
     p
 }
 
-/// Linux: `p` with its Landlock rules made (`linux::confine` — it walks the project for protected names).
+/// Linux: `p` with its Landlock rules made (`linux::confine` — it walks the project for protected names, and
+/// makes first what a build makes beside them: `linux::Made`).
 #[cfg(target_os = "linux")]
 pub fn confined(mut p: Policy) -> Policy {
-    let made = crate::landlock::abi().and_then(|abi| linux::confine(&p, abi, linux::audit_readable(abi)));
+    let made =
+        crate::landlock::abi().and_then(|abi| linux::confine(&p, abi, linux::audit_readable(abi), true));
     p.confine = Some(made.map_err(|e| format!("the sandbox couldn't be made: {e}")));
     p
 }
@@ -2115,7 +2284,7 @@ fn output_in(
     #[cfg(target_os = "linux")]
     let out = {
         let abi = crate::landlock::abi().ok()?;
-        let rules = linux::confine(policy, abi, false).ok()?;
+        let rules = linux::confine(policy, abi, Err("not watched".into()), false).ok()?;
         let mut c = Command::new(program);
         c.args(args).envs(env.iter().copied()).current_dir(&policy.root).env(MARK, "1");
         c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
@@ -2153,7 +2322,7 @@ pub fn watch_for(p: &Policy) -> Option<std::sync::Arc<Watch>> {
     let tag = p.tag.as_ref()?;
     #[cfg(target_os = "linux")]
     return match &p.confine {
-        Some(Ok(c)) if c.audit => Some(Watch::start_audit(tag)),
+        Some(Ok(c)) if c.audit.is_ok() => Some(Watch::start_audit(tag)),
         Some(Ok(c)) if c.serve.is_ok() => Some(Watch::quiet(tag)),
         _ => None,
     };
@@ -2180,7 +2349,19 @@ pub fn spawn(policy: Option<&Policy>, cmd: &Command) -> std::io::Result<crate::s
             }
         };
         let serve = std::sync::Arc::new(p.clone());
-        return linux::confined(c, Some(serve), owner, || crate::spawn::setsid(cmd));
+        let spawned = linux::confined(c, Some(serve), owner, || crate::spawn::setsid(cmd))?;
+        // (what was made first, still empty once the run is gone, goes — the run's own thread reaps it)
+        let (made, pid) = (c.made.clone(), spawned.pid);
+        if !made.paths.is_empty() {
+            std::thread::spawn(move || {
+                // SAFETY: signal 0 only asks whether the process is there.
+                while unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+                    std::thread::sleep(WATCH_LOOKS);
+                }
+                made.tidy();
+            });
+        }
+        return Ok(spawned);
     }
     let _ = policy;
     crate::spawn::setsid(cmd)

@@ -6,6 +6,9 @@
 protect = ["build.rs", "Cargo.toml", ".cargo"]
 # cargo's builds
 outputs = ["target"]
+# What a first build makes beside those names: cargo's builds, and the lock file it writes in place (an empty
+# one it takes)
+first-made = ["target/", "Cargo.lock"]
 # Read by cargo, rustup and their tools as soon as they're on disk: a half-edited one breaks every cargo run
 # (#19 — `~/.cargo/config.toml`), so a save that doesn't parse stays in the buffer
 config-files = { toml = [

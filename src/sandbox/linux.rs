@@ -75,21 +75,29 @@ pub fn availability(abi: io::Result<u32>, seccomp: bool) -> Availability {
 }
 
 /// A policy made into Landlock's rules for this kernel's ABI — applied, with the seccomp filter, by the
-/// thread that starts each run (`spawn`). `audit`: the denials come from Landlock's audit log (ABI 7+, the
-/// kernel's messages readable here — `audit_readable`); else from the run's own error lines. `serve`: what
-/// a run reaches by address is tarae's to decide (`supervisor.rs`) — or why it can't be here, and every
-/// socket but netlink is refused.
+/// thread that starts each run (`spawn`). `audit`: the denials come from Landlock's audit log (`audit_readable`
+/// — seen working here); else why not, and they come from the run's own error lines. `serve`: what a run
+/// reaches by address is tarae's to decide (`supervisor.rs`) — or why it can't be here, and every socket but
+/// netlink is refused. `made`: what was made first, beside protected names, for the run to write in. `closed`:
+/// the project's folders a run can't make, remove or rename an entry in — each holds a protected name, or one
+/// below it (`grant`).
 #[derive(Clone)]
 pub struct Confine {
     pub abi: u32,
-    pub audit: bool,
+    pub audit: Result<(), String>,
     pub serve: Result<(), String>,
+    pub made: Arc<Made>,
+    pub closed: Vec<PathBuf>,
     rules: Arc<Ruleset>,
 }
 
 impl std::fmt::Debug for Confine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Confine(ABI {}, audit {}, serve {:?})", self.abi, self.audit, self.serve)
+        write!(
+            f,
+            "Confine(ABI {}, audit {:?}, serve {:?}, made {:?})",
+            self.abi, self.audit, self.serve, self.made.paths
+        )
     }
 }
 
@@ -98,8 +106,153 @@ impl PartialEq for Confine {
         self.abi == other.abi
             && self.audit == other.audit
             && self.serve == other.serve
+            && self.closed == other.closed
+            && Arc::ptr_eq(&self.made, &other.made)
             && Arc::ptr_eq(&self.rules, &other.rules)
     }
+}
+
+/// What a first build makes beside a protected name, made before a run: a folder holding one is closed to new
+/// entries (`grant`), so a fresh clone's `cargo build` couldn't make `target/` beside `Cargo.toml`, nor Gradle
+/// `build/` beside `build.gradle`. Each pack's `first-made` folders in every folder holding one of its protected
+/// names, its files (written in place: `Cargo.lock`) in the outermost of those only — a workspace's
+/// members get none — each when it isn't there (`to_make`). Empty, made through no link, and taken away again
+/// when the run is over if still empty (`Made::tidy`): a run that built nothing leaves nothing behind.
+pub struct Made {
+    /// What was made — (path, a folder) — in the order made.
+    pub paths: Vec<(PathBuf, bool)>,
+    tidied: std::sync::atomic::AtomicBool,
+}
+
+impl Made {
+    pub fn none() -> Made {
+        Made { paths: Vec::new(), tidied: Default::default() }
+    }
+
+    /// What's still empty of it, taken away — once (a folder something was put in, a file written, stay). On a
+    /// thread of its own: a run's end is said on the main loop.
+    pub fn tidy(self: &Arc<Self>) {
+        if self.paths.is_empty() || self.tidied.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let paths = self.paths.clone();
+        std::thread::spawn(move || tidy(&paths));
+    }
+}
+
+impl Drop for Made {
+    fn drop(&mut self) {
+        if !self.paths.is_empty() && !self.tidied.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            let paths = std::mem::take(&mut self.paths);
+            std::thread::spawn(move || tidy(&paths));
+        }
+    }
+}
+
+/// `paths` (made first) that are still empty, taken away, the last made first — each through its folder,
+/// opened through no link: an empty folder (`rmdir` leaves one that isn't), a file of no bytes. Blocks.
+fn tidy(paths: &[(PathBuf, bool)]) {
+    for (path, folder) in paths.iter().rev() {
+        let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else { continue };
+        let Ok(dir) = landlock::open_unlinked(dir, libc::O_PATH | libc::O_DIRECTORY) else { continue };
+        let Ok(name) = std::ffi::CString::new(name.as_encoded_bytes()) else { continue };
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&dir);
+        // SAFETY: a folder descriptor of ours and a name, live for the calls; a stat buffer the call fills.
+        unsafe {
+            if *folder {
+                libc::unlinkat(fd, name.as_ptr(), libc::AT_REMOVEDIR);
+                continue;
+            }
+            let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+            if libc::fstatat(fd, name.as_ptr(), st.as_mut_ptr(), libc::AT_SYMLINK_NOFOLLOW) == 0 {
+                let st = st.assume_init();
+                if st.st_mode & libc::S_IFMT == libc::S_IFREG && st.st_size == 0 {
+                    libc::unlinkat(fd, name.as_ptr(), 0);
+                }
+            }
+        }
+    }
+}
+
+/// Whether a pack may have `name` made first: one plain name, not a protected one (`protected_at`), nor the
+/// first of a protected name of several (`gradle` would hold `gradle/wrapper` — a protected name made where
+/// none is, which Landlock can't keep).
+pub fn makeable(name: &str) -> bool {
+    let plain =
+        !name.is_empty() && name != "." && name != ".." && !name.contains('/') && !name.contains('\0');
+    plain
+        && super::protected_at(&[std::ffi::OsStr::new(name)]).is_empty()
+        && !super::protected_names()
+            .any(|p| p.split_once('/').is_some_and(|(first, _)| first.eq_ignore_ascii_case(name)))
+}
+
+/// What to make first in the project at `root` whose protected names are `found` (`protected_there`), by
+/// `packs`: (path, a folder) — each pack's `first-made` folders in every folder holding one of its names (a name
+/// of several parts: the folder holding its first), its files in the outermost such folders, those that
+/// aren't there (nor a link) and are `makeable`. Asks the disk only whether each is there.
+pub fn to_make(root: &Path, found: &[PathBuf], packs: &[crate::packs::MadeBeside]) -> Vec<(PathBuf, bool)> {
+    // The folders holding each pack's names: (pack, folder)
+    let mut anchors: Vec<(usize, PathBuf)> = Vec::new();
+    for f in found {
+        let Ok(rel) = f.strip_prefix(root) else { continue };
+        let parts: Vec<&std::ffi::OsStr> = rel.iter().collect();
+        for (i, m) in packs.iter().enumerate() {
+            for name in &m.protect {
+                let want: Vec<&str> = name.split('/').collect();
+                let Some(from) = parts.len().checked_sub(want.len()) else { continue };
+                if parts[from..].iter().zip(&want).all(|(p, n)| p.eq_ignore_ascii_case(n)) {
+                    let at = root.join(parts[..from].iter().collect::<PathBuf>());
+                    if !anchors.contains(&(i, at.clone())) {
+                        anchors.push((i, at));
+                    }
+                }
+            }
+        }
+    }
+    let missing = |p: &Path| p.symlink_metadata().is_err_and(|e| e.kind() == io::ErrorKind::NotFound);
+    let mut out: Vec<(PathBuf, bool)> = Vec::new();
+    for (i, at) in &anchors {
+        let m = &packs[*i];
+        let outermost = !anchors.iter().any(|(j, other)| j == i && other != at && at.starts_with(other));
+        let folders = m.folders.iter().map(|o| (o, true));
+        let files = m.files.iter().filter(|_| outermost).map(|l| (l, false));
+        for (name, folder) in folders.chain(files).filter(|(n, _)| makeable(n)) {
+            let path = at.join(name);
+            if missing(&path) && !out.iter().any(|(p, _)| *p == path) {
+                out.push((path, folder));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// `plan` made: each through its folder opened through no link — `mkdirat`, or a file made empty
+/// (`O_CREAT|O_EXCL|O_NOFOLLOW`: one there now, or a link, is left alone). What was made.
+fn make(plan: Vec<(PathBuf, bool)>) -> Made {
+    let mut paths = Vec::new();
+    for (path, folder) in plan {
+        let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else { continue };
+        let Ok(dir) = landlock::open_unlinked(dir, libc::O_PATH | libc::O_DIRECTORY) else { continue };
+        let Ok(c) = std::ffi::CString::new(name.as_encoded_bytes()) else { continue };
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&dir);
+        // SAFETY: a folder descriptor of ours and a name, live for the calls; a file made is closed at once.
+        let made = unsafe {
+            match folder {
+                true => libc::mkdirat(fd, c.as_ptr(), 0o777) == 0,
+                false => {
+                    let flags =
+                        libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+                    let f = libc::openat(fd, c.as_ptr(), flags, 0o666);
+                    f >= 0 && libc::close(f) == 0
+                }
+            }
+        };
+        if made {
+            paths.push((path, folder));
+        }
+    }
+    Made { paths, tidied: Default::default() }
 }
 
 impl Eq for Confine {}
@@ -148,9 +301,27 @@ pub fn protected_there(root: &Path, extra: &[PathBuf]) -> Vec<PathBuf> {
     out
 }
 
+/// The folders in the project at `root` that `grant` splits around `found` (`protected_there`): each one's
+/// folders up to the root, the root too.
+fn closed_folders(root: &Path, found: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for f in found.iter().filter(|f| f.starts_with(root)) {
+        for dir in f.ancestors().skip(1) {
+            if !dir.starts_with(root) {
+                break;
+            }
+            if !out.iter().any(|o| o == dir) {
+                out.push(dir.to_path_buf());
+            }
+        }
+    }
+    out
+}
+
 /// `p` as Landlock's rules for ABI `abi`. Reads everywhere but home, and in it where `p.reads` says around what
-/// it keeps (none of that when reads aren't confined); writes as `writes_allow` has them; the devices.
-pub fn confine(p: &Policy, abi: u32, audit: bool) -> io::Result<Confine> {
+/// it keeps (none of that when reads aren't confined); writes as `writes_allow` has them; the devices. With
+/// `make_first`, what a first build makes beside a protected name is made before (`Made`) — and so granted.
+pub fn confine(p: &Policy, abi: u32, audit: Result<(), String>, make_first: bool) -> io::Result<Confine> {
     let mut r = Ruleset::new(abi)?;
     let hidden: Vec<PathBuf> = p.reads.copies.hidden.iter().map(|(f, _)| f.clone()).collect();
     match &p.reads.home {
@@ -181,7 +352,12 @@ pub fn confine(p: &Policy, abi: u32, audit: bool) -> io::Result<Confine> {
         None => grant(&mut r, Path::new("/"), READ, &hidden)?,
     }
     let abs: Vec<PathBuf> = p.protect.clone();
-    grant(&mut r, &p.root, landlock::ALL, &protected_there(&p.root, &abs))?;
+    let found = protected_there(&p.root, &abs);
+    let made = match make_first {
+        true => make(to_make(&p.root, &found, &crate::packs::made_beside())),
+        false => Made::none(),
+    };
+    grant(&mut r, &p.root, landlock::ALL, &found)?;
     if let Some(run) = &p.run {
         grant(&mut r, run.path(), landlock::ALL, &[])?;
     }
@@ -199,7 +375,8 @@ pub fn confine(p: &Policy, abi: u32, audit: bool) -> io::Result<Confine> {
         None => Ok(()),
         Some(why) => Err(why),
     };
-    Ok(Confine { abi, audit, serve, rules: Arc::new(r) })
+    let closed = closed_folders(&p.root, &found);
+    Ok(Confine { abi, audit, serve, made: Arc::new(made), closed, rules: Arc::new(r) })
 }
 
 /// `start` (a spawn) on a short-lived thread confined to `c` and under the seccomp filter — what it starts is
@@ -233,6 +410,31 @@ pub fn confined<T: Send>(
     )
 }
 
+/// What the report says of what was made first (`Made`) — nothing when nothing was.
+pub fn made_said(made: &Made, root: &Path) -> String {
+    const SAID: usize = 6;
+    if made.paths.is_empty() {
+        return String::new();
+    }
+    let mut names: Vec<String> = made
+        .paths
+        .iter()
+        .take(SAID)
+        .map(|(p, folder)| {
+            let rel = p.strip_prefix(root).unwrap_or(p).display().to_string();
+            if *folder { format!("{rel}/") } else { rel }
+        })
+        .collect();
+    if made.paths.len() > SAID {
+        names.push(format!("{} more", made.paths.len() - SAID));
+    }
+    format!(
+        " Before it ran, tarae made {} — empty: on Linux a folder holding a protected name takes no new entry, so \
+         a build couldn't make them itself. What's still empty when it's over goes again.",
+        names.join(", ")
+    )
+}
+
 /// What a run of ABI `abi` can't be kept from, for the report: no signal scope below 6.
 pub fn notes(abi: u32) -> String {
     match abi {
@@ -243,28 +445,191 @@ pub fn notes(abi: u32) -> String {
     }
 }
 
-/// Whether Landlock's audit records can be read here: ABI 7+, and `journalctl` shows the kernel's messages
-/// to this user (one line of them; none means only the user's own journal is readable). Blocks (a worker's),
-/// looked once.
-pub fn audit_readable(abi: u32) -> bool {
-    static FOUND: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    abi >= 7
-        && *FOUND.get_or_init(|| {
-            std::process::Command::new("journalctl")
+/// Where Landlock's audit records are read: the journal (the kernel's messages), or auditd's own log when
+/// auditd runs — it takes them, and none reach the journal (the user's GCP VM: `/var/log/audit/audit.log`,
+/// root:adm 0640).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AuditSource {
+    Journal,
+    Auditd(PathBuf),
+}
+
+impl AuditSource {
+    /// The command that prints its records as they come (from its end).
+    pub fn stream(&self) -> std::process::Command {
+        match self {
+            AuditSource::Journal => {
+                let mut c = std::process::Command::new("journalctl");
+                let args = [
+                    "-f",
+                    "-n",
+                    "0",
+                    "-q",
+                    "-o",
+                    "cat",
+                    "--no-pager",
+                    "_TRANSPORT=kernel",
+                    "_TRANSPORT=audit",
+                ];
+                c.args(args);
+                c
+            }
+            AuditSource::Auditd(log) => {
+                let mut c = std::process::Command::new("tail");
+                c.args(["-n", "0", "-F"]).arg(log);
+                c
+            }
+        }
+    }
+}
+
+/// Where the records go here, from whether auditd runs (`auditd`: its log, or why this user can't read it) and
+/// whether the journal shows the kernel's messages to this user — or why there's nowhere to read them.
+fn audit_source(auditd: Option<Result<PathBuf, String>>, journal: bool) -> Result<AuditSource, String> {
+    match auditd {
+        Some(Ok(log)) => Ok(AuditSource::Auditd(log)),
+        Some(Err(why)) => Err(why),
+        None if journal => Ok(AuditSource::Journal),
+        None => Err("tarae can't read the kernel's log here".into()),
+    }
+}
+
+/// Whether auditd runs (a process of that name), and then its log — `log_file` in its settings, else the
+/// default — or why this user can't read it. Blocks (a worker's).
+fn auditd_log() -> Option<Result<PathBuf, String>> {
+    let running = std::fs::read_dir("/proc").ok()?.flatten().any(|e| {
+        let pid = e.file_name();
+        pid.to_string_lossy().bytes().all(|b| b.is_ascii_digit())
+            && std::fs::read_to_string(e.path().join("comm")).is_ok_and(|c| c.trim() == "auditd")
+    });
+    if !running {
+        return None;
+    }
+    let conf = std::fs::read_to_string("/etc/audit/auditd.conf").unwrap_or_default();
+    let set = conf.lines().find_map(|l| {
+        let (k, v) = l.split_once('=')?;
+        (k.trim() == "log_file").then(|| PathBuf::from(v.trim()))
+    });
+    let log = set.unwrap_or_else(|| PathBuf::from("/var/log/audit/audit.log"));
+    Some(match std::fs::File::open(&log) {
+        Ok(_) => Ok(log),
+        Err(_) => Err("audit goes to auditd's log, which this user can't read".into()),
+    })
+}
+
+/// Where this tarae reads Landlock's records (`audit_readable` finds it; the journal until then).
+static AUDIT_SOURCE: std::sync::OnceLock<AuditSource> = std::sync::OnceLock::new();
+
+/// Whether a run's denials come from Landlock's audit records here — Err why not (said with the result): below
+/// ABI 7 none are made; they must be readable where they go (`audit_source`: auditd's log when it runs, else
+/// the journal); and the kernel's audit must be on (`auditd`, or `audit=1` at boot) — off, as on a stock
+/// Ubuntu 24.04, Landlock emits nothing, which no setting says: the result said "blocked nothing" for two real
+/// denials (the user, kernel 7.0). So it's tried for real there (`audit_probe`). Blocks up to `AUDIT_PROBE`
+/// (a worker's), once.
+pub fn audit_readable(abi: u32) -> Result<(), String> {
+    if abi < 7 {
+        return Err(format!("this kernel's Landlock (ABI {abi}) doesn't log what it refuses"));
+    }
+    static FOUND: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+    FOUND
+        .get_or_init(|| {
+            let journal = std::process::Command::new("journalctl")
                 .args(["-k", "-n", "1", "-q", "-o", "cat", "--no-pager"])
                 .stdin(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .output()
-                .is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
+                .is_ok_and(|o| o.status.success() && !o.stdout.is_empty());
+            let source = audit_source(auditd_log(), journal)?;
+            let found = audit_probe(abi, |_, _| source.stream(), AUDIT_PROBE);
+            let _ = AUDIT_SOURCE.set(source);
+            found
         })
+        .clone()
 }
 
-/// The command a watch reads Landlock's audit records from: the kernel's messages and the audit ones, as
-/// they come.
+/// How long `audit_probe` waits for its record.
+const AUDIT_PROBE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// A denial of a throwaway thread's own — confined to nothing, it tries to make a file in a temp folder of the
+/// probe's, again every 100 ms — and its record looked for in `stream` (made with that thread's id and that
+/// folder: a refused new file's record names its folder, measured) for up to `wait`. Ok: it came, and `Audit`
+/// tells it as that thread's run's; Err why not.
+fn audit_probe(
+    abi: u32,
+    stream: impl FnOnce(u32, &Path) -> std::process::Command,
+    wait: std::time::Duration,
+) -> Result<(), String> {
+    use std::sync::mpsc::{RecvTimeoutError, channel};
+    static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let folder = std::env::temp_dir().join(format!("tarae-audit-probe-{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&folder).map_err(|e| format!("{}: {e}", folder.display()))?;
+    let name = folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    // The thread that's denied: confined to nothing (it ends with the probe)
+    let ((tid_tx, tid_rx), (stop, stopped)) = (channel(), channel::<()>());
+    let tried = folder.join("x");
+    std::thread::spawn(move || {
+        if Ruleset::new(abi).and_then(|r| r.apply()).is_err() {
+            return;
+        }
+        // SAFETY: gettid has no preconditions.
+        let _ = tid_tx.send(unsafe { libc::gettid() } as u32);
+        loop {
+            let _ = std::fs::OpenOptions::new().write(true).create_new(true).open(&tried);
+            if stopped.recv_timeout(std::time::Duration::from_millis(100)) != Err(RecvTimeoutError::Timeout) {
+                return;
+            }
+        }
+    });
+    let tid =
+        tid_rx.recv_timeout(std::time::Duration::from_secs(1)).map_err(|_| "Landlock confined no thread")?;
+    let mut cmd = stream(tid, &folder);
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let mut child = cmd.spawn().map_err(|e| format!("tarae can't read the kernel's log here ({e})"))?;
+    let (lines_tx, lines) = channel::<String>();
+    let out = child.stdout.take();
+    std::thread::spawn(move || {
+        let Some(out) = out else { return };
+        for l in io::BufRead::lines(io::BufReader::new(out)).map_while(Result::ok) {
+            if lines_tx.send(l).is_err() {
+                return;
+            }
+        }
+    });
+    let (mut audit, mut seen, mut told) = (Audit { owner: Some(tid), ..Default::default() }, false, false);
+    let end = std::time::Instant::now() + wait;
+    while !told {
+        let Ok(line) = lines.recv_timeout(end.saturating_duration_since(std::time::Instant::now())) else {
+            break;
+        };
+        // (the folder — as a refused new file's record names it — or the file in it)
+        let ours = |path: &str| {
+            let p = Path::new(path);
+            p.ends_with(&name) || p.parent().is_some_and(|d| d.ends_with(&name))
+        };
+        seen |=
+            audit_value(&line, "blockers").is_some() && audit_value(&line, "path").is_some_and(|p| ours(&p));
+        told = audit.line(&line).iter().any(|d| ours(&d.target));
+    }
+    let _ = stop.send(());
+    let _ = child.kill();
+    std::thread::spawn(move || child.wait());
+    let _ = std::fs::remove_dir_all(&folder);
+    match (told, seen) {
+        (true, _) => Ok(()),
+        (false, true) => {
+            Err("Landlock's audit records here don't name the thread that confined a run".into())
+        }
+        (false, false) => Err("kernel audit is off (no auditd or audit=1)".into()),
+    }
+}
+
+/// The command a watch reads Landlock's audit records from, as they come: where `audit_readable` found them
+/// (auditd's log, or the journal).
 pub fn audit_stream() -> std::process::Command {
-    let mut c = std::process::Command::new("journalctl");
-    c.args(["-f", "-n", "0", "-q", "-o", "cat", "--no-pager", "_TRANSPORT=kernel", "_TRANSPORT=audit"]);
-    c
+    AUDIT_SOURCE.get().unwrap_or(&AuditSource::Journal).stream()
 }
 
 /// A value in an audit record's `key=value` words: quoted, or hex (how audit writes a string with spaces).
@@ -341,6 +706,10 @@ fn audit_op(blockers: &str) -> &'static str {
     let any = |names: &[&str]| blockers.split(',').any(|b| names.contains(&b));
     if any(&["fs.read_file", "fs.read_dir", "fs.execute"]) && !blockers.contains("fs.write") {
         return "file-read-data";
+    }
+    // (a new file, folder or link refused: the record names the folder it was refused in — `merge_made`)
+    if blockers.split(',').all(|b| b.starts_with("fs.make_")) {
+        return "file-make-in";
     }
     if blockers.starts_with("fs.") {
         return "file-write*";
@@ -552,6 +921,155 @@ mod tests {
         std::fs::write(s.base.join("outside"), "x").expect("the thread that started it writes anywhere");
     }
 
+    /// What a first build makes beside a protected name, by the built-in packs: their folders in every folder
+    /// holding one of their names — a name of several parts (`gradle/wrapper`) counting for the folder holding
+    /// its first — their files in the outermost only (a workspace member gets none); nothing beside a
+    /// core name (`.envrc`), nothing that's there, nor where a link is. (A tree in the test's own folder.)
+    #[test]
+    fn what_a_first_build_makes_is_made_first_where_it_goes() {
+        let dir = std::env::temp_dir().join(format!("tarae-made-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for f in [
+            "Cargo.toml",
+            ".git/HEAD",
+            "sub/Cargo.toml",
+            "sub/build.rs",
+            "web/package.json",
+            "app/build.gradle",
+            "settings.gradle",
+            "gradle/wrapper/gradle-wrapper.properties",
+            "docs/.envrc",
+            "done/Cargo.toml",
+            "done/target/x",
+            "link/Cargo.toml",
+        ] {
+            std::fs::create_dir_all(dir.join(f).parent().unwrap()).unwrap();
+            std::fs::write(dir.join(f), "").unwrap();
+        }
+        std::os::unix::fs::symlink(dir.join("docs"), dir.join("link/target")).unwrap();
+        let root = std::fs::canonicalize(&dir).unwrap();
+        let found = protected_there(&root, &[]);
+        let mut plan: Vec<(String, bool)> = to_make(&root, &found, &crate::packs::made_beside())
+            .into_iter()
+            .map(|(p, folder)| (p.strip_prefix(&root).unwrap().display().to_string(), folder))
+            .collect();
+        plan.sort();
+        let want: Vec<(String, bool)> = [
+            (".gradle", true),
+            ("Cargo.lock", false),
+            ("app/.gradle", true),
+            ("app/build", true),
+            ("app/target", true),
+            ("build", true),
+            ("sub/target", true),
+            ("target", true),
+            ("web/node_modules", true),
+            ("web/package-lock.json", false),
+        ]
+        .iter()
+        .map(|(p, f)| (p.to_string(), *f))
+        .collect();
+        assert_eq!(plan, want);
+        // Made: through no link, each once; the next plan has nothing left
+        let made = make(to_make(&root, &found, &crate::packs::made_beside()));
+        assert_eq!(made.paths.len(), want.len());
+        assert!(root.join("target").is_dir() && root.join("Cargo.lock").metadata().unwrap().len() == 0);
+        assert!(to_make(&root, &found, &crate::packs::made_beside()).is_empty(), "all there now");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Nothing made first is, or can hold, a protected name: the built-in packs' `first-made` names are
+    /// each one plain name, none a protected one in any case, nor the first of one of several.
+    #[test]
+    fn nothing_made_first_is_a_protected_name() {
+        let packs = crate::packs::made_beside();
+        let names: Vec<&String> = packs.iter().flat_map(|m| m.folders.iter().chain(&m.files)).collect();
+        for want in ["target", "Cargo.lock", "node_modules", "package-lock.json", ".gradle", "build"] {
+            assert!(names.iter().any(|n| *n == want), "{want}: {names:?}");
+        }
+        for n in &names {
+            assert!(makeable(n), "{n}");
+        }
+        for bad in
+            ["build.rs", "CARGO.TOML", ".cargo", ".git", ".envrc", "gradle", "Gradle", "a/b", "..", ".", ""]
+        {
+            assert!(!makeable(bad), "{bad}");
+        }
+        // (a pack listing one: left out of the plan)
+        let root = std::env::temp_dir().join(format!("tarae-made-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "").unwrap();
+        let bad = crate::packs::MadeBeside {
+            pack: "bad".into(),
+            protect: vec!["Cargo.toml".into()],
+            folders: vec![".cargo".into(), "gradle".into(), "out".into()],
+            files: vec!["build.rs".into()],
+        };
+        let plan = to_make(&root, &[root.join("Cargo.toml")], &[bad]);
+        assert_eq!(plan, [(root.join("out"), true)]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// For real, a fresh clone: its first builds write what they make beside their manifests — made first,
+    /// empty — and nothing else new there (a protected name least of all). When the run is over, what it
+    /// left empty goes; what it wrote stays.
+    #[test]
+    fn a_fresh_clones_first_build_works() {
+        let Some(_) = kernel_abi("a_fresh_clones_first_build_works") else { return };
+        let s = Scratch::new("fresh");
+        for f in ["proj/web/package.json", "proj/app/build.gradle"] {
+            std::fs::create_dir_all(s.base.join(f).parent().unwrap()).unwrap();
+            std::fs::write(s.base.join(f), "x").unwrap();
+        }
+        let p = s.policy();
+        let r = &s.root;
+        assert!(
+            r.join("target").is_dir() && r.join("sub/target").is_dir() && !r.join("sub/Cargo.lock").exists()
+        );
+        let script = r#"
+            m() { if mkdir -p "$2" 2>/dev/null; then echo "$1 ok"; else echo "$1 no"; fi; }
+            w() { if ( echo x > "$2" ) 2>/dev/null; then echo "$1 ok"; else echo "$1 no"; fi; }
+            m target "$R/target/debug/deps"; w lock "$R/Cargo.lock"; m npm "$R/web/node_modules/p"
+            w npm-lock "$R/web/package-lock.json"; m gradle "$R/app/build/classes"
+            m cargo-config "$R/.cargo"; w build-rs "$R/build.rs"; m wrapper "$R/gradle/wrapper"; w other "$R/web/x.json"
+        "#;
+        let mut cmd = crate::sandbox::command(Some(&p), "sh", &["-c".into(), script.into()]);
+        cmd.env("R", r);
+        let spawned = crate::sandbox::spawn(Some(&p), &cmd).unwrap();
+        let mut out = String::new();
+        io::Read::read_to_string(&mut spawned.stdout.unwrap(), &mut out).unwrap();
+        crate::spawn::wait(spawned.pid).unwrap();
+        let got: Vec<&str> = out.lines().collect();
+        let want = [
+            "target ok",
+            "lock ok",
+            "npm ok",
+            "npm-lock ok",
+            "gradle ok",
+            "cargo-config no",
+            "build-rs no",
+            "wrapper no",
+            "other no",
+        ];
+        assert_eq!(got, want);
+        // (the run is gone: what it left empty goes, on a thread of its own)
+        let left_empty = ["sub/target", "app/.gradle", "app/target"];
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while left_empty.iter().any(|e| r.join(e).exists()) && std::time::Instant::now() < end {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        for e in left_empty {
+            assert!(!r.join(e).exists(), "{e} left empty: gone");
+        }
+        for kept in
+            ["target/debug", "Cargo.lock", "web/node_modules/p", "web/package-lock.json", "app/build/classes"]
+        {
+            assert!(r.join(kept).exists(), "{kept} written: kept");
+        }
+        drop(p);
+    }
+
     /// What Claude reads of a Linux run: the network as macOS says it where tarae serves it (nothing beyond
     /// this machine, `llm.sandbox-network` or not), else no socket at all and why; the protected names where
     /// they are, what Landlock can't keep, and where what it refused is read from — this kernel's ABI said.
@@ -588,6 +1106,10 @@ mod tests {
             }
         }
         assert!(r.contains("where they are now"), "{r}");
+        assert!(
+            r.contains("Before it ran, tarae made Cargo.lock, ") && r.contains(" target/"),
+            "made first: {r}"
+        );
         assert!(r.contains("a protected name it makes where none is yet isn't refused"), "{r}");
         assert_eq!(r.contains("can't keep a command's signals"), abi < 6, "{r}");
         if abi < 7 {
@@ -596,6 +1118,91 @@ mod tests {
                 "{r}"
             );
         }
+    }
+
+    /// Whether Landlock's records come is tried for real: a denial of a thread's own, its record looked for. A
+    /// stand-in for `journalctl`: silent (the kernel's audit off — a stock Ubuntu's) is said so, within the
+    /// wait; the probe's own record, its domain naming the thread that confined it, is the log working; one
+    /// whose domain names another (the record's `pid=` not the confining thread's) can't be told as a run's.
+    #[test]
+    fn the_audit_log_is_tried_for_real() {
+        let Some(abi) = kernel_abi("the_audit_log_is_tried_for_real") else { return };
+        let sh = |script: String| {
+            let mut c = std::process::Command::new("sh");
+            c.arg("-c").arg(script);
+            c
+        };
+        // (auditd's form, as its log has them: the new file refused named by its folder, `UID=` glued on)
+        let records = |pid: String, path: &Path| {
+            format!(
+                "echo 'type=UNKNOWN[1424] msg=audit(1:2): domain=7a status=allocated mode=enforcing pid={pid} \
+                 uid=1001 exe=\"/t/tarae\" comm=\"tarae-landlock\"UID=\"wq\"'; \
+                 echo 'type=UNKNOWN[1423] msg=audit(1:2): domain=7a blockers=fs.make_reg path=\"{}\" dev=\"sda1\" \
+                 ino=1'; exec sleep 5",
+                path.display()
+            )
+        };
+        let wait = std::time::Duration::from_millis(500);
+        let t = std::time::Instant::now();
+        let off = audit_probe(abi, |_, _| sh("exec sleep 5".into()), wait);
+        assert_eq!(off, Err("kernel audit is off (no auditd or audit=1)".into()));
+        assert!(t.elapsed() < std::time::Duration::from_secs(2), "{:?}: within its wait", t.elapsed());
+        assert_eq!(audit_probe(abi, |tid, path| sh(records(tid.to_string(), path)), wait), Ok(()));
+        let other = audit_probe(abi, |_, path| sh(records("1".into(), path)), wait);
+        assert!(other.as_ref().is_err_and(|w| w.contains("don't name the thread")), "{other:?}");
+    }
+
+    /// What a Linux run's output says the sandbox refused, though the policy lets it write there: making,
+    /// removing or moving an entry of a folder holding a protected name (Landlock's own rule — by a path, or a
+    /// name from where the run is, as `sh` says it), and from ABI 6 a signal to a process outside the run's
+    /// own (Landlock's scope). In plain words, and in the report — not "blocked nothing" — said as read from
+    /// the output even where the audit log works (it didn't have them).
+    #[test]
+    fn what_a_linux_runs_output_says_was_refused() {
+        let Some(_) = kernel_abi("what_a_linux_runs_output_says_was_refused") else { return };
+        let s = Scratch::new("said");
+        let mut p = s.policy();
+        if let Some(Ok(c)) = &mut p.confine {
+            (c.abi, c.audit) = (6, Ok(()));
+        }
+        p.watch = Some(crate::sandbox::Watch::quiet("t."));
+        let lib = s.root.join("sub/lib.rs");
+        let out = [
+            (true, "sh: 1: cannot create Cargo.toml.bak: Permission denied".to_string()),
+            (true, format!("rm: cannot remove '{}': Permission denied", lib.display())),
+            (true, "bash: kill: (4242) - Operation not permitted".to_string()),
+            (true, "rm: cannot remove 'src/old.rs': No such file or directory".to_string()),
+        ];
+        let plain = |p: &Policy| p.said_in_output(&out, &[]).iter().map(Denial::plain).collect::<Vec<_>>();
+        let said = plain(&p);
+        assert_eq!(
+            said,
+            [
+                format!(
+                    "making {} — a folder holding protected names takes no new files on Linux",
+                    s.root.join("Cargo.toml.bak").display()
+                ),
+                format!(
+                    "removing {} — a folder holding protected names keeps its files on Linux",
+                    lib.display()
+                ),
+                "signalling process 4242 — outside the run's own processes".to_string(),
+            ]
+        );
+        let r = Guard::In(Box::new(p.clone())).report(&out);
+        let r = r.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(r.contains("The sandbox blocked 3 things"), "{r}");
+        assert!(
+            r.contains("(Read from its own error lines") && !r.contains("from Landlock's audit log,"),
+            "{r}"
+        );
+        assert!(r.contains("make it in a folder without one") && r.contains("can't signal"), "{r}");
+        assert!(!r.contains("open it from the run's panel"), "nothing to open for these: {r}");
+        // Below ABI 6 a refused signal isn't the sandbox's
+        if let Some(Ok(c)) = &mut p.confine {
+            c.abi = 5;
+        }
+        assert_eq!(plain(&p).len(), 2);
     }
 
     /// Without an audit log, what a run refused is read from its error lines: Landlock's "Permission
@@ -652,6 +1259,81 @@ mod tests {
         assert!(a.line("audit: type=1400 apparmor=\"DENIED\"").is_empty());
     }
 
+    /// auditd's records, verbatim from its log on a kernel 7.0 (the user's VM): its enrichment glued on
+    /// (`comm="…"UID="wq"`, no space) changes nothing; a refused new file names its folder (`file-make-in`),
+    /// whichever record comes first. Where they're read: auditd's log when it runs (why not, when this user
+    /// can't read it), else the journal — followed from its end.
+    #[test]
+    fn auditds_records_are_read_where_they_go() {
+        let domain = r#"type=UNKNOWN[1424] msg=audit(1791187720.409:280): domain=107163519 status=allocated mode=enforcing pid=127026 uid=1001 exe="/home/wq/tarae/target-ll/release/tarae" comm="tarae-landlock"UID="wq""#;
+        let access = r#"type=UNKNOWN[1423] msg=audit(1791187720.409:280): domain=107163519 blockers=fs.make_reg path="/home/wq/proj" dev="sda1" ino=264783"#;
+        let made =
+            Denial { process: "the run".into(), op: "file-make-in".into(), target: "/home/wq/proj".into() };
+        let mut a = Audit { owner: Some(127026), ..Default::default() };
+        assert!(a.line(domain).is_empty());
+        assert_eq!(a.line(access), std::slice::from_ref(&made));
+        let mut a = Audit { owner: Some(127026), ..Default::default() };
+        assert!(a.line(access).is_empty(), "waits for its domain");
+        assert_eq!(a.line(domain), [made]);
+        let log = PathBuf::from("/var/log/audit/audit.log");
+        let unreadable = "audit goes to auditd's log, which this user can't read".to_string();
+        assert_eq!(audit_source(Some(Ok(log.clone())), true), Ok(AuditSource::Auditd(log.clone())));
+        assert_eq!(audit_source(Some(Err(unreadable.clone())), true), Err(unreadable));
+        assert_eq!(audit_source(None, true), Ok(AuditSource::Journal));
+        assert!(audit_source(None, false).is_err_and(|w| w.contains("can't read the kernel's log")));
+        let tail = AuditSource::Auditd(log).stream();
+        let args: Vec<_> = tail.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(
+            (tail.get_program().to_string_lossy(), args.join(" ")),
+            ("tail".into(), "-n 0 -F /var/log/audit/audit.log".into())
+        );
+    }
+
+    /// A refused new file's record names only its folder: the file the output names there takes its place
+    /// (one line, the kernel's); without one the folder is said — the rule said too where it's Landlock's own
+    /// (a folder holding protected names), else as a write there (what `space m s` can open).
+    #[test]
+    fn a_new_files_record_takes_the_files_name_from_the_output() {
+        let Some(_) = kernel_abi("a_new_files_record_takes_the_files_name_from_the_output") else { return };
+        let s = Scratch::new("made-in");
+        let p = s.policy();
+        let in_root = Denial {
+            process: "the run".into(),
+            op: "file-make-in".into(),
+            target: s.root.display().to_string(),
+        };
+        let mut seen = vec![in_root.clone()];
+        let out = [(true, "sh: 1: cannot create Cargo.toml.bak: Permission denied".to_string())];
+        let said = p.said_in_output(&out, &seen);
+        let rest = p.merge_made(&mut seen, said);
+        assert!(rest.is_empty(), "{rest:?}");
+        let bak = s.root.join("Cargo.toml.bak").display().to_string();
+        assert_eq!(
+            seen[0].plain(),
+            format!("making {bak} — a folder holding protected names takes no new files on Linux")
+        );
+        assert_eq!(seen[0].process, "the run");
+        let mut alone = vec![in_root];
+        assert!(p.merge_made(&mut alone, Vec::new()).is_empty());
+        let root = s.root.display();
+        assert_eq!(
+            alone[0].plain(),
+            format!(
+                "making a new file in {root} — a folder holding protected names takes no new files on Linux"
+            )
+        );
+        let mut outside = vec![Denial {
+            process: "the run".into(),
+            op: "file-make-in".into(),
+            target: s.base.display().to_string(),
+        }];
+        p.merge_made(&mut outside, Vec::new());
+        assert_eq!(
+            (outside[0].op.as_str(), outside[0].plain()),
+            ("file-write*", format!("writing {}", s.base.display()))
+        );
+    }
+
     /// A watch reads its run's records as they come (a stand-in for `journalctl`: a script that prints the
     /// kernel's lines once the run's thread is told), and stops with it.
     #[test]
@@ -664,7 +1346,7 @@ mod tests {
         stream.arg("-c").arg(format!(
             "until [ -e '{}' ]; do sleep 0.01; done; \
              echo 'audit: type=1424 audit(1:2): domain=9f status=allocated mode=enforcing pid=4242 uid=1'; \
-             echo 'audit: type=1423 audit(1:2): domain=9f blockers=fs.make_reg path=\"/w/p/build.rs\" ino=1'; \
+             echo 'audit: type=1423 audit(1:2): domain=9f blockers=fs.write_file path=\"/w/p/build.rs\" ino=1'; \
              exec sleep 30",
             go.display()
         ));

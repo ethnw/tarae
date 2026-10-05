@@ -39,8 +39,8 @@
 //!
 //! `[tasks]`: see `tasks`. `[install.<tool>]`: see `Install`. `[server.<name>]`: see `LeaveOut`.
 //! `[[waits]]`: see `waits`. `[language.<name>]`, `[grammar.<name>]`, `[server.<name>]`'s `command` and `args`,
-//! `config-files`, `outputs`: the language table, `languages.rs`. How a runtime folder's pack counts for each
-//! key: `Reach`.
+//! `config-files`, `outputs`: the language table, `languages.rs`. `first-made`: what a Linux run gets made
+//! first (`made_beside`, `sandbox/linux.rs`). How a runtime folder's pack counts for each key: `Reach`.
 //!
 //! Packs are read when a test or the tasks are looked for (the built-in ones parsed once, a runtime folder's
 //! read each time), so an edited pack counts at once — but for the language table, read once at the start.
@@ -230,6 +230,9 @@ pub(crate) const KEYS: &[(&str, Reach)] = &[
     // Tools' output folders: skipped by walks — the token scan's among them, so one of one's own would hide
     // a token from it
     ("outputs", Reach::BuiltIn),
+    // What a first build makes beside the pack's protected names (`target/`, `Cargo.lock`): on Linux made,
+    // empty, before a run, where a run can't make a new entry (`sandbox/linux.rs`) — it widens what a run makes
+    ("first-made", Reach::BuiltIn),
     // (narrows: becomes `Added` with `sandbox::protected_names`)
     ("protect", Reach::BuiltIn),
 ];
@@ -487,6 +490,45 @@ pub fn protect() -> Vec<String> {
         }
     }
     out
+}
+
+/// What one built-in pack says a project's first build makes beside its protected names (`protect`) — its
+/// `first-made`: folders (`target/`, written with a `/`) and files written in place (`Cargo.lock`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MadeBeside {
+    pub pack: String,
+    pub protect: Vec<String>,
+    pub folders: Vec<String>,
+    pub files: Vec<String>,
+}
+
+/// Every built-in pack's `MadeBeside` that makes something — from the binary only: a runtime folder's pack
+/// can't add one (`Reach::BuiltIn`). A pack that doesn't read is logged and left out.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // (Landlock's — `sandbox/linux.rs`)
+pub fn made_beside() -> Vec<MadeBeside> {
+    let mut out = Vec::new();
+    for (pack, text) in crate::runtime::pack_manifests_builtin() {
+        match made_beside_of(pack, text) {
+            Ok(m) if !m.protect.is_empty() && !(m.folders.is_empty() && m.files.is_empty()) => out.push(m),
+            Ok(_) => {}
+            Err(e) => crate::log::line("tarae", "warning", &format!("the {pack} pack: {e}")),
+        }
+    }
+    out
+}
+
+/// One pack's `MadeBeside`, from its `pack.toml`'s text.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // (Landlock's — `sandbox/linux.rs`)
+pub(crate) fn made_beside_of(pack: &str, text: &str) -> Result<MadeBeside, String> {
+    let t = text.parse::<Table>().map_err(|e| e.message().to_string())?;
+    let mut m = MadeBeside { pack: pack.to_string(), protect: protect_of(text)?, ..Default::default() };
+    for name in strings(t.get("first-made"), "first-made")?.unwrap_or_default() {
+        match name.strip_suffix('/') {
+            Some(folder) => m.folders.push(folder.to_string()),
+            None => m.files.push(name),
+        }
+    }
+    Ok(m)
 }
 
 /// One pack's `protect` names (none: no `protect`).
@@ -1920,8 +1962,22 @@ mod tests {
         assert!(read_pack("x", "[tset]\n", "yours").unwrap_err().contains("has no `tset`"));
         assert!(read_pack("x", "whatever = 1\n", "built in").unwrap_err().contains("built in"));
         assert_eq!(reach("outputs"), Some(Reach::BuiltIn));
+        assert_eq!(reach("first-made"), Some(Reach::BuiltIn));
         assert_eq!(reach("config-files"), Some(Reach::Added));
         assert_eq!(reach("language"), Some(Reach::Yours));
+    }
+
+    /// `first-made`: a name ending in `/` is a folder, the others files — read from the built-in packs only (a
+    /// runtime folder's widens what a run makes: left out, as `outputs`).
+    #[test]
+    fn first_made_is_folders_and_files_from_the_built_in_packs() {
+        let m = made_beside_of("x", "protect = [\"M.toml\"]\nfirst-made = [\"out/\", \"M.lock\"]\n").unwrap();
+        assert_eq!((m.folders, m.files), (vec!["out".to_string()], vec!["M.lock".to_string()]));
+        let rust = made_beside().into_iter().find(|m| m.pack == "rust").expect("the rust pack makes some");
+        assert_eq!((rust.folders, rust.files), (vec!["target".to_string()], vec!["Cargo.lock".to_string()]));
+        let mut b: Table = "protect = [\"M.toml\"]\nfirst-made = [\"out/\"]\n".parse().unwrap();
+        over(&mut b, "first-made = [\"src/\", \"x\"]\n".parse().unwrap());
+        assert_eq!(b["first-made"].as_array().unwrap().len(), 1, "a pack of yours adds none: {b:?}");
     }
 
     /// A runtime folder's pack over a built-in one, key by key as each one's reach says: whole tables

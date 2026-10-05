@@ -211,7 +211,16 @@ project, whatever its languages, and a pack of your own can't take one out (`llm
 # runtime/packs/rust/pack.toml
 protect = ["build.rs", "Cargo.toml", ".cargo"]   # names, anywhere in the project, in any case;
                                                  # "gradle/wrapper": those names in a row
+outputs = ["target"]                             # tools' output folders: the file walks skip them
+first-made = ["target/", "Cargo.lock"]           # what a first build makes beside those names
 ```
+
+On Linux a folder holding a protected name takes no new entry from Claude's commands, so a fresh clone's first
+build couldn't make `target/` beside `Cargo.toml`: before a command runs, tarae makes the pack's `first-made`,
+empty — a folder (written with a `/`) in every folder holding one of its names, a file (written in place, as
+`Cargo.lock` is) in the outermost — then takes away what's still empty when the command is over. A name that
+is, or would hold, a protected one is never made. That's all `first-made` does: the walks go by `outputs` alone
+(Java's `build/` is made first, but a repository whose `build/` holds sources is still searched).
 
 A run can wait on something that isn't its own work — another cargo holding the build directory. `[[waits]]` names
 the lines that say so: such a line is the run's state, not output (the task or test panel shows `waiting for cargo's
@@ -236,7 +245,7 @@ Each top-level key of a `pack.toml` says how a pack of your own counts for it:
 | `[install.<tool>]`, `[grammar.<name>]` | replaces that entry; the others stay |
 | `[language.<name>]`, `[server.<name>]` | replaces the keys it sets; the entry's other keys stay — in whichever folder the language is |
 | `config-files` | adds to the built-in list; nothing can be taken out |
-| `outputs`, `protect` | ignored, and said at the start: tarae reads them from its own packs only (they decide what Claude's runs may reach) |
+| `outputs`, `first-made`, `protect` | ignored, and said at the start: tarae reads them from its own packs only (they decide what Claude's runs may reach or make) |
 
 A key no pack knows is a mistake in that pack, said with its name as one that doesn't parse is. Your
 `[language]`, `[grammar]` and `[server]` are read once, when tarae starts — after editing them, `:restart`.

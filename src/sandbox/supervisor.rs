@@ -1330,11 +1330,7 @@ mod tests {
             std::fs::create_dir_all(s.root.join(f).parent().unwrap()).unwrap();
             std::fs::write(s.root.join(f), text).unwrap();
         }
-        // (Gradle's output folders made first: the project's folder holds protected names, so a run can't make
-        // a new entry in it on Linux — what the pack's `outputs` will make before a run, the plan's step 5)
-        for out in [".gradle", "build"] {
-            std::fs::create_dir_all(s.root.join(out)).unwrap();
-        }
+        // (a fresh clone: no `.gradle/` nor `build/` — the policy makes them first, from the Java pack's outputs)
         let build = |localhost: bool| {
             let llm = crate::llm::LlmConfig { sandbox_localhost: localhost, ..Default::default() };
             let mut p = super::super::policy(&s.root, &llm, &[]);

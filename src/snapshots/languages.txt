@@ -480,6 +480,11 @@
   dist -
   src -
 
+[made first on Linux: pack — beside — what]
+  java — build.gradle build.gradle.kts settings.gradle settings.gradle.kts gradle.properties gradlew gradle/wrapper buildSrc pom.xml mvnw .mvn — .gradle/ build/ target/
+  javascript — package.json — node_modules/ package-lock.json
+  rust — build.rs Cargo.toml .cargo — target/ Cargo.lock
+
 [test files by name]
   src/a_test.go test
   src/a.go -

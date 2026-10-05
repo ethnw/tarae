@@ -5,6 +5,9 @@
 protect = ["package.json"]
 # What npm installs
 outputs = ["node_modules"]
+# What a first `npm install` makes beside package.json: its packages, and the lock file it writes in place (an
+# empty one it takes)
+first-made = ["node_modules/", "package-lock.json"]
 # Read by npm as soon as it's on disk
 config-files = { json = ["package.json"] }
 

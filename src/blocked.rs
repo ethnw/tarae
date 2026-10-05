@@ -119,7 +119,8 @@ impl Editor {
             let mut seen = g.watch().map(|w| w.blocked().seen).unwrap_or_default();
             if let crate::sandbox::Guard::In(p) = g {
                 let said = p.said_in_output(output, &seen);
-                seen.extend(said);
+                let rest = p.merge_made(&mut seen, said);
+                seen.extend(rest);
             }
             (!seen.is_empty()).then_some(seen)
         };
