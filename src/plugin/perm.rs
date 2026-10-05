@@ -3,7 +3,8 @@
 //!
 //! - **Approval**: a plugin that asks for any is held until you approve the whole list: a card shows it when
 //!   the plugin loads (once until quit), and what you approved is kept (`plugin-permissions.json` in the
-//!   state folder). If a new version asks for something else, it's asked again.
+//!   state folder). If a new version asks for something else, it's asked again. What it asks for while the card
+//!   is up waits on the answer (`plugin_hold`): done on yes, refused on not now.
 //! - **At the moment of use**: a connection to a host:port it hasn't used before is asked about, once; so is
 //!   a file outside its read patterns (a kubeconfig `KUBECONFIG` points elsewhere) — when it asked for some
 //!   reading at all. The answers are kept with the approval.
@@ -16,10 +17,13 @@ use std::path::{Component, Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use super::abi::{Connect, HostEvent, Permission};
+use super::abi::{Action, Connect, HostEvent, Permission};
 use super::shown;
 use crate::editor::Editor;
 use crate::offer::{Offer, What};
+
+/// The most requests held for one plugin while its approval card is up (more are refused at once).
+const HELD_MAX: usize = 256;
 
 /// What a plugin asks to do right now.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,6 +32,25 @@ pub enum Ask {
     Connect(Connect),
     /// Read a file outside its patterns: (request id, the path resolved).
     Read(u64, PathBuf),
+}
+
+impl Ask {
+    /// The request waiting on the answer.
+    fn id(&self) -> u64 {
+        match self {
+            Ask::Connect(c) => c.id,
+            Ask::Read(id, _) => *id,
+        }
+    }
+
+    /// What's asked — (a host?, the host:port or the file): another connection to that host, or that file
+    /// read again, is the same question.
+    fn subject(&self) -> (bool, String) {
+        match self {
+            Ask::Connect(c) => (true, target(c)),
+            Ask::Read(_, path) => (false, path.display().to_string()),
+        }
+    }
 }
 
 /// One plugin's approvals, as kept.
@@ -280,6 +303,22 @@ impl Editor {
             What::PluginPermissions { plugin: q, .. } | What::PluginAsk { plugin: q, .. } => q != plugin,
             _ => true,
         });
+        // (what waited on its approval card: refused — never left unanswered)
+        let held = self.plugins.as_mut().and_then(|p| p.held.remove(plugin)).unwrap_or_default();
+        let why = format!("its permissions wait for your approval (:plugin-approve {plugin})");
+        let no: Vec<HostEvent> = held
+            .iter()
+            .filter_map(|a| match a {
+                Action::Spawn(sp) => Some(sp.id),
+                Action::ReadFile(id, _) | Action::ReadEnv(id, _) | Action::Find(id, _) => Some(*id),
+                Action::Connect(c) => Some(c.id),
+                _ => None,
+            })
+            .map(|id| HostEvent::Failed(id, why.clone()))
+            .collect();
+        if !no.is_empty() {
+            self.plugin_events(plugin, no);
+        }
     }
 
     /// `:plugin-approve <plugin>` — its approval card again.
@@ -344,9 +383,10 @@ impl Editor {
         allow: bool,
     ) {
         if !allow {
-            return self.set_status(format!(
+            self.set_status(format!(
                 "Plugin {plugin} does nothing beyond the buffer until you approve — :plugin-approve {plugin}"
             ));
+            return self.plugin_held_go(&plugin);
         }
         // Still that plugin, still asking for that
         let now = self.plugins.as_ref().and_then(|p| p.permissions.get(&plugin)).map(|d| keys(d));
@@ -359,6 +399,54 @@ impl Editor {
             Ok(()) => self.set_success(format!("Plugin {plugin}: approved")),
             Err(e) => self.set_warning(format!("approved until you quit — couldn't keep it: {e}")),
         }
+        self.plugin_held_go(&plugin);
+    }
+
+    /// Whether `a` waits for the plugin's approval card — it needs a permission, and the card asks for them now
+    /// (the first time, it comes up, as when a request is refused). Held, it's done once you approve
+    /// (`plugin_held_go`): the plugin goes on by itself, not stuck on a refusal from before.
+    pub(super) fn plugin_hold(&mut self, plugin: &str, a: &Action) -> bool {
+        let needs = matches!(
+            a,
+            Action::Spawn(_)
+                | Action::ReadFile(..)
+                | Action::ReadEnv(..)
+                | Action::Connect(_)
+                | Action::Find(..)
+        );
+        let Some(declared) = self.plugins.as_ref().and_then(|p| p.permissions.get(plugin)).cloned() else {
+            return false;
+        };
+        if !needs || declared.is_empty() {
+            return false;
+        }
+        self.approvals_fresh();
+        if self.plugin_approved(plugin) {
+            return false;
+        }
+        self.plugin_permissions_loaded(plugin, &declared);
+        let card = self.offers.iter().chain(&self.session.parked).any(|o| {
+            matches!(&o.what, What::PluginPermissions { plugin: q, .. } if q == plugin) && !o.installing()
+        });
+        let Some(p) = self.plugins.as_mut().filter(|_| card) else { return false };
+        let held = p.held.entry(plugin.to_string()).or_default();
+        if held.len() >= HELD_MAX {
+            return false;
+        }
+        held.push(a.clone());
+        true
+    }
+
+    /// The approval card answered: what waited on it, done now — or, not approved, refused as a request is
+    /// then (its card gone, so none is held again).
+    fn plugin_held_go(&mut self, plugin: &str) {
+        let held = self.plugins.as_mut().and_then(|p| p.held.remove(plugin)).unwrap_or_default();
+        if held.is_empty() {
+            return;
+        }
+        let doc = self.doc();
+        let seen = super::Seen { doc: doc.id, version: doc.version(), ranges: Vec::new() };
+        self.plugin_apply(plugin, &seen, held);
     }
 
     /// Whether a plugin may, right now, do what needs `need` (declared and approved). Err: why not.
@@ -434,8 +522,22 @@ impl Editor {
         if known { Ok(()) } else { Err(None) }
     }
 
-    /// Asks you about one connection or file.
+    /// Asks you about one connection or file — one card a question: a request asking what a card already asks
+    /// (another connection to that host) waits on that card's answer.
     pub(super) fn plugin_ask(&mut self, plugin: &str, ask: Ask) {
+        let asked =
+            self.offers.iter_mut().chain(self.session.parked.iter_mut()).find_map(|o| match &mut o.what {
+                What::PluginAsk { plugin: p, asks }
+                    if p == plugin && asks.first().map(Ask::subject) == Some(ask.subject()) =>
+                {
+                    Some(asks)
+                }
+                _ => None,
+            });
+        if let Some(asks) = asked {
+            asks.push(ask);
+            return;
+        }
         let (title, question) = match &ask {
             Ask::Connect(c) => (
                 format!("Plugin {plugin} wants to connect"),
@@ -456,18 +558,15 @@ impl Editor {
                 &question,
                 "…",
                 format!("Plugin {plugin}"),
-                What::PluginAsk { plugin: plugin.to_string(), ask: Box::new(ask) },
+                What::PluginAsk { plugin: plugin.to_string(), asks: vec![ask] },
             )
             .deciding(0..1),
         );
     }
 
-    /// Your answer about one connection or file: yes is kept, and the request goes on; no fails it.
-    pub(crate) fn plugin_ask_answer(&mut self, plugin: String, ask: Ask, allow: bool) {
-        let id = match &ask {
-            Ask::Connect(c) => c.id,
-            Ask::Read(id, _) => *id,
-        };
+    /// Your answer about one connection or file: yes is kept, and the requests waiting on it go on; no fails
+    /// them.
+    pub(crate) fn plugin_ask_answer(&mut self, plugin: String, asks: Vec<Ask>, allow: bool) {
         // Still loaded and approved (a card left from before a revoke grants nothing)
         let loaded = self.plugins.as_ref().is_some_and(|p| p.permissions.contains_key(&plugin));
         self.approvals_fresh();
@@ -475,12 +574,10 @@ impl Editor {
             return;
         }
         if !allow {
-            return self.plugin_events(&plugin, vec![HostEvent::Failed(id, "you said no".into())]);
+            let no = asks.iter().map(|a| HostEvent::Failed(a.id(), "you said no".into())).collect();
+            return self.plugin_events(&plugin, no);
         }
-        let (host, entry) = match &ask {
-            Ask::Connect(c) => (true, target(c)),
-            Ask::Read(_, path) => (false, path.display().to_string()),
-        };
+        let Some((host, entry)) = asks.first().map(Ask::subject) else { return };
         let r = self.approvals_change(|all| {
             let a = all.entry(plugin.clone()).or_default();
             if host { a.hosts.push(entry) } else { a.files.push(entry) }
@@ -488,9 +585,11 @@ impl Editor {
         if let Err(e) = r {
             self.set_warning(format!("allowed until you quit — couldn't keep it: {e}"));
         }
-        match ask {
-            Ask::Connect(c) => self.plugin_connect_now(&plugin, c),
-            Ask::Read(id, path) => self.plugin_read_now(&plugin, id, path),
+        for ask in asks {
+            match ask {
+                Ask::Connect(c) => self.plugin_connect_now(&plugin, c),
+                Ask::Read(id, path) => self.plugin_read_now(&plugin, id, path),
+            }
         }
     }
 

@@ -66,8 +66,9 @@ pub enum What {
     JavaDebug { file: PathBuf, root: PathBuf, attach: Option<(String, u16)> },
     /// A plugin asks for permissions (when it loads): `y` approves the list, kept.
     PluginPermissions { plugin: String, permissions: Vec<crate::plugin::PluginPermission> },
-    /// A plugin asks to connect somewhere new, or read a file outside its patterns: `y` allows it, kept.
-    PluginAsk { plugin: String, ask: Box<crate::plugin::PluginAsk> },
+    /// A plugin asks to connect somewhere new, or read a file outside its patterns: `y` allows it, kept — and
+    /// every request waiting on it (all asking the same) goes on.
+    PluginAsk { plugin: String, asks: Vec<crate::plugin::PluginAsk> },
     /// A language server or debugger — `run` in the task panel (in `cwd`), then `then`.
     Install { tool: String, run: Vec<String>, cwd: PathBuf, then: crate::install::Then },
     /// A command Claude wants to run (`tools.rs`): `y` runs it in the task panel, `n` tells Claude no.
@@ -563,8 +564,9 @@ impl crate::editor::Editor {
         if self.background() {
             return self.session.parked.push(o);
         }
-        // (one holding a call isn't merged into another by its title — the other's call would be lost)
-        let own = o.asker().is_some();
+        // (one holding a call isn't merged into another by its title — the other's call would be lost; nor is a
+        // plugin's ask — the other's request would be: one asking the same joins its card, `plugin_ask`)
+        let own = o.asker().is_some() || matches!(o.what, What::PluginAsk { .. });
         if let Some(old) = self.offers.iter_mut().find(|x| x.title == o.title).filter(|_| !own) {
             // Replaced whole — what it says with what it does — and it settles again before `y` counts
             if !old.installing() {
@@ -708,9 +710,9 @@ impl crate::editor::Editor {
                 self.offer_finished(id, Ok(()));
                 self.plugin_permissions_answer(plugin, permissions, true);
             }
-            What::PluginAsk { plugin, ask } => {
+            What::PluginAsk { plugin, asks } => {
                 self.offer_finished(id, Ok(()));
-                self.plugin_ask_answer(plugin, *ask, true);
+                self.plugin_ask_answer(plugin, asks, true);
             }
             What::Run(card) => crate::tools::run_answer(self, id, *card, Some(crate::allow::Scope::Once)),
             What::NoSandbox { job, call, ride } => {
@@ -1089,7 +1091,7 @@ impl crate::editor::Editor {
             What::PluginPermissions { plugin, permissions } => {
                 self.plugin_permissions_answer(plugin, permissions, false)
             }
-            What::PluginAsk { plugin, ask } => self.plugin_ask_answer(plugin, *ask, false),
+            What::PluginAsk { plugin, asks } => self.plugin_ask_answer(plugin, asks, false),
             What::Install { tool, .. } => {
                 self.set_status(format!("Not installing {tool} for now (N on its card: never ask)"))
             }

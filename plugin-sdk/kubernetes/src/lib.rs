@@ -251,7 +251,7 @@ struct Req {
 struct Seen {
     text: String,
     tone: Tone,
-    /// What the side tab says of it (`3/3 ↻2`, `3 pods`).
+    /// What the side tab says of it (`3/3 · 2 restarts`, `3 pods`).
     brief: String,
 }
 
@@ -1403,7 +1403,7 @@ impl State {
         // Where each value goes: the chart's templates (as open, or as read), the lines writing it as it is
         let mine = |p: &&String| p.starts_with(&format!("{dir}/templates/"));
         let mut templates: BTreeMap<&String, &Vec<Doc>> =
-            self.chart_files.iter().filter(|(p, _)| mine(p)).map(|(p, d)| (p, d)).collect();
+            self.chart_files.iter().filter(|(p, _)| mine(p)).collect();
         // (as open: as it is now)
         templates.extend(self.files.iter().filter(|(p, _)| mine(p)).map(|(p, f)| (p, &f.docs)));
         for f in fields.iter().filter(|f| !f.nested && !f.templated) {
@@ -1575,7 +1575,7 @@ impl State {
             out.push(Action::Side(Some(Side { open, focus: false, ..side })));
         }
         let tone = if self.error.is_some() { Tone::Error } else { Tone::Ok };
-        let badge = (format!("⎈ {}", self.context()), tone);
+        let badge = (format!("k8s {}", self.context()), tone);
         if self.badge.as_ref() != Some(&badge) {
             self.badge = Some(badge.clone());
             out.push(Action::Badge(Some(badge)));
@@ -1665,19 +1665,20 @@ impl State {
                             let (state, tone) = status::pod_tone(p);
                             // (under its workload: without the workload's name in front)
                             let short = name.strip_prefix(&format!("{}-", d.name)).unwrap_or(&name).to_string();
-                            // Its age, if it's new; its restarts, if any
-                            let mut detail = Vec::new();
-                            if let Some(t) = p.metadata.creation_timestamp.as_ref().map(|t| t.0.as_millisecond())
-                                && now - t < 10 * 60_000
-                            {
-                                detail.push(status::human(now - t));
-                            }
-                            match status::pod_restarts(p) {
-                                0 => {}
-                                n => detail.push(format!("↻{n}")),
-                            }
-                            rows.push(row(format!("pod:{ns}/{name}"), 3, short, detail.join(" "), tone, None));
+                            // Its age, if it's new — its restarts, if any, a line of their own below (the column is
+                            // narrow)
+                            let age = p
+                                .metadata
+                                .creation_timestamp
+                                .as_ref()
+                                .map(|t| now - t.0.as_millisecond())
+                                .filter(|ms| *ms < 10 * 60_000)
+                                .map_or(String::new(), status::human);
+                            rows.push(row(format!("pod:{ns}/{name}"), 3, short, age, tone, None));
                             rows.push(why(4, state, tone));
+                            if let n @ 1.. = status::pod_restarts(p) {
+                                rows.push(why(4, status::restarts(n), tone));
+                            }
                         }
                     }
                 }
@@ -1703,7 +1704,7 @@ impl State {
         let keys = [("ret", "go / logs"), ("d", "describe"), ("e", "events"), ("y", "yaml"), ("a", "all")];
         Side {
             title: "k8s".into(),
-            note: format!("⎈ {}", self.context()),
+            note: format!("k8s {}", self.context()),
             rows,
             keys: keys.iter().map(|(k, d)| (k.to_string(), d.to_string())).collect(),
             open: false,
@@ -2808,7 +2809,7 @@ mod tests {
         let said: Vec<(u64, &str)> = hints[0].hints.iter().map(|h| (h.line, h.text.as_str())).collect();
         assert_eq!(said, [(1, "2/2 ready  (ns default, from the context)"), (6, "not in prod-eks")]);
         // The badge: the cluster · the side tab: the file, its objects
-        assert_eq!(s.badge, Some(("⎈ prod-eks".into(), Tone::Ok)));
+        assert_eq!(s.badge, Some(("k8s prod-eks".into(), Tone::Ok)));
         let Some(Action::Side(Some(side))) = out.iter().find(|a| matches!(a, Action::Side(_))) else { panic!() };
         assert!(!side.open, "opened at it the first time only");
         let rows: Vec<(u64, &str, &str)> = side.rows.iter().map(|r| (r.depth, r.text.as_str(), r.detail.as_str())).collect();
@@ -2986,8 +2987,8 @@ mod tests {
     #[test]
     fn one_hint_a_line_saying_all_of_it_in_the_worst_tone() {
         let h = |line, text: &str, tone| Hint { line, text: text.into(), tone };
-        let got = together(vec![h(3, "→ 2", Tone::Info), h(5, "ok", Tone::Ok), h(3, "OOMKilled ↻1", Tone::Error)]);
-        assert_eq!(got, [h(3, "→ 2  ·  OOMKilled ↻1", Tone::Error), h(5, "ok", Tone::Ok)]);
+        let got = together(vec![h(3, "→ 2", Tone::Info), h(5, "ok", Tone::Ok), h(3, "OOMKilled · 1 restart", Tone::Error)]);
+        assert_eq!(got, [h(3, "→ 2  ·  OOMKilled · 1 restart", Tone::Error), h(5, "ok", Tone::Ok)]);
     }
 
     #[test]

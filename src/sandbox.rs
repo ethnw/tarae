@@ -461,9 +461,32 @@ const GRADLE_READS: [&str; 2] = ["caches/modules-2", "wrapper/dists"];
 /// sandboxed `./gradlew` hands its build to a daemon started outside, and the build runs outside the sandbox.
 const GRADLE_KEPT: &str = "daemon";
 
+/// What the environment says of where the toolchains' homes are — read from the process once, where a policy is
+/// made (`here`), and passed in: what's worked out from it is the same in a test as in a run (a sandboxed run
+/// has a Gradle home of its own).
+#[derive(Clone, Debug, Default)]
+pub struct HomeVars {
+    pub cargo_home: Option<PathBuf>,
+    pub rustup_home: Option<PathBuf>,
+    pub gradle_user_home: Option<PathBuf>,
+    pub xdg_config_home: Option<PathBuf>,
+}
+
+impl HomeVars {
+    pub fn here() -> HomeVars {
+        let var = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+        HomeVars {
+            cargo_home: var("CARGO_HOME"),
+            rustup_home: var("RUSTUP_HOME"),
+            gradle_user_home: var("GRADLE_USER_HOME"),
+            xdg_config_home: var("XDG_CONFIG_HOME"),
+        }
+    }
+}
+
 /// The user's Gradle home — `$GRADLE_USER_HOME` (absolute), else `~/.gradle` — as the profile writes it.
-fn gradle_home_of(home: &Path) -> PathBuf {
-    let set = std::env::var_os("GRADLE_USER_HOME").map(PathBuf::from).filter(|g| g.is_absolute());
+fn gradle_home_of(home: &Path, vars: &HomeVars) -> PathBuf {
+    let set = vars.gradle_user_home.clone().filter(|g| g.is_absolute());
     profile_path(&set.unwrap_or_else(|| home.join(".gradle")))
 }
 
@@ -474,17 +497,17 @@ const CLAUDES: [&str; 3] = [".claude", ".claude.json", ".claude.json.backup"];
 /// `GRADLE_READS`, tarae's grammars (its own tests and shots load them), the folders on PATH (what's there
 /// runs), and `also` (the repository's other checkouts, what the user let Claude read) — none that's home
 /// itself or in a kept place.
-pub fn reads_for(home: &Path, also: &[PathBuf]) -> Reads {
-    let cargo_home = cargo_home_of(Some(home));
+pub fn reads_for(home: &Path, also: &[PathBuf], vars: &HomeVars) -> Reads {
+    let cargo_home = cargo_home_of(Some(home), vars);
     let mut allow: Vec<PathBuf> = HOME_READS.iter().map(|r| profile_path(&home.join(r))).collect();
-    let gradle = gradle_home_of(home);
+    let gradle = gradle_home_of(home, vars);
     allow.extend(GRADLE_READS.iter().map(|r| gradle.join(r)));
     allow.extend(cargo_home.clone());
-    allow.extend(std::env::var_os("RUSTUP_HOME").map(|r| profile_path(Path::new(&r))));
+    allow.extend(vars.rustup_home.as_deref().map(profile_path));
     allow.extend(crate::grammar::grammars_dir().map(|d| profile_path(&d)));
     allow.extend(crate::blocked::path_dirs());
     allow.extend(also.iter().cloned());
-    let kept = kept_reads(home, cargo_home.as_deref());
+    let kept = kept_reads(home, cargo_home.as_deref(), vars);
     allow.retain(|p| p.starts_with(home) && p != home && !kept.iter().any(|k| p.starts_with(k)));
     allow.sort();
     allow.dedup();
@@ -507,17 +530,17 @@ pub fn cargo_configs_above(root: &Path, home: &Path) -> Vec<PathBuf> {
 /// What a run never reads, whatever is granted: the places that hold keys (`allow::SECRETS`, and git's
 /// credential store where `$XDG_CONFIG_HOME` puts it), Claude's own (`CLAUDES`), cargo's credentials, Gradle's
 /// daemons' registry (`GRADLE_KEPT`), and tarae's state (its conversations, what was allowed — its log aside).
-pub fn kept_reads(home: &Path, cargo_home: Option<&Path>) -> Vec<PathBuf> {
+pub fn kept_reads(home: &Path, cargo_home: Option<&Path>, vars: &HomeVars) -> Vec<PathBuf> {
     let at = |p: PathBuf| profile_path(&p);
     let mut v: Vec<PathBuf> =
         crate::allow::SECRETS.iter().chain(&CLAUDES).map(|s| at(home.join(s))).collect();
     for cargo in [Some(home.join(".cargo")), cargo_home.map(Path::to_path_buf)].into_iter().flatten() {
         v.extend(["credentials", "credentials.toml"].map(|c| at(cargo.join(c))));
     }
-    for gradle in [at(home.join(".gradle")), gradle_home_of(home)] {
+    for gradle in [at(home.join(".gradle")), gradle_home_of(home, vars)] {
         v.push(gradle.join(GRADLE_KEPT));
     }
-    let xdg = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|x| x.is_absolute());
+    let xdg = vars.xdg_config_home.clone().filter(|x| x.is_absolute());
     v.extend(xdg.map(|x| at(x.join("git/credentials"))));
     v.extend(crate::config::state_dir().map(at));
     v.sort();
@@ -1659,7 +1682,8 @@ pub fn missing_why(stderr: &str) -> String {
 /// (`reads`, real) — the toolchain's folders found (blocks).
 pub fn policy(root: &Path, llm: &crate::llm::LlmConfig, reads: &[PathBuf]) -> Policy {
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let cargo_home = cargo_home_of(home.as_deref());
+    let vars = HomeVars::here();
+    let cargo_home = cargo_home_of(home.as_deref(), &vars);
     let tmp = std::fs::canonicalize(std::env::temp_dir()).ok();
     let real_home = home.as_deref().and_then(|h| std::fs::canonicalize(h).ok());
     // (the repository's other checkouts — never home or above it, nor where keys are; cargo's configs above)
@@ -1671,11 +1695,11 @@ pub fn policy(root: &Path, llm: &crate::llm::LlmConfig, reads: &[PathBuf]) -> Po
     let above: Vec<PathBuf> =
         real_home.iter().flat_map(|h| cargo_configs_above(&profile_path(root), h)).collect();
     also.extend(above.iter().cloned());
-    let gradle = real_home.as_deref().map(gradle_home_of).filter(|g| g.is_dir());
+    let gradle = real_home.as_deref().map(|h| gradle_home_of(h, &vars)).filter(|g| g.is_dir());
     let mut env = Env {
         gradle_locks: gradle.as_deref().map(gradle_locks).unwrap_or_default(),
         gradle,
-        reads: real_home.as_ref().map(|h| reads_for(h, &also)).unwrap_or_default(),
+        reads: real_home.as_ref().map(|h| reads_for(h, &also, &vars)).unwrap_or_default(),
         root: profile_path(root),
         home,
         tmp,
@@ -1786,7 +1810,7 @@ pub fn build_dirs(root: &Path) -> Vec<PathBuf> {
         return Vec::new();
     };
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let cargo_home = cargo_home_of(home.as_deref());
+    let cargo_home = cargo_home_of(home.as_deref(), &HomeVars::here());
     let tmp = std::fs::canonicalize(std::env::temp_dir()).ok();
     let open = |d: &Path| {
         cargo_dir_verdict(
@@ -1804,9 +1828,9 @@ pub fn build_dirs(root: &Path) -> Vec<PathBuf> {
 }
 
 /// `$CARGO_HOME` (else `~/.cargo`), real — when it exists.
-fn cargo_home_of(home: Option<&Path>) -> Option<PathBuf> {
-    std::env::var_os("CARGO_HOME")
-        .map(PathBuf::from)
+fn cargo_home_of(home: Option<&Path>, vars: &HomeVars) -> Option<PathBuf> {
+    vars.cargo_home
+        .clone()
         .or_else(|| home.map(|h| h.join(".cargo")))
         .and_then(|p| std::fs::canonicalize(p).ok())
 }
@@ -2401,7 +2425,10 @@ mod tests {
             home.join(".claude/x"),
             "/opt/x".into(),
         ];
-        let r = reads_for(&home, &also);
+        // (nothing from this process's environment: the same inside a sandboxed run, which has a Gradle home of
+        // its own, as outside)
+        let vars = HomeVars::default();
+        let r = reads_for(&home, &also, &vars);
         assert_eq!(r.home.as_deref(), Some(home.as_path()));
         for p in [
             ".cargo",
@@ -2424,11 +2451,18 @@ mod tests {
         }
         // Java's: Gradle's downloaded dependencies and wrapper distributions, never its daemons' registry nor
         // either tool's settings (repository passwords)
-        let gradle = gradle_home_of(&home);
+        let gradle = gradle_home_of(&home, &vars);
+        assert_eq!(gradle, home.join(".gradle"));
         for p in ["caches/modules-2", "wrapper/dists"] {
             assert!(r.allow.contains(&gradle.join(p)), "{p}: {:?}", r.allow);
         }
-        assert!(r.kept.contains(&home.join(".gradle/daemon")) && r.kept.contains(&gradle.join("daemon")));
+        assert!(r.kept.contains(&gradle.join("daemon")));
+        // `GRADLE_USER_HOME` elsewhere: its reads, and its daemons kept as well as `~/.gradle`'s
+        let moved = home.join("gradle-elsewhere");
+        let r2 = reads_for(&home, &also, &HomeVars { gradle_user_home: Some(moved.clone()), ..vars.clone() });
+        assert!(r2.allow.contains(&moved.join("caches/modules-2")), "{:?}", r2.allow);
+        assert!(!r2.allow.contains(&home.join(".gradle/caches/modules-2")));
+        assert!(r2.kept.contains(&home.join(".gradle/daemon")) && r2.kept.contains(&moved.join("daemon")));
         let policy =
             Policy::for_project(&Env { root: home.join("proj"), reads: r.clone(), ..Env::default() });
         for (path, read) in [
@@ -3439,7 +3473,7 @@ mod tests {
             root: root.clone(),
             write: w.llm.sandbox_write.clone(),
             ports: w.llm.sandbox_ports,
-            reads: reads_for(&home, &w.reads),
+            reads: reads_for(&home, &w.reads, &HomeVars::here()),
             ..Env::default()
         };
         let p = Policy { sockets: w.sockets, ..Policy::for_project(&env) };
@@ -3720,7 +3754,8 @@ mod tests {
         for f in [&ignore, &stored, &older] {
             std::fs::write(f, "marker\n").unwrap();
         }
-        let env = Env { root: root.clone(), reads: reads_for(&home, &[]), ..Env::default() };
+        let env =
+            Env { root: root.clone(), reads: reads_for(&home, &[], &HomeVars::here()), ..Env::default() };
         let p = Policy::for_project(&env);
         let cat = |f: &Path| {
             let mut c =
@@ -3781,7 +3816,7 @@ mod tests {
             std::fs::write(home.join(file), text).unwrap();
         }
         let run = RunDir::new().unwrap();
-        let mut reads = reads_for(&home, &[]);
+        let mut reads = reads_for(&home, &[], &HomeVars::here());
         let sources = crate::tokens::sources(&home, &|_| None);
         reads.copies = crate::tokens::copies(&sources, Some(run.path()), &home, &[], &reads.kept);
         let tmp = std::fs::canonicalize(std::env::temp_dir()).ok();
@@ -3880,7 +3915,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let env = Env {
             root: root.clone(),
-            reads: reads_for(&home, &[]),
+            reads: reads_for(&home, &[], &HomeVars::here()),
             gradle: Some(g.clone()),
             gradle_locks: gradle_locks(&g),
             ..Env::default()
@@ -3967,7 +4002,7 @@ mod tests {
         )
         .unwrap();
         let home = std::fs::canonicalize(std::env::var_os("HOME").unwrap()).unwrap();
-        let cargo_home = cargo_home_of(Some(&home));
+        let cargo_home = cargo_home_of(Some(&home), &HomeVars::here());
         let tag = format!("tarae-test-{}-tools.", std::process::id());
         let w = Watch::start(&tag);
         std::thread::sleep(WATCH_READY);
@@ -3976,7 +4011,7 @@ mod tests {
             home: Some(home.clone()),
             tmp: std::fs::canonicalize(std::env::temp_dir()).ok(),
             cargo_home,
-            reads: reads_for(&home, &cargo_configs_above(&root, &home)),
+            reads: reads_for(&home, &cargo_configs_above(&root, &home), &HomeVars::here()),
             ..Env::default()
         };
         let p = Policy { tag: Some(tag), watch: Some(w.clone()), ..Policy::for_project(&env) };

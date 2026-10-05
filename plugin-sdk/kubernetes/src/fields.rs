@@ -74,8 +74,7 @@ pub fn fields(lines: &[&str], first: u64) -> Vec<Field> {
         // A line that's only template actions: passed over (not an indentation level)
         if body.starts_with("{{") && body.ends_with("}}") {
             for action in body.split("{{").skip(1) {
-                let word =
-                    action.trim_start_matches('-').trim_start().split_whitespace().next().unwrap_or("");
+                let word = action.trim_start_matches('-').split_whitespace().next().unwrap_or("");
                 match word {
                     "range" => blocks.push(true),
                     "if" | "with" | "define" | "block" => blocks.push(false),

@@ -120,6 +120,8 @@ pub struct Plugins {
     /// What you approved (kept), and the plugins asked about since tarae started.
     approvals: std::collections::BTreeMap<String, perm::Approval>,
     asked: std::collections::HashSet<String>,
+    /// What each plugin asked for while its approval card was up: done once you approve, refused if you don't.
+    held: std::collections::HashMap<String, Vec<Action>>,
     /// Where approvals are kept, and when it was last read.
     perm_store: Option<PathBuf>,
     perm_mtime: Option<std::time::SystemTime>,
@@ -165,6 +167,7 @@ impl Plugins {
         self.status.retain(|(p, _), _| p != plugin);
         self.events.subs.retain(|(p, ..)| p != plugin);
         self.permissions.remove(plugin);
+        self.held.remove(plugin);
         self.outbox.remove(plugin);
         self.stop_all(plugin);
         if self.panel.as_ref().is_some_and(|s| s.plugin == plugin) {
@@ -206,6 +209,7 @@ impl Editor {
                 permissions: Default::default(),
                 approvals: perm::load(perm::store_path().as_deref()),
                 asked: Default::default(),
+                held: Default::default(),
                 perm_store: perm::store_path(),
                 perm_mtime: None,
                 procs: Default::default(),
@@ -357,6 +361,9 @@ impl Editor {
             |a: &Action| matches!(a, Action::ReplaceSelections(_) | Action::Edits(_) | Action::Select(_));
         let mut edited = false;
         for a in &actions {
+            if self.plugin_hold(plugin, a) {
+                continue;
+            }
             let r = match a {
                 Action::Status(m) => {
                     self.set_status(shown(m));
@@ -696,11 +703,14 @@ mod tests {
     #[test]
     fn permissions_wait_for_approval_and_hold_to_what_was_asked() {
         let (mut ed, dir) = setup("perm", "x\n");
-        // Held: the card asks as it loads, and what needs a permission fails meanwhile
+        // Held: the card asks as it loads, and what needs a permission waits for it — done once approved, the
+        // plugin going on by itself (#167: it stayed refused until asked again)
         ed.plugin_run("exec", "").unwrap();
-        until_said(&mut ed, "failed 1 its permissions wait for your approval");
+        settle_until(&mut ed, |ed| {
+            ed.plugins.as_ref().is_some_and(|p| p.held.get("demo").is_some_and(|h| h.len() == 1))
+        });
+        assert!(!toasts(&ed).contains("failed 1"), "{}", toasts(&ed));
         answer(&mut ed, approval, true);
-        ed.plugin_run("exec", "").unwrap();
         // (its output and its end go to the plugin undrawn; its answers, which say them, drawn)
         let flags = quiet_until(&mut ed, "exit 1 Some(0) []");
         assert!(flags.contains(&true) && flags.last() == Some(&false), "{flags:?}");
@@ -724,6 +734,36 @@ mod tests {
         assert!(!ed.offers.iter().any(|o| approval(&o.what)));
         ed.plugin_approve("demo").unwrap();
         assert!(ed.offers.first().is_some_and(|o| approval(&o.what)));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// What waited on the approval card is refused when you say not now — said, never left unanswered; with no
+    /// card up a request is refused at once; `:plugin-approve`'s card holds again, and its yes goes on.
+    #[test]
+    fn not_approving_refuses_what_waited_on_the_card() {
+        let (mut ed, dir) = setup("not-now", "x\n");
+        let held = |ed: &Editor| ed.plugins.as_ref().map_or(0, |p| p.held.get("demo").map_or(0, Vec::len));
+        ed.plugin_run("exec", "").unwrap();
+        ed.plugin_run("getenv", "TARAE_DEMO").unwrap();
+        settle_until(&mut ed, |ed| held(ed) == 2);
+        answer(&mut ed, approval, false);
+        let why = "its permissions wait for your approval (:plugin-approve demo)";
+        settle_until(&mut ed, |ed| {
+            toasts(ed).contains(&format!("failed 1 {why}"))
+                && toasts(ed).contains(&format!("failed 11 {why}"))
+        });
+        assert_eq!(held(&ed), 0);
+        // No card up: refused at once, not held
+        ed.toasts.clear();
+        ed.plugin_run("exec", "").unwrap();
+        until_said(&mut ed, &format!("failed 1 {why}"));
+        assert_eq!(held(&ed), 0);
+        // Its card brought back: held again, and done on yes
+        ed.plugin_approve("demo").unwrap();
+        ed.plugin_run("exec", "").unwrap();
+        settle_until(&mut ed, |ed| held(ed) == 1);
+        answer(&mut ed, approval, true);
+        until_said(&mut ed, "exit 1 Some(0) []");
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -811,6 +851,34 @@ mod tests {
         settle_until(&mut ed, |ed| ed.offers.first().is_some_and(|o| ask(&o.what)));
         answer(&mut ed, ask, true);
         until_said(&mut ed, "failed 20 127.0.0.1:1");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Connections to a new host in one answer (the Kubernetes plugin's first: two API groups at once) are one
+    /// card, and `y` lets every one of them go — none is left waiting forever. Another host is its own card.
+    #[test]
+    fn connections_waiting_on_one_host_are_one_card_and_all_go() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port() as u64;
+        let server =
+            std::thread::spawn(move || (0..2).map(|_| listener.accept().unwrap().0).collect::<Vec<_>>());
+        let (mut ed, dir) = setup("one-card", "x\n");
+        answer(&mut ed, approval, true);
+        let seen = Seen { doc: ed.docs[0].id, version: ed.docs[0].version(), ranges: Vec::new() };
+        let to = |id, port| Action::Connect(abi::Connect { id, host: "127.0.0.1".into(), port });
+        ed.plugin_apply("demo", &seen, vec![to(20, port), to(21, port), to(22, 1)]);
+        let asking: Vec<String> =
+            ed.offers.iter().filter(|o| ask(&o.what)).map(|o| o.question.clone()).collect();
+        assert_eq!(asking.len(), 2, "one card a host: {asking:?}");
+        answer(&mut ed, ask, true);
+        settle_until(&mut ed, |ed| {
+            toasts(ed).contains("connected 20") && toasts(ed).contains("connected 21")
+        });
+        // (the other host's card, asking still)
+        answer(&mut ed, ask, false);
+        until_said(&mut ed, "failed 22 you said no");
+        assert!(ed.offers.is_empty());
+        drop(server.join());
         std::fs::remove_dir_all(dir).ok();
     }
 

@@ -179,18 +179,23 @@ fn n(v: &Value) -> u64 {
     v.as_u64().unwrap_or(0)
 }
 
-/// `2/3 ready` for a workload that wants `want` and has `ready`, with what's wrong among its pods.
+/// `2/3 ready` for a workload that wants `want` and has `ready`, with what's wrong among its pods — and,
+/// last, their restarts.
 fn replicas(ready: u64, want: u64, updated: Option<u64>, pods: &[&DynamicObject]) -> (String, Tone) {
     if want == 0 {
         return ("scaled to 0".into(), Tone::Info);
     }
     let base = format!("{ready}/{want} ready");
-    match worst(pods) {
+    let (text, tone) = match worst(pods) {
         Some((s, Tone::Error, k)) => (format!("{base} · {k} {s}"), Tone::Error),
         _ if ready >= want && updated.is_none_or(|u| u >= want) => (base, Tone::Ok),
         _ if updated.is_some_and(|u| u < want) => (format!("{base} · rolling out"), Tone::Warning),
         Some((s, _, k)) => (format!("{base} · {k} {s}"), Tone::Warning),
         None => (base, Tone::Warning),
+    };
+    match pods.iter().map(|p| pod_restarts(p)).sum() {
+        0 => (text, tone),
+        n => (format!("{text} · {}", restarts(n)), tone),
     }
 }
 
@@ -271,7 +276,10 @@ fn by_kind(kind: &str, o: &DynamicObject, pods: &[&DynamicObject]) -> (String, T
             Some(n(&st["updatedNumberScheduled"])),
             &mine(&spec["selector"]),
         ),
-        "Pod" => pod_tone(o),
+        "Pod" => match (pod_tone(o), pod_restarts(o)) {
+            (said, 0) => said,
+            ((s, tone), n) => (format!("{s} · {}", restarts(n)), tone),
+        },
         "Job" => {
             let failed = condition(st, "Failed").filter(|c| c["status"] == "True");
             if let Some(c) = failed {
@@ -349,26 +357,17 @@ fn by_kind(kind: &str, o: &DynamicObject, pods: &[&DynamicObject]) -> (String, T
     }
 }
 
-/// What the narrow side tab says of a state: a number or a word (`3/3`, `3 pods`, `Bound`) — the rest is
-/// beside the code, and a problem's reason gets a line of its own.
+/// What the narrow side tab says of a state: a number or a word (`3/3`, `3 pods`, `Bound`) — the rest (its
+/// pods' restarts too) is beside the code, and a problem's reason gets a line of its own.
 pub fn brief(kind: &str, o: &DynamicObject, pods: &[&DynamicObject]) -> String {
     let (spec, st) = (&o.data["spec"], &o.data["status"]);
     let mine = |selector: &Value| pods.iter().copied().filter(|p| selects(selector, p)).collect::<Vec<_>>();
-    let restarts = |ps: &[&DynamicObject]| -> u64 { ps.iter().map(|p| pod_restarts(p)).sum() };
-    let with_restarts = |base: String, ps: &[&DynamicObject]| match restarts(ps) {
-        0 => base,
-        n => format!("{base} ↻{n}"),
-    };
     match kind {
-        "Deployment" | "StatefulSet" | "ReplicaSet" => with_restarts(
-            format!("{}/{}", n(&st["readyReplicas"]), spec["replicas"].as_u64().unwrap_or(1)),
-            &mine(&spec["selector"]),
-        ),
-        "DaemonSet" => with_restarts(
-            format!("{}/{}", n(&st["numberReady"]), n(&st["desiredNumberScheduled"])),
-            &mine(&spec["selector"]),
-        ),
-        "Pod" => with_restarts(pod_status(o), &[o]),
+        "Deployment" | "StatefulSet" | "ReplicaSet" => {
+            format!("{}/{}", n(&st["readyReplicas"]), spec["replicas"].as_u64().unwrap_or(1))
+        }
+        "DaemonSet" => format!("{}/{}", n(&st["numberReady"]), n(&st["desiredNumberScheduled"])),
+        "Pod" => pod_status(o),
         "Job" => format!("{}/{}", n(&st["succeeded"]), spec["completions"].as_u64().unwrap_or(1)),
         "Service" if spec["selector"].as_object().is_some_and(|m| !m.is_empty()) => {
             let ready = mine(&spec["selector"]).iter().filter(|p| pod_tone(p).1 == Tone::Ok).count();
@@ -393,6 +392,11 @@ pub fn pod_restarts(p: &DynamicObject) -> u64 {
         .flat_map(|k| st[*k].as_array().into_iter().flatten())
         .filter_map(|c| c["restartCount"].as_u64())
         .sum()
+}
+
+/// Restarts in words (`3 restarts`) — a glyph for it (`↻`) isn't in every terminal font.
+pub fn restarts(n: u64) -> String {
+    format!("{n} restart{}", if n == 1 { "" } else { "s" })
 }
 
 /// A pod described, for a buffer: its state, where it runs, each container (image, state, restarts, how it
@@ -532,13 +536,15 @@ mod tests {
     #[test]
     fn briefly_for_the_side_tab_and_described_for_a_buffer() {
         let deploy = obj(json!({"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "web"},
-            "spec": {"replicas": 3, "selector": {"matchLabels": {"app": "web"}}}, "status": {"readyReplicas": 3}}));
+            "spec": {"replicas": 3, "selector": {"matchLabels": {"app": "web"}}}, "status": {"readyReplicas": 3, "updatedReplicas": 3}}));
         let mut ok = pod("web-1", "web", json!({"running": {"startedAt": "2026-01-01T00:00:00Z"}}));
         assert_eq!(brief("Deployment", &deploy, &[&ok]), "3/3");
         ok.data["status"]["containerStatuses"][0]["restartCount"] = json!(2);
         ok.data["status"]["containerStatuses"][0]["name"] = json!("c");
         ok.data["status"]["containerStatuses"][0]["lastState"] = json!({"terminated": {"exitCode": 137, "reason": "OOMKilled"}});
-        assert_eq!(brief("Deployment", &deploy, &[&ok]), "3/3 ↻2", "its pods' restarts");
+        assert_eq!(brief("Deployment", &deploy, &[&ok]), "3/3", "narrow: its pods' restarts are beside the code");
+        assert_eq!(summary("Deployment", &deploy, &[&ok]).0, "3/3 ready · 2 restarts");
+        assert_eq!(summary("Pod", &ok, &[]).0, "Running · 2 restarts");
         let said = describe(&ok, 0);
         assert!(said.contains("ready yes · restarts 2") && said.contains("last: OOMKilled"), "{said}");
     }

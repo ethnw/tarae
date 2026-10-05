@@ -54,7 +54,7 @@ pub struct Choice {
 /// risky one) — each once. Home, the project and the folders on PATH passed in.
 pub fn choices(denials: &[Denial], home: &Path, root: &Path, path: &[PathBuf]) -> Vec<Choice> {
     let mut out: Vec<Choice> = Vec::new();
-    let kept = crate::sandbox::kept_reads(home, None);
+    let kept = crate::sandbox::kept_reads(home, None, &crate::sandbox::HomeVars::here());
     for d in denials {
         let target = crate::sandbox::profile_path(Path::new(&d.target));
         let below = |dir: &Path| {

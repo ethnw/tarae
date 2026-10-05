@@ -149,10 +149,11 @@ fn on(event: Event, cx: Context) -> Vec<Action> {
 
 A plugin that needs more says so in `permissions()`. When it loads, a card lists what it asks for, in words (and how
 far it reaches: a program runs with any arguments, as you); until you press `y` it can do nothing beyond the buffer
-(its buffer-only commands still work). The card takes `y` only once it has been in sight for half a second, so a key
-meant for the code can't approve it. What you approve is kept, by the plugin's name; if a new version asks for
-something else, the card asks again. Said no? The plugin can't bring the card back — `:plugin-approve <plugin>`
-does.
+(its buffer-only commands still work). What it asks for while the card is up waits for your answer: `y` does it, in
+order, and the plugin goes on by itself; not now comes back as `failed`. The card takes `y` only once it has been in
+sight for half a second, so a key meant for the code can't approve it. What you approve is kept, by the plugin's
+name; if a new version asks for something else, the card asks again. Said no? The plugin can't bring the card back —
+`:plugin-approve <plugin>` does (what it asked for since was refused: ask again).
 
 ```rust
 fn permissions() -> Vec<Permission> {
@@ -231,9 +232,9 @@ the keys. While the debugger or the terminal has its place, it's out of sight an
 
 [`plugin-sdk/kubernetes`](../plugin-sdk/kubernetes) uses all of it: the cluster in the code. Open a manifest and
 each object in it has its state beside its `kind:` line (`2/3 ready · 1 ImagePullBackOff`, `Ready`, `not in
-prod-eks`), live; the status line says which cluster (`⎈` the kubeconfig's current context); the side panel's
+prod-eks`), live; the status line says which cluster (`k8s` and the kubeconfig's current context); the side panel's
 `k8s` tab is the file in front's, as the outline is (`shown`): its objects by kind, names under each — briefly: a number when it's fine (`3/3`,
-`3 pods`, `↻2` if its pods restarted), and when it isn't, why on a line of its own, under the pods that say it
+`3 pods`; its pods' restarts are beside the code, `3/3 ready · 2 restarts`), and when it isn't, why on a line of its own, under the pods that say it
 (newest first, `2m` if new). Below them, the other open files that aren't fine, to go to (`enter`); a file with
 none says so. `C-w e` takes the keys to the tab and back. `enter` goes to where one is defined (a pod: its logs), `d` describes a pod (its
 containers, how they last ended, conditions, events), `e` its events (a workload's with its pods'), `y` its live
@@ -256,7 +257,7 @@ scalar's text), fields the cluster has, compared by what they mean (`0.5` CPU is
 `managedFields` (server-side apply's record of each field's manager): `replicas: 1  → 3 · kubectl`. Why a
 workload's pods aren't fine goes on the line that's why, from the pods' own status (nothing more is asked of the
 cluster): an image that can't be pulled on its `image:` line (`ImagePullBackOff: not found`), a missing ConfigMap
-or Secret on the line that names it, `OOMKilled ↻3` on `limits.memory`, `CrashLoopBackOff · exit 1` on
+or Secret on the line that names it, `OOMKilled · 3 restarts` on `limits.memory`, `CrashLoopBackOff · exit 1` on
 `command:`, a container running unready for over a minute on `readinessProbe:`, and each of the scheduler's
 reasons on the request, `nodeSelector`/`affinity`, `tolerations` or `volumes` it's about. And what a line names
 that isn't there, before a pod finds out: a ConfigMap (or the key it reads from it), a Secret, a ServiceAccount, a
@@ -332,4 +333,4 @@ release's own values; never `insecure-skip-tls-verify`.
 | “its answer is too big” | over 64 MB of text and lists in one answer |
 | “crashed (a panic?)” | the plugin panicked |
 | `failed`: “it didn't ask to …” | add it to `permissions()` (then you approve it again) |
-| `failed`: “its permissions wait for your approval” | `y` on its card, or `:plugin-permissions` |
+| `failed`: “its permissions wait for your approval” | you said not now: `:plugin-approve <plugin>`, `y`, then ask again |

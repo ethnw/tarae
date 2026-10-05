@@ -3,7 +3,7 @@
 //!
 //! - an image that can't be pulled: its `image:` line (`ImagePullBackOff: not found`);
 //! - a ConfigMap or Secret a container needs that isn't there: the line that names it;
-//! - killed for memory: its `limits.memory` line (`OOMKilled ↻3`); crashing: its `command:` (or `args:`, or
+//! - killed for memory: its `limits.memory` line (`OOMKilled · 3 restarts`); crashing: its `command:` (or `args:`, or
 //!   its `name:`) line, with the exit code;
 //! - running but not ready for over a minute: its `readinessProbe:` line;
 //! - not scheduled: the requests, `nodeSelector` / `affinity`, `tolerations` or `volumes` the scheduler's
@@ -166,14 +166,15 @@ pub fn causes(fields: &[Field], pods: &[&DynamicObject], now: i64) -> Vec<Cause>
                     }
                     _ if ended["reason"] == "OOMKilled" => {
                         if let Some(l) = line(&["resources", "limits", "memory"]).or_else(|| line(&["name"])) {
-                            mine.push((l, format!("OOMKilled ↻{restarts}"), Tone::Error));
+                            mine.push((l, format!("OOMKilled · {}", crate::status::restarts(restarts)), Tone::Error));
                         }
                     }
                     "CrashLoopBackOff" => {
                         let code = ended["exitCode"].as_i64().map_or(String::new(), |c| format!(" · exit {c}"));
                         let l = line(&["command"]).or_else(|| line(&["args"])).or_else(|| line(&["name"]));
                         if let Some(l) = l {
-                            mine.push((l, format!("CrashLoopBackOff{code} ↻{restarts}"), Tone::Error));
+                            let n = crate::status::restarts(restarts);
+                            mine.push((l, format!("CrashLoopBackOff{code} · {n}"), Tone::Error));
                         }
                     }
                     _ => {}
@@ -299,10 +300,10 @@ spec:
     fn killed_for_memory_on_its_limit_crashing_on_its_command_not_ready_on_its_probe() {
         let oom = json!({"containerStatuses": [{"name": "web", "ready": false, "restartCount": 3,
             "state": {"waiting": {"reason": "CrashLoopBackOff"}}, "lastState": {"terminated": {"reason": "OOMKilled", "exitCode": 137}}}]});
-        assert_eq!(said(&[pod("a", oom)], 0), [(18, "OOMKilled ↻3".to_string(), Tone::Error)]);
+        assert_eq!(said(&[pod("a", oom)], 0), [(18, "OOMKilled · 3 restarts".to_string(), Tone::Error)]);
         let crash = json!({"containerStatuses": [{"name": "web", "ready": false, "restartCount": 2,
             "state": {"waiting": {"reason": "CrashLoopBackOff"}}, "lastState": {"terminated": {"reason": "Error", "exitCode": 1}}}]});
-        assert_eq!(said(&[pod("a", crash)], 0), [(12, "CrashLoopBackOff · exit 1 ↻2".to_string(), Tone::Error)]);
+        assert_eq!(said(&[pod("a", crash)], 0), [(12, "CrashLoopBackOff · exit 1 · 2 restarts".to_string(), Tone::Error)]);
         let unready = |since: &str| json!({"containerStatuses": [{"name": "web", "ready": false, "restartCount": 0,
             "state": {"running": {"startedAt": since}}}]});
         let at = crate::status::millis(&json!("2026-10-01T00:00:00Z")).unwrap();

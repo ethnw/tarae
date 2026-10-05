@@ -99,8 +99,9 @@ fn never(path: &Path, rules: &Rules, places: &[PathBuf]) -> bool {
 /// `allow::SECRETS`, Claude's own, cargo's credentials, tarae's state).
 fn key_places(home: Option<&Path>) -> Vec<PathBuf> {
     let Some(home) = home else { return Vec::new() };
-    let cargo = std::env::var_os("CARGO_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".cargo"));
-    crate::sandbox::kept_reads(home, Some(&crate::sandbox::profile_path(&cargo)))
+    let vars = crate::sandbox::HomeVars::here();
+    let cargo = vars.cargo_home.clone().unwrap_or_else(|| home.join(".cargo"));
+    crate::sandbox::kept_reads(home, Some(&crate::sandbox::profile_path(&cargo)), &vars)
 }
 
 /// `editor.recovery-skip`: a name (one `*` at most) matches any part of the path in any case; an entry
