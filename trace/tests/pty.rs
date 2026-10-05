@@ -47,16 +47,8 @@ fn a_write_to_a_slow_reader_waits_about_its_stall() {
         "the write waited {max:.1} ms for a reader stalled {STALL_MS} ms\n{summary}"
     );
     let s = r.writes.iter().find(|s| s.comm == "fixture-write").unwrap();
-    // The writing function calls glibc's write (→ __internal_syscall_cancel → __syscall_cancel_arch): found
-    // by frame pointers only where glibc keeps them
-    if cfg!(target_arch = "aarch64") {
-        assert!(s.user.iter().any(|f| f.ends_with("write_in_a_known_place")), "{:#?}", s.user);
-    } else {
-        eprintln!(
-            "tarae-test: not checked here — write_in_a_known_place in the write's stack: on x86_64 glibc's \
-             cancellable write keeps no frame pointer, so a frame-pointer walk loses its caller (DWARF \
-             unwinding is next)"
-        );
-    }
+    // The writing function calls glibc's write (→ __internal_syscall_cancel → __syscall_cancel_arch), which
+    // keeps no frame pointer on x86_64: its caller found by unwinding glibc's .eh_frame
+    assert!(s.user.iter().any(|f| f.ends_with("write_in_a_known_place")), "{:#?}", s.user);
     eprintln!("{summary}");
 }

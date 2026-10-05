@@ -171,13 +171,24 @@ thread_local! {
     pub static DROPPED_LATER: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// A thread of tarae's, by name — `tarae-<what>`, at most 15 bytes (what Linux keeps) — so `top -H`, a
-/// profiler or `tarae-trace` tells tarae's threads apart (unnamed, every one is called `tarae`).
+/// The bytes of a thread's name Linux keeps (the rest is cut: `top -H` and a profiler see only these).
+pub const THREAD_NAME_MAX: usize = 15;
+
+/// A thread name of tarae's fits `THREAD_NAME_MAX` (checked in debug builds, where every thread started says so).
+pub fn check_thread_name(name: &str) {
+    debug_assert!(
+        name.len() <= THREAD_NAME_MAX,
+        "{name}: Linux keeps {THREAD_NAME_MAX} bytes of a thread's name"
+    );
+}
+
+/// A thread of tarae's, by name — `tarae-<what>`, at most `THREAD_NAME_MAX` bytes — so `top -H`, a profiler
+/// or `tarae-trace` tells tarae's threads apart (unnamed, every one is called `tarae`).
 pub fn thread<T: Send + 'static>(
     name: &str,
     f: impl FnOnce() -> T + Send + 'static,
 ) -> thread::JoinHandle<T> {
-    debug_assert!(name.len() <= 15, "{name}: Linux keeps 15 bytes of a thread's name");
+    check_thread_name(name);
     thread::Builder::new().name(name.into()).spawn(f).expect("failed to spawn thread")
 }
 
@@ -213,5 +224,52 @@ mod tests {
         assert!(q.recv_timeout(Duration::from_millis(100)).is_none(), "nothing came back");
         q.jobs().spawn(|| |_: &mut Editor| {});
         assert!(q.recv_timeout(Duration::from_secs(5)).is_some(), "a spawned job's result does");
+    }
+
+    /// Every thread tarae starts has a name: `thread(…)`, or a `Builder` given one — the e2e test
+    /// (`every_thread_tarae_starts_has_a_name`, Linux) sees only the threads its scenario starts. A thread
+    /// started from the main thread without one is called `tarae` like it; from another, that one's name.
+    /// Scoped threads are left out (they end before their scope returns, inside a named thread's work). And
+    /// every name given as `thread("…")` fits `THREAD_NAME_MAX` — the assert only sees threads that start.
+    #[test]
+    fn every_thread_in_the_code_is_named() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") && !p.ends_with("tests.rs") {
+                    out.push(p);
+                }
+            }
+        }
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        walk(&src, &mut files);
+        let (mut unnamed, mut long) = (Vec::new(), Vec::new());
+        for f in files {
+            let text = std::fs::read_to_string(&f).unwrap();
+            // (a file's own tests start at its top-level `#[cfg(test)] mod`)
+            let code = text.split("\n#[cfg(test)]\nmod ").next().unwrap_or_default();
+            for (i, line) in code.lines().enumerate() {
+                let at = || format!("{}:{}", f.strip_prefix(&src).unwrap().display(), i + 1);
+                let from = code.lines().skip(i).take(4).collect::<String>();
+                let builder = line.contains("thread::Builder::new()") && !from.contains(".name(");
+                if line.contains("thread::spawn(") || builder {
+                    unnamed.push(at());
+                }
+                for (_, rest) in line.match_indices("thread(\"").map(|(j, m)| line.split_at(j + m.len())) {
+                    let name = rest.split('"').next().unwrap_or_default();
+                    if name.len() > THREAD_NAME_MAX {
+                        long.push(format!("{}: {name} ({} bytes)", at(), name.len()));
+                    }
+                }
+            }
+        }
+        assert!(
+            unnamed.is_empty(),
+            "threads started without a name (event::thread names one):\n{unnamed:#?}"
+        );
+        assert!(long.is_empty(), "names Linux cuts at {THREAD_NAME_MAX} bytes:\n{long:#?}");
     }
 }

@@ -60,7 +60,7 @@ pub fn unavailable() -> Option<String> {
 /// A listener on a filter of a short-lived thread's own (refused under another listener: `EBUSY`), and a
 /// descriptor of tarae's own taken through its pidfd (a container's filter refuses `pidfd_getfd`).
 fn probe() -> Result<(), String> {
-    let listener = std::thread::spawn(|| -> io::Result<()> {
+    let listener = crate::event::thread("tarae-seccomp", || -> io::Result<()> {
         let mut allow = [libc::sock_filter {
             code: (libc::BPF_RET | libc::BPF_K) as u16,
             jt: 0,

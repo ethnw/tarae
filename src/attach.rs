@@ -108,7 +108,7 @@ fn start_helper(cmd: &str, cwd: &Path) -> Result<Child, String> {
     let (tx, rx) = std::sync::mpsc::channel();
     if let Some(out) = child.stdout.take() {
         let tx = tx.clone();
-        std::thread::spawn(move || {
+        crate::event::thread("tarae-before", move || {
             let mut lines = BufReader::new(out).lines();
             let _ = tx.send(lines.next().and_then(Result::ok));
             for _ in lines {} // keep draining (so a full pipe doesn't stall it)
@@ -118,7 +118,7 @@ fn start_helper(cmd: &str, cwd: &Path) -> Result<Child, String> {
     let err_text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     if let Some(e) = err {
         let t = err_text.clone();
-        std::thread::spawn(move || {
+        crate::event::thread("tarae-before-er", move || {
             for l in BufReader::new(e).lines().map_while(Result::ok) {
                 let mut t = t.lock().unwrap();
                 if t.len() < 400 {

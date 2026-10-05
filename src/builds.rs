@@ -391,7 +391,7 @@ impl Builds {
             .spawn()
             .ok()?;
         let mut out = child.stdout.take()?;
-        let reader = std::thread::spawn(move || {
+        let reader = crate::event::thread("tarae-build-ask", move || {
             let mut s = Vec::new();
             let _ = out.read_to_end(&mut s);
             s

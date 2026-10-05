@@ -56,8 +56,9 @@ const MAX_TIMERS: usize = 256;
 /// How long a stopped program has before it's killed.
 const KILL_AFTER: Duration = Duration::from_secs(2);
 
-/// A thread, or why there isn't one (rather than a panic).
+/// A thread, or why there isn't one (rather than a panic) — its name as short as `event::thread`'s.
 fn thread(name: &str, f: impl FnOnce() + Send + 'static) -> Result<(), String> {
+    crate::event::check_thread_name(name);
     std::thread::Builder::new()
         .name(name.to_string())
         .spawn(f)
@@ -150,7 +151,7 @@ impl Clock {
         let mut st = lock.lock().expect("never poisoned");
         if !st.running {
             let clock = self.0.clone();
-            thread("tarae-plugin-clock", move || tick(&clock))?;
+            thread("tarae-plug-tick", move || tick(&clock))?;
             st.running = true;
         }
         st.serial += 1;
@@ -381,7 +382,7 @@ impl Editor {
             let (tx, rx) = mpsc::channel::<Vec<u8>>();
             let queued = Arc::new(AtomicUsize::new(0));
             let sock = Sock { serial, stream, tx, queued: queued.clone() };
-            thread("tarae-plugin-send", move || {
+            thread("tarae-plug-send", move || {
                 let mut w = writer;
                 while let Ok(bytes) = rx.recv() {
                     let ok = w.write_all(&bytes).is_ok();
@@ -393,7 +394,7 @@ impl Editor {
             })?;
             let events = self.events.shared_sender();
             let who = plugin.to_string();
-            thread("tarae-plugin-read", move || {
+            thread("tarae-plug-read", move || {
                 let mut r = reader;
                 let mut buf = vec![0u8; CHUNK];
                 let send = |ev: HostEvent| {
@@ -547,7 +548,7 @@ impl Editor {
         let id = sp.id;
         if let Some(err) = stderr {
             let (tail, name) = (tail.clone(), who.clone());
-            let started = thread("tarae-plugin-stderr", move || {
+            let started = thread("tarae-plug-err", move || {
                 crate::task::read_batches(err, |lines| {
                     let mut t = tail.lock().expect("never poisoned");
                     for l in lines {
@@ -571,7 +572,7 @@ impl Editor {
         let pid = child.id();
         let events = self.events.shared_sender();
         let done = ended.clone();
-        thread("tarae-plugin-run", move || {
+        thread("tarae-plug-run", move || {
             let reader_flow = flow.clone();
             let sender = move || {
                 let (who, flow, events) = (who.clone(), flow.clone(), events.clone());
@@ -592,7 +593,8 @@ impl Editor {
             let readers = usize::from(stdout.is_some());
             if let Some(out) = stdout {
                 let (send, flow) = (sender(), reader_flow);
-                std::thread::spawn(move || {
+                // (not started: `eof` gone with it, the wait below doesn't wait)
+                let _ = thread("tarae-plug-out", move || {
                     crate::task::read_batches(out, |lines| flow.wait() && send(HostEvent::Lines(id, lines)));
                     let _ = eof.send(());
                 });

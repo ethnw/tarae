@@ -68,15 +68,9 @@ fn a_known_wait_shows_up_in_its_function_with_its_time() {
     let s = r.stacks.iter().find(|s| s.user.iter().any(|f| f.ends_with(KNOWN))).unwrap();
     let at = s.user.iter().position(|f| f.ends_with(KNOWN)).unwrap();
     assert!(s.kernel.iter().any(|f| f.contains("nanosleep")), "the kernel's nanosleep: {s:#?}");
-    // The frames under it are std's and glibc's — walked by frame pointers only where those keep them
-    if cfg!(target_arch = "aarch64") {
-        assert!(s.user[at + 1..].iter().any(|f| f.contains("sleep")), "the sleep under it: {s:#?}");
-    } else {
-        eprintln!(
-            "tarae-test: not checked here — std::thread::sleep under {KNOWN}: on x86_64 std and Debian's \
-             glibc keep no frame pointers, so a frame-pointer walk loses them (DWARF unwinding is next)"
-        );
-    }
+    // The frames under it are std's and glibc's — which keep no frame pointers on x86_64: unwound by their
+    // .eh_frame
+    assert!(s.user[at + 1..].iter().any(|f| f.contains("sleep")), "the sleep under it: {s:#?}");
     // The main thread waited on the join about as long — in other stacks
     let main = r.threads().into_iter().find(|t| t.comm == "trace-fixture").expect(&summary);
     assert!(main.blocked_ns as f64 / 1e6 >= WAIT_MS * 0.95, "{summary}");
@@ -85,6 +79,47 @@ fn a_known_wait_shows_up_in_its_function_with_its_time() {
         s.user.join("\n    "),
         s.kernel.join(" → ")
     );
+}
+
+/// A wait under a frame whose frame-pointer register holds something else (`trace-fixture hidden`): a
+/// frame-pointer walk ends at it, so the function above is found only by unwinding with .eh_frame — on any
+/// architecture, as std and glibc need on x86_64.
+#[test]
+fn a_wait_under_a_frame_without_a_frame_pointer_is_named() {
+    const WAIT_MS: f64 = 500.0;
+    const ABOVE: &str = "wait_above_a_hidden_frame";
+    let _one = one_at_a_time();
+    let mut p = Command::new(FIXTURE)
+        .args(["hidden", &(WAIT_MS as u64).to_string()])
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let target = Target { pids: vec![p.id()], ..Target::default() };
+    let Some(mut t) = attach("a_wait_under_a_frame_without_a_frame_pointer_is_named", &target) else {
+        p.kill().ok();
+        p.wait().ok();
+        return;
+    };
+    writeln!(p.stdin.take().unwrap()).unwrap();
+    let mut status = None;
+    t.run_until(|| {
+        status = p.try_wait().unwrap();
+        status.is_some()
+    });
+    let r = t.finish("hidden").unwrap();
+    assert!(status.unwrap().success());
+    let summary = r.summary(10);
+    assert!(r.lost.values().all(|n| *n == 0), "lost: {:?}\n{summary}", r.lost);
+    let wait = r.stacks.iter().filter(|s| s.comm == "fixture-wait").max_by_key(|s| s.ns).expect(&summary);
+    assert!(wait.ns as f64 / 1e6 >= WAIT_MS * 0.9, "{wait:#?}\n{summary}");
+    let at = |name: &str| wait.user.iter().position(|f| f.ends_with(name));
+    let (above, hidden, below) = (at(ABOVE), at("call_without_a_frame_pointer"), at("sleep_below"));
+    assert!(
+        above.is_some() && above < hidden && hidden < below,
+        "{ABOVE} → call_without_a_frame_pointer → sleep_below, root first: {:#?}",
+        wait.user
+    );
+    eprintln!("{summary}  the wait, root first:\n    {}", wait.user.join("\n    "));
 }
 
 /// `--pid` on a process already running: its waits that start after the attach counted; its children only

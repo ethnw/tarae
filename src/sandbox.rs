@@ -685,7 +685,7 @@ impl RunDir {
 impl Drop for RunDir {
     fn drop(&mut self) {
         let dir = std::mem::take(&mut self.0);
-        std::thread::spawn(move || std::fs::remove_dir_all(dir));
+        crate::event::thread("tarae-tidy", move || std::fs::remove_dir_all(dir));
     }
 }
 
@@ -1010,7 +1010,7 @@ impl Watch {
     /// It ends itself unless a run has started under it (`run_started`) `within` from now.
     pub fn unless_claimed_within(self: &std::sync::Arc<Self>, within: std::time::Duration) {
         let w = std::sync::Arc::downgrade(self);
-        std::thread::spawn(move || {
+        crate::event::thread("tarae-watch", move || {
             std::thread::sleep(within);
             if let Some(w) = w.upgrade().filter(|w| !w.claimed.load(std::sync::atomic::Ordering::SeqCst)) {
                 w.fail(format!("its run didn't start within {}s", within.as_secs()));
@@ -1025,7 +1025,7 @@ impl Watch {
     pub fn run_started(self: &std::sync::Arc<Self>, pid: u32) {
         self.claimed.store(true, std::sync::atomic::Ordering::SeqCst);
         let w = std::sync::Arc::downgrade(self);
-        std::thread::spawn(move || {
+        crate::event::thread("tarae-watch", move || {
             // SAFETY: signal 0 only asks whether the process is there.
             let there = || unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
             let stopped = |w: &std::sync::Weak<Watch>| {
@@ -1092,7 +1092,7 @@ impl Watch {
         let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
         *self.child.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
         let (blocked, stopped) = (self.blocked.clone(), self.stopped.clone());
-        std::thread::spawn(move || {
+        crate::event::thread("tarae-deny-read", move || {
             use std::io::{BufRead, Read};
             for line in std::io::BufReader::new(stdout.expect("piped")).lines().map_while(Result::ok) {
                 for d in parse(&line) {
@@ -1145,7 +1145,7 @@ impl Watch {
         self.stopped.store(true, std::sync::atomic::Ordering::SeqCst);
         if let Some(mut c) = self.child.lock().unwrap_or_else(|e| e.into_inner()).take() {
             let _ = c.kill();
-            std::thread::spawn(move || c.wait());
+            crate::event::thread("tarae-reap", move || c.wait());
         }
     }
 }
@@ -2377,7 +2377,7 @@ pub fn spawn(policy: Option<&Policy>, cmd: &Command) -> std::io::Result<crate::s
         // (what was made first, still empty once the run is gone, goes — the run's own thread reaps it)
         let (made, pid) = (c.made.clone(), spawned.pid);
         if !made.paths.is_empty() {
-            std::thread::spawn(move || {
+            crate::event::thread("tarae-tidy", move || {
                 // SAFETY: signal 0 only asks whether the process is there.
                 while unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
                     std::thread::sleep(WATCH_LOOKS);

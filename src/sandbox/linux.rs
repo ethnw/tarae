@@ -135,7 +135,7 @@ impl Made {
             return;
         }
         let paths = self.paths.clone();
-        std::thread::spawn(move || tidy(&paths));
+        crate::event::thread("tarae-tidy", move || tidy(&paths));
     }
 }
 
@@ -143,7 +143,7 @@ impl Drop for Made {
     fn drop(&mut self) {
         if !self.paths.is_empty() && !self.tidied.swap(true, std::sync::atomic::Ordering::SeqCst) {
             let paths = std::mem::take(&mut self.paths);
-            std::thread::spawn(move || tidy(&paths));
+            crate::event::thread("tarae-tidy", move || tidy(&paths));
         }
     }
 }
@@ -620,7 +620,7 @@ fn audit_probe(
     let confined = spawned.ok().and_then(|_| confined.recv_timeout(std::time::Duration::from_secs(1)).ok());
     if confined.as_ref() != Some(&owner) {
         let _ = child.kill();
-        std::thread::spawn(move || child.wait());
+        crate::event::thread("tarae-reap", move || child.wait());
         let _ = std::fs::remove_dir_all(&folder);
         return Err(match confined {
             None => "Landlock confined no thread".into(),
@@ -631,7 +631,7 @@ fn audit_probe(
     }
     let (lines_tx, lines) = channel::<String>();
     let out = child.stdout.take();
-    std::thread::spawn(move || {
+    crate::event::thread("tarae-audit", move || {
         let Some(out) = out else { return };
         for l in io::BufRead::lines(io::BufReader::new(out)).map_while(Result::ok) {
             if lines_tx.send(l).is_err() {
@@ -656,7 +656,7 @@ fn audit_probe(
     }
     let _ = stop.send(());
     let _ = child.kill();
-    std::thread::spawn(move || child.wait());
+    crate::event::thread("tarae-reap", move || child.wait());
     let _ = std::fs::remove_dir_all(&folder);
     match (told, seen) {
         (true, _) => Ok(()),

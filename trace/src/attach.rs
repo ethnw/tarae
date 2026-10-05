@@ -4,18 +4,22 @@
 //! `ptywrite`) is its object plus what it reads at the end — the `Probe` trait.
 //!
 //! Pids are the tool's own pid namespace's (a container's, or the host's). The maps of a process are read
-//! when the BPF side marks it seen (its `seen` map, polled) and every `REREAD` after.
+//! when the BPF side marks it seen (its `seen` map, polled) and every `REREAD` after. The user stacks' copies
+//! (`stack_copies`) are taken off their ring as they come, by a thread of their own, and unwound at the end.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use libbpf_rs::{Link, Map, MapCore, MapFlags, Object, ObjectBuilder};
+use libbpf_rs::{Link, Map, MapCore, MapFlags, Object, ObjectBuilder, RingBufferBuilder};
 
 use crate::maps::{self, Region};
 use crate::procs;
 use crate::symbols::Symbols;
+use crate::unwind::{self, Copy, Unwinder};
 
 pub const COMM_LEN: usize = 16;
 /// Frames per stack (`MAX_DEPTH` in stacks.bpf.h).
@@ -154,6 +158,47 @@ pub fn monotonic_ns() -> u64 {
     ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
 }
 
+/// The user stacks' copies by stack id, as their reader took them off the ring.
+type Copies = Arc<Mutex<HashMap<u64, Copy>>>;
+
+/// The thread taking the copies off the ring until it's told to stop — then what's left on it too.
+struct Reader {
+    stop: Arc<AtomicBool>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl Reader {
+    /// Reads `ring` (`stack_copies`) into `copies`.
+    fn start(ring: &Map<'_>, copies: Copies) -> Result<Reader, Error> {
+        let mut b = RingBufferBuilder::new();
+        b.add(ring, move |r: &[u8]| {
+            if let Some((id, c)) = Copy::parse(r) {
+                copies.lock().unwrap_or_else(|e| e.into_inner()).insert(id, c);
+            }
+            0
+        })
+        .map_err(bpf("stack copies"))?;
+        let ring = b.build().map_err(bpf("stack copies"))?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = stop.clone();
+        let thread = std::thread::Builder::new()
+            .name("trace-copies".into())
+            .spawn(move || {
+                while !stopped.load(Ordering::SeqCst) {
+                    let _ = ring.poll(Duration::from_millis(20));
+                }
+                let _ = ring.consume();
+            })
+            .map_err(|e| Error::Other(format!("the stack copies' reader: {e}")))?;
+        Ok(Reader { stop, thread })
+    }
+
+    fn stop(self) {
+        self.stop.store(true, Ordering::SeqCst);
+        let _ = self.thread.join();
+    }
+}
+
 /// A probe's object, attached.
 pub struct Attached {
     pub obj: Object,
@@ -163,6 +208,17 @@ pub struct Attached {
     known: HashSet<u32>,
     t0: Instant,
     read_at: Instant,
+    copies: Copies,
+    reader: Option<Reader>,
+}
+
+impl Drop for Attached {
+    /// (the reader stops before the ring it reads is unmapped with the object)
+    fn drop(&mut self) {
+        if let Some(r) = self.reader.take() {
+            r.stop();
+        }
+    }
 }
 
 impl Attached {
@@ -180,8 +236,15 @@ impl Attached {
             known: HashSet::new(),
             t0: Instant::now(),
             read_at: Instant::now(),
+            copies: Copies::default(),
+            reader: None,
         };
         a.map("settings")?.update(&0u32.to_ne_bytes(), &cfg, MapFlags::ANY).map_err(bpf("settings"))?;
+        let reader = match a.map("stack_copies") {
+            Ok(ring) => Some(Reader::start(&ring, a.copies.clone())?),
+            Err(_) => None,
+        };
+        a.reader = reader;
         let mut seeds = target.pids.clone();
         if target.children {
             let all = procs::all();
@@ -250,12 +313,16 @@ impl Attached {
         }
     }
 
-    /// Detaches — the totals stop moving while they're read: the seconds traced, and the clock then.
+    /// Detaches — the totals stop moving while they're read: the seconds traced, and the clock then. The
+    /// copies still on the ring are taken off it.
     pub fn detach(&mut self) -> (f64, u64) {
         let secs = self.t0.elapsed().as_secs_f64();
         self.links.clear();
         let now = monotonic_ns();
         self.poll();
+        if let Some(r) = self.reader.take() {
+            r.stop();
+        }
         (secs, now)
     }
 
@@ -268,7 +335,7 @@ impl Attached {
     }
 
     /// The probe's own losses (`errors`, labelled in its order), the shared ones (`tracked` and `stacks`
-    /// full), and the switches of the comm in other pid namespaces.
+    /// full, stack copies the ring had no room for), and the switches of the comm in other pid namespaces.
     pub fn losses(&self, own: &[&str]) -> (BTreeMap<String, u64>, u64) {
         let mut lost: BTreeMap<String, u64> = own
             .iter()
@@ -278,14 +345,24 @@ impl Attached {
         let sel = self.counters("sel_errors", 2);
         lost.insert("tracked table full".into(), sel[0]);
         if self.map("stack_errors").is_ok() {
-            lost.insert("stack table full".into(), self.counters("stack_errors", 1)[0]);
+            let s = self.counters("stack_errors", 2);
+            lost.insert("stack table full".into(), s[0]);
+            lost.insert("stack copies dropped (ring full)".into(), s[1]);
         }
         (lost, sel[1])
     }
 
     /// Names stacks (by their ids in `stacks`) for the probe's report.
     pub fn namer(&self) -> Namer<'_> {
-        Namer { a: self, stacks: self.map("stacks").ok(), addrs: HashMap::new(), symbols: Symbols::new() }
+        Namer {
+            a: self,
+            stacks: self.map("stacks").ok(),
+            addrs: HashMap::new(),
+            symbols: Symbols::new(),
+            copies: self.copies.lock().unwrap_or_else(|e| e.into_inner()),
+            unwinder: Unwinder::default(),
+            unwound: HashMap::new(),
+        }
     }
 }
 
@@ -294,6 +371,10 @@ pub struct Namer<'a> {
     stacks: Option<Map<'a>>,
     addrs: HashMap<u64, Vec<u64>>,
     symbols: Symbols,
+    copies: MutexGuard<'a, HashMap<u64, Copy>>,
+    unwinder: Unwinder,
+    /// A user stack's frames by its id: unwound from its copy, the walk's beyond.
+    unwound: HashMap<u64, Vec<u64>>,
 }
 
 impl Namer<'_> {
@@ -313,15 +394,25 @@ impl Namer<'_> {
         Ok(a)
     }
 
-    /// A user stack of process `tgid`, root first, and which frames are its own code.
+    /// A user stack of process `tgid`, root first, and which frames are its own code — unwound from its copy
+    /// where there is one (`unwind.rs`), the frame-pointer walk's frames where not.
     pub fn user(&mut self, tgid: u32, id: u64) -> (Vec<String>, Vec<bool>) {
-        match self.addrs(id) {
-            Ok(a) => {
-                let p = self.a.kept.get(&tgid);
-                self.symbols.user(p.map(|p| p.regions.as_slice()), p.and_then(|p| p.exe.as_deref()), &a)
+        let walked = match self.addrs(id) {
+            Ok(a) => a,
+            Err(why) => return (vec![why], vec![false]),
+        };
+        let p = self.a.kept.get(&tgid);
+        let regions = p.map(|p| p.regions.as_slice());
+        let a = match (self.unwound.get(&id), self.copies.get(&id), regions) {
+            (Some(a), ..) => a.clone(),
+            (None, Some(c), Some(r)) => {
+                let a = unwind::merged(self.unwinder.frames(r, c), &walked);
+                self.unwound.insert(id, a.clone());
+                a
             }
-            Err(why) => (vec![why], vec![false]),
-        }
+            _ => walked,
+        };
+        self.symbols.user(regions, p.and_then(|p| p.exe.as_deref()), &a)
     }
 
     /// A kernel stack, root first.

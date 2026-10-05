@@ -1,13 +1,15 @@
 //! tarae-trace — eBPF probes that measure tarae on Linux, for its developers (`tarae-trace <probe> --pid …`
 //! on a running tarae; `cargo xtask trace` builds and runs it in a container, see `xtask/src/trace.rs`).
 //! Probes: `offcpu` (where threads wait), `syscalls` (the syscall mix), `pty` (terminal write latency). The
-//! probes and the symbolizing are Linux-only; the reports and the maps arithmetic build and test anywhere.
+//! probes and the symbolizing are Linux-only; the reports, the maps arithmetic and the unwinding's walk build
+//! and test anywhere.
 
 pub mod maps;
 pub mod procs;
 pub mod ptyreport;
 pub mod report;
 pub mod sysreport;
+pub mod unwind;
 
 #[cfg(target_os = "linux")]
 pub mod attach;

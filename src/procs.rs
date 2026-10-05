@@ -1832,7 +1832,7 @@ fn stop_unknown(pid: u32, started: u64) {
     // SAFETY: SIGTERM to a descendant of tarae's, as read a moment ago.
     unsafe { libc::kill(pid as i32, libc::SIGTERM) };
     if o.ppid == std::process::id() {
-        std::thread::spawn(move || crate::spawn::wait_once(pid));
+        crate::event::thread("tarae-reap", move || crate::spawn::wait_once(pid));
     }
 }
 

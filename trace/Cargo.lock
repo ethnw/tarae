@@ -328,6 +328,7 @@ name = "tarae-trace"
 version = "0.0.0"
 dependencies = [
  "blazesym",
+ "gimli",
  "libbpf-rs",
  "libc",
  "serde_json",

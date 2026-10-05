@@ -159,7 +159,7 @@ impl Write for Queued {
 
 fn queued(mut out: Box<dyn Write + Send>) -> Box<dyn Write + Send> {
     let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
-    std::thread::spawn(move || {
+    crate::event::thread("tarae-dap-write", move || {
         for msg in rx {
             if out.write_all(&msg).and_then(|_| out.flush()).is_err() {
                 break;
@@ -226,7 +226,7 @@ pub(crate) fn kill_group(c: &mut Child) {
 /// Gives the adapter up to 1 s to finish on its own (after disconnect), then stops its group
 /// (the debuggee too) and reaps it — on a thread.
 fn reap(mut c: Child) {
-    std::thread::spawn(move || {
+    crate::event::thread("tarae-reap", move || {
         let end = Instant::now() + Duration::from_secs(1);
         while Instant::now() < end && matches!(c.try_wait(), Ok(None)) {
             std::thread::sleep(Duration::from_millis(20));
@@ -269,7 +269,7 @@ fn spawn_adapter(
     let err = Arc::new(Mutex::new(Vec::new()));
     if let Some(e) = child.stderr.take() {
         let err = err.clone();
-        std::thread::spawn(move || {
+        crate::event::thread("tarae-dap-err", move || {
             for l in BufReader::new(e).lines().map_while(Result::ok).filter(|l| !l.trim().is_empty()) {
                 let mut v = err.lock().unwrap();
                 v.push(l);
@@ -638,7 +638,7 @@ impl Editor {
         generation: u64,
     ) {
         let tx = self.events.shared_sender();
-        std::thread::spawn(move || {
+        crate::event::thread("tarae-dap-read", move || {
             let mut r = BufReader::new(reader);
             while let Some(msg) = crate::lsp::read_message(&mut r) {
                 let apply = move |ed: &mut Editor| ed.on_dap(generation, msg);

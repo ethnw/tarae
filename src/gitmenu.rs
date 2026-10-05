@@ -254,7 +254,7 @@ pub(crate) fn git(dir: &Path, args: &[&str], input: Option<&str>) -> Result<Stri
         .map_err(|e| format!("git: {e}"))?;
     if let (Some(s), Some(mut stdin)) = (input, child.stdin.take()) {
         let s = s.to_string();
-        std::thread::spawn(move || {
+        crate::event::thread("tarae-git-feed", move || {
             use std::io::Write as _;
             let _ = stdin.write_all(s.as_bytes());
         });

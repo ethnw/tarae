@@ -279,7 +279,7 @@ fn batch(root: &Path, mode: &str, ids: &[&str]) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("git: {e}"))?;
     let mut stdin = child.stdin.take().ok_or("git: no stdin")?;
     let input: String = ids.iter().map(|i| format!("{i}\n")).collect();
-    let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
+    let writer = crate::event::thread("tarae-git-feed", move || stdin.write_all(input.as_bytes()));
     let mut out = Vec::new();
     child.stdout.take().ok_or("git: no stdout")?.read_to_end(&mut out).map_err(|e| e.to_string())?;
     let _ = writer.join();

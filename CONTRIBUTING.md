@@ -301,11 +301,10 @@ process, or the disk.
 
   For good stacks, build tarae with `RUSTFLAGS='-C force-frame-pointers=yes' cargo build --profile perf`.
 
-  On x86_64, user stacks are short for now. They're walked by frame pointers, which Rust's std and glibc
-  (Debian's) don't keep there, so the program's frame that called into them is lost: the frame above a
-  cancellable syscall (read, write, poll, nanosleep), and at times everything above libc. Times and kernel
-  stacks are right. aarch64 keeps every frame. Two fixture assertions are aarch64-only for this, and say so
-  when skipped. DWARF unwinding is the fix, next.
+  User stacks are unwound with the binaries' `.eh_frame`, so code without frame pointers keeps its frames —
+  on x86_64, Rust's std and Debian's glibc. The first time a stack is seen, its registers and 32 KB of it go
+  to the tool through a ring buffer, and it's unwound at the end. Above those 32 KB, the frame-pointer walk's
+  frames carry on.
 
   Reproducibly, in one Docker container on the Docker your CLI reaches (colima here), with tarae built and driven
   there by `tests/perf.rs`'s scenarios:
