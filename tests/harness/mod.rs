@@ -262,6 +262,10 @@ pub struct Output {
     /// Panics of the vt100 parser itself (it overflows on a 1-column screen). The parser is replaced with a
     /// blank one — tarae redraws whole frames, so the next frame fills it again.
     parser_panics: Vec<String>,
+    /// A frame's start has been read and its end not yet (`FRAME_START` … `FRAME_END`): the parsed screen is
+    /// half old, half new — not one to judge (#184: under load the chat's first line was read without the
+    /// lines under it, all written in one frame).
+    in_frame: bool,
 }
 
 pub type Shared = Arc<Mutex<Output>>;
@@ -356,6 +360,7 @@ impl Term {
             first_frame_at: None,
             last_frame_at: None,
             parser_panics: Vec::new(),
+            in_frame: false,
         }));
         let mut reader = master.try_clone().expect("dup master");
         let sink = Arc::clone(&out);
@@ -382,6 +387,8 @@ impl Term {
                             o.first_frame_at.get_or_insert(at);
                             o.last_frame_at = Some(at);
                         }
+                        // (with the parser, under the one lock: never one without the other)
+                        o.in_frame = in_frame_after(&o.raw[from..], o.in_frame);
                         let (rows, cols) = o.parser.screen().size();
                         let parser = &mut o.parser;
                         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -431,15 +438,31 @@ impl Term {
         lock(&self.out).raw.clone()
     }
 
-    /// Polls the screen until `done` holds. On timeout, panics with the whole screen.
+    /// The screen to judge: as of a frame's end, or outside frames — None while one is half read (#184: the
+    /// first rows of a frame were judged before the rest were read). A tarae that exited is judged as it left
+    /// the screen (one killed mid-frame never ends it).
+    fn whole(&mut self) -> Option<Screen> {
+        let running = matches!(self.child.try_wait(), Ok(None));
+        let o = lock(&self.out);
+        if o.in_frame && running {
+            return None;
+        }
+        let s = o.parser.screen();
+        let (_, cols) = s.size();
+        Some(Screen { rows: s.rows(0, cols).collect() })
+    }
+
+    /// Polls the screen — each whole frame — until `done` holds. On timeout, panics with the whole screen.
     pub fn wait_for(&mut self, what: &str, done: impl Fn(&Screen) -> bool) -> Screen {
         let deadline = Instant::now() + self.timeout;
         loop {
-            let s = self.screen();
-            if done(&s) {
+            if let Some(s) = self.whole()
+                && done(&s)
+            {
                 return s;
             }
             if Instant::now() > deadline {
+                let s = self.screen();
                 let state = match self.child.try_wait() {
                     Ok(Some(st)) => format!("tarae EXITED ({st})"),
                     _ => "tarae still running".to_string(),
@@ -456,8 +479,9 @@ impl Term {
     pub fn poll_for(&mut self, within: Duration, done: impl Fn(&Screen) -> bool) -> Option<Screen> {
         let deadline = Instant::now() + within;
         loop {
-            let s = self.screen();
-            if done(&s) {
+            if let Some(s) = self.whole()
+                && done(&s)
+            {
                 return Some(s);
             }
             if Instant::now() > deadline {
@@ -721,8 +745,22 @@ impl Drop for Watching {
     }
 }
 
-/// Where a frame ends (`CSI ?2026l`, the synchronized update's end).
+/// Where a frame ends (`CSI ?2026l`, the synchronized update's end) — and where one starts.
 pub const FRAME_END: &[u8] = b"\x1b[?2026l";
+pub const FRAME_START: &[u8] = b"\x1b[?2026h";
+
+/// Inside a frame or not after `bytes` (`was`: before them) — whichever of its marks came last; neither:
+/// as it was. `bytes` start a mark's length less one before the new ones, so a mark split across reads is
+/// seen.
+pub fn in_frame_after(bytes: &[u8], was: bool) -> bool {
+    let last = |mark: &[u8]| bytes.windows(mark.len()).rposition(|w| w == mark);
+    match (last(FRAME_START), last(FRAME_END)) {
+        (Some(s), Some(e)) => s > e,
+        (Some(_), None) => true,
+        (None, Some(_)) => false,
+        (None, None) => was,
+    }
+}
 
 /// A process's CPU time and context switches so far.
 #[derive(Clone, Copy, Debug, Default)]

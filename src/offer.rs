@@ -430,8 +430,10 @@ impl Offer {
             W::Install { .. } | W::Fetch { .. } => vec![('y', "Install"), ('n', "Not now"), ('N', "Never")],
             W::PluginPermissions { .. } => vec![('y', "Allow"), ('n', "Not now")],
             W::PluginAsk { .. } => vec![('y', "Allow"), ('n', "No")],
-            // (one socket past the sandbox — #119)
-            W::Run(r) if r.socket.is_some() => vec![('y', "This run"), ('a', "This chat"), ('n', "No")],
+            // (one socket past the sandbox — #119; `a` is the socket's, for any command — #182)
+            W::Run(r) if r.socket.is_some() => {
+                vec![('y', "This run"), ('a', "This socket, this chat"), ('n', "No")]
+            }
             W::Run(r) if r.keep => vec![('y', "Run"), ('a', "This chat"), ('A', "Always"), ('n', "No")],
             // (its pattern for the rest of the chat — the card says which)
             W::Run(r) if r.pattern.is_some() => vec![('y', "Run"), ('a', "This chat"), ('n', "No")],

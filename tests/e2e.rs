@@ -84,6 +84,24 @@ fn a_copy_over_ssh_goes_through_the_terminal() {
     assert!(s.contains("OSC 52"), "says how\n{s}");
 }
 
+/// #184: the harness judges a screen only between frames — read up to a frame's start and not its end, the
+/// parsed screen is half old, half new. A mark split across two reads is seen once its last byte comes.
+#[test]
+fn a_half_read_frame_is_not_judged() {
+    use harness::in_frame_after;
+    assert!(in_frame_after(b"old\x1b[?2026hthe first row", false), "started, not ended");
+    assert!(!in_frame_after(b"the last row\x1b[?2026l", true), "ended");
+    assert!(in_frame_after(b"\x1b[?2026l\x1b[?2026hnext", false), "one ended, the next begun");
+    assert!(!in_frame_after(b"\x1b[?2026hall\x1b[?2026l", false), "a whole one");
+    assert!(in_frame_after(b"rows, no mark", true) && !in_frame_after(b"plain", false), "no mark: as it was");
+    // (split: the reader looks again from a mark's length less one before the new bytes)
+    let (first, second) = (b"\x1b[?20".as_slice(), b"26hrow".as_slice());
+    assert!(!in_frame_after(first, false), "not yet a mark");
+    let mut seen = first[first.len().saturating_sub(harness::FRAME_START.len() - 1)..].to_vec();
+    seen.extend_from_slice(second);
+    assert!(in_frame_after(&seen, false), "its last byte come: a frame begun");
+}
+
 /// No claude on PATH (the sandbox's PATH has none): the chat says Claude Code isn't installed and how to get it
 /// and log in — not an OS error (#163).
 #[test]
@@ -97,7 +115,10 @@ fn a_chat_without_claude_says_how_to_get_it() {
     t.send("hello\r");
     // (the Enter handled and drawn too: it tries again)
     t.state_json(input + 8);
-    let s = t.wait_text("Claude Code isn't installed");
+    // (the message whole — #184: under load its first line was read before the rest of its frame)
+    let s = t.wait_for("the message, whole", |s| {
+        s.contains("Claude Code isn't installed") && s.contains("install.sh") && s.contains("log in")
+    });
     assert!(s.contains("install.sh"), "how to get it\n{s}");
     assert!(s.contains("log in"), "and log in\n{s}");
     assert!(!s.contains("os error"), "{s}");

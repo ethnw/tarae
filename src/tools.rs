@@ -959,6 +959,14 @@ fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
             Some(Beyond { reason: reason.to_string(), socket, since: None })
         }
     };
+    // (one socket this chat allows already — `a` on its card: the sandbox has it for every run of the chat,
+    // so it isn't asked again; the command goes as any does — #182: the very same call came back to its card)
+    let allowed_socket = |b: &Beyond| {
+        b.socket
+            .as_ref()
+            .is_some_and(|s| ed.session.chat.as_ref().is_some_and(|c| c.allowed.sockets.contains(s)))
+    };
+    let outside = outside.filter(|b| !allowed_socket(b));
     let cwd = run_cwd(&ed.session.root, args["cwd"].as_str())?;
     let mut call = call;
     call.trace = Some(crate::trace::RunTrace::new(format!("claude's run: {}", crate::task::traced(cmd))));
@@ -1475,8 +1483,11 @@ fn ask_with(
             }
             Some(s) => {
                 let g = crate::allow::Grant::Socket(s.clone());
+                // (what `a` allows, said exactly — #182: read as this command's, it was the socket's)
                 question.push_str(&format!(
-                    "It may connect to {} — that one file; everything else stays in the sandbox.",
+                    "It may connect to {} — that one file; everything else stays in the sandbox. y lets it \
+                     connect for this run only; a for the rest of this chat, whatever command asks — each \
+                     command is still asked as usual.",
                     crate::allow::tilde(s)
                 ));
                 if let Some(w) = g.warning() {
@@ -3357,6 +3368,56 @@ mod tests {
             let e = ask(&mut ed, &socket, reason).unwrap_err();
             assert!(e.contains(why) && ed.offers.is_empty(), "{socket}: {e}");
         }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #182: `a` on a socket's card is that socket for the rest of the chat, for any command — and the card
+    /// says so. Asked again for it (the very same call, right after — seen with `cargo xtask trace test`): no
+    /// socket card; the command goes as any command does — one that runs unasked runs, another gets its own
+    /// card, without the socket in it.
+    #[test]
+    fn a_socket_allowed_for_the_chat_isnt_asked_again() {
+        use serde_json::json;
+        let dir =
+            crate::sandbox::profile_path(&std::env::temp_dir()).join(format!("qa{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("c")).unwrap();
+        let sock = dir.join("c/docker.sock");
+        let _l = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        ed.session.root = dir.clone();
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        crate::chat::open(&mut ed);
+        let ask = |ed: &mut crate::editor::Editor, n: u64, command: &str| {
+            let args =
+                json!({ "command": command, "unix_socket": sock.to_str().unwrap(), "reason": "docker" });
+            super::run(ed, super::Call::test(n), &args)
+        };
+        // (stand-ins: `true` reads nothing and runs unasked; `make demo` — not a check — asks)
+        ask(&mut ed, 1, "true").unwrap();
+        let o = ed.offers.first().expect("its card");
+        assert_eq!(o.title, super::SOCKET_RUN_TITLE);
+        assert_eq!(o.answers(false), [('y', "This run"), ('a', "This socket, this chat"), ('n', "No")]);
+        let q = o.question.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            q.contains(
+                "y lets it connect for this run only; a for the rest of this chat, whatever command asks — each \
+                 command is still asked as usual."
+            ),
+            "{q}"
+        );
+        ed.offer_for_chat();
+        // The very same call again: no card — it runs
+        ed.offers.clear();
+        ask(&mut ed, 2, "true").unwrap();
+        assert!(ed.offers.is_empty(), "asked again: {:?}", ed.offers.first().map(|o| &o.question));
+        // Another command with it: its own card, as any — the socket not asked again
+        ask(&mut ed, 3, "make demo").unwrap();
+        let o = ed.offers.first().expect("the command's card");
+        assert_eq!(o.title, "Claude wants to run");
+        assert!(!o.question.contains("It may connect"), "{}", o.question);
+        ed.session.task_run = None;
         std::fs::remove_dir_all(&dir).ok();
     }
 

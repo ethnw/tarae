@@ -574,7 +574,8 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
   nothing kept. A request without a reason is turned back before it reaches you. When all it needs is one unix
   socket (a server's — `cargo xtask linux` talks to colima's Docker), Claude asks for that instead
   (`unix_socket`): the card names the file, says everything else stays in the sandbox, and offers `y` this
-  run or `a` this conversation
+  run or `a` this socket for the rest of the conversation — whatever command asks for it. Asked for it again,
+  it isn't a socket card; each command is still asked as any command is
 - **Since your last y.** When Claude asks again for a command you already said `y` to outside the sandbox in
   this conversation (the same run, from the same folder), its card says when that was and shows only what
   changed since in what the command runs. The same run is what runs: the program and its arguments before the

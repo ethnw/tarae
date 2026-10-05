@@ -1639,6 +1639,118 @@ fn review_rail_scrolls_by_itself_only_to_show_the_file() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// #179: a turn's review of 80 files in folders (~78 met), beside the chat, at heights from small to tall:
+/// the rail's rows stay inside it — its counts (`N of 80 viewed`) at the top and its keys at the bottom
+/// always in sight, the files between them counted above and below (`↑ a more` · shown · `↓ b more` = 80);
+/// the file in hand brought into view, anywhere in the list, without the head or the keys moving.
+#[test]
+fn review_rail_with_80_files_scrolls_and_keeps_its_counts() {
+    use crate::codereview::{Base, CodeReview, File};
+    let dir = std::env::temp_dir().join(format!("tarae-rail-80-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = std::fs::canonicalize(dir).unwrap();
+    let rel = |i: usize| format!("src/m{}/part{}/f{i:02}.rs", i / 10, i % 3);
+    let mut files: Vec<File> = (0..79)
+        .map(|i| {
+            let rel = rel(i);
+            std::fs::create_dir_all(dir.join(&rel).parent().unwrap()).unwrap();
+            std::fs::write(dir.join(&rel), "x\n").unwrap();
+            File { path: dir.join(&rel), rel, added: 3, removed: 1, new: false, gone: false, binary: false }
+        })
+        .collect();
+    // (one of Claude's temp files outside the checkout: a row more in the head)
+    let out = PathBuf::from("/tmp/tarae-rail-80/f79.rs");
+    files.push(File {
+        path: out.clone(),
+        rel: out.display().to_string(),
+        added: 2,
+        removed: 0,
+        new: true,
+        gone: false,
+        binary: false,
+    });
+    for (w, h, keys) in [(160, 16, false), (160, 20, true), (160, 30, false), (200, 50, true)] {
+        let mut s = Shot::new(w, h);
+        s.ed.session.root = dir.clone();
+        s.ed.config.llm.command = "sh".into();
+        s.ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        crate::chat::open(&mut s.ed);
+        s.ed.session.chat.as_mut().unwrap().focused = false;
+        s.ed.open(&dir.join(rel(0))).unwrap();
+        let turn = Base::Turn { at: 0, question: "split the modules".into() };
+        s.ed.session.code_review = Some(CodeReview::for_test(turn, dir.clone(), files.clone()));
+        // (the rail with the keys: its own hints — `]F file` last)
+        if keys {
+            crate::codereview::rail_focus(&mut s.ed);
+        }
+        let last_key = if keys { "]F file" } else { "q keep" };
+        let rows = |s: &mut Shot| -> Vec<String> {
+            let mut p = vt100::Parser::new(s.h, s.w, 0);
+            p.process(&s.frame());
+            p.screen().rows(0, s.w).collect()
+        };
+        let check = |rows: &[String], at: &str| {
+            let all = rows.join("\n");
+            let row_of = |t: &str| rows.iter().position(|r| r.contains(t));
+            let counts = row_of("of 80 viewed").unwrap_or_else(|| panic!("{at}: the counts in sight\n{all}"));
+            assert!(row_of("80 files").is_some_and(|r| r < counts), "{at}: the head\n{all}");
+            // The keys at the bottom of the rail, right over the status line, whole
+            let keys = row_of(last_key).unwrap_or_else(|| panic!("{at}: the keys in sight\n{all}"));
+            assert_eq!(keys, h as usize - 2, "{at}: the last key row ends the rail\n{all}");
+            let n = |arrow: &str| {
+                rows.iter()
+                    .find_map(|r| r.split(&format!("{arrow} ")).nth(1)?.split(" more").next()?.parse().ok())
+                    .unwrap_or(0usize)
+            };
+            let shown: Vec<usize> = rows
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.contains("◦ f") || r.contains("● f"))
+                .map(|(y, _)| y)
+                .collect();
+            assert!(!shown.is_empty(), "{at}: some files\n{all}");
+            assert!(
+                shown.iter().all(|&y| y > counts && y < keys - 4),
+                "{at}: files between head and keys\n{all}"
+            );
+            assert_eq!(n("↑") + shown.len() + n("↓"), 80, "{at}: every file counted\n{all}");
+            (n("↑"), n("↓"))
+        };
+        let (up, down) = check(&rows(&mut s), &format!("{h} rows, the first file"));
+        assert_eq!(up, 0, "{h} rows: from the top");
+        assert!(down > 0, "{h} rows: more below");
+        // The last file, then one in the middle: in view (the row in hand, `▎`), the head and keys where they
+        // were — shown from the code, or moved to with the rail's own keys while it has them
+        let order = s.ed.session.code_review.as_ref().unwrap().rail_order();
+        for at_ in [order.len() - 1, 41] {
+            let i = order[at_];
+            match keys {
+                false => crate::codereview::show(&mut s.ed, i, false),
+                true if at_ == order.len() - 1 => s.keys("G"),
+                true => {
+                    s.keys("gg");
+                    (0..at_).for_each(|_| s.keys("j"));
+                }
+            }
+            let r = rows(&mut s);
+            let at = format!("{h} rows, file {i}");
+            let (_, down) = check(&r, &at);
+            let name =
+                std::path::Path::new(&files[i].rel).file_name().unwrap().to_string_lossy().into_owned();
+            assert!(
+                r.iter().any(|row| row.starts_with('▎') && row.contains(&format!("◦ {name}"))),
+                "{at}: in view, in hand\n{}",
+                r.join("\n")
+            );
+            if at_ == order.len() - 1 {
+                assert_eq!(down, 0, "{at}: nothing below the last");
+            }
+        }
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// #73, #67: a turn's review with folders, the chat open beside it: the wheel scrolls the rail, a click on
 /// `↓ N more` / `↑ N more` scrolls it a page; a click on a file's `◦` opens it and marks it viewed — a
 /// second click right after (the file still opening) leaves it marked, and `space v m` still toggles.
