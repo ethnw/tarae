@@ -20,6 +20,8 @@ use crate::tools::{Extra, For, Job};
 pub struct BlockedRun {
     pub job: Job,
     pub denials: Vec<Denial>,
+    /// Linux: where the denials were told from (`Policy::denials_from`) — the cards say it.
+    pub from: Option<String>,
 }
 
 impl BlockedRun {
@@ -74,8 +76,7 @@ pub fn choices(denials: &[Denial], home: &Path, root: &Path, path: &[PathBuf]) -
                 let why = format!("{} was writing {} in it", d.process, below(&dir));
                 Choice { hint: below(&dir), grant: Grant::Write(dir), why }
             }));
-        } else if d.op == "network-outbound"
-            && let Some(n) = d.target.rsplit_once(':').and_then(|(_, p)| p.parse::<u16>().ok())
+        } else if let Some(n) = d.port_here()
             && !crate::sandbox::RISKY_PORTS.iter().any(|(p, _)| *p == n)
         {
             let why = format!("{} was connecting to it", d.process);
@@ -122,18 +123,24 @@ impl Editor {
             }
             (!seen.is_empty()).then_some(seen)
         };
+        let from = |g: Option<&crate::sandbox::Guard>| match g {
+            Some(crate::sandbox::Guard::In(p)) => p.denials_from(),
+            _ => None,
+        };
         let task = self.session.task_run.as_ref().and_then(|r| {
             Some((
                 r.started,
                 BlockedRun {
                     job: Job::Command(r.task.cmd.clone(), r.task.cwd.clone()),
                     denials: denials(r.guard.as_ref(), &r.output)?,
+                    from: from(r.guard.as_ref()),
                 },
             ))
         });
         let test = self.session.test_run.as_ref().and_then(|r| {
             let job = Job::Tests(Box::new(r.target.clone()));
-            Some((r.started, BlockedRun { job, denials: denials(r.guard.as_ref(), &r.output)? }))
+            let from = from(r.guard.as_ref());
+            Some((r.started, BlockedRun { job, denials: denials(r.guard.as_ref(), &r.output)?, from }))
         });
         match which {
             Which::Task => task.map(|t| t.1),
@@ -243,6 +250,9 @@ fn grant_card(
          choose. {lasts}",
         grant.shown()
     );
+    if let Some(from) = &run.from {
+        question.push_str(&format!("\n\nWhat it refused was read {from}."));
+    }
     let warn: Vec<String> = grant.warning().map(String::from).into_iter().chain(tokens).collect();
     let warning = (!warn.is_empty()).then(|| {
         question.push_str("\n\n");
@@ -311,6 +321,9 @@ mod tests {
             d("network-outbound", "remote:*:2375".into()),
             d("file-write-create", root.join(".git/index.lock").display().to_string()),
             d("mach-lookup", "com.apple.lsd.mapdb".into()),
+            // (Linux's supervisor names the address: a port on this machine is offered, one beyond isn't)
+            d("network-outbound", "remote:[::1]:8080".into()),
+            d("network-outbound", "remote:192.0.2.1:9".into()),
         ];
         let all = choices(&denials, &home, &root, &[]);
         assert_eq!((all[0].hint.as_str(), all[1].hint.as_str()), ("…/x", "…/_cacache/x"), "below the folder");
@@ -318,8 +331,13 @@ mod tests {
         let got: Vec<Grant> = all.into_iter().map(|c| c.grant).collect();
         assert_eq!(
             got,
-            [Grant::Write(home.join(".npm/_cacache")), Grant::Write(home.join(".npm")), Grant::Port(5432)],
-            "Docker's port and the project's .git aren't offered; each folder once"
+            [
+                Grant::Write(home.join(".npm/_cacache")),
+                Grant::Write(home.join(".npm")),
+                Grant::Port(5432),
+                Grant::Port(8080)
+            ],
+            "Docker's port, an address beyond this machine and the project's .git aren't offered; each folder once"
         );
         std::fs::remove_dir_all(&base).ok();
     }
@@ -375,7 +393,8 @@ mod tests {
             std::fs::write(base.join(f), text).unwrap();
         }
         let mut ed = Editor::new(crate::config::Config::default());
-        let run = BlockedRun { job: Job::Command("cat x".into(), base.clone()), denials: Vec::new() };
+        let run =
+            BlockedRun { job: Job::Command("cat x".into(), base.clone()), denials: Vec::new(), from: None };
         let choice = |dir: &str| Choice {
             grant: Grant::Read(base.join(dir)),
             hint: String::new(),

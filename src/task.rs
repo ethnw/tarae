@@ -592,8 +592,9 @@ impl Editor {
             cmd.env_remove("CDPATH");
         }
         cmd.current_dir(&task.cwd).env("NO_COLOR", "1").env("CARGO_TERM_COLOR", "never");
-        // (its own session and group, not a fork of the editor — `spawn.rs`)
-        let child = match crate::spawn::setsid(&cmd) {
+        // (its own session and group, not a fork of the editor — `spawn.rs`; on Linux from a thread confined
+        // to its sandbox)
+        let child = match crate::sandbox::spawn(sandbox, &cmd) {
             Ok(c) => c,
             Err(e) => {
                 trace.end(format!("didn't spawn: {e}"));

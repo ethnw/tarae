@@ -650,8 +650,9 @@ impl Editor {
         let mut cmd = crate::sandbox::command(policy, &argv[0], &argv[1..]);
         cmd.current_dir(&target.cwd).env("NO_COLOR", "1").env("CARGO_TERM_COLOR", "never");
         let wall = std::time::SystemTime::now();
-        // (its own session and group, not a fork of the editor — `spawn.rs`)
-        let child = match crate::spawn::setsid(&cmd) {
+        // (its own session and group, not a fork of the editor — `spawn.rs`; on Linux from a thread confined
+        // to its sandbox)
+        let child = match crate::sandbox::spawn(policy, &cmd) {
             Ok(c) => c,
             // (the previous run, if any, stays current — its lines·end still land)
             Err(e) => {

@@ -99,14 +99,17 @@ pub struct Ran {
 pub struct Made {
     pub runs: Vec<(SystemTime, Option<SystemTime>)>,
     pub dirs: Vec<PathBuf>,
-    /// Where a run's files count (real paths): `/private/tmp` and the user's temp folder — not what holds
+    /// Where a run's files count (real paths): `/tmp` and the user's temp folder — not what holds
     /// that (`$TMPDIR`'s parent has the apps' caches), nor the toolchain's folders.
     pub temp: Vec<PathBuf>,
 }
 
 impl Made {
     pub fn of(ran: &[Ran]) -> Made {
-        let temp = [PathBuf::from("/private/tmp"), crate::sandbox::profile_path(&std::env::temp_dir())];
+        let temp = [
+            crate::sandbox::profile_path(std::path::Path::new("/tmp")),
+            crate::sandbox::profile_path(&std::env::temp_dir()),
+        ];
         Made {
             runs: ran.iter().map(|r| (r.from, r.to)).collect(),
             dirs: ran.iter().filter_map(|r| r.dir.as_ref().map(|d| d.path().to_path_buf())).collect(),

@@ -431,7 +431,7 @@ pub static SETTINGS: &[Setting] = &[
     Setting {
         path: "llm.sandbox-network",
         kind: Kind::Bool,
-        doc: "Chat: the sandbox lets Claude's commands reach the network — but not this machine's risky ports (Docker, Jupyter…) unless in llm.sandbox-ports",
+        doc: "Chat: the sandbox lets Claude's commands reach the network — but not this machine's risky ports (Docker, Jupyter…) unless in llm.sandbox-ports. macOS only: on Linux they reach this machine at most",
         get: |c| Value::from(c.llm.sandbox_network),
         set: |c, v| c.llm.sandbox_network = b(v),
     },

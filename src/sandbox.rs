@@ -19,8 +19,17 @@
 //! `~/.cargo/build/shared` (`build.build-dir`) — which is why the toolchain's dirs come from `cargo
 //! metadata`, not a guess. Paths are matched as real paths (`/tmp` = `/private/tmp`): all are canonical.
 //!
-//! Where there's no sandbox (not macOS, or tarae itself runs inside one) Claude's commands don't run
-//! quietly without one: each asks, or the user agrees for the conversation, and the chat's title says so.
+//! On Linux the same policy is enforced by Landlock and seccomp instead of a profile (`linux.rs`): fully
+//! from Landlock ABI 3; at 1–2 as far as it goes, every run asking.
+//!
+//! Where there's no sandbox (no Landlock, another system, or tarae itself in a Seatbelt one) Claude's
+//! commands don't run quietly without one: each asks, or the user agrees for the conversation, and the chat's
+//! title says so.
+
+#[cfg(target_os = "linux")]
+pub mod linux;
+#[cfg(target_os = "linux")]
+pub mod supervisor;
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -28,10 +37,14 @@ use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
+#[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
 pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
 /// Set in a sandboxed command's environment (tarae's own tests read it: a sandbox can't start inside one).
 pub const MARK: &str = "TARAE_SANDBOXED";
+
+/// The shared temp folder, as a real path.
+const TMP: &str = if cfg!(target_os = "macos") { "/private/tmp" } else { "/tmp" };
 
 /// Whether this system can sandbox a command.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -40,6 +53,9 @@ pub enum Availability {
     #[default]
     Unknown,
     Ready,
+    /// A sandbox that goes only so far (why — Linux's Landlock below ABI 3): runs go in it, each asking first.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    Partial(String),
     /// Why there's none.
     Missing(String),
     /// Tests only: Claude's commands run as before — the sandbox's own tests set the others.
@@ -72,13 +88,19 @@ impl Guard {
     /// denies it counts too (`Policy::said_in_output` — the kernel's own report of a denial gets lost).
     pub fn report(&self, output: &[(bool, String)]) -> String {
         let rules = self.rules();
-        let unwatched = " \"Operation not permitted\" is likely the sandbox.";
         let Guard::In(p) = self else { return rules };
+        let unwatched = match p.denials_from() {
+            Some(from) => format!(
+                " What it refused is read {from}: \"Permission denied\" on a file, \"Operation not permitted\" on \
+                 a socket, is likely the sandbox."
+            ),
+            None => " \"Operation not permitted\" is likely the sandbox.".into(),
+        };
         let mut b = self.watch().map(|w| w.blocked()).unwrap_or_default();
         for d in p.said_in_output(output, &b.seen) {
             b.add(d);
         }
-        if self.watch().is_none() && b.total == 0 {
+        if (self.watch().is_none() || p.files_unwatched()) && b.total == 0 {
             return format!("{rules}{unwatched}");
         }
         if b.total > 0 {
@@ -100,11 +122,15 @@ impl Guard {
             if b.distinct > b.seen.len() {
                 s.push_str(&format!("  … and {} more\n", b.distinct - b.seen.len()));
             }
-            if b.seen.iter().any(|d| d.process == SEEN_IN_OUTPUT) {
-                s.push_str(
+            match p.denials_from() {
+                Some(from) if b.seen.iter().any(|d| d.process == SEEN_IN_OUTPUT) => {
+                    s.push_str(&format!("(Read {from}, judged by the sandbox's rules.)\n"))
+                }
+                None if b.seen.iter().any(|d| d.process == SEEN_IN_OUTPUT) => s.push_str(
                     "(What's said in the output is from its own error lines, judged by the sandbox's rules: the \
                      kernel's report of a denial gets lost now and then.)\n",
-                );
+                ),
+                _ => {}
             }
             let (kept, all) = self.kept(&b.seen);
             s.push_str(&kept);
@@ -152,7 +178,8 @@ impl Guard {
                     "the keychain" => services.push("the keychain"),
                     // (a JVM refused a port on this machine: Gradle's client and its daemon)
                     w if d.process == "java" && w.starts_with("connecting to port") => {
-                        daemon |= !p.network && !p.localhost;
+                        // (Linux: the open network isn't this machine's ports)
+                        daemon |= !p.localhost && !(p.network && p.linux_said().is_none());
                         all = false;
                     }
                     _ => all = false,
@@ -251,7 +278,10 @@ impl Guard {
         match self {
             Guard::In(p) => {
                 let ports = p.ports.iter().map(u16::to_string).collect::<Vec<_>>().join(", ");
-                let net = match (p.network, p.localhost, ports.is_empty()) {
+                let linux = p.linux_said();
+                // (Linux's supervisor opens nothing beyond this machine — said in its notes)
+                let beyond = p.network && linux.is_none();
+                let net = match (beyond, p.localhost, ports.is_empty()) {
                     (true, ..) => ", and reach the network — but not this machine's risky ports (Docker, Jupyter, \
                                    debuggers…)"
                         .to_string(),
@@ -306,10 +336,14 @@ impl Guard {
                     }
                     None => String::new(),
                 };
+                let (names_where, net, linux) = match linux {
+                    Some((said, notes)) => ("where they are now", said.unwrap_or(net), notes),
+                    None => ("anywhere in it", net, String::new()),
+                };
                 format!(
-                    "In tarae's sandbox: it could {reads}write only in the project — not {names}, anywhere in it \
+                    "In tarae's sandbox: it could {reads}write only in the project — not {names}, {names_where} \
                      (Edit changes those) — temp folders and the toolchain's own{crates}{net}.{granted}{refused}\
-                     {copies}"
+                     {copies}{linux}"
                 )
             }
             Guard::Without(why) => format!("Ran without a sandbox ({why}) — the user agreed."),
@@ -380,6 +414,10 @@ pub struct Policy {
     pub reads: Reads,
     /// Gradle in it: a home of the run's own (`gradle_run_home`).
     pub gradle: Gradle,
+    /// Linux: the policy as Landlock's rules (`linux::confine`, made on the worker) — Err why it couldn't be
+    /// (the run then doesn't start: `spawn`); None before it's made (`policy` makes it).
+    #[cfg(target_os = "linux")]
+    pub confine: Option<Result<linux::Confine, String>>,
 }
 
 /// Gradle in a run: the user's Gradle home, and the environment that points Gradle at the run's own.
@@ -580,7 +618,7 @@ pub fn cargo_dir_verdict(
     if own.is_some_and(|o| o == d && per_checkout(o)) {
         return Ok(true);
     }
-    let temps = [Some(Path::new("/private/tmp")), tmp];
+    let temps = [Some(Path::new(TMP)), tmp];
     if temps.iter().flatten().any(|t| d.starts_with(t) && d != *t) {
         return Ok(false);
     }
@@ -642,6 +680,23 @@ const SEEN_IN_OUTPUT: &str = "said in the output";
 pub(crate) const EITHER: &str = "file-read* file-write*";
 
 impl Denial {
+    /// The port on this machine a connection was refused on — Seatbelt names no address (`remote:*:9`, so
+    /// any port counts), Linux's supervisor does (`remote:127.0.0.1:9`, `remote:[::1]:9`). None for an
+    /// address beyond this machine.
+    pub fn port_here(&self) -> Option<u16> {
+        let rest = self.target.strip_prefix("remote:").filter(|_| self.op == "network-outbound")?;
+        let (host, port) = rest.rsplit_once(':')?;
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        let here = host == "*"
+            || host.parse::<std::net::IpAddr>().is_ok_and(|ip| match ip {
+                std::net::IpAddr::V6(v6) => {
+                    v6.to_ipv4_mapped().map_or(v6.is_loopback(), |v4| v4.is_loopback())
+                }
+                v4 => v4.is_loopback(),
+            });
+        port.parse().ok().filter(|_| here)
+    }
+
     /// The file it was about: the target — for a refused link, the file linked.
     fn file(&self) -> Option<&Path> {
         match self.op.as_str() {
@@ -687,11 +742,14 @@ impl Denial {
             }
             _ if op.starts_with("file-write") => format!("changing {t}"),
             "network-outbound" if t.starts_with('/') => format!("connecting to socket {t}"),
-            "network-outbound" if t.starts_with("remote:") => match t.rsplit_once(':') {
-                Some((_, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => {
-                    format!("connecting to port {port}")
-                }
-                _ => self.shown(),
+            "network-outbound" if t.starts_with("remote:") => match self.port_here() {
+                Some(port) => format!("connecting to port {port}"),
+                None => match t.strip_prefix("remote:") {
+                    Some(at) if at.rsplit_once(':').is_some_and(|(_, p)| p.parse::<u16>().is_ok()) => {
+                        format!("connecting to {at}")
+                    }
+                    _ => self.shown(),
+                },
             },
             "network-bind" if t.starts_with('/') => format!("making socket {t}"),
             "appleevent-send" if !t.is_empty() => format!("Apple Event to {t}"),
@@ -804,6 +862,7 @@ impl Blocked {
 /// `eventMessage`: `Sandbox: touch(80432) deny(1) file-write-create /path` with the tag after it (on a line
 /// of its own, measured — or after a space). A line of repeats (`3 duplicate reports for Sandbox: …`) counts
 /// once.
+#[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
 pub fn parse_denial(json: &str, tag: &str) -> Option<Denial> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
     let msg = v["eventMessage"].as_str()?;
@@ -844,9 +903,10 @@ pub fn live_watches() -> Vec<std::sync::Arc<Watch>> {
     live.iter().filter_map(std::sync::Weak::upgrade).collect()
 }
 
-/// The kernel's denials for one run (`log stream`, only the lines with its tag), gathered on a thread of its
-/// own; stopped when the run is done (`finish`), when its process is gone (`run_started`), when it never
-/// starts (`WATCH_UNCLAIMED`), or when the last holder lets go.
+/// The kernel's denials for one run (macOS: `log stream`, only the lines with its tag; Linux: Landlock's
+/// audit records of its domain — `linux::Audit`), gathered on a thread of its own; stopped when the run is
+/// done (`finish`), when its process is gone (`run_started`), when it never starts (`WATCH_UNCLAIMED`), or
+/// when the last holder lets go.
 pub struct Watch {
     tag: String,
     child: Mutex<Option<std::process::Child>>,
@@ -854,6 +914,9 @@ pub struct Watch {
     stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Its run started (`run_started`).
     claimed: std::sync::atomic::AtomicBool,
+    /// Linux: the thread that confined its run (`owned_by`) — its audit records name it.
+    #[cfg(target_os = "linux")]
+    owner: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl std::fmt::Debug for Watch {
@@ -879,9 +942,17 @@ impl Watch {
             blocked: Default::default(),
             stopped: Default::default(),
             claimed: Default::default(),
+            #[cfg(target_os = "linux")]
+            owner: Default::default(),
         });
         LIVE.lock().unwrap_or_else(|e| e.into_inner()).push(std::sync::Arc::downgrade(&w));
         w
+    }
+
+    /// Linux: its run was confined by thread `tid` (`spawn`).
+    #[cfg(target_os = "linux")]
+    pub fn owned_by(&self, tid: u32) {
+        self.owner.store(tid, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// It ends itself unless a run has started under it (`run_started`) `within` from now.
@@ -923,29 +994,57 @@ impl Watch {
 
     /// Starts `log stream` for `tag` (on a worker: it returns at once, but give it `WATCH_READY` before the
     /// run starts). When it can't run or ends early, `blocked().failed` says why.
+    #[cfg(not(target_os = "linux"))]
     pub fn start(tag: &str) -> std::sync::Arc<Watch> {
         let w = Watch::quiet(tag);
         let predicate = format!("sender == \"Sandbox\" AND eventMessage CONTAINS \"{tag}\"");
-        let spawned = Command::new("/usr/bin/log")
-            .args(["stream", "--style", "ndjson", "--predicate", &predicate])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn();
+        let mut c = Command::new("/usr/bin/log");
+        c.args(["stream", "--style", "ndjson", "--predicate", &predicate]);
+        let tag = tag.to_string();
+        w.read(c, move |line| parse_denial(line, &tag).into_iter().collect());
+        w
+    }
+
+    /// Linux: Landlock's audit records (`linux::audit_stream`), its run's domain told by the thread that
+    /// confined it (`owned_by`). As `start`.
+    #[cfg(target_os = "linux")]
+    pub fn start_audit(tag: &str) -> std::sync::Arc<Watch> {
+        Watch::start_audit_from(tag, linux::audit_stream())
+    }
+
+    /// `start_audit` reading `stream` (a stand-in for `journalctl` in tests).
+    #[cfg(target_os = "linux")]
+    pub fn start_audit_from(tag: &str, stream: Command) -> std::sync::Arc<Watch> {
+        let w = Watch::quiet(tag);
+        let (owner, mut audit) = (w.owner.clone(), linux::Audit::default());
+        w.read(stream, move |line| {
+            let tid = owner.load(std::sync::atomic::Ordering::SeqCst);
+            audit.owner = (tid != 0).then_some(tid);
+            audit.line(line)
+        });
+        w
+    }
+
+    /// Reads what `cmd` prints, line by line, on a thread of its own: each line's denials (`parse`) are the
+    /// run's. Its child is the watch's; one that can't start or ends early says why in `blocked().failed`.
+    fn read(
+        self: &std::sync::Arc<Self>,
+        mut cmd: Command,
+        mut parse: impl FnMut(&str) -> Vec<Denial> + Send + 'static,
+    ) {
+        let name = cmd.get_program().to_string_lossy().into_owned();
+        let spawned = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn();
         let mut child = match spawned {
             Ok(c) => c,
-            Err(e) => {
-                w.fail(format!("/usr/bin/log: {e}"));
-                return w;
-            }
+            Err(e) => return self.fail(format!("{name}: {e}")),
         };
         let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
-        *w.child.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
-        let (blocked, stopped, tag) = (w.blocked.clone(), w.stopped.clone(), tag.to_string());
+        *self.child.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
+        let (blocked, stopped) = (self.blocked.clone(), self.stopped.clone());
         std::thread::spawn(move || {
             use std::io::{BufRead, Read};
             for line in std::io::BufReader::new(stdout.expect("piped")).lines().map_while(Result::ok) {
-                if let Some(d) = parse_denial(&line, &tag) {
+                for d in parse(&line) {
                     blocked.lock().unwrap_or_else(|e| e.into_inner()).add(d);
                 }
             }
@@ -955,12 +1054,11 @@ impl Watch {
                 if let Some(mut e) = stderr {
                     let _ = e.read_to_string(&mut said);
                 }
-                let why = said.lines().find(|l| !l.trim().is_empty()).unwrap_or("log stream ended").trim();
-                blocked.lock().unwrap_or_else(|e| e.into_inner()).failed = Some(why.to_string());
+                let why = said.lines().find(|l| !l.trim().is_empty()).unwrap_or("it ended").trim();
+                blocked.lock().unwrap_or_else(|e| e.into_inner()).failed = Some(format!("{name}: {why}"));
             }
         });
-        w.unless_claimed_within(WATCH_UNCLAIMED);
-        w
+        self.unless_claimed_within(WATCH_UNCLAIMED);
     }
 
     /// A watch whose child is `program args` — a stand-in for `log stream` (tests; killed with it).
@@ -972,8 +1070,8 @@ impl Watch {
         w
     }
 
-    /// A denial, as if reported (tests).
-    #[cfg(test)]
+    /// A denial told by what refused it — Linux's supervisor (`supervisor::refuse`), tests.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn record(&self, d: Denial) {
         self.blocked.lock().unwrap_or_else(|e| e.into_inner()).add(d);
     }
@@ -1061,7 +1159,8 @@ fn paths_in(line: &str, root: &Path) -> Vec<PathBuf> {
                 _ => {}
             }
         }
-        match ["tmp", "var", "etc"].iter().any(|d| out.starts_with(Path::new("/").join(d))) {
+        let private = ["tmp", "var", "etc"].iter().any(|d| out.starts_with(Path::new("/").join(d)));
+        match private && cfg!(target_os = "macos") {
             true => Path::new("/private").join(out.strip_prefix("/").unwrap_or(&out)),
             false => out,
         }
@@ -1075,12 +1174,14 @@ fn paths_in(line: &str, root: &Path) -> Vec<PathBuf> {
 
 /// Lines of output that say a permission was refused — what's left to go by when nothing watched.
 pub fn refused_lines(output: &[(bool, String)]) -> Vec<String> {
-    output
-        .iter()
-        .filter(|(_, l)| l.to_ascii_lowercase().contains("operation not permitted"))
-        .take(5)
-        .map(|(_, l)| l.clone())
-        .collect()
+    output.iter().filter(|(_, l)| refusal(l)).take(5).map(|(_, l)| l.clone()).collect()
+}
+
+/// Whether a line says the sandbox may have refused something: "Operation not permitted" (Seatbelt's, and
+/// seccomp's on Linux), and on Linux "Permission denied" (Landlock's).
+fn refusal(line: &str) -> bool {
+    let l = line.to_ascii_lowercase();
+    l.contains("operation not permitted") || (cfg!(target_os = "linux") && l.contains("permission denied"))
 }
 
 /// The names every project keeps, whatever its languages: tarae's project config (its trusted settings and
@@ -1135,10 +1236,12 @@ const OUTPUTS: [&str; 2] = ["target", "node_modules"];
 /// The longest run of names (`a|b|…`) in one regex of the profile. Seatbelt refuses a string literal past
 /// about a kilobyte — "Error reading string", exit 65 (measured: 1032 characters refused, 578 taken) — and
 /// every pack's names in any case are past it, so they go in several regexes of this much at most.
+#[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
 const NAMES_PER_REGEX: usize = 400;
 
 /// The protected names (`protected_names`) as Seatbelt regex alternatives in any case, a name of several
 /// parts joined with `/`, split in runs of at most `NAMES_PER_REGEX` characters.
+#[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
 fn name_regexes() -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for n in protected_names() {
@@ -1155,6 +1258,7 @@ fn name_regexes() -> Vec<String> {
 }
 
 /// A name as a Seatbelt regex in any case: `[bB][uU][iI][lL][dD]\.[rR][sS]`.
+#[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
 fn any_case(name: &str) -> String {
     name.chars()
         .map(|c| match c {
@@ -1176,6 +1280,7 @@ pub fn protected_in(root: &Path, path: &Path) -> bool {
 }
 
 /// Device files every program writes to (`/dev/null`, terminals — a pty test hangs without them: measured).
+#[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
 const DEVICES: &str = "(allow file-write* (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/tty\") \
 (literal \"/dev/ptmx\") (literal \"/dev/dtracehelper\") (regex #\"^/dev/ttys[0-9]+$\") (subpath \"/dev/fd\"))\n";
 
@@ -1222,6 +1327,7 @@ const CARGO_FILES: [&str; 8] = [
 /// The extended attribute cargo sets on `registry` and `git` at every run, so file sync (iCloud, File
 /// Provider) leaves them alone — the one write to the caches an offline build makes (measured, cargo 1.99,
 /// 2026-10-04): denied, the build goes on, but every run's report would carry it.
+#[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
 const CARGO_XATTR: &str = "com.apple.fileprovider.ignore#P";
 
 /// The keychain's servers: the only lookup `security find-generic-password` makes (measured) — the keychain
@@ -1230,12 +1336,14 @@ const KEYCHAIN: [&str; 2] = ["com.apple.SecurityServer", "com.apple.securityd"];
 
 /// What a run never reaches: the clipboard (`pbpaste` reads it — measured, exit 0 open, 1 denied) and the
 /// keychain's servers. No toolchain looks either up (measured: preflight, Go, Node, a shot, e2e).
+#[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
 fn kept_services() -> String {
     let keychain: String = KEYCHAIN.iter().map(|k| format!(" (global-name \"{k}\")")).collect();
     format!("mach-lookup (global-name-regex #\"^com\\.apple\\.pasteboard\\.\"){keychain}")
 }
 
 /// Ways to get something run outside: Apple Events to other apps, LaunchServices (`open`).
+#[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
 const NO_WAY_OUT: [&str; 2] = [
     "appleevent-send",
     "mach-lookup (global-name \"com.apple.coreservices.launchservicesd\") (global-name-regex #\"^com\\.apple\\.lsd\\.\")",
@@ -1244,6 +1352,7 @@ const NO_WAY_OUT: [&str; 2] = [
 impl Policy {
     /// The Seatbelt profile. Paths aren't in it: they're `-D` parameters (`params`), so no path can change
     /// what it says. Every deny carries the run's tag (`tag`) — the only text from outside, and tarae's own.
+    #[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
     pub fn profile(&self) -> String {
         let with = self.tag.as_ref().map(|t| format!(" (with message \"{t}\")")).unwrap_or_default();
         let deny = |rule: &str| format!("(deny {rule}{with})\n");
@@ -1380,7 +1489,69 @@ impl Policy {
         p
     }
 
+    /// Linux: how the report says the network where it differs from macOS's words — tarae's supervisor
+    /// serving: as macOS has it, but nothing beyond this machine (`None`); not serving here: no socket at all,
+    /// this machine's ports and the project's unix sockets included, and why — and what Landlock can't keep
+    /// (`linux.rs`). None elsewhere.
+    pub fn linux_said(&self) -> Option<(Option<String>, String)> {
+        #[cfg(target_os = "linux")]
+        if let Some(Ok(c)) = &self.confine {
+            let asked = self.network || self.localhost || !self.ports.is_empty() || !self.sockets.is_empty();
+            let net = c.serve.as_ref().err().map(|why| {
+                format!(
+                    ", and make no socket: no network, not even this machine's ports, and no unix socket — not \
+                     even in the project or its own folder, which macOS allows (tarae can't serve them here: \
+                     {why}){}",
+                    if asked {
+                        " — what llm.sandbox-network, -localhost, -ports or a socket grant open, too"
+                    } else {
+                        ""
+                    }
+                )
+            });
+            let beyond = match c.serve.is_ok() && self.network {
+                true => " On Linux llm.sandbox-network doesn't open the network beyond this machine yet.",
+                false => "",
+            };
+            let notes = format!(
+                " On Linux a protected name it makes where none is yet isn't refused, and the terminal \
+                 multiplexers' folders in /tmp stay writable.{beyond}{}",
+                linux::notes(c.abi)
+            );
+            return Some((net, notes));
+        }
+        None
+    }
+
+    /// Linux without Landlock's audit log: what a run was refused in files is read from its own error lines
+    /// only, though its watch hears what the supervisor refused.
+    fn files_unwatched(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        return matches!(&self.confine, Some(Ok(c)) if !c.audit);
+        #[cfg(not(target_os = "linux"))]
+        false
+    }
+
+    /// Linux: where what a run refused is told from — Landlock's audit log, or the run's own error lines and
+    /// why. None elsewhere (macOS's log, always).
+    pub fn denials_from(&self) -> Option<String> {
+        #[cfg(target_os = "linux")]
+        if let Some(Ok(c)) = &self.confine {
+            return Some(match (c.audit, c.abi) {
+                (true, _) => "from Landlock's audit log".into(),
+                (false, n) if n < 7 => {
+                    format!(
+                        "from its own error lines — this kernel's Landlock (ABI {n}) doesn't log what it refuses"
+                    )
+                }
+                _ => "from its own error lines — tarae can't read the kernel's log here".into(),
+            });
+        }
+        None
+    }
+
     /// The kept places (`Reads::kept`, by index) that hold the project, and the others.
+    #[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
     fn kept_split(&self) -> (Vec<usize>, Vec<usize>) {
         (0..self.reads.kept.len()).partition(|&i| self.root.starts_with(&self.reads.kept[i]))
     }
@@ -1426,13 +1597,20 @@ impl Policy {
     /// already said aren't again. Relative paths are from the project (`paths_in`: no disk).
     pub fn said_in_output(&self, output: &[(bool, String)], seen: &[Denial]) -> Vec<Denial> {
         const BEFORE: usize = 3;
-        let refused =
-            |l: &str| l.contains("ermitted") && l.to_ascii_lowercase().contains("operation not permitted");
+        let refused = |l: &str| l.contains("ermi") && refusal(l);
         let failed = |l: &str| {
             let l = l.to_ascii_lowercase();
-            ["operation not permitted", "fail", "error", "cannot", "can't", "couldn't", "unable"]
-                .iter()
-                .any(|w| l.contains(w))
+            let words = [
+                "not permitted",
+                "permission denied",
+                "fail",
+                "error",
+                "cannot",
+                "can't",
+                "couldn't",
+                "unable",
+            ];
+            words.iter().any(|w| l.contains(w))
         };
         let mut near = vec![false; output.len()];
         for (i, _) in output.iter().enumerate().filter(|(_, (_, l))| refused(l)) {
@@ -1459,6 +1637,7 @@ impl Policy {
     }
 
     /// The profile's parameters (name, value).
+    #[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
     pub fn params(&self) -> Vec<(String, String)> {
         let s = |p: &Path| p.to_string_lossy().into_owned();
         let mut v = vec![("ROOT".to_string(), s(&self.root))];
@@ -1481,6 +1660,7 @@ impl Policy {
     }
 
     /// `sandbox-exec`'s arguments before the command.
+    #[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
     pub fn args(&self) -> Vec<String> {
         let mut a = vec!["-p".to_string(), self.profile()];
         for (k, v) in self.params() {
@@ -1502,7 +1682,7 @@ impl Policy {
                 protect.push(root.join(rel));
             }
         }
-        let mut write = vec![PathBuf::from("/private/tmp")];
+        let mut write = vec![PathBuf::from(TMP)];
         if let Some(t) = &env.tmp {
             write.push(user_temp(t));
         }
@@ -1561,6 +1741,8 @@ impl Policy {
             refused,
             reads: env.reads.clone(),
             gradle: Gradle { user: env.gradle.clone(), env: Vec::new() },
+            #[cfg(target_os = "linux")]
+            confine: None,
         }
     }
 }
@@ -1568,7 +1750,7 @@ impl Policy {
 /// Where tmux and zellij keep their sockets: tmux in `$TMUX_TMPDIR` (else `/tmp`) `/tmux-<uid>`, zellij in
 /// `$ZELLIJ_SOCKET_DIR` (else `$TMPDIR/zellij-<uid>`). Real paths.
 fn mux_dirs(env: &Env) -> Vec<PathBuf> {
-    let tmux_base = env.tmux_tmpdir.as_deref().unwrap_or(Path::new("/private/tmp"));
+    let tmux_base = env.tmux_tmpdir.as_deref().unwrap_or(Path::new(TMP));
     let mut v = vec![profile_path(tmux_base).join(format!("tmux-{}", env.uid))];
     match (&env.zellij_dir, &env.tmp) {
         (Some(d), _) => v.push(profile_path(d)),
@@ -1645,6 +1827,13 @@ pub fn probe() -> Availability {
     FOUND.get_or_init(probe_now).clone()
 }
 
+/// Linux: from the kernel's Landlock ABI, asked (backports count — never the version string).
+#[cfg(target_os = "linux")]
+fn probe_now() -> Availability {
+    linux::availability(crate::landlock::abi(), crate::seccomp::available())
+}
+
+#[cfg(not(target_os = "linux"))]
 fn probe_now() -> Availability {
     if !cfg!(target_os = "macos") {
         return Availability::Missing("this system has no sandbox tarae can use yet".into());
@@ -1674,6 +1863,7 @@ pub fn inside() -> bool {
 }
 
 /// Why `sandbox-exec` couldn't start one, from what it said.
+#[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
 pub fn missing_why(stderr: &str) -> String {
     if stderr.contains("sandbox_apply") { INSIDE.into() } else { format!("sandbox-exec: {}", stderr.trim()) }
 }
@@ -1736,7 +1926,18 @@ pub fn policy(root: &Path, llm: &crate::llm::LlmConfig, reads: &[PathBuf]) -> Po
         env: run.as_ref().map(|r| gradle_run_home(r.path(), env.gradle.as_deref(), opts)).unwrap_or_default(),
         user: env.gradle.clone(),
     };
-    Policy { run, tag, gradle, ..Policy::for_project(&env) }
+    let p = Policy { run, tag, gradle, ..Policy::for_project(&env) };
+    #[cfg(target_os = "linux")]
+    let p = confined(p);
+    p
+}
+
+/// Linux: `p` with its Landlock rules made (`linux::confine` — it walks the project for protected names).
+#[cfg(target_os = "linux")]
+pub fn confined(mut p: Policy) -> Policy {
+    let made = crate::landlock::abi().and_then(|abi| linux::confine(&p, abi, linux::audit_readable(abi)));
+    p.confine = Some(made.map_err(|e| format!("the sandbox couldn't be made: {e}")));
+    p
 }
 
 /// The lock file Gradle's wrapper takes beside each distribution it unpacked in the user's Gradle home
@@ -1911,6 +2112,17 @@ fn output_in(
     args: &[&str],
     env: &[(&str, &str)],
 ) -> Option<serde_json::Value> {
+    #[cfg(target_os = "linux")]
+    let out = {
+        let abi = crate::landlock::abi().ok()?;
+        let rules = linux::confine(policy, abi, false).ok()?;
+        let mut c = Command::new(program);
+        c.args(args).envs(env.iter().copied()).current_dir(&policy.root).env(MARK, "1");
+        c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+        let child = linux::confined(&rules, None, |_| {}, || c.spawn()).ok()?;
+        child.wait_with_output().ok()?
+    };
+    #[cfg(not(target_os = "linux"))]
     let out = Command::new(SANDBOX_EXEC)
         .args(policy.args())
         .arg(program)
@@ -1921,8 +2133,8 @@ fn output_in(
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
-        .ok()
-        .filter(|o| o.status.success())?;
+        .ok()?;
+    let out = Some(out).filter(|o| o.status.success())?;
     serde_json::from_slice(&out.stdout).ok()
 }
 
@@ -1933,12 +2145,61 @@ fn inside_env(c: &mut Command) -> &mut Command {
     c.env(MARK, "1").env("GIT_OPTIONAL_LOCKS", "0")
 }
 
-/// `program args` inside `policy` — or as it is, without one.
+/// The watch for a run in `p` (on a worker; give one with a stream — `Watch::pid` — `WATCH_READY` before the
+/// run starts) — None where nothing can watch: no tag, or on Linux neither an audit log to read
+/// (`linux::Confine::audit` — the files' denials then come from the run's output alone) nor a supervisor
+/// to say what it refused (a quiet watch it records in).
+pub fn watch_for(p: &Policy) -> Option<std::sync::Arc<Watch>> {
+    let tag = p.tag.as_ref()?;
+    #[cfg(target_os = "linux")]
+    return match &p.confine {
+        Some(Ok(c)) if c.audit => Some(Watch::start_audit(tag)),
+        Some(Ok(c)) if c.serve.is_ok() => Some(Watch::quiet(tag)),
+        _ => None,
+    };
+    #[cfg(not(target_os = "linux"))]
+    Some(Watch::start(tag))
+}
+
+/// Starts `cmd` (made by `command`) in a session of its own (`spawn::setsid`) — on Linux from a thread
+/// confined to `policy` (`linux::confined`: its rules, the seccomp filter, and tarae's supervisor deciding
+/// what it reaches by address); elsewhere the sandbox is in the command already. A policy whose rules
+/// couldn't be made doesn't start at all.
+pub fn spawn(policy: Option<&Policy>, cmd: &Command) -> std::io::Result<crate::spawn::Spawned> {
+    #[cfg(target_os = "linux")]
+    if let Some(p) = policy {
+        let c = match &p.confine {
+            Some(Ok(c)) => c,
+            Some(Err(why)) => return Err(std::io::Error::other(why.clone())),
+            None => return Err(std::io::Error::other("the sandbox wasn't made for this run")),
+        };
+        let watch = p.watch.clone();
+        let owner = move |tid| {
+            if let Some(w) = &watch {
+                w.owned_by(tid);
+            }
+        };
+        let serve = std::sync::Arc::new(p.clone());
+        return linux::confined(c, Some(serve), owner, || crate::spawn::setsid(cmd));
+    }
+    let _ = policy;
+    crate::spawn::setsid(cmd)
+}
+
+/// `program args` inside `policy` — or as it is, without one. On Linux the sandbox comes with the spawn
+/// (`spawn`); here only what a sandboxed run's environment says.
 pub fn command(policy: Option<&Policy>, program: &str, args: &[String]) -> Command {
     match policy {
         Some(p) => {
-            let mut c = Command::new(SANDBOX_EXEC);
-            c.args(p.args()).arg(program).args(args);
+            #[cfg(target_os = "linux")]
+            let mut c = Command::new(program);
+            #[cfg(not(target_os = "linux"))]
+            let mut c = {
+                let mut c = Command::new(SANDBOX_EXEC);
+                c.args(p.args()).arg(program);
+                c
+            };
+            c.args(args);
             inside_env(&mut c).envs(p.gradle.env.iter().map(|(k, v)| (k, v)));
             if let Some(run) = &p.run {
                 c.env("TMPDIR", run.path());
@@ -2113,10 +2374,7 @@ mod tests {
         let keep = Policy::for_project(&env(root)).keep;
         assert_eq!(
             keep,
-            [
-                profile_path(Path::new("/private/tmp")).join("tmux-501"),
-                "/private/var/folders/ab/cd/T/zellij-501".into()
-            ]
+            [profile_path(Path::new(TMP)).join("tmux-501"), "/private/var/folders/ab/cd/T/zellij-501".into()]
         );
         let moved = Env {
             tmux_tmpdir: Some("/Users/u/tm".into()),
@@ -2157,7 +2415,7 @@ mod tests {
         assert_eq!(
             w,
             [
-                "/private/tmp",
+                TMP,
                 "/private/var/folders/ab/cd",
                 "/Users/u/.cargo/build/ab/cd12",
                 "/Users/u/Library/Caches/thing",
@@ -2179,7 +2437,9 @@ mod tests {
     /// checkout's build dir, or a folder beside them (`~/.config/fish`). (Folders of the test's own.)
     #[test]
     fn a_cargo_dir_from_the_checkout_opens_only_its_own() {
-        let base = profile_path(&std::env::temp_dir()).join(format!("tarae-sb-dirs-{}", std::process::id()));
+        // (not in a temp folder: what's there is writable anyway — Linux's temp_dir is `/tmp`)
+        let target = profile_path(&std::env::current_dir().unwrap().join("target"));
+        let base = target.join(format!("tarae-sb-dirs-{}", std::process::id()));
         std::fs::remove_dir_all(&base).ok();
         let (home, root) = (base.join("home"), base.join("work/proj"));
         let cargo_home = home.join(".cargo");
@@ -2222,7 +2482,7 @@ mod tests {
         // Said where Claude reads it, and on the panel
         let g = Guard::In(Box::new(p));
         let said = g.report(&[]);
-        assert!(said.contains(&format!("{} (cargo's build-dir", home.display())), "{said}");
+        assert!(said.contains(&format!("{} (cargo's build-dir", crate::allow::tilde(&home))), "{said}");
         let (line, _) = panel_line(Some(&g), false, std::time::Instant::now()).expect("the panel says it");
         assert!(
             line.starts_with("sandbox kept ") && line.contains(" closed — cargo's config named it"),
@@ -3130,6 +3390,12 @@ mod tests {
         // As Seatbelt says it, where there are no plainer words
         assert_eq!(plain("mach-lookup", "com.apple.other"), "mach-lookup com.apple.other");
         assert_eq!(plain("network-outbound", "remote:*:x"), "network-outbound remote:*:x");
+        // Linux's supervisor names the address: this machine's by port, another as it is
+        assert_eq!(plain("network-outbound", "remote:127.0.0.1:9"), "connecting to port 9");
+        assert_eq!(plain("network-outbound", "remote:[::ffff:127.0.0.1]:9"), "connecting to port 9");
+        assert_eq!(plain("network-outbound", "remote:192.0.2.1:9"), "connecting to 192.0.2.1:9");
+        assert_eq!(plain("network-outbound", "remote:[2001:db8::1]:9"), "connecting to [2001:db8::1]:9");
+        assert_eq!(plain("network-outbound", "@bus"), "network-outbound @bus");
         assert_eq!(plain("system-info", ""), "system-info");
         assert_eq!(denial("file-write-unlink", "/a").reported(), "deleting /a (file-write-unlink, touch)");
         assert_eq!(denial("system-info", "x").reported(), "system-info x (touch)");

@@ -428,7 +428,8 @@ review) and run that.
 
 ### The sandbox
 
-What Claude runs, with `run` and `run_tests`, runs in a sandbox (macOS: Seatbelt). What you run yourself doesn't.
+What Claude runs, with `run` and `run_tests`, runs in a sandbox (macOS: Seatbelt; Linux: Landlock and seccomp,
+the same rules — [what differs](#on-linux)). What you run yourself doesn't.
 
 - It can write in the project, except the paths in `llm.sandbox-protect` and what runs later outside the
   sandbox or sets how things run, wherever it sits in the project and in any case. Every language pack lists
@@ -506,7 +507,8 @@ What Claude runs, with `run` and `run_tests`, runs in a sandbox (macOS: Seatbelt
   tarae also reads the run's output: a path on a failing line next to `Operation not permitted` that the
   sandbox wouldn't let it read or write counts as denied too, and Claude is told it came from the output.
 - It reaches nothing over the network, so a build that needs to download something fails.
-  `llm.sandbox-network` lets it through, and `llm.sandbox-write` adds folders
+  `llm.sandbox-network` lets it through (macOS only — on Linux it reaches this machine at most), and
+  `llm.sandbox-write` adds folders
 - Unix sockets work only in the project and in a temp folder made for each run, which the command gets as
   `TMPDIR`. The sockets in `/tmp` and your own temp folder belong to programs running outside the sandbox
   (tmux, zellij, ssh-agent), and some of them would run whatever they're told. tmux's and zellij's socket
@@ -584,10 +586,61 @@ What Claude runs, with `run` and `run_tests`, runs in a sandbox (macOS: Seatbelt
 
 - git's read-only commands run with `GIT_OPTIONAL_LOCKS=0`, so `git status` doesn't try to refresh the index
   in `.git` (a write the sandbox would deny and report)
-- **Where there's no sandbox** (Linux for now, or tarae itself running inside one), Claude's commands don't
+- **Where there's no sandbox** (a Linux kernel without Landlock, a processor other than x86-64 or ARM64 on
+  Linux, or tarae itself running inside another sandbox on macOS), Claude's commands don't
   quietly run without one. A card says there's none: `y` runs this one, `a` runs the rest of this conversation's
   commands too, and `n` says no. While they run without one, the chat's title says `› no sandbox`.
   `llm.sandbox = false` turns the sandbox off; the title says so too
+
+#### On Linux
+
+The rules above are the same on Linux; how they're kept differs. The kernel's Landlock keeps files to the
+rules (writes, and reads in your home folder), seccomp keeps a command off sockets, and tarae itself decides
+every connection a command makes. Nothing to install, no root, no helper program: a command is started from a
+thread of tarae's that confined itself first, and everything it starts stays confined.
+
+- **How much depends on the kernel.** tarae reads Landlock's version (its ABI) from the kernel, so a
+  distribution's backport counts:
+
+  | Landlock ABI (Linux) | Claude's commands |
+  |---|---|
+  | none (before 5.13, or left out of the boot's `lsm=`) | no sandbox: each command asks first (the card above) |
+  | 1 (5.13) | a partial sandbox: truncating a file isn't controlled, and every move or link across folders is refused. Each command asks first, saying why — `y` this one, `a` this conversation (still in the sandbox), `n` |
+  | 2 (5.19) | partial, as 1, but moves across folders work |
+  | 3–4 (6.2) | the full sandbox, unasked, as on macOS. Device `ioctl`s aren't controlled |
+  | 5 (6.10) | + device `ioctl`s controlled |
+  | 6 (6.12) | + a command can't send a signal to a process outside its own (below 6, Claude's result says it could) |
+  | 7 and later (6.15) | + what was refused comes from Landlock's own log, when tarae can read the kernel's messages (`journalctl -k`). Its records are read as the kernel's documentation describes them; not yet checked against a live kernel |
+
+  Below 7, or without that log, what a command was refused in files is read from its own error lines
+  (`Permission denied` on a path the rules keep), and Claude's result says that's where it came from.
+- **Connections are tarae's to make.** A command's calls that name an address — connecting, binding, sending
+  to an address — wait for tarae, which reads the address once, decides on its own copy with the rules above
+  (`llm.sandbox-ports`, `llm.sandbox-localhost`, the project's and the run's own unix sockets, a socket you
+  granted), and makes the call itself, handing the command the result. What the command changes in its memory
+  meanwhile reaches nothing, and a unix socket is opened by its real path without following a link. The
+  sockets a command listens on are bound to this machine's loopback, so even one listening on every address
+  hears only this machine. A server that checks who connects sees tarae's process, not the command's.
+- **This machine at most.** `llm.sandbox-network` doesn't open the network beyond this machine on Linux: a
+  command reaches this machine's ports as `llm.sandbox-ports` and `llm.sandbox-localhost` say, and nothing
+  else. Claude's result says so.
+- **When tarae can't make a command's connections**, the command gets no socket at all — no port on this
+  machine, no unix socket, not even the project's — and Claude's result says why. That happens:
+  - in a container without `CAP_SYS_PTRACE`: Docker's default filter refuses the calls tarae takes a
+    command's socket with (`pidfd_open`, `pidfd_getfd`). A dev container needs `--cap-add SYS_PTRACE`
+    (`runArgs` in `devcontainer.json`)
+  - with Yama's `ptrace_scope` at 2 (unless tarae holds `CAP_SYS_PTRACE`) or 3: tarae can't read a command's
+    calls. At 1, the default on Ubuntu, only a process that left the command's tree (a daemon that detached
+    itself) has its connections refused
+  - when tarae itself runs inside such a sandbox (a tarae started by one of Claude's commands)
+- **Gradle runs in the sandbox** with `llm.sandbox-localhost`, as on macOS. But a Gradle project that has never
+  been built fails for now: its folder holds `build.gradle`, so the command can't make `.gradle/` and
+  `build/` there (below). Build it once yourself, and Claude's builds work from then on.
+- **What Landlock can't keep, said in Claude's result:** a protected name made in a folder that holds none yet
+  (a `.cargo` folder inside `src/`, say — Landlock rules are on paths that are there); tmux's and zellij's
+  folders in `/tmp`, which stay writable (Java writes its temp files in `/tmp` whatever `TMPDIR` says). The
+  other way round, a folder that holds a protected name is closed to new entries: next to `Cargo.toml` a
+  command can change the files that are there, but not make, remove or rename one.
 
 ### Reading outside the project
 

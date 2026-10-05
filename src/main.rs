@@ -44,6 +44,8 @@ mod jumplist;
 mod key;
 mod keymap;
 mod labels;
+#[cfg(target_os = "linux")]
+mod landlock;
 mod languages;
 mod llm;
 mod log;
@@ -83,6 +85,8 @@ mod sandbox;
 mod saver;
 mod screen;
 mod search;
+#[cfg(target_os = "linux")]
+mod seccomp;
 mod seeing;
 mod selection;
 mod session;

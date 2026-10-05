@@ -130,7 +130,9 @@ fn common_git_dir(root: &Path) -> Option<PathBuf> {
 /// `docker run …` for the checks: the tree read-only at /src (a worktree's git folder read-only too, where
 /// its `.git` file says), the caches in volumes, the pinned image.
 fn docker_args(root: &Path, git: Option<&Path>, pin: &str, what: &What) -> Vec<String> {
-    let mut a: Vec<String> = ["run", "--rm"].map(String::from).into();
+    // (CAP_SYS_PTRACE: Docker's default filter refuses `pidfd_open`/`pidfd_getfd` without it — the sandbox's
+    // supervisor takes a run's socket with them, and its tests would skip themselves)
+    let mut a: Vec<String> = ["run", "--rm", "--cap-add", "SYS_PTRACE"].map(String::from).into();
     let mount = |a: &mut Vec<String>, v: String| a.extend(["-v".to_string(), v]);
     mount(&mut a, format!("{}:/src:ro", root.display()));
     if let Some(git) = git {
@@ -300,6 +302,7 @@ mod tests {
     fn the_tree_is_read_only_and_the_checks_run_in_a_clone() {
         let a = docker_args(Path::new("/r/tarae"), None, "1.99.0", &What::Both);
         assert!(a.windows(2).any(|w| w == ["-v", "/r/tarae:/src:ro"]), "{a:?}");
+        assert!(a.windows(2).any(|w| w == ["--cap-add", "SYS_PTRACE"]), "the supervisor's tests run: {a:?}");
         assert!(
             !a.iter().any(|v| v.starts_with("/r/tarae:") && !v.ends_with(":ro")),
             "no writable mount: {a:?}"
@@ -383,7 +386,7 @@ mod tests {
         assert!(name.chars().all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c)), "a Docker volume name");
         let made = create_args(a, "1.99.0");
         assert_eq!(made, ["volume", "create", "--label", "tarae.checkout=/w/tarae/s1", name.as_str()]);
-        let args = docker_args(a, None, "1.99.0", What::Test);
+        let args = docker_args(a, None, "1.99.0", &What::Test { args: Vec::new(), repeat: 1 });
         assert!(args.contains(&format!("{name}:/target")), "{args:?}");
         assert!(args.contains(&"tarae-registry:/usr/local/cargo/registry".to_string()), "{args:?}");
         assert!(args.contains(&"tarae-rustup-1.99.0:/usr/local/rustup".to_string()), "{args:?}");

@@ -110,7 +110,7 @@ pub enum Why {
     Socket,
     /// Claude asked to run it outside the sandbox.
     Outside,
-    /// There's no sandbox here.
+    /// There's no sandbox here, or one that goes only so far.
     NoSandbox,
     /// Claude's Read, Grep or Glob outside the project.
     Read,

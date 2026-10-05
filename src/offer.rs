@@ -81,7 +81,12 @@ pub enum What {
     Run(Box<crate::tools::RunCard>),
     /// No sandbox on this system (`tools.rs`): `y` runs Claude's command anyway, `a` does for the rest of
     /// the conversation, `n` tells Claude no. `ride`: what goes along to the run (`queued.rs`).
-    NoSandbox { job: crate::tools::Job, call: crate::tools::Call, ride: Box<crate::queued::Ride> },
+    NoSandbox {
+        job: crate::tools::Job,
+        call: crate::tools::Call,
+        ride: Box<crate::queued::Ride>,
+        kind: crate::tools::Unsandboxed,
+    },
     /// Review at the end (`edits.rs`): `y` lets Claude's edits go in as it makes them.
     ReviewAtEnd,
     /// Claude's Read, Grep or Glob outside the project (`reads.rs`): `y` once, `a` this chat, `A` always
@@ -723,9 +728,12 @@ impl crate::editor::Editor {
                 self.plugin_ask_answer(plugin, asks, true);
             }
             What::Run(card) => crate::tools::run_answer(self, id, *card, Some(crate::allow::Scope::Once)),
-            What::NoSandbox { job, call, ride } => {
-                crate::tools::unprotected_answer(self, id, job, call, *ride, crate::tools::Unprotected::Once)
-            }
+            What::NoSandbox { job, call, ride, kind } => crate::tools::unprotected_answer(
+                self,
+                id,
+                (job, call, *ride, kind),
+                crate::tools::Unprotected::Once,
+            ),
             What::ReviewAtEnd => {
                 self.offer_finished(id, Ok(()));
                 crate::edits::at_end_set(self, true);
@@ -1053,12 +1061,10 @@ impl crate::editor::Editor {
         self.card_how(o.id, format!("answered {key}"));
         self.card_answered(o.id);
         match o.what {
-            What::NoSandbox { job, call, ride } => crate::tools::unprotected_answer(
+            What::NoSandbox { job, call, ride, kind } => crate::tools::unprotected_answer(
                 self,
                 o.id,
-                job,
-                call,
-                *ride,
+                (job, call, *ride, kind),
                 crate::tools::Unprotected::ThisChat,
             ),
             What::Read { pending, keep, folder } => {
@@ -1104,9 +1110,12 @@ impl crate::editor::Editor {
                 self.set_status(format!("Not installing {tool} for now (N on its card: never ask)"))
             }
             What::Run(card) => crate::tools::run_answer(self, o.id, *card, None),
-            What::NoSandbox { job, call, ride } => {
-                crate::tools::unprotected_answer(self, o.id, job, call, *ride, crate::tools::Unprotected::No)
-            }
+            What::NoSandbox { job, call, ride, kind } => crate::tools::unprotected_answer(
+                self,
+                o.id,
+                (job, call, *ride, kind),
+                crate::tools::Unprotected::No,
+            ),
             What::ReviewAtEnd => self.set_status("Claude's edits come one at a time"),
             What::ProjectTrust { hash } => self.project_trust_answer(o.id, hash, false),
             What::Read { pending, keep, folder } => {

@@ -336,13 +336,9 @@ fn grant_places_in(
     temp: &Path,
     tmp: &Path,
 ) -> Vec<PathBuf> {
+    let roots =
+        [tmp.to_path_buf(), temp.to_path_buf(), temp.parent().map(Path::to_path_buf).unwrap_or_default()];
     let tmp = [tmp.to_path_buf(), temp.to_path_buf()];
-    let temp = temp.to_path_buf();
-    let roots = [
-        PathBuf::from("/private/tmp"),
-        temp.clone(),
-        temp.parent().map(Path::to_path_buf).unwrap_or_default(),
-    ];
     let mut out: Vec<PathBuf> = Vec::new();
     for r in reads {
         let folder = r.parent().filter(|dir| {
@@ -421,10 +417,10 @@ pub fn defaults(root: &Path, temp: bool) -> Defaults {
     Defaults { checkouts, temp, code }
 }
 
-/// `/private/tmp` and the user's temp folder (`$TMPDIR` itself — not its parent, which holds apps'
-/// caches), real paths.
+/// `/tmp` (macOS's `/private/tmp`) and the user's temp folder (`$TMPDIR` itself — not its parent, which holds
+/// apps' caches), real paths.
 pub fn temp_folders() -> Vec<PathBuf> {
-    let mut v = vec![crate::sandbox::profile_path(Path::new("/private/tmp"))];
+    let mut v = vec![crate::sandbox::profile_path(Path::new("/tmp"))];
     let t = crate::sandbox::profile_path(&std::env::temp_dir());
     if !v.contains(&t) {
         v.push(t);
@@ -845,7 +841,7 @@ pub(crate) mod tests {
         assert!(defaults(&main, false).temp.is_empty());
         let t = defaults(&main, true).temp;
         assert!(t.contains(&crate::sandbox::profile_path(&std::env::temp_dir())), "{t:?}");
-        assert!(t.contains(&crate::sandbox::profile_path(Path::new("/private/tmp"))), "{t:?}");
+        assert!(t.contains(&crate::sandbox::profile_path(Path::new("/tmp"))), "{t:?}");
         std::fs::remove_dir_all(&base).ok();
     }
 

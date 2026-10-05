@@ -7022,6 +7022,151 @@ mod tests {
         std::fs::remove_dir_all(&kept).ok();
     }
 
+    /// Linux tests that need this kernel's Landlock at `abi` or more: None after saying the test skips itself.
+    #[cfg(target_os = "linux")]
+    fn landlock_at_least(abi: u32, test: &str) -> Option<u32> {
+        match crate::landlock::abi() {
+            Ok(n) if n >= abi => Some(n),
+            got => {
+                let line = format!(
+                    "{}editor::tests::{test} — needs Landlock ABI {abi}, this kernel: {got:?}\n",
+                    crate::test_results::SELF_SKIP
+                );
+                let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+                None
+            }
+        }
+    }
+
+    /// For real, on Linux: Claude's check runs confined by Landlock — it writes in its project, not in a
+    /// folder outside it (a marker under the build's `target/`) — and Claude reads that it ran sandboxed,
+    /// what was refused and where that was read from, and how Linux's sandbox differs.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn claudes_check_runs_in_the_linux_sandbox() {
+        use serde_json::json;
+        let Some(abi) =
+            landlock_at_least(crate::sandbox::linux::FULL, "claudes_check_runs_in_the_linux_sandbox")
+        else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("tarae-run-ll-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let kept = std::env::current_dir().unwrap().join(format!("target/ll-kept-{}", std::process::id()));
+        std::fs::create_dir_all(&kept).unwrap();
+        let (made, marker) = (dir.join("made"), kept.join("marker"));
+        let mut ed = editor("");
+        ed.sandbox = crate::sandbox::Availability::Ready;
+        ed.config.llm.run_allow = vec!["touch".into()];
+        let command = format!("touch {} {}", made.display(), marker.display());
+        let log = claude_calls(&mut ed, &dir, "run", &json!({ "command": command }));
+        feed(&mut ed, "<space>ltouch them<ret>");
+        settle_for(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
+        assert!(made.exists(), "the project is writable");
+        assert!(!marker.exists(), "outside it isn't");
+        let answer = tool_answer(&log).replace("\\n", " ");
+        let answer = answer.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(answer.contains("Permission denied") && answer.contains("In tarae's sandbox"), "{answer}");
+        assert!(answer.contains("The sandbox blocked one thing"), "{answer}");
+        assert!(answer.contains("marker (file-write*, said in the output)"), "{answer}");
+        let net = match crate::sandbox::supervisor::unavailable() {
+            None => "connect to nothing over the network, this machine's ports included",
+            Some(_) => "make no socket",
+        };
+        assert!(answer.contains(net), "{answer}");
+        if abi < 7 {
+            assert!(
+                answer.contains(&format!(
+                    "(Read from its own error lines — this kernel's Landlock (ABI {abi})"
+                ))
+            );
+        }
+        assert!(!crate::tools::unsandboxed(&ed));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&kept).ok();
+    }
+
+    /// Landlock below ABI 3 (a stand-in: this kernel's rules, the availability said partial): every run of
+    /// Claude's asks first, saying why — `n` tells Claude, `y` runs it in the sandbox, `a` for the rest of
+    /// the conversation (still sandboxed: the title doesn't say "no sandbox").
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_partial_sandbox_asks_each_run() {
+        use serde_json::json;
+        if landlock_at_least(1, "a_partial_sandbox_asks_each_run").is_none() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("tarae-run-partial-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let made = dir.join("made");
+        let why = "this kernel's Landlock (ABI 2) can't control truncating files";
+        let start = || {
+            std::fs::remove_file(&made).ok();
+            std::fs::remove_file(dir.join("stdin.log")).ok();
+            let mut ed = editor("");
+            ed.sandbox = crate::sandbox::Availability::Partial(why.into());
+            ed.config.llm.run_allow = vec!["touch".into()];
+            let command = format!("touch {}", made.display());
+            let log = claude_calls(&mut ed, &dir, "run", &json!({ "command": command }));
+            feed(&mut ed, "<space>ltouch it<ret>");
+            settle_for(&mut ed, |ed| !ed.offers.is_empty());
+            (ed, log)
+        };
+        let (mut ed, log) = start();
+        let o = &ed.offers[0];
+        assert_eq!(o.title, crate::tools::PARTIAL_SANDBOX_TITLE);
+        assert!(o.question.contains(why) && o.weighty(), "{}", o.question);
+        ed.offer_dismiss();
+        settle_for(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
+        assert!(tool_answer(&log).contains("goes only so far") && !made.exists());
+        let (mut ed, log) = start();
+        ed.offer_accept();
+        settle_for(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
+        assert!(made.exists());
+        assert!(tool_answer(&log).contains("In tarae's sandbox"), "{}", tool_answer(&log));
+        let (mut ed, _) = start();
+        ed.offer_for_chat();
+        settle_for(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
+        assert!(made.exists() && !crate::tools::unsandboxed(&ed), "agreed, and still sandboxed");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Linux, tarae serving this machine's ports: a Gradle run of Claude's goes in the sandbox like any other
+    /// — no card first — and is kept to it (a stand-in `./gradlew` writes in the project and a name the
+    /// sandbox keeps).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn gradle_runs_in_the_sandbox_on_linux() {
+        use serde_json::json;
+        use std::os::unix::fs::PermissionsExt;
+        if landlock_at_least(crate::sandbox::linux::FULL, "gradle_runs_in_the_sandbox_on_linux").is_none() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("tarae-run-gradle-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let gradlew = dir.join("gradlew");
+        // (in a folder of its own: one holding a protected name — `gradlew` — takes no new entry on Linux)
+        std::fs::create_dir_all(dir.join("build")).unwrap();
+        let script = "#!/bin/sh\ncd \"$(dirname \"$0\")\"; echo in > build/built.txt; echo out > build.rs\n";
+        std::fs::write(&gradlew, script).unwrap();
+        std::fs::set_permissions(&gradlew, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut ed = editor("");
+        ed.sandbox = crate::sandbox::Availability::Ready;
+        ed.config.llm.run_allow = vec![gradlew.display().to_string()];
+        let command = format!("{} test", gradlew.display());
+        let log = claude_calls(&mut ed, &dir, "run", &json!({ "command": command }));
+        feed(&mut ed, "<space>ltest it<ret>");
+        settle_for(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy() || !ed.offers.is_empty());
+        assert!(ed.offers.is_empty(), "no card: {:?}", ed.offers.first().map(|o| &o.title));
+        assert!(dir.join("build/built.txt").exists(), "it ran: {}", tool_answer(&log));
+        assert!(!dir.join("build.rs").exists(), "in the sandbox");
+        assert!(tool_answer(&log).contains("In tarae's sandbox"), "{}", tool_answer(&log));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// A sandboxed run that was denied something: its panel says what, on its bottom row — and once it has
     /// printed nothing for a while, that it may be waiting on it. The same in the test pane.
     #[test]

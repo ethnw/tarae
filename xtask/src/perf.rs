@@ -144,8 +144,9 @@ pub fn run(args: &[String]) -> Result<()> {
 /// runs — stays the default build. Sizes don't move between runs: the noise is a few edits' worth.
 /// 9.5 (2026-10-04, ~8.5 then): feature batches added 0.03–0.24 MB each, so it has room for the roadmap
 /// (queues, UI state, the RA swap) and still trips on a dependency's +0.5 MB (ripgrep's crates were).
+/// 10 (2026-10-05, 9.41 then): the user's call — a size pass comes at the roadmap's end.
 const SIZES: [(&str, &[&str], &str, f64); 2] = [
-    ("release_size_mb", &[], "target", 9.5),
+    ("release_size_mb", &[], "target", 10.0),
     ("release_size_bundled_mb", &["--features", "bundled-grammars"], "target/bundled-size", 15.0),
 ];
 const SIZE_NOISE: f64 = 0.05;
