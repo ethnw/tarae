@@ -61,6 +61,15 @@ impl Base {
     }
 }
 
+/// Which change a file just shown lands on, once its diff is there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Land {
+    First,
+    Last,
+    /// The one at this line (0-based) — a high-risk change `]h` goes to.
+    Line(usize),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct File {
     /// Relative to the repository root.
@@ -83,8 +92,9 @@ pub struct CodeReview {
     pending: Vec<PathBuf>,
     /// Documents diffed against the review's base (back to the index when it ends).
     pub docs: Vec<DocId>,
-    /// Once this document's diff arrives, select its first (or, going back, last) change.
-    land: Option<(DocId, bool)>,
+    /// Once this document's diff arrives, select its first (or, going back, last) change — or the one at a
+    /// line (`]h`).
+    land: Option<(DocId, Land)>,
     /// The rail has the keys (`space e` during a review) · the file selected there.
     pub focus: bool,
     pub selected: usize,
@@ -184,6 +194,19 @@ impl CodeReview {
     /// `f`'s highest grade, and whether it has high-risk changes at all (looked at or not).
     pub fn top(&self, ed: &Editor, f: &File) -> Option<Grade> {
         self.graded(ed, f).iter().map(|g| g.grade).max()
+    }
+
+    /// The keys of the lines of every high-risk change no one has looked at (a held card's gate).
+    pub fn high_unseen_keys(&self, ed: &Editor) -> Vec<crate::risk::Key> {
+        let looked = &ed.session.looked;
+        let graded = self.files.iter().map(|f| self.graded(ed, f));
+        let graded: Vec<Graded> = graded.collect();
+        graded
+            .iter()
+            .flat_map(|g| g.iter())
+            .filter(|g| g.grade == Grade::High && !g.looked_at(looked))
+            .flat_map(|g| g.keys.iter().copied())
+            .collect()
     }
 
     /// The high-risk changes no one has looked at, across the review: (file, its line now, 0-based).
@@ -615,7 +638,10 @@ pub fn start_in(ed: &mut Editor, cwd: PathBuf, branch: Option<String>) {
         Ok((root, base, files, grades))
     };
     ed.step(ed.events.jobs(), "review", said, work, |ed, found| match found {
-        Err(e) => ed.set_error(format!("review: {e}")),
+        Err(e) => {
+            ed.session.review_high = false;
+            ed.set_error(format!("review: {e}"))
+        }
         Ok((root, base, files, grades)) => open(ed, root, base, files, grades),
     });
 }
@@ -843,7 +869,11 @@ fn open_at(
         let s = if n == 1 { "" } else { "s" };
         ed.set_status(format!("review: {n} file{s} {said} — ]g walks the changes"));
     }
-    show(ed, first, false);
+    // (opened for a bring's high-risk changes: on the first not looked at)
+    match std::mem::take(&mut ed.session.review_high).then(|| highs_in_order(ed).first().copied()).flatten() {
+        Some((i, at)) => show_at(ed, i, Land::Line(at)),
+        None => show(ed, first, false),
+    }
     if std::mem::take(&mut ed.session.review_ask) {
         crate::reviewer::start(ed);
     }
@@ -897,6 +927,32 @@ pub fn unseen(
     highs.iter().filter(|(_, g)| !g.looked_at(looked)).map(|(rel, g)| format!("{rel}:{}", g.at + 1)).collect()
 }
 
+/// A held card's `h` (#196): to the high-risk changes it waits on — the review in front's next one; for a
+/// bring of the checkout `root` onto `base`, a review since `base` there first (its session to the front),
+/// opening on the first one. Going there is no look.
+pub fn card_highs(ed: &mut Editor, bring: Option<(PathBuf, String)>) {
+    let Some((root, base)) = bring else {
+        high_step(ed, true);
+        return;
+    };
+    // (a session's root and a review's are real paths already — nothing read from disk on a key)
+    let same = |a: &Path, b: &Path| a == b;
+    let open = ed.session.code_review.as_ref().is_some_and(|r| {
+        same(&r.root, &root) && matches!(&r.base, Base::Branch { name, .. } if *name == base)
+    });
+    if open {
+        high_step(ed, true);
+        return;
+    }
+    if !same(&ed.session.root, &root)
+        && let Some(id) = ed.sessions.iter().find(|l| same(&l.root, &root)).map(|l| l.id)
+    {
+        ed.session_switch(id);
+    }
+    ed.session.review_high = true;
+    start_in(ed, root, Some(base));
+}
+
 /// Why a yes is held while `n` high-risk changes wait for a person's look.
 pub fn held_said(n: usize) -> String {
     format!("{} not looked at — space v h on each, in a review", crate::nav::count(n, "high-risk change"))
@@ -948,7 +1004,8 @@ pub fn push_bring_card(
             let left = unseen(&highs, &looked);
             if !left.is_empty() {
                 card.question.push_str(&format!(
-                    "\n\n{} not looked at — space v b {base} reviews them (space v h on each):{}",
+                    "\n\n{} not looked at — h goes to them in a review since {base} (]h the next, space v h \
+                     on each):{}",
                     crate::nav::count(left.len(), "high-risk change"),
                     places_said(&left)
                 ));
@@ -956,6 +1013,11 @@ pub fn push_bring_card(
                 let from = lines - left.len().min(HELD_SHOWN) - usize::from(left.len() > HELD_SHOWN) - 1;
                 card.warning = Some(from..lines);
                 card.held = Some(held_said(left.len()));
+                card.gate = highs
+                    .iter()
+                    .filter(|(_, g)| !g.looked_at(&looked))
+                    .flat_map(|(_, g)| g.keys.iter().copied())
+                    .collect();
             }
             ed.push_offer(card);
         }
@@ -995,8 +1057,11 @@ fn reviewer_said(
     Some(s)
 }
 
-/// `space v h` · `:review-hunk-seen`: the high-risk change under the cursor looked at — by you, a key in
-/// review mode (no tool of Claude's can). What holds the review's end and the bring (`risk.rs`).
+/// `space v h` · `:review-hunk-seen`: the high-risk changes under the selections looked at — the cursor's
+/// line, or every one a selection touches that was on screen as the key was pressed (#196; the rest said,
+/// not taken) — by you, a key in review mode (no tool of Claude's can).
+/// What holds the review's end and the bring (`risk.rs`). None there: to the next one not looked at — only
+/// going; `space v h` there is the look.
 pub fn hunk_seen(ed: &mut Editor) {
     let Some(r) = ed.session.code_review.as_ref() else {
         return ed.set_status("no review here — space v v starts one");
@@ -1005,27 +1070,105 @@ pub fn hunk_seen(ed: &mut Editor) {
         return ed.set_status("this file isn't one of the review's");
     };
     let f = &r.files[i];
-    let line = ed.cursor_line();
+    // (each selection's lines — a cursor's, its one line)
+    let doc = ed.doc();
+    let spans: Vec<(usize, usize)> = doc
+        .selection()
+        .ranges()
+        .iter()
+        .map(|s| {
+            let line = |p| crate::movement::line_of(&doc.text, p);
+            let last = if s.to() > s.from() {
+                line(s.to().saturating_sub(1)).max(line(s.from()))
+            } else {
+                line(s.from())
+            };
+            (line(s.from()), last + 1)
+        })
+        .collect();
+    // (the lines the last frame drew of this document — what was on screen as the key was pressed)
+    let drawn: std::collections::HashSet<usize> = ed
+        .screen
+        .panes
+        .iter()
+        .filter(|p| ed.session.views.iter().any(|v| v.id == p.0 && v.doc == doc.id))
+        .flat_map(|p| p.3.iter().map(|row| row.0))
+        .collect();
     let graded = r.graded(ed, f);
-    let here: Vec<&crate::risk::Graded> =
-        graded.iter().filter(|g| (g.at..g.at + g.lines).contains(&line)).collect();
-    let Some(top) = here.iter().map(|g| g.grade).max() else {
-        return ed.set_status("no change on this line — ]g goes to the next");
+    let touches = |g: &crate::risk::Graded| spans.iter().any(|&(a, b)| g.at < b && a < g.at + g.lines);
+    // A cursor's line: the change it's on. A selection over more lines: only the changes that were on screen
+    // — every line of one drawn, or one that filled the pane — never one scrolled past (`%` takes no more
+    // than what was shown)
+    let on_line =
+        |g: &crate::risk::Graded| spans.iter().any(|&(a, b)| b == a + 1 && g.at < b && a < g.at + g.lines);
+    let shown = |g: &crate::risk::Graded| {
+        !drawn.is_empty()
+            && ((g.at..g.at + g.lines).all(|l| drawn.contains(&l))
+                || drawn.iter().all(|l| (g.at..g.at + g.lines).contains(l)))
     };
-    if top != Grade::High {
-        return ed.set_status(format!("this change is {} — only high-risk ones need space v h", top.word()));
+    // (every high one there: a file's change of mode sits on its first line, with any change of lines there)
+    let (high, unshown): (Vec<&crate::risk::Graded>, Vec<&crate::risk::Graded>) =
+        graded.iter().filter(|g| touches(g) && g.grade == Grade::High).partition(|g| on_line(g) || shown(g));
+    let unshown = unshown.iter().filter(|g| !g.looked_at(&ed.session.looked)).count();
+    // (a selection's that weren't on screen: said, never taken)
+    let off = match unshown {
+        0 => String::new(),
+        n => format!(" · {} under the selection not on screen", crate::nav::count(n, "high-risk change")),
+    };
+    if high.is_empty() && unshown > 0 {
+        return ed.set_status(format!(
+            "{} under the selection not on screen — not looked at · ]h goes to the next",
+            crate::nav::count(unshown, "high-risk change")
+        ));
     }
-    // (every high one here: a file's change of mode sits on its first line, with any change of lines there)
-    let keys: Vec<crate::risk::Key> =
-        here.iter().filter(|g| g.grade == Grade::High).flat_map(|g| g.keys.iter().copied()).collect();
+    if high.is_empty() {
+        // Nothing here to look at: to the next one that waits
+        let here = graded.iter().filter(|g| touches(g)).map(|g| g.grade).max();
+        if r.high_unseen(ed).is_empty() {
+            return ed.set_status(match here {
+                Some(g) => format!("this change is {} — no high-risk change left in this review", g.word()),
+                None => "no high-risk change left in this review".into(),
+            });
+        }
+        high_step(ed, true);
+        return;
+    }
+    let fresh = high.iter().filter(|g| !g.looked_at(&ed.session.looked)).count();
+    let keys: Vec<crate::risk::Key> = high.iter().flat_map(|g| g.keys.iter().copied()).collect();
     ed.session.looked.extend(keys);
     let left = r.high_unseen(ed).len();
+    held_sync(ed);
+    // (one: its marker went, in sight; several — a selection's — counted aloud)
+    let looked = match fresh {
+        0 | 1 => "looked at".to_string(),
+        n => format!("{} looked at", crate::nav::count(n, "high-risk change")),
+    };
+    let said = |n| {
+        format!("{looked}{off} — {} left · ]h goes to the next", crate::nav::count(n, "high-risk change"))
+    };
     match left {
-        0 => ed.set_success("looked at — no high-risk change left in this review"),
-        n => ed.note(format!(
-            "looked at — {} left · ]g walks the changes",
-            crate::nav::count(n, "high-risk change")
-        )),
+        0 => ed.set_success(format!("{looked} — no high-risk change left in this review")),
+        n if fresh > 1 || !off.is_empty() => ed.set_status(said(n)),
+        n => ed.note(said(n)),
+    }
+}
+
+/// After a look: a card held for high-risk changes (the review's end, a bring — `Offer.gate`) whose every
+/// one has had a look since gets its yes back, saying so — the next `y` is an answer to it as it is now.
+pub fn held_sync(ed: &mut Editor) {
+    let looked = &ed.session.looked;
+    let mut freed = false;
+    for o in ed.offers.iter_mut().filter(|o| o.held.is_some() && !o.gate.is_empty()) {
+        if o.gate.iter().all(|k| looked.contains(k)) {
+            o.held = None;
+            o.warning = None;
+            o.question.push_str("\n\nEach has had a look since.");
+            o.rev += 1;
+            freed = true;
+        }
+    }
+    if freed {
+        ed.note("every high-risk change it held for has had a look — its y is back");
     }
 }
 
@@ -1150,6 +1293,11 @@ fn end(ed: &mut Editor) {
 
 /// Opens file `i` of the review with its base; `at_end` = land on its last change (walking back).
 pub fn show(ed: &mut Editor, i: usize, at_end: bool) {
+    show_at(ed, i, if at_end { Land::Last } else { Land::First });
+}
+
+/// `show`, landing on `at`.
+fn show_at(ed: &mut Editor, i: usize, at: Land) {
     let Some(r) = &ed.session.code_review else { return };
     let Some(f) = r.files.get(i).cloned() else { return };
     let from = match &r.base {
@@ -1192,7 +1340,7 @@ pub fn show(ed: &mut Editor, i: usize, at_end: bool) {
         if !r.docs.contains(&id) {
             r.docs.push(id);
         }
-        r.land = Some((id, at_end));
+        r.land = Some((id, at));
     }
     // Seen before in this review: its base is there already — land now (the diff keeps itself current)
     if ed.docs.iter().any(|d| d.id == id && d.review_base.is_some() && d.diff_of.is_none()) {
@@ -1242,7 +1390,7 @@ fn load_base(ed: &mut Editor, id: DocId, from: From, f: File) {
 
 /// A file just shown: its first (last) change selected and centered, once its diff is there.
 pub fn land(ed: &mut Editor) {
-    let Some((id, at_end)) = ed.session.code_review.as_ref().and_then(|r| r.land) else { return };
+    let Some((id, at)) = ed.session.code_review.as_ref().and_then(|r| r.land) else { return };
     let Some(d) = ed.docs.iter().find(|d| d.id == id) else { return };
     if d.git_version != d.version() || ed.doc().id != id {
         return;
@@ -1250,15 +1398,97 @@ pub fn land(ed: &mut Editor) {
     if let Some(r) = &mut ed.session.code_review {
         r.land = None;
     }
-    let target = if at_end { d.git_hunks.last() } else { d.git_hunks.first() }.cloned();
-    if let Some(h) = target {
-        ed.select_hunk(&h);
-        // The cursor on its first line — a change taller than the screen (a new file) shows from its top
-        let r = ed.doc().selection().primary();
-        let back = crate::selection::Range::new(r.to(), r.from());
-        ed.doc_mut().set_selection(crate::selection::Selection::single(back));
-        ed.align_view(crate::viewalign::Place::Center);
+    let target = match at {
+        Land::First => d.git_hunks.first(),
+        Land::Last => d.git_hunks.last(),
+        Land::Line(l) => return land_on(ed, l),
+    };
+    if let Some(h) = target.cloned() {
+        select_from_top(ed, &h);
     }
+}
+
+/// Change `h` selected, the cursor on its first line — a change taller than the screen (a new file) shows
+/// from its top — and centered.
+fn select_from_top(ed: &mut Editor, h: &crate::git::Hunk) {
+    ed.select_hunk(h);
+    let r = ed.doc().selection().primary();
+    let back = crate::selection::Range::new(r.to(), r.from());
+    ed.doc_mut().set_selection(crate::selection::Selection::single(back));
+    ed.align_view(crate::viewalign::Place::Center);
+}
+
+/// The change at `line` of the document in front selected as `land` does (its diff not there: the line).
+fn land_on(ed: &mut Editor, line: usize) {
+    let hunks = &ed.doc().git_hunks;
+    let at = |h: &&crate::git::Hunk| h.lines.start <= line && line < h.lines.end.max(h.lines.start + 1);
+    match hunks.iter().find(at).or_else(|| hunks.iter().find(|h| h.lines.start >= line)).cloned() {
+        Some(h) => select_from_top(ed, &h),
+        None => {
+            ed.goto_line(line);
+            ed.align_view(crate::viewalign::Place::Center);
+        }
+    }
+}
+
+/// The high-risk changes no one has looked at, in the rail's order — file by file, line by line: (file,
+/// line now, 0-based).
+fn highs_in_order(ed: &Editor) -> Vec<(usize, usize)> {
+    let Some(r) = ed.session.code_review.as_ref() else { return Vec::new() };
+    let order = r.rail_order();
+    let rank = |i: usize| order.iter().position(|&k| k == i).unwrap_or(usize::MAX);
+    let mut v = r.high_unseen(ed);
+    v.sort_by_key(|&(i, at)| (rank(i), at));
+    v
+}
+
+/// `]h` / `[h` (#196): to the next (previous) high-risk change no one has looked at — across the review's
+/// files, around at the end. Going there is no look: `space v h` on it is. True if it went.
+pub fn high_step(ed: &mut Editor, forward: bool) -> bool {
+    let Some(r) = ed.session.code_review.as_ref() else {
+        ed.set_status("no review here — space v v starts one");
+        return false;
+    };
+    let order = r.rail_order();
+    let rank = |i: usize| order.iter().position(|&k| k == i).unwrap_or(usize::MAX);
+    // (from the file in hand and the selection's end going on, its start going back; from none of them: the
+    // first · the last)
+    let here = r.current(ed).map(|i| {
+        let (doc, sel) = (ed.doc(), ed.doc().selection().primary());
+        let pos = if forward { sel.cursor(&doc.text) } else { sel.from() };
+        (rank(i), crate::movement::line_of(&doc.text, pos))
+    });
+    let highs = highs_in_order(ed);
+    let n = highs.len();
+    if n == 0 {
+        ed.set_status("no high-risk change left to look at in this review");
+        return false;
+    }
+    let key = |&(i, at): &(usize, usize)| (rank(i), at);
+    let target = match (here, forward) {
+        (None, true) => highs.first(),
+        (None, false) => highs.last(),
+        (Some(h), true) => highs.iter().find(|x| key(x) > h).or(highs.first()),
+        (Some(h), false) => highs.iter().rev().find(|x| key(x) < h).or(highs.last()),
+    };
+    let (i, at) = *target.expect("not empty");
+    let k = highs.iter().position(|&x| x == (i, at)).unwrap_or(0) + 1;
+    high_go(ed, i, at);
+    let rel = ed.session.code_review.as_ref().map(|r| r.files[i].rel.clone()).unwrap_or_default();
+    ed.set_status(format!("high-risk {k} of {n} not looked at · {rel}:{} — space v h looks at it", at + 1));
+    true
+}
+
+/// To high-risk change `at` of file `i`: in the file in front, selected at once; else the file opened,
+/// landing on it.
+fn high_go(ed: &mut Editor, i: usize, at: usize) {
+    let Some(r) = ed.session.code_review.as_ref() else { return };
+    let ready = |d: &crate::document::Document| d.review_base.is_some() && d.git_version == d.version();
+    if r.current(ed) == Some(i) && ready(ed.doc()) {
+        ed.push_jump();
+        return land_on(ed, at);
+    }
+    show_at(ed, i, Land::Line(at));
 }
 
 /// `]g`/`[g` past the last (first) change of a file: on to the next (previous) file of the review. True if
@@ -1367,7 +1597,8 @@ pub fn close_asked(ed: &mut Editor) {
     if !high.is_empty() {
         let from = q.split('\n').count() + 1;
         q.push_str(&format!(
-            "\n\n{} not looked at — it ends once each has had a look (]g to it, space v h):{}",
+            "\n\n{} not looked at — it ends once each has had a look (h goes to them, ]h the next, space v h \
+             on each):{}",
             crate::nav::count(high.len(), "high-risk change"),
             places_said(&high)
         ));
@@ -1378,6 +1609,7 @@ pub fn close_asked(ed: &mut Editor) {
     let mut card = crate::offer::Offer::new(format!("End {name}'s review?"), &q, "", String::new(), what);
     if !high.is_empty() {
         (card.held, card.warning) = (Some(held_said(high.len())), warning);
+        card.gate = r.high_unseen_keys(ed);
     }
     ed.push_offer(card);
 }
@@ -1687,7 +1919,8 @@ mod tests {
             o.question
         );
         assert!(o.question.contains("\n  src/a.rs:2"), "{}", o.question);
-        assert_eq!(o.answers(false).iter().map(|a| a.0).collect::<String>(), "n");
+        // (`h` goes to it — #196)
+        assert_eq!(o.answers(false).iter().map(|a| a.0).collect::<String>(), "hn");
         feed(&mut ed, "y");
         assert!(ed.session.code_review.is_some() && ed.offers.len() == 1, "not ended, the card stays");
         assert!(ed.offer_said.as_ref().is_some_and(|s| s.2.contains("not looked at")), "said on the card");
@@ -1702,6 +1935,140 @@ mod tests {
         assert_eq!(high(&ed), Some(0));
         feed(&mut ed, "<space>vm<space>vq");
         assert!(ed.session.code_review.is_none(), "ended: {:?}", ed.offers.first().map(|o| &o.question));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #196: reaching the high-risk changes. `]h`/`[h` go to the next (previous) one not looked at, across the
+    /// review's files and around; `space v h` with none under the cursor goes to the next one — only going, a
+    /// second `space v h` there is the look; over a selection it takes every high-risk change it touches that
+    /// was on screen (`%`, scrolled to the end, never takes one scrolled past — said instead). The
+    /// end card's `h` goes to them, and once each has had a look its `y` is back. Nothing is marked without
+    /// `space v h`.
+    #[test]
+    fn the_high_risk_changes_are_reached_by_keys() {
+        let dir = std::env::temp_dir().join(format!("tarae-review-reach-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let run = |args: &[&str]| {
+            let id = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"];
+            let ok = std::process::Command::new("git").args(id).args(args).current_dir(&dir).output();
+            assert!(ok.unwrap().status.success(), "git {args:?}");
+        };
+        let fns = |names: &str| names.chars().map(|c| format!("fn {c}() {{}}\n")).collect::<String>();
+        std::fs::write(dir.join("a.rs"), fns("abcdefgh")).unwrap();
+        std::fs::write(dir.join("b.rs"), fns("m")).unwrap();
+        run(&["init", "-q"]);
+        run(&["add", "."]);
+        run(&["commit", "-qm", "x"]);
+        // a.rs: high on lines 1 and 7 (0-based), a plain change on 4; b.rs: high on 0
+        let mut a: Vec<String> = fns("abcdefgh").lines().map(str::to_string).collect();
+        a[1] = "fn b() { unsafe { x() } }".into();
+        a[4] = "fn e() { y() }".into();
+        a[7] = "fn h() { unsafe { z() } }".into();
+        std::fs::write(dir.join("a.rs"), a.join("\n") + "\n").unwrap();
+        std::fs::write(dir.join("b.rs"), "fn m() { unsafe { w() } }\n").unwrap();
+        let mut ed = Editor::new(crate::config::Config::default());
+        start_in(&mut ed, dir.clone(), None);
+        settle_until(&mut ed, landed);
+        let left = |ed: &Editor| ed.session.code_review.as_ref().map_or(0, |r| r.high_unseen(ed).len());
+        let at = |ed: &Editor| {
+            let name =
+                ed.doc().path.as_ref().and_then(|p| p.file_name()).unwrap().to_string_lossy().to_string();
+            (name, ed.cursor_line())
+        };
+        // `]h`/`[h`, waiting for a file to land when it goes to another
+        let go = |ed: &mut Editor, keys: &str, file: &str| {
+            feed(ed, keys);
+            settle_until(ed, |ed| landed(ed) && ed.doc().path.as_deref() == Some(dir.join(file).as_path()));
+        };
+        assert_eq!((at(&ed), left(&ed)), (("a.rs".into(), 1), 3));
+        go(&mut ed, "]h", "a.rs");
+        assert_eq!(at(&ed), ("a.rs".into(), 7), "past the plain change");
+        go(&mut ed, "]h", "b.rs");
+        assert_eq!(at(&ed), ("b.rs".into(), 0), "into the next file");
+        go(&mut ed, "]h", "a.rs");
+        assert_eq!(at(&ed), ("a.rs".into(), 1), "around");
+        go(&mut ed, "[h", "b.rs");
+        assert_eq!(at(&ed), ("b.rs".into(), 0));
+        go(&mut ed, "[h", "a.rs");
+        assert_eq!(at(&ed), ("a.rs".into(), 7));
+        assert_eq!(left(&ed), 3, "going is no look");
+        // `space v h` on a line with no change: to the next one, not looked at
+        ed.goto_line(2);
+        feed(&mut ed, "<space>vh");
+        assert_eq!((at(&ed), left(&ed)), (("a.rs".into(), 7), 3), "to the next, past the plain change");
+        ed.goto_line(4);
+        feed(&mut ed, "<space>vh");
+        assert_eq!((at(&ed), left(&ed)), (("a.rs".into(), 7), 3), "from a plain change: to the next high");
+        // Over a selection: only the high ones it touches that were on screen as the key was pressed
+        let drawn =
+            |ed: &Editor| ed.screen.panes.iter().flat_map(|p| p.3.iter().map(|r| r.0)).collect::<Vec<_>>();
+        let status = |ed: &Editor| ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        // (the pane showing the file's end: a selection over lines 0–1 takes nothing, says why)
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 8).unwrap();
+        assert!(drawn(&ed).contains(&7) && !drawn(&ed).contains(&1), "{:?}", drawn(&ed));
+        ed.goto_line(0);
+        feed(&mut ed, "xx<space>vh");
+        assert_eq!(left(&ed), 3, "line 1's wasn't on screen");
+        assert!(
+            status(&ed).contains("1 high-risk change under the selection not on screen"),
+            "{}",
+            status(&ed)
+        );
+        // (`%` from the file's top: its cursor at the end, the frame after it scrolls there — as live, a frame
+        // between the keys — so `space v h` takes line 7's, never line 1's, scrolled past, and says so)
+        feed(&mut ed, "<esc>;");
+        ed.goto_line(0);
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 8).unwrap();
+        assert!(drawn(&ed).contains(&1) && !drawn(&ed).contains(&7), "{:?}", drawn(&ed));
+        feed(&mut ed, "%");
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 8).unwrap();
+        assert!(drawn(&ed).contains(&7) && !drawn(&ed).contains(&1), "{:?}", drawn(&ed));
+        feed(&mut ed, "<space>vh");
+        assert_eq!(left(&ed), 2, "line 7's, not line 1's");
+        assert!(
+            status(&ed).contains(
+                "looked at · 1 high-risk change under the selection not on screen — 2 high-risk changes left"
+            ),
+            "a partial take says what it left: {}",
+            status(&ed)
+        );
+        // (the whole file on screen, none of a.rs's looked at yet: both taken, counted aloud)
+        ed.session.looked.clear();
+        feed(&mut ed, "<esc>;");
+        ed.goto_line(0);
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 30).unwrap();
+        feed(&mut ed, "%");
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 30).unwrap();
+        assert!(drawn(&ed).contains(&1) && drawn(&ed).contains(&7), "{:?}", drawn(&ed));
+        feed(&mut ed, "<space>vh");
+        assert_eq!(left(&ed), 1, "both of a.rs's");
+        assert!(
+            status(&ed).contains("2 high-risk changes looked at — 1 high-risk change left"),
+            "{}",
+            status(&ed)
+        );
+        // The end card: held, `h` goes to what's left; looked at, its `y` ends the review
+        feed(&mut ed, "<esc>;<space>vq");
+        let o = ed.offers.first().expect("the end card");
+        assert!(o.held.is_some(), "{}", o.question);
+        assert_eq!(o.answers(false).iter().map(|a| a.0).collect::<String>(), "hn");
+        go(&mut ed, "h", "b.rs");
+        assert_eq!((at(&ed), left(&ed)), (("b.rs".into(), 0), 1), "there, not looked at");
+        assert!(!ed.offers.is_empty(), "the card stays");
+        feed(&mut ed, "<space>vh");
+        assert_eq!(left(&ed), 0);
+        let o = ed.offers.first().expect("the end card");
+        assert!(o.held.is_none(), "every one looked at: its yes is back");
+        assert_eq!(o.answers(false).iter().map(|a| a.0).collect::<String>(), "yn");
+        // None left: said
+        feed(&mut ed, "]h");
+        assert!(
+            ed.status.as_ref().is_some_and(|s| s.0.contains("no high-risk change left")),
+            "{:?}",
+            ed.status
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

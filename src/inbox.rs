@@ -10,8 +10,9 @@
 //! narrow by session or kind. `enter` goes to the one in hand — its session to the front, its card up with
 //! the keys — and it's answered there, on its card, as ever: never from the list.
 //!
-//! `C-q` takes the same order: to the one that has waited longest, in any session (#90, #94) — once it's the
-//! card up, `C-q` gives it the keys. While anything waits, `C-q` never says nothing does. Claude's runs gone
+//! `C-q` takes the same order, but for what's in front: the session in front's own first (#198), then the one
+//! that has waited longest, in any session (#90, #94) — once it's the card up, `C-q` gives it the keys. While
+//! anything waits, `C-q` never says nothing does. Claude's runs gone
 //! quiet are listed after everything that asks for an answer (#171), and so is a reviewer that ended in a
 //! session behind (#195) — news to read there, gone once that session is in front.
 
@@ -219,12 +220,16 @@ impl Editor {
         next.map(|d| d + std::time::Duration::from_millis(5))
     }
 
-    /// Where `C-q` goes now, unheld — the inbox's first, and what that is from here.
+    /// Where `C-q` goes now, unheld — this session's own first (#198: an older one elsewhere waits while you
+    /// answer what's here), else the inbox's first; and what that is from here.
     pub fn next_up(&self) -> Next {
-        let Some(e) = self.inbox().into_iter().next() else {
+        let inbox = self.inbox();
+        let front = !self.background();
+        let own = inbox.iter().position(|e| front && e.asks_answer() && e.session_id() == self.session.id);
+        let Some(e) = inbox.into_iter().nth(own.unwrap_or(0)) else {
             return self.turns_ended().first().map_or(Next::None, |&id| Next::Done(id));
         };
-        let here = e.session_id() == self.session.id && !self.background();
+        let here = e.session_id() == self.session.id && front;
         match e.card() {
             Some(id) if here && self.offers.first().is_some_and(|o| o.id == id && !o.installing()) => {
                 Next::Card(id)

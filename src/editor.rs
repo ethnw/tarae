@@ -2513,6 +2513,24 @@ impl Editor {
         self.note(format!("closed {name}"));
     }
 
+    /// `C-x` in the notes list: the note on `item`'s row closes · `all` (`A-x`): every note its author began.
+    /// The list follows, the row in hand where it was — or goes (kept for `space '`) when a card asks first
+    /// (your unsent drafts among them): the card takes the keys.
+    fn picker_close_notes(&mut self, item: &crate::picker::Item, all: bool) {
+        let Some(id) = crate::notes::of_row(self, item) else { return };
+        match crate::notes::began(self, id).filter(|_| all) {
+            Some(by) if crate::notes::close_by(self, Some(by)) => return self.keep_last_picker(),
+            Some(_) => {}
+            None => crate::notes::close(self, id),
+        }
+        let rest = crate::notes::picker_items(self);
+        if let Some(p) = self.picker.as_mut() {
+            let at = p.selected;
+            p.set_items(rest);
+            p.selected = at.min(p.len().saturating_sub(1));
+        }
+    }
+
     fn picker_key(&mut self, key: Key) {
         let Some(p) = self.picker.as_mut() else { return };
         // Anything but typing acts on the list — never on the last query's rows
@@ -2560,6 +2578,11 @@ impl Editor {
                     }
                     _ => self.git_branch_delete(&name, true),
                 };
+            }
+            // A note: `C-x` closes it, `A-x` every note its author began (#197)
+            (Code::Char('x'), ctrl) if p.title == crate::notes::NOTES && (ctrl || key.alt) => {
+                let Some(item) = p.current().cloned() else { return };
+                return self.picker_close_notes(&item, !ctrl);
             }
             // A buffer: close it (#47)
             (Code::Char('x'), true) if matches!(p.current().map(|i| &i.action), Some(Action::Buffer(_))) => {
@@ -2705,6 +2728,7 @@ impl Editor {
                     self.set_success(format!("Theme {name} · saved to your config"));
                 }),
             Action::Goto { path, line, col } => self.open_at(&path, line, col),
+            Action::Note { path, line, .. } => self.open_at(&path, line, 0),
         };
         if let Err(e) = result {
             self.set_error(format!("{e:#}"));
@@ -2949,7 +2973,7 @@ impl Editor {
                     .is_some_and(|t| t.focus && t.visible && t.exited.is_none()))
     }
 
-    /// `C-q` while a card is up — the one that has waited longest (else `C-q` goes to that one, `inbox.rs`) —
+    /// `C-q` while a card is up — this session's first, then the one that has waited longest (`inbox.rs`) —
     /// gives it the keys from wherever they are (#24); while it has them, its answers answer it and Esc — or
     /// `C-q` again — gives them back unanswered (#25, #94), the card staying up — other keys are swallowed,
     /// saying what it asks. True if the key was the card's.
@@ -2965,7 +2989,8 @@ impl Editor {
                 self.set_status("keys back — the card waits, C-q answers it");
                 return true;
             }
-            // (another has waited longer — in a session behind, stacked under it: `C-q` goes there)
+            // (another goes first — stacked under it here and older, or, nothing asking here, one in a
+            // session behind: `C-q` goes there)
             if self.next_up() != crate::inbox::Next::Card(id) {
                 return false;
             }
@@ -3041,7 +3066,8 @@ impl Editor {
         if self.card_key(key) {
             return took(Handler::Card);
         }
-        // …else to the one that has waited longest, wherever it is (#7, #90, #94) — the front's own edit review
+        // …else to the next up — nothing here, the one that has waited longest, wherever it is (#7, #90, #94,
+        // #198) — the front's own edit review
         // takes its `C-q` itself
         if key.ctrl
             && !key.alt
@@ -6069,7 +6095,7 @@ mod tests {
         });
         assert!(ed.session.task_run.as_ref().is_none_or(|r| r.task.cmd != cmd), "it didn't run");
         assert!(
-            matches!(&ed.offers[0].what, crate::offer::What::Run(r) if r.cmd == cmd && r.pattern.is_none())
+            matches!(&ed.offers[0].what, crate::offer::What::Run(r) if r.cmd == cmd && r.again.is_none())
         );
     }
 
@@ -6115,8 +6141,8 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// #27: a card's `a` lets its pattern (`tools::pattern` — here the whole `basename one two`) run without
-    /// asking for the rest of the chat: the same command the next turn has no card. The card says so.
+    /// #27: a card's `a` lets its command (`tools::again` — this exact one, #193) run without asking for the
+    /// rest of the chat: the same command the next turn has no card. The card says so.
     #[test]
     fn a_cards_this_chat_allows_its_pattern() {
         use serde_json::json;
@@ -6128,13 +6154,17 @@ mod tests {
         feed(&mut ed, "<space>lsay it<ret>");
         settle_for(&mut ed, |ed| !ed.offers.is_empty());
         let q = ed.offers[0].question.clone();
-        assert!(q.contains("a — also `basename one two …` unasked, this chat"), "{q}");
+        assert!(q.contains("a — this exact command again unasked, this chat"), "{q}");
         assert!(ed.offers[0].lasts() && !ed.offers[0].keeps(), "a — this chat; never for good");
         // (`a`, as its key does once the card has been in sight)
         ed.offer_for_chat();
         settle_for(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
         assert!(tool_answer(&log).contains("exit 0"));
-        assert_eq!(ed.session.chat.as_ref().unwrap().run_allow, ["basename one two"]);
+        let again = &ed.session.chat.as_ref().unwrap().run_again;
+        assert_eq!(
+            again.iter().map(|r| r.again.parts.clone()).collect::<Vec<_>>(),
+            [[["basename", "one", "two"]]]
+        );
         ed.session.chat.as_mut().unwrap().focused = true;
         let answers = |log: &Path| std::fs::read_to_string(log).unwrap_or_default().matches("\"c7\"").count();
         feed(&mut ed, "again<ret>");
@@ -6163,14 +6193,14 @@ mod tests {
         assert!(ed.offers.is_empty(), "a check through filters runs as the check would");
         let answer = tool_answer(&log);
         assert!(answer.contains("exit 0") && answer.contains("one two"), "{answer}");
-        // Not allowed yet: the card offers the check's own pattern
+        // Not allowed yet: the card offers the command again, its filters aside (#193)
         std::fs::remove_file(&log).ok();
         let mut ed = editor("");
         claude_calls(&mut ed, &dir, "run", &json!({ "command": piped }));
         feed(&mut ed, "<space>lsay it<ret>");
         settle_for(&mut ed, |ed| !ed.offers.is_empty());
         let q = ed.offers[0].question.clone();
-        assert!(q.contains("a — also `basename one two …` unasked, this chat"), "{q}");
+        assert!(q.contains("a — this exact command again unasked, this chat"), "{q}");
         // A pipe into a writer isn't a filter
         std::fs::remove_file(&log).ok();
         let mut ed = editor("");
@@ -6326,7 +6356,7 @@ mod tests {
                 "What it does can't be told from its words: `$(…)` makes its words as it runs.",
             ),
             ("cd nope; cat x", "Where it reads can't be told — cd nope: no such folder."),
-            ("make -s", "It runs make — not a check, a read, or a pattern allowed in this chat."),
+            ("make -s", "It runs make — not a check, a read, or a command allowed in this chat."),
         ] {
             let mut ed = editor("");
             ed.session.root = this_repo();
@@ -6508,10 +6538,12 @@ mod tests {
         let o = &ed.offers[0];
         assert!(matches!(&o.what, crate::offer::What::Run(r) if r.cmd == command));
         // (why it asks, a line under it — #164)
-        let why = "It runs touch — not a check, a read, or a pattern allowed in this chat.";
+        let why = "It runs touch — not a check, a read, or a command allowed in this chat.";
+        // (#193: `a` is this exact command — one word and a path makes one)
+        let a = "a — this exact command again unasked, this chat";
         assert_eq!(
             (o.title.as_str(), o.question.as_str()),
-            ("Claude wants to run", format!("{command}\n\n{why}").as_str())
+            ("Claude wants to run", format!("{command}\n\n{why}\n\n{a}").as_str())
         );
         assert!(o.weighty(), "y must have been in sight a moment to count");
         // Another command while that one is asked about waits on a card of its own, under it (#5: refused,

@@ -135,7 +135,7 @@ pub const COMMANDS: &[TypedCmd] = &[
     c(&["review-turn"], Arg::None, "Review what Claude changed in its last turn"),
     c(&["soft-wrap"], Arg::None, "Wrap this buffer's long lines, or scroll sideways (on/off)"),
     c(&["note-close"], Arg::None, "Close Claude's note on this line"),
-    c(&["notes-clear"], Arg::None, "Close all of Claude's notes"),
+    c(&["notes-clear"], Arg::None, "Close all notes (or one author's: reviewer, author, you)"),
     c(&["commit-draft"], Arg::None, "Let Claude draft the commit message"),
     c(&["undo-turn"], Arg::None, "Undo what Claude changed in its last turn"),
     c(&["redo-turn"], Arg::None, "Bring back the turn you undid"),

@@ -5121,7 +5121,9 @@ fn draw_picker(
     // Preview target
     let target = p.current().map(|i| i.action.clone());
     let preview_title = match &target {
-        Some(Action::Open(path) | Action::Goto { path, .. }) => rel_path(editor, path),
+        Some(Action::Open(path) | Action::Goto { path, .. } | Action::Note { path, .. }) => {
+            rel_path(editor, path)
+        }
         Some(Action::Buffer(id) | Action::Jump { doc: id, .. }) => editor
             .docs
             .iter()
@@ -5972,6 +5974,10 @@ fn draw_statusline(
     if quiet > 0 {
         let runs = if quiet == 1 { "run" } else { "runs" };
         left.push(Seg { text: format!("{gap}{quiet} {runs} quiet"), style: dim, keep: INBOX });
+    }
+    // A restart under way, until it happens (#194: a toast said it once; a second `:restart` called it off)
+    if let Some(r) = crate::restart::pending(editor) {
+        left.push(Seg { text: format!("  {}", fit_ellipsis(&r, 40)), style: accent, keep: CHIP });
     }
     if chip {
         // (the others: possibly stuck · done — #86: said apart from what waits)
@@ -10647,6 +10653,19 @@ fn key_hints(editor: &Editor) -> Option<Vec<(&'static str, String)>> {
                 hints(&[("enter", "open"), ("C-x", "close the buffer"), ("type", "narrow"), ("esc", "close")])
             }
         }
+    } else if let Some(p) = editor.picker.as_ref().filter(|p| p.title == crate::notes::NOTES) {
+        // (`A-x` names whose: the row's author — #197)
+        let by = p
+            .current()
+            .and_then(|i| crate::notes::of_row(editor, i))
+            .and_then(|id| crate::notes::began(editor, id));
+        match by {
+            Some(by) => {
+                let all = format!("close all the {}'s", by.label());
+                hints(&[("enter", "go to it"), ("C-x", "close it"), ("A-x", &all), ("esc", "close")])
+            }
+            None => hints(&[("enter", "go to it"), ("type", "narrow"), ("esc", "close")]),
+        }
     } else if editor.picker.as_ref().is_some_and(|p| p.title == crate::inbox::INBOX) {
         // (answered there, on its card — never from the list)
         hints(&[("enter", "go to it"), ("type", "narrow"), ("esc", "close")])
@@ -11222,6 +11241,7 @@ mod tests {
                 drawn: Default::default(),
                 asked: None,
                 held: None,
+                gate: Vec::new(),
             });
             let result =
                 serde_json::json!([{"label": "line_one", "detail": "fn line_one()"}, {"label": "lx"}]);

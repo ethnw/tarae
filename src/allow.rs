@@ -52,6 +52,8 @@ impl Allowed {
             Grant::Read(p) => self.add_read(p.clone()),
             Grant::Write(p) => self.add_write(p.clone()),
             Grant::Port(n) => self.add_port(*n),
+            // (Docker's: one run's or one command's, never a chat's — #193)
+            Grant::Socket(_) if g.as_outside() => {}
             Grant::Socket(s) => {
                 if !self.sockets.contains(s) {
                     self.sockets.push(s.clone());
@@ -116,6 +118,12 @@ impl Grant {
             Grant::Read(p) => keepable(p, home().as_deref()),
             _ => true,
         }
+    }
+
+    /// Whether it's as much as running outside the sandbox (`warning` says why: Docker's socket) — never
+    /// allowed for a chat, only for one run or one command (#193, `tools::RunAgain`).
+    pub fn as_outside(&self) -> bool {
+        self.warning().is_some()
     }
 
     /// For a socket that's Docker's (`docker.sock`, colima's, Docker Desktop's): what connecting to it
@@ -571,7 +579,8 @@ pub fn grant_reads(ed: &mut crate::editor::Editor, places: &[PathBuf], scope: Sc
 /// `a`/`A` on a card about what the sandbox blocked: Claude's commands may do `g` for the rest of this
 /// conversation, or always in this project — and Claude hears it with the next message.
 pub fn grant(ed: &mut crate::editor::Editor, g: &Grant, scope: Scope) {
-    if scope == Scope::Once {
+    // (Docker's socket is as much as the sandbox off: never for longer than one run — #193)
+    if scope == Scope::Once || g.as_outside() {
         return;
     }
     // (a socket is this conversation's at most)

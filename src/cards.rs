@@ -150,7 +150,7 @@ impl Why {
     pub fn said(&self) -> Option<String> {
         Some(match self {
             Why::NotACheck(p) => {
-                format!("It runs {p} — not a check, a read, or a pattern allowed in this chat.")
+                format!("It runs {p} — not a check, a read, or a command allowed in this chat.")
             }
             Why::Unreadable(what) => format!("What it does can't be told from its words: {what}."),
             Why::Script => "It runs a script — what runs is in the file.".into(),

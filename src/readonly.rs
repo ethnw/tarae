@@ -70,6 +70,12 @@ pub fn before_pipe(line: &str) -> Option<Vec<Part>> {
     Some(parts.into_iter().take(n).collect())
 }
 
+/// The parts of `line` as `parse` reads them, a command's leading `NAME=value` words kept as its first words,
+/// and between each two whether it's a single `|` — what a run card's `a` keys on (`tools::again`).
+pub fn parse_env(line: &str) -> Option<(Vec<Part>, Vec<bool>)> {
+    split(line, true).ok()
+}
+
 /// What `split` reads, or what in the line it doesn't (`unreadable`).
 type Split = Result<(Vec<Part>, Vec<bool>), &'static str>;
 
@@ -896,6 +902,13 @@ fn reads_only(words: &[&str]) -> bool {
     let Some((&name, args)) = words.split_first() else { return false };
     // A short option cluster with `c` in it (`-ro` has `-o`)
     let short = |w: &str, c: char| w.starts_with('-') && !w.starts_with("--") && w[1..].contains(c);
+    // A long option as getopt_long takes it: any start of its name (`--out=f` is `--output=f`, `--fol` is
+    // `--follow`) — an ambiguous one is refused here too, as the tool itself would
+    let long = |w: &str, name: &str| {
+        w.strip_prefix("--")
+            .map(|o| o.split_once('=').map_or(o, |(o, _)| o))
+            .is_some_and(|o| !o.is_empty() && name.starts_with(o))
+    };
     let any = |f: &dyn Fn(&str) -> bool| args.iter().any(|w| f(w));
     match name {
         "git" => match git_after_c(args) {
@@ -907,13 +920,14 @@ fn reads_only(words: &[&str]) -> bool {
         _ if SAYS.contains(&name) => true,
         "sed" => sed_prints(args),
         "find" => !any(&|w| ["-exec", "-ok", "-delete", "-fprint", "-fls"].iter().any(|o| w.starts_with(o))),
-        "sort" => !any(&|w| short(w, 'o') || w.starts_with("--compress-program")),
-        "tree" => !any(&|w| short(w, 'o')),
-        "file" => !any(&|w| short(w, 'C') || w.starts_with("--compile")),
-        "tail" => !any(&|w| short(w, 'f') || short(w, 'F') || w.starts_with("--follow")),
+        "sort" => !any(&|w| short(w, 'o') || long(w, "output") || long(w, "compress-program")),
+        // (`-R` with `-H` writes a `00Tree.html` in each folder, through a shell)
+        "tree" => !any(&|w| short(w, 'o') || short(w, 'R')),
+        "file" => !any(&|w| short(w, 'C') || long(w, "compile")),
+        "tail" => !any(&|w| short(w, 'f') || short(w, 'F') || long(w, "follow")),
         "rg" => !any(&|w| w.starts_with("--pre")),
-        // `uniq in out` writes `out`
-        "uniq" => args.iter().filter(|w| !w.starts_with('-')).count() <= 1,
+        // `uniq in out` writes `out` — `uniq - out` too (`-` is the input: an operand, not an option)
+        "uniq" => args.iter().filter(|w| **w == "-" || !w.starts_with('-')).count() <= 1,
         _ => COMMANDS.contains(&name),
     }
 }
@@ -1209,6 +1223,8 @@ mod tests {
             "du -sh target",
             "diff a.txt b.txt",
             "sort -r names.txt",
+            "sort --check --numeric-sort names.txt",
+            "tail --lines=5 log.txt",
             "uniq names.txt",
             "pwd",
             "git blame src/main.rs",
@@ -1247,13 +1263,26 @@ mod tests {
             "sort -ro out names.txt",
             "sort --output=out x",
             "sort --compress-program=sh x",
+            // (getopt_long takes any start of a long option's name)
+            "sort --compress-prog=./x x",
+            "sort --co ./x x",
+            "sort --out=f x",
+            "sort --o f x",
             "tree -o out",
+            "tree -R -H . -L 1",
+            "tree -dR -H . -L 1",
             "file -C -m magic",
+            "file --comp -m magic",
             "tail -f log.txt",
             "tail -F log.txt",
             "tail --follow log.txt",
+            "tail --fol log.txt",
+            "tail --f=name log.txt",
             "rg --pre sh fn",
             "uniq in.txt out.txt",
+            // (#193: `-` is stdin, `out` is still written)
+            "uniq - out.txt",
+            "uniq -c - out.txt",
             "git branch new",
             "git branch -D main",
             "git -C /x push",

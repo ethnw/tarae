@@ -12,7 +12,8 @@
 //!
 //! Files are saved first, as before a task. What can't come along stops it the way `:q` is stopped — a
 //! buffer with no file, an edit's review, a review of Claude's turn — in any session (`blocker`). A chat turn
-//! in flight is waited for (`turn_over`); `:restart` again cancels.
+//! in flight is waited for (`turn_over`). A restart under way is on the status line until it happens
+//! (`pending`); `:restart` again asks before calling it off.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -114,10 +115,24 @@ impl Restart {
 
 // ── :restart ────────────────────────────────────────────────────────────────
 
-/// `:restart` (`build`) / `:restart!`. Again while one is under way: cancels it.
+/// `:restart` (`build`) / `:restart!`. Again while one is under way: a card asks before calling it off
+/// (#194: a second `:restart`, the first thought to have done nothing, canceled it) — one card: asked
+/// again while it's up, that card comes to the front.
 pub fn start(ed: &mut Editor, build: bool) -> Result<(), String> {
-    if ed.restart.take().is_some() {
-        ed.set_status("restart canceled");
+    if let Some(r) = ed.restart.as_ref() {
+        let up = ed
+            .offers
+            .iter()
+            .position(|o| matches!(o.what, crate::offer::What::RestartCancel { id } if id == r.id));
+        if let Some(i) = up {
+            ed.offer_to_front(i);
+            ed.set_status("already asking — y calls the restart off, n keeps it going");
+            return Ok(());
+        }
+        let (id, waits) = (r.id, pending(ed).unwrap_or_else(|| "tarae restarts".into()));
+        let q = format!("{}.\n\ny calls it off · n keeps it going", said(ed, &waits));
+        let what = crate::offer::What::RestartCancel { id };
+        ed.push_offer(crate::offer::Offer::new("Call off the restart?".into(), &q, "", String::new(), what));
         return Ok(());
     }
     blocker(ed, true).map_or(Ok(()), |why| Err(format!("can't restart: {why}")))?;
@@ -127,11 +142,58 @@ pub fn start(ed: &mut Editor, build: bool) -> Result<(), String> {
     // Every session's turn, not only the front's (#109)
     let turns = turns(ed);
     if !turns.is_empty() {
-        ed.set_status(format!("tarae restarts when {} — :restart again cancels", waits_for(&turns)));
+        ed.set_status(format!(
+            "tarae restarts when {} — :restart again asks to call it off",
+            waits_for(&turns)
+        ));
         return Ok(());
     }
     go(ed);
     Ok(())
+}
+
+/// A restart under way, in a few words for the status line — `restart waits for gitescape`, `restart
+/// waits for its build` — until it happens (#194: said once in a toast, then nothing showed it pending). None
+/// while none is, or while its card asks (it's in sight).
+pub fn pending(ed: &Editor) -> Option<String> {
+    Some(match &ed.restart.as_ref()?.stage {
+        Stage::Turn => match turns(ed).as_slice() {
+            [] => "restart waits".into(),
+            names => format!("restart waits for {}", names.join(", ")),
+        },
+        Stage::Writes => "restart waits for Claude's edits".into(),
+        Stage::Building(_) => "restart waits for its build".into(),
+        Stage::Saving | Stage::Finding | Stage::Checking | Stage::Ready(_) => "restarting".into(),
+        Stage::Choosing | Stage::Same => return None,
+    })
+}
+
+/// What the cancel card says the restart waits for: the turns by name, else the status line's words.
+fn said(ed: &Editor, pending: &str) -> String {
+    let turns = turns(ed);
+    match ed.restart.as_ref().map(|r| &r.stage) {
+        Some(Stage::Turn) if !turns.is_empty() => format!("tarae restarts when {}", waits_for(&turns)),
+        _ => pending.to_string(),
+    }
+}
+
+/// The answer on the card `:restart` again raised: `y` calls restart `id` off (and its cards go), `n` keeps
+/// it going. Gone meanwhile (it happened, or failed): said.
+pub fn cancel_answer(ed: &mut Editor, card: u64, id: u64, yes: bool) {
+    ed.offer_finished(card, Ok(()));
+    if !ed.restart.as_ref().is_some_and(|r| r.id == id) {
+        return ed.set_status("that restart isn't under way any more");
+    }
+    if !yes {
+        let waits = pending(ed).unwrap_or_else(|| "the restart goes on".into());
+        return ed.set_status(format!("{waits} — kept"));
+    }
+    ed.restart = None;
+    let restarts = |w: &crate::offer::What| {
+        matches!(w, crate::offer::What::Restart(_) | crate::offer::What::RestartSame { .. })
+    };
+    ed.drop_cards_for(restarts, "dropped — the restart was called off");
+    ed.set_status("restart canceled");
 }
 
 /// The sessions whose Claude is in a turn, or whose turn's files are still being read — by name.
@@ -454,7 +516,10 @@ pub fn chosen(ed: &mut Editor, card: u64, choice: Choice, which: Option<usize>) 
     if let Some(r) = ed.restart.as_mut() {
         r.stage = Stage::Building(generation);
     }
-    ed.set_status(format!("building {} — tarae restarts when it's done (:restart again cancels)", t.named()));
+    ed.set_status(format!(
+        "building {} — tarae restarts when it's done (:restart again asks to call it off)",
+        t.named()
+    ));
 }
 
 /// The build task ended (`task.rs`) — true if it was this restart's (then the restart says what's next).
@@ -1743,7 +1808,7 @@ mod tests {
     }
 
     /// A slow disk doesn't hold the screen: `:restart` saves and goes on once the files are written (the
-    /// saver's event, not a wait) — and `:restart` again meanwhile cancels it.
+    /// saver's event, not a wait) — and `:restart` again meanwhile, `y` on its card, cancels it.
     #[test]
     fn a_slow_save_is_waited_for_off_the_main_loop() {
         let dir = temp("slow");
@@ -1761,7 +1826,7 @@ mod tests {
 
         let mut ed = editing(&dir, "", &bin);
         ed.saver.slow = Duration::from_millis(300);
-        feed(&mut ed, ":restart!<ret>:restart!<ret>");
+        feed(&mut ed, ":restart!<ret>:restart!<ret>y");
         assert!(ed.restart.is_none());
         settle_until(&mut ed, |ed| !ed.doc().is_modified());
         assert!(ed.restart.is_none() && !ed.should_quit, "{}", toasts(&ed));
@@ -2064,7 +2129,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A chat turn in flight is waited for — the restart goes on when it ends; `:restart` again cancels.
+    /// A chat turn in flight is waited for — the restart goes on when it ends; `:restart` again, `y` on its card, cancels.
     #[test]
     fn a_turn_in_flight_is_waited_for() {
         let dir = temp("turn");
@@ -2086,7 +2151,9 @@ mod tests {
         assert!(ed.session.chat.as_ref().unwrap().busy());
         crate::typed::execute(&mut ed, "restart!").unwrap();
         crate::typed::execute(&mut ed, "restart!").unwrap();
-        assert!(ed.restart.is_none(), "again = canceled");
+        // (the chat has the keys: the card's are given)
+        feed(&mut ed, "<C-q>y");
+        assert!(ed.restart.is_none(), "again, then y = canceled");
         crate::typed::execute(&mut ed, "restart!").unwrap();
         assert_eq!(ed.restart.as_ref().unwrap().stage, Stage::Turn);
         assert!(toasts(&ed).contains("when Claude's turn ends"), "{}", toasts(&ed));
@@ -2531,6 +2598,68 @@ mod tests {
         ed.handle_event(crate::event::Event::Resize);
         settle_answering(&mut ed, |ed| ed.should_quit || ed.restart.is_none());
         assert_eq!(ed.restart.as_ref().and_then(Restart::ready), Some(bin.as_path()), "{}", toasts(&ed));
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #194: a restart waiting for a turn stays in sight — the status line says whose turn it waits for —
+    /// until it happens; `:restart` again (thinking the first did nothing) asks before calling it off: `n`
+    /// keeps it waiting, `y` calls it off and the status line says nothing of it any more.
+    #[test]
+    fn a_waiting_restart_is_in_sight_and_again_asks_first() {
+        let dir = temp("in-sight");
+        let (main, back) = (dir.join("main"), dir.join("back"));
+        for d in [&main, &back] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let bin = fake_tarae(&dir, "tarae 9.9.9");
+        let mut ed = Editor::new(Config::default());
+        (ed.session.root, ed.session.name) = (main.clone(), "main".into());
+        ed.config.restart_binary = bin.display().to_string();
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        let id = ed.session_open(&back).unwrap();
+        crate::chat::open(&mut ed);
+        ed.session.chat.as_mut().unwrap().state = crate::chat::State::Thinking;
+        assert!(ed.session_switch(0));
+        let status = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 160, 30).unwrap();
+            let mut vt = vt100::Parser::new(30, 160, 0);
+            vt.process(&bytes);
+            vt.screen().rows(0, 160).nth(29).unwrap()
+        };
+        assert!(!status(&mut ed).contains("restart"));
+        crate::typed::execute(&mut ed, "restart!").unwrap();
+        ed.toasts.clear();
+        // Long after its toast: still said
+        let line = status(&mut ed);
+        assert!(line.contains("restart waits for back"), "{line}");
+        // Again: a card asks — nothing called off yet
+        crate::typed::execute(&mut ed, "restart!").unwrap();
+        assert_eq!(ed.restart.as_ref().map(|r| &r.stage), Some(&Stage::Turn), "asks first");
+        let card = ed.offers.first().expect("a card asks");
+        assert!(card.title.contains("Call off the restart"), "{}", card.title);
+        assert!(card.question.contains("Claude's turn ends in back"), "{}", card.question);
+        // (again while it asks: that card, not a second)
+        crate::typed::execute(&mut ed, "restart!").unwrap();
+        crate::typed::execute(&mut ed, "restart!").unwrap();
+        assert_eq!(ed.offers.len(), 1, "one card");
+        assert!(ed.status.as_ref().is_some_and(|s| s.0.contains("already asking")), "{:?}", ed.status);
+        feed(&mut ed, "n");
+        assert!(ed.offers.is_empty());
+        assert_eq!(ed.restart.as_ref().map(|r| &r.stage), Some(&Stage::Turn), "n: still waits");
+        assert!(status(&mut ed).contains("restart waits for back"));
+        crate::typed::execute(&mut ed, "restart!").unwrap();
+        feed(&mut ed, "y");
+        assert!(ed.restart.is_none(), "y: called off");
+        assert!(toasts(&ed).contains("restart canceled"), "{}", toasts(&ed));
+        assert!(!status(&mut ed).contains("restart"));
+        // (back's turn ends: nothing restarts)
+        let back_chat = ed.sessions.iter_mut().find(|l| l.id == id).and_then(|l| l.chat.as_mut()).unwrap();
+        back_chat.state = crate::chat::State::Idle;
+        ed.handle_event(crate::event::Event::Resize);
+        assert!(ed.restart.is_none() && !ed.should_quit);
         drop(ed);
         std::fs::remove_dir_all(&dir).ok();
     }

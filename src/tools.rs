@@ -665,18 +665,23 @@ fn rule_env(rule: &str) -> (Vec<&str>, Vec<&str>) {
 }
 
 /// Programs a check's output can go through and still count as the check (#32): they only read it
-/// (`sed` only as `sed -n '3,40p'` — `readonly::only_reads`).
+/// (`sed` only as `sed -n '3,40p'` — `readonly::only_reads`; the rest with the options `filters.rs` lists).
 const FILTERS: [&str; 8] = ["grep", "head", "tail", "wc", "sort", "cut", "uniq", "sed"];
 
 /// The first command's words when `cmd` is one command piped into filters and nothing else (`cargo test
-/// 2>&1 | grep -E "a|b" | head`): each filter one of `FILTERS` with no option that writes, runs or never
-/// ends (`readonly::only_reads`). What the filters read besides their input is `readonly::outside`'s.
+/// 2>&1 | grep -E "a|b" | head`): each filter one of `FILTERS` with only options its list allows
+/// (`filters::reads`). What the filters read besides their input is `readonly::outside`'s.
 pub fn filtered(cmd: &str) -> Option<Vec<String>> {
     let mut parts = crate::readonly::piped(cmd)?.into_iter();
     let head = parts.next()?;
     let mut any = false;
     for f in parts {
-        if !FILTERS.contains(&f[0].text.as_str()) || !crate::readonly::only_reads(&f) {
+        let words: Vec<&str> = f.iter().map(|w| w.text.as_str()).collect();
+        let reads = match words[0] {
+            "sed" => crate::readonly::only_reads(&f),
+            _ => crate::filters::reads(&words),
+        };
+        if !FILTERS.contains(&words[0]) || !reads {
             return None;
         }
         any = true;
@@ -688,9 +693,9 @@ pub fn filtered(cmd: &str) -> Option<Vec<String>> {
 /// `cargo test; cargo clippy`, `cd sub && git -C x log | sort` — every command one that runs unasked
 /// (`allowed_words`, no glob; git's after `-C <dir>` as without it) or only reads, joined by `;` `&&` `||`
 /// `|`, a `cd` aside. Where it reads (a `cd`'s or `-C`'s folder, the files named) is then judged as any
-/// read's (`read_only`). `scripts`: a part that runs a script by its path counts too — then what's in each is
-/// checked against the chat's (`readonly::script_pins`, on a worker).
-fn chain_allowed(cmd: &str, extra: &[String], scripts: bool) -> bool {
+/// read's (`read_only`). (A script run by its path is never one: what `a` allows of it is its line exactly —
+/// `Again`, #193.)
+fn chain_allowed(cmd: &str, extra: &[String]) -> bool {
     let Some(parts) = crate::readonly::parse(cmd) else { return false };
     let mut any = false;
     for p in &parts {
@@ -702,8 +707,7 @@ fn chain_allowed(cmd: &str, extra: &[String], scripts: bool) -> bool {
             words.extend(rest);
         }
         let plain = !w.iter().any(|w| w.glob) && part_allowed(&words, extra);
-        let script = scripts && crate::readonly::script_part(w).is_some();
-        if !plain && !script && !crate::readonly::only_reads(w) {
+        if !plain && !crate::readonly::only_reads(w) {
             return false;
         }
         any = true;
@@ -811,95 +815,236 @@ pub(crate) fn runner(name: &str) -> bool {
     RUNNERS.contains(&name) || name.starts_with("python")
 }
 
-/// The pattern a run card can allow for the rest of the chat (`a`): the command's first plain words — no
-/// option, path, value or glob — two or three of them (`cargo xtask shot`); a command piped into filters
-/// gives its own (`filtered`, #32). None for a line of other commands, one word, or a runner (`sh x.sh`,
-/// `env …`: anything could follow). `NAME=value` words in front go in by name (`A= B= cargo xtask shot`,
-/// #44) — none for a name no pattern may set (`readonly::env_allowed`: PATH, LD_*, DYLD_* …).
-pub fn pattern(cmd: &str) -> Option<String> {
-    let (names, words) =
-        crate::readonly::one_command_env(cmd).or_else(|| filtered(cmd).map(|w| (Vec::new(), w)))?;
-    words_pattern(&names, &words)
-}
-
-/// What a run card's `a` allows for the rest of the chat: patterns (`pattern`'s) and scripts, each as it
-/// is when the user says yes (`readonly::script_pins`).
+/// What a run card's `a` lets run again unasked for the rest of the chat (#193, user decision 2026-10-06):
+/// this exact command — every word of the line's commands before its filters, the `NAME=value` words in
+/// front of them (the same names, the same values) and its `cd`s — with any filters after it that only read
+/// (`pipe_filter`): `cargo xtask trace test | grep A`, then `… | grep B`. Scripts it runs by their path are
+/// allowed as they are now (`readonly::script_pins`). It replaced a 2–3-word prefix (`cargo xtask shot`, any
+/// arguments, any values): never another command.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Pattern {
-    pub rules: Vec<String>,
+pub struct Again {
+    /// The line's parts before its filters, word for word (a `cd` as `cd <dir>`).
+    pub parts: Vec<Vec<String>>,
     pub scripts: Vec<String>,
 }
 
-impl Pattern {
-    /// As the card says it: `` `sh target/x/setup.sh` as it is now and `A=… cargo xtask shot …` ``.
-    pub fn shown(&self) -> String {
-        let scripts = self.scripts.iter().map(|s| format!("`{s}` as it is now"));
-        let rules = self.rules.iter().map(|r| format!("`{} …`", pattern_shown(r)));
-        scripts.chain(rules).collect::<Vec<_>>().join(" and ")
+impl Again {
+    /// Whether `cmd` is this command, its filters aside.
+    pub fn covers(&self, cmd: &str) -> bool {
+        head_of(cmd).is_some_and(|h| h == self.parts)
+    }
+
+    /// What it allows besides the command, as the card says it: ` and `x.sh` as it is now`.
+    pub fn scripts_said(&self) -> String {
+        self.scripts.iter().map(|s| format!(" and `{s}` as it is now")).collect()
     }
 }
 
-/// The card's `a` for `cmd`: its pattern (`pattern`) — or, for a line of several commands (#93: `sh
-/// target/x/setup.sh && env A=1 cargo xtask shot x.png`, asked six times an hour), each part's: a script run
-/// by its path as it is now, a pattern for the rest; parts that run unasked already need none. None when a
-/// part can have neither (a runner, one word, a glob).
-pub fn card_pattern(cmd: &str) -> Option<Pattern> {
-    use crate::readonly::Part;
-    if let Some(p) = pattern(cmd) {
-        return Some(Pattern { rules: vec![p], scripts: Vec::new() });
+/// An `Again` the user allowed, and where: the folder it runs in, and Docker's socket when it was its card's
+/// (that socket rides with this command only — `allow::Grant::as_outside`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunAgain {
+    pub cwd: PathBuf,
+    pub socket: Option<PathBuf>,
+    pub again: Again,
+}
+
+impl RunAgain {
+    pub fn covers(&self, cwd: &Path, socket: Option<&Path>, cmd: &str) -> bool {
+        self.cwd == cwd && self.socket.as_deref() == socket && self.again.covers(cmd)
     }
-    let (mut rules, mut scripts) = (Vec::new(), Vec::new());
-    for p in crate::readonly::parse(cmd)? {
+}
+
+/// Filters a command's output can go through and still be that command, for `a` (#193 — the user's list;
+/// no `sed`). Each only reads what's piped in — `pipe_filter` says how.
+const PIPE_FILTERS: [&str; 10] = ["grep", "head", "tail", "cut", "wc", "sort", "uniq", "tr", "awk", "jq"];
+
+/// Whether `w` is a filter that only reads: one of `PIPE_FILTERS`, no glob; grep … tr with only the options
+/// `filters.rs` lists for each (`sort -o`, `sort --out=f`, `tail -f`, `uniq - out` aren't); `awk` and `jq`
+/// as `awk_reads` and `jq_reads` say. A file a filter names is read as any read is (where it reads is
+/// judged — `judged`).
+fn pipe_filter(w: &[crate::readonly::Word]) -> bool {
+    let words: Vec<&str> = w.iter().map(|w| w.text.as_str()).collect();
+    let Some((&name, args)) = words.split_first() else { return false };
+    if w.iter().any(|w| w.glob) || !PIPE_FILTERS.contains(&name) {
+        return false;
+    }
+    match name {
+        "awk" => awk_reads(args),
+        "jq" => jq_reads(args),
+        _ => crate::filters::reads(&words),
+    }
+}
+
+/// `awk` that only prints: options `-F` and `-v` only (no `-f` file of code, `-i`/`-l` loading more), one
+/// program and no file — and nothing in the program that runs a command, writes, or reads past its input:
+/// `system`, `getline`, `ENVIRON`, `close`, a `|` or `>` (a pipe or a file — comparisons with `>` and `||`
+/// ask too), `@` (`@load`, `@include`).
+fn awk_reads(args: &[&str]) -> bool {
+    let mut program = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i] {
+            "-F" | "-v" if i + 1 < args.len() => i += 1,
+            a if (a.starts_with("-F") || a.starts_with("-v")) && a.len() > 2 => {}
+            a if a.starts_with('-') => return false,
+            a if program.is_none() => program = Some(a),
+            _ => return false,
+        }
+        i += 1;
+    }
+    let Some(p) = program else { return false };
+    !p.contains(['|', '>', '@']) && !["system", "getline", "ENVIRON", "close"].iter().any(|w| p.contains(w))
+}
+
+/// `jq` that only reads what's piped in: its output options and `--arg`/`--argjson`, one filter and no file
+/// (no `-f`, `--rawfile`, `--slurpfile`, `-L`), and a filter that neither loads code (`include`, `import`)
+/// nor reads the environment (`env`, `$ENV`).
+fn jq_reads(args: &[&str]) -> bool {
+    const LONG: [&str; 13] = [
+        "--raw-output",
+        "--compact-output",
+        "--slurp",
+        "--null-input",
+        "--join-output",
+        "--ascii-output",
+        "--sort-keys",
+        "--exit-status",
+        "--tab",
+        "--raw-input",
+        "--color-output",
+        "--monochrome-output",
+        "--raw-output0",
+    ];
+    let mut program = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i] {
+            "--arg" | "--argjson" if i + 2 < args.len() => i += 2,
+            a if LONG.contains(&a) => {}
+            a if a.len() > 1 && a.starts_with('-') && !a.starts_with("--") => {
+                if !a[1..].chars().all(|c| "rcesnjaSCMR".contains(c)) {
+                    return false;
+                }
+            }
+            a if a.starts_with('-') => return false,
+            a if program.is_none() => program = Some(a),
+            _ => return false,
+        }
+        i += 1;
+    }
+    let Some(p) = program else { return false };
+    // (`env` as a word of the filter, not a field — `.env` reads the input)
+    let word = |w: &str| {
+        p.match_indices(w).any(|(at, _)| {
+            let before = p[..at].chars().next_back();
+            let after = p[at + w.len()..].chars().next();
+            let id = |c: char| c.is_ascii_alphanumeric() || c == '_';
+            !before.is_some_and(|c| id(c) || c == '.' || c == '$') && !after.is_some_and(id)
+        })
+    };
+    !p.contains("$ENV") && !["env", "include", "import"].iter().any(|w| word(w))
+}
+
+/// The parts of `cmd` before the filters at its end (`pipe_filter`, each after a `|`), word for word — a
+/// command's `NAME=value` words in front kept, a `cd` as `cd <dir>`. None for a line `readonly::parse_env`
+/// doesn't read, or one with a glob before its filters (the shell fills it in as it runs).
+fn head_of(cmd: &str) -> Option<Vec<Vec<String>>> {
+    use crate::readonly::Part;
+    let (mut parts, piped) = crate::readonly::parse_env(cmd)?;
+    while parts.len() > 1
+        && piped.get(parts.len() - 2) == Some(&true)
+        && matches!(parts.last(), Some(Part::Cmd(w)) if pipe_filter(w))
+    {
+        parts.pop();
+    }
+    parts
+        .iter()
+        .map(|p| match p {
+            Part::Cd(d) => (!d.glob).then(|| vec!["cd".to_string(), d.text.clone()]),
+            Part::Cmd(w) => (!w.iter().any(|w| w.glob)).then(|| w.iter().map(|w| w.text.clone()).collect()),
+        })
+        .collect()
+}
+
+/// What `a` on `cmd`'s card would allow (`Again`) — None when it can't be offered: a part that runs whatever
+/// follows it (`RUNNERS` — `sh -c`, `env -i`, `xargs`, `python3 -c`; a script by its path is fine, pinned),
+/// git (what reads runs already; what writes goes to `.git`, which the sandbox denies), a name set in front
+/// that finds programs or loads code (`readonly::env_allowed`), an option no rule lets through
+/// (`writes_option`, #169), a glob.
+pub fn again(cmd: &str) -> Option<Again> {
+    use crate::readonly::Part;
+    let parts = head_of(cmd)?;
+    let (parsed, _) = crate::readonly::parse_env(cmd)?;
+    let mut scripts = Vec::new();
+    for p in parsed.iter().take(parts.len()) {
         let Part::Cmd(w) = p else { continue };
-        if let Some(s) = crate::readonly::script_part(&w) {
+        let words: Vec<String> = w.iter().map(|w| w.text.clone()).collect();
+        let (names, rest) = crate::readonly::env_words(&words)?;
+        if !names.iter().all(|n| crate::readonly::env_allowed(n)) || writes_option(&rest).is_some() {
+            return None;
+        }
+        let first = rest.first()?;
+        if let Some(s) = crate::readonly::script_part(&w[words.len() - rest.len()..]) {
             scripts.push(s.to_string());
             continue;
         }
-        let words: Vec<String> = w.iter().map(|w| w.text.clone()).collect();
-        if w.iter().any(|w| w.glob) {
+        // (a program by its path that isn't a script pinned as it is — `../elsewhere/x.sh`, `/bin/sh` —
+        // could be anything next time)
+        let name = Path::new(first).file_name().and_then(|n| n.to_str()).unwrap_or(first);
+        if runner(name) || name == "git" || first.contains('/') {
             return None;
         }
-        if part_allowed(&words, &[]) || crate::readonly::only_reads(&w) {
-            continue;
+    }
+    Some(Again { parts, scripts })
+}
+
+/// `cmd` as its reads are judged when it runs again by an `Again` (`read_only`): its words, the names set in
+/// front left out (they change what runs, not where it reads), quoted for `readonly::parse`. None when a word
+/// can't be put back so.
+fn judged(cmd: &str) -> Option<String> {
+    use crate::readonly::Part;
+    let quote = |w: &str| -> Option<String> {
+        let plain = |c: char| c.is_ascii_alphanumeric() || "_./:=@%+,-".contains(c);
+        if !w.is_empty() && w.chars().all(plain) {
+            Some(w.to_string())
+        } else if !w.contains('\'') {
+            Some(format!("'{w}'"))
+        } else if !w.contains(['"', '$', '`', '\\', '!']) {
+            Some(format!("\"{w}\""))
+        } else {
+            None
         }
-        let (names, rest) = crate::readonly::env_words(&words)?;
-        rules.push(words_pattern(&names, &rest)?);
+    };
+    let (parts, piped) = crate::readonly::parse_env(cmd)?;
+    let mut out = String::new();
+    for (i, p) in parts.iter().enumerate() {
+        if i > 0 {
+            out.push_str(if piped[i - 1] { " | " } else { " ; " });
+        }
+        let words: Vec<String> = match p {
+            Part::Cd(d) => vec!["cd".into(), d.text.clone()],
+            Part::Cmd(w) => {
+                let words: Vec<String> = w.iter().map(|w| w.text.clone()).collect();
+                crate::readonly::env_words(&words).map_or(words, |(_, rest)| rest)
+            }
+        };
+        let quoted: Option<Vec<String>> = words.iter().map(|w| quote(w)).collect();
+        out.push_str(&quoted?.join(" "));
     }
-    (!rules.is_empty() || !scripts.is_empty()).then_some(Pattern { rules, scripts })
+    Some(out)
 }
 
-/// `pattern` for one command's words and the names set in front of them — none for words passing an
-/// option no rule lets through (`writes_option`): `a` would promise what it can't keep (#169).
-fn words_pattern(names: &[String], words: &[String]) -> Option<String> {
-    if !names.iter().all(|n| crate::readonly::env_allowed(n)) || writes_option(words).is_some() {
-        return None;
-    }
-    let lead: Vec<&str> = words
-        .iter()
-        .map(String::as_str)
-        .take_while(|w| {
-            !w.is_empty()
-                && !w.starts_with(['-', '.', '@', '+'])
-                && !w.contains(['/', '=', ':', '@', '"', '\'', '$'])
-        })
-        .take(3)
-        .collect();
-    let runner = |w: &&str| runner(w);
-    // (git: what reads runs already; what writes goes to `.git`, which the sandbox denies)
-    let git = lead.first() == Some(&"git");
-    let names = names.iter().map(|n| format!("{n}="));
-    (lead.len() >= 2 && !lead.iter().any(runner) && !git)
-        .then(|| names.chain(lead.iter().map(|w| w.to_string())).collect::<Vec<_>>().join(" "))
+/// Whether socket `s` is one `allow.rs` calls as much as running outside the sandbox (Docker's): never
+/// allowed for a chat — its card's `a` is the command's (#193).
+fn outside_socket(s: &Path) -> bool {
+    crate::allow::Grant::Socket(s.to_path_buf()).as_outside()
 }
 
-/// A pattern as the card says it: each name's value left open (`A=… cargo xtask shot`).
-pub fn pattern_shown(p: &str) -> String {
-    let (set, rest) = rule_env(p);
-    set.iter()
-        .map(|n| format!("{n}=…"))
-        .chain(rest.iter().map(|w| w.to_string()))
-        .collect::<Vec<_>>()
-        .join(" ")
+// Each Claude run admitted, with what rode along — what a test checks a run was given.
+#[cfg(test)]
+thread_local! {
+    pub static ADMITTED: std::cell::RefCell<Vec<(String, Extra)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Runs `command` now (allowed), or once the user says yes on its card — answered when it ends.
@@ -943,10 +1088,11 @@ fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
     };
     // (one socket this chat allows already — `a` on its card: the sandbox has it for every run of the chat,
     // so it isn't asked again; the command goes as any does — #182: the very same call came back to its card)
+    // (Docker's never is: it's as much as the sandbox off — #193)
     let allowed_socket = |b: &Beyond| {
-        b.socket
-            .as_ref()
-            .is_some_and(|s| ed.session.chat.as_ref().is_some_and(|c| c.allowed.sockets.contains(s)))
+        b.socket.as_ref().is_some_and(|s| {
+            !outside_socket(s) && ed.session.chat.as_ref().is_some_and(|c| c.allowed.sockets.contains(s))
+        })
     };
     let outside = outside.filter(|b| !allowed_socket(b));
     let cwd = run_cwd(&ed.session.root, args["cwd"].as_str())?;
@@ -968,8 +1114,19 @@ fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
             }
         }
     };
-    let mut extra = ed.config.llm.run_allow.clone();
-    extra.extend(ed.session.chat.as_ref().map(|c| c.run_allow.clone()).unwrap_or_default());
+    // This exact command, allowed for the chat on its card (`a` — #193): its filters may differ, Docker's
+    // socket rides with it when that was its card's. Where it reads, and whether a script it runs is as it
+    // was allowed, are looked at as for any read — anything off and it's the card.
+    let socket = outside.as_ref().and_then(|b| b.socket.clone());
+    let whole = outside.as_ref().is_some_and(|b| b.socket.is_none());
+    let chat = ed.session.chat.as_ref();
+    let allowed_again =
+        !whole && chat.is_some_and(|c| c.run_again.iter().any(|r| r.covers(&cwd, socket.as_deref(), cmd)));
+    if let Some(judge) = judged(cmd).filter(|_| allowed_again) {
+        let pins = chat.map(|c| c.run_scripts.clone()).unwrap_or_default();
+        return read_only(ed, call, cmd.to_string(), cwd, Some(pins), (judge, outside));
+    }
+    let extra = ed.config.llm.run_allow.clone();
     if outside.is_none() && allowed(cmd, &extra) {
         guarded(ed, call, Job::Command(cmd.to_string(), cwd), false);
         return Ok(());
@@ -977,14 +1134,9 @@ fn run(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
     // (a check piped into filters: the check's rule, and what the filters name is read as any read's — #32)
     // (a chain of allowed parts likewise — #57, #66)
     let checked =
-        filtered(cmd).is_some_and(|head| allowed_words(&head, &extra)) || chain_allowed(cmd, &extra, false);
+        filtered(cmd).is_some_and(|head| allowed_words(&head, &extra)) || chain_allowed(cmd, &extra);
     if outside.is_none() && (checked || crate::readonly::read_only(cmd)) {
-        return read_only(ed, call, cmd.to_string(), cwd, Vec::new());
-    }
-    // (scripts the chat allowed as they were, the rest allowed: what's in them looked at on a worker — #93)
-    let pins = ed.session.chat.as_ref().map(|c| c.run_scripts.clone()).unwrap_or_default();
-    if outside.is_none() && !pins.is_empty() && chain_allowed(cmd, &extra, true) {
-        return read_only(ed, call, cmd.to_string(), cwd, pins);
+        return read_only(ed, call, cmd.to_string(), cwd, None, (cmd.to_string(), None));
     }
     let why = match &outside {
         Some(Beyond { socket: Some(_), .. }) => crate::cards::Why::Socket,
@@ -1333,14 +1485,17 @@ fn run_cwd(root: &Path, cwd: Option<&str>) -> Result<PathBuf, String> {
 /// A command that only reads (`readonly.rs`) — or a line of checks and reads (`chain_allowed`, `filtered`):
 /// where it reads is found on a worker — all of it in the project, or in places allowed, and it runs now;
 /// anything else is on its card. A part that runs something (a check, git) outside the project is the plain
-/// card, reads allowed there or not (`readonly::runs_outside`). `pins`: the scripts it runs must be the
-/// chat's as they were allowed (`a` on a card — #93) — one changed since, or another, and it's the plain card.
+/// card, reads allowed there or not (`readonly::runs_outside`). `pins` (a command `a` allowed — #193): every
+/// script it runs must be the chat's as it was allowed — one changed since, or another, and it's the plain
+/// card. `judge`: the line as where it reads is judged (`judged` — the names set in front left out);
+/// `beyond`: Docker's socket riding with it (its card's, `a`).
 fn read_only(
     ed: &mut Editor,
     call: Call,
     cmd: String,
     cwd: PathBuf,
-    pins: Vec<(PathBuf, u64)>,
+    pins: Option<Vec<(PathBuf, u64)>>,
+    (judge, beyond): (String, Option<Beyond>),
 ) -> Result<(), String> {
     let chat = ed.session.chat.as_ref().map(|c| c.allowed.clone()).unwrap_or_default();
     let (store, root, temp) = (ed.allow_path.clone(), ed.session.root.clone(), ed.read_temp);
@@ -1348,15 +1503,16 @@ fn read_only(
         let mut kept = crate::allow::Store::read(store.as_deref()).get(&root);
         let defaults = crate::allow::defaults(&root, temp);
         kept.read.extend(defaults.all());
-        let sysroot = cmd.contains(crate::readonly::SYSROOT).then(|| crate::allow::sysroot(&cwd)).flatten();
-        let reads = crate::readonly::outside(&cmd, &cwd, &root, &chat, &kept, sysroot.as_deref());
+        let sysroot = judge.contains(crate::readonly::SYSROOT).then(|| crate::allow::sysroot(&cwd)).flatten();
+        let reads = crate::readonly::outside(&judge, &cwd, &root, &chat, &kept, sysroot.as_deref());
         // (where they are, for the card's line)
         let classes = reads.as_ref().map(|r| crate::cards::classes(r, &defaults)).unwrap_or_default();
         // (a check or git that would run outside the project: the plain card, whatever reads are allowed)
-        let runs_outside = crate::readonly::runs_outside(&cmd, &cwd, &root, sysroot.as_deref());
-        let pinned = pins.is_empty()
-            || crate::readonly::script_pins(&cmd, &cwd, &root)
-                .is_some_and(|s| s.iter().all(|p| pins.contains(p)));
+        let runs_outside = crate::readonly::runs_outside(&judge, &cwd, &root, sysroot.as_deref());
+        let pinned = pins.is_none_or(|pins| {
+            crate::readonly::script_pins(&judge, &cwd, &root)
+                .is_some_and(|s| s.iter().all(|p| pins.contains(p)))
+        });
         move |ed: &mut Editor| {
             use crate::cards::Why;
             call.step("where it reads looked at");
@@ -1374,19 +1530,24 @@ fn read_only(
                     _ if runs_outside => Why::RunsOutside,
                     _ => Why::ScriptChanged,
                 };
-                if let Err(e) = card(ed, call, cmd, cwd, None, why) {
+                if let Err(e) = card(ed, call, cmd, cwd, beyond, why) {
                     answer(ed, c, Err(e));
                 }
                 return;
             }
             // (a `cd` into what isn't a folder: where the rest reads can't be told — the plain card)
             let (reads, why) = match reads {
-                Ok(r) if r.is_empty() => return guarded(ed, call, Job::Command(cmd, cwd), false),
+                Ok(r) if r.is_empty() => {
+                    // (Docker's socket for this run alone — its card's `a` was this command's)
+                    let grant = beyond.and_then(|b| b.socket).map(crate::allow::Grant::Socket);
+                    let extra = Extra { grant, outside: false };
+                    return guard_and_go(ed, For::Claude(call), Job::Command(cmd, cwd), false, extra);
+                }
                 Ok(r) => (r, Why::ReadsOutside(classes)),
                 Err(e) => (Vec::new(), Why::CdUnknown(e)),
             };
             let c = call.clone();
-            if let Err(e) = ask_with(ed, cmd, cwd, call, Default::default(), (reads, why), None) {
+            if let Err(e) = ask_with(ed, cmd, cwd, call, Default::default(), (reads, why), beyond) {
                 answer(ed, c, Err(e));
             }
         }
@@ -1400,7 +1561,7 @@ fn read_only(
 pub fn runs_unasked(cmd: &str, extra: &[String]) -> bool {
     allowed(cmd, extra)
         || filtered(cmd).is_some_and(|head| allowed_words(&head, extra))
-        || chain_allowed(cmd, extra, false)
+        || chain_allowed(cmd, extra)
         || crate::readonly::read_only(cmd)
 }
 
@@ -1465,11 +1626,22 @@ fn ask_with(
             }
             Some(s) => {
                 let g = crate::allow::Grant::Socket(s.clone());
-                // (what `a` allows, said exactly — #182: read as this command's, it was the socket's)
+                // (what `a` allows, said exactly — #182: read as this command's, it was the socket's; #193:
+                // Docker's is this command's only)
+                let a = match (g.as_outside(), again(&cmd).filter(|_| reads.is_empty())) {
+                    (true, Some(_)) => {
+                        "a lets this command connect again for the rest of this chat — with any filters after \
+                         it that only read — never another command."
+                    }
+                    (true, None) => "Nothing longer than this run can be allowed for it.",
+                    (false, _) => {
+                        "a for the rest of this chat, whatever command asks — each command is still asked as \
+                         usual."
+                    }
+                };
                 question.push_str(&format!(
                     "It may connect to {} — that one file; everything else stays in the sandbox. y lets it \
-                     connect for this run only; a for the rest of this chat, whatever command asks — each \
-                     command is still asked as usual.",
+                     connect for this run only; {a}",
                     crate::allow::tilde(s)
                 ));
                 if let Some(w) = g.warning() {
@@ -1506,10 +1678,15 @@ fn ask_with(
             shown.join(", ")
         ));
     }
-    // (a command that only reads is asked for where it reads, not what it is)
-    let pattern = card_pattern(&cmd).filter(|_| outside.is_none() && reads.is_empty());
-    if let Some(p) = &pattern {
-        question.push_str(&format!("\n\na — also {} unasked, this chat", p.shown()));
+    // (a command that only reads is asked for where it reads, not what it is; past the sandbox only
+    // Docker's socket, as this command's — #193)
+    // (nor where it reads can't be told — a `cd` into no folder: it would ask again anyway)
+    let docker = outside.as_ref().is_some_and(|b| b.socket.as_deref().is_some_and(outside_socket));
+    let judged_reads = reads.is_empty() && !matches!(why, crate::cards::Why::CdUnknown(_));
+    let offered = again(&cmd).filter(|_| (outside.is_none() || docker) && judged_reads);
+    if let Some(a) = offered.as_ref().filter(|_| outside.is_none()) {
+        question
+            .push_str(&format!("\n\na — this exact command{} again unasked, this chat", a.scripts_said()));
     }
     for (path, text) in &shown {
         let text = text.replace("\r\n", "\n").replace('\t', "    ");
@@ -1584,7 +1761,7 @@ fn ask_with(
         keep,
         outside: outside.is_some() && socket.is_none(),
         socket,
-        pattern,
+        again: offered,
     };
     let what = crate::offer::What::Run(Box::new(card));
     let o = crate::offer::Offer::new(title, &question, "Running…", "Claude's command".into(), what);
@@ -1836,7 +2013,7 @@ pub fn with_allowed(
 /// run if one changed since — `a`/`A` too, and what it reads outside stays allowed (this chat · always);
 /// None tells Claude no. `unprotected`: the card said there's no sandbox.
 pub fn run_answer(ed: &mut Editor, id: u64, what: RunCard, scope: Option<crate::allow::Scope>) {
-    let RunCard { cmd, cwd, call, shown, unprotected, reads, grants, keep, outside, socket, pattern } = what;
+    let RunCard { cmd, cwd, call, shown, unprotected, reads, grants, keep, outside, socket, again } = what;
     ed.offer_finished(id, Ok(()));
     let Some(scope) = scope else {
         return answer(ed, call, Err(format!("the user chose not to run `{cmd}`")));
@@ -1845,12 +2022,15 @@ pub fn run_answer(ed: &mut Editor, id: u64, what: RunCard, scope: Option<crate::
     // Outside the sandbox: what it runs as it is at this yes, kept with the chat before it runs — its next
     // ask shows only what changed since (`sinceyes.rs`)
     let yes = outside.then(|| (ed.session.root.clone(), std::time::SystemTime::now()));
-    // One socket past the sandbox: this run's (`y`), or this conversation's (`a` — #119)
-    let socket = socket.map(crate::allow::Grant::Socket);
-    if let Some(g) = socket.as_ref().filter(|_| scope != crate::allow::Scope::Once) {
+    // One socket past the sandbox: this run's (`y`), or this conversation's (`a` — #119) — Docker's never
+    // the conversation's: its `a` is this command's (#193, below)
+    let docker = socket.as_deref().is_some_and(outside_socket);
+    let lasting = matches!(scope, crate::allow::Scope::ThisChat | crate::allow::Scope::Always);
+    let grant = socket.clone().map(crate::allow::Grant::Socket);
+    if let Some(g) = grant.as_ref().filter(|_| lasting && !docker) {
         crate::allow::grant(ed, g, crate::allow::Scope::ThisChat);
     }
-    let outside = Extra { grant: socket, outside };
+    let outside = Extra { grant, outside };
     if keep {
         crate::allow::grant_reads(ed, &grants, scope);
     }
@@ -1858,19 +2038,29 @@ pub fn run_answer(ed: &mut Editor, id: u64, what: RunCard, scope: Option<crate::
     if let Some(c) = ed.session.chat.as_mut().filter(|_| scope == crate::allow::Scope::Once) {
         c.read_once.extend(reads.iter().filter(|r| !c.read_once.contains(r)).cloned().collect::<Vec<_>>());
     }
-    // `a` (or `A` where reads are kept too): its pattern for the rest of this chat — never for good; its
-    // scripts as they are now (pinned on the worker below)
-    let lasting = matches!(scope, crate::allow::Scope::ThisChat | crate::allow::Scope::Always);
-    let pin = lasting && pattern.as_ref().is_some_and(|p| !p.scripts.is_empty());
-    if let (Some(p), true) = (&pattern, lasting)
+    // `a` (or `A` where reads are kept too): this exact command for the rest of this chat — never for good,
+    // in this folder, with Docker's socket when it was its card's; its scripts as they are now (pinned on the
+    // worker below)
+    let pin = lasting && again.as_ref().is_some_and(|a| !a.scripts.is_empty());
+    if let (Some(a), true) = (&again, lasting)
         && let Some(chat) = ed.session.chat.as_mut()
     {
-        for r in &p.rules {
-            if !chat.run_allow.contains(r) {
-                chat.run_allow.push(r.clone());
-            }
+        let r = RunAgain { cwd: cwd.clone(), socket: socket.clone().filter(|_| docker), again: a.clone() };
+        if !chat.run_again.contains(&r) {
+            chat.run_again.push(r);
         }
-        ed.note(format!("{} runs without asking for the rest of this chat", p.shown()));
+        if let Some(s) = socket.as_ref().filter(|_| docker) {
+            ed.session.checkpoints.tell.push(format!(
+                "The user let `{cmd}` connect to the socket {} again for the rest of this conversation — that \
+                 command only, word for word (filters after it that only read may differ); any other command \
+                 with it is asked.",
+                crate::allow::tilde(s)
+            ));
+        }
+        ed.note(format!(
+            "this command{} runs again without asking for the rest of this chat",
+            a.scripts_said()
+        ));
     }
     if shown.is_empty() && !pin && yes.is_none() {
         return run_now(ed, cmd, cwd, call, unprotected, outside);
@@ -1949,8 +2139,8 @@ pub struct RunCard {
     pub outside: bool,
     /// Claude asked to let it connect to this one unix socket (#119): `y` this run, `a` this chat.
     pub socket: Option<PathBuf>,
-    /// What `a` lets run without asking for the rest of the chat (`card_pattern`).
-    pub pattern: Option<Pattern>,
+    /// What `a` lets run again without asking for the rest of the chat (`again` — this exact command).
+    pub again: Option<Again>,
 }
 
 // ── The sandbox ─────────────────────────────────────────────────────────────
@@ -1998,6 +2188,10 @@ fn guarded(ed: &mut Editor, call: Call, job: Job, asked: bool) {
 /// runs outside the sandbox. The policy has what's allowed for the project and this conversation in it.
 /// Its slot busy (another run, or Claude's before it in line): it waits its turn (`queued::admit`).
 pub fn guard_and_go(ed: &mut Editor, who: For, job: Job, asked: bool, extra: Extra) {
+    #[cfg(test)]
+    if let (For::Claude(_), Job::Command(c, _)) = (&who, &job) {
+        ADMITTED.with(|a| a.borrow_mut().push((c.clone(), extra.clone())));
+    }
     crate::queued::admit(ed, who, job, Ride { unprotected: asked, extra, ..Default::default() });
 }
 
@@ -3420,8 +3614,10 @@ mod tests {
         );
         assert!(o.lasts() && !o.keeps(), "this chat at most");
         ed.offer_for_chat();
+        // (Docker's: the command's for this chat, never the socket — #193)
         let c = ed.session.chat.as_ref().unwrap();
-        assert_eq!(c.allowed.sockets, std::slice::from_ref(&sock), "this chat's");
+        assert!(c.allowed.sockets.is_empty(), "not the socket");
+        assert_eq!(c.run_again.len(), 1, "the command, with it");
         assert!(
             ed.session.checkpoints.tell.iter().any(|t| t.contains("connect to the socket")),
             "Claude hears it"
@@ -3438,10 +3634,116 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// #193 (user decision 2026-10-06): on Docker's socket — what `allow.rs` calls as much as running
+    /// outside the sandbox — `a` is this command with that socket, never the socket for every command. The
+    /// same command again, its filters changed: no card, and it runs with the socket (this run's grant). Another
+    /// command with the socket: the socket card again. The chat's sockets never hold it, whatever asks it in:
+    /// the run card, the blocked-run card's grant, `allow::grant`.
+    #[test]
+    fn a_on_dockers_socket_is_this_command_never_the_socket() {
+        use serde_json::json;
+        let dir =
+            crate::sandbox::profile_path(&std::env::temp_dir()).join(format!("qd{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("c")).unwrap();
+        let sock = dir.join("c/docker.sock");
+        let _l = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        ed.session.root = dir.clone();
+        // (the stand-in runs unsandboxed here — `echo`, nothing else; what's checked is what it was given)
+        ed.config.llm.sandbox = false;
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        crate::chat::open(&mut ed);
+        let c = ed.session.chat.as_mut().unwrap();
+        c.state = crate::chat::State::Thinking;
+        c.focused = false;
+        let generation = c.generation();
+        let ask = |ed: &mut crate::editor::Editor, n: u64, command: &str| {
+            let args =
+                json!({ "command": command, "unix_socket": sock.to_str().unwrap(), "reason": "docker" });
+            super::run(ed, super::Call::of(generation, &format!("r{n}"), json!(n)), &args)
+        };
+        let pump = |ed: &mut crate::editor::Editor, done: &dyn Fn(&crate::editor::Editor) -> bool| {
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !done(ed) {
+                assert!(std::time::Instant::now() < end, "waited too long");
+                if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+                    ed.handle_event(ev);
+                }
+            }
+        };
+        let admitted =
+            |cmd: &str| super::ADMITTED.with(|a| a.borrow().iter().rev().find(|x| x.0 == cmd).cloned());
+        // (`basename` runs nothing else and isn't a read: without a rule, it asks)
+        let first = "basename trace test | grep trace";
+        ask(&mut ed, 1, first).unwrap();
+        let o = ed.offers.first().expect("its card");
+        assert_eq!(o.title, super::SOCKET_RUN_TITLE);
+        assert_eq!(o.answers(false), [('y', "This run"), ('a', "This command, this chat"), ('n', "No")]);
+        let q = o.question.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(q.contains("a lets this command connect again for the rest of this chat"), "{q}");
+        assert!(q.contains("never another command"), "{q}");
+        ed.offer_for_chat();
+        assert!(ed.session.chat.as_ref().unwrap().allowed.sockets.is_empty(), "not the socket");
+        pump(&mut ed, &|_| admitted(first).is_some());
+        // The same command, another filter: no card, and the socket rides with it
+        ed.offers.clear();
+        let again = "basename trace test | tail -1";
+        ask(&mut ed, 2, again).unwrap();
+        pump(&mut ed, &|ed| admitted(again).is_some() || !ed.offers.is_empty());
+        assert!(ed.offers.is_empty(), "asked again: {:?}", ed.offers.first().map(|o| &o.question));
+        let grant = admitted(again).and_then(|a| a.1.grant);
+        assert_eq!(grant, Some(crate::allow::Grant::Socket(sock.clone())), "this run's grant");
+        // Another command with it: the socket card
+        ask(&mut ed, 3, "basename other").unwrap();
+        pump(&mut ed, &|ed| !ed.offers.is_empty() || admitted("basename other").is_some());
+        assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some(super::SOCKET_RUN_TITLE));
+        // The same command without the socket isn't it either: its own card
+        ed.offers.clear();
+        let bare = json!({ "command": first });
+        super::run(&mut ed, super::Call::of(generation, "r4", json!(4)), &bare).unwrap();
+        pump(&mut ed, &|ed| !ed.offers.is_empty() || admitted(first).is_some_and(|a| a.1.grant.is_none()));
+        assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some("Claude wants to run"));
+        // Never the chat's, whatever asks: the grant card (`blocked.rs`) offers no `a`, `allow::grant` keeps
+        // none and says none
+        let g = crate::allow::Grant::Socket(sock.clone());
+        ed.toasts.clear();
+        crate::allow::grant(&mut ed, &g, crate::allow::Scope::ThisChat);
+        assert!(ed.session.chat.as_ref().unwrap().allowed.sockets.is_empty());
+        assert!(ed.toasts.is_empty(), "nothing granted, nothing said");
+        // (and were it in the chat's sockets somehow, a run asking for it still gets its card)
+        ed.session.chat.as_mut().unwrap().allowed.sockets.push(sock.clone());
+        ed.offers.clear();
+        ask(&mut ed, 5, "basename five").unwrap();
+        pump(&mut ed, &|ed| !ed.offers.is_empty() || admitted("basename five").is_some());
+        assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some(super::SOCKET_RUN_TITLE));
+        let mut a = crate::allow::Allowed::default();
+        a.add(&g);
+        assert!(a.sockets.is_empty(), "never added");
+        let card = crate::offer::Offer::new(
+            "x".into(),
+            "",
+            "",
+            String::new(),
+            crate::offer::What::Grant {
+                grant: g,
+                run: Box::new(crate::blocked::BlockedRun {
+                    job: super::Job::Command(first.into(), dir.clone()),
+                    denials: Vec::new(),
+                    from: None,
+                }),
+            },
+        );
+        assert_eq!(card.answers(false), [('y', "This run"), ('n', "No")]);
+        assert!(!card.lasts());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// #182: `a` on a socket's card is that socket for the rest of the chat, for any command — and the card
-    /// says so. Asked again for it (the very same call, right after — seen with `cargo xtask trace test`): no
-    /// socket card; the command goes as any command does — one that runs unasked runs, another gets its own
-    /// card, without the socket in it.
+    /// says so (a socket that isn't Docker's: Docker's is the command's — #193). Asked again for it (the very
+    /// same call, right after): no socket card; the command goes as any command does — one that runs unasked
+    /// runs, another gets its own card, without the socket in it.
     #[test]
     fn a_socket_allowed_for_the_chat_isnt_asked_again() {
         use serde_json::json;
@@ -3449,7 +3751,7 @@ mod tests {
             crate::sandbox::profile_path(&std::env::temp_dir()).join(format!("qa{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("c")).unwrap();
-        let sock = dir.join("c/docker.sock");
+        let sock = dir.join("c/app.sock");
         let _l = std::os::unix::net::UnixListener::bind(&sock).unwrap();
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
         ed.session.root = dir.clone();
@@ -3657,7 +3959,7 @@ mod tests {
     /// one part that isn't, and the line asks.
     #[test]
     fn a_chain_of_allowed_parts_is_allowed() {
-        let ok = |c: &str| super::chain_allowed(c, &[], false);
+        let ok = |c: &str| super::chain_allowed(c, &[]);
         for c in [
             "cargo fmt && cargo clippy",
             "cargo test; cargo clippy",
@@ -3695,8 +3997,8 @@ mod tests {
         ] {
             assert!(!ok(c), "{c}");
         }
-        let chat = vec!["cargo xtask shot".to_string()];
-        assert!(super::chain_allowed("cargo xtask shot a.png && cargo test", &chat, false), "the chat's own");
+        let rule = vec!["cargo xtask shot".to_string()];
+        assert!(super::chain_allowed("cargo xtask shot a.png && cargo test", &rule), "llm.run-allow's own");
         assert!(super::filtered("cargo test | sed -n '1,40p'").is_some(), "sed -n is a filter");
         assert!(super::is_check("cargo fmt && cargo clippy"), "a chain of checks feeds the list");
         // A9: an `echo` in a line of checks says a word — the line still runs unasked, and is still checks
@@ -3717,22 +4019,15 @@ mod tests {
         }
     }
 
-    /// The pattern a run card's `a` allows for the rest of the chat: a command's first plain words, two or
-    /// three — none for a runner (anything could follow it), one word, or a line of several.
+    /// What a run card's `a` can't be offered for (#193: it's the exact command, but these could run
+    /// anything next time): a runner, `env` with an option or no command, a name that finds programs. And
+    /// an `llm.run-allow` rule (the user's own, in settings) is still a prefix, word for word.
     #[test]
-    fn a_cards_pattern_for_the_chat() {
-        let p = |c: &str| super::pattern(c);
-        assert_eq!(p("cargo xtask shot /tmp/x.png '@?ready'").as_deref(), Some("cargo xtask shot"));
+    fn a_cards_a_is_never_for_a_runner() {
+        let p = |c: &str| super::again(c);
         assert_eq!(p("git config --get user.name"), None, "git: reads run already, writes go to .git");
-        assert_eq!(p("npm run build:prod").as_deref(), Some("npm run"), "a value isn't part of it");
-        assert_eq!(p("echo one two three four").as_deref(), Some("echo one two"), "three at most");
-        assert_eq!(p("sh -c 'cargo bench'").as_deref(), Some("cargo bench"), "the body's, sh -c taken off");
-        // #93: `env NAME=value …` reads as the names it sets
-        assert_eq!(p("env FOO=1 cargo test").as_deref(), Some("FOO= cargo test"));
-        assert_eq!(p("A=1 env B=2 cargo xtask shot x.png").as_deref(), Some("A= B= cargo xtask shot"));
+        assert!(p("sh -c 'cargo bench'").is_some_and(|a| a.covers("cargo bench")), "the body's");
         for c in [
-            "sh target/sb/x.sh",
-            "bash x",
             "env -i cargo test",
             "env -S 'cargo test' x",
             "env FOO=1",
@@ -3742,25 +4037,22 @@ mod tests {
             "xargs rm",
             "sudo make",
             "time cargo build",
-            "make",
-            "rm -rf target",
-            "touch /tmp/made",
-            "ls | wc -l",
-            "cargo build; rm x",
+            "sh x.sh && python3 y.py",
+            "../elsewhere/x.sh",
+            "/bin/rm -rf x",
         ] {
             assert_eq!(p(c), None, "{c}");
         }
-        // Allowed for the chat: the pattern, word for word
-        let chat = vec!["cargo xtask shot".to_string()];
-        assert!(super::allowed("cargo xtask shot /tmp/a.png '@?files in'", &chat));
-        assert!(!super::allowed("cargo xtask perf", &chat));
-        assert!(!super::allowed("cargo xtask shot x; rm -rf y", &chat));
+        let rule = vec!["cargo xtask shot".to_string()];
+        assert!(super::allowed("cargo xtask shot /tmp/a.png '@?files in'", &rule));
+        assert!(!super::allowed("cargo xtask perf", &rule));
+        assert!(!super::allowed("cargo xtask shot x; rm -rf y", &rule));
     }
 
     /// #169: a card's `a` promised `cargo test …`, and the next `cargo test` with other arguments asked
-    /// again — `--config` was what asked, and no allowance lifts it. What `a` offers, once taken, lets the
-    /// same command and others of its pattern through; a card it can't keep that for offers no `a` and
-    /// says what asks.
+    /// again — `--config` was what asked, and no allowance lifts it. What `a` offers, once taken, lets that
+    /// command through again (#193: that one, exactly — its filters aside); a card it can't keep that for
+    /// offers no `a` and says what asks.
     #[test]
     fn what_a_cards_a_offers_is_what_it_lets_through() {
         use crate::cards::Why;
@@ -3771,50 +4063,160 @@ mod tests {
              --nocapture",
         ];
         for c in theirs {
-            assert_eq!(super::card_pattern(c), None, "{c}");
+            assert_eq!(super::again(c), None, "{c}");
             assert_eq!(super::why_asked(c, &[]), Why::Writes("--config"), "{c}");
             assert!(Why::Writes("--config").said().unwrap().contains("--config"));
         }
-        // Each card's `a`, taken: the command itself and another of its pattern run unasked
-        for (c, other) in [
-            ("cargo xtask shot /tmp/x.png '@?ready'", "cargo xtask shot /tmp/y.png"),
-            ("cargo xtask shot x.png 2>&1 | grep -E 'a|b' | tail -3", "cargo xtask shot z.png"),
-            ("TARAE_BACKGROUND=dark cargo xtask shot a.png", "TARAE_BACKGROUND=light cargo xtask shot b.png"),
-            ("npm run build:prod", "npm run lint"),
-            ("cargo test --target x86_64-unknown-linux-gnu zz_drive -- --ignored", "cargo test --release"),
-            ("cargo bench --bench x | tail", "cargo bench"),
+        // Each card's `a`, taken: the command itself again, another filter after it — not another of its
+        // kind (#193: those were let through by a prefix)
+        for (c, filtered, other) in [
+            (
+                "cargo xtask shot /tmp/x.png '@?ready'",
+                "cargo xtask shot /tmp/x.png '@?ready' | tail",
+                "cargo xtask shot /tmp/y.png",
+            ),
+            (
+                "cargo xtask shot x.png 2>&1 | grep -E 'a|b' | tail -3",
+                "cargo xtask shot x.png | wc -l",
+                "cargo xtask shot z.png",
+            ),
+            (
+                "TARAE_BACKGROUND=dark cargo xtask shot a.png",
+                "TARAE_BACKGROUND=dark cargo xtask shot a.png | head",
+                "TARAE_BACKGROUND=light cargo xtask shot a.png",
+            ),
+            ("npm run build:prod", "npm run build:prod | grep error", "npm run lint"),
+            ("cargo bench --bench x | tail", "cargo bench --bench x", "cargo bench"),
         ] {
-            let p = super::card_pattern(c).unwrap_or_else(|| panic!("{c}: no a"));
-            assert!(super::runs_unasked(c, &p.rules) && super::runs_unasked(other, &p.rules), "{c}: {p:?}");
+            let a = super::again(c).unwrap_or_else(|| panic!("{c}: no a"));
+            assert!(a.covers(c) && a.covers(filtered) && !a.covers(other), "{c}: {a:?}");
         }
+    }
+
+    /// #193 (user decision 2026-10-06): a run card's `a` is this exact command — every word, the names and
+    /// values set in front, its `cd`s — with any filters after it that only read: `cargo xtask trace test |
+    /// grep A`, then `… | grep B`, `… | tail -5`, `… | jq -r .x` run unasked; one word more, less or
+    /// different in the command, another value, another name: asked. A filter that writes, runs or reads a
+    /// file of its own is no filter (awk's `system`, `|`, `>`, `getline`, `ENVIRON`, `@load`, `-f`; jq's
+    /// files, `include`, `env`; `sort -o`, `tee`).
+    #[test]
+    fn a_run_cards_a_is_this_exact_command_with_any_reading_filters() {
+        let again = |c: &str| super::again(c);
+        let words = |c: &str| again(c).map(|a| a.parts);
+        let w = |s: &[&str]| s.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        let trace = "cargo xtask trace test | grep A";
+        assert_eq!(words(trace), Some(vec![w(&["cargo", "xtask", "trace", "test"])]));
+        // (a name set in front is part of the command, value and all — it offered no `a` before)
+        let env = "TARAE_UI=x cargo xtask trace test 2>&1 | grep -E 'a|b' | head -20";
+        assert_eq!(words(env), Some(vec![w(&["TARAE_UI=x", "cargo", "xtask", "trace", "test"])]));
+        assert_eq!(
+            words("cd sub && cargo xtask trace test | grep A"),
+            Some(vec![w(&["cd", "sub"]), w(&["cargo", "xtask", "trace", "test"])])
+        );
+        let a = again(trace).unwrap();
+        for same in [
+            "cargo xtask trace test | grep B",
+            "cargo xtask trace test",
+            "cargo xtask trace test 2>&1 | tail -5",
+            "cargo xtask trace test | grep -v x | sort | uniq -c | sort -rn | head -3 | wc -l",
+            "cargo xtask trace test | cut -d: -f1 | tr a-z A-Z",
+            "cargo xtask trace test | awk -F: -v n=2 '{ print $n }'",
+            "cargo xtask trace test | awk '$3 == \"x\" { n++ } END { print n }'",
+            "cargo xtask trace test | jq -r --arg k v '.[$k] | select(.a)'",
+            "sh -c 'cargo xtask trace test | grep A'",
+        ] {
+            assert!(a.covers(same), "{same}");
+        }
+        for other in [
+            "cargo xtask trace test2 | grep A",
+            "cargo xtask trace test --x | grep A",
+            "cargo xtask trace | grep A",
+            "cargo xtask shot | grep A",
+            "TARAE_UI=x cargo xtask trace test | grep A",
+            "cargo xtask trace test; rm x",
+            "cargo xtask trace test && cargo xtask trace test2",
+            "cd sub && cargo xtask trace test | grep A",
+            // filters that aren't: a program, a writer, a file of their own
+            "cargo xtask trace test | sh",
+            "cargo xtask trace test | tee out",
+            "cargo xtask trace test | sort -o out",
+            "cargo xtask trace test | sort --out=f",
+            "cargo xtask trace test | sort --compress-prog=./x",
+            "cargo xtask trace test | uniq - out",
+            "cargo xtask trace test | tail -f",
+            "cargo xtask trace test | tail --fol",
+            "cargo xtask trace test | xargs rm",
+            "cargo xtask trace test | sed -n 1p",
+            "cargo xtask trace test | grep A *.rs",
+            "cargo xtask trace test | awk '{ system(\"rm x\") }'",
+            "cargo xtask trace test | awk '{ print > \"f\" }'",
+            "cargo xtask trace test | awk '{ print | \"sh\" }'",
+            "cargo xtask trace test | awk '{ \"date\" | getline d }'",
+            "cargo xtask trace test | awk 'BEGIN { print ENVIRON[\"T\"] }'",
+            "cargo xtask trace test | awk '@load \"x\"'",
+            "cargo xtask trace test | awk -f x.awk",
+            "cargo xtask trace test | awk '{ print }' other.txt",
+            "cargo xtask trace test | awk -i x '{ print }'",
+            "cargo xtask trace test | jq . other.json",
+            "cargo xtask trace test | jq --rawfile x f .",
+            "cargo xtask trace test | jq -f prog.jq",
+            "cargo xtask trace test | jq 'env.T'",
+            "cargo xtask trace test | jq '$ENV.T'",
+            "cargo xtask trace test | jq 'include \"x\"; .'",
+        ] {
+            assert!(!a.covers(other), "{other}");
+        }
+        let e = again(env).unwrap();
+        assert!(e.covers("TARAE_UI=x cargo xtask trace test | tail -1"));
+        for other in [
+            "TARAE_UI=y cargo xtask trace test | grep A",
+            "cargo xtask trace test | grep A",
+            "TARAE_UI=x CC=/tmp/evil cargo xtask trace test | grep A",
+            "CC=/tmp/evil TARAE_UI=x cargo xtask trace test",
+        ] {
+            assert!(!e.covers(other), "{other}");
+        }
+        // No `a`: a program that runs what follows it, git (what reads runs already), a name that finds
+        // programs, an option no rule lets through, a glob the shell fills in
+        for c in [
+            "python3 -c 'print(1)' | grep 1",
+            "env -i cargo test",
+            "xargs rm",
+            "git commit -m x",
+            "PATH=/tmp/bin cargo xtask shot",
+            "LD_PRELOAD=/tmp/x.so cargo test",
+            "cargo test --config 'build.rustflags=[]'",
+            "cargo run -- *.rs",
+        ] {
+            assert_eq!(again(c), None, "{c}");
+        }
+        // A script run by its path: in the key, and allowed as it is now (`script_pins`)
+        let s = again("sh target/x/setup.sh && cargo xtask shot a.png").unwrap();
+        assert_eq!(s.scripts, ["target/x/setup.sh"]);
+        assert!(!s.covers("sh target/x/setup.sh && cargo xtask shot b.png"), "another file: asked");
     }
 
     /// #93: a line of several commands gets a pattern for each part — a script run by its path as it is
     /// now, a pattern for the rest, nothing for a part that runs unasked — or none when a part can't.
     #[test]
     fn a_line_of_a_script_and_a_command_gets_a_pattern_for_each() {
-        use super::Pattern;
-        let p = |c: &str| super::card_pattern(c);
+        let p = |c: &str| super::again(c);
+        let scripts = |c: &str| p(c).map(|a| a.scripts);
         let shot = "sh target/x/setup.sh && env TARAE_SHOT_XDG=/tmp/x TARAE_BACKGROUND=dark cargo xtask shot \
                     target/x/2.png '@?ready'";
-        let want = Pattern {
-            rules: vec!["TARAE_SHOT_XDG= TARAE_BACKGROUND= cargo xtask shot".into()],
-            scripts: vec!["target/x/setup.sh".into()],
-        };
-        assert_eq!(p(shot), Some(want.clone()));
+        let a = p(shot).expect("an a");
+        assert_eq!(a.scripts, ["target/x/setup.sh"]);
+        assert_eq!(a.scripts_said(), " and `target/x/setup.sh` as it is now");
+        assert!(a.covers(shot) && !a.covers(&shot.replace("2.png", "3.png")), "#193: this line, exactly");
+        assert_eq!(scripts("./run.sh fast"), Some(vec!["./run.sh".to_string()]));
         assert_eq!(
-            want.shown(),
-            "`target/x/setup.sh` as it is now and `TARAE_SHOT_XDG=… TARAE_BACKGROUND=… cargo xtask shot …`"
+            scripts("cd sub && bash gen.sh && cargo test && ls"),
+            Some(vec!["gen.sh".to_string()]),
+            "the check and the read are in its words"
         );
-        assert_eq!(p("cargo xtask shot a.png").map(|p| p.rules), Some(vec!["cargo xtask shot".to_string()]));
-        assert_eq!(p("./run.sh fast"), Some(Pattern { rules: vec![], scripts: vec!["./run.sh".into()] }));
-        assert_eq!(
-            p("cd sub && bash gen.sh && cargo test && ls"),
-            Some(Pattern { rules: vec![], scripts: vec!["gen.sh".into()] }),
-            "the check and the read need nothing"
-        );
+        // (#193: the same line exactly, `rm` and all, is what was said yes to)
+        assert!(p("sh x.sh && rm -rf y").is_some());
         for c in [
-            "sh x.sh && rm -rf y",
             "sh x.sh && python3 y.py",
             "sh -c 'sh x.sh'",
             "sh -x x.sh",
@@ -3839,19 +4241,18 @@ mod tests {
             "../elsewhere/x.sh",
             "sh ../x.sh",
         ] {
-            let got = p(c);
-            assert!(got.as_ref().is_none_or(|p| p.scripts.is_empty()), "{c}: {got:?}");
+            // (#193: and no `a` at all — what's at that path could be anything next time)
+            assert_eq!(p(c), None, "{c}");
         }
-        // The chat's rule lets the line's command through, `env` and all — its script is for the worker
-        let chat = vec!["TARAE_SHOT_XDG= TARAE_BACKGROUND= cargo xtask shot".to_string()];
-        assert!(!super::chain_allowed(shot, &chat, false), "a script isn't a check");
-        assert!(super::chain_allowed(shot, &chat, true));
-        assert!(!super::chain_allowed("sh x.sh && rm y", &chat, true));
+        // A rule of the user's (`llm.run-allow`) never lets a script through: what `a` allows of one is its
+        // line exactly, the script as it was (`read_only`'s pins)
+        let rule = vec!["TARAE_SHOT_XDG= TARAE_BACKGROUND= cargo xtask shot".to_string()];
+        assert!(!super::chain_allowed(shot, &rule), "a script isn't a check");
     }
 
-    /// #93 as the user met it: the same screenshot line again with one argument changed asked every time.
-    /// `a` on its card allows its script as it is and its command's pattern for the chat — the next one runs
-    /// unasked; the script changed, and it asks again.
+    /// #93: `a` on a scripted line's card allows its script as it is with the line — the same line runs again
+    /// unasked; the script changed, and it asks again. #193 (user decision 2026-10-06): the line exactly —
+    /// one argument changed asks (#93's prefix let `… target/x/2.png` through).
     #[test]
     fn a_scripted_line_allowed_for_the_chat_runs_again_unasked_while_its_script_is_the_same() {
         use serde_json::json;
@@ -3889,24 +4290,33 @@ mod tests {
         pump(&mut ed, &|ed| !ed.offers.is_empty());
         let q = ed.offers[0].question.clone();
         assert!(
-            q.contains("a — also `target/x/setup.sh` as it is now and `TARAE_BACKGROUND=… echo shot …` unasked, this chat"),
+            q.contains(
+                "a — this exact command and `target/x/setup.sh` as it is now again unasked, this chat"
+            ),
             "{q}"
         );
         ed.offer_for_chat();
         pump(&mut ed, &ended);
         assert!(dir.join("set-up").exists(), "it ran");
         assert_eq!(ed.session.chat.as_ref().unwrap().run_scripts.len(), 1, "the script, as it was");
-        // Again, another file: unasked
+        // Again, the same line: unasked
         ed.session.task_run = None;
-        super::run(&mut ed, super::Call::of(generation, "r2", json!(2)), &json!({ "command": line(2) }))
+        super::run(&mut ed, super::Call::of(generation, "r2", json!(2)), &json!({ "command": line(1) }))
             .unwrap();
         pump(&mut ed, &|ed| ed.session.task_run.is_some() || !ed.offers.is_empty());
         assert!(ed.offers.is_empty(), "no card: {:?}", ed.offers.first().map(|o| &o.question));
         pump(&mut ed, &ended);
+        // Another file: asked (#193)
+        ed.session.task_run = None;
+        super::run(&mut ed, super::Call::of(generation, "r5", json!(5)), &json!({ "command": line(2) }))
+            .unwrap();
+        pump(&mut ed, &|ed| ed.session.task_run.is_some() || !ed.offers.is_empty());
+        assert!(ed.session.task_run.is_none() && !ed.offers.is_empty(), "another line: its card");
+        ed.offer_dismiss();
         // The script changed: asked again
         std::fs::write(dir.join("target/x/setup.sh"), "touch set-up-again\n").unwrap();
         ed.session.task_run = None;
-        super::run(&mut ed, super::Call::of(generation, "r3", json!(3)), &json!({ "command": line(3) }))
+        super::run(&mut ed, super::Call::of(generation, "r3", json!(3)), &json!({ "command": line(1) }))
             .unwrap();
         pump(&mut ed, &|ed| ed.session.task_run.is_some() || !ed.offers.is_empty());
         assert!(ed.session.task_run.is_none() && !ed.offers.is_empty(), "a card for the changed script");
@@ -3931,22 +4341,24 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// #44: assignments in front of the command go into the pattern by name, values left open — never a
-    /// name that finds programs or libraries, or one the sandbox sets; and a command setting a name its
-    /// rule doesn't name still asks.
+    /// #44: assignments in front of the command — in a run card's `a` (#193) with their values, exactly;
+    /// never a name that finds programs or libraries, or one the sandbox sets. A rule of the user's
+    /// (`llm.run-allow`, `NAME=` words) takes the names it lists, any values (#132: a name it doesn't list
+    /// asks).
     #[test]
     fn assignments_in_front_go_into_the_pattern_by_name() {
-        let p = |c: &str| super::pattern(c);
+        let p = |c: &str| super::again(c);
         let shot =
             "sh -c 'TARAE_SHOT_XDG=/tmp/x TARAE_BACKGROUND=dark cargo xtask shot /tmp/a.png \"@?ready\"'";
-        assert_eq!(p(shot).as_deref(), Some("TARAE_SHOT_XDG= TARAE_BACKGROUND= cargo xtask shot"));
-        assert_eq!(
-            super::pattern_shown(&p(shot).unwrap()),
-            "TARAE_SHOT_XDG=… TARAE_BACKGROUND=… cargo xtask shot"
+        let a = p(shot).expect("an a");
+        assert_eq!(a.parts[0][..2], ["TARAE_SHOT_XDG=/tmp/x", "TARAE_BACKGROUND=dark"]);
+        assert!(
+            a.covers("TARAE_SHOT_XDG=/tmp/x TARAE_BACKGROUND=dark cargo xtask shot /tmp/a.png '@?ready'")
         );
-        assert_eq!(p("FOO=1 cargo test").as_deref(), Some("FOO= cargo test"), "not only in sh -c");
-        // (`env` in between sets nothing more — #93)
-        assert_eq!(p("A=1 env cargo test").as_deref(), Some("A= cargo test"));
+        assert!(!a.covers(&shot.replace("dark", "light")), "another value");
+        assert!(!a.covers("cargo xtask shot /tmp/a.png '@?ready'"), "no names");
+        assert!(p("FOO=1 cargo test").is_some_and(|a| a.covers("FOO=1 cargo test")), "not only in sh -c");
+        assert!(p("A=1 env cargo test").is_some_and(|a| !a.covers("A=1 cargo test")), "its words, `env` too");
         for c in [
             "PATH=/tmp/bin cargo xtask shot",
             "LD_PRELOAD=/tmp/x.so cargo xtask shot",
@@ -3955,7 +4367,6 @@ mod tests {
             "TMPDIR=/x cargo xtask shot",
             "TARAE_SANDBOXED= cargo xtask shot",
             "A=1 env -i cargo test",
-            "A=1 sh x.sh",
             "'A=1' cargo test",
             "A=$(id) cargo test",
             "A=1 B=2",
@@ -3963,7 +4374,7 @@ mod tests {
         ] {
             assert_eq!(p(c), None, "{c}");
         }
-        let chat = vec![p(shot).unwrap()];
+        let chat = vec!["TARAE_SHOT_XDG= TARAE_BACKGROUND= cargo xtask shot".to_string()];
         assert!(super::allowed(shot, &chat));
         assert!(super::allowed("TARAE_BACKGROUND=light cargo xtask shot /tmp/b.png", &chat), "fewer names");
         assert!(super::allowed("cargo xtask shot /tmp/b.png", &chat), "none");
@@ -3978,19 +4389,12 @@ mod tests {
             "sh -c 'RUST_LOG=debug cargo xtask shot /tmp/d.png'",
             "TARAE_BACKGROUND=dark CC=/tmp/evil cargo xtask shot /tmp/e.png",
         ] {
-            assert!(!super::allowed(c, &chat) && !super::chain_allowed(c, &chat, false), "{c}");
+            assert!(!super::allowed(c, &chat) && !super::chain_allowed(c, &chat), "{c}");
         }
-        let wider = vec![p(more).unwrap()];
-        assert_eq!(
-            super::pattern_shown(&wider[0]),
-            "TARAE_SHOT_XDG=… TARAE_BACKGROUND=… TARAE_SHOT_COLS=… cargo xtask shot"
-        );
+        let wider = vec!["TARAE_SHOT_XDG= TARAE_BACKGROUND= TARAE_SHOT_COLS= cargo xtask shot".to_string()];
+        assert!(super::allowed(more, &wider) && super::allowed(shot, &wider), "all three, or fewer");
         assert!(
-            super::allowed(more, &wider) && super::allowed(shot, &wider),
-            "its card's a: all three, or fewer"
-        );
-        assert!(
-            super::chain_allowed("env TARAE_BACKGROUND=dark cargo xtask shot /tmp/f.png", &chat, false),
+            super::chain_allowed("env TARAE_BACKGROUND=dark cargo xtask shot /tmp/f.png", &chat),
             "fewer names through env, in a line"
         );
         for c in [
@@ -4050,9 +4454,9 @@ mod tests {
         assert!(super::is_check(yours), "it still feeds the list");
         assert!(!super::is_check("grep -rn x src | head"), "a grep through a filter isn't a check");
         assert!(!super::is_check("cargo xtask shot x.png | head"));
+        // (a run card's `a`: the command before its filters — #193)
         let shot = "sh -c 'cargo xtask shot /tmp/x.png 2>&1 | grep -E \"a|b\" | tail -3'";
-        assert_eq!(super::pattern(shot).as_deref(), Some("cargo xtask shot"));
-        assert_eq!(super::pattern("ls | wc -l"), None, "one word isn't a pattern");
+        assert!(super::again(shot).is_some_and(|a| a.covers("cargo xtask shot /tmp/x.png")));
     }
 
     /// Only checks and builds feed the user's list (#28): every command in the line one of them; Claude's

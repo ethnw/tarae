@@ -50,6 +50,9 @@ pub struct Offer {
     /// Its yes is held, and why (a review's end or a bring while high-risk changes wait for a person's
     /// look — `codereview.rs`): `y` and `p` aren't among its answers, and pressed are refused on it.
     pub held: Option<String>,
+    /// The changed lines' keys a held yes waits on (`risk::keys`): once the session has looked at every one,
+    /// the hold goes (`codereview::held_sync`) — no asking again. Empty: held until answered otherwise.
+    pub gate: Vec<crate::risk::Key>,
 }
 
 /// A card's text in a buffer of its own (`v`) is titled this, then the card's title.
@@ -157,6 +160,15 @@ pub enum What {
     /// The binary a restart would run is the one it was, older than its checkout's HEAD: `y` restarts onto
     /// it anyway, `n` doesn't.
     RestartSame { id: u64 },
+    /// `:restart` again while restart `id` is under way (#194): `y` calls it off, `n` keeps it going.
+    RestartCancel { id: u64 },
+    /// Drafts (`notes.rs`) whose lines changed since they were pinned, at a turn's end (#197): `y` closes
+    /// notes `ids`, `n` keeps them. Its session's.
+    NotesStale { ids: Vec<u64> },
+    /// Closing every note an author began (`:notes-clear <who>`, the notes list's `A-x`) — or every note, `by`
+    /// None — when some hold your unsent drafts: `y` closes notes `ids` (the ones asked about), `n` keeps
+    /// them. Its session's.
+    NotesClose { by: Option<crate::notes::By>, ids: Vec<u64> },
     /// A buffer's unsaved edits a gone tarae kept (`recovery.rs`): `y` restores them into the buffer, `c`
     /// compares them with the file, `D` discards them, `n` leaves them for the next start.
     Recover(Box<crate::recovery::Found>),
@@ -196,7 +208,8 @@ impl What {
             | What::ProjectTrust { .. }
             | What::Recover(_)
             | What::Restart(_)
-            | What::RestartSame { .. } => ByItself,
+            | What::RestartSame { .. }
+            | What::RestartCancel { .. } => ByItself,
             What::ForcePush(_)
             | What::Hooks(_)
             | What::Grant { .. }
@@ -215,6 +228,8 @@ impl What {
             | What::Read { .. }
             | What::Screen { .. }
             | What::ChangeSet { .. }
+            | What::NotesStale { .. }
+            | What::NotesClose { .. }
             | What::Stuck(_) => Lost,
         }
     }
@@ -306,6 +321,7 @@ impl Offer {
             drawn: Default::default(),
             asked: None,
             held: None,
+            gate: Vec::new(),
         }
     }
 
@@ -457,13 +473,15 @@ impl Offer {
 
     /// Whether its answer can last longer than once (`a` this chat · `A` always — `A` only for reads).
     pub fn lasts(&self) -> bool {
+        // (Docker's socket is never the chat's: a run card's `a` is then its command's, when it has one — #193)
+        let as_outside = |s: &std::path::Path| crate::allow::Grant::Socket(s.to_path_buf()).as_outside();
         match &self.what {
-            What::NoSandbox { .. }
-            | What::Read { keep: true, .. }
-            | What::Grant { .. }
-            | What::Screen { .. } => true,
-            // (what it reads outside, or its pattern for the rest of the chat)
-            What::Run(r) => r.keep || r.pattern.is_some() || r.socket.is_some(),
+            What::Grant { grant, .. } => !grant.as_outside(),
+            What::NoSandbox { .. } | What::Read { keep: true, .. } | What::Screen { .. } => true,
+            // (what it reads outside, this command again, or its socket for the rest of the chat)
+            What::Run(r) => {
+                r.keep || r.again.is_some() || r.socket.as_deref().is_some_and(|s| !as_outside(s))
+            }
             _ => false,
         }
     }
@@ -495,7 +513,11 @@ impl Offer {
     /// Whether it parks with its session when another comes to the front: Claude's, and a review's end
     /// (#159: it stayed up in the other session, and `y` there ended that one's review).
     pub fn goes_with_session(&self) -> bool {
-        self.claudes() || matches!(self.what, What::ReviewEnd { .. } | What::Stuck(_))
+        self.claudes()
+            || matches!(
+                self.what,
+                What::ReviewEnd { .. } | What::Stuck(_) | What::NotesStale { .. } | What::NotesClose { .. }
+            )
     }
 
     pub fn installing(&self) -> bool {
@@ -509,8 +531,22 @@ impl Offer {
         let mut v = self.answers_all(quick);
         if self.held.is_some() && matches!(self.state, OfferState::Asking) {
             v.retain(|a| !matches!(a.0, 'y' | 'p'));
+            if self.highs().is_some() {
+                v.insert(0, ('h', "Go to them"));
+            }
         }
         v
+    }
+
+    /// Held for high-risk changes (#196): `h` goes to them — `Some(None)` in the review in front (its end
+    /// card), `Some(Some((checkout, base)))` in a review since the base (a bring's). The card stays.
+    pub fn highs(&self) -> Option<Option<(PathBuf, String)>> {
+        self.held.as_ref()?;
+        match &self.what {
+            What::ReviewEnd { .. } => Some(None),
+            What::Rebased(m) => Some(Some((m.root.clone(), m.base.clone()))),
+            _ => None,
+        }
     }
 
     fn answers_all(&self, quick: bool) -> Vec<(char, &'static str)> {
@@ -525,13 +561,16 @@ impl Offer {
             W::Install { .. } | W::Fetch { .. } => vec![('y', "Install"), ('n', "Not now"), ('N', "Never")],
             W::PluginPermissions { .. } => vec![('y', "Allow"), ('n', "Not now")],
             W::PluginAsk { .. } => vec![('y', "Allow"), ('n', "No")],
-            // (one socket past the sandbox — #119; `a` is the socket's, for any command — #182)
-            W::Run(r) if r.socket.is_some() => {
-                vec![('y', "This run"), ('a', "This socket, this chat"), ('n', "No")]
-            }
+            // (one socket past the sandbox — #119; `a` is the socket's, for any command — #182; Docker's,
+            // this command's with it, never the socket's — #193)
+            W::Run(r) if r.socket.is_some() && self.lasts() => match r.again.is_some() {
+                true => vec![('y', "This run"), ('a', "This command, this chat"), ('n', "No")],
+                false => vec![('y', "This run"), ('a', "This socket, this chat"), ('n', "No")],
+            },
+            W::Run(r) if r.socket.is_some() => vec![('y', "This run"), ('n', "No")],
             W::Run(r) if r.keep => vec![('y', "Run"), ('a', "This chat"), ('A', "Always"), ('n', "No")],
-            // (its pattern for the rest of the chat — the card says which)
-            W::Run(r) if r.pattern.is_some() => vec![('y', "Run"), ('a', "This chat"), ('n', "No")],
+            // (this command again for the rest of the chat — the card says which)
+            W::Run(r) if r.again.is_some() => vec![('y', "Run"), ('a', "This chat"), ('n', "No")],
             W::Run(_) => vec![('y', "Run"), ('n', "No")],
             W::ReviewAtEnd => vec![('y', "Turn on"), ('n', "No")],
             W::ProjectTrust { .. } => vec![('y', "Trust"), ('n', "Ignore")],
@@ -541,6 +580,8 @@ impl Offer {
                 vec![('y', "Once"), ('a', "This chat"), ('A', "Always"), ('n', "No")]
             }
             W::Read { keep: false, .. } => vec![('y', "Once"), ('n', "No")],
+            // (Docker's socket: this run's only — #193)
+            W::Grant { grant, .. } if grant.as_outside() => vec![('y', "This run"), ('n', "No")],
             W::Grant { grant, .. } if !grant.keepable() => {
                 vec![('y', "This run"), ('a', "This chat"), ('n', "No")]
             }
@@ -588,6 +629,8 @@ impl Offer {
             }
             W::Restart(_) => vec![('y', "Restart"), ('n', "Not now")],
             W::RestartSame { .. } => vec![('y', "Restart anyway"), ('n', "Don't")],
+            W::RestartCancel { .. } => vec![('y', "Call it off"), ('n', "Keep it")],
+            W::NotesStale { .. } | W::NotesClose { .. } => vec![('y', "Close them"), ('n', "Keep them")],
             // (throwing them away takes a capital, as removing does)
             W::Recover(_) => vec![('y', "Restore"), ('c', "Compare"), ('D', "Discard"), ('n', "Not now")],
             W::ChangeSet { .. } => {
@@ -631,6 +674,9 @@ impl Offer {
             W::Hooks(_) => "hooks",
             W::Restart(_) => "restart",
             W::RestartSame { .. } => "restart-same",
+            W::RestartCancel { .. } => "restart-cancel",
+            W::NotesStale { .. } => "notes-stale",
+            W::NotesClose { .. } => "notes-close",
             W::Recover(_) => "recover",
             W::Stuck(_) => "stuck",
         }
@@ -710,6 +756,7 @@ impl crate::editor::Editor {
             if !old.installing() {
                 (old.question, old.working, old.failed) = (o.question, o.working, o.failed);
                 (old.decided, old.warning, old.asked, old.diff) = (o.decided, o.warning, o.asked, o.diff);
+                (old.held, old.gate) = (o.held, o.gate);
                 (old.what, old.state) = (o.what, OfferState::Asking);
                 old.rev += 1;
             }
@@ -805,6 +852,11 @@ impl crate::editor::Editor {
             Code::Char('X') if o.aborts() => self.offer_abort(),
             Code::Char('b') if o.base_steps() => self.offer_session_base(),
             Code::Char('f') if o.restart_other() => self.offer_restart_other(),
+            // (the card stays: what it waits on is yours to look at, then it's answered)
+            Code::Char('h') if o.highs().is_some() => {
+                let bring = o.highs().flatten();
+                crate::codereview::card_highs(self, bring);
+            }
             // (the card stays: shown, it's still to answer)
             Code::Char('w') if o.stuck().is_some() => {
                 let s = o.stuck().cloned().expect("just seen");
@@ -924,6 +976,9 @@ impl crate::editor::Editor {
             What::Hooks(ask) => self.hooks_answer(id, *ask, true),
             What::Restart(c) => crate::restart::chosen(self, id, *c, Some(0)),
             What::RestartSame { id: r } => crate::restart::same_answer(self, id, r, true),
+            What::RestartCancel { id: r } => crate::restart::cancel_answer(self, id, r, true),
+            What::NotesStale { ids } => crate::notes::stale_answer(self, id, ids, true),
+            What::NotesClose { by, ids } => crate::notes::close_by_answer(self, id, by, ids, true),
             What::Recover(f) => crate::recovery::restore(self, id, *f),
             What::Stuck(s) => {
                 self.offer_finished(id, Ok(()));
@@ -1327,6 +1382,9 @@ impl crate::editor::Editor {
             What::Hooks(ask) => self.hooks_answer(o.id, *ask, false),
             What::Restart(c) => crate::restart::chosen(self, o.id, *c, None),
             What::RestartSame { id } => crate::restart::same_answer(self, o.id, id, false),
+            What::RestartCancel { id } => crate::restart::cancel_answer(self, o.id, id, false),
+            What::NotesStale { ids } => crate::notes::stale_answer(self, o.id, ids, false),
+            What::NotesClose { by, ids } => crate::notes::close_by_answer(self, o.id, by, ids, false),
             What::Recover(f) => crate::recovery::not_now(self, *f),
             What::Stuck(s) => crate::stuck::keep_waiting(self, &s),
         }

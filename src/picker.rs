@@ -76,6 +76,13 @@ pub enum Action {
         line: usize,
         col: usize,
     },
+    /// Note `id` (`notes.rs`), on line `line` of the file — the notes list's row: Enter goes there as `Goto`,
+    /// `C-x`/`A-x` close it by its id.
+    Note {
+        id: u64,
+        path: PathBuf,
+        line: usize,
+    },
 }
 
 /// Job that builds the list on a worker thread.
@@ -959,7 +966,7 @@ impl Action {
     pub fn preview_target(&self) -> Option<(&Path, Option<usize>)> {
         match self {
             Action::Open(p) => Some((p, None)),
-            Action::Goto { path, line, .. } => Some((path, Some(*line))),
+            Action::Goto { path, line, .. } | Action::Note { path, line, .. } => Some((path, Some(*line))),
             Action::Buffer(_)
             | Action::Jump { .. }
             | Action::ReplaceFile(_)

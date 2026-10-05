@@ -23,9 +23,9 @@
 20                                                words'
 21
 22                                                It runs cargo xtask — not a check, a read, or a
-23                                                pattern allowed in this chat.
+23                                                command allowed in this chat.
 24
-25                                                a — also `cargo xtask shot …` unasked, this chat
+25                                                a — this exact command again unasked, this chat
 26
 27                                                y Run   a This chat   n No
 28                                             ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
@@ -87,7 +87,7 @@
 22                                                dd dddd ddddd ddddd d ddd d dddddd d ddddd dd d
 23                                                ddddddd ddddddd dd dddd ddddd
 24
-25                                                d d dddd dddddd ddddd dddd dd dddddddd dddd dddd
+25                                                d d dddd ddddd ddddddd ddddd dddddddd dddd dddd
 26
 27                                                A       A dddd dddd   A dd
 28

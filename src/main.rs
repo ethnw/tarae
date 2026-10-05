@@ -30,6 +30,7 @@ mod edits;
 mod event;
 mod fetch;
 mod filetree;
+mod filters;
 mod follow;
 mod fswatch;
 mod git;

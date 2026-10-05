@@ -284,6 +284,8 @@ commands! {
         goto_prev_change_part => "Previous change (each small one)",
         goto_next_review_file => "Next file of the review",
         goto_prev_review_file => "Previous file of the review",
+        goto_next_high_change => "Next high-risk change",
+        goto_prev_high_change => "Previous high-risk change",
         diagnostics_picker => "Diagnostics",
         workspace_diagnostics_picker => "Diagnostics in every file",
         select_references_to_symbol_under_cursor => "Select this symbol's uses",
@@ -1775,6 +1777,14 @@ fn goto_next_review_file(cx: &mut Context) {
 
 fn goto_prev_review_file(cx: &mut Context) {
     crate::codereview::step_file(cx.editor, false);
+}
+
+fn goto_next_high_change(cx: &mut Context) {
+    crate::codereview::high_step(cx.editor, true);
+}
+
+fn goto_prev_high_change(cx: &mut Context) {
+    crate::codereview::high_step(cx.editor, false);
 }
 
 fn goto_next_diag(cx: &mut Context) {

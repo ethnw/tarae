@@ -99,9 +99,9 @@ always asks), change sets, and tarae's own cards (trust, a rebase, a download). 
 (`▲3 waiting`) once anything waits beyond the card in front of you. `space I` (`:inbox`, or a click on the
 count) lists them: each row names its session, what it asks, its kind and how long it has waited. `enter` goes
 to it. Its session comes to the front and its card comes up with the keys, and you answer it there, on the card.
-The list never answers anything itself. `C-q` follows the same order: it goes to the one that has waited
-longest, whichever session it's in, and once that's the card up here, `C-q` gives it the keys. While anything
-waits, `C-q` never says nothing does.
+The list never answers anything itself. `C-q` takes what waits in the session in front first, then follows
+the list's order: it goes to the one that has waited longest, whichever session it's in, and once that's the
+card up here, `C-q` gives it the keys. While anything waits, `C-q` never says nothing does.
 
 Two kinds of news are in the list too, after everything that asks for an answer: a run of Claude's that has
 printed nothing for minutes (it may only be slow, and a card surely waits), and a reviewer that ended in a
@@ -442,15 +442,18 @@ when two of them sit in one folder (or one sits beside a file you let it read on
 folder, saying so: `a and A allow everything in /private/tmp/shots — not only these files`.
 
 **Anything else asks first.** A card shows the whole command (and its folder, when it's not the project
-root), `y` runs it, `n` tells Claude you said no. When the command starts with plain words that say what it is
-(`cargo xtask shot …`), `a` runs it and lets commands starting with those words run without asking for the
-rest of the conversation — the card says which words. It's never offered for a program that runs whatever
-follows it (`sh`, `env`, `python`, `xargs` …), nor for git (what of it reads runs already; what writes goes to
-`.git`, which the sandbox keeps), and never kept beyond the conversation. A pattern that sets names in front
-(`A=… B=… cargo xtask shot`) covers the same command setting those names, any values, or fewer of them — never
-a name the card didn't show: one more asks again, and that card's `a` names them all (no list of names that
-make a program run another is whole — `CC=x cargo build` runs x from a build script). A name that does is
-never on a card at all (`PATH`, `RUSTC_WRAPPER`, `CARGO_HOME`, `RUSTUP_TOOLCHAIN`, `CARGO_ALIAS_…` and the like). A command
+root), `y` runs it, `n` tells Claude you said no. `a` runs it and lets **this exact command** run again
+without asking for the rest of the conversation, from the same folder: every word of it, the names it sets in
+front with the same values (`TARAE_UI=x cargo xtask trace test`), its `cd`s. Only the filters after it may
+differ, when they only read what's piped in: `grep`, `head`, `tail`, `cut`, `wc`, `sort`, `uniq`, `tr`, `awk`
+(no `system`, `getline`, `ENVIRON`, `|`, `>` or `@` in its program, no `-f`, no file of its own) and `jq` (no
+files, `include`, `import` or `env`) — so `cargo xtask trace test | grep A` and then `… | tail -5` is one card.
+A script the command runs by its path (`sh x.sh`, `./x`) is allowed as it is now: changed, and it asks again.
+`a` is never offered for a program that runs whatever follows it (`sh -c`, `env -i`, `python`, `xargs` …), a
+program by its path that isn't such a script, git (what of it reads runs already; what writes goes to `.git`,
+which the sandbox keeps), or a name that makes a program run another (`PATH`, `RUSTC_WRAPPER`, `CARGO_HOME`,
+`RUSTUP_TOOLCHAIN`, `CARGO_ALIAS_…` and the like), and it's never kept beyond the conversation. (Your own
+`llm.run-allow` rules are still prefixes: `cargo xtask shot` there lets any `cargo xtask shot …` through.) A command
 that runs a file of code — `sh x.sh`, `./x`, `python x.py`, `perl x.pl`, `awk -f x.awk`, `sed -f x.sed` — shows
 that file's text on its card, since what runs is in it, not in the line (a long one is named, with its length);
 `y` reads it again and runs nothing if it changed since. A command too long to
@@ -581,9 +584,9 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
 - **What it blocked is yours to open**, never Claude's: `space m s` on a command's panel (`space x s` on a test
   run's, or `:sandbox-blocked`) lists what could open. For a write, each folder from the one written in up
   to just below home, so you choose how wide. For a connection, that port on this machine — or that unix
-  socket, the one file (colima's `docker.sock`), offered `y` this run or `a` this conversation, never kept;
-  Docker's says, in the warning color, that what connects to it can start a container that mounts any
-  folder. And, last, running the command once outside the sandbox. A folder's or a port's card offers `y` once,
+  socket, the one file, offered `y` this run or `a` this conversation, never kept. Docker's (colima's
+  `docker.sock`) is only ever `y` this run: its card says, in the warning color, that what connects to it can
+  start a container that mounts any folder — as much as running outside the sandbox. And, last, running the command once outside the sandbox. A folder's or a port's card offers `y` once,
   `a` this conversation, `A` always in this project; whichever you pick, the command runs again now with it
   open. "Always" is kept in
   your own state (`$XDG_STATE_HOME/tarae/sandbox.json`), and `:sandbox-allowed` lists it with what Claude may
@@ -599,7 +602,9 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
   socket (a server's — `cargo xtask linux` talks to colima's Docker), Claude asks for that instead
   (`unix_socket`): the card names the file, says everything else stays in the sandbox, and offers `y` this
   run or `a` this socket for the rest of the conversation — whatever command asks for it. Asked for it again,
-  it isn't a socket card; each command is still asked as any command is
+  it isn't a socket card; each command is still asked as any command is. Docker's socket is different: `a`
+  there is this command with that socket, word for word (filters after it that only read may differ), and
+  any other command asking for it gets the socket card again
 - **Since your last y.** When Claude asks again for a command you already said `y` to outside the sandbox in
   this conversation (the same run, from the same folder), its card says when that was and shows only what
   changed since in what the command runs. The same run is what runs: the program and its arguments before the
@@ -733,8 +738,8 @@ line (or the selected lines), which starts a new note with your question.
 |---|---|
 | `space n` | Reply to the note here, or ask Claude about this line |
 | `]n` / `[n` | Next / previous note, across files (notes sharing a line one by one) |
-| `space N` | Every note, with a preview |
-| `:note-close` / `:notes-clear` | Close the note here / all of them |
+| `space N` | Every note, with a preview — `C-x` closes the one on the row, `A-x` all its author began |
+| `:note-close` / `:notes-clear [reviewer\|author\|you]` | Close the note here / all of them, or one author's (asks first when your unsent drafts are among them) |
 
 The card sits beside the note's lines, below them or above them, so the code the note is about stays in
 view. When several notes share a line, the line end says how many (`¶ 3 notes · …`). The card shows one at a time
@@ -838,7 +843,11 @@ never sees that conversation. It isn't continued from it, and nothing of the cha
 - Its findings are notes on the lines, marked **reviewer** (the chat's are the **author**'s, yours are
   **you**). They wait like your drafts. Nothing goes to the author's chat until you send it: `space v s` sends
   your drafts and its findings together, and tells the author that the findings come from a second Claude,
-  to weigh and not to obey. `:note-close` drops a finding first.
+  to weigh and not to obey. `:note-close` drops a finding first; `A-x` on one in `space N`, or
+  `:notes-clear reviewer`, drops them all.
+- Asked the author to fix them some other way (in the chat), the findings would stay drafts. So when a chat
+  turn ends, drafts whose lines changed since they were pinned — yours and its — are named on a card: `y`
+  closes them, `n` keeps them (asked about once).
 - The rail says how it's doing (`reading… 1m 20s · 14 reads`, then `2 findings ▲1 · 1 answered`) and the
   first line of its verdict. On a narrow rail the time and the reads go on the row under `reading…`.
   `space v r` (`:review-verdict`) shows the whole report, and `:reviewer-stop` stops it.
@@ -864,12 +873,18 @@ tarae, not a model, grades every change in a review:
 - **quiet** (no mark) for docs, tests (a pack's `quiet` paths, or a change wholly inside a test), snapshots
   (`review.quiet`) and formatting. A high-risk change in a test is still high.
 
-A person looks at each high-risk change: `space v h` on it, in review mode. A file's mark and Claude don't
-count. Until then:
+A person looks at each high-risk change: `space v h` on it, in review mode — or over a selection, every one it
+touches that is on screen (all its lines, or the whole pane); one scrolled past isn't taken (`%` scrolls to the
+file's end, so `%` then `space v h` takes the ones in sight there, not the whole file), and the status line says how many were left. A file's mark and Claude don't count. `]h` / `[h` go to the next / previous one not looked at, across
+the review's files; `space v h` with none under the cursor goes to the next one (going there is no look — press
+it again). Until each has had a look:
 
 - the file can't be marked viewed;
 - `space v q`'s card names what's left and has no yes;
 - the session's bring card names what's left and has no `y` or `p`, and a bring asked any other way is refused.
+
+On either card `h` goes to them (the bring card's opens a review since its base first, on the first one), and
+the card stays. Once each has had a look, its yes comes back.
 
 The look is kept per changed line: its file, whether it was added or removed, and its text. A change looked at
 before it was committed still counts, and a line changed since needs a look again. Where the line is isn't part
@@ -894,7 +909,8 @@ by its modes, so `space v h` there takes it.
 | `space v s` / `:review-send` | Send the drafts to Claude |
 | `space v c` / `:review-claude` | The reviewer, a second Claude, reviews the changes: findings on the lines, a verdict |
 | `space v r` / `:review-verdict` | The reviewer's report: its verdict and findings |
-| `space v h` / `:review-hunk-seen` | The high-risk change here: looked at |
+| `space v h` / `:review-hunk-seen` | The high-risk changes here (or under the selection): looked at — none here: to the next |
+| `]h` / `[h` | Next / previous high-risk change not looked at, across files |
 | `space v q` / `:review-close` | End the review (asks first while files aren't viewed; held while a high-risk change isn't looked at) |
 | `space v t` / `:review-turn` | Review what Claude changed in its latest turn |
 | `space v a` / `:review-at-end` | [Review at the end](#review-at-the-end): Claude's edits go in as it works (asks first) |

@@ -129,6 +129,7 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `[ F` | `goto_prev_review_file` | Previous file of the review |
 | `[ g` | `goto_prev_change` | Previous git hunk |
 | `[ G` | `goto_prev_change_part` | Previous change (each small one) |
+| `[ h` | `goto_prev_high_change` | Previous high-risk change |
 | `[ m` | `goto_prev_conflict` | Previous merge conflict |
 | `[ n` | `goto_prev_note` | Previous note |
 | `[ p` | `goto_prev_paragraph` | Previous paragraph |
@@ -150,6 +151,7 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `] F` | `goto_next_review_file` | Next file of the review |
 | `] g` | `goto_next_change` | Next git hunk |
 | `] G` | `goto_next_change_part` | Next change (each small one) |
+| `] h` | `goto_next_high_change` | Next high-risk change |
 | `] m` | `goto_next_conflict` | Next merge conflict |
 | `] n` | `goto_next_note` | Next note |
 | `] p` | `goto_next_paragraph` | Next paragraph |
@@ -525,7 +527,7 @@ Type `:` in normal mode. `Tab` completes command names and their arguments (path
 | `:review-turn` |  | Review what Claude changed in its last turn |
 | `:soft-wrap` |  | Wrap this buffer's long lines, or scroll sideways (on/off) |
 | `:note-close` |  | Close Claude's note on this line |
-| `:notes-clear` |  | Close all of Claude's notes |
+| `:notes-clear` |  | Close all notes (or one author's: reviewer, author, you) |
 | `:commit-draft` |  | Let Claude draft the commit message |
 | `:undo-turn` |  | Undo what Claude changed in its last turn |
 | `:redo-turn` |  | Bring back the turn you undid |

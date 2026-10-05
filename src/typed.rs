@@ -411,10 +411,16 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
         }
         "undo-turn" => crate::checkpoint::step(editor, true),
         "redo-turn" => crate::checkpoint::step(editor, false),
+        // (`:notes-clear reviewer`: only the notes the reviewer began — #197)
+        // (your unsent drafts among them: a card asks first)
         "notes-clear" => {
-            let n = editor.session.notes.list.len();
-            editor.session.notes.list.clear();
-            editor.set_status(format!("{n} note{} closed", if n == 1 { "" } else { "s" }));
+            let by = match rest.split_whitespace().next() {
+                Some(word) => {
+                    Some(crate::notes::by_word(word).ok_or("notes-clear takes reviewer, author or you")?)
+                }
+                None => None,
+            };
+            crate::notes::close_by(editor, by);
             Ok(())
         }
         n if n.parse::<usize>().is_ok() => {

@@ -285,11 +285,12 @@ pub struct Chat {
     /// Claude may look at the screen without asking for the rest of this conversation (`a` on its card —
     /// `seeing.rs`).
     pub sees: bool,
-    /// Commands starting so run without asking for the rest of this conversation (`a` on a run card —
-    /// `tools::pattern`).
-    pub run_allow: Vec<String>,
-    /// Scripts run by their path that run without asking for the rest of this conversation while they're
-    /// what they were (real path, hash of what's in it — `a` on a run card, `readonly::script_pins`, #93).
+    /// Commands that run again without asking for the rest of this conversation — each exactly, its filters
+    /// aside, where it ran, with Docker's socket when its card had it (`a` on a run card — `tools::again`,
+    /// #193).
+    pub run_again: Vec<crate::tools::RunAgain>,
+    /// The scripts those commands run by their path, as they were (real path, hash of what's in it —
+    /// `readonly::script_pins`, #93): one changed since, and the command asks again.
     pub run_scripts: Vec<(PathBuf, u64)>,
     /// The commands the user said yes to running outside the sandbox in this conversation, with what they ran
     /// as it was then — the same one asked again says what changed since (`sinceyes.rs`).
@@ -363,12 +364,13 @@ impl Chat {
     /// it back until that one is answered) is a command that won't run unasked (#5: `C-q` found no card
     /// while one was about to come). `allow`: `llm.run-allow`.
     pub fn asks_next(&self, allow: &[String]) -> bool {
-        let extra: Vec<String> = allow.iter().chain(&self.run_allow).cloned().collect();
+        // (one this chat allowed again: by its words — where it runs is the run's to tell)
+        let again = |cmd: &str| self.run_again.iter().any(|r| r.again.covers(cmd));
         self.calls.iter().skip(1).any(|k| {
             k.name == "mcp__tarae__run"
                 && k.input["command"]
                     .as_str()
-                    .is_some_and(|cmd| !crate::tools::runs_unasked(cmd.trim(), &extra))
+                    .is_some_and(|cmd| !crate::tools::runs_unasked(cmd.trim(), allow) && !again(cmd.trim()))
         })
     }
 }
@@ -400,7 +402,7 @@ impl Chat {
             scanned: Default::default(),
             ran: Vec::new(),
             sees: false,
-            run_allow: Vec::new(),
+            run_again: Vec::new(),
             run_scripts: Vec::new(),
             outside_yes: Vec::new(),
             queued: None,

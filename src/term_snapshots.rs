@@ -1227,7 +1227,7 @@ fn snapshot_sessions_dropdown_with_the_reviewer_reading() {
 }
 
 /// `space v q` with a high-risk change no one has looked at: the end card names it in the warning colour, and
-/// its only answer is `n` (`Offer.held`).
+/// it has no yes (`Offer.held`) — `h` goes to it (#196), `n` keeps reviewing.
 #[test]
 fn snapshot_review_end_held_by_a_high_change() {
     let base: String = (1..=5).map(|i| format!("let line_{i} = {i};\n")).collect();
@@ -1237,7 +1237,7 @@ fn snapshot_review_end_held_by_a_high_change() {
     r.set_rules(crate::risk::Rules::with(&[("rust", &["rust"], &[r"\bunsafe\b"], &[])], &[], &[]));
     crate::codereview::close_asked(&mut s.ed);
     let o = s.ed.offers.first().expect("the end card");
-    assert_eq!(o.answers(false), [('n', "Keep reviewing")]);
+    assert_eq!(o.answers(false), [('h', "Go to them"), ('n', "Keep reviewing")]);
     assert!(o.question.contains("1 high-risk change not looked at"), "{}", o.question);
     s.check("review_end_held");
 }

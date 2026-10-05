@@ -25,7 +25,7 @@
 22                                                git commit -am 'Count words'
 23
 24                                                It runs git commit — not a check, a read, or a
-25                                                pattern allowed in this chat.
+25                                                command allowed in this chat.
 26
 27                                                y Run   n No
 28                                             ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀

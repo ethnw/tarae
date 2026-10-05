@@ -3749,7 +3749,7 @@ mod tests {
         assert!(q.contains("reviewer: 1 ▲ of 1 finding"), "{q}");
         // (a new file: one change, from its first line)
         assert!(q.contains("1 high-risk change not looked at") && q.contains("\n  a.rs:1"), "{q}");
-        assert_eq!(card_in_sight(&mut ed), ['n']);
+        assert_eq!(card_in_sight(&mut ed), ['h', 'n']);
         for k in ["y", "p"] {
             feed(&mut ed, k);
             assert!(card(&ed, title).is_some(), "{k}: the card stays");
@@ -3761,15 +3761,29 @@ mod tests {
         settle_until(&mut ed, |ed| says(ed, "bring risky:") || says(ed, "Brought"));
         assert!(says(&ed, "bring risky: 1 high-risk change not looked at"), "{}", said(&ed));
         assert_eq!(git_in(&repo, &["rev-parse", "main"]), main_was);
-        // Looked at in a review since main — then brought
-        crate::codereview::start_in(&mut ed, wt.clone(), Some("main".into()));
+        // #196: the card's `h` — a review since main, on the change (going there is no look); `space v h`
+        // there gives the card its yes back — then brought
+        feed(&mut ed, ":session-bring<ret>");
+        settle_until(&mut ed, |ed| card(ed, title).is_some());
+        assert_eq!(card_in_sight(&mut ed), ['h', 'n']);
+        feed(&mut ed, "h");
         settle_until(&mut ed, |ed| {
             let d = ed.doc();
-            ed.session.code_review.is_some() && d.review_base.is_some() && d.git_version == d.version()
+            ed.session.code_review.is_some()
+                && d.review_base.is_some()
+                && d.git_version == d.version()
+                && d.path.as_deref() == Some(wt.join("a.rs").as_path())
         });
-        ed.goto_line(1);
+        let base = ed.session.code_review.as_ref().map(|r| r.base.label());
+        assert_eq!(base.as_deref(), Some("since main"));
+        assert_eq!(ed.cursor_line(), 0, "on the change");
+        assert!(ed.session.looked.is_empty(), "going is no look");
+        assert!(card(&ed, title).is_some(), "the card stays");
         feed(&mut ed, "<space>vh");
         assert!(!ed.session.looked.is_empty(), "{}", said(&ed));
+        assert!(card(&ed, title).is_some_and(|o| o.held.is_none()), "its yes is back");
+        assert_eq!(card_in_sight(&mut ed), ['y', 'p', 'n']);
+        ed.offers.clear();
         ed.messages.clear();
         bring_asked(&mut ed, "risky", "main");
         settle_until(&mut ed, |ed| says(ed, "Brought") || says(ed, "bring risky:"));

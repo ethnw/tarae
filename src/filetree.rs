@@ -265,7 +265,7 @@ fn segments(path: &str) -> Vec<(&str, Range<usize>)> {
 /// past the path of the file it opens (`src/a.rs:12: text`).
 pub fn path_len(root: &Path, item: &Item) -> usize {
     let path = match &item.action {
-        Action::Open(p) | Action::Goto { path: p, .. } => p,
+        Action::Open(p) | Action::Goto { path: p, .. } | Action::Note { path: p, .. } => p,
         _ => return item.label.len(),
     };
     let rel = path.strip_prefix(root).unwrap_or(path).as_os_str().as_encoded_bytes();

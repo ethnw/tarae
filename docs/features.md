@@ -389,7 +389,8 @@ its own session; the list (`]q`) belongs to the old tarae and stays behind. Undo
 keeps working, as after any restart (`editor.persistent-undo`).
 
 Some things make it wait, and some stop it. If Claude is answering in any session's chat, the restart waits for
-those turns to end (saying whose), and for any edits you accepted to land on disk; `:restart` again cancels. It stops, with a message
+those turns to end, and for any edits you accepted to land on disk. Until it happens the status line says what it
+waits for (`restart waits for gitescape`); `:restart` again asks before calling it off. It stops, with a message
 saying what to do, if something open can't be carried over or would be cut short: text in a buffer that has no
 file, a file that changed on disk under your edits, a change of Claude's waiting for your answer, a review of
 Claude's turn (`space v t`), a commit message being written, a task or tests still running — in any session, the message naming which — or a debug run. When a

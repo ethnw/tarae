@@ -11,23 +11,23 @@
 08                            ▌
 09                            ▌
 10                            ▌
-11                            ▌
-12                            ▌                      ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-13                            ▌                       ▎ End tarae's review?
-14                            ▌                         tarae's review · uncommitted · 0 of 1 viewed
-15                            ▌
-16                            ▌                         1 file not viewed
-17                            ▌
-18                            ▌                           src/demo.rs
-19                            ▌
-20                            ▌                         1 high-risk change not looked at — it ends once each has
-21                            ▌                         had a look (]g to it, space v h):
+11                            ▌                      ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+12                            ▌                       ▎ End tarae's review?
+13                            ▌                         tarae's review · uncommitted · 0 of 1 viewed
+14                            ▌
+15                            ▌                         1 file not viewed
+16                            ▌
+17                            ▌                           src/demo.rs
+18                            ▌
+19                            ▌                         1 high-risk change not looked at — it ends once each has
+20                            ▌                         had a look (h goes to them, ]h the next, space v h on
+21                            ▌                         each):
 22                            ▌                           src/demo.rs:6
 23                            ▌
 24                            ▌                         Drafts stay. Opened again, its marks are kept while a
 25   ]g hunk  ]F file         ▌                         file's diff is the same.
 26   space e files            ▌
-27   space n comment          ▌                         n Keep reviewing
+27   space n comment          ▌                         h Go to them   n Keep reviewing
 28   space v m viewed · q end ▌                      ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
 29  ▐ NORMAL ▌  +1                                                                          rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
@@ -43,7 +43,7 @@
 09 ppppppppppppppppppppppppppp
 10 ppppppppppppppppppppppppppp
 11 ppppppppppppppppppppppppppp
-12 ppppppppppppppppppppppppppp
+12 ppppppppppppppppppppppppppp                       ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 13 ppppppppppppppppppppppppppp                       ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 14 ppppppppppppppppppppppppppp                       ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 15 ppppppppppppppppppppppppppp                       ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
@@ -74,22 +74,22 @@
 09
 10
 11
-12
-13                                                    a BBB BBBBBBB BBBBBBB
-14                                                      ddddddd dddddd d ddddddddddd d d dd d dddddd
-15
-16                                                      d dddd ddd dddddd
-17
-18                                                        ddddddddddd
-19
-20                                                      w wwwwwwwww wwwwww www wwwwww ww w ww wwww wwww wwww www
-21                                                      www w wwww www ww www wwwww w www
+12                                                    a BBB BBBBBBB BBBBBBB
+13                                                      ddddddd dddddd d ddddddddddd d d dd d dddddd
+14
+15                                                      d dddd ddd dddddd
+16
+17                                                        ddddddddddd
+18
+19                                                      w wwwwwwwww wwwwww www wwwwww ww w ww wwww wwww wwww www
+20                                                      www w wwww ww wwww ww wwwww ww www wwwww wwwww w w ww
+21                                                      wwwwww
 22                                                        wwwwwwwwwwwww
 23
 24                                                      dddddd ddddd dddddd dddddd ddd ddddd ddd dddd ddddd d
 25   DD ffff  DD ffff                                   dddddd dddd dd ddd ddddd
 26   DDDDD D fffff
-27   DDDDD D fffffff                                    A
+27   DDDDD D fffffff                                    A              A dddd ddddddddd
 28   DDDDD D f ffffff f f fff
 29  a BBBBBB a  gg                                                                          dddd   ddddd dd   TTT
 ## legend

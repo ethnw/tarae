@@ -56,6 +56,9 @@ pub struct Session {
     pub code_review: Option<crate::codereview::CodeReview>,
     /// The review being opened is for the reviewer (`space v c`) — asked once it's open.
     pub review_ask: bool,
+    /// The review being opened is for the high-risk changes a bring waits on (its card's `h`, #196) — it
+    /// opens on the first one not looked at.
+    pub review_high: bool,
     /// The reviewer — a second Claude reviewing the code review's changes, apart from the chat's
     /// conversation (`reviewer.rs`): reading, or what it found last.
     pub reviewer: Option<crate::reviewer::Reviewer>,
@@ -210,6 +213,7 @@ impl Session {
             review: None,
             code_review: None,
             review_ask: false,
+            review_high: false,
             reviewer: None,
             sidebar: None,
             side_last: crate::sidebar::Mode::Files,
@@ -893,8 +897,8 @@ mod tests {
     }
 
     /// #7: the card up says how many wait behind it — stacked, queued in its chat, in sessions behind — and
-    /// `C-q` goes to the one that came first: the session behind's, its card up there, before the newer ones
-    /// up here; once it's the card up, `C-q` gives it the keys.
+    /// `C-q` gives the keys to the one up here (#198: this session's own first, though the one behind came
+    /// first), then goes to the session behind's, its card up there; once it's the card up, the keys.
     #[test]
     fn the_card_counts_what_waits_and_c_q_goes_to_it() {
         use crate::offer::{Offer, What};
@@ -917,23 +921,23 @@ mod tests {
         parser.process(&bytes);
         let s = parser.screen().contents();
         assert!(s.contains("Claude asks 2") && s.contains("1/2 here · 1 elsewhere"), "{s}");
-        // C-q with cards up here — but back's came first: to it, its card up there
+        // C-q with cards up here — back's came first, but this session's own go first (#198): the keys
         feed(&mut ed, "<C-q>");
-        assert_eq!(ed.session.id, back_id, "to the one that waited longest");
+        assert!(ed.card_keys && ed.session.id == 0, "this session's own first");
+        ed.offers.clear();
+        ed.card_keys = false;
+        // None up here: C-q goes to back's, its card up there
+        feed(&mut ed, "<C-q>");
+        assert_eq!(ed.session.id, back_id, "then the one that waited longest");
         assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some("Claude asks 1"));
         // C-q again: the keys
         feed(&mut ed, "<C-q>");
         assert!(ed.card_keys && ed.session.id == back_id);
-        ed.offers.clear();
-        ed.card_keys = false;
-        // None up here: C-q goes back to front's, the first of them up
-        feed(&mut ed, "<C-q>");
-        assert_eq!(ed.session.id, 0);
-        assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some("Claude asks 2"));
         // Nothing waits anywhere: said
         ed.offers.clear();
+        ed.card_keys = false;
         feed(&mut ed, "<C-q>");
-        assert_eq!(ed.session.id, 0);
+        assert_eq!(ed.session.id, back_id);
         assert!(ed.status.as_ref().is_some_and(|s| s.0.contains("no card waits")), "{:?}", ed.status);
     }
 

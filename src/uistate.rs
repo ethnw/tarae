@@ -269,7 +269,7 @@ impl Editor {
         let modal = self.picker.is_some() || self.prompt.is_some();
         let next = self.next_up();
         // `card_key`: held, every key is the front card's (`C-q` lets go); not held, `C-q` gives it them when
-        // it's the one that has waited longest
+        // it's the next up (`inbox::next_up`: this session's own first, then the oldest)
         let up = self.offers.first().filter(|o| !o.installing() && !modal);
         let held = up.is_some() && self.card_keys;
         if let Some(o) = up {

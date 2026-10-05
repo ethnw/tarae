@@ -134,23 +134,24 @@ fn the_inbox_is_every_sessions_waiting_things_oldest_first() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// `C-q` goes to the one that has waited longest, in any session — before the card up in front, when one
-/// behind came first; once it's the card up, `C-q` gives it the keys. #94's case: a card of tarae's parked in
-/// a session behind whose turn ended (`done`, its Claude idle) — `C-q` said "no card waits for you" while it
-/// waited there; now it goes to it. Nothing anywhere: said.
+/// `C-q` with nothing waiting in front goes to the one that has waited longest, in any session; once it's
+/// the card up, `C-q` gives it the keys. #94's case: a card of tarae's parked in a session behind whose turn
+/// ended (`done`, its Claude idle) — `C-q` said "no card waits for you" while it waited there; now it goes to
+/// it. Nothing anywhere: said.
 #[test]
 fn c_q_goes_to_the_oldest_in_any_session() {
     let (mut ed, dir, back, third) = three("c-q");
-    up(&mut ed, claudes(1, 5));
     park(&mut ed, back, claudes(2, 60));
     // (#94: tarae's own card, parked in a session whose turn ended behind)
     park(&mut ed, third, tarae(30));
     session(&mut ed, third).turn_end = Some((Instant::now(), Ok(())));
     // The status line counts all of them, every session's
     let rows = screen(&mut ed, 160, 30);
-    assert!(rows[29].contains("▲3 waiting"), "{}", rows[29]);
-    // C-q: to back's (the oldest), its card up — not the keys to the front's
+    assert!(rows[29].contains("▲2 waiting"), "{}", rows[29]);
+    // C-q: to back's (the oldest), its card up
     feed(&mut ed, "<C-q>");
+    // (front's comes meanwhile, the newest: it waits behind)
+    park(&mut ed, 0, claudes(1, 5));
     assert_eq!(ed.session.id, back, "the one that waited longest");
     assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some("Claude asks 2"));
     assert!(!ed.card_keys);
@@ -177,6 +178,27 @@ fn c_q_goes_to_the_oldest_in_any_session() {
     ed.offers.clear();
     feed(&mut ed, "<C-q>");
     assert!(ed.status.as_ref().is_some_and(|s| s.0.contains("no card waits")), "{:?}", ed.status);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// #198: `C-q` in a session with a card of its own takes that one first — an older one in another session
+/// waits (answering here meant `n` to the other first). Then the rest by age. The list keeps its order: the
+/// oldest first, whatever session is in front.
+#[test]
+fn c_q_takes_this_sessions_own_card_first() {
+    let (mut ed, dir, back, _) = three("own");
+    park(&mut ed, back, claudes(1, 600));
+    up(&mut ed, claudes(2, 5));
+    assert_eq!(ed.inbox()[0].session_id(), back, "the list: oldest first");
+    feed(&mut ed, "<C-q>");
+    assert_eq!(ed.session.id, 0, "stays here");
+    assert!(ed.card_keys, "this session's card has the keys");
+    assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some("Claude asks 2"));
+    feed(&mut ed, "n");
+    assert!(ed.offers.is_empty() && !ed.card_keys);
+    // Answered: then the rest, by age
+    feed(&mut ed, "<C-q>");
+    assert_eq!((ed.session.id, ed.offers.first().map(|o| o.title.as_str())), (back, Some("Claude asks 1")));
     std::fs::remove_dir_all(&dir).ok();
 }
 
