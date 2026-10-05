@@ -13,6 +13,9 @@
 //! - Claude is told on the next message (its memory still has its edits).
 //! - Review at the end (`edits.rs`): edits Claude makes unseen keep only the text before; what it is after is
 //!   read when the turn ends (`gather`), and the turn opens as a review (`codereview::start_turn`).
+//! - A command of Claude's that isn't a check: what it changed in the checkout joins the turn the same way
+//!   (`record_run`, `snapshot.rs`) — a file it deleted comes back with undo, one that isn't text by its git
+//!   blob.
 //! - Kept on disk per project (`$XDG_STATE_HOME/tarae/turns/<project hash>.json` — the newest `KEEP`, and
 //!   the turn in flight), written on a worker at each change: a new tarae (`:restart`, a crash) still has
 //!   them. A turn cut short comes back as one of its own, its files as they are now.
@@ -26,16 +29,27 @@ use crate::editor::Editor;
 use crate::transaction::{Change, Transaction};
 
 /// One file a turn changed.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Touched {
     pub path: PathBuf,
     /// Before Claude's first change this turn — None: the turn created the file.
     pub before: Option<Rope>,
     /// After its latest.
     pub after: Rope,
-    /// Written without the user seeing it (review at the end, `edits.rs`) — `after` is read from disk when
-    /// the turn ends, and the turn is reviewed then.
+    /// Written without the user seeing it (review at the end, `edits.rs`; a run's change, `snapshot.rs`) —
+    /// `after` is read from disk when the turn ends, and the turn is reviewed then.
     pub unseen: bool,
+    /// After it there's no file (a run deleted it): undo writes it again, redo deletes it.
+    pub gone: bool,
+    /// Not text (a run's change): what it was and is as git's blobs — taken back by writing a blob out.
+    pub bytes: Option<Bytes>,
+}
+
+/// A file a run changed that isn't text, by its git blobs (None: no file).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Bytes {
+    pub before: Option<String>,
+    pub after: Option<String>,
 }
 
 /// One turn's changes.
@@ -49,6 +63,17 @@ pub struct Checkpoint {
     /// v q`), or a git review showing all its files — not one written unseen whose review a later turn's
     /// replaced (`space v t` says so).
     pub seen: bool,
+}
+
+impl Touched {
+    /// It's a change (a file changed and changed back isn't).
+    fn changed(&self) -> bool {
+        match (&self.bytes, &self.before) {
+            (Some(b), _) => b.before != b.after,
+            (None, None) => true,
+            (None, Some(b)) => *b != self.after || self.gone,
+        }
+    }
 }
 
 impl Checkpoint {
@@ -87,7 +112,7 @@ pub fn record(ed: &mut Editor, id: crate::document::DocId, before: Option<Rope>)
     match turn.iter_mut().find(|t| t.path == path) {
         Some(t) => t.after = after,
         None => {
-            turn.push(Touched { path, before, after, unseen: false });
+            turn.push(Touched { path, before, after, ..Default::default() });
             keep(ed);
         }
     }
@@ -111,7 +136,7 @@ pub fn record_unseen(
         }
         None => {
             let after = before.clone().unwrap_or_default();
-            turn.push(Touched { path, before, after, unseen: true });
+            turn.push(Touched { path, before, after, unseen: true, ..Default::default() });
             keep_then(ed, then);
         }
     }
@@ -131,7 +156,8 @@ pub fn record_unseen_all(
             Some(t) if t.unseen => {}
             Some(t) => (t.unseen, new) = (true, true),
             None => {
-                turn.push(Touched { path, before: Some(before.clone()), after: before, unseen: true });
+                let after = before.clone();
+                turn.push(Touched { path, before: Some(before), after, unseen: true, ..Default::default() });
                 new = true;
             }
         }
@@ -153,10 +179,59 @@ pub fn record_all(
     for (path, before, after) in files {
         match turn.iter_mut().find(|t| t.path == path) {
             Some(t) => t.after = after,
-            None => turn.push(Touched { path, before: Some(before), after, unseen: false }),
+            None => turn.push(Touched { path, before: Some(before), after, ..Default::default() }),
         }
     }
     keep_then(ed, then);
+}
+
+/// What a run of Claude's changed in the checkout (`snapshot.rs`) joins the turn, as written unseen: each
+/// file's text before this turn kept the first time (one the turn touched already keeps its own), a deleted
+/// one marked gone, one that isn't text kept by its blobs. What they are after is read when the turn ends.
+pub fn record_run(ed: &mut Editor, changes: Vec<crate::snapshot::Change>) {
+    add_run(&mut ed.session.checkpoints.turn, changes);
+    keep(ed);
+}
+
+/// `record_run` when the turn it ran in is over (stopped meanwhile): a checkpoint of its own, called
+/// `question`. The files row (`checkpoint::finish`).
+pub fn record_run_alone(
+    ed: &mut Editor,
+    question: &str,
+    changes: Vec<crate::snapshot::Change>,
+) -> Option<String> {
+    let mut files = Vec::new();
+    add_run(&mut files, changes);
+    finish(ed, question, files)
+}
+
+fn add_run(turn: &mut Vec<Touched>, changes: Vec<crate::snapshot::Change>) {
+    for c in changes {
+        let text = |b: &Option<crate::snapshot::Blob>| {
+            b.as_ref().and_then(|b| b.text.as_deref()).map(Rope::from_str).unwrap_or_default()
+        };
+        let blobs = Bytes {
+            before: c.before.as_ref().map(|b| b.id.clone()),
+            after: c.after.as_ref().map(|b| b.id.clone()),
+        };
+        let (after, gone, is_text) = (text(&c.after), c.after.is_none(), c.text());
+        match turn.iter_mut().find(|t| t.path == c.path) {
+            Some(t) => {
+                (t.unseen, t.gone, t.after) = (true, gone, after);
+                // (its blob before stays this turn's first; one that was text before the run: from the run's)
+                match (&mut t.bytes, is_text) {
+                    (Some(b), _) => b.after = blobs.after,
+                    (None, false) => t.bytes = Some(blobs),
+                    (None, true) => {}
+                }
+            }
+            None => {
+                let before = c.before.as_ref().map(|_| text(&c.before));
+                let bytes = (!is_text).then_some(blobs);
+                turn.push(Touched { path: c.path, before, after, unseen: true, gone, bytes });
+            }
+        }
+    }
 }
 
 /// A change of its own accepted in document `id` (a `space i` answer): one step.
@@ -170,7 +245,7 @@ pub fn single(ed: &mut Editor, id: crate::document::DocId, before: Rope, what: &
         return;
     }
     let question = what.lines().next().unwrap_or_default().to_string();
-    let files = vec![Touched { path, before: Some(before), after, unseen: false }];
+    let files = vec![Touched { path, before: Some(before), after, ..Default::default() }];
     ed.session.checkpoints.list.push(Checkpoint::new(question, files));
     keep(ed);
 }
@@ -197,26 +272,27 @@ pub fn gather(ed: &mut Editor, question: &str) -> bool {
     let paths: Vec<PathBuf> = files.iter().filter(|t| t.unseen).map(|t| t.path.clone()).collect();
     ed.events.jobs().spawn(move || {
         // (gone: nothing in it now · unreadable: as it was kept) — with its fingerprint, for open buffers
-        let now: Vec<(Option<Rope>, Option<crate::disk::Stamp>)> = paths
+        let now: Vec<(Option<Rope>, Option<crate::disk::Stamp>, bool)> = paths
             .iter()
             .map(|p| {
                 let stamp = crate::disk::stamp(p);
-                let text = match std::fs::read(p) {
-                    Ok(b) => String::from_utf8(b).ok().map(|s| Rope::from_str(&s)),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(Rope::new()),
-                    Err(_) => None,
+                let (text, gone) = match std::fs::read(p) {
+                    Ok(b) => (String::from_utf8(b).ok().map(|s| Rope::from_str(&s)), false),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Some(Rope::new()), true),
+                    Err(_) => (None, false),
                 };
-                (text, stamp)
+                (text, stamp, gone)
             })
             .collect();
         move |ed: &mut Editor| {
             let mut files = files;
-            for (p, (now, stamp)) in paths.iter().zip(now) {
+            for (p, (now, stamp, gone)) in paths.iter().zip(now) {
                 let Some(now) = now else { continue };
                 // An open buffer shows what Claude wrote before the review diffs it
                 ed.disk_take(p, &now, stamp);
-                if let Some(t) = files.iter_mut().find(|t| &t.path == p) {
-                    t.after = now;
+                // (one that isn't text keeps its blobs: `after` says nothing of it)
+                if let Some(t) = files.iter_mut().find(|t| &t.path == p && t.bytes.is_none()) {
+                    (t.after, t.gone) = (now, gone);
                 }
             }
             ed.session.checkpoints.gathering = false;
@@ -230,8 +306,7 @@ pub fn gather(ed: &mut Editor, question: &str) -> bool {
 /// The turn's `files` as a checkpoint — the files row (`lib.rs, sub.rs` · `4 files`), None if none changed.
 fn finish(ed: &mut Editor, question: &str, files: Vec<Touched>) -> Option<String> {
     // (a file changed and changed back isn't a change)
-    let files: Vec<Touched> =
-        files.into_iter().filter(|t| t.before.as_ref().is_none_or(|b| *b != t.after)).collect();
+    let files: Vec<Touched> = files.into_iter().filter(Touched::changed).collect();
     if files.is_empty() {
         // (the turn kept as in flight goes)
         keep(ed);
@@ -271,9 +346,17 @@ pub fn step(ed: &mut Editor, undo: bool) -> Result<(), String> {
     let mut changed = Vec::new();
     let mut kept = 0;
     let mut problems = Vec::new();
+    let mut blobs = Vec::new();
     for f in &cp.files {
-        let (from, to) =
-            if undo { (Some(&f.after), f.before.as_ref()) } else { (f.before.as_ref(), Some(&f.after)) };
+        // (not text: its blob written out on a worker — said there if it can't be)
+        if let Some(b) = &f.bytes {
+            let (expect, put) = if undo { (&b.after, &b.before) } else { (&b.before, &b.after) };
+            blobs.push((f.path.clone(), expect.clone(), put.clone()));
+            changed.push(crate::chat::shown(&ed.session.root, &f.path));
+            continue;
+        }
+        let after = (!f.gone).then_some(&f.after);
+        let (from, to) = if undo { (after, f.before.as_ref()) } else { (f.before.as_ref(), after) };
         match file(ed, &f.path, from, to) {
             Ok((true, k)) => {
                 changed.push(crate::chat::shown(&ed.session.root, &f.path));
@@ -285,6 +368,7 @@ pub fn step(ed: &mut Editor, undo: bool) -> Result<(), String> {
     }
     ed.session.checkpoints.list[i].undone = undo;
     keep(ed);
+    put_blobs(ed, blobs);
     let what = if undo { "undid" } else { "brought back" };
     let files = match changed.as_slice() {
         [one] => one.clone(),
@@ -317,6 +401,26 @@ pub fn step(ed: &mut Editor, undo: bool) -> Result<(), String> {
         ed.set_warning(format!("{msg} · {}", problems.join("; ")));
     }
     Ok(())
+}
+
+/// Files that aren't text, each `(path, what it should be now, what it goes to)` as git's blobs (None: no
+/// file) — written out on a worker; one changed since is left as it is, and said.
+fn put_blobs(ed: &mut Editor, blobs: Vec<(PathBuf, Option<String>, Option<String>)>) {
+    if blobs.is_empty() {
+        return;
+    }
+    let root = ed.session.root.clone();
+    ed.events.jobs().spawn(move || {
+        let problems: Vec<String> = blobs
+            .iter()
+            .filter_map(|(p, now, to)| crate::snapshot::put(&root, p, now.as_deref(), to.as_deref()).err())
+            .collect();
+        move |ed: &mut Editor| {
+            if !problems.is_empty() {
+                ed.set_warning(format!("not taken back: {}", problems.join("; ")));
+            }
+        }
+    });
 }
 
 /// The question, short enough for a toast (`src/sub.rs 새 파일에 sub(a…`).
@@ -369,6 +473,10 @@ fn file(
     // The disk matches again (unsaved edits of the user's stay unsaved)
     if clean {
         let id = ed.doc().id;
+        // (a file a run deleted, with its folder: the folder first)
+        if let Some(dir) = path.parent().filter(|d| !d.exists()) {
+            std::fs::create_dir_all(dir).map_err(|e| format!("{shown}: {e}"))?;
+        }
         ed.flush_saves(); // (written here — a background save of it finishes first)
         ed.doc_mut().save().map_err(|e| format!("{shown}: {e:#}"))?;
         ed.lsp_did_save(id);
@@ -409,16 +517,22 @@ pub fn hold_saves() -> std::sync::MutexGuard<'static, ()> {
 }
 
 fn touched_json(t: &Touched) -> Value {
+    let bytes = t.bytes.as_ref().map(|b| json!({ "before": b.before, "after": b.after }));
     json!({ "path": t.path, "before": t.before.as_ref().map(Rope::to_string), "after": t.after.to_string(),
-            "unseen": t.unseen })
+            "unseen": t.unseen, "gone": t.gone, "bytes": bytes })
 }
 
 fn touched_of(v: &Value) -> Option<Touched> {
+    let blob = |b: &Value| b.as_str().map(String::from);
     Some(Touched {
         path: PathBuf::from(v["path"].as_str()?),
         before: v["before"].as_str().map(Rope::from_str),
         after: Rope::from_str(v["after"].as_str()?),
         unseen: v["unseen"].as_bool().unwrap_or(false),
+        gone: v["gone"].as_bool().unwrap_or(false),
+        bytes: v["bytes"]
+            .is_object()
+            .then(|| Bytes { before: blob(&v["bytes"]["before"]), after: blob(&v["bytes"]["after"]) }),
     })
 }
 
@@ -522,19 +636,19 @@ pub fn restore(ed: &mut Editor) {
         let back = dir.clone();
         let mut s = load(&dir, &root);
         let mut cut = std::mem::take(&mut s.turn);
-        for t in &mut cut {
+        for t in cut.iter_mut().filter(|t| t.bytes.is_none()) {
             // (gone: nothing in it now · unreadable: as it was kept)
             match std::fs::read(&t.path) {
                 Ok(b) => {
                     if let Ok(now) = String::from_utf8(b) {
-                        t.after = Rope::from_str(&now);
+                        (t.after, t.gone) = (Rope::from_str(&now), false);
                     }
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => t.after = Rope::new(),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (t.after, t.gone) = (Rope::new(), true),
                 Err(_) => {}
             }
         }
-        cut.retain(|t| t.before.as_ref().is_none_or(|b| *b != t.after));
+        cut.retain(Touched::changed);
         if !cut.is_empty() {
             let question = if s.question.is_empty() { CUT_SHORT.to_string() } else { s.question.clone() };
             s.list.push(Checkpoint::new(question, cut));

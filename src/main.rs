@@ -91,6 +91,7 @@ mod sidebar;
 mod signature;
 mod sinceyes;
 mod sizes;
+mod snapshot;
 mod sorting;
 mod spawn;
 mod split;

@@ -331,6 +331,9 @@ pub struct TestRun {
     pub key: Option<String>,
     pub joined: Vec<crate::queued::Joined>,
     pub queued: Option<crate::queued::Queued>,
+    /// Claude's: the checkout as it found it — what it changed joins the turn at its end (`snapshot.rs`; its
+    /// line's next run waits for that).
+    pub snap: Option<crate::snapshot::Before>,
 }
 
 impl TestRun {
@@ -400,6 +403,7 @@ impl TestRun {
             key: None,
             joined: Vec::new(),
             queued: None,
+            snap: None,
         }
     }
 
@@ -777,8 +781,9 @@ impl Editor {
                     RunState::Failed(Some(c)) => format!("failed, exit {c}"),
                     RunState::Failed(None) | RunState::Running => "killed".to_string(),
                 });
-                // (what waits for the pane goes next — once this one's end is told)
-                if !ed.session.runs_next.is_empty() {
+                // (what waits for the pane goes next — once this one's end is told; once what it changed is
+                // taken, for Claude's — `tools::tests_done`)
+                if !ed.session.runs_next.is_empty() && !(r.snap.is_some() && r.chat.is_some()) {
                     let next = crate::event::Event::Job(Box::new(crate::queued::run_next));
                     let _ = ed.events.sender().send(next);
                 }
@@ -810,6 +815,7 @@ impl Editor {
             key: None,
             joined: Vec::new(),
             queued: None,
+            snap: None,
         });
     }
 

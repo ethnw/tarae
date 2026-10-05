@@ -7,19 +7,26 @@
 //! test outside the sandbox ten times in an hour, a small edit between each, and each time the whole test was
 //! to be read again). Never the content of a file outside the project: a script there is named, not shown.
 //!
+//! "The same command" is what runs (`key`, from a day of answering these, #158): the program and its
+//! arguments before the first pipe — what's after it only filters what's shown — and for a script, the
+//! script, whatever its arguments. A script that runs the project's code (`cargo test` inside it, a binary
+//! built here) isn't all that runs: the card shows the project's changes too.
+//!
 //! At each `y` (`tools::run_answer`) a snapshot is kept with the conversation (`Chat.outside_yes`, gone with
-//! it): for scripts, their text; for the rest, the project's working tree as a git tree — `git add -A` into a
-//! temporary copy of the index (only what changed since the index is hashed; the real index isn't touched,
-//! no hook runs), then `write-tree`. At the next ask the tree is taken again and `git diff <then> <now> -- .`
-//! from the project's root is what changed. Both on workers, before the run starts and before the card.
+//! it): for scripts, their text (and the project's tree, as above); for the rest, the project's working tree
+//! as a git tree (`snapshot::tree`: the real index isn't touched, no hook runs). At the next ask the tree is
+//! taken again and `git diff <then> <now> -- .` from the project's root is what changed. Both on workers,
+//! before the run starts and before the card.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-/// A yes to a command outside the sandbox: what it was, where it ran, when, and what it ran as it was then.
+/// A yes to a command outside the sandbox: what it was, what made it the same run (`key`), where it ran,
+/// when, and what it ran as it was then.
 #[derive(Clone, Debug)]
 pub struct Yes {
     pub cmd: String,
+    pub key: String,
     pub cwd: PathBuf,
     pub at: SystemTime,
     pub kept: Kept,
@@ -29,8 +36,9 @@ pub struct Yes {
 pub enum Kept {
     /// The project's tree at the yes (a git tree's id).
     Tree(String),
-    /// The scripts it runs as they were: real path, text (None: not text, or not there).
-    Scripts(Vec<(PathBuf, Option<String>)>),
+    /// The scripts it runs as they were: real path, text (None: not text, or not there) — and, when one of
+    /// them runs the project's code (`runs_project`), the project's tree (Err: why it couldn't be taken).
+    Scripts { scripts: Vec<(PathBuf, Option<String>)>, project: Option<Result<String, String>> },
     /// Not kept, and why (not a git checkout, git failed) — the next card says it can't tell.
     Not(String),
 }
@@ -40,6 +48,8 @@ pub enum Kept {
 pub struct Since {
     /// When the yes was (`01:12`).
     pub at: String,
+    /// The line said yes to, when it isn't this one (`key` made them one run).
+    pub was: Option<String>,
     pub changed: Changed,
 }
 
@@ -59,8 +69,45 @@ pub enum Changed {
 /// A card shows at most this many changed lines — the rest are counted (read them before you say yes).
 const LINES_MAX: usize = 400;
 
-/// A temporary index's name is unique per process with this.
-static INDEX_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// What makes two asks one run: what runs — the parts before the first pipe (`cd`s and `NAME=value`s
+/// included; `cargo test x | grep y` and `cargo test x | tail` are one, `cargo test z` another) — and for
+/// a head that runs one script, that script whatever its arguments (`sh x.sh a` and `sh x.sh b`: its diff
+/// is what changed). A line the shell reader can't read is its whole self.
+pub fn key(cmd: &str) -> String {
+    use crate::readonly::Part;
+    let Some(head) = crate::readonly::before_pipe(cmd) else { return cmd.trim().to_string() };
+    // (words apart by a character no word has: `a "b c"` isn't `a b c`)
+    let shown: Vec<String> = head
+        .iter()
+        .map(|p| match p {
+            Part::Cd(d) => format!("cd\u{1f}{d}"),
+            Part::Cmd(w) => w.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join("\u{1f}"),
+        })
+        .collect();
+    let commands: Vec<&Vec<crate::readonly::Word>> = head
+        .iter()
+        .filter_map(|p| match p {
+            Part::Cmd(w) => Some(w),
+            Part::Cd(_) => None,
+        })
+        .collect();
+    let line: Vec<String> = head
+        .iter()
+        .map(|p| match p {
+            Part::Cd(d) => format!("cd '{d}'"),
+            Part::Cmd(w) => w.iter().map(|w| format!("'{}'", w.text)).collect::<Vec<_>>().join(" "),
+        })
+        .collect();
+    if let ([one], [script]) = (&commands[..], &crate::tools::scripts_run(&line.join(" && "))[..]) {
+        let words: Vec<String> = one.iter().map(|w| w.text.clone()).collect();
+        let program = match crate::readonly::env_words(&words) {
+            Some((_, rest)) => rest.first().cloned(),
+            None => words.first().cloned(),
+        };
+        return format!("script\u{1f}{}\u{1f}{}", program.unwrap_or_default(), script.display());
+    }
+    shown.join("\u{1e}")
+}
 
 /// What `cmd` (run in `cwd`, in the project at `root`) runs, as it is now — on a worker.
 pub fn take(root: &Path, cwd: &Path, cmd: &str) -> Kept {
@@ -71,9 +118,11 @@ pub fn take(root: &Path, cwd: &Path, cmd: &str) -> Kept {
             let text = std::fs::read(&path).ok().and_then(|b| String::from_utf8(b).ok());
             (path, text)
         };
-        return Kept::Scripts(scripts.iter().map(read).collect());
+        let scripts: Vec<(PathBuf, Option<String>)> = scripts.iter().map(read).collect();
+        let project = runs_project(root, &scripts).then(|| crate::snapshot::tree(root));
+        return Kept::Scripts { scripts, project };
     }
-    match tree(root) {
+    match crate::snapshot::tree(root) {
         Ok(id) => Kept::Tree(id),
         Err(e) => Kept::Not(e),
     }
@@ -86,16 +135,145 @@ impl Yes {
             (Kept::Not(why), _) => Changed::Unknown(format!("what it ran then wasn't kept ({why})")),
             (_, Kept::Not(why)) => Changed::Unknown(why),
             (Kept::Tree(then), Kept::Tree(now)) if *then == now => Changed::Nothing,
-            (Kept::Tree(then), Kept::Tree(now)) => match diff(root, then, &now) {
+            (Kept::Tree(then), Kept::Tree(now)) => match diff(root, then, &now, &[]) {
                 Ok(lines) if lines.is_empty() => Changed::Nothing,
                 Ok(lines) => Changed::Lines { of: "the project".into(), lines },
                 Err(e) => Changed::Unknown(e),
             },
-            (Kept::Scripts(then), Kept::Scripts(now)) => scripts_changed(root, then, &now),
+            (Kept::Scripts { scripts: then, project: kept }, Kept::Scripts { scripts: now, project }) => {
+                let own = scripts_changed(root, then, &now);
+                match project {
+                    Some(project) => with_project(root, own, &now, kept.as_ref(), project),
+                    None => own,
+                }
+            }
             // (it runs a script now and didn't then, or the other way: not the same command's files)
             _ => Changed::Unknown("it runs other files than it did".into()),
         };
-        Since { at: crate::log::clock(self.at), changed }
+        let was = (self.cmd.trim() != cmd.trim()).then(|| self.cmd.clone());
+        Since { at: crate::log::clock(self.at), was, changed }
+    }
+}
+
+/// Programs that build or test what's in the folder they run in — a script calling one runs the project's
+/// code.
+const BUILDERS: [&str; 22] = [
+    "cargo",
+    "rustc",
+    "go",
+    "make",
+    "gmake",
+    "just",
+    "npm",
+    "npx",
+    "pnpm",
+    "yarn",
+    "pytest",
+    "tox",
+    "nox",
+    "gradle",
+    "mvn",
+    "dotnet",
+    "swift",
+    "zig",
+    "cmake",
+    "ninja",
+    "bazel",
+    "xcodebuild",
+];
+
+/// Whether one of `scripts` runs the project at `root`'s code — so it isn't all that runs: a program in the
+/// project that isn't text (a binary built here), or a script with a line that builds or tests (`BUILDERS`),
+/// runs a file by a relative path (`./x`, `target/debug/t`), or hands one to an interpreter (`python3 x.py`).
+fn runs_project(root: &Path, scripts: &[(PathBuf, Option<String>)]) -> bool {
+    scripts.iter().any(|(path, text)| match text {
+        None => path.starts_with(root) && path.is_file(),
+        Some(t) => t.lines().any(runs_project_line),
+    })
+}
+
+/// One line of a script: whether it runs the project's code (`runs_project`) — read by words, as a shell
+/// would split it at `;` `&` `|` and brackets; a comment says nothing.
+fn runs_project_line(line: &str) -> bool {
+    let line = line.trim();
+    if line.starts_with('#') {
+        return false;
+    }
+    let lead = |w: &&str| {
+        (w.contains('=') && !w.starts_with('-'))
+            || matches!(
+                *w,
+                "exec"
+                    | "time"
+                    | "env"
+                    | "nice"
+                    | "nohup"
+                    | "command"
+                    | "then"
+                    | "do"
+                    | "else"
+                    | "if"
+                    | "while"
+                    | "until"
+                    | "!"
+                    | "{"
+            )
+    };
+    line.split([';', '|', '&', '(', ')', '`']).any(|part| {
+        let mut words = part.split_whitespace().map(|w| w.trim_matches(['"', '\''])).skip_while(lead);
+        let Some(program) = words.next() else { return false };
+        let name = program.rsplit('/').next().unwrap_or(program);
+        let relative = |w: &str| !w.starts_with(['/', '-', '$', '~']) && w.contains(['/', '.']);
+        BUILDERS.contains(&name)
+            || (program.contains('/') && relative(program))
+            || (crate::tools::runner(name)
+                && !BUILDERS.contains(&name)
+                && words.find(|w| !w.starts_with('-')).is_some_and(relative))
+    })
+}
+
+/// A script's own changes (`own`) and, as it runs the project's code, the project's since tree `kept` (None:
+/// it didn't run the project's code then) — the scripts themselves left out of the project's diff.
+fn with_project(
+    root: &Path,
+    own: Changed,
+    scripts: &[(PathBuf, Option<String>)],
+    kept: Option<&Result<String, String>>,
+    now: Result<String, String>,
+) -> Changed {
+    let inside: Vec<&PathBuf> = scripts.iter().map(|(p, _)| p).filter(|p| p.starts_with(root)).collect();
+    let names: Vec<String> = scripts.iter().map(|(p, _)| crate::chat::shown(root, p)).collect();
+    let names = names.join(", ");
+    let exclude: Vec<String> = inside
+        .iter()
+        .filter_map(|p| p.strip_prefix(root).ok())
+        .map(|p| format!(":(exclude){}", p.display()))
+        .collect();
+    let project = match (kept, now) {
+        (Some(Ok(then)), Ok(now)) if *then == now => Ok(Vec::new()),
+        (Some(Ok(then)), Ok(now)) => diff(root, then, &now, &exclude),
+        (Some(Err(e)), _) => Err(e.clone()),
+        (_, Err(e)) => Err(e),
+        (None, _) => Err("it didn't run the project's code then, so the project wasn't kept".into()),
+    };
+    match (own, project) {
+        (Changed::Unknown(why), _) => Changed::Unknown(why),
+        (Changed::Nothing, Ok(p)) if p.is_empty() => Changed::Nothing,
+        (Changed::Nothing, Ok(lines)) => {
+            Changed::Lines { of: format!("the project {names} runs ({names} itself unchanged)"), lines }
+        }
+        (Changed::Nothing, Err(e)) => Changed::Unknown(format!(
+            "{names} is unchanged, but it runs the project's code, and what changed there can't be told ({e})"
+        )),
+        (Changed::Lines { of, mut lines }, Err(e)) => {
+            lines.push(format!("and it runs the project's code: what changed there can't be told ({e})"));
+            Changed::Lines { of, lines: capped(lines) }
+        }
+        (Changed::Lines { of, lines }, Ok(p)) if p.is_empty() => Changed::Lines { of, lines },
+        (Changed::Lines { of, mut lines }, Ok(p)) => {
+            lines.extend(p);
+            Changed::Lines { of: format!("{of}, and the project it runs"), lines: capped(lines) }
+        }
     }
 }
 
@@ -161,50 +339,24 @@ fn capped(mut lines: Vec<String>) -> Vec<String> {
     lines
 }
 
-/// git as tarae runs it here: no hooks, the index `index` if given.
-fn git(root: &Path, args: &[&str], index: Option<&Path>) -> Result<String, String> {
-    #[cfg(test)]
-    crate::gitmenu::not_in_this_repository(root, args);
-    let mut cmd = std::process::Command::new("git");
-    crate::dap::setsid(&mut cmd);
-    cmd.arg("-C").arg(root).args(crate::gitmenu::NO_HOOKS).args(args);
-    cmd.env("GIT_TERMINAL_PROMPT", "0").stdin(std::process::Stdio::null());
-    if let Some(i) = index {
-        cmd.env("GIT_INDEX_FILE", i);
-    }
-    let out = cmd.output().map_err(|e| format!("git: {e}"))?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        return Err(err.lines().find(|l| !l.trim().is_empty()).unwrap_or("git failed").to_string());
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-}
-
-/// The project's working tree as a git tree (what `git add -A` would stage, ignored files left out) —
-/// staged into a copy of the index in the temp folder, so the real one isn't touched.
-fn tree(root: &Path) -> Result<String, String> {
-    let dir = git(root, &["rev-parse", "--absolute-git-dir"], None)
-        .map_err(|_| "not a git checkout, so what changed can't be told".to_string())?;
-    let seq = INDEX_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let index = std::env::temp_dir().join(format!("tarae-yes-{}-{seq}.index", std::process::id()));
-    // (from the checkout's own index: only what changed since it is hashed again)
-    if let Err(e) = std::fs::copy(Path::new(dir.trim()).join("index"), &index)
-        && e.kind() != std::io::ErrorKind::NotFound
-    {
-        return Err(format!("git's index: {e}"));
-    }
-    let id = git(root, &["add", "-A", "--", "."], Some(&index))
-        .and_then(|_| git(root, &["write-tree"], Some(&index)));
-    std::fs::remove_file(&index).ok();
-    Ok(id?.trim().to_string())
-}
-
-/// What changed from tree `then` to `now` in the project (paths from its root): each file's path, then its
-/// hunks. A file a card can't show as it is (control characters, bidi marks) is named, not shown.
-fn diff(root: &Path, then: &str, now: &str) -> Result<Vec<String>, String> {
-    let args =
-        ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--relative", "-U2", then, now, "--", "."];
-    let text = git(root, &args, None)?;
+/// What changed from tree `then` to `now` in the project (paths from its root), but the pathspecs `exclude`:
+/// each file's path, then its hunks. A file a card can't show as it is (control characters, bidi marks) is
+/// named, not shown.
+fn diff(root: &Path, then: &str, now: &str, exclude: &[String]) -> Result<Vec<String>, String> {
+    let mut args = vec![
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--relative",
+        "-U2",
+        then,
+        now,
+        "--",
+        ".",
+    ];
+    args.extend(exclude.iter().map(String::as_str));
+    let text = crate::snapshot::git(root, &args, None)?;
     let mut out = Vec::new();
     let mut file: Vec<String> = Vec::new();
     let flush = |file: &mut Vec<String>, out: &mut Vec<String>| {
@@ -256,20 +408,29 @@ fn diff(root: &Path, then: &str, now: &str) -> Result<Vec<String>, String> {
 }
 
 impl Since {
+    /// ` to `sh x.sh one`` — the line said yes to, when it isn't this one.
+    fn to(&self) -> String {
+        self.was.as_ref().map(|w| format!(" to `{w}`")).unwrap_or_default()
+    }
+
     /// Its part of the card: its lines, and which of them are a diff's (drawn in the diff's colours).
     pub fn card_lines(&self) -> (Vec<String>, std::ops::Range<usize>) {
         match &self.changed {
             Changed::Nothing => {
-                (vec![format!("Unchanged since your y at {} — the same as it ran then.", self.at)], 0..0)
+                let same = match self.was {
+                    None => "the same as it ran then",
+                    Some(_) => "what it runs is as it was then",
+                };
+                (vec![format!("Unchanged since your y at {}{} — {same}.", self.at, self.to())], 0..0)
             }
             Changed::Lines { of, lines } => {
-                let mut v = vec![format!("Since your y at {}, changed in {of}:", self.at)];
+                let mut v = vec![format!("Since your y at {}{}, changed in {of}:", self.at, self.to())];
                 v.extend(lines.iter().cloned());
                 let n = v.len();
                 (v, 1..n)
             }
             Changed::Unknown(why) => {
-                (vec![format!("You said y to it at {} — {why}; read it as new.", self.at)], 0..0)
+                (vec![format!("You said y to it at {}{} — {why}; read it as new.", self.at, self.to())], 0..0)
             }
         }
     }

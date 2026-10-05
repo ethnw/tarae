@@ -288,6 +288,17 @@ removed. `space U` (`:redo-turn`) brings the turn back. Press `space u` again to
 
 An accepted `space i` answer is a step of its own too: `space u` takes the latest back, whichever it was.
 
+A command Claude runs is part of its turn too, checks and its tests included (a test that deletes files is
+what this is for), unless it only reads (`grep`, `ls`). Right before it starts, tarae takes the checkout as it is (a git tree in its own index, in the
+checkout's git folder: your index isn't touched, no hook runs). When the command ends, tarae compares the
+checkout with that. Whatever the command changed, made or deleted joins the turn like Claude's edits. The
+turn ends in its review, `space u` brings deleted files back and removes the ones it made, and Claude's
+report of the run names them. Files that aren't text come back from git's copy, but only when they're still
+as the command left them. Not covered: ignored files (build output, `target/`), links and submodules, and
+more than 5,000 new untracked files at once (the report says how many). An ignored file or folder the command
+deleted (`.env.local`, `target/`) is named in Claude's report as not kept, though nothing brings it back. Taking the first snapshot of a
+checkout with that many costs about 90 s and 800 MB of git objects at 200,000 files.
+
 Your own edits since the turn stay. Only Claude's changes are taken out. Where you edited on or right next to
 one of Claude's changes, that change is left alone too, and the toast says how many were left. Each file
 changes as one step, so `u` in that file takes the undo back. Files that had no unsaved edits are saved
@@ -523,15 +534,19 @@ What Claude runs, with `run` and `run_tests`, runs in a sandbox (macOS: Seatbelt
   (`unix_socket`): the card names the file, says everything else stays in the sandbox, and offers `y` this
   run or `a` this conversation
 - **Since your last y.** When Claude asks again for a command you already said `y` to outside the sandbox in
-  this conversation (the same command, from the same folder), its card says when that was and shows only what
-  changed since in what the command runs. For a command that runs the project's code (`cargo test … parser::`)
+  this conversation (the same run, from the same folder), its card says when that was and shows only what
+  changed since in what the command runs. The same run is what runs: the program and its arguments before the
+  first `|` (`cargo test parser | tail` and `cargo test parser | grep FAIL` are one), and for a script, the
+  script whatever its arguments (`sh check.sh one`, `sh check.sh two`). When the line isn't the one you said
+  yes to, the card names that one. For a command that runs the project's code (`cargo test … parser::`)
   that's the project's changed hunks, the lines around each change dim, what came and went in the diff's
   colours. For a script (`sh check.sh`, `python3 x.py`) it's the script's own diff, shown in place of the whole
-  script. Nothing changed: `Unchanged since your y at 01:12`. It never answers for you. The card waits for `y`
-  as before, but you only read what's new. Nothing outside the project is shown: a script there is named as
-  changed, never shown. At each `y`, tarae keeps a snapshot with the conversation: the scripts' text, or the
-  project's working tree as a git tree (staged into a temporary copy of the index, so your own index isn't
-  touched, with no hooks). A new conversation starts with none
+  script. A script that runs the project's code (`cargo test` inside it, a program built here) shows the
+  project's changes too: `unchanged` covers only what runs. Nothing changed: `Unchanged since your y at
+  01:12`. It never answers for you. The card waits for `y` as before, but you only read what's new. Nothing
+  outside the project is shown: a script there is named as changed, never shown. At each `y`, tarae keeps a snapshot with the conversation: the scripts' text, the
+  project's working tree as a git tree, or both (tarae's own index, so yours isn't touched, with no hooks). A
+  new conversation starts with none
 
 ![Claude asks again to run cargo test -q parser:: outside the sandbox: the card says "Since your y at 02:28, changed in the project:", then src/parser.rs and its hunk, depth > 64 in red and depth > 128 in green, then Claude's reason and the warning](screenshots/since-your-y.png)
 ([hanji theme](screenshots/since-your-y-hanji.png))

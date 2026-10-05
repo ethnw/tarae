@@ -219,6 +219,9 @@ pub struct Run {
     pub key: Option<String>,
     pub joined: Vec<crate::queued::Joined>,
     pub queued: Option<crate::queued::Queued>,
+    /// Claude's command that isn't a check: the checkout as it found it — what it changed joins the turn at
+    /// its end (`snapshot.rs`; its line's next run waits for that).
+    pub snap: Option<crate::snapshot::Before>,
 }
 
 impl Run {
@@ -331,6 +334,7 @@ impl Run {
             key: None,
             joined: Vec::new(),
             queued: None,
+            snap: None,
         }
     }
 }
@@ -515,7 +519,7 @@ impl Editor {
                 }
                 r.by_claude = true;
                 r.guard = guard;
-                (r.key, r.joined, r.queued) = (ride.key, ride.joined, ride.queued);
+                (r.key, r.joined, r.queued, r.snap) = (ride.key, ride.joined, ride.queued, ride.snap);
                 Ok(())
             }
             None => Err(Box::new((who, ride))),
@@ -732,8 +736,9 @@ impl Editor {
                 // (a wait it ended in — killed while it waited — ends with it)
                 r.wait.end(Instant::now(), &r.trace);
                 r.trace.end(ended(&r.state));
-                // (what waits for the panel goes next — once this one's end is told)
-                if !ed.session.runs_next.is_empty() {
+                // (what waits for the panel goes next — once this one's end is told; once what it changed is
+                // taken, for a run whose changes are — `tools::run_done`)
+                if !ed.session.runs_next.is_empty() && !(r.snap.is_some() && r.chat.is_some()) {
                     let next = crate::event::Event::Job(Box::new(crate::queued::run_next));
                     let _ = ed.events.sender().send(next);
                 }
@@ -802,6 +807,7 @@ impl Editor {
             key: None,
             joined: Vec::new(),
             queued: None,
+            snap: None,
         });
     }
 }

@@ -54,6 +54,14 @@ pub fn piped(line: &str) -> Option<Vec<Vec<Word>>> {
         .collect()
 }
 
+/// The parts of `line` before its first single `|` — what runs, not what only filters its output (`cargo
+/// test x 2>&1 | tail`: `cargo test x`) — a command's leading `NAME=value` words kept. None as `parse`.
+pub fn before_pipe(line: &str) -> Option<Vec<Part>> {
+    let (parts, piped) = split(line, true)?;
+    let n = piped.iter().position(|p| *p).map_or(parts.len(), |i| i + 1);
+    Some(parts.into_iter().take(n).collect())
+}
+
 /// The line's parts (an `sh -c '…'` around it taken off) and, between each two, whether it's a single `|`.
 /// `env`: a command's leading `NAME=value` words are kept as its first words (else such a line is None).
 fn split(line: &str, env: bool) -> Option<(Vec<Part>, Vec<bool>)> {

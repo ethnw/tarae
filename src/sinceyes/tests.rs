@@ -37,7 +37,8 @@ fn repo(name: &str) -> (PathBuf, PathBuf) {
 }
 
 fn yes(root: &Path, cmd: &str) -> Yes {
-    Yes { cmd: cmd.into(), cwd: root.into(), at: SystemTime::now(), kept: take(root, root, cmd) }
+    let kept = take(root, root, cmd);
+    Yes { cmd: cmd.into(), key: key(cmd), cwd: root.into(), at: SystemTime::now(), kept }
 }
 
 /// A command that runs the project's code: what changed since the yes is the project's hunks — a line
@@ -102,7 +103,11 @@ fn a_scripts_own_diff_and_one_outside_the_project_named_only() {
     std::fs::write(dir.join("outside.sh"), "echo outside-marker\n").unwrap();
     let cmd = "sh check.sh && sh ../outside.sh";
     let y = yes(&root, cmd);
-    assert!(matches!(&y.kept, Kept::Scripts(s) if s.len() == 2), "{:?}", y.kept);
+    assert!(
+        matches!(&y.kept, Kept::Scripts { scripts, project: None } if scripts.len() == 2),
+        "{:?}",
+        y.kept
+    );
     assert_eq!(y.since(&root, &root, cmd).changed, Changed::Nothing);
     std::fs::write(root.join("check.sh"), "echo one\necho three\n").unwrap();
     std::fs::write(dir.join("outside.sh"), "echo outside-marker changed\n").unwrap();
@@ -117,6 +122,83 @@ fn a_scripts_own_diff_and_one_outside_the_project_named_only() {
     let s = y.since(&root, &root, "make check");
     assert!(matches!(&s.changed, Changed::Unknown(w) if w.contains("not a git checkout")), "{s:?}");
     assert!(s.card_lines().0[0].contains("read it as new"), "{:?}", s.card_lines());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The same run is what runs (#158): the program and its arguments before the first pipe — another filter
+/// after it is the same run, another argument before it isn't — and a script by its file, whatever its
+/// arguments. A line the shell reader can't read is its whole self.
+#[test]
+fn the_same_run_is_what_runs_not_the_filter_after_it() {
+    let same = |a: &str, b: &str| key(a) == key(b);
+    assert!(same("cargo test lib_a 2>&1 | grep FAIL", "cargo test lib_a | tail -5"));
+    assert!(same("cargo test lib_a", "cargo test lib_a | head"));
+    assert!(!same("cargo test lib_a | tail", "cargo test lib_b | tail"), "another argument: another run");
+    assert!(!same("cargo test lib_a", "cd sub && cargo test lib_a"), "from another folder");
+    assert!(!same("A=1 cargo test", "cargo test"), "what it sets is part of what runs");
+    assert!(!same("cargo test 'a b'", "cargo test a b"), "words stay words");
+    // A script: by its file, whatever its arguments — not by another interpreter, nor another file
+    assert!(same("sh target/x/setup.sh one", "sh target/x/setup.sh two 2>&1 | tail"));
+    assert!(same("./run.sh --fast", "./run.sh"));
+    assert!(!same("sh setup.sh one", "sh other.sh one"));
+    assert!(!same("sh setup.sh", "bash setup.sh"));
+    assert!(!same("sh setup.sh && cargo test", "sh setup.sh"), "a script and more: by its words");
+    // Unreadable: the whole line
+    assert!(same("cargo test $X | tail", "cargo test $X | tail"));
+    assert!(!same("cargo test $X | tail", "cargo test $X | head"));
+}
+
+/// A script that runs the project's code isn't all that runs: since the yes, the project's changes come
+/// with the script's (the script itself left out of them) — "unchanged" only when neither changed. One that
+/// runs nothing of the project: its own diff only, as before.
+#[test]
+fn a_script_that_runs_the_projects_code_shows_the_projects_changes_too() {
+    let (dir, root) = repo("runs");
+    std::fs::write(root.join("check.sh"), "set -e\nRUST_LOG=1 cargo test lib_a -- --nocapture\n").unwrap();
+    std::fs::write(root.join("say.sh"), "# cargo test would run the project\necho hello\n").unwrap();
+    let cmd = "sh check.sh one";
+    let y = yes(&root, cmd);
+    assert!(matches!(&y.kept, Kept::Scripts { project: Some(Ok(_)), .. }), "{:?}", y.kept);
+    // Another argument, the same script: nothing changed
+    let s = y.since(&root, &root, "sh check.sh two");
+    assert_eq!(s.changed, Changed::Nothing);
+    assert_eq!(s.was.as_deref(), Some(cmd));
+    assert!(s.card_lines().0[0].contains(" to `sh check.sh one` — what it runs is as it was then"), "{s:?}");
+    // The project changed, the script didn't: the project's diff
+    std::fs::write(root.join("src/lib.rs"), "fn a() {}\nfn b() { 2 }\n").unwrap();
+    let s = y.since(&root, &root, cmd);
+    let Changed::Lines { of, lines } = &s.changed else { panic!("{s:?}") };
+    assert_eq!(of, "the project check.sh runs (check.sh itself unchanged)");
+    assert!(
+        lines.iter().any(|l| l == "+fn b() { 2 }") && lines.iter().any(|l| l == "src/lib.rs"),
+        "{lines:#?}"
+    );
+    // Both: the script's hunks, then the project's — the script not twice
+    std::fs::write(root.join("check.sh"), "set -e\ncargo test lib_b\n").unwrap();
+    let s = y.since(&root, &root, cmd);
+    let Changed::Lines { of, lines } = &s.changed else { panic!("{s:?}") };
+    assert_eq!(of, "check.sh, and the project it runs");
+    assert_eq!(lines[0], "check.sh");
+    assert_eq!(lines.iter().filter(|l| l.starts_with("check.sh")).count(), 1, "{lines:#?}");
+    assert!(lines.iter().any(|l| l == "+cargo test lib_b") && lines.iter().any(|l| l == "+fn b() { 2 }"));
+    // A script that runs nothing of the project: the project isn't kept, its changes aren't said
+    let y = yes(&root, "sh say.sh");
+    assert!(matches!(&y.kept, Kept::Scripts { project: None, .. }), "{:?}", y.kept);
+    std::fs::write(root.join("src/lib.rs"), "fn a() {}\nfn b() { 3 }\n").unwrap();
+    assert_eq!(y.since(&root, &root, "sh say.sh").changed, Changed::Nothing);
+    // What reads as running the project's code, line by line
+    for l in [
+        "cargo test",
+        "  make check",
+        "A=1 B=2 go test ./...",
+        "./target/debug/tarae --version",
+        "x && npm run t",
+    ] {
+        assert!(runs_project_line(l), "{l}");
+    }
+    for l in ["echo cargo", "# cargo test", "grep -r x src/", "cat README.md", "wc -l notes.txt"] {
+        assert!(!runs_project_line(l), "{l}");
+    }
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -193,6 +275,14 @@ fn the_card_says_what_changed_since_your_y() {
     // Another command: a first card
     let q = ask(&mut ed, 4, "true && true");
     assert!(!q.contains("your y at"), "{q}");
+    ed.offer_dismiss();
+    pump(&mut ed, &|_| answered(4).is_some(), "told no");
+    // The same run through another filter (#158): the yes counts, and the card names the line it was to
+    let q = ask(&mut ed, 5, "true | head -1");
+    assert!(
+        q.contains("Unchanged since your y at ") && q.contains(" to `true` — what it runs is as it was"),
+        "{q}"
+    );
     ed.offer_dismiss();
     std::fs::remove_dir_all(&dir).ok();
 }

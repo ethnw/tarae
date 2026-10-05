@@ -388,7 +388,7 @@ fn start_tests(ed: &mut Editor, who: For, target: crate::testing::Target, guard:
                 For::User(head) => r.tell = Some(head),
             }
             r.by_claude = true;
-            (r.key, r.joined, r.queued) = (ride.key, ride.joined, ride.queued);
+            (r.key, r.joined, r.queued, r.snap) = (ride.key, ride.joined, ride.queued, ride.snap);
         }
         None => fail(ed, who, ride.joined, format!("couldn't start {program}")),
     }
@@ -451,6 +451,7 @@ pub fn tests_done(ed: &mut Editor) {
     }
     let joined = std::mem::take(&mut r.joined);
     let Some(call) = r.chat.take() else { return };
+    let snap = r.snap.take();
     let root = ed.session.root.clone();
     let text = report(&root, r, Waited::of(r.started, r.queued.as_ref(), None));
     let others: Vec<(Call, String)> = joined
@@ -461,17 +462,26 @@ pub fn tests_done(ed: &mut Editor) {
         })
         .collect();
     let failed = r.failures().first().map(|&i| r.cases[i].clone());
+    let label = format!("tests: {}", r.target.label);
     crate::reads::run_ended(ed);
-    answer(ed, call, Ok(text));
-    for (c, text) in others {
-        answer(ed, c, Ok(text));
-    }
-    if let Some(case) = failed
-        && let Some((path, line)) = case.at.clone()
-    {
-        let why = case.message.iter().map(|m| m.trim()).filter(|m| !m.is_empty()).take(3).collect::<Vec<_>>();
-        let why = why.join(" · ");
-        crate::follow::point(ed, "failed", case.name, &path, line..line + 1, Some(why));
+    let generation = call.generation;
+    let told = move |ed: &mut Editor, changed: String| {
+        answer(ed, call, Ok(format!("{text}{changed}")));
+        for (c, text) in others {
+            answer(ed, c, Ok(format!("{text}{changed}")));
+        }
+        if let Some(case) = failed
+            && let Some((path, line)) = case.at.clone()
+        {
+            let why =
+                case.message.iter().map(|m| m.trim()).filter(|m| !m.is_empty()).take(3).collect::<Vec<_>>();
+            let why = why.join(" · ");
+            crate::follow::point(ed, "failed", case.name, &path, line..line + 1, Some(why));
+        }
+    };
+    match snap {
+        Some(snap) => run_changes(ed, snap, generation, label, told),
+        None => told(ed, String::new()),
     }
 }
 
@@ -504,10 +514,16 @@ pub fn tests_dropped(ed: &mut Editor, why: &str) {
         .flatten()
         .map(|s| format!(". {s}"))
         .unwrap_or_default();
+    let (snap, label) = (r.snap.take(), format!("tests: {}", r.target.label));
     if let Some(call) = r.chat.take() {
         crate::reads::run_ended(ed);
+        let generation = call.generation;
         for c in std::iter::once(call).chain(joined.into_iter().map(|j| j.call)) {
             answer(ed, c, Err(format!("the test run was stopped — {why}{silent}")));
+        }
+        // (what it changed before it was stopped is the turn's all the same)
+        if let Some(snap) = snap {
+            run_changes(ed, snap, generation, label, |_: &mut Editor, _| {});
         }
     }
 }
@@ -1053,9 +1069,10 @@ fn card(
         .chain(checkpoints.carried.iter().cloned())
         .collect();
     let scripts = scripts_run(&cmd);
+    // (the same run: what runs, not the filters after it — `sinceyes::key`)
     let yes = outside.as_ref().filter(|b| b.socket.is_none()).and_then(|_| {
-        let c = ed.session.chat.as_ref()?;
-        c.outside_yes.iter().rev().find(|y| y.cmd == cmd && y.cwd == cwd).cloned()
+        let (c, key) = (ed.session.chat.as_ref()?, crate::sinceyes::key(&cmd));
+        c.outside_yes.iter().rev().find(|y| y.key == key && y.cwd == cwd).cloned()
     });
     if unseen.is_empty() && scripts.is_empty() && yes.is_none() {
         return ask_with(ed, cmd, cwd, call, Default::default(), (Vec::new(), why), outside);
@@ -1838,16 +1855,17 @@ pub fn run_answer(ed: &mut Editor, id: u64, what: RunCard, scope: Option<crate::
         let pins = pin.then(|| crate::readonly::script_pins(&cmd, &cwd, &root));
         let yes = yes.filter(|_| changed.is_none()).map(|(root, at)| crate::sinceyes::Yes {
             kept: crate::sinceyes::take(&root, &cwd, &cmd),
+            key: crate::sinceyes::key(&cmd),
             cmd: cmd.clone(),
             cwd: cwd.clone(),
             at,
         });
         move |ed: &mut Editor| {
-            // (kept for the chat that asked — the last yes to the same command in the same folder)
+            // (kept for the chat that asked — the last yes to the same run in the same folder)
             if let Some(y) = yes
                 && let Some(c) = ed.session.chat.as_mut().filter(|c| c.generation() == call.generation)
             {
-                c.outside_yes.retain(|o| (&o.cmd, &o.cwd) != (&y.cmd, &y.cwd));
+                c.outside_yes.retain(|o| (&o.key, &o.cwd) != (&y.key, &y.cwd));
                 c.outside_yes.push(y);
             }
             // (its scripts as they are now, for the chat that asked — one pinned before gives way)
@@ -2036,20 +2054,38 @@ fn go(ed: &mut Editor, who: For, job: Job, guard: Option<Guard>, ride: Ride) {
         {
             return crate::queued::run_next(ed);
         }
-        go_now(ed, who, job, guard, ride)
+        // A run of Claude's — a check or its tests too (a test that deletes files is what undo is for) — but
+        // not a command that only reads (two snapshots cost ~110 ms in a small checkout, and those are most of
+        // its runs): the checkout as it is now, first — what it changes joins the turn (`snapshot.rs`). After
+        // the saves: what the user saved isn't the run's.
+        let reads = matches!(&job, Job::Command(cmd, _) if crate::readonly::read_only(cmd));
+        // (its slot taken meanwhile: back in line now, its snapshot when its turn comes)
+        match &who {
+            For::Claude(call) if !reads && !slot_taken(ed, &job) => {
+                call.step("snapshot");
+                let root = ed.session.root.clone();
+                ed.events.jobs().spawn(move || {
+                    let snap = crate::snapshot::Before::take(&root);
+                    move |ed: &mut Editor| {
+                        if let For::Claude(call) = &who {
+                            call.step("snapshot taken");
+                            if asked_in_turn && !turn(ed, call) {
+                                return crate::queued::run_next(ed);
+                            }
+                        }
+                        go_now(ed, who, job, guard, Ride { snap: Some(snap), ..ride })
+                    }
+                });
+            }
+            _ => go_now(ed, who, job, guard, ride),
+        }
     });
 }
 
 /// It starts — unless its slot was taken while it got ready (the user's task, a race with another call of
 /// Claude's): then it's back at the front of its line, its sandbox made again when its turn comes.
 fn go_now(ed: &mut Editor, who: For, job: Job, guard: Option<Guard>, ride: Ride) {
-    let taken = match &job {
-        Job::Command(..) => {
-            ed.session.task_run.as_ref().is_some_and(|r| r.state == crate::task::State::Running)
-        }
-        Job::Tests(_) => ed.session.test_run.as_ref().is_some_and(|r| r.state == RunState::Running),
-    };
-    if taken {
+    if slot_taken(ed, &job) {
         drop(guard);
         return crate::queued::again(ed, crate::queued::What::Guarded { who, job, ride }, None);
     }
@@ -2063,6 +2099,16 @@ fn go_now(ed: &mut Editor, who: For, job: Job, guard: Option<Guard>, ride: Ride)
     match job {
         Job::Command(cmd, cwd) => run_start(ed, who, cmd, cwd, guard, ride),
         Job::Tests(target) => start_tests(ed, who, *target, guard, ride),
+    }
+}
+
+/// Whether `job`'s slot has a run under way (the task panel, the test pane).
+fn slot_taken(ed: &Editor, job: &Job) -> bool {
+    match job {
+        Job::Command(..) => {
+            ed.session.task_run.as_ref().is_some_and(|r| r.state == crate::task::State::Running)
+        }
+        Job::Tests(_) => ed.session.test_run.as_ref().is_some_and(|r| r.state == RunState::Running),
     }
 }
 
@@ -2149,6 +2195,7 @@ pub fn run_done(ed: &mut Editor) {
     }
     let joined = std::mem::take(&mut r.joined);
     let Some(call) = r.chat.take() else { return };
+    let snap = r.snap.take();
     let r = &*r;
     let items = &r.places;
     let text = run_report(&ed.session.root, r, items, Waited::of(r.started, r.queued.as_ref(), None));
@@ -2162,14 +2209,21 @@ pub fn run_done(ed: &mut Editor) {
         .collect();
     let first =
         items.iter().find(|i| i.severity == 1).filter(|_| r.state != crate::task::State::Passed).cloned();
-    let label = r.task.name.clone();
+    let (label, cmd) = (r.task.name.clone(), r.task.cmd.clone());
     crate::reads::run_ended(ed);
-    answer(ed, call, Ok(text));
-    for (c, text) in others {
-        answer(ed, c, Ok(text));
-    }
-    if let Some(it) = first {
-        crate::follow::point(ed, "failed", label, &it.path, it.line..it.line + 1, Some(it.message));
+    let generation = call.generation;
+    let told = move |ed: &mut Editor, changed: String| {
+        answer(ed, call, Ok(format!("{text}{changed}")));
+        for (c, text) in others {
+            answer(ed, c, Ok(format!("{text}{changed}")));
+        }
+        if let Some(it) = first {
+            crate::follow::point(ed, "failed", label, &it.path, it.line..it.line + 1, Some(it.message));
+        }
+    };
+    match snap {
+        Some(snap) => run_changes(ed, snap, generation, cmd, told),
+        None => told(ed, String::new()),
     }
 }
 
@@ -2183,12 +2237,110 @@ pub fn run_dropped(ed: &mut Editor, why: &str) {
     let silent = crate::waits::silent_line(r.last_output, Instant::now())
         .map(|s| format!(". {s}"))
         .unwrap_or_default();
+    let (snap, cmd) = (r.snap.take(), r.task.cmd.clone());
     if let Some(call) = r.chat.take() {
         crate::reads::run_ended(ed);
+        let generation = call.generation;
         for c in std::iter::once(call).chain(joined.into_iter().map(|j| j.call)) {
             answer(ed, c, Err(format!("the command was stopped — {why}{silent}")));
         }
+        // (what it changed before it was stopped is the turn's all the same)
+        if let Some(snap) = snap {
+            run_changes(ed, snap, generation, cmd, |_: &mut Editor, _| {});
+        }
     }
+}
+
+/// Files a report names at most (the rest counted).
+const CHANGED_NAMED: usize = 12;
+
+/// `names`, at most `CHANGED_NAMED` of them, the rest counted (`a, b and 3 more`).
+fn some_named(names: &[String]) -> String {
+    let mut said = names.iter().take(CHANGED_NAMED).cloned().collect::<Vec<_>>().join(", ");
+    if names.len() > CHANGED_NAMED {
+        said.push_str(&format!(" and {} more", names.len() - CHANGED_NAMED));
+    }
+    said
+}
+
+/// What Claude's run `cmd` (a command, or `tests: …`) changed in the checkout since `snap` (`snapshot.rs`) —
+/// taken on a worker, then recorded in the turn it ran in (chat process `generation`), or as a checkpoint of
+/// its own when that turn is over. `told` gets what Claude reads of it (nothing when nothing changed) — and
+/// the ignored files and folders it deleted, named, which nothing takes back; then the line's next run goes
+/// (held for this — `task.rs`, `testing.rs`).
+fn run_changes(
+    ed: &mut Editor,
+    snap: crate::snapshot::Before,
+    generation: u64,
+    cmd: String,
+    told: impl FnOnce(&mut Editor, String) + Send + 'static,
+) {
+    ed.events.jobs().spawn(move || {
+        let found = snap.since();
+        move |ed: &mut Editor| {
+            let said = match found {
+                Ok(crate::snapshot::Found { files, skipped, left_out, ignored_gone })
+                    if !files.is_empty() || !skipped.is_empty() || left_out > 0 || !ignored_gone.is_empty() =>
+                {
+                    let root = ed.session.root.clone();
+                    let named: Vec<String> = files
+                        .iter()
+                        .map(|c| {
+                            let name = crate::chat::shown(&root, &c.path);
+                            match (&c.before, &c.after) {
+                                (None, _) => format!("{name} (new)"),
+                                (_, None) => format!("{name} (deleted)"),
+                                _ => name,
+                            }
+                        })
+                        .collect();
+                    let said = some_named(&named);
+                    let turn =
+                        ed.session.chat.as_ref().is_some_and(|c| c.generation() == generation && c.busy());
+                    if turn && !files.is_empty() {
+                        crate::checkpoint::record_run(ed, files);
+                    } else if !files.is_empty()
+                        && let Some(n) = crate::checkpoint::record_run_alone(ed, &format!("ran `{cmd}`"), files)
+                        && let Some(c) = &mut ed.session.chat
+                    {
+                        let row = format!("its run changed {n} after the turn · space v t · space u undo");
+                        c.msgs.push(crate::chat::Msg::new(crate::chat::Role::Note, row, ""));
+                    }
+                    let mut out = String::new();
+                    if !named.is_empty() {
+                        out.push_str(&format!(
+                            "\nIt changed in the checkout: {said} — part of this turn's changes, which the \
+                             user reviews and can take back.\n"
+                        ));
+                    }
+                    if !skipped.is_empty() {
+                        out.push_str(&format!("Changed, and not taken back with the turn: {}.\n", skipped.join(", ")));
+                    }
+                    if left_out > 0 {
+                        out.push_str(&format!(
+                            "{left_out} new untracked files in the checkout (not ignored) weren't kept — too many at \
+                             once: its changes to them can't be taken back.\n"
+                        ));
+                    }
+                    if !ignored_gone.is_empty() {
+                        out.push_str(&format!(
+                            "It deleted ignored files, which aren't kept — the user can't take them back: {}.\n",
+                            some_named(&ignored_gone)
+                        ));
+                    }
+                    out
+                }
+                Ok(_) => String::new(),
+                Err(e) => {
+                    let line = format!("snapshot: what `{cmd}` changed can't be told — {e}");
+                    crate::log::line("tarae", "info", &line);
+                    String::new()
+                }
+            };
+            told(ed, said);
+            crate::queued::run_next(ed);
+        }
+    });
 }
 
 /// Places reported at most; output lines sent whole up to `OUTPUT_WHOLE`, else its first `OUTPUT_HEAD` and
@@ -2914,12 +3066,18 @@ mod tests {
         let joined = s.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(joined.contains("2 more calls wait on this: read a.rs · read b.rs"), "{s}");
         assert!(joined.contains("1/2"), "the second counted: {s}");
-        // Yes to the first, then to the second while the first runs: it runs next
+        // Yes to the first, then to the second while the first runs: it runs next (the first starts once the
+        // checkout's snapshot is taken — `snapshot.rs`)
         ed.offer_accept();
-        assert!(ed.session.task_run.as_ref().is_some_and(|r| r.task.cmd == one), "the first runs");
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !ed.session.task_run.as_ref().is_some_and(|r| r.task.cmd == one) {
+            assert!(std::time::Instant::now() < end, "the first runs");
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(5)) {
+                ed.handle_event(ev);
+            }
+        }
         ed.offer_accept();
         assert_eq!(ed.session.runs_next.len(), 1, "the second waits for the first to end");
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while !dir.join("two.txt").exists() {
             assert!(std::time::Instant::now() < end, "the second ran after the first");
             if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
@@ -2992,10 +3150,12 @@ mod tests {
         let running = |ed: &crate::editor::Editor| {
             ed.session.task_run.as_ref().is_some_and(|r| r.state == crate::task::State::Running)
         };
-        pump(&mut ed, &|ed| !running(ed));
+        // (answered once what it changed is taken — `snapshot.rs`)
+        let said = || super::ANSWERED.with(|a| a.borrow().iter().find(|(id, _)| *id == json!(41)).cloned());
+        pump(&mut ed, &|ed| !running(ed) && said().is_some());
         let r = ed.session.task_run.as_ref().unwrap();
         assert!(r.wait.now.is_none() && !r.output.iter().any(|l| l.1.contains("Blocking")));
-        let said = super::ANSWERED.with(|a| a.borrow().iter().find(|(id, _)| *id == json!(41)).cloned());
+        let said = said();
         let text = said.expect("answered").1.unwrap();
         let second = text.lines().nth(1).unwrap_or_default();
         let waited: f32 = second
@@ -3046,6 +3206,7 @@ mod tests {
             before: None,
             after: ropey::Rope::new(),
             unseen: true,
+            ..Default::default()
         });
         let shown = |q: &str, f: &str| q.contains(&format!("{f} — written this turn, unseen:\necho evil"));
         // The copy: nothing on its own card (copying runs nothing) — then, run in a second call, flagged

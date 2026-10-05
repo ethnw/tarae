@@ -5337,7 +5337,7 @@ mod tests {
             path: other.clone(),
             before: None,
             after: ropey::Rope::new(),
-            unseen: false,
+            ..Default::default()
         };
         ed.session.checkpoints.turn.push(touched);
         let t = tool(&mut ed, 4, diags, json!({})).unwrap();

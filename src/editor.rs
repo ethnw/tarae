@@ -6728,6 +6728,7 @@ mod tests {
                 before: None,
                 after: ropey::Rope::new(),
                 unseen: true,
+                ..Default::default()
             });
             let log = claude_calls(&mut ed, &dir, "run", &json!({ "command": command }));
             feed(&mut ed, "<space>lmake it<ret>");
@@ -8675,6 +8676,7 @@ mod tests {
                 before: Some(ropey::Rope::from_str("x\n")),
                 after: ropey::Rope::from_str(&now),
                 unseen: true,
+                ..Default::default()
             };
             Checkpoint::new(q.into(), vec![t])
         };

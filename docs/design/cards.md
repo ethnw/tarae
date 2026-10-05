@@ -1,8 +1,8 @@
 # Cards: what a session may do, not what a command looks like
 
-Design, 2026-10-04. Status: **approved** with the five recommendations of §8 (2026-10-04). P0, P1 and P2
-are built (`src/cards.rs`, `allow::defaults`; `sandbox.rs`' write rules; its read rules — §9 "P2, as built");
-P5, P3 and P4 aren't yet.
+Design, 2026-10-04. Status: **approved** with the five recommendations of §8 (2026-10-04). P0, P1, P2 and
+P5 are built (`src/cards.rs`, `allow::defaults`; `sandbox.rs`' write rules; its read rules; `snapshot.rs` —
+§9 "P2, as built", "P5, as built"); P3 and P4 aren't yet.
 
 ## Headline
 
@@ -542,6 +542,44 @@ them):
   would point Claude at it.
 - The read card, its folder for `a`/`A`, and `space m s`'s read grants say when the place holds a
   token-like line (`tokens::found_in`, on a worker), by file name only.
+
+**P5, as built (2026-10-05)** — plan and numbers in `target/sb/p5-plan.md`, `p5-checkpoint.md`, the scripts
+beside them:
+
+- **The snapshot** (`src/snapshot.rs`): `git add -A` + `write-tree` into **tarae's own index per checkout**
+  (`tarae-snapshot.index` in its git folder, first made from a copy of the real one), kept between snapshots.
+  A fresh copy each time (what "since your last y" did) hashes every untracked file every time: 21 s at 200k
+  untracked files against 0.4 s kept. Taken in `tools::go` after the saves (what the user saved isn't the
+  run's), on a worker, for **every run of Claude's that isn't read-only** (`readonly::read_only` —
+  classification, as §3.7 keeps it): commands, checks and `run_tests` alike. Checks run arbitrary code (§2),
+  and a test that deletes files is what undo is for (one check here once deleted far more than it should).
+  They pay ~40 ms before and ~41 ms after (`perf_snapshot_around_a_check`: 600 tracked files, an ignored
+  `target/` of 21k files the check writes into). Read-only commands skip it: two snapshots cost ~110 ms on
+  the runs Claude makes most.
+- **The run's end** (`tools::run_done`, `run_dropped`, `tests_done`, `tests_dropped`): the tree again, `diff-tree`, both sides' blobs through
+  one `cat-file --batch`. The changes join the turn as written unseen (`checkpoint::record_run`). The turn
+  ends in its review and `space u` takes them back. Claude's report names them. The line's next run waits
+  for this, so its writes aren't counted in the diff. Files the editor wrote meanwhile (`Editor::wrote`)
+  aren't the run's. A turn that's over by then (stopped) gets a checkpoint of its own.
+- **`Touched.gone`** (the run deleted it: undo writes it back, its folder too; redo deletes it again) and
+  **`Touched.bytes`** (not text, or over 1 MB: git blob ids; undo and redo write the blob out on a worker,
+  only over a file still as expected). Kept in the turns' JSON.
+- **Measured** (macOS, APFS): 200k untracked files, first snapshot **91 s and 800 MB** of loose objects
+  (unsandboxed; 95 s in the sandbox), then 0.38–0.85 s. So **past `NEW_MAX` (5,000) new files at once a
+  snapshot keeps what it had** (`add -u`, the new ones counted): 0.18 s first, 0.17 s again, 0.21 s for a
+  run's whole after-side, nothing written. The report says how many weren't kept. 5,000 new files: 2.7 s
+  once, then 47 ms. This repository: about 55 ms a snapshot (about 20 ms of it starting git twice).
+- **§3.4's question, decided: no `file-write-unlink` deny** (`target/sb/p5-unlink.sh`, `p5-rules.sh`). A deny
+  on tracked literals refuses `rm`, `mv x y`, **rename-over** (`printf > tmp && mv tmp x`) and `sed -i`, which
+  is how many tools save. In-place writes and `rustfmt` pass. Its cost grows faster than linearly: per run, 0 /
+  1,000 / 2,000 / 5,000 literals = 9 / 189 / 726 / 4,548 ms. It breaks working tools, costs a fifth of a
+  second at a thousand tracked files, and still leaves untracked files open. The snapshot covers all three.
+- **Ignored files aren't covered** (build output): a run that deletes an ignored file (`rm .env.local`,
+  `cargo clean`) can't be undone by `space u`. It is **named** in Claude's report as not kept, capped at 12
+  names: the ignored files and folders are listed before and after (`ls-files -o -i --directory`, so an ignored
+  folder is one entry and is never walked). A file deleted inside an ignored folder isn't seen; the folder
+  going is. P3 decides whether such deletes ask. Links, submodules and mode-only changes aren't covered either
+  (named in the report).
 
 ---
 

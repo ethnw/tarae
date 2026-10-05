@@ -59,6 +59,9 @@ pub struct Ride {
     /// The user's run of Claude's again (`For::User`): its trace from its place in line (Claude's own rides on
     /// its call).
     pub trace: Option<crate::trace::RunTrace>,
+    /// The checkout as Claude's command (not a check) found it, taken right before it starts (`tools::go`,
+    /// `snapshot.rs`).
+    pub snap: Option<crate::snapshot::Before>,
 }
 
 /// A run waiting for its slot.
@@ -455,6 +458,14 @@ impl Editor {
         let now = Instant::now();
         for l in std::iter::once(&mut self.session).chain(&mut self.sessions).filter(|l| l.id == id) {
             l.wrote = Some(now);
+            // (a run under way whose changes are taken: this one isn't its)
+            let snaps = [
+                l.task_run.as_mut().and_then(|r| r.snap.as_mut()),
+                l.test_run.as_mut().and_then(|r| r.snap.as_mut()),
+            ];
+            for s in snaps.into_iter().flatten() {
+                s.wrote.push(path.to_path_buf());
+            }
         }
     }
 

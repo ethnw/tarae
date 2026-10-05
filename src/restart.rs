@@ -1424,6 +1424,7 @@ mod tests {
                 before: Some(ropey::Rope::from_str("one\n")),
                 after: ropey::Rope::from_str("two\n"),
                 unseen: true,
+                ..Default::default()
             }],
             undone: false,
             seen: false,
