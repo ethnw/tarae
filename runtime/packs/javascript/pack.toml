@@ -10,6 +10,8 @@ outputs = ["node_modules"]
 first-made = ["node_modules/", "package-lock.json"]
 # Read by npm as soon as it's on disk
 config-files = { json = ["package.json"] }
+# What checks and builds: the places Claude's run of one prints go to your list (]q)
+checks = ["npm test", "npm run", "pnpm test", "pnpm run", "yarn test", "eslint"]
 
 # `__tests__`: Jest's folder
 [language.javascript]

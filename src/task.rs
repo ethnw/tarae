@@ -43,52 +43,153 @@ fn all_tasks(configured: Vec<Task>, root: &Path) -> Vec<Task> {
     out
 }
 
-/// Reads places out of a task's output, a line at a time: `path:line[:col]: [error|warning] message` (rustc
-/// `--message-format=short`, gcc/clang, go, eslint, ruff, mypy), `path(line,col): error …` (tsc), rustc's
-/// `error…: message` + ` --> path:line:col`, and Python's `File "path", line N`. Only paths that exist
+/// A run whose output is read, not shown on a terminal (a task, tests): colours off — `NO_COLOR`, and what the
+/// packs say turns a tool's off (`color-off`, `CARGO_TERM_COLOR=never`).
+pub(crate) fn color_off(cmd: &mut std::process::Command) {
+    cmd.env("NO_COLOR", "1");
+    for (k, v) in &crate::languages::get().color_off {
+        cmd.env(k, v);
+    }
+}
+
+/// A pack's `[[places]]` rule: a form of place one tool's output has beyond the one every tool shares
+/// (`path:line[:col]: [severity] message`, read by the core). Lines are matched trimmed.
+///
+/// - `match`: a regular expression; its groups `path`, `line`, `col` — or `place`, a `path:line[:col]` read
+///   as the shared form is — and `severity`, `message`. With no `severity` group the message's first word
+///   says it, as in the shared form (`error TS2304: …`); `message = "…"`: one of its own.
+/// - `then`: the place comes on a later line, matching this (rustc's `error[E0308]: …` + ` --> src/a.rs:3:5`):
+///   the line is a message waiting for it, the `then` line's groups its place.
+///
+/// A rule whose place isn't a file lets the next rule, then the shared form, try the line.
+#[derive(Clone, Debug)]
+pub struct PlaceRule {
+    re: regex::Regex,
+    then: Option<regex::Regex>,
+    message: Option<String>,
+}
+
+impl PlaceRule {
+    /// One `[[places]]` entry.
+    pub(crate) fn read(t: &toml::Table) -> Result<PlaceRule, String> {
+        crate::packs::known(t, &["match", "then", "message"], "[[places]]")?;
+        let re = |k: &str| -> Result<Option<regex::Regex>, String> {
+            let Some(p) = crate::packs::string(t, k)? else { return Ok(None) };
+            let re = regex::Regex::new(&p).map_err(|e| format!("`{k}`: {e}"))?;
+            let groups = ["path", "line", "col", "place", "severity", "message"];
+            match re.capture_names().flatten().find(|g| !groups.contains(g)) {
+                Some(g) => Err(format!("`{k}`: no group `{g}` (there are: {})", groups.join(", "))),
+                None => Ok(Some(re)),
+            }
+        };
+        let rule = PlaceRule {
+            re: re("match")?.ok_or("an entry has no `match`")?,
+            then: re("then")?,
+            message: None,
+        };
+        let placed = |r: &regex::Regex| {
+            let g: Vec<&str> = r.capture_names().flatten().collect();
+            g.contains(&"place") || (g.contains(&"path") && g.contains(&"line"))
+        };
+        if !placed(rule.then.as_ref().unwrap_or(&rule.re)) {
+            let k = if rule.then.is_some() { "then" } else { "match" };
+            return Err(format!("`{k}` has no place (`place`, or `path` and `line`)"));
+        }
+        Ok(PlaceRule { message: crate::packs::string(t, "message")?, ..rule })
+    }
+
+    /// How the language table's snapshot says it.
+    #[cfg(test)]
+    pub(crate) fn summary(&self) -> String {
+        let mut s = self.re.as_str().to_string();
+        if let Some(t) = &self.then {
+            s += &format!(" then {}", t.as_str());
+        }
+        if let Some(m) = &self.message {
+            s += &format!(" says {m:?}");
+        }
+        s
+    }
+
+    /// What this rule makes of `line`: a place, a message waiting for its place, or nothing.
+    fn read_line(&self, cwd: &Path, line: &str) -> Option<Read> {
+        let caps = self.re.captures(line)?;
+        let (sev, msg) = self.said(&caps);
+        if self.then.is_some() {
+            return Some(Read::Waits(sev, msg));
+        }
+        Some(Read::Place(placed(cwd, &caps, sev, msg)))
+    }
+
+    /// The severity and message a line says.
+    fn said(&self, caps: &regex::Captures) -> (u8, String) {
+        let msg = self.message.clone().or_else(|| caps.name("message").map(|m| m.as_str().to_string()));
+        match (caps.name("severity"), msg) {
+            (Some(s), m) => (severity(s.as_str()).0, m.unwrap_or_default()),
+            (None, m) => severity(m.as_deref().unwrap_or_default()),
+        }
+    }
+}
+
+enum Read {
+    Place(Option<Item>),
+    Waits(u8, String),
+}
+
+/// The place `caps` names — `place`, else `path`, `line`, `col` — if it's a file.
+fn placed(cwd: &Path, caps: &regex::Captures, sev: u8, msg: String) -> Option<Item> {
+    if let Some(p) = caps.name("place") {
+        let (path, l, c, _) = split_place(p.as_str())?;
+        return item(cwd, path, l, c, sev, msg);
+    }
+    let n = |k: &str| caps.name(k).and_then(|m| m.as_str().parse::<usize>().ok());
+    item(cwd, caps.name("path")?.as_str(), n("line")?, n("col").unwrap_or(1), sev, msg)
+}
+
+/// Reads places out of a task's output, a line at a time: the forms the packs say (`[[places]]` — tsc's,
+/// rustc's long one, Python's tracebacks), then the one every tool shares, `path:line[:col]: [error|warning]
+/// message` (rustc `--message-format=short`, gcc/clang, go, eslint, ruff, mypy). Only paths that exist
 /// count — a URL or a timestamp isn't a place.
-#[derive(Default)]
 pub struct Matcher {
-    /// rustc's long format: the message line waiting for its ` --> ` line.
-    pending: Option<(u8, String)>,
+    rules: std::sync::Arc<Vec<PlaceRule>>,
+    /// A message waiting for its place: the rule's index, its severity and text.
+    pending: Option<(usize, u8, String)>,
 }
 
 impl Matcher {
-    pub fn line(&mut self, cwd: &Path, line: &str) -> Option<Item> {
-        let t = line.trim_end();
-        let trimmed = t.trim_start();
-        // rustc long format
-        if let Some(rest) = trimmed.strip_prefix("--> ") {
-            let (sev, msg) = self.pending.take()?;
-            let (path, l, c, _) = split_place(rest)?;
-            return item(cwd, path, l, c, sev, msg);
-        }
-        for (word, sev) in [("error", 1), ("warning", 2)] {
-            if let Some(rest) = trimmed.strip_prefix(word)
-                && (rest.starts_with(':') || rest.starts_with('['))
-            {
-                let msg = rest.split_once(": ").map_or("", |(_, m)| m);
-                self.pending = Some((sev, msg.to_string()));
-                return None;
+    pub fn new(rules: std::sync::Arc<Vec<PlaceRule>>) -> Matcher {
+        Matcher { rules, pending: None }
+    }
+
+    /// The built-in packs' rules (tests).
+    #[cfg(test)]
+    pub(crate) fn builtin() -> Matcher {
+        let mut rules = Vec::new();
+        for (_, t) in crate::packs::builtin_manifests() {
+            if let Some(v) = t.as_ref().unwrap().get("places") {
+                rules.extend(crate::packs::places_of(v).unwrap());
             }
         }
-        // Python traceback
-        if let Some(rest) = trimmed.strip_prefix("File \"")
-            && let Some((path, rest)) = rest.split_once("\", line ")
-        {
-            let n: usize = rest.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()?;
-            return item(cwd, path, n, 1, 1, "traceback".into());
+        Matcher::new(std::sync::Arc::new(rules))
+    }
+
+    pub fn line(&mut self, cwd: &Path, line: &str) -> Option<Item> {
+        let trimmed = line.trim();
+        if let Some((i, sev, msg)) = self.pending.take() {
+            let then = self.rules[i].then.as_ref().expect("a waiting rule has a `then`");
+            match then.captures(trimmed) {
+                Some(caps) => return placed(cwd, &caps, sev, msg),
+                None => self.pending = Some((i, sev, msg)),
+            }
         }
-        // tsc: path(line,col): error TS1234: message — the last `(` before `):` (a path may hold parentheses:
-        // Next.js's `app/(auth)/page.tsx`); if that isn't a place, the other forms get their turn
-        if let Some(close) = trimmed.find("):")
-            && let Some(open) = trimmed[..close].rfind('(')
-            && let Some((l, c)) = trimmed[open + 1..close].split_once(',')
-            && let (Ok(l), Ok(c)) = (l.parse(), c.parse())
-        {
-            let (sev, msg) = severity(trimmed[close + 2..].trim());
-            if let Some(found) = item(cwd, &trimmed[..open], l, c, sev, msg) {
-                return Some(found);
+        for (i, r) in self.rules.iter().enumerate() {
+            match r.read_line(cwd, trimmed) {
+                Some(Read::Waits(sev, msg)) => {
+                    self.pending = Some((i, sev, msg));
+                    return None;
+                }
+                Some(Read::Place(Some(found))) => return Some(found),
+                Some(Read::Place(None)) | None => {}
             }
         }
         let (path, l, c, rest) = split_place(trimmed)?;
@@ -591,7 +692,8 @@ impl Editor {
         if claudes {
             cmd.env_remove("CDPATH");
         }
-        cmd.current_dir(&task.cwd).env("NO_COLOR", "1").env("CARGO_TERM_COLOR", "never");
+        cmd.current_dir(&task.cwd);
+        color_off(&mut cmd);
         // (its own session and group, not a fork of the editor — `spawn.rs`; on Linux from a thread confined
         // to its sandbox)
         let child = match crate::sandbox::spawn(sandbox, &cmd) {
@@ -701,15 +803,17 @@ impl Editor {
         std::thread::spawn(move || {
             // (the packs read here — one of one's own is a file)
             let waits = std::sync::Arc::new(crate::waits::Rules::load());
+            let places = std::sync::Arc::new(crate::packs::places());
             let (eof, read_all) = std::sync::mpsc::channel();
             let mut readers = 0;
             for (stream, err) in [(stdout, false), (stderr, true)] {
                 let Some(s) = stream else { continue };
                 let (tx, send_lines, waits, eof) =
                     (tx.clone(), send_lines.clone(), waits.clone(), eof.clone());
+                let places = places.clone();
                 readers += 1;
                 std::thread::spawn(move || {
-                    let mut matcher = Matcher::default();
+                    let mut matcher = Matcher::new(places);
                     read_batches(s, |lines| send_lines(&tx, &mut matcher, &waits, err, lines));
                     let _ = eof.send(());
                 });
@@ -960,7 +1064,7 @@ mod tests {
     #[test]
     fn places_from_common_formats() {
         let d = dir();
-        let mut m = Matcher::default();
+        let mut m = Matcher::builtin();
         let mut one = |l: &str| {
             m.line(&d, l).map(|i| {
                 (
@@ -1012,6 +1116,69 @@ mod tests {
         let got = m.line(&d.join("member"), "src/main.rs:1:1: error: from the workspace root");
         assert_eq!(got.map(|i| i.path.ends_with("src/main.rs")), Some(true));
         std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// A task's or a test run's output is read, not a terminal's: colours off — `NO_COLOR`, and the packs'
+    /// `color-off` (cargo's `term.color = "always"` would colour it anyway).
+    #[test]
+    fn runs_read_plain_get_colours_off() {
+        let mut cmd = std::process::Command::new("true");
+        color_off(&mut cmd);
+        let envs: Vec<(String, String)> = cmd
+            .get_envs()
+            .filter_map(|(k, v)| Some((k.to_str()?.to_string(), v?.to_str()?.to_string())))
+            .collect();
+        for want in [("NO_COLOR", "1"), ("CARGO_TERM_COLOR", "never")] {
+            assert!(envs.iter().any(|(k, v)| (k.as_str(), v.as_str()) == want), "{want:?}: {envs:?}");
+        }
+    }
+
+    /// Reading places out of a task's output — on its reader threads, a line at a time: 20k lines of cargo's
+    /// long and short forms, tsc, a Python traceback and lines that are no place, the best of 5. A number for
+    /// `cargo perf`.
+    #[test]
+    fn perf_task_places_lines() {
+        if crate::test_results::unoptimized("task::tests::perf_task_places_lines") {
+            return;
+        }
+        let d = dir();
+        let mut out = Vec::new();
+        for i in 0..1_000 {
+            let n = i % 40 + 1;
+            out.extend([
+                format!("   Compiling crate{i} v0.1.{i}"),
+                format!("warning: unused variable: `x{i}`"),
+                format!("  --> src/main.rs:{n}:9"),
+                "   |".to_string(),
+                format!("{n} |     let x{i} = 1;"),
+                "   |         ^^ help: if this is intentional, prefix it with an underscore".to_string(),
+                "   |".to_string(),
+                "   = note: `#[warn(unused_variables)]` on by default".to_string(),
+                String::new(),
+                format!("src/main.rs:{n}:5: error[E0425]: cannot find value `y{i}`"),
+                format!("src/main.rs({n},2): error TS2304: Cannot find name 'y'."),
+                "Traceback (most recent call last):".to_string(),
+                format!("  File \"a.py\", line {n}, in <module>"),
+                "    import missing".to_string(),
+                "ModuleNotFoundError: No module named 'missing'".to_string(),
+                format!("    Finished `dev` profile [unoptimized + debuginfo] target(s) in {i}.0s"),
+                format!("see https://example.com:8080/x{i}"),
+                format!("test m::t{i} ... ok"),
+                format!("{i} | some text: with a colon"),
+                format!("     Running unittests src/lib.rs (target/debug/deps/x-{i})"),
+            ]);
+        }
+        let mut best = f64::MAX;
+        for _ in 0..5 {
+            let t0 = std::time::Instant::now();
+            let mut m = Matcher::builtin();
+            let found = out.iter().filter(|l| m.line(&d, l).is_some()).count();
+            best = best.min(t0.elapsed().as_secs_f64() * 1000.0);
+            assert_eq!(found, 4_000, "the long form, the short, tsc's and the traceback's");
+        }
+        let line = format!("PERF task_places_20k_lines_ms {best:.3} budget=150 noise=3\n");
+        let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+        assert!(best < 150.0, "{best:.1} ms for {} lines (budget 150)", out.len());
     }
 
     #[test]

@@ -636,7 +636,7 @@ mod tests {
                 lang: "python".into(),
                 argv: vec!["sh".into(), "-c".into(), script.into()],
                 debug: None,
-                parse: "python".into(),
+                lines: crate::test_results::Rules::builtin("python"),
                 build: None,
                 debug_run: None,
                 junit: None,

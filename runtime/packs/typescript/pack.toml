@@ -1,5 +1,13 @@
 # TypeScript (and TSX): typescript-language-server (JavaScript's too); type-checking the project.
 
+# What checks: the places Claude's run of it prints go to your list (]q)
+checks = ["tsc"]
+
+# tsc: `path(line,col): error TS2304: message` — the first `(line,col):`, so a path may hold parentheses
+# (Next.js's `app/(auth)/page.tsx`)
+[[places]]
+match = '^(?<path>.+?)\((?<line>\d+),(?<col>\d+)\): ?(?<message>.*)$'
+
 [language.typescript]
 extensions = ["ts", "mts", "cts"]
 comment-token = "//"

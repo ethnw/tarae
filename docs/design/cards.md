@@ -369,7 +369,7 @@ those asks rare enough to read.
 | `outside`, `candidates`, `runs_outside`, `expand`, `SYSROOT`, `allow::sysroot` (#112) | `readonly.rs:866-1006`, `allow.rs:335-361` | **gone**: the kernel sees where a read goes |
 | `unrolled`, `fill`, `VAR`, variable marks (#113) | `readonly.rs:255-511` | **gone** |
 | `ENV_NEVER`, `env_allowed`, `one_command_env`, `env_words` (#44, #93, #114) | `readonly.rs:527-626` | **gone**: `RUSTC_WRAPPER=x` runs `x` *in the sandbox* |
-| `CHECKS`, `is_check`, `filtered` | `tools.rs:567-692` | **stay** (the user's list, the lineup) |
+| `CHECKS` (since 2026-10-05 the packs' `checks`), `is_check`, `filtered` | `tools.rs:567-692` | **stay** (the user's list, the lineup) |
 | `Grant`, `Allowed`, `Store`, `keepable`, `SECRETS`, `NEVER_WRITE`, `write_choices`, `code_trees`, `defaults` (was `also_readable`), `checkouts` | `allow.rs` | **stay**: this is the capability store. `Grant::Read`, scope `Session`. |
 | `grant_places` folder offers (#102) | `allow.rs:275` | **stays** for real outside reads; run outputs no longer ask |
 | `reads::Made` / `Chat.ran` (#81) | `reads.rs:79-129` | **simplified**: temp folders are readable by default. `Made` goes. |

@@ -4,9 +4,10 @@
 //! `[debug]` (the pack's language; a pack of one's own replaces it whole):
 //! - `debugger = "<name>"`: the `[debugger.<name>]` it runs — or `way = "java"`, a way tarae has in code
 //!   (java-debug through jdtls, `java.rs`).
-//! - `helpers = ["python"]`: `{python}` for the templates (the helpers that need no test).
+//! - `vars`: variables for the templates, as `[test]`'s (`packs::Derive` — `{python}`, the virtualenv's),
+//!   `{cwd}` being the project's root.
 //! - `launch`: `F5` on a file — the launch request's arguments. `{file}`, `{filename}`, `{dir}` (the file's
-//!   folder), `{cwd}` (the project's root — where the debugger runs), `{built}`, the helpers'.
+//!   folder), `{cwd}` (the project's root — where the debugger runs), `{built}`, the `vars`.
 //! - `build = { when, otherwise, run, env, pick, take, error, none }`: built before launching (on a worker) —
 //!   `run`'s output read as JSON lines, the last one `pick` holds gives `{built}` from its field `take`; a
 //!   failed build says the first line `error.pick` holds, by its first `error.text` field there (else its
@@ -41,17 +42,16 @@ use toml::Table;
 
 use crate::packs::{Var, known, string, strings};
 
-/// The ways tarae has in code (`way = …`).
-const WAYS: &[&str] = &["java"];
-/// The helpers a `[debug]` may name: those that need no test's tree.
-const HELPERS: &[&str] = &["python"];
+/// The ways tarae has in code (`way = …`; a test's `debug-attach`).
+pub(crate) const WAYS: &[&str] = &["java"];
 
 /// A language's `[debug]`.
 #[derive(Debug, Clone)]
 pub struct DebugSpec {
     pub lang: String,
     pub with: With,
-    helpers: Vec<String>,
+    /// `vars`, as `[test]`'s (`packs::Derive`), worked out with `{cwd}` the project's root.
+    vars: Vec<crate::packs::Derive>,
     launch: Option<toml::Value>,
     build: Option<BuildTemplate>,
     attach_pid: Option<toml::Value>,
@@ -90,7 +90,7 @@ fn debug_of(lang: &str, v: &toml::Value) -> Result<DebugSpec, String> {
     let t = v.as_table().ok_or("isn't a table")?;
     known(
         t,
-        &["debugger", "way", "helpers", "launch", "build", "attach-pid", "attach-remote", "attach-tcp"],
+        &["debugger", "way", "vars", "launch", "build", "attach-pid", "attach-remote", "attach-tcp"],
         "it",
     )?;
     let with = match (string(t, "debugger")?, string(t, "way")?) {
@@ -99,10 +99,7 @@ fn debug_of(lang: &str, v: &toml::Value) -> Result<DebugSpec, String> {
         (None, Some(w)) => return Err(format!("no `way = \"{w}\"` (there is: {})", WAYS.join(", "))),
         _ => return Err("takes one of `debugger` or `way`".into()),
     };
-    let helpers = strings(t.get("helpers"), "helpers")?.unwrap_or_default();
-    if let Some(h) = helpers.iter().find(|h| !HELPERS.contains(&h.as_str())) {
-        return Err(format!("no helper `{h}` here (there is: {})", HELPERS.join(", ")));
-    }
+    let vars = crate::packs::derive_rules(t.get("vars"), "")?;
     let template = |k: &str| match t.get(k) {
         None => Ok(None),
         Some(v @ toml::Value::Table(_)) => Ok(Some(v.clone())),
@@ -116,7 +113,7 @@ fn debug_of(lang: &str, v: &toml::Value) -> Result<DebugSpec, String> {
     Ok(DebugSpec {
         lang: lang.to_string(),
         with,
-        helpers,
+        vars,
         launch,
         build,
         attach_pid: template("attach-pid")?,
@@ -160,7 +157,7 @@ pub enum Attach {
 }
 
 impl DebugSpec {
-    /// `F5` on `file` in the project at `root` (a real path): what to do. Reads the disk (the helpers, the
+    /// `F5` on `file` in the project at `root` (a real path): what to do. Reads the disk (the `vars`, the
     /// build's `when`): a worker's.
     pub fn launch(&self, file: &Path, root: &Path) -> Result<Launch, String> {
         if let With::Way(_) = &self.with {
@@ -172,7 +169,7 @@ impl DebugSpec {
                 self.lang
             ));
         };
-        let mut vars = self.vars(root);
+        let mut vars = self.vars(file, root)?;
         let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let dir = file.parent().map_or_else(|| root.to_path_buf(), |d| d.canonicalize().unwrap_or(d.into()));
         for (k, v) in [
@@ -211,7 +208,7 @@ impl DebugSpec {
             With::Way(_) => return Ok(Attach::Way),
             With::Debugger(d) => d,
         };
-        let mut vars = self.vars(root);
+        let mut vars = self.vars(root, root)?;
         let mut unset = Vec::new();
         let mut put = |k: &str, v: Option<Var>| match v {
             Some(v) => drop(vars.insert(k.into(), v)),
@@ -233,17 +230,13 @@ impl DebugSpec {
         }
     }
 
-    /// The variables every template has: `{cwd}`, and the helpers'.
-    fn vars(&self, root: &Path) -> HashMap<String, Var> {
+    /// The variables every template has: `{cwd}`, and the pack's `vars` — worked out from `place` (the file
+    /// launched; the root, attaching).
+    fn vars(&self, place: &Path, root: &Path) -> Result<HashMap<String, Var>, String> {
         let mut vars = HashMap::new();
         vars.insert("cwd".into(), Var::One(root.display().to_string()));
-        for h in &self.helpers {
-            // (the `[test]` helper of that name, `packs.rs`)
-            if h == "python" {
-                vars.insert("python".into(), Var::One(crate::testing::py_interpreter(root)));
-            }
-        }
-        vars
+        crate::packs::derive(&self.vars, place, &mut vars)?;
+        Ok(vars)
     }
 
     /// One line for the language table's snapshot.
@@ -253,6 +246,9 @@ impl DebugSpec {
             With::Debugger(d) => d.clone(),
             With::Way(w) => format!("way {w}"),
         };
+        if !self.vars.is_empty() {
+            s += &format!(" · vars {}", self.vars.iter().map(|v| v.name()).collect::<Vec<_>>().join(" "));
+        }
         if let Some(l) = &self.launch {
             s += &format!(" · launch {}", l.to_string().replace('\n', " ").trim());
         }
@@ -1004,7 +1000,8 @@ mod tests {
         assert!(bad("debuger = \"d\"").contains("no `debuger`"));
         assert!(bad("debugger = \"d\"\nway = \"java\"").contains("one of"));
         assert!(bad("way = \"kotlin\"").contains("no `way = \"kotlin\"`"));
-        assert!(bad("debugger = \"d\"\nhelpers = [\"cargo\"]").contains("no helper `cargo`"));
+        assert!(bad("debugger = \"d\"\nhelpers = [\"python\"]").contains("no `helpers`"));
+        assert!(bad("debugger = \"d\"\nvars = [{ name = \"p\" }]").contains("say how"));
         assert!(bad("debugger = \"d\"\nlaunch = 1").contains("`launch` isn't a table"));
         assert!(
             bad("debugger = \"d\"\n[build]\nrun = [\"b\"]\ntake = \"x\"\npick = {}").contains("no `launch`")

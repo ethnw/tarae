@@ -731,34 +731,9 @@ fn allowed_words(words: &[String], extra: &[String]) -> bool {
         .any(|rule| rule_matches(words, &rule_env(rule).1))
 }
 
-/// Commands whose places are worth the user's list (`]q`): builds, tests, linters — by whole words.
-const CHECKS: [&str; 22] = [
-    "cargo build",
-    "cargo check",
-    "cargo test",
-    "cargo clippy",
-    "cargo nextest",
-    "cargo fmt",
-    "cargo perf",
-    "go build",
-    "go test",
-    "go vet",
-    "gofmt -l",
-    "make",
-    "npm test",
-    "npm run",
-    "pnpm test",
-    "pnpm run",
-    "yarn test",
-    "tsc",
-    "eslint",
-    "ruff check",
-    "mypy",
-    "pytest",
-];
-
-/// Whether a command Claude runs is a check or a build — every command in its line one of `CHECKS` (a `cd`
-/// aside). Only those feed the user's list; a grep of Claude's looking around doesn't replace it (#28).
+/// Whether a command Claude runs is a check or a build — every command in its line one of the packs'
+/// `checks` (a `cd` aside). Only those feed the user's list; a grep of Claude's looking around doesn't replace
+/// it (#28).
 pub fn is_check(cmd: &str) -> bool {
     // (a check's output through filters is the check's: its places are what's left — #32)
     if let Some(head) = filtered(cmd) {
@@ -780,9 +755,10 @@ pub fn is_check(cmd: &str) -> bool {
     any
 }
 
-/// Whether one command's words start with one of `CHECKS`.
+/// Whether one command's words start with one of the packs' `checks` (builds, tests, linters — by whole
+/// words: `cargo test`, `tsc`).
 fn check_words(w: &[String]) -> bool {
-    CHECKS.iter().any(|c| {
+    crate::languages::get().checks.iter().any(|c| {
         let c: Vec<&str> = c.split(' ').collect();
         w.len() >= c.len() && w.iter().zip(&c).all(|(w, c)| w == c)
     })

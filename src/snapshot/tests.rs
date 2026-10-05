@@ -439,7 +439,7 @@ fn checks_and_tests_are_covered_and_ignored_deletions_said() {
             lang: "python".into(),
             argv: vec!["sh".into(), "-c".into(), "rm src/a.txt && echo ok".into()],
             debug: None,
-            parse: "python".into(),
+            lines: crate::test_results::Rules::builtin("python"),
             build: None,
             debug_run: None,
             junit: None,

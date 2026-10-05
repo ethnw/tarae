@@ -63,10 +63,22 @@ change](#what-a-pack-of-yours-can-change)). A query file of yours replaces the b
 query = "tests.scm"                  # captures each test (@test), group (@group) and their names (@name)
 files = ["*_test.go"]                # which files hold tests
 cwd = { nearest = ["go.mod"] }       # or "file-dir"; `or = [...]` for a second choice
-parse = "go"                         # how the output is read: go · rust · python
-run = ["go", "test", "-race", "-run", "^{name}$", "./..."]        # the test at the cursor
-run-file = ["go", "test", "-race", "-run", "^({names})$", "./..."] # the file's tests, joined with |
+run = ["go", "test", "-race", "-v", "-run", "^{name}$", "./..."]        # the test at the cursor
+run-file = ["go", "test", "-race", "-v", "-run", "^({names})$", "./..."] # the file's tests, joined with |
 debug = { mode = "test", program = "{cwd}", args = ["-test.run", "^{name}$"] }  # the debugger's launch configuration
+none-ran = [0]                       # how a run that matched no test ends
+
+# How the output is read, a line at a time: the first rule that matches acts
+[[test.line]]
+match = '^\s*=== RUN\s+(?<name>\S+)'  # what follows is about this test
+begin = true
+
+[[test.line]]
+match = '^\s*--- (?<status>PASS|FAIL|SKIP): (?<name>\S+)(?: \((?<secs>[\d.]+)s\))?'
+status = { PASS = "passed", FAIL = "failed", SKIP = "skipped" }
+
+[[test.line]]
+match = '^    \s*(?<file>[^\s:]+\.go):(?<line>\d+): (?<message>.*)$'  # where it failed, and why
 ```
 
 - **Three scopes.** The test at the cursor (`run`, `debug`, `label`); the group around the cursor when it's in no
@@ -82,15 +94,16 @@ debug = { mode = "test", program = "{cwd}", args = ["-test.run", "^{name}$"] }  
   - `{names}` — the file's tests
   - `{cwd}`, `{file}`, `{filename}`, `{rel}` (the file from `{cwd}`)
 - **Helpers.** An argument that is just a list variable becomes its items, and one that ends up empty is left out.
-  - `helpers = ["python"]` adds `{python}`, the project's virtualenv Python.
-  - `helpers = ["cargo"]` adds `{cargo-target}` (`--lib`, `--bin x`, `--test x`), `{module}` (the file's module
-    path) and `{crate-root}` (the target's root file).
+  `helpers = ["cargo"]` adds `{cargo-target}` (`--lib`, `--bin x`, `--test x`), `{module}` (the file's module path)
+  and `{crate-root}` (the target's root file).
 - **Variables of the pack's own** (`vars`, a list, in order — each may use those before it): how a build's layout
   is said. The [Java pack](../runtime/packs/java/pack.toml) works out `{java-root}` (the top of a multi-module
   build), the module, Gradle or Maven, the wrapper or the tool, the module's task and `{package}` with them:
   - `{ name = "root", topmost = ["pom.xml"] }` / `nearest = [...]` — the folder holding one, the topmost below the
     repository or the nearest up (`"roots"`: the language's `roots`); none: `else = "{…}"`, or the error `missing`
-  - `{ name = "tool", first = ["{root}/gradlew", "gradle"] }` — the first that's a file, else a program name
+  - `{ name = "tool", first = ["{root}/gradlew", "gradle"] }` — the first that's a file, else a program name;
+    `~/` and `${VAR}` are expanded, and one naming a variable that isn't set is passed over (Python's `{python}`:
+    `["{cwd}/.venv/bin/python", "${VIRTUAL_ENV}/bin/python", "python3"]`)
   - `{ name = "module", parts = "{module-dir}", from = "{root}" }` — the folders between: `{module}` is `a/b`,
     `{module/:}` is `a:b`
   - `{ name = "x", if = "{module}", then = …, else = … }` (not empty), or `if-exists = "{root}/pom.xml"` — each side
@@ -99,13 +112,32 @@ debug = { mode = "test", program = "{cwd}", args = ["-test.run", "^{name}$"] }  
   `cwd` can be a template: `cwd = "{java-root}"`.
 - **Variants.** `variant-by = "{java-build}"` picks `[test.variant.gradle]` or `[test.variant.maven]`, whose
   settings override the rest; a variant's own `vars` are worked out once it's picked.
+- **Reading the output.** `[[test.line]]` rules read it a line at a time, as it comes; each line tries them in
+  order and the first whose `match` matches acts, by its named groups — `name` (the test), `status`, `secs`,
+  `file` and `line` (where it failed), `message` (a line of why):
+  - `status = { ok = "passed", FAILED = "failed" }` by the `status` group's text (passed · failed · skipped), or
+    `status = "skipped"` whatever the line
+  - `begin = true`: the lines after are about the test this one names (libtest's `---- a::b stdout ----`); `end =
+    true`: about none. A rule with no `name` group acts on that test. `known = true`: only a test already listed
+    (by name, or as the end of one's `::` name) — a heading for no test is nobody's; `name-replace = { "." = "::"
+    }` turns its name into the one the results use
+  - `phase = "failures"`: the rule counts only in that part of the output (`""`: outside every one); `to = "…"`
+    starts one (pytest's `FAILURES` block)
+  - `place = "last"`: a later place replaces this one until the test has a message (a traceback's last frame);
+    otherwise the first place that's a file stays
+  - `none-ran = [0, 5]`: a run that listed no test and ended with one of these ran none — said as such, not passed
+
+  The [Rust](../runtime/packs/rust/pack.toml) (libtest), Go and [Python](../runtime/packs/python/pack.toml)
+  (pytest) packs read theirs this way. A test is failed from when it's first listed until a line says otherwise;
+  one that said it skipped stays skipped when the runner calls it a pass.
 - **JUnit XML.** With `parse = "junit"`, results come from the reports written to `reports` during the run, and
   failures point into `sources` (through a Java stack, or the first `path:line` in the failure).
 - **Building before debugging.** `{built}` in a debug template is what `debug-build` builds when debugging
   starts — the same table as `[debug] build` ([Debuggers from packs](#debuggers-from-packs)); Rust's builds the test
   binary with `cargo test --no-run` and picks the one whose root file is `{crate-root}`.
 - **Debugging by attaching.** Instead of a `debug` template, `debug-args` are added to the command so the test
-  waits for a debugger, and `debug-attach = "java"` attaches java-debug once the JVM says where.
+  waits for a debugger, and `debug-attach = { wait-for = '…(?<port>\d+)', way = "java" }` attaches java-debug once
+  a line of the run's output matches `wait-for` — its `port` group the port.
 - **Kinds.** A query pattern can give its tests a kind with `(#set! kind "bench")`. `[test.kind.bench]` then has
   settings of its own, and `file = false` keeps those tests out of a file's run. `@start` makes a test begin
   earlier, at its attributes.
@@ -247,22 +279,39 @@ for = "cargo's lock"                  # the panel: waiting for …
 report = "cargo's {what} lock"        # Claude's report (`for` unless set)
 ```
 
+A task's places come the same way. Every tool's `path:line[:col]: [severity] message` is tarae's own; a form one
+tool has beyond it is its pack's `[[places]]` — `match` with groups `path`, `line`, `col` (or `place`, a
+`path:line:col` text), `severity`, `message`; `then` when the place comes on a later line; `message = "…"` for one
+of its own. A rule whose place isn't a file lets the next try. `checks` names the commands whose places a run of
+Claude's puts in your list (`]q`); `color-off` what turns a tool's colours off in the runs tarae reads.
+
+```toml
+# runtime/packs/rust/pack.toml
+checks = ["cargo build", "cargo check", "cargo test", "cargo clippy", "cargo nextest", "cargo fmt", "cargo perf"]
+color-off = { CARGO_TERM_COLOR = "never" }    # beside NO_COLOR=1, in every task and test run
+
+# rustc's long form: the message, then where (` --> src/a.rs:3:5`) a few lines on
+[[places]]
+match = '^(?<severity>error|warning)(?:\[[^\]]*\])?: ?(?<message>.*)$'
+then = '^--> (?<place>.+)$'
+```
+
 ### What a pack of yours can change
 
 Each top-level key of a `pack.toml` says how a pack of your own counts for it:
 
 | Keys | A pack of yours |
 |---|---|
-| `[test]`, `[tasks]`, `[[preflight]]`, `[[waits]]`, `[debug]` | replaces the built-in table |
+| `[test]`, `[tasks]`, `[[preflight]]`, `[[waits]]`, `[[places]]`, `[debug]` | replaces the built-in table |
 | `[install.<tool>]`, `[grammar.<name>]`, `[debugger.<name>]` | replaces that entry; the others stay |
 | `[language.<name>]`, `[server.<name>]` | replaces the keys it sets; the entry's other keys stay — in whichever folder the language is |
-| `config-files` | adds to the built-in list; nothing can be taken out |
-| `outputs`, `first-made`, `protect`, `[builds]` | ignored, and said at the start: tarae reads them from its own packs only (they decide what Claude's runs may reach or make, and — `[builds]`: where a checkout builds — what a session's end may delete) |
+| `config-files`, `checks` | adds to the built-in list; nothing can be taken out |
+| `outputs`, `first-made`, `protect`, `color-off`, `[builds]` | ignored, and said at the start: tarae reads them from its own packs only (they decide what Claude's runs may reach or make, or what's in their environment, and — `[builds]`: where a checkout builds — what a session's end may delete) |
 
 A key no pack knows is a mistake in that pack, said with its name as one that doesn't parse is. Your
-`[language]`, `[grammar]` and `[server]` are read once, when tarae starts — after editing them, `:restart`.
-`[test]`, `[tasks]`, `[[preflight]]`, `[[waits]]`, `[install]`, `[debug]` and `[debugger]` are read when they're
-used, so they count at once.
+`[language]`, `[grammar]`, `[server]` and `checks` are read once, when tarae starts — after editing them,
+`:restart`. `[test]`, `[tasks]`, `[[preflight]]`, `[[waits]]`, `[[places]]`, `[install]`, `[debug]` and
+`[debugger]` are read when they're used, so they count at once.
 
 ## Debugger
 
@@ -318,7 +367,8 @@ attach-tcp = { mode = "remote", substitutePath = [{ from = "{cwd}", to = "{remot
 ```
 
 - **`launch`** — what `F5` sends: `{file}`, `{filename}`, `{dir}` (the file's folder), `{cwd}` (the project's root,
-  where the debugger runs), `{python}` with `helpers = ["python"]`, and `{built}`. No `launch`: `F5` says to attach.
+  where the debugger runs), `{built}`, and the `vars` the `[debug]` has (as `[test]`'s — the Python pack's
+  `{python}`, its virtualenv's). No `launch`: `F5` says to attach.
 - **`build`** — built first, on a worker, the debug panel saying so: `run`'s output is read as JSON lines and the last
   one `pick` holds gives `{built}` from its field `take`. `pick` fields are dotted paths (`"target.kind" = "bin"`: a list
   holding it counts; paths compare as real paths). A failed build shows the first line `error.pick` holds, by its first
@@ -356,8 +406,11 @@ Where each thing used to be code, and what says it now:
 | "install lldb-dap / dlv" | the debugger's `[install.<name>]` |
 | macOS's 8-second lldb hint | `[debugger.lldb-dap] slow-start` |
 | Dropping dlv's terminal hint and lldb's disassembly; dimming dlv's `Building` | `[debugger.<name>] quiet`, `own-first` |
-| Rust's `cargo build` and picking the binary; Go's and Python's launch arguments | `[debug] build`, `launch`, `helpers` |
+| Rust's `cargo build` and picking the binary; Go's and Python's launch arguments | `[debug] build`, `launch`, `vars` |
 | Rust's test binary (`cargo test --no-run`), `{cargo-test-binary}` | `[test] debug-build`, `{built}` |
+| Reading libtest, `go test -v` and pytest output; "no tests ran" (pytest's exit 5) | `[[test.line]]`, `none-ran` |
+| The virtualenv's Python (`{python}`) | `vars` with `first` (`${VIRTUAL_ENV}`) |
+| Java's "Listening for transport dt_socket at address" | `[test] debug-attach = { wait-for, way }` |
 | Which languages attach, and each one's attach arguments | `[debug] attach-pid`, `attach-remote`, `attach-tcp` |
 
 ## Attaching to a running program

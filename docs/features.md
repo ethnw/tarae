@@ -169,8 +169,9 @@ configs carry over as they are.
   closes its panel, `:task <name>` (`:make`) runs one by name. Tasks come from the project — `cargo check`/`clippy`/
   `build`, `go build`/`vet`, `tsc`, every `npm run` script, `ruff`/`mypy`, `make`, as the language packs say — and from `[task.<name>] cmd =
   "…"` (optional `cwd`) in the config. It runs in the background with its output below the code; every
-  `file:line:col: message` it prints (rustc, gcc/clang, go, tsc, eslint, ruff, mypy, Python tracebacks) goes into the
-  list as it comes, so `]q` walks the errors. Modified files are saved first
+  `file:line:col: message` it prints (rustc, gcc/clang, go, eslint, ruff, mypy — and the forms the packs add with
+  `[[places]]`: rustc's long one, tsc's, Python tracebacks) goes into the list as it comes, so `]q` walks the errors.
+  Modified files are saved first
 - **Terminal** `space T` — your shell in a panel below the code, with the keys: everything you type goes to it
   (colors, full-screen programs, the lot). `C-\` moves the keys between the code and it, both ways (inside it the key
   is `editor.terminal-escape`); `space T` shows it with the keys — from wherever it is, behind another tab or

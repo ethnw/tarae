@@ -1,5 +1,8 @@
 # Go: gopls; `go test` in the package's folder, dlv to debug. go.mod has a language of its own here.
 
+# What checks and builds: the places Claude's run of one prints go to your list (]q)
+checks = ["go build", "go test", "go vet", "gofmt -l"]
+
 # gofmt indents with tabs
 [language.go]
 extensions = ["go"]
@@ -30,12 +33,26 @@ bundle = true
 query = "tests.scm"
 files = ["*_test.go"]
 cwd = "file-dir"
-parse = "go"
+# "no tests to run" ends with 0
+none-ran = [0]
 # One test ({name}); the file's tests ({names}, joined with |)
 run = ["go", "test", "-v", "-run", "^{name}$", "."]
 run-file = ["go", "test", "-v", "-run", "^({names})$", "."]
 debug = { mode = "test", program = "{cwd}", cwd = "{cwd}", args = ["-test.run", "^{name}$", "-test.v"], outputMode = "remote" }
 debug-file = { mode = "test", program = "{cwd}", cwd = "{cwd}", args = ["-test.run", "^({names})$", "-test.v"], outputMode = "remote" }
+
+# `go test -v`: `=== RUN` starts a test (what t.Error and t.Log say comes indented, `x_test.go:8: why`
+# under it), `--- PASS: TestX (0.01s)` ends it
+[[test.line]]
+match = '^\s*=== RUN\s+(?<name>\S+)'
+begin = true
+
+[[test.line]]
+match = '^\s*--- (?<status>PASS|FAIL|SKIP): (?<name>\S+)(?: \((?<secs>[\d.]+)s\))?'
+status = { PASS = "passed", FAIL = "failed", SKIP = "skipped" }
+
+[[test.line]]
+match = '^    \s*(?<file>[^\s:]+\.go):(?<line>\d+): (?<message>.*)$'
 
 [test.kind.bench]
 file = false

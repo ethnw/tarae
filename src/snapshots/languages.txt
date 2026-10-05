@@ -95,6 +95,7 @@
   lsp: gopls (gopls)
   installs: go comment
   debug: dlv · launch { cwd = "{cwd}", mode = "debug", outputMode = "remote", program = "{dir}" } · attach-pid { cwd = "{cwd}", mode = "local", processId = "{pid}" } · attach-tcp { mode = "remote", substitutePath = [{ from = "{cwd}", to = "{remote-root}" }] }
+  test output: 3 line rules · groups file line message name secs status · none ran at exit 0
 [gomod] go.mod
   grammar: gomod
   filenames: go.mod
@@ -146,6 +147,7 @@
   lsp: jdtls (jdtls)
   installs: java comment
   debug: way java
+  test output: junit reports · vars java-root java-module-dir java-module java-build package · debug-attach java on Listening for transport dt_socket at address: *(?:\S*:)?(?<port>\d+)
 [javascript] JavaScript
   grammar: javascript
   extensions: js mjs cjs
@@ -245,7 +247,9 @@
   lsp: basedpyright (basedpyright-langserver --stdio) pyright (pyright-langserver --stdio) pylsp (pylsp)
   also: ruff (ruff server)
   installs: python comment
-  debug: debugpy · launch { console = "internalConsole", cwd = "{cwd}", justMyCode = true, program = "{file}", python = "{python}" } · attach-pid { cwd = "{cwd}", justMyCode = false, processId = "{pid}" } · attach-tcp { justMyCode = false, pathMappings = [{ localRoot = "{cwd}", remoteRoot = "{remote-root}" }] }
+  debug: debugpy · vars python · launch { console = "internalConsole", cwd = "{cwd}", justMyCode = true, program = "{file}", python = "{python}" } · attach-pid { cwd = "{cwd}", justMyCode = false, processId = "{pid}" } · attach-tcp { justMyCode = false, pathMappings = [{ localRoot = "{cwd}", remoteRoot = "{remote-root}" }] }
+  test output: 6 line rules · groups file line message name status · phases failures · none ran at exit 0 5 · vars python
+  places: ^File "(?<path>[^"]+)", line (?<line>\d+) says "traceback"
 [ruby] Ruby
   grammar: ruby
   extensions: rb
@@ -263,6 +267,8 @@
   lsp: rust-analyzer (rust-analyzer)
   installs: rust comment
   debug: lldb-dap · launch { args = [], cwd = "{cwd}", program = "{built}", stopOnEntry = false } · build cargo build --message-format=json when Cargo.toml · attach-pid { cwd = "{cwd}", pid = "{pid}", program = "{program}" } · attach-remote { attachCommands = ["gdb-remote {host}:{port}"], cwd = "{cwd}", program = "{program}", sourceMap = [["{remote-root}", "{cwd}"]] }
+  test output: 7 line rules · groups file line message name status · none ran at exit 0
+  places: ^(?<severity>error|warning)(?:\[[^\]]*\])?: ?(?<message>.*)$ then ^--> (?<place>.+)$
 [scala] Scala
   grammar: scala
   extensions: scala sc
@@ -319,6 +325,7 @@
   roots: package.json tsconfig.json jsconfig.json
   lsp: typescript-language-server (typescript-language-server --stdio)
   installs: typescript comment
+  places: ^(?<path>.+?)\((?<line>\d+),(?<col>\d+)\): ?(?<message>.*)$
 [vue] Vue
   grammar: vue
   extensions: vue
@@ -343,6 +350,12 @@
   flags: doc-comments
   lsp: zls (zls)
   installs: zig comment
+
+[checks — feed the list]
+  go build · go test · go vet · gofmt -l · npm test · npm run · pnpm test · pnpm run · yarn test · eslint · make · ruff check · mypy · pytest · cargo build · cargo check · cargo test · cargo clippy · cargo nextest · cargo fmt · cargo perf · tsc
+
+[color-off — tasks and tests]
+  CARGO_TERM_COLOR=never
 
 [any language]
   roots: CMakeLists.txt Cargo.toml build.gradle build.gradle.kts compile_commands.json go.mod go.work jsconfig.json package.json pom.xml pyproject.toml settings.gradle settings.gradle.kts setup.cfg setup.py tsconfig.json

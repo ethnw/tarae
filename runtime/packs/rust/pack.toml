@@ -6,6 +6,10 @@
 protect = ["build.rs", "Cargo.toml", ".cargo"]
 # cargo's builds
 outputs = ["target"]
+# What checks and builds: the places Claude's run of one prints go to your list (]q)
+checks = ["cargo build", "cargo check", "cargo test", "cargo clippy", "cargo nextest", "cargo fmt", "cargo perf"]
+# cargo colours its output even into a pipe when its config says `always`: tasks and tests read it plain
+color-off = { CARGO_TERM_COLOR = "never" }
 # What a first build makes beside those names: cargo's builds, and the lock file it writes in place (an empty
 # one it takes)
 first-made = ["target/", "Cargo.lock"]
@@ -15,6 +19,12 @@ config-files = { toml = [
     "Cargo.toml", "rust-toolchain.toml", "rustfmt.toml", ".rustfmt.toml", "clippy.toml", ".clippy.toml",
     "deny.toml", ".cargo/config.toml", ".cargo/config", ".cargo/credentials.toml",
 ] }
+
+# rustc's long form: the message, then where (` --> src/a.rs:3:5`) a few lines on — the short one
+# (`--message-format=short`) is the form every tool shares
+[[places]]
+match = '^(?<severity>error|warning)(?:\[[^\]]*\])?: ?(?<message>.*)$'
+then = '^--> (?<place>.+)$'
 
 # No '' pair: a lifetime's quote
 [language.rust]
@@ -39,7 +49,8 @@ dev = true
 query = "tests.scm"
 cwd = { nearest = ["Cargo.toml"] }
 helpers = ["cargo"]          # {cargo-target}, {module}, {module-label}, {crate-root}
-parse = "rust"
+# libtest's `running 0 tests` (a filter that matched nothing) ends with 0
+none-ran = [0]
 
 run = ["cargo", "test", "{cargo-target}", "--", "{module}{path}", "--exact"]
 run-group = ["cargo", "test", "{cargo-target}", "--", "{module}{groups}::"]
@@ -51,6 +62,33 @@ label-file = "{module-label}"
 debug = { program = "{built}", args = ["{module}{path}", "--exact", "--nocapture", "--test-threads=1"], cwd = "{cwd}", stopOnEntry = false }
 debug-group = { program = "{built}", args = ["{module}{groups}::", "--nocapture", "--test-threads=1"], cwd = "{cwd}", stopOnEntry = false }
 debug-file = { program = "{built}", args = ["{module}", "--nocapture", "--test-threads=1"], cwd = "{cwd}", stopOnEntry = false }
+
+# libtest's output: a line per test, then each failure's section (`---- a::b stdout ----`) — where it
+# panicked, and the rest of the section is why
+[[test.line]]
+match = '^test (?<name>\S+)(?: - should panic)? \.\.\. (?<status>ok|FAILED|ignored)'
+status = { ok = "passed", FAILED = "failed", ignored = "skipped" }
+
+[[test.line]]
+match = '^---- (?<name>.+) stdout ----$'
+begin = true
+
+[[test.line]]
+match = '^(?:failures:|test result:)'
+end = true
+
+[[test.line]]
+match = '^\s*$|^note: run with'
+
+# Before Rust 1.73: `panicked at 'message', src/a.rs:3:5`
+[[test.line]]
+match = '''panicked at '(?<message>.*)', (?<file>[^\s:']+\.rs):(?<line>\d+)'''
+
+[[test.line]]
+match = '''panicked at (?<file>[^\s:']+\.rs):(?<line>\d+)'''
+
+[[test.line]]
+match = '^(?<message>.*)$'
 
 # {built}: the test binary of the file's target (its root file is {crate-root})
 [test.debug-build]

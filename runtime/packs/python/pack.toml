@@ -5,6 +5,13 @@
 outputs = [".venv", "__pycache__"]
 # Read by pip, uv, poetry and pipenv as soon as they're on disk
 config-files = { toml = ["pyproject.toml", "Pipfile"] }
+# What checks: the places Claude's run of one prints go to your list (]q)
+checks = ["ruff check", "mypy", "pytest"]
+
+# A traceback's frames
+[[places]]
+match = '^File "(?<path>[^"]+)", line (?<line>\d+)'
+message = "traceback"
 
 [language.python]
 extensions = ["py", "pyi", "pyw"]
@@ -30,8 +37,10 @@ args = ["server"]
 [test]
 query = "tests.scm"
 cwd = { nearest = ["pyproject.toml", "pytest.ini", "setup.cfg", "tox.ini", "setup.py"], or = [".git"] }
-helpers = ["python"]         # {python}
-parse = "python"
+# {python}: the project's virtualenv's, else the one activated, else python3
+vars = [{ name = "python", first = ["{cwd}/.venv/bin/python", "{cwd}/venv/bin/python", "${VIRTUAL_ENV}/bin/python", "python3"] }]
+# pytest's 5: nothing was collected
+none-ran = [0, 5]
 
 # -v: a line per test; --tb=short: just where it failed and the E lines (what the results panel reads)
 run = ["{python}", "-m", "pytest", "{rel}::{path}", "-v", "--tb=short", "--color=no"]
@@ -45,10 +54,44 @@ debug = { module = "pytest", args = ["{rel}::{path}", "-q", "--color=no"], pytho
 debug-group = { module = "pytest", args = ["{rel}::{groups}", "-q", "--color=no"], python = "{python}", cwd = "{cwd}", console = "internalConsole", justMyCode = false }
 debug-file = { module = "pytest", args = ["{rel}", "-q", "--color=no"], python = "{python}", cwd = "{cwd}", console = "internalConsole", justMyCode = false }
 
+# pytest -v: a line per test (`tests/test_x.py::TestA::test_b PASSED  [ 50%]` — the name past the file),
+# then the FAILURES block: a heading per failure (`___ TestA.test_b ___`), its traceback's frames
+# (`tests/test_x.py:7: in test_b` — the last before the E lines is where it failed) and its E lines
+[[test.line]]
+match = '^[^\s:]+::(?<name>\S+) (?<status>PASSED|FAILED|ERROR|SKIPPED|XFAIL)\b'
+phase = ""
+status = { PASSED = "passed", FAILED = "failed", ERROR = "failed", SKIPPED = "skipped", XFAIL = "skipped" }
+
+[[test.line]]
+match = '^=.* FAILURES '
+to = "failures"
+
+[[test.line]]
+match = '^='
+phase = "failures"
+to = ""
+
+# (a heading for no test — `ERROR at setup of …` — isn't one)
+[[test.line]]
+match = '^__[_ ]*(?<name>.*?)[_ ]*__\s*$'
+phase = "failures"
+begin = true
+known = true
+name-replace = { "." = "::" }
+
+[[test.line]]
+match = '^E\s+(?<message>.*?)\s*$'
+phase = "failures"
+
+[[test.line]]
+match = '^(?<file>[^\s:]+\.py):(?<line>\d+)'
+phase = "failures"
+place = "last"
+
 # F5: the file, with the project's virtualenv's Python (its packages)
 [debug]
 debugger = "debugpy"
-helpers = ["python"]
+vars = [{ name = "python", first = ["{cwd}/.venv/bin/python", "{cwd}/venv/bin/python", "${VIRTUAL_ENV}/bin/python", "python3"] }]
 launch = { program = "{file}", python = "{python}", console = "internalConsole", cwd = "{cwd}", justMyCode = true }
 attach-pid = { processId = "{pid}", justMyCode = false, cwd = "{cwd}" }
 # `python -m debugpy --listen 5678 app.py` speaks DAP: straight to it

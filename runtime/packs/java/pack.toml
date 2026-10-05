@@ -50,7 +50,9 @@ label = "{groups/.}.{name}"
 label-group = "{groups/.}"
 label-file = "{first-group}"
 sources = ["{java-module-dir}/src/test/java", "{java-module-dir}/src/main/java"]
-debug-attach = "java"
+# Debugging: the build runs the test JVM waiting for a debugger (`debug-args`), which says where — `5005` or
+# `*:5005` — and java-debug attaches there (tarae's own way, java.rs)
+debug-attach = { wait-for = 'Listening for transport dt_socket at address: *(?:\S*:)?(?<port>\d+)', way = "java" }
 variant-by = "{java-build}"
 
 # The project's own wrapper when it has one; the module's task (`:a:b:test`), or every project's at the top

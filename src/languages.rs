@@ -21,7 +21,11 @@
 //!   done-text, error }`, `virtual = { scheme, fetch, language, title-join }` (`virtualdoc.rs`),
 //!   `client-commands`.
 //! - `config-files = { toml = [...], json = [...] }`: files checked for parse errors before a save (`disk.rs`;
-//!   a name with a `/` is the path's last parts); `outputs`: tools' output folders that walks skip.
+//!   a name with a `/` is the path's last parts); `outputs`: tools' output folders that walks skip; `checks`:
+//!   the commands that check or build (`cargo test`, `tsc` — by their first words): the places Claude's run of
+//!   one prints go to the user's list (`tools::is_check`); `color-off = { CARGO_TERM_COLOR = "never" }`: what
+//!   turns a tool's colours off, beside `NO_COLOR=1`, in every task and test run (their output is read, not a
+//!   terminal's — built-in packs only: it's in Claude's runs' environment).
 //!
 //! Built once (`get`), before the first frame — `main` asks for it before reading the config — from the
 //! built-in packs and a runtime folder's (`~/.local/share/tarae/packs/`), each key by its `packs::Reach`:
@@ -92,6 +96,8 @@ pub struct Languages {
     pub config_toml: Vec<String>,
     pub config_json: Vec<String>,
     pub outputs: Vec<String>,
+    pub checks: Vec<String>,
+    pub color_off: Vec<(String, String)>,
     pub test_files: Vec<String>,
     pub test_dirs: Vec<String>,
     /// What was wrong in the packs read (a runtime folder's, mostly) — logged, and said at the start.
@@ -113,7 +119,7 @@ pub fn get() -> &'static Languages {
 }
 
 /// The packs' top-level lists the table holds — every pack's together.
-const LISTS: &[&str] = &["config-files", "outputs"];
+const LISTS: &[&str] = &["config-files", "outputs", "checks", "color-off"];
 
 /// One language's, grammar's or server's entry while the table is put together.
 struct Entry {
@@ -272,7 +278,7 @@ fn add_list(lists: &mut Table, key: &str, v: Value) {
     }
 }
 
-/// `config-files`' TOML and JSON names, and `outputs`, into `out`.
+/// `config-files`' TOML and JSON names, `outputs`, `checks` and `color-off` into `out`.
 fn lists_of(lists: &Table, out: &mut Languages) -> Result<(), String> {
     if let Some(c) = lists.get("config-files") {
         let c = c.as_table().ok_or("`config-files` isn't a table")?;
@@ -281,6 +287,14 @@ fn lists_of(lists: &Table, out: &mut Languages) -> Result<(), String> {
         out.config_json = strings(c.get("json"), "config-files.json")?.unwrap_or_default();
     }
     out.outputs = strings(lists.get("outputs"), "outputs")?.unwrap_or_default();
+    out.checks = strings(lists.get("checks"), "checks")?.unwrap_or_default();
+    if let Some(c) = lists.get("color-off") {
+        let c = c.as_table().ok_or("`color-off` isn't a table (`{ VAR = \"value\" }`)")?;
+        for (k, v) in c {
+            let v = v.as_str().ok_or(format!("`color-off.{k}` isn't a string"))?;
+            out.color_off.push((k.clone(), v.to_string()));
+        }
+    }
     Ok(())
 }
 
@@ -616,14 +630,21 @@ mod tests {
             if let Some(d) = crate::debugpack::read(n) {
                 line(&mut s, "debug", &[d.map_or_else(|e| format!("broken: {e}"), |d| d.summary())]);
             }
+            line(&mut s, "test output", &crate::packs::test_summary(n).into_iter().collect::<Vec<_>>());
+            for p in crate::packs::places_summary(n) {
+                line(&mut s, "places", &[p]);
+            }
         }
+        let table = super::get();
+        writeln!(s, "\n[checks — feed the list]\n  {}", table.checks.join(" · ")).unwrap();
+        let off: Vec<String> = table.color_off.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        writeln!(s, "\n[color-off — tasks and tests]\n  {}", off.join(" ")).unwrap();
         let mut any = any;
         any.sort();
         writeln!(s, "\n[any language]\n  roots: {}", any.join(" ")).unwrap();
 
         // What servers speak beyond the protocol (`lsp::ServerTraits`) — those that speak something
         writeln!(s, "\n[servers]").unwrap();
-        let table = super::get();
         let mut names: Vec<&String> = table.traits.keys().collect();
         names.sort();
         for n in names {
@@ -1009,8 +1030,16 @@ mod tests {
         let t = yours(&[(
             "rust",
             "outputs = [\"src\"]\nprotect = []\nconfig-files = { toml = [\"mine.toml\"] }\n\
+             checks = [\"just test\"]\ncolor-off = { RUSTC_WRAPPER = \"/tmp/w\" }\n\
              [grammar.rust]\ngit = \"https://example.com/r\"\nrev = \"abc\"\ncore = true\n",
         )]);
+        // Whose places feed the list: added to; what goes in every run's environment: tarae's own only
+        assert!(
+            ["just test", "cargo test", "go test"].iter().all(|c| t.checks.iter().any(|x| x == c)),
+            "{:?}",
+            t.checks
+        );
+        assert_eq!(t.color_off, [("CARGO_TERM_COLOR".to_string(), "never".to_string())]);
         assert!(!t.outputs.contains(&"src".to_string()), "{:?}", t.outputs);
         assert!(t.outputs.contains(&"target".to_string()));
         for f in ["Cargo.toml", ".cargo/config.toml", "mine.toml"] {
@@ -1019,6 +1048,7 @@ mod tests {
         let said = t.said.join("\n");
         assert!(said.contains("`outputs` is read from tarae's own packs only"), "{said}");
         assert!(said.contains("`protect` is read from tarae's own packs only"), "{said}");
+        assert!(said.contains("`color-off` is read from tarae's own packs only"), "{said}");
         assert!(said.contains("[grammar.rust] `core`"), "{said}");
         let rust = t.grammars.iter().find(|g| g.name == "rust").unwrap();
         assert_eq!(rust.git, "https://example.com/r", "re-pinned — fetched only after a yes");

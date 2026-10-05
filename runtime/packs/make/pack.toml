@@ -4,6 +4,8 @@
 # `makefile` too): make reads `GNUmakefile` before `Makefile`; just, a make-like runner (the just pack),
 # reads `justfile` and `.justfile`
 protect = ["Makefile", "GNUmakefile", "justfile", ".justfile"]
+# What builds: the places Claude's run of it prints go to your list (]q)
+checks = ["make"]
 
 # A recipe's lines start with a tab
 [language.make]

@@ -1,12 +1,15 @@
-//! Test result parsing — reads runner output line by line into per-test results (pass·fail·skip ·
-//! duration · failure message · failure location). Rust = libtest (`test a::b ... ok` ·
-//! `---- a::b stdout ----` · `panicked at file:line:col:`), Go = `go test -v`
-//! (`--- FAIL: TestX (0.00s)` · `    x_test.go:8: message`), Python = `pytest -v --tb=short`
-//! (`file::node PASSED` · `___ node ___` · `file:line: in …` · `E   …`), Java = the JUnit XML reports
-//! Gradle·Maven leave (read once after finishing — location from `at pkg.Class.method(File.java:12)`).
+//! Test results — a run's output read into per-test results (pass·fail·skip · duration · failure message ·
+//! failure location): a line at a time by the rules a pack gives (`[[test.line]]`, `Rules` — libtest, `go
+//! test -v`, pytest in the built-in packs), or from the JUnit XML reports a run leaves (Gradle, Maven, vitest
+//! — read once it ends; location from `at pkg.Class.method(File.java:12)`).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+
+use regex::Regex;
+
+use crate::packs::{known, string};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
@@ -44,7 +47,7 @@ fn resolve(cwd: &Path, rel: &str) -> Option<PathBuf> {
     cwd.ancestors().map(|d| d.join(p)).find(|f| f.is_file()).map(|f| std::fs::canonicalize(&f).unwrap_or(f))
 }
 
-/// A fragment like `a/b.rs:21:9` → (path, 0-based line).
+/// A fragment like `a/b.java:21` → (path, 0-based line).
 fn file_line(s: &str, ext: &str) -> Option<(String, usize)> {
     let i = s.find(ext)?;
     let path = s[..i + ext.len()].rsplit([' ', '(', '\'']).next()?.to_string();
@@ -71,200 +74,317 @@ pub fn unoptimized(name: &str) -> bool {
     true
 }
 
-/// Per-runner parse state.
-#[derive(Clone, Debug, Default)]
-pub enum Parser {
-    Rust {
-        /// The `---- name stdout ----` section being read.
-        section: Option<String>,
-    },
-    Go {
-        /// The current `=== RUN` test (the `file:line: message` lines below it belong to it).
-        running: Option<String>,
-    },
-    Python {
-        failures: bool,
-        section: Option<String>,
-    },
-    /// Not read line by line (Java = XML after finishing).
-    #[default]
-    None,
+/// How a pack's runner says its results, a line at a time — `[test]`'s `[[test.line]]` and `none-ran`, read
+/// on the worker that finds the test (`packs.rs`) and carried with it (a run reads no pack).
+///
+/// Each line tries the rules in order; the first whose `match` (a regular expression) matches the line acts,
+/// by its named groups — `name` (the test), `status`, `secs`, `file` and `line` (where it failed), `message`
+/// (a line of why) — and by what it says:
+/// - `status = { ok = "passed", FAILED = "failed", ignored = "skipped" }`: by the `status` group's text; or
+///   `status = "skipped"` whatever the line.
+/// - `begin = true`: the lines after this one are about the test it names (`---- a::b stdout ----`); `end =
+///   true`: about none. A rule with no `name` group acts on that test — with none, the line is nobody's.
+/// - `known = true`: only a test already listed — by its name, or as the end of one's `::`-joined name — else
+///   none (a heading that names no test). `name-replace = { "." = "::" }`: the name as the results say it.
+/// - `phase = "…"`: the rule counts only in that phase of the output (`""`: outside every one); `to = "…"`: the
+///   phase from this line on (pytest's `FAILURES` block).
+/// - `place = "last"`: a later place replaces this one until the test has a message (a traceback's last
+///   frame); else the first place that's a file stays.
+///
+/// `none-ran = [0, 5]`: a run that listed no test and ended with one of these codes ran none (a filter that
+/// matched nothing). A test listed is failed until a line says otherwise; one that said it skipped isn't a
+/// pass after; and tarae's own `SELF_SKIP` line is read whatever the rules.
+#[derive(Clone, Debug)]
+pub struct Rules {
+    lines: Vec<LineRule>,
+    none_ran: Vec<i32>,
+    /// What they were read from: two runs read alike when it's the same (`testing::How`'s equality).
+    source: String,
+}
+
+impl PartialEq for Rules {
+    fn eq(&self, o: &Rules) -> bool {
+        self.source == o.source
+    }
+}
+
+impl Eq for Rules {}
+
+#[derive(Clone, Debug)]
+struct LineRule {
+    re: Regex,
+    status: Says,
+    begin: bool,
+    end: bool,
+    known: bool,
+    name_replace: Vec<(String, String)>,
+    phase: Option<String>,
+    to: Option<String>,
+    place_last: bool,
+}
+
+/// The status a line says.
+#[derive(Clone, Debug)]
+enum Says {
+    Nothing,
+    Is(Status),
+    /// By the `status` group's text.
+    By(Vec<(String, Status)>),
+}
+
+/// The named groups a rule's `match` may have.
+const GROUPS: &[&str] = &["name", "status", "secs", "file", "line", "message"];
+
+fn status_named(s: &str) -> Result<Status, String> {
+    match s {
+        "passed" => Ok(Status::Passed),
+        "failed" => Ok(Status::Failed),
+        "skipped" => Ok(Status::Skipped),
+        _ => Err(format!("no status `{s}` (there are: passed, failed, skipped)")),
+    }
+}
+
+impl Rules {
+    /// `[test]`'s `line` and `none-ran` — None when it has no `line` (its output isn't read a line at a time).
+    pub fn read(t: &toml::Table) -> Result<Option<Rules>, String> {
+        let Some(list) = t.get("line") else {
+            return match t.contains_key("none-ran") {
+                true => Err("`none-ran` with no [[test.line]] rules to list a test".into()),
+                false => Ok(None),
+            };
+        };
+        let list = list.as_array().ok_or("`line` isn't a list ([[test.line]])")?;
+        let mut lines = Vec::new();
+        for (n, e) in list.iter().enumerate() {
+            let r = e.as_table().ok_or("a [[test.line]] isn't a table")?;
+            let what = format!("[[test.line]] {}", n + 1);
+            let rule = Self::rule(r).map_err(|e| format!("{what}: {e}"))?;
+            lines.push(rule);
+        }
+        let none_ran = match t.get("none-ran") {
+            None => Vec::new(),
+            Some(v) => {
+                let codes = v.as_array().ok_or("`none-ran` isn't a list of exit codes")?;
+                let code = |c: &toml::Value| c.as_integer().and_then(|c| i32::try_from(c).ok());
+                codes.iter().map(code).collect::<Option<_>>().ok_or("`none-ran` holds a non-number")?
+            }
+        };
+        let source = format!("{} {:?}", toml::Value::Array(list.clone()), none_ran);
+        Ok(Some(Rules { lines, none_ran, source }))
+    }
+
+    fn rule(r: &toml::Table) -> Result<LineRule, String> {
+        known(
+            r,
+            &["match", "status", "begin", "end", "known", "name-replace", "phase", "to", "place"],
+            "it",
+        )?;
+        let pattern = string(r, "match")?.ok_or("no `match`")?;
+        let re = Regex::new(&pattern).map_err(|e| format!("`match`: {e}"))?;
+        let groups: Vec<&str> = re.capture_names().flatten().collect();
+        if let Some(g) = groups.iter().find(|g| !GROUPS.contains(g)) {
+            return Err(format!("no group `{g}` (there are: {})", GROUPS.join(", ")));
+        }
+        if groups.contains(&"file") != groups.contains(&"line") {
+            return Err("a place is `file` and `line` together".into());
+        }
+        let flag = |k: &str| match r.get(k) {
+            None => Ok(false),
+            Some(v) => v.as_bool().ok_or(format!("`{k}` is true or false")),
+        };
+        let status = match r.get("status") {
+            None => Says::Nothing,
+            Some(toml::Value::String(s)) => Says::Is(status_named(s)?),
+            Some(toml::Value::Table(by)) => {
+                if !groups.contains(&"status") {
+                    return Err("`status = { … }` reads a `status` group, and `match` has none".into());
+                }
+                let mut said = Vec::new();
+                for (text, s) in by {
+                    let s = s.as_str().ok_or(format!("`status.{text}` isn't a string"))?;
+                    said.push((text.clone(), status_named(s)?));
+                }
+                Says::By(said)
+            }
+            Some(_) => return Err("`status` is a status or a table of them".into()),
+        };
+        let name_replace = match r.get("name-replace") {
+            None => Vec::new(),
+            Some(v) => {
+                let t = v.as_table().ok_or("`name-replace` is a table (`{ \".\" = \"::\" }`)")?;
+                let each = |(a, b): (&String, &toml::Value)| b.as_str().map(|b| (a.clone(), b.to_string()));
+                t.iter().map(each).collect::<Option<_>>().ok_or("`name-replace` holds a non-string")?
+            }
+        };
+        let place_last = match string(r, "place")?.as_deref() {
+            None | Some("first") => false,
+            Some("last") => true,
+            Some(p) => return Err(format!("no `place = \"{p}\"` (there are: first, last)")),
+        };
+        Ok(LineRule {
+            re,
+            status,
+            begin: flag("begin")?,
+            end: flag("end")?,
+            known: flag("known")?,
+            name_replace,
+            phase: string(r, "phase")?,
+            to: string(r, "to")?,
+            place_last,
+        })
+    }
+
+    /// One line for the language table's snapshot: the rules' count, their phases and groups, `none-ran`.
+    #[cfg(test)]
+    pub(crate) fn summary(&self) -> String {
+        let mut phases: Vec<&str> = self.lines.iter().filter_map(|l| l.to.as_deref()).collect();
+        phases.retain(|p| !p.is_empty());
+        phases.dedup();
+        let mut groups: Vec<&str> = self.lines.iter().flat_map(|l| l.re.capture_names().flatten()).collect();
+        groups.sort();
+        groups.dedup();
+        let mut s = format!("{} line rules · groups {}", self.lines.len(), groups.join(" "));
+        if !phases.is_empty() {
+            s += &format!(" · phases {}", phases.join(" "));
+        }
+        if !self.none_ran.is_empty() {
+            let codes: Vec<String> = self.none_ran.iter().map(i32::to_string).collect();
+            s += &format!(" · none ran at exit {}", codes.join(" "));
+        }
+        s
+    }
+
+    /// A built-in pack's rules (tests that run a pack's tests by hand).
+    #[cfg(test)]
+    pub(crate) fn builtin(lang: &str) -> Option<Rules> {
+        let t = crate::packs::builtin_manifests().iter().find(|(l, _)| l == lang)?.1.as_ref().ok()?;
+        Rules::read(t.get("test")?.as_table()?).unwrap()
+    }
+}
+
+/// Reads a run's output a line at a time, by its pack's rules (none: it isn't read so — JUnit's after).
+#[derive(Debug, Default)]
+pub struct Parser {
+    rules: Option<Rules>,
+    phase: String,
+    /// The case the lines are about (`begin`).
+    current: Option<usize>,
+    /// Each case's place in `cases`, by its name — a long run's lines don't look through every case — and
+    /// how many cases it has seen.
+    index: HashMap<String, usize>,
+    indexed: usize,
 }
 
 impl Parser {
-    pub fn for_lang(lang: &str) -> Parser {
-        match lang {
-            "rust" => Parser::Rust { section: None },
-            "go" => Parser::Go { running: None },
-            "python" => Parser::Python { failures: false, section: None },
-            _ => Parser::None,
-        }
+    pub fn new(rules: Option<Rules>) -> Parser {
+        Parser { rules, ..Default::default() }
     }
 
-    /// Whether a finished run ran no test: a runner read test by test that reported none (a filter that
-    /// matched nothing — libtest's `running 0 tests`, go's "no tests to run", pytest's exit 5). A runner not
-    /// read per test can't tell — its exit code stands.
+    /// Whether a finished run ran no test: one read test by test that listed none and ended as its pack says
+    /// a run of none ends (libtest's `running 0 tests` and 0, pytest's 5). One not read per test can't tell —
+    /// its exit code stands.
     pub fn ran_none(&self, code: Option<i32>, cases: &[Case]) -> bool {
-        match self {
-            Parser::None => false,
-            Parser::Python { .. } => cases.is_empty() && matches!(code, Some(0 | 5)),
-            Parser::Rust { .. } | Parser::Go { .. } => cases.is_empty() && code == Some(0),
+        let Some(r) = &self.rules else { return false };
+        cases.is_empty() && code.is_some_and(|c| r.none_ran.contains(&c))
+    }
+
+    /// `name`'s case, listed (failed until a line says otherwise) if it isn't yet.
+    fn find(&mut self, cases: &mut Vec<Case>, name: &str) -> usize {
+        if let Some(i) = self.listed(cases, name) {
+            return i;
         }
+        cases.push(Case::new(name, Status::Failed));
+        self.index.insert(name.to_string(), cases.len() - 1);
+        self.indexed = cases.len();
+        cases.len() - 1
+    }
+
+    /// `name`'s case if it's listed.
+    fn listed(&mut self, cases: &[Case], name: &str) -> Option<usize> {
+        // (cases listed elsewhere — a finished run's, in tests — are indexed once seen)
+        if self.indexed != cases.len() {
+            self.index = cases.iter().enumerate().rev().map(|(i, c)| (c.name.clone(), i)).collect();
+            self.indexed = cases.len();
+        }
+        self.index.get(name).copied().filter(|&i| cases.get(i).is_some_and(|c| c.name == name))
     }
 
     /// Reads one line — adds to or updates `cases`.
     pub fn line(&mut self, cwd: &Path, line: &str, cases: &mut Vec<Case>) {
-        let find = |cases: &mut Vec<Case>, name: &str| -> usize {
-            match cases.iter().position(|c| c.name == name) {
-                Some(i) => i,
-                None => {
-                    cases.push(Case::new(name, Status::Failed));
-                    cases.len() - 1
+        let Some(rules) = self.rules.take() else { return };
+        self.read(&rules, cwd, line, cases);
+        self.rules = Some(rules);
+    }
+
+    fn read(&mut self, rules: &Rules, cwd: &Path, line: &str, cases: &mut Vec<Case>) {
+        if let Some(rest) = line.strip_prefix(SELF_SKIP) {
+            let (name, why) = rest.split_once(" — ").unwrap_or((rest, ""));
+            let i = self.find(cases, name.trim());
+            cases[i].status = Status::Skipped;
+            cases[i].message = vec![why.trim().to_string()].into_iter().filter(|w| !w.is_empty()).collect();
+            return;
+        }
+        let Some((r, caps)) = rules
+            .lines
+            .iter()
+            .filter(|r| r.phase.as_ref().is_none_or(|p| *p == self.phase))
+            .find_map(|r| Some((r, r.re.captures(line)?)))
+        else {
+            return;
+        };
+        if let Some(to) = &r.to {
+            (self.phase, self.current) = (to.clone(), None);
+        }
+        if r.end {
+            self.current = None;
+        }
+        let i = match caps.name("name") {
+            Some(n) => {
+                let mut name = n.as_str().trim().to_string();
+                for (a, b) in &r.name_replace {
+                    name = name.replace(a.as_str(), b);
                 }
+                let i = match r.known {
+                    true => self.listed(cases, &name).or_else(|| {
+                        let end = format!("::{name}");
+                        cases.iter().position(|c| c.name.ends_with(&end))
+                    }),
+                    false => Some(self.find(cases, &name)),
+                };
+                if r.begin {
+                    self.current = i;
+                }
+                i
+            }
+            None => self.current.filter(|&i| i < cases.len()),
+        };
+        let Some(i) = i else { return };
+        let c = &mut cases[i];
+        let status = match &r.status {
+            Says::Nothing => None,
+            Says::Is(s) => Some(*s),
+            Says::By(by) => {
+                caps.name("status").and_then(|t| by.iter().find(|(k, _)| k == t.as_str())).map(|b| b.1)
             }
         };
-        match self {
-            Parser::Rust { section } => {
-                if let Some(rest) = line.strip_prefix(SELF_SKIP) {
-                    let (name, why) = rest.split_once(" — ").unwrap_or((rest, ""));
-                    let i = find(cases, name.trim());
-                    cases[i].status = Status::Skipped;
-                    cases[i].message =
-                        vec![why.trim().to_string()].into_iter().filter(|w| !w.is_empty()).collect();
-                    return;
-                }
-                if let Some(rest) = line.strip_prefix("test ")
-                    && let Some((name, verdict)) = rest.rsplit_once(" ... ")
-                {
-                    let name = name.trim_end_matches(" - should panic");
-                    let status = match verdict.trim() {
-                        "ok" => Status::Passed,
-                        "FAILED" => Status::Failed,
-                        v if v.starts_with("ignored") => Status::Skipped,
-                        _ => return,
-                    };
-                    let i = find(cases, name);
-                    // libtest's `ok` for a test that skipped itself (it said so first) stays a skip
-                    if !(status == Status::Passed && cases[i].status == Status::Skipped) {
-                        cases[i].status = status;
-                    }
-                    return;
-                }
-                if let Some(name) = line.strip_prefix("---- ").and_then(|l| l.strip_suffix(" stdout ----")) {
-                    *section = Some(name.to_string());
-                    return;
-                }
-                if line.starts_with("failures:") || line.starts_with("test result:") {
-                    *section = None;
-                    return;
-                }
-                if let Some(name) = section.clone() {
-                    if line.trim().is_empty() || line.starts_with("note: run with") {
-                        return;
-                    }
-                    let i = find(cases, &name);
-                    if let Some(p) = line.split_once("panicked at ").map(|x| x.1) {
-                        if cases[i].at.is_none() {
-                            cases[i].at = file_line(p, ".rs").and_then(|(f, l)| Some((resolve(cwd, &f)?, l)));
-                        }
-                        // Old format: panicked at 'message', file:line:col
-                        if let Some(msg) = p.strip_prefix('\'').and_then(|m| m.rsplit_once("', ")) {
-                            cases[i].message.push(msg.0.to_string());
-                        }
-                        return;
-                    }
-                    cases[i].message.push(line.to_string());
-                }
-            }
-            Parser::Go { running } => {
-                let t = line.trim_start();
-                if let Some(name) = t.strip_prefix("=== RUN") {
-                    let name = name.trim();
-                    find(cases, name);
-                    *running = Some(name.to_string());
-                    return;
-                }
-                for (tag, status) in [
-                    ("--- PASS: ", Status::Passed),
-                    ("--- FAIL: ", Status::Failed),
-                    ("--- SKIP: ", Status::Skipped),
-                ] {
-                    if let Some(rest) = t.strip_prefix(tag) {
-                        let (name, secs) = match rest.split_once(" (") {
-                            Some((n, s)) => (n, s.trim_end_matches(')').trim_end_matches('s').parse().ok()),
-                            None => (rest, None),
-                        };
-                        let i = find(cases, name.trim());
-                        (cases[i].status, cases[i].secs) = (status, secs);
-                        return;
-                    }
-                }
-                // Failure message: `    x_test.go:8: Add = 4` (t.Log·t.Error)
-                if line.starts_with("    ")
-                    && let (Some(name), Some((f, l))) = (running.clone(), file_line(t, ".go"))
-                {
-                    let i = find(cases, &name);
-                    if cases[i].at.is_none() {
-                        cases[i].at = resolve(cwd, &f).map(|p| (p, l));
-                    }
-                    let msg = t.split_once(": ").map_or(t, |x| x.1);
-                    cases[i].message.push(msg.to_string());
-                }
-            }
-            Parser::Python { failures, section } => {
-                // Result line: `tests/test_x.py::TestA::test_b PASSED [ 50%]`
-                for (tag, status) in [
-                    (" PASSED", Status::Passed),
-                    (" FAILED", Status::Failed),
-                    (" ERROR", Status::Failed),
-                    (" SKIPPED", Status::Skipped),
-                    (" XFAIL", Status::Skipped),
-                ] {
-                    if !*failures
-                        && line.contains("::")
-                        && let Some(node) = line.split_once(tag).map(|x| x.0)
-                        && !node.contains(' ')
-                    {
-                        let name = node.split_once("::").map_or(node, |x| x.1);
-                        let i = find(cases, name);
-                        cases[i].status = status;
-                        return;
-                    }
-                }
-                if line.starts_with('=') && line.contains(" FAILURES ") {
-                    *failures = true;
-                    return;
-                }
-                if !*failures {
-                    return;
-                }
-                if line.starts_with('=') {
-                    *failures = false;
-                    *section = None;
-                    return;
-                }
-                // `____ TestA.test_b ____`
-                if line.starts_with("__") && line.trim_end().ends_with("__") {
-                    let name = line.trim_matches(|c| c == '_' || c == ' ').replace('.', "::");
-                    *section = Some(name);
-                    return;
-                }
-                let Some(name) = section.clone() else { return };
-                let Some(i) =
-                    cases.iter().position(|c| c.name == name || c.name.ends_with(&format!("::{name}")))
-                else {
-                    return;
-                };
-                if let Some(msg) = line.strip_prefix("E ") {
-                    cases[i].message.push(msg.trim().to_string());
-                } else if let Some((f, l)) = file_line(line, ".py")
-                    && line.starts_with(&f)
-                    && cases[i].message.is_empty()
-                {
-                    cases[i].at = resolve(cwd, &f).map(|p| (p, l));
-                }
-            }
-            Parser::None => {}
+        // (a test that said it skipped stays skipped when the runner calls it a pass after)
+        if let Some(s) = status
+            && !(s == Status::Passed && c.status == Status::Skipped)
+        {
+            c.status = s;
+        }
+        if let Some(secs) = caps.name("secs").and_then(|s| s.as_str().parse().ok()) {
+            c.secs = Some(secs);
+        }
+        if let (Some(f), Some(l)) = (caps.name("file"), caps.name("line"))
+            && (if r.place_last { c.message.is_empty() } else { c.at.is_none() })
+            && let Some(path) = resolve(cwd, f.as_str())
+            && let Ok(l) = l.as_str().parse::<usize>()
+        {
+            c.at = Some((path, l.saturating_sub(1)));
+        }
+        if let Some(m) = caps.name("message") {
+            c.message.push(m.as_str().to_string());
         }
     }
 }
@@ -422,7 +542,7 @@ mod tests {
     /// though libtest calls it `ok` after; others are as libtest says.
     #[test]
     fn a_test_that_skipped_itself_isnt_a_pass() {
-        let mut p = Parser::for_lang("rust");
+        let mut p = Parser::new(Rules::builtin("rust"));
         let mut cases = Vec::new();
         let cwd = std::env::temp_dir();
         for l in [
@@ -444,6 +564,77 @@ mod tests {
                 ("sandbox::tests::plain", Status::Passed, String::new()),
             ]
         );
+    }
+
+    /// A run that listed no test ran none when it ends as its pack says one of none ends (pytest's 5 too);
+    /// one that listed a test, or ended otherwise, ran some; a run not read a line at a time can't tell.
+    #[test]
+    fn each_pack_says_how_a_run_of_none_ends() {
+        let none = |lang: &str, code: i32| Parser::new(Rules::builtin(lang)).ran_none(Some(code), &[]);
+        assert!(none("rust", 0) && none("go", 0) && none("python", 0) && none("python", 5));
+        assert!(!none("rust", 101) && !none("go", 1) && !none("rust", 5) && !none("python", 1));
+        assert!(!none("java", 0), "junit: its exit code stands");
+        let one = [Case::new("a", Status::Passed)];
+        assert!(!Parser::new(Rules::builtin("rust")).ran_none(Some(0), &one));
+    }
+
+    /// A pack's rules that don't hold are said, naming the rule — not skipped, not crashed on.
+    #[test]
+    fn rules_that_dont_read_are_said() {
+        let read = |toml: &str| Rules::read(&toml.parse::<toml::Table>().unwrap()).map(|r| r.is_some());
+        assert_eq!(read("run = []"), Ok(false), "no rules: not read a line at a time");
+        assert_eq!(read("[[line]]\nmatch = '^ok (?<name>.+)'\nstatus = 'passed'"), Ok(true));
+        let bad = |toml: &str| read(toml).unwrap_err();
+        assert!(bad("none-ran = [0]").contains("no [[test.line]]"));
+        assert!(bad("[[line]]\nmatch = '('").contains("[[test.line]] 1: `match`"));
+        assert!(
+            bad("[[line]]\nmatch = 'x'\n[[line]]\nmatch = 'x'\nbegins = true")
+                .contains("2: it has no `begins`")
+        );
+        assert!(bad("[[line]]\nmatch = '(?<test>x)'").contains("no group `test`"));
+        assert!(bad("[[line]]\nmatch = '(?<file>x)'").contains("`file` and `line` together"));
+        assert!(bad("[[line]]\nmatch = 'x'\nstatus = 'ok'").contains("no status `ok`"));
+        assert!(bad("[[line]]\nmatch = 'x'\nstatus = { ok = 'passed' }").contains("has none"));
+        assert!(bad("[[line]]\nmatch = 'x'\nplace = 'middle'").contains("first, last"));
+        assert!(bad("none-ran = ['0']\n[[line]]\nmatch = 'x'").contains("non-number"));
+    }
+
+    /// The pack of one's own in the docs reads `go test -v` as the Go pack does — its rules are the pack's.
+    #[test]
+    fn the_go_rules_in_the_docs_are_the_packs() {
+        let md = include_str!("../docs/testing-and-debugging.md");
+        let block = md.split("```toml\n").find(|b| b.contains("packs/go/pack.toml — run from")).unwrap();
+        let t: toml::Table = block.split("```").next().unwrap().parse().unwrap();
+        let docs = Rules::read(t["test"].as_table().unwrap()).unwrap();
+        assert!(
+            docs.is_some() && docs == Rules::builtin("go"),
+            "the docs' [[test.line]] drifted from the go pack"
+        );
+    }
+
+    /// Lines are about the test a heading names until another heading or an end; a heading that names no
+    /// test listed (`known`) leaves its lines nobody's; a later place replaces an earlier one until the
+    /// message (`place = "last"`).
+    #[test]
+    fn rules_follow_the_test_a_heading_names() {
+        let d = tmp_with("rules", &["a.x", "b.x"]);
+        let rules = "none-ran = [0]\n\
+            [[line]]\nmatch = '^(?<name>\\S+) (?<status>ok|bad)$'\nstatus = { ok = 'passed', bad = 'failed' }\n\
+            [[line]]\nmatch = '^== (?<name>.+)$'\nbegin = true\nknown = true\nname-replace = { '.' = '::' }\n\
+            [[line]]\nmatch = '^--$'\nend = true\n\
+            [[line]]\nmatch = '^at (?<file>\\S+):(?<line>\\d+)'\nplace = 'last'\n\
+            [[line]]\nmatch = '^! (?<message>.*)$'\n";
+        let rules = Rules::read(&rules.parse::<toml::Table>().unwrap()).unwrap();
+        let text = "m::t1 bad\nm::t2 ok\n== t1\nat a.x:3\nat b.x:9\n! why\nat a.x:1\n--\n! nobody's\n\
+                    == m.t2\n! also\n== setup of t3\n! lost";
+        let c = feed(&mut Parser::new(rules), &d, text);
+        let got: Vec<_> = c.iter().map(|c| (c.name.as_str(), c.status, c.message.join("|"))).collect();
+        assert_eq!(
+            got,
+            [("m::t1", Status::Failed, "why".to_string()), ("m::t2", Status::Passed, "also".to_string())]
+        );
+        assert_eq!(c[0].at, Some((d.join("b.x"), 8)), "the last place before the message");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     fn feed(p: &mut Parser, cwd: &Path, text: &str) -> Vec<Case> {
@@ -469,7 +660,7 @@ mod tests {
     fn reads_libtest_output() {
         let d = tmp_with("rust", &["src/math.rs"]);
         let out = "running 3 tests\ntest math::tests::adds ... ok\ntest math::tests::divides ... FAILED\ntest math::tests::slow ... ignored, takes long\n\nfailures:\n\n---- math::tests::divides stdout ----\n\nthread 'math::tests::divides' panicked at src/math.rs:21:9:\nassertion `left == right` failed: 7 / 2 rounds down\n  left: 3\n right: 4\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    math::tests::divides\n\ntest result: FAILED. 1 passed; 1 failed; 1 ignored";
-        let c = feed(&mut Parser::for_lang("rust"), &d, out);
+        let c = feed(&mut Parser::new(Rules::builtin("rust")), &d, out);
         let st: Vec<_> = c.iter().map(|c| (c.name.as_str(), c.status)).collect();
         assert_eq!(
             st,
@@ -491,7 +682,7 @@ mod tests {
     fn reads_go_test_v_output() {
         let d = tmp_with("go", &["calc_test.go"]);
         let out = "=== RUN   TestAdd\n    calc_test.go:8: Add = 4\n--- FAIL: TestAdd (0.00s)\n=== RUN   TestAddNegative\n--- PASS: TestAddNegative (0.01s)\nFAIL\nexit status 1";
-        let c = feed(&mut Parser::for_lang("go"), &d, out);
+        let c = feed(&mut Parser::new(Rules::builtin("go")), &d, out);
         assert_eq!((c[0].name.as_str(), c[0].status, c[0].secs), ("TestAdd", Status::Failed, Some(0.0)));
         assert_eq!(c[0].message, ["Add = 4"]);
         assert_eq!(c[0].at, Some((d.join("calc_test.go"), 7)));
@@ -500,15 +691,83 @@ mod tests {
 
     #[test]
     fn reads_pytest_verbose_short_tracebacks() {
-        let d = tmp_with("py", &["tests/test_math.py"]);
-        let out = "tests/test_math.py::test_add FAILED                                   [ 50%]\ntests/test_math.py::TestDiv::test_half PASSED                        [100%]\n\n=================================== FAILURES ===================================\n___________________________________ test_add ___________________________________\ntests/test_math.py:7: in test_add\n    assert total == 6\nE   assert 5 == 6\n=========================== short test summary info ============================\nFAILED tests/test_math.py::test_add - assert 5 == 6";
-        let c = feed(&mut Parser::for_lang("python"), &d, out);
+        let d = tmp_with("py", &["tests/test_math.py", "tests/check.py"]);
+        let out = "tests/test_math.py::test_add FAILED                                   [ 50%]\ntests/test_math.py::TestDiv::test_half PASSED                        [100%]\n\n=================================== FAILURES ===================================\n___________________________________ test_add ___________________________________\ntests/test_math.py:7: in test_add\n    check(total)\ntests/check.py:3: in check\n    assert total == 6\nE   assert 5 == 6\ntests/test_math.py:1: in nothing\n=========================== short test summary info ============================\nFAILED tests/test_math.py::test_add - assert 5 == 6";
+        let c = feed(&mut Parser::new(Rules::builtin("python")), &d, out);
         assert_eq!(
             c.iter().map(|c| (c.name.as_str(), c.status)).collect::<Vec<_>>(),
             [("test_add", Status::Failed), ("TestDiv::test_half", Status::Passed)]
         );
         assert_eq!(c[0].message, ["assert 5 == 6"]);
-        assert_eq!(c[0].at, Some((d.join("tests/test_math.py"), 6)));
+        assert_eq!(
+            c[0].at,
+            Some((d.join("tests/check.py"), 2)),
+            "the traceback's last frame before the E lines"
+        );
+    }
+
+    /// The three runners' outputs, 10k lines each or so — passes mostly, a failure in every two hundred
+    /// with its section, message and place (`src/m.rs`, `t_test.go`, `tests/test_m.py`).
+    fn outputs() -> [(&'static str, String); 3] {
+        let (mut rust, mut go, mut py) = (String::new(), String::new(), String::new());
+        let mut failures = (String::new(), String::new());
+        // (go's two lines a test: every other one)
+        for i in 0..10_000 {
+            let n = i % 40 + 1;
+            if i % 200 == 0 {
+                rust += &format!("test m::tests::t{i} ... FAILED\n");
+                failures.0 += &format!(
+                    "---- m::tests::t{i} stdout ----\nthread 'm::tests::t{i}' panicked at src/m.rs:{n}:9:\n\
+                     assertion `left == right` failed\n  left: 1\n right: 2\n"
+                );
+                go += &format!(
+                    "=== RUN   TestT{i}\n    t_test.go:{n}: got 1, want 2\n--- FAIL: TestT{i} (0.00s)\n"
+                );
+                py += &format!("tests/test_m.py::test_t{i} FAILED                         [ 50%]\n");
+                failures.1 += &format!(
+                    "_____________ test_t{i} _____________\ntests/test_m.py:{n}: in test_t{i}\n    assert x == 2\n\
+                     E   assert 1 == 2\n"
+                );
+                continue;
+            }
+            rust += &format!("test m::tests::t{i} ... ok\n");
+            py += &format!("tests/test_m.py::TestC::test_t{i} PASSED                  [ 50%]\n");
+            if i % 2 == 0 {
+                go += &format!("=== RUN   TestT{i}\n--- PASS: TestT{i} (0.01s)\n");
+            }
+        }
+        rust +=
+            &format!("\nfailures:\n\n{}\nfailures:\n    m::tests::t0\n\ntest result: FAILED.", failures.0);
+        py += &format!(
+            "\n=================== FAILURES ===================\n{}=========== short test summary info ===========\n",
+            failures.1
+        );
+        [("rust", rust), ("go", go), ("python", py)]
+    }
+
+    /// Reading a run's output — on the main loop, a line at a time as it comes: 30k lines of libtest, `go test
+    /// -v` and pytest output, the best of 5. A number for `cargo perf`.
+    #[test]
+    fn perf_test_output_lines() {
+        if crate::test_results::unoptimized("test_results::tests::perf_test_output_lines") {
+            return;
+        }
+        let d = tmp_with("perf", &["src/m.rs", "t_test.go", "tests/test_m.py"]);
+        let outs = outputs();
+        let lines: usize = outs.iter().map(|(_, o)| o.lines().count()).sum();
+        let mut best = f64::MAX;
+        for _ in 0..5 {
+            let t0 = std::time::Instant::now();
+            for (lang, out) in &outs {
+                let c = feed(&mut Parser::new(Rules::builtin(lang)), &d, out);
+                assert!(c.len() >= 5_000 && c.iter().any(|c| c.at.is_some()), "{lang}: {}", c.len());
+            }
+            best = best.min(t0.elapsed().as_secs_f64() * 1000.0);
+        }
+        let line = format!("PERF test_output_30k_lines_ms {best:.3} budget=60 noise=1\n");
+        let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+        assert!(lines >= 30_000 && best < 60.0, "{best:.1} ms for {lines} lines (budget 60)");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

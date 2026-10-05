@@ -2,7 +2,7 @@
 //! rerun the last one. A language's tests are found and run the way its pack says (`packs.rs`,
 //! `runtime/packs/`: Go, Rust, Python, Java). Finding goes **through the tree-sitter tree** — if the grammar
 //! is missing, show a download offer and resume the intended work once downloaded (`offer::Resume`). Here:
-//! the helpers packs use (the Cargo target, the virtualenv), running, and debugging.
+//! the helper packs use (the Cargo target), running, and debugging.
 //!
 //! Runs on three worker threads (read stdout·stderr, wait) — editing isn't blocked. Launched in a process group
 //! of its own (`setsid`) so closing kills the whole process group (including the test binaries cargo spawned).
@@ -33,16 +33,16 @@ pub struct Target {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum How {
-    /// From a language pack: the command, the debugger's launch configuration, the output parser.
-    /// And what to build before debugging; or the command to debug with instead, and how to attach
+    /// From a language pack: the command, the debugger's launch configuration, how its output is read a line
+    /// at a time. And what to build before debugging; or the command to debug with instead, and how to attach
     /// (`java`); and for `junit`, where the reports land and the source roots.
     Pack {
         lang: String,
         argv: Vec<String>,
         debug: Option<Value>,
-        parse: String,
+        lines: Option<crate::test_results::Rules>,
         build: Option<crate::debugpack::Build>,
-        debug_run: Option<(Vec<String>, String)>,
+        debug_run: Option<(Vec<String>, crate::packs::AttachWait)>,
         junit: Option<(Vec<PathBuf>, Vec<PathBuf>)>,
     },
 }
@@ -60,10 +60,10 @@ fn lang_of(how: &How) -> &str {
     lang
 }
 
-/// Which output parser reads a run.
-fn parser_of(how: &How) -> &str {
-    let How::Pack { parse, .. } = how;
-    parse
+/// What reads a run's output a line at a time.
+fn parser_of(how: &How) -> crate::test_results::Parser {
+    let How::Pack { lines, .. } = how;
+    crate::test_results::Parser::new(lines.clone())
 }
 
 /// Can this language's tests be run (before finding — when asking whether to download the grammar).
@@ -95,7 +95,7 @@ pub fn find(
         lang: lang.to_string(),
         argv: f.argv,
         debug: f.debug,
-        parse: f.parse,
+        lines: f.lines,
         build: f.build,
         debug_run: f.debug_run,
         junit: f.junit,
@@ -256,19 +256,6 @@ fn module_path(rest: &[&str]) -> Vec<String> {
     v
 }
 
-// ── Python ───────────────────────────────────────────────────────────────
-
-/// The venv's python if any (`.venv`·`venv`·`$VIRTUAL_ENV`), else python3.
-pub fn py_interpreter(root: &Path) -> String {
-    let venv = std::env::var_os("VIRTUAL_ENV").map(PathBuf::from);
-    [root.join(".venv"), root.join("venv")]
-        .into_iter()
-        .chain(venv)
-        .map(|v| v.join("bin/python"))
-        .find(|p| p.is_file())
-        .map_or_else(|| "python3".to_string(), |p| p.display().to_string())
-}
-
 // ── Running ──────────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -289,9 +276,9 @@ pub struct TestRun {
     pub took: Option<Duration>,
     pid: Option<u32>,
     generation: u64,
-    /// Java test debug: attach once the test JVM prints
-    /// "Listening for transport dt_socket at address: N" (file, root).
-    java_attach: Option<(PathBuf, PathBuf)>,
+    /// A test debugged by running it (`debug-attach`): attached once a line says where it waits — the file
+    /// and project it's for.
+    attach: Option<(crate::packs::AttachWait, PathBuf, PathBuf)>,
     /// Per-test results (parsed per line — Java: JUnit XML after finishing) · the one picked in the
     /// results pane.
     pub cases: Vec<crate::test_results::Case>,
@@ -363,13 +350,13 @@ impl TestRun {
             lang: "python".into(),
             argv: vec!["python".into()],
             debug: None,
-            parse: "python".into(),
+            lines: crate::test_results::Rules::builtin("python"),
             build: None,
             debug_run: None,
             junit: None,
         };
         TestRun {
-            parser: crate::test_results::Parser::for_lang(parser_of(&how)),
+            parser: parser_of(&how),
             target: Target { label: label.into(), cwd: std::env::temp_dir(), how },
             state: RunState::Failed(Some(1)),
             output: output.into_iter().map(|l| (false, l)).collect(),
@@ -377,7 +364,7 @@ impl TestRun {
             took: None,
             pid: None,
             generation: 0,
-            java_attach: None,
+            attach: None,
             cases,
             selected: 0,
             scroll: None,
@@ -636,7 +623,8 @@ impl Editor {
         };
         let watched = policy.is_some_and(|p| p.watch.is_some());
         let mut cmd = crate::sandbox::command(policy, &argv[0], &argv[1..]);
-        cmd.current_dir(&target.cwd).env("NO_COLOR", "1").env("CARGO_TERM_COLOR", "never");
+        cmd.current_dir(&target.cwd);
+        crate::task::color_off(&mut cmd);
         let wall = std::time::SystemTime::now();
         // (its own session and group, not a fork of the editor — `spawn.rs`; on Linux from a thread confined
         // to its sandbox)
@@ -683,12 +671,9 @@ impl Editor {
                         if r.wait.line(hit, at, &r.trace) {
                             continue;
                         }
-                        // Java test debug: the test JVM waits for a debugger — attach to that port
-                        let listen = line
-                            .split_once("Listening for transport dt_socket at address:")
-                            .and_then(|(_, a)| a.trim().rsplit(':').next()?.parse::<u16>().ok());
-                        if let Some(port) = listen
-                            && let Some(a) = r.java_attach.take()
+                        // A test debugged by running it waits for a debugger — attach to the port it says
+                        if let Some(port) = r.attach.as_ref().and_then(|a| a.0.port(&line))
+                            && let Some(a) = r.attach.take()
                         {
                             attach = Some((a, port, r.target.label.clone()));
                         }
@@ -700,10 +685,14 @@ impl Editor {
                     if n > 5000 {
                         r.output.drain(..n - 5000);
                     }
-                    if let Some(((file, root), port, label)) = attach {
+                    if let Some(((wait, file, root), port, label)) = attach {
                         ed.dap_generation += 1;
                         let g = ed.dap_generation;
-                        ed.java_attach(file, root, "127.0.0.1".into(), port, g);
+                        // (the ways tarae has in code — `debugpack::WAYS`, checked when the pack was read)
+                        match wait.way.as_str() {
+                            "java" => ed.java_attach(file, root, "127.0.0.1".into(), port, g),
+                            way => return ed.set_error(format!("no way `{way}` to attach")),
+                        }
                         // Debug pane header = the test name, not the address
                         if let Some(d) = ed.dap.as_mut() {
                             d.program = label;
@@ -780,7 +769,7 @@ impl Editor {
             };
             let _ = tx.send(crate::event::Event::Job(Box::new(done)));
         });
-        let parser = crate::test_results::Parser::for_lang(parser_of(&target.how));
+        let parser = parser_of(&target.how);
         self.session.test_run = Some(TestRun {
             target,
             state: RunState::Running,
@@ -789,7 +778,7 @@ impl Editor {
             took: None,
             pid: Some(pid),
             generation,
-            java_attach: None,
+            attach: None,
             cases: Vec::new(),
             parser,
             selected: 0,
@@ -809,9 +798,9 @@ impl Editor {
     }
 
     /// Debugging by running `argv` (a pack's `debug-args`): Java — the build tool starts the test JVM waiting
-    /// for a debugger (build output in the test pane), and once it prints that it's waiting, java-debug
-    /// attaches (debug pane).
-    fn test_debug_by_running(&mut self, target: Target, argv: Vec<String>) {
+    /// for a debugger (build output in the test pane), and once it prints where it's waiting (`wait`), the
+    /// pack's way attaches (debug pane).
+    fn test_debug_by_running(&mut self, target: Target, argv: Vec<String>, wait: crate::packs::AttachWait) {
         let Some(file) = self.doc().path.clone() else { return };
         let mut t = target.clone();
         let How::Pack { argv: run, .. } = &mut t.how;
@@ -826,7 +815,7 @@ impl Editor {
         self.session.test_last = Some((target.clone(), true));
         self.dap_test = Some(target);
         if let Some(r) = self.session.test_run.as_mut() {
-            r.java_attach = Some((file, root));
+            r.attach = Some((wait, file, root));
         }
         self.set_status("Building and starting the test JVM — attaching when it's ready");
     }
@@ -848,8 +837,8 @@ impl Editor {
         self.dap_resume = Some(crate::offer::Resume::TestTarget(Box::new(target.clone())));
         let lang = lang_of(&target.how).to_string();
         let How::Pack { debug_run, .. } = &target.how;
-        if let Some((argv, _)) = debug_run.clone() {
-            return self.test_debug_by_running(target, argv);
+        if let Some((argv, wait)) = debug_run.clone() {
+            return self.test_debug_by_running(target, argv, wait);
         }
         let lang = lang.as_str();
         self.dap_generation += 1;
@@ -1024,10 +1013,11 @@ mod tests {
             "Test + a lowercase letter isn't a test (go's rule)"
         );
         // Debugging: the pack's launch configuration, filled in
-        let How::Pack { debug: Some(launch), parse, .. } = find_at("x := 1").how else {
+        let How::Pack { debug: Some(launch), lines, .. } = find_at("x := 1").how else {
             panic!("from the pack")
         };
-        assert_eq!(parse, "go");
+        assert_eq!(lines, crate::test_results::Rules::builtin("go"));
+        assert!(lines.is_some());
         assert_eq!(
             launch,
             json!({ "mode": "test", "program": "/p", "cwd": "/p", "args": ["-test.run", "^TestParse$", "-test.v"], "outputMode": "remote" })
@@ -1047,7 +1037,6 @@ mod tests {
             [test]
             query = "q.scm"
             cwd = { nearest = ["go.mod"] }
-            parse = "go"
             run = ["go", "test", "-race", "-run", "^{name}$", "./..."]
             run-file = ["go", "test", "{file}"]
         "#;
@@ -1206,7 +1195,14 @@ mod tests {
         else {
             panic!("no debug run or junit")
         };
-        assert_eq!((argv.last().map(String::as_str), attach.as_str()), (Some("--debug-jvm"), "java"));
+        assert_eq!((argv.last().map(String::as_str), attach.way.as_str()), (Some("--debug-jvm"), "java"));
+        // (where the JVM says it waits: the port, with a host or without)
+        let says = |a: &str| attach.port(&format!("Listening for transport dt_socket at address: {a}"));
+        assert_eq!(
+            (says("5005"), says("*:5006"), says("localhost:5007")),
+            (Some(5005), Some(5006), Some(5007))
+        );
+        assert_eq!(attach.port("Listening for transport dt_shmem at address: 5005"), None);
         assert_eq!(reports, [d.join("app/build/test-results/test")]);
         assert_eq!(sources, [d.join("app/src/test/java"), d.join("app/src/main/java")]);
         // Maven: -pl module -Dtest=Class#method
@@ -1342,7 +1338,7 @@ mod tests {
                     lang: parse.into(),
                     argv: vec!["sh".into(), "-c".into(), script.into()],
                     debug: None,
-                    parse: parse.into(),
+                    lines: crate::test_results::Rules::builtin(parse),
                     build: None,
                     debug_run: None,
                     junit: None,
@@ -1387,7 +1383,7 @@ mod tests {
                 lang: "rust".into(),
                 argv: vec!["sh".into(), "-c".into(), script.into()],
                 debug: None,
-                parse: "rust".into(),
+                lines: crate::test_results::Rules::builtin("rust"),
                 build: None,
                 debug_run: None,
                 junit: None,
@@ -1440,7 +1436,7 @@ mod tests {
                 lang: "python".into(),
                 argv: vec![python.into(), "-m".into(), "pytest".into(), "x".into()],
                 debug: None,
-                parse: "python".into(),
+                lines: crate::test_results::Rules::builtin("python"),
                 build: None,
                 debug_run: None,
                 junit: None,
