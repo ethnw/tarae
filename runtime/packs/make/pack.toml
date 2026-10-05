@@ -26,3 +26,12 @@ rank = 90
 [[tasks.task]]
 name = "make"
 cmd = "make"
+
+# A code review's grades (`risk.rs`): a recipe is shell — as bash's (a Makefile itself is a protected name: every
+# change to it is high already; these are for the `.mk` files it includes)
+[review]
+risky = [
+    '\brm\s+(-[a-zA-Z]*[rRf]|--recursive|--force)', '\b(curl|wget)\b[^#]*\|\s*(sudo\s+)?(ba|z|da|k)?sh\b',
+    '\b(sudo|doas)\b', '\bch(mod|own|grp)\b', '\beval\b', '\b(curl|wget|nc|ncat|ssh|scp)\b', '\bdd\b.*\bof=',
+    '\bmkfs', '\bshred\b', '\$\(shell\b',
+]

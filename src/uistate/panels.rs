@@ -59,6 +59,11 @@ pub struct Review {
     pub file: Option<String>,
     pub focused: bool,
     pub rows: Vec<Row>,
+    /// Its high-risk changes no one has looked at (`path:line` — `risk.rs`).
+    pub high: Vec<String>,
+    /// Its reviewer (`reviewer.rs`): reading · done · stopped, and what it found — findings, on high-risk
+    /// changes, answered.
+    pub reviewer: Option<(&'static str, crate::reviewer::Tally)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -203,6 +208,19 @@ impl Editor {
                 file: marked.and_then(|i| r.files.get(i)).map(|f| f.rel.clone()),
                 focused: r.focus,
                 rows,
+                high: r
+                    .high_unseen(self)
+                    .into_iter()
+                    .map(|(i, at)| format!("{}:{}", r.files[i].rel, at + 1))
+                    .collect(),
+                reviewer: self.session.reviewer.as_ref().filter(|v| v.of == r.started).map(|v| {
+                    let state = match v.state {
+                        crate::reviewer::State::Reading => "reading",
+                        crate::reviewer::State::Done => "done",
+                        crate::reviewer::State::Failed(_) => "stopped",
+                    };
+                    (state, crate::reviewer::review_tally(self).unwrap_or_default())
+                }),
             });
         }
         if let Some(r) = self.session.review.as_ref().filter(|r| r.ready) {
@@ -375,7 +393,9 @@ impl Panels {
             }),
             "review": self.review.as_ref().map(|r| json!({
                 "base": r.base, "files": r.files, "viewed": r.viewed, "file": r.file, "focused": r.focused,
-                "rows": rows_json(&r.rows),
+                "rows": rows_json(&r.rows), "high": r.high,
+                "reviewer": r.reviewer.map(|(state, t)| json!({ "state": state, "findings": t.findings,
+                    "high": t.high, "answered": t.answered })),
             })),
             "edit_review": self.edit_review.as_ref().map(|r| json!({
                 "file": r.file, "change": [r.change.0, r.change.1], "undecided": r.undecided,
@@ -412,7 +432,15 @@ impl Panels {
         }
         if let Some(r) = &self.review {
             let file = r.file.as_deref().map(|f| format!(" · in hand {f}")).unwrap_or_default();
-            out.push(format!("review {} · {} files, {} viewed{file}", r.base, r.files, r.viewed));
+            let high = match r.high.len() {
+                0 => String::new(),
+                n => format!(" · {n} high-risk to look at"),
+            };
+            let by = r
+                .reviewer
+                .map(|(s, t)| format!(" · reviewer {s}, {} findings", t.findings))
+                .unwrap_or_default();
+            out.push(format!("review {} · {} files, {} viewed{high}{by}{file}", r.base, r.files, r.viewed));
         }
         if let Some(r) = &self.edit_review {
             out.push(format!(

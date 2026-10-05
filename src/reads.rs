@@ -198,11 +198,7 @@ pub fn request(ed: &mut Editor, request_id: &str, req: &Value) -> Option<Value> 
     // (the root, a real path, is where claude runs — its relative paths are from there)
     let root = ed.session.root.clone();
     ed.events.jobs().spawn(move || {
-        let look = look(&tool, &input, &root);
-        let mut kept = crate::allow::Store::read(store.as_deref()).get(&root);
-        let defaults = crate::allow::defaults(&root, temp);
-        kept.read.extend(defaults.all());
-        let ok = covered(&look, &root, &chat, &kept, &made);
+        let (look, ok, defaults) = decide(&tool, &input, &root, store.as_deref(), temp, &chat, &made);
         let class = crate::cards::class(look.at.as_deref(), &defaults, crate::allow::home().as_deref());
         // (asked: its card says first what looks like a token there)
         let found = match (ok, &look.at) {
@@ -221,6 +217,29 @@ pub fn request(ed: &mut Editor, request_id: &str, req: &Value) -> Option<Value> 
         }
     });
     None
+}
+
+/// What `tool` reading `input` (from `root`, where claude runs) reads, and whether it may go without asking:
+/// inside `root`, a place this conversation (`chat`) or the user (`store`, kept for always) allowed, the places
+/// read unasked (`allow::defaults` — the repository's other checkouts, and the temp folders when `temp`), or
+/// made by a run of this turn (`made`). The defaults come back too (the card sorts places by them). A worker's:
+/// it resolves paths and reads the kept answers. The chat asks the rest on a card; the reviewer refuses it
+/// (`reviewer.rs`).
+pub fn decide(
+    tool: &str,
+    input: &Value,
+    root: &Path,
+    store: Option<&Path>,
+    temp: bool,
+    chat: &Allowed,
+    made: &Made,
+) -> (Look, bool, crate::allow::Defaults) {
+    let look = look(tool, input, root);
+    let mut kept = crate::allow::Store::read(store).get(root);
+    let defaults = crate::allow::defaults(root, temp);
+    kept.read.extend(defaults.all());
+    let ok = covered(&look, root, chat, &kept, made);
+    (look, ok, defaults)
 }
 
 /// A read come to wait beside the one on the card up (it came after the card): the card offers their folder

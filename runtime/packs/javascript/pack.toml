@@ -54,3 +54,12 @@ each = { json = "package.json", keys = "scripts" }
 # No `[[preflight]]` defaults: JavaScript's toolchain doesn't define the check — npm, pnpm, yarn or bun run
 # it, jest, vitest, mocha … test it, and `npm init`'s default `test` script fails on purpose. `[preflight]`
 # in .tarae.toml lists this project's steps.
+
+# A code review's grades (`risk.rs`): a change adding or removing a line like these is high-risk — spawning,
+# running code, deleting and moving, permissions and links, the network, the environment
+[review]
+risky = [
+    'child_process', '\beval\(', 'new Function\(', '\bfs\.(rm|rmdir|unlink|rename|chmod|symlink)', '\bfetch\(',
+    'require\(.(net|http|https).\)', 'from .(node:)?(net|http|https).', 'process\.env\.\w+\s*=',
+]
+quiet = ["__tests__/", "*.test.js", "*.spec.js", "*.test.jsx", "*.spec.jsx"]

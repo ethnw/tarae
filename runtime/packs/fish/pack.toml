@@ -8,3 +8,12 @@ comment-token = "#"
 git = "https://github.com/ram02z/tree-sitter-fish"
 rev = "a78aef9abc395c600c38a037ac779afc7e3cc9e0"
 bundle = true
+
+# A code review's grades (`risk.rs`): as bash's — deleting, running what it fetched, root, permissions, the
+# network, evaluating strings
+[review]
+risky = [
+    '\brm\s+(-[a-zA-Z]*[rRf]|--recursive|--force)', '\b(curl|wget)\b[^#]*\|\s*(sudo\s+)?(ba|z|da|k|fi)?sh\b',
+    '\bsource\s+\(', '\b(sudo|doas)\b', '\bch(mod|own|grp)\b', '\beval\b', '\b(curl|wget|nc|ncat|ssh|scp)\b',
+    '\bdd\b.*\bof=', '\bmkfs', '\bshred\b',
+]

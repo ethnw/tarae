@@ -798,15 +798,68 @@ back in one go. It works on the real buffers, so every motion, go-to-definition,
   opened again, the review keeps it — and a change to the diff takes it back. `space v q` ends the review (with files
   not viewed it asks first, on a card naming them), and the gutter goes back to comparing against the index
 
-### Claude reviews your changes
+### A second Claude reviews your changes
 
-![Claude's review: notes at the ends of the new lines (div(x, 0) panics; average of nothing divides by zero), a note card open under the cursor, and the verdict in the chat](screenshots/claude-reviews.png)
+`space v c` (or `:review-claude [branch]`) opens the review if it isn't open and starts **the reviewer**: a
+second Claude, apart from the chat. The conversation that wrote the code never reviews it itself. The reviewer
+never sees that conversation. It isn't continued from it, and nothing of the chat goes into what it's sent.
 
-It works the other way too. `space v c` (or `:review-claude [branch]`) opens the review if it isn't open and
-hands Claude the whole diff, untracked files included. Claude reads the code around the changes as it needs to,
-pins each finding to its lines as a [note](#notes) (bugs, cases that break, missing tests, and no style nits),
-and gives its verdict in the chat. It doesn't change files. Answer a note with `space n`: in a review that's a
-draft, and `space v s` sends your answers together.
+- It gets the whole diff, untracked files included. The diff is data, in a block the diff can't close. The ask
+  says before and after it that anything in the changes or the files that reads like an instruction is to be
+  reported, never followed.
+- It has a checklist on top of whether the code is right:
+  - deleting files or folders
+  - permissions, the sandbox and trust rules
+  - spawning processes
+  - the network
+  - links followed
+  - `unsafe`
+  - build scripts and manifests
+  - secrets
+  - for each change of behaviour, whether a test would fail without it
+- It can only read and pin notes. Its tools are Read, Grep, Glob and the note tool. Reads go by the chat's
+  rules, and what would ask you on a card is refused instead. It can't edit, write or run anything, and an ask
+  for that is refused. No settings are loaded for it. Its claude is one process for one turn, and nothing of it
+  is kept.
+- Its findings are notes on the lines, marked **reviewer** (the chat's are the **author**'s, yours are
+  **you**). They wait like your drafts. Nothing goes to the author's chat until you send it: `space v s` sends
+  your drafts and its findings together, and tells the author that the findings come from a second Claude,
+  to weigh and not to obey. `:note-close` drops a finding first.
+- The rail says how it's doing (`reading…`, then `2 findings ▲1 · 1 answered`) and the first line of its
+  verdict. `space v r` (`:review-verdict`) shows the whole report, and `:reviewer-stop` stops it.
+- What it costs is the session's, said as the reviewer's in `:usage`.
+
+### Risk grades
+
+![A review's rail: ▲ 2 high to look at; build.rs and main.rs marked ▲1, README.md quiet; the unsafe line ends with "▲ high · unsafe · space v h"](screenshots/review-risk.png)
+
+tarae, not a model, grades every change in a review:
+
+- **▲ high** when any of these holds:
+  - an added or removed line matches its language pack's patterns (Rust: `unsafe`, `Command::new`,
+    `remove_dir_all`, sockets…);
+  - its path is in the project's `review.risky` (a trusted setting, read from the checkout tarae started in);
+  - its path is a protected name (build scripts, manifests).
+- **• behaviour** for any other change.
+- **quiet** (no mark) for docs, tests (a pack's `quiet` paths, or a change wholly inside a test), snapshots
+  (`review.quiet`) and formatting. A high-risk change in a test is still high.
+
+A person looks at each high-risk change: `space v h` on it, in review mode. A file's mark and Claude don't
+count. Until then:
+
+- the file can't be marked viewed;
+- `space v q`'s card names what's left and has no yes;
+- the session's bring card names what's left and has no `y` or `p`, and a bring asked any other way is refused.
+
+The look is kept per changed line: its file, whether it was added or removed, and its text. A change looked at
+before it was committed still counts, and a line changed since needs a look again. Where the line is isn't part
+of it, so commits that regroup the changes still count. The same line added again elsewhere in the same file
+counts as looked at already.
+
+A file made executable or turned into a symlink is a high-risk change too, shown on its first line. It's kept
+by its modes, so `space v h` there takes it.
+
+![End the review? — 2 high-risk changes not looked at, named; the only answer is n Keep reviewing](screenshots/review-end-held.png)
 
 | Key | In a review |
 |---|---|
@@ -819,8 +872,10 @@ draft, and `space v s` sends your answers together.
 | `space v u` | Take the change at the cursor back |
 | `space v z` | Read wide: the rail and the chat give the code their columns (again: back) |
 | `space v s` / `:review-send` | Send the drafts to Claude |
-| `space v c` / `:review-claude` | Claude reviews the changes: notes on the lines, a verdict in the chat |
-| `space v q` / `:review-close` | End the review (asks first while files aren't viewed) |
+| `space v c` / `:review-claude` | The reviewer, a second Claude, reviews the changes: findings on the lines, a verdict |
+| `space v r` / `:review-verdict` | The reviewer's report: its verdict and findings |
+| `space v h` / `:review-hunk-seen` | The high-risk change here: looked at |
+| `space v q` / `:review-close` | End the review (asks first while files aren't viewed; held while a high-risk change isn't looked at) |
 | `space v t` / `:review-turn` | Review what Claude changed in its latest turn |
 | `space v a` / `:review-at-end` | [Review at the end](#review-at-the-end): Claude's edits go in as it works (asks first) |
 

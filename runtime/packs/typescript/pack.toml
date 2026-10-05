@@ -61,3 +61,11 @@ ways = [
     { run = ["npm", "install", "--global", "typescript-language-server", "typescript"] },
     { run = ["brew", "install", "typescript-language-server"] },
 ]
+
+# A code review's grades (`risk.rs`): as JavaScript's
+[review]
+risky = [
+    'child_process', '\beval\(', 'new Function\(', '\bfs\.(rm|rmdir|unlink|rename|chmod|symlink)', '\bfetch\(',
+    'require\(.(net|http|https).\)', 'from .(node:)?(net|http|https).', 'process\.env\.\w+\s*=',
+]
+quiet = ["__tests__/", "*.test.ts", "*.spec.ts", "*.test.tsx", "*.spec.tsx"]

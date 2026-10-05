@@ -6,7 +6,7 @@
 03   1 of 3 viewed            ▌  1
 04                            ▌  2 /// Counts how often each word appears.
 05     src/                   ▌  3 ///
-06 ▎ │ ● demo.rs     +3 −3 ¶1 ▌  4 /// Words are split on whitespace; case is kept.
+06 ▎ │ ● demo.rs   • +3 −3 ¶1 ▌  4 /// Words are split on whitespace; case is kept.
 07   │ ◦ lib.rs       +40 new ▌  5 pub fn word_counts(text: &str) -> HashMap<&str, usize> {
 08   ◦ README.md        +2 −1 ▌   −    let mut counts = HashMap::new();
 09                            ▌  6▎    let mut counts: HashMap<&str, usize> = HashMap::new();
@@ -68,7 +68,7 @@
 03   f ff f ffffff               f
 04                               f
 05     dddf                      f
-06 a f g ddddddd     gg ee aa    f
+06 a f g ddddddd   w gg ee aa    f
 07   f f              ggg fff    f
 08   f                  gg ee     E
 09                               fw

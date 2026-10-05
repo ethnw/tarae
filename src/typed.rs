@@ -347,6 +347,18 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
             crate::codereview::close_asked(editor);
             Ok(())
         }
+        "review-hunk-seen" => {
+            crate::codereview::hunk_seen(editor);
+            Ok(())
+        }
+        "review-verdict" => {
+            crate::reviewer::verdict(editor);
+            Ok(())
+        }
+        "reviewer-stop" => {
+            crate::reviewer::stop(editor);
+            Ok(())
+        }
         "review-turn" => {
             crate::codereview::review_turn(editor);
             Ok(())

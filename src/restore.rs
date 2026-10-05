@@ -79,6 +79,29 @@ impl State {
             .unwrap_or_default()
     }
 
+    /// The changed lines a person looked at in this folder's reviews (`Session.looked` — `risk.rs`), kept as
+    /// 32 hex digits each; anything else (an earlier build's FNV numbers) counts for nothing — its changes ask
+    /// for a look again.
+    pub fn looked(&self, cwd: &Path) -> std::collections::HashSet<crate::risk::Key> {
+        let keys = self.root.get("looked").and_then(|n| n.get(cwd.to_str()?)).and_then(Value::as_array);
+        keys.into_iter().flatten().filter_map(Value::as_str).filter_map(crate::risk::key_of_hex).collect()
+    }
+
+    /// The looked-at lines of the session in `cwd` as they are now (as `set_notes`).
+    pub fn set_looked(&mut self, cwd: &Path, looked: &std::collections::HashSet<crate::risk::Key>) {
+        let Some(cwd) = cwd.to_str() else { return };
+        let saved = self.root.entry("looked").or_insert_with(|| json!({}));
+        if let Some(map) = saved.as_object_mut() {
+            match looked.is_empty() {
+                true => map.remove(cwd),
+                false => {
+                    let keys: Vec<String> = looked.iter().map(|k| crate::risk::key_hex(*k)).collect();
+                    map.insert(cwd.to_string(), json!(keys))
+                }
+            };
+        }
+    }
+
     /// The notes of the session in `cwd` as they are now — what `notes` gives from here on (a session ended
     /// and opened again in the same run), and what's written on quit.
     pub fn set_notes(&mut self, cwd: &Path, notes: Vec<Value>) {
@@ -172,6 +195,12 @@ impl Editor {
             .collect();
         for (cwd, notes) in notes {
             self.restore.set_notes(&cwd, notes);
+        }
+        // (and what was looked at in its reviews — the gate on its bring, `risk.rs`)
+        let looked: Vec<(PathBuf, std::collections::HashSet<crate::risk::Key>)> =
+            self.sessions_in_order().iter().map(|l| (l.root.clone(), l.looked.clone())).collect();
+        for (cwd, looked) in looked {
+            self.restore.set_looked(&cwd, &looked);
         }
         let opened = self.restore.opened;
         let folder = self.session.root.to_str().map(str::to_string);
@@ -274,6 +303,21 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// The lines looked at in a review (`risk.rs`) outlive a quit, as their keys in hex; a mark kept by an earlier
+    /// build (an FNV number) counts for nothing — its change asks for a look again.
+    #[test]
+    fn looked_at_lines_are_kept_by_their_sha256_key_only() {
+        let k = crate::risk::key("src/a.rs", b'+', "    unsafe { b() }");
+        let mut s = State::from_json(json!({}));
+        let root = Path::new("/proj");
+        s.set_looked(root, &std::iter::once(k).collect());
+        let kept = State::from_json(Value::Object(s.root.clone()));
+        assert_eq!(kept.looked(root), std::iter::once(k).collect());
+        // An earlier build's mark of the same line: its FNV key, a number
+        let old = State::from_json(json!({ "looked": { "/proj": [12387807294418380025u64, "zz"] } }));
+        assert!(old.looked(root).is_empty(), "an old mark is no look");
+    }
+
     /// Wave 3, gap 1: the notes of a session behind (a review's drafts too) were saved only for the front's
     /// folder — gone on every quit and restart. Each session's are kept under its own checkout, and come back
     /// in its session when it does (`sessions_back` → `session_add`), none in another's.
@@ -290,10 +334,10 @@ mod tests {
         let (front, back) = (dir.join("front"), dir.join("back"));
         let mut ed = Editor::new(crate::config::Config::default());
         ed.session.root = front.clone();
-        crate::notes::add(&mut ed, &front.join("a.txt"), 0..1, By::Claude, "in front");
+        crate::notes::add(&mut ed, &front.join("a.txt"), 0..1, By::Author, "in front");
         let id = ed.session_add(back.clone());
         ed.with_session(id, |ed| {
-            crate::notes::add(ed, &back.join("a.txt"), 1..2, By::Claude, "behind");
+            crate::notes::add(ed, &back.join("a.txt"), 1..2, By::Author, "behind");
             // (a review's draft, not sent yet)
             let n = ed.session.notes.list.last_mut().unwrap();
             n.thread.push(crate::notes::Entry { by: By::You, text: "my draft".into(), draft: true });

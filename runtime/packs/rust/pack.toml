@@ -189,3 +189,14 @@ ways = [
     { run = ["rustup", "component", "add", "rust-analyzer"], bin = ["~/.cargo/bin"], project = true },
     { run = ["brew", "install", "rust-analyzer"] },
 ]
+
+# A code review's grades (`risk.rs`): a change that adds or removes a line like these is high-risk — looked
+# at by a person before it's brought: unsafe code, spawning, deleting and moving, permissions and links,
+# sockets, the environment. Tests and benches are quiet (a high line in them still isn't)
+[review]
+risky = [
+    '\bunsafe\b', 'Command::new', '\.exec\(', 'remove_dir_all', 'remove_file', '\bremove_dir\b', 'fs::rename',
+    'set_permissions', 'symlink', 'TcpStream', 'TcpListener', 'UdpSocket', 'UnixStream',
+    'UnixListener', 'libc::', 'env::set_var', 'env::remove_var', 'from_raw', 'transmute',
+]
+quiet = ["tests/", "benches/"]

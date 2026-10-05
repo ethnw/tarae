@@ -23,3 +23,13 @@ ways = [
     { run = ["npm", "install", "--global", "bash-language-server"] },
     { run = ["brew", "install", "bash-language-server"] },
 ]
+
+# A code review's grades (`risk.rs`): a change adding or removing a line like these is high-risk — deleting,
+# running what it fetched, root, permissions, the network, evaluating strings, raw disks, history rewritten
+[review]
+risky = [
+    '\brm\s+(-[a-zA-Z]*[rRf]|--recursive|--force)', '\b(curl|wget)\b[^#]*\|\s*(sudo\s+)?(ba|z|da|k)?sh\b',
+    '<\(\s*(curl|wget)\b', '\b(sudo|doas)\b', '\bch(mod|own|grp)\b', '\beval\b', '\b(curl|wget|nc|ncat|ssh|scp)\b',
+    '\bdd\b.*\bof=', '\bmkfs', '\bshred\b', '>\s*/dev/(sd|nvme|disk)', '\bLD_PRELOAD\b',
+    '\bgit\s+(push\s.*(-f\b|--force)|reset\s+--hard|clean\s+-[a-zA-Z]*f)',
+]

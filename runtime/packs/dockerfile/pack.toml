@@ -9,3 +9,12 @@ comment-token = "#"
 git = "https://github.com/camdencheek/tree-sitter-dockerfile"
 rev = "087daa20438a6cc01fa5e6fe6906d77c869d19fe"
 bundle = true
+
+# A code review's grades (`risk.rs`): an image's build is shell, and its user and what it fetches matter —
+# running what it fetched, root, permissions, deleting, fetching from the network, secrets in the build
+[review]
+risky = [
+    '\b(curl|wget)\b[^#]*\|\s*(sudo\s+)?(ba|z|da|k)?sh\b', '\bUSER\s+(root|0)\b', '\b(sudo|doas)\b',
+    '\bch(mod|own)\b', '\brm\s+(-[a-zA-Z]*[rRf]|--recursive|--force)', '\bADD\s+https?://', '--privileged',
+    '\b(curl|wget)\b', '\b(ARG|ENV)\s+\w*(TOKEN|SECRET|PASSWORD|KEY)\w*',
+]

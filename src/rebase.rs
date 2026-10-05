@@ -792,11 +792,12 @@ impl Editor {
                 }
                 // (a session's: bring it now? The checkout tarae started in has no base to go into)
                 if self.session.id != 0 {
-                    let root = self.session.root.clone();
-                    let quick = self.preflight_quick();
-                    self.push_offer(
-                        Moved { root, name, branch, base, moved: 0, ahead }.bring_card(quick, true),
-                    );
+                    let (root, quick, sid) =
+                        (self.session.root.clone(), self.preflight_quick(), self.session.id);
+                    let card =
+                        Moved { root: root.clone(), name, branch, base: base.clone(), moved: 0, ahead }
+                            .bring_card(quick, true);
+                    crate::codereview::push_bring_card(self, sid, card, root, base);
                 }
             }
             Ended::Aborted => {

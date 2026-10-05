@@ -473,6 +473,9 @@ pub(crate) const KEYS: &[(&str, Reach)] = &[
     ("checks", Reach::Added),
     // Variables in every task's and test run's environment — Claude's too: env can change what runs
     ("color-off", Reach::BuiltIn),
+    // What a code review grades high and quiet (`risk.rs`): one's own patterns make more changes high, its
+    // quiet paths can't lower a high one
+    ("review", Reach::Added),
     // Tools' output folders: skipped by walks — the token scan's among them, so one of one's own would hide
     // a token from it
     ("outputs", Reach::BuiltIn),
@@ -735,6 +738,52 @@ pub fn protect() -> Vec<String> {
         match protect_of(text) {
             Ok(names) => out.extend(names),
             Err(e) => crate::log::line("tarae", "warning", &format!("the {lang} pack: protect: {e}")),
+        }
+    }
+    out
+}
+
+/// One pack's `[review]` (`risk.rs`): the languages it's for (its `[language.<name>]`s, else its own name),
+/// the line patterns that make a change high (`risky`), the paths that are tests or docs (`quiet`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Review {
+    pub pack: String,
+    pub langs: Vec<String>,
+    pub risky: Vec<String>,
+    pub quiet: Vec<String>,
+}
+
+/// Every pack's `[review]` — a runtime folder's adds to the built-in one's (`Reach::Added`). A pack that
+/// can't be read is logged and left out.
+pub fn review() -> Vec<Review> {
+    let mut out = Vec::new();
+    for pack in crate::runtime::pack_langs() {
+        let t = match manifest(&pack) {
+            Some(Ok(t)) => t,
+            Some(Err(e)) => {
+                crate::log::line("tarae", "warning", &e);
+                continue;
+            }
+            None => continue,
+        };
+        let Some(r) = t.get("review") else { continue };
+        let langs = match t.get("language").and_then(toml::Value::as_table) {
+            Some(l) => l.keys().cloned().collect(),
+            None => vec![pack.clone()],
+        };
+        let read = || -> Result<Review, String> {
+            let r = r.as_table().ok_or("`review` isn't a table")?;
+            known(r, &["risky", "quiet"], "[review]")?;
+            Ok(Review {
+                pack: pack.clone(),
+                langs,
+                risky: strings(r.get("risky"), "risky")?.unwrap_or_default(),
+                quiet: strings(r.get("quiet"), "quiet")?.unwrap_or_default(),
+            })
+        };
+        match read() {
+            Ok(r) => out.push(r),
+            Err(e) => crate::log::line("tarae", "warning", &format!("the {pack} pack: {e}")),
         }
     }
     out
@@ -1687,6 +1736,17 @@ impl Tests {
             debug_run,
             junit,
         })
+    }
+
+    /// Where the file's tests are (byte ranges): each test, and each group holding one (a test module's
+    /// helpers are its tests' code) — a change wholly inside one is a test's (`risk.rs`).
+    pub fn test_spans(&self, tree: &Tree, src: &str) -> Vec<std::ops::Range<usize>> {
+        let items = self.items(tree, src);
+        let tests: Vec<std::ops::Range<usize>> =
+            items.iter().filter(|i| i.test).map(|i| i.range.clone()).collect();
+        let holds = |g: &std::ops::Range<usize>| tests.iter().any(|t| g.start <= t.start && t.end <= g.end);
+        let groups = items.iter().filter(|i| !i.test && holds(&i.range)).map(|i| i.range.clone());
+        groups.chain(tests.iter().cloned()).collect()
     }
 
     fn items(&self, tree: &Tree, src: &str) -> Vec<Item> {

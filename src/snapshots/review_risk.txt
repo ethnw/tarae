@@ -1,0 +1,97 @@
+# review_risk · 112x30 · theme meok · cursor 5:32
+## text
+00   review       uncommitted ▌ tarae  ›  src  ›  demo.rs
+01   ──────────────────────── ▌ ──────────────────────────────────────────────────────────────────────────────────
+02   1 file  +30              ▌  3 let line_1 = 1;                                                                ▐
+03   0 of 1 viewed            ▌  2 let line_2 = 2;                                                                ▐
+04   ▲ 1 high to look at      ▌  1 let line_3 = 3;                                                                ▐
+05   reviewer  1 finding ▲1   ▌  4 let line_4 = 4;                                                                ▐
+06   “One risk: the unsafe c… ▌  1 let line_5 = 5;                                                                ▐
+07                            ▌  2▎let added_1 = 1;   ▲ high · unsafe (rust pack) · space v h                     ▐
+08     src/                   ▌  3▎let added_2 = 2;                                                               ▐
+09 ▎ │ ◦ demo.rs       ▲1 +30 ▌  4▎let added_3 = 3;                                                               ▐
+10                            ▌  5▎let added_4 = 4;                                                               ▐
+11                            ▌  6▎let added_5 = 5;                                                               ▐
+12                            ▌  7▎let added_6 = 6;                                                               ▐
+13                            ▌  8▎let pid = unsafe { getpid() };   ¶ reviewer · unsafe without a SAFETY comment. ▐
+14                            ▌  9▎let added_8 = 8;                                                               ▐
+15                            ▌ 10▎let added_9 = 9;                                                               ▐
+16                            ▌ 11▎let added_10 = 10;                                                             ▐
+17                            ▌ 12▎let added_11 = 11;                                                             ▐
+18                            ▌ 13▎let added_12 = 12;                                                             ▐
+19                            ▌ 14▎let added_13 = 13;                                                             ▐
+20                            ▌ 15▎let added_14 = 14;                                                             ▐
+21                            ▌ 16▎let added_15 = 15;                                                             ▐
+22                            ▌ 17▎let added_16 = 16;                                                             ▐
+23                            ▌ 18▎let added_17 = 17;                                                             ▐
+24                            ▌ 19▎let added_18 = 18;                                                             ▐
+25   ]g hunk  ]F file         ▌ 20▎let added_19 = 19;                                                             ▐
+26   space e files            ▌ 21▎let added_20 = 20;                                                             ▐
+27   space n comment          ▌ 22▎let added_21 = 21;                                                             ▐
+28   space v m viewed · q end ▌ 23▎let added_22 = 22;                                                             ▐
+29  ▐ NORMAL ▌  +30                                                                         rust   utf-8 LF   4:1
+## bg · surface per cell, blank = ui.background
+00 ppppppppppppppppppppppppppp
+01 ppppppppppppppppppppppppppp
+02 ppppppppppppppppppppppppppp
+03 ppppppppppppppppppppppppppp
+04 ppppppppppppppppppppppppppp
+05 ppppppppppppppppppppppppppp     Acccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+06 ppppppppppppppppppppppppppp
+07 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
+08 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
+09 PPPPPPPPPPPPPPPPPPPPPPPPPPp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
+10 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
+11 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
+12 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
+13 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
+14 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
+15 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
+16 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
+17 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
+18 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
+19 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
+20 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
+21 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
+22 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
+23 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
+24 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
+25 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
+26 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
+27 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
+28 ppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111111
+29   AAAAAAAA
+## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
+00   TTTTTT       fffffffffff   ddddd  f  ddd  f  TTTTTTT
+01   ffffffffffffffffffffffff   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+02   d dddd  ggg                 f                                                                                f
+03   f ff f ffffff               f                                                                                f
+04   e e eeee ee eeee ee         f                                                                                f
+05   BBBBBBBB  d ddddddd ee      A                                                                                g
+06   dddd ddddd ddd dddddd dd    f                                                                                g
+07                               fg                   e                                                           g
+08     dddf                      fg                                                                               g
+09 a f f ttttttt       ee ggg    fg                                                                               g
+10                               fg                                                                               g
+11                               fg                                                                               g
+12                               fg                                                                               g
+13                               fg                                                                               g
+14                               fg                                                                               g
+15                              ffg                                                                               g
+16                              ffg                                                                               g
+17                              ffg                                                                               g
+18                              ffg                                                                               g
+19                              ffg                                                                               g
+20                              ffg                                                                               g
+21                              ffg                                                                               g
+22                              ffg                                                                               g
+23                              ffg                                                                               g
+24                              ffg                                                                               g
+25   DD ffff  DD ffff           ffg                                                                               g
+26   DDDDD D fffff              ffg                                                                               g
+27   DDDDD D fffffff            ffg                                                                               g
+28   DDDDD D f ffffff f f fff   ffg                                                                               g
+29  a BBBBBB a  ggg                                                                         dddd   ddddd dd   TTT
+## legend
+bg: c=ui.cursorline.primary  p=ui.popup  P=ui.menu.selected  A=ui.cursor.primary  1=other
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  e=error  g=diff.plus  B=bold

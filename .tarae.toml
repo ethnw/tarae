@@ -3,6 +3,15 @@
 restart-build = "cargo build --release"
 restart-binary = "target/release/tarae"
 
+# A code review's grades (`risk.rs`): every change to these is high-risk — looked at by a person (space v h)
+# before the review ends or a session is brought; snapshots and docs are quiet
+[review]
+risky = [
+  "sandbox*", "landlock.rs", "seccomp.rs", "allow.rs", "trust.rs", "builds.rs", "build.rs", ".github/",
+  ".tarae.toml",
+]
+quiet = ["src/snapshots/", "docs/"]
+
 [llm]
 # tarae's own tests (attach.rs, dap.rs, plugin …) connect to their own port-0 listeners — opens every local port,
 # the risky ones too

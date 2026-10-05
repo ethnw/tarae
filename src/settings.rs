@@ -502,6 +502,26 @@ pub static SETTINGS: &[Setting] = &[
         get: |c| Value::from(c.session_worktrees.as_str()),
         set: |c, v| c.session_worktrees = s(v).to_string(),
     },
+    Setting {
+        path: "review.risky",
+        kind: Kind::StrList,
+        doc: "Code review: files whose every change is high-risk — looked at by you (space v h) before the review ends or the session is brought. A name matches anywhere, in any case, one * per part (\"sandbox*\"); a path from the project root (\".github/\"). The language packs' patterns (unsafe, spawning…) and the protected names count too. Read from the checkout tarae started in",
+        get: |c| Value::Array(c.review_risky.iter().map(|a| Value::from(a.as_str())).collect()),
+        set: |c, v| {
+            c.review_risky =
+                v.as_array().into_iter().flatten().filter_map(|a| a.as_str().map(str::to_string)).collect()
+        },
+    },
+    Setting {
+        path: "review.quiet",
+        kind: Kind::StrList,
+        doc: "Code review: files that are tests, docs or snapshots — their changes graded quiet (never over a high-risk one). Names and paths as review.risky",
+        get: |c| Value::Array(c.review_quiet.iter().map(|a| Value::from(a.as_str())).collect()),
+        set: |c, v| {
+            c.review_quiet =
+                v.as_array().into_iter().flatten().filter_map(|a| a.as_str().map(str::to_string)).collect()
+        },
+    },
 ];
 
 /// Settings that had another name: (old path, new path). A config file's old name still applies, and a

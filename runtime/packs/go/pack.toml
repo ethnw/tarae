@@ -124,3 +124,13 @@ ways = [
     { run = ["go", "install", "github.com/go-delve/delve/cmd/dlv@latest"], bin = ["${GOBIN}", "${GOPATH}/bin", "~/go/bin"] },
     { run = ["brew", "install", "delve"] },
 ]
+
+# A code review's grades (`risk.rs`): a change adding or removing a line like these is high-risk — unsafe,
+# spawning, deleting and moving, permissions and links, the network, the environment
+[review]
+risky = [
+    '"unsafe"', '\bunsafe\.', '"os/exec"', 'exec\.Command', 'syscall\.', 'os\.RemoveAll', 'os\.Remove\(',
+    'os\.Rename', 'os\.Chmod', 'os\.Symlink', 'filepath\.EvalSymlinks', 'net\.Dial', 'net\.Listen',
+    'http\.(Get|Post|Head)\(', 'os\.Setenv',
+]
+quiet = ["*_test.go", "testdata/"]

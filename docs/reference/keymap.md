@@ -326,9 +326,11 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 |---|---|---|
 | `space v a` | `review_at_end` | Claude's edits: review at end |
 | `space v b` | `review_branch` | Review against a branch… |
-| `space v c` | `review_claude` | Claude reviews the changes |
+| `space v c` | `review_claude` | A second Claude reviews |
+| `space v h` | `review_hunk_seen` | Looked at this risky change |
 | `space v m` | `review_viewed` | Mark this file viewed |
 | `space v q` | `review_close` | End the review |
+| `space v r` | `review_verdict` | The reviewer's verdict |
 | `space v s` | `review_send` | Send the review to Claude |
 | `space v t` | `review_turn` | Review Claude's last turn |
 | `space v u` | `review_undo_change` | Take this change back |
@@ -514,7 +516,10 @@ Type `:` in normal mode. `Tab` completes command names and their arguments (path
 | `:effort` |  | How hard Claude thinks (none: a picker) |
 | `:review` |  | Review the changes (uncommitted, or since a branch) |
 | `:review-send` |  | Send the review's comments to Claude |
-| `:review-claude` |  | Claude reviews the changes (uncommitted, or since a branch) |
+| `:review-claude` |  | A second Claude reviews the changes (uncommitted, or since a branch) |
+| `:review-verdict` |  | The reviewer's verdict and findings |
+| `:review-hunk-seen` |  | The high-risk change here: looked at |
+| `:reviewer-stop` |  | Stop the reviewer reading |
 | `:review-close` |  | End the review |
 | `:review-at-end` |  | Claude's edits go in as it works, reviewed when its turn ends (on/off) |
 | `:review-turn` |  | Review what Claude changed in its last turn |

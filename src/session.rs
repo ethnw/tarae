@@ -54,8 +54,11 @@ pub struct Session {
     pub review: Option<crate::llm::Review>,
     /// The code review in progress (`codereview.rs`).
     pub code_review: Option<crate::codereview::CodeReview>,
-    /// The review being opened is for Claude to review (`space v c`) — asked once it's open.
+    /// The review being opened is for the reviewer (`space v c`) — asked once it's open.
     pub review_ask: bool,
+    /// The reviewer — a second Claude reviewing the code review's changes, apart from the chat's
+    /// conversation (`reviewer.rs`): reading, or what it found last.
+    pub reviewer: Option<crate::reviewer::Reviewer>,
     /// The side panel — files or outline (`sidebar.rs`).
     pub sidebar: Option<crate::sidebar::Sidebar>,
     /// The tab it last showed (`C-w e` opens it again).
@@ -138,6 +141,9 @@ pub struct Session {
     /// The code review's viewed marks, by file — kept past the review (#9: reopened, they were gone) while the
     /// file's diff is what it was when marked (`codereview::Viewed`).
     pub viewed: std::collections::HashMap<PathBuf, crate::codereview::Viewed>,
+    /// The changed lines a person looked at in a review (`space v h` on a high-risk change — `risk::keys`):
+    /// what holds the review's end and the bring until they're all here (`risk.rs`).
+    pub looked: std::collections::HashSet<crate::risk::Key>,
     /// Its files that came again from disk (or changed there under an edit) while it was behind — said only
     /// in `:messages` (`disk_said`), so its tab, the chip and its row in the list carry a `•` (#6) until it
     /// comes to the front.
@@ -204,6 +210,7 @@ impl Session {
             review: None,
             code_review: None,
             review_ask: false,
+            reviewer: None,
             sidebar: None,
             side_last: crate::sidebar::Mode::Files,
             terminal: None,
@@ -242,6 +249,7 @@ impl Session {
             asking: Vec::new(),
             spawned: Vec::new(),
             viewed: Default::default(),
+            looked: Default::default(),
             reloaded: 0,
             usage: Default::default(),
             compacted: Default::default(),

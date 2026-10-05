@@ -167,7 +167,7 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
 
 /// A tool's schema with its annotations: a title, and whether it only reads or may change things the
 /// user has (hints for the client — tarae's own cards and reviews still decide).
-fn annotated(mut schema: Value) -> Value {
+pub(crate) fn annotated(mut schema: Value) -> Value {
     let (title, hint) = match schema["name"].as_str().unwrap_or_default() {
         "note" => ("Pin a note", None),
         "run_tests" => ("Run tests", None),
@@ -195,7 +195,7 @@ fn annotated(mut schema: Value) -> Value {
 }
 
 /// A tool's text as MCP content (Err = a tool error Claude can correct).
-fn content(r: Result<String, String>) -> Value {
+pub(crate) fn content(r: Result<String, String>) -> Value {
     match r {
         Ok(t) => json!({ "content": [{ "type": "text", "text": t }] }),
         Err(e) => json!({ "content": [{ "type": "text", "text": e }], "isError": true }),

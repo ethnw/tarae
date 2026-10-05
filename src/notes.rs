@@ -2,6 +2,8 @@
 //!
 //! - Claude writes them with the `note` tool of the chat process (an MCP server living in tarae — the chat
 //!   answers `mcp_message` control requests, `chat.rs`). `reply_to` answers a thread instead.
+//! - Each entry says who wrote it (`By`): the author (the chat's Claude), you, or the reviewer (a second
+//!   Claude, `reviewer.rs` — its findings wait like your drafts, `finding`).
 //! - A note sits on a document mark (it follows edits); a file that isn't open keeps the line numbers and
 //!   gets its mark when it opens (`attach`, every event). The line end shows `¶ first words +N`, and with
 //!   the cursor on the lines a card shows the whole thread (`term::note_lines`).
@@ -23,10 +25,43 @@ use crate::editor::Editor;
 use crate::movement as mv;
 use crate::selection::{Range as SelRange, Selection};
 
+/// Who wrote an entry: the chat's Claude (the author of the changes) · you · the reviewer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum By {
-    Claude,
+    /// The chat's Claude — what it changed is what's reviewed.
+    Author,
     You,
+    /// The reviewer (`reviewer.rs`) — a second Claude, apart from the chat's.
+    Reviewer,
+}
+
+impl By {
+    /// How it's shown: on the note's card, in the notes list and the review rail.
+    pub fn label(self) -> &'static str {
+        match self {
+            By::Author => "author",
+            By::You => "you",
+            By::Reviewer => "reviewer",
+        }
+    }
+
+    /// How a thread line names its author for Claude, and in the restore file (the author's `claude`, as
+    /// files written before there was a reviewer have it).
+    pub fn word(self) -> &'static str {
+        match self {
+            By::Author => "claude",
+            By::You => "you",
+            By::Reviewer => "reviewer",
+        }
+    }
+
+    fn from_word(w: &str) -> By {
+        match w {
+            "you" => By::You,
+            "reviewer" => By::Reviewer,
+            _ => By::Author,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -192,7 +227,7 @@ pub fn to_json(notes: &Notes, docs: &[crate::document::Document]) -> Vec<Value> 
             let thread: Vec<Value> = n
                 .thread
                 .iter()
-                .map(|e| json!([if e.by == By::Claude { "claude" } else { "you" }, e.text, e.draft]))
+                .map(|e| json!([e.by.word(), e.text, e.draft]))
                 .collect();
             json!({ "path": n.path, "lines": [n.lines.start, n.lines.end], "anchor": anchor, "thread": thread })
         })
@@ -206,6 +241,8 @@ pub fn restore_in(ed: &mut Editor, id: crate::event::SessionId) {
     let Some(s) = std::iter::once(session).chain(sessions.iter_mut()).find(|l| l.id == id) else { return };
     let saved = restore.notes(&s.root);
     restore_from(&mut s.notes, docs, saved);
+    // (and the lines looked at in its reviews — `risk.rs`)
+    s.looked.extend(restore.looked(&s.root));
 }
 
 fn restore_from(notes: &mut Notes, docs: &mut [crate::document::Document], saved: Vec<Value>) {
@@ -221,7 +258,7 @@ fn restore_from(notes: &mut Notes, docs: &mut [crate::document::Document], saved
             .into_iter()
             .flatten()
             .filter_map(|e| {
-                let by = if e[0] == "you" { By::You } else { By::Claude };
+                let by = By::from_word(e[0].as_str().unwrap_or_default());
                 Some(Entry { by, text: e[1].as_str()?.to_string(), draft: e[2] == true })
             })
             .collect();
@@ -271,21 +308,54 @@ pub fn tool_call(ed: &mut Editor, args: &Value) -> Result<String, String> {
     let text = args["text"].as_str().map(str::trim).filter(|t| !t.is_empty()).ok_or("text is required")?;
     if let Some(id) = args["reply_to"].as_u64() {
         let n = find_mut(ed, id).ok_or(format!("there's no note #{id}"))?;
-        n.thread.push(Entry { by: By::Claude, text: text.to_string(), draft: false });
+        n.thread.push(Entry { by: By::Author, text: text.to_string(), draft: false });
         n.waiting = false;
         return Ok(format!("replied on note #{id}"));
     }
+    let (path, lines) = placed(&ed.session.root, args)?;
+    let line = lines.start;
+    let id = add(ed, &path, lines, By::Author, text);
+    Ok(format!("note #{id} pinned at {}:{}", crate::chat::shown(&ed.session.root, &path), line + 1))
+}
+
+/// Where a new note goes: `path` (relative to `root`) and its lines, 0-based.
+fn placed(root: &Path, args: &Value) -> Result<(PathBuf, Range<usize>), String> {
     let path =
         args["path"].as_str().filter(|p| !p.is_empty()).ok_or("path and line are required for a new note")?;
-    let path = crate::chat::resolve(&ed.session.root, path);
+    let path = crate::chat::resolve(root, path);
     let path = std::fs::canonicalize(&path).unwrap_or(path);
     if !path.is_file() {
         return Err(format!("{} isn't a file", path.display()));
     }
     let line = args["line"].as_u64().ok_or("path and line are required for a new note")?.max(1) as usize - 1;
     let end = args["end_line"].as_u64().map_or(line, |e| (e.max(1) as usize - 1).max(line));
-    let id = add(ed, &path, line..end + 1, By::Claude, text);
-    Ok(format!("note #{id} pinned at {}:{}", crate::chat::shown(&ed.session.root, &path), line + 1))
+    Ok((path, line..end + 1))
+}
+
+/// The most a finding of the reviewer's says (it's read by you, then maybe sent to the author).
+const FINDING_MAX: usize = 1_000;
+
+/// The reviewer's `note` (`reviewer.rs`) → the new note's id and what it's told. A finding only: a file
+/// inside `root` (the checkout it reviews), no `reply_to` (it sees no thread). It waits like your drafts —
+/// for `space v s` to take it to the author with them, or `:note-close` to drop it.
+pub fn finding(ed: &mut Editor, root: &Path, args: &Value) -> Result<(u64, String), String> {
+    if args.get("reply_to").is_some_and(|r| !r.is_null()) {
+        return Err("the reviewer pins new findings only — reply_to isn't one of its arguments".into());
+    }
+    let text = args["text"].as_str().map(str::trim).filter(|t| !t.is_empty()).ok_or("text is required")?;
+    let text: String = match text.char_indices().nth(FINDING_MAX) {
+        Some((cut, _)) => format!("{}…", &text[..cut]),
+        None => text.to_string(),
+    };
+    let (path, lines) = placed(root, args)?;
+    let shown = crate::chat::shown(root, &path);
+    crate::paths::existing_inside(root, &path, &shown, "the reviewer pins findings in the checkout only")?;
+    let line = lines.start;
+    let id = add(ed, &path, lines, By::Reviewer, &text);
+    if let Some(n) = find_mut(ed, id) {
+        n.thread[0].draft = true;
+    }
+    Ok((id, format!("finding #{id} pinned at {shown}:{}", line + 1)))
 }
 
 /// The chat turn ended: notes still waiting stop waiting — a single one gets Claude's plain answer (it didn't
@@ -300,7 +370,7 @@ pub fn turn_done(ed: &mut Editor, answer: Option<String>) {
         }
         n.waiting = false;
         if single && let Some(a) = answer.as_ref().map(|a| a.trim().to_string()).filter(|a| !a.is_empty()) {
-            n.thread.push(Entry { by: By::Claude, text: a, draft: false });
+            n.thread.push(Entry { by: By::Author, text: a, draft: false });
         }
     }
 }
@@ -426,7 +496,8 @@ fn message(ed: &Editor, n: &Note) -> String {
     );
     // The thread up to (not including) the message being sent
     for e in &n.thread[..n.thread.len().saturating_sub(1)] {
-        s.push_str(if e.by == By::Claude { "claude: " } else { "you: " });
+        s.push_str(e.by.word());
+        s.push_str(": ");
         s.push_str(&e.text);
         s.push('\n');
     }
@@ -490,11 +561,19 @@ pub fn picker(ed: &mut Editor) {
                 n.gist()
             ),
             action: Action::Goto { path: n.path.clone(), line: n.lines.start, col: 0 },
-            hint: match n.thread.len() {
-                1 => String::new(),
-                k => format!("+{} replies", k - 1),
+            // (who began it, and how many answered)
+            hint: {
+                let by = n.thread.first().map_or(By::Author, |e| e.by).label();
+                match n.thread.len() {
+                    1 => by.to_string(),
+                    2 => format!("{by} · +1 reply"),
+                    k => format!("{by} · +{} replies", k - 1),
+                }
             },
-            glyph: Some(("¶", "ui.accent")),
+            glyph: Some(match n.thread.first().map(|e| e.by) {
+                Some(By::Reviewer) => ("¶", "type"),
+                _ => ("¶", "ui.accent"),
+            }),
         })
         .collect();
     ed.open_picker(crate::picker::Picker::new("notes", items, false), None);
@@ -506,6 +585,46 @@ mod tests {
 
     fn editor() -> Editor {
         Editor::new(crate::config::Config::default())
+    }
+
+    /// Each entry says who wrote it — the chat's `note` the author, the reviewer's `finding` the reviewer
+    /// (waiting like a draft), `space n` you — and keeps it through the restore file; a file written before
+    /// there was a reviewer (`claude`) reads as the author's.
+    #[test]
+    fn notes_carry_their_author() {
+        let dir = std::env::temp_dir().join(format!("tarae-notes-by-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let f = dir.join("a.rs");
+        std::fs::write(&f, "one\ntwo\nthree\n").unwrap();
+        let mut ed = editor();
+        ed.open(&f).unwrap();
+        tool_call(&mut ed, &json!({"path": f, "line": 1, "text": "the author's"})).unwrap();
+        let (found, _) =
+            finding(&mut ed, &dir, &json!({"path": "a.rs", "line": 2, "text": "the reviewer's"})).unwrap();
+        // (`space n` on line 3: with a finding waiting it's a draft too)
+        ed.goto_line(2);
+        submit(&mut ed, None, "mine");
+        let by: Vec<(By, bool)> =
+            ed.session.notes.list.iter().map(|n| (n.thread[0].by, n.thread[0].draft)).collect();
+        assert_eq!(by, [(By::Author, false), (By::Reviewer, true), (By::You, true)]);
+        assert_eq!(ed.session.notes.list[1].id, found);
+        let mut saved = to_json(&ed.session.notes, &ed.docs);
+        let words: Vec<&str> = saved.iter().map(|n| n["thread"][0][0].as_str().unwrap()).collect();
+        assert_eq!(words, ["claude", "reviewer", "you"]);
+        saved.push(json!({"path": f, "lines": [0, 1], "thread": [["claude", "from an older tarae"]]}));
+        let mut ed = editor();
+        restore_from(&mut ed.session.notes, &mut ed.docs, saved);
+        let by: Vec<(By, bool)> =
+            ed.session.notes.list.iter().map(|n| (n.thread[0].by, n.thread[0].draft)).collect();
+        assert_eq!(by, [(By::Author, false), (By::Reviewer, true), (By::You, true), (By::Author, false)]);
+        // The reviewer pins findings in the checkout only, and answers no thread
+        let outside = std::env::temp_dir().join(format!("tarae-notes-by-out-{}.rs", std::process::id()));
+        std::fs::write(&outside, "x\n").unwrap();
+        assert!(finding(&mut ed, &dir, &json!({"path": outside, "line": 1, "text": "out"})).is_err());
+        assert!(finding(&mut ed, &dir, &json!({"reply_to": 1, "text": "re"})).is_err());
+        std::fs::remove_file(&outside).ok();
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Saved on quit, back at start — and if the file was edited meanwhile, the note finds its line again;

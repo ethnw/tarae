@@ -82,6 +82,13 @@ The name is also the `:set` path: `:set editor.scrolloff 8` changes it until you
 |---|---|---|---|
 | `session.worktrees` | string | `""` | Where sessions' checkouts go, a folder per repository ("" = $XDG_DATA_HOME/tarae/worktrees) |
 
+## `[review]`
+
+| Setting | Type | Default | Description |
+|---|---|---|---|
+| `review.risky` | list of strings | `[]` | Code review: files whose every change is high-risk — looked at by you (space v h) before the review ends or the session is brought. A name matches anywhere, in any case, one * per part ("sandbox*"); a path from the project root (".github/"). The language packs' patterns (unsafe, spawning…) and the protected names count too. Read from the checkout tarae started in |
+| `review.quiet` | list of strings | `[]` | Code review: files that are tests, docs or snapshots — their changes graded quiet (never over a high-risk one). Names and paths as review.risky |
+
 ## Tables you name yourself
 
 These are read alongside the settings above; see the [configuration guide](../configuration.md).

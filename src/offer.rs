@@ -47,6 +47,9 @@ pub struct Offer {
     pub drawn: std::cell::Cell<Option<Instant>>,
     /// What it asks, for its `card` line (`cards.rs`) — Claude's cards and the sandbox's.
     pub asked: Option<crate::cards::Asked>,
+    /// Its yes is held, and why (a review's end or a bring while high-risk changes wait for a person's
+    /// look — `codereview.rs`): `y` and `p` aren't among its answers, and pressed are refused on it.
+    pub held: Option<String>,
 }
 
 /// A card's text in a buffer of its own (`v`) is titled this, then the card's title.
@@ -302,6 +305,7 @@ impl Offer {
             since: Instant::now(),
             drawn: Default::default(),
             asked: None,
+            held: None,
         }
     }
 
@@ -502,6 +506,14 @@ impl Offer {
     /// one list (`uistate.rs`). None while it's downloading. `quick`: the project has a quick preflight set
     /// (the bring card's `p` runs that one).
     pub fn answers(&self, quick: bool) -> Vec<(char, &'static str)> {
+        let mut v = self.answers_all(quick);
+        if self.held.is_some() && matches!(self.state, OfferState::Asking) {
+            v.retain(|a| !matches!(a.0, 'y' | 'p'));
+        }
+        v
+    }
+
+    fn answers_all(&self, quick: bool) -> Vec<(char, &'static str)> {
         use What as W;
         match self.state {
             OfferState::Installing(_) => return Vec::new(),
@@ -835,6 +847,10 @@ impl crate::editor::Editor {
         {
             return self.offer_refused(why);
         }
+        // (a yes held — high-risk changes no one has looked at: said on the card, which stays)
+        if let Some(why) = self.offers[0].held.clone() {
+            return self.offer_refused(why);
+        }
         let mut o = self.offers.remove(0);
         o.said(self.session.label(), "y");
         self.card_how(o.id, "answered y");
@@ -946,6 +962,9 @@ impl crate::editor::Editor {
     pub fn offer_preflight_first(&mut self) {
         if !self.offers.first().is_some_and(Offer::preflights) {
             return;
+        }
+        if let Some(why) = self.offers[0].held.clone() {
+            return self.offer_refused(why);
         }
         if let What::Rebased(m) = self.offers.remove(0).what {
             self.rebase_preflight_then_bring(*m);

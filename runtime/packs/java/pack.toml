@@ -182,3 +182,13 @@ unpack = "tar.gz"
 program = "bin/jdtls"
 needs = ["python3"]
 runtime = { program = "java", home = "JAVA_HOME", ask = ["-version"], version = 'version "(?:1\.)?(\d+)', at-least = 21, get = "install a JDK 21 or newer (Ubuntu: openjdk-21-jdk) and point JAVA_HOME at it" }
+
+# A code review's grades (`risk.rs`): a change adding or removing a line like these is high-risk — spawning,
+# native code, deleting and moving, permissions and links, the network, reflection
+[review]
+risky = [
+    'Runtime\.getRuntime\(\)\.exec', 'ProcessBuilder', '\bnative\b', 'System\.loadLibrary', 'Files\.delete',
+    'deleteRecursively', 'Files\.move', 'setPosixFilePermissions', 'createSymbolicLink', 'new Socket\(',
+    'ServerSocket', 'HttpClient', 'URL\(.*\)\.open', 'Class\.forName', 'setAccessible\(true\)',
+]
+quiet = ["src/test/"]

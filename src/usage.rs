@@ -694,8 +694,9 @@ pub fn report(name: &str, u: &Usage, all: &[(&str, &Usage)], now_ms: u64) -> Str
             let models: Vec<String> =
                 t.model.split(", ").filter(|m| !m.is_empty()).map(model_short).collect();
             let mut model = if models.is_empty() { "not reported".to_string() } else { models.join(", ") };
-            if t.conversation == "ask" {
-                model = format!("ask · {model}");
+            // (a one-turn process's: `space i`'s, the reviewer's — `reviewer.rs`)
+            if matches!(t.conversation.as_str(), "ask" | "reviewer") {
+                model = format!("{} · {model}", t.conversation);
             }
             // (a `/compact` turn's 0 tokens and its summary's cost, said for what they are)
             if t.compacted.is_some() {

@@ -5323,9 +5323,9 @@ mod tests {
         assert_eq!(
             thread,
             [
-                (By::Claude, "Line 3 repeats line 2."),
+                (By::Author, "Line 3 repeats line 2."),
                 (By::You, "why?"),
-                (By::Claude, "Because the fixture counts lines.")
+                (By::Author, "Because the fixture counts lines.")
             ]
         );
         assert!(!n.waiting);
@@ -10717,58 +10717,6 @@ mod tests {
         std::fs::remove_file(&log).ok();
     }
 
-    /// `space v c`: the review opens and Claude reviews it — the diff goes to the chat, its findings come back
-    /// as notes on the lines.
-    #[test]
-    fn claude_reviews_the_changes() {
-        use serde_json::json;
-        let repo = git_repo("claudereview", &[("a.txt", "one\n")]);
-        std::fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
-        std::fs::write(repo.join("b.txt"), "brand new\n").unwrap();
-        let path = std::fs::canonicalize(repo.join("a.txt")).unwrap();
-        let log = repo.join("..").join(format!("claudereview-{}.log", std::process::id()));
-        let args = json!({"path": path, "line": 2, "text": "This line is new — is it tested?"});
-        let tool = json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1", "name": "mcp__tarae__note", "input": args}]}});
-        let call = json!({"type": "control_request", "request_id": "c7", "request": {"subtype": "mcp_message",
-            "server_name": "tarae", "message": {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
-            "params": {"name": "note", "arguments": args}}}});
-        let result = json!({"type": "result", "result": "One question."});
-        let body: Vec<String> =
-            [tool, call, result].iter().map(|e| format!("printf '%s\\n' '{e}'")).collect();
-        let mut ed = editor("");
-        ed.config.llm.command = "sh".into();
-        ed.config.llm.args = vec![
-            "-c".into(),
-            format!(
-                "while read -r line; do printf '%s\\n' \"$line\" >> '{}'; case \"$line\" in '{{\"message\"'*) {};; esac; done",
-                log.display(),
-                body.join("; ")
-            ),
-        ];
-        // (`ask_claude` in the repository of the test: open it there, then the ask follows)
-        ed.session.review_ask = true;
-        crate::codereview::start_in(&mut ed, repo.clone(), None);
-        settle_until(&mut ed, |ed| {
-            ed.session.code_review.is_some() && ed.session.chat.as_ref().is_some_and(|c| c.busy())
-        });
-        settle_until(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
-        let sent = std::fs::read_to_string(&log).unwrap();
-        let asked = sent.lines().find(|l| l.contains("Review my changes")).expect("asked");
-        assert!(asked.contains(r#"<changes of=\"uncommitted\">"#) && asked.contains("+two"), "{asked}");
-        assert!(
-            asked.contains("+++ b/b.txt") && asked.contains("+brand new"),
-            "untracked files too: {asked}"
-        );
-        let n = ed.session.notes.list.last().expect("its finding");
-        assert_eq!(
-            (n.path.as_path(), n.lines.clone(), n.gist()),
-            (path.as_path(), 1..2, "This line is new — is it tested?")
-        );
-        assert_eq!(n.thread[0].by, crate::notes::By::Claude);
-        std::fs::remove_dir_all(&repo).ok();
-        std::fs::remove_file(&log).ok();
-    }
-
     /// `space e` during a review gives the rail the keys: `j`/`k` over its files (in its order), Enter opens
     /// one, `m` marks it viewed and goes on to the next, Esc back to the code.
     #[test]
@@ -11492,7 +11440,7 @@ mod tests {
         ed.config.llm.command = "/nonexistent/no-llm".into();
         feed(&mut ed, "<space>nhello<ret>");
         assert!(ed.session.notes.list.is_empty(), "the new note went away");
-        crate::notes::add(&mut ed, &main, 0..1, crate::notes::By::Claude, "hi");
+        crate::notes::add(&mut ed, &main, 0..1, crate::notes::By::Author, "hi");
         feed(&mut ed, "<space>nreply<ret>");
         let n = &ed.session.notes.list[0];
         assert_eq!((n.thread.len(), n.waiting), (1, false), "the reply was taken back");

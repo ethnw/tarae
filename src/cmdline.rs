@@ -118,7 +118,14 @@ pub const COMMANDS: &[TypedCmd] = &[
     c(&["effort"], Arg::None, "How hard Claude thinks (none: a picker)"),
     c(&["review"], Arg::Branch, "Review the changes (uncommitted, or since a branch)"),
     c(&["review-send"], Arg::None, "Send the review's comments to Claude"),
-    c(&["review-claude"], Arg::Branch, "Claude reviews the changes (uncommitted, or since a branch)"),
+    c(
+        &["review-claude"],
+        Arg::Branch,
+        "A second Claude reviews the changes (uncommitted, or since a branch)",
+    ),
+    c(&["review-verdict"], Arg::None, "The reviewer's verdict and findings"),
+    c(&["review-hunk-seen"], Arg::None, "The high-risk change here: looked at"),
+    c(&["reviewer-stop"], Arg::None, "Stop the reviewer reading"),
     c(&["review-close"], Arg::None, "End the review"),
     c(
         &["review-at-end"],

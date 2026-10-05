@@ -625,6 +625,7 @@ impl ProcsState {
                     Kind::Terminal => "terminal",
                     Kind::Chat => "chat",
                     Kind::Ask => "ask",
+                    Kind::Reviewer => "reviewer",
                     Kind::Spare => "spare",
                     Kind::Plugin(..) => "plugin",
                     Kind::Other => "other",

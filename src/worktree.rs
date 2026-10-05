@@ -765,8 +765,15 @@ fn ready(
 }
 
 /// Its base moved up to its branch — fast-forward only, in the checkout that has the base (refused if that
-/// one has changes, saved or not, in the files it brings), else the ref alone (on a worker).
-fn bring(root: &Path, base: Option<String>, start: &Path, unsaved: &[PathBuf]) -> Result<Brought, String> {
+/// one has changes, saved or not, in the files it brings), else the ref alone (on a worker). Refused while a
+/// high-risk change it brings waits for a person's look (`looked`, graded by `rules` — `risk.rs`).
+fn bring(
+    root: &Path,
+    base: Option<String>,
+    start: &Path,
+    unsaved: &[PathBuf],
+    (looked, rules): (&std::collections::HashSet<crate::risk::Key>, &crate::risk::Rules),
+) -> Result<Brought, String> {
     let branch = current_branch(root).ok_or("its checkout is on no branch — nothing to bring")?;
     let base = base_or_start(base, start)?;
     let base_tip = local_branch(root, &base)?;
@@ -777,6 +784,11 @@ fn bring(root: &Path, base: Option<String>, start: &Path, unsaved: &[PathBuf]) -
     if !is_ancestor(root, &base_tip, &tip) {
         let moved = count(root, &format!("{tip}..{base_tip}"));
         return Err(format!("{base} moved {} since — rebase {branch} on it first", commits(moved)));
+    }
+    let left =
+        crate::codereview::unseen(&crate::codereview::highs_between(root, &base_tip, &tip, rules)?, looked);
+    if !left.is_empty() {
+        return Err(crate::codereview::held_said(left.len()));
     }
     let n = count(root, &format!("{base_tip}..{tip}"));
     let list = git(root, &["worktree", "list", "--porcelain"], None)?;
@@ -1580,6 +1592,7 @@ impl Editor {
             return self.rebase_offer(id).map_err(|e| format!("bring {name}: {e}"));
         }
         let (root, base, start) = (session.root.clone(), session.base.clone(), self.start_root());
+        let (looked, rules) = (session.looked.clone(), crate::risk::Rules::of(&self.config));
         let unsaved: Vec<PathBuf> =
             self.docs.iter().filter(|d| d.is_modified()).filter_map(|d| d.path.clone()).collect();
         let said = format!("Bringing {name} in…");
@@ -1591,9 +1604,8 @@ impl Editor {
                 None if !now => {
                     ready(&root, &who, base, &start, &unsaved).map_or_else(Bringing::Refused, Bringing::Ready)
                 }
-                None => {
-                    bring(&root, base, &start, &unsaved).map_or_else(Bringing::Refused, Bringing::Brought)
-                }
+                None => bring(&root, base, &start, &unsaved, (&looked, &rules))
+                    .map_or_else(Bringing::Refused, Bringing::Brought),
             },
         };
         self.step(self.events.shared_jobs(), "session", said, work, move |ed, result| {
@@ -1611,7 +1623,8 @@ impl Editor {
                 Bringing::Ready(m) => {
                     let mut quick = None;
                     ed.with_session(id, |ed| quick = ed.preflight_quick());
-                    ed.push_offer(m.bring_card(quick, false));
+                    let (root, base) = (m.root.clone(), m.base.clone());
+                    crate::codereview::push_bring_card(ed, id, m.bring_card(quick, false), root, base);
                 }
                 // (one tarae didn't start: taken up, so continue and abort know it — and its card up)
                 Bringing::Rebasing(stop) => {
@@ -1965,7 +1978,7 @@ mod tests {
         ed.turns_dir = Some(store.clone());
         let wt = new_session(&mut ed, "gone");
         settle_until(&mut ed, |ed| ed.session.checkpoints.dir.is_some());
-        crate::notes::add(&mut ed, &wt.join("a.txt"), 0..1, crate::notes::By::Claude, "a note");
+        crate::notes::add(&mut ed, &wt.join("a.txt"), 0..1, crate::notes::By::Author, "a note");
         let (before, after) = (Some(ropey::Rope::from_str("one\n")), ropey::Rope::from_str("two\n"));
         let t = Touched { path: wt.join("a.txt"), before, after, ..Default::default() };
         ed.session.checkpoints.list.push(Checkpoint::new("a turn".into(), vec![t]));
@@ -3616,5 +3629,82 @@ mod tests {
         assert!(load(&state.join("elsewhere"), common).sessions.is_empty());
         assert_eq!(kept_list(&json!({ OLD_NAME: [kept("c")] }))[0].name, "c", ":restart's state");
         std::fs::remove_dir_all(&state).ok();
+    }
+
+    /// A high-risk change it brings (the Rust pack's `unsafe` — `risk.rs`) holds the bring until a person has
+    /// looked at it in a review: the bring card names it and has no `y` nor `p` (pressed: refused on it), says
+    /// what the reviewer found; a bring asked anyway is refused on the worker. Looked at (`space v h` in a
+    /// review since main), it's brought; a later commit changing that line holds the next bring again.
+    #[test]
+    fn a_high_risk_change_holds_the_bring_until_looked_at() {
+        let (repo, dir) = place("bring-high");
+        let mut ed = editor(&repo, &dir);
+        let wt = new_session(&mut ed, "risky");
+        std::fs::write(wt.join("a.rs"), "fn a() {\n    unsafe { b() }\n}\n").unwrap();
+        git_in(&wt, &["add", "a.rs"]);
+        git_in(&wt, &["commit", "-qm", "risky"]);
+        let main_was = git_in(&repo, &["rev-parse", "main"]);
+        // The reviewer found one thing, on that line
+        let id = crate::notes::add(
+            &mut ed,
+            &wt.join("a.rs"),
+            1..2,
+            crate::notes::By::Reviewer,
+            "unsafe, unsaid why",
+        );
+        let of = std::time::Instant::now();
+        let done = crate::reviewer::State::Done;
+        ed.session.reviewer =
+            Some(crate::reviewer::Reviewer::for_test(of, wt.clone(), done, vec![id], "One risk."));
+        let title = "Bring risky into main";
+        feed(&mut ed, ":session-bring<ret>");
+        settle_until(&mut ed, |ed| card(ed, title).is_some() || says(ed, "bring risky:"));
+        let q = card(&ed, title).unwrap().question.clone();
+        assert!(q.contains("reviewer: 1 ▲ of 1 finding"), "{q}");
+        // (a new file: one change, from its first line)
+        assert!(q.contains("1 high-risk change not looked at") && q.contains("\n  a.rs:1"), "{q}");
+        assert_eq!(card_in_sight(&mut ed), ['n']);
+        for k in ["y", "p"] {
+            feed(&mut ed, k);
+            assert!(card(&ed, title).is_some(), "{k}: the card stays");
+        }
+        assert_eq!(git_in(&repo, &["rev-parse", "main"]), main_was, "nothing brought");
+        // Brought anyway (as the card's yes would): refused where it's done
+        feed(&mut ed, "n");
+        ed.session_bring_now("risky").unwrap();
+        settle_until(&mut ed, |ed| says(ed, "bring risky:") || says(ed, "Brought"));
+        assert!(says(&ed, "bring risky: 1 high-risk change not looked at"), "{}", said(&ed));
+        assert_eq!(git_in(&repo, &["rev-parse", "main"]), main_was);
+        // Looked at in a review since main — then brought
+        crate::codereview::start_in(&mut ed, wt.clone(), Some("main".into()));
+        settle_until(&mut ed, |ed| {
+            let d = ed.doc();
+            ed.session.code_review.is_some() && d.review_base.is_some() && d.git_version == d.version()
+        });
+        ed.goto_line(1);
+        feed(&mut ed, "<space>vh");
+        assert!(!ed.session.looked.is_empty(), "{}", said(&ed));
+        ed.messages.clear();
+        bring_asked(&mut ed, "risky", "main");
+        settle_until(&mut ed, |ed| says(ed, "Brought") || says(ed, "bring risky:"));
+        assert_eq!(
+            git_in(&repo, &["rev-parse", "main"]),
+            git_in(&wt, &["rev-parse", "HEAD"]),
+            "{}",
+            said(&ed)
+        );
+        // That line changed in a later commit: held again
+        std::fs::write(wt.join("a.rs"), "fn a() {\n    unsafe { c() }\n}\n").unwrap();
+        git_in(&wt, &["commit", "-qam", "again"]);
+        ed.offers.clear();
+        ed.messages.clear();
+        feed(&mut ed, "<esc>:session-bring<ret>");
+        settle_until(&mut ed, |ed| card(ed, title).is_some() || says(ed, "bring risky:"));
+        assert_eq!(
+            card(&ed, title).and_then(|o| o.held.clone()).as_deref(),
+            Some(crate::codereview::held_said(1).as_str())
+        );
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

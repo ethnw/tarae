@@ -960,7 +960,7 @@ fn a_note_card_leaves_its_lines_in_sight() {
             &mut s.ed,
             &path,
             first..first + 6,
-            crate::notes::By::Claude,
+            crate::notes::By::Author,
             "Six lines, one remark.",
         );
         s.frame();
@@ -972,7 +972,7 @@ fn a_note_card_leaves_its_lines_in_sight() {
     }
 }
 
-/// A thread too long for the room keeps its newest words — under the name of whoever says them (`¶ claude`),
+/// A thread too long for the room keeps its newest words — under the name of whoever says them (`¶ author`),
 /// the cut words going on with `…`.
 #[test]
 fn a_cut_note_keeps_who_is_talking() {
@@ -994,10 +994,104 @@ fn a_cut_note_keeps_who_is_talking() {
         .map(|r| r.trim())
         .filter(|r| !r.is_empty() && !r.starts_with(['▄', '▀']))
         .collect();
-    assert!(card[0].starts_with("¶ claude"), "{card:#?}");
+    assert!(card[0].starts_with("¶ author"), "{card:#?}");
     assert!(card[1].starts_with("… Sentence number"), "{card:#?}");
     assert!(card.iter().any(|r| r.contains("Sentence number 12")), "the newest stays: {card:#?}");
     assert!(card.last().unwrap().contains("space n"), "and the keys: {card:#?}");
+}
+
+/// Who wrote each note, where it's seen: the reviewer's finding (`¶ reviewer · not sent yet` on its card, its
+/// line end `reviewer · …`, `r1` in the rail beside your `¶1`), your draft, the author's answer.
+#[test]
+fn snapshot_review_notes_by_their_author() {
+    use crate::notes::By;
+    let (base, now) = five_and_thirty_added();
+    let mut s = review_of(112, 30, &base, &now);
+    let path = s.ed.doc().path.clone().unwrap();
+    let id =
+        crate::notes::add(&mut s.ed, &path, 11..12, By::Reviewer, "This value is never checked before use.");
+    crate::notes::add(&mut s.ed, &path, 22..23, By::You, "Name this better.");
+    for n in &mut s.ed.session.notes.list {
+        (n.thread[0].draft, n.waiting) = (true, false);
+    }
+    let n = s.ed.session.notes.list.iter_mut().find(|n| n.id == id).unwrap();
+    n.thread
+        .push(crate::notes::Entry { by: By::Author, text: "It is — two lines up.".into(), draft: false });
+    s.ed.goto_line(11);
+    let mut parser = vt100::Parser::new(s.h, s.w, 0);
+    parser.process(&s.frame());
+    let rows: Vec<String> = parser.screen().rows(0, s.w).collect();
+    let has = |t: &str| rows.iter().any(|r| r.contains(t));
+    assert!(has("¶ reviewer · not sent yet") && has("¶ author"), "the card: {rows:#?}");
+    assert!(has("¶ reviewer · This value") && has("¶ draft · Name"), "the line ends: {rows:#?}");
+    assert!(has("¶1 r1"), "the rail: yours and the reviewer's: {rows:#?}");
+    s.check("review_notes_by_author");
+}
+
+/// A high-risk change, graded by a pack's pattern: the rail says how many are left to look at and marks the
+/// file `▲1`, the change's first line says why and the key; the reviewer's row its findings (one on the high
+/// change) and its verdict's first line. `space v h` on it: looked at — faint everywhere.
+#[test]
+fn snapshot_review_risk_and_the_reviewer() {
+    use crate::notes::By;
+    let base: String = (1..=5).map(|i| format!("let line_{i} = {i};\n")).collect();
+    let added: String = (1..=30)
+        .map(|i| {
+            if i == 7 {
+                "let pid = unsafe { getpid() };\n".to_string()
+            } else {
+                format!("let added_{i} = {i};\n")
+            }
+        })
+        .collect();
+    let mut s = review_of(112, 30, &base, &format!("{base}{added}"));
+    let path = s.ed.doc().path.clone().unwrap();
+    let r = s.ed.session.code_review.as_mut().unwrap();
+    r.set_rules(crate::risk::Rules::with(&[("rust", &["rust"], &[r"\bunsafe\b"], &[])], &[], &[]));
+    let (of, root) = (r.started, r.root.clone());
+    let id = crate::notes::add(&mut s.ed, &path, 11..12, By::Reviewer, "unsafe without a SAFETY comment.");
+    s.ed.session.reviewer = Some(crate::reviewer::Reviewer::for_test(
+        of,
+        root,
+        crate::reviewer::State::Done,
+        vec![id],
+        "One risk: the unsafe call has no SAFETY comment.\nThe rest reads fine.",
+    ));
+    s.ed.goto_line(3);
+    let mut parser = vt100::Parser::new(s.h, s.w, 0);
+    parser.process(&s.frame());
+    let rows: Vec<String> = parser.screen().rows(0, s.w).collect();
+    let has = |rows: &[String], t: &str| rows.iter().any(|r| r.contains(t));
+    assert!(has(&rows, "▲ 1 high to look at"), "{rows:#?}");
+    assert!(has(&rows, "demo.rs  ▲1 +30") || has(&rows, "▲1 +30"), "the file's mark: {rows:#?}");
+    assert!(has(&rows, "reviewer  1 finding ▲1"), "{rows:#?}");
+    assert!(has(&rows, "“One risk: the unsafe"), "{rows:#?}");
+    assert!(has(&rows, "▲ high · unsafe (rust pack) · space v h"), "the line end: {rows:#?}");
+    s.check("review_risk");
+    // Looked at, by the key on the change
+    s.ed.goto_line(6);
+    crate::codereview::hunk_seen(&mut s.ed);
+    let mut parser = vt100::Parser::new(s.h, s.w, 0);
+    parser.process(&s.frame());
+    let rows: Vec<String> = parser.screen().rows(0, s.w).collect();
+    assert!(has(&rows, "▲ all looked at"), "{rows:#?}");
+    assert!(has(&rows, "▲ looked at · unsafe (rust pack)"), "{rows:#?}");
+}
+
+/// `space v q` with a high-risk change no one has looked at: the end card names it in the warning colour, and
+/// its only answer is `n` (`Offer.held`).
+#[test]
+fn snapshot_review_end_held_by_a_high_change() {
+    let base: String = (1..=5).map(|i| format!("let line_{i} = {i};\n")).collect();
+    let now = format!("{base}let pid = unsafe {{ getpid() }};\n");
+    let mut s = review_of(112, 30, &base, &now);
+    let r = s.ed.session.code_review.as_mut().unwrap();
+    r.set_rules(crate::risk::Rules::with(&[("rust", &["rust"], &[r"\bunsafe\b"], &[])], &[], &[]));
+    crate::codereview::close_asked(&mut s.ed);
+    let o = s.ed.offers.first().expect("the end card");
+    assert_eq!(o.answers(false), [('n', "Keep reviewing")]);
+    assert!(o.question.contains("1 high-risk change not looked at"), "{}", o.question);
+    s.check("review_end_held");
 }
 
 /// `now` under code review against `base` on a `w`×`h` screen, the rail of files up (as `snapshot_review`).
@@ -1068,7 +1162,7 @@ fn card_edges_sit_on_what_is_under_them() {
     let mut s = review_of(112, 30, &base, &now);
     let (ground, surface, _) = chrome_colors(&s.ed);
     let path = s.ed.doc().path.clone().unwrap();
-    crate::notes::add(&mut s.ed, &path, 11..12, crate::notes::By::Claude, "A remark about this added line.");
+    crate::notes::add(&mut s.ed, &path, 11..12, crate::notes::By::Author, "A remark about this added line.");
     s.ed.goto_line(11);
     let with = cells(&s.frame(), s.w, s.h);
     let rect = s.ed.screen.note_card.get().expect("the note card");
@@ -1098,7 +1192,7 @@ fn card_edges_stay_seated_through_diffs() {
     let mut s = review_of(112, 30, &base, &now);
     let path = s.ed.doc().path.clone().unwrap();
     for line in [11, 20] {
-        crate::notes::add(&mut s.ed, &path, line..line + 1, crate::notes::By::Claude, "A remark about this.");
+        crate::notes::add(&mut s.ed, &path, line..line + 1, crate::notes::By::Author, "A remark about this.");
     }
     let mut screen = crate::screen::Screen::new();
     let mut through_diffs = vt100::Parser::new(s.h, s.w, 0);
@@ -1134,7 +1228,7 @@ fn a_note_card_stays_in_its_pane() {
                 cards get and has to be kept inside the pane rather than wherever it would fit.";
     let inside = |s: &mut Shot, what: &str| {
         let path = s.ed.doc().path.clone().unwrap();
-        crate::notes::add(&mut s.ed, &path, 11..12, crate::notes::By::Claude, long);
+        crate::notes::add(&mut s.ed, &path, 11..12, crate::notes::By::Author, long);
         s.ed.goto_line(11);
         s.frame();
         let (x, _, w, _) = s.ed.screen.note_card.get().unwrap_or_else(|| panic!("{what}: the note card"));
@@ -1305,7 +1399,7 @@ fn floating_cards_never_overlap() {
         let long = "A longer note that wraps over a few rows so the card is tall — the kind Claude writes when \
                     something needs explaining; it goes on for a while to fill the card.";
         for _ in 0..3 {
-            crate::notes::add(&mut s.ed, &path, 39..40, crate::notes::By::Claude, long);
+            crate::notes::add(&mut s.ed, &path, 39..40, crate::notes::By::Author, long);
         }
         s.ed.goto_line(39);
         let c = s.ed.session.chat.as_mut().unwrap();

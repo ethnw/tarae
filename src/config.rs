@@ -93,6 +93,10 @@ pub struct EditorConfig {
     pub preflight: Vec<crate::preflight::Step>,
     /// …and `.tarae.local.toml`'s, added after them (or after the packs').
     pub preflight_local: Vec<crate::preflight::Step>,
+    /// A code review's risk grades (`risk.rs`): paths whose every change is high (a trusted setting) · paths
+    /// that are tests, docs or snapshots — names anywhere, paths from the root.
+    pub review_risky: Vec<String>,
+    pub review_quiet: Vec<String>,
 }
 
 impl Default for EditorConfig {
@@ -135,6 +139,8 @@ impl Default for EditorConfig {
             tasks: Vec::new(),
             preflight: Vec::new(),
             preflight_local: Vec::new(),
+            review_risky: Vec::new(),
+            review_quiet: Vec::new(),
         }
     }
 }

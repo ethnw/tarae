@@ -145,3 +145,13 @@ ways = [
     { run = ["pipx", "install", "basedpyright"], bin = ["${PIPX_BIN_DIR}", "~/.local/bin"] },
     { run = ["brew", "install", "basedpyright"] },
 ]
+
+# A code review's grades (`risk.rs`): a change adding or removing a line like these is high-risk — spawning,
+# running code, deleting and moving, permissions and links, the network, unpickling, the environment
+[review]
+risky = [
+    '\bsubprocess\b', 'os\.system', 'os\.popen', 'os\.exec', '\beval\(', '\bexec\(', 'shutil\.rmtree',
+    'os\.remove', 'os\.unlink', 'os\.rmdir', 'os\.rename', 'shutil\.move', 'os\.chmod', 'os\.symlink',
+    '\bsocket\b', '\brequests\.', 'urllib', 'pickle\.load', 'os\.environ\[.*\]\s*=',
+]
+quiet = ["tests/", "test_*.py", "*_test.py", "conftest.py"]

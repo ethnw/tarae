@@ -466,10 +466,10 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
     }
     if lay.rail_w > 0
         && editor.review_rail_up()
-        && let Some(marked) = editor.session.code_review.as_ref().map(|r| r.marked(editor))
+        && let Some((marked, room)) =
+            editor.session.code_review.as_ref().map(|r| (r.marked(editor), review_rail_room(&lay, editor, r)))
         && let Some(r) = editor.session.code_review.as_mut()
     {
-        let room = review_rail_room(&lay, r);
         r.fit(marked, room);
     }
     if let Some(p) = editor.picker.as_mut() {
@@ -3122,6 +3122,21 @@ fn draw_text(
             }
         }
     }
+    // A code review's high-risk change: its first line ends with what makes it so, until looked at
+    // (`space v h`, `risk.rs`) — where no note speaks, ahead of diagnostics
+    let mut risk_at: Vec<Option<(bool, String)>> = vec![None; span];
+    if let (Some(r), Some(p)) = (editor.session.code_review.as_ref(), doc.path.as_deref())
+        && let Some(f) = r.files.iter().find(|f| f.path == p)
+    {
+        for g in r.graded(editor, f).iter().filter(|g| g.grade == crate::risk::Grade::High) {
+            // (two on a line — a change of mode on the first, with a change of lines: the one left to look at)
+            if let Some(slot) = g.at.checked_sub(top).and_then(|r| risk_at.get_mut(r))
+                && slot.as_ref().is_none_or(|(looked, _)| *looked)
+            {
+                *slot = Some((g.looked_at(&editor.session.looked), g.why.clone()));
+            }
+        }
+    }
     // A plugin's hints (a cluster's state beside a manifest) — where no note or diagnostic speaks
     let mut hint_at: Vec<Option<(&str, crate::plugin::PluginTone)>> = vec![None; span];
     for (line, text, tone) in editor.plugin_hints_for(doc) {
@@ -3826,29 +3841,59 @@ fn draw_text(
                     (false, 1) => String::new(),
                     (false, k) => format!("  +{}", k - 1),
                 };
-                // Several on the line: how many, then the one the card shows; a draft says so
-                let draft = if n.thread.iter().any(|e| e.draft) { "draft · " } else { "" };
+                // Several on the line: how many, then the one the card shows; a draft says so, and a
+                // finding of the reviewer's whose it is (in its colour)
+                let reviewer = n.thread.first().is_some_and(|e| e.by == crate::notes::By::Reviewer);
+                let draft = match (reviewer, n.thread.iter().any(|e| e.draft)) {
+                    (true, _) => "reviewer · ",
+                    (false, true) => "draft · ",
+                    (false, false) => "",
+                };
                 let gist = if count > 1 {
                     format!("{count} notes · {draft}{}", n.gist())
                 } else {
                     format!("{draft}{}", n.gist())
                 };
                 let body = fit_ellipsis(&gist, room.saturating_sub(2 + tail.width()));
+                let glyph_fg = if reviewer { reviewer_style(editor, ui).fg } else { ui.accent.fg };
                 apply(out, line_base)?;
                 queue!(out, Print("   "))?;
-                apply(out, Style { fg: ui.accent.fg, ..line_base })?;
+                apply(out, Style { fg: glyph_fg, ..line_base })?;
                 queue!(out, Print("¶ "))?;
-                let fg = blend(ui.accent.fg, line_base.bg.or(ui.tint), 0.62).or(ui.virt.fg);
+                let fg = blend(glyph_fg, line_base.bg.or(ui.tint), 0.62).or(ui.virt.fg);
                 apply(out, Style { fg, italic: true, ..line_base })?;
                 queue!(out, Print(&body))?;
                 apply(out, Style { fg: ui.linenr.fg, ..line_base })?;
                 queue!(out, Print(&tail))?;
             }
         }
+        // Line-end risk: `  ▲ high · unsafe (rust pack) · space v h` in the error colour — looked at: faint
+        let risk_here = risk_at.get(li).cloned().flatten().filter(|_| note_here.is_none());
+        if let Some((looked, why)) = &risk_here
+            && last
+            && !clipped
+        {
+            let used = x0 + col.saturating_sub(row_left) + shift + 1 + extra_used;
+            let room = lay.text_cols.saturating_sub(used + 3);
+            if room >= 8 {
+                let (color, text) = match looked {
+                    true => (ui.linenr.fg, format!("looked at · {why}")),
+                    false => (ui.sign[1].fg, risk_line_end(why, room.saturating_sub(2))),
+                };
+                apply(out, line_base)?;
+                queue!(out, Print("   "))?;
+                apply(out, Style { fg: color, ..line_base })?;
+                queue!(out, Print("▲ "))?;
+                let fg = if *looked { color } else { blend(color, line_base.bg.or(ui.tint), 0.72).or(color) };
+                apply(out, Style { fg, italic: true, ..line_base })?;
+                queue!(out, Print(fit_ellipsis(&text, room.saturating_sub(2))))?;
+            }
+        }
         // Line-end diagnostic: `  ● message +2` — symbol in severity color, text a tone lower. …if no room
         if let Some((sev, msg, more, whole)) = line_message_here
             && !clipped
             && note_here.is_none()
+            && risk_here.is_none()
         {
             let used = x0 + col.saturating_sub(row_left) + shift + 1 + extra_used;
             let room = lay.text_cols.saturating_sub(used + 3);
@@ -3884,8 +3929,11 @@ fn draw_text(
             }
         }
         // A plugin's hint: `  ● web · 2/3 ready` — the glyph in its tone's color, the text a tone lower
-        let hint_here =
-            hint_at.get(li).copied().flatten().filter(|_| line_message_here.is_none() && note_here.is_none());
+        let hint_here = hint_at
+            .get(li)
+            .copied()
+            .flatten()
+            .filter(|_| line_message_here.is_none() && note_here.is_none() && risk_here.is_none());
         if let Some((text, tone)) = hint_here
             && last
             && !clipped
@@ -3924,6 +3972,7 @@ fn draw_text(
             && line_message_here.is_none()
             && note_here.is_none()
             && hint_here.is_none()
+            && risk_here.is_none()
             && extra_used == 0
             && let Some(b) = editor.blame_here(line)
         {
@@ -8178,12 +8227,23 @@ fn review_rail_need(r: &crate::codereview::CodeReview) -> usize {
     }
     let st = Style::default();
     let turn = matches!(r.base, crate::codereview::Base::Turn { .. });
-    for (focus, drafts) in [(true, 0), (false, 0), (false, 9)] {
-        for row in review_rail_hints(focus, turn, drafts, st, st, st) {
+    for (focus, drafts, high) in [(true, 0, false), (false, 0, false), (false, 9, false), (false, 0, true)] {
+        for row in review_rail_hints(focus, turn, drafts, high, st, st, st) {
             need = need.max(row.iter().map(|s| s.text.width()).sum());
         }
     }
     need
+}
+
+/// File `f`'s notes waiting to be sent with the review: (your drafts, the reviewer's findings) — a note the
+/// reviewer began is its, whoever answered it since.
+fn rail_drafts(editor: &Editor, f: &crate::codereview::File) -> (usize, usize) {
+    let waiting =
+        editor.session.notes.list.iter().filter(|n| n.path == f.path && n.thread.iter().any(|e| e.draft));
+    waiting.fold((0, 0), |(mine, found), n| match n.thread.first().map(|e| e.by) {
+        Some(crate::notes::By::Reviewer) => (mine, found + 1),
+        _ => (mine + 1, found),
+    })
 }
 
 /// A file row's end: `+a −r`, `binary`, `outside`/`new`/`gone` (as `draw_review_rail` puts it — drafts
@@ -8210,11 +8270,13 @@ fn rail_tail(r: &crate::codereview::CodeReview, f: &crate::codereview::File) -> 
     s
 }
 
-/// The review rail's key hints — with its keys, on Claude's turn, or a review's (`send n` with drafts).
+/// The review rail's key hints — with its keys, on Claude's turn, or a review's (`send n` with drafts; on a
+/// high-risk change not looked at, `h looked at` — `high`).
 fn review_rail_hints(
     focus: bool,
     turn: bool,
     drafts: usize,
+    high: bool,
     key: Style,
     faint: Style,
     accent: Style,
@@ -8244,6 +8306,9 @@ fn review_rail_hints(
         // `space v` once, its keys after it (`s send 2 · q end`) — the pairs wouldn't fit the rail
         let send = if drafts > 0 {
             vec![sp("space v s", key), sp(&format!(" send {drafts}"), accent), sp(" · q end", faint)]
+        } else if high {
+            // (no `q end`: a high-risk change not looked at holds the end — and the rail's width)
+            vec![sp("space v h", key), sp(" looked at", accent)]
         } else {
             vec![sp("space v", key), sp(" m viewed · q end", faint)]
         };
@@ -8252,11 +8317,68 @@ fn review_rail_hints(
 }
 
 /// Rows the review rail has for its files (a turn's has its question under the head; files outside the
-/// checkout, a row saying so).
-fn review_rail_room(lay: &Layout, r: &crate::codereview::CodeReview) -> usize {
+/// checkout, a row saying so; the risk rows — `rail_risk`).
+fn review_rail_room(lay: &Layout, editor: &Editor, r: &crate::codereview::CodeReview) -> usize {
     let question = usize::from(matches!(r.base, crate::codereview::Base::Turn { .. }));
     let outside = usize::from(r.files.iter().any(|f| r.outside(f)));
-    lay.body_h.saturating_sub(RAIL_HEAD + question + outside + RAIL_HINTS + 1).max(1)
+    let risk = rail_risk(editor, r).len();
+    lay.body_h.saturating_sub(RAIL_HEAD + question + outside + risk + RAIL_HINTS + 1).max(1)
+}
+
+/// How a piece of a risk row is coloured (`draw_review_rail` picks the style).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tone {
+    High,
+    Warn,
+    Faint,
+    Dim,
+    Accent,
+    Reviewer,
+}
+
+/// The rail's rows about risk, under its counts (`risk.rs`, `reviewer.rs`): the high-risk changes left to
+/// look at (`▲ 2 high to look at` — `▲ all looked at`, faint), and the reviewer: reading, what it found, the
+/// first line of its verdict.
+fn rail_risk(editor: &Editor, r: &crate::codereview::CodeReview) -> Vec<Vec<(Tone, String)>> {
+    use crate::reviewer::State;
+    let mut rows = Vec::new();
+    let any_high =
+        r.files.iter().any(|f| r.graded(editor, f).iter().any(|g| g.grade == crate::risk::Grade::High));
+    if any_high {
+        rows.push(match r.high_unseen(editor).len() {
+            0 => vec![(Tone::Faint, "▲ all looked at".to_string())],
+            n => vec![(Tone::High, format!("▲ {n} high to look at"))],
+        });
+    }
+    let Some(rv) = editor.session.reviewer.as_ref().filter(|rv| rv.of == r.started) else { return rows };
+    let mut row = vec![(Tone::Reviewer, "reviewer".to_string())];
+    match &rv.state {
+        State::Reading => {
+            row.push((Tone::Accent, "  reading…".into()));
+            if rv.reads > 0 {
+                row.push((Tone::Faint, format!(" {}", crate::nav::count(rv.reads, "read"))));
+            }
+        }
+        State::Done => {
+            let t = crate::reviewer::review_tally(editor).unwrap_or_default();
+            match t.findings {
+                0 => row.push((Tone::Dim, "  no findings".into())),
+                n => row.push((Tone::Dim, format!("  {}", crate::nav::count(n, "finding")))),
+            }
+            if t.high > 0 {
+                row.push((Tone::High, format!(" ▲{}", t.high)));
+            }
+            if t.answered > 0 {
+                row.push((Tone::Faint, format!(" · {} answered", t.answered)));
+            }
+        }
+        State::Failed(_) => row.push((Tone::Warn, "  stopped".into())),
+    }
+    rows.push(row);
+    if let Some(first) = rv.verdict.lines().map(str::trim).find(|l| !l.is_empty()) {
+        rows.push(vec![(Tone::Dim, format!("“{first}”"))]);
+    }
+    rows
 }
 
 fn draw_review_rail(
@@ -8281,15 +8403,9 @@ fn draw_review_rail(
     let key = Style { bold: true, ..dim };
     let w = lay.rail_w.saturating_sub(GAP + PAD + PAD_R).max(1);
     let sp = |text: String, style: Style| Span { text, style };
-    let drafts_in = |f: &crate::codereview::File| {
-        editor
-            .session
-            .notes
-            .list
-            .iter()
-            .filter(|n| n.path == f.path && n.thread.iter().any(|e| e.draft))
-            .count()
-    };
+    // A file's drafts waiting to go: yours, and the reviewer's findings (`rail_drafts`)
+    let drafts_in = |f: &crate::codereview::File| rail_drafts(editor, f);
+    let reviewer_fg = reviewer_style(editor, ui).fg;
     let drafts: usize = editor.session.notes.list.iter().filter(|n| n.thread.iter().any(|e| e.draft)).count();
     let (added, removed): (usize, usize) =
         r.files.iter().fold((0, 0), |(a, b), f| (a + f.added, b + f.removed));
@@ -8332,9 +8448,29 @@ fn draw_review_rail(
         let said = format!("{outside} outside, not committed");
         rows.push((vec![sp(fit_ellipsis(&said, w), Style { fg: warn_fg, ..card })], card, None));
     }
+    // What's high-risk and left to look at, and the reviewer (`rail_risk`)
+    let high_fg = editor.theme.try_get("error").and_then(|s| s.fg).or(warn_fg);
+    for row in rail_risk(editor, r) {
+        let mut left = w;
+        let mut spans = Vec::new();
+        for (tone, text) in row {
+            let st = match tone {
+                Tone::High => Style { fg: high_fg, ..card },
+                Tone::Warn => Style { fg: warn_fg, ..card },
+                Tone::Faint => faint,
+                Tone::Dim => dim,
+                Tone::Accent => accent,
+                Tone::Reviewer => Style { fg: reviewer_fg, bold: true, ..card },
+            };
+            let text = fit_ellipsis(&text, left);
+            left = left.saturating_sub(text.width());
+            spans.push(sp(text, st));
+        }
+        rows.push((spans, card, None));
+    }
     // Files under their folders (filetree.rs, in the review's order) — from its scroll (`CodeReview::fit`),
     // the files out of sight counted in the blank rows around them
-    let room = review_rail_room(lay, r);
+    let room = review_rail_room(lay, editor, r);
     let tree = r.rail_rows();
     let files_in = |rows: &[crate::filetree::Row]| rows.iter().filter(|t| t.item.is_some()).count();
     let more = |k: usize, arrow: &str| {
@@ -8368,6 +8504,15 @@ fn draw_review_rail(
         let bg = if here { selected } else { card };
         let seen = r.viewed(editor, f);
         let mut tail = Vec::new();
+        // Its grade: `▲k` high-risk changes to look at (all looked at: a faint `▲`), `•` behaviour, quiet none
+        match r.top(editor, f) {
+            Some(crate::risk::Grade::High) => match r.high_left(editor, f) {
+                0 => tail.push(sp(" ▲".into(), Style { fg: ui.linenr.fg, ..bg })),
+                k => tail.push(sp(format!(" ▲{k}"), Style { fg: high_fg, ..bg })),
+            },
+            Some(crate::risk::Grade::Behaviour) => tail.push(sp(" •".into(), Style { fg: warn_fg, ..bg })),
+            _ => {}
+        }
         if f.binary {
             tail.push(sp(" binary".into(), Style { fg: ui.linenr.fg, ..bg }));
         } else {
@@ -8386,9 +8531,12 @@ fn draw_review_rail(
         } else if f.gone {
             tail.push(sp(" gone".into(), Style { fg: ui.linenr.fg, ..bg }));
         }
-        let k = drafts_in(f);
+        let (k, found) = drafts_in(f);
         if k > 0 {
             tail.push(sp(format!(" ¶{k}"), Style { fg: ui.accent.fg, ..bg }));
+        }
+        if found > 0 {
+            tail.push(sp(format!(" r{found}"), Style { fg: reviewer_fg, ..bg }));
         }
         let tail_w: usize = tail.iter().map(|s| s.text.width()).sum();
         let indent = guides.text.width();
@@ -8422,7 +8570,16 @@ fn draw_review_rail(
     let fill = lay.body_h.saturating_sub(rows.len() + RAIL_HINTS);
     rows.extend(std::iter::repeat_n((Vec::new(), card, None), fill));
     rows.push((Vec::new(), card, None));
-    for row in review_rail_hints(r.focus, turn, drafts, key, faint, accent) {
+    // (the cursor on a high-risk change no one has looked at yet)
+    let high_here = r.current(editor).is_some_and(|i| {
+        let line = editor.cursor_line();
+        r.graded(editor, &r.files[i]).iter().any(|g| {
+            g.grade == crate::risk::Grade::High
+                && (g.at..g.at + g.lines).contains(&line)
+                && !g.looked_at(&editor.session.looked)
+        })
+    });
+    for row in review_rail_hints(r.focus, turn, drafts, high_here, key, faint, accent) {
         rows.push((row, card, None));
     }
     let mut links = editor.screen.review_rail.borrow_mut();
@@ -10118,11 +10275,23 @@ fn note_lines(
         }
         out.push(Line::Text {
             spans: match e.by {
-                By::Claude => vec![sp("¶ ", accent), sp("claude", Style { bold: true, ..accent })],
+                By::Author => vec![sp("¶ ", accent), sp(By::Author.label(), Style { bold: true, ..accent })],
                 By::You if e.draft => {
-                    vec![sp("› ", dim), sp("you", Style { bold: true, ..dim }), sp(" · draft", faint)]
+                    vec![
+                        sp("› ", dim),
+                        sp(By::You.label(), Style { bold: true, ..dim }),
+                        sp(" · draft", faint),
+                    ]
                 }
-                By::You => vec![sp("› ", dim), sp("you", Style { bold: true, ..dim })],
+                By::You => vec![sp("› ", dim), sp(By::You.label(), Style { bold: true, ..dim })],
+                By::Reviewer => {
+                    let st = reviewer_style(editor, ui);
+                    let mut v = vec![sp("¶ ", st), sp(By::Reviewer.label(), Style { bold: true, ..st })];
+                    if e.draft {
+                        v.push(sp(" · not sent yet", faint));
+                    }
+                    v
+                }
             },
             indent: 0,
         });
@@ -10155,6 +10324,33 @@ fn note_lines(
     };
     out.push(Line::Text { spans: hint_spans(hints, key, faint), indent: 0 });
     out
+}
+
+/// A high-risk change's line end in `room` cells, after its `▲`: `high · unsafe (rust pack) · space v h` — the
+/// key that clears it always stays: the rule's source goes first (`high · unsafe · space v h`), then the rule
+/// is cut.
+fn risk_line_end(why: &str, room: usize) -> String {
+    const KEY: &str = " · space v h";
+    let whole = format!("high · {why}{KEY}");
+    if whole.width() <= room {
+        return whole;
+    }
+    let rule = why.rsplit_once(" (").map_or(why, |(rule, _)| rule);
+    let short = format!("high · {rule}{KEY}");
+    if short.width() <= room {
+        return short;
+    }
+    let left = room.saturating_sub("high · ".width() + KEY.width());
+    match left {
+        0..=1 => fit_ellipsis(&format!("high{KEY}"), room),
+        _ => format!("high · {}{KEY}", fit_ellipsis(rule, left)),
+    }
+}
+
+/// The reviewer's colour (`reviewer.rs`) — a syntax colour apart from the accent the author's notes have.
+fn reviewer_style(editor: &Editor, ui: &Ui) -> Style {
+    let fg = editor.theme.try_get("type").and_then(|s| s.fg).or(ui.virt.fg);
+    Style { fg, ..Style::default() }
 }
 
 /// The merge conflict under the cursor: which of how many, and the keys that settle it (the labels git gave
@@ -10980,6 +11176,7 @@ mod tests {
                 since: std::time::Instant::now(),
                 drawn: Default::default(),
                 asked: None,
+                held: None,
             });
             let result =
                 serde_json::json!([{"label": "line_one", "detail": "fn line_one()"}, {"label": "lx"}]);
@@ -11326,7 +11523,7 @@ mod tests {
                 &mut ed,
                 &p,
                 i * 2..i * 2 + 1,
-                crate::notes::By::Claude,
+                crate::notes::By::Author,
                 "a note about this line",
             );
         }
@@ -11384,6 +11581,86 @@ mod tests {
             let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
         }
         assert!(seating <= frame / 10, "seating the cards {seating:?} of a {frame:?} frame");
+    }
+
+    /// A review's grades cost a frame little: 46 files, each with 20 graded changes of 10 lines (a few high, one
+    /// looked at), the rail drawn — its rows ask every file's grades several times a frame (`rail_risk`, each
+    /// row's mark). Medians of 300 frames, graded and not, both said for `cargo perf`.
+    #[test]
+    fn perf_frames_with_a_graded_review() {
+        if crate::test_results::unoptimized("term::tests::perf_frames_with_a_graded_review") {
+            return;
+        }
+        use crate::codereview::{Base, CodeReview, File};
+        use crate::risk::{Grade, Graded, Hunk};
+        let root = PathBuf::from("/nowhere/repo");
+        let files: Vec<File> = (0..46)
+            .map(|i| {
+                let rel = format!("src/m{}/f{i}.rs", i / 8);
+                File {
+                    path: root.join(&rel),
+                    rel,
+                    added: 200,
+                    removed: 0,
+                    new: false,
+                    gone: false,
+                    binary: false,
+                }
+            })
+            .collect();
+        let grades: crate::codereview::Grades = files
+            .iter()
+            .map(|f| {
+                let hunks = (0..20)
+                    .map(|k| {
+                        let lines: Vec<String> =
+                            (0..10).map(|l| format!("let x{k}_{l} = {l}; // {}", f.rel)).collect();
+                        let h = Hunk { at: k * 12, added: lines, ..Hunk::default() };
+                        let grade = if k % 7 == 0 { Grade::High } else { Grade::Behaviour };
+                        Graded {
+                            grade,
+                            why: "unsafe (rust pack)".into(),
+                            ..crate::risk::graded(&f.rel, None, &h, &Default::default(), false)
+                        }
+                    })
+                    .collect();
+                (f.path.clone(), hunks)
+            })
+            .collect();
+        let frames = |graded: bool| {
+            let mut ed = Editor::new(Config::default());
+            let mut r = CodeReview::for_test(Base::Head, root.clone(), files.clone());
+            if graded {
+                r.grades = grades.clone();
+                let first = &grades[&files[0].path][0];
+                ed.session.looked.extend(first.keys.iter().copied());
+            }
+            ed.session.code_review = Some(r);
+            let mut buf = Vec::with_capacity(1 << 16);
+            render(&mut ed, &mut buf, 180, 50).unwrap();
+            let mut all: Vec<Duration> = (0..300)
+                .map(|_| {
+                    buf.clear();
+                    let t = Instant::now();
+                    render(&mut ed, &mut buf, 180, 50).unwrap();
+                    t.elapsed()
+                })
+                .collect();
+            all.sort_unstable();
+            all[all.len() / 2]
+        };
+        let (plain, graded) = (frames(false), frames(true));
+        let us = |d: Duration| d.as_secs_f64() * 1e6;
+        for (name, d) in [("review_frame_ungraded_46", plain), ("review_frame_graded_46", graded)] {
+            let line = format!("PERF {name} {:.1} budget=16000 noise=50\n", us(d));
+            let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+        }
+        // (measured 2026-10-05: 59.5 µs against 20.7 with a copy of each file's grades per call; 28 against 25
+        // shared)
+        assert!(
+            graded <= plain.mul_f64(1.5) + Duration::from_micros(20),
+            "graded {graded:?} against {plain:?} ungraded"
+        );
     }
 
     /// Sessions cost a frame nothing: key → frame with the chat open, one session against three (the tab row,
@@ -11556,7 +11833,7 @@ mod tests {
                 &mut ed,
                 &path,
                 i * 20..i * 20 + 3,
-                crate::notes::By::Claude,
+                crate::notes::By::Author,
                 "a note about this",
             );
         }
@@ -11683,6 +11960,22 @@ mod tests {
         assert!(t.width() <= 16 && t.ends_with(".rs") && t.contains('…'), "{t}");
         assert_eq!(tree_guides(2), "│ │ ");
         assert_eq!(tree_guides(5), "│ │ │ ││", "past the third, one cell each");
+    }
+
+    /// A high-risk change's line end keeps the key that clears it at any width: whole when it fits, then
+    /// without the rule's source, then the rule cut — never `space…`.
+    #[test]
+    fn a_high_changes_line_end_keeps_its_key() {
+        let why = "unsafe (rust pack)";
+        assert_eq!(risk_line_end(why, 60), "high · unsafe (rust pack) · space v h");
+        assert_eq!(risk_line_end(why, 30), "high · unsafe · space v h");
+        let cut = risk_line_end("remove_dir_all (rust pack)", 24);
+        assert!(cut.ends_with(" · space v h") && cut.contains('…') && cut.width() <= 24, "{cut}");
+        for room in 8..60 {
+            let s = risk_line_end(why, room);
+            assert!(s.width() <= room, "{room}: {s}");
+            assert!(s.ends_with("space v h") || room < "high · space v h".width(), "{room}: {s}");
+        }
     }
 
     /// The review rail is as wide as its rows need (U6: 31 columns for two files, yet names cut): a short

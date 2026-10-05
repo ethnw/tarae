@@ -83,6 +83,8 @@ mod replace;
 mod replay;
 mod restart;
 mod restore;
+mod reviewer;
+mod risk;
 mod runtime;
 mod sandbox;
 mod saver;

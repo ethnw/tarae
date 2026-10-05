@@ -212,7 +212,9 @@ commands! {
         review_branch => "Review against a branch…",
         review_viewed => "Mark this file viewed",
         review_send => "Send the review to Claude",
-        review_claude => "Claude reviews the changes",
+        review_claude => "A second Claude reviews",
+        review_verdict => "The reviewer's verdict",
+        review_hunk_seen => "Looked at this risky change",
         review_close => "End the review",
         review_at_end => "Claude's edits: review at end",
         review_turn => "Review Claude's last turn",
@@ -2243,6 +2245,14 @@ fn effort_picker(cx: &mut Context) {
 
 fn review_claude(cx: &mut Context) {
     crate::codereview::ask_claude(cx.editor, None);
+}
+
+fn review_verdict(cx: &mut Context) {
+    crate::reviewer::verdict(cx.editor);
+}
+
+fn review_hunk_seen(cx: &mut Context) {
+    crate::codereview::hunk_seen(cx.editor);
 }
 
 fn undo_turn(cx: &mut Context) {

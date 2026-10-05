@@ -550,6 +550,8 @@ pub enum Kind {
     Chat,
     /// `space i`'s claude, answering.
     Ask,
+    /// A session's reviewer, reading (`reviewer.rs`).
+    Reviewer,
     /// The claude kept started for the next `space i`.
     Spare,
     /// A plugin's program: (plugin, its id for it).
@@ -568,7 +570,7 @@ impl Kind {
         match self {
             Kind::Tarae => 0,
             Kind::Lsp(_) | Kind::Held(..) => 1,
-            Kind::Chat | Kind::Ask | Kind::Spare => 2,
+            Kind::Chat | Kind::Ask | Kind::Reviewer | Kind::Spare => 2,
             Kind::Debug | Kind::Helper => 3,
             Kind::Task | Kind::Queued(_) => 4,
             Kind::Test => 5,
@@ -1521,6 +1523,9 @@ impl Editor {
             if let Some(c) = &l.chat {
                 add(c.pid(), Kind::Chat, "claude", "the chat".into(), session);
             }
+            if let Some(r) = &l.reviewer {
+                add(r.pid(), Kind::Reviewer, "claude", format!("the reviewer · {}", r.label), session);
+            }
         }
         // (a watch held elsewhere — its run gone, not yet started, or never to: still tarae's, still known)
         for w in crate::sandbox::live_watches() {
@@ -1810,6 +1815,11 @@ impl Editor {
             Kind::Ask => {
                 crate::llm::kill(r.pid);
                 gone(self, "space i's claude", None);
+            }
+            Kind::Reviewer => {
+                let pid = r.pid;
+                self.procs_in(&r, |ed| crate::reviewer::stopped_by_procs(ed, pid));
+                gone(self, "the reviewer", None);
             }
             Kind::Spare => {
                 self.llm_warm = Default::default();

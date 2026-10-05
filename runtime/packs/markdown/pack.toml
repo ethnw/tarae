@@ -35,3 +35,7 @@ args = ["server"]
 what = "Markdown's language server (marksman)"
 ways = [{ run = ["brew", "install", "marksman"] }]
 hint = "or your system's package, or a release from github.com/artempyanykh/marksman"
+
+# A code review's grades (`risk.rs`): docs are quiet
+[review]
+quiet = ["*.md", "*.markdown"]

@@ -1,0 +1,97 @@
+# review_end_held · 112x30 · theme meok · cursor 2:32
+## text
+00   review       uncommitted ▌ tarae  ›  src  ›  demo.rs
+01   ──────────────────────── ▌ ──────────────────────────────────────────────────────────────────────────────────
+02   1 file  +1               ▌  1 let line_1 = 1;
+03   0 of 1 viewed            ▌  1 let line_2 = 2;
+04   ▲ 1 high to look at      ▌  2 let line_3 = 3;
+05                            ▌  3 let line_4 = 4;
+06     src/                   ▌  4 let line_5 = 5;
+07 ▎ │ ◦ demo.rs        ▲1 +1 ▌  5▎let pid = unsafe { getpid() };   ▲ high · unsafe (rust pack) · space v h
+08                            ▌
+09                            ▌
+10                            ▌
+11                            ▌
+12                            ▌                      ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+13                            ▌                       ▎ End reviewer's review?
+14                            ▌                         reviewer's review · uncommitted · 0 of 1 viewed
+15                            ▌
+16                            ▌                         1 file not viewed
+17                            ▌
+18                            ▌                           src/demo.rs
+19                            ▌
+20                            ▌                         1 high-risk change not looked at — it ends once each has
+21                            ▌                         had a look (]g to it, space v h):
+22                            ▌                           src/demo.rs:6
+23                            ▌
+24                            ▌                         Drafts stay. Opened again, its marks are kept while a
+25   ]g hunk  ]F file         ▌                         file's diff is the same.
+26   space e files            ▌
+27   space n comment          ▌                         n Keep reviewing
+28   space v m viewed · q end ▌                      ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+29  ▐ NORMAL ▌  +1                                                                          rust   utf-8 LF   1:1
+## bg · surface per cell, blank = ui.background
+00 ppppppppppppppppppppppppppp
+01 ppppppppppppppppppppppppppp
+02 ppppppppppppppppppppppppppp     Accccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+03 ppppppppppppppppppppppppppp
+04 ppppppppppppppppppppppppppp
+05 ppppppppppppppppppppppppppp
+06 ppppppppppppppppppppppppppp
+07 PPPPPPPPPPPPPPPPPPPPPPPPPPp     11111111111111111111111111111111111111111111111111111111111111111111111111111111
+08 ppppppppppppppppppppppppppp
+09 ppppppppppppppppppppppppppp
+10 ppppppppppppppppppppppppppp
+11 ppppppppppppppppppppppppppp
+12 ppppppppppppppppppppppppppp
+13 ppppppppppppppppppppppppppp                       ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+14 ppppppppppppppppppppppppppp                       ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+15 ppppppppppppppppppppppppppp                       ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+16 ppppppppppppppppppppppppppp                       ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+17 ppppppppppppppppppppppppppp                       ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+18 ppppppppppppppppppppppppppp                       ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+19 ppppppppppppppppppppppppppp                       ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+20 ppppppppppppppppppppppppppp                       ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+21 ppppppppppppppppppppppppppp                       ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+22 ppppppppppppppppppppppppppp                       ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+23 ppppppppppppppppppppppppppp                       ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+24 ppppppppppppppppppppppppppp                       ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+25 ppppppppppppppppppppppppppp                       ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+26 ppppppppppppppppppppppppppp                       ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+27 ppppppppppppppppppppppppppp                       ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+28 ppppppppppppppppppppppppppp
+29   AAAAAAAA
+## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
+00   TTTTTT       fffffffffff   ddddd  f  ddd  f  TTTTTTT
+01   ffffffffffffffffffffffff   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+02   d dddd  gg                  A
+03   f ff f ffffff               f
+04   e e eeee ee eeee ee         f
+05                               f
+06     dddf                      f
+07 a f f ttttttt        ee gg    fg                                 e
+08
+09
+10
+11
+12
+13                                                    a BBB BBBBBBBBBB BBBBBBB
+14                                                      dddddddddd dddddd d ddddddddddd d d dd d dddddd
+15
+16                                                      d dddd ddd dddddd
+17
+18                                                        ddddddddddd
+19
+20                                                      w wwwwwwwww wwwwww www wwwwww ww w ww wwww wwww wwww www
+21                                                      www w wwww www ww www wwwww w www
+22                                                        wwwwwwwwwwwww
+23
+24                                                      dddddd ddddd dddddd dddddd ddd ddddd ddd dddd ddddd d
+25   DD ffff  DD ffff                                   dddddd dddd dd ddd ddddd
+26   DDDDD D fffff
+27   DDDDD D fffffff                                    A
+28   DDDDD D f ffffff f f fff
+29  a BBBBBB a  gg                                                                          dddd   ddddd dd   TTT
+## legend
+bg: c=ui.cursorline.primary  p=ui.popup  P=ui.menu.selected  A=ui.cursor.primary  1=other
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  e=error  w=warning  g=diff.plus  B=bold
