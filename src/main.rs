@@ -35,6 +35,7 @@ mod fswatch;
 mod git;
 mod gitmenu;
 mod gitpanel;
+mod gitrepo;
 mod grammar;
 mod graphemes;
 mod grep;

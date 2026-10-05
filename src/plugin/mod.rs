@@ -1333,13 +1333,28 @@ mod tests {
     fn the_project_s_files_found_and_read_its_own_files_written_tools_offered() {
         let (mut ed, dir) = setup("project", "");
         answer(&mut ed, approval, true);
-        // The project is the folder tarae started in: its files found by pattern (what git ignores, not)
+        // The project is the folder tarae started in — here a repository of the test's own (git lists its
+        // files: never in tarae's own repository): its files found by pattern (what git ignores, not)
+        let project = dir.join("project");
+        std::fs::create_dir_all(project.join("sub")).unwrap();
+        std::fs::create_dir_all(project.join("ignored")).unwrap();
+        for f in ["Cargo.toml", "sub/Cargo.toml", "ignored/Cargo.toml"] {
+            std::fs::write(project.join(f), "[package]\nname = \"p\"\n").unwrap();
+        }
+        std::fs::write(project.join(".gitignore"), "ignored/\n").unwrap();
+        let project = std::fs::canonicalize(&project).unwrap();
+        for args in [&["init", "-q"][..], &["add", "-A"]] {
+            let ok = std::process::Command::new("git").args(args).current_dir(&project).output().unwrap();
+            assert!(ok.status.success(), "git {args:?}");
+        }
+        ed.session.root = project.clone();
         ed.plugin_run("find", "**/Cargo.toml").unwrap();
         until_said(&mut ed, r#"found 50 ["Cargo.toml""#);
+        assert!(!toasts(&ed).contains("ignored/"), "{}", toasts(&ed));
         ed.plugin_run("find", "../**").unwrap();
         until_said(&mut ed, "failed 50 “../**”: a pattern from the project's folder");
         // …and read without being asked; a file outside it is still asked about
-        let manifest = std::env::current_dir().unwrap().join("Cargo.toml");
+        let manifest = project.join("Cargo.toml");
         ed.plugin_run("fetch", &manifest.display().to_string()).unwrap();
         until_said(&mut ed, "file 10 ");
         // Its own folder: written, nowhere else

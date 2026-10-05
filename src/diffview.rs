@@ -9,26 +9,27 @@ use std::sync::Arc;
 
 use crate::document::DocId;
 use crate::editor::Editor;
-use crate::gitmenu::git;
 
 /// The text to compare `path` with: `against` empty = HEAD's version, an existing file (`as_file`: what
-/// `against` names as a file, from the editor's root) = its text, else the version at that git revision.
-/// (On a worker thread.)
-fn base_text(path: &Path, against: &str, as_file: PathBuf) -> Result<(String, String), String> {
+/// `against` names as a file, from the editor's root) = its text, else the version at that git revision in
+/// its repository as `places` finds it — `gitrepo::for_file_in`. (On a worker thread.)
+pub(crate) fn base_text(
+    places: &crate::gitrepo::Places,
+    path: &Path,
+    against: &str,
+    as_file: PathBuf,
+) -> Result<(String, String), String> {
     // A file — or `/dev/null` (git difftool's side for a new file): anything readable that isn't a folder
     if !against.is_empty() && as_file.exists() && !as_file.is_dir() {
         let text = std::fs::read_to_string(&as_file).map_err(|e| format!("{against}: {e}"))?;
         let name = as_file.file_name().map_or(against.to_string(), |n| n.to_string_lossy().into_owned());
         return Ok((text, name));
     }
-    let dir = path.parent().ok_or("no folder")?;
-    let top = PathBuf::from(git(dir, &["rev-parse", "--show-toplevel"], None)?.trim());
-    let top = std::fs::canonicalize(&top).unwrap_or(top);
-    let rel = path.strip_prefix(&top).map_err(|_| "outside the repository")?.to_string_lossy().into_owned();
+    let (repo, rel) = crate::gitrepo::for_file_in(places, path).map_err(|n| n.said())?;
     let rev = if against.is_empty() { "HEAD" } else { against };
     // Not in that revision: everything is new
-    let text = git(&top, &["show", &format!("{rev}:{rel}")], None).or_else(|e| {
-        git(&top, &["rev-parse", "--verify", "--quiet", rev], None).map(|_| String::new()).map_err(|_| e)
+    let text = repo.run(&["show", &format!("{rev}:{rel}")], None).or_else(|e| {
+        repo.run(&["rev-parse", "--verify", "--quiet", rev], None).map(|_| String::new()).map_err(|_| e)
     })?;
     Ok((text, rev.to_string()))
 }
@@ -45,8 +46,9 @@ impl Editor {
         }
         let (id, version, text) = (doc.id, doc.version(), doc.text.clone());
         let (as_file, against) = (self.path_of(Path::new(against)), against.to_string());
+        let places = self.git_places(&path);
         self.events.jobs().spawn(move || {
-            let result = base_text(&path, &against, as_file).map(|(base, label)| {
+            let result = base_text(&places, &path, &against, as_file).map(|(base, label)| {
                 let hunks = crate::git::hunks(&base, &text.to_string());
                 (base, label, hunks)
             });
@@ -119,12 +121,14 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("old.txt"), "a\nb\n").unwrap();
         let old = dir.join("old.txt");
-        let (text, label) = base_text(&dir.join("new.txt"), &old.to_string_lossy(), old.clone()).unwrap();
+        let at = crate::gitrepo::Places::only(&dir);
+        let (text, label) =
+            base_text(&at, &dir.join("new.txt"), &old.to_string_lossy(), old.clone()).unwrap();
         assert_eq!((text.as_str(), label.as_str()), ("a\nb\n", "old.txt"));
         // (named relative to the editor's root: the file there)
-        assert_eq!(base_text(&dir.join("new.txt"), "old.txt", old.clone()).unwrap().0, "a\nb\n");
+        assert_eq!(base_text(&at, &dir.join("new.txt"), "old.txt", old.clone()).unwrap().0, "a\nb\n");
         // git difftool's side for a new file
-        assert_eq!(base_text(&dir.join("new.txt"), "/dev/null", "/dev/null".into()).unwrap().0, "");
+        assert_eq!(base_text(&at, &dir.join("new.txt"), "/dev/null", "/dev/null".into()).unwrap().0, "");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

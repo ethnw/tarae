@@ -42,7 +42,7 @@ const WRITE_ONE: u64 = landlock::READ_FILE | landlock::WRITE_FILE | landlock::TR
 /// terminals for a pty test (`/dev/ptmx`, then its `/dev/pts/N`, with their ioctls); POSIX semaphores and
 /// shared memory as files in `/dev/shm` (made and removed — macOS's profile allows them too). Reading the
 /// rest of `/dev` (`/dev/urandom`) is the reads' (outside home).
-const DEVICES: [(&str, u64); 7] = [
+pub(super) const DEVICES: [(&str, u64); 7] = [
     ("/dev/null", WRITE_ONE),
     ("/dev/zero", WRITE_ONE),
     ("/dev/full", WRITE_ONE),

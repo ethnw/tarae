@@ -5,7 +5,7 @@
 //! checkout, every file in it that is untracked, or new or changed since the session's base — not only the
 //! hooks this action is likely to run (config and a pull's merge or rebase run others, and a hook runs the
 //! folder's other files; the likely ones are marked) — if any, a card names them and shows them (as a script written unseen is shown — cut to fit, `v` for all of it, `y` waiting until
-//! it's been read): `y` runs the action as usual · `n` runs it with no hooks this time (`gitmenu::NO_HOOKS`) ·
+//! it's been read): `y` runs the action as usual · `n` runs it with no hooks this time (`gitrepo::NO_HOOKS`) ·
 //! Esc back, unanswered, like every card. Committed hooks the base has as they are run as before; hooks under
 //! `.git` (no Claude writes there) are never asked about. tarae's own steps never run hooks at all.
 
@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use crate::editor::Editor;
 use crate::event::SessionId;
-use crate::gitmenu::git;
+use crate::gitrepo::git;
 use crate::offer::{Offer, What};
 
 /// The hooks an action is likely to run — only said on the card (`runs on this pull`): what is asked about is
@@ -237,7 +237,7 @@ impl Editor {
         self.offer_finished(card, Ok(()));
         let Some(i) = self.hook_waits.iter().position(|w| w.card == card) else { return };
         let w = self.hook_waits.remove(i);
-        let pre: Pre = if run { &[] } else { &crate::gitmenu::NO_HOOKS };
+        let pre: Pre = if run { &[] } else { &crate::gitrepo::NO_HOOKS };
         if !run {
             self.note(format!("{} without hooks this time", ask.what));
         }

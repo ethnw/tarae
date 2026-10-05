@@ -385,6 +385,12 @@ pub struct Editor {
     pub(crate) replace_plan: Vec<crate::replace::FilePlan>,
     /// Blame (gitmenu.rs — `b` in the git tab).
     pub blame: crate::gitmenu::BlameState,
+    /// Files told why they get no git (`gitrepo::NoGit::Writable`) — said once each, since tarae started.
+    pub(crate) git_told: std::collections::HashSet<PathBuf>,
+    /// Index reads for the gutter that came back (`git_load_base`) — what tests wait on.
+    pub(crate) git_bases_read: u64,
+    /// Rebase lines read on a worker that came back (`rebase::rebase_git`) — what tests wait on.
+    pub(crate) rebase_lines_read: u64,
     /// `gw` labels on screen (labels.rs) — the next two keys pick one.
     pub jump_labels: Option<crate::labels::Labels>,
     /// Length of the key sequence behind the last command — to drop `Q` itself when recording stops.
@@ -789,6 +795,9 @@ impl Editor {
             expand_history: Vec::new(),
             jump_labels: None,
             blame: Default::default(),
+            git_told: Default::default(),
+            git_bases_read: 0,
+            rebase_lines_read: 0,
             replace_targets: None,
             replace_plan: Vec::new(),
             next_id: 0,
@@ -3384,13 +3393,9 @@ impl Editor {
                 }
                 let root = self.session.root.clone();
                 self.events.jobs().spawn(move || {
-                    let out = std::process::Command::new("git")
-                        .args(["branch", "-a", "--format=%(refname:short)"])
-                        .current_dir(&root)
-                        .stderr(std::process::Stdio::null())
-                        .output()
-                        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-                        .unwrap_or_default();
+                    let out =
+                        crate::gitrepo::git(&root, &["branch", "-a", "--format=%(refname:short)"], None)
+                            .unwrap_or_default();
                     let mut names: Vec<String> = out
                         .lines()
                         .map(str::trim)
@@ -3728,6 +3733,8 @@ mod tests {
     #[test]
     fn command_line_completion_keys() {
         let mut ed = Editor::new(Config::default());
+        // (`:git-switch `'s branch names are read by git in the root: one that isn't tarae's own repository)
+        ed.session.root = std::fs::canonicalize(std::env::temp_dir()).unwrap();
         let text = |ed: &Editor| ed.prompt.as_ref().map(|p| p.text.clone()).unwrap_or_default();
         feed(&mut ed, ":wr<tab>");
         assert_eq!(text(&ed), "write", "several → the first");
@@ -4244,6 +4251,7 @@ mod tests {
         git(&["add", "a.txt"]);
         git(&["commit", "-qm", "first"]);
         let mut ed = editor("");
+        ed.session.root = dir.clone(); // (a file's git is the session's repository's — `gitrepo`)
         ed.git_auto = true;
         // (the git tab `space g` opens reads its status in the panel's folder — not this repository)
         let mut sb = crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, dir.clone());
@@ -4302,6 +4310,7 @@ mod tests {
         git(&["add", "a.txt"]);
         git(&["commit", "-qm", "first"]);
         let mut ed = editor("");
+        ed.session.root = dir.clone(); // (a file's git is the session's repository's — `gitrepo`)
         ed.git_auto = true;
         ed.open(&file).unwrap();
         settle_until(&mut ed, |ed| ed.doc().git_base.is_some());
@@ -4314,6 +4323,101 @@ mod tests {
         assert_eq!(ed.blame.of.map(|(_, v)| v), Some(last), "blamed a version typed over");
         assert_eq!(ed.blame_here(0).as_deref(), Some("not committed yet"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A file in no session's repository, where no sandboxed run can write (here under this crate's `target/`:
+    /// not the session's checkout, not a temp folder, no grant): its own repository, found from its folder —
+    /// its gutter as anywhere else.
+    #[test]
+    fn a_file_outside_every_session_and_write_place_gets_its_gutter() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("target/tarae-outside-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let file = dir.join("sub/a.txt");
+        std::fs::write(&file, "one\n").unwrap();
+        for args in [&["init", "-q"][..], &["add", "sub/a.txt"]] {
+            let ok = std::process::Command::new("git").args(args).current_dir(&dir).output().unwrap();
+            assert!(ok.status.success(), "git {args:?}");
+        }
+        std::fs::write(&file, "one\ntwo\n").unwrap();
+        let mut ed = editor("");
+        ed.sandbox = crate::sandbox::Availability::Ready;
+        ed.git_auto = true;
+        assert!(!file.starts_with(&ed.session.root));
+        ed.open(&file).unwrap();
+        settle_until(&mut ed, |ed| ed.doc().git_base.is_some());
+        assert_eq!(ed.doc().git_base.as_deref().map(String::as_str), Some("one\n"));
+        settle_until(&mut ed, |ed| !ed.doc().git_hunks.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A file in no session's repository where a sandboxed run can write (the temp folder), a git directory's
+    /// layout planted around it: no git read there — and the status line says why, once.
+    #[test]
+    fn a_file_where_commands_write_gets_no_git_and_is_told_once() {
+        let dir = std::env::temp_dir().join(format!("tarae-planted-outside-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let sub = dir.join("sub");
+        std::fs::create_dir_all(sub.join("objects")).unwrap();
+        std::fs::create_dir_all(sub.join("refs")).unwrap();
+        std::fs::write(sub.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(sub.join("config"), "[core]\n\tbare = true\n").unwrap();
+        let file = sub.join("a.txt");
+        std::fs::write(&file, "one\n").unwrap();
+        let root = std::env::temp_dir().join(format!("tarae-planted-root-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ed = editor("");
+        ed.session.root = std::fs::canonicalize(&root).unwrap();
+        ed.sandbox = crate::sandbox::Availability::Ready;
+        ed.git_auto = true;
+        ed.open(&file).unwrap();
+        let why = "not in this session's repository — tarae doesn't read a git folder from where commands can write";
+        let told = |ed: &Editor| ed.messages.iter().filter(|m| m.2.contains(why)).count();
+        settle_until(&mut ed, |ed| told(ed) > 0);
+        assert!(ed.doc().git_base.is_none());
+        // Asked again (focus regained): not said again
+        let read = ed.git_bases_read;
+        ed.git_reload_bases();
+        ed.git_reload_bases();
+        settle_until(&mut ed, |ed| ed.git_bases_read >= read + 2);
+        assert_eq!(told(&ed), 1, "once");
+        assert!(ed.doc().git_base.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Runs not sandboxed (`llm.sandbox` off): a run can write anywhere and run git itself, so holding git
+    /// back protects nothing — a file in no session's repository, in the temp folder here, gets its own,
+    /// found from its folder, and nothing is said.
+    #[test]
+    fn unsandboxed_runs_leave_files_outside_the_sessions_their_git() {
+        let dir = std::env::temp_dir().join(format!("tarae-unsandboxed-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let file = dir.join("sub/a.txt");
+        std::fs::write(&file, "one\n").unwrap();
+        for args in [&["init", "-q"][..], &["add", "sub/a.txt"]] {
+            let ok = std::process::Command::new("git").args(args).current_dir(&dir).output().unwrap();
+            assert!(ok.status.success(), "git {args:?}");
+        }
+        std::fs::write(&file, "one\ntwo\n").unwrap();
+        let root = std::env::temp_dir().join(format!("tarae-unsandboxed-root-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ed = editor("");
+        ed.session.root = std::fs::canonicalize(&root).unwrap();
+        // (a sandbox here, the setting off — not the tests' Bypass, which is unsandboxed already)
+        ed.sandbox = crate::sandbox::Availability::Ready;
+        ed.config.llm.sandbox = false;
+        ed.git_auto = true;
+        ed.open(&file).unwrap();
+        settle_until(&mut ed, |ed| ed.git_bases_read > 0);
+        assert_eq!(ed.doc().git_base.as_deref().map(String::as_str), Some("one\n"));
+        assert!(!ed.messages.iter().any(|m| m.2.contains(crate::gitrepo::NOT_READ)), "nothing said");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -9823,12 +9927,22 @@ mod tests {
     }
 
     /// The git tab: changes and staged files as sections; `s` stages the file under the selection, `c` opens
-    /// the message buffer, `:w` commits it (and closes it), `d` twice deletes an untracked file.
+    /// the message buffer, `:w` commits it (and closes it), `d` twice deletes an untracked file. The user's
+    /// own hook runs as git runs it from a terminal: no `GIT_DIR`/`GIT_WORK_TREE` handed to it (`gitrepo`'s
+    /// hooked form) — a stand-in that only writes what it was given into the test's own folder.
     #[test]
     fn git_tab_stage_commit_discard() {
         let repo = git_repo("gittab", &[("a.txt", "one\n")]);
         std::fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
         std::fs::write(repo.join("b.txt"), "new\n").unwrap();
+        let seen = repo.with_file_name(format!("tarae-gittab-hook-{}.seen", std::process::id()));
+        let hook = repo.join(".git/hooks/pre-commit");
+        let script =
+            format!("#!/bin/sh\necho \"${{GIT_DIR-none}} ${{GIT_WORK_TREE-none}}\" > '{}'\n", seen.display());
+        std::fs::write(&hook, script).unwrap();
+        let mut perms = std::fs::metadata(&hook).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&hook, perms).unwrap();
         let mut ed = editor("");
         ed.session.sidebar = Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, repo.clone()));
         ed.git_refresh();
@@ -9861,6 +9975,12 @@ mod tests {
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&log.stdout).trim(), "add two");
         assert!(ed.docs.iter().all(|d| d.display_name_short() != "COMMIT_EDITMSG"), "its buffer closed");
+        assert_eq!(
+            std::fs::read_to_string(&seen).unwrap(),
+            "none none\n",
+            "the hook ran, given no repository"
+        );
+        std::fs::remove_file(&seen).ok();
         // b.txt: untracked — the first d asks, the second deletes
         ed.session.sidebar.as_mut().unwrap().focus = true;
         ed.session.sidebar.as_mut().unwrap().selected = 1;
@@ -10845,6 +10965,7 @@ mod tests {
         std::fs::write(repo.join("b.txt"), "b\nmore\n").unwrap();
         let file = repo.join("a.txt");
         let mut ed = editor("");
+        ed.session.root = repo.clone(); // (a file's git is the session's repository's — `gitrepo`)
         ed.git_auto = true;
         ed.open(&file).unwrap();
         settle_until(&mut ed, |ed| ed.doc().git_base.is_some());
@@ -10916,6 +11037,7 @@ mod tests {
         let repo = git_repo("hub", &[("a.txt", "one\ntwo\nthree\nfour\nfive\n")]);
         let file = repo.join("a.txt");
         let mut ed = editor("");
+        ed.session.root = repo.clone(); // (a file's git is the session's repository's — `gitrepo`)
         ed.git_auto = true;
         ed.open(&file).unwrap();
         settle_until(&mut ed, |ed| ed.doc().git_base.is_some());
@@ -11016,6 +11138,7 @@ mod tests {
         let repo = git_repo("gitnothinghere", &[("a.txt", "one\n"), ("b.txt", "two\n")]);
         std::fs::write(repo.join("b.txt"), "two\nmore\n").unwrap();
         let mut ed = editor("");
+        ed.session.root = repo.clone(); // (a file's git is the session's repository's — `gitrepo`)
         ed.git_auto = true;
         ed.open(&repo.join("a.txt")).unwrap();
         settle_until(&mut ed, |ed| ed.doc().git_base.is_some());
@@ -11102,6 +11225,7 @@ mod tests {
         let repo = git_repo("diffview", &[("a.txt", "one\ntwo\nthree\n")]);
         std::fs::write(repo.join("a.txt"), "one\nTWO\nthree\nfour\n").unwrap();
         let mut ed = editor("");
+        ed.session.root = repo.clone(); // (a file's git is the session's repository's — `gitrepo`)
         ed.open(&repo.join("a.txt")).unwrap();
         feed(&mut ed, ":diff<ret>");
         settle_until(&mut ed, |ed| ed.doc().review_base.is_some());
@@ -12755,9 +12879,22 @@ q = \"delete_selection\"\n",
 
     #[test]
     fn file_picker_and_global_search_open_files() {
-        // On this repo itself: the file list fills, and a search result jumps to its line.
+        // In a repository of its own (git lists its files — never in tarae's own): the file list fills, and a
+        // search result jumps to its line.
+        let dir = std::env::temp_dir().join(format!("tarae-picker-files-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        for i in 0..12 {
+            std::fs::write(dir.join(format!("src/m{i}.rs")), format!("fn m{i}() {{}}\n")).unwrap();
+        }
+        std::fs::write(dir.join("src/selection.rs"), "fn other() {}\n\nfn put_cursor() {}\n").unwrap();
+        for args in [&["init", "-q"][..], &["add", "-A"]] {
+            let ok = std::process::Command::new("git").args(args).current_dir(&dir).output().unwrap();
+            assert!(ok.status.success(), "git {args:?}");
+        }
         let mut ed = editor("");
-        ed.session.root = this_repo();
+        ed.session.root = dir.clone();
         feed(&mut ed, " f");
         settle(&mut ed);
         let p = ed.picker.as_ref().unwrap();
@@ -12776,6 +12913,7 @@ q = \"delete_selection\"\n",
         let pos = doc.selection().primary().head;
         let line = doc.text.line(mv::line_of(&doc.text, pos)).to_string();
         assert!(line.contains("fn put_cursor"), "{line:?}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// #36: editing a big Rust file keeps memory bounded — undo keeps no parse trees (every step kept its

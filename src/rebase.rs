@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::editor::Editor;
-use crate::gitmenu::git;
+use crate::gitrepo::git;
 use crate::offer::{Offer, What};
 
 /// How often the step (n of m) is read while git runs.
@@ -27,10 +27,16 @@ const SIDE_MAX: usize = 60_000;
 /// git as tarae runs it for a rebase — outside the sandbox, so with no hooks: a `core.hooksPath` inside the
 /// checkout (`.githooks`) is a folder the session's Claude can write, and pre-rebase, post-checkout,
 /// post-rewrite and the commit hooks would run what it put there unsandboxed (review, 2026-10-04 — the same
-/// flag as `gitmenu::NO_HOOKS`, here as a shell line for the task panel). And without
+/// flag as `gitrepo::NO_HOOKS`, here as a shell line for the task panel). And without
 /// the conflict advice: its `hint:` lines tell you to `git add` and `--continue` yourself — tarae's step here —
-/// and made the task panel tall enough to push the resolved card over the review (a shot).
-const GIT: &str = "git -c core.hooksPath=/dev/null -c advice.mergeConflict=false";
+/// and made the task panel tall enough to push the resolved card over the review (a shot). On `repo`, named
+/// (`gitrepo::Repo::shell_line`).
+fn git_line(repo: &crate::gitrepo::Repo) -> String {
+    format!("{} {} -c advice.mergeConflict=false", repo.shell_line(), crate::gitrepo::NO_HOOKS.join(" "))
+}
+
+/// What a rebase step that didn't start does: says why (and a start leaves no rebase behind).
+type Unstarted = Box<dyn FnOnce(&mut Editor, String) + Send>;
 
 /// A session whose base moved since it left it — what the rebase card says (`y` rebases), and once it's
 /// rebased, what the bring card says (`moved` 0 then).
@@ -222,7 +228,7 @@ fn move_up(m: &Moved, unsaved: &[PathBuf]) -> Result<String, String> {
     if let Some(why) = held_up(&m.root, unsaved) {
         return Err(why);
     }
-    crate::gitmenu::git_no_hooks(&m.root, &["merge", "--ff-only", "-q", &base_tip])?;
+    crate::gitrepo::git_no_hooks(&m.root, &["merge", "--ff-only", "-q", &base_tip])?;
     Ok(base_tip.chars().take(7).collect())
 }
 
@@ -314,7 +320,7 @@ pub struct Ask {
 // ── Git (workers) ────────────────────────────────────────────────────────────
 
 fn git_dir(root: &Path) -> Option<PathBuf> {
-    git(root, &["rev-parse", "--absolute-git-dir"], None).ok().map(|s| PathBuf::from(s.trim()))
+    crate::gitrepo::repo(root).ok().map(|r| r.git_dir.clone())
 }
 
 /// The rebase's own folder in the git folder, while one is under way (`git am`'s isn't one).
@@ -612,8 +618,42 @@ impl Editor {
             .collect()
     }
 
-    /// `cmd` (git) in the task panel for the rebase in front — its step read while it runs.
-    fn rebase_git(&mut self, name: &str, cmd: String, aborting: bool) -> Result<(), String> {
+    /// git in the task panel for the rebase in front — its step read while it runs. `cmd` makes the line from
+    /// its start (`git_line`): the repository as kept, else read on a worker first — `gitrepo`'s list is capped,
+    /// so a start, `--continue` or `--abort` never fails on it. One that can't start: `unstarted` says why.
+    fn rebase_git(
+        &mut self,
+        name: &str,
+        cmd: impl FnOnce(&str) -> String + Send + 'static,
+        aborting: bool,
+        unstarted: Unstarted,
+    ) {
+        let root = self.session.root.clone();
+        if let Some(repo) = crate::gitrepo::cached(&root) {
+            if let Err(e) = self.rebase_run(name, cmd(&git_line(&repo)), aborting) {
+                unstarted(self, e);
+            }
+            return;
+        }
+        let (name, asked) = (name.to_string(), self.session.id);
+        // (`jobs()`: applied in the session that asked, swapped in if it's behind by then — `with_session`; one
+        // gone meanwhile would have it applied in front instead: dropped)
+        self.events.jobs().spawn(move || {
+            let line = crate::gitrepo::repo(&root).map(|r| git_line(&r));
+            move |ed: &mut Editor| {
+                ed.rebase_lines_read += 1;
+                if ed.session.id != asked {
+                    return;
+                }
+                if let Err(e) = line.and_then(|g| ed.rebase_run(&name, cmd(&g), aborting)) {
+                    unstarted(ed, e);
+                }
+            }
+        });
+    }
+
+    /// `rebase_git`'s line started.
+    fn rebase_run(&mut self, name: &str, cmd: String, aborting: bool) -> Result<(), String> {
         let root = self.session.root.clone();
         let task = crate::task::Task { name: name.into(), cmd, cwd: root.clone() };
         let generation = self.task_start_git(task).ok_or("git didn't start")?;
@@ -703,11 +743,17 @@ impl Editor {
             also: Vec::new(),
             stashed,
         });
-        let cmd = format!("{GIT} rebase{autostash} {}", crate::packs::sh_quote(&m.base));
-        if let Err(e) = self.rebase_git(&format!("rebase onto {}", m.base), cmd, false) {
-            self.session.rebase = None;
-            self.set_error(format!("rebase {}: {e}", m.branch));
-        }
+        let base = crate::packs::sh_quote(&m.base);
+        let branch = m.branch.clone();
+        self.rebase_git(
+            &format!("rebase onto {}", m.base),
+            move |git| format!("{git} rebase{autostash} {base}"),
+            false,
+            Box::new(move |ed, e| {
+                ed.session.rebase = None;
+                ed.set_error(format!("rebase {branch}: {e}"));
+            }),
+        );
     }
 
     /// `s` on the held card: the rebase, its changes stashed for it and put back after.
@@ -1122,15 +1168,16 @@ impl Editor {
                 ed.rebase_review_gone();
                 ed.rebase_cards_gone();
                 let quoted: Vec<String> = files.iter().map(|f| crate::packs::sh_quote(f)).collect();
-                let add = match quoted.is_empty() {
-                    true => String::new(),
-                    false => format!("{GIT} add -A -- {} && ", quoted.join(" ")),
+                let cmd = move |git: &str| {
+                    let add = match quoted.is_empty() {
+                        true => String::new(),
+                        false => format!("{git} add -A -- {} && ", quoted.join(" ")),
+                    };
+                    // (no editor for the replayed commit's message: it's kept as it was)
+                    format!("{add}GIT_EDITOR=true {git} rebase --continue")
                 };
-                // (no editor for the replayed commit's message: it's kept as it was)
-                let cmd = format!("{add}GIT_EDITOR=true {GIT} rebase --continue");
-                if let Err(e) = ed.rebase_git("rebase --continue", cmd, false) {
-                    ed.set_error(format!("rebase: {e}"));
-                }
+                let said: Unstarted = Box::new(|ed, e| ed.set_error(format!("rebase: {e}")));
+                ed.rebase_git("rebase --continue", cmd, false, said);
             }
         });
         Ok(())
@@ -1148,7 +1195,9 @@ impl Editor {
         self.rebase_free()?;
         self.rebase_review_gone();
         self.rebase_cards_gone();
-        self.rebase_git("rebase --abort", format!("{GIT} rebase --abort"), true)
+        let said: Unstarted = Box::new(|ed, e| ed.set_error(format!("rebase: {e}")));
+        self.rebase_git("rebase --abort", |git| format!("{git} rebase --abort"), true, said);
+        Ok(())
     }
 
     /// `:rebase-continue`/`:rebase-abort` with no rebase of tarae's here: one under way in the checkout

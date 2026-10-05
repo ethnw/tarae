@@ -3,12 +3,12 @@
 //! end, toggled. git runs on worker threads; the gutter compares against the index (git.rs).
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 use ropey::Rope;
 
 use crate::editor::Editor;
 use crate::git::{Hunk, HunkKind};
+use crate::gitrepo::git;
 use crate::movement as mv;
 
 // ── Pure parts ────────────────────────────────────────────────────────────────
@@ -223,77 +223,25 @@ pub fn blame_text(b: &Blame, now: i64) -> String {
     format!("{}, {} · {}", b.author, ago(now - b.time), b.summary)
 }
 
-/// git's hooks turned off — for what tarae itself runs in a checkout, outside the sandbox (session making,
-/// ending and bringing, a review's fetch, the rebase — `rebase::GIT`): a `core.hooksPath` inside a checkout
-/// is a folder Claude can write (review, 2026-10-04). The user's own git-tab actions keep their hooks.
-pub(crate) const NO_HOOKS: [&str; 2] = ["-c", "core.hooksPath=/dev/null"];
-
-/// `git` with `NO_HOOKS`.
-pub(crate) fn git_no_hooks(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let all: Vec<&str> = NO_HOOKS.iter().chain(args).copied().collect();
-    git(dir, &all, None)
+/// `git blame --porcelain` of `text` as file `path`'s — in its repository as `places` finds it
+/// (`gitrepo::for_file_in`). On a worker.
+fn blame_of(places: &crate::gitrepo::Places, path: &Path, text: &str) -> Result<String, String> {
+    let (repo, rel) = crate::gitrepo::for_file_in(places, path).map_err(|n| n.said())?;
+    repo.run(&["blame", "--porcelain", "--contents", "-", "--", &rel], Some(text))
 }
 
-pub(crate) fn git(dir: &Path, args: &[&str], input: Option<&str>) -> Result<String, String> {
-    #[cfg(test)]
-    not_in_this_repository(dir, args);
-    let mut cmd = Command::new("git");
-    // No terminal of its own (`setsid`): ssh or gpg asking for a passphrase can't take ours (it fails instead)
-    crate::dap::setsid(&mut cmd);
-    let mut child = cmd
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        // A read (status, diff) never takes the index lock — a commit or stage running then would fail on it
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("git: {e}"))?;
-    if let (Some(s), Some(mut stdin)) = (input, child.stdin.take()) {
-        let s = s.to_string();
-        crate::event::thread("tarae-git-feed", move || {
-            use std::io::Write as _;
-            let _ = stdin.write_all(s.as_bytes());
-        });
-    }
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        return Err(err.lines().find(|l| !l.trim().is_empty()).unwrap_or("git failed").to_string());
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-}
-
-/// Tests only: whether git run in `dir` would work on tarae's own repository (the nearest `.git` up from it
-/// is this crate's).
-#[cfg(test)]
-fn in_this_repository(dir: &Path) -> bool {
-    let own = std::fs::canonicalize(env!("CARGO_MANIFEST_DIR")).unwrap();
-    let dir = dir.ancestors().find_map(|d| std::fs::canonicalize(d).ok()).unwrap_or_default();
-    dir.ancestors().find(|d| d.join(".git").exists()) == Some(own.as_path())
-}
-
-/// Tests only: no test runs git in tarae's own repository — even a read can write there (`git diff`
-/// refreshes the index), and a sandboxed run reports it as a denial. One that does stops the whole run,
-/// naming the command and where it came from (past libtest's capture: an abort loses what it captured).
-#[cfg(test)]
-pub(crate) fn not_in_this_repository(dir: &Path, args: &[&str]) {
-    if in_this_repository(dir) {
-        // (a job's worker is named after the test it ran for — `event::run`)
-        let test = std::thread::current().name().unwrap_or("a test").to_string();
-        let line = format!(
-            "{test} ran `git {}` in tarae's own repository ({}) — give it a repository of its own in its \
-             temp folder\n{}\n",
-            args.join(" "),
-            dir.display(),
-            std::backtrace::Backtrace::force_capture()
-        );
-        let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
-        std::process::abort();
-    }
+/// `space g s`'s work: hunk `h` of the buffer's `text` (against `base`, the index's) into the index of its
+/// repository as `places` finds it (`gitrepo::for_file_in`). On a worker.
+fn stage(
+    places: &crate::gitrepo::Places,
+    path: &Path,
+    base: &str,
+    text: &Rope,
+    h: &Hunk,
+) -> Result<(), String> {
+    let (repo, rel) = crate::gitrepo::for_file_in(places, path).map_err(|n| n.said())?;
+    let p = patch(&rel, base, text, h);
+    repo.run(&["apply", "--cached", "--unidiff-zero", "--whitespace=nowarn", "-"], Some(&p)).map(|_| ())
 }
 
 /// Blame state for the current document (on/off is `editor.git-blame`).
@@ -405,21 +353,10 @@ impl Editor {
         let doc = self.doc();
         let Some(path) = doc.path.clone() else { return };
         let (id, text) = (doc.id, doc.text.clone());
+        let places = self.git_places(&path);
         self.note("staging…");
         self.events.jobs().spawn(move || {
-            let result = (|| {
-                let dir = path.parent().ok_or("no folder")?;
-                let top = PathBuf::from(git(dir, &["rev-parse", "--show-toplevel"], None)?.trim());
-                let top = std::fs::canonicalize(&top).unwrap_or(top);
-                let rel = path
-                    .strip_prefix(&top)
-                    .map_err(|_| "outside the repository")?
-                    .to_string_lossy()
-                    .into_owned();
-                let p = patch(&rel, &base, &text, &h);
-                git(&top, &["apply", "--cached", "--unidiff-zero", "--whitespace=nowarn", "-"], Some(&p))
-                    .map(|_| ())
-            })();
+            let result = stage(&places, &path, &base, &text, &h);
             move |ed: &mut Editor| match result {
                 Ok(()) => {
                     ed.set_success("Staged the hunk");
@@ -513,11 +450,9 @@ impl Editor {
         // (a rope clone — the text is written out on the worker, not on every version here)
         let doc = self.doc();
         let (id, version, text) = (doc.id, doc.version(), doc.text.clone());
+        let places = self.git_places(&path);
         self.events.jobs().spawn(move || {
-            let text = text.to_string();
-            let dir = path.parent().unwrap_or(Path::new("."));
-            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            let out = git(dir, &["blame", "--porcelain", "--contents", "-", "--", &name], Some(&text));
+            let out = blame_of(&places, &path, &text.to_string());
             move |ed: &mut Editor| {
                 ed.blame.running = false;
                 if let Ok(out) = out {
@@ -546,24 +481,6 @@ impl Editor {
 mod tests {
     use super::*;
     use crate::git::hunks;
-
-    /// The tripwire's question: this crate's folders (a subfolder too, and one that isn't there yet) are
-    /// this repository; a repository of a test's own, even one made under `target/`, is not.
-    #[test]
-    fn tests_know_this_repository() {
-        let own = Path::new(env!("CARGO_MANIFEST_DIR"));
-        assert!(in_this_repository(own));
-        assert!(in_this_repository(&own.join("src")));
-        assert!(in_this_repository(&own.join("target/not-there-yet")));
-        let dir = own.join(format!("target/tarae-own-repo-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        let ok = std::process::Command::new("git").args(["init", "-q"]).current_dir(&dir).output().unwrap();
-        assert!(ok.status.success());
-        assert!(!in_this_repository(&dir), "a repository of its own");
-        assert!(!in_this_repository(&std::env::temp_dir()));
-        std::fs::remove_dir_all(&dir).ok();
-    }
 
     /// Changed files come diffed and in `git status` order, however many workers took them.
     #[test]
@@ -602,6 +519,90 @@ mod tests {
         assert!(got[..40].iter().all(|c| c.letter == 'M' && c.line == 1), "the changed line is b");
         assert_eq!(got[40].letter, '?');
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// tarae's git asked for a file (blame, the gutter, staging, `:diff`, the `.tarae.local.toml` check) works
+    /// on the repository the session started in — not on a git directory that files in the project make of a
+    /// subfolder (`HEAD`, `objects/`, `refs/`, `config`), nor with that config: here a marker alias, never run
+    /// (`target/sb/gitescape.md`). Each of the five is asked here, so one put back on discovery fails it.
+    #[test]
+    fn git_from_a_files_folder_keeps_the_trusted_repository() {
+        let top = std::env::temp_dir().join(format!("tarae-gitescape-{}", std::process::id()));
+        std::fs::remove_dir_all(&top).ok();
+        let sub = top.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let top = std::fs::canonicalize(&top).unwrap();
+        let sub = top.join("sub");
+        let file = sub.join("a.txt");
+        std::fs::write(&file, "trusted\n").unwrap();
+        std::fs::write(top.join(".gitignore"), ".tarae.local.toml\n").unwrap();
+        std::fs::write(sub.join(".tarae.local.toml"), "").unwrap();
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &["add", "sub/a.txt", ".gitignore"],
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-qm",
+                "a",
+            ],
+        ] {
+            let ok = std::process::Command::new("git").args(args).current_dir(&top).output().unwrap();
+            assert!(ok.status.success(), "git {args:?}");
+        }
+        let trusted = top.join(".git");
+        let for_file = || crate::gitrepo::for_file(&top, &file);
+        let git_dir = || {
+            let (repo, _) = for_file().ok_or("no repository")?;
+            repo.run(&["rev-parse", "--absolute-git-dir"], None).map(|d| PathBuf::from(d.trim()))
+        };
+        assert_eq!(git_dir(), Ok(trusted.clone()), "before: the repository it started in");
+        let at = crate::gitrepo::Places::only(&top);
+        let base = || crate::git::index_blob(&at, &file).ok().flatten();
+        assert_eq!(base().as_deref(), Some("trusted\n"));
+
+        // What files in the project can be: a git directory's layout in a subfolder, a marker in its config
+        std::fs::write(sub.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::create_dir_all(sub.join("objects")).unwrap();
+        std::fs::create_dir_all(sub.join("refs")).unwrap();
+        std::fs::write(
+            sub.join("config"),
+            "[core]\n\trepositoryformatversion = 0\n\tbare = true\n[alias]\n\ttarae-planted = version\n",
+        )
+        .unwrap();
+
+        // (all of them, so one run says which hold: the config read, the repository, then the five — the
+        // gutter's base, blame, `:diff`'s base, `.tarae.local.toml` as yours, and staging a hunk last)
+        let now = Rope::from_str("trusted\nstaged\n");
+        let hunk = hunks("trusted\n", &now.to_string()).remove(0);
+        let got = (
+            for_file().and_then(|(r, _)| r.run(&["config", "--get", "alias.tarae-planted"], None).ok()),
+            git_dir(),
+            base(),
+            blame_of(&at, &file, "trusted\n").map(|o| parse_blame(&o)[0].as_ref().map(|b| b.summary.clone())),
+            crate::diffview::base_text(&at, &file, "", PathBuf::new()),
+            crate::config::personal(&top, &sub.join(".tarae.local.toml")),
+            stage(&at, &file, "trusted\n", &now, &hunk).map(|_| base()),
+        );
+        std::fs::remove_dir_all(&top).ok();
+        let staged = Some("trusted\nstaged\n".to_string());
+        assert_eq!(
+            got,
+            (
+                None,
+                Ok(trusted),
+                Some("trusted\n".to_string()),
+                Ok(Some("a".to_string())),
+                Ok(("trusted\n".to_string(), "HEAD".to_string())),
+                Ok(()),
+                Ok(staged)
+            )
+        );
     }
 
     #[test]

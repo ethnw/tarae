@@ -661,12 +661,17 @@ pub fn cargo_dir_verdict(
 pub struct RunDir(PathBuf);
 
 impl RunDir {
+    /// Where runs' own folders are made: `$TMPDIR`, real.
+    pub fn base() -> PathBuf {
+        profile_path(&std::env::temp_dir())
+    }
+
     /// A new folder under `$TMPDIR` (real path; short — a socket's path has 104 bytes at most), only ours.
     pub fn new() -> std::io::Result<std::sync::Arc<RunDir>> {
         use std::os::unix::fs::DirBuilderExt;
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
-        let base = profile_path(&std::env::temp_dir());
+        let base = RunDir::base();
         let dir = base.join(format!("tarae-{}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
         std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
         Ok(std::sync::Arc::new(RunDir(dir)))
@@ -1377,10 +1382,40 @@ pub fn protected_in(root: &Path, path: &Path) -> bool {
     !at.is_empty() && !output.is_some_and(|o| at.iter().any(|&i| i > o))
 }
 
-/// Device files every program writes to (`/dev/null`, terminals — a pty test hangs without them: measured).
+/// Device files every program writes to (`/dev/null`, terminals — a pty test hangs without them: measured), as
+/// the profile's filters (`devices_rule`): (filter, its argument).
 #[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
-const DEVICES: &str = "(allow file-write* (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/tty\") \
-(literal \"/dev/ptmx\") (literal \"/dev/dtracehelper\") (regex #\"^/dev/ttys[0-9]+$\") (subpath \"/dev/fd\"))\n";
+const DEVICES: [(&str, &str); 7] = [
+    ("literal", "/dev/null"),
+    ("literal", "/dev/zero"),
+    ("literal", "/dev/tty"),
+    ("literal", "/dev/ptmx"),
+    ("literal", "/dev/dtracehelper"),
+    ("regex", "^/dev/ttys[0-9]+$"),
+    ("subpath", "/dev/fd"),
+];
+
+/// The profile's rule for `DEVICES`.
+#[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
+fn devices_rule() -> String {
+    let filters: String = DEVICES
+        .iter()
+        .map(|(f, a)| match *f {
+            "regex" => format!(" (regex #\"{a}\")"),
+            f => format!(" ({f} \"{a}\")"),
+        })
+        .collect();
+    format!("(allow file-write*{filters})\n")
+}
+
+/// The device places a run writes (`Policy::write_places`): the files and folders the platform's rules name
+/// (Seatbelt's `DEVICES` but its patterns — terminals' files in `/dev`; Landlock's `linux::DEVICES`).
+#[cfg(not(target_os = "linux"))]
+static DEVICE_PLACES: std::sync::LazyLock<Vec<&'static str>> =
+    std::sync::LazyLock::new(|| DEVICES.iter().filter(|(f, _)| *f != "regex").map(|(_, a)| *a).collect());
+#[cfg(target_os = "linux")]
+static DEVICE_PLACES: std::sync::LazyLock<Vec<&'static str>> =
+    std::sync::LazyLock::new(|| linux::DEVICES.iter().map(|(d, _)| *d).collect());
 
 /// Ports on this machine where what listens runs what it's asked to, outside the sandbox. The network
 /// closed (the default), every port on this machine is closed but `llm.sandbox-ports` — these included;
@@ -1516,7 +1551,7 @@ impl Policy {
                 "(allow file-write-xattr (require-all (require-any{caches}) (xattr \"{CARGO_XATTR}\")))\n"
             ));
         }
-        p.push_str(DEVICES);
+        p.push_str(&devices_rule());
         let open: String = self.ports.iter().map(|n| format!(" (remote ip \"localhost:{n}\")")).collect();
         if !self.network {
             // Listening stays open (a test's own server); connecting, only where it's allowed
@@ -1694,6 +1729,24 @@ impl Policy {
             }
             _ => true,
         }
+    }
+
+    /// Every place a run under this policy may write, folders and files — what its rules open, from the fields
+    /// the profile (`args`) and Landlock's rules (`linux::confine`) are made from: the project, `write`, `files`,
+    /// a run's own folder (any run's: where `RunDir` makes them), the devices (`DEVICE_PLACES`). What's kept
+    /// inside them (`protect`, `keep`, `caches`) counts as written too. Real paths.
+    pub fn write_places(&self) -> Vec<PathBuf> {
+        let run = self.run.as_ref().map(|r| r.path().to_path_buf());
+        let mut all: Vec<PathBuf> = std::iter::once(self.root.clone())
+            .chain(self.write.iter().cloned())
+            .chain(self.files.iter().cloned())
+            .chain([RunDir::base()])
+            .chain(run)
+            .chain(DEVICE_PLACES.iter().map(PathBuf::from))
+            .collect();
+        all.sort();
+        all.dedup();
+        all
     }
 
     /// Whether the profile lets a run write `real` — its rules, in Rust (the devices aside).
@@ -2072,9 +2125,18 @@ pub fn missing_why(stderr: &str) -> String {
     if stderr.contains("sandbox_apply") { INSIDE.into() } else { format!("sandbox-exec: {}", stderr.trim()) }
 }
 
-/// The policy for the project at `root` with these settings and the places in home the user let Claude read
-/// (`reads`, real) — the toolchain's folders found (blocks).
-pub fn policy(root: &Path, llm: &crate::llm::LlmConfig, reads: &[PathBuf]) -> Policy {
+/// Where a sandboxed run in the project at `root` may write with these settings (grants put in as
+/// `tools::with_allowed` does): its policy's own (`Policy::write_places`), made as `policy` makes it — the same
+/// `env_for`, the toolchain's folders asked as for a run (blocks the first time: a worker's). For what tarae
+/// reads from places no run can write (`gitrepo::for_file_in`).
+pub fn write_places(root: &Path, llm: &crate::llm::LlmConfig) -> Vec<PathBuf> {
+    Policy::for_project(&env_for(root, llm, &[]).0).write_places()
+}
+
+/// What the policy for the project at `root` is made from (`policy`, `write_places`): these settings, the
+/// places in home the user let Claude read (`reads`, real), the toolchain's folders found (asked inside the
+/// sandbox they're for — blocks). With cargo's configs above the project (`tokens.rs` reads them).
+fn env_for(root: &Path, llm: &crate::llm::LlmConfig, reads: &[PathBuf]) -> (Env, Vec<PathBuf>) {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let vars = HomeVars::here();
     let cargo_home = cargo_home_of(home.as_deref(), &vars);
@@ -2114,6 +2176,14 @@ pub fn policy(root: &Path, llm: &crate::llm::LlmConfig, reads: &[PathBuf]) -> Po
     // The toolchain is asked inside the sandbox it's for (it reads only)
     let found = toolchain_dirs(&Policy::for_project(&env), env.cargo_home.as_deref());
     (env.dirs, env.cargo_dirs, env.own_build) = (found.other, found.cargo, found.own_build);
+    (env, above)
+}
+
+/// The policy for the project at `root` with these settings and the places in home the user let Claude read
+/// (`reads`, real) — the toolchain's folders found (blocks).
+pub fn policy(root: &Path, llm: &crate::llm::LlmConfig, reads: &[PathBuf]) -> Policy {
+    let (mut env, above) = env_for(root, llm, reads);
+    let real_home = env.home.as_deref().and_then(|h| std::fs::canonicalize(h).ok());
     // (no folder of its own: no sockets but the project's, `TMPDIR` as it was, and no tag to watch by)
     let run = RunDir::new().ok();
     let tag = run.as_ref().map(|r| r.tag());
@@ -2261,18 +2331,7 @@ fn own_build_setting(cargo_home: Option<&Path>, var: Option<String>) -> Option<S
 /// project until a file that sets them changes.
 fn toolchain_dirs(base: &Policy, cargo_home: Option<&Path>) -> ToolDirs {
     let root = &base.root;
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-    let cargo_config = cargo_home.map_or_else(|| home.join(".cargo"), Path::to_path_buf);
-    let stamp_of = [
-        root.join("Cargo.toml"),
-        root.join(".cargo/config.toml"),
-        root.join(".cargo/config"),
-        cargo_config.join("config.toml"),
-        cargo_config.join("config"),
-        root.join("go.mod"),
-    ];
-    let stamp: Vec<Option<SystemTime>> =
-        stamp_of.iter().map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok()).collect();
+    let stamp = toolchain_stamp(root, cargo_home);
     let seen = SEEN.get_or_init(Default::default);
     if let Some((s, dirs)) = seen.lock().ok().and_then(|m| m.get(root).cloned())
         && s == stamp
@@ -2309,6 +2368,32 @@ fn toolchain_dirs(base: &Policy, cargo_home: Option<&Path>) -> ToolDirs {
         m.insert(root.clone(), (stamp, dirs.clone()));
     }
     dirs
+}
+
+/// The files that set the toolchain's folders for the project at `root` (real), by their times — what
+/// `toolchain_dirs` keeps its answer by.
+fn toolchain_stamp(root: &Path, cargo_home: Option<&Path>) -> Vec<Option<SystemTime>> {
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let cargo_config = cargo_home.map_or_else(|| home.join(".cargo"), Path::to_path_buf);
+    let stamp_of = [
+        root.join("Cargo.toml"),
+        root.join(".cargo/config.toml"),
+        root.join(".cargo/config"),
+        cargo_config.join("config.toml"),
+        cargo_config.join("config"),
+        root.join("go.mod"),
+    ];
+    stamp_of.iter().map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok()).collect()
+}
+
+/// Tests: what `toolchain_dirs` answers for the project at `root` — as a probe of its toolchain would have
+/// found it (no cargo or go asked inside a sandbox, which can't start inside the one tests may run in).
+#[cfg(test)]
+pub(crate) fn toolchain_found(root: &Path, dirs: ToolDirs) {
+    let root = profile_path(root);
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let stamp = toolchain_stamp(&root, cargo_home_of(home.as_deref(), &HomeVars::here()).as_deref());
+    SEEN.get_or_init(Default::default).lock().unwrap().insert(root, (stamp, dirs));
 }
 
 /// A program's JSON output, run in the project inside `policy`, with `env` set.
@@ -2482,6 +2567,61 @@ pub(crate) fn skipped_inside(test: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Where a run may write, as `gitrepo` asks it (`write_places`), is its policy's own (`policy`): the same
+    /// list — the project, the toolchain's folders its probe found (a Go module cache here), `llm.sandbox-write`,
+    /// runs' own folders, the devices. And a file in that toolchain folder gets no git by discovery
+    /// (`gitrepo::for_file_in`), though a repository holds it.
+    #[test]
+    fn write_places_are_the_policys_own() {
+        let pid = std::process::id();
+        let root = std::env::temp_dir().join(format!("tarae-write-places-{pid}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = std::fs::canonicalize(&root).unwrap();
+        // (under this crate's `target/`: outside the temp folders; a repository of its own, so a discovery
+        // there never climbs into tarae's)
+        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("target/tarae-gomodcache-{pid}"));
+        std::fs::remove_dir_all(&cache).ok();
+        std::fs::create_dir_all(cache.join("mod")).unwrap();
+        let cache = std::fs::canonicalize(&cache).unwrap();
+        let ok = Command::new("git").args(["init", "-q"]).current_dir(&cache).output().unwrap();
+        assert!(ok.status.success());
+        toolchain_found(&root, ToolDirs { other: vec![cache.clone()], ..Default::default() });
+        let llm =
+            crate::llm::LlmConfig { sandbox_write: vec!["/opt/tarae-granted".into()], ..Default::default() };
+        let w = write_places(&root, &llm);
+        let devices =
+            if cfg!(target_os = "linux") { ["/dev/shm", "/dev/pts"] } else { ["/dev/fd", "/dev/null"] };
+        let named = [&root, &cache, Path::new("/opt/tarae-granted"), &RunDir::base()];
+        for p in named.into_iter().chain(devices.iter().map(Path::new)) {
+            assert!(w.iter().any(|x| x == p), "{} in {w:?}", p.display());
+        }
+        let p = policy(&root, &llm, &[]);
+        let run = p.run.as_ref().map(|r| r.path().to_path_buf());
+        let of_policy: Vec<PathBuf> =
+            p.write_places().into_iter().filter(|x| Some(x) != run.as_ref()).collect();
+        assert_eq!(of_policy, w, "the policy's own list");
+        let file = cache.join("mod/x.go");
+        std::fs::write(&file, "package x\n").unwrap();
+        let writes = w.clone();
+        let places = crate::gitrepo::Places {
+            roots: vec![root.clone()],
+            writes: std::sync::Arc::new(move || Some(writes.clone())),
+        };
+        assert_eq!(
+            crate::gitrepo::for_file_in(&places, &file).err(),
+            Some(crate::gitrepo::NoGit::Writable { looks: true })
+        );
+        // (the profile's device rule as it was written by hand)
+        assert_eq!(
+            devices_rule(),
+            "(allow file-write* (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/tty\") \
+             (literal \"/dev/ptmx\") (literal \"/dev/dtracehelper\") (regex #\"^/dev/ttys[0-9]+$\") (subpath \
+             \"/dev/fd\"))\n"
+        );
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&cache).ok();
+    }
 
     /// Whether `pid` is there at all — a zombie counts (signal 0 only asks).
     fn there(pid: u32) -> bool {

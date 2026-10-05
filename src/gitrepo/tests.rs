@@ -1,0 +1,274 @@
+use super::*;
+
+/// git in `dir` as a test sets up its repository (no launcher: what's set up is what the launcher is asked about).
+fn git_in(dir: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+        .args(["-c", "protocol.file.allow=always", "-c", "init.defaultBranch=main"])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+}
+
+/// A fresh folder of this test's own in the temp folder, real path.
+fn temp(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("tarae-gitrepo-{name}-{}", std::process::id()));
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::canonicalize(&dir).unwrap()
+}
+
+/// A repository with one commit of `files` (path, text) in `dir`.
+fn repository(dir: &Path, files: &[(&str, &str)]) {
+    for (rel, text) in files {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    }
+    git_in(dir, &["init", "-q"]);
+    git_in(dir, &["add", "-A"]);
+    git_in(dir, &["commit", "-qm", "base"]);
+}
+
+/// The tripwire's question: this crate's folders (a subfolder too, and one that isn't there yet) are
+/// this repository; a repository of a test's own, even one made under `target/`, is not.
+#[test]
+fn tests_know_this_repository() {
+    let own = Path::new(env!("CARGO_MANIFEST_DIR"));
+    assert!(in_this_repository(own));
+    assert!(in_this_repository(&own.join("src")));
+    assert!(in_this_repository(&own.join("target/not-there-yet")));
+    let dir = own.join(format!("target/tarae-own-repo-{}", std::process::id()));
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(&dir).unwrap();
+    let ok = Command::new("git").args(["init", "-q"]).current_dir(&dir).output().unwrap();
+    assert!(ok.status.success());
+    assert!(!in_this_repository(&dir), "a repository of its own");
+    assert!(!in_this_repository(&std::env::temp_dir()));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// From a root in a subfolder: the repository's folders, the top as the work tree, git run in the root (its
+/// `ls-files` of that folder) — and a file's git from the top, its path from there.
+#[test]
+fn a_root_resolves_once_and_runs_in_itself() {
+    let dir = temp("root");
+    repository(&dir, &[("pkg/a.txt", "a\n"), ("b.txt", "b\n")]);
+    let root = dir.join("pkg");
+    let r = repo(&root).unwrap();
+    assert_eq!(
+        *r,
+        Repo {
+            git_dir: dir.join(".git"),
+            common_dir: dir.join(".git"),
+            work_tree: Some(dir.clone()),
+            dir: root.clone()
+        }
+    );
+    assert!(Arc::ptr_eq(&r, &repo(&root).unwrap()), "kept");
+    assert_eq!(git(&root, &["ls-files"], None).unwrap(), "a.txt\n");
+    let (at, rel) = for_file(&root, &dir.join("b.txt")).unwrap();
+    assert_eq!(
+        (at.dir.as_path(), rel.as_str()),
+        (dir.as_path(), "b.txt"),
+        "a file outside the root, in the tree"
+    );
+    assert_eq!(at.run(&["show", &format!(":{rel}")], None).unwrap(), "b\n");
+    assert!(for_file(&root, &std::env::temp_dir().join("elsewhere.txt")).is_none());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Kept by the root's real path: two spellings of one folder (a link to it) are one entry, one resolving.
+#[test]
+fn a_root_is_kept_by_its_real_path() {
+    let dir = temp("spelling");
+    let real = dir.join("r");
+    std::fs::create_dir_all(&real).unwrap();
+    repository(&real, &[("a.txt", "a\n")]);
+    std::os::unix::fs::symlink(&real, dir.join("link")).unwrap();
+    let a = repo(&real).unwrap();
+    assert!(Arc::ptr_eq(&a, &repo(&dir.join("link")).unwrap()), "one entry for both spellings");
+    assert!(cached(&real).is_some_and(|c| Arc::ptr_eq(&c, &a)));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A folder first resolved inside an outer repository, given a repository of its own since: resolved again
+/// (its own `.git` isn't the one kept).
+#[test]
+fn a_root_with_a_git_of_its_own_since_is_resolved_again() {
+    let dir = temp("inner");
+    repository(&dir, &[("inner/a.txt", "a\n")]);
+    let inner = dir.join("inner");
+    assert_eq!(repo(&inner).unwrap().work_tree.as_deref(), Some(dir.as_path()));
+    git_in(&inner, &["init", "-q"]);
+    assert_eq!(repo(&inner).unwrap().work_tree.as_deref(), Some(inner.as_path()), "its own now");
+    assert_eq!(cached(&inner).map(|r| r.git_dir.clone()), Some(inner.join(".git")));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// At most `cap` roots kept; the least lately used goes first — a root asked again stays.
+#[test]
+fn the_kept_roots_are_capped_least_lately_used_first() {
+    let dir = temp("cap");
+    let root = |i: usize| dir.join(format!("d{i}"));
+    let mut kept = Kept { cap: 3, entries: Vec::new() };
+    for i in 0..5 {
+        std::fs::create_dir_all(root(i).join(".git")).unwrap();
+        let r = Repo {
+            git_dir: root(i).join(".git"),
+            common_dir: root(i).join(".git"),
+            work_tree: Some(root(i)),
+            dir: root(i),
+        };
+        kept.put(root(i), Arc::new(r));
+        if i == 2 {
+            assert!(kept.get(&root(0)).is_some(), "0 used again: the newest");
+        }
+    }
+    let left: Vec<PathBuf> = kept.entries.iter().map(|(k, _)| k.clone()).collect();
+    assert_eq!(left, [root(0), root(3), root(4)]);
+    assert_eq!(KEPT_MAX, 64);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Not a repository: an error, and not kept — a `git init` there later is seen.
+#[test]
+fn no_repository_is_said_and_not_kept() {
+    let dir = temp("none");
+    let e = repo(&dir).unwrap_err();
+    assert!(e.contains("not a git repository"), "{e}");
+    git_in(&dir, &["init", "-q"]);
+    assert_eq!(repo(&dir).unwrap().work_tree.as_deref(), Some(dir.as_path()));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A root that is a bare-looking folder (`HEAD`, `objects/`, `refs/` — what files in a project can be) is
+/// never taken for a repository: `safe.bareRepository=explicit`.
+#[test]
+fn a_bare_looking_folder_is_no_repository() {
+    let dir = temp("bare");
+    std::fs::write(dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::create_dir_all(dir.join("objects")).unwrap();
+    std::fs::create_dir_all(dir.join("refs")).unwrap();
+    std::fs::write(dir.join("config"), "[core]\n\tbare = true\n").unwrap();
+    let e = repo(&dir).unwrap_err();
+    assert!(e.contains("bare repository"), "{e}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A linked checkout: its own git folder, the common one, and its own top; the common one named alone runs
+/// what outlives the checkout (`worktree list`).
+#[test]
+fn a_linked_checkout_has_its_own_git_folder() {
+    let dir = temp("linked");
+    let main = dir.join("main");
+    std::fs::create_dir_all(&main).unwrap();
+    repository(&main, &[("a.txt", "a\n")]);
+    git_in(&main, &["worktree", "add", "-q", "-b", "side", "../side"]);
+    let side = dir.join("side");
+    let r = repo(&side).unwrap();
+    assert_eq!(r.git_dir, main.join(".git/worktrees/side"));
+    assert_eq!(r.common_dir, main.join(".git"));
+    assert_eq!(r.work_tree.as_deref(), Some(side.as_path()));
+    assert_eq!(git(&side, &["symbolic-ref", "--short", "HEAD"], None).unwrap(), "side\n");
+    let list = Repo::git_folder(&r.common_dir).run(&["worktree", "list", "--porcelain"], None).unwrap();
+    assert_eq!(list.lines().filter(|l| l.starts_with("worktree ")).count(), 2, "{list}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A file in no session's repository (`for_file_in`): its own repository, found from its folder, when no run
+/// writes there — but not one whose git folder is where runs write (a linked checkout outside of a repository
+/// inside), nor one inside a write place (told: something there passes for a repository).
+#[test]
+fn a_file_outside_the_sessions_is_read_only_away_from_writes() {
+    let dir = temp("outside");
+    let (w, plain, linked) = (dir.join("w"), dir.join("plain"), dir.join("linked"));
+    std::fs::create_dir_all(w.join("main")).unwrap();
+    std::fs::create_dir_all(&plain).unwrap();
+    repository(&plain, &[("a.txt", "plain\n")]);
+    repository(&w.join("main"), &[("a.txt", "main\n")]);
+    git_in(&w.join("main"), &["worktree", "add", "-q", "-b", "side", linked.to_str().unwrap()]);
+    let writes = vec![w.clone()];
+    let places = Places { roots: Vec::new(), writes: Arc::new(move || Some(writes.clone())) };
+    let (r, rel) = for_file_in(&places, &plain.join("a.txt")).unwrap();
+    assert_eq!((r.git_dir.clone(), rel.as_str()), (plain.join(".git"), "a.txt"));
+    assert_eq!(for_file_in(&places, &linked.join("a.txt")).err(), Some(NoGit::Writable { looks: true }));
+    assert_eq!(for_file_in(&places, &w.join("main/a.txt")).err(), Some(NoGit::Writable { looks: true }));
+    std::fs::write(w.join("loose.txt"), "x\n").unwrap();
+    assert_eq!(for_file_in(&places, &w.join("loose.txt")).err(), Some(NoGit::Writable { looks: false }));
+    // Runs not sandboxed: nothing held back — found from the file's folder, wherever (a bare look-alike still not)
+    let anywhere = Places { roots: Vec::new(), writes: Arc::new(|| None) };
+    let (r, _) = for_file_in(&anywhere, &w.join("main/a.txt")).unwrap();
+    assert_eq!(r.git_dir, w.join("main/.git"));
+    let bare = w.join("bare");
+    for d in ["objects", "refs"] {
+        std::fs::create_dir_all(bare.join(d)).unwrap();
+    }
+    std::fs::write(bare.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::write(bare.join("x.txt"), "x\n").unwrap();
+    assert_eq!(for_file_in(&anywhere, &bare.join("x.txt")).err(), Some(NoGit::None));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The shell line the rebase runs: both folders given, quoted, the guard on.
+#[test]
+fn the_shell_line_names_the_repository() {
+    let r = Repo {
+        git_dir: "/r/it's/.git".into(),
+        common_dir: "/r/it's/.git".into(),
+        work_tree: Some("/r/it's".into()),
+        dir: "/r/it's".into(),
+    };
+    assert_eq!(
+        r.shell_line(),
+        r"git --git-dir '/r/it'\''s/.git' --work-tree '/r/it'\''s' -c safe.bareRepository=explicit"
+    );
+}
+
+/// A file in a submodule: its own repository, from the git folder the session's records (`modules/…`), its
+/// path from the submodule's top — the gutter's base its index's. A folder with a `.git` that the index has
+/// no gitlink for, or a gitlink whose `.git` names a folder outside `modules/`, is the session's repository's
+/// (nothing taken from it).
+#[test]
+fn a_submodule_file_takes_the_submodules_recorded_repository() {
+    let dir = temp("sub");
+    let (lib, top) = (dir.join("lib"), dir.join("top"));
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::create_dir_all(&top).unwrap();
+    repository(&lib, &[("src/x.txt", "lib's\n")]);
+    repository(&top, &[("a.txt", "top's\n")]);
+    git_in(&top, &["submodule", "add", "-q", lib.to_str().unwrap(), "vendor/lib"]);
+    git_in(&top, &["commit", "-qm", "lib"]);
+    let file = top.join("vendor/lib/src/x.txt");
+    std::fs::write(&file, "lib's\nchanged\n").unwrap();
+    let (r, rel) = for_file(&top, &file).unwrap();
+    assert_eq!(r.git_dir, top.join(".git/modules/vendor/lib"));
+    assert_eq!(r.work_tree.as_deref(), Some(top.join("vendor/lib").as_path()));
+    assert_eq!(rel, "src/x.txt");
+    assert_eq!(crate::git::index_blob(&Places::only(&top), &file).unwrap().as_deref(), Some("lib's\n"));
+
+    // Not a gitlink: a folder of the session's repository with a `.git` naming the module's folder
+    std::fs::create_dir_all(top.join("other")).unwrap();
+    std::fs::write(top.join("other/y.txt"), "y\n").unwrap();
+    git_in(&top, &["add", "other/y.txt"]);
+    std::fs::write(top.join("other/.git"), "gitdir: ../.git/modules/vendor/lib\n").unwrap();
+    let (r, rel) = for_file(&top, &top.join("other/y.txt")).unwrap();
+    assert_eq!((r.git_dir.clone(), rel.as_str()), (top.join(".git"), "other/y.txt"));
+    assert_eq!(
+        crate::git::index_blob(&Places::only(&top), &top.join("other/y.txt")).unwrap().as_deref(),
+        Some("y\n")
+    );
+
+    // A gitlink whose `.git` names a git folder outside `modules/`: not followed
+    std::fs::write(top.join("vendor/lib/.git"), format!("gitdir: {}\n", lib.join(".git").display())).unwrap();
+    let (r, rel) = for_file(&top, &file).unwrap();
+    assert_eq!((r.git_dir.clone(), rel.as_str()), (top.join(".git"), "vendor/lib/src/x.txt"));
+    assert_eq!(
+        crate::git::index_blob(&Places::only(&top), &file).unwrap(),
+        None,
+        "the session's index has only the gitlink"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

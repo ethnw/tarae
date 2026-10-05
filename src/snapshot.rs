@@ -12,7 +12,7 @@
 //! files at once aren't either (a tree of 200k untracked files: 91 s and 800 MB the first time). On workers,
 //! unsandboxed — tarae's own git, not Claude's. "Since your last y" (`sinceyes.rs`) takes its trees here too.
 
-use std::io::{BufRead as _, Read as _, Write as _};
+use std::io::{BufRead as _, Read as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -28,31 +28,23 @@ static INDEX_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::n
 /// One snapshot per index at a time (two at once: git refuses the second its lock).
 static LOCKS: Mutex<Vec<(PathBuf, Arc<Mutex<()>>)>> = Mutex::new(Vec::new());
 
-/// git as tarae runs it here: in `root`, no hooks, no prompt, the index `index` if given.
+/// git as tarae runs it here: on `root`'s repository (`gitrepo`), in `root`, no hooks, the index `index` if
+/// given.
 pub(crate) fn git(root: &Path, args: &[&str], index: Option<&Path>) -> Result<String, String> {
     git_bytes(root, args, index).map(|b| String::from_utf8_lossy(&b).into_owned())
 }
 
-fn command(root: &Path, args: &[&str], index: Option<&Path>) -> std::process::Command {
-    #[cfg(test)]
-    crate::gitmenu::not_in_this_repository(root, args);
-    let mut cmd = std::process::Command::new("git");
-    crate::dap::setsid(&mut cmd);
-    cmd.arg("-C").arg(root).args(crate::gitmenu::NO_HOOKS).args(args);
-    cmd.env("GIT_TERMINAL_PROMPT", "0").stdin(std::process::Stdio::null());
+fn command(root: &Path, args: &[&str], index: Option<&Path>) -> Result<std::process::Command, String> {
+    let all: Vec<&str> = crate::gitrepo::NO_HOOKS.iter().chain(args).copied().collect();
+    let mut cmd = crate::gitrepo::repo(root)?.command(&all);
     if let Some(i) = index {
         cmd.env("GIT_INDEX_FILE", i);
     }
-    cmd
+    Ok(cmd)
 }
 
 fn git_bytes(root: &Path, args: &[&str], index: Option<&Path>) -> Result<Vec<u8>, String> {
-    let out = command(root, args, index).output().map_err(|e| format!("git: {e}"))?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        return Err(err.lines().find(|l| !l.trim().is_empty()).unwrap_or("git failed").to_string());
-    }
-    Ok(out.stdout)
+    crate::gitrepo::finish(&command(root, args, index)?, None)
 }
 
 /// The project at `root`'s working tree as a git tree (what `git add -A` would stage, ignored files left
@@ -74,21 +66,11 @@ pub struct Tree {
 /// time — past this a snapshot keeps what it had (`add -u`: stats, ~0.4 s at 200k) and says so.
 const NEW_MAX: usize = 5_000;
 
-/// Each root's git folder, once asked (a process saved per snapshot).
-static GIT_DIRS: Mutex<Vec<(PathBuf, PathBuf)>> = Mutex::new(Vec::new());
-
+/// The checkout's git folder (`gitrepo` keeps it once resolved: a process saved per snapshot).
 fn git_dir(root: &Path) -> Result<PathBuf, String> {
-    let known = GIT_DIRS.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(r, _)| r == root).cloned();
-    if let Some((_, dir)) = known.filter(|(_, d)| d.is_dir()) {
-        return Ok(dir);
-    }
-    let dir = git(root, &["rev-parse", "--absolute-git-dir"], None)
-        .map_err(|_| "not a git checkout, so what changed can't be told".to_string())?;
-    let dir = PathBuf::from(dir.trim());
-    let mut dirs = GIT_DIRS.lock().unwrap_or_else(|e| e.into_inner());
-    dirs.retain(|(r, _)| r != root);
-    dirs.push((root.to_path_buf(), dir.clone()));
-    Ok(dir)
+    crate::gitrepo::repo(root)
+        .map(|r| r.git_dir.clone())
+        .map_err(|_| "not a git checkout, so what changed can't be told".to_string())
 }
 
 /// `tree`, with how many new files it left out.
@@ -269,25 +251,15 @@ fn texts(root: &Path, ids: &[&str]) -> Result<Vec<(String, String)>, String> {
     Ok(got)
 }
 
-/// `git cat-file <mode>` fed `ids` (written from a thread of its own: a big answer can't block the asking).
+/// `git cat-file <mode>` fed `ids` (`gitrepo::ran` writes them from a thread of its own: a big answer can't
+/// block the asking).
 fn batch(root: &Path, mode: &str, ids: &[&str]) -> Result<Vec<u8>, String> {
-    let mut child = command(root, &["cat-file", mode], None)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| format!("git: {e}"))?;
-    let mut stdin = child.stdin.take().ok_or("git: no stdin")?;
     let input: String = ids.iter().map(|i| format!("{i}\n")).collect();
-    let writer = crate::event::thread("tarae-git-feed", move || stdin.write_all(input.as_bytes()));
-    let mut out = Vec::new();
-    child.stdout.take().ok_or("git: no stdout")?.read_to_end(&mut out).map_err(|e| e.to_string())?;
-    let _ = writer.join();
-    let st = child.wait().map_err(|e| e.to_string())?;
-    if !st.success() {
+    let ran = crate::gitrepo::ran(&command(root, &["cat-file", mode], None)?, Some(input.as_bytes()))?;
+    if !ran.ok {
         return Err(format!("git cat-file {mode} failed"));
     }
-    Ok(out)
+    Ok(ran.stdout)
 }
 
 /// Blob `id` written out at `path` (its folder made) — None: `path` removed. Only while `path` is still

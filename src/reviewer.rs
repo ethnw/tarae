@@ -148,7 +148,7 @@ pub fn start(ed: &mut Editor) {
     let Some(diff) = crate::codereview::diff_work(ed) else { return };
     let at = root.clone();
     let work = move || {
-        let head = crate::gitmenu::git(&at, &["rev-parse", "HEAD"], None).unwrap_or_default();
+        let head = crate::gitrepo::git(&at, &["rev-parse", "HEAD"], None).unwrap_or_default();
         (diff(), head.trim().to_string())
     };
     ed.step(

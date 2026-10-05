@@ -359,7 +359,7 @@ fn find(ed: &mut Editor, id: u64) {
 fn target(label: String, root: &Path, binary: &str) -> Result<Target, String> {
     let root = project_root(root);
     let bin = resolve(binary, &root)?;
-    let said = crate::gitmenu::git(&root, &["log", "-1", "--format=%h %ct"], None).unwrap_or_default();
+    let said = crate::gitrepo::git(&root, &["log", "-1", "--format=%h %ct"], None).unwrap_or_default();
     let (head, head_time) = match said.trim().split_once(' ') {
         Some((h, t)) => (Some(h.to_string()), t.parse().ok()),
         None => (None, None),
@@ -2107,9 +2107,11 @@ mod tests {
             &["add", "-A"],
             &["commit", "-q", "-m", "base"],
         ] {
-            crate::gitmenu::git(dir, args, None).unwrap();
+            // (plain git: there's no repository for tarae's — `gitrepo` — before the `init`)
+            let out = std::process::Command::new("git").args(args).current_dir(dir).output().unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
         }
-        crate::gitmenu::git(dir, &["rev-parse", "--short", "HEAD"], None).unwrap().trim().to_string()
+        crate::gitrepo::git(dir, &["rev-parse", "--short", "HEAD"], None).unwrap().trim().to_string()
     }
 
     /// Wave 3, point 8: a code review open in a session — of the uncommitted changes in front, since a
@@ -2124,7 +2126,7 @@ mod tests {
                    [lang.markdown]\nlsp = [\"mdfake\"]\n";
         let (config, w) = crate::config::parse(cfg);
         assert!(w.is_empty(), "{w:?}");
-        let git = |d: &Path, args: &[&str]| crate::gitmenu::git(d, args, None).unwrap();
+        let git = |d: &Path, args: &[&str]| crate::gitrepo::git(d, args, None).unwrap();
         std::fs::write(front.join("g.txt"), "g\n").unwrap();
         repo(&front);
         repo(&back);
@@ -2191,7 +2193,7 @@ mod tests {
     fn a_cards_command_asks_again_after_restart() {
         use crate::offer::What;
         let (front, back, dir, mut ed) = two_sessions("again");
-        let git = |args: &[&str]| crate::gitmenu::git(&back, args, None).unwrap();
+        let git = |args: &[&str]| crate::gitrepo::git(&back, args, None).unwrap();
         repo(&back);
         git(&["checkout", "-q", "-b", "side"]);
         std::fs::write(back.join("a.txt"), "only on side\n").unwrap();
@@ -2229,7 +2231,7 @@ mod tests {
     fn a_branch_delete_asked_again_asks_even_when_nothing_would_be_lost() {
         use crate::offer::What;
         let (front, back, dir, mut ed) = two_sessions("again-merged");
-        let git = |args: &[&str]| crate::gitmenu::git(&back, args, None).unwrap();
+        let git = |args: &[&str]| crate::gitrepo::git(&back, args, None).unwrap();
         repo(&back);
         git(&["checkout", "-q", "-b", "side"]);
         std::fs::write(back.join("a.txt"), "only on side\n").unwrap();
@@ -2260,7 +2262,7 @@ mod tests {
     fn a_session_end_asked_again_asks_even_when_nothing_would_be_lost() {
         use crate::offer::What;
         let (front, _, dir, mut ed) = two_sessions("again-end");
-        let git = |d: &Path, args: &[&str]| crate::gitmenu::git(d, args, None).unwrap();
+        let git = |d: &Path, args: &[&str]| crate::gitrepo::git(d, args, None).unwrap();
         repo(&front);
         let wt = dir.join("wt");
         git(&front, &["worktree", "add", "-q", "-b", "wt", wt.to_str().unwrap()]);

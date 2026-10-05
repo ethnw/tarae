@@ -75,6 +75,26 @@ fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src/snapshots/fixtures")
 }
 
+/// The `demo` fixture copied to a temp folder of `test`'s own, at the same path below it — for a picker that
+/// lists files (with git, which no test runs in tarae's own repository): (that folder — the editor's root, so
+/// paths read as they do from this repository's — and the copy).
+fn demo_copy(test: &str) -> (PathBuf, PathBuf) {
+    fn copy(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for e in std::fs::read_dir(from).unwrap().flatten() {
+            let (f, t) = (e.path(), to.join(e.file_name()));
+            if f.is_dir() { copy(&f, &t) } else { std::fs::copy(&f, &t).map(|_| ()).unwrap() }
+        }
+    }
+    let base = std::env::temp_dir().join(format!("tarae-shot-{test}-{}", std::process::id()));
+    std::fs::remove_dir_all(&base).ok();
+    std::fs::create_dir_all(&base).unwrap();
+    let base = std::fs::canonicalize(&base).unwrap();
+    let demo = base.join("src/snapshots/fixtures/demo");
+    copy(&fixtures().join("demo"), &demo);
+    (base, demo)
+}
+
 /// A small Rust file (doc comment, loop, string, multi-byte text) — the scenarios' default document.
 const DEMO_RS: &str = r#"use std::collections::HashMap;
 
@@ -594,7 +614,8 @@ fn snapshot_command_palette() {
 #[test]
 fn snapshot_file_picker() {
     let mut s = Shot::new(100, 30);
-    let root = fixtures().join("demo");
+    let (base, root) = demo_copy("file-picker");
+    s.ed.session.root = base;
     s.ed.open_picker(
         crate::picker::Picker::new("files in demo", Vec::new(), true).with_tree(root.clone(), None),
         Some(Box::new(move || Ok(crate::picker::file_items(&root)))),
@@ -2723,7 +2744,8 @@ fn redraw_asks_for_a_whole_frame() {
 #[test]
 fn picker_query_shows_past_a_long_title() {
     let mut s = Shot::new(100, 20);
-    let root = fixtures().join("demo");
+    let (base, root) = demo_copy("long-title");
+    s.ed.session.root = base;
     let title = "files in a-folder-whose-name-is-as-long-as-a-worktree-ebpf-performance-7e75ab";
     s.ed.open_picker(
         crate::picker::Picker::new(title, Vec::new(), true).with_tree(root.clone(), None),
@@ -3077,7 +3099,7 @@ fn the_picker_floats_with_equal_margins() {
     s.ed.config.llm.command = "sh".into();
     s.ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
     s.keys(" l<esc>");
-    let root = fixtures().join("demo");
+    let (_, root) = demo_copy("floats");
     s.ed.open_picker(
         crate::picker::Picker::new("files", Vec::new(), true).with_tree(root.clone(), None),
         Some(Box::new(move || Ok(crate::picker::file_items(&root)))),

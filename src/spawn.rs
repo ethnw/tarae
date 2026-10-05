@@ -1,4 +1,5 @@
-//! Starting a run's process (a task, tests) in a session of its own without forking the editor.
+//! Starting a run's process (a task, tests — and every git tarae runs, `gitrepo`) in a session of its own
+//! without forking the editor.
 //!
 //! `dap::setsid` is a `pre_exec`, and any `pre_exec` makes std fork the whole editor and exec in the child:
 //! the fork copies the page tables, so it costs with the editor's memory — measured 2.9 ms at 230 MB and
@@ -9,7 +10,7 @@
 //! stops it and everything it started.
 
 use std::ffi::{CString, OsStr, OsString};
-use std::io::{self, PipeReader};
+use std::io::{self, PipeReader, PipeWriter};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
@@ -24,8 +25,19 @@ pub struct Spawned {
 /// `cmd`'s program, arguments, environment changes and folder, started in a session of its own: stdin
 /// `/dev/null`, stdout and stderr pipes (what `cmd` says of its stdio isn't read — `Command` doesn't tell;
 /// nor `env_clear`).
-#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub fn setsid(cmd: &Command) -> io::Result<Spawned> {
+    start(cmd, false).map(|(s, _)| s)
+}
+
+/// `setsid` with a pipe for its stdin (tarae's git fed a buffer's text — `gitrepo`): the end to write it,
+/// to drop once written.
+pub fn setsid_fed(cmd: &Command) -> io::Result<(Spawned, PipeWriter)> {
+    let (s, input) = start(cmd, true)?;
+    Ok((s, input.ok_or_else(|| io::Error::other("no stdin pipe"))?))
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn start(cmd: &Command, fed: bool) -> io::Result<(Spawned, Option<PipeWriter>)> {
     use std::mem::MaybeUninit;
     use std::os::fd::AsRawFd;
 
@@ -55,6 +67,7 @@ pub fn setsid(cmd: &Command) -> io::Result<Spawned> {
     // (std's pipes: close-on-exec on both ends — the child gets the write ends as its 1 and 2 only)
     let (out_r, out_w) = io::pipe()?;
     let (err_r, err_w) = io::pipe()?;
+    let input = if fed { Some(io::pipe()?) } else { None };
 
     let ok = |r: libc::c_int| if r == 0 { Ok(()) } else { Err(io::Error::from_raw_os_error(r)) };
     // SAFETY: every pointer handed over outlives the call (the CStrings and their arrays are held above);
@@ -69,7 +82,10 @@ pub fn setsid(cmd: &Command) -> io::Result<Spawned> {
         }
         let (a, f) = (attr.as_mut_ptr(), actions.as_mut_ptr());
         let spawned = (|| -> io::Result<libc::pid_t> {
-            ok(libc::posix_spawn_file_actions_addopen(f, 0, null_c.as_ptr(), libc::O_RDONLY, 0))?;
+            match &input {
+                Some((r, _)) => ok(libc::posix_spawn_file_actions_adddup2(f, r.as_raw_fd(), 0))?,
+                None => ok(libc::posix_spawn_file_actions_addopen(f, 0, null_c.as_ptr(), libc::O_RDONLY, 0))?,
+            }
             ok(libc::posix_spawn_file_actions_adddup2(f, out_w.as_raw_fd(), 1))?;
             ok(libc::posix_spawn_file_actions_adddup2(f, err_w.as_raw_fd(), 2))?;
             if let Some(dir) = &cwd_c {
@@ -88,13 +104,15 @@ pub fn setsid(cmd: &Command) -> io::Result<Spawned> {
         libc::posix_spawn_file_actions_destroy(f);
         libc::posix_spawnattr_destroy(a);
         let pid = spawned?;
-        Ok(Spawned { pid: pid as u32, stdout: Some(out_r), stderr: Some(err_r) })
+        // (the child's end of its stdin closed here: the writer's drop is its end of input)
+        let input = input.map(|(_, w)| w);
+        Ok((Spawned { pid: pid as u32, stdout: Some(out_r), stderr: Some(err_r) }, input))
     }
 }
 
 /// Elsewhere: the fork as before.
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub fn setsid(cmd: &Command) -> io::Result<Spawned> {
+fn start(cmd: &Command, fed: bool) -> io::Result<(Spawned, Option<PipeWriter>)> {
     use std::os::fd::OwnedFd;
     use std::process::Stdio;
     let mut c = Command::new(cmd.get_program());
@@ -108,14 +126,16 @@ pub fn setsid(cmd: &Command) -> io::Result<Spawned> {
     if let Some(dir) = cmd.get_current_dir() {
         c.current_dir(dir);
     }
-    c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    c.stdin(if fed { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = crate::dap::setsid(&mut c).spawn()?;
     let pipe = |fd: Option<OwnedFd>| fd.map(PipeReader::from);
-    Ok(Spawned {
+    let input = child.stdin.take().map(|s| PipeWriter::from(OwnedFd::from(s)));
+    let spawned = Spawned {
         pid: child.id(),
         stdout: pipe(child.stdout.take().map(OwnedFd::from)),
         stderr: pipe(child.stderr.take().map(OwnedFd::from)),
-    })
+    };
+    Ok((spawned, input))
 }
 
 #[cfg(target_os = "macos")]
@@ -351,6 +371,19 @@ mod tests {
         std::fs::remove_dir_all(d).ok();
     }
 
+    /// Fed: what's written reaches its stdin, and dropping the writer ends it — in a session of its own still.
+    #[test]
+    fn a_fed_run_reads_what_its_given() {
+        use std::io::Write as _;
+        let (s, mut w) = setsid_fed(&sh("cat; echo end")).unwrap();
+        // SAFETY: getsid only reads.
+        assert_eq!(unsafe { libc::getsid(s.pid as libc::pid_t) }, s.pid as libc::pid_t);
+        w.write_all(b"one\ntwo\n").unwrap();
+        drop(w);
+        let (out, _, status) = output(s);
+        assert_eq!((out.as_str(), status.success()), ("one\ntwo\nend\n", true));
+    }
+
     /// The program is found as execvp in the child found it: `./x` from the run's folder, a bare name
     /// along the child's own `PATH`; one that isn't there is the error std gave.
     #[test]
@@ -443,8 +476,8 @@ mod tests {
             c
         };
         let out = |o: std::process::Output| String::from_utf8_lossy(&o.stdout).into_owned();
-        let paths: [(&str, &dyn Fn() -> String); 4] = [
-            // language servers, Claude, git — std's spawn
+        let paths: [(&str, &dyn Fn() -> String); 5] = [
+            // language servers, Claude — std's spawn
             ("std", &|| {
                 let cfg = crate::llm::LlmConfig {
                     command: "/bin/sh".into(),
@@ -453,14 +486,15 @@ mod tests {
                 };
                 out(crate::llm::spawn(&cfg, &[], Path::new("/")).unwrap().wait_with_output().unwrap())
             }),
-            // the debugger, the git tab's remotes, plugins — std's fork with `pre_exec`
+            // the debugger, plugins — std's fork with `pre_exec`
             ("dap::setsid", &|| {
                 let mut c = ls();
                 c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
                 out(crate::dap::setsid(&mut c).output().unwrap())
             }),
-            // runs and tests
+            // runs and tests, tarae's git (fed its stdin: `setsid_fed`)
             ("spawn::setsid", &|| output(setsid(&ls()).unwrap()).0),
+            ("spawn::setsid_fed", &|| output(setsid_fed(&ls()).unwrap().0).0),
             // the terminal panel's next program
             ("terminal", &|| {
                 let mut t = crate::editor::Editor::new(crate::config::parse("").0);

@@ -512,10 +512,10 @@ fn viewed_said(ed: &mut Editor, i: usize) {
 
 // ── git (worker threads) ──────────────────────────────────────────────────────
 
-/// (the one way git runs — with no terminal of its own (`setsid`), so the fetch below can't ask for a password on the
-/// terminal)
+/// (the one way git runs, `gitrepo` — with no terminal of its own (`setsid`), so the fetch below can't ask for a
+/// password on the terminal)
 fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
-    crate::gitmenu::git(dir, args, None)
+    crate::gitrepo::git(dir, args, None)
 }
 
 /// `git diff --numstat -z` → (added, removed, path, binary).
@@ -600,8 +600,8 @@ pub fn start_in(ed: &mut Editor, cwd: PathBuf, branch: Option<String>) {
                 if let Some((remote, rest)) = name.split_once('/')
                     && remotes.lines().any(|r| r == remote)
                 {
-                    // (tarae's own step: no hooks — `gitmenu::NO_HOOKS`)
-                    let _ = crate::gitmenu::git_no_hooks(&root, &["fetch", "--quiet", remote, rest]);
+                    // (tarae's own step: no hooks — `gitrepo::NO_HOOKS`)
+                    let _ = crate::gitrepo::git_no_hooks(&root, &["fetch", "--quiet", remote, rest]);
                 }
                 let commit = git(&root, &["merge-base", "HEAD", &name])
                     .map_err(|e| format!("{name}: {e}"))?

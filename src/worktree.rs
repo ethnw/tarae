@@ -19,8 +19,8 @@ use serde_json::{Value, json};
 use crate::builds::{BuildDir, Builds, Doomed, remove_build};
 use crate::editor::Editor;
 use crate::event::SessionId;
-use crate::gitmenu::{git, git_no_hooks};
 use crate::gitpanel::{branch_name, commit_rows, current_branch, only_on, parse_log, top_of};
+use crate::gitrepo::{Repo, git, git_no_hooks};
 
 /// How long sizes on disk are measured for, at most (then the card says "over").
 pub(crate) const MEASURE_FOR: Duration = Duration::from_millis(1500);
@@ -121,9 +121,7 @@ pub(crate) fn sha(dir: &Path, rev: &str) -> Result<String, String> {
 
 /// The repository's git folder (shared by all its worktrees), real path.
 pub fn common_dir(dir: &Path) -> Result<PathBuf, String> {
-    let out = git(dir, &["rev-parse", "--path-format=absolute", "--git-common-dir"], None)?;
-    let p = PathBuf::from(out.trim());
-    Ok(std::fs::canonicalize(&p).unwrap_or(p))
+    crate::gitrepo::repo(dir).map(|r| r.common_dir.clone())
 }
 
 /// Whether `a` is in `b`'s history.
@@ -644,7 +642,7 @@ fn ending(name: String, root: &Path, base: Option<String>, start: &Path) -> Resu
 /// The repository's checkouts (`git worktree list` — the main one, every session's, ones made outside
 /// tarae), real paths.
 fn checkouts(common: &Path) -> Vec<PathBuf> {
-    let list = git(common, &["worktree", "list", "--porcelain"], None).unwrap_or_default();
+    let list = Repo::git_folder(common).run(&["worktree", "list", "--porcelain"], None).unwrap_or_default();
     crate::gitpanel::parse_worktrees(&list)
         .into_iter()
         .map(|(p, _)| std::fs::canonicalize(&p).unwrap_or(p))
@@ -665,8 +663,11 @@ fn build_dir_fate(e: &Ending, builds: Option<&Builds>) -> Result<Doomed, BuildDi
 /// and then its build dir when nothing else builds there (`build_dir_fate`; `builds`: how to ask).
 fn remove(e: &Ending, both: bool, builds: Option<&Builds>) -> Result<((u64, bool), BuildDir), String> {
     let branch = e.branch.as_deref().filter(|_| both);
+    // (the repository's git folder, named: what runs here outlives the checkout)
+    let common = Repo::git_folder(&e.common);
+    let tip = |b: &str| common.run(&["rev-parse", "--verify", "-q", &format!("refs/heads/{b}")], None);
     if let Some(b) = branch
-        && sha(&e.common, &format!("refs/heads/{b}")).ok().as_deref() != Some(e.tip.as_str())
+        && tip(b).ok().as_deref().map(str::trim) != Some(e.tip.as_str())
     {
         return Err(format!("{b} moved since the card was shown — nothing removed"));
     }
@@ -679,9 +680,9 @@ fn remove(e: &Ending, both: bool, builds: Option<&Builds>) -> Result<((u64, bool
         args.push("--force");
     }
     args.push(root);
-    git_no_hooks(&e.common, &args)?;
+    common.run_no_hooks(&args)?;
     if let Some(b) = branch {
-        git_no_hooks(&e.common, &["branch", "-D", "--", b])?;
+        common.run_no_hooks(&["branch", "-D", "--", b])?;
     }
     let build = match fate {
         Ok(doomed) => remove_build(&doomed),
@@ -2643,8 +2644,11 @@ mod tests {
         let (wt, _) = moved_apart(&mut ed, &repo, true);
         rebase_asked(&mut ed);
         let task = ed.session.task_run.as_ref().map(|r| (r.task.name.clone(), r.task.cmd.clone()));
-        let cmd = "git -c core.hooksPath=/dev/null -c advice.mergeConflict=false rebase 'main'";
-        assert_eq!(task, Some(("rebase onto main".into(), cmd.into())), "in the task panel, with no hooks");
+        // (on the session's repository, named — `gitrepo`)
+        let named = crate::gitrepo::repo(&wt).unwrap().shell_line();
+        assert!(named.contains(" --work-tree "), "{named}");
+        let cmd = format!("{named} -c core.hooksPath=/dev/null -c advice.mergeConflict=false rebase 'main'");
+        assert_eq!(task, Some(("rebase onto main".into(), cmd)), "in the task panel, with no hooks");
         settle_until(&mut ed, |ed| card(ed, "Rebased feat onto main").is_some() || says(ed, "rebase feat:"));
         let main = git_in(&repo, &["rev-parse", "main"]);
         assert_eq!(git_in(&wt, &["merge-base", "main", "HEAD"]), main, "on main's tip");
@@ -2916,15 +2920,53 @@ mod tests {
         settle_until(&mut ed, |ed| says(ed, "not going on"));
         assert!(says(&ed, "conflict markers still in a.txt — not going on"));
         assert!(crate::rebase::under_way(&wt).is_some(), "still stopped");
+        // (its repository not kept — `gitrepo`'s list is capped: read on a worker, not refused — and the user
+        // in the other session by the time it's read: the abort goes on in feat's, not the one in front)
+        crate::gitrepo::forget(&wt);
         feed(&mut ed, ":rebase-abort<ret>");
-        settle_until(&mut ed, |ed| says(ed, "Rebase aborted") || says(ed, "rebase feat:"));
+        let feat = ed.session.id;
+        let main = ed.sessions.iter().map(|s| s.id).find(|&id| id != feat).expect("the other session");
+        assert!(ed.session_switch(main));
+        settle_until(&mut ed, |ed| {
+            says(ed, "Rebase aborted") || says(ed, "rebase feat:") || says(ed, "rebase:")
+        });
         assert!(says(&ed, "Rebase aborted — feat is back where it was"), "{}", said(&ed));
+        assert!(ed.session.task_run.is_none(), "nothing ran in the session in front");
+        assert!(ed.session_switch(feat));
+        assert!(ed.session.task_run.as_ref().is_some_and(|r| r.task.name == "rebase --abort"));
         assert_eq!(git_in(&wt, &["rev-parse", "HEAD"]), tip);
         assert_eq!(std::fs::read_to_string(wt.join("a.txt")).unwrap(), "one\nfeat\n");
         assert!(ed.session.rebase.is_none() && crate::rebase::under_way(&wt).is_none());
         // None under way now
         feed(&mut ed, ":rebase-abort<ret>");
         settle_until(&mut ed, |ed| says(ed, "no rebase under way"));
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A rebase step whose line is read on a worker (its repository not kept), for a session gone by the time
+    /// it's read: dropped — not started in the session in front (`with_session` applies a gone session's
+    /// result there).
+    #[test]
+    fn a_rebase_step_for_a_session_gone_meanwhile_is_dropped() {
+        let (repo, dir) = place("rebase-gone");
+        let mut ed = editor(&repo, &dir);
+        claude_does(&mut ed, &dir.join("claude.log"), "");
+        let (wt, _) = moved_apart(&mut ed, &repo, false);
+        rebase_asked(&mut ed);
+        settle_until(&mut ed, |ed| says(ed, "conflict markers still in") || says(ed, "rebase feat:"));
+        assert!(crate::rebase::under_way(&wt).is_some(), "stopped on its conflict: {}", said(&ed));
+        crate::gitrepo::forget(&wt);
+        feed(&mut ed, ":rebase-abort<ret>");
+        let feat = ed.session.id;
+        let main = ed.sessions.iter().map(|s| s.id).find(|&id| id != feat).expect("the other session");
+        assert!(ed.session_switch(main));
+        // Gone — taken out as nothing in tarae can while it rebases (ending one is refused then)
+        ed.sessions.retain(|s| s.id != feat);
+        let read = ed.rebase_lines_read;
+        settle_until(&mut ed, |ed| ed.rebase_lines_read > read);
+        assert!(ed.session.task_run.is_none(), "nothing started in the session in front");
+        assert!(crate::rebase::under_way(&wt).is_some(), "not aborted in someone else's name");
         drop(ed);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -3316,6 +3358,7 @@ mod tests {
         let git_tab = ed.session.sidebar.as_ref().map(|s| (s.mode, s.focus));
         assert_eq!(git_tab, Some((crate::sidebar::Mode::Git, true)));
         feed(&mut ed, ":w<ret>");
+        ed.flush_saves(); // (saving is in the background: on disk before git commits it)
         git_in(&wt, &["commit", "-qam", "x"]);
         // A run in the task panel: the rebase waits behind it, and goes once it's over
         let marker = dir.join("go");

@@ -7,7 +7,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 
 use ropey::Rope;
@@ -1041,17 +1040,12 @@ fn commit_preview(root: &Path, hash: &str) -> Preview {
 
 // ── Building lists (worker thread) ───────────────────────────────────────────
 
-/// File list — `git ls-files` in a git repo (respects .gitignore, fast), else walk the tree directly.
+/// File list — `git ls-files` in a git repo (respects .gitignore, fast; of `root`, from it), else walk the
+/// tree directly.
 pub fn list_files(root: &Path) -> Vec<PathBuf> {
-    let git = Command::new("git")
-        .args(["ls-files", "--cached", "--others", "--exclude-standard", "-z"])
-        .current_dir(root)
-        .output();
-    if let Ok(out) = git
-        && out.status.success()
-    {
+    let args = ["ls-files", "--cached", "--others", "--exclude-standard", "-z"];
+    if let Ok(out) = crate::gitrepo::repo(root).and_then(|r| r.output(&args, None)) {
         let listed: Vec<PathBuf> = out
-            .stdout
             .split(|&b| b == 0)
             .filter(|s| !s.is_empty())
             .map(|s| PathBuf::from(String::from_utf8_lossy(s).into_owned()))

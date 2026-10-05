@@ -67,6 +67,9 @@ fn run(cmd: &mut Command) -> Result<(), String> {
     Err(tail.into_iter().rev().collect::<Vec<_>>().join(" / "))
 }
 
+/// (Not through `gitrepo`, tarae's one way to run git on a project: this is a repository tarae makes itself in
+/// its own data folder, from a grammar's URL and commit in the packs — no project's files, so nothing there
+/// to pass for a repository; `git init` makes it, the folder is all it works in.)
 fn git(dir: &Path) -> Command {
     let mut c = Command::new("git");
     c.arg("-C").arg(dir).env("GIT_TERMINAL_PROMPT", "0");

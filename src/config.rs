@@ -214,27 +214,16 @@ fn local_path(root: &Path) -> Option<PathBuf> {
 /// Whether `.tarae.local.toml` at `path` is yours to read as you'd read your own config: git says it's
 /// untracked and ignored. Err (why not) otherwise — a committed one came with the repository (the
 /// project's, which `.tarae.toml` is for), an untracked one git doesn't ignore may have come with a
-/// download of it, and outside a repository git can't tell. Asked only when the file is there.
-pub(crate) fn personal(path: &Path) -> Result<(), String> {
-    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else { return Err("no folder".into()) };
-    let git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .args(args)
-            .arg(name)
-            .current_dir(dir)
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .stdin(std::process::Stdio::null())
-            .output()
-            .ok()
-    };
-    let inside = git(&["rev-parse", "--is-inside-work-tree", "--"]).is_some_and(|o| o.status.success());
-    if !inside {
+/// download of it, and outside a repository git can't tell. Asked only when the file is there, of the
+/// repository `root` (the editor's) resolves — not of what the file's folder may pass for (`gitrepo`).
+pub(crate) fn personal(root: &Path, path: &Path) -> Result<(), String> {
+    let Some((repo, rel)) = crate::gitrepo::for_file(root, path) else {
         return Err("not in a git repository, so git can't say it's yours".into());
-    }
-    if git(&["ls-files", "--error-unmatch", "--"]).is_some_and(|o| o.status.success()) {
+    };
+    if repo.run(&["ls-files", "--error-unmatch", "--", &rel], None).is_ok() {
         return Err("git tracks it — a committed one is the project's: put that in .tarae.toml".into());
     }
-    if !git(&["check-ignore", "-q", "--"]).is_some_and(|o| o.status.success()) {
+    if repo.run(&["check-ignore", "-q", "--", &rel], None).is_err() {
         return Err("git doesn't ignore it — add it to .gitignore or .git/info/exclude to use it".into());
     }
     Ok(())
@@ -255,7 +244,7 @@ fn short(p: &Path) -> String {
 /// once the project is trusted.
 pub fn load(root: &Path) -> (Config, Vec<String>) {
     let store = crate::trust::Store::read(crate::trust::Store::path().as_deref());
-    let local = local_path(root).filter(|p| p.is_file());
+    let local = local_path(root).filter(|p| p.is_file()).map(|p| (root.to_path_buf(), p));
     load_layers(config_path(), project_layer(root), local, &store)
 }
 
@@ -271,11 +260,11 @@ pub(crate) fn load_from(
 
 /// The layers in order: yours, the project's (through `trust.rs`), then `.tarae.local.toml` — read as
 /// yours when git ignores it (`personal`), else not at all, said so. Its `[preflight]` steps go after the
-/// project's (`EditorConfig::preflight_local`), not in their place.
+/// project's (`EditorConfig::preflight_local`), not in their place. `local` = (the editor's root, the file).
 pub(crate) fn load_layers(
     user: Option<PathBuf>,
     project: Option<PathBuf>,
-    local: Option<PathBuf>,
+    local: Option<(PathBuf, PathBuf)>,
     store: &crate::trust::Store,
 ) -> (Config, Vec<String>) {
     let read = |path: &Path, warnings: &mut Vec<String>| match fs::read_to_string(path) {
@@ -322,10 +311,10 @@ pub(crate) fn load_layers(
             });
         }
     }
-    if let Some(path) = &local
+    if let Some((root, path)) = &local
         && let Some(src) = read(path, &mut warnings)
     {
-        match personal(path) {
+        match personal(root, path) {
             Ok(()) => {
                 let file = short(path);
                 let apply = |c: &mut Config, warnings: &mut Vec<String>| {
@@ -750,7 +739,9 @@ Z = ["move_line_down", ":sh touch marker"]
         )
         .unwrap();
         fs::write(dir.join(".gitignore"), ".tarae.local.toml\n").unwrap();
-        let load = |store: &Store| load_layers(None, Some(project.clone()), Some(local.clone()), store);
+        let load = |store: &Store| {
+            load_layers(None, Some(project.clone()), Some((dir.clone(), local.clone())), store)
+        };
         let names = |s: &[crate::preflight::Step]| s.iter().map(|s| s.name.clone()).collect::<Vec<_>>();
         // Outside a repository: git can't say it's yours
         let (c, w) = load(&Store::default());

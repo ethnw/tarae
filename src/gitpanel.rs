@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use crate::document::DocId;
 use crate::editor::Editor;
-use crate::gitmenu::git;
+use crate::gitrepo::git;
 use crate::hooks;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -262,22 +262,13 @@ pub fn refusal(stderr: &str) -> Refused {
 }
 
 /// Git with a time limit on its patience for remotes: no prompts (push/pull fail fast instead of waiting
-/// for a password nobody will type).
+/// for a password nobody will type). Its hooks the user's (pre-push, a pull's merge): `gitrepo`'s hooked form.
 fn git_remote(dir: &Path, args: &[&str]) -> Result<String, Refused> {
-    #[cfg(test)]
-    crate::gitmenu::not_in_this_repository(dir, args);
-    let mut cmd = std::process::Command::new("git");
-    crate::dap::setsid(&mut cmd);
-    let out = cmd
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|e| Refused { why: format!("git: {e}"), rejected: None })?;
+    let refused = |why: String| Refused { why, rejected: None };
+    let cmd = crate::gitrepo::repo(dir).map_err(refused)?.hooked_command(args).map_err(refused)?;
+    let out = crate::gitrepo::ran(&cmd, None).map_err(refused)?;
     let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
-    if !out.status.success() {
+    if !out.ok {
         return Err(refusal(&text(&out.stderr)));
     }
     Ok(format!("{}{}", text(&out.stdout), text(&out.stderr)))
@@ -620,7 +611,7 @@ impl Editor {
             if pop { &["stash", "pop"] } else { &["stash", "push", "--include-untracked"] };
         self.git_hooked("stash", hooks::STASH, move |ed, pre| {
             ed.git_do(
-                Box::new(move |top| git(top, &hooks::with(pre, args), None)),
+                Box::new(move |top| crate::gitrepo::hooked(top, &hooks::with(pre, args))),
                 Box::new(move |ed, r| match r {
                     Ok(_) if pop => ed.set_success("Took the stashed changes back"),
                     Ok(out) if out.contains("No local changes") => ed.set_status("nothing to stash"),
@@ -919,7 +910,7 @@ impl Editor {
                         if amend {
                             args.push("--amend");
                         }
-                        git(top, &hooks::with(pre, &args), None)
+                        crate::gitrepo::hooked(top, &hooks::with(pre, &args))
                             .and_then(|_| git(top, &["log", "-1", "--format=%h %s"], None))
                     }),
                     Box::new(move |ed, result| match result {
@@ -1106,7 +1097,7 @@ impl Editor {
                         );
                     }
                     let was_pushed = pushed(top);
-                    git(top, &hooks::with(pre, &["commit", "--amend", "--no-edit"]), None)?;
+                    crate::gitrepo::hooked(top, &hooks::with(pre, &["commit", "--amend", "--no-edit"]))?;
                     let line = git(top, &["log", "-1", "--format=%h %s"], None)?;
                     Ok((line.trim().to_string(), was_pushed))
                 },
@@ -1254,7 +1245,7 @@ impl Editor {
                     return Err(format!("{b:?} isn't a branch"));
                 }
                 not_held(top, &b, "switch to")?;
-                git(top, &hooks::with(pre, &["switch", &b]), None)
+                crate::gitrepo::hooked(top, &hooks::with(pre, &["switch", &b]))
             },
             move |ed, r| match r {
                 Ok(_) => ed.set_success(format!("On {branch}")),
@@ -1280,7 +1271,7 @@ impl Editor {
                     }
                     args.push(f);
                 }
-                git(top, &hooks::with(pre, &args), None).map(|_| name)
+                crate::gitrepo::hooked(top, &hooks::with(pre, &args)).map(|_| name)
             },
             move |ed, r| match r {
                 Ok(name) => ed.set_success(format!("On {name}, a new branch")),
@@ -1303,7 +1294,7 @@ impl Editor {
                 };
                 let new = branch_name(top, &new)?;
                 not_held(top, &old, "rename")?;
-                git(top, &hooks::with(pre, &["branch", "-m", "--", &old, &new]), None)?;
+                crate::gitrepo::hooked(top, &hooks::with(pre, &["branch", "-m", "--", &old, &new]))?;
                 let up = git(
                     top,
                     &["for-each-ref", "--format=%(upstream:short)", &format!("refs/heads/{new}")],
@@ -1351,7 +1342,7 @@ impl Editor {
                 if !lost.is_empty() || always {
                     return Ok((top.to_path_buf(), Deleting::Ask { tip, lost }));
                 }
-                git(top, &hooks::with(pre, &["branch", "-D", "--", &n]), None)?;
+                crate::gitrepo::hooked(top, &hooks::with(pre, &["branch", "-D", "--", &n]))?;
                 Ok((top.to_path_buf(), Deleting::Done(tip)))
             },
             move |ed, r| match r {
@@ -1406,7 +1397,7 @@ impl Editor {
                 if now.trim() != t {
                     return Err(format!("{b} moved since the card was shown — nothing deleted"));
                 }
-                git(&top, &hooks::with(pre, &["branch", "-D", "--", &b]), None)
+                crate::gitrepo::hooked(&top, &hooks::with(pre, &["branch", "-D", "--", &b]))
             };
             ed.step(ed.events.jobs(), "git", said, work, move |ed, result| {
                 match result {
@@ -1445,7 +1436,7 @@ const DRAFT_DIFF_MAX: usize = 80_000;
 /// What Claude reads to draft a commit message: the repository's recent messages (their style), the stat and
 /// the staged diff — amending, the whole commit's (from HEAD's parent).
 fn commit_prompt(top: &Path, amend: bool) -> Result<String, String> {
-    use crate::gitmenu::git;
+    use crate::gitrepo::git;
     let base: Vec<&str> = if amend { vec!["--cached", "HEAD^"] } else { vec!["--cached"] };
     let diff_of = |extra: &[&str]| {
         let mut args = vec!["diff", "--no-color", "--no-ext-diff"];

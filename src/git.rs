@@ -167,23 +167,55 @@ pub fn regions(hunks: &[Hunk]) -> Vec<Hunk> {
     out
 }
 
-/// This file's content in the index (None outside a repo or for an untracked file) — the gutter compares
-/// against it, so staged changes leave the gutter. Runs on a worker thread.
-pub fn index_blob(path: &Path) -> Option<String> {
-    let dir = path.parent()?;
-    let name = path.file_name()?.to_str()?;
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["show", &format!(":./{name}")])
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    out.status.success().then(|| String::from_utf8(out.stdout).ok()).flatten()
+/// This file's content in the index of its repository as `places` finds it (`gitrepo::for_file_in` — never by
+/// discovery from where a run can write); Ok(None): untracked. The gutter compares against it, so staged
+/// changes leave the gutter. Runs on a worker thread.
+pub fn index_blob(
+    places: &crate::gitrepo::Places,
+    path: &Path,
+) -> Result<Option<String>, crate::gitrepo::NoGit> {
+    let (repo, rel) = crate::gitrepo::for_file_in(places, path)?;
+    Ok(repo.output(&["show", &format!(":{rel}")], None).ok().and_then(|b| String::from_utf8(b).ok()))
 }
 
 impl Editor {
+    /// Where `path`'s git is looked for (`gitrepo::for_file_in`): the sessions' repositories — the one whose
+    /// checkout holds it first, then the front one's — and, for a file in none, where a sandboxed run of any
+    /// session may write (`sandbox::write_places`, with what's been granted: kept for its project, its chat's;
+    /// worked out on the worker, only then). Runs not sandboxed (`llm.sandbox` off, no sandbox here): none —
+    /// such a file's own repository is found from its folder, nothing held back.
+    pub(crate) fn git_places(&self, path: &Path) -> crate::gitrepo::Places {
+        use crate::sandbox::Availability;
+        let id = self.session_of(path);
+        let all = || std::iter::once(&self.session).chain(&self.sessions);
+        let mut roots: Vec<PathBuf> = all().filter(|s| Some(s.id) == id).map(|s| s.root.clone()).collect();
+        for s in all() {
+            if !roots.contains(&s.root) {
+                roots.push(s.root.clone());
+            }
+        }
+        let sandboxed = self.config.llm.sandbox
+            && !matches!(self.sandbox, Availability::Missing(_) | Availability::Bypass);
+        let (llm, store) = (self.config.llm.clone(), self.allow_path.clone());
+        let chats: Vec<(PathBuf, crate::allow::Allowed)> = all()
+            .map(|s| (s.root.clone(), s.chat.as_ref().map(|c| c.allowed.clone()).unwrap_or_default()))
+            .collect();
+        let writes: crate::gitrepo::Writes = std::sync::Arc::new(move || {
+            if !sandboxed {
+                return None;
+            }
+            let kept = crate::allow::Store::read(store.as_deref());
+            let mut all = Vec::new();
+            for (root, chat) in &chats {
+                let project = kept.get(&crate::sandbox::profile_path(root));
+                let w = crate::tools::with_allowed(&llm, &[&project, chat], None);
+                all.extend(crate::sandbox::write_places(root, &w.llm));
+            }
+            Some(all)
+        });
+        crate::gitrepo::Places { roots, writes }
+    }
+
     /// (Re)load the document's index content — on open, on regaining focus (may have staged outside), after
     /// staging a hunk.
     pub fn git_load_base(&mut self, id: crate::document::DocId) {
@@ -201,9 +233,15 @@ impl Editor {
         if reviewed(self) {
             return;
         }
+        let places = self.git_places(&path);
         self.events.jobs().spawn(move || {
-            let base = index_blob(&path).map(std::sync::Arc::new);
+            let read = index_blob(&places, &path);
             move |ed: &mut Editor| {
+                ed.git_bases_read += 1;
+                if read == Err(crate::gitrepo::NoGit::Writable { looks: true }) && ed.git_told.insert(path) {
+                    ed.set_status(crate::gitrepo::NOT_READ);
+                }
+                let base = read.ok().flatten().map(std::sync::Arc::new);
                 // A review or `:diff` that started meanwhile keeps its base
                 if reviewed(ed) {
                     return;
@@ -300,6 +338,49 @@ mod tests {
         assert_eq!(h, [Hunk { kind: HunkKind::Deleted, lines: 1..1, removed: 1, base: 1..2 }]);
         let h = hunks("a\n", "a\nb\nc\n");
         assert_eq!(h, [Hunk { kind: HunkKind::Added, lines: 1..3, removed: 0, base: 1..1 }]);
+    }
+
+    /// The gutter's base for a large file (`index_blob`, one git run each) — 100k lines (5 MB) in a
+    /// repository of 3,000 tracked files: the first (the repository resolved then, once per root), and the
+    /// median of 21 after (`target/sb/gitlauncher.md`: the same as the discovery form it replaced).
+    #[test]
+    fn perf_gutter_base_of_a_large_file() {
+        if crate::test_results::unoptimized("git::tests::perf_gutter_base_of_a_large_file") {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("tarae-gutter-perf-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        for i in 0..3000 {
+            std::fs::write(dir.join(format!("src/f{i}.rs")), format!("fn f{i}() {{}}\n").repeat(20)).unwrap();
+        }
+        let big = dir.join("src/big.rs");
+        std::fs::write(&big, "fn line() { let x = 1 + 2 + 3; } // a line of a large file\n".repeat(100_000))
+            .unwrap();
+        for args in [&["init", "-q"][..], &["add", "-A"]] {
+            let ok = std::process::Command::new("git").args(args).current_dir(&dir).output().unwrap();
+            assert!(ok.status.success(), "git {args:?}");
+        }
+        let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1000.0;
+        let places = crate::gitrepo::Places::only(&dir);
+        let t = std::time::Instant::now();
+        assert!(index_blob(&places, &big).is_ok_and(|b| b.is_some_and(|b| b.len() > 5_000_000)));
+        let first = ms(t);
+        let mut again: Vec<f64> = (0..21)
+            .map(|_| {
+                let t = std::time::Instant::now();
+                assert!(index_blob(&places, &big).is_ok_and(|b| b.is_some()));
+                ms(t)
+            })
+            .collect();
+        crate::sorting::by(&mut again, f64::total_cmp);
+        std::fs::remove_dir_all(&dir).ok();
+        let lines = [
+            format!("PERF gutter_base_large_file_ms {:.2} budget=200 noise=1", again[again.len() / 2]),
+            format!("(the first: {first:.2} ms · fastest {:.2} · slowest {:.2})", again[0], again[20]),
+        ];
+        let _ = std::io::Write::write_all(&mut std::io::stderr(), (lines.join("\n") + "\n").as_bytes());
     }
 
     #[test]
