@@ -209,12 +209,20 @@ pub struct Turn {
     pub cost: Option<f64>,
     pub requests: usize,
     pub ms: Option<u64>,
+    /// Claude compacted the conversation in it — its trigger (`auto` · `manual`): a `/compact` turn reports
+    /// 0 tokens and the summary's cost, said so rather than as a turn that read nothing.
+    pub compacted: Option<String>,
 }
 
 impl Turn {
     fn json(&self) -> Value {
         json!({ "at": self.at_ms, "model": self.model, "counts": self.counts.json(), "cost": self.cost,
-                "requests": self.requests, "ms": self.ms })
+                "requests": self.requests, "ms": self.ms, "compacted": self.compacted })
+    }
+
+    /// It compacted and reported no tokens of its own (`/compact`'s turn).
+    pub fn only_compacted(&self) -> bool {
+        self.compacted.is_some() && self.counts.context().unwrap_or(0) + self.counts.output.unwrap_or(0) == 0
     }
 
     fn from_json(conversation: &str, v: &Value) -> Option<Turn> {
@@ -226,6 +234,7 @@ impl Turn {
             cost: v["cost"].as_f64(),
             requests: v["requests"].as_u64().unwrap_or(0) as usize,
             ms: v["ms"].as_u64(),
+            compacted: v["compacted"].as_str().map(String::from),
         })
     }
 }
@@ -247,6 +256,9 @@ pub struct Conv {
     first_next: bool,
     /// Its cost so far, as its last result said (None: not known here).
     pub cost_so_far: Option<f64>,
+    /// Compacted since its latest request: what the context holds now (`post_tokens`) — until the next
+    /// request says.
+    pub compacted_to: Option<u64>,
 }
 
 /// Warm (time left) · cold (since when) · not reported.
@@ -333,6 +345,8 @@ pub struct Usage {
     pub watch: Option<u64>,
     /// The Claude Code version its chat's process runs (`system init`) — whose price table the costs are.
     pub cli: Option<String>,
+    /// The turn under way compacted the conversation — its trigger, for its `Turn`.
+    compacting: Option<String>,
 }
 
 impl Usage {
@@ -392,7 +406,20 @@ impl Usage {
         if r.counts.write.unwrap_or(0) > 0 {
             c.ttl = r.ttl;
         }
+        // (a request after a compaction says what the context holds again)
+        if c.last.as_ref().is_none_or(|l| l.id != r.id) {
+            c.compacted_to = None;
+        }
         c.last = Some(r);
+    }
+
+    /// The conversation compacted (`compaction.rs`): the context holds what it kept from now on, and the
+    /// turn under way says it compacted.
+    pub fn compacted(&mut self, k: &crate::compaction::Compaction) {
+        self.compacting = Some(k.trigger.clone());
+        if let Some(c) = self.conv.as_mut() {
+            c.compacted_to = k.post_tokens;
+        }
     }
 
     /// The turn's result: a turn of what it says (else of what its requests said).
@@ -440,6 +467,7 @@ impl Usage {
             cost,
             requests: requests.len(),
             ms: s.ms,
+            compacted: self.compacting.take(),
         });
         self.turns.last().expect("just pushed")
     }
@@ -456,12 +484,13 @@ impl Usage {
             cost: s.total_cost,
             requests: 0,
             ms: s.ms,
+            compacted: None,
         });
     }
 
     /// The turn ended with no result (claude exited, cut off): what its requests said, no cost.
     pub fn cut_off(&mut self, at_ms: u64) {
-        if self.requests.is_empty() {
+        if self.requests.is_empty() && self.compacting.is_none() {
             return;
         }
         let conversation = self.conv.as_ref().map(|c| c.id.clone()).unwrap_or_default();
@@ -472,6 +501,7 @@ impl Usage {
     pub fn new_conversation(&mut self) {
         self.conv = None;
         self.requests.clear();
+        self.compacting = None;
     }
 
     /// Whether anything was reported at all.
@@ -494,10 +524,12 @@ impl Usage {
         if now_ms < at { Cache::Warm { left_ms: at - now_ms, ttl } } else { Cache::Cold { since_ms: at } }
     }
 
-    /// What the latest request carried, and its model's context window if a result named it.
+    /// What the latest request carried — since a compaction, what that kept — and its model's context
+    /// window if a result named it.
     pub fn context(&self) -> Option<(u64, Option<u64>)> {
-        let last = self.conv.as_ref()?.last.as_ref()?;
-        let used = last.counts.context()?;
+        let c = self.conv.as_ref()?;
+        let last = c.last.as_ref()?;
+        let used = c.compacted_to.or(last.counts.context())?;
         let window = self.windows.iter().find(|(m, _)| *m == last.model).map(|w| w.1);
         Some((used, window))
     }
@@ -529,6 +561,9 @@ impl Usage {
             v["fixed"] = c.fixed.as_ref().map_or(Value::Null, Request::json);
             v["touched"] = json!(c.touched_ms);
             v["ttl"] = json!(c.ttl.map(Ttl::name));
+            if let Some(n) = c.compacted_to {
+                v["compacted_to"] = json!(n);
+            }
         }
         Some(v)
     }
@@ -557,6 +592,7 @@ impl Usage {
             fixed: Request::from_json(&v["fixed"]),
             first_next: false,
             cost_so_far: v["cost_so_far"].as_f64(),
+            compacted_to: v["compacted_to"].as_u64(),
         });
     }
 }
@@ -660,6 +696,10 @@ pub fn report(name: &str, u: &Usage, all: &[(&str, &Usage)], now_ms: u64) -> Str
             let mut model = if models.is_empty() { "not reported".to_string() } else { models.join(", ") };
             if t.conversation == "ask" {
                 model = format!("ask · {model}");
+            }
+            // (a `/compact` turn's 0 tokens and its summary's cost, said for what they are)
+            if t.compacted.is_some() {
+                model = format!("{model} · compacted");
             }
             let mut row = vec![clock(t.at_ms), model];
             row.extend(cells(&t.counts));

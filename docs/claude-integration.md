@@ -60,6 +60,19 @@ conversations. `C-p` in the chat (or `:chat-resume`) picks any of them, with the
 `~/.local/state/tarae/chats/`. Because Claude keeps the chat's conversations too, they also show in `claude --resume`
 in that folder.
 
+**When Claude compacts.** Near its context limit Claude Code summarizes the conversation so far and carries on
+from the summary (or does it when you send `/compact`). Details it worked out before — a list it wrote, a plan's
+steps — may survive only as far as the summary kept them. While it compacts, which can take a minute, the chat
+(and the card beside the code, when following) says `compacting…` instead of `thinking…`. Then the chat says so
+where it happened, a beat of its own between what came before and after: `≈ Claude compacted this conversation (automatic, 812k
+tokens before) — what it worked out before may be only in its summary now` (`manual` when you asked). If Claude
+later seems to have forgotten something, that note is why. When the chat is out of sight (the code zoomed with
+`C-w z`, a review read wide), a toast says it too: `Claude compacted its conversation (automatic, 812k tokens
+before) — space l shows it`, a warning when it came by itself. Minimized while following, the chat comes back
+with the answer and the note in it, so no toast. The context figure under the chat drops to what the summary kept, and a `/compact` turn says
+`compacted` where its token counts would be zeros (in `:usage` too). `tarae state` counts each session's
+compactions, with the last one's time and trigger, and `--watch usage` is told when one happens.
+
 Every message carries **the current file, cursor, selection, and diagnostics** as context, plus **what's on
 screen**: the lines you're looking at, and the file in the pane beside it when the window is split. So "this" and
 "here" mean what you see, even when the cursor is somewhere else — the whole file only the
@@ -107,8 +120,10 @@ warning). When something older waits elsewhere, the toast says so: `C-q goes the
 the chat (or the status line's chip, with the chat closed) keeps saying `▲ waits` or `done` until you look. Once
 nothing waits, `C-q` goes to the sessions whose turn ended — the first to end first — and says when. In the front
 session, a turn that ends while the chat is out of sight (something else zoomed with `C-w z`, a review read wide)
-is said the same way: `Claude's turn ended — space l shows it`. Claude's own view of the screen leaves out other
-sessions' news (they're counts there).
+is said the same way: `Claude's turn ended — space l shows it`. A session behind whose Claude
+[compacts](#chat-panel) says so too: `fix-login · Claude compacted its conversation (automatic, 812k tokens
+before)`, as a warning when it came by itself. Its row in the session list says `≈ compacted` until it's been in
+front. Claude's own view of the screen leaves out other sessions' news (they're counts there).
 
 ![The inbox over the code: three rows, oldest first — main · Claude wants to run outside the sandbox · cargo test -q parser:: (run · 13 s), api · Claude wants to see your screen (screen · 9 s), docs · Change 1 of 1 · README.md (edit · 6 s) — and the status line's main ▲3 waiting](screenshots/inbox.png)
 ([hanji theme](screenshots/inbox-hanji.png))
@@ -730,7 +745,8 @@ that's not what you pay, so it's said as `≈ API` — in the chat's row, the se
   redraws; the only frame while you're idle is the one when it turns cold. (`tarae state` says the seconds
   left.)
 - **Context**: the last request's input + cache read + cache write, against the model's window (the window comes
-  with the first turn's result, so the first turn shows the token count).
+  with the first turn's result, so the first turn shows the token count). After a compaction, what it kept,
+  until the next request says.
 - **The last turn**: its cost, then its tokens read from the cache, written to it, sent as input and written out.
   Claude reports the cost as a whole; the four numbers are tokens, not dollars.
 

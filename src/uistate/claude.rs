@@ -61,6 +61,7 @@ impl Editor {
             l.branch = None;
             l.root.clear();
             l.rebasing = None;
+            l.compacted = None;
         }
         s.cards.retain(|c| c.session == own);
         // (a toast that's news of another session — its turn ended, it waits: theirs, a count here)

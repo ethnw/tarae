@@ -136,7 +136,10 @@ side git · 4 rows · in hand git:src/term.rs
   `keys` comes from one new `Editor::keys_to()`, and the routing test (phase 1) holds `handle_key` to it.
 - **`mode`, `prompt`** — mode, and the prompt's kind (`PromptKind::label`) and text (full level only).
 - **`sessions`** — id, name, branch, `doing` (`Doing`: `idle` · `working` · `waiting` · `done` ·
-  `stuck {tool, secs}`), cards waiting, `rebasing n/m`, the reloaded `•`.
+  `stuck {tool, secs}`), cards waiting, `rebasing n/m`, the reloaded `•`, and once its Claude compacted its
+  conversation (`compaction.rs`), `compacted`: `count` since tarae started, the `last` one's `at_ms`, `trigger`
+  (`auto` · `manual`), `pre_tokens`, `post_tokens`, and `unseen` (it came behind, not in front since). Claude's
+  level has only its own session's.
 - **`cards`** — every card: up front, stacked behind it, or parked in a session behind.
   - `whose`: `claude` when `Offer::claudes`, else `tarae`.
   - `kind`: the `What` variant in kebab case.

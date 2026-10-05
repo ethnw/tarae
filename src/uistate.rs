@@ -715,6 +715,8 @@ pub struct SessionState {
     pub front: bool,
     /// Its Claude's usage (`usage.rs`) — None: nothing reported yet.
     pub usage: Option<UsageState>,
+    /// Its Claude's conversation compacted since tarae started (`compaction.rs`) — None: never.
+    pub compacted: Option<crate::compaction::Compacted>,
 }
 
 /// A session's usage as the state says it — None in a field: not reported.
@@ -767,6 +769,9 @@ impl UsageState {
             v["model"] = json!(t.model);
             v["cost"] = json!(t.cost);
             v["requests"] = json!(t.requests);
+            if let Some(k) = &t.compacted {
+                v["compacted"] = json!(k);
+            }
             v
         });
         let mut totals = c(&self.totals.counts);
@@ -896,6 +901,7 @@ impl Editor {
             reloaded: l.reloaded,
             front: is_front,
             usage: UsageState::of(&l.usage, now_ms),
+            compacted: Some(l.compacted.clone()).filter(|c| c.count > 0),
         };
         let mut sessions = vec![session(front, true)];
         sessions.extend(self.sessions.iter().map(|l| session(l, false)));
@@ -1052,6 +1058,9 @@ impl UiState {
                 if let Some(u) = &s.usage {
                     v["usage"] = u.json();
                 }
+                if let Some(c) = &s.compacted {
+                    v["compacted"] = c.json();
+                }
                 v
             })
             .collect();
@@ -1126,6 +1135,9 @@ impl UiState {
         for s in &self.sessions {
             if let Some(u) = &s.usage {
                 out.push(format!("usage {}: {}", s.id, u.text()));
+            }
+            if let Some(c) = &s.compacted {
+                out.push(format!("compacted {}: {}", s.id, c.text()));
             }
         }
         out.extend(self.card_lines());

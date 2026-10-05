@@ -7531,7 +7531,12 @@ fn draw_follow_card(
             && (asks || matches!(verb, "edit" | "write") && editor.session.review.is_some())
     };
     let mut sub: Option<Vec<Span>> = None;
+    let compacting = crate::compaction::under_way(&editor.session) && !replaying;
     let mut head: Vec<Span> = match gaze {
+        _ if compacting => vec![
+            Span { text: wave(), style: accent },
+            Span { text: " compacting".into(), style: Style { bold: true, ..dim } },
+        ],
         Some(g) if waiting(g.look.verb) => vec![
             Span { text: "● ".into(), style: accent },
             Span { text: "waiting for your answer".into(), style: Style { bold: true, ..dim } },
@@ -8830,12 +8835,18 @@ fn draw_chat(
                     lines.push(vec![sp(format!("{:>w$}", m.text), faint)]);
                 } else {
                     // As many rows as it takes (how to install claude is a few lines — #163), each line of it
-                    // wrapped, hanging under its text
+                    // wrapped, hanging under its text. A compaction is a beat of its own mid-answer, not the
+                    // end of what came before: air above it, and the `≈` the session list marks it with
+                    let compacted = crate::compaction::is_note(&m.text);
+                    if compacted {
+                        lines.push(Vec::new());
+                    }
+                    let mark = if compacted { "≈ " } else { "· " };
                     let mut first = true;
                     for part in m.text.split('\n') {
                         let para = [md::Line::Text { spans: vec![sp(part.to_string(), dim)], indent: 0 }];
                         for l in md::wrap(&para, w.saturating_sub(2).max(1), faint) {
-                            let mut row = vec![sp(if first { "· " } else { "  " }.into(), dim)];
+                            let mut row = vec![sp(if first { mark } else { "  " }.into(), dim)];
                             row.extend(l);
                             lines.push(row);
                             first = false;
@@ -8846,7 +8857,11 @@ fn draw_chat(
         }
     }
     let thought_live = c.msgs.last().is_some_and(|m| m.role == Role::Thought);
-    if c.state == State::Thinking && !exploring && !thought_live {
+    // (compacting can take a minute — said for what it is, whatever was going on before it)
+    if crate::compaction::under_way(&editor.session) {
+        lines.push(Vec::new());
+        lines.push(vec![sp(wave(), accent), sp(" compacting…".into(), dim)]);
+    } else if c.state == State::Thinking && !exploring && !thought_live {
         lines.push(Vec::new());
         lines.push(vec![sp(wave(), accent), sp(" thinking…".into(), dim)]);
     }
@@ -8959,7 +8974,9 @@ fn draw_chat(
             sp(
                 format!(
                     " {} {:>4.1}s",
-                    if exploring {
+                    if crate::compaction::under_way(&editor.session) {
+                        "compacting"
+                    } else if exploring {
                         "exploring"
                     } else if s == State::Thinking {
                         "thinking"
@@ -9248,6 +9265,10 @@ fn usage_spans(
     };
     let split = |long: bool| -> Vec<Span> {
         let Some(t) = turn.filter(|t| t.counts.any()) else { return Vec::new() };
+        // (`/compact`'s turn reports no tokens: said for what it is, not as `read 0 write 0 …`)
+        if t.only_compacted() {
+            return vec![sp("compacted".into(), dim)];
+        }
         let n = &t.counts;
         let parts =
             [("read", "r", n.read), ("write", "w", n.write), ("in", "i", n.input), ("out", "o", n.output)];

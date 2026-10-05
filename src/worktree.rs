@@ -857,6 +857,8 @@ pub struct Shown {
     pub rebasing: Option<String>,
     /// Its files that came again from disk while it was behind (`Session.reloaded`, #6).
     pub reloaded: usize,
+    /// Its Claude compacted its conversation while it was behind (`Compacted.unseen`).
+    pub compacted: bool,
     /// Its Claude's cache (`warm until 14:32` · `cold` · `cache not reported`) and what its turns cost so far
     /// (`usage.rs`) — None: nothing reported.
     pub claude: Option<(String, String)>,
@@ -884,13 +886,14 @@ impl Shown {
 
 /// The list's rows: the name, a glyph for what its Claude does (`●` working, `▲` waiting for you, `◦` a
 /// tool call unanswered too long — `stuck? symbols 42s`; a turn ended behind says `done` in words), and the
-/// rest in columns — branch, `↑ahead ↓behind`, what's changed, files reloaded behind (`• 2 reloaded`), what
-/// it's doing, its Claude's cache and cost so far, CPU and memory — each column as wide as its widest and
-/// empty ones left out, so the hints (right-aligned) line up row under row.
+/// rest in columns — branch, `↑ahead ↓behind`, what's changed, files reloaded behind (`• 2 reloaded`), its
+/// Claude compacted behind (`≈ compacted`), what it's doing, its Claude's cache and cost so far, CPU and
+/// memory — each column as wide as its widest and empty ones left out, so the hints (right-aligned) line up
+/// row under row.
 pub fn items(sessions: &[Shown]) -> Vec<crate::picker::Item> {
     use crate::session::Doing;
     use unicode_width::UnicodeWidthStr as _;
-    let cols: Vec<[String; 8]> = sessions
+    let cols: Vec<[String; 9]> = sessions
         .iter()
         .map(|l| {
             let branch = l.branch.clone().filter(|b| *b != l.name).unwrap_or_default();
@@ -919,13 +922,14 @@ pub fn items(sessions: &[Shown]) -> Vec<crate::picker::Item> {
                 .unwrap_or_default();
             let reloaded =
                 if l.reloaded > 0 { format!("• {} reloaded", l.reloaded) } else { String::new() };
+            let compacted = if l.compacted { "≈ compacted".to_string() } else { String::new() };
             let (cache, cost) = l.claude.clone().unwrap_or_default();
-            [branch, moved.join(" "), changed, reloaded, doing, cache, cost, usage]
+            [branch, moved.join(" "), changed, reloaded, compacted, doing, cache, cost, usage]
         })
         .collect();
-    let widths: Vec<usize> = (0..8).map(|c| cols.iter().map(|r| r[c].width()).max().unwrap_or(0)).collect();
+    let widths: Vec<usize> = (0..9).map(|c| cols.iter().map(|r| r[c].width()).max().unwrap_or(0)).collect();
     // (counts right-aligned, words left)
-    let right = [false, true, true, true, false, false, true, true];
+    let right = [false, true, true, true, false, false, false, true, true];
     sessions
         .iter()
         .zip(cols)
@@ -1477,6 +1481,7 @@ impl Editor {
                 usage: crate::procs::summed(&self.procs.rows, &self.session_pids(l)),
                 rebasing: l.rebase.as_ref().map(crate::rebase::Rebase::said),
                 reloaded: l.reloaded,
+                compacted: l.compacted.unseen,
                 claude: Shown::claude_of(&l.usage, now_ms),
             })
             .collect();
@@ -3345,6 +3350,7 @@ mod tests {
             usage,
             rebasing: None,
             reloaded: 0,
+            compacted: false,
             claude: None,
         };
         let f = |ahead, behind, changed| Some(Facts { ahead, behind, changed });

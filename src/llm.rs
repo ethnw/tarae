@@ -342,6 +342,8 @@ pub enum StreamEv {
     Usage(crate::usage::Seen),
     /// The turn's result as far as usage goes — sent before its `Done`.
     Spent(crate::usage::Spent),
+    /// claude compacting the conversation: begun, over, the compaction itself (`compaction.rs`).
+    Compaction(crate::compaction::Ev),
     /// End of a turn — final text or error (not logged in·stopped etc.).
     Done(Result<String, String>),
     /// The process exited (for the chat panel — last stderr line).
@@ -432,8 +434,8 @@ pub fn pump(
                             }
                         }
                     }
-                    // Answered on the main loop (text streamed before it goes first)
-                    Some(c @ StreamEv::Control { .. }) => {
+                    // Answered on the main loop · said where it happened (text streamed before it goes first)
+                    Some(c @ (StreamEv::Control { .. } | StreamEv::Compaction(_))) => {
                         if !flush(&mut pending, pending_thought) || !send(c) {
                             break;
                         }
@@ -624,6 +626,10 @@ fn parse_line(ev: &serde_json::Value) -> Option<StreamEv> {
             }
         }
         "system" if ev["subtype"] == "thinking_tokens" => Some(StreamEv::Thinking),
+        // (`status: "requesting"` is usage's — `usage_line`)
+        "system" if ev["subtype"] == "compact_boundary" || ev["subtype"] == "status" => {
+            crate::compaction::Ev::of(ev, crate::usage::now_ms()).map(StreamEv::Compaction)
+        }
         "system" if ev["subtype"] == "init" => Some(StreamEv::Conversation {
             id: ev["session_id"].as_str()?.to_string(),
             model: ev["model"].as_str().unwrap_or_default().to_string(),
@@ -1030,6 +1036,7 @@ fn start(
             | StreamEv::Tool { .. }
             | StreamEv::ToolResult { .. }
             | StreamEv::Control { .. }
+            | StreamEv::Compaction(_)
             | StreamEv::Exit(_) => {
                 return None;
             }

@@ -229,17 +229,19 @@ pub fn turn(ed: &mut Editor, what: &str, calls: usize, took: Option<std::time::D
                        "said": said }));
 }
 
-/// Session `ed.session`'s usage changed — a turn's result came (`turn`), or its cache went cold (`cold`) —
-/// for watchers. Its own kind, said where it happens rather than diffed frame to frame: the seconds left
-/// change every frame, and a watcher of what sessions are doing needn't hear what they cost.
+/// Session `ed.session`'s usage changed — a turn's result came (`turn`), its cache went cold (`cold`), or
+/// its Claude compacted the conversation (`compacted`: the context dropped) — for watchers. Its own kind,
+/// said where it happens rather than diffed frame to frame: the seconds left change every frame, and a
+/// watcher of what sessions are doing needn't hear what they cost.
 pub fn usage(ed: &mut Editor, what: &str) {
     if !ed.ui_watch.watching() {
         return;
     }
     let Some(u) = super::UsageState::of(&ed.session.usage, crate::usage::now_ms()) else { return };
     let (id, name) = (super::session_id(ed.session.id), ed.session.label().to_string());
-    let said = match what {
-        "cold" => format!("{id} {name}: Claude's cache went cold"),
+    let said = match (what, &ed.session.compacted.last) {
+        ("cold", _) => format!("{id} {name}: Claude's cache went cold"),
+        ("compacted", Some(k)) => format!("{id} {name}: Claude compacted its conversation ({})", k.how()),
         _ => format!("{id} {name}: {}", u.text()),
     };
     let mut ev = u.json();

@@ -14,6 +14,7 @@ mod cmdline;
 mod codereview;
 mod commands;
 mod comment;
+mod compaction;
 mod completion;
 mod config;
 mod conflict;

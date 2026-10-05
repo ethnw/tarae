@@ -926,6 +926,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             crate::usage::view_sync(ed);
         }
         StreamEv::Answered(model) => c.model = model,
+        StreamEv::Compaction(e) => crate::compaction::on_event(ed, e),
         StreamEv::ToolResult { id, text, error } => {
             c.calls.retain(|k| k.id != id);
             // What it did on disk (an edit, a write, a command): the git tab reads the status again (#29 — it
@@ -1112,7 +1113,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
 /// The front session's chat stays out of sight once its turn is over: the last frame drew none, and not only
 /// because follow mode minimized it while Claude worked (that comes back with the answer) — something else
 /// fills the screen (`C-w z`), or a review is read wide (`space v z`).
-fn out_of_sight(ed: &Editor) -> bool {
+pub(crate) fn out_of_sight(ed: &Editor) -> bool {
     let zoomed = ed.zoomed().is_some_and(|z| z != crate::sizes::Zoom::Chat);
     ed.last_frame.is_some() && ed.screen.chat_x.is_none() && (zoomed || ed.review_wide())
 }

@@ -144,6 +144,9 @@ pub struct Session {
     pub reloaded: usize,
     /// What its Claude's turns cost and how warm its cache is (`usage.rs`).
     pub usage: crate::usage::Usage,
+    /// Its Claude's conversation compacted since tarae started — how often, the last one, and whether one
+    /// came behind and it hasn't been in front since (`compaction.rs`).
+    pub compacted: crate::compaction::Compacted,
 }
 
 /// How long a tool call may wait before its session is marked possibly stuck (a `diagnostics` call's own
@@ -241,6 +244,7 @@ impl Session {
             viewed: Default::default(),
             reloaded: 0,
             usage: Default::default(),
+            compacted: Default::default(),
         }
     }
 
@@ -778,8 +782,10 @@ impl Editor {
         self.offers.append(&mut self.session.parked);
         self.session.waiting_told = false;
         self.session.turn_end = None;
-        // (what came from disk meanwhile is in sight now — its `•` goes)
+        // (what came from disk meanwhile is in sight now — its `•` goes; so does a compaction's mark: its note
+        // is in the chat)
         self.session.reloaded = 0;
+        self.session.compacted.unseen = false;
         crate::edits::next(self);
         crate::follow::session_in(self);
         // (which one is in front is kept too — `:restart` and the next start come back to it)
@@ -1506,6 +1512,7 @@ mod tests {
             usage: None,
             rebasing: None,
             reloaded: 0,
+            compacted: false,
             claude: None,
         };
         let row = &crate::worktree::items(&[shown(doing)])[0];
