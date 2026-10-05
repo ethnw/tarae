@@ -14,7 +14,9 @@
 //! - `[grammar.<name>]`: `git`, `rev`, `subpath` — the upstream C, at the commit its queries were written
 //!   for; `core`, `dev`, `bundle`: built into which binaries (`build.rs`, the built-in packs only);
 //!   `everywhere = true`: installed with every grammar.
-//! - `[server.<name>]`: `command` (the name unless set), `args`.
+//! - `[server.<name>]`: `command` (the name unless set), `args`; what it speaks beyond the protocol
+//!   (`lsp::ServerTraits`): `share = { toolchain, checks, reload-progress }` (one for a repository's checkouts —
+//!   `share.rs`), `quiescent = { method, capability, field, health, message }`, `symbol-params`, `hide-lines`.
 //! - `config-files = { toml = [...], json = [...] }`: files checked for parse errors before a save (`disk.rs`;
 //!   a name with a `/` is the path's last parts); `outputs`: tools' output folders that walks skip.
 //!
@@ -28,7 +30,7 @@ use std::sync::OnceLock;
 
 use toml::{Table, Value};
 
-use crate::lsp::ServerSpec;
+use crate::lsp::{Quiescent, ServerSpec, ServerTraits, Share};
 use crate::packs::{Reach, known, reach, string, strings};
 
 #[derive(Debug, Clone)]
@@ -80,6 +82,8 @@ pub struct Languages {
     /// Grammars installed with every grammar (`comment`: TODO, NOTE in comments).
     pub everywhere: Vec<String>,
     pub servers: Vec<ServerSpec>,
+    /// Each server's traits, by its name (`lsp::traits`).
+    pub traits: std::collections::HashMap<String, ServerTraits>,
     /// Every language's `roots` — a language with none of its own takes these.
     pub roots_any: Vec<String>,
     pub config_toml: Vec<String>,
@@ -215,7 +219,10 @@ pub(crate) fn build(builtin: &[(String, Result<Table, String>)], yours: &[(Strin
     }
     for e in &servers {
         match server_of(e) {
-            Ok(s) => out.servers.push(s),
+            Ok((s, traits)) => {
+                out.traits.insert(s.name.clone(), traits);
+                out.servers.push(s);
+            }
             Err(err) => said.push(format!("the {} pack: [server.{}]: {err}", e.pack, e.name)),
         }
     }
@@ -394,16 +401,64 @@ fn grammar_of(e: &Entry) -> Result<(crate::grammar::Source, bool), String> {
     Ok((source, flag("everywhere")))
 }
 
-fn server_of(e: &Entry) -> Result<ServerSpec, String> {
+/// Every key a `[server.<name>]` may have.
+pub(crate) const SERVER_KEYS: &[&str] =
+    &["command", "args", "leave-out", "share", "quiescent", "symbol-params", "hide-lines"];
+
+fn server_of(e: &Entry) -> Result<(ServerSpec, ServerTraits), String> {
     let t = &e.t;
     // (`leave-out`: read where the server starts — `packs::leave_out`)
-    known(t, &["command", "args", "leave-out"], "it")?;
-    Ok(ServerSpec {
+    known(t, SERVER_KEYS, "it")?;
+    let spec = ServerSpec {
         name: e.name.clone(),
         command: string(t, "command")?.unwrap_or_else(|| e.name.clone()),
         args: strings(t.get("args"), "args")?.unwrap_or_default(),
         except: Vec::new(),
-    })
+    };
+    Ok((spec, traits_of(t)?))
+}
+
+/// A `[server.<name>]`'s traits: `share`, `quiescent`, `symbol-params`, `hide-lines` (`lsp::ServerTraits`).
+fn traits_of(t: &Table) -> Result<ServerTraits, String> {
+    let table = |k: &str, keys: &[&str]| -> Result<Option<&Table>, String> {
+        let Some(v) = t.get(k) else { return Ok(None) };
+        let v = v.as_table().ok_or(format!("`{k}` isn't a table"))?;
+        known(v, keys, &format!("`{k}`"))?;
+        Ok(Some(v))
+    };
+    let share = match table("share", &["toolchain", "checks", "reload-progress"])? {
+        None => None,
+        Some(s) => Some(Share {
+            toolchain: strings(s.get("toolchain"), "share.toolchain")?.unwrap_or_default(),
+            checks: string(s, "checks")?,
+            reload_progress: string(s, "reload-progress")?,
+        }),
+    };
+    let quiescent = match table("quiescent", &["method", "capability", "field", "health", "message"])? {
+        None => None,
+        Some(q) => {
+            let need = |k: &str| string(q, k)?.ok_or(format!("`quiescent` has no `{k}`"));
+            Some(Quiescent {
+                method: need("method")?,
+                capability: string(q, "capability")?,
+                field: need("field")?,
+                health: string(q, "health")?,
+                message: string(q, "message")?,
+            })
+        }
+    };
+    // (the server's own words: any keys)
+    let symbol_params = match t.get("symbol-params") {
+        None => serde_json::Value::Null,
+        Some(v) if v.is_table() => serde_json::to_value(v).map_err(|e| format!("`symbol-params`: {e}"))?,
+        Some(_) => return Err("`symbol-params` isn't a table".into()),
+    };
+    let hide_lines = strings(t.get("hide-lines"), "hide-lines")?
+        .unwrap_or_default()
+        .iter()
+        .map(|r| regex::Regex::new(r).map_err(|e| format!("`hide-lines`: {e}")))
+        .collect::<Result<_, _>>()?;
+    Ok(ServerTraits { share, quiescent, symbol_params, hide_lines })
 }
 
 #[cfg(test)]
@@ -474,6 +529,46 @@ mod tests {
         let mut any = any;
         any.sort();
         writeln!(s, "\n[any language]\n  roots: {}", any.join(" ")).unwrap();
+
+        // What servers speak beyond the protocol (`lsp::ServerTraits`) — those that speak something
+        writeln!(s, "\n[servers]").unwrap();
+        let table = super::get();
+        let mut names: Vec<&String> = table.traits.keys().collect();
+        names.sort();
+        for n in names {
+            let t = &table.traits[n];
+            let mut said = Vec::new();
+            if let Some(sh) = &t.share {
+                let opt = |k: &str, v: &Option<String>| {
+                    v.as_ref().map(|v| format!(" · {k} {v}")).unwrap_or_default()
+                };
+                said.push(format!(
+                    "share: toolchain {}{}{}",
+                    sh.toolchain.join(" "),
+                    opt("checks", &sh.checks),
+                    opt("reload-progress", &sh.reload_progress)
+                ));
+            }
+            if let Some(q) = &t.quiescent {
+                let fields = [Some(&q.field), q.health.as_ref(), q.message.as_ref()];
+                let fields: Vec<&str> = fields.into_iter().flatten().map(String::as_str).collect();
+                let cap = q.capability.as_ref().map(|c| format!(" (asked: {c})")).unwrap_or_default();
+                said.push(format!("quiescent: {}{cap} · {}", q.method, fields.join(" ")));
+            }
+            if !t.symbol_params.is_null() {
+                said.push(format!("symbol-params: {}", t.symbol_params));
+            }
+            if !t.hide_lines.is_empty() {
+                let lines: Vec<&str> = t.hide_lines.iter().map(regex::Regex::as_str).collect();
+                said.push(format!("hide-lines: {}", lines.join("  ")));
+            }
+            if !said.is_empty() {
+                writeln!(s, "  {n}").unwrap();
+                for l in said {
+                    writeln!(s, "    {l}").unwrap();
+                }
+            }
+        }
 
         writeln!(s, "\n[grammars]").unwrap();
         let mut grammars = crate::grammar::sources();
@@ -720,12 +815,48 @@ mod tests {
         assert_eq!(lang(&t, "a.c"), Some("c"));
         let ra = t.servers.iter().find(|s| s.name == "rust-analyzer").unwrap();
         assert_eq!(ra.command, "/opt/ra/rust-analyzer");
+        assert!(t.traits["rust-analyzer"].share.is_some(), "the keys it didn't set stay");
         let said = t.said.join("\n");
         assert!(said.contains("the broken pack (yours)"), "{said}");
         assert!(said.contains("the typo pack (yours) has no `languag`"), "{said}");
         assert!(said.contains("[language.y]: it has no `extension`"), "{said}");
         assert_eq!(lang(&t, "a.rs"), Some("rust"), "the built-in packs stay");
         assert_eq!(t.langs.len(), get().langs.len() + 1);
+    }
+
+    /// A server's traits from a runtime folder's pack: one key in place of the built-in one (a table whole —
+    /// `share` here), the others kept; a server of one's own gets its own; what can't be read is said and that
+    /// server is left out.
+    #[test]
+    fn a_runtime_pack_says_what_a_server_speaks() {
+        let t = yours(&[
+            ("rust", "[server.rust-analyzer]\nshare = { toolchain = [\"mine.toml\"] }\n"),
+            (
+                "mine",
+                "[server.myls]\nquiescent = { method = \"my/ready\", field = \"done\" }\n\
+                 symbol-params = { all = true }\nhide-lines = ['^note:']\n",
+            ),
+            ("typo", "[server.a]\nshare = { toolchian = [] }\n"),
+            ("noway", "[server.b]\nquiescent = { field = \"x\" }\n"),
+            ("badre", "[server.c]\nhide-lines = ['(']\n"),
+        ]);
+        let ra = &t.traits["rust-analyzer"];
+        let share = ra.share.as_ref().unwrap();
+        assert_eq!(share.toolchain, ["mine.toml"]);
+        assert_eq!(share.checks, None, "`share` is one key: replaced whole");
+        assert!(ra.quiescent.is_some() && !ra.hide_lines.is_empty(), "its other keys stay");
+        let my = &t.traits["myls"];
+        let q = my.quiescent.as_ref().unwrap();
+        assert_eq!((q.method.as_str(), q.field.as_str(), q.capability.as_ref()), ("my/ready", "done", None));
+        assert_eq!(my.symbol_params, serde_json::json!({ "all": true }));
+        assert_eq!(my.shown_message("unused\nnote: from here"), "unused");
+        let said = t.said.join("\n");
+        assert!(said.contains("[server.a]: `share` has no `toolchian`"), "{said}");
+        assert!(said.contains("[server.b]: `quiescent` has no `method`"), "{said}");
+        assert!(said.contains("[server.c]: `hide-lines`"), "{said}");
+        for gone in ["a", "b", "c"] {
+            assert!(!t.traits.contains_key(gone) && !t.servers.iter().any(|s| s.name == gone), "{gone}");
+        }
     }
 
     /// What widens what Claude's runs may do comes from tarae's own packs only; what narrows can be added

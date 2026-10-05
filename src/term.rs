@@ -3102,8 +3102,7 @@ fn draw_text(
                 continue;
             };
             let msg = d.message.lines().next().unwrap_or_default();
-            let whole =
-                d.message.lines().filter(|l| !l.trim().is_empty() && !lint_origin(l)).nth(1).is_none();
+            let whole = d.message.lines().filter(|l| !l.trim().is_empty()).nth(1).is_none();
             *slot = match *slot {
                 None => Some((d.severity, msg, 0, whole)),
                 Some((s, _, n, _)) if d.severity < s => Some((d.severity, msg, n + 1, whole)),
@@ -10270,8 +10269,8 @@ fn diagnostic_lines(
             1 | 3 => "●",
             _ => "·",
         };
-        let mut lines =
-            d.message.lines().map(str::trim_end).filter(|l| !l.trim().is_empty() && !lint_origin(l));
+        // (lines its server's pack hides are gone already — `ServerTraits::shown_message`)
+        let mut lines = d.message.lines().map(str::trim_end).filter(|l| !l.trim().is_empty());
         let color = Style { fg: ui.sign[d.severity.min(4) as usize].fg, ..Style::default() };
         let mut spans = vec![Span { text: format!("{glyph} "), style: color }];
         // Errors/warnings lead in bold; info/hints (often "expected due to this") step back
@@ -10324,13 +10323,6 @@ fn message_spans(text: &str, base: Style, lang: Option<&str>, editor: &Editor) -
         out.push(Span { text: rest.to_string(), style: base });
     }
     out
-}
-
-/// rustc's "`#[warn(unused_variables)]` (part of …) on by default" — says where a lint comes from, not
-/// what's wrong. Left out of the card.
-fn lint_origin(line: &str) -> bool {
-    let l = line.trim();
-    l.starts_with("`#[") && l.ends_with("on by default")
 }
 
 /// `rustc E0308` — who reported it and its code, if the server says.

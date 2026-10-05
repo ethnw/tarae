@@ -37,6 +37,78 @@ pub struct ServerSpec {
     pub except: Vec<String>,
 }
 
+/// What a pack says of a server beyond how it starts (`[server.<name>]`, read once with the language table): the
+/// extensions of the protocol it speaks, and what tarae does with them. A server no pack knows has none.
+#[derive(Debug, Default)]
+pub struct ServerTraits {
+    /// `share`: one of it serves every checkout of a repository, unless `editor.lsp-share` says otherwise.
+    pub share: Option<Share>,
+    /// `quiescent`: it says when it has nothing left to load (a swap switches then — `share.rs`).
+    pub quiescent: Option<Quiescent>,
+    /// `symbol-params`: added to `workspace/symbol`'s params (an object; Null: none).
+    pub symbol_params: Value,
+    /// `hide-lines`: lines of a diagnostic's message that say nothing about what's wrong — left out of it.
+    pub hide_lines: Vec<regex::Regex>,
+}
+
+/// A pack's `share = { … }`: what sharing one server between checkouts needs to know of it.
+#[derive(Debug, Default)]
+pub struct Share {
+    /// Files whose words pick its toolchain, the nearest up: checkouts on different ones get a server each.
+    pub toolchain: Vec<String>,
+    /// The setting (a dotted path) that turns its checks off — held off while a swap's new server loads.
+    pub checks: Option<String>,
+    /// The `$/progress` title that means it's loading its workspaces again (a toolchain may have changed).
+    pub reload_progress: Option<String>,
+}
+
+/// A pack's `quiescent = { … }`: the notification that says it's done loading.
+#[derive(Debug)]
+pub struct Quiescent {
+    pub method: String,
+    /// The client capability (a dotted path, set to true) that asks for it.
+    pub capability: Option<String>,
+    /// Where in its params: whether it's quiescent · its health (`ok` unless said) · what's wrong.
+    pub field: String,
+    pub health: Option<String>,
+    pub message: Option<String>,
+}
+
+/// The traits of a server no pack knows.
+pub static NO_TRAITS: ServerTraits =
+    ServerTraits { share: None, quiescent: None, symbol_params: Value::Null, hide_lines: Vec::new() };
+
+/// The names `spec` goes by in the packs: its own, then the built-in servers whose command it runs (`[lsp.py]
+/// command = "pyright-langserver"` is pyright).
+fn pack_names(spec: &ServerSpec) -> Vec<String> {
+    let mut names = vec![spec.name.clone()];
+    let program = Path::new(&spec.command).file_name().map(|n| n.to_string_lossy().into_owned());
+    let builtin = crate::languages::get().servers.iter();
+    names.extend(builtin.filter(|s| program.as_deref() == Some(s.command.as_str())).map(|s| s.name.clone()));
+    names
+}
+
+/// `spec`'s traits, by the names it goes by in the packs.
+pub fn traits(spec: &ServerSpec) -> &'static ServerTraits {
+    let all = &crate::languages::get().traits;
+    pack_names(spec).iter().find_map(|n| all.get(n)).unwrap_or(&NO_TRAITS)
+}
+
+impl ServerTraits {
+    /// A diagnostic's `message` without the lines `hide-lines` leaves out — whole when every line would go.
+    pub fn shown_message(&self, message: &str) -> String {
+        let hidden = |l: &str| self.hide_lines.iter().any(|r| r.is_match(l.trim()));
+        if self.hide_lines.is_empty() || !message.lines().any(hidden) {
+            return message.to_string();
+        }
+        let kept: Vec<&str> = message.lines().filter(|l| !hidden(l)).collect();
+        match kept.iter().all(|l| l.trim().is_empty()) {
+            true => message.to_string(),
+            false => kept.join("\n"),
+        }
+    }
+}
+
 /// What `[lsp.<name>] except` can turn off.
 pub const FEATURES: &[&str] = &[
     "diagnostics",
@@ -152,8 +224,31 @@ pub struct LspConfig {
     pub languages: HashMap<String, Vec<String>>,
     /// `[lang.<lang>] also` — servers that start beside it.
     pub also: HashMap<String, Vec<String>>,
-    /// `editor.lsp-share` — servers one of which serves every checkout of a repository (`share.rs`).
-    pub share: Vec<String>,
+    /// `editor.lsp-share` — servers one of which serves every checkout of a repository (`share.rs`). None: the
+    /// ones whose pack says `share`.
+    pub share: Option<Vec<String>>,
+}
+
+impl LspConfig {
+    /// Whether one server `name` (with `traits`) serves every checkout of a repository.
+    pub fn shares(&self, name: &str, traits: &ServerTraits) -> bool {
+        match &self.share {
+            Some(list) => list.iter().any(|s| s == name),
+            None => traits.share.is_some(),
+        }
+    }
+}
+
+/// The servers whose pack says `share` — `editor.lsp-share` when it isn't set.
+pub fn shared_by_packs() -> Vec<String> {
+    let mut names: Vec<String> = crate::languages::get()
+        .traits
+        .iter()
+        .filter(|(_, t)| t.share.is_some())
+        .map(|(n, _)| n.clone())
+        .collect();
+    names.sort();
+    names
 }
 
 /// Markers that make a project root for this language (its pack's `roots`) — other languages' don't count
@@ -278,10 +373,7 @@ pub type MakeOptions = Box<dyn FnOnce() -> Options + Send>;
 /// "pyright-langserver"` is pyright). Several folders (a shared server): the first one's are relative to it,
 /// as the server reads them, the others' whole paths.
 pub fn options_for(spec: &ServerSpec, roots: &[PathBuf], given: Value) -> MakeOptions {
-    let mut names = vec![spec.name.clone()];
-    let program = Path::new(&spec.command).file_name().map(|n| n.to_string_lossy().into_owned());
-    let builtin = crate::languages::get().servers.iter();
-    names.extend(builtin.filter(|s| program.as_deref() == Some(s.command.as_str())).map(|s| s.name.clone()));
+    let names = pack_names(spec);
     let (roots, name) = (roots.to_vec(), spec.name.clone());
     Box::new(move || {
         let mut o = Options { init: given, config: Value::Null };
@@ -470,16 +562,18 @@ pub struct Client {
     pub name: String,
     /// What it was started as (a swap starts its next one the same way — `share.rs`).
     pub spec: ServerSpec,
+    /// What its pack says it speaks beyond the protocol.
+    pub traits: &'static ServerTraits,
     /// Its first workspace folder (its working folder).
     pub root: PathBuf,
     /// Every workspace folder it serves, `root` first — several when checkouts of a repository share it.
     pub roots: Vec<PathBuf>,
     /// The repository and toolchain it's shared by (None: one folder's own server).
     pub share: Option<crate::share::Key>,
-    /// `checkOnSave` held off — a swap's new server until it takes over, a restarted one until it's loaded
-    /// (`share.rs`; measured: that skips a check of every folder at its start).
+    /// Its checks (its pack's `share.checks`) held off — a swap's new server until it takes over, a restarted
+    /// one until it's loaded (`share.rs`; measured: that skips a check of every folder at its start).
     pub checks_off: bool,
-    /// rust-analyzer's `experimental/serverStatus`: quiescent now (None until it says) · whether it ever was
+    /// What its pack's `quiescent` notification said: quiescent now (None until it says) · whether it ever was
     /// (a server still loading is restarted, not swapped) · its health.
     pub quiescent: Option<bool>,
     pub settled_once: bool,
@@ -630,6 +724,7 @@ impl Client {
             id,
             name: spec.name.clone(),
             spec: spec.clone(),
+            traits: traits(spec),
             root: root.to_path_buf(),
             roots: roots.to_vec(),
             share: None,
@@ -723,8 +818,10 @@ impl Client {
                 },
             },
         });
-        // rust-analyzer says when it's quiescent (a swap switches then — `share.rs`)
-        init["params"]["capabilities"]["experimental"] = json!({ "serverStatusNotification": true });
+        // One that says when it's quiescent, asked to (a swap switches then — `share.rs`)
+        if let Some(cap) = client.traits.quiescent.as_ref().and_then(|q| q.capability.as_deref()) {
+            put(&mut init["params"]["capabilities"], cap, json!(true));
+        }
         // The options are made on the writer thread: some need the disk (`nested_checkouts` walks the project).
         // Its settings are in place before `initialize` goes, so before the server can ask for them.
         let config = std::sync::Arc::clone(&client.config);

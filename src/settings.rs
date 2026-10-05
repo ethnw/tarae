@@ -307,11 +307,16 @@ pub static SETTINGS: &[Setting] = &[
     Setting {
         path: "editor.lsp-share",
         kind: Kind::StrList,
-        doc: "Language servers one of which serves every checkout of a repository (a session each) on the same toolchain — swapped as checkouts come and go",
-        get: |c| Value::Array(c.lsp.share.iter().map(|a| Value::from(a.as_str())).collect()),
+        doc: "Language servers one of which serves every checkout of a repository (a session each) on the same toolchain — swapped as checkouts come and go; unset: those whose pack says `share`",
+        // (unset: the servers whose pack says `share`)
+        get: |c| {
+            let list = c.lsp.share.clone().unwrap_or_else(crate::lsp::shared_by_packs);
+            Value::Array(list.into_iter().map(Value::from).collect())
+        },
         set: |c, v| {
-            c.lsp.share =
-                v.as_array().into_iter().flatten().filter_map(|a| a.as_str().map(str::to_string)).collect()
+            c.lsp.share = Some(
+                v.as_array().into_iter().flatten().filter_map(|a| a.as_str().map(str::to_string)).collect(),
+            )
         },
     },
     Setting {

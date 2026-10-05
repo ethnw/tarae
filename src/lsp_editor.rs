@@ -516,7 +516,7 @@ impl Editor {
                 Some(server) => {
                     self.lsp.server_for.insert(spec.name.clone(), server.name.clone());
                     // (one for a repository's checkouts: `share.rs` — None while it's being arranged)
-                    let cid = match self.config.lsp.share.contains(&server.name) {
+                    let cid = match self.config.lsp.shares(&server.name, lsp::traits(&server)) {
                         true => self.share_attach(&server, &spec.name, &path, id),
                         false => self.lsp_spawn(&server, &spec.name, &path),
                     };
@@ -592,8 +592,8 @@ impl Editor {
         self.lsp_start(server, &[root], false)
     }
 
-    /// A new `server` for the workspace folders `roots` (`checks_off`: rust-analyzer's `checkOnSave` held
-    /// off until it's turned on) — None if it couldn't start, or keeps exiting.
+    /// A new `server` for the workspace folders `roots` (`checks_off`: its checks — its pack's `share.checks` —
+    /// held off until they're turned on) — None if it couldn't start, or keeps exiting.
     pub(crate) fn lsp_start(
         &mut self,
         server: &lsp::ServerSpec,
@@ -609,8 +609,11 @@ impl Editor {
         let cid = self.lsp.next_id;
         let (server, options) = crate::java::prepare(server, root);
         let mut options = lsp::options_for(&server, roots, options);
-        if checks_off {
-            options = crate::share::checks_held(options);
+        // (a server with no setting for it can't be held)
+        let checks = lsp::traits(&server).share.as_ref().and_then(|s| s.checks.clone());
+        let checks_off = checks_off && checks.is_some();
+        if let Some(key) = checks.filter(|_| checks_off) {
+            options = crate::share::checks_held(options, key);
         }
         match Client::start(cid, &server, roots, options, self.events.shared_sender()) {
             Ok(mut c) => {
@@ -1009,6 +1012,10 @@ impl Editor {
                 }
                 let Some(path) = params["uri"].as_str().and_then(lsp::path_from_uri) else { return };
                 let enc = self.encoding_of(cid);
+                // (less the lines its pack's `hide-lines` leaves out; `raw` keeps them)
+                let traits = self.client(cid).map_or(&lsp::NO_TRAITS, |c| c.traits);
+                let message =
+                    |d: &Value| traits.shown_message(d["message"].as_str().unwrap_or_default().trim());
                 // Doc paths are canonical — only a URI matching no open doc as-is is resolved on disk
                 let open = |p: &std::path::Path| self.docs.iter().position(|d| d.path.as_deref() == Some(p));
                 let mut canonical = None; // (asked of the disk once — a flycheck sends a burst of these)
@@ -1024,14 +1031,7 @@ impl Editor {
                             let at = &d["range"]["start"];
                             let n = |k: &str| at[k].as_u64().unwrap_or(0) as usize;
                             let sev = d["severity"].as_u64().unwrap_or(1).clamp(1, 4) as u8;
-                            (
-                                cid,
-                                sev,
-                                n("line"),
-                                n("character"),
-                                d["message"].as_str().unwrap_or_default().trim().to_string(),
-                                crate::nav::code_of(d),
-                            )
+                            (cid, sev, n("line"), n("character"), message(d), crate::nav::code_of(d))
                         })
                         .collect();
                     // Each server's list replaces only its own
@@ -1060,7 +1060,7 @@ impl Editor {
                             from,
                             to: to.max(from),
                             severity: d["severity"].as_u64().unwrap_or(1).clamp(1, 4) as u8,
-                            message: d["message"].as_str().unwrap_or_default().trim().to_string(),
+                            message: message(d),
                             raw: d.clone(),
                             source: cid,
                         })
@@ -1093,8 +1093,10 @@ impl Editor {
                         let mut p =
                             lsp::Progress { began: Some(std::time::Instant::now()), ..Default::default() };
                         p.update(v);
-                        // (rust-analyzer loading its workspaces again: a folder's toolchain may have changed)
-                        let refetch = c.share.is_some() && p.title == "Fetching";
+                        // (loading its workspaces again, as its pack names it: a folder's toolchain may have
+                        // changed)
+                        let reload = c.traits.share.as_ref().and_then(|s| s.reload_progress.as_deref());
+                        let refetch = c.share.is_some() && reload == Some(p.title.as_str());
                         c.progress.insert(token, p);
                         if refetch {
                             self.share_refetch(cid);
@@ -1104,14 +1106,19 @@ impl Editor {
                     None => {}
                 }
             }
-            // rust-analyzer: quiescent (nothing left to load) or not, and its health
-            "experimental/serverStatus" => {
+            // Its pack's `quiescent`: nothing left to load or not, and its health
+            m if self
+                .client(cid)
+                .and_then(|c| c.traits.quiescent.as_ref())
+                .is_some_and(|q| q.method == m) =>
+            {
                 let Some(c) = self.client_mut(cid) else { return };
-                let quiescent = params["quiescent"].as_bool().unwrap_or(false);
-                let health = params["health"].as_str().unwrap_or("ok").to_string();
+                let Some(q) = c.traits.quiescent.as_ref() else { return };
+                let quiescent = params[&q.field].as_bool().unwrap_or(false);
+                let field = |k: &Option<String>| k.as_ref().and_then(|k| params[k].as_str());
+                let health = field(&q.health).unwrap_or("ok").to_string();
                 if health != c.health && !(c.health.is_empty() && health == "ok") {
-                    let msg =
-                        params["message"].as_str().unwrap_or_default().lines().next().unwrap_or_default();
+                    let msg = field(&q.message).unwrap_or_default().lines().next().unwrap_or_default();
                     crate::log::line(&c.name, "health", format!("{health} {msg}").trim_end());
                 }
                 (c.quiescent, c.health) = (Some(quiescent), health);
@@ -2950,9 +2957,11 @@ impl Editor {
             let Some(doc) = self.docs.iter().find(|d| d.lsp.clients().any(|x| x == cid)).map(|d| d.id) else {
                 continue;
             };
-            // `searchKind`/`searchScope`: rust-analyzer's extension — by default it lists types only;
-            // others ignore them
-            let params = json!({ "query": query, "searchKind": "allSymbols", "searchScope": "workspace" });
+            // (and its pack's `symbol-params`: rust-analyzer lists types only unless asked for all)
+            let mut params = json!({ "query": query });
+            if let (Value::Object(p), Value::Object(more)) = (&mut params, &c.traits.symbol_params) {
+                p.extend(more.clone());
+            }
             if self.lsp_send_for(doc, cid, kind.clone(), "workspace/symbol", params).is_some() {
                 asked.push((cid, name));
             }
@@ -3380,6 +3389,11 @@ mod tests {
 
     /// Fake server = `cat` writing everything it receives to a file. Tests feed responses via on_lsp_message.
     fn setup(name: &str, src: &str) -> (Editor, PathBuf, PathBuf) {
+        setup_as("fake", name, src)
+    }
+
+    /// `setup` with the stand-in named `server` — a name a pack knows gets that pack's traits.
+    fn setup_as(server: &str, name: &str, src: &str) -> (Editor, PathBuf, PathBuf) {
         let dir = std::env::temp_dir().join(format!("tarae-lsp-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("main.rs");
@@ -3388,7 +3402,7 @@ mod tests {
         std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"t\"\n").unwrap();
         let log = dir.join("sent.log");
         let cfg = format!(
-            "[lsp.fake]\ncommand = \"sh\"\nargs = [\"-c\", \"cat > '{}'\"]\n[lang.rust]\nlsp = [\"fake\"]\n",
+            "[lsp.{server}]\ncommand = \"sh\"\nargs = [\"-c\", \"cat > '{}'\"]\n[lang.rust]\nlsp = [\"{server}\"]\n",
             log.display()
         );
         let (config, w) = crate::config::parse(&cfg);
@@ -4946,6 +4960,49 @@ mod tests {
     /// implementations) and answers with each place's signature — lines joined while a bracket is open;
     /// by name it asks `workspace/symbol` (all symbols, not rust-analyzer's types only), exact names
     /// listed, the container's first. Outside the project refused; an unknown kind said.
+    /// What the rust pack says rust-analyzer speaks beyond the protocol reaches a server of that name (a
+    /// stand-in), and none of it one no pack knows: asked to say when it's quiescent, and heard when it does;
+    /// asked by name for every kind of symbol; rustc's "on by default" line left out of a diagnostic's message
+    /// (kept in `raw`; a message of nothing else kept whole).
+    #[test]
+    fn rust_analyzers_extensions_are_its_packs() {
+        for (server, theirs) in [("rust-analyzer", true), ("fake", false)] {
+            let (mut ed, file, log) = setup_as(server, &format!("traits-{server}"), "fn a() {}\n");
+            ed.session.root = file.parent().unwrap().to_path_buf();
+            let out = sent_until(&log, &["initialize"]);
+            assert_eq!(out.contains(r#""serverStatusNotification":true"#), theirs, "{server}: {out}");
+            let cid = up(&mut ed, json!({ "workspaceSymbolProvider": true }));
+            let status = json!({ "jsonrpc": "2.0", "method": "experimental/serverStatus",
+                "params": { "health": "warning", "quiescent": true, "message": "Failed to load workspaces" } });
+            ed.on_lsp_message(cid, status);
+            let c = ed.client(cid).unwrap();
+            assert_eq!(c.quiescent, theirs.then_some(true), "{server}");
+            assert_eq!(c.health, if theirs { "warning" } else { "" }, "{server}");
+
+            crate::nav::definition(&mut ed, crate::tools::Call::test(1), &json!({"symbol": "a"})).unwrap();
+            let out = sent_until(&log, &["workspace/symbol"]);
+            let asked = out.lines().find(|l| l.contains("workspace/symbol")).expect("asked by name");
+            let all = asked.contains(r#""searchKind":"allSymbols""#)
+                && asked.contains(r#""searchScope":"workspace""#);
+            assert_eq!(all, theirs, "{server}: {asked}");
+
+            let lint = "`#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default";
+            let said = format!("unused variable: `x`\n{lint}");
+            let d = |m: &str| json!({ "range": { "start": { "line": 0, "character": 3 }, "end": { "line": 0, "character": 4 } }, "message": m, "severity": 2 });
+            let params = json!({ "uri": lsp::uri(&file), "diagnostics": [d(&said), d(lint)] });
+            ed.on_lsp_message(
+                cid,
+                json!({ "jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": params }),
+            );
+            let diags = &ed.doc().lsp.diagnostics;
+            let of = |m: &str| diags.iter().find(|x| x.raw["message"] == m).expect("received");
+            let want = if theirs { "unused variable: `x`" } else { said.as_str() };
+            assert_eq!(of(&said).message, want, "{server}");
+            assert_eq!(of(lint).message, lint, "{server}: nothing else to say — kept whole");
+            std::fs::remove_dir_all(file.parent().unwrap()).ok();
+        }
+    }
+
     #[test]
     fn the_definition_tool_asks_at_the_place_and_by_name() {
         let (mut ed, file, other, log) = def_fixture("tool-def");
@@ -4992,9 +5049,10 @@ mod tests {
         crate::nav::definition(&mut ed, crate::tools::Call::test(3), &json!({"symbol": "S::a"})).unwrap();
         let asked = sent_until(&log, &["workspace/symbol"]);
         let asked = asked.lines().find(|l| l.contains("workspace/symbol")).expect("asked by name");
+        assert!(asked.contains(r#""query":"a""#), "{asked}");
         assert!(
-            asked.contains(r#""query":"a""#) && asked.contains(r#""searchKind":"allSymbols""#),
-            "{asked}"
+            !asked.contains("searchKind"),
+            "rust-analyzer's extension isn't sent to a server no pack knows"
         );
         let sym = |name: &str, kind: u64, container: &str, at: Value| json!({ "name": name, "kind": kind, "containerName": container, "location": at });
         let found = json!([

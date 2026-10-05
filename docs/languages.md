@@ -70,6 +70,22 @@ rev = "…"                            # the commit the queries were written for
 args = ["lsp"]                       # command = "…" when it isn't the server's name
 ```
 
+What a server speaks beyond the protocol goes in its `[server.<name>]` too ([the rust pack's](../runtime/packs/rust/pack.toml)
+says rust-analyzer's):
+
+```toml
+[server.gleam]
+# One server for every checkout of a repository (sessions' worktrees), unless `editor.lsp-share` lists others:
+# the files whose words pick its toolchain (checkouts on different ones get one each), the setting that turns its
+# checks off while a second one loads, the `$/progress` title that means it's loading its workspaces again
+share = { toolchain = ["gleam.toml"], checks = "checkOnSave", reload-progress = "Fetching" }
+# The notification that says it has nothing left to load (a swap waits for it), the capability that asks for it,
+# and where in its params it says so, its health and what's wrong
+quiescent = { method = "x/status", capability = "experimental.status", field = "quiescent", health = "health", message = "message" }
+symbol-params = { scope = "all" }    # added to `workspace/symbol`'s params
+hide-lines = ['^note: ']             # lines of its diagnostics that say nothing about what's wrong
+```
+
 - **Pinned.** The built-in packs' languages are pinned in
   [`src/snapshots/languages.txt`](../src/snapshots/languages.txt): a change shows there.
 - **No ties.** No two built-in languages claim one extension, file name or pattern. One of yours wins a tie with a

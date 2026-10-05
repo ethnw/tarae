@@ -2,7 +2,8 @@
 //! `target/measure/ra-{measure,share,swap,open}-2026-10-04.md`).
 //!
 //! - Every checkout of the same repository (git's common folder — a session's worktree is one) on the same
-//!   toolchain is a workspace folder of one server (`editor.lsp-share`: rust-analyzer). Four checkouts of
+//!   toolchain is a workspace folder of one server (a pack's `share`, else `editor.lsp-share`: rust-analyzer;
+//!   its toolchain files, checks setting and reload progress are its pack's too). Four checkouts of
 //!   this repository took ≈1.5 GB that way against ≈3.4 GB with a server each, and every session's server
 //!   stays warm.
 //! - Its folders change by a **swap**: a new server B for the new list loads beside the one in use, A. B is
@@ -47,17 +48,24 @@ const GB: u64 = 1 << 30;
 
 // ── What shares ─────────────────────────────────────────────────────────
 
-/// What a server is shared by: the repository (git's common folder, a real path) and the toolchain (the
-/// nearest `rust-toolchain.toml` / `rust-toolchain`'s words, empty for none).
+/// What a server is shared by: the repository (git's common folder, a real path) and the toolchain (the words
+/// of the nearest of its pack's `share.toolchain` files — rust-analyzer's `rust-toolchain.toml` — empty for
+/// none).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Key {
     pub repo: PathBuf,
     pub toolchain: String,
 }
 
-/// `root`'s key. None when it isn't in a git checkout (its own server, as before). Disk: run on a worker.
-pub fn key_of(root: &Path) -> Option<Key> {
-    Some(Key { repo: common_dir(root)?, toolchain: toolchain_of(root) })
+/// `root`'s key for a server whose toolchain is said in the files `toolchain`. None when it isn't in a git
+/// checkout (its own server, as before). Disk: run on a worker.
+pub fn key_of(root: &Path, toolchain: &[String]) -> Option<Key> {
+    Some(Key { repo: common_dir(root)?, toolchain: toolchain_of(root, toolchain) })
+}
+
+/// The files that say server `c`'s toolchain (its pack's `share.toolchain`).
+fn toolchain_files(c: &Client) -> Vec<String> {
+    c.traits.share.as_ref().map(|s| s.toolchain.clone()).unwrap_or_default()
 }
 
 /// Git's common folder for the checkout `root` is in: its `.git` folder, or for a worktree (`.git` a file
@@ -79,10 +87,14 @@ fn common_dir(root: &Path) -> Option<PathBuf> {
     std::fs::canonicalize(common).ok()
 }
 
-/// The toolchain file rustup would read for `root` (the nearest one up), its words — empty if none.
-fn toolchain_of(root: &Path) -> String {
+/// The nearest of the toolchain files `names` up from `root` (the first of them in a folder), its words —
+/// empty if none.
+fn toolchain_of(root: &Path, names: &[String]) -> String {
+    if names.is_empty() {
+        return String::new();
+    }
     for d in root.ancestors() {
-        for name in ["rust-toolchain.toml", "rust-toolchain"] {
+        for name in names {
             if let Ok(t) = std::fs::read_to_string(d.join(name)) {
                 return t.split_whitespace().collect::<Vec<_>>().join(" ");
             }
@@ -103,23 +115,25 @@ pub fn foreign(roots: &[PathBuf], mine: &Path, path: &Path) -> bool {
         && !roots.iter().any(|r| own(r) && path.starts_with(r))
 }
 
-/// The server's options with `checkOnSave` off — a swap's new server, a restarted one: measured, a start
-/// with checks on checks every folder at once.
-pub fn checks_held(inner: MakeOptions) -> MakeOptions {
+/// The server's options with its checks (`checks`, its pack's `share.checks`: rust-analyzer's `checkOnSave`)
+/// off — a swap's new server, a restarted one: measured, a start with checks on checks every folder at once.
+pub fn checks_held(inner: MakeOptions, checks: String) -> MakeOptions {
     Box::new(move || {
         let mut o = inner();
-        lsp::put(&mut o.init, "checkOnSave", json!(false));
+        lsp::put(&mut o.init, &checks, json!(false));
         o
     })
 }
 
 /// A shared server's answer to `workspace/configuration`: the options it started with, its checks as they
 /// are now. rust-analyzer takes the answer as its whole settings, so answering `checkOnSave` alone would
-/// drop the rest (the left-out folders). None for one that isn't shared (answered as before).
+/// drop the rest (the left-out folders). None for one that isn't shared, or whose checks can't be held
+/// (answered as before).
 pub fn settings(c: &Client) -> Option<Value> {
     c.share.as_ref()?;
+    let checks = c.traits.share.as_ref()?.checks.as_deref()?;
     let mut v = c.init_sent.get().cloned().unwrap_or(Value::Null);
-    lsp::put(&mut v, "checkOnSave", json!(!c.checks_off));
+    lsp::put(&mut v, checks, json!(!c.checks_off));
     Some(v)
 }
 
@@ -391,7 +405,8 @@ impl Editor {
                 None
             }
             None => {
-                self.share_read_key(root, id);
+                let toolchain = lsp::traits(server).share.as_ref().map(|s| s.toolchain.clone());
+                self.share_read_key(root, id, toolchain.unwrap_or_default());
                 return None;
             }
         };
@@ -420,14 +435,16 @@ impl Editor {
         }
     }
 
-    /// Folder `root`'s key is read on a worker; document `id` gets its server then.
-    fn share_read_key(&mut self, root: PathBuf, id: DocId) {
+    /// Folder `root`'s key is read on a worker (`toolchain`: the files that say the server's toolchain);
+    /// document `id` gets its server then. (Keys are kept by folder: a second kind of shared server in one
+    /// folder would take the first's — there's one kind today.)
+    fn share_read_key(&mut self, root: PathBuf, id: DocId, toolchain: Vec<String>) {
         self.park(id);
         if !self.lsp.share.reading.insert(root.clone()) {
             return;
         }
         self.events.shared_jobs().spawn(move || {
-            let key = key_of(&root);
+            let key = key_of(&root, &toolchain);
             move |ed: &mut Editor| {
                 ed.lsp.share.reading.remove(&root);
                 ed.lsp.share.keys.insert(root, key);
@@ -457,30 +474,58 @@ impl Editor {
         self.share_wake();
     }
 
-    /// A session was made for checkout `root`: a cargo project of a repository whose shared server is up
-    /// joins it now — the swap runs while the session is set up and its Claude starts, not after its first
-    /// file opens (that waited the whole 11–14 s of a new checkout's load from then). Disk on a worker.
+    /// A session was made for checkout `root`: a project of a repository whose shared server is up joins it
+    /// now — the swap runs while the session is set up and its Claude starts, not after its first file opens
+    /// (that waited the whole 11–14 s of a new checkout's load from then). Disk on a worker.
     pub(crate) fn share_session(&mut self, root: &Path) {
-        let shared = |c: &Client| c.share.is_some() && self.config.lsp.share.contains(&c.name);
-        if !self.config.lsp.enabled || !self.lsp.clients.iter().any(shared) {
+        if !self.config.lsp.enabled {
+            return;
+        }
+        // Each server shared now: what makes its project there (its languages' `needs-project`, else their
+        // `roots` — rust-analyzer's: Cargo.toml, rust-project.json), and the files that say its toolchain
+        let mut servers: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
+        for c in &self.lsp.clients {
+            if c.share.is_none()
+                || !self.config.lsp.shares(&c.name, c.traits)
+                || servers.iter().any(|s| s.0 == c.name)
+            {
+                continue;
+            }
+            let mut marks: Vec<String> = Vec::new();
+            for (lang, _) in self.lsp.server_for.iter().filter(|(_, s)| **s == c.name) {
+                marks.extend(
+                    lsp::project_markers(lang).unwrap_or_else(|| lsp::markers_for(lang)).iter().cloned(),
+                );
+            }
+            servers.push((c.name.clone(), marks, toolchain_files(c)));
+        }
+        if servers.is_empty() {
             return;
         }
         let root = root.to_path_buf();
         self.events.shared_jobs().spawn(move || {
-            // (the folder its files' server would have: the checkout, when the cargo project is at its top)
-            let project = root.join("Cargo.toml").is_file() || root.join("rust-project.json").is_file();
-            let key = if project { key_of(&root) } else { None };
-            move |ed: &mut Editor| ed.share_session_key(root, key)
+            // (the folder its files' server would have: the checkout, when its project is at its top)
+            let keys: Vec<(String, Key)> = servers
+                .into_iter()
+                .filter(|(_, marks, _)| marks.iter().any(|m| root.join(m).is_file()))
+                .filter_map(|(name, _, files)| Some((name, key_of(&root, &files)?)))
+                .collect();
+            move |ed: &mut Editor| {
+                for (name, key) in keys {
+                    ed.share_session_key(root.clone(), &name, key);
+                }
+            }
         });
     }
 
-    fn share_session_key(&mut self, root: PathBuf, key: Option<Key>) {
-        let Some(key) = key else { return };
+    fn share_session_key(&mut self, root: PathBuf, server: &str, key: Key) {
         self.lsp.share.keys.insert(root.clone(), Some(key.clone()));
-        let share = &self.config.lsp.share;
-        let Some(c) = self.lsp.clients.iter().find(|c| {
-            c.share.as_ref() == Some(&key) && share.contains(&c.name) && self.lsp.share.in_use(c.id)
-        }) else {
+        let Some(c) = self
+            .lsp
+            .clients
+            .iter()
+            .find(|c| c.name == server && c.share.as_ref() == Some(&key) && self.lsp.share.in_use(c.id))
+        else {
             return;
         };
         let (a, name) = (c.id, c.name.clone());
@@ -704,8 +749,8 @@ impl Editor {
         }
     }
 
-    /// rust-analyzer's `checkOnSave` on (it asks for its settings again — `settings`; measured: no check
-    /// starts, the next save checks).
+    /// Its checks on again (rust-analyzer's `checkOnSave`: it asks for its settings again — `settings`;
+    /// measured: no check starts, the next save checks).
     fn checks_on(&mut self, cid: ClientId) {
         let Some(c) = self.client_mut(cid) else { return };
         if !c.checks_off {
@@ -1055,12 +1100,12 @@ impl Editor {
     /// second toolchain added 0.5 GB to the shared one that stayed after the folder changed back).
     pub(crate) fn share_refetch(&mut self, cid: ClientId) {
         let Some(c) = self.client(cid) else { return };
-        let roots = c.roots.clone();
+        let (roots, toolchain) = (c.roots.clone(), toolchain_files(c));
         self.events.shared_jobs().spawn(move || {
             let keys: Vec<(PathBuf, Option<Key>, bool)> = roots
                 .into_iter()
                 .map(|r| {
-                    let (k, there) = (key_of(&r), r.exists());
+                    let (k, there) = (key_of(&r, &toolchain), r.exists());
                     (r, k, there)
                 })
                 .collect();
@@ -1147,6 +1192,11 @@ mod tests {
 
     fn plenty() -> Room {
         Room { pressure: Pressure::Normal, headroom: Some(64 * GB) }
+    }
+
+    /// rust-analyzer's traits, as the rust pack says them — the tests here run on that data.
+    fn ra() -> &'static lsp::ServerTraits {
+        &crate::languages::get().traits["rust-analyzer"]
     }
 
     fn tight() -> Room {
@@ -1322,6 +1372,10 @@ mod tests {
         up(&mut ed, b);
         let out = sent(&t, &ed, b, &["initialize", "wt1/src/main.rs", "main/src/main.rs"]);
         assert!(out.contains(r#""checkOnSave":false"#), "B's checks off: {out}");
+        assert!(
+            out.contains(r#""serverStatusNotification":true"#),
+            "asked to say when it's quiescent: {out}"
+        );
         assert!(out.contains(&format!(r#""uri":"{}""#, lsp::uri(&t.join("wt1")))), "both folders");
         assert_eq!(out.matches("textDocument/didOpen").count(), 2, "every open file: {out}");
         // Its settings answer says checks off too (rust-analyzer takes it as its whole settings)
@@ -1571,6 +1625,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(&t);
     }
 
+    /// A new session's checkout joins as it's made (`a_session_made_joins_before_its_first_file`) only when
+    /// it's a project at its top — by what the server's language's pack says makes one (rust's
+    /// `needs-project`); one that isn't waits for a file of its own.
+    #[test]
+    fn a_new_sessions_checkout_joins_only_as_a_project() {
+        let (t, mut ed) = fixture("session-project", &["wt1", "wt2"], plenty);
+        let (_, a) = open(&mut ed, &t.join("main/src/main.rs"));
+        let a = a.unwrap();
+        up(&mut ed, a);
+        quiescent(&mut ed, a);
+        std::fs::remove_file(t.join("wt2/Cargo.toml")).unwrap();
+        ed.share_session(&t.join("wt2"));
+        ed.share_session(&t.join("wt1"));
+        assert!(settle(&mut ed, 3000, |ed| the_swap(ed).is_some()), "a swap began");
+        let (_, b) = the_swap(&ed).unwrap();
+        assert_eq!(ed.client(b).unwrap().roots, [t.join("main"), t.join("wt1")], "wt1 joined, wt2 didn't");
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    /// `editor.lsp-share` unset: the servers whose pack says `share` (rust-analyzer) — and what `:config-show`
+    /// says; set, exactly its list (`[]`: none).
+    #[test]
+    fn who_shares_is_the_packs_unless_set() {
+        let (ra_spec, other) =
+            (lsp::default_spec("rust-analyzer").unwrap(), lsp::default_spec("gopls").unwrap());
+        let unset = crate::lsp::LspConfig::default();
+        assert!(unset.shares("rust-analyzer", lsp::traits(&ra_spec)));
+        assert!(!unset.shares("gopls", lsp::traits(&other)));
+        assert_eq!(crate::lsp::shared_by_packs(), ["rust-analyzer"]);
+        let (config, w) = crate::config::parse("[editor]\nlsp-share = []\n");
+        assert!(w.is_empty(), "{w:?}");
+        assert!(!config.editor.lsp.shares("rust-analyzer", lsp::traits(&ra_spec)), "turned off");
+        let (config, _) = crate::config::parse("[editor]\nlsp-share = [\"gopls\"]\n");
+        assert!(config.editor.lsp.shares("gopls", lsp::traits(&other)), "one whose pack doesn't say it");
+        assert!(!config.editor.lsp.shares("rust-analyzer", lsp::traits(&ra_spec)));
+        let shown = crate::settings::SETTINGS.iter().find(|s| s.path == "editor.lsp-share").unwrap();
+        let default = crate::config::EditorConfig::default();
+        assert_eq!((shown.get)(&default), toml::Value::Array(vec!["rust-analyzer".into()]));
+    }
+
     #[test]
     fn swap_or_restart_by_pressure_and_twice_the_need() {
         let room = |pressure, headroom: Option<u64>| Room { pressure, headroom };
@@ -1638,14 +1732,25 @@ mod tests {
         std::fs::write(wt.join(".git"), format!("gitdir: {}\n", main.join(".git/worktrees/wt").display()))
             .unwrap();
         std::fs::write(main.join(".git/worktrees/wt/commondir"), "../..\n").unwrap();
-        let k = key_of(&main).unwrap();
-        assert_eq!(key_of(&wt), Some(k.clone()), "a worktree: its repository's");
-        assert_ne!(key_of(&clone), Some(k.clone()), "a clone is a repository of its own");
-        assert_eq!(key_of(&t.join("nowhere")), None);
+        // (the files the rust pack says rust-analyzer's toolchain is in)
+        let files = &ra().share.as_ref().expect("the rust pack shares rust-analyzer").toolchain;
+        let key = |r: &Path| key_of(r, files);
+        let k = key(&main).unwrap();
+        assert_eq!(key(&wt), Some(k.clone()), "a worktree: its repository's");
+        assert_ne!(key(&clone), Some(k.clone()), "a clone is a repository of its own");
+        assert_eq!(key(&t.join("nowhere")), None);
         std::fs::write(wt.join("rust-toolchain.toml"), "[toolchain]\nchannel = \"1.98.0\"\n").unwrap();
-        let w = key_of(&wt).unwrap();
+        let w = key(&wt).unwrap();
         assert_eq!(w.repo, k.repo);
         assert_ne!(w, k, "another toolchain: another server");
+        std::fs::remove_file(wt.join("rust-toolchain.toml")).unwrap();
+        std::fs::write(wt.join("rust-toolchain"), "1.98.0\n").unwrap();
+        assert_ne!(key(&wt), Some(k.clone()), "the older file name too");
+        assert_eq!(
+            key_of(&wt, &[]),
+            key_of(&main, &[]),
+            "a server whose pack names none: by repository alone"
+        );
         let _ = std::fs::remove_dir_all(&t);
     }
 }

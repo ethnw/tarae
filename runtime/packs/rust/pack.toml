@@ -88,6 +88,16 @@ report = "cargo's {what} lock"
 # Worktrees and checkouts inside the project aren't scanned (paths from its root; no defaults to keep)
 [server.rust-analyzer]
 leave-out = { init = "files.exclude", each = "{rel}" }
+# One for every checkout of a repository on one toolchain (`editor.lsp-share`): rustup's toolchain files say
+# which; `checkOnSave` held off while a swap's new one loads (a start with checks checks every folder); it
+# reports "Fetching" when it loads its workspaces again — a toolchain file may have changed
+share = { toolchain = ["rust-toolchain.toml", "rust-toolchain"], checks = "checkOnSave", reload-progress = "Fetching" }
+# Its extension: says when it has nothing left to load (a swap switches then), asked for in the capabilities
+quiescent = { method = "experimental/serverStatus", capability = "experimental.serverStatusNotification", field = "quiescent", health = "health", message = "message" }
+# Its extension: by default `workspace/symbol` lists types only
+symbol-params = { searchKind = "allSymbols", searchScope = "workspace" }
+# rustc's "`#[warn(unused_variables)]` (part of …) on by default" says where a lint comes from, not what's wrong
+hide-lines = ['^`#\[.*on by default$']
 
 # rustup's proxy lands in ~/.cargo/bin; run in the project, so its rust-toolchain.toml counts. The proxy is
 # on PATH even when the component isn't installed: it says so, and exits

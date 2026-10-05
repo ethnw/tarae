@@ -42,7 +42,7 @@ The name is also the `:set` path: `:set editor.scrolloff 8` changes it until you
 | `editor.indent-guides` | bool | `true` | Faint vertical guides in leading indentation (theme: ui.virtual.indent-guide) |
 | `editor.scrollbar` | bool | `true` | Scrollbar on the right edge, with error/warning marks for the whole file |
 | `editor.lsp` | bool | `true` | Start language servers (servers: [lsp.&lt;name>] command/args, per language: [lang.&lt;lang>] lsp = [...]) |
-| `editor.lsp-share` | list of strings | `["rust-analyzer"]` | Language servers one of which serves every checkout of a repository (a session each) on the same toolchain — swapped as checkouts come and go |
+| `editor.lsp-share` | list of strings | `["rust-analyzer"]` | Language servers one of which serves every checkout of a repository (a session each) on the same toolchain — swapped as checkouts come and go; unset: those whose pack says `share` |
 
 ## `[editor.cursor]`
 

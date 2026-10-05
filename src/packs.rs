@@ -764,8 +764,8 @@ fn leave_out_in(server: &str, tables: Vec<(String, Table)>) -> Option<LeaveOut> 
 
 fn server_table(v: &toml::Value) -> Result<Option<LeaveOut>, String> {
     let t = v.as_table().ok_or("isn't a table")?;
-    // (`command`, `args`: the language table's — `languages.rs`)
-    known(t, &["leave-out", "command", "args"], "it")?;
+    // (the others: the language table's — `languages.rs`)
+    known(t, crate::languages::SERVER_KEYS, "it")?;
     let Some(l) = t.get("leave-out") else { return Ok(None) };
     let l = l.as_table().ok_or("`leave-out` isn't a table")?;
     known(l, &["init", "config", "each", "keep"], "`leave-out`")?;
