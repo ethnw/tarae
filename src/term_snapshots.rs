@@ -1098,6 +1098,8 @@ fn snapshot_review_end_held_by_a_high_change() {
 fn review_of(w: u16, h: u16, base: &str, now: &str) -> Shot {
     use crate::codereview::{Base, CodeReview, File};
     let mut s = Shot::new(w, h);
+    // (the session's label is the checkout folder's name — `tarae`, as `project()`'s, wherever the tests run)
+    (s.ed.session.name, s.ed.session.git_branch) = ("tarae".into(), None);
     s.file("src/demo.rs", now);
     let cwd = std::env::current_dir().unwrap();
     let file = File {

@@ -13,8 +13,8 @@
 10                            ▌
 11                            ▌
 12                            ▌                      ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-13                            ▌                       ▎ End reviewer's review?
-14                            ▌                         reviewer's review · uncommitted · 0 of 1 viewed
+13                            ▌                       ▎ End tarae's review?
+14                            ▌                         tarae's review · uncommitted · 0 of 1 viewed
 15                            ▌
 16                            ▌                         1 file not viewed
 17                            ▌
@@ -75,8 +75,8 @@
 10
 11
 12
-13                                                    a BBB BBBBBBBBBB BBBBBBB
-14                                                      dddddddddd dddddd d ddddddddddd d d dd d dddddd
+13                                                    a BBB BBBBBBB BBBBBBB
+14                                                      ddddddd dddddd d ddddddddddd d d dd d dddddd
 15
 16                                                      d dddd ddd dddddd
 17
