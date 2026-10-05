@@ -500,7 +500,10 @@ pub fn turn_over(ed: &mut Editor) {
         r.chat = None;
         r.joined.clear();
     }
-    ed.drop_cards(|w| matches!(w, crate::offer::What::Run(_) | crate::offer::What::NoSandbox { .. }));
+    ed.drop_cards(|w| {
+        use crate::offer::What;
+        matches!(w, What::Run(_) | What::NoSandbox { .. } | What::ProtectedMade { .. })
+    });
     crate::seeing::turn_over(ed);
     crate::refactor::turn_over(ed);
 }
@@ -2021,6 +2024,12 @@ pub fn guard_and_go(ed: &mut Editor, who: For, job: Job, asked: bool, extra: Ext
 
 /// `guard_and_go` once it's this run's turn — what rides along goes on to the run (`ride`).
 pub(crate) fn guard_then_go(ed: &mut Editor, who: For, job: Job, ride: Ride) {
+    // (a protected name a run of Claude's made: its next run waits for the user's look first)
+    if let For::Claude(call) = &who
+        && !ed.session.made_protected.is_empty()
+    {
+        return ask_made(ed, call.clone(), job, ride);
+    }
     if ride.extra.outside {
         return go(ed, who, job, Some(Guard::Outside), ride);
     }
@@ -2251,6 +2260,68 @@ pub fn unprotected_answer(
     }
 }
 
+pub const MADE_TITLE: &str = "Claude wants to run — after it made a protected file";
+
+/// The protected names a run made, named — `(a.toml, a name` · `a, b — names`, then `it` · `them`) — for
+/// what follows: "… the sandbox keeps".
+fn made_named(made: &[String]) -> (String, &'static str) {
+    match made.len() {
+        1 => (format!("{}, a name", made[0]), "it"),
+        _ => (format!("{} — names", some_named(made)), "them"),
+    }
+}
+
+/// Claude's next run waits for the user (`What::ProtectedMade`): its last run made protected names where none
+/// was (`Session.made_protected`) — what Landlock couldn't refuse, and what runs outside the sandbox later.
+fn ask_made(ed: &mut Editor, call: Call, job: Job, ride: Ride) {
+    use crate::cards::{Past, Request, Why};
+    let label = job.label();
+    let made = ed.session.made_protected.clone();
+    let (named, it) = made_named(&made);
+    let among = if made.len() == 1 { "it's" } else { "they're" };
+    let question = format!(
+        "{label}\n\nIts last run made {named} the sandbox keeps from Claude's commands: what's in {it} runs \
+         outside the sandbox, in your builds and your terminal. The sandbox couldn't refuse {it}: none was \
+         there yet.\n\nLook at {it} before this runs — {among} among this turn's changes (space u takes the \
+         turn back)."
+    );
+    let at = label.split('\n').count() + 1;
+    call.step("protected-made card up");
+    let what = crate::offer::What::ProtectedMade { job, call, ride: Box::new(ride), made };
+    let asked = crate::cards::Asked::new(
+        Why::ProtectedMade,
+        Request::Run { past: Past::No, sandboxed: true, reads: Vec::new() },
+    );
+    let o = crate::offer::Offer::new(MADE_TITLE.into(), &question, "", String::new(), what);
+    ed.push_offer(o.asked(asked).warning(at..at + 1));
+}
+
+/// The answer on that card: `y` runs it (the names seen — not asked about again), `n` tells Claude no (and
+/// the calls that joined it) — asked again before its next run.
+pub fn made_answer(
+    ed: &mut Editor,
+    id: u64,
+    (job, call, ride, made): (Job, Call, Ride, Vec<String>),
+    yes: bool,
+) {
+    ed.offer_finished(id, Ok(()));
+    if yes {
+        call.step("answered yes");
+        ed.session.made_protected.retain(|p| !made.contains(p));
+        return guard_then_go(ed, For::Claude(call), job, ride);
+    }
+    let (named, it) = made_named(&made);
+    let e = format!(
+        "Your last run made {named} the sandbox keeps (what's in {it} runs outside it), and the user chose not \
+         to run `{}` after it — ask them how to go on",
+        job.label()
+    );
+    for c in std::iter::once(call).chain(ride.joined.into_iter().map(|j| j.call)) {
+        answer(ed, c, Err(e.clone()));
+    }
+    crate::queued::run_next(ed)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unprotected {
     Once,
@@ -2361,8 +2432,12 @@ fn run_changes(
         let found = snap.since();
         move |ed: &mut Editor| {
             let said = match found {
-                Ok(crate::snapshot::Found { files, skipped, left_out, ignored_gone })
-                    if !files.is_empty() || !skipped.is_empty() || left_out > 0 || !ignored_gone.is_empty() =>
+                Ok(crate::snapshot::Found { files, skipped, left_out, ignored_gone, protected })
+                    if !files.is_empty()
+                        || !skipped.is_empty()
+                        || left_out > 0
+                        || !ignored_gone.is_empty()
+                        || !protected.is_empty() =>
                 {
                     let root = ed.session.root.clone();
                     let named: Vec<String> = files
@@ -2409,6 +2484,21 @@ fn run_changes(
                             "It deleted ignored files, which aren't kept — the user can't take them back: {}.\n",
                             some_named(&ignored_gone)
                         ));
+                    }
+                    // (kept for the card before its next run — Landlock couldn't refuse them)
+                    if !protected.is_empty() {
+                        let (named, it) = made_named(&protected);
+                        out.push_str(&format!(
+                            "It made {named} the sandbox keeps from your commands: what's in {it} runs later \
+                             outside it (the user's builds, their terminal). The sandbox couldn't refuse {it} \
+                             (none was there yet); the user is asked about {it} before your next command or \
+                             test runs. To change one, use Edit.\n"
+                        ));
+                        for p in protected {
+                            if !ed.session.made_protected.contains(&p) {
+                                ed.session.made_protected.push(p);
+                            }
+                        }
                     }
                     out
                 }

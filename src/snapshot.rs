@@ -329,14 +329,31 @@ pub struct Before {
 }
 
 /// What a run changed (`Before::since`): the files, those it can't take back (named — `changes`), how many
-/// new files weren't kept, before or after it (`NEW_MAX`), and the ignored files and folders it deleted —
-/// named only: no tree has them, so nothing takes them back.
+/// new files weren't kept, before or after it (`NEW_MAX`), the ignored files and folders it deleted —
+/// named only: no tree has them, so nothing takes them back — and the protected names it made
+/// (`protected_made`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Found {
     pub files: Vec<Change>,
     pub skipped: Vec<String>,
     pub left_out: usize,
     pub ignored_gone: Vec<String>,
+    pub protected: Vec<String>,
+}
+
+/// The protected names (`sandbox::protected_in`: not below `target/` or `node_modules/`) a run made where
+/// none was, from the project's root: files new in the tree, and ignored files and folders new beside them
+/// (`.envrc` and `.tarae.local.toml` are often ignored). Seatbelt refuses them by name; Landlock can't (a
+/// path that isn't there has no rule) — so they're said before the next run (`tools::ask_made`).
+fn protected_made(root: &Path, files: &[Change], ignored_new: &[String]) -> Vec<String> {
+    let new_files =
+        files.iter().filter(|c| c.before.is_none()).filter_map(|c| c.path.strip_prefix(root).ok());
+    let ignored = ignored_new.iter().map(|p| Path::new(p.trim_end_matches('/')));
+    new_files
+        .chain(ignored)
+        .filter(|rel| crate::sandbox::protected_in(root, &root.join(rel)))
+        .map(|rel| rel.to_string_lossy().into_owned())
+        .collect()
 }
 
 /// The project's ignored files and folders, from its root (`.env`, `target/`): an ignored folder is one
@@ -363,19 +380,27 @@ impl Before {
         let then = self.tree.as_ref().map_err(String::clone)?;
         let now = snap(&self.root)?;
         let left_out = then.left_out.max(now.left_out);
-        let ignored_gone = match (&self.ignored, ignored(&self.root)) {
+        let (ignored_gone, ignored_new) = match (&self.ignored, ignored(&self.root)) {
             (Some(was), Ok(is)) => {
-                let is: std::collections::HashSet<&String> = is.iter().collect();
-                was.iter().filter(|p| !is.contains(p) && !self.root.join(p).exists()).cloned().collect()
+                let set = |v: &[String]| v.iter().cloned().collect::<std::collections::HashSet<String>>();
+                let (was_set, is_set) = (set(was), set(&is));
+                let gone =
+                    was.iter().filter(|p| !is_set.contains(*p) && !self.root.join(p).exists()).cloned();
+                (gone.collect(), is.into_iter().filter(|p| !was_set.contains(p)).collect())
             }
-            _ => Vec::new(),
+            _ => (Vec::new(), Vec::new()),
         };
-        if then.id == now.id {
-            return Ok(Found { left_out, ignored_gone, ..Default::default() });
-        }
-        let (mut files, skipped) = changes(&self.root, &then.id, &now.id)?;
+        let (mut files, skipped) = match then.id == now.id {
+            true => (Vec::new(), Vec::new()),
+            false => changes(&self.root, &then.id, &now.id)?,
+        };
         files.retain(|c| !self.wrote.contains(&c.path));
-        Ok(Found { files, skipped, left_out, ignored_gone })
+        let ignored_new: Vec<String> = ignored_new
+            .into_iter()
+            .filter(|p| !self.wrote.contains(&self.root.join(p.trim_end_matches('/'))))
+            .collect();
+        let protected = protected_made(&self.root, &files, &ignored_new);
+        Ok(Found { files, skipped, left_out, ignored_gone, protected })
     }
 }
 

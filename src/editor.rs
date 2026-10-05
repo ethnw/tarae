@@ -7070,7 +7070,10 @@ mod tests {
         let answer = answer.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(answer.contains("Permission denied") && answer.contains("In tarae's sandbox"), "{answer}");
         assert!(answer.contains("The sandbox blocked one thing"), "{answer}");
-        assert!(answer.contains("marker (file-write*, said in the output)"), "{answer}");
+        // (a checkout in home, as on the user's VM: reads are kept there too, so either is refused)
+        let in_home = std::env::var_os("HOME").is_some_and(|h| !h.is_empty() && marker.starts_with(h));
+        let op = if in_home { crate::sandbox::EITHER } else { "file-write*" };
+        assert!(answer.contains(&format!("marker ({op}, said in the output)")), "{answer}");
         let net = match crate::sandbox::supervisor::unavailable() {
             None => "connect to nothing over the network, this machine's ports included",
             Some(_) => "make no socket",

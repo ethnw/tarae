@@ -7516,7 +7516,14 @@ fn draw_follow_card(
     // review: said so, not "running" while nothing runs (what it waits on is that card's — not repeated)
     let asks = editor.offers.iter().any(|o| {
         use crate::offer::What;
-        matches!(o.what, What::Run(_) | What::NoSandbox { .. } | What::Read { .. } | What::Screen { .. })
+        matches!(
+            o.what,
+            What::Run(_)
+                | What::NoSandbox { .. }
+                | What::ProtectedMade { .. }
+                | What::Read { .. }
+                | What::Screen { .. }
+        )
     });
     let waiting = |verb: &str| {
         c.busy()

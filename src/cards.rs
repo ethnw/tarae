@@ -112,6 +112,8 @@ pub enum Why {
     Outside,
     /// There's no sandbox here, or one that goes only so far.
     NoSandbox,
+    /// Claude's last run made a protected name where none was — what Landlock can't refuse.
+    ProtectedMade,
     /// Claude's Read, Grep or Glob outside the project.
     Read,
     /// Claude's `screen`.
@@ -136,6 +138,7 @@ impl Why {
             Why::Socket => "socket".into(),
             Why::Outside => "outside".into(),
             Why::NoSandbox => "no-sandbox".into(),
+            Why::ProtectedMade => "protected-made".into(),
             Why::Read => "read".into(),
             Why::Screen => "screen".into(),
             Why::Blocked => "blocked".into(),
@@ -166,6 +169,7 @@ impl Why {
             | Why::Socket
             | Why::Outside
             | Why::NoSandbox
+            | Why::ProtectedMade
             | Why::Read
             | Why::Screen
             | Why::Blocked => return None,
@@ -273,6 +277,7 @@ fn kind(w: &What) -> &'static str {
     match w {
         What::Run(_) => "run",
         What::NoSandbox { .. } => "no-sandbox",
+        What::ProtectedMade { .. } => "protected-made",
         What::Read { .. } => "read",
         What::Screen { .. } => "screen",
         What::Grant { .. } => "grant",

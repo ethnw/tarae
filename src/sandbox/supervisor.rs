@@ -1292,7 +1292,9 @@ mod tests {
         assert!(!s.base.join("out/x.sock").exists());
         let blocked = p.watch.as_ref().unwrap().blocked();
         let plain: Vec<String> = blocked.seen.iter().map(super::super::Denial::plain).collect();
-        assert!(plain.contains(&format!("connecting to socket {}", out.display())), "{plain:?}");
+        // (as the words show it: home spelled `~` — a checkout in home, as on the user's VM)
+        let out = super::super::home_shown(&out.display().to_string());
+        assert!(plain.contains(&format!("connecting to socket {out}")), "{plain:?}");
         drop(listeners);
     }
 

@@ -65,8 +65,9 @@ fn what_a_run_changed_text_blobs_deleted_new_and_not_ignored_files() {
     std::fs::write(dir.join("src/new.txt"), "fresh\n").unwrap();
     std::fs::write(dir.join("untracked.txt"), "mine, changed\n").unwrap();
     std::fs::write(dir.join("build/out.o"), "built again\n").unwrap();
-    let Found { files: c, skipped, left_out, ignored_gone } = before.since().unwrap();
+    let Found { files: c, skipped, left_out, ignored_gone, protected } = before.since().unwrap();
     assert!(skipped.is_empty() && left_out == 0, "{skipped:?} {left_out}");
+    assert!(protected.is_empty(), "no protected name made: {protected:?}");
     assert!(ignored_gone.is_empty(), "an ignored file changed isn't one deleted: {ignored_gone:?}");
     assert_eq!(c.len(), 5, "{c:#?}");
     let a = file(&c, &dir, "src/a.txt");
@@ -127,6 +128,34 @@ fn ignored_files_a_run_deleted_are_named() {
     let found = before.since().unwrap();
     assert_eq!(found.ignored_gone, [".env.local", "build/"]);
     assert!(found.files.is_empty(), "nothing a tree has: {found:?}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The protected names a run made where none was — what Landlock can't refuse: a manifest in a new folder,
+/// a `.cargo` folder in `src/`, an ignored `.envrc` (a tree hasn't it; the ignored entries before and after
+/// have) — not one below `target/` (a tool's output), not a file of another name, not a change to a file
+/// that was there, and not what the editor wrote meanwhile (Claude's reviewed Edit).
+#[test]
+fn protected_names_a_run_made_are_found() {
+    let dir = repo("protected");
+    std::fs::write(dir.join(".gitignore"), "build/\n.env.local\n.envrc\n").unwrap();
+    let mut before = Before::take(&dir);
+    for (rel, text) in [
+        ("sub/Cargo.toml", "[package]\n"),
+        ("src/.cargo/config.toml", "[build]\n"),
+        (".envrc", "export X=1\n"),
+        ("target/pkg/Cargo.toml", "[package]\n"),
+        ("src/lib.rs", "fn f() {}\n"),
+        ("src/a.txt", "one\nchanged\n"),
+        ("edited/build.rs", "fn main() {}\n"),
+    ] {
+        std::fs::create_dir_all(dir.join(rel).parent().unwrap()).unwrap();
+        std::fs::write(dir.join(rel), text).unwrap();
+    }
+    before.wrote.push(dir.join("edited/build.rs"));
+    let mut found = before.since().unwrap().protected;
+    found.sort();
+    assert_eq!(found, [".envrc", "src/.cargo/config.toml", "sub/Cargo.toml"]);
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -432,6 +461,78 @@ fn checks_and_tests_are_covered_and_ignored_deletions_said() {
     assert_eq!(std::fs::read_to_string(dir.join("src/gone.txt")).unwrap(), "kept-marker\n");
     assert_eq!(std::fs::read_to_string(dir.join("src/a.txt")).unwrap(), "one\ntwo\n");
     assert!(!dir.join(".env.local").exists(), "an ignored file isn't kept: not back");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A run of Claude's that makes a protected name where none was: Claude's report says so, and its next run
+/// waits on a card naming it — `n` tells Claude no and nothing runs, the next asks again; `y` runs it, and
+/// the one after doesn't ask. (Harmless commands in the test's own repository.)
+#[test]
+fn a_protected_name_a_run_made_is_asked_about_before_the_next_run() {
+    let dir = repo("made");
+    let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+    ed.session.root = dir.clone();
+    ed.config.llm.sandbox = false;
+    ed.config.llm.command = "sh".into();
+    ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+    crate::chat::open(&mut ed);
+    let c = ed.session.chat.as_mut().unwrap();
+    c.state = crate::chat::State::Thinking;
+    c.focused = false;
+    let generation = c.generation();
+    let pump = |ed: &mut crate::editor::Editor, done: &dyn Fn(&crate::editor::Editor) -> bool, what: &str| {
+        let end = Instant::now() + Duration::from_secs(20);
+        while !done(ed) {
+            assert!(Instant::now() < end, "{what}");
+            if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
+    };
+    let answered = |n: u64| {
+        crate::tools::ANSWERED
+            .with(|a| a.borrow().iter().find(|(id, _)| *id == json!(n)).map(|(_, r)| r.clone()))
+    };
+    let run = |ed: &mut crate::editor::Editor, n: u64, cmd: &str| {
+        let call = crate::tools::Call::of(generation, &format!("r{n}"), json!(n));
+        let job = crate::tools::Job::Command(cmd.into(), dir.clone());
+        crate::tools::guard_and_go(ed, crate::tools::For::Claude(call), job, false, Default::default());
+    };
+    run(&mut ed, 1, "mkdir sub && printf '[package]\\n' > sub/Cargo.toml");
+    pump(&mut ed, &|_| answered(1).is_some(), "the first run");
+    let report = answered(1).unwrap().unwrap();
+    assert!(report.contains("It made sub/Cargo.toml, a name the sandbox keeps"), "{report}");
+    // n: nothing runs, Claude hears why
+    run(&mut ed, 2, "touch two");
+    pump(&mut ed, &|ed| !ed.offers.is_empty(), "the card");
+    let o = &ed.offers[0];
+    assert!(matches!(o.what, crate::offer::What::ProtectedMade { .. }) && o.weighty(), "{}", o.title);
+    assert_eq!(o.title, crate::tools::MADE_TITLE);
+    assert!(o.question.starts_with("touch two\n\nIts last run made sub/Cargo.toml"), "{}", o.question);
+    assert!(o.question.contains("a name the sandbox keeps") && o.question.contains("what's in it runs"));
+    ed.offer_dismiss();
+    let no = answered(2).unwrap().unwrap_err();
+    assert!(no.contains("made sub/Cargo.toml") && no.contains("chose not to run `touch two`"), "{no}");
+    assert!(!dir.join("two").exists());
+    // Asked again; y: it runs, and the next doesn't ask
+    run(&mut ed, 3, "touch three");
+    pump(&mut ed, &|ed| !ed.offers.is_empty(), "the card again");
+    ed.offer_accept();
+    pump(&mut ed, &|_| answered(3).is_some(), "the third run");
+    assert!(dir.join("three").exists() && ed.session.made_protected.is_empty());
+    run(&mut ed, 4, "touch four .envrc sub/build.rs");
+    pump(&mut ed, &|_| answered(4).is_some(), "the fourth run, unasked");
+    assert!(dir.join("four").exists());
+    let report = answered(4).unwrap().unwrap();
+    assert!(report.contains("It made .envrc, sub/build.rs — names the sandbox keeps"), "{report}");
+    // Two: said as two
+    run(&mut ed, 5, "touch five");
+    pump(&mut ed, &|ed| !ed.offers.is_empty(), "the card for both");
+    let q = &ed.offers[0].question;
+    assert!(q.contains("made .envrc, sub/build.rs — names") && q.contains("they're among"), "{q}");
+    ed.offer_accept();
+    pump(&mut ed, &|_| answered(5).is_some(), "the fifth run");
+    assert!(dir.join("five").exists());
     std::fs::remove_dir_all(&dir).ok();
 }
 

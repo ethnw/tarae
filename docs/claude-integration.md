@@ -648,7 +648,11 @@ thread of tarae's that confined itself first, and everything it starts stays con
   - when tarae itself runs inside such a sandbox (a tarae started by one of Claude's commands)
 - **Gradle runs in the sandbox** with `llm.sandbox-localhost`, as on macOS.
 - **What Landlock can't keep, said in Claude's result:** a protected name made in a folder that holds none yet
-  (a `.cargo` folder inside `src/`, say — Landlock rules are on paths that are there); tmux's and zellij's
+  (a `.cargo` folder inside `src/`, say — Landlock rules are on paths that are there). So tarae looks after
+  each run (in a git checkout): a protected name it made — `.envrc` too, ignored or not, but not below
+  `target/` or `node_modules/` — is named in Claude's result, and Claude's next command or test waits on a
+  card naming it: `y` runs it, `n` tells Claude no (asked again next time). The file is among the turn's
+  changes, and `space u` takes the turn back. tmux's and zellij's
   folders in `/tmp`, which stay writable (Java writes its temp files in `/tmp` whatever `TMPDIR` says). The
   other way round, a folder that holds a protected name is closed to new entries: next to `Cargo.toml` a
   command can change the files that are there, but not make, remove or rename one.

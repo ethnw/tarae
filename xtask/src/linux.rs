@@ -1,4 +1,4 @@
-//! `cargo xtask linux [--platform linux/<arch>] [clippy|test [--repeat N] [cargo test's arguments]]` — tarae's checks on Linux (CI runs there too: `-D dead-code` on code only
+//! `cargo xtask linux [--env NAME=VALUE]… [--platform linux/<arch>] [clippy|test [--repeat N] [cargo test's arguments]]` — tarae's checks on Linux (CI runs there too: `-D dead-code` on code only
 //! macOS calls, a root container's `#` prompt …), in Docker on the pinned toolchain (`rust:<major.minor>`, and
 //! `rust-toolchain.toml`'s exact version in it). Whichever Docker the CLI reaches: `DOCKER_CONTEXT` or `DOCKER_HOST`, else the
 //! current context (here the colima VM: `colima start -p tarae-test`, `DOCKER_CONTEXT=colima-tarae-test`).
@@ -36,7 +36,37 @@ enum What {
     Both,
 }
 
-const USAGE: &str = "usage: cargo xtask linux [--platform linux/<arch>] [clippy | test [--repeat N] [cargo test's arguments]]";
+const USAGE: &str = "usage: cargo xtask linux [--env NAME=VALUE]… [--platform linux/<arch>] [clippy | test [--repeat N] [cargo test's arguments]]";
+
+/// The leading `--env NAME=VALUE`s — set in the container (`HOME=/work`: the checkout inside home, as on a
+/// machine where it's under the user's home) — and the arguments after them.
+fn envs(args: &[String]) -> Result<(Vec<String>, &[String])> {
+    let mut rest = args;
+    let mut set = Vec::new();
+    while let [e, v, more @ ..] = rest
+        && e == "--env"
+    {
+        let name = v.split_once('=').map(|(n, _)| n).unwrap_or_default();
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return Err(format!("--env {v}: NAME=VALUE — {USAGE}"));
+        }
+        set.push(v.clone());
+        rest = more;
+    }
+    if rest.first().is_some_and(|e| e == "--env") {
+        return Err(format!("--env: which one? — {USAGE}"));
+    }
+    Ok((set, rest))
+}
+
+/// `docker run`'s arguments with `-e NAME=VALUE` for each of `envs`, before the image (the last four: image,
+/// `sh`, `-ec`, the script).
+fn with_envs(mut a: Vec<String>, envs: &[String]) -> Vec<String> {
+    let at = a.len().saturating_sub(4);
+    let set: Vec<String> = envs.iter().flat_map(|e| ["-e".to_string(), e.clone()]).collect();
+    a.splice(at..at, set);
+    a
+}
 
 /// What `cargo xtask linux …`'s arguments ask for: the platform first (`--platform linux/amd64`: Docker's
 /// `os/arch`, emulated where the VM's isn't it — None: the Docker host's own), then the checks.
@@ -75,6 +105,7 @@ fn what(args: &[String]) -> Result<What> {
 }
 
 pub fn run(args: &[String]) -> Result<()> {
+    let (set, args) = envs(args)?;
     let (platform, what) = ask(args)?;
     let platform = platform.as_deref();
     let root = root();
@@ -94,7 +125,7 @@ pub fn run(args: &[String]) -> Result<()> {
         return Err(format!("docker volume create {}: failed", target_volume(&root, &pin, platform)));
     }
     let st = Command::new("docker")
-        .args(docker_args(&root, common_git_dir(&root).as_deref(), &pin, platform, &what))
+        .args(with_envs(docker_args(&root, common_git_dir(&root).as_deref(), &pin, platform, &what), &set))
         .status()
         .map_err(|e| format!("docker: {e}"))?;
     if !st.success() {
@@ -280,8 +311,10 @@ fn image(pin: &str) -> String {
 
 /// What runs in the container: the clone (with what isn't committed yet), then the checks.
 fn script(what: &What) -> String {
+    // (home made first: `--env HOME=/work` names one the clone hasn't made yet)
     let mut s = String::from(
-        "git config --global --add safe.directory '*'\n\
+        "mkdir -p \"$HOME\"\n\
+         git config --global --add safe.directory '*'\n\
          git clone -q /src /work/tarae && cd /work/tarae\n\
          git -C /src diff HEAD | git apply --allow-empty\n\
          git -C /src ls-files --others --exclude-standard -z | (cd /src && tar --null -T - -cf -) | tar -xf -\n\
@@ -420,6 +453,27 @@ mod tests {
             create_args(r, "1.99.0", Some("linux/amd64"))[3..],
             ["tarae.checkout=/r/tarae", amd.as_str()]
         );
+    }
+
+    /// `--env NAME=VALUE` first, as often as needed: each a `-e` of `docker run`'s, before the image — the
+    /// rest read as without them; a name that isn't one, or a missing value, is refused.
+    #[test]
+    fn envs_go_into_the_container() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let given = args(&["--env", "HOME=/work", "--env", "A_1=x=y", "test", "--bin", "tarae"]);
+        let (set, rest) = envs(&given).unwrap();
+        assert_eq!(
+            (set.clone(), rest.to_vec()),
+            (args(&["HOME=/work", "A_1=x=y"]), args(&["test", "--bin", "tarae"]))
+        );
+        let a = with_envs(docker_args(Path::new("/r/tarae"), None, "1.99.0", None, &What::Clippy), &set);
+        let image = a.iter().position(|v| v == "rust:1.99").unwrap();
+        assert_eq!(a[image - 4..image], args(&["-e", "HOME=/work", "-e", "A_1=x=y"]), "{a:?}");
+        assert_eq!(a[image + 1..image + 3], args(&["sh", "-ec"]));
+        assert_eq!(envs(&args(&["clippy"])).unwrap(), (Vec::new(), &args(&["clippy"])[..]));
+        for bad in [&["--env", "=x"][..], &["--env", "A B=x"], &["--env", "noequals"], &["--env"]] {
+            assert!(envs(&args(bad)).is_err_and(|e| e.contains("--env")), "{bad:?}");
+        }
     }
 
     /// A worktree (a tarae session): the main checkout's git folder goes in read-only, at the path its `.git`

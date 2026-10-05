@@ -104,11 +104,13 @@ One line per card, when it's answered or dropped (built in P0 — `src/cards.rs`
 20:02:30  tarae  card  size · run · why=reads-outside · class=temp,elsewhere · shadow=grant:read · n · not drawn · up 0.4s
 ```
 
-- The kind: `run`, `read`, `no-sandbox`, `screen`, and the sandbox's own `grant` and `outside` (the user
-  opening what it blocked).
+- The kind: `run`, `read`, `no-sandbox`, `protected-made` (Claude's next run, after one made a protected
+  name Landlock couldn't refuse), `screen`, and the sandbox's own `grant` and `outside` (the user opening
+  what it blocked).
 - `why` is the rule that sent it to a card: `not-a-check:<prog>` (the first part no rule lets through),
   `unreadable`, `script`, `script-changed`, `env-name`, `glob`, `reads-outside`, `cd-unknown`,
-  `runs-outside`, `socket`, `outside`, `no-sandbox`, `read` (Claude's Read/Grep/Glob), `screen`, `blocked`.
+  `runs-outside`, `socket`, `outside`, `no-sandbox`, `protected-made`, `read` (Claude's Read/Grep/Glob),
+  `screen`, `blocked`.
   Reads add `class`: `other-checkout`, `temp`, `toolchain`, `home`, `elsewhere`, `secret`, `unknown`.
 - `shadow` is what the capability model (§3) would do, from `cards::decide` — the one function P3 will
   decide by: `none` (runs or reads unasked), `grant:<read|write|port>`, `socket`, `outside`, `no-sandbox`,

@@ -84,6 +84,14 @@ pub enum What {
         ride: Box<crate::queued::Ride>,
         kind: crate::tools::Unsandboxed,
     },
+    /// Claude's last run made protected names where none was (`made` — what Landlock can't refuse,
+    /// `tools::ask_made`): `y` runs its next anyway, `n` tells Claude no.
+    ProtectedMade {
+        job: crate::tools::Job,
+        call: crate::tools::Call,
+        ride: Box<crate::queued::Ride>,
+        made: Vec<String>,
+    },
     /// Review at the end (`edits.rs`): `y` lets Claude's edits go in as it makes them.
     ReviewAtEnd,
     /// Claude's Read, Grep or Glob outside the project (`reads.rs`): `y` once, `a` this chat, `A` always
@@ -178,7 +186,9 @@ impl Offer {
     fn asker(&self) -> Option<Asker> {
         match &self.what {
             What::Run(r) => Some(Asker::Tool(r.call.clone())),
-            What::NoSandbox { call, .. } | What::Screen { call } => Some(Asker::Tool(call.clone())),
+            What::NoSandbox { call, .. } | What::ProtectedMade { call, .. } | What::Screen { call } => {
+                Some(Asker::Tool(call.clone()))
+            }
             What::Read { pending, .. } => Some(Asker::Permission {
                 request_id: pending.request_id.clone(),
                 generation: pending.generation,
@@ -277,6 +287,7 @@ impl Offer {
                 | What::PluginAsk { .. }
                 | What::Run(_)
                 | What::NoSandbox { .. }
+                | What::ProtectedMade { .. }
                 | What::ReviewAtEnd
                 | What::ProjectTrust { .. }
                 | What::Read { .. }
@@ -396,6 +407,7 @@ impl Offer {
             self.what,
             What::Run(_)
                 | What::NoSandbox { .. }
+                | What::ProtectedMade { .. }
                 | What::Read { .. }
                 | What::Screen { .. }
                 | What::ChangeSet { .. }
@@ -438,6 +450,7 @@ impl Offer {
             W::ReviewAtEnd => vec![('y', "Turn on"), ('n', "No")],
             W::ProjectTrust { .. } => vec![('y', "Trust"), ('n', "Ignore")],
             W::NoSandbox { .. } => vec![('y', "Run"), ('a', "This chat"), ('n', "No")],
+            W::ProtectedMade { .. } => vec![('y', "Run"), ('n', "No")],
             W::Read { keep: true, .. } => {
                 vec![('y', "Once"), ('a', "This chat"), ('A', "Always"), ('n', "No")]
             }
@@ -505,6 +518,7 @@ impl Offer {
             W::Install { .. } => "install",
             W::Run(_) => "run",
             W::NoSandbox { .. } => "no-sandbox",
+            W::ProtectedMade { .. } => "protected-made",
             W::ReviewAtEnd => "review-at-end",
             W::Read { .. } => "read",
             W::Grant { .. } => "grant",
@@ -761,6 +775,9 @@ impl crate::editor::Editor {
                 (job, call, *ride, kind),
                 crate::tools::Unprotected::Once,
             ),
+            What::ProtectedMade { job, call, ride, made } => {
+                crate::tools::made_answer(self, id, (job, call, *ride, made), true)
+            }
             What::ReviewAtEnd => {
                 self.offer_finished(id, Ok(()));
                 crate::edits::at_end_set(self, true);
@@ -1147,6 +1164,9 @@ impl crate::editor::Editor {
                 (job, call, *ride, kind),
                 crate::tools::Unprotected::No,
             ),
+            What::ProtectedMade { job, call, ride, made } => {
+                crate::tools::made_answer(self, o.id, (job, call, *ride, made), false)
+            }
             What::ReviewAtEnd => self.set_status("Claude's edits come one at a time"),
             What::ProjectTrust { hash } => self.project_trust_answer(o.id, hash, false),
             What::Read { pending, keep, folder } => {

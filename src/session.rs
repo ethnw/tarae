@@ -126,6 +126,9 @@ pub struct Session {
     /// When a file in its checkout was last saved or written (Claude's edit, a change set) — a run under way
     /// since then is no longer the one the same command would run (`queued::join`).
     pub wrote: Option<Instant>,
+    /// Protected names Claude's runs made where none was (`snapshot::Found::protected`, from its root) — its
+    /// next run waits on a card about them (`tools::ask_made`); a `y` there clears it.
+    pub made_protected: Vec<String>,
     /// Its Claude's calls waiting on a card for the user's answer (`offer::Asking`) — each card must be up
     /// (in front) or parked (behind) until it's answered; one gone is told (`asking_sync`).
     pub asking: Vec<crate::offer::Asking>,
@@ -232,6 +235,7 @@ impl Session {
             tool_waits: Vec::new(),
             runs_next: Default::default(),
             wrote: None,
+            made_protected: Vec::new(),
             asking: Vec::new(),
             spawned: Vec::new(),
             viewed: Default::default(),

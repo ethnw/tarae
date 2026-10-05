@@ -1234,16 +1234,18 @@ mod tests {
         ];
         let plain = |p: &Policy| p.said_in_output(&out, &[]).iter().map(Denial::plain).collect::<Vec<_>>();
         let said = plain(&p);
+        // (paths as the words show them: home spelled `~` — a checkout in home, as on the user's VM)
+        let shown = |p: &Path| crate::sandbox::home_shown(&p.display().to_string());
         assert_eq!(
             said,
             [
                 format!(
                     "making {} — a folder holding protected names takes no new files on Linux",
-                    s.root.join("Cargo.toml.bak").display()
+                    shown(&s.root.join("Cargo.toml.bak"))
                 ),
                 format!(
                     "removing {} — a folder holding protected names keeps its files on Linux",
-                    lib.display()
+                    shown(&lib)
                 ),
                 "signalling process 4242 — outside the run's own processes".to_string(),
             ]
@@ -1597,7 +1599,9 @@ mod tests {
         let said = p.said_in_output(&out, &seen);
         let rest = p.merge_made(&mut seen, said);
         assert!(rest.is_empty(), "{rest:?}");
-        let bak = s.root.join("Cargo.toml.bak").display().to_string();
+        // (paths as the words show them: home spelled `~` — a checkout in home, as on the user's VM)
+        let shown = |p: &Path| crate::sandbox::home_shown(&p.display().to_string());
+        let bak = shown(&s.root.join("Cargo.toml.bak"));
         assert_eq!(
             seen[0].plain(),
             format!("making {bak} — a folder holding protected names takes no new files on Linux")
@@ -1605,7 +1609,7 @@ mod tests {
         assert_eq!(seen[0].process, "the run");
         let mut alone = vec![in_root];
         assert!(p.merge_made(&mut alone, Vec::new()).is_empty());
-        let root = s.root.display();
+        let root = shown(&s.root);
         assert_eq!(
             alone[0].plain(),
             format!(
@@ -1620,7 +1624,7 @@ mod tests {
         p.merge_made(&mut outside, Vec::new());
         assert_eq!(
             (outside[0].op.as_str(), outside[0].plain()),
-            ("file-write*", format!("writing {}", s.base.display()))
+            ("file-write*", format!("writing {}", shown(&s.base)))
         );
     }
 

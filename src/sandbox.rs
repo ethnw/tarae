@@ -709,6 +709,15 @@ const SEEN_IN_OUTPUT: &str = "said in the output";
 pub(crate) const SEEN_IN_AUDIT_LOG: &str = "the run";
 pub(crate) const EITHER: &str = "file-read* file-write*";
 
+/// `target` (a path, or what a denial names) with home spelled `~` — how a denial's words show it.
+pub(crate) fn home_shown(target: &str) -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    match target.strip_prefix(&home) {
+        Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with('/')) => format!("~{rest}"),
+        _ => target.to_string(),
+    }
+}
+
 impl Denial {
     /// The port on this machine a connection was refused on — Seatbelt names no address (`remote:*:9`, so
     /// any port counts), Linux's supervisor does (`remote:127.0.0.1:9`, `remote:[::1]:9`). None for an
@@ -738,15 +747,9 @@ impl Denial {
         }
     }
 
-    /// The target, home spelled `~`.
+    /// The target, home spelled `~` (`home_shown`).
     fn target_shown(&self) -> String {
-        let home = std::env::var("HOME").unwrap_or_default();
-        match self.target.strip_prefix(&home) {
-            Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with('/')) => {
-                format!("~{rest}")
-            }
-            _ => self.target.clone(),
-        }
+        home_shown(&self.target)
     }
 
     /// As Seatbelt says it: `file-write-create ~/x`.
@@ -789,7 +792,8 @@ impl Denial {
             "signal" if t.is_empty() => "signalling a process outside the run's own processes".into(),
             "signal" => format!("signalling process {t} — outside the run's own processes"),
             _ if op.starts_with("file-write") => format!("changing {t}"),
-            "network-outbound" if t.starts_with('/') => format!("connecting to socket {t}"),
+            // (a path by what it is, not as shown: under home it's `~/…` — a VM's checkout in home)
+            "network-outbound" if self.target.starts_with('/') => format!("connecting to socket {t}"),
             "network-outbound" if t.starts_with("remote:") => match self.port_here() {
                 Some(port) => format!("connecting to port {port}"),
                 None => match t.strip_prefix("remote:") {
@@ -799,7 +803,7 @@ impl Denial {
                     _ => self.shown(),
                 },
             },
-            "network-bind" if t.starts_with('/') => format!("making socket {t}"),
+            "network-bind" if self.target.starts_with('/') => format!("making socket {t}"),
             "appleevent-send" if !t.is_empty() => format!("Apple Event to {t}"),
             "mach-lookup"
                 if t.starts_with("com.apple.lsd") || t == "com.apple.coreservices.launchservicesd" =>
@@ -1598,8 +1602,9 @@ impl Policy {
                 false => "",
             };
             let notes = format!(
-                " On Linux a protected name it makes where none is yet isn't refused, and the terminal \
-                 multiplexers' folders in /tmp stay writable.{beyond}{}{}",
+                " On Linux a protected name it makes where none is yet isn't refused (the user is asked about \
+                 it before your next run), and the terminal multiplexers' folders in /tmp stay writable.\
+                 {beyond}{}{}",
                 linux::notes(c.abi),
                 linux::made_said(&c.made, &self.root)
             );
@@ -3568,6 +3573,9 @@ mod tests {
         let home = std::env::var("HOME").unwrap();
         let plain = |op: &str, target: &str| denial(op, target).plain();
         assert_eq!(plain("file-write-create", &format!("{home}/x")), "writing ~/x");
+        // (a socket in home is still a socket — once said as Seatbelt's `network-outbound ~/…`)
+        assert_eq!(plain("network-outbound", &format!("{home}/s.sock")), "connecting to socket ~/s.sock");
+        assert_eq!(plain("network-bind", &format!("{home}/s.sock")), "making socket ~/s.sock");
         assert_eq!(plain("file-write-data", "/dev/ttys004"), "writing /dev/ttys004");
         assert_eq!(plain("file-write-unlink", "/a"), "deleting /a");
         assert_eq!(plain("file-write-rename", "/a"), "moving /a");
