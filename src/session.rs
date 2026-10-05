@@ -110,9 +110,10 @@ pub struct Session {
     /// front · Claude's waiting on one has been said (once while it's behind).
     pub parked: Vec<crate::offer::Offer>,
     pub waiting_told: bool,
-    /// Its Claude ended a turn while it was behind, and it hasn't been in front since — its tab says `done`
-    /// (#86: not the `▲` of a card waiting).
-    pub turn_done: bool,
+    /// Its Claude ended a turn while it was behind, and it hasn't been in front since: when, and how (stopped
+    /// or failed: its words) — its tab says `done` (#86: not the `▲` of a card waiting), a toast says it once,
+    /// and `C-q` goes there once nothing waits (the one that ended first, first).
+    pub turn_end: Option<(Instant, Result<(), String>)>,
     /// Its documents whose servers stopped while it rested behind (`lsp_rest`) — attached again when it's in
     /// front, or its Claude starts a turn.
     pub asleep: Vec<DocId>,
@@ -229,7 +230,7 @@ impl Session {
             restorable: None,
             parked: Vec::new(),
             waiting_told: false,
-            turn_done: false,
+            turn_end: None,
             asleep: Vec::new(),
             tool_waits: Vec::new(),
             runs_next: Default::default(),
@@ -272,6 +273,19 @@ impl Session {
                 w.generation == chat.generation() && now.saturating_duration_since(w.since) >= w.after
             })
             .min_by_key(|w| w.since)
+    }
+}
+
+/// How a turn ended, as a toast says it: `turn ended` · `turn stopped` · `turn ended: <its error's first
+/// line>` (a warning).
+pub fn turn_end_words(how: &Result<(), String>) -> (crate::editor::ToastKind, String) {
+    use crate::editor::ToastKind;
+    match how {
+        Ok(()) => (ToastKind::Info, "turn ended".into()),
+        Err(e) if e == "stopped" => (ToastKind::Info, "turn stopped".into()),
+        Err(e) => {
+            (ToastKind::Warning, format!("turn ended: {}", e.lines().next().unwrap_or_default().trim()))
+        }
     }
 }
 
@@ -345,7 +359,7 @@ impl Editor {
             Doing::Queued { pos }
         } else if l.chat.as_ref().is_some_and(crate::chat::Chat::busy) {
             Doing::Working
-        } else if l.turn_done && !front {
+        } else if l.turn_end.is_some() && !front {
             Doing::Done
         } else {
             Doing::Idle
@@ -422,6 +436,33 @@ impl Editor {
     /// How many sessions behind ended a turn you haven't looked at (`Doing::Done`).
     pub fn sessions_done(&self) -> usize {
         self.sessions.iter().filter(|l| self.doing(l) == Doing::Done).count()
+    }
+
+    /// The sessions behind whose turn ended unseen (`Doing::Done`), the first to end first — where `C-q`
+    /// goes once nothing waits (`inbox::Next::Done`).
+    pub(crate) fn turns_ended(&self) -> Vec<SessionId> {
+        let mut ended: Vec<(Instant, SessionId)> = self
+            .sessions
+            .iter()
+            .filter(|l| self.doing(l) == Doing::Done)
+            .filter_map(|l| Some((l.turn_end.as_ref()?.0, l.id)))
+            .collect();
+        ended.sort();
+        ended.into_iter().map(|(_, id)| id).collect()
+    }
+
+    /// How `C-q` gets to session `id`'s news — a card or an edit of its waiting (`waits`), else its turn's
+    /// end — as its toast says it: `C-q goes there`, or after how many came first (`C-q` takes the oldest).
+    fn c_q_says(&self, id: SessionId, waits: bool) -> String {
+        let inbox = self.inbox();
+        let before = match waits {
+            true => inbox.iter().position(|e| e.session_id() == id).unwrap_or(inbox.len()),
+            false => inbox.len() + self.turns_ended().iter().position(|&l| l == id).unwrap_or(0),
+        };
+        match before {
+            0 => "C-q goes there".into(),
+            n => format!("C-q goes there after {n} older"),
+        }
     }
 
     /// How many sessions behind are possibly stuck (`Doing::Stuck`) — `◦n` where their tabs aren't drawn.
@@ -589,9 +630,11 @@ impl Editor {
         // (behind as it was after — a swap inside a swap leaves the outer one's session behind still)
         let was = std::mem::replace(&mut self.behind, true);
         let said = self.messages.last().map(|m| m.0);
+        let ended_before = self.session.turn_end.as_ref().map(|t| t.0);
         f(self);
         self.behind = was;
         let tell = self.session.waits() && !std::mem::replace(&mut self.session.waiting_told, true);
+        let ended = self.session.turn_end.as_ref().filter(|t| Some(t.0) != ended_before).map(|t| t.1.clone());
         let name = self.session.label().to_string();
         if let Some(id) = self.docs.get(self.current).map(|d| d.id) {
             self.session.current_doc = id;
@@ -605,9 +648,20 @@ impl Editor {
         std::mem::swap(&mut self.session, &mut self.sessions[i]);
         self.current = self.doc_index(self.session.current_doc);
         self.events.set_session(front);
+        // Its turn ended · it waits for you: said once each, named — and how `C-q` gets there (the waiting
+        // one's toast says it when both are so: `C-q` takes a card first)
+        if let Some(how) = &ended {
+            let (kind, words) = turn_end_words(how);
+            let msg = match tell {
+                true => format!("{name} · {words}"),
+                false => format!("{name} · {words} — {}", self.c_q_says(id, false)),
+            };
+            self.said_for(id, kind, msg);
+        }
         if tell {
-            self.set_status(format!("{name} · Claude waits for your answer — C-q goes there"));
-        } else if self.messages.last().map(|m| m.0) == said {
+            let msg = format!("{name} · waits for you — {}", self.c_q_says(id, true));
+            self.said_for(id, crate::editor::ToastKind::Info, msg);
+        } else if ended.is_none() && self.messages.last().map(|m| m.0) == said {
             // (nothing of it is on screen — an idle front draws nothing for a busy session behind)
             self.unchanged = true;
         }
@@ -707,7 +761,7 @@ impl Editor {
         }
         self.offers.append(&mut self.session.parked);
         self.session.waiting_told = false;
-        self.session.turn_done = false;
+        self.session.turn_end = None;
         // (what came from disk meanwhile is in sight now — its `•` goes)
         self.session.reloaded = 0;
         crate::edits::next(self);
@@ -1526,5 +1580,117 @@ mod tests {
         let mut vt = vt100::Parser::new(h, w, 0);
         vt.process(&bytes);
         vt.screen().rows(0, w).collect()
+    }
+
+    /// A fake claude that ends its `n`th turn with `results[n]` (the last one from then on).
+    fn claude_ends(ed: &mut Editor, results: &[Value]) {
+        let mut cases = String::new();
+        for (i, r) in results.iter().enumerate() {
+            let n = if i + 1 == results.len() { "*".to_string() } else { (i + 1).to_string() };
+            cases.push_str(&format!("{n}) printf '%s\\n' '{r}';; "));
+        }
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec![
+            "-c".into(),
+            format!(
+                "n=0; while read -r line; do case \"$line\" in '{{\"message\"'*) ;; *) continue;; esac; \
+                 n=$((n+1)); case $n in {cases}esac; done"
+            ),
+        ];
+    }
+
+    /// Events handled until session `id`'s Claude is idle again.
+    fn turn_ends(ed: &mut Editor, id: SessionId) {
+        let end = Instant::now() + Duration::from_secs(10);
+        while session_by(ed, id).chat.as_ref().unwrap().busy() {
+            assert!(Instant::now() < end, "its turn ends");
+            if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
+    }
+
+    /// A session behind ends its turn: a toast says so once, named, with how `C-q` gets there — and `C-q`
+    /// goes there. A failed turn says its error's first line, a warning; a stopped one says so, and with a card
+    /// that came first (the front's), `C-q` goes there after it. The toast is that session's news: the
+    /// front's Claude doesn't see it (other sessions are counts at its level).
+    #[test]
+    fn a_turn_ended_behind_is_said_once_with_its_name() {
+        use crate::editor::ToastKind;
+        use crate::offer::{Offer, What};
+        let (mut ed, front, back) = two_projects("ended");
+        let ok = json!({"type": "result", "result": "done"});
+        let failed = json!({"type": "result", "is_error": true, "result": "API Error: overloaded\nlater"});
+        let stopped = json!({"type": "result", "subtype": "error_during_execution", "result": ""});
+        claude_ends(&mut ed, &[ok, failed, stopped]);
+        let (id, _) = back_at_work(&mut ed, &back);
+        turn_ends(&mut ed, id);
+        let said = |ed: &Editor, text: &str| ed.toasts.iter().filter(|t| t.text == text).count();
+        let msg = "back · turn ended — C-q goes there";
+        assert_eq!(said(&ed, msg), 1, "{:?}", ed.toasts);
+        assert_eq!(ed.toasts.iter().find(|t| t.text == msg).map(|t| t.of), Some(Some(id)));
+        // Once: more of it applied behind says nothing again
+        ed.with_session(id, |_| {});
+        assert_eq!(said(&ed, msg), 1);
+        // The user's state has it; the front's Claude's doesn't
+        assert!(ed.ui_state().toasts.iter().any(|t| t.text == msg));
+        assert!(ed.ui_state_claude().toasts.iter().all(|t| !t.text.contains("back ·")));
+        // C-q: there
+        feed(&mut ed, "<C-q>");
+        assert_eq!(ed.session.id, id);
+        // A failed turn: its error's first line, a warning
+        feed(&mut ed, "<space>lagain<ret><esc>");
+        assert!(ed.session_switch(0));
+        turn_ends(&mut ed, id);
+        let warn = ed.toasts.iter().find(|t| t.text.starts_with("back · turn ended: ")).expect("said");
+        assert_eq!(
+            (warn.text.as_str(), warn.kind),
+            ("back · turn ended: API Error: overloaded — C-q goes there", ToastKind::Warning)
+        );
+        // A stopped one, a card of the front's up first: `C-q` goes there after it
+        assert!(ed.session_switch(id));
+        feed(&mut ed, "<space>lonce more<ret><esc>");
+        assert!(ed.session_switch(0));
+        let what = What::Screen { call: crate::tools::Call::test(1) };
+        ed.push_offer(Offer::new("Claude asks".into(), "to see the screen", "", String::new(), what));
+        turn_ends(&mut ed, id);
+        assert_eq!(said(&ed, "back · turn stopped — C-q goes there after 1 older"), 1, "{:?}", ed.toasts);
+        std::fs::remove_dir_all(front.parent().unwrap()).ok();
+    }
+
+    /// The front session's turn ends with its chat out of sight past the turn — the code zoomed (`C-w z`):
+    /// said, with where it's seen. In sight, or minimized only by follow mode while Claude worked (it's back
+    /// with the answer): nothing.
+    #[test]
+    fn the_fronts_turn_ended_out_of_sight_is_said() {
+        let (mut ed, front, _) = two_projects("front-ended");
+        claude_ends(&mut ed, &[json!({"type": "result", "result": "done"})]);
+        let said = |ed: &Editor| ed.toasts.iter().filter(|t| t.text.starts_with("Claude's turn")).count();
+        feed(&mut ed, "<space>l<esc>");
+        ed.session.chat.as_mut().unwrap().follow.on = false;
+        // In sight
+        feed(&mut ed, "<space>lone<ret><esc>");
+        screen(&mut ed, 160, 30);
+        assert!(ed.screen.chat_x.is_some());
+        turn_ends(&mut ed, 0);
+        assert_eq!(said(&ed), 0, "{:?}", ed.toasts);
+        // Minimized by follow mode while Claude works: nothing
+        ed.session.chat.as_mut().unwrap().follow.on = true;
+        feed(&mut ed, "<space>ltwo<ret><esc>");
+        screen(&mut ed, 160, 30);
+        assert!(ed.screen.chat_x.is_none(), "minimized while it works");
+        turn_ends(&mut ed, 0);
+        assert_eq!(said(&ed), 0, "{:?}", ed.toasts);
+        // The code zoomed: said
+        ed.session.chat.as_mut().unwrap().follow.on = false;
+        feed(&mut ed, "<space>lthree<ret><esc>");
+        screen(&mut ed, 160, 30);
+        feed(&mut ed, "<C-w>z");
+        screen(&mut ed, 160, 30);
+        assert!(ed.zoomed().is_some() && ed.screen.chat_x.is_none());
+        turn_ends(&mut ed, 0);
+        let t = ed.toasts.iter().find(|t| t.text.starts_with("Claude's turn")).map(|t| t.text.as_str());
+        assert_eq!(t, Some("Claude's turn ended — space l shows it"), "{:?}", ed.toasts);
+        std::fs::remove_dir_all(front.parent().unwrap()).ok();
     }
 }

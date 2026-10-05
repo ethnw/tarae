@@ -63,6 +63,14 @@ impl Editor {
             l.rebasing = None;
         }
         s.cards.retain(|c| c.session == own);
+        // (a toast that's news of another session — its turn ended, it waits: theirs, a count here)
+        let others: Vec<String> = self
+            .toasts
+            .iter()
+            .filter(|t| t.of.is_some_and(|of| of != self.session.id))
+            .map(|t| format!("toast#{}", t.id))
+            .collect();
+        s.toasts.retain(|t| !others.contains(&t.id));
         // (the inbox is every session's: only its own session's entries — the others are counts)
         s.inbox.retain(|e| e.session == own);
         for c in s.cards.iter_mut().filter(|c| c.kind.starts_with("plugin")) {

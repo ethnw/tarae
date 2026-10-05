@@ -977,11 +977,19 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             let (calls, took) = (c.calls.len(), c.started.elapsed());
             c.state = State::Idle;
             c.calls.clear();
+            let how = match &r {
+                Ok(_) => Ok(()),
+                Err(_) if c.stopping => Err("stopped".to_string()),
+                Err(e) => Err(e.clone()),
+            };
             crate::uistate::watch::turn(ed, "ended", calls, Some(took));
             let ok = r.is_ok();
-            // (a session behind: its tab says `done` until it's looked at — #86)
+            // A session behind: its tab says `done` until it's looked at (#86), and a toast says it once
+            // (`with_session`). In front with the chat out of sight past the turn: said here
             if ed.background() {
-                ed.session.turn_done = true;
+                ed.session.turn_end = Some((Instant::now(), how));
+            } else if out_of_sight(ed) {
+                turn_end_said(ed, how);
             }
             let Some(c) = ed.session.chat.as_mut() else { return };
             match r {
@@ -1067,6 +1075,24 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             crate::reads::turn_over(ed);
             crate::restart::turn_over(ed);
         }
+    }
+}
+
+/// The front session's chat stays out of sight once its turn is over: the last frame drew none, and not only
+/// because follow mode minimized it while Claude worked (that comes back with the answer) — something else
+/// fills the screen (`C-w z`), or a review is read wide (`space v z`).
+fn out_of_sight(ed: &Editor) -> bool {
+    let zoomed = ed.zoomed().is_some_and(|z| z != crate::sizes::Zoom::Chat);
+    ed.last_frame.is_some() && ed.screen.chat_x.is_none() && (zoomed || ed.review_wide())
+}
+
+/// The front session's turn ended with its chat out of sight: said, and where it's seen.
+fn turn_end_said(ed: &mut Editor, how: Result<(), String>) {
+    let (kind, words) = crate::session::turn_end_words(&how);
+    let msg = format!("Claude's {words} — space l shows it");
+    match kind {
+        crate::editor::ToastKind::Warning => ed.set_warning(msg),
+        _ => ed.set_status(msg),
     }
 }
 

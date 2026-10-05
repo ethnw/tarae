@@ -68,7 +68,10 @@ pub enum Next {
     Review,
     /// Elsewhere: another session, a card stacked behind the front one, an edit waiting its turn.
     Go(Box<Entry>),
-    /// Nothing waits.
+    /// Nothing waits, and this session behind ended its turn unseen — the first of them to end (its tab's
+    /// `done`). Not an entry of the inbox (nothing there asks for an answer): a tail after it.
+    Done(SessionId),
+    /// Nothing waits, no turn ended unseen.
     None,
 }
 
@@ -200,7 +203,9 @@ impl Editor {
 
     /// Where `C-q` goes now, unheld — the inbox's first, and what that is from here.
     pub fn next_up(&self) -> Next {
-        let Some(e) = self.inbox().into_iter().next() else { return Next::None };
+        let Some(e) = self.inbox().into_iter().next() else {
+            return self.turns_ended().first().map_or(Next::None, |&id| Next::Done(id));
+        };
         let here = e.session_id() == self.session.id && !self.background();
         match e.card() {
             Some(id) if here && self.offers.first().is_some_and(|o| o.id == id && !o.installing()) => {
@@ -211,12 +216,21 @@ impl Editor {
         }
     }
 
-    /// `C-q` with no card of its to take it: to the one that has waited longest. False: nothing waits.
+    /// `C-q` with no card of its to take it: to the one that has waited longest — nothing waiting, to the
+    /// session whose turn ended first, unseen. False: nothing waits, no turn ended.
     pub(crate) fn inbox_next(&mut self) -> bool {
         match self.next_up() {
             Next::None => false,
             Next::Go(e) => {
                 self.inbox_to(&e);
+                true
+            }
+            Next::Done(id) => {
+                let Some(l) = self.sessions.iter().find(|l| l.id == id) else { return false };
+                let ago = l.turn_end.as_ref().map_or(0, |t| ms(t.0, Instant::now()));
+                let said = format!("{} · its turn ended {} ago", l.label(), waited(ago));
+                self.session_switch(id);
+                self.set_status(said);
                 true
             }
             // (the card up, the review in front: theirs — `card_key`, `llm::review_key`)

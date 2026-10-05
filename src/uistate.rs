@@ -279,8 +279,13 @@ impl Editor {
                 v.push(shortcut(Region::Card(o.id), Filter::Only(vec![ctrl('q')])));
             }
         }
-        // `C-q` to the one that has waited longest, elsewhere (the front's edit review takes its own)
-        if !modal && !held && matches!(next, crate::inbox::Next::Go(_) | crate::inbox::Next::None) {
+        // `C-q` to the one that has waited longest, elsewhere (the front's edit review takes its own) — nothing
+        // waiting, to a session whose turn ended
+        let elsewhere = matches!(
+            next,
+            crate::inbox::Next::Go(_) | crate::inbox::Next::Done(_) | crate::inbox::Next::None
+        );
+        if !modal && !held && elsewhere {
             v.push(shortcut(Region::NextCard, Filter::Only(vec![ctrl('q')])));
         }
         // `terminal_key`: the program has them all

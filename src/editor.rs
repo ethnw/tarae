@@ -130,6 +130,9 @@ pub struct Toast {
     pub shown: bool,
     /// Which message it is — the count of messages said when it came (`toast#N` in the UI state).
     pub id: u64,
+    /// The session it's news of, when that's one behind (said there, or about it) — Claude's level of the
+    /// state leaves it out for any other session's Claude (other sessions are counts there).
+    pub of: Option<crate::event::SessionId>,
 }
 
 /// Two clicks on the same picker row this close together are a double click (it opens the row).
@@ -212,7 +215,7 @@ impl Toast {
             ToastKind::Error => 60_000,
         };
         let life = std::time::Duration::from_millis(ms);
-        Toast { text, kind, at: std::time::Instant::now(), life, step: None, shown: false, id: 0 }
+        Toast { text, kind, at: std::time::Instant::now(), life, step: None, shown: false, id: 0, of: None }
     }
 
     pub fn alive(&self) -> bool {
@@ -1255,9 +1258,19 @@ impl Editor {
         self.report_as_is(kind, msg);
     }
 
+    /// News of session `id` (its name in `msg` already), said from the front — a toast that's that session's
+    /// (`Toast.of`), not the front's.
+    pub(crate) fn said_for(&mut self, id: crate::event::SessionId, kind: ToastKind, msg: String) {
+        self.report_as_is(kind, msg.clone());
+        if let Some(t) = self.toasts.iter_mut().rev().find(|t| t.text == msg && t.kind == kind) {
+            t.of = Some(id);
+        }
+    }
+
     fn report_as_is(&mut self, kind: ToastKind, msg: String) {
+        let of = self.behind.then_some(self.session.id);
         self.recorded(kind, msg.clone());
-        self.toast(kind, msg.clone());
+        self.toast(kind, msg.clone(), of);
         let severity = if kind == ToastKind::Error { Severity::Error } else { Severity::Info };
         self.status = Some((msg, severity));
     }
@@ -1325,7 +1338,7 @@ impl Editor {
         self.status = Some((msg.into(), Severity::Info));
     }
 
-    fn toast(&mut self, kind: ToastKind, text: String) {
+    fn toast(&mut self, kind: ToastKind, text: String, of: Option<crate::event::SessionId>) {
         // The card is gone (all had their time) → this one starts a new card
         if !self.toasts.iter().any(Toast::alive) {
             self.toasts.clear();
@@ -1333,10 +1346,10 @@ impl Editor {
         // The same message again: its time starts over, where it is (moving it would make the card jump)
         let id = self.said;
         if let Some(t) = self.toasts.iter_mut().find(|t| t.text == text && t.kind == kind) {
-            *t = Toast { id, ..Toast::new(kind, text) };
+            *t = Toast { id, of, ..Toast::new(kind, text) };
             return;
         }
-        self.toasts.push(Toast { id, ..Toast::new(kind, text) });
+        self.toasts.push(Toast { id, of, ..Toast::new(kind, text) });
         // (the card shows the newest few and counts the rest — all of them are in `:messages`)
         if self.toasts.len() > MESSAGES_KEPT {
             self.toasts.remove(0);
@@ -2945,7 +2958,10 @@ impl Editor {
             && key.code == Code::Char('q')
             && self.picker.is_none()
             && self.prompt.is_none()
-            && matches!(self.next_up(), crate::inbox::Next::Go(_) | crate::inbox::Next::None)
+            && matches!(
+                self.next_up(),
+                crate::inbox::Next::Go(_) | crate::inbox::Next::Done(_) | crate::inbox::Next::None
+            )
         {
             took(Handler::NextCard);
             if !self.inbox_next() {
@@ -9260,8 +9276,12 @@ mod tests {
         assert!(ed.offers.is_empty(), "no card over the front session");
         assert!(ed.session.review.is_none(), "no review over it");
         assert_eq!(ed.doc().id, front_doc, "the front stays where it was");
-        let told: Vec<&String> =
-            ed.messages.iter().map(|m| &m.2).filter(|m| m.contains("Claude waits for your answer")).collect();
+        let told: Vec<&String> = ed
+            .messages
+            .iter()
+            .map(|m| &m.2)
+            .filter(|m| m.contains(" · waits for you — C-q goes there"))
+            .collect();
         assert_eq!(told.len(), 1, "said once: {told:?}");
         assert!(told[0].starts_with(&format!("{} · ", session_by(&ed, behind).name)), "named: {}", told[0]);
         // In front: its card and its review are up, on its own file

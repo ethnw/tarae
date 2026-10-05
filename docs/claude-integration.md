@@ -91,6 +91,16 @@ longest, whichever session it's in, and once that's the card up here, `C-q` give
 waits, `C-q` never says nothing does. A run of Claude's that has printed nothing for minutes is in the list too,
 but after everything that asks for an answer: it may only be slow, and a card surely waits.
 
+**News of sessions behind** is said where you are, inside tarae — no system notification, no bell. When a session
+behind starts waiting for you, or its Claude's turn ends, a toast names it: `fix-login · waits for you — C-q goes
+there`, `fix-login · turn ended — C-q goes there` (a stopped turn says `turn stopped`; a failed one, its error, as a
+warning). When something older waits elsewhere, the toast says so: `C-q goes there after 2 older`. Its tab over
+the chat (or the status line's chip, with the chat closed) keeps saying `▲ waits` or `done` until you look. Once
+nothing waits, `C-q` goes to the sessions whose turn ended — the first to end first — and says when. In the front
+session, a turn that ends while the chat is out of sight (something else zoomed with `C-w z`, a review read wide)
+is said the same way: `Claude's turn ended — space l shows it`. Claude's own view of the screen leaves out other
+sessions' news (they're counts there).
+
 ![The inbox over the code: three rows, oldest first — main · Claude wants to run outside the sandbox · cargo test -q parser:: (run · 13 s), api · Claude wants to see your screen (screen · 9 s), docs · Change 1 of 1 · README.md (edit · 6 s) — and the status line's main ▲3 waiting](screenshots/inbox.png)
 ([hanji theme](screenshots/inbox-hanji.png))
 

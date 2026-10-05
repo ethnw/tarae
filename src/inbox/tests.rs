@@ -145,7 +145,7 @@ fn c_q_goes_to_the_oldest_in_any_session() {
     park(&mut ed, back, claudes(2, 60));
     // (#94: tarae's own card, parked in a session whose turn ended behind)
     park(&mut ed, third, tarae(30));
-    session(&mut ed, third).turn_done = true;
+    session(&mut ed, third).turn_end = Some((Instant::now(), Ok(())));
     // The status line counts all of them, every session's
     let rows = screen(&mut ed, 160, 30);
     assert!(rows[29].contains("▲3 waiting"), "{}", rows[29]);
@@ -235,6 +235,35 @@ fn a_card_waiting_comes_before_a_run_only_quiet() {
     assert_eq!(ed.session.id, 0);
     assert_eq!(ed.slot(), Some(crate::sizes::Slot::Task));
     assert!(ed.bottom_has_keys());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Nothing waits, but turns ended in sessions behind (their tabs say `done`): `C-q` goes to them, the one
+/// that ended first first, and says when — after whatever waits: a card that comes meanwhile goes first, and
+/// it isn't the inbox's (its count stays what waits for an answer). None left: "no card waits".
+#[test]
+fn c_q_goes_to_a_finished_session_when_nothing_waits() {
+    let (mut ed, dir, back, third) = three("done");
+    let ago = |s: u64| Some((Instant::now() - Duration::from_secs(s), Ok(())));
+    session(&mut ed, back).turn_end = ago(30);
+    session(&mut ed, third).turn_end = ago(200);
+    assert!(ed.inbox().is_empty(), "a turn's end asks nothing");
+    assert_eq!(ed.next_up(), super::Next::Done(third));
+    // A card comes meanwhile: it goes first
+    park(&mut ed, back, claudes(1, 1));
+    feed(&mut ed, "<C-q>");
+    assert_eq!((ed.session.id, ed.offers.first().map(|o| o.title.as_str())), (back, Some("Claude asks 1")));
+    ed.offers.clear();
+    // (back was looked at with it: its `done` went)
+    assert!(session(&mut ed, back).turn_end.is_none());
+    // Then third's turn end, said with how long ago
+    feed(&mut ed, "<C-q>");
+    assert_eq!(ed.session.id, third);
+    assert!(ed.status.as_ref().is_some_and(|s| s.0 == "third · its turn ended 3 min ago"), "{:?}", ed.status);
+    // Nothing left
+    feed(&mut ed, "<C-q>");
+    assert_eq!(ed.session.id, third);
+    assert!(ed.status.as_ref().is_some_and(|s| s.0.contains("no card waits")), "{:?}", ed.status);
     std::fs::remove_dir_all(&dir).ok();
 }
 

@@ -196,6 +196,15 @@ const SCENES: &[Scene] = &[
         weighty_card(ed);
     }),
     ("a card up, an older one in a session behind", older_card_behind),
+    ("nothing waits, a turn ended in a session behind", |ed| {
+        let dir = std::env::temp_dir().join(format!("tarae-uistate-done-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let id = ed.session_open(&dir).unwrap();
+        assert!(ed.session_switch(0) && ed.session.id != id);
+        let l = ed.sessions.iter_mut().find(|l| l.id == id).unwrap();
+        l.turn_end = Some((Instant::now(), Ok(())));
+        assert_eq!(ed.next_up(), crate::inbox::Next::Done(id));
+    }),
     ("a card up, an older one behind, the chat's draft", |ed| {
         older_card_behind(ed);
         chat(ed, "hello");
