@@ -7,7 +7,7 @@ let tarae [offer to](#when-one-is-missing).
 | Language | Language server (first one found) | Tests | Debugger |
 |---|---|---|---|
 | Rust | `rust-analyzer` | `cargo test` | `lldb-dap` (builds with `cargo build` first) |
-| C / C++ | `clangd` | — | `lldb-dap` |
+| C / C++ | `clangd` | — | `lldb-dap` (attach to the program your build made) |
 | Go | `gopls` | `go test` | `dlv` |
 | Python | `basedpyright`, `pyright`, `pylsp` — and `ruff` beside it | `pytest` | `debugpy` |
 | Java | `jdtls` (Java 21+) | Gradle (`./gradlew` or `gradle`) · Maven (`./mvnw` or `mvn`) | java-debug inside jdtls (offered for download) |

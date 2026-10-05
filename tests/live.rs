@@ -810,6 +810,68 @@ fn python_debug_test_stops_at_breakpoint() {
     debug_test_stops_at_breakpoint(&sb, "calc.py", "return a", "test_calc.py", "def test_add");
 }
 
+/// A breakpoint, `F5` on the file: as its pack's `[debug]` says (built first, for Rust), it stops there.
+fn launch_stops_at_breakpoint(sb: &Sandbox, open: &str, bp: &str) {
+    let mut t = sb.spawn(&[open]);
+    t.send(&format!("/{bp}\r"));
+    t.wait_text(&format!("/{bp}"));
+    t.send(" Gb");
+    t.wait_for("the breakpoint in the gutter", |s| s.contains("●"));
+    t.send(" Gl");
+    let s = t.wait_for("stopped at the breakpoint", |s| s.contains("F10 over") && s.contains("a = 1"));
+    assert!(s.contains("VARIABLES"), "{s}");
+    t.send(" Gt");
+    t.wait_for("the debug run over", |s| !s.contains("F10 over"));
+}
+
+#[test]
+#[ignore = "live: run with `cargo live`"]
+fn rust_launch_builds_and_stops_at_breakpoint() {
+    let lldb = Command::new("xcrun").args(["-f", "lldb-dap"]).output().is_ok_and(|o| o.status.success());
+    if !have("cargo") || (!lldb && !have("lldb-dap") && skip("no lldb-dap")) {
+        return;
+    }
+    let sb = Sandbox::live("f5-rust");
+    sb.write_config(&format!("{LIVE_CONFIG}lsp = false\n"));
+    std::fs::create_dir_all(sb.file("src")).unwrap();
+    sb.write("Cargo.toml", "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
+    sb.write(
+        "src/main.rs",
+        "fn add(a: i32, b: i32) -> i32 {\n    let c = a + b;\n    c\n}\n\nfn main() {\n    println!(\"{}\", add(1, 2));\n}\n",
+    );
+    launch_stops_at_breakpoint(&sb, "src/main.rs", "let c");
+}
+
+#[test]
+#[ignore = "live: run with `cargo live`"]
+fn go_launch_stops_at_breakpoint() {
+    if !have("go") || !have("dlv") {
+        return;
+    }
+    let sb = Sandbox::live("f5-go");
+    sb.write_config(&format!("{LIVE_CONFIG}lsp = false\n"));
+    sb.write("go.mod", "module demo\n\ngo 1.21\n");
+    sb.write(
+        "main.go",
+        "package main\n\nimport \"fmt\"\n\nfunc add(a, b int) int {\n\tc := a + b\n\treturn c\n}\n\nfunc main() {\n\tfmt.Println(add(1, 2))\n}\n",
+    );
+    launch_stops_at_breakpoint(&sb, "main.go", "c := a");
+}
+
+#[test]
+#[ignore = "live: run with `cargo live`"]
+fn python_launch_stops_at_breakpoint() {
+    let debugpy =
+        Command::new("python3").args(["-c", "import debugpy"]).output().is_ok_and(|o| o.status.success());
+    if !debugpy && skip("python3 has no debugpy (pip install debugpy)") {
+        return;
+    }
+    let sb = Sandbox::live("f5-py");
+    sb.write_config(&format!("{LIVE_CONFIG}lsp = false\n"));
+    sb.write("main.py", "def add(a, b):\n    c = a + b\n    return c\n\n\nprint(add(1, 2))\n");
+    launch_stops_at_breakpoint(&sb, "main.py", "c = a");
+}
+
 // ── The chat (space l) ───────────────────────────────────────────────────────
 
 /// Claude checks with tarae's run_tests tool: the tests run in the test panel, and the answer names the failure.

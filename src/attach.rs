@@ -1,14 +1,9 @@
 //! Attach a debugger to a running program (remote debugging) — `space G a` · `:attach [name | host:port]`.
 //!
-//! Each language attaches differently:
-//! - **Python** — the debug server of a program launched with `python -m debugpy --listen 5678 app.py`
-//!   speaks DAP → connect directly over TCP and `attach`.
-//! - **Go** — the server of `dlv debug|exec|attach --headless --listen :2345 --accept-multiclient` also
-//!   speaks DAP → connect directly over TCP and `attach {mode: remote}`.
-//! - **Java** — launch the JVM with `-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005`
-//!   → java-debug inside jdtls attaches over JDWP (java.rs).
-//! - **Rust·C** — remote `gdbserver`·`lldb-server gdbserver :1234 ./app` → lldb-dap via
-//!   `gdb-remote host:port`. With `pid`, a local process (lldb-dap·dlv·debugpy all).
+//! How each language attaches is its pack's `[debug]` (`debugpack.rs`): `attach-tcp` — the program's own
+//! debug server speaks DAP, so connect straight to host:port (debugpy's, a headless dlv's); `attach-remote` —
+//! the debugger started here attaches to a remote stub at host:port (lldb-dap's `gdb-remote`); `attach-pid` —
+//! to a local process; or a way of its own (Java: java-debug inside jdtls attaches over JDWP, java.rs).
 //!
 //! Config (`~/.config/tarae/config.toml`·`.tarae.toml`) — name targets and pick one in `space G a`:
 //! ```toml
@@ -25,9 +20,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use serde_json::json;
-
 use crate::dap::{kill_group, setsid};
+use crate::debugpack::Attach;
 use crate::editor::Editor;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -45,7 +39,7 @@ pub struct AttachTarget {
     /// Source root on the remote side (`/app` in a container etc.) — maps breakpoint·call stack paths
     /// to this project's root.
     pub remote_root: Option<String>,
-    /// Rust·C: executable to read symbols from (lldb).
+    /// The executable to read symbols from, from the project's root (`{program}` in the pack's attach).
     pub program: Option<String>,
 }
 
@@ -251,23 +245,24 @@ impl Editor {
             .map(|f| crate::lsp::find_root_for(&lang, f))
             .unwrap_or_else(|| self.session.root.clone());
         let root = std::fs::canonicalize(&root).unwrap_or(root);
-        if !matches!(lang.as_str(), "python" | "go" | "java" | "rust" | "c" | "cpp") {
-            return self.set_error(format!(
-                "attach: no debugger for {}",
-                if lang.is_empty() { "this file" } else { &lang }
-            ));
-        }
         self.dap_test = None;
         self.dap_resume = Some(crate::offer::Resume::Attach(t.clone()));
         self.dap_generation += 1;
         let generation = self.dap_generation;
         self.dap = Some(Dap::placeholder(State::Starting, t.label()));
-        let direct = matches!(lang.as_str(), "python" | "go") && t.pid.is_none();
-        let (before, host, port, cwd) = (t.before.clone(), t.host.clone(), t.port, root.clone());
+        let (before, cwd) = (t.before.clone(), root.clone());
+        let t2 = t.clone();
         self.events.jobs().spawn(move || {
-            let helper = before.as_deref().map(|b| start_helper(b, &cwd)).transpose();
-            let stream = match (&helper, direct, port) {
-                (Ok(_), true, Some(p)) => Some(connect(&host, p)),
+            // How this language attaches (its pack), then the helper, then straight to host:port if that's it
+            let how = crate::debugpack::of(&lang).and_then(|d| {
+                d.attach(&cwd, t2.pid, &t2.host, t2.port, t2.program.as_deref(), t2.remote_root.as_deref())
+            });
+            let helper = match &how {
+                Ok(_) => before.as_deref().map(|b| start_helper(b, &cwd)).transpose(),
+                Err(e) => Err(e.clone()),
+            };
+            let stream = match (&helper, &how, t2.port) {
+                (Ok(_), Ok(Attach::Tcp(..)), Some(p)) => Some(connect(&t2.host, p)),
                 _ => None,
             };
             move |ed: &mut Editor| {
@@ -277,14 +272,14 @@ impl Editor {
                     }
                     return;
                 }
-                let helper = match helper {
-                    Ok(h) => h,
-                    Err(e) => {
+                let (helper, how) = match (helper, how) {
+                    (Ok(h), Ok(how)) => (h, how),
+                    (Err(e), _) | (_, Err(e)) => {
                         ed.dap = None;
                         return ed.set_error(format!("attach: {e}"));
                     }
                 };
-                ed.attach_continue(t, lang, root, file, stream, helper, generation);
+                ed.attach_continue(t, lang, root, file, how, stream, helper, generation);
             }
         });
     }
@@ -296,12 +291,12 @@ impl Editor {
         lang: String,
         root: PathBuf,
         file: Option<PathBuf>,
+        how: Attach,
         stream: Option<Result<std::net::TcpStream, String>>,
         helper: Option<Child>,
         generation: u64,
     ) {
         let program = t.label();
-        let remote = t.remote_root.clone();
         let fail = |ed: &mut Editor, helper: Option<Child>, e: String| {
             if let Some(mut h) = helper {
                 kill_group(&mut h);
@@ -309,31 +304,22 @@ impl Editor {
             ed.dap = None;
             ed.set_error(format!("attach: {e}"));
         };
-        match (lang.as_str(), stream) {
-            // Directly over TCP — remote debugpy·dlv servers speak DAP
-            (l @ ("python" | "go"), Some(stream)) => {
+        match (how, stream) {
+            // Directly over TCP — the program's debug server speaks DAP
+            (Attach::Tcp(args, debugger), Some(stream)) => {
                 let s = match stream {
                     Ok(s) => s,
                     Err(e) => return fail(self, helper, e),
                 };
-                let args = if l == "python" {
-                    let mut a = json!({ "justMyCode": false });
-                    if let Some(r) = &remote {
-                        a["pathMappings"] = json!([{ "localRoot": root, "remoteRoot": r }]);
-                    }
-                    a
-                } else {
-                    let mut a = json!({ "mode": "remote" });
-                    if let Some(r) = &remote {
-                        a["substitutePath"] = json!([{ "from": root, "to": r }]);
-                    }
-                    a
-                };
-                let id = if l == "python" { "debugpy" } else { "go" };
                 let reader = Box::new(s.try_clone().expect("tcp clone"));
-                self.dap_connect(id, reader, Box::new(s), None, args, program, generation);
+                self.dap_connect(&debugger.id, reader, Box::new(s), None, args, program, generation);
+                if let Some(d) = &mut self.dap {
+                    d.quiet = debugger.quiet;
+                }
             }
-            ("java", _) => {
+            (Attach::Tcp(..), None) => return fail(self, helper, "needs host:port".into()),
+            // The one way in code: Java's, through jdtls (java.rs — a plugin later)
+            (Attach::Way, _) => {
                 let Some(port) = t.port else {
                     return fail(self, helper, "Java attaches to host:port (JDWP)".into());
                 };
@@ -356,32 +342,8 @@ impl Editor {
                 }
                 return;
             }
-            // Launch a local adapter to attach — lldb-dap (gdb-remote·pid); with pid, dlv·debugpy too
-            (l, _) => {
-                let adapter_lang = if l == "cpp" || l == "c" { "rust" } else { l };
-                let Some(id) = crate::dap::adapter_id(adapter_lang) else {
-                    return fail(self, helper, format!("no debug adapter for {l}"));
-                };
-                let args = match (id, t.pid) {
-                    ("lldb-dap", Some(pid)) => json!({ "pid": pid, "program": t.program }),
-                    ("lldb-dap", None) => {
-                        let mut a = json!({ "attachCommands": [format!("gdb-remote {}:{}", t.host, t.port.unwrap_or(0))] });
-                        if let Some(p) = &t.program {
-                            a["program"] = json!(root.join(p));
-                        }
-                        if let Some(r) = &remote {
-                            a["sourceMap"] = json!([[r, root]]);
-                        }
-                        a
-                    }
-                    ("go", Some(pid)) => json!({ "mode": "local", "processId": pid }),
-                    ("debugpy", Some(pid)) => json!({ "processId": pid, "justMyCode": false }),
-                    _ => return fail(self, helper, "needs a pid or host:port".into()),
-                };
-                let mut args = args;
-                args["cwd"] = json!(root);
-                self.dap_start(adapter_lang, args, program, generation);
-            }
+            // The debugger started here to attach — by pid, or to a remote stub
+            (Attach::Started(args), _) => self.dap_start(&lang, root, args, program, generation),
         }
         // On the debug run (or dap_start's placeholder, which the debug run takes over)
         match &mut self.dap {

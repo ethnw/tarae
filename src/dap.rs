@@ -1,9 +1,10 @@
-//! Debugger (Debug Adapter Protocol) — lldb-dap (Rust·C·C++), dlv (Go), debugpy (Python),
-//! java-debug (Java — `java.rs`).
+//! Debugger (Debug Adapter Protocol). Which debugger a language has, how it's found and started, how a
+//! file is launched (built first?) and a program attached to: its pack's `[debug]` and
+//! `[debugger.<name>]` (`debugpack.rs`); Java's way through jdtls is `java.rs`.
 //!
-//! Flow: (for Rust, build the executable with `cargo build` first) → launch the adapter → initialize →
-//! launch → on the `initialized` event, all breakpoints + configurationDone → on stop (`stopped`), call
-//! stack → top frame's variables → the editor jumps to that line.
+//! Flow: (build first, if the pack says so) → launch the adapter → initialize → launch → on the
+//! `initialized` event, all breakpoints + configurationDone → on stop (`stopped`), call stack → top frame's
+//! variables → the editor jumps to that line.
 //! Reading is on a thread (same `Content-Length` framing as LSP); writes are small messages, sent from main.
 //! Screen (breakpoints ●·stopped line ▶·variable values at line end·debug pane below) is in term.rs.
 
@@ -74,6 +75,8 @@ pub struct Dap {
     launch: Value,
     /// The adapter's last stderr lines — why it died if it exits before starting.
     adapter_err: Arc<Mutex<Vec<String>>>,
+    /// Its own output lines, as its pack says (dropped, dimmed).
+    pub(crate) quiet: crate::debugpack::Quiet,
 }
 
 /// One breakpoint — condition·log message are optional.
@@ -234,86 +237,31 @@ fn reap(mut c: Child) {
 
 // ── Adapters ─────────────────────────────────────────────────────────────
 
-/// Language → adapter id (which launch·attach arguments it takes). Its command is resolved by `adapter`.
-pub(crate) fn adapter_id(lang: &str) -> Option<&'static str> {
-    match lang {
-        "rust" | "c" | "cpp" => Some("lldb-dap"),
-        "go" => Some("go"),
-        "python" => Some("debugpy"),
-        _ => None,
-    }
-}
-
-/// Language → (adapter command, connect over TCP?) — searches PATH·xcrun, so on a worker thread.
-/// Python: the project's venv python when there is one (debugpy often lives only there).
-fn adapter(lang: &str, root: &Path) -> Option<(Vec<String>, bool)> {
-    let which = |c: &str| {
-        std::env::var_os("PATH")
-            .and_then(|p| std::env::split_paths(&p).map(|d| d.join(c)).find(|f| f.is_file()))
-    };
-    match adapter_id(lang)? {
-        "lldb-dap" => {
-            // Linux distros add a version to the name (apt's lldb-dap-18) or use the old name (lldb-vscode)
-            let named = || {
-                let mut names = vec!["lldb-dap".to_string(), "lldb-vscode".to_string()];
-                for v in (14..=22).rev() {
-                    names.push(format!("lldb-dap-{v}"));
-                    names.push(format!("lldb-vscode-{v}"));
-                }
-                names.iter().find_map(|n| which(n))
-            };
-            let path = named().or_else(|| {
-                let out = Command::new("xcrun").args(["-f", "lldb-dap"]).output().ok()?;
-                let p = String::from_utf8(out.stdout).ok()?.trim().to_string();
-                (!p.is_empty()).then(|| PathBuf::from(p))
-            })?;
-            Some((vec![path.display().to_string()], false))
-        }
-        "go" => which("dlv")
-            .or_else(|| crate::packs::installed_at("dlv"))
-            .map(|p| (vec![p.display().to_string(), "dap".into()], true)),
-        _ => {
-            let py = crate::testing::py_interpreter(root);
-            match which("debugpy-adapter") {
-                Some(p) if py == "python3" => Some((vec![p.display().to_string()], false)),
-                _ => Some((vec![py, "-m".into(), "debugpy.adapter".into()], false)),
-            }
-        }
-    }
-}
-
-/// An adapter process with its transport ready (made on a worker thread).
+/// An adapter process with its transport ready (made on a worker thread), and its pack's say.
 pub(crate) struct Started {
     reader: Box<dyn std::io::Read + Send>,
     writer: Box<dyn Write + Send>,
     child: Child,
     err: Arc<Mutex<Vec<String>>>,
+    debugger: crate::debugpack::Debugger,
 }
 
-/// How `resolve` says the adapter isn't there.
-const NO_ADAPTER: &str = "no debug adapter";
-
-/// `adapter`, or what to install.
-fn resolve(lang: &str, cwd: &Path) -> Result<(Vec<String>, bool), String> {
-    adapter(lang, cwd).ok_or_else(|| match adapter_id(lang) {
-        Some("lldb-dap") => format!("{NO_ADAPTER} for {lang} — install lldb-dap (LLVM)"),
-        Some("go") => format!("{NO_ADAPTER} for go — install dlv (github.com/go-delve/delve)"),
-        _ => format!("{NO_ADAPTER} for {lang}"),
-    })
-}
-
-/// Launches the adapter in a process group of its own (`setsid`) in `cwd` and connects to it (worker thread — dlv's TCP port
-/// takes a moment to come up).
-fn spawn_adapter((cmd, tcp): (Vec<String>, bool), cwd: &Path) -> Result<Started, String> {
+/// Launches the adapter (`cmd`, as `debugger`'s pack says) in a process group of its own (`setsid`) in `cwd`
+/// and connects to it (worker thread — a TCP port takes a moment to come up).
+fn spawn_adapter(
+    (debugger, cmd): (crate::debugpack::Debugger, Vec<String>),
+    cwd: &Path,
+) -> Result<Started, String> {
     let mut c = Command::new(&cmd[0]);
     // The adapter runs in the project folder (the same real path as launch's cwd — if paths diverge,
     // like macOS /tmp ↔ /private/tmp, dlv's go build fails with "outside main module", measured)
     c.args(&cmd[1..]).current_dir(cwd);
+    let tcp = debugger.tcp();
     let port = tcp
         .then(|| std::net::TcpListener::bind("127.0.0.1:0").ok()?.local_addr().ok().map(|a| a.port()))
         .flatten();
-    if let Some(p) = port {
-        c.args(["-l", &format!("127.0.0.1:{p}")]);
+    if let Some(listen) = port.and_then(|p| debugger.listen(p)) {
+        c.args(listen);
     }
     c.stdin(Stdio::piped()).stdout(if tcp { Stdio::null() } else { Stdio::piped() }).stderr(Stdio::piped());
     let mut child = setsid(&mut c).spawn().map_err(|e| format!("{}: {e}", cmd[0]))?;
@@ -353,66 +301,13 @@ fn spawn_adapter((cmd, tcp): (Vec<String>, bool), cwd: &Path) -> Result<Started,
             (Box::new(child.stdout.take().expect("stdout")), Box::new(child.stdin.take().expect("stdin")))
         }
     };
-    Ok(Started { reader, writer, child, err })
+    Ok(Started { reader, writer, child, err, debugger })
 }
 
 /// `what` + the reason lines below it (if any).
-fn with_reason(what: &str, why: &[impl AsRef<str>]) -> String {
+pub(crate) fn with_reason(what: &str, why: &[impl AsRef<str>]) -> String {
     let why: Vec<&str> = why.iter().map(AsRef::as_ref).collect();
     if why.is_empty() { what.to_string() } else { format!("{what}\n{}", why.join("\n")) }
-}
-
-/// Runs a cargo build (`args` + JSON messages) and returns the executable of the last artifact `pick`
-/// accepts — on failure, the first compiler error as rustc renders it (else cargo's own last stderr lines).
-/// On a worker thread.
-pub(crate) fn cargo_artifact(
-    args: &[&str],
-    cwd: &Path,
-    pick: impl Fn(&Value) -> bool,
-) -> Result<Option<PathBuf>, String> {
-    let out = Command::new("cargo")
-        .args(args)
-        .arg("--message-format=json")
-        .current_dir(cwd)
-        .env("CARGO_TERM_COLOR", "never")
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("cargo: {e}"))?;
-    let mut exe = None;
-    let mut first_error = None;
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
-        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
-        match v["reason"].as_str() {
-            Some("compiler-artifact") if pick(&v) => {
-                if let Some(e) = v["executable"].as_str() {
-                    exe = Some(PathBuf::from(e));
-                }
-            }
-            Some("compiler-message") if v["message"]["level"] == "error" && first_error.is_none() => {
-                let m = &v["message"];
-                first_error = m["rendered"].as_str().or_else(|| m["message"].as_str()).map(str::to_string);
-            }
-            _ => {}
-        }
-    }
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let why: Vec<&str> = match &first_error {
-            Some(e) => e.trim_end().lines().take(8).collect(),
-            None => {
-                let tail: Vec<&str> = stderr.lines().filter(|l| !l.trim().is_empty()).rev().take(3).collect();
-                tail.into_iter().rev().collect()
-            }
-        };
-        return Err(with_reason("build failed", &why));
-    }
-    Ok(exe)
-}
-
-/// Finds the executable via `cargo build` (on a worker thread).
-fn cargo_build(root: &Path) -> Result<PathBuf, String> {
-    let is_bin = |v: &Value| v["target"]["kind"].as_array().is_some_and(|k| k.iter().any(|x| x == "bin"));
-    cargo_artifact(&["build"], root, is_bin)?.ok_or_else(|| "no binary target to debug".to_string())
 }
 
 /// Color scope chosen by the value's shape (string·number·boolean·other).
@@ -578,73 +473,83 @@ impl Editor {
             (None, Some(spec)) => spec.name.clone(),
             (None, None) => String::new(),
         };
-        // Java: the adapter is java-debug inside jdtls — nothing to launch, ask jdtls step by step (java.rs)
-        if lang == "java" {
-            let root = crate::lsp::find_root_for("java", &path);
-            let root = std::fs::canonicalize(&root).unwrap_or(root);
-            self.dap_generation += 1;
-            return self.java_debug_start(path, root, self.dap_generation);
-        }
-        if adapter_id(&lang).is_none() {
-            return self.set_error(format!(
-                "debug: no debug adapter for {}",
-                if lang.is_empty() { "this file" } else { &lang }
-            ));
-        }
-        let root = crate::lsp::find_root(&path);
-        let root = std::fs::canonicalize(&root).unwrap_or(root);
+        let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         self.dap_generation += 1;
         let generation = self.dap_generation;
-        let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        match lang.as_str() {
-            "rust" | "c" | "cpp" => {
-                let root2 = root.clone();
-                self.dap_build_and_start(&lang, name(&root), root, generation, move || {
-                    if !root2.join("Cargo.toml").is_file() {
-                        return Err("open a Cargo project (C/C++: :debug <program>)".into());
-                    }
-                    let exe = cargo_build(&root2)?;
-                    let program = name(&exe);
-                    Ok((json!({ "program": exe, "args": [], "cwd": root2, "stopOnEntry": false }), program))
-                });
-            }
-            "go" => {
-                // outputMode remote = program output as DAP output events instead of dlv's stdout
-                // (so it shows in the debug pane)
-                let dir =
-                    std::fs::canonicalize(path.parent().unwrap_or(&root)).unwrap_or_else(|_| root.clone());
-                let launch = json!({ "mode": "debug", "program": dir, "cwd": root, "outputMode": "remote" });
-                self.dap_start("go", launch, name(&path), generation);
-            }
-            _ => {
-                // The project's venv python runs the program (its packages)
-                let python = crate::testing::py_interpreter(&root);
-                let launch = json!({ "program": path, "python": python, "console": "internalConsole",
-                                     "cwd": root, "justMyCode": true });
-                self.dap_start("python", launch, name(&path), generation);
-            }
-        }
-    }
-
-    /// Launches `lang`'s adapter (resolve·spawn·connect on a worker thread) and starts a debug run with
-    /// `launch` (its `cwd` = where the adapter runs). Meanwhile "starting" in the debug pane — callers may
-    /// set `request`·`helper` on that placeholder; the debug run takes them over.
-    pub(crate) fn dap_start(&mut self, lang: &str, launch: Value, program: String, generation: u64) {
-        let Some(id) = adapter_id(lang) else {
-            self.dap = None;
-            return self.set_error(format!("debug: no debug adapter for {lang}"));
-        };
-        self.dap = Some(Dap::placeholder(State::Starting, program.clone()));
-        let lang = lang.to_string();
-        let cwd = launch["cwd"].as_str().map_or_else(|| PathBuf::from("."), PathBuf::from);
+        self.dap = Some(Dap::placeholder(State::Starting, name(&path)));
+        // The pack read, the project's root found, the build's files looked for — on a worker
         self.events.jobs().spawn(move || {
-            let started = resolve(&lang, &cwd).and_then(|cmd| spawn_adapter(cmd, &cwd));
-            let started = started.map(|s| (s, launch, program));
-            move |ed: &mut Editor| ed.dap_started(id, started, generation)
+            let debug = crate::debugpack::of(&lang);
+            // A way in code finds its project as its language does (Java's: the topmost build file); a
+            // debugger runs in the project's root by any language's markers
+            let root = match debug.as_ref().map(|d| &d.with) {
+                Ok(crate::debugpack::With::Way(_)) => crate::lsp::find_root_for(&lang, &path),
+                _ => crate::lsp::find_root(&path),
+            };
+            let root = std::fs::canonicalize(&root).unwrap_or(root);
+            let how = debug.and_then(|d| d.launch(&path, &root));
+            move |ed: &mut Editor| ed.dap_launch_with(how, lang, path, root, generation)
         });
     }
 
-    /// Rust·C: build first, then launch lldb-dap on the result — all on a worker thread, "building" in the
+    /// `F5`'s next step, as `lang`'s pack says: Java's own way, the debugger started, or a build first.
+    fn dap_launch_with(
+        &mut self,
+        how: Result<crate::debugpack::Launch, String>,
+        lang: String,
+        path: PathBuf,
+        root: PathBuf,
+        generation: u64,
+    ) {
+        use crate::debugpack::Launch;
+        if self.dap_generation != generation {
+            return;
+        }
+        let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        match how {
+            Err(e) => {
+                self.dap = None;
+                self.set_error(format!("debug: {e}"));
+            }
+            // Java: the adapter is java-debug inside jdtls — nothing to launch, ask jdtls step by step (java.rs)
+            // (it puts up its own placeholder once it begins)
+            Ok(Launch::Way) => {
+                self.dap = None;
+                self.java_debug_start(path, root, generation);
+            }
+            Ok(Launch::Ready(launch)) => self.dap_start(&lang, root, launch, name(&path), generation),
+            Ok(Launch::Build(build, pending)) => {
+                let cwd = root.clone();
+                self.dap_build_and_start(&lang, name(&root), root, generation, move || {
+                    let built = crate::debugpack::run_build(&build, &cwd)?;
+                    Ok((pending.with(&built), name(&built)))
+                });
+            }
+        }
+    }
+
+    /// Launches `lang`'s adapter in `cwd` (resolve·spawn·connect on a worker thread) and starts a debug run
+    /// with `launch`. Meanwhile "starting" in the debug pane — callers may set `request`·`helper` on that
+    /// placeholder; the debug run takes them over.
+    pub(crate) fn dap_start(
+        &mut self,
+        lang: &str,
+        cwd: PathBuf,
+        launch: Value,
+        program: String,
+        generation: u64,
+    ) {
+        self.dap = Some(Dap::placeholder(State::Starting, program.clone()));
+        let lang = lang.to_string();
+        self.events.jobs().spawn(move || {
+            let started = crate::debugpack::resolve(&lang, &cwd)
+                .and_then(|found| Ok(spawn_adapter(found, &cwd)?))
+                .map(|s| (s, launch, program));
+            move |ed: &mut Editor| ed.dap_started(started, generation)
+        });
+    }
+
+    /// Built first, then the adapter launched on the result — all on a worker thread, "building" in the
     /// debug pane meanwhile. `build` returns (launch arguments, program name).
     pub(crate) fn dap_build_and_start(
         &mut self,
@@ -659,16 +564,20 @@ impl Editor {
         let lang = lang.to_string();
         self.events.jobs().spawn(move || {
             // Adapter first — no point building if there's nothing to debug with
-            let started = resolve(&lang, &cwd).and_then(|cmd| {
+            let started = crate::debugpack::resolve(&lang, &cwd).and_then(|found| {
                 let (launch, program) = build()?;
-                Ok((spawn_adapter(cmd, &cwd)?, launch, program))
+                Ok((spawn_adapter(found, &cwd)?, launch, program))
             });
-            move |ed: &mut Editor| ed.dap_started("lldb-dap", started, generation)
+            move |ed: &mut Editor| ed.dap_started(started, generation)
         });
     }
 
     /// The adapter is up (or couldn't start) — begins the debug run if it's still the current one.
-    fn dap_started(&mut self, id: &str, started: Result<(Started, Value, String), String>, generation: u64) {
+    fn dap_started(
+        &mut self,
+        started: Result<(Started, Value, String), crate::debugpack::Failed>,
+        generation: u64,
+    ) {
         // (built, or not: the debug panel says how it goes from here)
         self.step_done("debug-build");
         if self.dap_generation != generation {
@@ -679,23 +588,39 @@ impl Editor {
         }
         match started {
             Ok((s, launch, program)) => {
-                self.dap_connect(id, s.reader, s.writer, Some(s.child), launch, program, generation);
-                if let Some(d) = &mut self.dap {
-                    d.adapter_err = s.err;
+                let d = s.debugger;
+                self.dap_connect(&d.id, s.reader, s.writer, Some(s.child), launch, program, generation);
+                if let Some(run) = &mut self.dap {
+                    run.adapter_err = s.err;
+                    run.quiet = d.quiet;
+                }
+                if let Some(slow) = d.slow_start.filter(|s| s.here()) {
+                    self.dap_slow_start(slow, generation);
                 }
             }
             Err(e) => {
                 self.dap = None;
                 // No debugger: offer it if its pack says how (then debugging starts again)
-                let tool = match id {
-                    "go" => "dlv",
-                    other => other,
-                };
-                if !(e.starts_with(NO_ADAPTER) && self.offer_install_debugger(tool)) {
-                    self.set_error(format!("debug: {e}"));
+                if !e.offer.is_some_and(|tool| self.offer_install_debugger(&tool)) {
+                    self.set_error(format!("debug: {}", e.said));
                 }
             }
         }
+    }
+
+    /// What the debugger's pack says when it hasn't started in a while (macOS's lldb waiting on a permission
+    /// prompt that may not be in sight).
+    fn dap_slow_start(&mut self, slow: crate::debugpack::SlowStart, generation: u64) {
+        self.events.jobs().spawn(move || {
+            std::thread::sleep(slow.after);
+            move |ed: &mut Editor| {
+                if ed.dap_generation == generation
+                    && ed.dap.as_ref().is_some_and(|d| d.state == State::Starting)
+                {
+                    ed.set_warning(slow.say);
+                }
+            }
+        });
     }
 
     /// Starts a debug run with an adapter whose transport is ready
@@ -741,24 +666,6 @@ impl Editor {
                     "columnsStartAt1": true, "pathFormat": "path", "supportsVariableType": true }),
         );
         self.dap = Some(d);
-        // macOS: the debugger needs permission to launch processes (a password prompt at first — if it's
-        // not visible, this waits forever).
-        // If it can't start within 8 s, tell the user what to do.
-        if cfg!(target_os = "macos") && id == "lldb-dap" {
-            self.events.jobs().spawn(move || {
-                std::thread::sleep(Duration::from_secs(8));
-                move |ed: &mut Editor| {
-                    if ed.dap_generation == generation
-                        && ed.dap.as_ref().is_some_and(|d| d.state == State::Starting)
-                    {
-                        ed.set_warning(
-                            "Still waiting for macOS to allow debugging — approve the password prompt, \
-                             or run `sudo DevToolsSecurity -enable` once and press F5 again",
-                        );
-                    }
-                }
-            });
-        }
     }
 
     pub fn dap_continue(&mut self) {
@@ -961,7 +868,7 @@ impl Editor {
                         if cat != "telemetry" {
                             for line in body["output"].as_str().unwrap_or_default().lines() {
                                 let first = d.output.is_empty();
-                                if let Some(c) = output_category(&cat, line, first) {
+                                if let Some(c) = d.quiet.category(&cat, line, first) {
                                     d.output.push((c.to_string(), line.to_string()));
                                 }
                             }
@@ -1036,6 +943,7 @@ impl Dap {
             program,
             launch: Value::Null,
             adapter_err: Arc::default(),
+            quiet: Default::default(),
         }
     }
 }
@@ -1066,25 +974,6 @@ pub fn inline_values(
         }
     }
     out
-}
-
-/// Which category an output line shows as — the adapter's own chatter dimmed, useless lines dropped (None).
-/// dlv sends "Building …" to stdout and "Type 'dlv help' …" (a terminal-only hint) to console.
-fn output_category<'a>(cat: &'a str, line: &str, first: bool) -> Option<&'a str> {
-    if line.starts_with("Type 'dlv help'") {
-        return None;
-    }
-    // Disassembly lldb prints on stop (inside dyld at attach — `dyld\`_dyld_start:` · `->  0x… <+4>: mov`)
-    let t = line.trim_start().trim_start_matches("->").trim_start();
-    let disasm = t.starts_with("0x") && t.contains(" <+") && t.contains(">:");
-    let symbol_head = cat == "console" && t.ends_with(':') && t.contains('`') && !t.contains(' ');
-    if cat != "stdout" && cat != "stderr" && (disasm || symbol_head) {
-        return None;
-    }
-    if first && cat == "stdout" && line.starts_with("Building ") {
-        return Some("console");
-    }
-    Some(cat)
 }
 
 #[cfg(test)]
@@ -1122,24 +1011,33 @@ mod tests {
         assert_eq!(value_scope("42"), "constant.numeric");
     }
 
+    /// dlv's and lldb-dap's packs: dlv's terminal hint and lldb's disassembly dropped, dlv's first `Building`
+    /// line dimmed as its own — the program's output kept.
     #[test]
     fn adapter_chatter_is_dimmed_or_dropped() {
-        assert_eq!(output_category("stdout", "Building /tmp/app", true), Some("console"));
+        let q = |name: &str| crate::debugpack::debugger(name).unwrap().quiet;
+        let dlv = q("dlv");
+        assert_eq!(dlv.category("stdout", "Building /tmp/app", true), Some("console"));
         assert_eq!(
-            output_category("stdout", "Building /tmp/app", false),
+            dlv.category("stdout", "Building /tmp/app", false),
             Some("stdout"),
             "printed by the program"
         );
-        assert_eq!(output_category("console", "Type 'dlv help' for list of commands.", false), None);
+        assert_eq!(dlv.category("console", "Type 'dlv help' for list of commands.", false), None);
+        let lldb = q("lldb-dap");
+        assert_eq!(lldb.category("stdout", "Building /tmp/app", true), Some("stdout"), "dlv's, not lldb's");
         // Drop the disassembly lldb prints on attach (program output stays)
-        assert_eq!(output_category("console", "dyld`_dyld_start:", false), None);
-        assert_eq!(output_category("console", "->  0x1044d0bf0 <+0>:  mov    x0, sp", false), None);
+        assert_eq!(lldb.category("console", "dyld`_dyld_start:", false), None);
+        assert_eq!(lldb.category("console", "->  0x1044d0bf0 <+0>:  mov    x0, sp", false), None);
         assert_eq!(
-            output_category("console", "    0x1044d0bf4 <+4>:  and    sp, x0, #0xfffffff0", false),
+            lldb.category("console", "    0x1044d0bf4 <+4>:  and    sp, x0, #0xfffffff0", false),
             None
         );
-        assert_eq!(output_category("stdout", "0x10 <+4>: mine", false), Some("stdout"));
-        assert_eq!(output_category("stderr", "boom", false), Some("stderr"));
+        assert_eq!(lldb.category("console", "Process 42 stopped", false), Some("console"));
+        assert_eq!(lldb.category("stdout", "0x10 <+4>: mine", false), Some("stdout"));
+        assert_eq!(lldb.category("stderr", "boom", false), Some("stderr"));
+        let none = crate::debugpack::Quiet::default();
+        assert_eq!(none.category("console", "dyld`_dyld_start:", false), Some("console"), "no pack, no rule");
     }
 
     /// A writer that collects what was sent to the adapter.
@@ -1332,7 +1230,7 @@ mod tests {
         let mut ed = Editor::new(crate::config::Config::default());
         ed.dap_generation += 1;
         let g = ed.dap_generation;
-        ed.dap_start("python", json!({ "program": "a.py", "cwd": root }), "a.py".into(), g);
+        ed.dap_start("python", root.clone(), json!({ "program": "a.py", "cwd": root }), "a.py".into(), g);
         assert_eq!(ed.dap.as_ref().map(|d| d.state.clone()), Some(State::Starting), "returns at once");
         settle_until(&mut ed, |ed| ed.dap.is_none());
         let msg = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
@@ -1355,9 +1253,21 @@ mod tests {
         .unwrap();
         std::fs::write(root.join("src/main.rs"), "fn main() {\n    let n: i32 = \"one\";\n}\n").unwrap();
         crate::testing::cargo_builds_inside(&root);
-        let e = cargo_build(&root).unwrap_err();
+        let root = root.canonicalize().unwrap();
+        // The Rust pack's F5: its build, then its launch with what was built
+        let rust = crate::debugpack::of("rust").unwrap();
+        let file = root.join("src/main.rs");
+        let crate::debugpack::Launch::Build(build, pending) = rust.launch(&file, &root).unwrap() else {
+            panic!("rust builds first")
+        };
+        let e = crate::debugpack::run_build(&build, &root).unwrap_err();
         assert!(e.starts_with("build failed\n") && e.contains("mismatched types"), "{e}");
         assert!(e.contains("src/main.rs:2"), "where, as rustc renders it: {e}");
+        std::fs::write(&file, "fn main() {\n    let n: i32 = 1;\n    println!(\"{n}\");\n}\n").unwrap();
+        let exe = crate::debugpack::run_build(&build, &root).unwrap();
+        assert!(exe.is_file() && exe.file_name().unwrap() == "x", "{exe:?}");
+        let launch = pending.with(&exe);
+        assert_eq!(launch, json!({ "program": exe, "args": [], "cwd": root, "stopOnEntry": false }));
         std::fs::remove_dir_all(&root).ok();
     }
 }

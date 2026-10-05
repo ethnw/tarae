@@ -79,6 +79,10 @@ steps = [{ name = "mvn test", cmd = "mvn -B test" }]
 # root has no build file (measured: ext/clone/pom.xml became project "v"; dot-folders it skips itself).
 # Globs over the folder holding a build file — the folder itself and below; vscode-java's defaults kept.
 # (Its workspace folder and the debug plugin are added where it starts — java.rs.)
+# F5 and attach: java-debug inside jdtls, a chain of jdtls commands — tarae's own code (java.rs), not data
+[debug]
+way = "java"
+
 [server.jdtls]
 leave-out = { init = "settings.java.import.exclusions", each = ["**/{rel}", "**/{rel}/**"], keep = ["**/node_modules/**", "**/.metadata/**", "**/archetype-resources/**", "**/META-INF/maven/**"] }
 

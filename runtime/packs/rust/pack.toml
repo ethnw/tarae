@@ -38,7 +38,7 @@ dev = true
 [test]
 query = "tests.scm"
 cwd = { nearest = ["Cargo.toml"] }
-helpers = ["cargo"]          # {cargo-target}, {module}, {module-label}
+helpers = ["cargo"]          # {cargo-target}, {module}, {module-label}, {crate-root}
 parse = "rust"
 
 run = ["cargo", "test", "{cargo-target}", "--", "{module}{path}", "--exact"]
@@ -48,9 +48,36 @@ label = "{module}{path}"
 label-group = "{module}{groups}::*"
 label-file = "{module-label}"
 
-debug = { program = "{cargo-test-binary}", args = ["{module}{path}", "--exact", "--nocapture", "--test-threads=1"], cwd = "{cwd}", stopOnEntry = false }
-debug-group = { program = "{cargo-test-binary}", args = ["{module}{groups}::", "--nocapture", "--test-threads=1"], cwd = "{cwd}", stopOnEntry = false }
-debug-file = { program = "{cargo-test-binary}", args = ["{module}", "--nocapture", "--test-threads=1"], cwd = "{cwd}", stopOnEntry = false }
+debug = { program = "{built}", args = ["{module}{path}", "--exact", "--nocapture", "--test-threads=1"], cwd = "{cwd}", stopOnEntry = false }
+debug-group = { program = "{built}", args = ["{module}{groups}::", "--nocapture", "--test-threads=1"], cwd = "{cwd}", stopOnEntry = false }
+debug-file = { program = "{built}", args = ["{module}", "--nocapture", "--test-threads=1"], cwd = "{cwd}", stopOnEntry = false }
+
+# {built}: the test binary of the file's target (its root file is {crate-root})
+[test.debug-build]
+run = ["cargo", "test", "--no-run", "{cargo-target}", "--message-format=json"]
+env = { CARGO_TERM_COLOR = "never" }
+pick = { reason = "compiler-artifact", "profile.test" = true, "target.src_path" = "{crate-root}" }
+take = "executable"
+error = { pick = { reason = "compiler-message", "message.level" = "error" }, text = ["message.rendered", "message.message"] }
+none = "no test binary for this file"
+
+# F5: the package's binary, built first; attach as C does (lldb-dap, the c pack)
+[debug]
+debugger = "lldb-dap"
+launch = { program = "{built}", args = [], cwd = "{cwd}", stopOnEntry = false }
+attach-pid = { pid = "{pid}", program = "{program}", cwd = "{cwd}" }
+attach-remote = { attachCommands = ["gdb-remote {host}:{port}"], program = "{program}", sourceMap = [["{remote-root}", "{cwd}"]], cwd = "{cwd}" }
+
+# A build's failure is rustc's first error, as rustc renders it
+[debug.build]
+when = ["Cargo.toml"]
+otherwise = "open a Cargo project"
+run = ["cargo", "build", "--message-format=json"]
+env = { CARGO_TERM_COLOR = "never" }
+pick = { reason = "compiler-artifact", "target.kind" = "bin" }
+take = "executable"
+error = { pick = { reason = "compiler-message", "message.level" = "error" }, text = ["message.rendered", "message.message"] }
+none = "no binary target to debug"
 
 [tasks]
 when = ["Cargo.toml"]

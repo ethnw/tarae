@@ -45,6 +45,24 @@ debug = { module = "pytest", args = ["{rel}::{path}", "-q", "--color=no"], pytho
 debug-group = { module = "pytest", args = ["{rel}::{groups}", "-q", "--color=no"], python = "{python}", cwd = "{cwd}", console = "internalConsole", justMyCode = false }
 debug-file = { module = "pytest", args = ["{rel}", "-q", "--color=no"], python = "{python}", cwd = "{cwd}", console = "internalConsole", justMyCode = false }
 
+# F5: the file, with the project's virtualenv's Python (its packages)
+[debug]
+debugger = "debugpy"
+helpers = ["python"]
+launch = { program = "{file}", python = "{python}", console = "internalConsole", cwd = "{cwd}", justMyCode = true }
+attach-pid = { processId = "{pid}", justMyCode = false, cwd = "{cwd}" }
+# `python -m debugpy --listen 5678 app.py` speaks DAP: straight to it
+attach-tcp = { justMyCode = false, pathMappings = [{ localRoot = "{cwd}", remoteRoot = "{remote-root}" }] }
+
+# The virtualenv's Python runs it when there is one (debugpy often lives only there); else debugpy's own
+# launcher, else python3's module
+[debugger.debugpy]
+find = [
+    { file = ["{cwd}/.venv/bin/python", "{cwd}/venv/bin/python", "${VIRTUAL_ENV}/bin/python"], run = ["{found}", "-m", "debugpy.adapter"] },
+    "debugpy-adapter",
+    { program = "python3", run = ["{found}", "-m", "debugpy.adapter"] },
+]
+
 [tasks]
 when = ["pyproject.toml", "setup.py", "setup.cfg"]
 rank = 50

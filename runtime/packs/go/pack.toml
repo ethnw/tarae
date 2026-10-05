@@ -82,6 +82,25 @@ ways = [
     { run = ["brew", "install", "gopls"] },
 ]
 
+# F5: the file's package. outputMode remote: the program's output comes as the debugger's output events
+# (the debug pane), not on dlv's stdout
+[debug]
+debugger = "dlv"
+launch = { mode = "debug", program = "{dir}", cwd = "{cwd}", outputMode = "remote" }
+attach-pid = { mode = "local", processId = "{pid}", cwd = "{cwd}" }
+# `dlv … --headless --listen :2345 --accept-multiclient` speaks DAP: straight to it
+attach-tcp = { mode = "remote", substitutePath = [{ from = "{cwd}", to = "{remote-root}" }] }
+
+# Where `go install` put it too (`[install.dlv]`'s bin)
+[debugger.dlv]
+adapter-id = "go"
+find = ["dlv"]
+run = ["{found}", "dap"]
+listen = ["-l", "127.0.0.1:{port}"]
+# A hint for its terminal, and its first line, building the program — its own, shown dim
+quiet = ["^Type 'dlv help'"]
+own-first = "^Building "
+
 [install.dlv]
 what = "Go's debugger"
 ways = [

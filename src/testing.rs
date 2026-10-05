@@ -41,7 +41,7 @@ pub enum How {
         argv: Vec<String>,
         debug: Option<Value>,
         parse: String,
-        build: Option<crate::packs::Build>,
+        build: Option<crate::debugpack::Build>,
         debug_run: Option<(Vec<String>, String)>,
         junit: Option<(Vec<PathBuf>, Vec<PathBuf>)>,
     },
@@ -254,18 +254,6 @@ fn module_path(rest: &[&str]) -> Vec<String> {
         v.pop();
     }
     v
-}
-
-/// Builds the test binary with `cargo test --no-run` and returns its path (on a worker thread).
-pub fn cargo_test_binary(cwd: &Path, flag: &[String], crate_root: &Path) -> Result<PathBuf, String> {
-    let root = std::fs::canonicalize(crate_root).unwrap_or_else(|_| crate_root.to_path_buf());
-    let mut args = vec!["test", "--no-run"];
-    args.extend(flag.iter().map(String::as_str));
-    let pick = |v: &Value| {
-        let src = v["target"]["src_path"].as_str().map(PathBuf::from);
-        v["profile"]["test"] == true && src.is_some_and(|s| std::fs::canonicalize(&s).unwrap_or(s) == root)
-    };
-    crate::dap::cargo_artifact(&args, cwd, pick)?.ok_or_else(|| "no test binary for this file".to_string())
 }
 
 // ── Python ───────────────────────────────────────────────────────────────
@@ -869,36 +857,16 @@ impl Editor {
         let cwd = target.cwd.clone();
         let label = target.label.clone();
         match target.how {
-            // The test binary built first (on a worker), its path put into the launch configuration
-            How::Pack {
-                debug: Some(launch),
-                build: Some(crate::packs::Build::CargoTestBinary { flag, crate_root }),
-                ..
-            } => {
+            // What the pack builds first (on a worker), its path put into the launch configuration
+            How::Pack { debug: Some(launch), build: Some(build), .. } => {
                 self.dap_build_and_start(lang, label.clone(), cwd.clone(), generation, move || {
-                    let exe = cargo_test_binary(&cwd, &flag, &crate_root)?;
-                    Ok((with_binary(launch, &exe.display().to_string()), label))
+                    let built = crate::debugpack::run_build(&build, &cwd)?;
+                    Ok((crate::debugpack::with_built(launch, &built), label))
                 });
             }
-            How::Pack { debug: Some(launch), .. } => self.dap_start(lang, launch, label, generation),
+            How::Pack { debug: Some(launch), .. } => self.dap_start(lang, cwd, launch, label, generation),
             How::Pack { debug: None, .. } => self.set_error(format!("the {lang} pack has no debug for this")),
         }
-    }
-}
-
-/// A launch configuration with `{cargo-test-binary}` replaced by the binary built.
-fn with_binary(v: Value, exe: &str) -> Value {
-    match v {
-        Value::String(s) => Value::String(s.replace("{cargo-test-binary}", exe)),
-        Value::Array(a) => Value::Array(a.into_iter().map(|x| with_binary(x, exe)).collect()),
-        // In place, not collected: a Map's `collect` sorts — a copy of the sort for each (~6 KB)
-        Value::Object(mut o) => {
-            for x in o.values_mut() {
-                *x = with_binary(x.take(), exe);
-            }
-            Value::Object(o)
-        }
-        v => v,
     }
 }
 
@@ -1013,16 +981,22 @@ mod tests {
         let How::Pack { debug: Some(launch), build: Some(build), .. } = t.how else {
             panic!("a build to debug")
         };
+        // The pack's `debug-build`: `cargo test --no-run` for this file's target, the binary whose root file
+        // is the target's
+        assert_eq!(build.run, ["cargo", "test", "--no-run", "--lib", "--message-format=json"]);
+        let crate_root = d.join("src/lib.rs").display().to_string();
         assert_eq!(
-            build,
-            crate::packs::Build::CargoTestBinary {
-                flag: vec!["--lib".into()],
-                crate_root: d.join("src/lib.rs")
-            }
+            build.pick,
+            [
+                ("profile.test".to_string(), json!(true)),
+                ("reason".to_string(), json!("compiler-artifact")),
+                ("target.src_path".to_string(), json!(crate_root)),
+            ]
         );
-        assert_eq!(launch["program"], "{cargo-test-binary}", "filled in once built");
+        assert_eq!(build.take, "executable");
+        assert_eq!(launch["program"], "{built}", "filled in once built");
         assert_eq!(launch["args"], json!(["c", "--exact", "--nocapture", "--test-threads=1"]));
-        let launch = with_binary(launch, "/t/x-123");
+        let launch = crate::debugpack::with_built(launch, Path::new("/t/x-123"));
         assert_eq!(launch["program"], "/t/x-123");
         let _ = std::fs::remove_dir_all(&d);
     }

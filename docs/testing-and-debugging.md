@@ -83,8 +83,8 @@ debug = { mode = "test", program = "{cwd}", args = ["-test.run", "^{name}$"] }  
   - `{cwd}`, `{file}`, `{filename}`, `{rel}` (the file from `{cwd}`)
 - **Helpers.** An argument that is just a list variable becomes its items, and one that ends up empty is left out.
   - `helpers = ["python"]` adds `{python}`, the project's virtualenv Python.
-  - `helpers = ["cargo"]` adds `{cargo-target}` (`--lib`, `--bin x`, `--test x`) and `{module}` (the file's module
-    path). `{cargo-test-binary}` in a debug template is the test binary, built when debugging starts.
+  - `helpers = ["cargo"]` adds `{cargo-target}` (`--lib`, `--bin x`, `--test x`), `{module}` (the file's module
+    path) and `{crate-root}` (the target's root file).
   - `helpers = ["java"]` adds `{java-root}` (the top of a multi-module build), `{java-module-dir}`, `{java-build}`
     (`gradle` or `maven`), `{java-tool}` (the wrapper if there is one), `{java-task}` (`:app:test`), `{java-pl}`
     (`-pl app`) and `{package}`. `cwd` can be a template too: `cwd = "{java-root}"`.
@@ -92,6 +92,9 @@ debug = { mode = "test", program = "{cwd}", args = ["-test.run", "^{name}$"] }  
   settings override the rest.
 - **JUnit XML.** With `parse = "junit"`, results come from the reports written to `reports` during the run, and
   failures point into `sources` (through a Java stack, or the first `path:line` in the failure).
+- **Building before debugging.** `{built}` in a debug template is what `debug-build` builds when debugging
+  starts — the same table as `[debug] build` ([Debuggers from packs](#debuggers-from-packs)); Rust's builds the test
+  binary with `cargo test --no-run` and picks the one whose root file is `{crate-root}`.
 - **Debugging by attaching.** Instead of a `debug` template, `debug-args` are added to the command so the test
   waits for a debugger, and `debug-attach = "java"` attaches java-debug once the JVM says where.
 - **Kinds.** A query pattern can give its tests a kind with `(#set! kind "bench")`. `[test.kind.bench]` then has
@@ -241,21 +244,23 @@ Each top-level key of a `pack.toml` says how a pack of your own counts for it:
 
 | Keys | A pack of yours |
 |---|---|
-| `[test]`, `[tasks]`, `[[preflight]]`, `[[waits]]` | replaces the built-in table |
-| `[install.<tool>]`, `[grammar.<name>]` | replaces that entry; the others stay |
+| `[test]`, `[tasks]`, `[[preflight]]`, `[[waits]]`, `[debug]` | replaces the built-in table |
+| `[install.<tool>]`, `[grammar.<name>]`, `[debugger.<name>]` | replaces that entry; the others stay |
 | `[language.<name>]`, `[server.<name>]` | replaces the keys it sets; the entry's other keys stay — in whichever folder the language is |
 | `config-files` | adds to the built-in list; nothing can be taken out |
 | `outputs`, `first-made`, `protect` | ignored, and said at the start: tarae reads them from its own packs only (they decide what Claude's runs may reach or make) |
 
 A key no pack knows is a mistake in that pack, said with its name as one that doesn't parse is. Your
 `[language]`, `[grammar]` and `[server]` are read once, when tarae starts — after editing them, `:restart`.
-`[test]`, `[tasks]`, `[[preflight]]`, `[[waits]]` and `[install]` are read when they're used, so they count at once.
+`[test]`, `[tasks]`, `[[preflight]]`, `[[waits]]`, `[install]`, `[debug]` and `[debugger]` are read when they're
+used, so they count at once.
 
 ## Debugger
 
-DAP for Rust, C, and C++ (lldb-dap — Rust is built with `cargo build` first), Go (dlv), Python (debugpy), and Java
-(java-debug inside jdtls — the current file's `main`, otherwise the project's first; Maven, Gradle, or a folder with no
-build file). Everything lives under `space G`.
+DAP for Rust (lldb-dap — built with `cargo build` first), C and C++ (lldb-dap, by [attaching](#attaching-to-a-running-program)
+to the program your build made), Go (dlv), Python (debugpy), and Java (java-debug inside jdtls — the current file's
+`main`, otherwise the project's first; Maven, Gradle, or a folder with no build file). Everything lives under
+`space G`. Which debugger a language has and how it starts is [its pack's](#debuggers-from-packs).
 
 | Key | Does |
 |---|---|
@@ -286,6 +291,65 @@ evaluated in the current frame on every pause and listed under WATCH at the top 
 - **Go**: dlv must be newer than the installed Go. If it's out of date, the notice shows dlv's own explanation
   (`go install github.com/go-delve/delve/cmd/dlv@latest`)
 - **Java**: the java-debug extension is offered for download the first time — see [Java](features.md#java)
+
+### Debuggers from packs
+
+A language's debugging is its pack's: `[debug]` says which debugger, how `F5` launches a file and how a running
+program is attached to; `[debugger.<name>]` says how that debugger is found and started, in whichever pack has it
+(lldb-dap is the [C pack's](../runtime/packs/c), and Rust and C++ name it). A pack of yours replaces `[debug]` whole
+and a `[debugger.<name>]` entry by entry.
+
+```toml
+# ~/.local/share/tarae/packs/go/pack.toml — F5 runs the module's main package, not the file's
+[debug]
+debugger = "dlv"                      # a [debugger.<name>]; Java's pack says way = "java" (code, through jdtls)
+launch = { mode = "debug", program = "{cwd}", cwd = "{cwd}", outputMode = "remote" }   # the launch request
+attach-pid = { mode = "local", processId = "{pid}", cwd = "{cwd}" }                    # :attach by pid
+attach-tcp = { mode = "remote", substitutePath = [{ from = "{cwd}", to = "{remote-root}" }] }  # straight to host:port
+```
+
+- **`launch`** — what `F5` sends: `{file}`, `{filename}`, `{dir}` (the file's folder), `{cwd}` (the project's root,
+  where the debugger runs), `{python}` with `helpers = ["python"]`, and `{built}`. No `launch`: `F5` says to attach.
+- **`build`** — built first, on a worker, the debug panel saying so: `run`'s output is read as JSON lines and the last
+  one `pick` holds gives `{built}` from its field `take`. `pick` fields are dotted paths (`"target.kind" = "bin"`: a list
+  holding it counts; paths compare as real paths). A failed build shows the first line `error.pick` holds, by its first
+  `error.text` field there (rustc's own rendering), else the build's last stderr lines. `when` lists files the project
+  has one of, else `otherwise` is said; `none` is said when it built but nothing was picked; `env` for the build.
+- **Attaching** — `attach-pid` (`{pid}`, a number) and `attach-remote` (`{host}`, `{port}`: lldb's `gdb-remote`)
+  start the debugger here to attach; `attach-tcp` connects straight to host:port, where the program's own debug
+  server speaks DAP (debugpy, a headless dlv). `{program}` and `{remote-root}` come from `[[attach]]`; a key whose
+  value names one that wasn't given is left out.
+
+```toml
+# runtime/packs/go/pack.toml
+[debugger.dlv]
+adapter-id = "go"                     # what initialize calls it (the name unless set)
+find = ["dlv"]                        # in order; then where [install.dlv] puts it
+run = ["{found}", "dap"]
+listen = ["-l", "127.0.0.1:{port}"]   # it talks over TCP, on a port tarae picks (else stdio)
+quiet = ["^Type 'dlv help'"]          # its own output lines dropped (not the program's stdout/stderr)
+own-first = "^Building "              # a first stdout line that's its own, shown dim
+```
+
+`find` takes program names (`"lldb-dap-{22..14}"`: each number, in that order), `{ file = [...] }` (the first that
+exists: `{cwd}`, `~`, `${VAR}`), `{ ask = ["xcrun", "-f", "lldb-dap"] }` (the path a command prints), each with a
+`run` of its own if it needs one (the Python pack's virtualenv runs `-m debugpy.adapter`). `slow-start = { after = 8,
+os = "macos", say = "…" }` is what to say when it hasn't started by then. The debugger's name is its
+`[install.<name>]`: missing, it's offered, and debugging starts again once it's in.
+
+Where each thing used to be code, and what says it now:
+
+| Was in tarae's code | Pack key |
+|---|---|
+| Which debugger a language has | `[debug] debugger` (`way = "java"` for java-debug through jdtls) |
+| Finding lldb-dap (`lldb-vscode`, versioned names, `xcrun`), dlv (and where `go install` put it), debugpy (the virtualenv's Python) | `[debugger.<name>] find`, `run` |
+| dlv's `-l 127.0.0.1:<port>` | `[debugger.dlv] listen` |
+| "install lldb-dap / dlv" | the debugger's `[install.<name>]` |
+| macOS's 8-second lldb hint | `[debugger.lldb-dap] slow-start` |
+| Dropping dlv's terminal hint and lldb's disassembly; dimming dlv's `Building` | `[debugger.<name>] quiet`, `own-first` |
+| Rust's `cargo build` and picking the binary; Go's and Python's launch arguments | `[debug] build`, `launch`, `helpers` |
+| Rust's test binary (`cargo test --no-run`), `{cargo-test-binary}` | `[test] debug-build`, `{built}` |
+| Which languages attach, and each one's attach arguments | `[debug] attach-pid`, `attach-remote`, `attach-tcp` |
 
 ## Attaching to a running program
 

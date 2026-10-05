@@ -1,4 +1,4 @@
-# C++: clangd (the c pack's).
+# C++: clangd and lldb-dap (the c pack's).
 
 [language.cpp]
 title = "C++"
@@ -12,3 +12,9 @@ lsp = ["clangd"]
 [grammar.cpp]
 git = "https://github.com/tree-sitter/tree-sitter-cpp"
 rev = "56455f4245baf4ea4e0881c5169de69d7edd5ae7"
+
+# As C: no launch, attach (space G a)
+[debug]
+debugger = "lldb-dap"
+attach-pid = { pid = "{pid}", program = "{program}", cwd = "{cwd}" }
+attach-remote = { attachCommands = ["gdb-remote {host}:{port}"], program = "{program}", sourceMap = [["{remote-root}", "{cwd}"]], cwd = "{cwd}" }

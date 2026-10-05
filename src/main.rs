@@ -17,6 +17,7 @@ mod completion;
 mod config;
 mod conflict;
 mod dap;
+mod debugpack;
 mod diffview;
 mod disk;
 mod doccomment;

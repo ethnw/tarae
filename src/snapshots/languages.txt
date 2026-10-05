@@ -14,6 +14,7 @@
   roots: compile_commands.json CMakeLists.txt
   lsp: clangd (clangd)
   installs: c comment
+  debug: lldb-dap · attach-pid { cwd = "{cwd}", pid = "{pid}", program = "{program}" } · attach-remote { attachCommands = ["gdb-remote {host}:{port}"], cwd = "{cwd}", program = "{program}", sourceMap = [["{remote-root}", "{cwd}"]] }
 [c-sharp] C#
   grammar: c-sharp
   extensions: cs
@@ -37,6 +38,7 @@
   roots: compile_commands.json CMakeLists.txt
   lsp: clangd (clangd)
   installs: cpp comment
+  debug: lldb-dap · attach-pid { cwd = "{cwd}", pid = "{pid}", program = "{program}" } · attach-remote { attachCommands = ["gdb-remote {host}:{port}"], cwd = "{cwd}", program = "{program}", sourceMap = [["{remote-root}", "{cwd}"]] }
 [css] CSS
   grammar: css
   extensions: css
@@ -92,6 +94,7 @@
   roots: go.work go.mod
   lsp: gopls (gopls)
   installs: go comment
+  debug: dlv · launch { cwd = "{cwd}", mode = "debug", outputMode = "remote", program = "{dir}" } · attach-pid { cwd = "{cwd}", mode = "local", processId = "{pid}" } · attach-tcp { mode = "remote", substitutePath = [{ from = "{cwd}", to = "{remote-root}" }] }
 [gomod] go.mod
   grammar: gomod
   filenames: go.mod
@@ -142,6 +145,7 @@
   roots: pom.xml build.gradle build.gradle.kts settings.gradle settings.gradle.kts
   lsp: jdtls (jdtls)
   installs: java comment
+  debug: way java
 [javascript] JavaScript
   grammar: javascript
   extensions: js mjs cjs
@@ -241,6 +245,7 @@
   lsp: basedpyright (basedpyright-langserver --stdio) pyright (pyright-langserver --stdio) pylsp (pylsp)
   also: ruff (ruff server)
   installs: python comment
+  debug: debugpy · launch { console = "internalConsole", cwd = "{cwd}", justMyCode = true, program = "{file}", python = "{python}" } · attach-pid { cwd = "{cwd}", justMyCode = false, processId = "{pid}" } · attach-tcp { justMyCode = false, pathMappings = [{ localRoot = "{cwd}", remoteRoot = "{remote-root}" }] }
 [ruby] Ruby
   grammar: ruby
   extensions: rb
@@ -257,6 +262,7 @@
   needs-project: Cargo.toml rust-project.json
   lsp: rust-analyzer (rust-analyzer)
   installs: rust comment
+  debug: lldb-dap · launch { args = [], cwd = "{cwd}", program = "{built}", stopOnEntry = false } · build cargo build --message-format=json when Cargo.toml · attach-pid { cwd = "{cwd}", pid = "{pid}", program = "{program}" } · attach-remote { attachCommands = ["gdb-remote {host}:{port}"], cwd = "{cwd}", program = "{program}", sourceMap = [["{remote-root}", "{cwd}"]] }
 [scala] Scala
   grammar: scala
   extensions: scala sc
@@ -347,6 +353,11 @@
     quiescent: experimental/serverStatus (asked: experimental.serverStatusNotification) · quiescent health message
     symbol-params: {"searchKind":"allSymbols","searchScope":"workspace"}
     hide-lines: ^`#\[.*on by default$
+
+[debuggers]
+  debugpy (id debugpy): file:{cwd}/.venv/bin/python|{cwd}/venv/bin/python|${VIRTUAL_ENV}/bin/python→{found} -m debugpy.adapter debugpy-adapter python3→{found} -m debugpy.adapter · run {found}
+  dlv (id go): dlv · run {found} dap · listen -l 127.0.0.1:{port} · quiet ^Type 'dlv help' · own-first ^Building 
+  lldb-dap (id lldb-dap): lldb-dap lldb-vscode lldb-dap-22 lldb-dap-21 lldb-dap-20 lldb-dap-19 lldb-dap-18 lldb-dap-17 lldb-dap-16 lldb-dap-15 lldb-dap-14 lldb-vscode-22 lldb-vscode-21 lldb-vscode-20 lldb-vscode-19 lldb-vscode-18 lldb-vscode-17 lldb-vscode-16 lldb-vscode-15 lldb-vscode-14 ask:xcrun -f lldb-dap · run {found} · slow-start 8s macos · quiet ^\s*(?:->)?\s*0x\S*.* <\+.*>: · quiet ^\s*(?:->)?\s*\S*`\S*:$
 
 [grammars]
   bash https://github.com/tree-sitter/tree-sitter-bash 487734f87fd87118028a65a4599352fa99c9cde8 bundle

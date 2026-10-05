@@ -29,15 +29,16 @@
 //!   `|`), `{cwd}`, `{file}`, `{filename}`, `{rel}` (the file from `{cwd}`), and the helpers'. An argument
 //!   that is just a list variable (`"{cargo-target}"`) becomes its items; one that ends up empty is left
 //!   out.
-//! - Debugging: `{cargo-test-binary}` in a `debug` template is the test binary, built (`cargo test
-//!   --no-run`) when debugging starts. Or, instead of a `debug` template: `debug-args`, added to the
-//!   command so the test waits for a debugger, and `debug-attach = "java"`, which attaches java-debug once
-//!   the JVM says where.
+//! - Debugging: `{built}` in a `debug` template is what `debug-build` builds when debugging starts (the
+//!   shape of `[debug] build`, `debugpack.rs`). Or, instead of a `debug` template: `debug-args`, added to
+//!   the command so the test waits for a debugger, and `debug-attach = "java"`, which attaches java-debug
+//!   once the JVM says where.
 //! - `variant-by`: a template naming the `[test.variant.<name>]` whose settings (templates, `reports`,
 //!   `sources`, `debug-args`) override these — Java's `gradle` and `maven`. A kind's settings override the
 //!   test ones; `file = false` keeps its tests out of a file's run.
 //!
 //! `[tasks]`: see `tasks`. `[install.<tool>]`: see `Install`. `[server.<name>]`: see `LeaveOut`.
+//! `[debug]`, `[debugger.<name>]`: `debugpack.rs`.
 //! `[[waits]]`: see `waits`. `[language.<name>]`, `[grammar.<name>]`, `[server.<name>]`'s `command` and `args`,
 //! `config-files`, `outputs`: the language table, `languages.rs`. `first-made`: what a Linux run gets made
 //! first (`made_beside`, `sandbox/linux.rs`). How a runtime folder's pack counts for each key: `Reach`.
@@ -63,19 +64,12 @@ pub struct Found {
     pub debug: Option<Value>,
     /// The output parser's name.
     pub parse: String,
-    /// What to build before debugging (`{cargo-test-binary}`).
-    pub build: Option<Build>,
+    /// What to build before debugging (`{built}`).
+    pub build: Option<crate::debugpack::Build>,
     /// Debugging by running this command instead (the test waits for a debugger), then attaching this way.
     pub debug_run: Option<(Vec<String>, String)>,
     /// `parse = "junit"`: the folders the reports land in, and the source roots.
     pub junit: Option<(Vec<PathBuf>, Vec<PathBuf>)>,
-}
-
-/// Built when debugging starts, its path put into the launch configuration.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Build {
-    /// `cargo test --no-run` with these target flags, picking the binary whose root file is `crate_root`.
-    CargoTestBinary { flag: Vec<String>, crate_root: PathBuf },
 }
 
 /// A pack's `[test]`.
@@ -86,6 +80,8 @@ pub struct Tests {
     helpers: Vec<String>,
     parse: String,
     group_sep: String,
+    /// What `{built}` in a `debug` template is, built when debugging starts.
+    debug_build: Option<crate::debugpack::BuildTemplate>,
     base: Settings,
     variant_by: Option<String>,
     variants: HashMap<String, Settings>,
@@ -226,6 +222,10 @@ pub(crate) const KEYS: &[(&str, Reach)] = &[
     ("server", Reach::Yours),
     ("language", Reach::Yours),
     ("grammar", Reach::Yours),
+    // How a language is debugged and its debugger found: the user's own debugging (F5, a test's, attach) —
+    // never Claude's runs
+    ("debug", Reach::Yours),
+    ("debugger", Reach::Yours),
     ("config-files", Reach::Added),
     // Tools' output folders: skipped by walks — the token scan's among them, so one of one's own would hide
     // a token from it
@@ -247,7 +247,7 @@ const KEY_BY_KEY: &[&str] = &["language", "server"];
 
 /// `lang`'s `pack.toml`: the built-in one, with a runtime folder's tables in their place by their `Reach` —
 /// so a pack of one's own can add tests without losing the built-in tasks, or the other way.
-fn manifest(lang: &str) -> Option<Result<Table, String>> {
+pub(crate) fn manifest(lang: &str) -> Option<Result<Table, String>> {
     let rel = format!("{lang}/pack.toml");
     let builtin = builtin_manifests().iter().find(|(l, _)| l == lang).map(|(_, t)| t.clone());
     let user = crate::runtime::pack_user(&rel).map(|s| read_pack(lang, &s, "yours"));
@@ -340,7 +340,7 @@ pub(crate) fn over(b: &mut Table, u: Table) {
 
 /// Whether a `Yours` table holds entries by name (`[install.<tool>]`), not settings of its own (`[test]`).
 fn is_by_name(key: &str) -> bool {
-    ["install", "server", "language", "grammar"].contains(&key)
+    ["install", "server", "language", "grammar", "debugger"].contains(&key)
 }
 
 /// `mine` added to `theirs`: lists joined (what's in both once), tables key by key.
@@ -702,7 +702,7 @@ fn install_tables() -> Vec<(String, Table)> {
 }
 
 /// Every pack's `[<key>]` (a pack that can't be read is logged).
-fn tables_of(key: &str) -> Vec<(String, Table)> {
+pub(crate) fn tables_of(key: &str) -> Vec<(String, Table)> {
     let mut out = Vec::new();
     for lang in crate::runtime::pack_langs() {
         match manifest(&lang) {
@@ -955,7 +955,7 @@ fn download_way(w: &Table) -> Result<crate::fetch::Download, String> {
 
 /// `~/go/bin`, `${GOPATH}/bin` → a folder (None if a variable isn't set). A variable holding a list of
 /// folders (`GOPATH=/a:/b`) gives its first, where tools install to.
-fn expand_dir(d: &str) -> Option<PathBuf> {
+pub(crate) fn expand_dir(d: &str) -> Option<PathBuf> {
     let home = || std::env::var("HOME").ok().filter(|h| !h.is_empty());
     let d = match d.strip_prefix("~/") {
         Some(rest) => format!("{}/{rest}", home()?),
@@ -1032,7 +1032,18 @@ impl Tests {
         file: impl Fn(&str) -> Option<String>,
     ) -> Result<Tests, String> {
         let t = root.get("test").and_then(|v| v.as_table()).ok_or("no [test]")?;
-        let own = ["query", "files", "cwd", "helpers", "parse", "group-sep", "variant-by", "variant", "kind"];
+        let own = [
+            "query",
+            "files",
+            "cwd",
+            "helpers",
+            "parse",
+            "group-sep",
+            "variant-by",
+            "variant",
+            "kind",
+            "debug-build",
+        ];
         known(t, &[&own[..], SETTINGS].concat(), "[test]")?;
         let name = string(t, "query")?.ok_or("[test] has no `query`")?;
         let src = file(&name).ok_or(format!("its query `{name}` is missing"))?;
@@ -1098,12 +1109,25 @@ impl Tests {
         if each.iter().any(|s| s.debug_args.is_some() && s.debug_attach.is_none()) {
             return Err("`debug-args` needs `debug-attach` (how to attach once the test waits)".into());
         }
+        let debug_build = match t.get("debug-build") {
+            None => None,
+            Some(b) => Some(crate::debugpack::build_of(b, false).map_err(|e| format!("`debug-build`: {e}"))?),
+        };
+        let built = {
+            let mut sets =
+                each.iter().flat_map(|s| [&s.test, &s.group, &s.file]).chain(kinds.values().map(|k| &k.t));
+            sets.any(|s| s.debug.as_ref().is_some_and(builds))
+        };
+        if debug_build.is_none() && built {
+            return Err("`{built}` in a `debug` template needs `debug-build`".into());
+        }
         Ok(Tests {
             query,
             files: strings(t.get("files"), "files")?.unwrap_or_default(),
             cwd,
             helpers,
             parse,
+            debug_build,
             group_sep: string(t, "group-sep")?.unwrap_or_else(|| "::".into()),
             base,
             variant_by,
@@ -1218,18 +1242,8 @@ impl Tests {
         };
         let run =
             set.run.as_ref().ok_or("the pack has no command for this (`run`, `run-group`, `run-file`)")?;
-        let build = match &set.debug {
-            Some(d) if d.to_string().contains("{cargo-test-binary}") => {
-                let flag = match vars.get("cargo-target") {
-                    Some(Var::Many(v)) => v.clone(),
-                    _ => return Err("{cargo-test-binary} needs the `cargo` helper".into()),
-                };
-                let crate_root = match vars.get("crate-root") {
-                    Some(Var::One(p)) => PathBuf::from(p),
-                    _ => return Err("{cargo-test-binary} needs the `cargo` helper".into()),
-                };
-                Some(Build::CargoTestBinary { flag, crate_root })
-            }
+        let build = match (&set.debug, &self.debug_build) {
+            (Some(d), Some(b)) if builds(d) => Some(b.fill(&vars)),
             _ => None,
         };
         let argv = args(run, &vars);
@@ -1345,6 +1359,11 @@ impl Tests {
     }
 }
 
+/// Whether a `debug` template runs what's built first (`{built}`).
+fn builds(debug: &toml::Value) -> bool {
+    debug.to_string().contains("{built}")
+}
+
 /// Whether a scope's command uses a variable (so it needs something there).
 fn uses(s: &Set, var: &str) -> bool {
     s.run.as_ref().is_some_and(|r| r.iter().any(|a| a.contains(var)))
@@ -1410,12 +1429,15 @@ struct Item {
 /// A template variable: a string; a list (an argument that's just this variable becomes its items); parts,
 /// joined with their separator — or, as `{var/sep}`, with `sep`; or alternatives, joined with `|`.
 #[derive(Clone, Debug)]
-enum Var {
+pub(crate) enum Var {
     One(String),
     Many(Vec<String>),
     Parts(Vec<String>, String),
     /// Alternatives, joined with `|` (`{names}`).
     Any(Vec<String>),
+    /// A JSON value: a template string that is just this variable (`"{pid}"`) becomes the value itself (a
+    /// number stays one); inside a longer string, its text.
+    Json(Value),
 }
 
 /// `*_test.go`-style: at most one `*`.
@@ -1443,7 +1465,7 @@ fn up_to(start: &Path, found: impl Fn(&Path) -> bool) -> Option<PathBuf> {
 /// `{var}`s filled in: a list variable joined with spaces; parts with their separator, or with what follows
 /// a `/` (`{groups/.}`). `|re` escapes the value for a regular expression (`{path|re}`). A `{…}` that names
 /// no variable stays as it is. What a variable holds isn't filled in again.
-fn fill(s: &str, vars: &HashMap<String, Var>) -> String {
+pub(crate) fn fill(s: &str, vars: &HashMap<String, Var>) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(i) = rest.find('{') {
@@ -1477,6 +1499,8 @@ fn expand(token: &str, vars: &HashMap<String, Var>) -> Option<String> {
         (Var::Parts(p, _), Some(with)) => esc(p.join(with)),
         // Each escaped on its own: `A|B` stays a choice
         (Var::Any(a), None) => a.iter().map(|x| esc(x.clone())).collect::<Vec<_>>().join("|"),
+        (Var::Json(Value::String(s)), None) => esc(s.clone()),
+        (Var::Json(v), None) => esc(v.to_string()),
         _ => return None,
     })
 }
@@ -1494,7 +1518,7 @@ fn regex_escape(s: &str) -> String {
 }
 
 /// A command's arguments: `"{list}"` becomes the list's items, and arguments that end up empty are left out.
-fn args(template: &[String], vars: &HashMap<String, Var>) -> Vec<String> {
+pub(crate) fn args(template: &[String], vars: &HashMap<String, Var>) -> Vec<String> {
     let mut out = Vec::new();
     for a in template {
         if let Some(Var::Many(items)) =
@@ -1511,10 +1535,17 @@ fn args(template: &[String], vars: &HashMap<String, Var>) -> Vec<String> {
     out
 }
 
-/// A TOML template as JSON, its strings filled in (list arguments as in `args`).
-fn json(v: &toml::Value, vars: &HashMap<String, Var>) -> Value {
+/// A TOML template as JSON, its strings filled in (list arguments as in `args`; a string that is just a
+/// `Var::Json` is its value).
+pub(crate) fn json(v: &toml::Value, vars: &HashMap<String, Var>) -> Value {
     match v {
-        toml::Value::String(s) => Value::String(fill(s, vars)),
+        toml::Value::String(s) => {
+            let lone = s.strip_prefix('{').and_then(|x| x.strip_suffix('}')).and_then(|k| vars.get(k));
+            match lone {
+                Some(Var::Json(v)) => v.clone(),
+                _ => Value::String(fill(s, vars)),
+            }
+        }
         toml::Value::Integer(i) => Value::from(*i),
         toml::Value::Float(f) => Value::from(*f),
         toml::Value::Boolean(b) => Value::Bool(*b),

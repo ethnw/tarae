@@ -641,9 +641,7 @@ pub(crate) mod tests {
                     let pack: Result<toml::Table, _> = toml::from_str(block);
                     assert!(
                         pack.is_ok_and(|p| {
-                            ["test", "tasks", "install", "preflight", "waits", "protect"]
-                                .iter()
-                                .any(|k| p.contains_key(*k))
+                            !p.is_empty() && p.keys().all(|k| crate::packs::reach(k).is_some())
                         }),
                         "{file}: language pack example\n{block}"
                     );

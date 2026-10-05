@@ -525,6 +525,9 @@ mod tests {
                 also.iter().map(|a| crate::lsp::default_spec(a).map_or(a.clone(), |l| server(&l))).collect();
             line(&mut s, "also", &also);
             line(&mut s, "installs", &crate::grammar::for_language(n));
+            if let Some(d) = crate::debugpack::read(n) {
+                line(&mut s, "debug", &[d.map_or_else(|e| format!("broken: {e}"), |d| d.summary())]);
+            }
         }
         let mut any = any;
         any.sort();
@@ -568,6 +571,16 @@ mod tests {
                     writeln!(s, "    {l}").unwrap();
                 }
             }
+        }
+
+        writeln!(s, "\n[debuggers]").unwrap();
+        let mut debuggers: Vec<String> =
+            crate::packs::tables_of("debugger").iter().flat_map(|(_, t)| t.keys().cloned()).collect();
+        debuggers.sort();
+        for d in debuggers {
+            let said =
+                crate::debugpack::debugger(&d).map_or_else(|e| format!("broken: {e}"), |d| d.summary());
+            writeln!(s, "  {said}").unwrap();
         }
 
         writeln!(s, "\n[grammars]").unwrap();

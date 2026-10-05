@@ -1,5 +1,5 @@
-# C (and C++'s server): clangd, and lldb-dap to debug (Rust's debugger too). Both come with the system's
-# toolchain, so tarae only says where to get them.
+# C (and C++'s server): clangd, and lldb-dap to debug (Rust's and C++'s debugger too). Both come with the
+# system's toolchain, so tarae only says where to get them.
 
 [language.c]
 extensions = ["c", "h"]
@@ -23,3 +23,20 @@ hint = "comes with Xcode's command line tools (xcode-select --install), or LLVM 
 [install.lldb-dap]
 what = "the debugger for Rust, C and C++"
 hint = "comes with Xcode (xcrun finds it), or LLVM (brew install llvm, apt install lldb)"
+
+# No launch: a C program is built by the project's own build — attach to it, by pid or to a gdbserver /
+# lldb-server stub (space G a)
+[debug]
+debugger = "lldb-dap"
+attach-pid = { pid = "{pid}", program = "{program}", cwd = "{cwd}" }
+attach-remote = { attachCommands = ["gdb-remote {host}:{port}"], program = "{program}", sourceMap = [["{remote-root}", "{cwd}"]], cwd = "{cwd}" }
+
+# Rust's, C's and C++'s. Linux packages add a version to the name (apt's lldb-dap-18) or keep the old one
+# (lldb-vscode); macOS has it in Xcode, which xcrun finds
+[debugger.lldb-dap]
+find = ["lldb-dap", "lldb-vscode", "lldb-dap-{22..14}", "lldb-vscode-{22..14}", { ask = ["xcrun", "-f", "lldb-dap"] }]
+# macOS asks for permission to debug (a password prompt at first — out of sight, it waits forever)
+slow-start = { after = 8, os = "macos", say = "Still waiting for macOS to allow debugging — approve the password prompt, or run `sudo DevToolsSecurity -enable` once and press F5 again" }
+# The disassembly it prints on a stop with no source (inside dyld at attach): `dyld`_dyld_start:`,
+# `->  0x… <+4>: mov`
+quiet = ['^\s*(?:->)?\s*0x\S*.* <\+.*>:', '^\s*(?:->)?\s*\S*`\S*:$']
