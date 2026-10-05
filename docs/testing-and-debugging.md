@@ -155,7 +155,8 @@ ways = [                             # the first whose program (or `needs`) is o
 ```
 
 `bin` is where it lands when that isn't on `PATH` (`~` and `${VAR}` work — a list like `GOPATH` gives its first);
-tarae looks for the tool there too. A recipe of your own replaces the built-in one for that tool only.
+tarae looks for the tool there too. A recipe of your own replaces the built-in one for that tool only. A way can
+also be a release tarae downloads and checks itself — see [Downloads](languages.md#downloads).
 
 ### Tasks from packs
 

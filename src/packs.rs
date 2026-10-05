@@ -465,7 +465,8 @@ pub fn on_path(cmd: &str) -> bool {
 /// - `ways`: how to install it, in order — each `{ run = [...], needs = "go", bin = ["~/go/bin"] }`, taken if
 ///   `needs` (else `run`'s program) is on `PATH`. `bin`: where it lands when that isn't on `PATH` (`~` and
 ///   `${VAR}` expanded), so tarae finds it there. `project = true`: run in the file's folder, not the home
-///   one (rustup: the project's toolchain).
+///   one (rustup: the project's toolchain). Or a `download` way — tarae fetches a release itself
+///   (`fetch.rs`, `download_way`), taken if what it needs is on `PATH`.
 /// - `hint`: what to tell when no way fits ("comes with Xcode's command line tools").
 ///
 /// The tool is named as it's run (`gopls`, `basedpyright-langserver`). tarae only offers: `y` runs `run`.
@@ -473,12 +474,28 @@ pub fn on_path(cmd: &str) -> bool {
 pub struct Install {
     pub tool: String,
     pub what: String,
-    /// The first way this machine can take.
+    /// The first way this machine can take, when it runs something.
     pub run: Option<Vec<String>>,
+    /// … or when it's a download.
+    pub download: Option<crate::fetch::Download>,
     /// That way runs in the file's folder (`project = true`: rustup, for the project's toolchain) — else in
     /// the home folder, where a project's settings (an `.npmrc`) don't reach.
     pub in_project: bool,
     pub hint: Option<String>,
+    /// Every way as it's said, fitting here or not — what to say when none does.
+    pub every: Vec<String>,
+}
+
+impl Install {
+    /// Where no way fits: `what` isn't installed, and how one gets it (every way, then the hint).
+    pub fn no_way(&self) -> String {
+        let mut how = self.every.clone();
+        how.extend(self.hint.clone());
+        match how.is_empty() {
+            true => format!("{} isn't installed", self.what),
+            false => format!("{} isn't installed: {}", self.what, how.join(", ")),
+        }
+    }
 }
 
 /// `tool`'s `[install.<tool>]`, from whichever pack has it (a pack that can't be read is logged).
@@ -486,10 +503,21 @@ pub fn install(tool: &str) -> Option<Install> {
     install_in(tool, install_tables()).map(|i| i.pick(on_path))
 }
 
-/// Where `tool` is when it isn't on `PATH`: in a `bin` of one of its ways (`go install` → `~/go/bin`).
+/// Where `tool` is when it isn't on `PATH`: in a `bin` of one of its ways (`go install` → `~/go/bin`), or
+/// where a `download` way put it (`fetched_dir`).
 pub fn installed_at(tool: &str) -> Option<PathBuf> {
     let found = install_in(tool, install_tables())?;
-    found.bins.iter().map(|d| d.join(tool)).find(|p| p.is_file())
+    found_in(tool, &found.bins, fetched_dir(tool).as_deref())
+}
+
+/// The first of `bins`' `tool`, then the program a download put in `fetched`, that's there.
+fn found_in(tool: &str, bins: &[PathBuf], fetched: Option<&Path>) -> Option<PathBuf> {
+    bins.iter().map(|d| d.join(tool)).find(|p| p.is_file()).or_else(|| crate::fetch::installed(fetched?))
+}
+
+/// Where a `download` way puts a tool: `<data>/<tool>`.
+pub fn fetched_dir(tool: &str) -> Option<PathBuf> {
+    Some(crate::runtime::data_dir()?.join(tool))
 }
 
 /// Every pack's `[install]`.
@@ -586,18 +614,39 @@ fn server_table(v: &toml::Value) -> Result<Option<LeaveOut>, String> {
 struct Recipe {
     tool: String,
     what: String,
-    /// (run, needs, in the project)
-    ways: Vec<(Vec<String>, String, bool)>,
+    ways: Vec<Way>,
     bins: Vec<PathBuf>,
     hint: Option<String>,
 }
 
+#[derive(Debug)]
+enum Way {
+    Run { run: Vec<String>, needs: String, project: bool },
+    Download(Box<crate::fetch::Download>),
+}
+
 impl Recipe {
-    /// The first way whose program `has`.
+    /// The first way whose program `has` (a download: whose tools it has).
     fn pick(self, has: impl Fn(&str) -> bool) -> Install {
-        let way = self.ways.into_iter().find(|(_, needs, _)| has(needs));
-        let in_project = way.as_ref().is_some_and(|w| w.2);
-        Install { tool: self.tool, what: self.what, run: way.map(|w| w.0), in_project, hint: self.hint }
+        let every = self
+            .ways
+            .iter()
+            .map(|w| match w {
+                Way::Run { run, .. } => crate::install::shown(run),
+                Way::Download(d) => d.shown(),
+            })
+            .collect();
+        let way = self.ways.into_iter().find(|w| match w {
+            Way::Run { needs, .. } => has(needs),
+            Way::Download(d) => d.fits(&has),
+        });
+        let (mut run, mut download, mut in_project) = (None, None, false);
+        match way {
+            Some(Way::Run { run: r, project, .. }) => (run, in_project) = (Some(r), project),
+            Some(Way::Download(d)) => download = Some(*d),
+            None => {}
+        }
+        Install { tool: self.tool, what: self.what, run, download, in_project, hint: self.hint, every }
     }
 }
 
@@ -624,6 +673,10 @@ fn recipe(tool: &str, v: &toml::Value) -> Result<Recipe, String> {
         t.get("ways").map_or(Ok(&[][..]), |w| w.as_array().map(Vec::as_slice).ok_or("`ways` isn't a list"))?
     {
         let w = w.as_table().ok_or("a way isn't a table")?;
+        if w.contains_key("download") {
+            ways.push(Way::Download(Box::new(download_way(w)?)));
+            continue;
+        }
         known(w, &["run", "needs", "bin", "project"], "a way")?;
         let run = strings(w.get("run"), "run")?.filter(|r| !r.is_empty()).ok_or("a way has no `run`")?;
         let needs = string(w, "needs")?.unwrap_or_else(|| run[0].clone());
@@ -632,9 +685,93 @@ fn recipe(tool: &str, v: &toml::Value) -> Result<Recipe, String> {
             None => false,
             Some(p) => p.as_bool().ok_or("`project` is true or false")?,
         };
-        ways.push((run, needs, project));
+        ways.push(Way::Run { run, needs, project });
     }
     Ok(Recipe { tool: tool.to_string(), what, ways, bins, hint: string(t, "hint")? })
+}
+
+/// A `download` way (docs/languages.md, "Downloads"): where the file is, how its version and name are found,
+/// where its checksum is, how it's unpacked and where the program is in it; what it needs and runs on.
+fn download_way(w: &Table) -> Result<crate::fetch::Download, String> {
+    use crate::fetch::{Download, Name, Pick, Runtime, Unpack, check_template};
+    known(
+        w,
+        &["download", "version", "file", "sha256", "unpack", "program", "needs", "runtime", "rename"],
+        "a download",
+    )?;
+    let template = |key: &str| -> Result<String, String> {
+        let t = string(w, key)?.ok_or_else(|| format!("a download has no `{key}`"))?;
+        check_template(&t)?;
+        Ok(t)
+    };
+    let pick = |v: &toml::Value, key: &str| -> Result<Pick, String> {
+        let t = v.as_table().ok_or_else(|| format!("`{key}` isn't a table"))?;
+        known(t, &["from", "pick"], &format!("`{key}`"))?;
+        let from = string(t, "from")?.ok_or_else(|| format!("`{key}` has no `from`"))?;
+        let pick = string(t, "pick")?.ok_or_else(|| format!("`{key}` has no `pick`"))?;
+        check_template(&from)?;
+        regex::Regex::new(&pick).map_err(|e| format!("`{key}.pick`: {e}"))?;
+        Ok(Pick { from, pick })
+    };
+    let url = template("download")?;
+    let version = pick(w.get("version").ok_or("a download has no `version`")?, "version")?;
+    let file = match w.get("file") {
+        Some(toml::Value::String(s)) => {
+            check_template(s)?;
+            Name::Is(s.clone())
+        }
+        Some(v) => Name::Pick(pick(v, "file")?),
+        None => return Err("a download has no `file`".into()),
+    };
+    let unpack = match string(w, "unpack")?.as_deref() {
+        Some("tar.gz") => Unpack::TarGz,
+        Some("file") | None => Unpack::File,
+        Some(u) => return Err(format!("`unpack` is \"tar.gz\" or \"file\", not {u:?}")),
+    };
+    let needs = match w.get("needs") {
+        Some(toml::Value::String(s)) => vec![s.clone()],
+        v => strings(v, "needs")?.unwrap_or_default(),
+    };
+    let runtime = match w.get("runtime") {
+        None => None,
+        Some(v) => {
+            let t = v.as_table().ok_or("`runtime` isn't a table")?;
+            known(t, &["program", "home", "ask", "version", "at-least", "get"], "`runtime`")?;
+            let need = |k: &str| string(t, k)?.ok_or_else(|| format!("`runtime` has no `{k}`"));
+            let version = need("version")?;
+            regex::Regex::new(&version).map_err(|e| format!("`runtime.version`: {e}"))?;
+            let at_least =
+                t.get("at-least").and_then(|v| v.as_integer()).ok_or("`runtime` has no `at-least` number")?;
+            Some(Runtime {
+                program: need("program")?,
+                home: string(t, "home")?,
+                ask: strings(t.get("ask"), "ask")?.unwrap_or_default(),
+                version,
+                at_least: u64::try_from(at_least).map_err(|_| "`at-least` is a version, not below 0")?,
+                get: need("get")?,
+            })
+        }
+    };
+    let rename = match w.get("rename") {
+        None => Vec::new(),
+        Some(v) => v
+            .as_table()
+            .ok_or("`rename` isn't a table")?
+            .iter()
+            .map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())).ok_or("`rename`'s values are names"))
+            .collect::<Result<_, _>>()?,
+    };
+    Ok(Download {
+        url,
+        version,
+        file,
+        sha256: template("sha256")?,
+        unpack,
+        program: template("program")?,
+        needs,
+        runtime,
+        rename,
+    })
 }
 
 /// `~/go/bin`, `${GOPATH}/bin` → a folder (None if a variable isn't set). A variable holding a list of
@@ -1405,6 +1542,114 @@ mod tests {
         assert!(merged("none", None, None).is_none());
     }
 
+    /// A tool off PATH is found in its ways' folders, then where a download put its program (`<data>/<tool>`,
+    /// the program it recorded).
+    #[test]
+    fn a_tool_off_path_is_found_where_it_landed() {
+        let d = std::env::temp_dir().join(format!("tarae-found-in-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let fetched = d.join("data/tool");
+        std::fs::create_dir_all(fetched.join("bin")).unwrap();
+        let bins = [d.join("go/bin")];
+        assert_eq!(found_in("tool", &bins, Some(&fetched)), None, "not there yet");
+        std::fs::write(fetched.join("bin/tool"), "").unwrap();
+        assert_eq!(found_in("tool", &bins, Some(&fetched)), None, "unpacked by hand, not by a download");
+        std::fs::write(fetched.join(".tarae-program"), "bin/tool").unwrap();
+        assert_eq!(found_in("tool", &bins, Some(&fetched)), Some(fetched.join("bin/tool")));
+        std::fs::write(d.join("outside"), "").unwrap();
+        std::fs::write(fetched.join(".tarae-program"), "../../outside").unwrap();
+        assert_eq!(found_in("tool", &bins, Some(&fetched)), None, "only inside its folder");
+        std::fs::create_dir_all(&bins[0]).unwrap();
+        std::fs::write(bins[0].join("tool"), "").unwrap();
+        assert_eq!(
+            found_in("tool", &bins, Some(&fetched)),
+            Some(bins[0].join("tool")),
+            "a way's folder first"
+        );
+        assert_eq!(fetched_dir("tool"), crate::runtime::data_dir().map(|d| d.join("tool")));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A `download` way as a pack writes it, and what it's refused for (said, and the recipe skipped).
+    #[test]
+    fn download_ways_read() {
+        let t: Table = r#"
+            [tool]
+            what = "a tool"
+            [[tool.ways]]
+            download = "https://x.org/{version}/tool_{os}_{arch}"
+            version = { from = "https://api.x.org/latest", pick = '"tag_name":\s*"([^"]+)"' }
+            file = "tool_{os}_{arch}"
+            sha256 = "https://x.org/{version}/sha256sums.txt"
+            program = "tool"
+            rename = { x86_64 = "amd64", aarch64 = "arm64" }
+        "#
+        .parse()
+        .unwrap();
+        let d = match &recipe("tool", &t["tool"]).unwrap().ways[0] {
+            Way::Download(d) => (**d).clone(),
+            w => panic!("{w:?}"),
+        };
+        assert_eq!(d.unpack, crate::fetch::Unpack::File, "the program itself unless it says");
+        assert_eq!(d.file, crate::fetch::Name::Is("tool_{os}_{arch}".into()));
+        assert_eq!(d.rename.len(), 2);
+        assert!(d.runtime.is_none() && d.needs.is_empty());
+        let broken = |change: &str| {
+            let base = r#"download = "https://x/{version}"
+                version = { from = "https://x/", pick = '(\d+)' }
+                file = "f"
+                sha256 = "https://x/{version}.sha256"
+                program = "f""#;
+            let toml = format!("[tool]\nwhat = \"a tool\"\n[[tool.ways]]\n{base}\n{change}\n");
+            let t: Table = toml.parse().unwrap_or_else(|e| panic!("{change}: {e}"));
+            recipe("tool", &t["tool"]).map(|_| ()).unwrap_err()
+        };
+        assert!(broken("unpack = \"zip\"").contains("`unpack`"));
+        assert!(broken("needs = 3").contains("needs"));
+        assert!(broken("mirror = \"x\"").contains("mirror"), "an unknown key");
+        assert!(broken("runtime = { program = \"java\" }").contains("runtime"));
+        assert!(broken("rename = { x86_64 = 1 }").contains("rename"));
+        let t: Table =
+            "[tool]\nwhat = \"t\"\n[[tool.ways]]\ndownload = \"https://x/{verison}\"\n".parse().unwrap();
+        assert!(recipe("tool", &t["tool"]).unwrap_err().contains("no such placeholder"));
+        let t: Table = "[tool]\nwhat = \"t\"\n[[tool.ways]]\ndownload = \"https://x/\"\nversion = { from = \"https://x/\", pick = \"(\" }\nfile = \"f\"\nsha256 = \"s\"\nprogram = \"f\"\n".parse().unwrap();
+        assert!(recipe("tool", &t["tool"]).unwrap_err().contains("version.pick"));
+    }
+
+    /// The Java pack's jdtls: Homebrew first, else Eclipse's newest milestone, checked, on Java 21.
+    #[test]
+    fn the_java_packs_jdtls_reads() {
+        let recipe = || install_in("jdtls", install_tables()).expect("the Java pack has [install.jdtls]");
+        assert_eq!(recipe().ways.len(), 2);
+        let brew = recipe().pick(|_| true);
+        assert_eq!(
+            (brew.run.as_deref(), brew.download.is_some()),
+            (Some(&["brew".to_string(), "install".into(), "jdtls".into()][..]), false)
+        );
+        let linux = recipe().pick(|p| p != "brew");
+        let d = linux.download.expect("the download where there's no brew");
+        assert_eq!(d.host(), "download.eclipse.org");
+        assert!(
+            d.url.contains("/jdtls/milestones/{version}/{file}"),
+            "a release, not the nightly: {}",
+            d.url
+        );
+        assert!(d.sha256.ends_with("{file}.sha256"));
+        assert_eq!(
+            (d.unpack, d.program.as_str(), d.needs.as_slice()),
+            (crate::fetch::Unpack::TarGz, "bin/jdtls", &["python3".to_string()][..])
+        );
+        let rt = d.runtime.expect("it runs on Java");
+        assert_eq!((rt.program.as_str(), rt.home.as_deref(), rt.at_least), ("java", Some("JAVA_HOME"), 21));
+        let none = recipe().pick(|p| p != "brew" && p != "python3");
+        assert!(none.run.is_none() && none.download.is_none(), "no python3: no way fits");
+        assert!(
+            none.no_way().contains("a download from download.eclipse.org (with curl or wget, tar, python3)"),
+            "{}",
+            none.no_way()
+        );
+    }
+
     #[test]
     fn install_recipes() {
         let t: Table = r#"
@@ -1435,8 +1680,15 @@ mod tests {
             i.run.as_deref(),
             Some(&["go".to_string(), "install".into(), "x/gopls@latest".into()][..])
         );
-        assert_eq!(install_in("gopls", tables()).unwrap().pick(|_| false).run, None, "no way fits");
+        let none = install_in("gopls", tables()).unwrap().pick(|_| false);
+        assert_eq!(none.run, None, "no way fits");
+        // What's said then: every way, then the hint
+        assert_eq!(
+            none.no_way(),
+            "Go's language server isn't installed: no-such-installer gopls, go install x/gopls@latest"
+        );
         let hint = install_in("lldb-dap", tables()).unwrap().pick(|_| true);
+        assert_eq!(hint.no_way(), "the debugger isn't installed: comes with Xcode");
         assert_eq!((hint.run, hint.hint.as_deref()), (None, Some("comes with Xcode")));
         assert!(install_in("bad", tables()).is_none(), "a way without `run` is said (logged) and skipped");
         assert!(install_in("nothing", tables()).is_none());

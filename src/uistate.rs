@@ -406,7 +406,10 @@ impl Editor {
         t.extend(['y', 'n']);
         t.extend(o.end_dirty().then_some('R'));
         t.extend(o.commits_first().then_some('c'));
-        t.extend(matches!(o.what, crate::offer::What::Install { .. }).then_some('N'));
+        t.extend(
+            matches!(o.what, crate::offer::What::Install { .. } | crate::offer::What::Fetch { .. })
+                .then_some('N'),
+        );
         t.extend(o.lasts().then_some('a'));
         t.extend(o.keeps().then_some('A'));
         t.extend(o.both().then_some('D'));

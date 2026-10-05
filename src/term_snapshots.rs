@@ -2082,7 +2082,7 @@ fn snapshot_terminal_panel() {
     mouse(&mut s, K::Drag, 13);
     let bytes = mouse(&mut s, K::Up, 13);
     assert_eq!(s.ed.session.terminal.as_ref().unwrap().selected_text(), "$ cargo test");
-    assert!(s.ed.toasts.iter().any(|t| t.text == "copied 12 characters"));
+    s.until("the copy", |ed| ed.toasts.iter().any(|t| t.text == "copied 12 characters"));
     let shot = snapshot(&s.ed, "t", &bytes, s.w, s.h);
     let bg_row = shot.lines().skip_while(|l| !l.starts_with("## bg")).nth(first + 1).unwrap();
     assert_eq!(&bg_row[4..18], "pVVVVVVVVVVVVp", "the selected cells: {bg_row:?}");

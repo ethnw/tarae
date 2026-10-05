@@ -64,6 +64,9 @@ pub enum What {
     /// java-debug plugin — once downloaded, resumes debugging this file
     /// (`attach` = the address, if it was attaching to a running JVM).
     JavaDebug { file: PathBuf, root: PathBuf, attach: Option<(String, u16)> },
+    /// A language server or debugger a pack has tarae download (`fetch.rs`): `y` fetches `way` into `dir`, then
+    /// `then`.
+    Fetch { tool: String, way: Box<crate::fetch::Download>, dir: PathBuf, then: crate::install::Then },
     /// A plugin asks for permissions (when it loads): `y` approves the list, kept.
     PluginPermissions { plugin: String, permissions: Vec<crate::plugin::PluginPermission> },
     /// A plugin asks to connect somewhere new, or read a file outside its patterns: `y` allows it, kept — and
@@ -261,6 +264,7 @@ impl Offer {
         matches!(
             self.what,
             What::Install { .. }
+                | What::Fetch { .. }
                 | What::PluginPermissions { .. }
                 | What::PluginAsk { .. }
                 | What::Run(_)
@@ -402,7 +406,7 @@ impl Offer {
         }
         match &self.what {
             W::Grammars { .. } | W::JavaDebug { .. } => vec![('y', "Install"), ('n', "Not now")],
-            W::Install { .. } => vec![('y', "Install"), ('n', "Not now"), ('N', "Never")],
+            W::Install { .. } | W::Fetch { .. } => vec![('y', "Install"), ('n', "Not now"), ('N', "Never")],
             W::PluginPermissions { .. } => vec![('y', "Allow"), ('n', "Not now")],
             W::PluginAsk { .. } => vec![('y', "Allow"), ('n', "No")],
             // (one socket past the sandbox — #119)
@@ -474,6 +478,7 @@ impl Offer {
         match self.what {
             W::Grammars { .. } => "grammars",
             W::JavaDebug { .. } => "java-debug",
+            W::Fetch { .. } => "fetch",
             W::PluginPermissions { .. } => "plugin-permissions",
             W::PluginAsk { .. } => "plugin-ask",
             W::Install { .. } => "install",
@@ -654,7 +659,9 @@ impl crate::editor::Editor {
             Code::Char('D') if o.recovers() => self.offer_discard(),
             Code::Char('y') => self.offer_accept(),
             Code::Char('n') => self.offer_dismiss(),
-            Code::Char('N') if matches!(o.what, What::Install { .. }) => self.offer_never(),
+            Code::Char('N') if matches!(o.what, What::Install { .. } | What::Fetch { .. }) => {
+                self.offer_never()
+            }
             Code::Char('a') if o.lasts() => self.offer_for_chat(),
             Code::Char('A') if o.keeps() => self.offer_always(),
             Code::Char('D') if o.both() => self.offer_remove(true),
@@ -705,6 +712,7 @@ impl crate::editor::Editor {
                 self.install_grammars(names, Some(id));
             }
             What::JavaDebug { .. } => self.java_debug_download(id),
+            What::Fetch { tool, way, dir, then } => self.fetch_start(id, tool, *way, dir, then),
             What::Install { tool, run, cwd, then } => self.install_start(id, tool, run, cwd, then),
             What::PluginPermissions { plugin, permissions } => {
                 self.offer_finished(id, Ok(()));
@@ -1066,7 +1074,7 @@ impl crate::editor::Editor {
     /// `N` on an install: closes it, and it isn't offered again.
     pub fn offer_never(&mut self) {
         let Some(o) = self.offers.first().filter(|o| !o.installing()) else { return };
-        let What::Install { tool, .. } = &o.what else { return };
+        let (What::Install { tool, .. } | What::Fetch { tool, .. }) = &o.what else { return };
         let tool = tool.clone();
         self.offers.remove(0);
         self.install_never(&tool);
@@ -1092,7 +1100,7 @@ impl crate::editor::Editor {
                 self.plugin_permissions_answer(plugin, permissions, false)
             }
             What::PluginAsk { plugin, asks } => self.plugin_ask_answer(plugin, asks, false),
-            What::Install { tool, .. } => {
+            What::Install { tool, .. } | What::Fetch { tool, .. } => {
                 self.set_status(format!("Not installing {tool} for now (N on its card: never ask)"))
             }
             What::Run(card) => crate::tools::run_answer(self, o.id, *card, None),

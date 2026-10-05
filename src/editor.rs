@@ -548,6 +548,8 @@ pub struct Editor {
     pub config_file: Option<std::path::PathBuf>,
     /// The last frame drawn and its size — what the user sees (`chat::attach_screen`).
     pub last_frame: Option<(Vec<u8>, u16, u16)>,
+    /// Bytes for the terminal itself, sent after the next frame (a copy through OSC 52 — `clipboard.rs`).
+    pub term_out: Vec<u8>,
     /// Sizes you set — the chat's and side panel's widths, the bottom slot's height (`sizes.rs`), global and
     /// kept in `sizes_path` (None in tests: nothing read or written) · the latest write's number.
     pub sizes: crate::sizes::Sizes,
@@ -730,6 +732,7 @@ impl Editor {
             run_clock: None,
             config_file: if cfg!(test) { None } else { crate::config::config_path() },
             last_frame: None,
+            term_out: Vec::new(),
             unfocused: false,
             // (a few bytes, read before the first frame — it's drawn at the sizes you left)
             sizes: if cfg!(test) {
@@ -3223,7 +3226,10 @@ impl Editor {
     pub fn write_register(&mut self, name: char, values: Vec<String>) {
         match name {
             '_' => {}
-            '+' => crate::clipboard::copy(&self.events.jobs(), values.join("\n")),
+            '+' => {
+                let what = crate::clipboard::selections(values.len());
+                crate::clipboard::copy(&self.events.jobs(), values.join("\n"), what)
+            }
             _ => {
                 self.registers.insert(name, values);
             }
@@ -12114,6 +12120,9 @@ q = \"delete_selection\"\n",
     fn clipboard_roundtrip() {
         let mut ed = run("ab", " y");
         settle(&mut ed); // write job done
+        // One toast, said once the copy is done (not before: it might fail)
+        let said: Vec<_> = ed.toasts.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(said, ["copied 1 selection"]);
         feed(&mut ed, "l p");
         settle(&mut ed); // read → paste
         assert_eq!(text(&ed), "aba");

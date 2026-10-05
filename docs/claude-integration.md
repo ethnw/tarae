@@ -5,7 +5,8 @@ edits the project with you watching and answering.
 
 tarae runs the `claude` CLI as a subprocess — there's no HTTP client, SDK, or API key in the editor; it uses your
 Claude Code login as it is. You need [Claude Code](https://claude.com/claude-code) installed and
-logged in.
+logged in — where `claude` isn't found, the chat says how to install it and log in, as Claude Code's own setup
+docs do.
 
 - [Select → instruct → diff](#select--instruct--diff)
 - [Chat panel](#chat-panel) — [follow mode](#follow-mode), [the plan](#the-plan), [edits](#edits), [undoing a turn](#undoing-a-turn), [running the tests](#running-the-tests), [running commands](#running-commands), [notes](#notes)

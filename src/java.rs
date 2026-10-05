@@ -510,21 +510,7 @@ impl crate::editor::Editor {
 
 const MAVEN: &str = "https://repo1.maven.org/maven2/com/microsoft/java/com.microsoft.java.debug.plugin";
 
-/// Download one URL — curl, else wget (both honor `https_proxy` for corporate proxies).
-fn http_get(url: &str) -> Result<Vec<u8>, String> {
-    let run = |cmd: &str, args: &[&str]| std::process::Command::new(cmd).args(args).output();
-    let out = match run("curl", &["-fsSL", "--retry", "2", url]) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            run("wget", &["-qO-", url]).map_err(|_| "needs curl or wget".to_string())?
-        }
-        r => r.map_err(|e| format!("curl: {e}"))?,
-    };
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        return Err(err.lines().last().unwrap_or("download failed").trim().to_string());
-    }
-    Ok(out.stdout)
-}
+use crate::fetch::http_get;
 
 /// Release version from maven-metadata.xml (`<release>`, else `<latest>`).
 fn release_version(meta: &str) -> Option<&str> {

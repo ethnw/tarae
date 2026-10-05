@@ -798,7 +798,11 @@ fn ensure_proc(ed: &mut Editor) {
     let mut child = match llm::spawn(&cfg, &extra, &ed.session.root) {
         Ok(child) => child,
         Err(e) => {
-            c.msgs.push(Msg::new(Role::Note, format!("{}: {e}", cfg.command), ""));
+            // (once: opening the chat tries, and so does sending)
+            let said = llm::spawn_failed(&cfg.command, &e, true);
+            if c.msgs.last().is_none_or(|m| m.role != Role::Note || m.text != said) {
+                c.msgs.push(Msg::new(Role::Note, said, ""));
+            }
             return;
         }
     };
@@ -1870,10 +1874,7 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
         (Code::Char(']') | Code::Char('g'), true, _) => follow(ed),
         (Code::Char('f'), true, _) => crate::follow::toggle(ed),
         (Code::Char('y'), true, _) => match c.last_code() {
-            Some(code) => {
-                crate::clipboard::copy(&ed.events.jobs(), code);
-                ed.set_status("copied the code block");
-            }
+            Some(code) => crate::clipboard::copy(&ed.events.jobs(), code, "the code block".into()),
             None => ed.set_status("no code block in the last answer"),
         },
         // The editor's page keys page the conversation (#153) — `C-u` from an empty input (with text it

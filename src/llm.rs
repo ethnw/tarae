@@ -170,7 +170,7 @@ impl Warm {
                 let _ = old.wait();
             });
         }
-        let child = spawn(cfg, &[], dir).map_err(|e| format!("{}: {e}", cfg.command))?;
+        let child = spawn(cfg, &[], dir).map_err(|e| spawn_failed(&cfg.command, &e, false))?;
         self.child = Some((child, dir.to_path_buf()));
         Ok(())
     }
@@ -196,6 +196,33 @@ impl Drop for Warm {
             });
         }
     }
+}
+
+/// What a failed start of `command` (`llm.command`) says. No `claude` at all: that Claude Code isn't installed,
+/// and how to get it and log in — in its own docs' words (code.claude.com/docs/en/setup); `whole`: every line
+/// (the chat), else one (a toast).
+pub fn spawn_failed(command: &str, e: &std::io::Error, whole: bool) -> String {
+    if e.kind() != std::io::ErrorKind::NotFound {
+        return format!("{command}: {e}");
+    }
+    if Path::new(command).file_name().is_none_or(|n| n != "claude") {
+        return match command.contains('/') {
+            true => format!("{command} isn't there (llm.command)"),
+            false => format!("{command} isn't on PATH (llm.command)"),
+        };
+    }
+    if !whole {
+        return "Claude Code isn't installed, or `claude` isn't on your PATH — install it with \
+                `curl -fsSL https://claude.ai/install.sh | bash`, then log in by running `claude`"
+            .into();
+    }
+    "Claude Code isn't installed, or `claude` isn't on your PATH. Install it (macOS, Linux, WSL):\n\
+     curl -fsSL https://claude.ai/install.sh | bash\n\
+     After installing, log in by running `claude` and following the browser prompts.\n\
+     If `claude` still isn't found, ~/.local/bin isn't on your PATH yet — add it, and start tarae from a \
+     new terminal.\n\
+     https://code.claude.com/docs/en/setup"
+        .into()
 }
 
 /// Claude, started in `dir` (the project root — its relative paths, its tools and its kept conversations are there).
@@ -1345,6 +1372,26 @@ mod tests {
         // (a path that isn't there: without the guard, nothing starts and nothing panics)
         let cfg = LlmConfig { command: "/nonexistent/claude".into(), ..LlmConfig::default() };
         let _ = spawn(&cfg, &[], &std::env::temp_dir());
+    }
+
+    /// No claude: Claude Code isn't installed — how to get it and log in, as its docs say (#163); any other
+    /// failure as it is.
+    #[test]
+    fn a_missing_claude_says_how_to_get_it() {
+        let gone = std::io::Error::from(std::io::ErrorKind::NotFound);
+        for command in ["claude", "/opt/x/claude"] {
+            let whole = spawn_failed(command, &gone, true);
+            assert!(whole.starts_with("Claude Code isn't installed"), "{whole}");
+            assert!(whole.contains("curl -fsSL https://claude.ai/install.sh | bash"), "{whole}");
+            assert!(whole.contains("log in by running `claude`"), "{whole}");
+            assert!(!whole.contains("os error"), "{whole}");
+            let one = spawn_failed(command, &gone, false);
+            assert!(!one.contains('\n') && one.contains("install.sh"), "a toast's one line: {one}");
+        }
+        assert_eq!(spawn_failed("my-agent", &gone, true), "my-agent isn't on PATH (llm.command)");
+        assert_eq!(spawn_failed("/x/my-agent", &gone, true), "/x/my-agent isn't there (llm.command)");
+        let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert!(spawn_failed("claude", &denied, true).starts_with("claude: "), "not a missing one");
     }
 
     /// A commit message's body wrapped at 72: the subject and short lines as they are, a long line between

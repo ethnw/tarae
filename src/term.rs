@@ -168,8 +168,11 @@ fn event_loop(editor: &mut Editor) -> Result<()> {
             frame.clear();
             render(editor, &mut frame, w, h)?;
             let bytes = screen.present(&frame, w, h, &editor.screen.edges.borrow());
-            if !bytes.is_empty() {
+            let own = std::mem::take(&mut editor.term_out);
+            if !bytes.is_empty() || !own.is_empty() {
                 out.write_all(bytes)?;
+                // (after the frame's synchronized update has ended: OSC 52 — `clipboard.rs`)
+                out.write_all(&own)?;
                 out.flush()?; // stdout holds back what has no newline
             }
         }
@@ -8820,7 +8823,18 @@ fn draw_chat(
                 } else if timing {
                     lines.push(vec![sp(format!("{:>w$}", m.text), faint)]);
                 } else {
-                    lines.push(vec![sp(fit_ellipsis(&format!("· {}", m.text), w), dim)]);
+                    // As many rows as it takes (how to install claude is a few lines — #163), each line of it
+                    // wrapped, hanging under its text
+                    let mut first = true;
+                    for part in m.text.split('\n') {
+                        let para = [md::Line::Text { spans: vec![sp(part.to_string(), dim)], indent: 0 }];
+                        for l in md::wrap(&para, w.saturating_sub(2).max(1), faint) {
+                            let mut row = vec![sp(if first { "· " } else { "  " }.into(), dim)];
+                            row.extend(l);
+                            lines.push(row);
+                            first = false;
+                        }
+                    }
                 }
             }
         }

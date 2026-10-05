@@ -2,6 +2,7 @@
 //! messages, requests (`gd` `gr` hover), diagnostic jumps. Late results (cursor moved/edited) are dropped.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use serde_json::{Value, json};
 
@@ -10,8 +11,14 @@ use crate::document::DocId;
 use crate::editor::Editor;
 use crate::lsp::{self, Client, ClientId, Diagnostic, Encoding};
 use crate::movement as mv;
+use crate::offer::What;
 use crate::picker::{Action, Item, Picker};
 use crate::selection::{Range, Selection};
+
+/// What a server's exit says (`Editor::lsp_exited`).
+fn exited_said(name: &str) -> String {
+    format!("{name} exited · :log-open shows why")
+}
 
 #[derive(Default)]
 pub struct LspState {
@@ -54,6 +61,8 @@ pub struct LspState {
     pub(crate) failed: HashMap<String, String>,
     pub(crate) server_for: HashMap<String, String>,
     missing: std::collections::HashSet<String>,
+    /// Servers whose "isn't installed: …" has been said since tarae started — once each (`install.rs`).
+    pub(crate) no_way_said: std::collections::HashSet<String>,
     /// Diagnostics for files that aren't open (`space D`): path → (server, severity, line, column, message).
     pub(crate) elsewhere: HashMap<std::path::PathBuf, Vec<Elsewhere>>,
     /// The go-to in hand, timed from its key to the frame that shows its answer (N1 — `tarae.log`).
@@ -3167,13 +3176,30 @@ impl Editor {
             return self.share_drop(cid);
         }
         let root = self.client(cid).map(|c| c.root.clone()).unwrap_or_default();
+        let tool = self
+            .client(cid)
+            .and_then(|c| Path::new(&c.spec.command).file_name().map(|n| n.to_string_lossy().into_owned()));
         if let Some(name) = self.lsp_stopped(cid) {
             // (reaped as it's dropped; the next file of its project starts it again — unless it keeps
             // exiting: then `:procs` holds it)
             crate::log::line(&name, "exit", &format!("{name} for {} exited", root.display()));
             self.lsp.failed.insert(name.clone(), "exited".into());
-            self.set_error(format!("{name} exited · :log-open shows why"));
+            // An install card for it says why already (a rustup proxy without its component — #166)
+            let offered = |t: &str| t == name || tool.as_deref() == Some(t);
+            if !self.offers.iter().any(|o| matches!(&o.what, What::Install { tool, .. } if offered(tool))) {
+                self.set_error(exited_said(&name));
+            }
             self.procs_server_exited(&name, &root);
+        }
+    }
+
+    /// An install card for `tool` came: a toast saying it exited (`lsp_exited`, just before) goes — the
+    /// card says why (#166).
+    pub(crate) fn exit_explained(&mut self, tool: &str) {
+        let said = exited_said(tool);
+        self.toasts.retain(|t| !t.text.ends_with(&said));
+        if self.status.as_ref().is_some_and(|(s, _)| s.ends_with(&said)) {
+            self.status = None;
         }
     }
 
@@ -4280,6 +4306,55 @@ mod tests {
         assert!(ed.lsp.clients.is_empty() && ed.doc().lsp.client.is_none());
         assert!(ed.status.as_ref().is_some_and(|s| s.0.contains("fake exited")));
         std::fs::remove_dir_all(file.parent().unwrap()).ok();
+    }
+
+    fn install_card(tool: &str) -> crate::offer::Offer {
+        crate::offer::Offer::new(
+            "Rust's language server".into(),
+            "?",
+            "…",
+            "x".into(),
+            What::Install {
+                tool: tool.into(),
+                run: vec!["true".into()],
+                cwd: std::env::temp_dir(),
+                then: crate::install::Then::Lsp,
+            },
+        )
+    }
+
+    /// A server exiting for want of what an install card offers (a rustup proxy without its component): the
+    /// card says why — no exit toast beside it, whichever comes first (#166).
+    #[test]
+    fn an_install_card_stands_for_the_exit_toast() {
+        let exited = |ed: &Editor| ed.toasts.iter().filter(|t| t.text.contains("exited")).count();
+        // The card first, then the exit
+        let (mut ed, file, _log) = setup("exit-offered", "fn main() {}\n");
+        let cid = ready(&mut ed);
+        let name = ed.client(cid).unwrap().name.clone();
+        ed.offers.push(install_card(&name));
+        ed.lsp_exited(cid);
+        assert_eq!(exited(&ed), 0, "{:?}", ed.toasts.iter().map(|t| &t.text).collect::<Vec<_>>());
+        std::fs::remove_dir_all(file.parent().unwrap()).ok();
+        // The exit first, then the card: its toast goes
+        let (mut ed, file, _log) = setup("exit-then-offer", "fn main() {}\n");
+        let cid = ready(&mut ed);
+        let name = ed.client(cid).unwrap().name.clone();
+        ed.set_status("something else");
+        ed.lsp_exited(cid);
+        assert_eq!(exited(&ed), 1);
+        ed.exit_explained(&name);
+        assert_eq!(exited(&ed), 0);
+        assert!(ed.toasts.iter().any(|t| t.text == "something else"), "the rest stays");
+        assert!(!ed.status.as_ref().is_some_and(|s| s.0.contains("exited")));
+        // Another server's card isn't this one's reason
+        let (mut ed, file2, _log) = setup("exit-other", "fn main() {}\n");
+        let cid = ready(&mut ed);
+        ed.offers.push(install_card("gopls"));
+        ed.lsp_exited(cid);
+        assert_eq!(exited(&ed), 1);
+        std::fs::remove_dir_all(file.parent().unwrap()).ok();
+        std::fs::remove_dir_all(file2.parent().unwrap()).ok();
     }
 
     #[test]

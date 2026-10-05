@@ -760,10 +760,11 @@ fn yank(cx: &mut Context) {
     cx.editor.write_register(reg, texts);
     let to = match reg {
         '"' => String::new(),
-        '+' => " to clipboard".into(),
+        // (the copy says so once it's done, and how — `clipboard::copy`)
+        '+' => return,
         r => format!(" to register {r}"),
     };
-    cx.editor.set_status(format!("yanked {n} selection{}{to}", if n == 1 { "" } else { "s" }));
+    cx.editor.set_status(format!("yanked {}{to}", crate::clipboard::selections(n)));
 }
 
 /// Pastes from a register. Reading `+` (clipboard) is an external command, so it pastes once the

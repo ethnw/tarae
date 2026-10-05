@@ -6,8 +6,10 @@
 //!
 //! Asked once per language until quit when a file opens and no server is found (quiet otherwise: the log
 //! says, the status line's dot is faint) — or when a rustup proxy says its component isn't installed — and
-//! each time debugging finds no debugger. A server the packs only have a `hint` for isn't offered; the hint
-//! goes to the log (a debugger's error says what to install).
+//! each time debugging finds no debugger. A server none of whose ways fits here (or that the packs only have
+//! a `hint` for) isn't offered: how one gets it is said on screen, where an offer would be, and logged (a
+//! debugger's error says what to install). A pack's `download` way is fetched by tarae itself (`fetch.rs`):
+//! what it runs on is looked at first, then the card.
 //!
 //! An install only runs from a card in sight, and while it runs no other task starts (that would stop it
 //! half-way); stopping it (`space m c`) says so on its card.
@@ -80,18 +82,33 @@ impl Editor {
     /// Whether to offer it: there's a way here, offers are on (`editor.offer-installs`; not in tests unless
     /// asked), and it isn't one never to offer.
     fn offerable(&self, found: &Install) -> bool {
-        found.run.is_some()
-            && self.offer_popups
+        (found.run.is_some() || found.download.is_some()) && self.may_offer(&found.tool)
+    }
+
+    /// Offers are on (`editor.offer-installs`; not in tests unless asked) and `tool` isn't one never to offer.
+    fn may_offer(&self, tool: &str) -> bool {
+        self.offer_popups
             && self.config.offer_installs
-            && !never_path().is_some_and(|p| never_read(&p).contains(&found.tool))
+            && !never_path().is_some_and(|p| never_read(&p).contains(tool))
     }
 
     /// No language server (for a language, the first time since tarae started; or one a rustup proxy says isn't
-    /// installed): offer to install the first of `tried` that a pack knows how to — else log what the pack
-    /// says.
+    /// installed): offer to install the first of `tried` that a pack knows how to — else say how one gets it.
     pub(crate) fn offer_install_server(&mut self, tried: &[String]) {
         let Some(found) = tried.iter().find_map(|t| crate::packs::install(t)) else { return };
+        self.offer_server(found);
+    }
+
+    fn offer_server(&mut self, found: Install) {
         self.offer_install(found, Then::Lsp);
+    }
+
+    /// Attaches servers to the open files that have none — a server just installed.
+    pub(crate) fn attach_servers_missing(&mut self) {
+        let ids: Vec<_> = self.docs.iter().filter(|d| d.lsp.client.is_none()).map(|d| d.id).collect();
+        for id in ids {
+            self.attach_lsp(id);
+        }
     }
 
     /// No debugger (`tool`): offer it, to go on with what stopped. false if there's nothing to offer — then
@@ -109,10 +126,23 @@ impl Editor {
 
     fn offer_install(&mut self, found: Install, then: Then) {
         if !self.offerable(&found) {
-            if let (None, Some(hint)) = (&found.run, &found.hint) {
-                crate::log::line("tarae", "info", &format!("{} ({}): {hint}", found.tool, found.what));
+            // No way fits here: said where it's seen (opening a file showed nothing else — #165), and logged —
+            // once per server until quit, as an offer is (not on every file opened, nor every time it exits)
+            if found.run.is_none()
+                && found.download.is_none()
+                && (found.hint.is_some() || !found.every.is_empty())
+                && self.lsp.no_way_said.insert(found.tool.clone())
+            {
+                let how = found.no_way();
+                crate::log::line("tarae", "info", &format!("{}: {how}", found.tool));
+                if self.may_offer(&found.tool) {
+                    self.set_warning(how);
+                }
             }
             return;
+        }
+        if found.download.is_some() {
+            return self.offer_fetch(found, then);
         }
         let Some(run) = found.run else { return };
         let home = || std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
@@ -126,6 +156,8 @@ impl Editor {
         // (what's decided: the command, under the line saying why)
         let command = shown(&run);
         let lines = command.split('\n').count();
+        // (it may have just exited for want of it: the card says why, the exit toast goes — #166)
+        self.exit_explained(&tool);
         self.push_offer(
             Offer::new(
                 title,
@@ -181,18 +213,115 @@ impl Editor {
             )),
             None => self.set_success(format!("{tool} installed")),
         }
+        self.installed(then);
+    }
+
+    /// On with what waited for it.
+    fn installed(&mut self, then: Then) {
         match then {
-            Then::Lsp => {
-                let ids: Vec<_> = self.docs.iter().filter(|d| d.lsp.client.is_none()).map(|d| d.id).collect();
-                for id in ids {
-                    self.attach_lsp(id);
-                }
-            }
+            Then::Lsp => self.attach_servers_missing(),
             Then::Resume(r) => self.resume(r),
             Then::Plugin { plugin, id } => {
                 self.plugin_events_from(&plugin, vec![crate::plugin::PluginHostEvent::Installed(id)])
             }
         }
+    }
+
+    /// A `download` way: what it runs on is looked at on a worker (it runs `java -version`, say) — then the
+    /// card, or on screen why not (once until quit, as "no way fits" is).
+    fn offer_fetch(&mut self, found: Install, then: Then) {
+        let runtime = found.download.as_ref().and_then(|d| d.runtime.clone());
+        self.events.jobs().spawn(move || {
+            let probed = runtime.as_ref().and_then(crate::fetch::probe);
+            move |ed: &mut Editor| ed.fetch_probed(found, then, probed)
+        });
+    }
+
+    fn fetch_probed(&mut self, found: Install, then: Then, probed: Option<(PathBuf, Option<u64>)>) {
+        let Some(way) = found.download else { return };
+        let dir = crate::packs::fetched_dir(&found.tool);
+        let blocker = match (&way.runtime, &dir) {
+            (_, None) => Some("there's no home folder to put it in".to_string()),
+            (Some(rt), _) => crate::fetch::runtime_blocker(rt, probed.as_ref(), &found.tool),
+            (None, _) => None,
+        };
+        let (Some(dir), None) = (dir, &blocker) else {
+            let why = blocker.unwrap_or_default();
+            if let Then::Plugin { plugin, id } = &then {
+                let ev = crate::plugin::PluginHostEvent::Failed(*id, why.clone());
+                self.plugin_events_from(plugin, vec![ev]);
+            }
+            if self.lsp.no_way_said.insert(found.tool.clone()) {
+                crate::log::line("tarae", "info", &format!("{}: {why}", found.tool));
+                self.set_warning(why);
+            }
+            return;
+        };
+        let tool = found.tool;
+        let mut title = found.what;
+        if let Some(first) = title.get_mut(..1) {
+            first.make_ascii_uppercase();
+        }
+        let runs_on = match (&way.runtime, &probed) {
+            (Some(rt), Some((at, Some(v)))) => format!("\nIt runs on {} ({} {v}).", at.display(), rt.program),
+            (Some(_), Some((at, None))) => format!("\nIt runs on {}.", at.display()),
+            _ => String::new(),
+        };
+        self.exit_explained(&tool);
+        self.push_offer(
+            Offer::new(
+                title,
+                &format!(
+                    "{tool} isn't installed. Download its newest release from {} — checked against its published \
+                     SHA-256 — into:\n{}{runs_on}",
+                    way.host(),
+                    dir.display()
+                ),
+                &format!("Downloading {tool}…"),
+                format!("Couldn't download {tool}"),
+                What::Fetch { tool, way: Box::new(way), dir, then },
+            )
+            .deciding(1..2),
+        );
+    }
+
+    /// `y` on a download's card: fetched on a worker, then on with what waited for it.
+    pub(crate) fn fetch_start(
+        &mut self,
+        id: u64,
+        tool: String,
+        way: crate::fetch::Download,
+        dir: PathBuf,
+        then: Then,
+    ) {
+        self.events.jobs().spawn(move || {
+            let got = crate::fetch::fetch(&way, &dir);
+            move |ed: &mut Editor| {
+                if ed.offer_by_id(id).is_none() {
+                    return;
+                }
+                match got {
+                    Ok(got) => {
+                        ed.offer_finished(id, Ok(()));
+                        let at = got.program.display();
+                        crate::log::line(
+                            "tarae",
+                            "info",
+                            &format!("{tool} {} downloaded: {at}", got.version),
+                        );
+                        ed.set_success(format!("{tool} {} installed — in {}", got.version, dir.display()));
+                        ed.installed(then);
+                    }
+                    Err(e) => {
+                        if let Then::Plugin { plugin, id } = &then {
+                            let ev = crate::plugin::PluginHostEvent::Failed(*id, e.clone());
+                            ed.plugin_events_from(plugin, vec![ev]);
+                        }
+                        ed.offer_finished(id, Err(e));
+                    }
+                }
+            }
+        });
     }
 
     /// A plugin's `offer-install`: the card for a tool a pack knows how to install — once per tool until
@@ -334,6 +463,152 @@ mod tests {
         ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
         assert!(ed.offer_key(y));
         assert!(ed.offers[0].installing());
+    }
+
+    fn no_way(tool: &str) -> Install {
+        Install {
+            tool: tool.into(),
+            what: "Lua's language server".into(),
+            run: None,
+            download: None,
+            in_project: false,
+            hint: Some("or a release from github.com/LuaLS/lua-language-server".into()),
+            every: vec![format!("brew install {tool}")],
+        }
+    }
+
+    /// A download way at a site that isn't there (nothing is fetched in these tests), running on `runtime`.
+    fn download_way(runtime: Option<&str>) -> crate::fetch::Download {
+        use crate::fetch::{Download, Name, Pick, Runtime, Unpack};
+        Download {
+            url: "http://127.0.0.1:9/{version}/{file}".into(),
+            version: Pick { from: "http://127.0.0.1:9/".into(), pick: r"(\d+\.\d+)".into() },
+            file: Name::Is("tool.tar.gz".into()),
+            sha256: "http://127.0.0.1:9/{version}/{file}.sha256".into(),
+            unpack: Unpack::TarGz,
+            program: "bin/tool".into(),
+            needs: vec![],
+            runtime: runtime.map(|p| Runtime {
+                program: p.into(),
+                home: None,
+                ask: vec!["-version".into()],
+                version: r"(\d+)".into(),
+                at_least: 21,
+                get: "install one".into(),
+            }),
+            rename: vec![],
+        }
+    }
+
+    fn settle_until(ed: &mut Editor, done: impl Fn(&Editor) -> bool, within: std::time::Duration) {
+        let end = std::time::Instant::now() + within;
+        while !done(ed) && std::time::Instant::now() < end {
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
+    }
+
+    /// Where no way fits, opening a file says how to get its server — on screen, not only in the log (#165).
+    #[test]
+    fn no_way_here_is_said_on_screen() {
+        let mut ed = Editor::new(crate::config::Config::default());
+        ed.offer_popups = true;
+        ed.offer_server(no_way("tarae-test-lua-ls"));
+        assert!(ed.offers.is_empty());
+        let said: Vec<_> = ed.toasts.iter().map(|t| (t.kind, t.text.as_str())).collect();
+        assert_eq!(
+            said,
+            [(
+                crate::editor::ToastKind::Warning,
+                "Lua's language server isn't installed: brew install tarae-test-lua-ls, or a release from \
+                 github.com/LuaLS/lua-language-server"
+            )]
+        );
+        // Once per server until quit — not again for the next file, nor when another language asks for it
+        ed.toasts.clear();
+        ed.offer_server(no_way("tarae-test-lua-ls"));
+        assert!(ed.toasts.is_empty(), "{:?}", ed.toasts.iter().map(|t| &t.text).collect::<Vec<_>>());
+        ed.offer_server(no_way("tarae-test-other-ls"));
+        assert_eq!(ed.toasts.len(), 1, "another server is its own");
+        // Offers off (and in tests): only the log
+        let mut ed = Editor::new(crate::config::Config::default());
+        ed.offer_server(no_way("tarae-test-lua-ls"));
+        assert!(ed.toasts.is_empty());
+    }
+
+    /// The install card for a server that just exited for want of it takes its exit toast's place (#166).
+    #[test]
+    fn the_install_card_takes_the_exit_toasts_place() {
+        let mut ed = Editor::new(crate::config::Config::default());
+        ed.offer_popups = true;
+        ed.set_error("rust-analyzer exited · :log-open shows why");
+        let found = Install { run: Some(vec!["rustup".into()]), ..no_way("rust-analyzer") };
+        ed.offer_server(found);
+        assert_eq!(ed.offers.len(), 1);
+        assert!(ed.toasts.iter().all(|t| !t.text.contains("exited")), "the card says why");
+    }
+
+    /// A download way whose runtime isn't here: looked at on a worker, then why not on screen — once until
+    /// quit, never the card.
+    #[test]
+    fn a_download_needing_what_isnt_here_says_so_once() {
+        let mut ed = Editor::new(crate::config::Config::default());
+        ed.offer_popups = true;
+        let found = || Install {
+            download: Some(download_way(Some("tarae-no-such-runtime"))),
+            ..no_way("tarae-test-dl")
+        };
+        ed.offer_server(found());
+        assert!(ed.toasts.is_empty() && ed.offers.is_empty(), "not said yet: its runtime is looked at first");
+        let start = std::time::Instant::now();
+        settle_until(
+            &mut ed,
+            |ed| !ed.toasts.is_empty() || !ed.offers.is_empty(),
+            std::time::Duration::from_secs(10),
+        );
+        assert!(ed.offers.is_empty(), "nothing to offer");
+        let said: Vec<_> = ed.toasts.iter().map(|t| (t.kind, t.text.as_str())).collect();
+        assert_eq!(
+            said,
+            [(
+                crate::editor::ToastKind::Warning,
+                "tarae-test-dl runs on tarae-no-such-runtime 21 or newer, and there's none here (PATH) — install one"
+            )]
+        );
+        // Once until quit (counted as said: the same toast again would merge)
+        let (took, said) = (start.elapsed(), ed.said);
+        ed.offer_server(found());
+        settle_until(&mut ed, |_| false, took * 3 + std::time::Duration::from_millis(200));
+        assert_eq!(ed.said, said);
+    }
+
+    /// A download way that fits: its card (weighty, `N` never as an install's); `y` fetches on a worker, and a
+    /// site that isn't there leaves the card saying so, to try again.
+    #[test]
+    fn a_download_is_offered_and_fetched_from_its_card() {
+        let mut ed = Editor::new(crate::config::Config::default());
+        ed.offer_popups = true;
+        ed.offer_server(Install { download: Some(download_way(None)), ..no_way("tarae-test-dl") });
+        settle_until(&mut ed, |ed| !ed.offers.is_empty(), std::time::Duration::from_secs(10));
+        let o = &ed.offers[0];
+        let What::Fetch { tool, dir, .. } = &o.what else { panic!("{:?}", o.what) };
+        assert_eq!(tool, "tarae-test-dl");
+        assert!(dir.ends_with("tarae/tarae-test-dl"), "{}", dir.display());
+        assert!(
+            o.question.contains("from 127.0.0.1:9 — checked against its published SHA-256"),
+            "{}",
+            o.question
+        );
+        assert!(o.weighty());
+        assert!(o.answers(false).iter().any(|(k, _)| *k == 'N'), "never, as an install");
+        ed.offer_accept();
+        assert!(ed.offers[0].installing(), "fetching");
+        settle_until(&mut ed, |ed| !ed.offers[0].installing(), std::time::Duration::from_secs(10));
+        let crate::offer::OfferState::Failed(why) = &ed.offers[0].state else {
+            panic!("{:?}", ed.offers[0].state)
+        };
+        assert!(!why.is_empty());
     }
 
     #[test]

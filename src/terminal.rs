@@ -591,12 +591,11 @@ impl Editor {
                     t.selection = None;
                     return;
                 }
-                let lines = text.lines().count();
-                crate::clipboard::copy(&self.events.jobs(), text.clone());
-                self.set_success(match lines {
-                    0 | 1 => format!("copied {} characters", text.chars().count()),
-                    n => format!("copied {n} lines"),
-                });
+                let what = match text.lines().count() {
+                    0 | 1 => format!("{} characters", text.chars().count()),
+                    n => format!("{n} lines"),
+                };
+                crate::clipboard::copy(&self.events.jobs(), text, what);
             }
         }
     }
@@ -908,6 +907,7 @@ mod tests {
         ed.terminal_mouse(MouseKind::Drag, Some((0, 6)), false);
         assert_eq!(ed.session.terminal.as_ref().unwrap().selected_text(), "world\nsecond");
         ed.terminal_mouse(MouseKind::Up, Some((0, 6)), false);
+        wait(&mut ed, |ed| ed.toasts.iter().any(|t| t.text.starts_with("copied")));
         assert!(
             ed.toasts.iter().any(|t| t.text == "copied 2 lines"),
             "{:?}",

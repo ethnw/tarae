@@ -64,6 +64,48 @@ fn starts_shows_the_file_and_quits_restoring_the_terminal() {
     assert!(!t.screen().contains("NORMAL"), "back on the main screen:\n{}", t.screen());
 }
 
+/// Over SSH a copy goes to the user's own clipboard through the terminal (OSC 52), written with tarae's own
+/// output after a frame — and the one toast says so.
+#[test]
+fn a_copy_over_ssh_goes_through_the_terminal() {
+    let sb = Sandbox::new("osc52").with_env("SSH_TTY", "/dev/pts/9");
+    sb.write("a.txt", "hi there\n");
+    let mut t = sb.spawn(&["a.txt"]);
+    t.wait_text("hi there");
+    t.send("e");
+    t.send(" y");
+    // "hi" in base64, ended by ST
+    let osc = b"\x1b]52;c;aGk=\x1b\\";
+    let raw = t.wait_raw("the OSC 52", |r| contains(r, osc));
+    let at = rfind(&raw, osc).unwrap();
+    let opened = rfind(&raw[..at], b"\x1b[?2026h").expect("a frame before it");
+    assert!(contains(&raw[opened..at], b"\x1b[?2026l"), "not inside a frame's synchronized update");
+    let s = t.wait_text("copied 1 selection");
+    assert!(s.contains("OSC 52"), "says how\n{s}");
+}
+
+/// No claude on PATH (the sandbox's PATH has none): the chat says Claude Code isn't installed and how to get it
+/// and log in — not an OS error (#163).
+#[test]
+fn a_chat_without_claude_says_how_to_get_it() {
+    let sb = Sandbox::new("noclaude");
+    sb.write("a.txt", "hi\n");
+    let mut t = sb.spawn(&["a.txt"]);
+    t.wait_text("hi");
+    let input = t.state_json(0)["input"].as_u64().unwrap();
+    t.send(" l");
+    t.send("hello\r");
+    // (the Enter handled and drawn too: it tries again)
+    t.state_json(input + 8);
+    let s = t.wait_text("Claude Code isn't installed");
+    assert!(s.contains("install.sh"), "how to get it\n{s}");
+    assert!(s.contains("log in"), "and log in\n{s}");
+    assert!(!s.contains("os error"), "{s}");
+    // (opening the chat tried, and so did sending: said once — a second would push the first's start up)
+    let said = |line: &str| s.rows.iter().filter(|r| r.contains(line)).count();
+    assert_eq!((said("Claude Code isn't installed"), said("After installing")), (1, 1), "{s}");
+}
+
 #[test]
 fn edits_and_saves_an_existing_file() {
     let sb = Sandbox::new("save");

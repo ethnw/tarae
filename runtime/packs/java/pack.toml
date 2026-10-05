@@ -65,5 +65,20 @@ leave-out = { init = "settings.java.import.exclusions", each = ["**/{rel}", "**/
 
 [install.jdtls]
 what = "Java's language server (jdtls)"
-ways = [{ run = ["brew", "install", "jdtls"] }]
-hint = "or your system's jdtls package, or a snapshot from download.eclipse.org/jdtls"
+hint = "or a release from download.eclipse.org/jdtls/milestones (it runs on Java 21 or newer)"
+
+[[install.jdtls.ways]]
+run = ["brew", "install", "jdtls"]
+
+# Where Homebrew isn't (Linux): Eclipse's newest milestone — the release a tag of eclipse.jdt.ls is built as
+# (mason pins the same build). The milestones folder lists one folder per release; each has `latest.txt`
+# naming its archive and `<archive>.sha256` beside it. The launcher is a Python script, run on Java 21+.
+[[install.jdtls.ways]]
+download = "https://download.eclipse.org/jdtls/milestones/{version}/{file}"
+version = { from = "https://download.eclipse.org/jdtls/milestones/", pick = 'milestones/(\d+(?:\.\d+)+)' }
+file = { from = "https://download.eclipse.org/jdtls/milestones/{version}/latest.txt", pick = '(jdt-language-server-\S+\.tar\.gz)' }
+sha256 = "https://download.eclipse.org/jdtls/milestones/{version}/{file}.sha256"
+unpack = "tar.gz"
+program = "bin/jdtls"
+needs = ["python3"]
+runtime = { program = "java", home = "JAVA_HOME", ask = ["-version"], version = 'version "(?:1\.)?(\d+)', at-least = 21, get = "install a JDK 21 or newer (Ubuntu: openjdk-21-jdk) and point JAVA_HOME at it" }

@@ -9,6 +9,11 @@
 //!
 //! Docker not reachable: it says `skipped — …` and exits 0, so a `:preflight` step with `note = "skipped"`
 //! reads it as a pass with a note. Not in tarae's own `.tarae.toml` — a step of yours (`.tarae.local.toml`).
+//!
+//! The target volume is the checkout's own (`target_volume`, labelled with its path): every checkout's clone is
+//! /work/tarae, so one shared target let a session's tests run another session's build (its e2e ran another's
+//! `target/debug/tarae`). Each run drops the volumes of checkouts that are gone; `cargo xtask linux prune` does
+//! that now, and drops the old shared `tarae-target-<pin>` too.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -60,6 +65,12 @@ pub fn run(args: &[String]) -> Result<()> {
         return Ok(());
     }
     eprintln!("Linux checks on {} (Rust {pin}) …", image(&pin));
+    prune_volumes(false);
+    // (made here, not by `docker run`: only a volume made this way carries its checkout's label)
+    let made = Command::new("docker").args(create_args(&root, &pin)).output();
+    if !made.as_ref().is_ok_and(|o| o.status.success()) {
+        return Err(format!("docker volume create {}: failed", target_volume(&root, &pin)));
+    }
     let st = Command::new("docker")
         .args(docker_args(&root, common_git_dir(&root).as_deref(), &pin, &what))
         .status()
@@ -125,7 +136,7 @@ fn docker_args(root: &Path, git: Option<&Path>, pin: &str, what: &What) -> Vec<S
     if let Some(git) = git {
         mount(&mut a, format!("{0}:{0}:ro", git.display()));
     }
-    mount(&mut a, format!("tarae-target-{pin}:/target"));
+    mount(&mut a, format!("{}:/target", target_volume(root, pin)));
     mount(&mut a, "tarae-registry:/usr/local/cargo/registry".into());
     // (seeded from the image the first time: the file's components and targets are fetched once)
     mount(&mut a, format!("tarae-rustup-{pin}:/usr/local/rustup"));
@@ -134,6 +145,93 @@ fn docker_args(root: &Path, git: Option<&Path>, pin: &str, what: &What) -> Vec<S
     }
     a.extend([image(pin), "sh".into(), "-ec".into(), script(what)]);
     a
+}
+
+/// The label naming the checkout a target volume is for.
+const CHECKOUT_LABEL: &str = "tarae.checkout";
+
+/// The checkout's own target volume: `tarae-target-<pin>-<hash of its path>` (FNV-1a — the same path gives the
+/// same name on every run and Rust version).
+fn target_volume(root: &Path, pin: &str) -> String {
+    let hash = root
+        .to_string_lossy()
+        .bytes()
+        .fold(0xcbf29ce484222325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100000001b3));
+    format!("tarae-target-{pin}-{hash:016x}")
+}
+
+/// `docker volume create …` for it, labelled with the checkout's path (an existing one is left as it is).
+fn create_args(root: &Path, pin: &str) -> Vec<String> {
+    let label = format!("{CHECKOUT_LABEL}={}", root.display());
+    ["volume", "create", "--label", &label, &target_volume(root, pin)].map(String::from).into()
+}
+
+/// `docker volume ls`'s rows for the target volumes: (name, its checkout's path — empty when unlabelled).
+fn volumes(listed: &str) -> Vec<(String, String)> {
+    listed
+        .lines()
+        .filter_map(|l| {
+            let (name, path) = l.split_once('\t').unwrap_or((l, ""));
+            name.starts_with("tarae-target-").then(|| (name.to_string(), path.trim().to_string()))
+        })
+        .collect()
+}
+
+/// The target volumes to drop: those whose checkout is gone (`is_dir` says) — and with `shared`, the one every
+/// checkout shared before (`tarae-target-<pin>`, no label). An unlabelled one of another form isn't ours to
+/// judge: kept.
+fn prunable(volumes: &[(String, String)], is_dir: impl Fn(&Path) -> bool, shared: bool) -> Vec<String> {
+    let old_form = |n: &str| {
+        n.strip_prefix("tarae-target-").is_some_and(|v| v.chars().all(|c| c.is_ascii_digit() || c == '.'))
+    };
+    volumes
+        .iter()
+        .filter(|(name, path)| match path.is_empty() {
+            true => shared && old_form(name),
+            false => !is_dir(Path::new(path)),
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+/// `cargo xtask linux prune`: the target volumes no checkout uses, the old shared one too.
+pub fn prune() -> Result<()> {
+    if let Err(why) = reachable(&mut Command::new("docker")) {
+        println!("{}", skipped(&why));
+        return Ok(());
+    }
+    if prune_volumes(true) == 0 {
+        println!("no target volume to drop — every one is a checkout's that's there");
+    }
+    Ok(())
+}
+
+/// Drops what `prunable` says, each said; one still in use (a run going) stays. How many went.
+fn prune_volumes(shared: bool) -> usize {
+    let format = format!("{{{{.Name}}}}\t{{{{.Label \"{CHECKOUT_LABEL}\"}}}}");
+    let Ok(out) = Command::new("docker")
+        .args(["volume", "ls", "--filter", "name=tarae-target-", "--format", &format])
+        .output()
+    else {
+        return 0;
+    };
+    let listed = volumes(&String::from_utf8_lossy(&out.stdout));
+    let mut gone = 0;
+    for name in prunable(&listed, Path::is_dir, shared) {
+        let rm = Command::new("docker").args(["volume", "rm", &name]).output();
+        match rm {
+            Ok(o) if o.status.success() => {
+                gone += 1;
+                let of = listed.iter().find(|(n, _)| *n == name).map(|(_, p)| p.as_str()).unwrap_or_default();
+                match of.is_empty() {
+                    true => eprintln!("dropped {name} (the target every checkout shared)"),
+                    false => eprintln!("dropped {name} ({of} is gone)"),
+                }
+            }
+            _ => eprintln!("kept {name} for now: Docker didn't drop it (a run using it?)"),
+        }
+    }
+    gone
 }
 
 /// The image for `pin`: `rust:<major.minor>` — rustup in it then takes `rust-toolchain.toml`'s exact version
@@ -206,9 +304,8 @@ mod tests {
             !a.iter().any(|v| v.starts_with("/r/tarae:") && !v.ends_with(":ro")),
             "no writable mount: {a:?}"
         );
-        assert!(
-            a.contains(&"tarae-target-1.99.0:/target".to_string()) && a.contains(&"rust:1.99".to_string())
-        );
+        let target = format!("{}:/target", target_volume(Path::new("/r/tarae"), "1.99.0"));
+        assert!(a.contains(&target) && a.contains(&"rust:1.99".to_string()), "{a:?}");
         assert_eq!((image("1.100.2"), image("1.99")), ("rust:1.100".to_string(), "rust:1.99".to_string()));
         let s = a.last().unwrap();
         assert!(s.contains("git clone -q /src /work/tarae && cd /work/tarae"), "{s}");
@@ -271,6 +368,48 @@ mod tests {
         assert_eq!(common_git_dir(&main), None, "a plain checkout's own .git is in the tree");
         assert_eq!(common_git_dir(&wt), Some(main.join(".git")));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Each checkout builds in a target of its own (one shared let a session's tests run another's build),
+    /// named the same on every run, labelled with its path; registry and rustup stay shared.
+    #[test]
+    fn each_checkout_has_its_own_target() {
+        let (a, b) = (Path::new("/w/tarae/s1"), Path::new("/w/tarae/s2"));
+        let name = target_volume(a, "1.99.0");
+        assert_eq!(name, target_volume(a, "1.99.0"), "the same on every run");
+        assert_ne!(name, target_volume(b, "1.99.0"), "another checkout, another target");
+        assert_ne!(name, target_volume(a, "1.100.0"), "and per pin");
+        assert!(name.starts_with("tarae-target-1.99.0-") && name.len() == "tarae-target-1.99.0-".len() + 16);
+        assert!(name.chars().all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c)), "a Docker volume name");
+        let made = create_args(a, "1.99.0");
+        assert_eq!(made, ["volume", "create", "--label", "tarae.checkout=/w/tarae/s1", name.as_str()]);
+        let args = docker_args(a, None, "1.99.0", What::Test);
+        assert!(args.contains(&format!("{name}:/target")), "{args:?}");
+        assert!(args.contains(&"tarae-registry:/usr/local/cargo/registry".to_string()), "{args:?}");
+        assert!(args.contains(&"tarae-rustup-1.99.0:/usr/local/rustup".to_string()), "{args:?}");
+    }
+
+    /// What's dropped: a target whose checkout is gone; the old shared one only when asked (`prune`); never a
+    /// live checkout's, nor an unlabelled one of another form.
+    #[test]
+    fn a_gone_checkouts_target_is_dropped() {
+        let listed = volumes(
+            "tarae-target-1.99.0-aaaa\t/w/live\n\
+             tarae-target-1.99.0-bbbb\t/w/gone\n\
+             tarae-target-1.99.0\t\n\
+             tarae-target-mine\t\n\
+             tarae-registry\t\n",
+        );
+        assert_eq!(listed.len(), 4, "only target volumes: {listed:?}");
+        let live = |p: &Path| p == Path::new("/w/live");
+        assert_eq!(prunable(&listed, live, false), ["tarae-target-1.99.0-bbbb"], "each run");
+        assert_eq!(
+            prunable(&listed, live, true),
+            ["tarae-target-1.99.0-bbbb", "tarae-target-1.99.0"],
+            "prune: the old shared one too"
+        );
+        assert!(prunable(&listed, |_| true, false).is_empty(), "every checkout there: nothing");
+        assert_eq!(volumes("tarae-target-1.99.0\n"), [("tarae-target-1.99.0".to_string(), String::new())]);
     }
 
     /// No Docker to talk to: said in a line a preflight note can match, not an error.
