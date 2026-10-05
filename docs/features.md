@@ -352,9 +352,12 @@ your `PATH`.
 
 Install a new tarae (`cargo install …` again) while one is running, then type `:restart`. The running tarae
 saves your files and starts the new one in the same terminal, in the same zellij or tmux pane, and you're back
-where you were: the open files with their cursors, selections, and scroll, the split windows, the side panel, the
-chat with the same conversation (and the words you were typing in it), and the settings you changed with `:set`.
-A toast says so (`Restarted · 3 files as they were`).
+where you were — in every session, each with its own: the open files with their cursors, selections, and scroll,
+the split windows, the side panel, the chat with the same conversation (and the words you were typing in it). The
+settings you changed with `:set` come along too, and the session that was in front is in front. A session behind
+comes back quiet: its language servers start when you bring it to the front, and its Claude when you send it a
+message (resuming the same conversation). A toast says what came back (`Restarted · 3 sessions · 9 files as
+they were`), and one after it names what didn't (`checkout gone: old-parser · file gone: old.rs`).
 
 It runs the tarae at the path the running one was started from, so whatever `cargo install` put there is what
 comes up. Before it lets go, it checks that the new binary runs and answers as a tarae; one that doesn't (a
@@ -366,8 +369,8 @@ it builds in and at what commit — `Restart into main's build (1085db8)?` — t
 session in front, `f` builds that one's instead. If the build leaves the binary as it was and it's older than
 that checkout's commit, a card says so rather than restarting into the same tarae (`y` restarts anyway).
 
-Some things don't come along. A shell in the terminal panel (`space T`) ends; the new tarae says so, and
-`space T` starts a fresh one. Language servers start again, so a large project is indexed again before
+Some things don't come along. A shell in the terminal panel (`space T`) ends; the new tarae says so, naming the
+session when it's one behind, and `space T` starts a fresh one. Language servers start again, so a large project is indexed again before
 go-to-definition and the like answer. The turns `space u` can take back and Claude's notes come back, each in
 its own session; the list (`]q`) belongs to the old tarae and stays behind. Undo within a file (`u`/`U`)
 keeps working, as after any restart (`editor.persistent-undo`).

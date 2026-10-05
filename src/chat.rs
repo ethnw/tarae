@@ -579,6 +579,11 @@ fn loaded(ed: &mut Editor, saved: Vec<crate::chats::Saved>) {
 
 /// Shows `saved` in the panel and resumes its conversation in claude (the process of now, if any, goes).
 pub fn continue_with(ed: &mut Editor, saved: crate::chats::Saved) {
+    continue_from(ed, saved, true);
+}
+
+/// `continue_with` — the process only when `spawn` (else the first message starts it, resuming).
+fn continue_from(ed: &mut Editor, saved: crate::chats::Saved, spawn: bool) {
     let Some(c) = &mut ed.session.chat else { return };
     if c.busy() {
         return ed.set_status("Claude is still answering — stop it (C-c) first");
@@ -600,7 +605,9 @@ pub fn continue_with(ed: &mut Editor, saved: crate::chats::Saved) {
         None => ed.session.usage.resumed(&saved.id),
     }
     crate::usage::watch(ed);
-    ensure_proc(ed);
+    if spawn {
+        ensure_proc(ed);
+    }
 }
 
 /// `C-p` · `:chat-resume`: the project's earlier conversations, newest first — Enter continues one.
@@ -661,6 +668,8 @@ pub struct Restored {
     pub follow: bool,
     /// Review at the end, on for this folder (`edits.rs`).
     pub at_end: Option<PathBuf>,
+    /// A session behind's: no claude until its first message (which resumes the conversation).
+    pub lazy: bool,
 }
 
 /// The note a conversation carried over a restart ends with (one — earlier ones go).
@@ -676,15 +685,26 @@ pub fn restore(ed: &mut Editor, r: Restored) {
     c.focused = r.focused;
     c.edits.at_end = r.at_end;
     ed.session.chat = Some(c);
-    let (Some(id), Some(dir)) = (r.conversation, ed.chats_dir.clone()) else { return ensure_proc(ed) };
+    let spawn = !r.lazy;
+    let (Some(id), Some(dir)) = (r.conversation, ed.chats_dir.clone()) else {
+        if spawn {
+            ensure_proc(ed);
+        }
+        return;
+    };
     let root = ed.session.root.clone();
     ed.events.jobs().spawn(move || {
         let saved = crate::chats::load(&dir, &root);
         move |ed: &mut Editor| {
             let Some(c) = &mut ed.session.chat else { return };
             c.past = saved.iter().map(|s| (s.id.clone(), s.title.clone(), s.updated)).collect();
-            let Some(s) = saved.into_iter().find(|s| s.id == id) else { return ensure_proc(ed) };
-            continue_with(ed, s);
+            let Some(s) = saved.into_iter().find(|s| s.id == id) else {
+                if spawn {
+                    ensure_proc(ed);
+                }
+                return;
+            };
+            continue_from(ed, s, spawn);
             let Some(c) = &mut ed.session.chat else { return };
             c.scroll = r.scroll;
             c.msgs.retain(|m| !(m.role == Role::Note && m.text == RESTARTED));
@@ -697,12 +717,20 @@ pub fn restore(ed: &mut Editor, r: Restored) {
 
 /// The conversation as it's kept: (store, project, it) — None before claude gave it an id.
 fn kept(ed: &Editor) -> Option<(std::path::PathBuf, std::path::PathBuf, crate::chats::Saved)> {
-    let (dir, c) = (ed.chats_dir.clone()?, ed.session.chat.as_ref()?);
+    kept_of(ed.chats_dir.clone()?, &ed.session)
+}
+
+/// `kept` for session `l`'s chat, in front or behind.
+fn kept_of(
+    dir: std::path::PathBuf,
+    l: &crate::session::Session,
+) -> Option<(std::path::PathBuf, std::path::PathBuf, crate::chats::Saved)> {
+    let c = l.chat.as_ref()?;
     let id = c.conversation.clone()?;
     let title = c.msgs.iter().find(|m| m.role == Role::User).map(|m| m.text.clone()).unwrap_or_default();
     let plan = c.plan.as_ref().map(crate::plan::Plan::to_json);
     let saved = crate::chats::Saved {
-        usage: ed.session.usage.conv_json(&id),
+        usage: l.usage.conv_json(&id),
         id,
         title,
         updated: crate::chats::now(),
@@ -710,7 +738,7 @@ fn kept(ed: &Editor) -> Option<(std::path::PathBuf, std::path::PathBuf, crate::c
         plan,
         seq: crate::chats::seq(),
     };
-    Some((dir, ed.session.root.clone(), saved))
+    Some((dir, l.root.clone(), saved))
 }
 
 /// The turn ended: the conversation is kept (on a worker) — its rows and claude's id for it.
@@ -719,11 +747,14 @@ fn keep(ed: &Editor) {
     ed.events.jobs().background(move || crate::chats::save(&dir, &root, saved));
 }
 
-/// Kept now, on this thread — the last thing before `:restart` replaces this process (a worker's save
-/// would go with it).
+/// Every session's kept now, on this thread — the last thing before `:restart` replaces this process (a
+/// worker's save would go with it).
 pub fn keep_now(ed: &Editor) {
-    if let Some((dir, root, saved)) = kept(ed) {
-        crate::chats::save(&dir, &root, saved);
+    let Some(dir) = ed.chats_dir.clone() else { return };
+    for l in ed.sessions_in_order() {
+        if let Some((dir, root, saved)) = kept_of(dir.clone(), l) {
+            crate::chats::save(&dir, &root, saved);
+        }
     }
 }
 

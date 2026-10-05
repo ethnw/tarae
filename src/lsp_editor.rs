@@ -84,6 +84,9 @@ pub struct LspState {
     pub(crate) sight_after: Option<std::time::Duration>,
     waits_sight: std::collections::HashSet<DocId>,
     pub(crate) unseen_later: bool,
+    /// While a session behind comes back after `:restart`: its files' servers wait until it's used — in
+    /// front, or its Claude answering (`Session.asleep`).
+    pub(crate) attach_later: bool,
     /// How long `g r`'s text matches wait for a busy server's answer — `TEXT_GRACE` unless a test says.
     pub(crate) text_grace: Option<std::time::Duration>,
     /// How long Claude's tools wait for a server before standing in for it — `nav::REFS_WAIT` unless a
@@ -478,6 +481,12 @@ impl Editor {
         }
         let Some(path) = doc.path.clone() else { return };
         let Some(spec) = crate::syntax::detect(&path) else { return };
+        if self.lsp.attach_later {
+            if !self.session.asleep.contains(&id) {
+                self.session.asleep.push(id);
+            }
+            return;
+        }
         // (reopened at startup outside every checkout: its server once it's shown — #141)
         if self.lsp.unseen_later && !self.in_a_checkout(&path) {
             self.lsp.waits_sight.insert(id);

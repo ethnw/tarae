@@ -1,11 +1,14 @@
 //! `:restart` — a new tarae (after `cargo install`, or tarae building tarae). Build if
 //! `editor.restart-build` says how, check the binary (`editor.restart-binary`, else the running one's
 //! path) answers `--version`, then become it: `exec` keeps the pid, the terminal and the zellij pane, and
-//! the new tarae comes back with what was on screen — the open files with their selections and scroll, the panes, the
-//! side panel, the chat (its claude conversation resumed, the words being typed) and the `:set`s.
+//! the new tarae comes back as it was in every session — each one's open files with their selections and
+//! scroll, its panes, side panel and chat (its claude conversation resumed, the words being typed) — the one
+//! in front in front, and the `:set`s. A session behind comes back as it would look had you switched away
+//! a moment ago: its files' servers asleep, its chat without a claude until it's used.
 //!
 //! The state goes through one file (`restart-<pid>.json` in the state dir → `--restart <file>`), written
-//! once the loop has ended and read (and removed) at startup.
+//! once the loop has ended and read (and removed) at startup. Each session has its block in it; the
+//! top-level fields stay as earlier builds read them (`snapshot`).
 //!
 //! Files are saved first, as before a task. What can't come along stops it the way `:q` is stopped — a
 //! buffer with no file, an open review, a code review. A chat turn in flight is waited for (`turn_over`);
@@ -18,7 +21,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+use crate::document::DocId;
 use crate::editor::{Editor, View};
+use crate::event::SessionId;
 use crate::selection::{Range, Selection};
 use crate::sidebar::Mode;
 use crate::split::{Dir, Split};
@@ -699,10 +704,48 @@ pub fn wait_for(pids: Vec<u32>) {
 /// What was on screen, as the next tarae reads it. Documents without a file (scratch, a review's deleted
 /// file, `jdt://` classes) stay behind — panes showing one show the current file — and so do files outside
 /// the project Claude's turn opened that you never took up (`Document::aside`, #37).
+///
+/// Each session's own block is in `sessions` (state v2: its files, panes, side panel, chat, shell — the
+/// fields below, of its own, `session_json`). The top-level ones stay as earlier builds read them — every
+/// file, the front's panes and chat — so a restart into one (`f` on the card) still comes back as it did.
 pub fn snapshot(ed: &mut Editor) -> Value {
     ed.sync_focus_view();
-    let docs: Vec<&crate::document::Document> =
-        ed.docs.iter().filter(|d| d.path.is_some() && d.virtual_uri.is_none() && !d.aside).collect();
+    let docs: Vec<&crate::document::Document> = ed.docs.iter().filter(|d| carried(d)).collect();
+    let mut state = session_json(&ed.session, &docs, ed.doc().id);
+    let overrides: Vec<Value> = ed.overrides.iter().map(|(p, v)| json!([p, v.to_string()])).collect();
+    // (every session, and which is in front — each with its block)
+    let mut sessions = crate::worktree::snapshot(ed);
+    let all = ed.sessions_in_order();
+    for (block, l) in sessions["sessions"].as_array_mut().into_iter().flatten().zip(&all) {
+        let current = if l.id == ed.session.id { ed.doc().id } else { l.current_doc };
+        let own: Vec<&crate::document::Document> =
+            docs.iter().filter(|d| l.docs.contains(&d.id)).copied().collect();
+        if let (Some(block), Value::Object(fields)) = (block.as_object_mut(), session_json(l, &own, current))
+        {
+            block.extend(fields);
+        }
+    }
+    if let Some(top) = state.as_object_mut() {
+        top.extend([
+            ("light".to_string(), json!(crate::theme::is_light())),
+            ("overrides".into(), json!(overrides)),
+            ("sessions".into(), sessions),
+            // (the review's viewed marks, each session's)
+            ("viewed".into(), crate::codereview::viewed_snapshot(ed)),
+        ]);
+    }
+    state
+}
+
+/// A document that comes along: a file — not a scratch, a review's deleted file, a `jdt://` class, or one
+/// outside the project Claude's turn opened that you never took up (`Document::aside`, #37).
+fn carried(d: &crate::document::Document) -> bool {
+    d.path.is_some() && d.virtual_uri.is_none() && !d.aside
+}
+
+/// Session `l`'s part of the state: `docs` (its files, `current` the one it shows), its panes, side panel,
+/// chat, and whether its shell was open (it can't come along — the next tarae says so).
+fn session_json(l: &crate::session::Session, docs: &[&crate::document::Document], current: DocId) -> Value {
     let index = |id| docs.iter().position(|d| d.id == id);
     let files: Vec<Value> = docs
         .iter()
@@ -712,58 +755,101 @@ pub fn snapshot(ed: &mut Editor) -> Value {
             json!({ "path": d.path, "sel": ranges, "primary": sel.primary_index(), "top": d.top, "left": d.left })
         })
         .collect();
-    let views: Vec<Value> = ed
-        .session
+    // (the focused pane shows the current document at its scroll — `sync_focus_view`, which a session
+    // behind hasn't had since it went behind)
+    let shown = docs.iter().find(|d| d.id == current).map(|d| (d.id, d.top, d.left));
+    let views: Vec<Value> = l
         .views
         .iter()
-        .map(|v| json!({ "id": v.id, "doc": index(v.doc), "top": v.top, "left": v.left }))
+        .map(|v| {
+            let (doc, top, left) = shown.filter(|_| v.id == l.focus).unwrap_or((v.doc, v.top, v.left));
+            json!({ "id": v.id, "doc": index(doc), "top": top, "left": left })
+        })
         .collect();
-    let sidebar = ed
-        .session
-        .sidebar
-        .as_ref()
-        .and_then(|s| Some(json!({ "mode": mode_name(s.mode)?, "focus": s.focus })));
-    let chat = ed.session.chat.as_ref().map(|c| {
+    let sidebar =
+        l.sidebar.as_ref().and_then(|s| Some(json!({ "mode": mode_name(s.mode)?, "focus": s.focus })));
+    let chat = l.chat.as_ref().map(|c| {
         json!({ "conversation": c.conversation, "input": c.input, "cursor": c.cursor, "focused": c.focused,
                 "scroll": c.scroll, "follow": c.follow.on, "at_end": c.edits.at_end })
     });
-    let overrides: Vec<Value> = ed.overrides.iter().map(|(p, v)| json!([p, v.to_string()])).collect();
     json!({
-        "light": crate::theme::is_light(),
         "docs": files,
-        "current": index(ed.doc().id),
+        "current": index(current),
         "views": views,
-        "split": split_json(&ed.session.split),
-        "focus": ed.session.focus,
+        "split": split_json(&l.split),
+        "focus": l.focus,
         "sidebar": sidebar,
         "chat": chat,
-        "overrides": overrides,
-        // (every session, and which is in front; its files are the ones above)
-        "sessions": crate::worktree::snapshot(ed),
-        // (the review's viewed marks, each session's)
-        "viewed": crate::codereview::viewed_snapshot(ed),
-        // (its shell can't come along — the next tarae says so)
-        "terminal": ed.session.terminal.as_ref().is_some_and(|t| t.exited.is_none()),
+        "terminal": l.terminal.as_ref().is_some_and(|t| t.exited.is_none()),
     })
 }
 
-/// Back as it was (`snapshot`) — the files that are still there — and a toast that says so. Number of
-/// files opened (none: the start screen, as a plain start would show).
-pub fn restore(ed: &mut Editor, v: &Value) -> usize {
-    let n = restore_quietly(ed, v);
-    let mut said = match n {
-        0 => "Restarted".to_string(),
-        1 => "Restarted · 1 file as it was".to_string(),
-        n => format!("Restarted · {n} files as they were"),
-    };
-    if v["terminal"].as_bool() == Some(true) {
-        said.push_str(" · the terminal starts afresh (space T)");
-    }
-    ed.set_success(said);
-    n
+/// What came back, for the toast.
+#[derive(Default)]
+struct Back {
+    sessions: usize,
+    files: std::collections::HashSet<DocId>,
+    /// Files and checkouts gone since — named, never dropped in silence.
+    gone: Vec<String>,
+    gone_checkouts: Vec<String>,
+    /// Whose shell starts afresh: None the front's, else a session behind's name.
+    shells: Vec<Option<String>>,
 }
 
-fn restore_quietly(ed: &mut Editor, v: &Value) -> usize {
+/// Back as it was (`snapshot`) — every session, the files that are still there — and what came back said:
+/// the counts, then (the newest toast, wrapped whole) by name what didn't — every gone checkout, the gone
+/// files (the first few), whose shell starts afresh. Number of files opened (none: the start screen, as a
+/// plain start would show).
+pub fn restore(ed: &mut Editor, v: &Value) -> usize {
+    let back = restore_quietly(ed, v);
+    let mut said = vec!["Restarted".to_string()];
+    if back.sessions > 1 {
+        said.push(format!("{} sessions", back.sessions));
+    }
+    match back.files.len() {
+        0 => {}
+        1 => said.push("1 file as it was".into()),
+        n => said.push(format!("{n} files as they were")),
+    }
+    if back.shells.contains(&None) {
+        said.push("the terminal starts afresh (space T)".into());
+    }
+    ed.set_success(said.join(" · "));
+    // By name — after, so it's the toast that wraps (the one before is a row of its own); each name one
+    // word, so a row never ends inside one
+    let mut named = Vec::new();
+    let list = |names: &[String]| names.join(", ");
+    match back.gone_checkouts.as_slice() {
+        [] => {}
+        [one] => named.push(format!("checkout gone: {one}")),
+        all => named.push(format!("checkouts gone: {}", list(all))),
+    }
+    let files: Vec<String> = back.gone.iter().take(GONE_SHOWN).cloned().collect();
+    match (files.len(), back.gone.len().saturating_sub(GONE_SHOWN)) {
+        (0, _) => {}
+        (1, _) => named.push(format!("file gone: {}", list(&files))),
+        (_, 0) => named.push(format!("files gone: {}", list(&files))),
+        (_, more) => named.push(format!("files gone: {} +{more}", list(&files))),
+    }
+    let shells: Vec<String> = back.shells.iter().flatten().cloned().collect();
+    match shells.len() {
+        0 => {}
+        1 => named.push(format!("terminal starts afresh: {}", list(&shells))),
+        _ => named.push(format!("terminals start afresh: {}", list(&shells))),
+    }
+    let gone = !back.gone_checkouts.is_empty() || !back.gone.is_empty();
+    match (named.is_empty(), gone) {
+        (true, _) => {}
+        (false, false) => ed.set_status(named.join(" · ")),
+        (false, true) => ed.set_warning(named.join(" · ")),
+    }
+    back.files.len()
+}
+
+/// Files gone since named on the restart's toast (the rest counted; checkouts are all named).
+const GONE_SHOWN: usize = 4;
+
+fn restore_quietly(ed: &mut Editor, v: &Value) -> Back {
     // `:set`s first — some decide how files open (soft wrap, language servers)
     let mut set = false;
     for o in v["overrides"].as_array().into_iter().flatten() {
@@ -777,16 +863,58 @@ fn restore_quietly(ed: &mut Editor, v: &Value) -> usize {
     if set {
         ed.ensure_theme();
     }
-    // The sessions, the one in front in front — the files below open in it
-    crate::worktree::restore(ed, &v["sessions"]);
+    // The sessions, the one in front in front
+    let gone = crate::worktree::restore(ed, &v["sessions"]);
     crate::codereview::viewed_restore(ed, &v["viewed"]);
+    let mut back = Back::default();
+    let blocks: Vec<&Value> =
+        v["sessions"]["sessions"].as_array().into_iter().flatten().filter(|b| b["docs"].is_array()).collect();
+    if blocks.is_empty() {
+        // (an earlier build's state: every file in the front, as it was then)
+        restore_session(ed, v, false, &mut back);
+        if v["terminal"].as_bool() == Some(true) {
+            back.shells.push(None);
+        }
+    } else {
+        // Each session in its own (`with_session`), the front's last — the one in sight
+        let front = ed.session.id;
+        let at = |ed: &Editor, b: &Value| {
+            let root = b["root"].as_str().map(Path::new)?;
+            ed.sessions_in_order().iter().find(|l| l.root == root).map(|l| (l.id, l.label().to_string()))
+        };
+        let mut found: Vec<(SessionId, String, &Value)> =
+            blocks.into_iter().filter_map(|b| at(ed, b).map(|(id, name)| (id, name, b))).collect();
+        crate::sorting::by_key(&mut found, |(id, ..)| *id == front);
+        for (id, name, b) in found {
+            let behind = id != front;
+            ed.with_session(id, |ed| restore_session(ed, b, behind, &mut back));
+            if b["terminal"].as_bool() == Some(true) {
+                back.shells.push(behind.then_some(name));
+            }
+        }
+    }
+    back.gone_checkouts = gone;
+    back.sessions = 1 + ed.sessions.len();
+    back
+}
+
+/// One session's files, panes, side panel and chat back (`session_json`, or an earlier build's top-level
+/// fields), in the session in front — swapped in for one `behind`, whose files' servers and claude wait
+/// until it's used (`LspState.attach_later` → `Session.asleep`; a lazy chat).
+fn restore_session(ed: &mut Editor, v: &Value, behind: bool, back: &mut Back) {
     // Saved index → the document it is now (outside the checkouts, a file's server waits until it's
     // shown — #141)
     let mut ids = Vec::new();
-    ed.lsp.unseen_later = true;
+    (ed.lsp.unseen_later, ed.lsp.attach_later) = (true, behind);
     for d in v["docs"].as_array().into_iter().flatten() {
-        let opened =
-            d["path"].as_str().filter(|p| Path::new(p).is_file()).and_then(|p| ed.open(Path::new(p)).ok());
+        let path = d["path"].as_str();
+        let opened = path.filter(|p| Path::new(p).is_file()).and_then(|p| ed.open(Path::new(p)).ok());
+        if opened.is_none()
+            && let Some(name) = path.and_then(|p| Path::new(p).file_name()).map(|n| n.to_string_lossy())
+            && !back.gone.iter().any(|g| *g == name)
+        {
+            back.gone.push(name.into_owned());
+        }
         ids.push(opened.map(|()| {
             let doc = ed.doc_mut();
             // (a big file still loading gets its spot from the restore file when its text is in)
@@ -811,9 +939,9 @@ fn restore_quietly(ed: &mut Editor, v: &Value) -> usize {
             doc.id
         }));
     }
-    ed.lsp.unseen_later = false;
-    let opened = ids.iter().flatten().count();
-    if opened > 0 {
+    (ed.lsp.unseen_later, ed.lsp.attach_later) = (false, false);
+    back.files.extend(ids.iter().flatten());
+    if ids.iter().any(Option::is_some) {
         layout(ed, v, &ids);
     }
     let sidebar = &v["sidebar"];
@@ -836,10 +964,10 @@ fn restore_quietly(ed: &mut Editor, v: &Value) -> usize {
                 scroll: num(&chat["scroll"]),
                 follow: chat["follow"].as_bool().unwrap_or(ed.config.llm.follow),
                 at_end: chat["at_end"].as_str().map(PathBuf::from),
+                lazy: behind,
             },
         );
     }
-    opened
 }
 
 /// The current file and the panes — `ids` = the document each saved one is now.
@@ -876,8 +1004,18 @@ fn layout(ed: &mut Editor, v: &Value, ids: &[Option<crate::document::DocId>]) {
             // The focused pane is the current document at its scroll
             ed.current = i;
             (ed.docs[i].top, ed.docs[i].left) = (f.top, f.left);
-            ed.next_view = leaves.last().map_or(1, |l| l + 1);
-            (ed.session.views, ed.session.split, ed.session.focus) = (views, split, focus);
+            // Each pane an id of this tarae's own counter — the state's only tie its panes to its split (two
+            // sessions' may be the same)
+            let first = ed.next_view;
+            ed.next_view += views.len() as u64;
+            let new = |old| first + ids.iter().position(|&i| i == old).unwrap_or(0) as u64;
+            let mut views = views;
+            for v in &mut views {
+                v.id = new(v.id);
+            }
+            let mut split = split;
+            split.renumber(&new);
+            (ed.session.views, ed.session.split, ed.session.focus) = (views, split, new(focus));
         }
     }
 }
@@ -1108,6 +1246,350 @@ mod tests {
         }
         assert_eq!(started().lines().count(), 1, "one claude — none prewarmed only to be killed");
         drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A conversation of `rows` kept in `store` for the checkout in `root`, as claude's id `id`.
+    fn keep_conversation(store: &Path, root: &Path, id: &str, said: &str) {
+        use crate::chat::{Msg, Role};
+        let msgs = [Msg::new(Role::User, "hello", ""), Msg::new(Role::Assistant, said, "")];
+        let saved = crate::chats::Saved {
+            id: id.into(),
+            title: "hello".into(),
+            updated: crate::chats::now(),
+            rows: crate::chats::rows_of(&msgs),
+            plan: None,
+            usage: None,
+            seq: crate::chats::seq(),
+        };
+        crate::chats::save(store, root, saved);
+    }
+
+    /// Two checkouts (`front`, `back`) in the test's folder, files in each; an editor started in `front`
+    /// with a stand-in claude (its command lines go to `argv.log`) and conversations kept in `chats`.
+    fn two_sessions(name: &str) -> (PathBuf, PathBuf, PathBuf, Editor) {
+        let dir = temp(name);
+        let (front, back) = (dir.join("front"), dir.join("back"));
+        for (d, files) in [(&front, &["f.txt"][..]), (&back, &["a.txt", "b.txt", "c.md"])] {
+            std::fs::create_dir_all(d).unwrap();
+            for f in files {
+                std::fs::write(d.join(f), "one\ntwo\nthree\n").unwrap();
+            }
+        }
+        (front.clone(), back, dir.clone(), started_in(&dir, &front))
+    }
+
+    /// A new editor as `:restart`'s binary starts: in `front`, the test's stand-ins.
+    fn started_in(dir: &Path, front: &Path) -> Editor {
+        let mut ed = Editor::new(Config::default());
+        ed.session.root = front.to_path_buf();
+        ed.chats_dir = Some(dir.join("chats"));
+        ed.config.llm.command = "sh".into();
+        let argv = dir.join("argv.log");
+        ed.config.llm.args =
+            vec!["-c".into(), format!("printf '%s\\n' \"$*\" >> '{}'; cat > /dev/null", argv.display())];
+        ed
+    }
+
+    fn session_at<'a>(ed: &'a Editor, root: &Path) -> &'a crate::session::Session {
+        ed.sessions_in_order().into_iter().find(|l| l.root == root).expect("the session")
+    }
+
+    fn paths_of(ed: &Editor, l: &crate::session::Session) -> Vec<String> {
+        let mut v: Vec<String> = ed
+            .docs
+            .iter()
+            .filter(|d| l.docs.contains(&d.id))
+            .filter_map(|d| Some(d.path.as_ref()?.file_name()?.to_string_lossy().into_owned()))
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// Wave 3, points 1–2: every session comes back as it was — not only the front's. Behind: its two files
+    /// (in its own buffer list, none in the front's), the selection, its two panes, its side panel, its chat
+    /// with its conversation and draft; the one in front in front.
+    #[test]
+    fn every_session_comes_back_as_it_was() {
+        let (front, back, dir, mut ed) = two_sessions("every");
+        keep_conversation(&dir.join("chats"), &back, "c-back", "Hello from back.");
+        ed.open(&front.join("f.txt")).unwrap();
+        let id = ed.session_add(back.clone());
+        ed.with_session(id, |ed| {
+            ed.open(&back.join("a.txt")).unwrap();
+            ed.doc_mut().set_selection(Selection::single(Range::new(0, 3)));
+            ed.split_view(Dir::Vertical);
+            ed.open(&back.join("b.txt")).unwrap();
+            ed.sidebar_show(Mode::Files);
+            let mut c = crate::chat::Chat::new();
+            (c.conversation, c.input, c.cursor) = (Some("c-back".into()), "half a thought".into(), 4);
+            ed.session.chat = Some(c);
+        });
+        let state = snapshot(&mut ed);
+        drop(ed);
+        let mut ed = started_in(&dir, &front);
+        restore(&mut ed, &state);
+        assert_eq!(ed.session.root, front, "the front in front");
+        assert_eq!(paths_of(&ed, &ed.session), ["f.txt"], "none of back's in the front's buffers");
+        let l = session_at(&ed, &back);
+        assert_eq!(paths_of(&ed, l), ["a.txt", "b.txt"]);
+        let current = ed.docs.iter().find(|d| d.id == l.current_doc).unwrap();
+        assert_eq!(current.path.as_deref(), Some(back.join("b.txt").as_path()), "its current file");
+        let a = ed.docs.iter().find(|d| d.path.as_deref() == Some(back.join("a.txt").as_path())).unwrap();
+        assert_eq!(a.selection().primary(), Range::new(0, 3));
+        assert_eq!(l.split.leaves().len(), 2, "its two panes");
+        assert_eq!(l.sidebar.as_ref().map(|s| s.mode), Some(Mode::Files), "its side panel");
+        let c = l.chat.as_ref().expect("its chat");
+        assert_eq!((c.input.as_str(), c.cursor), ("half a thought", 4), "its draft");
+        settle_until(&mut ed, |ed| {
+            let c = session_at(ed, &back).chat.as_ref().unwrap();
+            c.msgs.iter().any(|m| m.text == "Hello from back.")
+        });
+        let c = session_at(&ed, &back).chat.as_ref().unwrap();
+        assert_eq!(c.conversation.as_deref(), Some("c-back"), "its own conversation");
+        assert!(ed.session.chat.is_none(), "none in front — there was none");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Wave 3, points 3–4: a session behind comes back with no language server and no claude — they start
+    /// when it's used: its files' server when it comes to the front, its claude (resuming its conversation)
+    /// with its first message.
+    #[test]
+    fn sessions_behind_start_no_server_and_no_claude() {
+        let (front, back, dir, mut ed) = two_sessions("lazy");
+        let cfg = "[lsp.mdfake]\ncommand = \"sh\"\nargs = [\"-c\", \"cat > /dev/null\"]\n\
+                   [lang.markdown]\nlsp = [\"mdfake\"]\n";
+        let (config, w) = crate::config::parse(cfg);
+        assert!(w.is_empty(), "{w:?}");
+        keep_conversation(&dir.join("chats"), &back, "c-back", "Hello from back.");
+        let id = ed.session_add(back.clone());
+        ed.with_session(id, |ed| {
+            ed.open(&back.join("c.md")).unwrap();
+            let mut c = crate::chat::Chat::new();
+            c.conversation = Some("c-back".into());
+            ed.session.chat = Some(c);
+        });
+        let state = snapshot(&mut ed);
+        drop(ed);
+        let mut ed = started_in(&dir, &front);
+        ed.config.lsp = config.editor.lsp.clone();
+        restore(&mut ed, &state);
+        settle_until(&mut ed, |ed| {
+            let c = session_at(ed, &back).chat.as_ref();
+            c.is_some_and(|c| c.msgs.iter().any(|m| m.text == "Hello from back."))
+        });
+        let md = |ed: &Editor| {
+            ed.docs
+                .iter()
+                .find(|d| d.path.as_deref() == Some(back.join("c.md").as_path()))
+                .unwrap()
+                .lsp
+                .client
+        };
+        assert_eq!(md(&ed), None, "no server for a session behind");
+        let c = session_at(&ed, &back).chat.as_ref().unwrap();
+        assert!(!c.proc_alive(), "no claude for a chat behind");
+        let argv = || std::fs::read_to_string(dir.join("argv.log")).unwrap_or_default();
+        // To the front: its server; a message: its claude, resuming its conversation
+        let id = session_at(&ed, &back).id;
+        ed.session_switch(id);
+        assert!(md(&ed).is_some(), "its server, now it's in front");
+        assert!(!ed.session.chat.as_ref().unwrap().proc_alive(), "its claude waits for a message");
+        let c = ed.session.chat.as_mut().unwrap();
+        (c.input, c.cursor) = ("go on".into(), 5);
+        crate::chat::send(&mut ed);
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !argv().contains("--resume c-back") {
+            assert!(std::time::Instant::now() < end, "resumed: {}", argv());
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(argv().lines().count(), 1, "one claude");
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Wave 3, point 5: before the exec, every session's conversation is kept on this thread — not only the
+    /// front's (a worker's save would go with the process).
+    #[test]
+    fn every_sessions_conversation_is_kept_before_the_exec() {
+        use crate::chat::{Msg, Role};
+        let (front, back, dir, mut ed) = two_sessions("keep-all");
+        let chat = |id: &str, said: &str| {
+            let mut c = crate::chat::Chat::new();
+            c.conversation = Some(id.into());
+            c.msgs = vec![Msg::new(Role::User, said, ""), Msg::new(Role::Assistant, "ok", "")];
+            c
+        };
+        ed.session.chat = Some(chat("c-front", "in front"));
+        let id = ed.session_add(back.clone());
+        ed.session_by_id(id).unwrap().chat = Some(chat("c-back", "behind"));
+        crate::chat::keep_now(&ed);
+        let store = dir.join("chats");
+        let ids =
+            |root: &Path| crate::chats::load(&store, root).into_iter().map(|s| s.id).collect::<Vec<_>>();
+        assert_eq!(ids(&front), ["c-front"]);
+        assert_eq!(ids(&back), ["c-back"], "the one behind too");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The state file goes both ways between builds: one an earlier build wrote (no session blocks) brings
+    /// the files back in the front, as then; and the one written now still has today's top-level fields —
+    /// what an earlier build reads after `f` on the restart card — with the front's files and panes.
+    #[test]
+    fn state_files_of_earlier_and_later_builds_restore() {
+        let (front, back, dir, mut ed) = two_sessions("compat");
+        ed.open(&front.join("f.txt")).unwrap();
+        let id = ed.session_add(back.clone());
+        ed.with_session(id, |ed| ed.open(&back.join("a.txt")).unwrap());
+        let state = snapshot(&mut ed);
+        drop(ed);
+        // Read as an earlier build reads it: the top-level fields
+        assert_eq!(state["docs"].as_array().map(Vec::len), Some(2), "every file, as before");
+        assert_eq!(state["views"].as_array().map(Vec::len), Some(1), "the front's panes");
+        assert_eq!(state["sessions"]["front"], json!(front));
+        // An earlier build's file: no blocks — the files open in the front, as then
+        let mut old = state.clone();
+        for s in old["sessions"]["sessions"].as_array_mut().unwrap() {
+            *s = json!({ "root": s["root"], "name": s["name"], "branch": s["branch"], "base": s["base"] });
+        }
+        let mut ed = started_in(&dir, &front);
+        assert_eq!(restore(&mut ed, &old), 2);
+        assert_eq!(paths_of(&ed, &ed.session), ["a.txt", "f.txt"], "an earlier build's: all in front");
+        assert_eq!(ed.sessions.len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Wave 3, point 11: the toast says what came back — the sessions, the files — and names what didn't: a
+    /// file gone, a checkout gone, each session's shell that starts afresh.
+    #[test]
+    fn the_restart_toast_says_what_came_back() {
+        let (front, back, dir, mut ed) = two_sessions("toast");
+        let old = dir.join("old");
+        std::fs::create_dir_all(&old).unwrap();
+        ed.open(&front.join("f.txt")).unwrap();
+        let id = ed.session_add(back.clone());
+        ed.with_session(id, |ed| {
+            ed.open(&back.join("a.txt")).unwrap();
+            ed.open(&back.join("b.txt")).unwrap();
+        });
+        ed.session_add(old.clone());
+        let mut state = snapshot(&mut ed);
+        drop(ed);
+        let blocks = state["sessions"]["sessions"].as_array_mut().unwrap();
+        let back_block = blocks.iter_mut().find(|b| b["root"] == json!(back)).unwrap();
+        back_block["terminal"] = json!(true);
+        std::fs::remove_file(back.join("b.txt")).unwrap();
+        std::fs::remove_dir_all(&old).unwrap();
+        let mut ed = started_in(&dir, &front);
+        restore(&mut ed, &state);
+        let said: Vec<&str> = ed.messages.iter().map(|m| m.2.as_str()).collect();
+        let at = said.iter().position(|m| m.starts_with("Restarted")).expect("said");
+        assert_eq!(
+            &said[at..],
+            [
+                "Restarted · 2 sessions · 2 files as they were",
+                "checkout gone: old · file gone: b.txt · terminal starts afresh: back"
+            ],
+            "the counts, then what didn't come back by name"
+        );
+        assert!(!said.iter().any(|m| m.contains("removed outside tarae")), "said once, there: {said:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Panes come back with ids of this tarae's own counter — two sessions whose panes had the same ids in
+    /// the state (an earlier build's, or a hand-edited file) don't share one; no two views anywhere do.
+    #[test]
+    fn no_two_views_share_an_id_after_a_restart() {
+        let (front, back, dir, mut ed) = two_sessions("view-ids");
+        ed.open(&front.join("f.txt")).unwrap();
+        ed.split_view(Dir::Vertical);
+        let id = ed.session_add(back.clone());
+        ed.with_session(id, |ed| {
+            ed.open(&back.join("a.txt")).unwrap();
+            ed.split_view(Dir::Horizontal);
+            ed.open(&back.join("b.txt")).unwrap();
+        });
+        let mut state = snapshot(&mut ed);
+        drop(ed);
+        // The same ids in both sessions' blocks
+        let blocks = state["sessions"]["sessions"].as_array_mut().unwrap();
+        let ids_of =
+            |b: &Value| b["views"].as_array().unwrap().iter().map(|v| v["id"].clone()).collect::<Vec<_>>();
+        let front_ids = ids_of(&blocks[0]);
+        let behind = blocks.iter_mut().find(|b| b["root"] == json!(back)).unwrap();
+        for (v, id) in behind["views"].as_array_mut().unwrap().iter_mut().zip(&front_ids) {
+            v["id"] = id.clone();
+        }
+        behind["split"] = json!({ "h": front_ids });
+        behind["focus"] = front_ids[1].clone();
+        let mut ed = started_in(&dir, &front);
+        restore(&mut ed, &state);
+        let all: Vec<u64> =
+            ed.sessions_in_order().iter().flat_map(|l| l.views.iter().map(|v| v.id)).collect();
+        let mut distinct = all.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(all.len(), distinct.len(), "every view's own id: {all:?}");
+        for l in ed.sessions_in_order() {
+            let mut leaves = l.split.leaves();
+            leaves.sort_unstable();
+            let mut ids: Vec<u64> = l.views.iter().map(|v| v.id).collect();
+            ids.sort_unstable();
+            assert_eq!((leaves.len(), &leaves), (2, &ids), "{}: its two panes, its split over them", l.name);
+            assert!(ids.contains(&l.focus), "{}: its focus one of them", l.name);
+        }
+        assert!(ed.next_view > *distinct.last().unwrap(), "the next one past them all");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The restart's toast on a narrow screen (60 columns): what came back first, then what didn't — every
+    /// gone checkout said, no name cut across rows or by an ellipsis.
+    #[test]
+    fn the_restart_toast_reads_whole_on_a_narrow_screen() {
+        let (front, back, dir, mut ed) = two_sessions("toast-narrow");
+        let gone: Vec<PathBuf> = ["login-fix", "old-parser"].iter().map(|n| dir.join(n)).collect();
+        for g in &gone {
+            std::fs::create_dir_all(g).unwrap();
+        }
+        ed.open(&front.join("f.txt")).unwrap();
+        let id = ed.session_add(back.clone());
+        ed.with_session(id, |ed| {
+            ed.open(&back.join("a.txt")).unwrap();
+            ed.open(&back.join("b.txt")).unwrap();
+        });
+        for g in &gone {
+            ed.session_add(g.clone());
+        }
+        let mut state = snapshot(&mut ed);
+        drop(ed);
+        let blocks = state["sessions"]["sessions"].as_array_mut().unwrap();
+        blocks.iter_mut().find(|b| b["root"] == json!(back)).unwrap()["terminal"] = json!(true);
+        std::fs::remove_file(back.join("b.txt")).unwrap();
+        for g in &gone {
+            std::fs::remove_dir_all(g).unwrap();
+        }
+        let mut ed = started_in(&dir, &front);
+        restore(&mut ed, &state);
+        let (w, h) = (60, 24);
+        let mut buf = Vec::new();
+        crate::term::render(&mut ed, &mut buf, w, h).unwrap();
+        let mut vt = vt100::Parser::new(h, w, 0);
+        vt.process(&buf);
+        let rows: Vec<String> = vt.screen().rows(0, w).collect();
+        let (x, y, cw, ch) = ed.screen.toast_card.get().expect("the toast is up");
+        let card: Vec<String> =
+            rows[y..y + ch].iter().map(|r| r.chars().skip(x).take(cw).collect::<String>()).collect();
+        let shown = card.join("\n");
+        // The newest toast: from its bar to the next one's
+        let first = card.iter().position(|r| r.contains('▎')).expect("a toast");
+        let end =
+            card[first + 1..].iter().position(|r| r.contains('▎')).map_or(card.len(), |i| first + 1 + i);
+        let newest = &card[first..end];
+        assert!(!newest.iter().any(|r| r.contains('…')), "nothing of it cut:\n{shown}");
+        for name in ["login-fix", "old-parser", "b.txt", "back"] {
+            assert!(newest.iter().any(|r| r.contains(name)), "{name:?} whole on a row:\n{shown}");
+        }
+        assert!(shown.contains("Restarted"), "the counts too:\n{shown}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -62,6 +62,14 @@ impl Split {
         true
     }
 
+    /// Every leaf's view id as `to` says (panes given new ids — `:restart`'s).
+    pub fn renumber(&mut self, to: &impl Fn(ViewId) -> ViewId) {
+        match self {
+            Split::Leaf(v) => *v = to(*v),
+            Split::Node(_, kids) => kids.iter_mut().for_each(|k| k.renumber(to)),
+        }
+    }
+
     pub fn leaves(&self) -> Vec<ViewId> {
         match self {
             Split::Leaf(v) => vec![*v],

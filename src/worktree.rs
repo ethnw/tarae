@@ -1231,14 +1231,15 @@ pub fn snapshot(ed: &Editor) -> Value {
     json!({ "sessions": sessions, "front": ed.session.root })
 }
 
-/// Back from `:restart`'s state, the front one in front — before its files open.
-pub fn restore(ed: &mut Editor, v: &Value) {
+/// Back from `:restart`'s state, the front one in front — before its files open. The names of those whose
+/// checkout is gone (the restart's toast says them).
+pub fn restore(ed: &mut Editor, v: &Value) -> Vec<String> {
     let sessions = kept_list(v);
     if sessions.is_empty() {
-        return;
+        return Vec::new();
     }
     let (here, gone): (Vec<Kept>, Vec<Kept>) = sessions.into_iter().partition(|k| k.root.is_dir());
-    ed.sessions_back(here, gone, v["front"].as_str().map(PathBuf::from), true);
+    ed.sessions_back(here, gone, v["front"].as_str().map(PathBuf::from), true)
 }
 
 impl Editor {
@@ -1314,7 +1315,14 @@ impl Editor {
             move |ed: &mut Editor| match found {
                 Some((here, gone, front)) => {
                     let take = !ed.session_store.keyed;
-                    ed.sessions_back(here, gone, front, take);
+                    let gone = ed.sessions_back(here, gone, front, take);
+                    if !gone.is_empty() {
+                        ed.set_warning(format!(
+                            "{} — {} removed outside tarae; dropped",
+                            gone.join(", "),
+                            if gone.len() == 1 { "its checkout was" } else { "their checkouts were" }
+                        ));
+                    }
                 }
                 None => ed.session_store.restored = true,
             }
@@ -1322,14 +1330,14 @@ impl Editor {
     }
 
     /// Kept sessions back: session 0's name and base onto it, the others behind (not twice); `front` in front
-    /// when `take_front`; the gone ones said, and the list written again without them.
+    /// when `take_front`; the list written again without the gone ones — their names, for the caller to say.
     pub fn sessions_back(
         &mut self,
         here: Vec<Kept>,
         gone: Vec<Kept>,
         front: Option<PathBuf>,
         take_front: bool,
-    ) {
+    ) -> Vec<String> {
         let start = self.start_root();
         let mut changed = !gone.is_empty();
         for k in here {
@@ -1351,17 +1359,10 @@ impl Editor {
         {
             self.session_switch(id);
         }
-        if !gone.is_empty() {
-            let names: Vec<&str> = gone.iter().map(|k| k.name.as_str()).collect();
-            self.set_warning(format!(
-                "{} — {} removed outside tarae; dropped",
-                names.join(", "),
-                if gone.len() == 1 { "its checkout was" } else { "their checkouts were" }
-            ));
-        }
         if changed {
             self.sessions_keep();
         }
+        gone.into_iter().map(|k| k.name).collect()
     }
 
     // ── Making ───────────────────────────────────────────────────────────────
@@ -3390,8 +3391,9 @@ mod tests {
         // :restart: the sessions, and the files in the one in front
         std::fs::write(one.join("b.txt"), "b\n").unwrap();
         let mut snapshot = snapshot;
-        snapshot["docs"] = json!([{ "path": one.join("b.txt") }]);
-        snapshot["current"] = json!(0);
+        let blocks = snapshot["sessions"]["sessions"].as_array_mut().unwrap();
+        let block = blocks.iter_mut().find(|b| b["root"] == json!(one)).unwrap();
+        (block["docs"], block["current"]) = (json!([{ "path": one.join("b.txt") }]), json!(0));
         let mut ed = editor(&repo, &dir);
         crate::restart::restore(&mut ed, &snapshot);
         assert_eq!(ed.session.root, one);
