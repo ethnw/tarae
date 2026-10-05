@@ -44,6 +44,8 @@ pub struct Pending {
     pub class: crate::cards::Class,
     /// When it came to wait — its place in the inbox (`inbox.rs`).
     pub since: std::time::Instant,
+    /// What looks like a token where it reads (`tokens::found_in`) — its card says so.
+    pub found: crate::tokens::Found,
 }
 
 /// Where the call reads — `cwd` is where relative paths start (claude's, the project's root).
@@ -199,13 +201,18 @@ pub fn request(ed: &mut Editor, request_id: &str, req: &Value) -> Option<Value> 
         kept.read.extend(defaults.all());
         let ok = covered(&look, &root, &chat, &kept, &made);
         let class = crate::cards::class(look.at.as_deref(), &defaults, crate::allow::home().as_deref());
+        // (asked: its card says first what looks like a token there)
+        let found = match (ok, &look.at) {
+            (false, Some(at)) => crate::tokens::found_in(at),
+            _ => Default::default(),
+        };
         move |ed: &mut Editor| {
             let Some(c) = ed.session.chat.as_mut().filter(|c| c.generation() == generation) else { return };
             if ok {
                 return crate::chat::respond(ed, &request_id, allow(&input));
             }
             let since = std::time::Instant::now();
-            c.reads.push_back(Pending { request_id, generation, input, look, class, since });
+            c.reads.push_back(Pending { request_id, generation, input, look, class, since, found });
             refold(ed);
             next(ed);
         }
@@ -214,28 +221,77 @@ pub fn request(ed: &mut Editor, request_id: &str, req: &Value) -> Option<Value> 
 }
 
 /// A read come to wait beside the one on the card up (it came after the card): the card offers their folder
-/// now — said on it, and settled again before `a` counts (#102: Claude's reads come one after another).
+/// now — said on it, and settled again before `a` counts (#102: Claude's reads come one after another) —
+/// once the folder's been looked through for tokens (`scanned`), so the card says what it holds first.
 fn refold(ed: &mut Editor) {
     let Some(c) = ed.session.chat.as_ref() else { return };
     let others: Vec<PathBuf> =
         c.reads.iter().filter_map(|w| w.look.at.clone()).chain(c.read_once.iter().cloned()).collect();
     let home = crate::allow::home();
     let front = !ed.background();
-    for o in ed.session.parked.iter_mut().chain(ed.offers.iter_mut().filter(|_| front)) {
-        let crate::offer::What::Read { pending, keep: true, folder: folder @ None } = &mut o.what else {
-            continue;
-        };
-        let Some(at) = pending.look.at.clone().filter(|_| pending.look.file) else { continue };
-        let Some(f) = crate::allow::grant_places(std::slice::from_ref(&at), &others, home.as_deref())
-            .pop()
-            .filter(|f| *f != at)
-        else {
-            continue;
-        };
-        o.question = question(&pending.look, true, Some(&f));
-        *folder = Some(f);
-        o.rev += 1;
+    // (each card offering its file alone, and the folder it'd offer now)
+    let wants: Vec<(u64, PathBuf)> = ed
+        .session
+        .parked
+        .iter()
+        .chain(ed.offers.iter().filter(|_| front))
+        .filter_map(|o| {
+            let crate::offer::What::Read { pending, keep: true, folder: None } = &o.what else { return None };
+            let at = pending.look.at.clone().filter(|_| pending.look.file)?;
+            let f = crate::allow::grant_places(std::slice::from_ref(&at), &others, home.as_deref()).pop()?;
+            (f != at).then_some((o.id, f))
+        })
+        .collect();
+    for (id, f) in wants {
+        let Some(found) = scanned(ed, &f) else { continue };
+        let cards = ed.session.parked.iter_mut().chain(ed.offers.iter_mut().filter(|_| front));
+        for o in cards.filter(|o| o.id == id) {
+            let crate::offer::What::Read { pending, folder, .. } = &mut o.what else { continue };
+            (o.question, o.warning) = card_text(pending, true, Some((&f, &found)));
+            *folder = Some(f.clone());
+            o.rev += 1;
+        }
     }
+}
+
+/// What folder `f` holds that looks like a token, once it's been looked through; else None — and it's
+/// looked through on a worker, the cards offering it once it has (`refold`).
+fn scanned(ed: &mut Editor, f: &Path) -> Option<crate::tokens::Found> {
+    let c = ed.session.chat.as_mut()?;
+    if let Some(found) = c.scanned.get(f) {
+        return found.clone();
+    }
+    c.scanned.insert(f.to_path_buf(), None);
+    let (generation, f) = (c.generation(), f.to_path_buf());
+    ed.events.jobs().spawn(move || {
+        let found = crate::tokens::found_in(&f);
+        move |ed: &mut Editor| {
+            let Some(c) = ed.session.chat.as_mut().filter(|c| c.generation() == generation) else { return };
+            c.scanned.insert(f, Some(found));
+            refold(ed);
+        }
+    });
+    None
+}
+
+/// The card's text, and its lines that warn: what `y` reads — or what `a`/`A` open (`folder`, with what it
+/// holds) — holds a token-like line (names, never values).
+pub fn card_text(
+    p: &Pending,
+    keep: bool,
+    folder: Option<(&Path, &crate::tokens::Found)>,
+) -> (String, Option<std::ops::Range<usize>>) {
+    let mut q = question(&p.look, keep, folder.map(|(f, _)| f));
+    let said =
+        [p.look.at.as_deref().and_then(|at| p.found.said(at)), folder.and_then(|(f, found)| found.said(f))];
+    let mut lines = Vec::new();
+    for s in said.into_iter().flatten() {
+        q.push_str("\n\n");
+        lines.push(q.split('\n').count() - 1);
+        q.push_str(&s);
+    }
+    let warning = lines.first().zip(lines.last()).map(|(a, b)| *a..*b + 1);
+    (q, warning)
 }
 
 fn allow(input: &Value) -> Value {
@@ -264,10 +320,14 @@ pub fn next(ed: &mut Editor) {
         }
         _ => None,
     };
-    let q = question(&p.look, keep, folder.as_deref());
+    // (the folder once it's been looked through for tokens — till then the file: `refold`)
+    let folder = folder.and_then(|f| scanned(ed, &f).map(|found| (f, found)));
+    let (q, warning) = card_text(&p, keep, folder.as_ref().map(|(f, found)| (f.as_path(), found)));
     let asked = crate::cards::Asked::new(crate::cards::Why::Read, crate::cards::Request::Read(p.class));
-    let what = crate::offer::What::Read { pending: Box::new(p), keep, folder };
-    ed.push_offer(crate::offer::Offer::new(TITLE.into(), &q, "", String::new(), what).asked(asked));
+    let what = crate::offer::What::Read { pending: Box::new(p), keep, folder: folder.map(|(f, _)| f) };
+    let mut o = crate::offer::Offer::new(TITLE.into(), &q, "", String::new(), what).asked(asked);
+    o.warning = warning;
+    ed.push_offer(o);
 }
 
 /// The card's text: exactly what's read, and where it goes — and, when `a`/`A` allow its folder rather
@@ -382,6 +442,59 @@ mod tests {
         std::os::unix::fs::symlink(dir.join("out"), p.join("link")).unwrap();
         assert_eq!(at("Read", json!({"file_path": "link/m.txt"})), Some(dir.join("out/m.txt")));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A read's card says first when what it opens holds a token-like line — the file `y` reads, then the
+    /// folder `a`/`A` would, offered beside a second read once it's been looked through (a worker's) and
+    /// settled again — by name, never the value, in the warning colour. (Fake values in the test's temp
+    /// folder.)
+    #[test]
+    fn a_reads_card_says_when_a_token_is_there() {
+        let base = crate::sandbox::profile_path(&std::env::temp_dir())
+            .join(format!("tarae-reads-tok-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        let out = base.join("out");
+        for (f, text) in [
+            ("p/README", "marker\n"),
+            ("out/hosts.yml", "oauth_token: tarae-fake-token\n"),
+            ("out/notes.txt", "marker\n"),
+            ("out/.env", "GITHUB_TOKEN=tarae-fake-token\n"),
+        ] {
+            std::fs::create_dir_all(base.join(f).parent().unwrap()).unwrap();
+            std::fs::write(base.join(f), text).unwrap();
+        }
+        let mut ed = Editor::new(crate::config::Config::default());
+        ed.session.root = base.join("p");
+        ed.session.chat = Some(crate::chat::Chat::new());
+        let settle = |ed: &mut Editor, done: &dyn Fn(&Editor) -> bool| {
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while !done(ed) {
+                let left = end.saturating_duration_since(std::time::Instant::now());
+                ed.handle_event(ed.events.recv_timeout(left).expect("done before the timeout"));
+            }
+        };
+        let warned = |ed: &Editor| {
+            let o = &ed.offers[0];
+            let r = o.warning.clone().unwrap_or_default();
+            o.question.split('\n').skip(r.start).take(r.len()).collect::<Vec<_>>().join("\n")
+        };
+        let ask = |ed: &mut Editor, id: &str, f: &str| {
+            request(ed, id, &json!({"tool_name": "Read", "input": {"file_path": out.join(f)}}));
+        };
+        ask(&mut ed, "1", "hosts.yml");
+        settle(&mut ed, &|ed| !ed.offers.is_empty());
+        let file = format!("{} holds a token-like line.", out.join("hosts.yml").display());
+        assert_eq!(warned(&ed), file, "{}", ed.offers[0].question);
+        // Beside a second read: the folder, once looked through — said too
+        let rev = ed.offers[0].rev;
+        ask(&mut ed, "2", "notes.txt");
+        settle(&mut ed, &|ed| matches!(&ed.offers[0].what, crate::offer::What::Read { folder: Some(_), .. }));
+        let folder = format!("In {}, .env and hosts.yml hold token-like lines.", out.display());
+        let q = ed.offers[0].question.clone();
+        assert!(warned(&ed).starts_with(&file) && warned(&ed).ends_with(&folder), "{q}");
+        assert!(q.contains(&format!("a and A allow everything in {}", out.display())), "{q}");
+        assert!(ed.offers[0].rev > rev && !q.contains("tarae-fake-token"), "{q}");
+        std::fs::remove_dir_all(&base).ok();
     }
 
     /// The card says what's searched: a folder "and everything in it", a single file just itself.

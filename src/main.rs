@@ -103,6 +103,7 @@ mod testcode;
 mod testing;
 mod textobject;
 mod theme;
+mod tokens;
 mod tools;
 mod trace;
 mod transaction;

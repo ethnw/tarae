@@ -534,6 +534,10 @@ pub struct Editor {
     pub trust_path: Option<std::path::PathBuf>,
     /// Where what's always allowed is kept (`allow.rs`) — None in tests (they set a temp file).
     pub allow_path: Option<std::path::PathBuf>,
+    /// Where cargo's configs told about for their tokens are kept (`tokens::tell_cargo`) — None in tests.
+    pub tokens_said: Option<std::path::PathBuf>,
+    /// Those told about since tarae started (`~` paths).
+    pub tokens_told: Vec<String>,
     /// Claude reads the temp folders unasked (`allow::defaults`) — off in tests: their projects, and what
     /// they read "outside" them, are in the temp folder.
     pub read_temp: bool,
@@ -712,6 +716,8 @@ impl Editor {
             project_trust: None,
             trust_path: if cfg!(test) { None } else { crate::trust::Store::path() },
             allow_path: if cfg!(test) { None } else { crate::allow::Store::path() },
+            tokens_said: if cfg!(test) { None } else { crate::tokens::said_path() },
+            tokens_told: Vec::new(),
             read_temp: !cfg!(test),
             run_clock: None,
             config_file: if cfg!(test) { None } else { crate::config::config_path() },

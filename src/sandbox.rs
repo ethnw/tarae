@@ -141,7 +141,7 @@ impl Guard {
     fn kept(&self, seen: &[Denial]) -> (String, bool) {
         let Guard::In(p) = self else { return (String::new(), false) };
         let (mut names, mut git, mut crates, mut all) = (Vec::new(), false, false, true);
-        let (mut secret, mut services) = (Vec::new(), Vec::new());
+        let (mut secret, mut services, mut copied) = (Vec::new(), Vec::new(), Vec::new());
         for d in seen {
             let Some(path) = d.file() else {
                 match d.plain().as_str() {
@@ -160,6 +160,10 @@ impl Guard {
                 }
                 _ if p.caches.iter().any(|c| path.starts_with(c)) => crates = true,
                 _ if p.reads.kept_holds(&p.root, path) => secret.push(crate::allow::tilde(path)),
+                _ if p.reads.copies.instead_of(path).is_some() => {
+                    let var = p.reads.copies.instead_of(path).unwrap_or_default();
+                    copied.push(format!("{} (${var})", crate::allow::tilde(path)))
+                }
                 _ => all = false,
             }
         }
@@ -168,7 +172,17 @@ impl Guard {
         secret.sort();
         secret.dedup();
         services.dedup();
+        copied.sort();
+        copied.dedup();
         let mut s = String::new();
+        if !copied.is_empty() {
+            s.push_str(&format!(
+                "{}: it holds a token, so your commands read a copy without those lines, at the variable named — \
+                 the tool finds it on its own; the file itself stays closed. If a command needs the token, say so \
+                 to the user and let them run it.\n",
+                copied.join(", ")
+            ));
+        }
         if !secret.is_empty() || !services.is_empty() {
             let what: Vec<String> =
                 secret.into_iter().chain(services.into_iter().map(String::from)).collect();
@@ -254,9 +268,17 @@ impl Guard {
                     }
                     false => "",
                 };
+                // (said only where a token was there: nothing more to read on a machine without one)
+                let copies = match p.reads.copies.said() {
+                    Some((files, vars)) => {
+                        format!(" The tools read copies of {files} without their token lines ({vars}).")
+                    }
+                    None => String::new(),
+                };
                 format!(
                     "In tarae's sandbox: it could {reads}write only in the project — not {names}, anywhere in it \
-                     (Edit changes those) — temp folders and the toolchain's own{crates}{net}.{granted}{refused}"
+                     (Edit changes those) — temp folders and the toolchain's own{crates}{net}.{granted}{refused}\
+                     {copies}"
                 )
             }
             Guard::Without(why) => format!("Ran without a sandbox ({why}) — the user agreed."),
@@ -341,6 +363,9 @@ pub struct Reads {
     pub kept: Vec<PathBuf>,
     /// tarae's log, though it's in tarae's state: Claude reads it unasked (#45).
     pub log: Option<PathBuf>,
+    /// Settings that hold a token: the copies the tools read instead, in the run's own folder, and the files
+    /// themselves, not read (`tokens.rs`).
+    pub copies: crate::tokens::Copies,
 }
 
 impl Reads {
@@ -358,8 +383,10 @@ impl Reads {
 /// What the toolchains read in home to work, measured (`target/sb/p2-measured.md`: tarae's preflight, a Go and
 /// a Node project, `cargo xtask shot`, the e2e harness, every read in home reported): cargo's and rustup's
 /// homes, git's settings, the text encoding CoreFoundation reads in every process, Go's GOPATH, cache and
-/// settings, npm's cache, the fonts a shot draws with.
-const HOME_READS: [&str; 10] = [
+/// settings, npm's cache, the fonts a shot draws with — and pip's settings files (2026-10-05,
+/// `target/sb/tokens-checkpoint.md`: denied, pip loses its index and the rest without a word). Those that
+/// can hold a token are read from a copy without it when one does (`tokens.rs`).
+const HOME_READS: [&str; 13] = [
     ".cargo",
     ".rustup",
     ".gitconfig",
@@ -370,6 +397,9 @@ const HOME_READS: [&str; 10] = [
     "Library/Application Support/go",
     ".npm",
     "Library/Fonts",
+    ".pip/pip.conf",
+    ".config/pip/pip.conf",
+    "Library/Application Support/pip/pip.conf",
 ];
 
 /// Claude's own, in home: its settings, conversations and token cache — kept from its runs like keys.
@@ -391,7 +421,7 @@ pub fn reads_for(home: &Path, also: &[PathBuf]) -> Reads {
     allow.sort();
     allow.dedup();
     let log = crate::log::path().map(|l| profile_path(&l));
-    Reads { home: Some(home.to_path_buf()), allow, kept, log }
+    Reads { home: Some(home.to_path_buf()), allow, kept, log, copies: Default::default() }
 }
 
 /// What cargo reads above the project (`root`, real) in `home`: `.cargo/config.toml` and `.cargo/config` in
@@ -1113,6 +1143,12 @@ impl Policy {
             p.push_str(&deny(rule));
         }
         p.push_str(&deny(&kept_services()));
+        // The settings that hold a token, each that file: the tools read their copies (`tokens.rs`)
+        let hidden: String =
+            (0..self.reads.copies.hidden.len()).map(|i| format!(" (literal (param \"T{i}\"))")).collect();
+        if !hidden.is_empty() {
+            p.push_str(&deny(&format!("file-read-data file-read-xattr{hidden}")));
+        }
         // Last, so nothing granted opens them: what no run reads — but the project, when one holds it (a
         // checkout under `~/.claude/worktrees`), and tarae's log. (Their metadata stays open, as everywhere:
         // tarae's own tests look at its state folder — measured; a hard link needs the data's read anyway)
@@ -1146,7 +1182,7 @@ impl Policy {
         if r.log.as_deref() == Some(real) && !r.kept.is_empty() {
             return true;
         }
-        if r.kept_holds(&self.root, real) {
+        if r.kept_holds(&self.root, real) || r.copies.instead_of(real).is_some() {
             return false;
         }
         match &r.home {
@@ -1229,6 +1265,7 @@ impl Policy {
             r.home.iter().flat_map(|_| r.allow.iter().enumerate().map(|(i, p)| (format!("R{i}"), s(p)))),
         );
         v.extend(r.kept.iter().enumerate().map(|(i, p)| (format!("X{i}"), s(p))));
+        v.extend(r.copies.hidden.iter().enumerate().map(|(i, (p, _))| (format!("T{i}"), s(p))));
         v.extend(r.log.iter().filter(|_| !r.kept.is_empty()).map(|l| ("LOG".to_string(), s(l))));
         v
     }
@@ -1437,9 +1474,11 @@ pub fn policy(root: &Path, llm: &crate::llm::LlmConfig, reads: &[PathBuf]) -> Po
         .filter(|c| crate::allow::keepable(c, real_home.as_deref()))
         .chain(reads.iter().cloned())
         .collect();
-    also.extend(real_home.iter().flat_map(|h| cargo_configs_above(&profile_path(root), h)));
+    let above: Vec<PathBuf> =
+        real_home.iter().flat_map(|h| cargo_configs_above(&profile_path(root), h)).collect();
+    also.extend(above.iter().cloned());
     let mut env = Env {
-        reads: real_home.map(|h| reads_for(&h, &also)).unwrap_or_default(),
+        reads: real_home.as_ref().map(|h| reads_for(h, &also)).unwrap_or_default(),
         root: profile_path(root),
         home,
         tmp,
@@ -1463,6 +1502,14 @@ pub fn policy(root: &Path, llm: &crate::llm::LlmConfig, reads: &[PathBuf]) -> Po
     // (no folder of its own: no sockets but the project's, `TMPDIR` as it was, and no tag to watch by)
     let run = RunDir::new().ok();
     let tag = run.as_ref().map(|r| r.tag());
+    // Settings that hold a token: copies without it in the run's folder (`tokens.rs`) — while reads are
+    // confined; what the user let Claude read stays readable
+    if let Some(h) = &real_home {
+        let sources = crate::tokens::sources(h, &crate::tokens::env_var);
+        let dir = run.as_ref().map(|r| r.path());
+        env.reads.copies = crate::tokens::copies(&sources, dir, h, reads, &env.reads.kept);
+        env.reads.copies.cargo = crate::tokens::cargo_holders(env.cargo_home.as_deref(), &above);
+    }
     Policy { run, tag, ..Policy::for_project(&env) }
 }
 
@@ -1622,6 +1669,9 @@ pub fn command(policy: Option<&Policy>, program: &str, args: &[String]) -> Comma
             if let Some(run) = &p.run {
                 c.env("TMPDIR", run.path());
             }
+            for (var, copy) in &p.reads.copies.env {
+                c.env(var, copy);
+            }
             c
         }
         None => {
@@ -1767,6 +1817,7 @@ mod tests {
                     "/Users/u/.local/state/tarae".into(),
                 ],
                 log: Some("/Users/u/.local/state/tarae/tarae.log".into()),
+                copies: Default::default(),
             },
         }
     }
@@ -2033,6 +2084,46 @@ mod tests {
         assert!(none.reads_allow(Path::new("/Users/u/.ssh/id")), "not confined without a home");
     }
 
+    /// Settings that hold a token (`tokens.rs`): each file denied by itself after the allows (`~/.gitconfig`
+    /// is one), named only by a parameter; the copy's variable in the run's environment; the report says
+    /// which were copied, and a read of one refused says the tool reads a copy — nothing said where none was.
+    #[test]
+    fn settings_holding_a_token_are_read_from_copies() {
+        let copy = PathBuf::from("/private/var/folders/ab/cd/T/tarae-1-0/settings/gitconfig");
+        let gitconfig = PathBuf::from("/Users/u/.gitconfig");
+        let mut e = env(Path::new("/Users/u/p"));
+        e.reads.copies = crate::tokens::Copies {
+            env: vec![("GIT_CONFIG_GLOBAL", copy.clone())],
+            hidden: vec![(gitconfig.clone(), "GIT_CONFIG_GLOBAL")],
+            left_out: vec![(gitconfig.clone(), "GIT_CONFIG_GLOBAL")],
+            cargo: vec![],
+        };
+        let p = Policy::for_project(&e);
+        let text = p.profile();
+        let deny = "(deny file-read-data file-read-xattr (literal (param \"T0\")))";
+        let at = |s: &str| text.find(s).unwrap_or_else(|| panic!("{s}: {text}"));
+        assert!(at(deny) > at("(allow file-read-data file-read-xattr (subpath (param \"ROOT\"))"), "{text}");
+        assert!(p.params().contains(&("T0".into(), "/Users/u/.gitconfig".into())));
+        assert!(!text.contains("/Users/u"), "paths only as parameters");
+        assert!(!p.reads_allow(&gitconfig) && p.reads_allow(Path::new("/Users/u/.cargo/config.toml")));
+        let c = command(Some(&p), "git", &[]);
+        let set: Vec<_> = c.get_envs().filter(|(k, _)| k.to_str() == Some("GIT_CONFIG_GLOBAL")).collect();
+        assert_eq!(set, [(std::ffi::OsStr::new("GIT_CONFIG_GLOBAL"), Some(copy.as_os_str()))]);
+        // Its report: what was copied, and a refused read of the file itself
+        let refused = format!("fatal: unable to access '{}': Operation not permitted", gitconfig.display());
+        let r = Guard::In(Box::new(p.clone())).report(&[(true, refused)]);
+        let shown = crate::allow::tilde(&gitconfig);
+        assert!(r.contains(&format!(
+            "{shown} ($GIT_CONFIG_GLOBAL): it holds a token, so your commands read a copy"
+        )));
+        assert!(r.contains(&format!(
+            "The tools read copies of {shown} without their token lines (GIT_CONFIG_GLOBAL)."
+        )));
+        assert!(!r.contains("If the command needs one of these"), "nothing left to open: {r}");
+        let none = Guard::In(Box::new(Policy::for_project(&env(Path::new("/Users/u/p"))))).report(&[]);
+        assert!(!none.contains("copies of") && !none.contains("T0"), "{none}");
+    }
+
     /// Where a run reads in home: what the toolchains were measured reading, the repository's other checkouts
     /// and grants (`also`) — never home itself, a place outside it, nor one in a kept place, granted or not.
     /// (A stand-in home in the test's own temp folder.)
@@ -2061,6 +2152,9 @@ mod tests {
             "go",
             "Library/Fonts",
             ".npm",
+            ".pip/pip.conf",
+            ".config/pip/pip.conf",
+            "Library/Application Support/pip/pip.conf",
             "src/other",
         ] {
             assert!(r.allow.contains(&home.join(p)), "{p}: {:?}", r.allow);
@@ -2990,6 +3084,7 @@ mod tests {
             allow: vec![home.join("allowed"), home.join("dir")],
             kept: vec![home.join("dir/.ssh"), home.join("state"), home.join(".claude")],
             log: Some(home.join("state/tarae.log")),
+            copies: Default::default(),
         };
         // (`dir` writable too: then only the read rules keep its key from a link)
         let policy = |root: &Path| Policy {
@@ -3080,6 +3175,111 @@ mod tests {
                 f.display()
             );
             assert!(!crate::allow::keepable(f, Some(&home)), "{}: kept for good", f.display());
+        }
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// For real, on macOS: settings that hold a token (`tokens.rs`), fake ones in a stand-in home — git's two
+    /// files (an include in one), Go's env file, npm's and pip's, cargo's. The tools work from their copies:
+    /// git's alias, its include's and its other file's settings; Go's flags, npm's registry, pip's timeout
+    /// (each when installed). And nothing a run can read holds a token — not the files, not the copies — but
+    /// cargo's config, left readable on purpose (cargo fails without it). Harmless: fake values in plain files
+    /// under the test's own folder under `target/`; no network (only settings are read).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn tokens_stay_out_of_runs_under_the_real_profile() {
+        if skipped_inside("sandbox::tests::tokens_stay_out_of_runs_under_the_real_profile") {
+            return;
+        }
+        const FAKE: &str = "tarae-fake-token";
+        let t = scratch("sb-tokens");
+        let (home, root) = (t.join("home"), t.join("home/proj"));
+        let files = [
+            (
+                ".gitconfig",
+                "[alias]\n\tco = checkout\n[include]\n\tpath = .config/git/extra.inc\n[http]\n\textraHeader = \
+                 Authorization: Bearer tarae-fake-token\n[url \"https://x:tarae-fake-token@github.com/\"]\n\
+                 \tinsteadOf = https://github.com/\n",
+            ),
+            (".config/git/extra.inc", "[alias]\n\tst = status\n"),
+            (".config/git/config", "[core]\n\tabbrev = 9\n"),
+            (
+                "Library/Application Support/go/env",
+                "GOFLAGS=-mod=mod\nGOPROXY=https://u:tarae-fake-token@proxy.example.com,direct\n",
+            ),
+            (".npmrc", "registry=https://r.example.com/\n//r.example.com/:_authToken=tarae-fake-token\n"),
+            (
+                ".config/pip/pip.conf",
+                "[global]\nindex-url = https://u:tarae-fake-token@p.example.com/s\ntimeout = 7\n",
+            ),
+            (".cargo/config.toml", "[registry]\ntoken = \"tarae-fake-token\"\n"),
+            ("proj/README", "marker\n"),
+        ];
+        for (file, text) in files {
+            std::fs::create_dir_all(home.join(file).parent().unwrap()).unwrap();
+            std::fs::write(home.join(file), text).unwrap();
+        }
+        let run = RunDir::new().unwrap();
+        let mut reads = reads_for(&home, &[]);
+        let sources = crate::tokens::sources(&home, &|_| None);
+        reads.copies = crate::tokens::copies(&sources, Some(run.path()), &home, &[], &reads.kept);
+        let tmp = std::fs::canonicalize(std::env::temp_dir()).ok();
+        let env = Env { root: root.clone(), home: Some(home.clone()), tmp, reads, ..Env::default() };
+        let p = Policy { run: Some(run), ..Policy::for_project(&env) };
+        let sh = |script: &str| {
+            let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
+            for v in [
+                "XDG_CONFIG_HOME",
+                "GOFLAGS",
+                "GOPROXY",
+                "npm_config_registry",
+                "PIP_TIMEOUT",
+                "PIP_INDEX_URL",
+            ] {
+                c.env_remove(v);
+            }
+            let out = c
+                .current_dir(&root)
+                .env("HOME", &home)
+                .env("GOCACHE", root.join("gocache"))
+                .env("GOTOOLCHAIN", "local")
+                .env("npm_config_cache", root.join("npmcache"))
+                .env("PIP_DISABLE_PIP_VERSION_CHECK", "1")
+                .env("GIT_CEILING_DIRECTORIES", &t)
+                .stdin(Stdio::null())
+                .output()
+                .unwrap();
+            let said =
+                format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            assert!(!said.contains(FAKE), "a token reached the run: {script}: {said}");
+            (out.status.success(), String::from_utf8_lossy(&out.stdout).into_owned())
+        };
+        let git = "git config --get alias.co && git config --get alias.st && git config --get core.abbrev && \
+                   ! git config --get-regexp '^(http|url)\\.'";
+        assert_eq!(sh(git), (true, "checkout\nstatus\n9\n".into()), "git from its copy");
+        // Nothing it can read holds one — cargo's config aside: each file by name (home's folders aren't
+        // listed), and everything in the run's own folder, the copies there
+        let named: Vec<String> = files.iter().map(|(f, _)| format!("'{}'", home.join(f).display())).collect();
+        let script = format!("grep -l {FAKE} {} 2>/dev/null; grep -rl {FAKE} \"$TMPDIR\"", named.join(" "));
+        let found = sh(&script).1;
+        assert_eq!(found, format!("{}\n", home.join(".cargo/config.toml").display()), "read: {found}");
+        assert!(!sh("cat \"$HOME/.gitconfig\" 2>/dev/null").0, "the file itself read");
+        let installed = |tool: &str| {
+            Command::new("sh")
+                .args(["-c", &format!("command -v {tool}")])
+                .output()
+                .is_ok_and(|o| o.status.success())
+        };
+        if installed("go") {
+            let (ok, out) = sh("go env GOFLAGS GOPROXY");
+            assert!(ok && out.starts_with("-mod=mod\n"), "go: {out}");
+        }
+        if installed("npm") {
+            assert_eq!(sh("npm config get registry"), (true, "https://r.example.com/\n".into()), "npm");
+        }
+        if installed("pip3") {
+            let (ok, out) = sh("pip3 config list");
+            assert!(ok && out.contains("global.timeout='7'"), "pip: {out}");
         }
         std::fs::remove_dir_all(&t).ok();
     }

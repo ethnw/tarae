@@ -526,6 +526,23 @@ them):
   and the keychain: to be found and faked). The whole profile costs 7.5 ms a run over a bare `sandbox-exec`
   (24 rules, 68 parameters).
 
+**Tokens in the settings a run reads (2026-10-05, after P2; the user chose copies after measuring)** —
+`tokens.rs`, measured in `target/sb/tokens-checkpoint.md`:
+
+- Where a file a run reads holds a token-like line (`tokens::token_like`: a URL with a password, a key
+  named for a secret with a value written there, an `Authorization:` header, a known prefix), the run gets a
+  copy without those lines in its `RunDir`, through the tool's variable (`GIT_CONFIG_GLOBAL`, `GOENV`,
+  `PIP_CONFIG_FILE`, `NPM_CONFIG_USERCONFIG`). The file itself is denied after the allows
+  (`Reads::copies.hidden`, `T<n>` parameters), unless the user granted a read of it. Made on the policy's
+  worker, by tarae, never by Claude's run.
+- `~/.npmrc` stays in `SECRETS` and always gets its copy. pip's settings joined `HOME_READS`: denied, pip
+  loses them without a word.
+- Cargo can't take a copy, so its config stays readable. The user is told once per file
+  (`$state/tokens-said`), by a toast, not the run's report: only the user can move a token, and the report
+  would point Claude at it.
+- The read card, its folder for `a`/`A`, and `space m s`'s read grants say when the place holds a
+  token-like line (`tokens::found_in`, on a worker), by file name only.
+
 ---
 
 ## 10. Linux

@@ -205,32 +205,57 @@ impl Editor {
             n => {
                 let Choice { grant, why, .. } =
                     n.parse::<usize>().ok().and_then(|i| list.get(i).cloned()).ok_or("no such row")?;
-                // (a socket: this run, or this conversation — everything else stays in the sandbox)
-                let lasts = match grant.keepable() {
-                    true => "Always lasts until :sandbox-allowed takes it back.",
-                    false => "Everything else stays in the sandbox; it's never kept past this conversation.",
+                // A read: its card says first what looks like a token there — looked through on a worker
+                let Grant::Read(place) = &grant else {
+                    self.push_offer(grant_card(grant, &why, &cmd, run, None));
+                    return Ok(());
                 };
-                let mut question = format!(
-                    "Let Claude's commands {}\n\n{why}, in `{cmd}` — which runs again now with it open, whichever \
-                     you choose. {lasts}",
-                    grant.shown()
-                );
-                let warning = grant.warning().map(|w| {
-                    question.push_str(&format!("\n\n{w}"));
-                    let at = question.split('\n').count() - 1;
-                    at..at + 1
+                let place = place.clone();
+                self.events.jobs().spawn(move || {
+                    let said = crate::tokens::found_in(&place).said(&place);
+                    move |ed: &mut Editor| ed.push_offer(grant_card(grant, &why, &cmd, run, said))
                 });
-                let asked = Asked::new(Why::Blocked, Request::Grant(grant.clone()));
-                let what = crate::offer::What::Grant { grant, run };
-                let o = crate::offer::Offer::new(GRANT_TITLE.into(), &question, "", String::new(), what);
-                match warning {
-                    Some(lines) => o.warning(lines).asked(asked),
-                    None => o.asked(asked),
-                }
+                return Ok(());
             }
         };
         self.push_offer(card);
         Ok(())
+    }
+}
+
+/// The card that opens `grant` for what was blocked in `run` (`why`, in `cmd`) — warning what it opens
+/// (Docker's socket; a place holding a token-like line: `tokens`).
+fn grant_card(
+    grant: Grant,
+    why: &str,
+    cmd: &str,
+    run: Box<BlockedRun>,
+    tokens: Option<String>,
+) -> crate::offer::Offer {
+    use crate::cards::{Asked, Request, Why};
+    // (a socket: this run, or this conversation — everything else stays in the sandbox)
+    let lasts = match grant.keepable() {
+        true => "Always lasts until :sandbox-allowed takes it back.",
+        false => "Everything else stays in the sandbox; it's never kept past this conversation.",
+    };
+    let mut question = format!(
+        "Let Claude's commands {}\n\n{why}, in `{cmd}` — which runs again now with it open, whichever you \
+         choose. {lasts}",
+        grant.shown()
+    );
+    let warn: Vec<String> = grant.warning().map(String::from).into_iter().chain(tokens).collect();
+    let warning = (!warn.is_empty()).then(|| {
+        question.push_str("\n\n");
+        let at = question.split('\n').count() - 1;
+        question.push_str(&warn.join("\n"));
+        at..at + warn.len()
+    });
+    let asked = Asked::new(Why::Blocked, Request::Grant(grant.clone()));
+    let what = crate::offer::What::Grant { grant, run };
+    let o = crate::offer::Offer::new(GRANT_TITLE.into(), &question, "", String::new(), what);
+    match warning {
+        Some(lines) => o.warning(lines).asked(asked),
+        None => o.asked(asked),
     }
 }
 
@@ -333,6 +358,52 @@ mod tests {
             ],
             "nothing for the key"
         );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// A read's grant card says first when the place holds a token-like line — by the file's name, never the
+    /// value, in the warning colour; it comes once the place's been looked through (a worker's). A place
+    /// without one says nothing of tokens. (Fake values in the test's own temp folder.)
+    #[test]
+    fn a_grants_card_says_when_a_token_is_there() {
+        let base = crate::sandbox::profile_path(&std::env::temp_dir())
+            .join(format!("tarae-blocked-tok-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        for (f, text) in [("conf/hosts.yml", "oauth_token: tarae-fake-token\n"), ("plain/x.txt", "marker\n")]
+        {
+            std::fs::create_dir_all(base.join(f).parent().unwrap()).unwrap();
+            std::fs::write(base.join(f), text).unwrap();
+        }
+        let mut ed = Editor::new(crate::config::Config::default());
+        let run = BlockedRun { job: Job::Command("cat x".into(), base.clone()), denials: Vec::new() };
+        let choice = |dir: &str| Choice {
+            grant: Grant::Read(base.join(dir)),
+            hint: String::new(),
+            why: "cat was reading …/x in it".into(),
+        };
+        ed.session.blocked = Some((run, vec![choice("conf"), choice("plain")]));
+        let card = |ed: &mut Editor, row: &str| {
+            ed.offers.clear();
+            ed.sandbox_grant(row).unwrap();
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while ed.offers.is_empty() {
+                let left = end.saturating_duration_since(std::time::Instant::now());
+                let ev = ed.events.recv_timeout(left).expect("the card before the timeout");
+                ed.handle_event(ev);
+            }
+            let o = &ed.offers[0];
+            let warned: Vec<&str> = match &o.warning {
+                Some(r) => o.question.split('\n').skip(r.start).take(r.len()).collect(),
+                None => Vec::new(),
+            };
+            (o.question.clone(), warned.join("\n"))
+        };
+        let (q, warned) = card(&mut ed, "0");
+        let said = format!("In {}, hosts.yml holds a token-like line.", base.join("conf").display());
+        assert_eq!(warned, said, "{q}");
+        assert!(!q.contains("tarae-fake-token"), "{q}");
+        let (q, warned) = card(&mut ed, "1");
+        assert!(warned.is_empty() && !q.contains("token"), "{q}");
         std::fs::remove_dir_all(&base).ok();
     }
 

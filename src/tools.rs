@@ -1965,16 +1965,20 @@ pub(crate) fn guard_then_go(ed: &mut Editor, who: For, job: Job, ride: Ride) {
     let chat = ed.session.chat.as_ref().map(|c| c.allowed.clone()).unwrap_or_default();
     let (store, root) = (ed.allow_path.clone(), ed.session.root.clone());
     let grant = ride.extra.grant.clone();
+    let said = ed.tokens_said.clone();
     ed.events.jobs().spawn(move || {
         let found = match found {
             Availability::Unknown => crate::sandbox::probe(),
             f => f,
         };
+        let mut cargo = (Vec::new(), None);
         let policy = (found == Availability::Ready).then(|| {
             let kept = crate::allow::Store::read(store.as_deref()).get(&crate::sandbox::profile_path(&root));
             let w = with_allowed(&llm, &[&kept, &chat], grant.as_ref());
             let mut p = crate::sandbox::policy(&root, &w.llm, &w.reads);
             (p.granted, p.sockets) = (w.granted, w.sockets);
+            // (cargo's configs holding a token: the user hears once — `tokens::tell_cargo`)
+            cargo = crate::tokens::cargo_to_tell(&p.reads.copies.cargo, said.as_deref());
             // Its denials watched from before it starts (the stream up first — measured)
             if let Some(tag) = &p.tag {
                 p.watch = Some(crate::sandbox::Watch::start(tag));
@@ -1984,6 +1988,7 @@ pub(crate) fn guard_then_go(ed: &mut Editor, who: For, job: Job, ride: Ride) {
         });
         move |ed: &mut Editor| {
             ed.sandbox = found.clone();
+            crate::tokens::tell_cargo(ed, &cargo.0, cargo.1);
             if let For::Claude(call) = &who {
                 call.step("sandbox ready");
             }

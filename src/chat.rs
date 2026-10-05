@@ -277,6 +277,9 @@ pub struct Chat {
     /// Places outside the project the user let Claude read once this conversation — a read beside one of
     /// them offers their folder (`allow::grant_places`, #102).
     pub read_once: Vec<PathBuf>,
+    /// The folders a read's card offered for `a`/`A`, looked through for tokens on a worker (None: under way)
+    /// — a folder is offered once its card can say what it holds (`reads::refold`).
+    pub scanned: std::collections::HashMap<PathBuf, Option<crate::tokens::Found>>,
     /// This turn's sandboxed runs of Claude's — what they made is read unasked (#81, `reads::Ran`).
     pub ran: Vec<crate::reads::Ran>,
     /// Claude may look at the screen without asking for the rest of this conversation (`a` on its card —
@@ -394,6 +397,7 @@ impl Chat {
             allowed: Default::default(),
             reads: Default::default(),
             read_once: Vec::new(),
+            scanned: Default::default(),
             ran: Vec::new(),
             sees: false,
             run_allow: Vec::new(),
@@ -2087,6 +2091,7 @@ mod tests {
             look: crate::reads::look("Read", &serde_json::json!({"file_path": shots.join(f)}), &root),
             class: crate::cards::Class::Elsewhere,
             since: std::time::Instant::now(),
+            found: Default::default(),
         };
         let card = |ed: &Editor| match ed.offers.first().map(|o| (&o.what, o.question.clone(), o.id)) {
             Some((crate::offer::What::Read { pending, folder, .. }, q, id)) => {
@@ -2105,6 +2110,13 @@ mod tests {
         crate::reads::answer(&mut ed, id, p, Some(crate::allow::Scope::Once), true, None);
         ed.session.chat.as_mut().unwrap().reads.extend([pending("b.png"), pending("c.png")]);
         crate::reads::next(&mut ed);
+        // (the folder's offered once it's been looked through for tokens — a worker's)
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while card(&ed).1.is_none() {
+            let left = end.saturating_duration_since(std::time::Instant::now());
+            let ev = ed.events.recv_timeout(left).expect("the folder offered before the timeout");
+            ed.handle_event(ev);
+        }
         let (at, folder, q, id) = card(&ed);
         assert_eq!((at, folder.clone()), (Some(shots.join("b.png")), Some(shots.clone())));
         assert!(q.contains(&format!("a and A allow everything in {}", shots.display())), "{q}");

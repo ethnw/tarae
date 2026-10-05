@@ -1,0 +1,914 @@
+//! Tokens in the settings Claude's runs read (2026-10-05, after card model P2 — `sandbox::reads_for`). A run
+//! reads in home what the toolchains need, and some of that can hold a token by design: git's settings
+//! (`http.extraHeader`, a token in a `url.<…>.insteadOf`), Go's env file (`go env -w GOPROXY=https://user:…@`),
+//! pip's (an `index-url` with `user:pass@`) — and npm's `~/.npmrc` (`_authToken`), kept from every run
+//! (`allow::SECRETS`). Measured with fake tokens in a stand-in home under a run's profile
+//! (`target/sb/tokens-checkpoint.md`): denied, git fails at every command, and Go, npm and pip lose their
+//! settings without a word; each takes a copy by a variable (`Tool::var`). So where a token is there, tarae —
+//! on the policy's worker, never Claude — writes a copy without those lines in the run's own folder
+//! (`sandbox::RunDir`), points the tool at it, and the run doesn't read the original (`Copies::hidden`);
+//! nothing changes where there's none. npm's file is kept whatever it holds, so its copy is always given.
+//!
+//! Cargo reads its config as an ancestor's and takes no copy (denied, every cargo command fails): it's left as
+//! it is, and the user is told once that cargo keeps tokens in `credentials.toml`, which runs never read
+//! (`cargo_holders`, `tell_cargo`). A card that lets Claude read a file or a folder says first when one holds
+//! a token-like line (`found_in`) — the file's name, never the value.
+
+use std::path::{Path, PathBuf};
+
+use crate::editor::Editor;
+
+// ── What looks like a token ─────────────────────────────────────────────────
+
+/// Keys named for a secret (lowercased, anywhere in the key: `//host/:_authToken`, `GITHUB_TOKEN`).
+const SECRET_KEYS: [&str; 12] = [
+    "token",
+    "password",
+    "passwd",
+    "secret",
+    "_auth",
+    "apikey",
+    "api_key",
+    "api-key",
+    "private_key",
+    "private-key",
+    "access_key",
+    "access-key",
+];
+
+/// …but not a key that names where one is or how it's got (`password_file`, `token-cmd`, `credential.helper`).
+const NOT_THE_VALUE: [&str; 8] = ["file", "path", "helper", "command", "cmd", "url", "type", "env"];
+
+/// Tokens known by how they start: GitHub's, GitLab's, npm's, PyPI's, Slack's.
+const PREFIXES: [&str; 11] =
+    ["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "glpat-", "npm_", "pypi-Ag", "xoxb-", "xoxp-"];
+
+/// Whether `line` holds what looks like a token: a URL with a password (`https://user:pass@`) or a long user
+/// (`https://ghp_…@`), a key named for one with a value written there (`token = …`, `//host/:_authToken=…`,
+/// `"password": "…"` — not `${VAR}`), an `Authorization:` header, or a token by its known prefix. A comment
+/// counts: it's in the file all the same.
+pub fn token_like(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    url_secret(line) || header_secret(&lower) || key_secret(&lower) || prefixed(line)
+}
+
+/// A URL in `s` whose user part has a password, or is a token itself.
+fn url_secret(s: &str) -> bool {
+    s.match_indices("://").any(|(i, _)| {
+        let rest = &s[i + 3..];
+        let end = rest.find(|c: char| "/?#\"',;)<>".contains(c) || c.is_whitespace()).unwrap_or(rest.len());
+        let Some((user, _)) = rest[..end].rsplit_once('@') else { return false };
+        match user.split_once(':') {
+            Some((_, pass)) => !pass.is_empty(),
+            None => user.len() >= 20 || prefixed(user),
+        }
+    })
+}
+
+fn header_secret(lower: &str) -> bool {
+    ["authorization:", "private-token:", "x-api-key:"].iter().any(|h| lower.contains(h))
+        || lower
+            .match_indices("bearer ")
+            .any(|(i, _)| lower[i + 7..].trim_start().chars().take_while(|c| !c.is_whitespace()).count() >= 8)
+}
+
+/// `key = value`, `key: value`, `"key": "value"`, `export KEY=value` — a key named for a secret, a value
+/// written there.
+fn key_secret(lower: &str) -> bool {
+    let t = lower.trim_start().trim_start_matches(['#', ';']).trim_start();
+    let t = t.strip_prefix("export ").unwrap_or(t);
+    let at = t.find('=').or_else(|| t.find(':').filter(|&i| !t[i..].starts_with("://")));
+    let Some(at) = at else { return false };
+    let key = t[..at].trim().trim_matches(['"', '\'']);
+    let plain_key = !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || "_.-/:@".contains(c));
+    if !plain_key || !SECRET_KEYS.iter().any(|k| key.contains(k)) {
+        return false;
+    }
+    if NOT_THE_VALUE.iter().any(|n| key.ends_with(n)) {
+        return false;
+    }
+    let value = t[at + 1..].trim().trim_end_matches(',').trim().trim_matches(['"', '\'']);
+    let placeholder = matches!(value, "true" | "false" | "null" | "none" | "yes" | "no" | "{" | "[");
+    value.len() >= 4 && !value.starts_with('$') && !placeholder
+}
+
+/// A token by its known prefix, with at least 16 characters after it.
+fn prefixed(s: &str) -> bool {
+    PREFIXES.iter().any(|p| {
+        s.match_indices(p).any(|(i, _)| {
+            s[i + p.len()..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+                .count()
+                >= 16
+        })
+    })
+}
+
+// ── Copies without them ─────────────────────────────────────────────────────
+
+/// How a settings file is read, for leaving lines out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Form {
+    /// git's: `[section]` headers (one holding a token — `[url "https://…@"]` — takes its section along), a
+    /// line ending in `\` goes on in the next.
+    Git,
+    /// configparser's (pip): headers too, and an indented line goes on the one before.
+    Ini,
+    /// A line each (Go's env file, npm's).
+    Lines,
+}
+
+/// `text` without its token-like lines as `form` reads it — what goes on a line dropped goes too, and a
+/// section whose header holds one — and how many lines went. `fix` gives each kept line (with its section's
+/// header) as it's written.
+fn strip(text: &str, form: Form, mut fix: impl FnMut(&str, &str) -> String) -> (String, usize) {
+    // Logical lines: git's `\` joins; an indented line goes on an ini's key
+    let mut groups: Vec<Vec<&str>> = Vec::new();
+    for line in text.lines() {
+        let goes_on = match (form, groups.last()) {
+            (Form::Git, Some(g)) => g.last().is_some_and(|l| l.trim_end().ends_with('\\')),
+            (Form::Ini, Some(_)) => line.starts_with(char::is_whitespace) && !line.trim().is_empty(),
+            _ => false,
+        };
+        match groups.last_mut() {
+            Some(g) if goes_on => g.push(line),
+            _ => groups.push(vec![line]),
+        }
+    }
+    let (mut out, mut gone, mut section, mut dropping) = (String::new(), 0, String::new(), false);
+    for g in groups {
+        let header = form != Form::Lines && g[0].trim_start().starts_with('[');
+        if header {
+            section = g[0].trim().to_string();
+            dropping = g.iter().any(|l| token_like(l));
+        }
+        let whole = dropping
+            || match form {
+                // (a key holding one takes what goes on it; a line going on holding one goes alone)
+                Form::Ini => token_like(g[0]),
+                _ => g.iter().any(|l| token_like(l)),
+            };
+        for l in &g {
+            if whole || token_like(l) {
+                gone += 1;
+                continue;
+            }
+            out.push_str(&fix(&section, l));
+            out.push('\n');
+        }
+    }
+    (out, gone)
+}
+
+/// A tool whose user settings may hold a token, and the variable that points it at a copy instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tool {
+    pub name: &'static str,
+    pub var: &'static str,
+    form: Form,
+    /// The copy's name in the run's folder.
+    file: &'static str,
+}
+
+pub const GIT: Tool = Tool { name: "git", var: "GIT_CONFIG_GLOBAL", form: Form::Git, file: "gitconfig" };
+pub const GO: Tool = Tool { name: "go", var: "GOENV", form: Form::Lines, file: "goenv" };
+pub const NPM: Tool = Tool { name: "npm", var: "NPM_CONFIG_USERCONFIG", form: Form::Lines, file: "npmrc" };
+pub const PIP: Tool = Tool { name: "pip", var: "PIP_CONFIG_FILE", form: Form::Ini, file: "pip.conf" };
+
+/// Where a tool keeps its user settings: `~/Library/Application Support` on macOS, else `$XDG_CONFIG_HOME`
+/// (or `~/.config`) — Go's `os.UserConfigDir`.
+fn user_config(home: &Path, var: &dyn Fn(&str) -> Option<String>) -> PathBuf {
+    match cfg!(target_os = "macos") {
+        true => home.join("Library/Application Support"),
+        false => xdg(home, var),
+    }
+}
+
+fn xdg(home: &Path, var: &dyn Fn(&str) -> Option<String>) -> PathBuf {
+    var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|x| x.is_absolute())
+        .unwrap_or_else(|| home.join(".config"))
+}
+
+/// Where each tool reads its user settings, in the order it reads them (the later wins), as it finds them
+/// from `home` and the environment (`var`) — a variable naming its file wins: `GIT_CONFIG_GLOBAL` (else
+/// `$XDG_CONFIG_HOME/git/config`, then `~/.gitconfig`), `GOENV` (`off`: none), `NPM_CONFIG_USERCONFIG`,
+/// `PIP_CONFIG_FILE` when that file is there (pip then reads no user file — else `~/.pip/pip.conf`, then
+/// its folder's: `~/Library/Application Support/pip` on macOS when there, else `~/.config/pip`).
+pub fn sources(home: &Path, var: &dyn Fn(&str) -> Option<String>) -> Vec<(Tool, Vec<PathBuf>)> {
+    let set = |name: &str| var(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+    let git = match set("GIT_CONFIG_GLOBAL") {
+        Some(f) => vec![f],
+        None => vec![xdg(home, var).join("git/config"), home.join(".gitconfig")],
+    };
+    let go = match set("GOENV") {
+        Some(f) if f == Path::new("off") => vec![],
+        Some(f) => vec![f],
+        None => vec![user_config(home, var).join("go/env")],
+    };
+    let npm = set("NPM_CONFIG_USERCONFIG").or_else(|| set("npm_config_userconfig"));
+    let pip = match set("PIP_CONFIG_FILE").filter(|f| f.exists()) {
+        Some(f) => vec![f],
+        None => {
+            let mac = home.join("Library/Application Support/pip");
+            let dir = match cfg!(target_os = "macos") && mac.is_dir() {
+                true => mac,
+                false => xdg(home, var).join("pip"),
+            };
+            vec![home.join(".pip/pip.conf"), dir.join("pip.conf")]
+        }
+    };
+    vec![(GIT, git), (GO, go), (NPM, vec![npm.unwrap_or_else(|| home.join(".npmrc"))]), (PIP, pip)]
+}
+
+/// What a run gets in place of the settings that hold a token.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Copies {
+    /// Each tool's variable and its copy, for the run's environment.
+    pub env: Vec<(&'static str, PathBuf)>,
+    /// The files that hold a token-like line (real paths) and the variable whose copy stands in: runs don't
+    /// read them — but one the user let Claude read (`copies`' `granted`).
+    pub hidden: Vec<(PathBuf, &'static str)>,
+    /// The files whose token-like lines a copy left out (hidden or not: npm's is kept anyway, one the user
+    /// let Claude read isn't), and the copy's variable.
+    pub left_out: Vec<(PathBuf, &'static str)>,
+    /// Cargo's configs that hold one, left as they are (`cargo_holders`).
+    pub cargo: Vec<PathBuf>,
+}
+
+impl Copies {
+    /// The files whose token lines a run's copies leave out, as the result says them (`~/.gitconfig`), and
+    /// the variables.
+    pub fn said(&self) -> Option<(String, String)> {
+        if self.left_out.is_empty() {
+            return None;
+        }
+        let files: Vec<String> = self.left_out.iter().map(|(f, _)| crate::allow::tilde(f)).collect();
+        let mut vars: Vec<&str> = self.left_out.iter().map(|(_, v)| *v).collect();
+        vars.dedup();
+        Some((files.join(", "), vars.join(", ")))
+    }
+
+    /// The variable whose copy stands in for `real`, when it's a file kept for its token.
+    pub fn instead_of(&self, real: &Path) -> Option<&'static str> {
+        self.hidden.iter().find(|(f, _)| f == real).map(|(_, v)| *v)
+    }
+}
+
+/// Making one tool's copy: where the copies go, which files held a token, how many copies were made.
+struct Making<'a> {
+    dir: Option<&'a Path>,
+    home: &'a Path,
+    held: Vec<PathBuf>,
+    made: usize,
+}
+
+/// The deepest include followed (git's own limit is 10).
+const INCLUDES_MAX: usize = 8;
+
+impl Making<'_> {
+    /// A settings file's text without its token-like lines — and git's includes made whole (`git_line`).
+    /// None: not there, or not readable.
+    fn file(&mut self, src: &Path, form: Form, depth: usize) -> Option<String> {
+        let text = std::fs::read_to_string(src).ok()?;
+        let base = src.parent().unwrap_or(Path::new("/")).to_path_buf();
+        let (out, gone) = match form {
+            Form::Git => strip(&text, form, |section, line| self.git_line(section, line, &base, depth)),
+            _ => strip(&text, form, |_, line| line.to_string()),
+        };
+        if gone > 0 && !self.held.iter().any(|h| h == src) {
+            self.held.push(src.to_path_buf());
+        }
+        Some(out)
+    }
+
+    /// A kept line of git's settings: an include's path made whole from the folder of the file it's in (git's
+    /// rule — the copy is elsewhere), an `includeIf "gitdir:./…"` too; an included file holding a token copied
+    /// the same way and included from the copy.
+    fn git_line(&mut self, section: &str, line: &str, base: &Path, depth: usize) -> String {
+        let lower = section.to_ascii_lowercase();
+        if line.trim() == section {
+            if lower.starts_with("[includeif") {
+                let at = format!("{}/", base.display());
+                return line
+                    .replace("gitdir:./", &format!("gitdir:{at}"))
+                    .replace("gitdir/i:./", &format!("gitdir/i:{at}"));
+            }
+            return line.to_string();
+        }
+        let included = lower.starts_with("[include]") || lower.starts_with("[includeif");
+        let Some((key, value)) =
+            line.split_once('=').filter(|(k, _)| included && k.trim().eq_ignore_ascii_case("path"))
+        else {
+            return line.to_string();
+        };
+        let value = value.trim().trim_matches('"');
+        let path = match value.strip_prefix("~/") {
+            Some(rest) => self.home.join(rest),
+            None if value.starts_with('/') => PathBuf::from(value),
+            None => base.join(value),
+        };
+        let real = crate::sandbox::profile_path(&path);
+        let mut to = path;
+        if depth < INCLUDES_MAX && real.is_file() {
+            let before = self.held.len();
+            if let Some(text) = self.file(&real, Form::Git, depth + 1)
+                && self.held.len() > before
+                && let Some(dir) = self.dir
+            {
+                self.made += 1;
+                let copy = dir.join(format!("gitconfig-include-{}", self.made));
+                if write_private(&copy, &copy_head(&real, &text)).is_ok() {
+                    to = copy;
+                }
+            }
+        }
+        let indent: String = key.chars().take_while(|c| c.is_whitespace()).collect();
+        format!("{indent}path = \"{}\"", to.display().to_string().replace('\\', "\\\\").replace('"', "\\\""))
+    }
+}
+
+/// A copy's first line: what it's a copy of (a comment in every form here — Go skips lines not starting with
+/// a capital).
+fn copy_head(of: &Path, text: &str) -> String {
+    format!("# tarae: {} without its token-like lines — what Claude's commands read\n{text}", of.display())
+}
+
+/// configparser's files merged as pip reads them one after another: a section's keys gathered, a key read
+/// later (`index_url` = `index-url`) over the one before.
+fn ini_merge(texts: &[String]) -> String {
+    type Entries = Vec<(String, Vec<String>)>;
+    let mut sections: Vec<(String, Entries)> = Vec::new();
+    for t in texts {
+        let (mut cur, mut key): (Option<usize>, Option<usize>) = (None, None);
+        for line in t.lines() {
+            let s = line.trim();
+            if s.is_empty() || s.starts_with(['#', ';']) {
+                continue;
+            }
+            if line.starts_with(char::is_whitespace) {
+                if let (Some(c), Some(k)) = (cur, key) {
+                    sections[c].1[k].1.push(line.to_string());
+                }
+                continue;
+            }
+            if let Some(name) = s.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                let name = name.trim().to_string();
+                cur = Some(sections.iter().position(|(n, _)| *n == name).unwrap_or_else(|| {
+                    sections.push((name, Vec::new()));
+                    sections.len() - 1
+                }));
+                key = None;
+                continue;
+            }
+            let Some(c) = cur else { continue };
+            let name =
+                s.split(['=', ':']).next().unwrap_or_default().trim().to_ascii_lowercase().replace('_', "-");
+            let entries = &mut sections[c].1;
+            let i = entries.iter().position(|(k, _)| *k == name).unwrap_or_else(|| {
+                entries.push((name, Vec::new()));
+                entries.len() - 1
+            });
+            entries[i].1 = vec![line.to_string()];
+            key = Some(i);
+        }
+    }
+    let mut out = String::new();
+    for (name, entries) in sections {
+        out.push_str(&format!("[{name}]\n"));
+        for line in entries.into_iter().flat_map(|(_, l)| l) {
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Written for this user only (its folder made when it's the first).
+fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?;
+    f.write_all(text.as_bytes())
+}
+
+/// The copies for a run whose own folder is `dir` (None: none could be made — the files that hold a token
+/// stay closed all the same), from each tool's `sources`: a tool whose files hold a token-like line — or one
+/// of which is kept from every run (`kept`: npm's) — gets one copy of them all, in the order it reads them,
+/// without those lines. A file that holds one is hidden from the run — unless the user let Claude read it
+/// (`granted`; their card said what it holds), or it's kept already. Real paths in.
+pub fn copies(
+    sources: &[(Tool, Vec<PathBuf>)],
+    dir: Option<&Path>,
+    home: &Path,
+    granted: &[PathBuf],
+    kept: &[PathBuf],
+) -> Copies {
+    let mut out = Copies::default();
+    let folder = dir.map(|d| d.join("settings"));
+    for (tool, files) in sources {
+        let real: Vec<PathBuf> =
+            files.iter().filter(|f| f.is_file()).map(|f| crate::sandbox::profile_path(f)).collect();
+        let mut m = Making { dir: folder.as_deref(), home, held: Vec::new(), made: 0 };
+        let texts: Vec<(PathBuf, String)> =
+            real.iter().filter_map(|f| Some((f.clone(), m.file(f, tool.form, 0)?))).collect();
+        let is_kept = |f: &Path| kept.iter().any(|k| f.starts_with(k));
+        if m.held.is_empty() && !real.iter().any(|f| is_kept(f)) {
+            continue;
+        }
+        let text = match tool.form {
+            Form::Ini if texts.len() > 1 => {
+                ini_merge(&texts.iter().map(|(_, t)| t.clone()).collect::<Vec<_>>())
+            }
+            _ => texts.iter().map(|(f, t)| copy_head(f, t)).collect::<Vec<_>>().join("\n"),
+        };
+        let head = match (tool.form, texts.len()) {
+            (Form::Ini, 2..) => format!("# tarae: {} merged, without their token-like lines\n", texts.len()),
+            _ => String::new(),
+        };
+        if let Some(f) = &folder {
+            let copy = f.join(tool.file);
+            if write_private(&copy, &format!("{head}{text}")).is_ok() {
+                out.env.push((tool.var, copy));
+                out.left_out.extend(m.held.iter().map(|h| (h.clone(), tool.var)));
+            }
+        }
+        for h in m.held {
+            if !is_kept(&h) && !granted.iter().any(|g| h.starts_with(g)) {
+                out.hidden.push((h, tool.var));
+            }
+        }
+    }
+    out
+}
+
+/// The process's own environment, for `sources`.
+pub fn env_var(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+
+/// Cargo's configs a run reads that hold a token-like line: its home's `config.toml` and `config`, and those
+/// in the folders above the project (`sandbox::cargo_configs_above`). Real paths.
+pub fn cargo_holders(cargo_home: Option<&Path>, above: &[PathBuf]) -> Vec<PathBuf> {
+    let home_configs = cargo_home.into_iter().flat_map(|c| ["config.toml", "config"].map(|f| c.join(f)));
+    home_configs
+        .chain(above.iter().cloned())
+        .filter(|f| std::fs::read_to_string(f).is_ok_and(|t| t.lines().any(token_like)))
+        .map(|f| crate::sandbox::profile_path(&f))
+        .collect()
+}
+
+// ── Saying so ───────────────────────────────────────────────────────────────
+
+/// Cargo's configs already told about (`$state/tokens-said`, a path a line): each is said once, and said
+/// again only once it held none for a while (it's taken off when a run finds it without one).
+pub fn said_path() -> Option<PathBuf> {
+    crate::config::state_dir().map(|d| d.join("tokens-said"))
+}
+
+fn said_read(path: &Path) -> Vec<PathBuf> {
+    std::fs::read_to_string(path)
+        .map(|s| s.lines().filter(|l| !l.is_empty()).map(PathBuf::from).collect())
+        .unwrap_or_default()
+}
+
+/// What to tell about cargo's configs (on the policy's worker): those holding a token not told before — and
+/// the list of told ones as it should now be (None: unchanged).
+pub fn cargo_to_tell(holders: &[PathBuf], said: Option<&Path>) -> (Vec<PathBuf>, Option<Vec<PathBuf>>) {
+    let told = said.map(said_read).unwrap_or_default();
+    let new: Vec<PathBuf> = holders.iter().filter(|h| !told.contains(h)).cloned().collect();
+    // (a file told before that holds none now is taken off: a token put back is said again)
+    let now: Vec<PathBuf> = told.iter().filter(|t| holders.contains(t)).chain(&new).cloned().collect();
+    (new, (now != told).then_some(now))
+}
+
+/// Tells the user, once, that cargo's `files` hold a token runs read — Claude's commands can't do without
+/// them, and cargo keeps tokens in `credentials.toml`, which they never read. A toast, not the run's report:
+/// it's the user who can move a token (Claude can't, and its report would point it at the file); and not a
+/// card: there's nothing to answer. `told`: the list to keep (`cargo_to_tell`), written on a worker.
+pub fn tell_cargo(ed: &mut Editor, files: &[PathBuf], told: Option<Vec<PathBuf>>) {
+    if let (Some(list), Some(path)) = (told, ed.tokens_said.clone()) {
+        ed.events.jobs().background(move || {
+            let body: String = list.iter().map(|p| format!("{}\n", p.display())).collect();
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = crate::disk::write_atomic(&path, |w| std::io::Write::write_all(w, body.as_bytes()));
+        });
+    }
+    let files: Vec<String> = files.iter().map(|f| crate::allow::tilde(f)).collect();
+    if files.is_empty() || ed.tokens_told.iter().any(|t| files.contains(t)) {
+        return;
+    }
+    ed.tokens_told.extend(files.iter().cloned());
+    let (them, it) = if files.len() == 1 { ("it", "holds a token") } else { ("them", "hold tokens") };
+    ed.set_warning(format!(
+        "{} {it}, and Claude's commands read {them} — cargo can't work without {them}. Cargo keeps tokens in \
+         ~/.cargo/credentials.toml, which they never read: move it there (cargo login puts it there).",
+        files.join(", ")
+    ));
+}
+
+// ── On a card ───────────────────────────────────────────────────────────────
+
+/// What a place holds that looks like a token (`found_in`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Found {
+    /// The files that hold a token-like line — `FOUND_MAX` at most.
+    pub files: Vec<PathBuf>,
+    /// How many more do.
+    pub more: usize,
+    /// Not every file was looked at (more than `LOOK_MAX`, or `BYTES_MAX` read).
+    pub cut: bool,
+}
+
+const FOUND_MAX: usize = 3;
+const LOOK_MAX: usize = 2000;
+const BYTES_MAX: u64 = 32 << 20;
+/// Bigger files aren't settings.
+const FILE_MAX: u64 = 256 << 10;
+/// Code, docs and pictures: a `token = …` there is code, not a token.
+const NOT_SETTINGS: [&str; 30] = [
+    "rs", "py", "js", "mjs", "ts", "tsx", "jsx", "go", "java", "kt", "c", "h", "cc", "cpp", "hpp", "swift",
+    "rb", "php", "cs", "scala", "lua", "md", "html", "css", "svg", "png", "jpg", "pdf", "lock", "sum",
+];
+/// Folders of tools' output, never looked in.
+const OUTPUT: [&str; 5] = ["node_modules", "target", ".venv", "__pycache__", "objects"];
+
+/// The files in `place` (a file, or a folder and everything in it — links not followed) that hold a
+/// token-like line: settings-like files only, within bounds (`Found::cut` says when they were met). Blocks:
+/// a worker's.
+pub fn found_in(place: &Path) -> Found {
+    let mut f = Found::default();
+    let (mut looked, mut bytes) = (0, 0);
+    let mut stack = vec![place.to_path_buf()];
+    while let Some(p) = stack.pop() {
+        let Ok(meta) = std::fs::symlink_metadata(&p) else { continue };
+        if meta.is_dir() {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            if p != place && OUTPUT.contains(&name) {
+                continue;
+            }
+            let Ok(rd) = std::fs::read_dir(&p) else { continue };
+            stack.extend(rd.flatten().map(|e| e.path()));
+            continue;
+        }
+        let ext = p.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+        if !meta.is_file() || meta.len() > FILE_MAX || (p != place && NOT_SETTINGS.contains(&ext.as_str())) {
+            continue;
+        }
+        if looked >= LOOK_MAX || bytes + meta.len() > BYTES_MAX {
+            f.cut = true;
+            break;
+        }
+        looked += 1;
+        bytes += meta.len();
+        let Ok(data) = std::fs::read(&p) else { continue };
+        if data.contains(&0) {
+            continue;
+        }
+        if String::from_utf8_lossy(&data).lines().any(token_like) {
+            match f.files.len() < FOUND_MAX {
+                true => f.files.push(p),
+                false => f.more += 1,
+            }
+        }
+    }
+    f.files.sort();
+    f
+}
+
+impl Found {
+    /// What a card says of `place` before it's opened (None: nothing to say) — the files' names, never what's
+    /// in them.
+    pub fn said(&self, place: &Path) -> Option<String> {
+        let at = crate::allow::tilde(place);
+        let name = |f: &PathBuf| match f.strip_prefix(place) {
+            Ok(r) if !r.as_os_str().is_empty() => r.display().to_string(),
+            _ => crate::allow::tilde(f),
+        };
+        let mut s = match self.files.as_slice() {
+            [] => String::new(),
+            [one] if one == place => format!("{at} holds a token-like line."),
+            [one] => format!("In {at}, {} holds a token-like line.", name(one)),
+            many => {
+                let mut names: Vec<String> = many.iter().map(name).collect();
+                let last = match self.more {
+                    0 => names.pop().unwrap_or_default(),
+                    n => format!("{n} more"),
+                };
+                format!("In {at}, {} and {last} hold token-like lines.", names.join(", "))
+            }
+        };
+        if self.cut {
+            s.push_str(if s.is_empty() { "" } else { " " });
+            s.push_str(&format!("{at} has more files than tarae looks through for tokens."));
+        }
+        (!s.is_empty()).then_some(s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let d = crate::sandbox::profile_path(&std::env::temp_dir())
+            .join(format!("tarae-tokens-{name}-{}", std::process::id()));
+        std::fs::remove_dir_all(&d).ok();
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn write(path: &Path, text: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    const FAKE: &str = "tarae-fake-token";
+
+    #[test]
+    fn what_looks_like_a_token() {
+        let yes = [
+            "\textraHeader = Authorization: Bearer tarae-fake-token",
+            "[url \"https://x-access-token:tarae-fake-token@github.com/\"]",
+            "GOPROXY=https://user:tarae-fake-token@proxy.example.com,direct",
+            "//registry.example.com/:_authToken=tarae-fake-token",
+            "_auth=dGFyYWUtZmFrZQ==",
+            "index-url = https://u:tarae-fake-token@pypi.example.com/simple",
+            "token = \"tarae-fake-token\"",
+            "  \"password\": \"tarae-fake-token\",",
+            "export GITHUB_TOKEN=tarae-fake-token",
+            "# token = tarae-fake-token",
+            "url = https://ghp_0123456789abcdefABCDEF@github.com/o/r",
+            "remote = ghp_0123456789abcdefABCDEF",
+            "Private-Token: tarae-fake-token",
+        ];
+        for l in yes {
+            assert!(token_like(l), "not seen: {l}");
+        }
+        let no = [
+            "[url \"git@github.com:\"]",
+            "\tinsteadOf = https://github.com/",
+            "url = ssh://git@github.com:22/o/r",
+            "always-auth=true",
+            "registry=https://registry.example.com/",
+            "//registry.example.com/:_authToken=${NPM_TOKEN}",
+            "\thelper = osxkeychain",
+            "password_file = ~/.secret",
+            "token-cmd = pass show npm",
+            "let token = parse(input);",
+            "GOFLAGS=-mod=mod",
+            "[registry]",
+            "token =",
+            "Authorization header goes here", // (no colon: prose)
+        ];
+        for l in no {
+            assert!(!token_like(l), "seen: {l}");
+        }
+    }
+
+    /// git's form: a header holding one drops its section; a key holding one drops itself and what goes on
+    /// it (`\`); the rest stays, comments and all.
+    #[test]
+    fn a_git_copy_leaves_out_the_token_lines() {
+        let text = "[user]\n\tname = Stand In\n[http]\n\textraHeader = Authorization: \\\n\t\tBearer tarae-fake-token\n\
+                    \tsslVerify = true\n[url \"https://x:tarae-fake-token@github.com/\"]\n\tinsteadOf = https://github.com/\n\
+                    [alias]\n\tco = checkout\n";
+        let (out, gone) = strip(text, Form::Git, |_, l| l.to_string());
+        assert_eq!(out, "[user]\n\tname = Stand In\n[http]\n\tsslVerify = true\n[alias]\n\tco = checkout\n");
+        assert_eq!(gone, 4);
+        assert!(!out.contains(FAKE));
+    }
+
+    /// configparser's form: an indented line goes on its key — a key holding one goes with them, a line going
+    /// on holding one goes alone.
+    #[test]
+    fn an_ini_copy_keeps_what_goes_on_a_key() {
+        let text = "[global]\nindex-url = https://u:tarae-fake-token@p.example.com/simple\n  https://more.example.com\n\
+                    extra-index-url =\n  https://a.example.com/simple\n  https://u:tarae-fake-token@b.example.com/simple\n\
+                    timeout = 7\n";
+        let (out, gone) = strip(text, Form::Ini, |_, l| l.to_string());
+        assert_eq!(out, "[global]\nextra-index-url =\n  https://a.example.com/simple\ntimeout = 7\n");
+        assert_eq!(gone, 3);
+        // Lines: a line each, headers are lines
+        let (out, _) =
+            strip("[x]\n_auth=dGFyYWUtZmFrZQ==\nsave-exact=true\n", Form::Lines, |_, l| l.to_string());
+        assert_eq!(out, "[x]\nsave-exact=true\n");
+    }
+
+    /// pip reads its files one after another: one copy, a key read later over the one before (`_` = `-`).
+    #[test]
+    fn pips_files_merge_in_its_order() {
+        let a =
+            "[global]\ntimeout = 7\nindex_url = https://a.example.com\n[install]\nuser = true\n".to_string();
+        let b = "[global]\nindex-url = https://b.example.com\n  https://c.example.com\n".to_string();
+        assert_eq!(
+            ini_merge(&[a, b]),
+            "[global]\ntimeout = 7\nindex-url = https://b.example.com\n  https://c.example.com\n[install]\nuser = true\n"
+        );
+    }
+
+    /// Every tool's file as it's found: the variable naming it wins, `GOENV=off` is none, pip's folder on
+    /// macOS only when it's there.
+    #[test]
+    fn where_each_tool_reads_its_settings() {
+        let home = scratch("sources");
+        let none = |_: &str| None;
+        let all = sources(&home, &none);
+        let get =
+            |all: &[(Tool, Vec<PathBuf>)], t: Tool| all.iter().find(|(x, _)| *x == t).unwrap().1.clone();
+        assert_eq!(get(&all, GIT), [home.join(".config/git/config"), home.join(".gitconfig")]);
+        assert_eq!(get(&all, NPM), [home.join(".npmrc")]);
+        assert_eq!(get(&all, PIP), [home.join(".pip/pip.conf"), home.join(".config/pip/pip.conf")]);
+        if cfg!(target_os = "macos") {
+            assert_eq!(get(&all, GO), [home.join("Library/Application Support/go/env")]);
+            std::fs::create_dir_all(home.join("Library/Application Support/pip")).unwrap();
+            let pip = get(&sources(&home, &none), PIP);
+            assert_eq!(pip[1], home.join("Library/Application Support/pip/pip.conf"));
+        }
+        let given = home.join("given.conf");
+        write(&given, "[global]\n");
+        let set = |n: &str| match n {
+            "GIT_CONFIG_GLOBAL" => Some("/x/gitconfig".to_string()),
+            "GOENV" => Some("off".to_string()),
+            "npm_config_userconfig" => Some("/x/npmrc".to_string()),
+            "PIP_CONFIG_FILE" => Some(given.display().to_string()),
+            "XDG_CONFIG_HOME" => Some("/xdg".to_string()),
+            _ => None,
+        };
+        let all = sources(&home, &set);
+        assert_eq!(get(&all, GIT), [PathBuf::from("/x/gitconfig")]);
+        assert!(get(&all, GO).is_empty());
+        assert_eq!(get(&all, NPM), [PathBuf::from("/x/npmrc")]);
+        assert_eq!(get(&all, PIP), std::slice::from_ref(&given));
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A stand-in home with fake tokens: a copy for git (both its files, an include made whole, an included
+    /// file holding one copied too), Go and pip, each file holding one hidden; npm's copy though it holds
+    /// none (its file is kept); a file the user let Claude read isn't hidden; written for this user only.
+    #[test]
+    fn copies_leave_out_the_tokens_and_hide_their_files() {
+        let t = scratch("copies");
+        let (home, dir) = (t.join("home"), t.join("run"));
+        std::fs::create_dir_all(&dir).unwrap();
+        write(
+            &home.join(".gitconfig"),
+            "[alias]\n\tco = checkout\n[include]\n\tpath = extra.inc\n\tpath = secret.inc\n\
+             [includeIf \"gitdir:./work/\"]\n\tpath = ~/work.inc\n[http]\n\textraHeader = Authorization: Bearer tarae-fake-token\n",
+        );
+        write(&home.join("extra.inc"), "[alias]\n\tst = status\n");
+        write(
+            &home.join("secret.inc"),
+            "[http]\n\textraHeader = Authorization: Bearer tarae-fake-token\n[core]\n\tabbrev = 9\n",
+        );
+        write(&home.join(".config/git/config"), "[user]\n\tname = Stand In\n");
+        write(
+            &home.join("go.env"),
+            "GOFLAGS=-mod=mod\nGOPROXY=https://u:tarae-fake-token@proxy.example.com\n",
+        );
+        write(&home.join(".npmrc"), "registry=https://r.example.com/\n");
+        write(&home.join(".pip/pip.conf"), "[global]\ntimeout = 7\n");
+        write(
+            &home.join(".config/pip/pip.conf"),
+            "[global]\nindex-url = https://u:tarae-fake-token@p.example.com/\n",
+        );
+        let home = std::fs::canonicalize(&home).unwrap();
+        let mut src = sources(&home, &|_| None);
+        src[1].1 = vec![home.join("go.env")];
+        let kept = [home.join(".npmrc")];
+        let c = copies(&src, Some(&dir), &home, &[], &kept);
+        let vars: Vec<&str> = c.env.iter().map(|(v, _)| *v).collect();
+        assert_eq!(vars, ["GIT_CONFIG_GLOBAL", "GOENV", "NPM_CONFIG_USERCONFIG", "PIP_CONFIG_FILE"]);
+        let read =
+            |v: &str| std::fs::read_to_string(&c.env.iter().find(|(x, _)| *x == v).unwrap().1).unwrap();
+        let git = read("GIT_CONFIG_GLOBAL");
+        assert!(
+            git.find("name = Stand In").unwrap() < git.find("co = checkout").unwrap(),
+            "git's order: {git}"
+        );
+        assert!(git.contains(&format!("path = \"{}\"", home.join("extra.inc").display())), "{git}");
+        assert!(git.contains(&format!("[includeIf \"gitdir:{}/work/\"]", home.display())), "{git}");
+        assert!(git.contains(&format!("path = \"{}\"", home.join("work.inc").display())), "{git}");
+        let inc = dir.join("settings/gitconfig-include-1");
+        assert!(git.contains(&format!("path = \"{}\"", inc.display())), "the include's copy: {git}");
+        assert!(std::fs::read_to_string(&inc).unwrap().contains("abbrev = 9"));
+        assert!(read("GOENV").contains("GOFLAGS=-mod=mod"));
+        assert_eq!(read("NPM_CONFIG_USERCONFIG").lines().last(), Some("registry=https://r.example.com/"));
+        let pip = read("PIP_CONFIG_FILE");
+        assert!(pip.contains("timeout = 7") && !pip.contains("index-url"), "{pip}");
+        for (_, f) in &c.env {
+            assert!(!std::fs::read_to_string(f).unwrap().contains(FAKE), "{}", f.display());
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(std::fs::metadata(f).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        assert!(!std::fs::read_to_string(&inc).unwrap().contains(FAKE));
+        let hidden: Vec<(PathBuf, &str)> = c.hidden.clone();
+        assert_eq!(
+            hidden,
+            [
+                (home.join("secret.inc"), "GIT_CONFIG_GLOBAL"),
+                (home.join(".gitconfig"), "GIT_CONFIG_GLOBAL"),
+                (home.join("go.env"), "GOENV"),
+                (home.join(".config/pip/pip.conf"), "PIP_CONFIG_FILE"),
+            ]
+        );
+        assert_eq!(c.instead_of(&home.join(".gitconfig")), Some("GIT_CONFIG_GLOBAL"));
+        assert_eq!(c.left_out, c.hidden, "what's left out is what's hidden here");
+        let (files, vars) = c.said().unwrap();
+        assert!(files.contains("go.env") && vars == "GIT_CONFIG_GLOBAL, GOENV, PIP_CONFIG_FILE", "{vars}");
+        // A file the user let Claude read: copied all the same, not hidden
+        let dir2 = t.join("run2");
+        std::fs::create_dir_all(&dir2).unwrap();
+        let granted = copies(&src, Some(&dir2), &home, &[home.join(".config/pip")], &kept);
+        assert!(!granted.hidden.iter().any(|(h, _)| h.starts_with(home.join(".config/pip"))));
+        assert!(granted.env.iter().any(|(v, _)| *v == "PIP_CONFIG_FILE"));
+        assert!(granted.left_out.iter().any(|(h, _)| h.starts_with(home.join(".config/pip"))));
+        // No run folder: nothing copied, the files still hidden
+        let none = copies(&src, None, &home, &[], &kept);
+        assert!(none.env.is_empty() && none.left_out.is_empty() && none.hidden == c.hidden);
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// No token anywhere and no kept file: nothing changes — no copy, nothing hidden.
+    #[test]
+    fn without_a_token_nothing_changes() {
+        let t = scratch("none");
+        let (home, dir) = (t.join("home"), t.join("run"));
+        std::fs::create_dir_all(&dir).unwrap();
+        write(&home.join(".gitconfig"), "[alias]\n\tco = checkout\n[credential]\n\thelper = osxkeychain\n");
+        write(&home.join(".config/pip/pip.conf"), "[global]\nindex-url = https://p.example.com/simple\n");
+        write(&home.join(".npmrc"), "//r.example.com/:_authToken=${NPM_TOKEN}\n");
+        let home = std::fs::canonicalize(&home).unwrap();
+        let c = copies(&sources(&home, &|_| None), Some(&dir), &home, &[], &[]);
+        assert_eq!(c, Copies::default());
+        assert!(!dir.join("settings").exists(), "nothing written");
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// Cargo's configs holding one are found, said once — and again only after a time without one.
+    #[test]
+    fn cargos_tokens_are_told_once() {
+        let t = scratch("cargo");
+        let cargo = t.join("cargo");
+        write(&cargo.join("config.toml"), "[net]\nretry = 3\n[registry]\ntoken = \"tarae-fake-token\"\n");
+        write(&t.join("p/.cargo/config.toml"), "[build]\njobs = 2\n");
+        let holders =
+            cargo_holders(Some(&cargo), &[t.join("p/.cargo/config.toml"), t.join("gone/.cargo/config")]);
+        assert_eq!(holders, [cargo.join("config.toml")]);
+        let said = t.join("state/tokens-said");
+        let (new, now) = cargo_to_tell(&holders, Some(&said));
+        assert_eq!((new.clone(), now.clone()), (holders.clone(), Some(holders.clone())));
+        write(&said, &format!("{}\n", holders[0].display()));
+        assert_eq!(cargo_to_tell(&holders, Some(&said)), (vec![], None), "told already");
+        assert_eq!(cargo_to_tell(&[], Some(&said)), (vec![], Some(vec![])), "none now: taken off");
+        // On screen: once since tarae started, too
+        let mut ed = Editor::new(crate::config::Config::default());
+        let said = |ed: &Editor| ed.messages.iter().filter(|m| m.2.contains("credentials.toml")).count();
+        tell_cargo(&mut ed, &new, None);
+        assert_eq!(said(&ed), 1, "{:?}", ed.toasts);
+        assert!(!ed.toasts.iter().any(|t| t.text.contains(FAKE)));
+        tell_cargo(&mut ed, &new, None);
+        assert_eq!(said(&ed), 1, "said twice");
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// A card's words: the file itself, files in a folder (by name, never the value; a few, then how many
+    /// more), code skipped, tools' output not looked in — and a folder too big to look through all.
+    #[test]
+    fn what_a_card_says_of_a_place() {
+        let t = scratch("found");
+        write(&t.join("a/.env"), "GITHUB_TOKEN=tarae-fake-token\n");
+        write(&t.join("a/hosts.yml"), "oauth_token: tarae-fake-token\n");
+        write(&t.join("a/src/main.rs"), "const PAT: &str = \"ghp_0123456789abcdefABCDEF\";\n");
+        write(&t.join("a/node_modules/x/.npmrc"), "_auth=tarae-fake-token\n");
+        write(&t.join("a/plain.toml"), "[x]\ny = 1\n");
+        let a = t.join("a");
+        let f = found_in(&a);
+        assert_eq!(f, Found { files: vec![a.join(".env"), a.join("hosts.yml")], more: 0, cut: false });
+        let said = f.said(&a).unwrap();
+        assert_eq!(said, format!("In {}, .env and hosts.yml hold token-like lines.", a.display()));
+        assert!(!said.contains(FAKE));
+        let one = found_in(&a.join("hosts.yml"));
+        let file = a.join("hosts.yml");
+        assert_eq!(one.said(&file), Some(format!("{} holds a token-like line.", file.display())));
+        assert_eq!(found_in(&a.join("plain.toml")).said(&a.join("plain.toml")), None);
+        for i in 0..5 {
+            write(&t.join(format!("b/{i}.conf")), "password = tarae-fake-token\n");
+        }
+        let b = found_in(&t.join("b"));
+        assert_eq!((b.files.len(), b.more), (3, 2));
+        let said = b.said(&t.join("b")).unwrap();
+        assert!(said.ends_with(".conf and 2 more hold token-like lines."), "{said}");
+        let cut = Found { cut: true, ..Found::default() };
+        let said = cut.said(&a).unwrap();
+        assert_eq!(said, format!("{} has more files than tarae looks through for tokens.", a.display()));
+        std::fs::remove_dir_all(&t).ok();
+    }
+}

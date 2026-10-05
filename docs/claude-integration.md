@@ -433,10 +433,25 @@ What Claude runs, with `run` and `run_tests`, runs in a sandbox (macOS: Seatbelt
   measured by running tarae's own checks, a Go and a Node project, a screenshot and the end-to-end tests with
   every read in home reported: `~/.cargo` (not its `credentials`), `~/.rustup`, `~/.gitconfig`,
   `~/.config/git`, `~/.CFUserTextEncoding`, Go's `~/go`, `~/Library/Caches/go-build` and
-  `~/Library/Application Support/go`, `~/.npm`, `~/Library/Fonts`, tarae's downloaded grammars, the folders
-  on your `PATH`, and the `.cargo/config.toml` files in the folders above the project. A file's metadata
-  (that it's there, its size and time) stays readable: every program looks at home and the folders above
-  the project.
+  `~/Library/Application Support/go`, `~/.npm`, `~/Library/Fonts`, pip's settings files, tarae's downloaded
+  grammars, the folders on your `PATH`, and the `.cargo/config.toml` files in the folders above the project.
+  A file's metadata (that it's there, its size and time) stays readable: every program looks at home and the
+  folders above the project.
+- **Settings that hold a token are read from a copy without it.** Some of what the tools read can hold a
+  token: git's settings (`http.extraHeader`, a token in a `url.<…>.insteadOf`), Go's env file (`go env -w
+  GOPROXY=https://user:…@…`), pip's (an `index-url` with `user:pass@`), npm's `~/.npmrc` (`_authToken`).
+  When one does, tarae writes a copy without those lines in the run's own folder and points the tool at it
+  (`GIT_CONFIG_GLOBAL` — git's two files merged, an include's path made whole, an included file holding a
+  token copied too —, `GOENV`, `PIP_CONFIG_FILE`, `NPM_CONFIG_USERCONFIG`). The run doesn't read the file
+  itself, and Claude is told the tool reads a copy. Where there's no token nothing changes. `~/.npmrc` is
+  never read, so npm always gets its copy (before, a run's npm lost its registry without a word).
+  Cargo reads its config without a way to take a copy, and every cargo command fails without it. So a token
+  in `~/.cargo/config.toml` stays readable, and tarae tells you once: cargo keeps tokens in
+  `~/.cargo/credentials.toml` (`cargo login` puts them there), which runs never read.
+- **A card that lets Claude read a place says first when it holds a token-like line.** That covers a read
+  card's file, the folder its `a`/`A` would open (offered once it's been looked through), and `space m s`'s
+  read grants. The card names the files, never the values. It looks through settings-like files only, not
+  code, and not tools' output (`node_modules`, `target`…). In a folder too big to look through, it says so.
 - **Some places it never reads, whatever you allow**: `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`,
   `~/.kube`, `~/.docker`, `~/.netrc`, `~/.npmrc`, `~/.pypirc`, `~/.password-store`, `~/Library/Keychains`,
   git's credential store (`~/.git-credentials`, `~/.config/git/credentials`),
