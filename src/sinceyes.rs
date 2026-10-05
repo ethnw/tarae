@@ -80,7 +80,7 @@ pub fn key(cmd: &str) -> String {
     let shown: Vec<String> = head
         .iter()
         .map(|p| match p {
-            Part::Cd(d) => format!("cd\u{1f}{d}"),
+            Part::Cd(d) => format!("cd\u{1f}{}", d.text),
             Part::Cmd(w) => w.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join("\u{1f}"),
         })
         .collect();
@@ -94,7 +94,7 @@ pub fn key(cmd: &str) -> String {
     let line: Vec<String> = head
         .iter()
         .map(|p| match p {
-            Part::Cd(d) => format!("cd '{d}'"),
+            Part::Cd(d) => format!("cd '{}'", d.text),
             Part::Cmd(w) => w.iter().map(|w| format!("'{}'", w.text)).collect::<Vec<_>>().join(" "),
         })
         .collect();

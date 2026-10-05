@@ -1007,7 +1007,10 @@ fn why_asked(cmd: &str, extra: &[String]) -> crate::cards::Why {
     if crate::readonly::one_command_env(cmd).is_some_and(|(names, _)| !names.is_empty()) {
         return Why::EnvName;
     }
-    let Some(parts) = crate::readonly::parse(cmd) else { return Why::Unreadable };
+    let parts = match crate::readonly::parse(cmd) {
+        Some(parts) => parts,
+        None => return Why::Unreadable(crate::readonly::unreadable(cmd).unwrap_or_default()),
+    };
     for p in &parts {
         let crate::readonly::Part::Cmd(w) = p else { continue };
         if w.iter().any(|w| w.glob) {
@@ -1015,10 +1018,15 @@ fn why_asked(cmd: &str, extra: &[String]) -> crate::cards::Why {
         }
         let words: Vec<String> = w.iter().map(|w| w.text.clone()).collect();
         if !part_allowed(&words, extra) && !crate::readonly::only_reads(w) {
-            return Why::NotACheck(words.first().cloned().unwrap_or_default());
+            // (with its subcommand, when it has one: `cargo xtask`, `git commit` — `cargo test` is a check)
+            let sub =
+                |s: &&String| s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+            let sub = words.get(1).filter(|s| !s.starts_with('-')).filter(sub);
+            let named = words.first().into_iter().chain(sub).cloned().collect::<Vec<_>>().join(" ");
+            return Why::NotACheck(named);
         }
     }
-    Why::Unreadable
+    Why::Unreadable("no rule reads the line whole")
 }
 
 /// What Claude asked to run past the sandbox, and why: outside it whole, or with one unix socket (#119) —
@@ -1171,7 +1179,7 @@ pub(crate) fn scripts_run(cmd: &str) -> Vec<PathBuf> {
                     Some((here.clone(), w.into_iter().map(|w| w.text).collect()))
                 }
                 crate::readonly::Part::Cd(d) => {
-                    here.push(d);
+                    here.push(d.text);
                     None
                 }
             })
@@ -1290,7 +1298,7 @@ pub(crate) fn runs_in(root: &Path, cwd: &Path, cmd: &str) -> Vec<String> {
         Some(parts) => {
             for p in parts {
                 match p {
-                    crate::readonly::Part::Cd(d) => here = lexical(here.join(d)),
+                    crate::readonly::Part::Cd(d) => here = lexical(here.join(d.text)),
                     crate::readonly::Part::Cmd(_) if !at.contains(&here) => at.push(here.clone()),
                     crate::readonly::Part::Cmd(_) => {}
                 }
@@ -1359,7 +1367,12 @@ fn read_only(
             // written unseen, shown on it)
             if runs_outside || !pinned {
                 let c = call.clone();
-                let why = if runs_outside { Why::RunsOutside } else { Why::ScriptChanged };
+                // (a `cd` that can't be followed counts as outside: said as what it is)
+                let why = match &reads {
+                    Err(e) if runs_outside => Why::CdUnknown(e.clone()),
+                    _ if runs_outside => Why::RunsOutside,
+                    _ => Why::ScriptChanged,
+                };
                 if let Err(e) = card(ed, call, cmd, cwd, None, why) {
                     answer(ed, c, Err(e));
                 }
@@ -1369,7 +1382,7 @@ fn read_only(
             let (reads, why) = match reads {
                 Ok(r) if r.is_empty() => return guarded(ed, call, Job::Command(cmd, cwd), false),
                 Ok(r) => (r, Why::ReadsOutside(classes)),
-                Err(_) => (Vec::new(), Why::CdUnknown),
+                Err(e) => (Vec::new(), Why::CdUnknown(e)),
             };
             let c = call.clone();
             if let Err(e) = ask_with(ed, cmd, cwd, call, Default::default(), (reads, why), None) {
@@ -1418,6 +1431,10 @@ fn ask_with(
     if !folders.is_empty() {
         question.push_str(&format!("\n  in {}", folders.join(", ")));
         decided.end += 1;
+    }
+    // Why it asks, where nothing below says it (#164: `cd ~/…/*/x && grep …` asked in silence)
+    if let Some(said) = why.said() {
+        question.push_str(&format!("\n\n{said}"));
     }
     // Said yes to before in this chat: when, and what changed since in what it runs — decided, the diff in
     // its colours (`sinceyes.rs`)
@@ -1622,7 +1639,7 @@ fn moved(cmd: &str, cwd: &Path, unseen: &[PathBuf]) -> Option<Vec<PathBuf>> {
     for part in crate::readonly::parse(cmd)? {
         let w = match part {
             Part::Cd(d) => {
-                here = std::fs::canonicalize(here.join(d)).ok()?;
+                here = crate::readonly::cd_into(&here, &d, None).ok()?;
                 continue;
             }
             Part::Cmd(w) => w,
@@ -2920,7 +2937,8 @@ mod tests {
             "git commit -m wip",
             "rm -rf target",
             "cargo test\nrm -rf x",
-            "cargo test ~/x",
+            // (`~/x` is home's, as any path — #164; someone else's can't be told)
+            "cargo test ~root/x",
             "",
         ] {
             assert!(!ok(c), "{c}");

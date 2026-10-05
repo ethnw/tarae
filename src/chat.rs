@@ -864,13 +864,14 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             crate::follow::on_tool(ed, &id, &name, &input, &look);
         }
         // Kept from the first question on — a tarae closed mid-turn still has it
-        StreamEv::Conversation { id, model } => {
+        StreamEv::Conversation { id, model, version } => {
             let new = c.conversation.as_deref() != Some(id.as_str());
             // (a process that didn't resume one began it: it has cost nothing before)
             match c.resume.is_none() {
                 true => ed.session.usage.fresh(&id),
                 false => ed.session.usage.resumed(&id),
             }
+            ed.session.usage.cli = version;
             c.conversation = Some(id);
             c.model = model;
             if new {

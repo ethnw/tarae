@@ -1,4 +1,4 @@
-//! `cargo xtask linux [clippy|test]` — tarae's checks on Linux (CI runs there too: `-D dead-code` on code only
+//! `cargo xtask linux [clippy|test [--repeat N] [cargo test's arguments]]` — tarae's checks on Linux (CI runs there too: `-D dead-code` on code only
 //! macOS calls, a root container's `#` prompt …), in Docker on the pinned toolchain (`rust:<major.minor>`, and
 //! `rust-toolchain.toml`'s exact version in it). Whichever Docker the CLI reaches: `DOCKER_CONTEXT` or `DOCKER_HOST`, else the
 //! current context (here the colima VM: `colima start -p tarae-test`, `DOCKER_CONTEXT=colima-tarae-test`).
@@ -15,20 +15,42 @@ use std::process::Command;
 
 use crate::{Result, root};
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum What {
     Clippy,
-    Test,
+    /// `cargo test` with these arguments (a filter, `--bin tarae`, `-- --test-threads=1` …), run `repeat` times
+    /// in the one container — stopping at the first that fails (a flaky test looked for).
+    Test {
+        args: Vec<String>,
+        repeat: u32,
+    },
     Both,
 }
 
-pub fn run(args: &[String]) -> Result<()> {
-    let what = match args.first().map(String::as_str) {
+const USAGE: &str = "usage: cargo xtask linux [clippy | test [--repeat N] [cargo test's arguments]]";
+
+/// What `cargo xtask linux …`'s arguments ask for.
+fn what(args: &[String]) -> Result<What> {
+    Ok(match args.split_first() {
         None => What::Both,
-        Some("clippy") => What::Clippy,
-        Some("test") => What::Test,
-        Some(a) => return Err(format!("usage: cargo xtask linux [clippy|test] — not {a}")),
-    };
+        Some((c, [])) if c == "clippy" => What::Clippy,
+        Some((t, rest)) if t == "test" => match rest {
+            [r, n, rest @ ..] if r == "--repeat" => What::Test {
+                args: rest.to_vec(),
+                repeat: n
+                    .parse()
+                    .ok()
+                    .filter(|n| *n > 0)
+                    .ok_or(format!("--repeat {n}: a count — {USAGE}"))?,
+            },
+            rest => What::Test { args: rest.to_vec(), repeat: 1 },
+        },
+        Some((a, _)) => return Err(format!("{USAGE} — not {a}")),
+    })
+}
+
+pub fn run(args: &[String]) -> Result<()> {
+    let what = what(args)?;
     let root = root();
     let toolchain = root.join("rust-toolchain.toml");
     let pin =
@@ -39,7 +61,7 @@ pub fn run(args: &[String]) -> Result<()> {
     }
     eprintln!("Linux checks on {} (Rust {pin}) …", image(&pin));
     let st = Command::new("docker")
-        .args(docker_args(&root, common_git_dir(&root).as_deref(), &pin, what))
+        .args(docker_args(&root, common_git_dir(&root).as_deref(), &pin, &what))
         .status()
         .map_err(|e| format!("docker: {e}"))?;
     if !st.success() {
@@ -96,7 +118,7 @@ fn common_git_dir(root: &Path) -> Option<PathBuf> {
 
 /// `docker run …` for the checks: the tree read-only at /src (a worktree's git folder read-only too, where
 /// its `.git` file says), the caches in volumes, the pinned image.
-fn docker_args(root: &Path, git: Option<&Path>, pin: &str, what: What) -> Vec<String> {
+fn docker_args(root: &Path, git: Option<&Path>, pin: &str, what: &What) -> Vec<String> {
     let mut a: Vec<String> = ["run", "--rm"].map(String::from).into();
     let mount = |a: &mut Vec<String>, v: String| a.extend(["-v".to_string(), v]);
     mount(&mut a, format!("{}:/src:ro", root.display()));
@@ -123,7 +145,7 @@ fn image(pin: &str) -> String {
 }
 
 /// What runs in the container: the clone (with what isn't committed yet), then the checks.
-fn script(what: What) -> String {
+fn script(what: &What) -> String {
     let mut s = String::from(
         "git config --global --add safe.directory '*'\n\
          git clone -q /src /work/tarae && cd /work/tarae\n\
@@ -131,14 +153,34 @@ fn script(what: What) -> String {
          git -C /src ls-files --others --exclude-standard -z | (cd /src && tar --null -T - -cf -) | tar -xf -\n\
          echo \"toolchain: $(rustc --version)\"\n",
     );
-    if what != What::Test {
+    if !matches!(what, What::Test { .. }) {
         s.push_str("cargo clippy --locked --all-targets -- -D warnings\n");
         s.push_str("cargo clippy --locked --all-targets --features bundled-grammars -- -D warnings\n");
     }
-    if what != What::Clippy {
-        s.push_str("cargo test --locked\n");
+    match what {
+        What::Clippy => {}
+        What::Both => s.push_str("cargo test --locked\n"),
+        What::Test { args, repeat } => {
+            let test = std::iter::once("cargo test --locked".to_string())
+                .chain(args.iter().map(|a| quoted(a)))
+                .collect::<Vec<_>>()
+                .join(" ");
+            match repeat {
+                1 => s.push_str(&format!("{test}\n")),
+                n => s.push_str(&format!(
+                    "n=0\nwhile [ $n -lt {n} ]; do n=$((n+1)); echo \"run $n of {n}\"; \
+                     {test} || {{ echo \"failed on run $n of {n}\"; exit 1; }}; done\n\
+                     echo \"all {n} runs passed\"\n"
+                )),
+            }
+        }
     }
     s
+}
+
+/// `a` as one word for sh, whatever is in it.
+fn quoted(a: &str) -> String {
+    format!("'{}'", a.replace('\'', r"'\''"))
 }
 
 #[cfg(test)]
@@ -158,7 +200,7 @@ mod tests {
     /// brought over), on the pinned image, with caches per version — and `clippy`/`test` run only theirs.
     #[test]
     fn the_tree_is_read_only_and_the_checks_run_in_a_clone() {
-        let a = docker_args(Path::new("/r/tarae"), None, "1.99.0", What::Both);
+        let a = docker_args(Path::new("/r/tarae"), None, "1.99.0", &What::Both);
         assert!(a.windows(2).any(|w| w == ["-v", "/r/tarae:/src:ro"]), "{a:?}");
         assert!(
             !a.iter().any(|v| v.starts_with("/r/tarae:") && !v.ends_with(":ro")),
@@ -174,17 +216,35 @@ mod tests {
         assert!(
             s.contains("--features bundled-grammars -- -D warnings") && s.contains("cargo test --locked")
         );
-        let clippy = script(What::Clippy);
+        let clippy = script(&What::Clippy);
         assert!(clippy.contains("cargo clippy") && !clippy.contains("cargo test"));
-        let test = script(What::Test);
+        let test = script(&What::Test { args: Vec::new(), repeat: 1 });
         assert!(test.contains("cargo test") && !test.contains("cargo clippy"));
+    }
+
+    /// `test`'s arguments go to `cargo test` as words, whatever is in them; `--repeat N` runs it N times in
+    /// the one container and stops at the first that fails.
+    #[test]
+    fn test_takes_cargo_tests_arguments_and_a_repeat() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let once = script(&what(&args(&["test", "recovery", "--", "it's"])).unwrap());
+        assert!(once.contains("cargo test --locked 'recovery' '--' 'it'\\''s'\n"), "{once}");
+        assert!(!once.contains("while"), "{once}");
+        let looped = script(&what(&args(&["test", "--repeat", "20", "recovery"])).unwrap());
+        assert!(
+            looped.contains("while [ $n -lt 20 ]") && looped.contains("cargo test --locked 'recovery' ||")
+        );
+        assert!(looped.contains("exit 1") && looped.contains("all 20 runs passed"), "{looped}");
+        assert_eq!(what(&args(&["test"])), Ok(What::Test { args: Vec::new(), repeat: 1 }));
+        assert!(what(&args(&["test", "--repeat", "0"])).unwrap_err().contains("--repeat 0: a count"));
+        assert!(what(&args(&["clippy", "x"])).unwrap_err().starts_with("usage:"));
     }
 
     /// A worktree (a tarae session): the main checkout's git folder goes in read-only, at the path its `.git`
     /// file names — and only then. Found from a real worktree of a temp repository.
     #[test]
     fn a_worktrees_git_folder_goes_in_read_only() {
-        let a = docker_args(Path::new("/w/s"), Some(Path::new("/r/tarae/.git")), "1.99.0", What::Clippy);
+        let a = docker_args(Path::new("/w/s"), Some(Path::new("/r/tarae/.git")), "1.99.0", &What::Clippy);
         assert!(a.windows(2).any(|w| w == ["-v", "/r/tarae/.git:/r/tarae/.git:ro"]), "{a:?}");
         assert!(!a.iter().any(|v| v.contains(':') && v.starts_with('/') && !v.ends_with(":ro")), "{a:?}");
         let dir = std::env::temp_dir().join(format!("tarae-xtask-wt-{}", std::process::id()));

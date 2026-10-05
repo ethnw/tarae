@@ -9174,8 +9174,8 @@ fn draw_chat(
     }))
 }
 
-/// The chat's usage row: `● warm until 14:32  ctx 4% of 200k  turn $0.0011  read 8.2k write 75 in 10 out 30`
-/// — the widest form that fits in `w`, folding the split first, then the context, then the cost (the cache
+/// The chat's usage row: `● warm until 14:32  ctx 4% of 200k  turn ≈ API $0.0011  read 8.2k write 75 in 10
+/// out 30` — the widest form that fits in `w`, folding the split first, then the context, then the cost (the cache
 /// stays; said by the clock, so it's true however long nothing redraws). None: nothing reported in this
 /// conversation yet. Styles: accent, dim, faint, warning.
 fn usage_spans(
@@ -9216,9 +9216,10 @@ fn usage_spans(
             None => Vec::new(),
         }
     };
+    // (the API price by claude's own table, not what a subscription pays — #161: said so, `≈`)
     let cost = |long: bool| -> Vec<Span> {
         let Some(t) = turn else { return Vec::new() };
-        let label = if long { "turn " } else { "" };
+        let label = if long { "turn ≈ API " } else { "≈" };
         match t.cost {
             Some(c) => vec![sp(label.into(), faint), sp(dollars(c), dim)],
             None if long => vec![sp("cost not reported".into(), faint)],

@@ -342,27 +342,37 @@ impl Editor {
 
     /// What `path` is on disk, read elsewhere (`body` at `stamp` — the end of a turn whose edits went in
     /// unseen, `checkpoint::gather`): an open buffer without unsaved edits takes it now, as the watch would
-    /// a moment later. One with unsaved edits is left to the watch (it says the file changed).
+    /// a moment later. One with unsaved edits is left to the watch (it says the file changed). Its servers
+    /// hear the change and a save, as from the watch (#160: the watch then skips it — a rebase's resolution
+    /// left rust-analyzer's check on the conflict markers).
     pub fn disk_take(&mut self, path: &Path, body: &Rope, stamp: Option<Stamp>) {
         let Some(doc) = self.docs.iter_mut().find(|d| d.path.as_deref() == Some(path)) else { return };
         if doc.is_modified() || doc.loading || stamp.is_none() || doc.disk == stamp {
             return;
         }
-        reload_text(doc, body);
+        let changed = reload_text(doc, body);
         doc.disk = stamp;
         doc.disk_conflict = false;
         doc.agent_writes = None;
+        let id = doc.id;
+        if changed {
+            self.lsp_saved_outside(id);
+        }
     }
 
-    /// `:reload` — take the disk content (my changes are discarded but recoverable with undo).
+    /// `:reload` — take the disk content (my changes are discarded but recoverable with undo); the buffer is
+    /// the file again, a save to its servers.
     pub fn reload_current(&mut self) -> Result<(), String> {
         let doc = self.doc_mut();
         let path = doc.path.clone().ok_or("no file name")?;
         let body = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        reload_text(doc, &Rope::from_str(&body));
+        let changed = reload_text(doc, &Rope::from_str(&body));
         doc.disk = stamp(&path);
         doc.disk_conflict = false;
-        let name = doc.display_name_short();
+        let (id, name) = (doc.id, doc.display_name_short());
+        if changed {
+            self.lsp_saved_outside(id);
+        }
         self.set_status(format!("{name} reloaded from disk"));
         Ok(())
     }
@@ -686,6 +696,49 @@ mod tests {
         assert_eq!(s.saves_reach(n + 2, true), n + 2, ":w is sent");
         s.pump(300);
         assert_eq!(s.saves(), n + 2, "and the held one went with it");
+        std::fs::remove_dir_all(&s.dir).ok();
+    }
+
+    /// #160: a file the buffer takes from disk elsewhere than the watch — the end of a turn whose edits went
+    /// in unseen (a rebase's conflicts resolved), `:reload` — is a change and a save to its servers, as the
+    /// watch's reload is: what they say follows the file (rust-analyzer checks on a save), not the conflict
+    /// markers it had.
+    #[test]
+    fn a_file_taken_from_disk_is_a_change_and_a_save_to_its_servers() {
+        let mut s = Saving::new("take");
+        s.outside("<<<<<<< HEAD\nfn a() {}\n=======\nfn b() {}\n>>>>>>> theirs\n");
+        assert_eq!(s.saves_reach(1, true), 1, "the markers, saved");
+        let sent = |s: &Saving| std::fs::read_to_string(s.dir.join("sent.log")).unwrap_or_default();
+        // (the last change sent, and a save after it)
+        let last_change = |s: &Saving| {
+            let all = sent(s);
+            let at = all.rfind("textDocument/didChange").unwrap_or(0);
+            (all[at..].to_string(), all[at..].contains("textDocument/didSave"))
+        };
+        // The resolution, on disk unseen: the turn's end takes it (the watch then has nothing to see) —
+        // later than `lsp_editor::RESAVE_WITHIN`: a change right after a save sends that save again
+        std::thread::sleep(Duration::from_millis(150));
+        let resolved = "fn a() {}\nfn b() {}\n";
+        std::fs::write(&s.file, resolved).unwrap();
+        let file = s.file.clone();
+        s.ed.disk_take(&file, &Rope::from_str(resolved), stamp(&file));
+        assert_eq!(s.ed.doc().text.to_string(), resolved);
+        assert_eq!(s.saves_reach(2, true), 2, "a save, once quiet");
+        let (change, saved) = last_change(&s);
+        assert!(change.contains(r"fn a() {}\nfn b() {}") && !change.contains("<<<<"), "{change}");
+        assert!(saved, "the save after the change: {change}");
+        // `:reload` of what changed unseen (later than `RESAVE_WITHIN` again)
+        std::thread::sleep(Duration::from_millis(150));
+        std::fs::write(&s.file, "fn c() {}\n").unwrap();
+        crate::typed::execute(&mut s.ed, "reload").unwrap();
+        assert_eq!(s.saves_reach(3, true), 3, ":reload is a save too");
+        // (the changed range only: `a` → `c`, the rest the same)
+        let (change, saved) = last_change(&s);
+        assert!(change.contains(r#""text":"c""#) && !change.contains("fn b") && saved, "{change}");
+        // Taking what the buffer already has: no change, no save
+        s.ed.disk_take(&file, &Rope::from_str("fn c() {}\n"), Some((std::time::SystemTime::UNIX_EPOCH, 1)));
+        s.pump(300);
+        assert_eq!(s.saves(), 3, "nothing changed");
         std::fs::remove_dir_all(&s.dir).ok();
     }
 

@@ -775,7 +775,8 @@ impl UsageState {
         })
     }
 
-    /// One line: `cache warm 54m (1h) · context 4% of 200k · last turn $0.0011 … · total $0.020 in 3 turns`.
+    /// One line: `cache warm 54m (1h) · context 4% of 200k · last turn $0.0011 … · total $0.020 in 3 turns ·
+    /// ≈ API price`.
     pub fn text(&self) -> String {
         use crate::usage::{count, dollars, tokens};
         let cache = match (self.seconds_left, self.ttl) {
@@ -799,7 +800,8 @@ impl UsageState {
             )
         });
         let turns = crate::usage::turns(self.totals.turns);
-        format!("{cache} · {context}{last} · total {} in {turns}", self.totals.cost_said())
+        // (#161: claude's own table's price, not what a subscription pays)
+        format!("{cache} · {context}{last} · total {} in {turns} · ≈ API price", self.totals.cost_said())
     }
 }
 

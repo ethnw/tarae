@@ -892,7 +892,7 @@ fn a_turns_usage_shows_under_the_chat_and_in_usage() {
     t.send("hello\r");
     // (the chat is 40 wide here: the footer's short form; warm until five minutes on, by the clock)
     t.wait_for("the usage line", |s| {
-        s.rows.iter().any(|r| r.contains("● warm until ") && r.contains("ctx 2%  $0.041"))
+        s.rows.iter().any(|r| r.contains("● warm until ") && r.contains("ctx 2%  ≈$0.041"))
     });
     let s = t.wait_state("the session's usage", |s| s["sessions"][0]["usage"]["cache"] == "warm");
     let u = &s["sessions"][0]["usage"];
@@ -901,11 +901,14 @@ fn a_turns_usage_shows_under_the_chat_and_in_usage() {
     t.send("\x1b");
     t.wait_state("the code has the keys", |s| s["keys"]["region"] == "code");
     t.command("usage");
+    // (the costs said once to be the API price — #161; today's total at the end, below the screen)
     t.wait_for("the usage view", |s| {
         s.contains("# Claude usage")
+            && s.contains("Costs are the API price")
             && s.contains("| total | 1 turn")
-            && s.contains("Every session: $0.041 in 1 turn")
     });
+    t.send("G");
+    t.wait_for("today's total", |s| s.contains("Every session: $0.041 in 1 turn"));
 }
 
 /// A state folder past `sun_path`'s 104 bytes: the socket is bound from its folder, and `tarae state`

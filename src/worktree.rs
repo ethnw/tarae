@@ -1086,7 +1086,7 @@ impl Shown {
             Cache::NotReported => "cache not reported".into(),
         };
         let t = u.totals();
-        let total = if t.turns == 0 { String::new() } else { t.cost_said() };
+        let total = if t.turns == 0 { String::new() } else { t.api_said() };
         Some((cache, total))
     }
 }
@@ -3397,9 +3397,11 @@ mod tests {
         u.spent(Spent { conversation: "c".into(), total_cost: Some(0.02), at_ms: 2_000, ..Spent::default() });
         // (warm until five minutes after the request went out, whenever it's asked)
         let at = format!("● warm until {}", crate::usage::until(1_000 + Ttl::Min5.ms()));
-        assert_eq!(Shown::claude_of(&u, 61_000), Some((at.clone(), "$0.020".into())));
-        assert_eq!(Shown::claude_of(&u, 290_000), Some((at, "$0.020".into())));
-        assert_eq!(Shown::claude_of(&u, 1_000 + Ttl::Min5.ms()), Some(("◦ cold".into(), "$0.020".into())));
+        // (the cost said as what it is: the API price — #161)
+        let cost = "≈ API $0.020".to_string();
+        assert_eq!(Shown::claude_of(&u, 61_000), Some((at.clone(), cost.clone())));
+        assert_eq!(Shown::claude_of(&u, 290_000), Some((at, cost.clone())));
+        assert_eq!(Shown::claude_of(&u, 1_000 + Ttl::Min5.ms()), Some(("◦ cold".into(), cost)));
     }
 
     /// #111: a build-dir set per checkout (`{workspace-path-hash}`) — found where cargo looks: its variable,

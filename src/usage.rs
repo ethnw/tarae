@@ -296,6 +296,24 @@ impl Totals {
             (_, n) => format!("{} + {n} not reported", dollars(self.cost)),
         }
     }
+
+    /// `cost_said` where nothing around it says what the number is (#161): `≈ API $1.23`.
+    pub fn api_said(&self) -> String {
+        match self.turns == self.unpriced {
+            true => self.cost_said(),
+            false => format!("≈ API {}", self.cost_said()),
+        }
+    }
+}
+
+/// What the costs are, once where they're shown at length (#161): claude's `total_cost_usd` is the API
+/// price by its own table — on a subscription, not what's paid.
+pub fn price_note(cli: Option<&str>) -> String {
+    let table = match cli {
+        Some(v) => format!("Claude Code {v}'s own table"),
+        None => "Claude Code's own table".into(),
+    };
+    format!("Costs are the API price, per {table} — on a subscription, not what you pay.")
 }
 
 /// A session's Claude usage.
@@ -313,6 +331,8 @@ pub struct Usage {
     requesting: Option<u64>,
     /// When the TTL watch asleep wakes (`watch`).
     pub watch: Option<u64>,
+    /// The Claude Code version its chat's process runs (`system init`) — whose price table the costs are.
+    pub cli: Option<String>,
 }
 
 impl Usage {
@@ -625,7 +645,8 @@ pub fn report(name: &str, u: &Usage, all: &[(&str, &Usage)], now_ms: u64) -> Str
         Some((n, None)) => format!("context {} (window not reported yet)", tokens(n)),
         None => "context not reported".into(),
     };
-    out += &format!("As of {} · {cache} · {context}\n\n## Turns\n\n", clock(now_ms));
+    out += &format!("As of {} · {cache} · {context}\n\n", clock(now_ms));
+    out += &format!("{}\n\n## Turns\n\n", price_note(u.cli.as_deref()));
     if u.turns.is_empty() {
         out += "No turn has ended yet.\n";
     } else {
@@ -650,8 +671,10 @@ pub fn report(name: &str, u: &Usage, all: &[(&str, &Usage)], now_ms: u64) -> Str
         row.extend(cells(&totals.counts));
         row.push(totals.cost_said());
         rows.push(row);
-        out +=
-            &table(&["time", "model", "input", "cache write", "cache read", "output", "hit", "cost"], &rows);
+        out += &table(
+            &["time", "model", "input", "cache write", "cache read", "output", "hit", "API price"],
+            &rows,
+        );
     }
     if let Some(c) = &u.conv {
         out += "\n## Every request starts with\n\n";

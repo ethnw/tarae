@@ -297,9 +297,9 @@ pub enum StreamEv {
     ToolResult { id: String, text: String, error: bool },
     /// claude asks the host something (`mcp_message` for tarae's own tools) — needs a `control_response`.
     Control { request_id: String, request: serde_json::Value },
-    /// The process's conversation (claude's `session_id`) and the model it runs (`system init`) — the chat
-    /// resumes it later (`--resume`).
-    Conversation { id: String, model: String },
+    /// The process's conversation (claude's `session_id`), the model it runs and Claude Code's version
+    /// (`system init`, None: not sent) — the chat resumes it later (`--resume`).
+    Conversation { id: String, model: String, version: Option<String> },
     /// The model that wrote an answer (an assistant message's `message.model`, or a stream's
     /// `message_start`) — sent when it changes.
     Answered(String),
@@ -596,6 +596,7 @@ fn parse_line(ev: &serde_json::Value) -> Option<StreamEv> {
         "system" if ev["subtype"] == "init" => Some(StreamEv::Conversation {
             id: ev["session_id"].as_str()?.to_string(),
             model: ev["model"].as_str().unwrap_or_default().to_string(),
+            version: ev["claude_code_version"].as_str().filter(|v| !v.is_empty()).map(String::from),
         }),
         "control_response" if ev["response"]["request_id"] == "tarae-init" => {
             Some(StreamEv::Models(ModelInfo::list(&ev["response"]["response"]["models"])))

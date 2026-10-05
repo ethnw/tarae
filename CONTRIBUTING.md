@@ -46,6 +46,10 @@ Checks of your own go in `.tarae.local.toml` at the root — its `[preflight] st
 reads as a pass with a note, and with `full = true` it waits for `:preflight-full`). The repository's `.gitignore` lists it: tarae reads that file only while git
 ignores it ([docs](docs/configuration.md#where-it-lives)).
 
+A test that fails only now and then on Linux: `cargo xtask linux test --repeat 20 --bin tarae recovery::` runs
+`cargo test` with those arguments twenty times in one container and stops at the first run that fails. Flakes
+that need the rest of the suite beside them show up with `--bin tarae` alone.
+
 `cargo perf` runs the performance budgets (a key → frame on a 200k-line file must stay under 16 ms) and
 real-use runs of the built editor on a pseudo-terminal (startup, a key in a big file, scrolling, idle CPU, memory
 with this repository open), in the `perf` profile — release, with line tables. It runs them three times, keeps

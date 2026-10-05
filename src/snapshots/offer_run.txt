@@ -12,20 +12,20 @@
 09   7     for word in text.split_whitespace() {
 10   8     │   *counts.entry(word).or_insert(0) += 1;
 11   9     }
-12  10     counts
-13  11 }
-14  12
-15  13 fn main() {                             ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-16  14     let text = "the quick brown fox jump ▎ Claude wants to run
-17  15     let counts = word_counts(text);        git commit -m 'Count words: the words in the text,
-18  16     println!("{} distinct words", counts   counted
-19  17 }
-20                                                Splits on whitespace, so "a  b" is two words, and
-21                                                keeps the counts in a map from word to how many
-22                                                times it came, printed after the text.
+12  10     counts                              ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+13  11 }                                        ▎ Claude wants to run
+14  12                                            git commit -m 'Count words: the words in the text,
+15  13 fn main() {                                counted
+16  14     let text = "the quick brown fox jump
+17  15     let counts = word_counts(text);        Splits on whitespace, so "a  b" is two words, and
+18  16     println!("{} distinct words", counts   keeps the counts in a map from word to how many
+19  17 }                                          times it came, printed after the text.
+20
+21                                                The tests cover the empty text and repeated
+22                                                words.'
 23
-24                                                The tests cover the empty text and repeated
-25                                                words.'
+24                                                It runs git commit — not a check, a read, or a
+25                                                pattern allowed in this chat.
 26
 27                                                y Run   n No
 28                                             ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
@@ -44,9 +44,9 @@
 10
 11
 12
-13
-14
-15
+13                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+14                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+15                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 16                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 17                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 18                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
@@ -75,10 +75,10 @@
 10   f
 11   f
 12  ff
-13  ff
+13  ff                                          a BBBBBB BBBBB BB BBB
 14  ff
 15  ff
-16  ff                gggg ggggg ggggg ggg gggg a BBBBBB BBBBB BB BBB
+16  ff                gggg ggggg ggggg ggg gggg
 17  ff
 18  ff              ggg gggggggg gggggg
 19  ff
@@ -86,8 +86,8 @@
 21
 22
 23
-24
-25
+24                                                dd dddd ddd dddddd d ddd d dddddd d ddddd dd d
+25                                                ddddddd ddddddd dd dddd ddddd
 26
 27                                                A       A dd
 28

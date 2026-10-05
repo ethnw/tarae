@@ -355,6 +355,49 @@ fn the_main_thread_never_waits_on_a_slow_disk() {
     std::fs::remove_dir_all(dir).ok();
 }
 
+/// A child forked while a tarae's lock was open holds it too until it execs (a fork copies every
+/// descriptor; close-on-exec closes them only at the exec). The tarae killed meanwhile, its copies are offered
+/// once that child lets go — `killed` waits for it, as a real death's next start would find it. (The flake
+/// this pins: on a loaded Linux, another test's child not yet exec'd hid a gone tarae's folder from the scan
+/// — no card, or the older copy left behind.) A harmless child: `true`, held back 300 ms before its exec.
+#[test]
+fn a_child_forked_while_the_lock_was_open_doesnt_hide_the_copies() {
+    use std::io::Read as _;
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::process::CommandExt as _;
+    let dir = place("forked");
+    let file = dir.join("project/a.txt");
+    std::fs::write(&file, "one\n").unwrap();
+    let mut ed = editor(&dir);
+    ed.open(&file).unwrap();
+    feed(&mut ed, "cTWO<esc>");
+    until("the copy is written", || copies_in(&dir).len() == 1);
+    // The child says it's forked — holding every descriptor, the lock's too — then waits before its exec
+    let (mut forked, said) = std::io::pipe().unwrap();
+    let fd = said.as_raw_fd();
+    let child = std::thread::spawn(move || {
+        let mut cmd = std::process::Command::new("true");
+        // SAFETY: only async-signal-safe calls (write, nanosleep) between the fork and the exec
+        unsafe {
+            cmd.pre_exec(move || {
+                libc::write(fd, b"f".as_ptr().cast(), 1);
+                let t = libc::timespec { tv_sec: 0, tv_nsec: 300_000_000 };
+                libc::nanosleep(&t, std::ptr::null_mut());
+                Ok(())
+            });
+        }
+        let status = cmd.status();
+        drop(said);
+        status
+    });
+    forked.read_exact(&mut [0]).unwrap();
+    recovery(&mut ed).killed();
+    let ed = started(&dir);
+    assert_eq!(cards(&ed).len(), 1, "the copy hidden by the child's hold on the lock");
+    assert!(child.join().unwrap().unwrap().success());
+    std::fs::remove_dir_all(dir).ok();
+}
+
 /// Two gone taraes' copies of one file: the newer is offered, the older goes.
 #[test]
 fn the_newest_copy_of_a_file_is_the_one_offered() {

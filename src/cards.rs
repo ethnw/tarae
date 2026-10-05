@@ -86,8 +86,9 @@ pub enum Why {
     /// A command none of the rules lets through — the program of its first part that isn't a check, an
     /// allowed pattern or a read.
     NotACheck(String),
-    /// A line the shell reader doesn't read (`$`, a redirect to a file, a newline …).
-    Unreadable,
+    /// A line the shell reader doesn't read — what in it (`readonly::unreadable`: `$`, a redirect to a file,
+    /// a newline …).
+    Unreadable(&'static str),
     /// It runs a script, or a file of code through an interpreter (#117).
     Script,
     /// A script the chat allowed isn't as it was (#93).
@@ -98,8 +99,8 @@ pub enum Why {
     Glob,
     /// It reads outside the project, where nothing allowed it (its places' classes).
     ReadsOutside(Vec<Class>),
-    /// A `cd` into what isn't a folder: where the rest reads can't be told.
-    CdUnknown,
+    /// Where it reads can't be told — a `cd` into what isn't one folder, … (`readonly::outside`'s Err).
+    CdUnknown(String),
     /// A check or git that would run outside the project.
     RunsOutside,
     /// Claude asked for one unix socket past the sandbox (#119).
@@ -120,13 +121,13 @@ impl Why {
     fn word(&self) -> String {
         match self {
             Why::NotACheck(p) => format!("not-a-check:{p}"),
-            Why::Unreadable => "unreadable".into(),
+            Why::Unreadable(_) => "unreadable".into(),
             Why::Script => "script".into(),
             Why::ScriptChanged => "script-changed".into(),
             Why::EnvName => "env-name".into(),
             Why::Glob => "glob".into(),
             Why::ReadsOutside(_) => "reads-outside".into(),
-            Why::CdUnknown => "cd-unknown".into(),
+            Why::CdUnknown(_) => "cd-unknown".into(),
             Why::RunsOutside => "runs-outside".into(),
             Why::Socket => "socket".into(),
             Why::Outside => "outside".into(),
@@ -135,6 +136,32 @@ impl Why {
             Why::Screen => "screen".into(),
             Why::Blocked => "blocked".into(),
         }
+    }
+
+    /// Why a run card asks, in one line (#164) — None where the card says it already in its own words (what
+    /// it reads outside, the sandbox it goes past, no sandbox here) or isn't a run's.
+    pub fn said(&self) -> Option<String> {
+        Some(match self {
+            Why::NotACheck(p) => {
+                format!("It runs {p} — not a check, a read, or a pattern allowed in this chat.")
+            }
+            Why::Unreadable(what) => format!("What it does can't be told from its words: {what}."),
+            Why::Script => "It runs a script — what runs is in the file.".into(),
+            Why::ScriptChanged => "A script it runs isn't as it was when this chat allowed it.".into(),
+            Why::EnvName => "It sets names in front of the command.".into(),
+            Why::Glob => "A pattern in a command that isn't a read — what it runs on can't be told.".into(),
+            Why::CdUnknown(why) => format!("Where it reads can't be told — {why}."),
+            Why::RunsOutside => {
+                "It runs a check or git outside the project — that folder's code runs.".into()
+            }
+            Why::ReadsOutside(_)
+            | Why::Socket
+            | Why::Outside
+            | Why::NoSandbox
+            | Why::Read
+            | Why::Screen
+            | Why::Blocked => return None,
+        })
     }
 }
 

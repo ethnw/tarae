@@ -4388,12 +4388,13 @@ mod tests {
     /// A turn of the recorded stream (`usage_stream.jsonl`, its first) answered by a fake claude: the line
     /// under the chat says the cache warm for the hour its 1h writes got, the context against the window
     /// its result named, the turn's cost and its counts; `:usage` lists the turn, the total, what each
-    /// request starts with and today's total; the state carries the same.
+    /// request starts with and today's total; the state carries the same. The cost is said once in each
+    /// place to be the API price by Claude Code's own table (#161).
     #[test]
     fn chat_usage_shows_under_the_chat_and_in_its_view() {
         let conv = "cda055cc-67c1-4da7-9120-68435b027d4f";
-        let mut events =
-            vec![serde_json::json!({"type": "system", "subtype": "init", "session_id": conv, "model": "m"})];
+        let mut events = vec![serde_json::json!({"type": "system", "subtype": "init", "session_id": conv,
+            "model": "m", "claude_code_version": "2.1.288"})];
         for line in include_str!("usage_stream.jsonl").lines() {
             events.push(serde_json::from_str(line).unwrap());
             if line.contains("total_cost_usd") {
@@ -4418,8 +4419,9 @@ mod tests {
         let at = crate::usage::until(ed.session.usage.cold_at().unwrap());
         let wide = rows(&mut ed, 240);
         let footer = wide.iter().find(|r| r.contains("● warm")).unwrap_or_else(|| panic!("{wide:#?}"));
-        let long =
-            format!("● warm until {at}  ctx 4% of 200k  turn $0.018  read 7.9k write 8.1k in 18 out 185");
+        let long = format!(
+            "● warm until {at}  ctx 4% of 200k  turn ≈ API $0.018  read 7.9k write 8.1k in 18 out 185"
+        );
         assert!(footer.contains(&long), "{footer:?}");
         assert!(
             wide.iter().position(|r| r.contains("● warm")) > wide.iter().position(|r| r.contains("enter"))
@@ -4427,15 +4429,17 @@ mod tests {
         // Narrower, the words fold first
         let narrow = rows(&mut ed, 160);
         let footer = narrow.iter().find(|r| r.contains("● warm")).unwrap_or_else(|| panic!("{narrow:#?}"));
-        assert!(footer.contains(&format!("● warm until {at}  ctx 4%  $0.018")), "{footer:?}");
+        assert!(footer.contains(&format!("● warm until {at}  ctx 4%  ≈$0.018")), "{footer:?}");
         assert!(!footer.contains("of 200k") && !footer.contains("turn "), "{footer:?}");
         feed(&mut ed, "<esc>:usage<ret>");
         assert_eq!(ed.doc().title.as_deref(), Some("usage"));
         let text = ed.doc().text.to_string();
         for part in [
-            "| time  | model     | input | cache write | cache read | output | hit |   cost |",
-            "| haiku 4.5 |    18 |        8.1k |       7.9k |    185 | 49% | $0.018 |",
-            "| total | 1 turn    |    18 |        8.1k |       7.9k |    185 | 49% | $0.018 |",
+            "\n\nCosts are the API price, per Claude Code 2.1.288's own table — on a subscription, not what you \
+             pay.\n\n## Turns",
+            "| time  | model     | input | cache write | cache read | output | hit | API price |",
+            "| haiku 4.5 |    18 |        8.1k |       7.9k |    185 | 49% |    $0.018 |",
+            "| total | 1 turn    |    18 |        8.1k |       7.9k |    185 | 49% |    $0.018 |",
             "## Every request starts with\n\n7.9k tokens (cache write 7.9k · cache read 0) — what this",
             "Every session: $0.018 in 1 turn",
         ] {
@@ -4448,6 +4452,10 @@ mod tests {
         assert_eq!((u.cache, u.ttl, u.context, u.window), ("warm", Some("1h"), Some(8133), Some(200_000)));
         assert!(u.seconds_left.is_some_and(|s| s > 3590), "{u:?}");
         assert!(s.text().contains("usage s0: cache warm 60m (1h) · context 4% of 200k"), "{}", s.text());
+        assert!(s.text().contains("total $0.018 in 1 turn · ≈ API price"), "{}", s.text());
+        // The session list: its total, said as what it is
+        let shown = crate::worktree::Shown::claude_of(&ed.session.usage, crate::usage::now_ms());
+        assert_eq!(shown.map(|s| s.1).as_deref(), Some("≈ API $0.018"));
     }
 
     fn follow_project(name: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
@@ -6074,6 +6082,37 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// #164: every run card says in one line why it asks — a line the shell reader doesn't read says what
+    /// in it; a `cd` whose folder can't be told says which; a program that isn't a check says its name.
+    #[test]
+    fn a_run_card_says_why_it_asks() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("tarae-run-why-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        // (no `'` in them: the fake claude's script holds them in single quotes)
+        for (command, why) in [
+            (
+                "sh -c \"d=$(ls -d src/* | head -1); grep -rn fn $d\"",
+                "What it does can't be told from its words: `$(…)` makes its words as it runs.",
+            ),
+            ("cd nope; cat x", "Where it reads can't be told — cd nope: no such folder."),
+            ("make -s", "It runs make — not a check, a read, or a pattern allowed in this chat."),
+        ] {
+            let mut ed = editor("");
+            ed.session.root = this_repo();
+            let _log = claude_calls(&mut ed, &dir, "run", &json!({ "command": command }));
+            feed(&mut ed, "<space>lgo<ret>");
+            settle_for(&mut ed, |ed| !ed.offers.is_empty() || !ed.session.chat.as_ref().unwrap().busy());
+            let q = ed.offers.first().map(|o| o.question.clone()).expect("a card");
+            // (after the command and where it runs, before anything else)
+            let after = q.strip_prefix(command).and_then(|r| r.split_once("\n\n")).map(|(_, r)| r);
+            assert!(after.is_some_and(|r| r.starts_with(why)), "{q}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Claude asks to run a command outside the sandbox: never without a reason (told at once, no card);
     /// with one, always a card — even for a command that would run unasked (`pwd`) — its reason on it, `y`
     /// or `n` only (`a` isn't an answer: never kept); `y` runs it outside, once, and the result says so.
@@ -6240,7 +6279,12 @@ mod tests {
         settle_for(&mut ed, |ed| !ed.offers.is_empty());
         let o = &ed.offers[0];
         assert!(matches!(&o.what, crate::offer::What::Run(r) if r.cmd == command));
-        assert_eq!((o.title.as_str(), o.question.as_str()), ("Claude wants to run", command.as_str()));
+        // (why it asks, a line under it — #164)
+        let why = "It runs touch — not a check, a read, or a pattern allowed in this chat.";
+        assert_eq!(
+            (o.title.as_str(), o.question.as_str()),
+            ("Claude wants to run", format!("{command}\n\n{why}").as_str())
+        );
         assert!(o.weighty(), "y must have been in sight a moment to count");
         // Another command while that one is asked about waits on a card of its own, under it (#5: refused,
         // Claude sent it again and again)

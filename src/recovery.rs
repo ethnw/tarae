@@ -489,12 +489,29 @@ impl Recovery {
         tx.send(msg(done)).is_err() || answered.recv_timeout(within).is_ok()
     }
 
-    /// Tests: the process dies — the keeper stops where it is and its lock goes, its copies stay.
+    /// Tests: the process dies — the keeper stops where it is and its lock goes, its copies stay. Gone once
+    /// no process has it open: a child another test forked while it was open holds it too, until it execs
+    /// (a fork copies every descriptor; close-on-exec closes them only at the exec) — under load long enough
+    /// for the next scan to take this tarae for a running one and pass its copies over (seen on Linux: a
+    /// `queued::tests` child, not yet exec'd). A real death lets it go the same way; this waits for that.
     #[cfg(test)]
     pub fn killed(&mut self) {
         self.tx = None;
         if let Some(t) = self.thread.take() {
             let _ = t.join();
+        }
+        // (the folder the keeper took: `run`, or `run.N` — `take_folder`)
+        let folders = (0..4).map(|n| match n {
+            0 => self.run.clone(),
+            n => PathBuf::from(format!("{}.{n}", self.run.display())),
+        });
+        let end = Instant::now() + Duration::from_secs(10);
+        for lock in folders.map(|d| d.join(LOCK)).filter(|l| l.exists()) {
+            let free = || File::open(&lock).is_ok_and(|f| f.try_lock().is_ok());
+            while !free() {
+                assert!(Instant::now() < end, "{} still held 10 s after the keeper ended", lock.display());
+                std::thread::sleep(Duration::from_millis(2));
+            }
         }
     }
 

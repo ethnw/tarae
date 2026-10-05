@@ -630,8 +630,12 @@ over the same stream as the conversation, so no server or port is involved.
 The last row of the chat says how warm Claude's prompt cache is and what the conversation costs:
 
 ```
-● warm until 14:32  ctx 4% of 200k  turn $0.018  read 7.9k write 8.1k in 18 out 185
+● warm until 14:32  ctx 4% of 200k  turn ≈ API $0.018  read 7.9k write 8.1k in 18 out 185
 ```
+
+The cost is what claude reports (`total_cost_usd`): the API price by Claude Code's own table. On a subscription
+that's not what you pay, so it's said as `≈ API` — in the chat's row, the session list — and once at the top of
+`:usage`, with the Claude Code version whose table it is.
 
 - **Cache**: warm until its TTL runs out, by the clock — 5 minutes or an hour from the last request that wrote
   or read it, as that request's cache write says; then `◦ cold`. Said as a time, it stays true while nothing
@@ -644,7 +648,7 @@ The last row of the chat says how warm Claude's prompt cache is and what the con
 
 When the chat is narrow the words fold first, then the split, then the context; the cache stays. The session list
 (`space W`) has a column with each session's cache and its total so far. `:usage` opens a buffer with a row per
-turn (time, model, input, cache write, cache read, output, hit rate, cost), the session's total, what every
+turn (time, model, input, cache write, cache read, output, hit rate, API price), the session's total, what every
 request in the conversation starts with (its first request: the system prompt, the tools, CLAUDE.md and the
 first message), and today's total across sessions. It updates as turns end.
 
