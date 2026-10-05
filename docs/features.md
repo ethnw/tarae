@@ -88,7 +88,9 @@ configs carry over as they are.
 - **Soft wrap** `editor.soft-wrap` — long lines show as several rows, broken after a space (mid-word only when a word is
   wider than the screen). Continuation rows are indented like the line, hang under a list marker (`- `, `1. `, `> `),
   and have no line number; `j`/`k` and paging move by rows. `"always"` (default) wraps code too (inlay hints then
-  stay off lines that wrap); `"prose"` wraps only Markdown, commit messages, and plain text; `"never"` scrolls sideways
+  stay off lines that wrap); `"prose"` wraps only Markdown, commit messages, and plain text; `"never"` scrolls sideways.
+  Per buffer: `z w` (or `:soft-wrap on|off`) flips it for the buffer in front alone; a card's whole text (`v`) always
+  wraps, and so does Claude's edit under review
 - Vertical movement remembers the visual column (tabs and wide characters included), so you come back to where you
   were after passing short lines
 

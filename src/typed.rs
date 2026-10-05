@@ -351,6 +351,16 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
             crate::codereview::review_turn(editor);
             Ok(())
         }
+        "soft-wrap" => {
+            // (on · off · nothing: flip — this buffer's, the setting stays)
+            let arg = rest.trim();
+            let want = ["off", "on"].iter().position(|w| *w == arg).map(|i| i == 1);
+            if want.is_none() && !arg.is_empty() {
+                return Err(format!("soft-wrap: on or off, not {arg}"));
+            }
+            editor.soft_wrap_toggle(want);
+            Ok(())
+        }
         "review-at-end" => {
             // (on · off · nothing: flip)
             let arg = rest.trim();

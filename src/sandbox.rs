@@ -108,6 +108,7 @@ impl Guard {
             }
             let (kept, all) = self.kept(&b.seen);
             s.push_str(&kept);
+            s.push_str(&quiet_said(&b).unwrap_or_default());
             s.push_str(&rules);
             if !all || b.distinct > b.seen.len() {
                 s.push_str(
@@ -119,8 +120,9 @@ impl Guard {
             }
             return s;
         }
+        let quiet = quiet_said(&b).unwrap_or_default();
         match b.failed {
-            None => format!("The sandbox blocked nothing. {rules}"),
+            None => format!("The sandbox blocked nothing. {quiet}{rules}"),
             Some(why) => {
                 let mut s =
                     format!("tarae couldn't watch what the sandbox blocked ({why}). {rules}{unwatched}");
@@ -629,12 +631,71 @@ pub struct Blocked {
     pub distinct: usize,
     pub total: usize,
     pub failed: Option<String>,
+    /// Denials expected, kept apart (`quiet`) — not counted as blocked, no panel line; each kind once.
+    pub quiet: Vec<Denial>,
 }
 
 pub const DENIALS_KEPT: usize = 10;
 
+/// Where a denied write is expected and harmless, so no report or panel names it: Go's telemetry counters —
+/// every go command (`go version` too) writes `…/go/telemetry/local/<…>.count` in home in its default
+/// `local` mode, and carries on silently when it can't. The mode is a file there (`go telemetry off` writes
+/// it); `GOTELEMETRY` is a read-only `go env` name, so no variable turns it off for a run — and opening home
+/// to it would let a run change the user's Go setting. Measured in P2: one denial in every Go run's report.
+const QUIET_WRITES: [&str; 1] = ["/Library/Application Support/go/telemetry/"];
+
+/// A shell's own startup files, right in home — closed with the rest of home on purpose (they hold tokens,
+/// and set what a command runs: a run is what its line says). zsh reads `~/.zshenv` for every `zsh -c` and
+/// starts without it, saying nothing; the report says so calmly, apart from what was blocked (`quiet_said`).
+const SHELL_SETUP: [&str; 8] =
+    [".zshenv", ".zprofile", ".zshrc", ".zlogin", ".profile", ".bashrc", ".bash_profile", ".bash_login"];
+
+/// Whether `d` is a read of one of `SHELL_SETUP` in `home`.
+fn shell_setup(d: &Denial, home: Option<&Path>) -> bool {
+    let p = Path::new(&d.target);
+    d.op.starts_with("file-read")
+        && home.is_some_and(|h| p.parent() == Some(h))
+        && p.file_name().is_some_and(|n| SHELL_SETUP.iter().any(|s| n == *s))
+}
+
+/// Whether `d` is expected — Go's telemetry writes (`QUIET_WRITES`), a shell's startup files (`SHELL_SETUP`).
+pub fn quiet(d: &Denial) -> bool {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    ((d.op.starts_with("file-write") || d.op == EITHER) && QUIET_WRITES.iter().any(|w| d.target.contains(w)))
+        || shell_setup(d, home.as_deref())
+}
+
+/// The report's calm line on what was kept apart: the shell's setup, not read — None for Go's telemetry
+/// (nothing to say: go carries on as it would).
+fn quiet_said(b: &Blocked) -> Option<String> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut shell: Vec<String> = b
+        .quiet
+        .iter()
+        .filter(|d| shell_setup(d, home.as_deref()))
+        .map(|d| crate::allow::tilde(Path::new(&d.target)))
+        .collect();
+    shell.dedup();
+    (!shell.is_empty()).then(|| {
+        format!(
+            "{}: the shell's own setup isn't read in the sandbox, as always (it holds tokens, and sets what \
+             runs) — the shell started without it, nothing failed for it. A command that needs something set \
+             there (a PATH entry, a variable) sets it itself.\n",
+            shell.join(", ")
+        )
+    })
+}
+
 impl Blocked {
     pub fn add(&mut self, d: Denial) {
+        if quiet(&d) {
+            if self.quiet.len() < DENIALS_KEPT
+                && !self.quiet.iter().any(|q| q.op == d.op && q.target == d.target)
+            {
+                self.quiet.push(d);
+            }
+            return;
+        }
         self.total += 1;
         let same = |s: &Denial| s.op == d.op && s.target == d.target;
         if self.seen.iter().any(same) {
@@ -1668,6 +1729,12 @@ pub fn command(policy: Option<&Policy>, program: &str, args: &[String]) -> Comma
             inside_env(&mut c);
             if let Some(run) = &p.run {
                 c.env("TMPDIR", run.path());
+                // npm's debug log in the run's own folder, not `~/.npm/_logs` (closed): measured, every npm
+                // command was denied writing its log and deleting the old ones its cleanup lists — in a
+                // folder of its own the cleanup finds none of yours. (`logs-max=0` writes none but still
+                // tries to delete every old one.) Its "complete log" line names a file there while the run's
+                // folder lasts.
+                c.env("npm_config_logs_dir", run.path());
             }
             for (var, copy) in &p.reads.copies.env {
                 c.env(var, copy);
@@ -2477,6 +2544,70 @@ mod tests {
             b.add(denial("file-write-data", &format!("/f{i}")));
         }
         assert_eq!((b.total, b.distinct, b.seen.len()), (22, 21, DENIALS_KEPT));
+    }
+
+    /// P2 leftovers: Go's telemetry counters (written in home by every go command) are denied but never named —
+    /// a Go run's report says nothing was blocked; any other write next to them is named as ever. A shell's
+    /// setup (`~/.zshenv`, read by every `zsh -c`) is said calmly, apart — not a warning. And npm keeps its
+    /// debug log in the run's own folder (its cleanup lists only that one), not `~/.npm/_logs`.
+    #[test]
+    fn expected_denials_stay_quiet_and_npm_logs_in_the_run() {
+        let home = std::env::var("HOME").unwrap();
+        let count = format!(
+            "{home}/Library/Application Support/go/telemetry/local/go@go1.27.1-go1.27.1-darwin-arm64-2026-10-05.v1.count"
+        );
+        let p = Policy { tag: Some("t.".into()), ..Policy::for_project(&env(Path::new("/Users/u/p"))) };
+        let w = Watch::quiet("t.");
+        w.record(Denial { process: "go".into(), op: "file-write-data".into(), target: count.clone() });
+        w.record(Denial { process: "go".into(), op: "file-write-create".into(), target: count });
+        let b = w.blocked();
+        assert_eq!((b.total, b.distinct, b.quiet.len()), (0, 0, 2));
+        let g = Guard::In(Box::new(Policy { watch: Some(w.clone()), ..p.clone() }));
+        let r = g.report(&[]);
+        assert!(r.starts_with("The sandbox blocked nothing. In tarae's sandbox"), "{r}");
+        assert_eq!(panel_line(Some(&g), true, std::time::Instant::now()), None, "nothing on the panel");
+        assert_eq!(crate::cards::denied_line("s", "go vet", &w.blocked()), None);
+        // (a read there isn't quieted: only Go's own writes)
+        assert!(!quiet(&denial("file-read-data", &format!("{home}/Library/Application Support/go/env"))));
+        // A shell's setup in home, closed on purpose: said calmly, not as blocked — no "tell the user"
+        let zsh = Watch::quiet("t.");
+        zsh.record(Denial {
+            process: "zsh".into(),
+            op: "file-read-data".into(),
+            target: format!("{home}/.zshenv"),
+        });
+        let g = Guard::In(Box::new(Policy { watch: Some(zsh.clone()), ..p.clone() }));
+        let r = g.report(&[]);
+        assert!(
+            r.starts_with(
+                "The sandbox blocked nothing. ~/.zshenv: the shell's own setup isn't read in the sandbox"
+            ) && !r.contains("don't work around it"),
+            "{r}"
+        );
+        assert_eq!(panel_line(Some(&g), true, std::time::Instant::now()), None, "no ▲ for it");
+        // (writing it, or one deeper in home: named as ever)
+        assert!(!quiet(&denial("file-write-data", &format!("{home}/.zshenv"))));
+        assert!(!quiet(&denial("file-read-data", &format!("{home}/proj/.zshenv"))));
+        // Beside something blocked: that one named and counted, the shell's line calm after it
+        zsh.record(denial("file-write-create", &format!("{home}/marker")));
+        let r = g.report(&[]);
+        assert!(r.starts_with("The sandbox blocked one thing — 1 time:\n  writing ~/marker"), "{r}");
+        assert!(r.contains("~/.zshenv: the shell's own setup") && !r.contains("reading ~/.zshenv"), "{r}");
+        let g = Guard::In(Box::new(Policy { watch: Some(w.clone()), ..p.clone() }));
+        w.record(denial("file-write-create", &format!("{home}/marker")));
+        let r = g.report(&[]);
+        assert!(r.starts_with("The sandbox blocked one thing — 1 time:\n  writing ~/marker"), "{r}");
+        // npm's log folder: the run's own
+        let run = RunDir::new().unwrap();
+        let p = Policy { run: Some(run.clone()), ..p };
+        let c = command(Some(&p), "npm", &["test".into()]);
+        let logs = c.get_envs().find(|(k, _)| *k == "npm_config_logs_dir").and_then(|(_, v)| v);
+        assert_eq!(logs, Some(run.path().as_os_str()));
+        let unsandboxed = command(None, "npm", &["test".into()]);
+        assert!(
+            unsandboxed.get_envs().all(|(k, _)| k != "npm_config_logs_dir"),
+            "the user's own runs as they are"
+        );
     }
 
     /// What Claude reads: what was blocked (deduplicated, with who tried); that nothing was; or that nothing

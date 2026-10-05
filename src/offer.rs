@@ -113,7 +113,8 @@ pub enum What {
     /// reviews them one by one, `v` shows every change, `n` declines them all. `generation` = its chat's.
     ChangeSet { generation: u64 },
     /// Ending a code review with files not viewed (`codereview.rs`, #10): `y` ends it, `n` keeps reviewing.
-    ReviewEnd,
+    /// Its session's, and that review's (`started`) only — #159.
+    ReviewEnd { session: crate::event::SessionId, started: Instant },
     /// Bringing a session whose base moved since it left it (`rebase.rs`): `y` rebases it onto its base
     /// first, `n` leaves it.
     Rebase(Box<crate::rebase::Moved>),
@@ -369,6 +370,12 @@ impl Offer {
         )
     }
 
+    /// Whether it parks with its session when another comes to the front: Claude's, and a review's end
+    /// (#159: it stayed up in the other session, and `y` there ended that one's review).
+    pub fn goes_with_session(&self) -> bool {
+        self.claudes() || matches!(self.what, What::ReviewEnd { .. })
+    }
+
     pub fn installing(&self) -> bool {
         matches!(self.state, OfferState::Installing(_))
     }
@@ -425,7 +432,7 @@ impl Offer {
             // (it fell to the download's row once: `y Install` on a card whose `y` declines Claude's change)
             W::CloseReviewed { .. } => vec![('y', "Decline and close"), ('n', "Keep both")],
             W::Screen { .. } => vec![('y', "Once"), ('a', "This chat"), ('n', "No")],
-            W::ReviewEnd => vec![('y', "End it"), ('n', "Keep reviewing")],
+            W::ReviewEnd { .. } => vec![('y', "End it"), ('n', "Keep reviewing")],
             W::Rebase(_) => vec![('y', "Rebase first"), ('n', "Leave it")],
             // (`p` runs the quick set when the project has two — the card names its steps)
             W::Rebased(_) => {
@@ -473,7 +480,7 @@ impl Offer {
             W::SessionEnd(_) => "session-end",
             W::CloseReviewed { .. } => "close-reviewed",
             W::ChangeSet { .. } => "change-set",
-            W::ReviewEnd => "review-end",
+            W::ReviewEnd { .. } => "review-end",
             W::Rebase(_) => "rebase",
             W::Rebased(_) => "rebased",
             W::RebaseResolved { .. } => "rebase-resolved",
@@ -712,9 +719,9 @@ impl crate::editor::Editor {
                 self.close_reviewed(doc, force);
             }
             What::ChangeSet { generation } => crate::refactor::accept_all(self, id, generation),
-            What::ReviewEnd => {
+            What::ReviewEnd { session, started } => {
                 self.offer_finished(id, Ok(()));
-                crate::codereview::close(self);
+                crate::codereview::close_answered(self, session, started);
             }
             What::Rebase(m) => self.rebase_start(id, *m),
             What::Rebased(m) => {
@@ -948,6 +955,11 @@ impl crate::editor::Editor {
             self.close_doc(d);
         }
         let doc = self.open_virtual(&name, &text);
+        // (wrapped as the card is, whatever editor.soft-wrap says: a script's long line read before its run
+        // never runs off the edge — #156; `z w` unwraps it)
+        if let Some(d) = self.docs.iter_mut().find(|d| d.id == doc) {
+            d.wrap = Some(true);
+        }
         // (seen whole once its last line has been on screen — `term::render_frame` looks)
         self.offer_view.set(Some((id, rev, doc)));
         self.offer_views.retain(|(d, _)| *d != doc);
@@ -1067,7 +1079,7 @@ impl crate::editor::Editor {
                 self.set_status("kept open — Claude's change still waits for y or n")
             }
             What::ChangeSet { generation } => crate::refactor::decline_all(self, generation),
-            What::ReviewEnd => self.set_status("still reviewing — space v m marks a file viewed"),
+            What::ReviewEnd { .. } => self.set_status("still reviewing — space v m marks a file viewed"),
             What::Rebase(m) => {
                 self.set_status(format!("Not rebased — {} as it is, nothing brought", m.branch))
             }

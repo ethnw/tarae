@@ -95,6 +95,8 @@ pub struct CodeReview {
     /// Read wide (`space v z`, #83): the rail and the chat give the code their columns until it's off
     /// again or the review ends (`Editor::review_wide`).
     pub wide: bool,
+    /// When it started — which review this is: the end card ends only this one (#159).
+    pub started: std::time::Instant,
 }
 
 impl CodeReview {
@@ -115,6 +117,7 @@ impl CodeReview {
             behind: false,
             rail_need: Default::default(),
             wide: false,
+            started: std::time::Instant::now(),
         }
     }
 
@@ -576,6 +579,7 @@ fn open(ed: &mut Editor, root: PathBuf, base: Base, mut files: Vec<File>) {
         behind: false,
         rail_need: Default::default(),
         wide: false,
+        started: std::time::Instant::now(),
     });
     let s = if n == 1 { "" } else { "s" };
     ed.set_status(format!("review: {n} file{s} {said} — ]g walks the changes"));
@@ -915,7 +919,16 @@ pub fn close_asked(ed: &mut Editor) {
     if left.is_empty() {
         return close(ed);
     }
-    let mut q = format!("{} not viewed — end the review anyway?\n", crate::nav::count(left.len(), "file"));
+    // (it names its session and its review, and ends only that one — #159: `y` on it after a trip to another
+    // session ended that one's)
+    let name = ed.session.label().to_string();
+    let viewed = r.files.len() - left.len();
+    let mut q = format!(
+        "{name}'s review · {} · {viewed} of {} viewed\n\n{} not viewed — end it anyway?\n",
+        r.base.label(),
+        r.files.len(),
+        crate::nav::count(left.len(), "file")
+    );
     for f in left.iter().take(CLOSE_FILES) {
         q.push_str(&format!("\n  {}", f.rel));
     }
@@ -923,8 +936,19 @@ pub fn close_asked(ed: &mut Editor) {
         q.push_str(&format!("\n  … {} more", left.len() - CLOSE_FILES));
     }
     q.push_str("\n\nDrafts stay. Opened again, its marks are kept while a file's diff is the same.");
-    let what = crate::offer::What::ReviewEnd;
-    ed.push_offer(crate::offer::Offer::new("End the review?".into(), &q, "", String::new(), what));
+    let what = crate::offer::What::ReviewEnd { session: ed.session.id, started: r.started };
+    ed.push_offer(crate::offer::Offer::new(format!("End {name}'s review?"), &q, "", String::new(), what));
+}
+
+/// The end card's `y`: review `started` of session `session` ends — only if it's the one in front and still
+/// the review there (its card goes with its session — `Offer::goes_with_session`; one ended meanwhile,
+/// another begun: that one stays).
+pub fn close_answered(ed: &mut Editor, session: crate::event::SessionId, started: std::time::Instant) {
+    let here = ed.session.id == session;
+    match ed.session.code_review.as_ref() {
+        Some(r) if here && r.started == started => close(ed),
+        _ => ed.set_status("that review has ended already — nothing else was closed"),
+    }
 }
 
 /// The end card names this many files left at most.

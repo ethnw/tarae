@@ -202,6 +202,7 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `z j` | `scroll_down` | Scroll down a line |
 | `z k` | `scroll_up` | Scroll up a line |
 | `z t` | `align_view_top` | Cursor line to the top |
+| `z w` | `toggle_soft_wrap` | Wrap long lines here (on/off) |
 | `z z` | `align_view_center` | Cursor line to mid-screen |
 | `z C-b` | `page_up` | Move page up |
 | `z C-d` | `half_page_down` | Move half page down |
@@ -217,6 +218,7 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `Z j` | `scroll_down` | Scroll down a line |
 | `Z k` | `scroll_up` | Scroll up a line |
 | `Z t` | `align_view_top` | Cursor line to the top |
+| `Z w` | `toggle_soft_wrap` | Wrap long lines here (on/off) |
 | `Z z` | `align_view_center` | Cursor line to mid-screen |
 | `Z C-b` | `page_up` | Move page up |
 | `Z C-d` | `half_page_down` | Move half page down |
@@ -516,6 +518,7 @@ Type `:` in normal mode. `Tab` completes command names and their arguments (path
 | `:review-close` |  | End the review |
 | `:review-at-end` |  | Claude's edits go in as it works, reviewed when its turn ends (on/off) |
 | `:review-turn` |  | Review what Claude changed in its last turn |
+| `:soft-wrap` |  | Wrap this buffer's long lines, or scroll sideways (on/off) |
 | `:note-close` |  | Close Claude's note on this line |
 | `:notes-clear` |  | Close all of Claude's notes |
 | `:commit-draft` |  | Let Claude draft the commit message |

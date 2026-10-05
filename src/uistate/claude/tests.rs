@@ -14,7 +14,13 @@ fn editor() -> Editor {
 
 /// A light card (`y` ends a code review — none here, so nothing happens); its id.
 fn card(ed: &mut Editor, title: &str) -> u64 {
-    let o = Offer::new(title.into(), "2 files not viewed.", "", String::new(), What::ReviewEnd);
+    let o = Offer::new(
+        title.into(),
+        "2 files not viewed.",
+        "",
+        String::new(),
+        What::ReviewEnd { session: 0, started: std::time::Instant::now() },
+    );
     let id = o.id;
     ed.push_offer(o);
     ed.offers.iter().find(|o| o.title == title).map_or(id, |o| o.id)
@@ -95,7 +101,13 @@ fn claudes_level_holds_back_unsent_text_and_other_sessions() {
     chat(&mut ed, "a secret draft");
     ed.open_prompt(crate::editor::PromptKind::Command, "a secret prompt");
     let other = behind(&mut ed, "other", std::env::temp_dir().join("tarae-claude-level-other"));
-    let mut parked = Offer::new("Their own card".into(), "theirs", "", String::new(), What::ReviewEnd);
+    let mut parked = Offer::new(
+        "Their own card".into(),
+        "theirs",
+        "",
+        String::new(),
+        What::ReviewEnd { session: 0, started: std::time::Instant::now() },
+    );
     (ed.offer_seq, parked.id) = (ed.offer_seq + 1, ed.offer_seq + 1);
     let theirs = format!("card#{}", parked.id);
     ed.sessions.iter_mut().find(|l| l.id == other).unwrap().parked.push(parked);
@@ -197,7 +209,13 @@ fn a_link_to_a_card_flashes_it_where_it_is_or_says_how_it_went() {
 fn a_link_to_another_sessions_card_brings_that_session_forward() {
     let mut ed = editor();
     let other = behind(&mut ed, "other", std::env::temp_dir().join("tarae-claude-link-other"));
-    let parked = Offer::new("Run it?".into(), "theirs", "", String::new(), What::ReviewEnd);
+    let parked = Offer::new(
+        "Run it?".into(),
+        "theirs",
+        "",
+        String::new(),
+        What::ReviewEnd { session: 0, started: std::time::Instant::now() },
+    );
     let id = parked.id;
     ed.sessions.iter_mut().find(|l| l.id == other).unwrap().parked.push(parked);
     ed.ui_jump(&format!("card#{id}"));

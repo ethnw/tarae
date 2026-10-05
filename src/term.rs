@@ -1447,6 +1447,10 @@ fn draw_task_panel(
     if let Some(w) = wait {
         summary.push((format!("   {w}"), dim));
     }
+    // (printing nothing for minutes: said after its wave — #157)
+    if let Some(s) = running.then(|| r.wait.silent(r.last_output, std::time::Instant::now())).flatten() {
+        summary.push((format!("   {s}"), dim));
+    }
     // (`space m m` runs the user's task again — not an install, not Claude's command, not tarae's git)
     let mut hints: Vec<(&str, &str)> = match (&r.state, r.found) {
         (State::Running, _) => vec![("space m c", "stop")],
@@ -2159,6 +2163,9 @@ fn draw_test_panel(
     };
     let waving = running && wait.is_none();
     summary.push((when, if waving { Style { fg: ui.accent.fg, ..card } } else { dim }));
+    if let Some(s) = running.then(|| r.wait.silent(r.last_output, std::time::Instant::now())).flatten() {
+        summary.push((format!("   {s}"), dim));
+    }
     let mut hints = slot_hints(editor);
     hints.extend_from_slice(match r.state {
         RunState::Running => &[("space x c", "stop")],
@@ -4402,6 +4409,31 @@ fn draw_review(
         apply(out, ui.base)?;
         queue!(out, Spaces(width.saturating_sub(3 + used)))?;
     }
+    // Soft wrap (#156): a row wider than the code column takes the screen rows it needs, its number on the
+    // first — a script's long line read before its run doesn't run off the edge (scrolling stays by rows)
+    let wrapping = editor.wraps(doc);
+    let tab = editor.config.tab_width;
+    let parts = |row: &RRow| -> Vec<crate::wrap::Row> {
+        match row {
+            RRow::Doc(l) if wrapping => crate::wrap::rows(text, *l, code_w, tab),
+            RRow::Diff { text: line, .. } if wrapping => {
+                crate::wrap::rows(&ropey::Rope::from_str(line), 0, code_w, tab)
+            }
+            _ => vec![crate::wrap::Row::whole(0)],
+        }
+    };
+    // Each row shown: where it starts below the title, and its parts that fit
+    let mut placed: Vec<(&RRow, usize, Vec<crate::wrap::Row>)> = Vec::with_capacity(shown.len());
+    let mut filled = 0;
+    for row in shown {
+        if filled >= body {
+            break;
+        }
+        let p: Vec<_> = parts(row).into_iter().take(body - filled).collect();
+        let n = p.len();
+        placed.push((row, filled, p));
+        filled += n;
+    }
     // The change in hand: its rows on screen (a notification keeps off them — U9)
     let mine = |r: &RRow| match r {
         RRow::Header(h) => *h == rev.current,
@@ -4409,185 +4441,203 @@ fn draw_review(
         RRow::Doc(_) => false,
     };
     let top = lay.text_top as usize + title_h;
-    editor
-        .screen
-        .review_change
-        .set(shown.iter().position(mine).zip(shown.iter().rposition(mine)).map(|(a, b)| (top + a, top + b)));
+    let first = placed.iter().find(|p| mine(p.0)).map(|p| top + p.1);
+    let last = placed.iter().rev().find(|p| mine(p.0)).map(|p| top + p.1 + p.2.len() - 1);
+    editor.screen.review_change.set(first.zip(last));
     // Every change's rows — the follow card keeps off them
-    *editor.screen.review_rows.borrow_mut() =
-        shown.iter().enumerate().filter(|(_, r)| !matches!(r, RRow::Doc(_))).map(|(k, _)| top + k).collect();
-    for (k, row) in shown.iter().enumerate() {
-        let y = lay.text_top + title_h as u16 + k as u16;
-        queue!(out, MoveTo(0, y))?;
-        let mut used;
-        match row {
-            RRow::Doc(l) => {
-                apply(out, faint)?;
-                queue!(out, Print(format!("{:>num_w$}   ", l + 1)))?;
-                used = num_w + 3;
-                used += draw_code_line(
-                    out,
-                    text,
-                    *l,
-                    code_w,
-                    editor.config.tab_width,
-                    &spans,
-                    &capture_styles,
-                    ui.base,
-                    (0, usize::MAX),
-                )?;
-            }
-            RRow::Header(i) => {
-                let h = &rev.hunks[*i];
-                let current = *i == rev.current && h.decision == Decision::Undecided && !h.conflict;
-                let bg = if current { band.or(ui.base.bg) } else { ui.base.bg };
-                let base = Style { bg, ..ui.base };
-                let line = text.byte_to_line(h.from.min(text.len_bytes())) + 1;
-                apply(out, base)?;
-                queue!(out, Spaces(num_w + 1))?;
-                apply(
-                    out,
-                    if current {
-                        Style { fg: ui.accent.fg, ..base }
-                    } else {
-                        Style { fg: ui.linenr.fg, ..base }
-                    },
-                )?;
-                queue!(out, Print("▎ "))?;
-                let label = format!("Change {} of {n} · line {line}", i + 1);
-                apply(
-                    out,
-                    if current {
-                        Style { bold: true, ..base.patch(Style { fg: ui.accent.fg, ..Style::default() }) }
-                    } else {
-                        Style { fg: ui.virt.fg, ..base }
-                    },
-                )?;
-                queue!(out, Print(&label))?;
-                used = num_w + 3 + label.width();
-                // What each key takes, said plainly: `y` this change, `a` every one still undecided (it
-                // was "a all" — one `y` left the rest waiting, easy to miss)
-                let left =
-                    rev.hunks.iter().filter(|h| h.decision == Decision::Undecided && !h.conflict).count();
-                let (all, all_short) = (format!("accept all {left}"), format!("all {left}"));
-                // Esc goes back where the keys were — the chat or the code — unanswered (#70, #118); from
-                // there `C-q` answers it. Each in a short form too, for when the row can't hold them whole
-                // (beside the chat it cut esc's off)
-                let chat = editor.session.chat.as_ref().map(|c| c.focused);
-                let esc: &[(&str, &str)] = &[("esc", "back, unanswered")];
-                let esc_short: &[(&str, &str)] = &[("esc", "back")];
-                type Hints<'a> = Vec<(&'a str, &'a str)>;
-                let (full, short, st): (Hints, Hints, Style) = match (h.conflict, h.decision) {
-                    (true, _) => {
-                        let v = vec![("", "text changed while waiting — skipped")];
-                        (v.clone(), v, base.patch(ui.error))
-                    }
-                    (_, Decision::Accept) => {
-                        (vec![("", "accepted")], vec![("", "accepted")], Style { fg: plus_fg, ..base })
-                    }
-                    (_, Decision::Reject) => {
-                        (vec![("", "rejected")], vec![("", "rejected")], Style { fg: minus_fg, ..base })
-                    }
-                    _ if current && chat == Some(true) => {
-                        (vec![("C-q", "answer it — the chat has the keys")], vec![("C-q", "answer it")], base)
-                    }
-                    _ if current && rev.away => {
-                        (vec![("C-q", "answer it — the code has the keys")], vec![("C-q", "answer it")], base)
-                    }
-                    _ if current && left > 1 => (
-                        [
-                            &[("y", "accept this one"), ("a", all.as_str()), ("n", "reject")][..],
-                            esc,
-                            &[("tab", "next")],
-                        ]
-                        .concat(),
-                        [
-                            &[("y", "this one"), ("a", all_short.as_str()), ("n", "no")][..],
-                            esc_short,
-                            &[("tab", "next")],
-                        ]
-                        .concat(),
-                        base,
-                    ),
-                    _ if current => (
-                        [&[("y", "accept"), ("n", "reject")][..], esc].concat(),
-                        [&[("y", "yes"), ("n", "no")][..], esc_short].concat(),
-                        base,
-                    ),
-                    _ => (vec![("", "pending")], vec![("", "pending")], Style { fg: ui.linenr.fg, ..base }),
-                };
-                let room = |v: &Hints, gap: usize| -> usize {
-                    v.iter()
-                        .map(|(k, d)| gap + if k.is_empty() { 0 } else { k.width() + 1 } + d.width())
-                        .sum()
-                };
-                let (status, gap) = if used + room(&full, 3) <= width { (full, 3) } else { (short, 2) };
-                for (key, desc) in status {
-                    let lead = " ".repeat(gap);
-                    let piece =
-                        if key.is_empty() { format!("{lead}{desc}") } else { format!("{lead}{key} {desc}") };
-                    if used + piece.width() > width {
-                        break;
-                    }
-                    if key.is_empty() {
-                        apply(out, st)?;
-                        queue!(out, Print(&piece))?;
-                    } else {
-                        apply(out, Style { fg: ui.accent.fg, bold: true, ..base })?;
-                        queue!(out, Print(format!("{lead}{key}")))?;
-                        apply(out, Style { fg: ui.virt.fg, ..base })?;
-                        queue!(out, Print(format!(" {desc}")))?;
-                    }
-                    used += piece.width();
+    *editor.screen.review_rows.borrow_mut() = placed
+        .iter()
+        .filter(|p| !matches!(p.0, RRow::Doc(_)))
+        .flat_map(|p| (0..p.2.len()).map(move |i| top + p.1 + i))
+        .collect();
+    for (row, at, ps) in &placed {
+        for (pi, part) in ps.iter().enumerate() {
+            let y = lay.text_top + (title_h + at + pi) as u16;
+            queue!(out, MoveTo(0, y))?;
+            let mut used;
+            match row {
+                RRow::Doc(l) => {
+                    apply(out, faint)?;
+                    let no = if pi == 0 { format!("{:>num_w$}   ", l + 1) } else { " ".repeat(num_w + 3) };
+                    queue!(out, Print(no), Spaces(part.x0))?;
+                    used = num_w + 3 + part.x0;
+                    used += draw_code_line(
+                        out,
+                        text,
+                        *l,
+                        code_w.saturating_sub(part.x0),
+                        tab,
+                        &spans,
+                        &capture_styles,
+                        ui.base,
+                        (part.col, part.end_col),
+                    )?;
                 }
-                apply(out, base)?;
-                queue!(out, Spaces(width.saturating_sub(used)))?;
-                used = width;
-            }
-            RRow::Diff { kind, text: line, old_no, hunk } => {
-                let decided = rev.hunks[*hunk].decision != Decision::Undecided;
-                let bg = match kind {
-                    '-' => minus_bg,
-                    '+' if !decided => plus_bg,
-                    _ => None,
-                }
-                .or(ui.base.bg);
-                let base = Style { bg, ..ui.base };
-                apply(out, Style { fg: ui.linenr.fg, ..base })?;
-                queue!(
-                    out,
-                    Print(match old_no {
-                        Some(no) => format!("{no:>num_w$} "),
-                        None => " ".repeat(num_w + 1),
-                    })
-                )?;
-                let (sign, sign_st) = match kind {
-                    '-' => ("−", Style { fg: minus_fg, bold: true, ..base }),
-                    '+' => ("▎", Style { fg: plus_fg, ..base }),
-                    _ => (" ", base),
-                };
-                apply(out, sign_st)?;
-                queue!(out, Print(sign), Print(" "))?;
-                used = num_w + 3;
-                for l in crate::markdown::code_lines(line, lang.as_deref(), t) {
-                    if let crate::markdown::Line::Code(sp) = l {
-                        for s in sp {
-                            let txt = fit(&s.text, width.saturating_sub(used));
-                            apply(out, base.patch(Style { bg: None, ..s.style }))?;
-                            queue!(out, Print(&txt))?;
-                            used += txt.width();
+                RRow::Header(i) => {
+                    let h = &rev.hunks[*i];
+                    let current = *i == rev.current && h.decision == Decision::Undecided && !h.conflict;
+                    let bg = if current { band.or(ui.base.bg) } else { ui.base.bg };
+                    let base = Style { bg, ..ui.base };
+                    let line = text.byte_to_line(h.from.min(text.len_bytes())) + 1;
+                    apply(out, base)?;
+                    queue!(out, Spaces(num_w + 1))?;
+                    apply(
+                        out,
+                        if current {
+                            Style { fg: ui.accent.fg, ..base }
+                        } else {
+                            Style { fg: ui.linenr.fg, ..base }
+                        },
+                    )?;
+                    queue!(out, Print("▎ "))?;
+                    let label = format!("Change {} of {n} · line {line}", i + 1);
+                    apply(
+                        out,
+                        if current {
+                            Style { bold: true, ..base.patch(Style { fg: ui.accent.fg, ..Style::default() }) }
+                        } else {
+                            Style { fg: ui.virt.fg, ..base }
+                        },
+                    )?;
+                    queue!(out, Print(&label))?;
+                    used = num_w + 3 + label.width();
+                    // What each key takes, said plainly: `y` this change, `a` every one still undecided (it
+                    // was "a all" — one `y` left the rest waiting, easy to miss)
+                    let left =
+                        rev.hunks.iter().filter(|h| h.decision == Decision::Undecided && !h.conflict).count();
+                    let (all, all_short) = (format!("accept all {left}"), format!("all {left}"));
+                    // Esc goes back where the keys were — the chat or the code — unanswered (#70, #118); from
+                    // there `C-q` answers it. Each in a short form too, for when the row can't hold them whole
+                    // (beside the chat it cut esc's off)
+                    let chat = editor.session.chat.as_ref().map(|c| c.focused);
+                    let esc: &[(&str, &str)] = &[("esc", "back, unanswered")];
+                    let esc_short: &[(&str, &str)] = &[("esc", "back")];
+                    type Hints<'a> = Vec<(&'a str, &'a str)>;
+                    let (full, short, st): (Hints, Hints, Style) = match (h.conflict, h.decision) {
+                        (true, _) => {
+                            let v = vec![("", "text changed while waiting — skipped")];
+                            (v.clone(), v, base.patch(ui.error))
                         }
+                        (_, Decision::Accept) => {
+                            (vec![("", "accepted")], vec![("", "accepted")], Style { fg: plus_fg, ..base })
+                        }
+                        (_, Decision::Reject) => {
+                            (vec![("", "rejected")], vec![("", "rejected")], Style { fg: minus_fg, ..base })
+                        }
+                        _ if current && chat == Some(true) => (
+                            vec![("C-q", "answer it — the chat has the keys")],
+                            vec![("C-q", "answer it")],
+                            base,
+                        ),
+                        _ if current && rev.away => (
+                            vec![("C-q", "answer it — the code has the keys")],
+                            vec![("C-q", "answer it")],
+                            base,
+                        ),
+                        _ if current && left > 1 => (
+                            [
+                                &[("y", "accept this one"), ("a", all.as_str()), ("n", "reject")][..],
+                                esc,
+                                &[("tab", "next")],
+                            ]
+                            .concat(),
+                            [
+                                &[("y", "this one"), ("a", all_short.as_str()), ("n", "no")][..],
+                                esc_short,
+                                &[("tab", "next")],
+                            ]
+                            .concat(),
+                            base,
+                        ),
+                        _ if current => (
+                            [&[("y", "accept"), ("n", "reject")][..], esc].concat(),
+                            [&[("y", "yes"), ("n", "no")][..], esc_short].concat(),
+                            base,
+                        ),
+                        _ => {
+                            (vec![("", "pending")], vec![("", "pending")], Style { fg: ui.linenr.fg, ..base })
+                        }
+                    };
+                    let room = |v: &Hints, gap: usize| -> usize {
+                        v.iter()
+                            .map(|(k, d)| gap + if k.is_empty() { 0 } else { k.width() + 1 } + d.width())
+                            .sum()
+                    };
+                    let (status, gap) = if used + room(&full, 3) <= width { (full, 3) } else { (short, 2) };
+                    for (key, desc) in status {
+                        let lead = " ".repeat(gap);
+                        let piece = if key.is_empty() {
+                            format!("{lead}{desc}")
+                        } else {
+                            format!("{lead}{key} {desc}")
+                        };
+                        if used + piece.width() > width {
+                            break;
+                        }
+                        if key.is_empty() {
+                            apply(out, st)?;
+                            queue!(out, Print(&piece))?;
+                        } else {
+                            apply(out, Style { fg: ui.accent.fg, bold: true, ..base })?;
+                            queue!(out, Print(format!("{lead}{key}")))?;
+                            apply(out, Style { fg: ui.virt.fg, ..base })?;
+                            queue!(out, Print(format!(" {desc}")))?;
+                        }
+                        used += piece.width();
                     }
+                    apply(out, base)?;
+                    queue!(out, Spaces(width.saturating_sub(used)))?;
+                    used = width;
                 }
-                apply(out, base)?;
-                queue!(out, Spaces(width.saturating_sub(used)))?;
-                used = width;
+                RRow::Diff { kind, text: line, old_no, hunk } => {
+                    let decided = rev.hunks[*hunk].decision != Decision::Undecided;
+                    let bg = match kind {
+                        '-' => minus_bg,
+                        '+' if !decided => plus_bg,
+                        _ => None,
+                    }
+                    .or(ui.base.bg);
+                    let base = Style { bg, ..ui.base };
+                    apply(out, Style { fg: ui.linenr.fg, ..base })?;
+                    queue!(
+                        out,
+                        Print(match old_no {
+                            Some(no) if pi == 0 => format!("{no:>num_w$} "),
+                            _ => " ".repeat(num_w + 1),
+                        })
+                    )?;
+                    // (an added line's bar runs down its wrapped rows; a removed line's sign is on its first)
+                    let (sign, sign_st) = match kind {
+                        '-' if pi == 0 => ("−", Style { fg: minus_fg, bold: true, ..base }),
+                        '+' => ("▎", Style { fg: plus_fg, ..base }),
+                        _ => (" ", base),
+                    };
+                    apply(out, sign_st)?;
+                    queue!(out, Print(sign))?;
+                    apply(out, base)?;
+                    queue!(out, Print(" "), Spaces(part.x0))?;
+                    used = num_w + 3 + part.x0;
+                    let pieces: Vec<(String, Style)> = crate::markdown::code_lines(line, lang.as_deref(), t)
+                        .into_iter()
+                        .filter_map(|l| match l {
+                            crate::markdown::Line::Code(sp) => Some(sp),
+                            _ => None,
+                        })
+                        .flatten()
+                        .map(|s| (s.text, base.patch(Style { bg: None, ..s.style })))
+                        .collect();
+                    let room = width.saturating_sub(used);
+                    used += print_columns(out, &pieces, (part.col, part.end_col), room, tab)?;
+                    apply(out, base)?;
+                    queue!(out, Spaces(width.saturating_sub(used)))?;
+                    used = width;
+                }
             }
+            apply(out, ui.base)?;
+            queue!(out, Spaces(width.saturating_sub(used)))?;
         }
-        apply(out, ui.base)?;
-        queue!(out, Spaces(width.saturating_sub(used)))?;
     }
-    for k in shown.len()..body {
+    for k in filled..body {
         queue!(out, MoveTo(0, lay.text_top + title_h as u16 + k as u16))?;
         apply(out, ui.base)?;
         queue!(out, Spaces(width))?;
@@ -4675,6 +4725,50 @@ fn request_preview(p: &mut Picker, jobs: &crate::event::Jobs) {
             }
         }
     });
+}
+
+/// A line given as styled pieces, its display columns `[from, to)` (a wrapped row) within `width` cells —
+/// tabs as spaces, control characters as `�`, as `draw_code_line` draws a document's. Returns the cells used.
+fn print_columns(
+    out: &mut impl Write,
+    pieces: &[(String, Style)],
+    (from, to): (usize, usize),
+    width: usize,
+    tab: usize,
+) -> io::Result<usize> {
+    let line: String = pieces.iter().map(|p| p.0.as_str()).collect();
+    let ends: Vec<usize> = pieces
+        .iter()
+        .scan(0, |at, p| {
+            *at += p.0.len();
+            Some(*at)
+        })
+        .collect();
+    let mut current: Option<Style> = None;
+    let mut used = 0;
+    for c in graphemes::cells(&line, 0, tab) {
+        if c.col < from {
+            continue;
+        }
+        if c.col >= to || c.col - from + c.width > width {
+            break;
+        }
+        let st = pieces[ends.partition_point(|&e| e <= c.bytes.start)].1;
+        if current != Some(st) {
+            apply(out, st)?;
+            current = Some(st);
+        }
+        let g = &line[c.bytes.clone()];
+        if g == "\t" {
+            queue!(out, Spaces(c.width))?;
+        } else if g.chars().next().is_some_and(char::is_control) {
+            queue!(out, Print('\u{fffd}'))?;
+        } else {
+            queue!(out, Print(g))?;
+        }
+        used = c.col + c.width - from;
+    }
+    Ok(used)
 }
 
 /// One line of code within `width` cells (applying syntax colors `spans`). Returns the number of cells used.
@@ -8677,7 +8771,7 @@ fn draw_chat(
                 *row_links.last_mut().expect("just pushed") = look.link.clone();
                 row_calls.push((lines.len() - 1, m.call.as_str()));
                 // (its command or tests waiting on what isn't their own — another cargo's lock — said under
-                // it, not left looking stuck: #10, `waits.rs`)
+                // it, not left looking stuck: #10, `waits.rs`; or printing nothing for minutes — #157)
                 let now = std::time::Instant::now();
                 let wait = match look.verb {
                     "run" => editor
@@ -8685,13 +8779,13 @@ fn draw_chat(
                         .task_run
                         .as_ref()
                         .filter(|r| r.by_claude && r.state == crate::task::State::Running)
-                        .and_then(|r| r.wait.shown(now)),
+                        .and_then(|r| r.wait.shown(now).or_else(|| r.wait.silent(r.last_output, now))),
                     "test" => editor
                         .session
                         .test_run
                         .as_ref()
                         .filter(|r| r.chat.is_some() && r.state == crate::testing::RunState::Running)
-                        .and_then(|r| r.wait.shown(now)),
+                        .and_then(|r| r.wait.shown(now).or_else(|| r.wait.silent(r.last_output, now))),
                     _ => None,
                 };
                 if live && let Some(wait) = wait {
@@ -11649,6 +11743,132 @@ mod tests {
         let hit = packs.hit("   Compiling tarae v0.1.0");
         assert!(!r.wait.line(hit, std::time::Instant::now(), &r.trace));
         assert!(!shown(&mut ed).contains("waiting for"));
+    }
+
+    /// #156: soft wrap is the buffer's to choose — `z w` and `:soft-wrap` flip it for this buffer alone, over
+    /// `editor.soft-wrap`; a card's whole text (`v`, a script read before its run) wraps whatever the setting
+    /// says; and Claude's edit under review wraps its long lines — the one view of a buffer that cut them off
+    /// at the edge.
+    #[test]
+    fn soft_wrap_is_the_buffers_and_the_review_wraps() {
+        let shown = |ed: &mut Editor| -> String {
+            let mut out = Vec::new();
+            render(ed, &mut out, 80, 24).unwrap();
+            let mut vt = vt100::Parser::new(24, 80, 0);
+            vt.process(&out);
+            vt.screen().contents()
+        };
+        let long = format!("echo {} TAIL", "word ".repeat(30));
+        let mut ed = Editor::new(Config::default());
+        ed.config.soft_wrap = "never".into();
+        let first = ed.open_virtual("script", &format!("#!/bin/sh\n{long}\n"));
+        assert!(!shown(&mut ed).contains("TAIL"), "never: cut at the edge");
+        // `z w`: this buffer wraps, said
+        for k in ["z", "w"] {
+            ed.handle_key(k.parse().unwrap());
+        }
+        assert_eq!(ed.doc().wrap, Some(true));
+        assert!(shown(&mut ed).contains("TAIL"), "wrapped");
+        assert!(ed.toasts.iter().any(|t| t.text.contains("long lines wrap in this buffer")));
+        // `:soft-wrap off` — on or off only
+        assert!(crate::typed::execute(&mut ed, "soft-wrap off").is_ok());
+        assert!(!shown(&mut ed).contains("TAIL"));
+        assert!(crate::typed::execute(&mut ed, "soft-wrap sideways").is_err(), "on or off only");
+        assert!(crate::typed::execute(&mut ed, "soft-wrap on").is_ok());
+        // Another buffer keeps the setting
+        let other = crate::document::Document::from_str(ed.alloc_id(), &long);
+        assert!(ed.wraps(ed.doc()) && !ed.wraps(&other), "another buffer keeps the setting");
+        // Claude's edit under review: its long lines wrap too — the document's and the added one's
+        ed.config.soft_wrap = "always".into();
+        ed.doc_mut().wrap = None;
+        let end = crate::movement::line_start(&ed.doc().text, 1);
+        let added = format!("echo {} ADDED\n", "more ".repeat(30));
+        crate::llm::review_with(&mut ed, first, "edit", vec![(0, end, "#!/bin/sh\n".into(), added)], None);
+        let s = shown(&mut ed);
+        assert!(s.contains("TAIL") && s.contains("ADDED"), "{s}");
+        // (never: cut at the edge, as before)
+        ed.config.soft_wrap = "never".into();
+        let s = shown(&mut ed);
+        assert!(!s.contains("TAIL") && !s.contains("ADDED"), "{s}");
+        crate::llm::close_review(&mut ed);
+        // A card's whole text wraps, whatever the setting says
+        let q = format!("Run it?\n\n  sh run.sh\n\n{long}");
+        let what = crate::offer::What::ReviewEnd { session: 0, started: std::time::Instant::now() };
+        ed.push_offer(crate::offer::Offer::new("Claude wants to run".into(), &q, "", String::new(), what));
+        ed.offer_view_all();
+        assert!(ed.doc().title.as_deref().is_some_and(|t| t.starts_with(crate::offer::CARD_VIEW)));
+        assert!(shown(&mut ed).contains("TAIL"), "the card's text wraps");
+    }
+
+    /// #157: Claude's run that has printed nothing for minutes (a server that never exited once its input
+    /// closed) says so — in the task panel, under Claude's run row, in `tarae state`'s runs, and in the inbox
+    /// as something to look at (`enter`: its panel with the keys) — until it prints again. Its session
+    /// behind wakes the editor once, when it goes silent.
+    #[test]
+    fn a_silent_run_says_so_where_the_user_looks() {
+        use crate::task::{Run, State, Task};
+        const SAID: &str = "no output for 3:0";
+        let mut ed = Editor::new(Config::default());
+        let cmd = "printf x | some-server";
+        let mut r = Run::for_test(Task { name: cmd.into(), cmd: cmd.into(), cwd: std::env::temp_dir() });
+        (r.state, r.by_claude) = (State::Running, true);
+        let wake = |ed: &Editor| ed.silent_wake().map(|d| d.as_secs());
+        ed.session.task_run = Some(r);
+        assert!(wake(&ed).is_some_and(|s| (170..=180).contains(&s)), "a frame when it goes silent");
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        crate::chat::open(&mut ed);
+        let c = ed.session.chat.as_mut().unwrap();
+        (c.state, c.unfolded) = (crate::chat::State::Thinking, true);
+        c.msgs.push(crate::chat::Msg::new(crate::chat::Role::User, "check it", ""));
+        let mut m = crate::chat::Msg::new(crate::chat::Role::Tool, "", "");
+        m.look = Some(crate::chat::Look {
+            verb: "run",
+            what: cmd.into(),
+            pattern: true,
+            range: String::new(),
+            link: None,
+        });
+        c.msgs.push(m);
+        let shown = |ed: &mut Editor| -> String {
+            let mut out = Vec::new();
+            render(ed, &mut out, 140, 36).unwrap();
+            let mut vt = vt100::Parser::new(36, 140, 0);
+            vt.process(&out);
+            vt.screen().contents()
+        };
+        assert!(!shown(&mut ed).contains("no output"), "it just started");
+        assert!(ed.ui_runs()[0].silent.is_none());
+        assert!(ed.inbox().is_empty());
+        // Three minutes and a bit of nothing
+        let Some(then) =
+            std::time::Instant::now().checked_sub(crate::waits::SILENT + std::time::Duration::from_secs(3))
+        else {
+            return; // (a machine up for less than that)
+        };
+        ed.session.task_run.as_mut().unwrap().last_output = then;
+        assert_eq!(wake(&ed), None, "silent already: no more frames for it");
+        let s = shown(&mut ed);
+        assert_eq!(s.matches(SAID).count(), 2, "the panel's header and the chat's row: {s}");
+        let runs = ed.ui_runs();
+        assert!(runs[0].silent.as_deref().is_some_and(|w| w.starts_with(SAID)), "{runs:?}");
+        assert!(runs[0].text().contains(SAID), "{}", runs[0].text());
+        let inbox = ed.inbox();
+        assert_eq!(inbox.len(), 1, "{inbox:?}");
+        let e = &inbox[0];
+        assert_eq!((e.kind, e.up), ("silent-run", "running"));
+        assert!(e.asks.starts_with(&format!("{cmd} · {SAID}")), "{}", e.asks);
+        assert!(e.waited_ms >= 183_000, "waited since it went quiet: {}", e.waited_ms);
+        // `enter` on it: its panel in front, with the keys, and how to stop it said
+        ed.inbox_go(&e.id.clone());
+        assert_eq!(ed.slot(), Some(crate::sizes::Slot::Task));
+        assert!(ed.bottom_has_keys(), "the panel has the keys");
+        assert!(ed.toasts.iter().any(|t| t.text.contains("space m c stops it")));
+        // It prints: all of it gone (the toast aside)
+        ed.toasts.clear();
+        ed.session.task_run.as_mut().unwrap().last_output = std::time::Instant::now();
+        assert!(!shown(&mut ed).contains("no output"));
+        assert!(ed.ui_runs()[0].silent.is_none() && ed.inbox().is_empty());
     }
 
     /// The side panel grows with a wide terminal — up to 12 more columns, the code keeping 100.

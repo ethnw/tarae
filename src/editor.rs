@@ -1439,7 +1439,11 @@ impl Editor {
 
     /// Whether `doc`'s long lines wrap (`editor.soft-wrap`) — "prose" = Markdown, commit messages, and
     /// files with no language.
+    /// A buffer's own choice (`z w`, `:soft-wrap`) goes first.
     pub fn wraps(&self, doc: &Document) -> bool {
+        if let Some(on) = doc.wrap {
+            return on;
+        }
         match self.config.soft_wrap.as_str() {
             "always" => true,
             "never" => false,
@@ -1447,6 +1451,19 @@ impl Editor {
                 matches!(doc.lang_name(), None | Some("markdown" | "git-commit"))
             }
         }
+    }
+
+    /// `z w` · `:soft-wrap [on|off]`: this buffer's long lines wrap, or scroll sideways — `on` None flips
+    /// what it does now. Said, with what the setting would do (#156).
+    pub fn soft_wrap_toggle(&mut self, on: Option<bool>) {
+        let on = on.unwrap_or(!self.wraps(self.doc()));
+        let doc = self.doc_mut();
+        doc.wrap = Some(on);
+        if on {
+            doc.left = 0;
+        }
+        let said = if on { "long lines wrap" } else { "long lines scroll sideways" };
+        self.set_status(format!("{said} in this buffer — editor.soft-wrap is {}", self.config.soft_wrap));
     }
 
     /// Insert-mode auto-pairs for this document — empty when turned off.
@@ -2131,10 +2148,8 @@ impl Editor {
             let left = crate::uistate::claude::FLASH.checked_sub(at.elapsed())?;
             Some(left + std::time::Duration::from_millis(2))
         });
-        match (next, flash) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        // A run of Claude's going silent, in any session: one frame then — the inbox counts it (#157)
+        [next, flash, self.silent_wake()].into_iter().flatten().min()
     }
 
     fn schedule_tick(&mut self) {
@@ -3522,6 +3537,10 @@ mod tests {
         ed.docs[0].text = ropey::Rope::from_str(text);
         // (tests make their projects in the temp folder — follow goes only into the project)
         ed.session.root = test_root();
+        // (a chat opened starts Claude: a stand-in that reads and says nothing, never the real one —
+        // `llm::spawn` refuses it in tests)
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
         ed
     }
 
@@ -10840,12 +10859,12 @@ mod tests {
         feed(&mut ed, "<space>vq");
         assert!(ed.session.code_review.is_some(), "not ended without a word");
         let card = ed.offers.first().map(|o| (o.title.clone(), o.question.clone())).unwrap();
-        assert_eq!(card.0, "End the review?");
-        assert!(
-            card.1.starts_with("2 files not viewed — end the review anyway?\n\n  b.rs\n  c.rs"),
-            "{}",
-            card.1
+        let name = ed.session.label().to_string();
+        assert_eq!(card.0, format!("End {name}'s review?"));
+        let head = format!(
+            "{name}'s review · uncommitted · 1 of 3 viewed\n\n2 files not viewed — end it anyway?\n\n  b.rs\n  c.rs"
         );
+        assert!(card.1.starts_with(&head), "{}", card.1);
         feed(&mut ed, "n");
         assert!(ed.session.code_review.is_some() && ed.offers.is_empty());
         // y: ended — back to the index as the diff base
@@ -11041,7 +11060,7 @@ mod tests {
         let (dir, main, ..) = follow_project("unreachable");
         let mut ed = editor("");
         ed.open(&main).unwrap();
-        ed.config.llm.command = "/nonexistent/claude".into();
+        ed.config.llm.command = "/nonexistent/no-llm".into();
         feed(&mut ed, "<space>nhello<ret>");
         assert!(ed.session.notes.list.is_empty(), "the new note went away");
         crate::notes::add(&mut ed, &main, 0..1, crate::notes::By::Claude, "hi");

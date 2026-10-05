@@ -217,6 +217,13 @@ impl Drop for Warm {
 
 /// Claude, started in `dir` (the project root — its relative paths, its tools and its kept conversations are there).
 pub fn spawn(cfg: &LlmConfig, extra: &[&str], dir: &Path) -> std::io::Result<Child> {
+    // (tests never start the real claude — a stand-in in `sh` answers for it; card model P2 found a test
+    // whose claude read ~/.claude.json and the keychain)
+    #[cfg(test)]
+    assert!(
+        Path::new(&cfg.command).file_name().is_none_or(|n| n != "claude"),
+        "a test started the real claude — give llm.command a stand-in (`sh -c 'cat > /dev/null'`)"
+    );
     let mut cmd = Command::new(&cfg.command);
     cmd.current_dir(dir).args(&cfg.args).args(extra);
     if let Some(m) = &cfg.model {
@@ -1345,6 +1352,16 @@ fn apply_accepted(ed: &mut Editor, rev: &Review) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Tests never start the real claude (card model P2 caught one reading ~/.claude.json and the keychain):
+    /// the default command, by name or path, is refused before anything starts.
+    #[test]
+    #[should_panic(expected = "a test started the real claude")]
+    fn a_test_never_starts_the_real_claude() {
+        // (a path that isn't there: without the guard, nothing starts and nothing panics)
+        let cfg = LlmConfig { command: "/nonexistent/claude".into(), ..LlmConfig::default() };
+        let _ = spawn(&cfg, &[], &std::env::temp_dir());
+    }
 
     /// A commit message's body wrapped at 72: the subject and short lines as they are, a long line between
     /// words, a list item's rest under its text; code, trailers and an over-long word whole.

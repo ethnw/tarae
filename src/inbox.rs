@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 
 use crate::editor::Editor;
 use crate::event::SessionId;
+use crate::sizes::Slot;
 use crate::uistate::{CardState, session_id};
 
 /// One thing waiting for the user.
@@ -83,6 +84,26 @@ fn ms(since: Instant, now: Instant) -> u64 {
     now.saturating_duration_since(since).as_millis().min(u64::MAX as u128) as u64
 }
 
+/// A session's runs of Claude's that have printed nothing for `waits::SILENT` or more: (id as the state
+/// names it, the slot it's in, its label, when it last printed, `no output for 27:04`).
+fn silent_runs(l: &crate::session::Session, now: Instant) -> Vec<(String, Slot, String, Instant, String)> {
+    let mut out = Vec::new();
+    if let Some(r) = l.task_run.as_ref().filter(|r| r.by_claude && r.state == crate::task::State::Running)
+        && let Some(said) = r.wait.silent(r.last_output, now)
+    {
+        let label = crate::task::traced(&r.task.cmd);
+        out.push((format!("run#{}", r.trace.id()), Slot::Task, label, r.last_output, said));
+    }
+    if let Some(r) =
+        l.test_run.as_ref().filter(|r| r.by_claude && r.state == crate::testing::RunState::Running)
+        && let Some(said) = r.wait.silent(r.last_output, now)
+    {
+        let label = format!("tests {}", r.target.label);
+        out.push((format!("run#{}", r.trace.id()), Slot::Test, label, r.last_output, said));
+    }
+    out
+}
+
 impl Editor {
     /// What waits for the user, oldest first.
     pub fn inbox(&self) -> Vec<Entry> {
@@ -124,6 +145,11 @@ impl Editor {
                 };
                 v.push(entry(format!("edit#{s}:review"), "edit", asks, r.asked, "review"));
             }
+            // Claude's run printing nothing for minutes: something to look at — its turn waits on it, and
+            // only the user can stop it (#157). Waited since it went quiet.
+            for (id, _, label, last, said) in silent_runs(l, now) {
+                v.push(entry(id, "silent-run", format!("{label} · {said}"), last, "running"));
+            }
             let Some(c) = l.chat.as_ref() else { continue };
             for p in &c.edits.queue {
                 let path = crate::chat::resolve(&l.root, p.input["file_path"].as_str().unwrap_or_default());
@@ -144,6 +170,26 @@ impl Editor {
         }
         v.sort_by(|a, b| b.0.waited_ms.cmp(&a.0.waited_ms).then(a.1.cmp(&b.1)));
         v.into_iter().map(|(e, _)| e).collect()
+    }
+
+    /// When a run of Claude's in any session next goes silent (`waits::SILENT`) — a frame then, for the
+    /// status line's count and the inbox (nothing else may draw: the session behind, Claude idle there).
+    pub(crate) fn silent_wake(&self) -> Option<std::time::Duration> {
+        let now = Instant::now();
+        let mut next: Option<std::time::Duration> = None;
+        for l in std::iter::once(&self.session).chain(&self.sessions) {
+            let task = l.task_run.as_ref().filter(|r| r.by_claude && r.state == crate::task::State::Running);
+            let test =
+                l.test_run.as_ref().filter(|r| r.by_claude && r.state == crate::testing::RunState::Running);
+            let ins = task
+                .and_then(|r| r.wait.silent_in(r.last_output, now))
+                .into_iter()
+                .chain(test.and_then(|r| r.wait.silent_in(r.last_output, now)));
+            for d in ins {
+                next = Some(next.map_or(d, |n| n.min(d)));
+            }
+        }
+        next.map(|d| d + std::time::Duration::from_millis(5))
     }
 
     /// Where `C-q` goes now, unheld — the inbox's first, and what that is from here.
@@ -185,6 +231,18 @@ impl Editor {
                 self.offer_to_front(i);
             }
             return;
+        }
+        // A silent run: its panel in front with the keys — stopping it is the user's call there
+        if e.kind == "silent-run" {
+            let Some((_, slot, _, _, said)) =
+                silent_runs(&self.session, Instant::now()).into_iter().find(|r| r.0 == e.id)
+            else {
+                return self.set_status("that run isn't quiet any more — it printed, or ended");
+            };
+            self.slot_show(slot);
+            self.bottom_take_keys();
+            let stop = if slot == Slot::Task { "space m c" } else { "space x c" };
+            return self.set_status(format!("Claude's run: {said} — {stop} stops it, Claude hears why"));
         }
         // An edit or a read: what holds it back here goes (insert mode, a prompt — its review waits for
         // you to stop typing), then the queues go on
@@ -230,8 +288,10 @@ impl Editor {
             .map(|e| {
                 let name = names.iter().find(|n| n.0 == e.session).map_or("", |n| n.1.as_str());
                 let label = if many { format!("{name} · {}", e.asks) } else { e.asks.clone() };
-                let claudes =
-                    matches!(e.kind, "run" | "read" | "no-sandbox" | "screen" | "edit" | "change-set");
+                let claudes = matches!(
+                    e.kind,
+                    "run" | "read" | "no-sandbox" | "screen" | "edit" | "change-set" | "silent-run"
+                );
                 crate::picker::Item {
                     label,
                     hint: format!("{} · {}", e.kind, waited(e.waited_ms)),

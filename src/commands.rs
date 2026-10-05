@@ -157,6 +157,7 @@ commands! {
         git_stage_hunk => "Stage this change",
         git_toggle_blame => "Blame on this line (on/off)",
         align_view_center => "Cursor line to mid-screen",
+        toggle_soft_wrap => "Wrap long lines here (on/off)",
         align_view_top => "Cursor line to the top",
         align_view_bottom => "Cursor line to the bottom",
         scroll_down => "Scroll down a line",
@@ -1087,6 +1088,9 @@ fn textobject(cx: &mut Context, ch: char, kind: to::Kind) {
 
 fn align_view_center(cx: &mut Context) {
     cx.editor.align_view(crate::viewalign::Place::Center)
+}
+fn toggle_soft_wrap(cx: &mut Context) {
+    cx.editor.soft_wrap_toggle(None)
 }
 fn align_view_top(cx: &mut Context) {
     cx.editor.align_view(crate::viewalign::Place::Top)

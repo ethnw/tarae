@@ -679,10 +679,10 @@ impl Editor {
             self.handle_key(esc);
             self.mode = Mode::Normal;
         }
-        // Out: where it was, and Claude's cards (they wait for it)
+        // Out: where it was, and its own cards — Claude's, its review's end (they wait for it)
         self.session.current_doc = self.doc().id;
         let (mut mine, rest): (Vec<_>, Vec<_>) =
-            std::mem::take(&mut self.offers).into_iter().partition(crate::offer::Offer::claudes);
+            std::mem::take(&mut self.offers).into_iter().partition(crate::offer::Offer::goes_with_session);
         self.offers = rest;
         mine.append(&mut self.session.parked);
         self.session.parked = mine;
@@ -1170,6 +1170,59 @@ mod tests {
         );
         let said = ed.messages.iter().map(|m| m.2.clone()).collect::<Vec<_>>().join(" | ");
         assert!(said.contains("front · a card went missing"), "named: {said}");
+        std::fs::remove_dir_all(front.parent().unwrap()).ok();
+    }
+
+    /// #159: a review's end card is its session's — it names the session and the review, goes behind with
+    /// its session, and `y` ends only that review: not another session's after a trip through the inbox, not
+    /// a review begun since in its place.
+    #[test]
+    fn a_review_end_card_ends_only_its_own_review() {
+        use crate::codereview::{Base, CodeReview, File};
+        let (mut ed, front, back) = two_projects("review-end");
+        let review = |root: &Path| {
+            let f = |rel: &str| File {
+                rel: rel.into(),
+                path: root.join(rel),
+                added: 1,
+                removed: 0,
+                new: false,
+                gone: false,
+                binary: false,
+            };
+            CodeReview::for_test(Base::Head, root.to_path_buf(), vec![f("a.rs"), f("b.rs"), f("c.rs")])
+        };
+        ed.session.code_review = Some(review(&front));
+        let back_id = ed.session_open(&back).unwrap();
+        ed.session.code_review = Some(review(&back));
+        assert!(ed.session_switch(0));
+        let name = ed.session.label().to_string();
+        feed(&mut ed, "<space>vq");
+        let o = ed.offers.first().expect("the end card");
+        let card = format!("card#{}", o.id);
+        assert_eq!(o.title, format!("End {name}'s review?"));
+        let head =
+            format!("{name}'s review · uncommitted · 0 of 3 viewed\n\n3 files not viewed — end it anyway?");
+        assert!(o.question.starts_with(&head), "{}", o.question);
+        // To back: front's card goes behind with front; back's own end card is its own, not merged into it
+        assert!(ed.session_switch(back_id));
+        assert!(ed.offers.is_empty(), "front's card isn't up in back: {:?}", ed.offers);
+        feed(&mut ed, "<space>vq");
+        assert_eq!(ed.offers.len(), 1);
+        assert_eq!(ed.offers[0].title, format!("End {}'s review?", ed.session.label()));
+        // Back to front's card through the inbox, `y`: front's review ends, back's stays
+        ed.inbox_go(&card);
+        assert_eq!(ed.session.id, 0);
+        feed(&mut ed, "y");
+        assert!(ed.session.code_review.is_none(), "front's ended");
+        assert!(session_by(&ed, back_id).code_review.is_some(), "back's untouched");
+        // Back's card, its review ended and another begun meanwhile: `y` ends nothing
+        assert!(ed.session_switch(back_id));
+        let r = ed.session.code_review.as_mut().unwrap();
+        r.started += Duration::from_millis(1);
+        feed(&mut ed, "<C-q>y");
+        assert!(ed.offers.is_empty(), "answered");
+        assert!(ed.session.code_review.is_some(), "the review begun since stays");
         std::fs::remove_dir_all(front.parent().unwrap()).ok();
     }
 

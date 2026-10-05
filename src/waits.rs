@@ -9,6 +9,24 @@ use std::time::{Duration, Instant};
 
 use crate::trace::RunTrace;
 
+/// A running run that has printed nothing this long says so — the chat's row, `tarae state`'s runs, the
+/// inbox for one of Claude's — and its report says it (#157: a server that never exited once its input
+/// closed showed only `● run` for 27 minutes).
+pub const SILENT: Duration = Duration::from_secs(180);
+
+/// Claude's report's line on a run that ended (or was stopped) at `end` after printing nothing since `last`
+/// for `SILENT` or more: `It printed nothing for its last 27:04.`
+pub fn silent_line(last: Instant, end: Instant) -> Option<String> {
+    let d = end.saturating_duration_since(last);
+    (d >= SILENT).then(|| {
+        format!(
+            "It printed nothing for its last {} — a program that waits for input or never exits (a server \
+             after its input closed) hangs until the user stops it.",
+            clock(d)
+        )
+    })
+}
+
 /// A pack's `[[waits]]` entry: `line`, a regular expression a waiting line matches (its named groups go into
 /// the texts as `{name}`); `for`, what it waits for as the panel says it (`cargo's lock`); `report`, as
 /// Claude's report says it (`cargo's {what} lock`; `for` unless set).
@@ -113,6 +131,24 @@ impl Waiting {
         Some(format!("waiting for {} · {}", hit.said, clock(now.saturating_duration_since(*since))))
     }
 
+    /// How long a running run has printed nothing, since `last` — when that's `SILENT` or more and it waits
+    /// on nothing it said (a wait says itself).
+    pub fn silent_for(&self, last: Instant, now: Instant) -> Option<Duration> {
+        let d = now.saturating_duration_since(last);
+        (self.now.is_none() && d >= SILENT).then_some(d)
+    }
+
+    /// How long until a running run that printed last at `last` goes silent — None: it is, or it waits.
+    pub fn silent_in(&self, last: Instant, now: Instant) -> Option<Duration> {
+        let d = (last + SILENT).checked_duration_since(now)?;
+        (self.now.is_none() && !d.is_zero()).then_some(d)
+    }
+
+    /// The chat's row, `tarae state`'s runs, the inbox: `no output for 27:04` (`silent_for`).
+    pub fn silent(&self, last: Instant, now: Instant) -> Option<String> {
+        self.silent_for(last, now).map(|d| format!("no output for {}", clock(d)))
+    }
+
     /// Claude's report's line, once the run ended (`took` all told — from its start): `Waited 16.0s for
     /// cargo's build directory lock. Ran 11.0s.` — and with its time in line before it started (`queued`: how
     /// long, behind what — `queued.rs`), `Waited 37.0s — 21.0s queued behind cargo test, 16.0s for cargo's
@@ -203,6 +239,14 @@ mod tests {
             line.contains("first output 1.0s · ran 1.0s · waited for cargo's lock 37.0s · exit 0"),
             "{line}"
         );
+        // Silent: from `SILENT` on, said — unless it says what it waits on
+        let mut w = Waiting::default();
+        assert_eq!(w.silent(at(0), at(179)), None);
+        assert_eq!(w.silent(at(0), at(1624)).as_deref(), Some("no output for 27:04"));
+        w.line(Some(hit.clone()), at(5), &trace);
+        assert_eq!(w.silent(at(5), at(1624)), None, "its wait says it");
+        assert_eq!(silent_line(at(0), at(179)), None);
+        assert!(silent_line(at(0), at(1624)).unwrap().starts_with("It printed nothing for its last 27:04"));
         // Nothing waited on: nothing said; only in line, that alone
         assert_eq!(Waiting::default().said(Duration::from_secs(3), None), None);
         assert_eq!(

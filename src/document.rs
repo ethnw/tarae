@@ -200,6 +200,8 @@ pub struct Document {
     /// Display name of an unnamed buffer (tutorial etc.) · disposable (quit isn't blocked as "unsaved").
     pub title: Option<String>,
     pub throwaway: bool,
+    /// Soft wrap for this buffer alone (`z w`, `:soft-wrap`) — None: `editor.soft-wrap` decides (#156).
+    pub wrap: Option<bool>,
     /// Address of non-file content (jdtls jdt:// class source) — reopening uses this buffer. Read-only.
     pub virtual_uri: Option<String>,
     /// Spots the jump lists point at (id → selection) — they follow edits like diagnostics do.
@@ -249,6 +251,7 @@ impl Document {
             git_version: u64::MAX,
             title: None,
             throwaway: false,
+            wrap: None,
             virtual_uri: None,
             marks: Vec::new(),
             next_mark: 0,

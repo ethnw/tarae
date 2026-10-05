@@ -499,10 +499,15 @@ pub fn turn_over(ed: &mut Editor) {
 pub fn tests_dropped(ed: &mut Editor, why: &str) {
     let Some(r) = ed.session.test_run.as_mut() else { return };
     let joined = std::mem::take(&mut r.joined);
+    let silent = (r.state == RunState::Running)
+        .then(|| crate::waits::silent_line(r.last_output, Instant::now()))
+        .flatten()
+        .map(|s| format!(". {s}"))
+        .unwrap_or_default();
     if let Some(call) = r.chat.take() {
         crate::reads::run_ended(ed);
         for c in std::iter::once(call).chain(joined.into_iter().map(|j| j.call)) {
-            answer(ed, c, Err(format!("the test run was stopped — {why}")));
+            answer(ed, c, Err(format!("the test run was stopped — {why}{silent}")));
         }
     }
 }
@@ -2174,10 +2179,14 @@ pub fn run_dropped(ed: &mut Editor, why: &str) {
         return;
     };
     let joined = std::mem::take(&mut r.joined);
+    // (stopped after minutes of nothing: Claude hears that too — #157)
+    let silent = crate::waits::silent_line(r.last_output, Instant::now())
+        .map(|s| format!(". {s}"))
+        .unwrap_or_default();
     if let Some(call) = r.chat.take() {
         crate::reads::run_ended(ed);
         for c in std::iter::once(call).chain(joined.into_iter().map(|j| j.call)) {
-            answer(ed, c, Err(format!("the command was stopped — {why}")));
+            answer(ed, c, Err(format!("the command was stopped — {why}{silent}")));
         }
     }
 }
@@ -2206,7 +2215,13 @@ fn run_report(root: &Path, r: &crate::task::Run, places: &[crate::quickfix::Item
     // (how long it waited in line, and how much of it on what isn't its own — another cargo's lock —
     // `waits.rs`)
     let waited = waited.line(&r.wait, r.took);
-    let mut out = format!("{verdict}{took}\n{waited}$ {}\n", r.task.cmd);
+    // (silent at its end for minutes: said — #157)
+    let silent = r
+        .took
+        .and_then(|t| crate::waits::silent_line(r.last_output, r.started + t))
+        .map(|s| format!("{s}\n"))
+        .unwrap_or_default();
+    let mut out = format!("{verdict}{took}\n{waited}{silent}$ {}\n", r.task.cmd);
     let (errors, warnings) = r.found;
     // Where its places are said as they are (#38): a check's or a build's went to the user's list; any
     // other run's (a grep's `path:line:` hits) are only in its output — not the user's, not errors
@@ -2320,8 +2335,13 @@ fn report(root: &Path, r: &TestRun, waited: Waited) -> String {
     // (how long it waited in line, and how much of it on what isn't its own — another cargo's lock —
     // `waits.rs`)
     let waited = waited.line(&r.wait, r.took);
+    let silent = r
+        .took
+        .and_then(|t| crate::waits::silent_line(r.last_output, r.started + t))
+        .map(|s| format!("{s}\n"))
+        .unwrap_or_default();
     let mut out = format!(
-        "{verdict}{took} — {}\n{waited}$ {}  (in {})\n",
+        "{verdict}{took} — {}\n{waited}{silent}$ {}  (in {})\n",
         r.target.label,
         r.target.argv().join(" "),
         crate::chat::shown(root, &r.target.cwd)
@@ -2839,7 +2859,7 @@ mod tests {
             "q",
             "",
             String::new(),
-            crate::offer::What::ReviewEnd,
+            crate::offer::What::ReviewEnd { session: 0, started: std::time::Instant::now() },
         ));
         ed.offer_dismiss();
         assert_eq!(lines().len(), 3);

@@ -9,6 +9,9 @@ fn editor() -> Editor {
     let mut ed = Editor::new(Config::default());
     ed.docs[0].text = ropey::Rope::from_str("one\ntwo\nthree\n");
     ed.session.root = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+    // (a message sent in a scene starts Claude: a stand-in, never the real one)
+    ed.config.llm.command = "sh".into();
+    ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
     ed
 }
 
@@ -33,7 +36,13 @@ fn frame(ed: &mut Editor) {
 
 /// A light card: `y` ends the code review (none here — nothing happens).
 fn light_card(ed: &mut Editor) {
-    let o = Offer::new("End the review?".into(), "2 files not viewed.", "", String::new(), What::ReviewEnd);
+    let o = Offer::new(
+        "End the review?".into(),
+        "2 files not viewed.",
+        "",
+        String::new(),
+        What::ReviewEnd { session: 0, started: std::time::Instant::now() },
+    );
     ed.push_offer(o);
 }
 
@@ -43,8 +52,13 @@ fn older_card_behind(ed: &mut Editor) {
     let dir = std::env::temp_dir().join(format!("tarae-uistate-behind-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let id = ed.session_open(&dir).unwrap();
-    let mut o =
-        Offer::new("Restart anyway?".into(), "It's the binary it was.", "", String::new(), What::ReviewEnd);
+    let mut o = Offer::new(
+        "Restart anyway?".into(),
+        "It's the binary it was.",
+        "",
+        String::new(),
+        What::ReviewEnd { session: 0, started: std::time::Instant::now() },
+    );
     o.since = Instant::now() - Duration::from_secs(60);
     ed.session.parked.push(o);
     assert!(ed.session_switch(0) && ed.session.id != id);

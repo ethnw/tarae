@@ -102,6 +102,8 @@ pub struct Run {
     pub state: String,
     /// What it waits on (`waiting for cargo's lock · 0:37`), or where it is in line (`1st`).
     pub waiting: Option<String>,
+    /// Running and printing nothing for minutes: `no output for 27:04` (`waits::SILENT` — #157).
+    pub silent: Option<String>,
     pub since_ms: u64,
     pub took_ms: Option<u64>,
 }
@@ -297,6 +299,7 @@ impl Editor {
                     label: if r.by_claude { crate::task::traced(&r.task.cmd) } else { r.task.name.clone() },
                     state,
                     waiting,
+                    silent: (r.state == S::Running).then(|| r.wait.silent(r.last_output, now)).flatten(),
                     since_ms: ms(now.saturating_duration_since(r.started)),
                     took_ms: r.took.map(ms),
                 });
@@ -319,6 +322,7 @@ impl Editor {
                     label: r.target.label.clone(),
                     state: state.into(),
                     waiting,
+                    silent: (r.state == S::Running).then(|| r.wait.silent(r.last_output, now)).flatten(),
                     since_ms: ms(now.saturating_duration_since(r.started)),
                     took_ms: r.took.map(ms),
                 });
@@ -338,6 +342,7 @@ impl Editor {
                         label: n.what.label(),
                         state: "queued".into(),
                         waiting: Some(crate::queued::ordinal(pos + 1)),
+                        silent: None,
                         since_ms: ms(now.saturating_duration_since(n.queued.since)),
                         took_ms: None,
                     });
@@ -443,12 +448,13 @@ impl Run {
     pub fn json(&self) -> Value {
         json!({
             "id": self.id, "session": self.session, "of": self.of, "kind": self.kind, "label": self.label,
-            "state": self.state, "waiting": self.waiting, "since_ms": self.since_ms, "took_ms": self.took_ms,
+            "state": self.state, "waiting": self.waiting, "silent": self.silent, "since_ms": self.since_ms,
+            "took_ms": self.took_ms,
         })
     }
 
     pub fn text(&self) -> String {
-        let waiting = self.waiting.as_deref().map(|w| format!(" · {w}")).unwrap_or_default();
+        let waiting = self.waiting.iter().chain(&self.silent).map(|w| format!(" · {w}")).collect::<String>();
         format!("{} {} · {} · {}{waiting}", self.id, self.of, self.label, self.state)
     }
 }

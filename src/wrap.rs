@@ -27,7 +27,7 @@ pub struct Row {
 }
 
 impl Row {
-    fn whole(start: usize) -> Self {
+    pub(crate) fn whole(start: usize) -> Self {
         Row { start, col: 0, end_col: usize::MAX, x0: 0 }
     }
 }
