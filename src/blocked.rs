@@ -1,6 +1,7 @@
 //! Acting on what the sandbox blocked — the user's call, never Claude's: `space m s` on a command's panel,
 //! `space x s` on a test run's, `:sandbox-blocked`. A list made of the run's denials: let Claude's commands
-//! write in a folder (each folder from the denied path's own up to just below home — how wide is the
+//! read a place in home (`allow::read_choices` — never keys or Claude's and tarae's own; Claude's Read reads
+//! it too), write in a folder (each folder from the denied path's own up to just below home — how wide is the
 //! user's call; `allow::write_choices` leaves out what must never open), connect to a port on this machine
 //! (not the risky ones — `sandbox::RISKY_PORTS`, by hand only), or run that one command outside the
 //! sandbox. Each is a weighty card. A write or a port is for once (the command runs again now with it),
@@ -48,41 +49,50 @@ pub struct Choice {
     pub why: String,
 }
 
-/// What could open for `denials`: the folders a write may open (`allow::write_choices`), a port on this
-/// machine (not a risky one) — each once. Home, the project and the folders on PATH passed in.
+/// What could open for `denials`: the places in home a read may open (`allow::read_choices` — never what's
+/// kept from every run), the folders a write may open (`allow::write_choices`), a port on this machine (not a
+/// risky one) — each once. Home, the project and the folders on PATH passed in.
 pub fn choices(denials: &[Denial], home: &Path, root: &Path, path: &[PathBuf]) -> Vec<Choice> {
     let mut out: Vec<Choice> = Vec::new();
+    let kept = crate::sandbox::kept_reads(home, None);
     for d in denials {
-        let found: Vec<Choice> = if d.op.starts_with("file-write") && d.target.starts_with('/') {
-            let target = crate::sandbox::profile_path(Path::new(&d.target));
-            crate::allow::write_choices(&target, home, root, path)
-                .into_iter()
-                .map(|dir| {
-                    let below = target.strip_prefix(&dir).map(|r| format!("…/{}", r.display()));
-                    let below = below.unwrap_or_else(|_| d.target.clone());
-                    let why = format!("{} was writing {below} in it", d.process);
-                    Choice { grant: Grant::Write(dir), hint: below, why }
-                })
-                .collect()
+        let target = crate::sandbox::profile_path(Path::new(&d.target));
+        let below = |dir: &Path| {
+            let below = target.strip_prefix(dir).map(|r| format!("…/{}", r.display()));
+            below.ok().filter(|b| b != "…/").unwrap_or_else(|| crate::allow::tilde(&target))
+        };
+        let file = d.target.starts_with('/');
+        let mut found: Vec<Choice> = Vec::new();
+        if file && (d.op.starts_with("file-read-data") || d.op == crate::sandbox::EITHER) {
+            found.extend(crate::allow::read_choices(&target, home, &kept).into_iter().map(|place| {
+                let why = format!("{} was reading {} in it", d.process, below(&place));
+                Choice { hint: below(&place), grant: Grant::Read(place), why }
+            }));
+        }
+        if file && (d.op.starts_with("file-write") || d.op == crate::sandbox::EITHER) {
+            found.extend(crate::allow::write_choices(&target, home, root, path).into_iter().map(|dir| {
+                let why = format!("{} was writing {} in it", d.process, below(&dir));
+                Choice { hint: below(&dir), grant: Grant::Write(dir), why }
+            }));
         } else if d.op == "network-outbound"
             && let Some(n) = d.target.rsplit_once(':').and_then(|(_, p)| p.parse::<u16>().ok())
             && !crate::sandbox::RISKY_PORTS.iter().any(|(p, _)| *p == n)
         {
             let why = format!("{} was connecting to it", d.process);
-            vec![Choice { grant: Grant::Port(n), hint: format!("{} connecting", d.process), why }]
-        } else if d.op == "network-outbound" && d.target.starts_with('/') {
+            found.push(Choice { grant: Grant::Port(n), hint: format!("{} connecting", d.process), why });
+        } else if d.op == "network-outbound" && file {
             // A unix socket (#119): that file, by its real path — one that's there and is a socket
             use std::os::unix::fs::FileTypeExt as _;
             let real = std::fs::canonicalize(&d.target).ok().filter(|p| {
                 std::fs::metadata(p).is_ok_and(|m| m.file_type().is_socket()) && !p.starts_with(root)
             });
             let why = format!("{} was connecting to it", d.process);
-            real.map(|s| Choice { grant: Grant::Socket(s), hint: format!("{} connecting", d.process), why })
-                .into_iter()
-                .collect()
-        } else {
-            Vec::new()
-        };
+            found.extend(real.map(|s| Choice {
+                grant: Grant::Socket(s),
+                hint: format!("{} connecting", d.process),
+                why,
+            }));
+        }
         for c in found {
             if !out.iter().any(|o| o.grant == c.grant) {
                 out.push(c);
@@ -100,10 +110,16 @@ pub fn path_dirs() -> Vec<PathBuf> {
 }
 
 impl Editor {
-    /// The run of Claude's whose denials `which` means, if the sandbox blocked anything in it.
+    /// The run of Claude's whose denials `which` means, if the sandbox blocked anything in it — what the
+    /// kernel reported, and what its output says (`Policy::said_in_output`: the kernel's report gets lost).
     fn blocked_run(&self, which: Which) -> Option<BlockedRun> {
-        let denials = |g: Option<&crate::sandbox::Guard>| -> Option<Vec<Denial>> {
-            let seen = g?.watch()?.blocked().seen;
+        let denials = |g: Option<&crate::sandbox::Guard>, output: &[(bool, String)]| -> Option<Vec<Denial>> {
+            let g = g?;
+            let mut seen = g.watch().map(|w| w.blocked().seen).unwrap_or_default();
+            if let crate::sandbox::Guard::In(p) = g {
+                let said = p.said_in_output(output, &seen);
+                seen.extend(said);
+            }
             (!seen.is_empty()).then_some(seen)
         };
         let task = self.session.task_run.as_ref().and_then(|r| {
@@ -111,13 +127,13 @@ impl Editor {
                 r.started,
                 BlockedRun {
                     job: Job::Command(r.task.cmd.clone(), r.task.cwd.clone()),
-                    denials: denials(r.guard.as_ref())?,
+                    denials: denials(r.guard.as_ref(), &r.output)?,
                 },
             ))
         });
         let test = self.session.test_run.as_ref().and_then(|r| {
             let job = Job::Tests(Box::new(r.target.clone()));
-            Some((r.started, BlockedRun { job, denials: denials(r.guard.as_ref())? }))
+            Some((r.started, BlockedRun { job, denials: denials(r.guard.as_ref(), &r.output)? }))
         });
         match which {
             Which::Task => task.map(|t| t.1),
@@ -143,6 +159,7 @@ impl Editor {
             .enumerate()
             .map(|(i, c)| Item {
                 label: match &c.grant {
+                    Grant::Read(p) => format!("allow reading {}", crate::allow::tilde(p)),
                     Grant::Write(p) => format!("allow writing in {}", crate::allow::tilde(p)),
                     Grant::Port(n) => format!("allow port {n} on this machine"),
                     Grant::Socket(s) => format!("allow the socket {} only", crate::allow::tilde(s)),
@@ -278,6 +295,43 @@ mod tests {
             got,
             [Grant::Write(home.join(".npm/_cacache")), Grant::Write(home.join(".npm")), Grant::Port(5432)],
             "Docker's port and the project's .git aren't offered; each folder once"
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Card model P2: a read the sandbox denied in home offers the places it may open, nearest first — never
+    /// a key's; one only the output said (reading or writing — it doesn't say which) offers both.
+    #[test]
+    fn what_a_denied_read_offers() {
+        let base = std::env::temp_dir().join(format!("tarae-blocked-read-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        for d in ["home/src/lib", "home/.ssh", "home/notes", "home/proj"] {
+            std::fs::create_dir_all(base.join(d)).unwrap();
+        }
+        let home = std::fs::canonicalize(base.join("home")).unwrap();
+        let d = |op: &str, target: PathBuf| Denial {
+            process: "cat".into(),
+            op: op.into(),
+            target: target.display().to_string(),
+        };
+        let denials = [
+            d("file-read-data", home.join("src/lib/a.rs")),
+            d("file-read-data", home.join(".ssh/id_ed25519")),
+            d(crate::sandbox::EITHER, home.join("notes/x")),
+        ];
+        let all = choices(&denials, &home, &home.join("proj"), &[]);
+        assert_eq!((all[0].hint.as_str(), all[1].hint.as_str()), ("…/a.rs", "…/lib/a.rs"));
+        assert_eq!(all[0].why, "cat was reading …/a.rs in it");
+        let got: Vec<Grant> = all.into_iter().map(|c| c.grant).collect();
+        assert_eq!(
+            got,
+            [
+                Grant::Read(home.join("src/lib")),
+                Grant::Read(home.join("src")),
+                Grant::Read(home.join("notes")),
+                Grant::Write(home.join("notes")),
+            ],
+            "nothing for the key"
         );
         std::fs::remove_dir_all(&base).ok();
     }

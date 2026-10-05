@@ -6,8 +6,10 @@
 //! `cargo_dir_verdict`, #20: a cargo config in the checkout names them, and Claude can write it; Go's caches), connect to nothing
 //! over the network but the ports on this machine the user opened (`llm.sandbox-ports`, or all with
 //! `llm.sandbox-localhost` — `RISKY_PORTS` says why not all by default), and make or reach unix sockets
-//! only in the project and its own temp folder (`RunDir`, its `TMPDIR`). What the user runs themselves (`space m m`, `space x x`, installs,
-//! `:restart`) isn't sandboxed.
+//! only in the project and its own temp folder (`RunDir`, its `TMPDIR`). In home it reads only the project,
+//! where it writes and what the toolchains were measured reading, besides what's granted (`Reads` — card model
+//! P2) — never keys or Claude's and tarae's own (`kept_reads`), nor the clipboard or the keychain. What the
+//! user runs themselves (`space m m`, `space x x`, installs, `:restart`) isn't sandboxed.
 //!
 //! Measured on macOS 27 (2026-10-01, `target/sb/` scripts): the later of two rules on a path wins and
 //! `require-not` works · a sandboxed process can't apply a different profile (exit 71, `sandbox_apply:
@@ -66,43 +68,45 @@ impl Guard {
     }
 
     /// What Claude reads with the command's result: what the sandbox blocked (or that it blocked nothing),
-    /// then what the sandbox allows. `output` = the run's lines — the fallback when nothing could watch.
+    /// then what the sandbox allows. `output` = the run's lines: what they say was refused where the profile
+    /// denies it counts too (`Policy::said_in_output` — the kernel's own report of a denial gets lost).
     pub fn report(&self, output: &[(bool, String)]) -> String {
         let rules = self.rules();
         let unwatched = " \"Operation not permitted\" is likely the sandbox.";
-        let Some(w) = self.watch() else {
-            return if matches!(self, Guard::In(_)) { format!("{rules}{unwatched}") } else { rules };
-        };
-        let b = w.blocked();
-        let in_caches = self.refused_in_caches(output);
-        if b.total == 0 && b.failed.is_none() && !in_caches.is_empty() {
-            let mut s =
-                "The sandbox's own report of what it blocked didn't come, but the output says a write \
-                         in cargo's caches was refused:\n"
-                    .to_string();
-            for l in &in_caches {
-                s.push_str(&format!("  {}\n", l.trim()));
-            }
-            if let Guard::In(p) = self {
-                s.push_str(&caches_kept(p));
-            }
-            s.push_str(&rules);
-            return s;
+        let Guard::In(p) = self else { return rules };
+        let mut b = self.watch().map(|w| w.blocked()).unwrap_or_default();
+        for d in p.said_in_output(output, &b.seen) {
+            b.add(d);
+        }
+        if self.watch().is_none() && b.total == 0 {
+            return format!("{rules}{unwatched}");
         }
         if b.total > 0 {
-            let mut s = format!(
+            let mut s = match &b.failed {
+                Some(why) => {
+                    format!("tarae couldn't watch what the sandbox blocked ({why}) — its output says:\n")
+                }
+                None => String::new(),
+            };
+            s.push_str(&format!(
                 "The sandbox blocked {} — {} time{}:\n",
                 if b.distinct == 1 { "one thing".to_string() } else { format!("{} things", b.distinct) },
                 b.total,
                 if b.total == 1 { "" } else { "s" }
-            );
+            ));
             for d in &b.seen {
                 s.push_str(&format!("  {}\n", d.reported()));
             }
             if b.distinct > b.seen.len() {
                 s.push_str(&format!("  … and {} more\n", b.distinct - b.seen.len()));
             }
-            let (kept, all) = self.kept(&b.seen, !in_caches.is_empty());
+            if b.seen.iter().any(|d| d.process == SEEN_IN_OUTPUT) {
+                s.push_str(
+                    "(What's said in the output is from its own error lines, judged by the sandbox's rules: the \
+                     kernel's report of a denial gets lost now and then.)\n",
+                );
+            }
+            let (kept, all) = self.kept(&b.seen);
             s.push_str(&kept);
             s.push_str(&rules);
             if !all || b.distinct > b.seen.len() {
@@ -127,41 +131,24 @@ impl Guard {
                         s.push_str(&format!("  {l}\n"));
                     }
                 }
-                if let (false, Guard::In(p)) = (in_caches.is_empty(), self) {
-                    s.push_str(&caches_kept(p));
-                }
                 s
             }
         }
     }
 
-    /// The output's lines that name a path in cargo's caches as what failed, when it says a write was
-    /// refused — what's left to go by when the kernel's report of the denial doesn't come (measured
-    /// 2026-10-04: a cargo that couldn't unpack a crate offline went unreported in 7 of 9 runs, even after
-    /// 10 s, while every `/bin/mkdir` in a row was reported).
-    fn refused_in_caches<'a>(&self, output: &'a [(bool, String)]) -> Vec<&'a str> {
-        let Guard::In(p) = self else { return Vec::new() };
-        if p.caches.is_empty() || !output.iter().any(|(_, l)| l.contains("Operation not permitted")) {
-            return Vec::new();
-        }
-        let caches: Vec<String> = p.caches.iter().map(|c| format!("{}/", c.display())).collect();
-        let failed = |l: &str| l.contains("failed") || l.contains("Operation not permitted");
-        output
-            .iter()
-            .map(|(_, l)| l.as_str())
-            .filter(|l| failed(l) && caches.iter().any(|c| l.contains(c.as_str())))
-            .take(3)
-            .collect()
-    }
-
     /// What among `seen` the profile keeps on purpose, each said with why and what to do instead — and
-    /// whether that's all of them. `caches`: the output says a write in cargo's caches was refused.
-    fn kept(&self, seen: &[Denial], caches: bool) -> (String, bool) {
+    /// whether that's all of them.
+    fn kept(&self, seen: &[Denial]) -> (String, bool) {
         let Guard::In(p) = self else { return (String::new(), false) };
-        let (mut names, mut git, mut crates, mut all) = (Vec::new(), false, caches, true);
+        let (mut names, mut git, mut crates, mut all) = (Vec::new(), false, false, true);
+        let (mut secret, mut services) = (Vec::new(), Vec::new());
         for d in seen {
             let Some(path) = d.file() else {
-                all = false;
+                match d.plain().as_str() {
+                    "the clipboard" => services.push("the clipboard"),
+                    "the keychain" => services.push("the keychain"),
+                    _ => all = false,
+                }
                 continue;
             };
             match path.strip_prefix(&p.root) {
@@ -172,12 +159,26 @@ impl Guard {
                     }
                 }
                 _ if p.caches.iter().any(|c| path.starts_with(c)) => crates = true,
+                _ if p.reads.kept_holds(&p.root, path) => secret.push(crate::allow::tilde(path)),
                 _ => all = false,
             }
         }
         names.sort();
         names.dedup();
+        secret.sort();
+        secret.dedup();
+        services.dedup();
         let mut s = String::new();
+        if !secret.is_empty() || !services.is_empty() {
+            let what: Vec<String> =
+                secret.into_iter().chain(services.into_iter().map(String::from)).collect();
+            s.push_str(&format!(
+                "{}: tarae keeps these from every command of yours — keys, tokens, Claude's and tarae's own \
+                 state, the clipboard, the keychain. Nothing opens them for a command; if one needs it, say so \
+                 to the user and let them run it.\n",
+                what.join(", ")
+            ));
+        }
         if !names.is_empty() {
             let it = if names.len() == 1 { "it" } else { "them" };
             s.push_str(&format!(
@@ -245,9 +246,17 @@ impl Guard {
                     }
                     true => "",
                 };
+                let reads = match p.reads.home.is_some() {
+                    true => {
+                        "read in your home folder only the project, the repository's other checkouts and the \
+                         toolchains' own folders — never keys, tokens, Claude's or tarae's state, the clipboard \
+                         or the keychain — "
+                    }
+                    false => "",
+                };
                 format!(
-                    "In tarae's sandbox: it could write only in the project — not {names}, anywhere in it (Edit \
-                     changes those) — temp folders and the toolchain's own{crates}{net}.{granted}{refused}"
+                    "In tarae's sandbox: it could {reads}write only in the project — not {names}, anywhere in it \
+                     (Edit changes those) — temp folders and the toolchain's own{crates}{net}.{granted}{refused}"
                 )
             }
             Guard::Without(why) => format!("Ran without a sandbox ({why}) — the user agreed."),
@@ -314,6 +323,105 @@ pub struct Policy {
     /// The folders cargo named that stay closed, and why (`cargo_dir_verdict`) — said with the result and on
     /// the panel.
     pub refused: Vec<(PathBuf, String)>,
+    /// Where it may read (card model P2).
+    pub reads: Reads,
+}
+
+/// Where a run reads (card model P2): anywhere outside home; in home the project, where it may write, and
+/// `allow` — never `kept`, whatever else holds it. Real paths. A file's metadata (`stat`) stays open in home:
+/// every program looks at home and the folders above the project, thousands of times a run (measured,
+/// `target/sb/p2-measured.md`); what's in a file or a folder's list is what's confined.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Reads {
+    /// Home — None: reads aren't confined (no home known; tests that don't ask).
+    pub home: Option<PathBuf>,
+    /// Places in home it may read, files or folders with everything in them (`reads_for`).
+    pub allow: Vec<PathBuf>,
+    /// Never read, denied after every allow (`kept_reads`) — but `log`.
+    pub kept: Vec<PathBuf>,
+    /// tarae's log, though it's in tarae's state: Claude reads it unasked (#45).
+    pub log: Option<PathBuf>,
+}
+
+impl Reads {
+    /// Whether `real` is in a place kept from every run — the profile's rule, in Rust: one that holds the
+    /// project (a checkout under `~/.claude/worktrees`) is kept but for the project.
+    pub fn kept_holds(&self, root: &Path, real: &Path) -> bool {
+        self.log.as_deref() != Some(real)
+            && self
+                .kept
+                .iter()
+                .any(|k| real.starts_with(k) && !(root.starts_with(k) && real.starts_with(root)))
+    }
+}
+
+/// What the toolchains read in home to work, measured (`target/sb/p2-measured.md`: tarae's preflight, a Go and
+/// a Node project, `cargo xtask shot`, the e2e harness, every read in home reported): cargo's and rustup's
+/// homes, git's settings, the text encoding CoreFoundation reads in every process, Go's GOPATH, cache and
+/// settings, npm's cache, the fonts a shot draws with.
+const HOME_READS: [&str; 10] = [
+    ".cargo",
+    ".rustup",
+    ".gitconfig",
+    ".config/git",
+    ".CFUserTextEncoding",
+    "go",
+    "Library/Caches/go-build",
+    "Library/Application Support/go",
+    ".npm",
+    "Library/Fonts",
+];
+
+/// Claude's own, in home: its settings, conversations and token cache — kept from its runs like keys.
+const CLAUDES: [&str; 3] = [".claude", ".claude.json", ".claude.json.backup"];
+
+/// Where a run reads in `home` (real): `HOME_READS`, cargo's and rustup's homes wherever they are, tarae's
+/// grammars (its own tests and shots load them), the folders on PATH (what's there runs), and `also` (the
+/// repository's other checkouts, what the user let Claude read) — none that's home itself or in a kept place.
+pub fn reads_for(home: &Path, also: &[PathBuf]) -> Reads {
+    let cargo_home = cargo_home_of(Some(home));
+    let mut allow: Vec<PathBuf> = HOME_READS.iter().map(|r| profile_path(&home.join(r))).collect();
+    allow.extend(cargo_home.clone());
+    allow.extend(std::env::var_os("RUSTUP_HOME").map(|r| profile_path(Path::new(&r))));
+    allow.extend(crate::grammar::grammars_dir().map(|d| profile_path(&d)));
+    allow.extend(crate::blocked::path_dirs());
+    allow.extend(also.iter().cloned());
+    let kept = kept_reads(home, cargo_home.as_deref());
+    allow.retain(|p| p.starts_with(home) && p != home && !kept.iter().any(|k| p.starts_with(k)));
+    allow.sort();
+    allow.dedup();
+    let log = crate::log::path().map(|l| profile_path(&l));
+    Reads { home: Some(home.to_path_buf()), allow, kept, log }
+}
+
+/// What cargo reads above the project (`root`, real) in `home`: `.cargo/config.toml` and `.cargo/config` in
+/// every folder between them — those files, not the folder (`credentials.toml` sits there). Measured: a
+/// project below a folder with one doesn't build without it ("could not load Cargo configuration"). Home's
+/// own is in cargo's home.
+pub fn cargo_configs_above(root: &Path, home: &Path) -> Vec<PathBuf> {
+    root.ancestors()
+        .skip(1)
+        .take_while(|a| a.starts_with(home) && *a != home)
+        .flat_map(|a| ["config.toml", "config"].map(|c| a.join(".cargo").join(c)))
+        .collect()
+}
+
+/// What a run never reads, whatever is granted: the places that hold keys (`allow::SECRETS`, and git's
+/// credential store where `$XDG_CONFIG_HOME` puts it), Claude's own (`CLAUDES`), cargo's credentials, and
+/// tarae's state (its conversations, what was allowed — its log aside).
+pub fn kept_reads(home: &Path, cargo_home: Option<&Path>) -> Vec<PathBuf> {
+    let at = |p: PathBuf| profile_path(&p);
+    let mut v: Vec<PathBuf> =
+        crate::allow::SECRETS.iter().chain(&CLAUDES).map(|s| at(home.join(s))).collect();
+    for cargo in [Some(home.join(".cargo")), cargo_home.map(Path::to_path_buf)].into_iter().flatten() {
+        v.extend(["credentials", "credentials.toml"].map(|c| at(cargo.join(c))));
+    }
+    let xdg = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|x| x.is_absolute());
+    v.extend(xdg.map(|x| at(x.join("git/credentials"))));
+    v.extend(crate::config::state_dir().map(at));
+    v.sort();
+    v.dedup();
+    v
 }
 
 /// Whether a folder cargo names for the checkout at `root` (`d`, a real path) may be written by its runs
@@ -400,9 +508,14 @@ pub struct Denial {
     pub target: String,
 }
 
-/// A hard link refused because its source isn't writable — Seatbelt's `forbidden-link-priv<file-write*>
-/// <source> <link>` (measured).
+/// A hard link refused because its source isn't writable or readable — Seatbelt's
+/// `forbidden-link-priv<file-write*>` / `<file-read*>` `<source> <link>` (measured).
 const LINK_PRIV: &str = "forbidden-link-priv";
+
+/// A denial read from the run's output (`Policy::said_in_output`): its process, and its operation when the
+/// profile denies both reading and writing the path — the output doesn't say which was tried.
+const SEEN_IN_OUTPUT: &str = "said in the output";
+pub(crate) const EITHER: &str = "file-read* file-write*";
 
 impl Denial {
     /// The file it was about: the target — for a refused link, the file linked.
@@ -438,7 +551,11 @@ impl Denial {
         let t = self.target_shown();
         let op = self.op.as_str();
         match op {
-            "file-write-create" | "file-write-data" => format!("writing {t}"),
+            "file-read-data" | "file-read-xattr" => format!("reading {t}"),
+            "file-read-metadata" => format!("looking at {t}"),
+            "file-link" => format!("linking {t}"),
+            EITHER => format!("reading or writing {t}"),
+            "file-write-create" | "file-write-data" | "file-write*" => format!("writing {t}"),
             "file-write-unlink" => format!("deleting {t}"),
             "file-write-rename" => format!("moving {t}"),
             _ if op.starts_with(LINK_PRIV) => {
@@ -459,6 +576,8 @@ impl Denial {
             {
                 "opening apps".into()
             }
+            "mach-lookup" if t.starts_with("com.apple.pasteboard.") => "the clipboard".into(),
+            "mach-lookup" if KEYCHAIN.contains(&t.as_str()) => "the keychain".into(),
             _ => self.shown(),
         }
     }
@@ -735,11 +854,47 @@ pub fn panel_line(
     Some((format!("sandbox blocked {}{more}", first.plain()), quiet))
 }
 
+/// The paths a line of output names — words that start `/`, `~/` (home), `./` or `../` (from `root`), with
+/// quotes, brackets and a closing `:` or `.` taken off — as the profile sees them, worked out without the
+/// disk (the main thread asks): `.` and `..` folded, `/tmp`, `/var` and `/etc` in `/private`. Not the
+/// devices (every run writes `/dev/null`).
+fn paths_in(line: &str, root: &Path) -> Vec<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let word = |w: &str| -> Option<PathBuf> {
+        match w {
+            w if w.starts_with('/') && w.len() > 1 => Some(PathBuf::from(w)),
+            w if w.starts_with("./") || w.starts_with("../") => Some(root.join(w)),
+            w => Some(home.as_ref()?.join(w.strip_prefix("~/")?)),
+        }
+    };
+    let folded = |p: PathBuf| {
+        let mut out = PathBuf::from("/");
+        for c in p.components() {
+            match c {
+                Component::Normal(n) => out.push(n),
+                Component::ParentDir => {
+                    out.pop();
+                }
+                _ => {}
+            }
+        }
+        match ["tmp", "var", "etc"].iter().any(|d| out.starts_with(Path::new("/").join(d))) {
+            true => Path::new("/private").join(out.strip_prefix("/").unwrap_or(&out)),
+            false => out,
+        }
+    };
+    line.split(|c: char| c.is_whitespace() || "`'\"()[]{}<>,;=".contains(c))
+        .filter_map(|w| word(w.trim_end_matches([':', '.'])))
+        .map(folded)
+        .filter(|p| !p.starts_with("/dev"))
+        .collect()
+}
+
 /// Lines of output that say a permission was refused — what's left to go by when nothing watched.
 pub fn refused_lines(output: &[(bool, String)]) -> Vec<String> {
     output
         .iter()
-        .filter(|(_, l)| l.contains("Operation not permitted"))
+        .filter(|(_, l)| l.to_ascii_lowercase().contains("operation not permitted"))
         .take(5)
         .map(|(_, l)| l.clone())
         .collect()
@@ -833,6 +988,17 @@ const CARGO_FILES: [&str; 8] = [
 /// 2026-10-04): denied, the build goes on, but every run's report would carry it.
 const CARGO_XATTR: &str = "com.apple.fileprovider.ignore#P";
 
+/// The keychain's servers: the only lookup `security find-generic-password` makes (measured) — the keychain
+/// files themselves are kept (`allow::SECRETS`).
+const KEYCHAIN: [&str; 2] = ["com.apple.SecurityServer", "com.apple.securityd"];
+
+/// What a run never reaches: the clipboard (`pbpaste` reads it — measured, exit 0 open, 1 denied) and the
+/// keychain's servers. No toolchain looks either up (measured: preflight, Go, Node, a shot, e2e).
+fn kept_services() -> String {
+    let keychain: String = KEYCHAIN.iter().map(|k| format!(" (global-name \"{k}\")")).collect();
+    format!("mach-lookup (global-name-regex #\"^com\\.apple\\.pasteboard\\.\"){keychain}")
+}
+
 /// Ways to get something run outside: Apple Events to other apps, LaunchServices (`open`).
 const NO_WAY_OUT: [&str; 2] = [
     "appleevent-send",
@@ -858,6 +1024,21 @@ impl Policy {
         let dirs: String = (0..self.write.len()).map(|i| format!(" (subpath (param \"W{i}\"))")).collect();
         if !run.is_empty() || !dirs.is_empty() {
             p.push_str(&format!("(allow file-write*{run}{dirs})\n"));
+        }
+        // Reads in home (card model P2): the project, where it writes, and what's allowed (`Reads`). A hard
+        // link's source must be readable too — Seatbelt's own `forbidden-link-priv<file-read-data>`, measured
+        // 2026-10-05 with `link(2)` itself, `target/sb/p2-links2.sh` — so nothing a run can't read comes into
+        // the project by a link, though its folder be writable: a `file-link` rule would add nothing (its
+        // places would be these write rules') and costs every build a denial per object file rustc links
+        if self.reads.home.is_some() {
+            let files: String =
+                (0..self.files.len()).map(|i| format!(" (literal (param \"F{i}\"))")).collect();
+            let reads: String =
+                (0..self.reads.allow.len()).map(|i| format!(" (subpath (param \"R{i}\"))")).collect();
+            p.push_str(&deny("file-read-data file-read-xattr (subpath (param \"HOME\"))"));
+            p.push_str(&format!(
+                "(allow file-read-data file-read-xattr (subpath (param \"ROOT\")){run}{dirs}{files}{reads})\n"
+            ));
         }
         // After the allows, so these win. The names a run keeps off, below the project's root however deep
         // — the regex starts with as many path parts as the root has (no path in it), so a name in the
@@ -931,7 +1112,104 @@ impl Policy {
         for rule in NO_WAY_OUT {
             p.push_str(&deny(rule));
         }
+        p.push_str(&deny(&kept_services()));
+        // Last, so nothing granted opens them: what no run reads — but the project, when one holds it (a
+        // checkout under `~/.claude/worktrees`), and tarae's log. (Their metadata stays open, as everywhere:
+        // tarae's own tests look at its state folder — measured; a hard link needs the data's read anyway)
+        let (around, other) = self.kept_split();
+        let each = |v: &[usize]| v.iter().map(|i| format!(" (subpath (param \"X{i}\"))")).collect::<String>();
+        if !other.is_empty() {
+            p.push_str(&deny(&format!("file-read-data file-read-xattr{}", each(&other))));
+        }
+        if !around.is_empty() {
+            p.push_str(&deny(&format!(
+                "file-read-data file-read-xattr (require-all (require-any{}) (require-not (subpath (param \
+                 \"ROOT\"))))",
+                each(&around)
+            )));
+        }
+        if self.reads.log.is_some() && !self.reads.kept.is_empty() {
+            p.push_str("(allow file-read-data file-read-xattr (literal (param \"LOG\")))\n");
+        }
         p
+    }
+
+    /// The kept places (`Reads::kept`, by index) that hold the project, and the others.
+    fn kept_split(&self) -> (Vec<usize>, Vec<usize>) {
+        (0..self.reads.kept.len()).partition(|&i| self.root.starts_with(&self.reads.kept[i]))
+    }
+
+    /// Whether the profile lets a run read `real` — its rules, in Rust.
+    pub fn reads_allow(&self, real: &Path) -> bool {
+        let r = &self.reads;
+        // (the log: opened after everything, when anything is kept)
+        if r.log.as_deref() == Some(real) && !r.kept.is_empty() {
+            return true;
+        }
+        if r.kept_holds(&self.root, real) {
+            return false;
+        }
+        match &r.home {
+            Some(home) if real.starts_with(home) => {
+                real.starts_with(&self.root)
+                    || self.run.as_ref().is_some_and(|d| real.starts_with(d.path()))
+                    || self.write.iter().chain(&r.allow).any(|w| real.starts_with(w))
+                    || self.files.iter().any(|f| f == real)
+            }
+            _ => true,
+        }
+    }
+
+    /// Whether the profile lets a run write `real` — its rules, in Rust (the devices aside).
+    pub fn writes_allow(&self, real: &Path) -> bool {
+        if self.files.iter().any(|f| f == real) {
+            return true;
+        }
+        if real.starts_with(&self.root) {
+            return !protected_in(&self.root, real) && !self.protect.iter().any(|p| real.starts_with(p));
+        }
+        let open = self.run.as_ref().is_some_and(|d| real.starts_with(d.path()))
+            || self.write.iter().any(|w| real.starts_with(w));
+        open && !self.keep.iter().chain(&self.caches).any(|k| real.starts_with(k))
+    }
+
+    /// What the run's output says was refused where the profile denies it — the kernel's own report of a
+    /// denial is lost now and then, at random (1 in 10, measured, `target/sb/p2-measured.md` §5): a path on
+    /// a line that failed, at or just before a line saying `Operation not permitted` (cargo says the path,
+    /// then `Caused by:`, then the error), that this profile doesn't let a run read or write. Those `seen`
+    /// already said aren't again. Relative paths are from the project (`paths_in`: no disk).
+    pub fn said_in_output(&self, output: &[(bool, String)], seen: &[Denial]) -> Vec<Denial> {
+        const BEFORE: usize = 3;
+        let refused =
+            |l: &str| l.contains("ermitted") && l.to_ascii_lowercase().contains("operation not permitted");
+        let failed = |l: &str| {
+            let l = l.to_ascii_lowercase();
+            ["operation not permitted", "fail", "error", "cannot", "can't", "couldn't", "unable"]
+                .iter()
+                .any(|w| l.contains(w))
+        };
+        let mut near = vec![false; output.len()];
+        for (i, _) in output.iter().enumerate().filter(|(_, (_, l))| refused(l)) {
+            near[i.saturating_sub(BEFORE)..=i].fill(true);
+        }
+        let mut out: Vec<Denial> = Vec::new();
+        let lines = output.iter().zip(&near).filter(|(_, n)| **n).map(|((_, l), _)| l);
+        for l in lines.filter(|l| failed(l)) {
+            for real in paths_in(l, &self.root) {
+                let op = match (self.reads_allow(&real), self.writes_allow(&real)) {
+                    (true, true) => continue,
+                    (true, false) => "file-write*",
+                    (false, _) => EITHER,
+                };
+                if seen.iter().chain(&out).any(|d| d.file() == Some(real.as_path())) {
+                    continue;
+                }
+                let target = real.display().to_string();
+                out.push(Denial { process: SEEN_IN_OUTPUT.into(), op: op.into(), target });
+            }
+        }
+        out.truncate(DENIALS_KEPT);
+        out
     }
 
     /// The profile's parameters (name, value).
@@ -945,6 +1223,13 @@ impl Policy {
         v.extend(self.keep.iter().enumerate().map(|(i, p)| (format!("K{i}"), s(p))));
         v.extend(self.caches.iter().enumerate().map(|(i, p)| (format!("C{i}"), s(p))));
         v.extend(self.sockets.iter().enumerate().map(|(i, p)| (format!("S{i}"), s(p))));
+        let r = &self.reads;
+        v.extend(r.home.iter().map(|h| ("HOME".to_string(), s(h))));
+        v.extend(
+            r.home.iter().flat_map(|_| r.allow.iter().enumerate().map(|(i, p)| (format!("R{i}"), s(p)))),
+        );
+        v.extend(r.kept.iter().enumerate().map(|(i, p)| (format!("X{i}"), s(p))));
+        v.extend(r.log.iter().filter(|_| !r.kept.is_empty()).map(|l| ("LOG".to_string(), s(l))));
         v
     }
 
@@ -1025,6 +1310,7 @@ impl Policy {
             granted: Vec::new(),
             sockets: Vec::new(),
             refused,
+            reads: env.reads.clone(),
         }
     }
 }
@@ -1069,6 +1355,8 @@ pub struct Env {
     pub tmux_tmpdir: Option<PathBuf>,
     pub zellij_dir: Option<PathBuf>,
     pub uid: u32,
+    /// Where it reads (`reads_for`; the default: reads not confined).
+    pub reads: Reads,
 }
 
 /// A path as the profile writes it: the real path; for one that isn't there yet, its folder's real path
@@ -1136,12 +1424,22 @@ pub fn missing_why(stderr: &str) -> String {
     if stderr.contains("sandbox_apply") { INSIDE.into() } else { format!("sandbox-exec: {}", stderr.trim()) }
 }
 
-/// The policy for the project at `root` with these settings — the toolchain's folders found (blocks).
-pub fn policy(root: &Path, llm: &crate::llm::LlmConfig) -> Policy {
+/// The policy for the project at `root` with these settings and the places in home the user let Claude read
+/// (`reads`, real) — the toolchain's folders found (blocks).
+pub fn policy(root: &Path, llm: &crate::llm::LlmConfig, reads: &[PathBuf]) -> Policy {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let cargo_home = cargo_home_of(home.as_deref());
     let tmp = std::fs::canonicalize(std::env::temp_dir()).ok();
+    let real_home = home.as_deref().and_then(|h| std::fs::canonicalize(h).ok());
+    // (the repository's other checkouts — never home or above it, nor where keys are; cargo's configs above)
+    let mut also: Vec<PathBuf> = crate::allow::checkouts(root)
+        .into_iter()
+        .filter(|c| crate::allow::keepable(c, real_home.as_deref()))
+        .chain(reads.iter().cloned())
+        .collect();
+    also.extend(real_home.iter().flat_map(|h| cargo_configs_above(&profile_path(root), h)));
     let mut env = Env {
+        reads: real_home.map(|h| reads_for(&h, &also)).unwrap_or_default(),
         root: profile_path(root),
         home,
         tmp,
@@ -1460,6 +1758,16 @@ mod tests {
             tmux_tmpdir: None,
             zellij_dir: None,
             uid: 501,
+            reads: Reads {
+                home: Some("/Users/u".into()),
+                allow: vec!["/Users/u/.cargo".into(), "/Users/u/.gitconfig".into()],
+                kept: vec![
+                    "/Users/u/.ssh".into(),
+                    "/Users/u/.claude".into(),
+                    "/Users/u/.local/state/tarae".into(),
+                ],
+                log: Some("/Users/u/.local/state/tarae/tarae.log".into()),
+            },
         }
     }
 
@@ -1651,6 +1959,142 @@ mod tests {
         assert!(sock.params().contains(&("S0".into(), "/Users/u/.colima/t/docker.sock".into())));
     }
 
+    /// Reads in the profile (card model P2), by parameters only: home's contents denied, then the project,
+    /// where it writes and the allowed places opened (a file's metadata stays open); the clipboard and the
+    /// keychain's servers never; and last of all, so nothing before opens them, the kept places — but the
+    /// project where one holds it, and tarae's log after that. Without a home, no read rules.
+    #[test]
+    fn reads_in_the_profile() {
+        let p = Policy::for_project(&env(Path::new("/Users/u/p")));
+        let text = p.profile();
+        assert!(!text.contains("/Users/u"), "{text}");
+        let at = |rule: &str| text.find(rule).unwrap_or_else(|| panic!("no {rule} in {text}"));
+        let home = at("(deny file-read-data file-read-xattr (subpath (param \"HOME\")))");
+        let open =
+            at("(allow file-read-data file-read-xattr (subpath (param \"ROOT\")) (subpath (param \"W0\"))");
+        assert!(
+            home < open
+                && text[open..].contains("(literal (param \"F0\")) ")
+                && text.contains("(subpath (param \"R1\"))")
+        );
+        assert!(!text.contains("file-read-metadata"), "metadata stays open: {text}");
+        let link = at("(allow file-write* (subpath (param \"W0\"))");
+        at(
+            "(deny mach-lookup (global-name-regex #\"^com\\.apple\\.pasteboard\\.\") (global-name \"com.apple.SecurityServer\") (global-name \"com.apple.securityd\"))",
+        );
+        let kept =
+            at("(deny file-read-data file-read-xattr (subpath (param \"X0\")) (subpath (param \"X1\")) \
+                       (subpath (param \"X2\")))");
+        let log = at("(allow file-read-data file-read-xattr (literal (param \"LOG\")))");
+        assert!(kept > at("(deny network-outbound (remote unix-socket))") && kept > link && log > kept);
+        assert!(text[kept..].lines().count() == 2, "the kept places last, then the log: {text}");
+        let params = p.params();
+        for (k, v) in [
+            ("HOME", "/Users/u"),
+            ("R0", "/Users/u/.cargo"),
+            ("X0", "/Users/u/.ssh"),
+            ("X2", "/Users/u/.local/state/tarae"),
+            ("LOG", "/Users/u/.local/state/tarae/tarae.log"),
+        ] {
+            assert!(params.contains(&(k.into(), v.into())), "{k}: {params:?}");
+        }
+        // A checkout inside a kept place: kept but for the project
+        let inside = Policy::for_project(&env(Path::new("/Users/u/.claude/worktrees/p")));
+        let text = inside.profile();
+        assert!(
+            text.contains(
+                "(deny file-read-data file-read-xattr (subpath (param \"X0\")) (subpath (param \"X2\")))"
+            ) && text.contains(
+                "(deny file-read-data file-read-xattr (require-all (require-any (subpath (param \"X1\"))) \
+                     (require-not (subpath (param \"ROOT\")))))"
+            ),
+            "{text}"
+        );
+        assert!(inside.reads_allow(Path::new("/Users/u/.claude/worktrees/p/src/a.rs")));
+        assert!(!inside.reads_allow(Path::new("/Users/u/.claude/settings.json")));
+        // The rules in Rust, as the report judges the output by them
+        for (path, read) in [
+            ("/Users/u/p/src/a.rs", true),
+            ("/Users/u/.cargo/registry/index/x", true),
+            ("/Users/u/.gitconfig", true),
+            ("/Users/u/.cargo/build/ab/cd12/x", true),
+            ("/Users/u/Library/Caches/thing/x", true),
+            ("/opt/homebrew/bin/go", true),
+            ("/Users/u/.local/state/tarae/tarae.log", true),
+            ("/Users/u/other/x", false),
+            ("/Users/u/.ssh/id_ed25519", false),
+            ("/Users/u/.local/state/tarae/chats/x.json", false),
+        ] {
+            assert_eq!(p.reads_allow(Path::new(path)), read, "{path}");
+        }
+        let none = Policy::for_project(&Env { reads: Reads::default(), ..env(Path::new("/Users/u/p")) });
+        let text = none.profile();
+        assert!(!text.contains("file-read") && !text.contains("HOME"), "{text}");
+        assert!(none.reads_allow(Path::new("/Users/u/.ssh/id")), "not confined without a home");
+    }
+
+    /// Where a run reads in home: what the toolchains were measured reading, the repository's other checkouts
+    /// and grants (`also`) — never home itself, a place outside it, nor one in a kept place, granted or not.
+    /// (A stand-in home in the test's own temp folder.)
+    #[test]
+    fn reads_for_a_home() {
+        let home = profile_path(&std::env::temp_dir()).join(format!("tarae-sb-home-{}", std::process::id()));
+        std::fs::remove_dir_all(&home).ok();
+        for d in [".cargo", ".ssh", "Library/Fonts", "src/other", ".claude/x"] {
+            std::fs::create_dir_all(home.join(d)).unwrap();
+        }
+        let also = [
+            home.join("src/other"),
+            home.clone(),
+            home.join(".ssh/x"),
+            home.join(".claude/x"),
+            "/opt/x".into(),
+        ];
+        let r = reads_for(&home, &also);
+        assert_eq!(r.home.as_deref(), Some(home.as_path()));
+        for p in [
+            ".cargo",
+            ".rustup",
+            ".gitconfig",
+            ".config/git",
+            ".CFUserTextEncoding",
+            "go",
+            "Library/Fonts",
+            ".npm",
+            "src/other",
+        ] {
+            assert!(r.allow.contains(&home.join(p)), "{p}: {:?}", r.allow);
+        }
+        for p in [home.clone(), home.join(".ssh/x"), home.join(".claude/x"), "/opt/x".into()] {
+            assert!(!r.allow.contains(&p), "{}: {:?}", p.display(), r.allow);
+        }
+        for p in [
+            ".ssh",
+            ".aws",
+            ".config/gh",
+            ".config/git/credentials",
+            ".git-credentials",
+            "Library/Keychains",
+            ".claude",
+            ".claude.json",
+            ".cargo/credentials.toml",
+        ] {
+            assert!(r.kept.contains(&home.join(p)), "{p}: {:?}", r.kept);
+        }
+        assert!(r.kept.iter().any(|k| crate::config::state_dir().is_some_and(|s| *k == profile_path(&s))));
+        // Cargo's configs above a project, up to home: those files only
+        let above = cargo_configs_above(&home.join("src/other/p"), &home);
+        let want = [
+            "src/other/.cargo/config.toml",
+            "src/other/.cargo/config",
+            "src/.cargo/config.toml",
+            "src/.cargo/config",
+        ];
+        assert_eq!(above, want.map(|w| home.join(w)));
+        assert!(cargo_configs_above(Path::new("/opt/p"), &home).is_empty());
+        std::fs::remove_dir_all(&home).ok();
+    }
+
     /// The names a run keeps off (card model P1), in Rust as in the profile: anywhere below the root, in any
     /// case, but not below a tool's output folder (unless the name comes first: `.git/modules/target`); the
     /// root's own path doesn't count (here it holds `.claude` and `target`). In the profile: names, never
@@ -1769,7 +2213,8 @@ mod tests {
             );
             assert!(!r.contains("If the command needs one of these"), "{at}: {r}");
         }
-        // The kernel's report of the denial didn't come: cargo's own error says it, and that's what's said
+        // The kernel's report of the denial didn't come: cargo's own error says it — the path two lines above
+        // the error — and that's what's said
         let cargo_said: Vec<(bool, String)> = [
             "error: failed to download `serde v1.0.0`",
             "  failed to create directory `/Users/u/.cargo/registry/src/i/serde-1.0.0`",
@@ -1782,19 +2227,36 @@ mod tests {
         let unreported = Guard::In(Box::new(Policy { watch: Some(Watch::quiet("u.")), ..p.clone() }));
         let r = unreported.report(&cargo_said);
         assert!(
-            r.starts_with("The sandbox's own report of what it blocked didn't come, but the output says a write \
-                           in cargo's caches was refused:\n  failed to create directory `/Users/u/.cargo/registry/src/i/serde-1.0.0`\n")
-                && r.contains("Cargo's caches (/Users/u/.cargo/registry, /Users/u/.cargo/git) stay as they are")
-                && !r.contains("blocked nothing"),
+            r.starts_with(
+                "The sandbox blocked one thing — 1 time:\n  writing /Users/u/.cargo/registry/src/i/serde-1.0.0 \
+                 (file-write*, said in the output)\n"
+            ) && r.contains("Cargo's caches (/Users/u/.cargo/registry, /Users/u/.cargo/git) stay as they are")
+                && !r.contains("If the command needs one of these"),
             "{r}"
         );
-        // …only when the output names a path in the caches as what failed, and says a write was refused
+        // …only when the output names it on a line that failed, and says a permission was refused
         assert!(unreported.report(&cargo_said[..2]).starts_with("The sandbox blocked nothing."));
-        let elsewhere: Vec<(bool, String)> =
-            vec![(true, "failed: /Users/u/other/x".into()), (true, "Operation not permitted".into())];
-        assert!(unreported.report(&elsewhere).starts_with("The sandbox blocked nothing."));
         let listed = vec![(false, "/Users/u/.cargo/registry/src/i/a.rs: fn x".into()), cargo_said[3].clone()];
         assert!(unreported.report(&listed).starts_with("The sandbox blocked nothing."), "a grep's hit");
+        // Anywhere the profile keeps it from: a place in home not read by default, in Go's and Node's words
+        // too — and that's not all kept on purpose: the user can open it
+        for said in [
+            "failed: /Users/u/other/x\nOperation not permitted",
+            "open /Users/u/other/x: operation not permitted",
+            "Error: EPERM: operation not permitted, open '/Users/u/other/x'",
+        ] {
+            let out: Vec<(bool, String)> = said.lines().map(|l| (true, l.to_string())).collect();
+            let r = unreported.report(&out);
+            assert!(
+                r.contains(
+                    "  reading or writing /Users/u/other/x (file-read* file-write*, said in the output)\n"
+                ) && r.contains("If the command needs one of these"),
+                "{said}: {r}"
+            );
+        }
+        // A key: kept from every command, said so
+        let r = unreported.report(&[(true, "cat: /Users/u/.ssh/id: Operation not permitted".into())]);
+        assert!(r.contains("/Users/u/.ssh/id: tarae keeps these from every command of yours"), "{r}");
         w.record(denial("file-write-create", "/Users/u/marker"));
         assert!(g.report(&[]).contains("If the command needs one of these"), "something else blocked");
         // The network open: the caches aren't kept, and nothing says they are
@@ -1947,16 +2409,25 @@ mod tests {
         );
         let failed = Watch::quiet("t.");
         failed.fail("log: Cannot run while sandboxed".into());
-        let out = [(true, "touch: /x: Operation not permitted".to_string()), (false, "fine".to_string())];
-        let r = Guard::In(Box::new(Policy { watch: Some(failed), ..p })).report(&out);
+        // (a path the profile lets it write: not the sandbox's for sure — the line is shown as it is)
+        let out =
+            [(true, "touch: /Users/u/p/x: Operation not permitted".to_string()), (false, "fine".to_string())];
+        let g = Guard::In(Box::new(Policy { watch: Some(failed), ..p }));
+        let r = g.report(&out);
         assert!(
             r.starts_with("tarae couldn't watch what the sandbox blocked (log: Cannot run while sandboxed)"),
             "{r}"
         );
         assert!(
             r.contains("likely the sandbox")
-                && r.contains("  touch: /x: Operation not permitted")
+                && r.contains("  touch: /Users/u/p/x: Operation not permitted")
                 && !r.contains("fine"),
+            "{r}"
+        );
+        // One the profile keeps from it: said as blocked, from the output
+        let r = g.report(&[(true, "touch: /x: Operation not permitted".to_string())]);
+        assert!(
+            r.starts_with("tarae couldn't watch what the sandbox blocked (log: Cannot run while sandboxed) — its output says:\nThe sandbox blocked one thing — 1 time:\n  writing /x (file-write*, said in the output)\n"),
             "{r}"
         );
     }
@@ -2063,6 +2534,7 @@ mod tests {
             granted: Vec::new(),
             sockets: Vec::new(),
             refused: Vec::new(),
+            reads: Reads::default(),
         };
         let sh = |script: &str| {
             let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
@@ -2128,6 +2600,7 @@ mod tests {
                 granted: Vec::new(),
                 sockets: Vec::new(),
                 refused: Vec::new(),
+                reads: Reads::default(),
             };
             let sh = |script: &str| {
                 let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
@@ -2193,6 +2666,7 @@ mod tests {
             granted: Vec::new(),
             sockets: Vec::new(),
             refused: Vec::new(),
+            reads: Reads::default(),
         };
         let pid = std::process::id();
         let (mine, other) = (format!("tarae-test-{pid}-1."), format!("tarae-test-{pid}-10."));
@@ -2245,6 +2719,7 @@ mod tests {
             granted: Vec::new(),
             sockets: Vec::new(),
             refused: Vec::new(),
+            reads: Reads::default(),
         };
         let sh = |script: &str| {
             let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
@@ -2267,10 +2742,11 @@ mod tests {
 
     /// For real, on macOS — what the user granted (`blocked.rs`) opens under the real profile, and only that:
     /// a folder kept for the project (through the store file) and one for this conversation are written in,
-    /// their sibling isn't; a granted port is reached, another isn't. The policy is made as a run's is
-    /// (`tools::with_allowed` → `llm.sandbox-write`/`-ports` → `Policy::for_project`), but without the usual
-    /// temp folders — the test's own folders are in one. Harmless: markers in its temp folder, listeners of
-    /// its own on 127.0.0.1 (only `nc -z` knocks).
+    /// their sibling isn't; a place in home kept for the project is read, the one beside it isn't (card
+    /// model P2); a granted port is reached, another isn't. The policy is made as a run's is
+    /// (`tools::with_allowed` → `llm.sandbox-write`/`-ports`, `reads_for` → `Policy::for_project`), but
+    /// without the usual temp folders — the test's own folders are in one. Harmless: markers in its temp
+    /// folder (a stand-in home there), listeners of its own on 127.0.0.1 (only `nc -z` knocks).
     #[cfg(target_os = "macos")]
     #[test]
     fn what_the_user_granted_opens_under_the_real_profile() {
@@ -2283,8 +2759,12 @@ mod tests {
         std::fs::remove_dir_all(&t).ok();
         let (root, kept, chat, sibling) =
             (t.join("project"), t.join("kept"), t.join("chat"), t.join("sibling"));
-        for d in [&root, &kept, &chat, &sibling] {
+        let (home, readable, unread) = (t.join("home"), t.join("home/readable"), t.join("home/unread"));
+        for d in [&root, &kept, &chat, &sibling, &readable, &unread] {
             std::fs::create_dir_all(d).unwrap();
+        }
+        for d in [&readable, &unread] {
+            std::fs::write(d.join("marker"), "marker\n").unwrap();
         }
         let granted = TcpListener::bind("127.0.0.1:0").unwrap();
         let other = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2297,6 +2777,7 @@ mod tests {
         crate::allow::keep(&store, &root, |a| {
             a.add(&Grant::Write(kept.clone()));
             a.add(&Grant::Port(port(&granted)));
+            a.add(&Grant::Read(readable.clone()));
         })
         .unwrap();
         let from_store = crate::allow::Store::read(Some(&store)).get(&root);
@@ -2312,16 +2793,17 @@ mod tests {
         let mut this_chat = Allowed::default();
         this_chat.add(&Grant::Write(chat.clone()));
         this_chat.add(&Grant::Socket(socks.join("granted.sock")));
-        let (llm, said, sockets) =
+        let w =
             crate::tools::with_allowed(&crate::llm::LlmConfig::default(), &[&from_store, &this_chat], None);
-        assert_eq!(said.len(), 4, "{said:?}");
+        assert_eq!(w.granted.len(), 5, "{:?}", w.granted);
         let env = Env {
             root: root.clone(),
-            write: llm.sandbox_write.clone(),
-            ports: llm.sandbox_ports,
+            write: w.llm.sandbox_write.clone(),
+            ports: w.llm.sandbox_ports,
+            reads: reads_for(&home, &w.reads),
             ..Env::default()
         };
-        let p = Policy { sockets, ..Policy::for_project(&env) };
+        let p = Policy { sockets: w.sockets, ..Policy::for_project(&env) };
         let sh = |script: &str| {
             let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
             c.current_dir(&root).stdin(Stdio::null()).output().unwrap()
@@ -2333,6 +2815,10 @@ mod tests {
         let r = sh(&format!("touch '{}'", sibling.join("marker").display()));
         assert!(!r.status.success() && !sibling.join("marker").exists(), "the sibling: written");
         assert!(String::from_utf8_lossy(&r.stderr).contains("Operation not permitted"));
+        let r = sh(&format!("cat '{}'", readable.join("marker").display()));
+        assert_eq!(String::from_utf8_lossy(&r.stdout), "marker\n", "the place granted for reading: {r:?}");
+        let r = sh(&format!("cat '{}'", unread.join("marker").display()));
+        assert!(!r.status.success() && r.stdout.is_empty(), "the place beside it was read: {r:?}");
         let reached = |l: &TcpListener| {
             sh(&format!("/usr/bin/nc -z -w 2 127.0.0.1 {}", port(l)));
             l.accept().is_ok()
@@ -2464,6 +2950,241 @@ mod tests {
         assert!(r.contains("build.rs: tarae keeps it from your commands") && r.contains("use Edit"), "{r}");
         assert!(r.contains("Git's own folder is kept"), "{r}");
         std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// For real, on macOS (card model P2) — reads under the real profile: in a stand-in home only the project,
+    /// the allowed places and tarae's log are read; a place beside them isn't (nor listed — though a file's
+    /// metadata stays open), nor a kept place, though an allowed — even writable — folder holds it; outside
+    /// home everything is. A checkout inside a kept place reads its own files and nothing else there. Nothing
+    /// unreadable can be hard-linked into the project — a key in a writable folder, a file in home not read —
+    /// nor what it reads but can't write; the project's own files link as before. The clipboard isn't
+    /// reached. Harmless: plain-text stand-ins in a folder of the test's own under `target/`; `pbpaste` goes to
+    /// /dev/null.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn reads_stay_in_their_places_under_the_real_profile() {
+        if skipped_inside("sandbox::tests::reads_stay_in_their_places_under_the_real_profile") {
+            return;
+        }
+        let t = scratch("sb-reads");
+        let home = t.join("home");
+        let (root, claudes) = (home.join("work/proj"), home.join(".claude/worktrees/p"));
+        for d in [&root, &claudes, &t.join("outside")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let (read, unread) = (
+            [root.join("own"), home.join("allowed/m"), home.join("state/tarae.log"), t.join("outside/m")],
+            [
+                home.join("other/m"),
+                home.join("dir/.ssh/key"),
+                home.join("state/chat.json"),
+                home.join(".claude/settings.json"),
+            ],
+        );
+        for f in read.iter().chain(&unread).chain([&claudes.join("own")]) {
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(f, "marker\n").unwrap();
+        }
+        let reads = Reads {
+            home: Some(home.clone()),
+            allow: vec![home.join("allowed"), home.join("dir")],
+            kept: vec![home.join("dir/.ssh"), home.join("state"), home.join(".claude")],
+            log: Some(home.join("state/tarae.log")),
+        };
+        // (`dir` writable too: then only the read rules keep its key from a link)
+        let policy = |root: &Path| Policy {
+            reads: reads.clone(),
+            write: vec![home.join("dir")],
+            ..Policy::for_project(&Env { root: root.to_path_buf(), ..Env::default() })
+        };
+        let p = policy(&root);
+        let sh = |p: &Policy, script: &str| {
+            let mut c = command(Some(p), "/bin/sh", &["-c".into(), script.into()]);
+            let out = c.current_dir(&p.root).stdin(Stdio::null()).output().unwrap();
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        // Hard links: nothing unreadable comes in, nor what it can read but not write
+        let o = |f: &str| home.join(f).display().to_string();
+        sh(
+            &p,
+            &format!(
+                "ln '{}' a; ln '{}' b; ln '{}' c; echo x > own2; ln own2 own3",
+                o("other/m"),
+                o("dir/.ssh/key"),
+                o("allowed/m")
+            ),
+        );
+        for (name, what) in [
+            ("a", "a file in home not read"),
+            ("b", "a key in a writable folder"),
+            ("c", "a file read, not written"),
+        ] {
+            assert!(!root.join(name).exists(), "{what}: linked into the project");
+        }
+        assert!(root.join("own3").exists(), "the project's own file: not linked");
+        let cat = |p: &Policy, f: &Path| sh(p, &format!("cat '{}' 2>/dev/null", f.display())) == "marker\n";
+        for f in &read {
+            assert!(cat(&p, f), "{}: not read", f.display());
+        }
+        for f in &unread {
+            assert!(!cat(&p, f), "{}: read", f.display());
+        }
+        for (dir, file) in [("other", "other/m"), ("dir/.ssh", "dir/.ssh/key")] {
+            let (dir, file) = (home.join(dir).display().to_string(), home.join(file).display().to_string());
+            let listed = sh(&p, &format!("ls '{dir}' 2>/dev/null; test -e '{file}' && echo there"));
+            assert_eq!(listed, "there\n", "{dir} listed, or its file's metadata closed");
+        }
+        // A checkout in a kept place
+        let inside = policy(&claudes);
+        assert!(cat(&inside, &claudes.join("own")) && !cat(&inside, &home.join(".claude/settings.json")));
+        assert_eq!(sh(&p, "/usr/bin/pbpaste > /dev/null 2>&1; echo $?"), "1\n", "the clipboard reached");
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// For real, on macOS (card model P2): git's credential store — plain-text passwords in
+    /// `~/.config/git/credentials`, inside `~/.config/git`, which runs read, and `~/.git-credentials` — isn't
+    /// read, while git's ignore file beside it is; nor offered for reading, nor kept for good. The reads are a
+    /// run's (`reads_for`) in a stand-in home. Harmless: plain-text markers under `target/`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn gits_stored_passwords_stay_unread_under_the_real_profile() {
+        if skipped_inside("sandbox::tests::gits_stored_passwords_stay_unread_under_the_real_profile") {
+            return;
+        }
+        let t = scratch("sb-gitcreds");
+        let home = t.join("home");
+        let root = home.join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(home.join(".config/git")).unwrap();
+        let (ignore, stored, older) = (
+            home.join(".config/git/ignore"),
+            home.join(".config/git/credentials"),
+            home.join(".git-credentials"),
+        );
+        for f in [&ignore, &stored, &older] {
+            std::fs::write(f, "marker\n").unwrap();
+        }
+        let env = Env { root: root.clone(), reads: reads_for(&home, &[]), ..Env::default() };
+        let p = Policy::for_project(&env);
+        let cat = |f: &Path| {
+            let mut c =
+                command(Some(&p), "/bin/sh", &["-c".into(), format!("cat '{}' 2>/dev/null", f.display())]);
+            c.current_dir(&root).stdin(Stdio::null()).output().unwrap().stdout == b"marker\n"
+        };
+        assert!(cat(&ignore), "git's ignore file: not read");
+        for f in [&stored, &older] {
+            assert!(!cat(f), "{}: read", f.display());
+            assert!(
+                crate::allow::read_choices(f, &home, &p.reads.kept).is_empty(),
+                "{}: offered",
+                f.display()
+            );
+            assert!(!crate::allow::keepable(f, Some(&home)), "{}: kept for good", f.display());
+        }
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// For real, on macOS (card model P2): the toolchains work with reads confined in the real home as a run
+    /// gets it (`reads_for` — the measured list — and cargo's configs above the project: this checkout has
+    /// one, and the test's crate is below it): git, rustc and cargo (a tiny crate built offline and run, its
+    /// target and build dirs in the test's folder), go and node when they're installed — and none of them is
+    /// denied a read (as far as the kernel's reports come). Harmless: they read their own settings;
+    /// what they write is under the test's own folder under `target/`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_toolchains_work_with_reads_confined() {
+        if skipped_inside("sandbox::tests::the_toolchains_work_with_reads_confined") {
+            return;
+        }
+        let t = scratch("sb-tools");
+        let root = t.join("proj");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("go")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"p\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main() { println!(\"built\"); }\n").unwrap();
+        std::fs::write(root.join("go/go.mod"), "module p\n\ngo 1.21\n").unwrap();
+        std::fs::write(
+            root.join("go/main.go"),
+            "package main\n\nimport \"fmt\"\n\nfunc main() { fmt.Println(\"built\") }\n",
+        )
+        .unwrap();
+        let home = std::fs::canonicalize(std::env::var_os("HOME").unwrap()).unwrap();
+        let cargo_home = cargo_home_of(Some(&home));
+        let tag = format!("tarae-test-{}-tools.", std::process::id());
+        let w = Watch::start(&tag);
+        std::thread::sleep(WATCH_READY);
+        let env = Env {
+            root: root.clone(),
+            home: Some(home.clone()),
+            tmp: std::fs::canonicalize(std::env::temp_dir()).ok(),
+            cargo_home,
+            reads: reads_for(&home, &cargo_configs_above(&root, &home)),
+            ..Env::default()
+        };
+        let p = Policy { tag: Some(tag), watch: Some(w.clone()), ..Policy::for_project(&env) };
+        let sh = |script: &str| {
+            let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
+            let out = c
+                .current_dir(&root)
+                .env("CARGO_BUILD_BUILD_DIR", root.join("build"))
+                .env("CARGO_TARGET_DIR", root.join("target"))
+                .env("GOCACHE", root.join("gocache"))
+                .env("GIT_CEILING_DIRECTORIES", &t)
+                .stdin(Stdio::null())
+                .output()
+                .unwrap();
+            (
+                out.status.success(),
+                format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)),
+            )
+        };
+        // (git reads its settings — not the checkout this test's folder is in)
+        let (ok, said) = sh(
+            "git config --list >/dev/null && rustc --version && cargo build --offline -q && target/debug/p",
+        );
+        assert!(ok && said.ends_with("built\n"), "{said}");
+        let here =
+            |tool: &str| Command::new(tool).arg("--version").output().is_ok_and(|o| o.status.success());
+        if here("go") {
+            let (ok, said) = sh("cd go && go build -o p . && ./p");
+            assert!(ok && said.ends_with("built\n"), "go: {said}");
+        }
+        if here("node") && here("npm") {
+            let (ok, said) = sh(
+                "node -e 'console.log(require(\"os\").homedir().length > 1)' && npm --version >/dev/null && echo built",
+            );
+            assert!(ok && said.ends_with("true\nbuilt\n"), "node: {said}");
+        }
+        std::thread::sleep(WATCH_LAST * 2);
+        w.finish();
+        let reads: Vec<String> =
+            w.blocked().seen.iter().filter(|d| d.op.starts_with("file-read")).map(Denial::shown).collect();
+        assert!(reads.is_empty(), "denied: {reads:?}");
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// Not a check: a measuring aid (card model P2's confirm pass, `target/sb/p2-confirm.sh`) — prints the
+    /// `sandbox-exec` arguments a run of Claude's gets in `$TARAE_PROFILE_ROOT` (else this checkout), with
+    /// that project's settings (`$TARAE_PROFILE_LOCALHOST`: its `sandbox-localhost`, as a session that trusts
+    /// it has), as a shell `set --` line (`PROFILE:`), and its tag (`TAG:`). Run outside a sandbox: the
+    /// toolchain's folders are asked inside one.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "a measuring aid: cargo test -- --ignored --nocapture sandbox::tests::the_profile_a_run_gets"]
+    fn the_profile_a_run_gets() {
+        let root = std::env::var_os("TARAE_PROFILE_ROOT")
+            .map_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")), PathBuf::from);
+        let mut llm = crate::config::load(&root).0.editor.llm;
+        llm.sandbox_localhost |= std::env::var_os("TARAE_PROFILE_LOCALHOST").is_some();
+        let p = policy(&root, &llm, &[]);
+        let quote = |a: &str| format!("'{}'", a.replace('\n', " ").replace('\'', "'\\''"));
+        let args: Vec<String> = p.args().iter().map(|a| quote(a)).collect();
+        println!("TAG: {}", p.tag.clone().unwrap_or_default());
+        println!("PROFILE: set -- {}", args.join(" "));
     }
 
     /// A folder's files and folders below it, each with its size, change time and inode — what a run wrote
@@ -2816,6 +3537,7 @@ mod tests {
             granted: Vec::new(),
             sockets: Vec::new(),
             refused: Vec::new(),
+            reads: Reads::default(),
         };
         let reached = |p: &Policy, l: &TcpListener| {
             let script = format!("/usr/bin/nc -z -w 2 127.0.0.1 {}", port(l));

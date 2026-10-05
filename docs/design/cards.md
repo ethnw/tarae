@@ -1,7 +1,8 @@
 # Cards: what a session may do, not what a command looks like
 
-Design, 2026-10-04. Status: **approved** with the five recommendations of §8 (2026-10-04). P0 is built
-(`src/cards.rs`, `allow::defaults`); P1 is under way in another session; the rest isn't built yet.
+Design, 2026-10-04. Status: **approved** with the five recommendations of §8 (2026-10-04). P0, P1 and P2
+are built (`src/cards.rs`, `allow::defaults`; `sandbox.rs`' write rules; its read rules — §9 "P2, as built");
+P5, P3 and P4 aren't yet.
 
 ## Headline
 
@@ -484,6 +485,46 @@ hour, each time read whole:
 - **Since your last y** (`src/sinceyes.rs`): an `outside_sandbox` run said yes to before in the chat shows only
   what changed since in what it runs — the project's hunks (a git tree per `y`, staged into a temp index), or a
   script's diff — or `Unchanged since your y at 01:12`. It still waits for `y`.
+
+**P2, as built (2026-10-05)** — measured first (`target/sb/p2-plan.md`, `p2-measured.md`, the scripts beside
+them):
+
+- **Reads in home are confined** (`sandbox::Reads`, `reads_for`, `Policy::profile`): `file-read-data` and
+  `file-read-xattr` denied under home. They're opened again for the project, the run's folder, every folder
+  it may write in, cargo's files, and the measured list (`HOME_READS`: `~/.cargo`, `~/.rustup`,
+  `~/.gitconfig`, `~/.config/git`, `~/.CFUserTextEncoding`, `~/go`, Go's cache and settings, `~/.npm`,
+  `~/Library/Fonts`). Also cargo's and rustup's homes wherever they are, tarae's grammars, the folders on
+  PATH, the repository's other checkouts, `.cargo/config{,.toml}` in the folders above the project (measured:
+  a crate below a folder with one doesn't build without it), and **the user's read grants**
+  (`tools::Widened.reads`: what Claude's Read was let read, its runs read too). Metadata stays open:
+  every workload `stat`s home and the folders above the project thousands of times, and closing it breaks
+  `getcwd` (measured).
+- **Kept from every run, last** (`kept_reads`): `allow::SECRETS`, `~/.claude`, `~/.claude.json*`, cargo's
+  `credentials*`, tarae's `$state`, with its log opened after. A kept place that holds the project (a checkout
+  under `~/.claude/worktrees`) is kept but for the project.
+- **Hard links**: no `file-link` rule. Seatbelt refuses a hard link whose new name would have any privilege
+  its source lacks (`forbidden-link-priv<op>`, measured with `link(2)` itself). So a source the run can't
+  read (`<file-read-data>`) can't come in. Neither can anything from outside the project and the run's
+  folder: they can't bind unix sockets (`<network-inbound>`). Each lock was seen holding alone. A `file-link`
+  rule would cover exactly the write rules' places, and denied everywhere it costs a denial per object file
+  rustc links.
+- **Mach**: `com.apple.pasteboard.*`, `com.apple.SecurityServer`, `com.apple.securityd` denied. No workload
+  looked either up. `pbpaste` gets exit 1 instead of 0. `security`'s exit status can't tell a missing item
+  from an unreachable keychain (44 both ways), but its only lookup is the denied one and the keychain files
+  are kept.
+- **A denied read opens like a write** (`Grant::Read`, `allow::read_choices`, `blocked.rs`): `space m s`
+  offers the file's folder and those above it, up to just below home, never a kept place or one holding one.
+- **Lost denial reports**: about 1 in 10 at random, also from processes that live on (measured), so waiting
+  can't fix it. `Policy::said_in_output` takes a path from a failing line at or up to 3 lines before
+  `operation not permitted` (any case: Go and Node print it lowercase). It judges the path by the profile's
+  rules in Rust (`reads_allow`, `writes_allow`) and turns it into a denial "said in the output", for the
+  report and for `space m s`. It replaces the cargo-caches-only fallback.
+- Confirmed under this profile: the quick preflight (1117 + 35 + 15 tests), e2e (35), a shot, Go
+  (build/vet/test/gofmt) and Node (node, npm test/run/ls) all pass. Left denied: Go's telemetry and npm's log
+  writes (as before P2), `~/.zshenv` (a test starts the user's shell), `~/.vscode/extensions` and tarae's
+  `java-debug` (lookups that find nothing), and a unit test's stray real `claude` (it reads `~/.claude.json`
+  and the keychain: to be found and faked). The whole profile costs 7.5 ms a run over a bare `sandbox-exec`
+  (24 rules, 68 parameters).
 
 ---
 

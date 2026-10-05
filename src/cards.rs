@@ -166,7 +166,7 @@ pub enum Request {
     Read(Class),
     /// Claude's `screen`.
     Screen,
-    /// The sandbox opened for what it blocked: a folder to write in, a port — or one socket.
+    /// The sandbox opened for what it blocked: a place to read, a folder to write in, a port — or one socket.
     Grant(crate::allow::Grant),
 }
 
@@ -213,6 +213,7 @@ pub fn decide(r: &Request) -> Decision {
         Request::Run { reads: c, .. } => reads(c),
         Request::Read(c) => reads(std::slice::from_ref(c)),
         Request::Screen => Decision::Screen,
+        Request::Grant(crate::allow::Grant::Read(_)) => Decision::Grant(Verb::Read),
         Request::Grant(crate::allow::Grant::Write(_)) => Decision::Grant(Verb::Write),
         Request::Grant(crate::allow::Grant::Port(_)) => Decision::Grant(Verb::Port),
         Request::Grant(crate::allow::Grant::Socket(_)) => Decision::Socket,

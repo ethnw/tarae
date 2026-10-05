@@ -49,6 +49,7 @@ impl Allowed {
 
     pub fn add(&mut self, g: &Grant) {
         match g {
+            Grant::Read(p) => self.add_read(p.clone()),
             Grant::Write(p) => self.add_write(p.clone()),
             Grant::Port(n) => self.add_port(*n),
             Grant::Socket(s) => {
@@ -84,10 +85,12 @@ fn add_place(list: &mut Vec<PathBuf>, real: PathBuf) {
     }
 }
 
-/// What a command of Claude's may do more: write in a folder, connect to a port on this machine, or to one
+/// What a command of Claude's may do more: read a place in home (its reads there are confined — card model
+/// P2; Claude's Read tool reads it too), write in a folder, connect to a port on this machine, or to one
 /// unix socket (#119 — colima's `docker.sock` for `cargo xtask linux`: the only way was the sandbox off).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Grant {
+    Read(PathBuf),
     Write(PathBuf),
     Port(u16),
     /// That socket file only (its real path) — never a folder of them, never kept.
@@ -98,15 +101,21 @@ impl Grant {
     /// As the card and the toasts say it.
     pub fn shown(&self) -> String {
         match self {
+            Grant::Read(p) => format!("read {} and everything in it", tilde(p)),
             Grant::Write(p) => format!("write in {} and everything in it", tilde(p)),
             Grant::Port(n) => format!("connect to port {n} on this machine"),
             Grant::Socket(s) => format!("connect to the socket {} — that one file", tilde(s)),
         }
     }
 
-    /// Whether it can be kept for the project (`A`): a socket can't — a server's socket is the server.
+    /// Whether it can be kept for the project (`A`): a socket can't — a server's socket is the server — nor
+    /// a read of home itself or above it, or of a place that holds keys.
     pub fn keepable(&self) -> bool {
-        !matches!(self, Grant::Socket(_))
+        match self {
+            Grant::Socket(_) => false,
+            Grant::Read(p) => keepable(p, home().as_deref()),
+            _ => true,
+        }
     }
 
     /// For a socket that's Docker's (`docker.sock`, colima's, Docker Desktop's): what connecting to it
@@ -200,8 +209,12 @@ pub fn keep(path: &Path, project: &Path, change: impl FnOnce(&mut Allowed)) -> R
         .map_err(|e| e.to_string())
 }
 
-/// Places under home that hold keys and tokens — allowed once at a time, never kept.
-const SECRETS: [&str; 11] = [
+/// Places under home that hold keys and tokens — allowed once at a time, never kept; Claude's commands never
+/// read them (`sandbox::kept_reads`). Git's credential store keeps passwords in plain text in
+/// `~/.git-credentials` and `~/.config/git/credentials` — the latter inside `~/.config/git`, which runs read.
+pub(crate) const SECRETS: [&str; 13] = [
+    ".git-credentials",
+    ".config/git/credentials",
     ".ssh",
     ".aws",
     ".gnupg",
@@ -273,6 +286,32 @@ pub fn write_choices(target: &Path, home: &Path, root: &Path, path: &[PathBuf]) 
         if !refused && !out.contains(&dir) {
             out.push(dir);
         }
+    }
+    out.truncate(WRITE_CHOICES);
+    out
+}
+
+/// The places a card may offer to let Claude's commands read, for a read the sandbox denied at `target` (a
+/// real path in home — reads elsewhere aren't confined): a file right in home itself (`~/.zshenv`), else
+/// the folder it's in and those above it up to just below home, nearest first (`WRITE_CHOICES` at most) —
+/// never home or above it, nor a place in, or holding, one kept from every run (`kept`: keys, Claude's and
+/// tarae's own).
+pub fn read_choices(target: &Path, home: &Path, kept: &[PathBuf]) -> Vec<PathBuf> {
+    if !target.starts_with(home) || target == home {
+        return Vec::new();
+    }
+    let open =
+        |p: &Path| !kept.iter().any(|k| k.starts_with(p) || p.starts_with(k)) && keepable(p, Some(home));
+    if target.parent() == Some(home) {
+        return [target.to_path_buf()].into_iter().filter(|t| open(t)).collect();
+    }
+    let mut out = Vec::new();
+    let mut at = target.parent();
+    while let Some(dir) = at.filter(|d| *d != home) {
+        if open(dir) {
+            out.push(dir.to_path_buf());
+        }
+        at = dir.parent();
     }
     out.truncate(WRITE_CHOICES);
     out
@@ -812,6 +851,34 @@ pub(crate) mod tests {
 
     fn krate_at(cargo: &Path) -> PathBuf {
         cargo.join("registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.170/src")
+    }
+
+    /// The places offered for a read the sandbox denied (card model P2): a file right in home itself, else its
+    /// folder and those above it up to just below home, nearest first — never home, a place outside it, keys,
+    /// nor a place kept from every run or a folder holding one. (Paths only; nothing is read.)
+    #[test]
+    fn which_places_a_denied_read_may_open() {
+        let home = Path::new("/Users/u");
+        let kept = [home.join(".ssh"), home.join(".config/gh"), home.join(".local/state/tarae")];
+        let choices = |p: &str| read_choices(&home.join(p), home, &kept);
+        assert_eq!(choices(".zshenv"), [home.join(".zshenv")], "a file right in home: itself");
+        assert_eq!(
+            choices("src/lib/a/b/c/d.rs"),
+            ["src/lib/a/b/c", "src/lib/a/b", "src/lib/a", "src/lib"].map(|p| home.join(p)),
+            "its folder and those above, nearest first, four at most"
+        );
+        assert_eq!(choices("src/x.rs"), [home.join("src")]);
+        for p in
+            [".ssh/id_ed25519", ".config/gh/hosts.yml", ".aws", ".aws/credentials", ".local/state/tarae/x"]
+        {
+            assert!(choices(p).is_empty(), "{p}: {:?}", choices(p));
+        }
+        // (not `.local` either: it holds tarae's state)
+        assert_eq!(choices(".local/share/x/y"), [home.join(".local/share/x"), home.join(".local/share")]);
+        assert!(
+            read_choices(home, home, &kept).is_empty()
+                && read_choices(Path::new("/opt/x/y"), home, &kept).is_empty()
+        );
     }
 
     /// The folders offered for a denied write: its nearest existing folder up to just below home — never

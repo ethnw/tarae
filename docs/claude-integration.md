@@ -427,6 +427,27 @@ What Claude runs, with `run` and `run_tests`, runs in a sandbox (macOS: Seatbelt
   folder — stays closed, and the run's panel and Claude's result say which (`llm.sandbox-write` opens a folder
   you choose). An edit to a `.cargo/config.toml` always asks first, even with review at the end. It can't
   write in `~/.cargo/bin` or anything else on your `PATH`
+- **In your home folder it reads only what it needs.** Outside home it reads anything (programs need `/usr`,
+  `/opt`, `/Applications`…). Inside home it reads the project, the folders it may write in, the repository's
+  other checkouts, the places you let Claude read, and what the toolchains read to work. That list was
+  measured by running tarae's own checks, a Go and a Node project, a screenshot and the end-to-end tests with
+  every read in home reported: `~/.cargo` (not its `credentials`), `~/.rustup`, `~/.gitconfig`,
+  `~/.config/git`, `~/.CFUserTextEncoding`, Go's `~/go`, `~/Library/Caches/go-build` and
+  `~/Library/Application Support/go`, `~/.npm`, `~/Library/Fonts`, tarae's downloaded grammars, the folders
+  on your `PATH`, and the `.cargo/config.toml` files in the folders above the project. A file's metadata
+  (that it's there, its size and time) stays readable: every program looks at home and the folders above
+  the project.
+- **Some places it never reads, whatever you allow**: `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`,
+  `~/.kube`, `~/.docker`, `~/.netrc`, `~/.npmrc`, `~/.pypirc`, `~/.password-store`, `~/Library/Keychains`,
+  git's credential store (`~/.git-credentials`, `~/.config/git/credentials`),
+  Claude's own `~/.claude` and `~/.claude.json`, cargo's `credentials.toml`, and tarae's state (its
+  conversations, what you allowed). The one exception is tarae's log. It can't reach the clipboard or the
+  keychain's server either. Nothing it can't read can be hard-linked into the project.
+- When it's denied a read, the run's panel says so. `space m s` offers to let it read that file's folder
+  (for this run, this conversation or always; never a place from the list above), and Claude's own Read can
+  read it too. The kernel's report of a denial gets lost now and then (about one in ten, measured). So
+  tarae also reads the run's output: a path on a failing line next to `Operation not permitted` that the
+  sandbox wouldn't let it read or write counts as denied too, and Claude is told it came from the output.
 - It reaches nothing over the network, so a build that needs to download something fails.
   `llm.sandbox-network` lets it through, and `llm.sandbox-write` adds folders
 - Unix sockets work only in the project and in a temp folder made for each run, which the command gets as

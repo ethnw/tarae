@@ -1732,41 +1732,53 @@ pub struct Extra {
     pub outside: bool,
 }
 
+/// What a run may do past the settings (`with_allowed`).
+#[derive(Clone, Debug, Default)]
+pub struct Widened {
+    /// The settings with the folders to write in and the ports added.
+    pub llm: crate::llm::LlmConfig,
+    /// How its result says what was allowed.
+    pub granted: Vec<String>,
+    /// The sockets it may connect to (no setting has those).
+    pub sockets: Vec<PathBuf>,
+    /// The places in home it may read (real paths — what Claude's Read was let read too).
+    pub reads: Vec<PathBuf>,
+}
+
 /// The settings a run's policy is made from with what's allowed added — kept for the project, for this
-/// conversation, and `once` — the sockets it may connect to (no setting has those), and how its result
-/// says it.
+/// conversation, and `once` — and what no setting has: the sockets, the places to read.
 pub fn with_allowed(
     llm: &crate::llm::LlmConfig,
     scopes: &[&crate::allow::Allowed],
     once: Option<&crate::allow::Grant>,
-) -> (crate::llm::LlmConfig, Vec<String>, Vec<PathBuf>) {
+) -> Widened {
     use crate::allow::Grant;
-    let mut llm = llm.clone();
-    let mut granted: Vec<String> = Vec::new();
-    let mut sockets: Vec<PathBuf> = Vec::new();
+    let mut w = Widened { llm: llm.clone(), ..Widened::default() };
     let grants = scopes
         .iter()
         .flat_map(|a| {
-            a.write
+            a.read
                 .iter()
-                .map(|p| Grant::Write(p.clone()))
+                .map(|p| Grant::Read(p.clone()))
+                .chain(a.write.iter().map(|p| Grant::Write(p.clone())))
                 .chain(a.ports.iter().map(|n| Grant::Port(*n)))
                 .chain(a.sockets.iter().map(|s| Grant::Socket(s.clone())))
         })
         .chain(once.cloned());
     for g in grants {
         match &g {
-            Grant::Write(p) => llm.sandbox_write.push(p.display().to_string()),
-            Grant::Port(n) => llm.sandbox_ports.push(*n),
-            Grant::Socket(s) if !sockets.contains(s) => sockets.push(s.clone()),
-            Grant::Socket(_) => {}
+            Grant::Read(p) if !w.reads.contains(p) => w.reads.push(p.clone()),
+            Grant::Write(p) => w.llm.sandbox_write.push(p.display().to_string()),
+            Grant::Port(n) => w.llm.sandbox_ports.push(*n),
+            Grant::Socket(s) if !w.sockets.contains(s) => w.sockets.push(s.clone()),
+            Grant::Read(_) | Grant::Socket(_) => {}
         }
         let said = g.shown();
-        if !granted.contains(&said) {
-            granted.push(said);
+        if !w.granted.contains(&said) {
+            w.granted.push(said);
         }
     }
-    (llm, granted, sockets)
+    w
 }
 
 /// The user's answer on the card: `y` runs it — the files it showed read again first (on a worker), and not
@@ -1960,9 +1972,9 @@ pub(crate) fn guard_then_go(ed: &mut Editor, who: For, job: Job, ride: Ride) {
         };
         let policy = (found == Availability::Ready).then(|| {
             let kept = crate::allow::Store::read(store.as_deref()).get(&crate::sandbox::profile_path(&root));
-            let (llm, granted, sockets) = with_allowed(&llm, &[&kept, &chat], grant.as_ref());
-            let mut p = crate::sandbox::policy(&root, &llm);
-            (p.granted, p.sockets) = (granted, sockets);
+            let w = with_allowed(&llm, &[&kept, &chat], grant.as_ref());
+            let mut p = crate::sandbox::policy(&root, &w.llm, &w.reads);
+            (p.granted, p.sockets) = (w.granted, w.sockets);
             // Its denials watched from before it starts (the stream up first — measured)
             if let Some(tag) = &p.tag {
                 p.watch = Some(crate::sandbox::Watch::start(tag));
@@ -2618,36 +2630,46 @@ mod tests {
     }
 
     /// A run's policy has what the user allowed in it — kept, this chat's, and a grant for this run alone —
-    /// each once, and its result says them.
+    /// each once, and its result says them; a place Claude's Read was let read is read by its runs too (card
+    /// model P2).
     #[test]
     fn what_the_user_allowed_goes_into_the_policy() {
         use crate::allow::{Allowed, Grant};
-        let kept = Allowed { write: vec!["/w/kept".into()], ports: vec![5432], ..Default::default() };
+        let kept = Allowed {
+            read: vec!["/r/kept".into()],
+            write: vec!["/w/kept".into()],
+            ports: vec![5432],
+            ..Default::default()
+        };
         let chat = Allowed { write: vec!["/w/chat".into()], ports: vec![5432], ..Default::default() };
         let base = crate::llm::LlmConfig::default();
-        let (llm, granted, sockets) = super::with_allowed(&base, &[&kept, &chat], Some(&Grant::Port(3000)));
-        assert_eq!(llm.sandbox_write, ["/w/kept", "/w/chat"]);
-        assert_eq!(llm.sandbox_ports, [5432, 5432, 3000], "(the policy keeps each port once)");
+        let w = super::with_allowed(&base, &[&kept, &chat], Some(&Grant::Port(3000)));
+        assert_eq!(w.llm.sandbox_write, ["/w/kept", "/w/chat"]);
+        assert_eq!(w.llm.sandbox_ports, [5432, 5432, 3000], "(the policy keeps each port once)");
         assert_eq!(
-            granted,
+            w.granted,
             [
+                "read /r/kept and everything in it",
                 "write in /w/kept and everything in it",
                 "connect to port 5432 on this machine",
                 "write in /w/chat and everything in it",
                 "connect to port 3000 on this machine"
             ]
         );
-        assert!(sockets.is_empty());
-        let (none, said, sockets) = super::with_allowed(&base, &[], None);
-        assert!(none.sandbox_write.is_empty() && none.sandbox_ports.is_empty() && said.is_empty());
-        assert!(sockets.is_empty());
-        // #119: a socket — this chat's, or this run's — as itself, nothing wider
-        let chat = Allowed { sockets: vec!["/s/a.sock".into()], ..Default::default() };
-        let once = Grant::Socket("/s/b.sock".into());
-        let (llm, said, sockets) = super::with_allowed(&base, &[&chat], Some(&once));
-        assert_eq!(sockets, [std::path::PathBuf::from("/s/a.sock"), "/s/b.sock".into()]);
-        assert!(llm.sandbox_write.is_empty() && llm.sandbox_ports.is_empty());
-        assert_eq!(said[1], "connect to the socket /s/b.sock — that one file");
+        assert!(w.sockets.is_empty());
+        assert_eq!(w.reads, [std::path::PathBuf::from("/r/kept")]);
+        let none = super::with_allowed(&base, &[], None);
+        assert!(none.llm.sandbox_write.is_empty() && none.llm.sandbox_ports.is_empty());
+        assert!(none.granted.is_empty() && none.sockets.is_empty() && none.reads.is_empty());
+        // #119: a socket — this chat's, or this run's — as itself, nothing wider; a read for this run alone
+        let chat =
+            Allowed { sockets: vec!["/s/a.sock".into()], read: vec!["/r/x".into()], ..Default::default() };
+        let w = super::with_allowed(&base, &[&chat], Some(&Grant::Socket("/s/b.sock".into())));
+        assert_eq!(w.sockets, [std::path::PathBuf::from("/s/a.sock"), "/s/b.sock".into()]);
+        assert!(w.llm.sandbox_write.is_empty() && w.llm.sandbox_ports.is_empty());
+        assert_eq!(w.granted[2], "connect to the socket /s/b.sock — that one file");
+        let once = super::with_allowed(&base, &[], Some(&Grant::Read("/r/once".into())));
+        assert_eq!(once.reads, [std::path::PathBuf::from("/r/once")]);
     }
 
     /// Checks run at once; anything the words don't fully say — or a read-only command made to write —
