@@ -49,6 +49,151 @@ pub struct ServerTraits {
     pub symbol_params: Value,
     /// `hide-lines`: lines of a diagnostic's message that say nothing about what's wrong — left out of it.
     pub hide_lines: Vec<regex::Regex>,
+    /// `args-add`: arguments added at its start (`start_spec`), unless its arguments hold `args-unless`.
+    pub args_add: Vec<String>,
+    pub args_unless: Option<String>,
+    /// `init`: its `initializationOptions` (Null: none) — `{installed:<tool>}` filled where it starts
+    /// (`installed_filled`).
+    pub init: Value,
+    /// `progress`: a notification of its own saying what it's doing while it starts.
+    pub progress: Option<Status>,
+    /// `virtual`: documents it serves at URIs of a scheme of its own (a library's class).
+    pub virtual_docs: Option<Virtual>,
+    /// `client-commands`: commands it hands back for the client to run, by what tarae does for each.
+    pub client_commands: Vec<(String, ClientAction)>,
+}
+
+/// A pack's `progress = { … }`: a server's own notification of what it's doing, shown as progress.
+#[derive(Debug)]
+pub struct Status {
+    pub method: String,
+    /// Where in its params: what kind of report it is · its words.
+    pub kind: String,
+    pub text: String,
+    /// Kinds that mean it's done (the progress goes) · words that mean so, whatever the kind · kinds that
+    /// are errors.
+    pub done: Vec<String>,
+    pub done_text: Option<regex::Regex>,
+    pub error: Vec<String>,
+}
+
+impl Status {
+    /// What `params` says it's doing — None when it's done.
+    pub fn text(&self, params: &Value) -> Option<String> {
+        let words = params[&self.text].as_str().unwrap_or_default();
+        let kind = params[&self.kind].as_str().unwrap_or_default();
+        if self.done.iter().any(|d| d == kind) || self.done_text.as_ref().is_some_and(|r| r.is_match(words)) {
+            return None;
+        }
+        Some(match self.error.iter().any(|e| e == kind) {
+            true => format!("error · {words}"),
+            false if words.is_empty() => "starting".into(),
+            false => words.to_string(),
+        })
+    }
+}
+
+/// A pack's `virtual = { … }`: where a server's own documents are, and how they're fetched and shown.
+#[derive(Debug)]
+pub struct Virtual {
+    /// The start of their URIs (`jdt://`).
+    pub scheme: String,
+    /// The request that returns one's text, given `{ "uri": … }`.
+    pub fetch: String,
+    /// The language they're in.
+    pub language: String,
+    /// Their title: the last part of the path without its extension, after the part before it and this
+    /// (`.`: `java.util.ArrayList`) — none: the last part alone.
+    pub title_join: Option<String>,
+}
+
+impl Virtual {
+    /// The first place of a location answer, when it's one of these: (its URI, its start).
+    pub fn location(&self, result: &Value) -> Option<(String, Value)> {
+        let (uri, pos) = location_uris(result).into_iter().next()?;
+        uri.starts_with(&self.scheme).then(|| (uri.to_string(), pos))
+    }
+
+    /// `jdt://contents/java.base/java.util/ArrayList.class?=…` → `java.util.ArrayList` (with `title-join`
+    /// "."): the path decoded, without its query; the part right after the scheme is where, not what.
+    pub fn title(&self, uri: &str) -> String {
+        let rest = uri.strip_prefix(&self.scheme).unwrap_or(uri);
+        let path = rest.split('?').next().unwrap_or(rest);
+        let decoded = String::from_utf8_lossy(&percent_decode(path)).into_owned();
+        let parts: Vec<&str> = decoded.split('/').filter(|p| !p.is_empty()).collect();
+        let last = parts.last().copied().unwrap_or_default();
+        let Some(join) = &self.title_join else { return last.to_string() };
+        let stem = last.rsplit_once('.').map_or(last, |(s, _)| s);
+        match parts.len() {
+            n if n >= 3 => format!("{}{join}{stem}", parts[n - 2]),
+            _ => stem.to_string(),
+        }
+    }
+}
+
+/// What tarae does for a server's client command.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClientAction {
+    /// `apply-edit`: each of its arguments is a WorkspaceEdit — applied here, the server not asked.
+    ApplyEdit,
+}
+
+/// `spec` as it starts in `root`: with its pack's `args-add` — `{cache}` (tarae's cache folder), `{root}`,
+/// `{root-name}` (its folder's name, `root` for `/`), `{root-hash}` (FNV-1a of its whole path, stable across
+/// runs and Rust versions — jdtls's `-data` folder must stay where it is) — unless its arguments already hold
+/// `args-unless`, or a variable can't be filled (no home folder).
+pub fn start_spec(spec: &ServerSpec, root: &Path) -> ServerSpec {
+    start_spec_with(spec, traits(spec), root, crate::runtime::cache_dir())
+}
+
+fn start_spec_with(spec: &ServerSpec, t: &ServerTraits, root: &Path, cache: Option<PathBuf>) -> ServerSpec {
+    let mut spec = spec.clone();
+    if t.args_add.is_empty() || t.args_unless.as_ref().is_some_and(|u| spec.args.contains(u)) {
+        return spec;
+    }
+    let name = root.file_name().map_or_else(|| "root".into(), |n| n.to_string_lossy().into_owned());
+    let hash = root
+        .to_string_lossy()
+        .bytes()
+        .fold(0xcbf29ce484222325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100000001b3));
+    let fill = |a: &String| -> Option<String> {
+        let mut a = a.replace("{root-name}", &name).replace("{root-hash}", &format!("{hash:016x}"));
+        a = a.replace("{root}", &root.to_string_lossy());
+        if a.contains("{cache}") {
+            a = a.replace("{cache}", &cache.as_ref()?.to_string_lossy());
+        }
+        Some(a)
+    };
+    match t.args_add.iter().map(fill).collect::<Option<Vec<String>>>() {
+        Some(more) => spec.args.extend(more),
+        None => crate::log::line(&spec.name, "warning", "no home folder: its pack's `args-add` left out"),
+    }
+    spec
+}
+
+/// `init` with each `{installed:<tool>}` string the path where that tool is (`packs::installed_at`) — an item
+/// of a list left out, any other place null, when it isn't there. Disk: the server's writer thread.
+pub fn installed_filled(v: Value) -> Value {
+    fn tool(s: &str) -> Option<&str> {
+        s.strip_prefix("{installed:")?.strip_suffix('}')
+    }
+    let found = |t: &str| crate::packs::installed_at(t).map(|p| Value::String(p.display().to_string()));
+    match v {
+        Value::String(s) => match tool(&s) {
+            Some(t) => found(t).unwrap_or(Value::Null),
+            None => Value::String(s),
+        },
+        Value::Array(a) => Value::Array(
+            a.into_iter()
+                .filter_map(|x| match x.as_str().and_then(tool) {
+                    Some(t) => found(t),
+                    None => Some(installed_filled(x)),
+                })
+                .collect(),
+        ),
+        Value::Object(m) => Value::Object(m.into_iter().map(|(k, x)| (k, installed_filled(x))).collect()),
+        v => v,
+    }
 }
 
 /// A pack's `share = { … }`: what sharing one server between checkouts needs to know of it.
@@ -75,8 +220,18 @@ pub struct Quiescent {
 }
 
 /// The traits of a server no pack knows.
-pub static NO_TRAITS: ServerTraits =
-    ServerTraits { share: None, quiescent: None, symbol_params: Value::Null, hide_lines: Vec::new() };
+pub static NO_TRAITS: ServerTraits = ServerTraits {
+    share: None,
+    quiescent: None,
+    symbol_params: Value::Null,
+    hide_lines: Vec::new(),
+    args_add: Vec::new(),
+    args_unless: None,
+    init: Value::Null,
+    progress: None,
+    virtual_docs: None,
+    client_commands: Vec::new(),
+};
 
 /// The names `spec` goes by in the packs: its own, then the built-in servers whose command it runs (`[lsp.py]
 /// command = "pyright-langserver"` is pyright).
@@ -357,8 +512,8 @@ pub fn nested_checkouts(root: &Path) -> Vec<String> {
     found
 }
 
-/// What a server is told at its start: `initializationOptions` (`given` — `java::prepare`'s — and more), and
-/// the settings `workspace/configuration` is answered from (`section`).
+/// What a server is told at its start: `initializationOptions` (its pack's `init`, and more), and the settings
+/// `workspace/configuration` is answered from (`section`).
 pub struct Options {
     pub init: Value,
     pub config: Value,
@@ -367,16 +522,17 @@ pub struct Options {
 /// Made on the server's writer thread: its pack is read and the project walked (disk work).
 pub type MakeOptions = Box<dyn FnOnce() -> Options + Send>;
 
-/// `given`, and the server's pack's `leave-out` (`packs::LeaveOut`) filled with `nested_checkouts` — so a
-/// server that scans the workspace leaves worktrees and checkouts inside it alone, through its own setting.
-/// The server is looked for by its name, else by the built-in one its command is (`[lsp.py] command =
-/// "pyright-langserver"` is pyright). Several folders (a shared server): the first one's are relative to it,
-/// as the server reads them, the others' whole paths.
-pub fn options_for(spec: &ServerSpec, roots: &[PathBuf], given: Value) -> MakeOptions {
+/// Its pack's `init` (the tools it names found — `installed_filled`), and the server's pack's `leave-out`
+/// (`packs::LeaveOut`) filled with `nested_checkouts` — so a server that scans the workspace leaves worktrees
+/// and checkouts inside it alone, through its own setting. The server is looked for by its name, else by the
+/// built-in one its command is (`[lsp.py] command = "pyright-langserver"` is pyright). Several folders (a
+/// shared server): the first one's are relative to it, as the server reads them, the others' whole paths.
+pub fn options_for(spec: &ServerSpec, roots: &[PathBuf]) -> MakeOptions {
     let names = pack_names(spec);
+    let init = traits(spec).init.clone();
     let (roots, name) = (roots.to_vec(), spec.name.clone());
     Box::new(move || {
-        let mut o = Options { init: given, config: Value::Null };
+        let mut o = Options { init: installed_filled(init), config: Value::Null };
         let Some(leave) = names.iter().find_map(|n| crate::packs::leave_out(n)) else { return o };
         let found: Vec<String> = roots
             .iter()
@@ -966,6 +1122,95 @@ pub fn hover_text(v: &Value) -> String {
 mod tests {
     use super::*;
 
+    fn spec_of(name: &str, command: &str, args: &[&str]) -> ServerSpec {
+        let args = args.iter().map(|a| a.to_string()).collect();
+        ServerSpec { name: name.into(), command: command.into(), args, except: vec![] }
+    }
+
+    /// jdtls's `-data` folder for a project, as every user's jdtls has it now — a new name re-imports each
+    /// project from scratch (minutes each). Pinned from what `java::workspace_dir` gave on 2026-10-05, before
+    /// it went for the java pack's `args-add`.
+    #[test]
+    fn jdtls_data_folders_stay_where_they_are() {
+        let jdtls = spec_of("jdtls", "jdtls", &[]);
+        let cache = crate::runtime::cache_dir().expect("a home folder");
+        for (root, name) in [
+            ("/work/a/app", "app-964de123d19fd75b"),
+            ("/Users/someone/Workspace/commons-lang", "commons-lang-c23c2a3c8437fd01"),
+            ("/private/tmp/tarae-java-small", "tarae-java-small-4a468dd58d495f8a"),
+            ("/", "root-af63a24c860189fe"),
+        ] {
+            let data = cache.join("jdtls").join(name).display().to_string();
+            assert_eq!(start_spec(&jdtls, Path::new(root)).args, ["-data", data.as_str()], "{root}");
+        }
+        // Renamed in the config, found by its command; one given its own `-data` keeps it
+        let renamed = spec_of("java", "/opt/jdtls/bin/jdtls", &["-Xmx2G"]);
+        assert_eq!(start_spec(&renamed, Path::new("/work/a/app")).args.len(), 3);
+        let own = spec_of("jdtls", "jdtls", &["-data", "/x"]);
+        assert_eq!(start_spec(&own, Path::new("/p")).args, ["-data", "/x"]);
+        // No home folder: nothing added (the launcher's own default)
+        assert!(start_spec_with(&jdtls, traits(&jdtls), Path::new("/p"), None).args.is_empty());
+        // Others untouched
+        let ra = spec_of("rust-analyzer", "rust-analyzer", &[]);
+        assert_eq!(start_spec(&ra, Path::new("/p")), ra);
+    }
+
+    /// jdtls's `language/status`, read by its pack's `progress`: what it's at until it's done — jdtls 1.61
+    /// sends a last "100% Starting …" after "Started", and "ProjectStatus: OK" says nothing of progress.
+    #[test]
+    fn jdtls_status_is_progress_until_done() {
+        let s = traits(&spec_of("jdtls", "jdtls", &[])).progress.as_ref().expect("the java pack says it");
+        assert_eq!(s.method, "language/status");
+        let text = |kind: &str, message: &str| s.text(&json!({ "type": kind, "message": message }));
+        assert_eq!(text("Starting", "Init...").as_deref(), Some("Init..."));
+        assert_eq!(
+            text("Starting", "42% Importing Maven project(s)").as_deref(),
+            Some("42% Importing Maven project(s)")
+        );
+        assert_eq!(text("Error", "no JDK").as_deref(), Some("error · no JDK"));
+        for (kind, message) in [
+            ("ServiceReady", "ServiceReady"),
+            ("Started", "Ready"),
+            ("Starting", "100% Starting Java Language Server"),
+            ("ProjectStatus", "OK"),
+        ] {
+            assert_eq!(text(kind, message), None, "{kind} {message}");
+        }
+    }
+
+    /// jdtls's own documents (`virtual`): a definition in a library's class is one; its title is the class.
+    #[test]
+    fn jdtls_classes_are_its_own_documents() {
+        let v = traits(&spec_of("jdtls", "jdtls", &[])).virtual_docs.as_ref().expect("the java pack says it");
+        assert_eq!((v.fetch.as_str(), v.language.as_str()), ("java/classFileContents", "java"));
+        let uri = "jdt://contents/java.base/java.util/ArrayList.class?=jproj/%5C/usr/lib/jvm%3Cjava.util(ArrayList.class";
+        let r = json!([{ "uri": uri, "range": { "start": { "line": 40, "character": 13 }, "end": {} } }]);
+        let (u, pos) = v.location(&r).unwrap();
+        assert_eq!((u.as_str(), pos["line"].as_u64()), (uri, Some(40)));
+        assert!(v.location(&json!([{ "uri": "file:///a/B.java", "range": { "start": {} } }])).is_none());
+        assert_eq!(v.title(uri), "java.util.ArrayList");
+        assert_eq!(v.title("jdt://contents/rt.jar/java.util/Map%24Entry.class"), "java.util.Map$Entry");
+        assert_eq!(v.title("jdt://contents/src.zip/java.util/List.java"), "java.util.List");
+        assert_eq!(v.title("jdt://contents/Lone.class"), "Lone", "no package");
+        let joined = Virtual {
+            title_join: None,
+            ..Virtual { scheme: "x:".into(), fetch: String::new(), language: String::new(), title_join: None }
+        };
+        assert_eq!(joined.title("x:/a/b/c.ts"), "c.ts", "no `title-join`: the last part as it is");
+        let cmds = &traits(&spec_of("jdtls", "jdtls", &[])).client_commands;
+        assert_eq!(cmds, &[("java.apply.workspaceEdit".to_string(), ClientAction::ApplyEdit)]);
+    }
+
+    /// `{installed:<tool>}` in a pack's `init`: where that tool is, or gone from its list (none here).
+    #[test]
+    fn installed_tools_fill_a_servers_options() {
+        let init = json!({ "bundles": ["{installed:tarae-no-such-tool}", "kept.jar"], "one": "{installed:tarae-no-such-tool}", "n": 1 });
+        assert_eq!(installed_filled(init), json!({ "bundles": ["kept.jar"], "one": null, "n": 1 }));
+        let jdtls = &traits(&spec_of("jdtls", "jdtls", &[])).init;
+        assert_eq!(jdtls["bundles"], json!(["{installed:java-debug}"]));
+        assert_eq!(jdtls["extendedClientCapabilities"]["classFileContentsSupport"], json!(true));
+    }
+
     /// UTF-16 positions counted by ropey are the ones counting chars gave — both ways, at every char of random
     /// text, and for columns inside a surrogate pair or past the line's end.
     #[test]
@@ -1150,22 +1395,19 @@ mod tests {
         let strs = |v: &Value| -> Vec<String> {
             v.as_array().into_iter().flatten().filter_map(|s| s.as_str().map(str::to_string)).collect()
         };
-        let ra =
-            options_for(&spec("rust-analyzer", "rust-analyzer"), std::slice::from_ref(&root), Value::Null)();
+        let ra = options_for(&spec("rust-analyzer", "rust-analyzer"), std::slice::from_ref(&root))();
         let mut ex = strs(&ra.init["files"]["exclude"]);
         ex.sort();
         assert_eq!(ex, [".claude/worktrees", "src/a/b/c4", "vendor/clone"]);
         assert_eq!(ra.config, Value::Null);
 
-        let given =
-            json!({ "bundles": ["x.jar"], "settings": { "java": { "maven": { "downloadSources": true } } } });
-        let jdtls =
-            options_for(&spec("jdtls", "/opt/jdtls/bin/jdtls"), std::slice::from_ref(&root), given.clone())()
-                .init;
+        // (found by its command: the java pack's jdtls)
+        let jdtls = options_for(&spec("java", "/opt/jdtls/bin/jdtls"), std::slice::from_ref(&root))().init;
+        assert!(jdtls["bundles"].is_array(), "{jdtls}");
         assert_eq!(
-            (&jdtls["bundles"], &jdtls["settings"]["java"]["maven"]),
-            (&given["bundles"], &json!({ "downloadSources": true })),
-            "its own kept"
+            jdtls["settings"]["java"]["maven"],
+            json!({ "downloadSources": true }),
+            "its pack's `init` kept beside what's left out"
         );
         let ex = strs(&jdtls["settings"]["java"]["import"]["exclusions"]);
         let defaults =
@@ -1178,11 +1420,7 @@ mod tests {
         }
         assert_eq!(ex.len(), 4 + 3 * 2, "{ex:?}");
 
-        let py = options_for(
-            &spec("py", "/usr/local/bin/pyright-langserver"),
-            std::slice::from_ref(&root),
-            Value::Null,
-        )();
+        let py = options_for(&spec("py", "/usr/local/bin/pyright-langserver"), std::slice::from_ref(&root))();
         assert_eq!(py.init, Value::Null, "pyright asks for it");
         let ex = strs(&section(&py.config, Some("python.analysis"))["exclude"]);
         assert!(ex.starts_with(&["**/node_modules", "**/__pycache__", "**/.*"].map(String::from)), "{ex:?}");
@@ -1193,26 +1431,21 @@ mod tests {
         );
         assert_eq!(section(&py.config, Some("pyright")), Value::Null);
 
-        let gopls = options_for(&spec("gopls", "gopls"), std::slice::from_ref(&root), Value::Null)().init;
+        let gopls = options_for(&spec("gopls", "gopls"), std::slice::from_ref(&root))().init;
         let f = strs(&gopls["directoryFilters"]);
         assert!(
             f.first().is_some_and(|d| d == "-**/node_modules") && f.contains(&"-vendor/clone".into()),
             "{f:?}"
         );
 
-        let taplo = options_for(&spec("taplo", "taplo"), std::slice::from_ref(&root), Value::Null)();
+        let taplo = options_for(&spec("taplo", "taplo"), std::slice::from_ref(&root))();
         assert_eq!((taplo.init, taplo.config), (Value::Null, Value::Null), "no leave-out in its pack");
         let plain = t.join("plain");
         std::fs::create_dir_all(plain.join("src")).unwrap();
-        let ra =
-            options_for(&spec("rust-analyzer", "rust-analyzer"), std::slice::from_ref(&plain), Value::Null)();
+        let ra = options_for(&spec("rust-analyzer", "rust-analyzer"), std::slice::from_ref(&plain))();
         assert_eq!(ra.init, Value::Null, "nothing nested: nothing said");
         // A shared server's second folder: its nested ones as whole paths (the server reads them from its first)
-        let ra = options_for(
-            &spec("rust-analyzer", "rust-analyzer"),
-            &[plain.clone(), root.clone()],
-            Value::Null,
-        )();
+        let ra = options_for(&spec("rust-analyzer", "rust-analyzer"), &[plain.clone(), root.clone()])();
         let mut ex = strs(&ra.init["files"]["exclude"]);
         ex.sort();
         let whole: Vec<String> = [".claude/worktrees", "src/a/b/c4", "vendor/clone"]

@@ -1,6 +1,6 @@
 # Java: through the build — Gradle or Maven, from the top of a multi-module build, in the file's module.
 # Results come from the JUnit XML the build writes. Debugging makes the test JVM wait, then attaches
-# java-debug (it comes with jdtls).
+# java-debug (inside jdtls — `[install.java-debug]`).
 
 # What runs later outside Claude's sandbox, in every project (`packs::protect`) — the user's builds,
 # `:preflight`, and jdtls, which imports a Gradle or Maven build when the project opens: Gradle's build and
@@ -33,7 +33,16 @@ bundle = true
 [test]
 query = "tests.scm"
 files = ["*.java"]
-helpers = ["java"]
+# Run from the topmost build file's folder (the top of a multi-module build), in the module with the nearest
+# one; Maven when the top has a pom.xml. `{package}`: `com.x.` from the file's `package` (tests.scm's
+# @var.package-name — the tree's, so not one in a comment)
+vars = [
+    { name = "java-root", topmost = "roots", missing = "no pom.xml or build.gradle above this file" },
+    { name = "java-module-dir", nearest = "roots", else = "{java-root}" },
+    { name = "java-module", parts = "{java-module-dir}", from = "{java-root}" },
+    { name = "java-build", if-exists = "{java-root}/pom.xml", then = "maven", else = "gradle" },
+    { name = "package", if = "{package-name}", then = "{package-name}.", else = "" },
+]
 cwd = "{java-root}"
 parse = "junit"
 # Nested classes are Outer$Inner to the build
@@ -44,14 +53,24 @@ sources = ["{java-module-dir}/src/test/java", "{java-module-dir}/src/main/java"]
 debug-attach = "java"
 variant-by = "{java-build}"
 
+# The project's own wrapper when it has one; the module's task (`:a:b:test`), or every project's at the top
 [test.variant.gradle]
+vars = [
+    { name = "java-tool", first = ["{java-root}/gradlew", "gradle"] },
+    { name = "java-task", if = "{java-module}", then = ":{java-module/:}:test", else = "test" },
+]
 run = ["{java-tool}", "{java-task}", "--rerun", "--console=plain", "--tests", "{package}{groups/$}.{name}"]
 run-group = ["{java-tool}", "{java-task}", "--rerun", "--console=plain", "--tests", "{package}{groups/$}"]
 run-file = ["{java-tool}", "{java-task}", "--rerun", "--console=plain", "--tests", "{package}{first-group}"]
 reports = ["{java-module-dir}/build/test-results/test"]
 debug-args = ["--debug-jvm"]
 
+# The project's own wrapper when it has one; the module by its folder (`-pl a/b`), none at the top
 [test.variant.maven]
+vars = [
+    { name = "java-tool", first = ["{java-root}/mvnw", "mvn"] },
+    { name = "java-pl", if = "{java-module}", then = ["-pl", "{java-module}"], else = [] },
+]
 run = ["{java-tool}", "-B", "test", "{java-pl}", "-Dtest={package}{groups/$}#{name}", "-Dsurefire.failIfNoSpecifiedTests=false"]
 run-group = ["{java-tool}", "-B", "test", "{java-pl}", "-Dtest={package}{groups/$}", "-Dsurefire.failIfNoSpecifiedTests=false"]
 run-file = ["{java-tool}", "-B", "test", "{java-pl}", "-Dtest={package}{first-group}", "-Dsurefire.failIfNoSpecifiedTests=false"]
@@ -75,16 +94,72 @@ held = "this project builds with its own ./mvnw, a script from the repository: l
 rank = 30
 steps = [{ name = "mvn test", cmd = "mvn -B test" }]
 
-# A pom.xml or build.gradle in a checkout inside the project is imported as a project of its own when the
-# root has no build file (measured: ext/clone/pom.xml became project "v"; dot-folders it skips itself).
-# Globs over the folder holding a build file — the folder itself and below; vscode-java's defaults kept.
-# (Its workspace folder and the debug plugin are added where it starts — java.rs.)
 # F5 and attach: java-debug inside jdtls, a chain of jdtls commands — tarae's own code (java.rs), not data
 [debug]
 way = "java"
 
+# A pom.xml or build.gradle in a checkout inside the project is imported as a project of its own when the
+# root has no build file (measured: ext/clone/pom.xml became project "v"; dot-folders it skips itself).
+# Globs over the folder holding a build file — the folder itself and below; vscode-java's defaults kept.
 [server.jdtls]
 leave-out = { init = "settings.java.import.exclusions", each = ["**/{rel}", "**/{rel}/**"], keep = ["**/node_modules/**", "**/.metadata/**", "**/archetype-resources/**", "**/META-INF/maven/**"] }
+# Its folder for a project's build state and index (-data): the launcher's default hashes only the folder's
+# name, so two `app`s would mix — the whole path's hash instead. Never change it: a new folder re-imports every
+# project from scratch (minutes each). One given in its args stays.
+args-add = ["-data", "{cache}/jdtls/{root-name}-{root-hash}"]
+args-unless = "-data"
+# Says what it's doing while it starts (importing the project, indexing) — done at "Started", "ServiceReady",
+# "ProjectStatus" (says nothing of progress), or a last "100% Starting …" after "Started" (1.61 sends one)
+progress = { method = "language/status", kind = "type", text = "message", done = ["Started", "ServiceReady", "ProjectStatus"], done-text = '^100%', error = ["Error"] }
+# A library's or the JDK's class comes as `jdt://contents/…/java.util/ArrayList.class?…`, its source (or what
+# it decompiles) asked for: a read-only buffer titled `java.util.ArrayList`
+virtual = { scheme = "jdt://", fetch = "java/classFileContents", language = "java", title-join = "." }
+# Code actions wrap their edits in this command, for the client to apply
+client-commands = { "java.apply.workspaceEdit" = "apply-edit" }
+
+# What it's told at its start. `bundles`: java-debug's jar, loaded only now (F5 offers it when missing; jdtls
+# started before it loads it then — java.rs)
+[server.jdtls.init]
+bundles = ["{installed:java-debug}"]
+
+[server.jdtls.init.extendedClientCapabilities]
+progressReportProvider = false
+# Library and JDK classes as jdt:// URIs (`virtual` above)
+classFileContentsSupport = true
+overrideMethodsPromptSupport = false
+advancedOrganizeImportsSupport = false
+generateToStringPromptSupport = false
+advancedGenerateAccessorsSupport = false
+resolveAdditionalTextEditsSupport = true
+
+[server.jdtls.init.settings.java]
+signatureHelp = { enabled = true }
+inlayHints = { parameterNames = { enabled = "literals" } }
+# A dependency's class is its real source, not decompiled (source jars downloaded)
+maven = { downloadSources = true }
+eclipse = { downloadSources = true }
+
+# The debugger inside jdtls. Pinned — Maven Central publishes only SHA-1 for it, so the SHA-256 is ours,
+# taken from the release whose SHA-1 matched the published dfc433d62cbb5bb71cfe87f1ee5363c549dccc92: a newer
+# one is a change here. Copies VS Code, Cursor or Neovim's mason already have are used as they are.
+[install.java-debug]
+what = "java-debug, the debugger jdtls runs"
+look-for = "com.microsoft.java.debug.plugin-*.jar"
+look-in = [
+    "~/.local/share/nvim/mason/packages/java-debug-adapter/extension/server",
+    "~/.vscode/extensions/vscjava.vscode-java-debug-*/server",
+    "~/.vscode-server/extensions/vscjava.vscode-java-debug-*/server",
+    "~/.cursor/extensions/vscjava.vscode-java-debug-*/server",
+]
+
+[[install.java-debug.ways]]
+download = "https://repo1.maven.org/maven2/com/microsoft/java/com.microsoft.java.debug.plugin/{version}/{file}"
+version = "0.53.1"
+file = "com.microsoft.java.debug.plugin-{version}.jar"
+sha256 = "4f4778d452a6a0665536f43ce4e32403a24be6593336b80dc85a322912859e24"
+size = 2960556
+unpack = "file"
+program = "{file}"
 
 [install.jdtls]
 what = "Java's language server (jdtls)"

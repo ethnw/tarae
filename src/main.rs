@@ -125,6 +125,7 @@ mod uistate;
 mod undofile;
 mod usage;
 mod viewalign;
+mod virtualdoc;
 mod waits;
 mod wasm;
 mod worktree;

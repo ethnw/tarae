@@ -1,6 +1,7 @@
 //! A tool a pack has tarae download itself — an `[install.<tool>]` way with `download` (`packs.rs`; the
 //! format in docs/languages.md, "Downloads"): its newest release found as the pack says, checked against the
-//! SHA-256 published beside it, unpacked into `<data>/<tool>` and found there from then on (`installed`).
+//! SHA-256 published beside it — or the release the pack pins, against the SHA-256 (and size) it pins —
+//! unpacked into `<data>/<tool>` and found there from then on (`installed`).
 //! Language-neutral: what to fetch, from where, and what it runs on are all the pack's.
 //!
 //! Shapes it covers: a release whose version is read off a page (a folder listing, `latest.txt`, a GitHub
@@ -17,6 +18,21 @@ use std::path::{Path, PathBuf};
 pub struct Pick {
     pub from: String,
     pub pick: String,
+}
+
+/// Which release: one the pack pins (a newer one is a pack change), or the newest one found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Version {
+    Pinned(String),
+    Newest(Pick),
+}
+
+/// What the file is checked against: a SHA-256 the pack pins (with a pinned version — java-debug's: Maven
+/// Central publishes only SHA-1 for it), or the one published beside it (a template: where).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Sum {
+    Pinned(String),
+    Published(String),
 }
 
 /// The file's name: a template, or read off a page.
@@ -54,10 +70,11 @@ pub struct Runtime {
 pub struct Download {
     /// Where the file is — a template (`{version}`, `{file}`, `{os}`, `{arch}`).
     pub url: String,
-    pub version: Pick,
+    pub version: Version,
     pub file: Name,
-    /// Where its checksum is — a template.
-    pub sha256: String,
+    pub sha256: Sum,
+    /// Its size in bytes, when the pack pins it too.
+    pub size: Option<u64>,
     pub unpack: Unpack,
     /// The program, inside what's unpacked — a template, relative.
     pub program: String,
@@ -117,10 +134,15 @@ fn highest(text: &str, pick: &str, at: &str) -> Result<String, String> {
         .ok_or_else(|| format!("nothing found at {at}"))
 }
 
+/// A SHA-256 as hex: 64 hex digits.
+pub fn is_sha256(h: &str) -> bool {
+    h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 /// The published checksum of `file`: the only hash there, or the one on `file`'s line (`<hash>  <name>`,
 /// `<hash> *<name>`).
 fn checksum_of(published: &str, file: &str) -> Option<String> {
-    let hex = |h: &str| h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit());
+    let hex = is_sha256;
     let rows: Vec<Vec<&str>> = published
         .lines()
         .map(|l| l.split_whitespace().collect::<Vec<_>>())
@@ -181,6 +203,21 @@ impl Download {
         with.extend(self.needs.iter().cloned());
         format!("a download from {} (with {})", self.host(), with.join(", "))
     }
+
+    /// What its card says it fetches and how it's checked: "version 0.53.1 from repo1.maven.org — checked
+    /// against the SHA-256 its pack pins", "its newest release from … — checked against its published
+    /// SHA-256".
+    pub fn said(&self) -> String {
+        let which = match &self.version {
+            Version::Pinned(v) => format!("version {v}"),
+            Version::Newest(_) => "its newest release".into(),
+        };
+        let checked = match &self.sha256 {
+            Sum::Pinned(_) => "the SHA-256 its pack pins",
+            Sum::Published(_) => "its published SHA-256",
+        };
+        format!("{which} from {} — checked against {checked}", self.host())
+    }
 }
 
 /// Download one URL — curl, else wget (both honor `https_proxy` for corporate proxies).
@@ -214,8 +251,14 @@ pub struct Got {
 /// and only then put in place of what's there.
 pub fn fetch(d: &Download, dir: &Path) -> Result<Got, String> {
     let mut vars = Vars::new(d);
-    let from = vars.fill(&d.version.from);
-    vars.version = highest(&text(&from)?, &d.version.pick, &from)?;
+    vars.version = match &d.version {
+        Version::Pinned(v) if plain(v) => v.clone(),
+        Version::Pinned(v) => return Err(format!("the pinned version isn't a plain one: {v:?}")),
+        Version::Newest(p) => {
+            let from = vars.fill(&p.from);
+            highest(&text(&from)?, &p.pick, &from)?
+        }
+    };
     vars.file = match &d.file {
         Name::Is(t) => vars.fill(t),
         Name::Pick(p) => {
@@ -227,13 +270,22 @@ pub fn fetch(d: &Download, dir: &Path) -> Result<Got, String> {
     if !plain(&file) {
         return Err(format!("the file's name isn't a plain one: {file:?}"));
     }
-    let published =
-        text(&vars.fill(&d.sha256)).map_err(|e| format!("no checksum published for {file} ({e})"))?;
-    let sum = checksum_of(&published, &file)
-        .ok_or_else(|| format!("no checksum for {file} in what's published"))?;
+    let (sum, whose) = match &d.sha256 {
+        Sum::Pinned(h) => (h.to_ascii_lowercase(), "the checksum its pack pins"),
+        Sum::Published(at) => {
+            let published =
+                text(&vars.fill(at)).map_err(|e| format!("no checksum published for {file} ({e})"))?;
+            let sum = checksum_of(&published, &file)
+                .ok_or_else(|| format!("no checksum for {file} in what's published"))?;
+            (sum, "its published checksum")
+        }
+    };
     let data = http_get(&vars.fill(&d.url))?;
+    if let Some(size) = d.size.filter(|&s| s != data.len() as u64) {
+        return Err(format!("{file} is {} bytes, not the {size} its pack says — not unpacked", data.len()));
+    }
     if crate::sha256::hex(&data) != sum {
-        return Err(format!("{file} doesn't match its published checksum — not unpacked"));
+        return Err(format!("{file} doesn't match {whose} — not unpacked"));
     }
     let program = vars.fill(&d.program);
     let rel = Path::new(&program);
@@ -433,12 +485,13 @@ mod tests {
     pub(crate) fn download(base: &str) -> Download {
         Download {
             url: format!("{base}/{{version}}/{{file}}"),
-            version: Pick { from: format!("{base}/"), pick: r"rel/(\d+(?:\.\d+)+)".into() },
+            version: Version::Newest(Pick { from: format!("{base}/"), pick: r"rel/(\d+(?:\.\d+)+)".into() }),
             file: Name::Pick(Pick {
                 from: format!("{base}/{{version}}/latest.txt"),
                 pick: r"(tool-\S+\.tar\.gz)".into(),
             }),
-            sha256: format!("{base}/{{version}}/{{file}}.sha256"),
+            sha256: Sum::Published(format!("{base}/{{version}}/{{file}}.sha256")),
+            size: None,
             unpack: Unpack::TarGz,
             program: "bin/tool".into(),
             needs: vec!["python3".into()],
@@ -592,9 +645,13 @@ mod tests {
         let base = fake_site(files, 3);
         let d = Download {
             url: format!("{base}/{{version}}/{{file}}"),
-            version: Pick { from: format!("{base}/latest"), pick: r#""tag_name":\s*"([^"]+)""#.into() },
+            version: Version::Newest(Pick {
+                from: format!("{base}/latest"),
+                pick: r#""tag_name":\s*"([^"]+)""#.into(),
+            }),
             file: Name::Is("tool_{os}".into()),
-            sha256: format!("{base}/{{version}}/sha256sums.txt"),
+            sha256: Sum::Published(format!("{base}/{{version}}/sha256sums.txt")),
+            size: None,
             unpack: Unpack::File,
             program: "tool".into(),
             needs: vec![],
@@ -608,6 +665,46 @@ mod tests {
         assert_eq!(std::fs::read(&got.program).unwrap(), body);
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(std::fs::metadata(&got.program).unwrap().permissions().mode() & 0o111, 0o111, "runnable");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A release the pack pins — its version, SHA-256 and size (java-debug's): nothing looked up, only the
+    /// file asked for, and what doesn't match all three isn't put in place.
+    #[test]
+    fn a_pinned_release_is_checked_against_the_pack() {
+        let tmp = std::env::temp_dir().join(format!("tarae-fetch-pinned-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let body = b"PK a stand-in jar, never run".to_vec();
+        let name = "plugin-0.53.1.jar".to_string();
+        let pinned = |base: &str, sum: String, size: usize| Download {
+            url: format!("{base}/{{version}}/{{file}}"),
+            version: Version::Pinned("0.53.1".into()),
+            file: Name::Is("plugin-{version}.jar".into()),
+            sha256: Sum::Pinned(sum),
+            size: Some(size as u64),
+            unpack: Unpack::File,
+            program: "{file}".into(),
+            needs: vec![],
+            runtime: None,
+            rename: vec![],
+        };
+        let site = || fake_site(vec![(format!("/rel/0.53.1/{name}"), body.clone())], 1);
+        let dir = tmp.join("plugin");
+        let got =
+            fetch(&pinned(&site(), crate::sha256::hex(&body).to_uppercase(), body.len()), &dir).unwrap();
+        assert_eq!(got, Got { version: "0.53.1".into(), program: dir.join(&name) });
+        assert_eq!(installed(&dir), Some(dir.join(&name)));
+        let err = fetch(&pinned(&site(), "0".repeat(64), body.len()), &dir).unwrap_err();
+        assert!(err.contains("doesn't match the checksum its pack pins"), "{err}");
+        let err = fetch(&pinned(&site(), crate::sha256::hex(&body), 2960556), &dir).unwrap_err();
+        assert!(err.contains("not the 2960556 its pack says"), "{err}");
+        assert_eq!(installed(&dir), Some(dir.join(&name)), "the one before stays");
+        let d = pinned("https://repo1.maven.org/x", "0".repeat(64), 1);
+        assert_eq!(
+            d.said(),
+            "version 0.53.1 from repo1.maven.org — checked against the SHA-256 its pack pins"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

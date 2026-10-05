@@ -31,7 +31,8 @@ Notes:
 - **dlv** must be newer than your Go (`go install github.com/go-delve/delve/cmd/dlv@latest`)
 - **debugpy** and **pytest** run with the project's `.venv` Python, or `$VIRTUAL_ENV`, when there is one
 - **java-debug** is a jdtls extension that jdtls doesn't ship. `F5` offers to download it from Maven Central (with
-  `curl` or `wget`); copies installed by VS Code or Neovim's mason are found too
+  `curl` or `wget`) — the release the Java pack pins, checked against the SHA-256 the pack pins (Maven Central
+  publishes only SHA-1 for it); copies installed by VS Code, Cursor or Neovim's mason are found too
 
 ## Adding a language
 
@@ -84,6 +85,21 @@ share = { toolchain = ["gleam.toml"], checks = "checkOnSave", reload-progress = 
 quiescent = { method = "x/status", capability = "experimental.status", field = "quiescent", health = "health", message = "message" }
 symbol-params = { scope = "all" }    # added to `workspace/symbol`'s params
 hide-lines = ['^note: ']             # lines of its diagnostics that say nothing about what's wrong
+# Arguments added at its start — {cache} (tarae's cache folder), {root}, {root-name}, {root-hash} (of the whole
+# path, stable) — unless its arguments already hold `args-unless` (jdtls's `-data` folder per project)
+args-add = ["--state", "{cache}/gleam/{root-name}-{root-hash}"]
+args-unless = "--state"
+# A notification of its own saying what it's doing while it starts, shown as progress: where in its params the
+# kind and the words are, the kinds (or words) that mean it's done, the kinds that are errors
+progress = { method = "x/status", kind = "type", text = "message", done = ["Ready"], done-text = '^100%', error = ["Error"] }
+# Documents of its own a definition can point at (jdtls's `jdt://` classes): asked for with `{ "uri": … }`,
+# opened read-only in `language`, titled `<part before>.<last part>` with `title-join = "."`
+virtual = { scheme = "gleam://", fetch = "gleam/source", language = "gleam", title-join = "." }
+# Commands it hands back for the client to run: "apply-edit" (each argument a WorkspaceEdit, applied here)
+client-commands = { "gleam.applyEdit" = "apply-edit" }
+
+[server.gleam.init]                  # its initializationOptions, as TOML
+plugins = ["{installed:gleam-plugin}"]   # where a tool the packs install is; left out of a list when it isn't
 ```
 
 - **Pinned.** The built-in packs' languages are pinned in
@@ -158,6 +174,25 @@ runtime = { program = "java", home = "JAVA_HOME", ask = ["-version"], version = 
 - **`file`**: a template (`"tool_{os}_{arch}.tar.gz"`), or read off a page the same way (`{ from, pick }`).
 - **`sha256`**: a file holding the one hash, or `<hash>  <name>` lines (`sha256sums.txt`, `checksums.txt`) — the
   line naming the file.
+- **Pinned.** Where a site publishes no SHA-256, the pack pins the release instead, as grammars are pinned to a
+  commit: `version = "0.53.1"` (nothing looked up), `sha256 = "<64 hex digits>"` (the hash itself — only with a
+  pinned version), `size = <bytes>` if you like. A newer release is a change to the pack. The Java pack's
+  java-debug, from Maven Central (which publishes only SHA-1 for it):
+
+  ```toml
+  [install.java-debug]
+  what = "java-debug, the debugger jdtls runs"
+  look-for = "com.microsoft.java.debug.plugin-*.jar"   # not a program: this file, the newest by its version
+  look-in = ["~/.vscode/extensions/vscjava.vscode-java-debug-*/server"]   # also where other editors put it
+  [[install.java-debug.ways]]
+  download = "https://repo1.maven.org/maven2/com/microsoft/java/com.microsoft.java.debug.plugin/{version}/{file}"
+  version = "0.53.1"
+  file = "com.microsoft.java.debug.plugin-{version}.jar"
+  sha256 = "4f4778d452a6a0665536f43ce4e32403a24be6593336b80dc85a322912859e24"
+  size = 2960556
+  unpack = "file"
+  program = "{file}"
+  ```
 - **`needs`**: programs it needs on `PATH`. With `tar.gz`, `tar` too; always `curl` or `wget`. The way is taken
   only when they're there, like a `run` way's program.
 - **`runtime`**: what the program runs on, looked at before the card — `program` (in `$<home>/bin` first), run
@@ -166,7 +201,8 @@ runtime = { program = "java", home = "JAVA_HOME", ask = ["-version"], version = 
 
 It covers a release found on a page, as a `.tar.gz` or as the program itself, with a checksum published beside it
 — Eclipse's milestones, and GitHub releases like helm-ls's (a binary per platform, each with its `.sha256sum`). Not
-covered: `.zip` archives, and releases that publish no checksum (lua-language-server's, as of 3.19).
+covered: `.zip` archives, and releases that publish no checksum and aren't pinned (lua-language-server's, as of
+3.19).
 
 ## Other tools tarae uses
 

@@ -16,7 +16,10 @@
 //!   `everywhere = true`: installed with every grammar.
 //! - `[server.<name>]`: `command` (the name unless set), `args`; what it speaks beyond the protocol
 //!   (`lsp::ServerTraits`): `share = { toolchain, checks, reload-progress }` (one for a repository's checkouts —
-//!   `share.rs`), `quiescent = { method, capability, field, health, message }`, `symbol-params`, `hide-lines`.
+//!   `share.rs`), `quiescent = { method, capability, field, health, message }`, `symbol-params`, `hide-lines`;
+//!   how it starts beyond `args` (`args-add`, `args-unless`, `init`); `progress = { method, kind, text, done,
+//!   done-text, error }`, `virtual = { scheme, fetch, language, title-join }` (`virtualdoc.rs`),
+//!   `client-commands`.
 //! - `config-files = { toml = [...], json = [...] }`: files checked for parse errors before a save (`disk.rs`;
 //!   a name with a `/` is the path's last parts); `outputs`: tools' output folders that walks skip.
 //!
@@ -30,7 +33,7 @@ use std::sync::OnceLock;
 
 use toml::{Table, Value};
 
-use crate::lsp::{Quiescent, ServerSpec, ServerTraits, Share};
+use crate::lsp::{ClientAction, Quiescent, ServerSpec, ServerTraits, Share, Status, Virtual};
 use crate::packs::{Reach, known, reach, string, strings};
 
 #[derive(Debug, Clone)]
@@ -402,8 +405,21 @@ fn grammar_of(e: &Entry) -> Result<(crate::grammar::Source, bool), String> {
 }
 
 /// Every key a `[server.<name>]` may have.
-pub(crate) const SERVER_KEYS: &[&str] =
-    &["command", "args", "leave-out", "share", "quiescent", "symbol-params", "hide-lines"];
+pub(crate) const SERVER_KEYS: &[&str] = &[
+    "command",
+    "args",
+    "leave-out",
+    "share",
+    "quiescent",
+    "symbol-params",
+    "hide-lines",
+    "args-add",
+    "args-unless",
+    "init",
+    "progress",
+    "virtual",
+    "client-commands",
+];
 
 fn server_of(e: &Entry) -> Result<(ServerSpec, ServerTraits), String> {
     let t = &e.t;
@@ -458,7 +474,79 @@ fn traits_of(t: &Table) -> Result<ServerTraits, String> {
         .iter()
         .map(|r| regex::Regex::new(r).map_err(|e| format!("`hide-lines`: {e}")))
         .collect::<Result<_, _>>()?;
-    Ok(ServerTraits { share, quiescent, symbol_params, hide_lines })
+    let args_add = strings(t.get("args-add"), "args-add")?.unwrap_or_default();
+    const ARG_VARS: [&str; 4] = ["cache", "root", "root-name", "root-hash"];
+    for a in &args_add {
+        let mut rest = a.as_str();
+        while let Some(i) = rest.find('{') {
+            let end = rest[i..].find('}').ok_or(format!("`args-add`: {a:?} has a `{{` not closed"))? + i;
+            if !ARG_VARS.contains(&&rest[i + 1..end]) {
+                return Err(format!(
+                    "`args-add`: no `{}` (there are {{{}}})",
+                    &rest[i..=end],
+                    ARG_VARS.join("}, {")
+                ));
+            }
+            rest = &rest[end + 1..];
+        }
+    }
+    // (the server's own words: any keys)
+    let init = match t.get("init") {
+        None => serde_json::Value::Null,
+        Some(v) if v.is_table() => serde_json::to_value(v).map_err(|e| format!("`init`: {e}"))?,
+        Some(_) => return Err("`init` isn't a table".into()),
+    };
+    let progress = match table("progress", &["method", "kind", "text", "done", "done-text", "error"])? {
+        None => None,
+        Some(p) => {
+            let need = |k: &str| string(p, k)?.ok_or(format!("`progress` has no `{k}`"));
+            let done_text = string(p, "done-text")?
+                .map(|r| regex::Regex::new(&r).map_err(|e| format!("`progress.done-text`: {e}")))
+                .transpose()?;
+            Some(Status {
+                method: need("method")?,
+                kind: need("kind")?,
+                text: need("text")?,
+                done: strings(p.get("done"), "progress.done")?.unwrap_or_default(),
+                done_text,
+                error: strings(p.get("error"), "progress.error")?.unwrap_or_default(),
+            })
+        }
+    };
+    let virtual_docs = match table("virtual", &["scheme", "fetch", "language", "title-join"])? {
+        None => None,
+        Some(v) => {
+            let need = |k: &str| string(v, k)?.ok_or(format!("`virtual` has no `{k}`"));
+            Some(Virtual {
+                scheme: need("scheme")?,
+                fetch: need("fetch")?,
+                language: need("language")?,
+                title_join: string(v, "title-join")?,
+            })
+        }
+    };
+    let mut client_commands = Vec::new();
+    if let Some(c) = t.get("client-commands") {
+        for (name, what) in c.as_table().ok_or("`client-commands` isn't a table")? {
+            let action = match what.as_str() {
+                Some("apply-edit") => ClientAction::ApplyEdit,
+                _ => return Err(format!("`client-commands.{name}`: what tarae does is \"apply-edit\"")),
+            };
+            client_commands.push((name.clone(), action));
+        }
+    }
+    Ok(ServerTraits {
+        share,
+        quiescent,
+        symbol_params,
+        hide_lines,
+        args_add,
+        args_unless: string(t, "args-unless")?,
+        init,
+        progress,
+        virtual_docs,
+        client_commands,
+    })
 }
 
 #[cfg(test)]
@@ -564,6 +652,33 @@ mod tests {
             if !t.hide_lines.is_empty() {
                 let lines: Vec<&str> = t.hide_lines.iter().map(regex::Regex::as_str).collect();
                 said.push(format!("hide-lines: {}", lines.join("  ")));
+            }
+            if !t.args_add.is_empty() {
+                let unless = t.args_unless.as_ref().map(|u| format!(" (unless {u})")).unwrap_or_default();
+                said.push(format!("args-add: {}{unless}", t.args_add.join(" ")));
+            }
+            if !t.init.is_null() {
+                said.push(format!("init: {}", t.init));
+            }
+            if let Some(p) = &t.progress {
+                let done_text =
+                    p.done_text.as_ref().map(|r| format!(" or {}", r.as_str())).unwrap_or_default();
+                said.push(format!(
+                    "progress: {} · {} {} · done {}{done_text} · error {}",
+                    p.method,
+                    p.kind,
+                    p.text,
+                    p.done.join(" "),
+                    p.error.join(" ")
+                ));
+            }
+            if let Some(v) = &t.virtual_docs {
+                let join =
+                    v.title_join.as_ref().map(|j| format!(" · titles joined by {j:?}")).unwrap_or_default();
+                said.push(format!("virtual: {} by {} in {}{join}", v.scheme, v.fetch, v.language));
+            }
+            for (cmd, action) in &t.client_commands {
+                said.push(format!("client-command: {cmd} → {action:?}"));
             }
             if !said.is_empty() {
                 writeln!(s, "  {n}").unwrap();
@@ -852,6 +967,10 @@ mod tests {
             ("typo", "[server.a]\nshare = { toolchian = [] }\n"),
             ("noway", "[server.b]\nquiescent = { field = \"x\" }\n"),
             ("badre", "[server.c]\nhide-lines = ['(']\n"),
+            ("badarg", "[server.d]\nargs-add = [\"{home}/x\"]\n"),
+            ("badcmd", "[server.e]\nclient-commands = { \"x.run\" = \"run\" }\n"),
+            ("nofetch", "[server.f]\nvirtual = { scheme = \"x:\", language = \"x\" }\n"),
+            ("noinit", "[server.g]\ninit = 3\n"),
         ]);
         let ra = &t.traits["rust-analyzer"];
         let share = ra.share.as_ref().unwrap();
@@ -867,7 +986,11 @@ mod tests {
         assert!(said.contains("[server.a]: `share` has no `toolchian`"), "{said}");
         assert!(said.contains("[server.b]: `quiescent` has no `method`"), "{said}");
         assert!(said.contains("[server.c]: `hide-lines`"), "{said}");
-        for gone in ["a", "b", "c"] {
+        assert!(said.contains("[server.d]: `args-add`: no `{home}`"), "{said}");
+        assert!(said.contains("[server.e]: `client-commands.x.run`"), "{said}");
+        assert!(said.contains("[server.f]: `virtual` has no `fetch`"), "{said}");
+        assert!(said.contains("[server.g]: `init` isn't a table"), "{said}");
+        for gone in ["a", "b", "c", "d", "e", "f", "g"] {
             assert!(!t.traits.contains_key(gone) && !t.servers.iter().any(|s| s.name == gone), "{gone}");
         }
     }

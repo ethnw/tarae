@@ -272,9 +272,8 @@ impl Editor {
             Offer::new(
                 title,
                 &format!(
-                    "{tool} isn't installed. Download its newest release from {} — checked against its published \
-                     SHA-256 — into:\n{}{runs_on}",
-                    way.host(),
+                    "{tool} isn't installed. Download {} — into:\n{}{runs_on}",
+                    way.said(),
                     dir.display()
                 ),
                 &format!("Downloading {tool}…"),
@@ -479,12 +478,13 @@ mod tests {
 
     /// A download way at a site that isn't there (nothing is fetched in these tests), running on `runtime`.
     fn download_way(runtime: Option<&str>) -> crate::fetch::Download {
-        use crate::fetch::{Download, Name, Pick, Runtime, Unpack};
+        use crate::fetch::{Download, Name, Pick, Runtime, Sum, Unpack, Version};
         Download {
             url: "http://127.0.0.1:9/{version}/{file}".into(),
-            version: Pick { from: "http://127.0.0.1:9/".into(), pick: r"(\d+\.\d+)".into() },
+            version: Version::Newest(Pick { from: "http://127.0.0.1:9/".into(), pick: r"(\d+\.\d+)".into() }),
             file: Name::Is("tool.tar.gz".into()),
-            sha256: "http://127.0.0.1:9/{version}/{file}.sha256".into(),
+            sha256: Sum::Published("http://127.0.0.1:9/{version}/{file}.sha256".into()),
+            size: None,
             unpack: Unpack::TarGz,
             program: "bin/tool".into(),
             needs: vec![],
@@ -609,6 +609,28 @@ mod tests {
             panic!("{:?}", ed.offers[0].state)
         };
         assert!(!why.is_empty());
+    }
+
+    /// Java debugging without java-debug: the card is the java pack's download — the release it pins, from
+    /// Maven Central, checked against the SHA-256 the pack pins — and debugging starts again once it's in.
+    #[test]
+    fn java_debug_is_offered_as_its_pack_pins_it() {
+        let mut ed = Editor::new(crate::config::Config::default());
+        ed.offer_popups = true;
+        ed.dap_resume = Some(Resume::Debug);
+        assert!(ed.offer_install_debugger("java-debug"), "the java pack says how");
+        settle_until(&mut ed, |ed| !ed.offers.is_empty(), std::time::Duration::from_secs(10));
+        let o = &ed.offers[0];
+        let What::Fetch { tool, dir, then, .. } = &o.what else { panic!("{:?}", o.what) };
+        assert_eq!((tool.as_str(), then), ("java-debug", &Then::Resume(Resume::Debug)));
+        assert!(dir.ends_with("tarae/java-debug"), "{}", dir.display());
+        assert!(
+            o.question.contains(
+                "Download version 0.53.1 from repo1.maven.org — checked against the SHA-256 its pack pins"
+            ),
+            "{}",
+            o.question
+        );
     }
 
     #[test]

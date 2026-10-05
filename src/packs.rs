@@ -86,6 +86,158 @@ pub struct Tests {
     variant_by: Option<String>,
     variants: HashMap<String, Settings>,
     kinds: HashMap<String, Kind>,
+    /// `vars`: worked out for the file before the variant is chosen · each variant's, after.
+    vars: Vec<Derive>,
+    variant_vars: HashMap<String, Vec<Derive>>,
+}
+
+/// A `vars` entry of `[test]` or a variant: a variable worked out for the file from what's around it — the
+/// pieces a build's layout is said with (Java's: the topmost build file's folder, the module's, Gradle or
+/// Maven, the wrapper or the tool). In order; each may use those before it, and the query's `@var.<name>`
+/// captures (the text of the first; empty when none).
+///
+/// - `topmost = [files]` / `nearest = [files]`: the folder holding one, the topmost below the repository or
+///   the nearest up — `"roots"`: the file's language's `roots`; none: `else` (a template), or the error
+///   `missing`.
+/// - `first = [templates]`: the first that's a file, else the first that isn't a path (a program on PATH).
+/// - `parts = "{a}"`, `from = "{b}"`: a's folders below b — `{name}` joins them with `/`, `{name/:}` with `:`.
+/// - `if = "{x}"` (not empty), or `if-exists = "{x}/f"`: `then`, else `else` — a template, or a list of them
+///   (its empty items left out; an argument that's just this variable becomes its items).
+#[derive(Clone, Debug)]
+struct Derive {
+    name: String,
+    how: Derived,
+}
+
+#[derive(Clone, Debug)]
+enum Derived {
+    Folder { topmost: bool, markers: Markers, or: Option<String>, missing: Option<String> },
+    First(Vec<String>),
+    Parts { path: String, from: String },
+    If { test: String, exists: bool, then: Choice, or: Choice },
+}
+
+#[derive(Clone, Debug)]
+enum Markers {
+    /// The file's language's `roots`.
+    Roots,
+    Files(Vec<String>),
+}
+
+/// A template, or a list of them.
+#[derive(Clone, Debug)]
+enum Choice {
+    One(String),
+    Many(Vec<String>),
+}
+
+/// A `vars` list, read.
+fn derive_rules(v: Option<&toml::Value>, at: &str) -> Result<Vec<Derive>, String> {
+    let Some(v) = v else { return Ok(Vec::new()) };
+    let list = v.as_array().ok_or(format!("`{at}vars` isn't a list"))?;
+    let mut out = Vec::new();
+    for e in list {
+        let t = e.as_table().ok_or(format!("a `{at}vars` entry isn't a table"))?;
+        let name = string(t, "name")?.ok_or(format!("a `{at}vars` entry has no `name`"))?;
+        let what = format!("`{at}vars` `{name}`");
+        let markers = |k: &str| -> Result<Markers, String> {
+            match t.get(k) {
+                Some(toml::Value::String(s)) if s == "roots" => Ok(Markers::Roots),
+                v => Ok(Markers::Files(strings(v, k)?.unwrap_or_default())),
+            }
+        };
+        let one_or_many = |k: &str| -> Result<Choice, String> {
+            match t.get(k) {
+                None => Ok(Choice::One(String::new())),
+                Some(toml::Value::String(s)) => Ok(Choice::One(s.clone())),
+                v => Ok(Choice::Many(strings(v, k)?.unwrap_or_default())),
+            }
+        };
+        let how = if t.contains_key("topmost") || t.contains_key("nearest") {
+            known(t, &["name", "topmost", "nearest", "else", "missing"], &what)?;
+            let topmost = t.contains_key("topmost");
+            Derived::Folder {
+                topmost,
+                markers: markers(if topmost { "topmost" } else { "nearest" })?,
+                or: string(t, "else")?,
+                missing: string(t, "missing")?,
+            }
+        } else if t.contains_key("first") {
+            known(t, &["name", "first"], &what)?;
+            Derived::First(strings(t.get("first"), "first")?.unwrap_or_default())
+        } else if t.contains_key("parts") {
+            known(t, &["name", "parts", "from"], &what)?;
+            let need = |k: &str| string(t, k)?.ok_or(format!("{what} has no `{k}`"));
+            Derived::Parts { path: need("parts")?, from: need("from")? }
+        } else if t.contains_key("if") || t.contains_key("if-exists") {
+            known(t, &["name", "if", "if-exists", "then", "else"], &what)?;
+            let exists = t.contains_key("if-exists");
+            let test = string(t, if exists { "if-exists" } else { "if" })?.unwrap_or_default();
+            Derived::If { test, exists, then: one_or_many("then")?, or: one_or_many("else")? }
+        } else {
+            return Err(format!("{what}: say how — topmost, nearest, first, parts or if"));
+        };
+        out.push(Derive { name, how });
+    }
+    Ok(out)
+}
+
+/// `rules` worked out for `path`, into `vars`.
+fn derive(rules: &[Derive], path: &Path, vars: &mut HashMap<String, Var>) -> Result<(), String> {
+    for r in rules {
+        let value = match &r.how {
+            Derived::Folder { topmost, markers, or, missing } => {
+                let files: Vec<String> = match markers {
+                    Markers::Files(f) => f.clone(),
+                    Markers::Roots => {
+                        let lang = crate::syntax::detect(path).map(|l| l.name.clone()).unwrap_or_default();
+                        crate::lsp::markers_for(&lang).to_vec()
+                    }
+                };
+                let found = match topmost {
+                    true => crate::lsp::root_by_markers(path, &files),
+                    false => up_to(path, |d| files.iter().any(|f| d.join(f).is_file())),
+                };
+                match (found, or) {
+                    (Some(d), _) => Var::One(d.display().to_string()),
+                    (None, Some(t)) => Var::One(fill(t, vars)),
+                    (None, None) => {
+                        return Err(missing
+                            .clone()
+                            .unwrap_or_else(|| format!("no {} above this file", files.join(" or "))));
+                    }
+                }
+            }
+            Derived::First(items) => {
+                let items: Vec<String> = items.iter().map(|t| fill(t, vars)).collect();
+                let file = items.iter().find(|i| i.starts_with('/') && Path::new(i).is_file());
+                match file.or_else(|| items.iter().find(|i| !i.contains('/') && !i.is_empty())) {
+                    Some(i) => Var::One(i.clone()),
+                    None => return Err(format!("`{}`: none of {} is here", r.name, items.join(", "))),
+                }
+            }
+            Derived::Parts { path: p, from } => {
+                let (p, from) = (PathBuf::from(fill(p, vars)), PathBuf::from(fill(from, vars)));
+                let parts = p
+                    .strip_prefix(&from)
+                    .map(|rel| rel.iter().map(|c| c.to_string_lossy().into_owned()).collect())
+                    .unwrap_or_default();
+                Var::Parts(parts, "/".into())
+            }
+            Derived::If { test, exists, then, or } => {
+                let t = fill(test, vars);
+                let yes = if *exists { Path::new(&t).exists() } else { !t.is_empty() };
+                match if yes { then } else { or } {
+                    Choice::One(s) => Var::One(fill(s, vars)),
+                    Choice::Many(l) => {
+                        Var::Many(l.iter().map(|s| fill(s, vars)).filter(|s| !s.is_empty()).collect())
+                    }
+                }
+            }
+        };
+        vars.insert(r.name.clone(), value);
+    }
+    Ok(())
 }
 
 enum Cwd {
@@ -638,6 +790,8 @@ pub fn on_path(cmd: &str) -> bool {
 /// - `hint`: what to tell when no way fits ("comes with Xcode's command line tools").
 /// - `missing-says`: what the program prints when it's there but not installed (a rustup proxy whose
 ///   component isn't): a line holding one of these offers it as if it weren't there (`missing_says`).
+/// - `look-for`: a tool that's a file, not a program (java-debug's jar: `name-*.jar`, the newest by its
+///   version) — in its download's folder, then the `look-in` folders (other editors' copies; a `*` per part).
 ///
 /// The tool is named as it's run (`gopls`, `basedpyright-langserver`). tarae only offers: `y` runs `run`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -680,10 +834,16 @@ pub fn missing_says(tool: &str) -> Vec<String> {
 }
 
 /// Where `tool` is when it isn't on `PATH`: in a `bin` of one of its ways (`go install` → `~/go/bin`), or
-/// where a `download` way put it (`fetched_dir`).
+/// where a `download` way put it (`fetched_dir`) — or for a file that isn't a program (`look-for`), the newest
+/// there or in `look-in`. Disk: a worker's, or once (java-debug's jar at F5 — `java::debug_bundle`).
 pub fn installed_at(tool: &str) -> Option<PathBuf> {
     let found = install_in(tool, install_tables())?;
-    found_in(tool, &found.bins, fetched_dir(tool).as_deref())
+    let fetched = fetched_dir(tool);
+    found_in(tool, &found.bins, fetched.as_deref()).or_else(|| {
+        let dirs: Vec<PathBuf> =
+            fetched.into_iter().chain(found.look_in.iter().filter_map(|d| expand_dir(d))).collect();
+        newest_in(found.look_for.as_deref()?, &dirs)
+    })
 }
 
 /// The first of `bins`' `tool`, then the program a download put in `fetched`, that's there.
@@ -795,6 +955,11 @@ struct Recipe {
     bins: Vec<PathBuf>,
     hint: Option<String>,
     missing_says: Vec<String>,
+    /// `look-for`: a file that isn't a program (java-debug's jar, `name-*.jar`), the newest by the version in
+    /// its name — in its download's folder, then the `look-in` folders (other editors' copies; one `*` per
+    /// part of a path).
+    look_for: Option<String>,
+    look_in: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -843,7 +1008,7 @@ fn install_in(tool: &str, tables: Vec<(String, Table)>) -> Option<Recipe> {
 
 fn recipe(tool: &str, v: &toml::Value) -> Result<Recipe, String> {
     let t = v.as_table().ok_or("isn't a table")?;
-    known(t, &["what", "ways", "hint", "missing-says"], "it")?;
+    known(t, &["what", "ways", "hint", "missing-says", "look-for", "look-in"], "it")?;
     let what = string(t, "what")?.ok_or("has no `what`")?;
     let mut ways = Vec::new();
     let mut bins = Vec::new();
@@ -866,16 +1031,76 @@ fn recipe(tool: &str, v: &toml::Value) -> Result<Recipe, String> {
         ways.push(Way::Run { run, needs, project });
     }
     let missing_says = strings(t.get("missing-says"), "missing-says")?.unwrap_or_default();
-    Ok(Recipe { tool: tool.to_string(), what, ways, bins, hint: string(t, "hint")?, missing_says })
+    let look_for = string(t, "look-for")?;
+    if look_for.as_ref().is_some_and(|f| f.contains('/') || f.matches('*').count() != 1) {
+        return Err("`look-for` is a file name with one `*` (where its version is)".into());
+    }
+    let look_in = strings(t.get("look-in"), "look-in")?.unwrap_or_default();
+    if !look_in.is_empty() && look_for.is_none() {
+        return Err("`look-in` needs `look-for` (the file to look for there)".into());
+    }
+    Ok(Recipe {
+        tool: tool.to_string(),
+        what,
+        ways,
+        bins,
+        hint: string(t, "hint")?,
+        missing_says,
+        look_for,
+        look_in,
+    })
+}
+
+/// The newest file named as `pattern` (one `*`: its version) in `dirs` — each a path whose parts may hold one
+/// `*` (`~/.vscode/extensions/vscjava.vscode-java-debug-*/server`), `~` and `${VAR}` expanded.
+fn newest_in(pattern: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
+    let (pre, post) = pattern.split_once('*')?;
+    let version = |p: &Path| {
+        let n = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        let v = n.get(pre.len()..n.len().saturating_sub(post.len())).unwrap_or_default();
+        v.split(|c: char| !c.is_ascii_digit())
+            .filter(|x| !x.is_empty())
+            .map(|x| x.parse().unwrap_or(0))
+            .collect::<Vec<u64>>()
+    };
+    dirs.iter()
+        .flat_map(|d| globbed(d))
+        .filter_map(|d| std::fs::read_dir(d).ok())
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| glob(pattern, n)) && p.is_file())
+        .max_by_key(|p| version(p))
+}
+
+/// The folders a path with `*`s in its parts names (`a/b-*/c` → every `a/b-…/c` there is).
+fn globbed(path: &Path) -> Vec<PathBuf> {
+    let mut found = vec![PathBuf::new()];
+    for part in path.components() {
+        let part = part.as_os_str().to_string_lossy();
+        if !part.contains('*') {
+            found.iter_mut().for_each(|f| f.push(&*part));
+            continue;
+        }
+        found = found
+            .iter()
+            .filter_map(|f| std::fs::read_dir(f).ok())
+            .flatten()
+            .flatten()
+            .filter(|e| glob(&part, &e.file_name().to_string_lossy()))
+            .map(|e| e.path())
+            .collect();
+    }
+    found
 }
 
 /// A `download` way (docs/languages.md, "Downloads"): where the file is, how its version and name are found,
 /// where its checksum is, how it's unpacked and where the program is in it; what it needs and runs on.
 fn download_way(w: &Table) -> Result<crate::fetch::Download, String> {
-    use crate::fetch::{Download, Name, Pick, Runtime, Unpack, check_template};
+    use crate::fetch::{Download, Name, Pick, Runtime, Sum, Unpack, Version, check_template};
     known(
         w,
-        &["download", "version", "file", "sha256", "unpack", "program", "needs", "runtime", "rename"],
+        &["download", "version", "file", "sha256", "size", "unpack", "program", "needs", "runtime", "rename"],
         "a download",
     )?;
     let template = |key: &str| -> Result<String, String> {
@@ -893,7 +1118,28 @@ fn download_way(w: &Table) -> Result<crate::fetch::Download, String> {
         Ok(Pick { from, pick })
     };
     let url = template("download")?;
-    let version = pick(w.get("version").ok_or("a download has no `version`")?, "version")?;
+    // A version pinned (a newer one is a pack change), or how the newest is found
+    let version = match w.get("version").ok_or("a download has no `version`")? {
+        toml::Value::String(v) => Version::Pinned(v.clone()),
+        v => Version::Newest(pick(v, "version")?),
+    };
+    // A SHA-256 pinned (64 hex digits), or where the published one is
+    let sha256 = match string(w, "sha256")?.ok_or("a download has no `sha256`")? {
+        h if crate::fetch::is_sha256(&h) => match version {
+            Version::Pinned(_) => Sum::Pinned(h),
+            Version::Newest(_) => return Err("a pinned `sha256` needs a pinned `version`".into()),
+        },
+        at => {
+            check_template(&at)?;
+            Sum::Published(at)
+        }
+    };
+    let size = match w.get("size") {
+        None => None,
+        Some(v) => {
+            Some(v.as_integer().and_then(|n| u64::try_from(n).ok()).ok_or("`size` is a number of bytes")?)
+        }
+    };
     let file = match w.get("file") {
         Some(toml::Value::String(s)) => {
             check_template(s)?;
@@ -944,7 +1190,8 @@ fn download_way(w: &Table) -> Result<crate::fetch::Download, String> {
         url,
         version,
         file,
-        sha256: template("sha256")?,
+        sha256,
+        size,
         unpack,
         program: template("program")?,
         needs,
@@ -1011,7 +1258,7 @@ fn set(t: &Table, sfx: &str) -> Result<Set, String> {
     })
 }
 
-const HELPERS: &[&str] = &["python", "cargo", "java"];
+const HELPERS: &[&str] = &["python", "cargo"];
 const PARSERS: &[&str] = &["go", "rust", "python", "junit"];
 
 impl Tests {
@@ -1043,6 +1290,7 @@ impl Tests {
             "variant",
             "kind",
             "debug-build",
+            "vars",
         ];
         known(t, &[&own[..], SETTINGS].concat(), "[test]")?;
         let name = string(t, "query")?.ok_or("[test] has no `query`")?;
@@ -1085,11 +1333,14 @@ impl Tests {
             }
         }
         let mut variants = HashMap::new();
+        let mut variant_vars = HashMap::new();
         if let Some(vs) = t.get("variant") {
             for (k, v) in vs.as_table().ok_or("[test.variant] isn't a table")? {
                 let vt = v.as_table().ok_or(format!("[test.variant.{k}] isn't a table"))?;
-                known(vt, SETTINGS, &format!("[test.variant.{k}]"))?;
+                known(vt, &[SETTINGS, &["vars"]].concat(), &format!("[test.variant.{k}]"))?;
                 variants.insert(k.clone(), Settings::read(vt)?);
+                variant_vars
+                    .insert(k.clone(), derive_rules(vt.get("vars"), &format!("[test.variant.{k}] "))?);
             }
         }
         let parse = string(t, "parse")?.unwrap_or_default();
@@ -1133,7 +1384,35 @@ impl Tests {
             variant_by,
             variants,
             kinds,
+            vars: derive_rules(t.get("vars"), "")?,
+            variant_vars,
         })
+    }
+
+    /// The query's `@var.<name>` captures in the file: the first one's text each — empty when none.
+    fn captured(&self, tree: &Tree, src: &str) -> HashMap<String, Var> {
+        let names = self.query.capture_names();
+        let mut out: HashMap<String, Var> = names
+            .iter()
+            .filter_map(|n| n.strip_prefix("var."))
+            .map(|n| (n.to_string(), Var::One(String::new())))
+            .collect();
+        if out.is_empty() {
+            return out;
+        }
+        let mut qc = QueryCursor::new();
+        let mut matches = qc.matches(&self.query, tree.root_node(), src.as_bytes());
+        while let Some(m) = matches.next() {
+            for c in m.captures() {
+                let Some(name) = names[c.index as usize].strip_prefix("var.") else { continue };
+                if matches!(out.get(name), Some(Var::One(s)) if s.is_empty())
+                    && let Ok(text) = c.node.utf8_text(src.as_bytes())
+                {
+                    out.insert(name.to_string(), Var::One(text.to_string()));
+                }
+            }
+        }
+        out
     }
 
     /// The test at `cursor` (byte) in `path` — else the group around it, else the file's tests; with
@@ -1159,7 +1438,9 @@ impl Tests {
             Cwd::Markers { nearest, or } => near(nearest).or_else(|| near(or)).unwrap_or(dir),
             Cwd::Template(_) => dir,
         };
-        let mut vars = self.helper_vars(path, &first, src, tree)?;
+        let mut vars = self.helper_vars(path, &first, tree)?;
+        vars.extend(self.captured(tree, src));
+        derive(&self.vars, path, &mut vars)?;
         let cwd = match &self.cwd {
             Cwd::Template(t) => {
                 let c = fill(t, &vars);
@@ -1181,7 +1462,10 @@ impl Tests {
         }
         let variant = self.variant_by.as_ref().map(|v| fill(v, &vars));
         let settings = match variant.as_ref().map(|v| (v, self.variants.get(v))) {
-            Some((_, Some(o))) => self.base.over(o),
+            Some((v, Some(o))) => {
+                derive(self.variant_vars.get(v).map_or(&[][..], Vec::as_slice), path, &mut vars)?;
+                self.base.over(o)
+            }
             Some((v, None)) => return Err(format!("no [test.variant.{v}]")),
             None => self.base.clone(),
         };
@@ -1306,13 +1590,7 @@ impl Tests {
     }
 
     /// The variables the pack's helpers give, for this file.
-    fn helper_vars(
-        &self,
-        path: &Path,
-        cwd: &Path,
-        src: &str,
-        tree: &Tree,
-    ) -> Result<HashMap<String, Var>, String> {
+    fn helper_vars(&self, path: &Path, cwd: &Path, tree: &Tree) -> Result<HashMap<String, Var>, String> {
         let mut vars = HashMap::new();
         for h in &self.helpers {
             match h.as_str() {
@@ -1333,25 +1611,6 @@ impl Tests {
                     vars.insert("module-label".into(), Var::One(label));
                     vars.insert("crate-root".into(), Var::One(c.crate_root.display().to_string()));
                 }
-                "java" => {
-                    let j = java(path, src, tree)?;
-                    let one = |s: String| Var::One(s);
-                    let task = if j.module.is_empty() { "test".into() } else { format!("{}:test", j.module) };
-                    let pl = if j.gradle || j.module.is_empty() {
-                        Vec::new()
-                    } else {
-                        vec!["-pl".into(), j.module]
-                    };
-                    vars.extend([
-                        ("java-root".into(), one(j.root.display().to_string())),
-                        ("java-module-dir".into(), one(j.module_dir.display().to_string())),
-                        ("java-build".into(), one(if j.gradle { "gradle" } else { "maven" }.into())),
-                        ("java-tool".into(), one(j.tool)),
-                        ("java-task".into(), one(task)),
-                        ("java-pl".into(), Var::Many(pl)),
-                        ("package".into(), one(j.package)),
-                    ]);
-                }
                 _ => unreachable!("checked when the pack was read"),
             }
         }
@@ -1367,55 +1626,6 @@ fn builds(debug: &toml::Value) -> bool {
 /// Whether a scope's command uses a variable (so it needs something there).
 fn uses(s: &Set, var: &str) -> bool {
     s.run.as_ref().is_some_and(|r| r.iter().any(|a| a.contains(var)))
-}
-
-/// A Java file's build: run from the topmost build file (the top of a multi-module build), in the module
-/// with the nearest one.
-struct Java {
-    root: PathBuf,
-    module_dir: PathBuf,
-    gradle: bool,
-    tool: String,
-    /// `:a:b` (Gradle) or `a/b` (Maven), empty at the top.
-    module: String,
-    /// `com.x.`, or empty.
-    package: String,
-}
-
-fn java(path: &Path, src: &str, tree: &Tree) -> Result<Java, String> {
-    let root = crate::java::project_root(path).ok_or("no pom.xml or build.gradle above this file")?;
-    let module_dir = up_to(path, |d| crate::java::build_files().iter().any(|f| d.join(f).is_file()))
-        .unwrap_or(root.clone());
-    let rel: Vec<String> = module_dir
-        .strip_prefix(&root)
-        .map(|r| r.iter().map(|c| c.to_string_lossy().into_owned()).collect())
-        .unwrap_or_default();
-    let gradle = !root.join("pom.xml").is_file();
-    let tool = match (gradle, root.join("gradlew").is_file(), root.join("mvnw").is_file()) {
-        (true, true, _) => root.join("gradlew").display().to_string(),
-        (true, false, _) => "gradle".into(),
-        (false, _, true) => root.join("mvnw").display().to_string(),
-        (false, _, false) => "mvn".into(),
-    };
-    let module = match (gradle, rel.is_empty()) {
-        (_, true) => String::new(),
-        (true, false) => format!(":{}", rel.join(":")),
-        (false, false) => rel.join("/"),
-    };
-    // `package a.b;` — from the tree, so not one in a comment or a string
-    let root_node = tree.root_node();
-    let mut walk = root_node.walk();
-    let package = root_node
-        .named_children(&mut walk)
-        .find(|n| n.kind() == "package_declaration")
-        .and_then(|p| {
-            let mut w = p.walk();
-            let name =
-                p.named_children(&mut w).find(|n| matches!(n.kind(), "identifier" | "scoped_identifier"));
-            name.and_then(|n| n.utf8_text(src.as_bytes()).ok()).map(|p| format!("{p}."))
-        })
-        .unwrap_or_default();
-    Ok(Java { root, module_dir, gradle, tool, module, package })
 }
 
 /// A test or group in the file.
@@ -1844,7 +2054,12 @@ mod tests {
             "a release, not the nightly: {}",
             d.url
         );
-        assert!(d.sha256.ends_with("{file}.sha256"));
+        assert_eq!(
+            d.sha256,
+            crate::fetch::Sum::Published(
+                "https://download.eclipse.org/jdtls/milestones/{version}/{file}.sha256".into()
+            )
+        );
         assert_eq!(
             (d.unpack, d.program.as_str(), d.needs.as_slice()),
             (crate::fetch::Unpack::TarGz, "bin/jdtls", &["python3".to_string()][..])
@@ -1858,6 +2073,77 @@ mod tests {
             "{}",
             none.no_way()
         );
+    }
+
+    /// The Java pack's java-debug: the release it pins (Maven Central publishes only SHA-1 for it, so the
+    /// SHA-256 is the pack's), downloaded as the jar it is — and found as other editors left it.
+    #[test]
+    fn the_java_packs_java_debug_is_pinned() {
+        let r = install_in("java-debug", install_tables()).expect("the Java pack has [install.java-debug]");
+        assert_eq!(r.look_for.as_deref(), Some("com.microsoft.java.debug.plugin-*.jar"));
+        assert!(r.look_in.iter().any(|d| d.contains("vscjava.vscode-java-debug-*/server")));
+        let d = r.pick(|_| true).download.expect("a download");
+        use crate::fetch::{Name, Sum, Unpack, Version};
+        assert_eq!(d.version, Version::Pinned("0.53.1".into()));
+        assert_eq!(
+            d.sha256,
+            Sum::Pinned("4f4778d452a6a0665536f43ce4e32403a24be6593336b80dc85a322912859e24".into())
+        );
+        assert_eq!(d.size, Some(2960556));
+        assert_eq!(d.file, Name::Is("com.microsoft.java.debug.plugin-{version}.jar".into()));
+        assert_eq!((d.unpack, d.program.as_str()), (Unpack::File, "{file}"));
+        assert_eq!(
+            d.url,
+            "https://repo1.maven.org/maven2/com/microsoft/java/com.microsoft.java.debug.plugin/{version}/{file}"
+        );
+        // A pinned hash with the newest release isn't a pin
+        let t: Table = format!(
+            "[t]\nwhat = \"t\"\n[[t.ways]]\ndownload = \"https://x/{{file}}\"\nfile = \"f\"\nprogram = \"f\"\n\
+             sha256 = \"{}\"\nversion = {{ from = \"https://x/\", pick = \"(\\\\d+)\" }}\n",
+            "a".repeat(64)
+        )
+        .parse()
+        .unwrap();
+        assert!(recipe("t", &t["t"]).unwrap_err().contains("needs a pinned `version`"));
+    }
+
+    /// `[test] vars` read: each says how; a key that doesn't belong to its way is a mistake said.
+    #[test]
+    fn test_vars_say_how() {
+        let read = |s: &str| {
+            let t: Table = format!("vars = [{s}]").parse().unwrap();
+            derive_rules(t.get("vars"), "").map(|r| r.len())
+        };
+        assert_eq!(read("{ name = \"a\", topmost = \"roots\" }, { name = \"b\", first = [\"x\"] }"), Ok(2));
+        assert!(read("{ name = \"a\" }").unwrap_err().contains("say how"));
+        assert!(read("{ topmost = [\"x\"] }").unwrap_err().contains("has no `name`"));
+        assert!(
+            read("{ name = \"a\", first = [\"x\"], else = \"y\" }").unwrap_err().contains("has no `else`")
+        );
+        assert!(read("{ name = \"a\", parts = \"{x}\" }").unwrap_err().contains("has no `from`"));
+    }
+
+    /// `look-for` in the download's folder and `look-in` folders (a `*` in a part of the path): the newest by
+    /// the version in its name.
+    #[test]
+    fn a_file_is_found_newest_where_editors_left_it() {
+        let t = std::env::temp_dir().join(format!("tarae-look-in-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        for (dir, file) in [
+            ("ours", "p-0.9.0.jar"),
+            ("ext/vscjava.debug-0.50/server", "p-0.50.0.jar"),
+            ("ext/vscjava.debug-0.53/server", "p-0.53.1.jar"),
+            ("ext/other-1/server", "p-9.9.9.jar"),
+            ("ext/vscjava.debug-0.53/server", "notes.txt"),
+        ] {
+            std::fs::create_dir_all(t.join(dir)).unwrap();
+            std::fs::write(t.join(dir).join(file), "PK").unwrap();
+        }
+        let dirs = [t.join("ours"), t.join("ext/vscjava.debug-*/server"), t.join("nowhere/*/x")];
+        assert_eq!(newest_in("p-*.jar", &dirs), Some(t.join("ext/vscjava.debug-0.53/server/p-0.53.1.jar")));
+        assert_eq!(newest_in("p-*.jar", &dirs[..1]), Some(t.join("ours/p-0.9.0.jar")));
+        assert_eq!(newest_in("q-*.jar", &dirs), None);
+        let _ = std::fs::remove_dir_all(&t);
     }
 
     #[test]

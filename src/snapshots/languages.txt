@@ -348,6 +348,12 @@
   roots: CMakeLists.txt Cargo.toml build.gradle build.gradle.kts compile_commands.json go.mod go.work jsconfig.json package.json pom.xml pyproject.toml settings.gradle settings.gradle.kts setup.cfg setup.py tsconfig.json
 
 [servers]
+  jdtls
+    args-add: -data {cache}/jdtls/{root-name}-{root-hash} (unless -data)
+    init: {"bundles":["{installed:java-debug}"],"extendedClientCapabilities":{"advancedGenerateAccessorsSupport":false,"advancedOrganizeImportsSupport":false,"classFileContentsSupport":true,"generateToStringPromptSupport":false,"overrideMethodsPromptSupport":false,"progressReportProvider":false,"resolveAdditionalTextEditsSupport":true},"settings":{"java":{"eclipse":{"downloadSources":true},"inlayHints":{"parameterNames":{"enabled":"literals"}},"maven":{"downloadSources":true},"signatureHelp":{"enabled":true}}}}
+    progress: language/status · type message · done Started ServiceReady ProjectStatus or ^100% · error Error
+    virtual: jdt:// by java/classFileContents in java · titles joined by "."
+    client-command: java.apply.workspaceEdit → ApplyEdit
   rust-analyzer
     share: toolchain rust-toolchain.toml rust-toolchain · checks checkOnSave · reload-progress Fetching
     quiescent: experimental/serverStatus (asked: experimental.serverStatusNotification) · quiescent health message

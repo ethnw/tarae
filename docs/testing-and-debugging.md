@@ -85,11 +85,20 @@ debug = { mode = "test", program = "{cwd}", args = ["-test.run", "^{name}$"] }  
   - `helpers = ["python"]` adds `{python}`, the project's virtualenv Python.
   - `helpers = ["cargo"]` adds `{cargo-target}` (`--lib`, `--bin x`, `--test x`), `{module}` (the file's module
     path) and `{crate-root}` (the target's root file).
-  - `helpers = ["java"]` adds `{java-root}` (the top of a multi-module build), `{java-module-dir}`, `{java-build}`
-    (`gradle` or `maven`), `{java-tool}` (the wrapper if there is one), `{java-task}` (`:app:test`), `{java-pl}`
-    (`-pl app`) and `{package}`. `cwd` can be a template too: `cwd = "{java-root}"`.
+- **Variables of the pack's own** (`vars`, a list, in order — each may use those before it): how a build's layout
+  is said. The [Java pack](../runtime/packs/java/pack.toml) works out `{java-root}` (the top of a multi-module
+  build), the module, Gradle or Maven, the wrapper or the tool, the module's task and `{package}` with them:
+  - `{ name = "root", topmost = ["pom.xml"] }` / `nearest = [...]` — the folder holding one, the topmost below the
+    repository or the nearest up (`"roots"`: the language's `roots`); none: `else = "{…}"`, or the error `missing`
+  - `{ name = "tool", first = ["{root}/gradlew", "gradle"] }` — the first that's a file, else a program name
+  - `{ name = "module", parts = "{module-dir}", from = "{root}" }` — the folders between: `{module}` is `a/b`,
+    `{module/:}` is `a:b`
+  - `{ name = "x", if = "{module}", then = …, else = … }` (not empty), or `if-exists = "{root}/pom.xml"` — each side
+    a template or a list (`then = ["-pl", "{module}"]`)
+  - The test query's `@var.<name>` captures are variables too (Java's `@var.package-name`: the tree's `package`).
+  `cwd` can be a template: `cwd = "{java-root}"`.
 - **Variants.** `variant-by = "{java-build}"` picks `[test.variant.gradle]` or `[test.variant.maven]`, whose
-  settings override the rest.
+  settings override the rest; a variant's own `vars` are worked out once it's picked.
 - **JUnit XML.** With `parse = "junit"`, results come from the reports written to `reports` during the run, and
   failures point into `sources` (through a Java stack, or the first `path:line` in the failure).
 - **Building before debugging.** `{built}` in a debug template is what `debug-build` builds when debugging

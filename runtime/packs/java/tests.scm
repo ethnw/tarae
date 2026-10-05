@@ -5,3 +5,6 @@
   (#match? @_a "(^|\\.)(Test|ParameterizedTest|RepeatedTest|TestFactory|TestTemplate)$"))
 
 (class_declaration name: (identifier) @name) @group
+
+; The file's package (`{package}` — pack.toml's vars)
+(package_declaration [(identifier) (scoped_identifier)] @var.package-name)

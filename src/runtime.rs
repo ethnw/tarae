@@ -20,6 +20,25 @@ pub fn builtin_grammar(name: &str) -> Option<unsafe extern "C" fn() -> *const ()
     BUILTIN_GRAMMARS.iter().find(|(n, _)| *n == name).map(|(_, f)| *f)
 }
 
+/// tarae's cache folder: `$XDG_CACHE_HOME/tarae`, else `~/.cache/tarae` (a server's own state per project —
+/// jdtls's `-data`, through its pack's `{cache}`).
+pub fn cache_dir() -> Option<PathBuf> {
+    cache_dir_of(std::env::var_os("XDG_CACHE_HOME"), std::env::var_os("HOME"))
+}
+
+fn cache_dir_of(xdg: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    xdg.map(PathBuf::from).or_else(|| home.map(|h| PathBuf::from(h).join(".cache"))).map(|d| d.join("tarae"))
+}
+
+#[cfg(test)]
+#[test]
+fn the_cache_folder_is_xdgs_else_homes() {
+    let p = |s: &str| Some(std::ffi::OsString::from(s));
+    assert_eq!(cache_dir_of(p("/x/cache"), p("/h")), Some(PathBuf::from("/x/cache/tarae")));
+    assert_eq!(cache_dir_of(None, p("/h")), Some(PathBuf::from("/h/.cache/tarae")));
+    assert_eq!(cache_dir_of(None, None), None);
+}
+
 /// Where grammars are downloaded to (`tarae grammar install`).
 pub fn data_dir() -> Option<PathBuf> {
     std::env::var_os("XDG_DATA_HOME")

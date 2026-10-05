@@ -398,8 +398,8 @@ pub enum Kind {
     WorkspaceSymbols,
     /// Java debug prep (jdtls `vscode.java.*` commands) — java.rs.
     JavaDebug,
-    /// Library/JDK class source (`java/classFileContents`, jdt:// definitions) — java.rs.
-    ClassFile {
+    /// A document of the server's own (its pack's `virtual`: jdtls's `jdt://` classes) — `virtualdoc.rs`.
+    Virtual {
         uri: String,
         pos: Value,
     },
@@ -607,8 +607,8 @@ impl Editor {
         }
         self.lsp.next_id += 1;
         let cid = self.lsp.next_id;
-        let (server, options) = crate::java::prepare(server, root);
-        let mut options = lsp::options_for(&server, roots, options);
+        let server = lsp::start_spec(server, root);
+        let mut options = lsp::options_for(&server, roots);
         // (a server with no setting for it can't be held)
         let checks = lsp::traits(&server).share.as_ref().and_then(|s| s.checks.clone());
         let checks_off = checks_off && checks.is_some();
@@ -879,9 +879,7 @@ impl Editor {
                     }
                     Kind::Shutdown => self.share_drop(cid),
                     Kind::JavaDebug => self.java_debug_reply(cid, id, error, result),
-                    Kind::ClassFile { uri, pos } => {
-                        self.class_file_reply(cid, uri.clone(), pos, error, result)
-                    }
+                    Kind::Virtual { uri, pos } => self.server_doc_reply(cid, uri.clone(), pos, error, result),
                     Kind::InlayHint { range } => self.on_inlay(cid, &p, *range, result),
                     &Kind::ToolRefs { ask } => {
                         self.with_session(session, |ed| crate::nav::refs_answered(ed, ask, answered))
@@ -1127,15 +1125,17 @@ impl Editor {
                     self.share_quiescent(cid);
                 }
             }
-            // jdtls startup progress (project import, indexing)
-            "language/status" => {
+            // Its pack's `progress`: what it's doing while it starts (jdtls: importing the project, indexing)
+            m if self.client(cid).and_then(|c| c.traits.progress.as_ref()).is_some_and(|s| s.method == m) => {
                 let Some(c) = self.client_mut(cid) else { return };
-                let key = "language/status".to_string();
-                // (jdtls says what it's at with each change — the log keeps them in order, timed)
-                if let Some(text) = crate::java::status_text(params) {
-                    crate::log::line(&c.name, "status", &text);
+                let Some(s) = c.traits.progress.as_ref() else { return };
+                let key = s.method.clone();
+                let text = s.text(params);
+                // (it says what it's at with each change — the log keeps them in order, timed)
+                if let Some(text) = &text {
+                    crate::log::line(&c.name, "status", text);
                 }
-                match crate::java::status_text(params) {
+                match text {
                     Some(title) => c.progress.insert(key, lsp::Progress { title, ..Default::default() }),
                     None => c.progress.remove(&key),
                 };
@@ -1253,7 +1253,7 @@ impl Editor {
             | Kind::SignatureHelp
             | Kind::InlayHint { .. }
             | Kind::JavaDebug
-            | Kind::ClassFile { .. }
+            | Kind::Virtual { .. }
             | Kind::ToolRefs { .. }
             | Kind::ToolDeclared { .. }
             | Kind::ToolSymbols { .. }
@@ -1326,13 +1326,15 @@ impl Editor {
                     t.step_at(format!("answered ({n})"), arrived.unwrap_or_else(std::time::Instant::now));
                     t.step("main loop");
                 }
-                // jdtls: library/JDK classes come as jdt:// URIs — source into a read-only buffer (java.rs)
+                // A document of the server's own (jdtls: a library's class as `jdt://`) — its text into a
+                // read-only buffer (`virtualdoc.rs`)
                 if goto != Goto::References
-                    && let Some((uri, pos)) = crate::java::jdt_location(result)
+                    && let Some(v) = self.client(cid).and_then(|c| c.traits.virtual_docs.as_ref())
+                    && let Some((uri, pos)) = v.location(result)
                 {
                     self.push_jump();
-                    self.trace_ends("class file asked");
-                    return self.open_class_file(cid, uri, pos);
+                    self.trace_ends("its own document asked");
+                    return self.open_server_doc(cid, uri, pos);
                 }
                 let locs = lsp::locations(result);
                 match locs.as_slice() {
@@ -2358,8 +2360,10 @@ impl Editor {
     }
 
     fn execute_command(&mut self, cid: ClientId, cmd: &Value) {
-        // jdtls: wraps the edit in a client command — apply without asking the server
-        if cmd["command"] == "java.apply.workspaceEdit" {
+        // A command its pack says is the client's to run (jdtls wraps edits in one) — the server not asked
+        let traits = self.client(cid).map_or(&lsp::NO_TRAITS, |c| c.traits);
+        let ours = traits.client_commands.iter().find(|(name, _)| cmd["command"] == name.as_str());
+        if let Some((_, lsp::ClientAction::ApplyEdit)) = ours {
             for edit in cmd["arguments"].as_array().into_iter().flatten() {
                 if let Err(e) = self.apply_workspace_edit(cid, edit) {
                     return self.set_error(format!("code action: {e}"));
@@ -4999,6 +5003,66 @@ mod tests {
             let want = if theirs { "unused variable: `x`" } else { said.as_str() };
             assert_eq!(of(&said).message, want, "{server}");
             assert_eq!(of(lint).message, lint, "{server}: nothing else to say — kept whole");
+            std::fs::remove_dir_all(file.parent().unwrap()).ok();
+        }
+    }
+
+    /// What the java pack says of jdtls reaches a server of that name (a stand-in), and none of it one no pack
+    /// knows: its `-data` folder in its arguments; `language/status` as progress, gone when it's done; a
+    /// definition in a library's class (`jdt://`) asked for and opened read-only, titled as the class; the
+    /// command its code actions wrap edits in applied here, not sent back.
+    #[test]
+    fn jdtls_extensions_are_its_packs() {
+        let src = "fn a() {}\n";
+        for (server, theirs) in [("jdtls", true), ("fake", false)] {
+            let (mut ed, file, log) = setup_as(server, &format!("jdtls-{server}"), src);
+            let cid = up(&mut ed, json!({ "definitionProvider": true }));
+            let args = ed.client(cid).unwrap().spec.args.clone();
+            assert_eq!(args.iter().any(|a| a == "-data"), theirs, "{server}: {args:?}");
+
+            let status = |kind: &str, message: &str| json!({ "jsonrpc": "2.0", "method": "language/status", "params": { "type": kind, "message": message } });
+            ed.on_lsp_message(cid, status("Starting", "Init..."));
+            let shown =
+                |ed: &Editor| ed.client(cid).unwrap().progress.values().map(|p| p.text()).collect::<Vec<_>>();
+            assert_eq!(shown(&ed), if theirs { vec!["Init...".to_string()] } else { vec![] }, "{server}");
+            ed.on_lsp_message(cid, status("Started", "Ready"));
+            assert!(shown(&ed).is_empty(), "{server}: done");
+
+            let uri = "jdt://contents/java.base/java.util/ArrayList.class?=jproj/%5C/usr/lib/jvm%3Cjava.util(ArrayList.class";
+            feed(&mut ed, "gd");
+            let id = pending_of(&ed, Kind::Goto(Goto::Definition));
+            let at = json!({ "uri": uri, "range": { "start": { "line": 1, "character": 4 }, "end": { "line": 1, "character": 9 } } });
+            ed.on_lsp_message(cid, json!({ "id": id, "result": [at] }));
+            let asked = ed
+                .lsp
+                .pending
+                .iter()
+                .find(|(_, p)| matches!(p.kind, Kind::Virtual { .. }))
+                .map(|((_, id), _)| *id);
+            assert_eq!(asked.is_some(), theirs, "{server}: its class asked for");
+            if let Some(id) = asked {
+                assert!(sent_has(&log, "java/classFileContents"));
+                ed.on_lsp_message(
+                    cid,
+                    json!({ "id": id, "result": "package java.util;\npublic class ArrayList {}\n" }),
+                );
+                let doc = ed.doc();
+                assert_eq!(doc.title.as_deref(), Some("java.util.ArrayList"));
+                assert_eq!(doc.virtual_uri.as_deref(), Some(uri));
+                assert!(doc.throwaway);
+                assert_eq!(doc.selection().primary().cursor(&doc.text), 23, "at its place: line 2, column 5");
+            }
+
+            ed.open(&file).unwrap();
+            let edit = json!({ "changes": { lsp::uri(&file): [{ "range": { "start": { "line": 0, "character": 3 }, "end": { "line": 0, "character": 4 } }, "newText": "b" }] } });
+            ed.execute_command(cid, &json!({ "command": "java.apply.workspaceEdit", "arguments": [edit] }));
+            assert_eq!(ed.doc().text != src, theirs, "{server}: applied here");
+            let out = if theirs { sent(&log) } else { sent_until(&log, &["workspace/executeCommand"]) };
+            assert_eq!(
+                out.contains("workspace/executeCommand"),
+                !theirs,
+                "{server}: sent back only when not ours"
+            );
             std::fs::remove_dir_all(file.parent().unwrap()).ok();
         }
     }

@@ -1,8 +1,8 @@
 //! Offers to download something (like IntelliJ's "install plugin" notice) — a card at the bottom right of
 //! the editing area, `y` download · `n` not now (normal mode, mouse too — insert mode is not intercepted).
 //! While downloading it shows a wave; on failure, the reason + `y` retry · `n` close.
-//! What gets downloaded is `What` — grammars (grammar.rs) · the java-debug plugin (java.rs) · a tool a
-//! language needs, installed the way its pack says (install.rs; `N` never offers that one again).
+//! What gets downloaded is `What` — grammars (grammar.rs) · a tool a language needs, installed the way its
+//! pack says (install.rs; `N` never offers that one again).
 //! Drawn by `term::OfferCard`.
 //!
 //! **Multiple offers stack** (`Editor::offers`, arrival order): only the front one takes keys; the ones
@@ -61,9 +61,6 @@ pub enum What {
     /// Grammars (the language + ones used with it). `lang` = human-readable language name ·
     /// `then` = work to resume once downloaded.
     Grammars { lang: String, names: Vec<String>, then: Option<Resume> },
-    /// java-debug plugin — once downloaded, resumes debugging this file
-    /// (`attach` = the address, if it was attaching to a running JVM).
-    JavaDebug { file: PathBuf, root: PathBuf, attach: Option<(String, u16)> },
     /// A language server or debugger a pack has tarae download (`fetch.rs`): `y` fetches `way` into `dir`, then
     /// `then`.
     Fetch { tool: String, way: Box<crate::fetch::Download>, dir: PathBuf, then: crate::install::Then },
@@ -426,7 +423,7 @@ impl Offer {
             OfferState::Asking => {}
         }
         match &self.what {
-            W::Grammars { .. } | W::JavaDebug { .. } => vec![('y', "Install"), ('n', "Not now")],
+            W::Grammars { .. } => vec![('y', "Install"), ('n', "Not now")],
             W::Install { .. } | W::Fetch { .. } => vec![('y', "Install"), ('n', "Not now"), ('N', "Never")],
             W::PluginPermissions { .. } => vec![('y', "Allow"), ('n', "Not now")],
             W::PluginAsk { .. } => vec![('y', "Allow"), ('n', "No")],
@@ -502,7 +499,6 @@ impl Offer {
         use What as W;
         match self.what {
             W::Grammars { .. } => "grammars",
-            W::JavaDebug { .. } => "java-debug",
             W::Fetch { .. } => "fetch",
             W::PluginPermissions { .. } => "plugin-permissions",
             W::PluginAsk { .. } => "plugin-ask",
@@ -748,7 +744,6 @@ impl crate::editor::Editor {
             What::Grammars { names, .. } => {
                 self.install_grammars(names, Some(id));
             }
-            What::JavaDebug { .. } => self.java_debug_download(id),
             What::Fetch { tool, way, dir, then } => self.fetch_start(id, tool, *way, dir, then),
             What::Install { tool, run, cwd, then } => self.install_start(id, tool, run, cwd, then),
             What::PluginPermissions { plugin, permissions } => {
@@ -1138,7 +1133,6 @@ impl crate::editor::Editor {
                     "No colors for {lang} until you quit — :grammar-install {first} anytime"
                 ));
             }
-            What::JavaDebug { .. } => self.set_status("Java debugging needs java-debug — F5 asks again"),
             What::PluginPermissions { plugin, permissions } => {
                 self.plugin_permissions_answer(plugin, permissions, false)
             }

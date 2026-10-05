@@ -1238,6 +1238,15 @@ mod tests {
         let Some(tree) = parse("java", src) else { return };
         let t = find("java", &file, src, &tree, at(src, "void t"), Scope::Nearest).unwrap();
         assert_eq!(t.argv()[5], "-Dtest=demo.T#t");
+        // At the top of the build, no module: Maven without -pl, Gradle's `test` of every project
+        let top = d.join("src/test/java/demo/T.java");
+        std::fs::create_dir_all(top.parent().unwrap()).unwrap();
+        let t = find("java", &top, src, &tree, at(src, "void t"), Scope::Nearest).unwrap();
+        assert_eq!(&t.argv()[..4], ["mvn", "-B", "test", "-Dtest=demo.T#t"]);
+        std::fs::remove_file(d.join("pom.xml")).unwrap();
+        std::fs::write(d.join("settings.gradle.kts"), "").unwrap();
+        let t = find("java", &top, src, &tree, at(src, "void t"), Scope::Nearest).unwrap();
+        assert_eq!(t.argv()[1], "test");
         let _ = std::fs::remove_dir_all(&d);
     }
 

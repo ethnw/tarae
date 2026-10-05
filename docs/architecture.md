@@ -268,7 +268,8 @@ src/
   completion.rs      completion state, filtering, snippets
   signature.rs       signature help
   editdiff.rs        workspace edit previews (code actions, rename)
-  java.rs            jdtls and java-debug specifics
+  virtualdoc.rs      a server's own documents (a pack's `virtual`: jdtls's jdt:// classes)
+  java.rs            Java debugging: java-debug's command chain through jdtls (for a plugin, later)
 
   testing.rs         test discovery and runs
   packs.rs           language packs: tests found and run, and tasks suggested, the way a pack's data says
