@@ -523,12 +523,16 @@ pub struct Found {
     pub files: Vec<PathBuf>,
     /// How many more do.
     pub more: usize,
-    /// Not every file was looked at (more than `LOOK_MAX`, or `BYTES_MAX` read).
+    /// Not every file was looked at (more than `LOOK_MAX`, `BYTES_MAX` read, `VISIT_MAX` entries met) — or
+    /// none: a place that's everything isn't walked.
     pub cut: bool,
 }
 
 const FOUND_MAX: usize = 3;
 const LOOK_MAX: usize = 2000;
+/// Entries a walk visits at most, read or not (folders, code): `/` in a Linux container, 44k entries, took
+/// ~1 s in a debug build — a quarter of that holds no card up even on a busy machine.
+const VISIT_MAX: usize = 10_000;
 const BYTES_MAX: u64 = 32 << 20;
 /// Bigger files aren't settings.
 const FILE_MAX: u64 = 256 << 10;
@@ -543,18 +547,72 @@ pub(crate) fn output_dir(name: &str) -> bool {
     name == "objects" || crate::languages::get().outputs.iter().any(|o| o == name)
 }
 
+/// Whether `dir` is on one of the kernel's own file systems (statfs's `f_type`): what's there is the kernel's,
+/// never a user's token file, and walking it is slow and racy (`/proc` changes as processes come and go).
+/// devtmpfs isn't told apart — it says tmpfs's type, as `/tmp` does — but `/dev`'s nodes aren't files.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn the_kernels(dir: &Path) -> bool {
+    const KERNELS: [u32; 15] = [
+        0x9FA0,      // proc
+        0x6265_6572, // sysfs
+        0x1CD1,      // devpts
+        0x1980_0202, // mqueue
+        0x0027_E0EB, // cgroup
+        0x6367_7270, // cgroup2
+        0x6462_6720, // debugfs
+        0x7472_6163, // tracefs
+        0x7363_6673, // securityfs
+        0xCAFE_4A11, // bpf
+        0x6165_676C, // pstore
+        0x6265_6570, // configfs
+        0xDE5E_81E4, // efivarfs
+        0x4249_4E4D, // binfmt_misc
+        0x6573_5543, // fusectl
+    ];
+    crate::fswatch::statfs(dir).is_some_and(|st| KERNELS.contains(&(st.f_type as u32)))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn the_kernels(_dir: &Path) -> bool {
+    false
+}
+
 /// The files in `place` (a file, or a folder and everything in it — links not followed) that hold a
-/// token-like line: settings-like files only, within bounds (`Found::cut` says when they were met). Blocks:
-/// a worker's.
+/// token-like line: settings-like files only, within bounds (`Found::cut` says when they were met), each read
+/// no further than its size says, the kernel's file systems not looked in (`the_kernels`); `/`, home and the
+/// folders above it not walked at all (cut). Blocks: a worker's.
 pub fn found_in(place: &Path) -> Found {
+    found_under(place, crate::allow::home().as_deref())
+}
+
+/// `found_in`, home being `home`.
+fn found_under(place: &Path, home: Option<&Path>) -> Found {
+    use std::io::Read as _;
+    use std::os::unix::fs::MetadataExt as _;
     let mut f = Found::default();
-    let (mut looked, mut bytes) = (0, 0);
+    // (a place allowed only as a whole — `/`, home or above, `allow::keepable`'s — isn't walked: too big to
+    // say anything of use, and its card would wait on it)
+    if place == Path::new("/") || home.is_some_and(|h| h.starts_with(place)) {
+        f.cut = true;
+        return f;
+    }
+    let (mut looked, mut bytes, mut visited) = (0, 0, 0);
+    // (whether each device is the kernel's: asked once a device, not once a folder)
+    let mut kernels = std::collections::HashMap::new();
     let mut stack = vec![place.to_path_buf()];
     while let Some(p) = stack.pop() {
+        if visited >= VISIT_MAX {
+            f.cut = true;
+            break;
+        }
+        visited += 1;
         let Ok(meta) = std::fs::symlink_metadata(&p) else { continue };
         if meta.is_dir() {
             let name = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
             if p != place && output_dir(name) {
+                continue;
+            }
+            if *kernels.entry(meta.dev()).or_insert_with(|| the_kernels(&p)) {
                 continue;
             }
             let Ok(rd) = std::fs::read_dir(&p) else { continue };
@@ -571,7 +629,13 @@ pub fn found_in(place: &Path) -> Found {
         }
         looked += 1;
         bytes += meta.len();
-        let Ok(data) = std::fs::read(&p) else { continue };
+        // (no further than its size says: a file of the kernel's can say 0 and be endless —
+        // `/proc/<pid>/pagemap`, 8 bytes a page of the address space)
+        let mut data = Vec::new();
+        let Ok(file) = std::fs::File::open(&p) else { continue };
+        if file.take(meta.len()).read_to_end(&mut data).is_err() {
+            continue;
+        }
         if data.contains(&0) {
             continue;
         }
@@ -913,5 +977,74 @@ mod tests {
         let said = cut.said(&a).unwrap();
         assert_eq!(said, format!("{} has more files than tarae looks through for tokens.", a.display()));
         std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// #177: a file of the kernel's says it's empty and isn't — `/proc/<pid>/pagemap` holds 8 bytes for every
+    /// page of the address space (~256 GiB on x86_64). Read to its end, a card for `/` never came, and the
+    /// worker went on reading after its test had failed until the test binary was 15 GB. Linux: procfs.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_file_saying_its_empty_is_read_no_further() {
+        let pagemap = Path::new("/proc/self/pagemap");
+        assert_eq!(std::fs::symlink_metadata(pagemap).unwrap().len(), 0, "procfs says 0");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(found_in(pagemap)).ok());
+        let found = rx.recv_timeout(std::time::Duration::from_secs(2)).expect("read past the size it says");
+        assert_eq!(found, Found::default());
+    }
+
+    /// The kernel's own file systems aren't looked in — told by their type, not their name: `/proc` and
+    /// `/sys` hold thousands of files (walked, more than `LOOK_MAX`: cut), `/` and the temp folder are no
+    /// kernel's. Linux.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn the_kernels_file_systems_arent_looked_in() {
+        assert!(the_kernels(Path::new("/proc")) && the_kernels(Path::new("/sys")));
+        assert!(!the_kernels(Path::new("/")) && !the_kernels(&std::env::temp_dir()));
+        for place in ["/proc", "/sys"] {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || tx.send(found_in(Path::new(place))).ok());
+            let found = rx.recv_timeout(std::time::Duration::from_secs(10)).expect(place);
+            assert_eq!(found, Found::default(), "{place} looked in");
+        }
+    }
+
+    /// A place allowed only as a whole — `/`, home, a folder above home — is too big for a walk to say
+    /// anything of use, and a card waited seconds on one: it isn't walked, and says so as a cut walk does.
+    /// What's below home is walked as before.
+    #[test]
+    fn a_place_thats_everything_isnt_walked() {
+        let t = scratch("everything");
+        let home = t.join("home");
+        write(&home.join(".env"), "GITHUB_TOKEN=tarae-fake-token\n");
+        write(&home.join("work/hosts.yml"), "oauth_token: tarae-fake-token\n");
+        let cut = Found { cut: true, ..Found::default() };
+        assert_eq!(found_under(&home, Some(&home)), cut, "home itself");
+        assert_eq!(found_under(&t, Some(&home)), cut, "above home");
+        assert_eq!(found_under(Path::new("/"), None), cut, "/ with no home");
+        let work = found_under(&home.join("work"), Some(&home));
+        assert_eq!(work.files, [home.join("work/hosts.yml")], "below home: walked");
+        // (home as tarae finds it: `/` is above every home)
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(found_in(Path::new("/"))).ok());
+        assert_eq!(rx.recv_timeout(std::time::Duration::from_millis(200)), Ok(cut), "/ walked");
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// A walk stops after `VISIT_MAX` entries, whether it read them or not (code and folders aren't read):
+    /// 44k entries took ~1 s in a debug build — no big folder holds a card up. Cut, and said so.
+    #[test]
+    fn a_walk_stops_after_so_many_entries() {
+        let t = scratch("entries");
+        for i in 0..VISIT_MAX {
+            write(&t.join(format!("d{}/{i}.rs", i % 100)), "");
+        }
+        assert_eq!(found_in(&t), Found { cut: true, ..Found::default() });
+        // (fewer: walked to the end)
+        let few = scratch("entries-few");
+        write(&few.join("a/b.rs"), "");
+        assert_eq!(found_in(&few), Found::default());
+        std::fs::remove_dir_all(&t).ok();
+        std::fs::remove_dir_all(&few).ok();
     }
 }

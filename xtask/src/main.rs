@@ -43,7 +43,7 @@ fn main() {
         Some("linux") => linux::run(&args[1..]),
         Some("stream") => stream::run(&args[1..]),
         _ => Err(
-            "usage: cargo xtask vendor-grammars | shot out.png [keys …] | perf | linux [clippy|test] | stream [--model M] [prompt] | stream --file F"
+            "usage: cargo xtask vendor-grammars | shot out.png [keys …] | perf | linux [--platform P] [clippy|test] | stream [--model M] [prompt] | stream --file F"
                 .into(),
         ),
     };

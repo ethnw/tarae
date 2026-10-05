@@ -1,4 +1,4 @@
-//! `cargo xtask linux [clippy|test [--repeat N] [cargo test's arguments]]` — tarae's checks on Linux (CI runs there too: `-D dead-code` on code only
+//! `cargo xtask linux [--platform linux/<arch>] [clippy|test [--repeat N] [cargo test's arguments]]` — tarae's checks on Linux (CI runs there too: `-D dead-code` on code only
 //! macOS calls, a root container's `#` prompt …), in Docker on the pinned toolchain (`rust:<major.minor>`, and
 //! `rust-toolchain.toml`'s exact version in it). Whichever Docker the CLI reaches: `DOCKER_CONTEXT` or `DOCKER_HOST`, else the
 //! current context (here the colima VM: `colima start -p tarae-test`, `DOCKER_CONTEXT=colima-tarae-test`).
@@ -14,6 +14,10 @@
 //! /work/tarae, so one shared target let a session's tests run another session's build (its e2e ran another's
 //! `target/debug/tarae`). Each run drops the volumes of checkouts that are gone; `cargo xtask linux prune` does
 //! that now, and drops the old shared `tarae-target-<pin>` too.
+//!
+//! `--platform linux/amd64` runs them on another architecture, its target and rustup volumes its own — on
+//! colima's aarch64 VM under qemu-user: slow, and a build was seen to stall (2026-10-05); a Docker on a real
+//! x86_64 machine (`DOCKER_HOST`) needs no `--platform`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -32,9 +36,25 @@ enum What {
     Both,
 }
 
-const USAGE: &str = "usage: cargo xtask linux [clippy | test [--repeat N] [cargo test's arguments]]";
+const USAGE: &str = "usage: cargo xtask linux [--platform linux/<arch>] [clippy | test [--repeat N] [cargo test's arguments]]";
 
-/// What `cargo xtask linux …`'s arguments ask for.
+/// What `cargo xtask linux …`'s arguments ask for: the platform first (`--platform linux/amd64`: Docker's
+/// `os/arch`, emulated where the VM's isn't it — None: the Docker host's own), then the checks.
+fn ask(args: &[String]) -> Result<(Option<String>, What)> {
+    match args {
+        [p, platform, rest @ ..] if p == "--platform" => {
+            let arch = platform.strip_prefix("linux/").unwrap_or_default();
+            if arch.is_empty() || !arch.chars().all(|c| c.is_ascii_alphanumeric() || c == '/') {
+                return Err(format!("--platform {platform}: linux/<arch>, as linux/amd64 — {USAGE}"));
+            }
+            Ok((Some(platform.clone()), what(rest)?))
+        }
+        [p] if p == "--platform" => Err(format!("--platform: which one? — {USAGE}")),
+        rest => Ok((None, what(rest)?)),
+    }
+}
+
+/// The checks the arguments after the platform ask for.
 fn what(args: &[String]) -> Result<What> {
     Ok(match args.split_first() {
         None => What::Both,
@@ -55,7 +75,8 @@ fn what(args: &[String]) -> Result<What> {
 }
 
 pub fn run(args: &[String]) -> Result<()> {
-    let what = what(args)?;
+    let (platform, what) = ask(args)?;
+    let platform = platform.as_deref();
     let root = root();
     let toolchain = root.join("rust-toolchain.toml");
     let pin =
@@ -64,15 +85,16 @@ pub fn run(args: &[String]) -> Result<()> {
         println!("{}", skipped(&why));
         return Ok(());
     }
-    eprintln!("Linux checks on {} (Rust {pin}) …", image(&pin));
+    let on = platform.map(|p| format!(", {p}")).unwrap_or_default();
+    eprintln!("Linux checks on {} (Rust {pin}{on}) …", image(&pin));
     prune_volumes(false);
     // (made here, not by `docker run`: only a volume made this way carries its checkout's label)
-    let made = Command::new("docker").args(create_args(&root, &pin)).output();
+    let made = Command::new("docker").args(create_args(&root, &pin, platform)).output();
     if !made.as_ref().is_ok_and(|o| o.status.success()) {
-        return Err(format!("docker volume create {}: failed", target_volume(&root, &pin)));
+        return Err(format!("docker volume create {}: failed", target_volume(&root, &pin, platform)));
     }
     let st = Command::new("docker")
-        .args(docker_args(&root, common_git_dir(&root).as_deref(), &pin, &what))
+        .args(docker_args(&root, common_git_dir(&root).as_deref(), &pin, platform, &what))
         .status()
         .map_err(|e| format!("docker: {e}"))?;
     if !st.success() {
@@ -128,20 +150,31 @@ fn common_git_dir(root: &Path) -> Option<PathBuf> {
 }
 
 /// `docker run …` for the checks: the tree read-only at /src (a worktree's git folder read-only too, where
-/// its `.git` file says), the caches in volumes, the pinned image.
-fn docker_args(root: &Path, git: Option<&Path>, pin: &str, what: &What) -> Vec<String> {
+/// its `.git` file says), the caches in volumes, the pinned image — on `platform` when one is asked, its
+/// target and toolchains in volumes of its own (the crates' sources stay shared).
+fn docker_args(
+    root: &Path,
+    git: Option<&Path>,
+    pin: &str,
+    platform: Option<&str>,
+    what: &What,
+) -> Vec<String> {
     // (CAP_SYS_PTRACE: Docker's default filter refuses `pidfd_open`/`pidfd_getfd` without it — the sandbox's
     // supervisor takes a run's socket with them, and its tests would skip themselves)
     let mut a: Vec<String> = ["run", "--rm", "--cap-add", "SYS_PTRACE"].map(String::from).into();
+    if let Some(p) = platform {
+        a.extend(["--platform".to_string(), p.to_string()]);
+    }
     let mount = |a: &mut Vec<String>, v: String| a.extend(["-v".to_string(), v]);
     mount(&mut a, format!("{}:/src:ro", root.display()));
     if let Some(git) = git {
         mount(&mut a, format!("{0}:{0}:ro", git.display()));
     }
-    mount(&mut a, format!("{}:/target", target_volume(root, pin)));
+    mount(&mut a, format!("{}:/target", target_volume(root, pin, platform)));
     mount(&mut a, "tarae-registry:/usr/local/cargo/registry".into());
     // (seeded from the image the first time: the file's components and targets are fetched once)
-    mount(&mut a, format!("tarae-rustup-{pin}:/usr/local/rustup"));
+    let of = platform.map(|p| format!("-{}", p.replace('/', "-"))).unwrap_or_default();
+    mount(&mut a, format!("tarae-rustup-{pin}{of}:/usr/local/rustup"));
     for e in ["CARGO_TARGET_DIR=/target", "CARGO_TERM_COLOR=never"] {
         a.extend(["-e".to_string(), e.to_string()]);
     }
@@ -153,19 +186,20 @@ fn docker_args(root: &Path, git: Option<&Path>, pin: &str, what: &What) -> Vec<S
 const CHECKOUT_LABEL: &str = "tarae.checkout";
 
 /// The checkout's own target volume: `tarae-target-<pin>-<hash of its path>` (FNV-1a — the same path gives the
-/// same name on every run and Rust version).
-fn target_volume(root: &Path, pin: &str) -> String {
-    let hash = root
-        .to_string_lossy()
-        .bytes()
+/// same name on every run and Rust version), the platform asked hashed in after it (the host's own: the path
+/// alone).
+fn target_volume(root: &Path, pin: &str, platform: Option<&str>) -> String {
+    let of = platform.map(|p| format!("\0{p}")).unwrap_or_default();
+    let hash = (root.to_string_lossy().bytes())
+        .chain(of.bytes())
         .fold(0xcbf29ce484222325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100000001b3));
     format!("tarae-target-{pin}-{hash:016x}")
 }
 
 /// `docker volume create …` for it, labelled with the checkout's path (an existing one is left as it is).
-fn create_args(root: &Path, pin: &str) -> Vec<String> {
+fn create_args(root: &Path, pin: &str, platform: Option<&str>) -> Vec<String> {
     let label = format!("{CHECKOUT_LABEL}={}", root.display());
-    ["volume", "create", "--label", &label, &target_volume(root, pin)].map(String::from).into()
+    ["volume", "create", "--label", &label, &target_volume(root, pin, platform)].map(String::from).into()
 }
 
 /// `docker volume ls`'s rows for the target volumes: (name, its checkout's path — empty when unlabelled).
@@ -259,7 +293,7 @@ fn script(what: &What) -> String {
     }
     match what {
         What::Clippy => {}
-        What::Both => s.push_str("cargo test --locked\n"),
+        What::Both => s.push_str("cargo test --locked --workspace\n"),
         What::Test { args, repeat } => {
             let test = std::iter::once("cargo test --locked".to_string())
                 .chain(args.iter().map(|a| quoted(a)))
@@ -300,21 +334,24 @@ mod tests {
     /// brought over), on the pinned image, with caches per version — and `clippy`/`test` run only theirs.
     #[test]
     fn the_tree_is_read_only_and_the_checks_run_in_a_clone() {
-        let a = docker_args(Path::new("/r/tarae"), None, "1.99.0", &What::Both);
+        let a = docker_args(Path::new("/r/tarae"), None, "1.99.0", None, &What::Both);
         assert!(a.windows(2).any(|w| w == ["-v", "/r/tarae:/src:ro"]), "{a:?}");
         assert!(a.windows(2).any(|w| w == ["--cap-add", "SYS_PTRACE"]), "the supervisor's tests run: {a:?}");
         assert!(
             !a.iter().any(|v| v.starts_with("/r/tarae:") && !v.ends_with(":ro")),
             "no writable mount: {a:?}"
         );
-        let target = format!("{}:/target", target_volume(Path::new("/r/tarae"), "1.99.0"));
+        assert!(!a.contains(&"--platform".to_string()), "the host's own: {a:?}");
+        let target = format!("{}:/target", target_volume(Path::new("/r/tarae"), "1.99.0", None));
         assert!(a.contains(&target) && a.contains(&"rust:1.99".to_string()), "{a:?}");
         assert_eq!((image("1.100.2"), image("1.99")), ("rust:1.100".to_string(), "rust:1.99".to_string()));
         let s = a.last().unwrap();
         assert!(s.contains("git clone -q /src /work/tarae && cd /work/tarae"), "{s}");
         assert!(s.contains("git -C /src diff HEAD | git apply") && s.contains("ls-files --others"), "{s}");
         assert!(
-            s.contains("--features bundled-grammars -- -D warnings") && s.contains("cargo test --locked")
+            s.contains("--features bundled-grammars -- -D warnings")
+                && s.contains("cargo test --locked --workspace\n"),
+            "xtask's tests too: {s}"
         );
         let clippy = script(&What::Clippy);
         assert!(clippy.contains("cargo clippy") && !clippy.contains("cargo test"));
@@ -340,11 +377,57 @@ mod tests {
         assert!(what(&args(&["clippy", "x"])).unwrap_err().starts_with("usage:"));
     }
 
+    /// `--platform linux/<arch>` first: `docker run` on it, with a target and toolchains of its own (an x86_64
+    /// build in the aarch64 one would be rebuilt both ways each time); the crates' sources stay shared. What
+    /// comes after it is read as without it; a platform missing, or not Linux, is refused.
+    #[test]
+    fn a_platform_runs_on_its_own_target_and_toolchains() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let (p, w) = ask(&args(&["--platform", "linux/amd64", "test", "--repeat", "3", "reads"])).unwrap();
+        assert_eq!(p.as_deref(), Some("linux/amd64"));
+        assert_eq!(w, What::Test { args: args(&["reads"]), repeat: 3 });
+        assert_eq!(
+            ask(&args(&["--platform", "linux/arm/v7"])).unwrap(),
+            (Some("linux/arm/v7".into()), What::Both)
+        );
+        assert_eq!(ask(&args(&["clippy"])).unwrap(), (None, What::Clippy));
+        assert!(ask(&args(&["--platform"])).unwrap_err().contains("which one?"));
+        for bad in ["amd64", "linux/", "windows/amd64", "linux/amd64;rm"] {
+            let e = ask(&args(&["--platform", bad, "clippy"])).unwrap_err();
+            assert!(e.contains(&format!("--platform {bad}: linux/<arch>")), "{e}");
+        }
+        assert!(
+            ask(&args(&["test", "--platform", "linux/amd64"])).is_ok_and(|(p, _)| p.is_none()),
+            "only first"
+        );
+        let r = Path::new("/r/tarae");
+        let a = docker_args(r, None, "1.99.0", Some("linux/amd64"), &What::Both);
+        assert!(a.windows(2).any(|w| w == ["--platform", "linux/amd64"]), "{a:?}");
+        assert!(a.windows(2).any(|w| w == ["--cap-add", "SYS_PTRACE"]), "the cap too: {a:?}");
+        let image = a.iter().position(|v| v == "rust:1.99").unwrap();
+        assert!(
+            a.iter().position(|v| v == "--platform").is_some_and(|p| p < image),
+            "before the image: {a:?}"
+        );
+        let amd = target_volume(r, "1.99.0", Some("linux/amd64"));
+        assert_ne!(amd, target_volume(r, "1.99.0", None));
+        assert_ne!(amd, target_volume(r, "1.99.0", Some("linux/arm64")));
+        assert_eq!(amd.len(), target_volume(r, "1.99.0", None).len(), "the same form: pruned alike");
+        assert!(a.contains(&format!("{amd}:/target")), "{a:?}");
+        assert!(a.contains(&"tarae-rustup-1.99.0-linux-amd64:/usr/local/rustup".to_string()), "{a:?}");
+        assert!(a.contains(&"tarae-registry:/usr/local/cargo/registry".to_string()), "{a:?}");
+        assert_eq!(
+            create_args(r, "1.99.0", Some("linux/amd64"))[3..],
+            ["tarae.checkout=/r/tarae", amd.as_str()]
+        );
+    }
+
     /// A worktree (a tarae session): the main checkout's git folder goes in read-only, at the path its `.git`
     /// file names — and only then. Found from a real worktree of a temp repository.
     #[test]
     fn a_worktrees_git_folder_goes_in_read_only() {
-        let a = docker_args(Path::new("/w/s"), Some(Path::new("/r/tarae/.git")), "1.99.0", &What::Clippy);
+        let a =
+            docker_args(Path::new("/w/s"), Some(Path::new("/r/tarae/.git")), "1.99.0", None, &What::Clippy);
         assert!(a.windows(2).any(|w| w == ["-v", "/r/tarae/.git:/r/tarae/.git:ro"]), "{a:?}");
         assert!(!a.iter().any(|v| v.contains(':') && v.starts_with('/') && !v.ends_with(":ro")), "{a:?}");
         let dir = std::env::temp_dir().join(format!("tarae-xtask-wt-{}", std::process::id()));
@@ -378,15 +461,15 @@ mod tests {
     #[test]
     fn each_checkout_has_its_own_target() {
         let (a, b) = (Path::new("/w/tarae/s1"), Path::new("/w/tarae/s2"));
-        let name = target_volume(a, "1.99.0");
-        assert_eq!(name, target_volume(a, "1.99.0"), "the same on every run");
-        assert_ne!(name, target_volume(b, "1.99.0"), "another checkout, another target");
-        assert_ne!(name, target_volume(a, "1.100.0"), "and per pin");
+        let name = target_volume(a, "1.99.0", None);
+        assert_eq!(name, target_volume(a, "1.99.0", None), "the same on every run");
+        assert_ne!(name, target_volume(b, "1.99.0", None), "another checkout, another target");
+        assert_ne!(name, target_volume(a, "1.100.0", None), "and per pin");
         assert!(name.starts_with("tarae-target-1.99.0-") && name.len() == "tarae-target-1.99.0-".len() + 16);
         assert!(name.chars().all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c)), "a Docker volume name");
-        let made = create_args(a, "1.99.0");
+        let made = create_args(a, "1.99.0", None);
         assert_eq!(made, ["volume", "create", "--label", "tarae.checkout=/w/tarae/s1", name.as_str()]);
-        let args = docker_args(a, None, "1.99.0", &What::Test { args: Vec::new(), repeat: 1 });
+        let args = docker_args(a, None, "1.99.0", None, &What::Test { args: Vec::new(), repeat: 1 });
         assert!(args.contains(&format!("{name}:/target")), "{args:?}");
         assert!(args.contains(&"tarae-registry:/usr/local/cargo/registry".to_string()), "{args:?}");
         assert!(args.contains(&"tarae-rustup-1.99.0:/usr/local/rustup".to_string()), "{args:?}");

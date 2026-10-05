@@ -36,8 +36,8 @@ set: fmt, clippy and test (the bundled-grammars builds and perf are marked `full
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo clippy --all-targets --features bundled-grammars -- -D warnings
-cargo test
-cargo test --features bundled-grammars
+cargo test --workspace
+cargo test --workspace --features bundled-grammars
 cargo perf
 ```
 
@@ -48,7 +48,9 @@ ignores it ([docs](docs/configuration.md#where-it-lives)).
 
 A test that fails only now and then on Linux: `cargo xtask linux test --repeat 20 --bin tarae recovery::` runs
 `cargo test` with those arguments twenty times in one container and stops at the first run that fails. Flakes
-that need the rest of the suite beside them show up with `--bin tarae` alone.
+that need the rest of the suite beside them show up with `--bin tarae` alone. A failure seen on one architecture
+only: `cargo xtask linux --platform linux/amd64 …` runs on that one (its own target and toolchains) — emulated on
+an aarch64 VM, slow and liable to stall; a Docker on a real x86_64 machine (`DOCKER_HOST`) is better.
 
 `cargo perf` runs the performance budgets (a key → frame on a 200k-line file must stay under 16 ms) and
 real-use runs of the built editor on a pseudo-terminal (startup, a key in a big file, scrolling, idle CPU, memory

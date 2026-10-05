@@ -202,7 +202,7 @@ fn poll_in(fds: &[RawFd], timeout: Duration) -> Option<usize> {
     }
 }
 
-fn statfs(dir: &Path) -> Option<libc::statfs> {
+pub fn statfs(dir: &Path) -> Option<libc::statfs> {
     use std::os::unix::ffi::OsStrExt;
     let c = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
     let mut st: libc::statfs = unsafe { std::mem::zeroed() };

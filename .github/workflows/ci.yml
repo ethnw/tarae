@@ -56,7 +56,7 @@ jobs:
       - run: |
           git config --global user.name ci
           git config --global user.email ci@example.com
-      - run: cargo test --locked --features "${{ matrix.features }}"
+      - run: cargo test --locked --workspace --features "${{ matrix.features }}"
       # The perf budgets skip themselves at the test profile's opt-level 0 — here in the `perf` profile
       # (release), pass or fail with TARAE_PERF_SLACK above; `cargo perf` keeps numbers, which shared runners
       # are too noisy for
