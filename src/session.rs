@@ -276,6 +276,17 @@ impl Session {
             })
     }
 
+    /// Its reviewer (`reviewer.rs`) reads — said beside what its chat's Claude does (both can be at work).
+    pub fn reviewing(&self) -> bool {
+        self.reviewer.as_ref().is_some_and(crate::reviewer::Reviewer::reading)
+    }
+
+    /// Something came while it was behind that it hasn't been in front for since: files again from disk
+    /// (#6), its reviewer's end (#195) — its tab's `•`.
+    pub fn news(&self) -> bool {
+        self.reloaded > 0 || self.reviewer.as_ref().is_some_and(|r| r.unseen)
+    }
+
     /// Its Claude's oldest tool call still unanswered past its time (its chat at work, the call this
     /// process's).
     fn stuck(&self, now: Instant) -> Option<&ToolWait> {
@@ -428,10 +439,11 @@ impl Editor {
     /// How many things wait for you (the inbox, `inbox.rs`) — here: the cards up (the front one too), an edit
     /// in its review, its chat's reads and edits queued (parallel calls queued silently), a change set's
     /// files — and in sessions behind (#7; #91: one `1/N` mixed the two, the card's `1/2 here · 1 elsewhere`
-    /// keeps them apart).
+    /// keeps them apart). Only what asks for an answer (`Entry::asks_answer`): a quiet run, a reviewer's end
+    /// is news, not something waiting.
     pub fn cards_waiting(&self) -> (usize, usize) {
         let front = crate::uistate::session_id(self.session.id);
-        let inbox = self.inbox();
+        let inbox: Vec<_> = self.inbox().into_iter().filter(crate::inbox::Entry::asks_answer).collect();
         let here = inbox.iter().filter(|e| e.session == front).count();
         (here, inbox.len() - here)
     }
@@ -483,10 +495,10 @@ impl Editor {
         self.sessions.iter().filter(|l| matches!(self.doing(l), Doing::Stuck { .. })).count()
     }
 
-    /// How many sessions behind had files come again from disk since they were in front (#6) — `•n` where
-    /// their tabs aren't drawn.
-    pub fn sessions_reloaded(&self) -> usize {
-        self.sessions.iter().filter(|l| l.reloaded > 0).count()
+    /// How many sessions behind had news since they were in front (`Session::news`: files again from disk,
+    /// #6; a reviewer's end, #195) — `•n` where their tabs aren't drawn.
+    pub fn sessions_with_news(&self) -> usize {
+        self.sessions.iter().filter(|l| l.news()).count()
     }
 
     /// The front session's buffers as indexes into `docs`, in their order there (the one shown always among
@@ -804,6 +816,8 @@ impl Editor {
         // is in the chat)
         self.session.reloaded = 0;
         self.session.compacted.unseen = false;
+        // (its reviewer ended while it was behind: said now — #195)
+        crate::reviewer::session_in(self);
         crate::edits::next(self);
         crate::follow::session_in(self);
         // (which one is in front is kept too — `:restart` and the next start come back to it)
@@ -1531,6 +1545,7 @@ mod tests {
             rebasing: None,
             reloaded: 0,
             compacted: false,
+            reviewer: String::new(),
             claude: None,
         };
         let row = &crate::worktree::items(&[shown(doing)])[0];

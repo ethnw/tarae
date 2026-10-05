@@ -5947,18 +5947,28 @@ fn draw_statusline(
             left.push(Seg { text: format!(" {}", r.said()), style, keep: CHIP });
         }
     }
-    // What waits for you, every session's — the inbox's count; a click lists them (`inbox.rs`). Not for
-    // the one card (or edit review) up here when that's all: it's in sight, and says so itself
-    let waiting = editor.inbox().len();
+    // What waits for you, every session's — the inbox's count of what asks for an answer; a click lists them
+    // (`inbox.rs`). Not for the one card (or edit review) up here when that's all: it's in sight, and says so
+    // itself
+    let inbox = editor.inbox();
+    let waiting = inbox.iter().filter(|e| e.asks_answer()).count();
     let only_in_sight =
         waiting == 1 && matches!(editor.next_up(), crate::inbox::Next::Card(_) | crate::inbox::Next::Review);
+    let mut gap = if chip { " " } else { "  " };
     if waiting > 0 && !only_in_sight {
-        let gap = if chip { " " } else { "  " };
         left.push(Seg {
             text: format!("{gap}▲{waiting} waiting"),
             style: ui.status.patch(warn),
             keep: INBOX,
         });
+        gap = " ";
+    }
+    // Claude's runs gone quiet (#157), any session's: to look at, not to answer — apart, calm (a click lists
+    // them too). A reviewer's end behind is its session's `•` (#195), as any news there.
+    let quiet = inbox.iter().filter(|e| e.kind == "silent-run").count();
+    if quiet > 0 {
+        let runs = if quiet == 1 { "run" } else { "runs" };
+        left.push(Seg { text: format!("{gap}{quiet} {runs} quiet"), style: dim, keep: INBOX });
     }
     if chip {
         // (the others: possibly stuck · done — #86: said apart from what waits)
@@ -5969,8 +5979,8 @@ fn draw_statusline(
         if !done.is_empty() {
             left.push(Seg { text: done, style: accent, keep: CHIP });
         }
-        // (files came again from disk in sessions behind — #6)
-        match editor.sessions_reloaded() {
+        // (news in sessions behind: files came again from disk — #6, a reviewer ended — #195)
+        match editor.sessions_with_news() {
             0 => {}
             n => left.push(Seg {
                 text: format!(" •{n}"),
@@ -6219,8 +6229,8 @@ fn draw_statusline(
 /// mode, the position and a floating list's keys).
 const CHIP: u8 = 235;
 
-/// The status line's `▲3 waiting` (the inbox): it outlasts the chip — what waits for you is what's left
-/// when the room runs out.
+/// The status line's `▲3 waiting` and `1 run quiet` (the inbox): they outlast the chip — what waits for you
+/// is what's left when the room runs out.
 const INBOX: u8 = 245;
 
 /// The status line's `keep` for a floating list's keys (`key_hints`): only the mode and the position outlast
@@ -8321,7 +8331,9 @@ fn review_rail_hints(
 fn review_rail_room(lay: &Layout, editor: &Editor, r: &crate::codereview::CodeReview) -> usize {
     let question = usize::from(matches!(r.base, crate::codereview::Base::Turn { .. }));
     let outside = usize::from(r.files.iter().any(|f| r.outside(f)));
-    let risk = rail_risk(editor, r).len();
+    // (its text's width, as `draw_review_rail` has it)
+    use crate::chrome::{GAP, PAD, PAD_R};
+    let risk = rail_risk(editor, r, lay.rail_w.saturating_sub(GAP + PAD + PAD_R).max(1)).len();
     lay.body_h.saturating_sub(RAIL_HEAD + question + outside + risk + RAIL_HINTS + 1).max(1)
 }
 
@@ -8336,10 +8348,21 @@ enum Tone {
     Reviewer,
 }
 
+/// How long the reviewer has read, as the rail says it: `7s`, `1m 20s` — whole seconds, a frame each
+/// (`Editor::tick_wanted`).
+fn reading_for(d: std::time::Duration) -> String {
+    match d.as_secs() {
+        s if s < 60 => format!("{s}s"),
+        s => format!("{}m {:02}s", s / 60, s % 60),
+    }
+}
+
 /// The rail's rows about risk, under its counts (`risk.rs`, `reviewer.rs`): the high-risk changes left to
-/// look at (`▲ 2 high to look at` — `▲ all looked at`, faint), and the reviewer: reading, what it found, the
-/// first line of its verdict.
-fn rail_risk(editor: &Editor, r: &crate::codereview::CodeReview) -> Vec<Vec<(Tone, String)>> {
+/// look at (`▲ 2 high to look at` — `▲ all looked at`, faint), and the reviewer: reading (for how long, how
+/// many reads — beside it on a rail `w` wide enough for the longest that gets, else on the row under it: the
+/// rail's width is fixed for the review, so where it is never moves), what it found, the first line of its
+/// verdict.
+fn rail_risk(editor: &Editor, r: &crate::codereview::CodeReview, w: usize) -> Vec<Vec<(Tone, String)>> {
     use crate::reviewer::State;
     let mut rows = Vec::new();
     let any_high =
@@ -8355,8 +8378,15 @@ fn rail_risk(editor: &Editor, r: &crate::codereview::CodeReview) -> Vec<Vec<(Ton
     match &rv.state {
         State::Reading => {
             row.push((Tone::Accent, "  reading…".into()));
+            let mut how = reading_for(rv.started.elapsed());
             if rv.reads > 0 {
-                row.push((Tone::Faint, format!(" {}", crate::nav::count(rv.reads, "read"))));
+                how += &format!(" · {}", crate::nav::count(rv.reads, "read"));
+            }
+            if w >= "reviewer  reading… 00m 00s · 000 reads".width() {
+                row.push((Tone::Faint, format!(" {how}")));
+            } else {
+                rows.push(row);
+                row = vec![(Tone::Faint, how)];
             }
         }
         State::Done => {
@@ -8450,7 +8480,7 @@ fn draw_review_rail(
     }
     // What's high-risk and left to look at, and the reviewer (`rail_risk`)
     let high_fg = editor.theme.try_get("error").and_then(|s| s.fg).or(warn_fg);
-    for row in rail_risk(editor, r) {
+    for row in rail_risk(editor, r, w) {
         let mut left = w;
         let mut spans = Vec::new();
         for (tone, text) in row {
@@ -8660,9 +8690,10 @@ fn draw_review_rail(
 /// The sessions under the chat's header (with more than one): `main │ fix-login ● │ new-parser ▲ waits │
 /// docs done │ +` — the one in front strong, `●` its Claude working, `▲ waits` a card (or an edit) waiting for
 /// you, `done` a turn that ended behind and hasn't been looked at, `◦ symbols 42s` possibly stuck (a tool
-/// call unanswered that long), `•` files came again from disk there (#6), `+` a new one. Where that doesn't
-/// fit, one dropdown: `◂ fix-login ● ▾ 2/3 ◦1 1 done •1 ▸` (the name opens the list, `◦1` possibly stuck,
-/// `•1` files came again from disk there, the arrows step — how many things wait for you is the status
+/// call unanswered that long), `¶ reviewing` its reviewer reading (#195), `•` news while it was behind —
+/// files came again from disk there (#6), its reviewer ended (#195) — `+` a new one. Where that doesn't
+/// fit, one dropdown: `◂ fix-login ● ¶ ▾ 2/3 ◦1 1 done •1 ▸` (the name opens the list, `◦1` possibly stuck,
+/// `•1` news in one behind, the arrows step — how many things wait for you is the status
 /// line's `▲3 waiting`, every session's). Styles: strong, dim, faint, accent, warning · where each click goes
 /// (from the row's start).
 /// The other sessions as the dropdown and the status line's chip count them: ` ◦1` (possibly stuck) ·
@@ -8682,7 +8713,7 @@ fn sessions_counted(editor: &Editor) -> [String; 2] {
 fn session_tabs(
     editor: &Editor,
     w: usize,
-    [strong, dim, faint, accent, warn]: [Style; 5],
+    [strong, dim, faint, accent, warn, reviewer]: [Style; 6],
 ) -> (Vec<crate::markdown::Span>, Vec<(usize, usize, crate::session::Spot)>) {
     use crate::markdown::Span;
     use crate::session::{Doing, Spot};
@@ -8716,11 +8747,15 @@ fn session_tabs(
         if let Some(m) = mark(l) {
             end = put(&mut spans, m.text, m.style);
         }
+        // (its reviewer reading — beside its chat's mark, in the reviewer's colour: #195)
+        if l.reviewing() {
+            end = put(&mut spans, " ¶ reviewing".into(), reviewer);
+        }
         if let Some(r) = rebasing(l) {
             end = put(&mut spans, r.text, r.style);
         }
-        // (files came again from disk while it was behind — #6)
-        if l.reloaded > 0 {
+        // (news while it was behind: files came again from disk — #6, its reviewer ended — #195)
+        if l.news() {
             end = put(&mut spans, " •".into(), dim);
         }
         // (a message typed in its chat, not sent — its input isn't on screen)
@@ -8742,9 +8777,14 @@ fn session_tabs(
     // room — else without)
     let mark =
         mark(&editor.session).map(|m| if m.text == " ▲ waits" { Span { text: " ▲".into(), ..m } } else { m });
+    let reviewing = editor.session.reviewing().then(|| Span { text: " ¶".into(), style: reviewer });
     let rebasing = rebasing(&editor.session);
-    let marks_w = [&mark, &rebasing].iter().filter_map(|m| m.as_ref()).map(|m| m.text.width()).sum::<usize>();
-    let reloaded = match editor.sessions_reloaded() {
+    let marks_w = [&mark, &reviewing, &rebasing]
+        .iter()
+        .filter_map(|m| m.as_ref())
+        .map(|m| m.text.width())
+        .sum::<usize>();
+    let reloaded = match editor.sessions_with_news() {
         0 => String::new(),
         n => format!(" •{n}"),
     };
@@ -8757,6 +8797,7 @@ fn session_tabs(
     // (the arrows dim, not faint — they're what a click steps with)
     let mut spans = vec![Span { text: "◂ ".into(), style: dim }, Span { text: name, style: strong }];
     spans.extend(mark);
+    spans.extend(reviewing);
     spans.extend(rebasing);
     spans.push(Span { text: " ▾".into(), style: dim });
     spans.push(Span { text: count, style: faint });
@@ -9161,7 +9202,8 @@ fn draw_chat(
     if tabs_h > 0 {
         let warn =
             t.try_get("warning").and_then(|s| s.fg).map_or(accent, |fg| Style { fg: Some(fg), ..card });
-        let (spans, spots) = session_tabs(editor, w, [strong, dim, faint, accent, warn]);
+        let reviewer = Style { fg: reviewer_style(editor, ui).fg, ..card };
+        let (spans, spots) = session_tabs(editor, w, [strong, dim, faint, accent, warn, reviewer]);
         chat_row_start(out, x0, y, edge(y), card)?;
         let used = chat_spans(out, &spans, card, w)?;
         chat_row_end(out, card, lay.chat_w, used)?;
@@ -12252,6 +12294,18 @@ mod tests {
         assert_eq!((e.kind, e.up), ("silent-run", "running"));
         assert!(e.asks.starts_with(&format!("{cmd} · {SAID}")), "{}", e.asks);
         assert!(e.waited_ms >= 183_000, "waited since it went quiet: {}", e.waited_ms);
+        // To look at, not to answer: apart from `▲ waiting` on the status line, calm — and not in a card's
+        // count of what waits
+        let status = |ed: &mut Editor| {
+            let mut out = Vec::new();
+            render(ed, &mut out, 140, 36).unwrap();
+            let mut vt = vt100::Parser::new(36, 140, 0);
+            vt.process(&out);
+            vt.screen().rows(0, 140).last().unwrap_or_default()
+        };
+        let line = status(&mut ed);
+        assert!(line.contains("1 run quiet") && !line.contains("waiting"), "{line}");
+        assert_eq!(ed.cards_waiting(), (0, 0));
         // `enter` on it: its panel in front, with the keys, and how to stop it said
         ed.inbox_go(&e.id.clone());
         assert_eq!(ed.slot(), Some(crate::sizes::Slot::Task));

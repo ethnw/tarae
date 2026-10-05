@@ -12,7 +12,8 @@
 //!
 //! `C-q` takes the same order: to the one that has waited longest, in any session (#90, #94) — once it's the
 //! card up, `C-q` gives it the keys. While anything waits, `C-q` never says nothing does. Claude's runs gone
-//! quiet are listed after everything that asks for an answer (#171).
+//! quiet are listed after everything that asks for an answer (#171), and so is a reviewer that ended in a
+//! session behind (#195) — news to read there, gone once that session is in front.
 
 use std::time::Instant;
 
@@ -27,16 +28,20 @@ use crate::uistate::{CardState, session_id};
 #[derive(Clone, Debug, PartialEq)]
 pub struct Entry {
     /// `card#12` · `edit#s1:review` (an edit in its review) · `edit#s1:<request>` (one waiting for it) ·
-    /// `read#s1:<request>` (a read waiting for its card) · `set#s1:<n>` (a change set's files, one by one).
+    /// `read#s1:<request>` (a read waiting for its card) · `set#s1:<n>` (a change set's files, one by one) ·
+    /// `run#…` (Claude's run gone quiet) · `reviewer#s1` (its reviewer ended while it was behind).
     pub id: String,
     /// Its session, as the state names it (`s1`).
     pub session: String,
-    /// A card's kind (`run`, `read`, `project-trust` …), `edit`, `read`, `change-set`.
+    /// A card's kind (`run`, `read`, `project-trust` …), `edit`, `read`, `change-set`, `silent-run`,
+    /// `reviewer`.
     pub kind: &'static str,
-    /// What it asks: a card's title and what's decided; an edit's change and file.
+    /// What it asks: a card's title and what's decided; an edit's change and file; a reviewer's end, what it
+    /// found and where to read it, or why it stopped.
     pub asks: String,
     pub waited_ms: u64,
-    /// Where it is: a card `front` · `stacked` · `parked`; an edit `review` (up in its session) · `queued`.
+    /// Where it is: a card `front` · `stacked` · `parked`; an edit `review` (up in its session) · `queued`;
+    /// a run `running`; a reviewer `ended`.
     pub up: &'static str,
 }
 
@@ -44,6 +49,13 @@ impl Entry {
     /// Its session's id.
     pub fn session_id(&self) -> SessionId {
         self.session[1..].parse().unwrap_or(0)
+    }
+
+    /// Whether it asks for an answer — a card, an edit, a read, a change set — rather than being news to look
+    /// at: Claude's run gone quiet (#157), a reviewer that ended behind (#195). Only those that ask are
+    /// `▲ waiting` (the status line, a card's count); the rest are said apart, calm.
+    pub fn asks_answer(&self) -> bool {
+        !matches!(self.kind, "silent-run" | "reviewer")
     }
 
     /// Its card's id, if it's a card.
@@ -115,8 +127,9 @@ impl Editor {
     }
 
     /// The inbox from the state's cards (`ui_state` lists both from one call) and every session's edits,
-    /// change sets and reads waiting. What asks for an answer comes first, oldest first; quiet runs after
-    /// it, however long they've been quiet — a slow run is only maybe stuck, a card surely waits (#171).
+    /// change sets and reads waiting. What asks for an answer comes first, oldest first; quiet runs and
+    /// reviewers that ended behind after it, however long ago — a slow run is only maybe stuck, a reviewer's
+    /// end is news to read, a card surely waits (#171).
     /// The order is by when each came, not by how long each has waited as read (whole milliseconds, each at
     /// its own moment: two cards come within one swapped between `keys_to`'s read and `handle_key`'s — the
     /// routing test, now and then); things that came at the same instant keep the order they came in.
@@ -158,6 +171,11 @@ impl Editor {
             for (id, _, label, last, said) in silent_runs(l, now) {
                 v.push(entry(id, "silent-run", format!("{label} · {said}"), last, "running"));
             }
+            // Its reviewer ended while it was behind (#195): news, not a question — what it found, where to
+            // read it; gone once the session is in front
+            if let Some((said, at)) = crate::reviewer::news(l) {
+                v.push(entry(format!("reviewer#{s}"), "reviewer", said, at, "ended"));
+            }
             let Some(c) = l.chat.as_ref() else { continue };
             for p in &c.edits.queue {
                 let path = crate::chat::resolve(&l.root, p.input["file_path"].as_str().unwrap_or_default());
@@ -176,7 +194,7 @@ impl Editor {
                 v.push(entry(format!("set#{s}:{i}"), "change-set", asks, since, "queued"));
             }
         }
-        let quiet = |e: &Entry| e.kind == "silent-run";
+        let quiet = |e: &Entry| !e.asks_answer();
         v.sort_by(|a, b| (quiet(&a.0).cmp(&quiet(&b.0))).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
         v.into_iter().map(|(e, ..)| e).collect()
     }
@@ -252,6 +270,10 @@ impl Editor {
             }
             return;
         }
+        // A reviewer that ended: there now — coming said it (`reviewer::session_in`)
+        if e.kind == "reviewer" {
+            return;
+        }
         // A silent run: its panel in front with the keys — stopping it is the user's call there
         if e.kind == "silent-run" {
             let Some((_, slot, _, _, said)) =
@@ -312,11 +334,16 @@ impl Editor {
                     e.kind,
                     "run" | "read" | "no-sandbox" | "screen" | "edit" | "change-set" | "silent-run"
                 );
+                // (a reviewer's end: its own glyph, as its findings have it — news, not a question)
+                let glyph = match e.kind {
+                    "reviewer" => ("¶", "type"),
+                    _ => ("▲", if claudes { "warning" } else { "ui.accent" }),
+                };
                 crate::picker::Item {
                     label,
                     hint: format!("{} · {}", e.kind, waited(e.waited_ms)),
                     action: crate::picker::Action::Inbox(e.id),
-                    glyph: Some(("▲", if claudes { "warning" } else { "ui.accent" })),
+                    glyph: Some(glyph),
                 }
             })
             .collect()

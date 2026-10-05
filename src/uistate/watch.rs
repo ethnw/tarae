@@ -40,8 +40,8 @@ struct Summary {
     keys: (String, String, String, bool, bool),
     /// (id, rev, up, session, the line `said` gives it)
     cards: Vec<(String, u64, &'static str, String, String)>,
-    /// (id, name, doing)
-    sessions: Vec<(String, String, String)>,
+    /// (id, name, doing, its reviewer's)
+    sessions: Vec<(String, String, String, Option<&'static str>)>,
     /// (id, kind, text)
     toasts: Vec<(String, &'static str, String)>,
 }
@@ -85,7 +85,11 @@ fn summary(s: &super::UiState) -> Summary {
                 (c.id.clone(), c.rev, c.up, c.session.clone(), line)
             })
             .collect(),
-        sessions: s.sessions.iter().map(|x| (x.id.clone(), x.name.clone(), x.doing.clone())).collect(),
+        sessions: s
+            .sessions
+            .iter()
+            .map(|x| (x.id.clone(), x.name.clone(), x.doing.clone(), x.reviewer))
+            .collect(),
         toasts: s.toasts.iter().map(|t| (t.id.clone(), t.kind, t.text.clone())).collect(),
     }
 }
@@ -113,14 +117,22 @@ fn diff(old: &Summary, new: &Summary) -> Vec<Value> {
                              "said": said }));
         }
     }
-    for (id, name, doing) in &new.sessions {
-        let was = old.sessions.iter().find(|s| &s.0 == id).map(|s| s.2.as_str());
-        if was != Some(doing.as_str()) {
-            let said = match was {
-                Some(w) => format!("{id} {name}: {w} → {doing}"),
-                None => format!("{id} {name}: {doing}"),
+    // (its reviewer said after what its chat does: `idle · reviewing`)
+    let shown = |doing: &str, reviewer: Option<&str>| match reviewer {
+        Some(r) => format!("{doing} · {r}"),
+        None => doing.to_string(),
+    };
+    for (id, name, doing, reviewer) in &new.sessions {
+        let before = old.sessions.iter().find(|s| &s.0 == id);
+        if before.is_none_or(|b| b.2 != *doing || b.3 != *reviewer) {
+            let now = shown(doing, *reviewer);
+            let said = match before {
+                Some(b) => format!("{id} {name}: {} → {now}", shown(&b.2, b.3)),
+                None => format!("{id} {name}: {now}"),
             };
-            out.push(json!({ "event": "session", "id": id, "doing": doing, "was": was, "said": said }));
+            let was = before.map(|b| b.2.as_str());
+            out.push(json!({ "event": "session", "id": id, "doing": doing, "was": was, "reviewer": reviewer,
+                             "said": said }));
         }
     }
     for (id, kind, text) in &new.toasts {
@@ -308,4 +320,29 @@ pub fn after_frame(ed: &mut Editor) {
 /// The gone ring's newest, for the state (`gone`).
 pub fn recent(gone: &VecDeque<Gone>, n: usize) -> Vec<Gone> {
     gone.iter().rev().take(n).cloned().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #195: a session's reviewer starting and ending to read is a `session` event, its chat's `doing` as it
+    /// was — `s0 author: idle → idle · reviewing`.
+    #[test]
+    fn a_reviewer_reading_is_a_session_event() {
+        let at = |reviewer| Summary {
+            sessions: vec![("s0".into(), "author".into(), "idle".into(), reviewer)],
+            ..Summary::default()
+        };
+        let e = diff(&at(None), &at(Some("reviewing")));
+        assert_eq!(e.len(), 1, "{e:?}");
+        assert_eq!(
+            (&e[0]["doing"], &e[0]["was"], &e[0]["reviewer"]),
+            (&json!("idle"), &json!("idle"), &json!("reviewing"))
+        );
+        assert_eq!(e[0]["said"], "s0 author: idle → idle · reviewing");
+        let e = diff(&at(Some("reviewing")), &at(None));
+        assert_eq!(e[0]["said"], "s0 author: idle · reviewing → idle");
+        assert!(diff(&at(Some("reviewing")), &at(Some("reviewing"))).is_empty());
+    }
 }

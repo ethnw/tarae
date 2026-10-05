@@ -709,7 +709,12 @@ pub struct SessionState {
     pub branch: Option<String>,
     /// Its checkout — `tarae state` finds the tarae whose session holds the folder it's run in.
     pub root: String,
+    /// What its chat's Claude does.
     pub doing: String,
+    /// Its reviewer (`reviewer.rs`): `reviewing` while it reads — None else. A field of its own beside
+    /// `doing`: the two are at work apart, often at once, and a driver waiting for `doing` to be `idle` waits
+    /// for the chat's turn, not a review it didn't ask for (#195).
+    pub reviewer: Option<&'static str>,
     pub cards: usize,
     pub rebasing: Option<String>,
     pub reloaded: usize,
@@ -897,6 +902,7 @@ impl Editor {
                 // (at work, held back in line behind another run: `queued 2nd`)
                 d @ crate::session::Doing::Queued { .. } => d.said(),
             },
+            reviewer: l.reviewing().then_some("reviewing"),
             cards: if is_front { self.offers.len() + l.parked.len() } else { l.parked.len() },
             rebasing: l.rebase.as_ref().map(|r| r.said()),
             reloaded: l.reloaded,
@@ -1050,6 +1056,9 @@ impl UiState {
                 if let Some(b) = &s.branch {
                     v["branch"] = json!(b);
                 }
+                if let Some(r) = s.reviewer {
+                    v["reviewer"] = json!(r);
+                }
                 if let Some(r) = &s.rebasing {
                     v["rebasing"] = json!(r);
                 }
@@ -1128,7 +1137,8 @@ impl UiState {
                         1 => " · 1 card".into(),
                         n => format!(" · {n} cards"),
                     };
-                    format!("{} {}{front} · {}{cards}", s.id, s.name, s.doing)
+                    let reviewer = s.reviewer.map(|r| format!(" · {r}")).unwrap_or_default();
+                    format!("{} {}{front} · {}{reviewer}{cards}", s.id, s.name, s.doing)
                 })
                 .collect();
             out.push(format!("sessions: {}", s.join("   ")));

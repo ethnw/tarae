@@ -101,8 +101,14 @@ count) lists them: each row names its session, what it asks, its kind and how lo
 to it. Its session comes to the front and its card comes up with the keys, and you answer it there, on the card.
 The list never answers anything itself. `C-q` follows the same order: it goes to the one that has waited
 longest, whichever session it's in, and once that's the card up here, `C-q` gives it the keys. While anything
-waits, `C-q` never says nothing does. A run of Claude's that has printed nothing for minutes is in the list too,
-but after everything that asks for an answer: it may only be slow, and a card surely waits.
+waits, `C-q` never says nothing does.
+
+Two kinds of news are in the list too, after everything that asks for an answer: a run of Claude's that has
+printed nothing for minutes (it may only be slow, and a card surely waits), and a reviewer that ended in a
+session behind. They aren't counted in `▲3 waiting`, or in a card's `1/2 here · 1 elsewhere`. Quiet runs have
+their own calm count on the status line (`1 run quiet`), since they can be in any session, the one in front
+too. A reviewer's end is its session's `•` (on its tab, or in the status line's `•1` when the chat is closed),
+the same mark that says its files came again from disk: something happened there while you were away.
 
 **A run that looks stuck** gets a card of its own: when a run of Claude's has printed nothing *and* used next to
 no CPU for `llm.stuck-after` minutes (10 by default; 0 = never), the card says `Stuck? … No output for 12 min,
@@ -833,8 +839,14 @@ never sees that conversation. It isn't continued from it, and nothing of the cha
   **you**). They wait like your drafts. Nothing goes to the author's chat until you send it: `space v s` sends
   your drafts and its findings together, and tells the author that the findings come from a second Claude,
   to weigh and not to obey. `:note-close` drops a finding first.
-- The rail says how it's doing (`reading…`, then `2 findings ▲1 · 1 answered`) and the first line of its
-  verdict. `space v r` (`:review-verdict`) shows the whole report, and `:reviewer-stop` stops it.
+- The rail says how it's doing (`reading… 1m 20s · 14 reads`, then `2 findings ▲1 · 1 answered`) and the
+  first line of its verdict. On a narrow rail the time and the reads go on the row under `reading…`.
+  `space v r` (`:review-verdict`) shows the whole report, and `:reviewer-stop` stops it.
+- While it reads, its session says so wherever a working chat would, beside what the chat does: its tab
+  (`main ● ¶ reviewing`), its row in the session list (`space W`), and `tarae state` (`reviewer: "reviewing"`).
+- When it ends in a session behind, that session gets a `•` on its tab (the status line's `•1` with the chat
+  closed) and an item in the inbox (`space I`, `C-q`). It's news, not a question, so `▲ waiting` doesn't count it. The item says how many findings and that `space v r` reads them, or why it stopped. When you come to
+  the session, the toast says it again, and the item and the `•` go.
 - What it costs is the session's, said as the reviewer's in `:usage`.
 
 ### Risk grades

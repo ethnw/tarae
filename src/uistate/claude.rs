@@ -111,7 +111,8 @@ impl UiState {
                         _ => "",
                     };
                     let cards = if s.cards == 0 { String::new() } else { format!(" · {} cards", s.cards) };
-                    format!("{} {}{whose} · {}{cards}", s.id, s.name, s.doing)
+                    let reviewer = s.reviewer.map(|r| format!(" · {r}")).unwrap_or_default();
+                    format!("{} {}{whose} · {}{reviewer}{cards}", s.id, s.name, s.doing)
                 })
                 .collect();
             out.push(format!("sessions: {}", s.join("   ")));

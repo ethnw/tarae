@@ -876,12 +876,26 @@ pub struct Shown {
     pub reloaded: usize,
     /// Its Claude compacted its conversation while it was behind (`Compacted.unseen`).
     pub compacted: bool,
+    /// Its reviewer (`reviewer.rs`): `¶ reviewing` while it reads, `¶ reviewer done` · `¶ reviewer stopped`
+    /// once it ended behind, not looked at (`Reviewer.unseen`) — empty else.
+    pub reviewer: String,
     /// Its Claude's cache (`warm until 14:32` · `cold` · `cache not reported`) and what its turns cost so far
     /// (`usage.rs`) — None: nothing reported.
     pub claude: Option<(String, String)>,
 }
 
 impl Shown {
+    /// `reviewer` for session `l`.
+    pub fn reviewer_of(l: &crate::session::Session) -> String {
+        use crate::reviewer::State;
+        match l.reviewer.as_ref() {
+            Some(r) if r.reading() => "¶ reviewing".into(),
+            Some(r) if r.unseen && r.state == State::Done => "¶ reviewer done".into(),
+            Some(r) if r.unseen => "¶ reviewer stopped".into(),
+            _ => String::new(),
+        }
+    }
+
     /// `claude` for a session's usage at `now_ms`.
     pub fn claude_of(u: &crate::usage::Usage, now_ms: u64) -> Option<(String, String)> {
         use crate::usage::Cache;
@@ -904,13 +918,13 @@ impl Shown {
 /// The list's rows: the name, a glyph for what its Claude does (`●` working, `▲` waiting for you, `◦` a
 /// tool call unanswered too long — `stuck? symbols 42s`; a turn ended behind says `done` in words), and the
 /// rest in columns — branch, `↑ahead ↓behind`, what's changed, files reloaded behind (`• 2 reloaded`), its
-/// Claude compacted behind (`≈ compacted`), what it's doing, its Claude's cache and cost so far, CPU and
-/// memory — each column as wide as its widest and empty ones left out, so the hints (right-aligned) line up
-/// row under row.
+/// Claude compacted behind (`≈ compacted`), what it's doing, its reviewer (`¶ reviewing`), its Claude's
+/// cache and cost so far, CPU and memory — each column as wide as its widest and empty ones left out, so the
+/// hints (right-aligned) line up row under row.
 pub fn items(sessions: &[Shown]) -> Vec<crate::picker::Item> {
     use crate::session::Doing;
     use unicode_width::UnicodeWidthStr as _;
-    let cols: Vec<[String; 9]> = sessions
+    let cols: Vec<[String; 10]> = sessions
         .iter()
         .map(|l| {
             let branch = l.branch.clone().filter(|b| *b != l.name).unwrap_or_default();
@@ -941,12 +955,13 @@ pub fn items(sessions: &[Shown]) -> Vec<crate::picker::Item> {
                 if l.reloaded > 0 { format!("• {} reloaded", l.reloaded) } else { String::new() };
             let compacted = if l.compacted { "≈ compacted".to_string() } else { String::new() };
             let (cache, cost) = l.claude.clone().unwrap_or_default();
-            [branch, moved.join(" "), changed, reloaded, compacted, doing, cache, cost, usage]
+            let reviewer = l.reviewer.clone();
+            [branch, moved.join(" "), changed, reloaded, compacted, doing, reviewer, cache, cost, usage]
         })
         .collect();
-    let widths: Vec<usize> = (0..9).map(|c| cols.iter().map(|r| r[c].width()).max().unwrap_or(0)).collect();
+    let widths: Vec<usize> = (0..10).map(|c| cols.iter().map(|r| r[c].width()).max().unwrap_or(0)).collect();
     // (counts right-aligned, words left)
-    let right = [false, true, true, true, false, false, false, true, true];
+    let right = [false, true, true, true, false, false, false, false, true, true];
     sessions
         .iter()
         .zip(cols)
@@ -1510,6 +1525,7 @@ impl Editor {
                 rebasing: l.rebase.as_ref().map(crate::rebase::Rebase::said),
                 reloaded: l.reloaded,
                 compacted: l.compacted.unseen,
+                reviewer: Shown::reviewer_of(l),
                 claude: Shown::claude_of(&l.usage, now_ms),
             })
             .collect();
@@ -3474,6 +3490,7 @@ mod tests {
             rebasing: None,
             reloaded: 0,
             compacted: false,
+            reviewer: String::new(),
             claude: None,
         };
         let f = |ahead, behind, changed| Some(Facts { ahead, behind, changed });

@@ -1,0 +1,55 @@
+# sessions_reviewing_dropdown · 100x16 · theme meok · cursor 2:4
+## text
+00  tarae  ›  [scratch]                                           claude                         ready
+01  ──────────────────────────────────────────────────────────    ────────────────────────────────────
+02   1                                                            ◂ main-with-a-long-fea… ¶ ▾ 1/3 •1 ▸
+03                                                                It reads the whole project,
+04                                                                starting from [scratch].
+05
+06                                                                tab for a suggestion
+07                                                                › Explain what this file does
+08                                                                › Where is this used across the pro…
+09                                                                › Why is this diagnostic happening?
+10
+11                                                                C-t for another model
+12                                                                ────────────────────────────────────
+13                                                                › Ask about [scratch]…
+14                                                                space l focus  space L close
+15  ▐ NORMAL ▌                                                                         utf-8 LF   1:1
+## bg · surface per cell, blank = ui.background
+00                                                              ppppppppppppppppppppppppppppppppppppppp
+01                                                              ppppppppppppppppppppppppppppppppppppppp
+02     cccccccccccccccccccccccccccccccccccccccccccccccccccccccc ppppppppppppppppppppppppppppppppppppppp
+03                                                              ppppppppppppppppppppppppppppppppppppppp
+04                                                              ppppppppppppppppppppppppppppppppppppppp
+05                                                              ppppppppppppppppppppppppppppppppppppppp
+06                                                              ppppppppppppppppppppppppppppppppppppppp
+07                                                              ppppppppppppppppppppppppppppppppppppppp
+08                                                              ppppppppppppppppppppppppppppppppppppppp
+09                                                              ppppppppppppppppppppppppppppppppppppppp
+10                                                              ppppppppppppppppppppppppppppppppppppppp
+11                                                              ppppppppppppppppppppppppppppppppppppppp
+12                                                              ppppppppppppppppppppppppppppppppppppppp
+13                                                              ppppppppppppppppppppppppppppppppppppppp
+14                                                              ppppppppppppppppppppppppppppppppppppppp
+15   AAAAAAAA
+## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
+00  ddddd  f  TTTTTTTTT                                           dddddd                         fffff
+01  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa    ffffffffffffffffffffffffffffffffffff
+02   A                                                            d TTTTTTTTTTTTTTTTTTTTT   d fff dd d
+03                                                                dd ddddd ddd ddddd dddddddd
+04                                                                dddddddd dddd dddddddddd
+05
+06                                                                DDD fff f ffffffffff
+07                                                                f ddddddd dddd dddd dddd dddd
+08                                                                f ddddd dd dddd dddd dddddd ddd dddd
+09                                                                f ddd dd dddd dddddddddd dddddddddd
+10
+11                                                                DDD fff fffffff fffff
+12                                                                ffffffffffffffffffffffffffffffffffff
+13                                                                f fff fffff ffffffffff
+14                                                                DDDDD D fffff  DDDDD D fffff
+15  a BBBBBB a                                                                         ddddd dd   TTT
+## legend
+bg: c=ui.cursorline.primary  p=ui.popup  A=ui.cursor.primary
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  B=bold

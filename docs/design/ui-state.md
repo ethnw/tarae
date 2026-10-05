@@ -136,7 +136,10 @@ side git · 4 rows · in hand git:src/term.rs
   `keys` comes from one new `Editor::keys_to()`, and the routing test (phase 1) holds `handle_key` to it.
 - **`mode`, `prompt`** — mode, and the prompt's kind (`PromptKind::label`) and text (full level only).
 - **`sessions`** — id, name, branch, `doing` (`Doing`: `idle` · `working` · `waiting` · `done` ·
-  `stuck {tool, secs}`), cards waiting, `rebasing n/m`, the reloaded `•`, and once its Claude compacted its
+  `stuck {tool, secs}` — its chat's Claude), `reviewer: "reviewing"` while its reviewer reads (`reviewer.rs`,
+  #195; absent else — a field of its own, not a `doing`: the two work apart and often at once, and a driver
+  waiting for `doing: idle` waits for the chat's turn, not a review), cards waiting, `rebasing n/m`, the
+  reloaded `•`, and once its Claude compacted its
   conversation (`compaction.rs`), `compacted`: `count` since tarae started, the `last` one's `at_ms`, `trigger`
   (`auto` · `manual`), `pre_tokens`, `post_tokens`, and `unseen` (it came behind, not in front since). Claude's
   level has only its own session's.
@@ -153,8 +156,11 @@ side git · 4 rows · in hand git:src/term.rs
   - `at`: its rect, as drawn.
 - **`inbox`** (2026-10-05, `inbox.rs`) — what waits for the user, every session's, oldest first: the cards above
   that wait (not downloading) and the edits waiting for their review (`edit#s0:review` up in its session,
-  `edit#s1:<request>` queued), reads queued for their card, a change set's files. Built from `cards` in the same
-  call, so the two can't disagree; `C-q` goes to its first.
+  `edit#s1:<request>` queued), reads queued for their card, a change set's files; after all that asks, Claude's
+  runs gone quiet (`silent-run`) and a reviewer that ended in a session behind (`reviewer#s1`, kind `reviewer`,
+  up `ended`: its findings and `space v r`, or why it stopped — gone once that session is in front). Built from
+  `cards` in the same call, so the two can't disagree; `C-q` goes to its first. Those two are news, not
+  questions (`Entry::asks_answer`): the status line's `▲n waiting` and a card's count leave them out.
 - **`toasts`** — the card's rows, and where they are: on a card, folded into the status line, or waiting for a
   card (U7).
 - **`panels`** — for the front session. Each holds what it shows and its *visible* rows (id + label +
@@ -292,7 +298,7 @@ A snapshot is one question. An event stream tells you about change without polli
 | `keys` | old → new `keys` | diff |
 | `card-up` | the card | diff |
 | `card-gone` | id, how: `answered y` · `declined` · `lost` · `replaced` · `turn-ended` | explicit, at `offer_finished`/`offer_dismiss`/`asking_sync`/`drop_cards` (a diff can't tell how) |
-| `session` | id, doing old → new | diff |
+| `session` | id, doing old → new, `reviewer` (its reviewer reading: `idle → idle · reviewing`) | diff |
 | `turn` | session, `started` / `ended` (`chat` Done), calls, edits | explicit |
 | `run` | id, `queued` · `started` · `waiting <what>` · `ended <how> <took>` | explicit, beside the `RunTrace` steps phase 0 already logs (and `Waiting::line`) |
 | `toast` | the toast | diff |

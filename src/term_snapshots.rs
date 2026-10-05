@@ -1078,6 +1078,133 @@ fn snapshot_review_risk_and_the_reviewer() {
     assert!(has(&rows, "▲ looked at · unsafe (rust pack)"), "{rows:#?}");
 }
 
+/// #195: while the reviewer reads, the rail says how long and how far — on its row where the rail is wide
+/// enough for the longest it gets, else on the row under it (the rail's width never changes in a review, so
+/// neither does where it is).
+#[test]
+fn the_rail_says_how_long_the_reviewer_has_read() {
+    use crate::reviewer::{Reviewer, State};
+    let (base, now) = five_and_thirty_added();
+    let mut s = review_of(112, 30, &base, &now);
+    let r = s.ed.session.code_review.as_ref().unwrap();
+    let mut rv = Reviewer::for_test(r.started, r.root.clone(), State::Reading, Vec::new(), "");
+    rv.started -= Duration::from_secs(80);
+    rv.reads = 14;
+    s.ed.session.reviewer = Some(rv);
+    let mut parser = vt100::Parser::new(s.h, s.w, 0);
+    parser.process(&s.frame());
+    let rows: Vec<String> = parser.screen().rows(0, s.w).collect();
+    let at =
+        rows.iter().position(|r| r.contains("reviewer  reading…")).unwrap_or_else(|| panic!("{rows:#?}"));
+    assert!(rows[at + 1].trim_start().starts_with("1m 20s · 14 reads"), "{rows:#?}");
+    // Under a minute, no reads yet: seconds only
+    let rv = s.ed.session.reviewer.as_mut().unwrap();
+    (rv.started, rv.reads) = (Instant::now() - Duration::from_secs(7), 0);
+    let mut parser = vt100::Parser::new(s.h, s.w, 0);
+    parser.process(&s.frame());
+    let rows: Vec<String> = parser.screen().rows(0, s.w).collect();
+    assert!(rows[at + 1].trim_start().starts_with("7s "), "{rows:#?}");
+    assert!(!rows[at + 1].contains("read"), "{rows:#?}");
+    // A frame as each second turns while the rail shows it — none with the rail out of sight, or once done
+    let next = s.ed.tick_wanted().expect("a frame for its time");
+    assert!(next <= Duration::from_millis(1002), "{next:?}");
+    s.ed.session.code_review.as_mut().unwrap().wide = true;
+    s.frame();
+    assert_eq!(s.ed.tick_wanted(), None, "the rail out of sight (space v z)");
+    s.ed.session.code_review.as_mut().unwrap().wide = false;
+    s.ed.session.reviewer.as_mut().unwrap().state = State::Done;
+    s.frame();
+    assert_eq!(s.ed.tick_wanted(), None, "done");
+    // A rail wide enough: all on one row
+    let mut s = review_of(160, 30, &base, &now);
+    let r = s.ed.session.code_review.as_mut().unwrap();
+    r.rail_need.take();
+    r.rail_need.get_or_init(|| 44);
+    let mut rv = Reviewer::for_test(r.started, r.root.clone(), State::Reading, Vec::new(), "");
+    rv.started -= Duration::from_secs(80);
+    rv.reads = 14;
+    s.ed.session.reviewer = Some(rv);
+    let mut parser = vt100::Parser::new(s.h, s.w, 0);
+    parser.process(&s.frame());
+    let rows: Vec<String> = parser.screen().rows(0, s.w).collect();
+    assert!(rows.iter().any(|r| r.contains("reviewer  reading… 1m 20s · 14 reads")), "{rows:#?}");
+}
+
+/// Three sessions on a `w`×16 screen, the chat open in front: `main` (in front, its reviewer reading),
+/// `fix-login` (its chat working, its reviewer reading), `docs` (its reviewer ended behind, not looked at).
+/// Named here, not after the checkout's folder (the tests run in any checkout).
+fn sessions_reviewing(w: u16) -> Shot {
+    use crate::reviewer::{Reviewer, State};
+    let mut s = Shot::new(w, 16);
+    let root = s.in_project();
+    let reviewer = |root: &std::path::Path, state| {
+        Reviewer::for_test(Instant::now(), root.to_path_buf(), state, Vec::new(), "")
+    };
+    (s.ed.session.name, s.ed.session.git_branch) = ("main".into(), None);
+    s.ed.session.reviewer = Some(reviewer(&root, State::Reading));
+    let mut chat = crate::chat::Chat::new();
+    chat.focused = false;
+    s.ed.session.chat = Some(chat);
+    // (behind, named so: their folders beside the project's)
+    let behind = |ed: &mut Editor, name: &str| -> PathBuf {
+        let dir = root.with_file_name(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let id = ed.session_add(dir.clone());
+        ed.sessions.iter_mut().find(|l| l.id == id).unwrap().name = name.into();
+        dir
+    };
+    let dir = behind(&mut s.ed, "fix-login");
+    let l = s.ed.sessions.last_mut().unwrap();
+    let mut chat = crate::chat::Chat::new();
+    chat.state = crate::chat::State::Thinking;
+    l.chat = Some(chat);
+    l.reviewer = Some(reviewer(&dir, State::Reading));
+    let dir = behind(&mut s.ed, "docs");
+    let mut done = reviewer(&dir, State::Done);
+    done.unseen = true;
+    s.ed.sessions.last_mut().unwrap().reviewer = Some(done);
+    s
+}
+
+/// #195: the reviewer reading, where the sessions are — its tab (`¶ reviewing`, beside the chat's `●`), its
+/// row in the list (`space W`) — and one that ended behind, not looked at (`•`, `¶ reviewer done`): news,
+/// not `▲ waiting` on the status line.
+#[test]
+fn snapshot_sessions_with_the_reviewer_reading() {
+    let mut s = sessions_reviewing(160);
+    let mut parser = vt100::Parser::new(s.h, s.w, 0);
+    parser.process(&s.frame());
+    let row = parser.screen().rows(0, s.w).find(|r| r.contains(" │ +")).unwrap_or_default();
+    assert!(row.contains("main ¶ reviewing │ fix-login ● ¶ reviewing │ docs • │ +"), "{row}");
+    let status = parser.screen().rows(0, s.w).last().unwrap_or_default();
+    assert!(!status.contains("waiting"), "{status}");
+    s.check("sessions_reviewing_tabs");
+    s.ed.session_list();
+    let mut parser = vt100::Parser::new(s.h, s.w, 0);
+    parser.process(&s.frame());
+    let rows: Vec<String> = parser.screen().rows(0, s.w).collect();
+    // (the list's rows — not the tabs', beside it)
+    let row = |name: &str| {
+        rows.iter().find(|r| r.contains(name) && !r.contains(" │ ")).cloned().unwrap_or_default()
+    };
+    assert!(row("fix-login").contains("working") && row("fix-login").contains("¶ reviewing"), "{rows:#?}");
+    assert!(row("docs").contains("¶ reviewer done"), "{rows:#?}");
+    s.check("sessions_reviewing_list");
+}
+
+/// #195: where the tabs don't fit — the dropdown: the front's reviewer as its `¶` beside the name, counted in
+/// the room the name leaves (a long name is cut, the `▸` stays whole), and `docs`' reviewer news in `•1`.
+#[test]
+fn snapshot_sessions_dropdown_with_the_reviewer_reading() {
+    let mut s = sessions_reviewing(100);
+    s.ed.session.name = "main-with-a-long-feature-name".into();
+    let mut parser = vt100::Parser::new(s.h, s.w, 0);
+    parser.process(&s.frame());
+    let row = parser.screen().rows(0, s.w).find(|r| r.contains(" ▾ ")).unwrap_or_default();
+    assert!(row.contains("◂ main-with-a-long") && row.contains("… ¶ ▾ 1/3 •1 ▸"), "{row}");
+    s.check("sessions_reviewing_dropdown");
+}
+
 /// `space v q` with a high-risk change no one has looked at: the end card names it in the warning colour, and
 /// its only answer is `n` (`Offer.held`).
 #[test]

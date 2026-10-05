@@ -85,6 +85,9 @@ pub struct Reviewer {
     pub verdict: String,
     /// What it cost, as its result said (None: not reported).
     pub cost: Option<f64>,
+    /// It ended while its session was behind, and that session hasn't been in front since — its inbox item,
+    /// its tab's `•`; said when you come to it (`Editor::session_switch`).
+    pub unseen: bool,
 }
 
 impl Reviewer {
@@ -106,6 +109,7 @@ impl Reviewer {
             reads: 0,
             verdict: verdict.into(),
             cost: None,
+            unseen: false,
         }
     }
 
@@ -270,6 +274,7 @@ fn spawn(ed: &mut Editor, g: Gathered) {
         reads: 0,
         verdict: String::new(),
         cost: None,
+        unseen: false,
     });
     llm::pump(child, true, ed.events.sender(), move |ev| {
         Some(Box::new(move |ed: &mut Editor| on_event(ed, generation, ev)))
@@ -278,6 +283,7 @@ fn spawn(ed: &mut Editor, g: Gathered) {
 }
 
 fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
+    let behind = ed.background();
     let Some(r) = ed.session.reviewer.as_mut().filter(|r| r.generation == generation) else { return };
     match ev {
         StreamEv::Control { request_id, request } => {
@@ -302,21 +308,19 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
         StreamEv::Done(result) => {
             r.proc = None;
             r.took = Some(r.started.elapsed());
-            let n = r.findings.len();
             match result {
                 Ok(text) => {
                     r.verdict = cut(text.trim(), VERDICT_MAX);
                     r.state = State::Done;
-                    let found = match n {
-                        0 => "no findings".to_string(),
-                        n => format!("{} — space v s sends them on", crate::nav::count(n, "finding")),
-                    };
-                    ed.set_success(format!("the reviewer is done: {found} · space v r reads its verdict"));
                 }
-                Err(e) => {
-                    r.state = State::Failed(e.clone());
-                    ed.set_warning(format!("the reviewer stopped: {e}"));
-                }
+                Err(e) => r.state = State::Failed(e),
+            }
+            // (its session behind: news there until it's in front again — #195)
+            r.unseen = behind;
+            let (kind, said) = ended(r, r.findings.len());
+            match kind {
+                crate::editor::ToastKind::Success => ed.set_success(said),
+                _ => ed.set_warning(said),
             }
             verdict_sync(ed);
         }
@@ -332,6 +336,53 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
         | StreamEv::Models(_)
         | StreamEv::Compaction(_)
         | StreamEv::Exit(_) => {}
+    }
+}
+
+/// How reviewer `r` ended, with `n` findings, as its toast says it: done (what it found, and the keys) — or
+/// stopped, and why.
+pub fn ended(r: &Reviewer, n: usize) -> (crate::editor::ToastKind, String) {
+    use crate::editor::ToastKind;
+    match &r.state {
+        State::Failed(why) => (ToastKind::Warning, format!("the reviewer stopped: {why}")),
+        _ => {
+            let found = match n {
+                0 => "no findings".to_string(),
+                n => format!("{} — space v s sends them on", crate::nav::count(n, "finding")),
+            };
+            (ToastKind::Success, format!("the reviewer is done: {found} · space v r reads its verdict"))
+        }
+    }
+}
+
+/// How session `l`'s reviewer ended behind, as its inbox item says it (`unseen`): what it found and that
+/// `space v r` reads it — or why it stopped. When it ended. None: no such news.
+pub fn news(l: &crate::session::Session) -> Option<(String, Instant)> {
+    let r = l.reviewer.as_ref().filter(|r| r.unseen)?;
+    let at = r.started + r.took.unwrap_or_default();
+    let said = match &r.state {
+        State::Failed(why) => format!("the reviewer stopped: {why}"),
+        _ => {
+            let n = r.findings.iter().filter(|id| l.notes.list.iter().any(|n| n.id == **id)).count();
+            match n {
+                0 => "the reviewer is done: no findings — space v r reads its verdict".to_string(),
+                n => format!("the reviewer found {} — space v r reads them", crate::nav::count(n, "finding")),
+            }
+        }
+    };
+    Some((said, at))
+}
+
+/// Session `ed.session`, come to the front: its reviewer's end, if it came while it was behind, said now —
+/// as it was then (its inbox item and its tab's `•` go).
+pub fn session_in(ed: &mut Editor) {
+    let Some(r) = ed.session.reviewer.as_mut().filter(|r| r.unseen) else { return };
+    r.unseen = false;
+    let n = r.findings.iter().filter(|id| ed.session.notes.list.iter().any(|n| n.id == **id)).count();
+    let (kind, said) = ended(r, n);
+    match kind {
+        crate::editor::ToastKind::Success => ed.set_success(said),
+        _ => ed.set_warning(said),
     }
 }
 
@@ -691,6 +742,153 @@ mod tests {
         ed.session.review_ask = true;
         crate::codereview::start_in(ed, repo.to_path_buf(), None);
         settle_until(ed, |ed| ed.session.reviewer.as_ref().is_some_and(|r| !r.reading()));
+    }
+
+    /// `space v c` over `repo`'s changes in its session, named `author` — until its claude is started: it
+    /// reads (what its fake prints waits, unread, until the test settles).
+    fn reading(ed: &mut Editor, repo: &Path) {
+        (ed.session.root, ed.session.name) = (repo.to_path_buf(), "author".into());
+        ed.session.review_ask = true;
+        crate::codereview::start_in(ed, repo.to_path_buf(), None);
+        settle_until(ed, |ed| ed.session.reviewer.as_ref().is_some_and(Reviewer::reading));
+    }
+
+    /// Another session, `other` (a folder beside the repository), behind — its id.
+    fn other_session(ed: &mut Editor, dir: &Path) -> crate::event::SessionId {
+        let other = dir.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        ed.session_add(other)
+    }
+
+    /// The author's session (`s0`), wherever it is.
+    fn author(ed: &Editor) -> &crate::session::Session {
+        std::iter::once(&ed.session).chain(&ed.sessions).find(|l| l.id == 0).unwrap()
+    }
+
+    /// The screen's rows (160×24).
+    fn rows(ed: &mut Editor) -> Vec<String> {
+        let mut bytes = Vec::new();
+        crate::term::render(ed, &mut bytes, 160, 24).unwrap();
+        let mut vt = vt100::Parser::new(24, 160, 0);
+        vt.process(&bytes);
+        vt.screen().rows(0, 160).collect()
+    }
+
+    /// The sessions' tabs over the front session's chat (opened, no process).
+    fn tabs(ed: &mut Editor) -> String {
+        if ed.session.chat.is_none() {
+            let mut c = crate::chat::Chat::new();
+            c.focused = false;
+            ed.session.chat = Some(c);
+        }
+        let rows = rows(ed);
+        rows.iter().find(|r| r.contains(" │ +")).cloned().unwrap_or_else(|| panic!("{rows:#?}"))
+    }
+
+    /// The status line (the screen's last row).
+    fn status(ed: &mut Editor) -> String {
+        rows(ed).pop().unwrap()
+    }
+
+    /// #195: while the reviewer reads, its session says so wherever a working chat would — in the state (a
+    /// field of its own beside `doing`, which stays the chat's Claude: `reviewer: "reviewing"`, `· reviewing`
+    /// on the sessions line) and on its tab (`¶ reviewing`), in front and behind; once it's done, nowhere.
+    #[test]
+    fn a_session_says_its_reviewer_is_reading() {
+        let (dir, repo) = place("state");
+        let mut ed = Editor::new(crate::config::Config::default());
+        fake(&mut ed, &dir, &[result("No findings.")]);
+        reading(&mut ed, &repo);
+        let other = other_session(&mut ed, &dir);
+        let said = |ed: &Editor| {
+            let st = ed.ui_state();
+            (st.json()["sessions"].clone(), st.text())
+        };
+        // In front
+        let (s, text) = said(&ed);
+        assert_eq!((&s[0]["doing"], &s[0]["reviewer"]), (&json!("idle"), &json!("reviewing")), "{s}");
+        assert!(s[1].get("reviewer").is_none(), "{s}");
+        assert!(text.contains("s0 author (front) · idle · reviewing   s1 other · idle\n"), "{text}");
+        assert!(tabs(&mut ed).contains("author ¶ reviewing │ other │ +"));
+        // Behind
+        assert!(ed.session_switch(other));
+        let (s, text) = said(&ed);
+        assert_eq!((&s[0]["doing"], &s[0]["reviewer"]), (&json!("idle"), &json!("reviewing")), "{s}");
+        assert!(text.contains("s0 author · idle · reviewing   s1 other (front)"), "{text}");
+        let row = tabs(&mut ed);
+        assert!(row.contains("author ¶ reviewing │ other │ +"), "{row}");
+        // Done: said nowhere
+        settle_until(&mut ed, |ed| !author(ed).reviewer.as_ref().unwrap().reading());
+        let (s, text) = said(&ed);
+        assert!(s[0].get("reviewer").is_none(), "{s}");
+        assert!(!text.contains("reviewing"), "{text}");
+        assert!(!tabs(&mut ed).contains("reviewing"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #195: a reviewer that ends while its session is behind is news there: an inbox item saying how many
+    /// findings and that `space v r` reads them, a `•` on its tab. `C-q` goes there, as to anything in the
+    /// inbox — where it's said, and the item and the mark go.
+    #[test]
+    fn a_reviewer_ending_behind_is_in_the_inbox_and_on_its_tab() {
+        let (dir, repo) = place("behind");
+        let mut ed = Editor::new(crate::config::Config::default());
+        let args = json!({"path": "a.txt", "line": 2, "text": "This line is new; is it tested?"});
+        let note = mcp_call("p1", 1, "tools/call", json!({"name": "note", "arguments": args}));
+        fake(&mut ed, &dir, &[note, result("One finding.")]);
+        reading(&mut ed, &repo);
+        let other = other_session(&mut ed, &dir);
+        assert!(ed.session_switch(other));
+        assert!(ed.inbox().is_empty(), "it reads: nothing yet");
+        settle_until(&mut ed, |ed| !author(ed).reviewer.as_ref().unwrap().reading());
+        let inbox = ed.inbox();
+        assert_eq!(inbox.len(), 1, "{inbox:?}");
+        let e = &inbox[0];
+        assert_eq!((e.id.as_str(), e.session.as_str(), e.kind), ("reviewer#s0", "s0", "reviewer"));
+        assert!(e.asks.contains("1 finding") && e.asks.contains("space v r reads"), "{}", e.asks);
+        let st = ed.ui_state();
+        assert_eq!(st.json()["inbox"][0]["id"], "reviewer#s0");
+        let row = tabs(&mut ed);
+        assert!(row.contains("author • │ other │ +"), "{row}");
+        // News, not a question: no `▲ waiting` on the status line, nor in a card's count — its `•` says it
+        // (the chip's `•1` with the chat closed)
+        assert_eq!(ed.cards_waiting(), (0, 0));
+        assert!(!status(&mut ed).contains("waiting"), "{}", status(&mut ed));
+        let chat = ed.session.chat.take();
+        let line = status(&mut ed);
+        assert!(line.contains("other •1") && !line.contains("waiting"), "{line}");
+        ed.session.chat = chat;
+        // C-q: to it — said there; the item and the mark gone
+        ed.handle_key("C-q".parse().unwrap());
+        assert_eq!(ed.session.id, 0);
+        let toasts = ed.ui_state().toasts;
+        assert!(
+            toasts.iter().any(|t| t.text.starts_with("the reviewer is done: 1 finding")),
+            "said where you are: {toasts:?}"
+        );
+        assert!(ed.inbox().is_empty(), "{:?}", ed.inbox());
+        assert!(ed.session_switch(other));
+        let row = tabs(&mut ed);
+        assert!(row.contains("author │ other │ +"), "{row}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #195: one that stopped behind says why in its inbox item.
+    #[test]
+    fn a_reviewer_stopping_behind_says_why() {
+        let (dir, repo) = place("stopped");
+        let mut ed = Editor::new(crate::config::Config::default());
+        let failed = json!({"type": "result", "is_error": true, "result": "Reached the maximum turns (60)"});
+        fake(&mut ed, &dir, &[failed]);
+        reading(&mut ed, &repo);
+        let other = other_session(&mut ed, &dir);
+        assert!(ed.session_switch(other));
+        settle_until(&mut ed, |ed| !author(ed).reviewer.as_ref().unwrap().reading());
+        let inbox = ed.inbox();
+        assert_eq!(inbox.len(), 1, "{inbox:?}");
+        assert!(inbox[0].asks.contains("stopped: Reached the maximum turns (60)"), "{}", inbox[0].asks);
+        assert!(tabs(&mut ed).contains("author • │ other │ +"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The author's conversation never reaches the reviewer: no `--resume`/`--continue` (taken out of

@@ -2173,6 +2173,20 @@ impl Editor {
         } else {
             self.toast_wake()
         };
+        // The reviewer reading, its time on the review rail drawn last frame: a frame as each second turns
+        let reviewer = self
+            .session
+            .reviewer
+            .as_ref()
+            .filter(|rv| rv.reading() && self.screen.rail_w > 0)
+            .filter(|rv| self.session.code_review.as_ref().is_some_and(|r| r.started == rv.of))
+            .map(|rv| {
+                let into = rv.started.elapsed().subsec_nanos();
+                std::time::Duration::from_nanos(1_000_000_000 - u64::from(into))
+                    + std::time::Duration::from_millis(2)
+            })
+            .filter(|_| !self.unfocused);
+        let next = [next, reviewer].into_iter().flatten().min();
         // An element flashing (a link followed): one frame when its flash is over, to take it away
         let flash = self.ui_flash.as_ref().and_then(|(_, at)| {
             let left = crate::uistate::claude::FLASH.checked_sub(at.elapsed())?;
