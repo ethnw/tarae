@@ -590,28 +590,40 @@ fn save(dir: &Path, root: &Path, s: Stored) {
 
 /// The turns as they are now, kept (the texts are written out on a worker).
 pub(crate) fn keep(ed: &Editor) {
-    if let Some(save) = saving(ed) {
+    keep_of(ed, &ed.session);
+}
+
+/// `keep` for session `l` — one that's ending (out of the editor already) too.
+pub(crate) fn keep_of(ed: &Editor, l: &crate::session::Session) {
+    if let Some(save) = saving(l) {
         ed.events.jobs().background(save);
     }
+}
+
+/// The turns kept for the checkout in `root` forgotten (its session ended, the checkout removed) — written
+/// over with none, later than any save of its still on its way (on a worker).
+pub(crate) fn forget(ed: &Editor, root: PathBuf) {
+    let Some(dir) = ed.turns_dir.clone() else { return };
+    let none = Stored { seq: crate::chats::seq(), ..Default::default() };
+    ed.events.jobs().background(move || save(&dir, &root, none));
 }
 
 /// `keep`, then `then` on the main loop once it's written (at once when nothing is kept — tests, or
 /// before `restore` has them back).
 fn keep_then(ed: &mut Editor, then: impl FnOnce(&mut Editor) + Send + 'static) {
-    let Some(save) = saving(ed) else { return then(ed) };
+    let Some(save) = saving(&ed.session) else { return then(ed) };
     ed.events.jobs().spawn(move || {
         save();
         then
     });
 }
 
-/// Writing the turns as they are now (for a worker) — None when they aren't kept.
-fn saving(ed: &Editor) -> Option<impl FnOnce() + Send + 'static> {
-    let dir = ed.session.checkpoints.dir.clone()?;
-    let root = ed.session.root.clone();
-    let list = &ed.session.checkpoints.list;
-    let question = ed
-        .session
+/// Writing session `l`'s turns as they are now (for a worker) — None when they aren't kept.
+fn saving(l: &crate::session::Session) -> Option<impl FnOnce() + Send + 'static> {
+    let dir = l.checkpoints.dir.clone()?;
+    let root = l.root.clone();
+    let list = &l.checkpoints.list;
+    let question = l
         .chat
         .as_ref()
         .and_then(|c| c.msgs.iter().rev().find(|m| m.role == crate::chat::Role::User))
@@ -619,19 +631,25 @@ fn saving(ed: &Editor) -> Option<impl FnOnce() + Send + 'static> {
         .unwrap_or_default();
     let s = Stored {
         list: list[list.len().saturating_sub(KEEP)..].to_vec(),
-        turn: ed.session.checkpoints.turn.clone(),
+        turn: l.checkpoints.turn.clone(),
         question,
         seq: crate::chats::seq(),
     };
     Some(move || save(&dir, &root, s))
 }
 
-/// At startup: the project's kept turns come back (read on a worker), before any made since. A turn
-/// tarae ended in the middle of becomes a checkpoint of its own, its files as they are now.
+/// `restore_from` the front session's own `dir` (tests set one; nothing is kept until they're back).
+#[cfg(test)]
 pub fn restore(ed: &mut Editor) {
-    // (nothing is kept until they're back — a save before would write over them)
     let Some(dir) = ed.session.checkpoints.dir.take() else { return };
-    let root = ed.session.root.clone();
+    restore_from(ed, dir, ed.session.root.clone());
+}
+
+/// As a session is made (`Editor::session_kept_back`): the kept turns of the checkout in `root` come back
+/// from `dir` (read on a worker), before any made since, into the session the editor's results are for now
+/// — its `dir` set once they're back (a save before would write over them). A turn tarae ended in the
+/// middle of becomes a checkpoint of its own, its files as they are now.
+pub fn restore_from(ed: &Editor, dir: PathBuf, root: PathBuf) {
     ed.events.jobs().spawn(move || {
         let back = dir.clone();
         let mut s = load(&dir, &root);
@@ -722,5 +740,55 @@ mod tests {
         assert_eq!(rebase("new\n", "", "new\n"), (String::new(), 0));
         // (the user's line right after them touches them: all stays)
         assert_eq!(rebase("x\ny\nz\n", "", "x\ny\nz\nmine\n"), ("x\ny\nz\nmine\n".to_string(), 1));
+    }
+
+    /// Wave 3, gap 2: a session behind (back at a start, or opened again) kept its turns nowhere it read —
+    /// its first turn saved a list of one over the ones kept for its checkout. Its kept turns come back into
+    /// it first, and a turn made meanwhile goes after them, on disk too.
+    #[test]
+    fn a_session_behind_keeps_its_turns_across_a_start() {
+        use super::*;
+        let dir = std::env::temp_dir().join(format!("tarae-turns-behind-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        for p in ["front", "back"] {
+            std::fs::create_dir_all(dir.join(p)).unwrap();
+        }
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let (front, back, store) = (dir.join("front"), dir.join("back"), dir.join("turns"));
+        let turn = |q: &str| {
+            let path = back.join("a.txt");
+            let (before, after) = (Some(Rope::from_str("one\n")), Rope::from_str("two\n"));
+            Checkpoint::new(q.into(), vec![Touched { path, before, after, ..Default::default() }])
+        };
+        // Kept by an earlier tarae for the checkout behind
+        let earlier = Stored {
+            list: vec![turn("first"), turn("second")],
+            seq: crate::chats::seq(),
+            ..Default::default()
+        };
+        save(&store, &back, earlier);
+        let mut ed = Editor::new(crate::config::Config::default());
+        (ed.session.root, ed.turns_dir) = (front, Some(store.clone()));
+        let id = ed.session_add(back.clone());
+        // A turn there right away, before anything else came
+        ed.with_session(id, |ed| {
+            ed.session.checkpoints.list.push(turn("third"));
+            keep(ed);
+        });
+        let questions = |l: &[Checkpoint]| l.iter().map(|c| c.question.clone()).collect::<Vec<_>>();
+        let want = ["first", "second", "third"];
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let here = questions(&ed.session_by_id(id).unwrap().checkpoints.list);
+            let kept = questions(&load(&store, &back).list);
+            if here == want && kept == want {
+                break;
+            }
+            assert!(std::time::Instant::now() < end, "in the session {here:?} · kept {kept:?}");
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(10)) {
+                ed.handle_event(ev);
+            }
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

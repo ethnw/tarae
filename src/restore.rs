@@ -69,7 +69,7 @@ impl State {
         Some((p.first()?.as_u64()? as usize, p.get(1)?.as_u64()? as usize))
     }
 
-    /// Notes saved for this folder (`notes::restore` reads them).
+    /// Notes saved for this folder (`notes::restore_in` reads them).
     pub fn notes(&self, cwd: &Path) -> Vec<Value> {
         self.root
             .get("notes")
@@ -77,6 +77,19 @@ impl State {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// The notes of the session in `cwd` as they are now — what `notes` gives from here on (a session ended
+    /// and opened again in the same run), and what's written on quit.
+    pub fn set_notes(&mut self, cwd: &Path, notes: Vec<Value>) {
+        let Some(cwd) = cwd.to_str() else { return };
+        let saved = self.root.entry("notes").or_insert_with(|| json!({}));
+        if let Some(map) = saved.as_object_mut() {
+            match notes.is_empty() {
+                true => map.remove(cwd),
+                false => map.insert(cwd.to_string(), Value::Array(notes)),
+            };
+        }
     }
 
     /// The files last open in this folder: (files, index being viewed).
@@ -141,7 +154,25 @@ impl Editor {
     /// On quit: record open files' positions and the files open in this folder.
     pub fn save_restore(&mut self) {
         let Some(f) = file() else { return };
-        let notes = crate::notes::to_json(self);
+        self.restore_record();
+        if let Some(dir) = f.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let body = Value::Object(self.restore.root.clone()).to_string();
+        let _ = crate::disk::write_atomic(&f, |w| w.write_all(body.as_bytes()));
+    }
+
+    /// What `save_restore` writes, put in `self.restore` (tests read it back from there).
+    fn restore_record(&mut self) {
+        // (every session's notes, each under its own checkout)
+        let notes: Vec<(PathBuf, Vec<Value>)> = self
+            .sessions_in_order()
+            .iter()
+            .map(|l| (l.root.clone(), crate::notes::to_json(&l.notes, &self.docs)))
+            .collect();
+        for (cwd, notes) in notes {
+            self.restore.set_notes(&cwd, notes);
+        }
         let opened = self.restore.opened;
         let folder = self.session.root.to_str().map(str::to_string);
         let root = &mut self.restore.root;
@@ -167,14 +198,6 @@ impl Editor {
         }
         root.insert("seq".into(), json!(seq));
         if let Some(cwd) = folder.as_deref() {
-            let saved = root.entry("notes").or_insert_with(|| json!({}));
-            if let Some(map) = saved.as_object_mut() {
-                if notes.is_empty() {
-                    map.remove(cwd);
-                } else {
-                    map.insert(cwd.to_string(), Value::Array(notes));
-                }
-            }
             let files: Vec<&str> = self.docs.iter().filter_map(|d| d.path.as_ref()?.to_str()).collect();
             let folders = root.entry("folders").or_insert_with(|| json!({}));
             if let Some(map) = folders.as_object_mut() {
@@ -185,11 +208,6 @@ impl Editor {
                 }
             }
         }
-        if let Some(dir) = f.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let body = Value::Object(root.clone()).to_string();
-        let _ = crate::disk::write_atomic(&f, |w| w.write_all(body.as_bytes()));
     }
 }
 
@@ -253,6 +271,48 @@ mod tests {
         assert_eq!(ed.doc().path.as_deref(), Some(a.as_path()), "saved current = a, not shifted by gone.txt");
         let doc_c = ed.docs.iter().find(|d| d.path.as_deref() == Some(c.as_path())).unwrap();
         assert_eq!(doc_c.selection().primary().head, 0, "cluster start");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Wave 3, gap 1: the notes of a session behind (a review's drafts too) were saved only for the front's
+    /// folder — gone on every quit and restart. Each session's are kept under its own checkout, and come back
+    /// in its session when it does (`sessions_back` → `session_add`), none in another's.
+    #[test]
+    fn notes_of_a_session_behind_outlive_a_quit() {
+        use crate::notes::{By, Note};
+        let dir = std::env::temp_dir().join(format!("tarae-restore-notes-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        for p in ["front", "back"] {
+            std::fs::create_dir_all(dir.join(p)).unwrap();
+            std::fs::write(dir.join(p).join("a.txt"), "one\ntwo\n").unwrap();
+        }
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let (front, back) = (dir.join("front"), dir.join("back"));
+        let mut ed = Editor::new(crate::config::Config::default());
+        ed.session.root = front.clone();
+        crate::notes::add(&mut ed, &front.join("a.txt"), 0..1, By::Claude, "in front");
+        let id = ed.session_add(back.clone());
+        ed.with_session(id, |ed| {
+            crate::notes::add(ed, &back.join("a.txt"), 1..2, By::Claude, "behind");
+            // (a review's draft, not sent yet)
+            let n = ed.session.notes.list.last_mut().unwrap();
+            n.thread.push(crate::notes::Entry { by: By::You, text: "my draft".into(), draft: true });
+        });
+        ed.restore_record();
+        let kept = State::from_json(Value::Object(ed.restore.root.clone()));
+        drop(ed);
+        // The next start: the front's at once (`main.rs`), the one behind as its session comes back
+        let mut ed = Editor::new(crate::config::Config::default());
+        ed.session.root = front.clone();
+        ed.restore = kept;
+        ed.session_kept_back(0);
+        let id = ed.session_add(back.clone());
+        let gists = |l: &[Note]| l.iter().map(|n| n.gist().to_string()).collect::<Vec<_>>();
+        assert_eq!(gists(&ed.session.notes.list), ["in front"]);
+        let behind = &ed.sessions.iter().find(|l| l.id == id).unwrap().notes.list;
+        assert_eq!(gists(behind), ["behind"], "its own, in its own session");
+        assert_eq!((behind[0].lines.clone(), behind[0].path.clone()), (1..2, back.join("a.txt")));
+        assert!(behind[0].thread.get(1).is_some_and(|e| e.draft && e.text == "my draft"), "the draft too");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

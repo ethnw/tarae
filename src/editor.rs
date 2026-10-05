@@ -529,6 +529,8 @@ pub struct Editor {
     pub git_auto: bool,
     /// Where the chat's conversations are kept (`chats.rs`) — None in tests (they set a temp dir).
     pub chats_dir: Option<std::path::PathBuf>,
+    /// Where Claude's turns are kept (`checkpoint.rs`), every session's — None in tests (they set a temp dir).
+    pub turns_dir: Option<std::path::PathBuf>,
     /// The sessions kept per repository, and whether they're back (`worktree.rs`).
     pub session_store: crate::worktree::SessionStore,
     /// The project file's held-back settings and the answer about them (`trust.rs`).
@@ -636,6 +638,7 @@ impl Editor {
         };
         let events = Queue::default();
         let saver = crate::saver::Saver::new(events.shared_sender());
+        let turns_dir = if cfg!(test) { None } else { crate::checkpoint::default_dir() };
         let mut ed = Self {
             docs: Vec::new(),
             current: 0,
@@ -721,6 +724,7 @@ impl Editor {
             git_diffing: false,
             git_auto: !cfg!(test),
             chats_dir: if cfg!(test) { None } else { crate::chats::default_dir() },
+            turns_dir,
             session_store: crate::worktree::SessionStore {
                 dir: if cfg!(test) { None } else { crate::worktree::default_dir() },
                 cargo: if cfg!(test) { None } else { crate::worktree::CargoAsk::real() },

@@ -1052,7 +1052,12 @@ pub fn wide_toggle(ed: &mut Editor) {
 
 /// Whether `space n` writes drafts: a review is open, or drafts are waiting to go.
 pub fn drafting(ed: &Editor) -> bool {
-    ed.session.code_review.is_some() || ed.session.notes.list.iter().any(|n| n.thread.iter().any(|e| e.draft))
+    drafting_in(&ed.session)
+}
+
+/// `drafting` in session `l`, in front or behind.
+pub fn drafting_in(l: &crate::session::Session) -> bool {
+    l.code_review.is_some() || l.notes.list.iter().any(|n| n.thread.iter().any(|e| e.draft))
 }
 
 /// The lines around a note as a diff against the review's base: context, `-` removed, `+` added.

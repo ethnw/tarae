@@ -194,10 +194,7 @@ impl Session {
             docs: Vec::new(),
             chat: None,
             notes: Default::default(),
-            checkpoints: crate::checkpoint::Checkpoints {
-                dir: if cfg!(test) { None } else { crate::checkpoint::default_dir() },
-                ..Default::default()
-            },
+            checkpoints: Default::default(),
             review: None,
             code_review: None,
             review_ask: false,
@@ -704,6 +701,7 @@ impl Editor {
         session.views.push(View::new(view, doc));
         (session.current_doc, session.scratch, session.docs) = (doc, Some(doc), vec![doc]);
         self.sessions.push(session);
+        self.session_kept_back(id);
         // (its checkout joins its repository's shared language server now — `share.rs`)
         self.share_session(&root);
         if self.git_auto {
@@ -713,6 +711,20 @@ impl Editor {
             self.events.set_session(self.session.id);
         }
         id
+    }
+
+    /// What session `id`'s checkout kept from last time, back in it: Claude's notes, and its turns (read on a
+    /// worker — nothing of them is written until they're back, or its first turn would write over them).
+    /// Each session's once: session 0's at start (`main.rs` — in front or, after a restart, maybe behind),
+    /// the others' as they're made.
+    pub fn session_kept_back(&mut self, id: SessionId) {
+        crate::notes::restore_in(self, id);
+        let root = std::iter::once(&self.session).chain(&self.sessions).find(|l| l.id == id).map(|l| &l.root);
+        if let (Some(root), Some(dir)) = (root.cloned(), self.turns_dir.clone()) {
+            self.events.set_session(id);
+            crate::checkpoint::restore_from(self, dir, root);
+            self.events.set_session(self.session.id);
+        }
     }
 
     /// `:session-switch <n>` — session `id` to the front. What was up over the one in front closes (a

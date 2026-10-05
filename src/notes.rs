@@ -9,9 +9,9 @@
 //!   The message goes to the chat with the lines and the thread; Claude answers with `reply_to` — if it
 //!   answers in plain text, that text goes into the thread. `]n`/`[n` walk notes, `space N` lists them,
 //!   `:note-close` drops the one here.
-//! - Kept per project in the restore file (`restore.rs`, written on quit — `to_json`, read at start — `restore`). A note
-//!   remembers its first line's text: if the file changed while tarae was closed, it re-anchors on the nearest
-//!   line with that text when the file opens.
+//! - Kept per session, under its checkout, in the restore file (`restore.rs`, written on quit — `to_json`, read
+//!   as the session is made — `restore_in`). A note remembers its first line's text: if the file changed while
+//!   tarae was closed, it re-anchors on the nearest line with that text when the file opens.
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -119,11 +119,13 @@ pub fn add(ed: &mut Editor, path: &Path, lines: Range<usize>, by: By, text: &str
 
 /// Every event: open documents get marks for their notes, and every note's lines follow its mark.
 pub fn attach(ed: &mut Editor) {
-    if ed.session.notes.list.is_empty() {
-        return;
-    }
     let Editor { session, docs, .. } = ed;
-    for n in &mut session.notes.list {
+    attach_in(&mut session.notes, docs);
+}
+
+/// `attach` for one session's notes.
+fn attach_in(notes: &mut Notes, docs: &mut [crate::document::Document]) {
+    for n in &mut notes.list {
         match n
             .at
             .and_then(|(d, m)| docs.iter().find(|doc| doc.id == d).and_then(|doc| Some((doc, doc.mark(m)?))))
@@ -176,14 +178,14 @@ fn nearest_line(text: &ropey::Rope, line: usize, want: &str) -> isize {
     0
 }
 
-/// Notes as saved in the restore file: path, lines, the first line's text, the thread.
-pub fn to_json(ed: &Editor) -> Vec<Value> {
-    ed.session.notes
+/// A session's notes as saved in the restore file: path, lines, the first line's text, the thread.
+pub fn to_json(notes: &Notes, docs: &[crate::document::Document]) -> Vec<Value> {
+    notes
         .list
         .iter()
         .map(|n| {
             let anchor = n.anchor.clone().or_else(|| {
-                let doc = ed.docs.iter().find(|d| d.path.as_deref() == Some(n.path.as_path()))?;
+                let doc = docs.iter().find(|d| d.path.as_deref() == Some(n.path.as_path()))?;
                 (n.lines.start < doc.text.len_lines())
                     .then(|| doc.text.line(n.lines.start).to_string().trim().to_string())
             });
@@ -197,13 +199,16 @@ pub fn to_json(ed: &Editor) -> Vec<Value> {
         .collect()
 }
 
-/// At start: this folder's (the root's) notes from last time.
-pub fn restore(ed: &mut Editor) {
-    let saved = ed.restore.notes(&ed.session.root);
-    restore_from(ed, saved);
+/// Session `id`'s notes from last time, kept for its checkout — session 0's at start, each other one's as
+/// it's made (`session_add`: back at a start or a restart, or opened again).
+pub fn restore_in(ed: &mut Editor, id: crate::event::SessionId) {
+    let Editor { session, sessions, docs, restore, .. } = ed;
+    let Some(s) = std::iter::once(session).chain(sessions.iter_mut()).find(|l| l.id == id) else { return };
+    let saved = restore.notes(&s.root);
+    restore_from(&mut s.notes, docs, saved);
 }
 
-fn restore_from(ed: &mut Editor, saved: Vec<Value>) {
+fn restore_from(notes: &mut Notes, docs: &mut [crate::document::Document], saved: Vec<Value>) {
     for v in saved {
         let (Some(path), Some(lines)) = (v["path"].as_str(), v["lines"].as_array()) else { continue };
         let (Some(a), Some(b)) =
@@ -223,9 +228,9 @@ fn restore_from(ed: &mut Editor, saved: Vec<Value>) {
         if thread.is_empty() || !Path::new(path).is_file() {
             continue;
         }
-        ed.session.notes.next += 1;
-        ed.session.notes.list.push(Note {
-            id: ed.session.notes.next,
+        notes.next += 1;
+        notes.list.push(Note {
+            id: notes.next,
             path: PathBuf::from(path),
             at: None,
             lines: a as usize..(b as usize).max(a as usize + 1),
@@ -234,7 +239,7 @@ fn restore_from(ed: &mut Editor, saved: Vec<Value>) {
             anchor: v["anchor"].as_str().map(str::to_string),
         });
     }
-    attach(ed);
+    attach_in(notes, docs);
 }
 
 /// Marks notes point at (the jump list's pruning keeps them).
@@ -516,7 +521,7 @@ mod tests {
         ed.open(&f).unwrap();
         tool_call(&mut ed, &json!({"path": f, "line": 3, "text": "look here"})).unwrap();
         tool_call(&mut ed, &json!({"reply_to": 1, "text": "and here"})).unwrap();
-        let mut saved = to_json(&ed);
+        let mut saved = to_json(&ed.session.notes, &ed.docs);
         assert_eq!(saved[0]["anchor"], "target();");
         // Edited outside tarae: two lines above
         std::fs::write(&f, "x\ny\na\nb\ntarget();\nc\n").unwrap();
@@ -524,7 +529,7 @@ mod tests {
             json!({"path": f, "lines": [50, 52], "anchor": "gone", "thread": [["claude", "past the end"]]}),
         );
         let mut ed = editor();
-        restore_from(&mut ed, saved);
+        restore_from(&mut ed.session.notes, &mut ed.docs, saved);
         assert_eq!(ed.session.notes.list.len(), 2);
         ed.open(&f).unwrap();
         attach(&mut ed);

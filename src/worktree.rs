@@ -1507,6 +1507,10 @@ impl Editor {
                         if let Some(id) = card {
                             ed.offer_finished(id, Ok(()));
                         }
+                        // (its notes and turns go with its checkout — a session made there later starts
+                        // without them)
+                        ed.restore.set_notes(&e.root, Vec::new());
+                        crate::checkpoint::forget(ed, e.root.clone());
                         let branch = match (&e.branch, both) {
                             (Some(b), false) => format!(" · branch {b} kept"),
                             (Some(b), true) => {
@@ -1592,6 +1596,11 @@ impl Editor {
         let i = self.sessions.iter().position(|l| l.id == id)?;
         let session = self.sessions.remove(i);
         let kept = Kept::of(&session);
+        // What it has now is what opening it again in this run brings back (`session_kept_back`): its notes
+        // where the restore reads them (with its files still open, for their anchors), its turns written
+        let notes = crate::notes::to_json(&session.notes, &self.docs);
+        self.restore.set_notes(&session.root, notes);
+        crate::checkpoint::keep_of(self, &session);
         let shown_elsewhere = |ed: &Editor, d| {
             std::iter::once(&ed.session).chain(&ed.sessions).any(|l| l.views.iter().any(|v| v.doc == d))
         };
@@ -2126,6 +2135,45 @@ mod tests {
         // The checkout tarae started in stays
         feed(&mut ed, ":session-end<ret>");
         assert!(says(&ed, "is the checkout tarae started in — it stays"), "{}", said(&ed));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An ended session's notes and turns go with its checkout: a session made later at the same path, in
+    /// the same run, starts without them.
+    #[test]
+    fn an_ended_sessions_notes_and_turns_go_with_it() {
+        use crate::checkpoint::{Checkpoint, Touched};
+        let (repo, dir) = place("forget");
+        let store = dir.join("turns");
+        let mut ed = editor(&repo, &dir);
+        ed.turns_dir = Some(store.clone());
+        let wt = new_session(&mut ed, "gone");
+        settle_until(&mut ed, |ed| ed.session.checkpoints.dir.is_some());
+        crate::notes::add(&mut ed, &wt.join("a.txt"), 0..1, crate::notes::By::Claude, "a note");
+        let (before, after) = (Some(ropey::Rope::from_str("one\n")), ropey::Rope::from_str("two\n"));
+        let t = Touched { path: wt.join("a.txt"), before, after, ..Default::default() };
+        ed.session.checkpoints.list.push(Checkpoint::new("a turn".into(), vec![t]));
+        crate::checkpoint::keep(&ed);
+        let kept = |n: usize| crate::checkpoint::load(&store, &wt).list.len() == n;
+        let wait = |what: &str, done: &dyn Fn() -> bool| {
+            let end = Instant::now() + Duration::from_secs(5);
+            while !done() {
+                assert!(Instant::now() < end, "{what}");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        wait("its turn kept", &|| kept(1));
+        feed(&mut ed, ":session-end<ret>");
+        settle_until(&mut ed, |ed| says(ed, "Ended gone") || says(ed, "end gone:"));
+        assert!(!wt.exists(), "{}", said(&ed));
+        wait("its turns forgotten", &|| kept(0));
+        // Another checkout at the same path, a session for it
+        git_in(&repo, &["worktree", "add", "-q", wt.to_str().unwrap(), "gone"]);
+        let id = ed.session_open(&wt).unwrap();
+        settle_until(&mut ed, |ed| ed.session.id == id && ed.session.checkpoints.dir.is_some());
+        assert!(ed.session.notes.list.is_empty(), "no note back: {:?}", ed.session.notes.list);
+        assert!(ed.session.checkpoints.list.is_empty(), "no turn back");
+        git_in(&repo, &["worktree", "remove", "--force", wt.to_str().unwrap()]);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -3366,6 +3414,60 @@ mod tests {
         let ed = start(false);
         assert_eq!(told(&ed), 0, "said once");
         drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A session ended and opened again in the same run (an end that failed opens it again) comes back as it
+    /// was when it ended — not as the startup file had it: a note removed since stays removed, its turns
+    /// come back once.
+    #[test]
+    fn a_session_opened_again_is_as_it_ended() {
+        use crate::checkpoint::{Checkpoint, Touched};
+        let dir = std::env::temp_dir().join(format!("tarae-sessions-again-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join("back")).unwrap();
+        let dir = std::fs::canonicalize(dir).unwrap();
+        let (back, store) = (dir.join("back"), dir.join("turns"));
+        let file = back.join("a.txt");
+        std::fs::write(&file, "one\ntwo\n").unwrap();
+        let mut ed = editor(&dir, &dir);
+        ed.turns_dir = Some(store.clone());
+        // At startup the restore file had two notes for it
+        let note = |line: usize, text: &str| json!({ "path": file, "lines": [line, line + 1], "thread": [["claude", text, false]] });
+        let notes = json!({ back.to_str().unwrap(): [note(0, "keep me"), note(1, "remove me")] });
+        ed.restore = crate::restore::State::from_json(json!({ "notes": notes }));
+        let id = ed.session_add(back.clone());
+        let turns_back = |ed: &mut Editor, id| {
+            settle_until(ed, |ed| {
+                std::iter::once(&ed.session)
+                    .chain(&ed.sessions)
+                    .any(|l| l.id == id && l.checkpoints.dir.is_some())
+            })
+        };
+        turns_back(&mut ed, id);
+        // A turn (not written yet), and one note removed
+        ed.with_session(id, |ed| {
+            let (before, after) = (Some(ropey::Rope::from_str("one\n")), ropey::Rope::from_str("two\n"));
+            let t = Touched { path: file.clone(), before, after, ..Default::default() };
+            ed.session.checkpoints.list.push(Checkpoint::new("a turn".into(), vec![t]));
+            ed.session.notes.list.retain(|n| n.gist() != "remove me");
+        });
+        // Ended: what it had is written as it goes — then back (as a failed end brings it back)
+        let kept = ed.session_close(&back).expect("closed");
+        assert!(ed.sessions.is_empty());
+        let end = Instant::now() + Duration::from_secs(5);
+        while crate::checkpoint::load(&store, &back).list.is_empty() {
+            assert!(Instant::now() < end, "its turns written as it ended");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        ed.sessions_back(vec![kept], Vec::new(), None, false);
+        let id = ed.sessions[0].id;
+        turns_back(&mut ed, id);
+        let l = &ed.sessions[0];
+        let gists: Vec<&str> = l.notes.list.iter().map(|n| n.gist()).collect();
+        assert_eq!(gists, ["keep me"], "the removed note stays removed");
+        let turns: Vec<&str> = l.checkpoints.list.iter().map(|c| c.question.as_str()).collect();
+        assert_eq!(turns, ["a turn"], "once");
         std::fs::remove_dir_all(&dir).ok();
     }
 

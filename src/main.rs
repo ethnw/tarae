@@ -260,10 +260,10 @@ fn main() -> Result<()> {
     if !editor.session_store.restored {
         editor.sessions_restore();
     }
-    // Claude's notes from last time in this folder (the open files get them right away)
-    notes::restore(&mut editor);
-    // Claude's turns here, for `space u` and `space v t` (a restart's, or ones a crash cut short)
-    checkpoint::restore(&mut editor);
+    // Claude's notes from last time in this folder (the open files get them right away), and its turns, for
+    // `space u` and `space v t` (a restart's, or ones a crash cut short) — the checkout tarae started in;
+    // the other sessions' came back with them
+    editor.session_kept_back(0);
     // Unsaved edits a tarae that's gone kept (a crash, a kill) — a card each (`recovery.rs`)
     editor.recovery_scan();
     if !files.is_empty() {

@@ -115,10 +115,7 @@ pub fn start(ed: &mut Editor, build: bool) -> Result<(), String> {
         ed.set_status("restart canceled");
         return Ok(());
     }
-    // (a turn's files still being read belong to it)
-    let in_turn =
-        ed.session.chat.as_ref().is_some_and(crate::chat::Chat::busy) || ed.session.checkpoints.gathering;
-    blocker(ed, in_turn).map_or(Ok(()), |why| Err(format!("can't restart: {why}")))?;
+    blocker(ed, true).map_or(Ok(()), |why| Err(format!("can't restart: {why}")))?;
     static NEXT: AtomicU64 = AtomicU64::new(1);
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
     ed.restart = Some(Restart { id, build, stage: Stage::Turn, target: None });
@@ -164,10 +161,11 @@ pub fn sync(ed: &mut Editor) {
     }
 }
 
-/// What keeps tarae from restarting now, in words. Files that can be saved don't — `go` saves them. While
-/// Claude's turn is in flight (`in_turn`), what belongs to it — its edit's review, its command, its tests —
-/// doesn't either: the turn is waited for. A shell open in the terminal doesn't: it's started again by hand.
-fn blocker(ed: &Editor, in_turn: bool) -> Option<String> {
+/// What keeps tarae from restarting now, in words — in any session, named when there are several. Files
+/// that can be saved don't — `go` saves them. While a session's Claude is in a turn (`waiting`: at
+/// `:restart`, which waits for every turn), what belongs to the turn — its edit's review, its command, its
+/// tests — doesn't either. A shell open in the terminal doesn't: it's started again by hand.
+fn blocker(ed: &Editor, waiting: bool) -> Option<String> {
     let stuck: Vec<String> = ed
         .docs
         .iter()
@@ -184,32 +182,46 @@ fn blocker(ed: &Editor, in_turn: bool) -> Option<String> {
     if rebasing.is_some() {
         return rebasing;
     }
+    let several = !ed.sessions.is_empty();
+    let in_session = ed.sessions_in_order().into_iter().find_map(|l| {
+        let why = session_blocker(l, waiting)?;
+        Some(if several { format!("{}: {why}", l.label()) } else { why })
+    });
+    if in_session.is_some() {
+        return in_session;
+    }
+    if ed.dap.as_ref().is_some_and(|d| !matches!(d.state, crate::dap::State::Exited(_))) {
+        return Some("a debug run is on — end it first (space G t)".into());
+    }
+    None
+}
+
+/// `blocker`'s part in session `l`, front or behind.
+fn session_blocker(l: &crate::session::Session, waiting: bool) -> Option<String> {
+    // (a turn's files still being read belong to it)
+    let in_turn =
+        waiting && (l.chat.as_ref().is_some_and(crate::chat::Chat::busy) || l.checkpoints.gathering);
     let claudes = |yes: bool| in_turn && yes;
-    if ed.session.review.is_some()
-        && !claudes(ed.session.chat.as_ref().is_some_and(|c| c.edits.review.is_some()))
-    {
+    if l.review.is_some() && !claudes(l.chat.as_ref().is_some_and(|c| c.edits.review.is_some())) {
         return Some("a review is open — answer it first".into());
     }
-    if crate::codereview::drafting(ed) {
+    if crate::codereview::drafting_in(l) {
         return Some("a code review is open — send it (space v s) or end it (space v q) first".into());
     }
     // (saved, it would come back as a plain file — `:wq` no longer committing)
-    if ed.session.committing.is_some() {
+    if l.committing.is_some() {
         return Some("a commit message is open — :wq commits it, :q drops it".into());
     }
     let running = crate::task::State::Running;
-    if let Some(r) = ed.session.task_run.as_ref().filter(|r| r.state == running && !claudes(r.by_claude)) {
+    if let Some(r) = l.task_run.as_ref().filter(|r| r.state == running && !claudes(r.by_claude)) {
         return Some(match r.install {
             true => format!("{} is installing — let it finish", r.task.name),
             false => format!("{} is running — let it finish, or stop it (space m c)", r.task.name),
         });
     }
     let testing = crate::testing::RunState::Running;
-    if ed.session.test_run.as_ref().is_some_and(|r| r.state == testing && !claudes(r.chat.is_some())) {
+    if l.test_run.as_ref().is_some_and(|r| r.state == testing && !claudes(r.chat.is_some())) {
         return Some("tests are running — let them finish, or stop them (space x c)".into());
-    }
-    if ed.dap.as_ref().is_some_and(|d| !matches!(d.state, crate::dap::State::Exited(_))) {
-        return Some("a debug run is on — end it first (space G t)".into());
     }
     None
 }
@@ -1261,6 +1273,59 @@ mod tests {
         let mut ed = Editor::new(Config::default());
         restore(&mut ed, &json!({ "terminal": true }));
         assert!(toasts(&ed).contains("Restarted · the terminal starts afresh (space T)"), "{}", toasts(&ed));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Wave 3, gap 3: only the front session's were looked at — a task or tests running behind were killed by
+    /// the exec without a word, a commit message or a review open there lost. Every session's stop it now,
+    /// named; with nothing in the way anywhere, it goes on.
+    #[test]
+    fn whats_running_in_a_session_behind_stops_the_restart_by_name() {
+        let dir = temp("blocked-behind");
+        let bin = fake_tarae(&dir, "tarae 9.9.9");
+        let mut ed = editing(&dir, "", &bin);
+        let back = dir.join("fix-login");
+        std::fs::create_dir_all(&back).unwrap();
+        std::fs::write(back.join("b.txt"), "one\n").unwrap();
+        let id = ed.session_add(back.clone());
+        let try_it = |ed: &mut Editor, why: &str| {
+            let err = crate::typed::execute(ed, "restart!").unwrap_err();
+            assert!(err.contains(&format!("fix-login: {why}")), "{err}");
+            assert!(ed.restart.is_none());
+        };
+        // A task, tests
+        let task = crate::task::Task { name: "slow".into(), cmd: "sleep 5".into(), cwd: back.clone() };
+        let mut run = crate::task::Run::for_test(task);
+        run.state = crate::task::State::Running;
+        ed.session_by_id(id).unwrap().task_run = Some(run);
+        try_it(&mut ed, "slow is running — let it finish, or stop it (space m c)");
+        ed.session_by_id(id).unwrap().task_run = None;
+        let mut tests = crate::testing::TestRun::finished("tests", Vec::new(), Vec::new());
+        tests.state = crate::testing::RunState::Running;
+        ed.session_by_id(id).unwrap().test_run = Some(tests);
+        try_it(&mut ed, "tests are running");
+        ed.session_by_id(id).unwrap().test_run = None;
+        // A commit message, an edit's review, a code review
+        let doc = ed.doc().id;
+        ed.session_by_id(id).unwrap().committing =
+            Some(crate::gitpanel::Committing { doc, top: back.clone(), amend: false, then_end: false });
+        try_it(&mut ed, "a commit message is open");
+        ed.session_by_id(id).unwrap().committing = None;
+        ed.with_session(id, |ed| {
+            ed.open(&back.join("b.txt")).unwrap();
+            let doc = ed.doc().id;
+            crate::llm::review_with(ed, doc, "x", vec![(0, 3, "one".into(), "uno".into())], None);
+        });
+        assert!(ed.session_by_id(id).unwrap().review.is_some());
+        try_it(&mut ed, "a review is open");
+        ed.session_by_id(id).unwrap().review = None;
+        let review = crate::codereview::CodeReview::for_test(crate::codereview::Base::Head, back, Vec::new());
+        ed.session_by_id(id).unwrap().code_review = Some(review);
+        try_it(&mut ed, "a code review is open");
+        ed.session_by_id(id).unwrap().code_review = None;
+        // Nothing anywhere: on its way
+        crate::typed::execute(&mut ed, "restart!").unwrap();
+        assert!(ed.restart.is_some());
         std::fs::remove_dir_all(&dir).ok();
     }
 
