@@ -1327,6 +1327,12 @@ impl Editor {
     /// and `y` deletes it if it hasn't moved since. Never the one you're on, nor one checked out in another
     /// worktree. `reopen`: the branch picker comes back after (it was open).
     pub fn git_branch_delete(&mut self, name: &str, reopen: bool) {
+        self.git_branch_delete_asking(name, reopen, false);
+    }
+
+    /// `git_branch_delete` — `always`: the card even with nothing only on it (its delete asked again after
+    /// `:restart` was never answered: asking again never acts).
+    pub fn git_branch_delete_asking(&mut self, name: &str, reopen: bool, always: bool) {
         let name = name.to_string();
         let n = name.clone();
         self.git_branch_job(
@@ -1342,7 +1348,7 @@ impl Editor {
                     .trim()
                     .to_string();
                 let lost = only_on(top, &n)?;
-                if !lost.is_empty() {
+                if !lost.is_empty() || always {
                     return Ok((top.to_path_buf(), Deleting::Ask { tip, lost }));
                 }
                 git(top, &hooks::with(pre, &["branch", "-D", "--", &n]), None)?;
@@ -1360,13 +1366,17 @@ impl Editor {
                 }
                 Ok((top, Deleting::Ask { tip, lost })) => {
                     let n = lost.len();
-                    let question = format!(
-                        "{} on no other branch or tag:{}\nGone with it — git's reflog keeps {} a while.\nA \
-                         squash merge on a forge looks unmerged here.",
-                        if n == 1 { "This commit is".to_string() } else { format!("These {n} commits are") },
-                        commit_rows(&lost),
-                        if n == 1 { "it" } else { "them" },
-                    );
+                    let question = match n {
+                        // (asked again after `:restart` — nothing only on it by now, asked all the same)
+                        0 => "Its commits are on another branch or tag too — nothing is lost with it.".into(),
+                        _ => format!(
+                            "{} on no other branch or tag:{}\nGone with it — git's reflog keeps {} a while.\nA \
+                             squash merge on a forge looks unmerged here.",
+                            if n == 1 { "This commit is".to_string() } else { format!("These {n} commits are") },
+                            commit_rows(&lost),
+                            if n == 1 { "it" } else { "them" },
+                        ),
+                    };
                     let rows = n.min(COMMITS_SHOWN + 1);
                     let o = crate::offer::Offer::new(
                         format!("Delete {name}?"),
@@ -1375,7 +1385,7 @@ impl Editor {
                         "Delete".into(),
                         crate::offer::What::BranchDelete { top, branch: name, tip },
                     )
-                    .deciding(1..1 + rows);
+                    .deciding(if n == 0 { 0..1 } else { 1..1 + rows });
                     ed.push_offer(o);
                 }
                 Err(e) => ed.set_error(format!("delete: {e}")),

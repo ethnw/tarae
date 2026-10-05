@@ -370,6 +370,15 @@ it builds in and at what commit — `Restart into main's build (1085db8)?` — t
 session in front, `f` builds that one's instead. If the build leaves the binary as it was and it's older than
 that checkout's commit, a card says so rather than restarting into the same tarae (`y` restarts anyway).
 
+Cards waiting for you come back as well as they can. One a command of yours raised — the preflight's first run,
+ending a session, bringing one, deleting a branch — is asked again by that command in its session, with fresh
+checks, and always on its card — nothing runs or goes until you answer it, even if by then nothing would be lost
+or the project has checks of its own. One
+whose cause runs again (a grammar to download, a plugin's permissions, the project's settings, unsaved
+edits a gone tarae kept) comes back by itself. The rest are a moment's decision about something live — a force
+push, hooks about to run, closing a buffer under review — and the restart's card names them, with their session,
+so you can answer them first.
+
 Some things don't come along. A shell in the terminal panel (`space T`) ends; the new tarae says so, naming the
 session when it's one behind, and `space T` starts a fresh one. Language servers start again, so a large project is indexed again before
 go-to-definition and the like answer. The turns `space u` can take back and Claude's notes come back, each in

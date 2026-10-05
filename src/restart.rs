@@ -404,8 +404,32 @@ fn ask(ed: &mut Editor, id: u64, targets: Vec<Target>) {
             says(o).replace("\n  ", " ").replace('\n', " ")
         ));
     }
+    // The cards waiting that won't come back (a moment's decision about something live), by session — in
+    // the warning colour, before the answer
+    let lost: Vec<String> = ed
+        .sessions_in_order()
+        .into_iter()
+        .flat_map(|l| {
+            cards_of(ed, l)
+                .filter(|o| o.what.over_restart() == crate::offer::OverRestart::Lost)
+                .map(|o| format!("  {} ({})", o.title, l.label()))
+        })
+        .collect();
+    let mut warned = None;
+    if !lost.is_empty() {
+        let from = q.split('\n').count() + 1;
+        q.push_str(&format!(
+            "\n\nWon't come back — answer it first, or ask again after:\n{}",
+            lost.join("\n")
+        ));
+        warned = Some(from..q.split('\n').count());
+    }
     let what = crate::offer::What::Restart(Box::new(Choice { id, targets }));
-    ed.push_offer(crate::offer::Offer::new(title, &q, "Restarting…", "Not restarting".into(), what));
+    let mut o = crate::offer::Offer::new(title, &q, "Restarting…", "Not restarting".into(), what);
+    if let Some(lines) = warned {
+        o = o.warning(lines);
+    }
+    ed.push_offer(o);
 }
 
 /// The answer on its card: build in (or run) `targets[which]` — None calls it off.
@@ -725,6 +749,16 @@ pub fn snapshot(ed: &mut Editor) -> Value {
         if let (Some(block), Value::Object(fields)) = (block.as_object_mut(), session_json(l, &own, current))
         {
             block.extend(fields);
+            // (its cards a command asks again — the rest come back by themselves, or were named on the card)
+            let again: Vec<Value> = cards_of(ed, l)
+                .filter_map(|o| match o.what.over_restart() {
+                    crate::offer::OverRestart::Again(line) => Some(json!({ "again": line })),
+                    _ => None,
+                })
+                .collect();
+            if !again.is_empty() {
+                block.insert("cards".into(), Value::Array(again));
+            }
         }
     }
     if let Some(top) = state.as_object_mut() {
@@ -737,6 +771,15 @@ pub fn snapshot(ed: &mut Editor) -> Value {
         ]);
     }
     state
+}
+
+/// Session `l`'s cards waiting: those up (and stacked) when it's in front, those parked when it's behind.
+fn cards_of<'a>(
+    ed: &'a Editor,
+    l: &'a crate::session::Session,
+) -> impl Iterator<Item = &'a crate::offer::Offer> {
+    let up = if l.id == ed.session.id { ed.offers.as_slice() } else { &[] };
+    up.iter().chain(&l.parked)
 }
 
 /// A document that comes along: a file — not a scratch, a review's deleted file, a `jdt://` class, or one
@@ -890,17 +933,44 @@ fn restore_quietly(ed: &mut Editor, v: &Value) -> Back {
         let mut found: Vec<(SessionId, String, &Value)> =
             blocks.into_iter().filter_map(|b| at(ed, b).map(|(id, name)| (id, name, b))).collect();
         crate::sorting::by_key(&mut found, |(id, ..)| *id == front);
-        for (id, name, b) in found {
-            let behind = id != front;
-            ed.with_session(id, |ed| restore_session(ed, b, behind, &mut back));
+        for (id, name, b) in &found {
+            let behind = *id != front;
+            ed.with_session(*id, |ed| restore_session(ed, b, behind, &mut back));
             if b["terminal"].as_bool() == Some(true) {
-                back.shells.push(behind.then_some(name));
+                back.shells.push(behind.then(|| name.clone()));
+            }
+        }
+        // Its cards asked again — each by its command, in its session, once every session is back (fresh
+        // checks; a card that comes is parked there as any card behind)
+        for (id, name, b) in &found {
+            for line in b["cards"].as_array().into_iter().flatten().filter_map(|c| c["again"].as_str()) {
+                let mut failed = None;
+                ed.with_session(*id, |ed| failed = ask_again(ed, line).err());
+                if let Some(why) = failed {
+                    ed.set_warning(format!("{name}: :{line} not asked again — {why}"));
+                }
             }
         }
     }
     back.gone_checkouts = gone;
     back.sessions = 1 + ed.sessions.len();
     back
+}
+
+/// A card's command run again (`OverRestart::Again`) — it was never answered, so it only ever asks: an end
+/// or a delete with nothing to lose by now is asked on its card all the same, not done at once.
+fn ask_again(ed: &mut Editor, line: &str) -> Result<(), String> {
+    match line.split_once(' ') {
+        Some(("session-end", which)) => ed.session_end_asking(which, true),
+        Some(("git-branch-delete", branch)) => {
+            ed.git_branch_delete_asking(branch, false, true);
+            Ok(())
+        }
+        None if line == "preflight" => ed.preflight_start_asking(crate::preflight::Set::Quick, true),
+        None if line == "preflight-full" => ed.preflight_start_asking(crate::preflight::Set::Full, true),
+        // (`:session-bring` asks on its card first, whatever it finds)
+        _ => crate::typed::execute(ed, line),
+    }
 }
 
 /// One session's files, panes, side panel and chat back (`session_json`, or an earlier build's top-level
@@ -2111,6 +2181,195 @@ mod tests {
         let why = blocked(&ed).expect("stopped");
         assert!(why.starts_with("front: a review of Claude's turn is open"), "{why}");
         drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Wave 3, point 10: a card of tarae's a command raised comes back after the restart by being asked
+    /// again — the command run anew in its session (fresh checks), its card parked there as any card behind.
+    /// Here the git tab's delete of a branch with commits on no other, asked in a session behind.
+    #[test]
+    fn a_cards_command_asks_again_after_restart() {
+        use crate::offer::What;
+        let (front, back, dir, mut ed) = two_sessions("again");
+        let git = |args: &[&str]| crate::gitmenu::git(&back, args, None).unwrap();
+        repo(&back);
+        git(&["checkout", "-q", "-b", "side"]);
+        std::fs::write(back.join("a.txt"), "only on side\n").unwrap();
+        git(&["commit", "-q", "-am", "side"]);
+        git(&["checkout", "-q", "main"]);
+        let id = ed.session_add(back.clone());
+        ed.with_session(id, |ed| crate::typed::execute(ed, "git-branch-delete side").unwrap());
+        let asked = |ed: &Editor| {
+            session_at(ed, &back).parked.iter().any(|o| matches!(o.what, What::BranchDelete { .. }))
+        };
+        settle_until(&mut ed, asked);
+        let state = snapshot(&mut ed);
+        let block =
+            state["sessions"]["sessions"].as_array().unwrap().iter().find(|b| b["root"] == json!(back));
+        assert_eq!(
+            block.unwrap()["cards"],
+            json!([{ "again": "git-branch-delete side" }]),
+            "how to ask again"
+        );
+        drop(ed);
+        let mut ed = started_in(&dir, &front);
+        restore(&mut ed, &state);
+        settle_until(&mut ed, asked);
+        assert!(
+            ed.offers.iter().all(|o| !matches!(o.what, What::BranchDelete { .. })),
+            "behind, not in front"
+        );
+        assert_eq!(git(&["branch", "--list", "side"]).trim(), "side", "asked, nothing deleted");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A card asked again was never answered: asking again never acts. The branch merged meanwhile — its
+    /// commits on another now, so `:git-branch-delete` would delete it at once — still gets its card.
+    #[test]
+    fn a_branch_delete_asked_again_asks_even_when_nothing_would_be_lost() {
+        use crate::offer::What;
+        let (front, back, dir, mut ed) = two_sessions("again-merged");
+        let git = |args: &[&str]| crate::gitmenu::git(&back, args, None).unwrap();
+        repo(&back);
+        git(&["checkout", "-q", "-b", "side"]);
+        std::fs::write(back.join("a.txt"), "only on side\n").unwrap();
+        git(&["commit", "-q", "-am", "side"]);
+        git(&["checkout", "-q", "main"]);
+        let id = ed.session_add(back.clone());
+        ed.with_session(id, |ed| crate::typed::execute(ed, "git-branch-delete side").unwrap());
+        let asked = |ed: &Editor| {
+            session_at(ed, &back).parked.iter().any(|o| matches!(o.what, What::BranchDelete { .. }))
+        };
+        settle_until(&mut ed, asked);
+        let state = snapshot(&mut ed);
+        drop(ed);
+        // Meanwhile: merged — nothing would be lost now
+        git(&["merge", "-q", "--ff-only", "side"]);
+        let mut ed = started_in(&dir, &front);
+        restore(&mut ed, &state);
+        let gone = || git(&["branch", "--list", "side"]).trim().is_empty();
+        settle_until(&mut ed, |ed| asked(ed) || gone());
+        assert!(!gone(), "deleted without its card");
+        assert!(asked(&ed));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// …and a session whose end was asked, with nothing to lose by the time the restart lands (its change
+    /// gone meanwhile — `:session-end` would end it at once), still gets its card.
+    #[test]
+    fn a_session_end_asked_again_asks_even_when_nothing_would_be_lost() {
+        use crate::offer::What;
+        let (front, _, dir, mut ed) = two_sessions("again-end");
+        let git = |d: &Path, args: &[&str]| crate::gitmenu::git(d, args, None).unwrap();
+        repo(&front);
+        let wt = dir.join("wt");
+        git(&front, &["worktree", "add", "-q", "-b", "wt", wt.to_str().unwrap()]);
+        let id = ed.session_add(wt.clone());
+        ed.session_by_id(id).unwrap().base = Some("main".into());
+        // Something to lose: a new file
+        std::fs::write(wt.join("new.txt"), "mine\n").unwrap();
+        crate::typed::execute(&mut ed, "session-end wt").unwrap();
+        let asked = |ed: &Editor| ed.offers.iter().any(|o| matches!(o.what, What::SessionEnd(_)));
+        settle_until(&mut ed, asked);
+        let state = snapshot(&mut ed);
+        drop(ed);
+        // Meanwhile: gone — nothing to lose now
+        std::fs::remove_file(wt.join("new.txt")).unwrap();
+        let mut ed = started_in(&dir, &front);
+        restore(&mut ed, &state);
+        let ended =
+            |ed: &Editor| ed.messages.iter().any(|m| m.2.contains("Ended wt") || m.2.contains("end wt:"));
+        settle_until(&mut ed, |ed| asked(ed) || ended(ed));
+        assert!(wt.exists() && !ended(&ed), "ended without its card");
+        assert!(asked(&ed));
+        drop(ed);
+        git(&front, &["worktree", "remove", "--force", wt.to_str().unwrap()]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// …and the preflight's first-run card, with the project given trusted steps of its own meanwhile —
+    /// `:preflight` would run them at once — is asked on its card all the same, nothing run.
+    #[test]
+    fn a_preflight_asked_again_asks_even_when_it_would_just_run() {
+        use crate::offer::{Offer, What};
+        use crate::preflight::{Set, Step};
+        let (front, _, dir, mut ed) = two_sessions("again-preflight");
+        let step = |name: &str, cmd: &str, from: &str| Step {
+            name: name.into(),
+            cmd: cmd.into(),
+            note: None,
+            from: from.into(),
+            full: false,
+        };
+        let steps = vec![step("check", "true", "rust pack")];
+        let what = What::Preflight { root: front.clone(), steps, set: Set::Quick };
+        ed.push_offer(Offer::new("Run these checks?".into(), "…", "", String::new(), what));
+        let state = snapshot(&mut ed);
+        drop(ed);
+        // Meanwhile: the project's own steps, trusted (a stand-in: a marker in the test's folder)
+        let marker = dir.join("ran");
+        let mut ed = started_in(&dir, &front);
+        ed.config.preflight = vec![step("mine", &format!("touch '{}'", marker.display()), ".tarae.toml")];
+        restore(&mut ed, &state);
+        let asked = |ed: &Editor| ed.offers.iter().any(|o| matches!(o.what, What::Preflight { .. }));
+        settle_until(&mut ed, |ed| asked(ed) || ed.session.task_run.is_some());
+        assert!(ed.session.task_run.is_none() && !marker.exists(), "ran without its card");
+        let o = ed.offers.iter().find(|o| matches!(o.what, What::Preflight { .. })).unwrap();
+        assert!(o.question.contains("touch"), "the steps it would run: {}", o.question);
+        // `y` there runs them
+        ed.offer_accept();
+        settle_until(&mut ed, |ed| ed.session.task_run.is_some());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// …and a card that can't come back (a moment's decision about something live) is named on the restart's
+    /// card, with its session, before it's answered — those asked again by their command and those that come
+    /// back by themselves aren't.
+    #[test]
+    fn the_restart_card_names_what_wont_come_back() {
+        use crate::offer::{Offer, What};
+        let (front, back, dir, mut ed) = two_sessions("lost");
+        let id = ed.session_add(back.clone());
+        let card = |title: &str, what| Offer::new(title.into(), "…", "", String::new(), what);
+        ed.push_offer(card("Close a.txt?", What::CloseReviewed { doc: 0, force: false }));
+        let tip = "0".repeat(40);
+        ed.push_offer(card(
+            "Delete side?",
+            What::BranchDelete { top: front.clone(), branch: "side".into(), tip },
+        ));
+        let ended = What::ReviewEnd { session: id, started: std::time::Instant::now() };
+        ed.session_by_id(id).unwrap().parked.push(card("End the review?", ended));
+        // (a run of Claude's held after its last made a protected name: its job isn't run again blind)
+        let made = What::ProtectedMade {
+            job: crate::tools::Job::Command("make".into(), back.clone()),
+            call: crate::tools::Call::test(1),
+            ride: Box::default(),
+            made: vec!["Makefile".into()],
+        };
+        ed.session_by_id(id).unwrap().parked.push(card("Run it after it made Makefile?", made));
+        ed.restart = Some(Restart { id: 7, build: false, stage: Stage::Finding, target: None });
+        let t = Target {
+            label: "front".into(),
+            root: front.clone(),
+            bin: dir.join("tarae"),
+            head: None,
+            head_time: None,
+            bin_time: None,
+        };
+        ask(&mut ed, 7, vec![t]);
+        let o = ed.offers.iter().find(|o| matches!(o.what, What::Restart(_))).expect("the restart's card");
+        let q = &o.question;
+        assert!(
+            q.ends_with(
+                "Won't come back — answer it first, or ask again after:\n  Close a.txt? (front)\n  End the \
+                 review? (back)\n  Run it after it made Makefile? (back)"
+            ),
+            "{q}"
+        );
+        assert!(!q.contains("Delete side?"), "asked again by its command: {q}");
+        let lines: Vec<&str> = q.split('\n').collect();
+        let warned = o.warning.clone().expect("in the warning colour");
+        assert!(lines[warned].iter().all(|l| l.contains("come back") || l.ends_with(')')), "{q}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

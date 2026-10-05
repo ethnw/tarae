@@ -528,6 +528,11 @@ impl Ending {
         let mut lines: Vec<String> = Vec::new();
         let mut decided = 0..0;
         let n = self.changed.len();
+        // (asked again after `:restart` — nothing to lose by now, asked all the same)
+        if self.quiet() {
+            lines.push(format!("Nothing would be lost — no changes, every commit in {}.", self.base));
+            decided = 0..1;
+        }
         if n > 0 {
             lines.push(format!(
                 "{}, in no commit yet:",
@@ -1252,6 +1257,12 @@ impl Editor {
     /// kept), else the card. Never the checkout tarae started in; not while files of it are unsaved or its
     /// Claude is answering.
     pub fn session_end(&mut self, which: &str) -> Result<(), String> {
+        self.session_end_asking(which, false)
+    }
+
+    /// `session_end` — `always`: the card even with nothing to lose (its end asked again after `:restart`
+    /// was never answered: asking again never acts).
+    pub fn session_end_asking(&mut self, which: &str, always: bool) -> Result<(), String> {
         let (id, name) = self.session_named(which)?;
         if id == 0 {
             return Err(format!("{name} is the checkout tarae started in — it stays"));
@@ -1279,7 +1290,7 @@ impl Editor {
         let n = name.clone();
         let work = move || ending(n, &root, base, &start);
         self.step(self.events.shared_jobs(), "session", said, work, move |ed, found| match found {
-            Ok(e) if e.quiet() => ed.session_remove(e, false, None),
+            Ok(e) if e.quiet() && !always => ed.session_remove(e, false, None),
             Ok(e) => ed.push_offer(e.card()),
             Err(e) => ed.set_error(format!("end {name}: {e}")),
         });

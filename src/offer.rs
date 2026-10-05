@@ -158,6 +158,59 @@ pub enum What {
     Stuck(Box<crate::stuck::Stuck>),
 }
 
+/// What becomes of a card waiting at `:restart` (`restart.rs`). Claude's can't be there — the restart waits
+/// for every turn, and their calls end with it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum OverRestart {
+    /// Asked again after it by the command that raised it (`:` line, run in its session): a fresh card, with
+    /// fresh checks.
+    Again(String),
+    /// It comes back by itself — what raises it runs again in the new tarae (a grammar shown, a plugin
+    /// loaded, the project's settings read, a copy found) — or it's the restart's own.
+    ByItself,
+    /// A moment's decision about something live: gone — named on the restart's card, to answer first.
+    Lost,
+}
+
+impl What {
+    pub fn over_restart(&self) -> OverRestart {
+        use OverRestart::*;
+        match self {
+            What::Preflight { set: crate::preflight::Set::Quick, .. } => Again("preflight".into()),
+            What::Preflight { set: crate::preflight::Set::Full, .. } => Again("preflight-full".into()),
+            What::SessionEnd(e) => Again(format!("session-end {}", e.name)),
+            What::Rebase(m) | What::Rebased(m) | What::UpTo(m) => Again(format!("session-bring {}", m.name)),
+            What::BranchDelete { branch, .. } => Again(format!("git-branch-delete {branch}")),
+            What::Grammars { .. }
+            | What::Fetch { .. }
+            | What::Install { .. }
+            | What::PluginPermissions { .. }
+            | What::PluginAsk { .. }
+            | What::ProjectTrust { .. }
+            | What::Recover(_)
+            | What::Restart(_)
+            | What::RestartSame { .. } => ByItself,
+            What::ForcePush(_)
+            | What::Hooks(_)
+            | What::Grant { .. }
+            | What::Outside { .. }
+            | What::CloseReviewed { .. }
+            | What::ReviewEnd { .. }
+            | What::SessionNew(_)
+            | What::RebaseResolved { .. }
+            // (Claude's: a run's job can't be run again blind — its call ends with the turn)
+            | What::Run(_)
+            | What::NoSandbox { .. }
+            | What::ProtectedMade { .. }
+            | What::ReviewAtEnd
+            | What::Read { .. }
+            | What::Screen { .. }
+            | What::ChangeSet { .. }
+            | What::Stuck(_) => Lost,
+        }
+    }
+}
+
 /// A call of Claude's waiting on a card for the user's answer (`Session.asking`): the card, how the call is
 /// answered, and what the card asks (its title). Taken off when the user answers the card or the turn
 /// ends; a card gone otherwise was lost, and the call is told so (`Editor::asking_sync`, #94) — never a

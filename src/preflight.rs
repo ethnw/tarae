@@ -428,6 +428,12 @@ impl Editor {
     /// looked for on a worker), then `.tarae.local.toml`'s, those of `set` run in the task panel. Err: why
     /// not now.
     pub fn preflight_start(&mut self, set: Set) -> Result<(), String> {
+        self.preflight_start_asking(set, false)
+    }
+
+    /// `preflight_start` — `always`: on its card whatever the steps are (its card asked again after
+    /// `:restart` was never answered: asking again never runs anything).
+    pub fn preflight_start_asking(&mut self, set: Set, always: bool) -> Result<(), String> {
         self.preflight_free()?;
         // The project's own, held back until it's trusted: not the packs' instead
         if self.config_project_held("preflight.") {
@@ -435,7 +441,13 @@ impl Editor {
         }
         let (project, local) = (self.config.preflight.clone(), self.config.preflight_local.clone());
         if !project.is_empty() {
-            return self.preflight_run([project, local].concat(), set);
+            let steps = [project, local].concat();
+            if always {
+                let root = self.preflight_root();
+                self.preflight_ask(root, steps, set, false);
+                return Ok(());
+            }
+            return self.preflight_run(steps, set);
         }
         let root = self.preflight_root();
         self.events.jobs().spawn(move || {
@@ -446,7 +458,7 @@ impl Editor {
                     ed.session.bring_after_preflight = false;
                     ed.set_error(format!("no preflight steps — {why}"));
                 }
-                _ => ed.preflight_found(root, packs.steps, local, set),
+                _ => ed.preflight_found_asking(root, packs.steps, local, set, always),
             }
         });
         Ok(())
@@ -464,12 +476,27 @@ impl Editor {
 
     /// The packs' default steps for `root` came (none: not a kind of project they know), with yours after:
     /// the first time in a project, a card says what will run, and that it runs the project's code.
+    #[cfg(test)]
     pub(crate) fn preflight_found(
         &mut self,
         root: std::path::PathBuf,
         packs: Vec<Step>,
         local: Vec<Step>,
         set: Set,
+    ) {
+        self.preflight_found_asking(root, packs, local, set, false);
+    }
+
+    /// The packs' default steps for `root` came (none: not a kind of project they know), with yours after:
+    /// the first time in a project, a card says what will run, and that it runs the project's code —
+    /// `always`: on the card even when told already, or with no defaults among them.
+    fn preflight_found_asking(
+        &mut self,
+        root: std::path::PathBuf,
+        packs: Vec<Step>,
+        local: Vec<Step>,
+        set: Set,
+        always: bool,
     ) {
         if packs.is_empty() && local.is_empty() {
             self.session.bring_after_preflight = false;
@@ -480,24 +507,43 @@ impl Editor {
         }
         let defaults = !packs.is_empty();
         let steps = [packs, local].concat();
-        if defaults && !self.preflight_told.contains(&root) {
-            let question = format!("{}\n\n{DEFAULTS_SAY}\n{DEFAULTS_REPLACED}", shown(&set.of(&steps)));
-            // (what yes means — the project's code runs — in the warning color)
-            let last = question.split('\n').count() - 2;
-            let o = crate::offer::Offer::new(
-                "Run these checks?".into(),
-                &question,
-                "running",
-                "didn't start".into(),
-                crate::offer::What::Preflight { root, steps, set },
-            )
-            .warning(last..last + 1);
-            return self.push_offer(o);
+        if always || (defaults && !self.preflight_told.contains(&root)) {
+            return self.preflight_ask(root, steps, set, defaults);
         }
         if let Err(e) = self.preflight_run(steps, set) {
             self.session.bring_after_preflight = false;
             self.set_error(e);
         }
+    }
+
+    /// The card before `steps` run (`y` runs them): the packs' defaults (`defaults`) say they run the
+    /// project's code; others, asked again after `:restart`, say why they're asked.
+    fn preflight_ask(&mut self, root: std::path::PathBuf, steps: Vec<Step>, set: Set, defaults: bool) {
+        let what = crate::offer::What::Preflight { root, steps: steps.clone(), set };
+        let shown = shown(&set.of(&steps));
+        if !defaults {
+            let question = format!("{shown}\n\nAsked again after :restart — it hadn't been answered.");
+            let o = crate::offer::Offer::new(
+                "Run these checks?".into(),
+                &question,
+                "running",
+                "didn't start".into(),
+                what,
+            );
+            return self.push_offer(o);
+        }
+        let question = format!("{shown}\n\n{DEFAULTS_SAY}\n{DEFAULTS_REPLACED}");
+        // (what yes means — the project's code runs — in the warning color)
+        let last = question.split('\n').count() - 2;
+        let o = crate::offer::Offer::new(
+            "Run these checks?".into(),
+            &question,
+            "running",
+            "didn't start".into(),
+            what,
+        )
+        .warning(last..last + 1);
+        self.push_offer(o);
     }
 
     /// `y` on that card: run, and no card again for this project until quit.
