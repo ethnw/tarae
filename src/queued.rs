@@ -73,12 +73,15 @@ pub enum What {
     Task(crate::task::Task),
     /// The user's tests.
     Tests(crate::testing::Target),
+    /// A session's rebase the user asked for (`rebase.rs`, #188): looked at again when its turn comes
+    /// (`stash`: its changes go into git's autostash).
+    Rebase { moved: Box<crate::rebase::Moved>, stash: bool },
 }
 
 impl What {
     pub fn slot(&self) -> Slot {
         match self {
-            What::Guarded { job: Job::Command(..), .. } | What::Task(_) => Slot::Task,
+            What::Guarded { job: Job::Command(..), .. } | What::Task(_) | What::Rebase { .. } => Slot::Task,
             What::Guarded { job: Job::Tests(_), .. } | What::Tests(_) => Slot::Tests,
         }
     }
@@ -113,6 +116,7 @@ impl What {
             }
             What::Task(t) => crate::task::traced(&t.name),
             What::Tests(t) => format!("tests {}", t.label),
+            What::Rebase { moved, .. } => format!("rebase {} onto {}", moved.branch, moved.base),
         }
     }
 }
@@ -276,6 +280,7 @@ fn push_at(ed: &mut Editor, mut what: What, front: bool, trace: Option<crate::tr
         crate::trace::RunTrace::new(match &what {
             What::Task(t) => format!("task: {}", t.name),
             What::Tests(t) => format!("tests: {}", t.label),
+            What::Rebase { .. } => label.clone(),
             What::Guarded { .. } => format!("{label}: run again"),
         })
     });
@@ -334,6 +339,11 @@ fn start(ed: &mut Editor, next: Next) {
         }
         What::Task(t) => ed.task_start_now(t, false, Some(next.trace)),
         What::Tests(t) => ed.test_start_now(t, false, Some(next.trace)),
+        // (its git run carries its own trace)
+        What::Rebase { moved, stash } => {
+            next.trace.end("its turn: the checkout looked at again");
+            ed.rebase_check(*moved, stash)
+        }
     }
 }
 

@@ -1438,10 +1438,15 @@ impl Editor {
             })
             .map(|d| d.id)
             .collect();
+        let had: Vec<crate::lsp::ClientId> =
+            self.docs.iter().filter(|d| gone.contains(&d.id)).flat_map(|d| d.lsp.clients()).collect();
+        let root = session.root.clone();
         drop(session);
         for d in gone {
             self.close_doc(d);
         }
+        // (its servers with them — #190)
+        self.lsp_stop_ended(&root, &had);
         self.sessions_keep();
         Some(kept)
     }
@@ -2184,11 +2189,13 @@ mod tests {
     }
 
     /// #141: an ended session's files close — those in its checkout and one outside it that only it had open
-    /// — and their servers stop soon after; a file outside it another session has open stays.
+    /// — and #190: their servers stop with it, not after the wait for a file reopened (its checkout is going;
+    /// marksman and taplo ran on), their processes gone; one whose file closed earlier too. A file outside it
+    /// another session has open stays, and its server.
     #[test]
     fn an_ended_sessions_servers_stop_with_it() {
         let (repo, dir) = place("servers");
-        std::fs::write(repo.join(".git/info/exclude"), "notes.md\n").unwrap();
+        std::fs::write(repo.join(".git/info/exclude"), "notes.md\nCargo.toml\n").unwrap();
         for d in ["elsewhere", "shared"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
             std::fs::write(dir.join(d).join("config.toml"), "x = 1\n").unwrap();
@@ -2208,16 +2215,35 @@ mod tests {
             ed.open(p).unwrap();
             ed.doc().lsp.client.expect("its server")
         };
+        // (one whose file closed while another of its checkout stayed open: waiting the long wait)
         let md = server(&mut ed, &wt.join("notes.md"));
+        std::fs::write(wt.join("Cargo.toml"), "[package]\n").unwrap();
+        let early = server(&mut ed, &wt.join("Cargo.toml"));
+        let id = ed.doc().id;
+        ed.close_doc(id);
         let toml = server(&mut ed, &dir.join("elsewhere/config.toml"));
         let kept = server(&mut ed, &shared);
+        let pids: Vec<u32> = [early, md, toml].iter().filter_map(|&c| ed.client(c)?.pid()).collect();
+        assert_eq!(pids.len(), 3);
         feed(&mut ed, ":session-end<ret>");
+        // (at its end — nothing waited for)
+        settle_until(&mut ed, |ed| ed.sessions.is_empty() || says(ed, "end docs:"));
+        for (cid, what) in [(early, "its toml one"), (md, "its markdown one"), (toml, "the outside file's")] {
+            assert!(ed.client(cid).is_none(), "{what} stopped with it");
+        }
         settle_until(&mut ed, |ed| says(ed, "Ended docs") || says(ed, "end docs:"));
         assert!(says(&ed, "Ended docs"), "{}", said(&ed));
-        settle_until(&mut ed, |ed| ed.client(md).is_none() && ed.client(toml).is_none());
         let open = |p: &Path| ed.docs.iter().any(|d| d.path.as_deref() == Some(p));
         assert!(!open(&dir.join("elsewhere/config.toml")), "the file outside only it had open closed");
         assert!(open(&shared) && ed.client(kept).is_some(), "one another session has open stays");
+        // Their processes gone (killed, reaped off the main loop)
+        // SAFETY: signal 0 only asks whether the process exists; nothing is sent.
+        let gone = |pid: u32| unsafe { libc::kill(pid as i32, 0) } != 0;
+        let end = Instant::now() + Duration::from_secs(5);
+        while !pids.iter().all(|&p| gone(p)) && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(pids.iter().all(|&p| gone(p)), "their processes ended");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2571,6 +2597,10 @@ mod tests {
         settle_until(ed, |ed| card(ed, "Bring feat: main moved").is_some() || says(ed, "bring feat:"));
         assert_eq!(card_in_sight(ed), ['y', 'n'], "{}", said(ed));
         feed(ed, "y");
+        // (its checkout looked at first, on a worker — #188)
+        settle_until(ed, |ed| {
+            ed.session.rebase.is_some() || says(ed, "rebase feat:") || !ed.offers.is_empty()
+        });
         assert!(ed.session.rebase.is_some(), "under way: {}", said(ed));
     }
 
@@ -3201,6 +3231,75 @@ mod tests {
         feed(&mut ed, "X");
         settle_until(&mut ed, |ed| says(ed, "Rebase aborted") || says(ed, "rebase feat:"));
         assert_eq!(git_in(&wt, &["rev-parse", "HEAD"]), tip, "{}", said(&ed));
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #188: a rebase held back by its checkout says why before git runs — and offers what fits, not a bare
+    /// "retry". Changes in no commit: named; `s` stashes them for the rebase and puts them back after (git's
+    /// autostash), `g` shows them in the git tab. Unsaved buffers there: named, and no `s` (their text isn't
+    /// on disk). A run in the task panel: the rebase waits its turn behind it.
+    #[test]
+    fn a_rebase_held_back_says_why_and_offers_what_fits() {
+        let (repo, dir) = place("rebase-held");
+        let mut ed = editor(&repo, &dir);
+        let (wt, _) = moved_apart(&mut ed, &repo, true);
+        let held = "Rebase feat: changes in no commit";
+        let yes = |ed: &mut Editor| {
+            feed(ed, ":session-bring<ret>");
+            settle_until(ed, |ed| card(ed, "Bring feat: main moved").is_some() || says(ed, "bring feat:"));
+            assert_eq!(card_in_sight(ed), ['y', 'n'], "{}", said(ed));
+            feed(ed, "y");
+        };
+        let rebased = |ed: &mut Editor| {
+            settle_until(ed, |ed| card(ed, "Rebased feat onto main").is_some() || says(ed, "rebase feat:"));
+            assert!(says(ed, "Rebased feat onto main — 2 commits on top"), "{}", said(ed));
+            assert_eq!(git_in(&wt, &["log", "--format=%s", "main..HEAD"]), "add b\nfeat a");
+            card_in_sight(ed);
+            feed(ed, "n");
+        };
+        // Changes in no commit: named, nothing run; `s` stashes them, rebases, and puts them back
+        std::fs::write(wt.join("a.txt"), "one\nfeat\nmine\n").unwrap();
+        yes(&mut ed);
+        settle_until(&mut ed, |ed| card(ed, held).is_some() || ed.session.rebase.is_some());
+        let q = &card(&ed, held).unwrap_or_else(|| panic!("{}", said(&ed))).question;
+        assert!(q.starts_with("a.txt changed and isn't in a commit — git won't rebase feat over it."), "{q}");
+        assert!(ed.session.task_run.is_none() && ed.session.rebase.is_none(), "no git ran");
+        assert_eq!(card_in_sight(&mut ed), ['s', 'g', 'n']);
+        feed(&mut ed, "s");
+        rebased(&mut ed);
+        assert!(says(&ed, "now at "), "{}", said(&ed));
+        assert!(says(&ed, "; your changes in a.txt are back"), "{}", said(&ed));
+        assert_eq!(std::fs::read_to_string(wt.join("a.txt")).unwrap(), "one\nfeat\nmine\n");
+        assert_eq!(git_in(&wt, &["stash", "list"]), "", "nothing left in the stash");
+        // Unsaved in a buffer there: named, no `s`; `g` shows the changes in the git tab
+        git_in(&wt, &["commit", "-qam", "mine"]);
+        git_in(&repo, &["commit", "-q", "--allow-empty", "-m", "main again"]);
+        ed.open(&wt.join("b.txt")).unwrap();
+        feed(&mut ed, "ix<esc>");
+        yes(&mut ed);
+        settle_until(&mut ed, |ed| card(ed, held).is_some() || ed.session.rebase.is_some());
+        let q = &card(&ed, held).unwrap_or_else(|| panic!("{}", said(&ed))).question;
+        assert!(q.starts_with("b.txt is unsaved here — save it (:w) first"), "{q}");
+        assert_eq!(card_in_sight(&mut ed), ['g', 'n']);
+        feed(&mut ed, "g");
+        assert!(card(&ed, held).is_none());
+        let git_tab = ed.session.sidebar.as_ref().map(|s| (s.mode, s.focus));
+        assert_eq!(git_tab, Some((crate::sidebar::Mode::Git, true)));
+        feed(&mut ed, ":w<ret>");
+        git_in(&wt, &["commit", "-qam", "x"]);
+        // A run in the task panel: the rebase waits behind it, and goes once it's over
+        let marker = dir.join("go");
+        let cmd = format!("while [ ! -e '{}' ]; do sleep 0.02; done", marker.display());
+        ed.task_start(crate::task::Task { name: "holder".into(), cmd, cwd: wt.clone() });
+        yes(&mut ed);
+        settle_until(&mut ed, |ed| !ed.session.runs_next.is_empty() || ed.session.rebase.is_some());
+        assert!(says(&ed, "rebase feat onto main waits behind holder"), "{}", said(&ed));
+        assert!(ed.session.rebase.is_none(), "not under way while it waits");
+        std::fs::write(&marker, "").unwrap();
+        settle_until(&mut ed, |ed| ed.session.rebase.is_some() || says(ed, "rebase feat:"));
+        settle_until(&mut ed, |ed| card(ed, "Rebased feat onto main").is_some() || says(ed, "rebase feat:"));
+        assert!(says(&ed, "Rebased feat onto main — 4 commits on top"), "{}", said(&ed));
         drop(ed);
         std::fs::remove_dir_all(&dir).ok();
     }

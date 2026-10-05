@@ -116,7 +116,10 @@ waiting and asks again after as long again. If the run prints or ends, the card 
 **News of sessions behind** is said where you are, inside tarae — no system notification, no bell. When a session
 behind starts waiting for you, or its Claude's turn ends, a toast names it: `fix-login · waits for you — C-q goes
 there`, `fix-login · turn ended — C-q goes there` (a stopped turn says `turn stopped`; a failed one, its error, as a
-warning). When something older waits elsewhere, the toast says so: `C-q goes there after 2 older`. Its tab over
+warning). Each new wait is news — a card, or an edit of Claude's to review, after an earlier wait there ended —
+and so is leaving a session with something waiting (its edit review up): it's said as it goes behind, since
+Claude waits on it and nothing else would come to say so. When something older waits elsewhere, the toast says
+so: `C-q goes there after 2 older`. Its tab over
 the chat (or the status line's chip, with the chat closed) keeps saying `▲ waits` or `done` until you look. Once
 nothing waits, `C-q` goes to the sessions whose turn ended — the first to end first — and says when. In the front
 session, a turn that ends while the chat is out of sight (something else zoomed with `C-w z`, a review read wide)
@@ -830,6 +833,12 @@ its base up to it, fast-forward only. When the base has moved since the session 
 - `y` rebases it onto its base in its checkout. tarae runs git itself (Claude's sandbox can't write `.git`), as
   `git rebase <base>` in the task panel — with hooks off: a hooks folder inside the checkout is one Claude can
   write, and this git runs outside the sandbox. A stop at conflicts reads `stopped: 2 conflicts` there, not failed
+- Before git runs, its checkout is looked at. Changes in no commit: a card names the files (`a.txt changed and
+  isn't in a commit — git won't rebase feat over it`) and offers `s` — stash them for the rebase and put them
+  back after (git's `--autostash`; if they don't go back cleanly they stay in git's stash, and the end says so)
+  — or `g`, the git tab, to commit or drop them yourself. Unsaved buffers there: named, saving them comes first
+  (no `s`). A run in the task panel: the rebase waits its turn behind it (a `queued` row there). A rebase
+  already stopped there: its card, to go on or abort. Should git refuse anyway, its own `error:` lines are said
 - Clean: a card offers to bring it now (`y`), to run the quick [`:preflight`](configuration.md#checks-before-a-push-preflight) first and bring it once that
   passes (`p` — the card names its steps; the `full = true` ones wait for `:preflight-full`, before publishing), or not now (`n`)
 - A conflict: the rebase stops, and the session's own Claude is asked in its chat to resolve the files. It's

@@ -132,6 +132,10 @@ pub enum What {
     /// Bringing a session whose base moved since it left it (`rebase.rs`): `y` rebases it onto its base
     /// first, `n` leaves it.
     Rebase(Box<crate::rebase::Moved>),
+    /// That rebase held back by its checkout — changes in no commit, buffers unsaved (`rebase.rs`, #188):
+    /// `s` stashes the changes for it and puts them back after (nothing unsaved), `g` shows them in the git
+    /// tab, `n` leaves it. No `y`: what it would do is the letter's.
+    RebaseHeld(Box<crate::rebase::Held>),
     /// A session rebased cleanly (`rebase.rs`): `y` brings it into its base, `p` runs the preflight first and
     /// brings it once that passes, `n` not now.
     Rebased(Box<crate::rebase::Moved>),
@@ -198,6 +202,8 @@ impl What {
             | What::ReviewEnd { .. }
             | What::SessionNew(_)
             | What::RebaseResolved { .. }
+            // (about the checkout as it was then — `:session-bring` looks at it afresh and raises it again)
+            | What::RebaseHeld(_)
             // (Claude's: a run's job can't be run again blind — its call ends with the turn)
             | What::Run(_)
             | What::NoSandbox { .. }
@@ -353,6 +359,7 @@ impl Offer {
                 | What::SessionEnd(_)
                 | What::ChangeSet { .. }
                 | What::Rebase(_)
+                | What::RebaseHeld(_)
                 | What::Rebased(_)
                 | What::RebaseResolved { .. }
                 | What::UpTo(_)
@@ -392,10 +399,24 @@ impl Offer {
         matches!(self.what, What::RebaseResolved { .. })
     }
 
+    /// The held rebase it asks about, if it's that card (`s` stashes, `g` shows the changes).
+    pub fn held(&self) -> Option<&crate::rebase::Held> {
+        match &self.what {
+            What::RebaseHeld(h) => Some(h),
+            _ => None,
+        }
+    }
+
+    /// Whether `s` answers it: a held rebase's card with nothing unsaved (its changes stashed for it).
+    pub fn stashes(&self) -> bool {
+        self.held().is_some_and(crate::rebase::Held::stashes)
+    }
+
     /// Whether `key` is one of its answers that only a settled card in sight takes (`y`, and the letters
     /// that do something too).
     pub fn weighty_answer(&self, c: char) -> bool {
         matches!(c, 'y' | 'a' | 'A' | 'D' | 'R' | 'c')
+            || (c == 's' && self.stashes())
             || (c == 'p' && self.preflights())
             || (c == 'X' && self.aborts())
             || (c == 'f' && self.restart_other())
@@ -534,6 +555,10 @@ impl Offer {
             W::Screen { .. } => vec![('y', "Once"), ('a', "This chat"), ('n', "No")],
             W::ReviewEnd { .. } => vec![('y', "End it"), ('n', "Keep reviewing")],
             W::Rebase(_) => vec![('y', "Rebase first"), ('n', "Leave it")],
+            W::RebaseHeld(_) if self.stashes() => {
+                vec![('s', "Stash, rebase, put back"), ('g', "Git tab"), ('n', "Leave it")]
+            }
+            W::RebaseHeld(_) => vec![('g', "Git tab"), ('n', "Leave it")],
             // (`p` runs the quick set when the project has two — the card names its steps)
             W::Rebased(_) => {
                 let p = if quick { "Quick preflight, then bring" } else { "Preflight, then bring" };
@@ -587,6 +612,7 @@ impl Offer {
             W::ChangeSet { .. } => "change-set",
             W::ReviewEnd { .. } => "review-end",
             W::Rebase(_) => "rebase",
+            W::RebaseHeld(_) => "rebase-held",
             W::Rebased(_) => "rebased",
             W::RebaseResolved { .. } => "rebase-resolved",
             W::UpTo(_) => "up-to",
@@ -761,6 +787,9 @@ impl crate::editor::Editor {
             Code::Char('A') if o.keeps() => self.offer_always(),
             Code::Char('D') if o.both() => self.offer_remove(true),
             Code::Char('p') if o.preflights() => self.offer_preflight_first(),
+            Code::Char(c @ ('s' | 'g')) if (c == 's' && o.stashes()) || (c == 'g' && o.held().is_some()) => {
+                self.offer_held(c)
+            }
             Code::Char('X') if o.aborts() => self.offer_abort(),
             Code::Char('b') if o.base_steps() => self.offer_session_base(),
             Code::Char('f') if o.restart_other() => self.offer_restart_other(),
@@ -789,6 +818,12 @@ impl crate::editor::Editor {
                 true => "its changes are in no commit — c commits them first, R removes them anyway",
                 false => "its changes are in no commit — R removes them anyway, n keeps them",
             });
+        }
+        // (a held rebase: what it'd do is the letter's — stash, or see them)
+        if let Some(h) = self.offers[0].held() {
+            let ask =
+                if h.stashes() { "s stashes them for the rebase, g shows them" } else { "g shows them" };
+            return self.offer_refused(format!("this card has no y — {ask}, n leaves it"));
         }
         // (a hook the card couldn't show isn't run on a yes)
         if matches!(&self.offers[0].what, What::Hooks(a) if !a.runnable()) {
@@ -859,6 +894,8 @@ impl crate::editor::Editor {
                 crate::codereview::close_answered(self, session, started);
             }
             What::Rebase(m) => self.rebase_start(id, *m),
+            // (refused above)
+            What::RebaseHeld(_) => self.offer_finished(id, Ok(())),
             What::Rebased(m) => {
                 self.offer_finished(id, Ok(()));
                 self.rebase_bring(*m);
@@ -912,6 +949,23 @@ impl crate::editor::Editor {
         }
         if let What::Rebased(m) = self.offers.remove(0).what {
             self.rebase_preflight_then_bring(*m);
+        }
+    }
+
+    /// `s` · `g` on a held rebase's card: its changes stashed for the rebase · shown in the git tab.
+    pub fn offer_held(&mut self, c: char) {
+        if self.offers.first().is_none_or(|o| o.held().is_none()) {
+            return;
+        }
+        let o = self.offers.remove(0);
+        o.said(self.session.label(), &c.to_string());
+        self.card_how(o.id, format!("answered {c}"));
+        self.card_answered(o.id);
+        if let What::RebaseHeld(h) = o.what {
+            match c {
+                's' => self.rebase_held_stash(*h),
+                _ => self.rebase_held_show(*h),
+            }
         }
     }
 
@@ -1240,6 +1294,9 @@ impl crate::editor::Editor {
             What::ReviewEnd { .. } => self.set_status("still reviewing — space v m marks a file viewed"),
             What::Rebase(m) => {
                 self.set_status(format!("Not rebased — {} as it is, nothing brought", m.branch))
+            }
+            What::RebaseHeld(h) => {
+                self.set_status(format!("Not rebased — {} as it is, nothing brought", h.moved.branch))
             }
             What::Rebased(m) => {
                 self.set_status(format!("Not brought — :session-bring {} when you're ready", m.name))

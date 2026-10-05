@@ -2347,6 +2347,17 @@ mod tests {
             made: vec!["Makefile".into()],
         };
         ed.session_by_id(id).unwrap().parked.push(card("Run it after it made Makefile?", made));
+        // (a rebase held back by its checkout's changes: `:session-bring` raises it again, looking afresh)
+        let moved = crate::rebase::Moved {
+            root: back.clone(),
+            name: "feat".into(),
+            branch: "feat".into(),
+            base: "main".into(),
+            moved: 1,
+            ahead: 1,
+        };
+        let held = crate::rebase::Held { moved, changed: vec!["a.txt".into()], unsaved: Vec::new() };
+        ed.session_by_id(id).unwrap().parked.push(held.card());
         ed.restart = Some(Restart { id: 7, build: false, stage: Stage::Finding, target: None });
         let t = Target {
             label: "front".into(),
@@ -2362,7 +2373,8 @@ mod tests {
         assert!(
             q.ends_with(
                 "Won't come back — answer it first, or ask again after:\n  Close a.txt? (front)\n  End the \
-                 review? (back)\n  Run it after it made Makefile? (back)"
+                 review? (back)\n  Run it after it made Makefile? (back)\n  Rebase feat: changes in no commit \
+                 (back)"
             ),
             "{q}"
         );

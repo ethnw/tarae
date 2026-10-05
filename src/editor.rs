@@ -9479,6 +9479,51 @@ mod tests {
         std::fs::remove_dir_all(&out).ok();
     }
 
+    /// #189: Claude's edit waiting in a session behind is news, as a card there is: a toast naming the
+    /// session (and how `C-q` gets there), its row marked, `C-q` reaching it — also when an earlier wait there
+    /// ended while it stayed behind (it was said once and never again), and when you leave a session with its
+    /// review up (Claude waits on it, so nothing else would come to say so). Harmless: a file in the test's
+    /// own temp checkout.
+    #[test]
+    fn an_edit_waiting_behind_is_news() {
+        use serde_json::json;
+        let repo = git_repo("session-edit-news", &[("a.txt", "one\n")]);
+        let wt = worktree(&repo, "edit-news");
+        let file = wt.join("a.txt");
+        let edit = json!({"type": "control_request", "request_id": "e1", "request": {"subtype": "can_use_tool",
+            "tool_name": "Edit", "input": {"file_path": file, "old_string": "one", "new_string": "ONE"}}});
+        let mut ed = editor("");
+        ed.session.root = repo.clone();
+        feed(&mut ed, ":o a.txt<ret>");
+        fake_claude_stream(&mut ed, &[json!("sleep 0.3"), edit]);
+        let behind = ed.session_open(&wt).unwrap();
+        feed(&mut ed, "<space>lfix it<ret><esc>:session-switch 0<ret>");
+        let told =
+            |ed: &Editor| ed.messages.iter().filter(|m| m.2.contains(" · waits for you — C-q")).count();
+        // A wait there that ended while it stayed behind: said once
+        waits_for_you(&mut ed, behind);
+        assert_eq!(told(&ed), 1);
+        ed.with_session(behind, |ed| ed.drop_cards(|w| matches!(w, crate::offer::What::Screen { .. })));
+        assert_ne!(ed.doing(session_by(&ed, behind)), crate::session::Doing::Waiting);
+        // Then its edit: said again, its row marked
+        settle_until(&mut ed, |ed| {
+            session_by(ed, behind).chat.as_ref().is_some_and(|c| !c.edits.queue.is_empty())
+        });
+        assert_eq!(told(&ed), 2, "said again: {:?}", ed.messages.iter().map(|m| &m.2).collect::<Vec<_>>());
+        assert_eq!(ed.doing(session_by(&ed, behind)), crate::session::Doing::Waiting);
+        // C-q: there, its review up
+        feed(&mut ed, "<C-q>");
+        assert_eq!(ed.session.id, behind);
+        assert!(ed.session.review.as_ref().is_some_and(|r| r.ready), "its review up");
+        // Left with its review up: said as it goes behind
+        feed(&mut ed, ":session-switch 0<ret>");
+        assert_eq!(told(&ed), 3, "said on leaving");
+        assert_eq!(ed.doing(session_by(&ed, behind)), crate::session::Doing::Waiting);
+        ed.sessions.clear();
+        git_in(&repo, &["worktree", "remove", "--force", wt.to_str().unwrap()]);
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
     /// Switching sessions with 20 files open in each — a number for `cargo perf` (it's two swaps and a few
     /// lookups, whatever is open). At opt-level 0 it skips itself, saying so past libtest's capture.
     #[test]

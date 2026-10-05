@@ -603,11 +603,8 @@ impl Editor {
                         }
                     }
                 }
-                let msg = ed.said_by_session(format!(
-                    "a card went missing ({}) — Claude was told nothing ran",
-                    a.what
-                ));
-                ed.set_warning(msg);
+                // (`set_warning` names a session behind itself)
+                ed.set_warning(format!("a card went missing ({}) — Claude was told nothing ran", a.what));
             };
             match id == front {
                 true => tell(self),
@@ -638,7 +635,13 @@ impl Editor {
         let ended_before = self.session.turn_end.as_ref().map(|t| t.0);
         f(self);
         self.behind = was;
-        let tell = self.session.waits() && !std::mem::replace(&mut self.session.waiting_told, true);
+        // (a wait that ended while it stayed behind: the next one is news again — #189, it was said once and
+        // never again)
+        let waits = self.session.waits();
+        let tell = waits && !std::mem::replace(&mut self.session.waiting_told, true);
+        if !waits {
+            self.session.waiting_told = false;
+        }
         let ended = self.session.turn_end.as_ref().filter(|t| Some(t.0) != ended_before).map(|t| t.1.clone());
         let name = self.session.label().to_string();
         if let Some(id) = self.docs.get(self.current).map(|d| d.id) {
@@ -760,8 +763,15 @@ impl Editor {
         self.offers = rest;
         mine.append(&mut self.session.parked);
         self.session.parked = mine;
-        self.session.waiting_told = false;
+        // Left with something waiting (its review up, a card of Claude's): said as it goes — Claude waits on
+        // it, so nothing else would come to say so (#189)
+        let (out, name, waits) = (self.session.id, self.session.label().to_string(), self.session.waits());
+        self.session.waiting_told = waits;
         std::mem::swap(&mut self.session, &mut self.sessions[i]);
+        if waits {
+            let msg = format!("{name} · waits for you — {}", self.c_q_says(out, true));
+            self.said_for(out, crate::editor::ToastKind::Info, msg);
+        }
         // In: its panes on documents that are still there (its own, else a blank one), its cards up, its tour
         // going on
         let here = |id: DocId| self.docs.iter().position(|d| d.id == id);

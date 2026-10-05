@@ -2258,6 +2258,31 @@ impl Editor {
         self.unchanged = true;
     }
 
+    /// The session of checkout `root` ended, its files closed (#190: marksman and taplo ran on after it): the
+    /// servers that were only its stop now — rooted inside its checkout, or serving its files just before
+    /// (`had`) — not after the wait for a file reopened (`ROOT_GONE`; its checkout goes). One serving a file
+    /// still open, or with one open under its folders (another session's — a shared server), stays.
+    pub(crate) fn lsp_stop_ended(&mut self, root: &std::path::Path, had: &[ClientId]) {
+        let used = |c: &Client| {
+            self.docs
+                .iter()
+                .any(|d| d.lsp.clients().any(|x| x == c.id) || d.path.as_deref().is_some_and(|p| c.serves(p)))
+        };
+        let inside = |c: &Client| !c.roots.is_empty() && c.roots.iter().all(|r| r.starts_with(root));
+        let gone: Vec<(ClientId, String)> = self
+            .lsp
+            .clients
+            .iter()
+            .filter(|c| (had.contains(&c.id) || inside(c)) && !used(c))
+            .map(|c| (c.id, c.root.display().to_string()))
+            .collect();
+        for (cid, at) in gone {
+            if let Some(name) = self.lsp_stopped(cid) {
+                crate::log::line(&name, "stop", &format!("{name} for {at} stopped — its session ended"));
+            }
+        }
+    }
+
     fn lsp_stop_if_unused(&mut self, cid: ClientId, since: std::time::Instant, wait: std::time::Duration) {
         if self.lsp.unused.get(&cid) != Some(&since) {
             return;
