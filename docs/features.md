@@ -353,8 +353,9 @@ your `PATH`.
 Install a new tarae (`cargo install …` again) while one is running, then type `:restart`. The running tarae
 saves your files and starts the new one in the same terminal, in the same zellij or tmux pane, and you're back
 where you were — in every session, each with its own: the open files with their cursors, selections, and scroll,
-the split windows, the side panel, the chat with the same conversation (and the words you were typing in it). The
-settings you changed with `:set` come along too, and the session that was in front is in front. A session behind
+the split windows, the side panel, the chat with the same conversation (and the words you were typing in it), and
+a code review — of the uncommitted changes or since a branch — on the file it was on, its comments not yet sent
+and its viewed marks with it. The settings you changed with `:set` come along too, and the session that was in front is in front. A session behind
 comes back quiet: its language servers start when you bring it to the front, and its Claude when you send it a
 message (resuming the same conversation). A toast says what came back (`Restarted · 3 sessions · 9 files as
 they were`), and one after it names what didn't (`checkout gone: old-parser · file gone: old.rs`).
@@ -378,6 +379,6 @@ keeps working, as after any restart (`editor.persistent-undo`).
 Some things make it wait, and some stop it. If Claude is answering in any session's chat, the restart waits for
 those turns to end (saying whose), and for any edits you accepted to land on disk; `:restart` again cancels. It stops, with a message
 saying what to do, if something open can't be carried over or would be cut short: text in a buffer that has no
-file, a file that changed on disk under your edits, an open review or code review, a commit message being
-written, a task or tests still running — in any session, the message naming which — or a debug run. When a
+file, a file that changed on disk under your edits, a change of Claude's waiting for your answer, a review of
+Claude's turn (`space v t`), a commit message being written, a task or tests still running — in any session, the message naming which — or a debug run. When a
 file can't be saved, it stops too, and nothing is lost.

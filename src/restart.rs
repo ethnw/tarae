@@ -2,8 +2,8 @@
 //! `editor.restart-build` says how, check the binary (`editor.restart-binary`, else the running one's
 //! path) answers `--version`, then become it: `exec` keeps the pid, the terminal and the zellij pane, and
 //! the new tarae comes back as it was in every session — each one's open files with their selections and
-//! scroll, its panes, side panel and chat (its claude conversation resumed, the words being typed) — the one
-//! in front in front, and the `:set`s. A session behind comes back as it would look had you switched away
+//! scroll, its panes, side panel, chat (its claude conversation resumed, the words being typed) and code
+//! review (its base, the file it was on) — the one in front in front, and the `:set`s. A session behind comes back as it would look had you switched away
 //! a moment ago: its files' servers asleep, its chat without a claude until it's used.
 //!
 //! The state goes through one file (`restart-<pid>.json` in the state dir → `--restart <file>`), written
@@ -11,8 +11,8 @@
 //! top-level fields stay as earlier builds read them (`snapshot`).
 //!
 //! Files are saved first, as before a task. What can't come along stops it the way `:q` is stopped — a
-//! buffer with no file, an open review, a code review. A chat turn in flight is waited for (`turn_over`);
-//! `:restart` again cancels.
+//! buffer with no file, an edit's review, a review of Claude's turn — in any session (`blocker`). A chat turn
+//! in flight is waited for (`turn_over`); `:restart` again cancels.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -210,8 +210,10 @@ fn session_blocker(l: &crate::session::Session, waiting: bool) -> Option<String>
     if l.review.is_some() && !claudes(l.chat.as_ref().is_some_and(|c| c.edits.review.is_some())) {
         return Some("a review is open — answer it first".into());
     }
-    if crate::codereview::drafting_in(l) {
-        return Some("a code review is open — send it (space v s) or end it (space v q) first".into());
+    // (a code review comes along, its drafts with the notes — not a turn's: its turns load later and would
+    // shift it; a rebase's stops it as the rebase)
+    if l.code_review.as_ref().is_some_and(|r| matches!(r.base, crate::codereview::Base::Turn { .. })) {
+        return Some("a review of Claude's turn is open — end it (space v q) first".into());
     }
     // (saved, it would come back as a plain file — `:wq` no longer committing)
     if l.committing.is_some() {
@@ -772,6 +774,8 @@ fn session_json(l: &crate::session::Session, docs: &[&crate::document::Document]
         json!({ "conversation": c.conversation, "input": c.input, "cursor": c.cursor, "focused": c.focused,
                 "scroll": c.scroll, "follow": c.follow.on, "at_end": c.edits.at_end })
     });
+    let on = docs.iter().find(|d| d.id == current).and_then(|d| d.path.as_deref());
+    let review = l.code_review.as_ref().and_then(|r| crate::codereview::carried(r, on));
     json!({
         "docs": files,
         "current": index(current),
@@ -780,6 +784,7 @@ fn session_json(l: &crate::session::Session, docs: &[&crate::document::Document]
         "focus": l.focus,
         "sidebar": sidebar,
         "chat": chat,
+        "review": review,
         "terminal": l.terminal.as_ref().is_some_and(|t| t.exited.is_none()),
     })
 }
@@ -967,6 +972,10 @@ fn restore_session(ed: &mut Editor, v: &Value, behind: bool, back: &mut Back) {
                 lazy: behind,
             },
         );
+    }
+    // Its code review (read again on a worker, in this session)
+    if v["review"].is_object() {
+        crate::codereview::reopen(ed, &v["review"]);
     }
 }
 
@@ -1282,7 +1291,7 @@ mod tests {
     /// A new editor as `:restart`'s binary starts: in `front`, the test's stand-ins.
     fn started_in(dir: &Path, front: &Path) -> Editor {
         let mut ed = Editor::new(Config::default());
-        ed.session.root = front.to_path_buf();
+        (ed.session.root, ed.session.name) = (front.to_path_buf(), "front".into());
         ed.chats_dir = Some(dir.join("chats"));
         ed.config.llm.command = "sh".into();
         let argv = dir.join("argv.log");
@@ -1801,9 +1810,11 @@ mod tests {
         assert!(ed.session_by_id(id).unwrap().review.is_some());
         try_it(&mut ed, "a review is open");
         ed.session_by_id(id).unwrap().review = None;
-        let review = crate::codereview::CodeReview::for_test(crate::codereview::Base::Head, back, Vec::new());
+        // (a code review comes along — a turn's doesn't)
+        let turn = crate::codereview::Base::Turn { at: 0, question: "q".into() };
+        let review = crate::codereview::CodeReview::for_test(turn, back, Vec::new());
         ed.session_by_id(id).unwrap().code_review = Some(review);
-        try_it(&mut ed, "a code review is open");
+        try_it(&mut ed, "a review of Claude's turn is open");
         ed.session_by_id(id).unwrap().code_review = None;
         // Nothing anywhere: on its way
         crate::typed::execute(&mut ed, "restart!").unwrap();
@@ -2029,6 +2040,78 @@ mod tests {
             crate::gitmenu::git(dir, args, None).unwrap();
         }
         crate::gitmenu::git(dir, &["rev-parse", "--short", "HEAD"], None).unwrap().trim().to_string()
+    }
+
+    /// Wave 3, point 8: a code review open in a session — of the uncommitted changes in front, since a
+    /// branch behind — and its drafts don't stop a restart any more: it comes back in its session, against
+    /// the same base (the branch's merge base as it was), on the file it was on; behind, its files' servers
+    /// wait. A review of Claude's turn still stops it, named (its turns load later and would shift it).
+    #[test]
+    fn a_code_review_comes_back_with_its_base_and_file() {
+        use crate::codereview::{Base, CodeReview};
+        let (front, back, dir, mut ed) = two_sessions("review");
+        let cfg = "[lsp.mdfake]\ncommand = \"sh\"\nargs = [\"-c\", \"cat > /dev/null\"]\n\
+                   [lang.markdown]\nlsp = [\"mdfake\"]\n";
+        let (config, w) = crate::config::parse(cfg);
+        assert!(w.is_empty(), "{w:?}");
+        let git = |d: &Path, args: &[&str]| crate::gitmenu::git(d, args, None).unwrap();
+        std::fs::write(front.join("g.txt"), "g\n").unwrap();
+        repo(&front);
+        repo(&back);
+        // In front: f.txt and g.txt changed, not committed · behind: a branch off main that changed c.md
+        std::fs::write(front.join("f.txt"), "ONE\ntwo\nthree\n").unwrap();
+        std::fs::write(front.join("g.txt"), "G\n").unwrap();
+        git(&back, &["checkout", "-q", "-b", "feat"]);
+        std::fs::write(back.join("c.md"), "# c\n").unwrap();
+        git(&back, &["commit", "-q", "-am", "feat"]);
+        let merge_base = git(&back, &["rev-parse", "main"]).trim().to_string();
+        let reviewing = |ed: &Editor, root: &Path| {
+            session_at(ed, root).code_review.as_ref().is_some_and(|r| !r.docs.is_empty())
+        };
+        crate::codereview::start(&mut ed, None);
+        settle_until(&mut ed, |ed| reviewing(ed, &front));
+        // In front, on its second file
+        crate::codereview::show(&mut ed, 1, false);
+        let id = ed.session_add(back.clone());
+        ed.with_session(id, |ed| crate::codereview::start(ed, Some("main".into())));
+        settle_until(&mut ed, |ed| reviewing(ed, &back));
+        // Behind: its review's file closed meanwhile, another one shown (the review opens it again)
+        ed.with_session(id, |ed| {
+            let md = ed.doc().id;
+            ed.open(&back.join("b.txt")).unwrap();
+            ed.close_doc(md);
+        });
+        // A draft in front
+        crate::notes::add(&mut ed, &front.join("f.txt"), 0..1, crate::notes::By::You, "why?");
+        ed.session.notes.list[0].thread[0].draft = true;
+        let blocked = |ed: &Editor| blocker(ed, true);
+        assert_eq!(blocked(&ed), None, "a review and its drafts come along");
+        let state = snapshot(&mut ed);
+        drop(ed);
+        let mut ed = started_in(&dir, &front);
+        ed.config.lsp = config.editor.lsp.clone();
+        restore(&mut ed, &state);
+        settle_until(&mut ed, |ed| reviewing(ed, &front) && reviewing(ed, &back));
+        let r = ed.session.code_review.as_ref().unwrap();
+        assert_eq!((&r.base, r.files.len()), (&Base::Head, 2), "in front: the uncommitted changes");
+        assert_eq!(ed.doc().path.as_deref(), Some(front.join("g.txt").as_path()), "on the file it was on");
+        let l = session_at(&ed, &back);
+        let r = l.code_review.as_ref().unwrap();
+        assert_eq!(r.base, Base::Branch { name: "main".into(), commit: merge_base }, "behind: since main");
+        let current = ed.docs.iter().find(|d| d.id == l.current_doc).unwrap();
+        assert_eq!(current.path.as_deref(), Some(back.join("c.md").as_path()), "its file, opened again");
+        assert!(r.docs.contains(&current.id), "in the review");
+        assert_eq!(current.lsp.client, None, "behind: its server waits");
+        // Nothing said for them over the restart's toasts
+        let said: Vec<&str> = ed.messages.iter().map(|m| m.2.as_str()).collect();
+        assert!(!said.iter().any(|m| m.contains("review:")), "{said:?}");
+        // A turn's review: stops it, named
+        let turn = Base::Turn { at: 0, question: "do it".into() };
+        ed.session.code_review = Some(CodeReview::for_test(turn, front.clone(), Vec::new()));
+        let why = blocked(&ed).expect("stopped");
+        assert!(why.starts_with("front: a review of Claude's turn is open"), "{why}");
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// #108: the card says which checkout `:restart` builds in and at what commit — the one tarae started

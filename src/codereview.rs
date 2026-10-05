@@ -438,6 +438,47 @@ pub fn start_in(ed: &mut Editor, cwd: PathBuf, branch: Option<String>) {
     });
 }
 
+/// A review as `:restart`'s state carries it (its session's block): its repository, its base, the file it's
+/// on — None for a turn's (its turns load later and shift it: it stops the restart instead) and a rebase's
+/// (the rebase does).
+pub fn carried(r: &CodeReview, on: Option<&Path>) -> Option<Value> {
+    let base = match &r.base {
+        Base::Head => json!("head"),
+        Base::Branch { name, commit } => json!({ "branch": name, "commit": commit }),
+        Base::Turn { .. } | Base::Replay { .. } => return None,
+    };
+    let current = on.and_then(|p| r.files.iter().find(|f| f.path == p)).map(|f| f.rel.clone());
+    Some(json!({ "root": r.root, "base": base, "current": current }))
+}
+
+/// After `:restart`: the review `carried` kept, open again in the session it's applied in — against the same
+/// base (a branch's merge base as it was: nothing fetched or asked again), its files read again on a worker,
+/// on the file it was on. Nothing said (the restart's toast speaks for it); a session behind's files wait
+/// for their servers (`LspState.attach_later`). Its drafts are notes, back with them.
+pub fn reopen(ed: &mut Editor, v: &Value) {
+    let Some(root) = v["root"].as_str().map(PathBuf::from) else { return };
+    let base = match &v["base"] {
+        b if b == "head" => Base::Head,
+        b => match (b["branch"].as_str(), b["commit"].as_str()) {
+            (Some(name), Some(commit)) => Base::Branch { name: name.into(), commit: commit.into() },
+            _ => return,
+        },
+    };
+    let current = v["current"].as_str().map(str::to_string);
+    ed.events.jobs().spawn(move || {
+        let files = changed(&root, &base);
+        move |ed: &mut Editor| match files {
+            Ok(files) if files.is_empty() => {}
+            Ok(files) => {
+                ed.lsp.attach_later = ed.background();
+                open_at(ed, root, base, files, current, false);
+                ed.lsp.attach_later = false;
+            }
+            Err(e) => ed.set_warning(format!("review {}: not open again — {e}", base.label())),
+        }
+    });
+}
+
 /// `space v t` · `:review-turn`: what Claude changed in its latest turn (not taken back), as a review.
 pub fn review_turn(ed: &mut Editor) {
     let list = &ed.session.checkpoints.list;
@@ -550,16 +591,31 @@ pub fn start_replay(
 }
 
 /// The review of `files` against `base` begins (any open one ends).
-fn open(ed: &mut Editor, root: PathBuf, base: Base, mut files: Vec<File>) {
+fn open(ed: &mut Editor, root: PathBuf, base: Base, files: Vec<File>) {
+    open_at(ed, root, base, files, None, true);
+}
+
+/// `open`, on the file `start` (relative) when it's among them — and said when `say`.
+fn open_at(
+    ed: &mut Editor,
+    root: PathBuf,
+    base: Base,
+    mut files: Vec<File>,
+    start: Option<String>,
+    say: bool,
+) {
     if files.is_empty() {
         return ed.set_status(format!("review: no changes {}", base.label()));
     }
     crate::sorting::by(&mut files, |a, b| a.rel.cmp(&b.rel));
     end(ed);
     let n = files.len();
-    // Start on the file being looked at, if it's among the changes (else the first)
+    // Start on the file asked for, else the one being looked at if it's among the changes, else the first
     let here = ed.doc().path.clone();
-    let first = files.iter().position(|f| here.as_ref() == Some(&f.path)).unwrap_or(0);
+    let first = start
+        .and_then(|rel| files.iter().position(|f| f.rel == rel))
+        .or_else(|| files.iter().position(|f| here.as_ref() == Some(&f.path)))
+        .unwrap_or(0);
     let said = match &base {
         Base::Turn { .. } => "Claude changed".to_string(),
         Base::Replay { label, .. } => format!("resolved, against {label}"),
@@ -581,8 +637,10 @@ fn open(ed: &mut Editor, root: PathBuf, base: Base, mut files: Vec<File>) {
         wide: false,
         started: std::time::Instant::now(),
     });
-    let s = if n == 1 { "" } else { "s" };
-    ed.set_status(format!("review: {n} file{s} {said} — ]g walks the changes"));
+    if say {
+        let s = if n == 1 { "" } else { "s" };
+        ed.set_status(format!("review: {n} file{s} {said} — ]g walks the changes"));
+    }
     show(ed, first, false);
     if std::mem::take(&mut ed.session.review_ask) {
         claude_reviews(ed);
@@ -1052,12 +1110,7 @@ pub fn wide_toggle(ed: &mut Editor) {
 
 /// Whether `space n` writes drafts: a review is open, or drafts are waiting to go.
 pub fn drafting(ed: &Editor) -> bool {
-    drafting_in(&ed.session)
-}
-
-/// `drafting` in session `l`, in front or behind.
-pub fn drafting_in(l: &crate::session::Session) -> bool {
-    l.code_review.is_some() || l.notes.list.iter().any(|n| n.thread.iter().any(|e| e.draft))
+    ed.session.code_review.is_some() || ed.session.notes.list.iter().any(|n| n.thread.iter().any(|e| e.draft))
 }
 
 /// The lines around a note as a diff against the review's base: context, `-` removed, `+` added.
