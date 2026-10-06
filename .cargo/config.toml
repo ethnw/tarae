@@ -6,3 +6,12 @@ xtask = "run --quiet --package xtask --"
 perf = "run --quiet --package xtask -- perf"
 # Live end-to-end runs with the real tools (tests/live.rs) — minutes, and the Claude ones use your plan
 live = "test --test live -- --ignored --test-threads=1"
+
+# Debug info in the binary on Linux, as rustc has it there — whatever the profile says (it comes after the
+# profile's flags). Cargo.toml's profiles are for macOS: release packs a dSYM, perf keeps the line tables in
+# the objects (`unpacked`). On Linux `unpacked` is split DWARF — skeletons in the binary, the rest in `.dwo`
+# files — which blazesym (tarae-trace) doesn't follow and addr2line shows no inlined frames from (measured
+# 2026-10-06); `packed` would only make a `.dwp` that strip leaves unused. A RUSTFLAGS of your own replaces
+# this: add `-C split-debuginfo=off` to it (xtask trace does).
+[target.'cfg(target_os = "linux")']
+rustflags = ["-C", "split-debuginfo=off"]

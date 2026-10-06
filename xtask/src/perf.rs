@@ -70,9 +70,20 @@ pub fn run(args: &[String]) -> Result<()> {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let test = |extra: &[&str]| {
         let mut c = Command::new(&cargo);
-        c.args(["test", "--profile", "perf", "--bin", "tarae", "--test", "perf"])
-            .args(extra)
-            .current_dir(&root);
+        // (the dev grammars: the syntax budgets highlight Rust)
+        c.args([
+            "test",
+            "--profile",
+            "perf",
+            "--features",
+            "dev-grammars",
+            "--bin",
+            "tarae",
+            "--test",
+            "perf",
+        ])
+        .args(extra)
+        .current_dir(&root);
         c
     };
     eprintln!("building the perf profile …");

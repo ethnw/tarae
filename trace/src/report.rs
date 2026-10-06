@@ -175,7 +175,8 @@ impl Report {
             let list: Vec<String> = unnamed.iter().map(|(m, n)| format!("{m} ({n} stacks)")).collect();
             s += &format!(
                 "  frames without names in {} — a stripped binary? A traceable tarae: \
-                 RUSTFLAGS='-C force-frame-pointers=yes' cargo build --profile perf\n",
+                 RUSTFLAGS='-C force-frame-pointers=yes -C split-debuginfo=off' cargo build --profile perf \
+                 --features dev-grammars\n",
                 list.join(", ")
             );
         }

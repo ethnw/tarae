@@ -193,8 +193,9 @@ process, or the disk.
   [`runtime/packs/<lang>/pack.toml`](runtime/packs) (`[grammar.<name>]` git, rev, subpath) — not from crates.io grammar
   crates. The default build embeds only the grammars marked
   `core = true` (TOML, Markdown, comment). Debug builds — `cargo run`, `cargo test` — also embed the `dev = true` one,
-  Rust: the tests and screen snapshots are written against it. `bundle = true` ones are embedded with
-  `--features bundled-grammars`.
+  Rust: the tests and screen snapshots are written against it. Other profiles embed it with `--features dev-grammars`
+  (`cargo perf` does, for its syntax budgets) — not because they have debug info: release builds keep line tables
+  in a dSYM. `bundle = true` ones are embedded with `--features bundled-grammars`.
 - After changing the bundled list or a grammar commit, repack with `cargo xtask vendor-grammars`. Bumping a grammar can
   break its queries; `every_installed_grammar_loads_with_its_queries` catches that.
 - Queries live in [`runtime/queries/`](runtime/queries) and are embedded at build time. To try query changes without
@@ -299,7 +300,10 @@ process, or the disk.
   `sudo tarae-trace offcpu --pid <tarae's pid> [--children] [--for 1m]` — it ends at Ctrl-C, `--for` (10 min
   if not given) or the target's exit, and writes `<probe>-<name>.json` and folded stacks.
 
-  For good stacks, build tarae with `RUSTFLAGS='-C force-frame-pointers=yes' cargo build --profile perf`.
+  For good stacks, build tarae with
+  `RUSTFLAGS='-C force-frame-pointers=yes -C split-debuginfo=off' cargo build --profile perf --features
+  dev-grammars` (a RUSTFLAGS replaces `.cargo/config.toml`'s, which keeps the debug info out of `.dwo` files the
+  tool doesn't read).
 
   User stacks are unwound with the binaries' `.eh_frame`, so code without frame pointers keeps its frames —
   on x86_64, Rust's std and Debian's glibc. The first time a stack is seen, its registers and 32 KB of it go

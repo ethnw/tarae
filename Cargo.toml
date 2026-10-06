@@ -38,16 +38,25 @@ grep-matcher = "0.1"
 lto = true
 codegen-units = 1
 panic = "abort"
+# The binary stripped, its symbols beside it: line tables (every frame's function and file:line) in
+# `tarae.dSYM` on macOS, which `:restart` keeps by UUID in target/dsyms (dsyms.rs). Measured 2026-10-06:
+# the binary's size the same (debug info moves LLVM's code ~1 KB, inside the last 16 KB page), the dSYM
+# ~70 MB, the build ~10% longer. The dev grammars stay out (build.rs keys them on `dev-grammars`). On Linux
+# `.cargo/config.toml` keeps split-debuginfo off (no `.dwp` made: strip would take the line tables it needs);
+# packaging will split the symbols off with objcopy instead.
+debug = "line-tables-only"
+split-debuginfo = "packed"
 strip = true
 
 # Screenshots (`cargo xtask shot` builds it): release's behavior (its grammars, no debug assertions) in a
-# fraction of its build time — no LTO, many codegen units, incremental. Not for measuring speed.
+# fraction of its build time — no LTO, many codegen units, incremental, no debug info. Not for measuring speed.
 [profile.shot]
 inherits = "release"
 opt-level = 1
 lto = false
 codegen-units = 256
 incremental = true
+debug = false
 strip = false
 
 # Optimize dependencies (tree-sitter C·regex·ropey) even in debug builds — our own code keeps fast compiles.
@@ -62,11 +71,13 @@ opt-level = 0
 debug = "line-tables-only"
 
 # The perf budgets and real-use scenarios (`cargo perf` → xtask perf): what a release build costs, so the test
-# profile's opt-level doesn't change what they measure — with line tables (and not stripped) so samples have
-# names. Debug info also embeds the dev grammars (build.rs), which the syntax budgets need.
+# profile's opt-level doesn't change what they measure — with line tables (and not stripped, no dSYM made) so
+# samples have names. Its builds turn on `dev-grammars` (xtask perf, CI), which the syntax budgets need.
+# `unpacked` is macOS's (the line tables stay in the objects); Linux keeps it off (`.cargo/config.toml`).
 [profile.perf]
 inherits = "release"
 debug = "line-tables-only"
+split-debuginfo = "unpacked"
 strip = false
 
 
@@ -77,6 +88,10 @@ strip = false
 # Where downloading isn't possible, build with:
 #   cargo install --path . --features bundled-grammars
 bundled-grammars = []
+# Embed the `dev = true` grammars (rust) outside the debug profile, which always has them (the tests and
+# screen snapshots are written against them): `cargo perf` and CI's perf budgets (the syntax budgets), and
+# the trace probes' perf builds turn it on.
+dev-grammars = []
 
 [build-dependencies]
 # Unpack runtime/grammars.tar.gz (flate2·tar) and compile the selected grammars (languages.toml — toml) as C (cc)

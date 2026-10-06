@@ -3,8 +3,8 @@
 //! 2. Language packs — `runtime/packs/<lang>/` (`pack.toml` and its queries).
 //! 3. Grammars — unpacks `runtime/grammars.tar.gz` (C sources of the packs' `[grammar.<name>]` with `bundle =
 //!    true`, same commits as the queries) and compiles them in parallel with the C compiler. The default build
-//!    has only `core = true` (toml·markdown·comment), debug builds also `dev = true` (rust), `--features
-//!    bundled-grammars` all of `bundle = true`. The rest are downloaded at run time.
+//!    has only `core = true` (toml·markdown·comment), debug builds (or `--features dev-grammars`) also `dev =
+//!    true` (rust), `--features bundled-grammars` all of `bundle = true`. The rest are downloaded at run time.
 //!
 //! Nothing it prints or writes names the checkout. Every checkout's build of tarae shares one build
 //! script run in the shared `build-dir` (`~/.cargo/build/shared` — the unit's hash is the same for the
@@ -46,10 +46,11 @@ fn wanted() -> Vec<String> {
     }
     let all = cfg!(feature = "bundled-grammars");
     // `cargo run`/`cargo test` (the debug profile): the tests and screen snapshots are written against these,
-    // and working on tarae itself wants them without a download. So do builds with debug info (`cargo
-    // perf`'s profile: its syntax budgets). Release builds leave them out (size).
+    // and working on tarae itself wants them without a download. Other profiles only when asked
+    // (`--features dev-grammars`: `cargo perf`'s syntax budgets) — not by debug info: the release build has
+    // line tables for its dSYM, and leaves them out (size).
     let dev = std::env::var("PROFILE").is_ok_and(|p| p == "debug")
-        || std::env::var("DEBUG").is_ok_and(|d| d == "true");
+        || std::env::var_os("CARGO_FEATURE_DEV_GRAMMARS").is_some();
     println!("cargo::rustc-check-cfg=cfg(tarae_dev_grammars)");
     if dev {
         println!("cargo::rustc-cfg=tarae_dev_grammars");

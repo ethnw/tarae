@@ -24,6 +24,7 @@ mod diffview;
 mod disk;
 mod doccomment;
 mod document;
+mod dsyms;
 mod editdiff;
 mod editor;
 mod edits;

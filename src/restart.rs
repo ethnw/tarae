@@ -50,6 +50,8 @@ pub enum Stage {
     Same,
     /// The binary answers `--version` (a worker).
     Checking,
+    /// It goes ahead: its dSYM is kept first (`dsyms::keep`, a worker).
+    Keeping,
     /// The loop ends; main runs it.
     Ready(PathBuf),
 }
@@ -62,6 +64,9 @@ pub struct Restart {
     pub stage: Stage,
     /// What it builds in and runs, once the card's answered.
     target: Option<Target>,
+    /// The binary's dSYM kept (`dsyms::keep`): where, None when there was none — or why not (the restart goes
+    /// on). Unset until it goes ahead (`keep_then`). Carried in the state: the next tarae logs it.
+    kept: Option<Result<Option<crate::dsyms::Kept>, String>>,
 }
 
 /// A checkout a restart can build in and run (#108): whose it is (its session's label), where its build
@@ -138,7 +143,7 @@ pub fn start(ed: &mut Editor, build: bool) -> Result<(), String> {
     blocker(ed, true).map_or(Ok(()), |why| Err(format!("can't restart: {why}")))?;
     static NEXT: AtomicU64 = AtomicU64::new(1);
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
-    ed.restart = Some(Restart { id, build, stage: Stage::Turn, target: None });
+    ed.restart = Some(Restart { id, build, stage: Stage::Turn, target: None, kept: None });
     // Every session's turn, not only the front's (#109)
     let turns = turns(ed);
     if !turns.is_empty() {
@@ -163,6 +168,8 @@ pub fn pending(ed: &Editor) -> Option<String> {
         },
         Stage::Writes => "restart waits for Claude's edits".into(),
         Stage::Building(_) => "restart waits for its build".into(),
+        // (a worker cloning the binary's dSYM — a moment on APFS, a copy elsewhere)
+        Stage::Keeping => "restarting — keeping its symbols".into(),
         Stage::Saving | Stage::Finding | Stage::Checking | Stage::Ready(_) => "restarting".into(),
         Stage::Choosing | Stage::Same => return None,
     })
@@ -614,6 +621,27 @@ fn check(ed: &mut Editor, bin: PathBuf, anyway: bool) {
                 }
                 return turn_over(ed);
             }
+            keep_then(ed, id, bin);
+        }
+    });
+}
+
+/// The restart goes ahead — checked, its card answered, no turn to wait for: the binary's symbols are kept
+/// by its UUID before it runs, as the next build replaces the build-dir's dSYM (`dsyms::keep`, a worker; a
+/// check that's turned down keeps nothing). Where they went — or why they weren't kept, and the restart goes
+/// on — comes along in the state, for the next tarae's log (`symbols_said`): files saved, the loop ends.
+fn keep_then(ed: &mut Editor, id: u64, bin: PathBuf) {
+    let Some(r) = ed.restart.as_mut() else { return };
+    r.stage = Stage::Keeping;
+    ed.events.jobs().spawn(move || {
+        let kept = crate::dsyms::keep(&bin);
+        move |ed: &mut Editor| {
+            if !at(ed, id, &Stage::Keeping) {
+                return;
+            }
+            if let Some(r) = ed.restart.as_mut() {
+                r.kept = Some(kept);
+            }
             saved_then(ed, id, move |ed| {
                 if let Some(r) = ed.restart.as_mut() {
                     r.stage = Stage::Ready(bin);
@@ -833,9 +861,37 @@ pub fn snapshot(ed: &mut Editor) -> Value {
             ("sessions".into(), sessions),
             // (the review's viewed marks, each session's)
             ("viewed".into(), crate::codereview::viewed_snapshot(ed)),
+            ("symbols".into(), symbols(ed)),
         ]);
     }
     state
+}
+
+/// Where the binary about to run has its symbols kept (`dsyms::keep`), or why they weren't — None when it
+/// had none beside it, or no restart went ahead.
+fn symbols(ed: &Editor) -> Value {
+    match ed.restart.as_ref().and_then(|r| r.kept.as_ref()) {
+        Some(Ok(Some(k))) => json!({ "at": k.at, "pruned": k.pruned.as_ref().err() }),
+        Some(Err(e)) => json!({ "not": e }),
+        Some(Ok(None)) | None => Value::Null,
+    }
+}
+
+/// The next tarae's log lines for its own symbols (`symbols` in the state): `(level, text)` — where they are,
+/// with its pid (the same across the exec, as `sample` shows it), else why they weren't kept.
+fn symbols_said(v: &Value, pid: u32) -> Vec<(&'static str, String)> {
+    let s = &v["symbols"];
+    let mut said = Vec::new();
+    if let Some(at) = s["at"].as_str() {
+        said.push(("info", format!("symbols of this tarae (pid {pid}): {at}")));
+    }
+    if let Some(e) = s["pruned"].as_str() {
+        said.push(("warning", format!("older kept symbols not removed: {e}")));
+    }
+    if let Some(e) = s["not"].as_str() {
+        said.push(("warning", format!("symbols of this tarae (pid {pid}) not kept: {e}")));
+    }
+    said
 }
 
 /// Session `l`'s cards waiting: those up (and stacked) when it's in front, those parked when it's behind.
@@ -914,6 +970,9 @@ struct Back {
 /// files (the first few), whose shell starts afresh. Number of files opened (none: the start screen, as a
 /// plain start would show).
 pub fn restore(ed: &mut Editor, v: &Value) -> usize {
+    for (level, text) in symbols_said(v, std::process::id()) {
+        crate::log::line("restart", level, &text);
+    }
     let back = restore_quietly(ed, v);
     let mut said = vec!["Restarted".to_string()];
     if back.sessions > 1 {
@@ -1807,6 +1866,58 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Before it becomes the binary it built, the restart keeps that binary's dSYM (`dsyms::keep`, on a
+    /// worker) — one it can't keep (here: the stand-in, in a cargo build's folder, is a script, not a Mach-O)
+    /// doesn't stop the restart. No dSYM beside the binary: nothing to keep. Either way the state carries it
+    /// and the next tarae's log says it — where they went, with its pid, or why not.
+    #[test]
+    fn the_binarys_symbols_are_kept_and_one_that_cant_be_doesnt_stop_it() {
+        let dir = temp("dsym");
+        let release = dir.join("target/release");
+        std::fs::create_dir_all(&release).unwrap();
+        std::fs::write(dir.join("target/CACHEDIR.TAG"), "").unwrap();
+        std::fs::write(release.join(".cargo-lock"), "").unwrap();
+        let bin = fake_tarae(&release, "tarae 9.9.9");
+        std::fs::create_dir_all(release.join("tarae.dSYM/Contents/Resources/DWARF")).unwrap();
+        let mut ed = editing(&dir, "true", &bin);
+        feed(&mut ed, ":restart<ret>");
+        settle_answering(&mut ed, |ed| ed.should_quit || ed.restart.is_none());
+        let r = ed.restart.as_ref().expect("still restarting");
+        assert_eq!(r.ready(), Some(bin.as_path()), "{}", toasts(&ed));
+        assert!(
+            matches!(&r.kept, Some(Err(e)) if e.contains(&bin.display().to_string()) && e.contains("not a 64-bit Mach-O")),
+            "{:?}",
+            r.kept
+        );
+        let said = symbols_said(&snapshot(&mut ed), 42);
+        assert!(
+            matches!(said.as_slice(), [("warning", s)] if s.starts_with("symbols of this tarae (pid 42) not kept: ")
+                && s.contains("not a 64-bit Mach-O")),
+            "{said:?}"
+        );
+        // Kept, its older ones not all removed: where, then why not
+        let at = dir.join("target/dsyms/A.dSYM");
+        ed.restart.as_mut().unwrap().kept =
+            Some(Ok(Some(crate::dsyms::Kept { at: at.clone(), pruned: Err("X.dSYM: not a folder".into()) })));
+        assert_eq!(
+            symbols_said(&snapshot(&mut ed), 42),
+            [
+                ("info", format!("symbols of this tarae (pid 42): {}", at.display())),
+                ("warning", "older kept symbols not removed: X.dSYM: not a folder".into()),
+            ]
+        );
+
+        std::fs::remove_dir_all(release.join("tarae.dSYM")).unwrap();
+        let mut ed = editing(&dir, "true", &bin);
+        feed(&mut ed, ":restart<ret>");
+        settle_answering(&mut ed, |ed| ed.should_quit || ed.restart.is_none());
+        let r = ed.restart.as_ref().expect("still restarting");
+        assert_eq!((r.ready(), &r.kept), (Some(bin.as_path()), &Some(Ok(None))), "{}", toasts(&ed));
+        let state = snapshot(&mut ed);
+        assert_eq!((&state["symbols"], symbols_said(&state, 42)), (&Value::Null, vec![]), "nothing to say");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// A slow disk doesn't hold the screen: `:restart` saves and goes on once the files are written (the
     /// saver's event, not a wait) — and `:restart` again meanwhile, `y` on its card, cancels it.
     #[test]
@@ -2427,7 +2538,7 @@ mod tests {
         };
         let held = crate::rebase::Held { moved, changed: vec!["a.txt".into()], unsaved: Vec::new() };
         ed.session_by_id(id).unwrap().parked.push(held.card());
-        ed.restart = Some(Restart { id: 7, build: false, stage: Stage::Finding, target: None });
+        ed.restart = Some(Restart { id: 7, build: false, stage: Stage::Finding, target: None, kept: None });
         let t = Target {
             label: "front".into(),
             root: front.clone(),
@@ -2521,7 +2632,7 @@ mod tests {
 
     /// #108: a binary the build left as it was, written before its checkout's HEAD was committed, is said on
     /// a card — not run as if it were new; `y` restarts onto it anyway, `n` doesn't. One the build wrote goes
-    /// straight on.
+    /// straight on. Its symbols are kept only once it goes ahead: not while the card asks, nor after `n`.
     #[test]
     fn the_same_old_binary_is_said_not_run() {
         let dir = temp("same");
@@ -2550,6 +2661,7 @@ mod tests {
             "{}",
             o.question
         );
+        assert_eq!(ed.restart.as_ref().map(|r| &r.kept), Some(&None), "not kept while the card asks");
         ed.offer_dismiss();
         assert!(ed.restart.is_none() && !ed.should_quit, "n: not restarting");
         // `y`: anyway
@@ -2557,7 +2669,13 @@ mod tests {
         settle_answering(&mut ed, |ed| same(ed) || ed.restart.is_none());
         ed.offer_accept();
         settle_until(&mut ed, |ed| ed.should_quit || ed.restart.is_none());
-        assert_eq!(ed.restart.as_ref().and_then(Restart::ready), Some(bin.as_path()), "{}", toasts(&ed));
+        let r = ed.restart.as_ref();
+        assert_eq!(r.and_then(Restart::ready), Some(bin.as_path()), "{}", toasts(&ed));
+        assert_eq!(
+            r.and_then(|r| r.kept.clone()),
+            Some(Ok(None)),
+            "kept once it went ahead (none beside it)"
+        );
         // A build that writes it: on at once
         let mut ed = Editor::new(Config::default());
         (ed.session.root, ed.session.name) = (main.clone(), "main".into());
@@ -2662,6 +2780,30 @@ mod tests {
         assert!(ed.restart.is_none() && !ed.should_quit);
         drop(ed);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// While its symbols are being kept (`Stage::Keeping`, a worker), the status line says so — and so does
+    /// the card `:restart` again raises; `y` there calls it off.
+    #[test]
+    fn the_status_line_says_the_symbols_are_being_kept() {
+        let mut ed = Editor::new(Config::default());
+        let status = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 160, 30).unwrap();
+            let mut vt = vt100::Parser::new(30, 160, 0);
+            vt.process(&bytes);
+            vt.screen().rows(0, 160).nth(29).unwrap()
+        };
+        let stage = Stage::Keeping;
+        ed.restart = Some(Restart { id: 7, build: false, stage, target: None, kept: None });
+        let line = status(&mut ed);
+        assert!(line.contains("restarting — keeping its symbols"), "{line}");
+        crate::typed::execute(&mut ed, "restart!").unwrap();
+        let card = ed.offers.first().expect("a card asks");
+        assert!(card.question.starts_with("restarting — keeping its symbols."), "{}", card.question);
+        feed(&mut ed, "y");
+        assert!(ed.restart.is_none(), "y: called off");
+        assert!(!status(&mut ed).contains("restart"));
     }
 
     #[test]

@@ -372,6 +372,13 @@ saying why. Nothing is built by default. `editor.restart-binary` points it at an
 it builds in and at what commit — `Restart into main's build (1085db8)?` — the one tarae started in; with another
 session in front, `f` builds that one's instead. If the build leaves the binary as it was and it's older than
 that checkout's commit, a card says so rather than restarting into the same tarae (`y` restarts anyway).
+On macOS, once a restart goes ahead (not on one turned down at a card), a cargo build's binary with a
+`tarae.dSYM` beside it (tarae's own release build) has that dSYM kept under its UUID in its target folder's
+`dsyms/`, the newest five, so the tarae you're running can still be symbolized after the next build (the status
+line says `keeping its symbols` meanwhile). The new tarae's log says where they went, with its pid — or why
+they couldn't be kept, and the restart goes on. A binary elsewhere (`~/bin/tarae`) keeps nothing. On
+disk that's at most five dSYMs of ~70 MB per target folder — clones of the build's at first, their own space
+once a build replaces it; a session's checkout's go with the checkout.
 
 Cards waiting for you come back as well as they can. One a command of yours raised — the preflight's first run,
 ending a session, bringing one, deleting a branch — is asked again by that command in its session, with fresh

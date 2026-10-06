@@ -231,7 +231,7 @@ fn script(what: &What) -> String {
     let mut s = String::from("exec 3>&1 1>&2\nfail=0\n");
     s.push_str(SYNC);
     s.push_str(
-        "export RUSTFLAGS='-C force-frame-pointers=yes'\n\
+        "export RUSTFLAGS='-C force-frame-pointers=yes -C split-debuginfo=off'\n\
          mkdir -p /out\n\
          took() { t=$(date +%s); r=0; \"$@\" || r=$?; echo \"took $(( $(date +%s) - t )) s: $*\"; return $r; }\n\
          cd trace\n\
@@ -247,12 +247,16 @@ fn script(what: &What) -> String {
             s.push_str("took cargo clippy --release --locked --all-targets -- -D warnings || fail=1\n")
         }
         What::Probe(probe, scenarios, options) => {
-            s.push_str("cd /work/tarae\ntook cargo test --locked --profile perf --test perf --no-run\n");
+            s.push_str(
+                "cd /work/tarae\ntook cargo test --locked --profile perf --features dev-grammars --test perf \
+                 --no-run\n",
+            );
             let options: String = options.iter().map(|o| format!(" {o}")).collect();
             for sc in scenarios {
                 s.push_str(&format!(
                     "took /target/release/tarae-trace {probe}{options} --comm tarae --name {sc} --out /out \
-                     --for {FOR} -- cargo test --locked --profile perf --test perf -- --exact {sc} --nocapture \
+                     --for {FOR} -- cargo test --locked --profile perf --features dev-grammars --test perf \
+                     -- --exact {sc} --nocapture \
                      || fail=1\n"
                 ));
             }

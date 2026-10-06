@@ -506,11 +506,18 @@ mod tests {
         for core in ["toml", "markdown", "markdown_inline", "comment"] {
             assert!(crate::runtime::builtin_grammar(core).is_some(), "{core}: core, in every build");
         }
-        // build.rs keys `dev` off the debug profile (what turns debug assertions on) or debug info (`cargo
-        // perf`'s profile): `cargo test` has rust built in, `cargo test --release` (like `cargo install`) doesn't
+        // build.rs keys `dev` off the debug profile (what turns debug assertions on) or `--features
+        // dev-grammars` (`cargo perf`) — never debug info: `cargo test` has rust built in, `cargo test --release`
+        // (like `cargo install`, line tables and all) doesn't
         let rust = crate::runtime::builtin_grammar("rust").is_some();
         assert_eq!(rust, cfg!(tarae_dev_grammars) || cfg!(feature = "bundled-grammars"));
         const { assert!(!cfg!(debug_assertions) || cfg!(tarae_dev_grammars), "every debug build has them") };
+        const {
+            assert!(
+                cfg!(debug_assertions) || cfg!(tarae_dev_grammars) == cfg!(feature = "dev-grammars"),
+                "outside the debug profile, only when asked"
+            )
+        };
     }
 
     fn source(name: &str, git: &str, rev: &str) -> Source {

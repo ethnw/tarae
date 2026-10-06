@@ -59,8 +59,8 @@ jobs:
       - run: cargo test --locked --workspace --features "${{ matrix.features }}"
       # The perf budgets skip themselves at the test profile's opt-level 0 — here in the `perf` profile
       # (release), pass or fail with TARAE_PERF_SLACK above; `cargo perf` keeps numbers, which shared runners
-      # are too noisy for
-      - run: cargo test --locked --features "${{ matrix.features }}" --profile perf --bin tarae -- perf_budget
+      # are too noisy for. The dev grammars (rust) for the syntax budgets: only debug builds have them unasked
+      - run: cargo test --locked --features dev-grammars --features "${{ matrix.features }}" --profile perf --bin tarae -- perf_budget
 
   # Downloads and builds a grammar from GitHub (the #[ignore]d network test).
   network:
