@@ -14,9 +14,11 @@
 //! Adopted = in a session neither tarae's nor its own (a child tarae starts is in one of those two), or seen
 //! under another parent before (`Reaper::adopted`); the rest is left a zombie, never a wrong kill. One adopted
 //! is held by a pidfd and reaped when two looks `GRACE` apart found it still unreaped.
-//! What a run of Claude's left is told by its environment (`sandbox::MARK` = the run's tag — kept by Gradle's
-//! daemon and passed to the Kotlin daemon, measured) and ended with its session, or when tarae quits
-//! (`sandbox::end_leftovers`, through `end`). Elsewhere (macOS) none of this exists: no subreaper, nothing to do.
+//! Since each session has a keeper (`sandbox::keeper`), what a sandboxed run leaves is the keeper's — it is
+//! their subreaper, and ends them with itself. tarae is the last parent of what a keeper that died left: told by
+//! its environment (`sandbox::MARK` = the run's tag — kept by Gradle's daemon and passed to the Kotlin daemon,
+//! measured) and ended (`sandbox::end_left_by_tag`, `sandbox::end_leftovers`, through `end`). Elsewhere (macOS)
+//! none of this exists: no subreaper, nothing to do.
 
 use std::collections::HashSet;
 use std::time::{Duration, Instant};

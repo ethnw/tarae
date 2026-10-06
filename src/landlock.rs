@@ -4,8 +4,8 @@
 //! the file rights that version has, grant some of them beneath paths (`Ruleset::allow`), and apply it to the
 //! calling thread (`Ruleset::apply`) — from then on whatever the ruleset handles is refused unless a rule
 //! grants it. Only the calling thread: threads already running stay as they were; threads and processes it
-//! starts afterwards inherit it, and nothing takes it off again — so a command is started confined from a
-//! short-lived thread of its own (`confined`).
+//! starts afterwards inherit it, and nothing takes it off again — so a run confines itself, forked by its
+//! session's keeper, with the ruleset tarae made (`restrict_self`, `sandbox::keeper`).
 //!
 //! The network rights a version has are handled with no rule (`handled_net`, `UNGRANTED`): a run's own TCP
 //! and UDP `bind`/`connect`, its UDP send to an address, and its connect to a unix socket by path are
@@ -14,7 +14,7 @@
 //! second lock under seccomp's routing, for a path the filter might miss.
 
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::path::Path;
 #[cfg(test)]
 use std::process::{Child, Command};
@@ -79,6 +79,13 @@ pub const NET_CONNECT_TCP: u64 = 1 << 1;
 /// auto-binds, which needs the bind right too — tarae's supervisor does both for a run.
 pub const NET_BIND_UDP: u64 = 1 << 2;
 pub const NET_CONNECT_SEND_UDP: u64 = 1 << 3;
+
+/// The newest rights tarae asks for (ABI 9's, 10's) — taken by a kernel reporting ABI 11 (Linux 7.3, 2026-10-06:
+/// every `landlock::tests` test ran there), but a kernel that refuses them anyway (a backport numbering them
+/// otherwise) gets a ruleset without them (`Ruleset::handling`): they're a second lock under tarae's supervisor,
+/// and refused they'd fail every run.
+const NEWEST_FS: u64 = RESOLVE_UNIX;
+const NEWEST_NET: u64 = NET_BIND_UDP | NET_CONNECT_SEND_UDP;
 
 /// Scopes (ABI 6): what a confined process may reach of processes outside its domain — tarae's, the user's
 /// others. Connecting to an abstract unix socket made outside it (tarae's supervisor refuses abstract names
@@ -179,28 +186,32 @@ impl Ruleset {
     /// A ruleset handling every file right ABI `abi` has (`handled`), its network rights (`handled_net`), and
     /// its scopes (`scopes`).
     pub fn new(abi: u32) -> io::Result<Ruleset> {
-        let attr = RulesetAttr {
-            handled_access_fs: handled(abi),
-            handled_access_net: handled_net(abi),
-            scoped: scopes(abi),
+        Ruleset::handling(abi, handled(abi), handled_net(abi))
+    }
+
+    /// `new`, handling `fs` and `net`. A kernel refusing them as unknown (`EINVAL`) while they hold
+    /// `NEWEST_FS`/`NEWEST_NET` gets a ruleset without those, said once in the log — not every run refused.
+    fn handling(abi: u32, fs: u64, net: u64) -> io::Result<Ruleset> {
+        let (fd, fs) = match create(fs, net, scopes(abi)) {
+            Err(e)
+                if e.raw_os_error() == Some(libc::EINVAL) && ((fs & NEWEST_FS) | (net & NEWEST_NET)) != 0 =>
+            {
+                static SAID: std::sync::Once = std::sync::Once::new();
+                SAID.call_once(|| {
+                    let line = format!(
+                        "this kernel (Landlock ABI {abi}) refused the newest rights tarae asks for — unix \
+                         sockets by path, UDP: handled without them (tarae's supervisor still decides each)"
+                    );
+                    crate::log::line("sandbox", "warn", &line);
+                });
+                let fs = fs & !NEWEST_FS;
+                (create(fs, net & !NEWEST_NET, scopes(abi))?, fs)
+            }
+            made => (made?, fs),
         };
-        // SAFETY: the attribute is a live struct of the size given; the kernel only reads it.
-        let fd = unsafe {
-            libc::syscall(
-                libc::SYS_landlock_create_ruleset,
-                &attr as *const RulesetAttr,
-                std::mem::size_of::<RulesetAttr>(),
-                0u32,
-            )
-        };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: a new descriptor of our own, closed with the ruleset.
-        let fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
         Ok(Ruleset {
             fd,
-            handled: attr.handled_access_fs,
+            handled: fs,
             abi,
             #[cfg(test)]
             added: Vec::new(),
@@ -269,18 +280,52 @@ impl Ruleset {
     /// setuid program it starts gains nothing. From ABI 7 the denials of what the thread runs are logged
     /// (`RESTRICT_SELF_LOG_NEW_EXEC_ON`).
     pub fn apply(&self) -> io::Result<()> {
-        let flags = if self.abi >= 7 { RESTRICT_SELF_LOG_NEW_EXEC_ON } else { 0 };
-        // SAFETY: plain prctl/syscall on this thread with integer arguments.
-        unsafe {
-            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
-                return Err(io::Error::last_os_error());
-            }
-            if libc::syscall(libc::SYS_landlock_restrict_self, self.fd.as_raw_fd(), flags) != 0 {
-                return Err(io::Error::last_os_error());
-            }
-        }
-        Ok(())
+        restrict(self.fd.as_fd(), self.abi)
     }
+
+    /// The ruleset's descriptor — what a keeper's run is handed to confine itself with (`restrict_self`).
+    pub fn fd(&self) -> BorrowedFd<'_> {
+        self.fd.as_fd()
+    }
+}
+
+/// A new ruleset handling `fs`, `net` and `scoped`.
+fn create(fs: u64, net: u64, scoped: u64) -> io::Result<OwnedFd> {
+    let attr = RulesetAttr { handled_access_fs: fs, handled_access_net: net, scoped };
+    // SAFETY: the attribute is a live struct of the size given; the kernel only reads it.
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            &attr as *const RulesetAttr,
+            std::mem::size_of::<RulesetAttr>(),
+            0u32,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: a new descriptor of our own, closed with the ruleset.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
+}
+
+/// Confines the calling thread to the ruleset `fd` came with (a keeper's run: `sandbox::keeper`), as
+/// `Ruleset::apply` does — the denials of what it runs logged from ABI 7.
+pub fn restrict_self(fd: BorrowedFd) -> io::Result<()> {
+    restrict(fd, abi()?)
+}
+
+fn restrict(fd: BorrowedFd, abi: u32) -> io::Result<()> {
+    let flags = if abi >= 7 { RESTRICT_SELF_LOG_NEW_EXEC_ON } else { 0 };
+    // SAFETY: plain prctl/syscall on this thread with integer arguments.
+    unsafe {
+        if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if libc::syscall(libc::SYS_landlock_restrict_self, fd.as_raw_fd(), flags) != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
 }
 
 /// `path` (absolute) opened with `flags` (and close-on-exec) through no link at all — any component one, the
@@ -310,13 +355,16 @@ pub fn open_unlinked(path: &Path, flags: libc::c_int) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
 }
 
-/// A name of its own for a thread about to confine itself (`confined`, the audit probe): Landlock's audit
-/// record of a domain names tarae's process (`pid=` is the process's id, not the thread's — the user's VM)
-/// and the thread's name as it was then (`comm=`), so the name is what tells one run's records from another's.
-/// Within the kernel's 15 bytes.
+/// A name of its own for a process or thread about to confine itself (a keeper's run, the audit probe):
+/// Landlock's audit record of a domain names the process that made it (`pid=` is the process's id, not the
+/// thread's — the user's VM) and its name as it was then (`comm=`), so the name is what tells one run's records
+/// from another's. tarae's pid is in it, so it's this tarae's alone: a run's watch hears the name before the run
+/// has a pid (`sandbox::spawn`) and goes by the name alone until then. Within the kernel's 15 bytes (`tl-`, a
+/// pid's 6 hex digits at most — `pid_max` ≤ 2²² —, `-`, 5 for the count: a million runs before one comes again).
 pub fn thread_name() -> String {
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    format!("tl-{}", SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) & 0xF_FFFF;
+    format!("tl-{:x}-{n:x}", std::process::id())
 }
 
 /// The calling thread's name as the kernel has it (`comm`) — what Landlock's audit records name.
@@ -330,9 +378,10 @@ pub fn comm() -> io::Result<String> {
     Ok(String::from_utf8_lossy(&buf[..end]).into_owned())
 }
 
-/// `start` on a short-lived thread of its own confined to `rules` — `also` applied after them (the seccomp
-/// filter), what it gives handed to `start` — leaving the caller as it was: the confinement ends with the
-/// thread, which has a name of its own (`thread_name`). Waits for `start` only.
+/// Tests: `start` on a short-lived thread of its own confined to `rules` — `also` applied after them, what it
+/// gives handed to `start` — leaving the caller as it was: the confinement ends with the thread, which has a
+/// name of its own (`thread_name`). Waits for `start` only. (tarae's runs are confined by themselves, forked by
+/// their session's keeper: `sandbox::keeper`.)
 ///
 /// Why a process `start` starts is confined: Landlock's domain (and `no_new_privs`) belong to a thread's
 /// credentials, and a new process takes its credentials from the thread that starts it. glibc's
@@ -341,6 +390,7 @@ pub fn comm() -> io::Result<String> {
 /// So the child, and all it starts, has this thread's ruleset; a process started from any other thread at
 /// the same time has that thread's own. What the command opens to start — its program, libraries,
 /// `/dev/null` for its stdin — is opened under the ruleset already: it must grant them.
+#[cfg(test)]
 pub fn confined<A, T: Send>(
     rules: &Ruleset,
     also: impl FnOnce() -> io::Result<A> + Send,
@@ -356,7 +406,7 @@ pub fn confined<A, T: Send>(
 }
 
 /// Starts `cmd` confined to `rules` with std's spawn (`confined`) — the tests' way; tarae's runs go through
-/// `sandbox::spawn`.
+/// `sandbox::spawn` (their keeper).
 #[cfg(test)]
 pub fn spawn(rules: &Ruleset, cmd: &mut Command) -> io::Result<Child> {
     confined(rules, || Ok(()), |()| cmd.spawn())
@@ -486,7 +536,8 @@ mod tests {
         let name = || confined(&rules, || Ok(()), |()| comm()).unwrap();
         let (a, b) = (name(), name());
         assert_ne!(a, b);
-        assert!(a.starts_with("tl-") && b.starts_with("tl-"), "{a} {b}");
+        let ours = format!("tl-{:x}-", std::process::id());
+        assert!(a.starts_with(&ours) && b.starts_with(&ours), "{a} {b}: this tarae's own");
     }
 
     /// The kernel says its version, and a ruleset leaves out the rights older versions don't know.
@@ -520,6 +571,36 @@ mod tests {
         );
         let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
         true
+    }
+
+    /// A kernel refusing the newest rights (`NEWEST_FS`, `NEWEST_NET` — asked here of one whose ABI hasn't them
+    /// all, as a bit numbered otherwise would be refused) still gets a ruleset, without them: what it
+    /// knows stays handled — a confined thread's own TCP bind is refused.
+    #[test]
+    fn rights_a_kernel_refuses_are_left_out_not_every_run() {
+        let test = "rights_a_kernel_refuses_are_left_out_not_every_run";
+        let Some(abi) = kernel_abi(test) else { return };
+        if below(test, abi, 4, "network rights") {
+            return;
+        }
+        if abi >= 10 {
+            let line = format!(
+                "{}landlock::tests::{test} — this kernel's Landlock is ABI {abi}: it has them all\n",
+                crate::test_results::SELF_SKIP
+            );
+            let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+            return;
+        }
+        let r = Ruleset::handling(abi, handled(abi) | NEWEST_FS, handled_net(abi) | NEWEST_NET)
+            .expect("made without them");
+        assert_eq!(r.handled & NEWEST_FS, 0, "left out");
+        let bind = std::thread::spawn(move || {
+            r.apply().expect("the ruleset applies");
+            std::net::TcpListener::bind("127.0.0.1:0").map(drop).map_err(|e| e.raw_os_error())
+        })
+        .join()
+        .unwrap();
+        assert_eq!(bind, Err(Some(libc::EACCES)), "TCP still handled");
     }
 
     /// From ABI 4 a confined thread's own TCP connect and bind are refused by the kernel — the connect to a

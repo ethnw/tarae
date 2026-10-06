@@ -1,7 +1,8 @@
 # The sandbox keeper: one per session, its namespaces, one egress proxy (Linux)
 
-Design, 2026-10-06. Status: **decided** (D2–D21 below). Step 1 is built (§Steps). macOS is unchanged: Seatbelt, as
-`src/sandbox.rs` has it.
+Design, 2026-10-06. Status: **decided** (D2–D23 below). Steps 1 and 2 are built (§Steps): every Linux session's
+sandboxed runs are forked by its keeper, without namespaces yet (`src/sandbox/keeper.rs`, `src/sandbox/channel.rs`).
+macOS is unchanged: Seatbelt, as `src/sandbox.rs` has it.
 
 ## What it's for
 
@@ -38,15 +39,15 @@ each address it reaches. It leaves four things open:
 | D16 | `/tmp` stays shared |
 | D18 | Another session's loopback listener is refused, even with `llm.sandbox-localhost` |
 | D21 | Later, its own step: the supervisor and the proxy as one confined process per session |
-| D23 | The supervisor and the proxy talk only over a `SOCK_SEQPACKET` socketpair inside tarae: typed messages plus `SCM_RIGHTS`, with the keeper channel's framing and bounded parser (one protocol module, fuzzed once), and no state shared between them (no `Arc` or `Mutex` across the boundary). The run's traffic is the other socketpair. In one process this is discipline, and it makes the D21 move mechanical; it is not isolation |
+| D23 | The supervisor and the proxy talk only over a Rust channel (`mpsc`) of typed, owned messages. **Supervisor → proxy**: the traffic end (`OwnedFd`), the session's id, and the connection's rules as a read-only snapshot (an `Arc`, never mutated). **Proxy → supervisor**: `Refused` and log lines. No socketpair between them, and no shared mutable state (no `Mutex` or other cell both sides write). The run's traffic socketpair stays. **Why not a socket**: in one process a socket isolates nothing; the channel keeps the same discipline at no serialization cost. If D21 is ever done, these messages move onto the keeper channel's wire format then (`channel.rs`). The keeper's own channel stays `SOCK_SEQPACKET` + `SCM_RIGHTS`: the keeper is another process |
 
 ## The shape
 
 ```
  tarae                                                     │ per session
  ─────                                                     │ ───────────
- the egress proxy: one, threads ◀── socketpair end ──┐     │ the KEEPER (a subprocess):
- the supervisor: threads, state per session ─────────┘     │   with user namespaces: PID 1 of user+net+ipc+pid+mnt
+ the egress proxy: one, threads ◀── mpsc: traffic end ─┐   │ the KEEPER (a subprocess):
+ the supervisor: threads, state per session ───────────┘   │   with user namespaces: PID 1 of user+net+ipc+pid+mnt
    decides each address, makes each allowed call           │   without: a fork server and child subreaper
  ── request channel (socketpair, close-on-exec) ──────────▶│   forks every run; parent or reaper of what runs leave
  ◀── each run's pidfd · status · its listener by pidfd_getfd│     └─ run: Landlock + seccomp of its own, then exec
@@ -57,7 +58,7 @@ each address it reaches. It leaves four things open:
 | **Where** | threads in tarae | threads in tarae | a process: `tarae --sandbox-keeper` |
 | **How many** | one for all sessions | one set per session (its policy, grants, report, log) | one per session, in every tier |
 | **Does** | parses CONNECT and the TLS ClientHello's SNI, resolves the name itself, checks every address, connects to the very address it checked, relays | takes each run's seccomp listener, reads the address, decides (`may_reach`, the route), and makes the call itself on the run's socket. Never `CONTINUE` | forks each run, reaps it, reports its status; owns what runs leave |
-| **Talks through** | its control socketpair with the supervisor only (D23): a message with the session's rules and the run's end of the traffic socketpair in; `Refused` and log lines out. No state shared with the supervisor | the policy at run start, `Refused` out, the listener by descriptor (nothing else, so moving it into a process later, D21, is mechanical); to the proxy, the control socketpair (D23) | the request channel |
+| **Talks through** | a channel (`mpsc`) with the supervisor only (D23): in, an owned message per connection (the traffic end, the session's id, its rules as a read-only snapshot); out, `Refused` and log lines. No mutable state shared with the supervisor | the policy at run start, `Refused` out, the listener by descriptor (nothing else, so moving it into a process later, D21, is mechanical); to the proxy, the channel (D23) | the request channel (`SOCK_SEQPACKET`, `channel.rs`) |
 | **Holds** | the session's rules per socket | the run's listener; descriptors it takes with `pidfd_getfd` | stdio from `/dev/null`, its channel's end; no capability |
 
 **The supervisor needs nothing from tarae mid-run.** Its `Policy` is an `Arc` cloned when the run starts
@@ -73,13 +74,14 @@ out is D21's step, decided and measured as that.
 
 ### Its birth
 
-From a worker, before the session's first sandboxed run:
+On the worker that makes a run's policy (`sandbox::confined` → `keeper::ready`), before the session's first sandboxed
+run; a run never makes one on the main loop:
 
 | Tier | Birth | What it is |
 |---|---|---|
 | with user namespaces | `clone3(CLONE_NEWUSER \| NEWNET \| NEWIPC \| NEWPID \| NEWNS \| CLONE_PIDFD)` | PID 1 of the session's namespaces |
 | … where `/proc` can't be mounted (Docker's masked `/proc`) | the same without `CLONE_NEWPID` | the namespaces' fork server, a child subreaper |
-| without user namespaces | `clone3(CLONE_PIDFD)`: no namespaces | a plain fork server and child subreaper (`PR_SET_CHILD_SUBREAPER`) |
+| without user namespaces (*built*) | `clone3(CLONE_PIDFD)`: no namespaces — or `clone(2)` with the same flag where a filter answers `clone3` with `ENOSYS` (Docker's default profile does, so that libcs fall back) | a plain fork server and child subreaper (`PR_SET_CHILD_SUBREAPER`) |
 
 Until its exec the child is a copy of a multithreaded process, so it makes raw system calls only:
 
@@ -88,40 +90,75 @@ Until its exec the child is a copy of a multithreaded process, so it makes raw s
    `/dev/ptmx`; a `tmpfs` on `/dev/shm` (D10).
 3. `lo` up (`ioctl(SIOCSIFFLAGS)`).
 4. Every capability dropped: each bounding-set bit, then `capset` to zero, no ambient set.
-5. exec of `tarae --sandbox-keeper` through the descriptor of its own binary (`/proc/self/fd/N`).
+5. stdio to `/dev/null`, its channel to fd 3, and `SIGCHLD` blocked, so every thread of the new process starts with it
+   blocked.
+6. `execveat` of tarae's own binary (an `O_PATH` descriptor of `/proc/self/exe`, opened once: the binary running, not
+   whatever replaced it on disk) as `tarae --sandbox-keeper`, with an **empty environment**.
 
-Steps 1–3 are only in the namespaced tiers. **A keeper that can't start fails the run with the reason. It never falls
-back to running unsandboxed**, and today's confining thread + `posix_spawn` path retires for sandboxed runs.
+Steps 1–4 are the namespaced tiers'. **A keeper that can't start fails the run with the reason. It never falls back to
+running unsandboxed.** The confining thread + `posix_spawn` path is retired.
 
-The keeper then sets `PR_SET_DUMPABLE` 0 and `PR_SET_NO_NEW_PRIVS`, and runs one single-threaded `poll` loop over its
-channel and a `signalfd` for `SIGCHLD`. It installs no signal handler: as PID 1 it then takes no signal from inside
-its namespace.
+The keeper, first thing in tarae's `main`, before anything of the editor:
+- sets `PR_SET_DUMPABLE` 0, `PR_SET_NO_NEW_PRIVS` and `PR_SET_CHILD_SUBREAPER`;
+- drops every capability, as step 4 does (without namespaces it holds some only as root, in a container);
+- marks its channel close-on-exec;
+- makes a session of its own;
+- sets every signal to its default (Rust's runtime had ignored `SIGPIPE`, and an ignored signal survives exec);
+- keeps `SIGCHLD` blocked before making its `signalfd`, so no handler or default ever runs for it.
+
+It then runs one single-threaded `poll` loop over its channel, its `signalfd` and each run's failure pipe. It installs
+no signal handler: as PID 1 it then takes no signal from inside its namespace.
+
+**Why the keeper holds no Landlock or seccomp of its own:**
+- **Nothing of tarae's is in it to take**: an empty environment, only its channel and stdio, and no capability.
+- **No run can trace it or read its `/proc`**: it's non-dumpable, and Landlock's ptrace rule keeps a domain off
+  processes outside it.
+- **From ABI 6 no run can signal it** (Landlock's scope).
+- **Below 6, a run that kills it only fails closed**: its runs fail, what they left ends, and tarae says so.
 
 ### The request channel
 
 A `socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC)` made at the birth: unnamed, one end each, every forked child
-closes the keeper's end first. Its framing and bounded parser are one protocol module, which the supervisor–proxy
-channel uses too (D23).
+closes the keeper's end first. Its framing and bounded parser are one protocol module (`channel.rs`). The
+supervisor–proxy messages would move onto it only if they ever leave tarae's process (D21, D23).
+- **One record is one message**: a kind byte, then its fields.
+- **Limits**: a record ≤ 1 MiB, ≤ 8 descriptors, a list ≤ 4096 items, exactly the descriptors its kind takes.
+- Each limit is a refusal, never a panic.
 
 | tarae → keeper | |
 |---|---|
-| `Run { id, argv, envp, cwd, pty }` + `SCM_RIGHTS` | `envp` is the run's `RunEnv`; the descriptors are the Landlock ruleset tarae built (`linux::confine`), stdio (none with `pty`), and the run's handoff socket. Sizes are bounded; a malformed request gets an error, never a crash |
-| `Signal { id, sig }` | cancel: the keeper signals the run's process group |
+| `Run { id, program, argv, envp, cwd, comm, served }` + `SCM_RIGHTS` | `program` resolved by tarae (`spawn::resolve`); `envp` the run's environment as `spawn::environment` makes it; `comm` the name the run gives itself (≤ 15 bytes). The descriptors: the Landlock ruleset tarae built (`linux::confine`), stdin (`/dev/null`, tarae's), stdout, stderr, and served, the run's handoff socket. A malformed request gets `Failed`, never a crash. `pty` comes with step 3 |
+| `Signal { id, sig }` | cancel: the keeper signals the run's process group, only while it hasn't reaped it (`dap::term_group` asks here: once the keeper has reaped a run, a kill from tarae could reach a reused pid) |
+| `AskUsage` | its own Rss and Pss (M3): its `smaps_rollup` is unreadable to tarae |
 | `End`, or EOF | end every run and leftover, then exit |
 
 | keeper → tarae | |
 |---|---|
-| `Started { id }` + `SCM_RIGHTS` | the child's pidfd, and with `pty` the master from the session's own `devpts` |
-| `Exited { id, status }` | the keeper is the child's parent and reaps it. Orphans it reaps are reported as counts |
-| `Failed { id, errno, step }` | the child failed before exec (`chdir`, Landlock, seccomp, the handoff, exec), told as the run's failure |
+| `Ready { pid }` | once, at its start |
+| `Started { id, pid }` + `SCM_RIGHTS` | the child's pidfd. The main loop waits for it (≤ 1 s, as it waited for `posix_spawn`) |
+| `Exited { id, status }` | the keeper is the child's parent and reaps it (`spawn::wait` asks here: a keeper's run isn't tarae's child) |
+| `Failed { id, errno, step }` | the child failed before exec (`chdir`, Landlock, seccomp, the handoff, exec), also said in its stderr; it exits 127 |
+| `Reaped { n }` | orphans it reaped, as a count (the log) |
+| `Usage { rss_kb, pss_kb }` | the answer to `AskUsage` |
 
-The forked child: closes the channel; `setsid` (and the controlling terminal with `pty`); `dup2`s its stdio;
-`chdir(cwd)`; `landlock_restrict_self(ruleset)`; seccomp (`seccomp::apply`); in served mode writes its listener's
-number on the handoff socket, waits while tarae runs `pidfd_getfd` and starts `supervisor::serve`, reads one byte
-back; closes the handoff socket (the listener is close-on-exec); execs.
+**The forked child**, step by step:
+1. Closes the channel.
+2. Sets `PR_SET_DUMPABLE` 1 again, for the handoff below. Without a user namespace, `pidfd_getfd` needs ptrace access
+   to the child, which a non-dumpable process refuses unless the caller has `CAP_SYS_PTRACE`. With one (step 3),
+   tarae's capabilities in the namespace cover it. A dumpable run is what every run was before, and what exec makes an
+   ordinary program anyway. Landlock's ptrace rule keeps other confined runs off it.
+3. `setsid` (and the controlling terminal with `pty`); `dup2`s its stdio; `chdir(cwd)`.
+4. `PR_SET_NAME` = `comm`, which Landlock's audit names beside the run's own pid.
+5. Unblocks every signal.
+6. `landlock_restrict_self(ruleset)`; then seccomp (`seccomp::apply`).
+7. Served: writes its listener's number on the handoff socket. tarae (a thread of its own, not the main loop) runs
+   `pidfd_getfd`, hands the listener to `supervisor::serve`, and writes one byte back.
+8. Execs.
 
-tarae uses the pidfd for the status, `pidfd_getfd`, cancel and the audit's pid (`fdinfo`'s `Pid:`). Yama 1 holds:
-tarae → keeper → run, and what runs leave stays below the keeper.
+Each step's failure is written on a close-on-exec pipe the keeper reads.
+
+tarae uses the pidfd for `pidfd_getfd`. The run's pid comes with `Started`. Yama 1 holds: tarae → keeper → run, and
+what runs leave stays below the keeper.
 
 ### What runs leave
 
@@ -131,23 +168,31 @@ tarae → keeper → run, and what runs leave stays below the keeper.
   descendants that aren't a current run. On `End` or EOF it ends them itself (TERM, then KILL after `LEFT_TERM`),
   then exits. No `/proc` walk by tag.
 - **When the keeper dies** (OOM, a bug, `:procs`; below Landlock ABI 6 without a PID namespace a run can kill it), its
-  orphans go to tarae, the subreaper (`reaper.rs`). tarae knows them by the dead keeper's pid, and by `MARK`, kept
-  only for this. It ends them, says so, and remakes the keeper (D11). The run under way is reported failed. The runs'
-  seccomp filters stay on: with its listener gone, an address-bearing call fails and reaches nothing.
-- `:procs` shows each session's keeper (`· the session's keeper`), its runs and leftovers under it.
+  orphans go to tarae, the subreaper (`reaper.rs`).
+  - **Its runs fail closed**: their waits answer "the session's keeper ended", and tarae ends them by their pids.
+  - **What they left** is ended by `MARK`, kept only for this.
+  - **tarae says so in the log, and the next run's policy makes a new keeper** (D11). A second death within 10
+    minutes and none is made: runs fail, saying why.
+  - **The runs' seccomp filters stay on**: with its listener gone, an address-bearing call fails and reaches nothing.
+- `:procs` shows each session's keeper (`sandbox keeper` — `the session's keeper · <checkout>`), its runs and
+  leftovers under it. Its memory is the resident one from its `stat`, which stays readable for a non-dumpable
+  process; its Pss it says itself (`Usage`).
 
 ### When it ends
 
-The session ends (`:session-end`); tarae quits, restarts or crashes (the channel is close-on-exec, so the keeper sees
-EOF); the session's policy key changes (D14: a daemon started under the old key would keep its rights, narrower or
-wider). There is no idle end; Gradle's and Kotlin's own timeouts end their daemons.
+- **The session ends** (`:session-end`), or **tarae quits, restarts or crashes**: `End`, or EOF on its channel, which
+  is close-on-exec.
+- **The session's policy key changes** (D14): a daemon started under the old key would keep its rights, narrower or
+  wider. The old keeper takes no run more. What its runs left ends at once, and it ends itself after its last run
+  (`keeper::ready`).
+- **There is no idle end**; Gradle's and Kotlin's own timeouts end their daemons.
 
 ### Its protection
 
 | Property | A+ / B+ | A / B | C / D | Test |
 |---|---|---|---|---|
 | non-dumpable | yes | yes | yes | `the_keeper_is_not_dumpable` |
-| no capability in what it forks | dropped before exec | dropped before exec | it has none | `a_command_holds_no_capability` |
+| no capability in what it forks | dropped before exec | dropped before exec | dropped at its start (it has some only as root) | `a_command_holds_no_capability` |
 | unreachable by its runs' signals | PID 1, and Landlock ABI 6 | Landlock ABI 6; below it a run can kill it | as A / B | `a_command_cant_signal_the_keeper` (from ABI 6, and below it in A+/B+); else `a_killed_keeper_fails_closed_and_is_remade` |
 | unreachable by ptrace and `/proc/<pid>/{mem,environ,fd}` | non-dumpable + Landlock's ptrace scope | same | same | `the_keeper_is_not_dumpable` |
 | holds only its channel and stdio | yes | yes | yes | `a_command_holds_only_its_stdio` |
@@ -203,16 +248,18 @@ the run's socket (`SETFD`), the other goes to the proxy **with the session and i
 stolen or forged. Explicit proxying: `HTTPS_PROXY`/`HTTP_PROXY` in the run's `RunEnv` name a reserved address, and a
 connect there is handed over the same way.
 
-**Two socketpairs, nothing shared (D23).** The run's traffic goes over the one above. Everything else between the
-supervisor and the proxy goes over a second one, a `SOCK_SEQPACKET` control socketpair made when tarae starts:
-- **supervisor → proxy**: one typed message per connection, with the session, its egress rules and the traffic end
-  as `SCM_RIGHTS`;
+**One socketpair for the traffic, a channel for the rest, nothing mutable shared (D23).** The run's traffic goes over
+the socketpair above. Everything else between the supervisor and the proxy goes over a Rust channel (`mpsc`) of typed,
+owned messages:
+- **supervisor → proxy**: one message per connection, carrying the traffic end (`OwnedFd`), the session's id, and the
+  connection's egress rules as a read-only snapshot (an `Arc`, never mutated once sent);
 - **proxy → supervisor**: `Refused` (the session, the name, why) and log lines.
 
-It uses the keeper channel's framing and bounded parser, one protocol module fuzzed once. The two share no state:
-no `Arc` or `Mutex` crosses between them, so the proxy knows only what a message carried. In one process that is
-discipline, not isolation: a bug in either still reaches all of tarae's memory. What it buys is that D21 moves them
-into a confined process without changing what they say to each other.
+No `Mutex` or other cell both sides write crosses between them, so the proxy knows only what a message carried.
+- **Why not a socket.** In one process, a socket would isolate nothing: a bug in either side still reaches all of
+  tarae's memory. The channel keeps the same discipline without serializing anything.
+- **If D21 is ever done** and they move into a confined process, these messages move onto the keeper channel's wire
+  format (`channel.rs`), fuzzed as it is, without changing what they say.
 
 | Parser | Input | Limits |
 |---|---|---|
@@ -294,15 +341,40 @@ Each lands on its own. The test that pins it is seen failing once with the chang
      sandbox` passed (111), every supervisor run test with `RESOLVE_UNIX` handled and granted nowhere. ABI 11's
      own addition isn't handled: tarae's rulesets ask for the rights up to 10.
 2. **The keeper without namespaces, for every session; the supervisor behind its few messages** (tiers C/D).
-   - Tests: `a_command_holds_only_its_stdio`, `the_keeper_is_not_dumpable`, `tarae_takes_the_listener_of_a_keeper_child`,
-     `exit_status_and_cancel_go_through_the_keeper`, `leftovers_are_the_keepers_children` (a run forks `env -i setsid
-     sleep`: its parent is the keeper, and `End` ends it), `the_keeper_ends_with_its_channel`,
-     `a_killed_keeper_fails_closed_and_is_remade`, `the_channel_parser_never_panics` (the protocol module's one
-     fuzz loop: malformed, oversized and truncated messages, and descriptors that don't match the message, each
-     answered with an error), every Linux sandbox run test unchanged.
-   - Break once: no `PR_SET_CHILD_SUBREAPER`.
+   - *Built*:
+     - `channel.rs` (the protocol);
+     - `keeper.rs` (both sides; `--sandbox-keeper` first thing in `main`);
+     - the supervisor in, the policy at its run's start and its listener; out, `Refused` on a channel
+       (`supervisor::Served`, `sandbox::told`);
+     - the confining thread + `posix_spawn` path removed (`landlock::confined` stays for its own tests).
+   - Tests (`sandbox::keeper::tests`, `sandbox::channel::tests`), each broken once:
+     - `the_channel_parser_never_panics`: the protocol module's one fuzz loop, 200,000 mutations of every kind's
+       record, each answered with a message (that very record) or a refusal. Broken by reading without its bounds
+       check: a panic.
+     - `a_message_and_its_descriptors_cross_the_socket`.
+     - `the_keeper_ends_with_its_channel`. Broken by ignoring EOF.
+     - `the_keeper_is_not_dumpable`, as an ordinary user. Broken by dropping `PR_SET_DUMPABLE` 0.
+     - `a_command_holds_only_its_stdio`. Broken by leaving the channel open in the child.
+     - `a_command_holds_no_capability`, step 3's test, here for C/D. Broken by not dropping capabilities: root's set
+       showed.
+     - `exit_status_and_cancel_go_through_the_keeper`. Broken by ignoring `Signal`.
+     - `tarae_takes_the_listener_of_a_keeper_child`, as an ordinary user: a port the policy opens is reached, port 9
+       refused, and the refusal comes out through `Refused`. Broken by leaving the child non-dumpable: "handing its
+       calls to tarae: Operation not permitted".
+     - `leftovers_are_the_keepers_children` (a run forks `env -i setsid sleep`). Broken by no
+       `PR_SET_CHILD_SUBREAPER`: its parent was init.
+     - `the_sessions_keeper_is_known` (`:procs`). Broken by leaving the line out.
+     - `a_killed_keeper_fails_closed_and_is_remade`. Broken by leaving its runs' waits unanswered.
+     - `a_keeper_says_what_it_uses`.
+   - **As an ordinary user, the dumpability tests run in a process of their own** (uid 65534 when the container makes
+     it root). Root with `CAP_SYS_PTRACE` reads and takes from any process, and a test keeper's libtest main thread
+     keeps root's capabilities, so as root these tests couldn't fail.
+   - **Every Linux sandbox test passes on both VMs (121), with one changed**:
+     `supervisor::tests::a_runs_detached_child_is_served_after_its_run`. A detached child's parent is now the
+     session's keeper, not tarae. It's served, reaped and ended whether tarae itself is a subreaper or not, with
+     `CAP_SYS_PTRACE` dropped too.
 3. **Namespaces at the keeper's birth** (A+/A/B+/B): maps, mounts, `lo`, capabilities dropped, the probe, the tiers.
-   - Tests: `a_command_holds_no_capability`, `no_pid_namespace_without_its_own_proc`,
+   - Tests: `a_command_holds_no_capability` (C/D's built in step 2), `no_pid_namespace_without_its_own_proc`,
      `a_run_sees_only_its_sessions_processes`, `the_session_mounts_keep_landlocks_rules` (a pty, a POSIX shm file and a
      `/proc/self` read under the run's ruleset), `a_pty_comes_from_the_sessions_devpts`,
      `a_command_cant_signal_the_keeper`, the probe's classification from stand-in errnos.
@@ -318,8 +390,8 @@ Each lands on its own. The test that pins it is seen failing once with the chang
      answering `127.0.0.1`, `169.254.169.254`, `fe80::1`), `it_connects_to_the_address_it_checked`,
      `sni_must_match_the_connect_host`, `plain_http_through_the_proxy_is_405`, `a_refusal_lands_in_the_sessions_report`,
      `two_sessions_rules_stay_apart`, `the_proxy_knows_only_what_a_message_carries` (D23: the proxy runs against a
-     stand-in supervisor that only writes control messages — a connection whose rules allow a name is relayed, the
-     same name under another message's rules is refused, and `Refused` comes back on the control socketpair) — the
+     stand-in supervisor that only writes messages to its channel — a connection whose rules allow a name is
+     relayed, the same name under another message's rules is refused, and `Refused` comes back on the channel) — the
      "outside" is always the test's own listeners on this machine.
    - Break once: connect by name instead of the checked address.
 6. **Per session** (D13, D14).
@@ -382,8 +454,29 @@ namespaces work but a fresh `/proc` can't be mounted (`EPERM`): tier A.
 **What a session keeps warm** (RSS, measured earlier with the kept Gradle homes): the Java project's Gradle daemon
 428–429 MB; the Kotlin project's Gradle daemon 676–693 MB plus its Kotlin daemon 446 MB. Per session, as today.
 
-**Still to measure**: M1, a run through tarae → keeper → exit status against today's `posix_spawn` (step 2); M3, an
-idle keeper's footprint and PSS for 1, 4 and 8 sessions, with and without namespaces (steps 2, 3); M4, the Gradle and
+### Step 2, the keeper without namespaces (2026-10-06)
+
+- **How**: `cargo xtask linux test --profile perf sandbox::keeper::tests::perf_`, optimized. The tests
+  `perf_a_run_through_the_keeper` and `perf_a_keepers_birth_and_memory` stay as the recurring numbers.
+- **The confining thread's numbers** were taken in the same build, before that path went.
+- **The test process** (tarae's stand-in) held 38–48 MB resident.
+- **The keepers** are the test binary run again, which is bigger than tarae's own: their Rss is an upper bound.
+
+| | colima `tarae-test`: Linux 6.8, aarch64, ABI 4 | GCP VM: Linux 7.3.0, x86_64, ABI 11 |
+|---|---|---|
+| **M1**: `true`, asked to its exit status, median of 50 — through the keeper, plain | 0.43 ms | 2.95 ms |
+| … served (the handoff and a supervisor) | 0.48 ms | 3.20 ms |
+| … through the confining thread + `posix_spawn` it replaced, plain / served | 0.33 / 0.34 ms | 1.93 / 1.95 ms |
+| **A keeper's birth** to `Ready`, median of 20 (once per session, on a worker) | 1.32 ms | 6.82 ms |
+| **M3**: one idle keeper's own Rss / Pss | 6.9 MB / 4.2 MB | 9.6 MB / 4.8 MB |
+| … 4 at once, Pss in all | 12.3 MB | 15.8 MB |
+| … 8 at once, Pss in all | 21.6 MB | 25.4 MB |
+
+- **A run costs the keeper 0.1 ms on colima and about 1 ms on the GCP VM**, which is slower at everything here.
+  That's the keeper's `fork` of itself, where `posix_spawn` didn't copy, plus the request and answer.
+- **An idle keeper shares most of its pages**: Pss per keeper falls from 4.2 to 2.7 MB with 8 of them.
+
+**Still to measure**: M3 with namespaces (step 3); M4, the Gradle and
 Kotlin pairs through the real keeper in A+ and C (step 3); M5, name lookups (`AI_ADDRCONFIG`) inside a session's netns
 with the network open (step 4); M8, tools that look at file owners inside the user namespace, where root's files show
 as `nobody` (step 3).

@@ -207,8 +207,13 @@ pub(crate) fn setsid(c: &mut Command) -> &mut Command {
     c
 }
 
-/// SIGTERM to the process group of a process launched with `setsid`.
+/// SIGTERM to the process group of a process launched with `setsid`. A sandboxed run on Linux is signalled by
+/// its session's keeper, its reaper — tarae's kill could reach a group whose pid was reused once it reaped it.
 pub(crate) fn term_group(pid: u32) {
+    #[cfg(target_os = "linux")]
+    if crate::sandbox::keeper::signal(pid, libc::SIGTERM) {
+        return;
+    }
     #[cfg(unix)]
     // SAFETY: only sends a signal to the process group we launched with `setsid`.
     unsafe {

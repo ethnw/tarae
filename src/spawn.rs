@@ -171,8 +171,9 @@ unsafe fn addchdir(f: *mut libc::posix_spawn_file_actions_t, dir: *const libc::c
     unsafe { libc::posix_spawn_file_actions_addchdir_np(f, dir) }
 }
 
-/// The child's environment: the editor's, with `cmd`'s changes.
-fn environment(cmd: &Command) -> Vec<(OsString, OsString)> {
+/// The child's environment: the editor's, with `cmd`'s changes (a keeper's run is given it so too —
+/// `sandbox::keeper`).
+pub(crate) fn environment(cmd: &Command) -> Vec<(OsString, OsString)> {
     let mut env: Vec<(OsString, OsString)> = std::env::vars_os().collect();
     for (k, v) in cmd.get_envs() {
         env.retain(|(name, _)| name != k);
@@ -186,7 +187,7 @@ fn environment(cmd: &Command) -> Vec<(OsString, OsString)> {
 /// The program's path as `execvp` in the child would find it (std's fork did that after `chdir`, with the
 /// child's `PATH`): with a `/`, from the run's folder; else the first executable along `PATH`. Absolute,
 /// so posix_spawn needn't resolve anything (macOS's misreports a relative one with a chdir as ENOENT).
-fn resolve(program: &OsStr, cwd: Option<&Path>, path_var: Option<&OsStr>) -> io::Result<PathBuf> {
+pub(crate) fn resolve(program: &OsStr, cwd: Option<&Path>, path_var: Option<&OsStr>) -> io::Result<PathBuf> {
     let from = |p: &Path| match cwd {
         Some(dir) if p.is_relative() => dir.join(p),
         _ => p.to_path_buf(),
@@ -242,9 +243,14 @@ pub fn close_on_exec() -> Vec<i32> {
     marked
 }
 
-/// Waits for `pid` to end (on a run's own thread — never the main loop).
+/// Waits for `pid` to end (on a run's own thread — never the main loop). A sandboxed run on Linux is its
+/// session's keeper's child, not tarae's: its keeper says how it ended (`sandbox::keeper::wait`).
 pub fn wait(pid: u32) -> io::Result<ExitStatus> {
     use std::os::unix::process::ExitStatusExt;
+    #[cfg(target_os = "linux")]
+    if let Some(how) = crate::sandbox::keeper::wait(pid) {
+        return how;
+    }
     let mut status = 0;
     loop {
         // SAFETY: waitpid on our own child, with a valid out pointer.

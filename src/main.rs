@@ -169,6 +169,11 @@ config: $XDG_CONFIG_HOME/tarae/config.toml (default ~/.config/tarae/config.toml)
         inside tarae: :set <path> [value], :set! (also saves), :toggle, :config-show";
 
 fn main() -> Result<()> {
+    // A session's keeper (Linux's sandbox): nothing of the editor runs in it
+    #[cfg(target_os = "linux")]
+    if std::env::args_os().nth(1).is_some_and(|a| a == sandbox::keeper::FLAG) {
+        sandbox::keeper::main();
+    }
     // (what tarae was handed open goes no further than tarae)
     spawn::close_on_exec();
     restart::remember_exe();

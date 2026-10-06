@@ -26,8 +26,12 @@
 //! commands don't run quietly without one: each asks, or the user agrees for the conversation, and the chat's
 //! title says so.
 
+#[cfg(target_os = "linux")]
+pub mod channel;
 #[cfg(test)]
 mod golden;
+#[cfg(target_os = "linux")]
+pub mod keeper;
 #[cfg(target_os = "linux")]
 pub mod linux;
 pub mod runenv;
@@ -1561,9 +1565,47 @@ fn end_left(which: impl Fn(&Ran) -> bool) -> Vec<u32> {
     ended
 }
 
+/// Linux: where a run's supervisor says its refusals (`Refused`) — a thread saying each in the run's report
+/// (`tell`) until the supervisor is done.
+#[cfg(target_os = "linux")]
+pub(crate) fn told(p: std::sync::Arc<Policy>) -> std::sync::mpsc::Sender<Denial> {
+    let (tx, rx) = std::sync::mpsc::channel::<Denial>();
+    crate::event::thread("tarae-refused", move || {
+        for d in rx {
+            tell(&p, d);
+        }
+    });
+    tx
+}
+
+/// Linux: what the runs of the project at `root` left that came to tarae (their keeper died — `keeper::gone`),
+/// told by their tag, ended.
+#[cfg(target_os = "linux")]
+pub(crate) fn end_left_by_tag(root: &Path) -> Vec<u32> {
+    end_left(|r| r.root == root)
+}
+
 /// Ends what Claude's runs left running — of the project at `root` (its session ended), or all of it (tarae
 /// quits; one from before a `:restart` too). Blocks up to a few seconds — a worker's, or tarae's end.
 pub fn end_leftovers(root: Option<&Path>) -> Vec<u32> {
+    // Linux: the session's keeper ends its tree and itself (what it's ending told first); the next run makes
+    // another. What came to tarae by a dead keeper is ended by its tag, below.
+    // (all of them together: a quit with many sessions waits as long as one)
+    #[cfg(target_os = "linux")]
+    let mut by_keepers: Vec<u32> = {
+        let keepers = keeper::of(root);
+        let left = keepers.iter().flat_map(|k| k.leftovers()).collect();
+        keeper::end_together(&keepers);
+        left
+    };
+    #[cfg(not(target_os = "linux"))]
+    let mut by_keepers = Vec::new();
+    by_keepers.extend(end_tagged(root));
+    by_keepers
+}
+
+/// `end_leftovers` of what tarae itself was given by its tag.
+fn end_tagged(root: Option<&Path>) -> Vec<u32> {
     match root {
         Some(root) => end_left(|r| r.root == root),
         None => {
@@ -2896,12 +2938,19 @@ fn run_homes_said(vars: &crate::sandboxpack::Vars) -> Vec<RunHomeSaid> {
 }
 
 /// Linux: `p` with its Landlock rules made (`linux::confine` — it walks the project for protected names, and
-/// makes first what a build makes beside them: `linux::Made`).
+/// makes first what a build makes beside them: `linux::Made`) and its session's keeper found or made
+/// (`keeper::ready`: a keeper of another policy key ends what its runs left — D14). Either failing, the run
+/// doesn't start, saying why.
 #[cfg(target_os = "linux")]
 pub fn confined(mut p: Policy) -> Policy {
     let made =
         crate::landlock::abi().and_then(|abi| linux::confine(&p, abi, linux::audit_readable(abi), true));
-    p.confine = Some(made.map_err(|e| format!("the sandbox couldn't be made: {e}")));
+    let key = policy_key(&p);
+    let made = made.map_err(|e| format!("the sandbox couldn't be made: {e}")).and_then(|mut c| {
+        c.keeper = Some(keeper::ready(&p.root, Some(&key))?);
+        Ok(c)
+    });
+    p.confine = Some(made);
     p
 }
 
@@ -3275,16 +3324,24 @@ fn output_in(
     args: &[&str],
     env: &[(&str, &str)],
 ) -> Option<serde_json::Value> {
+    // (through the session's keeper — any of its policies': a probe's is none — without a supervisor)
     #[cfg(target_os = "linux")]
     let out = {
         let abi = crate::landlock::abi().ok()?;
         let rules = linux::confine(policy, abi, Err("not watched".into()), false).ok()?;
+        let k = keeper::ready(&policy.root, None).ok()?;
         let mut c = Command::new(program);
         from_run_env(&mut c, policy);
         c.args(args).envs(env.iter().copied()).current_dir(&policy.root).env(MARK, "1");
-        c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
-        let child = linux::confined(&rules, None, |_| {}, || c.spawn()).ok()?;
-        child.wait_with_output().ok()?
+        let s = k.start(&c, &crate::landlock::thread_name(), rules.rules_fd(), None).ok()?.spawned;
+        // (what it says on stderr read meanwhile, unkept: a full pipe would stop it)
+        if let Some(mut err) = s.stderr {
+            crate::event::thread("tarae-probe", move || io::copy(&mut err, &mut io::sink()));
+        }
+        let mut stdout = Vec::new();
+        io::Read::read_to_end(&mut s.stdout?, &mut stdout).ok()?;
+        let status = crate::spawn::wait(s.pid).ok()?;
+        std::process::Output { status, stdout, stderr: Vec::new() }
     };
     #[cfg(not(target_os = "linux"))]
     let out = from_run_env(&mut Command::new(SANDBOX_EXEC), policy)
@@ -3363,10 +3420,21 @@ pub fn watch_for(p: &Policy) -> Option<std::sync::Arc<Watch>> {
     Some(Watch::start(tag))
 }
 
-/// Starts `cmd` (made by `command`) in a session of its own (`spawn::setsid`) — on Linux from a thread
-/// confined to `policy` (`linux::confined`: its rules, the seccomp filter, and tarae's supervisor deciding
-/// what it reaches by address); elsewhere the sandbox is in the command already. A policy whose rules
-/// couldn't be made doesn't start at all.
+/// Tests: what runs between a keeper's run's start and its watch hearing its pid (its pid, its name), for the
+/// project at the root given — `Started` held there (`linux::tests::a_denial_before_its_start_is_told_is_the_runs`).
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) type Held = std::sync::Arc<dyn Fn(u32, &str) + Send + Sync>;
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) static STARTED_HELD: std::sync::Mutex<Option<(PathBuf, Held)>> = std::sync::Mutex::new(None);
+#[cfg(all(test, target_os = "linux"))]
+fn lock_held() -> std::sync::MutexGuard<'static, Option<(PathBuf, Held)>> {
+    STARTED_HELD.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Starts `cmd` (made by `command`) in a session of its own (`spawn::setsid`) — on Linux forked by the session's
+/// keeper (`keeper::Keeper::start`: its rules and the seccomp filter its own, and tarae's supervisor deciding
+/// what it reaches by address — the main loop waits for its start only); elsewhere the sandbox is in the
+/// command already. A policy whose rules or keeper couldn't be made doesn't start at all.
 pub fn spawn(policy: Option<&Policy>, cmd: &Command) -> std::io::Result<crate::spawn::Spawned> {
     #[cfg(target_os = "linux")]
     if let Some(p) = policy {
@@ -3375,14 +3443,33 @@ pub fn spawn(policy: Option<&Policy>, cmd: &Command) -> std::io::Result<crate::s
             Some(Err(why)) => return Err(std::io::Error::other(why.clone())),
             None => return Err(std::io::Error::other("the sandbox wasn't made for this run")),
         };
-        let watch = p.watch.clone();
-        let owner = move |o| {
-            if let Some(w) = &watch {
-                w.owned_by(o);
-            }
+        let Some(k) = &c.keeper else {
+            return Err(std::io::Error::other("the session's keeper wasn't made for this run"));
         };
-        let serve = std::sync::Arc::new(p.clone());
-        let spawned = linux::confined(c, Some(serve), owner, || crate::spawn::setsid(cmd))?;
+        // Its watch knows it by its name before it exists: its first denial (and its domain's record with it)
+        // can come before `Started` does — then by its pid too
+        let comm = crate::landlock::thread_name();
+        let owner = |pid| linux::Owner { pid, comm: comm.clone() };
+        if let Some(w) = &p.watch {
+            w.owned_by(owner(0));
+        }
+        let started = match c.serve {
+            Ok(()) => {
+                let serve = std::sync::Arc::new(p.clone());
+                k.start_served(cmd, &comm, c.rules_fd(), serve.clone(), told(serve))?
+            }
+            Err(_) => k.start(cmd, &comm, c.rules_fd(), None)?,
+        };
+        let spawned = started.spawned;
+        #[cfg(test)]
+        let held = lock_held().as_ref().filter(|(r, _)| *r == p.root).map(|(_, f)| f.clone());
+        #[cfg(test)]
+        if let Some(held) = held {
+            held(spawned.pid, &comm);
+        }
+        if let Some(w) = &p.watch {
+            w.owned_by(owner(spawned.pid));
+        }
         ran(p, spawned.pid);
         // (what was made first, still empty once the run is gone, goes — the run's own thread reaps it)
         let (made, pid) = (c.made.clone(), spawned.pid);
@@ -6935,6 +7022,45 @@ mod tests {
             format!("token={};path={}", probe["token"].as_str().unwrap(), probe["path"].as_str().unwrap());
         std::fs::write(dir.join("probe"), said).unwrap();
         std::fs::write(dir.join("said"), p.run_env.said(&mut Vec::new()).unwrap_or_default()).unwrap();
+    }
+
+    /// A toolchain's probe (`output_in`) runs through the session's keeper, confined: its parent is the keeper
+    /// `keeper::of` lists for the project, and it can't write the project's `Cargo.toml`. (The project under the
+    /// build's `target/`, not in `/tmp`: the policy writes there.)
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_probe_runs_through_the_sessions_keeper() {
+        if !crate::landlock::abi().is_ok_and(|n| n >= 2) {
+            let line = format!(
+                "{}sandbox::tests::a_probe_runs_through_the_sessions_keeper — no Landlock here\n",
+                crate::test_results::SELF_SKIP
+            );
+            let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+            return;
+        }
+        let base =
+            std::env::current_dir().unwrap().join(format!("target/tarae-probe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("Cargo.toml"), "[workspace]\n").unwrap();
+        let root = std::fs::canonicalize(&base).unwrap();
+        let env = Env {
+            root: root.clone(),
+            tmp: Some(profile_path(&std::env::temp_dir())),
+            run_env: run_env_of(&Here::now(), &crate::llm::LlmConfig::default()),
+            ..Default::default()
+        };
+        let p = Policy::for_project(&env);
+        let script = r#"if printf x >> "$R/Cargo.toml" 2>/dev/null; then w=yes; else w=no; fi
+            printf '{"ppid": %s, "wrote": "%s"}' "$PPID" "$w""#;
+        let r = root.to_string_lossy().into_owned();
+        let probe = output_in(&p, "/bin/sh", &["-c", script], &[("R", &r)]).expect("the probe answers");
+        let keepers: Vec<u64> = keeper::of(Some(&root)).iter().map(|k| u64::from(k.pid)).collect();
+        assert_eq!(keepers, [probe["ppid"].as_u64().unwrap()], "forked by the session's keeper: {probe}");
+        assert_eq!(probe["wrote"], "no", "confined: {probe}");
+        assert_eq!(std::fs::read_to_string(root.join("Cargo.toml")).unwrap(), "[workspace]\n");
+        end_leftovers(Some(&root));
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// A sandboxed run's side: the names of its environment, one a line, into `$TARAE_ENV_NAMES` — never a

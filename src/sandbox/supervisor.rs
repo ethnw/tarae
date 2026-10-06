@@ -125,7 +125,7 @@ fn pidfd_open(pid: i32) -> io::Result<OwnedFd> {
 }
 
 /// The caller's descriptor `n`, as one of tarae's own (the same open socket — close-on-exec).
-fn pidfd_getfd(pidfd: &OwnedFd, n: RawFd) -> io::Result<OwnedFd> {
+pub(super) fn pidfd_getfd(pidfd: &OwnedFd, n: RawFd) -> io::Result<OwnedFd> {
     // SAFETY: plain call; a descriptor it makes is ours.
     let fd = unsafe { libc::syscall(libc::SYS_pidfd_getfd, pidfd.as_raw_fd(), n, 0u32) };
     if fd < 0 {
@@ -144,12 +144,31 @@ fn result(r: isize) -> Answer {
     if r < 0 { Err(errno(&io::Error::last_os_error())) } else { Ok(r as i64) }
 }
 
+/// What a supervisor serves one run by — all it has of tarae's (`docs/design/sandbox-keeper.md`: the supervisor
+/// behind its few messages, so moving it into a process of its own later is mechanical): the run's policy as it
+/// was when the run started (nothing comes mid-run), and where its refusals go out (`Refused`).
+pub struct Served {
+    policy: Arc<Policy>,
+    refused: std::sync::mpsc::Sender<Denial>,
+}
+
+impl std::ops::Deref for Served {
+    type Target = Policy;
+    fn deref(&self) -> &Policy {
+        &self.policy
+    }
+}
+
 /// Starts the supervisor of one run, on a thread of its own made from the calling thread (unconfined: a
 /// thread a confined one made would be confined too, and its own calls would wait on itself). It waits for
-/// the listener the confined thread sends once its filter is on (`seccomp::apply`), then answers that run's
-/// calls until no process of it is left. The sender dropped unsent: it ends.
-pub fn serve(policy: Arc<Policy>) -> io::Result<std::sync::mpsc::SyncSender<OwnedFd>> {
+/// the run's listener (taken from the run's process: `sandbox::keeper`), then answers that run's calls until no
+/// process of it is left, its refusals out on `refused`. The sender dropped unsent: it ends.
+pub fn serve(
+    policy: Arc<Policy>,
+    refused: std::sync::mpsc::Sender<Denial>,
+) -> io::Result<std::sync::mpsc::SyncSender<OwnedFd>> {
     let (tx, rx) = std::sync::mpsc::sync_channel::<OwnedFd>(1);
+    let policy = Arc::new(Served { policy, refused });
     std::thread::Builder::new().name("tarae-serve".into()).spawn(move || {
         quiet_signals();
         let Ok(fd) = rx.recv() else { return };
@@ -186,7 +205,7 @@ fn quiet_signals() {
     }
 }
 
-fn call(l: &Listener, n: &libc::seccomp_notif, p: &Policy) -> Answer {
+fn call(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
     match n.data.nr as libc::c_long {
         libc::SYS_connect => connect(l, n, p),
         libc::SYS_sendto => sendto(l, n, p),
@@ -404,10 +423,10 @@ fn may_reach(p: &Policy, a: SocketAddr) -> bool {
     this_machine(a.ip()) && (p.localhost || p.ports.contains(&a.port()))
 }
 
-/// A refusal: said in the run's report (its watch — once the run is gone, its session's current run's:
-/// `sandbox::tell`), `EPERM` to the caller — "Operation not permitted", as macOS says it.
-fn refuse(p: &Policy, c: &Caller, op: &str, target: String) -> Answer {
-    super::tell(p, Denial { process: c.name(), op: op.into(), target });
+/// A refusal: `Refused` out (tarae says it in the run's report — its watch, once the run is gone its session's
+/// current run's: `sandbox::tell`), `EPERM` to the caller — "Operation not permitted", as macOS says it.
+fn refuse(p: &Served, c: &Caller, op: &str, target: String) -> Answer {
+    let _ = p.refused.send(Denial { process: c.name(), op: op.into(), target });
     Err(libc::EPERM)
 }
 
@@ -494,7 +513,7 @@ fn socket_place(p: &Policy, real: &Path) -> bool {
 /// The unix socket a path the caller named reaches, if it may: one in the project or the run's own folder,
 /// or one the user granted (that file, by its real path) — opened (`open_real`), a socket.
 /// Refused: said, `EPERM`. The descriptor holds it while its address (`unix_address`) is used.
-fn unix_target(p: &Policy, c: &Caller, named: &Path) -> Result<(OwnedFd, Vec<u8>), i32> {
+fn unix_target(p: &Served, c: &Caller, named: &Path) -> Result<(OwnedFd, Vec<u8>), i32> {
     let abs = absolute(c, named)?;
     let real = std::fs::canonicalize(&abs).map_err(|e| errno(&e))?;
     if !socket_place(p, &real) && !p.sockets.contains(&real) {
@@ -516,7 +535,7 @@ fn unix_target(p: &Policy, c: &Caller, named: &Path) -> Result<(OwnedFd, Vec<u8>
 
 /// `connect(fd, addr, len)`: an internet socket to this machine's open ports, a unix one to a socket it may
 /// reach (`unix_target`), netlink as asked — done on the caller's own socket, waiting as the caller would.
-fn connect(l: &Listener, n: &libc::seccomp_notif, p: &Policy) -> Answer {
+fn connect(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
     let c = Caller::open(l, n)?;
     let args = n.data.args;
     let addr = address(&c, args[1], args[2])?;
@@ -548,7 +567,7 @@ fn connect(l: &Listener, n: &libc::seccomp_notif, p: &Policy) -> Answer {
 /// `bind(fd, addr, len)`: an internet socket on this machine (any port — a test's own server), a unix one
 /// in the project or the run's own folder where a run may write (`Policy::writes_allow`: not a protected
 /// name), netlink as asked. Abstract unix names are refused.
-fn bind(l: &Listener, n: &libc::seccomp_notif, p: &Policy) -> Answer {
+fn bind(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
     let c = Caller::open(l, n)?;
     let args = n.data.args;
     let addr = address(&c, args[1], args[2])?;
@@ -588,7 +607,7 @@ fn bind(l: &Listener, n: &libc::seccomp_notif, p: &Policy) -> Answer {
 /// Where a send names (`addr`, read once), on a socket of `domain`: the address to send to — tarae's copy,
 /// or a unix socket's through tarae's own descriptor (held with it) — or refused as `connect` would be.
 fn destination(
-    p: &Policy,
+    p: &Served,
     c: &Caller,
     domain: i32,
     addr: Vec<u8>,
@@ -621,7 +640,7 @@ fn payload(c: &Caller, at: u64, len: u64, datagram: bool) -> Result<Vec<u8>, i32
 }
 
 /// `sendto(fd, buf, len, flags, addr, alen)` with an address (one without isn't tarae's).
-fn sendto(l: &Listener, n: &libc::seccomp_notif, p: &Policy) -> Answer {
+fn sendto(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
     let c = Caller::open(l, n)?;
     let args = n.data.args;
     let flags = args[3] as i32;
@@ -717,7 +736,7 @@ fn read_msg(c: &Caller, at: u64, datagram: bool) -> Result<Msg, i32> {
 }
 
 /// One message sent on `sock` as the caller asked — where it names refused as a `sendto` there would be.
-fn send_one(p: &Policy, c: &Caller, sock: &OwnedFd, domain: i32, m: Msg, flags: i32) -> Answer {
+fn send_one(p: &Served, c: &Caller, sock: &OwnedFd, domain: i32, m: Msg, flags: i32) -> Answer {
     let (to, _held) = match m.name {
         Some(addr) => destination(p, c, domain, addr)?,
         None => (Vec::new(), None),
@@ -741,7 +760,7 @@ fn send_one(p: &Policy, c: &Caller, sock: &OwnedFd, domain: i32, m: Msg, flags: 
 }
 
 /// `sendmsg(fd, msg, flags)` — every one, as only the message says where it goes.
-fn sendmsg(l: &Listener, n: &libc::seccomp_notif, p: &Policy) -> Answer {
+fn sendmsg(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
     let c = Caller::open(l, n)?;
     let args = n.data.args;
     let sock = c.fd(args[0])?;
@@ -753,7 +772,7 @@ fn sendmsg(l: &Listener, n: &libc::seccomp_notif, p: &Policy) -> Answer {
 /// `sendmmsg(fd, msgs, n, flags)`: each message as `sendmsg`, its length written back where the caller
 /// reads it (`msg_len` — glibc's resolver checks it); the first that fails ends it (failing the call when
 /// it's the first).
-fn sendmmsg(l: &Listener, n: &libc::seccomp_notif, p: &Policy) -> Answer {
+fn sendmmsg(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
     let c = Caller::open(l, n)?;
     let args = n.data.args;
     let sock = c.fd(args[0])?;
@@ -1019,7 +1038,8 @@ mod tests {
     /// fork) and a `setsid sleep 60`, and ends at once (exit 3, its own waiter's to read); a second later the
     /// child connects to this machine's open port and says whether it could, and who its parent is now; then
     /// what the run left is ended as at its session's end (`sandbox::end_leftovers`). Prints `scene: <ok|no>
-    /// <parent is me: yes|no> <reaped: yes|no> exit=<the run's, as its waiter read it> ended=<yes|no>`.
+    /// <parent is the session's keeper: yes|no> <reaped: yes|no> exit=<the run's, as its waiter read it>
+    /// ended=<yes|no>`.
     #[test]
     #[ignore]
     fn detached_scene() {
@@ -1054,18 +1074,22 @@ mod tests {
         let said = std::fs::read_to_string(&out).unwrap_or_default();
         let w: Vec<&str> = said.split_whitespace().collect();
         let (result, parent, child) = (w.first().copied().unwrap_or("none"), w.get(1), w.get(2));
-        let mine = parent.is_some_and(|p| *p == std::process::id().to_string());
-        // (the orphan, a zombie child of ours once it's done: reaped)
+        let keeper = match &p.confine {
+            Some(Ok(c)) => c.keeper.as_ref().map(|k| k.pid),
+            _ => None,
+        };
+        let mine = keeper.is_some_and(|k| parent.is_some_and(|p| *p == k.to_string()));
+        // (the orphan, a zombie child of the keeper's once it's done: reaped)
         let gone = || child.is_none_or(|c| !std::path::Path::new(&format!("/proc/{c}")).exists());
         let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
         while mine && !gone() && std::time::Instant::now() < end {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         let reaped = mine && gone();
-        // (the long one, a daemon of sorts: ours to end — as at its session's end)
+        // (the long one, a daemon of sorts: the session's to end — as at its session's end)
         let long: Option<u32> =
             std::fs::read_to_string(out.with_extension("long")).ok().and_then(|t| t.trim().parse().ok());
-        let ours = long.and_then(crate::procs::read).is_some_and(|o| o.ppid == std::process::id());
+        let ours = long.and_then(crate::procs::read).is_some_and(|o| keeper == Some(o.ppid));
         let ended = match long {
             Some(l) if ours => {
                 super::super::end_leftovers(Some(&p.root)) == [l]
@@ -1111,10 +1135,12 @@ mod tests {
         }
     }
 
-    /// The scene each way (`detached_scene`): with tarae a subreaper, a run's detached child is adopted by
-    /// tarae, its connect after its run is served, and it's reaped once done; without, its connect is served
-    /// only where tarae may take a non-descendant's sockets (`CAP_SYS_PTRACE`, or Yama 0 or none) — colima's
-    /// container has the capability and its kernel Yama 1, so the capability dropped is a VM's case.
+    /// The scene each way (`detached_scene`): a run's detached child is adopted by the session's keeper (a child
+    /// subreaper — `sandbox::keeper`), its connect after its run is served (the keeper is tarae's descendant:
+    /// Yama 1 lets tarae take its sockets), it's reaped once done, and what's left ends with its session —
+    /// whether tarae itself is a subreaper or not, and with `CAP_SYS_PTRACE` dropped too (colima's container
+    /// has the capability and its kernel Yama 1, so the capability dropped is a VM's case). Before the keeper,
+    /// tarae as subreaper was what kept such a child served.
     #[test]
     fn a_runs_detached_child_is_served_after_its_run() {
         if !served("a_runs_detached_child_is_served_after_its_run") {
@@ -1142,19 +1168,19 @@ mod tests {
         // (Yama 2 or 3: nothing is served without the capability, descendant or not)
         let drops: &[bool] = if cap && yama.is_none_or(|y| y <= "1") { &[false, true] } else { &[false] };
         for &drop in drops {
-            let others = (cap && !drop) || yama.is_none_or(|y| y == "0");
             let (off, on) = (scene("0", drop), scene("1", drop));
             let line = format!(
-                "capability {}: subreaper off: {off} · on: {on} · non-descendants served: {others}\n",
+                "capability {}: tarae a subreaper off: {off} · on: {on}\n",
                 if drop { "dropped" } else { "kept" }
             );
             let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
-            assert_eq!(
-                on, "ok yes yes exit=3 ended=yes",
-                "a subreaper: adopted, served, reaped; the run's waiter undisturbed; the long one ended with its \
-                 session"
-            );
-            assert!(off.starts_with(if others { "ok no" } else { "no no" }), "{off}");
+            for said in [&on, &off] {
+                assert_eq!(
+                    said, "ok yes yes exit=3 ended=yes",
+                    "the keeper a subreaper: adopted, served, reaped; the run's waiter undisturbed; the long one \
+                     ended with its session"
+                );
+            }
         }
     }
 

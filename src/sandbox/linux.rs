@@ -96,10 +96,17 @@ pub struct Confine {
     pub closed: Vec<PathBuf>,
     /// The fileless folders under protected ones, made again after a run (`Kept`).
     pub kept: Arc<Kept>,
+    /// The session's keeper, which forks the run (`sandbox::confined` finds or makes it) — None until then.
+    pub keeper: Option<Arc<super::keeper::Keeper>>,
     rules: Arc<Ruleset>,
 }
 
 impl Confine {
+    /// The Landlock ruleset's descriptor — what a keeper's run confines itself with (`sandbox::keeper`).
+    pub fn rules_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        self.rules.fd()
+    }
+
     /// Tests: the rules made — (path, the rights granted) — in the order added.
     #[cfg(test)]
     pub fn granted(&self) -> &[(PathBuf, u64)] {
@@ -126,6 +133,10 @@ impl PartialEq for Confine {
             && Arc::ptr_eq(&self.made, &other.made)
             && Arc::ptr_eq(&self.kept, &other.kept)
             && Arc::ptr_eq(&self.rules, &other.rules)
+            && match (&self.keeper, &other.keeper) {
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                (a, b) => a.is_none() && b.is_none(),
+            }
     }
 }
 
@@ -544,50 +555,30 @@ pub(super) fn confine_in(
         true => Kept::none(),
         false => Kept::of(&found),
     };
-    Ok(Confine { abi, audit, serve, made: Arc::new(made), closed, kept: Arc::new(kept), rules: Arc::new(r) })
+    Ok(Confine {
+        abi,
+        audit,
+        serve,
+        made: Arc::new(made),
+        closed,
+        kept: Arc::new(kept),
+        keeper: None,
+        rules: Arc::new(r),
+    })
 }
 
-/// `start` (a spawn) on a short-lived thread confined to `c` and under the seccomp filter — what it starts is
-/// in the sandbox, the caller isn't (`landlock::confined`). `serve`: the run's policy, when tarae decides
-/// what it reaches by address (`supervisor::serve`, started from here: an unconfined thread) — else the
-/// plain filter. `owner` hears the thread before (a watch reading Landlock's audit log tells its run's domain
-/// by it).
-pub fn confined<T: Send>(
-    c: &Confine,
-    serve: Option<Arc<Policy>>,
-    owner: impl FnOnce(Owner) + Send,
-    start: impl FnOnce() -> io::Result<T> + Send,
-) -> io::Result<T> {
-    use crate::seccomp::Mode;
-    let to = match serve.filter(|_| c.serve.is_ok()) {
-        Some(p) => Some(super::supervisor::serve(p)?),
-        None => None,
-    };
-    let mode = if to.is_some() { Mode::Served } else { Mode::Plain };
-    landlock::confined(
-        &c.rules,
-        || crate::seccomp::apply(mode),
-        |listener| {
-            if let (Some(to), Some(l)) = (to, listener) {
-                to.send(l).map_err(|_| io::Error::other("tarae's supervisor ended before its run"))?;
-            }
-            owner(Owner::this_thread());
-            start()
-        },
-    )
-}
-
-/// The thread that confined a run, as Landlock's domain record names it: tarae's process (`pid=` is the
-/// process's id, not the thread's) and the thread's own name (`comm=`, one per confining thread —
-/// `landlock::thread_name`).
+/// What confined a run, as Landlock's domain record names it: the process that confined itself (`pid=` — a
+/// keeper's run, by its own pid; the audit probe, tarae's) and its name then (`comm=`: a keeper's run names
+/// itself before its rules, one name per run — `landlock::thread_name`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Owner {
+    /// 0: not known yet (a run not started yet) — the name alone tells it, this tarae's own.
     pub pid: u32,
     pub comm: String,
 }
 
 impl Owner {
-    /// The calling thread.
+    /// The calling thread — the audit probe's, which confines a thread of tarae's own (`audit_readable`).
     pub fn this_thread() -> Owner {
         Owner { pid: std::process::id(), comm: landlock::comm().unwrap_or_default() }
     }
@@ -910,8 +901,11 @@ impl Audit {
             return Vec::new();
         }
         let comm = audit_value(line, "comm");
-        let named =
-            |o: &&Owner| !o.comm.is_empty() && pid == Some(o.pid) && comm.as_deref() == Some(o.comm.as_str());
+        let named = |o: &&Owner| {
+            !o.comm.is_empty()
+                && (o.pid == 0 || pid == Some(o.pid))
+                && comm.as_deref() == Some(o.comm.as_str())
+        };
         let mine = self.owner.iter().chain(&self.also).find(named).cloned();
         let (keep, rest): (Vec<_>, Vec<_>) =
             std::mem::take(&mut self.waiting).into_iter().partition(|(d, _)| *d == domain);
@@ -919,7 +913,9 @@ impl Audit {
         if let Some(o) = &mine {
             let mut known = DOMAINS.lock().unwrap_or_else(|e| e.into_inner());
             if !known.iter().any(|(_, d)| *d == domain) {
-                known.push((o.clone(), domain.clone()));
+                // (by the record's pid: the owner a later run hears of has it, though this one was told first)
+                let o = Owner { pid: pid.unwrap_or(o.pid), comm: o.comm.clone() };
+                known.push((o, domain.clone()));
                 let n = known.len();
                 known.drain(..n.saturating_sub(DOMAINS_KEPT));
             }
@@ -1906,6 +1902,34 @@ mod tests {
         assert!(now.line(&domain("e9", "tl-e9")).is_empty());
     }
 
+    /// A run's first denial (its domain's record with it) can come before `Started` does: its watch knows it
+    /// by its name alone till then (`sandbox::spawn`: pid 0), so the domain is the run's — still once its pid is
+    /// known, and to a later run of the project by the pid the record gave. Another name isn't the run's.
+    #[test]
+    fn a_runs_domain_told_before_its_pid_is_known_is_its_own() {
+        let access = |d: &str, path: &str| {
+            format!(
+                "audit: type=1423 audit(1:4): domain={d} blockers=fs.write_file path=\"{path}\" dev=\"vda2\" ino=9"
+            )
+        };
+        let domain = |d: &str, pid: u32, comm: &str| {
+            format!(
+                "audit: type=1424 audit(1:4): domain={d} status=allocated mode=enforcing pid={pid} uid=0 \
+                 exe=\"/usr/bin/tarae\" comm=\"{comm}\""
+            )
+        };
+        let o = |pid: u32, comm: &str| Owner { pid, comm: comm.into() };
+        let mut a = Audit { owner: Some(o(0, "tl-f1")), ..Default::default() };
+        assert!(a.line(&access("f1", "/w/p/Cargo.toml")).is_empty(), "waits for its domain");
+        assert_eq!(a.line(&domain("f1", 302, "tl-f1")).len(), 1, "its own, by its name");
+        assert!(a.line(&domain("f2", 303, "tl-f2")).is_empty(), "another name's");
+        a.owner = Some(o(302, "tl-f1"));
+        assert_eq!(a.line(&access("f1", "/w/p/build.rs")).len(), 1, "its own once its pid is known");
+        let mut later = Audit { owner: Some(o(304, "tl-f3")), ..Default::default() };
+        later.also(vec![o(302, "tl-f1")]);
+        assert_eq!(later.line(&access("f1", "/w/p/x")).len(), 1, "a later run knows it by its pid");
+    }
+
     /// auditd's records, verbatim from its log on a kernel 7.0 (the user's VM): the domain is told by tarae's
     /// process id (`pid=`, the process's — not the confining thread's) and the thread's name (`comm=`), its
     /// enrichment glued on (`comm="…"UID="wq"`, no space); another thread of the same tarae, or the name in
@@ -2047,6 +2071,49 @@ mod tests {
             assert_eq!(found, Ok(()), "domain record first: {domain_first}");
             std::fs::remove_dir_all(log.parent().unwrap()).ok();
         }
+    }
+
+    /// A run whose first act is denied, its domain's record and that denial read before `Started` reaches tarae
+    /// (held there — `sandbox::STARTED_HELD` — till the watch has them, or 2 s): the denial is still the run's,
+    /// its watch told its name before the run was asked for (`sandbox::spawn`). The act is refused for real (a
+    /// new file beside `Cargo.toml`); its records are the kernel's form (`vm_records`) in a stand-in for auditd's
+    /// log — a container's kernel logs nowhere tarae reads.
+    #[test]
+    fn a_denial_before_its_start_is_told_is_the_runs() {
+        let Some(_) = kernel_abi("a_denial_before_its_start_is_told_is_the_runs") else { return };
+        let s = Scratch::new("first-act");
+        let mut p = s.policy();
+        let log = std::fs::canonicalize(auditd_log("first-act")).unwrap();
+        let w = crate::sandbox::Watch::start_audit_from("t.", AuditSource::Auditd(log.clone()).stream());
+        assert!(opened(&w, &log, std::time::Duration::from_secs(5)), "tail opened the log");
+        p.watch = Some(w.clone());
+        let (l, root, seen) = (log.clone(), s.root.clone(), w.clone());
+        let held: crate::sandbox::Held = Arc::new(move |pid: u32, comm: &str| {
+            append(&l, &vm_records(pid, comm, &root));
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while seen.blocked().seen.is_empty() && std::time::Instant::now() < end {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        });
+        *crate::sandbox::STARTED_HELD.lock().unwrap() = Some((s.root.clone(), held));
+        let script = r#"if printf x > "$R/new.rs" 2>/dev/null; then echo made; else echo refused; fi"#;
+        let mut cmd = crate::sandbox::command(Some(&p), "sh", &["-c".into(), script.into()]);
+        cmd.env("R", &s.root);
+        let spawned = crate::sandbox::spawn(Some(&p), &cmd);
+        *crate::sandbox::STARTED_HELD.lock().unwrap() = None;
+        let spawned = spawned.unwrap();
+        let mut out = String::new();
+        io::Read::read_to_string(&mut spawned.stdout.unwrap(), &mut out).unwrap();
+        crate::spawn::wait(spawned.pid).unwrap();
+        assert_eq!(out.trim(), "refused", "its first act, refused for real");
+        let made = Denial {
+            process: "the run".into(),
+            op: "file-make-in".into(),
+            target: s.root.display().to_string(),
+        };
+        assert_eq!(w.blocked().seen, [made], "the run's, though read before its start was told");
+        w.finish();
+        std::fs::remove_dir_all(log.parent().unwrap()).ok();
     }
 
     /// Whether the watch's reader (`tail -F` on auditd's log) has `log` open within `within` — the file among

@@ -1650,6 +1650,18 @@ impl Editor {
                 });
             }
         }
+        // (each session's keeper: its sandboxed runs, and what they left, under it — `sandbox::keeper`)
+        #[cfg(target_os = "linux")]
+        for k in crate::sandbox::keeper::of(None).into_iter().filter(|k| !k.is_gone()) {
+            out.push(Known {
+                pid: k.pid,
+                kind: Kind::Helper,
+                title: "sandbox keeper".into(),
+                what: format!("the session's keeper · {}", crate::allow::tilde(&k.root)),
+                session: self.session_of(&k.root).filter(|_| sessions),
+                at: None,
+            });
+        }
         // (a session's end's own command — its session gone by then)
         for (pid, cmd) in crate::ended::running() {
             out.push(Known {
