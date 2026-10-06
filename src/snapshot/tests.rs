@@ -114,6 +114,82 @@ fn too_many_new_files_at_once_are_left_out_and_said() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// A save's temp file (`disk::write_atomic`'s, there while a save is being written) isn't the run's: never in
+/// the snapshot, so never a change of its — the run's own new file beside it is.
+#[test]
+fn a_saves_temp_file_isnt_the_runs() {
+    let dir = repo("temp");
+    let before = Before::take(&dir);
+    std::fs::write(dir.join("src/.a.txt.tarae-123-0.tmp"), "half").unwrap();
+    std::fs::write(dir.join(".untracked.txt.tarae-123-1.tmp"), "half").unwrap();
+    std::fs::write(dir.join("src/made.txt"), "the run's\n").unwrap();
+    let found = before.since().unwrap();
+    let names: Vec<_> = found.files.iter().map(|c| c.path.clone()).collect();
+    assert_eq!(names, [dir.join("src/made.txt")], "{found:?}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A save still being written as Claude's run ends (a slow disk): what it changed is taken once the save is
+/// written — never halfway — and the save isn't the run's: the report and the turn name only what the run did.
+/// (A harmless command: it waits for the save's temp file in the test's own repository, then makes a file.)
+#[test]
+fn a_runs_changes_wait_for_a_save_still_being_written() {
+    let dir = repo("saving");
+    let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+    ed.session.root = dir.clone();
+    ed.config.llm.sandbox = false;
+    ed.config.llm.command = "sh".into();
+    ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+    ed.saver.slow = Duration::from_millis(1500);
+    ed.open(&dir.join("src/a.txt")).unwrap();
+    let doc = ed.doc().id;
+    crate::chat::open(&mut ed);
+    let c = ed.session.chat.as_mut().unwrap();
+    c.state = crate::chat::State::Thinking;
+    c.focused = false;
+    let generation = c.generation();
+    let answered = || {
+        crate::tools::ANSWERED
+            .with(|a| a.borrow().iter().find(|(id, _)| *id == json!(1)).map(|(_, r)| r.clone()))
+    };
+    let pump = |ed: &mut crate::editor::Editor, done: &dyn Fn(&crate::editor::Editor) -> bool, what: &str| {
+        let end = Instant::now() + Duration::from_secs(20);
+        while !done(ed) {
+            assert!(Instant::now() < end, "{what}");
+            if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
+    };
+    let cmd =
+        "while ! ls src/.a.txt.tarae-*.tmp >/dev/null 2>&1; do sleep 0.05; done; printf 'x\\n' > made.txt";
+    let call = crate::tools::Call::of(generation, "r1", json!(1));
+    let job = crate::tools::Job::Command(cmd.into(), dir.clone());
+    crate::tools::guard_and_go(&mut ed, crate::tools::For::Claude(call), job, false, Default::default());
+    pump(
+        &mut ed,
+        &|ed| ed.session.task_run.as_ref().is_some_and(|r| r.state == crate::task::State::Running),
+        "it runs",
+    );
+    let d = ed.docs.iter_mut().find(|d| d.id == doc).unwrap();
+    d.apply(&crate::transaction::Transaction::new(vec![crate::transaction::Change::insert(0, "saved\n")]));
+    ed.save_in_background(doc, false, crate::saver::Then::Auto(" · idle")).unwrap();
+    pump(&mut ed, &|_| answered().is_some(), "it ran");
+    let saving = ed.docs.iter().find(|d| d.id == doc).unwrap().saving;
+    assert_eq!(saving, 0, "its changes were taken once the save was written");
+    assert_eq!(std::fs::read_to_string(dir.join("src/a.txt")).unwrap(), "saved\none\ntwo\n");
+    let report = answered().unwrap().unwrap();
+    // (the command names the temp file: the line of what changed is the one read)
+    let changed = report.lines().find(|l| l.starts_with("It changed in the checkout: "));
+    assert!(
+        changed.is_some_and(|l| l.starts_with("It changed in the checkout: made.txt (new) —")),
+        "the save isn't the run's: {report}"
+    );
+    let turn: Vec<_> = ed.session.checkpoints.turn.iter().map(|t| t.path.clone()).collect();
+    assert_eq!(turn, [dir.join("made.txt")]);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// Ignored files a run deleted are named, not kept: an ignored file, an ignored folder whole — not a file
 /// inside an ignored folder (that folder is one entry, never walked), and not one the run left.
 #[test]

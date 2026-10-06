@@ -81,6 +81,7 @@ The name is also the `:set` path: `:set editor.scrolloff 8` changes it until you
 | Setting | Type | Default | Description |
 |---|---|---|---|
 | `session.worktrees` | string | `""` | Where sessions' checkouts go, a folder per repository ("" = $XDG_DATA_HOME/tarae/worktrees) |
+| `session.ended` | list of strings | `[]` | A command, its words, run once a session's checkout is removed (:session-end) — in the checkout tarae started in, outside the sandbox, TARAE_ENDED_CHECKOUT naming the one removed; stopped after 2 minutes; how it ended goes to the log (e.g. ["cargo", "xtask", "linux", "prune"]; [] = none) |
 
 ## `[review]`
 

@@ -721,15 +721,23 @@ impl Editor {
         });
     }
 
-    /// `s` / `u` on a row: stage / unstage it (a file, a folder, or `""` = the whole section).
+    /// `s` / `u` on a row: stage / unstage it (a file, a folder, or `""` = the whole section). Staging waits
+    /// for the saves asked before it — what's staged is what was saved, never a save's temp file.
     pub fn git_stage(&mut self, rel: &str, stage: bool) {
         let path = if rel.is_empty() { ".".to_string() } else { rel.to_string() };
         let args: Vec<String> = if stage {
-            vec!["add".into(), "--all".into(), "--".into(), path]
+            vec!["add".into(), "--all".into(), "--".into(), path, crate::disk::NOT_TEMP.into()]
         } else {
             vec!["restore".into(), "--staged".into(), "--".into(), path]
         };
         let what = if rel.is_empty() { "everything".to_string() } else { rel.to_string() };
+        match stage {
+            true => self.after_saves(move |ed| ed.git_stage_run(args, what, stage)),
+            false => self.git_stage_run(args, what, stage),
+        }
+    }
+
+    fn git_stage_run(&mut self, args: Vec<String>, what: String, stage: bool) {
         self.git_do(
             Box::new(move |top| {
                 let a: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -1738,6 +1746,49 @@ mod tests {
         // Changes to commit: no history — the list is the changes
         std::fs::write(dir.join("a.txt"), "two\n").unwrap();
         assert_eq!(status(&dir, Some("main".into())).unwrap().log, None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A save and a stage at once (`:w`, then `s` on everything while it's written — a slow disk): the stage
+    /// waits for the save, so what's staged is what was saved; and a save's temp file — one asked after it
+    /// waited, here a stray one beside — is never staged. (A repository of the test's own, in its temp folder.)
+    #[test]
+    fn staging_waits_for_saves_and_never_takes_a_temp_file() {
+        let dir = std::env::temp_dir().join(format!("tarae-gitpanel-saves-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let git_out = |args: &[&str]| {
+            let id = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"];
+            let out =
+                std::process::Command::new("git").args(id).args(args).current_dir(&dir).output().unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8(out.stdout).unwrap()
+        };
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        git_out(&["init", "-q"]);
+        git_out(&["add", "a.txt"]);
+        git_out(&["commit", "-qm", "base"]);
+        // (named as `disk::write_atomic` names them — at the top and in a folder)
+        std::fs::write(dir.join(format!(".b.txt.tarae-{}-99.tmp", std::process::id())), "half").unwrap();
+        std::fs::write(dir.join("sub/.c.rs.tarae-1-0.tmp"), "half").unwrap();
+        let mut ed = Editor::new(crate::config::Config::default());
+        ed.session.root = dir.clone();
+        ed.open(&dir.join("a.txt")).unwrap();
+        ed.session.git_status = Some(status(&dir, None).unwrap().with_rows());
+        ed.saver.slow = std::time::Duration::from_millis(600);
+        for k in ["c", "T", "W", "O", "esc", ":", "w", "ret"] {
+            ed.handle_key(k.parse().unwrap());
+        }
+        ed.git_stage("", true);
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !ed.toasts.iter().any(|t| t.text == "Staged everything") {
+            let left = end.saturating_duration_since(std::time::Instant::now());
+            let ev = ed.events.recv_timeout(left).expect("staged before the timeout");
+            ed.handle_event(ev);
+        }
+        assert_eq!(git_out(&["show", ":a.txt"]), "TWOne\n", "staged what was saved");
+        assert_eq!(git_out(&["ls-files"]), "a.txt\n", "no temp file staged");
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -503,6 +503,16 @@ pub static SETTINGS: &[Setting] = &[
         set: |c, v| c.session_worktrees = s(v).to_string(),
     },
     Setting {
+        path: "session.ended",
+        kind: Kind::StrList,
+        doc: "A command, its words, run once a session's checkout is removed (:session-end) — in the checkout tarae started in, outside the sandbox, TARAE_ENDED_CHECKOUT naming the one removed; stopped after 2 minutes; how it ended goes to the log (e.g. [\"cargo\", \"xtask\", \"linux\", \"prune\"]; [] = none)",
+        get: |c| Value::Array(c.session_ended.iter().map(|a| Value::from(a.as_str())).collect()),
+        set: |c, v| {
+            c.session_ended =
+                v.as_array().into_iter().flatten().filter_map(|a| a.as_str().map(str::to_string)).collect()
+        },
+    },
+    Setting {
         path: "review.risky",
         kind: Kind::StrList,
         doc: "Code review: files whose every change is high-risk — looked at by you (space v h) before the review ends or the session is brought. A name matches anywhere, in any case, one * per part (\"sandbox*\"); a path from the project root (\".github/\"). The language packs' patterns (unsafe, spawning…) and the protected names count too. Read from the checkout tarae started in",

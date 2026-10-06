@@ -72,7 +72,8 @@ pub struct Saver {
     shared: Arc<(Mutex<Shared>, Condvar)>,
     /// Oldest first
     waits: Vec<Wait>,
-    /// Tests: a slow disk's stand-in — each write takes this long first (set before the first save)
+    /// Tests: a slow disk's stand-in — each write takes this long, its temp file there meanwhile (set before
+    /// the first save)
     #[cfg(test)]
     pub slow: Duration,
 }
@@ -98,9 +99,13 @@ impl Saver {
             let (tx, rx) = channel::<Job>();
             crate::event::thread("tarae-saver", move || {
                 while let Ok(job) = rx.recv() {
-                    #[cfg(test)]
-                    std::thread::sleep(slow);
-                    let result = crate::disk::write_atomic(&job.path, |w| job.text.write_to(w))
+                    let write = |w: &mut std::io::BufWriter<std::fs::File>| {
+                        // (inside the write: its temp file is there meanwhile, as on a slow disk)
+                        #[cfg(test)]
+                        std::thread::sleep(slow);
+                        job.text.write_to(w)
+                    };
+                    let result = crate::disk::write_atomic(&job.path, write)
                         .map(|()| crate::disk::stamp(&job.path))
                         .map_err(|e| format!("writing {}: {e}", job.path.display()));
                     let (lock, cv) = &*shared;

@@ -28,6 +28,7 @@ mod dsyms;
 mod editdiff;
 mod editor;
 mod edits;
+mod ended;
 mod event;
 mod fetch;
 mod filetree;

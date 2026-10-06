@@ -109,6 +109,11 @@ fn common_run<'a>(
     n
 }
 
+/// A pathspec leaving out `write_atomic`'s temp files, for every `git add` tarae runs itself: one being
+/// written meanwhile (a save asked after the add waited for those before it — `Editor::after_saves`) isn't
+/// staged.
+pub const NOT_TEMP: &str = ":(exclude,glob)**/.*.tarae-*.tmp";
+
 /// Replace `path` without a window where it's half-written: temp file in the same directory (permissions
 /// of the old file) → fsync → rename. Symlinks are followed (the target is replaced, the link stays).
 /// If the directory isn't writable, falls back to writing in place.
@@ -129,6 +134,7 @@ pub fn write_atomic(
     // Numbered so back-to-back writes of one file (worker threads) don't collide
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    // (`NOT_TEMP` matches this name)
     let tmp = dir.join(format!(".{name}.tarae-{}-{n}.tmp", std::process::id()));
     let f = match OpenOptions::new().write(true).create_new(true).open(&tmp) {
         Ok(f) => f,

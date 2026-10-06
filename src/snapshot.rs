@@ -125,7 +125,8 @@ fn stage(root: &Path, index: &Path) -> Result<Tree, String> {
     let new = git_bytes(root, &["ls-files", "-z", "--others", "--exclude-standard", "--", "."], Some(index))?;
     let new = new.split(|&b| b == 0).filter(|f| !f.is_empty()).count();
     let all = new <= NEW_MAX;
-    git(root, &["add", if all { "-A" } else { "-u" }, "--", "."], Some(index))?;
+    // (a save's temp file isn't the run's: left out)
+    git(root, &["add", if all { "-A" } else { "-u" }, "--", ".", crate::disk::NOT_TEMP], Some(index))?;
     let id = git(root, &["write-tree"], Some(index))?.trim().to_string();
     Ok(Tree { id, left_out: if all { 0 } else { new } })
 }

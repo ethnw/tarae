@@ -100,12 +100,17 @@ fn bundled_grammars() -> Result<Vec<Grammar>> {
     Ok(out)
 }
 
-fn cache_dir() -> Result<PathBuf> {
+/// tarae's data folder (`$XDG_DATA_HOME/tarae`, else `~/.local/share/tarae`), as tarae finds it.
+fn data_dir() -> Result<PathBuf> {
     let data = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
         .ok_or("no home directory")?;
-    Ok(data.join("tarae/sources"))
+    Ok(data.join("tarae"))
+}
+
+fn cache_dir() -> Result<PathBuf> {
+    Ok(data_dir()?.join("sources"))
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<()> {

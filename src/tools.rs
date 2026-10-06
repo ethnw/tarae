@@ -2594,6 +2594,19 @@ fn some_named(names: &[String]) -> String {
 /// (held for this — `task.rs`, `testing.rs`).
 fn run_changes(
     ed: &mut Editor,
+    mut snap: crate::snapshot::Before,
+    generation: u64,
+    cmd: String,
+    told: impl FnOnce(&mut Editor, String) + Send + 'static,
+) {
+    // (after the saves asked meanwhile, as the snapshot before was: none is caught half-written — and what
+    // they write isn't the run's: taken from its run, this snapshot is out of `Editor::wrote`'s reach)
+    snap.wrote.extend(ed.docs.iter().filter(|d| d.saving > 0).filter_map(|d| d.path.clone()));
+    ed.after_saves(move |ed| run_changes_now(ed, snap, generation, cmd, told));
+}
+
+fn run_changes_now(
+    ed: &mut Editor,
     snap: crate::snapshot::Before,
     generation: u64,
     cmd: String,

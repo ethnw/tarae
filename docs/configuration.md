@@ -29,7 +29,7 @@ the [keymap reference](reference/keymap.md).
   someone else may have written it. What in it runs commands or loosens how Claude's commands are guarded waits
   until you trust the project: `llm.command`, `llm.args`, `llm.run-allow`, `llm.review-ask`, `llm.review-at-end`,
   `llm.chat-settings`, `llm.sandbox*`, `editor.restart-build` and `restart-binary`, `session.worktrees` (where checkouts are
-  written), `[task.*]`, `[preflight]` steps, a `[lsp.*]`
+  written), `session.ended` (run at each session's end), `[task.*]`, `[preflight]` steps, a `[lsp.*]`
   `command` or `args`, an `[[attach]]` `before`, and keys bound to `:` commands. A card shows each one as written: `y` trusts the
   project, `n` ignores that part. The rest of the file applies either way. Each answer is kept for that version
   of those values, for the whole repository: every checkout of it (each session) shares every version you

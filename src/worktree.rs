@@ -1084,7 +1084,7 @@ impl Editor {
     }
 
     /// The checkout tarae started in (session 0's).
-    fn start_root(&self) -> PathBuf {
+    pub(crate) fn start_root(&self) -> PathBuf {
         self.sessions_in_order().first().map(|l| l.root.clone()).unwrap_or_default()
     }
 
@@ -1374,6 +1374,8 @@ impl Editor {
                         if let BuildDir::Failed(why) = build {
                             ed.set_warning(format!("{}'s build dir isn't all removed — {why}", e.name));
                         }
+                        // (only once its checkout is gone — what it runs may judge by that)
+                        ed.session_ended(&e.root);
                     }
                     Err(why) => {
                         if let Some(k) = kept.filter(|k| k.root.is_dir()) {
@@ -1403,17 +1405,20 @@ impl Editor {
         let said = format!("Staging {}'s changes…", e.name);
         let root = e.root.clone();
         let work = move || {
-            git_no_hooks(&root, &["add", "--all"])
+            git_no_hooks(&root, &["add", "--all", "--", ".", crate::disk::NOT_TEMP])
                 .and_then(|_| crate::gitpanel::status(&root, None).map(crate::gitpanel::Status::with_rows))
         };
-        // (its session's: the status and the message are that session's, wherever you are when they land)
-        self.step(self.events.jobs(), "session", said, work, move |ed, read| match read {
-            Ok(st) => {
-                ed.session.git_status = Some(st);
-                ed.session.commit_then_end = true;
-                ed.git_commit_open(false, true);
-            }
-            Err(why) => ed.set_error(format!("commit {}: {why}", e.name)),
+        // (once the saves asked before it are written: what's staged is what was saved, never a temp file —
+        // and its session's: the status and the message are that session's, wherever you are when they land)
+        self.after_saves(move |ed| {
+            ed.step(ed.events.jobs(), "session", said, work, move |ed, read| match read {
+                Ok(st) => {
+                    ed.session.git_status = Some(st);
+                    ed.session.commit_then_end = true;
+                    ed.git_commit_open(false, true);
+                }
+                Err(why) => ed.set_error(format!("commit {}: {why}", e.name)),
+            })
         });
     }
 
@@ -1670,7 +1675,13 @@ mod tests {
 
     fn git_in(dir: &Path, args: &[&str]) -> String {
         let out = std::process::Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
-        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        // (both streams: some refusals — "nothing to commit" — are on stdout)
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}{}",
+            String::from_utf8_lossy(&out.stderr),
+            String::from_utf8_lossy(&out.stdout)
+        );
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
@@ -1981,6 +1992,48 @@ mod tests {
         // The checkout tarae started in stays
         feed(&mut ed, ":session-end<ret>");
         assert!(says(&ed, "is the checkout tarae started in — it stays"), "{}", said(&ed));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `session.ended` runs once a session's checkout is removed — in the checkout tarae started in, the one
+    /// removed named in TARAE_ENDED_CHECKOUT and gone by then (a stand-in writing a mark in the test's own
+    /// folder). A removal that failed runs nothing; a command that fails says so in a warning.
+    #[test]
+    fn session_ended_runs_once_a_sessions_checkout_is_gone() {
+        let (repo, dir) = place("ended");
+        let marks = dir.join("ended-marks");
+        let mut ed = editor(&repo, &dir);
+        let script = format!(
+            "{{ pwd; echo \"$TARAE_ENDED_CHECKOUT\"; [ -e \"$TARAE_ENDED_CHECKOUT\" ] && echo there || echo gone; }} \
+             >> '{}'",
+            marks.display()
+        );
+        ed.config.session_ended = vec!["sh".into(), "-c".into(), script];
+        let read = || std::fs::read_to_string(&marks).unwrap_or_default();
+        // Ended: run, after its checkout went
+        let done = new_session(&mut ed, "done");
+        feed(&mut ed, ":session-end<ret>");
+        settle_until(&mut ed, |ed| says(ed, "Ended done") || says(ed, "end done:"));
+        assert!(!done.exists(), "{}", said(&ed));
+        settle_until(&mut ed, |_| read().lines().count() >= 3);
+        assert_eq!(read(), format!("{}\n{}\ngone\n", repo.display(), done.display()));
+        assert!(ed.toasts.iter().all(|t| !t.text.contains("session.ended")), "a pass says nothing");
+        // A removal that fails (a file made after the checks — git won't remove it unforced): nothing run
+        let kept = new_session(&mut ed, "kept");
+        let e = ending("kept".into(), &kept, Some("main".into()), &repo).unwrap();
+        std::fs::write(kept.join("new.txt"), "made since\n").unwrap();
+        ed.session_remove(e, false, None);
+        settle_until(&mut ed, |ed| says(ed, "Ended kept") || says(ed, "end kept:"));
+        assert!(says(&ed, "end kept:") && kept.exists(), "{}", said(&ed));
+        // A command that fails: a warning with how it ended and its last line (and the one before ran nothing)
+        let bad = new_session(&mut ed, "bad");
+        ed.config.session_ended = vec!["sh".into(), "-c".into(), "echo nope >&2; exit 3".into()];
+        feed(&mut ed, ":session-end bad<ret>");
+        settle_until(&mut ed, |ed| says(ed, "session.ended") || says(ed, "end bad:"));
+        assert!(!bad.exists(), "{}", said(&ed));
+        assert!(says(&ed, "session.ended `sh -c echo nope >&2; exit 3` — exit 3: nope"), "{}", said(&ed));
+        assert!(!read().contains(kept.to_str().unwrap()), "not after a failed removal: {}", read());
+        drop(ed);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2397,16 +2450,35 @@ mod tests {
         let reply = json!({"type": "result", "result": "Add the notes"});
         ed.config.llm.args = vec!["-c".into(), format!("read -r line; printf '%s\\n' '{reply}'")];
         ed.session_switch(0);
+        ed.open(&wt.join("notes.md")).unwrap();
+        let notes = ed.doc().id;
         feed(&mut ed, ":session-end wip<ret>");
         settle_until(&mut ed, |ed| end_card(ed).is_some());
         card_in_sight(&mut ed);
+        // (a save of notes.md asked once the card is up — an edit landing, auto-save — still being written as
+        // `c` is pressed (a slow disk), and a save's temp file beside: the commit has what was saved, never a
+        // temp file)
+        let stray = wt.join(".b.txt.tarae-1-0.tmp");
+        std::fs::write(&stray, "half").unwrap();
+        ed.saver.slow = Duration::from_millis(1500);
+        let doc = ed.docs.iter_mut().find(|d| d.id == notes).unwrap();
+        doc.apply(&crate::transaction::Transaction::new(vec![crate::transaction::Change::insert(
+            0, "saved\n",
+        )]));
+        ed.save_in_background(notes, false, crate::saver::Then::Auto(" · idle")).unwrap();
         feed(&mut ed, "c");
+        let saving = ed.docs.iter().find(|d| d.id == notes).unwrap().saving;
+        assert_eq!(saving, 1, "still being written as c was pressed");
         assert_eq!(ed.session.root, wt, "to its session");
         settle_until(&mut ed, |ed| ed.session.review.as_ref().is_some_and(|r| r.ready));
         assert!(ed.session.committing.as_ref().is_some_and(|c| c.then_end));
+        assert_eq!(git_in(&wt, &["show", ":notes.md"]), "saved\ntodo", "staged what was saved");
+        assert!(!git_in(&wt, &["ls-files"]).contains(".tmp"), "no temp file staged");
+        std::fs::remove_file(&stray).unwrap();
         feed(&mut ed, "a:w<ret>");
         settle_until(&mut ed, |ed| end_card(ed).is_some_and(|e| !e.dirty()));
         assert_eq!(git_in(&wt, &["log", "-1", "--format=%s"]), "Add the notes");
+        assert_eq!(git_in(&wt, &["show", "HEAD:notes.md"]), "saved\ntodo");
         assert_eq!(git_in(&wt, &["status", "--porcelain"]), "", "all of it in the commit");
         assert_eq!(card_in_sight(&mut ed), ['y', 'D', 'n']);
         assert!(ed.offers[0].question.starts_with("2 commits not in main:"), "{}", ed.offers[0].question);

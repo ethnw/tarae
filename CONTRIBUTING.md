@@ -46,6 +46,20 @@ Checks of your own go in `.tarae.local.toml` at the root — its `[preflight] st
 reads as a pass with a note, and with `full = true` it waits for `:preflight-full`). The repository's `.gitignore` lists it: tarae reads that file only while git
 ignores it ([docs](docs/configuration.md#where-it-lives)).
 
+Each checkout's Linux checks build in a Docker volume of its own (5–7 GB), labelled with this machine's id (made
+once in tarae's data folder, `machine-id`, and copied to the repository's git folder, `tarae-machine-id`). A run
+drops this machine's volumes whose checkout is gone — also when the whole repository was deleted — and never
+another machine's (a Docker shared through `DOCKER_HOST`). A run of yours always labels the volume it makes; one
+of Claude's, in tarae's sandbox, reads only the git folder's copy, so it labels once a run of yours (or `prune`)
+has made that copy, and before then says it labels none. A volume without the id — made so, or made before ids —
+is judged by its checkout's path alone, as this machine's, and is never relabelled — on a Docker reached through
+a unix socket only: over the network (`tcp://`, `ssh://`) it may be another machine's, so there only volumes
+carrying this machine's id are dropped. `cargo xtask linux prune` says how many it judged by path, or kept. Past
+30 GB a run says what tarae's volumes take (or that Docker couldn't measure them), the
+checkouts' targets apart from the shared ones (registry, toolchains), which nothing here frees. To drop a
+session's volume as the session ends, put `[session] ended = ["cargo", "xtask", "linux", "prune"]` in that
+`.tarae.local.toml`.
+
 A test that fails only now and then on Linux: `cargo xtask linux test --repeat 20 --bin tarae recovery::` runs
 `cargo test` with those arguments twenty times in one container and stops at the first run that fails. Flakes
 that need the rest of the suite beside them show up with `--bin tarae` alone. A failure seen on one architecture

@@ -1540,6 +1540,17 @@ impl Editor {
                 });
             }
         }
+        // (a session's end's own command — its session gone by then)
+        for (pid, cmd) in crate::ended::running() {
+            out.push(Known {
+                pid,
+                kind: Kind::Helper,
+                title: "session.ended".into(),
+                what: cmd,
+                session: None,
+                at: None,
+            });
+        }
         let mut add =
             |pid: Option<u32>, kind: Kind, title: &str, what: String, session: Option<SessionId>| {
                 if let Some(pid) = pid.filter(|&p| p > 0) {
