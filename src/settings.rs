@@ -471,7 +471,7 @@ pub static SETTINGS: &[Setting] = &[
     Setting {
         path: "llm.sandbox-write",
         kind: Kind::StrList,
-        doc: "Chat: more folders the sandbox lets Claude's commands write to (\"~/.npm\") — never the project's own folders above it",
+        doc: "Chat: more folders the sandbox lets Claude's commands write to (\"~/scratch\") — never the project's own folders above it",
         get: |c| Value::Array(c.llm.sandbox_write.iter().map(|a| Value::from(a.as_str())).collect()),
         set: |c, v| {
             c.llm.sandbox_write =

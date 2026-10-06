@@ -200,3 +200,72 @@ risky = [
     'UnixListener', 'libc::', 'env::set_var', 'env::remove_var', 'from_raw', 'transmute',
 ]
 quiet = ["tests/", "benches/"]
+
+# Claude's sandbox (`sandboxpack.rs`). What cargo and rustup read in home to work, measured
+# (`target/sb/p2-measured.md`: tarae's preflight, every read in home reported): their homes. And cargo's config
+# in every folder between the project and home — those files, not the folder (`credentials.toml` sits there):
+# a project below a folder with one doesn't build without it ("could not load Cargo configuration")
+[sandbox]
+reads = ["~/.cargo", "~/.rustup", "{cargo}", "{rustup}"]
+reads-above = [".cargo/config.toml", ".cargo/config"]
+# Cargo's tokens: never read, wherever its home is
+kept = ["{cargo}/credentials", "{cargo}/credentials.toml"]
+# Where `cargo install` and rustup put programs: never written
+bins = ["{cargo}/bin"]
+# How the sandbox names the folders `[builds]` asks cargo for (#20: the checkout's cargo config names them)
+builds-said = { who = "cargo", target = "target-dir", build = "build-dir" }
+
+[sandbox.homes]
+cargo = { env = "CARGO_HOME", else = "~/.cargo" }
+rustup = { env = "RUSTUP_HOME", else = "~/.rustup" }
+
+# Cargo's shared caches — `registry/` (the index, the downloaded `.crate`s, the unpacked crates) and `git/`
+# (git dependencies' databases and checkouts) — kept as they are while the network is closed: every project's
+# build outside the sandbox uses what's there (cargo doesn't check an unpacked crate or a checkout again), and
+# with no download a build has nothing new to put there. The files a sandboxed cargo writes there anyway, the
+# network closed or open: its locks, its last-use database (SQLite, with its journal or write-ahead log), and
+# the tag that tells backup tools a cache is one — written again when it's gone (measured, cargo 1.99,
+# 2026-10-04). The extended attribute it sets on `registry` and `git` at every run, so file sync (iCloud,
+# File Provider) leaves them alone: the one write an offline build makes there (denied, the build goes on,
+# but every report would carry it)
+[sandbox.caches]
+home = "cargo"
+dirs = ["registry", "git"]
+files = [
+    ".package-cache", ".package-cache-mutate", ".global-cache", ".global-cache-journal", ".global-cache-wal",
+    ".global-cache-shm", "registry/CACHEDIR.TAG", "git/CACHEDIR.TAG",
+]
+xattr = "com.apple.fileprovider.ignore#P"
+rule = "cargo's caches — its crates and git checkouts"
+said = """Cargo's caches ({caches}) stay as they are while the network is closed: every project's build outside \
+the sandbox uses the crates and git checkouts there. A build that needs a crate unpacked or a git dependency \
+checked out fails here — that's not something to fix in the code: tell the user. A build or `cargo fetch` of \
+theirs puts it there, then run it again; llm.sandbox-network opens the caches to your commands."""
+
+# Cargo reads its config as an ancestor's and takes no copy (denied, every cargo command fails): it's left as
+# it is, and the user is told once (`tokens.rs`)
+[[sandbox.settings]]
+tool = "cargo"
+files = ["{cargo}/config.toml", "{cargo}/config"]
+above = true
+tell = """cargo can't work without {them}. Cargo keeps tokens in ~/.cargo/credentials.toml, which they never \
+read: move it there (cargo login puts it there)."""
+
+# What Claude runs unasked: the checks — `cargo tree` and `cargo metadata` read the dependency graph (#116),
+# cargo as the checks run it, in the sandbox
+[claude]
+run-allow = [
+    "cargo build", "cargo check", "cargo test", "cargo clippy", "cargo fmt", "cargo tree", "cargo metadata",
+]
+# Read unasked (#112): the toolchains' own sources and the crates cargo downloaded — never the homes themselves
+code-trees = ["{cargo}/registry/src", "{rustup}/toolchains/*/lib/rustlib/src"]
+# What builds and tests a project: a script calling one runs its code (`sinceyes.rs`)
+builders = ["cargo", "rustc"]
+said = { rank = 10, run = "cargo build/check/test/clippy/fmt/tree/metadata", code = "the Rust toolchain's sources ($(rustc --print sysroot)/lib/rustlib/src) or cargo's downloaded crates", tests = "Rust (cargo test)", protect = "build.rs, Cargo.toml, .cargo" }
+
+# The sysroot `$(rustc --print sysroot)` gives where a command runs, as rustup says it (it reads the toolchain
+# files; nothing of the project's runs): one of rustup's toolchains that's there (#112)
+[claude.expand."$(rustc --print sysroot)"]
+run = ["rustup", "show", "active-toolchain"]
+env = { RUSTUP_AUTO_INSTALL = "0" }
+first-word-in = "{rustup}/toolchains"

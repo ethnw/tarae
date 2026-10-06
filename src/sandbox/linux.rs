@@ -96,6 +96,14 @@ pub struct Confine {
     rules: Arc<Ruleset>,
 }
 
+impl Confine {
+    /// Tests: the rules made — (path, the rights granted) — in the order added.
+    #[cfg(test)]
+    pub fn granted(&self) -> &[(PathBuf, u64)] {
+        &self.rules.added
+    }
+}
+
 impl std::fmt::Debug for Confine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -394,7 +402,7 @@ fn grant(r: &mut Ruleset, path: &Path, access: u64, holes: &[PathBuf]) -> io::Re
 }
 
 /// The protected names (`protected_in`) that are there in the project at `root`, each the path where one
-/// starts — not looked for below one, nor in tools' output (`OUTPUTS`, where those names are let through) —
+/// starts — not looked for below one, nor in tools' output (`outputs`, where those names are let through) —
 /// and `extra` (`llm.sandbox-protect`) that are there. Links aren't followed.
 pub fn protected_there(root: &Path, extra: &[PathBuf]) -> Vec<PathBuf> {
     fn walk(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
@@ -406,7 +414,7 @@ pub fn protected_there(root: &Path, extra: &[PathBuf]) -> Vec<PathBuf> {
                 continue;
             }
             let folder = e.file_type().is_ok_and(|t| t.is_dir());
-            if folder && !super::OUTPUTS.iter().any(|o| e.file_name() == *o) {
+            if folder && !super::outputs().iter().any(|o| e.file_name() == o.as_str()) {
                 walk(root, &path, out);
             }
         }

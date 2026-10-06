@@ -4,19 +4,21 @@
 //! pip's (an `index-url` with `user:pass@`) — and npm's `~/.npmrc` (`_authToken`), kept from every run
 //! (`allow::SECRETS`). Measured with fake tokens in a stand-in home under a run's profile
 //! (`target/sb/tokens-checkpoint.md`): denied, git fails at every command, and Go, npm and pip lose their
-//! settings without a word; each takes a copy by a variable (`Tool::var`). So where a token is there, tarae —
-//! on the policy's worker, never Claude — writes a copy without those lines in the run's own folder
+//! settings without a word; each takes a copy by a variable (`Tool::var`). Git is tarae's own; the others are
+//! the built-in packs' `[[sandbox.settings]]` (`sandboxpack.rs`). So where a token is there, tarae — on the
+//! policy's worker, never Claude — writes a copy without those lines in the run's own folder
 //! (`sandbox::RunDir`), points the tool at it, and the run doesn't read the original (`Copies::hidden`);
 //! nothing changes where there's none. npm's file is kept whatever it holds, so its copy is always given.
 //!
-//! Cargo reads its config as an ancestor's and takes no copy (denied, every cargo command fails): it's left as
-//! it is, and the user is told once that cargo keeps tokens in `credentials.toml`, which runs never read
-//! (`cargo_holders`, `tell_cargo`). A card that lets Claude read a file or a folder says first when one holds
-//! a token-like line (`found_in`) — the file's name, never the value.
+//! A setting that takes no copy (cargo reads its config as an ancestor's — denied, every cargo command fails)
+//! is left as it is, and the user is told once, in its pack's words (`tell`: cargo keeps tokens in
+//! `credentials.toml`, which runs never read — `told_holders`, `tell_holders`). A card that lets Claude read a
+//! file or a folder says first when one holds a token-like line (`found_in`) — the file's name, never the value.
 
 use std::path::{Path, PathBuf};
 
 use crate::editor::Editor;
+use crate::sandbox::Os;
 
 // ── What looks like a token ─────────────────────────────────────────────────
 
@@ -161,81 +163,83 @@ fn strip(text: &str, form: Form, mut fix: impl FnMut(&str, &str) -> String) -> (
     (out, gone)
 }
 
-/// A tool whose user settings may hold a token, and the variable that points it at a copy instead.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A tool whose user settings may hold a token, and the variable that points it at a copy instead — git
+/// (tarae's own), and the packs' `[[sandbox.settings]]` that take a copy.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tool {
-    pub name: &'static str,
-    pub var: &'static str,
+    pub name: String,
+    pub var: String,
     form: Form,
     /// The copy's name in the run's folder.
-    file: &'static str,
+    file: String,
 }
 
-pub const GIT: Tool = Tool { name: "git", var: "GIT_CONFIG_GLOBAL", form: Form::Git, file: "gitconfig" };
-pub const GO: Tool = Tool { name: "go", var: "GOENV", form: Form::Lines, file: "goenv" };
-pub const NPM: Tool = Tool { name: "npm", var: "NPM_CONFIG_USERCONFIG", form: Form::Lines, file: "npmrc" };
-pub const PIP: Tool = Tool { name: "pip", var: "PIP_CONFIG_FILE", form: Form::Ini, file: "pip.conf" };
-
-/// Where a tool keeps its user settings: `~/Library/Application Support` on macOS, else `$XDG_CONFIG_HOME`
-/// (or `~/.config`) — Go's `os.UserConfigDir`.
-fn user_config(home: &Path, var: &dyn Fn(&str) -> Option<String>) -> PathBuf {
-    match cfg!(target_os = "macos") {
-        true => home.join("Library/Application Support"),
-        false => xdg(home, var),
-    }
-}
-
-fn xdg(home: &Path, var: &dyn Fn(&str) -> Option<String>) -> PathBuf {
-    var("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .filter(|x| x.is_absolute())
-        .unwrap_or_else(|| home.join(".config"))
+/// git's: `GIT_CONFIG_GLOBAL`, else `$XDG_CONFIG_HOME/git/config`, then `~/.gitconfig`.
+fn git() -> Tool {
+    Tool { name: "git".into(), var: "GIT_CONFIG_GLOBAL".into(), form: Form::Git, file: "gitconfig".into() }
 }
 
 /// Where each tool reads its user settings, in the order it reads them (the later wins), as it finds them
-/// from `home` and the environment (`var`) — a variable naming its file wins: `GIT_CONFIG_GLOBAL` (else
-/// `$XDG_CONFIG_HOME/git/config`, then `~/.gitconfig`), `GOENV` (`off`: none), `NPM_CONFIG_USERCONFIG`,
-/// `PIP_CONFIG_FILE` when that file is there (pip then reads no user file — else `~/.pip/pip.conf`, then
-/// its folder's: `~/Library/Application Support/pip` on macOS when there, else `~/.config/pip`).
-pub fn sources(home: &Path, var: &dyn Fn(&str) -> Option<String>) -> Vec<(Tool, Vec<PathBuf>)> {
+/// from `home` and the environment (`var`) on `os` — a variable naming its file wins (git's, a pack's `var`
+/// or `var-also`; its `off` value: none; with `var-if-there`, only when that file is there), else its
+/// `files` (`{ first, file }`: in the first folder that's there, else the last).
+pub fn sources_on(home: &Path, var: &dyn Fn(&str) -> Option<String>, os: Os) -> Vec<(Tool, Vec<PathBuf>)> {
     let set = |name: &str| var(name).filter(|v| !v.is_empty()).map(PathBuf::from);
-    let git = match set("GIT_CONFIG_GLOBAL") {
+    let t = crate::sandboxpack::get();
+    let vars = crate::sandboxpack::Vars::new(t, home, &set, os);
+    let git_files = match set("GIT_CONFIG_GLOBAL") {
         Some(f) => vec![f],
-        None => vec![xdg(home, var).join("git/config"), home.join(".gitconfig")],
+        None => vec![vars.xdg_config.join("git/config"), home.join(".gitconfig")],
     };
-    let go = match set("GOENV") {
-        Some(f) if f == Path::new("off") => vec![],
-        Some(f) => vec![f],
-        None => vec![user_config(home, var).join("go/env")],
-    };
-    let npm = set("NPM_CONFIG_USERCONFIG").or_else(|| set("npm_config_userconfig"));
-    let pip = match set("PIP_CONFIG_FILE").filter(|f| f.exists()) {
-        Some(f) => vec![f],
-        None => {
-            let mac = home.join("Library/Application Support/pip");
-            let dir = match cfg!(target_os = "macos") && mac.is_dir() {
-                true => mac,
-                false => xdg(home, var).join("pip"),
-            };
-            vec![home.join(".pip/pip.conf"), dir.join("pip.conf")]
+    let mut out = vec![(git(), git_files)];
+    for s in &t.settings {
+        let (Some(name), Some(file)) = (&s.var, &s.copy) else { continue };
+        let form = if s.form == "ini" { Form::Ini } else { Form::Lines };
+        let tool = Tool { name: s.tool.clone(), var: name.clone(), form, file: file.clone() };
+        let named = std::iter::once(name).chain(&s.var_also).find_map(|v| set(v));
+        let named = named.filter(|f| !s.var_if_there || f.exists());
+        let files = match named {
+            Some(f) if s.off.as_deref().is_some_and(|off| f == Path::new(off)) => vec![],
+            Some(f) => vec![f],
+            None => s.files.iter().filter_map(|f| setting_file(f, &vars)).collect(),
+        };
+        out.push((tool, files));
+    }
+    out
+}
+
+/// `sources_on` this system.
+#[cfg(test)]
+pub fn sources(home: &Path, var: &dyn Fn(&str) -> Option<String>) -> Vec<(Tool, Vec<PathBuf>)> {
+    sources_on(home, var, Os::HOST)
+}
+
+/// Where one of a setting's files is (`{ first, file }`: in the first folder that's there, else the last).
+fn setting_file(f: &crate::sandboxpack::SettingFile, vars: &crate::sandboxpack::Vars) -> Option<PathBuf> {
+    use crate::sandboxpack::SettingFile;
+    match f {
+        SettingFile::Place(p) => vars.place(p),
+        SettingFile::First { dirs, file } => {
+            let dirs: Vec<PathBuf> = dirs.iter().filter_map(|d| vars.place(d)).collect();
+            Some(dirs.iter().find(|d| d.is_dir()).or(dirs.last())?.join(file))
         }
-    };
-    vec![(GIT, git), (GO, go), (NPM, vec![npm.unwrap_or_else(|| home.join(".npmrc"))]), (PIP, pip)]
+    }
 }
 
 /// What a run gets in place of the settings that hold a token.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Copies {
     /// Each tool's variable and its copy, for the run's environment.
-    pub env: Vec<(&'static str, PathBuf)>,
+    pub env: Vec<(String, PathBuf)>,
     /// The files that hold a token-like line (real paths) and the variable whose copy stands in: runs don't
     /// read them — but one the user let Claude read (`copies`' `granted`).
-    pub hidden: Vec<(PathBuf, &'static str)>,
+    pub hidden: Vec<(PathBuf, String)>,
     /// The files whose token-like lines a copy left out (hidden or not: npm's is kept anyway, one the user
     /// let Claude read isn't), and the copy's variable.
-    pub left_out: Vec<(PathBuf, &'static str)>,
-    /// Cargo's configs that hold one, left as they are (`cargo_holders`).
-    pub cargo: Vec<PathBuf>,
+    pub left_out: Vec<(PathBuf, String)>,
+    /// The settings of tools that take no copy that hold one, left as they are (`told_holders` — cargo's), and
+    /// what the user is told of each (its pack's `tell`).
+    pub told: Vec<(PathBuf, String)>,
 }
 
 impl Copies {
@@ -246,14 +250,14 @@ impl Copies {
             return None;
         }
         let files: Vec<String> = self.left_out.iter().map(|(f, _)| crate::allow::tilde(f)).collect();
-        let mut vars: Vec<&str> = self.left_out.iter().map(|(_, v)| *v).collect();
+        let mut vars: Vec<&str> = self.left_out.iter().map(|(_, v)| v.as_str()).collect();
         vars.dedup();
         Some((files.join(", "), vars.join(", ")))
     }
 
     /// The variable whose copy stands in for `real`, when it's a file kept for its token.
-    pub fn instead_of(&self, real: &Path) -> Option<&'static str> {
-        self.hidden.iter().find(|(f, _)| f == real).map(|(_, v)| *v)
+    pub fn instead_of(&self, real: &Path) -> Option<&str> {
+        self.hidden.iter().find(|(f, _)| f == real).map(|(_, v)| v.as_str())
     }
 }
 
@@ -432,41 +436,43 @@ pub fn copies(
             _ => String::new(),
         };
         if let Some(f) = &folder {
-            let copy = f.join(tool.file);
+            let copy = f.join(&tool.file);
             if write_private(&copy, &format!("{head}{text}")).is_ok() {
-                out.env.push((tool.var, copy));
-                out.left_out.extend(m.held.iter().map(|h| (h.clone(), tool.var)));
+                out.env.push((tool.var.clone(), copy));
+                out.left_out.extend(m.held.iter().map(|h| (h.clone(), tool.var.clone())));
             }
         }
         for h in m.held {
             if !is_kept(&h) && !granted.iter().any(|g| h.starts_with(g)) {
-                out.hidden.push((h, tool.var));
+                out.hidden.push((h, tool.var.clone()));
             }
         }
     }
     out
 }
 
-/// The process's own environment, for `sources`.
-pub fn env_var(name: &str) -> Option<String> {
-    std::env::var(name).ok()
-}
-
-/// Cargo's configs a run reads that hold a token-like line: its home's `config.toml` and `config`, and those
-/// in the folders above the project (`sandbox::cargo_configs_above`). Real paths.
-pub fn cargo_holders(cargo_home: Option<&Path>, above: &[PathBuf]) -> Vec<PathBuf> {
-    let home_configs = cargo_home.into_iter().flat_map(|c| ["config.toml", "config"].map(|f| c.join(f)));
-    home_configs
-        .chain(above.iter().cloned())
-        .filter(|f| std::fs::read_to_string(f).is_ok_and(|t| t.lines().any(token_like)))
-        .map(|f| crate::sandbox::profile_path(&f))
+/// The settings a run reads of the tools that take no copy (the packs' settings with `tell` — cargo reads
+/// its config as an ancestor's) that hold a token-like line: their `files` (`vars`: their places), and those
+/// above the project (`sandbox::reads_above`) for one that reads them there (`above`). Real paths.
+pub fn told_holders(vars: &crate::sandboxpack::Vars, above: &[PathBuf]) -> Vec<(PathBuf, String)> {
+    let t = crate::sandboxpack::get();
+    let mut files: Vec<(PathBuf, String)> = Vec::new();
+    for s in &t.settings {
+        let Some(tell) = &s.tell else { continue };
+        let theirs = s.files.iter().filter_map(|f| setting_file(f, vars));
+        files.extend(theirs.chain(above.iter().filter(|_| s.above).cloned()).map(|f| (f, tell.clone())));
+    }
+    files
+        .into_iter()
+        .filter(|(f, _)| std::fs::read_to_string(f).is_ok_and(|t| t.lines().any(token_like)))
+        .map(|(f, tell)| (crate::sandbox::profile_path(&f), tell))
         .collect()
 }
 
 // ── Saying so ───────────────────────────────────────────────────────────────
 
-/// Cargo's configs already told about (`$state/tokens-said`, a path a line): each is said once, and said
-/// again only once it held none for a while (it's taken off when a run finds it without one).
+/// The settings already told about (`told_holders`; `$state/tokens-said`, a path a line): each is said once,
+/// and said again only once it held none for a while (it's taken off when a run finds it without one).
 pub fn said_path() -> Option<PathBuf> {
     crate::config::state_dir().map(|d| d.join("tokens-said"))
 }
@@ -477,21 +483,26 @@ fn said_read(path: &Path) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
-/// What to tell about cargo's configs (on the policy's worker): those holding a token not told before — and
-/// the list of told ones as it should now be (None: unchanged).
-pub fn cargo_to_tell(holders: &[PathBuf], said: Option<&Path>) -> (Vec<PathBuf>, Option<Vec<PathBuf>>) {
+/// What to tell about the settings holding a token (`told_holders`, on the policy's worker): those not told
+/// before — and the list of told ones as it should now be (None: unchanged).
+pub fn to_tell(
+    holders: &[(PathBuf, String)],
+    said: Option<&Path>,
+) -> (Vec<(PathBuf, String)>, Option<Vec<PathBuf>>) {
     let told = said.map(said_read).unwrap_or_default();
-    let new: Vec<PathBuf> = holders.iter().filter(|h| !told.contains(h)).cloned().collect();
+    let new: Vec<(PathBuf, String)> = holders.iter().filter(|(h, _)| !told.contains(h)).cloned().collect();
     // (a file told before that holds none now is taken off: a token put back is said again)
-    let now: Vec<PathBuf> = told.iter().filter(|t| holders.contains(t)).chain(&new).cloned().collect();
+    let holds = |t: &PathBuf| holders.iter().any(|(h, _)| h == t);
+    let now: Vec<PathBuf> =
+        told.iter().filter(|t| holds(t)).cloned().chain(new.iter().map(|(h, _)| h.clone())).collect();
     (new, (now != told).then_some(now))
 }
 
-/// Tells the user, once, that cargo's `files` hold a token runs read — Claude's commands can't do without
-/// them, and cargo keeps tokens in `credentials.toml`, which they never read. A toast, not the run's report:
-/// it's the user who can move a token (Claude can't, and its report would point it at the file); and not a
-/// card: there's nothing to answer. `told`: the list to keep (`cargo_to_tell`), written on a worker.
-pub fn tell_cargo(ed: &mut Editor, files: &[PathBuf], told: Option<Vec<PathBuf>>) {
+/// Tells the user, once, that these settings (cargo's) hold a token runs read — Claude's commands can't do
+/// without them — and what to do, in each one's pack's words (`{them}`). A toast, not the run's report: it's
+/// the user who can move a token (Claude can't, and its report would point it at the file); and not a card:
+/// there's nothing to answer. `told`: the list to keep (`to_tell`), written on a worker.
+pub fn tell_holders(ed: &mut Editor, holders: &[(PathBuf, String)], told: Option<Vec<PathBuf>>) {
     if let (Some(list), Some(path)) = (told, ed.tokens_said.clone()) {
         ed.events.jobs().background(move || {
             let body: String = list.iter().map(|p| format!("{}\n", p.display())).collect();
@@ -501,16 +512,23 @@ pub fn tell_cargo(ed: &mut Editor, files: &[PathBuf], told: Option<Vec<PathBuf>>
             let _ = crate::disk::write_atomic(&path, |w| std::io::Write::write_all(w, body.as_bytes()));
         });
     }
-    let files: Vec<String> = files.iter().map(|f| crate::allow::tilde(f)).collect();
+    let files: Vec<String> = holders.iter().map(|(f, _)| crate::allow::tilde(f)).collect();
     if files.is_empty() || ed.tokens_told.iter().any(|t| files.contains(t)) {
         return;
     }
     ed.tokens_told.extend(files.iter().cloned());
     let (them, it) = if files.len() == 1 { ("it", "holds a token") } else { ("them", "hold tokens") };
+    let mut tells: Vec<String> = Vec::new();
+    for (_, tell) in holders {
+        let tell = tell.replace("{them}", them);
+        if !tells.contains(&tell) {
+            tells.push(tell);
+        }
+    }
     ed.set_warning(format!(
-        "{} {it}, and Claude's commands read {them} — cargo can't work without {them}. Cargo keeps tokens in \
-         ~/.cargo/credentials.toml, which they never read: move it there (cargo login puts it there).",
-        files.join(", ")
+        "{} {it}, and Claude's commands read {them} — {}",
+        files.join(", "),
+        tells.join(" ")
     ));
 }
 
@@ -789,14 +807,14 @@ mod tests {
         let none = |_: &str| None;
         let all = sources(&home, &none);
         let get =
-            |all: &[(Tool, Vec<PathBuf>)], t: Tool| all.iter().find(|(x, _)| *x == t).unwrap().1.clone();
-        assert_eq!(get(&all, GIT), [home.join(".config/git/config"), home.join(".gitconfig")]);
-        assert_eq!(get(&all, NPM), [home.join(".npmrc")]);
-        assert_eq!(get(&all, PIP), [home.join(".pip/pip.conf"), home.join(".config/pip/pip.conf")]);
+            |all: &[(Tool, Vec<PathBuf>)], t: &str| all.iter().find(|(x, _)| x.name == t).unwrap().1.clone();
+        assert_eq!(get(&all, "git"), [home.join(".config/git/config"), home.join(".gitconfig")]);
+        assert_eq!(get(&all, "npm"), [home.join(".npmrc")]);
+        assert_eq!(get(&all, "pip"), [home.join(".pip/pip.conf"), home.join(".config/pip/pip.conf")]);
         if cfg!(target_os = "macos") {
-            assert_eq!(get(&all, GO), [home.join("Library/Application Support/go/env")]);
+            assert_eq!(get(&all, "go"), [home.join("Library/Application Support/go/env")]);
             std::fs::create_dir_all(home.join("Library/Application Support/pip")).unwrap();
-            let pip = get(&sources(&home, &none), PIP);
+            let pip = get(&sources(&home, &none), "pip");
             assert_eq!(pip[1], home.join("Library/Application Support/pip/pip.conf"));
         }
         let given = home.join("given.conf");
@@ -810,10 +828,13 @@ mod tests {
             _ => None,
         };
         let all = sources(&home, &set);
-        assert_eq!(get(&all, GIT), [PathBuf::from("/x/gitconfig")]);
-        assert!(get(&all, GO).is_empty());
-        assert_eq!(get(&all, NPM), [PathBuf::from("/x/npmrc")]);
-        assert_eq!(get(&all, PIP), std::slice::from_ref(&given));
+        assert_eq!(get(&all, "git"), [PathBuf::from("/x/gitconfig")]);
+        assert!(get(&all, "go").is_empty());
+        assert_eq!(get(&all, "npm"), [PathBuf::from("/x/npmrc")]);
+        assert_eq!(get(&all, "pip"), std::slice::from_ref(&given));
+        // (`PIP_CONFIG_FILE` naming no file: pip reads its own, as without it)
+        let gone = |n: &str| (n == "PIP_CONFIG_FILE").then(|| "/x/none.conf".to_string());
+        assert_eq!(get(&sources(&home, &gone), "pip")[0], home.join(".pip/pip.conf"));
         std::fs::remove_dir_all(&home).ok();
     }
 
@@ -851,10 +872,9 @@ mod tests {
         src[1].1 = vec![home.join("go.env")];
         let kept = [home.join(".npmrc")];
         let c = copies(&src, Some(&dir), &home, &[], &kept);
-        let vars: Vec<&str> = c.env.iter().map(|(v, _)| *v).collect();
+        let vars: Vec<&str> = c.env.iter().map(|(v, _)| v.as_str()).collect();
         assert_eq!(vars, ["GIT_CONFIG_GLOBAL", "GOENV", "NPM_CONFIG_USERCONFIG", "PIP_CONFIG_FILE"]);
-        let read =
-            |v: &str| std::fs::read_to_string(&c.env.iter().find(|(x, _)| *x == v).unwrap().1).unwrap();
+        let read = |v: &str| std::fs::read_to_string(&c.env.iter().find(|(x, _)| x == v).unwrap().1).unwrap();
         let git = read("GIT_CONFIG_GLOBAL");
         assert!(
             git.find("name = Stand In").unwrap() < git.find("co = checkout").unwrap(),
@@ -876,7 +896,7 @@ mod tests {
             assert_eq!(std::fs::metadata(f).unwrap().permissions().mode() & 0o777, 0o600);
         }
         assert!(!std::fs::read_to_string(&inc).unwrap().contains(FAKE));
-        let hidden: Vec<(PathBuf, &str)> = c.hidden.clone();
+        let hidden: Vec<(PathBuf, &str)> = c.hidden.iter().map(|(h, v)| (h.clone(), v.as_str())).collect();
         assert_eq!(
             hidden,
             [
@@ -895,7 +915,7 @@ mod tests {
         std::fs::create_dir_all(&dir2).unwrap();
         let granted = copies(&src, Some(&dir2), &home, &[home.join(".config/pip")], &kept);
         assert!(!granted.hidden.iter().any(|(h, _)| h.starts_with(home.join(".config/pip"))));
-        assert!(granted.env.iter().any(|(v, _)| *v == "PIP_CONFIG_FILE"));
+        assert!(granted.env.iter().any(|(v, _)| v == "PIP_CONFIG_FILE"));
         assert!(granted.left_out.iter().any(|(h, _)| h.starts_with(home.join(".config/pip"))));
         // No run folder: nothing copied, the files still hidden
         let none = copies(&src, None, &home, &[], &kept);
@@ -919,29 +939,41 @@ mod tests {
         std::fs::remove_dir_all(&t).ok();
     }
 
-    /// Cargo's configs holding one are found, said once — and again only after a time without one.
+    /// Cargo's configs holding one — in its home wherever `CARGO_HOME` puts it, and above the project — are
+    /// found, said once in the rust pack's words, and again only after a time without one.
     #[test]
     fn cargos_tokens_are_told_once() {
         let t = scratch("cargo");
         let cargo = t.join("cargo");
         write(&cargo.join("config.toml"), "[net]\nretry = 3\n[registry]\ntoken = \"tarae-fake-token\"\n");
         write(&t.join("p/.cargo/config.toml"), "[build]\njobs = 2\n");
-        let holders =
-            cargo_holders(Some(&cargo), &[t.join("p/.cargo/config.toml"), t.join("gone/.cargo/config")]);
-        assert_eq!(holders, [cargo.join("config.toml")]);
+        write(&t.join("q/.cargo/config"), "[registries.x]\ntoken = \"tarae-fake-token\"\n");
+        let var = |n: &str| (n == "CARGO_HOME").then(|| cargo.clone());
+        let vars = crate::sandboxpack::Vars::new(crate::sandboxpack::get(), &t.join("home"), &var, Os::HOST);
+        let above = [t.join("p/.cargo/config.toml"), t.join("q/.cargo/config"), t.join("gone/.cargo/config")];
+        let holders = told_holders(&vars, &above);
+        let files: Vec<&PathBuf> = holders.iter().map(|(f, _)| f).collect();
+        assert_eq!(files, [&cargo.join("config.toml"), &t.join("q/.cargo/config")]);
         let said = t.join("state/tokens-said");
-        let (new, now) = cargo_to_tell(&holders, Some(&said));
-        assert_eq!((new.clone(), now.clone()), (holders.clone(), Some(holders.clone())));
-        write(&said, &format!("{}\n", holders[0].display()));
-        assert_eq!(cargo_to_tell(&holders, Some(&said)), (vec![], None), "told already");
-        assert_eq!(cargo_to_tell(&[], Some(&said)), (vec![], Some(vec![])), "none now: taken off");
-        // On screen: once since tarae started, too
+        let (new, now) = to_tell(&holders, Some(&said));
+        let paths: Vec<PathBuf> = holders.iter().map(|(f, _)| f.clone()).collect();
+        assert_eq!((new.clone(), now.clone()), (holders.clone(), Some(paths.clone())));
+        write(&said, &paths.iter().map(|p| format!("{}\n", p.display())).collect::<String>());
+        assert_eq!(to_tell(&holders, Some(&said)), (vec![], None), "told already");
+        assert_eq!(to_tell(&[], Some(&said)), (vec![], Some(vec![])), "none now: taken off");
+        // On screen: once since tarae started, too — the pack's words, `{them}` filled in
         let mut ed = Editor::new(crate::config::Config::default());
         let said = |ed: &Editor| ed.messages.iter().filter(|m| m.2.contains("credentials.toml")).count();
-        tell_cargo(&mut ed, &new, None);
+        tell_holders(&mut ed, &new, None);
         assert_eq!(said(&ed), 1, "{:?}", ed.toasts);
+        let m = ed.messages.iter().find(|m| m.2.contains("credentials.toml")).unwrap();
+        assert!(
+            m.2.contains("hold tokens, and Claude's commands read them — cargo can't work without them."),
+            "{}",
+            m.2
+        );
         assert!(!ed.toasts.iter().any(|t| t.text.contains(FAKE)));
-        tell_cargo(&mut ed, &new, None);
+        tell_holders(&mut ed, &new, None);
         assert_eq!(said(&ed), 1, "said twice");
         std::fs::remove_dir_all(&t).ok();
     }

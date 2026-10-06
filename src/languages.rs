@@ -168,6 +168,14 @@ pub(crate) fn build(builtin: &[(String, Result<Table, String>)], yours: &[(Strin
         for key in t.keys().filter(|k| reach(k) == Some(Reach::BuiltIn)) {
             said.push(format!("your {pack} pack: `{key}` is read from tarae's own packs only"));
         }
+        // (a table of keys: each that's the built-in packs' only — `sandboxpack.rs` leaves them out)
+        for (key, v) in t.iter().filter(|(k, _)| matches!(reach(k), Some(Reach::Keys(_)))) {
+            for sub in v.as_table().into_iter().flat_map(|s| s.keys()) {
+                if crate::packs::sub_reach(key, sub) == Some(Reach::BuiltIn) {
+                    said.push(format!("your {pack} pack: `{key}.{sub}` is read from tarae's own packs only"));
+                }
+            }
+        }
         for (key, into) in [("language", &mut langs), ("grammar", &mut grammars), ("server", &mut servers)] {
             if reach(key) != Some(Reach::Yours) {
                 continue;
@@ -201,8 +209,8 @@ pub(crate) fn build(builtin: &[(String, Result<Table, String>)], yours: &[(Strin
                 Some(Reach::Yours) => {
                     lists.insert(key.to_string(), v.clone());
                 }
-                // (said above)
-                Some(Reach::BuiltIn) | None => {}
+                // (said above; a table of keys isn't one of the lists)
+                Some(Reach::BuiltIn | Reach::Keys(_)) | None => {}
             }
         }
     }

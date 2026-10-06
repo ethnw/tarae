@@ -12,3 +12,7 @@ test-files = ["*Test.cs", "*Tests.cs"]
 [grammar.c-sharp]
 git = "https://github.com/tree-sitter/tree-sitter-c-sharp"
 rev = "b5eb5742f6a7e9438bee22ce8026d6b927be2cd7"
+
+# What builds a project: a script calling one runs its code (`sinceyes.rs`)
+[claude]
+builders = ["dotnet"]

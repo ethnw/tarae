@@ -711,9 +711,9 @@ mod tests {
         // (a command's words are only paths when they're there: the log must be)
         if log.exists() {
             let cmd = format!("grep -n ready {}", log.display());
-            assert_eq!(crate::readonly::outside(&cmd, root, root, &none, &none, None), Ok(vec![]));
+            assert_eq!(crate::readonly::outside(&cmd, root, root, &none, &none, &[]), Ok(vec![]));
             let cmd = format!("tail -n 40 {} {}", log.display(), dir.display());
-            let out = crate::readonly::outside(&cmd, root, root, &none, &none, None).unwrap();
+            let out = crate::readonly::outside(&cmd, root, root, &none, &none, &[]).unwrap();
             assert_eq!(out, vec![std::fs::canonicalize(dir).unwrap()], "the folder still asks");
         }
     }

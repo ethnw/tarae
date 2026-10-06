@@ -35,3 +35,8 @@ risky = [
     '\b(sudo|doas)\b', '\bch(mod|own|grp)\b', '\beval\b', '\b(curl|wget|nc|ncat|ssh|scp)\b', '\bdd\b.*\bof=',
     '\bmkfs', '\bshred\b', '\$\(shell\b',
 ]
+
+# What builds a project: a script calling one runs its code (`sinceyes.rs`)
+[claude]
+builders = ["make", "gmake"]
+said = { rank = 60, protect = "Makefile" }

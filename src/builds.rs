@@ -142,6 +142,63 @@ impl Tool {
         self.remove.is_some()
     }
 
+    /// What's run to ask where a checkout builds, and its answer's fields (target, build folder).
+    pub(crate) fn asked(&self) -> (&[String], &str, Option<&str>) {
+        (&self.ask, &self.target, self.build.as_deref())
+    }
+
+    /// The tool's home with these variables (`var`: set and not empty) for the user's `home` — its variable,
+    /// else `~/…` from home.
+    pub(crate) fn home_in(
+        &self,
+        var: &dyn Fn(&str) -> Option<PathBuf>,
+        home: Option<&Path>,
+    ) -> Option<PathBuf> {
+        if let Some(v) = self.home_env.as_deref().and_then(var) {
+            return Some(v);
+        }
+        let e = self.home_else.as_deref()?;
+        match e.strip_prefix("~/") {
+            Some(rest) => Some(home?.join(rest)),
+            None => Some(PathBuf::from(e)),
+        }
+    }
+
+    /// Your own build-folder setting — never the checkout's: its variable's value, else the tool's home's
+    /// `home-files` (`tool_home`) — and the variable that puts it over the checkout's. None when nothing sets it.
+    pub(crate) fn own_setting(
+        &self,
+        var: &dyn Fn(&str) -> Option<String>,
+        tool_home: Option<&Path>,
+    ) -> Option<(String, String)> {
+        let s = self.setting.as_ref()?;
+        let env = s.env.clone()?;
+        if let Some(v) = var(&env) {
+            return Some((env, v));
+        }
+        s.home_files.iter().find_map(|f| {
+            let text = std::fs::read_to_string(tool_home?.join(f)).ok()?;
+            let v: toml::Value = toml::from_str(&text).ok()?;
+            Some((env.clone(), dotted(&v, &s.key)?.as_str()?.to_string()))
+        })
+    }
+
+    /// Where a checkout's own build folder sits: so many folders below this one in the tool's home (`remove`).
+    pub(crate) fn own_under(&self) -> Option<(&Path, usize)> {
+        self.remove.as_ref().map(|r| (r.under.as_path(), r.depth))
+    }
+
+    /// The files that set where the checkout at `root` builds: its `when` and `setting.files` there, the
+    /// tool's home's `home-files`.
+    pub(crate) fn set_by(&self, root: &Path, tool_home: Option<&Path>) -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = self.when.iter().map(|f| root.join(f)).collect();
+        if let Some(s) = &self.setting {
+            v.extend(s.files.iter().map(|f| root.join(f)));
+            v.extend(tool_home.into_iter().flat_map(|h| s.home_files.iter().map(|f| h.join(f))));
+        }
+        v
+    }
+
     /// Whether a build-folder setting puts each checkout's builds apart (`per-checkout` in it).
     pub fn per_checkout(&self, setting: &str) -> bool {
         self.setting.as_ref().is_some_and(|s| s.per_checkout.iter().any(|m| setting.contains(m.as_str())))

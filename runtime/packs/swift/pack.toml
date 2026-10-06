@@ -9,3 +9,7 @@ doc-comments = true
 [grammar.swift]
 git = "https://github.com/alex-pinkus/tree-sitter-swift"
 rev = "57c1c6d6ffa1c44b330182d41717e6fe37430704"
+
+# What builds a project: a script calling one runs its code (`sinceyes.rs`)
+[claude]
+builders = ["swift"]

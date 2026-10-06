@@ -452,8 +452,10 @@ A script the command runs by its path (`sh x.sh`, `./x`) is allowed as it is now
 `a` is never offered for a program that runs whatever follows it (`sh -c`, `env -i`, `python`, `xargs` …), a
 program by its path that isn't such a script, git (what of it reads runs already; what writes goes to `.git`,
 which the sandbox keeps), or a name that makes a program run another (`PATH`, `RUSTC_WRAPPER`, `CARGO_HOME`,
-`RUSTUP_TOOLCHAIN`, `CARGO_ALIAS_…` and the like), and it's never kept beyond the conversation. (Your own
-`llm.run-allow` rules are still prefixes: `cargo xtask shot` there lets any `cargo xtask shot …` through.) A command
+`RUSTUP_TOOLCHAIN`, `CARGO_ALIAS_…` and the like) or one the sandbox sets or reads for a tool
+(`GRADLE_USER_HOME`, `GOENV`, `PIP_CONFIG_FILE`, `GOMODCACHE`, `GOCACHE` … — the language packs' own), and
+it's never kept beyond the conversation. (Your own `llm.run-allow` rules are still prefixes: `cargo xtask shot`
+there lets any `cargo xtask shot …` through.) A command
 that runs a file of code — `sh x.sh`, `./x`, `python x.py`, `perl x.pl`, `awk -f x.awk`, `sed -f x.sed` — shows
 that file's text on its card, since what runs is in it, not in the line (a long one is named, with its length);
 `y` reads it again and runs nothing if it changed since. A command too long to
@@ -476,8 +478,9 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
   `.mvn` (your builds run them, and jdtls when it imports the project). tarae adds `.git`, `.tarae.toml`,
   `.tarae.local.toml`, `.envrc`, `.github`, `.claude` and `.vscode`. Nothing a project or your config sets
   takes one out. A command can't make, change, move, remove or hard-link them; Claude is told which write was
-  kept and to change it with Edit, which you review. Inside `target/` and `node_modules/` those names are
-  tools' output (cmake's `Makefile`s, each package's `package.json`) and are written as usual. A command can
+  kept and to change it with Edit, which you review. Inside `target/`, `node_modules/`, `.venv/` and
+  `__pycache__/` (the language packs' `outputs`) those names are tools' output (cmake's `Makefile`s, each
+  package's `package.json`, a virtualenv's own) and are written as usual. A command can
   hard-link only files it may write, so nothing from outside is brought into the project under another name.
   It can also write in the temp folders and the toolchain's own folders: cargo's caches (`~/.cargo/registry`
   and `~/.cargo/git`) only while the network is open — closed, they stay as they are, so nothing a command
@@ -485,21 +488,49 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
   checkouts there, and cargo doesn't check them again). An offline build writes only cargo's lock and
   last-use files, the caches' `CACHEDIR.TAG` and the mark that keeps file sync off them. A build that needs a
   crate unpacked or a git dependency checked out fails, and Claude
-  is told to ask you: a build or `cargo fetch` of yours puts it there. Go's caches, and cargo's target
-  and build dirs (tarae asks `cargo metadata`) — those only when they're the checkout's own: inside it, its
+  is told to ask you: a build or `cargo fetch` of yours puts it there. Go's module cache (where `go env` says
+  `GOMODCACHE` is) the same way: read, written only while the network is open (an offline build writes nothing
+  there — measured); a build needing a module not downloaded fails, and Claude is told to ask you. Go's build
+  cache is the commands' own, never yours: `GOCACHE` points at a folder kept for the project's commands across
+  runs in tarae's cache folder (`~/.cache/tarae/run-homes/go-build/<the project's>`, or under
+  `$XDG_CACHE_HOME`; made only yours, in a project with a `go.mod` or `go.work` — elsewhere the run's own
+  folder), and yours (`~/Library/Caches/go-build` on macOS, `~/.cache/go-build` on Linux, or where `go env`
+  says `GOCACHE` is) is never written, nor read in your home — whatever place you let Claude read holds it
+  (outside home commands read anything). Commands run Go with `GOTOOLCHAIN=local`: a `toolchain` line in
+  `go.mod` would otherwise have `go` (and `go env`) run a toolchain from your module cache (measured), picked by
+  a file in the checkout. A folder Go names must not be your home or a folder above it, one holding the
+  checkout, in or around where keys are or what runs later, where programs you run are (a folder on your
+  `PATH`, `~/.local/bin`, `~/.cargo/bin`, `$GOBIN` or `~/go/bin`, `$GOPATH/bin`, or a folder holding one), in
+  or holding a toolchain's shared cache (Go's module cache at `$GOPATH/pkg/mod` or `$GOMODCACHE`, cargo's
+  `registry` and `git` in its home — at their defaults and where `GOPATH`, `GOMODCACHE` or `CARGO_HOME` moved
+  them) — the one it names as its module cache is judged without its own places, never without another
+  toolchain's — or a toolchain's home (cargo's, rustup's, Gradle's, `GOPATH` — at their defaults and where their
+  variables moved them; a `GOPATH` that's a list is every folder in it, its module cache and `bin` in the first,
+  as Go puts them), a folder holding one or a folder in one, but for the module cache's own place in
+  `GOPATH`: those stay closed, and Claude's result says which. Cargo's target
+  and build dirs (tarae asks `cargo metadata`) only when they're the checkout's own: inside it, its
   per-checkout build dir under cargo's home (`build/xx/yyyy`, worked out from your own `build-dir` setting,
   never the checkout's), or a temp folder. A cargo config in the checkout can name any folder, and Claude can
   write that config, so anything else it names — home, a folder holding the checkout, cargo's home, another
   folder — stays closed, and the run's panel and Claude's result say which (`llm.sandbox-write` opens a folder
   you choose). An edit to a `.cargo/config.toml` always asks first, even with review at the end. It can't
-  write in `~/.cargo/bin` or anything else on your `PATH`
+  write where programs you run are — the same list — and the card that opens a blocked write (`space m s`)
+  never offers one of those folders or a folder holding one, a folder in or holding a toolchain's shared cache
+  (in any project, whether it's Go's or not: those are written only with the network open, as above), nor a
+  toolchain's home, a folder holding one or a folder in one — what's there runs later as you: Gradle's
+  compiled build scripts (`~/.gradle/caches`), the distributions `./gradlew` runs (`~/.gradle/wrapper/dists`),
+  the toolchains rustup's proxies run (`~/.rustup/toolchains`), the packages `npx` runs from npm's home
+  (`~/.npm/_npx`, or where `npm_config_cache` moves it). What a command may write there it writes through its
+  own rule (a cache with the network open, Gradle's wrapper lock files), never the card. npm needs none: from
+  its cache, `npm ci` and `npm test` only read there
 - **In your home folder it reads only what it needs.** Outside home it reads anything (programs need `/usr`,
   `/opt`, `/Applications`…). Inside home it reads the project, the folders it may write in, the repository's
   other checkouts, the places you let Claude read, and what the toolchains read to work. That list was
   measured by running tarae's own checks, a Go and a Node project, a screenshot and the end-to-end tests with
   every read in home reported: `~/.cargo` (not its `credentials`), `~/.rustup`, `~/.gitconfig`,
-  `~/.config/git`, `~/.CFUserTextEncoding`, Go's `~/go`, `~/Library/Caches/go-build` and
-  `~/Library/Application Support/go`, `~/.npm`, `~/Library/Fonts`, pip's settings files, tarae's downloaded
+  `~/.config/git`, `~/.CFUserTextEncoding`, Go's `~/go`, its module cache wherever it is, and its settings
+  folder (`~/Library/Application Support/go` on macOS, `~/.config/go` on Linux) — not your Go build cache —,
+  `~/.npm`, `~/Library/Fonts`, pip's settings files, tarae's downloaded
   grammars, the folders on your `PATH`, and the `.cargo/config.toml` files in the folders above the project.
   For Java, measured with Gradle and Maven: the JDKs in `~/Library/Java/JavaVirtualMachines`, Maven's
   `~/.m2/repository` and `~/.m2/wrapper` (not `settings.xml`), Gradle's downloaded dependencies
@@ -526,6 +557,13 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
   Cargo reads its config without a way to take a copy, and every cargo command fails without it. So a token
   in `~/.cargo/config.toml` stays readable, and tarae tells you once: cargo keeps tokens in
   `~/.cargo/credentials.toml` (`cargo login` puts them there), which runs never read.
+- **What each toolchain needs is its language pack's.** The places above, the caches, Gradle's home of its own,
+  the settings that take a copy, the checks Claude runs without asking and the code folders it reads are the
+  built-in language packs' `[sandbox]` and `[claude]` tables (each `pack.toml` says why, measured). A pack in
+  your runtime folder can't widen them — it can only add places never read, folders of programs never written
+  (`bins`) and programs that build — and an
+  entry of tarae's own past what tarae always keeps (keys, Claude's and tarae's own, what runs later, your home
+  itself) is left out. tarae keeps those itself, whatever a pack says.
 - **A card that lets Claude read a place says first when it holds a token-like line.** That covers a read
   card's file, the folder its `a`/`A` would open (offered once it's been looked through), and `space m s`'s
   read grants. The card names the files, never the values. It looks through settings-like files only, not
@@ -707,8 +745,9 @@ thread of tarae's that confined itself first, and everything it starts stays con
 Claude reads the project freely: its Read, Grep and Glob go through without asking wherever the path really
 leads into the project (links followed). So do the repository's other checkouts (the main one and each
 session's — as git's own files say, both ways: an entry under `.git/worktrees` whose folder doesn't name it
-back is no checkout), the temp folders (`/tmp`, your `$TMPDIR`), the toolchains' sources and the crates cargo
-downloaded. Outside those, a card says exactly what would be read: the file, or the folder searched and what
+back is no checkout), the temp folders (`/tmp`, your `$TMPDIR`), the toolchains' sources, the crates cargo
+downloaded, Go's module cache, and the project's build folders outside it that its commands may write. Outside
+those, a card says exactly what would be read: the file, or the folder searched and what
 for. What's read goes to Claude.
 
 - `y` once · `a` this conversation · `A` always, in this project · `n` no

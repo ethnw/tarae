@@ -41,7 +41,10 @@
 //! `[[waits]]`: see `waits`. `[[places]]`: see `places`. `[language.<name>]`, `[grammar.<name>]`,
 //! `[server.<name>]`'s `command` and `args`, `config-files`, `outputs`, `checks`, `color-off`: the language
 //! table, `languages.rs`. `first-made`: what a Linux run gets made
-//! first (`made_beside`, `sandbox/linux.rs`). How a runtime folder's pack counts for each key: `Reach`.
+//! first (`made_beside`, `sandbox/linux.rs`). `[sandbox]`, `[claude]`: what a toolchain needs from Claude's
+//! sandbox and what Claude runs and reads unasked for it — `sandboxpack.rs`, its keys' reach each its own
+//! (`Reach::Keys`: what widens is the built-in packs' only). How a runtime folder's pack counts for each key:
+//! `Reach`.
 //!
 //! Packs are read when a test or the tasks are looked for (the built-in ones parsed once, a runtime folder's
 //! read each time), so an edited pack counts at once — but for the language table, read once at the start.
@@ -188,7 +191,7 @@ pub(crate) fn derive_rules(v: Option<&toml::Value>, at: &str) -> Result<Vec<Deri
     let mut out = Vec::new();
     for e in list {
         let t = e.as_table().ok_or(format!("a `{at}vars` entry isn't a table"))?;
-        let name = string(t, "name")?.ok_or(format!("a `{at}vars` entry has no `name`"))?;
+        let name = need(t, "name", &format!("a `{at}vars` entry"))?;
         let what = format!("`{at}vars` `{name}`");
         let markers = |k: &str| -> Result<Markers, String> {
             match t.get(k) {
@@ -214,11 +217,10 @@ pub(crate) fn derive_rules(v: Option<&toml::Value>, at: &str) -> Result<Vec<Deri
             }
         } else if t.contains_key("first") {
             known(t, &["name", "first"], &what)?;
-            Derived::First(strings(t.get("first"), "first")?.unwrap_or_default())
+            Derived::First(list_in(t, "first")?)
         } else if t.contains_key("parts") {
             known(t, &["name", "parts", "from"], &what)?;
-            let need = |k: &str| string(t, k)?.ok_or(format!("{what} has no `{k}`"));
-            Derived::Parts { path: need("parts")?, from: need("from")? }
+            Derived::Parts { path: need(t, "parts", &what)?, from: need(t, "from", &what)? }
         } else if t.contains_key("if") || t.contains_key("if-exists") {
             known(t, &["name", "if", "if-exists", "then", "else"], &what)?;
             let exists = t.contains_key("if-exists");
@@ -350,12 +352,12 @@ impl AttachWait {
     fn read(v: &toml::Value) -> Result<AttachWait, String> {
         let t = v.as_table().ok_or("`debug-attach` is `{ wait-for = '…', way = \"…\" }`")?;
         known(t, &["wait-for", "way"], "`debug-attach`")?;
-        let way = string(t, "way")?.ok_or("`debug-attach` has no `way`")?;
+        let way = need(t, "way", "`debug-attach`")?;
         if !crate::debugpack::WAYS.contains(&way.as_str()) {
             let ways = crate::debugpack::WAYS.join(", ");
             return Err(format!("no `debug-attach` way `{way}` (there is: {ways})"));
         }
-        let wait_for = string(t, "wait-for")?.ok_or("`debug-attach` has no `wait-for`")?;
+        let wait_for = need(t, "wait-for", "`debug-attach`")?;
         let wait_for = regex::Regex::new(&wait_for).map_err(|e| format!("`debug-attach.wait-for`: {e}"))?;
         if wait_for.capture_names().flatten().all(|g| g != "port") {
             return Err("`debug-attach.wait-for` has no `port` group".into());
@@ -450,6 +452,9 @@ pub(crate) enum Reach {
     /// The built-in packs' only, from the binary — a key that widens what Claude's runs may do. A runtime
     /// folder's is said and left out.
     BuiltIn,
+    /// A table whose keys each have their own reach (`[sandbox]`, `[claude]` — `sandboxpack.rs`); a key not
+    /// listed is refused when read.
+    Keys(&'static [(&'static str, Reach)]),
 }
 
 /// Every top-level key of a `pack.toml`, and how a runtime folder's pack counts for it.
@@ -486,7 +491,37 @@ pub(crate) const KEYS: &[(&str, Reach)] = &[
     ("protect", Reach::BuiltIn),
     // Tools' build folders: decides what a session's end deletes (`builds.rs`)
     ("builds", Reach::BuiltIn),
+    // What a toolchain needs from Claude's sandbox, and what Claude runs and reads unasked: each key by its own
+    // reach — what widens the built-in packs' only, what narrows added to (`sandboxpack.rs`)
+    ("sandbox", Reach::Keys(crate::sandboxpack::SANDBOX_KEYS)),
+    ("claude", Reach::Keys(crate::sandboxpack::CLAUDE_KEYS)),
 ];
+
+/// The reach of `key`'s `sub` key — `key`'s own when it isn't a table of keys; None: no such key.
+pub(crate) fn sub_reach(key: &str, sub: &str) -> Option<Reach> {
+    match reach(key)? {
+        Reach::Keys(keys) => keys.iter().find(|(k, _)| *k == sub).map(|(_, r)| *r),
+        r => Some(r),
+    }
+}
+
+/// `t`'s tables of keys (`Reach::Keys`) without the keys a runtime folder's pack can't set (`BuiltIn`): the
+/// keys left out, as `table.key`.
+fn without_builtin_keys(t: &mut Table) -> Vec<String> {
+    let mut gone = Vec::new();
+    for (key, v) in t.iter_mut() {
+        if let (Some(Reach::Keys(_)), toml::Value::Table(sub)) = (reach(key), v) {
+            sub.retain(|k, _| {
+                let keep = sub_reach(key, k) != Some(Reach::BuiltIn);
+                if !keep {
+                    gone.push(format!("{key}.{k}"));
+                }
+                keep
+            });
+        }
+    }
+    gone
+}
 
 /// `key`'s reach — None: no pack has that key.
 pub(crate) fn reach(key: &str) -> Option<Reach> {
@@ -518,10 +553,17 @@ pub(crate) fn builtin_manifests() -> &'static [(String, Result<Table, String>)] 
 /// One `pack.toml`'s text, read: a table whose every top-level key is one a pack may have.
 pub(crate) fn read_pack(lang: &str, text: &str, whose: &str) -> Result<Table, String> {
     let t = text.parse::<Table>().map_err(|e| format!("the {lang} pack ({whose}): {}", e.message()))?;
-    match t.keys().find(|k| reach(k).is_none()) {
-        Some(k) => Err(format!("the {lang} pack ({whose}) has no `{k}`")),
-        None => Ok(t),
+    if let Some(k) = t.keys().find(|k| reach(k).is_none()) {
+        return Err(format!("the {lang} pack ({whose}) has no `{k}`"));
     }
+    for (key, v) in &t {
+        let Some(Reach::Keys(_)) = reach(key) else { continue };
+        let sub = v.as_table().ok_or(format!("the {lang} pack ({whose}): `{key}` isn't a table"))?;
+        if let Some(k) = sub.keys().find(|k| sub_reach(key, k).is_none()) {
+            return Err(format!("the {lang} pack ({whose}) has no `{key}.{k}`"));
+        }
+    }
+    Ok(t)
 }
 
 /// The built-in `pack.toml` with the tables of one's own in their place.
@@ -544,6 +586,7 @@ fn merged_tables(
         (Some(b), None) => b,
         (None, Some(u)) => u.map(|mut u| {
             u.retain(|k, _| reach(k) != Some(Reach::BuiltIn));
+            without_builtin_keys(&mut u);
             u
         }),
         (Some(b), Some(u)) => u.and_then(|u| {
@@ -555,10 +598,29 @@ fn merged_tables(
 }
 
 /// A runtime folder's pack `u` over the built-in `b`, each key by its `Reach`.
-pub(crate) fn over(b: &mut Table, u: Table) {
+pub(crate) fn over(b: &mut Table, mut u: Table) {
+    without_builtin_keys(&mut u);
     for (key, mine) in u {
         match reach(&key) {
             Some(Reach::BuiltIn) | None => {}
+            // Key by key, each by its own reach (what's built-in only is gone already)
+            Some(Reach::Keys(_)) => {
+                let toml::Value::Table(mine) = mine else { continue };
+                let toml::Value::Table(theirs) =
+                    b.entry(key.clone()).or_insert_with(|| toml::Value::Table(Table::new()))
+                else {
+                    continue;
+                };
+                for (k, v) in mine {
+                    match (sub_reach(&key, &k), theirs.get_mut(&k)) {
+                        (Some(Reach::Added), Some(t)) => add_value(t, v),
+                        (Some(Reach::Added | Reach::Yours), _) => {
+                            theirs.insert(k, v);
+                        }
+                        _ => {}
+                    }
+                }
+            }
             Some(Reach::Added) => match b.get_mut(&key) {
                 Some(theirs) => add_value(theirs, mine),
                 None => {
@@ -655,7 +717,7 @@ pub fn tasks(root: &Path) -> Vec<Suggested> {
 fn tasks_of(v: &toml::Value, root: &Path) -> Result<Option<(i64, Vec<Suggested>)>, String> {
     let t = v.as_table().ok_or("isn't a table")?;
     known(t, &["when", "rank", "task"], "[tasks]")?;
-    let when = strings(t.get("when"), "when")?.unwrap_or_default();
+    let when = list_in(t, "when")?;
     if !when.iter().any(|f| root.join(f).is_file()) {
         return Ok(None);
     }
@@ -669,8 +731,8 @@ fn tasks_of(v: &toml::Value, root: &Path) -> Result<Option<(i64, Vec<Suggested>)
     for task in list {
         let task = task.as_table().ok_or("a task isn't a table")?;
         known(task, &["name", "cmd", "needs", "each"], "[[tasks.task]]")?;
-        let name = string(task, "name")?.ok_or("a task has no `name`")?;
-        let cmd = string(task, "cmd")?.ok_or(format!("`{name}` has no `cmd`"))?;
+        let name = need(task, "name", "a task")?;
+        let cmd = need(task, "cmd", &format!("`{name}`"))?;
         if string(task, "needs")?.is_some_and(|n| !on_path(&n)) {
             continue;
         }
@@ -679,8 +741,8 @@ fn tasks_of(v: &toml::Value, root: &Path) -> Result<Option<(i64, Vec<Suggested>)
             Some(each) => {
                 let e = each.as_table().ok_or(format!("`{name}`: `each` isn't a table"))?;
                 known(e, &["json", "keys"], "`each`")?;
-                let file = string(e, "json")?.ok_or(format!("`{name}`: `each` has no `json`"))?;
-                let key = string(e, "keys")?.ok_or(format!("`{name}`: `each` has no `keys`"))?;
+                let file = need(e, "json", &format!("`{name}`: `each`"))?;
+                let key = need(e, "keys", &format!("`{name}`: `each`"))?;
                 let Ok(src) = std::fs::read_to_string(root.join(&file)) else { continue };
                 let Ok(json) = serde_json::from_str::<Value>(&src) else { continue };
                 // A key is the project's to name: quoted for `sh -c`
@@ -774,12 +836,7 @@ pub fn review() -> Vec<Review> {
         let read = || -> Result<Review, String> {
             let r = r.as_table().ok_or("`review` isn't a table")?;
             known(r, &["risky", "quiet"], "[review]")?;
-            Ok(Review {
-                pack: pack.clone(),
-                langs,
-                risky: strings(r.get("risky"), "risky")?.unwrap_or_default(),
-                quiet: strings(r.get("quiet"), "quiet")?.unwrap_or_default(),
-            })
+            Ok(Review { pack: pack.clone(), langs, risky: list_in(r, "risky")?, quiet: list_in(r, "quiet")? })
         };
         match read() {
             Ok(r) => out.push(r),
@@ -819,7 +876,7 @@ pub fn made_beside() -> Vec<MadeBeside> {
 pub(crate) fn made_beside_of(pack: &str, text: &str) -> Result<MadeBeside, String> {
     let t = text.parse::<Table>().map_err(|e| e.message().to_string())?;
     let mut m = MadeBeside { pack: pack.to_string(), protect: protect_of(text)?, ..Default::default() };
-    for name in strings(t.get("first-made"), "first-made")?.unwrap_or_default() {
+    for name in list_in(&t, "first-made")? {
         match name.strip_suffix('/') {
             Some(folder) => m.folders.push(folder.to_string()),
             None => m.files.push(name),
@@ -831,7 +888,7 @@ pub(crate) fn made_beside_of(pack: &str, text: &str) -> Result<MadeBeside, Strin
 /// One pack's `protect` names (none: no `protect`).
 fn protect_of(text: &str) -> Result<Vec<String>, String> {
     let t = text.parse::<Table>().map_err(|e| e.message().to_string())?;
-    let names = strings(t.get("protect"), "protect")?.unwrap_or_default();
+    let names = list_in(&t, "protect")?;
     let mut out = Vec::new();
     for name in names {
         let parts: Vec<&str> = name.split('/').collect();
@@ -857,11 +914,11 @@ fn preflight_of(
     for entry in list {
         let t = entry.as_table().ok_or("an entry isn't a table")?;
         known(t, &["when", "unless", "held", "rank", "steps"], "[[preflight]]")?;
-        let when = strings(t.get("when"), "when")?.unwrap_or_default();
+        let when = list_in(t, "when")?;
         if !when.iter().any(|f| root.join(f).is_file()) {
             continue;
         }
-        let unless = strings(t.get("unless"), "unless")?.unwrap_or_default();
+        let unless = list_in(t, "unless")?;
         if unless.iter().any(|f| root.join(f).is_file()) {
             held.extend(string(t, "held")?);
             continue;
@@ -934,9 +991,9 @@ fn waits_of(v: &toml::Value) -> Result<Vec<crate::waits::Rule>, String> {
     for entry in list {
         let t = entry.as_table().ok_or("an entry isn't a table")?;
         known(t, &["line", "for", "report"], "[[waits]]")?;
-        let line = string(t, "line")?.ok_or("an entry has no `line`")?;
+        let line = need(t, "line", "an entry")?;
         let line = regex::Regex::new(&line).map_err(|e| format!("`line`: {e}"))?;
-        let said = string(t, "for")?.ok_or("an entry has no `for`")?;
+        let said = need(t, "for", "an entry")?;
         out.push(crate::waits::Rule::new(line, said, string(t, "report")?));
     }
     Ok(out)
@@ -1110,7 +1167,7 @@ fn server_table(v: &toml::Value) -> Result<Option<LeaveOut>, String> {
     if each.is_empty() || each.iter().any(|e| !e.contains("{rel}")) {
         return Err("`each` has no `{rel}`".into());
     }
-    let keep = strings(l.get("keep"), "keep")?.unwrap_or_default();
+    let keep = list_in(l, "keep")?;
     Ok(Some(LeaveOut { place, each, keep }))
 }
 
@@ -1191,19 +1248,19 @@ fn recipe(tool: &str, v: &toml::Value) -> Result<Recipe, String> {
         known(w, &["run", "needs", "bin", "project"], "a way")?;
         let run = strings(w.get("run"), "run")?.filter(|r| !r.is_empty()).ok_or("a way has no `run`")?;
         let needs = string(w, "needs")?.unwrap_or_else(|| run[0].clone());
-        bins.extend(strings(w.get("bin"), "bin")?.unwrap_or_default().iter().filter_map(|d| expand_dir(d)));
+        bins.extend(list_in(w, "bin")?.iter().filter_map(|d| expand_dir(d)));
         let project = match w.get("project") {
             None => false,
             Some(p) => p.as_bool().ok_or("`project` is true or false")?,
         };
         ways.push(Way::Run { run, needs, project });
     }
-    let missing_says = strings(t.get("missing-says"), "missing-says")?.unwrap_or_default();
+    let missing_says = list_in(t, "missing-says")?;
     let look_for = string(t, "look-for")?;
     if look_for.as_ref().is_some_and(|f| f.contains('/') || f.matches('*').count() != 1) {
         return Err("`look-for` is a file name with one `*` (where its version is)".into());
     }
-    let look_in = strings(t.get("look-in"), "look-in")?.unwrap_or_default();
+    let look_in = list_in(t, "look-in")?;
     if !look_in.is_empty() && look_for.is_none() {
         return Err("`look-in` needs `look-for` (the file to look for there)".into());
     }
@@ -1338,7 +1395,7 @@ fn download_way(w: &Table) -> Result<crate::fetch::Download, String> {
             Some(Runtime {
                 program: need("program")?,
                 home: string(t, "home")?,
-                ask: strings(t.get("ask"), "ask")?.unwrap_or_default(),
+                ask: list_in(t, "ask")?,
                 version,
                 at_least: u64::try_from(at_least).map_err(|_| "`at-least` is a version, not below 0")?,
                 get: need("get")?,
@@ -1417,6 +1474,16 @@ pub(crate) fn string(t: &Table, key: &str) -> Result<Option<String>, String> {
     }
 }
 
+/// `key`, a string `what` must have.
+pub(crate) fn need(t: &Table, key: &str, what: &str) -> Result<String, String> {
+    string(t, key)?.ok_or(format!("{what} has no `{key}`"))
+}
+
+/// `key`, a list of strings — none when it isn't there.
+pub(crate) fn list_in(t: &Table, key: &str) -> Result<Vec<String>, String> {
+    Ok(strings(t.get(key), key)?.unwrap_or_default())
+}
+
 /// The templates of one scope: `run{sfx}`, `debug{sfx}`, `label{sfx}`.
 fn set(t: &Table, sfx: &str) -> Result<Set, String> {
     Ok(Set {
@@ -1462,7 +1529,7 @@ impl Tests {
             "none-ran",
         ];
         known(t, &[&own[..], SETTINGS].concat(), "[test]")?;
-        let name = string(t, "query")?.ok_or("[test] has no `query`")?;
+        let name = need(t, "query", "[test]")?;
         let src = file(&name).ok_or(format!("its query `{name}` is missing"))?;
         let query = Query::new(language, &src).map_err(|e| format!("{name}: {e}"))?;
         if query.capture_index_for_name("name").is_none()
@@ -1485,7 +1552,7 @@ impl Tests {
                 }
             }
         };
-        let helpers = strings(t.get("helpers"), "helpers")?.unwrap_or_default();
+        let helpers = list_in(t, "helpers")?;
         if let Some(h) = helpers.iter().find(|h| !HELPERS.contains(&h.as_str())) {
             return Err(format!("no helper `{h}` (there are: {})", HELPERS.join(", ")));
         }
@@ -1549,7 +1616,7 @@ impl Tests {
         }
         Ok(Tests {
             query,
-            files: strings(t.get("files"), "files")?.unwrap_or_default(),
+            files: list_in(t, "files")?,
             cwd,
             helpers,
             parse,

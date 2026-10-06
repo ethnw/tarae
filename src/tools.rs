@@ -278,13 +278,20 @@ fn response(call: &Call, r: Result<String, String>) -> Value {
 
 // ── run_tests ───────────────────────────────────────────────────────────────
 
-fn run_tests_schema() -> Value {
+/// The built-in packs' words for `field` of their `[claude] said` (by rank), joined with `", "`.
+fn packs_said(field: fn(&crate::sandboxpack::Said) -> Option<&str>) -> String {
+    let said = &crate::sandboxpack::get().said;
+    said.iter().filter_map(field).collect::<Vec<_>>().join(", ")
+}
+
+pub(crate) fn run_tests_schema() -> Value {
+    let tests = packs_said(|s| s.tests.as_deref());
     json!({
         "name": "run_tests",
-        "description": "Run tests in the user's editor and get the results — after you change code, run the \
+        "description": format!("Run tests in the user's editor and get the results — after you change code, run the \
     tests that cover it to check your work. Give a test file, and a line to run just the test (or test \
     module/class) around it; without a line, the file's tests. The user watches the run in their editor. \
-    Call it once the edits it should check are made, not alongside them. Unsaved files are saved first. Rust (cargo test), Go, Python (pytest), Java (Gradle/Maven).",
+    Call it once the edits it should check are made, not alongside them. Unsaved files are saved first. {tests}."),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -536,18 +543,21 @@ pub fn tests_dropped(ed: &mut Editor, why: &str) {
 
 // ── run ─────────────────────────────────────────────────────────────────────
 
-fn run_schema() -> Value {
+pub(crate) fn run_schema() -> Value {
+    // (the packs' checks and code folders, by rank: cargo's, go's · Rust's sources and crates)
+    let checks = packs_said(|s| s.run.as_deref());
+    let code: String = packs_said(|s| s.code.as_deref());
+    let code = if code.is_empty() { code } else { format!(", {code}") };
     json!({
         "name": "run",
-        "description": "Run a shell command in the project, in the user's editor, and get how it ended and \
+        "description": format!("Run a shell command in the project, in the user's editor, and get how it ended and \
     its output — build, lint, format, test suites, git. The user watches it in their task panel. Both output \
     streams come back whole (long output: its start and end), so don't redirect or pipe to head/tail for \
-    that. Checks (cargo build/check/test/clippy/fmt/tree/metadata, go build/test/vet, git status/diff/log/show) \
+    that. Checks ({checks}, git status/diff/log/show) \
     start at once — words only (quotes are fine), alone or piped into grep head tail wc sort cut uniq, sed -n \
     'a,bp'. So do read-only ones (ls cat head tail wc grep rg find tree stat file du diff sort uniq cut pwd \
     echo nm otool strings size, sed -n 'a,bp', git blame/rev-parse/ls-files/branch/show, git diff --no-index; \
-    git -C <dir> too) whose paths stay in the project, the repository's other checkouts, the temp folders, \
-    the Rust toolchain's sources ($(rustc --print sysroot)/lib/rustlib/src) or cargo's downloaded crates — \
+    git -C <dir> too) whose paths stay in the project, the repository's other checkouts, the temp folders{code} — \
     and lines of checks and reads joined by ; && || |, \
     with cd, for/while-read loops of reads, or the same in sh -c '…' (no other $, no backticks or redirects \
     to files). To run somewhere other than the project root, give cwd rather than a cd. Any other command \
@@ -556,7 +566,7 @@ fn run_schema() -> Value {
     sandbox; when one needs one unix socket outside it (a server's — colima's docker.sock), ask for that: \
     unix_socket with your reason; when it can't work in it otherwise (the network, writing where the sandbox \
     doesn't let it), you may ask to run it outside: outside_sandbox with your reason — the user decides on a \
-    card, this once.",
+    card, this once."),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -574,26 +584,15 @@ fn run_schema() -> Value {
 /// A reason to run outside the sandbox, at most (the card shows it whole).
 const REASON_MAX: usize = 300;
 
-/// Commands that run without asking: the checks, and git's read-only ones — by whole words, and only
-/// when the line has nothing the shell would read as more than words (`allowed`). `cargo tree` and `cargo
-/// metadata` read the dependency graph (#116) — cargo as the checks run it, in the sandbox.
-pub const RUN_ALLOW: [&str; 15] = [
-    "cargo build",
-    "cargo check",
-    "cargo test",
-    "cargo clippy",
-    "cargo fmt",
-    "cargo tree",
-    "cargo metadata",
-    "go build",
-    "go test",
-    "go vet",
-    "gofmt -l",
-    "git status",
-    "git diff",
-    "git log",
-    "git show",
-];
+/// Git's read-only commands, which run without asking (git is tarae's own).
+const GIT_READS: [&str; 4] = ["git status", "git diff", "git log", "git show"];
+
+/// Commands that run without asking: git's read-only ones and the checks the built-in packs name
+/// (`[claude] run-allow` — cargo's, go's) — by whole words, and only when the line has nothing the shell would
+/// read as more than words (`allowed`).
+pub fn run_allow() -> impl Iterator<Item = &'static str> {
+    GIT_READS.into_iter().chain(crate::sandboxpack::get().run_allow.iter().map(String::as_str))
+}
 
 /// A command longer than this isn't put to the user (a card can't show it whole).
 const COMMAND_MAX: usize = 600;
@@ -610,7 +609,7 @@ fn writes_option(words: &[String]) -> Option<&'static str> {
 
 /// Whether `cmd` runs without asking: one command and nothing else (`readonly::one_command` — quoted words
 /// are fine; expansion, redirection, chaining, globs or an assignment and the words don't say what runs),
-/// starting with one of the `RUN_ALLOW` or `extra` prefixes word for word (`extra`: `llm.run-allow`, this
+/// starting with one of the `run_allow` or `extra` prefixes word for word (`extra`: `llm.run-allow`, this
 /// chat's patterns), and none of the options that make it write or run something.
 pub fn allowed(cmd: &str, extra: &[String]) -> bool {
     if let Some(words) = crate::readonly::one_command(cmd) {
@@ -731,11 +730,8 @@ fn allowed_words(words: &[String], extra: &[String]) -> bool {
     {
         return false;
     }
-    RUN_ALLOW
-        .iter()
-        .copied()
-        .chain(extra.iter().map(String::as_str))
-        .any(|rule| rule_matches(words, &rule_env(rule).1))
+    let mut rules = run_allow().map(str::to_string).chain(extra.iter().cloned());
+    rules.any(|rule| rule_matches(words, &rule_env(&rule).1))
 }
 
 /// Whether a command Claude runs is a check or a build — every command in its line one of the packs'
@@ -1503,12 +1499,12 @@ fn read_only(
         let mut kept = crate::allow::Store::read(store.as_deref()).get(&root);
         let defaults = crate::allow::defaults(&root, temp);
         kept.read.extend(defaults.all());
-        let sysroot = judge.contains(crate::readonly::SYSROOT).then(|| crate::allow::sysroot(&cwd)).flatten();
-        let reads = crate::readonly::outside(&judge, &cwd, &root, &chat, &kept, sysroot.as_deref());
+        let expanded = crate::allow::expanded(&judge, &cwd);
+        let reads = crate::readonly::outside(&judge, &cwd, &root, &chat, &kept, &expanded);
         // (where they are, for the card's line)
         let classes = reads.as_ref().map(|r| crate::cards::classes(r, &defaults)).unwrap_or_default();
         // (a check or git that would run outside the project: the plain card, whatever reads are allowed)
-        let runs_outside = crate::readonly::runs_outside(&judge, &cwd, &root, sysroot.as_deref());
+        let runs_outside = crate::readonly::runs_outside(&judge, &cwd, &root, &expanded);
         let pinned = pins.is_none_or(|pins| {
             crate::readonly::script_pins(&judge, &cwd, &root)
                 .is_some_and(|s| s.iter().all(|p| pins.contains(p)))
@@ -1828,7 +1824,7 @@ fn moved(cmd: &str, cwd: &Path, unseen: &[PathBuf]) -> Option<Vec<PathBuf>> {
     for part in crate::readonly::parse(cmd)? {
         let w = match part {
             Part::Cd(d) => {
-                here = crate::readonly::cd_into(&here, &d, None).ok()?;
+                here = crate::readonly::cd_into(&here, &d, &[]).ok()?;
                 continue;
             }
             Part::Cmd(w) => w,
@@ -2223,14 +2219,14 @@ pub(crate) fn guard_then_go(ed: &mut Editor, who: For, job: Job, ride: Ride) {
             Availability::Unknown => crate::sandbox::probe(),
             f => f,
         };
-        let mut cargo = (Vec::new(), None);
+        let mut told = (Vec::new(), None);
         let policy = matches!(found, Availability::Ready | Availability::Partial(_)).then(|| {
             let kept = crate::allow::Store::read(store.as_deref()).get(&crate::sandbox::profile_path(&root));
             let w = with_allowed(&llm, &[&kept, &chat], grant.as_ref());
             let mut p = crate::sandbox::policy(&root, &w.llm, &w.reads);
             (p.granted, p.sockets) = (w.granted, w.sockets);
-            // (cargo's configs holding a token: the user hears once — `tokens::tell_cargo`)
-            cargo = crate::tokens::cargo_to_tell(&p.reads.copies.cargo, said.as_deref());
+            // (settings holding a token that take no copy — cargo's: the user hears once — `tokens::tell_holders`)
+            told = crate::tokens::to_tell(&p.reads.copies.told, said.as_deref());
             // Its denials watched from before it starts (the stream up first — measured)
             p.watch = crate::sandbox::watch_for(&p);
             std::thread::sleep(crate::sandbox::watch_wait(&p));
@@ -2238,7 +2234,7 @@ pub(crate) fn guard_then_go(ed: &mut Editor, who: For, job: Job, ride: Ride) {
         });
         move |ed: &mut Editor| {
             ed.sandbox = found.clone();
-            crate::tokens::tell_cargo(ed, &cargo.0, cargo.1);
+            crate::tokens::tell_holders(ed, &told.0, told.1);
             if let For::Claude(call) = &who {
                 call.step("sandbox ready");
             }

@@ -63,3 +63,35 @@ risky = [
     'require\(.(net|http|https).\)', 'from .(node:)?(net|http|https).', 'process\.env\.\w+\s*=',
 ]
 quiet = ["__tests__/", "*.test.js", "*.spec.js", "*.test.jsx", "*.spec.jsx"]
+
+# Claude's sandbox (`sandboxpack.rs`). npm's cache, measured (`target/sb/p2-measured.md`, a Node project)
+[sandbox]
+reads = ["~/.npm", "{npm}", "{npm-upper}"]
+# npm's debug log in the run's own folder, not `~/.npm/_logs` (closed): measured, every npm command was denied
+# writing its log and deleting the old ones its cleanup lists — in a folder of its own the cleanup finds none
+# of yours. (`logs-max=0` writes none but still tries to delete every old one.) Its "complete log" line names
+# a file there while the run's folder lasts
+env = { npm_config_logs_dir = "{run}" }
+
+# npm's home, wherever its cache setting moves it (npm reads `npm_config_*` in any case — both forms people
+# set): what `npx` fetched runs from its `_npx/` later, outside the sandbox, so no grant or asked folder opens
+# it (`sandbox::RunsLater`). Runs only read it — measured 2026-10-06 (`target/sb/corepack6/npm-ro`): `npm
+# ci`, `npm ci --offline` and `npm test` from the cache, read-only, wrote nothing there and were denied nothing
+# there (the network aside: the audit's lookup)
+[sandbox.homes]
+npm = { env = "npm_config_cache", else = "~/.npm" }
+npm-upper = { env = "NPM_CONFIG_CACHE", else = "~/.npm" }
+
+# npm's settings hold its tokens (`_authToken`): the file is kept from every run (`allow::SECRETS`), so its
+# copy without them is always given
+[[sandbox.settings]]
+tool = "npm"
+var = "NPM_CONFIG_USERCONFIG"
+var-also = ["npm_config_userconfig"]
+files = ["~/.npmrc"]
+form = "lines"
+copy = "npmrc"
+
+[claude]
+builders = ["npm", "npx", "pnpm", "yarn"]
+said = { rank = 50, protect = "package.json" }

@@ -192,3 +192,53 @@ risky = [
     'ServerSocket', 'HttpClient', 'URL\(.*\)\.open', 'Class\.forName', 'setAccessible\(true\)',
 ]
 quiet = ["src/test/"]
+
+# Claude's sandbox (`sandboxpack.rs`). What Java's builds read in home, measured
+# (`target/sb/java-checkpoint.md`): the JDKs `/usr/bin/java` looks for, Maven's downloaded repository and its
+# wrapper's distributions — not `~/.m2/settings.xml` (a repository's password lives there). In the user's
+# Gradle home: the dependencies downloaded (`caches/modules-2`, read in place as `GRADLE_RO_DEP_CACHE`) and the
+# wrapper's distributions — not its settings (`gradle.properties` holds repository passwords)
+[sandbox]
+reads = [
+    "~/Library/Java/JavaVirtualMachines", "~/.m2/repository", "~/.m2/wrapper", "{gradle}/caches/modules-2",
+    "{gradle}/wrapper/dists",
+]
+# The user's Gradle daemons' registry: their ports and the token each takes — kept from every run, whatever is
+# granted. Measured (`target/sb/java-checkpoint.md`, c0): with it readable and this machine's ports open, a
+# sandboxed `./gradlew` hands its build to a daemon started outside, and the build runs outside the sandbox
+kept = ["{gradle}/daemon"]
+# The lock file Gradle's wrapper takes beside each distribution it unpacked (`wrapper/dists/<name>/<hash>/
+# <name>.zip.lck`) — every run, though the distribution is there (measured: denied, `./gradlew` fails). The
+# only writes a run makes in the user's Gradle home
+write-files = ["{gradle}/wrapper/dists/{a}/{b}/{a}.zip.lck"]
+# A JVM refused a port on this machine: Gradle's client and its daemon
+refused-port = { process = "java", said = """Java was refused a port on this machine: Gradle's client talks to \
+its build daemon and test workers over this machine's ports, so a Gradle build can't run while they're closed. \
+Tell the user: llm.sandbox-localhost (in the project's .tarae.toml) opens them. Their own Gradle daemons stay \
+out of reach — the registry that names them is kept from your commands.""" }
+
+[sandbox.homes]
+gradle = { env = "GRADLE_USER_HOME", else = "~/.gradle" }
+
+# A run's own Gradle home, made in its folder. The user's holds what their own builds run later — compiled
+# build scripts, the wrapper's distributions, the dependencies — and the registry of their daemons, so a run
+# never writes there, nor reads that registry (measured: a sandboxed build that found it ran in a daemon
+# started outside). In the run's own: the wrapper's distributions linked from the user's (read; only their
+# lock files written), the user's downloaded dependencies read in place, and no daemon kept after the build
+# (`org.gradle.daemon=false`, after the user's `GRADLE_OPTS`): it would live on past the run, inside its
+# sandbox, for nobody. Gone with the run's folder — a small build took 4.5 s from nothing, 3.7 s again
+# (measured)
+[sandbox.run-home.gradle]
+env = "GRADLE_USER_HOME"
+make = ["wrapper"]
+link = { "wrapper/dists" = "{gradle}/wrapper/dists" }
+set = { GRADLE_RO_DEP_CACHE = { value = "{gradle}/caches", if = "{gradle}/caches/modules-2" } }
+append = { GRADLE_OPTS = "-Dorg.gradle.daemon=false" }
+said = """{home}: the user's Gradle home stays as it is — their own builds run what's there. Your commands have \
+a Gradle home of their own and read the downloaded dependencies and the wrapper's distributions from theirs: \
+Gradle trying to write there is expected, and the build goes on. A dependency or distribution not downloaded \
+yet fails here — tell the user; a build of theirs fetches it."""
+
+[claude]
+builders = ["gradle", "mvn"]
+said = { rank = 40, tests = "Java (Gradle/Maven)" }

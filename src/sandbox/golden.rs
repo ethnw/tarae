@@ -1,0 +1,420 @@
+//! What the sandbox makes of a stand-in home, pinned (`src/snapshots/sandbox_*.txt`, `TARAE_BLESS=1` rewrites
+//! them): the profile and its parameters, the policy each system's rules are made from, Landlock's rules, where
+//! a run writes, what Claude reads in a run's report, and the words its prompt says of the sandbox. Made from a
+//! home of the test's own (`Fixture`) and what `Here` says of it — never the user's — so the same text comes
+//! out on any machine; what isn't the fixture's (the run's folder, the temp folders, tarae's state) is named
+//! by a `$NAME`.
+
+use std::path::{Path, PathBuf};
+
+use super::*;
+
+/// A stand-in home with what the toolchains keep there, a project in it, and what `Here` says of them.
+struct Fixture {
+    base: PathBuf,
+    home: PathBuf,
+    root: PathBuf,
+    here: Here,
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.base).ok();
+    }
+}
+
+/// Every token here is a fake one (`tarae-fake-token`), in the test's own folder.
+const FILES: [(&str, &str); 16] = [
+    ("Library/Application Support/go/env", "GOPROXY=https://u:tarae-fake-token@example.invalid\n"),
+    (".config/go/env", "GOPROXY=https://u:tarae-fake-token@example.invalid\n"),
+    (".cargo/registry/src/index/x-1.0/lib.rs", ""),
+    (".cargo/git/checkouts/y/z", ""),
+    (".cargo/config.toml", "[registries.x]\ntoken = \"tarae-fake-token-cargo-0000\"\n"),
+    (".cargo/credentials.toml", "[registry]\ntoken = \"tarae-fake-token-cred-0000\"\n"),
+    (".rustup/toolchains/stable-x/lib/rustlib/src/rust/library/core/lib.rs", ""),
+    (".gradle/wrapper/dists/gradle-8.10-bin/abc123/gradle-8.10-bin.zip", ""),
+    (".gradle/caches/modules-2/files-2.1/x", ""),
+    (".gradle/daemon/8.10/registry.bin", ""),
+    (".m2/repository/x", ""),
+    (".npmrc", "//registry.npmjs.org/:_authToken=tarae-fake-token-npm-00000000\n"),
+    (
+        ".gitconfig",
+        "[user]\n\tname = x\n[http]\n\textraHeader = Authorization: Bearer tarae-fake-token-git-0000\n",
+    ),
+    (".config/pip/pip.conf", "[global]\nindex-url = https://u:tarae-fake-token@example.invalid/simple\n"),
+    (".ssh/id_x", "not a key\n"),
+    ("work/.cargo/config.toml", "[build]\njobs = 2\n"),
+];
+
+const FOLDERS: [&str; 7] = [
+    "Library/Application Support/go/telemetry",
+    "Library/Caches/go-build",
+    ".cache/go-build",
+    "gocache",
+    "go/pkg/mod",
+    ".cargo/build/ab/cdef0123",
+    "elsewhere",
+];
+
+impl Fixture {
+    /// A fresh one (`name` keeps tests apart), the homes at their defaults; `env` adds to what `Here` says.
+    fn new(name: &str, os: Os, env: &[(&str, &str)]) -> Fixture {
+        // (never in the shared temp folder — Linux's is `/tmp`: a run writes all of it, so the fixture's own
+        // places would fold into it)
+        let tmp = std::env::temp_dir();
+        let tmp = if tmp.starts_with(TMP) { PathBuf::from("/var/tmp") } else { tmp };
+        let base = tmp.join(format!("tarae-golden-{name}-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::create_dir_all(base.join("tmp")).unwrap();
+        let base = std::fs::canonicalize(&base).unwrap();
+        let home = base.join("home");
+        let root = home.join("work/proj");
+        for (rel, text) in FILES {
+            let p = home.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        }
+        for rel in FOLDERS {
+            std::fs::create_dir_all(home.join(rel)).unwrap();
+        }
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"p\"\n").unwrap();
+        std::fs::write(root.join("go.mod"), "module p\n").unwrap();
+        for d in ["cargo-moved/registry", "gradle-moved/daemon", "rustup-moved/toolchains"] {
+            std::fs::create_dir_all(base.join(d)).unwrap();
+        }
+        let mut vars: HashMap<String, std::ffi::OsString> = HashMap::new();
+        vars.insert("HOME".into(), home.clone().into());
+        for (k, v) in env {
+            let v = v.replace("$BASE", &base.display().to_string());
+            vars.insert(k.to_string(), v.into());
+        }
+        let here = Here { env: vars, tmp: Some(base.join("tmp")), uid: 501, os };
+        // What the toolchain would have said (no cargo or go is run): Go's module cache, the user's Go build
+        // cache moved into home (kept from runs), cargo's target dir in the checkout, a folder in home it names
+        // (kept closed — #20), and this checkout's own build dir
+        let own = home.join(".cargo/build/ab/cdef0123");
+        let named = vec![
+            (root.join("target"), "target-dir".into()),
+            (home.join("elsewhere"), "target-dir".into()),
+            (own.clone(), "build-dir".into()),
+        ];
+        let found = ToolDirs {
+            other: Vec::new(),
+            caches: vec![(home.join("go/pkg/mod"), "GOMODCACHE".into(), "go's GOMODCACHE".into())],
+            kept: vec![home.join("gocache")],
+            named,
+            own_build: Some(own),
+        };
+        toolchain_found_in(&root, found, &here);
+        Fixture { base, home, root, here }
+    }
+
+    /// `text` with what isn't the fixture's own named: the run's folder and tag, the project, the stand-in home,
+    /// the fixture's folder, the shared temp folder, tarae's state.
+    fn named(&self, text: &str, run: Option<&RunDir>) -> String {
+        let mut names: Vec<(String, &str)> = vec![
+            // (the project's kept homes are named by its path: the fixture's, a new one each time)
+            (project_key(&self.root), "$KEY"),
+            (self.root.display().to_string(), "$ROOT"),
+            (self.home.display().to_string(), "$HOME"),
+            (self.base.display().to_string(), "$BASE"),
+            (TMP.to_string(), "$TMP"),
+        ];
+        if let Some(r) = run {
+            names.push((r.path().display().to_string(), "$RUN"));
+            names.push((r.tag(), "$TAG"));
+        }
+        if let Some(s) = crate::config::state_dir() {
+            names.push((profile_path(&s).display().to_string(), "$STATE"));
+        }
+        // (longest first: the project is in the home, the home in the fixture's folder)
+        names.sort_by_key(|(from, _)| std::cmp::Reverse(from.len()));
+        let mut out = text.to_string();
+        for (from, to) in names {
+            out = replace_whole(&out, &from, to);
+        }
+        out
+    }
+
+    fn policy(&self, llm: &crate::llm::LlmConfig) -> Policy {
+        policy_in(&self.root, llm, &[], &self.here)
+    }
+}
+
+/// `text` with `from` as `to` where it's a whole path's start — not inside a name (`$BASE/tmp` keeps its
+/// `/tmp`, `TMP` on Linux) — and ends with a part (`/tmp` isn't `/tmpfoo`'s).
+fn replace_whole(text: &str, from: &str, to: &str) -> String {
+    let in_name = |c: char| c.is_alphanumeric() || "_.-$".contains(c);
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(i) = rest.find(from) {
+        out.push_str(&rest[..i]);
+        let before = out.chars().next_back();
+        let after = rest[i + from.len()..].chars().next();
+        if before.is_some_and(in_name) || after.is_some_and(|c| in_name(c) && c != '.') {
+            out.push_str(from);
+        } else {
+            out.push_str(to);
+        }
+        rest = &rest[i + from.len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Compared with `src/snapshots/<name>`, or written there with `TARAE_BLESS=1`.
+fn pinned(name: &str, actual: &str) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/snapshots").join(name);
+    if std::env::var_os("TARAE_BLESS").is_some_and(|v| v == "1") {
+        std::fs::write(&path, actual).unwrap();
+        return;
+    }
+    let expected = std::fs::read_to_string(&path).unwrap_or_default();
+    if expected != actual {
+        let first = expected.lines().zip(actual.lines()).position(|(a, b)| a != b);
+        panic!(
+            "{} differs (first at line {}) — if intended: TARAE_BLESS=1 cargo test sandbox::golden\n\n{actual}",
+            path.display(),
+            first.map_or("past the shorter's end".into(), |l| (l + 1).to_string()),
+        );
+    }
+}
+
+/// Paths, sorted, one a line.
+fn lines(f: &Fixture, run: Option<&RunDir>, paths: impl IntoIterator<Item = String>) -> String {
+    let mut v: Vec<String> = paths.into_iter().map(|p| f.named(&p, run)).collect();
+    v.sort();
+    v.iter().map(|p| format!("    {p}\n")).collect()
+}
+
+fn shown(p: &Path) -> String {
+    p.display().to_string()
+}
+
+/// The profile byte for byte, its parameters as a set per letter (the profile names them by index, so their
+/// order is the packs' reading order's), and the policy's fields every system's rules are made from.
+fn policy_said(f: &Fixture, p: &Policy) -> String {
+    let run = p.run.as_deref();
+    let mut s = String::from("profile:\n");
+    // (the names' regexes start with as many path parts as the project's path has: the machine's)
+    let depth = p.root.components().filter(|c| matches!(c, Component::Normal(_))).count();
+    let profile = p.profile().replace(&format!("^{}/", "/[^/]+".repeat(depth)), "^$ROOT-PARTS/");
+    s.push_str(&f.named(&profile, run));
+    s.push_str("params:\n");
+    let mut by: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for (k, v) in p.params() {
+        let letter: String = k.chars().take_while(|c| !c.is_ascii_digit()).collect();
+        by.entry(letter).or_default().push(v);
+    }
+    for (letter, values) in by {
+        s.push_str(&format!("  {letter}:\n{}", lines(f, run, values)));
+    }
+    let r = &p.reads;
+    let fields: [(&str, Vec<String>); 15] = [
+        ("write", p.write.iter().map(|w| shown(w)).collect()),
+        ("files", p.files.iter().map(|w| shown(w)).collect()),
+        ("keep", p.keep.iter().map(|w| shown(w)).collect()),
+        ("caches", p.caches.iter().map(|w| shown(w)).collect()),
+        ("refused", p.refused.iter().map(|(d, why)| format!("{} — {why}", shown(d))).collect()),
+        ("reads.home", r.home.iter().map(|w| shown(w)).collect()),
+        ("reads.allow", r.allow.iter().map(|w| shown(w)).collect()),
+        ("reads.kept", r.kept.iter().map(|w| shown(w)).collect()),
+        ("reads.log", r.log.iter().map(|w| shown(w)).collect()),
+        ("copies.env", r.copies.env.iter().map(|(v, c)| format!("{v}={}", shown(c))).collect()),
+        ("copies.hidden", r.copies.hidden.iter().map(|(h, v)| format!("{} (${v})", shown(h))).collect()),
+        ("copies.left_out", r.copies.left_out.iter().map(|(h, v)| format!("{} (${v})", shown(h))).collect()),
+        ("copies.told", r.copies.told.iter().map(|(w, _)| shown(w)).collect()),
+        ("run env", p.env.iter().map(|(k, v)| format!("{k}={v}")).collect()),
+        ("tool homes", p.run_homes.iter().map(|h| format!("{} {}", h.name, shown(&h.user))).collect()),
+    ];
+    for (name, values) in fields {
+        s.push_str(&format!("{name}:\n{}", lines(f, run, values)));
+    }
+    s
+}
+
+/// A scene of `the_policy_is_pinned`: its name, what `Here` adds, the settings.
+type Scene<'a> = (&'a str, &'a [(&'a str, &'a str)], crate::llm::LlmConfig);
+
+/// The profile and the policy, each system's, from the stand-in home: its homes at their defaults, the
+/// homes moved by their variables, and the network open with a port (cargo's caches written then).
+#[test]
+fn the_policy_is_pinned() {
+    let moved = [
+        ("CARGO_HOME", "$BASE/cargo-moved"),
+        ("RUSTUP_HOME", "$BASE/rustup-moved"),
+        ("GRADLE_USER_HOME", "$BASE/gradle-moved"),
+        ("GRADLE_OPTS", "-Xmx1g"),
+    ];
+    let open = crate::llm::LlmConfig { sandbox_network: true, sandbox_ports: vec![9], ..Default::default() };
+    let mut out = String::new();
+    for os in [Os::Mac, Os::Linux] {
+        let scenes: [Scene; 3] = [
+            ("homes at their defaults", &[], Default::default()),
+            ("homes moved", &moved, Default::default()),
+            ("network open, port 9", &[], open.clone()),
+        ];
+        for (i, (scene, env, llm)) in scenes.into_iter().enumerate() {
+            let f = Fixture::new(&format!("policy-{os:?}-{i}"), os, env);
+            out.push_str(&format!("══ {os:?}: {scene}\n"));
+            out.push_str(&policy_said(&f, &f.policy(&llm)));
+        }
+    }
+    pinned("sandbox_policy.txt", &out);
+}
+
+/// Where a run may write (`write_places` — gitescape's git launcher reads it), but the devices and runs'
+/// folders, which no pack names (each said present).
+#[test]
+fn the_write_places_are_pinned() {
+    let f = Fixture::new("write-places", Os::HOST, &[]);
+    let llm = crate::llm::LlmConfig::default();
+    let all = Policy::for_project(&env_in(&f.root, &llm, &[], &f.here).0).write_places();
+    let base = RunDir::base();
+    assert!(all.contains(&base), "{all:?}");
+    assert!(DEVICE_PLACES.iter().all(|d| all.iter().any(|w| w == Path::new(d))), "{all:?}");
+    // (runs' folders are `$TMPDIR`'s: on Linux that's `/tmp`, which the policy names itself)
+    let runs = |w: &PathBuf| *w == base && *w != Path::new(TMP);
+    let ours = all.iter().filter(|w| !runs(w) && !DEVICE_PLACES.iter().any(|d| *w == Path::new(d)));
+    pinned("sandbox_write_places.txt", &lines(&f, None, ours.map(|w| shown(w))));
+}
+
+/// What Claude reads with a run's result: every kind of denial the report explains, and what its panel line
+/// says — then a run that was denied nothing, and its panel line (the folder the checkout's cargo config named).
+#[test]
+fn the_report_is_pinned() {
+    // (macOS's: a token file's place is the system's — the report names it)
+    let f = Fixture::new("report", Os::Mac, &[]);
+    let p = f.policy(&crate::llm::LlmConfig::default());
+    let run = p.run.clone();
+    let home = &f.home;
+    let file = |op: &str, p: PathBuf| Denial { process: "x".into(), op: op.into(), target: shown(&p) };
+    let telemetry = |rel: &str| quiet_writes()[0].join(rel).display().to_string();
+    let denials = [
+        file("file-write-create", home.join(".cargo/registry/src/index/x-1.0/new.rs")),
+        file("file-write-create", home.join(".gradle/caches/transforms-4/x")),
+        Denial { process: "java".into(), op: "network-outbound".into(), target: "remote:*:9".into() },
+        file("file-read-data", home.join(".gitconfig")),
+        file("file-read-data", home.join(".cargo/credentials.toml")),
+        // (Go's telemetry: quiet at its place for the process's home on this system, as `quiet` reads it —
+        // the same tail in the project is named)
+        Denial { process: "x".into(), op: "file-write-create".into(), target: telemetry("local/x.count") },
+        file("file-write-create", f.root.join("Library/Application Support/go/telemetry/local/x.count")),
+        file("file-write-data", f.root.join("Cargo.toml")),
+        file("file-write-create", f.root.join(".git/index.lock")),
+        file("file-write-create", PathBuf::from("/opt/tarae-golden/x")),
+    ];
+    let watch = Watch::quiet("golden.");
+    for d in denials {
+        watch.record(d);
+    }
+    let guard = Guard::In(Box::new(Policy { watch: Some(watch), ..p.clone() }));
+    let mut out = String::from("══ denied\n");
+    out.push_str(&guard.report(&[]));
+    let line = panel_line(Some(&guard), false, std::time::Instant::now());
+    out.push_str(&format!("\npanel: {line:?}\n══ denied nothing\n"));
+    let calm = Guard::In(Box::new(Policy { watch: Some(Watch::quiet("golden-calm.")), ..p }));
+    out.push_str(&calm.report(&[]));
+    let line = panel_line(Some(&calm), false, std::time::Instant::now());
+    out.push_str(&format!("\npanel: {line:?}\n"));
+    pinned("sandbox_report.txt", &f.named(&out, run.as_deref()));
+}
+
+/// The words Claude's prompt and tools say of the sandbox, the checks and the toolchains.
+#[test]
+fn claudes_words_are_pinned() {
+    let desc = |v: serde_json::Value| v["description"].as_str().unwrap().to_string();
+    let system = &crate::chat::system();
+    let from = system.find("Both run in a sandbox").unwrap();
+    let to = from + system[from..].find("never work around it.").unwrap() + "never work around it.".len();
+    let out = format!(
+        "══ run\n{}\n══ run_tests\n{}\n══ the chat's prompt\n{}\n",
+        desc(crate::tools::run_schema()),
+        desc(crate::tools::run_tests_schema()),
+        &system[from..to]
+    );
+    pinned("claude_sandbox_words.txt", &out);
+}
+
+/// The packs' table (`sandboxpack.rs`) says what the core's own lists say, each as its readers take it — the
+/// two side by side until the readers move to the table (then the pinned texts above hold it).
+#[test]
+fn the_packs_say_what_the_core_said() {
+    let t = crate::sandboxpack::get();
+    assert_eq!(t.problems, Vec::<String>::new());
+    // (what a run reads, never reads and writes in home, the caches: the policy pinned above)
+    // Go's telemetry, at its place in home on each system (Linux's where `XDG_CONFIG_HOME` puts it)
+    let quiet = |os: Os, env: &[(&str, &str)]| {
+        let env = env.iter().map(|(k, v)| (k.to_string(), v.into())).collect();
+        quiet_places(&vars_in(Path::new("/h"), &Here { env, os, ..Here::default() }))
+    };
+    let xdg = [("XDG_CONFIG_HOME", "/x/conf")];
+    assert_eq!(quiet(Os::Mac, &xdg), [PathBuf::from("/h/Library/Application Support/go/telemetry")]);
+    assert_eq!(quiet(Os::Linux, &[]), [PathBuf::from("/h/.config/go/telemetry")]);
+    assert_eq!(quiet(Os::Linux, &xdg), [PathBuf::from("/x/conf/go/telemetry")]);
+    // What Claude runs unasked, git's read-only ones being the core's
+    let mut now: Vec<&str> = crate::tools::run_allow().collect();
+    now.sort();
+    let was = [
+        "cargo build",
+        "cargo check",
+        "cargo clippy",
+        "cargo fmt",
+        "cargo metadata",
+        "cargo test",
+        "cargo tree",
+        "git diff",
+        "git log",
+        "git show",
+        "git status",
+        "go build",
+        "go test",
+        "go vet",
+        "gofmt -l",
+    ];
+    assert_eq!(now, was);
+    // What builds a project, with what no pack names
+    let mut now: Vec<&str> = t.builders.iter().map(String::as_str).collect();
+    now.sort();
+    let was = [
+        "cargo", "cmake", "dotnet", "gmake", "go", "gradle", "just", "make", "mvn", "nox", "npm", "npx",
+        "pnpm", "pytest", "rustc", "swift", "tox", "yarn", "zig",
+    ];
+    assert_eq!(now, was);
+    // The one `$(…)` a line may hold
+    let [e] = t.expand.as_slice() else { panic!("{:?}", t.expand) };
+    assert_eq!(
+        (e.word.as_str(), &e.run[..]),
+        ("$(rustc --print sysroot)", &["rustup", "show", "active-toolchain"].map(String::from)[..])
+    );
+    // (the settings that can hold a token: the policy pinned above, `tokens.rs`'s tests)
+}
+
+/// Landlock's rules for the stand-in home's policy, in the fixture's folder and `/dev` (outside them they're
+/// the machine's) — what Linux enforces, from the same policy.
+#[cfg(target_os = "linux")]
+#[test]
+fn landlocks_rules_are_pinned() {
+    let Ok(abi) = crate::landlock::abi() else { return };
+    let f = Fixture::new("landlock", Os::Linux, &[]);
+    let p = f.policy(&crate::llm::LlmConfig::default());
+    let c = linux::confine(&p, abi, Err("not watched".into()), false).unwrap();
+    let run = p.run.as_deref();
+    let ours = |path: &Path| {
+        path.starts_with(&f.base)
+            || run.is_some_and(|r| path.starts_with(r.path()))
+            || path == Path::new(TMP)
+            || path.starts_with("/dev")
+    };
+    let mut rules: Vec<String> = c
+        .granted()
+        .iter()
+        .filter(|(path, _)| ours(path))
+        .map(|(path, access)| format!("{:#06x} {}", access, f.named(&shown(path), run)))
+        .collect();
+    // (a set: sorted as shown — in path order the run's folder, numbered by the runs before, moves about)
+    rules.sort();
+    let out: String = rules.iter().map(|r| format!("{r}\n")).collect();
+    pinned("sandbox_landlock.txt", &out);
+}

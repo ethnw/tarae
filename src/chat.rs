@@ -27,7 +27,7 @@ use crate::key::{Code, Key};
 use crate::llm::{self, StreamEv};
 use crate::markdown::Span;
 
-const SYSTEM: &str = "You are Claude, built into tarae — a terminal code editor, working in the user's project \
+pub(crate) const SYSTEM: &str = "You are Claude, built into tarae — a terminal code editor, working in the user's project \
 (your current directory). Explore it with Read, Glob and tarae's own code tools — look at the code you need \
 across files instead of guessing. The language server's answers beat any text search and reading around — \
 reach for them first: \"where is X defined\" is definition by name (symbol X, no file or line needed) — never a \
@@ -42,7 +42,7 @@ the change (a test file, and a line for a single test) — when they fail, read 
 watches the run in their editor. To build, lint, format, run a whole test suite or use git, use the run \
 tool: one command per call, its output comes back; checks start at once, other commands wait for the user's \
 yes. Both run in a sandbox: they can write only in the project (not .git, nor build scripts, manifests and tool \
-settings — build.rs, Cargo.toml, package.json, Makefile, .cargo, .github, .tarae*.toml…: change those with Edit), \
+settings — {protect}, .github, .tarae*.toml…: change those with Edit), \
 temp folders and the toolchain's own, and connect to nothing over the network, this machine included, but the ports the user \
 opened (each result says which) — when it blocks something a command needs, tell the user (the settings \
 llm.sandbox-ports, llm.sandbox-localhost and llm.sandbox-network open more); never work around it. Tests of dangerous behavior (deleting, overwriting, killing \
@@ -82,9 +82,13 @@ const SYSTEM_UI: &str = " The context's ui: line and the ui tool name what's on 
 (card#12, toast#3, run#7, pane#2, git:src/a.rs); write an id as given and it's a link to that element — never \
 make one up. <pointed id=…> is what the user pointed at.";
 
-/// The system prompt: `SYSTEM`, the refactoring tools, the screen by id, and where tarae's own log is (#45).
-fn system() -> String {
-    let mut s = format!("{SYSTEM}{SYSTEM_REFACTOR}{SYSTEM_UI}");
+/// The system prompt: `SYSTEM` — its protected names' examples the built-in packs' (`[claude] said.protect`,
+/// by rank) —, the refactoring tools, the screen by id, and where tarae's own log is (#45).
+pub(crate) fn system() -> String {
+    let said = &crate::sandboxpack::get().said;
+    let protect: Vec<&str> = said.iter().filter_map(|s| s.protect.as_deref()).collect();
+    let base = SYSTEM.replace("{protect}", &protect.join(", "));
+    let mut s = format!("{base}{SYSTEM_REFACTOR}{SYSTEM_UI}");
     if let Some(log) = crate::log::path() {
         s.push_str(&format!(
             " tarae's own log, {}, says what the language servers are doing (starting, indexing, ready, \

@@ -9,3 +9,7 @@ comment-token = "#"
 [grammar.cmake]
 git = "https://github.com/uyha/tree-sitter-cmake"
 rev = "6e51463ef3052dd3b328322c22172eda093727ad"
+
+# What builds a project: a script calling one runs its code (`sinceyes.rs`)
+[claude]
+builders = ["cmake"]

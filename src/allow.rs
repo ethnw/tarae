@@ -274,21 +274,26 @@ const WRITE_DEPTH: usize = 3;
 /// The folders a card may offer to let Claude's commands write in, for a write the sandbox denied at
 /// `target`: from its nearest existing folder up to just below home (outside home, `WRITE_CHOICES` at most,
 /// none shallower than `WRITE_DEPTH`), widest last — none that is home or above it, holds keys or a place
-/// that runs something later (`NEVER_WRITE`, a folder on `path`), or is in (or holds) the project. Real
-/// paths.
-pub fn write_choices(target: &Path, home: &Path, root: &Path, path: &[PathBuf]) -> Vec<PathBuf> {
+/// that runs something later (`NEVER_WRITE`; `later`: the folders of programs the user runs, the shared
+/// caches, a toolchain's home and all in it), or is in (or holds) the project. Real paths.
+pub fn write_choices(
+    target: &Path,
+    home: &Path,
+    root: &Path,
+    later: &crate::sandbox::RunsLater,
+) -> Vec<PathBuf> {
     let mut at = target.parent().map(Path::to_path_buf);
     while let Some(p) = at.clone().filter(|p| !p.exists()) {
         at = p.parent().map(Path::to_path_buf);
     }
-    let never: Vec<PathBuf> =
-        SECRETS.iter().chain(NEVER_WRITE.iter()).map(|s| home.join(s)).chain(path.iter().cloned()).collect();
+    let never: Vec<PathBuf> = SECRETS.iter().chain(NEVER_WRITE.iter()).map(|s| home.join(s)).collect();
     let mut out = Vec::new();
     while let Some(dir) = at {
         at = dir.parent().map(Path::to_path_buf);
         let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
         let refused = home.starts_with(&dir)
             || never.iter().any(|n| n.starts_with(&dir) || dir.starts_with(n))
+            || later.refuses(&dir).is_some()
             || dir.starts_with(root)
             || root.starts_with(&dir)
             || dir.components().count() <= WRITE_DEPTH;
@@ -367,27 +372,28 @@ fn grant_places_in(
     out
 }
 
-/// Folders of code read unasked, wherever they are (#112): the Rust toolchains' own sources
-/// (`<rustup home>/toolchains/*/lib/rustlib/src`) and the crates cargo downloaded (`<cargo home>/registry/
-/// src`) — real paths, those that are there. Never the cargo home itself (its `credentials.toml`) nor
-/// anything else in either home: a link in these trees that leads out is judged where it leads.
-pub fn code_trees(cargo_home: Option<&Path>, rustup_home: Option<&Path>) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = cargo_home.map(|c| c.join("registry/src")).into_iter().collect();
-    if let Some(toolchains) = rustup_home.and_then(|r| std::fs::read_dir(r.join("toolchains")).ok()) {
-        out.extend(toolchains.flatten().map(|t| t.path().join("lib/rustlib/src")));
+/// Folders of code read unasked, wherever they are (#112): the built-in packs' `[claude] code-trees` (the Rust
+/// toolchains' own sources, `{rustup}/toolchains/*/lib/rustlib/src`, and the crates cargo downloaded,
+/// `{cargo}/registry/src`), `vars` their places, a `*` each folder that's there — real paths, those that are
+/// there. Never a tool's home itself (cargo's `credentials.toml`) nor anything else in it: a link in these
+/// trees that leads out is judged where it leads.
+pub fn code_trees(vars: &crate::sandboxpack::Vars) -> Vec<PathBuf> {
+    let trees = crate::sandboxpack::get().code_trees.iter().filter_map(|t| vars.place(t));
+    let mut out: Vec<PathBuf> = Vec::new();
+    for t in trees {
+        let mut at = vec![PathBuf::new()];
+        for c in t.components() {
+            at = match c.as_os_str() == "*" {
+                true => at
+                    .iter()
+                    .flat_map(|a| std::fs::read_dir(a).into_iter().flatten().flatten().map(|e| e.path()))
+                    .collect(),
+                false => at.into_iter().map(|a| a.join(c)).collect(),
+            };
+        }
+        out.extend(at);
     }
     out.into_iter().filter_map(|p| std::fs::canonicalize(p).ok()).filter(|p| p.is_dir()).collect()
-}
-
-/// `$CARGO_HOME` (else `~/.cargo`) and `$RUSTUP_HOME` (else `~/.rustup`), as this process sees them.
-fn rust_homes() -> (Option<PathBuf>, Option<PathBuf>) {
-    let at = |var: &str, dir: &str| {
-        std::env::var_os(var)
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-            .or_else(|| home().map(|h| h.join(dir)))
-    };
-    (at("CARGO_HOME", ".cargo"), at("RUSTUP_HOME", ".rustup"))
 }
 
 /// What a read of Claude's may read unasked besides the project and what the user allowed, by kind
@@ -415,11 +421,11 @@ impl Defaults {
 /// The places Claude reads unasked for the project at `root` (`Defaults`); the temp folders only with
 /// `temp` (`Editor.read_temp` — tests' projects are in the temp folder, and theirs off). On a worker.
 pub fn defaults(root: &Path, temp: bool) -> Defaults {
-    let (cargo, rustup) = rust_homes();
-    let mut code = code_trees(cargo.as_deref(), rustup.as_deref());
+    let h = home();
+    let here = crate::sandbox::Here::now();
+    let mut code = h.as_deref().map(|h| code_trees(&crate::sandbox::vars_in(h, &here))).unwrap_or_default();
     // (a cargo config can point them anywhere — and a checkout can be anywhere: never home or above it,
     // nor where keys are)
-    let h = home();
     code.extend(crate::sandbox::build_dirs(root).into_iter().filter(|d| keepable(d, h.as_deref())));
     let checkouts = checkouts(root).into_iter().filter(|d| keepable(d, h.as_deref())).collect();
     let temp = if temp { temp_folders() } else { Vec::new() };
@@ -508,32 +514,41 @@ fn same(a: &Path, b: &Path) -> bool {
     matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(a), Ok(b)) if a == b)
 }
 
-/// The real sysroot `$(rustc --print sysroot)` gives where a command runs (`cwd`), as rustup says it
-/// (`rustup show active-toolchain` — it reads the toolchain files; nothing of the project's runs): one of
-/// rustup's toolchains that's there, else None. On a worker.
-pub fn sysroot(cwd: &Path) -> Option<PathBuf> {
-    let out = std::process::Command::new("rustup")
-        .args(["show", "active-toolchain"])
-        .current_dir(cwd)
-        .env("RUSTUP_AUTO_INSTALL", "0")
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    sysroot_of(&String::from_utf8_lossy(&out.stdout), rust_homes().1.as_deref()?)
+/// The real folder each of the `$(…)` words in `cmd` gives where it runs (`cwd`; `readonly::expansions` — the
+/// packs' `expand`): what its pack runs says it — `$(rustc --print sysroot)` as rustup says it (`rustup show
+/// active-toolchain` reads the toolchain files; nothing of the project's runs) — one of the folders directly
+/// in its `first-word-in` that's there; one it can't tell is left out. On a worker.
+pub fn expanded(cmd: &str, cwd: &Path) -> Vec<(String, PathBuf)> {
+    let t = crate::sandboxpack::get();
+    let named = t.expand.iter().filter(|e| cmd.contains(&e.word));
+    let vars = home().map(|h| crate::sandbox::vars_in(&h, &crate::sandbox::Here::now()));
+    named
+        .filter_map(|e| {
+            let out = std::process::Command::new(e.run.first()?)
+                .args(&e.run[1..])
+                .current_dir(cwd)
+                .envs(e.env.iter().map(|(k, v)| (k, v)))
+                .stdin(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .output()
+                .ok()?;
+            let folder = vars.as_ref()?.place(&e.first_word_in)?;
+            Some((e.word.clone(), named_in(&String::from_utf8_lossy(&out.stdout), &folder)?))
+        })
+        .collect()
 }
 
-/// The toolchain rustup names first in `said` (`1.99.0-aarch64-apple-darwin (overridden by …)`), as a
-/// folder of `rustup_home`'s that's there (real path) — a name that isn't one (a path, `..`) is None.
-pub fn sysroot_of(said: &str, rustup_home: &Path) -> Option<PathBuf> {
+/// The folder `said` names first (rustup's `1.99.0-aarch64-apple-darwin (overridden by …)`), as one directly in
+/// `dir` that's there (real path) — a name that isn't one (a path, `..`) is None.
+pub fn named_in(said: &str, dir: &Path) -> Option<PathBuf> {
     let name = said.split_whitespace().next()?;
     let plain = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || "-._".contains(c));
     if !plain || name.starts_with('.') {
         return None;
     }
-    let toolchains = std::fs::canonicalize(rustup_home.join("toolchains")).ok()?;
-    let dir = std::fs::canonicalize(toolchains.join(name)).ok()?;
-    (dir.parent() == Some(toolchains.as_path()) && dir.is_dir()).then_some(dir)
+    let dir = std::fs::canonicalize(dir).ok()?;
+    let found = std::fs::canonicalize(dir.join(name)).ok()?;
+    (found.parent() == Some(dir.as_path()) && found.is_dir()).then_some(found)
 }
 
 /// Home, as the process sees it.
@@ -763,7 +778,15 @@ pub(crate) mod tests {
         std::os::unix::fs::symlink(cargo.join("credentials.toml"), krate.join("leak.rs")).unwrap();
         let base = std::fs::canonicalize(&base).unwrap();
         let (cargo, rustup, p) = (base.join("cargo"), base.join("rustup"), base.join("p"));
-        let mut trees = code_trees(Some(&cargo), Some(&rustup));
+        // (the rust pack's code trees, its homes where `CARGO_HOME` and `RUSTUP_HOME` put them)
+        let var = |n: &str| match n {
+            "CARGO_HOME" => Some(cargo.clone()),
+            "RUSTUP_HOME" => Some(rustup.clone()),
+            _ => None,
+        };
+        let vars =
+            crate::sandboxpack::Vars::new(crate::sandboxpack::get(), &base, &var, crate::sandbox::Os::HOST);
+        let mut trees = code_trees(&vars);
         trees.sort();
         assert_eq!(
             trees,
@@ -772,7 +795,7 @@ pub(crate) mod tests {
         );
         let kept = Allowed { read: trees, ..Default::default() };
         let none = Allowed::default();
-        let at = |c: &str| crate::readonly::outside(c, &p, &p, &none, &kept, None).unwrap();
+        let at = |c: &str| crate::readonly::outside(c, &p, &p, &none, &kept, &[]).unwrap();
         let lib = krate_at(&cargo).join("lib.rs");
         assert!(at(&format!("sed -n '1,20p' {}", lib.display())).is_empty());
         assert!(at(&format!("grep -rn fn {}", cargo.join("registry/src").display())).is_empty());
@@ -787,11 +810,13 @@ pub(crate) mod tests {
             std::slice::from_ref(&cargo),
             "the cargo home itself"
         );
-        // The sysroot rustup names: one of its toolchains that's there
+        // The sysroot rustup names: one of its toolchains that's there (the rust pack's `first-word-in`)
+        let tcs = vars.place(&crate::sandboxpack::get().expand[0].first_word_in).unwrap();
+        assert_eq!(tcs, rustup.join("toolchains"));
         let tc = rustup.join("toolchains/stable-x");
-        assert_eq!(sysroot_of("stable-x (overridden by '/p/rust-toolchain.toml')\n", &rustup), Some(tc));
+        assert_eq!(named_in("stable-x (overridden by '/p/rust-toolchain.toml')\n", &tcs), Some(tc));
         for said in ["", "nope-z", "..", "../../cargo", "/tmp/tc (path)", "stable-x/../bare-y"] {
-            assert_eq!(sysroot_of(said, &rustup), None, "{said}");
+            assert_eq!(named_in(said, &tcs), None, "{said}");
         }
         std::fs::remove_dir_all(&base).ok();
     }
@@ -888,8 +913,10 @@ pub(crate) mod tests {
     }
 
     /// The folders offered for a denied write: its nearest existing folder up to just below home — never
-    /// home or above, keys, a place that runs something later or a folder holding one, the PATH's folders
-    /// (or what holds them), or the project. (A made-up home in the test's temp folder.)
+    /// home or above, keys, a place that runs something later or a folder holding one, where programs the user
+    /// runs are (the PATH's folders, `~/.local/bin`, the packs' `bins`) or what holds them, a toolchain's home
+    /// or anything in it (at its default or moved) — npm's too: what `npx` fetched runs from its `_npx` — or
+    /// the project. (A made-up home in the test's temp folder.)
     #[test]
     fn which_folders_a_denied_write_may_open() {
         let base = std::env::temp_dir().join(format!("tarae-choices-{}", std::process::id()));
@@ -897,6 +924,9 @@ pub(crate) mod tests {
         let home = base.join("home");
         for d in [
             ".npm/_cacache",
+            ".npm/_npx/0a1b/node_modules/x",
+            "opt/npm/_npx/2c3d",
+            "data/new",
             ".local/bin",
             ".config/tarae",
             "Library/LaunchAgents",
@@ -905,18 +935,50 @@ pub(crate) mod tests {
             ".cargo/registry/cache/i",
             ".cargo/git/db/dep-1",
             ".cargo/git/checkouts/dep-1/abc",
+            ".cargo/bin",
+            "go/bin",
+            ".gradle/caches/8.10/scripts",
+            ".gradle/wrapper/dists/gradle-8.10-bin/x",
+            ".rustup/toolchains/x/bin",
+            "tools/bin",
+            "opt/cargo/bin",
         ] {
             std::fs::create_dir_all(home.join(d)).unwrap();
         }
         let home = std::fs::canonicalize(&home).unwrap();
         let root = home.join("work/proj");
-        let path = [home.join(".local/bin")];
-        let at = |t: &str| write_choices(&home.join(t), &home, &root, &path);
+        // (cargo's home and npm's moved out of their default places)
+        let cargo = home.join("opt/cargo");
+        let here = crate::sandbox::Here {
+            env: [
+                ("HOME".to_string(), home.clone().into()),
+                ("CARGO_HOME".to_string(), cargo.clone().into()),
+                ("npm_config_cache".to_string(), home.join("opt/npm").into()),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let path = [home.join("tools/bin")];
+        let later = crate::sandbox::RunsLater::new(&home, &crate::sandbox::vars_in(&home, &here), &path);
+        let at = |t: &str| write_choices(&home.join(t), &home, &root, &later);
         // (the file itself, and a folder not there yet, aren't offered — the nearest that is, and up)
-        assert_eq!(at(".npm/_cacache/new/x.json"), [home.join(".npm/_cacache"), home.join(".npm")]);
+        assert_eq!(at("data/new/x/y.json"), [home.join("data/new"), home.join("data")]);
+        // (npm's home, at its default and moved: what `npx` fetched runs from there later)
+        assert!(at(".npm/_cacache/new/x.json").is_empty(), "{:?}", at(".npm/_cacache/new/x.json"));
+        assert!(at(".npm/_npx/0a1b/node_modules/x/index.js").is_empty(), "npx's packages");
+        assert!(at("opt/npm/_npx/2c3d/x").is_empty(), "a moved npm home");
         assert!(at(".zshrc").is_empty(), "in home itself");
         assert!(at(".ssh/known_hosts").is_empty(), "keys");
-        assert!(at(".local/bin/tool").is_empty(), "on PATH — and .local holds it");
+        assert!(at(".local/bin/tool").is_empty(), "~/.local/bin — and .local holds it");
+        assert!(at("tools/bin/tool").is_empty(), "on PATH — and tools holds it");
+        assert!(at(".cargo/bin/tool").is_empty(), "cargo's programs");
+        assert!(at("go/bin/tool").is_empty(), "go's programs — and go is its home");
+        // (in a toolchain's home: what the user's own builds and proxies run later)
+        assert!(at(".gradle/caches/8.10/scripts/x.class").is_empty(), "Gradle's compiled build scripts");
+        assert!(at(".gradle/wrapper/dists/gradle-8.10-bin/x/g.zip").is_empty(), "what ./gradlew runs");
+        assert!(at(".rustup/toolchains/x/bin/cargo").is_empty(), "what rustup's proxies run");
+        assert!(at("opt/cargo/bin/tool").is_empty(), "a moved cargo home's programs — and its home");
+        assert!(at("opt/cargo/x").is_empty(), "a moved cargo home");
         assert!(at(".config/tarae/config.toml").is_empty(), "tarae's own; .config holds it");
         assert!(at("Library/LaunchAgents/x.plist").is_empty(), "runs at login; Library holds it");
         assert!(at("work/proj/.git/index.lock").is_empty(), "the project");
@@ -935,10 +997,10 @@ pub(crate) mod tests {
         let deep = base.join("o/a/b/c/d");
         std::fs::create_dir_all(&deep).unwrap();
         let deep = std::fs::canonicalize(deep).unwrap();
-        let got = write_choices(&deep.join("x"), &home, &root, &path);
+        let got = write_choices(&deep.join("x"), &home, &root, &later);
         assert_eq!(got.len(), WRITE_CHOICES, "{got:?}");
         assert_eq!(got[0], deep);
-        assert!(write_choices(Path::new("/opt/x/y"), &home, &root, &path).is_empty(), "{got:?}");
+        assert!(write_choices(Path::new("/opt/x/y"), &home, &root, &later).is_empty(), "{got:?}");
         std::fs::remove_dir_all(&base).ok();
     }
 }

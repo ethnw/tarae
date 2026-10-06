@@ -26,7 +26,10 @@ pub fn cache_dir() -> Option<PathBuf> {
     cache_dir_of(std::env::var_os("XDG_CACHE_HOME"), std::env::var_os("HOME"))
 }
 
-fn cache_dir_of(xdg: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> Option<PathBuf> {
+pub(crate) fn cache_dir_of(
+    xdg: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
     xdg.map(PathBuf::from).or_else(|| home.map(|h| PathBuf::from(h).join(".cache"))).map(|d| d.join("tarae"))
 }
 

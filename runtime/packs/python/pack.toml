@@ -155,3 +155,23 @@ risky = [
     '\bsocket\b', '\brequests\.', 'urllib', 'pickle\.load', 'os\.environ\[.*\]\s*=',
 ]
 quiet = ["tests/", "test_*.py", "*_test.py", "conftest.py"]
+
+# Claude's sandbox (`sandboxpack.rs`). pip's settings files (2026-10-05, `target/sb/tokens-checkpoint.md`:
+# denied, pip loses its index and the rest without a word)
+[sandbox]
+reads = ["~/.pip/pip.conf", "~/.config/pip/pip.conf", "~/Library/Application Support/pip/pip.conf"]
+
+# pip's can hold a token (an `index-url` with `user:pass@`): a copy without it, the files merged as pip reads
+# them — `PIP_CONFIG_FILE` when that file is there (pip then reads no user file), else `~/.pip/pip.conf`, then
+# its folder's (macOS's `~/Library/Application Support/pip` when it's there, else `~/.config/pip`)
+[[sandbox.settings]]
+tool = "pip"
+var = "PIP_CONFIG_FILE"
+var-if-there = true
+files = ["~/.pip/pip.conf", { first = ["{user-config}/pip", "{xdg-config}/pip"], file = "pip.conf" }]
+form = "ini"
+copy = "pip.conf"
+
+[claude]
+builders = ["pytest", "tox", "nox"]
+said = { rank = 30, tests = "Python (pytest)" }

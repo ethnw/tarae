@@ -107,21 +107,33 @@ fn split_with(line: &str, env: bool, vars: bool) -> Split {
     Ok(outer)
 }
 
-/// The toolchain's sources' root as Claude spells it (#112): kept in its word as written, and filled in
-/// with the real sysroot where the word is judged (`outside`) — unknown, the line asks.
-pub const SYSROOT: &str = "$(rustc --print sysroot)";
+/// The `$(…)` words a line may hold — the built-in packs' `[claude] expand` (#112: `$(rustc --print
+/// sysroot)`, the toolchain's sources' root as Claude spells it), a closed set: kept in its word as written,
+/// and filled in with its folder where the word is judged (`outside` — `allow::expanded`) — unknown, the line
+/// asks.
+pub fn expansions() -> impl Iterator<Item = &'static str> {
+    crate::sandboxpack::get().expand.iter().map(|e| e.word.as_str())
+}
+
+/// Where in `word` one of `expansions` starts, and which.
+fn expansion_in(word: &str) -> Option<(usize, &'static str)> {
+    expansions().filter_map(|e| Some((word.find(e)?, e))).min()
+}
 
 /// A variable's use in a word (`split_with`'s `vars`): `VAR.0`, `q` (in double quotes) or `u`, its name,
 /// `VAR.1`. Characters no line of Claude's has (one that does isn't read that way).
 const VAR: (char, char) = ('\u{E000}', '\u{E001}');
 
-/// What a `$` starts, the rest of the line after it in `chars`: `SYSROOT`, or with `vars` a variable's
-/// name (`$f`, `${f}`) as its mark — taken from `chars`. None for anything else (`$(…)`, `$1`, `$?` …).
+/// What a `$` starts, the rest of the line after it in `chars`: one of `expansions`, or with `vars` a
+/// variable's name (`$f`, `${f}`) as its mark — taken from `chars`. None for anything else (`$(…)`, `$1`,
+/// `$?` …).
 fn dollar(chars: &mut std::iter::Peekable<std::str::Chars>, vars: bool, quoted: bool) -> Option<String> {
-    let rest = &SYSROOT[1..];
-    if chars.clone().take(rest.len()).eq(rest.chars()) {
-        chars.nth(rest.len() - 1);
-        return Some(SYSROOT.to_string());
+    for e in expansions() {
+        let rest = &e[1..];
+        if chars.clone().take(rest.chars().count()).eq(rest.chars()) {
+            chars.nth(rest.chars().count() - 1);
+            return Some(e.to_string());
+        }
     }
     if !vars {
         return None;
@@ -642,8 +654,15 @@ const ENV_NEVER: [&str; 46] = [
     "_ASKPASS",
 ];
 
-/// Whether a pattern may carry `name` among its assignments.
+/// Whether a pattern may carry `name` among its assignments: not one of `ENV_NEVER`, nor a variable the
+/// built-in packs set or read for a run (a tool's home, a run's own home, their `env`, a setting's file —
+/// `sandboxpack::Packs::env_names`: `GRADLE_USER_HOME=~/.gradle` would point a run back at the user's).
 pub fn env_allowed(name: &str) -> bool {
+    env_core(name) && !crate::sandboxpack::get().env_names().any(|n| n == name)
+}
+
+/// `env_allowed` with `ENV_NEVER` alone — what the packs' own variables are checked against as they're read.
+pub fn env_core(name: &str) -> bool {
     env_name(name)
         && !ENV_NEVER.iter().any(|n| {
             if n.ends_with('_') {
@@ -720,7 +739,7 @@ pub fn script_pins(cmd: &str, cwd: &Path, root: &Path) -> Option<Vec<(PathBuf, u
     let mut out = Vec::new();
     for part in parse(cmd)? {
         match part {
-            Part::Cd(d) => here = cd_into(&here, &d, None).ok()?,
+            Part::Cd(d) => here = cd_into(&here, &d, &[]).ok()?,
             Part::Cmd(w) => {
                 let Some(path) = script_part(&w) else { continue };
                 let real = std::fs::canonicalize(here.join(path)).ok()?;
@@ -966,7 +985,10 @@ fn candidates(words: &[Word]) -> Vec<String> {
                     .split_once('=')
                     .map(|(_, v)| v)
                     // (`-f$(rustc --print sysroot)/…` from the sysroot on — `outside` fills it in)
-                    .or_else(|| w.text.find(SYSROOT).or_else(|| w.text.find('/')).map(|i| &w.text[i..]))?,
+                    .or_else(|| {
+                        let at = expansion_in(&w.text).map(|(i, _)| i).or_else(|| w.text.find('/'));
+                        at.map(|i| &w.text[i..])
+                    })?,
             };
             if !w.glob {
                 return Some(path.to_string());
@@ -984,13 +1006,13 @@ fn candidates(words: &[Word]) -> Vec<String> {
 /// git (a repository's config runs its hooks, fsmonitor, pager): a read allowed outside (`allow.rs`) never
 /// lets those run there — code nobody saw (review note). A `cd` that can't be followed counts as outside. On
 /// a worker.
-pub fn runs_outside(cmd: &str, cwd: &Path, root: &Path, sysroot: Option<&Path>) -> bool {
+pub fn runs_outside(cmd: &str, cwd: &Path, root: &Path, expanded: &[(String, PathBuf)]) -> bool {
     let Some(parts) = flat(cmd) else { return true };
     let inside = |p: &Path| std::fs::canonicalize(p).is_ok_and(|r| r.starts_with(root));
     let mut here = cwd.to_path_buf();
     for part in parts {
         match part {
-            Part::Cd(dir) => match cd_into(&here, &dir, sysroot) {
+            Part::Cd(dir) => match cd_into(&here, &dir, expanded) {
                 Ok(d) => here = d,
                 Err(_) => return true,
             },
@@ -1019,22 +1041,23 @@ pub fn runs_outside(cmd: &str, cwd: &Path, root: &Path, sysroot: Option<&Path>) 
 /// where it runs: after a `cd`, in that folder (its real path) — which is read too. Err: a `cd` into
 /// what isn't a folder that's there (or a glob naming none or several — `cd_into`) — the shell would stay
 /// where it was and run the rest (after `;` or `||`) from there, so where those read can't be told: the
-/// line is asked about. So is a word naming `SYSROOT` when `sysroot` (its real path, `allow::sysroot`)
-/// isn't known, and a glob with `..` after its first wildcard (`*/../..` climbs out of what's fixed).
+/// line is asked about. So is a word naming one of `expansions` when `expanded` (each one's real folder,
+/// `allow::expanded`) doesn't know it, and a glob with `..` after its first wildcard (`*/../..` climbs out of
+/// what's fixed).
 pub fn outside(
     cmd: &str,
     cwd: &Path,
     root: &Path,
     chat: &Allowed,
     kept: &Allowed,
-    sysroot: Option<&Path>,
+    expanded: &[(String, PathBuf)],
 ) -> Result<Vec<PathBuf>, String> {
     let mut out: Vec<PathBuf> = Vec::new();
     let mut here = cwd.to_path_buf();
     for part in flat(cmd).ok_or("a line that can't be read")? {
         let words = match part {
             Part::Cd(dir) => {
-                here = cd_into(&here, &dir, sysroot)?;
+                here = cd_into(&here, &dir, expanded)?;
                 vec![".".to_string()]
             }
             Part::Cmd(w) => {
@@ -1045,7 +1068,7 @@ pub fn outside(
             }
         };
         for w in words {
-            let w = expand(&w, sysroot)?;
+            let w = expand(&w, expanded)?;
             let Ok(real) = std::fs::canonicalize(here.join(w)) else { continue };
             if real.starts_with(root)
                 || chat.reads(&real)
@@ -1061,19 +1084,21 @@ pub fn outside(
     Ok(out)
 }
 
-/// `word` with `SYSROOT` in it filled in with `sysroot`. Err: it names it and the sysroot isn't known, or
-/// one the shell would split or fill in (a space, a glob), or it's named twice, or climbs out of it (`..`
-/// after it).
-fn expand(word: &str, sysroot: Option<&Path>) -> Result<String, String> {
-    let Some(at) = word.find(SYSROOT) else { return Ok(word.to_string()) };
-    let unknown = || format!("where {SYSROOT} leads couldn't be told");
-    let root = sysroot.map(|p| p.to_string_lossy().into_owned()).ok_or_else(unknown)?;
-    let after = &word[at + SYSROOT.len()..];
+/// `word` with the one of `expansions` in it filled in with its folder (`expanded`). Err: it names one whose
+/// folder isn't known, or one the shell would split or fill in (a space, a glob), or names one twice, or
+/// climbs out of it (`..` after it).
+fn expand(word: &str, expanded: &[(String, PathBuf)]) -> Result<String, String> {
+    let Some((at, e)) = expansion_in(word) else { return Ok(word.to_string()) };
+    let unknown = || format!("where {e} leads couldn't be told");
+    let folder = expanded.iter().find(|(w, _)| w == e).map(|(_, p)| p.to_string_lossy().into_owned());
+    let root = folder.ok_or_else(unknown)?;
+    let after = &word[at + e.len()..];
     let climbs = Path::new(after).components().any(|c| c == std::path::Component::ParentDir);
-    if root.contains(|c: char| c.is_whitespace() || "*?[]".contains(c)) || after.contains(SYSROOT) || climbs {
+    let again = expansion_in(after).is_some();
+    if root.contains(|c: char| c.is_whitespace() || "*?[]".contains(c)) || again || climbs {
         return Err(unknown());
     }
-    Ok(word.replacen(SYSROOT, &root, 1))
+    Ok(word.replacen(e, &root, 1))
 }
 
 /// Whether a glob's `..` comes after its first wildcard (`src/*/../..`): through a link, `..` is the
@@ -1083,12 +1108,12 @@ fn climbs(glob: &str) -> bool {
     after.split('/').any(|s| s == "..")
 }
 
-/// The folder a `cd dir` from `here` goes into (real path), `SYSROOT` filled in: a folder that's there —
+/// The folder a `cd dir` from `here` goes into (real path), `expansions` filled in: a folder that's there —
 /// a glob only when it names exactly one, as the shell fills it in (#164: `cd
 /// ~/.cargo/registry/src/*/libc-0.2.189/src` asked). Err says why not: no such folder; a glob naming none
 /// or several, or with `[` or `..` in it. On a worker.
-pub fn cd_into(here: &Path, dir: &Word, sysroot: Option<&Path>) -> Result<PathBuf, String> {
-    let text = expand(&dir.text, sysroot)?;
+pub fn cd_into(here: &Path, dir: &Word, expanded: &[(String, PathBuf)]) -> Result<PathBuf, String> {
+    let text = expand(&dir.text, expanded)?;
     let path = match dir.glob {
         false => here.join(&text),
         true => {
@@ -1201,6 +1226,24 @@ mod tests {
         }
         // Not a name at all
         assert!(!env_allowed("1A") && !env_allowed("A-B") && !env_allowed(""));
+        // What the built-in packs set or read for a run: a tool's home, a run's own home, its `env`, a
+        // setting's file, a cache's variable, what a toolchain is asked — though `ENV_NEVER` doesn't name them
+        // (a pack may set them itself)
+        for n in ["GRADLE_USER_HOME", "GRADLE_OPTS", "GRADLE_RO_DEP_CACHE", "npm_config_logs_dir", "GOENV"] {
+            assert!(!env_allowed(n) && env_core(n), "{n}");
+        }
+        // (every name the packs' caches and `ask` read, whatever pack: none of them a pattern's)
+        let t = crate::sandboxpack::get();
+        let asked = t.caches.iter().filter_map(|c| c.var.as_deref());
+        let asked: Vec<&str> = asked.chain(t.ask.iter().flat_map(|a| a.keys().map(String::as_str))).collect();
+        assert!(asked.contains(&"GOCACHE") && asked.contains(&"GOMODCACHE"), "{asked:?}");
+        for n in &asked {
+            assert!(!env_allowed(n) && env_core(n), "{n}");
+        }
+        let gomodcache = ["GOMODCACHE=… go build".to_string()];
+        assert!(!crate::tools::allowed("GOMODCACHE=/x go build", &gomodcache), "the module cache moved");
+        let rule = ["GRADLE_USER_HOME=… cargo build".to_string()];
+        assert!(!crate::tools::allowed("GRADLE_USER_HOME=/x cargo build", &rule), "no pattern sets one");
     }
 
     /// The list, and each option that makes one of them write, run something, or never end.
@@ -1599,6 +1642,9 @@ mod tests {
         let (tc, p) = (base.join("rustup/toolchains/1.99.0-aarch64-apple-darwin"), base.join("p"));
         let trees = Allowed { read: vec![tc.join("lib/rustlib/src")], ..Default::default() };
         let none = Allowed::default();
+        // (the rust pack's one `$(…)`, its folder known)
+        assert_eq!(expansions().collect::<Vec<_>>(), ["$(rustc --print sysroot)"]);
+        let known = [("$(rustc --print sysroot)".to_string(), tc.clone())];
         let core = "$(rustc --print sysroot)/lib/rustlib/src/rust/library/core/src/lib.rs";
         for c in [
             format!("sed -n '1,40p' {core}"),
@@ -1607,20 +1653,16 @@ mod tests {
                 .into(),
         ] {
             assert!(read_only(&c), "{c}");
-            assert_eq!(outside(&c, &p, &p, &none, &trees, Some(&tc)), Ok(vec![]), "{c}");
-            assert!(!runs_outside(&c, &p, &p, Some(&tc)), "{c}");
+            assert_eq!(outside(&c, &p, &p, &none, &trees, &known), Ok(vec![]), "{c}");
+            assert!(!runs_outside(&c, &p, &p, &known), "{c}");
         }
         let c = format!("cat {core}");
-        assert!(outside(&c, &p, &p, &none, &trees, None).is_err(), "not known: asked");
-        assert_eq!(
-            outside(&c, &p, &p, &none, &none, Some(&tc)),
-            Ok(vec![tc.join(&core[25..])]),
-            "not allowed"
-        );
+        assert!(outside(&c, &p, &p, &none, &trees, &[]).is_err(), "not known: asked");
+        assert_eq!(outside(&c, &p, &p, &none, &none, &known), Ok(vec![tc.join(&core[25..])]), "not allowed");
         let climbs = "cat $(rustc --print sysroot)/../../x";
-        assert!(outside(climbs, &p, &p, &none, &trees, Some(&tc)).is_err(), "out of it");
+        assert!(outside(climbs, &p, &p, &none, &trees, &known).is_err(), "out of it");
         let opt = "grep -f$(rustc --print sysroot)/../../x src";
-        assert!(outside(opt, &p, &p, &none, &trees, Some(&tc)).is_err(), "an option's value");
+        assert!(outside(opt, &p, &p, &none, &trees, &known).is_err(), "an option's value");
         assert_eq!(parse("cat $(rustc --print sysroot )"), None, "only as written");
         assert_eq!(parse("cat $(rustc --print target-libdir)"), None);
         std::fs::remove_dir_all(&base).ok();
@@ -1639,7 +1681,7 @@ mod tests {
         std::fs::write(out.join("m.txt"), "x\n").unwrap();
         std::os::unix::fs::symlink(&out, p.join("link")).unwrap();
         let none = Allowed::default();
-        let at = |cmd: &str| outside(cmd, &p, &p, &none, &none, None).unwrap();
+        let at = |cmd: &str| outside(cmd, &p, &p, &none, &none, &[]).unwrap();
         assert!(at("cat src/a.rs").is_empty());
         assert!(at("grep -rn nothing-like-a-path src").is_empty(), "a pattern isn't a path");
         assert!(at("ls").is_empty());
@@ -1656,8 +1698,8 @@ mod tests {
         // #88: a -C behind git's harmless options is a read all the same, and where it runs (`runs_outside`)
         assert_eq!(at("git --no-pager -C ../out log"), std::slice::from_ref(&out));
         assert_eq!(at("git -C src --no-optional-locks ls-files ../../out"), std::slice::from_ref(&out));
-        assert!(runs_outside("git --no-optional-locks -C ../out status", &p, &p, None));
-        assert!(!runs_outside("git --no-optional-locks -C src status", &p, &p, None));
+        assert!(runs_outside("git --no-optional-locks -C ../out status", &p, &p, &[]));
+        assert!(!runs_outside("git --no-optional-locks -C src status", &p, &p, &[]));
         // A line of several: each part where it runs — a cd's folder read too; a glob by its fixed folder
         assert!(at("cd src && cat a.rs | wc -l").is_empty());
         assert_eq!(at("cd ../out && cat m.txt"), [out.clone(), out.join("m.txt")]);
@@ -1673,17 +1715,17 @@ mod tests {
             "cd nope && cat x",
             "sh -c 'cd nope; cat ../out/m.txt'",
         ] {
-            let r = outside(line, &p, &p, &none, &none, None);
+            let r = outside(line, &p, &p, &none, &none, &[]);
             assert!(r.as_ref().is_err_and(|e| e.contains("no such folder")), "{line}: {r:?}");
         }
         // One there is followed to its real path: a link into somewhere else is read there
         assert_eq!(at("cd link; cat m.txt"), [out.clone(), out.join("m.txt")]);
         let allowed = Allowed { read: vec![out.clone()], ..Default::default() };
         assert!(
-            outside("cat ../out/m.txt", &p, &p, &allowed, &none, None).unwrap().is_empty(),
+            outside("cat ../out/m.txt", &p, &p, &allowed, &none, &[]).unwrap().is_empty(),
             "allowed this chat"
         );
-        assert!(outside("cat ../out/m.txt", &p, &p, &none, &allowed, None).unwrap().is_empty(), "kept");
+        assert!(outside("cat ../out/m.txt", &p, &p, &none, &allowed, &[]).unwrap().is_empty(), "kept");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1729,30 +1771,30 @@ mod tests {
         let none = Allowed::default();
         // (home read as a read: outside the project, what the card names)
         let real_home = std::fs::canonicalize(&home).unwrap();
-        assert_eq!(outside("ls ~", &p, &p, &none, &none, None), Ok(vec![real_home]), "home is out");
+        assert_eq!(outside("ls ~", &p, &p, &none, &none, &[]), Ok(vec![real_home]), "home is out");
         let at =
             |line: &str| line.replace('~', &base.display().to_string()).replace("/.cargo/registry", "/reg");
         for line in [one, list] {
             let line = at(line);
-            assert_eq!(outside(&line, &p, &p, &none, &crates, None), Ok(vec![]), "{line}");
-            assert!(!runs_outside(&line, &p, &p, None), "{line}");
+            assert_eq!(outside(&line, &p, &p, &none, &crates, &[]), Ok(vec![]), "{line}");
+            assert!(!runs_outside(&line, &p, &p, &[]), "{line}");
         }
         let into = reg.join("index-a/libc-0.2.189/src");
-        assert_eq!(outside(&at(one), &p, &p, &none, &none, None), Ok(vec![into.clone()]), "not allowed");
+        assert_eq!(outside(&at(one), &p, &p, &none, &none, &[]), Ok(vec![into.clone()]), "not allowed");
         // A name starting with `.` isn't one `*` names; `[ ]` and `..` after a wildcard can't be told
         let glob = Word { text: format!("{}/*/libc-0.2.189/src", reg.display()), glob: true };
-        assert_eq!(cd_into(&p, &glob, None), Ok(into));
+        assert_eq!(cd_into(&p, &glob, &[]), Ok(into));
         for bad in ["*/../../..", "[i]*/libc-0.2.189"] {
             let w = Word { text: format!("{}/{bad}", reg.display()), glob: true };
-            assert!(cd_into(&p, &w, None).is_err(), "{bad}");
+            assert!(cd_into(&p, &w, &[]).is_err(), "{bad}");
         }
         let climbs = format!("ls {}/*/../../..", reg.display());
-        assert!(outside(&climbs, &p, &p, &none, &crates, None).is_err(), "out past the wildcard");
+        assert!(outside(&climbs, &p, &p, &none, &crates, &[]).is_err(), "out past the wildcard");
         // Two folders it could be: the shell's pick isn't told — asked, saying so
         std::fs::create_dir_all(base.join("reg/src/index-b/libc-0.2.189/src")).unwrap();
-        let r = outside(&at(one), &p, &p, &none, &crates, None);
+        let r = outside(&at(one), &p, &p, &none, &crates, &[]);
         assert!(r.as_ref().is_err_and(|e| e.ends_with("2 folders match")), "{r:?}");
-        assert!(runs_outside(&at(one), &p, &p, None));
+        assert!(runs_outside(&at(one), &p, &p, &[]));
         std::fs::remove_dir_all(&base).ok();
         for (pat, name, is) in [
             ("libc-*", "libc-0.2", true),

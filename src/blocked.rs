@@ -56,7 +56,9 @@ pub struct Choice {
 /// risky one) — each once. Home, the project and the folders on PATH passed in.
 pub fn choices(denials: &[Denial], home: &Path, root: &Path, path: &[PathBuf]) -> Vec<Choice> {
     let mut out: Vec<Choice> = Vec::new();
-    let kept = crate::sandbox::kept_reads(home, None, &crate::sandbox::HomeVars::here());
+    let vars = crate::sandbox::vars_in(home, &crate::sandbox::Here::now());
+    let kept = crate::sandbox::kept_reads(home, &vars);
+    let later = crate::sandbox::RunsLater::new(home, &vars, path);
     for d in denials {
         let target = crate::sandbox::profile_path(Path::new(&d.target));
         let below = |dir: &Path| {
@@ -72,7 +74,7 @@ pub fn choices(denials: &[Denial], home: &Path, root: &Path, path: &[PathBuf]) -
             }));
         }
         if file && (d.op.starts_with("file-write") || d.op == crate::sandbox::EITHER) {
-            found.extend(crate::allow::write_choices(&target, home, root, path).into_iter().map(|dir| {
+            found.extend(crate::allow::write_choices(&target, home, root, &later).into_iter().map(|dir| {
                 let why = format!("{} was writing {} in it", d.process, below(&dir));
                 Choice { hint: below(&dir), grant: Grant::Write(dir), why }
             }));
@@ -310,14 +312,14 @@ mod tests {
     fn what_a_runs_denials_offer() {
         let base = std::env::temp_dir().join(format!("tarae-blocked-{}", std::process::id()));
         std::fs::remove_dir_all(&base).ok();
-        std::fs::create_dir_all(base.join("home/.npm/_cacache")).unwrap();
+        std::fs::create_dir_all(base.join("home/data/cache")).unwrap();
         std::fs::create_dir_all(base.join("home/proj")).unwrap();
         let home = std::fs::canonicalize(base.join("home")).unwrap();
         let root = home.join("proj");
         let d = |op: &str, target: String| Denial { process: "npm".into(), op: op.into(), target };
         let denials = [
-            d("file-write-create", home.join(".npm/_cacache/x").display().to_string()),
-            d("file-write-data", home.join(".npm/_cacache/y").display().to_string()),
+            d("file-write-create", home.join("data/cache/x").display().to_string()),
+            d("file-write-data", home.join("data/cache/y").display().to_string()),
             d("network-outbound", "remote:*:5432".into()),
             d("network-outbound", "remote:*:2375".into()),
             d("file-write-create", root.join(".git/index.lock").display().to_string()),
@@ -327,19 +329,82 @@ mod tests {
             d("network-outbound", "remote:192.0.2.1:9".into()),
         ];
         let all = choices(&denials, &home, &root, &[]);
-        assert_eq!((all[0].hint.as_str(), all[1].hint.as_str()), ("…/x", "…/_cacache/x"), "below the folder");
+        assert_eq!((all[0].hint.as_str(), all[1].hint.as_str()), ("…/x", "…/cache/x"), "below the folder");
         assert_eq!(all[2].why, "npm was connecting to it");
         let got: Vec<Grant> = all.into_iter().map(|c| c.grant).collect();
         assert_eq!(
             got,
             [
-                Grant::Write(home.join(".npm/_cacache")),
-                Grant::Write(home.join(".npm")),
+                Grant::Write(home.join("data/cache")),
+                Grant::Write(home.join("data")),
                 Grant::Port(5432),
                 Grant::Port(8080)
             ],
             "Docker's port, an address beyond this machine and the project's .git aren't offered; each folder once"
         );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// A toolchain's shared cache is never offered for writing, in a project that isn't the tool's either (no
+    /// `go.mod` here, so nothing asked Go where its module cache is): not Go's module cache at its default, nor
+    /// cargo's registry, nor what holds them — and no folder the packs' `ask` could name there opens. Written
+    /// only through the caches rule, with the network open. Nor npm's home (`npx` runs what's there). (A
+    /// stand-in home in the test's temp folder.)
+    #[test]
+    fn a_shared_cache_is_never_offered_in_a_project_not_the_tools() {
+        let base = std::env::temp_dir().join(format!("tarae-blocked-cache-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        let modcache = "go/pkg/mod/golang.org/x/text@v0.1.0";
+        for d in [
+            modcache,
+            "go/pkg/mod/cache/download",
+            ".cargo/registry/src/i/serde-1.0.0",
+            ".npm/_cacache",
+            ".npm/_npx/0a1b",
+            "data/cache",
+            "proj",
+        ] {
+            std::fs::create_dir_all(base.join("home").join(d)).unwrap();
+        }
+        let home = std::fs::canonicalize(base.join("home")).unwrap();
+        let root = home.join("proj");
+        assert!(!root.join("go.mod").exists());
+        let d = |target: PathBuf| Denial {
+            process: "x".into(),
+            op: "file-write-create".into(),
+            target: target.display().to_string(),
+        };
+        let denials = [
+            d(home.join(modcache).join("new.go")),
+            d(home.join("go/pkg/mod/cache/download/x.zip")),
+            d(home.join(".cargo/registry/src/i/serde-1.0.0/build.rs")),
+            d(home.join(".npm/_cacache/x")),
+            d(home.join(".npm/_npx/0a1b/x.js")),
+            d(home.join("data/cache/x")),
+        ];
+        let got: Vec<Grant> = choices(&denials, &home, &root, &[]).into_iter().map(|c| c.grant).collect();
+        assert_eq!(
+            got,
+            [Grant::Write(home.join("data/cache")), Grant::Write(home.join("data"))],
+            "only the folder no toolchain keeps"
+        );
+        // …nor as a folder the toolchain names, this project's policy holding no write there
+        let here = crate::sandbox::Here {
+            env: [("HOME".to_string(), home.clone().into())].into(),
+            ..Default::default()
+        };
+        let llm = crate::llm::LlmConfig::default();
+        crate::sandbox::toolchain_found_in(&root, Default::default(), &here);
+        let env = crate::sandbox::env_in(&root, &llm, &[], &here).0;
+        for d in [home.join(modcache), home.join("go/pkg/mod"), home.join(".cargo/registry")] {
+            let why = crate::sandbox::ask_dir_verdict(&d, &root, Some(&home), &env.runs_later).unwrap_err();
+            assert!(why.contains("a toolchain's shared cache"), "{}: {why}", d.display());
+        }
+        let why =
+            crate::sandbox::ask_dir_verdict(&home.join(".npm/_npx"), &root, Some(&home), &env.runs_later);
+        assert!(why.as_ref().is_err_and(|w| w.starts_with("it's in a toolchain's home")), "{why:?}");
+        let p = crate::sandbox::Policy::for_project(&env);
+        assert!(!p.writes_allow(&home.join(modcache).join("new.go")), "{:?}", p.write);
         std::fs::remove_dir_all(&base).ok();
     }
 

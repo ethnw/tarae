@@ -16,3 +16,7 @@ rev = "eb7d58c2dc4fbeea4745019dee8df013034ae66b"
 what = "Zig's language server"
 ways = [{ run = ["brew", "install", "zls"] }]
 hint = "or your system's package, or a release from github.com/zigtools/zls"
+
+# What builds a project: a script calling one runs its code (`sinceyes.rs`)
+[claude]
+builders = ["zig"]

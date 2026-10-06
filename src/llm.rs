@@ -95,7 +95,7 @@ pub struct LlmConfig {
     pub review_at_end: bool,
     /// Chat: load CLAUDE.md files and Claude Code settings like `claude` does (hooks off, edits always ask).
     pub chat_settings: bool,
-    /// Chat: commands Claude's `run` starts without asking, past the built-in checks (`tools::RUN_ALLOW`) —
+    /// Chat: commands Claude's `run` starts without asking, past the built-in checks (`tools::run_allow`) —
     /// each a prefix of whole words (`"npm test"`).
     pub run_allow: Vec<String>,
     /// Chat, review at the end (`edits.rs`): more files whose edits still ask first, past the protected ones

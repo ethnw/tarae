@@ -3,7 +3,7 @@
 //! in the project (but `protected_names` — `.git`, `build.rs`, `Cargo.toml`, `.cargo`… wherever they sit —
 //! and `llm.sandbox-protect`), the temp folders and the toolchain's own folders (cargo's registry and git
 //! caches only with the network open — `Policy::caches` —, its target and build dirs when they're the checkout's own —
-//! `cargo_dir_verdict`, #20: a cargo config in the checkout names them, and Claude can write it; Go's caches), connect to nothing
+//! `asked_dir_verdict`, #20: a cargo config in the checkout names them, and Claude can write it; Go's caches), connect to nothing
 //! over the network but the ports on this machine the user opened (`llm.sandbox-ports`, or all with
 //! `llm.sandbox-localhost` — `RISKY_PORTS` says why not all by default), and make or reach unix sockets
 //! only in the project and its own temp folder (`RunDir`, its `TMPDIR`). In home it reads only the project,
@@ -26,12 +26,15 @@
 //! commands don't run quietly without one: each asks, or the user agrees for the conversation, and the chat's
 //! title says so.
 
+#[cfg(test)]
+mod golden;
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_os = "linux")]
 pub mod supervisor;
 
 use std::collections::HashMap;
+use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
@@ -176,9 +179,10 @@ impl Guard {
     /// whether that's all of them.
     fn kept(&self, seen: &[Denial]) -> (String, bool) {
         let Guard::In(p) = self else { return (String::new(), false) };
-        let (mut names, mut git, mut crates, mut all) = (Vec::new(), false, false, true);
+        let (mut names, mut git, mut caches, mut all) = (Vec::new(), false, Vec::new(), true);
         let (mut secret, mut services, mut copied) = (Vec::new(), Vec::new(), Vec::new());
-        let (mut gradle, mut daemon) = (false, false);
+        let (mut homes, mut ports) = (Vec::new(), Vec::new());
+        let refused_port = &crate::sandboxpack::get().refused_port;
         let (mut entries, mut signals) = (false, false);
         for d in seen {
             if d.op.starts_with("file-entry-") {
@@ -190,10 +194,14 @@ impl Guard {
                     "the clipboard" => services.push("the clipboard"),
                     "the keychain" => services.push("the keychain"),
                     _ if d.op == "signal" => signals = true,
-                    // (a JVM refused a port on this machine: Gradle's client and its daemon)
-                    w if d.process == "java" && w.starts_with("connecting to port") => {
+                    // (a process the packs say needs this machine's ports refused one: Gradle's JVM)
+                    w if w.starts_with("connecting to port")
+                        && refused_port.iter().any(|(n, _)| *n == d.process) =>
+                    {
                         // (Linux: the open network isn't this machine's ports)
-                        daemon |= !p.localhost && !(p.network && p.linux_said().is_none());
+                        let closed = !p.localhost && !(p.network && p.linux_said().is_none());
+                        let of = refused_port.iter().position(|(n, _)| *n == d.process);
+                        ports.extend(of.filter(|i| closed && !ports.contains(i)));
                         all = false;
                     }
                     _ => all = false,
@@ -207,16 +215,20 @@ impl Guard {
                         false => names.push(rel.display().to_string()),
                     }
                 }
-                _ if p.caches.iter().any(|c| path.starts_with(c)) => crates = true,
+                _ if p.caches.iter().any(|c| path.starts_with(c)) => {
+                    let of = p.caches_said.iter().position(|s| s.dirs.iter().any(|c| path.starts_with(c)));
+                    caches.extend(of.filter(|i| !caches.contains(i)));
+                }
                 _ if p.reads.kept_holds(&p.root, path) => secret.push(crate::allow::tilde(path)),
                 _ if p.reads.copies.instead_of(path).is_some() => {
                     let var = p.reads.copies.instead_of(path).unwrap_or_default();
                     copied.push(format!("{} (${var})", crate::allow::tilde(path)))
                 }
                 _ if d.op.starts_with("file-write")
-                    && p.gradle.user.as_ref().is_some_and(|g| path.starts_with(g)) =>
+                    && p.run_homes.iter().any(|h| path.starts_with(&h.user)) =>
                 {
-                    gradle = true
+                    let of = p.run_homes.iter().position(|h| path.starts_with(&h.user));
+                    homes.extend(of.filter(|i| !homes.contains(i)));
                 }
                 _ => all = false,
             }
@@ -263,26 +275,15 @@ impl Guard {
                  (outside_sandbox, with your reason).\n",
             );
         }
-        if crates {
-            s.push_str(&caches_kept(p));
+        for i in caches {
+            s.push_str(&p.caches_said[i].kept());
         }
-        if gradle && let Some(home) = &p.gradle.user {
-            s.push_str(&format!(
-                "{}: the user's Gradle home stays as it is — their own builds run what's there. Your commands \
-                 have a Gradle home of their own and read the downloaded dependencies and the wrapper's \
-                 distributions from theirs: Gradle trying to write there is expected, and the build goes on. A \
-                 dependency or distribution not downloaded yet fails here — tell the user; a build of theirs \
-                 fetches it.\n",
-                crate::allow::tilde(home)
-            ));
+        for i in homes {
+            let h = &p.run_homes[i];
+            s.push_str(&format!("{}\n", h.said.replace("{home}", &crate::allow::tilde(&h.user))));
         }
-        if daemon {
-            s.push_str(
-                "Java was refused a port on this machine: Gradle's client talks to its build daemon and test \
-                 workers over this machine's ports, so a Gradle build can't run while they're closed. Tell the \
-                 user: llm.sandbox-localhost (in the project's .tarae.toml) opens them. Their own Gradle \
-                 daemons stay out of reach — the registry that names them is kept from your commands.\n",
-            );
+        for i in ports {
+            s.push_str(&format!("{}\n", refused_port[i].1));
         }
         if entries {
             s.push_str(
@@ -336,18 +337,34 @@ impl Guard {
                             .map(|(d, why)| format!("{} ({why})", crate::allow::tilde(d)))
                             .collect();
                         format!(
-                            " It kept closed what the checkout's cargo config named: {} — a build writing \
+                            " It kept closed what the checkout's {} config named: {} — a build writing \
+                             there fails; the user can open a folder with llm.sandbox-write.",
+                            p.named_by,
+                            each.join("; ")
+                        )
+                    }
+                };
+                // (what the toolchain's settings named for its caches and stays closed)
+                let refused = match p.refused_asked.is_empty() {
+                    true => refused,
+                    false => {
+                        let each: Vec<String> = p
+                            .refused_asked
+                            .iter()
+                            .map(|(d, why)| format!("{} ({why})", crate::allow::tilde(d)))
+                            .collect();
+                        format!(
+                            "{refused} It kept closed what the toolchain's settings named: {} — a build writing \
                              there fails; the user can open a folder with llm.sandbox-write.",
                             each.join("; ")
                         )
                     }
                 };
                 let names = protected_names().collect::<Vec<_>>().join(", ");
+                let rules: Vec<&str> = p.caches_said.iter().map(|c| c.rule.as_str()).collect();
                 let crates = match p.caches.is_empty() {
-                    false => {
-                        " (not cargo's caches — its crates and git checkouts — while the network is closed)"
-                    }
-                    true => "",
+                    false => format!(" (not {} — while the network is closed)", rules.join("; ")),
+                    true => String::new(),
                 };
                 let reads = match p.reads.home.is_some() {
                     true => {
@@ -381,17 +398,23 @@ impl Guard {
     }
 }
 
-/// What Claude reads when a write in cargo's caches was kept (`Policy::caches`): why, and what to do instead.
-fn caches_kept(p: &Policy) -> String {
-    let caches: Vec<String> = p.caches.iter().map(|c| crate::allow::tilde(c)).collect();
-    format!(
-        "Cargo's caches ({}) stay as they are while the network is closed: every project's build outside \
-         the sandbox uses the crates and git checkouts there. A build that needs a crate unpacked or a git \
-         dependency checked out fails here — that's not something to fix in the code: tell the user. A build \
-         or `cargo fetch` of theirs puts it there, then run it again; llm.sandbox-network opens the caches to \
-         your commands.\n",
-        caches.join(", ")
-    )
+/// A tool's shared caches as a run is told of them (the packs' `caches`): its folders, how the rules say them,
+/// and what Claude reads when a write there was kept — why, and what to do instead (`{caches}`: the folders).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CachesSaid {
+    pub dirs: Vec<PathBuf>,
+    pub rule: String,
+    pub said: String,
+    /// The extended attribute the tool sets on these folders themselves at every run (Seatbelt's: Landlock has
+    /// no such rule) — cargo's for file sync, the one write to its caches an offline build makes.
+    pub xattr: Option<String>,
+}
+
+impl CachesSaid {
+    fn kept(&self) -> String {
+        let dirs: Vec<String> = self.dirs.iter().map(|c| crate::allow::tilde(c)).collect();
+        format!("{}\n", self.said.replace("{caches}", &dirs.join(", ")))
+    }
 }
 
 /// What a sandboxed command may do. Every path is real (canonical).
@@ -403,19 +426,19 @@ pub struct Policy {
     pub protect: Vec<PathBuf>,
     /// Folders writable besides the project (temp, the toolchain's, `llm.sandbox-write`).
     pub write: Vec<PathBuf>,
-    /// Single files writable — cargo's lock and last-use files (`CARGO_FILES`), the network closed even
-    /// those inside `caches`.
+    /// Single files writable — the caches' own files (cargo's locks and last-use database), the network closed
+    /// even those inside `caches`, and the packs' `write-files`.
     pub files: Vec<PathBuf>,
     /// Folders inside writable ones kept as they are: the terminal multiplexers' sockets (`mux_dirs`) — a
     /// command could otherwise delete or replace the multiplexer the user works in.
     pub keep: Vec<PathBuf>,
-    /// Cargo's shared caches — `registry/` (the index, the downloaded `.crate`s, the unpacked crates) and
-    /// `git/` (git dependencies' databases and checkouts) — kept as they are while the network is closed:
-    /// every project's build outside the sandbox uses what's there (cargo doesn't check an unpacked crate or a
-    /// checkout again), and with no download a build has nothing new to put there. Only `files` are written
-    /// in them. A crate downloaded and never unpacked, a git dependency never checked out (or what cargo's
-    /// cleanup removed) fails here, and the report says why.
+    /// The tools' shared caches (the packs' `caches` — cargo's crates and git checkouts) kept as they are while
+    /// the network is closed: every project's build outside the sandbox uses what's there, and with no
+    /// download a build has nothing new to put there. Only `files` are written in them. What a build needs
+    /// that isn't there fails here, and the report says why (`caches_said`).
     pub caches: Vec<PathBuf>,
+    /// How each tool's caches are said, while they're kept, and the attribute it sets on them.
+    pub caches_said: Vec<CachesSaid>,
     /// The network beyond this machine (`llm.sandbox-network`).
     pub network: bool,
     /// Ports on this machine it may connect to (`llm.sandbox-ports`): the network closed, the only ones;
@@ -435,26 +458,32 @@ pub struct Policy {
     pub granted: Vec<String>,
     /// Unix sockets outside the project it may connect to, each that one file (`allow::Grant::Socket`).
     pub sockets: Vec<PathBuf>,
-    /// The folders cargo named that stay closed, and why (`cargo_dir_verdict`) — said with the result and on
-    /// the panel.
+    /// The folders the checkout's build tool named that stay closed, and why (`asked_dir_verdict`) — said with
+    /// the result and on the panel — and who named them (`builds-said`: `cargo`).
     pub refused: Vec<(PathBuf, String)>,
+    pub named_by: String,
+    /// The folders the packs' `ask` named that stay closed, and why (`ask_dir_verdict` — Go's caches).
+    pub refused_asked: Vec<(PathBuf, String)>,
     /// Where it may read (card model P2).
     pub reads: Reads,
-    /// Gradle in it: a home of the run's own (`gradle_run_home`).
-    pub gradle: Gradle,
+    /// What the run's environment gets from the packs: the variables that point a tool at a home of the run's
+    /// own (`run_homes_made` — Gradle's), and their `env` (npm's log folder in the run's).
+    pub env: Vec<(String, String)>,
+    /// The users' own homes of the tools that get one of the run's (kept as they are), as Claude is told.
+    pub run_homes: Vec<RunHomeSaid>,
     /// Linux: the policy as Landlock's rules (`linux::confine`, made on the worker) — Err why it couldn't be
     /// (the run then doesn't start: `spawn`); None before it's made (`policy` makes it).
     #[cfg(target_os = "linux")]
     pub confine: Option<Result<linux::Confine, String>>,
 }
 
-/// Gradle in a run: the user's Gradle home, and the environment that points Gradle at the run's own.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Gradle {
-    /// The user's Gradle home (`gradle_home_of`), when it's there — kept as it is.
-    pub user: Option<PathBuf>,
-    /// `GRADLE_USER_HOME`, `GRADLE_RO_DEP_CACHE`, `GRADLE_OPTS` (`gradle_run_home`).
-    pub env: Vec<(String, String)>,
+/// A tool that gets a home of the run's own (the packs' `run-home`): its name, the user's own home of it (real,
+/// there), and what Claude reads when a write there was kept (`{home}`: that home).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunHomeSaid {
+    pub name: String,
+    pub user: PathBuf,
+    pub said: String,
 }
 
 /// Where a run reads (card model P2): anywhere outside home; in home the project, where it may write, and
@@ -488,92 +517,87 @@ impl Reads {
     }
 }
 
-/// What the toolchains read in home to work, measured (`target/sb/p2-measured.md`: tarae's preflight, a Go and
-/// a Node project, `cargo xtask shot`, the e2e harness, every read in home reported): cargo's and rustup's
-/// homes, git's settings, the text encoding CoreFoundation reads in every process, Go's GOPATH, cache and
-/// settings, npm's cache, the fonts a shot draws with — and pip's settings files (2026-10-05,
-/// `target/sb/tokens-checkpoint.md`: denied, pip loses its index and the rest without a word). Those that
-/// can hold a token are read from a copy without it when one does (`tokens.rs`). Java's
-/// (`target/sb/java-checkpoint.md`): the JDKs `/usr/bin/java` looks for, Maven's downloaded repository and its
-/// wrapper's distributions — not `~/.m2/settings.xml` (a repository's password lives there); Gradle's are
-/// where its home is (`GRADLE_READS`).
-const HOME_READS: [&str; 16] = [
-    ".cargo",
-    ".rustup",
-    ".gitconfig",
-    ".config/git",
-    ".CFUserTextEncoding",
-    "go",
-    "Library/Caches/go-build",
-    "Library/Application Support/go",
-    ".npm",
-    "Library/Fonts",
-    ".pip/pip.conf",
-    ".config/pip/pip.conf",
-    "Library/Application Support/pip/pip.conf",
-    "Library/Java/JavaVirtualMachines",
-    ".m2/repository",
-    ".m2/wrapper",
-];
+/// What every run reads in home besides what the toolchains read (the packs' `reads` — `sandboxpack.rs`),
+/// measured (`target/sb/p2-measured.md`, every read in home reported): git's settings, the text encoding
+/// CoreFoundation reads in every process, the fonts a shot draws with.
+const HOME_READS: [&str; 4] = [".gitconfig", ".config/git", ".CFUserTextEncoding", "Library/Fonts"];
 
-/// What a Gradle build reads in the user's Gradle home (measured, `target/sb/java-checkpoint.md`) — it runs
-/// with a home of its own (`gradle_run_home`): the dependencies downloaded (`caches/modules-2`, read in place
-/// as `GRADLE_RO_DEP_CACHE`) and the wrapper's distributions. Not its settings (`gradle.properties` holds
-/// repository passwords), and never its daemons' registry (`GRADLE_KEPT`).
-const GRADLE_READS: [&str; 2] = ["caches/modules-2", "wrapper/dists"];
+/// What a run never reads at a toolchain's default home, whatever is granted and whatever the packs say — the
+/// floor under their `kept` (which adds where a variable moved the home), as `allow::SECRETS` is: cargo's
+/// credentials, and the user's Gradle daemons' registry — their ports and the token each takes (measured,
+/// `target/sb/java-checkpoint.md` c0: with it readable and this machine's ports open, a sandboxed `./gradlew`
+/// hands its build to a daemon started outside, and the build runs outside the sandbox).
+pub const KEPT_FLOOR: [&str; 3] = [".cargo/credentials", ".cargo/credentials.toml", ".gradle/daemon"];
 
-/// The user's Gradle daemons' registry: their ports and the token each takes — kept from every run, whatever
-/// is granted. Measured (`target/sb/java-checkpoint.md`, c0): with it readable and this machine's ports open, a
-/// sandboxed `./gradlew` hands its build to a daemon started outside, and the build runs outside the sandbox.
-const GRADLE_KEPT: &str = "daemon";
-
-/// What the environment says of where the toolchains' homes are — read from the process once, where a policy is
-/// made (`here`), and passed in: what's worked out from it is the same in a test as in a run (a sandboxed run
-/// has a Gradle home of its own).
-#[derive(Clone, Debug, Default)]
-pub struct HomeVars {
-    pub cargo_home: Option<PathBuf>,
-    pub rustup_home: Option<PathBuf>,
-    pub gradle_user_home: Option<PathBuf>,
-    pub xdg_config_home: Option<PathBuf>,
+/// The packs' places (`sandboxpack::Vars`) for `home` as `here` says the variables — read from the process
+/// once, where a policy is made, and passed in: what's worked out from it is the same in a test as in a run (a
+/// sandboxed run has a Gradle home of its own).
+pub fn vars_in(home: &Path, here: &Here) -> crate::sandboxpack::Vars {
+    crate::sandboxpack::Vars::new(crate::sandboxpack::get(), home, &|name| here.path(name), here.os)
 }
 
-impl HomeVars {
-    pub fn here() -> HomeVars {
-        let var = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
-        HomeVars {
-            cargo_home: var("CARGO_HOME"),
-            rustup_home: var("RUSTUP_HOME"),
-            gradle_user_home: var("GRADLE_USER_HOME"),
-            xdg_config_home: var("XDG_CONFIG_HOME"),
+/// The system a policy is made for — what the folders it names are on it (`tokens::user_config`). The one tarae
+/// runs on, but in tests: each system's policy is made on any.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Os {
+    #[default]
+    Mac,
+    Linux,
+}
+
+impl Os {
+    pub const HOST: Os = if cfg!(target_os = "macos") { Os::Mac } else { Os::Linux };
+}
+
+/// What the process's surroundings say where a policy is made — its variables, `$TMPDIR` (real), the user's
+/// id, the system — read once (`now`) and passed in: what's worked out from it is the same in a test as in a
+/// run.
+#[derive(Clone, Debug, Default)]
+pub struct Here {
+    pub env: HashMap<String, std::ffi::OsString>,
+    pub tmp: Option<PathBuf>,
+    pub uid: u32,
+    pub os: Os,
+}
+
+impl Here {
+    pub fn now() -> Here {
+        Here {
+            env: std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v))).collect(),
+            tmp: std::fs::canonicalize(std::env::temp_dir()).ok(),
+            // SAFETY: getuid has no preconditions and can't fail.
+            uid: unsafe { libc::getuid() },
+            os: Os::HOST,
         }
     }
-}
 
-/// The user's Gradle home — `$GRADLE_USER_HOME` (absolute), else `~/.gradle` — as the profile writes it.
-fn gradle_home_of(home: &Path, vars: &HomeVars) -> PathBuf {
-    let set = vars.gradle_user_home.clone().filter(|g| g.is_absolute());
-    profile_path(&set.unwrap_or_else(|| home.join(".gradle")))
+    /// A variable naming a place, when it's set and not empty.
+    pub fn path(&self, name: &str) -> Option<PathBuf> {
+        self.env.get(name).filter(|v| !v.is_empty()).map(PathBuf::from)
+    }
+
+    /// A variable as it's set (empty too), in UTF-8 — what `tokens::sources` reads (`std::env::var`'s).
+    pub fn var(&self, name: &str) -> Option<String> {
+        self.env.get(name).and_then(|v| v.clone().into_string().ok())
+    }
 }
 
 /// Claude's own, in home: its settings, conversations and token cache — kept from its runs like keys.
 const CLAUDES: [&str; 3] = [".claude", ".claude.json", ".claude.json.backup"];
 
-/// Where a run reads in `home` (real): `HOME_READS`, cargo's and rustup's homes wherever they are, Gradle's
-/// `GRADLE_READS`, tarae's grammars (its own tests and shots load them), the folders on PATH (what's there
-/// runs), and `also` (the repository's other checkouts, what the user let Claude read) — none that's home
-/// itself or in a kept place.
-pub fn reads_for(home: &Path, also: &[PathBuf], vars: &HomeVars) -> Reads {
-    let cargo_home = cargo_home_of(Some(home), vars);
-    let mut allow: Vec<PathBuf> = HOME_READS.iter().map(|r| profile_path(&home.join(r))).collect();
-    let gradle = gradle_home_of(home, vars);
-    allow.extend(GRADLE_READS.iter().map(|r| gradle.join(r)));
-    allow.extend(cargo_home.clone());
-    allow.extend(vars.rustup_home.as_deref().map(profile_path));
+/// Where a run reads in `home` (real; `vars` its places): `HOME_READS`, the packs' `reads` (a home alone only
+/// where it's there — its variable may name a folder never made), tarae's grammars (its own tests and shots
+/// load them), the folders on PATH (what's there runs), and `also` (the repository's other checkouts, what the
+/// user let Claude read) — none that's home itself or in a kept place.
+pub fn reads_for(home: &Path, also: &[PathBuf], vars: &crate::sandboxpack::Vars) -> Reads {
+    let packs = crate::sandboxpack::get().reads.iter();
+    let packs = packs.filter_map(|r| vars.place(r).filter(|p| !vars.is_home(r) || p.exists()));
+    let mut allow: Vec<PathBuf> = HOME_READS.iter().map(|r| home.join(r)).chain(packs).collect();
+    allow = allow.iter().map(|p| profile_path(p)).collect();
     allow.extend(crate::grammar::grammars_dir().map(|d| profile_path(&d)));
     allow.extend(crate::blocked::path_dirs());
     allow.extend(also.iter().cloned());
-    let kept = kept_reads(home, cargo_home.as_deref(), vars);
+    let kept = kept_reads(home, vars);
     allow.retain(|p| p.starts_with(home) && p != home && !kept.iter().any(|k| p.starts_with(k)));
     allow.sort();
     allow.dedup();
@@ -581,67 +605,73 @@ pub fn reads_for(home: &Path, also: &[PathBuf], vars: &HomeVars) -> Reads {
     Reads { home: Some(home.to_path_buf()), allow, kept, log, copies: Default::default() }
 }
 
-/// What cargo reads above the project (`root`, real) in `home`: `.cargo/config.toml` and `.cargo/config` in
-/// every folder between them — those files, not the folder (`credentials.toml` sits there). Measured: a
-/// project below a folder with one doesn't build without it ("could not load Cargo configuration"). Home's
-/// own is in cargo's home.
-pub fn cargo_configs_above(root: &Path, home: &Path) -> Vec<PathBuf> {
+/// What a toolchain reads above the project (`root`, real) in `home`: the packs' `reads-above` files in every
+/// folder between them — those files, not the folder (cargo's `credentials.toml` sits beside its config).
+pub fn reads_above(root: &Path, home: &Path) -> Vec<PathBuf> {
+    let files = &crate::sandboxpack::get().reads_above;
     root.ancestors()
         .skip(1)
         .take_while(|a| a.starts_with(home) && *a != home)
-        .flat_map(|a| ["config.toml", "config"].map(|c| a.join(".cargo").join(c)))
+        .flat_map(|a| files.iter().map(|f| a.join(f)))
         .collect()
 }
 
 /// What a run never reads, whatever is granted: the places that hold keys (`allow::SECRETS`, and git's
-/// credential store where `$XDG_CONFIG_HOME` puts it), Claude's own (`CLAUDES`), cargo's credentials, Gradle's
-/// daemons' registry (`GRADLE_KEPT`), and tarae's state (its conversations, what was allowed — its log aside).
-pub fn kept_reads(home: &Path, cargo_home: Option<&Path>, vars: &HomeVars) -> Vec<PathBuf> {
+/// credential store where `$XDG_CONFIG_HOME` puts it), Claude's own (`CLAUDES`), `KEPT_FLOOR`, the packs'
+/// `kept` at both a home's places, and tarae's state (its conversations, what was allowed — its log aside).
+pub fn kept_reads(home: &Path, vars: &crate::sandboxpack::Vars) -> Vec<PathBuf> {
+    kept_in(home, vars, &crate::sandboxpack::get().kept)
+}
+
+/// `kept_reads` with the packs' `kept` given.
+fn kept_in(home: &Path, vars: &crate::sandboxpack::Vars, packs: &[String]) -> Vec<PathBuf> {
     let at = |p: PathBuf| profile_path(&p);
-    let mut v: Vec<PathBuf> =
-        crate::allow::SECRETS.iter().chain(&CLAUDES).map(|s| at(home.join(s))).collect();
-    for cargo in [Some(home.join(".cargo")), cargo_home.map(Path::to_path_buf)].into_iter().flatten() {
-        v.extend(["credentials", "credentials.toml"].map(|c| at(cargo.join(c))));
-    }
-    for gradle in [at(home.join(".gradle")), gradle_home_of(home, vars)] {
-        v.push(gradle.join(GRADLE_KEPT));
-    }
-    let xdg = vars.xdg_config_home.clone().filter(|x| x.is_absolute());
-    v.extend(xdg.map(|x| at(x.join("git/credentials"))));
+    let floor = crate::allow::SECRETS.iter().chain(&CLAUDES).chain(&KEPT_FLOOR);
+    let mut v: Vec<PathBuf> = floor.map(|s| at(home.join(s))).collect();
+    v.extend(packs.iter().flat_map(|k| vars.places_both(k)).map(at));
+    v.push(at(vars.xdg_config.join("git/credentials")));
     v.extend(crate::config::state_dir().map(at));
     v.sort();
     v.dedup();
     v
 }
 
-/// Whether a folder cargo names for the checkout at `root` (`d`, a real path) may be written by its runs
-/// (#20 — the checkout's cargo config names it, and Claude can write that): `Ok(true)` it needs a rule of
-/// its own (this checkout's own per-checkout build dir, `own`, under cargo's home as `build/xx/yyyy`),
+/// The checkout's build tool (a built-in pack's `[builds]`), as its named folders are judged: who names them
+/// (`builds-said`: `cargo`), its home (real, when it's there), and where a checkout's own build folder sits in
+/// that home — so many folders below this one (`[builds] remove`: `build`, 2).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Builder {
+    pub who: String,
+    pub home: Option<PathBuf>,
+    pub own_under: Option<(PathBuf, usize)>,
+}
+
+/// Whether a folder the checkout's build tool names for the checkout at `root` (`d`, a real path) may be
+/// written by its runs (#20 — a config in the checkout names it, and Claude can write that): `Ok(true)` it
+/// needs a rule of its own (this checkout's own per-checkout build dir, `own`, where `tool` keeps them),
 /// `Ok(false)` it's writable already (inside the checkout, a temp folder); `Err` why it stays closed — home or
-/// above it, a folder holding the checkout, cargo's home or above it, or anything else.
-pub fn cargo_dir_verdict(
+/// above it, a folder holding the checkout, the tool's home or above it, or anything else.
+pub fn asked_dir_verdict(
     d: &Path,
     root: &Path,
     home: Option<&Path>,
-    cargo_home: Option<&Path>,
+    tool: &Builder,
     own: Option<&Path>,
     tmp: Option<&Path>,
 ) -> Result<bool, String> {
-    if home.is_some_and(|h| h.starts_with(d)) {
-        return Err(if home == Some(d) { "it's your home".into() } else { "it holds your home".into() });
+    if let Some(why) = never_written(d, root, home) {
+        return Err(why);
     }
-    if root.starts_with(d) && root != d {
-        return Err("it holds the checkout".into());
-    }
-    if cargo_home.is_some_and(|c| c.starts_with(d)) {
-        return Err("it's cargo's home".into());
+    let who = &tool.who;
+    if tool.home.as_ref().is_some_and(|c| c.starts_with(d)) {
+        return Err(format!("it's {who}'s home"));
     }
     if d.starts_with(root) {
         return Ok(false);
     }
     let per_checkout = |o: &Path| {
-        let below = cargo_home.and_then(|c| o.strip_prefix(c.join("build")).ok());
-        below.is_some_and(|b| b.components().count() == 2)
+        let (Some(h), Some((under, depth))) = (&tool.home, &tool.own_under) else { return false };
+        o.strip_prefix(h.join(under)).is_ok_and(|b| b.components().count() == *depth)
     };
     if own.is_some_and(|o| o == d && per_checkout(o)) {
         return Ok(true);
@@ -650,7 +680,126 @@ pub fn cargo_dir_verdict(
     if temps.iter().flatten().any(|t| d.starts_with(t) && d != *t) {
         return Ok(false);
     }
-    Err("it isn't in the checkout, its own build dir under cargo's home, or a temp folder".into())
+    Err(format!("it isn't in the checkout, its own build dir under {who}'s home, or a temp folder"))
+}
+
+/// Why a folder a toolchain names (`d`, real) is never one its runs write, whatever names it: home or above
+/// it, a folder holding the checkout `root` (it would open `.git`).
+fn never_written(d: &Path, root: &Path, home: Option<&Path>) -> Option<String> {
+    if home.is_some_and(|h| h.starts_with(d)) {
+        return Some(if home == Some(d) { "it's your home".into() } else { "it holds your home".into() });
+    }
+    (root.starts_with(d) && root != d).then(|| "it holds the checkout".into())
+}
+
+/// Whether a folder the packs' `ask` names (Go's module cache — `d`, real) may be written by the project's runs
+/// (a cache: with the network open): it's the tool's own, wherever its settings put it — but never home or
+/// above it, a folder holding the checkout, nor in or around where keys are, Claude's and tarae's own, or what
+/// runs later (`allow::SECRETS`, `KEPT_FLOOR`, `allow::NEVER_WRITE`, `later`: programs' folders, shared caches,
+/// toolchains' homes and what's in them). Err why not.
+pub fn ask_dir_verdict(d: &Path, root: &Path, home: Option<&Path>, later: &RunsLater) -> Result<(), String> {
+    if let Some(why) = never_written(d, root, home).or_else(|| later.refuses(d)) {
+        return Err(why);
+    }
+    let Some(home) = home else { return Ok(()) };
+    let keys = crate::allow::SECRETS.iter().chain(&CLAUDES).chain(&KEPT_FLOOR).map(|k| home.join(k));
+    let mut keys = keys.chain(crate::config::state_dir().map(|s| profile_path(&s)));
+    if keys.any(|k| k.starts_with(d) || d.starts_with(&k)) {
+        return Err("it's where keys, Claude's or tarae's own are".into());
+    }
+    let later = crate::allow::NEVER_WRITE.iter().map(|w| home.join(w));
+    if later.into_iter().any(|w| w.starts_with(d) || d.starts_with(&w)) {
+        return Err("what's there runs later outside the sandbox".into());
+    }
+    Ok(())
+}
+
+/// Where programs land by convention in home, whatever the toolchain (install scripts', pipx's).
+pub const USER_BIN: &str = ".local/bin";
+
+/// What no folder opened for writing is, holds or is in — what's there runs outside the sandbox later, as the
+/// user: the folders of programs they run (`bins`: those on `PATH`, `USER_BIN`, the packs' `bins`), the
+/// toolchains' shared caches (`caches`: the packs' `caches` at their defaults and where a home or variable moved
+/// them — every project's build uses what's there; written only through the caches rule, with the network
+/// open), and the toolchains' homes (the packs' `homes`, where they are and at their defaults) and all in them —
+/// compiled build scripts, the distributions a wrapper runs, the toolchains a proxy runs; what the packs let a
+/// run write there goes through its own rule (a cache's, `write-files`), never this. Real paths. The asked
+/// folders (`ask_dir_verdict`) and the write card (`allow::write_choices`) read it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RunsLater {
+    pub bins: Vec<PathBuf>,
+    pub caches: Vec<crate::sandboxpack::CachePlace>,
+    pub homes: Vec<PathBuf>,
+    /// The places in a home a cache being judged has there (`but_cache`) — a folder in one isn't refused for
+    /// being in that home.
+    pub own: Vec<PathBuf>,
+}
+
+impl RunsLater {
+    /// For `home` (real) and the packs' places there (`vars`), with the folders on `PATH` (`path`, real).
+    pub fn new(home: &Path, vars: &crate::sandboxpack::Vars, path: &[PathBuf]) -> RunsLater {
+        let packs = crate::sandboxpack::get().bins.iter().flat_map(|b| vars.places_both(b));
+        let bins = path.iter().cloned().chain([home.join(USER_BIN)]).chain(packs);
+        let homes = vars.homes.iter().flat_map(|(_, at, default)| [at.clone(), default.clone()]);
+        let homes = homes.chain(vars.listed.iter().cloned());
+        let real = |v: &mut Vec<PathBuf>| {
+            *v = v.iter().map(|p| profile_path(p)).collect();
+            v.sort();
+            v.dedup();
+        };
+        let mut caches: Vec<_> = vars.caches.clone();
+        for c in &mut caches {
+            c.at = profile_path(&c.at);
+        }
+        caches.sort();
+        caches.dedup();
+        let mut r = RunsLater { bins: bins.collect(), caches, homes: homes.collect(), own: Vec::new() };
+        real(&mut r.bins);
+        real(&mut r.homes);
+        r
+    }
+
+    /// How a cache a toolchain names (its `asked` key) is judged: as any folder, but for that cache's own places
+    /// (it's kept by the caches rule) — another toolchain's cache, or home, still refuses it; in a home only
+    /// where the pack gives that cache a place there.
+    pub fn but_cache(&self, asked: &str) -> RunsLater {
+        let (own, caches): (Vec<_>, Vec<_>) =
+            self.caches.iter().cloned().partition(|c| c.asked.as_deref() == Some(asked));
+        let own = own.into_iter().filter(|c| c.given).map(|c| c.at).collect();
+        RunsLater { caches, own, ..self.clone() }
+    }
+
+    /// Why folder `d` (real) is never written — None: not for this.
+    pub fn refuses(&self, d: &Path) -> Option<String> {
+        if let Some(b) = self.bins.iter().find(|b| b.starts_with(d) || d.starts_with(b)) {
+            let how = if d.starts_with(b) { "it's where" } else { "it holds where" };
+            return Some(format!("{how} programs you run are ({})", crate::allow::tilde(b)));
+        }
+        if let Some(c) = self.caches.iter().map(|c| &c.at).find(|c| c.starts_with(d) || d.starts_with(c)) {
+            let how = if d.starts_with(c) { "it's in" } else { "it holds" };
+            return Some(format!(
+                "{how} a toolchain's shared cache ({}) — written only with the network open",
+                crate::allow::tilde(c)
+            ));
+        }
+        let own = |h: &Path| self.own.iter().any(|o| o.starts_with(h) && o != h && d.starts_with(o));
+        let h = self.homes.iter().find(|h| h.starts_with(d) || (d.starts_with(h) && !own(h)))?;
+        let how = if *h == d {
+            "it's"
+        } else if h.starts_with(d) {
+            "it holds"
+        } else {
+            "it's in"
+        };
+        Some(format!("{how} a toolchain's home ({})", crate::allow::tilde(h)))
+    }
+}
+
+/// The folders on `PATH` as `here` says it (real paths, those that are there).
+pub fn path_dirs_in(here: &Here) -> Vec<PathBuf> {
+    let path = here.env.get("PATH");
+    path.map(|p| std::env::split_paths(p).filter_map(|d| std::fs::canonicalize(d).ok()).collect())
+        .unwrap_or_default()
 }
 
 /// A run's own temp folder. Unix sockets anywhere else stay out of reach: in `/private/tmp` and `$TMPDIR`
@@ -844,12 +993,24 @@ pub struct Blocked {
 
 pub const DENIALS_KEPT: usize = 10;
 
-/// Where a denied write is expected and harmless, so no report or panel names it: Go's telemetry counters —
-/// every go command (`go version` too) writes `…/go/telemetry/local/<…>.count` in home in its default
-/// `local` mode, and carries on silently when it can't. The mode is a file there (`go telemetry off` writes
-/// it); `GOTELEMETRY` is a read-only `go env` name, so no variable turns it off for a run — and opening home
-/// to it would let a run change the user's Go setting. Measured in P2: one denial in every Go run's report.
-const QUIET_WRITES: [&str; 1] = ["/Library/Application Support/go/telemetry/"];
+/// Where a denied write is expected and harmless, so no report or panel names it — the packs' `quiet-writes`
+/// (Go's telemetry counters) at their places for this home on this system (`vars`): macOS's `~/Library/
+/// Application Support/go/telemetry`, Linux's where `$XDG_CONFIG_HOME` puts it, else `~/.config/…`. Only
+/// there: the same tail anywhere else (a project's own `go/telemetry/`) is named as ever. As the variables say
+/// them — a place reached through a link isn't matched, and its denial is named.
+pub fn quiet_places(vars: &crate::sandboxpack::Vars) -> Vec<PathBuf> {
+    crate::sandboxpack::get().quiet_writes.iter().filter_map(|q| vars.place(q)).collect()
+}
+
+/// `quiet_places` for the process's home on this system, read once (variables only — no disk).
+fn quiet_writes() -> &'static [PathBuf] {
+    static AT: OnceLock<Vec<PathBuf>> = OnceLock::new();
+    AT.get_or_init(|| {
+        let var = |n: &str| std::env::var_os(n).filter(|v| !v.is_empty()).map(PathBuf::from);
+        let Some(home) = var("HOME").filter(|h| h.is_absolute()) else { return Vec::new() };
+        quiet_places(&crate::sandboxpack::Vars::new(crate::sandboxpack::get(), &home, &var, Os::HOST))
+    })
+}
 
 /// A shell's own startup files, right in home — closed with the rest of home on purpose (they hold tokens,
 /// and set what a command runs: a run is what its line says). zsh reads `~/.zshenv` for every `zsh -c` and
@@ -865,11 +1026,17 @@ fn shell_setup(d: &Denial, home: Option<&Path>) -> bool {
         && p.file_name().is_some_and(|n| SHELL_SETUP.iter().any(|s| n == *s))
 }
 
-/// Whether `d` is expected — Go's telemetry writes (`QUIET_WRITES`), a shell's startup files (`SHELL_SETUP`).
+/// Whether `d` is expected — the packs' quiet writes (`quiet_writes`), a shell's startup files
+/// (`SHELL_SETUP`).
 pub fn quiet(d: &Denial) -> bool {
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    ((d.op.starts_with("file-write") || d.op == EITHER) && QUIET_WRITES.iter().any(|w| d.target.contains(w)))
-        || shell_setup(d, home.as_deref())
+    quiet_in(d, home.as_deref(), quiet_writes())
+}
+
+/// `quiet` for `home`, its quiet writes at `places` (`quiet_places`).
+fn quiet_in(d: &Denial, home: Option<&Path>, places: &[PathBuf]) -> bool {
+    let write = d.op.starts_with("file-write") || d.op == EITHER;
+    (write && places.iter().any(|w| Path::new(&d.target).starts_with(w))) || shell_setup(d, home)
 }
 
 /// The report's calm line on what was kept apart: the shell's setup, not read — None for Go's telemetry
@@ -1184,15 +1351,18 @@ pub fn panel_line(
 ) -> Option<(String, Option<String>)> {
     let g = guard?;
     let b = g.watch().map(|w| w.blocked()).unwrap_or_default();
-    // (nothing denied yet: what the checkout's cargo config named and stays closed — #20)
+    // (nothing denied yet: what the checkout's build tool config named and stays closed — #20)
     let Some(first) = b.seen.first() else {
         let Guard::In(p) = g else { return None };
-        let (d, _) = p.refused.first()?;
-        let more = if p.refused.len() > 1 { format!("  +{}", p.refused.len() - 1) } else { String::new() };
-        return Some((
-            format!("sandbox kept {} closed — cargo's config named it{more}", crate::allow::tilde(d)),
-            None,
-        ));
+        let all = p.refused.len() + p.refused_asked.len();
+        let more = if all > 1 { format!("  +{}", all - 1) } else { String::new() };
+        if let Some((d, _)) = p.refused.first() {
+            let (d, by) = (crate::allow::tilde(d), &p.named_by);
+            return Some((format!("sandbox kept {d} closed — {by}'s config named it{more}"), None));
+        }
+        let (d, which) = p.refused_asked.first()?;
+        let (d, which) = (crate::allow::tilde(d), which.split(" — ").next().unwrap_or(which));
+        return Some((format!("sandbox kept {d} closed — {which} named it{more}"), None));
     };
     let more = if b.distinct > 1 { format!("  +{}", b.distinct - 1) } else { String::new() };
     let quiet = (running && last_output.elapsed() >= QUIET).then(|| {
@@ -1330,11 +1500,21 @@ pub fn protected_at(parts: &[&std::ffi::OsStr]) -> Vec<usize> {
     at
 }
 
-/// Folders of tools' output, where those names are what the tool writes: cmake's `Makefile`s and `cargo
-/// package`'s `Cargo.toml`s under `target/`, each package's `package.json` under `node_modules/`. What's
-/// there runs later anyway (build scripts, packages), so keeping the names closes nothing there — a name
-/// below one of these is let through (`.git/modules/target/hooks` isn't: the name comes first).
-const OUTPUTS: [&str; 2] = ["target", "node_modules"];
+/// Folders of tools' output (the built-in packs' `outputs`), where those names are what the tool writes:
+/// cmake's `Makefile`s and `cargo package`'s `Cargo.toml`s under `target/`, each package's `package.json`
+/// under `node_modules/`, a virtualenv's own. What's there runs later anyway (build scripts, packages), so
+/// keeping the names closes nothing there — a name below one of these is let through
+/// (`.git/modules/target/hooks` isn't: the name comes first).
+pub fn outputs() -> &'static [String] {
+    &crate::languages::get().outputs
+}
+
+/// A name as a Seatbelt regex, as it's written: `\.venv`.
+#[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
+fn as_written(name: &str) -> String {
+    let plain = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
+    name.chars().map(|c| if plain(c) { c.to_string() } else { format!("\\{c}") }).collect()
+}
 
 /// The longest run of names (`a|b|…`) in one regex of the profile. Seatbelt refuses a string literal past
 /// about a kilobyte — "Error reading string", exit 65 (measured: 1032 characters refused, 578 taken) — and
@@ -1373,12 +1553,12 @@ fn any_case(name: &str) -> String {
 }
 
 /// Whether the profile keeps `path` (real) from a run in the project at `root` by its name
-/// (`protected_names`, `OUTPUTS`) — the profile's rule, in Rust: the report names what it denied.
+/// (`protected_names`, `outputs`) — the profile's rule, in Rust: the report names what it denied.
 pub fn protected_in(root: &Path, path: &Path) -> bool {
     let Ok(rel) = path.strip_prefix(root) else { return false };
     let parts: Vec<&std::ffi::OsStr> = rel.iter().collect();
     let at = protected_at(&parts);
-    let output = parts.iter().position(|p| OUTPUTS.iter().any(|o| p == o));
+    let output = parts.iter().position(|p| outputs().iter().any(|o| *p == o.as_str()));
     !at.is_empty() && !output.is_some_and(|o| at.iter().any(|&i| i > o))
 }
 
@@ -1440,29 +1620,6 @@ pub const RISKY_PORTS: [(u16, &str); 10] = [
 /// 5000 0.4 s, 20000 don't compile).
 pub const PORTS_MAX: usize = 200;
 
-/// Cargo's shared caches in its home, kept while the network is closed (`Policy::caches`).
-const CARGO_CACHES: [&str; 2] = ["registry", "git"];
-
-/// The files in cargo's home a sandboxed cargo writes, the network closed or open: its locks, its
-/// last-use database (SQLite, with its journal or write-ahead log), and the tag that tells backup tools a
-/// cache is one — written again when it's gone (measured, cargo 1.99, 2026-10-04).
-const CARGO_FILES: [&str; 8] = [
-    ".package-cache",
-    ".package-cache-mutate",
-    ".global-cache",
-    ".global-cache-journal",
-    ".global-cache-wal",
-    ".global-cache-shm",
-    "registry/CACHEDIR.TAG",
-    "git/CACHEDIR.TAG",
-];
-
-/// The extended attribute cargo sets on `registry` and `git` at every run, so file sync (iCloud, File
-/// Provider) leaves them alone — the one write to the caches an offline build makes (measured, cargo 1.99,
-/// 2026-10-04): denied, the build goes on, but every run's report would carry it.
-#[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
-const CARGO_XATTR: &str = "com.apple.fileprovider.ignore#P";
-
 /// The keychain's servers: the only lookup `security find-generic-password` makes (measured) — the keychain
 /// files themselves are kept (`allow::SECRETS`).
 const KEYCHAIN: [&str; 2] = ["com.apple.SecurityServer", "com.apple.securityd"];
@@ -1523,7 +1680,7 @@ impl Policy {
         // root's own path (a checkout under `.claude/worktrees`) doesn't close the whole project
         let depth = self.root.components().filter(|c| matches!(c, Component::Normal(_))).count();
         let below = format!("^{}/(.*/)?", "/[^/]+".repeat(depth));
-        let outputs = OUTPUTS.join("|");
+        let outputs = outputs().iter().map(|o| as_written(o)).collect::<Vec<_>>().join("|");
         let (mut named, mut in_output) = (String::new(), String::new());
         for names in name_regexes() {
             named.push_str(&format!(" (regex #\"{below}({names})(/|$)\")"));
@@ -1544,11 +1701,20 @@ impl Policy {
         if !files.is_empty() {
             p.push_str(&format!("(allow file-write*{files})\n"));
         }
-        // …and the mark cargo puts on its caches at every run, on those folders themselves
-        let caches: String = (0..self.caches.len()).map(|i| format!(" (literal (param \"C{i}\"))")).collect();
-        if !caches.is_empty() {
+        // …and the mark cargo puts on its caches at every run, on its own folders themselves
+        let mut xattrs: Vec<(&str, String)> = Vec::new();
+        for c in &self.caches_said {
+            let Some(x) = c.xattr.as_deref() else { continue };
+            let at = (0..self.caches.len()).filter(|&i| c.dirs.contains(&self.caches[i]));
+            let at: String = at.map(|i| format!(" (literal (param \"C{i}\"))")).collect();
+            match xattrs.iter_mut().find(|(y, _)| *y == x) {
+                Some((_, all)) => all.push_str(&at),
+                None => xattrs.push((x, at)),
+            }
+        }
+        for (x, caches) in xattrs.iter().filter(|(_, c)| !c.is_empty()) {
             p.push_str(&format!(
-                "(allow file-write-xattr (require-all (require-any{caches}) (xattr \"{CARGO_XATTR}\")))\n"
+                "(allow file-write-xattr (require-all (require-any{caches}) (xattr \"{x}\")))\n"
             ));
         }
         p.push_str(&devices_rule());
@@ -1943,22 +2109,47 @@ impl Policy {
         if let Some(t) = &env.tmp {
             write.push(user_temp(t));
         }
-        // Cargo's caches: written as it downloads and unpacks — with the network closed, kept (`caches`)
-        let cargo_caches: Vec<PathBuf> =
-            env.cargo_home.iter().flat_map(|ch| CARGO_CACHES.map(|c| ch.join(c))).collect();
-        if env.network {
-            write.extend(cargo_caches.iter().cloned());
+        // The folders the packs' `ask` names: the tool's own — but never where nothing is written, a shared cache
+        // or a toolchain's home among it; its caches (Go's module cache) as the others, read — each judged but
+        // for its own places, which the caches rule keeps (another toolchain's cache or home still refuses it)
+        let mut refused_asked = Vec::new();
+        let home = env.home.as_deref();
+        let open = |d: &Path, which: &str, later: &RunsLater, refused: &mut Vec<(PathBuf, String)>| {
+            let verdict = ask_dir_verdict(d, &root, home, later);
+            verdict.map_err(|why| refused.push((d.to_path_buf(), format!("{which} — {why}")))).is_ok()
+        };
+        for (d, which) in &env.dirs {
+            if open(d, which, &env.runs_later, &mut refused_asked) {
+                write.push(d.clone());
+            }
         }
-        write.extend(env.dirs.iter().cloned());
-        // Cargo's folders as the checkout's config names them: only its own (#20)
+        let mut reads = env.reads.clone();
+        let mut caches_said = env.caches.clone();
+        for (key, which, c) in &env.asked_caches {
+            let but = env.runs_later.but_cache(key);
+            if c.dirs.iter().all(|d| open(d, which, &but, &mut refused_asked)) {
+                reads.allow.extend(
+                    c.dirs.iter().filter(|d| reads.home.as_ref().is_some_and(|h| d.starts_with(h))).cloned(),
+                );
+                caches_said.push(c.clone());
+            }
+        }
+        // The tools' caches: written as they download and unpack — with the network closed, kept (`caches`)
+        let caches: Vec<PathBuf> = caches_said.iter().flat_map(|c| c.dirs.iter().cloned()).collect();
+        if env.network {
+            write.extend(caches.iter().cloned());
+        }
+        // The tools' homes kept for the project's runs (Go's build cache)
+        write.extend(env.kept_homes.iter().map(|(_, h)| h.clone()));
+        // The folders the checkout's build tool names as its config says: only its own (#20)
         let mut refused = Vec::new();
-        for (d, which) in &env.cargo_dirs {
-            let (home, ch, own) = (env.home.as_deref(), env.cargo_home.as_deref(), env.own_build.as_deref());
-            match cargo_dir_verdict(d, &root, home, ch, own, env.tmp.as_deref()) {
+        for (d, which) in &env.asked {
+            let (home, own) = (env.home.as_deref(), env.own_build.as_deref());
+            match asked_dir_verdict(d, &root, home, &env.builder, own, env.tmp.as_deref()) {
                 Ok(true) => write.push(d.clone()),
                 Ok(false) => {}
                 Err(why) if !refused.iter().any(|(r, _)| r == d) => {
-                    refused.push((d.clone(), format!("cargo's {which} — {why}")))
+                    refused.push((d.clone(), format!("{}'s {which} — {why}", env.builder.who)))
                 }
                 Err(_) => {}
             }
@@ -1973,9 +2164,6 @@ impl Policy {
         // Never the project or what holds it (that would open .git again); inside it, the project's rule
         write.retain(|w| !root.starts_with(w) && !w.starts_with(&root));
         write.dedup();
-        let mut files: Vec<PathBuf> =
-            env.cargo_home.iter().flat_map(|ch| CARGO_FILES.map(|f| ch.join(f))).collect();
-        files.extend(env.gradle_locks.iter().cloned());
         let mut ports: Vec<u16> = env.ports.clone();
         ports.sort_unstable();
         ports.dedup();
@@ -1984,9 +2172,10 @@ impl Policy {
             root,
             protect,
             write,
-            files,
+            files: env.files.clone(),
             keep: mux_dirs(env),
-            caches: if env.network { Vec::new() } else { cargo_caches },
+            caches: if env.network { Vec::new() } else { caches },
+            caches_said: if env.network { Vec::new() } else { caches_said },
             network: env.network,
             ports,
             localhost: env.localhost,
@@ -1996,8 +2185,11 @@ impl Policy {
             granted: Vec::new(),
             sockets: Vec::new(),
             refused,
-            reads: env.reads.clone(),
-            gradle: Gradle { user: env.gradle.clone(), env: Vec::new() },
+            refused_asked,
+            named_by: env.builder.who.clone(),
+            reads,
+            env: Vec::new(),
+            run_homes: env.run_homes.clone(),
             #[cfg(target_os = "linux")]
             confine: None,
         }
@@ -2024,15 +2216,28 @@ pub struct Env {
     pub home: Option<PathBuf>,
     /// `$TMPDIR`, real.
     pub tmp: Option<PathBuf>,
-    /// `$CARGO_HOME` (or `~/.cargo`), real — when it exists.
-    pub cargo_home: Option<PathBuf>,
-    /// The toolchain's own folders (`toolchain_dirs`) — Go's caches; cargo's apart, below.
-    pub dirs: Vec<PathBuf>,
-    /// The folders cargo names for the checkout (real paths, which: `target-dir` · `build-dir`) — a cargo
-    /// config in the checkout sets them, so they open only as `cargo_dir_verdict` says (#20).
-    pub cargo_dirs: Vec<(PathBuf, &'static str)>,
-    /// This checkout's own per-checkout build dir: what cargo names with your own `build-dir` (`$CARGO_BUILD_
-    /// BUILD_DIR`, else cargo's home config) put over the checkout's — `cargo-home/build/xx/yyyy`.
+    /// The tools' shared caches (the packs' `caches`: their folders in their homes, real, when there).
+    pub caches: Vec<CachesSaid>,
+    /// Single files a run writes: the caches' own files, the packs' `write-files` (`sandboxpack::filled`).
+    pub files: Vec<PathBuf>,
+    /// The toolchain's own folders (`toolchain_dirs`) — what the packs' `ask` names for writing (real paths, as
+    /// said: `go's GOCACHE`), opened as `ask_dir_verdict` says; the build tool's apart.
+    pub dirs: Vec<(PathBuf, String)>,
+    /// The toolchain's shared caches it names (`ask`'s `caches` — Go's module cache): by key (`GOMODCACHE`), as
+    /// said (`go's GOMODCACHE`) and as the pack says them — kept as `caches` are, once `ask_dir_verdict` lets
+    /// them be.
+    pub asked_caches: Vec<(String, String, CachesSaid)>,
+    /// What no folder opened for writing is or holds (`ask_dir_verdict`).
+    pub runs_later: RunsLater,
+    /// The tools' homes kept across the project's runs (the packs' `run-home` with `keep` — `kept_home`): the
+    /// tool's name, the folder (real; made by the run that needs it).
+    pub kept_homes: Vec<(String, PathBuf)>,
+    /// The folders the checkout's build tool names (real paths, as said: `target-dir` · `build-dir`) — a config
+    /// in the checkout sets them, so they open only as `asked_dir_verdict` says (#20) — and the tool.
+    pub asked: Vec<(PathBuf, String)>,
+    pub builder: Builder,
+    /// This checkout's own per-checkout build dir: what the build tool names with your own setting (cargo's
+    /// `$CARGO_BUILD_BUILD_DIR`, else its home config) put over the checkout's — `cargo-home/build/xx/yyyy`.
     pub own_build: Option<PathBuf>,
     /// `llm.sandbox-write` · `-protect` · `-network` · `-ports` · `-localhost`.
     pub write: Vec<String>,
@@ -2046,10 +2251,8 @@ pub struct Env {
     pub uid: u32,
     /// Where it reads (`reads_for`; the default: reads not confined).
     pub reads: Reads,
-    /// The user's Gradle home (real, when it's there), and the lock files its wrapper writes beside each
-    /// distribution (`gradle_locks`).
-    pub gradle: Option<PathBuf>,
-    pub gradle_locks: Vec<PathBuf>,
+    /// The users' own homes of the tools that get one of the run's (`run_homes_said`).
+    pub run_homes: Vec<RunHomeSaid>,
 }
 
 /// A path as the profile writes it: the real path; for one that isn't there yet, its folder's real path
@@ -2130,59 +2333,143 @@ pub fn missing_why(stderr: &str) -> String {
 /// `env_for`, the toolchain's folders asked as for a run (blocks the first time: a worker's). For what tarae
 /// reads from places no run can write (`gitrepo::for_file_in`).
 pub fn write_places(root: &Path, llm: &crate::llm::LlmConfig) -> Vec<PathBuf> {
-    Policy::for_project(&env_for(root, llm, &[]).0).write_places()
+    Policy::for_project(&env_in(root, llm, &[], &Here::now()).0).write_places()
 }
 
 /// What the policy for the project at `root` is made from (`policy`, `write_places`): these settings, the
 /// places in home the user let Claude read (`reads`, real), the toolchain's folders found (asked inside the
-/// sandbox they're for — blocks). With cargo's configs above the project (`tokens.rs` reads them).
-fn env_for(root: &Path, llm: &crate::llm::LlmConfig, reads: &[PathBuf]) -> (Env, Vec<PathBuf>) {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let vars = HomeVars::here();
-    let cargo_home = cargo_home_of(home.as_deref(), &vars);
-    let tmp = std::fs::canonicalize(std::env::temp_dir()).ok();
+/// sandbox they're for — blocks), what `here` says. With cargo's configs above the project (`tokens.rs` reads
+/// them).
+pub(crate) fn env_in(
+    root: &Path,
+    llm: &crate::llm::LlmConfig,
+    reads: &[PathBuf],
+    here: &Here,
+) -> (Env, Vec<PathBuf>) {
+    let home = here.path("HOME");
+    let tmp = here.tmp.clone();
     let real_home = home.as_deref().and_then(|h| std::fs::canonicalize(h).ok());
-    // (the repository's other checkouts — never home or above it, nor where keys are; cargo's configs above)
+    let vars = real_home.as_deref().map(|h| vars_in(h, here));
+    let (caches, files) = vars.as_ref().map(caches_and_files).unwrap_or_default();
+    let asks = asks_for(root, real_home.as_deref(), here);
+    // (the repository's other checkouts — never home or above it, nor where keys are; configs above)
     let mut also: Vec<PathBuf> = crate::allow::checkouts(root)
         .into_iter()
         .filter(|c| crate::allow::keepable(c, real_home.as_deref()))
         .chain(reads.iter().cloned())
         .collect();
-    let above: Vec<PathBuf> =
-        real_home.iter().flat_map(|h| cargo_configs_above(&profile_path(root), h)).collect();
+    let above: Vec<PathBuf> = real_home.iter().flat_map(|h| reads_above(&profile_path(root), h)).collect();
     also.extend(above.iter().cloned());
-    let gradle = real_home.as_deref().map(|h| gradle_home_of(h, &vars)).filter(|g| g.is_dir());
+    let reads = real_home.as_deref().zip(vars.as_ref()).map(|(h, v)| reads_for(h, &also, v));
+    let runs_later =
+        real_home.as_deref().zip(vars.as_ref()).map(|(h, v)| RunsLater::new(h, v, &path_dirs_in(here)));
     let mut env = Env {
-        gradle_locks: gradle.as_deref().map(gradle_locks).unwrap_or_default(),
-        gradle,
-        reads: real_home.as_ref().map(|h| reads_for(h, &also, &vars)).unwrap_or_default(),
+        asked_caches: Vec::new(),
+        runs_later: runs_later.unwrap_or_default(),
+        kept_homes: kept_homes(root, real_home.as_deref(), here),
+        run_homes: vars.as_ref().map(run_homes_said).unwrap_or_default(),
+        reads: reads.unwrap_or_default(),
         root: profile_path(root),
         home,
         tmp,
-        cargo_home,
+        caches,
+        files,
         dirs: Vec::new(),
-        cargo_dirs: Vec::new(),
+        asked: Vec::new(),
+        builder: asks.builder.clone(),
         own_build: None,
         write: llm.sandbox_write.clone(),
         protect: llm.sandbox_protect.clone(),
         network: llm.sandbox_network,
         ports: llm.sandbox_ports.clone(),
         localhost: llm.sandbox_localhost,
-        tmux_tmpdir: std::env::var_os("TMUX_TMPDIR").filter(|v| !v.is_empty()).map(PathBuf::from),
-        zellij_dir: std::env::var_os("ZELLIJ_SOCKET_DIR").filter(|v| !v.is_empty()).map(PathBuf::from),
-        // SAFETY: getuid has no preconditions and can't fail.
-        uid: unsafe { libc::getuid() },
+        tmux_tmpdir: here.path("TMUX_TMPDIR"),
+        zellij_dir: here.path("ZELLIJ_SOCKET_DIR"),
+        uid: here.uid,
     };
     // The toolchain is asked inside the sandbox it's for (it reads only)
-    let found = toolchain_dirs(&Policy::for_project(&env), env.cargo_home.as_deref());
-    (env.dirs, env.cargo_dirs, env.own_build) = (found.other, found.cargo, found.own_build);
+    let found = toolchain_dirs(&Policy::for_project(&env), &asks);
+    (env.dirs, env.asked, env.own_build) = (found.other, found.named, found.own_build);
+    // Its caches, as the packs say them; what it names that no run reads — in home, not home itself nor what
+    // holds the project
+    let packs = &crate::sandboxpack::get().caches;
+    for (d, key, which) in found.caches {
+        if let Some(c) = packs.iter().find(|c| c.asked.as_ref() == Some(&key)) {
+            env.asked_caches.push((key, which, caches_in(c, &d).0));
+        }
+    }
+    if let Some(h) = &env.reads.home {
+        let keep = found.kept.into_iter().filter(|d| d.starts_with(h) && d != h && !env.root.starts_with(d));
+        env.reads.kept.extend(keep);
+        env.reads.kept.sort();
+        env.reads.kept.dedup();
+    }
     (env, above)
+}
+
+/// The tools' homes kept across the project's runs (`run-home`s with `keep`, in a project with one of their
+/// `when`): in tarae's cache folder (`$XDG_CACHE_HOME`, else `~/.cache` — as `here` says), `run-homes/<name>/
+/// <the project's key>` — the key, the project's real path's. Not made here (a run makes its own).
+fn kept_homes(root: &Path, home: Option<&Path>, here: &Here) -> Vec<(String, PathBuf)> {
+    let homes = crate::sandboxpack::get().run_homes.iter();
+    let kept =
+        homes.filter(|h| h.keep && (h.when.is_empty() || h.when.iter().any(|f| root.join(f).exists())));
+    let xdg = here.path("XDG_CACHE_HOME").filter(|p| p.is_absolute()).map(PathBuf::into_os_string);
+    let cache = crate::runtime::cache_dir_of(xdg, home.map(|h| h.as_os_str().to_owned()));
+    let Some(cache) = cache.map(|c| profile_path(&c.join("run-homes"))) else { return Vec::new() };
+    let key = project_key(root);
+    kept.map(|h| (h.name.clone(), cache.join(&h.name).join(&key))).collect()
+}
+
+/// A project's key among the kept homes: its real path's (sha256, 16 hex).
+pub(crate) fn project_key(root: &Path) -> String {
+    crate::sha256::hex(profile_path(root).as_os_str().as_encoded_bytes())[..16].to_string()
+}
+
+/// The tools' shared caches in their homes (real, when there) as the packs say them — with the attribute each
+/// tool sets on them — and the single files a run writes (the caches' own, then the packs' `write-files`
+/// filled with the folders that are there — blocks). (Those the toolchain names come with its answer.)
+fn caches_and_files(vars: &crate::sandboxpack::Vars) -> (Vec<CachesSaid>, Vec<PathBuf>) {
+    let t = crate::sandboxpack::get();
+    let (mut caches, mut files) = (Vec::new(), Vec::new());
+    for c in t.caches.iter().filter(|c| c.asked.is_none()) {
+        let Some(home) = vars.home_of(&c.home).and_then(|(at, _)| std::fs::canonicalize(at).ok()) else {
+            continue;
+        };
+        let (said, own) = caches_in(c, &home);
+        caches.push(said);
+        files.extend(own);
+    }
+    for w in &t.write_files {
+        files
+            .extend(vars.place(w).map(|p| crate::sandboxpack::filled(&profile_path(&p))).unwrap_or_default());
+    }
+    (caches, files)
+}
+
+/// A tool's caches in its `home` (or the folder its toolchain named, `asked`): how they're said, and their
+/// own files.
+fn caches_in(c: &crate::sandboxpack::Caches, home: &Path) -> (CachesSaid, Vec<PathBuf>) {
+    let dirs = match c.asked {
+        Some(_) => vec![home.to_path_buf()],
+        None => c.dirs.iter().map(|d| home.join(d)).collect(),
+    };
+    let files = c.files.iter().map(|f| home.join(f)).collect();
+    (CachesSaid { dirs, rule: c.rule.clone(), said: c.said.clone(), xattr: c.xattr.clone() }, files)
 }
 
 /// The policy for the project at `root` with these settings and the places in home the user let Claude read
 /// (`reads`, real) — the toolchain's folders found (blocks).
 pub fn policy(root: &Path, llm: &crate::llm::LlmConfig, reads: &[PathBuf]) -> Policy {
-    let (mut env, above) = env_for(root, llm, reads);
+    let p = policy_in(root, llm, reads, &Here::now());
+    #[cfg(target_os = "linux")]
+    let p = confined(p);
+    p
+}
+
+/// `policy` with what `here` says — its Landlock rules not made yet (`confined`).
+pub(crate) fn policy_in(root: &Path, llm: &crate::llm::LlmConfig, reads: &[PathBuf], here: &Here) -> Policy {
+    let (mut env, above) = env_in(root, llm, reads, here);
     let real_home = env.home.as_deref().and_then(|h| std::fs::canonicalize(h).ok());
     // (no folder of its own: no sockets but the project's, `TMPDIR` as it was, and no tag to watch by)
     let run = RunDir::new().ok();
@@ -2190,20 +2477,43 @@ pub fn policy(root: &Path, llm: &crate::llm::LlmConfig, reads: &[PathBuf]) -> Po
     // Settings that hold a token: copies without it in the run's folder (`tokens.rs`) — while reads are
     // confined; what the user let Claude read stays readable
     if let Some(h) = &real_home {
-        let sources = crate::tokens::sources(h, &crate::tokens::env_var);
+        let sources = crate::tokens::sources_on(h, &|name| here.var(name), here.os);
         let dir = run.as_ref().map(|r| r.path());
         env.reads.copies = crate::tokens::copies(&sources, dir, h, reads, &env.reads.kept);
-        env.reads.copies.cargo = crate::tokens::cargo_holders(env.cargo_home.as_deref(), &above);
+        env.reads.copies.told = crate::tokens::told_holders(&vars_in(h, here), &above);
     }
-    let opts = std::env::var("GRADLE_OPTS").ok();
-    let gradle = Gradle {
-        env: run.as_ref().map(|r| gradle_run_home(r.path(), env.gradle.as_deref(), opts)).unwrap_or_default(),
-        user: env.gradle.clone(),
+    // The run's own homes for the tools, and the packs' variables (`{run}`: its folder)
+    let vars = real_home.as_deref().map(|h| crate::sandboxpack::Vars {
+        run: run.as_ref().map(|r| r.path().to_path_buf()),
+        ..vars_in(h, here)
+    });
+    let made =
+        run.as_ref().zip(vars.as_ref()).map(|(r, v)| run_homes_made(r.path(), v, here, &env.kept_homes));
+    let mut vars_env = made.unwrap_or_default();
+    vars_env.extend(vars.as_ref().map(packs_env).unwrap_or_default());
+    Policy { run, tag, env: vars_env, ..Policy::for_project(&env) }
+}
+
+/// The packs' `env` for a run, its places filled in (`vars` knows the run's folder): one naming a place that
+/// isn't known (`{run}` without a run) is left out.
+fn packs_env(vars: &crate::sandboxpack::Vars) -> Vec<(String, String)> {
+    let filled = |v: &str| match v.starts_with('{') || v.starts_with("~/") {
+        true => vars.place(v).map(|p| p.display().to_string()),
+        false => Some(v.to_string()),
     };
-    let p = Policy { run, tag, gradle, ..Policy::for_project(&env) };
-    #[cfg(target_os = "linux")]
-    let p = confined(p);
-    p
+    let env = &crate::sandboxpack::get().env;
+    env.iter().filter_map(|(k, v)| Some((k.clone(), filled(v)?))).collect()
+}
+
+/// The tools that get a home of the run's own, with the user's own home of each that's there (real).
+fn run_homes_said(vars: &crate::sandboxpack::Vars) -> Vec<RunHomeSaid> {
+    let homes = crate::sandboxpack::get().run_homes.iter();
+    homes
+        .filter_map(|h| {
+            let user = vars.home_of(&h.name).map(|(at, _)| profile_path(at)).filter(|u| u.is_dir())?;
+            Some(RunHomeSaid { name: h.name.clone(), user, said: h.said.clone() })
+        })
+        .collect()
 }
 
 /// Linux: `p` with its Landlock rules made (`linux::confine` — it walks the project for protected names, and
@@ -2216,61 +2526,249 @@ pub fn confined(mut p: Policy) -> Policy {
     p
 }
 
-/// The lock file Gradle's wrapper takes beside each distribution it unpacked in the user's Gradle home
-/// (`wrapper/dists/<name>/<hash>/<name>.zip.lck`) — every run, though the distribution is there (measured:
-/// denied, `./gradlew` fails). The only writes a run makes in the user's Gradle home. Blocks (a worker's).
-fn gradle_locks(user: &Path) -> Vec<PathBuf> {
-    let dirs = |d: &Path| -> Vec<PathBuf> {
-        let entries = std::fs::read_dir(d).into_iter().flatten().flatten();
-        entries.map(|e| e.path()).filter(|p| p.is_dir()).collect()
-    };
-    let mut out = Vec::new();
-    for dist in dirs(&user.join("wrapper/dists")) {
-        let Some(name) = dist.file_name().map(|n| n.to_string_lossy().into_owned()) else { continue };
-        out.extend(dirs(&dist).into_iter().map(|h| h.join(format!("{name}.zip.lck"))));
-    }
-    out.sort();
-    out
-}
-
-/// A run's own Gradle home, made in its folder `run`: the environment that points Gradle there. The user's
-/// (`user`) holds what their own builds run later — compiled build scripts, the wrapper's distributions, the
-/// dependencies — and the registry of their daemons, so a run never writes there, nor reads that registry
-/// (measured: a sandboxed build that found it ran in a daemon started outside). In the run's own: the
-/// wrapper's distributions linked from the user's (read; only their lock files written — `gradle_locks`),
-/// the user's downloaded dependencies read in place (`GRADLE_RO_DEP_CACHE`), and no daemon kept after the
-/// build (`org.gradle.daemon=false`, after the user's `GRADLE_OPTS`): it would live on past the run, inside
-/// its sandbox, for nobody. Gone with the run's folder — a small build took 4.5 s from nothing, 3.7 s again
-/// (measured). Blocks (a worker's).
-fn gradle_run_home(run: &Path, user: Option<&Path>, opts: Option<String>) -> Vec<(String, String)> {
-    let home = run.join("gradle");
-    let _ = std::fs::create_dir_all(home.join("wrapper"));
-    let mut env = vec![("GRADLE_USER_HOME".to_string(), home.display().to_string())];
-    if let Some(user) = user {
-        let dists = user.join("wrapper/dists");
-        if dists.is_dir() {
-            let _ = std::os::unix::fs::symlink(&dists, home.join("wrapper/dists"));
+/// The run's own homes for the tools (the packs' `run-home` — Gradle's: the user's holds what their own builds
+/// run later and their daemons' registry; Go's build cache), made in its folder `run` — or the one `kept` for
+/// the project (only tarae's: 0700) — the folders each says, links from it into the user's places that are
+/// there (read only — what a run writes there is the packs' `write-files`), and the environment that points
+/// the tool there — its variable, what's set (when its `if` place is there), what's appended to the user's own
+/// value (`here`'s). Gone with the run's folder, but a kept one. What's made in a home goes through no link
+/// (`Unlinked`): a kept one is a folder earlier runs wrote in, and tarae isn't sandboxed. Blocks (a worker's).
+fn run_homes_made(
+    run: &Path,
+    vars: &crate::sandboxpack::Vars,
+    here: &Here,
+    kept: &[(String, PathBuf)],
+) -> Vec<(String, String)> {
+    let at = |p: &str| vars.place(p).map(|p| profile_path(&p));
+    let mut env = Vec::new();
+    for h in &crate::sandboxpack::get().run_homes {
+        let kept = kept.iter().find(|(name, _)| *name == h.name).map(|(_, home)| home);
+        // (no kept one, or one that's a link: the run's own, as before)
+        let made = kept.and_then(|k| Some((k.clone(), Unlinked::made(k).ok()?)));
+        let (home, dir) = match made {
+            Some((home, dir)) => (home, Ok(dir)),
+            None => (run.join(&h.name), Unlinked::made(&run.join(&h.name))),
+        };
+        env.push((h.env.clone(), home.display().to_string()));
+        let mut said = Vec::new();
+        match &dir {
+            Ok(dir) => {
+                for m in &h.make {
+                    if let Err(e) = dir.folder(Path::new(m), &mut said) {
+                        said.push(e);
+                    }
+                }
+                for (inside, to) in &h.link {
+                    if let Some(to) = at(to).filter(|t| t.is_dir())
+                        && let Err(e) = dir.link(Path::new(inside), &to, &mut said)
+                    {
+                        said.push(e);
+                    }
+                }
+            }
+            Err(e) => said.push(e.clone()),
         }
-        if user.join("caches/modules-2").is_dir() {
-            env.push(("GRADLE_RO_DEP_CACHE".into(), user.join("caches").display().to_string()));
+        for s in said {
+            crate::log::line("tarae", "warning", &format!("a run's {} home: {s}", h.name));
+        }
+        for (var, value, when) in &h.set {
+            if when.as_deref().is_none_or(|w| at(w).is_some_and(|w| w.exists()))
+                && let Some(value) = at(value)
+            {
+                env.push((var.clone(), value.display().to_string()));
+            }
+        }
+        for (var, more) in &h.append {
+            let theirs = here.var(var);
+            let value = match theirs.as_deref().map(str::trim).filter(|o| !o.is_empty()) {
+                Some(o) => format!("{o} {more}"),
+                None => more.clone(),
+            };
+            env.push((var.clone(), value));
         }
     }
-    let no_daemon = "-Dorg.gradle.daemon=false";
-    let opts = match opts.as_deref().map(str::trim).filter(|o| !o.is_empty()) {
-        Some(o) => format!("{o} {no_daemon}"),
-        None => no_daemon.into(),
-    };
-    env.push(("GRADLE_OPTS".into(), opts));
     env
 }
 
-/// What the project's toolchain names: Go's caches (`other`), cargo's target and build dirs (`cargo`, real
-/// paths, which), and this checkout's own per-checkout build dir (`own_build` — `Env`'s).
+/// A run home's folder, opened through no link — what's made in it goes from it a step at a time, each
+/// folder opened from the one before without following a link (`O_NOFOLLOW`), so a link a run left there, or
+/// swaps in while another run is under way, is never gone through. A link in the way is removed (said); a file
+/// or folder where a link goes is left as it is (Err).
+struct Unlinked {
+    fd: std::os::fd::OwnedFd,
+    at: PathBuf,
+}
+
+impl Unlinked {
+    /// Folder `home` (absolute), made where it isn't (0700, its parents as they come — tarae's own folders),
+    /// opened — Err when it's a link or no folder.
+    fn made(home: &Path) -> Result<Unlinked, String> {
+        use std::os::unix::fs::DirBuilderExt;
+        let said = |e: io::Error| format!("{}: {e}", home.display());
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(home).map_err(said)?;
+        let c = c_name(home.as_os_str())?;
+        let at = home.to_path_buf();
+        Ok(Unlinked { fd: open_dir_at(libc::AT_FDCWD, &c).map_err(said)?, at })
+    }
+
+    /// Folder `rel` (plain names) in it, made where it isn't — each step through no link (`gone`: links
+    /// removed on the way).
+    fn folder(&self, rel: &Path, gone: &mut Vec<String>) -> Result<Unlinked, String> {
+        let mut parts = rel.iter();
+        let first = parts.next().ok_or("no folder named")?;
+        let mut dir = self.step(first, gone)?;
+        for p in parts {
+            dir = dir.step(p, gone)?;
+        }
+        Ok(dir)
+    }
+
+    /// One folder in it, made where it isn't (0700) and opened — a link there removed and the folder made.
+    fn step(&self, name: &std::ffi::OsStr, gone: &mut Vec<String>) -> Result<Unlinked, String> {
+        let c = c_name(name)?;
+        let at = self.at.join(name);
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&self.fd);
+        for _ in 0..2 {
+            // SAFETY: a folder descriptor of ours and a name, live for the call (one there already: EEXIST).
+            unsafe { libc::mkdirat(fd, c.as_ptr(), 0o700) };
+            match open_dir_at(fd, &c) {
+                Ok(fd) => return Ok(Unlinked { fd, at }),
+                Err(_) if self.unlinked(&c, &at, gone) => {}
+                Err(e) => return Err(format!("{}: {e} (no folder there)", at.display())),
+            }
+        }
+        Err(format!("{}: a link came back", at.display()))
+    }
+
+    /// A link `rel` (plain names) in it to `to` — its folders made through no link; one there already to `to`
+    /// kept, to elsewhere removed first.
+    fn link(&self, rel: &Path, to: &Path, gone: &mut Vec<String>) -> Result<(), String> {
+        let name = rel.file_name().ok_or("no link named")?;
+        let dir = match rel.parent().filter(|p| !p.as_os_str().is_empty()) {
+            Some(p) => self.folder(p, gone)?,
+            None => Unlinked { fd: self.fd.try_clone().map_err(|e| e.to_string())?, at: self.at.clone() },
+        };
+        let (c, target) = (c_name(name)?, c_name(to.as_os_str())?);
+        let at = dir.at.join(name);
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&dir.fd);
+        for _ in 0..2 {
+            // SAFETY: a folder descriptor of ours and two names, live for the call.
+            if unsafe { libc::symlinkat(target.as_ptr(), fd, c.as_ptr()) } == 0 {
+                return Ok(());
+            }
+            let e = io::Error::last_os_error();
+            if e.raw_os_error() != Some(libc::EEXIST) {
+                return Err(format!("{}: {e}", at.display()));
+            }
+            if link_target(fd, &c).is_some_and(|t| t == to.as_os_str()) {
+                return Ok(());
+            }
+            if !dir.unlinked(&c, &at, gone) {
+                return Err(format!("{}: not a link, where the link goes — left as it is", at.display()));
+            }
+        }
+        Err(format!("{}: a link came back", at.display()))
+    }
+
+    /// Whether `c` in it was a link, now removed (said in `gone`).
+    fn unlinked(&self, c: &std::ffi::CStr, at: &Path, gone: &mut Vec<String>) -> bool {
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&self.fd);
+        // SAFETY: a folder descriptor of ours and a name, live for the call.
+        let removed = link_target(fd, c).is_some() && unsafe { libc::unlinkat(fd, c.as_ptr(), 0) } == 0;
+        if removed {
+            gone.push(format!("{}: a link there, removed", at.display()));
+        }
+        removed
+    }
+}
+
+/// `name` as C wants it.
+fn c_name(name: &std::ffi::OsStr) -> Result<std::ffi::CString, String> {
+    std::ffi::CString::new(name.as_encoded_bytes()).map_err(|_| format!("{name:?}: a NUL in it"))
+}
+
+/// Folder `c` in `fd` (or `AT_FDCWD`) opened — Err when it's a link (`O_NOFOLLOW`) or no folder.
+fn open_dir_at(fd: libc::c_int, c: &std::ffi::CStr) -> io::Result<std::os::fd::OwnedFd> {
+    let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    // SAFETY: a folder descriptor of ours (or the cwd's) and a name, live for the call.
+    let got = unsafe { libc::openat(fd, c.as_ptr(), flags) };
+    if got < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: just made, ours.
+    Ok(unsafe { std::os::fd::FromRawFd::from_raw_fd(got) })
+}
+
+/// Where link `c` in `fd` points — None: no link there.
+fn link_target(fd: libc::c_int, c: &std::ffi::CStr) -> Option<std::ffi::OsString> {
+    let mut buf = vec![0u8; libc::PATH_MAX as usize];
+    // SAFETY: a folder descriptor of ours, a name and a buffer of its length, live for the call.
+    let n = unsafe { libc::readlinkat(fd, c.as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
+    let n = usize::try_from(n).ok()?;
+    buf.truncate(n);
+    Some(std::os::unix::ffi::OsStringExt::from_vec(buf))
+}
+
+/// What the project's toolchain names: what the packs' `ask` gives — folders written (`other`), its shared
+/// caches (`caches`: with their key, as said — Go's module cache), what no run reads (`kept` — the user's Go
+/// build cache) — the checkout's build tool's target and build dirs (`named`, real paths, as said — cargo's),
+/// and this checkout's own per-checkout build dir (`own_build` — `Env`'s).
 #[derive(Clone, Debug, Default)]
 pub struct ToolDirs {
-    pub other: Vec<PathBuf>,
-    pub cargo: Vec<(PathBuf, &'static str)>,
+    pub other: Vec<(PathBuf, String)>,
+    pub caches: Vec<(PathBuf, String, String)>,
+    pub kept: Vec<PathBuf>,
+    pub named: Vec<(PathBuf, String)>,
     pub own_build: Option<PathBuf>,
+}
+
+/// What the project is asked where it writes outside it, and how the answers are judged: the checkout's
+/// build tool (the first built-in `[builds]` whose `when` it has), the packs' `ask` whose `when` it has, and
+/// the files that set what they answer (their times keep the answer — `toolchain_dirs`).
+struct Asks {
+    tool: Option<crate::builds::Tool>,
+    builder: Builder,
+    /// How the tool's answer's fields are said (`builds-said`: target, build).
+    said: [String; 2],
+    /// Your own build-folder setting: the variable that puts it over the checkout's, its value.
+    own: Option<(String, String)>,
+    others: Vec<crate::sandboxpack::Ask>,
+    /// What they're asked with: the packs' `env` a run gets (but what names its own folder) — Go's
+    /// `GOTOOLCHAIN=local`.
+    env: Vec<(String, String)>,
+    set_by: Vec<PathBuf>,
+}
+
+/// What the project at `root` (`home`: real) is asked, with what `here` says.
+fn asks_for(root: &Path, home: Option<&Path>, here: &Here) -> Asks {
+    let t = crate::sandboxpack::get();
+    let has = |when: &[String]| when.iter().any(|f| root.join(f).is_file());
+    let entries = crate::builds::Builds::of(crate::packs::builtin_manifests());
+    let (pack, tool) = match entries.into_iter().find(|(_, when, _)| has(when)) {
+        Some((pack, _, Ok(tool))) => (pack, Some(tool)),
+        _ => (String::new(), None),
+    };
+    let said = t.builds_said.iter().find(|s| s.pack == pack);
+    let tool_home = tool.as_ref().and_then(|t| t.home_in(&|n| here.path(n), home));
+    let tool_home = tool_home.and_then(|h| std::fs::canonicalize(h).ok());
+    let builder = Builder {
+        who: said.map_or_else(
+            || tool.as_ref().map(|t| t.name.to_lowercase()).unwrap_or_default(),
+            |s| s.who.clone(),
+        ),
+        home: tool_home.clone(),
+        own_under: tool.as_ref().and_then(|t| t.own_under()).map(|(u, d)| (u.to_path_buf(), d)),
+    };
+    let fields =
+        tool.as_ref().map(|t| t.asked()).map(|(_, t, b)| [t.to_string(), b.unwrap_or(t).to_string()]);
+    let said = said.map(|s| [s.target.clone(), s.build.clone()]).or(fields).unwrap_or_default();
+    let var = |n: &str| here.var(n).filter(|v| !v.is_empty());
+    let own = tool.as_ref().and_then(|t| t.own_setting(&var, tool_home.as_deref()));
+    let others: Vec<crate::sandboxpack::Ask> = t.ask.iter().filter(|a| has(&a.when)).cloned().collect();
+    let mut set_by = tool.as_ref().map(|t| t.set_by(root, tool_home.as_deref())).unwrap_or_default();
+    set_by.extend(others.iter().flat_map(|a| a.when.iter().map(|f| root.join(f))));
+    let env = home.map(|h| packs_env(&vars_in(h, here))).unwrap_or_default();
+    Asks { tool, builder, said, own, others, env, set_by }
 }
 
 /// What `toolchain_dirs` found per project (real path): the stamps of the files that set them, the folders.
@@ -2278,7 +2776,8 @@ type Seen = HashMap<PathBuf, (Vec<Option<SystemTime>>, ToolDirs)>;
 static SEEN: OnceLock<Mutex<Seen>> = OnceLock::new();
 
 /// The project's toolchain folders outside it as last found for a run of Claude's (`toolchain_dirs`) — only
-/// those its runs may write (`cargo_dir_verdict`); nothing looked up: none before its first run.
+/// those its runs may write (`asked_dir_verdict`, `ask_dir_verdict`; a shared cache too, which they read);
+/// nothing looked up: none before its first run.
 pub fn build_dirs(root: &Path) -> Vec<PathBuf> {
     let root = profile_path(root);
     let Some(found) =
@@ -2286,52 +2785,29 @@ pub fn build_dirs(root: &Path) -> Vec<PathBuf> {
     else {
         return Vec::new();
     };
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let cargo_home = cargo_home_of(home.as_deref(), &HomeVars::here());
-    let tmp = std::fs::canonicalize(std::env::temp_dir()).ok();
-    let open = |d: &Path| {
-        cargo_dir_verdict(
-            d,
-            &root,
-            home.as_deref(),
-            cargo_home.as_deref(),
-            found.own_build.as_deref(),
-            tmp.as_deref(),
-        )
-        .is_ok()
-    };
-    let cargo = found.cargo.iter().map(|(d, _)| d).filter(|d| open(d));
-    found.other.iter().chain(cargo).filter(|d| !d.starts_with(&root)).cloned().collect()
+    let here = Here::now();
+    let home = here.path("HOME");
+    let tool = asks_for(&root, home.as_deref(), &here).builder;
+    let (own, tmp) = (found.own_build.as_deref(), here.tmp.as_deref());
+    let open = |d: &Path| asked_dir_verdict(d, &root, home.as_deref(), &tool, own, tmp).is_ok();
+    let named = found.named.iter().map(|(d, _)| d).filter(|d| open(d));
+    let real_home = home.as_deref().and_then(|h| std::fs::canonicalize(h).ok());
+    let later = real_home.as_deref().map(|h| RunsLater::new(h, &vars_in(h, &here), &path_dirs_in(&here)));
+    let later = later.unwrap_or_default();
+    let open = |d: &&PathBuf, later: &RunsLater| ask_dir_verdict(d, &root, home.as_deref(), later).is_ok();
+    let written = found.other.iter().map(|(d, _)| d).filter(|d| open(d, &later));
+    let caches = found.caches.iter().filter(|(d, key, _)| open(&d, &later.but_cache(key))).map(|(d, ..)| d);
+    let other = written.chain(caches);
+    other.chain(named).filter(|d| !d.starts_with(&root)).cloned().collect()
 }
 
-/// `$CARGO_HOME` (else `~/.cargo`), real — when it exists.
-fn cargo_home_of(home: Option<&Path>, vars: &HomeVars) -> Option<PathBuf> {
-    vars.cargo_home
-        .clone()
-        .or_else(|| home.map(|h| h.join(".cargo")))
-        .and_then(|p| std::fs::canonicalize(p).ok())
-}
-
-/// Your own `build.build-dir` — `$CARGO_BUILD_BUILD_DIR`, else cargo's home config's — never the
-/// checkout's: what its per-checkout build dir is worked out from (#20).
-fn own_build_setting(cargo_home: Option<&Path>, var: Option<String>) -> Option<String> {
-    if let Some(v) = var.filter(|v| !v.is_empty()) {
-        return Some(v);
-    }
-    ["config.toml", "config"].iter().find_map(|f| {
-        let text = std::fs::read_to_string(cargo_home?.join(f)).ok()?;
-        let v: toml::Value = toml::from_str(&text).ok()?;
-        v.get("build")?.get("build-dir")?.as_str().map(str::to_string)
-    })
-}
-
-/// Folders the project's toolchain writes outside it: cargo's target and build dirs (`cargo metadata` —
-/// they can be anywhere: `CARGO_TARGET_DIR`, `build.build-dir` in a cargo config), Go's caches — and the
-/// build dir cargo names with your own setting put over the checkout's (`ToolDirs::own_build`). Kept per
-/// project until a file that sets them changes.
-fn toolchain_dirs(base: &Policy, cargo_home: Option<&Path>) -> ToolDirs {
+/// Folders the project's toolchain writes outside it: the checkout's build tool's target and build dirs
+/// (cargo's `cargo metadata` — they can be anywhere: `CARGO_TARGET_DIR`, `build.build-dir` in a cargo config)
+/// and what the packs' `ask` names (Go's caches) — and the build dir the tool names with your own setting put
+/// over the checkout's (`ToolDirs::own_build`). Kept per project until a file that sets them changes.
+fn toolchain_dirs(base: &Policy, asks: &Asks) -> ToolDirs {
     let root = &base.root;
-    let stamp = toolchain_stamp(root, cargo_home);
+    let stamp = stamp_of(&asks.set_by);
     let seen = SEEN.get_or_init(Default::default);
     if let Some((s, dirs)) = seen.lock().ok().and_then(|m| m.get(root).cloned())
         && s == stamp
@@ -2339,29 +2815,39 @@ fn toolchain_dirs(base: &Policy, cargo_home: Option<&Path>) -> ToolDirs {
         return dirs;
     }
     let mut dirs = ToolDirs::default();
-    let metadata = ["metadata", "--no-deps", "--offline", "--format-version", "1"];
-    if root.join("Cargo.toml").is_file()
-        && let Some(json) = output_in(base, "cargo", &metadata, &[])
-    {
-        for (key, which) in [("target_directory", "target-dir"), ("build_directory", "build-dir")] {
-            if let Some(d) = json[key].as_str() {
-                dirs.cargo.push((profile_path(Path::new(d)), which));
+    let json_of = |run: &[String], env: &[(&str, &str)]| {
+        let args: Vec<&str> = run.iter().skip(1).map(String::as_str).collect();
+        output_in(base, run.first()?, &args, env)
+    };
+    if let Some(tool) = &asks.tool {
+        let (run, target, build) = tool.asked();
+        if let Some(json) = json_of(run, &[]) {
+            for (key, said) in [Some(target), build].into_iter().zip(&asks.said) {
+                if let Some(d) = key.and_then(|k| json[k].as_str()) {
+                    dirs.named.push((profile_path(Path::new(d)), said.clone()));
+                }
             }
-        }
-        // (your own build-dir over the checkout's — the variable wins over every config file)
-        if let Some(own) = own_build_setting(cargo_home, std::env::var("CARGO_BUILD_BUILD_DIR").ok())
-            && let Some(json) = output_in(base, "cargo", &metadata, &[("CARGO_BUILD_BUILD_DIR", &own)])
-        {
-            dirs.own_build = json["build_directory"].as_str().map(|d| profile_path(Path::new(d)));
+            // (your own build folder over the checkout's — the variable wins over every config file)
+            if let Some((var, own)) = &asks.own
+                && let Some(json) = json_of(run, &[(var, own)])
+            {
+                dirs.own_build = build.and_then(|b| json[b].as_str()).map(|d| profile_path(Path::new(d)));
+            }
         }
     }
-    if root.join("go.mod").is_file()
-        && let Some(json) = output_in(base, "go", &["env", "-json", "GOCACHE", "GOMODCACHE"], &[])
-    {
-        for key in ["GOCACHE", "GOMODCACHE"] {
-            if let Some(d) = json[key].as_str().filter(|d| !d.is_empty()) {
-                dirs.other.push(profile_path(Path::new(d)));
+    let env: Vec<(&str, &str)> = asks.env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    for a in &asks.others {
+        if let Some(json) = json_of(&a.run, &env) {
+            let who = a.run.first().map_or("", String::as_str);
+            let at =
+                |key: &str| json[key].as_str().filter(|d| !d.is_empty()).map(|d| profile_path(Path::new(d)));
+            for key in &a.json {
+                dirs.other.extend(at(key).map(|d| (d, format!("{who}'s {key}"))));
             }
+            for key in &a.caches {
+                dirs.caches.extend(at(key).map(|d| (d, key.clone(), format!("{who}'s {key}"))));
+            }
+            dirs.kept.extend(a.kept.iter().filter_map(|k| at(k)));
         }
     }
     if let Ok(mut m) = seen.lock() {
@@ -2370,29 +2856,25 @@ fn toolchain_dirs(base: &Policy, cargo_home: Option<&Path>) -> ToolDirs {
     dirs
 }
 
-/// The files that set the toolchain's folders for the project at `root` (real), by their times — what
-/// `toolchain_dirs` keeps its answer by.
-fn toolchain_stamp(root: &Path, cargo_home: Option<&Path>) -> Vec<Option<SystemTime>> {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-    let cargo_config = cargo_home.map_or_else(|| home.join(".cargo"), Path::to_path_buf);
-    let stamp_of = [
-        root.join("Cargo.toml"),
-        root.join(".cargo/config.toml"),
-        root.join(".cargo/config"),
-        cargo_config.join("config.toml"),
-        cargo_config.join("config"),
-        root.join("go.mod"),
-    ];
-    stamp_of.iter().map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok()).collect()
+/// The times of the files that set the toolchain's folders (`Asks::set_by`) — what `toolchain_dirs` keeps its
+/// answer by.
+fn stamp_of(files: &[PathBuf]) -> Vec<Option<SystemTime>> {
+    files.iter().map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok()).collect()
 }
 
 /// Tests: what `toolchain_dirs` answers for the project at `root` — as a probe of its toolchain would have
 /// found it (no cargo or go asked inside a sandbox, which can't start inside the one tests may run in).
 #[cfg(test)]
 pub(crate) fn toolchain_found(root: &Path, dirs: ToolDirs) {
+    toolchain_found_in(root, dirs, &Here::now());
+}
+
+/// `toolchain_found`, with what `here` says (a stand-in home).
+#[cfg(test)]
+pub(crate) fn toolchain_found_in(root: &Path, dirs: ToolDirs, here: &Here) {
     let root = profile_path(root);
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let stamp = toolchain_stamp(&root, cargo_home_of(home.as_deref(), &HomeVars::here()).as_deref());
+    let home = here.path("HOME").and_then(|h| std::fs::canonicalize(h).ok());
+    let stamp = stamp_of(&asks_for(&root, home.as_deref(), here).set_by);
     SEEN.get_or_init(Default::default).lock().unwrap().insert(root, (stamp, dirs));
 }
 
@@ -2525,15 +3007,9 @@ pub fn command(policy: Option<&Policy>, program: &str, args: &[String]) -> Comma
                 c
             };
             c.args(args);
-            inside_env(&mut c).envs(p.gradle.env.iter().map(|(k, v)| (k, v)));
+            inside_env(&mut c).envs(p.env.iter().map(|(k, v)| (k, v)));
             if let Some(run) = &p.run {
                 c.env("TMPDIR", run.path());
-                // npm's debug log in the run's own folder, not `~/.npm/_logs` (closed): measured, every npm
-                // command was denied writing its log and deleting the old ones its cleanup lists — in a
-                // folder of its own the cleanup finds none of yours. (`logs-max=0` writes none but still
-                // tries to delete every old one.) Its "complete log" line names a file there while the run's
-                // folder lasts.
-                c.env("npm_config_logs_dir", run.path());
             }
             for (var, copy) in &p.reads.copies.env {
                 c.env(var, copy);
@@ -2586,7 +3062,10 @@ mod tests {
         let cache = std::fs::canonicalize(&cache).unwrap();
         let ok = Command::new("git").args(["init", "-q"]).current_dir(&cache).output().unwrap();
         assert!(ok.status.success());
-        toolchain_found(&root, ToolDirs { other: vec![cache.clone()], ..Default::default() });
+        toolchain_found(
+            &root,
+            ToolDirs { other: vec![(cache.clone(), "go's GOMODCACHE".into())], ..Default::default() },
+        );
         let llm =
             crate::llm::LlmConfig { sandbox_write: vec!["/opt/tarae-granted".into()], ..Default::default() };
         let w = write_places(&root, &llm);
@@ -2723,16 +3202,31 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Cargo as the rust pack says it, its home at `home` (that needn't be there): `Env` with its caches, their
+    /// own files and attribute, and the build tool that names its folders.
+    fn cargo_at(home: &Path) -> Env {
+        let t = crate::sandboxpack::get();
+        let c = t.caches.iter().find(|c| c.home == "cargo").expect("the rust pack's caches");
+        let (said, files) = caches_in(c, home);
+        let builds = crate::builds::Builds::of(crate::packs::builtin_manifests());
+        let (_, _, rust) = builds.iter().find(|(p, ..)| p == "rust").expect("its [builds]");
+        let own_under = rust.as_ref().unwrap().own_under().map(|(u, d)| (u.to_path_buf(), d));
+        let builder = Builder { who: "cargo".into(), home: Some(home.into()), own_under };
+        Env { caches: vec![said], files, builder, ..Env::default() }
+    }
+
     fn env(root: &Path) -> Env {
+        let cargo = cargo_at(Path::new("/Users/u/.cargo"));
+        let lock = "/Users/u/.gradle/wrapper/dists/gradle-9.7.1-bin/h1/gradle-9.7.1-bin.zip.lck";
         Env {
             root: root.to_path_buf(),
             home: Some("/Users/u".into()),
             tmp: Some("/private/var/folders/ab/cd/T".into()),
-            cargo_home: Some("/Users/u/.cargo".into()),
+            files: cargo.files.iter().cloned().chain([lock.into()]).collect(),
             dirs: Vec::new(),
-            cargo_dirs: vec![
-                ("/Users/u/.cargo/build/ab/cd12".into(), "build-dir"),
-                (root.join("target"), "target-dir"),
+            asked: vec![
+                ("/Users/u/.cargo/build/ab/cd12".into(), "build-dir".into()),
+                (root.join("target"), "target-dir".into()),
             ],
             own_build: Some("/Users/u/.cargo/build/ab/cd12".into()),
             write: vec!["~/Library/Caches/thing".into(), "/".into(), "/Users".into()],
@@ -2754,11 +3248,24 @@ mod tests {
                 log: Some("/Users/u/.local/state/tarae/tarae.log".into()),
                 copies: Default::default(),
             },
-            gradle: Some("/Users/u/.gradle".into()),
-            gradle_locks: vec![
-                "/Users/u/.gradle/wrapper/dists/gradle-9.7.1-bin/h1/gradle-9.7.1-bin.zip.lck".into(),
-            ],
+            run_homes: vec![gradle_at(Path::new("/Users/u/.gradle"))],
+            ..cargo
         }
+    }
+
+    /// Gradle's run home as the java pack says it, the user's Gradle home at `user` (that needn't be there).
+    fn gradle_at(user: &Path) -> RunHomeSaid {
+        let homes = &crate::sandboxpack::get().run_homes;
+        let h = homes.iter().find(|h| h.name == "gradle").expect("the java pack's run-home");
+        RunHomeSaid { name: h.name.clone(), user: user.into(), said: h.said.clone() }
+    }
+
+    /// The run's own homes made in `run` with the user's Gradle home at `user` and their `GRADLE_OPTS`.
+    fn made_with(run: &Path, user: &Path, opts: Option<&str>) -> Vec<(String, String)> {
+        let mut env = HashMap::from([("GRADLE_USER_HOME".to_string(), user.into())]);
+        env.extend(opts.map(|o| ("GRADLE_OPTS".to_string(), o.into())));
+        let here = Here { env, ..Here::default() };
+        run_homes_made(run, &vars_in(&user.join("no-home"), &here), &here, &[])
     }
 
     /// The multiplexers' socket folders, where they put them by default and where the environment says.
@@ -2856,15 +3363,18 @@ mod tests {
             cargo_home.clone(),
             cargo_home.join("build/ab/ffff"),
         ];
-        let named: Vec<(PathBuf, &str)> =
-            bad.iter().cloned().chain([root.join("target"), own.clone()]).map(|d| (d, "build-dir")).collect();
+        let named: Vec<(PathBuf, String)> = bad
+            .iter()
+            .cloned()
+            .chain([root.join("target"), own.clone()])
+            .map(|d| (d, "build-dir".into()))
+            .collect();
         let env = Env {
             root: root.clone(),
             home: Some(home.clone()),
-            cargo_home: Some(cargo_home.clone()),
-            cargo_dirs: named,
+            asked: named,
             own_build: Some(own.clone()),
-            ..Env::default()
+            ..cargo_at(&cargo_home)
         };
         let p = Policy::for_project(&env);
         for d in &bad {
@@ -2891,11 +3401,384 @@ mod tests {
         .unwrap();
         std::fs::create_dir_all(root.join(".cargo")).unwrap();
         std::fs::write(root.join(".cargo/config.toml"), "[build]\nbuild-dir = \"/\"\n").unwrap();
-        let at = |var: Option<&str>| own_build_setting(Some(&cargo_home), var.map(String::from));
-        assert_eq!(at(None).as_deref(), Some("{cargo-cache-home}/build/{workspace-path-hash}"));
-        assert_eq!(at(Some("/x/{workspace-path-hash}")).as_deref(), Some("/x/{workspace-path-hash}"));
+        let builds = crate::builds::Builds::of(crate::packs::builtin_manifests());
+        let (_, _, rust) = builds.iter().find(|(p, ..)| p == "rust").unwrap();
+        let rust = rust.as_ref().unwrap();
+        let at = |var: Option<&str>| {
+            let var = |_: &str| var.map(String::from);
+            rust.own_setting(&var, Some(&cargo_home)).map(|(v, own)| format!("{v}={own}"))
+        };
+        let var = "CARGO_BUILD_BUILD_DIR";
+        assert_eq!(at(None), Some(format!("{var}={{cargo-cache-home}}/build/{{workspace-path-hash}}")));
+        assert_eq!(at(Some("/x/{workspace-path-hash}")), Some(format!("{var}=/x/{{workspace-path-hash}}")));
         std::fs::remove_file(cargo_home.join("config.toml")).unwrap();
         assert_eq!(at(None), None, "none of yours: no per-checkout dir to trust");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// The folders a checkout's build tool names are judged the same for any tool a pack brings: a tool of the
+    /// test's own naming home, `/`, the checkout's parent and its own home — all closed, each said in its words;
+    /// its own build folder (where its `[builds] remove` puts one) and the checkout's own open. (Names only.)
+    #[test]
+    fn asked_dirs_are_judged_for_every_tool() {
+        let (home, root) = (PathBuf::from("/Users/u"), PathBuf::from("/Users/u/work/p"));
+        let tool_home = home.join(".mytool");
+        let own = tool_home.join("cache/one");
+        let builder = Builder {
+            who: "mytool".into(),
+            home: Some(tool_home.clone()),
+            own_under: Some(("cache".into(), 1)),
+        };
+        let bad =
+            [home.clone(), "/".into(), home.join("work"), tool_home.clone(), tool_home.join("cache/one/x")];
+        let asked =
+            bad.iter().chain([&own, &root.join("out")]).map(|d| (d.clone(), "out-dir".into())).collect();
+        let env = Env {
+            root: root.clone(),
+            home: Some(home),
+            asked,
+            builder,
+            own_build: Some(own.clone()),
+            ..Env::default()
+        };
+        let p = Policy::for_project(&env);
+        for d in &bad {
+            assert!(!p.write.contains(d), "{} opened: {:?}", d.display(), p.write);
+            let (_, why) =
+                p.refused.iter().find(|(r, _)| r == d).unwrap_or_else(|| panic!("{} not said", d.display()));
+            assert!(why.starts_with("mytool's out-dir — "), "{why}");
+        }
+        assert!(p.refused.iter().any(|(_, why)| why.ends_with("it's mytool's home")), "{:?}", p.refused);
+        assert!(p.write.contains(&own) && p.refused.len() == bad.len(), "{:?} {:?}", p.write, p.refused);
+        assert_eq!(p.named_by, "mytool");
+    }
+
+    /// The folders a pack's `ask` names (Go's caches) are the tool's own wherever its settings put them — but
+    /// never home or above it, what holds the checkout, nor in or around keys or what runs later: those stay
+    /// closed, said where Claude reads it and on the panel. (Names only.)
+    #[test]
+    fn ask_dirs_are_judged_too() {
+        let (home, root) = (PathBuf::from("/Users/u"), PathBuf::from("/Users/u/work/p"));
+        let good = [PathBuf::from("/opt/out"), home.join("Library/Caches/mytool"), home.join("go/pkg/mod")];
+        let bad = [
+            home.clone(),
+            "/".into(),
+            home.join("work"),
+            home.join(".ssh/cache"),
+            home.join(".gradle/daemon"),
+            home.join(".cargo/registry/x"),
+            home.join(".config/fish"),
+        ];
+        let dirs = good.iter().chain(&bad).map(|d| (d.clone(), "mytool's OUT".to_string())).collect();
+        let p = Policy::for_project(&Env {
+            root: root.clone(),
+            home: Some(home.clone()),
+            dirs,
+            ..Env::default()
+        });
+        assert!(good.iter().all(|d| p.write.contains(d)), "{:?}", p.write);
+        for d in &bad {
+            assert!(!p.write.contains(d), "{} opened", d.display());
+            assert!(
+                p.refused_asked.iter().any(|(r, why)| r == d && why.starts_with("mytool's OUT — ")),
+                "{}",
+                d.display()
+            );
+        }
+        assert!(p.refused.is_empty());
+        let g = Guard::In(Box::new(p));
+        let said = g.report(&[]);
+        let h = crate::allow::tilde(&home);
+        assert!(
+            said.contains(&format!(
+                "It kept closed what the toolchain's settings named: {h} (mytool's OUT — it's your home)"
+            )),
+            "{said}"
+        );
+        let (line, _) = panel_line(Some(&g), false, std::time::Instant::now()).expect("the panel says it");
+        assert_eq!(line, format!("sandbox kept {h} closed — mytool's OUT named it  +{}", bad.len() - 1));
+    }
+
+    /// What runs later as the user is never a folder the packs' `ask` names, nor one a write card offers
+    /// (`RunsLater`): a folder on `PATH`, `~/.local/bin`, cargo's `bin`, Go's `GOBIN` (moved) and `GOPATH`'s
+    /// `bin`, in them or holding them; a toolchain's shared cache (Go's module cache, cargo's registry and git —
+    /// at their defaults and moved by `GOPATH`, `GOMODCACHE`, `CARGO_HOME`), in or holding one; and a toolchain's
+    /// home (cargo's, rustup's, Gradle's, `GOPATH`, npm's), what holds one and all in one — Gradle's compiled
+    /// scripts and wrapper distributions, rustup's toolchains, what `npx` runs from npm's `_npx` (at its default
+    /// and moved by `npm_config_cache` in either case). A cache the toolchain names is judged but for its own
+    /// places: another's cache or home still refuses it. Each said why. (Names only.)
+    #[test]
+    fn what_runs_later_is_never_an_asked_folder() {
+        let (home, root) = (PathBuf::from("/Users/u"), PathBuf::from("/Users/u/work/p"));
+        let env = HashMap::from([
+            ("GOBIN".to_string(), "/opt/gobin".into()),
+            ("GRADLE_USER_HOME".to_string(), "/opt/g/gradle".into()),
+            ("GOPATH".to_string(), "/opt/gopath".into()),
+            ("GOMODCACHE".to_string(), "/opt/modcache".into()),
+            ("CARGO_HOME".to_string(), "/opt/cargo".into()),
+            ("npm_config_cache".to_string(), "/opt/npm".into()),
+            ("NPM_CONFIG_CACHE".to_string(), "/opt/npm-upper".into()),
+        ]);
+        let vars = vars_in(&home, &Here { env, ..Here::default() });
+        let later = RunsLater::new(&home, &vars, &[PathBuf::from("/opt/tools/bin")]);
+        let cache = "it's in a toolchain's shared cache";
+        let in_home = "it's in a toolchain's home";
+        let cases: [(PathBuf, &str); 32] = [
+            // (the shared caches: at their defaults, and where a home or variable moved them)
+            (home.join("go/pkg/mod"), cache),
+            (home.join("go/pkg/mod/cache/download"), cache),
+            ("/opt/gopath/pkg/mod/x".into(), cache),
+            ("/opt/modcache".into(), cache),
+            ("/opt/cargo/registry/src".into(), cache),
+            ("/opt/cargo/git".into(), cache),
+            (home.join("go/pkg"), "it holds a toolchain's shared cache"),
+            ("/opt/gopath/bin".into(), "it's where programs you run are"),
+            ("/opt/g/gradle".into(), "it's a toolchain's home"),
+            ("/opt/g".into(), "it holds a toolchain's home"),
+            ("/opt/tools/bin".into(), "it's where programs you run are"),
+            ("/opt/tools".into(), "it holds where programs you run are"),
+            (home.join(".local/bin/sub"), "it's where programs you run are"),
+            (home.join(".local"), "it holds where programs you run are"),
+            (home.join(".cargo/bin"), "it's where programs you run are"),
+            ("/opt/gobin".into(), "it's where programs you run are"),
+            (home.join("go/bin"), "it's where programs you run are"),
+            (home.join("go"), "it holds where programs you run are"),
+            (home.join(".cargo"), "it holds where programs you run are"),
+            (home.join(".rustup"), "it's a toolchain's home"),
+            (home.join(".gradle"), "it's a toolchain's home"),
+            // (in a home: what the user's own builds and proxies run — at its default and where it's moved)
+            (home.join(".gradle/caches"), in_home),
+            (home.join(".gradle/wrapper/dists"), in_home),
+            ("/opt/g/gradle/caches/x".into(), in_home),
+            (home.join(".rustup/toolchains/x/bin"), in_home),
+            ("/opt/cargo/bin".into(), "it's where programs you run are"),
+            ("/opt/gopath/src".into(), in_home),
+            (home.join(".npm"), "it's a toolchain's home"),
+            (home.join(".npm/_npx/0a1b/node_modules"), in_home),
+            ("/opt/npm/_npx".into(), in_home),
+            ("/opt/npm-upper/_cacache".into(), in_home),
+            (home.join("tools"), ""),
+        ];
+        // (every case's verdict, the wrong ones said together)
+        let wrong: Vec<String> = cases
+            .iter()
+            .filter_map(|(d, why)| {
+                let got = ask_dir_verdict(d, &root, Some(&home), &later);
+                let right = match why.is_empty() {
+                    true => got.is_ok(),
+                    false => got.as_ref().is_err_and(|w| w.starts_with(why)),
+                };
+                (!right).then(|| format!("{}: {got:?}", d.display()))
+            })
+            .collect();
+        assert!(wrong.is_empty(), "{wrong:#?}");
+        // (a home's place, not only its default: GOBIN moved — and the default too)
+        assert!(
+            later.refuses(&home.join("go/bin")).is_some() && later.refuses(Path::new("/opt/gobin")).is_some()
+        );
+        // (a cache the toolchain names is judged but for its own places — kept by the caches rule — in Go's home
+        // only where the pack gives it one, wherever `GOMODCACHE` points; never another's cache or home)
+        let verdict = |d: &Path, later: &RunsLater| ask_dir_verdict(d, &root, Some(&home), later);
+        let but = later.but_cache("GOMODCACHE");
+        for d in [home.join("go/pkg/mod"), "/opt/gopath/pkg/mod".into(), "/opt/modcache".into()] {
+            assert_eq!(verdict(&d, &but), Ok(()), "{}", d.display());
+        }
+        let refused = |d: &Path, later: &RunsLater| verdict(d, later).unwrap_err();
+        assert!(refused(Path::new("/opt/gopath/src"), &but).starts_with(in_home));
+        assert!(refused(Path::new("/opt/cargo/registry"), &but).starts_with(cache));
+        assert!(refused(&home.join(".gradle/caches"), &but).starts_with(in_home));
+        assert!(refused(&home.join("go/bin"), &but).starts_with("it's where programs you run are"));
+        // (Go's module cache moved into a moved cargo home's registry: cargo's cache, not Go's to write)
+        let env = HashMap::from([
+            ("CARGO_HOME".to_string(), "/opt/cargo".into()),
+            ("GOMODCACHE".to_string(), "/opt/cargo/registry".into()),
+        ]);
+        let vars = vars_in(&home, &Here { env, ..Here::default() });
+        let but = RunsLater::new(&home, &vars, &[]).but_cache("GOMODCACHE");
+        assert_eq!(
+            refused(Path::new("/opt/cargo/registry"), &but),
+            "it's in a toolchain's shared cache (/opt/cargo/registry) — written only with the network open"
+        );
+        // (… or anywhere else in cargo's home: not a place the pack gives Go's cache)
+        let env = HashMap::from([
+            ("CARGO_HOME".to_string(), "/opt/cargo".into()),
+            ("GOMODCACHE".to_string(), "/opt/cargo/mods".into()),
+        ]);
+        let vars = vars_in(&home, &Here { env, ..Here::default() });
+        let but = RunsLater::new(&home, &vars, &[]).but_cache("GOMODCACHE");
+        assert!(refused(Path::new("/opt/cargo/mods"), &but).starts_with(in_home));
+        // (a `GOPATH` that's a list: the module cache and `bin` in its first entry, every entry a home)
+        let env = HashMap::from([("GOPATH".to_string(), "/a:/b".into())]);
+        let later = RunsLater::new(&home, &vars_in(&home, &Here { env, ..Here::default() }), &[]);
+        let cases = [
+            ("/a/pkg/mod/x", cache),
+            ("/a/bin", "it's where programs you run are"),
+            ("/a/src", in_home),
+            ("/a", "it holds where programs you run are"),
+            ("/b", "it's a toolchain's home"),
+            ("/b/pkg/mod", in_home),
+            ("/b/bin", in_home),
+        ];
+        for (d, why) in cases {
+            assert!(
+                refused(Path::new(d), &later).starts_with(why),
+                "{d}: {:?}",
+                refused(Path::new(d), &later)
+            );
+        }
+        let but = later.but_cache("GOMODCACHE");
+        assert_eq!(verdict(Path::new("/a/pkg/mod"), &but), Ok(()));
+        assert!(refused(Path::new("/b/pkg/mod"), &but).starts_with(in_home));
+    }
+
+    /// A toolchain's shared cache its `ask` names (Go's module cache) is kept as the packs' `caches` are: read,
+    /// written only with the network open, said when a write there was kept — and judged as any folder it
+    /// names (one that's a home stays closed). (Names only.)
+    #[test]
+    fn an_asked_cache_is_kept_as_caches_are() {
+        let (home, root) = (PathBuf::from("/Users/u"), PathBuf::from("/Users/u/work/p"));
+        let modcache = home.join("go/pkg/mod");
+        let said = |d: &Path| CachesSaid {
+            dirs: vec![d.into()],
+            rule: "the cache".into(),
+            said: "kept {caches}".into(),
+            xattr: None,
+        };
+        let place = crate::sandboxpack::CachePlace {
+            at: modcache.clone(),
+            asked: Some("GOMODCACHE".into()),
+            given: true,
+        };
+        let later = RunsLater { homes: vec![home.join("go")], caches: vec![place], ..Default::default() };
+        let env = |network: bool| Env {
+            root: root.clone(),
+            home: Some(home.clone()),
+            reads: Reads { home: Some(home.clone()), ..Reads::default() },
+            asked_caches: vec![
+                ("GOMODCACHE".into(), "go's GOMODCACHE".into(), said(&modcache)),
+                ("GOMODCACHE".into(), "go's GOMODCACHE".into(), said(&home.join("go"))),
+            ],
+            runs_later: later.clone(),
+            network,
+            ..Env::default()
+        };
+        let closed = Policy::for_project(&env(false));
+        assert_eq!(closed.caches, std::slice::from_ref(&modcache));
+        assert!(!closed.write.contains(&modcache) && closed.reads.allow.contains(&modcache), "{closed:?}");
+        assert!(closed.reads_allow(&modcache.join("x@v1/x.go")) && !closed.writes_allow(&modcache.join("x")));
+        let (go, why) = &closed.refused_asked[0];
+        assert_eq!(
+            (go, why.as_str()),
+            (&home.join("go"), "go's GOMODCACHE — it's a toolchain's home (/Users/u/go)")
+        );
+        let d = Denial {
+            process: "go".into(),
+            op: "file-write-create".into(),
+            target: modcache.join("x").display().to_string(),
+        };
+        let w = Watch::quiet("asked-cache.");
+        w.record(d);
+        let report = Guard::In(Box::new(Policy { watch: Some(w), ..closed })).report(&[]);
+        assert!(report.contains(&format!("kept {}", crate::allow::tilde(&modcache))), "{report}");
+        assert!(report.contains("(not the cache — while the network is closed)"), "{report}");
+        // (cargo's file-sync mark: on cargo's caches only — C0, C1 — never another tool's)
+        let both = Policy::for_project(&Env { caches: cargo_at(&home.join(".cargo")).caches, ..env(false) });
+        assert_eq!(both.caches[2], modcache);
+        let profile = both.profile();
+        let marks: Vec<&str> = profile.lines().filter(|l| l.contains("file-write-xattr")).collect();
+        assert_eq!(
+            marks,
+            [
+                "(allow file-write-xattr (require-all (require-any (literal (param \"C0\")) (literal (param \"C1\"))) \
+              (xattr \"com.apple.fileprovider.ignore#P\")))"
+            ]
+        );
+        let open = Policy::for_project(&env(true));
+        assert!(
+            open.caches.is_empty()
+                && open.write.contains(&modcache)
+                && open.writes_allow(&modcache.join("x"))
+        );
+        assert!(!open.write.contains(&home.join("go")), "{:?}", open.write);
+    }
+
+    /// Go's build cache for runs is the project's own, kept across its runs in tarae's cache folder — made only
+    /// tarae's — pointed at by `GOCACHE` and written by those runs only; the user's own (where `go env` says it
+    /// is) is never read; another project gets another; a project without `go.mod` gets the run's own as
+    /// before; and the toolchain is asked, and runs, with `GOTOOLCHAIN=local`. (A stand-in home in the test's
+    /// own folder; no go is run — what it would say is given.)
+    #[test]
+    fn gos_build_cache_is_the_projects_own() {
+        use std::os::unix::fs::PermissionsExt;
+        // (never in the shared temp folder: on Linux that's `/tmp`, which every run writes)
+        let tmp = std::env::temp_dir();
+        let tmp = if tmp.starts_with(TMP) { PathBuf::from("/var/tmp") } else { tmp };
+        let base = tmp.join(format!("tarae-gocache-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        let made = [
+            "work/a",
+            "work/b",
+            "work/plain",
+            "go/gocache",
+            "go/pkg/mod",
+            "Library/Caches/go-build",
+            "Library/Caches/x",
+        ];
+        for d in made {
+            std::fs::create_dir_all(base.join("home").join(d)).unwrap();
+        }
+        let base = std::fs::canonicalize(&base).unwrap();
+        let home = base.join("home");
+        for p in ["a", "b"] {
+            std::fs::write(home.join("work").join(p).join("go.mod"), "module p\n").unwrap();
+        }
+        let here =
+            Here { env: HashMap::from([("HOME".to_string(), home.clone().into())]), ..Here::default() };
+        let llm = crate::llm::LlmConfig::default();
+        let policy = |p: &str| {
+            let root = home.join("work").join(p);
+            let found = ToolDirs {
+                caches: vec![(home.join("go/pkg/mod"), "GOMODCACHE".into(), "go's GOMODCACHE".into())],
+                kept: vec![home.join("go/gocache")],
+                ..ToolDirs::default()
+            };
+            toolchain_found_in(&root, found, &here);
+            // (the user let Claude read their caches folder: the build cache in it stays kept)
+            policy_in(&root, &llm, &[home.join("Library/Caches")], &here)
+        };
+        let var = |p: &Policy, k: &str| p.env.iter().find(|(n, _)| n == k).map(|(_, v)| PathBuf::from(v));
+        let (a, b) = (policy("a"), policy("b"));
+        // (the module cache Go named, at its default place: a cache of the project's — not refused as one)
+        assert_eq!((&a.caches[..], &a.refused_asked[..]), (&[home.join("go/pkg/mod")][..], &[][..]));
+        let kept = home.join(".cache/tarae/run-homes/go-build");
+        let ours = kept.join(project_key(&home.join("work/a")));
+        assert_eq!(var(&a, "GOCACHE"), Some(ours.clone()));
+        let mode = std::fs::metadata(&ours).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "only tarae's");
+        assert!(
+            a.write.contains(&ours) && a.writes_allow(&ours.join("ab/x-d")) && a.reads_allow(&ours.join("x"))
+        );
+        let theirs = var(&b, "GOCACHE").unwrap();
+        assert!(
+            theirs.starts_with(&kept) && theirs != ours && !b.writes_allow(&ours.join("x")),
+            "{theirs:?}"
+        );
+        // (the user's own build cache: neither read nor written, at its default or where `go env` says — though
+        // what holds each is read)
+        for user in [home.join("Library/Caches/go-build/ab/x"), home.join("go/gocache/ab/x")] {
+            assert!(!a.reads_allow(&user) && !a.writes_allow(&user), "{}", user.display());
+        }
+        assert!(
+            a.reads_allow(&home.join("Library/Caches/x/y"))
+                && a.reads_allow(&home.join("go/pkg/mod/m@v1/x.go"))
+        );
+        let plain = policy("plain");
+        let run = plain.run.as_ref().unwrap().path().join("go-build");
+        assert_eq!(var(&plain, "GOCACHE"), Some(run), "no go.mod: the run's own");
+        assert!(!plain.write.iter().any(|w| w.starts_with(&kept)));
+        assert!(a.env.contains(&("GOTOOLCHAIN".into(), "local".into())), "{:?}", a.env);
+        let asks = asks_for(&home.join("work/a"), Some(&home), &here);
+        assert!(asks.env.contains(&("GOTOOLCHAIN".into(), "local".into())), "{:?}", asks.env);
         std::fs::remove_dir_all(&base).ok();
     }
 
@@ -3031,10 +3914,10 @@ mod tests {
         let gitconfig = PathBuf::from("/Users/u/.gitconfig");
         let mut e = env(Path::new("/Users/u/p"));
         e.reads.copies = crate::tokens::Copies {
-            env: vec![("GIT_CONFIG_GLOBAL", copy.clone())],
-            hidden: vec![(gitconfig.clone(), "GIT_CONFIG_GLOBAL")],
-            left_out: vec![(gitconfig.clone(), "GIT_CONFIG_GLOBAL")],
-            cargo: vec![],
+            env: vec![("GIT_CONFIG_GLOBAL".into(), copy.clone())],
+            hidden: vec![(gitconfig.clone(), "GIT_CONFIG_GLOBAL".into())],
+            left_out: vec![(gitconfig.clone(), "GIT_CONFIG_GLOBAL".into())],
+            told: vec![],
         };
         let p = Policy::for_project(&e);
         let text = p.profile();
@@ -3062,6 +3945,29 @@ mod tests {
         assert!(!none.contains("copies of") && !none.contains("T0"), "{none}");
     }
 
+    /// What a run never reads holds without any pack — `KEPT_FLOOR` beside `allow::SECRETS`, Claude's own,
+    /// tarae's state — and the packs' `kept` adds where a variable moved a home: `GRADLE_USER_HOME` elsewhere,
+    /// both daemons' registries are the profile's denies (the measured escape stays closed).
+    #[test]
+    fn the_kept_floor_holds_without_packs() {
+        let home = Path::new("/Users/u");
+        let kept = kept_in(home, &vars_in(home, &Here::default()), &[]);
+        for s in crate::allow::SECRETS.iter().chain(&CLAUDES).chain(&KEPT_FLOOR) {
+            assert!(kept.contains(&home.join(s)), "{s}: {kept:?}");
+        }
+        assert!(crate::config::state_dir().is_none_or(|s| kept.contains(&profile_path(&s))), "{kept:?}");
+        let moved = Path::new("/opt/tarae-gradle-home");
+        let env = HashMap::from([("GRADLE_USER_HOME".to_string(), moved.into())]);
+        let vars = vars_in(home, &Here { env, ..Here::default() });
+        let reads = Reads { home: Some(home.into()), kept: kept_reads(home, &vars), ..Reads::default() };
+        let p = Policy::for_project(&Env { root: home.join("p"), reads, ..Env::default() });
+        let denied: Vec<String> =
+            p.params().into_iter().filter(|(k, _)| k.starts_with('X')).map(|(_, v)| v).collect();
+        for d in [home.join(".gradle/daemon"), moved.join("daemon")] {
+            assert!(denied.contains(&d.display().to_string()), "{}: {denied:?}", d.display());
+        }
+    }
+
     /// Where a run reads in home: what the toolchains were measured reading, the repository's other checkouts
     /// and grants (`also`) — never home itself, a place outside it, nor one in a kept place, granted or not.
     /// (A stand-in home in the test's own temp folder.)
@@ -3081,7 +3987,7 @@ mod tests {
         ];
         // (nothing from this process's environment: the same inside a sandboxed run, which has a Gradle home of
         // its own, as outside)
-        let vars = HomeVars::default();
+        let vars = vars_in(&home, &Here::default());
         let r = reads_for(&home, &also, &vars);
         assert_eq!(r.home.as_deref(), Some(home.as_path()));
         for p in [
@@ -3105,7 +4011,7 @@ mod tests {
         }
         // Java's: Gradle's downloaded dependencies and wrapper distributions, never its daemons' registry nor
         // either tool's settings (repository passwords)
-        let gradle = gradle_home_of(&home, &vars);
+        let gradle = vars.home_of("gradle").unwrap().0.to_path_buf();
         assert_eq!(gradle, home.join(".gradle"));
         for p in ["caches/modules-2", "wrapper/dists"] {
             assert!(r.allow.contains(&gradle.join(p)), "{p}: {:?}", r.allow);
@@ -3113,7 +4019,9 @@ mod tests {
         assert!(r.kept.contains(&gradle.join("daemon")));
         // `GRADLE_USER_HOME` elsewhere: its reads, and its daemons kept as well as `~/.gradle`'s
         let moved = home.join("gradle-elsewhere");
-        let r2 = reads_for(&home, &also, &HomeVars { gradle_user_home: Some(moved.clone()), ..vars.clone() });
+        std::fs::create_dir_all(&moved).unwrap();
+        let env = HashMap::from([("GRADLE_USER_HOME".to_string(), moved.clone().into())]);
+        let r2 = reads_for(&home, &also, &vars_in(&home, &Here { env, ..Here::default() }));
         assert!(r2.allow.contains(&moved.join("caches/modules-2")), "{:?}", r2.allow);
         assert!(!r2.allow.contains(&home.join(".gradle/caches/modules-2")));
         assert!(r2.kept.contains(&home.join(".gradle/daemon")) && r2.kept.contains(&moved.join("daemon")));
@@ -3149,7 +4057,7 @@ mod tests {
         }
         assert!(r.kept.iter().any(|k| crate::config::state_dir().is_some_and(|s| *k == profile_path(&s))));
         // Cargo's configs above a project, up to home: those files only
-        let above = cargo_configs_above(&home.join("src/other/p"), &home);
+        let above = reads_above(&home.join("src/other/p"), &home);
         let want = [
             "src/other/.cargo/config.toml",
             "src/other/.cargo/config",
@@ -3157,8 +4065,16 @@ mod tests {
             "src/.cargo/config",
         ];
         assert_eq!(above, want.map(|w| home.join(w)));
-        assert!(cargo_configs_above(Path::new("/opt/p"), &home).is_empty());
+        assert!(reads_above(Path::new("/opt/p"), &home).is_empty());
         std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// The files the packs' `write-files` give with the user's Gradle home at `gradle` (`GRADLE_USER_HOME`; no
+    /// cargo home beside it).
+    fn locks_in(gradle: &Path) -> Vec<PathBuf> {
+        let env = HashMap::from([("GRADLE_USER_HOME".to_string(), gradle.into())]);
+        let home = gradle.join("no-home");
+        caches_and_files(&vars_in(&home, &Here { env, ..Here::default() })).1
     }
 
     /// A run's own Gradle home (Java under P2): `GRADLE_USER_HOME` in the run's folder, the user's wrapper
@@ -3177,13 +4093,13 @@ mod tests {
         std::fs::create_dir_all(user.join("caches/modules-2")).unwrap();
         std::fs::write(dist.join("gradle-9.7.1-bin/marker"), "kept").unwrap();
         assert_eq!(
-            gradle_locks(&user),
+            locks_in(&user),
             [
                 user.join("wrapper/dists/gradle-8.9-bin/h2/gradle-8.9-bin.zip.lck"),
                 dist.join("gradle-9.7.1-bin.zip.lck")
             ]
         );
-        let vars = gradle_run_home(&run, Some(&user), Some(" -Xmx1g ".into()));
+        let vars = made_with(&run, &user, Some(" -Xmx1g "));
         let get = |k: &str| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
         assert_eq!(get("GRADLE_USER_HOME"), Some(run.join("gradle").display().to_string()));
         assert_eq!(get("GRADLE_RO_DEP_CACHE"), Some(user.join("caches").display().to_string()));
@@ -3193,22 +4109,71 @@ mod tests {
         std::fs::remove_dir_all(&run).unwrap();
         assert!(dist.join("gradle-9.7.1-bin/marker").exists(), "the run's folder took the distribution");
         // No Gradle home of the user's: the run's own all the same, nothing to link or read in place
-        let bare = gradle_run_home(&t.join("run2"), None, Some("  ".into()));
+        let bare = made_with(&t.join("run2"), &t.join("no-gradle"), Some("  "));
+        // (Go's build cache is a run home too: the run's own here, no project being Go's)
+        let bare: Vec<&(String, String)> = bare.iter().filter(|(k, _)| k.starts_with("GRADLE")).collect();
         let keys: Vec<&str> = bare.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(keys, ["GRADLE_USER_HOME", "GRADLE_OPTS"]);
         assert_eq!(bare[1].1, "-Dorg.gradle.daemon=false");
         assert!(t.join("run2/gradle/wrapper").is_dir() && !t.join("run2/gradle/wrapper/dists").exists());
         // In the policy: the lock files are writable files, the environment goes with every command
-        let e = Env {
-            gradle: Some(user.clone()),
-            gradle_locks: gradle_locks(&user),
-            ..env(Path::new("/Users/u/p"))
-        };
-        let p = Policy { gradle: Gradle { user: Some(user.clone()), env: vars }, ..Policy::for_project(&e) };
+        let e =
+            Env { run_homes: vec![gradle_at(&user)], files: locks_in(&user), ..env(Path::new("/Users/u/p")) };
+        let p = Policy { env: vars, ..Policy::for_project(&e) };
         assert!(p.files.contains(&dist.join("gradle-9.7.1-bin.zip.lck")), "{:?}", p.files);
         let c = command(Some(&p), "true", &[]);
         let set: Vec<_> = c.get_envs().filter_map(|(k, v)| Some((k.to_str()?, v?.to_str()?))).collect();
         assert!(set.contains(&("GRADLE_OPTS", "-Xmx1g -Dorg.gradle.daemon=false")), "{set:?}");
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// A kept run home is a folder earlier runs wrote in: what tarae (unsandboxed) makes there goes through no
+    /// link a run left — where a made folder goes, where the wrapper link goes (pointing elsewhere), the home
+    /// itself — and a folder where the link goes is left as it is. Nothing is made where a link points.
+    /// (Gradle's home as a kept one, stand-ins in the test's own temp folder.)
+    #[test]
+    fn a_kept_home_is_made_through_no_link() {
+        let t = profile_path(&std::env::temp_dir()).join(format!("tarae-sb-unlinked-{}", std::process::id()));
+        std::fs::remove_dir_all(&t).ok();
+        let (user, run, kept, away) = (t.join("user/.gradle"), t.join("run"), t.join("kept"), t.join("away"));
+        let dists = user.join("wrapper/dists");
+        for d in [&dists, &run, &kept, &away] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let env = HashMap::from([("GRADLE_USER_HOME".to_string(), user.clone().into())]);
+        let here = Here { env, ..Here::default() };
+        let vars = vars_in(&user.join("no-home"), &here);
+        let made = |kept: &Path| {
+            let env = run_homes_made(&run, &vars, &here, &[("gradle".into(), kept.to_path_buf())]);
+            env.into_iter().find(|(k, _)| k == "GRADLE_USER_HOME").map(|(_, v)| PathBuf::from(v))
+        };
+        let symlink = |to: &Path, at: &Path| std::os::unix::fs::symlink(to, at).unwrap();
+        let is_link = |p: &Path| p.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink());
+        // A link where the made folder goes: removed, the folder made, the wrapper's link in it
+        symlink(&away, &kept.join("wrapper"));
+        assert_eq!(made(&kept), Some(kept.clone()));
+        assert!(!is_link(&kept.join("wrapper")) && kept.join("wrapper").is_dir());
+        assert_eq!(std::fs::read_link(kept.join("wrapper/dists")).unwrap(), dists);
+        // A link where the wrapper's link goes, pointing elsewhere: replaced
+        std::fs::remove_file(kept.join("wrapper/dists")).unwrap();
+        symlink(&away, &kept.join("wrapper/dists"));
+        made(&kept);
+        assert_eq!(std::fs::read_link(kept.join("wrapper/dists")).unwrap(), dists);
+        // (the same again: kept as it is)
+        made(&kept);
+        assert_eq!(std::fs::read_link(kept.join("wrapper/dists")).unwrap(), dists);
+        // A folder where the link goes: left as it is, nothing linked in it
+        std::fs::remove_file(kept.join("wrapper/dists")).unwrap();
+        std::fs::create_dir(kept.join("wrapper/dists")).unwrap();
+        made(&kept);
+        assert!(!is_link(&kept.join("wrapper/dists")));
+        assert_eq!(std::fs::read_dir(kept.join("wrapper/dists")).unwrap().count(), 0);
+        // The kept home itself a link: the run's own instead, nothing made where it points
+        let linked = t.join("linked");
+        symlink(&away, &linked);
+        assert_eq!(made(&linked), Some(run.join("gradle")));
+        assert!(run.join("gradle/wrapper/dists").is_symlink());
+        assert_eq!(std::fs::read_dir(&away).unwrap().count(), 0, "nothing made through a link");
         std::fs::remove_dir_all(&t).ok();
     }
 
@@ -3217,10 +4182,7 @@ mod tests {
     /// JVM refused a port on this machine says Gradle needs this machine's ports, only while they're closed.
     #[test]
     fn what_a_run_is_told_about_gradle() {
-        let p = Policy {
-            gradle: Gradle { user: Some("/Users/u/.gradle".into()), env: Vec::new() },
-            ..Policy::for_project(&env(Path::new("/Users/u/p")))
-        };
+        let p = Policy::for_project(&env(Path::new("/Users/u/p")));
         let report = |p: &Policy, d: &[Denial]| {
             let w = Watch::quiet("g.");
             for d in d {
@@ -3310,9 +4272,11 @@ mod tests {
             "src/main/java/org/gradle/Api.java",
             "wrapper/x",
             "target/classes/META-INF/maven/p/pom.xml",
+            ".venv/src/p/Makefile",
         ] {
             assert!(!kept(rel), "{rel}");
         }
+        assert!(kept("xvenv/Makefile") && kept("a.venv/Makefile"), "only `.venv` itself");
         assert!(!protected_in(root, Path::new("/Users/u/elsewhere/build.rs")));
         let text = Policy::for_project(&env(root)).profile();
         assert!(!text.contains("/Users") && !text.contains("worktrees"), "{text}");
@@ -3329,8 +4293,11 @@ mod tests {
             "(deny file-write* (require-all (subpath (param \"ROOT\")) (require-any{each}) (require-not"
         );
         assert!(text.contains(&rule), "{text}");
+        // (the packs' `outputs`, as written: `.venv`'s dot isn't any character)
+        let outputs = "node_modules|\\.venv|__pycache__|target";
         assert!(
-            text.contains(&format!("(regex #\"^{skip}/(.*/)?(target|node_modules)/(.*/)?({})", regexes[0]))
+            text.contains(&format!("(regex #\"^{skip}/(.*/)?({outputs})/(.*/)?({})", regexes[0])),
+            "{text}"
         );
         for n in protected_names() {
             let n = n.split('/').map(any_case).collect::<Vec<_>>().join("/");
@@ -3651,9 +4618,16 @@ mod tests {
     #[test]
     fn expected_denials_stay_quiet_and_npm_logs_in_the_run() {
         let home = std::env::var("HOME").unwrap();
-        let count = format!(
-            "{home}/Library/Application Support/go/telemetry/local/go@go1.27.1-go1.27.1-darwin-arm64-2026-10-05.v1.count"
-        );
+        // (this system's own form: the process's home is what `quiet` reads)
+        let config = match Os::HOST {
+            Os::Mac => format!("{home}/Library/Application Support"),
+            Os::Linux => std::env::var("XDG_CONFIG_HOME")
+                .ok()
+                .filter(|x| x.starts_with('/'))
+                .unwrap_or(format!("{home}/.config")),
+        };
+        let count =
+            format!("{config}/go/telemetry/local/go@go1.27.1-go1.27.1-darwin-arm64-2026-10-05.v1.count");
         let p = Policy { tag: Some("t.".into()), ..Policy::for_project(&env(Path::new("/Users/u/p"))) };
         let w = Watch::quiet("t.");
         w.record(Denial { process: "go".into(), op: "file-write-data".into(), target: count.clone() });
@@ -3695,9 +4669,13 @@ mod tests {
         w.record(denial("file-write-create", &format!("{home}/marker")));
         let r = g.report(&[]);
         assert!(r.starts_with("The sandbox blocked one thing — 1 time:\n  writing ~/marker"), "{r}");
-        // npm's log folder: the run's own
+        // npm's log folder: the run's own (the packs' `env`, `{run}` filled in)
         let run = RunDir::new().unwrap();
-        let p = Policy { run: Some(run.clone()), ..p };
+        let vars = vars_in(Path::new(&home), &Here::default());
+        let env =
+            packs_env(&crate::sandboxpack::Vars { run: Some(run.path().to_path_buf()), ..vars.clone() });
+        assert!(packs_env(&vars).iter().all(|(k, _)| k != "npm_config_logs_dir"), "no run: no log folder");
+        let p = Policy { run: Some(run.clone()), env, ..p };
         let c = command(Some(&p), "npm", &["test".into()]);
         let logs = c.get_envs().find(|(k, _)| *k == "npm_config_logs_dir").and_then(|(_, v)| v);
         assert_eq!(logs, Some(run.path().as_os_str()));
@@ -3706,6 +4684,62 @@ mod tests {
             unsandboxed.get_envs().all(|(k, _)| k != "npm_config_logs_dir"),
             "the user's own runs as they are"
         );
+    }
+
+    /// A quiet write is quiet only at its place for the home on this system — macOS's `~/Library/Application
+    /// Support/go/telemetry`, Linux's where `XDG_CONFIG_HOME` puts it (else `~/.config`): the same tail in the
+    /// project, elsewhere in home or in the other system's form is a denial like any, named in the report.
+    #[test]
+    fn a_quiet_write_is_quiet_only_at_its_place() {
+        let home = Path::new("/Users/u");
+        let tail = "go/telemetry/local/x.count";
+        let places = |os: Os, env: &[(&str, &str)]| {
+            let env = env.iter().map(|(k, v)| (k.to_string(), v.into())).collect();
+            quiet_places(&vars_in(home, &Here { env, os, ..Here::default() }))
+        };
+        let quiet_at = |places: &[PathBuf], rel: &str| {
+            quiet_in(&denial("file-write-create", &home.join(rel).display().to_string()), Some(home), places)
+        };
+        let mac = places(Os::Mac, &[("XDG_CONFIG_HOME", "/Users/u/conf")]);
+        assert!(quiet_at(&mac, &format!("Library/Application Support/{tail}")));
+        assert!(quiet_at(&mac, "Library/Application Support/go/telemetry"), "the folder itself");
+        for rel in [
+            format!("work/p/Library/Application Support/{tail}"),
+            format!("work/p/.config/{tail}"),
+            format!("work/p/{tail}"),
+            format!(".config/{tail}"),
+            format!("conf/{tail}"),
+            format!("Library/Application Support/go/telemetry-x/{tail}"),
+        ] {
+            assert!(!quiet_at(&mac, &rel), "macOS: {rel}");
+        }
+        // (a read there is no quiet write)
+        let read = denial(
+            "file-read-data",
+            &home.join(format!("Library/Application Support/{tail}")).display().to_string(),
+        );
+        assert!(!quiet_in(&read, Some(home), &mac));
+        let linux = places(Os::Linux, &[]);
+        assert!(quiet_at(&linux, &format!(".config/{tail}")));
+        for rel in [format!("Library/Application Support/{tail}"), format!("work/p/.config/{tail}")] {
+            assert!(!quiet_at(&linux, &rel), "Linux: {rel}");
+        }
+        let xdg = places(Os::Linux, &[("XDG_CONFIG_HOME", "/Users/u/conf")]);
+        assert!(quiet_at(&xdg, &format!("conf/{tail}")), "where XDG_CONFIG_HOME puts it");
+        assert!(!quiet_at(&xdg, &format!(".config/{tail}")), "not the default once it's moved");
+        // In a report: a write in the project with the same tail as this system's is named and counted
+        let real = std::env::var("HOME").unwrap();
+        let root = Path::new(&real).join("work/p");
+        let w = Watch::quiet("t-tail.");
+        for form in ["Library/Application Support", ".config"] {
+            w.record(denial("file-write-create", &root.join(form).join(tail).display().to_string()));
+        }
+        let b = w.blocked();
+        assert_eq!((b.total, b.distinct, b.quiet.len()), (2, 2, 0));
+        let p = Policy { tag: Some("t-tail.".into()), ..Policy::for_project(&env(&root)) };
+        let r = Guard::In(Box::new(Policy { watch: Some(w), ..p })).report(&[]);
+        let at = crate::allow::tilde(&root.join(".config").join(tail));
+        assert!(r.starts_with("The sandbox blocked 2 things — 2 times:\n") && r.contains(&at), "{r}");
     }
 
     /// What Claude reads: what was blocked (deduplicated, with who tried); that nothing was; or that nothing
@@ -3857,6 +4891,7 @@ mod tests {
             files: Vec::new(),
             keep: Vec::new(),
             caches: Vec::new(),
+            caches_said: Vec::new(),
             network: false,
             ports: vec![port],
             localhost: false,
@@ -3866,8 +4901,11 @@ mod tests {
             granted: Vec::new(),
             sockets: Vec::new(),
             refused: Vec::new(),
+            named_by: String::new(),
+            refused_asked: Vec::new(),
             reads: Reads::default(),
-            gradle: Gradle::default(),
+            env: Vec::new(),
+            run_homes: Vec::new(),
         };
         let sh = |script: &str| {
             let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
@@ -3924,6 +4962,7 @@ mod tests {
                 files: Vec::new(),
                 keep: Vec::new(),
                 caches: Vec::new(),
+                caches_said: Vec::new(),
                 network,
                 ports: Vec::new(),
                 localhost: false,
@@ -3933,8 +4972,11 @@ mod tests {
                 granted: Vec::new(),
                 sockets: Vec::new(),
                 refused: Vec::new(),
+                named_by: String::new(),
+                refused_asked: Vec::new(),
                 reads: Reads::default(),
-                gradle: Gradle::default(),
+                env: Vec::new(),
+                run_homes: Vec::new(),
             };
             let sh = |script: &str| {
                 let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
@@ -3991,6 +5033,7 @@ mod tests {
             files: Vec::new(),
             keep: Vec::new(),
             caches: Vec::new(),
+            caches_said: Vec::new(),
             network: false,
             ports: Vec::new(),
             localhost: false,
@@ -4000,8 +5043,11 @@ mod tests {
             granted: Vec::new(),
             sockets: Vec::new(),
             refused: Vec::new(),
+            named_by: String::new(),
+            refused_asked: Vec::new(),
             reads: Reads::default(),
-            gradle: Gradle::default(),
+            env: Vec::new(),
+            run_homes: Vec::new(),
         };
         let pid = std::process::id();
         let (mine, other) = (format!("tarae-test-{pid}-1."), format!("tarae-test-{pid}-10."));
@@ -4045,6 +5091,7 @@ mod tests {
             files: Vec::new(),
             keep: kept.to_vec(),
             caches: Vec::new(),
+            caches_said: Vec::new(),
             network: false,
             ports: Vec::new(),
             localhost: false,
@@ -4054,8 +5101,11 @@ mod tests {
             granted: Vec::new(),
             sockets: Vec::new(),
             refused: Vec::new(),
+            named_by: String::new(),
+            refused_asked: Vec::new(),
             reads: Reads::default(),
-            gradle: Gradle::default(),
+            env: Vec::new(),
+            run_homes: Vec::new(),
         };
         let sh = |script: &str| {
             let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
@@ -4136,7 +5186,7 @@ mod tests {
             root: root.clone(),
             write: w.llm.sandbox_write.clone(),
             ports: w.llm.sandbox_ports,
-            reads: reads_for(&home, &w.reads, &HomeVars::here()),
+            reads: reads_for(&home, &w.reads, &vars_in(&home, &Here::now())),
             ..Env::default()
         };
         let p = Policy { sockets: w.sockets, ..Policy::for_project(&env) };
@@ -4417,8 +5467,11 @@ mod tests {
         for f in [&ignore, &stored, &older] {
             std::fs::write(f, "marker\n").unwrap();
         }
-        let env =
-            Env { root: root.clone(), reads: reads_for(&home, &[], &HomeVars::here()), ..Env::default() };
+        let env = Env {
+            root: root.clone(),
+            reads: reads_for(&home, &[], &vars_in(&home, &Here::now())),
+            ..Env::default()
+        };
         let p = Policy::for_project(&env);
         let cat = |f: &Path| {
             let mut c =
@@ -4479,7 +5532,7 @@ mod tests {
             std::fs::write(home.join(file), text).unwrap();
         }
         let run = RunDir::new().unwrap();
-        let mut reads = reads_for(&home, &[], &HomeVars::here());
+        let mut reads = reads_for(&home, &[], &vars_in(&home, &Here::now()));
         let sources = crate::tokens::sources(&home, &|_| None);
         reads.copies = crate::tokens::copies(&sources, Some(run.path()), &home, &[], &reads.kept);
         let tmp = std::fs::canonicalize(std::env::temp_dir()).ok();
@@ -4578,17 +5631,13 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let env = Env {
             root: root.clone(),
-            reads: reads_for(&home, &[], &HomeVars::here()),
-            gradle: Some(g.clone()),
-            gradle_locks: gradle_locks(&g),
+            reads: reads_for(&home, &[], &vars_in(&home, &Here::now())),
+            run_homes: vec![gradle_at(&g)],
+            files: locks_in(&g),
             ..Env::default()
         };
-        let vars = gradle_run_home(run_dir.path(), Some(&g), None);
-        let p = Policy {
-            run: Some(run_dir.clone()),
-            gradle: Gradle { user: Some(g.clone()), env: vars },
-            ..Policy::for_project(&env)
-        };
+        let vars = made_with(run_dir.path(), &g, None);
+        let p = Policy { run: Some(run_dir.clone()), env: vars, ..Policy::for_project(&env) };
         let sh = |script: &str| {
             let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
             c.current_dir(&root).stdin(Stdio::null()).output().unwrap().status.success()
@@ -4665,7 +5714,8 @@ mod tests {
         )
         .unwrap();
         let home = std::fs::canonicalize(std::env::var_os("HOME").unwrap()).unwrap();
-        let cargo_home = cargo_home_of(Some(&home), &HomeVars::here());
+        let vars = vars_in(&home, &Here::now());
+        let (caches, files) = caches_and_files(&vars);
         let tag = format!("tarae-test-{}-tools.", std::process::id());
         let w = Watch::start(&tag);
         std::thread::sleep(WATCH_READY);
@@ -4673,8 +5723,9 @@ mod tests {
             root: root.clone(),
             home: Some(home.clone()),
             tmp: std::fs::canonicalize(std::env::temp_dir()).ok(),
-            cargo_home,
-            reads: reads_for(&home, &cargo_configs_above(&root, &home), &HomeVars::here()),
+            caches,
+            files,
+            reads: reads_for(&home, &reads_above(&root, &home), &vars),
             ..Env::default()
         };
         let p = Policy { tag: Some(tag), watch: Some(w.clone()), ..Policy::for_project(&env) };
@@ -4764,7 +5815,7 @@ mod tests {
     /// fails, and Claude reads why and that the user puts it there. The network open, all of it is written
     /// as before. And a project with a registry and a git dependency, a build script and a test still
     /// builds, tests and formats offline once they're in place, writing in cargo's home only its lock and
-    /// last-use files (`CARGO_FILES`) and trying nothing it's denied. Harmless and offline: cargo's home, a
+    /// last-use files (the rust pack's `caches.files`) and trying nothing it's denied. Harmless and offline: cargo's home, a
     /// registry (a git index of one crate, its `.crate` fetched over `file://`), a git dependency and the
     /// project are folders of the test's own under `target/` (never the real `~/.cargo`); the caches' writes
     /// are tried on marker files the test planted.
@@ -4866,12 +5917,8 @@ mod tests {
         let unformatted =
             "pub fn f()->u8{tarae_dep::one()+gdep::two()}\n#[test]\nfn t(){assert_eq!(f(),3);}\n";
         write(&root.join("src/lib.rs"), unformatted);
-        let env = Env {
-            root: root.clone(),
-            cargo_home: Some(home.clone()),
-            tmp: Some(profile_path(&std::env::temp_dir())),
-            ..Env::default()
-        };
+        let env =
+            Env { root: root.clone(), tmp: Some(profile_path(&std::env::temp_dir())), ..cargo_at(&home) };
         let (closed, open) = (Policy::for_project(&env), Policy::for_project(&Env { network: true, ..env }));
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
         let run = |p: &Policy, args: &[&str]| {
@@ -5080,6 +6127,7 @@ mod tests {
             files: Vec::new(),
             keep: Vec::new(),
             caches: Vec::new(),
+            caches_said: Vec::new(),
             network,
             ports,
             localhost,
@@ -5089,8 +6137,11 @@ mod tests {
             granted: Vec::new(),
             sockets: Vec::new(),
             refused: Vec::new(),
+            named_by: String::new(),
+            refused_asked: Vec::new(),
             reads: Reads::default(),
-            gradle: Gradle::default(),
+            env: Vec::new(),
+            run_homes: Vec::new(),
         };
         let reached = |p: &Policy, l: &TcpListener| {
             let script = format!("/usr/bin/nc -z -w 2 127.0.0.1 {}", port(l));

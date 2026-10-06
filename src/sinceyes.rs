@@ -155,35 +155,17 @@ impl Yes {
     }
 }
 
-/// Programs that build or test what's in the folder they run in — a script calling one runs the project's
-/// code.
-const BUILDERS: [&str; 22] = [
-    "cargo",
-    "rustc",
-    "go",
-    "make",
-    "gmake",
-    "just",
-    "npm",
-    "npx",
-    "pnpm",
-    "yarn",
-    "pytest",
-    "tox",
-    "nox",
-    "gradle",
-    "mvn",
-    "dotnet",
-    "swift",
-    "zig",
-    "cmake",
-    "ninja",
-    "bazel",
-    "xcodebuild",
-];
+/// Programs that build or test what's in the folder they run in, no pack naming them — under the packs'
+/// `[claude] builders` (cargo, go, make…), which only add: a script calling one runs the project's code.
+const BUILDERS_FLOOR: [&str; 3] = ["ninja", "bazel", "xcodebuild"];
+
+/// Whether `name` is a program that builds or tests (`BUILDERS_FLOOR`, the packs' `builders`).
+fn builder(name: &str) -> bool {
+    BUILDERS_FLOOR.contains(&name) || crate::sandboxpack::get().builders.iter().any(|b| b == name)
+}
 
 /// Whether one of `scripts` runs the project at `root`'s code — so it isn't all that runs: a program in the
-/// project that isn't text (a binary built here), or a script with a line that builds or tests (`BUILDERS`),
+/// project that isn't text (a binary built here), or a script with a line that builds or tests (`builder`),
 /// runs a file by a relative path (`./x`, `target/debug/t`), or hands one to an interpreter (`python3 x.py`).
 fn runs_project(root: &Path, scripts: &[(PathBuf, Option<String>)]) -> bool {
     scripts.iter().any(|(path, text)| match text {
@@ -224,10 +206,10 @@ fn runs_project_line(line: &str) -> bool {
         let Some(program) = words.next() else { return false };
         let name = program.rsplit('/').next().unwrap_or(program);
         let relative = |w: &str| !w.starts_with(['/', '-', '$', '~']) && w.contains(['/', '.']);
-        BUILDERS.contains(&name)
+        builder(name)
             || (program.contains('/') && relative(program))
             || (crate::tools::runner(name)
-                && !BUILDERS.contains(&name)
+                && !builder(name)
                 && words.find(|w| !w.starts_with('-')).is_some_and(relative))
     })
 }

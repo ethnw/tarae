@@ -1,0 +1,1200 @@
+══ Mac: homes at their defaults
+profile:
+(version 1)
+(allow default)
+(deny file-write* (with message "$TAG"))
+(allow file-write* (require-all (subpath (param "ROOT"))))
+(allow file-write* (subpath (param "RUN")) (subpath (param "W0")) (subpath (param "W1")) (subpath (param "W2")) (subpath (param "W3")))
+(deny file-read-data file-read-xattr (subpath (param "HOME")) (with message "$TAG"))
+(allow file-read-data file-read-xattr (subpath (param "ROOT")) (subpath (param "RUN")) (subpath (param "W0")) (subpath (param "W1")) (subpath (param "W2")) (subpath (param "W3")) (literal (param "F0")) (literal (param "F1")) (literal (param "F2")) (literal (param "F3")) (literal (param "F4")) (literal (param "F5")) (literal (param "F6")) (literal (param "F7")) (literal (param "F8")) (subpath (param "R0")) (subpath (param "R1")) (subpath (param "R2")) (subpath (param "R3")) (subpath (param "R4")) (subpath (param "R5")) (subpath (param "R6")) (subpath (param "R7")) (subpath (param "R8")) (subpath (param "R9")) (subpath (param "R10")) (subpath (param "R11")) (subpath (param "R12")) (subpath (param "R13")) (subpath (param "R14")) (subpath (param "R15")) (subpath (param "R16")) (subpath (param "R17")) (subpath (param "R18")) (subpath (param "R19")))
+(deny file-write* (require-all (subpath (param "ROOT")) (require-any (regex #"^$ROOT-PARTS/(.*/)?([bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]|[bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[gG][rR][aA][dD][lL][eE]\.[pP][rR][oO][pP][eE][rR][tT][iI][eE][sS]|[gG][rR][aA][dD][lL][eE][wW]|[gG][rR][aA][dD][lL][eE]/[wW][rR][aA][pP][pP][eE][rR])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?([bB][uU][iI][lL][dD][sS][rR][cC]|[pP][oO][mM]\.[xX][mM][lL]|[mM][vV][nN][wW]|\.[mM][vV][nN]|[pP][aA][cC][kK][aA][gG][eE]\.[jJ][sS][oO][nN]|[mM][aA][kK][eE][fF][iI][lL][eE]|[gG][nN][uU][mM][aA][kK][eE][fF][iI][lL][eE]|[jJ][uU][sS][tT][fF][iI][lL][eE]|\.[jJ][uU][sS][tT][fF][iI][lL][eE]|[bB][uU][iI][lL][dD]\.[rR][sS]|[cC][aA][rR][gG][oO]\.[tT][oO][mM][lL]|\.[cC][aA][rR][gG][oO])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?(\.[tT][aA][rR][aA][eE]\.[tT][oO][mM][lL]|\.[eE][nN][vV][rR][cC]|\.[cC][lL][aA][uU][dD][eE]|\.[gG][iI][tT][hH][uU][bB]|\.[vV][sS][cC][oO][dD][eE]|\.[tT][aA][rR][aA][eE]\.[lL][oO][cC][aA][lL]\.[tT][oO][mM][lL]|\.[gG][iI][tT])(/|$)")) (require-not (require-any (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/(.*/)?([bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]|[bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[gG][rR][aA][dD][lL][eE]\.[pP][rR][oO][pP][eE][rR][tT][iI][eE][sS]|[gG][rR][aA][dD][lL][eE][wW]|[gG][rR][aA][dD][lL][eE]/[wW][rR][aA][pP][pP][eE][rR])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/(.*/)?([bB][uU][iI][lL][dD][sS][rR][cC]|[pP][oO][mM]\.[xX][mM][lL]|[mM][vV][nN][wW]|\.[mM][vV][nN]|[pP][aA][cC][kK][aA][gG][eE]\.[jJ][sS][oO][nN]|[mM][aA][kK][eE][fF][iI][lL][eE]|[gG][nN][uU][mM][aA][kK][eE][fF][iI][lL][eE]|[jJ][uU][sS][tT][fF][iI][lL][eE]|\.[jJ][uU][sS][tT][fF][iI][lL][eE]|[bB][uU][iI][lL][dD]\.[rR][sS]|[cC][aA][rR][gG][oO]\.[tT][oO][mM][lL]|\.[cC][aA][rR][gG][oO])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/(.*/)?(\.[tT][aA][rR][aA][eE]\.[tT][oO][mM][lL]|\.[eE][nN][vV][rR][cC]|\.[cC][lL][aA][uU][dD][eE]|\.[gG][iI][tT][hH][uU][bB]|\.[vV][sS][cC][oO][dD][eE]|\.[tT][aA][rR][aA][eE]\.[lL][oO][cC][aA][lL]\.[tT][oO][mM][lL]|\.[gG][iI][tT])(/|$)")))) (with message "$TAG"))
+(deny file-write* (subpath (param "K0")) (subpath (param "K1")) (subpath (param "C0")) (subpath (param "C1")) (subpath (param "C2")) (with message "$TAG"))
+(allow file-write* (literal (param "F0")) (literal (param "F1")) (literal (param "F2")) (literal (param "F3")) (literal (param "F4")) (literal (param "F5")) (literal (param "F6")) (literal (param "F7")) (literal (param "F8")))
+(allow file-write-xattr (require-all (require-any (literal (param "C0")) (literal (param "C1"))) (xattr "com.apple.fileprovider.ignore#P")))
+(allow file-write* (literal "/dev/null") (literal "/dev/zero") (literal "/dev/tty") (literal "/dev/ptmx") (literal "/dev/dtracehelper") (regex #"^/dev/ttys[0-9]+$") (subpath "/dev/fd"))
+(deny network* (with message "$TAG"))
+(allow network-bind network-inbound (local ip "localhost:*"))
+(deny network-bind network-inbound (local unix-socket) (with message "$TAG"))
+(deny network-outbound (remote unix-socket) (with message "$TAG"))
+(allow network-bind network-inbound (require-all (local unix-socket) (require-any (subpath (param "ROOT")) (subpath (param "RUN")))))
+(allow network-outbound (require-all (remote unix-socket) (require-any (subpath (param "ROOT")) (subpath (param "RUN")))))
+(deny appleevent-send (with message "$TAG"))
+(deny mach-lookup (global-name "com.apple.coreservices.launchservicesd") (global-name-regex #"^com\.apple\.lsd\.") (with message "$TAG"))
+(deny mach-lookup (global-name-regex #"^com\.apple\.pasteboard\.") (global-name "com.apple.SecurityServer") (global-name "com.apple.securityd") (with message "$TAG"))
+(deny file-read-data file-read-xattr (literal (param "T0")) (literal (param "T1")) (literal (param "T2")) (with message "$TAG"))
+(deny file-read-data file-read-xattr (subpath (param "X0")) (subpath (param "X1")) (subpath (param "X2")) (subpath (param "X3")) (subpath (param "X4")) (subpath (param "X5")) (subpath (param "X6")) (subpath (param "X7")) (subpath (param "X8")) (subpath (param "X9")) (subpath (param "X10")) (subpath (param "X11")) (subpath (param "X12")) (subpath (param "X13")) (subpath (param "X14")) (subpath (param "X15")) (subpath (param "X16")) (subpath (param "X17")) (subpath (param "X18")) (subpath (param "X19")) (subpath (param "X20")) (subpath (param "X21")) (with message "$TAG"))
+(allow file-read-data file-read-xattr (literal (param "LOG")))
+params:
+  C:
+    $HOME/.cargo/git
+    $HOME/.cargo/registry
+    $HOME/go/pkg/mod
+  F:
+    $HOME/.cargo/.global-cache
+    $HOME/.cargo/.global-cache-journal
+    $HOME/.cargo/.global-cache-shm
+    $HOME/.cargo/.global-cache-wal
+    $HOME/.cargo/.package-cache
+    $HOME/.cargo/.package-cache-mutate
+    $HOME/.cargo/git/CACHEDIR.TAG
+    $HOME/.cargo/registry/CACHEDIR.TAG
+    $HOME/.gradle/wrapper/dists/gradle-8.10-bin/abc123/gradle-8.10-bin.zip.lck
+  HOME:
+    $HOME
+  K:
+    $BASE/tmp/zellij-501
+    $TMP/tmux-501
+  LOG:
+    $STATE/tarae.log
+  R:
+    $HOME/.CFUserTextEncoding
+    $HOME/.cargo
+    $HOME/.config/git
+    $HOME/.config/pip/pip.conf
+    $HOME/.gitconfig
+    $HOME/.gradle/caches/modules-2
+    $HOME/.gradle/wrapper/dists
+    $HOME/.m2/repository
+    $HOME/.m2/wrapper
+    $HOME/.npm
+    $HOME/.pip/pip.conf
+    $HOME/.rustup
+    $HOME/Library/Application Support/go
+    $HOME/Library/Application Support/pip/pip.conf
+    $HOME/Library/Fonts
+    $HOME/Library/Java/JavaVirtualMachines
+    $HOME/go
+    $HOME/go/pkg/mod
+    $HOME/work/.cargo/config
+    $HOME/work/.cargo/config.toml
+  ROOT:
+    $ROOT
+  RUN:
+    $RUN
+  T:
+    $HOME/.config/pip/pip.conf
+    $HOME/.gitconfig
+    $HOME/Library/Application Support/go/env
+  W:
+    $BASE/tmp
+    $HOME/.cache/tarae/run-homes/go-build/$KEY
+    $HOME/.cargo/build/ab/cdef0123
+    $TMP
+  X:
+    $HOME/.aws
+    $HOME/.cargo/credentials
+    $HOME/.cargo/credentials.toml
+    $HOME/.claude
+    $HOME/.claude.json
+    $HOME/.claude.json.backup
+    $HOME/.config/gh
+    $HOME/.config/git/credentials
+    $HOME/.docker
+    $HOME/.git-credentials
+    $HOME/.gnupg
+    $HOME/.gradle/daemon
+    $HOME/.kube
+    $HOME/.netrc
+    $HOME/.npmrc
+    $HOME/.password-store
+    $HOME/.pypirc
+    $HOME/.ssh
+    $HOME/Library/Caches/go-build
+    $HOME/Library/Keychains
+    $HOME/gocache
+    $STATE
+write:
+    $BASE/tmp
+    $HOME/.cache/tarae/run-homes/go-build/$KEY
+    $HOME/.cargo/build/ab/cdef0123
+    $TMP
+files:
+    $HOME/.cargo/.global-cache
+    $HOME/.cargo/.global-cache-journal
+    $HOME/.cargo/.global-cache-shm
+    $HOME/.cargo/.global-cache-wal
+    $HOME/.cargo/.package-cache
+    $HOME/.cargo/.package-cache-mutate
+    $HOME/.cargo/git/CACHEDIR.TAG
+    $HOME/.cargo/registry/CACHEDIR.TAG
+    $HOME/.gradle/wrapper/dists/gradle-8.10-bin/abc123/gradle-8.10-bin.zip.lck
+keep:
+    $BASE/tmp/zellij-501
+    $TMP/tmux-501
+caches:
+    $HOME/.cargo/git
+    $HOME/.cargo/registry
+    $HOME/go/pkg/mod
+refused:
+    $HOME/elsewhere — cargo's target-dir — it isn't in the checkout, its own build dir under cargo's home, or a temp folder
+reads.home:
+    $HOME
+reads.allow:
+    $HOME/.CFUserTextEncoding
+    $HOME/.cargo
+    $HOME/.config/git
+    $HOME/.config/pip/pip.conf
+    $HOME/.gitconfig
+    $HOME/.gradle/caches/modules-2
+    $HOME/.gradle/wrapper/dists
+    $HOME/.m2/repository
+    $HOME/.m2/wrapper
+    $HOME/.npm
+    $HOME/.pip/pip.conf
+    $HOME/.rustup
+    $HOME/Library/Application Support/go
+    $HOME/Library/Application Support/pip/pip.conf
+    $HOME/Library/Fonts
+    $HOME/Library/Java/JavaVirtualMachines
+    $HOME/go
+    $HOME/go/pkg/mod
+    $HOME/work/.cargo/config
+    $HOME/work/.cargo/config.toml
+reads.kept:
+    $HOME/.aws
+    $HOME/.cargo/credentials
+    $HOME/.cargo/credentials.toml
+    $HOME/.claude
+    $HOME/.claude.json
+    $HOME/.claude.json.backup
+    $HOME/.config/gh
+    $HOME/.config/git/credentials
+    $HOME/.docker
+    $HOME/.git-credentials
+    $HOME/.gnupg
+    $HOME/.gradle/daemon
+    $HOME/.kube
+    $HOME/.netrc
+    $HOME/.npmrc
+    $HOME/.password-store
+    $HOME/.pypirc
+    $HOME/.ssh
+    $HOME/Library/Caches/go-build
+    $HOME/Library/Keychains
+    $HOME/gocache
+    $STATE
+reads.log:
+    $STATE/tarae.log
+copies.env:
+    GIT_CONFIG_GLOBAL=$RUN/settings/gitconfig
+    GOENV=$RUN/settings/goenv
+    NPM_CONFIG_USERCONFIG=$RUN/settings/npmrc
+    PIP_CONFIG_FILE=$RUN/settings/pip.conf
+copies.hidden:
+    $HOME/.config/pip/pip.conf ($PIP_CONFIG_FILE)
+    $HOME/.gitconfig ($GIT_CONFIG_GLOBAL)
+    $HOME/Library/Application Support/go/env ($GOENV)
+copies.left_out:
+    $HOME/.config/pip/pip.conf ($PIP_CONFIG_FILE)
+    $HOME/.gitconfig ($GIT_CONFIG_GLOBAL)
+    $HOME/.npmrc ($NPM_CONFIG_USERCONFIG)
+    $HOME/Library/Application Support/go/env ($GOENV)
+copies.told:
+    $HOME/.cargo/config.toml
+run env:
+    GOCACHE=$HOME/.cache/tarae/run-homes/go-build/$KEY
+    GOTOOLCHAIN=local
+    GRADLE_OPTS=-Dorg.gradle.daemon=false
+    GRADLE_RO_DEP_CACHE=$HOME/.gradle/caches
+    GRADLE_USER_HOME=$RUN/gradle
+    npm_config_logs_dir=$RUN
+tool homes:
+    gradle $HOME/.gradle
+══ Mac: homes moved
+profile:
+(version 1)
+(allow default)
+(deny file-write* (with message "$TAG"))
+(allow file-write* (require-all (subpath (param "ROOT"))))
+(allow file-write* (subpath (param "RUN")) (subpath (param "W0")) (subpath (param "W1")) (subpath (param "W2")))
+(deny file-read-data file-read-xattr (subpath (param "HOME")) (with message "$TAG"))
+(allow file-read-data file-read-xattr (subpath (param "ROOT")) (subpath (param "RUN")) (subpath (param "W0")) (subpath (param "W1")) (subpath (param "W2")) (literal (param "F0")) (literal (param "F1")) (literal (param "F2")) (literal (param "F3")) (literal (param "F4")) (literal (param "F5")) (literal (param "F6")) (literal (param "F7")) (subpath (param "R0")) (subpath (param "R1")) (subpath (param "R2")) (subpath (param "R3")) (subpath (param "R4")) (subpath (param "R5")) (subpath (param "R6")) (subpath (param "R7")) (subpath (param "R8")) (subpath (param "R9")) (subpath (param "R10")) (subpath (param "R11")) (subpath (param "R12")) (subpath (param "R13")) (subpath (param "R14")) (subpath (param "R15")) (subpath (param "R16")) (subpath (param "R17")))
+(deny file-write* (require-all (subpath (param "ROOT")) (require-any (regex #"^$ROOT-PARTS/(.*/)?([bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]|[bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[gG][rR][aA][dD][lL][eE]\.[pP][rR][oO][pP][eE][rR][tT][iI][eE][sS]|[gG][rR][aA][dD][lL][eE][wW]|[gG][rR][aA][dD][lL][eE]/[wW][rR][aA][pP][pP][eE][rR])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?([bB][uU][iI][lL][dD][sS][rR][cC]|[pP][oO][mM]\.[xX][mM][lL]|[mM][vV][nN][wW]|\.[mM][vV][nN]|[pP][aA][cC][kK][aA][gG][eE]\.[jJ][sS][oO][nN]|[mM][aA][kK][eE][fF][iI][lL][eE]|[gG][nN][uU][mM][aA][kK][eE][fF][iI][lL][eE]|[jJ][uU][sS][tT][fF][iI][lL][eE]|\.[jJ][uU][sS][tT][fF][iI][lL][eE]|[bB][uU][iI][lL][dD]\.[rR][sS]|[cC][aA][rR][gG][oO]\.[tT][oO][mM][lL]|\.[cC][aA][rR][gG][oO])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?(\.[tT][aA][rR][aA][eE]\.[tT][oO][mM][lL]|\.[eE][nN][vV][rR][cC]|\.[cC][lL][aA][uU][dD][eE]|\.[gG][iI][tT][hH][uU][bB]|\.[vV][sS][cC][oO][dD][eE]|\.[tT][aA][rR][aA][eE]\.[lL][oO][cC][aA][lL]\.[tT][oO][mM][lL]|\.[gG][iI][tT])(/|$)")) (require-not (require-any (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/(.*/)?([bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]|[bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[gG][rR][aA][dD][lL][eE]\.[pP][rR][oO][pP][eE][rR][tT][iI][eE][sS]|[gG][rR][aA][dD][lL][eE][wW]|[gG][rR][aA][dD][lL][eE]/[wW][rR][aA][pP][pP][eE][rR])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/(.*/)?([bB][uU][iI][lL][dD][sS][rR][cC]|[pP][oO][mM]\.[xX][mM][lL]|[mM][vV][nN][wW]|\.[mM][vV][nN]|[pP][aA][cC][kK][aA][gG][eE]\.[jJ][sS][oO][nN]|[mM][aA][kK][eE][fF][iI][lL][eE]|[gG][nN][uU][mM][aA][kK][eE][fF][iI][lL][eE]|[jJ][uU][sS][tT][fF][iI][lL][eE]|\.[jJ][uU][sS][tT][fF][iI][lL][eE]|[bB][uU][iI][lL][dD]\.[rR][sS]|[cC][aA][rR][gG][oO]\.[tT][oO][mM][lL]|\.[cC][aA][rR][gG][oO])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/(.*/)?(\.[tT][aA][rR][aA][eE]\.[tT][oO][mM][lL]|\.[eE][nN][vV][rR][cC]|\.[cC][lL][aA][uU][dD][eE]|\.[gG][iI][tT][hH][uU][bB]|\.[vV][sS][cC][oO][dD][eE]|\.[tT][aA][rR][aA][eE]\.[lL][oO][cC][aA][lL]\.[tT][oO][mM][lL]|\.[gG][iI][tT])(/|$)")))) (with message "$TAG"))
+(deny file-write* (subpath (param "K0")) (subpath (param "K1")) (subpath (param "C0")) (subpath (param "C1")) (subpath (param "C2")) (with message "$TAG"))
+(allow file-write* (literal (param "F0")) (literal (param "F1")) (literal (param "F2")) (literal (param "F3")) (literal (param "F4")) (literal (param "F5")) (literal (param "F6")) (literal (param "F7")))
+(allow file-write-xattr (require-all (require-any (literal (param "C0")) (literal (param "C1"))) (xattr "com.apple.fileprovider.ignore#P")))
+(allow file-write* (literal "/dev/null") (literal "/dev/zero") (literal "/dev/tty") (literal "/dev/ptmx") (literal "/dev/dtracehelper") (regex #"^/dev/ttys[0-9]+$") (subpath "/dev/fd"))
+(deny network* (with message "$TAG"))
+(allow network-bind network-inbound (local ip "localhost:*"))
+(deny network-bind network-inbound (local unix-socket) (with message "$TAG"))
+(deny network-outbound (remote unix-socket) (with message "$TAG"))
+(allow network-bind network-inbound (require-all (local unix-socket) (require-any (subpath (param "ROOT")) (subpath (param "RUN")))))
+(allow network-outbound (require-all (remote unix-socket) (require-any (subpath (param "ROOT")) (subpath (param "RUN")))))
+(deny appleevent-send (with message "$TAG"))
+(deny mach-lookup (global-name "com.apple.coreservices.launchservicesd") (global-name-regex #"^com\.apple\.lsd\.") (with message "$TAG"))
+(deny mach-lookup (global-name-regex #"^com\.apple\.pasteboard\.") (global-name "com.apple.SecurityServer") (global-name "com.apple.securityd") (with message "$TAG"))
+(deny file-read-data file-read-xattr (literal (param "T0")) (literal (param "T1")) (literal (param "T2")) (with message "$TAG"))
+(deny file-read-data file-read-xattr (subpath (param "X0")) (subpath (param "X1")) (subpath (param "X2")) (subpath (param "X3")) (subpath (param "X4")) (subpath (param "X5")) (subpath (param "X6")) (subpath (param "X7")) (subpath (param "X8")) (subpath (param "X9")) (subpath (param "X10")) (subpath (param "X11")) (subpath (param "X12")) (subpath (param "X13")) (subpath (param "X14")) (subpath (param "X15")) (subpath (param "X16")) (subpath (param "X17")) (subpath (param "X18")) (subpath (param "X19")) (subpath (param "X20")) (subpath (param "X21")) (subpath (param "X22")) (subpath (param "X23")) (subpath (param "X24")) (with message "$TAG"))
+(allow file-read-data file-read-xattr (literal (param "LOG")))
+params:
+  C:
+    $BASE/cargo-moved/git
+    $BASE/cargo-moved/registry
+    $HOME/go/pkg/mod
+  F:
+    $BASE/cargo-moved/.global-cache
+    $BASE/cargo-moved/.global-cache-journal
+    $BASE/cargo-moved/.global-cache-shm
+    $BASE/cargo-moved/.global-cache-wal
+    $BASE/cargo-moved/.package-cache
+    $BASE/cargo-moved/.package-cache-mutate
+    $BASE/cargo-moved/git/CACHEDIR.TAG
+    $BASE/cargo-moved/registry/CACHEDIR.TAG
+  HOME:
+    $HOME
+  K:
+    $BASE/tmp/zellij-501
+    $TMP/tmux-501
+  LOG:
+    $STATE/tarae.log
+  R:
+    $HOME/.CFUserTextEncoding
+    $HOME/.cargo
+    $HOME/.config/git
+    $HOME/.config/pip/pip.conf
+    $HOME/.gitconfig
+    $HOME/.m2/repository
+    $HOME/.m2/wrapper
+    $HOME/.npm
+    $HOME/.pip/pip.conf
+    $HOME/.rustup
+    $HOME/Library/Application Support/go
+    $HOME/Library/Application Support/pip/pip.conf
+    $HOME/Library/Fonts
+    $HOME/Library/Java/JavaVirtualMachines
+    $HOME/go
+    $HOME/go/pkg/mod
+    $HOME/work/.cargo/config
+    $HOME/work/.cargo/config.toml
+  ROOT:
+    $ROOT
+  RUN:
+    $RUN
+  T:
+    $HOME/.config/pip/pip.conf
+    $HOME/.gitconfig
+    $HOME/Library/Application Support/go/env
+  W:
+    $BASE/tmp
+    $HOME/.cache/tarae/run-homes/go-build/$KEY
+    $TMP
+  X:
+    $BASE/cargo-moved/credentials
+    $BASE/cargo-moved/credentials.toml
+    $BASE/gradle-moved/daemon
+    $HOME/.aws
+    $HOME/.cargo/credentials
+    $HOME/.cargo/credentials.toml
+    $HOME/.claude
+    $HOME/.claude.json
+    $HOME/.claude.json.backup
+    $HOME/.config/gh
+    $HOME/.config/git/credentials
+    $HOME/.docker
+    $HOME/.git-credentials
+    $HOME/.gnupg
+    $HOME/.gradle/daemon
+    $HOME/.kube
+    $HOME/.netrc
+    $HOME/.npmrc
+    $HOME/.password-store
+    $HOME/.pypirc
+    $HOME/.ssh
+    $HOME/Library/Caches/go-build
+    $HOME/Library/Keychains
+    $HOME/gocache
+    $STATE
+write:
+    $BASE/tmp
+    $HOME/.cache/tarae/run-homes/go-build/$KEY
+    $TMP
+files:
+    $BASE/cargo-moved/.global-cache
+    $BASE/cargo-moved/.global-cache-journal
+    $BASE/cargo-moved/.global-cache-shm
+    $BASE/cargo-moved/.global-cache-wal
+    $BASE/cargo-moved/.package-cache
+    $BASE/cargo-moved/.package-cache-mutate
+    $BASE/cargo-moved/git/CACHEDIR.TAG
+    $BASE/cargo-moved/registry/CACHEDIR.TAG
+keep:
+    $BASE/tmp/zellij-501
+    $TMP/tmux-501
+caches:
+    $BASE/cargo-moved/git
+    $BASE/cargo-moved/registry
+    $HOME/go/pkg/mod
+refused:
+    $HOME/.cargo/build/ab/cdef0123 — cargo's build-dir — it isn't in the checkout, its own build dir under cargo's home, or a temp folder
+    $HOME/elsewhere — cargo's target-dir — it isn't in the checkout, its own build dir under cargo's home, or a temp folder
+reads.home:
+    $HOME
+reads.allow:
+    $HOME/.CFUserTextEncoding
+    $HOME/.cargo
+    $HOME/.config/git
+    $HOME/.config/pip/pip.conf
+    $HOME/.gitconfig
+    $HOME/.m2/repository
+    $HOME/.m2/wrapper
+    $HOME/.npm
+    $HOME/.pip/pip.conf
+    $HOME/.rustup
+    $HOME/Library/Application Support/go
+    $HOME/Library/Application Support/pip/pip.conf
+    $HOME/Library/Fonts
+    $HOME/Library/Java/JavaVirtualMachines
+    $HOME/go
+    $HOME/go/pkg/mod
+    $HOME/work/.cargo/config
+    $HOME/work/.cargo/config.toml
+reads.kept:
+    $BASE/cargo-moved/credentials
+    $BASE/cargo-moved/credentials.toml
+    $BASE/gradle-moved/daemon
+    $HOME/.aws
+    $HOME/.cargo/credentials
+    $HOME/.cargo/credentials.toml
+    $HOME/.claude
+    $HOME/.claude.json
+    $HOME/.claude.json.backup
+    $HOME/.config/gh
+    $HOME/.config/git/credentials
+    $HOME/.docker
+    $HOME/.git-credentials
+    $HOME/.gnupg
+    $HOME/.gradle/daemon
+    $HOME/.kube
+    $HOME/.netrc
+    $HOME/.npmrc
+    $HOME/.password-store
+    $HOME/.pypirc
+    $HOME/.ssh
+    $HOME/Library/Caches/go-build
+    $HOME/Library/Keychains
+    $HOME/gocache
+    $STATE
+reads.log:
+    $STATE/tarae.log
+copies.env:
+    GIT_CONFIG_GLOBAL=$RUN/settings/gitconfig
+    GOENV=$RUN/settings/goenv
+    NPM_CONFIG_USERCONFIG=$RUN/settings/npmrc
+    PIP_CONFIG_FILE=$RUN/settings/pip.conf
+copies.hidden:
+    $HOME/.config/pip/pip.conf ($PIP_CONFIG_FILE)
+    $HOME/.gitconfig ($GIT_CONFIG_GLOBAL)
+    $HOME/Library/Application Support/go/env ($GOENV)
+copies.left_out:
+    $HOME/.config/pip/pip.conf ($PIP_CONFIG_FILE)
+    $HOME/.gitconfig ($GIT_CONFIG_GLOBAL)
+    $HOME/.npmrc ($NPM_CONFIG_USERCONFIG)
+    $HOME/Library/Application Support/go/env ($GOENV)
+copies.told:
+run env:
+    GOCACHE=$HOME/.cache/tarae/run-homes/go-build/$KEY
+    GOTOOLCHAIN=local
+    GRADLE_OPTS=-Xmx1g -Dorg.gradle.daemon=false
+    GRADLE_USER_HOME=$RUN/gradle
+    npm_config_logs_dir=$RUN
+tool homes:
+    gradle $BASE/gradle-moved
+══ Mac: network open, port 9
+profile:
+(version 1)
+(allow default)
+(deny file-write* (with message "$TAG"))
+(allow file-write* (require-all (subpath (param "ROOT"))))
+(allow file-write* (subpath (param "RUN")) (subpath (param "W0")) (subpath (param "W1")) (subpath (param "W2")) (subpath (param "W3")) (subpath (param "W4")) (subpath (param "W5")) (subpath (param "W6")))
+(deny file-read-data file-read-xattr (subpath (param "HOME")) (with message "$TAG"))
+(allow file-read-data file-read-xattr (subpath (param "ROOT")) (subpath (param "RUN")) (subpath (param "W0")) (subpath (param "W1")) (subpath (param "W2")) (subpath (param "W3")) (subpath (param "W4")) (subpath (param "W5")) (subpath (param "W6")) (literal (param "F0")) (literal (param "F1")) (literal (param "F2")) (literal (param "F3")) (literal (param "F4")) (literal (param "F5")) (literal (param "F6")) (literal (param "F7")) (literal (param "F8")) (subpath (param "R0")) (subpath (param "R1")) (subpath (param "R2")) (subpath (param "R3")) (subpath (param "R4")) (subpath (param "R5")) (subpath (param "R6")) (subpath (param "R7")) (subpath (param "R8")) (subpath (param "R9")) (subpath (param "R10")) (subpath (param "R11")) (subpath (param "R12")) (subpath (param "R13")) (subpath (param "R14")) (subpath (param "R15")) (subpath (param "R16")) (subpath (param "R17")) (subpath (param "R18")) (subpath (param "R19")))
+(deny file-write* (require-all (subpath (param "ROOT")) (require-any (regex #"^$ROOT-PARTS/(.*/)?([bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]|[bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[gG][rR][aA][dD][lL][eE]\.[pP][rR][oO][pP][eE][rR][tT][iI][eE][sS]|[gG][rR][aA][dD][lL][eE][wW]|[gG][rR][aA][dD][lL][eE]/[wW][rR][aA][pP][pP][eE][rR])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?([bB][uU][iI][lL][dD][sS][rR][cC]|[pP][oO][mM]\.[xX][mM][lL]|[mM][vV][nN][wW]|\.[mM][vV][nN]|[pP][aA][cC][kK][aA][gG][eE]\.[jJ][sS][oO][nN]|[mM][aA][kK][eE][fF][iI][lL][eE]|[gG][nN][uU][mM][aA][kK][eE][fF][iI][lL][eE]|[jJ][uU][sS][tT][fF][iI][lL][eE]|\.[jJ][uU][sS][tT][fF][iI][lL][eE]|[bB][uU][iI][lL][dD]\.[rR][sS]|[cC][aA][rR][gG][oO]\.[tT][oO][mM][lL]|\.[cC][aA][rR][gG][oO])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?(\.[tT][aA][rR][aA][eE]\.[tT][oO][mM][lL]|\.[eE][nN][vV][rR][cC]|\.[cC][lL][aA][uU][dD][eE]|\.[gG][iI][tT][hH][uU][bB]|\.[vV][sS][cC][oO][dD][eE]|\.[tT][aA][rR][aA][eE]\.[lL][oO][cC][aA][lL]\.[tT][oO][mM][lL]|\.[gG][iI][tT])(/|$)")) (require-not (require-any (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/(.*/)?([bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]|[bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[gG][rR][aA][dD][lL][eE]\.[pP][rR][oO][pP][eE][rR][tT][iI][eE][sS]|[gG][rR][aA][dD][lL][eE][wW]|[gG][rR][aA][dD][lL][eE]/[wW][rR][aA][pP][pP][eE][rR])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/(.*/)?([bB][uU][iI][lL][dD][sS][rR][cC]|[pP][oO][mM]\.[xX][mM][lL]|[mM][vV][nN][wW]|\.[mM][vV][nN]|[pP][aA][cC][kK][aA][gG][eE]\.[jJ][sS][oO][nN]|[mM][aA][kK][eE][fF][iI][lL][eE]|[gG][nN][uU][mM][aA][kK][eE][fF][iI][lL][eE]|[jJ][uU][sS][tT][fF][iI][lL][eE]|\.[jJ][uU][sS][tT][fF][iI][lL][eE]|[bB][uU][iI][lL][dD]\.[rR][sS]|[cC][aA][rR][gG][oO]\.[tT][oO][mM][lL]|\.[cC][aA][rR][gG][oO])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/(.*/)?(\.[tT][aA][rR][aA][eE]\.[tT][oO][mM][lL]|\.[eE][nN][vV][rR][cC]|\.[cC][lL][aA][uU][dD][eE]|\.[gG][iI][tT][hH][uU][bB]|\.[vV][sS][cC][oO][dD][eE]|\.[tT][aA][rR][aA][eE]\.[lL][oO][cC][aA][lL]\.[tT][oO][mM][lL]|\.[gG][iI][tT])(/|$)")))) (with message "$TAG"))
+(deny file-write* (subpath (param "K0")) (subpath (param "K1")) (with message "$TAG"))
+(allow file-write* (literal (param "F0")) (literal (param "F1")) (literal (param "F2")) (literal (param "F3")) (literal (param "F4")) (literal (param "F5")) (literal (param "F6")) (literal (param "F7")) (literal (param "F8")))
+(allow file-write* (literal "/dev/null") (literal "/dev/zero") (literal "/dev/tty") (literal "/dev/ptmx") (literal "/dev/dtracehelper") (regex #"^/dev/ttys[0-9]+$") (subpath "/dev/fd"))
+(deny network-outbound (remote ip "localhost:2375") (remote ip "localhost:2376") (remote ip "localhost:4243") (remote ip "localhost:8888") (remote ip "localhost:9222") (remote ip "localhost:9229") (remote ip "localhost:6379") (remote ip "localhost:2379") (remote ip "localhost:6443") (remote ip "localhost:10250") (with message "$TAG"))
+(deny network-bind network-inbound (local unix-socket) (with message "$TAG"))
+(deny network-outbound (remote unix-socket) (with message "$TAG"))
+(allow network-bind network-inbound (require-all (local unix-socket) (require-any (subpath (param "ROOT")) (subpath (param "RUN")))))
+(allow network-outbound (require-all (remote unix-socket) (require-any (subpath (param "ROOT")) (subpath (param "RUN")))))
+(deny appleevent-send (with message "$TAG"))
+(deny mach-lookup (global-name "com.apple.coreservices.launchservicesd") (global-name-regex #"^com\.apple\.lsd\.") (with message "$TAG"))
+(deny mach-lookup (global-name-regex #"^com\.apple\.pasteboard\.") (global-name "com.apple.SecurityServer") (global-name "com.apple.securityd") (with message "$TAG"))
+(deny file-read-data file-read-xattr (literal (param "T0")) (literal (param "T1")) (literal (param "T2")) (with message "$TAG"))
+(deny file-read-data file-read-xattr (subpath (param "X0")) (subpath (param "X1")) (subpath (param "X2")) (subpath (param "X3")) (subpath (param "X4")) (subpath (param "X5")) (subpath (param "X6")) (subpath (param "X7")) (subpath (param "X8")) (subpath (param "X9")) (subpath (param "X10")) (subpath (param "X11")) (subpath (param "X12")) (subpath (param "X13")) (subpath (param "X14")) (subpath (param "X15")) (subpath (param "X16")) (subpath (param "X17")) (subpath (param "X18")) (subpath (param "X19")) (subpath (param "X20")) (subpath (param "X21")) (with message "$TAG"))
+(allow file-read-data file-read-xattr (literal (param "LOG")))
+params:
+  F:
+    $HOME/.cargo/.global-cache
+    $HOME/.cargo/.global-cache-journal
+    $HOME/.cargo/.global-cache-shm
+    $HOME/.cargo/.global-cache-wal
+    $HOME/.cargo/.package-cache
+    $HOME/.cargo/.package-cache-mutate
+    $HOME/.cargo/git/CACHEDIR.TAG
+    $HOME/.cargo/registry/CACHEDIR.TAG
+    $HOME/.gradle/wrapper/dists/gradle-8.10-bin/abc123/gradle-8.10-bin.zip.lck
+  HOME:
+    $HOME
+  K:
+    $BASE/tmp/zellij-501
+    $TMP/tmux-501
+  LOG:
+    $STATE/tarae.log
+  R:
+    $HOME/.CFUserTextEncoding
+    $HOME/.cargo
+    $HOME/.config/git
+    $HOME/.config/pip/pip.conf
+    $HOME/.gitconfig
+    $HOME/.gradle/caches/modules-2
+    $HOME/.gradle/wrapper/dists
+    $HOME/.m2/repository
+    $HOME/.m2/wrapper
+    $HOME/.npm
+    $HOME/.pip/pip.conf
+    $HOME/.rustup
+    $HOME/Library/Application Support/go
+    $HOME/Library/Application Support/pip/pip.conf
+    $HOME/Library/Fonts
+    $HOME/Library/Java/JavaVirtualMachines
+    $HOME/go
+    $HOME/go/pkg/mod
+    $HOME/work/.cargo/config
+    $HOME/work/.cargo/config.toml
+  ROOT:
+    $ROOT
+  RUN:
+    $RUN
+  T:
+    $HOME/.config/pip/pip.conf
+    $HOME/.gitconfig
+    $HOME/Library/Application Support/go/env
+  W:
+    $BASE/tmp
+    $HOME/.cache/tarae/run-homes/go-build/$KEY
+    $HOME/.cargo/build/ab/cdef0123
+    $HOME/.cargo/git
+    $HOME/.cargo/registry
+    $HOME/go/pkg/mod
+    $TMP
+  X:
+    $HOME/.aws
+    $HOME/.cargo/credentials
+    $HOME/.cargo/credentials.toml
+    $HOME/.claude
+    $HOME/.claude.json
+    $HOME/.claude.json.backup
+    $HOME/.config/gh
+    $HOME/.config/git/credentials
+    $HOME/.docker
+    $HOME/.git-credentials
+    $HOME/.gnupg
+    $HOME/.gradle/daemon
+    $HOME/.kube
+    $HOME/.netrc
+    $HOME/.npmrc
+    $HOME/.password-store
+    $HOME/.pypirc
+    $HOME/.ssh
+    $HOME/Library/Caches/go-build
+    $HOME/Library/Keychains
+    $HOME/gocache
+    $STATE
+write:
+    $BASE/tmp
+    $HOME/.cache/tarae/run-homes/go-build/$KEY
+    $HOME/.cargo/build/ab/cdef0123
+    $HOME/.cargo/git
+    $HOME/.cargo/registry
+    $HOME/go/pkg/mod
+    $TMP
+files:
+    $HOME/.cargo/.global-cache
+    $HOME/.cargo/.global-cache-journal
+    $HOME/.cargo/.global-cache-shm
+    $HOME/.cargo/.global-cache-wal
+    $HOME/.cargo/.package-cache
+    $HOME/.cargo/.package-cache-mutate
+    $HOME/.cargo/git/CACHEDIR.TAG
+    $HOME/.cargo/registry/CACHEDIR.TAG
+    $HOME/.gradle/wrapper/dists/gradle-8.10-bin/abc123/gradle-8.10-bin.zip.lck
+keep:
+    $BASE/tmp/zellij-501
+    $TMP/tmux-501
+caches:
+refused:
+    $HOME/elsewhere — cargo's target-dir — it isn't in the checkout, its own build dir under cargo's home, or a temp folder
+reads.home:
+    $HOME
+reads.allow:
+    $HOME/.CFUserTextEncoding
+    $HOME/.cargo
+    $HOME/.config/git
+    $HOME/.config/pip/pip.conf
+    $HOME/.gitconfig
+    $HOME/.gradle/caches/modules-2
+    $HOME/.gradle/wrapper/dists
+    $HOME/.m2/repository
+    $HOME/.m2/wrapper
+    $HOME/.npm
+    $HOME/.pip/pip.conf
+    $HOME/.rustup
+    $HOME/Library/Application Support/go
+    $HOME/Library/Application Support/pip/pip.conf
+    $HOME/Library/Fonts
+    $HOME/Library/Java/JavaVirtualMachines
+    $HOME/go
+    $HOME/go/pkg/mod
+    $HOME/work/.cargo/config
+    $HOME/work/.cargo/config.toml
+reads.kept:
+    $HOME/.aws
+    $HOME/.cargo/credentials
+    $HOME/.cargo/credentials.toml
+    $HOME/.claude
+    $HOME/.claude.json
+    $HOME/.claude.json.backup
+    $HOME/.config/gh
+    $HOME/.config/git/credentials
+    $HOME/.docker
+    $HOME/.git-credentials
+    $HOME/.gnupg
+    $HOME/.gradle/daemon
+    $HOME/.kube
+    $HOME/.netrc
+    $HOME/.npmrc
+    $HOME/.password-store
+    $HOME/.pypirc
+    $HOME/.ssh
+    $HOME/Library/Caches/go-build
+    $HOME/Library/Keychains
+    $HOME/gocache
+    $STATE
+reads.log:
+    $STATE/tarae.log
+copies.env:
+    GIT_CONFIG_GLOBAL=$RUN/settings/gitconfig
+    GOENV=$RUN/settings/goenv
+    NPM_CONFIG_USERCONFIG=$RUN/settings/npmrc
+    PIP_CONFIG_FILE=$RUN/settings/pip.conf
+copies.hidden:
+    $HOME/.config/pip/pip.conf ($PIP_CONFIG_FILE)
+    $HOME/.gitconfig ($GIT_CONFIG_GLOBAL)
+    $HOME/Library/Application Support/go/env ($GOENV)
+copies.left_out:
+    $HOME/.config/pip/pip.conf ($PIP_CONFIG_FILE)
+    $HOME/.gitconfig ($GIT_CONFIG_GLOBAL)
+    $HOME/.npmrc ($NPM_CONFIG_USERCONFIG)
+    $HOME/Library/Application Support/go/env ($GOENV)
+copies.told:
+    $HOME/.cargo/config.toml
+run env:
+    GOCACHE=$HOME/.cache/tarae/run-homes/go-build/$KEY
+    GOTOOLCHAIN=local
+    GRADLE_OPTS=-Dorg.gradle.daemon=false
+    GRADLE_RO_DEP_CACHE=$HOME/.gradle/caches
+    GRADLE_USER_HOME=$RUN/gradle
+    npm_config_logs_dir=$RUN
+tool homes:
+    gradle $HOME/.gradle
+══ Linux: homes at their defaults
+profile:
+(version 1)
+(allow default)
+(deny file-write* (with message "$TAG"))
+(allow file-write* (require-all (subpath (param "ROOT"))))
+(allow file-write* (subpath (param "RUN")) (subpath (param "W0")) (subpath (param "W1")) (subpath (param "W2")) (subpath (param "W3")))
+(deny file-read-data file-read-xattr (subpath (param "HOME")) (with message "$TAG"))
+(allow file-read-data file-read-xattr (subpath (param "ROOT")) (subpath (param "RUN")) (subpath (param "W0")) (subpath (param "W1")) (subpath (param "W2")) (subpath (param "W3")) (literal (param "F0")) (literal (param "F1")) (literal (param "F2")) (literal (param "F3")) (literal (param "F4")) (literal (param "F5")) (literal (param "F6")) (literal (param "F7")) (literal (param "F8")) (subpath (param "R0")) (subpath (param "R1")) (subpath (param "R2")) (subpath (param "R3")) (subpath (param "R4")) (subpath (param "R5")) (subpath (param "R6")) (subpath (param "R7")) (subpath (param "R8")) (subpath (param "R9")) (subpath (param "R10")) (subpath (param "R11")) (subpath (param "R12")) (subpath (param "R13")) (subpath (param "R14")) (subpath (param "R15")) (subpath (param "R16")) (subpath (param "R17")) (subpath (param "R18")) (subpath (param "R19")))
+(deny file-write* (require-all (subpath (param "ROOT")) (require-any (regex #"^$ROOT-PARTS/(.*/)?([bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]|[bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[gG][rR][aA][dD][lL][eE]\.[pP][rR][oO][pP][eE][rR][tT][iI][eE][sS]|[gG][rR][aA][dD][lL][eE][wW]|[gG][rR][aA][dD][lL][eE]/[wW][rR][aA][pP][pP][eE][rR])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?([bB][uU][iI][lL][dD][sS][rR][cC]|[pP][oO][mM]\.[xX][mM][lL]|[mM][vV][nN][wW]|\.[mM][vV][nN]|[pP][aA][cC][kK][aA][gG][eE]\.[jJ][sS][oO][nN]|[mM][aA][kK][eE][fF][iI][lL][eE]|[gG][nN][uU][mM][aA][kK][eE][fF][iI][lL][eE]|[jJ][uU][sS][tT][fF][iI][lL][eE]|\.[jJ][uU][sS][tT][fF][iI][lL][eE]|[bB][uU][iI][lL][dD]\.[rR][sS]|[cC][aA][rR][gG][oO]\.[tT][oO][mM][lL]|\.[cC][aA][rR][gG][oO])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?(\.[tT][aA][rR][aA][eE]\.[tT][oO][mM][lL]|\.[eE][nN][vV][rR][cC]|\.[cC][lL][aA][uU][dD][eE]|\.[gG][iI][tT][hH][uU][bB]|\.[vV][sS][cC][oO][dD][eE]|\.[tT][aA][rR][aA][eE]\.[lL][oO][cC][aA][lL]\.[tT][oO][mM][lL]|\.[gG][iI][tT])(/|$)")) (require-not (require-any (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/(.*/)?([bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]|[bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[gG][rR][aA][dD][lL][eE]\.[pP][rR][oO][pP][eE][rR][tT][iI][eE][sS]|[gG][rR][aA][dD][lL][eE][wW]|[gG][rR][aA][dD][lL][eE]/[wW][rR][aA][pP][pP][eE][rR])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/(.*/)?([bB][uU][iI][lL][dD][sS][rR][cC]|[pP][oO][mM]\.[xX][mM][lL]|[mM][vV][nN][wW]|\.[mM][vV][nN]|[pP][aA][cC][kK][aA][gG][eE]\.[jJ][sS][oO][nN]|[mM][aA][kK][eE][fF][iI][lL][eE]|[gG][nN][uU][mM][aA][kK][eE][fF][iI][lL][eE]|[jJ][uU][sS][tT][fF][iI][lL][eE]|\.[jJ][uU][sS][tT][fF][iI][lL][eE]|[bB][uU][iI][lL][dD]\.[rR][sS]|[cC][aA][rR][gG][oO]\.[tT][oO][mM][lL]|\.[cC][aA][rR][gG][oO])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/(.*/)?(\.[tT][aA][rR][aA][eE]\.[tT][oO][mM][lL]|\.[eE][nN][vV][rR][cC]|\.[cC][lL][aA][uU][dD][eE]|\.[gG][iI][tT][hH][uU][bB]|\.[vV][sS][cC][oO][dD][eE]|\.[tT][aA][rR][aA][eE]\.[lL][oO][cC][aA][lL]\.[tT][oO][mM][lL]|\.[gG][iI][tT])(/|$)")))) (with message "$TAG"))
+(deny file-write* (subpath (param "K0")) (subpath (param "K1")) (subpath (param "C0")) (subpath (param "C1")) (subpath (param "C2")) (with message "$TAG"))
+(allow file-write* (literal (param "F0")) (literal (param "F1")) (literal (param "F2")) (literal (param "F3")) (literal (param "F4")) (literal (param "F5")) (literal (param "F6")) (literal (param "F7")) (literal (param "F8")))
+(allow file-write-xattr (require-all (require-any (literal (param "C0")) (literal (param "C1"))) (xattr "com.apple.fileprovider.ignore#P")))
+(allow file-write* (literal "/dev/null") (literal "/dev/zero") (literal "/dev/tty") (literal "/dev/ptmx") (literal "/dev/dtracehelper") (regex #"^/dev/ttys[0-9]+$") (subpath "/dev/fd"))
+(deny network* (with message "$TAG"))
+(allow network-bind network-inbound (local ip "localhost:*"))
+(deny network-bind network-inbound (local unix-socket) (with message "$TAG"))
+(deny network-outbound (remote unix-socket) (with message "$TAG"))
+(allow network-bind network-inbound (require-all (local unix-socket) (require-any (subpath (param "ROOT")) (subpath (param "RUN")))))
+(allow network-outbound (require-all (remote unix-socket) (require-any (subpath (param "ROOT")) (subpath (param "RUN")))))
+(deny appleevent-send (with message "$TAG"))
+(deny mach-lookup (global-name "com.apple.coreservices.launchservicesd") (global-name-regex #"^com\.apple\.lsd\.") (with message "$TAG"))
+(deny mach-lookup (global-name-regex #"^com\.apple\.pasteboard\.") (global-name "com.apple.SecurityServer") (global-name "com.apple.securityd") (with message "$TAG"))
+(deny file-read-data file-read-xattr (literal (param "T0")) (literal (param "T1")) (literal (param "T2")) (with message "$TAG"))
+(deny file-read-data file-read-xattr (subpath (param "X0")) (subpath (param "X1")) (subpath (param "X2")) (subpath (param "X3")) (subpath (param "X4")) (subpath (param "X5")) (subpath (param "X6")) (subpath (param "X7")) (subpath (param "X8")) (subpath (param "X9")) (subpath (param "X10")) (subpath (param "X11")) (subpath (param "X12")) (subpath (param "X13")) (subpath (param "X14")) (subpath (param "X15")) (subpath (param "X16")) (subpath (param "X17")) (subpath (param "X18")) (subpath (param "X19")) (subpath (param "X20")) (subpath (param "X21")) (with message "$TAG"))
+(allow file-read-data file-read-xattr (literal (param "LOG")))
+params:
+  C:
+    $HOME/.cargo/git
+    $HOME/.cargo/registry
+    $HOME/go/pkg/mod
+  F:
+    $HOME/.cargo/.global-cache
+    $HOME/.cargo/.global-cache-journal
+    $HOME/.cargo/.global-cache-shm
+    $HOME/.cargo/.global-cache-wal
+    $HOME/.cargo/.package-cache
+    $HOME/.cargo/.package-cache-mutate
+    $HOME/.cargo/git/CACHEDIR.TAG
+    $HOME/.cargo/registry/CACHEDIR.TAG
+    $HOME/.gradle/wrapper/dists/gradle-8.10-bin/abc123/gradle-8.10-bin.zip.lck
+  HOME:
+    $HOME
+  K:
+    $BASE/tmp/zellij-501
+    $TMP/tmux-501
+  LOG:
+    $STATE/tarae.log
+  R:
+    $HOME/.CFUserTextEncoding
+    $HOME/.cargo
+    $HOME/.config/git
+    $HOME/.config/go
+    $HOME/.config/pip/pip.conf
+    $HOME/.gitconfig
+    $HOME/.gradle/caches/modules-2
+    $HOME/.gradle/wrapper/dists
+    $HOME/.m2/repository
+    $HOME/.m2/wrapper
+    $HOME/.npm
+    $HOME/.pip/pip.conf
+    $HOME/.rustup
+    $HOME/Library/Application Support/pip/pip.conf
+    $HOME/Library/Fonts
+    $HOME/Library/Java/JavaVirtualMachines
+    $HOME/go
+    $HOME/go/pkg/mod
+    $HOME/work/.cargo/config
+    $HOME/work/.cargo/config.toml
+  ROOT:
+    $ROOT
+  RUN:
+    $RUN
+  T:
+    $HOME/.config/go/env
+    $HOME/.config/pip/pip.conf
+    $HOME/.gitconfig
+  W:
+    $BASE/tmp
+    $HOME/.cache/tarae/run-homes/go-build/$KEY
+    $HOME/.cargo/build/ab/cdef0123
+    $TMP
+  X:
+    $HOME/.aws
+    $HOME/.cache/go-build
+    $HOME/.cargo/credentials
+    $HOME/.cargo/credentials.toml
+    $HOME/.claude
+    $HOME/.claude.json
+    $HOME/.claude.json.backup
+    $HOME/.config/gh
+    $HOME/.config/git/credentials
+    $HOME/.docker
+    $HOME/.git-credentials
+    $HOME/.gnupg
+    $HOME/.gradle/daemon
+    $HOME/.kube
+    $HOME/.netrc
+    $HOME/.npmrc
+    $HOME/.password-store
+    $HOME/.pypirc
+    $HOME/.ssh
+    $HOME/Library/Keychains
+    $HOME/gocache
+    $STATE
+write:
+    $BASE/tmp
+    $HOME/.cache/tarae/run-homes/go-build/$KEY
+    $HOME/.cargo/build/ab/cdef0123
+    $TMP
+files:
+    $HOME/.cargo/.global-cache
+    $HOME/.cargo/.global-cache-journal
+    $HOME/.cargo/.global-cache-shm
+    $HOME/.cargo/.global-cache-wal
+    $HOME/.cargo/.package-cache
+    $HOME/.cargo/.package-cache-mutate
+    $HOME/.cargo/git/CACHEDIR.TAG
+    $HOME/.cargo/registry/CACHEDIR.TAG
+    $HOME/.gradle/wrapper/dists/gradle-8.10-bin/abc123/gradle-8.10-bin.zip.lck
+keep:
+    $BASE/tmp/zellij-501
+    $TMP/tmux-501
+caches:
+    $HOME/.cargo/git
+    $HOME/.cargo/registry
+    $HOME/go/pkg/mod
+refused:
+    $HOME/elsewhere — cargo's target-dir — it isn't in the checkout, its own build dir under cargo's home, or a temp folder
+reads.home:
+    $HOME
+reads.allow:
+    $HOME/.CFUserTextEncoding
+    $HOME/.cargo
+    $HOME/.config/git
+    $HOME/.config/go
+    $HOME/.config/pip/pip.conf
+    $HOME/.gitconfig
+    $HOME/.gradle/caches/modules-2
+    $HOME/.gradle/wrapper/dists
+    $HOME/.m2/repository
+    $HOME/.m2/wrapper
+    $HOME/.npm
+    $HOME/.pip/pip.conf
+    $HOME/.rustup
+    $HOME/Library/Application Support/pip/pip.conf
+    $HOME/Library/Fonts
+    $HOME/Library/Java/JavaVirtualMachines
+    $HOME/go
+    $HOME/go/pkg/mod
+    $HOME/work/.cargo/config
+    $HOME/work/.cargo/config.toml
+reads.kept:
+    $HOME/.aws
+    $HOME/.cache/go-build
+    $HOME/.cargo/credentials
+    $HOME/.cargo/credentials.toml
+    $HOME/.claude
+    $HOME/.claude.json
+    $HOME/.claude.json.backup
+    $HOME/.config/gh
+    $HOME/.config/git/credentials
+    $HOME/.docker
+    $HOME/.git-credentials
+    $HOME/.gnupg
+    $HOME/.gradle/daemon
+    $HOME/.kube
+    $HOME/.netrc
+    $HOME/.npmrc
+    $HOME/.password-store
+    $HOME/.pypirc
+    $HOME/.ssh
+    $HOME/Library/Keychains
+    $HOME/gocache
+    $STATE
+reads.log:
+    $STATE/tarae.log
+copies.env:
+    GIT_CONFIG_GLOBAL=$RUN/settings/gitconfig
+    GOENV=$RUN/settings/goenv
+    NPM_CONFIG_USERCONFIG=$RUN/settings/npmrc
+    PIP_CONFIG_FILE=$RUN/settings/pip.conf
+copies.hidden:
+    $HOME/.config/go/env ($GOENV)
+    $HOME/.config/pip/pip.conf ($PIP_CONFIG_FILE)
+    $HOME/.gitconfig ($GIT_CONFIG_GLOBAL)
+copies.left_out:
+    $HOME/.config/go/env ($GOENV)
+    $HOME/.config/pip/pip.conf ($PIP_CONFIG_FILE)
+    $HOME/.gitconfig ($GIT_CONFIG_GLOBAL)
+    $HOME/.npmrc ($NPM_CONFIG_USERCONFIG)
+copies.told:
+    $HOME/.cargo/config.toml
+run env:
+    GOCACHE=$HOME/.cache/tarae/run-homes/go-build/$KEY
+    GOTOOLCHAIN=local
+    GRADLE_OPTS=-Dorg.gradle.daemon=false
+    GRADLE_RO_DEP_CACHE=$HOME/.gradle/caches
+    GRADLE_USER_HOME=$RUN/gradle
+    npm_config_logs_dir=$RUN
+tool homes:
+    gradle $HOME/.gradle
+══ Linux: homes moved
+profile:
+(version 1)
+(allow default)
+(deny file-write* (with message "$TAG"))
+(allow file-write* (require-all (subpath (param "ROOT"))))
+(allow file-write* (subpath (param "RUN")) (subpath (param "W0")) (subpath (param "W1")) (subpath (param "W2")))
+(deny file-read-data file-read-xattr (subpath (param "HOME")) (with message "$TAG"))
+(allow file-read-data file-read-xattr (subpath (param "ROOT")) (subpath (param "RUN")) (subpath (param "W0")) (subpath (param "W1")) (subpath (param "W2")) (literal (param "F0")) (literal (param "F1")) (literal (param "F2")) (literal (param "F3")) (literal (param "F4")) (literal (param "F5")) (literal (param "F6")) (literal (param "F7")) (subpath (param "R0")) (subpath (param "R1")) (subpath (param "R2")) (subpath (param "R3")) (subpath (param "R4")) (subpath (param "R5")) (subpath (param "R6")) (subpath (param "R7")) (subpath (param "R8")) (subpath (param "R9")) (subpath (param "R10")) (subpath (param "R11")) (subpath (param "R12")) (subpath (param "R13")) (subpath (param "R14")) (subpath (param "R15")) (subpath (param "R16")) (subpath (param "R17")))
+(deny file-write* (require-all (subpath (param "ROOT")) (require-any (regex #"^$ROOT-PARTS/(.*/)?([bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]|[bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[gG][rR][aA][dD][lL][eE]\.[pP][rR][oO][pP][eE][rR][tT][iI][eE][sS]|[gG][rR][aA][dD][lL][eE][wW]|[gG][rR][aA][dD][lL][eE]/[wW][rR][aA][pP][pP][eE][rR])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?([bB][uU][iI][lL][dD][sS][rR][cC]|[pP][oO][mM]\.[xX][mM][lL]|[mM][vV][nN][wW]|\.[mM][vV][nN]|[pP][aA][cC][kK][aA][gG][eE]\.[jJ][sS][oO][nN]|[mM][aA][kK][eE][fF][iI][lL][eE]|[gG][nN][uU][mM][aA][kK][eE][fF][iI][lL][eE]|[jJ][uU][sS][tT][fF][iI][lL][eE]|\.[jJ][uU][sS][tT][fF][iI][lL][eE]|[bB][uU][iI][lL][dD]\.[rR][sS]|[cC][aA][rR][gG][oO]\.[tT][oO][mM][lL]|\.[cC][aA][rR][gG][oO])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?(\.[tT][aA][rR][aA][eE]\.[tT][oO][mM][lL]|\.[eE][nN][vV][rR][cC]|\.[cC][lL][aA][uU][dD][eE]|\.[gG][iI][tT][hH][uU][bB]|\.[vV][sS][cC][oO][dD][eE]|\.[tT][aA][rR][aA][eE]\.[lL][oO][cC][aA][lL]\.[tT][oO][mM][lL]|\.[gG][iI][tT])(/|$)")) (require-not (require-any (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/(.*/)?([bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]|[bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[gG][rR][aA][dD][lL][eE]\.[pP][rR][oO][pP][eE][rR][tT][iI][eE][sS]|[gG][rR][aA][dD][lL][eE][wW]|[gG][rR][aA][dD][lL][eE]/[wW][rR][aA][pP][pP][eE][rR])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/(.*/)?([bB][uU][iI][lL][dD][sS][rR][cC]|[pP][oO][mM]\.[xX][mM][lL]|[mM][vV][nN][wW]|\.[mM][vV][nN]|[pP][aA][cC][kK][aA][gG][eE]\.[jJ][sS][oO][nN]|[mM][aA][kK][eE][fF][iI][lL][eE]|[gG][nN][uU][mM][aA][kK][eE][fF][iI][lL][eE]|[jJ][uU][sS][tT][fF][iI][lL][eE]|\.[jJ][uU][sS][tT][fF][iI][lL][eE]|[bB][uU][iI][lL][dD]\.[rR][sS]|[cC][aA][rR][gG][oO]\.[tT][oO][mM][lL]|\.[cC][aA][rR][gG][oO])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/(.*/)?(\.[tT][aA][rR][aA][eE]\.[tT][oO][mM][lL]|\.[eE][nN][vV][rR][cC]|\.[cC][lL][aA][uU][dD][eE]|\.[gG][iI][tT][hH][uU][bB]|\.[vV][sS][cC][oO][dD][eE]|\.[tT][aA][rR][aA][eE]\.[lL][oO][cC][aA][lL]\.[tT][oO][mM][lL]|\.[gG][iI][tT])(/|$)")))) (with message "$TAG"))
+(deny file-write* (subpath (param "K0")) (subpath (param "K1")) (subpath (param "C0")) (subpath (param "C1")) (subpath (param "C2")) (with message "$TAG"))
+(allow file-write* (literal (param "F0")) (literal (param "F1")) (literal (param "F2")) (literal (param "F3")) (literal (param "F4")) (literal (param "F5")) (literal (param "F6")) (literal (param "F7")))
+(allow file-write-xattr (require-all (require-any (literal (param "C0")) (literal (param "C1"))) (xattr "com.apple.fileprovider.ignore#P")))
+(allow file-write* (literal "/dev/null") (literal "/dev/zero") (literal "/dev/tty") (literal "/dev/ptmx") (literal "/dev/dtracehelper") (regex #"^/dev/ttys[0-9]+$") (subpath "/dev/fd"))
+(deny network* (with message "$TAG"))
+(allow network-bind network-inbound (local ip "localhost:*"))
+(deny network-bind network-inbound (local unix-socket) (with message "$TAG"))
+(deny network-outbound (remote unix-socket) (with message "$TAG"))
+(allow network-bind network-inbound (require-all (local unix-socket) (require-any (subpath (param "ROOT")) (subpath (param "RUN")))))
+(allow network-outbound (require-all (remote unix-socket) (require-any (subpath (param "ROOT")) (subpath (param "RUN")))))
+(deny appleevent-send (with message "$TAG"))
+(deny mach-lookup (global-name "com.apple.coreservices.launchservicesd") (global-name-regex #"^com\.apple\.lsd\.") (with message "$TAG"))
+(deny mach-lookup (global-name-regex #"^com\.apple\.pasteboard\.") (global-name "com.apple.SecurityServer") (global-name "com.apple.securityd") (with message "$TAG"))
+(deny file-read-data file-read-xattr (literal (param "T0")) (literal (param "T1")) (literal (param "T2")) (with message "$TAG"))
+(deny file-read-data file-read-xattr (subpath (param "X0")) (subpath (param "X1")) (subpath (param "X2")) (subpath (param "X3")) (subpath (param "X4")) (subpath (param "X5")) (subpath (param "X6")) (subpath (param "X7")) (subpath (param "X8")) (subpath (param "X9")) (subpath (param "X10")) (subpath (param "X11")) (subpath (param "X12")) (subpath (param "X13")) (subpath (param "X14")) (subpath (param "X15")) (subpath (param "X16")) (subpath (param "X17")) (subpath (param "X18")) (subpath (param "X19")) (subpath (param "X20")) (subpath (param "X21")) (subpath (param "X22")) (subpath (param "X23")) (subpath (param "X24")) (with message "$TAG"))
+(allow file-read-data file-read-xattr (literal (param "LOG")))
+params:
+  C:
+    $BASE/cargo-moved/git
+    $BASE/cargo-moved/registry
+    $HOME/go/pkg/mod
+  F:
+    $BASE/cargo-moved/.global-cache
+    $BASE/cargo-moved/.global-cache-journal
+    $BASE/cargo-moved/.global-cache-shm
+    $BASE/cargo-moved/.global-cache-wal
+    $BASE/cargo-moved/.package-cache
+    $BASE/cargo-moved/.package-cache-mutate
+    $BASE/cargo-moved/git/CACHEDIR.TAG
+    $BASE/cargo-moved/registry/CACHEDIR.TAG
+  HOME:
+    $HOME
+  K:
+    $BASE/tmp/zellij-501
+    $TMP/tmux-501
+  LOG:
+    $STATE/tarae.log
+  R:
+    $HOME/.CFUserTextEncoding
+    $HOME/.cargo
+    $HOME/.config/git
+    $HOME/.config/go
+    $HOME/.config/pip/pip.conf
+    $HOME/.gitconfig
+    $HOME/.m2/repository
+    $HOME/.m2/wrapper
+    $HOME/.npm
+    $HOME/.pip/pip.conf
+    $HOME/.rustup
+    $HOME/Library/Application Support/pip/pip.conf
+    $HOME/Library/Fonts
+    $HOME/Library/Java/JavaVirtualMachines
+    $HOME/go
+    $HOME/go/pkg/mod
+    $HOME/work/.cargo/config
+    $HOME/work/.cargo/config.toml
+  ROOT:
+    $ROOT
+  RUN:
+    $RUN
+  T:
+    $HOME/.config/go/env
+    $HOME/.config/pip/pip.conf
+    $HOME/.gitconfig
+  W:
+    $BASE/tmp
+    $HOME/.cache/tarae/run-homes/go-build/$KEY
+    $TMP
+  X:
+    $BASE/cargo-moved/credentials
+    $BASE/cargo-moved/credentials.toml
+    $BASE/gradle-moved/daemon
+    $HOME/.aws
+    $HOME/.cache/go-build
+    $HOME/.cargo/credentials
+    $HOME/.cargo/credentials.toml
+    $HOME/.claude
+    $HOME/.claude.json
+    $HOME/.claude.json.backup
+    $HOME/.config/gh
+    $HOME/.config/git/credentials
+    $HOME/.docker
+    $HOME/.git-credentials
+    $HOME/.gnupg
+    $HOME/.gradle/daemon
+    $HOME/.kube
+    $HOME/.netrc
+    $HOME/.npmrc
+    $HOME/.password-store
+    $HOME/.pypirc
+    $HOME/.ssh
+    $HOME/Library/Keychains
+    $HOME/gocache
+    $STATE
+write:
+    $BASE/tmp
+    $HOME/.cache/tarae/run-homes/go-build/$KEY
+    $TMP
+files:
+    $BASE/cargo-moved/.global-cache
+    $BASE/cargo-moved/.global-cache-journal
+    $BASE/cargo-moved/.global-cache-shm
+    $BASE/cargo-moved/.global-cache-wal
+    $BASE/cargo-moved/.package-cache
+    $BASE/cargo-moved/.package-cache-mutate
+    $BASE/cargo-moved/git/CACHEDIR.TAG
+    $BASE/cargo-moved/registry/CACHEDIR.TAG
+keep:
+    $BASE/tmp/zellij-501
+    $TMP/tmux-501
+caches:
+    $BASE/cargo-moved/git
+    $BASE/cargo-moved/registry
+    $HOME/go/pkg/mod
+refused:
+    $HOME/.cargo/build/ab/cdef0123 — cargo's build-dir — it isn't in the checkout, its own build dir under cargo's home, or a temp folder
+    $HOME/elsewhere — cargo's target-dir — it isn't in the checkout, its own build dir under cargo's home, or a temp folder
+reads.home:
+    $HOME
+reads.allow:
+    $HOME/.CFUserTextEncoding
+    $HOME/.cargo
+    $HOME/.config/git
+    $HOME/.config/go
+    $HOME/.config/pip/pip.conf
+    $HOME/.gitconfig
+    $HOME/.m2/repository
+    $HOME/.m2/wrapper
+    $HOME/.npm
+    $HOME/.pip/pip.conf
+    $HOME/.rustup
+    $HOME/Library/Application Support/pip/pip.conf
+    $HOME/Library/Fonts
+    $HOME/Library/Java/JavaVirtualMachines
+    $HOME/go
+    $HOME/go/pkg/mod
+    $HOME/work/.cargo/config
+    $HOME/work/.cargo/config.toml
+reads.kept:
+    $BASE/cargo-moved/credentials
+    $BASE/cargo-moved/credentials.toml
+    $BASE/gradle-moved/daemon
+    $HOME/.aws
+    $HOME/.cache/go-build
+    $HOME/.cargo/credentials
+    $HOME/.cargo/credentials.toml
+    $HOME/.claude
+    $HOME/.claude.json
+    $HOME/.claude.json.backup
+    $HOME/.config/gh
+    $HOME/.config/git/credentials
+    $HOME/.docker
+    $HOME/.git-credentials
+    $HOME/.gnupg
+    $HOME/.gradle/daemon
+    $HOME/.kube
+    $HOME/.netrc
+    $HOME/.npmrc
+    $HOME/.password-store
+    $HOME/.pypirc
+    $HOME/.ssh
+    $HOME/Library/Keychains
+    $HOME/gocache
+    $STATE
+reads.log:
+    $STATE/tarae.log
+copies.env:
+    GIT_CONFIG_GLOBAL=$RUN/settings/gitconfig
+    GOENV=$RUN/settings/goenv
+    NPM_CONFIG_USERCONFIG=$RUN/settings/npmrc
+    PIP_CONFIG_FILE=$RUN/settings/pip.conf
+copies.hidden:
+    $HOME/.config/go/env ($GOENV)
+    $HOME/.config/pip/pip.conf ($PIP_CONFIG_FILE)
+    $HOME/.gitconfig ($GIT_CONFIG_GLOBAL)
+copies.left_out:
+    $HOME/.config/go/env ($GOENV)
+    $HOME/.config/pip/pip.conf ($PIP_CONFIG_FILE)
+    $HOME/.gitconfig ($GIT_CONFIG_GLOBAL)
+    $HOME/.npmrc ($NPM_CONFIG_USERCONFIG)
+copies.told:
+run env:
+    GOCACHE=$HOME/.cache/tarae/run-homes/go-build/$KEY
+    GOTOOLCHAIN=local
+    GRADLE_OPTS=-Xmx1g -Dorg.gradle.daemon=false
+    GRADLE_USER_HOME=$RUN/gradle
+    npm_config_logs_dir=$RUN
+tool homes:
+    gradle $BASE/gradle-moved
+══ Linux: network open, port 9
+profile:
+(version 1)
+(allow default)
+(deny file-write* (with message "$TAG"))
+(allow file-write* (require-all (subpath (param "ROOT"))))
+(allow file-write* (subpath (param "RUN")) (subpath (param "W0")) (subpath (param "W1")) (subpath (param "W2")) (subpath (param "W3")) (subpath (param "W4")) (subpath (param "W5")) (subpath (param "W6")))
+(deny file-read-data file-read-xattr (subpath (param "HOME")) (with message "$TAG"))
+(allow file-read-data file-read-xattr (subpath (param "ROOT")) (subpath (param "RUN")) (subpath (param "W0")) (subpath (param "W1")) (subpath (param "W2")) (subpath (param "W3")) (subpath (param "W4")) (subpath (param "W5")) (subpath (param "W6")) (literal (param "F0")) (literal (param "F1")) (literal (param "F2")) (literal (param "F3")) (literal (param "F4")) (literal (param "F5")) (literal (param "F6")) (literal (param "F7")) (literal (param "F8")) (subpath (param "R0")) (subpath (param "R1")) (subpath (param "R2")) (subpath (param "R3")) (subpath (param "R4")) (subpath (param "R5")) (subpath (param "R6")) (subpath (param "R7")) (subpath (param "R8")) (subpath (param "R9")) (subpath (param "R10")) (subpath (param "R11")) (subpath (param "R12")) (subpath (param "R13")) (subpath (param "R14")) (subpath (param "R15")) (subpath (param "R16")) (subpath (param "R17")) (subpath (param "R18")) (subpath (param "R19")))
+(deny file-write* (require-all (subpath (param "ROOT")) (require-any (regex #"^$ROOT-PARTS/(.*/)?([bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]|[bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[gG][rR][aA][dD][lL][eE]\.[pP][rR][oO][pP][eE][rR][tT][iI][eE][sS]|[gG][rR][aA][dD][lL][eE][wW]|[gG][rR][aA][dD][lL][eE]/[wW][rR][aA][pP][pP][eE][rR])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?([bB][uU][iI][lL][dD][sS][rR][cC]|[pP][oO][mM]\.[xX][mM][lL]|[mM][vV][nN][wW]|\.[mM][vV][nN]|[pP][aA][cC][kK][aA][gG][eE]\.[jJ][sS][oO][nN]|[mM][aA][kK][eE][fF][iI][lL][eE]|[gG][nN][uU][mM][aA][kK][eE][fF][iI][lL][eE]|[jJ][uU][sS][tT][fF][iI][lL][eE]|\.[jJ][uU][sS][tT][fF][iI][lL][eE]|[bB][uU][iI][lL][dD]\.[rR][sS]|[cC][aA][rR][gG][oO]\.[tT][oO][mM][lL]|\.[cC][aA][rR][gG][oO])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?(\.[tT][aA][rR][aA][eE]\.[tT][oO][mM][lL]|\.[eE][nN][vV][rR][cC]|\.[cC][lL][aA][uU][dD][eE]|\.[gG][iI][tT][hH][uU][bB]|\.[vV][sS][cC][oO][dD][eE]|\.[tT][aA][rR][aA][eE]\.[lL][oO][cC][aA][lL]\.[tT][oO][mM][lL]|\.[gG][iI][tT])(/|$)")) (require-not (require-any (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/(.*/)?([bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]|[bB][uU][iI][lL][dD]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]|[sS][eE][tT][tT][iI][nN][gG][sS]\.[gG][rR][aA][dD][lL][eE]\.[kK][tT][sS]|[gG][rR][aA][dD][lL][eE]\.[pP][rR][oO][pP][eE][rR][tT][iI][eE][sS]|[gG][rR][aA][dD][lL][eE][wW]|[gG][rR][aA][dD][lL][eE]/[wW][rR][aA][pP][pP][eE][rR])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/(.*/)?([bB][uU][iI][lL][dD][sS][rR][cC]|[pP][oO][mM]\.[xX][mM][lL]|[mM][vV][nN][wW]|\.[mM][vV][nN]|[pP][aA][cC][kK][aA][gG][eE]\.[jJ][sS][oO][nN]|[mM][aA][kK][eE][fF][iI][lL][eE]|[gG][nN][uU][mM][aA][kK][eE][fF][iI][lL][eE]|[jJ][uU][sS][tT][fF][iI][lL][eE]|\.[jJ][uU][sS][tT][fF][iI][lL][eE]|[bB][uU][iI][lL][dD]\.[rR][sS]|[cC][aA][rR][gG][oO]\.[tT][oO][mM][lL]|\.[cC][aA][rR][gG][oO])(/|$)") (regex #"^$ROOT-PARTS/(.*/)?(node_modules|\.venv|__pycache__|target)/(.*/)?(\.[tT][aA][rR][aA][eE]\.[tT][oO][mM][lL]|\.[eE][nN][vV][rR][cC]|\.[cC][lL][aA][uU][dD][eE]|\.[gG][iI][tT][hH][uU][bB]|\.[vV][sS][cC][oO][dD][eE]|\.[tT][aA][rR][aA][eE]\.[lL][oO][cC][aA][lL]\.[tT][oO][mM][lL]|\.[gG][iI][tT])(/|$)")))) (with message "$TAG"))
+(deny file-write* (subpath (param "K0")) (subpath (param "K1")) (with message "$TAG"))
+(allow file-write* (literal (param "F0")) (literal (param "F1")) (literal (param "F2")) (literal (param "F3")) (literal (param "F4")) (literal (param "F5")) (literal (param "F6")) (literal (param "F7")) (literal (param "F8")))
+(allow file-write* (literal "/dev/null") (literal "/dev/zero") (literal "/dev/tty") (literal "/dev/ptmx") (literal "/dev/dtracehelper") (regex #"^/dev/ttys[0-9]+$") (subpath "/dev/fd"))
+(deny network-outbound (remote ip "localhost:2375") (remote ip "localhost:2376") (remote ip "localhost:4243") (remote ip "localhost:8888") (remote ip "localhost:9222") (remote ip "localhost:9229") (remote ip "localhost:6379") (remote ip "localhost:2379") (remote ip "localhost:6443") (remote ip "localhost:10250") (with message "$TAG"))
+(deny network-bind network-inbound (local unix-socket) (with message "$TAG"))
+(deny network-outbound (remote unix-socket) (with message "$TAG"))
+(allow network-bind network-inbound (require-all (local unix-socket) (require-any (subpath (param "ROOT")) (subpath (param "RUN")))))
+(allow network-outbound (require-all (remote unix-socket) (require-any (subpath (param "ROOT")) (subpath (param "RUN")))))
+(deny appleevent-send (with message "$TAG"))
+(deny mach-lookup (global-name "com.apple.coreservices.launchservicesd") (global-name-regex #"^com\.apple\.lsd\.") (with message "$TAG"))
+(deny mach-lookup (global-name-regex #"^com\.apple\.pasteboard\.") (global-name "com.apple.SecurityServer") (global-name "com.apple.securityd") (with message "$TAG"))
+(deny file-read-data file-read-xattr (literal (param "T0")) (literal (param "T1")) (literal (param "T2")) (with message "$TAG"))
+(deny file-read-data file-read-xattr (subpath (param "X0")) (subpath (param "X1")) (subpath (param "X2")) (subpath (param "X3")) (subpath (param "X4")) (subpath (param "X5")) (subpath (param "X6")) (subpath (param "X7")) (subpath (param "X8")) (subpath (param "X9")) (subpath (param "X10")) (subpath (param "X11")) (subpath (param "X12")) (subpath (param "X13")) (subpath (param "X14")) (subpath (param "X15")) (subpath (param "X16")) (subpath (param "X17")) (subpath (param "X18")) (subpath (param "X19")) (subpath (param "X20")) (subpath (param "X21")) (with message "$TAG"))
+(allow file-read-data file-read-xattr (literal (param "LOG")))
+params:
+  F:
+    $HOME/.cargo/.global-cache
+    $HOME/.cargo/.global-cache-journal
+    $HOME/.cargo/.global-cache-shm
+    $HOME/.cargo/.global-cache-wal
+    $HOME/.cargo/.package-cache
+    $HOME/.cargo/.package-cache-mutate
+    $HOME/.cargo/git/CACHEDIR.TAG
+    $HOME/.cargo/registry/CACHEDIR.TAG
+    $HOME/.gradle/wrapper/dists/gradle-8.10-bin/abc123/gradle-8.10-bin.zip.lck
+  HOME:
+    $HOME
+  K:
+    $BASE/tmp/zellij-501
+    $TMP/tmux-501
+  LOG:
+    $STATE/tarae.log
+  R:
+    $HOME/.CFUserTextEncoding
+    $HOME/.cargo
+    $HOME/.config/git
+    $HOME/.config/go
+    $HOME/.config/pip/pip.conf
+    $HOME/.gitconfig
+    $HOME/.gradle/caches/modules-2
+    $HOME/.gradle/wrapper/dists
+    $HOME/.m2/repository
+    $HOME/.m2/wrapper
+    $HOME/.npm
+    $HOME/.pip/pip.conf
+    $HOME/.rustup
+    $HOME/Library/Application Support/pip/pip.conf
+    $HOME/Library/Fonts
+    $HOME/Library/Java/JavaVirtualMachines
+    $HOME/go
+    $HOME/go/pkg/mod
+    $HOME/work/.cargo/config
+    $HOME/work/.cargo/config.toml
+  ROOT:
+    $ROOT
+  RUN:
+    $RUN
+  T:
+    $HOME/.config/go/env
+    $HOME/.config/pip/pip.conf
+    $HOME/.gitconfig
+  W:
+    $BASE/tmp
+    $HOME/.cache/tarae/run-homes/go-build/$KEY
+    $HOME/.cargo/build/ab/cdef0123
+    $HOME/.cargo/git
+    $HOME/.cargo/registry
+    $HOME/go/pkg/mod
+    $TMP
+  X:
+    $HOME/.aws
+    $HOME/.cache/go-build
+    $HOME/.cargo/credentials
+    $HOME/.cargo/credentials.toml
+    $HOME/.claude
+    $HOME/.claude.json
+    $HOME/.claude.json.backup
+    $HOME/.config/gh
+    $HOME/.config/git/credentials
+    $HOME/.docker
+    $HOME/.git-credentials
+    $HOME/.gnupg
+    $HOME/.gradle/daemon
+    $HOME/.kube
+    $HOME/.netrc
+    $HOME/.npmrc
+    $HOME/.password-store
+    $HOME/.pypirc
+    $HOME/.ssh
+    $HOME/Library/Keychains
+    $HOME/gocache
+    $STATE
+write:
+    $BASE/tmp
+    $HOME/.cache/tarae/run-homes/go-build/$KEY
+    $HOME/.cargo/build/ab/cdef0123
+    $HOME/.cargo/git
+    $HOME/.cargo/registry
+    $HOME/go/pkg/mod
+    $TMP
+files:
+    $HOME/.cargo/.global-cache
+    $HOME/.cargo/.global-cache-journal
+    $HOME/.cargo/.global-cache-shm
+    $HOME/.cargo/.global-cache-wal
+    $HOME/.cargo/.package-cache
+    $HOME/.cargo/.package-cache-mutate
+    $HOME/.cargo/git/CACHEDIR.TAG
+    $HOME/.cargo/registry/CACHEDIR.TAG
+    $HOME/.gradle/wrapper/dists/gradle-8.10-bin/abc123/gradle-8.10-bin.zip.lck
+keep:
+    $BASE/tmp/zellij-501
+    $TMP/tmux-501
+caches:
+refused:
+    $HOME/elsewhere — cargo's target-dir — it isn't in the checkout, its own build dir under cargo's home, or a temp folder
+reads.home:
+    $HOME
+reads.allow:
+    $HOME/.CFUserTextEncoding
+    $HOME/.cargo
+    $HOME/.config/git
+    $HOME/.config/go
+    $HOME/.config/pip/pip.conf
+    $HOME/.gitconfig
+    $HOME/.gradle/caches/modules-2
+    $HOME/.gradle/wrapper/dists
+    $HOME/.m2/repository
+    $HOME/.m2/wrapper
+    $HOME/.npm
+    $HOME/.pip/pip.conf
+    $HOME/.rustup
+    $HOME/Library/Application Support/pip/pip.conf
+    $HOME/Library/Fonts
+    $HOME/Library/Java/JavaVirtualMachines
+    $HOME/go
+    $HOME/go/pkg/mod
+    $HOME/work/.cargo/config
+    $HOME/work/.cargo/config.toml
+reads.kept:
+    $HOME/.aws
+    $HOME/.cache/go-build
+    $HOME/.cargo/credentials
+    $HOME/.cargo/credentials.toml
+    $HOME/.claude
+    $HOME/.claude.json
+    $HOME/.claude.json.backup
+    $HOME/.config/gh
+    $HOME/.config/git/credentials
+    $HOME/.docker
+    $HOME/.git-credentials
+    $HOME/.gnupg
+    $HOME/.gradle/daemon
+    $HOME/.kube
+    $HOME/.netrc
+    $HOME/.npmrc
+    $HOME/.password-store
+    $HOME/.pypirc
+    $HOME/.ssh
+    $HOME/Library/Keychains
+    $HOME/gocache
+    $STATE
+reads.log:
+    $STATE/tarae.log
+copies.env:
+    GIT_CONFIG_GLOBAL=$RUN/settings/gitconfig
+    GOENV=$RUN/settings/goenv
+    NPM_CONFIG_USERCONFIG=$RUN/settings/npmrc
+    PIP_CONFIG_FILE=$RUN/settings/pip.conf
+copies.hidden:
+    $HOME/.config/go/env ($GOENV)
+    $HOME/.config/pip/pip.conf ($PIP_CONFIG_FILE)
+    $HOME/.gitconfig ($GIT_CONFIG_GLOBAL)
+copies.left_out:
+    $HOME/.config/go/env ($GOENV)
+    $HOME/.config/pip/pip.conf ($PIP_CONFIG_FILE)
+    $HOME/.gitconfig ($GIT_CONFIG_GLOBAL)
+    $HOME/.npmrc ($NPM_CONFIG_USERCONFIG)
+copies.told:
+    $HOME/.cargo/config.toml
+run env:
+    GOCACHE=$HOME/.cache/tarae/run-homes/go-build/$KEY
+    GOTOOLCHAIN=local
+    GRADLE_OPTS=-Dorg.gradle.daemon=false
+    GRADLE_RO_DEP_CACHE=$HOME/.gradle/caches
+    GRADLE_USER_HOME=$RUN/gradle
+    npm_config_logs_dir=$RUN
+tool homes:
+    gradle $HOME/.gradle

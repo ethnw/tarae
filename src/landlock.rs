@@ -132,6 +132,9 @@ pub struct Ruleset {
     fd: OwnedFd,
     handled: u64,
     abi: u32,
+    /// Tests: every rule added — (path, the rights granted) — in order.
+    #[cfg(test)]
+    pub added: Vec<(std::path::PathBuf, u64)>,
 }
 
 impl Ruleset {
@@ -153,7 +156,13 @@ impl Ruleset {
         }
         // SAFETY: a new descriptor of our own, closed with the ruleset.
         let fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
-        Ok(Ruleset { fd, handled: attr.handled_access_fs, abi })
+        Ok(Ruleset {
+            fd,
+            handled: attr.handled_access_fs,
+            abi,
+            #[cfg(test)]
+            added: Vec::new(),
+        })
     }
 
     /// Grants `access` beneath `path` (a real path): in a folder and everything under it, or on one file — of
@@ -188,6 +197,8 @@ impl Ruleset {
         if r < 0 {
             return Err(io::Error::last_os_error());
         }
+        #[cfg(test)]
+        self.added.push((path.to_path_buf(), access));
         Ok(true)
     }
 

@@ -96,12 +96,10 @@ fn never(path: &Path, rules: &Rules, places: &[PathBuf]) -> bool {
 }
 
 /// The places that hold keys, as real paths: what Claude's runs never read (`sandbox::kept_reads` —
-/// `allow::SECRETS`, Claude's own, cargo's credentials, tarae's state).
+/// `allow::SECRETS`, Claude's own, the toolchains' credentials wherever their homes are, tarae's state).
 fn key_places(home: Option<&Path>) -> Vec<PathBuf> {
     let Some(home) = home else { return Vec::new() };
-    let vars = crate::sandbox::HomeVars::here();
-    let cargo = vars.cargo_home.clone().unwrap_or_else(|| home.join(".cargo"));
-    crate::sandbox::kept_reads(home, Some(&crate::sandbox::profile_path(&cargo)), &vars)
+    crate::sandbox::kept_reads(home, &crate::sandbox::vars_in(home, &crate::sandbox::Here::now()))
 }
 
 /// `editor.recovery-skip`: a name (one `*` at most) matches any part of the path in any case; an entry

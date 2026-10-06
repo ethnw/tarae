@@ -1,0 +1,14 @@
+    $BASE/tmp
+    $HOME/.cache/tarae/run-homes/go-build/$KEY
+    $HOME/.cargo/.global-cache
+    $HOME/.cargo/.global-cache-journal
+    $HOME/.cargo/.global-cache-shm
+    $HOME/.cargo/.global-cache-wal
+    $HOME/.cargo/.package-cache
+    $HOME/.cargo/.package-cache-mutate
+    $HOME/.cargo/build/ab/cdef0123
+    $HOME/.cargo/git/CACHEDIR.TAG
+    $HOME/.cargo/registry/CACHEDIR.TAG
+    $HOME/.gradle/wrapper/dists/gradle-8.10-bin/abc123/gradle-8.10-bin.zip.lck
+    $ROOT
+    $TMP

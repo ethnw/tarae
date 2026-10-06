@@ -134,3 +134,67 @@ risky = [
     'http\.(Get|Post|Head)\(', 'os\.Setenv',
 ]
 quiet = ["*_test.go", "testdata/"]
+
+# Claude's sandbox (`sandboxpack.rs`). What Go reads in home, measured (`target/sb/p2-measured.md`, a Go
+# project): GOPATH (the module cache in it) and its settings (`os.UserConfigDir`'s `go/`) — not the user's
+# build cache: runs have one of their own (below), and the user's is never read
+[sandbox]
+reads = ["~/go", "{user-config}/go"]
+kept = ["{user-cache}/go-build"]
+# Its telemetry counters: every go command (`go version` too) writes `…/go/telemetry/local/<…>.count` in its
+# default `local` mode, and carries on silently when it can't. The mode is a file there (`go telemetry off`
+# writes it); `GOTELEMETRY` is a read-only `go env` name, so no variable turns it off for a run — and opening
+# it would let a run change the user's Go setting. Measured in P2: one denial in every Go run's report
+quiet-writes = ["{user-config}/go/telemetry/"]
+# A `toolchain` line in go.mod newer than the go on PATH makes go run the toolchain module of that version
+# from the module cache — `go env` too (measured, `target/sb/corepack6/go-caches-toolchain.sh`: a module
+# planted there was found, and refused only by the checksum database; no variable skips that check). Runs use
+# the go on PATH: what runs isn't picked by a file in the checkout, and nothing is downloaded to switch. A
+# project needing a newer go says so ("go.mod requires go >= …; GOTOOLCHAIN=local")
+env = { GOTOOLCHAIN = "local" }
+# Where `go env` says the module cache is (GOMODCACHE, GOPATH, the user's env file) — a shared cache: an
+# offline build writes nothing there (measured: `go-caches-build.sh`), so it's read only while the network is
+# closed — and the user's build cache, kept from runs wherever it is
+ask = [{ when = ["go.mod", "go.work"], run = ["go", "env", "-json", "GOMODCACHE", "GOCACHE"], caches = ["GOMODCACHE"], kept = ["GOCACHE"] }]
+# Where `go install` puts programs: never written, nor GOPATH itself
+bins = ["{go}/bin", "{gobin}"]
+
+# GOPATH may be a list (`/a:/b`): Go puts the module cache and `bin` in the first; every one is a home
+[sandbox.homes]
+go = { env = "GOPATH", else = "~/go", list = true }
+gobin = { env = "GOBIN", else = "~/go/bin" }
+
+# The module cache: every project's build outside the sandbox compiles what's there, and a build doesn't check
+# what's unpacked there again (`go mod verify` does). Where it is by default — `$GOPATH/pkg/mod`, else where
+# `GOMODCACHE` points — no grant opens it, in a Go project or not
+[sandbox.caches]
+asked = "GOMODCACHE"
+places = ["{go}/pkg/mod"]
+var = "GOMODCACHE"
+rule = "Go's module cache"
+said = """Go's module cache ({caches}) stays as it is while the network is closed: every project's build outside \
+the sandbox uses the modules there. A build that needs a module not downloaded yet fails here — that's not \
+something to fix in the code: tell the user. A build or `go mod download` of theirs puts it there, then run it \
+again; llm.sandbox-network opens the cache to your commands."""
+
+# Go's build cache, of the runs' own: kept across the project's runs (a cold one rebuilds the standard library),
+# never the user's — what a run compiles there never reaches their builds
+[sandbox.run-home.go-build]
+env = "GOCACHE"
+keep = true
+when = ["go.mod", "go.work"]
+
+# Go's env file can hold a token (`go env -w GOPROXY=https://user:…@`): denied, Go loses its settings without a
+# word (`target/sb/tokens-checkpoint.md`) — a copy without it, at `GOENV` (`off`: none)
+[[sandbox.settings]]
+tool = "go"
+var = "GOENV"
+off = "off"
+files = ["{user-config}/go/env"]
+form = "lines"
+copy = "goenv"
+
+[claude]
+run-allow = ["go build", "go test", "go vet", "gofmt -l"]
+builders = ["go"]
+said = { rank = 20, run = "go build/test/vet", tests = "Go" }
