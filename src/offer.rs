@@ -112,6 +112,9 @@ pub enum What {
     /// The project's `.tarae.toml` sets what runs commands (`trust.rs`): `y` trusts it, `n` ignores that
     /// part. `hash` = what the card showed.
     ProjectTrust { hash: crate::trust::Digest },
+    /// A repository's own git settings and hooks run commands (`gittrust.rs`): `y` lets them run, `n` keeps
+    /// them off (held — `gitrepo`).
+    GitTrust(Box<crate::gittrust::Ask>),
     /// Claude asks to see the screen (`seeing.rs`): `y` once, `a` this chat, `n` no.
     Screen { call: crate::tools::Call },
     /// `:preflight`'s first run in a project with the packs' default steps (`preflight.rs`): `y` runs those
@@ -206,6 +209,7 @@ impl What {
             | What::PluginPermissions { .. }
             | What::PluginAsk { .. }
             | What::ProjectTrust { .. }
+            | What::GitTrust(_)
             | What::Recover(_)
             | What::Restart(_)
             | What::RestartSame { .. }
@@ -369,6 +373,7 @@ impl Offer {
                 | What::ProtectedMade { .. }
                 | What::ReviewAtEnd
                 | What::ProjectTrust { .. }
+                | What::GitTrust(_)
                 | What::Read { .. }
                 | What::Grant { .. }
                 | What::Outside { .. }
@@ -574,6 +579,7 @@ impl Offer {
             W::Run(_) => vec![('y', "Run"), ('n', "No")],
             W::ReviewAtEnd => vec![('y', "Turn on"), ('n', "No")],
             W::ProjectTrust { .. } => vec![('y', "Trust"), ('n', "Ignore")],
+            W::GitTrust(_) => vec![('y', "Let them run"), ('n', "Keep off")],
             W::NoSandbox { .. } => vec![('y', "Run"), ('a', "This chat"), ('n', "No")],
             W::ProtectedMade { .. } => vec![('y', "Run"), ('n', "No")],
             W::Read { keep: true, .. } => {
@@ -657,6 +663,7 @@ impl Offer {
             W::Grant { .. } => "grant",
             W::Outside { .. } => "outside",
             W::ProjectTrust { .. } => "project-trust",
+            W::GitTrust(_) => "git-trust",
             W::Screen { .. } => "screen",
             W::Preflight { .. } => "preflight",
             W::BranchDelete { .. } => "branch-delete",
@@ -749,8 +756,9 @@ impl crate::editor::Editor {
             return self.session.parked.push(o);
         }
         // (one holding a call isn't merged into another by its title — the other's call would be lost; nor is a
-        // plugin's ask — the other's request would be: one asking the same joins its card, `plugin_ask`)
-        let own = o.asker().is_some() || matches!(o.what, What::PluginAsk { .. });
+        // plugin's ask — the other's request would be: one asking the same joins its card, `plugin_ask`; nor a
+        // repository's commands — a submodule's card would take its parent's place: one each, `git_trust_check`)
+        let own = o.asker().is_some() || matches!(o.what, What::PluginAsk { .. } | What::GitTrust(_));
         if let Some(old) = self.offers.iter_mut().find(|x| x.title == o.title).filter(|_| !own) {
             // Replaced whole — what it says with what it does — and it settles again before `y` counts
             if !old.installing() {
@@ -893,6 +901,10 @@ impl crate::editor::Editor {
         if matches!(&self.offers[0].what, What::Hooks(a) if !a.runnable()) {
             return self.set_status("a hook here can't be shown — n goes on without hooks");
         }
+        // (a value too long to show isn't trusted)
+        if matches!(&self.offers[0].what, What::GitTrust(a) if !a.showable()) {
+            return self.offer_refused("a value here is too long to show — only n keeps them off");
+        }
         // (no restore over edits of yours, nor into a file still loading — said on the card, which stays)
         if let What::Recover(f) = &self.offers[0].what
             && let Some(why) = crate::recovery::refuses(self, f)
@@ -939,6 +951,7 @@ impl crate::editor::Editor {
                 crate::edits::at_end_set(self, true);
             }
             What::ProjectTrust { hash } => self.project_trust_answer(id, hash, true),
+            What::GitTrust(ask) => self.git_trust_answer(id, *ask, true),
             What::Read { pending, keep, folder } => {
                 crate::reads::answer(self, id, *pending, Some(crate::allow::Scope::Once), keep, folder)
             }
@@ -1350,6 +1363,7 @@ impl crate::editor::Editor {
             }
             What::ReviewAtEnd => self.set_status("Claude's edits come one at a time"),
             What::ProjectTrust { hash } => self.project_trust_answer(o.id, hash, false),
+            What::GitTrust(ask) => self.git_trust_answer(o.id, *ask, false),
             What::Read { pending, keep, folder } => {
                 crate::reads::answer(self, o.id, *pending, None, keep, folder)
             }

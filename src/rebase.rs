@@ -30,9 +30,11 @@ const SIDE_MAX: usize = 60_000;
 /// flag as `gitrepo::NO_HOOKS`, here as a shell line for the task panel). And without
 /// the conflict advice: its `hint:` lines tell you to `git add` and `--continue` yourself — tarae's step here —
 /// and made the task panel tall enough to push the resolved card over the review (a shot). On `repo`, named
-/// (`gitrepo::Repo::shell_line`).
-fn git_line(repo: &crate::gitrepo::Repo) -> String {
-    format!("{} {} -c advice.mergeConflict=false", repo.shell_line(), crate::gitrepo::NO_HOOKS.join(" "))
+/// (`gitrepo::Repo::shell_line`: what's held, its values in the run's environment).
+fn git_line(repo: &crate::gitrepo::Repo) -> crate::gitrepo::Line {
+    let mut line = repo.shell_line();
+    line.text = format!("{} {} -c advice.mergeConflict=false", line.text, crate::gitrepo::NO_HOOKS.join(" "));
+    line
 }
 
 /// What a rebase step that didn't start does: says why (and a start leaves no rebase behind).
@@ -630,7 +632,8 @@ impl Editor {
     ) {
         let root = self.session.root.clone();
         if let Some(repo) = crate::gitrepo::cached(&root) {
-            if let Err(e) = self.rebase_run(name, cmd(&git_line(&repo)), aborting) {
+            let line = git_line(&repo);
+            if let Err(e) = self.rebase_run(name, cmd(&line.text), line.env, aborting) {
                 unstarted(self, e);
             }
             return;
@@ -645,18 +648,24 @@ impl Editor {
                 if ed.session.id != asked {
                     return;
                 }
-                if let Err(e) = line.and_then(|g| ed.rebase_run(&name, cmd(&g), aborting)) {
+                if let Err(e) = line.and_then(|g| ed.rebase_run(&name, cmd(&g.text), g.env, aborting)) {
                     unstarted(ed, e);
                 }
             }
         });
     }
 
-    /// `rebase_git`'s line started.
-    fn rebase_run(&mut self, name: &str, cmd: String, aborting: bool) -> Result<(), String> {
+    /// `rebase_git`'s line started, with its environment.
+    fn rebase_run(
+        &mut self,
+        name: &str,
+        cmd: String,
+        env: Vec<(String, String)>,
+        aborting: bool,
+    ) -> Result<(), String> {
         let root = self.session.root.clone();
         let task = crate::task::Task { name: name.into(), cmd, cwd: root.clone() };
-        let generation = self.task_start_git(task).ok_or("git didn't start")?;
+        let generation = self.task_start_git(task, &env).ok_or("git didn't start")?;
         if let Some(r) = self.session.rebase.as_mut() {
             r.stage = Stage::Running { generation, aborting };
         }

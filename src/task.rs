@@ -566,7 +566,7 @@ impl Editor {
             if !force && crate::queued::claudes_running(&ed.session, crate::queued::Slot::Task) {
                 return crate::queued::again(ed, crate::queued::What::Task(task), Some(trace));
             }
-            ed.task_spawn(task, None, None, true, false, trace);
+            ed.task_spawn(task, None, None, true, false, &[], trace);
         });
     }
 
@@ -611,7 +611,7 @@ impl Editor {
             _ => None,
         };
         let feeds = crate::tools::is_check(&task.cmd);
-        self.task_spawn(task, None, policy, feeds, true, trace);
+        self.task_spawn(task, None, policy, feeds, true, &[], trace);
         match self.session.task_run.as_mut().filter(|_| self.task_generation != before) {
             Some(r) => {
                 match who {
@@ -635,7 +635,7 @@ impl Editor {
         }
         let before = self.task_generation;
         let trace = crate::trace::RunTrace::new(format!("restart's build: {}", traced(&task.cmd)));
-        self.task_spawn(task, None, None, true, false, trace);
+        self.task_spawn(task, None, None, true, false, &[], trace);
         (self.task_generation != before).then_some(self.task_generation)
     }
 
@@ -643,16 +643,17 @@ impl Editor {
     /// step's places go to the list. Its generation; None if it didn't start.
     pub(crate) fn task_start_preflight(&mut self, task: Task, trace: crate::trace::RunTrace) -> Option<u64> {
         let before = self.task_generation;
-        self.task_spawn(task, None, None, true, false, trace);
+        self.task_spawn(task, None, None, true, false, &[], trace);
         (self.task_generation != before).then_some(self.task_generation)
     }
 
-    /// tarae's own git run (`rebase.rs`): not the task `space m m` runs again, and its output's places stay
-    /// out of the list. Its generation; None if it didn't start.
-    pub(crate) fn task_start_git(&mut self, task: Task) -> Option<u64> {
+    /// tarae's own git run (`rebase.rs`), with `env` (what its line names, kept out of the line): not the
+    /// task `space m m` runs again, and its output's places stay out of the list. Its generation; None if it
+    /// didn't start.
+    pub(crate) fn task_start_git(&mut self, task: Task, env: &[(String, String)]) -> Option<u64> {
         let before = self.task_generation;
         let trace = crate::trace::RunTrace::new(format!("tarae's git: {}", traced(&task.cmd)));
-        self.task_spawn(task, None, None, false, false, trace);
+        self.task_spawn(task, None, None, false, false, env, trace);
         let r = self.session.task_run.as_mut().filter(|_| self.task_generation != before)?;
         r.git = true;
         Some(self.task_generation)
@@ -662,13 +663,14 @@ impl Editor {
     /// places stay out of the list.
     pub(crate) fn task_start_install(&mut self, task: Task, after: After) {
         let trace = crate::trace::RunTrace::new(format!("install: {}", traced(&task.cmd)));
-        self.task_spawn(task, Some(after), None, false, false, trace);
+        self.task_spawn(task, Some(after), None, false, false, &[], trace);
     }
 
     /// `feeds`: its places make the list (`]q`) — the run takes it over from its start. `claudes`: a
     /// command of Claude's — without `CDPATH`, so a `cd` lands where `readonly::outside` resolved it (with
-    /// it set, `cd src` may go to another `src` on it, and the line read there unasked). `trace`: its way
-    /// so far, logged at its end.
+    /// it set, `cd src` may go to another `src` on it, and the line read there unasked). `env`: variables it
+    /// runs with besides tarae's own. `trace`: its way so far, logged at its end.
+    #[allow(clippy::too_many_arguments)]
     fn task_spawn(
         &mut self,
         task: Task,
@@ -676,6 +678,7 @@ impl Editor {
         sandbox: Option<&crate::sandbox::Policy>,
         feeds: bool,
         claudes: bool,
+        env: &[(String, String)],
         trace: crate::trace::RunTrace,
     ) {
         // (a configured task's folder is as written — from the root, the root itself when it says none)
@@ -693,6 +696,7 @@ impl Editor {
         if claudes {
             cmd.env_remove("CDPATH");
         }
+        cmd.envs(env.iter().map(|(k, v)| (k, v)));
         cmd.current_dir(&task.cwd);
         color_off(&mut cmd);
         // (its own session and group, not a fork of the editor — `spawn.rs`; on Linux from a thread confined

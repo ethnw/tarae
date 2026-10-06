@@ -22,12 +22,33 @@
 //! sandbox here): a run can write anywhere and run git itself, so nothing is held back — discovery from the
 //! file's folder wherever it is, still refusing a bare look-alike.
 //!
+//! A repository's own config can name commands git runs (fsmonitor, filters, textconv, merge drivers, ssh,
+//! credential helpers, gpg …) and its git folder can hold hooks: found when it's resolved (`held.rs`), and
+//! held on every run — settings (`Hold::settings`), flags, environment — until the user trusts them on a
+//! card (`What::GitTrust`, answers kept as `.tarae.toml`'s are: `trust.rs`); a resolve that finds them
+//! unanswered puts the card up, whichever git call it was for (`set_asker`). The user's own config —
+//! `global`, `system`, what tarae's environment gives — is never held.
+//!
 //! Not here: the grammar download's git (`grammar.rs`) — a repository tarae makes itself in its data folder,
 //! from a URL in the packs, outside any project.
+
+mod held;
+
+pub use held::{Hold, Local};
+
+/// When a found key (or `hook <name>`) runs — said on the card.
+pub fn runs(key: &str) -> &'static str {
+    match key.starts_with("hook ") {
+        true => held::HOOKS_RUN,
+        false => held::guard(key).map_or("", |g| g.runs),
+    }
+}
 
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
+
+use crate::trust::{Digest, State};
 
 /// On every git tarae runs: a bare repository is used only when named.
 const SAFE: [&str; 2] = ["-c", "safe.bareRepository=explicit"];
@@ -39,6 +60,10 @@ pub(crate) const NO_HOOKS: [&str; 2] = ["-c", "core.hooksPath=/dev/null"];
 
 /// Submodules inside submodules followed at most this deep.
 const DEPTH_MAX: usize = 8;
+
+/// A repository's config listed at most this often in one resolve (`read_local`: until it names no file not
+/// stamped first).
+const LISTINGS_MAX: usize = 4;
 
 /// A repository git runs on, its folders as real paths.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,6 +77,189 @@ pub struct Repo {
     /// Where its git runs: the root it was resolved from (the work tree, or a folder in it — a session started
     /// in a subfolder keeps `-- .` and `--relative` to that folder), else the git folder.
     pub dir: PathBuf,
+    /// Its own config that runs commands, and its git folder's hooks (`held.rs`).
+    pub local: Arc<Local>,
+    /// What every run puts in while those are held — None: none found, or trusted.
+    pub held: Option<Arc<Hold>>,
+    /// Not answered yet for what's found now: the card asks (`What::GitTrust`).
+    pub asks: bool,
+    /// The files that decided `local` and their stamps (`Kept::get` resolves it again when one changed).
+    pub stamps: Vec<(PathBuf, Stamp)>,
+    /// Resolved within `RACY` of a change to one of those files: not kept (`Kept::get`) — a change after
+    /// its stamp could leave the stamp as it was.
+    pub racy: bool,
+    /// Its submodules checked out — each resolved as a repository of its own (`Repo::submodules`).
+    pub subs: Vec<Sub>,
+    /// Its submodules' git folders in its own `modules/` that aren't checked out now: a fetch fetches into
+    /// them, a checkout of a commit that has them checks them out — read as the checked-out ones are.
+    pub dormant: Vec<Arc<Repo>>,
+}
+
+/// A submodule checked out in a repository's work tree: a gitlink in its index with a `.git` there — what
+/// git looks into from the repository around it (a status runs one in it; a fetch, push or checkout may
+/// recurse), its own config and all. While its commands are held (`held`, or held in one below it), every
+/// run of the repository around it keeps out of it (`Hold::keep_out`); its changes don't show until then.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Sub {
+    /// From the work tree's top.
+    pub rel: String,
+    pub repo: Arc<Repo>,
+}
+
+/// A file's change times (`ctime`, seconds and nanoseconds), its own and — a link — what it leads to's: what
+/// its text, its mode and a file put in its place all move (a `chmod +x` leaves the modification time as
+/// it was). None: not there.
+pub type Stamp = Option<[(i64, i64); 2]>;
+
+fn stamp(p: &Path) -> Stamp {
+    use std::os::unix::fs::MetadataExt as _;
+    let own = std::fs::symlink_metadata(p).ok()?;
+    let to = std::fs::metadata(p).unwrap_or_else(|_| own.clone());
+    let s = [(own.ctime(), own.ctime_nsec()), (to.ctime(), to.ctime_nsec())];
+    #[cfg(test)]
+    let s = coarse(p, s);
+    Some(s)
+}
+
+/// How soon after a change to what decides a repository its resolve isn't kept (`Repo::racy`) — git's
+/// "racy" files: a file's time moves coarsely (Linux's by the kernel's tick, a few ms; some file systems'
+/// by the second), so a change in the tick its stamp was taken in leaves the stamp as it was — a resolve
+/// that read the file before the change, finishing after it, would be kept with what it read (seen on
+/// Linux: a worker's resolve between a hook's write and its `chmod`).
+const RACY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Whether `s` was changed within `RACY` before `at`.
+fn racy(s: &Stamp, at: std::time::SystemTime) -> bool {
+    let changed = |(sec, ns): (i64, i64)| {
+        std::time::UNIX_EPOCH + std::time::Duration::new(sec.max(0) as u64, ns.clamp(0, 999_999_999) as u32)
+    };
+    s.is_some_and(|times| times.into_iter().any(|t| changed(t) + RACY > at))
+}
+
+/// Tests: stamps of files under these folders in whole seconds — a file system whose times move by the
+/// second (Linux's move by the tick): a change in the same second leaves a stamp as it was.
+#[cfg(test)]
+static COARSE: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub fn coarse_times_under(under: &Path) {
+    COARSE.lock().unwrap_or_else(|e| e.into_inner()).push(under.to_path_buf());
+}
+
+#[cfg(test)]
+fn coarse(p: &Path, s: [(i64, i64); 2]) -> [(i64, i64); 2] {
+    match COARSE.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|u| p.starts_with(u)) {
+        true => s.map(|(sec, _)| (sec, 0)),
+        false => s,
+    }
+}
+
+/// `files` with their stamps now.
+fn stamped(files: impl IntoIterator<Item = PathBuf>) -> Vec<(PathBuf, Stamp)> {
+    files
+        .into_iter()
+        .map(|f| {
+            let t = stamp(&f);
+            (f, t)
+        })
+        .collect()
+}
+
+/// Where answers about repositories' own commands are kept (`trust.rs`'s file) — set once at startup; never in
+/// tests (nothing read: everything asks).
+static TRUST_STORE: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Answers given since tarae started, newest last: (the repository's config file, what was found, trusted) —
+/// before the store's file is written, and in tests.
+static ANSWERS: Mutex<Vec<(PathBuf, Digest, bool)>> = Mutex::new(Vec::new());
+
+/// The trust store's file (`trust::Store::path`) — `main` sets it.
+pub fn set_trust_store(path: Option<PathBuf>) {
+    *TRUST_STORE.lock().unwrap_or_else(|e| e.into_inner()) = path;
+}
+
+/// The answer for what a repository (its `config` file) runs now (`digest`).
+fn trust_state(config: &Path, digest: Digest) -> State {
+    let answers = ANSWERS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, _, t)) = answers.iter().rev().find(|(c, d, _)| c == config && *d == digest) {
+        return if *t { State::Trusted } else { State::Ignored };
+    }
+    drop(answers);
+    let store = TRUST_STORE.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    match store {
+        Some(path) => crate::trust::Store::read(Some(&path)).state(config, digest),
+        None => State::Ask,
+    }
+}
+
+/// The card answered for a repository (its `config` file): kept for this run of tarae (the editor writes the
+/// store), and its kept entries resolved again — trusted, nothing held.
+pub fn answered(config: &Path, digest: Digest, trusted: bool) {
+    ANSWERS.lock().unwrap_or_else(|e| e.into_inner()).push((config.to_path_buf(), digest, trusted));
+    repos().entries.retain(|(_, r)| !r.about(config));
+    submodules().entries.retain(|(_, r)| !r.about(config));
+}
+
+/// Whether what a repository (its `config` file) runs (`digest`) was answered since tarae started — a resolve
+/// that asked, told before the answer and landing after it, puts no card up again. Reads no file.
+pub fn answered_since(config: &Path, digest: Digest) -> bool {
+    ANSWERS.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|(c, d, _)| c == config && *d == digest)
+}
+
+/// Where a resolve says it found commands waiting for an answer: (repositories under this folder, the events
+/// of the editor whose card goes up) — `main` sets `/`, a test its own folder.
+static ASKERS: Mutex<Vec<(PathBuf, crate::event::Tx)>> = Mutex::new(Vec::new());
+
+/// A resolve of a repository under `under` that finds its commands unanswered tells `tx` (`tell`): the card
+/// goes up from whichever git call resolved it — a status, a snapshot after a run, a blame — not only when
+/// a checkout is first watched.
+pub fn set_asker(under: &Path, tx: crate::event::Tx) {
+    let mut askers = ASKERS.lock().unwrap_or_else(|e| e.into_inner());
+    askers.retain(|(u, _)| u != under);
+    askers.push((under.to_path_buf(), tx));
+}
+
+/// `r` just resolved (not one kept): itself and each submodule whose commands wait for an answer, told —
+/// `Editor::git_trust_told` puts its card up unless it's up already.
+fn tell(r: &Repo) {
+    let asking = r.asking();
+    if asking.is_empty() {
+        return;
+    }
+    let askers = ASKERS.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(tx) = askers.iter().rev().find(|(u, _)| r.dir.starts_with(u)).map(|(_, tx)| tx.clone()) else {
+        return;
+    };
+    drop(askers);
+    for a in asking {
+        let _ = tx.send(crate::event::Event::Job(Box::new(move |ed: &mut crate::editor::Editor| {
+            ed.git_trust_told(&a)
+        })));
+    }
+}
+
+/// Tests: what runs right after a repository's config was listed (by its git folder), once — a change that
+/// lands while it's resolved.
+#[cfg(test)]
+type AfterListing = (PathBuf, Box<dyn FnOnce() + Send>);
+
+#[cfg(test)]
+static AFTER_LISTING: Mutex<Vec<AfterListing>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub fn after_listing(git_dir: &Path, f: impl FnOnce() + Send + 'static) {
+    AFTER_LISTING.lock().unwrap_or_else(|e| e.into_inner()).push((git_dir.to_path_buf(), Box::new(f)));
+}
+
+#[cfg(test)]
+fn after_listing_run(git_dir: &Path) {
+    let f = {
+        let mut all = AFTER_LISTING.lock().unwrap_or_else(|e| e.into_inner());
+        all.iter().position(|(d, _)| d == git_dir).map(|i| all.remove(i).1)
+    };
+    if let Some(f) = f {
+        f();
+    }
 }
 
 /// Roots kept at most (the least lately used goes first).
@@ -71,7 +279,8 @@ impl Kept {
         let i = self.entries.iter().position(|(k, _)| k == root)?;
         let r = &self.entries[i].1;
         let own = std::fs::symlink_metadata(root.join(".git")).is_ok();
-        if !r.git_dir.is_dir() || (own && r.work_tree.as_deref() != Some(root)) {
+        let changed = r.racy || r.stamps.iter().any(|(p, t)| stamp(p) != *t);
+        if !r.git_dir.is_dir() || (own && r.work_tree.as_deref() != Some(root)) || changed {
             self.entries.remove(i);
             return None;
         }
@@ -95,6 +304,14 @@ fn repos() -> std::sync::MutexGuard<'static, Kept> {
     REPOS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Submodules once resolved (`submodule`), by their top's real path — apart from the roots: one is taken
+/// only as the repository around it records it.
+static SUBMODULES: Mutex<Kept> = Mutex::new(Kept { cap: KEPT_MAX, entries: Vec::new() });
+
+fn submodules() -> std::sync::MutexGuard<'static, Kept> {
+    SUBMODULES.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// The repository of `root` — a folder tarae trusts, never a file's folder (`for_file`) — resolved the first
 /// time and kept (`Kept`). Runs git the first time: on a worker.
 pub fn repo(root: &Path) -> Result<Arc<Repo>, String> {
@@ -104,6 +321,7 @@ pub fn repo(root: &Path) -> Result<Arc<Repo>, String> {
     }
     let r = Arc::new(resolve_with(&real, None)?);
     repos().put(real, r.clone());
+    tell(&r);
     Ok(r)
 }
 
@@ -152,7 +370,273 @@ fn resolve_with(root: &Path, ceilings: Option<&std::ffi::OsStr>) -> Result<Repo,
         Some(top) => top.clone(),
         None => git_dir.clone(),
     };
-    Ok(Repo { git_dir, common_dir, work_tree, dir })
+    Ok(Repo::read_local(git_dir, common_dir, work_tree, dir, 0))
+}
+
+impl Repo {
+    /// A repository's folders with its own command-running config read (`held::find`: one `git config
+    /// --get-regexp` of the guarded keys and the includes, which runs nothing — measured), held unless
+    /// trusted for exactly that — and with a work tree, its submodules (`submodules`, `depth` deep already),
+    /// kept out of while one's held.
+    fn read_local(
+        git_dir: PathBuf,
+        common_dir: PathBuf,
+        work_tree: Option<PathBuf>,
+        dir: PathBuf,
+        depth: usize,
+    ) -> Repo {
+        let mut r = Repo {
+            git_dir,
+            common_dir,
+            work_tree,
+            dir,
+            local: Arc::default(),
+            held: None,
+            asks: false,
+            stamps: Vec::new(),
+            racy: false,
+            subs: Vec::new(),
+            dormant: Vec::new(),
+        };
+        let at = std::time::SystemTime::now();
+        // (every file stamped before it's read, as `submodule`'s: a change while it's read — a run writing the
+        // config, an include, a hook — is a change the next run sees. What the listing names besides — an
+        // include's file, `HEAD` for an `onbranch:` — is known only after it: listed again with those stamped
+        // first, until it names nothing new; the hooks `find` reads, stamped there before each is looked at)
+        let mut known = vec![r.config_file(), r.git_dir.join("config.worktree"), r.common_dir.join("hooks")];
+        let mut listings = 0;
+        let (local, mut stamps) = loop {
+            let mut stamps = stamped(known.clone());
+            let local = r.listing();
+            listings += 1;
+            stamps.extend(local.stamped.iter().cloned());
+            let new: Vec<PathBuf> =
+                local.files.iter().filter(|f| !stamps.iter().any(|(p, _)| p == *f)).cloned().collect();
+            if new.is_empty() {
+                break (local, stamps);
+            }
+            // (an include chain changing as it's read: what it names now, stamped after)
+            if listings == LISTINGS_MAX {
+                stamps.extend(stamped(new));
+                break (local, stamps);
+            }
+            known.extend(new);
+        };
+        if !local.found.is_empty() {
+            let state = trust_state(&r.config_file(), local.digest());
+            let trusted = state == State::Trusted && local.showable();
+            r.held = (!trusted).then(|| Arc::new(local.hold.clone()));
+            r.asks = state == State::Ask;
+        }
+        r.local = Arc::new(local);
+        // (a submodule not checked out has no work tree, but its `modules/` the git folders of its own
+        // submodules: a recursive checkout that brings it back checks those out too)
+        if (r.work_tree.is_some() || depth > 0) && depth < DEPTH_MAX {
+            let (subs, watched) = r.submodules(depth);
+            let (dormant, folders) = r.dormant(&subs, depth);
+            stamps.extend(watched.into_iter().chain(folders));
+            (r.subs, r.dormant) = (subs, dormant);
+            let out: Vec<String> =
+                r.subs.iter().filter(|s| s.repo.held.is_some()).map(|s| s.rel.clone()).collect();
+            if !out.is_empty() || r.dormant.iter().any(|d| d.held.is_some()) {
+                let mut h = r.held.as_deref().cloned().unwrap_or_default();
+                // (one not checked out runs nothing itself: held, it's what the repository around it keeps
+                // out of — no `.gitmodules` of its own to read)
+                let names = if r.work_tree.is_some() { r.gitmodules_names() } else { Vec::new() };
+                h.keep_out(&names, &out);
+                r.held = Some(Arc::new(h));
+            }
+        }
+        let below: Vec<(PathBuf, Stamp)> = r.below().flat_map(|b| b.stamps.clone()).collect();
+        stamps.extend(below);
+        r.racy = stamps.iter().any(|(_, s)| racy(s, at));
+        r.stamps = stamps;
+        r
+    }
+
+    /// Its own command-running config as git lists it (`held::find`: one `git config --get-regexp` of the
+    /// guarded keys and the includes) and its git folder's hooks.
+    fn listing(&self) -> Local {
+        let args = held::listing_args();
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        #[cfg(test)]
+        not_in_this_repository(&self.dir, &args);
+        let mut cmd = base(&self.dir);
+        cmd.arg("--git-dir").arg(&self.git_dir);
+        // (a git folder alone: a submodule's not checked out names a work tree that isn't there — git stops
+        // before reading its config, measured — so one that is)
+        if self.work_tree.is_none() {
+            cmd.arg("--work-tree").arg(&self.git_dir);
+        }
+        cmd.args(SAFE).args(&args);
+        // (`--get-regexp` exits 1 when no key matches: what it printed either way. No listing: nothing found —
+        // and nothing that can run, since git can't read it either)
+        let listing =
+            ran(&cmd, None).map(|r| String::from_utf8_lossy(&r.stdout).into_owned()).unwrap_or_default();
+        #[cfg(test)]
+        after_listing_run(&self.git_dir);
+        // (the files named as git read them: with `--git-dir` given absolute, absolute — a run that found its
+        // repository says `file:.git/config`, measured; `the_users_own_values_come_back` holds this)
+        let mut local =
+            held::find(&held::parse(&listing), &self.common_dir.join("hooks"), &self.git_dir.join("HEAD"));
+        // (git runs its commands from the work tree's top — it goes there first — else in the git folder)
+        let runs_in = self.work_tree.as_deref().unwrap_or(&self.git_dir);
+        // (whose hooks card looks at a hooks folder: the checkout's — the git folder named alone, its main
+        // checkout's, around its `.git`: it agrees with that checkout, and runs no hooks itself)
+        let main = (self.git_dir == self.common_dir && self.git_dir.file_name() == Some(".git".as_ref()))
+            .then(|| self.git_dir.parent())
+            .flatten();
+        let checkout = self.work_tree.as_deref().or(main);
+        held::cover(&mut local, runs_in, checkout, &[&self.git_dir, &self.common_dir]);
+        local
+    }
+
+    /// Its submodules' repositories, checked out or not (one level).
+    fn below(&self) -> impl Iterator<Item = &Arc<Repo>> {
+        self.subs.iter().map(|s| &s.repo).chain(&self.dormant)
+    }
+
+    /// The git folders in its `modules/` (the checkout's own: a linked checkout keeps its submodules' there)
+    /// that none of `subs` uses — a folder holding `HEAD` and `config` is one, any other is looked into (a
+    /// submodule's name can hold a `/`) — and the folders looked into, to watch for one coming (stamped before
+    /// each is read).
+    fn dormant(&self, subs: &[Sub], depth: usize) -> (Vec<Arc<Repo>>, Vec<(PathBuf, Stamp)>) {
+        let (mut found, mut folders) = (Vec::new(), Vec::new());
+        let mut todo = vec![self.git_dir.join("modules")];
+        while let Some(dir) = todo.pop() {
+            folders.push((dir.clone(), stamp(&dir)));
+            for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let p = e.path();
+                if !e.file_type().is_ok_and(|t| t.is_dir()) {
+                    continue;
+                }
+                if !(p.join("HEAD").is_file() && p.join("config").is_file()) {
+                    todo.push(p);
+                    continue;
+                }
+                let Ok(p) = std::fs::canonicalize(&p) else { continue };
+                if subs.iter().any(|s| s.repo.git_dir == p) {
+                    continue;
+                }
+                found.push(Arc::new(Repo::read_local(p.clone(), p.clone(), None, p, depth + 1)));
+            }
+        }
+        (found, folders)
+    }
+
+    /// Its submodules checked out (`Sub`): the gitlinks in its index (`ls-files --stage`, which runs nothing)
+    /// with a `.git` there — a folder, or a file naming one — each read as a repository of its own; and the
+    /// files that decide them, to watch: `HEAD` (a switch to a commit that has others), `.gitmodules` (what
+    /// adding one, or a pull that brings one, changes), each gitlink's `.git` (there or not yet), and — in
+    /// `dormant` — `modules/` (where a new one's git folder goes) — each stamped before it's read. Not the
+    /// index: every stage and commit writes it, and each would resolve the repository again (25–45 ms of git,
+    /// measured) for what those already catch — a gitlink comes with `.gitmodules`, and is looked into only
+    /// once its `.git` is there.
+    fn submodules(&self, depth: usize) -> (Vec<Sub>, Vec<(PathBuf, Stamp)>) {
+        let Some(top) = self.work_tree.clone() else { return (Vec::new(), Vec::new()) };
+        let mut watched = stamped([self.git_dir.join("HEAD"), top.join(".gitmodules")]);
+        let listed =
+            self.output(&["ls-files", "--stage", "-z", "--full-name", "--", ":/"], None).unwrap_or_default();
+        let mut subs = Vec::new();
+        // (`160000 <id> <stage>\t<path>`)
+        for e in listed.split(|&b| b == 0) {
+            let Some(rel) = e.strip_prefix(b"160000 ").and_then(|e| e.splitn(2, |&b| b == b'\t').nth(1))
+            else {
+                continue;
+            };
+            let Ok(rel) = std::str::from_utf8(rel) else { continue };
+            let (at, dot_git) = (top.join(rel), top.join(rel).join(".git"));
+            watched.push((dot_git.clone(), stamp(&dot_git)));
+            let git_dir = match std::fs::symlink_metadata(&dot_git) {
+                Ok(m) if m.is_dir() => dot_git,
+                Ok(_) => {
+                    let named = std::fs::read_to_string(&dot_git).unwrap_or_default();
+                    let Some(to) = named.lines().find_map(|l| l.strip_prefix("gitdir:")) else { continue };
+                    at.join(to.trim())
+                }
+                Err(_) => continue,
+            };
+            let (Ok(git_dir), Ok(sub_top)) = (std::fs::canonicalize(&git_dir), std::fs::canonicalize(&at))
+            else {
+                continue;
+            };
+            // (a linked checkout's git folder names its common one)
+            let common = std::fs::read_to_string(git_dir.join("commondir"))
+                .ok()
+                .and_then(|c| std::fs::canonicalize(git_dir.join(c.trim())).ok())
+                .unwrap_or_else(|| git_dir.clone());
+            let repo = Repo::read_local(git_dir, common, Some(sub_top.clone()), sub_top, depth + 1);
+            subs.push(Sub { rel: rel.to_string(), repo: Arc::new(repo) });
+        }
+        (subs, watched)
+    }
+
+    /// The submodules' names `.gitmodules` gives as git reads it: the work tree's file, else the index's,
+    /// else HEAD's (`git config`, which runs nothing).
+    fn gitmodules_names(&self) -> Vec<String> {
+        let top = self.work_tree.clone().unwrap_or_default();
+        let file = top.join(".gitmodules");
+        let from: Vec<Vec<String>> = match std::fs::symlink_metadata(&file) {
+            Ok(_) => vec![vec!["--file".into(), file.to_string_lossy().into_owned()]],
+            Err(_) => [":.gitmodules", "HEAD:.gitmodules"].map(|b| vec!["--blob".into(), b.into()]).into(),
+        };
+        for source in from {
+            let mut args = vec!["config", "-z"];
+            args.extend(source.iter().map(String::as_str));
+            args.extend(["--get-regexp", r"^submodule\..+\.path$"]);
+            let Ok(r) = ran(&self.command(&args), None) else { continue };
+            if !r.ok && r.stdout.is_empty() && !r.stderr.is_empty() {
+                continue; // (not there)
+            }
+            // (`key LF value NUL`; the name as written, between `submodule.` and `.path`)
+            return String::from_utf8_lossy(&r.stdout)
+                .split('\0')
+                .filter_map(|e| e.split_once('\n').map_or(Some(e), |(k, _)| Some(k)))
+                .filter_map(|k| k.strip_prefix("submodule.")?.strip_suffix(".path"))
+                .map(str::to_string)
+                .collect();
+        }
+        Vec::new()
+    }
+
+    /// Whether `config` is its own config file, or one of its submodules' (any depth, checked out or not).
+    fn about(&self, config: &Path) -> bool {
+        self.config_file() == config || self.below().any(|b| b.about(config))
+    }
+
+    /// Itself and its submodules, any depth, checked out or not — the ones whose own commands wait for a
+    /// card (`asks`).
+    pub fn asking(&self) -> Vec<Arc<Repo>> {
+        let mut out: Vec<Arc<Repo>> = Vec::new();
+        if self.asks {
+            out.push(Arc::new(self.clone()));
+        }
+        for b in self.below() {
+            out.extend(b.asking());
+        }
+        out
+    }
+
+    /// The file answers about its own commands are kept by: its common folder's `config`.
+    pub fn config_file(&self) -> PathBuf {
+        self.common_dir.join("config")
+    }
+
+    /// `args` on `cmd` — with what's held put in first (`-c`, the environment) and its flags after the
+    /// subcommand (`Hold::args`).
+    fn hold_on(&self, cmd: &mut Command, args: &[&str]) {
+        let Some(h) = self.held.as_deref() else {
+            cmd.args(args);
+            return;
+        };
+        for (arg, var, value) in h.settings() {
+            cmd.arg(arg).env(var, value);
+        }
+        for (var, value) in &h.env {
+            cmd.env(var, value);
+        }
+        cmd.args(h.args(args));
+    }
 }
 
 /// git in `dir`: no prompt, no optional lock (a read — status, diff — never takes the index lock: a commit
@@ -160,7 +644,61 @@ fn resolve_with(root: &Path, ceilings: Option<&std::ffi::OsStr>) -> Result<Repo,
 fn base(dir: &Path) -> Command {
     let mut cmd = Command::new("git");
     cmd.current_dir(dir).env("GIT_TERMINAL_PROMPT", "0").env("GIT_OPTIONAL_LOCKS", "0");
+    // (tests never read the machine's own config — it's the user's, and can hold tokens: a stand-in instead)
+    #[cfg(test)]
+    cmd.env("GIT_CONFIG_GLOBAL", test_global(dir)).env("GIT_CONFIG_NOSYSTEM", "1");
+    #[cfg(test)]
+    for (k, v) in test_env(dir) {
+        cmd.env(k, v);
+    }
     cmd
+}
+
+/// Tests: the environment tarae runs in, as git sees it, for runs in folders under a test's own (`env_for`).
+#[cfg(test)]
+type Env = Vec<(String, String)>;
+
+#[cfg(test)]
+static ENVS: Mutex<Vec<(PathBuf, Env)>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn test_env(dir: &Path) -> Env {
+    let envs = ENVS.lock().unwrap_or_else(|e| e.into_inner());
+    envs.iter().find(|(u, _)| dir.starts_with(u)).map(|(_, v)| v.clone()).unwrap_or_default()
+}
+
+#[cfg(test)]
+pub fn env_for(under: &Path, vars: &[(&str, &str)]) {
+    let vars = vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    ENVS.lock().unwrap_or_else(|e| e.into_inner()).push((under.to_path_buf(), vars));
+}
+
+/// Tests: the user-level config git reads for runs in folders under a test's own (`GIT_CONFIG_GLOBAL` on
+/// those runs only — never the test binary's environment — and no system config, nor git's built-in one).
+#[cfg(test)]
+static GLOBALS: Mutex<Vec<(PathBuf, PathBuf)>> = Mutex::new(Vec::new());
+
+/// Tests: the stand-in user config for a run in `dir` — a test's own (`global_config_for`), else an empty
+/// file of the test binary's in the temp folder.
+#[cfg(test)]
+fn test_global(dir: &Path) -> PathBuf {
+    static EMPTY: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let own =
+        GLOBALS.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(u, _)| dir.starts_with(u)).cloned();
+    own.map(|(_, f)| f).unwrap_or_else(|| {
+        EMPTY
+            .get_or_init(|| {
+                let f = std::env::temp_dir().join(format!("tarae-test-gitconfig-{}", std::process::id()));
+                std::fs::write(&f, "").ok();
+                f
+            })
+            .clone()
+    })
+}
+
+#[cfg(test)]
+pub fn global_config_for(under: &Path, file: &Path) {
+    GLOBALS.lock().unwrap_or_else(|e| e.into_inner()).push((under.to_path_buf(), file.to_path_buf()));
 }
 
 /// What a git run gave.
@@ -219,10 +757,13 @@ pub fn finish(cmd: &Command, input: Option<&[u8]>) -> Result<Vec<u8>, String> {
 
 impl Repo {
     /// A git folder named — the common one a checkout's `repo` gave, for what outlives the checkout (its
-    /// removal, its branch's): no work tree, nothing discovered.
+    /// removal, its branch's): no work tree, nothing discovered; its own config read and held as a checkout's
+    /// (runs git: on a worker).
     pub fn git_folder(dir: &Path) -> Repo {
         let d = dir.to_path_buf();
-        Repo { git_dir: d.clone(), common_dir: d.clone(), work_tree: None, dir: d }
+        let r = Repo::read_local(d.clone(), d.clone(), None, d, 0);
+        tell(&r);
+        r
     }
 
     /// git on this repository: its folders given, run in `dir` — to run with `ran` or `finish` (an
@@ -235,7 +776,8 @@ impl Repo {
         if let Some(top) = &self.work_tree {
             cmd.arg("--work-tree").arg(top);
         }
-        cmd.args(SAFE).args(args);
+        cmd.args(SAFE);
+        self.hold_on(&mut cmd, args);
         cmd
     }
 
@@ -251,7 +793,8 @@ impl Repo {
         if let Some(parent) = top.parent() {
             cmd.env("GIT_CEILING_DIRECTORIES", parent);
         }
-        cmd.env_remove("GIT_DIR").env_remove("GIT_WORK_TREE").args(SAFE).args(args);
+        cmd.env_remove("GIT_DIR").env_remove("GIT_WORK_TREE").args(SAFE);
+        self.hold_on(&mut cmd, args);
         Ok(cmd)
     }
 
@@ -271,15 +814,39 @@ impl Repo {
         self.run(&all, None)
     }
 
-    /// The start of a shell line that runs git on it (the rebase's, in the task panel).
-    pub fn shell_line(&self) -> String {
+    /// The start of a shell line that runs git on it (the rebase's, in the task panel), and the environment
+    /// it runs with: no fetch (`NO_LAZY_FETCH`), and what's held as on every run (`Hold::for_line`) — names in
+    /// the line (`--config-env`), values only in the environment: the line is shown and logged, and a value
+    /// can be the user's own put back (a credential helper's, say).
+    pub fn shell_line(&self) -> Line {
         let q = |p: &Path| crate::packs::sh_quote(&p.to_string_lossy());
-        let mut line = format!("git --git-dir {}", q(&self.git_dir));
+        let mut text = format!("git --git-dir {}", q(&self.git_dir));
         if let Some(top) = &self.work_tree {
-            line += &format!(" --work-tree {}", q(top));
+            text += &format!(" --work-tree {}", q(top));
         }
-        line + " " + &SAFE.join(" ")
+        text = text + " " + &SAFE.join(" ");
+        let mut env = vec![(NO_LAZY_FETCH.0.to_string(), NO_LAZY_FETCH.1.to_string())];
+        if let Some(h) = self.held.as_deref().map(Hold::for_line) {
+            for (arg, var, value) in h.settings() {
+                text += &format!(" {}", crate::packs::sh_quote(&arg));
+                env.push((var, value.to_string()));
+            }
+            env.extend(h.env.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+        }
+        Line { text, env }
     }
+}
+
+/// On the rebase's git (`Repo::shell_line`): a partial clone's missing object isn't fetched from its remote
+/// on demand — the rebase reaches no remote (its credential helpers, ssh, a proxy) — it fails instead, in
+/// git's own words, which the rebase's end says (git 2.45+).
+pub const NO_LAZY_FETCH: (&str, &str) = ("GIT_NO_LAZY_FETCH", "1");
+
+/// A shell line of git's and the environment it runs with (`Repo::shell_line`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Line {
+    pub text: String,
+    pub env: Vec<(String, String)>,
 }
 
 /// git on `root`'s repository (`repo`) — the call most of tarae makes.
@@ -412,6 +979,7 @@ fn outside(folder: &Path, writes: &[PathBuf]) -> Option<Arc<Repo>> {
     let ceilings = std::env::join_paths(writes.iter().filter(|w| w.is_absolute())).ok()?;
     let r = Arc::new(resolve_with(folder, (!writes.is_empty()).then_some(ceilings.as_os_str())).ok()?);
     repos().put(folder.to_path_buf(), r.clone());
+    tell(&r);
     Some(r)
 }
 
@@ -443,7 +1011,7 @@ fn within(repo: Arc<Repo>, rel: &Path, depth: usize) -> Option<(Arc<Repo>, Strin
                 let here: PathBuf = parts[..=i].iter().collect();
                 if let Some(sub) = submodule(&repo, &at, here.to_str()?) {
                     let rest: PathBuf = parts[i + 1..].iter().collect();
-                    return within(Arc::new(sub), &rest, depth + 1);
+                    return within(sub, &rest, depth + 1);
                 }
             }
         }
@@ -453,7 +1021,14 @@ fn within(repo: Arc<Repo>, rel: &Path, depth: usize) -> Option<(Arc<Repo>, Strin
 
 /// The submodule checked out at `at` (`rel` from `repo`'s top), as `repo` records it: a gitlink in its index
 /// there, and a git folder under its own `modules/` — the one the checkout's `.git` names, taken only there.
-fn submodule(repo: &Repo, at: &Path, rel: &str) -> Option<Repo> {
+/// Kept as a root's is (`SUBMODULES`), with what made it one stamped too: `repo`'s index and that `.git`.
+fn submodule(repo: &Repo, at: &Path, rel: &str) -> Option<Arc<Repo>> {
+    let top = std::fs::canonicalize(at).ok()?;
+    if let Some(r) = submodules().get(&top) {
+        return Some(r);
+    }
+    // (stamped before they're read: a change while they are is seen next time)
+    let made = stamped([repo.git_dir.join("index"), at.join(".git")]);
     let spec = format!(":(top,literal){rel}");
     let listed = repo.run(&["ls-files", "--stage", "-z", "--", &spec], None).ok()?;
     // (`160000 <id> 0\t<path>`)
@@ -470,8 +1045,13 @@ fn submodule(repo: &Repo, at: &Path, rel: &str) -> Option<Repo> {
     if git_dir == modules || !git_dir.starts_with(&modules) || !git_dir.is_dir() {
         return None;
     }
-    let top = std::fs::canonicalize(at).ok()?;
-    Some(Repo { common_dir: git_dir.clone(), git_dir, work_tree: Some(top.clone()), dir: top })
+    // (its own config, held by its own answer)
+    let mut sub = Repo::read_local(git_dir.clone(), git_dir, Some(top.clone()), top.clone(), 1);
+    sub.stamps.extend(made);
+    let sub = Arc::new(sub);
+    submodules().put(top, sub.clone());
+    tell(&sub);
+    Some(sub)
 }
 
 /// Tests only: whether git run in `dir` would work on tarae's own repository (the nearest `.git` up from it

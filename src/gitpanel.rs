@@ -44,6 +44,12 @@ pub struct Status {
     pub rows: std::sync::Arc<[crate::sidebar::Line]>,
     /// A clean tree's history, for the tab with nothing to commit (#147).
     pub log: Option<Log>,
+    /// Submodules whose own commands are held, kept out of every run (`gitrepo::Sub`): (from the top, its
+    /// card up — else answered `n`). Their changes don't show; their rows say so.
+    pub held: Vec<(String, bool)>,
+    /// The repository and its submodules whose commands wait for an answer: their cards go up as it lands
+    /// (one gone unanswered comes back) — so a row that says its card is up has one.
+    pub asks: Vec<std::sync::Arc<crate::gitrepo::Repo>>,
 }
 
 /// What a clean tree's git tab says instead of nothing: the branch's commits past its base — what bring
@@ -181,6 +187,11 @@ pub fn status(cwd: &Path, base: Option<String>) -> Result<Status, String> {
     let out = git(&top, &["status", "--porcelain=v2", "-z", "--branch", "--untracked-files=all"], None)?;
     let mut st = parse_v2(&out);
     st.top = top.clone();
+    if let Ok(r) = crate::gitrepo::repo(&top) {
+        let held = r.subs.iter().filter(|s| s.repo.held.is_some());
+        st.held = held.map(|s| (s.rel.clone(), !s.repo.asking().is_empty())).collect();
+        st.asks = r.asking();
+    }
     let staged = numstat(&git(&top, &["diff", "--cached", "--numstat", "-z"], None).unwrap_or_default());
     // (`diff-files`, not `diff`: over a file whose stat changed, `diff` refreshes the index — taking its lock
     // whatever `GIT_OPTIONAL_LOCKS` says)
@@ -664,6 +675,9 @@ impl Editor {
                 match result {
                     Ok(mut st) => {
                         st.generation = read;
+                        for r in &st.asks {
+                            ed.git_trust_check(r);
+                        }
                         ed.session.git_status = Some(st);
                     }
                     Err(e) => {

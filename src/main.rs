@@ -39,6 +39,7 @@ mod git;
 mod gitmenu;
 mod gitpanel;
 mod gitrepo;
+mod gittrust;
 mod grammar;
 mod graphemes;
 mod grep;
@@ -254,6 +255,10 @@ fn main() -> Result<()> {
     let packs = languages::get();
     let (config, warnings) = config::load(&root);
     let mut editor = editor::Editor::with_root(config, root);
+    // (where answers about repositories' own git commands are kept — `gitrepo` reads them as it resolves)
+    gitrepo::set_trust_store(editor.trust_path.clone());
+    // (and where a resolve that finds them unanswered puts the card up — any repository, any git call)
+    gitrepo::set_asker(std::path::Path::new("/"), editor.events.shared_sender());
     // Started without a file: recent files on the start screen (existing ones only; reads one small file)
     editor.recent = recent::load();
     editor.restore = restore::State::load();

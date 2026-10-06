@@ -12,6 +12,28 @@ fn git_in(dir: &Path, args: &[&str]) {
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
 }
 
+/// A repository's folders as given, nothing of its own found (no git run).
+fn plain(git_dir: PathBuf, work_tree: Option<PathBuf>, dir: PathBuf) -> Repo {
+    Repo {
+        common_dir: git_dir.clone(),
+        git_dir,
+        work_tree,
+        dir,
+        local: Arc::default(),
+        held: None,
+        asks: false,
+        stamps: Vec::new(),
+        racy: false,
+        subs: Vec::new(),
+        dormant: Vec::new(),
+    }
+}
+
+/// Past `RACY` since the test's last change: a resolve now is kept.
+fn settled() {
+    std::thread::sleep(RACY + std::time::Duration::from_millis(100));
+}
+
 /// A fresh folder of this test's own in the temp folder, real path.
 fn temp(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("tarae-gitrepo-{name}-{}", std::process::id()));
@@ -56,17 +78,14 @@ fn tests_know_this_repository() {
 fn a_root_resolves_once_and_runs_in_itself() {
     let dir = temp("root");
     repository(&dir, &[("pkg/a.txt", "a\n"), ("b.txt", "b\n")]);
+    settled();
     let root = dir.join("pkg");
     let r = repo(&root).unwrap();
     assert_eq!(
-        *r,
-        Repo {
-            git_dir: dir.join(".git"),
-            common_dir: dir.join(".git"),
-            work_tree: Some(dir.clone()),
-            dir: root.clone()
-        }
+        (&r.git_dir, &r.common_dir, &r.work_tree, &r.dir),
+        (&dir.join(".git"), &dir.join(".git"), &Some(dir.clone()), &root)
     );
+    assert!(r.held.is_none() && !r.asks, "nothing of its own runs commands");
     assert!(Arc::ptr_eq(&r, &repo(&root).unwrap()), "kept");
     assert_eq!(git(&root, &["ls-files"], None).unwrap(), "a.txt\n");
     let (at, rel) = for_file(&root, &dir.join("b.txt")).unwrap();
@@ -88,6 +107,7 @@ fn a_root_is_kept_by_its_real_path() {
     std::fs::create_dir_all(&real).unwrap();
     repository(&real, &[("a.txt", "a\n")]);
     std::os::unix::fs::symlink(&real, dir.join("link")).unwrap();
+    settled();
     let a = repo(&real).unwrap();
     assert!(Arc::ptr_eq(&a, &repo(&dir.join("link")).unwrap()), "one entry for both spellings");
     assert!(cached(&real).is_some_and(|c| Arc::ptr_eq(&c, &a)));
@@ -103,6 +123,7 @@ fn a_root_with_a_git_of_its_own_since_is_resolved_again() {
     let inner = dir.join("inner");
     assert_eq!(repo(&inner).unwrap().work_tree.as_deref(), Some(dir.as_path()));
     git_in(&inner, &["init", "-q"]);
+    settled();
     assert_eq!(repo(&inner).unwrap().work_tree.as_deref(), Some(inner.as_path()), "its own now");
     assert_eq!(cached(&inner).map(|r| r.git_dir.clone()), Some(inner.join(".git")));
     std::fs::remove_dir_all(&dir).ok();
@@ -116,12 +137,7 @@ fn the_kept_roots_are_capped_least_lately_used_first() {
     let mut kept = Kept { cap: 3, entries: Vec::new() };
     for i in 0..5 {
         std::fs::create_dir_all(root(i).join(".git")).unwrap();
-        let r = Repo {
-            git_dir: root(i).join(".git"),
-            common_dir: root(i).join(".git"),
-            work_tree: Some(root(i)),
-            dir: root(i),
-        };
+        let r = plain(root(i).join(".git"), Some(root(i)), root(i));
         kept.put(root(i), Arc::new(r));
         if i == 2 {
             assert!(kept.get(&root(0)).is_some(), "0 used again: the newest");
@@ -212,19 +228,38 @@ fn a_file_outside_the_sessions_is_read_only_away_from_writes() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// The shell line the rebase runs: both folders given, quoted, the guard on.
+/// The shell line the rebase runs: both folders given, quoted, the guard on, no fetch.
 #[test]
 fn the_shell_line_names_the_repository() {
-    let r = Repo {
-        git_dir: "/r/it's/.git".into(),
-        common_dir: "/r/it's/.git".into(),
-        work_tree: Some("/r/it's".into()),
-        dir: "/r/it's".into(),
-    };
+    let mut r = plain("/r/it's/.git".into(), Some("/r/it's".into()), "/r/it's".into());
+    let start = r"git --git-dir '/r/it'\''s/.git' --work-tree '/r/it'\''s' -c safe.bareRepository=explicit";
+    let no_fetch = ("GIT_NO_LAZY_FETCH".to_string(), "1".to_string());
+    assert_eq!(r.shell_line(), Line { text: start.into(), env: vec![no_fetch.clone()] });
+    // (what's held goes in as on every run: each value in a variable of its own, named by `--config-env` — a
+    // key that holds a `=` whole — the values only in the environment, the network's held too; no flags)
+    let config = vec![
+        ("merge.m=x.driver".to_string(), "git merge-file %A".to_string()),
+        ("credential.helper".to_string(), "store --file /x/tarae-fake-token".to_string()),
+        ("filter.f.clean".to_string(), "it's".to_string()),
+    ];
+    let env = vec![("GIT_PROXY_COMMAND", "false")];
+    let flags = vec![("--no-textconv", &["blame"][..])];
+    r.held = Some(Arc::new(Hold { config, env, flags, ..Hold::default() }));
+    let line = r.shell_line();
     assert_eq!(
-        r.shell_line(),
-        r"git --git-dir '/r/it'\''s/.git' --work-tree '/r/it'\''s' -c safe.bareRepository=explicit"
+        line.text,
+        format!(
+            "{start} '--config-env=merge.m=x.driver=TARAE_GIT_HELD_0' '--config-env=credential.helper=TARAE_GIT_HELD_1' '--config-env=filter.f.clean=TARAE_GIT_HELD_2'"
+        )
     );
+    let env = [
+        ("GIT_NO_LAZY_FETCH", "1"),
+        ("TARAE_GIT_HELD_0", "git merge-file %A"),
+        ("TARAE_GIT_HELD_1", "store --file /x/tarae-fake-token"),
+        ("TARAE_GIT_HELD_2", "it's"),
+        ("GIT_PROXY_COMMAND", "false"),
+    ];
+    assert_eq!(line.env, env.map(|(k, v)| (k.to_string(), v.to_string())));
 }
 
 /// A file in a submodule: its own repository, from the git folder the session's records (`modules/…`), its

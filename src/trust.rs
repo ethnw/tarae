@@ -112,6 +112,18 @@ pub fn visible(s: &str) -> String {
     s.chars().map(|c| if hidden(c) { format!("\\u{{{:x}}}", c as u32) } else { c.to_string() }).collect()
 }
 
+/// `visible` on one line, for text a card shows as a line of its own (a key, a value, a file's name): a line
+/// break shown as `¶` — one more line could pass for a line of the card's own — a tab and the Unicode line
+/// and paragraph separators spelled out too, and a `¶` of the text's own, so none reads as the other.
+pub fn visible_line(s: &str) -> String {
+    let spelled = |c: char| match c {
+        '\n' => "¶".to_string(),
+        '\t' | '¶' | '\u{2028}' | '\u{2029}' => format!("\\u{{{:x}}}", c as u32),
+        c => c.to_string(),
+    };
+    visible(&s.chars().map(spelled).collect::<String>())
+}
+
 /// What an answer is about: a digest of the held-back items.
 pub type Digest = [u8; 32];
 

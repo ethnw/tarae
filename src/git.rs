@@ -61,6 +61,10 @@ fn head_ref(head: &Path) -> Option<PathBuf> {
 pub fn watch(tx: crate::event::Tx, dir: PathBuf) {
     crate::event::thread("tarae-git-watch", move || {
         let Some(head) = find_head(&dir) else { return };
+        // (its own commands held until answered: the card, once — `gittrust.rs`; a submodule's its own)
+        for r in crate::gitrepo::repo(&dir).map(|r| r.asking()).unwrap_or_default() {
+            let _ = tx.send(Event::Job(Box::new(move |ed: &mut Editor| ed.git_trust_told(&r))));
+        }
         let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
         let (mut last, mut first) = (None, true);
         loop {
@@ -169,13 +173,27 @@ pub fn regions(hunks: &[Hunk]) -> Vec<Hunk> {
 
 /// This file's content in the index of its repository as `places` finds it (`gitrepo::for_file_in` — never by
 /// discovery from where a run can write); Ok(None): untracked. The gutter compares against it, so staged
-/// changes leave the gutter. Runs on a worker thread.
+/// changes leave the gutter. Runs on a worker thread. (Tests: `git_load_base` reads it with `index_read`.)
+#[cfg(test)]
 pub fn index_blob(
     places: &crate::gitrepo::Places,
     path: &Path,
 ) -> Result<Option<String>, crate::gitrepo::NoGit> {
-    let (repo, rel) = crate::gitrepo::for_file_in(places, path)?;
-    Ok(repo.output(&["show", &format!(":{rel}")], None).ok().and_then(|b| String::from_utf8(b).ok()))
+    index_read(places, path).0
+}
+
+/// `index_blob`, with the repository it read from when its own commands wait for an answer (its card).
+type Read = (Result<Option<String>, crate::gitrepo::NoGit>, Option<std::sync::Arc<crate::gitrepo::Repo>>);
+
+fn index_read(places: &crate::gitrepo::Places, path: &Path) -> Read {
+    match crate::gitrepo::for_file_in(places, path) {
+        Ok((repo, rel)) => {
+            let text = repo.output(&["show", &format!(":{rel}")], None).ok();
+            let text = text.and_then(|b| String::from_utf8(b).ok());
+            (Ok(text), repo.asks.then_some(repo))
+        }
+        Err(e) => (Err(e), None),
+    }
 }
 
 impl Editor {
@@ -235,9 +253,12 @@ impl Editor {
         }
         let places = self.git_places(&path);
         self.events.jobs().spawn(move || {
-            let read = index_blob(&places, &path);
+            let (read, asks) = index_read(&places, &path);
             move |ed: &mut Editor| {
                 ed.git_bases_read += 1;
+                if let Some(r) = asks {
+                    ed.git_trust_check(&r);
+                }
                 if read == Err(crate::gitrepo::NoGit::Writable { looks: true }) && ed.git_told.insert(path) {
                     ed.set_status(crate::gitrepo::NOT_READ);
                 }

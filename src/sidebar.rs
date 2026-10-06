@@ -400,7 +400,19 @@ fn detail_rows(
 /// gutter's colors, `+a −r`) — built on the worker that reads the status.
 pub fn git_rows(st: &crate::gitpanel::Status) -> Vec<Line> {
     let mut lines = Vec::new();
-    for (staged, title, list) in [(false, "Changes", &st.unstaged), (true, "Staged", &st.staged)] {
+    // (a held submodule shows among the changes though git says nothing of it — its changes kept out)
+    let mut changes = st.unstaged.clone();
+    for (rel, _) in &st.held {
+        if !changes.iter().any(|e| e.rel == *rel) {
+            changes.push(crate::gitpanel::Entry {
+                letter: HELD,
+                rel: rel.clone(),
+                added: None,
+                removed: None,
+            });
+        }
+    }
+    for (staged, title, list) in [(false, "Changes", &changes), (true, "Staged", &st.staged)] {
         if list.is_empty() {
             continue;
         }
@@ -440,6 +452,8 @@ pub fn git_rows(st: &crate::gitpanel::Status) -> Vec<Line> {
                         _ => "M",
                     };
                     let hint = match (e.added, e.removed) {
+                        // (a submodule changed in its work tree: git counts it `0 0`)
+                        (Some(0), Some(0)) => String::new(),
                         (Some(a), Some(0)) => format!("+{a}"),
                         (Some(0), Some(r)) => format!("−{r}"),
                         (Some(a), Some(r)) => format!("+{a} −{r}"),
@@ -447,14 +461,42 @@ pub fn git_rows(st: &crate::gitpanel::Status) -> Vec<Line> {
                     };
                     let t =
                         Target::Change { rel: e.rel.clone(), staged, untracked: e.letter == '?', file: true };
-                    (t, Some((letter, scope)), hint)
+                    match e.letter {
+                        HELD => (Target::None, Some(("▲", "warning")), String::new()),
+                        _ => (t, Some((letter, scope)), hint),
+                    }
                 }
             };
-            lines.push(Line { depth: r.depth + 1, kind: r.kind, label, glyph, hint, target });
+            let depth = r.depth + 1;
+            // (two short rows, in line with its name: a submodule sits deep in the tree, and one long row is
+            // cut there at the panel's usual width — seen in a shot)
+            let note = match st.held.iter().find(|(rel, _)| !staged && r.dir.is_none() && *rel == e.rel) {
+                Some((_, true)) => HELD_ASKS,
+                Some((_, false)) => HELD_KEPT_OFF,
+                None => &[],
+            };
+            lines.push(Line { depth, kind: r.kind, label, glyph, hint, target });
+            for n in note {
+                lines.push(Line {
+                    depth,
+                    kind: Kind::Note,
+                    label: n.to_string(),
+                    glyph: Some(("·", "warning")),
+                    hint: String::new(),
+                    target: Target::None,
+                });
+            }
         }
     }
     lines
 }
+
+/// The letter of a held submodule's row (`git_rows`) — none of git's.
+const HELD: char = '▲';
+
+/// Under a held submodule's row: its card is up · answered `n`.
+pub const HELD_ASKS: &[&str] = &["its changes show once", "its card is answered"];
+pub const HELD_KEPT_OFF: &[&str] = &["kept off on its card:", "its changes don't show"];
 
 /// The list as tree rows — its items under their files and folders (headings), severity glyphs, the
 /// current item's row.

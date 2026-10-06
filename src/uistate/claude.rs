@@ -2,7 +2,8 @@
 //!
 //! - **Claude's level**: a strict subset of the state — its own session in detail, other sessions as name,
 //!   what they do and how many cards; no unsent text (the chat's draft, a prompt's or picker's query); a
-//!   plugin's card by its title only. Less than the `screen` tool sends, so its `ui` tool asks no card.
+//!   plugin's card and a repository's git settings (`git-trust`) by their titles only, in the inbox too.
+//!   Less than the `screen` tool sends, so its `ui` tool asks no card.
 //! - **The context line**: every message's `<editor-context>` gains `ui: …` when something's up beyond the
 //!   code and the chat — the cards, the toasts, the runs under way, by id.
 //! - **Ids in Claude's answers** (`card#12`, `run#7`, `git:src/a.rs`) are links: a click or `C-]` brings the
@@ -74,16 +75,22 @@ impl Editor {
         s.toasts.retain(|t| !others.contains(&t.id));
         // (the inbox is every session's: only its own session's entries — the others are counts)
         s.inbox.retain(|e| e.session == own);
-        // (what a card asks, cut as the one-line forms cut it: the whole is for scripts — Claude's level
-        // doesn't grow with a long card)
+        // (a plugin's card, and a repository's own git settings — text from outside, a credential helper's
+        // value maybe a secret: by title only, on the card and in the inbox; any other card's ask cut as the
+        // one-line forms cut it: the whole is for scripts — Claude's level doesn't grow with a long card)
+        let by_title = |kind: &str| kind.starts_with("plugin") || kind == "git-trust";
         for c in &mut s.cards {
-            c.asks = match c.kind.starts_with("plugin") {
+            c.asks = match by_title(c.kind) {
                 true => c.title.clone(),
                 false => super::asks_line(&c.asks),
             };
         }
         for e in &mut s.inbox {
-            e.asks = super::asks_line(&e.asks);
+            let card = s.cards.iter().find(|c| c.id == e.id);
+            e.asks = match by_title(e.kind) {
+                true => card.map_or_else(|| e.kind.into(), |c| c.title.clone()),
+                false => super::asks_line(&e.asks),
+            };
         }
         s.runs.retain(|r| r.session == own);
         // (its `procs` tool says these, each process's command line and folder with them)

@@ -1685,6 +1685,28 @@ mod tests {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
+    /// The repository's own git settings (its `core.hooksPath` here) trusted, as the card's `y` does
+    /// (`gittrust.rs`) — these tests are about the hooks card that comes after: held, no hook would run.
+    fn own_settings_trusted(repo: &Path) {
+        let r = crate::gitrepo::repo(repo).unwrap();
+        crate::gitrepo::answered(&r.config_file(), r.local.digest(), true);
+    }
+
+    /// The hooks card up for hooks changed in the checkout `root`, and only it: the trust card neither up nor
+    /// asking — the hooks in a `core.hooksPath` inside the checkout are the hooks card's (`held::cover`), one
+    /// card for one edit.
+    fn only_the_hooks_card(ed: &Editor, root: &Path) {
+        let trust = ed.offers.iter().chain(&ed.session.parked);
+        assert!(
+            !trust.into_iter().any(|o| matches!(o.what, crate::offer::What::GitTrust(_))),
+            "{}",
+            said(ed)
+        );
+        crate::gitrepo::forget(root);
+        let r = crate::gitrepo::repo(root).unwrap();
+        assert!(!r.asks && r.held.is_none(), "the trust card would ask too: {:?}", r.local.found);
+    }
+
     fn has_branch(repo: &Path, b: &str) -> bool {
         let mut git = std::process::Command::new("git");
         git.arg("-C").arg(repo).args(["rev-parse", "--verify", "-q", &format!("refs/heads/{b}")]);
@@ -2741,9 +2763,12 @@ mod tests {
         let mut ed = editor(&repo, &dir);
         let (wt, _) = moved_apart(&mut ed, &repo, true);
         rebase_asked(&mut ed);
+        // (its line made on a worker when the repository was resolved too soon after a change to be kept —
+        // `gitrepo::RACY`)
+        settle_until(&mut ed, |ed| ed.session.task_run.is_some() || says(ed, "rebase feat:"));
         let task = ed.session.task_run.as_ref().map(|r| (r.task.name.clone(), r.task.cmd.clone()));
         // (on the session's repository, named — `gitrepo`)
-        let named = crate::gitrepo::repo(&wt).unwrap().shell_line();
+        let named = crate::gitrepo::repo(&wt).unwrap().shell_line().text;
         assert!(named.contains(" --work-tree "), "{named}");
         let cmd = format!("{named} -c core.hooksPath=/dev/null -c advice.mergeConflict=false rebase 'main'");
         assert_eq!(task, Some(("rebase onto main".into(), cmd)), "in the task panel, with no hooks");
@@ -3116,6 +3141,9 @@ mod tests {
         let mut ed = editor(&repo, &dir);
         claude_does(&mut ed, &log, &format!("cp '{}' a.txt;", answer.display()));
         plant_hooks(&repo, &marks);
+        // (trusted: what's tested is that tarae's own git runs no hooks, not that they're held — and its card
+        // would take the rebase card's `y`)
+        own_settings_trusted(&repo);
         let (wt, _) = moved_apart(&mut ed, &repo, false);
         // (main's commit in `moved_apart` ran them; making the session didn't)
         let ran = marked_by_hand(&marks);
@@ -3166,6 +3194,10 @@ mod tests {
         // in `.git`: an absolute one into main's checkout
         let abs = repo.join(".githooks");
         git_in(&repo, &["config", "core.hooksPath", abs.to_str().unwrap()]);
+        own_settings_trusted(&repo);
+        // (main's hooks, outside the session's checkout: no hooks card of the session's looks at them, so they
+        // are what the trust card covers there — its own answer)
+        own_settings_trusted(&wt);
         ed.offers.clear();
         feed(&mut ed, ":session-end<ret>");
         settle_until(&mut ed, |ed| end_card(ed).is_some() || says(ed, "end feat:"));
@@ -3199,6 +3231,7 @@ mod tests {
         git_in(&repo, &["add", "-A"]);
         git_in(&repo, &["commit", "-qm", "hooks"]);
         std::fs::remove_file(&marks).unwrap();
+        own_settings_trusted(&repo);
         let mut ed = editor(&repo, &dir);
         let wt = new_session(&mut ed, "feat");
         let amended = |ed: &Editor| ed.messages.iter().filter(|m| m.2.starts_with("Amended")).count();
@@ -3217,6 +3250,7 @@ mod tests {
         let head = git_in(&wt, &["rev-parse", "HEAD"]);
         amend(&mut ed, "2");
         settle_until(&mut ed, |ed| card(ed, "Hooks before the amend").is_some() || says(ed, "amend:"));
+        only_the_hooks_card(&ed, &wt);
         let q = card(&ed, "Hooks before the amend").unwrap().question.clone();
         assert!(
             q.starts_with(
@@ -3238,6 +3272,7 @@ mod tests {
         hook(&wt, "commit-msg", "untracked");
         amend(&mut ed, "3");
         settle_until(&mut ed, |ed| card(ed, "Hooks before the amend").is_some() || says(ed, "amend:"));
+        only_the_hooks_card(&ed, &wt);
         let q = card(&ed, "Hooks before the amend").unwrap().question.clone();
         assert!(
             q.contains(
@@ -3289,6 +3324,7 @@ mod tests {
             git_in(&origin, &["rev-parse", "HEAD"])
         };
         git_in(&repo, &["config", "core.hooksPath", ".githooks"]);
+        own_settings_trusted(&repo);
         let mut ed = editor(&repo, &dir);
         ed.git_refresh();
         settle_until(&mut ed, |ed| ed.session.git_status.is_some());
@@ -3301,6 +3337,7 @@ mod tests {
             let tip = up(&format!("up {k}"));
             ed.git_push_pull(false);
             settle_until(&mut ed, |ed| card(ed, "Hooks before the pull").is_some() || says(ed, "pull:"));
+            only_the_hooks_card(&ed, &repo);
             let q = card(&ed, "Hooks before the pull").unwrap().question.clone();
             let row = format!("  .githooks/{name} — untracked\n");
             assert!(q.contains(&row), "{name} asked about, not marked as the pull's own: {q}");
@@ -3359,7 +3396,13 @@ mod tests {
         rebase_asked(&mut ed);
         settle_until(&mut ed, |ed| says(ed, "conflict markers still in") || says(ed, "rebase feat:"));
         feed(&mut ed, ":rebase-abort<ret>");
-        assert!(matches!(ed.session.rebase.as_ref().unwrap().stage, crate::rebase::Stage::Running { .. }));
+        // (its line made on a worker when the repository was resolved too soon after a change to be kept —
+        // `gitrepo::RACY`: the rebase just moved `HEAD`)
+        let running = |ed: &Editor| {
+            matches!(ed.session.rebase.as_ref().map(|r| &r.stage), Some(crate::rebase::Stage::Running { .. }))
+        };
+        settle_until(&mut ed, |ed| running(ed) || says(ed, "rebase feat:"));
+        assert!(running(&ed), "{}", said(&ed));
         ed.task_close();
         settle_until(&mut ed, |ed| ed.session.rebase.as_ref().is_none_or(|r| r.stopped()));
         assert!(says(&ed, "the rebase's git was stopped — it's read as git left it"), "{}", said(&ed));

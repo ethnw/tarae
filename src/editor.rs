@@ -10147,6 +10147,10 @@ mod tests {
         let mut perms = std::fs::metadata(&hook).unwrap().permissions();
         std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
         std::fs::set_permissions(&hook, perms).unwrap();
+        // (a hook in the git folder is held until the repository is trusted — `gittrust.rs`: trusted here, as
+        // the card's `y` does)
+        let r = crate::gitrepo::repo(&repo).unwrap();
+        crate::gitrepo::answered(&r.config_file(), r.local.digest(), true);
         let mut ed = editor("");
         ed.session.sidebar = Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, repo.clone()));
         ed.git_refresh();
