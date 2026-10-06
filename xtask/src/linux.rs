@@ -5,7 +5,10 @@
 //!
 //! The working tree is mounted **read-only**; the checks run in a clone made inside the container, with the
 //! uncommitted changes applied and the untracked files copied — nothing the container runs can write the real
-//! tree or its `.git`. Caches live in Docker volumes, per pinned version (target, rustup; the registry shared).
+//! tree or its `.git`. A Docker on another machine (a `DOCKER_HOST` socket forwarded from a cloud VM) can't
+//! see the tree (`sees_tree`): the checkout as it is goes in on stdin instead, as a tar (`streamed`), made a
+//! repository of one commit inside. Caches live in Docker volumes, per pinned version (target, rustup; the
+//! registry shared).
 //!
 //! Docker not reachable: it says `skipped — …` and exits 0, so a `:preflight` step with `note = "skipped"`
 //! reads it as a pass with a note. Not in tarae's own `.tarae.toml` — a step of yours (`.tarae.local.toml`).
@@ -147,10 +150,35 @@ pub fn run(args: &[String]) -> Result<()> {
     if !made.as_ref().is_ok_and(|o| o.status.success()) {
         return Err(format!("docker volume create {}: failed", target_volume(&root, &pin, platform)));
     }
-    let st = Command::new("docker")
-        .args(with_envs(docker_args(&root, common_git_dir(&root).as_deref(), &pin, platform, &what), &set))
-        .status()
-        .map_err(|e| format!("docker: {e}"))?;
+    let git = common_git_dir(&root);
+    let tree = match sees_tree(&root, &pin, platform) {
+        true => Tree::Mounted(git.as_deref()),
+        false => {
+            eprintln!(
+                "this Docker doesn't see {} (another machine's): the checkout goes in on stdin",
+                root.display()
+            );
+            Tree::Streamed
+        }
+    };
+    let mut docker = Command::new("docker");
+    docker.args(with_envs(docker_args(&root, tree, &pin, platform, &what), &set));
+    let st = match tree {
+        Tree::Mounted(_) => docker.status(),
+        Tree::Streamed => {
+            let tar = streamed(&root)?;
+            let mut child =
+                docker.stdin(std::process::Stdio::piped()).spawn().map_err(|e| format!("docker: {e}"))?;
+            let mut stdin = child.stdin.take().expect("piped");
+            let feed = std::thread::spawn(move || std::io::Write::write_all(&mut stdin, &tar));
+            let st = child.wait();
+            if let Ok(Err(e)) = feed.join() {
+                eprintln!("the checkout didn't all go in: {e}");
+            }
+            st
+        }
+    }
+    .map_err(|e| format!("docker: {e}"))?;
     say_sizes();
     if !st.success() {
         return Err("the Linux checks failed (above)".into());
@@ -208,16 +236,61 @@ fn git_folder(root: &Path) -> Option<PathBuf> {
     Some(PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
 }
 
-/// `docker run …` for the checks: the tree read-only at /src (a worktree's git folder read-only too, where
-/// its `.git` file says), the caches in volumes, the pinned image — on `platform` when one is asked, its
-/// target and toolchains in volumes of its own (the crates' sources stay shared).
-fn docker_args(
-    root: &Path,
-    git: Option<&Path>,
-    pin: &str,
-    platform: Option<&str>,
-    what: &What,
-) -> Vec<String> {
+/// How the checkout reaches the container.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Tree<'a> {
+    /// Read-only at /src, with a worktree's git folder (read-only too, at the path its `.git` file names): a
+    /// Docker that sees this machine's files (colima's VM shares them).
+    Mounted(Option<&'a Path>),
+    /// On the container's stdin as a tar (`streamed`): a Docker on another machine sees none of them.
+    Streamed,
+}
+
+/// Whether the Docker sees the checkout at its own path — a bind `--mount` (unlike `-v`, which makes an empty
+/// folder there) refuses a source that isn't there.
+fn sees_tree(root: &Path, pin: &str, platform: Option<&str>) -> bool {
+    let mut probe = Command::new("docker");
+    probe.args(["run", "--rm"]);
+    if let Some(p) = platform {
+        probe.args(["--platform", p]);
+    }
+    probe.arg("--mount").arg(format!("type=bind,source={},target=/src,readonly", root.display()));
+    probe.args([image(pin).as_str(), "test", "-f", "/src/Cargo.toml"]);
+    probe.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null());
+    probe.stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success())
+}
+
+/// The checkout as it is, as a tar for a Docker that can't see it (`Tree::Streamed`): every tracked file with
+/// its changes, the untracked ones git doesn't ignore — a deleted one left out, no `.git`, links as links.
+fn streamed(root: &Path) -> Result<Vec<u8>> {
+    use std::os::unix::ffi::OsStrExt;
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--deduplicate"])
+        .output()
+        .map_err(|e| format!("git ls-files: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("git ls-files: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    let mut tar = tar::Builder::new(Vec::new());
+    tar.follow_symlinks(false);
+    for name in out.stdout.split(|&b| b == 0).filter(|n| !n.is_empty()) {
+        let rel = Path::new(std::ffi::OsStr::from_bytes(name));
+        let path = root.join(rel);
+        // (deleted, the deletion not staged yet: the clone leaves it out too)
+        if path.symlink_metadata().is_err() {
+            continue;
+        }
+        tar.append_path_with_name(&path, rel).map_err(|e| format!("{}: {e}", rel.display()))?;
+    }
+    tar.into_inner().map_err(|e| format!("tar: {e}"))
+}
+
+/// `docker run …` for the checks: the tree as `tree` brings it, the caches in volumes, the pinned image — on
+/// `platform` when one is asked, its target and toolchains in volumes of its own (the crates' sources stay
+/// shared).
+fn docker_args(root: &Path, tree: Tree, pin: &str, platform: Option<&str>, what: &What) -> Vec<String> {
     // (CAP_SYS_PTRACE: Docker's default filter refuses `pidfd_open`/`pidfd_getfd` without it — the sandbox's
     // supervisor takes a run's socket with them, and its tests would skip themselves)
     let mut a: Vec<String> = ["run", "--rm", "--cap-add", "SYS_PTRACE"].map(String::from).into();
@@ -225,9 +298,14 @@ fn docker_args(
         a.extend(["--platform".to_string(), p.to_string()]);
     }
     let mount = |a: &mut Vec<String>, v: String| a.extend(["-v".to_string(), v]);
-    mount(&mut a, format!("{}:/src:ro", root.display()));
-    if let Some(git) = git {
-        mount(&mut a, format!("{0}:{0}:ro", git.display()));
+    match tree {
+        Tree::Mounted(git) => {
+            mount(&mut a, format!("{}:/src:ro", root.display()));
+            if let Some(git) = git {
+                mount(&mut a, format!("{0}:{0}:ro", git.display()));
+            }
+        }
+        Tree::Streamed => a.push("-i".to_string()),
     }
     mount(&mut a, format!("{}:/target", target_volume(root, pin, platform)));
     mount(&mut a, "tarae-registry:/usr/local/cargo/registry".into());
@@ -237,7 +315,7 @@ fn docker_args(
     for e in ["CARGO_TARGET_DIR=/target", "CARGO_TERM_COLOR=never"] {
         a.extend(["-e".to_string(), e.to_string()]);
     }
-    a.extend([image(pin), "sh".into(), "-ec".into(), script(what)]);
+    a.extend([image(pin), "sh".into(), "-ec".into(), script(tree, what)]);
     a
 }
 
@@ -685,17 +763,28 @@ pub(crate) fn image(pin: &str) -> String {
     format!("rust:{}", minor.join("."))
 }
 
-/// What runs in the container: the clone (with what isn't committed yet), then the checks.
-fn script(what: &What) -> String {
+/// What runs in the container: the clone (with what isn't committed yet) — or, streamed, the checkout as it is
+/// made a repository of one commit — then the checks.
+fn script(tree: Tree, what: &What) -> String {
     // (home made first: `--env HOME=/work` names one the clone hasn't made yet)
     let mut s = String::from(
         "mkdir -p \"$HOME\"\n\
-         git config --global --add safe.directory '*'\n\
-         git clone -q /src /work/tarae && cd /work/tarae\n\
-         git -C /src diff HEAD | git apply --allow-empty\n\
-         git -C /src ls-files --others --exclude-standard -z | (cd /src && tar --null -T - -cf -) | tar -xf -\n\
-         echo \"toolchain: $(rustc --version)\"\n",
+         git config --global --add safe.directory '*'\n",
     );
+    s.push_str(match tree {
+        Tree::Mounted(_) => {
+            "git clone -q /src /work/tarae && cd /work/tarae\n\
+             git -C /src diff HEAD | git apply --allow-empty\n\
+             git -C /src ls-files --others --exclude-standard -z | (cd /src && tar --null -T - -cf -) | tar -xf -\n"
+        }
+        Tree::Streamed => {
+            "mkdir -p /work/tarae && cd /work/tarae\n\
+             tar --no-same-owner -xf -\n\
+             git init -q && git add -A\n\
+             git -c user.name=xtask -c user.email=xtask@localhost commit -q --no-verify -m 'the checkout as it is'\n"
+        }
+    });
+    s.push_str("echo \"toolchain: $(rustc --version)\"\n");
     if !matches!(what, What::Test { .. }) {
         s.push_str("cargo clippy --locked --all-targets -- -D warnings\n");
         s.push_str("cargo clippy --locked --all-targets --features bundled-grammars -- -D warnings\n");
@@ -743,7 +832,7 @@ mod tests {
     /// brought over), on the pinned image, with caches per version — and `clippy`/`test` run only theirs.
     #[test]
     fn the_tree_is_read_only_and_the_checks_run_in_a_clone() {
-        let a = docker_args(Path::new("/r/tarae"), None, "1.99.0", None, &What::Both);
+        let a = docker_args(Path::new("/r/tarae"), Tree::Mounted(None), "1.99.0", None, &What::Both);
         assert!(a.windows(2).any(|w| w == ["-v", "/r/tarae:/src:ro"]), "{a:?}");
         assert!(a.windows(2).any(|w| w == ["--cap-add", "SYS_PTRACE"]), "the supervisor's tests run: {a:?}");
         assert!(
@@ -762,9 +851,9 @@ mod tests {
                 && s.contains("cargo test --locked --workspace\n"),
             "xtask's tests too: {s}"
         );
-        let clippy = script(&What::Clippy);
+        let clippy = script(Tree::Mounted(None), &What::Clippy);
         assert!(clippy.contains("cargo clippy") && !clippy.contains("cargo test"));
-        let test = script(&What::Test { args: Vec::new(), repeat: 1 });
+        let test = script(Tree::Mounted(None), &What::Test { args: Vec::new(), repeat: 1 });
         assert!(test.contains("cargo test") && !test.contains("cargo clippy"));
     }
 
@@ -773,10 +862,11 @@ mod tests {
     #[test]
     fn test_takes_cargo_tests_arguments_and_a_repeat() {
         let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        let once = script(&what(&args(&["test", "recovery", "--", "it's"])).unwrap());
+        let once = script(Tree::Mounted(None), &what(&args(&["test", "recovery", "--", "it's"])).unwrap());
         assert!(once.contains("cargo test --locked 'recovery' '--' 'it'\\''s'\n"), "{once}");
         assert!(!once.contains("while"), "{once}");
-        let looped = script(&what(&args(&["test", "--repeat", "20", "recovery"])).unwrap());
+        let looped =
+            script(Tree::Mounted(None), &what(&args(&["test", "--repeat", "20", "recovery"])).unwrap());
         assert!(
             looped.contains("while [ $n -lt 20 ]") && looped.contains("cargo test --locked 'recovery' ||")
         );
@@ -810,7 +900,7 @@ mod tests {
             "only first"
         );
         let r = Path::new("/r/tarae");
-        let a = docker_args(r, None, "1.99.0", Some("linux/amd64"), &What::Both);
+        let a = docker_args(r, Tree::Mounted(None), "1.99.0", Some("linux/amd64"), &What::Both);
         assert!(a.windows(2).any(|w| w == ["--platform", "linux/amd64"]), "{a:?}");
         assert!(a.windows(2).any(|w| w == ["--cap-add", "SYS_PTRACE"]), "the cap too: {a:?}");
         let image = a.iter().position(|v| v == "rust:1.99").unwrap();
@@ -842,7 +932,10 @@ mod tests {
             (set.clone(), rest.to_vec()),
             (args(&["HOME=/work", "A_1=x=y"]), args(&["test", "--bin", "tarae"]))
         );
-        let a = with_envs(docker_args(Path::new("/r/tarae"), None, "1.99.0", None, &What::Clippy), &set);
+        let a = with_envs(
+            docker_args(Path::new("/r/tarae"), Tree::Mounted(None), "1.99.0", None, &What::Clippy),
+            &set,
+        );
         let image = a.iter().position(|v| v == "rust:1.99").unwrap();
         assert_eq!(a[image - 4..image], args(&["-e", "HOME=/work", "-e", "A_1=x=y"]), "{a:?}");
         assert_eq!(a[image + 1..image + 3], args(&["sh", "-ec"]));
@@ -856,8 +949,13 @@ mod tests {
     /// file names — and only then. Found from a real worktree of a temp repository.
     #[test]
     fn a_worktrees_git_folder_goes_in_read_only() {
-        let a =
-            docker_args(Path::new("/w/s"), Some(Path::new("/r/tarae/.git")), "1.99.0", None, &What::Clippy);
+        let a = docker_args(
+            Path::new("/w/s"),
+            Tree::Mounted(Some(Path::new("/r/tarae/.git"))),
+            "1.99.0",
+            None,
+            &What::Clippy,
+        );
         assert!(a.windows(2).any(|w| w == ["-v", "/r/tarae/.git:/r/tarae/.git:ro"]), "{a:?}");
         assert!(!a.iter().any(|v| v.contains(':') && v.starts_with('/') && !v.ends_with(":ro")), "{a:?}");
         let dir = std::env::temp_dir().join(format!("tarae-xtask-wt-{}", std::process::id()));
@@ -886,6 +984,84 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// A Docker that can't see the checkout (another machine's) gets it on stdin: nothing of this machine's is
+    /// mounted, and the container makes its repository from what it reads.
+    #[test]
+    fn a_tree_the_docker_cant_see_goes_in_on_stdin() {
+        let a = docker_args(Path::new("/r/tarae"), Tree::Streamed, "1.99.0", None, &What::Clippy);
+        assert!(a.contains(&"-i".to_string()), "{a:?}");
+        assert!(!a.iter().any(|v| v.starts_with("/r/tarae")), "no mount of the checkout: {a:?}");
+        let s = a.last().unwrap();
+        assert!(s.contains("tar --no-same-owner -xf -\n") && s.contains("git init -q && git add -A"), "{s}");
+        assert!(!s.contains("/src"), "{s}");
+        let mounted = docker_args(Path::new("/r/tarae"), Tree::Mounted(None), "1.99.0", None, &What::Clippy);
+        assert!(!mounted.contains(&"-i".to_string()), "a mounted tree reads no stdin: {mounted:?}");
+    }
+
+    /// What goes in on stdin is the checkout as the mounted clone makes it: tracked files with their changes,
+    /// untracked ones git doesn't ignore, a link as a link — not a deleted file, an ignored one, nor `.git`.
+    #[test]
+    fn the_streamed_tree_is_the_checkout_as_it_is() {
+        let dir = std::env::temp_dir().join(format!("tarae-xtask-stream-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let git = |args: &[&str]| {
+            let ok = Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "core.hooksPath=/dev/null"])
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        let write = |name: &str, text: &str| std::fs::write(dir.join(name), text).unwrap();
+        git(&["init", "-q"]);
+        write(".gitignore", "target/\n");
+        write("src/kept.rs", "committed");
+        write("changed.rs", "committed");
+        write("gone.rs", "committed");
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "one"]);
+        write("changed.rs", "changed since");
+        std::fs::remove_file(dir.join("gone.rs")).unwrap();
+        write("new.rs", "untracked");
+        std::os::unix::fs::symlink("src/kept.rs", dir.join("link.rs")).unwrap();
+        std::fs::create_dir_all(dir.join("target")).unwrap();
+        write("target/ignored", "x");
+        let bytes = streamed(&dir).unwrap();
+        let mut entries: Vec<(String, String)> = tar::Archive::new(&bytes[..])
+            .entries()
+            .unwrap()
+            .map(|e| {
+                let mut e = e.unwrap();
+                let name = e.path().unwrap().display().to_string();
+                let body = match e.link_name().unwrap() {
+                    Some(to) => format!("-> {}", to.display()),
+                    None => {
+                        let mut s = String::new();
+                        std::io::Read::read_to_string(&mut e, &mut s).unwrap();
+                        s
+                    }
+                };
+                (name, body)
+            })
+            .collect();
+        entries.sort();
+        let want = [
+            (".gitignore", "target/\n"),
+            ("changed.rs", "changed since"),
+            ("link.rs", "-> src/kept.rs"),
+            ("new.rs", "untracked"),
+            ("src/kept.rs", "committed"),
+        ]
+        .map(|(n, b)| (n.to_string(), b.to_string()));
+        assert_eq!(entries, want);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Each checkout builds in a target of its own (one shared let a session's tests run another's build),
     /// named the same on every run, labelled with its path; registry and rustup stay shared.
     #[test]
@@ -911,7 +1087,8 @@ mod tests {
             ]
         );
         assert_eq!(create_args(a, None, "1.99.0", None)[3..], ["tarae.checkout=/w/tarae/s1", name.as_str()]);
-        let args = docker_args(a, None, "1.99.0", None, &What::Test { args: Vec::new(), repeat: 1 });
+        let args =
+            docker_args(a, Tree::Mounted(None), "1.99.0", None, &What::Test { args: Vec::new(), repeat: 1 });
         assert!(args.contains(&format!("{name}:/target")), "{args:?}");
         assert!(args.contains(&"tarae-registry:/usr/local/cargo/registry".to_string()), "{args:?}");
         assert!(args.contains(&"tarae-rustup-1.99.0:/usr/local/rustup".to_string()), "{args:?}");

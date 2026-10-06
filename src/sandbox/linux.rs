@@ -18,7 +18,10 @@
 //! `/tmp` (splitting `/tmp` would refuse every new file there, and Java writes its temp files in `/tmp`
 //! whatever `TMPDIR` says); a single file not there yet (cargo's SQLite journal). The network: what a run
 //! reaches by address tarae decides, as macOS's profile does (`supervisor.rs`) — where it can't here,
-//! seccomp refuses every socket but netlink, this machine's ports and the project's unix sockets too.
+//! seccomp refuses every socket but netlink, this machine's ports and the project's unix sockets too. Under
+//! that, Landlock refuses a run's own TCP bind and connect (ABI 4), its connect to a unix socket by path
+//! (ABI 9) and its UDP bind and send to an address (ABI 10), granted nowhere (`landlock::handled_net`,
+//! `UNGRANTED`): tarae makes those calls for it.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -453,7 +456,17 @@ pub fn confine(
     audit: Result<AuditSource, String>,
     make_first: bool,
 ) -> io::Result<Confine> {
-    let mut r = Ruleset::new(abi)?;
+    confine_in(Ruleset::new(abi)?, p, audit, make_first)
+}
+
+/// `confine`, the rules added to `r` (the golden's are only written down: `Ruleset::written`).
+pub(super) fn confine_in(
+    mut r: Ruleset,
+    p: &Policy,
+    audit: Result<AuditSource, String>,
+    make_first: bool,
+) -> io::Result<Confine> {
+    let abi = r.abi();
     let hidden: Vec<PathBuf> = p.reads.copies.hidden.iter().map(|(f, _)| f.clone()).collect();
     match &p.reads.home {
         Some(home) => {

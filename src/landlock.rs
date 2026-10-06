@@ -6,6 +6,12 @@
 //! grants it. Only the calling thread: threads already running stay as they were; threads and processes it
 //! starts afterwards inherit it, and nothing takes it off again — so a command is started confined from a
 //! short-lived thread of its own (`confined`).
+//!
+//! The network rights a version has are handled with no rule (`handled_net`, `UNGRANTED`): a run's own TCP
+//! and UDP `bind`/`connect`, its UDP send to an address, and its connect to a unix socket by path are
+//! refused by the kernel. tarae's supervisor
+//! does each of those calls for the run, as tarae, unconfined (`sandbox/supervisor.rs`) — so this is a
+//! second lock under seccomp's routing, for a path the filter might miss.
 
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -33,9 +39,9 @@ pub const REFER: u64 = 1 << 13;
 pub const TRUNCATE: u64 = 1 << 14;
 /// `ioctl` on a device file (ABI 5; before it, always).
 pub const IOCTL_DEV: u64 = 1 << 15;
-/// Connecting or sending to a unix socket by its path (ABI 9; before it, always — tarae's supervisor decides
-/// each one whatever the ABI, `sandbox/supervisor.rs`). Left out of `FILE` until a kernel that has it shows a rule on the socket file
-/// itself takes it: the kernel refuses a file rule with a right it doesn't take there.
+/// Connecting or sending to a unix socket by its path (ABI 9, as the v7.2 tag's uapi header has it — the link
+/// at `NET_BIND_UDP`; before it, always — tarae's supervisor decides each one whatever the ABI,
+/// `sandbox/supervisor.rs`). Handled, never granted (`UNGRANTED`).
 pub const RESOLVE_UNIX: u64 = 1 << 16;
 
 /// Every right above.
@@ -58,6 +64,21 @@ pub const ALL: u64 = EXECUTE
     | RESOLVE_UNIX;
 /// The rights a rule on a single file can hold — the rest are about a folder's entries.
 pub const FILE: u64 = EXECUTE | WRITE_FILE | READ_FILE | TRUNCATE | IOCTL_DEV;
+/// Handled where the ABI has it and granted by no rule (`Ruleset::allow` leaves it out): what tarae's
+/// supervisor does for a run, never the run itself.
+pub const UNGRANTED: u64 = RESOLVE_UNIX;
+
+/// Network rights (ABI 4), as `<linux/landlock.h>` numbers them: binding a TCP socket to a port, connecting
+/// one. Handled with no rule (`handled_net`).
+pub const NET_BIND_TCP: u64 = 1 << 0;
+pub const NET_CONNECT_TCP: u64 = 1 << 1;
+/// UDP's (ABI 10, shipped in Linux 7.2; the v7.2 tag's `include/uapi/linux/landlock.h` —
+/// https://raw.githubusercontent.com/torvalds/linux/v7.2/include/uapi/linux/landlock.h): binding a UDP
+/// socket to a port, and setting its remote port or sending a datagram to a port given with the send. A send
+/// with no address on a socket already connected isn't checked; setting a remote address or a first send
+/// auto-binds, which needs the bind right too — tarae's supervisor does both for a run.
+pub const NET_BIND_UDP: u64 = 1 << 2;
+pub const NET_CONNECT_SEND_UDP: u64 = 1 << 3;
 
 /// Scopes (ABI 6): what a confined process may reach of processes outside its domain — tarae's, the user's
 /// others. Connecting to an abstract unix socket made outside it (tarae's supervisor refuses abstract names
@@ -71,8 +92,8 @@ const RULE_PATH_BENEATH: libc::c_int = 1;
 /// domain logs only the program that made it, and that's tarae's thread, not the command.
 const RESTRICT_SELF_LOG_NEW_EXEC_ON: u32 = 1 << 1;
 
-/// `struct landlock_ruleset_attr`: file rights, network rights (none handled here — `seccomp.rs` keeps runs
-/// off sockets), scopes. A kernel older than a field takes the struct while the fields it lacks are 0.
+/// `struct landlock_ruleset_attr`: file rights, network rights (`handled_net`), scopes. A kernel older than a
+/// field takes the struct while the fields it lacks are 0.
 #[repr(C)]
 struct RulesetAttr {
     handled_access_fs: u64,
@@ -121,6 +142,20 @@ pub fn handled(abi: u32) -> u64 {
     fs
 }
 
+/// The network rights a ruleset made for ABI `abi` handles: TCP's bind and connect from 4, UDP's bind and
+/// connect-or-send from 10, none before 4. No rule grants a port, so a run's own call is refused — tarae's
+/// supervisor makes it for the run.
+pub fn handled_net(abi: u32) -> u64 {
+    let mut net = 0;
+    if abi >= 4 {
+        net |= NET_BIND_TCP | NET_CONNECT_TCP;
+    }
+    if abi >= 10 {
+        net |= NET_BIND_UDP | NET_CONNECT_SEND_UDP;
+    }
+    net
+}
+
 /// The scopes a ruleset made for ABI `abi` has: both from 6, none before.
 pub fn scopes(abi: u32) -> u64 {
     if abi >= 6 { SCOPE_ABSTRACT_UNIX_SOCKET | SCOPE_SIGNAL } else { 0 }
@@ -135,13 +170,20 @@ pub struct Ruleset {
     /// Tests: every rule added — (path, the rights granted) — in order.
     #[cfg(test)]
     pub added: Vec<(std::path::PathBuf, u64)>,
+    /// Tests: only written down (`written`) — no rule goes to the kernel.
+    #[cfg(test)]
+    written: bool,
 }
 
 impl Ruleset {
-    /// A ruleset handling every file right ABI `abi` has (`handled`), and its scopes (`scopes`).
+    /// A ruleset handling every file right ABI `abi` has (`handled`), its network rights (`handled_net`), and
+    /// its scopes (`scopes`).
     pub fn new(abi: u32) -> io::Result<Ruleset> {
-        let attr =
-            RulesetAttr { handled_access_fs: handled(abi), handled_access_net: 0, scoped: scopes(abi) };
+        let attr = RulesetAttr {
+            handled_access_fs: handled(abi),
+            handled_access_net: handled_net(abi),
+            scoped: scopes(abi),
+        };
         // SAFETY: the attribute is a live struct of the size given; the kernel only reads it.
         let fd = unsafe {
             libc::syscall(
@@ -162,26 +204,46 @@ impl Ruleset {
             abi,
             #[cfg(test)]
             added: Vec::new(),
+            #[cfg(test)]
+            written: false,
         })
+    }
+
+    /// Tests: the rules a ruleset for ABI `abi` would hold, whatever this kernel's version — written down
+    /// (`added`), never made nor applied.
+    #[cfg(test)]
+    pub fn written(abi: u32) -> io::Result<Ruleset> {
+        let fd = std::fs::File::open("/dev/null")?.into();
+        Ok(Ruleset { fd, handled: handled(abi), abi, added: Vec::new(), written: true })
+    }
+
+    /// The ABI the ruleset was made for.
+    pub fn abi(&self) -> u32 {
+        self.abi
     }
 
     /// Grants `access` beneath `path` (a real path): in a folder and everything under it, or on one file — of
     /// `access`, the rights a file can hold (`FILE`). Rights the ruleset doesn't handle are left out (they stay
-    /// allowed anyway); a rule left with none isn't added. `path` must exist. No link is followed anywhere on
-    /// its way (`open_unlinked`) — the rule is left out (false): a link planted where a run writes, as the
-    /// path itself or a folder above it, would otherwise carry the grant to where it points.
+    /// allowed anyway), and so is `UNGRANTED`; a rule left with none isn't added. `path` must exist. No link is
+    /// followed anywhere on its way (`open_unlinked`) — the rule is left out (false): a link planted where a
+    /// run writes, as the path itself or a folder above it, would otherwise carry the grant to where it points.
     pub fn allow(&mut self, path: &Path, access: u64) -> io::Result<bool> {
         let at = match open_unlinked(path, libc::O_PATH) {
             Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return Ok(false),
             at => std::fs::File::from(at?),
         };
         let kind = at.metadata()?.file_type();
-        let mut access = access & self.handled;
+        let mut access = access & self.handled & !UNGRANTED;
         if !kind.is_dir() {
             access &= FILE;
         }
         if access == 0 {
             return Ok(false);
+        }
+        #[cfg(test)]
+        if self.written {
+            self.added.push((path.to_path_buf(), access));
+            return Ok(true);
         }
         let rule = PathBeneathAttr { allowed_access: access, parent_fd: at.as_raw_fd() };
         // SAFETY: both descriptors are open for the call; the kernel only reads the rule.
@@ -441,7 +503,141 @@ mod tests {
         assert_eq!((handled(5), handled(8)), (handled(3) | IOCTL_DEV, handled(3) | IOCTL_DEV));
         assert_eq!((handled(9), handled(99)), (ALL, ALL));
         assert_eq!((scopes(5), scopes(6)), (0, SCOPE_ABSTRACT_UNIX_SOCKET | SCOPE_SIGNAL));
+        let (tcp, udp) = (NET_BIND_TCP | NET_CONNECT_TCP, NET_BIND_UDP | NET_CONNECT_SEND_UDP);
+        assert_eq!((handled_net(3), handled_net(4), handled_net(9)), (0, tcp, tcp));
+        assert_eq!((handled_net(10), handled_net(99)), (tcp | udp, tcp | udp));
         Ruleset::new(abi).expect("this kernel takes a ruleset of its own version's rights");
+    }
+
+    /// Says the test skips itself when this kernel's ABI is below `need`, which brought `what`.
+    fn below(test: &str, abi: u32, need: u32, what: &str) -> bool {
+        if abi >= need {
+            return false;
+        }
+        let line = format!(
+            "{}landlock::tests::{test} — this kernel's Landlock is ABI {abi}: {what} came with {need}\n",
+            crate::test_results::SELF_SKIP
+        );
+        let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+        true
+    }
+
+    /// From ABI 4 a confined thread's own TCP connect and bind are refused by the kernel — the connect to a
+    /// listener of the test's own on this machine. A socket it made, connected by a thread that applied
+    /// nothing (as tarae's supervisor makes the call for a run), reaches that listener.
+    #[test]
+    fn a_runs_own_connect_is_refused_by_the_kernel() {
+        let test = "a_runs_own_connect_is_refused_by_the_kernel";
+        let Some(abi) = kernel_abi(test) else { return };
+        if below(test, abi, 4, "TCP rights") {
+            return;
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (connect, bind, made) = std::thread::spawn(move || {
+            Ruleset::new(abi).and_then(|r| r.apply()).expect("the ruleset applies");
+            // SAFETY: a new socket of this thread's own, owned below.
+            let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+            assert!(fd >= 0, "a confined thread still makes a socket: {}", io::Error::last_os_error());
+            (
+                std::net::TcpStream::connect(addr).map(drop).map_err(|e| e.raw_os_error()),
+                std::net::TcpListener::bind("127.0.0.1:0").map(drop).map_err(|e| e.raw_os_error()),
+                // SAFETY: just made, owned once.
+                unsafe { OwnedFd::from_raw_fd(fd) },
+            )
+        })
+        .join()
+        .unwrap();
+        assert_eq!(connect, Err(Some(libc::EACCES)), "its own connect");
+        assert_eq!(bind, Err(Some(libc::EACCES)), "its own bind");
+        let (sin, size) = loopback(addr.port());
+        // SAFETY: the socket and the address are live for the call.
+        let r = unsafe { libc::connect(made.as_raw_fd(), (&raw const sin).cast(), size) };
+        assert_eq!(r, 0, "connected by a thread that applied nothing: {}", io::Error::last_os_error());
+        listener.accept().expect("the listener has it");
+    }
+
+    /// `127.0.0.1:port` as the kernel takes it, and its size.
+    fn loopback(port: u16) -> (libc::sockaddr_in, libc::socklen_t) {
+        // SAFETY: an all-integer struct, zeroed then set.
+        let mut sin: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+        sin.sin_family = libc::AF_INET as libc::sa_family_t;
+        sin.sin_port = port.to_be();
+        sin.sin_addr.s_addr = u32::from(std::net::Ipv4Addr::LOCALHOST).to_be();
+        (sin, std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t)
+    }
+
+    /// From ABI 10 a confined thread's own UDP send to an address and its own bind are refused by the kernel —
+    /// the send to a receiver of the test's own on this machine, from a socket it made, and from one a thread
+    /// that applied nothing connected (an address given with the send is checked whatever the socket has).
+    /// On that connected socket (as tarae's supervisor connects one for a run) a send with no address goes
+    /// through to the receiver.
+    #[test]
+    fn a_runs_own_udp_send_is_refused_by_the_kernel() {
+        let test = "a_runs_own_udp_send_is_refused_by_the_kernel";
+        let Some(abi) = kernel_abi(test) else { return };
+        if below(test, abi, 10, "UDP rights") {
+            return;
+        }
+        let receiver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        receiver.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        let to = receiver.local_addr().unwrap();
+        let connected = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        connected.connect(to).unwrap();
+        let (own_send, own_bind, addressed, plain) = std::thread::spawn(move || {
+            Ruleset::new(abi).and_then(|r| r.apply()).expect("the ruleset applies");
+            // SAFETY: a new socket of this thread's own, owned below.
+            let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
+            assert!(fd >= 0, "a confined thread still makes a socket: {}", io::Error::last_os_error());
+            // SAFETY: just made, owned once.
+            let own = unsafe { OwnedFd::from_raw_fd(fd) };
+            let (sin, size) = loopback(to.port());
+            // SAFETY: the socket, the byte and the address are live for the call.
+            let sent = unsafe {
+                libc::sendto(own.as_raw_fd(), b"o".as_ptr().cast(), 1, 0, (&raw const sin).cast(), size)
+            };
+            let own_send = if sent < 0 { Err(io::Error::last_os_error().raw_os_error()) } else { Ok(()) };
+            (
+                own_send,
+                std::net::UdpSocket::bind("127.0.0.1:0").map(drop).map_err(|e| e.raw_os_error()),
+                connected.send_to(b"a", to).map(drop).map_err(|e| e.raw_os_error()),
+                connected.send(b"p").map(drop).map_err(|e| e.raw_os_error()),
+            )
+        })
+        .join()
+        .unwrap();
+        assert_eq!(own_send, Err(Some(libc::EACCES)), "its own send to an address");
+        assert_eq!(own_bind, Err(Some(libc::EACCES)), "its own bind");
+        assert_eq!(addressed, Err(Some(libc::EACCES)), "a send to an address on a socket connected for it");
+        assert_eq!(plain, Ok(()), "a send with no address on a socket connected for it");
+        let mut got = [0u8; 4];
+        let n = receiver.recv(&mut got).expect("the receiver has the plain send");
+        assert_eq!(&got[..n], b"p", "only the plain send arrived");
+    }
+
+    /// From ABI 9 a confined thread's own connect to a unix socket by its path is refused by the kernel — one
+    /// of the test's own, in the folder the ruleset grants every right in. A thread that applied nothing
+    /// connects to it.
+    #[test]
+    fn a_runs_own_unix_connect_is_refused_by_the_kernel() {
+        let test = "a_runs_own_unix_connect_is_refused_by_the_kernel";
+        let Some(abi) = kernel_abi(test) else { return };
+        if below(test, abi, 9, "unix sockets by path") {
+            return;
+        }
+        let (dir, granted, _) = folders("unix");
+        let path = granted.join("socket");
+        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let (g, p) = (granted.clone(), path.clone());
+        let own = std::thread::spawn(move || {
+            confine(abi, &g, ALL).expect("the ruleset applies");
+            std::os::unix::net::UnixStream::connect(&p).map(drop).map_err(|e| e.raw_os_error())
+        })
+        .join()
+        .unwrap();
+        assert_eq!(own, Err(Some(libc::EACCES)), "its own connect, in a folder granted every right");
+        std::os::unix::net::UnixStream::connect(&path).expect("a thread that applied nothing connects");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A symlink carries no grant: a rule asked for a link (to a sibling folder, as a run could plant one) is

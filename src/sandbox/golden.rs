@@ -392,14 +392,14 @@ fn the_packs_say_what_the_core_said() {
 }
 
 /// Landlock's rules for the stand-in home's policy, in the fixture's folder and `/dev` (outside them they're
-/// the machine's) — what Linux enforces, from the same policy.
+/// the machine's) — what Linux enforces, from the same policy — for the ABIs that change what's handled:
+/// each one's handled rights, then its rules. Written down, not made: any kernel pins every ABI.
 #[cfg(target_os = "linux")]
 #[test]
 fn landlocks_rules_are_pinned() {
-    let Ok(abi) = crate::landlock::abi() else { return };
+    use crate::landlock;
     let f = Fixture::new("landlock", Os::Linux, &[]);
     let p = f.policy(&crate::llm::LlmConfig::default());
-    let c = linux::confine(&p, abi, Err("not watched".into()), false).unwrap();
     let run = p.run.as_deref();
     let ours = |path: &Path| {
         path.starts_with(&f.base)
@@ -407,14 +407,21 @@ fn landlocks_rules_are_pinned() {
             || path == Path::new(TMP)
             || path.starts_with("/dev")
     };
-    let mut rules: Vec<String> = c
-        .granted()
-        .iter()
-        .filter(|(path, _)| ours(path))
-        .map(|(path, access)| format!("{:#06x} {}", access, f.named(&shown(path), run)))
-        .collect();
-    // (a set: sorted as shown — in path order the run's folder, numbered by the runs before, moves about)
-    rules.sort();
-    let out: String = rules.iter().map(|r| format!("{r}\n")).collect();
+    let mut out = String::new();
+    for abi in [3, 4, 6, 9, 10] {
+        let r = landlock::Ruleset::written(abi).unwrap();
+        let c = linux::confine_in(r, &p, Err("not watched".into()), false).unwrap();
+        let (fs, net, scopes) = (landlock::handled(abi), landlock::handled_net(abi), landlock::scopes(abi));
+        out += &format!("ABI {abi}: handles files {fs:#07x} · network {net:#x} · scopes {scopes:#x}\n");
+        let mut rules: Vec<String> = c
+            .granted()
+            .iter()
+            .filter(|(path, _)| ours(path))
+            .map(|(path, access)| format!("    {:#06x} {}\n", access, f.named(&shown(path), run)))
+            .collect();
+        // (a set: sorted as shown — in path order the run's folder, numbered by the runs before, moves about)
+        rules.sort();
+        out.extend(rules);
+    }
     pinned("sandbox_landlock.txt", &out);
 }
