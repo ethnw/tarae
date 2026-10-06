@@ -1657,7 +1657,7 @@ impl Editor {
                 pid: k.pid,
                 kind: Kind::Helper,
                 title: "sandbox keeper".into(),
-                what: format!("the session's keeper · {}", crate::allow::tilde(&k.root)),
+                what: format!("the session's keeper · {} · {}", k.said(), crate::allow::tilde(&k.root)),
                 session: self.session_of(&k.root).filter(|_| sessions),
                 at: None,
             });

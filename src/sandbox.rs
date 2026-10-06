@@ -37,6 +37,8 @@ pub mod linux;
 pub mod runenv;
 #[cfg(target_os = "linux")]
 pub mod supervisor;
+#[cfg(target_os = "linux")]
+pub mod tier;
 
 use std::collections::HashMap;
 use std::io;
@@ -2937,17 +2939,21 @@ fn run_homes_said(vars: &crate::sandboxpack::Vars) -> Vec<RunHomeSaid> {
         .collect()
 }
 
-/// Linux: `p` with its Landlock rules made (`linux::confine` — it walks the project for protected names, and
-/// makes first what a build makes beside them: `linux::Made`) and its session's keeper found or made
-/// (`keeper::ready`: a keeper of another policy key ends what its runs left — D14). Either failing, the run
-/// doesn't start, saying why.
+/// Linux: `p` with its session's keeper found or made, in the namespaces this system and the policy give it
+/// (`tier::for_policy`; `keeper::ready`: a keeper of another policy key ends what its runs left — D14), and its
+/// Landlock rules made for that keeper's runs (`linux::confine` — it walks the project for protected names,
+/// makes first what a build makes beside them: `linux::Made`, and grants the devices on the keeper's own).
+/// Either failing, the run doesn't start, saying why.
 #[cfg(target_os = "linux")]
 pub fn confined(mut p: Policy) -> Policy {
-    let made =
-        crate::landlock::abi().and_then(|abi| linux::confine(&p, abi, linux::audit_readable(abi), true));
+    let ns = tier::for_policy(&p);
     let key = policy_key(&p);
-    let made = made.map_err(|e| format!("the sandbox couldn't be made: {e}")).and_then(|mut c| {
-        c.keeper = Some(keeper::ready(&p.root, Some(&key))?);
+    let made = keeper::ready(&p.root, Some(&key), ns).and_then(|k| {
+        let made = crate::landlock::abi().and_then(|abi| {
+            linux::confine(&p, abi, linux::audit_readable(abi), true, Some(&k), linux::served_here())
+        });
+        let mut c = made.map_err(|e| format!("the sandbox couldn't be made: {e}"))?;
+        c.keeper = Some(k);
         Ok(c)
     });
     p.confine = Some(made);
@@ -3328,12 +3334,14 @@ fn output_in(
     #[cfg(target_os = "linux")]
     let out = {
         let abi = crate::landlock::abi().ok()?;
-        let rules = linux::confine(policy, abi, Err("not watched".into()), false).ok()?;
-        let k = keeper::ready(&policy.root, None).ok()?;
+        let ns = tier::for_policy(policy);
+        let k = keeper::ready(&policy.root, None, ns).ok()?;
+        let unserved = Err("a probe's run".into());
+        let rules = linux::confine(policy, abi, Err("not watched".into()), false, Some(&k), unserved).ok()?;
         let mut c = Command::new(program);
         from_run_env(&mut c, policy);
         c.args(args).envs(env.iter().copied()).current_dir(&policy.root).env(MARK, "1");
-        let s = k.start(&c, &crate::landlock::thread_name(), rules.rules_fd(), None).ok()?.spawned;
+        let s = k.start(&c, &crate::landlock::thread_name(), rules.rules_fd(), rules.net).ok()?.spawned;
         // (what it says on stderr read meanwhile, unkept: a full pipe would stop it)
         if let Some(mut err) = s.stderr {
             crate::event::thread("tarae-probe", move || io::copy(&mut err, &mut io::sink()));
@@ -3453,12 +3461,12 @@ pub fn spawn(policy: Option<&Policy>, cmd: &Command) -> std::io::Result<crate::s
         if let Some(w) = &p.watch {
             w.owned_by(owner(0));
         }
-        let started = match c.serve {
-            Ok(()) => {
+        let started = match c.net {
+            tier::RunNet::Served => {
                 let serve = std::sync::Arc::new(p.clone());
                 k.start_served(cmd, &comm, c.rules_fd(), serve.clone(), told(serve))?
             }
-            Err(_) => k.start(cmd, &comm, c.rules_fd(), None)?,
+            net => k.start(cmd, &comm, c.rules_fd(), net)?,
         };
         let spawned = started.spawned;
         #[cfg(test)]
@@ -7055,7 +7063,9 @@ mod tests {
             printf '{"ppid": %s, "wrote": "%s"}' "$PPID" "$w""#;
         let r = root.to_string_lossy().into_owned();
         let probe = output_in(&p, "/bin/sh", &["-c", script], &[("R", &r)]).expect("the probe answers");
-        let keepers: Vec<u64> = keeper::of(Some(&root)).iter().map(|k| u64::from(k.pid)).collect();
+        // (its `$PPID` is the keeper's number as its runs see it: 1 inside a PID namespace)
+        let keepers: Vec<u64> =
+            keeper::of(Some(&root)).iter().map(|k| u64::from(keeper::seen_by_runs(k))).collect();
         assert_eq!(keepers, [probe["ppid"].as_u64().unwrap()], "forked by the session's keeper: {probe}");
         assert_eq!(probe["wrote"], "no", "confined: {probe}");
         assert_eq!(std::fs::read_to_string(root.join("Cargo.toml")).unwrap(), "[workspace]\n");

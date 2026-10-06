@@ -1057,9 +1057,11 @@ mod tests {
         let s = Scratch::new(&format!("detached-{on}"));
         let p = s.policy(vec![port], false, Vec::new());
         let out = s.root.join("after");
+        // (the detached child waits a second after saying its pid: in a PID namespace it's translated to tarae's
+        // number while it's there — `keeper::outer_pid`)
         let script = r#"( bash -c 'sleep 1
             if exec 3<>/dev/tcp/127.0.0.1/$PORT; then r=ok; else r=no; fi
-            echo "$r $(cut -d" " -f4 /proc/$$/stat) $$" > "$OUT"' & )
+            echo "$r $(cut -d" " -f4 /proc/$$/stat) $$" > "$OUT"; sleep 1' & )
             ( setsid sleep 60 & echo $! > "$OUT.long" ); sleep 0.1; exit 3"#;
         let mut cmd = super::super::command(Some(&p), "sh", &["-c".into(), script.into()]);
         cmd.env("PORT", port.to_string()).env("OUT", &out).current_dir(&p.root);
@@ -1074,11 +1076,20 @@ mod tests {
         let said = std::fs::read_to_string(&out).unwrap_or_default();
         let w: Vec<&str> = said.split_whitespace().collect();
         let (result, parent, child) = (w.first().copied().unwrap_or("none"), w.get(1), w.get(2));
-        let keeper = match &p.confine {
-            Some(Ok(c)) => c.keeper.as_ref().map(|k| k.pid),
+        let k = match &p.confine {
+            Some(Ok(c)) => c.keeper.clone(),
             _ => None,
         };
-        let mine = keeper.is_some_and(|k| parent.is_some_and(|p| *p == k.to_string()));
+        let keeper = k.as_ref().map(|k| k.pid);
+        // (what the child said is in its keeper's numbering — its parent as runs see the keeper; its pid, made
+        // tarae's while it's there)
+        let mine = k
+            .as_ref()
+            .is_some_and(|k| parent.is_some_and(|p| *p == super::super::keeper::seen_by_runs(k).to_string()));
+        let child: Option<u32> = match (&k, child.and_then(|c| c.parse().ok())) {
+            (Some(k), Some(c)) => Some(super::super::keeper::outer_pid(k, c)),
+            (_, c) => c,
+        };
         // (the orphan, a zombie child of the keeper's once it's done: reaped)
         let gone = || child.is_none_or(|c| !std::path::Path::new(&format!("/proc/{c}")).exists());
         let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
@@ -1087,8 +1098,10 @@ mod tests {
         }
         let reaped = mine && gone();
         // (the long one, a daemon of sorts: the session's to end — as at its session's end)
-        let long: Option<u32> =
-            std::fs::read_to_string(out.with_extension("long")).ok().and_then(|t| t.trim().parse().ok());
+        let long: Option<u32> = std::fs::read_to_string(out.with_extension("long"))
+            .ok()
+            .and_then(|t| t.trim().parse().ok())
+            .map(|l| k.as_ref().map_or(l, |k| super::super::keeper::outer_pid(k, l)));
         let ours = long.and_then(crate::procs::read).is_some_and(|o| keeper == Some(o.ppid));
         let ended = match long {
             Some(l) if ours => {
@@ -1248,7 +1261,12 @@ mod tests {
             let file = s.root.join(name);
             crate::spawn::wait(run_in(p, r#"( setsid sleep 60 & echo $! > "$F" )"#, &[("F", &file)]))
                 .unwrap();
-            std::fs::read_to_string(&file).unwrap().trim().parse().unwrap()
+            let said: u32 = std::fs::read_to_string(&file).unwrap().trim().parse().unwrap();
+            // (in its keeper's numbering: made tarae's)
+            match &p.confine {
+                Some(Ok(c)) => c.keeper.as_ref().map_or(said, |k| super::super::keeper::outer_pid(k, said)),
+                _ => said,
+            }
         };
         let there = |pid: u32| std::path::Path::new(&format!("/proc/{pid}")).exists();
         let old = long(&s.policy(Vec::new(), false, Vec::new()), "old");
@@ -1713,5 +1731,99 @@ mod tests {
             blocked.seen.iter().any(|d| d.process == "java" && d.plain().starts_with("connecting to port")),
             "{blocked:?}\n{said}"
         );
+    }
+
+    /// `sh -c script` in the project at `root` as Claude's runs are (`sandbox::policy` → `command` → `spawn`,
+    /// `llm.sandbox-localhost` on — Gradle reaches its daemon so): how long to its end in ms, whether it
+    /// succeeded, its output's last lines.
+    fn sandboxed(root: &Path, script: &str) -> (u128, bool, String) {
+        let llm = crate::llm::LlmConfig { sandbox_localhost: true, ..Default::default() };
+        let p = super::super::policy(root, &llm, &[]);
+        let at = std::time::Instant::now();
+        // (every part's errors too, not only the last's)
+        let mut cmd = super::super::command(Some(&p), "sh", &["-c".into(), format!("{{ {script}\n}} 2>&1")]);
+        cmd.current_dir(root);
+        let spawned = super::super::spawn(Some(&p), &cmd).expect("it starts");
+        drop(spawned.stderr);
+        let mut out = String::new();
+        io::Read::read_to_string(&mut spawned.stdout.unwrap(), &mut out).ok();
+        let ok = crate::spawn::wait(spawned.pid).is_ok_and(|s| s.success());
+        let tail: Vec<&str> = out.lines().rev().take(3).collect();
+        (at.elapsed().as_millis(), ok, tail.into_iter().rev().collect::<Vec<_>>().join(" / "))
+    }
+
+    /// What the session's keeper of `root` holds after its runs: each process it left (its descendants that
+    /// aren't a run going), by what it runs — `gradle-daemon`, `kotlin-daemon`, or its name.
+    fn left_by(root: &Path) -> String {
+        let Some(k) = super::super::keeper::of(Some(root)).into_iter().find(|k| !k.is_gone()) else {
+            return "no keeper".into();
+        };
+        let mut seen = Vec::new();
+        let mut next = k.leftovers();
+        while let Some(p) = next.pop() {
+            next.extend(crate::procs::children(p));
+            let cmdline = std::fs::read(format!("/proc/{p}/cmdline")).unwrap_or_default();
+            let cmdline = String::from_utf8_lossy(&cmdline);
+            let what = if cmdline.contains("GradleDaemon") {
+                "gradle-daemon"
+            } else if cmdline.contains("KotlinCompileDaemon") {
+                "kotlin-daemon"
+            } else {
+                continue;
+            };
+            let parent = crate::procs::read(p).map_or(0, |o| o.ppid);
+            seen.push(format!(
+                "{what} (parent {})",
+                if parent == k.pid { "the keeper".into() } else { parent.to_string() }
+            ));
+        }
+        seen.sort();
+        format!("{} · {}", k.said(), if seen.is_empty() { "nothing".into() } else { seen.join(", ") })
+    }
+
+    /// M4 (`docs/design/sandbox-keeper.md` §Measured): `gradle --offline --console=plain $TARAE_M4_TASK --rerun`
+    /// in `$TARAE_M4_PROJECT`, twice in a row through the session's real keeper, three pairs — what each pair's
+    /// runs took, and what the keeper holds after run 2 (its daemons kept, its own children). Between pairs the
+    /// keeper ends (`end_leftovers`): its daemons with it, run 1 cold. `TARAE_TEST_NO_NS`: without namespaces
+    /// (tier C), A/B in one machine. Run by `target/sb/m4-keeper.sh` in a container with a JDK and Gradle.
+    #[test]
+    #[ignore = "a measurement (M4): run by target/sb/m4-keeper.sh"]
+    fn measure_gradle_pairs() {
+        let (Ok(project), Ok(task)) = (std::env::var("TARAE_M4_PROJECT"), std::env::var("TARAE_M4_TASK"))
+        else {
+            return;
+        };
+        let root = std::fs::canonicalize(project).unwrap();
+        let gradle = format!("gradle --offline --console=plain {task} --rerun");
+        // (libtest's own `test … ...` ends here: each `measure:` starts its line)
+        println!();
+        for pair in 1..=3 {
+            super::super::end_leftovers(Some(&root));
+            let (one, ok1, said1) = sandboxed(&root, &gradle);
+            let (two, ok2, said2) = sandboxed(&root, &gradle);
+            assert!(ok1 && ok2, "run 1: {said1}\nrun 2: {said2}");
+            println!(
+                "measure: {task} pair {pair}: run 1 {one} ms, run 2 {two} ms · after run 2: {}",
+                left_by(&root)
+            );
+        }
+        super::super::end_leftovers(Some(&root));
+    }
+
+    /// M8: tools that look at file owners, through the session's keeper (`$TARAE_M8` lines `<project>\t<script>`):
+    /// how each ended and its last lines — A/B with `TARAE_TEST_NO_NS`. Inside a user namespace root's files show
+    /// as `nobody`. Run by `target/sb/m4-keeper.sh`.
+    #[test]
+    #[ignore = "a measurement (M8): run by target/sb/m4-keeper.sh"]
+    fn measure_tools_that_look_at_owners() {
+        let Ok(cases) = std::env::var("TARAE_M8") else { return };
+        println!();
+        for line in cases.lines().filter(|l| !l.trim().is_empty()) {
+            let (project, script) = line.split_once('\t').unwrap();
+            let root = std::fs::canonicalize(project).unwrap();
+            let (ms, ok, said) = sandboxed(&root, script);
+            println!("measure: {script} — {} in {ms} ms: {said}", if ok { "ok" } else { "FAILED" });
+            super::super::end_leftovers(Some(&root));
+        }
     }
 }

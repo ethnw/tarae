@@ -1700,7 +1700,12 @@ mod tests {
             let cmd = crate::sandbox::command(Some(&p), "sh", &["-c".into(), script]);
             let s = crate::sandbox::spawn(Some(&p), &cmd).unwrap();
             crate::spawn::wait(s.pid).unwrap();
-            std::fs::read_to_string(&file).unwrap().trim().parse().unwrap()
+            let said: u32 = std::fs::read_to_string(&file).unwrap().trim().parse().unwrap();
+            // (in its keeper's numbering: made tarae's)
+            match &p.confine {
+                Some(Ok(c)) => c.keeper.as_ref().map_or(said, |k| crate::sandbox::keeper::outer_pid(k, said)),
+                _ => said,
+            }
         };
         let (closed, other) = (leave(&there), leave(&here));
         let there_now = |pid: u32| Path::new(&format!("/proc/{pid}")).exists();

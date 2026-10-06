@@ -27,6 +27,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use super::tier::RunNet;
 use super::{Availability, Denial, Policy};
 use crate::landlock::{self, Ruleset};
 
@@ -92,6 +93,9 @@ pub struct Confine {
     pub abi: u32,
     pub audit: Result<AuditSource, String>,
     pub serve: Result<(), String>,
+    /// How a run's sockets go, decided once (`confine`): its rules are made for it, and the keeper's run takes
+    /// it for its seccomp mode.
+    pub net: RunNet,
     pub made: Arc<Made>,
     pub closed: Vec<PathBuf>,
     /// The fileless folders under protected ones, made again after a run (`Kept`).
@@ -112,14 +116,20 @@ impl Confine {
     pub fn granted(&self) -> &[(PathBuf, u64)] {
         &self.rules.added
     }
+
+    /// Tests: the network rights the ruleset handles (0: a run's TCP and UDP calls are its own).
+    #[cfg(test)]
+    pub fn handled_net(&self) -> u64 {
+        self.rules.net
+    }
 }
 
 impl std::fmt::Debug for Confine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Confine(ABI {}, audit {:?}, serve {:?}, made {:?})",
-            self.abi, self.audit, self.serve, self.made.paths
+            "Confine(ABI {}, audit {:?}, serve {:?}, net {:?}, made {:?})",
+            self.abi, self.audit, self.serve, self.net, self.made.paths
         )
     }
 }
@@ -129,6 +139,7 @@ impl PartialEq for Confine {
         self.abi == other.abi
             && self.audit == other.audit
             && self.serve == other.serve
+            && self.net == other.net
             && self.closed == other.closed
             && Arc::ptr_eq(&self.made, &other.made)
             && Arc::ptr_eq(&self.kept, &other.kept)
@@ -461,21 +472,71 @@ fn closed_folders(root: &Path, found: &[PathBuf]) -> Vec<PathBuf> {
 /// `p` as Landlock's rules for ABI `abi`. Reads everywhere but home, and in it where `p.reads` says around what
 /// it keeps (none of that when reads aren't confined); writes as `writes_allow` has them; the devices. With
 /// `make_first`, what a first build makes beside a protected name is made before (`Made`) — and so granted.
+/// For the runs of `keeper` (None: no keeper's yet — a probe's rules, the golden), served or not (`serve`:
+/// `served_here`, or why not): how their sockets go is decided here, once (`Confine.net`, `Ns::run_net`) — not
+/// served and in the session's own network namespace, TCP and UDP are left unhandled
+/// (`Ruleset::new_own_network`: the run's calls are its own, and reach only that namespace's `lo`). In a mount
+/// namespace of its own, the devices are granted on its own device places too (`session_devices`).
 pub fn confine(
     p: &Policy,
     abi: u32,
     audit: Result<AuditSource, String>,
     make_first: bool,
+    keeper: Option<&super::keeper::Keeper>,
+    serve: Result<(), String>,
 ) -> io::Result<Confine> {
-    confine_in(Ruleset::new(abi)?, p, audit, make_first)
+    let net = keeper.map_or(super::tier::Ns::NONE, |k| k.ns).run_net(serve.is_ok());
+    let mut r = ruleset_for(net, abi)?;
+    if let Some(k) = keeper.filter(|k| k.ns.user) {
+        session_devices(&mut r, &k.devices, k.ns.shm)?;
+    }
+    confine_in(r, p, audit, make_first, serve, net)
 }
 
-/// `confine`, the rules added to `r` (the golden's are only written down: `Ruleset::written`).
+/// The ruleset `confine` starts from for runs whose sockets go as `net` says: TCP and UDP left to the run only
+/// for `Own`.
+pub(super) fn ruleset_for(net: RunNet, abi: u32) -> io::Result<Ruleset> {
+    match net {
+        RunNet::Own => Ruleset::new_own_network(abi),
+        RunNet::Served | RunNet::Plain => Ruleset::new(abi),
+    }
+}
+
+/// Whether tarae's supervisor serves runs here — or why not (`supervisor::unavailable`).
+pub fn served_here() -> Result<(), String> {
+    super::supervisor::unavailable().map_or(Ok(()), Err)
+}
+
+/// The rights `DEVICES` grants, on a session keeper's own device places — `devices`, the handles it opened in
+/// its mount namespace before any run existed (`keeper::DEVICE_HANDLES`). Its `devpts` and `/dev/shm` are
+/// mounts over this system's, and Landlock's walk doesn't reach a rule on a root another mount covers
+/// (measured, `target/sb/step3-notes.md`): the rules on this system's places don't hold there. `/dev/pts/ptmx`
+/// is its `/dev/ptmx`'s file (bound over a node there, a link in a container). Without a `/dev/shm` of its own
+/// (`own_shm` false: the project or a write place is in this system's) that one is this system's, granted with
+/// the project's protected names left out as every place is — not again here, whole.
+pub(super) fn session_devices(
+    r: &mut Ruleset,
+    devices: &[(&'static str, std::os::fd::OwnedFd)],
+    own_shm: bool,
+) -> io::Result<()> {
+    use std::os::fd::AsFd;
+    for (place, fd) in devices.iter().filter(|(p, _)| own_shm || *p != "/dev/shm") {
+        let named = if *place == "/dev/pts/ptmx" { "/dev/ptmx" } else { place };
+        if let Some((_, access)) = DEVICES.iter().find(|(d, _)| *d == named) {
+            r.allow_at(fd.as_fd(), &Path::new("session:").join(place.trim_start_matches('/')), *access)?;
+        }
+    }
+    Ok(())
+}
+
+/// `confine`, the rules added to `r` (the golden's are only written down: `Ruleset::written`), made for `net`.
 pub(super) fn confine_in(
     mut r: Ruleset,
     p: &Policy,
     audit: Result<AuditSource, String>,
     make_first: bool,
+    serve: Result<(), String>,
+    net: RunNet,
 ) -> io::Result<Confine> {
     let abi = r.abi();
     let hidden: Vec<PathBuf> = p.reads.copies.hidden.iter().map(|(f, _)| f.clone()).collect();
@@ -545,10 +606,6 @@ pub(super) fn confine_in(
     for (d, access) in DEVICES {
         grant(&mut r, Path::new(d), access, &protected_in(Path::new(d)))?;
     }
-    let serve = match super::supervisor::unavailable() {
-        None => Ok(()),
-        Some(why) => Err(why),
-    };
     // (`REMOVE_DIR` reaches into the protected folders too: what it could take there is noted, made again
     // after the run — `Kept`)
     let kept = match closed.is_empty() {
@@ -559,6 +616,7 @@ pub(super) fn confine_in(
         abi,
         audit,
         serve,
+        net,
         made: Arc::new(made),
         closed,
         kept: Arc::new(kept),

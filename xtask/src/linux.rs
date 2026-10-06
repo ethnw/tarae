@@ -1,4 +1,4 @@
-//! `cargo xtask linux [--env NAME=VALUE]… [--platform linux/<arch>] [clippy|test [--repeat N] [cargo test's arguments]]` — tarae's checks on Linux (CI runs there too: `-D dead-code` on code only
+//! `cargo xtask linux [--env NAME=VALUE]… [--userns[=masked]] [--platform linux/<arch>] [clippy|test [--repeat N] [cargo test's arguments]]` — tarae's checks on Linux (CI runs there too: `-D dead-code` on code only
 //! macOS calls, a root container's `#` prompt …), in Docker on the pinned toolchain (`rust:<major.minor>`, and
 //! `rust-toolchain.toml`'s exact version in it). Whichever Docker the CLI reaches: `DOCKER_CONTEXT` or `DOCKER_HOST`, else the
 //! current context (here the colima VM: `colima start -p tarae-test`, `DOCKER_CONTEXT=colima-tarae-test`).
@@ -57,7 +57,44 @@ enum What {
     Both,
 }
 
-const USAGE: &str = "usage: cargo xtask linux [--env NAME=VALUE]… [--platform linux/<arch>] [clippy | test [--repeat N] [cargo test's arguments]]";
+const USAGE: &str = "usage: cargo xtask linux [--env NAME=VALUE]… [--userns[=masked]] [--platform linux/<arch>] [clippy | test [--repeat N] [cargo test's arguments]]";
+
+/// What `--userns` lets the container do, so the sandbox's tier tests reach a real session keeper
+/// (`src/sandbox/tier.rs`): Docker's default seccomp profile refuses new namespaces, its `docker-default`
+/// AppArmor profile refuses mounting, and its masked paths make a fresh `/proc` too revealing to mount. Only
+/// the container is loosened — never what tarae does; without the option it's Docker's defaults (tier C).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Userns {
+    /// `--userns`: all three lifted — tier A+ where the kernel allows unprivileged user namespaces.
+    Full,
+    /// `--userns=masked`: `/proc` left masked — tier A (no PID namespace, D12).
+    Masked,
+}
+
+/// A leading `--userns` or `--userns=masked`, and the arguments after it.
+fn userns(args: &[String]) -> Result<(Option<Userns>, &[String])> {
+    match args.split_first() {
+        Some((u, rest)) if u == "--userns" => Ok((Some(Userns::Full), rest)),
+        Some((u, rest)) if u == "--userns=masked" => Ok((Some(Userns::Masked), rest)),
+        Some((u, _)) if u.starts_with("--userns") => {
+            Err(format!("{u}: --userns or --userns=masked — {USAGE}"))
+        }
+        _ => Ok((None, args)),
+    }
+}
+
+/// `docker run`'s arguments with `--userns`'s security options after `run --rm --cap-add SYS_PTRACE`.
+fn with_userns(mut a: Vec<String>, u: Option<Userns>) -> Vec<String> {
+    let opts: &[&str] = match u {
+        None => &[],
+        Some(Userns::Masked) => &["seccomp=unconfined", "apparmor=unconfined"],
+        Some(Userns::Full) => &["seccomp=unconfined", "apparmor=unconfined", "systempaths=unconfined"],
+    };
+    let set: Vec<String> = opts.iter().flat_map(|o| ["--security-opt".to_string(), o.to_string()]).collect();
+    let at = 4.min(a.len());
+    a.splice(at..at, set);
+    a
+}
 
 /// The leading `--env NAME=VALUE`s — set in the container (`HOME=/work`: the checkout inside home, as on a
 /// machine where it's under the user's home) — and the arguments after them.
@@ -127,6 +164,7 @@ fn what(args: &[String]) -> Result<What> {
 
 pub fn run(args: &[String]) -> Result<()> {
     let (set, args) = envs(args)?;
+    let (ns, args) = userns(args)?;
     let (platform, what) = ask(args)?;
     let platform = platform.as_deref();
     let root = root();
@@ -162,7 +200,10 @@ pub fn run(args: &[String]) -> Result<()> {
         }
     };
     let mut docker = Command::new("docker");
-    docker.args(with_envs(docker_args(&root, tree, &pin, platform, &what), &set));
+    docker.args(with_userns(with_envs(docker_args(&root, tree, &pin, platform, &what), &set), ns));
+    if let Some(u) = ns {
+        eprintln!("--userns: the container's own seccomp and AppArmor profiles lifted ({u:?})");
+    }
     let st = match tree {
         Tree::Mounted(_) => docker.status(),
         Tree::Streamed => {
@@ -818,6 +859,36 @@ fn quoted(a: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `--userns` lifts the container's own seccomp, AppArmor and masked paths (tier A+), `--userns=masked`
+    /// keeps `/proc` masked (tier A), and without it the container is Docker's defaults: no `--security-opt`.
+    /// Its options go after `--cap-add SYS_PTRACE`, before the image, with the rest kept.
+    #[test]
+    fn userns_loosens_only_the_container() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let full = args(&["--userns", "test", "sandbox"]);
+        assert_eq!(userns(&full).unwrap(), (Some(Userns::Full), &full[1..]));
+        assert_eq!(userns(&args(&["--userns=masked", "clippy"])).unwrap().0, Some(Userns::Masked));
+        let none = args(&["test"]);
+        assert_eq!(userns(&none).unwrap(), (None, &none[..]));
+        assert!(userns(&args(&["--userns=all"])).is_err(), "only the two");
+        let base = docker_args(Path::new("/r/tarae"), Tree::Mounted(None), "1.99.0", None, &What::Both);
+        let opts = |a: &[String]| -> Vec<String> {
+            a.windows(2).filter(|w| w[0] == "--security-opt").map(|w| w[1].clone()).collect()
+        };
+        assert_eq!(opts(&base), Vec::<String>::new(), "Docker's defaults: {base:?}");
+        assert_eq!(with_userns(base.clone(), None), base);
+        let full = with_userns(base.clone(), Some(Userns::Full));
+        assert_eq!(opts(&full), ["seccomp=unconfined", "apparmor=unconfined", "systempaths=unconfined"]);
+        assert_eq!(
+            opts(&with_userns(base.clone(), Some(Userns::Masked))),
+            ["seccomp=unconfined", "apparmor=unconfined"]
+        );
+        assert_eq!(&full[..4], ["run", "--rm", "--cap-add", "SYS_PTRACE"]);
+        assert_eq!(full[full.len() - 4..], base[base.len() - 4..], "the image and its script last");
+        assert_eq!(full.len(), base.len() + 6);
+        assert!(!full.iter().any(|a| a == "--privileged" || a.contains("SYS_ADMIN")), "{full:?}");
+    }
 
     #[test]
     fn the_pinned_toolchain_and_its_image() {

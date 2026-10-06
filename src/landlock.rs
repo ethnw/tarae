@@ -180,6 +180,9 @@ pub struct Ruleset {
     /// Tests: only written down (`written`) — no rule goes to the kernel.
     #[cfg(test)]
     written: bool,
+    /// Tests: the network rights it handles.
+    #[cfg(test)]
+    pub net: u64,
 }
 
 impl Ruleset {
@@ -189,10 +192,17 @@ impl Ruleset {
         Ruleset::handling(abi, handled(abi), handled_net(abi))
     }
 
+    /// `new` without the network rights: for a run not served inside its session's own network namespace,
+    /// whose TCP and UDP calls are its own — the namespace, holding only `lo`, is the lock there
+    /// (`seccomp::Mode::OwnNetwork`).
+    pub fn new_own_network(abi: u32) -> io::Result<Ruleset> {
+        Ruleset::handling(abi, handled(abi), 0)
+    }
+
     /// `new`, handling `fs` and `net`. A kernel refusing them as unknown (`EINVAL`) while they hold
     /// `NEWEST_FS`/`NEWEST_NET` gets a ruleset without those, said once in the log — not every run refused.
     fn handling(abi: u32, fs: u64, net: u64) -> io::Result<Ruleset> {
-        let (fd, fs) = match create(fs, net, scopes(abi)) {
+        let (fd, fs, net) = match create(fs, net, scopes(abi)) {
             Err(e)
                 if e.raw_os_error() == Some(libc::EINVAL) && ((fs & NEWEST_FS) | (net & NEWEST_NET)) != 0 =>
             {
@@ -204,11 +214,13 @@ impl Ruleset {
                     );
                     crate::log::line("sandbox", "warn", &line);
                 });
-                let fs = fs & !NEWEST_FS;
-                (create(fs, net & !NEWEST_NET, scopes(abi))?, fs)
+                let (fs, net) = (fs & !NEWEST_FS, net & !NEWEST_NET);
+                (create(fs, net, scopes(abi))?, fs, net)
             }
-            made => (made?, fs),
+            made => (made?, fs, net),
         };
+        #[cfg(not(test))]
+        let _ = net;
         Ok(Ruleset {
             fd,
             handled: fs,
@@ -217,6 +229,8 @@ impl Ruleset {
             added: Vec::new(),
             #[cfg(test)]
             written: false,
+            #[cfg(test)]
+            net,
         })
     }
 
@@ -225,7 +239,14 @@ impl Ruleset {
     #[cfg(test)]
     pub fn written(abi: u32) -> io::Result<Ruleset> {
         let fd = std::fs::File::open("/dev/null")?.into();
-        Ok(Ruleset { fd, handled: handled(abi), abi, added: Vec::new(), written: true })
+        Ok(Ruleset {
+            fd,
+            handled: handled(abi),
+            abi,
+            added: Vec::new(),
+            written: true,
+            net: handled_net(abi),
+        })
     }
 
     /// The ABI the ruleset was made for.
@@ -241,8 +262,19 @@ impl Ruleset {
     pub fn allow(&mut self, path: &Path, access: u64) -> io::Result<bool> {
         let at = match open_unlinked(path, libc::O_PATH) {
             Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return Ok(false),
-            at => std::fs::File::from(at?),
+            at => at?,
         };
+        self.allow_at(at.as_fd(), path, access)
+    }
+
+    /// `allow` on what `at` (an `O_PATH` handle) is — `path` the name it's recorded under (tests). A session
+    /// keeper's own device places come so (`sandbox::keeper`: opened in its mount namespace, which tarae can't
+    /// name by a path of its own).
+    pub fn allow_at(&mut self, at: BorrowedFd, path: &Path, access: u64) -> io::Result<bool> {
+        // (the name is only recorded in tests)
+        #[cfg(not(test))]
+        let _ = path;
+        let at = std::fs::File::from(at.try_clone_to_owned()?);
         let kind = at.metadata()?.file_type();
         let mut access = access & self.handled & !UNGRANTED;
         if !kind.is_dir() {

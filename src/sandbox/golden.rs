@@ -437,7 +437,9 @@ fn landlocks_rules_are_pinned() {
     let mut out = String::new();
     for abi in [3, 4, 6, 9, 10] {
         let r = landlock::Ruleset::written(abi).unwrap();
-        let c = linux::confine_in(r, &p, Err("not watched".into()), false).unwrap();
+        let c =
+            linux::confine_in(r, &p, Err("not watched".into()), false, Ok(()), super::tier::RunNet::Served)
+                .unwrap();
         let (fs, net, scopes) = (landlock::handled(abi), landlock::handled_net(abi), landlock::scopes(abi));
         out += &format!("ABI {abi}: handles files {fs:#07x} · network {net:#x} · scopes {scopes:#x}\n");
         let mut rules: Vec<String> = c

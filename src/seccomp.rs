@@ -48,11 +48,14 @@ const fn arg_high(i: u32) -> u32 {
 const SOCK_FLAGS: u32 = (libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC) as u32;
 
 /// Whether the calls that name an address go to tarae (`Served`: the listener `apply` gives back is the
-/// supervisor's) or internet sockets are refused outright (`Plain`).
+/// supervisor's), internet sockets are refused outright (`Plain`), or — not served, inside the session's own
+/// network namespace, which holds only `lo` (`sandbox::keeper`) — its stream and datagram ones are the run's
+/// own (`OwnNetwork`: the namespace is the lock; raw ones still refused, as unix sockets, which cross it).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Plain,
     Served,
+    OwnNetwork,
 }
 
 /// Where a check goes: on to the next, over the next few, or to one of the answers at the end.
@@ -114,7 +117,6 @@ fn ops(arch: u32, mode: Mode) -> Vec<Op> {
             Op::Load(NR), // (back to the call's number for the next block)
         ]);
     }
-    let inet = if served { To::Tarae } else { To::Refuse };
     let unix_stream = if served { To::Allow } else { To::Refuse };
     ops.extend([
         Op::Is(nr(libc::SYS_socket), To::Next, To::Allow),
@@ -124,8 +126,28 @@ fn ops(arch: u32, mode: Mode) -> Vec<Op> {
         Op::Is(libc::AF_NETLINK as u32, To::Next, To::Skip(2)),
         Op::Load(arg_low(2)),
         Op::Is(libc::NETLINK_ROUTE as u32, To::Allow, To::Refuse),
-        Op::Is(libc::AF_INET as u32, inet, To::Next),
-        Op::Is(libc::AF_INET6 as u32, inet, To::Next),
+    ]);
+    match mode {
+        Mode::Served => ops.extend([
+            Op::Is(libc::AF_INET as u32, To::Tarae, To::Next),
+            Op::Is(libc::AF_INET6 as u32, To::Tarae, To::Next),
+        ]),
+        Mode::Plain => ops.extend([
+            Op::Is(libc::AF_INET as u32, To::Refuse, To::Next),
+            Op::Is(libc::AF_INET6 as u32, To::Refuse, To::Next),
+        ]),
+        // (an internet socket of a stream or a datagram kind is the run's; any other — raw — refused)
+        Mode::OwnNetwork => ops.extend([
+            Op::Is(libc::AF_INET as u32, To::Skip(1), To::Next),
+            Op::Is(libc::AF_INET6 as u32, To::Next, To::Skip(4)),
+            Op::Load(arg_low(1)),
+            Op::And(!SOCK_FLAGS),
+            Op::Is(libc::SOCK_STREAM as u32, To::Allow, To::Next),
+            Op::Is(libc::SOCK_DGRAM as u32, To::Allow, To::Refuse),
+            Op::Load(arg_low(0)), // (back to the family for the next block)
+        ]),
+    }
+    ops.extend([
         Op::Is(libc::AF_UNIX as u32, To::Next, To::Refuse),
         Op::Load(arg_low(1)),
         Op::And(!SOCK_FLAGS),
@@ -186,7 +208,7 @@ pub fn apply(mode: Mode) -> io::Result<Option<OwnedFd>> {
     let fprog = libc::sock_fprog { len: prog.len() as u16, filter: prog.as_mut_ptr() };
     let listener = libc::SECCOMP_FILTER_FLAG_NEW_LISTENER;
     let tries: &[libc::c_ulong] = match mode {
-        Mode::Plain => &[0],
+        Mode::Plain | Mode::OwnNetwork => &[0],
         Mode::Served => &[listener | libc::SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV, listener],
     };
     // SAFETY: the program outlives the call (the kernel copies it); this thread only (no TSYNC).
@@ -393,7 +415,7 @@ mod tests {
         let (inet, inet6, unix) = (libc::AF_INET as u64, libc::AF_INET6 as u64, libc::AF_UNIX as u64);
         let stream = (libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK) as u64;
         let dgram = (libc::SOCK_DGRAM | libc::SOCK_CLOEXEC) as u64;
-        for mode in [Mode::Plain, Mode::Served] {
+        for mode in [Mode::Plain, Mode::Served, Mode::OwnNetwork] {
             let run = |nr, args: &[u64]| eval(mode, arch, nr, args);
             assert_eq!(run(libc::SYS_socket, &[libc::AF_NETLINK as u64]), allow, "{mode:?}");
             assert_eq!(run(libc::SYS_socket, &[(1 << 32) | libc::AF_NETLINK as u64]), allow, "an int");
@@ -433,5 +455,20 @@ mod tests {
         assert_eq!(served(libc::SYS_sendto, &[3, 0x1000, 9, 0, 0x7fff_0000, 16]), tarae, "an address");
         assert_eq!(served(libc::SYS_sendto, &[3, 0x1000, 9, 0, 0x7f_0000_0000, 16]), tarae, "high half");
         assert_eq!(served(libc::SYS_listen, &[3]), allow);
+        // In the session's own network namespace: its stream and datagram internet sockets, its calls on them
+        // its own; a raw one, a unix one and a datagram pair still refused
+        let own = |nr, args: &[u64]| eval(Mode::OwnNetwork, arch, nr, args);
+        let raw = libc::SOCK_RAW as u64;
+        assert_eq!(
+            [own(libc::SYS_socket, &[inet, stream]), own(libc::SYS_socket, &[inet6, dgram])],
+            [allow; 2]
+        );
+        assert_eq!(own(libc::SYS_socket, &[inet, raw]), eperm, "a raw socket");
+        assert_eq!(own(libc::SYS_socket, &[inet6, raw | (1 << 32)]), eperm, "the type is an int");
+        assert_eq!(own(libc::SYS_socket, &[unix, stream]), eperm);
+        assert_eq!(own(libc::SYS_socketpair, &[unix, dgram]), eperm, "a datagram pair");
+        for nr in [libc::SYS_connect, libc::SYS_bind, libc::SYS_sendmsg, libc::SYS_sendto] {
+            assert_eq!(own(nr, &[3, 0x1000, 9, 0, 0x7fff_0000, 16]), allow, "{nr}");
+        }
     }
 }

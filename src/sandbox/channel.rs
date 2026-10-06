@@ -62,8 +62,10 @@ impl Step {
     }
 }
 
-/// A run asked of a keeper. Its descriptors: the Landlock ruleset, stdin, stdout, stderr — and, `served`, the
-/// handoff socket its listener's number goes back on.
+/// A run asked of a keeper. Its descriptors: the Landlock ruleset, stdin, stdout, stderr — and, `served` or
+/// `held`, the handoff socket: served, its listener's number goes back on it and a byte comes once tarae has
+/// it; held, a byte comes once tarae knows its pid (a keeper in a PID namespace says its own number — tarae
+/// reads its own from the pidfd, before the run can end and be reaped).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Run {
     pub id: u64,
@@ -76,6 +78,9 @@ pub struct Run {
     /// The name the run's process gives itself before its rules (Landlock's audit names it), ≤ `COMM_MAX`.
     pub comm: Vec<u8>,
     pub served: bool,
+    pub held: bool,
+    /// Not served, in the session's own network namespace: its internet sockets its own (`seccomp::Mode`).
+    pub own_net: bool,
 }
 
 /// A message, either way.
@@ -93,10 +98,14 @@ pub enum Msg {
     /// End every run and what they left, then exit (as EOF does).
     End,
     // keeper → tarae
+    /// It's there; with an `O_PATH` handle of each device place it has (`places`, the names — the fds in their
+    /// order), opened in its own mount namespace before any run (`keeper::DEVICE_HANDLES`).
     Ready {
         pid: u32,
+        places: Vec<Vec<u8>>,
     },
-    /// The run's process is there; its pidfd comes with it.
+    /// The run's process is there; its pidfd comes with it. `pid` is the keeper's number for it — in a PID
+    /// namespace not tarae's (tarae reads its own from the pidfd).
     Started {
         id: u64,
         pid: u32,
@@ -140,7 +149,8 @@ impl Msg {
     /// The descriptors the message takes, exactly.
     pub fn fds(&self) -> usize {
         match self {
-            Msg::Run(r) => 4 + r.served as usize,
+            Msg::Run(r) => 4 + (r.served || r.held) as usize,
+            Msg::Ready { places, .. } => places.len(),
             Msg::Started { .. } => 1,
             _ => 0,
         }
@@ -168,7 +178,7 @@ pub fn encode(msg: &Msg) -> Result<Vec<u8>, Refused> {
             list(&mut b, &r.envp)?;
             bytes(&mut b, &r.cwd);
             bytes(&mut b, &r.comm);
-            b.push(r.served as u8);
+            b.extend([r.served as u8, r.held as u8, r.own_net as u8]);
             valid_run(r)?;
         }
         Msg::Signal { id, sig } => {
@@ -176,7 +186,13 @@ pub fn encode(msg: &Msg) -> Result<Vec<u8>, Refused> {
             b.extend(sig.to_le_bytes());
         }
         Msg::AskUsage | Msg::End => {}
-        Msg::Ready { pid } => b.extend(pid.to_le_bytes()),
+        Msg::Ready { pid, places } => {
+            if places.len() > FDS_MAX {
+                return Err(Refused("more places than a message takes descriptors"));
+            }
+            b.extend(pid.to_le_bytes());
+            list(&mut b, places)?;
+        }
         Msg::Started { id, pid } => {
             b.extend(id.to_le_bytes());
             b.extend(pid.to_le_bytes());
@@ -262,6 +278,14 @@ impl<'a> Reader<'a> {
         Ok(self.array::<1>()?[0])
     }
 
+    fn flag(&mut self) -> Result<bool, Refused> {
+        match self.u8()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(Refused("a flag that isn't 0 or 1")),
+        }
+    }
+
     fn u32(&mut self) -> Result<u32, Refused> {
         Ok(u32::from_le_bytes(self.array()?))
     }
@@ -312,11 +336,9 @@ pub fn decode(b: &[u8], fds: usize) -> Result<Msg, Refused> {
                 envp: r.list()?,
                 cwd: r.bytes()?,
                 comm: r.bytes()?,
-                served: match r.u8()? {
-                    0 => false,
-                    1 => true,
-                    _ => return Err(Refused("a flag that isn't 0 or 1")),
-                },
+                served: r.flag()?,
+                held: r.flag()?,
+                own_net: r.flag()?,
             };
             valid_run(&run)?;
             Msg::Run(run)
@@ -324,7 +346,14 @@ pub fn decode(b: &[u8], fds: usize) -> Result<Msg, Refused> {
         2 => Msg::Signal { id: r.u64()?, sig: r.i32()? },
         3 => Msg::AskUsage,
         4 => Msg::End,
-        64 => Msg::Ready { pid: r.u32()? },
+        64 => {
+            let pid = r.u32()?;
+            let places = r.list()?;
+            if places.len() > FDS_MAX {
+                return Err(Refused("more places than a message takes descriptors"));
+            }
+            Msg::Ready { pid, places }
+        }
         65 => Msg::Started { id: r.u64()?, pid: r.u32()? },
         66 => Msg::Failed {
             id: r.u64()?,
@@ -451,7 +480,7 @@ mod tests {
 
     /// One of every kind, with fields worth mutating.
     fn every_kind() -> Vec<Msg> {
-        let run = |served| {
+        let run = |served, held, own_net| {
             Msg::Run(Run {
                 id: 7,
                 program: b"/bin/sh".to_vec(),
@@ -460,15 +489,23 @@ mod tests {
                 cwd: b"/tmp/project".to_vec(),
                 comm: b"tl-12".to_vec(),
                 served,
+                held,
+                own_net,
             })
         };
         vec![
-            run(false),
-            run(true),
+            run(false, false, false),
+            run(true, false, false),
+            run(false, true, true),
+            run(true, true, false),
             Msg::Signal { id: 7, sig: libc::SIGTERM },
             Msg::AskUsage,
             Msg::End,
-            Msg::Ready { pid: 4242 },
+            Msg::Ready { pid: 4242, places: Vec::new() },
+            Msg::Ready {
+                pid: 1,
+                places: vec![b"/dev/pts".to_vec(), b"/dev/pts/ptmx".to_vec(), b"/dev/shm".to_vec()],
+            },
             Msg::Started { id: 7, pid: 4243 },
             Msg::Failed { id: 7, errno: libc::ENOENT, step: Step::Exec },
             Msg::Exited { id: 7, status: 3 << 8 },

@@ -1,14 +1,19 @@
-//! A session's keeper (`docs/design/sandbox-keeper.md` §The keeper) — here without namespaces (tiers C/D; the
-//! namespaces are step 3): a small process per session, `tarae --sandbox-keeper`, that forks each sandboxed run
-//! of its session, reaps it and says how it ended, and is the child subreaper of what the runs leave — so what a
-//! run leaves running is the session's process tree, not a tag (`env -i` can't shed it), and ends with it.
+//! A session's keeper (`docs/design/sandbox-keeper.md` §The keeper): a small process per session, `tarae
+//! --sandbox-keeper`, that forks each sandboxed run of its session, reaps it and says how it ended, and is the
+//! child subreaper of what the runs leave — so what a run leaves running is the session's process tree, not a
+//! tag (`env -i` can't shed it), and ends with it. Where user namespaces work (`tier.rs`) it's born in the
+//! session's own — user, ipc, mount, pid where a fresh `/proc` mounts (then it's their PID 1), net where the
+//! policy opens nothing — with the user's own ids (D5), its own `/proc`, `/dev/pts` and `/dev/shm` (D10), `lo`
+//! up, and every capability dropped before its exec; without, a plain fork server (tiers C/D).
 //!
 //! tarae's side: `ready` (on the worker that makes a run's policy — `sandbox::confined`) finds the session's
-//! keeper or makes one (`born`: `clone3(CLONE_PIDFD)`, raw calls until the exec), `Keeper::run` asks it for a
-//! run and waits for `Started` (the main loop's wait: at most `STARTED_WITHIN`, as it waited for `posix_spawn`
-//! before), and the two places every run is waited on and stopped — `spawn::wait` and `dap::term_group` — ask
-//! here first (`wait`, `signal`): a keeper's run isn't tarae's child, and only its reaper can signal it without
-//! a reused pid's race. Its channel is `channel.rs`'s protocol; a thread reads it, another waits on its pidfd.
+//! keeper or makes one (`born`: `clone3(CLONE_PIDFD | namespaces)`, tarae writing its id maps, raw calls until
+//! the exec), `Keeper::run` asks it for a run and waits for `Started` (the main loop's wait: at most
+//! `STARTED_WITHIN`, as it waited for `posix_spawn` before), and the two places every run is waited on and
+//! stopped — `spawn::wait` and `dap::term_group` — ask here first (`wait`, `signal`): a keeper's run isn't
+//! tarae's child, and only its reaper can signal it without a reused pid's race. Its channel is `channel.rs`'s
+//! protocol; a thread reads it, another waits on its pidfd. A run's pid is tarae's number: in a PID namespace
+//! the keeper says its own, so tarae reads its own from the run's pidfd while the run waits for it (`held`).
 //!
 //! The keeper's side (`main`) is single-threaded: non-dumpable, `no_new_privs`, a child subreaper, a session
 //! of its own, every signal at its default and `SIGCHLD` blocked from its birth (read through a `signalfd`, so
@@ -26,6 +31,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use super::channel::{self, Msg, Step};
+use super::tier::{BirthError, BirthStep, Ns, RunNet};
 
 /// The flag tarae's `main` starts a keeper with.
 pub const FLAG: &str = "--sandbox-keeper";
@@ -40,6 +46,9 @@ const LEFT_TERM: Duration = Duration::from_secs(1);
 /// How long a keeper told to end has (its `Kept::end_all`'s rounds of TERM and KILL, `LEFT_TERM` each, and a
 /// second more) before KILL.
 const END_WITHIN: Duration = Duration::from_secs(5);
+/// The device places a keeper hands tarae with `Ready` (its own, in its mount namespace): its `devpts`, its
+/// `ptmx` there and at `/dev/ptmx` where that's a node bound over (not a link), its `/dev/shm`.
+pub const DEVICE_HANDLES: [&str; 4] = ["/dev/pts", "/dev/pts/ptmx", "/dev/ptmx", "/dev/shm"];
 /// D11: a session's keeper that ended this many times within `DEATHS_WITHIN` isn't made again.
 const DEATHS_MAX: usize = 2;
 const DEATHS_WITHIN: Duration = Duration::from_secs(600);
@@ -50,6 +59,11 @@ const DEATHS_WITHIN: Duration = Duration::from_secs(600);
 pub struct Keeper {
     pub pid: u32,
     pub root: PathBuf,
+    /// The namespaces it was born with.
+    pub ns: Ns,
+    /// Its own device places (`DEVICE_HANDLES`), as it handed them with `Ready`: what its runs' rules grant
+    /// the devices on when it's in a mount namespace of its own (`linux::confine`).
+    pub devices: Vec<(&'static str, OwnedFd)>,
     chan: OwnedFd,
     pidfd: OwnedFd,
     state: Mutex<State>,
@@ -71,6 +85,12 @@ struct State {
     /// Tests (M3): what it said it uses.
     #[cfg(test)]
     usage: Option<(u64, u64)>,
+    /// Tests: what its held runs' pidfds' fdinfo reads as, instead of `/proc`'s.
+    #[cfg(test)]
+    fdinfo: Option<&'static str>,
+    /// Tests: how its runs ended, as it said (`Exited`), whether tarae still waited on them or not.
+    #[cfg(test)]
+    exits: Vec<i32>,
 }
 
 #[derive(Default)]
@@ -79,6 +99,8 @@ struct Slot {
     started: Option<Result<(u32, Arc<OwnedFd>), String>>,
     /// Its `wait` status — or why it has none (the keeper ended first).
     exited: Option<Result<i32, String>>,
+    /// A held run's end of its handoff socket: a byte on it once its pid is known, and it goes on to its exec.
+    hold: Option<Arc<OwnedFd>>,
 }
 
 /// Every keeper there is (a session's, and ones superseded still ending their runs). Held only to look or
@@ -99,10 +121,12 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// The keeper of the session at `root` for a policy keyed `key` (None: any — a probe's): the one there, else a
-/// new one. One of another key is superseded: what its runs left ends now, and it ends after its last run (D14).
-/// Two deaths within `DEATHS_WITHIN` and none is made (D11). Blocks (a worker's).
-pub fn ready(root: &Path, key: Option<&str>) -> Result<Arc<Keeper>, String> {
+/// The keeper of the session at `root` for a policy keyed `key` (None: any — a probe's), born with `ns`
+/// (`tier::for_policy`): the one there, else a new one. One of another key — or born with other namespaces —
+/// is superseded: what its runs left ends now, and it ends after its last run (D14). Two deaths within
+/// `DEATHS_WITHIN` and none is made (D11). A birth that fails fails the run, saying why — never another tier
+/// (D-b: the probe's, until tarae starts again). Blocks (a worker's).
+pub fn ready(root: &Path, key: Option<&str>, ns: Ns) -> Result<Arc<Keeper>, String> {
     let _births = lock(&BIRTHS);
     let current = {
         let mut keepers = lock(&KEEPERS);
@@ -113,11 +137,11 @@ pub fn ready(root: &Path, key: Option<&str>) -> Result<Arc<Keeper>, String> {
         let mut s = lock(&k.state);
         match (&s.key, key) {
             (_, None) => return Ok(k.clone()),
-            (None, Some(new)) => {
+            (None, Some(new)) if k.ns == ns => {
                 s.key = Some(new.to_string());
                 return Ok(k.clone());
             }
-            (Some(was), Some(new)) if was == new => return Ok(k.clone()),
+            (Some(was), Some(new)) if was == new && k.ns == ns => return Ok(k.clone()),
             _ => {
                 s.superseded = true;
                 let idle = s.runs.values().all(|r| r.exited.is_some() || r.started.is_none());
@@ -148,9 +172,14 @@ pub fn ready(root: &Path, key: Option<&str>) -> Result<Arc<Keeper>, String> {
         let _ = began.send(());
         std::thread::sleep(Duration::from_secs(1));
     }
-    let k = Keeper::born(root, key).map_err(|e| format!("the session's keeper couldn't start: {e}"))?;
+    let k = Keeper::born(root, key, ns).map_err(|e| format!("the session's keeper couldn't start: {e}"))?;
     lock(&KEEPERS).push(k.clone());
     Ok(k)
+}
+
+/// A keeper for the probe (`tier.rs`): born with `ns`, kept by nobody but the caller.
+pub(super) fn born_for_probe(root: &Path, ns: Ns) -> io::Result<Arc<Keeper>> {
+    Keeper::born(root, None, ns)
 }
 
 /// The keepers of the session at `root` (None: every session's).
@@ -207,14 +236,17 @@ pub fn signal(pid: u32, sig: i32) -> bool {
 }
 
 impl Keeper {
-    /// A new keeper for the session at `root`: `clone3` (its pidfd from the start), the child's raw calls —
-    /// stdio to `/dev/null`, its channel to fd 3, `SIGCHLD` blocked (so through the exec: no thread of the new
-    /// process takes it before its `signalfd` does) — then the exec of tarae's own binary, with an empty
-    /// environment. Ready once it says so (`READY_WITHIN`).
-    fn born(root: &Path, key: Option<&str>) -> io::Result<Arc<Keeper>> {
+    /// A new keeper for the session at `root`, in the namespaces `ns` says: `clone3` (its pidfd from the start),
+    /// its id maps written by tarae (D5), then the child's raw calls — with namespaces its mounts, `lo` and
+    /// every capability dropped (`Birth::child`); stdio to `/dev/null`, its channel to fd 3, `SIGCHLD` blocked
+    /// (so through the exec: no thread of the new process takes it before its `signalfd` does) — then the exec
+    /// of tarae's own binary, with an empty environment. Ready once it says so (`READY_WITHIN`); a step that
+    /// failed before is the error (`BirthError` inside it).
+    fn born(root: &Path, key: Option<&str>, ns: Ns) -> io::Result<Arc<Keeper>> {
         let exe = exe()?;
         let (ours, theirs) = seqpacket()?;
         let null = open_null(libc::O_RDWR)?;
+        let birth = Birth::new()?;
         let argv: Vec<CString> = keeper_argv();
         let argv_p: Vec<*const libc::c_char> =
             argv.iter().map(|a| a.as_ptr()).chain(std::iter::once(std::ptr::null())).collect();
@@ -225,10 +257,11 @@ impl Keeper {
         let mut pidfd: libc::c_int = -1;
         // SAFETY: in the child — a copy of a multithreaded process — only raw calls on descriptors and buffers
         // made above, then the exec or `_exit`.
-        let pid = unsafe { clone_pidfd(&mut pidfd) };
+        let pid = unsafe { clone_pidfd(&mut pidfd, ns.clone_flags()) };
         if pid == 0 {
             // SAFETY: as above — async-signal-safe calls only.
             unsafe {
+                birth.child(ns);
                 for fd in 0..3 {
                     libc::dup2(null.as_raw_fd(), fd);
                 }
@@ -249,28 +282,35 @@ impl Keeper {
                     envp.as_ptr(),
                     libc::AT_EMPTY_PATH,
                 );
-                libc::_exit(127);
+                birth.failed(BirthStep::Exec, errno());
             }
         }
         if pid < 0 {
-            return Err(io::Error::last_os_error());
+            return Err(BirthError { step: BirthStep::Clone, errno: errno() }.into());
         }
         // SAFETY: the pidfd `clone3` made for us.
         let pidfd = unsafe { OwnedFd::from_raw_fd(pidfd) };
         drop(theirs);
+        let (go, told) = birth.parents();
         let ready = (|| {
-            if !readable(ours.as_fd(), READY_WITHIN)? {
-                return Err(io::Error::other("it didn't say it was there"));
+            if ns.user {
+                id_maps(pid as i32)?;
             }
-            match channel::recv(ours.as_fd(), &mut Vec::new())? {
-                Some((Ok(Msg::Ready { .. }), _)) => Ok(()),
-                Some((msg, _)) => Err(io::Error::other(format!("it said {msg:?} first"))),
-                None => Err(io::Error::other("it ended at once")),
+            // SAFETY: one byte written from a buffer we own, on our end of the go pipe.
+            if unsafe { libc::write(go.as_raw_fd(), [1u8].as_ptr().cast(), 1) } != 1 {
+                return Err(BirthError { step: BirthStep::Go, errno: errno() }.into());
             }
+            said_ready(ours.as_fd(), told)
         })();
+        let (ready, devices) = match ready {
+            Ok(devices) => (Ok(()), devices),
+            Err(e) => (Err(e), Vec::new()),
+        };
         let k = Arc::new(Keeper {
             pid: pid as u32,
             root: root.to_path_buf(),
+            ns,
+            devices,
             chan: ours,
             pidfd,
             state: Mutex::new(State { key: key.map(str::to_string), ..State::default() }),
@@ -286,8 +326,25 @@ impl Keeper {
         }
         let reading = k.clone();
         crate::event::thread("tarae-keeper", move || reading.read());
-        crate::log::line("sandbox", "info", &format!("a keeper for {}: pid {}", root.display(), k.pid));
+        crate::log::line(
+            "sandbox",
+            "info",
+            &format!("a keeper for {}: pid {}, {}", root.display(), k.pid, k.said()),
+        );
         Ok(k)
+    }
+
+    /// Its tier and namespaces in words (`:procs`, the log): `A+ (user net ipc pid mnt)`, and why its network
+    /// is this machine's where its policy opens one (D-a).
+    pub fn said(&self) -> String {
+        let served = super::supervisor::unavailable().is_none();
+        let tier = super::tier::Tier::of(self.ns, served).said();
+        match self.ns.user && !self.ns.net {
+            true => {
+                format!("{tier} ({}; network shared: its policy opens it, until routing)", self.ns.said())
+            }
+            false => format!("{tier} ({})", self.ns.said()),
+        }
     }
 
     /// Reads what the keeper says, until its channel ends.
@@ -305,16 +362,51 @@ impl Keeper {
     fn heard(self: &Arc<Self>, msg: Msg, mut fds: Vec<OwnedFd>) {
         let mut s = lock(&self.state);
         match msg {
-            Msg::Started { id, pid } => match (s.runs.get_mut(&id), fds.pop()) {
-                (Some(slot), Some(pidfd)) => {
-                    slot.started = Some(Ok((pid, Arc::new(pidfd))));
-                    lock(&RUNS).push((pid, self.clone(), id));
+            Msg::Started { id, pid } => {
+                let pidfd = fds.pop();
+                // (in a PID namespace its number is the keeper's: tarae's own from its pidfd, read while it
+                // waits for its byte)
+                let number = match (&pidfd, self.ns.pid) {
+                    (Some(fd), true) => self.number(&s, fd),
+                    _ => Ok(pid),
+                };
+                match (s.runs.get_mut(&id), pidfd) {
+                    (Some(slot), Some(pidfd)) => match number {
+                        Ok(pid) => {
+                            slot.started = Some(Ok((pid, Arc::new(pidfd))));
+                            lock(&RUNS).push((pid, self.clone(), id));
+                            if let Some(hold) = slot.hold.take() {
+                                // SAFETY: one byte from a buffer we own, on our end of its handoff socket.
+                                unsafe {
+                                    libc::send(hold.as_raw_fd(), [1u8].as_ptr().cast(), 1, libc::MSG_NOSIGNAL)
+                                };
+                            }
+                        }
+                        // (one tarae can't number it couldn't wait on or end: its byte never goes, it's killed
+                        // where it waits — gone already, it failed: its `Failed` or `Exited` says so)
+                        Err(why) => {
+                            // SAFETY: KILL through the run's pidfd, ours (no other process can be it).
+                            unsafe {
+                                libc::syscall(
+                                    libc::SYS_pidfd_send_signal,
+                                    pidfd.as_raw_fd(),
+                                    libc::SIGKILL,
+                                    0,
+                                    0,
+                                )
+                            };
+                            if let Some(why) = why {
+                                slot.started = Some(Err(why));
+                            }
+                        }
+                    },
+                    // (one whose start tarae gave up on: it goes)
+                    _ => {
+                        let _ =
+                            channel::send(self.chan.as_fd(), &Msg::Signal { id, sig: libc::SIGKILL }, &[]);
+                    }
                 }
-                // (one whose start tarae gave up on: it goes)
-                _ => {
-                    let _ = channel::send(self.chan.as_fd(), &Msg::Signal { id, sig: libc::SIGKILL }, &[]);
-                }
-            },
+            }
             Msg::Failed { id, errno, step } => {
                 let why = format!("{}: {}", step.said(), io::Error::from_raw_os_error(errno));
                 match s.runs.get_mut(&id) {
@@ -327,8 +419,13 @@ impl Keeper {
                 }
             }
             Msg::Exited { id, status } => {
+                #[cfg(test)]
+                s.exits.push(status);
                 if let Some(slot) = s.runs.get_mut(&id) {
                     slot.exited = Some(Ok(status));
+                    if slot.started.is_none() {
+                        slot.started = Some(Err(format!("it ended before it started ({status})")));
+                    }
                 }
                 let idle = s.runs.values().all(|r| r.exited.is_some());
                 if s.superseded && idle && !s.ending {
@@ -345,6 +442,15 @@ impl Keeper {
         }
         drop(s);
         self.changed.notify_all();
+    }
+
+    /// tarae's number for a held run, from its pidfd (`pid_of`; in tests what `State.fdinfo` says, if set).
+    fn number(&self, #[allow(unused_variables)] s: &State, pidfd: &OwnedFd) -> Result<u32, Option<String>> {
+        #[cfg(test)]
+        if let Some(info) = s.fdinfo {
+            return pid_in_fdinfo(info);
+        }
+        pid_of(pidfd)
     }
 
     /// Waits for the keeper's process to end (and reaps it).
@@ -477,9 +583,15 @@ impl Keeper {
         s.usage
     }
 
-    /// Asks for run `req` with its descriptors (the ruleset, stdin, stdout, stderr — and served, the handoff
-    /// socket's child end) and waits for its start (`STARTED_WITHIN`): its pid and pidfd.
-    pub fn run(&self, mut req: channel::Run, fds: &[BorrowedFd]) -> io::Result<(u32, Arc<OwnedFd>)> {
+    /// Asks for run `req` with its descriptors (the ruleset, stdin, stdout, stderr — and served or held, the
+    /// handoff socket's child end) and waits for its start (`STARTED_WITHIN`): its pid and pidfd. `hold`, a held
+    /// run's end of that socket: its byte goes once its pid is known (`heard`).
+    fn run(
+        &self,
+        mut req: channel::Run,
+        fds: &[BorrowedFd],
+        hold: Option<Arc<OwnedFd>>,
+    ) -> io::Result<(u32, Arc<OwnedFd>)> {
         let id = {
             let mut s = lock(&self.state);
             if let Some(why) = &s.gone {
@@ -490,7 +602,7 @@ impl Keeper {
             }
             s.next += 1;
             let id = s.next;
-            s.runs.insert(id, Slot::default());
+            s.runs.insert(id, Slot { hold, ..Slot::default() });
             id
         };
         req.id = id;
@@ -530,16 +642,37 @@ impl Keeper {
     /// Starts `cmd` — its program, arguments, environment and folder, as `spawn::setsid` takes them: stdin
     /// `/dev/null`, stdout and stderr pipes — through the keeper, confined to the Landlock ruleset `rules`, its
     /// process named `comm` before it confines itself (`landlock::thread_name` — what Landlock's audit names
-    /// beside its pid: the caller tells its watch first, `sandbox::spawn`); with `handoff` (the child's end of a
-    /// socket pair), served: its listener's number comes back on it.
+    /// beside its pid: the caller tells its watch first, `sandbox::spawn`). Its sockets go as `net` says — the
+    /// answer `rules` were made for (`linux::confine`'s `Confine.net`): `Own`, its internet sockets are its own
+    /// (`seccomp::Mode::OwnNetwork`); `Plain`, it has none; `Served` is `start_served`'s.
     pub fn start(
         &self,
         cmd: &std::process::Command,
         comm: &str,
         rules: BorrowedFd,
-        handoff: Option<&OwnedFd>,
+        net: RunNet,
     ) -> io::Result<Started> {
+        if net == RunNet::Served {
+            return Err(io::Error::other("a served run starts with its supervisor (start_served)"));
+        }
+        self.start_with(cmd, comm, rules, net).map(|(s, _)| s)
+    }
+
+    /// `start`, served or not; with a handoff socket when served or held (a keeper in a PID namespace — its
+    /// run waits for tarae to know its pid): tarae's end of it comes back.
+    fn start_with(
+        &self,
+        cmd: &std::process::Command,
+        comm: &str,
+        rules: BorrowedFd,
+        net: RunNet,
+    ) -> io::Result<(Started, Option<Arc<OwnedFd>>)> {
         use std::os::unix::ffi::OsStrExt;
+        // (its own sockets only inside the network namespace that holds them to `lo`)
+        if net == RunNet::Own && self.ns.run_net(false) != RunNet::Own {
+            return Err(io::Error::other("a run's own network, but its keeper has no network namespace"));
+        }
+        let served = net == RunNet::Served;
         let env = crate::spawn::environment(cmd);
         let cwd = match cmd.get_current_dir() {
             Some(d) => std::path::absolute(d)?,
@@ -565,17 +698,38 @@ impl Keeper {
             envp,
             cwd: bytes(cwd.as_os_str()),
             comm: comm.as_bytes().to_vec(),
-            served: handoff.is_some(),
+            served,
+            held: self.ns.pid,
+            own_net: net == RunNet::Own,
         };
         let stdin = open_null(libc::O_RDONLY)?;
         let (out_r, out_w) = io::pipe()?;
         let (err_r, err_w) = io::pipe()?;
+        let handoff = match served || req.held {
+            true => Some(stream_pair()?),
+            false => None,
+        };
         let mut fds = vec![rules, stdin.as_fd(), out_w.as_fd(), err_w.as_fd()];
-        fds.extend(handoff.map(|h| h.as_fd()));
-        let (pid, pidfd) = self.run(req, &fds)?;
+        fds.extend(handoff.as_ref().map(|(_, theirs)| theirs.as_fd()));
+        let ours = handoff.as_ref().map(|(ours, _)| ours.clone());
+        let hold = ours.clone().filter(|_| req.held);
+        let (pid, pidfd) = self.run(req, &fds, hold)?;
         let spawned = crate::spawn::Spawned { pid, stdout: Some(out_r), stderr: Some(err_r) };
-        Ok(Started { spawned, pidfd })
+        Ok((Started { spawned, pidfd }, ours))
     }
+}
+
+/// A `SOCK_STREAM` pair, close-on-exec: tarae's end (shared by who writes on it) and the child's.
+fn stream_pair() -> io::Result<(Arc<OwnedFd>, OwnedFd)> {
+    let mut fds = [0; 2];
+    // SAFETY: a two-int array for the call to fill.
+    if unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0, fds.as_mut_ptr()) }
+        != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: both just made, ours.
+    Ok(unsafe { (Arc::new(OwnedFd::from_raw_fd(fds[0])), OwnedFd::from_raw_fd(fds[1])) })
 }
 
 impl Keeper {
@@ -594,22 +748,12 @@ impl Keeper {
         refused: std::sync::mpsc::Sender<super::Denial>,
     ) -> io::Result<Started> {
         let to = super::supervisor::serve(policy, refused)?;
-        let mut fds = [0; 2];
-        // SAFETY: a two-int array for the call to fill.
-        if unsafe {
-            libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0, fds.as_mut_ptr())
-        } != 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: both just made, ours.
-        let (ours, theirs) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
-        let started = self.start(cmd, comm, rules, Some(&theirs))?;
-        drop(theirs);
+        let (started, ours) = self.start_with(cmd, comm, rules, RunNet::Served)?;
+        let ours = ours.ok_or_else(|| io::Error::other("a served run without its handoff"))?;
         let pidfd = started.pidfd.clone();
         crate::event::thread("tarae-handoff", move || {
             let mut n = [0u8; 4];
-            // SAFETY: a read into a buffer of its size, a write of one byte, on our end of the pair.
+            // SAFETY: a read into a buffer of its size, a send of one byte, on our end of the pair.
             unsafe {
                 if libc::read(ours.as_raw_fd(), n.as_mut_ptr().cast(), 4) != 4 {
                     return;
@@ -620,7 +764,7 @@ impl Keeper {
                 if to.send(listener).is_err() {
                     return;
                 }
-                libc::write(ours.as_raw_fd(), [1u8].as_ptr().cast(), 1);
+                libc::send(ours.as_raw_fd(), [1u8].as_ptr().cast(), 1, libc::MSG_NOSIGNAL);
             }
         });
         Ok(started)
@@ -666,15 +810,16 @@ struct CloneArgs {
     cgroup: u64,
 }
 
-/// A child with its pidfd from the start (in `pidfd`): `clone3(CLONE_PIDFD)` — or, where a filter answers
-/// `clone3` with `ENOSYS` (Docker's default profile does, so that libcs fall back), `clone(2)` with the same
-/// flag (Linux 5.2). 0 in the child, its pid in the parent, -1 and errno on failure.
+/// A child with its pidfd from the start (in `pidfd`), in the namespaces `ns_flags` makes (`Ns::clone_flags`):
+/// `clone3(CLONE_PIDFD | …)` — or, where a filter answers `clone3` with `ENOSYS` (Docker's default profile
+/// does, so that libcs fall back), `clone(2)` with the same flags (Linux 5.2). 0 in the child, its pid in the
+/// parent, -1 and errno on failure.
 ///
 /// # Safety
 /// The child is a copy of the calling (multithreaded) process: until its exec it may make raw calls only.
-unsafe fn clone_pidfd(pidfd: &mut libc::c_int) -> libc::c_long {
+unsafe fn clone_pidfd(pidfd: &mut libc::c_int, ns_flags: u64) -> libc::c_long {
     let args = CloneArgs {
-        flags: libc::CLONE_PIDFD as u64,
+        flags: libc::CLONE_PIDFD as u64 | ns_flags,
         pidfd: (pidfd as *mut libc::c_int) as u64,
         exit_signal: libc::SIGCHLD as u64,
         ..CloneArgs::default()
@@ -686,8 +831,257 @@ unsafe fn clone_pidfd(pidfd: &mut libc::c_int) -> libc::c_long {
             return r;
         }
         // (flags, new stack: none — the child goes on on a copy of this one, as a fork's —, where the pidfd goes)
-        let flags = (libc::CLONE_PIDFD | libc::SIGCHLD) as libc::c_ulong;
+        let flags = (libc::CLONE_PIDFD | libc::SIGCHLD) as libc::c_ulong | ns_flags as libc::c_ulong;
         libc::syscall(libc::SYS_clone, flags, 0usize, pidfd as *mut libc::c_int, 0usize, 0usize)
+    }
+}
+
+/// What a birth's child needs, made before the clone — it makes raw calls only: its go pipe (tarae's byte once
+/// the id maps are written) and its birth pipe (what failed before its exec, as `(step, errno)`; its end closed
+/// by the exec: it's there), both above the descriptors the child moves into 0–3; and this kernel's highest
+/// capability.
+struct Birth {
+    go: (OwnedFd, OwnedFd),
+    told: (OwnedFd, OwnedFd),
+    last_cap: libc::c_ulong,
+}
+
+/// `struct ifreq` as `SIOCGIFFLAGS`/`SIOCSIFFLAGS` take it: a name, the flags, the rest of its 40 bytes.
+#[repr(C)]
+struct IfFlags {
+    name: [u8; 16],
+    flags: libc::c_short,
+    rest: [u8; 22],
+}
+
+impl Birth {
+    fn new() -> io::Result<Birth> {
+        let pipe = || -> io::Result<(OwnedFd, OwnedFd)> {
+            let (r, w) = io::pipe()?;
+            Ok((high(r.into())?, high(w.into())?))
+        };
+        let last_cap = std::fs::read_to_string("/proc/sys/kernel/cap_last_cap")
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(63);
+        Ok(Birth { go: pipe()?, told: pipe()?, last_cap })
+    }
+
+    /// tarae's ends, the child's closed: the go pipe's writer, the birth pipe's reader.
+    fn parents(self) -> (OwnedFd, OwnedFd) {
+        (self.go.1, self.told.0)
+    }
+
+    /// Says what failed (`step`, `errno`) on the birth pipe, and ends the child.
+    ///
+    /// # Safety
+    /// The birth's child's: raw calls only.
+    unsafe fn failed(&self, step: BirthStep, errno: i32) -> ! {
+        let mut m = [step.code(); 5];
+        m[1..].copy_from_slice(&errno.to_le_bytes());
+        // SAFETY: a write of a buffer we own, then the end of this process.
+        unsafe {
+            libc::write(self.told.1.as_raw_fd(), m.as_ptr().cast(), m.len());
+            libc::_exit(127)
+        }
+    }
+
+    /// The child, before the rest of its birth: waits for tarae's go (its id maps written; its end gone —
+    /// tarae gave up — it exits), then, with namespaces: its mounts slaved to the system's (nothing it mounts
+    /// goes out), a fresh `/proc` with a PID namespace, its own `devpts` with its `ptmx` over `/dev/ptmx`, its
+    /// own `/dev/shm` (D10), `lo` up, and every capability dropped — each checked; a failure said and it exits.
+    ///
+    /// # Safety
+    /// The birth's child's: raw calls only (a copy of a multithreaded process).
+    unsafe fn child(&self, ns: Ns) {
+        let null = std::ptr::null::<libc::c_char>();
+        // SAFETY: raw calls on this process's own descriptors, static strings and buffers on its stack.
+        unsafe {
+            libc::close(self.go.1.as_raw_fd());
+            libc::close(self.told.0.as_raw_fd());
+            let mut byte = 0u8;
+            loop {
+                match libc::read(self.go.0.as_raw_fd(), (&raw mut byte).cast(), 1) {
+                    1 => break,
+                    0 => libc::_exit(127),
+                    _ if errno() == libc::EINTR => continue,
+                    _ => self.failed(BirthStep::Go, errno()),
+                }
+            }
+            libc::close(self.go.0.as_raw_fd());
+            if !ns.user {
+                return;
+            }
+            let mount = |src: *const libc::c_char,
+                         at: &std::ffi::CStr,
+                         fs: *const libc::c_char,
+                         flags: libc::c_ulong,
+                         data: *const libc::c_void| {
+                libc::mount(src, at.as_ptr(), fs, flags, data) == 0
+            };
+            if !mount(null, c"/", null, libc::MS_REC | libc::MS_SLAVE, std::ptr::null()) {
+                self.failed(BirthStep::Propagation, errno());
+            }
+            let (nosuid, nodev, noexec) = (libc::MS_NOSUID, libc::MS_NODEV, libc::MS_NOEXEC);
+            if ns.pid
+                && !mount(
+                    c"proc".as_ptr(),
+                    c"/proc",
+                    c"proc".as_ptr(),
+                    nosuid | nodev | noexec,
+                    std::ptr::null(),
+                )
+            {
+                self.failed(BirthStep::Proc, errno());
+            }
+            let pts = c"newinstance,ptmxmode=0666,mode=0620";
+            if !mount(
+                c"devpts".as_ptr(),
+                c"/dev/pts",
+                c"devpts".as_ptr(),
+                nosuid | noexec,
+                pts.as_ptr().cast(),
+            ) {
+                self.failed(BirthStep::Devpts, errno());
+            }
+            if !mount(c"/dev/pts/ptmx".as_ptr(), c"/dev/ptmx", null, libc::MS_BIND, std::ptr::null()) {
+                self.failed(BirthStep::Ptmx, errno());
+            }
+            let shm = c"mode=1777";
+            if ns.shm
+                && !mount(
+                    c"tmpfs".as_ptr(),
+                    c"/dev/shm",
+                    c"tmpfs".as_ptr(),
+                    nosuid | nodev,
+                    shm.as_ptr().cast(),
+                )
+            {
+                self.failed(BirthStep::Shm, errno());
+            }
+            if ns.net {
+                let s = libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0);
+                let mut ifr = IfFlags { name: [0; 16], flags: 0, rest: [0; 22] };
+                ifr.name[..2].copy_from_slice(b"lo");
+                if s < 0 || libc::ioctl(s, libc::SIOCGIFFLAGS as _, &raw mut ifr) != 0 {
+                    self.failed(BirthStep::Lo, errno());
+                }
+                ifr.flags |= libc::IFF_UP as libc::c_short;
+                if libc::ioctl(s, libc::SIOCSIFFLAGS as _, &raw mut ifr) != 0 {
+                    self.failed(BirthStep::Lo, errno());
+                }
+                libc::close(s);
+            }
+            if let Err(e) = capabilities_dropped(self.last_cap) {
+                self.failed(BirthStep::Caps, e);
+            }
+        }
+    }
+}
+
+/// `fd` moved up past the descriptors a birth's child moves into 0–3 (close-on-exec).
+fn high(fd: OwnedFd) -> io::Result<OwnedFd> {
+    // SAFETY: a dup of a descriptor we own; the new one is ours.
+    let up = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 10) };
+    if up < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: just made.
+    Ok(unsafe { OwnedFd::from_raw_fd(up) })
+}
+
+/// The new keeper's id maps, written by tarae (its parent, the user namespace's owner): the user's own ids,
+/// each to itself (D5) — `setgroups` denied first, as an unprivileged map of a group needs.
+fn id_maps(pid: i32) -> Result<(), BirthError> {
+    // SAFETY: plain calls with no arguments.
+    let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+    let maps = [
+        ("setgroups", "deny".to_string()),
+        ("uid_map", format!("{uid} {uid} 1")),
+        ("gid_map", format!("{gid} {gid} 1")),
+    ];
+    for (file, map) in maps {
+        std::fs::write(format!("/proc/{pid}/{file}"), map)
+            .map_err(|e| BirthError { step: BirthStep::Map, errno: e.raw_os_error().unwrap_or(libc::EIO) })?;
+    }
+    Ok(())
+}
+
+/// Waits for a new keeper's `Ready` on `chan` (`READY_WITHIN`) — or what its birth pipe `told` says failed
+/// first (its end, the exec, says nothing). Its device handles: those of `DEVICE_HANDLES`' places, each once
+/// (another name or a second one is left out, said in the log).
+fn said_ready(chan: BorrowedFd, told: OwnedFd) -> io::Result<Vec<(&'static str, OwnedFd)>> {
+    let deadline = Instant::now() + READY_WITHIN;
+    let mut told = Some(told);
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::Error::other("it didn't say it was there"));
+        }
+        let mut polled = vec![libc::pollfd { fd: chan.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
+        if let Some(t) = &told {
+            polled.push(libc::pollfd { fd: t.as_raw_fd(), events: libc::POLLIN, revents: 0 });
+        }
+        // SAFETY: the pollfds, live for the call.
+        let r =
+            unsafe { libc::poll(polled.as_mut_ptr(), polled.len() as libc::nfds_t, left.as_millis() as i32) };
+        if r < 0 && errno() != libc::EINTR {
+            return Err(io::Error::last_os_error());
+        }
+        if let (Some(t), Some(p)) = (&told, polled.get(1))
+            && p.revents != 0
+        {
+            let mut b = [0u8; 5];
+            // SAFETY: a read into a buffer of its size.
+            let n = unsafe { libc::read(t.as_raw_fd(), b.as_mut_ptr().cast(), b.len()) };
+            if n == 5 {
+                let step = BirthStep::from_code(b[0]).unwrap_or(BirthStep::Exec);
+                let errno = i32::from_le_bytes([b[1], b[2], b[3], b[4]]);
+                return Err(BirthError { step, errno }.into());
+            }
+            told = None;
+            continue;
+        }
+        if polled[0].revents != 0 {
+            return match channel::recv(chan, &mut Vec::new())? {
+                Some((Ok(Msg::Ready { places, .. }), fds)) => {
+                    let mut kept: Vec<(&'static str, OwnedFd)> = Vec::new();
+                    for (place, fd) in places.iter().zip(fds) {
+                        match DEVICE_HANDLES.iter().find(|d| d.as_bytes() == place.as_slice()) {
+                            Some(d) if !kept.iter().any(|(k, _)| k == d) => kept.push((*d, fd)),
+                            _ => crate::log::line(
+                                "sandbox",
+                                "warn",
+                                &format!("a keeper handed {} — left out", String::from_utf8_lossy(place)),
+                            ),
+                        }
+                    }
+                    Ok(kept)
+                }
+                Some((msg, _)) => Err(io::Error::other(format!("it said {msg:?} first"))),
+                None => Err(io::Error::other("it ended at once")),
+            };
+        }
+    }
+}
+
+/// Tarae's number for the process `pidfd` is of (its fdinfo's `Pid:`) — else `Err(None)`: it's gone,
+/// `Err(Some(why))`: tarae can't number it (`pid_in_fdinfo`, or no fdinfo to read).
+fn pid_of(pidfd: &OwnedFd) -> Result<u32, Option<String>> {
+    let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", pidfd.as_raw_fd()))
+        .map_err(|e| Some(format!("its pidfd's fdinfo: {e}")))?;
+    pid_in_fdinfo(&info)
+}
+
+/// A pidfd's fdinfo's `Pid:` — `Err(None)` at `-1` (the process is gone), `Err(Some(why))` for none tarae
+/// can use (`0`: not in this `/proc`'s PID namespace; none at all).
+fn pid_in_fdinfo(info: &str) -> Result<u32, Option<String>> {
+    let pid = info.lines().find_map(|l| l.strip_prefix("Pid:")).and_then(|p| p.trim().parse::<i64>().ok());
+    match pid {
+        Some(-1) => Err(None),
+        Some(p) if p > 0 => u32::try_from(p).map_err(|_| Some(format!("its pidfd says pid {p}"))),
+        Some(_) => Err(Some("its pid isn't in tarae's PID namespace (its pidfd says 0)".into())),
+        None => Err(Some("its pidfd's fdinfo has no pid".into())),
     }
 }
 
@@ -825,9 +1219,20 @@ pub fn main() -> ! {
     let mut k = Kept { chan, signals, children: HashMap::new(), reaped: 0 };
     // SAFETY: getpid has no preconditions.
     let me = unsafe { libc::getpid() } as u32;
-    if k.say(&Msg::Ready { pid: me }, &[]).is_err() {
+    // Its device places, as its own mount namespace has them, opened now — before any run exists — and handed
+    // to tarae with `Ready`: what tarae grants a run on (a rule on what they sit on isn't reached). A link
+    // (`/dev/ptmx` → `pts/ptmx` in a container) isn't opened: what it points to comes as itself.
+    let handles: Vec<(&str, OwnedFd)> = DEVICE_HANDLES
+        .iter()
+        .filter_map(|p| crate::landlock::open_unlinked(Path::new(p), libc::O_PATH).ok().map(|fd| (*p, fd)))
+        .collect();
+    let places = handles.iter().map(|(p, _)| p.as_bytes().to_vec()).collect();
+    let fds: Vec<BorrowedFd> = handles.iter().map(|(_, fd)| fd.as_fd()).collect();
+    if k.say(&Msg::Ready { pid: me, places }, &fds).is_err() {
         std::process::exit(1);
     }
+    drop(fds);
+    drop(handles);
     let mut buf = Vec::new();
     loop {
         let errors: Vec<(u64, RawFd)> =
@@ -1009,16 +1414,19 @@ impl Kept {
     }
 }
 
+/// `capset`'s header, version 3 (two data blocks of effective, permitted, inheritable).
+#[repr(C)]
+struct CapHeader {
+    version: u32,
+    pid: i32,
+}
+
 /// Every capability gone, for good: the bounding set (an exec as root would take them back from it — this
 /// needs `CAP_SETPCAP`, which only a root keeper has), the ambient set, then effective, permitted and
-/// inheritable. tarae run as a user has none to drop; as root in a container its runs would hold root's.
+/// inheritable. tarae run as a user has none to drop; as root in a container its runs would hold root's. (A
+/// keeper born in namespaces has dropped them all already: `capabilities_dropped`.)
 fn drop_capabilities() {
-    #[repr(C)]
-    struct Header {
-        version: u32,
-        pid: i32,
-    }
-    let h = Header { version: 0x2008_0522, pid: 0 };
+    let h = CapHeader { version: 0x2008_0522, pid: 0 };
     let none = [0u32; 6];
     // SAFETY: plain prctls with integer arguments; capset with version 3's header and its two data blocks.
     unsafe {
@@ -1028,6 +1436,34 @@ fn drop_capabilities() {
         libc::prctl(libc::PR_CAP_AMBIENT, libc::PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0);
         libc::syscall(libc::SYS_capset, &raw const h, none.as_ptr());
     }
+}
+
+/// A birth's child in its user namespace (where it holds every capability, `CAP_SETPCAP` too) drops them all
+/// before its exec: each bounding-set bit up to `last` (an exec as the namespace's root would take them back
+/// from it), checked gone; the ambient set; effective, permitted and inheritable. Err: an errno. Raw calls only.
+///
+/// # Safety
+/// Plain calls on this process; a birth's child may make them.
+unsafe fn capabilities_dropped(last: libc::c_ulong) -> Result<(), i32> {
+    let h = CapHeader { version: 0x2008_0522, pid: 0 };
+    let none = [0u32; 6];
+    // SAFETY: as above.
+    unsafe {
+        for cap in 0..=last {
+            libc::prctl(libc::PR_CAPBSET_DROP, cap, 0, 0, 0);
+        }
+        for cap in 0..=last {
+            if libc::prctl(libc::PR_CAPBSET_READ, cap, 0, 0, 0) == 1 {
+                return Err(libc::EPERM);
+            }
+        }
+        if libc::prctl(libc::PR_CAP_AMBIENT, libc::PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0) != 0
+            || libc::syscall(libc::SYS_capset, &raw const h, none.as_ptr()) != 0
+        {
+            return Err(errno());
+        }
+    }
+    Ok(())
 }
 
 fn errno() -> i32 {
@@ -1049,8 +1485,9 @@ fn own_usage() -> (u64, u64) {
 /// A run's child, after the keeper's fork: its channel closed, dumpable again (finding 1: tarae takes its
 /// listener with `pidfd_getfd`, which a non-dumpable process refuses without a namespace of tarae's), a session
 /// of its own, its stdio, its folder, its name (what Landlock's audit names), every signal unblocked, its
-/// Landlock rules, its seccomp filter — served, its listener's number handed to tarae and one byte back — then
-/// the exec. A failure on the way is written on `error` (step, errno) and in its stderr, and it exits 127.
+/// Landlock rules, its seccomp filter — served, its listener's number handed to tarae and one byte back; held,
+/// one byte once tarae knows its pid — then the exec. A failure on the way is written on `error` (step, errno)
+/// and in its stderr, and it exits 127.
 fn child(run: &channel::Run, fds: &[OwnedFd], chan: RawFd, error: RawFd) -> ! {
     let fail = |step: Step, errno: i32| -> ! {
         let mut b = [step.code(); 5];
@@ -1090,22 +1527,39 @@ fn child(run: &channel::Run, fds: &[OwnedFd], chan: RawFd, error: RawFd) -> ! {
     if let Err(e) = crate::landlock::restrict_self(ruleset.as_fd()) {
         fail(Step::Landlock, e.raw_os_error().unwrap_or(libc::EIO));
     }
-    let mode = if run.served { crate::seccomp::Mode::Served } else { crate::seccomp::Mode::Plain };
+    let mode = match (run.served, run.own_net) {
+        (true, _) => crate::seccomp::Mode::Served,
+        (false, true) => crate::seccomp::Mode::OwnNetwork,
+        (false, false) => crate::seccomp::Mode::Plain,
+    };
     let listener = match crate::seccomp::apply(mode) {
         Ok(l) => l,
         Err(e) => fail(Step::Seccomp, e.raw_os_error().unwrap_or(libc::EIO)),
     };
-    if let (Some(l), Some(handoff)) = (&listener, fds.get(4)) {
+    let handoff = fds.get(4);
+    if let (Some(l), Some(handoff)) = (&listener, handoff) {
         let n = (l.as_raw_fd() as u32).to_le_bytes();
-        let mut back = [0u8];
-        // SAFETY: a write and a read of buffers we own on the handoff socket (neither is a call the filter
-        // hands to tarae: no address).
-        let ok = unsafe {
-            libc::write(handoff.as_raw_fd(), n.as_ptr().cast(), n.len()) == 4
-                && libc::read(handoff.as_raw_fd(), back.as_mut_ptr().cast(), 1) == 1
-        };
-        if !ok {
+        // SAFETY: a write of a buffer we own on the handoff socket (not a call the filter hands to tarae: no
+        // address).
+        if unsafe { libc::write(handoff.as_raw_fd(), n.as_ptr().cast(), n.len()) } != 4 {
             fail(Step::Handoff, errno());
+        }
+    }
+    // (a byte once tarae has its listener, served; one once tarae knows its pid, held — in either order)
+    let bytes = run.served as usize + run.held as usize;
+    if bytes > 0 {
+        let Some(handoff) = handoff else { fail(Step::Request, libc::EINVAL) };
+        let mut back = [0u8; 2];
+        let mut got = 0;
+        while got < bytes {
+            // SAFETY: a read into a buffer we own, within it.
+            let n = unsafe { libc::read(handoff.as_raw_fd(), back[got..].as_mut_ptr().cast(), bytes - got) };
+            match n {
+                n if n > 0 => got += n as usize,
+                0 => fail(Step::Handoff, libc::EPIPE),
+                _ if errno() == libc::EINTR => {}
+                _ => fail(Step::Handoff, errno()),
+            }
         }
     }
     drop(listener);
@@ -1118,6 +1572,49 @@ fn child(run: &channel::Run, fds: &[OwnedFd], chan: RawFd, error: RawFd) -> ! {
     // SAFETY: the program, argv and envp are NUL-terminated arrays of strings held above.
     unsafe { libc::execve(c(&run.program).as_ptr(), argv_p.as_ptr(), envp_p.as_ptr()) };
     fail(Step::Exec, errno())
+}
+
+/// Tests: tarae's number for the process a run of `k`'s calls `inner` (what `$!` or `$$` says inside a PID
+/// namespace) — the descendant of `k` whose `NSpid` ends with it; `inner` itself without one. Waits a second
+/// for it (it must be alive: a gone one has no `NSpid` to find).
+#[cfg(test)]
+pub(crate) fn outer_pid(k: &Keeper, inner: u32) -> u32 {
+    if !k.ns.pid {
+        return inner;
+    }
+    let below = |mut p: u32| {
+        for _ in 0..64 {
+            match crate::procs::read(p).map(|o| o.ppid) {
+                Some(pp) if pp == k.pid => return true,
+                Some(pp) if pp > 1 => p = pp,
+                _ => return false,
+            }
+        }
+        false
+    };
+    let end = Instant::now() + Duration::from_secs(1);
+    loop {
+        for e in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+            let Some(p) = e.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else { continue };
+            let status = std::fs::read_to_string(format!("/proc/{p}/status")).unwrap_or_default();
+            let nspid: Vec<&str> = status
+                .lines()
+                .find_map(|l| l.strip_prefix("NSpid:"))
+                .map(|v| v.split_whitespace().collect())
+                .unwrap_or_default();
+            if nspid.len() > 1 && nspid.last() == Some(&inner.to_string().as_str()) && below(p) {
+                return p;
+            }
+        }
+        assert!(Instant::now() < end, "no process {inner} below keeper {}", k.pid);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Tests: the keeper's number as its runs see it (their `$PPID`, a `stat`'s parent) — 1 in its PID namespace.
+#[cfg(test)]
+pub(crate) fn seen_by_runs(k: &Keeper) -> u32 {
+    if k.ns.pid { 1 } else { k.pid }
 }
 
 #[cfg(test)]
@@ -1133,10 +1630,21 @@ mod tests {
         }
     }
 
-    /// A keeper of a test's own, for a root no other test uses.
+    /// The namespaces this system gives a keeper (`tier::get`): every test's keeper is born in them, so each
+    /// test runs in the tier there is.
+    fn ns() -> Ns {
+        super::super::tier::get().ns
+    }
+
+    /// A keeper of a test's own, for a root no other test uses, in this system's namespaces.
     fn keeper(test: &str) -> Arc<Keeper> {
+        keeper_in(test, ns())
+    }
+
+    /// `keeper`, born with `ns`.
+    fn keeper_in(test: &str, ns: Ns) -> Arc<Keeper> {
         let root = std::env::temp_dir().join(format!("tarae-keeper-{}-{test}", std::process::id()));
-        Keeper::born(&root, None).expect("a keeper starts")
+        Keeper::born(&root, None, ns).expect("a keeper starts")
     }
 
     /// Whether the keeper is gone within `wait` — tarae told, and its process ended and reaped.
@@ -1188,7 +1696,7 @@ mod tests {
     ) -> (String, std::process::ExitStatus) {
         let mut cmd = std::process::Command::new("sh");
         cmd.args(["-c", script]);
-        let s = k.start(&cmd, &crate::landlock::thread_name(), rules.fd(), None).unwrap();
+        let s = k.start(&cmd, &crate::landlock::thread_name(), rules.fd(), RunNet::Plain).unwrap();
         let mut out = String::new();
         io::Read::read_to_string(&mut s.spawned.stdout.unwrap(), &mut out).unwrap();
         (out, crate::spawn::wait(s.spawned.pid).unwrap())
@@ -1233,9 +1741,9 @@ mod tests {
         assert_eq!(status.code(), Some(3), "its exit status");
         let mut cmd = std::process::Command::new("sh");
         cmd.args(["-c", "sleep 30 & echo $!; wait"]);
-        let s = k.start(&cmd, &crate::landlock::thread_name(), rules.fd(), None).unwrap();
+        let s = k.start(&cmd, &crate::landlock::thread_name(), rules.fd(), RunNet::Plain).unwrap();
         let mut lines = std::io::BufReader::new(s.spawned.stdout.unwrap()).lines();
-        let child: i32 = lines.next().unwrap().unwrap().trim().parse().unwrap();
+        let child = outer_pid(&k, lines.next().unwrap().unwrap().trim().parse().unwrap());
         let pid = s.spawned.pid;
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || tx.send(crate::spawn::wait(pid)));
@@ -1292,8 +1800,9 @@ mod tests {
         };
         let p = super::super::Policy::for_project(&env);
         let abi = crate::landlock::abi().unwrap();
-        let c = super::super::linux::confine(&p, abi, Err("not watched".into()), false).unwrap();
-        let k = keeper("served");
+        let k = keeper_in("served", super::super::tier::for_policy(&p));
+        let c = super::super::linux::confine(&p, abi, Err("not watched".into()), false, Some(&k), Ok(()))
+            .unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         let mut cmd = std::process::Command::new("bash");
         let script = "if : 3<>/dev/tcp/127.0.0.1/$P; then printf served; fi
@@ -1321,7 +1830,7 @@ mod tests {
         let k = keeper("leftovers");
         let (out, status) = sh_through(&k, &rules, "env -i setsid sleep 30 >/dev/null 2>&1 & echo $!");
         assert!(status.success(), "{out}");
-        let sleep: u32 = out.trim().parse().unwrap();
+        let sleep = outer_pid(&k, out.trim().parse().unwrap());
         let parent = || crate::procs::read(sleep).map(|o| o.ppid);
         let end = Instant::now() + Duration::from_secs(3);
         while parent() != Some(k.pid) && Instant::now() < end {
@@ -1345,10 +1854,11 @@ mod tests {
             unsafe { libc::kill(k.pid as i32, libc::SIGKILL) };
             assert!(gone_within(k, Duration::from_secs(2)), "it's gone");
         };
-        let k = ready(&root, Some("a key")).unwrap();
+        let k = ready(&root, Some("a key"), ns()).unwrap();
         let mut cmd = std::process::Command::new("sleep");
         cmd.arg("30");
-        let run = k.start(&cmd, &crate::landlock::thread_name(), rules.fd(), None).unwrap().spawned.pid;
+        let run =
+            k.start(&cmd, &crate::landlock::thread_name(), rules.fd(), RunNet::Plain).unwrap().spawned.pid;
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || tx.send(crate::spawn::wait(run).map_err(|e| e.to_string())));
         kill(&k);
@@ -1359,12 +1869,12 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(crate::procs::read(run).is_none_or(|o| o.zombie), "the run ended with it");
-        let again = ready(&root, Some("a key")).expect("made again");
+        let again = ready(&root, Some("a key"), ns()).expect("made again");
         assert_ne!(again.pid, k.pid);
         let (_, status) = sh_through(&again, &rules, "exit 0");
         assert!(status.success(), "a run of the new one goes");
         kill(&again);
-        let refused = ready(&root, Some("a key")).expect_err("not made a third time");
+        let refused = ready(&root, Some("a key"), ns()).expect_err("not made a third time");
         assert!(refused.contains("tarae stopped making it"), "{refused}");
     }
 
@@ -1403,7 +1913,7 @@ mod tests {
         let (tx, began) = std::sync::mpsc::channel();
         *lock(&SLOW_BIRTH) = Some((root.clone(), tx));
         let r = root.clone();
-        let birth = std::thread::spawn(move || ready(&r, Some("a key")));
+        let birth = std::thread::spawn(move || ready(&r, Some("a key"), ns()));
         began.recv_timeout(Duration::from_secs(5)).expect("its birth began");
         let at = Instant::now();
         let _ = of(None);
@@ -1427,7 +1937,7 @@ mod tests {
         cmd.args(["-c", "trap '' TERM; echo ready; exec sleep 30"]);
         let mut outs = Vec::new();
         for k in &keepers {
-            let s = k.start(&cmd, &crate::landlock::thread_name(), rules.fd(), None).unwrap();
+            let s = k.start(&cmd, &crate::landlock::thread_name(), rules.fd(), RunNet::Plain).unwrap();
             let mut lines = std::io::BufReader::new(s.spawned.stdout.unwrap()).lines();
             assert_eq!(lines.next().unwrap().unwrap(), "ready", "TERM ignored from now");
             outs.push(lines);
@@ -1448,10 +1958,10 @@ mod tests {
         use std::io::BufRead;
         let Some(rules) = open_rules("a_key_change_supersedes_the_keeper") else { return };
         let root = std::env::temp_dir().join(format!("tarae-keeper-superseded-{}", std::process::id()));
-        let old = ready(&root, Some("key 1")).unwrap();
+        let old = ready(&root, Some("key 1"), ns()).unwrap();
         let (out, status) = sh_through(&old, &rules, "setsid sleep 30 >/dev/null 2>&1 & echo $!");
         assert!(status.success(), "{out}");
-        let left: u32 = out.trim().parse().unwrap();
+        let left = outer_pid(&old, out.trim().parse().unwrap());
         let end = Instant::now() + Duration::from_secs(3);
         while crate::procs::read(left).map(|o| o.ppid) != Some(old.pid) && Instant::now() < end {
             std::thread::sleep(Duration::from_millis(20));
@@ -1459,10 +1969,10 @@ mod tests {
         assert_eq!(old.leftovers(), [left], "left by its run");
         let mut cmd = std::process::Command::new("sh");
         cmd.args(["-c", "echo going; exec sleep 30"]);
-        let going = old.start(&cmd, &crate::landlock::thread_name(), rules.fd(), None).unwrap();
+        let going = old.start(&cmd, &crate::landlock::thread_name(), rules.fd(), RunNet::Plain).unwrap();
         let mut lines = std::io::BufReader::new(going.spawned.stdout.unwrap()).lines();
         assert_eq!(lines.next().unwrap().unwrap(), "going");
-        let new = ready(&root, Some("key 2")).unwrap();
+        let new = ready(&root, Some("key 2"), ns()).unwrap();
         assert_ne!(new.pid, old.pid, "a new keeper for the new key");
         let ended = |pid: u32, within: Duration| {
             let end = Instant::now() + within;
@@ -1473,12 +1983,12 @@ mod tests {
         };
         assert!(ended(left, LEFT_TERM * 3), "what its runs left ended now");
         assert!(!old.is_gone(), "kept for its run going");
-        let refused = old.start(&cmd, &crate::landlock::thread_name(), rules.fd(), None).err();
+        let refused = old.start(&cmd, &crate::landlock::thread_name(), rules.fd(), RunNet::Plain).err();
         assert!(refused.is_some_and(|e| e.to_string().contains("replaced")), "no run more");
         crate::dap::term_group(going.spawned.pid);
         crate::spawn::wait(going.spawned.pid).unwrap();
         assert!(gone_within(&old, END_WITHIN), "ended after its last run");
-        let third = ready(&root, Some("key 3")).unwrap();
+        let third = ready(&root, Some("key 3"), ns()).unwrap();
         assert!(gone_within(&new, END_WITHIN), "an idle one superseded ends at once");
         third.end();
     }
@@ -1518,7 +2028,7 @@ mod tests {
         // SAFETY: a call that fails before it does anything (no arguments it reads).
         let clone3 = unsafe { libc::syscall(libc::SYS_clone3, std::ptr::null::<CloneArgs>(), 0usize) };
         let errno = if clone3 < 0 { errno() } else { 0 };
-        let born = match Keeper::born(Path::new("/tarae-keeper-clone3"), None) {
+        let born = match Keeper::born(Path::new("/tarae-keeper-clone3"), None, ns()) {
             Ok(k) => {
                 k.end();
                 "yes".to_string()
@@ -1541,7 +2051,7 @@ mod tests {
     #[test]
     fn the_sessions_keeper_is_known() {
         let root = std::env::temp_dir().join(format!("tarae-keeper-known-{}", std::process::id()));
-        let k = ready(&root, Some("a key")).unwrap();
+        let k = ready(&root, Some("a key"), ns()).unwrap();
         let ed = crate::editor::Editor::new(crate::config::Config::default());
         let known = ed.procs_known();
         let line = known.iter().find(|n| n.pid == k.pid).expect("a line for it");
@@ -1552,12 +2062,31 @@ mod tests {
         assert!(!known.iter().any(|n| n.pid == k.pid), "gone once it ended");
     }
 
-    /// A project's policy with these ports open, and its Landlock rules (`linux::confine`): (the policy, the
-    /// rules, the project).
-    fn project(name: &str, ports: Vec<u16>) -> (super::super::Policy, super::super::linux::Confine, PathBuf) {
+    /// A project's policy with these ports open and these (empty) files, and its Landlock rules for `keeper`'s
+    /// runs (`linux::confine`), served as this system serves them: (the policy, the rules, the project).
+    fn project_in(
+        name: &str,
+        ports: Vec<u16>,
+        keeper: Option<&Keeper>,
+        files: &[&str],
+    ) -> (super::super::Policy, super::super::linux::Confine, PathBuf) {
+        project_served(name, ports, keeper, files, super::super::linux::served_here())
+    }
+
+    /// `project_in`, served or not as `serve` says.
+    fn project_served(
+        name: &str,
+        ports: Vec<u16>,
+        keeper: Option<&Keeper>,
+        files: &[&str],
+        serve: Result<(), String>,
+    ) -> (super::super::Policy, super::super::linux::Confine, PathBuf) {
         let root = std::env::temp_dir().join(format!("tarae-keeper-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let root = std::fs::canonicalize(&root).unwrap();
+        for f in files {
+            std::fs::write(root.join(f), "").unwrap();
+        }
         let env = super::super::Env {
             root: root.clone(),
             tmp: Some(super::super::profile_path(&std::env::temp_dir())),
@@ -1567,7 +2096,8 @@ mod tests {
         };
         let p = super::super::Policy::for_project(&env);
         let abi = crate::landlock::abi().unwrap();
-        let c = super::super::linux::confine(&p, abi, Err("not watched".into()), false).unwrap();
+        let c =
+            super::super::linux::confine(&p, abi, Err("not watched".into()), false, keeper, serve).unwrap();
         (p, c, root)
     }
 
@@ -1590,9 +2120,17 @@ mod tests {
         s.lines().find_map(|l| l.strip_prefix("VmRSS:")).map(|v| v.trim().to_string()).unwrap_or_default()
     }
 
+    /// The namespaces to measure in, A/B on one kernel: none, and this system's when it has any.
+    fn measured_in() -> Vec<Ns> {
+        let mut each = vec![Ns::NONE];
+        each.extend(Some(ns()).filter(|n| n.user));
+        each
+    }
+
     /// M1 (`docs/design/sandbox-keeper.md` §Measured): a sandboxed `true`, from asking to its exit status,
-    /// median of 50 — through the keeper, plain and served (the confining thread and `posix_spawn` it replaced
-    /// were measured beside it before they went: the doc has both).
+    /// median of 50 — through the keeper, plain and served, without namespaces and in this system's (the
+    /// confining thread and `posix_spawn` it replaced were measured beside it before they went: the doc has
+    /// both).
     #[test]
     fn perf_a_run_through_the_keeper() {
         if crate::test_results::unoptimized("sandbox::keeper::tests::perf_a_run_through_the_keeper") {
@@ -1601,71 +2139,110 @@ mod tests {
         if open_rules("perf_a_run_through_the_keeper").is_none() {
             return;
         }
-        let (p, c, root) = project("perf", Vec::new());
-        let k = keeper("perf");
-        let mut cmd = std::process::Command::new("true");
-        cmd.current_dir(&root);
         let served = super::super::supervisor::unavailable().is_none();
-        let policy = Arc::new(p);
-        let (tx, _rx) = std::sync::mpsc::channel();
-        let keeper_plain = median_ms(50, || {
-            let s = k.start(&cmd, &crate::landlock::thread_name(), c.rules_fd(), None).unwrap();
-            crate::spawn::wait(s.spawned.pid).unwrap();
-        });
-        let keeper_served = served.then(|| {
-            median_ms(50, || {
-                let s = k
-                    .start_served(
-                        &cmd,
-                        &crate::landlock::thread_name(),
-                        c.rules_fd(),
-                        policy.clone(),
-                        tx.clone(),
-                    )
-                    .unwrap();
+        let mut said = Vec::new();
+        for ns in measured_in() {
+            let k = keeper_in("perf", ns);
+            let (p, c, root) = project_in("perf", Vec::new(), Some(&k), &[]);
+            let (_, plain, _) =
+                project_served("perf", Vec::new(), Some(&k), &[], Err("measured plain".into()));
+            let mut cmd = std::process::Command::new("true");
+            cmd.current_dir(&root);
+            let policy = Arc::new(p);
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let keeper_plain = median_ms(50, || {
+                let s = k.start(&cmd, &crate::landlock::thread_name(), plain.rules_fd(), plain.net).unwrap();
                 crate::spawn::wait(s.spawned.pid).unwrap();
-            })
-        });
-        let ms = |m: Option<f64>| m.map_or("not served here".into(), |m| format!("{m:.2} ms"));
+            });
+            let keeper_served = served.then(|| {
+                median_ms(50, || {
+                    let s = k
+                        .start_served(
+                            &cmd,
+                            &crate::landlock::thread_name(),
+                            c.rules_fd(),
+                            policy.clone(),
+                            tx.clone(),
+                        )
+                        .unwrap();
+                    crate::spawn::wait(s.spawned.pid).unwrap();
+                })
+            });
+            let ms = |m: Option<f64>| m.map_or("not served here".into(), |m| format!("{m:.2} ms"));
+            said.push(format!("{}: plain {keeper_plain:.2} ms, served {}", k.said(), ms(keeper_served)));
+            k.end();
+            std::fs::remove_dir_all(&root).ok();
+        }
         let line = format!(
-            "M1, `true` asked to its status, median of 50 (this process {}): keeper plain {keeper_plain:.2} ms, \
-             served {}\n",
+            "M1, `true` asked to its status, median of 50 (this process {}) — {}\n",
             rss(),
-            ms(keeper_served),
+            said.join(" · ")
         );
         let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
-        k.end();
-        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// `/proc/meminfo`'s `MemAvailable` and `Slab`, in KB.
+    fn meminfo() -> (i64, i64) {
+        let m = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
+        let kb = |name: &str| -> i64 {
+            m.lines()
+                .find_map(|l| l.strip_prefix(name))
+                .and_then(|v| v.trim().trim_end_matches("kB").trim().parse().ok())
+                .unwrap_or(0)
+        };
+        (kb("MemAvailable:"), kb("Slab:"))
     }
 
     /// A keeper's birth to `Ready`, median of 20, and an idle keeper's own Rss and Pss (its `Usage`) with 1, 4
-    /// and 8 at once (M3).
+    /// and 8 at once (M3) — without namespaces and in this system's; with 8, what the system's `MemAvailable`
+    /// and `Slab` moved by (the kernel's share — namespaces, a mount table's copy — which Pss doesn't count; a
+    /// rough bound: anything else on the machine moves them too).
     #[test]
     fn perf_a_keepers_birth_and_memory() {
         if crate::test_results::unoptimized("sandbox::keeper::tests::perf_a_keepers_birth_and_memory") {
             return;
         }
         let root = std::env::temp_dir().join(format!("tarae-keeper-birth-{}", std::process::id()));
-        let mut born = Vec::new();
-        let birth = median_ms(20, || born.push(Keeper::born(&root, None).unwrap()));
-        for k in born.drain(..) {
-            k.end();
-        }
-        let mut said = Vec::new();
-        for n in [1, 4, 8] {
-            let ks: Vec<Arc<Keeper>> = (0..n).map(|_| Keeper::born(&root, None).unwrap()).collect();
-            std::thread::sleep(Duration::from_millis(200));
-            let used: Vec<(u64, u64)> = ks.iter().filter_map(|k| k.usage()).collect();
-            let (rss, pss) = used.iter().fold((0, 0), |a, u| (a.0 + u.0, a.1 + u.1));
-            said.push(format!("{n}: Rss {rss} KB, Pss {pss} KB in all"));
-            for k in ks {
+        let mut lines = Vec::new();
+        for ns in measured_in() {
+            let mut born = Vec::new();
+            let birth = median_ms(20, || born.push(Keeper::born(&root, None, ns).unwrap()));
+            for k in born.drain(..) {
                 k.end();
             }
+            let mut said = Vec::new();
+            for n in [1, 4, 8] {
+                let before = meminfo();
+                let ks: Vec<Arc<Keeper>> = (0..n).map(|_| Keeper::born(&root, None, ns).unwrap()).collect();
+                std::thread::sleep(Duration::from_millis(200));
+                let after = meminfo();
+                let used: Vec<(u64, u64)> = ks.iter().filter_map(|k| k.usage()).collect();
+                let (rss, pss) = used.iter().fold((0, 0), |a, u| (a.0 + u.0, a.1 + u.1));
+                let system = match n {
+                    8 => {
+                        format!(
+                            " (MemAvailable {:+} KB, Slab {:+} KB)",
+                            after.0 - before.0,
+                            after.1 - before.1
+                        )
+                    }
+                    _ => String::new(),
+                };
+                said.push(format!("{n}: Rss {rss} KB, Pss {pss} KB in all{system}"));
+                for k in ks {
+                    k.end();
+                }
+            }
+            lines.push(format!(
+                "{}: birth {birth:.2} ms · idle keepers' own use — {}",
+                ns.said(),
+                said.join(" · ")
+            ));
         }
         let line = format!(
-            "a keeper's birth to Ready, median of 20 (this process {}): {birth:.2} ms · idle keepers' own use — {}\n",
+            "a keeper's birth to Ready, median of 20 (this process {}) — {}\n",
             rss(),
-            said.join(" · ")
+            lines.join(" ‖ ")
         );
         let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
     }
@@ -1690,7 +2267,10 @@ mod tests {
             return;
         }
         ordinary_user();
-        let k = keeper("dumpable");
+        // (a keeper with no namespaces: in a user namespace this process, its owner, holds every capability and
+        // reads it anyway — the flag is the same in every tier; there the runs inside are kept off by having no
+        // capability, and Landlock's ptrace rule)
+        let k = keeper_in("dumpable", Ns::NONE);
         let mut mine = std::process::Command::new("sleep").arg("30").spawn().unwrap();
         let read = |pid: u32| {
             let environ = tried(std::fs::read(format!("/proc/{pid}/environ")));
@@ -1708,14 +2288,22 @@ mod tests {
 
     /// The test binary run on the ignored scene `name` (`env` set besides): what it printed after `scene: `.
     fn scene(name: &str, env: &[(&str, &str)]) -> String {
-        let exe = std::env::current_exe().unwrap();
-        let out = std::process::Command::new(exe)
-            .args(["--exact", &format!("sandbox::keeper::tests::{name}"), "--ignored", "--nocapture"])
+        said_by(name, scene_cmd(name, env))
+    }
+
+    /// The command `scene` runs.
+    fn scene_cmd(name: &str, env: &[(&str, &str)]) -> std::process::Command {
+        let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+        cmd.args(["--exact", &format!("sandbox::keeper::tests::{name}"), "--ignored", "--nocapture"])
             .args(["--test-threads=1"])
             .env(SCENE, "1")
-            .envs(env.iter().copied())
-            .output()
-            .unwrap();
+            .envs(env.iter().copied());
+        cmd
+    }
+
+    /// What `cmd` — scene `name`'s — printed after `scene: `.
+    fn said_by(name: &str, mut cmd: std::process::Command) -> String {
+        let out = cmd.output().unwrap();
         let text = String::from_utf8_lossy(&out.stdout).into_owned();
         let err = String::from_utf8_lossy(&out.stderr);
         text.lines()
@@ -1726,12 +2314,21 @@ mod tests {
     /// As root (a container's tests), this process becomes `nobody` — every thread (glibc's `setresuid`), every
     /// capability gone: an ordinary user, as tarae runs. A scene's only: it changes the whole process.
     fn ordinary_user() {
+        ordinary_user_as(65534);
+    }
+
+    /// `ordinary_user`, as uid and gid `id` (1000 for the tier scenes: inside a user namespace an unmapped id
+    /// shows as 65534, so with 65534 a working map couldn't be told from none). Dumpable again after: changing
+    /// its ids made it non-dumpable, which a process started as that user isn't — and a non-dumpable tarae's
+    /// keeper has its `/proc` files root's, its id maps unwritable (`tier::why` says so).
+    fn ordinary_user_as(id: u32) {
         // SAFETY: plain calls on this process (a scene's own).
         unsafe {
             if libc::geteuid() == 0 {
                 assert_eq!(libc::setgroups(0, std::ptr::null()), 0, "setgroups");
-                assert_eq!(libc::setresgid(65534, 65534, 65534), 0, "setresgid");
-                assert_eq!(libc::setresuid(65534, 65534, 65534), 0, "setresuid");
+                assert_eq!(libc::setresgid(id, id, id), 0, "setresgid");
+                assert_eq!(libc::setresuid(id, id, id), 0, "setresuid");
+                assert_eq!(libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0), 0, "dumpable");
             }
         }
     }
@@ -1742,5 +2339,644 @@ mod tests {
             Ok(_) => "ok".into(),
             Err(e) => e.raw_os_error().map_or_else(|| e.to_string(), |n| n.to_string()),
         }
+    }
+
+    // ── the session's namespaces ───────────────────────────────────────────────────────────────────────
+
+    /// Whether this system gives a keeper the session's namespaces — else says the test skips itself, with the
+    /// probe's reason (on a machine without them that line is the proof the reason is right). A machine said to
+    /// give them (`TARAE_EXPECT_TIER`, as `the_probe_here` checks) fails instead: a birth broken into tier C
+    /// isn't a skip there.
+    fn namespaced(test: &str) -> bool {
+        if ns().user {
+            return true;
+        }
+        let why = super::super::tier::get().short.clone().unwrap_or_default();
+        if let Ok(want) = std::env::var("TARAE_EXPECT_TIER").map(|w| w.trim().to_string())
+            && ["A+", "A", "B+", "B"].contains(&want.as_str())
+        {
+            panic!("{test}: tier {want} expected here, the probe found none — {why}");
+        }
+        let line = format!(
+            "{}sandbox::keeper::tests::{test} — no namespaces here: {why}\n",
+            crate::test_results::SELF_SKIP
+        );
+        let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+        false
+    }
+
+    /// What tells the test binary it's a run's program (`helper`), and which.
+    const HELPER: &str = "TARAE_KEEPER_HELPER";
+
+    /// The test binary as a run of `k`'s under `rules` (made for `net`), in `cwd`, on `helper` doing `what` (with
+    /// `env` set): what it printed after `helper: `.
+    fn helper_through(
+        k: &Keeper,
+        rules: BorrowedFd,
+        net: RunNet,
+        what: &str,
+        env: &[(&str, &str)],
+        cwd: Option<&Path>,
+    ) -> String {
+        let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+        cmd.args([
+            "--exact",
+            "sandbox::keeper::tests::helper",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(HELPER, what)
+        .envs(env.iter().copied());
+        if let Some(d) = cwd {
+            cmd.current_dir(d);
+        }
+        let s = k.start(&cmd, &crate::landlock::thread_name(), rules, net).unwrap();
+        let (mut out, mut err) = (String::new(), String::new());
+        io::Read::read_to_string(&mut s.spawned.stdout.unwrap(), &mut out).unwrap();
+        io::Read::read_to_string(&mut s.spawned.stderr.unwrap(), &mut err).unwrap();
+        crate::spawn::wait(s.spawned.pid).unwrap();
+        out.lines()
+            .find_map(|l| l.split_once("helper: ").map(|(_, s)| s.to_string()))
+            .unwrap_or_else(|| panic!("the helper said nothing:\n{out}\n{err}"))
+    }
+
+    /// A run's program in these tests: the test binary, doing what `HELPER` says — `pty`: a pty opened, its
+    /// device and what `/dev/pts` lists (`dev=<st_dev> listed=<entries>`); `mounts`: a pty, a file made and
+    /// removed in `/dev/shm`, `/proc/self/status` read, `$TARAE_PROTECTED` opened to write (each `ok` or its
+    /// errno); `loopback`: a listener of its own on `127.0.0.1` reached, and `127.0.0.1:$TARAE_PORT`.
+    #[test]
+    #[ignore = "a run's program in the keeper's tests (helper_through)"]
+    fn helper() {
+        use std::os::unix::fs::MetadataExt;
+        let Ok(what) = std::env::var(HELPER) else { return };
+        let said = match what.as_str() {
+            "pty" => match pty_opened() {
+                Ok((_m, _s, path)) => {
+                    let dev = std::fs::metadata(&path).map(|m| m.dev()).unwrap_or(0);
+                    let mut listed: Vec<String> = std::fs::read_dir("/dev/pts")
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                        .map(|e| e.file_name().to_string_lossy().into_owned())
+                        .collect();
+                    listed.sort();
+                    format!("dev={dev} listed={}", listed.join(","))
+                }
+                Err(e) => format!("pty={}", tried::<()>(Err(e))),
+            },
+            "mounts" => {
+                let shm = format!("/dev/shm/tarae-helper-{}", std::process::id());
+                let made = std::fs::write(&shm, "x").and_then(|()| std::fs::remove_file(&shm));
+                let protected = std::env::var("TARAE_PROTECTED").unwrap_or_default();
+                format!(
+                    "pty={} shm={} proc={} protected={}",
+                    tried(pty_opened()),
+                    tried(made),
+                    tried(std::fs::read_to_string("/proc/self/status")),
+                    tried(std::fs::OpenOptions::new().write(true).open(protected)),
+                )
+            }
+            "loopback" => {
+                let own = (|| {
+                    let l = std::net::TcpListener::bind("127.0.0.1:0")?;
+                    std::net::TcpStream::connect(l.local_addr()?).map(drop)
+                })();
+                let port: u16 = std::env::var("TARAE_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(9);
+                format!(
+                    "own={} tarae's={}",
+                    tried(own),
+                    tried(std::net::TcpStream::connect(("127.0.0.1", port)))
+                )
+            }
+            other => format!("no helper {other}"),
+        };
+        println!("helper: {said}");
+    }
+
+    /// A pty opened (`/dev/ptmx`): its master, its slave, the slave's path.
+    fn pty_opened() -> io::Result<(OwnedFd, OwnedFd, String)> {
+        // SAFETY: plain calls on descriptors this makes and owns; a name buffer of its size.
+        unsafe {
+            let m = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC);
+            if m < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let m = OwnedFd::from_raw_fd(m);
+            let mut name = [0 as libc::c_char; 64];
+            if libc::grantpt(m.as_raw_fd()) != 0
+                || libc::unlockpt(m.as_raw_fd()) != 0
+                || libc::ptsname_r(m.as_raw_fd(), name.as_mut_ptr(), name.len()) != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            let s = libc::open(name.as_ptr(), libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC);
+            if s < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let path = std::ffi::CStr::from_ptr(name.as_ptr()).to_string_lossy().into_owned();
+            Ok((m, OwnedFd::from_raw_fd(s), path))
+        }
+    }
+
+    /// D5: inside the session's user namespace a run is the user tarae is — its uid and gid tarae's own, each
+    /// mapped to itself (not to root), `setgroups` denied. As uid 1000 (`ids_scene`).
+    #[test]
+    fn a_run_keeps_the_users_own_ids() {
+        if !namespaced("a_run_keeps_the_users_own_ids") {
+            return;
+        }
+        let said = scene("ids_scene", &[]);
+        let (me, run) = said.split_once(" run=").expect("its two halves");
+        let id = me.strip_prefix("me=").unwrap().split_once('/').unwrap();
+        let (u, g) = (id.0, id.1);
+        assert_ne!(u, "65534", "an id a map can be told from no map with");
+        assert_eq!(run, format!("{u}/{g} {u} {u} 1 {g} {g} 1 deny"), "{said}");
+    }
+
+    /// `a_run_keeps_the_users_own_ids`'s scene, as uid and gid 1000: `scene: me=<uid>/<gid> run=<its id -u>/<id
+    /// -g> <uid_map> <gid_map> <setgroups>`.
+    #[test]
+    #[ignore = "run by a_run_keeps_the_users_own_ids in a process of its own"]
+    fn ids_scene() {
+        if std::env::var_os(SCENE).is_none() {
+            return;
+        }
+        ordinary_user_as(1000);
+        let Some(rules) = open_rules("ids_scene") else { return };
+        let k = keeper("ids");
+        let script = "echo $(id -u)/$(id -g) $(cat /proc/self/uid_map) $(cat /proc/self/gid_map) \
+                      $(cat /proc/self/setgroups)";
+        let (out, status) = sh_through(&k, &rules, script);
+        assert!(status.success(), "{out}");
+        // SAFETY: plain calls with no arguments.
+        let (u, g) = unsafe { (libc::getuid(), libc::getgid()) };
+        println!("scene: me={u}/{g} run={}", out.trim());
+        k.end();
+    }
+
+    /// D12: where a fresh `/proc` can't be mounted — here a `tmpfs` over `/proc/sys`, made in a user and mount
+    /// namespace of the scene's own, so locked in the keeper's copy as Docker's masks are (`masked_proc_scene`)
+    /// — the probe finds no PID namespace (never the host's `/proc` under one), saying why, and a run's `NSpid`
+    /// holds one number.
+    #[test]
+    fn no_pid_namespace_without_its_own_proc() {
+        use std::os::unix::process::CommandExt;
+        if !namespaced("no_pid_namespace_without_its_own_proc") {
+            return;
+        }
+        let mut cmd = scene_cmd("masked_proc_scene", &[]);
+        // SAFETY: plain calls with no arguments.
+        let (u, g) = unsafe { (libc::geteuid(), libc::getegid()) };
+        let maps: Vec<(&'static std::ffi::CStr, Vec<u8>)> = vec![
+            (c"/proc/self/setgroups", b"deny".to_vec()),
+            (c"/proc/self/uid_map", format!("{u} {u} 1").into_bytes()),
+            (c"/proc/self/gid_map", format!("{g} {g} 1").into_bytes()),
+        ];
+        // SAFETY: in the forked child before its exec: raw calls only, on strings made before the fork.
+        unsafe {
+            cmd.pre_exec(move || {
+                let null = std::ptr::null::<libc::c_char>();
+                if libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNS) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                for (path, map) in &maps {
+                    let fd = libc::open(path.as_ptr(), libc::O_WRONLY);
+                    if fd < 0 || libc::write(fd, map.as_ptr().cast(), map.len()) != map.len() as isize {
+                        return Err(io::Error::last_os_error());
+                    }
+                    libc::close(fd);
+                }
+                if libc::mount(null, c"/".as_ptr(), null, libc::MS_REC | libc::MS_PRIVATE, std::ptr::null())
+                    != 0
+                    || libc::mount(
+                        c"tmpfs".as_ptr(),
+                        c"/proc/sys".as_ptr(),
+                        c"tmpfs".as_ptr(),
+                        0,
+                        std::ptr::null(),
+                    ) != 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let said = said_by("masked_proc_scene", cmd);
+        assert!(said.contains("(user net ipc mnt) nspid=1 — "), "{said}");
+        assert!(said.contains("a fresh /proc can't be mounted here"), "{said}");
+    }
+
+    /// `no_pid_namespace_without_its_own_proc`'s scene, in the user and mount namespace its test made:
+    /// `scene: <tier> (<namespaces>) nspid=<how many numbers a run's NSpid holds> — <why>`.
+    #[test]
+    #[ignore = "run by no_pid_namespace_without_its_own_proc in a process of its own"]
+    fn masked_proc_scene() {
+        if std::env::var_os(SCENE).is_none() {
+            return;
+        }
+        let p = super::super::tier::get();
+        let Some(rules) = open_rules("masked_proc_scene") else { return };
+        let k = keeper("masked");
+        let (out, _) = sh_through(&k, &rules, "grep NSpid /proc/self/status");
+        let n = out.split_whitespace().count().saturating_sub(1);
+        let why = p.short.clone().unwrap_or_default();
+        println!("scene: {} ({}) nspid={n} — {why}", p.tier().said(), p.ns.said());
+        k.end();
+    }
+
+    /// A run sees only its session: in its `/proc` the keeper (1) and its own, in a numbering of their own —
+    /// not this process; in `/proc/net/dev` only `lo` (a policy that opens nothing: the session's own
+    /// network); in `/proc/sysvipc/shm` not the segment this process made (the session's own IPC).
+    #[test]
+    fn a_run_sees_only_its_sessions_processes() {
+        if !namespaced("a_run_sees_only_its_sessions_processes") {
+            return;
+        }
+        let Some(rules) = open_rules("a_run_sees_only_its_sessions_processes") else { return };
+        let k = keeper("sees");
+        // SAFETY: a plain call; the segment is removed below.
+        let shm = unsafe { libc::shmget(libc::IPC_PRIVATE, 4096, libc::IPC_CREAT | 0o600) };
+        assert!(shm >= 0, "{}", io::Error::last_os_error());
+        let listed =
+            |text: &str| text.lines().skip(1).any(|l| l.split_whitespace().nth(1) == Some(&*shm.to_string()));
+        let ours = std::fs::read_to_string("/proc/sysvipc/shm").unwrap();
+        let script = r#"ls /proc | grep -E '^[0-9]+$' | tr '\n' ' '; echo
+            tail -n +3 /proc/net/dev | cut -d: -f1 | tr -d ' ' | tr '\n' ' '; echo
+            cat /proc/sysvipc/shm"#;
+        let (out, status) = sh_through(&k, &rules, script);
+        // SAFETY: removes the segment made above.
+        unsafe { libc::shmctl(shm, libc::IPC_RMID, std::ptr::null_mut()) };
+        assert!(status.success(), "{out}");
+        assert!(listed(&ours), "this process sees its own segment: {ours}");
+        let mut lines = out.lines();
+        let pids: Vec<u32> = lines.next().unwrap().split_whitespace().map(|p| p.parse().unwrap()).collect();
+        let devs = lines.next().unwrap().trim().to_string();
+        let ipc = lines.collect::<Vec<_>>().join("\n");
+        if k.ns.pid {
+            assert!(pids.contains(&1), "the keeper, PID 1: {pids:?}");
+            assert!(!pids.contains(&std::process::id()), "not this process: {pids:?}");
+            assert!(pids.iter().all(|p| *p < 64), "a numbering of the session's own: {pids:?}");
+        }
+        if k.ns.net {
+            assert_eq!(devs, "lo", "only its loopback");
+        }
+        assert!(!listed(&ipc), "not this process's segment: {ipc}");
+        k.end();
+    }
+
+    /// D10 under Landlock: the session's own `/dev/pts` and `/dev/shm` sit over this system's, where a rule
+    /// isn't reached through them (measured: `target/sb/step3-notes.md`), so a run's rules grant the devices on
+    /// the keeper's own places too (the handles it gave with `Ready` — `linux::session_devices`). Under a
+    /// project's real rules (`linux::confine`) a pty, a file made and removed in `/dev/shm` and `/proc/self`
+    /// read all work — and a protected file is still refused: denied, not hidden.
+    #[test]
+    fn the_session_mounts_keep_landlocks_rules() {
+        if !namespaced("the_session_mounts_keep_landlocks_rules")
+            || open_rules("the_session_mounts_keep_landlocks_rules").is_none()
+        {
+            return;
+        }
+        let k = keeper("mounts");
+        let plain = Err("not served".into());
+        let (_p, c, root) = project_served("mounts", Vec::new(), Some(&k), &["Cargo.toml"], plain);
+        let granted: Vec<String> = c.granted().iter().map(|(p, _)| p.display().to_string()).collect();
+        for own in ["session:/dev/pts", "session:/dev/pts/ptmx", "session:/dev/shm"] {
+            assert!(granted.iter().any(|g| g == own), "{own} granted: {granted:?}");
+        }
+        let protected = root.join("Cargo.toml");
+        let env = [("TARAE_PROTECTED", protected.to_str().unwrap())];
+        let said = helper_through(&k, c.rules_fd(), c.net, "mounts", &env, Some(&root));
+        assert_eq!(said, format!("pty=ok shm=ok proc=ok protected={}", libc::EACCES));
+        k.end();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A project in `/dev/shm` gets no `/dev/shm` of its own for its session (a private one would hide it from
+    /// its runs): its keeper is born without that mount and says so; a run there writes in the project, and
+    /// this process sees what it wrote.
+    #[test]
+    fn a_project_in_dev_shm_shares_dev_shm() {
+        if !namespaced("a_project_in_dev_shm_shares_dev_shm") {
+            return;
+        }
+        let Ok(abi) = crate::landlock::abi() else { return };
+        let root = std::path::PathBuf::from(format!("/dev/shm/tarae-keeper-shm-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = std::fs::canonicalize(&root).unwrap();
+        let env = super::super::Env {
+            root: root.clone(),
+            tmp: Some(super::super::profile_path(&std::env::temp_dir())),
+            run_env: super::super::run_env_of(&super::super::Here::now(), &crate::llm::LlmConfig::default()),
+            ..Default::default()
+        };
+        let p = super::super::Policy::for_project(&env);
+        let wanted = super::super::tier::for_policy(&p);
+        assert!(super::super::tier::in_shm(&p) && !wanted.shm && wanted.user, "{wanted:?}");
+        let k = keeper_in("shm", wanted);
+        assert!(k.said().contains("/dev/shm shared"), "{}", k.said());
+        let plain = Err("not served".into());
+        let c =
+            super::super::linux::confine(&p, abi, Err("not watched".into()), false, Some(&k), plain).unwrap();
+        let granted: Vec<String> = c.granted().iter().map(|(p, _)| p.display().to_string()).collect();
+        assert!(
+            !granted.iter().any(|g| g == "session:/dev/shm"),
+            "this system's, not granted whole: {granted:?}"
+        );
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "printf made > made"]).current_dir(&root);
+        let s = k.start(&cmd, &crate::landlock::thread_name(), c.rules_fd(), c.net).unwrap();
+        let status = crate::spawn::wait(s.spawned.pid).unwrap();
+        assert!(status.success() && std::fs::read_to_string(root.join("made")).is_ok_and(|m| m == "made"));
+        k.end();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// D10: a run's pty comes from the session's own `devpts` — another instance than this process's (its device
+    /// differs), which lists only `ptmx` and the run's own, not the two this process holds.
+    #[test]
+    fn a_pty_comes_from_the_sessions_devpts() {
+        use std::os::unix::fs::MetadataExt;
+        if !namespaced("a_pty_comes_from_the_sessions_devpts") {
+            return;
+        }
+        let Some(rules) = open_rules("a_pty_comes_from_the_sessions_devpts") else { return };
+        let _mine = (pty_opened().expect("a pty of this process's"), pty_opened().expect("and another"));
+        let ours = std::fs::metadata("/dev/pts").unwrap().dev();
+        let ours_listed = std::fs::read_dir("/dev/pts").unwrap().count();
+        assert!(ours_listed >= 3, "ptmx and this process's two");
+        let k = keeper("pty");
+        let said = helper_through(&k, rules.fd(), RunNet::Plain, "pty", &[], None);
+        let (dev, listed) = said.strip_prefix("dev=").and_then(|s| s.split_once(" listed=")).expect(&said);
+        assert_ne!(dev.parse::<u64>().unwrap(), ours, "another devpts: {said}");
+        assert_eq!(listed.split(',').count(), 2, "ptmx and its own: {said}");
+        k.end();
+    }
+
+    /// A run can't end or stop its keeper by a signal: in its PID namespace the keeper is PID 1, which takes no
+    /// signal it has no handler for; without one, from Landlock ABI 6 the signal scope keeps a run off it. TERM,
+    /// INT, HUP, KILL and STOP to its parent (the keeper) — and the keeper still runs the next.
+    #[test]
+    fn a_command_cant_signal_the_keeper() {
+        let Some(rules) = open_rules("a_command_cant_signal_the_keeper") else { return };
+        let k = keeper("signal");
+        let abi = crate::landlock::abi().unwrap_or(0);
+        if !k.ns.pid && abi < 6 {
+            let line = format!(
+                "{}sandbox::keeper::tests::a_command_cant_signal_the_keeper — no PID namespace here and Landlock ABI \
+                 {abi}: a run can signal it; it fails closed (a_killed_keeper_fails_closed_and_is_remade)\n",
+                crate::test_results::SELF_SKIP
+            );
+            let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+            k.end();
+            return;
+        }
+        let script = "for s in TERM INT HUP KILL STOP; do kill -s $s $PPID 2>&1; done; echo sent";
+        let (out, _) = sh_through(&k, &rules, script);
+        assert!(out.trim_end().ends_with("sent"), "{out}");
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!k.is_gone(), "the keeper's there: {out}");
+        let (_, status) = sh_through(&k, &rules, "exit 0");
+        assert!(status.success(), "and runs the next");
+        k.end();
+    }
+
+    /// A run's pid is tarae's number for it, from its pidfd's fdinfo: its parent, as this process sees it, is
+    /// the keeper; inside a PID namespace the keeper's own number for it is another.
+    #[test]
+    fn a_runs_pid_comes_from_its_pidfd() {
+        use std::io::BufRead;
+        let info = "pos:\t0\nflags:\t02000002\nmnt_id:\t15\nino:\t1061\nPid:\t4242\nNSpid:\t4242\t7\n";
+        assert_eq!(pid_in_fdinfo(info), Ok(4242));
+        assert_eq!(pid_in_fdinfo("Pid:\t-1\nNSpid:\t-1\n"), Err(None), "gone");
+        assert!(matches!(pid_in_fdinfo("Pid:\t0\n"), Err(Some(_))), "not in this PID namespace");
+        assert!(matches!(pid_in_fdinfo("flags:\t0\n"), Err(Some(_))));
+        let Some(rules) = open_rules("a_runs_pid_comes_from_its_pidfd") else { return };
+        let k = keeper("pidfd");
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "echo $$; exec sleep 30"]);
+        let s = k.start(&cmd, &crate::landlock::thread_name(), rules.fd(), RunNet::Plain).unwrap();
+        let mut lines = std::io::BufReader::new(s.spawned.stdout.unwrap()).lines();
+        let inner: u32 = lines.next().unwrap().unwrap().trim().parse().unwrap();
+        let pid = s.spawned.pid;
+        assert_eq!(
+            crate::procs::read(pid).map(|o| o.ppid),
+            Some(k.pid),
+            "tarae's number: the keeper's child"
+        );
+        match k.ns.pid {
+            true => assert_ne!(inner, pid, "inside, another number"),
+            false => assert_eq!(inner, pid),
+        }
+        crate::dap::term_group(pid);
+        crate::spawn::wait(pid).unwrap();
+        k.end();
+    }
+
+    /// A held run tarae can't number (its pidfd says `Pid: 0` — a `/proc` of another PID namespace) never goes
+    /// on to its exec: no byte, KILLed where it waits, and its start fails saying why — not a run left going
+    /// that tarae could neither wait on nor end.
+    #[test]
+    fn a_held_run_tarae_cant_number_never_goes_on() {
+        if !namespaced("a_held_run_tarae_cant_number_never_goes_on") {
+            return;
+        }
+        let Some(rules) = open_rules("a_held_run_tarae_cant_number_never_goes_on") else { return };
+        let k = keeper("unnumbered");
+        if !k.ns.pid {
+            let line = format!(
+                "{}sandbox::keeper::tests::a_held_run_tarae_cant_number_never_goes_on — no PID namespace here: \
+                 its runs aren't held\n",
+                crate::test_results::SELF_SKIP
+            );
+            let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+            k.end();
+            return;
+        }
+        lock(&k.state).fdinfo = Some("Pid:\t0\n");
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "exit 3"]);
+        let e = k
+            .start(&cmd, &crate::landlock::thread_name(), rules.fd(), RunNet::Plain)
+            .err()
+            .expect("its start fails");
+        assert!(e.to_string().contains("PID namespace"), "{e}");
+        let deadline = Instant::now() + STARTED_WITHIN;
+        let mut s = lock(&k.state);
+        while s.exits.is_empty() && Instant::now() < deadline {
+            let left = deadline.saturating_duration_since(Instant::now());
+            s = k.changed.wait_timeout(s, left).unwrap_or_else(|e| e.into_inner()).0;
+        }
+        let ended = s.exits.clone();
+        drop(s);
+        assert!(
+            matches!(ended[..], [st] if libc::WIFSIGNALED(st) && libc::WTERMSIG(st) == libc::SIGKILL),
+            "killed before its exec, not ended by its program: {ended:?}"
+        );
+        k.end();
+    }
+
+    /// D-a: a policy that opens a port, this machine's ports or the network gets no network namespace until
+    /// routing (its runs' sockets would be the session's, where nothing listens and nothing goes out), and the
+    /// keeper says so; one that opens nothing gets the session's own, not this process's. A keeper of the other
+    /// kind is superseded.
+    #[test]
+    fn an_open_policys_keeper_has_no_netns_yet() {
+        use super::super::tier;
+        if !namespaced("an_open_policys_keeper_has_no_netns_yet") {
+            return;
+        }
+        let (closed, _, r1) = project_in("netns-closed", Vec::new(), None, &[]);
+        let (open, _, r2) = project_in("netns-open", vec![9], None, &[]);
+        let (closed_ns, open_ns) = (tier::for_policy(&closed), tier::for_policy(&open));
+        assert_eq!((closed_ns.net, open_ns.net), (ns().net, false));
+        assert!(tier::opens(&super::super::Policy { localhost: true, ..closed.clone() }));
+        assert!(tier::opens(&super::super::Policy { network: true, ..closed.clone() }));
+        let root = std::env::temp_dir().join(format!("tarae-keeper-netns-{}", std::process::id()));
+        let net = |pid: u32| std::fs::read_link(format!("/proc/{pid}/ns/net")).unwrap();
+        let a = ready(&root, Some("closed"), closed_ns).unwrap();
+        assert_ne!(net(a.pid), net(std::process::id()), "the session's own");
+        let b = ready(&root, Some("open"), open_ns).unwrap();
+        assert_ne!(a.pid, b.pid, "another keeper");
+        assert_eq!(net(b.pid), net(std::process::id()), "this machine's, until routing");
+        assert!(b.said().contains("network shared"), "{}", b.said());
+        assert!(gone_within(&a, END_WITHIN), "the idle one superseded ends");
+        b.end();
+        for r in [r1, r2] {
+            std::fs::remove_dir_all(r).ok();
+        }
+    }
+
+    /// Finding 2's measurement (step 3): which object a rule must be on for a run to write in the session's
+    /// own `/dev/shm` and open a pty of its own `devpts` — this process's `/dev/shm`/`/dev/pts` (the mounts the
+    /// session's sit on), `/dev`, or the session's own (opened through `/proc/<keeper>/root`). Every ruleset
+    /// reads and runs everywhere besides. Prints `measure: …` lines.
+    #[test]
+    #[ignore = "a measurement: run by hand (step 3, finding 2)"]
+    fn measure_where_a_rule_holds_over_the_session_mounts() {
+        use std::os::unix::fs::MetadataExt;
+        if !namespaced("measure_where_a_rule_holds_over_the_session_mounts") {
+            return;
+        }
+        let abi = crate::landlock::abi().unwrap();
+        let k = keeper("rules-measure");
+        let theirs = format!("/proc/{}/root", k.pid);
+        let id = |p: &str| {
+            std::fs::metadata(p).map(|m| format!("{}:{}", m.dev(), m.ino())).unwrap_or_else(|e| e.to_string())
+        };
+        println!(
+            "measure: ABI {abi} · /dev/shm here {} · the session's {} · /dev/pts here {} · the session's {}",
+            id("/dev/shm"),
+            id(&format!("{theirs}/dev/shm")),
+            id("/dev/pts"),
+            id(&format!("{theirs}/dev/pts"))
+        );
+        let info = std::fs::read_to_string(format!("/proc/{}/mountinfo", k.pid)).unwrap_or_default();
+        for l in
+            info.lines().filter(|l| [" /dev/shm ", " /dev/pts ", " /dev/ptmx "].iter().any(|m| l.contains(m)))
+        {
+            println!("measure: the session's mountinfo: {l}");
+        }
+        #[repr(C, packed)]
+        struct Beneath {
+            allowed_access: u64,
+            parent_fd: i32,
+        }
+        let read = crate::landlock::EXECUTE | crate::landlock::READ_FILE | crate::landlock::READ_DIR;
+        let rules_on = |place: Option<&str>| {
+            let mut r = crate::landlock::Ruleset::new(abi).unwrap();
+            r.allow(Path::new("/"), read).unwrap();
+            if let Some(p) = place {
+                // (opened as it is — `/proc/<pid>/root` is a magic link `Ruleset::allow` won't follow)
+                let at = std::fs::File::open(p).unwrap();
+                let rule = Beneath {
+                    allowed_access: crate::landlock::handled(abi) & !crate::landlock::UNGRANTED,
+                    parent_fd: at.as_raw_fd(),
+                };
+                // SAFETY: both descriptors open for the call; the kernel only reads the rule.
+                let n = unsafe {
+                    libc::syscall(libc::SYS_landlock_add_rule, r.fd().as_raw_fd(), 1, &raw const rule, 0u32)
+                };
+                assert_eq!(n, 0, "{p}: {}", io::Error::last_os_error());
+            }
+            r
+        };
+        let shm = ": > /dev/shm/tarae-m.$$ && rm /dev/shm/tarae-m.$$ && echo ok";
+        let (shm_here, shm_theirs) = (format!("{theirs}/dev/shm"), format!("{theirs}/dev/pts"));
+        let places: [(&str, Option<&str>); 5] = [
+            ("no rule", None),
+            ("/dev/shm and /dev/pts here", Some("HERE")),
+            ("/dev here", Some("/dev")),
+            ("the session's own", Some("THEIRS")),
+            ("/", Some("/")),
+        ];
+        for (name, place) in places {
+            let (shm_rules, pty_rules) = match place {
+                Some("HERE") => (rules_on(Some("/dev/shm")), rules_on(Some("/dev/pts"))),
+                Some("THEIRS") => (rules_on(Some(&shm_here)), rules_on(Some(&shm_theirs))),
+                p => (rules_on(p), rules_on(p)),
+            };
+            let (out, _) = sh_through(&k, &shm_rules, &format!("{shm} 2>&1"));
+            let pty = helper_through(&k, pty_rules.fd(), RunNet::Plain, "pty", &[], None);
+            println!("measure: rule on {name}: shm {} · pty {pty}", out.trim());
+        }
+        k.end();
+    }
+
+    /// Not served, inside the session's own network namespace a run's internet sockets are its own
+    /// (`seccomp::Mode::OwnNetwork`, Landlock's TCP and UDP rights unhandled — `Ruleset::new_own_network`): it
+    /// listens on its own `lo` and reaches itself; a listener of this process's on this machine's loopback isn't
+    /// there for it.
+    #[test]
+    fn in_plain_mode_a_run_reaches_only_its_own_loopback() {
+        if !namespaced("in_plain_mode_a_run_reaches_only_its_own_loopback") {
+            return;
+        }
+        let Ok(abi) = crate::landlock::abi() else { return };
+        let mut rules = crate::landlock::Ruleset::new_own_network(abi).unwrap();
+        rules.allow(Path::new("/"), crate::landlock::ALL).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port().to_string();
+        let k = keeper("loopback");
+        let said = helper_through(&k, rules.fd(), RunNet::Own, "loopback", &[("TARAE_PORT", &port)], None);
+        assert_eq!(said, format!("own=ok tarae's={}", libc::ECONNREFUSED));
+        k.end();
+    }
+
+    /// How a run's sockets go is decided once, by `linux::confine` (`Confine.net`), and its rules are made for
+    /// that answer: a keeper without a network namespace, not served → `Plain`, TCP and UDP handled; served →
+    /// `Served`, handled; not served in the session's own → `Own`, left to the run — and a run started on that
+    /// answer (its seccomp mode) under those rules reaches its own `lo`.
+    #[test]
+    fn confine_decides_a_runs_network_once() {
+        let test = "confine_decides_a_runs_network_once";
+        if open_rules(test).is_none() {
+            return;
+        }
+        // (below ABI 4 Landlock has no network rights: only the decision is there to check)
+        let abi = crate::landlock::abi().unwrap();
+        let nets = crate::landlock::handled_net(abi) != 0;
+        for (net, handled) in [(RunNet::Plain, nets), (RunNet::Served, nets), (RunNet::Own, false)] {
+            let r = super::super::linux::ruleset_for(net, abi).unwrap();
+            assert_eq!(r.net != 0, handled, "{net:?}'s rules");
+        }
+        let unserved = || Err::<(), String>("not served".into());
+        let none = keeper_in("netrights-none", Ns::NONE);
+        let (_, c, _) = project_served("netrights-none", vec![], Some(&none), &[], unserved());
+        assert_eq!((c.net, c.handled_net() != 0), (RunNet::Plain, nets), "no network namespace");
+        none.end();
+        if !namespaced(test) {
+            return;
+        }
+        let k = keeper("netrights");
+        assert!(k.ns.net, "a policy opening nothing gets the session's network: {}", k.said());
+        let (_, c, _) = project_served("netrights-served", vec![], Some(&k), &[], Ok(()));
+        assert_eq!((c.net, c.handled_net() != 0), (RunNet::Served, nets), "served");
+        let (_, c, root) = project_served("netrights-own", vec![], Some(&k), &[], unserved());
+        assert_eq!((c.net, c.handled_net()), (RunNet::Own, 0), "plain, in its own network namespace");
+        let said = helper_through(&k, c.rules_fd(), c.net, "loopback", &[], Some(&root));
+        assert!(said.starts_with("own=ok "), "its own sockets, under its own rules: {said}");
+        k.end();
+        std::fs::remove_dir_all(&root).ok();
     }
 }

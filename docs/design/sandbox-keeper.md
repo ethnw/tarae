@@ -1,7 +1,8 @@
 # The sandbox keeper: one per session, its namespaces, one egress proxy (Linux)
 
-Design, 2026-10-06. Status: **decided** (D2–D23 below). Steps 1 and 2 are built (§Steps): every Linux session's
-sandboxed runs are forked by its keeper, without namespaces yet (`src/sandbox/keeper.rs`, `src/sandbox/channel.rs`).
+Design, 2026-10-06. Status: **decided** (D2–D23 below). Steps 1–3 are built (§Steps): every Linux session's
+sandboxed runs are forked by its keeper, born in the session's namespaces where user namespaces work
+(`src/sandbox/keeper.rs`, `src/sandbox/tier.rs`, `src/sandbox/channel.rs`).
 macOS is unchanged: Seatbelt, as `src/sandbox.rs` has it.
 
 ## What it's for
@@ -77,26 +78,61 @@ out is D21's step, decided and measured as that.
 On the worker that makes a run's policy (`sandbox::confined` → `keeper::ready`), before the session's first sandboxed
 run; a run never makes one on the main loop:
 
-| Tier | Birth | What it is |
+| Tier | Birth (*built*) | What it is |
 |---|---|---|
 | with user namespaces | `clone3(CLONE_NEWUSER \| NEWNET \| NEWIPC \| NEWPID \| NEWNS \| CLONE_PIDFD)` | PID 1 of the session's namespaces |
 | … where `/proc` can't be mounted (Docker's masked `/proc`) | the same without `CLONE_NEWPID` | the namespaces' fork server, a child subreaper |
-| without user namespaces (*built*) | `clone3(CLONE_PIDFD)`: no namespaces — or `clone(2)` with the same flag where a filter answers `clone3` with `ENOSYS` (Docker's default profile does, so that libcs fall back) | a plain fork server and child subreaper (`PR_SET_CHILD_SUBREAPER`) |
+| without user namespaces | `clone3(CLONE_PIDFD)`: no namespaces | a plain fork server and child subreaper (`PR_SET_CHILD_SUBREAPER`) |
 
-Until its exec the child is a copy of a multithreaded process, so it makes raw system calls only:
+Where a filter answers `clone3` with `ENOSYS` (Docker's default profile does, so that libcs fall back), `clone(2)`
+takes the same flags.
 
-1. It waits on a pipe while tarae writes `setgroups` = `deny`, `uid_map` and `gid_map`: the user's own ids (D5).
-2. Mount propagation to slave; a fresh `procfs` on `/proc`; a new `devpts` instance with its `ptmx` bound over
-   `/dev/ptmx`; a `tmpfs` on `/dev/shm` (D10).
-3. `lo` up (`ioctl(SIOCSIFFLAGS)`).
-4. Every capability dropped: each bounding-set bit, then `capset` to zero, no ambient set.
+**Which namespaces, per policy** (`tier::for_policy`, so part of the policy key, D14):
+- **No `CLONE_NEWNET` while the policy opens the network, this machine's ports or a port** (D-a, until step 4).
+  Before the egress swap, an allowed connect made on the run's socket would reach the session's empty loopback, or
+  nothing beyond it. Such a keeper says `network shared: its policy opens it, until routing`.
+- **No private `/dev/shm` where the project, a place it writes or a file it writes is under `/dev/shm`** (it would
+  hide them from the run). That keeper says `/dev/shm shared: the project or a place it writes is in it`.
+
+Until its exec the child is a copy of a multithreaded process, so it makes raw system calls only. Each failure goes on
+a birth pipe as (step, errno) — `tier::BirthStep` — and its exec closes the pipe:
+
+1. It waits on a go pipe while tarae, the namespace's owner, writes `setgroups` = `deny`, `uid_map` and `gid_map`: the
+   user's own ids (D5).
+   - This needs tarae dumpable: the `/proc` files of a non-dumpable process's child are root's. The probe says so
+     when that's the cause.
+2. Mount propagation to slave; a fresh `procfs` on `/proc` (with a PID namespace only); a new `devpts` instance with
+   its `ptmx` bound over `/dev/ptmx`; a `tmpfs` on `/dev/shm` unless shared (D10).
+3. `lo` up (`ioctl(SIOCSIFFLAGS)`), with a network namespace only.
+4. Every capability dropped: each bounding-set bit up to `cap_last_cap`, each checked gone; no ambient set; then
+   `capset` to zero.
 5. stdio to `/dev/null`, its channel to fd 3, and `SIGCHLD` blocked, so every thread of the new process starts with it
    blocked.
 6. `execveat` of tarae's own binary (an `O_PATH` descriptor of `/proc/self/exe`, opened once: the binary running, not
    whatever replaced it on disk) as `tarae --sandbox-keeper`, with an **empty environment**.
 
-Steps 1–4 are the namespaced tiers'. **A keeper that can't start fails the run with the reason. It never falls back to
-running unsandboxed.** The confining thread + `posix_spawn` path is retired.
+Steps 2–4 are the namespaced tiers'. **A keeper that can't start fails the run with the reason. It never falls back to
+running unsandboxed, nor to another tier while tarae runs** (D-b: the tier is the probe's until tarae starts again).
+The confining thread + `posix_spawn` path is retired.
+
+**The session's device places, from the keeper.** The session's `devpts` and `/dev/shm` are mounts over this system's,
+and Landlock's walk doesn't reach a rule on a root another mount covers. Measured: a rule on this system's `/dev/shm`
+or `/dev/pts` doesn't let a run write in the session's; a rule on the session's own roots, on `/dev` or on `/` does.
+So tarae's rules for this system's places don't hold there.
+- **The keeper opens `O_PATH` handles** of its own `/dev/pts`, `/dev/pts/ptmx`, `/dev/ptmx` (where that's a node, not
+  a link) and `/dev/shm` first thing in its `main`, and hands them to tarae with `Ready`.
+- **tarae grants `DEVICES`' rights on them** in that keeper's runs' rules (`linux::session_devices`; the keeper is made
+  before the rules).
+- **Why these handles are trusted:** they're opened before any run exists. Nothing a run does can change what they
+  name, since only the keeper's birth mounts there and a run has no capability.
+- tarae takes only the places it knows, each once.
+- A shared `/dev/shm` handle is this system's, already granted with the project's protected names left out, so it
+  isn't granted again whole.
+
+**A run's pid.** A keeper in a PID namespace says its own number for the run in `Started`. tarae takes its own from
+the run's pidfd (its fdinfo's `Pid:`). A **held** run, which is every run of such a keeper, waits before its exec for a
+byte on its handoff socket, sent once tarae has read the pid. Without the hold, a quick run could end and be reaped
+before tarae looks.
 
 The keeper, first thing in tarae's `main`, before anything of the editor:
 - sets `PR_SET_DUMPABLE` 0, `PR_SET_NO_NEW_PRIVS` and `PR_SET_CHILD_SUBREAPER`;
@@ -127,15 +163,15 @@ supervisor–proxy messages would move onto it only if they ever leave tarae's p
 
 | tarae → keeper | |
 |---|---|
-| `Run { id, program, argv, envp, cwd, comm, served }` + `SCM_RIGHTS` | `program` resolved by tarae (`spawn::resolve`); `envp` the run's environment as `spawn::environment` makes it; `comm` the name the run gives itself (≤ 15 bytes). The descriptors: the Landlock ruleset tarae built (`linux::confine`), stdin (`/dev/null`, tarae's), stdout, stderr, and served, the run's handoff socket. A malformed request gets `Failed`, never a crash. `pty` comes with step 3 |
+| `Run { id, program, argv, envp, cwd, comm, served, held, own_net }` + `SCM_RIGHTS` | `program` resolved by tarae (`spawn::resolve`); `envp` the run's environment as `spawn::environment` makes it; `comm` the name the run gives itself (≤ 15 bytes). The descriptors: the Landlock ruleset tarae built (`linux::confine`), stdin (`/dev/null`, tarae's), stdout, stderr, and, served or held, the run's handoff socket. `held`: it waits for tarae to know its pid (a keeper in a PID namespace). `own_net`: not served, in the session's netns, its internet sockets are its own (`seccomp::Mode::OwnNetwork`, Landlock's TCP and UDP unhandled). A malformed request gets `Failed`, never a crash. No `pty`: no sandboxed run asks for one, so it waits for a caller (a run opening `/dev/ptmx` gets the session's own) |
 | `Signal { id, sig }` | cancel: the keeper signals the run's process group, only while it hasn't reaped it (`dap::term_group` asks here: once the keeper has reaped a run, a kill from tarae could reach a reused pid) |
 | `AskUsage` | its own Rss and Pss (M3): its `smaps_rollup` is unreadable to tarae |
 | `End`, or EOF | end every run and leftover, then exit |
 
 | keeper → tarae | |
 |---|---|
-| `Ready { pid }` | once, at its start |
-| `Started { id, pid }` + `SCM_RIGHTS` | the child's pidfd. The main loop waits for it (≤ 1 s, as it waited for `posix_spawn`) |
+| `Ready { pid, places }` + `SCM_RIGHTS` | once, at its start, with an `O_PATH` handle of each device place it has (§Its birth) |
+| `Started { id, pid }` + `SCM_RIGHTS` | the child's pidfd; `pid` is the keeper's number (tarae reads its own from the pidfd). The main loop waits for it (≤ 1 s, as it waited for `posix_spawn`) |
 | `Exited { id, status }` | the keeper is the child's parent and reaps it (`spawn::wait` asks here: a keeper's run isn't tarae's child) |
 | `Failed { id, errno, step }` | the child failed before exec (`chdir`, Landlock, seccomp, the handoff, exec), also said in its stderr; it exits 127 |
 | `Reaped { n }` | orphans it reaped, as a count (the log) |
@@ -305,7 +341,9 @@ is taken. What failure says:
 
 | Seen | Why |
 |---|---|
-| the id map write refused, `apparmor_restrict_unprivileged_userns` = 1 | Ubuntu 23.10+/24.04's restriction: the new namespace has no capability |
+| the first mount refused (`EPERM`), `apparmor_restrict_unprivileged_userns` = 1 | Ubuntu 23.10+/24.04's restriction: the new namespace has no capability. tarae writes the id maps from outside, as the namespace's owner, so that part works; measured on colima and Ubuntu 26.10 (`refused at making its mounts its own`) |
+| the id map write refused (`EACCES`) while tarae is non-dumpable | its ids changed after it started: its children's `/proc` files are root's |
+| a mount refused under an AppArmor profile other than `unconfined` | the profile (Docker's `docker-default`) denies mounting |
 | `clone3`/`unshare` EPERM or ENOSYS in a container | Docker's default seccomp profile |
 | ENOSPC, `user.max_user_namespaces` = 0, `kernel.unprivileged_userns_clone` = 0 | user namespaces turned off |
 | `/proc/version` says WSL 1 | WSL 1 |
@@ -373,12 +411,33 @@ Each lands on its own. The test that pins it is seen failing once with the chang
      `supervisor::tests::a_runs_detached_child_is_served_after_its_run`. A detached child's parent is now the
      session's keeper, not tarae. It's served, reaped and ended whether tarae itself is a subreaper or not, with
      `CAP_SYS_PTRACE` dropped too.
-3. **Namespaces at the keeper's birth** (A+/A/B+/B): maps, mounts, `lo`, capabilities dropped, the probe, the tiers.
-   - Tests: `a_command_holds_no_capability` (C/D's built in step 2), `no_pid_namespace_without_its_own_proc`,
-     `a_run_sees_only_its_sessions_processes`, `the_session_mounts_keep_landlocks_rules` (a pty, a POSIX shm file and a
-     `/proc/self` read under the run's ruleset), `a_pty_comes_from_the_sessions_devpts`,
-     `a_command_cant_signal_the_keeper`, the probe's classification from stand-in errnos.
-   - Break once: skip the bounding-set drop.
+3. **Namespaces at the keeper's birth** (A+/A/B+/B). *Built*: maps, mounts, `lo`, capabilities dropped, the
+   session's device handles, a run's pid from its pidfd (held), plain mode's own network, the probe and its reasons
+   (`tier.rs`), the tier said in the log and `:procs` (the full showing is step 8).
+   - **Two interim rules**: D-a, no netns for a policy that opens anything, until step 4; and no private `/dev/shm`
+     for a project in it.
+   - **Tests**, each broken once (`target/sb/step3-notes.md`):
+     - `a_command_holds_no_capability`, broken by no bounding-set drop;
+     - `a_run_keeps_the_users_own_ids` (D5, as uid 1000), by a root map;
+     - `no_pid_namespace_without_its_own_proc` (D12, a locked overmount of the scene's own);
+     - `a_run_sees_only_its_sessions_processes` (pids, `lo`, SysV IPC);
+     - `the_session_mounts_keep_landlocks_rules`, by granting only this system's roots;
+     - `a_project_in_dev_shm_shares_dev_shm`;
+     - `a_pty_comes_from_the_sessions_devpts`;
+     - `a_command_cant_signal_the_keeper`, by a keeper with a TERM handler;
+     - `a_runs_pid_comes_from_its_pidfd`;
+     - `an_open_policys_keeper_has_no_netns_yet`;
+     - `in_plain_mode_a_run_reaches_only_its_own_loopback`;
+     - `tier::tests::the_probe_says_why` and `the_probe_here`.
+   - **Every step-2 test runs in the probe's tier.** The test helpers `keeper::outer_pid` and `seen_by_runs` translate
+     the pids a run prints.
+   - **The tier tests reach a real A+** with `cargo xtask linux --userns` (the container's seccomp, AppArmor and
+     masked paths lifted; `--userns=masked` keeps `/proc` masked, tier A). `--env TARAE_EXPECT_TIER=A+` makes a
+     machine's expected tier fail rather than skip.
+   - **Ran (2026-10-06), 166 tests each, all passing:**
+     - Debian 12 (Linux 6.1, ABI 2): A+, A and C.
+     - colima (6.8, ABI 4): C under Docker's seccomp and under Ubuntu's restriction.
+     - GCP Ubuntu 26.10 (7.3, ABI 11): C both ways, and A+ with the restriction lifted by the user for the run.
 4. **Sockets inside the session, routing and the egress swap** (D2).
    - Tests: `route` as a pure function over a table of destinations, `two_runs_share_the_sessions_loopback`,
      `the_users_loopback_isnt_reached`, `an_opened_port_reaches_this_machine`, `a_swapped_socket_keeps_nonblocking`,
@@ -476,7 +535,43 @@ namespaces work but a fresh `/proc` can't be mounted (`EPERM`): tier A.
   That's the keeper's `fork` of itself, where `posix_spawn` didn't copy, plus the request and answer.
 - **An idle keeper shares most of its pages**: Pss per keeper falls from 4.2 to 2.7 MB with 8 of them.
 
-**Still to measure**: M3 with namespaces (step 3); M4, the Gradle and
-Kotlin pairs through the real keeper in A+ and C (step 3); M5, name lookups (`AI_ADDRCONFIG`) inside a session's netns
-with the network open (step 4); M8, tools that look at file owners inside the user namespace, where root's files show
-as `nobody` (step 3).
+### Step 3, the keeper in namespaces (2026-10-06)
+
+- **How**: `cargo xtask linux --userns test --profile perf sandbox::keeper::tests::perf_`, optimized, A+ beside C in
+  one process (`measured_in`).
+- **M4 and M8**: `target/sb/m4-keeper.sh`, the setup from the earlier `nsholder-measure.sh`, through tarae's real run
+  path (`sandbox::policy` → `spawn`), A+ then C (`TARAE_TEST_NO_NS`).
+- Details in `target/sb/step3-notes.md`.
+
+| | Debian 12, 6.1, ABI 2, x86_64: C · A+ | Ubuntu 26.10, 7.3, ABI 11, x86_64: C · A+ |
+|---|---|---|
+| **M1**, plain / served | 2.11 / 2.17 · 2.09 / 2.27 ms | 2.22 / 2.45 · 2.47 / 2.52 ms |
+| **A keeper's birth** to `Ready` | 6.81 · 9.94 ms | 6.33 · 8.80 ms |
+| **M3**, idle keepers' Pss, 1 / 4 / 8 | 4.7 / 13.4 / 23.2 · 4.8 / 13.4 / 23.1 MB | 7.7 / 15.9 / 27.0 · 6.2 / 16.0 / 26.5 MB |
+| … the kernel's, 8 keepers (`Slab`) | ≈ 0 · +216 KB | 0 · −4 KB (noise) |
+
+- **A run in the session's namespaces costs at most about 0.25 ms more; a birth about +3 ms, once.**
+- **The namespaces don't change a keeper's own memory.** The kernel's share is below what `/proc/meminfo` tells apart.
+
+**M4, Debian**, run 1 → run 2 in ms, three pairs (A+ here without a netns: the policy opens localhost, D-a):
+
+| | A+ | C |
+|---|---|---|
+| Java `test` | 10105 → 2078 · 8861 → 2040 · 9476 → 2065 | 9697 → 1823 · 8861 → 1834 · 8402 → 1787 |
+| Kotlin `compileKotlin` | 51438 → 2193 · 18182 → 2049 · 15155 → 2048 | 52882 → 2174 · 14958 → 1879 · 14887 → 2002 |
+
+- **The daemons are kept by the session's keeper in both tiers**: reused on run 2, their parent the keeper (Kotlin's,
+  the Gradle daemon), ended with it.
+- **A+ adds about 0.25 s to Java's run 2** (both runs of the script); this is not explained yet.
+- **Run 2 through tarae's real path is 1.8–2.0 s in both tiers**, against the stand-ins' 0.55 s. That's the path's
+  own cost (a policy per run, the supervisor making the client's loopback connects, the kept home), not the
+  namespaces', and worth its own look.
+
+**M8, Debian**: `git status`/`log`, `cargo build --offline`, `npm ci --offline`, `mvn -o package` and `gradle --offline
+test` all work in A+ as in C. **No tool refused root's files showing as `nobody`.**
+- `ls /` is refused in both tiers (`/` is granted entry by entry around home).
+- `python3 -m venv` fails in both: the image has no `ensurepip`.
+- One `cargo build` in A+ failed once, its words lost, and built the next time: unexplained.
+
+**Still to measure**: M4 with a netns (step 4, where a session's own listener is reached inside it); M5, name lookups
+(`AI_ADDRCONFIG`) inside a session's netns with the network open (step 4).
