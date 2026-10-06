@@ -80,12 +80,10 @@ Early mockups that set the direction: [ink](design/a-ink.png) · [paper](design/
 | **Experience** ✅ | which-key, palette, tutor, start screen, mouse, toasts, git gutter, reopening the last files, persistent undo, disk sync, doc comments, splits, tests, debugger, attach |
 | **Workbench** ✅ | Side panel (files, outline, list, git), one folder tree for every list of files, indentation from `indents.scm`, several language servers per file, the list (quickfix) and build tasks, git tab (stage, commit, push, log, branches), merge conflicts, `:diff`, built-in terminal |
 | **M6** ✅ | Plugins — commands in Rust, compiled to WebAssembly, sandboxed on tarae's own runtime (interpreter + JIT); `tarae plugin new/dev/list` |
-| Next | ACP (hosting agents inside tarae) |
 
 Non-goals: a GUI, vim emulation, copying Helix behavior for its own sake.
 
-Claude runs inside tarae as the chat's `claude -p` process (stream-json, with tarae's tools as an in-process MCP
-server). Hosting other agents inside tarae via ACP remains a later candidate.
+What landed since, what's under way and what comes next: [roadmap.md](roadmap.md).
 
 ## Plugins
 

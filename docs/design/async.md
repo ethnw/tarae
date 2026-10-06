@@ -1,6 +1,7 @@
 # Async and queues in tarae
 
-Design, 2026-10-04 (roadmap #6, widened). Status: proposal. Nothing here is built yet.
+Design, 2026-10-04 (roadmap #6, widened). Status: phases 0 (1085db8), H (d27979d) and 1 (5bd76dd) are built
+(§4); phases 2–4 — the lineup, exclusive runs, observed holders — are still a proposal.
 
 ## Headline
 
