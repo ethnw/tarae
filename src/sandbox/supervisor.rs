@@ -404,12 +404,10 @@ fn may_reach(p: &Policy, a: SocketAddr) -> bool {
     this_machine(a.ip()) && (p.localhost || p.ports.contains(&a.port()))
 }
 
-/// A refusal: said in the run's report (its watch), `EPERM` to the caller — "Operation not permitted", as
-/// macOS says it.
+/// A refusal: said in the run's report (its watch — once the run is gone, its session's current run's:
+/// `sandbox::tell`), `EPERM` to the caller — "Operation not permitted", as macOS says it.
 fn refuse(p: &Policy, c: &Caller, op: &str, target: String) -> Answer {
-    if let Some(w) = &p.watch {
-        w.record(Denial { process: c.name(), op: op.into(), target });
-    }
+    super::tell(p, Denial { process: c.name(), op: op.into(), target });
     Err(libc::EPERM)
 }
 
@@ -900,10 +898,16 @@ mod tests {
                 tmp: Some(super::super::profile_path(&std::env::temp_dir())),
                 ports,
                 localhost,
+                // (what a real policy's run gets of this process's environment — `PATH` finds `sh`)
+                run_env: super::super::run_env_of(
+                    &super::super::Here::now(),
+                    &crate::llm::LlmConfig::default(),
+                ),
                 ..Default::default()
             };
             let run = super::super::RunDir::new().ok();
-            let p = Policy { run, sockets, ..Policy::for_project(&env) };
+            let tag = run.as_ref().map(|r| r.tag());
+            let p = Policy { run, tag, sockets, ..Policy::for_project(&env) };
             Policy { watch: Some(super::super::Watch::quiet("t.")), ..super::super::confined(p) }
         }
     }
@@ -933,6 +937,323 @@ mod tests {
             out.lines().filter_map(|l| l.split_once("probe: ")).map(|(_, s)| s.to_string()).collect();
         assert_eq!(said.len(), ops.len(), "the probe said each:\n{out}\n{err}");
         said
+    }
+
+    /// A stream socket pair, `n` times a byte sent with `sendmsg` and read back on the other end (a receive
+    /// waits 5 s at most): `ok`, or where and how it went wrong.
+    fn pair_sendmsg(n: usize) -> String {
+        let mut fds = [0; 2];
+        // SAFETY: a two-slot array the call fills.
+        if unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) } != 0 {
+            return format!("socketpair {}", io::Error::last_os_error());
+        }
+        let wait = libc::timeval { tv_sec: 5, tv_usec: 0 };
+        // SAFETY: a live struct of the size given.
+        unsafe {
+            libc::setsockopt(
+                fds[1],
+                libc::SOL_SOCKET,
+                libc::SO_RCVTIMEO,
+                (&raw const wait).cast(),
+                std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+            )
+        };
+        for i in 0..n {
+            let mut byte = [(i % 251) as u8];
+            let mut iov = libc::iovec { iov_base: byte.as_mut_ptr().cast(), iov_len: 1 };
+            // SAFETY: zeroed, then its one buffer set; no address.
+            let mut m: libc::msghdr = unsafe { std::mem::zeroed() };
+            (m.msg_iov, m.msg_iovlen) = (&raw mut iov, 1);
+            // SAFETY: the message and its buffer live for the call.
+            let sent = unsafe { libc::sendmsg(fds[0], &raw const m, 0) };
+            if sent != 1 {
+                return format!("sendmsg {i}: {sent} {}", io::Error::last_os_error());
+            }
+            let mut got = [0u8; 1];
+            // SAFETY: a one-byte buffer.
+            let read = unsafe { libc::recv(fds[1], got.as_mut_ptr().cast(), 1, 0) };
+            if read != 1 || got[0] != (i % 251) as u8 {
+                return format!("recv {i}: {read} {} {:?}", io::Error::last_os_error(), got);
+            }
+        }
+        // SAFETY: ours.
+        unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+        "ok".into()
+    }
+
+    /// For real (step 7: a sandboxed loop of `sendmsg` and `recv` on a socket pair hung): every message a run
+    /// sends on a socket pair with `sendmsg` — tarae making the call on the run's own socket — arrives, once,
+    /// in order.
+    #[test]
+    fn messages_sent_on_a_socket_pair_arrive() {
+        if !served("messages_sent_on_a_socket_pair_arrive") {
+            return;
+        }
+        let s = Scratch::new("pair");
+        let p = s.policy(Vec::new(), false, Vec::new());
+        let got = probe_in(&p, &["pair-sendmsg 1".into(), "pair-sendmsg 2000".into()]);
+        assert_eq!(got, ["ok", "ok"]);
+    }
+
+    /// Looks with a `reaper::Reaper` at this process's tree every 20 ms, each as if `GRACE` had gone by since
+    /// the one before — the most a reaper could take — for good (the scenes' processes are their own).
+    fn reaping() {
+        std::thread::spawn(|| {
+            let (mut s, mut r) = (crate::procs::Sampler::default(), crate::reaper::Reaper::default());
+            let mut now = std::time::Instant::now();
+            loop {
+                now += crate::reaper::GRACE;
+                crate::procs::look(&mut s, &mut r, now);
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        });
+    }
+
+    /// What tarae does with what a run leaves running (`crate::reaper`), in a process of its own (it changes
+    /// the whole process): `TARAE_SCENE=<subreaper> <drop>`: tarae a child subreaper (`reaper::at_start`) or
+    /// not, `CAP_SYS_PTRACE` dropped or not (so a container that has it shows what a VM's Yama 1 does), a
+    /// reaper taking every zombie child it can (`reaping`); a run starts a child that leaves it (a double
+    /// fork) and a `setsid sleep 60`, and ends at once (exit 3, its own waiter's to read); a second later the
+    /// child connects to this machine's open port and says whether it could, and who its parent is now; then
+    /// what the run left is ended as at its session's end (`sandbox::end_leftovers`). Prints `scene: <ok|no>
+    /// <parent is me: yes|no> <reaped: yes|no> exit=<the run's, as its waiter read it> ended=<yes|no>`.
+    #[test]
+    #[ignore]
+    fn detached_scene() {
+        let Ok(scene) = std::env::var("TARAE_SCENE") else { return };
+        let (on, drop) = scene.split_once(' ').unwrap();
+        if drop == "1" {
+            drop_ptrace();
+        }
+        if on == "1" {
+            crate::reaper::at_start();
+            reaping();
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let s = Scratch::new(&format!("detached-{on}"));
+        let p = s.policy(vec![port], false, Vec::new());
+        let out = s.root.join("after");
+        let script = r#"( bash -c 'sleep 1
+            if exec 3<>/dev/tcp/127.0.0.1/$PORT; then r=ok; else r=no; fi
+            echo "$r $(cut -d" " -f4 /proc/$$/stat) $$" > "$OUT"' & )
+            ( setsid sleep 60 & echo $! > "$OUT.long" ); sleep 0.1; exit 3"#;
+        let mut cmd = super::super::command(Some(&p), "sh", &["-c".into(), script.into()]);
+        cmd.env("PORT", port.to_string()).env("OUT", &out).current_dir(&p.root);
+        let spawned = super::super::spawn(Some(&p), &cmd).unwrap();
+        let exit = crate::spawn::wait(spawned.pid).unwrap().code().unwrap_or(-1);
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !std::fs::read_to_string(&out).is_ok_and(|t| t.ends_with('\n'))
+            && std::time::Instant::now() < end
+        {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let said = std::fs::read_to_string(&out).unwrap_or_default();
+        let w: Vec<&str> = said.split_whitespace().collect();
+        let (result, parent, child) = (w.first().copied().unwrap_or("none"), w.get(1), w.get(2));
+        let mine = parent.is_some_and(|p| *p == std::process::id().to_string());
+        // (the orphan, a zombie child of ours once it's done: reaped)
+        let gone = || child.is_none_or(|c| !std::path::Path::new(&format!("/proc/{c}")).exists());
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while mine && !gone() && std::time::Instant::now() < end {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let reaped = mine && gone();
+        // (the long one, a daemon of sorts: ours to end — as at its session's end)
+        let long: Option<u32> =
+            std::fs::read_to_string(out.with_extension("long")).ok().and_then(|t| t.trim().parse().ok());
+        let ours = long.and_then(crate::procs::read).is_some_and(|o| o.ppid == std::process::id());
+        let ended = match long {
+            Some(l) if ours => {
+                super::super::end_leftovers(Some(&p.root)) == [l]
+                    && !std::path::Path::new(&format!("/proc/{l}")).exists()
+            }
+            Some(l) => {
+                // SAFETY: a plain kill of the scene's own sleep, which isn't ours to reap.
+                unsafe { libc::kill(l as i32, libc::SIGKILL) };
+                false
+            }
+            None => false,
+        };
+        let yes = |b: bool| if b { "yes" } else { "no" };
+        println!("scene: {result} {} {} exit={exit} ended={}", yes(mine), yes(reaped), yes(ended));
+    }
+
+    /// (CAP_SYS_PTRACE is capability 19 — libc doesn't name it)
+    const CAP_SYS_PTRACE: u32 = 19;
+
+    /// Drops `CAP_SYS_PTRACE` from the calling thread (threads it starts after inherit that) — the scene's
+    /// own process only.
+    fn drop_ptrace() {
+        #[repr(C)]
+        struct Header {
+            version: u32,
+            pid: i32,
+        }
+        #[repr(C)]
+        #[derive(Default, Clone, Copy)]
+        struct Data {
+            effective: u32,
+            permitted: u32,
+            inheritable: u32,
+        }
+        let mut h = Header { version: 0x2008_0522, pid: 0 };
+        let mut d = [Data::default(); 2];
+        // SAFETY: capget/capset with version 3's header and its two data blocks.
+        unsafe {
+            assert_eq!(libc::syscall(libc::SYS_capget, &mut h, d.as_mut_ptr()), 0);
+            d[0].effective &= !(1 << CAP_SYS_PTRACE);
+            d[0].permitted &= !(1 << CAP_SYS_PTRACE);
+            assert_eq!(libc::syscall(libc::SYS_capset, &mut h, d.as_ptr()), 0);
+        }
+    }
+
+    /// The scene each way (`detached_scene`): with tarae a subreaper, a run's detached child is adopted by
+    /// tarae, its connect after its run is served, and it's reaped once done; without, its connect is served
+    /// only where tarae may take a non-descendant's sockets (`CAP_SYS_PTRACE`, or Yama 0 or none) — colima's
+    /// container has the capability and its kernel Yama 1, so the capability dropped is a VM's case.
+    #[test]
+    fn a_runs_detached_child_is_served_after_its_run() {
+        if !served("a_runs_detached_child_is_served_after_its_run") {
+            return;
+        }
+        let scene = |on: &str, drop: bool| {
+            let exe = std::env::current_exe().unwrap();
+            let out = std::process::Command::new(exe)
+                .args(["--exact", "sandbox::supervisor::tests::detached_scene", "--ignored", "--nocapture"])
+                .args(["--test-threads=1"])
+                .env("TARAE_SCENE", format!("{on} {}", drop as u8))
+                .output()
+                .unwrap();
+            let text = String::from_utf8_lossy(&out.stdout).into_owned();
+            text.lines().find_map(|l| l.split_once("scene: ").map(|(_, s)| s.to_string())).unwrap_or(text)
+        };
+        let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+        let scope = std::fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope").ok();
+        let yama = scope.as_deref().map(str::trim);
+        let cap = status
+            .lines()
+            .find_map(|l| l.strip_prefix("CapEff:"))
+            .and_then(|h| u64::from_str_radix(h.trim(), 16).ok())
+            .is_some_and(|c| c & (1 << CAP_SYS_PTRACE) != 0);
+        // (Yama 2 or 3: nothing is served without the capability, descendant or not)
+        let drops: &[bool] = if cap && yama.is_none_or(|y| y <= "1") { &[false, true] } else { &[false] };
+        for &drop in drops {
+            let others = (cap && !drop) || yama.is_none_or(|y| y == "0");
+            let (off, on) = (scene("0", drop), scene("1", drop));
+            let line = format!(
+                "capability {}: subreaper off: {off} · on: {on} · non-descendants served: {others}\n",
+                if drop { "dropped" } else { "kept" }
+            );
+            let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+            assert_eq!(
+                on, "ok yes yes exit=3 ended=yes",
+                "a subreaper: adopted, served, reaped; the run's waiter undisturbed; the long one ended with its \
+                 session"
+            );
+            assert!(off.starts_with(if others { "ok no" } else { "no no" }), "{off}");
+        }
+    }
+
+    /// A run in `p` of `sh -c script` (`env` set), its watch told it started (as `task.rs` does): its pid.
+    fn run_in(p: &Policy, script: &str, env: &[(&str, &Path)]) -> u32 {
+        let mut cmd = super::super::command(Some(p), "sh", &["-c".into(), script.into()]);
+        cmd.envs(env.iter().copied()).current_dir(&p.root);
+        let s = super::super::spawn(Some(p), &cmd).unwrap();
+        if let Some(w) = &p.watch {
+            w.run_started(s.pid);
+        }
+        s.pid
+    }
+
+    /// Waits (5 s at most) for `done`.
+    fn until(done: impl Fn() -> bool) -> bool {
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !done() && std::time::Instant::now() < end {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        done()
+    }
+
+    /// What a run left running, after its run, in a process of its own (`TARAE_LEFTOVER_SCENE`; tarae a child
+    /// subreaper, as it is): run 1 leaves a child that, each time a file says so, connects to a port the
+    /// policy doesn't open. Told while run 2 of the project goes, the refusal is run 2's (its report); told
+    /// while none goes, it waits for run 3's. Then: what a run under one policy left is ended when a run of
+    /// the project starts under another (it holds the old one) — not by one under the same. Prints `scene:
+    /// w1=<n> w2=<n> w3=<n> stale=<ended: yes|no> same=<kept: yes|no>` (n: the refusals of port 9 each run's
+    /// watch has).
+    #[test]
+    #[ignore]
+    fn leftover_scene() {
+        if std::env::var_os("TARAE_LEFTOVER_SCENE").is_none() {
+            return;
+        }
+        crate::reaper::at_start();
+        let s = Scratch::new("leftover");
+        let refused = |p: &Policy| {
+            let b = p.watch.as_ref().unwrap().blocked();
+            b.seen.iter().filter(|d| d.op == "network-outbound" && d.target.ends_with(":9")).count()
+        };
+        let ended = |p: &Policy| p.watch.as_ref().is_some_and(|w| w.ended());
+        let go = s.base.join("out/go");
+        let script = r#"( bash -c 'for i in 1 2; do
+            while [ ! -e "$GO$i" ]; do sleep 0.05; done
+            ( : <>/dev/tcp/127.0.0.1/9 ) 2>/dev/null; done' & ); exit 0"#;
+        let p1 = s.policy(Vec::new(), false, Vec::new());
+        crate::spawn::wait(run_in(&p1, script, &[("GO", &go)])).unwrap();
+        assert!(until(|| ended(&p1)), "run 1's end seen");
+        let p2 = s.policy(Vec::new(), false, Vec::new());
+        let r2 = run_in(&p2, "sleep 3", &[]);
+        std::fs::write(go.with_file_name("go1"), "").unwrap();
+        until(|| refused(&p2) > 0);
+        crate::spawn::wait(r2).unwrap();
+        assert!(until(|| ended(&p2)), "run 2's end seen");
+        std::fs::write(go.with_file_name("go2"), "").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let p3 = s.policy(Vec::new(), false, Vec::new());
+        crate::spawn::wait(run_in(&p3, "true", &[])).unwrap();
+        let (w1, w2, w3) = (refused(&p1), refused(&p2), refused(&p3));
+        super::super::end_leftovers(Some(&s.root));
+        // A policy since changed: what the old one left ends; under the same, it stays
+        let long = |p: &Policy, name: &str| -> u32 {
+            let file = s.root.join(name);
+            crate::spawn::wait(run_in(p, r#"( setsid sleep 60 & echo $! > "$F" )"#, &[("F", &file)]))
+                .unwrap();
+            std::fs::read_to_string(&file).unwrap().trim().parse().unwrap()
+        };
+        let there = |pid: u32| std::path::Path::new(&format!("/proc/{pid}")).exists();
+        let old = long(&s.policy(Vec::new(), false, Vec::new()), "old");
+        let new = long(&s.policy(vec![4242], false, Vec::new()), "new");
+        let stale = until(|| !there(old));
+        crate::spawn::wait(run_in(&s.policy(vec![4242], false, Vec::new()), "true", &[])).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let same = there(new);
+        super::super::end_leftovers(Some(&s.root));
+        let yes = |b: bool| if b { "yes" } else { "no" };
+        println!("scene: w1={w1} w2={w2} w3={w3} stale={} same={}", yes(stale), yes(same));
+    }
+
+    /// `leftover_scene`: a refusal of what a run left goes to its project's run going then (its report),
+    /// else to the next one's; what a run left under a policy since changed ends with the change.
+    #[test]
+    fn what_a_run_left_is_told_to_its_projects_current_run() {
+        if !served("what_a_run_left_is_told_to_its_projects_current_run") {
+            return;
+        }
+        let exe = std::env::current_exe().unwrap();
+        let out = std::process::Command::new(exe)
+            .args(["--exact", "sandbox::supervisor::tests::leftover_scene", "--ignored", "--nocapture"])
+            .args(["--test-threads=1"])
+            .env("TARAE_LEFTOVER_SCENE", "1")
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        let said = text.lines().find_map(|l| l.split_once("scene: ").map(|(_, s)| s.to_string()));
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(said.as_deref(), Some("w1=0 w2=1 w3=1 stale=yes same=yes"), "{text}\n{err}");
     }
 
     /// An op's result as the probe says it: `ok`, or `err` and the errno.
@@ -996,6 +1317,7 @@ mod tests {
                 ["race", good, bad, n] => {
                     race(good.parse().unwrap(), bad.parse().unwrap(), n.parse().unwrap())
                 }
+                ["pair-sendmsg", n] => pair_sendmsg(n.parse().unwrap()),
                 ["lookup", name] => lookup(name),
                 ["netlink-route"] => said(netlink_route()),
                 ["netlink", protocol] => {

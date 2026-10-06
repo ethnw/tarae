@@ -245,6 +245,9 @@ impl Kept {
                 walk(f, m.permissions().mode(), &mut budget, &mut dirs);
             }
         }
+        // (in order, not the file system's listing order — it differs between file systems, and the report
+        // names them in this order; a parent still comes before its folders)
+        dirs.sort();
         Kept { dirs, restored: Default::default() }
     }
 
@@ -839,6 +842,9 @@ fn audit_value(line: &str, key: &str) -> Option<String> {
 #[derive(Debug, Default)]
 pub struct Audit {
     pub owner: Option<Owner>,
+    /// The threads that confined the project's earlier runs (`also`): what those left running is this run's to
+    /// tell now (`sandbox::tell`).
+    also: Vec<Owner>,
     ours: Vec<String>,
     others: Vec<String>,
     waiting: Vec<(String, Denial)>,
@@ -847,7 +853,27 @@ pub struct Audit {
 /// Access records kept waiting for their domain's record, at most.
 const AUDIT_WAITING: usize = 64;
 
+/// The domains told so far, by the thread that confined each (a domain's record comes once, with its first
+/// denial — a later run's watch knows an earlier run's domain from here). `DOMAINS_KEPT` at most.
+static DOMAINS: std::sync::Mutex<Vec<(Owner, String)>> = std::sync::Mutex::new(Vec::new());
+const DOMAINS_KEPT: usize = 256;
+
 impl Audit {
+    /// The project's earlier runs are `owners` too: their domains known so far are this run's from now.
+    pub fn also(&mut self, owners: Vec<Owner>) {
+        if owners == self.also {
+            return;
+        }
+        let known = DOMAINS.lock().unwrap_or_else(|e| e.into_inner());
+        for (o, d) in known.iter() {
+            if owners.contains(o) && !self.ours.contains(d) {
+                self.ours.push(d.clone());
+                self.others.retain(|x| x != d);
+            }
+        }
+        self.also = owners;
+    }
+
     /// The denials `line` adds: an access record of the run's domain (`LANDLOCK_ACCESS`: `domain=… blockers=…
     /// path=…`), or those waiting for a domain record that turned out the run's (`LANDLOCK_DOMAIN`:
     /// `domain=… status=allocated … pid=… comm=…`). Said in the profile's words (`file-write*`,
@@ -871,13 +897,21 @@ impl Audit {
             return Vec::new();
         }
         let comm = audit_value(line, "comm");
-        let mine = self.owner.as_ref().is_some_and(|o| {
-            !o.comm.is_empty() && pid == Some(o.pid) && comm.as_deref() == Some(o.comm.as_str())
-        });
+        let named =
+            |o: &&Owner| !o.comm.is_empty() && pid == Some(o.pid) && comm.as_deref() == Some(o.comm.as_str());
+        let mine = self.owner.iter().chain(&self.also).find(named).cloned();
         let (keep, rest): (Vec<_>, Vec<_>) =
             std::mem::take(&mut self.waiting).into_iter().partition(|(d, _)| *d == domain);
         self.waiting = rest;
-        match mine {
+        if let Some(o) = &mine {
+            let mut known = DOMAINS.lock().unwrap_or_else(|e| e.into_inner());
+            if !known.iter().any(|(_, d)| *d == domain) {
+                known.push((o.clone(), domain.clone()));
+                let n = known.len();
+                known.drain(..n.saturating_sub(DOMAINS_KEPT));
+            }
+        }
+        match mine.is_some() {
             true => {
                 self.ours.push(domain);
                 keep.into_iter().map(|(_, d)| d).collect()
@@ -1322,11 +1356,12 @@ mod tests {
                 "branches removed"
             ]
         );
-        // … and the report says what was made again
+        // … and the report says what was made again — in order, whatever order the file system lists them in
+        // (the VMs' ext4 lists them otherwise than colima's overlay: the report's words changed with it)
         let r = crate::sandbox::Guard::In(Box::new(p.clone())).report(&[]);
         let r = r.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
-            r.contains("It removed empty folders inside protected ones — .git/refs, .git/objects/info, .git/branches — which tarae made again"),
+            r.contains("It removed empty folders inside protected ones — .git/branches, .git/objects/info, .git/refs — which tarae made again"),
             "{r}"
         );
         let gone: Vec<&str> = ["refs/heads", "refs/tags", "refs", "objects/info", "branches"]
@@ -1347,6 +1382,8 @@ mod tests {
     fn a_run_keeps_to_its_policy() {
         let Some(_) = kernel_abi("a_run_keeps_to_its_policy") else { return };
         let s = Scratch::new("run");
+        // (outside home, a file of the test's own — not a system file: GCP's Ubuntu image has no /etc/hostname)
+        std::fs::write(s.base.join("readable"), "x").unwrap();
         let p = s.policy();
         assert!(matches!(p.confine, Some(Ok(_))), "{:?}", p.confine);
         let run = p.run.as_ref().unwrap().path().to_path_buf();
@@ -1358,7 +1395,7 @@ mod tests {
             w llm-protect "$R/kept/x"; w run "$RUN/x"; w tmp "/tmp/tarae-confine-$$"; w devnull /dev/null
             w outside "$B/outside"
             r home-allowed "$H/.cargo/config.toml"; r home-kept "$H/.cargo/credentials.toml"
-            r home-ssh "$H/.ssh/id"; r home-other "$H/notes"; r outside-home /etc/hostname
+            r home-ssh "$H/.ssh/id"; r home-other "$H/notes"; r outside-home "$B/readable"
             if mv "$R/src/main.rs" "$R/src/moved.rs" 2>/dev/null; then echo move ok; else echo move no; fi
             if rm "$R/sub/build.rs" 2>/dev/null; then echo remove-protected ok; else echo remove-protected no; fi
             if bash -c "exec 3<>/dev/tcp/127.0.0.1/$PORT" 2>/dev/null; then echo socket ok; else echo socket no; fi
@@ -1816,6 +1853,43 @@ mod tests {
         assert!(a.line("audit: type=1400 apparmor=\"DENIED\"").is_empty());
     }
 
+    /// What an earlier run of the project left running is denied in that run's domain: a later run's watch
+    /// told the earlier ones' threads (`also`) reads it — by the domain's record when it comes now, or, its
+    /// record told already (to the earlier run's watch), by the domain known from then. Another thread's
+    /// domain stays out.
+    #[test]
+    fn what_an_earlier_run_left_is_read_by_the_current_runs_watch() {
+        let access = |d: &str, path: &str| {
+            format!(
+                "audit: type=1423 audit(1:3): domain={d} blockers=fs.write_file path=\"{path}\" dev=\"vda2\" ino=9"
+            )
+        };
+        let domain = |d: &str, comm: &str| {
+            format!(
+                "audit: type=1424 audit(1:3): domain={d} status=allocated mode=enforcing pid=301 uid=0 \
+                 exe=\"/usr/bin/tarae\" comm=\"{comm}\""
+            )
+        };
+        let o = |comm: &str| Owner { pid: 301, comm: comm.into() };
+        // Run 1 (thread tl-e1) sees its domain e1 told; run 2 hears of run 1 after its record went by
+        let mut first = Audit { owner: Some(o("tl-e1")), ..Default::default() };
+        assert_eq!(first.line(&domain("e1", "tl-e1")).len(), 0);
+        let mut now = Audit { owner: Some(o("tl-e2")), ..Default::default() };
+        now.also(vec![o("tl-e1"), o("tl-e3")]);
+        let d = now.line(&access("e1", "/w/p/Cargo.toml"));
+        assert_eq!(
+            d.iter().map(|d| d.target.as_str()).collect::<Vec<_>>(),
+            ["/w/p/Cargo.toml"],
+            "known from then"
+        );
+        // Run 3's domain first told now: its record names its thread
+        assert!(now.line(&access("e3", "/w/p/build.rs")).is_empty(), "waits for its domain");
+        assert_eq!(now.line(&domain("e3", "tl-e3")).len(), 1);
+        // Another thread's
+        assert!(now.line(&access("e9", "/x")).is_empty());
+        assert!(now.line(&domain("e9", "tl-e9")).is_empty());
+    }
+
     /// auditd's records, verbatim from its log on a kernel 7.0 (the user's VM): the domain is told by tarae's
     /// process id (`pid=`, the process's — not the confining thread's) and the thread's name (`comm=`), its
     /// enrichment glued on (`comm="…"UID="wq"`, no space); another thread of the same tarae, or the name in
@@ -2146,6 +2220,9 @@ mod tests {
             return;
         };
         let n: usize = std::env::var("TARAE_MEASURE_N").ok().and_then(|n| n.parse().ok()).unwrap_or(3);
+        // (the test binary as tarae is: what a run leaves running stays its — `reaper`; the list is measured
+        // alone, with `--exact`: that's the whole process's)
+        crate::reaper::at_start();
         let ms = |d: Duration| d.as_secs_f64() * 1000.0;
         let median = |mut v: Vec<f64>| {
             v.sort_by(f64::total_cmp);
@@ -2177,6 +2254,9 @@ mod tests {
                 c.current_dir(&root);
                 let t = Instant::now();
                 let s = crate::sandbox::spawn(p.as_ref(), &c).unwrap();
+                if let Some(w) = p.as_ref().and_then(|p| p.watch.as_ref()) {
+                    w.run_started(s.pid);
+                }
                 let read = |r: Option<std::io::PipeReader>, err: bool| {
                     std::thread::spawn(move || {
                         let mut text = String::new();
@@ -2211,18 +2291,24 @@ mod tests {
                 }
                 (wall, status.code().unwrap_or(-1), policy_ms, report)
             };
+            // (said as it goes — a long list is never silent for minutes)
+            let say = |s: String| {
+                let _ = io::Write::write_all(&mut io::stderr(), format!("{s}\n").as_bytes());
+            };
+            say(format!("measuring {name} …"));
             run(false); // (warm: the first run of a command isn't counted)
             let (mut plain, mut sandboxed, mut policy) = (Vec::new(), Vec::new(), Vec::new());
             let (mut exits, mut said) = ((Vec::new(), Vec::new()), String::new());
-            for _ in 0..n {
+            for i in 0..n {
                 let (w, code, _, _) = run(false);
                 plain.push(w);
                 exits.0.push(code);
-                let (w, code, p, r) = run(true);
-                sandboxed.push(w);
+                let (ws, code, p, r) = run(true);
+                sandboxed.push(ws);
                 policy.push(p);
                 exits.1.push(code);
                 said = r.unwrap_or_default();
+                say(format!("  {name} {}/{n}: plain {w:.0} ms, sandboxed {ws:.0} ms", i + 1));
             }
             let (pl, sb) = (median(plain), median(sandboxed));
             out.push(format!(
@@ -2235,5 +2321,23 @@ mod tests {
             ));
         }
         let _ = io::Write::write_all(&mut io::stderr(), format!("{}\n", out.join("\n")).as_bytes());
+        // What the runs left running (a build tool's daemon), and what it holds now — then ended, as at quit
+        let rss = |pid: u32| {
+            let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
+            status
+                .lines()
+                .find_map(|l| l.strip_prefix("VmRSS:"))
+                .map(|v| v.trim().to_string())
+                .unwrap_or_default()
+        };
+        for l in crate::sandbox::leftovers() {
+            // (with what it started — a Gradle daemon's Kotlin daemon, its workers)
+            for o in crate::procs::tree(l.pid) {
+                let line =
+                    format!("left running: {} (pid {}) · RSS {} · {}\n", o.name, o.pid, rss(o.pid), l.tag);
+                let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+            }
+        }
+        crate::sandbox::end_leftovers(None);
     }
 }

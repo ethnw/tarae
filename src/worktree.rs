@@ -1480,6 +1480,9 @@ impl Editor {
         }
         // (its servers with them — #190)
         self.lsp_stop_ended(&root, &had);
+        // (and what its Claude's runs left running — a Gradle daemon: ended on a thread, it waits for them)
+        let left = root.clone();
+        crate::event::thread("tarae-end", move || crate::sandbox::end_leftovers(Some(&left)));
         self.sessions_keep();
         Some(kept)
     }
@@ -1672,6 +1675,76 @@ impl Editor {
 mod tests {
     use super::*;
     use crate::config::Config;
+
+    /// Linux, in a process of its own (`TARAE_SESSION_END_SCENE` = a temp folder; it makes itself a child
+    /// subreaper): a run of Claude's in each of two sessions leaves a `setsid sleep 60`. One session closes:
+    /// what its run left ends, the other's stays — until tarae's quit ends it (`sandbox::end_leftovers`).
+    /// Prints `session-end: closed=<ended> other=<kept> quit=<ended>`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore]
+    fn session_end_scene() {
+        let Some(base) = std::env::var_os("TARAE_SESSION_END_SCENE").map(PathBuf::from) else { return };
+        crate::reaper::at_start();
+        let (here, there) = (base.join("here"), base.join("there"));
+        for d in [&here, &there] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let mut ed = Editor::new(Config::default());
+        (ed.session.root, ed.session.name) = (here.clone(), "here".into());
+        ed.session_open(&there).unwrap();
+        let leave = |root: &Path| -> u32 {
+            let p = crate::sandbox::policy(root, &crate::llm::LlmConfig::default(), &[]);
+            let file = root.join("left.pid");
+            let script = format!("(setsid sleep 60 & echo $! > '{}')", file.display());
+            let cmd = crate::sandbox::command(Some(&p), "sh", &["-c".into(), script]);
+            let s = crate::sandbox::spawn(Some(&p), &cmd).unwrap();
+            crate::spawn::wait(s.pid).unwrap();
+            std::fs::read_to_string(&file).unwrap().trim().parse().unwrap()
+        };
+        let (closed, other) = (leave(&there), leave(&here));
+        let there_now = |pid: u32| Path::new(&format!("/proc/{pid}")).exists();
+        let gone = |pid: u32| {
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while there_now(pid) && std::time::Instant::now() < end {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            !there_now(pid)
+        };
+        ed.session_close(&there);
+        let (closed, kept) = (gone(closed), there_now(other));
+        crate::sandbox::end_leftovers(None);
+        let yes = |b: bool| if b { "yes" } else { "no" };
+        println!("session-end: closed={} other={} quit={}", yes(closed), yes(kept), yes(gone(other)));
+    }
+
+    /// `session_end_scene`, run.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn what_a_sessions_runs_left_ends_with_it() {
+        if crate::landlock::abi().is_err() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("tarae-session-end-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(dir).unwrap();
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "worktree::tests::session_end_scene",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("TARAE_SESSION_END_SCENE", &dir)
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        let said = text.lines().find_map(|l| l.split_once("session-end: ").map(|(_, s)| s.to_string()));
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(said.as_deref(), Some("closed=yes other=yes quit=yes"), "{text}\n{err}");
+    }
 
     fn git_in(dir: &Path, args: &[&str]) -> String {
         let out = std::process::Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();

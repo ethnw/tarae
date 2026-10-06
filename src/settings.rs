@@ -469,6 +469,13 @@ pub static SETTINGS: &[Setting] = &[
         set: |c, v| c.llm.sandbox_localhost = b(v),
     },
     Setting {
+        path: "llm.sandbox-kept-days",
+        kind: Kind::Int { min: 1, max: 3650 },
+        doc: "Chat: days a toolchain's home kept for Claude's commands (Go's build cache, Gradle's home and daemon) may go unused before tarae's start removes it",
+        get: |c| Value::from(c.llm.sandbox_kept_days as i64),
+        set: |c, v| c.llm.sandbox_kept_days = n(v) as u64,
+    },
+    Setting {
         path: "llm.sandbox-write",
         kind: Kind::StrList,
         doc: "Chat: more folders the sandbox lets Claude's commands write to (\"~/scratch\") — never the project's own folders above it",

@@ -10,3 +10,10 @@ test-files = ["*Test.kt", "*Tests.kt"]
 [grammar.kotlin]
 git = "https://github.com/fwcd/tree-sitter-kotlin"
 rev = "c4ddea359a7ff4d92360b2efcd6cfce5dc25afe6"
+
+# Claude's sandbox (`sandboxpack.rs`). The user's Kotlin compile daemons' registry (the Kotlin Gradle plugin's,
+# measured with Kotlin 2.0.21): a client that reads it hands its compile to a daemon started outside the sandbox
+# (compiler plugins run code) — kept from every run, whatever is granted. A run's Gradle build gets a registry
+# of its own (the java pack's Gradle run home)
+[sandbox]
+kept = ["~/.kotlin/daemon"]

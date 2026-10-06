@@ -225,20 +225,34 @@ out of reach — the registry that names them is kept from your commands.""" }
 [sandbox.homes]
 gradle = { env = "GRADLE_USER_HOME", else = "~/.gradle" }
 
-# A run's own Gradle home, made in its folder. The user's holds what their own builds run later — compiled
-# build scripts, the wrapper's distributions, the dependencies — and the registry of their daemons, so a run
-# never writes there, nor reads that registry (measured: a sandboxed build that found it ran in a daemon
-# started outside). In the run's own: the wrapper's distributions linked from the user's (read; only their
-# lock files written), the user's downloaded dependencies read in place, and no daemon kept after the build
-# (`org.gradle.daemon=false`, after the user's `GRADLE_OPTS`): it would live on past the run, inside its
-# sandbox, for nobody. Gone with the run's folder — a small build took 4.5 s from nothing, 3.7 s again
-# (measured)
+# Gradle's home of the runs' own. The user's holds what their own builds run later — compiled build scripts,
+# the wrapper's distributions, the dependencies — and the registry of their daemons, so a run never writes
+# there, nor reads that registry (measured: a sandboxed build that found it ran in a daemon started outside).
+# In the runs' own: the wrapper's distributions linked from the user's (read; only their lock files written)
+# and the user's downloaded dependencies read in place.
+#
+# Kept, with its daemon, for a Gradle project's runs where tarae serves and ends what a run leaves (Linux): one
+# home per project and policy, so a policy narrowed since never reuses a daemon started under a wider one
+# (measured, `target/sb/subreaper.md`: `gradle test` +6% over a plain run with the daemon kept, +411% in a
+# fresh home without one). The daemon ends itself after 30 idle minutes (Gradle's default: 3 hours), and tarae
+# ends it with its session, at quit, or when the project's policy changes. The Kotlin Gradle plugin keeps its
+# compile daemon's registry in `~/.kotlin/daemon` — closed to runs, so it compiled in Gradle's daemon instead
+# (+227%); pointed into this home (`kotlin.daemon.options`, read by the plugin — a Java-only build ignores it) it
+# gets a daemon of the runs' own: within 5–10% of a plain build once warm (`target/sb/kept-homes-plan.md` §1),
+# also ended after 30 idle minutes (Kotlin's default: 2 hours).
+#
+# Elsewhere — macOS, or not a Gradle project — the run's own, gone with its folder, and no daemon kept after
+# the build (`org.gradle.daemon=false`, after the user's `GRADLE_OPTS`): it would live on past the run for
+# nobody, nothing ending it
 [sandbox.run-home.gradle]
 env = "GRADLE_USER_HOME"
+keep = true
+when = ["build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "gradlew"]
 make = ["wrapper"]
 link = { "wrapper/dists" = "{gradle}/wrapper/dists" }
 set = { GRADLE_RO_DEP_CACHE = { value = "{gradle}/caches", if = "{gradle}/caches/modules-2" } }
-append = { GRADLE_OPTS = "-Dorg.gradle.daemon=false" }
+daemon = { make = ["kotlin-daemon"], append = { GRADLE_OPTS = "-Dkotlin.daemon.options=runFilesPath={home}/kotlin-daemon,autoshutdownIdleSeconds=1800 -Dorg.gradle.daemon.idletimeout=1800000" } }
+fresh = { append = { GRADLE_OPTS = "-Dorg.gradle.daemon=false" } }
 said = """{home}: the user's Gradle home stays as it is — their own builds run what's there. Your commands have \
 a Gradle home of their own and read the downloaded dependencies and the wrapper's distributions from theirs: \
 Gradle trying to write there is expected, and the build goes on. A dependency or distribution not downloaded \

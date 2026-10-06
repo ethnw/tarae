@@ -118,6 +118,9 @@ pub struct LlmConfig {
     /// More of tarae's environment their commands get (`sandbox::runenv`): names, or `PREFIX*` families — a
     /// token-like one only by its whole name.
     pub sandbox_env: Vec<String>,
+    /// Days a kept run home (a toolchain's home of the runs', kept across them) stays with no run using it before
+    /// tarae's start removes it (`runhomes.rs`).
+    pub sandbox_kept_days: u64,
     /// Chat: Claude's `screen` tool shows the terminal panel's contents too (`seeing.rs`) — off, its rows go
     /// blank.
     pub screen_terminal: bool,
@@ -147,6 +150,7 @@ impl Default for LlmConfig {
             sandbox_ports: Vec::new(),
             sandbox_localhost: false,
             sandbox_env: Vec::new(),
+            sandbox_kept_days: 14,
             screen_terminal: true,
             stuck_after: 10,
         }

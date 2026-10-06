@@ -593,6 +593,10 @@ beside them:
   the user's later builds. Each run gets its own (`sandbox::gradle_run_home`): the dependencies read in place
   (`GRADLE_RO_DEP_CACHE`), the distributions linked in (only the wrapper's `.zip.lck` files are written —
   `gradle_locks`), no daemon after the build. A small `./gradlew clean test` took 4.5 s cold and 3.7 s warm.
+  (Linux, 2026-10-06: a Gradle project's home is kept per project and policy — the java pack's run home with
+  `daemon` — and its daemon lives on, tarae its last parent: `reaper.rs`, `target/sb/subreaper.md`. +0% over a
+  plain `gradle test`. Kotlin's compile daemon gets its registry there too; kept homes are pruned at start —
+  `runhomes.rs`, `target/sb/kept-homes-plan.md` §5.)
 - **The daemons' registry is kept** (`GRADLE_KEPT`): with it readable and localhost open, a sandboxed
   `./gradlew` handed its build to a daemon started outside, and that build wrote a file the sandbox keeps.
 - **Gradle needs localhost**: its client reaches its own daemon, even with `--no-daemon`'s single-use one, over

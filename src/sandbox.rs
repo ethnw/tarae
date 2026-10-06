@@ -483,6 +483,8 @@ pub struct Policy {
     pub run_env: runenv::RunEnv,
     /// The users' own homes of the tools that get one of the run's (kept as they are), as Claude is told.
     pub run_homes: Vec<RunHomeSaid>,
+    /// The kept run homes its runs get (`with_kept`; held — `policy_in`).
+    pub kept: Vec<Kept>,
     /// Linux: the policy as Landlock's rules (`linux::confine`, made on the worker) — Err why it couldn't be
     /// (the run then doesn't start: `spawn`); None before it's made (`policy` makes it).
     #[cfg(target_os = "linux")]
@@ -1055,7 +1057,9 @@ fn shell_setup(d: &Denial, home: Option<&Path>) -> bool {
 }
 
 /// Whether `d` is expected — the packs' quiet writes (`quiet_writes`), a shell's startup files
-/// (`SHELL_SETUP`).
+/// (`SHELL_SETUP`), a JVM's own `/proc/<pid>/coredump_filter` (it goes on without), a `connect` to port 0
+/// (getaddrinfo sorting its answers by the route to each — a UDP socket, nothing sent; Rocky's `getent ahosts`,
+/// step 7).
 pub fn quiet(d: &Denial) -> bool {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     quiet_in(d, home.as_deref(), quiet_writes())
@@ -1064,7 +1068,10 @@ pub fn quiet(d: &Denial) -> bool {
 /// `quiet` for `home`, its quiet writes at `places` (`quiet_places`).
 fn quiet_in(d: &Denial, home: Option<&Path>, places: &[PathBuf]) -> bool {
     let write = d.op.starts_with("file-write") || d.op == EITHER;
-    (write && places.iter().any(|w| Path::new(&d.target).starts_with(w))) || shell_setup(d, home)
+    (write && places.iter().any(|w| Path::new(&d.target).starts_with(w)))
+        || (write && d.target.starts_with("/proc/") && d.target.ends_with("/coredump_filter"))
+        || (d.op == "network-outbound" && d.target.starts_with("remote:") && d.target.ends_with(":0"))
+        || shell_setup(d, home)
 }
 
 /// The report's calm line on what was kept apart: the shell's setup, not read — None for Go's telemetry
@@ -1176,9 +1183,15 @@ pub struct Watch {
     stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Its run started (`run_started`).
     claimed: std::sync::atomic::AtomicBool,
+    /// Its run's own process is gone: what the run left running tells the project's next run since (`tell`).
+    ended: std::sync::atomic::AtomicBool,
     /// Linux: the thread that confined its run (`owned_by`) — its audit records name it.
     #[cfg(target_os = "linux")]
     owner: std::sync::Arc<Mutex<Option<linux::Owner>>>,
+    /// Linux: the threads that confined its project's earlier runs — what those left running is told here
+    /// (`also_owned_by`).
+    #[cfg(target_os = "linux")]
+    also: std::sync::Arc<Mutex<Vec<linux::Owner>>>,
 }
 
 impl std::fmt::Debug for Watch {
@@ -1204,8 +1217,11 @@ impl Watch {
             blocked: Default::default(),
             stopped: Default::default(),
             claimed: Default::default(),
+            ended: Default::default(),
             #[cfg(target_os = "linux")]
             owner: Default::default(),
+            #[cfg(target_os = "linux")]
+            also: Default::default(),
         });
         LIVE.lock().unwrap_or_else(|e| e.into_inner()).push(std::sync::Arc::downgrade(&w));
         w
@@ -1215,6 +1231,13 @@ impl Watch {
     #[cfg(target_os = "linux")]
     pub fn owned_by(&self, owner: linux::Owner) {
         *self.owner.lock().unwrap_or_else(|e| e.into_inner()) = Some(owner);
+    }
+
+    /// Linux: what the runs confined by `owners` (its project's earlier ones) left running is told here too —
+    /// Landlock's records name the thread that confined the run that started it.
+    #[cfg(target_os = "linux")]
+    pub fn also_owned_by(&self, owners: Vec<linux::Owner>) {
+        *self.also.lock().unwrap_or_else(|e| e.into_inner()) = owners;
     }
 
     /// It ends itself unless a run has started under it (`run_started`) `within` from now.
@@ -1247,6 +1270,9 @@ impl Watch {
                     return;
                 }
             }
+            if let Some(w) = w.upgrade() {
+                w.ended.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
             std::thread::sleep(WATCH_LAST);
             if let Some(w) = w.upgrade() {
                 w.finish();
@@ -1278,9 +1304,10 @@ impl Watch {
     #[cfg(target_os = "linux")]
     pub fn start_audit_from(tag: &str, stream: Command) -> std::sync::Arc<Watch> {
         let w = Watch::quiet(tag);
-        let (owner, mut audit) = (w.owner.clone(), linux::Audit::default());
+        let (owner, also, mut audit) = (w.owner.clone(), w.also.clone(), linux::Audit::default());
         w.read(stream, move |line| {
             audit.owner = owner.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            audit.also(also.lock().unwrap_or_else(|e| e.into_inner()).clone());
             audit.line(line)
         });
         w
@@ -1350,6 +1377,12 @@ impl Watch {
         self.child.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(std::process::Child::id)
     }
 
+    /// Whether its run's process is gone (or it was told to stop).
+    pub fn ended(&self) -> bool {
+        self.ended.load(std::sync::atomic::Ordering::SeqCst)
+            || self.stopped.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// The run is done: no more watching (its last denials have had `WATCH_LAST`).
     pub fn finish(&self) {
         self.stopped.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1364,6 +1397,203 @@ impl Drop for Watch {
     fn drop(&mut self) {
         self.finish();
     }
+}
+
+// ── What runs leave running (Linux — `reaper`) ──────────────────────────
+
+/// A run of Claude's, kept after it's gone for what it left running: whose it was (its project — a session's
+/// checkout), its policy's key (`policy_key`), its own process, its watch, and (Linux) the thread that
+/// confined it — Landlock's records of what it left name that thread.
+struct Ran {
+    tag: String,
+    root: PathBuf,
+    key: String,
+    pid: u32,
+    watch: Option<std::sync::Weak<Watch>>,
+    #[cfg(target_os = "linux")]
+    owner: Option<linux::Owner>,
+}
+
+/// The runs since tarae started, oldest first — `RAN_KEPT` at most.
+static RAN: Mutex<Vec<Ran>> = Mutex::new(Vec::new());
+const RAN_KEPT: usize = 256;
+
+/// What the supervisor refused what a project's runs left, told while none of its runs was going: for the next
+/// one's watch — `PENDING_KEPT` a project.
+static PENDING: Mutex<Vec<(PathBuf, Denial)>> = Mutex::new(Vec::new());
+const PENDING_KEPT: usize = 32;
+
+/// Run `pid` in `p` started: kept by its tag. What its project's earlier runs left and was refused while none
+/// went is its watch's now; what they left under another policy (a grant since, a setting) is ended — it
+/// holds the old one (on a thread of its own).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn ran(p: &Policy, pid: u32) {
+    let Some(tag) = p.tag.clone() else { return };
+    let key = policy_key(p);
+    if let Some(w) = &p.watch {
+        PENDING.lock().unwrap_or_else(|e| e.into_inner()).retain(|(root, d)| match *root == p.root {
+            true => {
+                w.record(d.clone());
+                false
+            }
+            false => true,
+        });
+    }
+    let mut ran = RAN.lock().unwrap_or_else(|e| e.into_inner());
+    ran.push(Ran {
+        tag,
+        root: p.root.clone(),
+        key: key.clone(),
+        pid,
+        watch: p.watch.as_ref().map(std::sync::Arc::downgrade),
+        #[cfg(target_os = "linux")]
+        owner: p.watch.as_ref().and_then(|w| w.owner.lock().unwrap_or_else(|e| e.into_inner()).clone()),
+    });
+    let n = ran.len();
+    ran.drain(..n.saturating_sub(RAN_KEPT));
+    drop(ran);
+    let root = p.root.clone();
+    crate::event::thread("tarae-end", move || {
+        end_left(|r| r.root == root && r.key != key);
+    });
+}
+
+/// The threads that confined the earlier runs of `root`'s project (Linux) — what they left is a new run's
+/// watch's to tell too (`Watch::also_owned_by`).
+#[cfg(target_os = "linux")]
+fn earlier_owners(root: &Path) -> Vec<linux::Owner> {
+    let ran = RAN.lock().unwrap_or_else(|e| e.into_inner());
+    ran.iter().filter(|r| r.root == root).filter_map(|r| r.owner.clone()).collect()
+}
+
+/// A refusal of something run `p` started (Linux's supervisor): its own run's watch while that run goes;
+/// after it, the newest run of its project still going — what a run left is the session's current run's to
+/// say now; none going: kept for the next (`PENDING`).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn tell(p: &Policy, d: Denial) {
+    if let Some(w) = p.watch.as_ref().filter(|w| !w.ended()) {
+        return w.record(d);
+    }
+    let current = RAN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .rev()
+        .filter(|r| r.root == p.root)
+        .find_map(|r| r.watch.as_ref()?.upgrade().filter(|w| !w.ended()));
+    match current {
+        Some(w) => w.record(d),
+        None => {
+            let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+            if pending.iter().filter(|(r, _)| *r == p.root).count() < PENDING_KEPT {
+                pending.push((p.root.clone(), d));
+            }
+        }
+    }
+}
+
+/// A process a run of this tarae's left running: tarae's child now (`reaper`), its tag (`MARK`) naming the
+/// run — and that run's project, when tarae still knows it (not one from before a `:restart`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Left {
+    pub pid: u32,
+    pub tag: String,
+    pub root: Option<PathBuf>,
+}
+
+/// Whether `tag` is one of this tarae's runs' (`RunDir::tag`: `tarae-<pid>-<n>.`).
+fn ours(tag: &str) -> bool {
+    tag.strip_prefix(&format!("tarae-{}-", std::process::id())).is_some_and(|n| n.ends_with('.'))
+}
+
+/// The project of the run tagged `tag` — None: not one tarae knows (`:procs` names what a run left by it).
+pub fn ran_root(tag: &str) -> Option<PathBuf> {
+    let ran = RAN.lock().unwrap_or_else(|e| e.into_inner());
+    ran.iter().find(|r| r.tag == tag).map(|r| r.root.clone())
+}
+
+/// The run of this tarae's whose tag process `pid`'s environment carries: (the tag, its project when known) —
+/// None: no run's. Reads `/proc` (a worker's).
+pub fn left_by(pid: u32) -> Option<(String, Option<PathBuf>)> {
+    let tag = crate::reaper::tag_of(pid).filter(|t| ours(t))?;
+    let root = ran_root(&tag);
+    Some((tag, root))
+}
+
+/// What this tarae's runs left running: its children carrying one of its runs' tags, but those runs' own
+/// processes (a run going, or just ended and not yet reaped). Reads `/proc` (a worker's).
+pub fn leftovers() -> Vec<Left> {
+    let me = std::process::id();
+    let own: Vec<u32> = RAN.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|r| r.pid).collect();
+    crate::procs::children(me)
+        .into_iter()
+        .filter(|pid| !own.contains(pid))
+        .filter(|&pid| crate::procs::read(pid).is_some_and(|o| !o.zombie))
+        .filter_map(|pid| left_by(pid).map(|(tag, root)| Left { pid, tag, root }))
+        .collect()
+}
+
+/// How long what's ended gets for its TERM before KILL.
+const LEFT_TERM: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Ends what the runs `which` picks left running (`reaper::end`) — looked for again a few times: a process
+/// it started under another group comes to tarae once its parent is gone. Blocks up to a few seconds. The
+/// pids ended.
+fn end_left(which: impl Fn(&Ran) -> bool) -> Vec<u32> {
+    let mut ended = Vec::new();
+    for _ in 0..3 {
+        let left = leftovers();
+        let picked: Vec<u32> = {
+            let ran = RAN.lock().unwrap_or_else(|e| e.into_inner());
+            let pick = |l: &Left| ran.iter().find(|r| r.tag == l.tag).is_some_and(&which);
+            left.into_iter().filter(|l| pick(l)).map(|l| l.pid).collect()
+        };
+        if picked.is_empty() {
+            break;
+        }
+        ended.extend(crate::reaper::end(&picked, LEFT_TERM));
+    }
+    if !ended.is_empty() {
+        crate::log::line("sandbox", "info", &format!("ended what runs left running: {ended:?}"));
+    }
+    ended
+}
+
+/// Ends what Claude's runs left running — of the project at `root` (its session ended), or all of it (tarae
+/// quits; one from before a `:restart` too). Blocks up to a few seconds — a worker's, or tarae's end.
+pub fn end_leftovers(root: Option<&Path>) -> Vec<u32> {
+    match root {
+        Some(root) => end_left(|r| r.root == root),
+        None => {
+            let mut ended = end_left(|_| true);
+            // (a run tarae doesn't know any more — before a `:restart`)
+            let unknown: Vec<u32> =
+                leftovers().into_iter().filter(|l| l.root.is_none()).map(|l| l.pid).collect();
+            ended.extend(crate::reaper::end(&unknown, LEFT_TERM));
+            ended
+        }
+    }
+}
+
+/// What a policy allows, as a key: the same project and the same grants and settings give the same key —
+/// what's the run's own (its folder, tag, watch, rules, the environment made from it) left out. What a run
+/// left under one key holds that policy: a run under another ends what the old one left (`ran`), and a home a
+/// daemon lives from is the key's own (`with_kept`).
+pub fn policy_key(p: &Policy) -> String {
+    let mut q = p.clone();
+    (q.run, q.tag, q.watch, q.env) = (None, None, None, Vec::new());
+    // (the kept homes are the project's and the key's — granted by them, not part of what's compared)
+    q.write.retain(|w| !p.kept.iter().any(|k| k.home == *w));
+    q.kept = Vec::new();
+    #[cfg(target_os = "linux")]
+    {
+        q.confine = None;
+    }
+    let mut text = format!("{q:?}");
+    if let Some(r) = &p.run {
+        text = text.replace(&r.path().display().to_string(), "$RUN");
+    }
+    crate::sha256::hex(text.as_bytes())[..16].to_string()
 }
 
 /// A sandboxed run that has printed nothing this long since something was denied may be waiting on it —
@@ -2219,6 +2449,7 @@ impl Policy {
             env: Vec::new(),
             run_env: env.run_env.clone(),
             run_homes: env.run_homes.clone(),
+            kept: Vec::new(),
             #[cfg(target_os = "linux")]
             confine: None,
         }
@@ -2258,9 +2489,12 @@ pub struct Env {
     pub asked_caches: Vec<(String, String, CachesSaid)>,
     /// What no folder opened for writing is or holds (`ask_dir_verdict`).
     pub runs_later: RunsLater,
-    /// The tools' homes kept across the project's runs (the packs' `run-home` with `keep` — `kept_home`): the
+    /// The tools' homes kept across the project's runs (the packs' `run-home` with `keep` — `kept_homes`): the
     /// tool's name, the folder (real; made by the run that needs it).
     pub kept_homes: Vec<(String, PathBuf)>,
+    /// The homes a tool's daemon lives from (`run-home`'s `daemon`), kept per project and policy: the tool's
+    /// name, the folder but the policy's key (`with_kept` puts it after a `-`).
+    pub daemon_homes: Vec<(String, PathBuf)>,
     /// The folders the checkout's build tool names (real paths, as said: `target-dir` · `build-dir`) — a config
     /// in the checkout sets them, so they open only as `asked_dir_verdict` says (#20) — and the tool.
     pub asked: Vec<(PathBuf, String)>,
@@ -2364,7 +2598,12 @@ pub fn missing_why(stderr: &str) -> String {
 /// `env_for`, the toolchain's folders asked as for a run (blocks the first time: a worker's). For what tarae
 /// reads from places no run can write (`gitrepo::for_file_in`).
 pub fn write_places(root: &Path, llm: &crate::llm::LlmConfig) -> Vec<PathBuf> {
-    Policy::for_project(&env_in(root, llm, &[], &Here::now()).0).write_places()
+    let env = env_in(root, llm, &[], &Here::now()).0;
+    let mut p = Policy::for_project(&env);
+    // (the homes a daemon lives from are per policy key too — every one of the tool's, as any run may have
+    // one: what a run may write is never trusted)
+    p.write.extend(env.daemon_homes.iter().filter_map(|(_, base)| base.parent().map(Path::to_path_buf)));
+    p.write_places()
 }
 
 /// What the policy for the project at `root` is made from (`policy`, `write_places`): these settings, the
@@ -2397,7 +2636,8 @@ pub(crate) fn env_in(
     let mut env = Env {
         asked_caches: Vec::new(),
         runs_later: runs_later.unwrap_or_default(),
-        kept_homes: kept_homes(root, real_home.as_deref(), here),
+        kept_homes: kept_homes(root, real_home.as_deref(), here, false),
+        daemon_homes: kept_homes(root, real_home.as_deref(), here, true),
         run_homes: vars.as_ref().map(run_homes_said).unwrap_or_default(),
         reads: reads.unwrap_or_default(),
         root: profile_path(root),
@@ -2441,16 +2681,60 @@ pub(crate) fn env_in(
 
 /// The tools' homes kept across the project's runs (`run-home`s with `keep`, in a project with one of their
 /// `when`): in tarae's cache folder (`$XDG_CACHE_HOME`, else `~/.cache` — as `here` says), `run-homes/<name>/
-/// <the project's key>` — the key, the project's real path's. Not made here (a run makes its own).
-fn kept_homes(root: &Path, home: Option<&Path>, here: &Here) -> Vec<(String, PathBuf)> {
+/// <the project's key>` — the key, the project's real path's. Not made here (a run makes its own). Those a
+/// daemon lives from (`daemon`) apart (`daemon`: true) — only where tarae serves and ends what runs leave
+/// (Linux: `reaper.rs`); elsewhere none: the run's own.
+fn kept_homes(root: &Path, home: Option<&Path>, here: &Here, daemon: bool) -> Vec<(String, PathBuf)> {
+    if daemon && here.os != Os::Linux {
+        return Vec::new();
+    }
     let homes = crate::sandboxpack::get().run_homes.iter();
-    let kept =
-        homes.filter(|h| h.keep && (h.when.is_empty() || h.when.iter().any(|f| root.join(f).exists())));
-    let xdg = here.path("XDG_CACHE_HOME").filter(|p| p.is_absolute()).map(PathBuf::into_os_string);
-    let cache = crate::runtime::cache_dir_of(xdg, home.map(|h| h.as_os_str().to_owned()));
-    let Some(cache) = cache.map(|c| profile_path(&c.join("run-homes"))) else { return Vec::new() };
+    let kept = homes.filter(|h| {
+        h.keep
+            && h.daemon.is_some() == daemon
+            && (h.when.is_empty() || h.when.iter().any(|f| root.join(f).exists()))
+    });
+    let Some(cache) = kept_root(home, here) else { return Vec::new() };
     let key = project_key(root);
     kept.map(|h| (h.name.clone(), cache.join(&h.name).join(&key))).collect()
+}
+
+/// Where kept run homes are: tarae's cache folder's `run-homes` (`$XDG_CACHE_HOME`, else `~/.cache` — as `here`
+/// says), real.
+pub(crate) fn kept_root(home: Option<&Path>, here: &Here) -> Option<PathBuf> {
+    let xdg = here.path("XDG_CACHE_HOME").filter(|p| p.is_absolute()).map(PathBuf::into_os_string);
+    let cache = crate::runtime::cache_dir_of(xdg, home.map(|h| h.as_os_str().to_owned()));
+    cache.map(|c| profile_path(&c.join("run-homes")))
+}
+
+/// `p`'s kept homes (`Policy::kept`, not held yet): the project's (`env.kept_homes`, written already), then
+/// those a daemon lives from (`env.daemon_homes`) under `p`'s key — opened to its runs. The key is taken with
+/// the project's in and the daemon's out, as `policy_key` takes it of the whole policy later (`ran`).
+fn with_kept(p: &mut Policy, env: &Env) {
+    let kept = |(name, home): &(String, PathBuf), daemon| Kept {
+        name: name.clone(),
+        home: home.clone(),
+        daemon,
+        held: Default::default(),
+    };
+    p.kept = env.kept_homes.iter().map(|h| kept(h, false)).collect();
+    let key = policy_key(p);
+    for (name, base) in &env.daemon_homes {
+        let home = PathBuf::from(format!("{}-{key}", base.display()));
+        p.write.push(home.clone());
+        p.kept.push(kept(&(name.clone(), home), true));
+    }
+}
+
+/// A kept run home a run gets (the packs' `run-home` with `keep`): the tool's name, its folder (real), whether a
+/// daemon lives from it (`daemon`: kept per policy too), and its stamp, held while the policy lives — a kept
+/// home in use is never pruned (`runhomes.rs`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Kept {
+    pub name: String,
+    pub home: PathBuf,
+    pub daemon: bool,
+    pub held: crate::runhomes::Held,
 }
 
 /// A project's key among the kept homes: its real path's (sha256, 16 hex).
@@ -2514,16 +2798,36 @@ pub(crate) fn policy_in(root: &Path, llm: &crate::llm::LlmConfig, reads: &[PathB
         env.reads.copies = crate::tokens::copies(&sources, dir, h, reads, &env.reads.kept);
         env.reads.copies.told = crate::tokens::told_holders(&vars_in(h, here), &above);
     }
+    let mut p = Policy { run, tag, ..Policy::for_project(&env) };
+    with_kept(&mut p, &env);
+    // The kept homes held (their stamps, before they're made: a prune can't take one between) — one that can't
+    // be is no kept home for this run: the run's own, and its folder not written (`policy_key` leaves the
+    // kept homes out of `write`: gone from both, the key is the same — the same policy's daemon isn't ended)
+    if p.run.is_some() {
+        let mut dropped = Vec::new();
+        p.kept.retain_mut(|k| match crate::runhomes::stamp(&k.home, &p.root) {
+            Ok(held) => {
+                k.held = held;
+                true
+            }
+            Err(e) => {
+                crate::log::line("sandbox", "warning", &format!("kept home {}: {e}", k.home.display()));
+                dropped.push(k.home.clone());
+                false
+            }
+        });
+        p.write.retain(|w| !dropped.contains(w));
+    }
     // The run's own homes for the tools, and the packs' variables (`{run}`: its folder)
     let vars = real_home.as_deref().map(|h| crate::sandboxpack::Vars {
-        run: run.as_ref().map(|r| r.path().to_path_buf()),
+        run: p.run.as_ref().map(|r| r.path().to_path_buf()),
         ..vars_in(h, here)
     });
     let made =
-        run.as_ref().zip(vars.as_ref()).map(|(r, v)| run_homes_made(r.path(), v, here, &env.kept_homes));
-    let mut vars_env = made.unwrap_or_default();
-    vars_env.extend(vars.as_ref().map(packs_env).unwrap_or_default());
-    Policy { run, tag, env: vars_env, ..Policy::for_project(&env) }
+        p.run.as_ref().zip(vars.as_ref()).map(|(r, v)| run_homes_made(r.path(), v, &p.run_env, &p.kept));
+    p.env = made.unwrap_or_default();
+    p.env.extend(vars.as_ref().map(packs_env).unwrap_or_default());
+    p
 }
 
 /// The packs' `env` for a run, its places filled in (`vars` knows the run's folder): one naming a place that
@@ -2563,29 +2867,33 @@ pub fn confined(mut p: Policy) -> Policy {
 /// the project (only tarae's: 0700) — the folders each says, links from it into the user's places that are
 /// there (read only — what a run writes there is the packs' `write-files`), and the environment that points
 /// the tool there — its variable, what's set (when its `if` place is there), what's appended to the user's own
-/// value (`here`'s). Gone with the run's folder, but a kept one. What's made in a home goes through no link
-/// (`Unlinked`): a kept one is a folder earlier runs wrote in, and tarae isn't sandboxed. Blocks (a worker's).
+/// value as the run gets it (`run_env`'s: a token-like one is left out, and gets only what's appended — never
+/// tarae's own value, which goes in after `from_run_env`; `{home}` in it: the home's folder) — and, a home a
+/// daemon lives from, its `daemon`'s folders and appends; a home of the run's own, its `fresh` appends. Gone
+/// with the run's folder, but a kept one. What's made in a home goes through no link (`Unlinked`): a kept one
+/// is a folder earlier runs wrote in, and tarae isn't sandboxed. Blocks (a worker's).
 fn run_homes_made(
     run: &Path,
     vars: &crate::sandboxpack::Vars,
-    here: &Here,
-    kept: &[(String, PathBuf)],
+    run_env: &runenv::RunEnv,
+    kept: &[Kept],
 ) -> Vec<(String, String)> {
     let at = |p: &str| vars.place(p).map(|p| profile_path(&p));
-    let mut env = Vec::new();
+    let mut env: Vec<(String, String)> = Vec::new();
     for h in &crate::sandboxpack::get().run_homes {
-        let kept = kept.iter().find(|(name, _)| *name == h.name).map(|(_, home)| home);
+        let kept = kept.iter().find(|k| k.name == h.name);
         // (no kept one, or one that's a link: the run's own, as before)
-        let made = kept.and_then(|k| Some((k.clone(), Unlinked::made(k).ok()?)));
-        let (home, dir) = match made {
-            Some((home, dir)) => (home, Ok(dir)),
-            None => (run.join(&h.name), Unlinked::made(&run.join(&h.name))),
+        let made = kept.and_then(|k| Some((k.home.clone(), k.daemon, Unlinked::made(&k.home).ok()?)));
+        let fresh = made.is_none();
+        let (home, daemon, dir) = match made {
+            Some((home, daemon, dir)) => (home, daemon.then_some(h.daemon.as_ref()).flatten(), Ok(dir)),
+            None => (run.join(&h.name), None, Unlinked::made(&run.join(&h.name))),
         };
         env.push((h.env.clone(), home.display().to_string()));
         let mut said = Vec::new();
         match &dir {
             Ok(dir) => {
-                for m in &h.make {
+                for m in h.make.iter().chain(daemon.iter().flat_map(|d| &d.make)) {
                     if let Err(e) = dir.folder(Path::new(m), &mut said) {
                         said.push(e);
                     }
@@ -2610,11 +2918,18 @@ fn run_homes_made(
                 env.push((var.clone(), value.display().to_string()));
             }
         }
-        for (var, more) in &h.append {
-            let theirs = here.var(var);
+        let fresh = fresh.then_some(&h.fresh).into_iter().flatten();
+        for (var, more) in h.append.iter().chain(daemon.iter().flat_map(|d| &d.append)).chain(fresh) {
+            let more = more.replace("{home}", &home.display().to_string());
+            // (after what's appended already — the user's own value first, as the run gets it)
+            let i = env.iter().position(|(k, _)| k == var);
+            let theirs = match i {
+                Some(i) => Some(env.remove(i).1),
+                None => run_env.var(var),
+            };
             let value = match theirs.as_deref().map(str::trim).filter(|o| !o.is_empty()) {
                 Some(o) => format!("{o} {more}"),
-                None => more.clone(),
+                None => more,
             };
             env.push((var.clone(), value));
         }
@@ -2944,9 +3259,10 @@ fn output_in(
     serde_json::from_slice(&out.stdout).ok()
 }
 
-/// What tarae sets in every sandboxed run besides the packs' `env` (`inside_env`, `task::color_off`) — and
-/// `TARAE_UI`, never a run of Claude's: none said as left out of its environment.
-const SET_IN_RUNS: [&str; 4] = [MARK, "GIT_OPTIONAL_LOCKS", "NO_COLOR", "TARAE_UI"];
+/// What tarae sets in every sandboxed run besides the packs' `env` (`inside_env`, `command`'s npm line,
+/// `task::color_off`) — and `TARAE_UI`, never a run of Claude's: none said as left out of its environment.
+const SET_IN_RUNS: [&str; 5] =
+    [MARK, "GIT_OPTIONAL_LOCKS", "npm_config_update_notifier", "NO_COLOR", "TARAE_UI"];
 
 /// What a run in a policy made with these settings gets of `here`'s environment (`runenv::of`): the floor,
 /// the proxies with the network open, what the packs' places read, the packs' `pass`, `llm.sandbox-env`.
@@ -2973,11 +3289,12 @@ fn from_run_env<'c>(c: &'c mut Command, p: &Policy) -> &'c mut Command {
     c.envs(p.run_env.vars.iter().map(|(k, v, _)| (k, v)))
 }
 
-/// What a sandboxed command's environment says: that it's sandboxed (`MARK`), and `GIT_OPTIONAL_LOCKS=0` —
-/// git's read-only commands (status, diff) otherwise refresh the index on the side, a write into `.git` the
-/// sandbox denies: noise in every report (measured: 6 denials in one `cargo test`).
-fn inside_env(c: &mut Command) -> &mut Command {
-    c.env(MARK, "1").env("GIT_OPTIONAL_LOCKS", "0")
+/// What a sandboxed command's environment says: that it's sandboxed (`MARK` — its value the run's tag: what
+/// the run leaves running carries it, `reaper`), and `GIT_OPTIONAL_LOCKS=0` — git's read-only commands
+/// (status, diff) otherwise refresh the index on the side, a write into `.git` the sandbox denies: noise in
+/// every report (measured: 6 denials in one `cargo test`).
+fn inside_env<'c>(c: &'c mut Command, tag: Option<&str>) -> &'c mut Command {
+    c.env(MARK, tag.unwrap_or("1")).env("GIT_OPTIONAL_LOCKS", "0")
 }
 
 /// The watch for a run in `p` (on a worker; give one with a stream — `Watch::pid` — `WATCH_READY` before the
@@ -2989,7 +3306,11 @@ pub fn watch_for(p: &Policy) -> Option<std::sync::Arc<Watch>> {
     #[cfg(target_os = "linux")]
     return match &p.confine {
         Some(Ok(c)) => match &c.audit {
-            Ok(source) => Some(Watch::start_audit(tag, source)),
+            Ok(source) => {
+                let w = Watch::start_audit(tag, source);
+                w.also_owned_by(earlier_owners(&p.root));
+                Some(w)
+            }
             Err(_) if c.serve.is_ok() => Some(Watch::quiet(tag)),
             Err(_) => None,
         },
@@ -3019,6 +3340,7 @@ pub fn spawn(policy: Option<&Policy>, cmd: &Command) -> std::io::Result<crate::s
         };
         let serve = std::sync::Arc::new(p.clone());
         let spawned = linux::confined(c, Some(serve), owner, || crate::spawn::setsid(cmd))?;
+        ran(p, spawned.pid);
         // (what was made first, still empty once the run is gone, goes — the run's own thread reaps it)
         let (made, pid) = (c.made.clone(), spawned.pid);
         if !made.paths.is_empty() {
@@ -3071,10 +3393,13 @@ pub fn command(policy: Option<&Policy>, program: &str, args: &[String]) -> Comma
             };
             c.args(args);
             from_run_env(&mut c, p);
-            inside_env(&mut c).envs(p.env.iter().map(|(k, v)| (k, v)));
+            inside_env(&mut c, p.tag.as_deref()).envs(p.env.iter().map(|(k, v)| (k, v)));
             if let Some(run) = &p.run {
                 c.env("TMPDIR", run.path());
             }
+            // (npm's daily check for its own update writes the date in `~/.npm`, closed — and asks the network:
+            // reported blocked in every npm run on the VMs, step 7)
+            c.env("npm_config_update_notifier", "false");
             for (var, copy) in &p.reads.copies.env {
                 c.env(var, copy);
             }
@@ -3260,7 +3585,7 @@ mod tests {
         let before = std::fs::read(dir.join(".git/index")).unwrap();
         let mut status = Command::new("git");
         status.args(["status", "--porcelain"]).current_dir(&dir);
-        let out = inside_env(&mut status).output().unwrap();
+        let out = inside_env(&mut status, None).output().unwrap();
         assert!(out.status.success() && out.stdout.is_empty(), "{out:?}");
         assert_eq!(std::fs::read(dir.join(".git/index")).unwrap(), before, "the index was rewritten");
         std::fs::remove_dir_all(&dir).ok();
@@ -3329,7 +3654,8 @@ mod tests {
         let mut env = HashMap::from([("GRADLE_USER_HOME".to_string(), user.into())]);
         env.extend(opts.map(|o| ("GRADLE_OPTS".to_string(), o.into())));
         let here = Here { env, ..Here::default() };
-        run_homes_made(run, &vars_in(&user.join("no-home"), &here), &here, &[])
+        let run_env = run_env_of(&here, &crate::llm::LlmConfig::default());
+        run_homes_made(run, &vars_in(&user.join("no-home"), &here), &run_env, &[])
     }
 
     /// The multiplexers' socket folders, where they put them by default and where the environment says.
@@ -3764,6 +4090,138 @@ mod tests {
                 && open.writes_allow(&modcache.join("x"))
         );
         assert!(!open.write.contains(&home.join("go")), "{:?}", open.write);
+    }
+
+    /// A home a tool's daemon lives from (the java pack's Gradle row, `daemon`): on Linux, a Gradle project's runs
+    /// get one kept per project and policy — its name ends with the policy's key as `ran` takes it, made only
+    /// tarae's, written by those runs, the daemon left on (the user's `GRADLE_OPTS`, then the row's `daemon`
+    /// appends: Kotlin's registry in it as `{home}`, both daemons' idle ends — no `org.gradle.daemon=false`), its
+    /// own folders made; the same project and policy find it again, another policy (a port opened) another. Its
+    /// stamp is held while the policy lives — a prune leaves it — and once that's gone a prune takes it. On
+    /// macOS, or in a project with none of Gradle's files: the run's own, the daemon off (`fresh`), nothing of
+    /// Kotlin's. (A stand-in home in the test's own folder; no Gradle is run.)
+    #[test]
+    fn a_daemons_home_is_kept_per_project_and_policy() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::Duration;
+        let tmp = std::env::temp_dir();
+        let tmp = if tmp.starts_with(TMP) { PathBuf::from("/var/tmp") } else { tmp };
+        let base = tmp.join(format!("tarae-daemon-home-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        for d in ["home/work/g", "home/work/plain"] {
+            std::fs::create_dir_all(base.join(d)).unwrap();
+        }
+        let base = std::fs::canonicalize(&base).unwrap();
+        let home = base.join("home");
+        let (g, plain) = (home.join("work/g"), home.join("work/plain"));
+        std::fs::write(g.join("settings.gradle.kts"), "").unwrap();
+        let here = |os: Os| {
+            let env = [("HOME", home.clone().into()), ("GRADLE_OPTS", "-Xmx1g".into())];
+            Here {
+                env: env.map(|(k, v): (&str, std::ffi::OsString)| (k.to_string(), v)).into(),
+                os,
+                ..Here::default()
+            }
+        };
+        let policy = |root: &Path, os: Os, ports: Vec<u16>| {
+            toolchain_found_in(root, ToolDirs::default(), &here(os));
+            let llm = crate::llm::LlmConfig { sandbox_ports: ports, ..Default::default() };
+            policy_in(root, &llm, &[], &here(os))
+        };
+        let var = |p: &Policy, k: &str| p.env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        let kept = home.join(".cache/tarae/run-homes/gradle");
+        let a = policy(&g, Os::Linux, Vec::new());
+        let key = policy_key(&a);
+        let ours = PathBuf::from(var(&a, "GRADLE_USER_HOME").unwrap());
+        assert_eq!(ours, kept.join(format!("{}-{}", project_key(&g), policy_key(&a))), "the key `ran` takes");
+        assert_eq!(std::fs::metadata(&ours).unwrap().permissions().mode() & 0o777, 0o700, "only tarae's");
+        assert!(a.write.contains(&ours) && a.writes_allow(&ours.join("caches/x")));
+        let opts = format!(
+            "-Xmx1g -Dkotlin.daemon.options=runFilesPath={}/kotlin-daemon,autoshutdownIdleSeconds=1800 \
+             -Dorg.gradle.daemon.idletimeout=1800000",
+            ours.display()
+        );
+        assert_eq!(var(&a, "GRADLE_OPTS"), Some(opts), "the daemons on, ending themselves");
+        assert!(ours.join("kotlin-daemon").is_dir() && ours.join("wrapper").is_dir());
+        let again = policy(&g, Os::Linux, Vec::new());
+        assert_eq!(
+            var(&again, "GRADLE_USER_HOME"),
+            var(&a, "GRADLE_USER_HOME"),
+            "the same project and policy"
+        );
+        let other = PathBuf::from(var(&policy(&g, Os::Linux, vec![8080]), "GRADLE_USER_HOME").unwrap());
+        assert!(other.starts_with(&kept) && other != ours, "another policy: {other:?}");
+        // Held while a policy lives: a prune leaves it; let go, a prune of homes unused that long takes it
+        let later = std::time::SystemTime::now() + Duration::from_secs(400 * 24 * 3600);
+        let root = kept.parent().unwrap();
+        let day = Duration::from_secs(24 * 3600);
+        assert!(crate::runhomes::prune(root, later, day, |_| false).iter().all(|(h, ..)| *h != ours));
+        assert!(ours.join("kotlin-daemon").is_dir(), "kept while held");
+        drop((a, again));
+        // (a process another test forks shares the stamp's lock until its `exec` closes it: looked for again
+        // while that's so — a lock never let go fails all the same)
+        let went = (0..100).find_map(|_| {
+            let went = crate::runhomes::prune(root, later, day, |_| false);
+            let gone = went.iter().any(|(h, ..)| *h == ours);
+            gone.then_some(went).or_else(|| {
+                std::thread::sleep(Duration::from_millis(20));
+                None
+            })
+        });
+        assert!(went.is_some() && !ours.exists(), "never let go");
+        // A stamp that can't be made (a folder where it goes): no kept home for that run — the run's own, the
+        // kept one not written — and the same key, so `ran` doesn't end the same policy's daemon
+        let stamp = ours.with_file_name(format!("{}.stamp", ours.file_name().unwrap().to_string_lossy()));
+        std::fs::create_dir_all(&stamp).unwrap();
+        let p = policy(&g, Os::Linux, Vec::new());
+        let run = p.run.as_ref().unwrap().path().join("gradle");
+        assert_eq!(var(&p, "GRADLE_USER_HOME"), Some(run.display().to_string()));
+        assert!(p.kept.is_empty() && !p.write.contains(&ours) && !p.writes_allow(&ours.join("caches/x")));
+        assert_eq!(policy_key(&p), key, "the same policy");
+        drop(p);
+        std::fs::remove_dir(&stamp).unwrap();
+        // macOS, and a project with none of Gradle's files: the run's own, the daemon off, nothing of Kotlin's
+        for (root, os) in [(&g, Os::Mac), (&plain, Os::Linux)] {
+            let p = policy(root, os, Vec::new());
+            let run = p.run.as_ref().unwrap().path().join("gradle");
+            assert_eq!(var(&p, "GRADLE_USER_HOME"), Some(run.display().to_string()), "{os:?}");
+            assert_eq!(var(&p, "GRADLE_OPTS").as_deref(), Some("-Xmx1g -Dorg.gradle.daemon=false"), "{os:?}");
+            assert!(!p.write.iter().any(|w| w.starts_with(&kept)) && p.kept.is_empty(), "{os:?}");
+        }
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// What a run home appends to (the java pack's `GRADLE_OPTS`) is the user's value as the run gets it: one
+    /// holding a fake password (`-D…Password=`, left out as token-like) gives the run only tarae's append — the
+    /// fake never comes back through it, on either system's appends; a harmless one still comes first.
+    #[test]
+    fn a_run_homes_append_starts_from_the_runs_own_value() {
+        let tmp = std::env::temp_dir();
+        let tmp = if tmp.starts_with(TMP) { PathBuf::from("/var/tmp") } else { tmp };
+        let base = tmp.join(format!("tarae-append-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::create_dir_all(base.join("home/work/g")).unwrap();
+        let base = std::fs::canonicalize(&base).unwrap();
+        let (home, g) = (base.join("home"), base.join("home/work/g"));
+        std::fs::write(g.join("settings.gradle.kts"), "").unwrap();
+        let opts_in_run = |opts: &str, os: Os| {
+            let env = [("HOME", home.clone().into()), ("GRADLE_OPTS", opts.into())];
+            let env = env.map(|(k, v): (&str, std::ffi::OsString)| (k.to_string(), v)).into();
+            let here = Here { env, os, ..Here::default() };
+            toolchain_found_in(&g, ToolDirs::default(), &here);
+            let p = policy_in(&g, &crate::llm::LlmConfig::default(), &[], &here);
+            let c = command(Some(&p), "/bin/sh", &["-c".into(), "true".into()]);
+            let opts = c.get_envs().find(|(k, _)| *k == "GRADLE_OPTS").and_then(|(_, v)| v);
+            opts.map(|v| v.to_string_lossy().into_owned()).unwrap_or_default()
+        };
+        let fake = format!("-Xmx2g -Dorg.gradle.project.repoPassword={FAKE}");
+        let mac = opts_in_run(&fake, Os::Mac);
+        assert_eq!(mac, "-Dorg.gradle.daemon=false", "tarae's append only");
+        let linux = opts_in_run(&fake, Os::Linux);
+        assert!(linux.starts_with("-Dkotlin.daemon.options=") && !linux.contains("Xmx2g"), "{linux}");
+        assert!(!mac.contains(FAKE) && !linux.contains(FAKE));
+        assert_eq!(opts_in_run("-Xmx2g", Os::Mac), "-Xmx2g -Dorg.gradle.daemon=false", "the user's first");
+        std::fs::remove_dir_all(&base).ok();
     }
 
     /// Go's build cache for runs is the project's own, kept across its runs in tarae's cache folder — made only
@@ -4208,15 +4666,20 @@ mod tests {
         let here = Here { env, ..Here::default() };
         let vars = vars_in(&user.join("no-home"), &here);
         let made = |kept: &Path| {
-            let env = run_homes_made(&run, &vars, &here, &[("gradle".into(), kept.to_path_buf())]);
+            // (as a home a daemon lives from: its own folders too)
+            let k = Kept { name: "gradle".into(), home: kept.into(), daemon: true, held: Default::default() };
+            let env = run_homes_made(&run, &vars, &Default::default(), &[k]);
             env.into_iter().find(|(k, _)| k == "GRADLE_USER_HOME").map(|(_, v)| PathBuf::from(v))
         };
         let symlink = |to: &Path, at: &Path| std::os::unix::fs::symlink(to, at).unwrap();
         let is_link = |p: &Path| p.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink());
-        // A link where the made folder goes: removed, the folder made, the wrapper's link in it
+        // A link where the made folder goes: removed, the folder made, the wrapper's link in it — and where the
+        // daemon's own folder goes too
         symlink(&away, &kept.join("wrapper"));
+        symlink(&away, &kept.join("kotlin-daemon"));
         assert_eq!(made(&kept), Some(kept.clone()));
         assert!(!is_link(&kept.join("wrapper")) && kept.join("wrapper").is_dir());
+        assert!(!is_link(&kept.join("kotlin-daemon")) && kept.join("kotlin-daemon").is_dir());
         assert_eq!(std::fs::read_link(kept.join("wrapper/dists")).unwrap(), dists);
         // A link where the wrapper's link goes, pointing elsewhere: replaced
         std::fs::remove_file(kept.join("wrapper/dists")).unwrap();
@@ -4239,6 +4702,23 @@ mod tests {
         assert!(run.join("gradle/wrapper/dists").is_symlink());
         assert_eq!(std::fs::read_dir(&away).unwrap().count(), 0, "nothing made through a link");
         std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// A policy's key (`policy_key`): the same project, grants and settings give the same key, whatever is a
+    /// run's own (its folder, its tag); a port opened since gives another.
+    #[test]
+    fn a_policys_key_is_what_it_allows() {
+        let p = |root: &Path, ports: Vec<u16>| {
+            let run = RunDir::new().ok();
+            let e = Env { ports, ..env(root) };
+            Policy { tag: run.as_ref().map(|r| r.tag()), run, ..Policy::for_project(&e) }
+        };
+        let root = Path::new("/w/p");
+        let (a, b) = (p(root, Vec::new()), p(root, Vec::new()));
+        assert_ne!(a.run, b.run);
+        assert_eq!(policy_key(&a), policy_key(&b), "a run's own isn't in it");
+        assert_ne!(policy_key(&a), policy_key(&p(root, vec![8080])), "a port opened");
+        assert_ne!(policy_key(&a), policy_key(&p(Path::new("/w/q"), Vec::new())), "another project");
     }
 
     /// What Claude reads about Gradle (Java under P2): its writes in the user's Gradle home — the read-only
@@ -4806,6 +5286,34 @@ mod tests {
         assert!(r.starts_with("The sandbox blocked 2 things — 2 times:\n") && r.contains(&at), "{r}");
     }
 
+    /// Step 7 on the VMs: what was reported as blocked though nothing needed it. npm checks for its own update
+    /// once a day, writing the date in `~/.npm` — a run is told not to (the user's own runs as they are); the
+    /// JVM writes its own `/proc/<pid>/coredump_filter` and goes on; getaddrinfo `connect`s a UDP socket to
+    /// port 0 of each address to sort them (nothing is sent). Those last two quiet — a write or a connect
+    /// beside them still named.
+    #[test]
+    fn what_runs_try_harmlessly_stays_quiet() {
+        let p = Policy { run: RunDir::new().ok(), ..Policy::for_project(&env(Path::new("/Users/u/p"))) };
+        let notifier = |c: &Command| {
+            c.get_envs()
+                .find(|(k, _)| *k == "npm_config_update_notifier")
+                .and_then(|(_, v)| v)
+                .map(|v| v.to_owned())
+        };
+        assert_eq!(notifier(&command(Some(&p), "npm", &["ci".into()])), Some("false".into()));
+        assert_eq!(notifier(&command(None, "npm", &["ci".into()])), None, "the user's own runs as they are");
+        let out = |target: &str| Denial {
+            process: "getent".into(),
+            op: "network-outbound".into(),
+            target: target.into(),
+        };
+        assert!(quiet(&denial("file-write*", "/proc/198585/coredump_filter")));
+        assert!(quiet(&out("remote:127.0.0.1:0")) && quiet(&out("remote:[::1]:0")));
+        assert!(!quiet(&denial("file-write*", "/proc/198585/environ")));
+        assert!(!quiet(&denial("file-write*", "/home/u/proc/1/coredump_filter")));
+        assert!(!quiet(&out("remote:127.0.0.1:10")) && !quiet(&out("remote:169.254.169.254:53")));
+    }
+
     /// What Claude reads: what was blocked (deduplicated, with who tried); that nothing was; or that nothing
     /// could watch — then the output's refusals.
     #[test]
@@ -4971,6 +5479,7 @@ mod tests {
             env: Vec::new(),
             run_env: Default::default(),
             run_homes: Vec::new(),
+            kept: Vec::new(),
         };
         let sh = |script: &str| {
             let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
@@ -5043,6 +5552,7 @@ mod tests {
                 env: Vec::new(),
                 run_env: Default::default(),
                 run_homes: Vec::new(),
+                kept: Vec::new(),
             };
             let sh = |script: &str| {
                 let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
@@ -5115,6 +5625,7 @@ mod tests {
             env: Vec::new(),
             run_env: Default::default(),
             run_homes: Vec::new(),
+            kept: Vec::new(),
         };
         let pid = std::process::id();
         let (mine, other) = (format!("tarae-test-{pid}-1."), format!("tarae-test-{pid}-10."));
@@ -5174,6 +5685,7 @@ mod tests {
             env: Vec::new(),
             run_env: Default::default(),
             run_homes: Vec::new(),
+            kept: Vec::new(),
         };
         let sh = |script: &str| {
             let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
@@ -6213,6 +6725,7 @@ mod tests {
             env: Vec::new(),
             run_env: Default::default(),
             run_homes: Vec::new(),
+            kept: Vec::new(),
         };
         let reached = |p: &Policy, l: &TcpListener| {
             let script = format!("/usr/bin/nc -z -w 2 127.0.0.1 {}", port(l));

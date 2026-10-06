@@ -30,12 +30,15 @@
 //!   sandbox it's for, with the packs' `env` — by JSON key, the folders it writes outside it (`json`), its
 //!   shared caches (`caches`, said by a `[sandbox.caches] asked`), what no run reads (`kept`).
 //! - `builds-said = { who, target, build }`: how the sandbox names the `[builds]` folders it was asked.
-//! - `run-home.<name> = { env, keep, when, make, link, set, append, said }`: a home of the run's own for the
-//!   tool named, made in the run's folder (`{run}/<name>`) — or, `keep`, kept across the project's runs in
-//!   tarae's cache folder (`run-homes/<name>/<the project's>`) where it has one of `when` — `env` pointing at
-//!   it: folders made in it, links from it into the tool's home (read only), variables `set` (`{ value, if }`:
-//!   when `if` is there) and `append`ed to the run's own; `said` what Claude reads when a write in the user's
-//!   home of the tool was kept.
+//! - `run-home.<name> = { env, keep, when, make, link, set, append, daemon, fresh, said }`: a home of the
+//!   run's own for the tool named, made in the run's folder (`{run}/<name>`) — or, `keep`, kept across the
+//!   project's runs in tarae's cache folder (`run-homes/<name>/<the project's>`) where it has one of `when` —
+//!   `env` pointing at it: folders made in it, links from it into the tool's home (read only), variables `set`
+//!   (`{ value, if }`: when `if` is there) and `append`ed to the run's own (`{home}`: this home's folder);
+//!   `daemon = { make, append }` (kept ones): the tool leaves a daemon serving later runs from it — kept per
+//!   project *and policy* where tarae ends what runs leave (Linux; elsewhere the run's own), and that made and
+//!   appended then; `fresh = { append }`: appended only to a home of the run's own; `said` what Claude reads
+//!   when a write in the user's home of the tool was kept.
 //! - `env`: variables in every run's environment (`{run}`: the run's own folder).
 //! - `pass`: what of the user's environment a run gets besides the core's floor (`sandbox::runenv`) — the
 //!   toolchain's own variables: names, or `PREFIX*` families (two characters at least before the `*`); never
@@ -178,8 +181,21 @@ pub struct RunHome {
     pub link: Vec<(String, String)>,
     /// (variable, value, only when this is there)
     pub set: Vec<(String, String, Option<String>)>,
+    /// Appended to the run's own value, whatever the home (`{home}`: the home's folder).
     pub append: Vec<(String, String)>,
+    /// The tool leaves a daemon serving later runs from it (`daemon`): kept per project and policy where tarae
+    /// ends what runs leave — and this made and appended then.
+    pub daemon: Option<Daemon>,
+    /// Appended only to a home of the run's own (`fresh` — not kept).
+    pub fresh: Vec<(String, String)>,
     pub said: String,
+}
+
+/// What a home a daemon lives from gets besides (`run-home`'s `daemon`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Daemon {
+    pub make: Vec<String>,
+    pub append: Vec<(String, String)>,
 }
 
 /// One of a setting's files: a place, or the file in the first of some folders that's there (else the last).
@@ -261,7 +277,9 @@ impl Packs {
     pub fn env_names(&self) -> impl Iterator<Item = &str> {
         let homes = self.homes.iter().map(|h| h.env.as_str());
         let runs = self.run_homes.iter().flat_map(|r| {
-            let set = r.set.iter().map(|(k, ..)| k.as_str()).chain(r.append.iter().map(|(k, _)| k.as_str()));
+            let daemon = r.daemon.iter().flat_map(|d| &d.append);
+            let appended = r.append.iter().chain(daemon).chain(&r.fresh).map(|(k, _)| k.as_str());
+            let set = r.set.iter().map(|(k, ..)| k.as_str()).chain(appended);
             std::iter::once(r.env.as_str()).chain(set)
         });
         let env = self.env.iter().map(|(k, _)| k.as_str());
@@ -571,7 +589,7 @@ fn read_key(out: &mut Packs, pack: &str, table: &str, key: &str, v: &Value) -> R
 }
 
 fn run_home(name: &str, h: &Table, homes: &[Home]) -> Result<RunHome, String> {
-    let keys = ["env", "keep", "when", "make", "link", "set", "append", "said"];
+    let keys = ["env", "keep", "when", "make", "link", "set", "append", "daemon", "fresh", "said"];
     known(h, &keys, &format!("`run-home.{name}`"))?;
     if !plain_word(name) {
         return Err(format!("`run-home.{name}`: a home's name is a folder's"));
@@ -602,11 +620,29 @@ fn run_home(name: &str, h: &Table, homes: &[Home]) -> Result<RunHome, String> {
         };
         r.set.push((k.clone(), value, when));
     }
-    for (k, v) in h.get("append").map_or(Ok(Vec::new()), |a| pairs(a, "append"))? {
-        check_var(&k)?;
-        r.append.push((k, v));
+    let appended = |t: &Table| -> Result<Vec<(String, String)>, String> {
+        let a = t.get("append").map_or(Ok(Vec::new()), |a| pairs(a, "append"))?;
+        a.iter().try_for_each(|(k, _)| check_var(k))?;
+        Ok(a)
+    };
+    r.append = appended(h)?;
+    if let Some(d) = h.get("daemon") {
+        let d = d.as_table().ok_or(format!("`run-home.{name}.daemon` isn't a table"))?;
+        known(d, &["make", "append"], &format!("`run-home.{name}.daemon`"))?;
+        if !r.keep {
+            return Err(format!(
+                "`run-home.{name}`: a home a daemon lives from is a kept one (`keep = true`)"
+            ));
+        }
+        r.daemon = Some(Daemon { make: list_in(d, "make")?, append: appended(d)? });
     }
-    if r.make.iter().chain(r.link.iter().map(|(k, _)| k)).any(|p| !plain(p)) {
+    if let Some(f) = h.get("fresh") {
+        let f = f.as_table().ok_or(format!("`run-home.{name}.fresh` isn't a table"))?;
+        known(f, &["append"], &format!("`run-home.{name}.fresh`"))?;
+        r.fresh = appended(f)?;
+    }
+    let daemon_made = r.daemon.iter().flat_map(|d| &d.make);
+    if r.make.iter().chain(daemon_made).chain(r.link.iter().map(|(k, _)| k)).any(|p| !plain(p)) {
         return Err(format!("`run-home.{name}`: what's made in it is a path of plain names"));
     }
     r.said = string(h, "said")?.unwrap_or_default();
@@ -675,8 +711,9 @@ fn pairs(v: &Value, what: &str) -> Result<Vec<(String, String)>, String> {
     t.iter().map(each).collect()
 }
 
-/// The core's own variables (`Vars`) — no home may take one's name.
-const CORE_VARS: [&str; 4] = ["user-config", "user-cache", "xdg-config", "run"];
+/// The core's own variables (`Vars`, and a run home's `{home}` in what it appends) — no home may take one's
+/// name.
+const CORE_VARS: [&str; 5] = ["user-config", "user-cache", "xdg-config", "run", "home"];
 
 /// Variables no tool's home comes from: they'd make it home, the folders on `PATH`, or the temp folders.
 const NOT_A_HOME: [&str; 4] = ["HOME", "PATH", "TMPDIR", "PWD"];

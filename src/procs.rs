@@ -75,6 +75,12 @@ pub struct Os {
     /// Its working folder — read for tarae's own children only (`Sampler::sample`): one the editor can't
     /// name goes under the session whose checkout it works in (#100).
     pub cwd: Option<PathBuf>,
+    /// The run of Claude's that left it running, by its environment (Linux: tarae's own children only —
+    /// `sandbox::left_by`): the run's tag, and its project when tarae knows it.
+    pub left: Option<(String, Option<PathBuf>)>,
+    /// Its session (Linux): a child of tarae's in another than tarae's own is one a program it ran left — tarae
+    /// is its last parent (`reaper`), it didn't start it.
+    pub sid: Option<u32>,
 }
 
 /// A C string in a fixed buffer.
@@ -125,6 +131,8 @@ pub fn read(pid: u32) -> Option<Os> {
             footprint: ok.then_some(ri.ri_phys_footprint),
             zombie: bsd.pbi_status == libc::SZOMB,
             cwd: None,
+            left: None,
+            sid: None,
         })
     }
 }
@@ -170,6 +178,8 @@ fn parse_stat(pid: u32, stat: &str, hz: u64, page: u64, boot: u64) -> Option<Os>
         footprint: None,
         zombie: f.first() == Some(&"Z"),
         cwd: None,
+        left: None,
+        sid: num(3).map(|s| s as u32),
     })
 }
 
@@ -300,6 +310,53 @@ pub fn command(pid: u32) -> Option<String> {
 #[cfg(target_os = "linux")]
 pub fn cwd(pid: u32) -> Option<PathBuf> {
     std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
+}
+
+/// Every process there is now (those not ours to read come along; reading them says nothing).
+#[cfg(target_os = "linux")]
+pub fn all() -> Vec<u32> {
+    let entries = std::fs::read_dir("/proc").into_iter().flatten().flatten();
+    entries.filter_map(|e| e.file_name().to_str()?.parse().ok()).collect()
+}
+
+/// Every process there is now.
+#[cfg(target_os = "macos")]
+pub fn all() -> Vec<u32> {
+    let mut buf: Vec<libc::pid_t> = vec![0; 1024];
+    loop {
+        let bytes = (buf.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
+        // SAFETY: the buffer is `bytes` long; the call writes pids into it.
+        let n = unsafe { libc::proc_listallpids(buf.as_mut_ptr().cast(), bytes) };
+        if n <= 0 {
+            return Vec::new();
+        }
+        // (a full buffer may have left some out: a bigger one)
+        if n as usize >= buf.len() && buf.len() < 1 << 20 {
+            buf.resize(buf.len() * 4, 0);
+            continue;
+        }
+        return buf.iter().take(n as usize).filter(|&&p| p > 0).map(|&p| p as u32).collect();
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn all() -> Vec<u32> {
+    Vec::new()
+}
+
+/// The files process `pid` has open, where it's ours to read (Linux: `/proc/<pid>/fd`) — elsewhere none
+/// (macOS's call for it isn't in `libc`).
+pub fn open_files(pid: u32) -> Vec<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        let fds = std::fs::read_dir(format!("/proc/{pid}/fd")).into_iter().flatten().flatten();
+        fds.filter_map(|e| std::fs::read_link(e.path()).ok()).collect()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        Vec::new()
+    }
 }
 
 /// One thread of a process, as an unprivileged reader is told it: what it waits in (`stuck.rs`, #181).
@@ -459,6 +516,7 @@ impl Sampler {
             .map(|mut os| {
                 if os.ppid == root {
                     os.cwd = cwd(os.pid);
+                    os.left = crate::sandbox::left_by(os.pid);
                 }
                 let before = self.prev.get(&(os.pid, os.started));
                 let pct = wall
@@ -488,16 +546,30 @@ fn quiet_every() -> Duration {
         .map_or(QUIET_EVERY, |ms| Duration::from_millis(ms.max(10)))
 }
 
+/// One look at tarae's tree — and the children tarae adopted (tarae is the last parent of what its programs
+/// leave — `reaper`), found ended in two looks `reaper::GRACE` apart, reaped; those are gone from the look.
+pub fn look(s: &mut Sampler, reaper: &mut crate::reaper::Reaper, now: Instant) -> Sample {
+    let me = std::process::id();
+    let mut sample = s.sample(me);
+    let tree: Vec<&Os> = sample.procs.iter().map(|(o, _)| o).collect();
+    let reaped = reaper.round(&tree, me, now);
+    if !reaped.is_empty() {
+        crate::log::line("procs", "info", &format!("reaped what nobody waited for: {reaped:?}"));
+        sample.procs.retain(|(o, _)| !reaped.contains(&o.pid));
+    }
+    sample
+}
+
 /// The sampling thread: a look now, then one every `QUIET_EVERY` (`OPEN_EVERY` while `:procs` is open), each
 /// sent to the main loop. It ends with the editor.
 pub fn start(events: crate::event::Tx, usual_path: Option<PathBuf>) -> Sender<Wake> {
     let (tx, rx) = channel();
     let run = move || {
-        let mut s = Sampler::default();
+        let (mut s, mut reaper) = (Sampler::default(), crate::reaper::Reaper::default());
         let (quiet, mut open) = (quiet_every(), false);
         let mut usual = Some(usual_path.as_deref().map(load_usual).unwrap_or_default());
         loop {
-            let mut sample = s.sample(std::process::id());
+            let mut sample = look(&mut s, &mut reaper, Instant::now());
             sample.usual = usual.take();
             let job = move |ed: &mut Editor| ed.procs_sampled(sample);
             if events.send(Event::Job(Box::new(job))).is_err() {
@@ -668,6 +740,8 @@ pub struct Row {
     pub flagged: bool,
     /// The session it's under (its heading's, for a heading) — None: shared.
     pub session: Option<SessionId>,
+    /// Left by a program tarae ran, tarae only its last parent (`reaper`): not a stray of tarae's own.
+    pub left: bool,
 }
 
 impl Row {
@@ -728,6 +802,7 @@ pub fn rows(
         zombie: os.zombie,
         flagged: false,
         session,
+        left: false,
     };
     // No process: a held server, a session's heading
     let bare = |kind: Kind, under: Kind, title: &str, what: String, session| Row {
@@ -747,6 +822,7 @@ pub fn rows(
         zombie: false,
         flagged: false,
         session,
+        left: false,
     };
     let mut out = Vec::new();
     if let Some(os) = by_pid.get(&me) {
@@ -763,16 +839,35 @@ pub fn rows(
             .max_by_key(|g| g.root.as_os_str().len())
             .map(|g| g.id)
     };
+    // (what a run of Claude's left running: the session whose checkout the run was in, the innermost)
+    let run_in = |root: &Path| {
+        groups
+            .iter()
+            .filter(|g| root.starts_with(&g.root))
+            .max_by_key(|g| g.root.as_os_str().len())
+            .map(|g| g.id)
+    };
+    let mine = by_pid.get(&me).and_then(|o| o.sid);
     let mut top: Vec<(Kind, String, String, &Os, Option<SessionId>)> = kids
         .get(&me)
         .into_iter()
         .flatten()
         .filter_map(|pid| by_pid.get(pid))
-        .map(|os| match known.iter().find(|k| k.is(os)) {
-            Some(k) => (k.kind.clone(), k.title.clone(), k.what.clone(), *os, grouped(k.session)),
-            None => (Kind::Other, os.name.clone(), String::new(), *os, working_in(os)),
+        .map(|os| match (known.iter().find(|k| k.is(os)), &os.left) {
+            (Some(k), _) => (k.kind.clone(), k.title.clone(), k.what.clone(), *os, grouped(k.session)),
+            (None, Some((_, root))) => {
+                let what = match root {
+                    Some(r) => format!("left by a run of Claude's in {}", crate::allow::tilde(r)),
+                    None => "left by a run of Claude's before tarae restarted".into(),
+                };
+                let session = root.as_deref().and_then(run_in).or_else(|| working_in(os));
+                (Kind::Other, format!("{} · left by a run", os.name), what, *os, session)
+            }
+            (None, None) => (Kind::Other, os.name.clone(), String::new(), *os, working_in(os)),
         })
         .collect();
+    // (tarae only its last parent: a run's, or in a session not tarae's — a program it ran left it)
+    let adopted = |os: &Os| os.left.is_some() || os.sid.is_some_and(|s| Some(s) != mine);
     crate::sorting::by(&mut top, |a, b| (a.0.order(), &a.1, a.3.pid).cmp(&(b.0.order(), &b.1, b.3.pid)));
     // A held server goes with the session its root is in (the innermost)
     let held_in = |h: &Held| {
@@ -794,7 +889,11 @@ pub fn rows(
             ));
         }
         for (kind, title, what, os, _) in top.iter().filter(|t| t.4 == session) {
-            out.push(row(os, 0, kind.clone(), kind.clone(), title.clone(), what.clone(), session));
+            let left = *kind == Kind::Other && adopted(os);
+            out.push(Row {
+                left,
+                ..row(os, 0, kind.clone(), kind.clone(), title.clone(), what.clone(), session)
+            });
             // What it started, depth first (a known one under it keeps its own name — a plugin's shell's child)
             let mut todo: Vec<(u32, usize)> =
                 kids.get(&os.pid).into_iter().flatten().rev().map(|&p| (p, 1)).collect();
@@ -861,6 +960,7 @@ pub fn with_queued(rows: &mut Vec<Row>, queued: &[(SessionId, u64, String, Strin
             zombie: false,
             flagged: false,
             session,
+            left: false,
         };
         rows.insert(at, row);
     }
@@ -1231,7 +1331,12 @@ impl Procs {
                 });
             }
             // A child of tarae's it doesn't know, running long; one nobody waited for
-            if r.depth == 0 && r.kind == Kind::Other && !r.zombie && r.up.is_some_and(|u| u >= STRAY_AFTER) {
+            if r.depth == 0
+                && r.kind == Kind::Other
+                && !r.left
+                && !r.zombie
+                && r.up.is_some_and(|u| u >= STRAY_AFTER)
+            {
                 out.push(Finding {
                     key: format!("stray:{}:{}", r.pid, r.started),
                     pid: r.pid,
@@ -1252,7 +1357,12 @@ impl Procs {
                     pid: r.pid,
                     what: format!("{} (pid {}) ended, and tarae didn't wait for it", r.title, r.pid),
                     short: format!("{} not reaped", r.title),
-                    did: "nothing — it goes when tarae does".into(),
+                    did: if cfg!(target_os = "linux") {
+                        "nothing yet — reaped once nobody has for a while"
+                    } else {
+                        "nothing — it goes when tarae does"
+                    }
+                    .into(),
                     act: Act::Nothing,
                 });
             }
@@ -2055,6 +2165,7 @@ mod tests {
             zombie: false,
             flagged: false,
             session: None,
+            left: false,
         }
     }
 
@@ -2674,6 +2785,178 @@ mod tests {
         let left: Vec<(&str, bool)> =
             p.checks.iter().map(|c| (c.short.as_str(), c.ended.is_none())).collect();
         assert_eq!(left, [("sleep running", true)], "the ones ended {}m ago gone", ENDED_KEPT.as_secs() / 60);
+    }
+
+    /// What a run of Claude's left running (its environment names the run — `sandbox::left_by`) is listed as
+    /// that, under the session whose checkout the run was in, not a stray of tarae's; nor is a child in a
+    /// session not tarae's (the terminal's `nohup`, tarae only its last parent — `reaper`). One of tarae's own
+    /// session that nothing names still is.
+    #[test]
+    fn what_a_run_left_goes_under_its_session_and_isnt_a_stray() {
+        let sid = |mut o: Os, s: u32| {
+            o.sid = Some(s);
+            o
+        };
+        let mut gradle = sid(os(5, 1, "java"), 77);
+        gradle.left = Some(("tarae-1-4.".into(), Some("/wt/fix/app".into())));
+        let mut before = sid(os(8, 1, "kotlin"), 78);
+        before.left = Some(("tarae-1-2.".into(), None));
+        let s = sample(vec![
+            sid(os(1, 0, "tarae"), 1),
+            gradle,
+            sid(os(6, 1, "node"), 88),
+            sid(os(7, 1, "log"), 1),
+            before,
+        ]);
+        let groups = [
+            Group { id: 0, name: "main".into(), root: "/w".into() },
+            Group { id: 1, name: "fix".into(), root: "/wt/fix".into() },
+        ];
+        let rows = rows(&s, &[], 1, &[], &groups, 1_000 + STRAY_AFTER.as_secs() + 60);
+        let r = |pid| rows.iter().find(|r| r.pid == pid).unwrap();
+        assert_eq!((r(5).title.as_str(), r(5).session), ("java · left by a run", Some(1)));
+        assert_eq!(r(5).what, "left by a run of Claude's in /wt/fix/app");
+        assert_eq!(r(8).what, "left by a run of Claude's before tarae restarted");
+        let found = Procs::default().check(&rows, &[], Instant::now()).0;
+        let keys: Vec<&str> = found.iter().map(|f| f.key.as_str()).collect();
+        assert_eq!(keys, ["stray:7:1000"], "only tarae's own");
+    }
+
+    /// Linux, in a process of its own (`TARAE_REAP_SCENE`; it makes itself a child subreaper): the looks reap
+    /// what tarae adopted — an orphan of a program in a session of its own, an orphan of tarae's session seen
+    /// under its parent before — once a second look finds it `reaper::GRACE` after the first; not before. A
+    /// child it started and holds that ended (in tarae's session, or `setsid`) is never reaped, however long
+    /// unwaited: still a zombie (its pid not free for another process), its owner's kill reaches only it, and
+    /// its wait gets its exit status; nor is a waiter within the grace robbed. Prints `reap: first=<all
+    /// listed> before=<all listed> orphan=<reaped at GRACE> seen=<there at GRACE, reaped after> held=<its
+    /// owner's exit code after a kill> setsid=<the same> late=<the late waiter's>`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore]
+    fn reap_scene() {
+        use std::process::{Command, Stdio};
+        let Some(dir) = std::env::var_os("TARAE_REAP_SCENE").map(PathBuf::from) else { return };
+        crate::reaper::at_start();
+        let until = |what: &dyn Fn() -> bool| {
+            let end = Instant::now() + Duration::from_secs(5);
+            while !what() && Instant::now() < end {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        let zombie = |pid: u32| read(pid).is_some_and(|o| o.zombie);
+        let pid_in = |f: &Path| {
+            until(&|| std::fs::read_to_string(f).is_ok_and(|t| t.ends_with('\n')));
+            std::fs::read_to_string(f).unwrap().trim().parse::<u32>().unwrap()
+        };
+        let sh = |c: &str| {
+            let mut cmd = Command::new("sh");
+            cmd.args(["-c", c]);
+            cmd
+        };
+        // Children it started and holds, ended at once: a plain one (tarae's session) and a `setsid` one
+        let mut held = sh("exit 1").spawn().unwrap();
+        let held_sid = crate::spawn::setsid(&sh("exit 2")).unwrap().pid;
+        // An orphan a program in a session of its own left (a run's, the terminal's)
+        let file = dir.join("orphan");
+        let prog =
+            crate::spawn::setsid(&sh(&format!("(sleep 0.2 & echo $! > '{}')", file.display()))).unwrap();
+        crate::spawn::wait(prog.pid).unwrap();
+        let orphan = pid_in(&file);
+        // One in tarae's session, under its parent still at the first look
+        let file = dir.join("seen");
+        let mut mid = sh(&format!("sleep 1 & echo $! > '{}'; read x", file.display()))
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let seen = pid_in(&file);
+        let mut late = sh("exit 3").spawn().unwrap();
+        until(&|| [held.id(), held_sid, orphan, late.id()].iter().all(|&p| zombie(p)));
+        let (mut s, mut r) = (Sampler::default(), crate::reaper::Reaper::default());
+        let listed = |s: &Sample, pid: u32| s.procs.iter().any(|(o, _)| o.pid == pid);
+        let all = [held.id(), held_sid, orphan, seen, late.id()];
+        let t0 = Instant::now();
+        let one = look(&mut s, &mut r, t0);
+        let first = all.iter().all(|&p| listed(&one, p));
+        drop(mid.stdin.take());
+        mid.wait().unwrap();
+        until(&|| zombie(seen));
+        let half = look(&mut s, &mut r, t0 + crate::reaper::GRACE / 2);
+        let before = all.iter().all(|&p| listed(&half, p));
+        let code = late.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-2);
+        let there = |pid: u32| Path::new(&format!("/proc/{pid}")).exists();
+        let at = look(&mut s, &mut r, t0 + crate::reaper::GRACE);
+        let orphan_reaped = !listed(&at, orphan) && !there(orphan);
+        let seen_kept = listed(&at, seen) && there(seen);
+        let after = look(&mut s, &mut r, t0 + crate::reaper::GRACE * 3);
+        let seen_reaped = !listed(&after, seen) && !there(seen);
+        // (the held ones: still zombies, so the pid is still theirs — the kill reaches only them)
+        let owned = |pid: u32| zombie(pid) && listed(&after, pid);
+        let held_code = match owned(held.id()) && held.kill().is_ok() {
+            true => held.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-2).to_string(),
+            false => "reaped".into(),
+        };
+        let sid_code = match owned(held_sid) {
+            true => crate::spawn::wait(held_sid).map(|s| s.code().unwrap_or(-1)).unwrap_or(-2).to_string(),
+            false => "reaped".into(),
+        };
+        let yes = |b: bool| if b { "yes" } else { "no" };
+        println!(
+            "reap: first={} before={} orphan={} seen={} held={held_code} setsid={sid_code} late={code}",
+            yes(first),
+            yes(before),
+            yes(orphan_reaped),
+            yes(seen_kept && seen_reaped),
+        );
+    }
+
+    /// Which zombie children the reaper takes for adopted (`reaper::Reaper::adopted`): one in a session
+    /// neither tarae's nor its own, or seen under another parent at a look before (and still, at the looks
+    /// after); never one of tarae's session or leading its own that wasn't — a child tarae started and holds
+    /// (an LSP server that crashed, the spare Claude) — nor anything while tarae's own session is unknown.
+    #[test]
+    fn the_reaper_takes_only_what_tarae_adopted() {
+        let p = |pid: u32, ppid: u32, sid: u32, zombie: bool| {
+            let mut o = os(pid, ppid, "p");
+            (o.sid, o.zombie) = (Some(sid), zombie);
+            o
+        };
+        let mut r = crate::reaper::Reaper::default();
+        let me = p(1, 0, 1, false);
+        // tarae's own: a crashed server (its session), a crashed setsid one; a run's orphan; a terminal's
+        // child still under its shell
+        let (server, adapter, orphan) = (p(2, 1, 1, true), p(3, 1, 3, true), p(4, 1, 9, true));
+        let (shell, under) = (p(5, 1, 5, false), p(6, 5, 1, false));
+        let tree = [&me, &server, &adapter, &orphan, &shell, &under];
+        assert_eq!(r.adopted(&tree, 1), [(4, 1_000)]);
+        // (its parent gone, the one under it is tarae's — in tarae's session, but seen under another before)
+        let adopted = p(6, 1, 1, true);
+        let tree = [&me, &server, &adapter, &orphan, &adopted];
+        assert_eq!(r.adopted(&tree, 1), [(4, 1_000), (6, 1_000)]);
+        assert_eq!(r.adopted(&tree, 1), [(4, 1_000), (6, 1_000)], "still known at the look after");
+        // A new reaper never saw it under another parent: like tarae's own, left
+        assert_eq!(crate::reaper::Reaper::default().adopted(&tree, 1), [(4, 1_000)]);
+        // tarae's session unknown: nothing is
+        let me_unknown = os(1, 0, "tarae");
+        assert!(crate::reaper::Reaper::default().adopted(&[&me_unknown, &orphan, &server], 1).is_empty());
+    }
+
+    /// `reap_scene`, run.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_looks_reap_what_tarae_adopted_and_never_what_it_holds() {
+        let dir = std::env::temp_dir().join(format!("tarae-reap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "procs::tests::reap_scene", "--ignored", "--nocapture", "--test-threads=1"])
+            .env("TARAE_REAP_SCENE", &dir)
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        let said = text.lines().find_map(|l| l.split_once("reap: ").map(|(_, s)| s.to_string()));
+        let err = String::from_utf8_lossy(&out.stderr);
+        let want = "first=yes before=yes orphan=yes seen=yes held=1 setsid=2 late=3";
+        assert_eq!(said.as_deref(), Some(want), "{text}\n{err}");
     }
 
     /// E16: the sandbox's own `log stream` beside a run of Claude's is a process tarae knows — not a stray

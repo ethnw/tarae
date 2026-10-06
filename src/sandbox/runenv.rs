@@ -210,6 +210,12 @@ fn grouped(names: &[String]) -> Vec<String> {
 }
 
 impl RunEnv {
+    /// A variable as the run gets it, in UTF-8 — None: left out, or not set.
+    pub fn var(&self, name: &str) -> Option<String> {
+        let (_, value, _) = self.vars.iter().find(|(k, ..)| k == name)?;
+        value.clone().into_string().ok()
+    }
+
     /// Every name left out.
     pub fn left_out(&self) -> impl Iterator<Item = &String> {
         self.tokens.iter().chain(&self.others)

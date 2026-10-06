@@ -279,6 +279,48 @@ when = ["t.mod"]
     }
 }
 
+/// A run home a daemon lives from (`daemon = { make, append }` — a kept one) and what only a home of the run's
+/// own gets (`fresh`): read as written, their variables among the packs' (no command of Claude's sets them);
+/// a daemon on a home that isn't kept, a key they don't take, a variable no pack may set, a folder that's no
+/// plain path — each left out, and said. No home may be called `home` (a run home's `{home}`).
+#[test]
+fn a_run_home_a_daemon_lives_from_reads() {
+    let good = r#"
+[sandbox.run-home.d]
+env = "D_HOME"
+keep = true
+daemon = { make = ["reg"], append = { D_OPTS = "-Dreg={home}/reg" } }
+fresh = { append = { D_OPTS = "-Ddaemon=off" } }
+"#;
+    let t = table(&[("d", good)], &[]);
+    assert_eq!(t.problems, Vec::<String>::new());
+    let [h] = t.run_homes.as_slice() else { panic!("{:?}", t.run_homes) };
+    let d = h.daemon.as_ref().expect("its daemon");
+    assert_eq!(
+        (&d.make[..], &d.append[..]),
+        (&["reg".to_string()][..], &[pair("D_OPTS", "-Dreg={home}/reg")][..])
+    );
+    assert_eq!((&h.fresh[..], &h.append[..]), (&[pair("D_OPTS", "-Ddaemon=off")][..], &[][..]));
+    assert!(t.env_names().any(|n| n == "D_OPTS"), "{:?}", t.env_names().collect::<Vec<_>>());
+    let cases = [
+        ("[sandbox.run-home.x]\nenv = \"X\"\ndaemon = {}\n", "is a kept one"),
+        ("[sandbox.run-home.x]\nenv = \"X\"\nkeep = true\ndaemon = { set = {} }\n", "daemon"),
+        ("[sandbox.run-home.x]\nenv = \"X\"\nfresh = { make = [\"a\"] }\n", "fresh"),
+        ("[sandbox.run-home.x]\nenv = \"X\"\nfresh = { append = { PATH = \"/x\" } }\n", "may not set"),
+        ("[sandbox.run-home.x]\nenv = \"X\"\nkeep = true\ndaemon = { make = [\"../a\"] }\n", "plain names"),
+        ("[sandbox.homes]\nhome = { env = \"X_HOME\", else = \"~/x\" }\n", "named twice"),
+    ];
+    for (text, why) in cases {
+        let t = table(&[("x", text)], &[]);
+        assert!(t.problems.iter().any(|p| p.contains(why)), "{text}: {:?}", t.problems);
+        assert!(t.run_homes.is_empty() && t.homes.iter().all(|h| h.name != "home"), "{text}: {t:?}");
+    }
+}
+
+fn pair(k: &str, v: &str) -> (String, String) {
+    (k.into(), v.into())
+}
+
 /// Places for a home: a home's variable when it's an absolute path (a list home's first entry), else its
 /// default; each system's own
 /// folders; a kept place at both a home's places; a quiet write from home; `{a}` filled with what's there.

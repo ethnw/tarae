@@ -542,7 +542,8 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
   distributions, the dependencies — so a command never writes there: it reads your downloaded dependencies in
   place (`GRADLE_RO_DEP_CACHE`) and your wrapper's distributions through a link, writing only the wrapper's
   lock file beside each. Your `gradle.properties` and init scripts aren't read. No daemon is kept after the
-  build (`-Dorg.gradle.daemon=false`, after your own `GRADLE_OPTS`). Gradle's client talks to its daemon and
+  build (`-Dorg.gradle.daemon=false`, after your own `GRADLE_OPTS`) — on Linux a Gradle project's home is kept
+  instead, with its daemon (below). Gradle's client talks to its daemon and
   test workers over this machine's ports, so a Gradle build in the sandbox needs `llm.sandbox-localhost`; your
   own daemons stay out of reach even then, since their registry (`daemon/` in your Gradle home) is never read —
   with it readable, a sandboxed build was measured running in a daemon started outside the sandbox.
@@ -726,10 +727,33 @@ thread of tarae's that confined itself first, and everything it starts stays con
     command's socket with (`pidfd_open`, `pidfd_getfd`). A dev container needs `--cap-add SYS_PTRACE`
     (`runArgs` in `devcontainer.json`)
   - with Yama's `ptrace_scope` at 2 (unless tarae holds `CAP_SYS_PTRACE`) or 3: tarae can't read a command's
-    calls. At 1, the default on Ubuntu, only a process that left the command's tree (a daemon that detached
-    itself) has its connections refused
+    calls. At 1, the default on Ubuntu, a process has to stay below tarae — so tarae is the last parent of
+    what its programs leave running (a *child subreaper*): a daemon that detached itself from a command comes
+    to tarae, not to init, and its connections are served after the command is over
   - when tarae itself runs inside such a sandbox (a tarae started by one of Claude's commands)
-- **Gradle runs in the sandbox** with `llm.sandbox-localhost`, as on macOS.
+- **What a command leaves running** (a build tool's daemon) stays tarae's, still inside the command's sandbox
+  and under its rules. What the sandbox refuses it is said in the result of the project's command going
+  then — or the next one's. It's in `:procs` under its session, as `java · left by a run`, and it ends when
+  its session ends, when tarae quits (or restarts), or when one of Claude's commands in that project starts
+  under other rules (a grant since, a setting): it holds the old ones. tarae tells it by its environment
+  (`TARAE_SANDBOXED` is the command's own tag — Gradle's daemon keeps it, and passes it to what it starts).
+  A process that drops or rewrites that variable isn't told: it isn't ended, and outlives tarae under the
+  rules it started with. Whatever a program tarae ran leaves is reaped by tarae once it has ended (on its
+  `:procs` look, after 10 seconds) — the terminal's `nohup`s too, which tarae otherwise leaves be. Never a
+  process tarae started itself: that one is its owner's to wait for.
+- **Gradle runs in the sandbox** with `llm.sandbox-localhost`, as on macOS — but a Gradle project's home is
+  kept: one per project and set of rules, in `~/.cache/tarae/run-homes/gradle/` (only tarae's, written by
+  that project's commands alone), and its daemon lives on between commands, as above. Measured: `gradle test`
+  as fast as outside the sandbox (586 → 588 ms), against 5× slower in a fresh home with no daemon. Kotlin's
+  compile daemon keeps its registry in that home too (yours, `~/.kotlin/daemon`, is never read: a command
+  that could would hand its compile to your daemon, outside the sandbox) — within 5–10% of a build outside
+  once warm, instead of ~3× slower compiling inside Gradle's daemon. Both daemons end themselves after 30
+  idle minutes. Where a home like that isn't kept (macOS, or no Gradle files), each command's is its own and
+  no daemon is left after the build.
+- **Kept homes are pruned** at tarae's start: a toolchain's home kept for Claude's commands (Go's build cache,
+  Gradle's) goes once no command has used it for `llm.sandbox-kept-days` (14), once a newer one for the same
+  project replaced it a day ago (its rules changed), or once its project is gone — never while a command of
+  any tarae holds it, nor while a process works in it or (Linux) holds a file open there.
 - **What Landlock can't keep, said in Claude's result:** a protected name made in a folder that holds none yet
   (a `.cargo` folder inside `src/`, say — Landlock rules are on paths that are there). So tarae looks after
   each run (in a git checkout): a protected name it made — `.envrc` too, ignored or not, but not below

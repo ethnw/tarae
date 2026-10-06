@@ -958,6 +958,59 @@ fn a_driver_reads_where_the_keys_go() {
     drop(t);
 }
 
+/// Linux: tarae is the last parent of what its programs leave running (`reaper::at_start`), and what a run of
+/// Claude's left ends when tarae quits (`sandbox::end_leftovers`). The stand-in: a `sleep` the terminal's
+/// shell leaves behind (a subshell gone, its own session) carrying a run tag of this tarae's — one tarae no
+/// longer knows, as after a `:restart`.
+#[cfg(target_os = "linux")]
+#[test]
+fn what_a_run_left_running_is_taraes_and_ends_when_it_quits() {
+    let sb = Sandbox::new("left");
+    sb.write("a.txt", "one\n");
+    let mut t = sb.spawn(&["a.txt"]);
+    t.wait_text("one");
+    t.send(" T");
+    t.wait_for("the shell", |s| s.contains("$ ") || s.contains("# "));
+    let file = sb.file("left.pid");
+    t.send(&format!(
+        "(TARAE_SANDBOXED=tarae-{}-999999. setsid sleep 97 & echo $! > '{}')\r",
+        t.pid(),
+        file.display()
+    ));
+    let end = std::time::Instant::now() + sb.timeout();
+    let pid: u32 = loop {
+        if let Some(p) = std::fs::read_to_string(&file).ok().and_then(|s| s.trim().parse().ok()) {
+            break p;
+        }
+        assert!(std::time::Instant::now() < end, "the shell left its sleep");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let parent = |pid: u32| {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        stat[stat.rfind(')')? + 2..].split(' ').nth(1)?.parse::<u32>().ok()
+    };
+    // (its subshell gone, it's re-parented — to tarae)
+    let end = std::time::Instant::now() + sb.timeout();
+    while parent(pid) != Some(t.pid()) && std::time::Instant::now() < end {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let adopted = parent(pid);
+    // Quit: `C-\` gives the keys back to tarae
+    t.send("\x1c:q!\r");
+    t.wait_exit();
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::path::Path::new(&format!("/proc/{pid}")).exists() && std::time::Instant::now() < end {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let left = std::path::Path::new(&format!("/proc/{pid}")).exists();
+    if left {
+        // SAFETY: the test's own stand-in.
+        unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+    }
+    assert_eq!(adopted, Some(t.pid()), "tarae is its parent");
+    assert!(!left, "ended with tarae");
+}
+
 /// Watching over the socket (`tarae state --watch`): the trust card up from the start goes with `n` — told
 /// as `card-gone`, `answered n`; the keys going to the terminal's program — told as `keys`; each event with
 /// the frame that showed it and the input it followed, in plain words too.

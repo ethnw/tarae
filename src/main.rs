@@ -79,6 +79,7 @@ mod queued;
 mod quickfix;
 mod readonly;
 mod reads;
+mod reaper;
 mod rebase;
 mod recent;
 mod recovery;
@@ -90,6 +91,7 @@ mod restart;
 mod restore;
 mod reviewer;
 mod risk;
+mod runhomes;
 mod runtime;
 mod sandbox;
 mod sandboxpack;
@@ -237,6 +239,8 @@ fn main() -> Result<()> {
 
     // (before any thread starts — SIGTERM and SIGHUP quit as `:q!` does, ending what tarae started)
     term::catch_signals();
+    // (Linux: what Claude's runs leave running stays tarae's — served, reaped, ended with its session)
+    reaper::at_start();
     // The UI state's socket — now, while no thread runs (its umask, and for a long path its folder, are the
     // process's for a moment); served once the editor is there
     let ui = uisocket::bind();
@@ -287,6 +291,9 @@ fn main() -> Result<()> {
     editor.session_kept_back(0);
     // Unsaved edits a tarae that's gone kept (a crash, a kill) — a card each (`recovery.rs`)
     editor.recovery_scan();
+    // Kept run homes no run needs any more — unused, replaced, their project gone (`runhomes.rs`; a worker's)
+    let days = editor.config.llm.sandbox_kept_days;
+    editor.events.jobs().background(move || runhomes::prune_now(days));
     if !files.is_empty() {
         editor.current = 0;
     }
@@ -308,6 +315,9 @@ fn main() -> Result<()> {
         Err(e) => log::line("ui", "info", &format!("no UI state socket: {e}")),
     }
     let result = term::run(&mut editor);
+    // What Claude's runs left running ends with tarae — a `:restart` too (their supervisors don't survive the
+    // exec: a daemon kept would have every connect refused)
+    sandbox::end_leftovers(None);
     // (`:restart`'s new binary binds its own at the same path; a failed one ends here too)
     uisocket::remove();
     editor.save_restore();

@@ -22,7 +22,7 @@ profile:
 (deny mach-lookup (global-name "com.apple.coreservices.launchservicesd") (global-name-regex #"^com\.apple\.lsd\.") (with message "$TAG"))
 (deny mach-lookup (global-name-regex #"^com\.apple\.pasteboard\.") (global-name "com.apple.SecurityServer") (global-name "com.apple.securityd") (with message "$TAG"))
 (deny file-read-data file-read-xattr (literal (param "T0")) (literal (param "T1")) (literal (param "T2")) (with message "$TAG"))
-(deny file-read-data file-read-xattr (subpath (param "X0")) (subpath (param "X1")) (subpath (param "X2")) (subpath (param "X3")) (subpath (param "X4")) (subpath (param "X5")) (subpath (param "X6")) (subpath (param "X7")) (subpath (param "X8")) (subpath (param "X9")) (subpath (param "X10")) (subpath (param "X11")) (subpath (param "X12")) (subpath (param "X13")) (subpath (param "X14")) (subpath (param "X15")) (subpath (param "X16")) (subpath (param "X17")) (subpath (param "X18")) (subpath (param "X19")) (subpath (param "X20")) (subpath (param "X21")) (with message "$TAG"))
+(deny file-read-data file-read-xattr (subpath (param "X0")) (subpath (param "X1")) (subpath (param "X2")) (subpath (param "X3")) (subpath (param "X4")) (subpath (param "X5")) (subpath (param "X6")) (subpath (param "X7")) (subpath (param "X8")) (subpath (param "X9")) (subpath (param "X10")) (subpath (param "X11")) (subpath (param "X12")) (subpath (param "X13")) (subpath (param "X14")) (subpath (param "X15")) (subpath (param "X16")) (subpath (param "X17")) (subpath (param "X18")) (subpath (param "X19")) (subpath (param "X20")) (subpath (param "X21")) (subpath (param "X22")) (with message "$TAG"))
 (allow file-read-data file-read-xattr (literal (param "LOG")))
 params:
   C:
@@ -93,6 +93,7 @@ params:
     $HOME/.git-credentials
     $HOME/.gnupg
     $HOME/.gradle/daemon
+    $HOME/.kotlin/daemon
     $HOME/.kube
     $HOME/.netrc
     $HOME/.npmrc
@@ -163,6 +164,7 @@ reads.kept:
     $HOME/.git-credentials
     $HOME/.gnupg
     $HOME/.gradle/daemon
+    $HOME/.kotlin/daemon
     $HOME/.kube
     $HOME/.netrc
     $HOME/.npmrc
@@ -224,7 +226,7 @@ profile:
 (deny mach-lookup (global-name "com.apple.coreservices.launchservicesd") (global-name-regex #"^com\.apple\.lsd\.") (with message "$TAG"))
 (deny mach-lookup (global-name-regex #"^com\.apple\.pasteboard\.") (global-name "com.apple.SecurityServer") (global-name "com.apple.securityd") (with message "$TAG"))
 (deny file-read-data file-read-xattr (literal (param "T0")) (literal (param "T1")) (literal (param "T2")) (with message "$TAG"))
-(deny file-read-data file-read-xattr (subpath (param "X0")) (subpath (param "X1")) (subpath (param "X2")) (subpath (param "X3")) (subpath (param "X4")) (subpath (param "X5")) (subpath (param "X6")) (subpath (param "X7")) (subpath (param "X8")) (subpath (param "X9")) (subpath (param "X10")) (subpath (param "X11")) (subpath (param "X12")) (subpath (param "X13")) (subpath (param "X14")) (subpath (param "X15")) (subpath (param "X16")) (subpath (param "X17")) (subpath (param "X18")) (subpath (param "X19")) (subpath (param "X20")) (subpath (param "X21")) (subpath (param "X22")) (subpath (param "X23")) (subpath (param "X24")) (with message "$TAG"))
+(deny file-read-data file-read-xattr (subpath (param "X0")) (subpath (param "X1")) (subpath (param "X2")) (subpath (param "X3")) (subpath (param "X4")) (subpath (param "X5")) (subpath (param "X6")) (subpath (param "X7")) (subpath (param "X8")) (subpath (param "X9")) (subpath (param "X10")) (subpath (param "X11")) (subpath (param "X12")) (subpath (param "X13")) (subpath (param "X14")) (subpath (param "X15")) (subpath (param "X16")) (subpath (param "X17")) (subpath (param "X18")) (subpath (param "X19")) (subpath (param "X20")) (subpath (param "X21")) (subpath (param "X22")) (subpath (param "X23")) (subpath (param "X24")) (subpath (param "X25")) (with message "$TAG"))
 (allow file-read-data file-read-xattr (literal (param "LOG")))
 params:
   C:
@@ -294,6 +296,7 @@ params:
     $HOME/.git-credentials
     $HOME/.gnupg
     $HOME/.gradle/daemon
+    $HOME/.kotlin/daemon
     $HOME/.kube
     $HOME/.netrc
     $HOME/.npmrc
@@ -364,6 +367,7 @@ reads.kept:
     $HOME/.git-credentials
     $HOME/.gnupg
     $HOME/.gradle/daemon
+    $HOME/.kotlin/daemon
     $HOME/.kube
     $HOME/.netrc
     $HOME/.npmrc
@@ -421,7 +425,7 @@ profile:
 (deny mach-lookup (global-name "com.apple.coreservices.launchservicesd") (global-name-regex #"^com\.apple\.lsd\.") (with message "$TAG"))
 (deny mach-lookup (global-name-regex #"^com\.apple\.pasteboard\.") (global-name "com.apple.SecurityServer") (global-name "com.apple.securityd") (with message "$TAG"))
 (deny file-read-data file-read-xattr (literal (param "T0")) (literal (param "T1")) (literal (param "T2")) (with message "$TAG"))
-(deny file-read-data file-read-xattr (subpath (param "X0")) (subpath (param "X1")) (subpath (param "X2")) (subpath (param "X3")) (subpath (param "X4")) (subpath (param "X5")) (subpath (param "X6")) (subpath (param "X7")) (subpath (param "X8")) (subpath (param "X9")) (subpath (param "X10")) (subpath (param "X11")) (subpath (param "X12")) (subpath (param "X13")) (subpath (param "X14")) (subpath (param "X15")) (subpath (param "X16")) (subpath (param "X17")) (subpath (param "X18")) (subpath (param "X19")) (subpath (param "X20")) (subpath (param "X21")) (with message "$TAG"))
+(deny file-read-data file-read-xattr (subpath (param "X0")) (subpath (param "X1")) (subpath (param "X2")) (subpath (param "X3")) (subpath (param "X4")) (subpath (param "X5")) (subpath (param "X6")) (subpath (param "X7")) (subpath (param "X8")) (subpath (param "X9")) (subpath (param "X10")) (subpath (param "X11")) (subpath (param "X12")) (subpath (param "X13")) (subpath (param "X14")) (subpath (param "X15")) (subpath (param "X16")) (subpath (param "X17")) (subpath (param "X18")) (subpath (param "X19")) (subpath (param "X20")) (subpath (param "X21")) (subpath (param "X22")) (with message "$TAG"))
 (allow file-read-data file-read-xattr (literal (param "LOG")))
 params:
   F:
@@ -491,6 +495,7 @@ params:
     $HOME/.git-credentials
     $HOME/.gnupg
     $HOME/.gradle/daemon
+    $HOME/.kotlin/daemon
     $HOME/.kube
     $HOME/.netrc
     $HOME/.npmrc
@@ -561,6 +566,7 @@ reads.kept:
     $HOME/.git-credentials
     $HOME/.gnupg
     $HOME/.gradle/daemon
+    $HOME/.kotlin/daemon
     $HOME/.kube
     $HOME/.netrc
     $HOME/.npmrc
@@ -622,7 +628,7 @@ profile:
 (deny mach-lookup (global-name "com.apple.coreservices.launchservicesd") (global-name-regex #"^com\.apple\.lsd\.") (with message "$TAG"))
 (deny mach-lookup (global-name-regex #"^com\.apple\.pasteboard\.") (global-name "com.apple.SecurityServer") (global-name "com.apple.securityd") (with message "$TAG"))
 (deny file-read-data file-read-xattr (literal (param "T0")) (literal (param "T1")) (literal (param "T2")) (with message "$TAG"))
-(deny file-read-data file-read-xattr (subpath (param "X0")) (subpath (param "X1")) (subpath (param "X2")) (subpath (param "X3")) (subpath (param "X4")) (subpath (param "X5")) (subpath (param "X6")) (subpath (param "X7")) (subpath (param "X8")) (subpath (param "X9")) (subpath (param "X10")) (subpath (param "X11")) (subpath (param "X12")) (subpath (param "X13")) (subpath (param "X14")) (subpath (param "X15")) (subpath (param "X16")) (subpath (param "X17")) (subpath (param "X18")) (subpath (param "X19")) (subpath (param "X20")) (subpath (param "X21")) (with message "$TAG"))
+(deny file-read-data file-read-xattr (subpath (param "X0")) (subpath (param "X1")) (subpath (param "X2")) (subpath (param "X3")) (subpath (param "X4")) (subpath (param "X5")) (subpath (param "X6")) (subpath (param "X7")) (subpath (param "X8")) (subpath (param "X9")) (subpath (param "X10")) (subpath (param "X11")) (subpath (param "X12")) (subpath (param "X13")) (subpath (param "X14")) (subpath (param "X15")) (subpath (param "X16")) (subpath (param "X17")) (subpath (param "X18")) (subpath (param "X19")) (subpath (param "X20")) (subpath (param "X21")) (subpath (param "X22")) (with message "$TAG"))
 (allow file-read-data file-read-xattr (literal (param "LOG")))
 params:
   C:
@@ -694,6 +700,7 @@ params:
     $HOME/.git-credentials
     $HOME/.gnupg
     $HOME/.gradle/daemon
+    $HOME/.kotlin/daemon
     $HOME/.kube
     $HOME/.netrc
     $HOME/.npmrc
@@ -764,6 +771,7 @@ reads.kept:
     $HOME/.git-credentials
     $HOME/.gnupg
     $HOME/.gradle/daemon
+    $HOME/.kotlin/daemon
     $HOME/.kube
     $HOME/.netrc
     $HOME/.npmrc
@@ -824,7 +832,7 @@ profile:
 (deny mach-lookup (global-name "com.apple.coreservices.launchservicesd") (global-name-regex #"^com\.apple\.lsd\.") (with message "$TAG"))
 (deny mach-lookup (global-name-regex #"^com\.apple\.pasteboard\.") (global-name "com.apple.SecurityServer") (global-name "com.apple.securityd") (with message "$TAG"))
 (deny file-read-data file-read-xattr (literal (param "T0")) (literal (param "T1")) (literal (param "T2")) (with message "$TAG"))
-(deny file-read-data file-read-xattr (subpath (param "X0")) (subpath (param "X1")) (subpath (param "X2")) (subpath (param "X3")) (subpath (param "X4")) (subpath (param "X5")) (subpath (param "X6")) (subpath (param "X7")) (subpath (param "X8")) (subpath (param "X9")) (subpath (param "X10")) (subpath (param "X11")) (subpath (param "X12")) (subpath (param "X13")) (subpath (param "X14")) (subpath (param "X15")) (subpath (param "X16")) (subpath (param "X17")) (subpath (param "X18")) (subpath (param "X19")) (subpath (param "X20")) (subpath (param "X21")) (subpath (param "X22")) (subpath (param "X23")) (subpath (param "X24")) (with message "$TAG"))
+(deny file-read-data file-read-xattr (subpath (param "X0")) (subpath (param "X1")) (subpath (param "X2")) (subpath (param "X3")) (subpath (param "X4")) (subpath (param "X5")) (subpath (param "X6")) (subpath (param "X7")) (subpath (param "X8")) (subpath (param "X9")) (subpath (param "X10")) (subpath (param "X11")) (subpath (param "X12")) (subpath (param "X13")) (subpath (param "X14")) (subpath (param "X15")) (subpath (param "X16")) (subpath (param "X17")) (subpath (param "X18")) (subpath (param "X19")) (subpath (param "X20")) (subpath (param "X21")) (subpath (param "X22")) (subpath (param "X23")) (subpath (param "X24")) (subpath (param "X25")) (with message "$TAG"))
 (allow file-read-data file-read-xattr (literal (param "LOG")))
 params:
   C:
@@ -895,6 +903,7 @@ params:
     $HOME/.git-credentials
     $HOME/.gnupg
     $HOME/.gradle/daemon
+    $HOME/.kotlin/daemon
     $HOME/.kube
     $HOME/.netrc
     $HOME/.npmrc
@@ -965,6 +974,7 @@ reads.kept:
     $HOME/.git-credentials
     $HOME/.gnupg
     $HOME/.gradle/daemon
+    $HOME/.kotlin/daemon
     $HOME/.kube
     $HOME/.netrc
     $HOME/.npmrc
@@ -1021,7 +1031,7 @@ profile:
 (deny mach-lookup (global-name "com.apple.coreservices.launchservicesd") (global-name-regex #"^com\.apple\.lsd\.") (with message "$TAG"))
 (deny mach-lookup (global-name-regex #"^com\.apple\.pasteboard\.") (global-name "com.apple.SecurityServer") (global-name "com.apple.securityd") (with message "$TAG"))
 (deny file-read-data file-read-xattr (literal (param "T0")) (literal (param "T1")) (literal (param "T2")) (with message "$TAG"))
-(deny file-read-data file-read-xattr (subpath (param "X0")) (subpath (param "X1")) (subpath (param "X2")) (subpath (param "X3")) (subpath (param "X4")) (subpath (param "X5")) (subpath (param "X6")) (subpath (param "X7")) (subpath (param "X8")) (subpath (param "X9")) (subpath (param "X10")) (subpath (param "X11")) (subpath (param "X12")) (subpath (param "X13")) (subpath (param "X14")) (subpath (param "X15")) (subpath (param "X16")) (subpath (param "X17")) (subpath (param "X18")) (subpath (param "X19")) (subpath (param "X20")) (subpath (param "X21")) (with message "$TAG"))
+(deny file-read-data file-read-xattr (subpath (param "X0")) (subpath (param "X1")) (subpath (param "X2")) (subpath (param "X3")) (subpath (param "X4")) (subpath (param "X5")) (subpath (param "X6")) (subpath (param "X7")) (subpath (param "X8")) (subpath (param "X9")) (subpath (param "X10")) (subpath (param "X11")) (subpath (param "X12")) (subpath (param "X13")) (subpath (param "X14")) (subpath (param "X15")) (subpath (param "X16")) (subpath (param "X17")) (subpath (param "X18")) (subpath (param "X19")) (subpath (param "X20")) (subpath (param "X21")) (subpath (param "X22")) (with message "$TAG"))
 (allow file-read-data file-read-xattr (literal (param "LOG")))
 params:
   F:
@@ -1092,6 +1102,7 @@ params:
     $HOME/.git-credentials
     $HOME/.gnupg
     $HOME/.gradle/daemon
+    $HOME/.kotlin/daemon
     $HOME/.kube
     $HOME/.netrc
     $HOME/.npmrc
@@ -1162,6 +1173,7 @@ reads.kept:
     $HOME/.git-credentials
     $HOME/.gnupg
     $HOME/.gradle/daemon
+    $HOME/.kotlin/daemon
     $HOME/.kube
     $HOME/.netrc
     $HOME/.npmrc

@@ -638,6 +638,16 @@ pub fn prune() -> Result<()> {
     Ok(())
 }
 
+/// Whether a volume's checkout is there — or can't be told: only a folder that's surely not there is gone. A
+/// run that can't see it (tarae's sandbox reads no sibling checkout: `Operation not permitted`) keeps its
+/// volume — measured 2026-10-06: two live sessions' targets dropped as "gone" from inside the sandbox.
+fn checkout_there(p: &Path) -> bool {
+    match std::fs::metadata(p) {
+        Ok(m) => m.is_dir(),
+        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+    }
+}
+
 /// Drops what `prunable` says for this machine (`ours`, on a Docker of its own or not: `local`), each said;
 /// one still in use (a run going) stays. What was listed, and what went.
 fn prune_volumes(ours: Option<&str>, local: bool, shared: bool) -> (Vec<Volume>, Vec<String>) {
@@ -649,7 +659,7 @@ fn prune_volumes(ours: Option<&str>, local: bool, shared: bool) -> (Vec<Volume>,
     };
     let listed = volumes(&String::from_utf8_lossy(&out.stdout));
     let mut gone = Vec::new();
-    for name in prunable(&listed, ours, local, Path::is_dir, shared) {
+    for name in prunable(&listed, ours, local, checkout_there, shared) {
         let rm = Command::new("docker").args(["volume", "rm", &name]).output();
         match rm {
             Ok(o) if o.status.success() => {
@@ -1062,6 +1072,27 @@ mod tests {
             assert!(e.starts_with("making ") && !ro.join(MACHINE_FILE).exists(), "{e}");
         }
         std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A checkout is gone only when it surely isn't there: a folder is there, nothing or a file where it was is
+    /// gone, and one this run can't see (a folder above it it may not enter — tarae's sandbox's sibling
+    /// checkouts) is there for all it can tell: its volume stays. (Not as root, whom the mode doesn't stop.)
+    #[test]
+    fn a_checkout_it_cant_see_isnt_gone() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!("xtask-there-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join("live")).unwrap();
+        std::fs::create_dir_all(dir.join("shut/wt")).unwrap();
+        std::fs::write(dir.join("file"), "").unwrap();
+        assert!(checkout_there(&dir.join("live")));
+        assert!(!checkout_there(&dir.join("deleted")) && !checkout_there(&dir.join("file")));
+        std::fs::set_permissions(dir.join("shut"), std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::metadata(dir.join("shut/wt")).is_err() {
+            assert!(checkout_there(&dir.join("shut/wt")), "can't see it: not gone");
+        }
+        std::fs::set_permissions(dir.join("shut"), std::fs::Permissions::from_mode(0o700)).unwrap();
         std::fs::remove_dir_all(&dir).ok();
     }
 
