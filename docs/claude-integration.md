@@ -598,8 +598,7 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
   tarae also reads the run's output: a path on a failing line next to `Operation not permitted` that the
   sandbox wouldn't let it read or write counts as denied too, and Claude is told it came from the output.
 - It reaches nothing over the network, so a build that needs to download something fails.
-  `llm.sandbox-network` lets it through (macOS only — on Linux it reaches this machine at most), and
-  `llm.sandbox-write` adds folders
+  `llm.sandbox-network` lets it through, and `llm.sandbox-write` adds folders
 - Unix sockets work only in the project and in a temp folder made for each run, which the command gets as
   `TMPDIR`. The sockets in `/tmp` and your own temp folder belong to programs running outside the sandbox
   (tmux, zellij, ssh-agent), and some of them would run whatever they're told. tmux's and zellij's socket
@@ -614,7 +613,9 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
     on ports picked at random. **That includes the ports in the table below**: it can't leave them out.
     tarae's own `.tarae.toml` sets it, because its tests do this
   - With `llm.sandbox-network` on, everything is reachable except the ports in the table, unless they're in
-    `llm.sandbox-ports`
+    `llm.sandbox-ports`. On macOS that holds for this machine's loopback only: the sandbox names ports by
+    `localhost`, so on this machine's other addresses (its LAN's) those ports are reached as the network is. On
+    Linux this machine's other addresses count as this machine: only the ports you open (below)
 
   | Port | What usually listens there |
   |---|---|
@@ -718,9 +719,12 @@ thread of tarae's that confined itself first, and everything it starts stays con
   meanwhile reaches nothing, and a unix socket is opened by its real path without following a link. The
   sockets a command listens on are bound to this machine's loopback, so even one listening on every address
   hears only this machine. A server that checks who connects sees tarae's process, not the command's.
-- **This machine at most.** `llm.sandbox-network` doesn't open the network beyond this machine on Linux: a
-  command reaches this machine's ports as `llm.sandbox-ports` and `llm.sandbox-localhost` say, and nothing
-  else. Claude's result says so.
+- **The network, but not this machine.** With `llm.sandbox-network` on, a command reaches the network beyond
+  this machine — never link-local addresses or the cloud metadata servers tarae knows of (most are link-local;
+  besides, Alibaba Cloud's `100.100.100.200` and AWS's and Google's IPv6 ones), also in their NAT64 and 6to4 forms,
+  multicast or broadcast. This machine — its loopback and its own addresses (its LAN's, Docker's bridge's, as
+  they were when the command started) — it reaches only on the ports `llm.sandbox-ports` and
+  `llm.sandbox-localhost` open. Claude's result says so.
 - **When tarae can't make a command's connections**, the command gets no socket at all — no port on this
   machine, no unix socket, not even the project's — and Claude's result says why. That happens:
   - in a container without `CAP_SYS_PTRACE`: Docker's default filter refuses the calls tarae takes a

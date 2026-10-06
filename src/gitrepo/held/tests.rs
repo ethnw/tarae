@@ -754,9 +754,11 @@ fn a_change_in_the_same_tick_as_the_resolve_is_seen() {
     let script = f.repo.join("tools/mon.sh");
     let now = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
     // (the change and both resolves within one second of the clock, from the start of one — tried again
-    // when a busy machine takes longer: else the test shows nothing)
+    // when a busy machine takes longer: else the test shows nothing; 20 ms past the second's start, as a file's
+    // time is the kernel's coarse clock, a tick behind the one `now` reads — at the start it's the second before)
     for tries in 1.. {
-        std::thread::sleep(std::time::Duration::from_nanos(1_000_000_000 - u64::from(now().subsec_nanos())));
+        let into = std::time::Duration::from_nanos(u64::from(now().subsec_nanos()));
+        std::thread::sleep(std::time::Duration::from_millis(1020) - into);
         script_at(&f, &script, "fsmonitor", "fail");
         f.set("core.fsmonitor", &format!("tools/mon.sh {tries}"));
         let first = f.resolved();

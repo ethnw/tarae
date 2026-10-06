@@ -48,13 +48,16 @@ const fn arg_high(i: u32) -> u32 {
 const SOCK_FLAGS: u32 = (libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC) as u32;
 
 /// Whether the calls that name an address go to tarae (`Served`: the listener `apply` gives back is the
-/// supervisor's), internet sockets are refused outright (`Plain`), or — not served, inside the session's own
-/// network namespace, which holds only `lo` (`sandbox::keeper`) — its stream and datagram ones are the run's
-/// own (`OwnNetwork`: the namespace is the lock; raw ones still refused, as unix sockets, which cross it).
+/// supervisor's — tarae makes the internet sockets too), internet sockets are refused outright (`Plain`), or
+/// — inside the session's own network namespace, which holds only `lo` (`sandbox::keeper`) — its stream and
+/// datagram ones are the run's own: served, its calls that name an address still go to tarae, which routes
+/// them (`Routed`: `sandbox::route`); not served, they're its own too (`OwnNetwork`: the namespace is the
+/// lock). Raw ones are refused in both, and unix ones not served, which cross the namespace.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Plain,
     Served,
+    Routed,
     OwnNetwork,
 }
 
@@ -88,7 +91,7 @@ enum Op {
 /// answer. The last block is `socket()`'s; any other call is allowed.
 fn ops(arch: u32, mode: Mode) -> Vec<Op> {
     let nr = |n: libc::c_long| n as u32;
-    let served = mode == Mode::Served;
+    let served = matches!(mode, Mode::Served | Mode::Routed);
     let mut ops = vec![Op::Load(ARCH_AT), Op::Is(arch, To::Next, To::Missing), Op::Load(NR)];
     #[cfg(target_arch = "x86_64")]
     ops.push(Op::Has(X32_BIT, To::Missing, To::Next));
@@ -96,7 +99,9 @@ fn ops(arch: u32, mode: Mode) -> Vec<Op> {
         ops.push(Op::Is(nr(n), To::Missing, To::Next));
     }
     if served {
-        for n in [libc::SYS_connect, libc::SYS_bind, libc::SYS_sendmsg, libc::SYS_sendmmsg] {
+        // (`listen`: on a socket tarae put out of the session it would listen on this machine's every address)
+        for n in [libc::SYS_connect, libc::SYS_bind, libc::SYS_listen, libc::SYS_sendmsg, libc::SYS_sendmmsg]
+        {
             ops.push(Op::Is(nr(n), To::Tarae, To::Next));
         }
         // `sendto` with an address (its fifth argument, a pointer); without one it goes where the socket is
@@ -136,14 +141,21 @@ fn ops(arch: u32, mode: Mode) -> Vec<Op> {
             Op::Is(libc::AF_INET as u32, To::Refuse, To::Next),
             Op::Is(libc::AF_INET6 as u32, To::Refuse, To::Next),
         ]),
-        // (an internet socket of a stream or a datagram kind is the run's; any other — raw — refused)
-        Mode::OwnNetwork => ops.extend([
+        // (an internet socket is the run's as `Served`'s `socket()` makes them: TCP or UDP, by kind and protocol
+        // — not raw, ICMP's, SCTP's or MPTCP's, whose own options and messages name addresses tarae never sees)
+        Mode::Routed | Mode::OwnNetwork => ops.extend([
             Op::Is(libc::AF_INET as u32, To::Skip(1), To::Next),
-            Op::Is(libc::AF_INET6 as u32, To::Next, To::Skip(4)),
+            Op::Is(libc::AF_INET6 as u32, To::Next, To::Skip(10)),
             Op::Load(arg_low(1)),
             Op::And(!SOCK_FLAGS),
-            Op::Is(libc::SOCK_STREAM as u32, To::Allow, To::Next),
-            Op::Is(libc::SOCK_DGRAM as u32, To::Allow, To::Refuse),
+            Op::Is(libc::SOCK_STREAM as u32, To::Next, To::Skip(3)),
+            Op::Load(arg_low(2)),
+            Op::Is(0, To::Allow, To::Next),
+            Op::Is(libc::IPPROTO_TCP as u32, To::Allow, To::Refuse),
+            Op::Is(libc::SOCK_DGRAM as u32, To::Next, To::Refuse),
+            Op::Load(arg_low(2)),
+            Op::Is(0, To::Allow, To::Next),
+            Op::Is(libc::IPPROTO_UDP as u32, To::Allow, To::Refuse),
             Op::Load(arg_low(0)), // (back to the family for the next block)
         ]),
     }
@@ -209,7 +221,7 @@ pub fn apply(mode: Mode) -> io::Result<Option<OwnedFd>> {
     let listener = libc::SECCOMP_FILTER_FLAG_NEW_LISTENER;
     let tries: &[libc::c_ulong] = match mode {
         Mode::Plain | Mode::OwnNetwork => &[0],
-        Mode::Served => &[listener | libc::SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV, listener],
+        Mode::Served | Mode::Routed => &[listener | libc::SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV, listener],
     };
     // SAFETY: the program outlives the call (the kernel copies it); this thread only (no TSYNC).
     unsafe {
@@ -222,7 +234,8 @@ pub fn apply(mode: Mode) -> io::Result<Option<OwnedFd>> {
             let r = libc::syscall(libc::SYS_seccomp, libc::SECCOMP_SET_MODE_FILTER, flags, fprog);
             if r >= 0 {
                 // (the listener comes close-on-exec: no run inherits it)
-                return Ok((mode == Mode::Served).then(|| OwnedFd::from_raw_fd(r as i32)));
+                let listens = matches!(mode, Mode::Served | Mode::Routed);
+                return Ok(listens.then(|| OwnedFd::from_raw_fd(r as i32)));
             }
             last = io::Error::last_os_error();
             if last.raw_os_error() != Some(libc::EINVAL) {
@@ -415,7 +428,7 @@ mod tests {
         let (inet, inet6, unix) = (libc::AF_INET as u64, libc::AF_INET6 as u64, libc::AF_UNIX as u64);
         let stream = (libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK) as u64;
         let dgram = (libc::SOCK_DGRAM | libc::SOCK_CLOEXEC) as u64;
-        for mode in [Mode::Plain, Mode::Served, Mode::OwnNetwork] {
+        for mode in [Mode::Plain, Mode::Served, Mode::Routed, Mode::OwnNetwork] {
             let run = |nr, args: &[u64]| eval(mode, arch, nr, args);
             assert_eq!(run(libc::SYS_socket, &[libc::AF_NETLINK as u64]), allow, "{mode:?}");
             assert_eq!(run(libc::SYS_socket, &[(1 << 32) | libc::AF_NETLINK as u64]), allow, "an int");
@@ -449,12 +462,12 @@ mod tests {
         assert_eq!(served(libc::SYS_socket, &[inet6, dgram]), tarae);
         assert_eq!(served(libc::SYS_socket, &[unix, stream]), allow);
         assert_eq!(served(libc::SYS_socketpair, &[unix, dgram]), allow, "its sendto goes to tarae");
-        for nr in [libc::SYS_connect, libc::SYS_bind, libc::SYS_sendmsg, libc::SYS_sendmmsg] {
+        for nr in [libc::SYS_connect, libc::SYS_bind, libc::SYS_listen, libc::SYS_sendmsg, libc::SYS_sendmmsg]
+        {
             assert_eq!(served(nr, &[3]), tarae, "{nr}");
         }
         assert_eq!(served(libc::SYS_sendto, &[3, 0x1000, 9, 0, 0x7fff_0000, 16]), tarae, "an address");
         assert_eq!(served(libc::SYS_sendto, &[3, 0x1000, 9, 0, 0x7f_0000_0000, 16]), tarae, "high half");
-        assert_eq!(served(libc::SYS_listen, &[3]), allow);
         // In the session's own network namespace: its stream and datagram internet sockets, its calls on them
         // its own; a raw one, a unix one and a datagram pair still refused
         let own = |nr, args: &[u64]| eval(Mode::OwnNetwork, arch, nr, args);
@@ -467,8 +480,50 @@ mod tests {
         assert_eq!(own(libc::SYS_socket, &[inet6, raw | (1 << 32)]), eperm, "the type is an int");
         assert_eq!(own(libc::SYS_socket, &[unix, stream]), eperm);
         assert_eq!(own(libc::SYS_socketpair, &[unix, dgram]), eperm, "a datagram pair");
-        for nr in [libc::SYS_connect, libc::SYS_bind, libc::SYS_sendmsg, libc::SYS_sendto] {
+        for nr in [libc::SYS_connect, libc::SYS_bind, libc::SYS_listen, libc::SYS_sendmsg, libc::SYS_sendto] {
             assert_eq!(own(nr, &[3, 0x1000, 9, 0, 0x7fff_0000, 16]), allow, "{nr}");
         }
+        // TCP and UDP only, by kind and protocol, in both: SCTP, MPTCP, ICMP's and UDP-Lite's sockets refused
+        for mode in [Mode::OwnNetwork, Mode::Routed] {
+            let socket =
+                |family, kind, protocol: u64| eval(mode, arch, libc::SYS_socket, &[family, kind, protocol]);
+            let (tcp, udp) = (libc::IPPROTO_TCP as u64, libc::IPPROTO_UDP as u64);
+            let ok = [
+                socket(inet, stream, 0),
+                socket(inet6, stream, tcp),
+                socket(inet, dgram, 0),
+                socket(inet6, dgram, udp),
+            ];
+            assert_eq!(ok, [allow; 4], "{mode:?}");
+            assert_eq!(socket(inet, stream, (1 << 32) | tcp), allow, "{mode:?}: the protocol is an int");
+            for (kind, protocol) in [
+                (stream, libc::IPPROTO_SCTP as u64),
+                (stream, libc::IPPROTO_MPTCP as u64),
+                (stream, udp),
+                (dgram, libc::IPPROTO_ICMP as u64),
+                (dgram, libc::IPPROTO_UDPLITE as u64),
+                (dgram, tcp),
+            ] {
+                assert_eq!(socket(inet, kind, protocol), eperm, "{mode:?}: {kind:#x} {protocol}");
+                assert_eq!(socket(inet6, kind, protocol), eperm, "{mode:?}: IPv6 {kind:#x} {protocol}");
+            }
+        }
+        // Routed: the run's own internet sockets in the session's netns, as above; what names an address goes
+        // to tarae, as served; a unix stream socket may be made (tarae says what it reaches)
+        let routed = |nr, args: &[u64]| eval(Mode::Routed, arch, nr, args);
+        assert_eq!(
+            [routed(libc::SYS_socket, &[inet, stream]), routed(libc::SYS_socket, &[inet6, dgram])],
+            [allow; 2]
+        );
+        assert_eq!(routed(libc::SYS_socket, &[inet, raw]), eperm, "a raw socket");
+        assert_eq!(routed(libc::SYS_socket, &[inet6, raw | (1 << 32)]), eperm, "the type is an int");
+        assert_eq!(routed(libc::SYS_socket, &[unix, stream]), allow);
+        assert_eq!(routed(libc::SYS_socket, &[unix, dgram]), eperm);
+        for nr in [libc::SYS_connect, libc::SYS_bind, libc::SYS_listen, libc::SYS_sendmsg, libc::SYS_sendmmsg]
+        {
+            assert_eq!(routed(nr, &[3]), tarae, "{nr}");
+        }
+        assert_eq!(routed(libc::SYS_sendto, &[3, 0x1000, 9, 0, 0x7fff_0000, 16]), tarae, "an address");
+        assert_eq!(routed(libc::SYS_sendto, &[3, 0x1000, 9, 0, 0, 0]), allow, "none");
     }
 }

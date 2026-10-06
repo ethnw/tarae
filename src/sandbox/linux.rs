@@ -122,6 +122,13 @@ impl Confine {
     pub fn handled_net(&self) -> u64 {
         self.rules.net
     }
+
+    /// Tests (M4's variants): these rules instead of the policy's.
+    #[cfg(test)]
+    pub fn with_rules(mut self, r: Ruleset) -> Confine {
+        self.rules = Arc::new(r);
+        self
+    }
 }
 
 impl std::fmt::Debug for Confine {
@@ -498,7 +505,7 @@ pub fn confine(
 pub(super) fn ruleset_for(net: RunNet, abi: u32) -> io::Result<Ruleset> {
     match net {
         RunNet::Own => Ruleset::new_own_network(abi),
-        RunNet::Served | RunNet::Plain => Ruleset::new(abi),
+        RunNet::Served | RunNet::Routed | RunNet::Plain => Ruleset::new(abi),
     }
 }
 
@@ -1218,6 +1225,8 @@ mod tests {
                 },
                 // (what a run gets of this process's environment, as `env_in` gives it)
                 run_env: run_env_here(),
+                // (this machine's own addresses read — none of them asked for here)
+                own_addresses: Some(Vec::new()),
                 ..Default::default()
             };
             let p = Policy { run: RunDir::new().ok(), ..Policy::for_project(&env) };
@@ -1652,8 +1661,9 @@ mod tests {
         drop(p);
     }
 
-    /// What Claude reads of a Linux run: the network as macOS says it where tarae serves it (nothing beyond
-    /// this machine, `llm.sandbox-network` or not), else no socket at all and why; the protected names where
+    /// What Claude reads of a Linux run: the network where tarae serves it as routed (beyond this machine with
+    /// `llm.sandbox-network`, never link-local, multicast or broadcast; this machine's ports as opened), else no
+    /// socket at all and why; the protected names where
     /// they are, what Landlock can't keep, and where what it refused is read from — this kernel's ABI said.
     #[test]
     fn the_report_says_how_linux_differs() {
@@ -1670,12 +1680,34 @@ mod tests {
                     r.contains("connect to nothing over the network, this machine's ports included"),
                     "{r}"
                 );
+                // (step 4: the open network is routed out — never the addresses D-d names; this machine's
+                // ports only as opened)
                 let open = said(Policy { network: true, ..s.policy() });
-                assert!(!open.contains("reach the network"), "{open}");
                 assert!(
-                    open.contains("llm.sandbox-network doesn't open the network beyond this machine"),
+                    open.contains(
+                        "reach the network beyond this machine (its loopback and its own addresses) — never \
+                         link-local addresses, the cloud metadata servers tarae knows of, multicast or broadcast — but none of \
+                         this machine's ports"
+                    ),
                     "{open}"
                 );
+                let opened = said(Policy { network: true, ports: vec![3000], ..s.policy() });
+                assert!(opened.contains("and this machine's ports 3000 only"), "{opened}");
+                assert!(!open.contains("doesn't open the network"), "{open}");
+                // (this machine's addresses unread: loopback only, the open network too — `route` refuses the rest)
+                let unread =
+                    said(Policy { network: true, ports: vec![3000], own_addresses: None, ..s.policy() });
+                assert!(
+                    unread.contains(
+                        "connect to nothing but this machine's loopback, its ports 3000 only (llm.sandbox-ports) — \
+                         tarae couldn't read this machine's own addresses, so it can't tell them from the network's \
+                         and refuses every other address, llm.sandbox-network notwithstanding"
+                    ),
+                    "{unread}"
+                );
+                let closed = said(Policy { own_addresses: None, ..s.policy() });
+                assert!(closed.contains("couldn't read this machine's own addresses"), "{closed}");
+                assert!(!closed.contains("notwithstanding"), "{closed}");
             }
             Some(why) => {
                 assert!(

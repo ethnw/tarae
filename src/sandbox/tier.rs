@@ -28,11 +28,15 @@ pub struct Ns {
 /// seccomp mode (the keeper's run) both take.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RunNet {
-    /// tarae's supervisor makes every call naming an address (`seccomp::Mode::Served`); Landlock handles TCP and
-    /// UDP.
+    /// Without a network namespace of its own (tier C): tarae makes its internet sockets, bound to `lo`, and
+    /// every call naming an address (`seccomp::Mode::Served`); Landlock handles TCP and UDP.
     Served,
-    /// Its own, in the network namespace its keeper made, holding only `lo` (`Mode::OwnNetwork`); Landlock
-    /// leaves TCP and UDP to it (`Ruleset::new_own_network`).
+    /// In the network namespace its keeper made: its internet sockets its own, every call naming an address
+    /// tarae's, routed (`Mode::Routed`, `sandbox::route`); Landlock handles TCP and UDP (tarae's calls on its
+    /// sockets aren't the run's).
+    Routed,
+    /// Not served, in that network namespace, holding only `lo` (`Mode::OwnNetwork`); Landlock leaves TCP and UDP
+    /// to it (`Ruleset::new_own_network`).
     Own,
     /// None (`Mode::Plain`); Landlock handles TCP and UDP.
     Plain,
@@ -61,11 +65,17 @@ impl Ns {
         f
     }
 
+    /// Whether these make a network namespace (`net` without `user` makes none: `clone_flags`).
+    pub fn netns(self) -> bool {
+        self.clone_flags() & libc::CLONE_NEWNET as u64 != 0
+    }
+
     /// How the internet sockets of a run of a keeper born with these go, `served` or not — decided once, in
     /// `linux::confine` (`Confine.net`).
     pub fn run_net(self, served: bool) -> RunNet {
-        match (served, self.clone_flags() & libc::CLONE_NEWNET as u64 != 0) {
-            (true, _) => RunNet::Served,
+        match (served, self.netns()) {
+            (true, true) => RunNet::Routed,
+            (true, false) => RunNet::Served,
             (false, true) => RunNet::Own,
             (false, false) => RunNet::Plain,
         }
@@ -322,6 +332,9 @@ pub struct Probed {
     pub short: Option<String>,
     /// Whether tarae serves its runs' calls here (`supervisor::unavailable`).
     pub served: Result<(), String>,
+    /// Whether tarae can put a socket of its own in a run's place (`supervisor::swap_unavailable`: the egress
+    /// swap) — or why not. Served without it, a policy that opens something keeps no netns (D-a).
+    pub swap: Result<(), String>,
 }
 
 impl Probed {
@@ -342,25 +355,46 @@ pub fn get() -> &'static Probed {
         #[cfg(test)]
         if std::env::var_os("TARAE_TEST_NO_NS").is_some() {
             let served = super::supervisor::unavailable().map_or(Ok(()), Err);
-            return Probed { ns: Ns::NONE, short: Some("none asked (TARAE_TEST_NO_NS)".into()), served };
+            let swap = super::supervisor::swap_unavailable().map_or(Ok(()), Err);
+            return Probed {
+                ns: Ns::NONE,
+                short: Some("none asked (TARAE_TEST_NO_NS)".into()),
+                served,
+                swap,
+            };
         }
-        let p = probe();
+        #[allow(unused_mut)]
+        let mut p = probe();
+        // (M4's cut: the session's namespaces without the PID one — tier A, no fresh `/proc` — on a machine
+        // that gives A+)
+        #[cfg(test)]
+        if std::env::var_os("TARAE_TEST_NO_PID").is_some() && p.ns.pid {
+            p.ns.pid = false;
+            p.short = Some("no PID namespace asked (TARAE_TEST_NO_PID)".into());
+        }
         let said = match &p.short {
             None => format!("namespaces: {} ({})", p.tier().said(), p.ns.said()),
             Some(why) => format!("namespaces: {} ({}) — {why}", p.tier().said(), p.ns.said()),
         };
         crate::log::line("sandbox", "info", &said);
+        if let (Ok(()), Err(why)) = (&p.served, &p.swap) {
+            let said = format!("a policy that opens a port or the network keeps no netns of its own: {why}");
+            crate::log::line("sandbox", "info", &said);
+        }
         p
     })
 }
 
-/// The namespaces the keeper of a policy is born with: the probe's, without `net` while the policy opens a
-/// port, this machine's ports or the network (D-a: until step 4's routing, its runs' sockets would be the
-/// session's, where nothing listens and nothing goes out), and without a `/dev/shm` of its own where the
-/// project or a place it writes is in this system's (`in_shm`: a private one would hide them).
+/// The namespaces the keeper of a policy is born with: the probe's — without `net` where tarae serves the runs
+/// but can't put a socket of its own in a run's place (`Probed.swap`) while the policy opens a port, this
+/// machine's ports or the network (D-a: its runs' sockets would be the session's, where nothing listens and
+/// nothing goes out) — and without a `/dev/shm` of its own where the project or a place it writes is in this
+/// system's (`in_shm`: a private one would hide them).
 pub fn for_policy(p: &super::Policy) -> Ns {
-    let ns = get().ns;
-    Ns { net: ns.net && !opens(p), shm: ns.shm && !in_shm(p), ..ns }
+    let probed = get();
+    let ns = probed.ns;
+    let stuck = probed.served.is_ok() && probed.swap.is_err() && opens(p);
+    Ns { net: ns.net && !stuck, shm: ns.shm && !in_shm(p), ..ns }
 }
 
 /// Whether the project, or a place or a file `p` writes, is in `/dev/shm` (real paths, as a policy has them).
@@ -393,7 +427,8 @@ fn probe() -> Probed {
         }
         Err(e) => (Ns::NONE, Some(e.said())),
     };
-    Probed { ns, short, served }
+    let swap = super::supervisor::swap_unavailable().map_or(Ok(()), Err);
+    Probed { ns, short, served, swap }
 }
 
 /// How a probe's keeper failed.
@@ -481,9 +516,11 @@ mod tests {
     #[test]
     fn a_run_owns_its_network_only_in_a_namespace_made_for_it() {
         assert_eq!(Ns::session(true, true).run_net(false), RunNet::Own);
-        assert_eq!(Ns::session(true, true).run_net(true), RunNet::Served);
+        assert_eq!(Ns::session(true, false).run_net(true), RunNet::Routed);
         assert_eq!(Ns::session(false, true).run_net(false), RunNet::Plain, "no network namespace");
+        assert_eq!(Ns::session(false, true).run_net(true), RunNet::Served);
         assert_eq!(Ns { net: true, ..Ns::NONE }.run_net(false), RunNet::Plain, "net without user: none made");
+        assert_eq!(Ns { net: true, ..Ns::NONE }.run_net(true), RunNet::Served);
         assert_eq!(Ns::NONE.run_net(true), RunNet::Served);
     }
 

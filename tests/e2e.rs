@@ -34,6 +34,11 @@ fn version_and_help_print_without_a_terminal() {
 /// -H`, a profiler or `tarae-trace` tells them apart — unnamed, each is called `tarae` like the main thread.
 /// Sampled from /proc while it starts on a file in a git repository, moves and saves. Linux only: elsewhere a
 /// process's thread names aren't there for a test to read.
+///
+/// A thread names itself as it starts (Rust's `Builder::name`: from inside it, first thing), so for its first
+/// moments it shows its creator's name — the main thread's `tarae`. One caught then and gone before the next look
+/// (a short job; seen on Debian in A+, where the start makes more of them) is no unnamed thread: one counts only
+/// once two looks, 20 ms apart, find it still `tarae`.
 #[cfg(target_os = "linux")]
 #[test]
 fn every_thread_tarae_starts_has_a_name() {
@@ -44,12 +49,23 @@ fn every_thread_tarae_starts_has_a_name() {
     let mut t = sb.spawn(&["a.rs"]);
     t.wait_text("fn main");
     let pid = t.pid();
-    let mut seen: BTreeMap<u32, String> = BTreeMap::new();
-    let look = |seen: &mut BTreeMap<u32, String>| {
+    // (each thread's latest name, and how many looks found it `tarae`)
+    let mut seen: BTreeMap<u32, (String, u32)> = BTreeMap::new();
+    // (an unnamed one's whereabouts too, as first seen: where it waits, the call it's in)
+    let mut whereabouts: BTreeMap<u32, String> = BTreeMap::new();
+    let mut look = |seen: &mut BTreeMap<u32, (String, u32)>| {
         for e in fs::read_dir(format!("/proc/{pid}/task")).into_iter().flatten().flatten() {
             let tid: u32 = e.file_name().to_string_lossy().parse().unwrap_or(0);
             if let Ok(name) = fs::read_to_string(e.path().join("comm")) {
-                seen.insert(tid, name.trim().to_string());
+                let name = name.trim().to_string();
+                if name == "tarae" && tid != pid && !whereabouts.contains_key(&tid) {
+                    let read = |f: &str| fs::read_to_string(e.path().join(f)).unwrap_or_default();
+                    let at = format!("wchan {} · syscall {}", read("wchan").trim(), read("syscall").trim());
+                    whereabouts.insert(tid, at);
+                }
+                let entry = seen.entry(tid).or_insert((String::new(), 0));
+                entry.1 += u32::from(name == "tarae");
+                entry.0 = name;
             }
         }
     };
@@ -61,11 +77,16 @@ fn every_thread_tarae_starts_has_a_name() {
         look(&mut seen);
         std::thread::sleep(Duration::from_millis(20));
     }
-    let unnamed: Vec<_> =
-        seen.iter().filter(|(tid, name)| **tid != pid && name.as_str() == "tarae").collect();
-    assert!(unnamed.is_empty(), "threads without a name of their own: {unnamed:?}\nall: {seen:?}");
+    let unnamed: Vec<_> = seen
+        .iter()
+        .filter(|(tid, (name, looks))| **tid != pid && name.as_str() == "tarae" && *looks >= 2)
+        .collect();
     assert!(
-        seen.values().any(|n| n == "tarae-input") && seen.values().any(|n| n == "tarae-signals"),
+        unnamed.is_empty(),
+        "threads without a name of their own: {unnamed:?} — {whereabouts:?}\nall: {seen:?}"
+    );
+    assert!(
+        seen.values().any(|(n, _)| n == "tarae-input") && seen.values().any(|(n, _)| n == "tarae-signals"),
         "{seen:?}"
     );
 }

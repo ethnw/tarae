@@ -34,6 +34,8 @@ mod golden;
 pub mod keeper;
 #[cfg(target_os = "linux")]
 pub mod linux;
+#[cfg(any(target_os = "linux", test))]
+pub mod route;
 pub mod runenv;
 #[cfg(target_os = "linux")]
 pub mod supervisor;
@@ -325,11 +327,43 @@ impl Guard {
             Guard::In(p) => {
                 let ports = p.ports.iter().map(u16::to_string).collect::<Vec<_>>().join(", ");
                 let linux = p.linux_said();
-                // (Linux's supervisor opens nothing beyond this machine — said in its notes)
-                let beyond = p.network && linux.is_none();
+                // (Linux: served, the open network is routed out — this machine's ports only as opened; not
+                // served, no socket at all, said in its notes)
+                let routed = linux.as_ref().is_some_and(|(no_socket, _)| no_socket.is_none());
+                let beyond = p.network && (linux.is_none() || routed);
+                // (Linux, served, but this machine's addresses unread or no socket of tarae's can take a run's
+                // place: nothing but loopback — `route` and the supervisor refuse the rest)
+                let lo = match (p.localhost, ports.is_empty()) {
+                    (true, _) => "every port of it".to_string(),
+                    (false, false) => format!("its ports {ports} only (llm.sandbox-ports)"),
+                    (false, true) => {
+                        "none of its ports (llm.sandbox-ports opens some, llm.sandbox-localhost all)"
+                            .to_string()
+                    }
+                };
+                let loopback_only = routed.then(|| p.loopback_only()).flatten();
                 let net = match (beyond, p.localhost, ports.is_empty()) {
-                    (true, ..) => ", and reach the network — but not this machine's risky ports (Docker, Jupyter, \
-                                   debuggers…)"
+                    _ if loopback_only.is_some() => format!(
+                        ", and connect to nothing but this machine's loopback, {lo} — {}{}",
+                        loopback_only.as_deref().unwrap_or_default(),
+                        if p.network { ", llm.sandbox-network notwithstanding" } else { "" }
+                    ),
+                    (true, here, none) if routed => format!(
+                        ", and reach the network beyond this machine (its loopback and its own addresses) — never \
+                         link-local addresses, the cloud metadata servers tarae knows of, multicast or broadcast — {}",
+                        match (here, none) {
+                            (true, _) => "and every port of this machine's".to_string(),
+                            (false, false) => format!("and this machine's ports {ports} only (llm.sandbox-ports)"),
+                            (false, true) => "but none of this machine's ports (llm.sandbox-ports opens some, \
+                                              llm.sandbox-localhost all)"
+                                .to_string(),
+                        }
+                    ),
+                    // (macOS: Seatbelt names loopback only — `localhost:<port>` — so this machine's own addresses
+                    // beyond it go as the network does)
+                    (true, ..) => ", and reach the network — but not the risky ports (Docker, Jupyter, debuggers…) \
+                                   on this machine's loopback; on its other addresses (its LAN's) they're reached as \
+                                   the network is"
                         .to_string(),
                     (false, true, _) => ", and connect to nothing over the network but this machine".into(),
                     (false, false, true) => ", and connect to nothing over the network, this machine's ports \
@@ -493,6 +527,22 @@ pub struct Policy {
     pub run_homes: Vec<RunHomeSaid>,
     /// The kept run homes its runs get (`with_kept`; held — `policy_in`).
     pub kept: Vec<Kept>,
+    /// Linux: the resolvers `resolv.conf` names, reached on port 53 with the network open (D-c, `route`).
+    #[cfg(target_os = "linux")]
+    pub resolvers: Vec<std::net::SocketAddr>,
+    /// Linux: this machine's own addresses (its LAN's, its bridges' — `docker0`'s), read when the policy is made:
+    /// `route` takes them as this machine, reached on its opened ports only. None where they couldn't be read:
+    /// every address beyond loopback is refused (never opened by a port, never out).
+    #[cfg(target_os = "linux")]
+    pub own_addresses: Option<Vec<std::net::IpAddr>>,
+    /// Tests (Linux): how long the supervisor waits once a socket of tarae's is in a run's place, before the call
+    /// that swapped it goes on — the window another thread of the run's calls into.
+    #[cfg(all(test, target_os = "linux"))]
+    pub swap_pause: Option<std::time::Duration>,
+    /// Tests (Linux): why no socket of tarae's can take a run's place, said as `supervisor::swap_unavailable`
+    /// would on a kernel without `SETFD` (`swap_missing`) — every kernel here has it.
+    #[cfg(all(test, target_os = "linux"))]
+    pub test_swap_missing: Option<String>,
     /// Linux: the policy as Landlock's rules (`linux::confine`, made on the worker) — Err why it couldn't be
     /// (the run then doesn't start: `spawn`); None before it's made (`policy` makes it).
     #[cfg(target_os = "linux")]
@@ -580,6 +630,14 @@ pub struct Here {
     pub tmp: Option<PathBuf>,
     pub uid: u32,
     pub os: Os,
+    /// Linux: `/etc/resolv.conf`'s text — the resolvers a run reaches on port 53 with the network open (D-c,
+    /// `route::resolvers`).
+    #[cfg(target_os = "linux")]
+    pub resolv: Option<String>,
+    /// Linux: the addresses of tarae's own network (`keeper::addresses`, every interface's) — None where they
+    /// couldn't be read.
+    #[cfg(target_os = "linux")]
+    pub addresses: Option<Vec<std::net::IpAddr>>,
     /// Tests: every variable asked (`path`, `var`) — what a policy reads of the environment
     /// (`every_variable_the_policy_reads_reaches_the_run`).
     #[cfg(test)]
@@ -594,6 +652,18 @@ impl Here {
             // SAFETY: getuid has no preconditions and can't fail.
             uid: unsafe { libc::getuid() },
             os: Os::HOST,
+            #[cfg(target_os = "linux")]
+            resolv: std::fs::read_to_string("/etc/resolv.conf").ok(),
+            #[cfg(target_os = "linux")]
+            addresses: keeper::addresses()
+                .inspect_err(|e| {
+                    let said = format!(
+                        "this machine's addresses couldn't be read ({e}): Claude's runs reach nothing beyond \
+                         loopback until they can"
+                    );
+                    crate::log::line("sandbox", "warn", &said);
+                })
+                .ok(),
             #[cfg(test)]
             asked: Default::default(),
         }
@@ -916,6 +986,8 @@ impl Denial {
     /// address beyond this machine.
     pub fn port_here(&self) -> Option<u16> {
         let rest = self.target.strip_prefix("remote:").filter(|_| self.op == "network-outbound")?;
+        // (Linux's supervisor may say why after the address: `remote:1.2.3.4:443 — …`)
+        let rest = rest.split_once(" — ").map_or(rest, |(at, _)| at);
         let (host, port) = rest.rsplit_once(':')?;
         let host = host.trim_start_matches('[').trim_end_matches(']');
         let here = host == "*"
@@ -988,12 +1060,28 @@ impl Denial {
             "network-outbound" if self.target.starts_with('/') => format!("connecting to socket {t}"),
             "network-outbound" if t.starts_with("remote:") => match self.port_here() {
                 Some(port) => format!("connecting to port {port}"),
-                None => match t.strip_prefix("remote:") {
-                    Some(at) if at.rsplit_once(':').is_some_and(|(_, p)| p.parse::<u16>().is_ok()) => {
-                        format!("connecting to {at}")
+                None => match t.strip_prefix("remote:").map(|r| r.split_once(" — ").unwrap_or((r, ""))) {
+                    Some((at, why)) if at.rsplit_once(':').is_some_and(|(_, p)| p.parse::<u16>().is_ok()) => {
+                        match why.is_empty() {
+                            true => format!("connecting to {at}"),
+                            false => format!("connecting to {at} — {why}"),
+                        }
                     }
                     _ => self.shown(),
                 },
+            },
+            // (Linux's routing: an address never reached, and a socket that can't leave the session, its why
+            // after the address — `supervisor::routed_socket`)
+            "network-never" => match t.strip_prefix("remote:") {
+                Some(at) => format!(
+                    "connecting to {at} — link-local addresses, the cloud metadata servers tarae knows of, multicast and \
+                     broadcast are never reached"
+                ),
+                None => self.shown(),
+            },
+            "network-bound" => match t.strip_prefix("remote:").and_then(|t| t.split_once(' ')) {
+                Some((at, why)) => format!("connecting to {at} {why}"),
+                None => self.shown(),
             },
             "network-bind" if self.target.starts_with('/') => format!("making socket {t}"),
             "appleevent-send" if !t.is_empty() => format!("Apple Event to {t}"),
@@ -2093,8 +2181,39 @@ impl Policy {
         p
     }
 
+    /// Linux, a served run: why it reaches nothing but this machine's loopback, where it doesn't — this
+    /// machine's own addresses couldn't be read when the policy was made (`own_addresses`: `route` refuses every
+    /// other address), or no socket of tarae's can take a run's place on this kernel (`swap_missing`: the
+    /// supervisor refuses what would need one). None elsewhere.
+    pub fn loopback_only(&self) -> Option<String> {
+        #[cfg(target_os = "linux")]
+        {
+            if self.own_addresses.is_none() {
+                return Some(
+                    "tarae couldn't read this machine's own addresses, so it can't tell them from the network's \
+                     and refuses every other address"
+                        .into(),
+                );
+            }
+            self.swap_missing().map(|why| format!("{why}, so nothing goes beyond it"))
+        }
+        #[cfg(not(target_os = "linux"))]
+        None
+    }
+
+    /// Linux: why tarae can't put a socket of its own in a run's place here (`supervisor::swap_unavailable`) —
+    /// None where it can. Tests: `test_swap_missing` says it instead.
+    #[cfg(target_os = "linux")]
+    pub fn swap_missing(&self) -> Option<String> {
+        #[cfg(test)]
+        if let Some(why) = &self.test_swap_missing {
+            return Some(why.clone());
+        }
+        supervisor::swap_unavailable()
+    }
+
     /// Linux: how the report says the network where it differs from macOS's words — tarae's supervisor
-    /// serving: as macOS has it, but nothing beyond this machine (`None`); not serving here: no socket at all,
+    /// serving: routed (`None`: `rules` says it); not serving here: no socket at all,
     /// this machine's ports and the project's unix sockets included, and why — and what Landlock can't keep
     /// (`linux.rs`). None elsewhere.
     pub fn linux_said(&self) -> Option<(Option<String>, String)> {
@@ -2113,14 +2232,9 @@ impl Policy {
                     }
                 )
             });
-            let beyond = match c.serve.is_ok() && self.network {
-                true => " On Linux llm.sandbox-network doesn't open the network beyond this machine yet.",
-                false => "",
-            };
             let notes = format!(
                 " On Linux a protected name it makes where none is yet isn't refused (the user is asked about \
-                 it before your next run), and the terminal multiplexers' folders in /tmp stay writable.\
-                 {beyond}{}{}{}",
+                 it before your next run), and the terminal multiplexers' folders in /tmp stay writable.{}{}{}",
                 linux::notes(c.abi),
                 linux::made_said(&c.made, &self.root),
                 linux::kept_said(&c.kept, &self.root)
@@ -2538,6 +2652,14 @@ impl Policy {
             run_homes: env.run_homes.clone(),
             kept: Vec::new(),
             #[cfg(target_os = "linux")]
+            resolvers: env.resolvers.clone(),
+            #[cfg(target_os = "linux")]
+            own_addresses: env.own_addresses.clone(),
+            #[cfg(all(test, target_os = "linux"))]
+            swap_pause: None,
+            #[cfg(all(test, target_os = "linux"))]
+            test_swap_missing: None,
+            #[cfg(target_os = "linux")]
             confine: None,
         }
     }
@@ -2605,6 +2727,12 @@ pub struct Env {
     pub run_homes: Vec<RunHomeSaid>,
     /// What a run gets of tarae's environment (`run_env_of`; the default: nothing).
     pub run_env: runenv::RunEnv,
+    /// The resolvers `resolv.conf` names (`route::resolvers`).
+    #[cfg(target_os = "linux")]
+    pub resolvers: Vec<std::net::SocketAddr>,
+    /// This machine's own addresses (`Here::addresses`).
+    #[cfg(target_os = "linux")]
+    pub own_addresses: Option<Vec<std::net::IpAddr>>,
 }
 
 /// A path as the profile writes it: the real path; for one that isn't there yet, its folder's real path
@@ -2745,6 +2873,10 @@ pub(crate) fn env_in(
         zellij_dir: here.path("ZELLIJ_SOCKET_DIR"),
         uid: here.uid,
         run_env: run_env_of(here, llm),
+        #[cfg(target_os = "linux")]
+        resolvers: here.resolv.as_deref().map(route::resolvers).unwrap_or_default(),
+        #[cfg(target_os = "linux")]
+        own_addresses: here.addresses.clone(),
     };
     // The toolchain is asked inside the sandbox it's for (it reads only)
     let found = toolchain_dirs(&Policy::for_project(&env), &asks);
@@ -3462,9 +3594,9 @@ pub fn spawn(policy: Option<&Policy>, cmd: &Command) -> std::io::Result<crate::s
             w.owned_by(owner(0));
         }
         let started = match c.net {
-            tier::RunNet::Served => {
+            net @ (tier::RunNet::Served | tier::RunNet::Routed) => {
                 let serve = std::sync::Arc::new(p.clone());
-                k.start_served(cmd, &comm, c.rules_fd(), serve.clone(), told(serve))?
+                k.start_served(cmd, &comm, c.rules_fd(), net, serve.clone(), told(serve))?
             }
             net => k.start(cmd, &comm, c.rules_fd(), net)?,
         };
@@ -5457,6 +5589,23 @@ mod tests {
         assert!(!quiet(&out("remote:127.0.0.1:10")) && !quiet(&out("remote:169.254.169.254:53")));
     }
 
+    /// macOS with the network open: the risky ports are closed on this machine's loopback only — Seatbelt names
+    /// ports by `localhost` — and the report says its other addresses aren't covered.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_report_says_macos_closes_risky_ports_on_loopback_only() {
+        let p = Policy { network: true, ..Policy::for_project(&env(Path::new("/Users/u/p"))) };
+        let r = Guard::In(Box::new(p)).report(&[]);
+        let r = r.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            r.contains(
+                "reach the network — but not the risky ports (Docker, Jupyter, debuggers…) on this machine's \
+                 loopback; on its other addresses (its LAN's) they're reached as the network is"
+            ),
+            "{r}"
+        );
+    }
+
     /// What Claude reads: what was blocked (deduplicated, with who tried); that nothing was; or that nothing
     /// could watch — then the output's refusals.
     #[test]
@@ -5544,6 +5693,18 @@ mod tests {
         assert_eq!(plain("network-outbound", "remote:192.0.2.1:9"), "connecting to 192.0.2.1:9");
         assert_eq!(plain("network-outbound", "remote:[2001:db8::1]:9"), "connecting to [2001:db8::1]:9");
         assert_eq!(plain("network-outbound", "@bus"), "network-outbound @bus");
+        // Linux's routing (step 4): never reached, and a socket that can't leave the session
+        assert_eq!(
+            plain("network-never", "remote:169.254.169.254:80"),
+            "connecting to 169.254.169.254:80 — link-local addresses, the cloud metadata servers tarae knows of, multicast \
+             and broadcast are never reached"
+        );
+        let bound =
+            "remote:93.184.216.34:443 from a socket it bound itself — a bound socket stays in the session";
+        assert_eq!(
+            plain("network-bound", bound),
+            "connecting to 93.184.216.34:443 from a socket it bound itself — a bound socket stays in the session"
+        );
         assert_eq!(plain("system-info", ""), "system-info");
         assert_eq!(denial("file-write-unlink", "/a").reported(), "deleting /a (file-write-unlink, touch)");
         assert_eq!(denial("system-info", "x").reported(), "system-info x (touch)");

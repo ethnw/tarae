@@ -13,6 +13,8 @@
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 
+use super::tier::RunNet;
+
 /// The longest record.
 pub const MSG_MAX: usize = 1 << 20;
 /// The most descriptors a record carries.
@@ -62,10 +64,10 @@ impl Step {
     }
 }
 
-/// A run asked of a keeper. Its descriptors: the Landlock ruleset, stdin, stdout, stderr — and, `served` or
-/// `held`, the handoff socket: served, its listener's number goes back on it and a byte comes once tarae has
-/// it; held, a byte comes once tarae knows its pid (a keeper in a PID namespace says its own number — tarae
-/// reads its own from the pidfd, before the run can end and be reaped).
+/// A run asked of a keeper. Its descriptors: the Landlock ruleset, stdin, stdout, stderr — and, served (`net`
+/// `Served` or `Routed`) or `held`, the handoff socket: served, its listener's number goes back on it and a
+/// byte comes once tarae has it; held, a byte comes once tarae knows its pid (a keeper in a PID namespace says
+/// its own number — tarae reads its own from the pidfd, before the run can end and be reaped).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Run {
     pub id: u64,
@@ -77,11 +79,20 @@ pub struct Run {
     pub cwd: Vec<u8>,
     /// The name the run's process gives itself before its rules (Landlock's audit names it), ≤ `COMM_MAX`.
     pub comm: Vec<u8>,
-    pub served: bool,
+    /// How its sockets go: its seccomp mode (`keeper::mode`), decided with its rules (`linux::confine`).
+    pub net: RunNet,
     pub held: bool,
-    /// Not served, in the session's own network namespace: its internet sockets its own (`seccomp::Mode`).
-    pub own_net: bool,
 }
+
+impl Run {
+    /// Served: its calls that name an address go to tarae, over its handoff socket's listener.
+    pub fn served(&self) -> bool {
+        matches!(self.net, RunNet::Served | RunNet::Routed)
+    }
+}
+
+/// `RunNet` on the wire, each its byte.
+const NETS: [RunNet; 4] = [RunNet::Plain, RunNet::Served, RunNet::Routed, RunNet::Own];
 
 /// A message, either way.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -149,7 +160,7 @@ impl Msg {
     /// The descriptors the message takes, exactly.
     pub fn fds(&self) -> usize {
         match self {
-            Msg::Run(r) => 4 + (r.served || r.held) as usize,
+            Msg::Run(r) => 4 + (r.served() || r.held) as usize,
             Msg::Ready { places, .. } => places.len(),
             Msg::Started { .. } => 1,
             _ => 0,
@@ -178,7 +189,8 @@ pub fn encode(msg: &Msg) -> Result<Vec<u8>, Refused> {
             list(&mut b, &r.envp)?;
             bytes(&mut b, &r.cwd);
             bytes(&mut b, &r.comm);
-            b.extend([r.served as u8, r.held as u8, r.own_net as u8]);
+            let net = NETS.iter().position(|n| *n == r.net).unwrap_or(0) as u8;
+            b.extend([net, r.held as u8]);
             valid_run(r)?;
         }
         Msg::Signal { id, sig } => {
@@ -336,9 +348,8 @@ pub fn decode(b: &[u8], fds: usize) -> Result<Msg, Refused> {
                 envp: r.list()?,
                 cwd: r.bytes()?,
                 comm: r.bytes()?,
-                served: r.flag()?,
+                net: *NETS.get(usize::from(r.u8()?)).ok_or(Refused("a network mode it doesn't know"))?,
                 held: r.flag()?,
-                own_net: r.flag()?,
             };
             valid_run(&run)?;
             Msg::Run(run)
@@ -480,7 +491,7 @@ mod tests {
 
     /// One of every kind, with fields worth mutating.
     fn every_kind() -> Vec<Msg> {
-        let run = |served, held, own_net| {
+        let run = |net, held| {
             Msg::Run(Run {
                 id: 7,
                 program: b"/bin/sh".to_vec(),
@@ -488,16 +499,16 @@ mod tests {
                 envp: vec![b"PATH=/usr/bin:/bin".to_vec(), b"TARAE_SANDBOXED=tarae-1-2.".to_vec()],
                 cwd: b"/tmp/project".to_vec(),
                 comm: b"tl-12".to_vec(),
-                served,
+                net,
                 held,
-                own_net,
             })
         };
         vec![
-            run(false, false, false),
-            run(true, false, false),
-            run(false, true, true),
-            run(true, true, false),
+            run(RunNet::Plain, false),
+            run(RunNet::Served, false),
+            run(RunNet::Own, true),
+            run(RunNet::Served, true),
+            run(RunNet::Routed, true),
             Msg::Signal { id: 7, sig: libc::SIGTERM },
             Msg::AskUsage,
             Msg::End,

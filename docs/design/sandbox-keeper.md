@@ -1,8 +1,9 @@
 # The sandbox keeper: one per session, its namespaces, one egress proxy (Linux)
 
-Design, 2026-10-06. Status: **decided** (D2–D23 below). Steps 1–3 are built (§Steps): every Linux session's
+Design, 2026-10-06. Status: **decided** (D2–D23 below). Steps 1–4 are built (§Steps): every Linux session's
 sandboxed runs are forked by its keeper, born in the session's namespaces where user namespaces work
-(`src/sandbox/keeper.rs`, `src/sandbox/tier.rs`, `src/sandbox/channel.rs`).
+(`src/sandbox/keeper.rs`, `src/sandbox/tier.rs`, `src/sandbox/channel.rs`); in the session's netns a run makes its
+own sockets and tarae routes every call that names an address (`src/sandbox/route.rs`, `supervisor.rs`).
 macOS is unchanged: Seatbelt, as `src/sandbox.rs` has it.
 
 ## What it's for
@@ -41,6 +42,10 @@ each address it reaches. It leaves four things open:
 | D18 | Another session's loopback listener is refused, even with `llm.sandbox-localhost` |
 | D21 | Later, its own step: the supervisor and the proxy as one confined process per session |
 | D23 | The supervisor and the proxy talk only over a Rust channel (`mpsc`) of typed, owned messages. **Supervisor → proxy**: the traffic end (`OwnedFd`), the session's id, and the connection's rules as a read-only snapshot (an `Arc`, never mutated). **Proxy → supervisor**: `Refused` and log lines. No socketpair between them, and no shared mutable state (no `Mutex` or other cell both sides write). The run's traffic socketpair stays. **Why not a socket**: in one process a socket isolates nothing; the channel keeps the same discipline at no serialization cost. If D21 is ever done, these messages move onto the keeper channel's wire format then (`channel.rs`). The keeper's own channel stays `SOCK_SEQPACKET` + `SCM_RIGHTS`: the keeper is another process |
+| D-c | With the network open, the resolvers `resolv.conf` names are reached on port 53 only: a loopback one (`127.0.0.53`) on this machine, another (GCP's `169.254.169.254`) out (2026-10-07) |
+| D-d | Before the proxy, "out" never reaches link-local addresses (the cloud metadata servers among them), multicast or broadcast, nor their IPv4-mapped forms — but D-c's port 53. Private ranges go out (2026-10-07) |
+| D-e | Tier C goes out by the same swap with the network open (2026-10-07) |
+| D-f | Abstract unix names are the session's own in its netns (bound and reached there); refused in C (2026-10-07) |
 
 ## The shape
 
@@ -58,7 +63,7 @@ each address it reaches. It leaves four things open:
 |---|---|---|---|
 | **Where** | threads in tarae | threads in tarae | a process: `tarae --sandbox-keeper` |
 | **How many** | one for all sessions | one set per session (its policy, grants, report, log) | one per session, in every tier |
-| **Does** | parses CONNECT and the TLS ClientHello's SNI, resolves the name itself, checks every address, connects to the very address it checked, relays | takes each run's seccomp listener, reads the address, decides (`may_reach`, the route), and makes the call itself on the run's socket. Never `CONTINUE` | forks each run, reaps it, reports its status; owns what runs leave |
+| **Does** | parses CONNECT and the TLS ClientHello's SNI, resolves the name itself, checks every address, connects to the very address it checked, relays | takes each run's seccomp listener, reads the address, decides (`route::route`), and makes the call itself on the run's socket. Never `CONTINUE` | forks each run, reaps it, reports its status; owns what runs leave |
 | **Talks through** | a channel (`mpsc`) with the supervisor only (D23): in, an owned message per connection (the traffic end, the session's id, its rules as a read-only snapshot); out, `Refused` and log lines. No mutable state shared with the supervisor | the policy at run start, `Refused` out, the listener by descriptor (nothing else, so moving it into a process later, D21, is mechanical); to the proxy, the channel (D23) | the request channel (`SOCK_SEQPACKET`, `channel.rs`) |
 | **Holds** | the session's rules per socket | the run's listener; descriptors it takes with `pidfd_getfd` | stdio from `/dev/null`, its channel's end; no capability |
 
@@ -88,9 +93,10 @@ Where a filter answers `clone3` with `ENOSYS` (Docker's default profile does, so
 takes the same flags.
 
 **Which namespaces, per policy** (`tier::for_policy`, so part of the policy key, D14):
-- **No `CLONE_NEWNET` while the policy opens the network, this machine's ports or a port** (D-a, until step 4).
-  Before the egress swap, an allowed connect made on the run's socket would reach the session's empty loopback, or
-  nothing beyond it. Such a keeper says `network shared: its policy opens it, until routing`.
+- **Every policy gets the session's netns** (step 4), whatever it opens: tarae routes what it opens out of the
+  netns (§Sockets and routing). Only where the kernel can't put a socket in a run's place (`SECCOMP_ADDFD_FLAG_SETFD`,
+  Linux 5.14: `supervisor::swap_unavailable`, `Probed.swap`) does a served policy that opens the network, this
+  machine's ports or a port keep none (D-a). Such a keeper says `network shared: its policy opens it — <why>`.
 - **No private `/dev/shm` where the project, a place it writes or a file it writes is under `/dev/shm`** (it would
   hide them from the run). That keeper says `/dev/shm shared: the project or a place it writes is in it`.
 
@@ -103,7 +109,16 @@ a birth pipe as (step, errno) — `tier::BirthStep` — and its exec closes the 
      when that's the cause.
 2. Mount propagation to slave; a fresh `procfs` on `/proc` (with a PID namespace only); a new `devpts` instance with
    its `ptmx` bound over `/dev/ptmx`; a `tmpfs` on `/dev/shm` unless shared (D10).
-3. `lo` up (`ioctl(SIOCSIFFLAGS)`), with a network namespace only.
+3. `lo` up (`ioctl(SIOCSIFFLAGS)`), with a network namespace only; then the address families tarae's own network
+   has, mirrored (`keeper::Families`, decided from `getifaddrs` before each birth — what glibc's `AI_ADDRCONFIG`
+   counts: IPv4 but loopback, IPv6 but loopback and link-local): `192.0.2.1/32` as `lo:1` (`SESSION_V4`:
+   `SIOCSIFADDR`, `SIOCSIFNETMASK`) and `2001:db8::1/128` (`SESSION_V6`: `SIOCSIFADDR` on an IPv6 socket, `lo`'s
+   index 1), documentation addresses both. Without them glibc reads "no IPv4 here" (or IPv6) and a lookup asking
+   only for that family comes back empty (M5); with them an `AI_ADDRCONFIG` lookup answers inside as it would
+   outside. Nothing is reached through them: a bind there is refused, a connect there is routed as any address
+   beyond this machine. Only lookups need them, so one that can't be made (IPv6 disabled in new namespaces, say)
+   doesn't fail the birth: the child says it on the birth pipe (`LO_NOTES`), tarae logs it, the keeper goes on without
+   it and says so with its tier (`Keeper.lo_missing`, `:procs`).
 4. Every capability dropped: each bounding-set bit up to `cap_last_cap`, each checked gone; no ambient set; then
    `capset` to zero.
 5. stdio to `/dev/null`, its channel to fd 3, and `SIGCHLD` blocked, so every thread of the new process starts with it
@@ -163,7 +178,7 @@ supervisor–proxy messages would move onto it only if they ever leave tarae's p
 
 | tarae → keeper | |
 |---|---|
-| `Run { id, program, argv, envp, cwd, comm, served, held, own_net }` + `SCM_RIGHTS` | `program` resolved by tarae (`spawn::resolve`); `envp` the run's environment as `spawn::environment` makes it; `comm` the name the run gives itself (≤ 15 bytes). The descriptors: the Landlock ruleset tarae built (`linux::confine`), stdin (`/dev/null`, tarae's), stdout, stderr, and, served or held, the run's handoff socket. `held`: it waits for tarae to know its pid (a keeper in a PID namespace). `own_net`: not served, in the session's netns, its internet sockets are its own (`seccomp::Mode::OwnNetwork`, Landlock's TCP and UDP unhandled). A malformed request gets `Failed`, never a crash. No `pty`: no sandboxed run asks for one, so it waits for a caller (a run opening `/dev/ptmx` gets the session's own) |
+| `Run { id, program, argv, envp, cwd, comm, net, held }` + `SCM_RIGHTS` | `program` resolved by tarae (`spawn::resolve`); `envp` the run's environment as `spawn::environment` makes it; `comm` the name the run gives itself (≤ 15 bytes). The descriptors: the Landlock ruleset tarae built (`linux::confine`), stdin (`/dev/null`, tarae's), stdout, stderr, and, served or held, the run's handoff socket. `net` (one byte, `tier::RunNet`, decided once with the rules in `linux::confine`): `Served` (no netns: tarae makes its sockets), `Routed` (served in the session's netns: its own sockets, its address-naming calls tarae's), `Own` (not served, in the netns: Landlock's TCP and UDP unhandled), `Plain` — its seccomp mode follows. `held`: it waits for tarae to know its pid (a keeper in a PID namespace). A malformed request gets `Failed`, never a crash. No `pty`: no sandboxed run asks for one, so it waits for a caller (a run opening `/dev/ptmx` gets the session's own) |
 | `Signal { id, sig }` | cancel: the keeper signals the run's process group, only while it hasn't reaped it (`dap::term_group` asks here: once the keeper has reaped a run, a kill from tarae could reach a reused pid) |
 | `AskUsage` | its own Rss and Pss (M3): its `smaps_rollup` is unreadable to tarae |
 | `End`, or EOF | end every run and leftover, then exit |
@@ -249,29 +264,76 @@ the filter refuses io_uring).
 | **9** | `RESOLVE_UNIX`: connect or send to a unix socket by path | handled, no rule (`landlock::UNGRANTED`) | the supervisor's path check (`unix_target`) |
 | **10** | `BIND_UDP`, `CONNECT_SEND_UDP` (setting the remote port, or sending to a port given with the send) | handled, no rule. A send with no address on a socket tarae connected isn't checked (the v7.2 uapi header's words); the auto-bind of a first connect or send happens in tarae's call | the routing alone |
 
-In Plain mode inside the session's namespaces (step 3 on) the run makes its own TCP and UDP calls, so those rights are
-left unhandled there; the netns, with only `lo`, is the lock. Plain mode without namespaces refuses internet sockets
-outright, as today.
+Not served inside the session's namespaces (`Own`, step 3 on) the run makes its own TCP and UDP calls, so those rights
+are left unhandled there; the netns, with only `lo`, is the lock. Served in it (`Routed`, step 4) they stay handled:
+tarae makes every address-naming call, unconfined. Not served without namespaces (`Plain`), internet sockets are
+refused outright, as before.
 
-## Sockets and routing (tiers with a network namespace)
+## Sockets and routing (*built*, step 4)
 
-The run makes its own internet sockets; they belong to the session's netns. `connect`, `bind`, `sendto` with an
-address, `sendmsg` and `sendmmsg` still go to the supervisor, which decides with `may_reach` and a route:
+**One decision per run** (`tier::RunNet`, made in `linux::confine` with its rules, carried to the keeper as the run's
+`net`): `Routed` in a netns tier served, `Served` in C, `Own` and `Plain` unserved. In `Routed` the run makes its own
+internet sockets — TCP's and UDP's only, by type and protocol, as C's `socket()` makes them (`seccomp::Mode::Routed`):
+not raw, ICMP's, UDP-Lite's, SCTP's or MPTCP's, whose own options and messages (SCTP's `CONNECTX`, its `DSTADDR`
+cmsgs) choose destinations tarae never sees; they belong to the session's netns. `connect`, `bind`, `listen`, an
+addressed `sendto`, `sendmsg` and `sendmmsg` still go to the supervisor, which routes them with one pure function
+(`route::route`, its table pinned by `route::tests::the_route_table` and
+`this_machines_own_addresses_are_this_machine`):
 
 | Destination | Route | How |
 |---|---|---|
-| loopback: a port the session listens on, or one not opened to this machine | **the session** | tarae makes the call on the run's own socket (`pidfd_getfd`); it stays in the session's netns |
-| loopback: a port opened by `llm.sandbox-ports`/`-localhost` that nothing in the session listens on (D2) | **this machine** | egress |
-| anything else, network open | **out** | egress, through the proxy |
-| anything else, network closed | refused | as today |
+| loopback (`127/8`, `::1`, mapped, `0.0.0.0`/`::`): a port the session listens on, or one not opened to this machine | **the session** | tarae makes the call on the run's own socket (`pidfd_getfd`); it stays in the session's netns. Not opened, nothing is read; opened, the session's listeners are read from the caller's own `/proc/<tid>/net/{tcp,udp}[6]` |
+| loopback: a port opened by `llm.sandbox-ports`/`-localhost` that nothing in the session listens on (D2) | **this machine** | egress, on a socket of tarae's bound to `lo` |
+| one of this machine's own addresses beyond loopback (its LAN's, Docker's bridge's `172.17.0.1` — every interface's, `getifaddrs` when the run's policy is made: `Policy.own_addresses`; unreadable: every address beyond loopback refused, network open or not — never opened by a port, never out; logged when the policy is made and said in the run's report) | opened port: **this machine** (`OwnAddress`); else refused: `EPERM`, `network-outbound` | egress, on a socket of tarae's bound to no device (one bound to `lo` reaches loopback's addresses only — measured: `ETIMEDOUT`). A service listening on every address isn't reached through them unless its port is opened |
+| a resolver `resolv.conf` names, its port 53, network open (D-c) | loopback one: **this machine**; another (GCP's `169.254.169.254`): **out** | egress. Read once into `Policy.resolvers` (`route::resolvers`, glibc's three) |
+| link-local (with `169.254.169.254`), the cloud metadata servers that aren't (Alibaba Cloud's `100.100.100.200`; AWS's `fd00:ec2::254` and EKS Pod Identity's `fd00:ec2::23`, Google Cloud's `fd20:ce::254`), multicast, broadcast — and those IPv4 ones carried in NAT64's `64:ff9b::/96` or 6to4's `2002::/16` — network open (D-d) | refused: `EPERM`, `network-never` | before any connect. A resolver's port 53 is the one exception, so the metadata server's other ports stay closed |
+| anything else, network open | **out** | egress — direct until the proxy (step 5); private ranges included |
+| anything else, network closed | refused: `EPERM`, `network-outbound` | as before |
 
-**Egress**: tarae makes a socket in its own namespace, copies what the run set (`O_NONBLOCK`, close-on-exec, the
-options it can read back) and puts it in place of the run's at the same descriptor number (`SECCOMP_IOCTL_NOTIF_ADDFD`
-with `SECCOMP_ADDFD_FLAG_SETFD`, Linux 5.14). A non-blocking connect answers `EINPROGRESS` as the run's own would. A
-socket the run bound itself is refused with `EADDRNOTAVAIL`: its source address can't move namespaces.
+In tier C (`Served`, no netns, D-e) the same table without the session: loopback is this machine's where opened, else
+refused; out is the same swap, replacing tarae's own `lo`-bound socket.
+
+**The egress swap** (`supervisor::swapped_for`), for Machine, OwnAddress and Out:
+1. tarae makes a socket in its own namespace, of the run's domain, type and protocol (TCP or UDP — any other is
+   refused here too), non-blocking as the run's is; for this machine's loopback, bound to `lo`.
+2. It carries what the run set and can read back (`CARRIED`: `SO_REUSEADDR`, `SO_REUSEPORT`, `SO_KEEPALIVE`,
+   `SO_BROADCAST`, `SO_OOBINLINE`, `SO_PRIORITY`, the buffer sizes, `TCP_NODELAY`, the keepalive timers,
+   `TCP_USER_TIMEOUT`, `TCP_FASTOPEN_CONNECT`, `IP_TOS`, `IP_TTL`, `IP_RECVERR`, `IP_MTU_DISCOVER`, `IPV6_V6ONLY`,
+   `IPV6_RECVERR`; `SO_LINGER`, `SO_RCVTIMEO`, `SO_SNDTIMEO`). Close-on-exec comes from the run's `fdinfo`.
+   `TCP_CONGESTION` isn't carried. One that can't be set fails the call.
+3. It records it as put out of the session (`Served.swapped`, by inode; the run's old socket's entry out) and only
+   then puts it in place of the
+   run's at the same descriptor number (`SECCOMP_IOCTL_NOTIF_ADDFD` with `SECCOMP_ADDFD_FLAG_SETFD`, Linux 5.14) —
+   another thread of the run's calling on that number the moment it's there finds it tarae's, never the
+   session's — then makes the call. A failed `ADDFD` takes the record back. A non-blocking connect answers
+   `EINPROGRESS` as the run's own would.
+4. What can't be swapped is refused with `EADDRNOTAVAIL` and said (`network-bound`): a socket bound to an address or
+   port of its own (its source address can't move namespaces), one with a BPF filter or bound to a device, one tarae
+   already put out of the session bound otherwise (to `lo`, or to none). A socket bound to every address and a port the kernel picks
+   (`0.0.0.0:0`, as Rust's `UdpSocket` and Java's `DatagramSocket` bind) is swapped as an unbound one: tarae made
+   that bind, so it knows (`Served.any_port`). A connected stream: `EISCONN`.
+5. A socket put out of the session takes no bind and no `listen` (`EINVAL`, `network-bind`): it's in tarae's
+   namespace, where a bind would listen on this machine — and so would a `listen` on one left unbound (a connect that
+   failed), which the kernel binds to every address at a port of its picking. A datagram one that sent has a port of
+   the kernel's on this machine's addresses, as any UDP client has: it hears what's sent to that port.
+6. A socket handed to the run from outside the session (over a unix socket in the project, by a process outside)
+   isn't the session's: in `Routed` a call the session's would make on its own socket — the `Session` route, a bind,
+   a `listen`, an abstract name — is refused (`EPERM`, said "from outside the session") unless `SIOCGSKNS` says the
+   socket's netns is the caller's. tarae has `CAP_NET_ADMIN` over the session's netns (its user namespace is
+   tarae's) and not over this machine's, where the ioctl is refused: not the session's, as anything unreadable.
+   Tier C never had it (no session netns: every call is judged as this machine's).
+
+The probe (`supervisor::swap_unavailable`) tries it once: a thread's `getppid` handed to a listener, which swaps
+`/dev/null` into a descriptor number the probe holds. No `unshare(CLONE_FILES)`: Docker's default seccomp profile
+refuses it. **Where the swap is missing** (before 5.14 — D-a: no netns, tier C's path): a route that needs one
+(`OwnAddress`, `Out`) is refused (`EPERM`, `network-outbound`, said with the probe's why), never left to `ADDFD`'s
+errno; this machine's loopback, where opened, is tier C's own socket and goes as ever; the report says loopback only
+(`Policy::loopback_only`).
 
 Unix sockets by path cross namespaces, so the supervisor's path rule (the session's project and `RunDir`) and ABI 9
-stay their guard. Abstract names are per netns: a run reaches only its session's.
+stay their guard. Abstract names are per netns: in `Routed` tarae binds and connects them on the run's own socket,
+so a run reaches only its session's (D-f; this machine's listener on the same name isn't reached); in C they stay
+refused.
 
 **Where sessions share a loopback** (tiers C and A without a netns of their own), D18's rule: tarae makes every
 internet socket in served mode, so one table holds each socket's inode against its session; a loopback listener is
@@ -426,7 +488,8 @@ Each lands on its own. The test that pins it is seen failing once with the chang
      - `a_pty_comes_from_the_sessions_devpts`;
      - `a_command_cant_signal_the_keeper`, by a keeper with a TERM handler;
      - `a_runs_pid_comes_from_its_pidfd`;
-     - `an_open_policys_keeper_has_no_netns_yet`;
+     - `an_open_policys_keeper_has_no_netns_yet` (since step 4:
+       `an_opened_policys_keeper_has_its_netns_where_the_swap_works`);
      - `in_plain_mode_a_run_reaches_only_its_own_loopback`;
      - `tier::tests::the_probe_says_why` and `the_probe_here`.
    - **Every step-2 test runs in the probe's tier.** The test helpers `keeper::outer_pid` and `seen_by_runs` translate
@@ -438,11 +501,53 @@ Each lands on its own. The test that pins it is seen failing once with the chang
      - Debian 12 (Linux 6.1, ABI 2): A+, A and C.
      - colima (6.8, ABI 4): C under Docker's seccomp and under Ubuntu's restriction.
      - GCP Ubuntu 26.10 (7.3, ABI 11): C both ways, and A+ with the restriction lifted by the user for the run.
-4. **Sockets inside the session, routing and the egress swap** (D2).
-   - Tests: `route` as a pure function over a table of destinations, `two_runs_share_the_sessions_loopback`,
-     `the_users_loopback_isnt_reached`, `an_opened_port_reaches_this_machine`, `a_swapped_socket_keeps_nonblocking`,
-     `a_bound_socket_isnt_swapped`, M5.
-   - Break once: route loopback always to this machine.
+4. **Sockets inside the session, routing and the egress swap** (D2). *Built* (2026-10-07; plan and measurements
+   `target/sb/step4-plan.md`, `step4-notes.md`): `route.rs`, `seccomp::Mode::Routed`, `RunNet::Routed` and the
+   channel's `net`, the swap and its probe, D-a only where the swap is missing, D-c–D-f as decided (§Sockets and
+   routing), the session's `lo` mirroring tarae's address families (`Families`), the supervisor's counters (one log line per served run: calls by
+   kind, time in tarae).
+   - **Tests**, each seen failing once with its break:
+
+     | Test | Broken by |
+     |---|---|
+     | `route::tests::the_route_table` (every row, both tiers; GCP's resolver: port 53 out, its other ports never) | loopback always to this machine; a resolver matched by address alone |
+     | `route::tests::resolvers_are_read_as_glibc_reads_them` | every line's second word taken |
+     | `two_runs_share_the_sessions_loopback` (closed, and with `localhost` on: the session first) | loopback to this machine |
+     | `the_users_loopback_isnt_reached` | the same: the user's own listener was reached |
+     | `an_opened_port_reaches_this_machine` (and the session's own listener on that port first) | opened ports ignored |
+     | `a_swapped_socket_keeps_nonblocking` (`EINPROGRESS`, `O_NONBLOCK`, close-on-exec, options, no device) | `O_NONBLOCK` not carried |
+     | `a_bound_socket_isnt_swapped` (a port of its own refused; `0.0.0.0:0` goes out) | the bound check skipped |
+     | `a_resolvers_port_reaches_this_machine` (D-c, a stand-in resolver on its own port) | the resolvers row dropped |
+     | `the_never_reached_are_refused` (D-d; multicast, so a break sends nothing) | D-d's check removed |
+     | `in_tier_c_the_network_open_goes_out_too` (D-e) | C's out-bound connect left on its `lo`-bound socket |
+     | `a_routed_runs_own_connect_is_refused_by_the_kernel` (ABI ≥ 4) | `Routed`'s rules leaving TCP unhandled |
+     | `the_swap_is_probed` | answering without `SETFD` |
+     | `the_families_are_what_glibc_counts` (the decision, pure) | IPv4 never counted |
+     | `an_ipv4_lookup_finds_an_address_in_the_session` | no `SESSION_V4` on `lo`: `getaddrinfo -2`; IPv4 never counted |
+     | `an_ipv6_lookup_finds_an_address_where_tarae_has_ipv6` (the family forced at the birth: the test containers have no IPv6; without it, nothing found) | no `SESSION_V6` on `lo`: `getaddrinfo -2` |
+     | *After the review (2026-10-07):* | |
+     | `seccomp::tests::the_filter_knows_only_the_native_calls` (TCP/UDP by protocol in `Routed` and `OwnNetwork`; `listen` to tarae) and `a_run_makes_tcp_and_udp_sockets_only` (SCTP, MPTCP, UDP-Lite, ICMP refused in the session) | the protocol checks always allowing: SCTP and MPTCP sockets made on Debian (`0 0 0 0 0 13`) |
+     | `route::tests::this_machines_own_addresses_are_this_machine` and `this_machines_own_address_is_reached_only_where_opened` (the addresses as `Here::now` reads them; C and the netns: refused, then reached once opened) | own addresses never asked: a run reached a listener on the container's own address with the network open |
+     | `a_socket_put_out_of_the_session_isnt_listened_on` (C and the netns; after a refused connect, and after `connect(AF_UNSPEC)` undid one made) | the swapped check in `listen` skipped: `listen=0` |
+     | `a_swapped_socket_is_taraes_before_the_run_holds_it` (a second thread connects the same number to loopback while the supervisor pauses right after `add_fd` — `Policy.swap_pause`, test-only) | the swap recorded after `add_fd`: the second connect was made on tarae's socket and reached the user's loopback listener (`lo=0 out=106`) |
+     | `route::tests::unread_own_addresses_only_refuse` (own addresses unread: an opened port on any address refused, nothing out) | an unread list counted as "mine": `93.184.216.34:3000` became `OwnAddress` |
+     | `without_the_swap_nothing_goes_beyond_loopback` (tier C, the swap forced missing — `Policy.test_swap_missing`: out refused and said, the loopback port reached, the report loopback only) | the swap's check skipped: the connection arrived out |
+     | `a_socket_from_outside_the_session_is_refused` (two TCP sockets and a unix one made outside, handed over a unix socket in the project: connect to loopback, listen, abstract name) | the netns check always passing: `connect=0 listen=0 abstract=0` — the user's listener and an abstract name of this machine's reached |
+     | `route::tests::the_route_table`'s metadata rows (`route::METADATA`: Alibaba's, EKS Pod Identity's, Google's IPv6; NAT64 and mapped forms; Alibaba's neighbours out) | the non-link-local list dropped |
+     | `linux::tests::the_report_says_how_linux_differs`'s unread case ("connect to nothing but this machine's loopback … llm.sandbox-network notwithstanding") | the report's unread case skipped |
+     | `route::tests::the_route_table`'s NAT64 and 6to4 rows (and `64:ff9b:1::/48`, the local-use prefix whose embedding varies, pinned as not covered) | the carried IPv4 address not checked |
+     | `a_mirror_that_fails_leaves_the_birth_going` (both mirrors on a device that isn't there: born, `lo_missing` said, IPv6 lookup finds nothing) | the IPv6 mirror's failure fatal again: `BirthError { step: Lo, errno: 19 }` |
+
+   - **Changed for the routing**: in a netns a closed loopback port, a datagram there and an abstract name are the
+     session's own, so `this_machines_ports_as_the_policy_says` and `unix_sockets_where_macos_allows_them` expect
+     `ECONNREFUSED`/sent there, not a rule's `EPERM`; `gradle_builds_in_the_sandbox` builds with this machine's ports
+     closed (its daemon is the session's); the scenes that needed a refusal in every tier use `192.0.2.1:9` with the
+     network closed. The swap's tests reach a listener of theirs on the container's own address with a policy made
+     with no own addresses (`own_addresses: Some([])`), so the routing takes it as beyond: a target truly beyond
+     would send packets off the machine, which no test does.
+   - **Ran (2026-10-07)**: colima C (6.8, ABI 4) and Debian 12 `--userns` A+ (6.1, ABI 2) full suites; GCP Ubuntu
+     26.10 A+ (7.3, ABI 11, the restriction lifted for the run) full suite with `TARAE_EXPECT_TIER=A+`; macOS
+     clippy. After the review's four findings: colima C and Debian A+ full suites again (1637 + 43 e2e each).
 5. **The egress proxy.**
    - Tests: `the_connect_parser_never_panics`, `the_sni_parser_never_panics`, `connect_heads_over_the_limit_are_refused`,
      `a_slow_client_is_cut_at_the_time_limit`, `loopback_link_local_and_metadata_are_refused` (a stand-in resolver
@@ -562,10 +667,11 @@ namespaces work but a fresh `/proc` can't be mounted (`EPERM`): tier A.
 
 - **The daemons are kept by the session's keeper in both tiers**: reused on run 2, their parent the keeper (Kotlin's,
   the Gradle daemon), ended with it.
-- **A+ adds about 0.25 s to Java's run 2** (both runs of the script); this is not explained yet.
-- **Run 2 through tarae's real path is 1.8–2.0 s in both tiers**, against the stand-ins' 0.55 s. That's the path's
-  own cost (a policy per run, the supervisor making the client's loopback connects, the kept home), not the
-  namespaces', and worth its own look.
+- **A+ adds about 0.25 s to Java's run 2** (both runs of the script); step 4's cut found where (below).
+- ~~Run 2 through tarae's real path is 1.8–2.0 s against the stand-ins' 0.55 s.~~ **Corrected in step 4: that
+  compared two machines.** The 0.55 s were colima's (aarch64); on this Debian VM the stand-ins themselves take
+  1.81–1.82 s (Java) and 1.93–1.99 s (Kotlin), and tarae's real path in C matches them (1.79 s). Not a cost of
+  tarae's path.
 
 **M8, Debian**: `git status`/`log`, `cargo build --offline`, `npm ci --offline`, `mvn -o package` and `gradle --offline
 test` all work in A+ as in C. **No tool refused root's files showing as `nobody`.**
@@ -573,5 +679,58 @@ test` all work in A+ as in C. **No tool refused root's files showing as `nobody`
 - `python3 -m venv` fails in both: the image has no `ensurepip`.
 - One `cargo build` in A+ failed once, its words lost, and built the next time: unexplained.
 
-**Still to measure**: M4 with a netns (step 4, where a session's own listener is reached inside it); M5, name lookups
-(`AI_ADDRCONFIG`) inside a session's netns with the network open (step 4).
+### Step 4, routing and the egress swap (2026-10-07)
+
+- **How**: `target/sb/m4-before.sh`, `m4-after.sh` (M4, Debian), `m5-lookups.sh` (M5, Debian and Ubuntu 26.10 with
+  `--network host`), `m5b-addrconfig.sh`, `m5c-cargo.sh`. Optimized test binaries; uid 1000, no capabilities.
+  Details: `target/sb/step4-notes.md`.
+
+**M4: Java's run 2 on Debian, medians of three pairs, ms** (the supervisor's calls in run 2 from its counters):
+
+| | Before step 4 | After |
+|---|---|---|
+| the stand-ins on this VM: plain `sh -c` · a FIFO keeper in namespaces | 1823 · 1813 | — |
+| C, the real path | 1793 (23 sockets, 6 connects, ≈ 4 ms in tarae) | 1869 (the same) |
+| A+, `sandbox-localhost` on | 2032 (no netns: D-a) | 2100 (routed: 6 connects look up the session's listeners, 9 ms in tarae) |
+| A+, the policy closed | — | 2063 (routed, no look-up, ≈ 3 ms in tarae) |
+| A+, Landlock granting all of `/` | 1811 | — |
+| A+ without the session's device grants | — | 2064 |
+| **A**: no fresh `/proc` (no PID namespace) | — | **1889** (without device grants: 1885) |
+| A+, unserved (`Own`) · `gradle` without `sh -c` | 2096 · 2078 | — |
+
+- **The routing costs nothing measurable** (2.10 against 2.03 s, inside the pairs' spread). With the policy closed,
+  Gradle needs no `sandbox-localhost`: its daemon is the session's.
+- **The supervisor isn't a cost**: about 31 calls and 4 ms per run 2; unserved is no faster.
+- **A+'s +0.2 s is the fresh `/proc` under Landlock's rules**: it goes in A (no fresh `/proc`) and with Landlock
+  granting all of `/`; the device grants don't matter.
+
+**M5: name lookups with the network open** (`getent ahosts`/`ahostsv4`, Python with and without `AI_ADDRCONFIG`,
+curl, Node, Java with an HTTPS GET, `cargo fetch`; A+ and C beside unsandboxed, on Debian through GCP's resolver
+`169.254.169.254` — D-c's "out" — and on 26.10 through `127.0.0.53` — D-c's "this machine"):
+- Every lookup and connection worked in both tiers: 9–15 connects per client, 3–5 ms in tarae, times as C's.
+- **Except an IPv4-only lookup with `AI_ADDRCONFIG`** (`getent ahostsv4`), empty inside the netns: with only `lo`,
+  glibc sees no IPv4. Fixed by the session's `lo` mirroring tarae's own families (§Its birth: `SESSION_V4`,
+  `SESSION_V6`), the IPv4 half measured first in a stand-in netns; an `AI_ADDRCONFIG` lookup answers inside as it
+  would outside.
+- `cargo fetch` failed in both tiers with a `~/.cargo` holding no `registry/` yet: the open network's grant on
+  cargo's caches covers only the folders there when the policy is made (Landlock can't grant a path that isn't
+  there). It predates step 4 (open items).
+
+## Open items
+
+- **macOS: this machine's own addresses beyond loopback.** Seatbelt names a port by `localhost` only, so with
+  `llm.sandbox-network` on a command reaches the risky ports (Docker's 2375, Jupyter's 8888…) on this machine's
+  LAN or bridge address as the network. Linux takes those addresses as this machine (§Sockets and routing); macOS
+  can't express it — its report and `llm.sandbox-network`'s description say so. A way would be the egress proxy
+  (step 5) checking the addresses it connects to, on macOS too.
+- **Linux: own addresses read once a policy.** An address that comes up during a run (a bridge, a new lease) is
+  beyond this machine to that run until its next policy.
+- **The fresh `/proc`'s cost under Landlock** (A+ +0.2 s on a Gradle run 2, step 4's M4): a micro-benchmark —
+  `/proc/self/stat` read 100,000 times under the same rules, in A against A+ — would say whether it's per lookup,
+  and what in Landlock's walk costs more on the fresh procfs instance. On the roadmap.
+- **A tool's cache folders that aren't there yet** (`cargo fetch` on a fresh `~/.cargo`, step 4's M5): with the
+  network open their grant covers only what exists when the policy is made. The option chosen: tarae makes the
+  pack-declared cache folders before the run (as `linux::Made` does, through no link), and the report names the
+  refused folder in both cases — today it does only when `~/.cargo` itself is missing (under an existing
+  `~/.cargo` the policy calls the path writable, so `said_in_output` doesn't count it). A small follow-up, queued
+  by the user.

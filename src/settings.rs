@@ -443,7 +443,7 @@ pub static SETTINGS: &[Setting] = &[
     Setting {
         path: "llm.sandbox-network",
         kind: Kind::Bool,
-        doc: "Chat: the sandbox lets Claude's commands reach the network — but not this machine's risky ports (Docker, Jupyter…) unless in llm.sandbox-ports. macOS only: on Linux they reach this machine at most",
+        doc: "Chat: the sandbox lets Claude's commands reach the network — but not this machine's risky ports (Docker, Jupyter…) unless in llm.sandbox-ports; on macOS that's its loopback only, its own LAN addresses aren't covered. On Linux never link-local addresses or the cloud metadata servers tarae knows of, multicast or broadcast, and this machine's ports — on loopback or its own addresses — only as llm.sandbox-ports and -localhost open them",
         get: |c| Value::from(c.llm.sandbox_network),
         set: |c, v| c.llm.sandbox_network = b(v),
     },
