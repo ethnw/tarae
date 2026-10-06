@@ -34,6 +34,45 @@ fn every_built_in_table_reads_clean() {
     }
 }
 
+/// What a pack's `pass` may hold: names and families of the toolchain's own — never a bare `*` or a family
+/// too short to mean one tool, the loader's (`LD_*`, `DYLD_*`, a family reaching them), nor a name only a
+/// secret has; each wrong one left out and said, the rest kept. And the built-in packs pass what was measured:
+/// cargo's, Go's by name (not `GO*`: `GOOGLE_*` is no tool's), the C toolchain's — and the managers' in the
+/// grammar-less `tools` pack.
+#[test]
+fn what_a_pass_may_hold() {
+    let t = table(
+        &[(
+            "x",
+            r#"[sandbox]
+pass = ["X_*", "XFLAGS", "*", "X*", "LD_LIBRARY_PATH", "DYLD_*", "LD*", "NPM_TOKEN", "MY_API_KEY", "A-B", "LDFLAGS"]"#,
+        )],
+        &[],
+    );
+    assert_eq!(t.pass, ["X_*", "XFLAGS", "LDFLAGS"]);
+    let said = t.problems.join("\n");
+    for (e, why) in [
+        ("*", "isn't a variable's name"),
+        ("X*", "isn't a variable's name"),
+        ("LD_LIBRARY_PATH", "is the loader's"),
+        ("DYLD_*", "is the loader's"),
+        ("LD*", "is the loader's"),
+        ("NPM_TOKEN", "names a secret"),
+        ("MY_API_KEY", "names a secret"),
+        ("A-B", "isn't a variable's name"),
+    ] {
+        assert!(said.contains(&format!("`{e}` {why}")), "{e}: {said}");
+    }
+    let ours = ours();
+    for e in
+        ["CARGO_*", "RUST*", "GOFLAGS", "CGO_*", "CC", "PKG_CONFIG_PATH", "MISE_*", "npm_config_*", "PYTHON*"]
+    {
+        assert!(ours.pass.contains(&e.to_string()), "{e}: {:?}", ours.pass);
+    }
+    assert!(!ours.pass.iter().any(|e| e.starts_with("GO") && e.ends_with('*')), "{:?}", ours.pass);
+    assert!(!ours.pass.iter().any(|e| e.starts_with("DIRENV")), "direnv's diff holds the values themselves");
+}
+
 /// A runtime folder's pack widens nothing: every key that's the built-in packs' only, set to what would open
 /// most, is left out — the table is tarae's own — and each is said.
 #[test]
@@ -46,6 +85,7 @@ write-files = ["~/.zshrc"]
 ask = [{ when = ["Cargo.toml"], run = ["sh", "-c", "touch marker"], json = ["x"] }]
 builds-said = { who = "x", target = "x", build = "x" }
 env = { RUSTC_WRAPPER = "/tmp/w", MINE = "{run}" }
+pass = ["AWS_*", "GITHUB_TOKEN"]
 quiet-writes = ["~/"]
 refused-port = { process = "x", said = "run sh outside" }
 kept = ["~/mine"]
@@ -86,8 +126,9 @@ first-word-in = "~/"
         (&with.builds_said, &with.run_allow, &with.code_trees),
         (&base.builds_said, &base.run_allow, &base.code_trees)
     );
-    assert_eq!((&with.expand, &with.said), (&base.expand, &base.said));
+    assert_eq!((&with.expand, &with.said, &with.pass), (&base.expand, &base.said, &base.pass));
     for key in [
+        "sandbox.pass",
         "sandbox.homes",
         "sandbox.reads",
         "sandbox.reads-above",

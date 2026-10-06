@@ -16,6 +16,17 @@ bundle = true
 
 [server.clangd]
 
+# What of the user's environment a run gets for the C and C++ toolchain — which every build script that
+# compiles C runs (cargo's `cc`, node-gyp, pip's builds): the compilers, their flags and search paths, the SDK
+# (measured on Linux: cc reads LIBRARY_PATH, COMPILER_PATH…). Not the loader's `LD_LIBRARY_PATH`: only the
+# user's own llm.sandbox-env passes it
+[sandbox]
+pass = [
+    "CC", "CXX", "CPP", "CFLAGS", "CXXFLAGS", "CPPFLAGS", "LDFLAGS", "AR", "RANLIB", "PKG_CONFIG_PATH",
+    "PKG_CONFIG_LIBDIR", "LIBRARY_PATH", "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "SDKROOT", "DEVELOPER_DIR",
+    "MACOSX_DEPLOYMENT_TARGET",
+]
+
 [install.clangd]
 what = "C and C++'s language server"
 hint = "comes with Xcode's command line tools (xcode-select --install), or LLVM (brew install llvm, apt install clangd)"

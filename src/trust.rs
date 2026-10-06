@@ -20,7 +20,7 @@ use crate::keymap::Keymaps;
 
 /// Settings a project file sets only once trusted: they run commands, or change what Claude's commands do
 /// unasked (`llm.sandbox*` comes with the sandbox), or what Claude sees.
-pub const RISKY: [&str; 18] = [
+pub const RISKY: [&str; 19] = [
     "editor.restart-build",
     "editor.restart-binary",
     "llm.command",
@@ -36,6 +36,8 @@ pub const RISKY: [&str; 18] = [
     "llm.sandbox-protect",
     "llm.sandbox-ports",
     "llm.sandbox-localhost",
+    // (a project passing `AWS_*` to every command)
+    "llm.sandbox-env",
     // (a project turning it back on when the user turned it off)
     "llm.screen-terminal",
     // (where a checkout of the project's files is written — a launch agents folder would run them)

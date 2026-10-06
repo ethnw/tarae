@@ -73,6 +73,7 @@ The name is also the `:set` path: `:set editor.scrolloff 8` changes it until you
 | `llm.sandbox-ports` | list of ports (at most 200) | `[]` | Chat: ports on this machine Claude's commands may connect to in the sandbox — a dev server, a test's database ([3000, 5432]) |
 | `llm.sandbox-localhost` | bool | `false` | Chat: every port on this machine open to Claude's commands (tests that talk to their own servers) — the risky ones too (Docker, Jupyter…): the sandbox can't leave some out |
 | `llm.sandbox-write` | list of strings | `[]` | Chat: more folders the sandbox lets Claude's commands write to ("~/scratch") — never the project's own folders above it |
+| `llm.sandbox-env` | list of strings | `[]` | Chat: more of your environment Claude's commands get ("DATABASE_URL", "MYAPP_*") — they start with PATH, HOME, the locale and the toolchains' own; a token-like one only by its whole name (:sandbox-env lists them) |
 | `llm.sandbox-protect` | list of strings | `[]` | Chat: paths in the project the sandbox keeps Claude's commands from changing ("migrations/"); the protected names (.git, .tarae.toml, build.rs, pom.xml… — every language pack's) always, anywhere in it |
 | `llm.context-lines` | integer 0–1000 | `20` | Lines of context sent around each selection |
 

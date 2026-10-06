@@ -487,6 +487,7 @@ Type `:` in normal mode. `Tab` completes command names and their arguments (path
 | `:sandbox-allowed` |  | What Claude may do past the defaults — take one back |
 | `:sandbox-disallow` |  | Take back a path or port :sandbox-allowed lists |
 | `:sandbox-blocked` |  | What the sandbox blocked in Claude's last run: open it |
+| `:sandbox-env` |  | Your environment's names Claude's commands get, and don't |
 | `:chat-screen` |  | Send the screen, as text, with your next chat message |
 | `:chat-point` |  | Point at something on screen — it goes with your next chat message |
 | `:log-open` |  | Open tarae's log (language servers, errors) |

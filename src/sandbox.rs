@@ -30,6 +30,7 @@
 mod golden;
 #[cfg(target_os = "linux")]
 pub mod linux;
+pub mod runenv;
 #[cfg(target_os = "linux")]
 pub mod supervisor;
 
@@ -82,6 +83,14 @@ impl Guard {
     pub fn watch(&self) -> Option<&std::sync::Arc<Watch>> {
         match self {
             Guard::In(p) => p.watch.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// What the run got of tarae's environment, when it ran in the sandbox.
+    pub fn run_env(&self) -> Option<&runenv::RunEnv> {
+        match self {
+            Guard::In(p) => Some(&p.run_env),
             _ => None,
         }
     }
@@ -469,6 +478,9 @@ pub struct Policy {
     /// What the run's environment gets from the packs: the variables that point a tool at a home of the run's
     /// own (`run_homes_made` — Gradle's), and their `env` (npm's log folder in the run's).
     pub env: Vec<(String, String)>,
+    /// What the run gets of tarae's own environment (`runenv.rs`) — it starts from nothing else — and the names
+    /// of what it doesn't.
+    pub run_env: runenv::RunEnv,
     /// The users' own homes of the tools that get one of the run's (kept as they are), as Claude is told.
     pub run_homes: Vec<RunHomeSaid>,
     /// Linux: the policy as Landlock's rules (`linux::confine`, made on the worker) — Err why it couldn't be
@@ -558,6 +570,10 @@ pub struct Here {
     pub tmp: Option<PathBuf>,
     pub uid: u32,
     pub os: Os,
+    /// Tests: every variable asked (`path`, `var`) — what a policy reads of the environment
+    /// (`every_variable_the_policy_reads_reaches_the_run`).
+    #[cfg(test)]
+    pub asked: std::sync::Arc<Mutex<Vec<String>>>,
 }
 
 impl Here {
@@ -568,18 +584,30 @@ impl Here {
             // SAFETY: getuid has no preconditions and can't fail.
             uid: unsafe { libc::getuid() },
             os: Os::HOST,
+            #[cfg(test)]
+            asked: Default::default(),
         }
     }
 
     /// A variable naming a place, when it's set and not empty.
     pub fn path(&self, name: &str) -> Option<PathBuf> {
+        self.asked(name);
         self.env.get(name).filter(|v| !v.is_empty()).map(PathBuf::from)
     }
 
     /// A variable as it's set (empty too), in UTF-8 — what `tokens::sources` reads (`std::env::var`'s).
     pub fn var(&self, name: &str) -> Option<String> {
+        self.asked(name);
         self.env.get(name).and_then(|v| v.clone().into_string().ok())
     }
+
+    #[cfg(test)]
+    fn asked(&self, name: &str) {
+        self.asked.lock().unwrap().push(name.to_string());
+    }
+
+    #[cfg(not(test))]
+    fn asked(&self, _: &str) {}
 }
 
 /// Claude's own, in home: its settings, conversations and token cache — kept from its runs like keys.
@@ -797,8 +825,8 @@ impl RunsLater {
 
 /// The folders on `PATH` as `here` says it (real paths, those that are there).
 pub fn path_dirs_in(here: &Here) -> Vec<PathBuf> {
-    let path = here.env.get("PATH");
-    path.map(|p| std::env::split_paths(p).filter_map(|d| std::fs::canonicalize(d).ok()).collect())
+    let path = here.path("PATH");
+    path.map(|p| std::env::split_paths(&p).filter_map(|d| std::fs::canonicalize(d).ok()).collect())
         .unwrap_or_default()
 }
 
@@ -2189,6 +2217,7 @@ impl Policy {
             named_by: env.builder.who.clone(),
             reads,
             env: Vec::new(),
+            run_env: env.run_env.clone(),
             run_homes: env.run_homes.clone(),
             #[cfg(target_os = "linux")]
             confine: None,
@@ -2253,6 +2282,8 @@ pub struct Env {
     pub reads: Reads,
     /// The users' own homes of the tools that get one of the run's (`run_homes_said`).
     pub run_homes: Vec<RunHomeSaid>,
+    /// What a run gets of tarae's environment (`run_env_of`; the default: nothing).
+    pub run_env: runenv::RunEnv,
 }
 
 /// A path as the profile writes it: the real path; for one that isn't there yet, its folder's real path
@@ -2386,6 +2417,7 @@ pub(crate) fn env_in(
         tmux_tmpdir: here.path("TMUX_TMPDIR"),
         zellij_dir: here.path("ZELLIJ_SOCKET_DIR"),
         uid: here.uid,
+        run_env: run_env_of(here, llm),
     };
     // The toolchain is asked inside the sandbox it's for (it reads only)
     let found = toolchain_dirs(&Policy::for_project(&env), &asks);
@@ -2890,13 +2922,14 @@ fn output_in(
         let abi = crate::landlock::abi().ok()?;
         let rules = linux::confine(policy, abi, Err("not watched".into()), false).ok()?;
         let mut c = Command::new(program);
+        from_run_env(&mut c, policy);
         c.args(args).envs(env.iter().copied()).current_dir(&policy.root).env(MARK, "1");
         c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
         let child = linux::confined(&rules, None, |_| {}, || c.spawn()).ok()?;
         child.wait_with_output().ok()?
     };
     #[cfg(not(target_os = "linux"))]
-    let out = Command::new(SANDBOX_EXEC)
+    let out = from_run_env(&mut Command::new(SANDBOX_EXEC), policy)
         .args(policy.args())
         .arg(program)
         .args(args)
@@ -2909,6 +2942,35 @@ fn output_in(
         .ok()?;
     let out = Some(out).filter(|o| o.status.success())?;
     serde_json::from_slice(&out.stdout).ok()
+}
+
+/// What tarae sets in every sandboxed run besides the packs' `env` (`inside_env`, `task::color_off`) — and
+/// `TARAE_UI`, never a run of Claude's: none said as left out of its environment.
+const SET_IN_RUNS: [&str; 4] = [MARK, "GIT_OPTIONAL_LOCKS", "NO_COLOR", "TARAE_UI"];
+
+/// What a run in a policy made with these settings gets of `here`'s environment (`runenv::of`): the floor,
+/// the proxies with the network open, what the packs' places read, the packs' `pass`, `llm.sandbox-env`.
+pub fn run_env_of(here: &Here, llm: &crate::llm::LlmConfig) -> runenv::RunEnv {
+    let packs = crate::sandboxpack::get();
+    let policy: Vec<&str> = packs.env_names().collect();
+    let colors = &crate::languages::get().color_off;
+    let mut set: Vec<&str> = SET_IN_RUNS.to_vec();
+    set.extend(colors.iter().map(|(k, _)| k.as_str()));
+    runenv::of(here, llm.sandbox_network, &policy, &packs.pass, &llm.sandbox_env, &set)
+}
+
+/// A sandboxed command's environment: tarae's own isn't inherited — only what `run_env` passes of it. Every
+/// other name of tarae's is removed by name, not with `env_clear`: `spawn::setsid` (every run's) starts from
+/// tarae's environment and applies `get_envs()`, which doesn't say it was cleared (`get_env_clear` is
+/// unstable) — and after `env_clear` std doesn't record a removal at all. Measured both ways on Linux: the
+/// fake token reached the run (`a_fake_token_never_reaches_a_sandboxed_run`).
+fn from_run_env<'c>(c: &'c mut Command, p: &Policy) -> &'c mut Command {
+    for (k, _) in std::env::vars_os() {
+        if !p.run_env.vars.iter().any(|(name, ..)| k == name.as_str()) {
+            c.env_remove(k);
+        }
+    }
+    c.envs(p.run_env.vars.iter().map(|(k, v, _)| (k, v)))
 }
 
 /// What a sandboxed command's environment says: that it's sandboxed (`MARK`), and `GIT_OPTIONAL_LOCKS=0` —
@@ -2994,7 +3056,8 @@ pub fn after_run(policy: Option<&Policy>) -> impl FnOnce() + Send + 'static {
 }
 
 /// `program args` inside `policy` — or as it is, without one. On Linux the sandbox comes with the spawn
-/// (`spawn`); here only what a sandboxed run's environment says.
+/// (`spawn`); here only what a sandboxed run's environment says: nothing of tarae's but `Policy::run_env`, then
+/// what tarae sets.
 pub fn command(policy: Option<&Policy>, program: &str, args: &[String]) -> Command {
     match policy {
         Some(p) => {
@@ -3007,6 +3070,7 @@ pub fn command(policy: Option<&Policy>, program: &str, args: &[String]) -> Comma
                 c
             };
             c.args(args);
+            from_run_env(&mut c, p);
             inside_env(&mut c).envs(p.env.iter().map(|(k, v)| (k, v)));
             if let Some(run) = &p.run {
                 c.env("TMPDIR", run.path());
@@ -4905,6 +4969,7 @@ mod tests {
             refused_asked: Vec::new(),
             reads: Reads::default(),
             env: Vec::new(),
+            run_env: Default::default(),
             run_homes: Vec::new(),
         };
         let sh = |script: &str| {
@@ -4976,6 +5041,7 @@ mod tests {
                 refused_asked: Vec::new(),
                 reads: Reads::default(),
                 env: Vec::new(),
+                run_env: Default::default(),
                 run_homes: Vec::new(),
             };
             let sh = |script: &str| {
@@ -5047,6 +5113,7 @@ mod tests {
             refused_asked: Vec::new(),
             reads: Reads::default(),
             env: Vec::new(),
+            run_env: Default::default(),
             run_homes: Vec::new(),
         };
         let pid = std::process::id();
@@ -5105,6 +5172,7 @@ mod tests {
             refused_asked: Vec::new(),
             reads: Reads::default(),
             env: Vec::new(),
+            run_env: Default::default(),
             run_homes: Vec::new(),
         };
         let sh = |script: &str| {
@@ -5536,7 +5604,8 @@ mod tests {
         let sources = crate::tokens::sources(&home, &|_| None);
         reads.copies = crate::tokens::copies(&sources, Some(run.path()), &home, &[], &reads.kept);
         let tmp = std::fs::canonicalize(std::env::temp_dir()).ok();
-        let env = Env { root: root.clone(), home: Some(home.clone()), tmp, reads, ..Env::default() };
+        let run_env = run_env_here();
+        let env = Env { root: root.clone(), home: Some(home.clone()), tmp, reads, run_env, ..Env::default() };
         let p = Policy { run: Some(run), ..Policy::for_project(&env) };
         let sh = |script: &str| {
             let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
@@ -5726,6 +5795,7 @@ mod tests {
             caches,
             files,
             reads: reads_for(&home, &reads_above(&root, &home), &vars),
+            run_env: run_env_here(),
             ..Env::default()
         };
         let p = Policy { tag: Some(tag), watch: Some(w.clone()), ..Policy::for_project(&env) };
@@ -5917,8 +5987,8 @@ mod tests {
         let unformatted =
             "pub fn f()->u8{tarae_dep::one()+gdep::two()}\n#[test]\nfn t(){assert_eq!(f(),3);}\n";
         write(&root.join("src/lib.rs"), unformatted);
-        let env =
-            Env { root: root.clone(), tmp: Some(profile_path(&std::env::temp_dir())), ..cargo_at(&home) };
+        let (tmp, run_env) = (Some(profile_path(&std::env::temp_dir())), run_env_here());
+        let env = Env { root: root.clone(), tmp, run_env, ..cargo_at(&home) };
         let (closed, open) = (Policy::for_project(&env), Policy::for_project(&Env { network: true, ..env }));
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
         let run = |p: &Policy, args: &[&str]| {
@@ -6141,6 +6211,7 @@ mod tests {
             refused_asked: Vec::new(),
             reads: Reads::default(),
             env: Vec::new(),
+            run_env: Default::default(),
             run_homes: Vec::new(),
         };
         let reached = |p: &Policy, l: &TcpListener| {
@@ -6163,5 +6234,152 @@ mod tests {
         let open_listed = policy(true, false, vec![port(&risky)]);
         assert!(reached(&open_listed, &risky), "network open: port {}, listed", port(&risky));
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Every variable the policy reads to place things (a toolchain's home, a setting's file, the XDG folders,
+    /// PATH) reaches the run — a run that saw another `CARGO_HOME` than the policy would look where nothing was
+    /// opened. What the policy reads is recorded as it asks (`Here::asked`), each set in turn until no new one
+    /// is asked; the multiplexers' socket folders aside (the policy keeps them from runs — a run has no use
+    /// for them).
+    #[test]
+    fn every_variable_the_policy_reads_reaches_the_run() {
+        let t = std::env::temp_dir().join(format!("tarae-runenv-reads-{}", std::process::id()));
+        std::fs::remove_dir_all(&t).ok();
+        let (home, root) = (t.join("home"), t.join("home/work/p"));
+        std::fs::create_dir_all(&root).unwrap();
+        for f in ["Cargo.toml", "go.mod", "build.gradle", "package.json"] {
+            std::fs::write(root.join(f), "").unwrap();
+        }
+        let (home, root) = (std::fs::canonicalize(&home).unwrap(), std::fs::canonicalize(&root).unwrap());
+        let llm = crate::llm::LlmConfig::default();
+        let mut env: HashMap<String, std::ffi::OsString> =
+            HashMap::from([("HOME".into(), home.clone().into())]);
+        let mut asked: Vec<String> = Vec::new();
+        for _ in 0..4 {
+            let here = Here { env: env.clone(), ..Here::default() };
+            toolchain_found_in(&root, ToolDirs::default(), &here);
+            let p = policy_in(&root, &llm, &[], &here);
+            let now: Vec<String> = here.asked.lock().unwrap().clone();
+            let names: Vec<&str> = p.run_env.vars.iter().map(|(k, ..)| k.as_str()).collect();
+            for n in &now {
+                if !["TMUX_TMPDIR", "ZELLIJ_SOCKET_DIR"].contains(&n.as_str()) && env.contains_key(n) {
+                    assert!(names.contains(&n.as_str()), "{n}: the policy reads it, the run doesn't get it");
+                }
+            }
+            let new: Vec<String> = now.into_iter().filter(|n| !asked.contains(n)).collect();
+            if new.is_empty() {
+                break;
+            }
+            for n in &new {
+                env.entry(n.clone()).or_insert_with(|| t.join("stand-in").join(n).into());
+            }
+            asked.extend(new);
+        }
+        for n in ["XDG_CONFIG_HOME", "CARGO_HOME", "GRADLE_USER_HOME", "GIT_CONFIG_GLOBAL", "PIP_CONFIG_FILE"]
+        {
+            assert!(asked.iter().any(|a| a == n), "{n} isn't asked: {asked:?}");
+        }
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    const FAKE: &str = "tarae-fake-token";
+
+    /// What a run gets of this process's environment with the default settings — as a real policy's
+    /// (`env_in`); a policy made by hand gets nothing of it. (Seatbelt's tests'; Linux's have their own.)
+    #[cfg(target_os = "macos")]
+    fn run_env_here() -> runenv::RunEnv {
+        run_env_of(&Here::now(), &crate::llm::LlmConfig::default())
+    }
+
+    /// lsbenv end to end, the real path: tarae's environment holding fake tokens (one inside a pack's family:
+    /// `CARGO_REGISTRY_TOKEN`), a pack's variable (`RUSTFLAGS`, the rust pack's `RUST*`) and one of nobody's —
+    /// the policy made from it (`policy` → `Here::now`) — a sandboxed run's environment holds the pack's and the
+    /// floor, not the fakes nor the other; the toolchain's probe (`output_in`) sees the same; the report names
+    /// what was left out, never a value. In a process of its own, the variables in its environment
+    /// (`env_in_its_own_process`): this one's isn't touched. Seatbelt can't start inside a sandbox; Linux needs
+    /// Landlock (`cargo xtask linux`).
+    #[test]
+    fn a_fake_token_never_reaches_a_sandboxed_run() {
+        #[cfg(target_os = "macos")]
+        if skipped_inside("sandbox::tests::a_fake_token_never_reaches_a_sandboxed_run") {
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        if !crate::landlock::abi().is_ok_and(|n| n >= 2) {
+            let line = format!(
+                "{}sandbox::tests::a_fake_token_never_reaches_a_sandboxed_run — needs Landlock ABI 2\n",
+                crate::test_results::SELF_SKIP
+            );
+            let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("tarae-runenv-e2e-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "sandbox::tests::env_in_its_own_process", "--ignored", "--nocapture"])
+            .env("TARAE_ENV_PROBE", &dir)
+            .env("GITHUB_TOKEN", FAKE)
+            .env("AWS_SECRET_ACCESS_KEY", FAKE)
+            .env("CARGO_REGISTRY_TOKEN", FAKE)
+            .env("RUSTFLAGS", "--cfg tarae_fake")
+            .env("TARAE_LSBENV_OTHER", "x")
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success() && said.contains("1 passed"), "the child ran it: {said}");
+        let read =
+            |f: &str| std::fs::read_to_string(dir.join(f)).unwrap_or_else(|e| panic!("{f}: {e}\n{said}"));
+        let names = read("names");
+        let names: Vec<&str> = names.lines().collect();
+        for n in ["PATH", "HOME", "RUSTFLAGS", MARK] {
+            assert!(names.contains(&n), "{n} didn't reach the run: {names:?}");
+        }
+        for n in ["GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY", "CARGO_REGISTRY_TOKEN", "TARAE_LSBENV_OTHER"] {
+            assert!(!names.contains(&n), "{n} reached the run");
+        }
+        assert_eq!(read("probe"), "token=;path=set", "the toolchain's probe");
+        let report = read("said");
+        assert!(report.contains("token-like: ") && report.contains("GITHUB_TOKEN"), "{report}");
+        assert!(report.contains("CARGO_REGISTRY_TOKEN") && report.contains("TARAE_"), "{report}");
+        assert!(!report.contains(FAKE), "a value in the report: {report}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `a_fake_token_never_reaches_a_sandboxed_run`'s child: the policy for this checkout from what this
+    /// process's environment says, a run in it writing the names it got (`names_of_its_environment`), the
+    /// toolchain's probe saying whether two variables are set, and the report — into `$TARAE_ENV_PROBE`.
+    #[test]
+    #[ignore = "run by a_fake_token_never_reaches_a_sandboxed_run in a process of its own"]
+    fn env_in_its_own_process() {
+        let Some(dir) = std::env::var_os("TARAE_ENV_PROBE").map(PathBuf::from) else { return };
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let p = policy(root, &crate::llm::LlmConfig::default(), &[]);
+        let exe = std::env::current_exe().unwrap();
+        let args = ["--exact", "sandbox::tests::names_of_its_environment", "--ignored", "--nocapture"];
+        let mut cmd = command(Some(&p), &exe.to_string_lossy(), &args.map(String::from));
+        cmd.env("TARAE_ENV_NAMES", dir.join("names")).current_dir(root);
+        let s = spawn(Some(&p), &cmd).expect("the run starts");
+        let mut out = String::new();
+        io::Read::read_to_string(&mut s.stdout.unwrap(), &mut out).unwrap();
+        crate::spawn::wait(s.pid).unwrap();
+        // (whether each is set — never what it holds)
+        let script = r#"printf '{"token": "%s", "path": "%s"}' "${GITHUB_TOKEN:+set}" "${PATH:+set}""#;
+        let probe = output_in(&p, "/bin/sh", &["-c", script], &[]).expect("the probe answers");
+        let said =
+            format!("token={};path={}", probe["token"].as_str().unwrap(), probe["path"].as_str().unwrap());
+        std::fs::write(dir.join("probe"), said).unwrap();
+        std::fs::write(dir.join("said"), p.run_env.said(&mut Vec::new()).unwrap_or_default()).unwrap();
+    }
+
+    /// A sandboxed run's side: the names of its environment, one a line, into `$TARAE_ENV_NAMES` — never a
+    /// value.
+    #[test]
+    #[ignore = "run in a sandbox by env_in_its_own_process"]
+    fn names_of_its_environment() {
+        let Some(file) = std::env::var_os("TARAE_ENV_NAMES") else { return };
+        let mut names: Vec<String> = std::env::vars_os().filter_map(|(k, _)| k.into_string().ok()).collect();
+        names.sort();
+        std::fs::write(file, names.join("\n")).unwrap();
     }
 }

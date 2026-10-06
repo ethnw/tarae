@@ -557,6 +557,22 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
   Cargo reads its config without a way to take a copy, and every cargo command fails without it. So a token
   in `~/.cargo/config.toml` stays readable, and tarae tells you once: cargo keeps tokens in
   `~/.cargo/credentials.toml` (`cargo login` puts them there), which runs never read.
+- **Its commands don't get your environment, only what their tools need.** Measured with fake tokens on macOS
+  and Linux: every language pack's checks pass with `PATH` alone, and npm hands its whole environment on to
+  the scripts it runs. So a command gets `PATH`, `HOME`, who you are, the locale, the temp folder, the XDG
+  folders and git's settings and identity; the proxies while `llm.sandbox-network` is open; each toolchain's
+  own variables, as its language pack names them (`CARGO_*` and `RUST*`, Go's by name, `JAVA_HOME` and
+  `GRADLE_*`, `PYTHON*` and `VIRTUAL_ENV`, `npm_config_*` and `NODE_*`, the C compilers' `CC`, `CFLAGS`…, and
+  mise's, asdf's, volta's and sdkman's in the `tools` pack); and what you add in `llm.sandbox-env` (a name, or a
+  family such as `"MYAPP_*"`). Whatever passed it, a variable that looks like a token is left out: a name for a
+  secret with a value (`GITHUB_TOKEN`, `CARGO_REGISTRY_TOKEN` inside `CARGO_*`), a URL with a password, a
+  token's known prefix. One you name whole in `llm.sandbox-env` goes through anyway. The rest of your
+  environment stays out: API keys, cloud credentials, the Claude Code session tarae was started from.
+  `LD_LIBRARY_PATH` reaches a command only through `llm.sandbox-env`. The first run of a conversation tells
+  Claude what was left out, by name, never a value: the token-like ones each, the rest grouped (`CLAUDE_* (28)`).
+  When a run's output names one, its report says so every time. `:sandbox-env` lists what goes in and why, and
+  what stays out. A project's `.tarae.toml` sets `llm.sandbox-env` only once you trust it. Your own commands, the
+  terminal and the language servers keep your environment as it is.
 - **What each toolchain needs is its language pack's.** The places above, the caches, Gradle's home of its own,
   the settings that take a copy, the checks Claude runs without asking and the code folders it reads are the
   built-in language packs' `[sandbox]` and `[claude]` tables (each `pack.toml` says why, measured). A pack in

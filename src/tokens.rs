@@ -22,13 +22,16 @@ use crate::sandbox::Os;
 
 // ── What looks like a token ─────────────────────────────────────────────────
 
-/// Keys named for a secret (lowercased, anywhere in the key: `//host/:_authToken`, `GITHUB_TOKEN`).
-const SECRET_KEYS: [&str; 12] = [
+/// Keys named for a secret (lowercased, anywhere in the key: `//host/:_authToken`, `GITHUB_TOKEN`,
+/// `npmAuthIdent` — yarn's `user:password`). `auth` alone counts only as a word of the key (`AUTH_WORDS`).
+const SECRET_KEYS: [&str; 14] = [
     "token",
     "password",
     "passwd",
     "secret",
-    "_auth",
+    "authident",
+    "auth_ident",
+    "auth-ident",
     "apikey",
     "api_key",
     "api-key",
@@ -37,6 +40,10 @@ const SECRET_KEYS: [&str; 12] = [
     "access_key",
     "access-key",
 ];
+
+/// Words of a key that name a secret on their own (`_auth`, `NPM_CONFIG__AUTH`, `BASIC_AUTH`,
+/// `YARN_NPM_AUTH_IDENT`) — a word, so `GIT_AUTHOR_NAME` isn't one.
+const AUTH_WORDS: [&str; 1] = ["auth"];
 
 /// …but not a key that names where one is or how it's got (`password_file`, `token-cmd`, `credential.helper`).
 const NOT_THE_VALUE: [&str; 8] = ["file", "path", "helper", "command", "cmd", "url", "type", "env"];
@@ -47,11 +54,32 @@ const PREFIXES: [&str; 11] =
 
 /// Whether `line` holds what looks like a token: a URL with a password (`https://user:pass@`) or a long user
 /// (`https://ghp_…@`), a key named for one with a value written there (`token = …`, `//host/:_authToken=…`,
-/// `"password": "…"` — not `${VAR}`), an `Authorization:` header, or a token by its known prefix. A comment
-/// counts: it's in the file all the same.
+/// `"password": "…"` — not `${VAR}`), an option giving one (`-Dsigning.password=…`, `--api-key=…`), an
+/// `Authorization:` header, or a token by its known prefix. A comment counts: it's in the file all the same.
 pub fn token_like(line: &str) -> bool {
     let lower = line.to_ascii_lowercase();
-    url_secret(line) || header_secret(&lower) || key_secret(&lower) || prefixed(line)
+    url_secret(line) || header_secret(&lower) || key_secret(&lower) || option_secret(&lower) || prefixed(line)
+}
+
+/// An option among `lower`'s words that gives a secret: `-Dkey=value` (a JVM's system property), `-Pkey=value`
+/// (Gradle's project property), `--key=value` — a key named for a secret, a value written there. Where options
+/// are a variable's or a setting's value (`GRADLE_OPTS=-D…`, `org.gradle.jvmargs=-D…`) the word starts with it.
+fn option_secret(lower: &str) -> bool {
+    lower.split_whitespace().any(|word| {
+        let word = word.trim_matches(['"', '\'']);
+        // `NAME=-D…`, `NAME="-D…`: what's after the first `=`, when that's an option
+        let word = match word.split_once('=') {
+            Some((name, rest))
+                if !name.starts_with('-') && rest.trim_start_matches(['"', '\'']).starts_with('-') =>
+            {
+                rest.trim_start_matches(['"', '\''])
+            }
+            _ => word,
+        };
+        let given =
+            word.strip_prefix("--").or_else(|| word.strip_prefix("-d")).or_else(|| word.strip_prefix("-p"));
+        given.is_some_and(|g| g.contains('=') && key_secret(g))
+    })
 }
 
 /// A URL in `s` whose user part has a password, or is a token itself.
@@ -83,7 +111,8 @@ fn key_secret(lower: &str) -> bool {
     let Some(at) = at else { return false };
     let key = t[..at].trim().trim_matches(['"', '\'']);
     let plain_key = !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || "_.-/:@".contains(c));
-    if !plain_key || !SECRET_KEYS.iter().any(|k| key.contains(k)) {
+    let auth_word = || key.split(|c: char| !c.is_ascii_alphanumeric()).any(|w| AUTH_WORDS.contains(&w));
+    if !plain_key || !(SECRET_KEYS.iter().any(|k| key.contains(k)) || auth_word()) {
         return false;
     }
     if NOT_THE_VALUE.iter().any(|n| key.ends_with(n)) {
@@ -733,6 +762,18 @@ mod tests {
             "url = https://ghp_0123456789abcdefABCDEF@github.com/o/r",
             "remote = ghp_0123456789abcdefABCDEF",
             "Private-Token: tarae-fake-token",
+            // yarn's npmAuthIdent (`user:password`), as a variable and in .yarnrc.yml; npm's `_auth` as one
+            "YARN_NPM_AUTH_IDENT=stand-in:tarae-fake-token",
+            "npmAuthIdent: \"stand-in:tarae-fake-token\"",
+            "NPM_CONFIG__AUTH=dGFyYWUtZmFrZQ==",
+            "BASIC_AUTH=stand-in:tarae-fake-token",
+            // Options giving one, in a variable's value or a setting's
+            "JAVA_OPTS=-Xmx2g -Dorg.gradle.project.repoPassword=tarae-fake-token",
+            "MAVEN_OPTS=-Dpassword=tarae-fake-token -B",
+            "export GRADLE_OPTS=\"-Dorg.gradle.project.signingPassword=tarae-fake-token\"",
+            "GRADLE_OPTS=-Porg.gradle.project.signing.secretKey=tarae-fake-token",
+            "org.gradle.jvmargs=-Xmx2g -Dhttps.proxyPassword=tarae-fake-token",
+            "NODE_OPTIONS=--api-key=tarae-fake-token",
         ];
         for l in yes {
             assert!(token_like(l), "not seen: {l}");
@@ -752,6 +793,16 @@ mod tests {
             "[registry]",
             "token =",
             "Authorization header goes here", // (no colon: prose)
+            // `auth` as a word, not inside one; options that give no secret, or name where it is
+            "GIT_AUTHOR_NAME=Stand In",
+            "GIT_AUTHOR_EMAIL=stand.in@example.com",
+            "auth-type=legacy",
+            "JAVA_OPTS=-Xmx2g -Dfile.encoding=UTF-8 -Dorg.gradle.daemon=false",
+            "GRADLE_OPTS=-Dsigning.password.file=/x/key.txt",
+            "MAVEN_OPTS=-Dpassword=${REPO_PASSWORD}",
+            "RUSTFLAGS=-Dwarnings -Ctarget-cpu=native",
+            "GOFLAGS=-tags=password",
+            "git log --author=Stand",
         ];
         for l in no {
             assert!(!token_like(l), "seen: {l}");

@@ -72,6 +72,10 @@ reads = ["~/.npm", "{npm}", "{npm-upper}"]
 # of yours. (`logs-max=0` writes none but still tries to delete every old one.) Its "complete log" line names
 # a file there while the run's folder lasts
 env = { npm_config_logs_dir = "{run}" }
+# What of the user's environment a run gets for node and its package managers (npm's settings in both cases,
+# nvm, corepack, pnpm, yarn) — `npm_config__authToken`, `NODE_AUTH_TOKEN` left out as tokens. Measured: npm hands
+# its whole environment on to the scripts it runs, so what isn't passed here doesn't reach them either
+pass = ["npm_config_*", "NPM_CONFIG_*", "NODE_*", "NVM_*", "COREPACK_*", "PNPM_HOME", "YARN_*"]
 
 # npm's home, wherever its cache setting moves it (npm reads `npm_config_*` in any case — both forms people
 # set): what `npx` fetched runs from its `_npx/` later, outside the sandbox, so no grant or asked folder opens

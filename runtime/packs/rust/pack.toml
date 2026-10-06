@@ -212,6 +212,11 @@ reads-above = [".cargo/config.toml", ".cargo/config"]
 kept = ["{cargo}/credentials", "{cargo}/credentials.toml"]
 # Where `cargo install` and rustup put programs: never written
 bins = ["{cargo}/bin"]
+# What of the user's environment a run gets for cargo, rustup, rustc, clippy and rustfmt (measured,
+# `target/sb/lsbenv-measured.md`): cargo's config (`CARGO_*` — `CARGO_REGISTRY_TOKEN` and the like left out
+# as tokens), rustup's, rustc's and the flags (`RUST*`: RUSTFLAGS, RUSTUP_TOOLCHAIN, RUST_BACKTRACE…), clippy's
+# config folder. The user's own builds see the same flags, so a run doesn't rebuild what theirs built
+pass = ["CARGO_*", "RUST*", "CLIPPY_CONF_DIR"]
 # How the sandbox names the folders `[builds]` asks cargo for (#20: the checkout's cargo config names them)
 builds-said = { who = "cargo", target = "target-dir", build = "build-dir" }
 

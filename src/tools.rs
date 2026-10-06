@@ -473,7 +473,9 @@ pub fn tests_done(ed: &mut Editor) {
         .collect();
     let failed = r.failures().first().map(|&i| r.cases[i].clone());
     let label = format!("tests: {}", r.target.label);
+    let env = r.guard.as_ref().and_then(|g| g.run_env()).cloned().map(|e| (e, r.output.clone()));
     crate::reads::run_ended(ed);
+    let text = format!("{text}{}", env_left_out(ed, env));
     let generation = call.generation;
     let told = move |ed: &mut Editor, changed: String| {
         answer(ed, call, Ok(format!("{text}{changed}")));
@@ -2530,7 +2532,9 @@ pub fn run_done(ed: &mut Editor) {
     let first =
         items.iter().find(|i| i.severity == 1).filter(|_| r.state != crate::task::State::Passed).cloned();
     let (label, cmd) = (r.task.name.clone(), r.task.cmd.clone());
+    let env = r.guard.as_ref().and_then(|g| g.run_env()).cloned().map(|e| (e, r.output.clone()));
     crate::reads::run_ended(ed);
+    let text = format!("{text}{}", env_left_out(ed, env));
     let generation = call.generation;
     let told = move |ed: &mut Editor, changed: String| {
         answer(ed, call, Ok(format!("{text}{changed}")));
@@ -2545,6 +2549,23 @@ pub fn run_done(ed: &mut Editor) {
         Some(snap) => run_changes(ed, snap, generation, cmd, told),
         None => told(ed, String::new()),
     }
+}
+
+/// What a sandboxed run's report adds of the variables left out of its environment (`sandbox::runenv`): the
+/// ones the chat's conversation hasn't heard of yet, and those its output names (`env`: the run's, and its
+/// output).
+fn env_left_out(
+    ed: &mut Editor,
+    env: Option<(crate::sandbox::runenv::RunEnv, Vec<(bool, String)>)>,
+) -> String {
+    let Some((e, output)) = env else { return String::new() };
+    let named = e.named_in(&output).map(|s| format!("\n{s}\n")).unwrap_or_default();
+    let Some(chat) = ed.session.chat.as_mut() else { return named };
+    if chat.env_said.0 != chat.conversation {
+        chat.env_said = (chat.conversation.clone(), Vec::new());
+    }
+    let new = e.said(&mut chat.env_said.1).map(|s| format!("\n{s}\n")).unwrap_or_default();
+    format!("{new}{named}")
 }
 
 /// A run Claude waited on is gone before it ended (stopped, or another task took its place).
@@ -4675,5 +4696,30 @@ mod tests {
         assert!(many.contains("60 more failed") && many.contains("  t59\n"), "{many}");
         assert!(!many.contains("  t60\n") && many.ends_with("  … and 10 more\n"), "{many}");
         assert!(super::failures(elsewhere(), &cases, &[]).is_empty());
+    }
+
+    /// A sandboxed run's report says what its environment left out once a conversation — another conversation
+    /// in the chat hears it again — and every time, the left-out names its output says; a run outside the
+    /// sandbox says nothing of it.
+    #[test]
+    fn a_runs_report_says_what_its_environment_left_out_once_a_conversation() {
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        let mut c = crate::chat::Chat::new();
+        c.conversation = Some("c1".into());
+        ed.session.chat = Some(c);
+        let e = crate::sandbox::runenv::RunEnv {
+            tokens: vec!["GITHUB_TOKEN".into()],
+            others: vec!["DATABASE_URL".into()],
+            ..Default::default()
+        };
+        let ran = |l: &str| Some((e.clone(), vec![(false, l.to_string())]));
+        let first = super::env_left_out(&mut ed, ran("ok"));
+        assert!(first.contains("token-like: GITHUB_TOKEN; the rest: DATABASE_URL."), "{first}");
+        assert_eq!(super::env_left_out(&mut ed, ran("ok")), "", "said once");
+        let named = super::env_left_out(&mut ed, ran("error: DATABASE_URL must be set"));
+        assert!(named.contains("Its output names DATABASE_URL") && !named.contains("token-like"), "{named}");
+        ed.session.chat.as_mut().unwrap().conversation = Some("c2".into());
+        assert!(super::env_left_out(&mut ed, ran("ok")).contains("GITHUB_TOKEN"), "a new conversation");
+        assert_eq!(super::env_left_out(&mut ed, None), "", "outside the sandbox");
     }
 }

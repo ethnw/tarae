@@ -24,7 +24,7 @@ pub struct Spawned {
 
 /// `cmd`'s program, arguments, environment changes and folder, started in a session of its own: stdin
 /// `/dev/null`, stdout and stderr pipes (what `cmd` says of its stdio isn't read — `Command` doesn't tell;
-/// nor `env_clear`).
+/// nor `env_clear`: a variable to leave out is removed by name — `sandbox::from_run_env`).
 pub fn setsid(cmd: &Command) -> io::Result<Spawned> {
     start(cmd, false).map(|(s, _)| s)
 }

@@ -211,6 +211,11 @@ kept = ["{gradle}/daemon"]
 # <name>.zip.lck`) — every run, though the distribution is there (measured: denied, `./gradlew` fails). The
 # only writes a run makes in the user's Gradle home
 write-files = ["{gradle}/wrapper/dists/{a}/{b}/{a}.zip.lck"]
+# What of the user's environment a run gets for the JDK, Gradle and Maven. Not `ORG_GRADLE_PROJECT_*` (a
+# project's properties — signing keys and repository passwords live there) nor `JAVA_TOOL_OPTIONS` (agents
+# loaded into every JVM). An options variable giving one of those as an option (`GRADLE_OPTS=-Dorg.gradle.project.
+# signingPassword=…`, `-Dpassword=…` in `MAVEN_OPTS`) is token-like and left out whole (`tokens::option_secret`)
+pass =["JAVA_HOME", "JAVA_OPTS", "JDK_JAVA_OPTIONS", "GRADLE_*", "MAVEN_OPTS", "MAVEN_ARGS", "MAVEN_HOME", "M2_HOME"]
 # A JVM refused a port on this machine: Gradle's client and its daemon
 refused-port = { process = "java", said = """Java was refused a port on this machine: Gradle's client talks to \
 its build daemon and test workers over this machine's ports, so a Gradle build can't run while they're closed. \

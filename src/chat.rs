@@ -324,6 +324,9 @@ pub struct Chat {
     pub given: Vec<String>,
     pub cited: Vec<String>,
     pub pointed: Vec<String>,
+    /// The variables its runs' reports have said were left out of their environment, in the conversation named
+    /// (`sandbox::runenv`): each said once a conversation.
+    pub env_said: (Option<String>, Vec<String>),
 }
 
 /// A tool call claude made (a `tool_use` block) — its id, tool and input.
@@ -421,6 +424,7 @@ impl Chat {
             given: Vec::new(),
             cited: Vec::new(),
             pointed: Vec::new(),
+            env_said: (None, Vec::new()),
         }
     }
 

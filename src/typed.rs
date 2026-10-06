@@ -252,6 +252,18 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
             editor.sandbox_blocked(crate::blocked::Which::Either);
             Ok(())
         }
+        "sandbox-env" => {
+            // (on a worker: `Here` reads the temp folder's real path)
+            let llm = editor.config.llm.clone();
+            editor.events.jobs().spawn(move || {
+                let page = crate::sandbox::run_env_of(&crate::sandbox::Here::now(), &llm).page();
+                move |ed: &mut Editor| {
+                    ed.new_scratch();
+                    ed.doc_mut().text = ropey::Rope::from_str(&page);
+                }
+            });
+            Ok(())
+        }
         "config-reload" => {
             let root = editor.session.root.clone();
             editor.events.jobs().spawn(move || {

@@ -479,6 +479,16 @@ pub static SETTINGS: &[Setting] = &[
         },
     },
     Setting {
+        path: "llm.sandbox-env",
+        kind: Kind::StrList,
+        doc: "Chat: more of your environment Claude's commands get (\"DATABASE_URL\", \"MYAPP_*\") — they start with PATH, HOME, the locale and the toolchains' own; a token-like one only by its whole name (:sandbox-env lists them)",
+        get: |c| Value::Array(c.llm.sandbox_env.iter().map(|a| Value::from(a.as_str())).collect()),
+        set: |c, v| {
+            c.llm.sandbox_env =
+                v.as_array().into_iter().flatten().filter_map(|a| a.as_str().map(str::to_string)).collect()
+        },
+    },
+    Setting {
         path: "llm.sandbox-protect",
         kind: Kind::StrList,
         doc: "Chat: paths in the project the sandbox keeps Claude's commands from changing (\"migrations/\"); the protected names (.git, .tarae.toml, build.rs, pom.xml… — every language pack's) always, anywhere in it",

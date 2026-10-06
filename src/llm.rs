@@ -115,6 +115,9 @@ pub struct LlmConfig {
     pub sandbox_ports: Vec<u16>,
     /// Every port on this machine open to them — the risky ones too (Seatbelt can't leave some out).
     pub sandbox_localhost: bool,
+    /// More of tarae's environment their commands get (`sandbox::runenv`): names, or `PREFIX*` families — a
+    /// token-like one only by its whole name.
+    pub sandbox_env: Vec<String>,
     /// Chat: Claude's `screen` tool shows the terminal panel's contents too (`seeing.rs`) — off, its rows go
     /// blank.
     pub screen_terminal: bool,
@@ -143,6 +146,7 @@ impl Default for LlmConfig {
             sandbox_protect: Vec::new(),
             sandbox_ports: Vec::new(),
             sandbox_localhost: false,
+            sandbox_env: Vec::new(),
             screen_terminal: true,
             stuck_after: 10,
         }

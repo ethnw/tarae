@@ -89,7 +89,7 @@ impl Fixture {
             let v = v.replace("$BASE", &base.display().to_string());
             vars.insert(k.to_string(), v.into());
         }
-        let here = Here { env: vars, tmp: Some(base.join("tmp")), uid: 501, os };
+        let here = Here { env: vars, tmp: Some(base.join("tmp")), uid: 501, os, ..Here::default() };
         // What the toolchain would have said (no cargo or go is run): Go's module cache, the user's Go build
         // cache moved into home (kept from runs), cargo's target dir in the checkout, a folder in home it names
         // (kept closed — #20), and this checkout's own build dir

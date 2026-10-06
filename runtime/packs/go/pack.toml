@@ -158,6 +158,15 @@ env = { GOTOOLCHAIN = "local" }
 ask = [{ when = ["go.mod", "go.work"], run = ["go", "env", "-json", "GOMODCACHE", "GOCACHE"], caches = ["GOMODCACHE"], kept = ["GOCACHE"] }]
 # Where `go install` puts programs: never written, nor GOPATH itself
 bins = ["{go}/bin", "{gobin}"]
+# What of the user's environment a run gets for go (`go help environment`, by name: `GO*` would take
+# GOOGLE_* too) and cgo. Not GOAUTH: the commands that fetch its credentials
+pass = [
+    "GO111MODULE", "GOARCH", "GOBIN", "GOCACHE", "GOCACHEPROG", "GODEBUG", "GOENV", "GOEXPERIMENT", "GOFIPS140",
+    "GOFLAGS", "GOINSECURE", "GOMODCACHE", "GONOPROXY", "GONOSUMDB", "GOOS", "GOPATH", "GOPRIVATE", "GOPROXY",
+    "GOROOT", "GOSUMDB", "GOTMPDIR", "GOTOOLCHAIN", "GOVCS", "GOWORK", "GOAMD64", "GOARM", "GOARM64", "GO386",
+    "GOMIPS", "GOMIPS64", "GOPPC64", "GORISCV64", "GOWASM", "GOGC", "GOMAXPROCS", "GOMEMLIMIT", "GOTRACEBACK",
+    "GCCGO", "CGO_*",
+]
 
 # GOPATH may be a list (`/a:/b`): Go puts the module cache and `bin` in the first; every one is a home
 [sandbox.homes]

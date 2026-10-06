@@ -914,6 +914,12 @@ mod tests {
     use super::*;
     use crate::sandbox::{Env, Guard, Reads, RunDir};
 
+    /// What a run gets of this process's environment with the default settings — as a real policy's
+    /// (`sandbox::env_in`); a policy made by hand gets nothing of it.
+    fn run_env_here() -> crate::sandbox::runenv::RunEnv {
+        crate::sandbox::run_env_of(&crate::sandbox::Here::now(), &crate::llm::LlmConfig::default())
+    }
+
     /// The kernel's ABI, or None after saying the test skips itself (no Landlock here, or ABI 1 — tarae
     /// doesn't use it).
     fn kernel_abi(test: &str) -> Option<u32> {
@@ -1109,6 +1115,8 @@ mod tests {
                     kept: vec![h.join(".ssh"), h.join(".cargo/credentials.toml")],
                     ..Default::default()
                 },
+                // (what a run gets of this process's environment, as `env_in` gives it)
+                run_env: run_env_here(),
                 ..Default::default()
             };
             let p = Policy { run: RunDir::new().ok(), ..Policy::for_project(&env) };
@@ -1238,6 +1246,7 @@ mod tests {
                 root: root.clone(),
                 tmp: Some(crate::sandbox::profile_path(&std::env::temp_dir())),
                 write: if name == "sandbox-write" { vec![base.display().to_string()] } else { Vec::new() },
+                run_env: run_env_here(),
                 ..Default::default()
             };
             let p = crate::sandbox::confined(Policy { run: RunDir::new().ok(), ..Policy::for_project(&env) });

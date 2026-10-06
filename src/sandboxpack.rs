@@ -37,6 +37,10 @@
 //!   when `if` is there) and `append`ed to the run's own; `said` what Claude reads when a write in the user's
 //!   home of the tool was kept.
 //! - `env`: variables in every run's environment (`{run}`: the run's own folder).
+//! - `pass`: what of the user's environment a run gets besides the core's floor (`sandbox::runenv`) — the
+//!   toolchain's own variables: names, or `PREFIX*` families (two characters at least before the `*`); never
+//!   the loader's (`LD_*`, `DYLD_*`), nor a name only a secret has (`NPM_TOKEN`). A token-like one is left out
+//!   all the same.
 //! - `bins`: where a toolchain puts programs the user runs — never written, nor what holds them (with the
 //!   folders on `PATH`, `~/.local/bin`, and the homes themselves: `sandbox::RunsLater`).
 //! - `quiet-writes`: where a denied write is expected — matched only at that place, for the user's home on
@@ -86,6 +90,8 @@ pub(crate) const SANDBOX_KEYS: &[(&str, Reach)] = &[
     ("builds-said", Reach::BuiltIn),
     ("run-home", Reach::BuiltIn),
     ("env", Reach::BuiltIn),
+    // (what of the user's environment a run gets)
+    ("pass", Reach::BuiltIn),
     // (narrows: never written)
     ("bins", Reach::Added),
     // (it hides a denial from the report)
@@ -232,6 +238,7 @@ pub struct Packs {
     pub builds_said: Vec<BuildsSaid>,
     pub run_homes: Vec<RunHome>,
     pub env: Vec<(String, String)>,
+    pub pass: Vec<String>,
     pub bins: Vec<String>,
     pub quiet_writes: Vec<String>,
     pub settings: Vec<Setting>,
@@ -485,6 +492,15 @@ fn read_key(out: &mut Packs, pack: &str, table: &str, key: &str, v: &Value) -> R
             for (k, val) in pairs(v, "env")? {
                 check_var(&k)?;
                 out.env.push((k, val));
+            }
+        }
+        ("sandbox", "pass") => {
+            for e in list(v)? {
+                match check_pass(&e) {
+                    Ok(()) if !out.pass.contains(&e) => out.pass.push(e),
+                    Ok(()) => {}
+                    Err(why) => wrong.push(format!("`{e}` {why}")),
+                }
             }
         }
         ("sandbox", "bins") => places(&mut out.bins, v, Kind::Read)?,
@@ -778,6 +794,23 @@ fn check_var(name: &str) -> Result<(), String> {
         true => Ok(()),
         false => Err(format!("`{name}` is a variable a pack may not set")),
     }
+}
+
+/// A `pass` entry: a name or a family (`sandbox::runenv::entry_ok`), not the loader's, not a name only a secret
+/// has (what `tokens::token_like` says of it with a value).
+fn check_pass(e: &str) -> Result<(), String> {
+    use crate::sandbox::runenv::{LOADER, entry_ok};
+    let stem = e.trim_end_matches('*');
+    if !entry_ok(e) {
+        return Err("isn't a variable's name, or a family of two characters or more before its `*`".into());
+    }
+    if LOADER.iter().any(|l| stem.starts_with(l) || l.starts_with(stem)) {
+        return Err("is the loader's — only the user's own llm.sandbox-env passes it".into());
+    }
+    if crate::tokens::token_like(&format!("{stem}=a-value-of-some-length")) {
+        return Err("names a secret".into());
+    }
+    Ok(())
 }
 
 /// A command run unasked: plain words (`gofmt -l`), the first a program's name that doesn't run what follows it.

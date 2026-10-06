@@ -1,0 +1,10 @@
+# The toolchain managers that serve more than one language — no grammar, no language: only what of the user's
+# environment a sandboxed run gets for their shims on PATH (`sandbox::runenv`), so the core names no tool.
+# mise and asdf pick a tool's version from their own variables; volta (node) and sdkman (the JVM's) find their
+# homes there. A token among them (`MISE_GITHUB_TOKEN`) is left out all the same.
+#
+# Not direnv: a run's `sh -c` runs no prompt hook, so it has nothing to do — and `DIRENV_DIFF` is the exported
+# variables themselves, encoded, where no token check can see one.
+
+[sandbox]
+pass = ["MISE_*", "ASDF_*", "VOLTA_*", "SDKMAN_*"]

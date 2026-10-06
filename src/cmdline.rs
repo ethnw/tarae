@@ -83,6 +83,7 @@ pub const COMMANDS: &[TypedCmd] = &[
     c(&["sandbox-allowed"], Arg::None, "What Claude may do past the defaults — take one back"),
     c(&["sandbox-disallow"], Arg::None, "Take back a path or port :sandbox-allowed lists"),
     c(&["sandbox-blocked"], Arg::None, "What the sandbox blocked in Claude's last run: open it"),
+    c(&["sandbox-env"], Arg::None, "Your environment's names Claude's commands get, and don't"),
     c(&["chat-screen"], Arg::None, "Send the screen, as text, with your next chat message"),
     c(&["chat-point"], Arg::None, "Point at something on screen — it goes with your next chat message"),
     c(&["log-open"], Arg::None, "Open tarae's log (language servers, errors)"),
