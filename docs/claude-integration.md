@@ -954,7 +954,9 @@ tarae, not a model, grades every change in a review:
 
 A person looks at each high-risk change: `space v h` on it, in review mode — or over a selection, every one it
 touches that is on screen (all its lines, or the whole pane); one scrolled past isn't taken (`%` scrolls to the
-file's end, so `%` then `space v h` takes the ones in sight there, not the whole file), and the status line says how many were left. A file's mark and Claude don't count. `]h` / `[h` go to the next / previous one not looked at, across
+file's end, so `%` then `space v h` takes the ones in sight there, not the whole file), and the status line says how many were left. One taller than the
+pane is taken — under the cursor or a selection — only once every line of it has been on screen, scrolled through
+since its text last changed; `]h` and `space v h` say so, and how many lines are left. A file's mark and Claude don't count. `]h` / `[h` go to the next / previous one not looked at, across
 the review's files; `space v h` with none under the cursor goes to the next one (going there is no look — press
 it again). Until each has had a look:
 
@@ -1020,7 +1022,10 @@ its base up to it, fast-forward only. When the base has moved since the session 
 
 While it's under way the session's tab, the status line's chip and its row in the list say `rebasing 2/5`, and
 `:session-end` and `:restart` wait for it (they say why). `:session-bring` on a session whose rebase stopped
-puts its card up again — `y` goes on, `X` aborts.
+puts its card up again — `y` goes on, `X` aborts. Its card put away (`n`), a rebase waiting on you — resolved, or
+stopped with nothing asked of its Claude (one taken up after a restart) — stays in the inbox (`space I`, the
+status line's `▲ waiting`) until it goes on or is aborted, waited since it began to wait (for one taken up, since
+git stopped, as git's files say). `enter` there, or one `C-q`, brings its card back with the keys.
 
 A session with no commits of its own, behind its base (it was made, nothing was committed, and the base moved
 on), has nothing to bring. `:session-bring` then offers to move it up to its base's tip instead: the card says

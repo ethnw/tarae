@@ -641,7 +641,7 @@ impl Editor {
             `d` discard (twice for a file; a hunk: its index lines back)\n\
             `o` `t` `a` a conflict: keep ours · theirs · both\n\
             `e` open in the editor · `D` diff against HEAD\n\
-            `c` commit · `C` commit, Claude drafting the message · `A` amend\n\
+            `c` commit · `C` commit, Claude drafting the message · `A` amend (`:git-amend`) — each opens the message: `:w` does it\n\
             `p` pull · `P` push · `f` fetch\n\
             `B` branches · `L` log · `z` stash · `Z` take it back\n\
             `b` blame on/off · `r` read again · `esc` the code";
@@ -700,8 +700,7 @@ impl Editor {
         self.git_queued(work, done);
     }
 
-    /// Queue work that doesn't need the status read first (`:git-amend` from the code): `done` gets what
-    /// `work` gave.
+    /// Queue work in the repository, the status read or not: `done` gets what `work` gave.
     fn git_queued<T: Send + 'static>(
         &mut self,
         work: impl FnOnce(&Path) -> T + Send + 'static,
@@ -868,7 +867,10 @@ impl Editor {
                 let file = PathBuf::from(dir.trim()).join("COMMIT_EDITMSG");
                 let last = if amend { git(top, &["log", "-1", "--format=%B"], None)? } else { String::new() };
                 let mut text = format!("{}\n", last.trim_end());
-                text += "\n# :w commits · :q cancels · :commit-draft asks Claude · # lines are left out\n";
+                text += &format!(
+                    "\n# :w {} · :q cancels · :commit-draft asks Claude · # lines are left out\n",
+                    if amend { "amends the last commit" } else { "commits" }
+                );
                 text += &format!(
                     "# {} on {branch}\n",
                     if amend { "Amending the last commit" } else { "Committing" }
@@ -883,7 +885,16 @@ impl Editor {
             Box::new(move |ed, r| match r {
                 Ok(file) if file.is_empty() => {
                     ed.session.commit_then_end = false;
-                    ed.set_warning("nothing staged — s stages a file (or a folder, or the whole section)")
+                    // (what's to stage, as the tab last read it — the commit's own read found nothing staged)
+                    let changed = ed.session.git_status.as_ref().is_some_and(|s| !s.unstaged.is_empty());
+                    let then = if draft { "C" } else { "c" };
+                    ed.set_warning(match changed {
+                        true => format!(
+                            "nothing staged to commit — s on a file stages it, s on Changes stages them all, \
+                             then {then}"
+                        ),
+                        false => "nothing staged to commit — no changes either".to_string(),
+                    })
                 }
                 Ok(file) => {
                     let then_end = std::mem::take(&mut ed.session.commit_then_end);
@@ -938,7 +949,8 @@ impl Editor {
                     Box::new(move |ed, result| match result {
                         // Its buffer goes (wherever you are by now — a hook can take a while)
                         Ok(line) => {
-                            ed.set_success(format!("Committed {}", line.trim()));
+                            let did = if amend { "Amended" } else { "Committed" };
+                            ed.set_success(format!("{did} {}", line.trim()));
                             ed.close_doc(id);
                             // (its session asked to end once its changes were in: asked again, now with none)
                             if then_end && let Err(e) = ed.session_end("") {
@@ -1106,33 +1118,23 @@ impl Editor {
         });
     }
 
-    /// `:git-amend` — what's staged goes into the last commit, its message kept (no buffer). Warned when
-    /// that commit is pushed already.
+    /// `:git-amend` — `A` from anywhere: the last commit's message in a buffer, what's staged going in with it
+    /// (`:w` amends, `:q` cancels; warned when that commit is pushed already) — as `c`/`C` open a new one.
+    /// The repository's status is read first when the git tab hasn't.
     pub fn git_amend(&mut self) {
-        self.git_hooked("amend", hooks::AMEND, |ed, pre| {
-            ed.git_queued(
-                move |top| {
-                    // (`--quiet` exits 1 when something is staged)
-                    if git(top, &["diff", "--cached", "--quiet"], None).is_ok() {
-                        return Err(
-                            "nothing staged to add to the last commit — A changes its message".to_string()
-                        );
-                    }
-                    let was_pushed = pushed(top);
-                    crate::gitrepo::hooked(top, &hooks::with(pre, &["commit", "--amend", "--no-edit"]))?;
-                    let line = git(top, &["log", "-1", "--format=%h %s"], None)?;
-                    Ok((line.trim().to_string(), was_pushed))
-                },
-                |ed, r| match r {
-                    Ok((line, was_pushed)) => {
-                        ed.set_success(format!("Amended {line}"));
-                        if was_pushed {
-                            ed.set_warning(PUSHED_WARNING);
-                        }
-                    }
-                    Err(e) => ed.set_error(format!("amend: {e}")),
-                },
-            );
+        if self.session.git_status.is_some() {
+            return self.git_commit_start(true);
+        }
+        let cwd = self.git_cwd();
+        self.events.jobs().spawn(move || {
+            let read = status(&cwd, None).map(Status::with_rows);
+            move |ed: &mut Editor| match read {
+                Ok(st) => {
+                    ed.session.git_status = Some(st);
+                    ed.git_commit_start(true);
+                }
+                Err(e) => ed.set_warning(format!("amend: {e}")),
+            }
         });
     }
 

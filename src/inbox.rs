@@ -11,7 +11,8 @@
 //! the keys — and it's answered there, on its card, as ever: never from the list.
 //!
 //! `C-q` takes the same order, but for what's in front: the session in front's own first (#198), then the one
-//! that has waited longest, in any session (#90, #94) — once it's the card up, `C-q` gives it the keys. While
+//! that has waited longest, in any session (#90, #94) — once it's the card up, `C-q` gives it the keys (a
+//! rebase's card put away gets them as it comes back: it was put away, not new). While
 //! anything waits, `C-q` never says nothing does. Claude's runs gone
 //! quiet are listed after everything that asks for an answer (#171), and so is a reviewer that ended in a
 //! session behind (#195) — news to read there, gone once that session is in front.
@@ -30,19 +31,20 @@ use crate::uistate::{CardState, session_id};
 pub struct Entry {
     /// `card#12` · `edit#s1:review` (an edit in its review) · `edit#s1:<request>` (one waiting for it) ·
     /// `read#s1:<request>` (a read waiting for its card) · `set#s1:<n>` (a change set's files, one by one) ·
-    /// `run#…` (Claude's run gone quiet) · `reviewer#s1` (its reviewer ended while it was behind).
+    /// `run#…` (Claude's run gone quiet) · `reviewer#s1` (its reviewer ended while it was behind) ·
+    /// `rebase#s1` (its rebase resolved, the card put away).
     pub id: String,
     /// Its session, as the state names it (`s1`).
     pub session: String,
     /// A card's kind (`run`, `read`, `project-trust` …), `edit`, `read`, `change-set`, `silent-run`,
-    /// `reviewer`.
+    /// `reviewer`, `rebase`.
     pub kind: &'static str,
     /// What it asks: a card's title and what's decided; an edit's change and file; a reviewer's end, what it
     /// found and where to read it, or why it stopped.
     pub asks: String,
     pub waited_ms: u64,
     /// Where it is: a card `front` · `stacked` · `parked`; an edit `review` (up in its session) · `queued`;
-    /// a run `running`; a reviewer `ended`.
+    /// a run `running`; a reviewer `ended`; a rebase's card `put-away`.
     pub up: &'static str,
 }
 
@@ -177,6 +179,21 @@ impl Editor {
             if let Some((said, at)) = crate::reviewer::news(l) {
                 v.push(entry(format!("reviewer#{s}"), "reviewer", said, at, "ended"));
             }
+            // A rebase that waits on you, its card put away (`n`) — resolved, or stopped with nothing asked of
+            // its Claude (one taken up after a restart): `enter` and `C-q` bring its card back. Waited since
+            // it began to wait (`Rebase::waits_on_you`: git's own time for one tarae didn't start)
+            if let Some(r) = l.rebase.as_ref()
+                && let Some(since) = r.waits_on_you()
+                && !cards.iter().any(|c| c.kind == "rebase-resolved" && c.session == s)
+            {
+                let asks = match r.stage {
+                    crate::rebase::Stage::Resolved => {
+                        format!("{}: conflicts resolved — y continues the rebase, X aborts it", l.label())
+                    }
+                    _ => format!("{}: {} stopped — y goes on, X aborts it", l.label(), r.said()),
+                };
+                v.push(entry(format!("rebase#{s}"), "rebase", asks, since, "put-away"));
+            }
             let Some(c) = l.chat.as_ref() else { continue };
             for p in &c.edits.queue {
                 let path = crate::chat::resolve(&l.root, p.input["file_path"].as_str().unwrap_or_default());
@@ -277,6 +294,19 @@ impl Editor {
         }
         // A reviewer that ended: there now — coming said it (`reviewer::session_in`)
         if e.kind == "reviewer" {
+            return;
+        }
+        // A rebase's card put away: up again, in front, with the keys — from `enter` and `C-q` alike (it was
+        // put away, not answered: going to it is going to answer it)
+        if e.kind == "rebase" {
+            if let Err(why) = self.rebase_offer(id) {
+                return self.set_status(why);
+            }
+            let mine = |o: &crate::offer::Offer| matches!(o.what, crate::offer::What::RebaseResolved { .. });
+            if let Some(i) = self.offers.iter().position(mine) {
+                self.offer_to_front(i);
+                self.card_keys = true;
+            }
             return;
         }
         // A silent run: its panel in front with the keys — stopping it is the user's call there

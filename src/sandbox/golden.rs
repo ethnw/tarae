@@ -313,7 +313,34 @@ fn the_report_is_pinned() {
     let mut out = String::from("══ denied\n");
     out.push_str(&guard.report(&[]));
     let line = panel_line(Some(&guard), false, std::time::Instant::now());
-    out.push_str(&format!("\npanel: {line:?}\n══ denied nothing\n"));
+    out.push_str(&format!("\npanel: {line:?}\n"));
+    // What only the run's output says was refused: the output's words, not the sandbox's — a grep's hit
+    // quoting the phrase in the project says nothing; cargo's error on its cache is said, apart
+    let output: Vec<(bool, String)> = [
+        format!("{}/src/a.rs:3: // Operation not permitted", shown(&f.root)),
+        "error: failed to download `serde v1.0.0`".into(),
+        format!(
+            "  failed to create directory `{}`",
+            shown(&home.join(".cargo/registry/src/index/serde-1.0.0"))
+        ),
+        "Caused by:".into(),
+        "  Operation not permitted (os error 1)".into(),
+    ]
+    .into_iter()
+    .map(|l| (true, l))
+    .collect();
+    let unrecorded = Guard::In(Box::new(Policy { watch: Some(Watch::quiet("golden-out.")), ..p.clone() }));
+    out.push_str("══ said only in the output\n");
+    out.push_str(&unrecorded.report(&output));
+    let line = panel_line(Some(&unrecorded), false, std::time::Instant::now());
+    out.push_str(&format!("\npanel: {line:?}\n"));
+    // Both: what tarae saw blocked, then what the output also says
+    let seen = Watch::quiet("golden-both.");
+    seen.record(file("file-write-data", f.root.join("Cargo.toml")));
+    let both = Guard::In(Box::new(Policy { watch: Some(seen), ..p.clone() }));
+    out.push_str("══ denied, and said in the output\n");
+    out.push_str(&both.report(&output));
+    out.push_str("\n══ denied nothing\n");
     let calm = Guard::In(Box::new(Policy { watch: Some(Watch::quiet("golden-calm.")), ..p }));
     out.push_str(&calm.report(&[]));
     let line = panel_line(Some(&calm), false, std::time::Instant::now());

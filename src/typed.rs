@@ -265,9 +265,9 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
             Ok(())
         }
         "config-reload" => {
-            let root = editor.session.root.clone();
+            let (root, from) = (editor.started_root().to_path_buf(), editor.config_sources());
             editor.events.jobs().spawn(move || {
-                let (c, w) = config::load(&root);
+                let (c, w) = config::load(&root, &from);
                 move |ed: &mut Editor| ed.reload_config(c, w)
             });
             Ok(())

@@ -906,6 +906,29 @@ impl Editor {
         &self.session.root
     }
 
+    /// The checkout tarae started in (session 0's): the editor's config is read from there, whichever
+    /// session is in front — after `:restart` that can be another checkout, its `.tarae.toml` another
+    /// version (one without `[preflight]`: the packs' defaults ran in place of the project's).
+    pub fn started_root(&self) -> &Path {
+        let first = std::iter::once(&self.session).chain(&self.sessions).find(|l| l.id == 0);
+        first.map_or(&self.session.root, |l| &l.root)
+    }
+
+    /// Where its config loads read your config file and the trust answers — none in tests.
+    pub fn config_sources(&self) -> crate::config::Sources {
+        crate::config::Sources { user: self.config_file.clone(), trust: self.trust_path.clone() }
+    }
+
+    /// What every tarae watches from its start (`term::event_loop`): its config files — `started_root`'s —
+    /// and that checkout's HEAD, as session 0's (the other sessions' are watched as they open).
+    pub fn watches_start(&mut self) {
+        let root = self.started_root().to_path_buf();
+        crate::config::watch(self.events.shared_sender(), root.clone(), self.config_sources());
+        self.events.set_session(0);
+        crate::git::watch(self.events.sender(), root);
+        self.events.set_session(self.session.id);
+    }
+
     /// `path` as the editor means it: a relative one is from the root, not from the process's folder.
     pub fn path_of(&self, path: &Path) -> PathBuf {
         if path.is_absolute() { path.to_path_buf() } else { self.session.root.join(path) }
@@ -7286,7 +7309,8 @@ mod tests {
         let answer = tool_answer(&log).replace("\\n", " ");
         let answer = answer.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(answer.contains("Permission denied") && answer.contains("In tarae's sandbox"), "{answer}");
-        assert!(answer.contains("The sandbox blocked one thing"), "{answer}");
+        // (read from the output — below: the output's words, not a record of tarae's)
+        assert!(answer.contains("Its output says one thing was refused"), "{answer}");
         // (a checkout in home, as on the user's VM: reads are kept there too, so either is refused)
         let in_home = std::env::var_os("HOME").is_some_and(|h| !h.is_empty() && marker.starts_with(h));
         let op = if in_home { crate::sandbox::EITHER } else { "file-write*" };
@@ -10543,8 +10567,8 @@ mod tests {
         std::fs::remove_dir_all(&wt).ok();
     }
 
-    /// `:git-amend` puts what's staged into the last commit, its message kept, and warns when that commit
-    /// was pushed (as `A` does). The branch has then gone a different way from its upstream: `P` shows a card
+    /// `:git-amend` opens the last commit's message as `A` does — warned when that commit was pushed — and
+    /// `:w` puts what's staged into it, its message kept. The branch has then gone a different way from its upstream: `P` shows a card
     /// listing the remote's commit a push would replace. Someone pushing between the card and `y` makes the
     /// lease refuse even after a fetch brought theirs in — theirs kept, said; asked again, `y` replaces what
     /// that card listed. A push refused because the remote moved on unseen brings the card too; one the
@@ -10562,18 +10586,22 @@ mod tests {
         ed.session.root = work.clone();
         feed(&mut ed, "<space>g");
         settle_until(&mut ed, |ed| ed.session.git_status.is_some());
-        // Nothing staged: said, nothing amended
-        crate::typed::execute(&mut ed, "git-amend").unwrap();
-        settle_until(&mut ed, |ed| said(ed, ToastKind::Error, "amend: nothing staged") == 1);
-        assert_eq!(git_out(&work, &["rev-parse", "HEAD"]), first);
-        // Staged: into the last commit, its message kept — and it was pushed: warned
+        // `:git-amend` is `A` from anywhere — the git tab's status not read yet too: the last message in a
+        // buffer, saying what `:w` does, nothing amended before it — and that commit was pushed: warned
         std::fs::write(work.join("a.txt"), "one\ntwo\n").unwrap();
         git_in(&work, &["add", "a.txt"]);
+        ed.session.git_status = None;
         crate::typed::execute(&mut ed, "git-amend").unwrap();
         settle_until(&mut ed, |ed| {
-            said(ed, ToastKind::Success, "Amended") == 1
+            ed.session.committing.as_ref().is_some_and(|c| c.amend)
                 && said(ed, ToastKind::Warning, crate::gitpanel::PUSHED_WARNING) == 1
         });
+        assert_eq!(ed.doc().display_name_short(), "COMMIT_EDITMSG");
+        assert!(text(&ed).starts_with("base\n") && text(&ed).contains("# :w amends the last commit"));
+        assert_eq!(git_out(&work, &["rev-parse", "HEAD"]), first, "nothing amended before :w");
+        // `:w`: what's staged into the last commit, its message kept
+        feed(&mut ed, ":w<ret>");
+        settle_until(&mut ed, |ed| said(ed, ToastKind::Success, "Amended") == 1);
         assert_ne!(git_out(&work, &["rev-parse", "HEAD"]), first);
         assert_eq!(git_out(&work, &["log", "-1", "--format=%s"]), "base");
         assert_eq!(git_out(&work, &["show", "HEAD:a.txt"]), "one\ntwo");
@@ -11056,6 +11084,90 @@ mod tests {
         feed(&mut ed, "c");
         settle_until(&mut ed, |ed| ed.session.committing.is_some());
         assert_eq!(ed.mode, Mode::Insert);
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// `:git-amend` with nothing staged is `A`'s reword: the last message opens, `:w` changes only the message
+    /// (the tree as it was). Not in a repository, the status can't be read: said, no buffer.
+    #[test]
+    fn git_amend_with_nothing_staged_rewords_and_outside_a_repository_says_why() {
+        let repo = git_repo("amend-reword", &[("a.txt", "one\n")]);
+        let tree = git_out(&repo, &["rev-parse", "HEAD^{tree}"]);
+        let mut ed = editor("");
+        ed.session.root = repo.clone();
+        crate::typed::execute(&mut ed, "git-amend").unwrap();
+        settle_until(&mut ed, |ed| ed.session.committing.as_ref().is_some_and(|c| c.amend));
+        assert!(text(&ed).starts_with("base\n") && text(&ed).contains("# :w amends the last commit"));
+        feed(&mut ed, "A, reworded<esc>:w<ret>");
+        settle_until(&mut ed, |ed| said(ed, ToastKind::Success, "Amended") == 1);
+        assert_eq!(
+            git_out(&repo, &["log", "--format=%s"]),
+            "base, reworded",
+            "one commit, its message changed"
+        );
+        assert_eq!(git_out(&repo, &["rev-parse", "HEAD^{tree}"]), tree, "nothing else");
+        std::fs::remove_dir_all(&repo).ok();
+        // Not a repository
+        let plain = std::env::temp_dir().join(format!("tarae-amend-plain-{}", std::process::id()));
+        std::fs::create_dir_all(&plain).unwrap();
+        let mut ed = editor("");
+        ed.session.root = std::fs::canonicalize(&plain).unwrap();
+        crate::typed::execute(&mut ed, "git-amend").unwrap();
+        settle_until(&mut ed, |ed| ed.messages.iter().any(|m| m.2.starts_with("amend: ")));
+        assert!(ed.session.committing.is_none(), "no buffer");
+        std::fs::remove_dir_all(&plain).ok();
+    }
+
+    /// frictions14: after `:restart` another session can be in front — a checkout whose `.tarae.toml` is
+    /// another version (one without `[preflight]`: the bring card's `p` ran the packs' defaults). The config
+    /// is still the checkout tarae started in's: what's watched (`watches_start`) and what `:config-reload`
+    /// reads.
+    #[test]
+    fn the_config_is_the_started_checkouts_whichever_session_is_in_front() {
+        let dir = std::env::temp_dir().join(format!("tarae-config-reload-root-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        for (sub, width) in [("started", 7), ("other", 3)] {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+            std::fs::write(dir.join(sub).join(".tarae.toml"), format!("[editor]\ntab-width = {width}\n"))
+                .unwrap();
+        }
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let mut ed = editor("");
+        ed.session.root = dir.join("started");
+        let other = ed.session_open(&dir.join("other")).unwrap();
+        assert!(ed.session_switch(other));
+        assert_eq!(ed.root(), dir.join("other"), "the other session in front");
+        assert_eq!(ed.started_root(), dir.join("started"));
+        ed.config.tab_width = 4;
+        crate::typed::execute(&mut ed, "config-reload").unwrap();
+        settle_until(&mut ed, |ed| ed.config.tab_width != 4);
+        assert_eq!(ed.config.tab_width, 7, "the started checkout's .tarae.toml");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `C` (and `c`) in the git tab with nothing staged: no buffer, and said why and what to press — `s` on
+    /// Changes stages them all.
+    #[test]
+    fn committing_with_nothing_staged_says_what_to_press() {
+        let repo = git_repo("commit-unstaged", &[("a.txt", "one\n")]);
+        std::fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
+        let mut ed = editor("");
+        ed.session.sidebar = Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Git, repo.clone()));
+        ed.git_refresh();
+        settle_until(&mut ed, |ed| ed.session.git_status.is_some());
+        for key in ["C", "c"] {
+            ed.status = None;
+            ed.session.sidebar.as_mut().unwrap().focus = true;
+            feed(&mut ed, key);
+            settle_until(&mut ed, |ed| ed.status.is_some());
+            let said = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+            assert!(
+                said.contains("nothing staged to commit")
+                    && said.contains(&format!("s on Changes stages them all, then {key}")),
+                "{key}: {said}"
+            );
+            assert!(ed.session.committing.is_none(), "{key}: no message buffer");
+        }
         std::fs::remove_dir_all(&repo).ok();
     }
 

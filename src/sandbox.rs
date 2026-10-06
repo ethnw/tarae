@@ -96,8 +96,10 @@ impl Guard {
     }
 
     /// What Claude reads with the command's result: what the sandbox blocked (or that it blocked nothing),
-    /// then what the sandbox allows. `output` = the run's lines: what they say was refused where the profile
-    /// denies it counts too (`Policy::said_in_output` — the kernel's own report of a denial gets lost).
+    /// then what the sandbox allows. Blocked = what tarae has its own record of (`Watch`: Seatbelt's log,
+    /// Landlock's audit log, the supervisor's refusals). `output` = the run's lines: what they say was refused
+    /// where the profile denies it (`Policy::said_in_output` — the kernel's own report of a denial gets lost)
+    /// is said apart, as the output's words (`output_says`): such a line may be the command's own.
     pub fn report(&self, output: &[(bool, String)]) -> String {
         let rules = self.rules();
         let Guard::In(p) = self else { return rules };
@@ -110,53 +112,53 @@ impl Guard {
         };
         let mut b = self.watch().map(|w| w.blocked()).unwrap_or_default();
         let said = p.said_in_output(output, &b.seen);
+        let mut o = Blocked::default();
         for d in p.merge_made(&mut b.seen, said) {
-            b.add(d);
+            o.add(d);
         }
-        if (self.watch().is_none() || p.files_unwatched()) && b.total == 0 {
+        for q in std::mem::take(&mut o.quiet) {
+            if !b.quiet.iter().any(|d| d.op == q.op && d.target == q.target) {
+                b.quiet.push(q);
+            }
+        }
+        if (self.watch().is_none() || p.files_unwatched()) && b.total == 0 && o.total == 0 {
             return format!("{rules}{unwatched}");
         }
-        if b.total > 0 {
-            let mut s = match &b.failed {
-                Some(why) => {
+        if b.total > 0 || o.total > 0 {
+            let mut s = match (&b.failed, b.total) {
+                (Some(why), 0) => format!("tarae couldn't watch what the sandbox blocked ({why}). "),
+                (Some(why), _) => {
                     format!("tarae couldn't watch what the sandbox blocked ({why}) — its output says:\n")
                 }
-                None => String::new(),
+                (None, 0) => "The sandbox blocked nothing tarae saw. ".into(),
+                (None, _) => String::new(),
             };
-            s.push_str(&format!(
-                "The sandbox blocked {} — {} time{}:\n",
-                if b.distinct == 1 { "one thing".to_string() } else { format!("{} things", b.distinct) },
-                b.total,
-                if b.total == 1 { "" } else { "s" }
-            ));
-            for d in &b.seen {
-                s.push_str(&format!("  {}\n", d.reported()));
-            }
-            if b.distinct > b.seen.len() {
-                s.push_str(&format!("  … and {} more\n", b.distinct - b.seen.len()));
+            if b.total > 0 {
+                s.push_str(&format!(
+                    "The sandbox blocked {} — {} time{}:\n",
+                    if b.distinct == 1 { "one thing".to_string() } else { format!("{} things", b.distinct) },
+                    b.total,
+                    if b.total == 1 { "" } else { "s" }
+                ));
+                for d in &b.seen {
+                    s.push_str(&format!("  {}\n", d.reported()));
+                }
+                if b.distinct > b.seen.len() {
+                    s.push_str(&format!("  … and {} more\n", b.distinct - b.seen.len()));
+                }
             }
             // (Linux: what came from Landlock's audit log, and where that is here)
             if let Some(log) = p.audit_log().filter(|_| b.seen.iter().any(|d| d.process == SEEN_IN_AUDIT_LOG))
             {
                 s.push_str(&format!("(Read from Landlock's audit log — {log} here.)\n"));
             }
-            match p.denials_from() {
-                // (Linux: what's said in the output is from its error lines, whatever the rest came from)
-                Some(_) if b.seen.iter().any(|d| d.process == SEEN_IN_OUTPUT) => s.push_str(&format!(
-                    "(Read from its own error lines — {}, judged by the sandbox's rules.)\n",
-                    p.output_read_why()
-                )),
-                None if b.seen.iter().any(|d| d.process == SEEN_IN_OUTPUT) => s.push_str(
-                    "(What's said in the output is from its own error lines, judged by the sandbox's rules: the \
-                     kernel's report of a denial gets lost now and then.)\n",
-                ),
-                _ => {}
-            }
-            let (kept, all) = self.kept(&b.seen);
+            s.push_str(&p.output_says(&o, b.total > 0));
+            let all_seen: Vec<Denial> = b.seen.iter().chain(&o.seen).cloned().collect();
+            let (kept, all) = self.kept(&all_seen);
             s.push_str(&kept);
             s.push_str(&quiet_said(&b).unwrap_or_default());
             s.push_str(&rules);
-            if !all || b.distinct > b.seen.len() {
+            if !all || b.distinct > b.seen.len() || o.distinct > o.seen.len() {
                 s.push_str(
                     "\nIf the command needs one of these, tell the user — they can open it from the run's \
                      panel (space m s), or llm.sandbox-write, llm.sandbox-ports, llm.sandbox-localhost and \
@@ -1637,7 +1639,8 @@ fn paths_in(line: &str, root: &Path) -> Vec<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let word = |w: &str| -> Option<PathBuf> {
         match w {
-            w if w.starts_with('/') && w.len() > 1 => Some(PathBuf::from(w)),
+            // (not `/` alone, nor `//` — a comment in a quoted line of code)
+            w if w.starts_with('/') && !w.trim_matches('/').is_empty() => Some(PathBuf::from(w)),
             w if w.starts_with("./") || w.starts_with("../") => Some(root.join(w)),
             w => Some(home.as_ref()?.join(w.strip_prefix("~/")?)),
         }
@@ -2113,6 +2116,46 @@ impl Policy {
             return c.audit.as_ref().ok().map(linux::AuditSource::said);
         }
         None
+    }
+
+    /// The report's words on what only the run's output says was refused (`o`, from `said_in_output`): tarae
+    /// has no record of it, so it's the output's — the sandbox's report of a denial gets lost now and then, but
+    /// such a line may be the command's own (a hit quoting the phrase, a refusal inside a container or a VM).
+    /// `also`: after what tarae saw blocked. Empty when the output says nothing.
+    fn output_says(&self, o: &Blocked, also: bool) -> String {
+        if o.total == 0 {
+            return String::new();
+        }
+        let (what, was, it, these) = match o.distinct {
+            1 => ("one thing".to_string(), "was", "it", "that's"),
+            n => (format!("{n} things"), "were", "them", "those are"),
+        };
+        let mut s = format!(
+            "Its output {}says {what} {was} refused where the sandbox's rules keep a command out — tarae has no \
+             record of {it}, so {these} the output's words, not a refusal seen: ",
+            if also { "also " } else { "" },
+        );
+        s.push_str(match self.denials_from() {
+            // (Linux without the audit log: the error lines are all there is to go by)
+            Some(_) => "likely the sandbox's, though a line may be the command's own:\n",
+            None => {
+                "the sandbox's report of a denial gets lost now and then, but the line may be the command's \
+                 own (a hit quoting the phrase, a refusal inside a container or VM):\n"
+            }
+        });
+        for d in &o.seen {
+            s.push_str(&format!("  {}\n", d.reported()));
+        }
+        if o.distinct > o.seen.len() {
+            s.push_str(&format!("  … and {} more\n", o.distinct - o.seen.len()));
+        }
+        if self.denials_from().is_some() {
+            s.push_str(&format!(
+                "(Read from its own error lines — {}, judged by the sandbox's rules.)\n",
+                self.output_read_why()
+            ));
+        }
+        s
     }
 
     /// Linux: where what a run refused is told from — Landlock's audit log, or the run's own error lines and
@@ -4984,7 +5027,7 @@ mod tests {
             assert!(!r.contains("If the command needs one of these"), "{at}: {r}");
         }
         // The kernel's report of the denial didn't come: cargo's own error says it — the path two lines above
-        // the error — and that's what's said
+        // the error — and that's what's said, as the output's words: tarae has no record of it
         let cargo_said: Vec<(bool, String)> = [
             "error: failed to download `serde v1.0.0`",
             "  failed to create directory `/Users/u/.cargo/registry/src/i/serde-1.0.0`",
@@ -4998,9 +5041,12 @@ mod tests {
         let r = unreported.report(&cargo_said);
         assert!(
             r.starts_with(
-                "The sandbox blocked one thing — 1 time:\n  writing /Users/u/.cargo/registry/src/i/serde-1.0.0 \
-                 (file-write*, said in the output)\n"
-            ) && r.contains("Cargo's caches (/Users/u/.cargo/registry, /Users/u/.cargo/git) stay as they are")
+                "The sandbox blocked nothing tarae saw. Its output says one thing was refused where the \
+                 sandbox's rules keep a command out — tarae has no record of it, so that's the output's words, \
+                 not a refusal seen: "
+            ) && r.contains("\n  writing /Users/u/.cargo/registry/src/i/serde-1.0.0 (file-write*, said in the output)\n")
+                && !r.contains("The sandbox blocked one thing")
+                && r.contains("Cargo's caches (/Users/u/.cargo/registry, /Users/u/.cargo/git) stay as they are")
                 && !r.contains("If the command needs one of these"),
             "{r}"
         );
@@ -5008,6 +5054,8 @@ mod tests {
         assert!(unreported.report(&cargo_said[..2]).starts_with("The sandbox blocked nothing."));
         let listed = vec![(false, "/Users/u/.cargo/registry/src/i/a.rs: fn x".into()), cargo_said[3].clone()];
         assert!(unreported.report(&listed).starts_with("The sandbox blocked nothing."), "a grep's hit");
+        let quoted = [(true, "/Users/u/p/src/a.rs:3: // Operation not permitted".to_string())];
+        assert!(unreported.report(&quoted).starts_with("The sandbox blocked nothing."), "a comment's `//`");
         // Anywhere the profile keeps it from: a place in home not read by default, in Go's and Node's words
         // too — and that's not all kept on purpose: the user can open it
         for said in [
@@ -5353,10 +5401,12 @@ mod tests {
                 && !r.contains("fine"),
             "{r}"
         );
-        // One the profile keeps from it: said as blocked, from the output
+        // One the profile keeps from it: said as the output's, not as blocked
         let r = g.report(&[(true, "touch: /x: Operation not permitted".to_string())]);
         assert!(
-            r.starts_with("tarae couldn't watch what the sandbox blocked (log: Cannot run while sandboxed) — its output says:\nThe sandbox blocked one thing — 1 time:\n  writing /x (file-write*, said in the output)\n"),
+            r.starts_with("tarae couldn't watch what the sandbox blocked (log: Cannot run while sandboxed). Its output says one thing was refused")
+                && r.contains("\n  writing /x (file-write*, said in the output)\n")
+                && !r.contains("The sandbox blocked one thing"),
             "{r}"
         );
     }
@@ -6363,7 +6413,8 @@ mod tests {
     fn the_profile_a_run_gets() {
         let root = std::env::var_os("TARAE_PROFILE_ROOT")
             .map_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")), PathBuf::from);
-        let mut llm = crate::config::load(&root).0.editor.llm;
+        // (as a real run's: your config and trust answers — run by hand, never in the suite)
+        let mut llm = crate::config::load(&root, &crate::config::Sources::own()).0.editor.llm;
         llm.sandbox_localhost |= std::env::var_os("TARAE_PROFILE_LOCALHOST").is_some();
         let p = policy(&root, &llm, &[]);
         let quote = |a: &str| format!("'{}'", a.replace('\n', " ").replace('\'', "'\\''"));
@@ -6603,7 +6654,8 @@ mod tests {
             assert!(report.contains(words), "{words}: {report}");
         }
         assert!(!report.contains("If the command needs one of these"), "{report}");
-        assert!(!report.contains("blocked nothing"), "{report}");
+        // (said as blocked, or as the output's words when the kernel's report didn't come — never "nothing")
+        assert!(!report.contains("The sandbox blocked nothing."), "{report}");
         let r = run(&open, &["build", "--offline"]);
         assert!(r.status.success() && src.exists(), "unpacked with the network open: {}", said(&r));
         // A git dependency fetched, never checked out — the same

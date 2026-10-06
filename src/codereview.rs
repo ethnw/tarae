@@ -128,6 +128,9 @@ pub struct CodeReview {
     /// How many of each file's changed lines moved (`moved_lines`) — said beside its counts, which include
     /// them: `+800 −500 · 500 moved`.
     pub moved: Moved,
+    /// The lines of each of its documents drawn since its text last changed (`drawn_sync`, after every
+    /// frame): a high-risk change taller than its pane is on screen once every line of it was (`hunk_seen`).
+    drawn: std::collections::HashMap<DocId, (u64, std::collections::HashSet<usize>)>,
 }
 
 impl CodeReview {
@@ -155,6 +158,7 @@ impl CodeReview {
             binary_shown: None,
             beyond: None,
             moved: Default::default(),
+            drawn: Default::default(),
         }
     }
 
@@ -972,6 +976,7 @@ fn open_at(
         binary_shown: None,
         beyond: None,
         moved,
+        drawn: Default::default(),
     });
     if say {
         let s = if n == 1 { "" } else { "s" };
@@ -1167,7 +1172,8 @@ fn reviewer_said(
 
 /// `space v h` · `:review-hunk-seen`: the high-risk changes under the selections looked at — the cursor's
 /// line, or every one a selection touches that was on screen as the key was pressed (#196; the rest said,
-/// not taken) — by you, a key in review mode (no tool of Claude's can).
+/// not taken) — one taller than the pane, from the cursor too, only once every line of it was (scrolled
+/// through since its text last changed) — by you, a key in review mode (no tool of Claude's can).
 /// What holds the review's end and the bring (`risk.rs`). None there: to the next one not looked at — only
 /// going; `space v h` there is the look.
 pub fn hunk_seen(ed: &mut Editor) {
@@ -1202,11 +1208,21 @@ pub fn hunk_seen(ed: &mut Editor) {
         .filter(|p| ed.session.views.iter().any(|v| v.id == p.0 && v.doc == doc.id))
         .flat_map(|p| p.3.iter().map(|row| row.0))
         .collect();
+    // (the pane's text rows — its size, not what the last frame drew there: a short file, or another file
+    // drawn in it, is no measure — and every line drawn since the text changed)
+    let rows = ed.viewport.0;
+    let ever = r.drawn.get(&doc.id).filter(|(v, _)| *v == doc.version()).map(|(_, lines)| lines);
     let graded = r.graded(ed, f);
     let touches = |g: &crate::risk::Graded| spans.iter().any(|&(a, b)| g.at < b && a < g.at + g.lines);
     // A cursor's line: the change it's on. A selection over more lines: only the changes that were on screen
     // — every line of one drawn, or one that filled the pane — never one scrolled past (`%` takes no more
-    // than what was shown)
+    // than what was shown). One taller than the pane can't be on screen at once: taken — under a selection or
+    // the cursor alike — once every line of it was drawn since the text changed (scrolled through)
+    let tall = |g: &crate::risk::Graded| rows > 0 && g.lines > rows;
+    let unread = |g: &crate::risk::Graded| {
+        (g.at..g.at + g.lines).filter(|l| !ever.is_some_and(|e| e.contains(l))).count()
+    };
+    let read_through = |g: &crate::risk::Graded| tall(g) && unread(g) == 0;
     let on_line =
         |g: &crate::risk::Graded| spans.iter().any(|&(a, b)| b == a + 1 && g.at < b && a < g.at + g.lines);
     let shown = |g: &crate::risk::Graded| {
@@ -1216,17 +1232,32 @@ pub fn hunk_seen(ed: &mut Editor) {
     };
     // (every high one there: a file's change of mode sits on its first line, with any change of lines there)
     let (high, unshown): (Vec<&crate::risk::Graded>, Vec<&crate::risk::Graded>) =
-        graded.iter().filter(|g| touches(g) && g.grade == Grade::High).partition(|g| on_line(g) || shown(g));
-    let unshown = unshown.iter().filter(|g| !g.looked_at(&ed.session.looked)).count();
+        graded.iter().filter(|g| touches(g) && g.grade == Grade::High).partition(|g| match tall(g) {
+            true => read_through(g),
+            false => on_line(g) || shown(g),
+        });
+    let unshown: Vec<&crate::risk::Graded> =
+        unshown.into_iter().filter(|g| !g.looked_at(&ed.session.looked)).collect();
     // (a selection's that weren't on screen: said, never taken)
-    let off = match unshown {
+    let off = match unshown.len() {
         0 => String::new(),
         n => format!(" · {} under the selection not on screen", crate::nav::count(n, "high-risk change")),
     };
-    if high.is_empty() && unshown > 0 {
+    if high.is_empty() && !unshown.is_empty() {
+        // (one taller than the pane: how much of it is left to scroll through)
+        if let [g] = unshown[..]
+            && tall(g)
+        {
+            return ed.set_status(format!(
+                "this high-risk change is taller than the pane — {} of its {} lines not on screen yet: scroll \
+                 through it, then space v h with the cursor in it",
+                unread(g),
+                g.lines
+            ));
+        }
         return ed.set_status(format!(
             "{} under the selection not on screen — not looked at · ]h goes to the next",
-            crate::nav::count(unshown, "high-risk change")
+            crate::nav::count(unshown.len(), "high-risk change")
         ));
     }
     if high.is_empty() {
@@ -1581,10 +1612,38 @@ pub fn high_step(ed: &mut Editor, forward: bool) -> bool {
     };
     let (i, at) = *target.expect("not empty");
     let k = highs.iter().position(|&x| x == (i, at)).unwrap_or(0) + 1;
+    // (one taller than the pane — as the last frame drew it — is looked at once scrolled through)
+    let lines = r.graded(ed, &r.files[i]).iter().find(|g| g.at == at).map_or(0, |g| g.lines);
+    let rows = ed.viewport.0;
     high_go(ed, i, at);
     let rel = ed.session.code_review.as_ref().map(|r| r.files[i].rel.clone()).unwrap_or_default();
-    ed.set_status(format!("high-risk {k} of {n} not looked at · {rel}:{} — space v h looks at it", at + 1));
+    let look = match rows > 0 && lines > rows {
+        true => {
+            format!("{lines} lines, taller than the pane: scroll through it, then space v h")
+        }
+        false => "space v h looks at it".to_string(),
+    };
+    ed.set_status(format!("high-risk {k} of {n} not looked at · {rel}:{} — {look}", at + 1));
     true
+}
+
+/// After a frame: the lines it drew of the review's documents (`CodeReview.drawn`), kept while each one's
+/// text stays as it is.
+pub fn drawn_sync(ed: &mut Editor) {
+    let Some(r) = ed.session.code_review.as_mut() else { return };
+    for (view, _, _, rows) in &ed.screen.panes {
+        let Some(v) = ed.session.views.iter().find(|v| v.id == *view) else { continue };
+        // (one of its files — as `current` finds them, by path)
+        let of_review = |d: &&crate::document::Document| {
+            d.id == v.doc && d.path.as_ref().is_some_and(|p| r.files.iter().any(|f| f.path == *p))
+        };
+        let Some(d) = ed.docs.iter().find(of_review) else { continue };
+        let e = r.drawn.entry(d.id).or_default();
+        if e.0 != d.version() {
+            *e = (d.version(), Default::default());
+        }
+        e.1.extend(rows.iter().map(|row| row.0));
+    }
 }
 
 /// To high-risk change `at` of file `i`: in the file in front, selected at once; else the file opened,
@@ -2177,6 +2236,96 @@ mod tests {
             "{:?}",
             ed.status
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A high-risk change taller than the pane is never on screen at once: `]h` says so and what to do, `space
+    /// v h` over it says how much is left to scroll through — and takes it once every line of it was drawn.
+    #[test]
+    fn a_high_risk_change_taller_than_the_pane_is_taken_once_scrolled_through() {
+        let dir = std::env::temp_dir().join(format!("tarae-review-tall-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let run = |args: &[&str]| {
+            let id = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"];
+            let ok = std::process::Command::new("git").args(id).args(args).current_dir(&dir).output();
+            assert!(ok.unwrap().status.success(), "git {args:?}");
+        };
+        let mut lines: Vec<String> = (0..40).map(|i| format!("fn f{i}() {{}}")).collect();
+        std::fs::write(dir.join("a.rs"), lines.join("\n") + "\n").unwrap();
+        run(&["init", "-q"]);
+        run(&["add", "."]);
+        run(&["commit", "-qm", "x"]);
+        // One high-risk change of 20 new lines (5–24 — no removed rows above them), the pane far shorter
+        let added = (0..20).map(|i| format!("fn g{i}() {{ unsafe {{ x() }} }}"));
+        lines.splice(5..5, added);
+        std::fs::write(dir.join("a.rs"), lines.join("\n") + "\n").unwrap();
+        let mut ed = Editor::new(crate::config::Config::default());
+        start_in(&mut ed, dir.clone(), None);
+        settle_until(&mut ed, landed);
+        let left = |ed: &Editor| ed.session.code_review.as_ref().map_or(0, |r| r.high_unseen(ed).len());
+        let status = |ed: &Editor| ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        let frame = |ed: &mut Editor| crate::term::render(ed, &mut Vec::new(), 100, 10).unwrap();
+        frame(&mut ed);
+        feed(&mut ed, "]h");
+        assert!(
+            status(&ed).contains("20 lines, taller than the pane: scroll through it, then space v h"),
+            "{}",
+            status(&ed)
+        );
+        // The whole change selected, its top part drawn: not taken, how much is left said
+        frame(&mut ed);
+        assert!(
+            ed.doc().selection().primary().to() - ed.doc().selection().primary().from() > 200,
+            "the change selected"
+        );
+        feed(&mut ed, "<space>vh");
+        assert_eq!(left(&ed), 1, "not all of it was on screen");
+        assert!(
+            status(&ed).contains("this high-risk change is taller than the pane —")
+                && status(&ed).contains("of its 20 lines not on screen yet: scroll through it"),
+            "{}",
+            status(&ed)
+        );
+        // The cursor on one line of it is no shortcut: unread, not taken either
+        feed(&mut ed, ";");
+        frame(&mut ed);
+        assert!(ed.doc().selection().primary().to() - ed.doc().selection().primary().from() <= 1);
+        feed(&mut ed, "<space>vh");
+        assert_eq!(left(&ed), 1, "the cursor on it, most of it unread");
+        assert!(status(&ed).contains("lines not on screen yet"), "{}", status(&ed));
+        // Scrolled through, a selection kept (select mode's `C-d` extends it), a frame between the keys
+        let through = |ed: &mut Editor| {
+            feed(ed, "v");
+            for _ in 0..6 {
+                feed(ed, "<C-d>");
+                frame(ed);
+            }
+            feed(ed, "<esc>");
+        };
+        through(&mut ed);
+        let (from, to) = (ed.doc().selection().primary().from(), ed.doc().selection().primary().to());
+        let line = |ed: &Editor, p| crate::movement::line_of(&ed.doc().text, p);
+        assert!(line(&ed, from) <= 24 && line(&ed, to) > line(&ed, from), "over its end: {from}..{to}");
+        // …and its text changed since (a line added at the file's end): read again — not taken
+        let end = ed.doc().text.len_bytes();
+        let add = crate::transaction::Transaction::new(vec![crate::transaction::Change::insert(
+            end,
+            "fn z() {}\n",
+        )]);
+        ed.doc_mut().apply(&add);
+        frame(&mut ed);
+        feed(&mut ed, "<space>vh");
+        assert_eq!(left(&ed), 1, "what was read was another text: {}", status(&ed));
+        // Read through again: taken, from the cursor in it too
+        feed(&mut ed, "gg");
+        frame(&mut ed);
+        through(&mut ed);
+        ed.goto_line(10);
+        frame(&mut ed);
+        feed(&mut ed, "<space>vh");
+        assert_eq!(left(&ed), 0, "{}", status(&ed));
         std::fs::remove_dir_all(&dir).ok();
     }
 

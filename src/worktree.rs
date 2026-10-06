@@ -3042,6 +3042,100 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// frictions14: a rebase brought back after a restart — tarae's part of it gone, git's state all there is —
+    /// is taken up where it stopped (`:session-bring`), and its card put away (`n`) waits in the inbox from
+    /// when git stopped, not from when it was taken up: its real wait, listed before a card that came since.
+    /// One `C-q` brings its card back with the keys.
+    #[test]
+    fn a_rebase_taken_up_after_a_restart_waits_from_when_git_stopped() {
+        let (repo, dir) = place("rebase-taken-up");
+        let mut ed = editor(&repo, &dir);
+        let (wt, _) = moved_apart(&mut ed, &repo, false);
+        let feat = ed.session.id;
+        // Stopped at its conflict by a tarae before this one — ten minutes ago, as git's files say
+        let out =
+            std::process::Command::new("git").arg("-C").arg(&wt).args(["rebase", "main"]).output().unwrap();
+        assert!(!out.status.success(), "stopped at the conflict: {}", String::from_utf8_lossy(&out.stdout));
+        let step = PathBuf::from(git_in(
+            &wt,
+            &["rev-parse", "--path-format=absolute", "--git-path", "rebase-merge"],
+        ));
+        let ten = std::time::SystemTime::now() - Duration::from_secs(600);
+        let msgnum = std::fs::File::options().write(true).open(step.join("msgnum")).unwrap();
+        msgnum.set_modified(ten).unwrap();
+        // Taken up: its card; put away
+        feed(&mut ed, ":session-bring<ret>");
+        settle_until(&mut ed, |ed| card(ed, "feat: rebasing 1/2").is_some() || says(ed, "bring feat:"));
+        assert!(ed.session.rebase.is_some(), "taken up: {}", said(&ed));
+        card_in_sight(&mut ed);
+        feed(&mut ed, "n");
+        assert!(card(&ed, "feat: rebasing 1/2").is_none());
+        // A card that came since, in the session tarae started in
+        assert!(ed.session_switch(0));
+        let later = crate::offer::What::ReviewEnd { session: 0, started: std::time::Instant::now() };
+        ed.push_offer(crate::offer::Offer::new("Later".into(), "…", "", String::new(), later));
+        let inbox = ed.inbox();
+        let kinds: Vec<&str> = inbox.iter().map(|e| e.kind).collect();
+        assert_eq!(kinds, ["rebase", "review-end"], "the rebase waited longer: {inbox:?}");
+        assert!(inbox[0].waited_ms >= 590_000, "git's ten minutes: {}", inbox[0].waited_ms);
+        assert!(inbox[0].asks.starts_with("feat: rebasing 1/2 stopped"), "{}", inbox[0].asks);
+        // One `C-q` (the card here put away first — this session's own go first): there, with the keys
+        ed.offers.clear();
+        feed(&mut ed, "<C-q>");
+        assert_eq!(ed.session.id, feat);
+        assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some("feat: rebasing 1/2"));
+        assert!(ed.card_keys, "with the keys");
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// frictions14: `n` on a resolved rebase's card puts it away, not out of reach — the inbox lists it (the
+    /// status line's count with it), and `enter` there, from another session, brings its card back in front
+    /// with the keys; up again, it's the card the inbox lists.
+    #[test]
+    fn a_resolved_rebase_put_away_waits_in_the_inbox() {
+        let (repo, dir) = place("rebase-inbox");
+        let (log, answer) = (dir.join("claude.log"), dir.join("answer.txt"));
+        std::fs::write(&answer, "one\nmain\nfeat\n").unwrap();
+        let mut ed = editor(&repo, &dir);
+        claude_does(&mut ed, &log, &format!("cp '{}' a.txt;", answer.display()));
+        moved_apart(&mut ed, &repo, false);
+        let feat = ed.session.id;
+        rebase_asked(&mut ed);
+        settle_until(&mut ed, |ed| {
+            card(ed, "feat: conflicts resolved").is_some() || says(ed, "rebase feat:")
+        });
+        card_in_sight(&mut ed);
+        feed(&mut ed, "n");
+        assert!(card(&ed, "feat: conflicts resolved").is_none());
+        assert!(says(&ed, "its card is in the inbox (space I)"), "{}", said(&ed));
+        let put_away =
+            |ed: &Editor| ed.inbox().into_iter().filter(|e| e.kind == "rebase").collect::<Vec<_>>();
+        let [e] = &put_away(&ed)[..] else { panic!("{:?}", ed.inbox()) };
+        assert!(e.asks.starts_with("feat: conflicts resolved") && e.asks_answer(), "{e:?}");
+        let id = e.id.clone();
+        // From another session: enter on it — feat in front, its card up with the keys
+        assert!(ed.session_switch(0));
+        assert!(ed.inbox().iter().any(|e| e.id == id), "listed from every session");
+        ed.inbox_go(&id);
+        assert_eq!(ed.session.id, feat);
+        let up = ed.offers.first().map(|o| o.title.as_str());
+        assert_eq!(up, Some("feat: conflicts resolved"), "its card, in front");
+        assert!(ed.card_keys, "with the keys");
+        assert!(put_away(&ed).is_empty(), "up again: the card is what the inbox lists");
+        // `C-q` from another session: there, its card up with the keys, as `enter` does — one key
+        card_in_sight(&mut ed);
+        feed(&mut ed, "n");
+        assert_eq!(put_away(&ed).len(), 1, "put away again");
+        assert!(ed.session_switch(0));
+        feed(&mut ed, "<C-q>");
+        assert_eq!(ed.session.id, feat, "C-q: there");
+        assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some("feat: conflicts resolved"));
+        assert!(ed.card_keys, "C-q: with the keys");
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// #129: resolving, Claude changed another file too (a snapshot blessed again) — it's in the review beside
     /// the conflicted one, the card names it, and `y` stages it with them (left unstaged, git refused to go
     /// on). One changed after the review isn't staged unseen: named, and the next `:rebase-continue` takes it.
@@ -3311,7 +3405,10 @@ mod tests {
         let amend = |ed: &mut Editor, n: &str| {
             std::fs::write(wt.join("a.txt"), format!("{n}\n")).unwrap();
             git_in(&wt, &["add", "a.txt"]);
+            // (the last message in a buffer, as `A` opens it: `:w` amends)
             feed(ed, ":git-amend<ret>");
+            settle_until(ed, |ed| ed.session.committing.is_some() || says(ed, "amend:"));
+            feed(ed, ":w<ret>");
         };
         // As its base has it: runs, no card
         amend(&mut ed, "1");

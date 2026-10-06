@@ -257,7 +257,7 @@ fn main() -> Result<()> {
     // The language table — the packs, a runtime folder's read from disk here, once: files opened, fences drawn
     // and servers started from now on read memory (the config checks its servers against it)
     let packs = languages::get();
-    let (config, warnings) = config::load(&root);
+    let (config, warnings) = config::load(&root, &config::Sources::own());
     let mut editor = editor::Editor::with_root(config, root);
     // (where answers about repositories' own git commands are kept — `gitrepo` reads them as it resolves)
     gitrepo::set_trust_store(editor.trust_path.clone());

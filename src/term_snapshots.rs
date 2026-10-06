@@ -1051,7 +1051,8 @@ fn snapshot_review_notes_by_their_author() {
 
 /// A high-risk change, graded by a pack's pattern: the rail says how many are left to look at and marks the
 /// file `▲1`, the change's first line says why and the key; the reviewer's row its findings (one on the high
-/// change) and its verdict's first line. `space v h` on it: looked at — faint everywhere.
+/// change) and its verdict's first line. `space v h` on it, once scrolled through (it's taller than the
+/// pane): looked at — faint everywhere.
 #[test]
 fn snapshot_review_risk_and_the_reviewer() {
     use crate::notes::By;
@@ -1089,8 +1090,15 @@ fn snapshot_review_risk_and_the_reviewer() {
     assert!(has(&rows, "“One risk: the unsafe"), "{rows:#?}");
     assert!(has(&rows, "▲ high · unsafe (rust pack) · space v h"), "the line end: {rows:#?}");
     s.check("review_risk");
-    // Looked at, by the key on the change
+    // Its 30 added lines are one change, taller than the pane: the key on it takes it only once scrolled
+    // through — to the change's end, then back on it
     s.ed.goto_line(6);
+    crate::codereview::hunk_seen(&mut s.ed);
+    assert_eq!(s.ed.session.looked.len(), 0, "not all of it was on screen");
+    s.ed.goto_line(34);
+    s.frame();
+    s.ed.goto_line(6);
+    s.frame();
     crate::codereview::hunk_seen(&mut s.ed);
     let mut parser = vt100::Parser::new(s.h, s.w, 0);
     parser.process(&s.frame());

@@ -189,8 +189,8 @@ pub fn project_path(root: &Path) -> Option<PathBuf> {
     }
 }
 
-fn layers(root: &Path) -> Vec<PathBuf> {
-    let mut v: Vec<PathBuf> = config_path().into_iter().collect();
+fn layers(root: &Path, user: Option<&Path>) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = user.map(Path::to_path_buf).into_iter().collect();
     if let Some(p) = project_path(root)
         && !v.contains(&p)
     {
@@ -202,6 +202,21 @@ fn layers(root: &Path) -> Vec<PathBuf> {
 /// The project layer, unless it's the user's own file (started in the config folder).
 fn project_layer(root: &Path) -> Option<PathBuf> {
     project_path(root).filter(|p| config_path().as_ref() != Some(p))
+}
+
+/// Where a load reads what isn't the project's: your config file, and the answers about projects' trust —
+/// the editor's own (`Editor::config_sources`: none in tests, so they never read yours).
+#[derive(Clone, Debug, Default)]
+pub struct Sources {
+    pub user: Option<PathBuf>,
+    pub trust: Option<PathBuf>,
+}
+
+impl Sources {
+    /// This process's: `config_path`, `trust::Store::path`.
+    pub fn own() -> Sources {
+        Sources { user: config_path(), trust: crate::trust::Store::path() }
+    }
 }
 
 /// `.tarae.local.toml` — yours, for one project: beside its `.tarae.toml`, or in the root (whether it's
@@ -245,10 +260,11 @@ fn short(p: &Path) -> String {
 /// Read the layers in order. Problems come back as `file:line: message` warnings (startup isn't blocked).
 /// The project's file (found from `root`, the editor's) goes in through `trust.rs`: what runs commands only
 /// once the project is trusted.
-pub fn load(root: &Path) -> (Config, Vec<String>) {
-    let store = crate::trust::Store::read(crate::trust::Store::path().as_deref());
+pub fn load(root: &Path, from: &Sources) -> (Config, Vec<String>) {
+    let store = crate::trust::Store::read(from.trust.as_deref());
     let local = local_path(root).filter(|p| p.is_file()).map(|p| (root.to_path_buf(), p));
-    load_layers(config_path(), project_layer(root), local, &store)
+    let project = project_layer(root).filter(|p| from.user.as_ref() != Some(p));
+    load_layers(from.user.clone(), project, local, &store)
 }
 
 /// (tests: the layers without a local one)
@@ -493,9 +509,9 @@ fn drop_typed(t: &mut toml::Table, path: &str, pass: &mut impl FnMut(String, &Va
 
 /// Config file watcher thread — sleeps until the files may have changed (inotify/kqueue, see `fswatch`),
 /// then compares mtimes. On change, it reads and parses here and sends only the result to the main loop.
-/// The project's files are `root`'s (the editor's).
-pub fn watch(tx: crate::event::Tx, root: PathBuf) {
-    let mut paths = layers(&root);
+/// The project's files are `root`'s (the editor's); yours and the trust answers are `from`'s.
+pub fn watch(tx: crate::event::Tx, root: PathBuf, from: Sources) {
+    let mut paths = layers(&root, from.user.as_deref());
     let p = root.join(".tarae.toml");
     if !paths.contains(&p) {
         paths.push(p); // even if missing yet — picked up as soon as it's created
@@ -507,8 +523,9 @@ pub fn watch(tx: crate::event::Tx, root: PathBuf) {
         let stamps =
             || -> Vec<_> { paths.iter().map(|p| fs::metadata(p).and_then(|m| m.modified()).ok()).collect() };
         let mut last = stamps();
-        // The plugins folder rides along: a few more stats, and no thread of its own
-        let plugin_dir = crate::plugin::dir();
+        // The plugins folder rides along: a few more stats, and no thread of its own (beside your config —
+        // `plugin::dir`, from `from`'s: none in tests)
+        let plugin_dir = from.user.as_deref().and_then(Path::parent).map(|d| d.join("plugins"));
         let mut plugins = crate::plugin::Watch::new(plugin_dir.clone());
         loop {
             // Armed before looking, so a change made while we look still ends the wait below
@@ -526,7 +543,7 @@ pub fn watch(tx: crate::event::Tx, root: PathBuf) {
             let now = stamps();
             if now != last {
                 last = now;
-                let (config, warnings) = load(&root);
+                let (config, warnings) = load(&root, &from);
                 let apply = move |ed: &mut Editor| ed.reload_config(config, warnings);
                 if tx.send(Event::Job(Box::new(apply))).is_err() {
                     break;

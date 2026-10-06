@@ -541,7 +541,7 @@ Type `:` in normal mode. `Tab` completes command names and their arguments (path
 | `:git-branch-new` |  | Make a branch and switch to it |
 | `:git-branch-rename` |  | Rename a branch (one name: this one) |
 | `:git-branch-delete` |  | Delete a branch (asks if it loses commits) |
-| `:git-amend` |  | Put what's staged into the last commit |
+| `:git-amend` |  | Amend the last commit (as A) |
 | `:diff` |  | Show changes against HEAD, a file, or a revision |
 | `:diff-off` |  | Stop showing the diff |
 | `:session-open` |  | Work in another checkout beside this one |

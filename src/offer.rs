@@ -1390,7 +1390,7 @@ impl crate::editor::Editor {
                 self.set_status(format!("Not brought — :session-bring {} when you're ready", m.name))
             }
             What::RebaseResolved { .. } => {
-                self.set_status("the rebase waits — :rebase-continue goes on, :rebase-abort ends it")
+                self.set_status("the rebase waits — its card is in the inbox (space I), or :rebase-continue")
             }
             What::UpTo(m) => self.set_status(format!("Left {} where it is, behind {}", m.name, m.base)),
             What::Hooks(ask) => self.hooks_answer(o.id, *ask, false),

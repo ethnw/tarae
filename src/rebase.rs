@@ -246,6 +246,8 @@ pub struct Stop {
     /// The branch being rebased · what onto (short) — for one tarae didn't start.
     pub head: Option<String>,
     pub onto: Option<String>,
+    /// When git stopped there (its step file's time) — what waits since then, across a restart.
+    pub since: Option<std::time::SystemTime>,
 }
 
 impl Stop {
@@ -276,6 +278,8 @@ pub struct Rebase {
     pub also: Vec<String>,
     /// The changes stashed for it (`--autostash`, #188) — put back at its end, and said.
     pub stashed: Vec<String>,
+    /// When its stop was resolved (`Stage::Resolved`) — from then it waits on you (`waits_on_you`).
+    pub resolved_at: Option<std::time::Instant>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -294,6 +298,23 @@ impl Rebase {
         match self.step {
             Some((n, m)) => format!("rebasing {n}/{m}"),
             None => "rebasing".into(),
+        }
+    }
+
+    /// Since when it waits on you — its card up or put away (`n`): the inbox lists it (`inbox.rs`). Resolved:
+    /// since then. Stopped with nothing asked of its Claude (git stopped for another reason, or one tarae
+    /// didn't start — after a restart, a quit): since git stopped, as git's files say — its real wait, whatever
+    /// tarae was running then. None while it's Claude's (asked to resolve) or git's (running).
+    pub fn waits_on_you(&self) -> Option<std::time::Instant> {
+        let now = std::time::Instant::now();
+        let since_git = || {
+            let ago = std::time::SystemTime::now().duration_since(self.stop.since?).ok()?;
+            Some(now.checked_sub(ago).unwrap_or(now))
+        };
+        match self.stage {
+            Stage::Resolved => Some(self.resolved_at.or_else(since_git).unwrap_or(now)),
+            Stage::Stopped if !self.asked && self.waiting.is_none() => Some(since_git().unwrap_or(now)),
+            _ => None,
         }
     }
 
@@ -357,12 +378,17 @@ pub fn under_way(root: &Path) -> Option<Stop> {
             let mut p = l.trim().splitn(3, '\x1f').map(str::to_string);
             Some((p.next()?, p.next()?, p.next().unwrap_or_default()))
         });
+    // (git writes the step file as it stops at each commit: its time is the stop's)
+    let step_file = state.join(if state.ends_with("rebase-merge") { "msgnum" } else { "next" });
+    let since =
+        [step_file, state.clone()].iter().find_map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
     Some(Stop {
         step: step_of(&state),
         files,
         commit,
         head: read("head-name").map(|h| h.trim_start_matches("refs/heads/").to_string()),
         onto: read("onto").map(|o| o.chars().take(7).collect()),
+        since,
     })
 }
 
@@ -751,6 +777,7 @@ impl Editor {
             waiting: None,
             also: Vec::new(),
             stashed,
+            resolved_at: None,
         });
         let base = crate::packs::sh_quote(&m.base);
         let branch = m.branch.clone();
@@ -923,6 +950,7 @@ impl Editor {
             ));
         }
         r.stage = Stage::Resolved;
+        r.resolved_at = Some(std::time::Instant::now());
         r.also = also;
         let mut stop = r.stop.clone();
         stop.files.extend(r.also.iter().cloned());
@@ -1248,6 +1276,7 @@ impl Editor {
             also: Vec::new(),
             // (one tarae didn't start: whether git stashed for it is git's to say at its end)
             stashed: Vec::new(),
+            resolved_at: None,
         });
     }
 
@@ -1352,6 +1381,7 @@ mod tests {
             waiting: None,
             also: Vec::new(),
             stashed: Vec::new(),
+            resolved_at: None,
         };
         assert_eq!(r.said(), "rebasing 2/5");
         assert_eq!(r.why("feat"), "feat is rebasing 2/5 — :rebase-continue or :rebase-abort first");
@@ -1384,6 +1414,7 @@ mod tests {
             waiting: None,
             also: Vec::new(),
             stashed: Vec::new(),
+            resolved_at: None,
         };
         ed.with_session(a, |ed| ed.session.rebase = Some(running("main")));
         let label = |ed: &mut Editor, id| {

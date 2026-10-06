@@ -1735,7 +1735,10 @@ mod tests {
         );
         let r = Guard::In(Box::new(p.clone())).report(&out);
         let r = r.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(r.contains("The sandbox blocked 3 things"), "{r}");
+        assert!(
+            r.contains("Its output says 3 things were refused") && !r.contains("The sandbox blocked 3"),
+            "{r}"
+        );
         assert!(
             r.contains("(Read from its own error lines") && !r.contains("(Read from Landlock's audit log"),
             "{r}"

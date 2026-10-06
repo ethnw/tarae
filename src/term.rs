@@ -147,8 +147,7 @@ const RESTING_REDRAW: std::time::Duration = std::time::Duration::from_millis(500
 fn event_loop(editor: &mut Editor) -> Result<()> {
     spawn_input(editor.events.shared_sender());
     spawn_signals(editor.events.shared_sender());
-    crate::config::watch(editor.events.shared_sender(), editor.session.root.clone());
-    crate::git::watch(editor.events.sender(), editor.session.root.clone());
+    editor.watches_start();
     editor.procs_start_sampling();
     let mut out = io::stdout();
     let mut draw = true;
@@ -507,6 +506,7 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
         }
     }
     editor.screen.panes = screen_panes;
+    crate::codereview::drawn_sync(editor);
     // A cut card's whole text (`v`) counts as seen once its buffer's last line is on screen
     if let Some((id, rev, doc)) = editor.offer_view.get()
         && editor.offer_viewing()

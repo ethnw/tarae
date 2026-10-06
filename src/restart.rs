@@ -1509,6 +1509,65 @@ mod tests {
         v
     }
 
+    /// frictions14: restarted with another session in front — a checkout whose `.tarae.toml` is another
+    /// version, without `[preflight]`. The watcher went by the session in front, so the next reload (here: a
+    /// change to your config, as editing it does) read that checkout's file: the project's quick set gone, the
+    /// bring card's `p` ran the packs' defaults. Now the config stays the checkout tarae started in's. Your
+    /// config and the trust answers are stand-ins in the test's folder (`config_sources`), never yours.
+    #[test]
+    fn restarted_with_another_session_in_front_the_config_stays_the_started_checkouts() {
+        use crate::config::{Sources, load};
+        let (front, back, dir, mut ed) = two_sessions("config-root");
+        let quick = "[preflight]\nsteps = [\n  { name = \"fmt\", cmd = \"true\" },\n  \
+                     { name = \"perf\", cmd = \"true\", full = true },\n]\n";
+        std::fs::write(front.join(".tarae.toml"), quick).unwrap();
+        std::fs::write(back.join(".tarae.toml"), "[editor]\ntab-width = 3\n").unwrap();
+        let (user, trust) = (dir.join("config.toml"), dir.join("trust.json"));
+        std::fs::write(&user, "[editor]\nscrolloff = 1\n").unwrap();
+        let sources = || Sources { user: Some(user.clone()), trust: Some(trust.clone()) };
+        // The project trusted, as its card's `y` does
+        let p = load(&front, &sources()).0.project.expect("its steps wait for trust");
+        crate::trust::record(trust.clone(), p.file, p.hash, true).unwrap();
+        let started = |ed: &mut Editor| {
+            (ed.config_file, ed.trust_path) = (Some(user.clone()), Some(trust.clone()));
+            let (c, w) = load(&front, &ed.config_sources());
+            ed.reload_config(c, w);
+        };
+        started(&mut ed);
+        assert_eq!(ed.preflight_quick(), Some(vec!["fmt".to_string()]), "before: the project's quick set");
+        // The other checkout in front, then `:restart`
+        let id = ed.session_add(back.clone());
+        assert!(ed.session_switch(id));
+        let state = snapshot(&mut ed);
+        drop(ed);
+        let mut ed = started_in(&dir, &front);
+        started(&mut ed);
+        restore(&mut ed, &state);
+        assert_eq!(ed.session.root, back, "the other checkout in front");
+        // As the event loop starts: then your config changes (again, until the watch has seen it)
+        ed.watches_start();
+        let mut n = 1;
+        while ed.config.scrolloff == 1 && n < 50 {
+            n += 1;
+            std::fs::write(&user, format!("[editor]\nscrolloff = {n}\n")).unwrap();
+            let end = std::time::Instant::now() + Duration::from_millis(200);
+            while ed.config.scrolloff == 1
+                && let Some(ev) =
+                    ed.events.recv_timeout(end.saturating_duration_since(std::time::Instant::now()))
+            {
+                ed.handle_event(ev);
+            }
+        }
+        assert_ne!(ed.config.scrolloff, 1, "your config's change read");
+        assert_eq!(ed.config.tab_width, 4, "not the checkout in front's .tarae.toml");
+        assert_eq!(
+            ed.preflight_quick(),
+            Some(vec!["fmt".to_string()]),
+            "after: still the project's quick set"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Wave 3, points 1–2: every session comes back as it was — not only the front's. Behind: its two files
     /// (in its own buffer list, none in the front's), the selection, its two panes, its side panel, its chat
     /// with its conversation and draft; the one in front in front.
