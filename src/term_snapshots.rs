@@ -1822,6 +1822,183 @@ fn review_keeps_the_cursor_on_screen_below_a_big_deletion() {
     }
 }
 
+/// Frictions 13, #1: a turn's review says it's the last turn, and under its question what it leaves out —
+/// `9 more differ from HEAD · space v v` on one row where the rail is wide enough, the key on its own row
+/// where it isn't; the files and the key hints still in sight under it.
+#[test]
+fn a_turns_rail_says_what_else_differs_from_head() {
+    let (base, now) = five_and_thirty_added();
+    for (need, rows_want) in [(None, 2), (Some(44), 1)] {
+        let mut s = review_of(160, 30, &base, &now);
+        let r = s.ed.session.code_review.as_mut().unwrap();
+        r.base = crate::codereview::Base::Turn { at: 0, question: "fix it".into() };
+        r.beyond = Some((9, "space v v".into()));
+        // (measured again: `review_of` measured it for a review of HEAD)
+        r.rail_need.take();
+        if let Some(n) = need {
+            r.rail_need.get_or_init(|| n);
+        }
+        let mut parser = vt100::Parser::new(s.h, s.w, 0);
+        parser.process(&s.frame());
+        let rows: Vec<String> = parser.screen().rows(0, s.w).collect();
+        assert!(rows[0].contains("review") && rows[0].contains("last turn"), "{rows:#?}");
+        assert!(rows[2].contains("“fix it”"), "{rows:#?}");
+        match rows_want {
+            1 => assert!(rows[3].contains("9 more differ from HEAD · space v v"), "{rows:#?}"),
+            _ => {
+                assert!(
+                    rows[3].contains("9 more differ from HEAD") && !rows[3].contains("space"),
+                    "{rows:#?}"
+                );
+                assert!(rows[4].trim_start().starts_with("space v v "), "{rows:#?}");
+            }
+        }
+        assert!(rows[3 + rows_want].contains("1 file"), "the counts under it: {rows:#?}");
+        assert!(rows.iter().any(|r| r.contains("demo.rs")), "{rows:#?}");
+        assert!(rows.iter().any(|r| r.contains("space u") && r.contains("undo the whole turn")), "{rows:#?}");
+    }
+}
+
+/// Frictions 13, #2: the rail's counts are every line, and what moved is said beside them, faint — on the
+/// file's row (the rail measured wide enough for it) and, each move once, on the counts' row.
+#[test]
+fn the_rail_says_what_moved() {
+    let (base, now) = five_and_thirty_added();
+    let mut s = review_of(160, 30, &base, &now);
+    let r = s.ed.session.code_review.as_mut().unwrap();
+    let path = r.files[0].path.clone();
+    r.moved.insert(path.clone(), 30);
+    // (graded as the review's worker grades it: a behaviour change, its `•` measured with the rest)
+    let behaviour = crate::risk::Graded {
+        grade: crate::risk::Grade::Behaviour,
+        why: String::new(),
+        at: 5,
+        lines: 30,
+        keys: Vec::new(),
+        mode: false,
+    };
+    r.grades.insert(path, std::sync::Arc::from(vec![behaviour]));
+    r.rail_need.take();
+    let mut parser = vt100::Parser::new(s.h, s.w, 0);
+    parser.process(&s.frame());
+    let rows: Vec<String> = parser.screen().rows(0, s.w).collect();
+    assert!(rows.iter().any(|r| r.contains("◦ demo.rs • +30 · 30 moved")), "the name whole: {rows:#?}");
+    assert!(rows.iter().any(|r| r.contains("1 file  +30 · 15 moved")), "{rows:#?}");
+    let row = rows.iter().find(|r| r.contains("◦ demo.rs")).unwrap();
+    let screen = parser.screen();
+    let y = rows.iter().position(|r| r == row).unwrap();
+    let x = row.find("30 moved").map(|b| row[..b].chars().count()).unwrap();
+    let (moved, count) =
+        (screen.cell(y as u16, x as u16).unwrap(), screen.cell(y as u16, (x - 6) as u16).unwrap());
+    assert_ne!(moved.fgcolor(), count.fgcolor(), "faint, not the count's colour");
+}
+
+/// Review of frictions 13, #2: the rail measures the grade it draws — the open document's diff as it is now,
+/// not what the review opened with — so a `▲1` found since doesn't cut the name.
+#[test]
+fn the_rail_measures_the_grade_it_draws() {
+    let (base, now) = five_and_thirty_added();
+    let now = format!("{now}let pid = unsafe {{ getpid() }};\n");
+    let mut s = review_of(160, 30, &base, &now);
+    let r = s.ed.session.code_review.as_mut().unwrap();
+    assert!(r.grades.is_empty(), "the review opened with no grade");
+    r.set_rules(crate::risk::Rules::with(&[("rust", &["rust"], &[r"\bunsafe\b"], &[])], &[], &[]));
+    r.moved.insert(r.files[0].path.clone(), 30000);
+    r.rail_need.take();
+    let mut parser = vt100::Parser::new(s.h, s.w, 0);
+    parser.process(&s.frame());
+    let rows: Vec<String> = parser.screen().rows(0, s.w).collect();
+    assert!(rows.iter().any(|r| r.contains("◦ demo.rs ▲1 +31 · 30000 moved")), "the name whole: {rows:#?}");
+}
+
+/// Frictions 13, #3: where a click on the rail's first file row opened nothing — a 188×57 screen, five
+/// sessions, a turn's review of 28 files in folders three deep, the reviewer's and the high-risk rows, the
+/// chat open and focused. A click on each file row's name opens that file; the first one's too, at the cell
+/// the user clicked (column 12, row 8 — 1-based).
+#[test]
+fn a_click_on_the_rails_file_names_opens_them_in_a_full_layout() {
+    use crate::codereview::{Base, CodeReview, File};
+    use crate::event::{Mouse, MouseKind};
+    let dir = std::env::temp_dir().join(format!("tarae-rail-full-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = std::fs::canonicalize(dir).unwrap();
+    let mut rels: Vec<String> = ["c-sharp", "go", "java", "python", "rust", "zig"]
+        .iter()
+        .map(|l| format!("runtime/packs/{l}/pack.toml"))
+        .collect();
+    rels.extend((0..22).map(|i| format!("src/f{i:02}.rs")));
+    let files: Vec<File> = rels
+        .iter()
+        .map(|rel| {
+            let path = dir.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "let x = 1;\nlet y = 2;\n").unwrap();
+            File { path, rel: rel.clone(), added: 2, removed: 1, new: false, gone: false, binary: false }
+        })
+        .collect();
+    let mut s = Shot::new(188, 57);
+    s.ed.session.root = dir.clone();
+    s.ed.open(&dir.join("src/f05.rs")).unwrap();
+    let base = Base::Turn { at: 0, question: "fix the frictions".into() };
+    let mut r = CodeReview::for_test(base, dir.clone(), files);
+    for rel in ["src/f03.rs", "src/f09.rs"] {
+        let high = crate::risk::Graded {
+            grade: crate::risk::Grade::High,
+            why: "unsafe (rust pack)".into(),
+            at: 0,
+            lines: 1,
+            keys: vec![1],
+            mode: false,
+        };
+        r.grades.insert(dir.join(rel), std::sync::Arc::from(vec![high]));
+    }
+    let (of, root) = (r.started, r.root.clone());
+    s.ed.session.code_review = Some(r);
+    s.ed.session.reviewer = Some(crate::reviewer::Reviewer::for_test(
+        of,
+        root,
+        crate::reviewer::State::Done,
+        Vec::new(),
+        "Two risks.",
+    ));
+    let mut chat = crate::chat::Chat::new();
+    chat.focused = true;
+    s.ed.session.chat = Some(chat);
+    for name in ["b", "c", "d", "e"] {
+        let other = dir.join(format!("session-{name}"));
+        std::fs::create_dir_all(&other).unwrap();
+        s.ed.session_add(other);
+    }
+    let screen = |s: &mut Shot| {
+        let mut p = vt100::Parser::new(s.h, s.w, 0);
+        p.process(&s.frame());
+        p.screen().rows(0, s.w).collect::<Vec<String>>()
+    };
+    let rows = screen(&mut s);
+    assert!(rows.iter().any(|r| r.contains("│ │ ◦ pack.toml")), "folders three deep: {rows:#?}");
+    let rail = s.ed.screen.review_rail.borrow().clone();
+    assert_eq!(rail.len(), 28, "every file in sight: {rows:#?}");
+    let opened = |s: &Shot| s.ed.doc().path.clone();
+    // The cell the user clicked: the first file row, on its name
+    let (y, i) = rail[0];
+    s.ed.handle_mouse(Mouse { kind: MouseKind::Down, x: 11, y: y as u16, alt: false });
+    s.ed.handle_mouse(Mouse { kind: MouseKind::Up, x: 11, y: y as u16, alt: false });
+    let want = s.ed.session.code_review.as_ref().unwrap().files[i].path.clone();
+    assert_eq!(opened(&s), Some(want), "the first row's file: {rows:#?}");
+    // Every row, on its name
+    for (y, i) in rail {
+        let rows = screen(&mut s);
+        let f = s.ed.session.code_review.as_ref().unwrap().files[i].clone();
+        let name = f.rel.rsplit('/').next().unwrap();
+        let x = rows[y].find(name).map(|b| rows[y][..b].chars().count()).expect("its name");
+        s.ed.handle_mouse(Mouse { kind: MouseKind::Down, x: x as u16 + 1, y: y as u16, alt: false });
+        s.ed.handle_mouse(Mouse { kind: MouseKind::Up, x: x as u16 + 1, y: y as u16, alt: false });
+        assert_eq!(opened(&s).as_deref(), Some(f.path.as_path()), "row {y}: {}", rows[y]);
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// The review's rail with more files than rows: a click opens the file under it without the list sliding
 /// (the next click lands where it's aimed), the wheel scrolls it, and a file shown from elsewhere (`]g`)
 /// scrolls into view.

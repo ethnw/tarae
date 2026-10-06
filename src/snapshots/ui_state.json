@@ -18,6 +18,7 @@
         48,
         8
       ],
+      "cut": 0,
       "id": "card#2",
       "in_sight_ms": 0,
       "kind": "review-end",
@@ -28,6 +29,7 @@
       "state": "asking",
       "title": "End the review?",
       "up": "front",
+      "viewing": false,
       "waited_ms": 0,
       "weighty": false,
       "whose": "tarae"
@@ -53,6 +55,7 @@
       ],
       "asks": "Claude changes 2 files · Claude renames `x`.",
       "at": null,
+      "cut": null,
       "id": "card#1",
       "in_sight_ms": null,
       "kind": "change-set",
@@ -63,6 +66,7 @@
       "state": "asking",
       "title": "Claude changes 2 files",
       "up": "parked",
+      "viewing": false,
       "waited_ms": 0,
       "weighty": true,
       "whose": "claude"

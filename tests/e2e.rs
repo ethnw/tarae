@@ -1419,3 +1419,42 @@ fn follow_shows_each_edit_and_replays_the_turn() {
     });
     step(&mut t, "]r]r]r]r]r]r", "past the newest", &|s| s.contains("that was the newest stop"));
 }
+
+/// Frictions 13, #3: a click on a file row of the review's rail, as the terminal sends it (SGR mouse bytes,
+/// press then release, 1-based), opens that file — with the chat open and focused beside it, on a 188×57
+/// screen, its folders three deep.
+#[test]
+fn a_click_on_the_review_rail_opens_the_file() {
+    let sb = Sandbox::new("rail-click");
+    fs::write(sb.git_config(), "[user]\n\tname = t\n\temail = t@t\n[commit]\n\tgpgsign = false\n").unwrap();
+    let rels = ["runtime/packs/c-sharp/pack.toml", "runtime/packs/go/pack.toml", "src/a.rs", "src/b.rs"];
+    for rel in rels {
+        fs::create_dir_all(sb.file(rel).parent().unwrap()).unwrap();
+        sb.write(rel, "one\n");
+    }
+    sb.git(&["init", "-q", "-b", "main"]);
+    sb.git(&["add", "-A"]);
+    sb.git(&["commit", "-q", "-m", "base"]);
+    for rel in rels {
+        sb.write(rel, "one\ntwo\n");
+    }
+    let mut t = Term::spawn(&sb, &["src/b.rs"], 188, 57);
+    t.wait_text("two");
+    t.command("review");
+    let s = t.wait_text("0 of 4 viewed");
+    let click = |t: &mut Term, s: &Screen, name: &str, nth: usize| {
+        let (y, row) =
+            s.rows.iter().enumerate().filter(|(_, r)| r.contains(&format!("◦ {name}"))).nth(nth).unwrap();
+        let x = row[..row.find(&format!("◦ {name}")).unwrap()].chars().count() + 2;
+        t.send(&format!("\x1b[<0;{};{}M\x1b[<0;{};{}m", x + 1, y + 1, x + 1, y + 1));
+    };
+    click(&mut t, &s, "pack.toml", 0);
+    t.wait_for("the first pack.toml opened", |s| {
+        s.rows[0].contains("c-sharp") && s.rows[0].contains("pack.toml")
+    });
+    // The chat open and focused beside it: the same
+    t.send(" l");
+    let s = t.wait_text("claude");
+    click(&mut t, &s, "a.rs", 0);
+    t.wait_for("a.rs opened", |s| s.rows[0].contains("a.rs"));
+}

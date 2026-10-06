@@ -402,6 +402,7 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
         popup: std::cell::Cell::new(None),
         offer_buttons: offer.as_ref().map(|c| c.buttons.clone()).unwrap_or_default(),
         offer_card: offer.as_ref().map(OfferCard::rect),
+        offer_cut: offer.as_ref().filter(|c| !c.bar).map(|c| c.cut),
         chat_links: Default::default(),
         chat_calls: Default::default(),
         chat_ids: Default::default(),
@@ -517,6 +518,7 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
         offer = OfferCard::new(editor, &lay, &ui);
         editor.screen.offer_buttons = offer.as_ref().map(|c| c.buttons.clone()).unwrap_or_default();
         editor.screen.offer_card = offer.as_ref().map(OfferCard::rect);
+        editor.screen.offer_cut = offer.as_ref().filter(|c| !c.bar).map(|c| c.cut);
     }
     draw(editor, &lay, &ui, review_rows.as_deref(), offer.as_ref(), out)
 }
@@ -647,7 +649,9 @@ impl Layout {
         let edit_w = w as usize - chat_w;
         let rail_w = match editor.session.code_review.as_ref() {
             // The review's: as wide as its names (U6)
-            Some(r) if review && zoom.is_none() && edit_w >= 90 => review_rail_w(r, edit_w, REVIEW_CODE_MIN),
+            Some(r) if review && zoom.is_none() && edit_w >= 90 => {
+                review_rail_w(editor, r, edit_w, REVIEW_CODE_MIN)
+            }
             // Narrower, while it has the keys (`space g` back from the git tab, `space e`) — in the room the
             // side panel would have: they went to a rail that wasn't drawn (#146)
             Some(r)
@@ -656,7 +660,7 @@ impl Layout {
                     && r.focus
                     && edit_w >= REVIEW_RAIL_MIN + crate::sizes::CODE_MIN =>
             {
-                review_rail_w(r, edit_w, crate::sizes::CODE_MIN)
+                review_rail_w(editor, r, edit_w, crate::sizes::CODE_MIN)
             }
             _ => widths.side,
         };
@@ -8222,25 +8226,37 @@ const REVIEW_CODE_MIN: usize = 60;
 /// once (the files don't change), so it never shifts while you read; a draft's `¶n` cuts the name a little
 /// rather than widening it. A name that still doesn't fit is cut from the left (its end stays). The code
 /// keeps `code_min` (60; 48 — as beside the side panel — while the rail has the keys on a narrow screen).
-fn review_rail_w(r: &crate::codereview::CodeReview, edit_w: usize, code_min: usize) -> usize {
+fn review_rail_w(
+    editor: &Editor,
+    r: &crate::codereview::CodeReview,
+    edit_w: usize,
+    code_min: usize,
+) -> usize {
     use crate::chrome::{GAP, PAD, PAD_R};
-    let need = *r.rail_need.get_or_init(|| review_rail_need(r));
+    let need = *r.rail_need.get_or_init(|| review_rail_need(editor, r));
     (need + PAD + PAD_R + GAP).clamp(REVIEW_RAIL_MIN, REVIEW_RAIL_MAX).min(edit_w.saturating_sub(code_min))
 }
 
 /// The cells the review rail's widest row takes (inside its padding).
-fn review_rail_need(r: &crate::codereview::CodeReview) -> usize {
+fn review_rail_need(editor: &Editor, r: &crate::codereview::CodeReview) -> usize {
     let mut need = "review".len() + 2 + r.base.label().width();
     let (added, removed): (usize, usize) =
         r.files.iter().fold((0, 0), |(a, b), f| (a + f.added, b + f.removed));
     let n = r.files.len();
-    need = need.max(format!("{n} files  +{added} −{removed}").width());
+    let moved = match r.moved_total() {
+        0 => String::new(),
+        k => format!(" · {k} moved"),
+    };
+    need = need.max(format!("{n} files  +{added} −{removed}{moved}").width());
     for t in r.rail_rows() {
         let piece: String = r.files[t.source].rel.chars().skip(t.span.start).take(t.span.len()).collect();
         let guides = tree_guides(t.depth).width();
         let row = match t.item {
             None => guides + 2 + piece.width() + 1,
-            Some(i) => 2 + guides + piece.width() + rail_tail(r, &r.files[i]).width(),
+            Some(i) => {
+                let f = &r.files[i];
+                2 + guides + piece.width() + rail_grade_w(editor, r, f) + rail_tail(r, f).width()
+            }
         };
         need = need.max(row);
     }
@@ -8265,6 +8281,21 @@ fn rail_drafts(editor: &Editor, f: &crate::codereview::File) -> (usize, usize) {
     })
 }
 
+/// The cells a file row's grade takes before its counts, as `draw_review_rail` grades it (`graded`: an open
+/// document's diff as it is now): ` ▲k` high-risk (k at its widest, none looked at), ` •` behaviour, none else
+/// — measured, so the moved count doesn't cut the name.
+fn rail_grade_w(editor: &Editor, r: &crate::codereview::CodeReview, f: &crate::codereview::File) -> usize {
+    use crate::risk::Grade;
+    let graded = r.graded(editor, f);
+    match graded.iter().map(|g| g.grade).max() {
+        Some(Grade::High) => {
+            format!(" ▲{}", graded.iter().filter(|g| g.grade == Grade::High).count()).width()
+        }
+        Some(Grade::Behaviour) => " •".width(),
+        _ => 0,
+    }
+}
+
 /// A file row's end: `+a −r`, `binary`, `outside`/`new`/`gone` (as `draw_review_rail` puts it — drafts
 /// aside).
 fn rail_tail(r: &crate::codereview::CodeReview, f: &crate::codereview::File) -> String {
@@ -8277,6 +8308,9 @@ fn rail_tail(r: &crate::codereview::CodeReview, f: &crate::codereview::File) -> 
         }
         if f.removed > 0 {
             s += &format!(" −{}", f.removed);
+        }
+        if r.moved_in(f) > 0 {
+            s += &format!(" · {} moved", r.moved_in(f));
         }
     }
     if r.outside(f) {
@@ -8342,8 +8376,20 @@ fn review_rail_room(lay: &Layout, editor: &Editor, r: &crate::codereview::CodeRe
     let outside = usize::from(r.files.iter().any(|f| r.outside(f)));
     // (its text's width, as `draw_review_rail` has it)
     use crate::chrome::{GAP, PAD, PAD_R};
-    let risk = rail_risk(editor, r, lay.rail_w.saturating_sub(GAP + PAD + PAD_R).max(1)).len();
-    lay.body_h.saturating_sub(RAIL_HEAD + question + outside + risk + RAIL_HINTS + 1).max(1)
+    let w = lay.rail_w.saturating_sub(GAP + PAD + PAD_R).max(1);
+    let (risk, beyond) = (rail_risk(editor, r, w).len(), rail_beyond(r, w).len());
+    lay.body_h.saturating_sub(RAIL_HEAD + question + beyond + outside + risk + RAIL_HINTS + 1).max(1)
+}
+
+/// A turn's review's rows about the files it leaves out (`CodeReview.beyond`): `9 more differ from HEAD ·
+/// space v v` — the key on a row of its own where the rail is too narrow for both. (text, key) a row.
+fn rail_beyond(r: &crate::codereview::CodeReview, w: usize) -> Vec<(String, String)> {
+    let Some((n, key)) = &r.beyond else { return Vec::new() };
+    let text = format!("{n} more differ from HEAD");
+    match text.width() + " · ".width() + key.width() <= w {
+        true => vec![(format!("{text} · "), key.clone())],
+        false => vec![(fit_ellipsis(&text, w), String::new()), (String::new(), fit_ellipsis(key, w))],
+    }
 }
 
 /// How a piece of a risk row is coloured (`draw_review_rail` picks the style).
@@ -8472,12 +8518,19 @@ fn draw_review_rail(
         }
         _ => false,
     };
+    // …and what it leaves out: the files that differ from HEAD besides its own, and the key for them all
+    for (text, k) in rail_beyond(r, w) {
+        rows.push((vec![sp(text, Style { fg: warn_fg, ..card }), sp(k, key)], card, None));
+    }
     let mut summary = vec![sp(format!("{n} file{}", if n == 1 { "" } else { "s" }), dim)];
     if added > 0 {
         summary.push(sp(format!("  +{added}"), plus));
     }
     if removed > 0 {
         summary.push(sp(format!(" −{removed}"), minus));
+    }
+    if r.moved_total() > 0 {
+        summary.push(sp(fit_ellipsis(&format!(" · {} moved", r.moved_total()), w), faint));
     }
     rows.push((summary, card, None));
     rows.push((vec![sp(format!("{viewed} of {n} viewed"), faint)], card, None));
@@ -8560,6 +8613,10 @@ fn draw_review_rail(
             }
             if f.removed > 0 {
                 tail.push(sp(format!(" −{}", f.removed), Style { fg: ui.diff_minus.fg, ..bg }));
+            }
+            // (the counts include them: how much of it only moved — frictions 13)
+            if r.moved_in(f) > 0 {
+                tail.push(sp(format!(" · {} moved", r.moved_in(f)), Style { fg: ui.linenr.fg, ..bg }));
             }
         }
         if r.outside(f) {
@@ -12069,7 +12126,7 @@ mod tests {
         use crate::chrome::{GAP, PAD, PAD_R};
         let rail = |ed: &Editor, w| Layout::new(ed, w, 40).rail_w;
         let short = review(&["a.rs", "b.rs"]);
-        let hints = review_rail_need(short.session.code_review.as_ref().unwrap()) + PAD + PAD_R + GAP;
+        let hints = review_rail_need(&short, short.session.code_review.as_ref().unwrap()) + PAD + PAD_R + GAP;
         assert!((24..31).contains(&hints), "two short names take what the hints need: {hints}");
         assert_eq!(rail(&short, 140), hints);
         assert_eq!(rail(&short, 240), hints, "not wider for a wide terminal");

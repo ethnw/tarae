@@ -334,7 +334,9 @@ impl Editor {
             .into_iter()
             .map(|e| {
                 let name = names.iter().find(|n| n.0 == e.session).map_or("", |n| n.1.as_str());
-                let label = if many { format!("{name} · {}", e.asks) } else { e.asks.clone() };
+                // (one row: cut as the one-line forms cut it — the whole is its card, one `enter` away)
+                let asks = crate::uistate::asks_line(&e.asks);
+                let label = if many { format!("{name} · {asks}") } else { asks };
                 let claudes = matches!(
                     e.kind,
                     "run" | "read" | "no-sandbox" | "screen" | "edit" | "change-set" | "silent-run"

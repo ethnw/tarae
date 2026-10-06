@@ -920,6 +920,71 @@ fn a_card_says_why_y_waits_and_lets_its_text_be_read_from_it() {
     assert!(ed.offers.is_empty());
 }
 
+/// Frictions 13, #4 and #5: a long card in the state. Its `asks` is whole in the JSON (scripts and the inbox
+/// read all of it) and cut in the one-line text form; the JSON says how many lines its drawing left out and
+/// whether it's been seen whole — not cut-and-unread, not after `v` alone (its buffer open, not read to its
+/// end), yes once read to its end; the text line says the same.
+#[test]
+fn a_long_cards_state_is_whole_and_says_what_has_been_seen() {
+    let mut ed = editor();
+    let script: String = (1..=60).map(|i| format!("echo step {i}\n")).collect();
+    let q = format!("{script}\nRuns the script Claude wrote this turn.");
+    let o = Offer::new(
+        "Claude wants to run a script".into(),
+        &q,
+        "",
+        String::new(),
+        What::Install {
+            tool: "script".into(),
+            run: vec!["true".into()],
+            cwd: ed_root(),
+            then: crate::install::Then::Lsp,
+        },
+    );
+    ed.push_offer(o);
+    let shown = |ed: &mut Editor| {
+        ed.focus_sync();
+        crate::term::render(ed, &mut Vec::new(), 100, 24).unwrap();
+        let s = ed.ui_state();
+        (s.json()["cards"][0].clone(), s.text().lines().find(|l| l.starts_with("card#")).unwrap().to_string())
+    };
+    let (card, line) = shown(&mut ed);
+    // #4: whole in the JSON, its last decided line there; cut on the text line
+    let asks = card["asks"].as_str().unwrap();
+    assert!(asks.ends_with("echo step 60") && !asks.ends_with('…'), "{asks}");
+    assert!(asks.chars().count() > 300, "longer than the text form's cut");
+    let inbox = &ed.ui_state().json()["inbox"][0];
+    assert_eq!(inbox["asks"].as_str(), Some(asks), "the inbox has it whole too");
+    assert!(line.contains("…\"") && !line.contains("echo step 60"), "{line}");
+    // Claude's level doesn't grow with it: cut as the one-line forms cut it, its inbox entry too
+    let claude = ed.ui_state_claude().json();
+    let theirs = claude["cards"][0]["asks"].as_str().unwrap();
+    assert!(theirs.ends_with('…') && theirs.chars().count() == super::ASKS_MAX, "{theirs}");
+    assert_eq!(claude["inbox"][0]["asks"].as_str(), Some(theirs), "{claude}");
+    assert!(!ed.ui_state_claude().text_claude(false).contains("echo step 60"));
+    // The inbox picker's row: cut too (the whole is its card, one `enter` away)
+    ed.inbox_open();
+    let label = ed.picker.as_ref().expect("the inbox").items()[0].label.clone();
+    assert_eq!(label, theirs, "one row, cut");
+    ed.picker = None;
+    // #5: cut, not seen whole
+    let cut = card["cut"].as_u64().unwrap();
+    assert!(cut > 0 && card["seen_whole"] == false && card["viewing"] == false, "{card}");
+    assert!(line.ends_with(&format!(" · {cut} more lines, not seen whole")), "{line}");
+    // `v`: its text open in its buffer — not yet read to its end
+    settle(&mut ed);
+    feed(&mut ed, &["<C-q>", "v"]);
+    let (card, line) = shown(&mut ed);
+    assert!(card["viewing"] == true && card["seen_whole"] == false && card["cut"].is_null(), "{card}");
+    assert!(line.ends_with(" · open in its buffer, not read to its end"), "{line}");
+    // Read to its end: seen whole
+    feed(&mut ed, &["g", "e"]);
+    let (card, line) = shown(&mut ed);
+    assert!(card["seen_whole"] == true, "{card}");
+    assert!(line.ends_with(" · seen whole"), "{line}");
+    feed(&mut ed, &["n"]);
+}
+
 /// A paste in normal mode: a `:` line opens the command line with it, not run (`:w` pasted into a commit
 /// message became part of its subject, unsaid); any other text is held for `p`, not put in, and said
 /// (#124); into the minimized chat, it comes back with it.

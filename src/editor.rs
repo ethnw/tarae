@@ -266,6 +266,9 @@ pub struct Screen {
     pub offer_buttons: Vec<(usize, usize, usize, char)>,
     /// The front card as drawn, its back cards' rows too (x, y, width, height) — the UI state's `at`.
     pub offer_card: Option<(usize, usize, usize, usize)>,
+    /// How many of the front card's lines its drawing left out (`↓ 2 more lines`; 0: drawn whole) — None
+    /// when no card is drawn, or it stepped aside to a bar while its text is read (the UI state's `cut`).
+    pub offer_cut: Option<usize>,
     /// Column where the picker's preview card starts (the wheel scrolls it there).
     pub picker_preview_x: Option<usize>,
     /// The floating docs card this frame (x, y, width, height) — drawing fills it in; the wheel scrolls it.
@@ -11683,6 +11686,67 @@ mod tests {
             ed.status.is_some() && ed.status.as_ref().unwrap().0.contains("no changes")
         });
         assert!(ed.session.code_review.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Frictions 13, #1: a turn's review is the last turn's files only — it says so, and how many other files
+    /// differ from HEAD (changed before the turn, untracked too), with the key that reviews them all. A turn
+    /// that changed every one of them leaves nothing to say.
+    #[test]
+    fn a_turns_review_says_what_else_differs_from_head() {
+        use crate::checkpoint::{Checkpoint, Touched};
+        let dir = git_repo("beyond", &[("a.rs", "one\n"), ("b.rs", "two\n"), ("c.rs", "three\n")]);
+        for f in ["a.rs", "b.rs", "c.rs", "d.rs"] {
+            std::fs::write(dir.join(f), "changed\n").unwrap();
+        }
+        let touched = |f: &str, before: &str| Touched {
+            path: dir.join(f),
+            before: Some(ropey::Rope::from_str(before)),
+            after: ropey::Rope::from_str("changed\n"),
+            ..Default::default()
+        };
+        let mut ed = editor("");
+        ed.session.root = dir.clone();
+        ed.session.checkpoints.list.push(Checkpoint::new("fix a".into(), vec![touched("a.rs", "one\n")]));
+        crate::codereview::start_turn(&mut ed, 0);
+        settle_until(&mut ed, |ed| ed.session.code_review.is_some());
+        let r = ed.session.code_review.as_ref().unwrap();
+        assert_eq!(r.base.label(), "last turn");
+        assert_eq!(r.files.len(), 1);
+        assert_eq!(r.beyond, Some((3, "space v v".to_string())), "b.rs, c.rs and the untracked d.rs");
+        // A turn over all four: nothing beyond it
+        let all = vec![
+            touched("a.rs", "one\n"),
+            touched("b.rs", "two\n"),
+            touched("c.rs", "three\n"),
+            Touched { before: None, ..touched("d.rs", "") },
+        ];
+        let mut ed = editor("");
+        ed.session.root = dir.clone();
+        ed.session.checkpoints.list.push(Checkpoint::new("fix all".into(), all));
+        crate::codereview::start_turn(&mut ed, 0);
+        settle_until(&mut ed, |ed| ed.session.code_review.is_some());
+        let r = ed.session.code_review.as_ref().unwrap();
+        assert_eq!((r.files.len(), &r.beyond), (4, &None));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Frictions 13, #2: code moved from a file to a new one — the review's counts are git's (every line), and
+    /// it knows how many of them moved: the 30 lines in both files, each move once in all.
+    #[test]
+    fn a_review_counts_the_lines_that_moved() {
+        let body: String = (1..=30).map(|i| format!("let value_{i} = compute({i});\n")).collect();
+        let dir = git_repo("moved", &[("a.rs", &format!("fn a() {{}}\n{body}"))]);
+        std::fs::write(dir.join("a.rs"), "fn a() {}\nuse crate::b::*;\nb::all();\n").unwrap();
+        std::fs::write(dir.join("b.rs"), &body).unwrap();
+        let mut ed = editor("");
+        crate::codereview::start_in(&mut ed, dir.clone(), None);
+        settle_until(&mut ed, |ed| ed.session.code_review.is_some());
+        let r = ed.session.code_review.as_ref().unwrap();
+        let counts: Vec<_> =
+            r.files.iter().map(|f| (f.rel.as_str(), f.added, f.removed, r.moved_in(f))).collect();
+        assert_eq!(counts, [("a.rs", 2, 30, 30), ("b.rs", 30, 0, 30)]);
+        assert_eq!(r.moved_total(), 30);
         std::fs::remove_dir_all(&dir).ok();
     }
 

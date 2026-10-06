@@ -55,7 +55,7 @@ impl Base {
         match self {
             Base::Head => "uncommitted".into(),
             Base::Branch { name, .. } => format!("since {name}"),
-            Base::Turn { .. } => "Claude's turn".into(),
+            Base::Turn { .. } => "last turn".into(),
             Base::Replay { label, .. } => format!("against {label}"),
         }
     }
@@ -121,6 +121,13 @@ pub struct CodeReview {
     /// A binary file the rail opened (it shows nothing: the code stays on the document then in front) — the
     /// file in hand while that document is (`in_hand`).
     binary_shown: Option<(usize, DocId)>,
+    /// A turn's review: how many other files differ from HEAD (changed before the turn, or by you) and the
+    /// key that reviews them all (`space v v`) — the rail says so under its head (frictions 13: a turn's
+    /// review read as the whole change).
+    pub beyond: Option<(usize, String)>,
+    /// How many of each file's changed lines moved (`moved_lines`) — said beside its counts, which include
+    /// them: `+800 −500 · 500 moved`.
+    pub moved: Moved,
 }
 
 impl CodeReview {
@@ -146,7 +153,19 @@ impl CodeReview {
             live: Default::default(),
             rules: Default::default(),
             binary_shown: None,
+            beyond: None,
+            moved: Default::default(),
         }
+    }
+
+    /// How many of `f`'s changed lines moved (`moved_lines`).
+    pub fn moved_in(&self, f: &File) -> usize {
+        self.moved.get(&f.path).copied().unwrap_or(0)
+    }
+
+    /// How many lines moved across the review — each move once (it counts in both of its files).
+    pub fn moved_total(&self) -> usize {
+        self.moved.values().sum::<usize>() / 2
     }
 
     /// The file in hand: a binary one the rail just opened (while the code is where it was), else the one
@@ -338,14 +357,15 @@ fn grade_doc(
 }
 
 /// Every file's changes against the review's base, graded (a worker's — git, files read): a git base's in
-/// one `diff-index -U0`; new and binary files whole; a turn's against its texts before the turn.
+/// one `diff-index -U0`; new and binary files whole; a turn's against its texts before the turn. And how
+/// many of each file's changed lines moved (`moved_lines`).
 fn grade_files(
     root: &Path,
     rev: Option<&str>,
     files: &[File],
     befores: &[Option<ropey::Rope>],
     rules: &crate::risk::Rules,
-) -> Grades {
+) -> (Grades, Moved) {
     use crate::risk::{Hunk, graded, lang_of};
     let mut diffed: std::collections::HashMap<String, Vec<Hunk>> = match rev {
         Some(rev) => {
@@ -358,6 +378,7 @@ fn grade_files(
         None => Default::default(),
     };
     let mut out = std::collections::HashMap::new();
+    let mut lines: Vec<(PathBuf, Vec<Hunk>)> = Vec::new();
     for (i, f) in files.iter().enumerate() {
         let hunks = if f.binary {
             let blob = git(root, &["hash-object", "--", &f.rel]).unwrap_or_else(|_| "gone".into());
@@ -375,8 +396,70 @@ fn grade_files(
         let lang = lang_of(&f.rel);
         let g: Graded = hunks.iter().map(|h| graded(&f.rel, lang, h, rules, false)).collect();
         out.insert(f.path.clone(), g);
+        if !f.binary {
+            lines.push((f.path.clone(), hunks));
+        }
     }
-    out
+    (out, moved_lines(&lines))
+}
+
+/// How many of each file's changed lines moved, by path (files with none left out).
+pub type Moved = std::collections::HashMap<PathBuf, usize>;
+
+/// The shortest line a move is told by (trimmed, in characters): shorter ones — `}`, `});`, blank, `else {`
+/// — are everywhere and would pair by chance.
+const MOVED_MIN: usize = 8;
+
+/// The lines that moved across `files`' changes (frictions 13: a file whose code went to a new one read as a
+/// small change): a removed line and an added one with the same text (at least `MOVED_MIN` characters
+/// trimmed), paired one to one. Within a file the text must be the same indentation and all — a block wrapped
+/// in an `if` changed, it didn't move; across files trimmed is enough (a function moved into an `impl`). Each
+/// file's count is its removed lines paired plus its added lines paired (a move counts in the file it left
+/// and the one it went to).
+fn moved_lines(files: &[(PathBuf, Vec<crate::risk::Hunk>)]) -> Moved {
+    use std::collections::HashMap;
+    fn long(l: &&String) -> bool {
+        l.trim().chars().count() >= MOVED_MIN
+    }
+    let mut counts = vec![0; files.len()];
+    // What no pair within its file took, by trimmed text: (file, [removed, added]) — files in order
+    let mut rest: HashMap<&str, Vec<(usize, [usize; 2])>> = HashMap::new();
+    for (i, (_, hunks)) in files.iter().enumerate() {
+        let mut sides: HashMap<&str, [usize; 2]> = HashMap::new();
+        for h in hunks {
+            for l in h.removed.iter().filter(long) {
+                sides.entry(l).or_default()[0] += 1;
+            }
+            for l in h.added.iter().filter(long) {
+                sides.entry(l).or_default()[1] += 1;
+            }
+        }
+        // Within the file: the very same line (indentation and all), as often as both sides have it
+        let mut left: HashMap<&str, [usize; 2]> = HashMap::new();
+        for (l, [r, a]) in sides {
+            let k = r.min(a);
+            counts[i] += 2 * k;
+            let t = left.entry(l.trim()).or_default();
+            t[0] += r - k;
+            t[1] += a - k;
+        }
+        for (t, s) in left.into_iter().filter(|(_, s)| s != &[0, 0]) {
+            rest.entry(t).or_default().push((i, s));
+        }
+    }
+    // Across files: a removed line in one, an added one in another
+    for sides in rest.values_mut() {
+        for a in 0..sides.len() {
+            for b in (0..sides.len()).filter(|&b| b != a) {
+                let k = sides[a].1[0].min(sides[b].1[1]);
+                sides[a].1[0] -= k;
+                sides[b].1[1] -= k;
+                counts[sides[a].0] += k;
+                counts[sides[b].0] += k;
+            }
+        }
+    }
+    files.iter().zip(counts).filter(|(_, n)| *n > 0).map(|((path, _), n)| (path.clone(), n)).collect()
 }
 
 fn gone_title(f: &File) -> String {
@@ -606,6 +689,10 @@ pub fn start(ed: &mut Editor, branch: Option<String>) {
     start_in(ed, ed.session.root.clone(), branch);
 }
 
+/// What `start_in`'s worker gathers: the repository's root, the base, the changed files, graded and their
+/// moves counted.
+type Gathered = (PathBuf, Base, Vec<File>, (Grades, Moved));
+
 /// `start` for the repository around `cwd`.
 pub fn start_in(ed: &mut Editor, cwd: PathBuf, branch: Option<String>) {
     let said = match &branch {
@@ -613,7 +700,7 @@ pub fn start_in(ed: &mut Editor, cwd: PathBuf, branch: Option<String>) {
         None => "review: gathering changes…".into(),
     };
     let rules = crate::risk::Rules::of(&ed.config);
-    let work = move || -> Result<(PathBuf, Base, Vec<File>, Grades), String> {
+    let work = move || -> Result<Gathered, String> {
         let root = PathBuf::from(git(&cwd, &["rev-parse", "--show-toplevel"])?.trim());
         let base = match branch {
             None => Base::Head,
@@ -755,13 +842,32 @@ fn start_turn_saying(ed: &mut Editor, at: usize, earlier: usize) {
             })
             .collect();
         let grades = grade_files(&root, None, &files, &befores, &rules);
+        let beyond = beyond_turn(&root, &files);
         move |ed: &mut Editor| {
+            let opens = !files.is_empty();
             open(ed, root, base, files, grades);
+            if opens
+                && beyond > 0
+                && let Some(r) = ed.session.code_review.as_mut()
+            {
+                let key = ed.keymaps.bindings().remove("review_start").unwrap_or_else(|| ":review".into());
+                r.beyond = Some((beyond, key));
+            }
             if let Some(said) = earlier_said(earlier) {
                 ed.set_warning(said);
             }
         }
     });
+}
+
+/// How many files in `root`'s repository differ from HEAD (untracked ones too) besides `turn`'s — what a
+/// turn's review leaves to `space v v` (a worker's: git; not a repository → 0).
+fn beyond_turn(root: &Path, turn: &[File]) -> usize {
+    let Ok(top) = git(root, &["rev-parse", "--show-toplevel"]) else { return 0 };
+    let Ok(all) = changed(Path::new(top.trim()), &Base::Head) else { return 0 };
+    let real = |p: &Path| crate::paths::real(p).unwrap_or_else(|| p.to_path_buf());
+    let mine: std::collections::HashSet<PathBuf> = turn.iter().map(|f| real(&f.path)).collect();
+    all.iter().filter(|f| !mine.contains(&real(&f.path))).count()
 }
 
 /// A stopped rebase's resolution as a review (`rebase.rs`): `rels` (its conflicted files, relative to `root`)
@@ -814,7 +920,7 @@ pub type Grades = std::collections::HashMap<PathBuf, Graded>;
 pub type Graded = Arc<[crate::risk::Graded]>;
 
 /// The review of `files` against `base`, graded, begins (any open one ends).
-fn open(ed: &mut Editor, root: PathBuf, base: Base, files: Vec<File>, grades: Grades) {
+fn open(ed: &mut Editor, root: PathBuf, base: Base, files: Vec<File>, grades: (Grades, Moved)) {
     open_at(ed, root, base, files, grades, None, true);
 }
 
@@ -824,7 +930,7 @@ fn open_at(
     root: PathBuf,
     base: Base,
     mut files: Vec<File>,
-    grades: Grades,
+    (grades, moved): (Grades, Moved),
     start: Option<String>,
     say: bool,
 ) {
@@ -864,6 +970,8 @@ fn open_at(
         live: Default::default(),
         rules: crate::risk::Rules::of(&ed.config),
         binary_shown: None,
+        beyond: None,
+        moved,
     });
     if say {
         let s = if n == 1 { "" } else { "s" };
@@ -2118,6 +2226,76 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Frictions 13, #2: lines that left one file for another count as moved in both, one to one; short lines
+    /// (`}`, blank, `else {`) never pair, nor does a line only one side has; a move within a file counts there
+    /// twice (it left and came back).
+    #[test]
+    fn moved_lines_pair_one_to_one_and_skip_short_ones() {
+        use crate::risk::Hunk;
+        let lines = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let hunk = |removed: &[&str], added: &[&str]| Hunk {
+            removed: lines(removed),
+            added: lines(added),
+            ..Default::default()
+        };
+        let body = ["    let total = a + b;", "    return total * 2;", "}", "", "else {"];
+        let files = vec![
+            // a.rs: the body went out (with its short lines), and a line of its own came in
+            (PathBuf::from("a.rs"), vec![hunk(&body, &["    call_the_new_helper();"])]),
+            // b.rs: new, the body in it — and the same long line once more than a.rs gave
+            (
+                PathBuf::from("b.rs"),
+                vec![hunk(&[], &["    let total = a + b;", "    let total = a + b;", "}", "else {"])],
+            ),
+            (PathBuf::from("c.rs"), vec![hunk(&[], &body[1..2])]),
+            // d.rs: a line moved within it
+            (
+                PathBuf::from("d.rs"),
+                vec![hunk(&["fn helper_one() {}"], &[]), hunk(&[], &["fn helper_one() {}"])],
+            ),
+        ];
+        let moved = moved_lines(&files);
+        let at = |p: &str| moved.get(Path::new(p)).copied().unwrap_or(0);
+        assert_eq!(at("a.rs"), 2, "its two long lines left; `}}`, blank and `else {{` don't count");
+        assert_eq!(at("b.rs"), 1, "one copy pairs — the second has nothing removed to pair with");
+        assert_eq!(at("c.rs"), 1);
+        assert_eq!(at("d.rs"), 2, "within one file: removed and added");
+        let mut r = CodeReview::for_test(Base::Head, PathBuf::from("/"), Vec::new());
+        r.moved = moved;
+        assert_eq!(r.moved_total(), 3, "each move once");
+    }
+
+    /// Review finding on #2: a block wrapped in an `if` is re-indented, not moved — within a file a pair needs
+    /// the line's indentation too; a function moved into another file's `impl` (indented deeper) did move.
+    #[test]
+    fn a_reindented_block_is_not_moved_but_one_moved_across_files_is() {
+        use crate::risk::Hunk;
+        let lines = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let hunk = |removed: &[&str], added: &[&str]| Hunk {
+            removed: lines(removed),
+            added: lines(added),
+            ..Default::default()
+        };
+        let body = ["    let total = a + b;", "    let twice = total * 2;", "    send_it(twice);"];
+        let wrapped = [
+            "    if ready {",
+            "        let total = a + b;",
+            "        let twice = total * 2;",
+            "        send_it(twice);",
+            "    }",
+        ];
+        let files = vec![(PathBuf::from("a.rs"), vec![hunk(&body, &wrapped)])];
+        assert_eq!(moved_lines(&files), Moved::new(), "wrapped in an if: nothing moved");
+        // The same lines into another file, deeper: moved, in both
+        let files = vec![
+            (PathBuf::from("a.rs"), vec![hunk(&body, &[])]),
+            (PathBuf::from("b.rs"), vec![hunk(&[], &wrapped[1..4])]),
+        ];
+        let moved = moved_lines(&files);
+        assert_eq!(moved.get(Path::new("a.rs")), Some(&3));
+        assert_eq!(moved.get(Path::new("b.rs")), Some(&3));
+    }
+
     /// Names git quotes, a name with a space, a change of mode: a review grades each under the name `-z` gives
     /// it — a protected name under a non-ASCII folder high, a script made executable high (open too: its
     /// document's diff has no mode, the review's grade stays), `space v h` takes either — and a bring sees the
@@ -2149,7 +2327,7 @@ mod tests {
         let files = changed(&dir, &Base::Head).unwrap();
         let rels: Vec<&str> = files.iter().map(|f| f.rel.as_str()).collect();
         assert_eq!(rels, ["a b.rs", "run.sh", "ü/build.rs"]);
-        let grades = grade_files(&dir, Some("HEAD"), &files, &[], &rules);
+        let (grades, _) = grade_files(&dir, Some("HEAD"), &files, &[], &rules);
         let whys = |rel: &str| -> Vec<(Grade, String)> {
             let f = files.iter().find(|f| f.rel == rel).unwrap();
             grades[&f.path].iter().map(|g| (g.grade, g.why.clone())).collect()

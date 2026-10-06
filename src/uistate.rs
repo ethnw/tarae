@@ -19,7 +19,7 @@ use crate::sizes::Slot;
 /// 2: `panels.edit_review.by` went (an edit's review is always Claude's).
 pub const V: u64 = 2;
 
-/// A card's `asks`: the title and what's decided, cut here (the rest is the card's — `v` shows it).
+/// A card's `asks` in the one-line forms (the text form, a watch's lines): cut here — the JSON has it whole.
 const ASKS_MAX: usize = 300;
 
 // ── Where the keys go ────────────────────────────────────────────────────
@@ -844,7 +844,14 @@ pub struct CardState {
     /// two cards come within one could swap between two reads).
     pub since: std::time::Instant,
     pub in_sight_ms: Option<u64>,
+    /// Every line of it has been in sight — drawn whole, or read to its end in its `v` buffer (a weighty
+    /// card's `y` waits for it).
     pub seen_whole: bool,
+    /// The front card's lines its drawing left out (`↓ 2 more lines`, 0: drawn whole) — None for a card not
+    /// drawn, or one stepped aside to a bar while its text is read (`viewing`).
+    pub cut: Option<usize>,
+    /// The front card's whole text is open in its buffer (`v`).
+    pub viewing: bool,
     pub at: Option<(usize, usize, usize, usize)>,
 }
 
@@ -999,6 +1006,8 @@ impl Editor {
                     .filter(|&(id, rev, _)| (id, rev) == (o.id, o.rev))
                     .map(|(.., at)| ms(at.elapsed())),
                 seen_whole: is_front && self.offer_seen_whole(),
+                cut: self.screen.offer_cut.filter(|_| is_front),
+                viewing: is_front && self.offer_viewing(),
                 at: self.screen.offer_card.filter(|_| is_front),
             }
         };
@@ -1016,7 +1025,8 @@ impl Editor {
     }
 }
 
-/// A card's `asks`: its title and the lines drawn at full strength (what's decided), capped.
+/// A card's `asks`: its title and the lines drawn at full strength (what's decided), whole — scripts and the
+/// inbox read it all (frictions 13); the one-line forms cut it (`asks_line`).
 fn asks(o: &crate::offer::Offer) -> String {
     let decided = o.decided_lines();
     let mut s = o.title.clone();
@@ -1026,10 +1036,15 @@ fn asks(o: &crate::offer::Offer) -> String {
             s.push_str(line.trim());
         }
     }
-    if s.chars().count() > ASKS_MAX {
-        s = s.chars().take(ASKS_MAX - 1).collect::<String>() + "…";
-    }
     s
+}
+
+/// A card's `asks` as a one-line form says it: cut at `ASKS_MAX`.
+pub(crate) fn asks_line(asks: &str) -> String {
+    match asks.chars().count() > ASKS_MAX {
+        true => asks.chars().take(ASKS_MAX - 1).collect::<String>() + "…",
+        false => asks.to_string(),
+    }
 }
 
 impl UiState {
@@ -1085,6 +1100,7 @@ impl UiState {
                         .collect::<Vec<_>>(),
                     "state": c.state, "weighty": c.weighty, "settled": c.settled, "rev": c.rev, "up": c.up,
                     "waited_ms": c.waited_ms, "in_sight_ms": c.in_sight_ms, "seen_whole": c.seen_whole,
+                    "cut": c.cut, "viewing": c.viewing,
                     "at": c.at.map(|(x, y, w, h)| [x, y, w, h]),
                 })
             })
@@ -1205,7 +1221,7 @@ impl UiState {
         for c in &self.cards {
             let answers: Vec<String> =
                 c.answers.iter().map(|(k, d)| format!("{k} {}", d.to_lowercase())).collect();
-            let mut line = format!("{} {} · {} · {:?}", c.id, c.whose, c.kind, c.asks);
+            let mut line = format!("{} {} · {} · {:?}", c.id, c.whose, c.kind, asks_line(&c.asks));
             if c.session != self.front {
                 line += &format!(" · in {}", c.session);
             }
@@ -1217,6 +1233,15 @@ impl UiState {
                 line += &format!(" · {}", c.state);
             } else if c.up == "front" && c.weighty {
                 line += if c.settled { " · settled" } else { " · settling" };
+            }
+            // (what's been read of it: `y` on a weighty one waits for all of it)
+            if c.up == "front" && (c.weighty || c.viewing || c.cut.is_some_and(|k| k > 0)) {
+                line += &match (c.seen_whole, c.cut, c.viewing) {
+                    (true, ..) => " · seen whole".to_string(),
+                    (false, _, true) => " · open in its buffer, not read to its end".to_string(),
+                    (false, Some(k), false) if k > 0 => format!(" · {k} more lines, not seen whole"),
+                    _ => String::new(),
+                };
             }
             out.push(line);
         }

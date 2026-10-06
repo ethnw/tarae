@@ -81,7 +81,7 @@ fn summary(s: &super::UiState) -> Summary {
             .map(|c| {
                 let answers: Vec<String> =
                     c.answers.iter().map(|(k, d)| format!("{k} {}", d.to_lowercase())).collect();
-                let line = format!("{} — {}", c.asks, answers.join(" · "));
+                let line = format!("{} — {}", super::asks_line(&c.asks), answers.join(" · "));
                 (c.id.clone(), c.rev, c.up, c.session.clone(), line)
             })
             .collect(),

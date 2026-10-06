@@ -74,8 +74,16 @@ impl Editor {
         s.toasts.retain(|t| !others.contains(&t.id));
         // (the inbox is every session's: only its own session's entries — the others are counts)
         s.inbox.retain(|e| e.session == own);
-        for c in s.cards.iter_mut().filter(|c| c.kind.starts_with("plugin")) {
-            c.asks = c.title.clone();
+        // (what a card asks, cut as the one-line forms cut it: the whole is for scripts — Claude's level
+        // doesn't grow with a long card)
+        for c in &mut s.cards {
+            c.asks = match c.kind.starts_with("plugin") {
+                true => c.title.clone(),
+                false => super::asks_line(&c.asks),
+            };
+        }
+        for e in &mut s.inbox {
+            e.asks = super::asks_line(&e.asks);
         }
         s.runs.retain(|r| r.session == own);
         // (its `procs` tool says these, each process's command line and folder with them)
