@@ -195,6 +195,7 @@ fn connection(p: &Proxy, session: u64, run: u64, rules: Egress) -> (TcpStream, R
     let run_end = TcpStream::connect(l.local_addr().unwrap()).unwrap();
     let (ours, _) = l.accept().unwrap();
     run_end.set_read_timeout(Some(WAIT)).unwrap();
+    run_end.set_write_timeout(Some(LIMIT)).unwrap();
     let (told, said) = mpsc::channel();
     let c =
         Connection { fd: ours.into(), run, session, process: "curl".into(), rules: Arc::new(rules), told };
@@ -444,6 +445,681 @@ fn a_pipelined_request_never_reaches_the_checked_address() {
         let n = smuggled.len();
         assert!(target.contains(&format!("{n} bytes sent after its request were dropped")), "{target}");
     }
+    // The body after the answer began (the server's side already going — on Linux the relay could splice by
+    // then): the client's side is still counted against its framing, never spliced past its request
+    for (head, body) in &cases[1..] {
+        let (mut c, d) = connection(&f.proxy, 1, 1, rules(&["web.test"]));
+        c.write_all(head.as_bytes()).unwrap();
+        assert_eq!(status(&mut c), 200);
+        c.write_all(format!("{body}{smuggled}").as_bytes()).unwrap();
+        let got = String::from_utf8(out.got.recv_timeout(WAIT).expect("half-closed")).unwrap();
+        assert!(got.ends_with(&format!("\r\n\r\n{body}")) && !got.contains("evil"), "late body: {got:?}");
+        let target = said(&d);
+        assert!(target.contains("bytes sent after its request were dropped"), "{target}");
+    }
+}
+
+/// Seeded bytes (xorshift): the same `n` from the same `seed`, at both ends of a test.
+fn seeded(seed: u64, n: usize) -> Vec<u8> {
+    let mut x = seed | 1;
+    (0..n)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x as u8
+        })
+        .collect()
+}
+
+/// How long a test waits on one of its own threads, a read or a write (`bounded`, `limited`) — a hang fails the
+/// test, it never hangs the run.
+const LIMIT: Duration = Duration::from_secs(60);
+
+/// A thread of the test's whose result is waited for at most `LIMIT`.
+struct Bounded<T>(Receiver<T>);
+
+fn bounded<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Bounded<T> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    Bounded(rx)
+}
+
+impl<T> Bounded<T> {
+    fn join(self, what: &str) -> T {
+        self.0.recv_timeout(LIMIT).unwrap_or_else(|e| panic!("{what}: no end within {LIMIT:?} ({e})"))
+    }
+}
+
+/// The first connection `l` takes, within `LIMIT`.
+fn accepted(l: &TcpListener) -> TcpStream {
+    l.set_nonblocking(true).unwrap();
+    let by = Instant::now() + LIMIT;
+    loop {
+        match l.accept() {
+            Ok((s, _)) => {
+                s.set_nonblocking(false).unwrap();
+                return s;
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock && Instant::now() < by => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(e) => panic!("no connection within {LIMIT:?}: {e}"),
+        }
+    }
+}
+
+/// `s` with its reads and writes limited to `LIMIT` each.
+fn limited(s: TcpStream) -> TcpStream {
+    s.set_read_timeout(Some(LIMIT)).unwrap();
+    s.set_write_timeout(Some(LIMIT)).unwrap();
+    s
+}
+
+/// A stream read to its end (within 60 s a read): how many bytes, and their FNV-1a hash.
+fn drained(mut s: &TcpStream) -> (usize, u64) {
+    s.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
+    let (mut n, mut h, mut b) = (0usize, 0xcbf2_9ce4_8422_2325u64, vec![0u8; 64 << 10]);
+    loop {
+        match s.read(&mut b) {
+            Ok(0) => return (n, h),
+            Ok(k) => {
+                n += k;
+                for &x in &b[..k] {
+                    h = (h ^ u64::from(x)).wrapping_mul(0x100_0000_01b3);
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => panic!("read after {n} bytes: {e}"),
+        }
+    }
+}
+
+fn fnv(b: &[u8]) -> u64 {
+    b.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &x| (h ^ u64::from(x)).wrapping_mul(0x100_0000_01b3))
+}
+
+/// What goes through a tunnel comes out byte for byte: 64 MiB of seeded bytes to the outside, echoed back —
+/// the same length and hash. On Linux, spliced once the look was off — its own relay's count (`relay::spliced_by`,
+/// never another test's tunnel) holds both ways' bytes — so a relay that never switches can't pass. On macOS
+/// (the pump) it's what caught the hung-up rule: a half-closed side left out of `poll` while bytes still waited
+/// for it lost them (56.6 of 64 MiB came back; broken again once, 2026-10-07).
+#[test]
+fn the_bytes_through_are_the_same_spliced_or_not() {
+    const N: usize = 64 << 20;
+    let out = outside(echo);
+    let (resolve, _) = resolver(vec![("example.invalid", vec![vec![out.at]])]);
+    let f = start(resolve, limits());
+    let (c, _) = tunnel(&f.proxy, 1, 1, rules(&["example.invalid"]), "example.invalid:443");
+    let end = c.local_addr().unwrap();
+    let mut w = limited(c.try_clone().unwrap());
+    let sent = seeded(7, N);
+    let want = fnv(&sent);
+    let writer = bounded(move || {
+        w.write_all(&sent).unwrap();
+        w.shutdown(std::net::Shutdown::Write).unwrap();
+    });
+    let (n, h) = drained(&c);
+    writer.join("the writer");
+    assert_eq!((n, h), (N, want), "the echo, byte for byte");
+    let moved = relay::spliced_by(end).expect("its relay ended");
+    if cfg!(target_os = "linux") {
+        assert!(moved >= 2 * N, "both ways spliced: {moved} bytes");
+    }
+}
+
+/// What waits in tarae when the look ends goes first, in order: the client sends while the outside hasn't
+/// answered (its bytes fill the sockets and the relay's 64 KB to the outside), then the outside answers — the
+/// look is over — and reads everything: the same bytes, none skipped by the switch to pipes (Linux: spliced
+/// after).
+#[test]
+fn what_waits_in_tarae_goes_before_the_switch() {
+    const N: usize = 16 << 20;
+    let l = TcpListener::bind((LO, 0)).unwrap();
+    let at = l.local_addr().unwrap();
+    let (resolve, _) = resolver(vec![("example.invalid", vec![vec![at]])]);
+    let f = start(resolve, limits());
+    let (go, answer) = mpsc::channel::<()>();
+    let outside = bounded(move || {
+        let mut s = limited(accepted(&l));
+        let (mut hello, mut b) = (Vec::new(), [0u8; 4096]);
+        while !matches!(parse::server_name(&hello), Ok(Some(_))) {
+            let n = s.read(&mut b).unwrap();
+            hello.extend_from_slice(&b[..n]);
+        }
+        // (not read meanwhile: the client's bytes wait — in the sockets, and in tarae)
+        answer.recv_timeout(LIMIT).unwrap();
+        s.write_all(&server_hello(&[7; 32])).unwrap();
+        drained(&s)
+    });
+    let (mut c, _) = connection(&f.proxy, 1, 1, rules(&["example.invalid"]));
+    let end = c.local_addr().unwrap();
+    assert_eq!(ask(&mut c, &connect_head("example.invalid:443")), 200);
+    c.write_all(curl_hello()).unwrap();
+    let sent = seeded(12, N);
+    c.set_nonblocking(true).unwrap();
+    let mut n = 0;
+    while n < N {
+        match c.write(&sent[n..(n + (64 << 10)).min(N)]) {
+            Ok(k) => n += k,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+            Err(e) => panic!("{e}"),
+        }
+    }
+    c.set_nonblocking(false).unwrap();
+    assert!(n > 64 << 10, "the sockets and tarae's 64 KB filled first: {n}");
+    go.send(()).unwrap();
+    let mut w = limited(c.try_clone().unwrap());
+    let rest = sent[n..].to_vec();
+    let writer = bounded(move || {
+        w.write_all(&rest).unwrap();
+        w.shutdown(std::net::Shutdown::Write).unwrap();
+    });
+    let back = drained(&c);
+    writer.join("the writer");
+    assert_eq!(back.0, server_hello(&[7; 32]).len());
+    assert_eq!(outside.join("the outside"), (N, fnv(&sent)), "every byte, in order");
+    let moved = relay::spliced_by(end).expect("its relay ended");
+    if cfg!(target_os = "linux") {
+        assert!(moved >= N - n, "the rest spliced: {moved}");
+    }
+}
+
+/// The outside for a slow reader: a ClientHello read, a ServerHello answered (the look over), `SLOW` seeded bytes
+/// sent, closed.
+fn sends_and_closes(s: TcpStream) -> Vec<u8> {
+    let mut s = limited(s);
+    let (mut hello, mut b) = (Vec::new(), [0u8; 4096]);
+    while !matches!(parse::server_name(&hello), Ok(Some(_))) {
+        match s.read(&mut b) {
+            Ok(n @ 1..) => hello.extend_from_slice(&b[..n]),
+            _ => return Vec::new(),
+        }
+    }
+    let _ = s.write_all(&server_hello(&[7; 32]));
+    let _ = s.write_all(&seeded(13, SLOW));
+    Vec::new()
+}
+
+const SLOW: usize = 512 << 10;
+
+/// A slow reader gets the end of what was sent: the outside sends and closes while the bytes still wait for the
+/// client (its buffers small, its reads slow) — the client's side is shut down only once they've all gone, so
+/// none are cut off. (A side shut while its pipe still holds bytes loses them.)
+#[test]
+fn a_slow_readers_end_isnt_cut() {
+    let out = outside(sends_and_closes);
+    let (resolve, _) = resolver(vec![("example.invalid", vec![vec![out.at]])]);
+    let f = start(resolve, limits());
+    // (the run's end and tarae's both small: the bytes wait in the relay, not in the sockets)
+    let l = TcpListener::bind((LO, 0)).unwrap();
+    let mut c = TcpStream::connect(l.local_addr().unwrap()).unwrap();
+    let (ours, _) = l.accept().unwrap();
+    let small = |s: &TcpStream, opt| {
+        let v: libc::c_int = 4096;
+        // SAFETY: our socket, an int option of its size.
+        unsafe {
+            libc::setsockopt(
+                s.as_raw_fd(),
+                libc::SOL_SOCKET,
+                opt,
+                (&raw const v).cast(),
+                size_of_val(&v) as _,
+            )
+        };
+    };
+    small(&ours, libc::SO_SNDBUF);
+    small(&c, libc::SO_RCVBUF);
+    let (told, _said) = mpsc::channel();
+    let rules = Arc::new(rules(&["example.invalid"]));
+    let conn = Connection { fd: ours.into(), run: 1, session: 1, process: "curl".into(), rules, told };
+    assert!(f.proxy.send(ToProxy::Connection(conn)));
+    c.set_read_timeout(Some(WAIT)).unwrap();
+    let end = c.local_addr().unwrap();
+    assert_eq!(ask(&mut c, &connect_head("example.invalid:443")), 200);
+    c.write_all(curl_hello()).unwrap();
+    let mut got = Vec::new();
+    let mut b = [0u8; 4096];
+    loop {
+        match c.read(&mut b) {
+            Ok(0) => break,
+            Ok(n) => got.extend_from_slice(&b[..n]),
+            Err(e) => panic!("after {} bytes: {e}", got.len()),
+        }
+        // (a slow reader: the outside's end comes while its bytes still wait)
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let sh = server_hello(&[7; 32]).len();
+    assert_eq!((got.len() - sh, fnv(&got[sh..])), (SLOW, fnv(&seeded(13, SLOW))), "every byte, to the end");
+    // (the client's side ends too: its relay is done)
+    drop(c);
+    let moved = relay::spliced_by(end).expect("its relay ended");
+    if cfg!(target_os = "linux") {
+        assert!(moved >= SLOW, "spliced: {moved}");
+    }
+}
+
+/// The outside for a half-close: a ClientHello read, a ServerHello (not a retry) answered — the look is over —
+/// then the client's bytes read to their end, then `M` seeded bytes back, then closed. What it read.
+fn halves(s: TcpStream) -> Vec<u8> {
+    let mut s = limited(s);
+    let (mut hello, mut b) = (Vec::new(), [0u8; 4096]);
+    while !matches!(parse::server_name(&hello), Ok(Some(_))) {
+        match s.read(&mut b) {
+            Ok(n @ 1..) => hello.extend_from_slice(&b[..n]),
+            _ => return Vec::new(),
+        }
+    }
+    let _ = s.write_all(&server_hello(&[7; 32]));
+    let mut got = Vec::new();
+    let _ = s.read_to_end(&mut got);
+    let _ = s.write_all(&seeded(9, HALF_M));
+    got
+}
+
+const HALF_N: usize = 1 << 20;
+const HALF_M: usize = 3 << 20;
+
+/// A tunnel half-closes as its sides do, spliced too: the client sends N bytes and shuts its writing — the
+/// outside reads exactly those, then its end; the outside answers M bytes and closes — the client reads exactly
+/// those, then its end. A tool waiting for the other side's end isn't left hanging. (On macOS it catches the
+/// hung-up rule too: the client's half-closed side left out of `poll` cut the answer to 0.8 of 3 MiB.)
+#[test]
+fn a_spliced_tunnel_half_closes_as_its_sides_do() {
+    let out = outside(halves);
+    let (resolve, _) = resolver(vec![("example.invalid", vec![vec![out.at]])]);
+    let f = start(resolve, limits());
+    let (mut c, _) = connection(&f.proxy, 1, 1, rules(&["example.invalid"]));
+    let end = c.local_addr().unwrap();
+    assert_eq!(ask(&mut c, &connect_head("example.invalid:443")), 200);
+    c.write_all(curl_hello()).unwrap();
+    let mut sh = vec![0u8; server_hello(&[7; 32]).len()];
+    c.read_exact(&mut sh).unwrap();
+    let sent = seeded(8, HALF_N);
+    c.write_all(&sent).unwrap();
+    c.shutdown(std::net::Shutdown::Write).unwrap();
+    // (the answer read as it comes: the outside says what it read only once its answer is sent)
+    let reader = bounded(move || drained(&c));
+    let got = out.got.recv_timeout(Duration::from_secs(30)).expect("the outside read to its end");
+    assert!(got == sent, "the outside read {} bytes, sent {}", got.len(), sent.len());
+    let back = reader.join("the client's reader");
+    assert_eq!(back, (HALF_M, fnv(&seeded(9, HALF_M))), "the client read the answer, then its end");
+    let moved = relay::spliced_by(end).expect("its relay ended");
+    if cfg!(target_os = "linux") {
+        assert!(moved >= HALF_N + HALF_M, "spliced: {moved}");
+    }
+}
+
+/// An http server for a big answer: a head and its `Content-Length` body read, then 8 MiB of seeded bytes after
+/// its own head, then closed. What it read.
+fn big_web(s: TcpStream) -> Vec<u8> {
+    let mut s = limited(s);
+    let got = web_request(&mut s);
+    let body = seeded(10, BIG);
+    let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {BIG}\r\nConnection: close\r\n\r\n");
+    let _ = s.write_all(head.as_bytes());
+    let _ = s.write_all(&body);
+    got
+}
+
+const BIG: usize = 8 << 20;
+
+/// Reads one request's head and its `Content-Length` body from `s`.
+fn web_request(s: &mut TcpStream) -> Vec<u8> {
+    let (mut got, mut b) = (Vec::new(), [0u8; 4096]);
+    let whole = |g: &[u8]| {
+        let end = g.windows(4).position(|w| w == b"\r\n\r\n")?;
+        let head = String::from_utf8_lossy(&g[..end]).to_ascii_lowercase();
+        let len = head.lines().find_map(|l| l.strip_prefix("content-length: ")?.trim().parse().ok());
+        (g.len() >= end + 4 + len.unwrap_or(0)).then_some(())
+    };
+    while whole(&got).is_none() {
+        match s.read(&mut b) {
+            Ok(n @ 1..) => got.extend_from_slice(&b[..n]),
+            _ => return got,
+        }
+    }
+    got
+}
+
+/// Plain http: a POST's body goes through counted (pumped), and once it's whole the answer — 8 MiB here — comes
+/// back whole and, on Linux, spliced; the server got exactly the rebuilt head and the body.
+#[test]
+fn a_plain_answers_bulk_is_spliced_and_whole() {
+    let out = outside(big_web);
+    let (resolve, _) = resolver(vec![("web.test", vec![vec![out.at]])]);
+    let f = start(resolve, limits());
+    let (mut c, _) = connection(&f.proxy, 1, 1, rules(&["web.test"]));
+    let end = c.local_addr().unwrap();
+    c.write_all(b"POST http://web.test/up HTTP/1.1\r\nContent-Length: 3\r\n\r\nx=").unwrap();
+    std::thread::sleep(Duration::from_millis(20));
+    c.write_all(b"1").unwrap();
+    let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {BIG}\r\nConnection: close\r\n\r\n");
+    let mut h = vec![0u8; head.len()];
+    c.read_exact(&mut h).unwrap();
+    assert_eq!(String::from_utf8_lossy(&h), head);
+    assert_eq!(drained(&c), (BIG, fnv(&seeded(10, BIG))), "the answer, whole");
+    let got = String::from_utf8(out.got.recv_timeout(WAIT).unwrap()).unwrap();
+    assert!(got.starts_with("POST /up HTTP/1.1\r\n") && got.ends_with("\r\n\r\nx=1"), "{got:?}");
+    let moved = relay::spliced_by(end).expect("its relay ended");
+    if cfg!(target_os = "linux") {
+        assert!(moved >= BIG, "the answer spliced: {moved}");
+    }
+}
+
+/// Two connected loopback pairs: the relay's client and the run's end, the relay's server and the outside's end.
+fn two_pairs() -> ((TcpStream, TcpStream), (TcpStream, TcpStream)) {
+    let pair = || {
+        let l = TcpListener::bind((LO, 0)).unwrap();
+        let far = TcpStream::connect(l.local_addr().unwrap()).unwrap();
+        (l.accept().unwrap().0, far)
+    };
+    (pair(), pair())
+}
+
+/// A relay on a thread of its own, waited for at most `LIMIT`: how it ended, and its thread's own CPU seconds
+/// (`CLOCK_THREAD_CPUTIME_ID`, both systems).
+fn relay_thread(
+    client: TcpStream,
+    server: TcpStream,
+    pipes: fn() -> io::Result<relay::Pipes>,
+) -> Bounded<(relay::End, f64)> {
+    bounded(move || {
+        let end = relay::relay_with(client, server, None, WAIT, b"", None, pipes);
+        // SAFETY: a timespec of ours, filled for this thread.
+        let mut t: libc::timespec = unsafe { std::mem::zeroed() };
+        unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) };
+        (end, t.tv_sec as f64 + t.tv_nsec as f64 / 1e9)
+    })
+}
+
+/// `s`'s buffer `opt` (`SO_SNDBUF`, `SO_RCVBUF`) set to 4 KB: bytes wait in the relay, not in the sockets.
+fn small(s: &TcpStream, opt: libc::c_int) {
+    let v: libc::c_int = 4096;
+    // SAFETY: our socket, an int option of its size.
+    unsafe {
+        libc::setsockopt(s.as_raw_fd(), libc::SOL_SOCKET, opt, (&raw const v).cast(), size_of_val(&v) as _)
+    };
+}
+
+/// A client that half-closes, then reads slowly, doesn't spin the relay: its side, read to its end, is polled only
+/// for writing while bytes wait for it — `poll` waits until it takes them (polled for reading after its end, it
+/// would answer at once, every round: broken so once, the relay's CPU was its whole time). The relay thread's own
+/// CPU stays a small part of the transfer's time, and the bytes come through whole. (Linux's splice loop: the
+/// full-pipe rule — `a_full_pipe_doesnt_spin_the_relay`.)
+#[test]
+fn a_half_closed_slow_reader_doesnt_spin_the_relay() {
+    // (enough that bytes wait in the relay: macOS's buffers took 256 KiB whole; Linux's 4 KB window crawls on
+    // delayed acks — 4 MiB there took over a minute)
+    const BYTES: usize = if cfg!(target_os = "linux") { 256 << 10 } else { 4 << 20 };
+    let ((client, run_end), (server, outside_end)) = two_pairs();
+    let (run_end, outside_end) = (limited(run_end), limited(outside_end));
+    small(&client, libc::SO_SNDBUF);
+    small(&run_end, libc::SO_RCVBUF);
+    run_end.shutdown(std::net::Shutdown::Write).unwrap();
+    let pumped = || Err(io::Error::from(io::ErrorKind::Unsupported));
+    let relay = relay_thread(client, server, pumped);
+    let t0 = Instant::now();
+    let sent = seeded(17, BYTES);
+    let to = sent.clone();
+    let mut from = outside_end;
+    let sender = bounded(move || {
+        from.write_all(&to).unwrap();
+        from.shutdown(std::net::Shutdown::Write).unwrap();
+        from
+    });
+    // (a slow reader: nothing read for a while — the relay's bytes wait for it, its side hung up)
+    std::thread::sleep(Duration::from_millis(300));
+    let (mut got, mut b) = (Vec::new(), [0u8; 4096]);
+    loop {
+        match (&run_end).read(&mut b) {
+            Ok(0) => break,
+            Ok(n) => got.extend_from_slice(&b[..n]),
+            Err(e) => panic!("{e}"),
+        }
+    }
+    let wall = t0.elapsed().as_secs_f64();
+    let from = sender.join("the sender");
+    assert!(got == sent, "{} of {BYTES} bytes, in order", got.len());
+    drop((from, run_end));
+    let (_, cpu) = relay.join("the relay");
+    assert!(cpu < wall * 0.25, "the relay's CPU {cpu:.2} s over {wall:.2} s: it spun");
+}
+
+/// One transfer of `bytes` through a relay — `pipes` making its pipes (an Err: pumped) — `up` from the client's
+/// side, else from the server's: the seconds to the receiver's end, and the relay thread's own CPU seconds.
+#[cfg(target_os = "linux")]
+fn relayed(bytes: usize, up: bool, pipes: fn() -> io::Result<relay::Pipes>) -> (f64, f64) {
+    let ((client, run_end), (server, outside_end)) = two_pairs();
+    let relay = relay_thread(client, server, pipes);
+    let (from, to) = if up { (run_end, outside_end) } else { (outside_end, run_end) };
+    let (from, mut to) = (limited(from), limited(to));
+    let t0 = Instant::now();
+    let sender = bounded(move || {
+        let block = seeded(14, 1 << 20);
+        let mut from = from;
+        for _ in 0..bytes / block.len() {
+            from.write_all(&block).unwrap();
+        }
+        from.shutdown(std::net::Shutdown::Write).unwrap();
+        from
+    });
+    let (mut n, mut b) = (0, vec![0u8; 1 << 20]);
+    loop {
+        match to.read(&mut b) {
+            Ok(0) => break,
+            Ok(k) => n += k,
+            Err(e) => panic!("{e}"),
+        }
+    }
+    let secs = t0.elapsed().as_secs_f64();
+    let from = sender.join("the sender");
+    assert_eq!(n, bytes);
+    drop((from, to));
+    (secs, relay.join("the relay").1)
+}
+
+/// The relay's throughput and CPU on Linux, spliced against pumped (step 6a; R3 measured ≈ 1 GB/s at ≈ 1 CPU-s/GiB
+/// pumped, 2.0–2.5 GB/s at ≈ 0.4 spliced): 512 MiB each way, 5 rounds, the order rotated; medians, and the
+/// relay thread's own CPU. Numbers for `cargo perf`; spliced must be the faster and the cheaper.
+#[cfg(target_os = "linux")]
+#[test]
+fn perf_relay_spliced_vs_pumped() {
+    if crate::test_results::unoptimized("sandbox::proxy::tests::perf_relay_spliced_vs_pumped") {
+        return;
+    }
+    const BYTES: usize = 512 << 20;
+    let pumped = || Err(io::Error::from(io::ErrorKind::Unsupported));
+    type MakePipes = fn() -> io::Result<relay::Pipes>;
+    let ways: [(&str, MakePipes); 2] = [("spliced", relay::pipes), ("pumped", pumped)];
+    let mut said = Vec::new();
+    for (dir, up) in [("down", false), ("up", true)] {
+        let mut runs: [Vec<(f64, f64)>; 2] = [Vec::new(), Vec::new()];
+        for round in 0..5 {
+            for k in 0..2 {
+                let w = (round + k) % 2;
+                runs[w].push(relayed(BYTES, up, ways[w].1));
+            }
+        }
+        let median = |mut v: Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        let gib = BYTES as f64 / f64::from(1 << 30);
+        let mut rates = [0.0; 2];
+        let mut cpus = [0.0; 2];
+        for (w, (name, _)) in ways.iter().enumerate() {
+            let mib_s: Vec<f64> = runs[w].iter().map(|r| (BYTES >> 20) as f64 / r.0).collect();
+            let (lo, hi) =
+                (mib_s.iter().copied().fold(f64::MAX, f64::min), mib_s.iter().copied().fold(0.0, f64::max));
+            rates[w] = median(mib_s);
+            cpus[w] = median(runs[w].iter().map(|r| r.1 / gib).collect());
+            said.push(format!(
+                "{dir} {name}: {:.0} MiB/s [{lo:.0}–{hi:.0}], {:.2} CPU-s/GiB",
+                rates[w], cpus[w]
+            ));
+            let line = format!("PERF relay_{name}_{dir}_mib_s {:.0} noise=400\n", rates[w]);
+            let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+            let line = format!("PERF relay_{name}_{dir}_cpu_s_per_gib {:.3} noise=0.2\n", cpus[w]);
+            let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+        }
+        assert!(rates[0] > rates[1] && cpus[0] < cpus[1], "{dir}: spliced not ahead — {said:?}");
+    }
+    eprintln!("{}", said.join("\n"));
+}
+
+/// A full pipe doesn't spin the relay: a pipe holds 16 slots, one per small segment, so it can be full well under
+/// its byte count. With one-page pipes and a slow reader behind small buffers, the relay thread waits on the far
+/// side rather than asking the ready socket again and again — its own CPU stays a small part of the transfer's
+/// time — and the bytes come through whole.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_full_pipe_doesnt_spin_the_relay() {
+    // (a 4 KB window crawls on delayed acks: a quarter MiB is seconds already)
+    const BYTES: usize = 256 << 10;
+    let ((client, run_end), (server, outside_end)) = two_pairs();
+    let (run_end, outside_end) = (limited(run_end), limited(outside_end));
+    small(&client, libc::SO_SNDBUF);
+    small(&run_end, libc::SO_RCVBUF);
+    let relay = relay_thread(client, server, relay::one_page_pipes);
+    let t0 = Instant::now();
+    let sent = seeded(15, BYTES);
+    let to = sent.clone();
+    let mut from = outside_end;
+    let sender = bounded(move || {
+        from.write_all(&to).unwrap();
+        from.shutdown(std::net::Shutdown::Write).unwrap();
+        from
+    });
+    let (mut got, mut b) = (Vec::new(), [0u8; 4096]);
+    loop {
+        match (&run_end).read(&mut b) {
+            Ok(0) => break,
+            Ok(n) => got.extend_from_slice(&b[..n]),
+            Err(e) => panic!("{e}"),
+        }
+        // (a slow reader: the pipe stays full while it reads)
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let wall = t0.elapsed().as_secs_f64();
+    let from = sender.join("the sender");
+    assert!(got == sent, "{} of {BYTES} bytes, in order", got.len());
+    // (both ends closed: the relay is done)
+    drop((from, run_end));
+    let (_, cpu) = relay.join("the relay");
+    assert!(cpu < wall * 0.25, "the relay's CPU {cpu:.2} s over {wall:.2} s: it spun");
+}
+
+/// A peer that resets while the relay splices to it never raises SIGPIPE: `splice` has no `MSG_NOSIGNAL`, and
+/// tarae lives through the signal only while it's ignored (a restart's window resets it). In a process of its own
+/// (`reset_mid_splice_in_its_own_process`), SIGPIPE at its default — it would end that process: the child ends
+/// well, each of its relays `Done`.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_peer_reset_mid_splice_raises_no_sigpipe() {
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "sandbox::proxy::tests::reset_mid_splice_in_its_own_process",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("TARAE_SIGPIPE_PROBE", "1")
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(out.status.signal(), None, "the child was ended by a signal: {said}");
+    assert!(out.status.success() && said.contains("1 passed"), "the child ran it: {said}");
+}
+
+/// `a_peer_reset_mid_splice_raises_no_sigpipe`'s child: SIGPIPE at its default here (this process only), then 30
+/// tunnels spliced at full speed whose client half-closes, reads a little, and resets (`SO_LINGER` 0) — the relay
+/// keeps splicing to it, and its socket (in CLOSE_WAIT: an `EPIPE`, not a reset) is where SIGPIPE would come from.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "run by a_peer_reset_mid_splice_raises_no_sigpipe in a process of its own"]
+fn reset_mid_splice_in_its_own_process() {
+    if std::env::var_os("TARAE_SIGPIPE_PROBE").is_none() {
+        return;
+    }
+    // SAFETY: this process is the test's own child; its SIGPIPE back at the default.
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+    for _ in 0..30 {
+        let ((client, run_end), (server, outside_end)) = two_pairs();
+        let relay = relay_thread(client, server, relay::pipes);
+        let mut from = limited(outside_end);
+        let sender = bounded(move || {
+            let block = seeded(16, 1 << 20);
+            while from.write_all(&block).is_ok() {}
+        });
+        let mut c = limited(run_end);
+        c.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut b = vec![0u8; 256 << 10];
+        c.read_exact(&mut b).unwrap();
+        let linger = libc::linger { l_onoff: 1, l_linger: 0 };
+        // SAFETY: our socket, a linger of its size.
+        unsafe {
+            libc::setsockopt(
+                c.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_LINGER,
+                (&raw const linger).cast(),
+                size_of_val(&linger) as _,
+            )
+        };
+        drop(c);
+        assert_eq!(relay.join("the relay").0, relay::End::Done);
+        sender.join("the sender");
+    }
+}
+
+/// A test reads its own relay's spliced count, never one an earlier relay on the same port left (ports are
+/// reused, and most tests never read theirs): a relay starting on the port takes the leftover out, and its own
+/// count is there only once it ended.
+#[test]
+fn a_reused_port_never_gives_another_relays_count() {
+    // (an address no real relay has: port 1 on loopback)
+    let at = SocketAddr::new(LO, 1);
+    relay::started(at);
+    relay::ended(at, 111);
+    relay::started(at);
+    let early = bounded(move || relay::spliced_by(at));
+    std::thread::sleep(Duration::from_millis(50));
+    relay::ended(at, 222);
+    assert_eq!(early.join("the reader"), Some(222), "the later relay's own, read before it ended");
+    let gone = bounded(move || relay::spliced_by(at));
+    assert_eq!(
+        gone.join("the second reader"),
+        None,
+        "the earlier relay's count went when the later one started"
+    );
+}
+
+/// Without pipes (descriptors run short) a tunnel isn't refused: the relay pumps it, the same bytes through.
+#[test]
+fn without_pipes_it_pumps() {
+    let ((client, run_end), (server, outside_end)) = two_pairs();
+    let none = || Err(io::Error::from_raw_os_error(libc::EMFILE));
+    let relayed = relay_thread(client, server, none);
+    let sent = seeded(11, 1 << 20);
+    let mut w = limited(run_end.try_clone().unwrap());
+    let to = sent.clone();
+    let writer = bounded(move || {
+        w.write_all(&to).unwrap();
+        w.shutdown(std::net::Shutdown::Write).unwrap();
+    });
+    let reader = bounded(move || {
+        let got = drained(&outside_end);
+        drop(outside_end);
+        got
+    });
+    writer.join("the writer");
+    assert_eq!(reader.join("the reader"), (sent.len(), fnv(&sent)), "pumped through");
+    drop(run_end);
+    assert_eq!(relayed.join("the relay").0, relay::End::Done);
 }
 
 /// An answer for one run leaves another run's connection to the same host waiting — and the user is asked for
