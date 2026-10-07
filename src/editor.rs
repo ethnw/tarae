@@ -2983,10 +2983,12 @@ impl Editor {
     }
 
     /// Whether the front card takes the keys: given it with `C-q`, or in normal mode with nothing else
-    /// holding them (no prefix key, prompt, picker, review, the chat's input or the terminal).
+    /// holding them (no prefix key, prompt, picker, review, the chat's input or the terminal) — and it hasn't
+    /// stepped aside for what its `h` went to (`Offer.aside`).
     pub fn card_has_keys(&self) -> bool {
         self.card_keys
             || (self.mode == Mode::Normal
+                && !self.offers.first().is_some_and(|o| o.aside)
                 && self.pending.is_empty()
                 && self.prompt.is_none()
                 && self.picker.is_none()
@@ -3033,7 +3035,7 @@ impl Editor {
         }
         // Its whole text open in its buffer, the one in sight (its bar): the keys that read it move it — `ge`
         // to its end, as the bar asks (they were swallowed, and `y` waited for a read nobody could do)
-        if self.offer_bar() && card_reads(key, &self.pending) {
+        if self.offer_reading() && card_reads(key, &self.pending) {
             self.pending.push(key);
             self.dispatch_pending();
             return true;

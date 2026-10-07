@@ -56,9 +56,12 @@ pub struct Session {
     pub code_review: Option<crate::codereview::CodeReview>,
     /// The review being opened is for the reviewer (`space v c`) — asked once it's open.
     pub review_ask: bool,
-    /// The review being opened is for the high-risk changes a bring waits on (its card's `h`, #196) — it
-    /// opens on the first one not looked at.
-    pub review_high: bool,
+    /// The review being opened is for the high-risk changes a bring's card names (its `h`, #196): those not
+    /// looked at, and the card's id — it opens on the first (`codereview::held_go`).
+    pub review_high: Option<(u64, Vec<crate::codereview::Held>)>,
+    /// The bring's changes the review couldn't show as they are now, in a buffer of their own as the commits
+    /// have them (`codereview::HeldView`) — `space v h` there looks at one.
+    pub held_view: Option<crate::codereview::HeldView>,
     /// The reviewer — a second Claude reviewing the code review's changes, apart from the chat's
     /// conversation (`reviewer.rs`): reading, or what it found last.
     pub reviewer: Option<crate::reviewer::Reviewer>,
@@ -213,7 +216,8 @@ impl Session {
             review: None,
             code_review: None,
             review_ask: false,
-            review_high: false,
+            review_high: None,
+            held_view: None,
             reviewer: None,
             sidebar: None,
             side_last: crate::sidebar::Mode::Files,

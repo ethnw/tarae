@@ -127,7 +127,7 @@ pub struct Hunk {
     pub removed: Vec<String>,
     pub added: Vec<String>,
     /// A change of mode instead of lines — (old, new), `none` for a file that wasn't there: made executable
-    /// (`100755`) or a symlink (`120000`), the only ones `parse_diff` gives.
+    /// (`100755`) or a symlink (`120000`), the only ones `mode_change` gives.
     pub mode: Option<(String, String)>,
 }
 
@@ -159,7 +159,7 @@ pub fn lang_of(rel: &str) -> Option<&'static str> {
 /// Hunk `h` of file `rel` (from the repository's root; `lang` its language) graded by `rules`; `in_test`: it
 /// lies wholly inside a test (the document's tree says).
 pub fn grade(rel: &str, lang: Option<&str>, h: &Hunk, rules: &Rules, in_test: bool) -> (Grade, String) {
-    // (a permission: `parse_diff` gives only the modes that matter)
+    // (a permission: `mode_change` gives only the modes that matter)
     if let Some((_, new)) = &h.mode {
         let what = if new == "120000" { "now a symlink" } else { "now executable" };
         return (Grade::High, what.into());
@@ -273,193 +273,50 @@ fn part_matches(pat: &str, part: &str) -> bool {
     }
 }
 
-/// One file's block of a diff while it's read: its path from the header (a change of mode only has no
-/// `---`/`+++`), from `---`, the modes it names, and its entry once it has one.
-#[derive(Default)]
-struct Block {
-    header: String,
-    old_path: Option<String>,
-    old_mode: Option<String>,
-    new_mode: Option<String>,
-    entry: Option<usize>,
-}
-
-/// A name as git writes it in a diff (`a/x`, `"b/\303\274/x"`, `b/a b.rs` + a tab): the path itself.
-fn diff_path(s: &str) -> String {
-    let s = s.trim_end_matches('\t');
-    let s = match s.strip_prefix('"').and_then(|q| q.strip_suffix('"')) {
-        Some(q) => unquote(q),
-        None => s.to_string(),
-    };
-    match s.strip_prefix("a/").or_else(|| s.strip_prefix("b/")) {
-        Some(rel) => rel.to_string(),
-        None => s,
-    }
-}
-
-/// git's C-style quoting taken off (what's between the quotes): `\"` `\\` `\t` `\n` … and `\ooo` bytes (a
-/// name's UTF-8, byte by byte).
-fn unquote(q: &str) -> String {
-    let b = q.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] != b'\\' || i + 1 >= b.len() {
-            out.push(b[i]);
-            i += 1;
-            continue;
-        }
-        let c = b[i + 1];
-        let simple = match c {
-            b'a' => Some(7),
-            b'b' => Some(8),
-            b't' => Some(b'\t'),
-            b'n' => Some(b'\n'),
-            b'v' => Some(11),
-            b'f' => Some(12),
-            b'r' => Some(b'\r'),
-            b'"' | b'\\' => Some(c),
-            _ => None,
-        };
-        match simple {
-            Some(x) => {
-                out.push(x);
-                i += 2;
-            }
-            None if i + 4 <= b.len() && b[i + 1..i + 4].iter().all(|d| (b'0'..=b'7').contains(d)) => {
-                let v = b[i + 1..i + 4].iter().fold(0u32, |v, d| v * 8 + u32::from(d - b'0'));
-                out.push(v as u8);
-                i += 4;
-            }
-            None => {
-                out.push(b[i]);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-/// The new path a `diff --git <a> <b>` header names (`--no-renames`: both the same name).
-fn header_path(h: &str) -> String {
-    if let Some(rest) = h.strip_prefix('"') {
-        // The first name quoted: up to its closing quote (not one escaped), the second after it
-        let mut esc = false;
-        let end = rest.char_indices().find(|&(_, c)| {
-            let close = c == '"' && !esc;
-            esc = c == '\\' && !esc;
-            close
-        });
-        if let Some((at, _)) = end {
-            return diff_path(rest[at + 1..].trim_start());
-        }
-    }
-    // `a/X b/X`: the second half
-    let mid = h.len().saturating_sub(1) / 2;
-    match h.get(mid + 1..) {
-        Some(b) if h.as_bytes().get(mid) == Some(&b' ') => diff_path(b),
-        _ => diff_path(h.split_once(' ').map_or(h, |(_, b)| b)),
-    }
-}
-
-/// A block read to its end: a change of mode that matters — made executable, or a symlink — as a change of
-/// its own, in its file's entry.
-fn block_done(out: &mut Vec<(String, Vec<Hunk>)>, b: Option<Block>) {
-    let Some(b) = b else { return };
-    let Some(new) = b.new_mode else { return };
-    let old = b.old_mode.unwrap_or_else(|| "none".into());
-    if !matches!(new.as_str(), "100755" | "120000") || old == new {
-        return;
-    }
-    let i = match b.entry {
-        Some(i) => i,
-        None => {
-            out.push((b.header, Vec::new()));
-            out.len() - 1
-        }
-    };
-    out[i].1.push(Hunk { mode: Some((old, new)), ..Hunk::default() });
-}
-
-/// A `git diff -U0` (or `diff-index -p -U0`) as each file's changes — by its path now (a deleted file's by
-/// its path then), git's quoting taken off. Binary files have no lines here; a file made executable or a
-/// symlink has a change of mode (`Hunk.mode`).
-pub fn parse_diff(text: &str) -> Vec<(String, Vec<Hunk>)> {
-    let mut out: Vec<(String, Vec<Hunk>)> = Vec::new();
-    let mut block: Option<Block> = None;
-    let mut in_hunk = false;
-    for line in text.lines() {
-        if let Some(h) = line.strip_prefix("diff --git ") {
-            block_done(&mut out, block.take());
-            block = Some(Block { header: header_path(h), ..Block::default() });
-            in_hunk = false;
-            continue;
-        }
-        if !in_hunk && let Some(b) = block.as_mut() {
-            let field = |p: &str| line.strip_prefix(p).map(|m| m.trim().to_string());
-            if let Some(m) = field("old mode ").or_else(|| field("deleted file mode ")) {
-                b.old_mode = Some(m);
-            } else if let Some(m) = field("new mode ").or_else(|| field("new file mode ")) {
-                b.new_mode = Some(m);
-            } else if let Some(p) = line.strip_prefix("--- ") {
-                b.old_path = (p != "/dev/null").then(|| diff_path(p));
-            } else if let Some(p) = line.strip_prefix("+++ ") {
-                let rel = match p {
-                    "/dev/null" => b.old_path.clone().unwrap_or_else(|| b.header.clone()),
-                    p => diff_path(p),
-                };
-                out.push((rel, Vec::new()));
-                b.entry = Some(out.len() - 1);
-            }
-        }
-        if let Some(h) = line.strip_prefix("@@ ") {
-            in_hunk = true;
-            // `@@ -a,b +c,d @@`: c is where it is now (1-based); with d 0 the lines removed were after line c
-            let new = h.split(' ').find(|w| w.starts_with('+')).unwrap_or("+0");
-            let (c, d): (usize, usize) = match new[1..].split_once(',') {
-                Some((c, d)) => (c.parse().unwrap_or(0), d.parse().unwrap_or(1)),
-                None => (new[1..].parse().unwrap_or(0), 1),
-            };
-            let at = if d == 0 { c } else { c.saturating_sub(1) };
-            if let Some(f) = out.last_mut() {
-                f.1.push(Hunk { at, ..Hunk::default() });
-            }
-            continue;
-        }
-        if !in_hunk {
-            continue;
-        }
-        let Some(h) = out.last_mut().and_then(|f| f.1.last_mut()) else { continue };
-        if let Some(l) = line.strip_prefix('-') {
-            h.removed.push(l.to_string());
-        } else if let Some(l) = line.strip_prefix('+') {
-            h.added.push(l.to_string());
-        }
-    }
-    block_done(&mut out, block);
-    out
-}
-
-/// `base` → `now` as changes (`git::hunks`, with their lines).
-pub fn hunks_of(base: &str, now: &str) -> Vec<Hunk> {
+/// `base` → `now` as changes — **the one way** a file's text becomes changes, for a review (an open
+/// document's diff, a file not opened yet) and a bring alike, so a line looked at in one is a line the other
+/// knows (`codereview::highs_between`; 2026-10-07: git's own diff named a blank line removed that this one
+/// kept, and the bring waited on a look nothing could give). Never git's diff: its algorithm and heuristics
+/// are the user's config.
+pub fn changes(base: &str, now: &str) -> Vec<Hunk> {
     let (b, n): (Vec<&str>, Vec<&str>) = (base.lines().collect(), now.lines().collect());
-    let take = |v: &[&str], r: &Range<usize>| {
-        v.get(r.clone()).unwrap_or_default().iter().map(|s| s.to_string()).collect()
-    };
-    crate::git::hunks(base, now)
+    let at = |v: &[&str], l: usize| v.get(l).map(|s| line_text(s).to_string());
+    lines_of(|l| at(&b, l), |l| at(&n, l), &crate::git::hunks(base, now))
+}
+
+/// A line as a change has it: without its `\n`, nor a `\r` before that (as `str::lines` gives it) — the one
+/// rule, whoever reads the line (`changes`, an open document's rope — `codereview::grade_doc`).
+pub fn line_text(raw: &str) -> &str {
+    let s = raw.strip_suffix('\n').unwrap_or(raw);
+    s.strip_suffix('\r').unwrap_or(s)
+}
+
+/// `hunks` — `git::hunks(base, now)`, worked out already (an open document's, on a worker) — with their lines,
+/// each read by `base`/`now` (line → its text by `line_text`; None past the end): only the changed lines are
+/// read, so an open document isn't made a `String` for them.
+pub fn lines_of(
+    base: impl Fn(usize) -> Option<String>,
+    now: impl Fn(usize) -> Option<String>,
+    hunks: &[crate::git::Hunk],
+) -> Vec<Hunk> {
+    let take = |f: &dyn Fn(usize) -> Option<String>, r: &Range<usize>| r.clone().map_while(f).collect();
+    hunks
         .iter()
         .map(|h| Hunk {
             at: h.lines.start,
-            removed: take(&b, &h.base),
-            added: take(&n, &h.lines),
+            removed: take(&base, &h.base),
+            added: take(&now, &h.lines),
             mode: None,
         })
         .collect()
 }
 
-/// A whole new file's lines as one change.
-pub fn added_whole(text: &str) -> Hunk {
-    Hunk { at: 0, removed: Vec::new(), added: text.lines().map(str::to_string).collect(), mode: None }
+/// A change of mode that matters (git's modes: `old`, `new`, `000000` for a file that wasn't there): made
+/// executable, or a symlink — a change of its own; any other, none.
+pub fn mode_change(old: &str, new: &str) -> Option<Hunk> {
+    let old = if old.bytes().all(|b| b == b'0') { "none" } else { old };
+    (matches!(new, "100755" | "120000") && old != new)
+        .then(|| Hunk { mode: Some((old.to_string(), new.to_string())), ..Hunk::default() })
 }
 
 /// A binary file as one change — its blob (git's id of its content: the same in a review and in the commits a
@@ -632,86 +489,38 @@ mod tests {
         }
     }
 
-    /// `git diff -U0` read back as changes: where each is now, the lines out and in — a new file, a deleted
-    /// one, and lines only removed (placed after the line before them).
+    /// Two texts as changes: where each is now, the lines out and in — a new file, a deleted one, and lines
+    /// only removed (placed where the line after them is now).
     #[test]
-    fn a_diff_reads_as_changes() {
-        let diff = "diff --git a/src/a.rs b/src/a.rs\nindex 1..2 100644\n--- a/src/a.rs\n+++ b/src/a.rs\n\
-                    @@ -3 +3 @@ fn x()\n-old\n+new\n@@ -9,2 +8,0 @@\n-gone 1\n-gone 2\n\
-                    diff --git a/n.rs b/n.rs\nnew file mode 100644\n--- /dev/null\n+++ b/n.rs\n@@ -0,0 +1,2 @@\n+a\n+b\n\
-                    diff --git a/d.rs b/d.rs\ndeleted file mode 100644\n--- a/d.rs\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n";
+    fn two_texts_read_as_changes() {
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
-        let f = parse_diff(diff);
         type Change = (usize, Vec<String>, Vec<String>);
-        let got: Vec<(&str, Vec<Change>)> = f
-            .iter()
-            .map(|(rel, hs)| {
-                (rel.as_str(), hs.iter().map(|h| (h.at, h.removed.clone(), h.added.clone())).collect())
-            })
-            .collect();
-        assert_eq!(
-            got,
-            [
-                ("src/a.rs", vec![(2, s(&["old"]), s(&["new"])), (8, s(&["gone 1", "gone 2"]), s(&[]))]),
-                ("n.rs", vec![(0, s(&[]), s(&["a", "b"]))]),
-                ("d.rs", vec![(0, s(&["x"]), s(&[]))]),
-            ]
-        );
-    }
-
-    /// git quotes a name with special characters C-style (`"b/\303\274/build.rs"`, `"b/x\"y\\z\tw.rs"`) and ends
-    /// one with a space in it with a tab: each comes back as the name itself — the same rel as `-z` gives.
-    #[test]
-    fn quoted_and_spaced_names_read_back_as_themselves() {
-        let one = |header: &str, minus: &str, plus: &str| {
-            let diff = format!(
-                "diff --git {header}\nindex 1..2 100644\n--- {minus}\n+++ {plus}\n@@ -1 +1 @@\n-a\n+b\n"
-            );
-            let f = parse_diff(&diff);
-            assert_eq!(f.len(), 1, "{diff}");
-            f[0].0.clone()
+        let got = |base: &str, now: &str| -> Vec<Change> {
+            changes(base, now).into_iter().map(|h| (h.at, h.removed, h.added)).collect()
         };
-        let q = r#""a/\303\274/build.rs" "b/\303\274/build.rs""#;
-        assert_eq!(one(q, r#""a/\303\274/build.rs""#, r#""b/\303\274/build.rs""#), "ü/build.rs");
-        assert_eq!(one("a/a b.rs b/a b.rs", "a/a b.rs\t", "b/a b.rs\t"), "a b.rs");
-        let odd = r#""b/x\"y\\z\tw.rs""#;
-        assert_eq!(
-            one(r#""a/x\"y\\z\tw.rs" "b/x\"y\\z\tw.rs""#, r#""a/x\"y\\z\tw.rs""#, odd),
-            "x\"y\\z\tw.rs"
-        );
-        // (a deleted file's name is its `---` one)
-        let gone = "diff --git \"a/\\303\\274.rs\" \"b/\\303\\274.rs\"\ndeleted file mode 100644\n--- \"a/\\303\\274.rs\"\n\
-                    +++ /dev/null\n@@ -1 +0,0 @@\n-x\n";
-        assert_eq!(parse_diff(gone)[0].0, "ü.rs");
+        let base = "a\nb\nold\nc\nd\ne\nf\ng\ngone 1\ngone 2\nh\n";
+        let now = "a\nb\nnew\nc\nd\ne\nf\ng\nh\n";
+        assert_eq!(got(base, now), [(2, s(&["old"]), s(&["new"])), (8, s(&["gone 1", "gone 2"]), s(&[]))]);
+        assert_eq!(got("", "a\nb\n"), [(0, s(&[]), s(&["a", "b"]))], "a new file");
+        assert_eq!(got("x\n", ""), [(0, s(&["x"]), s(&[]))], "a deleted one");
+        // (lines as `str::lines` has them: a CRLF file's `\r` isn't part of a line, a last line without `\n` is one)
+        assert_eq!(got("a\r\nb\r\n", "a\r\nc"), [(1, s(&["b"]), s(&["c"]))]);
     }
 
     /// A change of mode has no lines: made executable, or made a symlink, it's a change of its own — high, its
     /// key its path and its modes; any other mode change (or a deleted file's) isn't one.
     #[test]
     fn a_file_made_executable_or_a_symlink_is_a_high_change() {
-        type Modes = Vec<Option<(String, String)>>;
-        let modes = |diff: &str| -> Vec<(String, Modes)> {
-            parse_diff(diff)
-                .into_iter()
-                .map(|(rel, hs)| (rel, hs.into_iter().map(|h| h.mode).collect()))
-                .collect()
-        };
         let m = |o: &str, n: &str| Some((o.to_string(), n.to_string()));
-        // Mode only: no `---`/`+++` at all
-        let only = "diff --git a/run.sh b/run.sh\nold mode 100644\nnew mode 100755\n";
-        assert_eq!(modes(only), [("run.sh".to_string(), vec![m("100644", "100755")])]);
-        // With lines too, then a new executable file, then a symlink in a file's place, then one made plain
-        let more = "diff --git a/a.sh b/a.sh\nold mode 100644\nnew mode 100755\nindex 1..2\n--- a/a.sh\n+++ b/a.sh\n\
-                    @@ -1 +1 @@\n-a\n+b\n\
-                    diff --git a/new.sh b/new.sh\nnew file mode 100755\nindex 0..1\n--- /dev/null\n+++ b/new.sh\n@@ -0,0 +1 @@\n+x\n\
-                    diff --git a/l b/l\ndeleted file mode 100644\nindex 1..0\n--- a/l\n+++ /dev/null\n@@ -1 +0,0 @@\n-t\n\
-                    diff --git a/l b/l\nnew file mode 120000\nindex 0..1\n--- /dev/null\n+++ b/l\n@@ -0,0 +1 @@\n+/etc\n\
-                    diff --git a/p.sh b/p.sh\nold mode 100755\nnew mode 100644\n";
-        let got = modes(more);
-        assert_eq!(got[0], ("a.sh".to_string(), vec![None, m("100644", "100755")]));
-        assert_eq!(got[1], ("new.sh".to_string(), vec![None, m("none", "100755")]));
-        assert_eq!(got[3], ("l".to_string(), vec![None, m("none", "120000")]));
-        assert!(got.iter().all(|(rel, ms)| rel != "p.sh" || ms.iter().all(Option::is_none)), "{got:?}");
+        let mode = |o: &str, n: &str| mode_change(o, n).and_then(|h| h.mode);
+        assert_eq!(mode("100644", "100755"), m("100644", "100755"));
+        assert_eq!(mode("000000", "100755"), m("none", "100755"), "a new executable file");
+        assert_eq!(mode("100644", "120000"), m("100644", "120000"), "a symlink in a file's place");
+        assert_eq!(mode("000000", "120000"), m("none", "120000"));
+        for (o, n) in [("100755", "100644"), ("100644", "000000"), ("100755", "100755"), ("000000", "100644")]
+        {
+            assert_eq!(mode(o, n), None, "{o} → {n}");
+        }
         // Graded high, keyed by its modes
         let exec = Hunk { mode: m("100644", "100755"), ..Hunk::default() };
         let rules = Rules::default();

@@ -53,6 +53,12 @@ pub struct Offer {
     /// The changed lines' keys a held yes waits on (`risk::keys`): once the session has looked at every one,
     /// the hold goes (`codereview::held_sync`) — no asking again. Empty: held until answered otherwise.
     pub gate: Vec<crate::risk::Key>,
+    /// The high-risk changes a bring's card names, in its order (`codereview::Held`): `h` goes to the first
+    /// not looked at — in the review, or shown as the bring takes it when the review can't show it.
+    pub held_changes: Vec<crate::codereview::Held>,
+    /// It stepped aside for what its `h` went to (`codereview::card_highs`): up, but its letters are the code's
+    /// again — `C-q` answers it; back when every change it held for has had a look.
+    pub aside: bool,
 }
 
 /// A card's text in a buffer of its own (`v`) is titled this, then the card's title.
@@ -326,6 +332,8 @@ impl Offer {
             asked: None,
             held: None,
             gate: Vec::new(),
+            held_changes: Vec::new(),
+            aside: false,
         }
     }
 
@@ -764,7 +772,7 @@ impl crate::editor::Editor {
             if !old.installing() {
                 (old.question, old.working, old.failed) = (o.question, o.working, o.failed);
                 (old.decided, old.warning, old.asked, old.diff) = (o.decided, o.warning, o.asked, o.diff);
-                (old.held, old.gate) = (o.held, o.gate);
+                (old.held, old.gate, old.held_changes, old.aside) = (o.held, o.gate, o.held_changes, false);
                 (old.what, old.state) = (o.what, OfferState::Asking);
                 old.rev += 1;
             }
@@ -861,10 +869,7 @@ impl crate::editor::Editor {
             Code::Char('b') if o.base_steps() => self.offer_session_base(),
             Code::Char('f') if o.restart_other() => self.offer_restart_other(),
             // (the card stays: what it waits on is yours to look at, then it's answered)
-            Code::Char('h') if o.highs().is_some() => {
-                let bring = o.highs().flatten();
-                crate::codereview::card_highs(self, bring);
-            }
+            Code::Char('h') if o.highs().is_some() => crate::codereview::card_highs(self),
             // (the card stays: shown, it's still to answer)
             Code::Char('w') if o.stuck().is_some() => {
                 let s = o.stuck().cloned().expect("just seen");
@@ -1228,9 +1233,15 @@ impl crate::editor::Editor {
             .is_some_and(|o| self.offer_view.get().is_some_and(|v| (v.0, v.1) == (o.id, o.rev)))
     }
 
-    /// The front card's whole text (`v`) is the buffer in sight: the card steps aside to a one-row bar under
-    /// it (U8 — whole it covered the right half of the very text it's about); back whole once you leave it.
+    /// The front card is a one-row bar over the status line: its whole text (`v`) is the buffer in sight
+    /// (`offer_reading` — U8: whole it covered the right half of the very text it's about), or it stepped aside
+    /// for what its `h` went to (`Offer.aside` — whole it covered the code to look at).
     pub fn offer_bar(&self) -> bool {
+        self.offer_reading() || self.offers.first().is_some_and(|o| o.aside)
+    }
+
+    /// The front card's whole text (`v`) is the buffer in sight — back whole once you leave it.
+    pub fn offer_reading(&self) -> bool {
         self.offer_viewing() && self.offer_view.get().is_some_and(|v| v.2 == self.doc().id)
     }
 

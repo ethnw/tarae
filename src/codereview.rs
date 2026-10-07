@@ -131,6 +131,9 @@ pub struct CodeReview {
     /// The lines of each of its documents drawn since its text last changed (`drawn_sync`, after every
     /// frame): a high-risk change taller than its pane is on screen once every line of it was (`hunk_seen`).
     drawn: std::collections::HashMap<DocId, (u64, std::collections::HashSet<usize>)>,
+    /// Files graded whole, as their blob would be (git converts them — `converted`): their open document's
+    /// text isn't what a commit stores, so it isn't graded again as it changes.
+    pub whole: std::collections::HashSet<PathBuf>,
 }
 
 impl CodeReview {
@@ -159,6 +162,7 @@ impl CodeReview {
             beyond: None,
             moved: Default::default(),
             drawn: Default::default(),
+            whole: Default::default(),
         }
     }
 
@@ -192,7 +196,8 @@ impl CodeReview {
     /// the worker found as the review opened (none yet: empty). Shared, not copied: the rail asks every file's
     /// several times a frame (`perf_frames_with_a_graded_review`: a copy each tripled a 46-file review's frame).
     pub fn graded(&self, ed: &Editor, f: &File) -> Graded {
-        if let Some(d) = doc_of(ed, f).filter(|d| d.review_base.is_some() && d.git_version == d.version()) {
+        let live = |d: &&crate::document::Document| d.review_base.is_some() && d.git_version == d.version();
+        if let Some(d) = doc_of(ed, f).filter(live).filter(|_| !self.whole.contains(&f.path)) {
             if let Some((v, g)) = self.live.borrow().get(&d.id)
                 && *v == d.version()
             {
@@ -324,8 +329,9 @@ impl CodeReview {
     }
 }
 
-/// An open document's diff against the review's base, graded — its tree (when there) says which changes lie
-/// wholly inside a test.
+/// An open document's diff against the review's base, graded — its lines as `risk::changes` takes them (the
+/// diff worked out on a worker already: `git_hunks`), its tree (when there) saying which changes lie wholly
+/// inside a test.
 fn grade_doc(
     d: &crate::document::Document,
     rel: &str,
@@ -333,10 +339,6 @@ fn grade_doc(
 ) -> Vec<crate::risk::Graded> {
     let Some(base) = d.review_base.as_ref() else { return Vec::new() };
     let lang = crate::risk::lang_of(rel);
-    let line = |r: &ropey::Rope, l: usize| r.line(l).to_string().trim_end_matches(['\n', '\r']).to_string();
-    let take = |r: &ropey::Rope, range: &std::ops::Range<usize>| -> Vec<String> {
-        range.clone().filter(|&l| l < r.len_lines()).map(|l| line(r, l)).collect()
-    };
     let spans = d
         .syntax
         .as_ref()
@@ -344,67 +346,249 @@ fn grade_doc(
         .map(|(name, tree)| crate::risk::test_spans(&name, tree, &d.text.to_string()))
         .unwrap_or_default();
     let byte = |l: usize| d.text.line_to_byte(l.min(d.text.len_lines()));
-    d.git_hunks
+    // (each changed line from its rope, by the one rule — `risk::line_text`)
+    let line = |r: &ropey::Rope, l: usize| {
+        (l < r.len_lines()).then(|| crate::risk::line_text(&r.line(l).to_string()).to_string())
+    };
+    crate::risk::lines_of(|l| line(base, l), |l| line(&d.text, l), &d.git_hunks)
         .iter()
-        .map(|h| {
-            let hunk = crate::risk::Hunk {
-                at: h.lines.start,
-                removed: take(base, &h.base),
-                added: take(&d.text, &h.lines),
-                mode: None,
-            };
+        .zip(&d.git_hunks)
+        .map(|(hunk, h)| {
             let (a, b) = (byte(h.lines.start), byte(h.lines.end));
             let in_test = spans.iter().any(|s| s.start <= a && b <= s.end.max(a));
-            crate::risk::graded(rel, lang, &hunk, rules, in_test)
+            crate::risk::graded(rel, lang, hunk, rules, in_test)
         })
         .collect()
 }
 
-/// Every file's changes against the review's base, graded (a worker's — git, files read): a git base's in
-/// one `diff-index -U0`; new and binary files whole; a turn's against its texts before the turn. And how
-/// many of each file's changed lines moved (`moved_lines`).
+/// One file's entry of `git diff --raw -z` (`diff-index` too): its modes and blobs then and now (all zeros:
+/// not there — or, now, the working tree's), by its path now (a deleted one's then).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Raw {
+    pub old_mode: String,
+    pub new_mode: String,
+    pub old: String,
+    pub new: String,
+    pub rel: String,
+}
+
+/// `--raw -z` records (`:old_mode new_mode old new status` NUL path NUL — `--no-renames`: one path each).
+pub fn parse_raw(out: &str) -> Vec<Raw> {
+    let mut parts = out.split('\0');
+    let mut v = Vec::new();
+    while let Some(meta) = parts.next() {
+        let Some(meta) = meta.trim_start_matches('\n').strip_prefix(':') else { continue };
+        let Some(rel) = parts.next() else { break };
+        let w: Vec<&str> = meta.split(' ').collect();
+        if let [old_mode, new_mode, old, new, ..] = w[..] {
+            let s = str::to_string;
+            v.push(Raw {
+                old_mode: s(old_mode),
+                new_mode: s(new_mode),
+                old: s(old),
+                new: s(new),
+                rel: s(rel),
+            });
+        }
+    }
+    v
+}
+
+/// The options every `--raw`/`--numstat` listing of tarae's names, so the user's config can't change what it
+/// lists: no renames (each file by its own path), whole object names, no external diff or text conversion.
+const LISTED: [&str; 4] = ["--no-renames", "--no-abbrev", "--no-ext-diff", "--no-textconv"];
+
+/// Whether `id` names nothing (git's all-zeros: no file, or the working tree's).
+fn none(id: &str) -> bool {
+    id.bytes().all(|b| b == b'0')
+}
+
+/// Blobs' contents by id — every one in a single `git cat-file --batch` (a worker's): a bring of hundreds of
+/// files is one process. One git can't read is left out (its text: empty).
+fn blobs(root: &Path, ids: &[&str]) -> Result<std::collections::HashMap<String, Vec<u8>>, String> {
+    let mut out = std::collections::HashMap::new();
+    let ids: Vec<&str> = ids.iter().copied().filter(|id| !none(id)).collect();
+    if ids.is_empty() {
+        return Ok(out);
+    }
+    let input = ids.join("\n") + "\n";
+    let bytes = crate::gitrepo::repo(root)?.output(&["cat-file", "--batch"], Some(&input))?;
+    // `<id> blob <size>\n<content>\n` · `<id> missing\n`
+    let mut at = 0;
+    while at < bytes.len() {
+        let Some(nl) = bytes[at..].iter().position(|&b| b == b'\n') else { break };
+        let head = String::from_utf8_lossy(&bytes[at..at + nl]).to_string();
+        at += nl + 1;
+        let w: Vec<&str> = head.split(' ').collect();
+        let [id, _, size] = w[..] else { continue };
+        let Ok(size) = size.parse::<usize>() else { continue };
+        let end = (at + size).min(bytes.len());
+        out.insert(id.to_string(), bytes[at..end].to_vec());
+        at = end + 1;
+    }
+    Ok(out)
+}
+
+/// A side of a changed file as text: a gitlink's commit as git's diff shows it, else its blob's content.
+fn side_text(mode: &str, id: &str, blobs: &std::collections::HashMap<String, Vec<u8>>) -> String {
+    match mode {
+        _ if none(id) => String::new(),
+        "160000" => format!("Subproject commit {id}\n"),
+        _ => blobs.get(id).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default(),
+    }
+}
+
+/// A file in the working tree as text — a symlink's target as git keeps it, a submodule's commit as its
+/// gitlink would say (`gitlink_now`), nothing when it's gone.
+fn worktree_text(root: &Path, f: &File, mode: Option<&str>) -> String {
+    if mode == Some("160000") {
+        return match gitlink_now(root, f) {
+            Some(id) => format!("Subproject commit {id}\n"),
+            None => String::new(),
+        };
+    }
+    match std::fs::symlink_metadata(&f.path) {
+        Ok(m) if m.file_type().is_symlink() => {
+            std::fs::read_link(&f.path).map(|t| t.to_string_lossy().into_owned()).unwrap_or_default()
+        }
+        Ok(_) => std::fs::read(&f.path).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default(),
+        Err(_) => String::new(),
+    }
+}
+
+/// The commit a submodule `f` of `root`'s repository is at now, as git reads it: its own checkout's HEAD —
+/// only where the folder is a checkout's top (else git's discovery climbs to the superproject, whose HEAD
+/// isn't the submodule's) — and a folder that isn't one (not initialized) the index's gitlink.
+fn gitlink_now(root: &Path, f: &File) -> Option<String> {
+    let real = |p: &Path| std::fs::canonicalize(p).ok();
+    if let Ok(out) = git(&f.path, &["rev-parse", "--show-toplevel", "HEAD"])
+        && let [top, head] = out.lines().collect::<Vec<_>>()[..]
+        && real(Path::new(top)).is_some_and(|t| Some(t) == real(&f.path))
+    {
+        return Some(head.trim().to_string());
+    }
+    // (`160000 <id> 0 TAB <path>`)
+    let staged = git(root, &["ls-files", "-s", "-z", "--", &f.rel]).ok()?;
+    let entry = staged.split('\0').find(|e| e.starts_with("160000 "))?;
+    entry.split(' ').nth(1).map(str::to_string)
+}
+
+/// The blobs whose text is read, of `raws`: the old side's (`both`: the new's too) of each file graded by its
+/// lines — never a binary one's nor one git converts (`whole`: graded by id), so a large binary is never read
+/// whole. One rule for a review and a bring.
+fn text_ids<'a>(
+    raws: impl IntoIterator<Item = &'a Raw>,
+    whole: &std::collections::HashSet<String>,
+    both: bool,
+) -> Vec<&'a str> {
+    raws.into_iter()
+        .filter(|r| !whole.contains(&r.rel))
+        .flat_map(|r| std::iter::once(r.old.as_str()).chain(both.then_some(r.new.as_str())))
+        .collect()
+}
+
+/// Of `rels`, the files git converts between the working tree and what a commit stores — a `filter` (LFS…),
+/// `ident`, a `working-tree-encoding` (the checkout's attributes, one `check-attr`): their working text isn't
+/// the text a commit has, so a review and a bring each grade such a file whole, by the blob it is or would be
+/// (`hash-object`, its conversion applied — or the commit's), as binary files are. (`eol`/`text` only change
+/// line ends, which no line's text holds — `risk::line_text`.)
+fn converted(root: &Path, rels: &[&str]) -> Result<std::collections::HashSet<String>, String> {
+    if rels.is_empty() {
+        return Ok(Default::default());
+    }
+    let input = rels.join("\0") + "\0";
+    let attrs = ["check-attr", "-z", "--stdin", "filter", "ident", "working-tree-encoding"];
+    let out = crate::gitrepo::git(root, &attrs, Some(&input))?;
+    // (`<path> NUL <attribute> NUL <value> NUL` each)
+    let parts: Vec<&str> = out.split('\0').collect();
+    Ok(parts
+        .chunks(3)
+        .filter(|c| c.len() == 3 && !matches!(c[2], "unspecified" | "unset" | ""))
+        .map(|c| c[0].to_string())
+        .collect())
+}
+
+/// A review's changes graded (`grade_files`): each file's, by path · how many of its lines moved · the files
+/// graded whole as their blob would be, not by their open text (`converted`).
+#[derive(Default)]
+pub struct Grading {
+    pub grades: Grades,
+    pub moved: Moved,
+    pub whole: std::collections::HashSet<PathBuf>,
+    /// Files git couldn't read to grade whole (`hash-object` failed — unreadable, a filter held or missing),
+    /// and why: each graded as unread (a key nothing else has), said as the review opens.
+    pub unread: Vec<(String, String)>,
+}
+
+/// Every file's changes against the review's base, graded (a worker's — git, files read): a git base's
+/// against its blobs (one `diff-index --raw`, one `cat-file --batch`), each through `risk::changes` — as a
+/// bring grades them (`highs_between`); binary files and the ones git converts whole; a turn's against its
+/// texts before the turn. And how many of each file's changed lines moved (`moved_lines`). Git failing is the
+/// review's error — never an empty base for every file (all of each graded new).
 fn grade_files(
     root: &Path,
     rev: Option<&str>,
     files: &[File],
     befores: &[Option<ropey::Rope>],
     rules: &crate::risk::Rules,
-) -> (Grades, Moved) {
+) -> Result<Grading, String> {
     use crate::risk::{Hunk, graded, lang_of};
-    let mut diffed: std::collections::HashMap<String, Vec<Hunk>> = match rev {
+    let raws: std::collections::HashMap<String, Raw> = match rev {
         Some(rev) => {
-            // (names as they are — `parse_diff` takes off what git still quotes)
-            let args =
-                ["-c", "core.quotePath=false", "diff-index", "-p", "-U0", "--no-color", "--no-ext-diff", rev];
-            let text = git(root, &args);
-            crate::risk::parse_diff(&text.unwrap_or_default()).into_iter().collect()
+            let args: Vec<&str> =
+                ["diff-index", "--raw", "-z"].into_iter().chain(LISTED).chain([rev]).collect();
+            parse_raw(&git(root, &args)?).into_iter().map(|r| (r.rel.clone(), r)).collect()
         }
         None => Default::default(),
     };
+    let whole = match rev {
+        Some(_) => converted(root, &files.iter().map(|f| f.rel.as_str()).collect::<Vec<_>>())?,
+        None => Default::default(),
+    };
+    // (binary files and the converted ones are graded by id: their blobs aren't read)
+    let by_id: std::collections::HashSet<String> =
+        files.iter().filter(|f| f.binary).map(|f| f.rel.clone()).chain(whole.iter().cloned()).collect();
+    let blobs = blobs(root, &text_ids(raws.values(), &by_id, false))?;
+    let mut unread = Vec::new();
     let mut out = std::collections::HashMap::new();
     let mut lines: Vec<(PathBuf, Vec<Hunk>)> = Vec::new();
     for (i, f) in files.iter().enumerate() {
-        let hunks = if f.binary {
-            let blob = git(root, &["hash-object", "--", &f.rel]).unwrap_or_else(|_| "gone".into());
-            vec![crate::risk::binary(blob.trim())]
+        let raw = raws.get(&f.rel);
+        let hunks = if by_id.contains(&f.rel) {
+            // (gone: as a bring says a file it deletes — a turn's file may be in no repository at all; one git
+            // can't read is that file's, said, not the review's end)
+            let hash = || git(root, &["hash-object", "--", &f.rel]).map(|b| b.trim().to_string());
+            let blob = match (f.gone, rev) {
+                (true, _) => "gone".to_string(),
+                (false, Some(_)) => hash().unwrap_or_else(|e| {
+                    unread.push((f.rel.clone(), e));
+                    format!("unread {}", f.rel)
+                }),
+                (false, None) => hash().unwrap_or_else(|_| "gone".into()),
+            };
+            let mut h = vec![crate::risk::binary(&blob)];
+            h.extend(raw.and_then(|r| crate::risk::mode_change(&r.old_mode, &r.new_mode)));
+            h
         } else if rev.is_none() {
             let before = befores.get(i).cloned().flatten().map(|b| b.to_string()).unwrap_or_default();
-            crate::risk::hunks_of(&before, &std::fs::read_to_string(&f.path).unwrap_or_default())
-        } else if let Some(h) = diffed.remove(&f.rel) {
-            h
-        } else if f.new {
-            vec![crate::risk::added_whole(&std::fs::read_to_string(&f.path).unwrap_or_default())]
+            crate::risk::changes(&before, &std::fs::read_to_string(&f.path).unwrap_or_default())
         } else {
-            Vec::new()
+            // (untracked: not in the listing — all of it new)
+            let base = raw.map(|r| side_text(&r.old_mode, &r.old, &blobs)).unwrap_or_default();
+            let mut h =
+                crate::risk::changes(&base, &worktree_text(root, f, raw.map(|r| r.new_mode.as_str())));
+            h.extend(raw.and_then(|r| crate::risk::mode_change(&r.old_mode, &r.new_mode)));
+            h
         };
         let lang = lang_of(&f.rel);
         let g: Graded = hunks.iter().map(|h| graded(&f.rel, lang, h, rules, false)).collect();
         out.insert(f.path.clone(), g);
-        if !f.binary {
+        if !by_id.contains(&f.rel) {
             lines.push((f.path.clone(), hunks));
         }
     }
-    (out, moved_lines(&lines))
+    let whole = files.iter().filter(|f| whole.contains(&f.rel)).map(|f| f.path.clone()).collect();
+    Ok(Grading { grades: out, moved: moved_lines(&lines), whole, unread })
 }
 
 /// How many of each file's changed lines moved, by path (files with none left out).
@@ -695,7 +879,7 @@ pub fn start(ed: &mut Editor, branch: Option<String>) {
 
 /// What `start_in`'s worker gathers: the repository's root, the base, the changed files, graded and their
 /// moves counted.
-type Gathered = (PathBuf, Base, Vec<File>, (Grades, Moved));
+type Gathered = (PathBuf, Base, Vec<File>, Grading);
 
 /// `start` for the repository around `cwd`.
 pub fn start_in(ed: &mut Editor, cwd: PathBuf, branch: Option<String>) {
@@ -725,13 +909,16 @@ pub fn start_in(ed: &mut Editor, cwd: PathBuf, branch: Option<String>) {
             }
         };
         let files = changed(&root, &base)?;
-        let grades = grade_files(&root, base.rev(), &files, &[], &rules);
+        let grades = grade_files(&root, base.rev(), &files, &[], &rules)?;
         Ok((root, base, files, grades))
     };
     ed.step(ed.events.jobs(), "review", said, work, |ed, found| match found {
         Err(e) => {
-            ed.session.review_high = false;
-            ed.set_error(format!("review: {e}"))
+            ed.set_error(format!("review: {e}"));
+            // (a card's `h` opened it: its changes as the bring takes them instead — no review needed)
+            if let Some((card, left)) = ed.session.review_high.take() {
+                held_go(ed, card, &left);
+            }
         }
         Ok((root, base, files, grades)) => open(ed, root, base, files, grades),
     });
@@ -766,9 +953,9 @@ pub fn reopen(ed: &mut Editor, v: &Value) {
     let current = v["current"].as_str().map(str::to_string);
     let rules = crate::risk::Rules::of(&ed.config);
     ed.events.jobs().spawn(move || {
-        let files = changed(&root, &base).map(|f| {
-            let grades = grade_files(&root, base.rev(), &f, &[], &rules);
-            (f, grades)
+        let files = changed(&root, &base).and_then(|f| {
+            let grades = grade_files(&root, base.rev(), &f, &[], &rules)?;
+            Ok((f, grades))
         });
         move |ed: &mut Editor| match files {
             Ok((files, _)) if files.is_empty() => {}
@@ -848,6 +1035,7 @@ fn start_turn_saying(ed: &mut Editor, at: usize, earlier: usize) {
         let grades = grade_files(&root, None, &files, &befores, &rules);
         let beyond = beyond_turn(&root, &files);
         move |ed: &mut Editor| {
+            let grades = ungraded_said(ed, grades);
             let opens = !files.is_empty();
             open(ed, root, base, files, grades);
             if opens
@@ -911,10 +1099,21 @@ pub fn start_replay(
             .collect();
         let grades = grade_files(&root, Some(&commit), &files, &[], &rules);
         move |ed: &mut Editor| {
+            // (ungraded, said: the rebase's card still comes — what it resolved is still to be seen)
+            let grades = ungraded_said(ed, grades);
             open(ed, root, Base::Replay { commit, label }, files, grades);
             then(ed);
         }
     });
+}
+
+/// A review's grading — or, git having failed (said, as an error), none: it opens ungraded rather than
+/// with every file graded new.
+fn ungraded_said(ed: &mut Editor, grading: Result<Grading, String>) -> Grading {
+    grading.unwrap_or_else(|e| {
+        ed.set_error(format!("review: its changes aren't graded — {e}"));
+        Grading::default()
+    })
 }
 
 /// Each file's changes graded (`risk.rs`), by path.
@@ -924,7 +1123,7 @@ pub type Grades = std::collections::HashMap<PathBuf, Graded>;
 pub type Graded = Arc<[crate::risk::Graded]>;
 
 /// The review of `files` against `base`, graded, begins (any open one ends).
-fn open(ed: &mut Editor, root: PathBuf, base: Base, files: Vec<File>, grades: (Grades, Moved)) {
+fn open(ed: &mut Editor, root: PathBuf, base: Base, files: Vec<File>, grades: Grading) {
     open_at(ed, root, base, files, grades, None, true);
 }
 
@@ -934,12 +1133,17 @@ fn open_at(
     root: PathBuf,
     base: Base,
     mut files: Vec<File>,
-    (grades, moved): (Grades, Moved),
+    Grading { grades, moved, whole, unread }: Grading,
     start: Option<String>,
     say: bool,
 ) {
     if files.is_empty() {
-        return ed.set_status(format!("review: no changes {}", base.label()));
+        ed.set_status(format!("review: no changes {}", base.label()));
+        // (a card's `h` opened it: its changes as the bring takes them instead)
+        if let Some((card, left)) = ed.session.review_high.take() {
+            held_go(ed, card, &left);
+        }
+        return;
     }
     crate::sorting::by(&mut files, |a, b| a.rel.cmp(&b.rel));
     end(ed);
@@ -977,14 +1181,29 @@ fn open_at(
         beyond: None,
         moved,
         drawn: Default::default(),
+        whole,
     });
     if say {
         let s = if n == 1 { "" } else { "s" };
         ed.set_status(format!("review: {n} file{s} {said} — ]g walks the changes"));
     }
-    // (opened for a bring's high-risk changes: on the first not looked at)
-    match std::mem::take(&mut ed.session.review_high).then(|| highs_in_order(ed).first().copied()).flatten() {
-        Some((i, at)) => show_at(ed, i, Land::Line(at)),
+    // (a file git couldn't read is graded as unread — said, by name and why)
+    if let Some((rel, why)) = unread.first() {
+        let more = match unread.len() {
+            1 => String::new(),
+            n => format!(" (and {} more)", n - 1),
+        };
+        ed.set_warning(format!("review: {rel}{more} couldn't be read, graded as unread — {why}"));
+    }
+    // (opened for a bring's high-risk changes: on the first its card names not looked at — or, the review
+    // not showing it, there first and then shown as the bring takes it)
+    match std::mem::take(&mut ed.session.review_high) {
+        Some((card, left)) => {
+            if !left.first().is_some_and(|h| in_review(ed, h).is_some()) {
+                show(ed, first, false);
+            }
+            held_go(ed, card, &left);
+        }
         None => show(ed, first, false),
     }
     if std::mem::take(&mut ed.session.review_ask) {
@@ -992,78 +1211,336 @@ fn open_at(
     }
 }
 
-/// The high-risk changes between commits `from` and `to` (a bring's — `git diff -U0`, commit to commit: no
-/// index, no lock), by file — binary files too, as their blob (a worker's).
+/// The high-risk changes between commits `from` and `to` (a bring's — commit to commit: no index, no lock),
+/// by file, in path order — each file's blobs through `risk::changes`, as a review grades them (its lines
+/// looked at there are its lines here); binary files as their blob (a worker's: one listing, one
+/// `cat-file --batch`).
 pub fn highs_between(
     root: &Path,
     from: &str,
     to: &str,
     rules: &crate::risk::Rules,
-) -> Result<Vec<(String, crate::risk::Graded)>, String> {
+) -> Result<Vec<Held>, String> {
     use crate::risk::{Grade, graded, lang_of};
-    // (names as they are — `parse_diff` takes off what git still quotes, and `-z`'s numstat quotes none)
-    let args = [
-        "-c",
-        "core.quotePath=false",
-        "diff",
-        "-U0",
-        "--no-color",
-        "--no-ext-diff",
-        "--no-renames",
-        from,
-        to,
-    ];
-    let diff = git(root, &args)?;
-    let mut files = crate::risk::parse_diff(&diff);
-    for (_, _, rel, binary) in
-        parse_numstat(&git(root, &["diff", "--numstat", "-z", "--no-renames", from, to])?)
-    {
-        if binary {
-            let blob = git(root, &["rev-parse", &format!("{to}:{rel}")]).unwrap_or_else(|_| "gone".into());
-            files.push((rel, vec![crate::risk::binary(blob.trim())]));
+    let list = |what: &str| -> Result<String, String> {
+        let args: Vec<&str> = ["diff", what, "-z"].into_iter().chain(LISTED).chain([from, to]).collect();
+        git(root, &args)
+    };
+    let mut raws = parse_raw(&list("--raw")?);
+    crate::sorting::by(&mut raws, |a, b| a.rel.cmp(&b.rel));
+    let mut binary: std::collections::HashSet<String> =
+        parse_numstat(&list("--numstat")?).into_iter().filter(|n| n.3).map(|n| n.2).collect();
+    // (the files git converts: whole, by blob, as a review grades them — `converted`)
+    binary.extend(converted(root, &raws.iter().map(|r| r.rel.as_str()).collect::<Vec<_>>())?);
+    let blobs = blobs(root, &text_ids(&raws, &binary, true))?;
+    let mut out = Vec::new();
+    for r in &raws {
+        let mut hunks = match binary.contains(&r.rel) {
+            true => vec![crate::risk::binary(if none(&r.new) { "gone" } else { &r.new })],
+            false => crate::risk::changes(
+                &side_text(&r.old_mode, &r.old, &blobs),
+                &side_text(&r.new_mode, &r.new, &blobs),
+            ),
+        };
+        hunks.extend(crate::risk::mode_change(&r.old_mode, &r.new_mode));
+        let lang = lang_of(&r.rel);
+        for h in &hunks {
+            let g = graded(&r.rel, lang, h, rules, false);
+            if g.grade == Grade::High {
+                out.push(Held::of(&r.rel, g, h));
+            }
         }
     }
-    let mut out = Vec::new();
-    for (rel, hunks) in files {
-        let lang = lang_of(&rel);
-        out.extend(hunks.iter().map(|h| (rel.clone(), graded(&rel, lang, h, rules, false))));
-    }
-    out.retain(|(_, g)| g.grade == Grade::High);
     Ok(out)
 }
 
-/// The high-risk changes of `highs` no one has looked at, as `path:line`.
-pub fn unseen(
-    highs: &[(String, crate::risk::Graded)],
-    looked: &std::collections::HashSet<crate::risk::Key>,
-) -> Vec<String> {
-    highs.iter().filter(|(_, g)| !g.looked_at(looked)).map(|(rel, g)| format!("{rel}:{}", g.at + 1)).collect()
+/// A high-risk change a bring takes (`highs_between`) — what its card names and holds for: the file, where
+/// the commits have it (0-based) and how many lines it spans there, why it's high, its lines as they have
+/// them, and their keys (`risk::keys`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Held {
+    pub rel: String,
+    pub at: usize,
+    pub lines: usize,
+    pub why: String,
+    pub removed: Vec<String>,
+    pub added: Vec<String>,
+    pub mode: Option<(String, String)>,
+    pub keys: Vec<crate::risk::Key>,
 }
 
-/// A held card's `h` (#196): to the high-risk changes it waits on — the review in front's next one; for a
-/// bring of the checkout `root` onto `base`, a review since `base` there first (its session to the front),
-/// opening on the first one. Going there is no look.
-pub fn card_highs(ed: &mut Editor, bring: Option<(PathBuf, String)>) {
+impl Held {
+    fn of(rel: &str, g: crate::risk::Graded, h: &crate::risk::Hunk) -> Held {
+        let (removed, added, mode) = (h.removed.clone(), h.added.clone(), h.mode.clone());
+        Held {
+            rel: rel.to_string(),
+            at: g.at,
+            lines: g.lines,
+            why: g.why,
+            removed,
+            added,
+            mode,
+            keys: g.keys,
+        }
+    }
+
+    /// Whether a person looked at every line of it (`Graded::looked_at`).
+    pub fn looked_at(&self, looked: &std::collections::HashSet<crate::risk::Key>) -> bool {
+        self.keys.iter().all(|k| looked.contains(k))
+    }
+
+    /// `path:line`, as a card names it.
+    pub fn place(&self) -> String {
+        format!("{}:{}", self.rel, self.at + 1)
+    }
+}
+
+/// The high-risk changes of `highs` no one has looked at, as `path:line`.
+pub fn unseen(highs: &[Held], looked: &std::collections::HashSet<crate::risk::Key>) -> Vec<String> {
+    highs.iter().filter(|h| !h.looked_at(looked)).map(Held::place).collect()
+}
+
+/// A held card's `h` (#196): the card steps aside (its letters the code's again, `C-q` answers it) for the
+/// first high-risk change it names not looked at — a review's end card: the review's next one; a bring's: in a
+/// review since its base (its session to the front, the review opened when it isn't), or, where the review
+/// can't show it as the commits have it, in a buffer that shows it so (`held_go`). Going there is no look.
+pub fn card_highs(ed: &mut Editor) {
+    let Some(o) = ed.offers.first() else { return };
+    let Some(bring) = o.highs() else { return };
+    let (id, held) = (o.id, o.held_changes.clone());
     let Some((root, base)) = bring else {
-        high_step(ed, true);
+        // (nowhere to go — no review, none left: said on the card, which keeps its place and the keys)
+        match high_step(ed, true) {
+            true => {
+                step_aside(ed, id);
+                aside_said(ed);
+            }
+            false => {
+                let why = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+                ed.offer_refused(why);
+            }
+        }
         return;
     };
+    let looked = &ed.session.looked;
+    let left: Vec<Held> = held.into_iter().filter(|h| !h.looked_at(looked)).collect();
+    if left.is_empty() {
+        return ed.offer_refused("each high-risk change it named has had a look");
+    }
+    step_aside(ed, id);
     // (a session's root and a review's are real paths already — nothing read from disk on a key)
-    let same = |a: &Path, b: &Path| a == b;
-    let open = ed.session.code_review.as_ref().is_some_and(|r| {
-        same(&r.root, &root) && matches!(&r.base, Base::Branch { name, .. } if *name == base)
-    });
+    let open = ed
+        .session
+        .code_review
+        .as_ref()
+        .is_some_and(|r| r.root == root && matches!(&r.base, Base::Branch { name, .. } if *name == base));
     if open {
-        high_step(ed, true);
+        return held_go(ed, id, &left);
+    }
+    if ed.session.root != root
+        && let Some(sid) = ed.sessions.iter().find(|l| l.root == root).map(|l| l.id)
+    {
+        ed.session_switch(sid);
+    }
+    ed.session.review_high = Some((id, left));
+    start_in(ed, root, Some(base));
+}
+
+/// Card `id` steps aside for what its `h` goes to — only once there's somewhere to go: a bar over the status
+/// line, the keys the code's (given it with `C-q`, they go back).
+fn step_aside(ed: &mut Editor, id: u64) {
+    if let Some(o) = ed.offers.iter_mut().find(|o| o.id == id) {
+        o.aside = true;
+    }
+    ed.card_keys = false;
+}
+
+/// After `h`: where the keys went, on the status line (the card stepped aside).
+fn aside_said(ed: &mut Editor) {
+    let now = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+    ed.set_status(format!("{now} · C-q goes back to the card"));
+}
+
+/// Where a bring's change `h` is in the review open: (file, its line now) — the high-risk change there not
+/// looked at holding the most of its lines not looked at. None: the review doesn't show it as the commits have
+/// it — its file isn't one of the review's, or some line of it isn't in any high-risk change there (the file
+/// differs from its commit): a look there would leave the card holding.
+fn in_review(ed: &Editor, h: &Held) -> Option<(usize, usize)> {
+    let r = ed.session.code_review.as_ref()?;
+    let looked = &ed.session.looked;
+    let i = r.files.iter().position(|f| f.rel == h.rel)?;
+    let want: std::collections::HashSet<crate::risk::Key> =
+        h.keys.iter().filter(|k| !looked.contains(k)).copied().collect();
+    let graded = r.graded(ed, &r.files[i]);
+    let highs: Vec<&crate::risk::Graded> =
+        graded.iter().filter(|g| g.grade == Grade::High && !g.looked_at(looked)).collect();
+    let shown: std::collections::HashSet<crate::risk::Key> =
+        highs.iter().flat_map(|g| g.keys.iter().copied()).collect();
+    if !want.is_subset(&shown) {
+        return None;
+    }
+    let best = highs
+        .iter()
+        .map(|g| (g.keys.iter().filter(|k| want.contains(k)).count(), g.at))
+        .filter(|&(n, _)| n > 0)
+        .max_by_key(|&(n, at)| (n, std::cmp::Reverse(at)));
+    best.map(|(_, at)| (i, at))
+}
+
+/// To the first of a bring's changes not looked at (`left`, in its card's order) — card `card`'s — in the
+/// review open; one the review can't show is said on the card, and shown as the commits have it (with every
+/// other it can't) in a buffer of its own, where `space v h` looks at it (`held_seen`).
+pub fn held_go(ed: &mut Editor, card: u64, left: &[Held]) {
+    let Some(first) = left.first() else { return };
+    if let Some((i, at)) = in_review(ed, first) {
+        high_go(ed, i, at);
+        ed.set_status(format!(
+            "high-risk {} — space v h looks at it · C-q goes back to the card",
+            first.place()
+        ));
         return;
     }
-    if !same(&ed.session.root, &root)
-        && let Some(id) = ed.sessions.iter().find(|l| same(&l.root, &root)).map(|l| l.id)
-    {
-        ed.session_switch(id);
+    let missing: Vec<Held> = left.iter().filter(|h| in_review(ed, h).is_none()).cloned().collect();
+    let n = missing.len();
+    ed.offer_refused(format!(
+        "{} {} the review as it is now — shown as the bring takes {}",
+        first.place(),
+        match n {
+            1 => "isn't in".to_string(),
+            n => format!("and {} more aren't in", n - 1),
+        },
+        if n == 1 { "it" } else { "them" }
+    ));
+    show_as_brought(ed, card, missing);
+}
+
+/// The buffer of a bring's changes the review can't show (`held_go`): one block each — `path:line — why`,
+/// then its lines as the commits have them, `-` removed, `+` added — closed with its card.
+#[derive(Clone, Debug)]
+pub struct HeldView {
+    pub doc: DocId,
+    /// Its text's version when made: changed since, its blocks are no longer where they were.
+    pub version: u64,
+    /// Each block's lines (0-based, its heading among them) and the change's keys.
+    pub blocks: Vec<(std::ops::Range<usize>, Vec<crate::risk::Key>)>,
+    /// What of each line was drawn since it was made — its first row, its last (`line_ends`): a block taller
+    /// than the pane is looked at once scrolled through.
+    pub drawn: std::collections::HashMap<usize, (bool, bool)>,
+}
+
+/// Of the rows a frame drew of document `doc` (its panes' `ViewRow::origin`s), what of each line: its first
+/// row (from column 0), its last (to its end). The buffer wraps, so a line is all on screen only with both — a
+/// long line's tail past the pane's edge is never "drawn".
+fn line_ends(ed: &Editor, doc: DocId) -> std::collections::HashMap<usize, (bool, bool)> {
+    let mut out: std::collections::HashMap<usize, (bool, bool)> = Default::default();
+    for p in ed.screen.panes.iter().filter(|p| ed.session.views.iter().any(|w| w.id == p.0 && w.doc == doc)) {
+        for &(line, col, _, end) in &p.3 {
+            let e = out.entry(line).or_default();
+            e.0 |= col == 0;
+            e.1 |= end == usize::MAX;
+        }
     }
-    ed.session.review_high = true;
-    start_in(ed, root, Some(base));
+    out
+}
+
+/// What heads the buffer.
+const AS_BROUGHT: &str = "High-risk changes as the bring takes them (their files differ in the review)\n\
+                          space v h on each, all of it on screen";
+
+/// `held_go`'s buffer of `missing`, card `card`'s (it closes with the card — `offer_view_sync`), in front.
+fn show_as_brought(ed: &mut Editor, card: u64, missing: Vec<Held>) {
+    let title = ed.offers.iter().find(|o| o.id == card).map(|o| o.title.clone()).unwrap_or_default();
+    let name = format!("{}{title} · as the bring takes them", crate::offer::CARD_VIEW);
+    let mut text = format!("{AS_BROUGHT}\n");
+    let mut blocks = Vec::new();
+    for h in &missing {
+        text.push('\n');
+        let from = text.lines().count();
+        let why = if h.why.is_empty() { String::new() } else { format!(" — {}", h.why) };
+        text.push_str(&format!("{}{why}\n", h.place()));
+        if let Some((old, new)) = &h.mode {
+            text.push_str(&format!("mode {old} → {new}\n"));
+        }
+        for l in &h.removed {
+            text.push_str(&format!("-{l}\n"));
+        }
+        for l in &h.added {
+            text.push_str(&format!("+{l}\n"));
+        }
+        blocks.push((from..text.lines().count(), h.keys.clone()));
+    }
+    let old: Vec<DocId> =
+        ed.docs.iter().filter(|d| d.throwaway && d.title.as_deref() == Some(&name)).map(|d| d.id).collect();
+    for d in old {
+        ed.close_doc(d);
+    }
+    let doc = ed.open_virtual(&name, &text);
+    // (wrapped: a line is looked at whole — `line_ends`)
+    if let Some(d) = ed.docs.iter_mut().find(|d| d.id == doc) {
+        d.wrap = Some(true);
+    }
+    ed.offer_views.retain(|(d, _)| *d != doc);
+    ed.offer_views.push((doc, card));
+    // (on the first block)
+    if let Some((r, _)) = blocks.first() {
+        ed.goto_line(r.start);
+    }
+    let version = ed.docs.iter().find(|d| d.id == doc).map_or(0, |d| d.version());
+    ed.session.held_view = Some(HeldView { doc, version, blocks, drawn: Default::default() });
+    if let Some(r) = ed.session.code_review.as_mut() {
+        r.focus = false;
+    }
+}
+
+/// `space v h` in the buffer of a bring's changes (`HeldView`): the block under the cursor looked at — every
+/// line of it drawn whole (wrapped: its first row and its last), in the frame the key was pressed over or
+/// since the buffer was made as it is (one taller than the pane: scrolled through) — by you, a key (no tool of
+/// Claude's can). True if the buffer is in front (the key was its).
+fn held_seen(ed: &mut Editor) -> bool {
+    let Some(v) = ed.session.held_view.as_ref().filter(|v| v.doc == ed.doc().id) else { return false };
+    if ed.doc().version() != v.version {
+        ed.set_status("this buffer was changed since — its card's h shows the changes again");
+        return true;
+    }
+    let line =
+        crate::movement::line_of(&ed.doc().text, ed.doc().selection().primary().cursor(&ed.doc().text));
+    let Some((range, keys)) = v.blocks.iter().find(|(r, _)| r.contains(&line)).cloned() else {
+        ed.set_status("not on a change — the cursor on one, then space v h");
+        return true;
+    };
+    // (unwrapped, a long line's tail past the pane's edge would pass for drawn)
+    if ed.doc().wrap != Some(true) {
+        ed.set_status(
+            "not looked at — wrap the buffer again (z w): a change is looked at with its lines whole",
+        );
+        return true;
+    }
+    // Each line whole — its first row and its last drawn: in the frame the key was pressed over, or since the
+    // buffer was made, as it is (one taller than the pane: scrolled through)
+    let now = line_ends(ed, v.doc);
+    let whole =
+        |m: &std::collections::HashMap<usize, (bool, bool)>, l: usize| m.get(&l).is_some_and(|e| e.0 && e.1);
+    let shown = range.clone().all(|l| whole(&now, l)) || range.clone().all(|l| whole(&v.drawn, l));
+    if !shown {
+        let unread = range.clone().filter(|&l| !whole(&now, l) && !whole(&v.drawn, l)).count();
+        ed.set_status(format!(
+            "{unread} of this change's {} lines not on screen whole — not looked at: scroll through it first",
+            range.len()
+        ));
+        return true;
+    }
+    ed.session.looked.extend(keys);
+    let left = ed
+        .offers
+        .iter()
+        .find(|o| ed.offer_views.iter().any(|(d, c)| *d == v.doc && *c == o.id))
+        .map_or(0, |o| o.held_changes.iter().filter(|h| !h.looked_at(&ed.session.looked)).count());
+    held_sync(ed);
+    match left {
+        0 => ed.set_success("looked at — the card's y is back"),
+        n => ed.set_status(format!("looked at — {} left", crate::nav::count(n, "high-risk change"))),
+    }
+    true
 }
 
 /// Why a yes is held while `n` high-risk changes wait for a person's look.
@@ -1126,11 +1603,8 @@ pub fn push_bring_card(
                 let from = lines - left.len().min(HELD_SHOWN) - usize::from(left.len() > HELD_SHOWN) - 1;
                 card.warning = Some(from..lines);
                 card.held = Some(held_said(left.len()));
-                card.gate = highs
-                    .iter()
-                    .filter(|(_, g)| !g.looked_at(&looked))
-                    .flat_map(|(_, g)| g.keys.iter().copied())
-                    .collect();
+                card.held_changes = highs.into_iter().filter(|h| !h.looked_at(&looked)).collect();
+                card.gate = card.held_changes.iter().flat_map(|h| h.keys.iter().copied()).collect();
             }
             ed.push_offer(card);
         }
@@ -1139,17 +1613,12 @@ pub fn push_bring_card(
 
 /// The bring card's line about the reviewer of the session in front (its checkout `root`; `highs`: the bring's
 /// high-risk changes; `head`: HEAD now) — None when it had none.
-fn reviewer_said(
-    ed: &Editor,
-    root: &Path,
-    highs: &[(String, crate::risk::Graded)],
-    head: &str,
-) -> Option<String> {
+fn reviewer_said(ed: &Editor, root: &Path, highs: &[Held], head: &str) -> Option<String> {
     use crate::reviewer::State;
     let rv = ed.session.reviewer.as_ref()?;
     let high = |path: &Path, lines: &std::ops::Range<usize>| {
         let rel = path.strip_prefix(root).unwrap_or(path).to_string_lossy();
-        highs.iter().any(|(r, g)| *r == rel && g.at < lines.end && lines.start < g.at + g.lines)
+        highs.iter().any(|h| h.rel == rel && h.at < lines.end && lines.start < h.at + h.lines)
     };
     let t = crate::reviewer::tally(ed, high)?;
     let mut s = match &rv.state {
@@ -1177,6 +1646,10 @@ fn reviewer_said(
 /// What holds the review's end and the bring (`risk.rs`). None there: to the next one not looked at — only
 /// going; `space v h` there is the look.
 pub fn hunk_seen(ed: &mut Editor) {
+    // (the buffer of a bring's changes the review couldn't show: its own blocks)
+    if held_seen(ed) {
+        return;
+    }
     let Some(r) = ed.session.code_review.as_ref() else {
         return ed.set_status("no review here — space v v starts one");
     };
@@ -1301,6 +1774,8 @@ pub fn held_sync(ed: &mut Editor) {
         if o.gate.iter().all(|k| looked.contains(k)) {
             o.held = None;
             o.warning = None;
+            // (stepped aside for its `h`: up again with its letters)
+            o.aside = false;
             o.question.push_str("\n\nEach has had a look since.");
             o.rev += 1;
             freed = true;
@@ -1630,6 +2105,18 @@ pub fn high_step(ed: &mut Editor, forward: bool) -> bool {
 /// After a frame: the lines it drew of the review's documents (`CodeReview.drawn`), kept while each one's
 /// text stays as it is.
 pub fn drawn_sync(ed: &mut Editor) {
+    // (the buffer of a bring's changes: its lines drawn, while its text is as made)
+    if let Some((doc, version)) = ed.session.held_view.as_ref().map(|v| (v.doc, v.version))
+        && ed.docs.iter().any(|d| d.id == doc && d.version() == version)
+    {
+        let now = line_ends(ed, doc);
+        if let Some(v) = ed.session.held_view.as_mut() {
+            for (l, (start, end)) in now {
+                let e = v.drawn.entry(l).or_default();
+                (e.0, e.1) = (e.0 || start, e.1 || end);
+            }
+        }
+    }
     let Some(r) = ed.session.code_review.as_mut() else { return };
     for (view, _, _, rows) in &ed.screen.panes {
         let Some(v) = ed.session.views.iter().find(|v| v.id == *view) else { continue };
@@ -2476,7 +2963,7 @@ mod tests {
         let files = changed(&dir, &Base::Head).unwrap();
         let rels: Vec<&str> = files.iter().map(|f| f.rel.as_str()).collect();
         assert_eq!(rels, ["a b.rs", "run.sh", "ü/build.rs"]);
-        let (grades, _) = grade_files(&dir, Some("HEAD"), &files, &[], &rules);
+        let grades = grade_files(&dir, Some("HEAD"), &files, &[], &rules).unwrap().grades;
         let whys = |rel: &str| -> Vec<(Grade, String)> {
             let f = files.iter().find(|f| f.rel == rel).unwrap();
             grades[&f.path].iter().map(|g| (g.grade, g.why.clone())).collect()
@@ -2511,7 +2998,7 @@ mod tests {
         git_out(&["add", "-A"]);
         git_out(&["commit", "-qm", "changes"]);
         let highs = highs_between(&dir, &base, "HEAD", &rules).unwrap();
-        let mut named: Vec<&str> = highs.iter().map(|(rel, _)| rel.as_str()).collect();
+        let mut named: Vec<&str> = highs.iter().map(|h| h.rel.as_str()).collect();
         named.sort_unstable();
         assert_eq!(named, ["run.sh", "ü/build.rs"]);
         assert_eq!(unseen(&highs, &Default::default()).len(), 2);
@@ -2520,6 +3007,759 @@ mod tests {
             "looked at in the review: {:?}",
             unseen(&highs, &ed.session.looked)
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The keys of a bring's high-risk changes, in order.
+    fn held_keys(highs: &[Held]) -> Vec<crate::risk::Key> {
+        let mut k: Vec<crate::risk::Key> = highs.iter().flat_map(|h| h.keys.iter().copied()).collect();
+        k.sort_unstable();
+        k
+    }
+
+    /// A text where git's `diff -U0` and tarae's `git::hunks` disagree about which lines changed: blank lines
+    /// between paragraphs that stay, and a table and a paragraph rewritten between two blank lines (the
+    /// `sandbox-keeper.md` hunk of 2026-10-07, cut down — git's xdiff drops a line found too often, the blank,
+    /// when it lies among enough changed ones, and reports it removed and added). (old, new).
+    fn blank_between_changes() -> (String, String) {
+        let lines = |what: &str, n: usize| (0..n).map(|i| format!("{what} {i}\n")).collect::<String>();
+        let paras = |r: std::ops::Range<usize>| {
+            r.map(|i| format!("para {i} stays as it was\n\n")).collect::<String>()
+        };
+        let old = format!(
+            "| A | B |\n|---|---|\n{}\n{}\n",
+            lines("| old row |", 6),
+            lines("old paragraph, line", 6)
+        );
+        let new = format!(
+            "| A | B |\n|---|---|\n{}\n{}\n{}\n",
+            lines("| new row |", 7),
+            lines("in tier C, line", 2),
+            lines("the swap, line", 6)
+        );
+        let whole = |mid: &str| format!("# sandbox notes\n\n{}{mid}{}", paras(0..12), paras(12..24));
+        (whole(&old), whole(&new))
+    }
+
+    /// The bring card's gate and the review see the same lines of a change (2026-10-07: the card held for a
+    /// removed blank line git's diff reported and the review's never had — nothing could look at it). A
+    /// session's commit on top of `main`, the file high (`review.risky`); every high-risk change looked at in
+    /// a review since `main` (`space v h`), the bring card isn't held. And the review's grading of a file not
+    /// opened is the bring's, key for key.
+    #[test]
+    fn the_bring_gate_and_the_review_agree_on_a_changes_lines() {
+        let dir = std::env::temp_dir().join(format!("tarae-review-agree-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        // (the test's own git: no config of the user's or the system's)
+        let git_out = |args: &[&str]| {
+            let id = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"];
+            let o = std::process::Command::new("git")
+                .args(id)
+                .args(args)
+                .current_dir(&dir)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "git {args:?}");
+            String::from_utf8_lossy(&o.stdout).to_string()
+        };
+        let (old, new) = blank_between_changes();
+        let rel = "docs/sandbox-keeper.md";
+        std::fs::write(dir.join(rel), &old).unwrap();
+        git_out(&["init", "-q", "-b", "main"]);
+        git_out(&["add", "-A"]);
+        git_out(&["commit", "-qm", "base"]);
+        git_out(&["checkout", "-qb", "work"]);
+        std::fs::write(dir.join(rel), &new).unwrap();
+        git_out(&["commit", "-qam", "the change"]);
+        // The fixture still makes the point: git's Myers reports a blank line removed, tarae's diff doesn't
+        let myers = git_out(&["diff", "-U0", "--diff-algorithm=myers", "--no-color", "main", "work"]);
+        assert!(myers.lines().any(|l| l == "-"), "git's diff removes no blank line here:\n{myers}");
+        let ours = crate::risk::changes(&old, &new);
+        assert!(ours.iter().all(|h| !h.removed.iter().any(String::is_empty)), "{ours:?}");
+        let mut config = crate::config::Config::default();
+        config.editor.review_risky = vec!["sandbox*".into()];
+        let rules = crate::risk::Rules::of(&config.editor);
+        // Not opened: the review's grading is the bring's, key for key
+        let base =
+            Base::Branch { name: "main".into(), commit: git_out(&["rev-parse", "main"]).trim().into() };
+        let files = changed(&dir, &base).unwrap();
+        let grades = grade_files(&dir, base.rev(), &files, &[], &rules).unwrap().grades;
+        let high_keys = |g: &mut dyn Iterator<Item = &crate::risk::Graded>| {
+            let mut k: Vec<crate::risk::Key> =
+                g.filter(|g| g.grade == Grade::High).flat_map(|g| g.keys.iter().copied()).collect();
+            k.sort_unstable();
+            k
+        };
+        let highs = highs_between(&dir, "main", "HEAD", &rules).unwrap();
+        assert!(!highs.is_empty());
+        assert_eq!(
+            high_keys(&mut grades[&dir.join(rel)].iter()),
+            held_keys(&highs),
+            "the review's worker and the bring"
+        );
+        // Opened in a review since main: each high-risk change looked at
+        let mut ed = Editor::new(config);
+        start_in(&mut ed, dir.clone(), Some("main".into()));
+        settle_until(&mut ed, landed);
+        for _ in 0..20 {
+            let r = ed.session.code_review.as_ref().unwrap();
+            let Some(&(_, at)) = r.high_unseen(&ed).first() else { break };
+            ed.goto_line(at);
+            feed(&mut ed, "<space>vh");
+        }
+        let r = ed.session.code_review.as_ref().unwrap();
+        assert!(r.high_unseen(&ed).is_empty(), "the review has none left");
+        // The bring card: nothing held
+        let sid = ed.session.id;
+        let moved = crate::rebase::Moved {
+            root: dir.clone(),
+            name: "work".into(),
+            branch: "work".into(),
+            base: "main".into(),
+            moved: 0,
+            ahead: 1,
+        };
+        crate::codereview::push_bring_card(
+            &mut ed,
+            sid,
+            moved.bring_card(None, false),
+            dir.clone(),
+            "main".into(),
+        );
+        settle_until(&mut ed, |ed| !ed.offers.is_empty());
+        let o = ed.offers.first().unwrap();
+        assert!(o.held.is_none(), "held: {}", o.question);
+        assert!(o.gate.iter().all(|k| ed.session.looked.contains(k)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A repository for a bring's card: `main` with `files`, then a branch `work` with `changed` committed —
+    /// the test's own git (no config of the user's or the system's). Its real path.
+    fn bring_repo(name: &str, files: &[(&str, String)], changed: &[(&str, String)]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("tarae-review-{name}-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let run = |args: &[&str]| {
+            let id = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"];
+            let o = std::process::Command::new("git")
+                .args(id)
+                .args(args)
+                .current_dir(&dir)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "git {args:?}");
+        };
+        for (rel, text) in files {
+            std::fs::write(dir.join(rel), text).unwrap();
+        }
+        run(&["init", "-q", "-b", "main"]);
+        run(&["add", "-A"]);
+        run(&["commit", "-qm", "base"]);
+        run(&["checkout", "-qb", "work"]);
+        for (rel, text) in changed {
+            std::fs::write(dir.join(rel), text).unwrap();
+        }
+        run(&["commit", "-qam", "the change"]);
+        dir
+    }
+
+    /// The bring card of `dir`'s `work` onto `main`, up and drawn (its answers in sight).
+    fn bring_card_up(ed: &mut Editor, dir: &Path) {
+        let moved = crate::rebase::Moved {
+            root: dir.to_path_buf(),
+            name: "work".into(),
+            branch: "work".into(),
+            base: "main".into(),
+            moved: 0,
+            ahead: 1,
+        };
+        let sid = ed.session.id;
+        push_bring_card(ed, sid, moved.bring_card(None, false), dir.to_path_buf(), "main".into());
+        settle_until(ed, |ed| !ed.offers.is_empty());
+        crate::term::render(ed, &mut Vec::new(), 100, 30).unwrap();
+    }
+
+    /// #4 of 2026-10-07: the bring card's `h` gives the keys to the review — given the card with `C-q`, they
+    /// stayed with it, every key "isn't an answer here" — and goes to the first change the card names, not the
+    /// review's next from the cursor; the card stays up, aside (`C-q` answers it), until each has had a look.
+    #[test]
+    fn a_bring_cards_h_takes_the_keys_to_the_first_change_it_names() {
+        let fns = |names: &str| names.chars().map(|c| format!("fn {c}() {{}}\n")).collect::<String>();
+        let mut a: Vec<String> = fns("abcdefgh").lines().map(str::to_string).collect();
+        a[1] = "fn b() { unsafe { x() } }".into();
+        a[6] = "fn g() { unsafe { z() } }".into();
+        let dir = bring_repo("h-keys", &[("a.rs", fns("abcdefgh"))], &[("a.rs", a.join("\n") + "\n")]);
+        let mut ed = Editor::new(crate::config::Config::default());
+        start_in(&mut ed, dir.clone(), Some("main".into()));
+        settle_until(&mut ed, landed);
+        // (the cursor past the first: the review's own next would be line 6's)
+        ed.goto_line(4);
+        bring_card_up(&mut ed, &dir);
+        let o = ed.offers.first().unwrap();
+        assert!(o.held.is_some(), "{}", o.question);
+        assert_eq!(o.held_changes.iter().map(Held::place).collect::<Vec<_>>(), ["a.rs:2", "a.rs:7"]);
+        feed(&mut ed, "<C-q>");
+        assert!(ed.card_keys, "given the keys");
+        feed(&mut ed, "h");
+        let status = |ed: &Editor| ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        assert_eq!(ed.cursor_line(), 1, "the card's first, not the review's next: {}", status(&ed));
+        assert!(status(&ed).contains("a.rs:2") && status(&ed).contains("C-q"), "{}", status(&ed));
+        assert!(!ed.card_keys && !ed.card_has_keys(), "the keys are the review's");
+        assert!(ed.offers.first().is_some_and(|o| o.aside && o.held.is_some()), "the card stays, aside");
+        assert!(ed.offer_bar(), "a bar over the status line, the code in sight");
+        // The review's keys: `]h` walks it, `space v h` looks — `h` is the code's again
+        feed(&mut ed, "]h");
+        assert_eq!(ed.cursor_line(), 6, "{}", status(&ed));
+        feed(&mut ed, "<space>vh");
+        ed.goto_line(1);
+        feed(&mut ed, "<space>vh");
+        let o = ed.offers.first().unwrap();
+        assert!(o.held.is_none() && !o.aside, "every one looked at: its y back, up again: {}", o.question);
+        assert!(ed.card_has_keys() && !ed.offer_bar());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #5 of 2026-10-07: a change the bring takes that the review can't show as it is now (its line changed in
+    /// the working tree since the commit) is never a dead end — `h` says so on the card and shows it as the
+    /// commits have it, in a buffer where `space v h` on it, all of it on screen, is the look; off screen it
+    /// isn't taken.
+    #[test]
+    fn a_change_the_review_cant_show_is_named_and_shown_as_the_bring_takes_it() {
+        let base = "fn a() {}\nfn b() {}\n".to_string();
+        let committed = "fn a() {}\nfn b() { unsafe { x() } }\n".to_string();
+        let dir = bring_repo("as-brought", &[("a.rs", base)], &[("a.rs", committed)]);
+        // (changed since its commit: the review shows this line, the bring takes the other)
+        std::fs::write(dir.join("a.rs"), "fn a() {}\nfn b() { unsafe { y() } }\n").unwrap();
+        let mut ed = Editor::new(crate::config::Config::default());
+        bring_card_up(&mut ed, &dir);
+        assert!(ed.offers.first().is_some_and(|o| o.held.is_some()));
+        // (no review open: `h` opens one since main, then finds the change isn't in it)
+        feed(&mut ed, "<C-q>h");
+        let shown =
+            |ed: &Editor| ed.doc().title.as_deref().is_some_and(|t| t.ends_with("as the bring takes them"));
+        settle_until(&mut ed, shown);
+        assert!(ed.session.code_review.is_some(), "the review since main open");
+        let said = ed.offer_said.as_ref().map(|s| s.2.clone()).unwrap_or_default();
+        assert!(said.contains("a.rs:2 isn't in the review as it is now"), "on the card: {said}");
+        let title = ed.doc().title.clone().unwrap_or_default();
+        assert!(title.ends_with("as the bring takes them"), "{title}");
+        let text = ed.doc().text.to_string();
+        assert!(
+            text.contains("a.rs:2 — unsafe (rust pack)\n-fn b() {}\n+fn b() { unsafe { x() } }"),
+            "{text}"
+        );
+        assert!(!ed.card_has_keys(), "the keys are the buffer's");
+        // Not on screen yet: not taken
+        feed(&mut ed, "<space>vh");
+        assert!(ed.offers.first().is_some_and(|o| o.held.is_some()), "taken unseen");
+        let status = |ed: &Editor| ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        assert!(status(&ed).contains("not on screen"), "{}", status(&ed));
+        // On screen: the look
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 30).unwrap();
+        feed(&mut ed, "<space>vh");
+        assert!(ed.offers.first().is_some_and(|o| o.held.is_none()), "{}", status(&ed));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Review finding 1 (2026-10-07): a file git converts on its way in — here `ident`, which keeps `$Id$` in
+    /// the commit and `$Id: <blob> $` in the working tree — isn't graded line by line against its working
+    /// text (the review would hold for a line no commit has): the review and the bring each grade it whole, by
+    /// the blob it is or would be — the same key.
+    #[test]
+    fn a_file_git_converts_is_graded_whole_alike() {
+        let dir = bring_repo(
+            "ident",
+            &[(".gitattributes", "*.txt ident\n".into()), ("sandbox.txt", "$Id$\none\n".into())],
+            &[("sandbox.txt", "$Id$\none\ntwo\n".into())],
+        );
+        // (checked out again: the working tree has the expanded `$Id: … $`, the commit `$Id$`)
+        std::fs::remove_file(dir.join("sandbox.txt")).unwrap();
+        let o = std::process::Command::new("git")
+            .args(["checkout", "--", "sandbox.txt"])
+            .current_dir(&dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(o.status.success());
+        assert!(std::fs::read_to_string(dir.join("sandbox.txt")).unwrap().starts_with("$Id: "));
+        let rules = crate::risk::Rules::of(&crate::config::EditorConfig {
+            review_risky: vec!["sandbox*".into()],
+            ..Default::default()
+        });
+        let base = Base::Branch { name: "main".into(), commit: "main".into() };
+        let files = changed(&dir, &base).unwrap();
+        let grading = grade_files(&dir, base.rev(), &files, &[], &rules).unwrap();
+        let path = dir.join("sandbox.txt");
+        let mut review: Vec<crate::risk::Key> =
+            grading.grades[&path].iter().flat_map(|g| g.keys.iter().copied()).collect();
+        review.sort_unstable();
+        let bring = held_keys(&highs_between(&dir, "main", "HEAD", &rules).unwrap());
+        assert_eq!(review, bring, "the same key, the review's and the bring's");
+        assert!(grading.whole.contains(&path), "graded whole: its open text isn't graded again");
+        // Open in a review since main: its document's text isn't graded — the key stays the bring's
+        let mut config = crate::config::Config::default();
+        config.editor.review_risky = vec!["sandbox*".into()];
+        let mut ed = Editor::new(config);
+        start_in(&mut ed, dir.clone(), Some("main".into()));
+        settle_until(&mut ed, |ed| landed(ed) && ed.doc().path.as_deref() == Some(path.as_path()));
+        let r = ed.session.code_review.as_ref().unwrap();
+        let f = r.files.iter().find(|f| f.path == path).unwrap();
+        let mut open: Vec<crate::risk::Key> =
+            r.graded(&ed, f).iter().flat_map(|g| g.keys.iter().copied()).collect();
+        open.sort_unstable();
+        assert_eq!(open, bring, "open, still the bring's key");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Review finding 6: a file git can't read to grade whole (here a filter marked required with no driver —
+    /// in the test's own user config) is that file's trouble, not the review's end: graded as unread (a key
+    /// nothing else has, so a bring's `h` shows it as the bring takes it) and said.
+    #[test]
+    fn a_file_git_cant_read_is_graded_unread_and_said() {
+        let dir = std::env::temp_dir().join(format!("tarae-review-unread-{}", std::process::id()));
+        let user = std::env::temp_dir().join(format!("tarae-review-unread-{}.gitconfig", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        std::fs::write(&user, "[filter \"nope\"]\n\trequired = true\n").unwrap();
+        crate::gitrepo::global_config_for(&dir, &user);
+        let run = |args: &[&str]| {
+            let id = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"];
+            let o = std::process::Command::new("git")
+                .args(id)
+                .args(args)
+                .current_dir(&dir)
+                .env("GIT_CONFIG_GLOBAL", &user)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+        };
+        std::fs::write(dir.join("readme"), "x\n").unwrap();
+        run(&["init", "-q"]);
+        run(&["add", "-A"]);
+        run(&["commit", "-qm", "base"]);
+        std::fs::write(dir.join(".gitattributes"), "*.dat filter=nope\n").unwrap();
+        std::fs::write(dir.join("a.dat"), "data\n").unwrap();
+        let file = File {
+            rel: "a.dat".into(),
+            path: dir.join("a.dat"),
+            added: 1,
+            removed: 0,
+            new: true,
+            gone: false,
+            binary: false,
+        };
+        let rules = crate::risk::Rules::of(&crate::config::EditorConfig::default());
+        let grading = grade_files(&dir, Some("HEAD"), &[file], &[], &rules).expect("the review goes on");
+        assert_eq!(grading.unread.iter().map(|u| u.0.as_str()).collect::<Vec<_>>(), ["a.dat"]);
+        let keys: Vec<crate::risk::Key> =
+            grading.grades[&dir.join("a.dat")].iter().flat_map(|g| g.keys.iter().copied()).collect();
+        assert_eq!(keys, crate::risk::keys("a.dat", &crate::risk::binary("unread a.dat")));
+        // (said as the review opens)
+        let mut ed = Editor::new(crate::config::Config::default());
+        let f = File {
+            rel: "a.dat".into(),
+            path: dir.join("a.dat"),
+            added: 1,
+            removed: 0,
+            new: true,
+            gone: false,
+            binary: false,
+        };
+        open(&mut ed, dir.clone(), Base::Head, vec![f], grading);
+        assert!(
+            ed.toasts.iter().any(|t| t.text.contains("a.dat couldn't be read, graded as unread")),
+            "{:?}",
+            ed.toasts.iter().map(|t| &t.text).collect::<Vec<_>>()
+        );
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_file(&user).ok();
+    }
+
+    /// Review finding 7: only the blobs whose text is graded are read — a binary file's and a converted one's
+    /// never (graded by id), the review's old side alone, a bring's both.
+    #[test]
+    fn only_the_blobs_graded_by_their_lines_are_read() {
+        let raw = |rel: &str, old: &str, new: &str| Raw {
+            old_mode: "100644".into(),
+            new_mode: "100644".into(),
+            old: old.into(),
+            new: new.into(),
+            rel: rel.into(),
+        };
+        let raws = [raw("a.rs", "a1", "a2"), raw("logo.png", "p1", "p2"), raw("big.lfs", "l1", "l2")];
+        let by_id: std::collections::HashSet<String> = ["logo.png".into(), "big.lfs".into()].into();
+        assert_eq!(text_ids(&raws, &by_id, false), ["a1"]);
+        assert_eq!(text_ids(&raws, &by_id, true), ["a1", "a2"]);
+    }
+
+    /// Review finding 8: a submodule whose folder isn't a checkout (not initialized) is at the commit its
+    /// index gitlink says — git's discovery from its folder would climb to the superproject and give that HEAD.
+    #[test]
+    fn a_submodule_not_checked_out_is_its_index_gitlink() {
+        let dir = std::env::temp_dir().join(format!("tarae-review-deinit-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join("top")).unwrap();
+        std::fs::create_dir_all(dir.join("lib")).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let git_in = |at: &Path, args: &[&str]| {
+            let id = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"];
+            let o = std::process::Command::new("git")
+                .args(id)
+                .args(["-c", "protocol.file.allow=always"])
+                .args(args)
+                .current_dir(at)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+        };
+        let (top, lib) = (dir.join("top"), dir.join("lib"));
+        std::fs::write(lib.join("a.txt"), "one\n").unwrap();
+        git_in(&lib, &["init", "-q"]);
+        git_in(&lib, &["add", "-A"]);
+        git_in(&lib, &["commit", "-qm", "one"]);
+        std::fs::write(top.join("readme"), "x\n").unwrap();
+        git_in(&top, &["init", "-q", "-b", "main"]);
+        git_in(&top, &["submodule", "add", "-q", lib.to_str().unwrap(), "sandbox-lib"]);
+        git_in(&top, &["add", "-A"]);
+        git_in(&top, &["commit", "-qm", "base"]);
+        git_in(&top, &["checkout", "-qb", "work"]);
+        let sub = top.join("sandbox-lib");
+        std::fs::write(sub.join("a.txt"), "two\n").unwrap();
+        git_in(&sub, &["commit", "-qam", "two"]);
+        git_in(&top, &["commit", "-qam", "moved"]);
+        // Not initialized any more: the folder stays, empty
+        git_in(&top, &["submodule", "deinit", "-q", "-f", "sandbox-lib"]);
+        assert!(sub.is_dir() && std::fs::read_dir(&sub).unwrap().next().is_none());
+        let rules = crate::risk::Rules::of(&crate::config::EditorConfig {
+            review_risky: vec!["sandbox*".into()],
+            ..Default::default()
+        });
+        let base = Base::Branch { name: "main".into(), commit: "main".into() };
+        let files = changed(&top, &base).unwrap();
+        let grades = grade_files(&top, base.rev(), &files, &[], &rules).unwrap().grades;
+        let mut review: Vec<crate::risk::Key> = grades
+            .get(&sub)
+            .into_iter()
+            .flat_map(|g| g.iter())
+            .flat_map(|g| g.keys.iter().copied())
+            .collect();
+        review.sort_unstable();
+        let bring = held_keys(&highs_between(&top, "main", "HEAD", &rules).unwrap());
+        assert_eq!(review.len(), 2, "{review:?}");
+        assert_eq!(review, bring, "the index's gitlink, not the superproject's HEAD");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Review finding 1, a `filter` attribute: a file git cleans on its way in (here upper-cased — the driver in
+    /// the test's own user config, as the user's would be: a repository's own filter commands wait for trust)
+    /// is graded as git cleans it — the review's key is the bring's. Read raw, the review held for lines no
+    /// commit has (`one`, `two` against the stored `ONE`).
+    #[test]
+    fn a_filtered_file_is_graded_as_git_cleans_it() {
+        let dir = std::env::temp_dir().join(format!("tarae-review-filter-{}", std::process::id()));
+        let user = std::env::temp_dir().join(format!("tarae-review-filter-{}.gitconfig", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        std::fs::write(&user, "[filter \"upper\"]\n\tclean = tr a-z A-Z\n\tsmudge = tr A-Z a-z\n").unwrap();
+        crate::gitrepo::global_config_for(&dir, &user);
+        let run = |args: &[&str]| {
+            let id = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"];
+            let o = std::process::Command::new("git")
+                .args(id)
+                .args(args)
+                .current_dir(&dir)
+                .env("GIT_CONFIG_GLOBAL", &user)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+            String::from_utf8_lossy(&o.stdout).to_string()
+        };
+        std::fs::write(dir.join(".gitattributes"), "sandbox.txt filter=upper\n").unwrap();
+        std::fs::write(dir.join("sandbox.txt"), "one\n").unwrap();
+        run(&["init", "-q", "-b", "main"]);
+        run(&["add", "-A"]);
+        run(&["commit", "-qm", "base"]);
+        run(&["checkout", "-qb", "work"]);
+        std::fs::write(dir.join("sandbox.txt"), "one\ntwo\n").unwrap();
+        run(&["commit", "-qam", "the change"]);
+        // (stored cleaned, kept raw in the working tree)
+        assert_eq!(run(&["show", "HEAD:sandbox.txt"]), "ONE\nTWO\n");
+        assert_eq!(std::fs::read_to_string(dir.join("sandbox.txt")).unwrap(), "one\ntwo\n");
+        let rules = crate::risk::Rules::of(&crate::config::EditorConfig {
+            review_risky: vec!["sandbox*".into()],
+            ..Default::default()
+        });
+        let base = Base::Branch { name: "main".into(), commit: "main".into() };
+        let files = changed(&dir, &base).unwrap();
+        let grading = grade_files(&dir, base.rev(), &files, &[], &rules).unwrap();
+        let path = dir.join("sandbox.txt");
+        let mut review: Vec<crate::risk::Key> =
+            grading.grades[&path].iter().flat_map(|g| g.keys.iter().copied()).collect();
+        review.sort_unstable();
+        let bring = held_keys(&highs_between(&dir, "main", "HEAD", &rules).unwrap());
+        assert_eq!(review, bring, "the review's key, as git cleans the file, is the bring's");
+        assert!(grading.whole.contains(&path));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_file(&user).ok();
+    }
+
+    /// Review finding 1, `text`/`eol`: a file kept with `\r\n` in the working tree and `\n` in the commit is
+    /// graded line by line, as any — a line's text has no line end (`risk::line_text`), so the review's keys
+    /// are the bring's.
+    #[test]
+    fn a_files_line_ends_never_make_a_change() {
+        let dir = bring_repo(
+            "eol",
+            &[(".gitattributes", "sandbox.txt text eol=crlf\n".into()), ("sandbox.txt", "one\n".into())],
+            &[("sandbox.txt", "one\ntwo\n".into())],
+        );
+        // (checked out again: `\r\n` in the working tree)
+        std::fs::remove_file(dir.join("sandbox.txt")).unwrap();
+        let o = std::process::Command::new("git")
+            .args(["checkout", "--", "sandbox.txt"])
+            .current_dir(&dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(o.status.success());
+        assert_eq!(std::fs::read_to_string(dir.join("sandbox.txt")).unwrap(), "one\r\ntwo\r\n");
+        let rules = crate::risk::Rules::of(&crate::config::EditorConfig {
+            review_risky: vec!["sandbox*".into()],
+            ..Default::default()
+        });
+        let base = Base::Branch { name: "main".into(), commit: "main".into() };
+        let files = changed(&dir, &base).unwrap();
+        let grading = grade_files(&dir, base.rev(), &files, &[], &rules).unwrap();
+        let path = dir.join("sandbox.txt");
+        assert!(!grading.whole.contains(&path), "line by line");
+        let mut review: Vec<crate::risk::Key> =
+            grading.grades[&path].iter().flat_map(|g| g.keys.iter().copied()).collect();
+        review.sort_unstable();
+        let bring = held_keys(&highs_between(&dir, "main", "HEAD", &rules).unwrap());
+        assert_eq!(review, bring);
+        assert_eq!(bring, [crate::risk::key("sandbox.txt", b'+', "two")], "the line added, nothing else");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Review finding 2: git failing while a review is graded is the review's error — it used to give every
+    /// base an empty text, every file graded all new, said nowhere.
+    #[test]
+    fn git_failing_is_the_reviews_error_not_every_file_new() {
+        let dir = std::env::temp_dir().join(format!("tarae-review-nogit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        std::fs::write(dir.join("a.rs"), "fn a() { unsafe { b() } }\n").unwrap();
+        let file = File {
+            rel: "a.rs".into(),
+            path: dir.join("a.rs"),
+            added: 1,
+            removed: 0,
+            new: false,
+            gone: false,
+            binary: false,
+        };
+        let rules = crate::risk::Rules::of(&crate::config::EditorConfig::default());
+        let got = grade_files(&dir, Some("HEAD"), &[file], &[], &rules);
+        assert!(got.is_err(), "graded anyway: {:?}", got.map(|g| g.grades.len()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Review findings 3 and 4: the buffer of a bring's changes takes a look only at a change seen whole. It
+    /// wraps, and a line counts once its first row and its last were drawn: a long line in a short pane isn't
+    /// taken from a frame that cut it, and is once scrolled through. A change of mode alone is a block like
+    /// any. Unwrapped (`z w`), or changed since it was made, it takes nothing — said.
+    #[test]
+    fn the_buffer_of_a_brings_changes_takes_only_what_was_seen_whole() {
+        use crate::risk::{Hunk, Rules, graded};
+        let long = format!("let s = unsafe {{ {} }};", "x".repeat(900));
+        let held = |rel: &str, h: Hunk| Held::of(rel, graded(rel, None, &h, &Rules::default(), false), &h);
+        let tall = held("a.rs", Hunk { at: 3, added: vec![long], ..Hunk::default() });
+        let mode = held("run.sh", Hunk { mode: Some(("100644".into(), "100755".into())), ..Hunk::default() });
+        let mut ed = Editor::new(crate::config::Config::default());
+        let mut card = crate::offer::Offer::new(
+            "Bring work into main".into(),
+            "held",
+            "",
+            String::new(),
+            crate::offer::What::ReviewEnd { session: 0, started: std::time::Instant::now() },
+        );
+        card.held = Some(held_said(2));
+        card.gate = tall.keys.iter().chain(&mode.keys).copied().collect();
+        card.held_changes = vec![tall.clone(), mode.clone()];
+        ed.push_offer(card);
+        let id = ed.offers[0].id;
+        show_as_brought(&mut ed, id, vec![tall.clone(), mode.clone()]);
+        let blocks = ed.session.held_view.as_ref().unwrap().blocks.clone();
+        let status = |ed: &Editor| ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        let looked = |ed: &Editor, h: &Held| h.looked_at(&ed.session.looked);
+        let frame = |ed: &mut Editor| crate::term::render(ed, &mut Vec::new(), 80, 8).unwrap();
+        // The long line wraps past the short pane: from the frame that shows its start, not taken
+        ed.goto_line(blocks[0].0.start + 1);
+        frame(&mut ed);
+        feed(&mut ed, "<space>vh");
+        assert!(!looked(&ed, &tall), "{}", status(&ed));
+        assert!(status(&ed).contains("not on screen whole"), "{}", status(&ed));
+        // Unwrapped, nothing is taken, whatever was drawn
+        ed.doc_mut().wrap = Some(false);
+        frame(&mut ed);
+        feed(&mut ed, "<space>vh");
+        assert!(!looked(&ed, &tall) && status(&ed).contains("wrap the buffer again"), "{}", status(&ed));
+        ed.doc_mut().wrap = Some(true);
+        // Scrolled through to its end: taken
+        for _ in 0..12 {
+            feed(&mut ed, "<C-e>");
+            frame(&mut ed);
+        }
+        ed.goto_line(blocks[0].0.start + 1);
+        feed(&mut ed, "<space>vh");
+        assert!(looked(&ed, &tall), "{}", status(&ed));
+        // A change of mode: its block on screen, taken — and the card's yes is back
+        ed.goto_line(blocks[1].0.start);
+        crate::term::render(&mut ed, &mut Vec::new(), 80, 30).unwrap();
+        feed(&mut ed, "<space>vh");
+        assert!(looked(&ed, &mode), "{}", status(&ed));
+        assert!(ed.offers[0].held.is_none(), "every change it held for looked at");
+        // Changed since it was made: nothing taken
+        ed.session.looked.clear();
+        show_as_brought(&mut ed, id, vec![mode.clone()]);
+        let edit = crate::transaction::Transaction::new(vec![crate::transaction::Change::insert(0, "x")]);
+        ed.doc_mut().apply(&edit);
+        crate::term::render(&mut ed, &mut Vec::new(), 80, 30).unwrap();
+        ed.goto_line(ed.session.held_view.as_ref().unwrap().blocks[0].0.start);
+        feed(&mut ed, "<space>vh");
+        assert!(!looked(&ed, &mode) && status(&ed).contains("changed since"), "{}", status(&ed));
+    }
+
+    /// Review finding 5: a held card's `h` with nowhere to go — a review-end card with no review, a bring's
+    /// with each change looked at — says so on the card, which stays whole with the keys; it steps aside only
+    /// for somewhere to go.
+    #[test]
+    fn a_cards_h_with_nowhere_to_go_says_so_and_stays() {
+        let mut ed = Editor::new(crate::config::Config::default());
+        let mut card = crate::offer::Offer::new(
+            "End the review?".into(),
+            "held",
+            "",
+            String::new(),
+            crate::offer::What::ReviewEnd { session: 0, started: std::time::Instant::now() },
+        );
+        card.held = Some(held_said(1));
+        ed.push_offer(card);
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 30).unwrap();
+        feed(&mut ed, "<C-q>h");
+        let o = ed.offers.first().unwrap();
+        assert!(!o.aside && ed.card_keys, "whole, with the keys");
+        let said = ed.offer_said.as_ref().map(|s| s.2.clone()).unwrap_or_default();
+        assert!(said.contains("no review here"), "on the card: {said}");
+    }
+
+    /// Grading an open file — once a version, on the main loop, when its diff lands (`CodeReview::graded`):
+    /// 20,000 lines, 200 changes, no tree (the text made a `String` for the lines alone). Median of 50.
+    #[test]
+    fn perf_grading_an_open_file() {
+        if crate::test_results::unoptimized("codereview::tests::perf_grading_an_open_file") {
+            return;
+        }
+        let base: String =
+            (0..20_000).map(|i| format!("    let value_{i} = compute({i}, \"some text\");\n")).collect();
+        let mut now: Vec<String> = base.lines().map(str::to_string).collect();
+        for k in 0..200 {
+            now[k * 100] = format!("    let value_{k} = unsafe {{ other({k}) }};");
+        }
+        let now = now.join("\n") + "\n";
+        let mut ed = Editor::new(crate::config::Config::default());
+        let d = &mut ed.docs[0];
+        d.text = ropey::Rope::from_str(&now);
+        d.review_base = Some(ropey::Rope::from_str(&base));
+        d.git_base = Some(Arc::new(base.clone()));
+        d.git_hunks = crate::git::hunks(&base, &now);
+        let rules = crate::risk::Rules::of(&crate::config::EditorConfig::default());
+        let d = &ed.docs[0];
+        assert_eq!(grade_doc(d, "src/a.rs", &rules).len(), 200);
+        let mut all: Vec<std::time::Duration> = (0..50)
+            .map(|_| {
+                let t = std::time::Instant::now();
+                std::hint::black_box(grade_doc(d, "src/a.rs", &rules));
+                t.elapsed()
+            })
+            .collect();
+        all.sort_unstable();
+        // (measured 2026-10-07: 495 µs; main's, reading lines the same way, 435 µs — a whole-text `String`
+        // per version made it 1080)
+        let us = all[all.len() / 2].as_secs_f64() * 1e6;
+        let line = format!("PERF review_grade_open_20k {us:.1} budget=16000 noise=100\n");
+        let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+    }
+
+    /// A submodule moved to another commit under a risky path: high in a review of the working tree (its
+    /// checked-out commit) and in the bring of the commit that records it — by the same keys.
+    #[test]
+    fn a_submodule_moved_is_the_same_change_to_a_review_and_a_bring() {
+        let dir = std::env::temp_dir().join(format!("tarae-review-sub-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join("top")).unwrap();
+        std::fs::create_dir_all(dir.join("lib")).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let git_in = |at: &Path, args: &[&str]| {
+            let id = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"];
+            let o = std::process::Command::new("git")
+                .args(id)
+                .args(["-c", "protocol.file.allow=always"])
+                .args(args)
+                .current_dir(at)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+            String::from_utf8_lossy(&o.stdout).trim().to_string()
+        };
+        let (top, lib) = (dir.join("top"), dir.join("lib"));
+        std::fs::write(lib.join("a.txt"), "one\n").unwrap();
+        git_in(&lib, &["init", "-q"]);
+        git_in(&lib, &["add", "-A"]);
+        git_in(&lib, &["commit", "-qm", "one"]);
+        std::fs::write(top.join("readme"), "x\n").unwrap();
+        git_in(&top, &["init", "-q"]);
+        git_in(&top, &["submodule", "add", "-q", lib.to_str().unwrap(), "sandbox-lib"]);
+        git_in(&top, &["add", "-A"]);
+        git_in(&top, &["commit", "-qm", "base"]);
+        let base = git_in(&top, &["rev-parse", "HEAD"]);
+        // The submodule's checkout moves on
+        let sub = top.join("sandbox-lib");
+        std::fs::write(sub.join("a.txt"), "two\n").unwrap();
+        git_in(&sub, &["commit", "-qam", "two"]);
+        let cfg = crate::config::EditorConfig { review_risky: vec!["sandbox*".into()], ..Default::default() };
+        let rules = crate::risk::Rules::of(&cfg);
+        let high = |g: &mut dyn Iterator<Item = &crate::risk::Graded>| {
+            let mut k: Vec<crate::risk::Key> =
+                g.filter(|g| g.grade == Grade::High).flat_map(|g| g.keys.iter().copied()).collect();
+            k.sort_unstable();
+            k
+        };
+        let files = changed(&top, &Base::Head).unwrap();
+        let grades = grade_files(&top, Some("HEAD"), &files, &[], &rules).unwrap().grades;
+        let review = high(&mut grades.get(&sub).into_iter().flat_map(|g| g.iter()));
+        git_in(&top, &["commit", "-qam", "moved"]);
+        let highs = highs_between(&top, &base, "HEAD", &rules).unwrap();
+        let bring = held_keys(&highs);
+        assert_eq!(review.len(), 2, "the commit out, the commit in: {review:?}");
+        assert_eq!(review, bring);
         std::fs::remove_dir_all(&dir).ok();
     }
 

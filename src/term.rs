@@ -6942,6 +6942,10 @@ impl OfferCard {
             let said = editor.offer_said_now().filter(|_| matches!(o.state, OfferState::Asking));
             let how = match &o.state {
                 _ if said.is_some() => said.unwrap_or_default().to_string(),
+                OfferState::Asking if o.aside && !editor.card_keys => {
+                    "aside while you look — C-q answers it".into()
+                }
+                OfferState::Asking if o.aside => "esc goes back, unanswered".into(),
                 OfferState::Asking if editor.offer_seen_whole() => "read to its end — y answers".to_string(),
                 OfferState::Asking => format!("{} to its end, then y answers", editor.end_key()),
                 _ => lines.get(1).map(|l| l.0.clone()).unwrap_or_default(),
@@ -11299,6 +11303,8 @@ mod tests {
                 asked: None,
                 held: None,
                 gate: Vec::new(),
+                held_changes: Vec::new(),
+                aside: false,
             });
             let result =
                 serde_json::json!([{"label": "line_one", "detail": "fn line_one()"}, {"label": "lx"}]);

@@ -968,8 +968,16 @@ it again). Until each has had a look:
 - `space v q`'s card names what's left and has no yes;
 - the session's bring card names what's left and has no `y` or `p`, and a bring asked any other way is refused.
 
-On either card `h` goes to them (the bring card's opens a review since its base first, on the first one), and
-the card stays. Once each has had a look, its yes comes back.
+On either card `h` goes to them and the card steps aside: it shrinks to a bar over the status line, the keys go
+back to the code, and `C-q` answers it. The bring card's `h` goes to the first change it names that no one has
+looked at, opening a review since its base first if one isn't open. Once each has had a look, the card comes back
+whole with its yes.
+
+A review and a bring see the same lines of a change: both diff the file's texts the same way (tarae's own diff,
+never git's, whose algorithm is your config's). A review is of the working tree, though, and a bring takes
+commits. When a line the bring takes differs in the working tree, the review can't show it. The bring card's `h`
+then says so on the card and opens the change as the commits have it, in a buffer of its own; `space v h` there,
+with the change on screen, is the look.
 
 The look is kept per changed line: its file, whether it was added or removed, and its text. A change looked at
 before it was committed still counts, and a line changed since needs a look again. Where the line is isn't part

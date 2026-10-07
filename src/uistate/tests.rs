@@ -183,6 +183,16 @@ const SCENES: &[Scene] = &[
         light_card(ed);
         feed(ed, &["<C-q>"]);
     }),
+    // (a held card's `h` went to what it waits on: its letters are the code's, `C-q` answers it)
+    ("a card stepped aside for its h", |ed| {
+        light_card(ed);
+        ed.offers[0].aside = true;
+    }),
+    ("a card stepped aside, given the keys (C-q)", |ed| {
+        light_card(ed);
+        ed.offers[0].aside = true;
+        feed(ed, &["<C-q>"]);
+    }),
     ("a card in insert mode", |ed| {
         light_card(ed);
         feed(ed, &["i"]);
