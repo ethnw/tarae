@@ -108,7 +108,13 @@ fn every_client_measured_is_read_as_it_was_sent() {
                 let whole = whole.unwrap_or_else(|| panic!("{who}: a whole ClientHello"));
                 assert_eq!(server_name(&rest[..whole]), Ok(Some(host.to_string())), "{who}");
             }
-            Request::Plain { method: "POST", host: Host::Name(n), port: 80, head: on } => {
+            Request::Plain {
+                method: "POST",
+                host: Host::Name(n),
+                port: 80,
+                head: on,
+                body: Framing::Length(3),
+            } => {
                 assert_eq!(n, host);
                 let on = String::from_utf8(on).unwrap();
                 assert!(on.starts_with("POST /form HTTP/1.1\r\nHost: example.invalid\r\n"), "{on}");
@@ -421,6 +427,107 @@ fn plain_http_takes_the_standard_methods_only() {
     for (line, headers) in refused {
         assert!(matches!(plain_request(line, headers), Err(Refusal::Malformed(_))), "{line:?} {headers:?}");
     }
+}
+
+/// The client's bytes that are its body, `chunk` at a time.
+fn taken(f: Framing, bytes: &[u8], chunk: usize) -> Result<(usize, bool), &'static str> {
+    let mut b = Body::new(f);
+    let mut n = 0;
+    for piece in bytes.chunks(chunk.max(1)) {
+        let k = b.take(piece)?;
+        assert!(k <= piece.len());
+        n += k;
+        if k < piece.len() {
+            break;
+        }
+    }
+    Ok((n, b.done()))
+}
+
+/// A body ends where its framing says, however its bytes are split: none for no framing, `Content-Length`'s
+/// count, a chunked body at its last chunk's trailers' blank line (extensions and trailers taken) — and what the
+/// client sends after it (another request) is never the body's. A chunked framing it can't follow is an error.
+#[test]
+fn a_body_ends_where_its_framing_says() {
+    let next = b"GET http://other.test/ HTTP/1.1\r\n\r\n";
+    let chunked = b"3;ext=1\r\nx=1\r\nA\r\n0123456789\r\n0\r\nTrailer: t\r\n\r\n";
+    let cases: [(Framing, &[u8]); 4] = [
+        (Framing::Empty, b""),
+        (Framing::Length(3), b"x=1"),
+        (Framing::Chunked, chunked),
+        (Framing::Chunked, b"0\r\n\r\n"),
+    ];
+    for (f, body) in cases {
+        let all = [body, &next[..]].concat();
+        for chunk in 1..=all.len() {
+            assert_eq!(taken(f, &all, chunk), Ok((body.len(), true)), "{f:?} {chunk}");
+        }
+        if !body.is_empty() {
+            assert_eq!(taken(f, &body[..body.len() - 1], 4), Ok((body.len() - 1, false)), "not done yet");
+        }
+    }
+    let wrong: [&[u8]; 8] = [
+        b"x\r\n",
+        b"\r\n",
+        b"3\nabc\r\n",
+        b"3\r\nabcX",
+        b"11111111111111111\r\n",
+        b"3 \r\nabc\r\n",
+        b"0\r\nTrailer: t\n\r\n",
+        b";ext\r\n",
+    ];
+    for w in wrong {
+        assert!(taken(Framing::Chunked, w, 64).is_err(), "{:?}", String::from_utf8_lossy(w));
+    }
+    let long_line = [&b"1;"[..], &vec![b'e'; CHUNK_LINE_MAX]].concat();
+    assert!(taken(Framing::Chunked, &long_line, 64).is_err(), "a size line past its limit");
+    let long_trailers = [&b"0\r\n"[..], &vec![b't'; HEAD_MAX + 1]].concat();
+    assert!(taken(Framing::Chunked, &long_trailers, 64).is_err(), "trailers past their limit");
+}
+
+/// Whatever a chunked body's bytes hold, its parser takes at most what it's given, never panics, and once done
+/// takes nothing more: real chunked bodies (random chunk sizes, extensions, trailers) mutated 100,000 times.
+#[test]
+fn the_body_parser_never_panics() {
+    let mut rng = Rng(0xb0d1_e5ee_d1ce_0005);
+    let (mut done, mut errors) = (0, 0);
+    for _ in 0..100_000 {
+        let mut b = Vec::new();
+        for _ in 0..rng.below(4) {
+            let n = 1 + rng.below(300);
+            b.extend_from_slice(format!("{n:x}").as_bytes());
+            if rng.below(3) == 0 {
+                b.extend_from_slice(b";name=value");
+            }
+            b.extend_from_slice(b"\r\n");
+            b.extend((0..n).map(|_| rng.next() as u8));
+            b.extend_from_slice(b"\r\n");
+        }
+        b.extend_from_slice(if rng.below(2) == 0 { b"0\r\n\r\n" } else { b"0\r\nX-T: 1\r\n\r\n" });
+        mutate(&mut rng, &mut b, CHUNK_LINE_MAX);
+        let mut body = Body::new(Framing::Chunked);
+        let mut at = 0;
+        while at < b.len() {
+            let piece = &b[at..(at + 1 + rng.below(512)).min(b.len())];
+            match body.take(piece) {
+                Ok(k) => {
+                    assert!(k <= piece.len());
+                    if body.done() {
+                        assert_eq!(body.take(b"more"), Ok(0), "nothing more once done");
+                        done += 1;
+                        break;
+                    }
+                    assert_eq!(k, piece.len(), "short only once done");
+                    at += k;
+                }
+                Err(_) => {
+                    errors += 1;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(done > 1000 && errors > 10_000, "{done} / {errors}");
 }
 
 /// Each refusal is answered with its status (too long 431, a method 405, the rest 400) and said in words that

@@ -65,8 +65,20 @@ pub enum Request {
     /// `CONNECT host:port`: a tunnel.
     Connect { host: Host, port: u16 },
     /// A plain-http request in absolute form. `head` is what goes to `host:port`: in origin form, its `Host` the
-    /// URI's, no `Proxy-*` nor hop-by-hop header, `Connection: close` (one request per connection).
-    Plain { method: &'static str, host: Host, port: u16, head: Vec<u8> },
+    /// URI's, no `Proxy-*` nor hop-by-hop header, `Connection: close` (one request per connection); `body` how
+    /// its body ends — what the client sends past that end isn't this request's, and doesn't go on.
+    Plain { method: &'static str, host: Host, port: u16, head: Vec<u8>, body: Framing },
+}
+
+/// How a plain request's body ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Framing {
+    /// No body.
+    Empty,
+    /// `Content-Length`.
+    Length(u64),
+    /// `Transfer-Encoding: chunked`.
+    Chunked,
 }
 
 /// A head read whole.
@@ -188,8 +200,8 @@ pub fn head(buf: &[u8]) -> Result<Option<Head>, Refusal> {
         } else {
             Refusal::Malformed("a method that isn't a token")
         })?;
-        framing(&named("content-length"), &named("transfer-encoding"))?;
-        plain(method, target, version, &headers)?
+        let body = framing(&named("content-length"), &named("transfer-encoding"))?;
+        plain(method, target, version, &headers, body)?
     };
     Ok(Some(Head { request, auth, len: end + 4 }))
 }
@@ -197,11 +209,14 @@ pub fn head(buf: &[u8]) -> Result<Option<Head>, Refusal> {
 /// A plain request's body framed one way only, so the proxy and the server can't read its end differently: no
 /// framing, one `Content-Length` of digits alone (19 at most: it fits a `u64`), or one `Transfer-Encoding:
 /// chunked` — never both, a list, two of either, or another coding.
-fn framing(lengths: &[&[u8]], codings: &[&[u8]]) -> Result<(), Refusal> {
+fn framing(lengths: &[&[u8]], codings: &[&[u8]]) -> Result<Framing, Refusal> {
     match (lengths, codings) {
-        ([], []) => Ok(()),
-        ([n], []) if (1..=19).contains(&n.len()) && n.iter().all(u8::is_ascii_digit) => Ok(()),
-        ([], [c]) if c.eq_ignore_ascii_case(b"chunked") => Ok(()),
+        ([], []) => Ok(Framing::Empty),
+        // (19 digits fit a u64 whatever they are)
+        ([n], []) if (1..=19).contains(&n.len()) && n.iter().all(u8::is_ascii_digit) => {
+            Ok(Framing::Length(n.iter().fold(0, |a, d| a * 10 + u64::from(d - b'0'))))
+        }
+        ([], [c]) if c.eq_ignore_ascii_case(b"chunked") => Ok(Framing::Chunked),
         ([_, ..], [_, ..]) => Err(Refusal::Malformed("both Content-Length and Transfer-Encoding")),
         ([_], []) | ([_, _, ..], []) => Err(Refusal::Malformed("a Content-Length that isn't one number")),
         _ => Err(Refusal::Malformed("a Transfer-Encoding that isn't one `chunked`")),
@@ -258,6 +273,7 @@ fn plain(
     target: &[u8],
     version: &[u8],
     headers: &[(&[u8], &[u8])],
+    body: Framing,
 ) -> Result<Request, Refusal> {
     let starts = |p: &[u8]| target.get(..p.len()).is_some_and(|s| s.eq_ignore_ascii_case(p));
     let rest = if starts(b"http://") {
@@ -306,7 +322,7 @@ fn plain(
         }
     }
     out.extend_from_slice(b"Connection: close\r\n\r\n");
-    Ok(Request::Plain { method, host, port, head: out })
+    Ok(Request::Plain { method, host, port, head: out, body })
 }
 
 /// `host:port` (an IPv6 address in brackets) — the port `default` when there's none (CONNECT's has one).
@@ -549,6 +565,131 @@ pub fn server_name(buf: &[u8]) -> Result<Option<String>, HelloRefusal> {
 /// Whether a ClientHello's server name is the host a CONNECT named — never for an address.
 pub fn same_host(connect: &Host, sni: &str) -> bool {
     matches!(connect, Host::Name(n) if n == sni)
+}
+
+/// The longest chunk-size line, its extensions too.
+pub const CHUNK_LINE_MAX: usize = 1024;
+
+/// A plain request's body followed to its end (`Framing`): how much of what the client sends is this request's —
+/// what comes after isn't, and doesn't go on (a request pipelined after it would reach the checked address under
+/// another `Host`). Bounded: a chunk's size line within `CHUNK_LINE_MAX`, at most 16 hex digits, its trailers
+/// within `HEAD_MAX`; a framing it can't follow is an error, never a guess.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Body(BodyState);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BodyState {
+    /// Bytes of the body left: a length's, or a chunk's data (then its CR LF — `chunk`).
+    Left {
+        n: u64,
+        chunk: bool,
+    },
+    /// A chunk-size line: its size so far, its digits, its length, in its extensions, a CR seen.
+    Size {
+        size: u64,
+        digits: u8,
+        len: usize,
+        ext: bool,
+        cr: bool,
+    },
+    /// The CR LF after a chunk's data: how much of it came.
+    DataEnd(u8),
+    /// The trailers after the last chunk: their length, the current line's, a CR seen.
+    Trailers {
+        len: usize,
+        line: usize,
+        cr: bool,
+    },
+    Done,
+}
+
+const SIZE_LINE: BodyState = BodyState::Size { size: 0, digits: 0, len: 0, ext: false, cr: false };
+
+impl Body {
+    pub fn new(f: Framing) -> Body {
+        Body(match f {
+            Framing::Empty | Framing::Length(0) => BodyState::Done,
+            Framing::Length(n) => BodyState::Left { n, chunk: false },
+            Framing::Chunked => SIZE_LINE,
+        })
+    }
+
+    /// Whether the body has ended.
+    pub fn done(&self) -> bool {
+        self.0 == BodyState::Done
+    }
+
+    /// How many of `b` — the client's next bytes — are the body's; Err: a framing it can't follow.
+    pub fn take(&mut self, b: &[u8]) -> Result<usize, &'static str> {
+        use BodyState::*;
+        let mut i = 0;
+        while i < b.len() {
+            self.0 = match self.0 {
+                Done => break,
+                Left { n, chunk } => {
+                    let k = n.min((b.len() - i) as u64);
+                    i += k as usize;
+                    match (n - k, chunk) {
+                        (0, true) => DataEnd(0),
+                        (0, false) => Done,
+                        (n, chunk) => Left { n, chunk },
+                    }
+                }
+                Size { size, digits, len, ext, cr } => {
+                    let c = b[i];
+                    i += 1;
+                    if cr {
+                        match (c, digits, size) {
+                            (b'\n', 0, _) => return Err("a chunk without a size"),
+                            (b'\n', _, 0) => Trailers { len: 0, line: 0, cr: false },
+                            (b'\n', _, size) => Left { n: size, chunk: true },
+                            _ => return Err("a chunk-size line not ended by CR LF"),
+                        }
+                    } else if len + 1 > CHUNK_LINE_MAX {
+                        return Err("a chunk-size line past its limit");
+                    } else {
+                        let len = len + 1;
+                        match c {
+                            b'\r' => Size { size, digits, len, ext, cr: true },
+                            b'\n' => return Err("a chunk-size line not ended by CR LF"),
+                            _ if ext && (c == b'\t' || (c >= 0x20 && c != 0x7f)) => {
+                                Size { size, digits, len, ext, cr }
+                            }
+                            b';' if digits > 0 => Size { size, digits, len, ext: true, cr },
+                            _ if !ext && c.is_ascii_hexdigit() && digits < 16 => {
+                                let d = u64::from((c as char).to_digit(16).unwrap_or(0));
+                                Size { size: size << 4 | d, digits: digits + 1, len, ext, cr }
+                            }
+                            _ => return Err("a chunk size that isn't 1–16 hex digits"),
+                        }
+                    }
+                }
+                DataEnd(k) => {
+                    if b[i] != b"\r\n"[usize::from(k)] {
+                        return Err("a chunk's data not ended by CR LF");
+                    }
+                    i += 1;
+                    if k == 1 { SIZE_LINE } else { DataEnd(1) }
+                }
+                Trailers { len, line, cr } => {
+                    let c = b[i];
+                    i += 1;
+                    if len + 1 > HEAD_MAX {
+                        return Err("trailers past their limit");
+                    }
+                    let len = len + 1;
+                    match (cr, c) {
+                        (true, b'\n') if line == 0 => Done,
+                        (true, b'\n') => Trailers { len, line: 0, cr: false },
+                        (true, _) | (false, b'\n') => return Err("a trailer line not ended by CR LF"),
+                        (false, b'\r') => Trailers { len, line, cr: true },
+                        (false, _) => Trailers { len, line: line + 1, cr },
+                    }
+                }
+            };
+        }
+        Ok(i)
+    }
 }
 
 #[cfg(test)]
