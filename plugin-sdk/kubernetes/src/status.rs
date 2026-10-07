@@ -144,6 +144,17 @@ pub fn pod_tone(o: &DynamicObject) -> (String, Tone) {
     (status, tone)
 }
 
+/// Whether a pod hasn't ended: not `Succeeded` or `Failed` (evicted, shut down with its node, done). An ended
+/// pod stays until it's collected and says what happened then, not how its workload is now.
+pub fn live(p: &DynamicObject) -> bool {
+    !matches!(p.data["status"]["phase"].as_str(), Some("Succeeded" | "Failed"))
+}
+
+/// Whether a pod takes a Service's traffic: running and ready.
+fn serves(p: &DynamicObject) -> bool {
+    p.data["status"]["phase"] == "Running" && ready(&p.data["status"])
+}
+
 /// Whether `pod` is one `selector` (a label selector, or a service's plain map) picks. A selector with
 /// expressions picks none (not worked out here).
 pub fn selects(selector: &Value, pod: &DynamicObject) -> bool {
@@ -264,17 +275,19 @@ pub fn kstatus(kind: &str, o: &DynamicObject) -> (Tone, String) {
 fn by_kind(kind: &str, o: &DynamicObject, pods: &[&DynamicObject]) -> (String, Tone) {
     let (spec, st) = (&o.data["spec"], &o.data["status"]);
     let mine = |selector: &Value| pods.iter().copied().filter(|p| selects(selector, p)).collect::<Vec<_>>();
+    // (a workload is its pods that haven't ended)
+    let live_mine = |selector: &Value| mine(selector).into_iter().filter(|p| live(p)).collect::<Vec<_>>();
     match kind {
         "Deployment" | "StatefulSet" | "ReplicaSet" => {
             let want = spec["replicas"].as_u64().unwrap_or(1);
             let updated = (kind != "ReplicaSet").then(|| n(&st["updatedReplicas"]));
-            replicas(n(&st["readyReplicas"]), want, updated, &mine(&spec["selector"]))
+            replicas(n(&st["readyReplicas"]), want, updated, &live_mine(&spec["selector"]))
         }
         "DaemonSet" => replicas(
             n(&st["numberReady"]),
             n(&st["desiredNumberScheduled"]),
             Some(n(&st["updatedNumberScheduled"])),
-            &mine(&spec["selector"]),
+            &live_mine(&spec["selector"]),
         ),
         "Pod" => match (pod_tone(o), pod_restarts(o)) {
             (said, 0) => said,
@@ -312,8 +325,7 @@ fn by_kind(kind: &str, o: &DynamicObject, pods: &[&DynamicObject]) -> (String, T
             if !selector.as_object().is_some_and(|m| !m.is_empty()) {
                 return (format!("{kind} · no selector"), Tone::Info);
             }
-            let behind = mine(selector);
-            let ready = behind.iter().filter(|p| pod_tone(p).1 == Tone::Ok).count();
+            let ready = mine(selector).into_iter().filter(|p| serves(p)).count();
             match ready {
                 0 => (format!("{kind} · no ready pods"), Tone::Warning),
                 k => (format!("{kind} · {k} pod{} ready", if k == 1 { "" } else { "s" }), Tone::Ok),
@@ -370,7 +382,7 @@ pub fn brief(kind: &str, o: &DynamicObject, pods: &[&DynamicObject]) -> String {
         "Pod" => pod_status(o),
         "Job" => format!("{}/{}", n(&st["succeeded"]), spec["completions"].as_u64().unwrap_or(1)),
         "Service" if spec["selector"].as_object().is_some_and(|m| !m.is_empty()) => {
-            let ready = mine(&spec["selector"]).iter().filter(|p| pod_tone(p).1 == Tone::Ok).count();
+            let ready = mine(&spec["selector"]).into_iter().filter(|p| serves(p)).count();
             format!("{ready} pod{}", if ready == 1 { "" } else { "s" })
         }
         "Service" => text(&spec["type"]),
@@ -531,6 +543,62 @@ mod tests {
         let svc = |sel: Value| obj(json!({"apiVersion": "v1", "kind": "Service", "metadata": {"name": "web"}, "spec": {"type": "ClusterIP", "selector": sel}}));
         assert_eq!(summary("Service", &svc(json!({"app": "web"})), &pods), ("ClusterIP · 1 pod ready".into(), Tone::Ok));
         assert_eq!(summary("Service", &svc(json!({"app": "db"})), &pods), ("ClusterIP · no ready pods".into(), Tone::Warning));
+    }
+
+    /// A pod that ended (`Failed`: evicted, shut down with its node; `Succeeded`) stays in the API until it's
+    /// collected — on a cluster whose nodes come and go (spot, Karpenter) there are always some. They say what
+    /// happened then, not how the workload is now: a workload whose pods are all ready is fine.
+    fn ended_pod(name: &str, app: &str, phase: &str, reason: &str, restarts: u64) -> DynamicObject {
+        obj(json!({"apiVersion": "v1", "kind": "Pod", "metadata": {"name": name, "labels": {"app": app}},
+            "spec": {"containers": [{"name": "c"}]},
+            "status": {"phase": phase, "reason": reason, "conditions": [{"type": "Ready", "status": "False"}],
+                "containerStatuses": [{"ready": false, "restartCount": restarts,
+                    "state": {"terminated": {"exitCode": if phase == "Failed" { 137 } else { 0 },
+                        "reason": if phase == "Failed" { "Error" } else { "Completed" }}}}]}}))
+    }
+
+    #[test]
+    fn pods_a_node_left_behind_dont_make_a_ready_workload_red() {
+        let deploy = obj(json!({"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "api"},
+            "spec": {"replicas": 2, "selector": {"matchLabels": {"app": "api"}}},
+            "status": {"readyReplicas": 2, "updatedReplicas": 2}}));
+        let (a, b) = (pod("api-1", "api", json!({"running": {}})), pod("api-2", "api", json!({"running": {}})));
+        let evicted = ended_pod("api-3", "api", "Failed", "Evicted", 11);
+        let errored = ended_pod("api-4", "api", "Failed", "", 0);
+        let done = ended_pod("api-5", "api", "Succeeded", "", 10);
+        let pods = [&a, &b, &evicted, &errored, &done];
+        assert_eq!(summary("Deployment", &deploy, &pods), ("2/2 ready".into(), Tone::Ok));
+        // (one short of its replicas: a warning for that — not an error for pods that ended long ago)
+        let short = obj(json!({"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "api"},
+            "spec": {"replicas": 3, "selector": {"matchLabels": {"app": "api"}}},
+            "status": {"readyReplicas": 2, "updatedReplicas": 3}}));
+        assert_eq!(summary("Deployment", &short, &pods), ("2/3 ready".into(), Tone::Warning));
+    }
+
+    #[test]
+    fn restarts_are_the_live_pods_own() {
+        let deploy = obj(json!({"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "web"},
+            "spec": {"replicas": 1, "selector": {"matchLabels": {"app": "web"}}},
+            "status": {"readyReplicas": 1, "updatedReplicas": 1}}));
+        let mut live = pod("web-1", "web", json!({"running": {}}));
+        live.data["status"]["containerStatuses"][0]["restartCount"] = json!(2);
+        // (an ended pod's restarts are its own history, gone with it)
+        let gone = ended_pod("web-0", "web", "Succeeded", "", 10);
+        assert_eq!(summary("Deployment", &deploy, &[&live, &gone]).0, "1/1 ready · 2 restarts");
+    }
+
+    /// A Service sends traffic only to pods that run and are ready — one that completed serves nothing.
+    #[test]
+    fn a_service_counts_only_pods_that_serve() {
+        let svc = obj(json!({"apiVersion": "v1", "kind": "Service", "metadata": {"name": "web"},
+            "spec": {"type": "ClusterIP", "selector": {"app": "web"}}}));
+        let serving = pod("web-1", "web", json!({"running": {}}));
+        let starting = pod("web-2", "web", json!({"waiting": {"reason": "ContainerCreating"}}));
+        let (done, evicted) =
+            (ended_pod("web-3", "web", "Succeeded", "", 0), ended_pod("web-4", "web", "Failed", "Evicted", 0));
+        let pods = [&serving, &starting, &done, &evicted];
+        assert_eq!(summary("Service", &svc, &pods), ("ClusterIP · 1 pod ready".into(), Tone::Ok));
+        assert_eq!(brief("Service", &svc, &pods), "1 pod");
     }
 
     #[test]

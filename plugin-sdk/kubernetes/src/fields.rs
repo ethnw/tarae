@@ -266,6 +266,16 @@ pub fn same(path: &[Seg], written: &Value, live: &Value) -> bool {
     }
 }
 
+/// A manager as its command is typed: kubectl records `kubectl-<command>` (`kubectl-client-side-apply` for
+/// apply); the rest as they name themselves.
+pub fn said_as(manager: &str) -> String {
+    match manager.strip_prefix("kubectl-") {
+        Some("client-side-apply") => "kubectl apply".into(),
+        Some(command) => format!("kubectl {command}"),
+        None => manager.to_string(),
+    }
+}
+
 /// Who holds the field at `path` in the cluster's object (`live`): the managers whose `managedFields` own
 /// it (server-side apply's record — `kubectl-edit`, a controller, `helm`, `kustomize-controller`, …). A
 /// list's item is found by its key there (`k:{"name":"web"}`), or by its value (`v:…`). The one that
@@ -472,5 +482,18 @@ spec:
             [Seg::Key("spec".into()), Seg::Key("containers".into()), Seg::Each, Seg::Key("image".into())];
         assert_eq!(at(&live, &each), Some(json!(["a", "b"])));
         assert_eq!(told(&json!(["a", "b", "c", "d"])), "a, b, c, … (4)");
+    }
+
+    /// Who set a value, in the words you typed: kubectl records its commands as `kubectl-<command>` (and apply
+    /// as `kubectl-client-side-apply`) — beside a line, `kubectl apply` reads at a glance. Other managers (a
+    /// controller, helm) are named as they name themselves.
+    #[test]
+    fn managers_are_named_as_their_commands_are_typed() {
+        assert_eq!(said_as("kubectl-client-side-apply"), "kubectl apply");
+        assert_eq!(said_as("kubectl-edit"), "kubectl edit");
+        assert_eq!(said_as("kubectl-rollout"), "kubectl rollout");
+        assert_eq!(said_as("kubectl"), "kubectl");
+        assert_eq!(said_as("helm"), "helm");
+        assert_eq!(said_as("kustomize-controller"), "kustomize-controller");
     }
 }

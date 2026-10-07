@@ -60,6 +60,8 @@ const KUBECONFIG: u64 = 2;
 const FILES: u64 = 10;
 const EXEC: u64 = 40;
 const REFRESH: u64 = 52;
+/// The cluster couldn't be reached: what wasn't known then is asked again when this ticks.
+const REACH: u64 = 53;
 const PICK_ACTION: u64 = 61;
 /// Kustomize: finding the project's kustomizations, learning where its own folder is, offering kustomize;
 /// reading kustomization `n`, writing root `n`'s wrapper, building root `n`.
@@ -183,6 +185,8 @@ struct Stream {
     /// Failures in a row (the pause before the next try grows with them), and the last one.
     retry: u32,
     error: Option<String>,
+    /// Not allowed to list it (403): said once for the kind in the tab, nothing beside its objects.
+    forbidden: bool,
 }
 
 /// What a group/version of the API serves: (kind, plural, namespaced) — asked of the cluster once.
@@ -245,6 +249,8 @@ struct Req {
     lines: Lines,
     /// The body so far (a log's: bytes that don't end a character yet).
     body: Vec<u8>,
+    /// Whether the server has sent anything at all (a failure before that: it didn't answer).
+    heard: bool,
 }
 
 /// How an object in a manifest is doing.
@@ -266,6 +272,12 @@ struct State {
     namespace: String,
     /// What keeps it from showing anything (the kubeconfig, signing in).
     error: Option<String>,
+    /// Why the cluster can't be reached (no answer at all — not an HTTP error), until it answers again; and
+    /// how many times in a row (the pause before asking again grows).
+    unreachable: Option<String>,
+    reach_retry: u32,
+    /// Whether asking again is set for (one timer a round).
+    reach_pending: bool,
     exec: Option<Exec>,
     exec_out: Vec<String>,
     exec_running: bool,
@@ -341,9 +353,9 @@ fn tally(tones: &[Tone], fine: String) -> (String, Tone) {
     let count = |t: Tone| tones.iter().filter(|x| **x == t).count();
     let detail = match (count(Tone::Error), count(Tone::Warning)) {
         (0, 0) => fine,
-        (e, 0) => format!("✗{e}"),
+        (e, 0) => format!("×{e}"),
         (0, w) => format!("▲{w}"),
-        (e, w) => format!("✗{e} ▲{w}"),
+        (e, w) => format!("×{e} ▲{w}"),
     };
     let worst = tones.iter().copied().min_by_key(|t| rank(*t)).unwrap_or(Tone::Info);
     (detail, worst)
@@ -429,7 +441,8 @@ impl State {
         out.extend(self.streams.keys().map(|sid| Action::Stop(RETRY + sid)));
         self.streams.clear();
         self.exec_running = false;
-        out.extend([Action::Stop(REFRESH), Action::Stop(EXEC)]);
+        (self.unreachable, self.reach_retry, self.reach_pending) = (None, 0, false);
+        out.extend([Action::Stop(REFRESH), Action::Stop(EXEC), Action::Stop(REACH)]);
         out
     }
 
@@ -738,6 +751,7 @@ impl State {
                     relist: false,
                     retry: 0,
                     error: None,
+                    forbidden: false,
                 },
             );
             out.extend(self.list(sid));
@@ -777,12 +791,29 @@ impl State {
         f.docs.iter().map(|d| Doc { via: via.clone(), ..d.clone() }).collect()
     }
 
+    /// A built root as it's named beside the code: as many of its last folders as tell it from the project's
+    /// other kustomizations, built or not (`apps/{base,staging,prod}/shop` → `prod/shop`).
+    fn root_label(&self, root: &str) -> String {
+        let parts: Vec<&str> = root.split('/').filter(|p| !p.is_empty()).collect();
+        let tail = |r: &str, n: usize| {
+            let p: Vec<&str> = r.split('/').filter(|p| !p.is_empty()).collect();
+            p[p.len().saturating_sub(n)..].join("/")
+        };
+        (1..=parts.len())
+            .map(|n| tail(root, n))
+            .find(|label| {
+                let others = self.tree.kzs.keys().chain(self.builds.keys()).filter(|r| *r != root);
+                others.into_iter().all(|r| tail(r, label.split('/').count()) != *label)
+            })
+            .unwrap_or_else(|| root.to_string())
+    }
+
     /// How each built root that takes `path` in made its documents.
     fn readings(&self, path: &str, docs: &[Doc]) -> Vec<Vec<Doc>> {
         let mut out = Vec::new();
         for root in self.tree.roots_of(path) {
             let Some(Build::Done(built)) = self.builds.get(&root) else { continue };
-            let label = root.rsplit('/').next().unwrap_or(&root).to_string();
+            let label = self.root_label(&root);
             let reading = docs
                 .iter()
                 .map(|d| match kustomize::became(built, path, &d.kind, &d.name, d.generated) {
@@ -905,6 +936,13 @@ impl State {
             .iter()
             .filter(|f| !f.nested)
             .filter(|f| !matches!(f.path.as_slice(), [fields::Seg::Key(k)] if k == "apiVersion" || k == "kind"))
+            // (built: a name and namespace written out are the build's to change — a prefix, the overlay's
+            // namespace; a template's still says what it made)
+            .filter(|f| {
+                let built = matches!(d.via, Via::Built(_)) && !f.templated;
+                !(built && matches!(f.path.as_slice(), [fields::Seg::Key(m), fields::Seg::Key(k)]
+                    if m == "metadata" && (k == "name" || k == "namespace")))
+            })
             .filter_map(|f| {
                 let now = fields::at(&live, &f.path)?;
                 // (a template's: what it made, said as it is)
@@ -922,7 +960,7 @@ impl State {
                 let by = fields::managers(&live, &f.path)
                     .into_iter()
                     .next()
-                    .map_or(String::new(), |m| format!("  · {m}"));
+                    .map_or(String::new(), |m| format!("  · {}", fields::said_as(&m)));
                 Some(Hint { line: f.line, text: format!("→ {}{by}", fields::told(&now)), tone: Tone::Info })
             })
             .collect()
@@ -939,7 +977,7 @@ impl State {
         // A build's names: what it made of a name (a prefix, a generator's hash)
         let built = match &d.via {
             Via::Built(label) => self.builds.iter().find_map(|(root, b)| match b {
-                Build::Done(built) if root.rsplit('/').next() == Some(label.as_str()) => Some(built),
+                Build::Done(built) if self.root_label(root) == *label => Some(built),
                 _ => None,
             }),
             _ => None,
@@ -1217,7 +1255,7 @@ impl State {
                         None => {
                             self.release_values.insert(key, Given::Asking(Vec::new()));
                             let args = ["get", "values", &rel.name, "--namespace", &rel.namespace, "--output", "json"];
-                            let args = args.iter().map(|a| a.to_string()).collect();
+                            let args = args.iter().map(|a| a.to_string()).chain(self.helm_cluster()).collect();
                             let id = VALUES_GET + n as u64;
                             out.push(Action::Spawn(Spawn { id, program: "helm".into(), args, env: Vec::new() }));
                             continue;
@@ -1249,6 +1287,18 @@ impl State {
         }
         out.extend(self.follow());
         out
+    }
+
+    /// What helm is told to reach the cluster with: the kubeconfig and context the plugin is on — left to
+    /// itself it merges every `KUBECONFIG` file and takes the context current when it runs. (Programs run in
+    /// the home folder, and no shell expands `~/`: from there.)
+    fn helm_cluster(&self) -> Vec<String> {
+        let mut args = vec!["--kube-context".to_string(), self.context().to_string()];
+        if !self.kubeconfig.is_empty() {
+            let file = self.kubeconfig.strip_prefix("~/").unwrap_or(&self.kubeconfig);
+            args.extend(["--kubeconfig".to_string(), file.to_string()]);
+        }
+        args
     }
 
     /// `helm get values` for release `n` answered (or not): its values written for its render — or, none or
@@ -1425,7 +1475,11 @@ impl State {
                         }
                         // Who: the release's own values, if they say so — else the field's last manager
                         let given = self.given(&top, rel, &keys).is_some_and(|g| fields::same(&u.path, &g, &now));
-                        let by = if given { Some("release values".into()) } else { fields::managers(&live, &u.path).into_iter().next() };
+                        let by = if given {
+                            Some("release values".into())
+                        } else {
+                            fields::managers(&live, &u.path).into_iter().next().map(|m| fields::said_as(&m))
+                        };
                         let entry = (rel.clone(), fields::told(&now), by);
                         if !said.contains(&entry) {
                             said.push(entry);
@@ -1488,6 +1542,10 @@ impl State {
         let Some(s) = self.stream_for(&w, &d.name) else {
             return Some(Seen { text: "not watched: too many kinds open".into(), tone: Tone::Info , brief: String::new() });
         };
+        // (can't be reached, or not allowed to list the kind: said once, in the tab — not object by object)
+        if self.unreachable.is_some() || s.forbidden {
+            return None;
+        }
         if let Some(e) = &s.error
             && !s.loaded
         {
@@ -1502,9 +1560,10 @@ impl State {
         let pods: Vec<&DynamicObject> = pods.map(|p| self.pods_in(&p)).unwrap_or_default();
         let (mut text, tone) = status::summary(&d.kind, o, &pods);
         let brief = status::brief(&d.kind, o, &pods);
-        // A namespace it didn't say: the one it was looked for in · the root it was built through
-        if d.namespace.is_none() && w.ns.is_some() {
-            text.push_str(&format!("  (ns {}, from the context)", self.namespace));
+        // A namespace it didn't say, when the context's isn't `default`: the one it was looked for in · the root
+        // it was built through
+        if d.namespace.is_none() && w.ns.is_some() && self.namespace != "default" {
+            text.push_str(&format!(" · ns {}", self.namespace));
         }
         if let Via::Built(root) = &d.via {
             text.push_str(&format!("  (via {root})"));
@@ -1512,10 +1571,12 @@ impl State {
         Some(Seen { text, tone, brief })
     }
 
-    /// A buffer is now in front (none: one with no file): the side tab is its objects — a manifest it hasn't
-    /// read yet (open before it was on), read now.
+    /// A buffer is now in front: the side tab is its objects — a manifest it hasn't read yet (open before it
+    /// was on), read now. One with no file (a pod described, its logs) leaves the tab on the file before it.
     fn shown(&mut self, path: Option<String>, version: u64, text: Option<&str>) -> Vec<Action> {
-        self.front = path.clone();
+        if path.is_some() {
+            self.front = path.clone();
+        }
         let mut out = Vec::new();
         if let (Some(path), Some(text)) = (path, text)
             && self.files.get(&path).map(|f| f.version) != Some(version)
@@ -1537,12 +1598,14 @@ impl State {
         for (path, f) in &self.files {
             let mut hints = Vec::new();
             let now = tarae_plugin::now::millis() as i64;
-            for d in self.docs(path) {
+            // (out of reach: what it last saw isn't now — nothing beside the code until it answers)
+            let docs = if self.unreachable.is_some() { Vec::new() } else { self.docs(path) };
+            for d in docs {
                 if let Some(s) = self.seen(&d) {
                     hints.push(Hint { line: d.at, text: s.text, tone: s.tone });
                 }
                 // Why its pods aren't fine, on the lines that are why — before what the cluster has otherwise
-                let pods = self.pods_of(&d);
+                let pods = self.pods_now(&d);
                 let causes = cause::causes(&d.fields, &pods, now);
                 let said: Vec<u64> = causes.iter().map(|c| c.line).collect();
                 hints.extend(causes.into_iter().map(|c| Hint { line: c.line, text: c.text, tone: c.tone }));
@@ -1574,8 +1637,11 @@ impl State {
             let open = !std::mem::replace(&mut self.side_opened, true);
             out.push(Action::Side(Some(Side { open, focus: false, ..side })));
         }
-        let tone = if self.error.is_some() { Tone::Error } else { Tone::Ok };
-        let badge = (format!("k8s {}", self.context()), tone);
+        let badge = match (&self.error, &self.unreachable) {
+            (Some(_), _) => (format!("k8s {}", self.context()), Tone::Error),
+            (None, Some(_)) => (format!("k8s {} · unreachable", self.context()), Tone::Warning),
+            (None, None) => (format!("k8s {}", self.context()), Tone::Ok),
+        };
         if self.badge.as_ref() != Some(&badge) {
             self.badge = Some(badge.clone());
             out.push(Action::Badge(Some(badge)));
@@ -1606,16 +1672,24 @@ impl State {
             rows.push(row("retry".into(), 0, "can't show the cluster".into(), "enter: again".into(), Tone::Error, None));
             // (all of it, a line at a time: the panel is narrow)
             rows.extend(wrapped(e, 30).into_iter().map(|l| why(1, l, Tone::Error)));
+        } else if let Some(reason) = &self.unreachable {
+            let text = format!("can't reach {}", self.context());
+            // (nothing beside it: the context's name keeps its room)
+            rows.push(row("retry".into(), 0, text, String::new(), Tone::Warning, None));
+            rows.extend(wrapped(reason, 30).into_iter().map(|l| why(1, l, Tone::Warning)));
+            rows.push(why(1, "trying again".into(), Tone::Info));
         } else if self.cluster.is_none() {
             rows.push(row("none".into(), 0, "connecting…".into(), String::new(), Tone::Info, None));
+        } else if let Some(values) = self.front.as_ref().filter(|f| self.values.contains_key(*f)) {
+            // A chart's values: the chart, and the releases the cluster has of it
+            rows.extend(self.chart_rows(values));
         } else if self.files.is_empty() {
-            let text = "open a manifest: its objects show here".into();
-            rows.push(row("none".into(), 0, text, String::new(), Tone::Info, None));
+            rows.push(row("none".into(), 0, "no manifests open".into(), String::new(), Tone::Info, None));
         } else if !self.front.as_ref().is_some_and(|f| self.files.contains_key(f)) {
             let text = "no objects in this file".into();
             rows.push(row("none".into(), 0, text, String::new(), Tone::Info, None));
         }
-        if self.cluster.is_some() {
+        if self.cluster.is_some() && self.unreachable.is_none() {
             // The file in front: its objects, by kind, and the pods of those that aren't fine
             for path in self.files.keys().filter(|p| Some(*p) == self.front.as_ref()) {
                 let docs = self.docs(path);
@@ -1653,9 +1727,11 @@ impl State {
                         // says it, why under itself
                         let ns = self.watched(d).and_then(|(w, _)| w.ns).unwrap_or_else(|| self.namespace.clone());
                         let bad: Vec<&DynamicObject> =
-                            self.pods_of(d).into_iter().filter(|p| status::pod_tone(p).1 != Tone::Ok).collect();
+                            self.pods_now(d).into_iter().filter(|p| status::pod_tone(p).1 != Tone::Ok).collect();
                         if bad.is_empty() || d.kind == "Pod" {
-                            let reason = st.text.split("  (ns ").next().unwrap_or(&st.text);
+                            // (why, without where it was looked for or built through)
+                            let reason = st.text.split("  (via ").next().unwrap_or(&st.text);
+                            let reason = reason.split(" · ns ").next().unwrap_or(reason);
                             let reason = reason.split_once(" · ").map_or(reason, |(_, r)| r);
                             rows.push(why(3, reason.to_string(), st.tone));
                         }
@@ -1680,6 +1756,10 @@ impl State {
                                 rows.push(why(4, status::restarts(n), tone));
                             }
                         }
+                        // (the ended ones still around: one quiet line)
+                        if let Some(ended) = self.ended_pods(d) {
+                            rows.push(why(3, ended, Tone::Info));
+                        }
                     }
                 }
             }
@@ -1700,6 +1780,17 @@ impl State {
                 rows.push(row("others".into(), 0, "other open files".into(), String::new(), worst, None));
                 rows.extend(others);
             }
+            // What it isn't allowed to list: once each (its objects say nothing)
+            let forbidden: BTreeSet<String> = self
+                .streams
+                .values()
+                .filter(|s| s.forbidden)
+                .map(|s| match &s.what.ns {
+                    Some(ns) => format!("no access to {} in {ns}", s.what.plural),
+                    None => format!("no access to {}", s.what.plural),
+                })
+                .collect();
+            rows.extend(forbidden.into_iter().map(|text| row(format!("access:{text}"), 0, text, String::new(), Tone::Info, None)));
         }
         let keys = [("ret", "go / logs"), ("d", "describe"), ("e", "events"), ("y", "yaml"), ("a", "all")];
         Side {
@@ -1710,6 +1801,34 @@ impl State {
             open: false,
             focus: false,
         }
+    }
+
+    /// The tab for a chart's `values.yaml`: the chart, and each release the cluster has of it (its namespace).
+    fn chart_rows(&self, path: &str) -> Vec<SideRow> {
+        let row = |id: String, depth, text: String, detail: String, note| SideRow {
+            id,
+            depth,
+            text,
+            detail,
+            tone: Tone::Info,
+            at: None,
+            note,
+        };
+        let file = path.rsplitn(3, '/').take(2).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("/");
+        let top = self.values_chart(path).map(|(top, _)| top).filter(|t| self.charts.as_ref().is_some_and(|c| c.contains_key(t)));
+        let Some(top) = top else {
+            return vec![row(format!("f:{path}"), 0, file, String::new(), false)];
+        };
+        // (its path says the chart: nothing beside it to cut it short)
+        let mut rows = vec![SideRow { at: Some((path.to_string(), 0, 0)), ..row(format!("f:{path}"), 0, file, String::new(), false) }];
+        match (&self.labeled, self.releases_of(&top).as_slice()) {
+            (None, _) => rows.push(row(String::new(), 1, "looking for its releases…".into(), String::new(), true)),
+            (Some(_), []) => rows.push(row(String::new(), 1, format!("no release in {}", self.context()), String::new(), true)),
+            (Some(_), rels) => rows.extend(
+                rels.iter().map(|r| row(format!("rel:{}/{}", r.namespace, r.name), 1, r.name.clone(), format!("ns {}", r.namespace), false)),
+            ),
+        }
+        rows
     }
 
     /// A key on a row of its side tab.
@@ -1773,6 +1892,30 @@ impl State {
         }
         self.picking = Some((path, i));
         vec![Action::Pick(Pick { id: PICK_ACTION, title: format!("{} {}", d.kind, d.name), items })]
+    }
+
+    /// The pods a document's object has now: a workload's or a service's that haven't ended (a Job's and a
+    /// pod's own as they are — ending is what they do).
+    fn pods_now(&self, d: &Doc) -> Vec<&DynamicObject> {
+        let all = self.pods_of(d);
+        if matches!(d.kind.as_str(), "Job" | "Pod") { all } else { all.into_iter().filter(|p| status::live(p)).collect() }
+    }
+
+    /// A workload's pods that ended and linger (`2 ended · Evicted`: the most common reason — short, the tab
+    /// is narrow), if any.
+    fn ended_pods(&self, d: &Doc) -> Option<String> {
+        if matches!(d.kind.as_str(), "Job" | "Pod") {
+            return None;
+        }
+        let mut why: BTreeMap<String, usize> = BTreeMap::new();
+        for p in self.pods_of(d).into_iter().filter(|p| !status::live(p)) {
+            let st = &p.data["status"];
+            let reason = st["reason"].as_str().filter(|r| !r.is_empty()).map_or_else(|| status::pod_status(p), str::to_string);
+            *why.entry(reason).or_default() += 1;
+        }
+        let n: usize = why.values().sum();
+        let (most, _) = why.iter().max_by_key(|(r, k)| (**k, std::cmp::Reverse(*r)))?;
+        Some(format!("{n} ended · {most}"))
     }
 
     /// The pods of a document's object (a workload's, a service's, or itself), newest first.
@@ -1912,7 +2055,15 @@ impl State {
         }
         self.reqs.insert(
             id,
-            Req { purpose, http: bytes, tls: None, resp: Response::new(), lines: Lines::new(), body: Vec::new() },
+            Req {
+                purpose,
+                http: bytes,
+                tls: None,
+                resp: Response::new(),
+                lines: Lines::new(),
+                body: Vec::new(),
+                heard: false,
+            },
         );
         vec![Action::Connect(Connect { id, host, port })]
     }
@@ -1984,7 +2135,8 @@ impl State {
         let mut out = self.stop_stream(sid);
         let Some(s) = self.streams.get_mut(&sid) else { return out };
         s.listing = None;
-        s.error = Some(why);
+        // (the latest failure is what's said: one after a 403 isn't "no access")
+        (s.error, s.forbidden) = (Some(why), false);
         let ms = (1000u64 << s.retry.min(5)).min(30_000);
         s.retry += 1;
         out.push(Action::Timer((RETRY + sid, ms)));
@@ -2054,12 +2206,11 @@ impl State {
                 self.served.insert(av, Served::Failed(why));
                 Vec::new()
             }
-            // Not allowed to see them: said, and asked again only in a minute
+            // Not allowed to see them: said once for the kind (the tab), and asked again only in a minute
             Purpose::List(sid) | Purpose::Watch(sid) if status == Some(403) => {
                 let mut out = self.stop_stream(sid);
                 if let Some(s) = self.streams.get_mut(&sid) {
-                    s.error = Some("no access".into());
-                    s.loaded = false;
+                    (s.forbidden, s.error, s.loaded) = (true, None, false);
                 }
                 out.push(Action::Timer((RETRY + sid, 60_000)));
                 out
@@ -2080,6 +2231,50 @@ impl State {
         out
     }
 
+    /// Request `id` got no answer: the connection couldn't be made, or closed before the server sent anything.
+    /// Then the cluster can't be reached — one fact, said once (in the tab and the badge) — and what was
+    /// being asked is asked again. A failure after the server said something (TLS, a certificate that fails
+    /// verification, a broken response) won't mend by waiting: `req_failed` says what failed.
+    fn unanswered(&mut self, id: u64, why: String) -> Vec<Action> {
+        let Some(r) = self.reqs.get(&id) else { return Vec::new() };
+        let view = matches!(r.purpose, Purpose::Logs(_) | Purpose::Yaml(..) | Purpose::Events(..));
+        let discover = if let Purpose::Discover(av) = &r.purpose { Some(av.clone()) } else { None };
+        if r.heard || view {
+            return self.req_failed(id, why, None);
+        }
+        self.dirty |= self.unreachable.as_ref() != Some(&why);
+        self.unreachable = Some(why.clone());
+        match discover {
+            // (asked while it couldn't be reached: not "not served" — asked again)
+            Some(av) => {
+                self.served.remove(&av);
+                self.reqs.remove(&id);
+                let mut out = vec![Action::Stop(id)];
+                out.extend(self.reach_later());
+                out
+            }
+            None => self.req_failed(id, why, None),
+        }
+    }
+
+    /// Asks again what wasn't known after a pause — one pause a round, however many requests got no answer
+    /// in it (1 s, 2 s, 4 s, … 30 s).
+    fn reach_later(&mut self) -> Vec<Action> {
+        if std::mem::replace(&mut self.reach_pending, true) {
+            return Vec::new();
+        }
+        let ms = (1000u64 << self.reach_retry.min(5)).min(30_000);
+        self.reach_retry += 1;
+        vec![Action::Timer((REACH, ms))]
+    }
+
+    /// The cluster answered (with anything): it can be reached.
+    fn reached(&mut self) {
+        if self.unreachable.take().is_some() {
+            (self.dirty, self.reach_retry) = (true, 0);
+        }
+    }
+
     fn connected(&mut self, id: u64) -> Vec<Action> {
         let (Some(c), Some(r)) = (&self.cluster, self.reqs.get_mut(&id)) else { return vec![Action::Stop(id)] };
         let started = Tls::client(c.tls.clone(), &c.server_name).and_then(|mut t| {
@@ -2096,8 +2291,10 @@ impl State {
         }
     }
 
+    /// Bytes from the server: through TLS, then what they say.
     fn data(&mut self, id: u64, bytes: &[u8]) -> Vec<Action> {
         let Some(r) = self.reqs.get_mut(&id) else { return vec![Action::Stop(id)] };
+        r.heard = true;
         let Some(t) = r.tls.as_mut() else { return Vec::new() };
         let mut out = Vec::new();
         if let Err(e) = t.feed(bytes) {
@@ -2109,7 +2306,16 @@ impl State {
             out.push(Action::Send((id, send)));
         }
         let plain = t.read();
-        let body = match r.resp.feed(&plain) {
+        out.extend(self.answered(id, &plain));
+        out
+    }
+
+    /// What the server said to request `id`, as it comes (after TLS): the response read, and done with
+    /// when it's whole.
+    fn answered(&mut self, id: u64, plain: &[u8]) -> Vec<Action> {
+        let mut out = Vec::new();
+        let Some(r) = self.reqs.get_mut(&id) else { return out };
+        let body = match r.resp.feed(plain) {
             Ok(b) => b,
             Err(e) => {
                 out.extend(self.req_failed(id, e, None));
@@ -2117,6 +2323,10 @@ impl State {
             }
         };
         let status = r.resp.head().map(|h| h.status);
+        if status.is_some() && self.unreachable.is_some() {
+            self.reached();
+        }
+        let Some(r) = self.reqs.get_mut(&id) else { return out };
         if status.is_some_and(|s| s >= 400) {
             self.dirty = true;
             r.body.extend(body);
@@ -2178,7 +2388,8 @@ impl State {
                 Err(e) => {
                     let why = if why.is_empty() { e } else { why.to_string() };
                     self.reqs.insert(id, r);
-                    self.req_failed(id, why, None)
+                    // (closed before the server said anything: no answer)
+                    self.unanswered(id, why)
                 }
             },
         }
@@ -2209,7 +2420,7 @@ impl State {
                         None => {
                             s.objects = s.listing.take().unwrap_or_default();
                             s.version = l.metadata.resource_version.unwrap_or_default();
-                            (s.loaded, s.error, s.retry) = (true, None, 0);
+                            (s.loaded, s.error, s.retry, s.forbidden) = (true, None, 0, false);
                             // (a workload's: its pods, by its selector, asked for now)
                             if WITH_PODS.contains(&s.kind.as_str()) {
                                 self.refollow = true;
@@ -2310,7 +2521,8 @@ impl State {
         match id {
             // A buffer of its closed
             id if id > FIRST_VIEW => self.view_closed(id),
-            id if self.reqs.contains_key(&id) => self.req_failed(id, why, None),
+            // (a connection that couldn't be made: no answer)
+            id if self.reqs.contains_key(&id) => self.unanswered(id, why),
             EXEC => self.exec_done(None, &[why]),
             ENV | KUBECONFIG => self.fail(why),
             id if (FILES..EXEC).contains(&id) => {
@@ -2581,6 +2793,10 @@ impl State {
                 HostEvent::Data((id, bytes)) => s.data(id, &bytes),
                 HostEvent::Closed((id, why)) => s.closed(id, &why),
                 HostEvent::Tick(REFRESH) => s.run_exec(),
+                HostEvent::Tick(REACH) => {
+                    s.reach_pending = false;
+                    s.follow()
+                }
                 HostEvent::Tick(t) if t > RETRY && t < FIRST_VIEW => s.list(t - RETRY),
                 HostEvent::Lines((EXEC, lines)) => {
                     s.exec_out.extend(lines);
@@ -2644,7 +2860,7 @@ mod tests {
             kinds.iter().map(|(k, p)| serde_json::json!({"kind": k, "name": p, "namespaced": true})).collect();
         let body = serde_json::json!({ "resources": resources }).to_string().into_bytes();
         let purpose = Purpose::Discover(av.into());
-        s.finished(Req { purpose, http: vec![], tls: None, resp: Response::new(), lines: Lines::new(), body })
+        s.finished(Req { purpose, http: vec![], tls: None, resp: Response::new(), lines: Lines::new(), body, heard: true })
     }
 
     #[test]
@@ -2684,7 +2900,7 @@ mod tests {
                 serde_json::json!({"matchExpressions": [{"key": "app", "operator": "Exists"}]})),
         ] {
             let body = list(kind, sel).to_string().into_bytes();
-            let r = Req { purpose: Purpose::List(sid), http: vec![], tls: None, resp: Response::new(), lines: Lines::new(), body };
+            let r = Req { purpose: Purpose::List(sid), http: vec![], tls: None, resp: Response::new(), lines: Lines::new(), body, heard: true };
             s.finished(r);
         }
         assert!(s.refollow, "a workload seen: what's watched looked at again");
@@ -2778,6 +2994,10 @@ mod tests {
             [(0, "other open files".to_string(), None), (1, "r/b.yaml".to_string(), Some("/r/b.yaml".to_string()))],
             "one that isn't fine: to go to"
         );
+        // A buffer that's no file (a pod described, its logs — the plugin's own): the tab stays on the manifest
+        // it came from, the place to go back to
+        s.shown(None, 1, None);
+        assert_eq!(rows(&s)[0].1, "r/a.yaml", "the plugin's own buffer in front");
         s.shown(Some("/r/notes.md".into()), 1, None);
         assert_eq!(rows(&s)[0].1, "no objects in this file");
         s.shown(Some("/r/c.yaml".into()), 1, None);
@@ -2807,7 +3027,8 @@ mod tests {
         assert_eq!(hints.len(), 1);
         assert_eq!(hints[0].version, 3, "for the text it read");
         let said: Vec<(u64, &str)> = hints[0].hints.iter().map(|h| (h.line, h.text.as_str())).collect();
-        assert_eq!(said, [(1, "2/2 ready  (ns default, from the context)"), (6, "not in prod-eks")]);
+        // (the namespace taken from the context isn't said when it's `default` — what anyone expects)
+        assert_eq!(said, [(1, "2/2 ready"), (6, "not in prod-eks")]);
         // The badge: the cluster · the side tab: the file, its objects
         assert_eq!(s.badge, Some(("k8s prod-eks".into(), Tone::Ok)));
         let Some(Action::Side(Some(side))) = out.iter().find(|a| matches!(a, Action::Side(_))) else { panic!() };
@@ -2906,7 +3127,10 @@ mod tests {
         };
         // What the release was given, first; then rendered with it
         let out = s.render();
-        assert_eq!(spawned(&out), [["get", "values", "shop-helm", "--namespace", "shop", "--output", "json"]]);
+        assert_eq!(
+            spawned(&out),
+            [["get", "values", "shop-helm", "--namespace", "shop", "--output", "json", "--kube-context", "prod-eks"]]
+        );
         assert!(s.render().iter().all(|a| !matches!(a, Action::Spawn(_))), "once");
         let out = answer_values(&mut s, 0, "null");
         assert_eq!(spawned(&out), [["template", "shop-helm", "/r/charts/shop", "--namespace", "shop"]], "given nothing");
@@ -2950,6 +3174,15 @@ mod tests {
         let said: Vec<(u64, String)> =
             s.values_hints("/r/charts/shop/values.yaml").into_iter().map(|h| (h.line, h.text)).collect();
         assert_eq!(said, [(0, "release shop-helm · ns shop".to_string()), (1, "→ 2".to_string())]);
+        // In front, the tab is its chart's: the releases (not "no objects" — it's what they're made from)
+        s.shown(Some("/r/charts/shop/values.yaml".into()), 1, None);
+        let rows: Vec<(u64, String, String)> = s.side_now().rows.iter().map(|r| (r.depth, r.text.clone(), r.detail.clone())).collect();
+        assert_eq!(
+            rows.iter().take(2).cloned().collect::<Vec<_>>(),
+            // (its path says the chart: nothing beside it to cut it short)
+            [(0, "shop/values.yaml".to_string(), String::new()), (1, "shop-helm".to_string(), "ns shop".to_string())],
+            "{rows:?}"
+        );
         // helm missing: offered once, and said
         s.renders.clear();
         let out = s.render();
@@ -3023,6 +3256,447 @@ mod tests {
         // The cause and what the cluster has otherwise, on the image's line, as one hint — the worse tone
         let image: Vec<&(u64, String, Tone)> = hints.iter().filter(|h| h.0 == 10).collect();
         assert_eq!(image, [&(10, "ErrImagePull: not found  ·  → nginx:no-such-tag-2".to_string(), Tone::Error)], "{hints:?}");
+    }
+
+    /// Pods that ended (evicted, gone with their node) linger until they're collected; under a workload that
+    /// isn't fine the tab lists the pods it has now — the ended ones are one quiet line, not rows that look
+    /// like today's problem, and no line of the manifest is blamed on them.
+    #[test]
+    fn the_tab_lists_the_pods_a_workload_has_now_and_counts_ended_ones_once() {
+        let mut s = with_cluster();
+        let text = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: worker\n  namespace: prod\nspec:\n  template:\n    spec:\n      containers:\n        - name: worker\n          resources:\n            limits:\n              memory: 64Mi\n";
+        s.file("/r/worker.yaml".into(), 1, text);
+        serve(&mut s, "apps/v1", &[("Deployment", "deployments")]);
+        serve(&mut s, "v1", &[("Pod", "pods")]);
+        let live = serde_json::json!({"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "worker", "namespace": "prod"},
+            "spec": {"replicas": 2, "selector": {"matchLabels": {"app": "worker"}}},
+            "status": {"readyReplicas": 1, "updatedReplicas": 2}});
+        let pod = |name: &str, status: Value| serde_json::json!({"apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": name, "namespace": "prod", "labels": {"app": "worker"}},
+            "spec": {"containers": [{"name": "worker"}]}, "status": status});
+        let pulling = pod("worker-a", serde_json::json!({"phase": "Pending", "containerStatuses": [{"name": "worker", "ready": false,
+            "restartCount": 0, "state": {"waiting": {"reason": "ErrImagePull", "message": "not found"}}}]}));
+        // (killed for memory before they were evicted: their OOMKilled is history, not the limit's fault now)
+        let evicted = |name: &str| pod(name, serde_json::json!({"phase": "Failed", "reason": "Evicted", "containerStatuses": [{"name": "worker",
+            "ready": false, "restartCount": 4, "state": {"terminated": {"exitCode": 137, "reason": "OOMKilled"}}}]}));
+        let sid = s.streams.iter().find(|(_, st)| st.kind == "Deployment").map(|(i, _)| *i).unwrap();
+        s.streams.get_mut(&sid).unwrap().loaded = true;
+        s.streams.get_mut(&sid).unwrap().objects.insert("worker".into(), serde_json::from_value(live).unwrap());
+        s.follow();
+        let pods = s.streams.iter().find(|(_, st)| st.kind == "Pod").map(|(i, _)| *i).unwrap();
+        let st = s.streams.get_mut(&pods).unwrap();
+        st.loaded = true;
+        for (name, p) in [("worker-a", pulling), ("worker-b", evicted("worker-b")), ("worker-c", evicted("worker-c"))] {
+            st.objects.insert(name.into(), serde_json::from_value(p).unwrap());
+        }
+        s.front = Some("/r/worker.yaml".into());
+        let rows: Vec<(u64, String)> = s.side_now().rows.iter().map(|r| (r.depth, r.text.clone())).collect();
+        let under: Vec<&(u64, String)> = rows.iter().skip_while(|r| r.1 != "worker").skip(1).collect();
+        assert_eq!(
+            under,
+            [&(3, "a".to_string()), &(4, "ErrImagePull".to_string()), &(3, "2 ended · Evicted".to_string())],
+            "{rows:?}"
+        );
+        let hints: Vec<(u64, String)> = s.show().iter()
+            .find_map(|a| if let Action::Hints(h) = a { Some(h.hints.iter().map(|h| (h.line, h.text.clone())).collect()) } else { None })
+            .unwrap();
+        assert!(!hints.iter().any(|h| h.1.contains("OOMKilled") || h.1.contains("Evicted")), "{hints:?}");
+    }
+
+    /// What the plugin writes on screen draws in every terminal font tarae is made for: only the glyphs
+    /// JetBrains Mono, Hack, Menlo and SF Mono all have (CLAUDE.md's list) — a missing one is a box. Checked
+    /// over every string in its code (comments aside).
+    #[test]
+    fn every_glyph_the_plugin_draws_is_in_every_font() {
+        const FONTS_HAVE: &str = "ƒτνπ§◦#¶●▲›▎▐▌▄▀▶▸▍•▁▂▃▄▅▆▇─│╭╮╰╯−·—…×←→↑↓◂▴▾◀▼‹≈";
+        let sources = [
+            ("lib.rs", include_str!("lib.rs")),
+            ("status.rs", include_str!("status.rs")),
+            ("cause.rs", include_str!("cause.rs")),
+            ("refs.rs", include_str!("refs.rs")),
+            ("fields.rs", include_str!("fields.rs")),
+            ("helm.rs", include_str!("helm.rs")),
+            ("kustomize.rs", include_str!("kustomize.rs")),
+            ("manifest.rs", include_str!("manifest.rs")),
+            ("kubeconfig.rs", include_str!("kubeconfig.rs")),
+        ];
+        let mut bad = Vec::new();
+        for (file, text) in sources {
+            for (line, s) in string_literals(text) {
+                for c in s.chars().filter(|c| !c.is_ascii() && !FONTS_HAVE.contains(*c)) {
+                    bad.push(format!("{file}:{line} {c}"));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "{bad:?}");
+    }
+
+    /// The string literals in Rust source (their text as written, escapes and all), with the line each
+    /// starts on — read as the compiler reads them: comments (nested block ones too) skipped, a char
+    /// literal (`'"'`, `'\''`) apart from a lifetime (`'a`), `b"…"`, raw strings (`r#"…"#`), strings over
+    /// several lines.
+    fn string_literals(src: &str) -> Vec<(usize, String)> {
+        let c: Vec<char> = src.chars().collect();
+        let at = |i: usize| c.get(i).copied().unwrap_or('\0');
+        let word = |ch: char| ch.is_alphanumeric() || ch == '_';
+        let (mut i, mut line, mut out) = (0, 1, Vec::new());
+        // From `i` (just past the opening quote) to the closing one (`hashes` of them after it, raw: no escapes)
+        let mut string = |i: &mut usize, line: &mut usize, raw: Option<usize>| {
+            let (start, from) = (*line, *i);
+            loop {
+                match at(*i) {
+                    '\0' => break,
+                    '\\' if raw.is_none() => *i += 1,
+                    '"' if (1..=raw.unwrap_or(0)).all(|k| at(*i + k) == '#') => break,
+                    '\n' => *line += 1,
+                    _ => {}
+                }
+                *i += 1;
+            }
+            out.push((start, c[from..(*i).min(c.len())].iter().collect::<String>()));
+            *i += 1 + raw.unwrap_or(0);
+        };
+        while i < c.len() {
+            match (at(i), at(i + 1)) {
+                ('\n', _) => (line, i) = (line + 1, i + 1),
+                ('/', '/') => {
+                    while i < c.len() && at(i) != '\n' {
+                        i += 1;
+                    }
+                }
+                ('/', '*') => {
+                    let mut depth = 0;
+                    loop {
+                        match (at(i), at(i + 1)) {
+                            ('\0', _) => break,
+                            ('/', '*') => (depth, i) = (depth + 1, i + 2),
+                            ('*', '/') => {
+                                (depth, i) = (depth - 1, i + 2);
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            ('\n', _) => (line, i) = (line + 1, i + 1),
+                            _ => i += 1,
+                        }
+                    }
+                }
+                // A char literal (its quote isn't a string's), or a lifetime
+                ('\'', '\\') => {
+                    i += 2;
+                    while at(i) != '\'' && at(i) != '\0' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                ('\'', _) if at(i + 2) == '\'' => i += 3,
+                ('\'', _) => i += 1,
+                ('"', _) => {
+                    i += 1;
+                    string(&mut i, &mut line, None);
+                }
+                // A word: `r`/`br` before quotes or hashes start a raw string, `b` a byte string
+                (ch, _) if word(ch) => {
+                    let start = i;
+                    while word(at(i)) {
+                        i += 1;
+                    }
+                    let w: String = c[start..i].iter().collect();
+                    if (w == "r" || w == "br") && matches!(at(i), '"' | '#') {
+                        let mut hashes = 0;
+                        while at(i) == '#' {
+                            (hashes, i) = (hashes + 1, i + 1);
+                        }
+                        if at(i) == '"' {
+                            i += 1;
+                            string(&mut i, &mut line, Some(hashes));
+                        }
+                    }
+                }
+                _ => i += 1,
+            }
+        }
+        out
+    }
+
+    /// The glyph check reads strings as Rust does: an escaped quote, a `'"'`, a raw string with quotes in
+    /// it, a string over several lines are strings (or not) as written — and a comment, even one with a
+    /// quote, is none.
+    #[test]
+    fn string_literals_are_read_as_rust_reads_them() {
+        let src = concat!(
+            "let q = '\"'; let a = \"say \\\"hi\\\" ×\";\n",
+            // (the comments' `\u{2717}`: a glyph not in the list, written so that this source has none)
+            "let r = r#\"a \"quoted\" ▲\"#; // a comment \"\u{2717}\"\n",
+            "/* a /* nested */ block \"\u{2717}\" */ let b = b\"bytes\"; let c = '\\''; fn f<'a>(x: &'a str) {}\n",
+            "let m = \"one\n",
+            "two ●\";\n",
+        );
+        let got: Vec<(usize, String)> = string_literals(src);
+        let want = [
+            (1, "say \\\"hi\\\" ×"),
+            (2, "a \"quoted\" ▲"),
+            (3, "bytes"),
+            (4, "one\ntwo ●"),
+        ];
+        assert_eq!(got, want.map(|(l, s)| (l, s.to_string())), "{got:?}");
+    }
+
+    /// A base read through an overlay says which one — by as much of its path as tells it from the project's
+    /// other kustomizations, built or not (`apps/{base,staging,prod}/shop` are all "shop": `prod/shop`). And the
+    /// name and namespace the build gave the object aren't differences from the file: that's what the overlay
+    /// is for.
+    #[test]
+    fn a_base_read_through_an_overlay_names_it_and_its_renames_arent_differences() {
+        let mut s = with_cluster();
+        let base = "/r/apps/base/shop/deployment.yaml";
+        let k = |path: &str, text: &str| kustomize::parse(path, text);
+        let kzs = [
+            k("/r/apps/base/shop/kustomization.yaml", "resources: [deployment.yaml]\n"),
+            k("/r/apps/prod/shop/kustomization.yaml", "resources: [../../base/shop]\n"),
+            k("/r/apps/staging/shop/kustomization.yaml", "resources: [../../base/shop]\n"),
+        ];
+        s.tree = kustomize::Tree { kzs: kzs.into_iter().map(|k| (k.dir.clone(), k)).collect() };
+        s.file(base.into(), 1, "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: shop\nspec:\n  replicas: 1\n");
+        let built = |ns: &str, name: &str| Built {
+            api_version: "apps/v1".into(),
+            kind: "Deployment".into(),
+            name: name.into(),
+            namespace: Some(ns.into()),
+            path: Some(base.into()),
+            configured_in: None,
+        };
+        // (only prod built — staging and the base still share its last folder)
+        s.builds.insert("/r/apps/prod/shop".into(), Build::Done(vec![built("shop-prod", "prod-shop")]));
+        serve(&mut s, "apps/v1", &[("Deployment", "deployments")]);
+        let live = serde_json::json!({"apiVersion": "apps/v1", "kind": "Deployment",
+            "metadata": {"name": "prod-shop", "namespace": "shop-prod"},
+            "spec": {"replicas": 2}, "status": {"readyReplicas": 2, "updatedReplicas": 2}});
+        for st in s.streams.values_mut() {
+            st.loaded = true;
+            if st.what.ns.as_deref() == Some("shop-prod") {
+                st.objects.insert("prod-shop".into(), serde_json::from_value(live.clone()).unwrap());
+            }
+        }
+        let d = s.docs(base).remove(0);
+        assert_eq!(s.seen(&d).unwrap().text, "2/2 ready  (via prod/shop)");
+        let said: Vec<(u64, String)> = s.differ(&d).into_iter().map(|h| (h.line, h.text)).collect();
+        assert_eq!(said, [(5, "→ 2".to_string())], "replicas differ; the name the build gave doesn't");
+    }
+
+    /// An object that names no namespace is looked for in the context's. Said beside it when that isn't
+    /// `default` (a surprise: `kubectl apply` would put it there too, but you may not expect it) — not on every
+    /// kind line of every file when it is.
+    #[test]
+    fn the_contexts_namespace_is_said_only_when_it_isnt_default() {
+        let said = |namespace: &str| {
+            let mut s = with_cluster();
+            s.namespace = namespace.into();
+            s.file("/r/web.yaml".into(), 1, "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n");
+            serve(&mut s, "apps/v1", &[("Deployment", "deployments")]);
+            let web = serde_json::json!({"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "web"},
+                "spec": {"replicas": 1}, "status": {"readyReplicas": 1, "updatedReplicas": 1}});
+            for st in s.streams.values_mut() {
+                st.loaded = true;
+                st.objects.insert("web".into(), serde_json::from_value(web.clone()).unwrap());
+            }
+            s.seen(&s.docs("/r/web.yaml")[0]).unwrap().text
+        };
+        assert_eq!(said("default"), "1/1 ready");
+        assert_eq!(said("team-a"), "1/1 ready · ns team-a");
+    }
+
+    /// A cluster that can't be reached is one fact: said once, in the tab and the badge — not the same refusal
+    /// beside every object, nor old state shown as if it were now. A kind asked about while it was down is
+    /// asked again, not taken as one the cluster doesn't serve.
+    #[test]
+    fn an_unreachable_cluster_is_said_once_not_per_object() {
+        let mut s = with_cluster();
+        let mut out = s.file("/r/web.yaml".into(), 1, MANIFEST);
+        s.front = Some("/r/web.yaml".into());
+        // Discovery of v1 goes through; apps/v1's connection is refused
+        serve(&mut s, "v1", &[("Service", "services"), ("Pod", "pods")]);
+        let discover = s.reqs.iter().find(|(_, r)| matches!(&r.purpose, Purpose::Discover(av) if av == "apps/v1")).map(|(i, _)| *i).unwrap();
+        let list = s.reqs.iter().find(|(_, r)| matches!(r.purpose, Purpose::List(_))).map(|(i, _)| *i).unwrap();
+        let refused = |id| HostEvent::Failed((id, "k:443: Connection refused (os error 61)".into()));
+        out.extend(s.on_events(vec![refused(discover), refused(list)]));
+        out.extend(s.show());
+        let hints: Vec<&Hint> = out.iter().filter_map(|a| if let Action::Hints(h) = a { Some(h) } else { None }).flat_map(|h| &h.hints).collect();
+        assert!(hints.iter().all(|h| !h.text.contains("refused")), "{hints:?}");
+        let rows: Vec<String> = s.side_now().rows.iter().map(|r| r.text.clone()).collect();
+        assert_eq!(rows[0], "can't reach prod-eks", "{rows:?}");
+        assert_eq!(s.side_now().rows[0].detail, "", "nothing beside it to cut it short");
+        assert_eq!(rows.last().map(String::as_str), Some("trying again"), "{rows:?}");
+        assert_eq!(rows.iter().filter(|r| r.contains("refused")).count(), 1, "said once: {rows:?}");
+        assert!(!rows.iter().any(|r| r == "web"), "no objects listed as if known: {rows:?}");
+        assert_eq!(s.badge, Some(("k8s prod-eks · unreachable".into(), Tone::Warning)));
+        // apps/v1 isn't "not served": asked again after a pause
+        assert!(!s.served.contains_key("apps/v1"));
+        let pause = out.iter().find_map(|a| if let Action::Timer((REACH, ms)) = a { Some(*ms) } else { None });
+        assert!(pause.is_some(), "{out:?}");
+        let again = s.on_events(vec![HostEvent::Tick(REACH)]);
+        assert!(s.reqs.values().any(|r| matches!(&r.purpose, Purpose::Discover(av) if av == "apps/v1")), "{again:?}");
+        // The server answers again (the asking-again's answer, as a response comes in): back to normal
+        let id = s.reqs.iter().find(|(_, r)| matches!(r.purpose, Purpose::Discover(_))).map(|(i, _)| *i).unwrap();
+        let body = br#"{"resources": [{"kind": "Deployment", "name": "deployments", "namespaced": true}]}"#;
+        let response = [format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).as_bytes(), body].concat();
+        s.answered(id, &response);
+        s.show();
+        assert_eq!(s.badge, Some(("k8s prod-eks".into(), Tone::Ok)));
+    }
+
+    /// "Can't reach" is for a cluster that doesn't answer — a connection that couldn't be made, or closed
+    /// before the server said anything — and it's asked again. A certificate that fails verification won't
+    /// get better by waiting: what failed is said, as for any other failure, and not retried as if it might.
+    #[test]
+    fn a_cluster_that_doesnt_answer_is_unreachable_but_a_failing_certificate_is_said() {
+        let start = || {
+            let mut s = with_cluster();
+            s.file("/r/web.yaml".into(), 1, MANIFEST);
+            s.front = Some("/r/web.yaml".into());
+            let id = |s: &State, av: &str| {
+                s.reqs.iter().find(|(_, r)| matches!(&r.purpose, Purpose::Discover(a) if a == av)).map(|(i, _)| *i).unwrap()
+            };
+            let ids = (id(&s, "apps/v1"), id(&s, "v1"));
+            (s, ids)
+        };
+        let reach = |out: &[Action]| out.iter().any(|a| matches!(a, Action::Timer((REACH, _))));
+        // The certificate: said where it matters, not "can't reach … trying again"
+        let (mut s, (apps, _)) = start();
+        let out = s.req_failed(apps, "invalid peer certificate: UnknownIssuer".into(), None);
+        assert!(s.unreachable.is_none() && !reach(&out), "{:?}", s.unreachable);
+        assert!(matches!(s.served.get("apps/v1"), Some(Served::Failed(why)) if why.contains("UnknownIssuer")));
+        s.show();
+        assert_eq!(s.badge, Some(("k8s prod-eks".into(), Tone::Ok)));
+        // No connection: can't reach, asked again
+        let (mut s, (apps, _)) = start();
+        let out = s.on_events(vec![HostEvent::Failed((apps, "k:443: Connection refused (os error 61)".into()))]);
+        assert!(s.unreachable.is_some() && reach(&out));
+        // Closed before the server said anything: the same
+        let (mut s, (_, v1)) = start();
+        let out = s.on_events(vec![HostEvent::Closed((v1, "Connection reset by peer".into()))]);
+        assert!(s.unreachable.is_some() && reach(&out));
+    }
+
+    /// While the cluster doesn't answer, what wasn't known is asked again after a pause that grows by
+    /// round — one pause however many API groups were waiting (not 1 s, 2 s, 4 s … in one go).
+    #[test]
+    fn the_pause_before_asking_again_grows_once_a_round() {
+        let mut s = with_cluster();
+        s.file("/r/web.yaml".into(), 1, MANIFEST);
+        let discovers = |s: &State| -> Vec<u64> {
+            s.reqs.iter().filter(|(_, r)| matches!(r.purpose, Purpose::Discover(_))).map(|(i, _)| *i).collect()
+        };
+        let pauses = |out: &[Action]| -> Vec<u64> {
+            out.iter().filter_map(|a| if let Action::Timer((REACH, ms)) = a { Some(*ms) } else { None }).collect()
+        };
+        let refuse = |s: &mut State| {
+            let ids = discovers(s);
+            assert_eq!(ids.len(), 2, "apps/v1 and v1");
+            s.on_events(ids.into_iter().map(|id| HostEvent::Failed((id, "Connection refused".into()))).collect())
+        };
+        assert_eq!(pauses(&refuse(&mut s)), [1000]);
+        s.on_events(vec![HostEvent::Tick(REACH)]);
+        assert_eq!(pauses(&refuse(&mut s)), [2000]);
+    }
+
+    /// What the tab says of a kind is its latest failure: a 403, then a retry that fails another way (the
+    /// server erring, say), says the new failure — not "no access" over it.
+    #[test]
+    fn after_a_403_the_latest_failure_wins() {
+        let mut s = with_cluster();
+        s.file("/r/secrets.yaml".into(), 1, "apiVersion: v1\nkind: Secret\nmetadata:\n  name: a\n");
+        s.front = Some("/r/secrets.yaml".into());
+        serve(&mut s, "v1", &[("Secret", "secrets")]);
+        let list = |s: &State| s.reqs.iter().find(|(_, r)| matches!(r.purpose, Purpose::List(_))).map(|(i, _)| *i).unwrap();
+        let sid = s.streams.keys().copied().next().unwrap();
+        let first = list(&s);
+        s.req_failed(first, "HTTP 403: secrets is forbidden".into(), Some(403));
+        s.on_events(vec![HostEvent::Tick(RETRY + sid)]);
+        let again = list(&s);
+        s.req_failed(again, "HTTP 500: etcdserver: request timed out".into(), Some(500));
+        let rows: Vec<String> = s.side_now().rows.iter().map(|r| r.text.clone()).collect();
+        assert!(!rows.iter().any(|r| r.contains("no access")), "{rows:?}");
+        let seen = s.seen(&s.docs("/r/secrets.yaml")[0]).map(|x| x.text);
+        assert_eq!(seen.as_deref(), Some("HTTP 500: etcdserver: request timed out"));
+    }
+
+    /// Not being allowed to list a kind is a fact about your rights, said once per kind and namespace in the
+    /// tab — not a warning beside every object of it (and no access review is asked: that's a POST).
+    #[test]
+    fn a_403_is_said_once_per_resource_not_per_object() {
+        let mut s = with_cluster();
+        let text = "apiVersion: v1\nkind: Secret\nmetadata:\n  name: a\n---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: b\n";
+        s.file("/r/secrets.yaml".into(), 1, text);
+        s.front = Some("/r/secrets.yaml".into());
+        serve(&mut s, "v1", &[("Secret", "secrets")]);
+        let list = s.reqs.iter().find(|(_, r)| matches!(r.purpose, Purpose::List(_))).map(|(i, _)| *i).unwrap();
+        s.req_failed(list, "HTTP 403: secrets is forbidden".into(), Some(403));
+        s.sent.clear();
+        let out = s.show();
+        let hints: Vec<&Hint> = out.iter().filter_map(|a| if let Action::Hints(h) = a { Some(h) } else { None }).flat_map(|h| &h.hints).collect();
+        assert!(hints.is_empty(), "nothing beside the objects: {hints:?}");
+        let rows: Vec<String> = s.side_now().rows.iter().map(|r| r.text.clone()).collect();
+        let said: Vec<&String> = rows.iter().filter(|r| r.contains("access")).collect();
+        assert_eq!(said, ["no access to secrets in default"], "{rows:?}");
+    }
+
+    /// The plugin is something you can leave on against prod: it only reads. Every kind of request it makes —
+    /// discovery, lists, watches, a Secret's metadata, live YAML, events, a pod described, logs, Helm's labels
+    /// — goes out as a GET.
+    #[test]
+    fn the_plugin_never_asks_a_cluster_to_change_anything() {
+        let mut s = with_cluster();
+        let text = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: token\n---\napiVersion: v1\nkind: Pod\nmetadata:\n  name: p\n";
+        s.file("/r/all.yaml".into(), 1, text);
+        serve(&mut s, "apps/v1", &[("Deployment", "deployments")]);
+        serve(&mut s, "v1", &[("Secret", "secrets"), ("Pod", "pods")]);
+        let sids: Vec<u64> = s.streams.keys().copied().collect();
+        for sid in sids {
+            s.watch(sid);
+        }
+        let pod = serde_json::json!({"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "p", "namespace": "default"}, "status": {"phase": "Running"}});
+        let pods = s.streams.values_mut().find(|st| st.kind == "Pod").unwrap();
+        pods.objects.insert("p".into(), serde_json::from_value(pod).unwrap());
+        let deployments = Watched { api_version: "apps/v1".into(), plural: "deployments".into(), ns: Some("default".into()) };
+        s.yaml(&deployments, "Deployment", "web");
+        s.events(Some("default"), "Deployment", "web");
+        s.describe("default", "p");
+        s.logs("default", "p");
+        s.label(0, true);
+        let name = |p: &Purpose| match p {
+            Purpose::Discover(_) => "discover",
+            Purpose::List(_) => "list",
+            Purpose::Watch(_) => "watch",
+            Purpose::Yaml(..) => "yaml",
+            Purpose::Events(..) => "events",
+            Purpose::Logs(_) => "logs",
+            Purpose::Labeled(..) => "labeled",
+        };
+        let kinds: BTreeSet<&str> = s.reqs.values().map(|r| name(&r.purpose)).collect();
+        assert_eq!(kinds, ["discover", "events", "labeled", "list", "logs", "watch", "yaml"].into(), "every kind of request seen");
+        for r in s.reqs.values() {
+            let line = String::from_utf8_lossy(&r.http).lines().next().unwrap_or_default().to_string();
+            assert!(line.starts_with("GET "), "{} went out as {line}", name(&r.purpose));
+        }
+    }
+
+    /// helm reads the kubeconfig itself: left to it, it takes whatever context is current when it runs (one
+    /// switched to in the terminal since) and merges every `KUBECONFIG` file — values from another cluster than
+    /// the hints beside them. So it's told the file and the context the plugin is on.
+    #[test]
+    fn helm_asks_the_cluster_the_hints_are_from() {
+        let mut s = with_cluster();
+        s.kubeconfig = "~/.kube/work".into();
+        s.charts = Some([("/r/charts/shop".to_string(), "shop".to_string())].into());
+        s.labeled = Some(vec![("shop-0.1.0".into(), "shop-helm".into(), "shop".into())]);
+        let out = s.file("/r/charts/shop/templates/deployment.yaml".into(), 1, "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: x\n");
+        let asked: Vec<Vec<String>> =
+            out.iter().filter_map(|a| if let Action::Spawn(sp) = a { Some(sp.args.clone()) } else { None }).collect();
+        assert_eq!(asked.len(), 1);
+        // (programs run in the home folder: `~/` is from there — no shell expands it)
+        let flag = |f: &str| asked[0].iter().position(|a| a == f).map(|i| asked[0][i + 1].as_str());
+        assert_eq!((flag("--kube-context"), flag("--kubeconfig")), (Some("prod-eks"), Some(".kube/work")), "{asked:?}");
     }
 
     /// A line that names an object the cluster hasn't says so — a key its ConfigMap hasn't, too; one an open
