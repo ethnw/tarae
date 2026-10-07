@@ -934,13 +934,17 @@ pub fn start_in(ed: &mut Editor, cwd: PathBuf, branch: Option<String>) {
 }
 
 /// A review as `:restart`'s state carries it (its session's block): its repository, its base, the file it's
-/// on — None for a turn's (its turns load later and shift it: it stops the restart instead) and a rebase's
-/// (the rebase does).
-pub fn carried(r: &CodeReview, on: Option<&Path>) -> Option<Value> {
+/// on — None for a rebase's (the rebase does). A turn's by its place from the newest of the session's `turns`
+/// and its question: the kept turns load after the restart, before a turn it ended mid-way and any made since
+/// (frictions15 — it held the restart, "end it first").
+pub fn carried(r: &CodeReview, on: Option<&Path>, turns: usize) -> Option<Value> {
     let base = match &r.base {
         Base::Head => json!("head"),
         Base::Branch { name, commit } => json!({ "branch": name, "commit": commit }),
-        Base::Turn { .. } | Base::Replay { .. } => return None,
+        Base::Turn { at, question } => {
+            json!({ "turn_back": turns.checked_sub(at + 1)?, "question": question })
+        }
+        Base::Replay { .. } => return None,
     };
     let current = on.and_then(|p| r.files.iter().find(|f| f.path == p)).map(|f| f.rel.clone());
     Some(json!({ "root": r.root, "base": base, "current": current }))
@@ -952,6 +956,15 @@ pub fn carried(r: &CodeReview, on: Option<&Path>) -> Option<Value> {
 /// for their servers (`LspState.attach_later`). Its drafts are notes, back with them.
 pub fn reopen(ed: &mut Editor, v: &Value) {
     let Some(root) = v["root"].as_str().map(PathBuf::from) else { return };
+    // A turn's: once its session's kept turns are back (`checkpoint::restore_from`), else now
+    if v["base"]["turn_back"].is_u64() {
+        let loaded = ed.session.checkpoints.dir.is_some() || ed.turns_dir.is_none();
+        match loaded {
+            true => reopen_turn(ed, v),
+            false => ed.session.turn_review_back = Some(v.clone()),
+        }
+        return;
+    }
     let base = match &v["base"] {
         b if b == "head" => Base::Head,
         b => match (b["branch"].as_str(), b["commit"].as_str()) {
@@ -976,6 +989,22 @@ pub fn reopen(ed: &mut Editor, v: &Value) {
             Err(e) => ed.set_warning(format!("review {}: not open again — {e}", base.label())),
         }
     });
+}
+
+/// A turn's review `carried` over `:restart`, its session's turns back: the same turn (counted from the newest
+/// kept — `Checkpoints::restored`: a turn the restart ended mid-way comes back after them as one more, and
+/// there may be some made since — its question the same) open again on the file it was on. Gone meanwhile
+/// (fewer kept, another question): said, not another turn's opened in its place.
+pub(crate) fn reopen_turn(ed: &mut Editor, v: &Value) {
+    let back = v["base"]["turn_back"].as_u64().unwrap_or(u64::MAX) as usize;
+    let question = v["base"]["question"].as_str().unwrap_or_default();
+    let (list, kept) = (&ed.session.checkpoints.list, ed.session.checkpoints.restored);
+    let at = kept.checked_sub(back.saturating_add(1)).filter(|&at| list[at].question == question);
+    let Some(at) = at else {
+        return ed.set_warning("review of the last turn: not open again — that turn isn't kept");
+    };
+    let current = v["current"].as_str().map(str::to_string);
+    start_turn_at(ed, at, 0, current, false);
 }
 
 /// `space v t` · `:review-turn`: what Claude changed in its latest turn (not taken back), as a review.
@@ -1006,6 +1035,11 @@ pub fn start_turn(ed: &mut Editor, at: usize) {
 
 /// `start_turn`, saying once it's open that `earlier` turns before it went in unseen.
 fn start_turn_saying(ed: &mut Editor, at: usize, earlier: usize) {
+    start_turn_at(ed, at, earlier, None, true);
+}
+
+/// `start_turn_saying`, on the file `start` (relative) when it's among them — and said when `say`.
+fn start_turn_at(ed: &mut Editor, at: usize, earlier: usize, start: Option<String>, say: bool) {
     let Some(cp) = ed.session.checkpoints.list.get(at) else { return };
     let base = Base::Turn { at, question: cp.question.clone() };
     let files: Vec<(PathBuf, Option<ropey::Rope>)> =
@@ -1046,7 +1080,7 @@ fn start_turn_saying(ed: &mut Editor, at: usize, earlier: usize) {
         move |ed: &mut Editor| {
             let grades = ungraded_said(ed, grades);
             let opens = !files.is_empty();
-            open(ed, root, base, files, grades);
+            open_at(ed, root, base, files, grades, start, say);
             if opens
                 && beyond > 0
                 && let Some(r) = ed.session.code_review.as_mut()

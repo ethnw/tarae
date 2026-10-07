@@ -89,12 +89,50 @@ pub enum Guard {
     Outside,
 }
 
+/// What a run was let reach outside itself (`Guard::reaches_out`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReachOut {
+    /// The unix sockets granted it, said — a daemon's: a run granted one is there to talk to it.
+    Sockets(String),
+    /// The network beyond this machine.
+    Network,
+    /// No sandbox around it.
+    Anything,
+}
+
+impl ReachOut {
+    /// In words: `~/.colima/default/docker.sock` · `the network` · `anything — no sandbox around it`.
+    pub fn said(&self) -> &str {
+        match self {
+            ReachOut::Sockets(s) => s,
+            ReachOut::Network => "the network",
+            ReachOut::Anything => "anything — no sandbox around it",
+        }
+    }
+}
+
 impl Guard {
     /// The run's watch, when it ran in the sandbox.
     pub fn watch(&self) -> Option<&std::sync::Arc<Watch>> {
         match self {
             Guard::In(p) => p.watch.as_ref(),
             _ => None,
+        }
+    }
+
+    /// What a run under this guard was let reach through which its work may go on elsewhere — the unix
+    /// sockets granted it (a daemon's), the network beyond this machine; outside the sandbox, anything. None:
+    /// neither. `stuck.rs` says it (frictions15): next to no CPU here doesn't say a run is stuck when it was
+    /// granted a daemon's socket — the network or no sandbox alone say nothing of where it is.
+    pub fn reaches_out(&self) -> Option<ReachOut> {
+        match self {
+            Guard::In(p) if !p.sockets.is_empty() => {
+                let socks: Vec<String> = p.sockets.iter().map(|s| crate::allow::tilde(s)).collect();
+                Some(ReachOut::Sockets(socks.join(", ")))
+            }
+            Guard::In(p) if p.network => Some(ReachOut::Network),
+            Guard::In(_) => None,
+            Guard::Without(_) | Guard::Off | Guard::Outside => Some(ReachOut::Anything),
         }
     }
 

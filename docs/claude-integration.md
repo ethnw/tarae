@@ -91,7 +91,13 @@ A card that asks something (this one, a command to run, a read outside the proje
 the editor. While you're typing in the chat, or in a review, it leaves your keys alone and says
 `C-q to answer it`: `C-q` gives the card the keys (the status line says `CARD`), your draft stays as it was, and
 Esc goes back unanswered. Esc never answers a card. `n` does. A card counts what waits behind it — `1/3`: cards
-under it, Claude's calls queued, cards in other sessions.
+under it, Claude's calls queued, cards in other sessions — and says it in words: `2 more wait — 1 here, 1 in
+fix-login · space I lists them`.
+
+A card too tall for the screen is read whole in its own buffer (`v`), the card a bar over the status line that
+says whose keys they are. The card keeps the keys while you read: `j`/`k`, `g e` and the page keys move through
+the text, and its answers answer it. Esc gives them back to the code, and from then on `y` there is a yank, not a
+yes. Only `C-q` gives them to the card again: pressed again it keeps them, and it never lets go.
 
 **The inbox** is everything waiting for your answer, in every session, oldest first: Claude's run and read
 cards, its edits waiting for their review (`Change 1 of 2 · src/a.rs` — a protected file like `.tarae.toml`

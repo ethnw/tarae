@@ -2995,10 +2995,12 @@ impl Editor {
 
     /// Whether the front card takes the keys: given it with `C-q`, or in normal mode with nothing else
     /// holding them (no prefix key, prompt, picker, review, the chat's input or the terminal) — and it hasn't
-    /// stepped aside for what its `h` went to (`Offer.aside`).
+    /// stepped aside for what its `h` went to (`Offer.aside`), nor is its text the buffer in sight: there
+    /// only `C-q` gives them (frictions15 review: Esc then `y`, a yank out of habit, answered the card).
     pub fn card_has_keys(&self) -> bool {
         self.card_keys
             || (self.mode == Mode::Normal
+                && !self.offer_reading()
                 && !self.offers.first().is_some_and(|o| o.aside)
                 && self.pending.is_empty()
                 && self.prompt.is_none()
@@ -3023,6 +3025,18 @@ impl Editor {
             return false;
         };
         if key.ctrl && !key.alt && key.code == Code::Char('q') {
+            // Its text being read in its buffer: `C-q` gives the card the keys, never takes them (frictions15:
+            // a toggle, it let go of a card that held them unseen — `j`/`k` read through it — and the `y`
+            // after went to the code); Esc gives them back
+            if self.offer_reading() {
+                let had = std::mem::replace(&mut self.card_keys, true);
+                self.pending.clear();
+                self.set_status(match had {
+                    true => "the card has the keys — esc gives them back",
+                    false => "the card has the keys — its answers answer it, esc gives them back",
+                });
+                return true;
+            }
             if self.card_keys {
                 self.card_keys = false;
                 self.set_status("keys back — the card waits, C-q answers it");
@@ -3036,6 +3050,8 @@ impl Editor {
             self.card_keys = true;
             return true;
         }
+        // (Esc never gives a card the keys, only back: handing them over too, Esc after Esc took turns — the
+        // toggle `C-q` lost, on the key pressed out of habit)
         if !self.card_keys {
             return false;
         }
@@ -12362,12 +12378,13 @@ mod tests {
         let s = screen(&mut ed);
         assert!(!s.contains("line 80 of what it runs"), "its end is below the screen");
         // While its text is read, the card is a bar over the status line (U8: the screen's last row) — nothing
-        // of it over the text
+        // of it over the text. It keeps the keys meanwhile (the reading keys reach the buffer through it), and
+        // says so
         let rows: Vec<&str> = s.lines().collect();
         let bar = rows[30 - 2];
         assert!(
             bar.contains("Trust this project's settings?")
-                && bar.contains("ge to its end, then y answers")
+                && bar.contains("ge to its end · esc goes back")
                 && bar.contains("y Trust"),
             "the bar: {bar:?}\n{s}"
         );
@@ -12388,7 +12405,7 @@ mod tests {
         feed(&mut ed, "ge");
         let s = screen(&mut ed);
         assert!(s.contains("line 80 of what it runs"), "{s}");
-        assert!(s.contains("read to its end — y answers"), "the bar says y counts now: {s}");
+        assert!(s.contains("y answers · esc goes back"), "the bar says y counts now: {s}");
         ed.handle_event(Event::Key("y".parse().unwrap()));
         assert!(ed.offers.is_empty(), "answered once seen whole");
         let card_buffers = |ed: &Editor| {

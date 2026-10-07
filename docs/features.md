@@ -395,10 +395,22 @@ go-to-definition and the like answer. The turns `space u` can take back and Clau
 its own session; the list (`]q`) belongs to the old tarae and stays behind. Undo within a file (`u`/`U`)
 keeps working, as after any restart (`editor.persistent-undo`).
 
-Some things make it wait, and some stop it. If Claude is answering in any session's chat, the restart waits for
-those turns to end, and for any edits you accepted to land on disk. Until it happens the status line says what it
-waits for (`restart waits for gitescape`); `:restart` again asks before calling it off. It stops, with a message
-saying what to do, if something open can't be carried over or would be cut short: text in a buffer that has no
-file, a file that changed on disk under your edits, a change of Claude's waiting for your answer, a review of
-Claude's turn (`space v t`), a commit message being written, a task or tests still running — in any session, the message naming which — or a debug run. When a
-file can't be saved, it stops too, and nothing is lost.
+Work under way doesn't hold it, in any session. A review comes along: since main, uncommitted, or a turn's
+(`space v t`), each back on the file it was on. What's running is named on the restart's card, by session and
+how long: Claude answering in a chat (and, by file, its edits waiting for your answer — dropped with it: the
+claude that asked doesn't outlive the restart), a command in the task panel, tests. `y` restarts anyway: they're ended, and the toast says which. Only what the
+card named is ended: something that starts while the card is up makes `y` ask again, naming it, and what starts
+after your answer (Claude asked again, a run) is waited for. `w` waits for them to end, and then the card asks
+again. While it waits, the status line says what it's waiting for (`restart waits for gitescape: Claude's
+turn`), and `:restart` again asks before calling it off. It always waits for edits you accepted to land on disk.
+
+Some things stop it, with a message saying what to do, because they can't be carried over:
+- text in a buffer that has no file;
+- a file that changed on disk under your edits;
+- a change of Claude's waiting for your answer, outside a turn;
+- a commit message being written;
+- an install running;
+- a debug run.
+
+The message names the session when there's more than one. When a file can't be saved, it stops too, and nothing is
+lost.

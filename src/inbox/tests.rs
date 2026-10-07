@@ -134,6 +134,22 @@ fn the_inbox_is_every_sessions_waiting_things_oldest_first() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// frictions15 #5: the card in front holds `C-q` (it takes this session's oldest first, #198), so what waits
+/// behind it would be a silent queue — the card says how many more wait, where (here, or which session) and
+/// the key that lists them (the keymap's, never a hardcoded one). Alone, it says nothing of the kind.
+#[test]
+fn the_front_card_says_how_many_wait_behind_it_and_where() {
+    let (mut ed, dir, back, _) = three("behind");
+    up(&mut ed, claudes(1, 60));
+    let alone = screen(&mut ed, 120, 30).join("\n");
+    assert!(!alone.contains("more wait"), "{alone}");
+    up(&mut ed, claudes(2, 30));
+    park(&mut ed, back, claudes(3, 10));
+    let rows = screen(&mut ed, 120, 30).join("\n");
+    assert!(rows.contains("2 more wait — 1 here, 1 in back · space I lists them"), "{rows}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// `C-q` with nothing waiting in front goes to the one that has waited longest, in any session; once it's
 /// the card up, `C-q` gives it the keys. #94's case: a card of tarae's parked in a session behind whose turn
 /// ended (`done`, its Claude idle) — `C-q` said "no card waits for you" while it waited there; now it goes to

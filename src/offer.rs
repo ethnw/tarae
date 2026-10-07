@@ -422,6 +422,11 @@ impl Offer {
         matches!(&self.what, What::Restart(c) if c.targets.len() > 1)
     }
 
+    /// Whether `w` answers it: a restart's card naming work under way (it waits for it to end).
+    pub fn restart_waits(&self) -> bool {
+        matches!(&self.what, What::Restart(c) if !c.under_way.is_empty())
+    }
+
     /// Whether `p` answers it: the bring card after a rebase (the preflight, then the bring).
     pub fn preflights(&self) -> bool {
         matches!(self.what, What::Rebased(_))
@@ -453,6 +458,7 @@ impl Offer {
             || (c == 'p' && self.preflights())
             || (c == 'X' && self.aborts())
             || (c == 'f' && self.restart_other())
+            || (c == 'w' && self.restart_waits())
     }
 
     /// The `(generation)` of a change set's card (`r` one by one, `v` every change).
@@ -638,10 +644,19 @@ impl Offer {
                 vec![('y', if a.hooks.len() == 1 { "Run it" } else { "Run them" }), ('n', "Skip hooks")]
             }
             W::Hooks(_) => vec![('n', "Skip hooks")],
-            W::Restart(_) if self.restart_other() => {
-                vec![('y', "Restart"), ('f', "The front's instead"), ('n', "Not now")]
+            // (work under way: `y` restarts anyway, ending it — `w` waits for it)
+            W::Restart(c) => {
+                let busy = !c.under_way.is_empty();
+                let mut v = vec![('y', if busy { "Restart anyway" } else { "Restart" })];
+                if self.restart_other() {
+                    v.push(('f', "The front's instead"));
+                }
+                if busy {
+                    v.push(('w', "Wait for them"));
+                }
+                v.push(('n', "Not now"));
+                v
             }
-            W::Restart(_) => vec![('y', "Restart"), ('n', "Not now")],
             W::RestartSame { .. } => vec![('y', "Restart anyway"), ('n', "Don't")],
             W::RestartCancel { .. } => vec![('y', "Call it off"), ('n', "Keep it")],
             W::NotesStale { .. } | W::NotesClose { .. } => vec![('y', "Close them"), ('n', "Keep them")],
@@ -868,6 +883,7 @@ impl crate::editor::Editor {
             Code::Char('X') if o.aborts() => self.offer_abort(),
             Code::Char('b') if o.base_steps() => self.offer_session_base(),
             Code::Char('f') if o.restart_other() => self.offer_restart_other(),
+            Code::Char('w') if o.restart_waits() => self.offer_restart_wait(),
             // (the card stays: what it waits on is yours to look at, then it's answered)
             Code::Char('h') if o.highs().is_some() => crate::codereview::card_highs(self),
             // (the card stays: shown, it's still to answer)
@@ -1016,6 +1032,18 @@ impl crate::editor::Editor {
         self.card_answered(o.id);
         if let What::Recover(f) = o.what {
             crate::recovery::discard(self, *f);
+        }
+    }
+
+    /// `w` on a restart's card naming work under way: it waits for that to end, then asks again.
+    pub fn offer_restart_wait(&mut self) {
+        if !self.offers.first().is_some_and(Offer::restart_waits) {
+            return;
+        }
+        let o = self.offers.remove(0);
+        self.card_answered(o.id);
+        if let What::Restart(c) = o.what {
+            crate::restart::wait_answer(self, o.id, *c);
         }
     }
 
@@ -1285,6 +1313,13 @@ impl crate::editor::Editor {
             t.focus = false;
         }
         self.bottom_focus = false;
+        // The card keeps the keys while it's read: the keys that read reach the buffer through it (`card_reads`),
+        // its answers answer it. In its buffer those are the card's only while it holds them — Esc gives them
+        // back, and then `y` is a yank, not a yes; `C-q` gives them again (frictions15 review)
+        self.card_keys = true;
+        // (in the focused pane now, not at the next event: its keys go through the card, past the code's
+        // path that would put it there — `track_doc_switch`)
+        self.sync_focus_view();
         // (the card's bar under it says so — U8)
         self.note(format!("the card's whole text — {} to its end, then y answers", self.end_key()));
     }

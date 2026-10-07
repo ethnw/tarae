@@ -275,6 +275,9 @@ impl Editor {
         if let Some(o) = up {
             if self.card_keys {
                 v.push(layer(Region::Card(o.id), Filter::All));
+            } else if self.offer_reading() {
+                // (its text the buffer in sight: `C-q` gives it the keys whatever is next up)
+                v.push(shortcut(Region::Card(o.id), Filter::Only(vec![ctrl('q')])));
             } else if next == crate::inbox::Next::Card(o.id) {
                 v.push(shortcut(Region::Card(o.id), Filter::Only(vec![ctrl('q')])));
             }
@@ -1026,7 +1029,8 @@ impl Editor {
 }
 
 /// A card's `asks`: its title and the lines drawn at full strength (what's decided), whole — scripts and the
-/// inbox read it all (frictions 13); the one-line forms cut it (`asks_line`).
+/// inbox read it all (frictions 13), the text line and the watch's `card-up` too (frictions15); Claude's level
+/// and the inbox picker's row cut it (`asks_line`).
 fn asks(o: &crate::offer::Offer) -> String {
     let decided = o.decided_lines();
     let mut s = o.title.clone();
@@ -1039,7 +1043,7 @@ fn asks(o: &crate::offer::Offer) -> String {
     s
 }
 
-/// A card's `asks` as a one-line form says it: cut at `ASKS_MAX`.
+/// A card's `asks` where room or tokens count (Claude's level, the inbox picker's row): cut at `ASKS_MAX`.
 pub(crate) fn asks_line(asks: &str) -> String {
     match asks.chars().count() > ASKS_MAX {
         true => asks.chars().take(ASKS_MAX - 1).collect::<String>() + "…",
@@ -1221,7 +1225,8 @@ impl UiState {
         for c in &self.cards {
             let answers: Vec<String> =
                 c.answers.iter().map(|(k, d)| format!("{k} {}", d.to_lowercase())).collect();
-            let mut line = format!("{} {} · {} · {:?}", c.id, c.whose, c.kind, asks_line(&c.asks));
+            // (whole: a driver asked to approve a command reads all of it — frictions15)
+            let mut line = format!("{} {} · {} · {:?}", c.id, c.whose, c.kind, c.asks);
             if c.session != self.front {
                 line += &format!(" · in {}", c.session);
             }

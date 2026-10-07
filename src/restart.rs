@@ -11,9 +11,10 @@
 //! top-level fields stay as earlier builds read them (`snapshot`).
 //!
 //! Files are saved first, as before a task. What can't come along stops it the way `:q` is stopped — a
-//! buffer with no file, an edit's review, a review of Claude's turn — in any session (`blocker`). A chat turn
-//! in flight is waited for (`turn_over`). A restart under way is on the status line until it happens
-//! (`pending`); `:restart` again asks before calling it off.
+//! buffer with no file, an edit's review, a commit message — in any session (`blocker`). What's under way — a
+//! chat turn and its edits waiting, a command, tests — is named on its card: restart anyway (that's ended;
+//! what begins after isn't, it's waited for) or wait (`turn_over`). A restart under way is on the status
+//! line until it happens (`pending`); `:restart` again asks before calling it off.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -67,6 +68,29 @@ pub struct Restart {
     /// The binary's dSYM kept (`dsyms::keep`): where, None when there was none — or why not (the restart goes
     /// on). Unset until it goes ahead (`keep_then`). Carried in the state: the next tarae logs it.
     kept: Option<Result<Option<crate::dsyms::Kept>, String>>,
+    /// Its card was answered with work under way (`under_way`) — restart anyway: what the card named is
+    /// ended, not waited for; what began after it is (it wasn't named).
+    anyway: Vec<Work>,
+}
+
+/// One thing `under_way` names, told apart from what begins after its card: a session's Claude turn (and
+/// whether an edit of it waits for an answer — ended with it), a command or tests by when they started.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Work {
+    Turn { session: SessionId, edits: bool },
+    Run(Instant),
+}
+
+impl Work {
+    /// Named on a card that named `named` — a turn whose edit waits only if the card said so.
+    fn named_in(&self, named: &[Work]) -> bool {
+        named.iter().any(|n| match (self, n) {
+            (Work::Turn { session, edits }, Work::Turn { session: s, edits: e }) => {
+                session == s && (*e || !edits)
+            }
+            (w, n) => w == n,
+        })
+    }
 }
 
 /// A checkout a restart can build in and run (#108): whose it is (its session's label), where its build
@@ -102,10 +126,14 @@ impl Target {
 
 /// What a restart's card asks: which of `targets` (the checkout tarae started in first) — `y` the first,
 /// `f` the session in front's; and, after a build that left the binary as it was, whether to go on anyway.
+/// `under_way`: what a restart now ends (`under_way`), said, and `work` the same told apart — `w` waits for it
+/// instead.
 #[derive(Clone, Debug)]
 pub struct Choice {
     pub id: u64,
     pub targets: Vec<Target>,
+    pub under_way: Vec<String>,
+    work: Vec<Work>,
 }
 
 impl Restart {
@@ -143,18 +171,83 @@ pub fn start(ed: &mut Editor, build: bool) -> Result<(), String> {
     blocker(ed, true).map_or(Ok(()), |why| Err(format!("can't restart: {why}")))?;
     static NEXT: AtomicU64 = AtomicU64::new(1);
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
-    ed.restart = Some(Restart { id, build, stage: Stage::Turn, target: None, kept: None });
-    // Every session's turn, not only the front's (#109)
-    let turns = turns(ed);
-    if !turns.is_empty() {
-        ed.set_status(format!(
-            "tarae restarts when {} — :restart again asks to call it off",
-            waits_for(&turns)
-        ));
-        return Ok(());
-    }
+    let stage = Stage::Turn;
+    ed.restart = Some(Restart { id, build, stage, target: None, kept: None, anyway: Vec::new() });
+    // What's under way in any session — Claude's turns (#109), commands, tests — is named on its card:
+    // restart anyway (ended) or wait (frictions15: one session's turn and its long command held it, unsaid)
     go(ed);
     Ok(())
+}
+
+/// What runs now that a restart would end, in every session (#109): Claude in a turn (or its turn's files
+/// being read), the task panel's run, the tests — named by session when there are several, with how long.
+/// The restart's own build isn't one. As waited for — the status line, the cancel card.
+fn under_way(ed: &Editor) -> Vec<String> {
+    under_way_of(ed, false).into_iter().map(|(_, said)| said).collect()
+}
+
+/// `under_way`, each told apart (`Work`) — `ending`: as a restart now would end it (its card, the toast of
+/// its yes), a turn naming its edits waiting for an answer, dropped with it (`edits_waiting`).
+fn under_way_of(ed: &Editor, ending: bool) -> Vec<(Work, String)> {
+    let several = !ed.sessions.is_empty();
+    let build = match ed.restart.as_ref().map(|r| &r.stage) {
+        Some(Stage::Building(g)) => Some(*g),
+        _ => None,
+    };
+    let mut out = Vec::new();
+    for l in ed.sessions_in_order() {
+        let at = |what: String| if several { format!("{}: {what}", l.label()) } else { what };
+        if l.chat.as_ref().is_some_and(crate::chat::Chat::busy) || l.checkpoints.gathering {
+            let (edits, files) = edits_waiting(ed, l);
+            let said = match edits {
+                _ if !ending || edits == 0 => "Claude's turn".to_string(),
+                1 => format!("Claude's turn — its unanswered edit to {} is dropped", files.join(", ")),
+                n => format!("Claude's turn — its {n} unanswered edits to {} are dropped", files.join(", ")),
+            };
+            out.push((Work::Turn { session: l.id, edits: edits > 0 }, at(said)));
+        }
+        let running = crate::task::State::Running;
+        if let Some(r) = l.task_run.as_ref().filter(|r| r.state == running && Some(r.generation()) != build) {
+            let cmd = crate::task::traced(&r.task.cmd);
+            let said = format!("{cmd} in the task panel, {}", crate::waits::clock(r.started.elapsed()));
+            out.push((Work::Run(r.started), at(said)));
+        }
+        let testing = crate::testing::RunState::Running;
+        if let Some(r) = l.test_run.as_ref().filter(|r| r.state == testing) {
+            let said = format!("tests {}, {}", r.target.label, crate::waits::clock(r.started.elapsed()));
+            out.push((Work::Run(r.started), at(said)));
+        }
+    }
+    out
+}
+
+/// Claude's edits in session `l` waiting for an answer — the one in its review, those queued behind it — and
+/// their files, each once. A restart drops them unanswered: the claude that asked is gone after it, and its
+/// conversation resumed can't take an answer to a request of the old process's.
+fn edits_waiting(ed: &Editor, l: &crate::session::Session) -> (usize, Vec<String>) {
+    let Some(c) = l.chat.as_ref() else { return (0, Vec::new()) };
+    let reviewed = c.edits.review.and(l.review.as_ref()).map(|r| r.doc_id);
+    let shown = reviewed.and_then(|id| ed.docs.iter().find(|d| d.id == id)).and_then(|d| d.path.clone());
+    let queued = c
+        .edits
+        .queue
+        .iter()
+        .map(|p| crate::chat::resolve(&l.root, p.input["file_path"].as_str().unwrap_or_default()));
+    let mut files = Vec::new();
+    for path in shown.into_iter().chain(queued) {
+        let said = crate::chat::shown(&l.root, &path);
+        if !files.contains(&said) {
+            files.push(said);
+        }
+    }
+    (c.edits.queue.len() + usize::from(c.edits.review.is_some()), files)
+}
+
+/// What runs now that the restart's answer didn't name (`Restart::anyway`; all of it before its card or after
+/// `w`) — waited for.
+fn unnamed(ed: &Editor) -> Vec<String> {
+    let named = ed.restart.as_ref().map_or(&[][..], |r| &r.anyway);
+    under_way_of(ed, false).into_iter().filter(|(w, _)| !w.named_in(named)).map(|(_, said)| said).collect()
 }
 
 /// A restart under way, in a few words for the status line — `restart waits for gitescape`, `restart
@@ -162,7 +255,7 @@ pub fn start(ed: &mut Editor, build: bool) -> Result<(), String> {
 /// while none is, or while its card asks (it's in sight).
 pub fn pending(ed: &Editor) -> Option<String> {
     Some(match &ed.restart.as_ref()?.stage {
-        Stage::Turn => match turns(ed).as_slice() {
+        Stage::Turn => match under_way(ed).as_slice() {
             [] => "restart waits".into(),
             names => format!("restart waits for {}", names.join(", ")),
         },
@@ -175,11 +268,13 @@ pub fn pending(ed: &Editor) -> Option<String> {
     })
 }
 
-/// What the cancel card says the restart waits for: the turns by name, else the status line's words.
+/// What the cancel card says the restart waits for: what's under way by name, else the status line's words.
 fn said(ed: &Editor, pending: &str) -> String {
-    let turns = turns(ed);
+    let under = under_way(ed);
     match ed.restart.as_ref().map(|r| &r.stage) {
-        Some(Stage::Turn) if !turns.is_empty() => format!("tarae restarts when {}", waits_for(&turns)),
+        Some(Stage::Turn) if !under.is_empty() => {
+            format!("tarae restarts once these end: {}", under.join(", "))
+        }
         _ => pending.to_string(),
     }
 }
@@ -203,23 +298,6 @@ pub fn cancel_answer(ed: &mut Editor, card: u64, id: u64, yes: bool) {
     ed.set_status("restart canceled");
 }
 
-/// The sessions whose Claude is in a turn, or whose turn's files are still being read — by name.
-fn turns(ed: &Editor) -> Vec<String> {
-    std::iter::once(&ed.session)
-        .chain(&ed.sessions)
-        .filter(|l| l.chat.as_ref().is_some_and(crate::chat::Chat::busy) || l.checkpoints.gathering)
-        .map(|l| l.label().to_string())
-        .collect()
-}
-
-/// What a restart waits for, said: `Claude's turn ends in main` · `Claude's turns end in main, fix-login`.
-fn waits_for(turns: &[String]) -> String {
-    match turns {
-        [one] => format!("Claude's turn ends in {one}"),
-        many => format!("Claude's turns end in {}", many.join(", ")),
-    }
-}
-
 /// A chat's turn ended (or the chat closed, or the turn's files were read): a restart waiting for every
 /// session's goes on — from the front (`sync`), not while a session behind is swapped in to apply it.
 pub fn turn_over(ed: &mut Editor) {
@@ -228,17 +306,19 @@ pub fn turn_over(ed: &mut Editor) {
     }
 }
 
-/// Every event: a restart waiting for turns goes on once none is under way in any session.
+/// Every event: a restart waiting (its card's `w`, or a turn asked after its answer) goes on once nothing is
+/// under way in any session — but what it was told to restart anyway with (`unnamed`).
 pub fn sync(ed: &mut Editor) {
-    if ed.restart.as_ref().is_some_and(|r| r.stage == Stage::Turn) && turns(ed).is_empty() {
+    if ed.restart.as_ref().is_some_and(|r| r.stage == Stage::Turn) && unnamed(ed).is_empty() {
         go(ed);
     }
 }
 
 /// What keeps tarae from restarting now, in words — in any session, named when there are several. Files
-/// that can be saved don't — `go` saves them. While a session's Claude is in a turn (`waiting`: at
-/// `:restart`, which waits for every turn), what belongs to the turn — its edit's review, its command, its
-/// tests — doesn't either. A shell open in the terminal doesn't: it's started again by hand.
+/// that can be saved don't — `go` saves them. Work under way doesn't (frictions15): commands and tests are
+/// named on the card (`under_way`) — restart anyway, or wait. While a session's Claude is in a turn
+/// (`waiting`: before the card, or told to restart anyway), what belongs to the turn — its edit's review —
+/// doesn't either. A shell open in the terminal doesn't: it's started again by hand.
 fn blocker(ed: &Editor, waiting: bool) -> Option<String> {
     let stuck: Vec<String> = ed
         .docs
@@ -279,25 +359,17 @@ fn session_blocker(l: &crate::session::Session, waiting: bool) -> Option<String>
     if l.review.is_some() && !claudes(l.chat.as_ref().is_some_and(|c| c.edits.review.is_some())) {
         return Some("a review is open — answer it first".into());
     }
-    // (a code review comes along, its drafts with the notes — not a turn's: its turns load later and would
-    // shift it; a rebase's stops it as the rebase)
-    if l.code_review.as_ref().is_some_and(|r| matches!(r.base, crate::codereview::Base::Turn { .. })) {
-        return Some("a review of Claude's turn is open — end it (space v q) first".into());
-    }
+    // (a code review comes along, its drafts with the notes — a turn's too, by its place from the newest turn
+    // (frictions15: one session's open review held every session's restart); a rebase's stops it as the
+    // rebase)
     // (saved, it would come back as a plain file — `:wq` no longer committing)
     if l.committing.is_some() {
         return Some("a commit message is open — :wq commits it, :q drops it".into());
     }
+    // (an install stopped half-way can leave a tool broken; other runs are named on the card)
     let running = crate::task::State::Running;
-    if let Some(r) = l.task_run.as_ref().filter(|r| r.state == running && !claudes(r.by_claude)) {
-        return Some(match r.install {
-            true => format!("{} is installing — let it finish", r.task.name),
-            false => format!("{} is running — let it finish, or stop it (space m c)", r.task.name),
-        });
-    }
-    let testing = crate::testing::RunState::Running;
-    if l.test_run.as_ref().is_some_and(|r| r.state == testing && !claudes(r.chat.is_some())) {
-        return Some("tests are running — let them finish, or stop them (space x c)".into());
+    if let Some(r) = l.task_run.as_ref().filter(|r| r.state == running && r.install) {
+        return Some(format!("{} is installing — let it finish", r.task.name));
     }
     None
 }
@@ -329,17 +401,10 @@ fn claudes_writes(ed: &mut Editor) -> bool {
     ed.events.jobs().spawn(move || {
         std::thread::sleep(nap);
         move |ed: &mut Editor| {
-            if !at(ed, id, &Stage::Writes) {
-                return;
+            // (on: what began meanwhile is the card's to name, or `check`'s to wait for once it's answered)
+            if at(ed, id, &Stage::Writes) {
+                go(ed);
             }
-            // (asked something meanwhile: after that turn)
-            if !turns(ed).is_empty() {
-                if let Some(r) = ed.restart.as_mut() {
-                    r.stage = Stage::Turn;
-                }
-                return;
-            }
-            go(ed);
         }
     });
     true
@@ -373,7 +438,10 @@ fn clear_to_go(ed: &mut Editor) -> bool {
             None => d.display_name(&ed.session.root),
         })
         .collect();
-    let why = match blocker(ed, false) {
+    // (before its card, or told to restart anyway, a turn's own review isn't in the way: the turn is named,
+    // its edits waiting with it — `under_way`)
+    let turn_ok = ed.restart.as_ref().is_some_and(|r| !r.anyway.is_empty() || r.target.is_none());
+    let why = match blocker(ed, turn_ok) {
         Some(why) => why,
         None if !unsaved.is_empty() => format!("couldn't save {}", unsaved.join(", ")),
         None => return true,
@@ -473,6 +541,16 @@ fn ask(ed: &mut Editor, id: u64, targets: Vec<Target>) {
             says(o).replace("\n  ", " ").replace('\n', " ")
         ));
     }
+    // What runs now — Claude's turns, commands, tests, in any session — ended by a restart now; `w` waits for
+    // them (frictions15: one session's turn and its long command held the restart, unsaid). In the warning
+    // colour, as what won't come back is
+    let (work, under): (Vec<Work>, Vec<String>) = under_way_of(ed, true).into_iter().unzip();
+    let mut warn_from = None;
+    if !under.is_empty() {
+        warn_from = Some(q.split('\n').count() + 1);
+        let lines: Vec<String> = under.iter().map(|u| format!("  {u}")).collect();
+        q.push_str(&format!("\n\nUnder way — ended if it restarts now:\n{}", lines.join("\n")));
+    }
     // The cards waiting that won't come back (a moment's decision about something live), by session — in
     // the warning colour, before the answer
     let lost: Vec<String> = ed
@@ -484,16 +562,15 @@ fn ask(ed: &mut Editor, id: u64, targets: Vec<Target>) {
                 .map(|o| format!("  {} ({})", o.title, l.label()))
         })
         .collect();
-    let mut warned = None;
     if !lost.is_empty() {
-        let from = q.split('\n').count() + 1;
+        warn_from.get_or_insert(q.split('\n').count() + 1);
         q.push_str(&format!(
             "\n\nWon't come back — answer it first, or ask again after:\n{}",
             lost.join("\n")
         ));
-        warned = Some(from..q.split('\n').count());
     }
-    let what = crate::offer::What::Restart(Box::new(Choice { id, targets }));
+    let warned = warn_from.map(|from| from..q.split('\n').count());
+    let what = crate::offer::What::Restart(Box::new(Choice { id, targets, under_way: under, work }));
     let mut o = crate::offer::Offer::new(title, &q, "Restarting…", "Not restarting".into(), what);
     if let Some(lines) = warned {
         o = o.warning(lines);
@@ -507,13 +584,27 @@ pub fn chosen(ed: &mut Editor, card: u64, choice: Choice, which: Option<usize>) 
     if !at(ed, choice.id, &Stage::Choosing) {
         return;
     }
-    let Some(t) = which.and_then(|i| choice.targets.into_iter().nth(i)) else {
+    let Some(which) = which.filter(|&i| i < choice.targets.len()) else {
         ed.restart = None;
         return ed.set_status("not restarting");
     };
+    // Something began while the card was up that it doesn't name (a run, Claude's edit waiting): the card
+    // again, naming it — `y` would end it unsaid
+    let now = under_way_of(ed, true);
+    if now.iter().any(|(w, _)| !w.named_in(&choice.work)) {
+        ed.set_status("something began since the card asked — it asks again");
+        return ask(ed, choice.id, choice.targets);
+    }
+    let t = choice.targets[which].clone();
     let r = ed.restart.as_mut().expect("at its stage");
     let build = Some(ed.config.restart_build.trim().to_string()).filter(|c| r.build && !c.is_empty());
     r.target = Some(t.clone());
+    // (with work under way: restart anyway — what the card named is ended, said; not waited for)
+    if !now.is_empty() {
+        r.anyway = choice.work;
+        let names: Vec<String> = now.into_iter().map(|(_, said)| said).collect();
+        ed.set_warning(format!("restarting anyway — it ends {}", names.join(", ")));
+    }
     // (no build: its card said whether the binary is older than HEAD)
     let Some(cmd) = build else { return check(ed, t.bin, true) };
     let task = crate::task::Task { name: "restart build".into(), cmd, cwd: t.root.clone() };
@@ -527,6 +618,24 @@ pub fn chosen(ed: &mut Editor, card: u64, choice: Choice, which: Option<usize>) 
         "building {} — tarae restarts when it's done (:restart again asks to call it off)",
         t.named()
     ));
+}
+
+/// `w` on its card: wait for what's under way to end, in every session — then the card again (what it builds
+/// and runs looked up afresh). `:restart` again asks to call it off.
+pub fn wait_answer(ed: &mut Editor, card: u64, choice: Choice) {
+    ed.offer_finished(card, Ok(()));
+    if !at(ed, choice.id, &Stage::Choosing) {
+        return;
+    }
+    if let Some(r) = ed.restart.as_mut() {
+        r.stage = Stage::Turn;
+    }
+    // (as waited for: a turn's edits are answered as it goes on, not dropped)
+    ed.set_status(format!(
+        "tarae restarts once these end: {} — :restart again asks to call it off",
+        under_way(ed).join(", ")
+    ));
+    turn_over(ed);
 }
 
 /// The build task ended (`task.rs`) — true if it was this restart's (then the restart says what's next).
@@ -610,14 +719,16 @@ fn check(ed: &mut Editor, bin: PathBuf, anyway: bool) {
             {
                 return same(ed, id, &t);
             }
-            // Claude was asked something meanwhile, or its edits are still landing: on from that wait
-            // (built already, the card answered)
-            let turns = turns(ed);
-            if !turns.is_empty() || pending_writes(ed).is_some() {
+            // Something began since the card that it didn't name (Claude asked something, a run, an edit of
+            // a named turn's), or Claude's edits are still landing: on from that wait (built already, the
+            // card answered)
+            let unnamed = unnamed(ed);
+            if !unnamed.is_empty() || pending_writes(ed).is_some() {
                 let r = ed.restart.as_mut().expect("checked above");
+                let built = if r.build { "built — " } else { "" };
                 (r.stage, r.build) = (Stage::Turn, false);
-                if !turns.is_empty() {
-                    ed.set_status(format!("built — tarae restarts when {}", waits_for(&turns)));
+                if !unnamed.is_empty() {
+                    ed.set_status(format!("{built}tarae restarts once these end: {}", unnamed.join(", ")));
                 }
                 return turn_over(ed);
             }
@@ -939,7 +1050,8 @@ fn session_json(l: &crate::session::Session, docs: &[&crate::document::Document]
                 "scroll": c.scroll, "follow": c.follow.on, "at_end": c.edits.at_end })
     });
     let on = docs.iter().find(|d| d.id == current).and_then(|d| d.path.as_deref());
-    let review = l.code_review.as_ref().and_then(|r| crate::codereview::carried(r, on));
+    let turns = l.checkpoints.list.len();
+    let review = l.code_review.as_ref().and_then(|r| crate::codereview::carried(r, on, turns));
     json!({
         "docs": files,
         "current": index(current),
@@ -1382,6 +1494,38 @@ mod tests {
             let ev = ed.events.recv_timeout(left).expect("event before timeout");
             ed.handle_event(ev);
         }
+    }
+
+    /// With `TARAE_FRAMES_DIR` set, the screen as it is (100 × 30) in both built-in themes there,
+    /// `<name>-meok.bin` / `<name>-hanji.bin` — for screenshots (`cargo xtask shot`: `TARAE_SHOT_REPLAY`).
+    fn frames_both(ed: &mut Editor, name: &str) {
+        let Some(dir) = std::env::var_os("TARAE_FRAMES_DIR") else { return };
+        std::fs::create_dir_all(&dir).unwrap();
+        // (crossterm drops every color under NO_COLOR, which tarae's test runner sets)
+        crossterm::style::force_color_output(true);
+        let (popups, was) = (std::mem::replace(&mut ed.offer_popups, true), ed.theme.name.clone());
+        for theme in ["meok", "hanji"] {
+            ed.theme = crate::theme::load(theme).unwrap();
+            let mut buf = Vec::new();
+            crate::term::render(ed, &mut buf, 100, 30).unwrap();
+            let edges = ed.screen.edges.borrow();
+            let bytes = crate::screen::Screen::new().present(&buf, 100, 30, &edges).to_vec();
+            std::fs::write(Path::new(&dir).join(format!("{name}-{theme}.bin")), bytes).unwrap();
+        }
+        (ed.offer_popups, ed.theme) = (popups, crate::theme::load(&was).unwrap());
+    }
+
+    /// The restart's card up, naming what's under way (`what`), answered `w`: it waits for that to end.
+    fn wait_on_card(ed: &mut Editor, what: &str) {
+        let card =
+            |ed: &Editor| ed.offers.iter().position(|o| matches!(o.what, crate::offer::What::Restart(_)));
+        settle_until(ed, |ed| card(ed).is_some());
+        let i = card(ed).expect("its card");
+        let q = &ed.offers[i].question;
+        assert!(q.contains(&format!("Under way — ended if it restarts now:\n  {what}")), "{q}");
+        ed.offer_to_front(i);
+        ed.offer_restart_wait();
+        assert_eq!(ed.restart.as_ref().map(|r| &r.stage), Some(&Stage::Turn), "{}", toasts(ed));
     }
 
     /// `settle_until`, a restart's card answered `y` (the checkout tarae started in) as it comes.
@@ -2033,8 +2177,9 @@ mod tests {
         assert!(toasts(&ed).contains("can't restart: unsaved changes in"), "{}", toasts(&ed));
     }
 
-    /// What's running or half written stops it with why, as `:q` would: a commit message, a task, a debug
-    /// run. A shell in the terminal doesn't — the next tarae says it starts afresh.
+    /// What's half written stops it with why, as `:q` would: a commit message, a debug run. A task running
+    /// doesn't (frictions15: its card names it — `a_sessions_review_and_running_command_dont_hold_a_restart`),
+    /// nor a shell in the terminal — the next tarae says it starts afresh.
     #[test]
     fn whats_running_or_half_written_stops_it() {
         let dir = temp("blocked");
@@ -2057,7 +2202,7 @@ mod tests {
         ed.task_start(task);
         // (it starts once the modified file is saved)
         settle_until(&mut ed, |ed| ed.session.task_run.is_some());
-        try_it(&mut ed, "slow is running — let it finish, or stop it (space m c)");
+        assert_eq!(blocker(&ed, true), None, "a run is named on its card, not a refusal");
         ed.task_close();
         ed.dap = Some(crate::dap::Dap::placeholder(crate::dap::State::Starting, "app".into()));
         try_it(&mut ed, "a debug run is on");
@@ -2073,8 +2218,9 @@ mod tests {
     }
 
     /// Wave 3, gap 3: only the front session's were looked at — a task or tests running behind were killed by
-    /// the exec without a word, a commit message or a review open there lost. Every session's stop it now,
-    /// named; with nothing in the way anywhere, it goes on.
+    /// the exec without a word, a commit message or a review open there lost. Every session's half-written
+    /// work stops it now, named; with nothing in the way anywhere, it goes on. Runs and a turn's review don't
+    /// stop it (frictions15): runs are named on its card, reviews come along.
     #[test]
     fn whats_running_in_a_session_behind_stops_the_restart_by_name() {
         let dir = temp("blocked-behind");
@@ -2089,19 +2235,14 @@ mod tests {
             assert!(err.contains(&format!("fix-login: {why}")), "{err}");
             assert!(ed.restart.is_none());
         };
-        // A task, tests
-        let task = crate::task::Task { name: "slow".into(), cmd: "sleep 5".into(), cwd: back.clone() };
+        // An install (stopped half-way it can leave a tool broken)
+        let task = crate::task::Task { name: "rust-analyzer".into(), cmd: "true".into(), cwd: back.clone() };
         let mut run = crate::task::Run::for_test(task);
-        run.state = crate::task::State::Running;
+        (run.state, run.install) = (crate::task::State::Running, true);
         ed.session_by_id(id).unwrap().task_run = Some(run);
-        try_it(&mut ed, "slow is running — let it finish, or stop it (space m c)");
+        try_it(&mut ed, "rust-analyzer is installing — let it finish");
         ed.session_by_id(id).unwrap().task_run = None;
-        let mut tests = crate::testing::TestRun::finished("tests", Vec::new(), Vec::new());
-        tests.state = crate::testing::RunState::Running;
-        ed.session_by_id(id).unwrap().test_run = Some(tests);
-        try_it(&mut ed, "tests are running");
-        ed.session_by_id(id).unwrap().test_run = None;
-        // A commit message, an edit's review, a code review
+        // A commit message, an edit's review
         let doc = ed.doc().id;
         ed.session_by_id(id).unwrap().committing =
             Some(crate::gitpanel::Committing { doc, top: back.clone(), amend: false, then_end: false });
@@ -2115,12 +2256,6 @@ mod tests {
         assert!(ed.session_by_id(id).unwrap().review.is_some());
         try_it(&mut ed, "a review is open");
         ed.session_by_id(id).unwrap().review = None;
-        // (a code review comes along — a turn's doesn't)
-        let turn = crate::codereview::Base::Turn { at: 0, question: "q".into() };
-        let review = crate::codereview::CodeReview::for_test(turn, back, Vec::new());
-        ed.session_by_id(id).unwrap().code_review = Some(review);
-        try_it(&mut ed, "a review of Claude's turn is open");
-        ed.session_by_id(id).unwrap().code_review = None;
         // Nothing anywhere: on its way
         crate::typed::execute(&mut ed, "restart!").unwrap();
         assert!(ed.restart.is_some());
@@ -2219,9 +2354,9 @@ mod tests {
         assert_eq!(flags & libc::FD_CLOEXEC, 0, "a descriptor's close-on-exec is as it was");
     }
 
-    /// Claude's edit waiting in its review is part of the turn — `:restart` waits instead of refusing. Once
-    /// accepted, the restart goes on only after Claude's write has landed (until then auto-save leaves the
-    /// file to Claude, and it would count as unsaved).
+    /// Claude's edit waiting in its review is part of the turn — `:restart` names the turn on its card instead
+    /// of refusing, and `w` waits. Once accepted, the restart goes on only after Claude's write has landed
+    /// (until then auto-save leaves the file to Claude, and it would count as unsaved).
     #[test]
     fn claudes_edit_and_its_write_are_waited_for() {
         let dir = temp("claude-edit");
@@ -2252,7 +2387,7 @@ mod tests {
         feed(&mut ed, "<space>lwrite it<ret>");
         settle_until(&mut ed, |ed| ed.session.review.is_some());
         crate::typed::execute(&mut ed, "restart!").unwrap();
-        assert_eq!(ed.restart.as_ref().unwrap().stage, Stage::Turn, "{}", toasts(&ed));
+        wait_on_card(&mut ed, "Claude's turn");
         feed(&mut ed, "y");
         settle_answering(&mut ed, |ed| ed.should_quit || ed.restart.is_none());
         assert_eq!(ed.restart.as_ref().and_then(Restart::ready), Some(bin.as_path()), "{}", toasts(&ed));
@@ -2263,8 +2398,8 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A turn's files still being read (review at the end) are waited for like the turn; then its review
-    /// doesn't open over the restart — the chat says `space v t`, which works after it.
+    /// A turn's files still being read (review at the end) are the turn's — named, and `w` waits for them; then
+    /// its review doesn't open over the restart — the chat says `space v t`, which works after it.
     #[test]
     fn a_turn_being_gathered_is_waited_for() {
         let dir = temp("gather");
@@ -2274,7 +2409,7 @@ mod tests {
         ed.config.restart_binary = bin.display().to_string();
         ed.session.checkpoints.gathering = true;
         crate::typed::execute(&mut ed, "restart!").unwrap();
-        assert_eq!(ed.restart.as_ref().unwrap().stage, Stage::Turn, "{}", toasts(&ed));
+        wait_on_card(&mut ed, "Claude's turn");
         turn_over(&mut ed);
         assert_eq!(ed.restart.as_ref().unwrap().stage, Stage::Turn, "still reading");
         let file = dir.join("a.txt");
@@ -2299,7 +2434,8 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A chat turn in flight is waited for — the restart goes on when it ends; `:restart` again, `y` on its card, cancels.
+    /// A chat turn in flight is named on the card; `w` waits for it — the restart goes on when it ends (its
+    /// card again); `:restart` again, `y` on its card, cancels.
     #[test]
     fn a_turn_in_flight_is_waited_for() {
         let dir = temp("turn");
@@ -2320,16 +2456,166 @@ mod tests {
         feed(&mut ed, "<space>lhello<ret>");
         assert!(ed.session.chat.as_ref().unwrap().busy());
         crate::typed::execute(&mut ed, "restart!").unwrap();
+        wait_on_card(&mut ed, "Claude's turn");
         crate::typed::execute(&mut ed, "restart!").unwrap();
         // (the chat has the keys: the card's are given)
         feed(&mut ed, "<C-q>y");
         assert!(ed.restart.is_none(), "again, then y = canceled");
         crate::typed::execute(&mut ed, "restart!").unwrap();
-        assert_eq!(ed.restart.as_ref().unwrap().stage, Stage::Turn);
-        assert!(toasts(&ed).contains("when Claude's turn ends"), "{}", toasts(&ed));
+        wait_on_card(&mut ed, "Claude's turn");
+        assert!(toasts(&ed).contains("tarae restarts once these end: Claude's turn"), "{}", toasts(&ed));
         settle_answering(&mut ed, |ed| ed.should_quit || ed.restart.is_none());
         assert!(!ed.session.chat.as_ref().unwrap().busy(), "only after the turn");
         assert_eq!(ed.restart.as_ref().and_then(Restart::ready), Some(bin.as_path()), "{}", toasts(&ed));
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An editor in `dir` restarting onto a stand-in tarae, its chat open with a stand-in claude that never
+    /// answers — and `restart!`'s card, nothing under way unless `busy` (Claude in a turn).
+    fn restart_card_with_chat(dir: &Path, busy: bool) -> (Editor, PathBuf) {
+        let bin = fake_tarae(dir, "tarae 9.9.9");
+        let mut ed = Editor::new(Config::default());
+        ed.session.root = dir.to_path_buf();
+        ed.config.restart_binary = bin.display().to_string();
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        crate::chat::open(&mut ed);
+        if busy {
+            ed.session.chat.as_mut().unwrap().state = crate::chat::State::Thinking;
+        }
+        crate::typed::execute(&mut ed, "restart!").unwrap();
+        settle_until(&mut ed, |ed| restart_card(ed).is_some());
+        (ed, bin)
+    }
+
+    /// The restart's card up, if it is — its question.
+    fn restart_card(ed: &Editor) -> Option<String> {
+        let o = ed.offers.iter().find(|o| matches!(o.what, crate::offer::What::Restart(_)))?;
+        Some(o.question.clone())
+    }
+
+    /// Restart anyway with Claude in a turn: the turn is named on the card and `y` doesn't wait for it —
+    /// and its edits waiting for an answer, which the restart drops with it (the claude that asked is gone
+    /// after it), are named too, by file (the reviewer: `y` dropped one, the card saying only "Claude's
+    /// turn"). Ones that came while the card was up aren't on it: `y` asks again, naming them.
+    #[test]
+    fn restart_anyway_ends_claudes_turn_and_names_its_edit() {
+        let dir = temp("anyway-turn");
+        let file = dir.join("a.txt");
+        std::fs::write(&file, "one\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "one\n").unwrap();
+        let (mut ed, bin) = restart_card_with_chat(&dir, true);
+        let q = restart_card(&ed).unwrap();
+        assert!(q.lines().any(|l| l == "  Claude's turn"), "{q}");
+        // Claude asks to write two files while the card is up
+        for (id, name) in [("e1", "a.txt"), ("e2", "b.txt")] {
+            ed.session.chat.as_mut().unwrap().edits.queue.push_back(crate::edits::Pending {
+                request_id: id.into(),
+                tool: "Write".into(),
+                input: json!({ "file_path": dir.join(name), "content": "TWO\n" }),
+                reason: String::new(),
+                since: Instant::now(),
+            });
+        }
+        ed.offer_accept();
+        assert!(
+            toasts(&ed).contains("something began since the card asked — it asks again"),
+            "{}",
+            toasts(&ed)
+        );
+        let q = restart_card(&ed).expect("asked again");
+        let dropped = "Claude's turn — its 2 unanswered edits to a.txt, b.txt are dropped";
+        assert!(q.lines().any(|l| l == format!("  {dropped}")), "{q}");
+        // The first opens in its review meanwhile: named all the same
+        ed.handle_event(crate::event::Event::Resize);
+        assert!(ed.session.review.is_some(), "a.txt's edit in its review");
+        settle_answering(&mut ed, |ed| ed.should_quit || ed.restart.is_none());
+        assert_eq!(ed.restart.as_ref().and_then(Restart::ready), Some(bin.as_path()), "{}", toasts(&ed));
+        assert!(ed.session.chat.as_ref().unwrap().busy(), "the turn wasn't waited for");
+        assert!(toasts(&ed).contains(&format!("restarting anyway — it ends {dropped}")), "{}", toasts(&ed));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "one\n", "the edit wasn't made");
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Restart anyway with Claude in a turn whose accepted edit is still being written: the write is waited
+    /// for (until then the file would count as unsaved), and on the way the turn the card named isn't (the
+    /// wait's `sync` lets what it was told to end go on).
+    #[test]
+    fn restart_anyway_waits_for_claudes_write_not_its_turn() {
+        let dir = temp("anyway-write");
+        let file = dir.join("a.txt");
+        std::fs::write(&file, "one\n").unwrap();
+        let (mut ed, bin) = restart_card_with_chat(&dir, true);
+        // Claude's accepted edit, its write on the way
+        ed.open(&file).unwrap();
+        let edit = crate::transaction::Transaction::new(vec![crate::transaction::Change::insert(0, "TWO\n")]);
+        ed.doc_mut().apply(&edit);
+        let v = ed.doc().version();
+        ed.doc_mut().agent_writes = Some((Instant::now() + Duration::from_millis(300), v));
+        let i = ed.offers.iter().position(|o| matches!(o.what, crate::offer::What::Restart(_))).unwrap();
+        ed.offer_to_front(i);
+        ed.offer_accept();
+        settle_until(&mut ed, |ed| ed.should_quit || ed.restart.is_none());
+        assert_eq!(ed.restart.as_ref().and_then(Restart::ready), Some(bin.as_path()), "{}", toasts(&ed));
+        assert!(toasts(&ed).contains("once Claude's edits are on disk"), "it waited: {}", toasts(&ed));
+        assert!(ed.session.chat.as_ref().unwrap().busy(), "the turn wasn't waited for");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "TWO\none\n", "written before it restarts");
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A turn asked after the card was answered wasn't on it: it's waited for, said — not ended with the
+    /// restart — and the restart goes on once it ends.
+    #[test]
+    fn a_turn_asked_after_the_answer_is_waited_for() {
+        let dir = temp("turn-after");
+        let (mut ed, bin) = restart_card_with_chat(&dir, false);
+        assert!(!restart_card(&ed).unwrap().contains("Under way"));
+        ed.offer_accept();
+        // (the binary's check is on a worker: asked before its answer lands)
+        ed.session.chat.as_mut().unwrap().state = crate::chat::State::Thinking;
+        settle_until(&mut ed, |ed| ed.restart.as_ref().is_some_and(|r| r.stage == Stage::Turn));
+        assert!(toasts(&ed).contains("tarae restarts once these end: Claude's turn"), "{}", toasts(&ed));
+        ed.handle_event(crate::event::Event::Resize);
+        assert_eq!(ed.restart.as_ref().unwrap().stage, Stage::Turn, "still at work");
+        ed.session.chat.as_mut().unwrap().state = crate::chat::State::Idle;
+        ed.handle_event(crate::event::Event::Resize);
+        settle_answering(&mut ed, |ed| ed.should_quit || ed.restart.is_none());
+        assert_eq!(ed.restart.as_ref().and_then(Restart::ready), Some(bin.as_path()), "{}", toasts(&ed));
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A run that starts while the card is up isn't on it (its list is taken when it's drawn): `y` asks
+    /// again, naming it, instead of ending it unsaid; `y` then restarts anyway, said.
+    #[test]
+    fn a_run_begun_while_the_card_is_up_asks_again() {
+        let dir = temp("run-began");
+        let (mut ed, bin) = restart_card_with_chat(&dir, false);
+        assert!(!restart_card(&ed).unwrap().contains("Under way"));
+        let task = crate::task::Task { name: "long".into(), cmd: "sleep 30".into(), cwd: dir.clone() };
+        let who = crate::tools::For::User("long".into());
+        assert!(ed.task_start_for(task, who, None, Default::default()).is_ok());
+        ed.offer_accept();
+        assert!(
+            toasts(&ed).contains("something began since the card asked — it asks again"),
+            "{}",
+            toasts(&ed)
+        );
+        let q = restart_card(&ed).expect("asked again");
+        assert!(
+            q.contains("Under way — ended if it restarts now:\n  sleep 30 in the task panel, 0:0"),
+            "{q}"
+        );
+        settle_answering(&mut ed, |ed| ed.should_quit || ed.restart.is_none());
+        assert_eq!(ed.restart.as_ref().and_then(Restart::ready), Some(bin.as_path()), "{}", toasts(&ed));
+        assert!(
+            toasts(&ed).contains("restarting anyway — it ends sleep 30 in the task panel"),
+            "{}",
+            toasts(&ed)
+        );
         drop(ed);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -2414,11 +2700,10 @@ mod tests {
         // Nothing said for them over the restart's toasts
         let said: Vec<&str> = ed.messages.iter().map(|m| m.2.as_str()).collect();
         assert!(!said.iter().any(|m| m.contains("review:")), "{said:?}");
-        // A turn's review: stops it, named
+        // A turn's review comes along too (frictions15 — `a_turns_review_comes_back_after_a_restart`)
         let turn = Base::Turn { at: 0, question: "do it".into() };
         ed.session.code_review = Some(CodeReview::for_test(turn, front.clone(), Vec::new()));
-        let why = blocked(&ed).expect("stopped");
-        assert!(why.starts_with("front: a review of Claude's turn is open"), "{why}");
+        assert_eq!(blocked(&ed), None);
         drop(ed);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -2597,7 +2882,14 @@ mod tests {
         };
         let held = crate::rebase::Held { moved, changed: vec!["a.txt".into()], unsaved: Vec::new() };
         ed.session_by_id(id).unwrap().parked.push(held.card());
-        ed.restart = Some(Restart { id: 7, build: false, stage: Stage::Finding, target: None, kept: None });
+        ed.restart = Some(Restart {
+            id: 7,
+            build: false,
+            stage: Stage::Finding,
+            target: None,
+            kept: None,
+            anyway: Vec::new(),
+        });
         let t = Target {
             label: "front".into(),
             root: front.clone(),
@@ -2746,8 +3038,156 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// #109: a restart waits for every session's turn, not only the front's — saying whose — and goes on
-    /// once the last one ends (it ended another session's turn, silently).
+    /// frictions15 #7: one session's open review or side work doesn't hold the restart. `:restart` was refused
+    /// for a turn's review open in another session ("end it first"), then waited, unsaid, on another session's
+    /// running command. Now a running command (here a session behind's, the test's own `sleep`) is named on
+    /// the card: `w` waits for it (said; once it ends the card asks again, nothing under way), `y` restarts
+    /// anyway — said, and the run is ended (its process gone once the editor is). A turn's review behind
+    /// doesn't stop it (`a_turns_review_comes_back_after_a_restart`).
+    #[test]
+    fn a_sessions_review_and_running_command_dont_hold_a_restart() {
+        let (_, back, dir, mut ed) = two_sessions("not-held");
+        let bin = fake_tarae(&dir, "tarae 9.9.9");
+        ed.config.restart_binary = bin.display().to_string();
+        use crate::codereview::{Base, CodeReview};
+        let id = ed.session_add(back.clone());
+        let turn = Base::Turn { at: 0, question: "do it".into() };
+        ed.session_by_id(id).unwrap().code_review =
+            Some(CodeReview::for_test(turn, back.clone(), Vec::new()));
+        let long = |ed: &mut Editor| -> u32 {
+            let mut pid = 0;
+            ed.with_session(id, |ed| {
+                let task =
+                    crate::task::Task { name: "long".into(), cmd: "sleep 30".into(), cwd: back.clone() };
+                let who = crate::tools::For::User("long".into());
+                assert!(ed.task_start_for(task, who, None, Default::default()).is_ok());
+                pid = ed.session.task_run.as_ref().unwrap().pid().unwrap();
+            });
+            pid
+        };
+        long(&mut ed);
+        // Not refused; named on its card — `w` waits, said
+        crate::typed::execute(&mut ed, "restart!").expect("not refused");
+        let up = |ed: &Editor| ed.offers.iter().any(|o| matches!(o.what, crate::offer::What::Restart(_)));
+        settle_until(&mut ed, up);
+        frames_both(&mut ed, "restart_under_way");
+        wait_on_card(&mut ed, "back: sleep 30 in the task panel, 0:0");
+        let o = |ed: &Editor| {
+            ed.offers.iter().find(|o| matches!(o.what, crate::offer::What::Restart(_))).cloned()
+        };
+        assert!(toasts(&ed).contains("tarae restarts once these end: back: sleep 30"), "{}", toasts(&ed));
+        // It ends: the card again, nothing under way
+        ed.with_session(id, |ed| ed.session.task_run = None);
+        ed.handle_event(crate::event::Event::Resize);
+        settle_until(&mut ed, |ed| o(ed).is_some());
+        let card = o(&ed).unwrap();
+        assert!(!card.question.contains("Under way"), "{}", card.question);
+        assert_eq!(card.answers(false).iter().map(|a| a.0).collect::<String>(), "yn");
+        ed.offer_dismiss();
+        assert!(ed.restart.is_none());
+        // Restart anyway: said, it goes ahead — and the run is ended
+        let pid = long(&mut ed);
+        crate::typed::execute(&mut ed, "restart!").unwrap();
+        settle_until(&mut ed, |ed| o(ed).is_some());
+        assert_eq!(o(&ed).unwrap().answers(false)[0], ('y', "Restart anyway"));
+        settle_answering(&mut ed, |ed| ed.should_quit || ed.restart.is_none());
+        assert_eq!(ed.restart.as_ref().and_then(Restart::ready), Some(bin.as_path()), "{}", toasts(&ed));
+        assert!(
+            toasts(&ed).contains("restarting anyway — it ends back: sleep 30 in the task panel"),
+            "{}",
+            toasts(&ed)
+        );
+        drop(ed);
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while crate::procs::read(pid).is_some_and(|p| !p.zombie) && std::time::Instant::now() < end {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(crate::procs::read(pid).is_none_or(|p| p.zombie), "its run ended");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// frictions15 #7: a turn's review, open in a session behind, comes back after the restart as a code
+    /// review does — the same turn (counted from the newest kept: the kept turns load after the restart,
+    /// before any made since, and `at` alone would point at another), on the file it was on. It held the
+    /// restart ("end it first"). A turn the restart ended mid-way (restart anyway, Claude at work) comes back
+    /// after the kept ones as one more — not counted: found by its question and its place among the kept
+    /// (the reviewer: counted from the list's end, it said "that turn isn't kept").
+    #[test]
+    fn a_turns_review_comes_back_after_a_restart() {
+        let (front, back, dir, mut ed) = two_sessions("turn-back");
+        let turns = dir.join("turns");
+        ed.turns_dir = Some(turns.clone());
+        let id = ed.session_add(back.clone());
+        settle_until(&mut ed, |ed| session_at(ed, &back).checkpoints.dir.is_some());
+        // Its two turns: the review is of the first ("loud"), on b.txt
+        let touched = |name: &str, after: &str| crate::checkpoint::Touched {
+            path: back.join(name),
+            before: Some(ropey::Rope::from_str("one\ntwo\nthree\n")),
+            after: ropey::Rope::from_str(after),
+            ..Default::default()
+        };
+        std::fs::write(back.join("a.txt"), "ONE\ntwo\nthree\n").unwrap();
+        std::fs::write(back.join("b.txt"), "one\nTWO\nthree\n").unwrap();
+        std::fs::write(back.join("c.md"), "one\ntwo\nTHREE\n").unwrap();
+        let cp = |q: &str, files| crate::checkpoint::Checkpoint::new(q.into(), files);
+        ed.session_by_id(id).unwrap().checkpoints.list = vec![
+            cp(
+                "make it loud",
+                vec![touched("a.txt", "ONE\ntwo\nthree\n"), touched("b.txt", "one\nTWO\nthree\n")],
+            ),
+            cp("and the notes", vec![touched("c.md", "one\ntwo\nTHREE\n")]),
+        ];
+        let reviewing =
+            |ed: &Editor| session_at(ed, &back).code_review.as_ref().is_some_and(|r| !r.docs.is_empty());
+        ed.with_session(id, |ed| crate::codereview::start_turn(ed, 0));
+        settle_until(&mut ed, reviewing);
+        ed.with_session(id, |ed| crate::codereview::show(ed, 1, false));
+        // A third turn under way, cut by the restart: c.md changed since it began
+        ed.session_by_id(id).unwrap().checkpoints.turn = vec![crate::checkpoint::Touched {
+            path: back.join("c.md"),
+            before: Some(ropey::Rope::from_str("one\ntwo\nTHREE\n")),
+            after: ropey::Rope::from_str("one\ntwo\nTHREE\n"),
+            ..Default::default()
+        }];
+        std::fs::write(back.join("c.md"), "one\ntwo\nTHREE, cut\n").unwrap();
+        // (kept as its edits land — `keep_of` writes on a worker)
+        crate::checkpoint::keep_now(session_at(&ed, &back));
+        assert_eq!(blocker(&ed, true), None, "a turn's review doesn't stop it");
+        // back's Claude still at work: restart anyway — its turn is cut
+        let bin = fake_tarae(&dir, "tarae 9.9.9");
+        ed.config.restart_binary = bin.display().to_string();
+        ed.with_session(id, |ed| {
+            crate::chat::open(ed);
+            ed.session.chat.as_mut().unwrap().state = crate::chat::State::Thinking;
+        });
+        crate::typed::execute(&mut ed, "restart!").unwrap();
+        settle_until(&mut ed, |ed| restart_card(ed).is_some());
+        let q = restart_card(&ed).unwrap();
+        assert!(q.lines().any(|l| l == "  back: Claude's turn"), "{q}");
+        settle_answering(&mut ed, |ed| ed.should_quit || ed.restart.is_none());
+        assert_eq!(ed.restart.as_ref().and_then(Restart::ready), Some(bin.as_path()), "{}", toasts(&ed));
+        assert!(toasts(&ed).contains("restarting anyway — it ends back: Claude's turn"), "{}", toasts(&ed));
+        let state = snapshot(&mut ed);
+        drop(ed);
+        let mut ed = started_in(&dir, &front);
+        ed.turns_dir = Some(turns);
+        restore(&mut ed, &state);
+        settle_until(&mut ed, reviewing);
+        let l = session_at(&ed, &back);
+        let r = l.code_review.as_ref().unwrap();
+        let crate::codereview::Base::Turn { at, question } = &r.base else { panic!("{:?}", r.base) };
+        assert_eq!((*at, question.as_str()), (0, "make it loud"), "the same turn");
+        assert_eq!(l.checkpoints.list[*at].question, "make it loud");
+        let questions: Vec<&str> = l.checkpoints.list.iter().map(|c| c.question.as_str()).collect();
+        assert_eq!(questions, ["make it loud", "and the notes", "a turn cut short"], "the cut one after");
+        let current = ed.docs.iter().find(|d| d.id == l.current_doc).unwrap();
+        assert_eq!(current.path.as_deref(), Some(back.join("b.txt").as_path()), "on the file it was on");
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #109: every session's turn is under way, not only the front's — named on the card, whose; `w` waits,
+    /// and it goes on once the last one ends (it ended another session's turn, silently).
     #[test]
     fn a_restart_waits_for_every_sessions_turn() {
         let dir = temp("every-turn");
@@ -2766,8 +3206,12 @@ mod tests {
         ed.session.chat.as_mut().unwrap().state = crate::chat::State::Thinking;
         assert!(ed.session_switch(0));
         crate::typed::execute(&mut ed, "restart!").unwrap();
-        assert_eq!(ed.restart.as_ref().unwrap().stage, Stage::Turn);
-        assert!(toasts(&ed).contains("tarae restarts when Claude's turn ends in back"), "{}", toasts(&ed));
+        wait_on_card(&mut ed, "back: Claude's turn");
+        assert!(
+            toasts(&ed).contains("tarae restarts once these end: back: Claude's turn"),
+            "{}",
+            toasts(&ed)
+        );
         ed.handle_event(crate::event::Event::Resize);
         assert_eq!(ed.restart.as_ref().unwrap().stage, Stage::Turn, "back's still at work");
         let back_chat = ed.sessions.iter_mut().find(|l| l.id == id).and_then(|l| l.chat.as_mut()).unwrap();
@@ -2808,6 +3252,7 @@ mod tests {
         };
         assert!(!status(&mut ed).contains("restart"));
         crate::typed::execute(&mut ed, "restart!").unwrap();
+        wait_on_card(&mut ed, "back: Claude's turn");
         ed.toasts.clear();
         // Long after its toast: still said
         let line = status(&mut ed);
@@ -2817,7 +3262,7 @@ mod tests {
         assert_eq!(ed.restart.as_ref().map(|r| &r.stage), Some(&Stage::Turn), "asks first");
         let card = ed.offers.first().expect("a card asks");
         assert!(card.title.contains("Call off the restart"), "{}", card.title);
-        assert!(card.question.contains("Claude's turn ends in back"), "{}", card.question);
+        assert!(card.question.contains("once these end: back: Claude's turn"), "{}", card.question);
         // (again while it asks: that card, not a second)
         crate::typed::execute(&mut ed, "restart!").unwrap();
         crate::typed::execute(&mut ed, "restart!").unwrap();
@@ -2854,7 +3299,8 @@ mod tests {
             vt.screen().rows(0, 160).nth(29).unwrap()
         };
         let stage = Stage::Keeping;
-        ed.restart = Some(Restart { id: 7, build: false, stage, target: None, kept: None });
+        ed.restart =
+            Some(Restart { id: 7, build: false, stage, target: None, kept: None, anyway: Vec::new() });
         let line = status(&mut ed);
         assert!(line.contains("restarting — keeping its symbols"), "{line}");
         crate::typed::execute(&mut ed, "restart!").unwrap();

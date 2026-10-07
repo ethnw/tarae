@@ -98,6 +98,10 @@ pub struct Checkpoints {
     pub gathering: bool,
     /// Where they're kept (the state dir's `turns/`; None: not kept — tests).
     pub dir: Option<PathBuf>,
+    /// How many of `list`, from its start, came back as kept (`restore_from`) — not the turn tarae ended in
+    /// the middle of, put after them, nor those made since: a turn's review carried over `:restart` counts
+    /// back from the last of these (`codereview::reopen_turn`).
+    pub restored: usize,
 }
 
 /// An accepted edit of Claude's landed in document `id`: `before` was its text just before (None = no such
@@ -600,6 +604,14 @@ pub(crate) fn keep_of(ed: &Editor, l: &crate::session::Session) {
     }
 }
 
+/// Tests: session `l`'s turns written now, on this thread (`keep_of` writes on a worker, unseen by events).
+#[cfg(test)]
+pub(crate) fn keep_now(l: &crate::session::Session) {
+    if let Some(save) = saving(l) {
+        save();
+    }
+}
+
 /// The turns kept for the checkout in `root` forgotten (its session ended, the checkout removed) — written
 /// over with none, later than any save of its still on its way (on a worker).
 pub(crate) fn forget(ed: &Editor, root: PathBuf) {
@@ -667,23 +679,28 @@ pub fn restore_from(ed: &Editor, dir: PathBuf, root: PathBuf) {
             }
         }
         cut.retain(Touched::changed);
+        let kept = s.list.len();
         if !cut.is_empty() {
             let question = if s.question.is_empty() { CUT_SHORT.to_string() } else { s.question.clone() };
             s.list.push(Checkpoint::new(question, cut));
         }
         move |ed: &mut Editor| {
             ed.session.checkpoints.dir = Some(back);
+            ed.session.checkpoints.restored = kept;
             let n = s.list.len();
-            if n == 0 {
-                return keep(ed);
+            if n > 0 {
+                let since = std::mem::take(&mut ed.session.checkpoints.list);
+                ed.session.checkpoints.list = s.list.into_iter().chain(since).collect();
+                // (a turn's review open already points past the ones put before it)
+                if let Some(crate::codereview::Base::Turn { at, .. }) =
+                    ed.session.code_review.as_mut().map(|r| &mut r.base)
+                {
+                    *at += n;
+                }
             }
-            let since = std::mem::take(&mut ed.session.checkpoints.list);
-            ed.session.checkpoints.list = s.list.into_iter().chain(since).collect();
-            // (a turn's review open already points past the ones put before it)
-            if let Some(crate::codereview::Base::Turn { at, .. }) =
-                ed.session.code_review.as_mut().map(|r| &mut r.base)
-            {
-                *at += n;
+            // (a turn's review `:restart` carried: open again now its turn is back)
+            if let Some(v) = ed.session.turn_review_back.take() {
+                crate::codereview::reopen_turn(ed, &v);
             }
             keep(ed);
         }

@@ -147,8 +147,10 @@ side git · 4 rows · in hand git:src/term.rs
   - `whose`: `claude` when `Offer::claudes`, else `tarae`.
   - `kind`: the `What` variant in kebab case.
   - `title`.
-  - `asks`: the title plus the question's `decided_lines`, capped. That's the part drawn at full strength —
-    not a hook's body, which `v` shows.
+  - `asks`: the title plus the question's `decided_lines` — the part drawn at full strength, not a hook's
+    body, which `v` shows. Whole at the full level (JSON, text line, a watcher's `card-up`, which carries
+    it as `asks` too): a driver reads all of a command it's asked to approve. Cut at Claude's level and in
+    the inbox picker's one-row label.
   - `answers`: from a new `Offer::answers()`, which the hint row is drawn from too.
   - `settled`: in sight past `SETTLE`, so `y` would count.
   - `seen_whole`: `offer_read`.

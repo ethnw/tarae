@@ -2650,6 +2650,135 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// frictions15 #4: a new session's bring card, `p` — the quick set of the project's own `[preflight]`
+    /// (`.tarae.toml` in the checkout tarae started in, trusted), never the packs' defaults in its place (they
+    /// were offered: "Run these checks?" with cargo's steps). The config is the editor's, read from the
+    /// started checkout (frictions 14) — so `p` runs the same steps however that config was read again while
+    /// the session is in front: as it started, `:config-reload`, trust taken back (then nothing runs, said)
+    /// and given again, a `.tarae.local.toml` of yours beside it (its steps after), and a session made from
+    /// a base older than the project's `[preflight]`. Your config and the trust answers are stand-ins in the
+    /// test's folder (`config_sources`), never yours.
+    #[test]
+    fn a_new_sessions_bring_card_runs_the_projects_quick_set() {
+        use crate::config::{Sources, load};
+        let (repo, dir) = place("bring-preflight");
+        // (a project the packs know — `Cargo.toml` — so their defaults would show, as a card)
+        std::fs::write(repo.join("Cargo.toml"), "[package]\nname = \"p\"\nversion = \"0.1.0\"\n").unwrap();
+        git_in(&repo, &["add", "-A"]);
+        git_in(&repo, &["commit", "-qm", "a crate"]);
+        let older = git_in(&repo, &["rev-parse", "HEAD"]);
+        let steps = "[preflight]\nsteps = [\n  { name = \"fmt\", cmd = \"echo ran fmt\" },\n  \
+                     { name = \"perf\", cmd = \"echo ran perf\", full = true },\n]\n";
+        std::fs::write(repo.join(".tarae.toml"), steps).unwrap();
+        std::fs::write(repo.join(".gitignore"), "target/\n.tarae.local.toml\n").unwrap();
+        git_in(&repo, &["add", "-A"]);
+        git_in(&repo, &["commit", "-qm", "the project's preflight"]);
+        // (your config's stand-in holds the test's own checkouts' folder and quiet claude: every reload below
+        // reads it — the defaults would make a checkout in your data folder)
+        let (user, trust) = (dir.join("config.toml"), dir.join("trust.json"));
+        let worktrees = toml::Value::from(dir.join("wt").display().to_string());
+        let mine = format!(
+            "[session]\nworktrees = {worktrees}\n[llm]\ncommand = \"sh\"\nargs = [\"-c\", \"cat > /dev/null\"]\n"
+        );
+        std::fs::write(&user, mine).unwrap();
+        let sources = Sources { user: Some(user.clone()), trust: Some(trust.clone()) };
+        // Trusted, as its card's `y` does
+        let p = load(&repo, &sources).0.project.expect("its steps wait for trust");
+        crate::trust::record(trust.clone(), p.file, p.hash, true).unwrap();
+        let mut ed = editor(&repo, &dir);
+        (ed.config_file, ed.trust_path) = (Some(user), Some(trust));
+        let (c, w) = load(&repo, &ed.config_sources());
+        ed.reload_config(c, w);
+        assert_eq!(ed.config.session_worktrees, dir.join("wt").display().to_string(), "{}", said(&ed));
+        assert_eq!(ed.preflight_quick(), Some(vec!["fmt".to_string()]), "the project's quick set");
+        // `p` on the bring card of a commit made in `wt`: the steps run, or what came instead
+        let mut n = 0;
+        let mut p_on_the_bring_card = |ed: &mut Editor, wt: &Path| -> Result<Vec<String>, String> {
+            n += 1;
+            std::fs::write(wt.join("a.txt"), format!("change {n}\n")).unwrap();
+            git_in(wt, &["commit", "-qam", &format!("change {n}")]);
+            ed.offers.clear();
+            let said_before = ed.messages.len();
+            feed(ed, ":session-bring<ret>");
+            let title = format!("Bring {} into ", ed.session.name);
+            let up = |ed: &Editor| ed.offers.iter().any(|o| o.title.starts_with(&title));
+            settle_until(ed, |ed| up(ed) || says(ed, "bring "));
+            assert_eq!(card_in_sight(ed), ['y', 'p', 'n'], "{}", said(ed));
+            ed.session.preflight = None;
+            feed(ed, "p");
+            let defaults = |ed: &Editor| card(ed, "Run these checks?").is_some();
+            let refused = |ed: &Editor| ed.messages[said_before..].iter().any(|m| m.2.contains("preflight"));
+            settle_until(ed, |ed| ed.session.preflight.is_some() || defaults(ed) || refused(ed));
+            if defaults(ed) {
+                return Err(format!(
+                    "the packs' defaults: {}",
+                    card(ed, "Run these checks?").unwrap().question
+                ));
+            }
+            let Some(p) = ed.session.preflight.as_ref() else {
+                return Err(ed.messages[said_before..]
+                    .iter()
+                    .map(|m| m.2.clone())
+                    .collect::<Vec<_>>()
+                    .join(" | "));
+            };
+            let ran = p.steps.iter().map(|s| s.name.clone()).collect();
+            // (its bring done before the next step: brought, or said why not)
+            let brought = |ed: &Editor| {
+                ed.messages[said_before..]
+                    .iter()
+                    .any(|m| m.2.starts_with("Brought") || m.2.starts_with("bring "))
+            };
+            settle_until(ed, brought);
+            Ok(ran)
+        };
+        // `:config-reload`, its read done (said, warnings or not)
+        let reload = |ed: &mut Editor| {
+            let n = ed.messages.len();
+            feed(ed, ":config-reload<ret>");
+            let read = |m: &(_, _, String)| m.2 == "config reloaded" || m.2.starts_with("config: ");
+            settle_until(ed, |ed| ed.messages[n..].iter().any(read));
+        };
+        let fmt = Ok(vec!["fmt".to_string()]);
+        // As it started
+        let wt = new_session(&mut ed, "feat");
+        assert_eq!(p_on_the_bring_card(&mut ed, &wt), fmt, "a new session");
+        // `:config-reload` with the session in front
+        reload(&mut ed);
+        assert_eq!(p_on_the_bring_card(&mut ed, &wt), fmt, "after :config-reload");
+        // Trust taken back: nothing runs — said, never the packs' instead; given again: the quick set
+        feed(&mut ed, ":project-untrust<ret>");
+        let r = p_on_the_bring_card(&mut ed, &wt);
+        assert!(r.as_ref().is_err_and(|e| e.contains("wait for it to be trusted")), "{r:?}");
+        feed(&mut ed, ":project-trust<ret>");
+        let trust = ed.offers.iter().position(|o| o.title == crate::trust::TITLE).expect("its card");
+        ed.offer_to_front(trust);
+        ed.offer_accept();
+        assert_eq!(p_on_the_bring_card(&mut ed, &wt), fmt, "trusted again");
+        // A `.tarae.local.toml` of yours beside the project's (git-ignored): its steps after
+        let local = "[preflight]\nsteps = [{ name = \"mine\", cmd = \"echo ran mine\" }]\n";
+        std::fs::write(repo.join(".tarae.local.toml"), local).unwrap();
+        reload(&mut ed);
+        assert_eq!(p_on_the_bring_card(&mut ed, &wt), Ok(vec!["fmt".into(), "mine".into()]), "yours after");
+        std::fs::remove_file(repo.join(".tarae.local.toml")).unwrap();
+        reload(&mut ed);
+        assert!(ed.config.preflight_local.is_empty());
+        // A session from a base older than the project's `[preflight]` (its checkout's `.tarae.toml` has none)
+        assert!(ed.config.session_worktrees.starts_with(&*dir.to_string_lossy()), "the test's own folder");
+        git_in(&repo, &["branch", "older", &older]);
+        let old = new_session(&mut ed, "old older");
+        assert!(!old.join(".tarae.toml").exists());
+        assert_eq!(p_on_the_bring_card(&mut ed, &old), fmt, "a checkout without [preflight]");
+        // …and the config read again with it in front (frictions 14: read from there, the steps were gone)
+        reload(&mut ed);
+        assert_eq!(
+            p_on_the_bring_card(&mut ed, &old),
+            fmt,
+            "read again, a checkout without [preflight] in front"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Bringing in: main moves up to the session's branch in main's checkout (its files follow); main moved
     /// meanwhile: a card offers to rebase first (with how far — `n` leaves it all); refused when main's
     /// checkout has changes in a file it brings; a base no checkout has moves as a ref alone.

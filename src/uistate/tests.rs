@@ -930,6 +930,111 @@ fn a_card_says_why_y_waits_and_lets_its_text_be_read_from_it() {
     assert!(ed.offers.is_empty());
 }
 
+/// A tall run card up, drawn and settled, its whole text open in its buffer with `keys` (`v` — the card keeps
+/// the keys while it's read; `C-q v`; `v <esc>`: given back).
+fn reading_a_tall_card(keys: &[&str]) -> Editor {
+    let mut ed = editor();
+    let script: String = (1..=60).map(|i| format!("echo step {i}\n")).collect();
+    let q = format!("{script}\nRuns the script Claude wrote this turn.");
+    let what = What::Install {
+        tool: "script".into(),
+        run: vec!["true".into()],
+        cwd: ed_root(),
+        then: crate::install::Then::Lsp,
+    };
+    ed.push_offer(Offer::new("Claude wants to run a script".into(), &q, "", String::new(), what));
+    bar_frame(&mut ed);
+    settle(&mut ed);
+    feed(&mut ed, keys);
+    bar_frame(&mut ed);
+    settle(&mut ed);
+    assert!(ed.offer_reading(), "its text is the buffer in sight");
+    ed
+}
+
+/// The frame as the user sees it (100 × 24) — the card a bar over the status line while its text is read.
+fn bar_frame(ed: &mut Editor) -> String {
+    ed.focus_sync();
+    crate::term::render(ed, &mut Vec::new(), 100, 24).unwrap();
+    crate::screen::text(ed.last_frame.as_ref().unwrap().0.as_slice(), 100, 24).unwrap()
+}
+
+/// frictions15 #1: reading a tall card's text in its buffer, however the keys got where they are — the card
+/// held them all along (`j`/`k` read through it), Esc gave them back, a view key pending — one `C-q` gives the
+/// card the keys, never takes them away (it was a toggle: the `C-q` meant to answer let go of a card holding
+/// them, unsaid, and the next key went to the code). Its answer then answers it.
+#[test]
+fn one_c_q_gives_a_card_being_read_its_keys_whatever_held_them() {
+    let (given, plain, back) = (&["<C-q>", "v"][..], &["v"][..], &["v", "<esc>"][..]);
+    for (opened, keys) in [
+        (given, &["j", "j"][..]),
+        (given, &["<esc>", "j"]),
+        (plain, &["j"]),
+        (back, &["j"]),
+        (back, &["z"]),
+        (given, &["g", "e"]),
+    ] {
+        let mut ed = reading_a_tall_card(opened);
+        feed(&mut ed, keys);
+        bar_frame(&mut ed);
+        feed(&mut ed, &["<C-q>"]);
+        assert!(ed.card_keys, "{keys:?}: one C-q, the card has the keys");
+        let s = bar_frame(&mut ed);
+        assert!(s.contains("esc goes back"), "{keys:?}: the bar says whose keys they are:\n{s}");
+        feed(&mut ed, &["<C-q>"]);
+        assert!(ed.card_keys, "{keys:?}: C-q again keeps them the card's");
+        assert!(ed.status.as_ref().is_some_and(|s| s.0.contains("the card has the keys")), "said");
+        feed(&mut ed, &["n"]);
+        assert!(ed.offers.is_empty(), "{keys:?}: its answer answered it");
+    }
+}
+
+/// frictions15 #1, after its review: in a card's buffer Esc only ever gives the card's keys back (#25) — it
+/// never hands them over. It did for a while, and Esc after Esc took turns, the toggle `C-q` had just lost, on
+/// the key pressed out of habit. `C-q` is the one way to give them; the bar says so.
+#[test]
+fn esc_in_a_cards_buffer_only_gives_the_keys_back() {
+    let mut ed = reading_a_tall_card(&["<C-q>", "v"]);
+    feed(&mut ed, &["<esc>"]);
+    assert!(!ed.card_keys, "held: Esc gives them back (#25)");
+    // (a view key pending: the code's keys — the bar says how to answer)
+    feed(&mut ed, &["z"]);
+    let s = bar_frame(&mut ed);
+    assert!(s.contains("C-q answers it"), "the code has them, said on the bar:\n{s}");
+    for _ in 0..3 {
+        feed(&mut ed, &["<esc>"]);
+        assert!(!ed.card_keys, "Esc again: still the code's — no turns taken");
+    }
+    feed(&mut ed, &["<C-q>"]);
+    assert!(ed.card_keys && bar_frame(&mut ed).contains("esc goes back"));
+    feed(&mut ed, &["n"]);
+    assert!(ed.offers.is_empty());
+}
+
+/// The review's case: Esc then `y` in a card's buffer — a yank, out of habit — doesn't answer the card, though
+/// its text was read to its end and `y` would install. Opened with `v` or with `C-q v`, the card holds the
+/// keys while it's read; after Esc only `C-q` gives them again — normal mode's free keys aren't the card's
+/// in its buffer. The bar says `C-q answers it`.
+#[test]
+fn esc_then_y_in_a_cards_buffer_doesnt_answer_it() {
+    for opened in [&["v"][..], &["<C-q>", "v"]] {
+        let mut ed = reading_a_tall_card(opened);
+        assert!(ed.card_keys, "{opened:?}: the card holds the keys while it's read");
+        feed(&mut ed, &["g", "e"]);
+        bar_frame(&mut ed);
+        assert!(ed.offer_seen_whole(), "read to its end: `y` would answer it");
+        let id = ed.offers[0].id;
+        feed(&mut ed, &["<esc>", "y"]);
+        assert!(!ed.card_keys, "{opened:?}: Esc gave them back");
+        assert_eq!(ed.offers.first().map(|o| o.id), Some(id), "{opened:?}: still up, unanswered");
+        assert!(matches!(ed.offers[0].state, crate::offer::OfferState::Asking), "not installing");
+        let s = bar_frame(&mut ed);
+        assert!(s.contains("C-q answers it"), "{s}");
+        feed(&mut ed, &["<C-q>", "n"]);
+        assert!(ed.offers.is_empty(), "{opened:?}: given with C-q, its answer answers it");
+    }
+}
+
 /// Frictions 13, #4 and #5: a long card in the state. Its `asks` is whole in the JSON (scripts and the inbox
 /// read all of it) and cut in the one-line text form; the JSON says how many lines its drawing left out and
 /// whether it's been seen whole — not cut-and-unread, not after `v` alone (its buffer open, not read to its
@@ -959,13 +1064,12 @@ fn a_long_cards_state_is_whole_and_says_what_has_been_seen() {
         (s.json()["cards"][0].clone(), s.text().lines().find(|l| l.starts_with("card#")).unwrap().to_string())
     };
     let (card, line) = shown(&mut ed);
-    // #4: whole in the JSON, its last decided line there; cut on the text line
+    // #4: whole in the JSON, its last decided line there (the text line too — frictions15 #2)
     let asks = card["asks"].as_str().unwrap();
     assert!(asks.ends_with("echo step 60") && !asks.ends_with('…'), "{asks}");
-    assert!(asks.chars().count() > 300, "longer than the text form's cut");
+    assert!(asks.chars().count() > 300, "longer than Claude's level's cut");
     let inbox = &ed.ui_state().json()["inbox"][0];
     assert_eq!(inbox["asks"].as_str(), Some(asks), "the inbox has it whole too");
-    assert!(line.contains("…\"") && !line.contains("echo step 60"), "{line}");
     // Claude's level doesn't grow with it: cut as the one-line forms cut it, its inbox entry too
     let claude = ed.ui_state_claude().json();
     let theirs = claude["cards"][0]["asks"].as_str().unwrap();
@@ -993,6 +1097,39 @@ fn a_long_cards_state_is_whole_and_says_what_has_been_seen() {
     assert!(card["seen_whole"] == true, "{card}");
     assert!(line.ends_with(" · seen whole"), "{line}");
     feed(&mut ed, &["n"]);
+}
+
+/// frictions15 #2: a driver asked to approve a long command reads all of it in every form the full level
+/// has — the text line and a watcher's `card-up` (its `said`, and an `asks` of its own, so a driver never
+/// parses `said`), not only the JSON. Still only what the card draws at full strength (the privacy rule):
+/// the script's last decided line, never the faint lines after it. Claude's level keeps its cut (its tokens).
+#[test]
+fn a_long_cards_asks_is_whole_in_every_full_level_form() {
+    let mut ed = editor();
+    let script: String = (1..=60).map(|i| format!("echo step {i}\n")).collect();
+    let q = format!("{script}\nRuns the script Claude wrote this turn.");
+    let what = What::Install {
+        tool: "script".into(),
+        run: vec!["true".into()],
+        cwd: ed_root(),
+        then: crate::install::Then::Lsp,
+    };
+    frame(&mut ed);
+    let (tx, rx) = std::sync::mpsc::sync_channel(watch::UNREAD);
+    let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    ed.ui_watch_add(watch::Watcher { tx, kinds: vec!["cards".into()], overflowed: flag });
+    ed.push_offer(Offer::new("Claude wants to run a script".into(), &q, "", String::new(), what));
+    frame(&mut ed);
+    let line = ed.ui_state().text().lines().find(|l| l.starts_with("card#")).unwrap().to_string();
+    assert!(line.contains("echo step 60") && !line.contains('…'), "{line}");
+    assert!(!line.contains("Runs the script"), "the faint line isn't in it: {line}");
+    let up: Value = rx.try_iter().map(|l| serde_json::from_str(&l).unwrap()).next().expect("card-up");
+    assert_eq!(up["event"], "card-up");
+    let asks = up["asks"].as_str().expect("its own asks");
+    assert!(asks.ends_with("echo step 60") && !asks.contains('…'), "{asks}");
+    assert!(up["said"].as_str().unwrap().contains("echo step 60"), "{up}");
+    let claude = ed.ui_state_claude().json();
+    assert!(claude["cards"][0]["asks"].as_str().unwrap().ends_with('…'), "Claude's level is cut");
 }
 
 /// A paste in normal mode: a `:` line opens the command line with it, not run (`:w` pasted into a commit

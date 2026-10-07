@@ -198,6 +198,138 @@ fn a_stuck_run_is_captured_then_asked_about() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// frictions15 #3 (a): a quiet run of Claude's that was granted a daemon's socket may be working there — a
+/// build on a remote container engine printed nothing for minutes at 0% CPU here and was called stuck. Its
+/// card is `Quiet:` and says what it can reach; one let reach nothing is still `Stuck?` (#181 — cargo hung
+/// under qemu). The run is the test's own `sleep`; the socket a name only.
+#[test]
+fn a_quiet_run_let_out_to_a_socket_is_asked_as_maybe_working_elsewhere() {
+    let dir = std::fs::canonicalize(std::env::temp_dir())
+        .unwrap()
+        .join(format!("tarae-stuck-reach-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut ed = Editor::new(crate::config::Config::default());
+    ed.session.root = dir.clone();
+    let task = crate::task::Task { name: "builds".into(), cmd: "sleep 30".into(), cwd: dir.clone() };
+    assert!(ed.task_start_for(task, crate::tools::For::User("b".into()), None, Default::default()).is_ok());
+    let mut policy = crate::sandbox::policy(&dir, &ed.config.llm, &[]);
+    policy.sockets = vec![dir.join("engine.sock")];
+    let ago = |m: u32| Instant::now().checked_sub(MIN * m).unwrap();
+    let r = ed.session.task_run.as_mut().unwrap();
+    (r.by_claude, r.last_output, r.wait.idle) = (true, ago(12), Some(ago(12)));
+    r.guard = Some(crate::sandbox::Guard::In(Box::new(policy)));
+    let pid = r.pid().unwrap();
+    ed.procs_sampled(sample(pid, 0.0));
+    settle_until(&mut ed, |ed| ed.offers.iter().any(|o| o.stuck().is_some()));
+    let o = &ed.offers[0];
+    assert_eq!(o.title, "Quiet: Claude's command");
+    let reach = format!(
+        "It can reach {} — the work may be going on there: next to no CPU here doesn't mean it's stuck.",
+        crate::allow::tilde(&dir.join("engine.sock"))
+    );
+    assert!(o.question.contains(&reach), "{}", o.question);
+    assert_eq!(o.answers(false), [('y', "Stop it"), ('w', "What it waits on"), ('n', "Keep waiting")]);
+    ed.session.task_run = None;
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// frictions15 #3 (b): what the run's processes are connected to outside its tree names where the work may
+/// be — before what it was let reach (a run outside the sandbox can reach anything; its connection says
+/// which). Neither: `Stuck?`, as #181.
+#[test]
+fn a_peer_outside_the_tree_is_named_on_the_card() {
+    use crate::sandbox::ReachOut;
+    let s = |reach: Option<ReachOut>| Stuck {
+        slot: Slot::Task,
+        run: 1,
+        pid: 4242,
+        asked: Instant::now(),
+        quiet: 12 * MIN,
+        cpu: 0.0,
+        at: 0,
+        reach,
+    };
+    let lines = ["pid 4242 · docker build . · 9 threads".to_string()];
+    let label = "Claude's command docker build . in the task panel";
+    let peers = ["~/.colima/default/docker.sock".to_string()];
+    let o = card(s(Some(ReachOut::Anything)), label, &lines, &peers);
+    assert_eq!(o.title, "Quiet: Claude's command");
+    assert!(
+        o.question
+            .contains("\n\nIts processes are connected to ~/.colima/default/docker.sock — the work may"),
+        "{}",
+        o.question
+    );
+    assert!(!o.question.contains("It can reach"), "the connection says which: {}", o.question);
+    let o = card(s(None), label, &lines, &[]);
+    assert_eq!(o.title, "Stuck? Claude's command");
+    assert!(!o.question.contains("may be going on there"), "{}", o.question);
+}
+
+/// The reviewer: a run with no sandbox around it, or the network open, was always `Quiet:` — "doesn't mean
+/// it's stuck" — so #181's hang (cargo under qemu, no connection anywhere) was never called stuck for those
+/// runs. Only a connection seen, or a daemon's socket granted, says where the work may be; the network or no
+/// sandbox alone, nothing connected, is `Stuck?` with the reach a note.
+#[test]
+fn reaching_anything_with_nothing_connected_is_still_stuck() {
+    use crate::sandbox::ReachOut;
+    let s = |reach| Stuck {
+        slot: Slot::Test,
+        run: 1,
+        pid: 4242,
+        asked: Instant::now(),
+        quiet: 12 * MIN,
+        cpu: 0.0,
+        at: 0,
+        reach: Some(reach),
+    };
+    let lines = ["pid 4242 · cargo test · 3 threads".to_string()];
+    let label = "Claude's tests in the test pane";
+    for (reach, said) in
+        [(ReachOut::Anything, "anything — no sandbox around it"), (ReachOut::Network, "the network")]
+    {
+        let o = card(s(reach), label, &lines, &[]);
+        assert_eq!(o.title, "Stuck? Claude's tests", "{said}");
+        let note = format!("It can reach {said}, but no connection outside its processes was seen.");
+        assert!(o.question.contains(&note), "{}", o.question);
+        assert!(!o.question.contains("doesn't mean it's stuck"), "{}", o.question);
+    }
+    // (connected, the same reach: where the work may be is known)
+    let peers = ["10.0.0.7:2376".to_string()];
+    assert_eq!(card(s(ReachOut::Network), label, &lines, &peers).title, "Quiet: Claude's tests");
+}
+
+/// frictions15 #3 (b), for real: a child of the test connected to the test's own socket (a stand-in daemon in
+/// its temp folder) — its tree's connection outside it is read and named by the socket's path.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_runs_connection_to_a_daemon_is_read_from_its_tree() {
+    let dir = crate::sandbox::profile_path(&std::env::temp_dir()).join(format!("sd{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("d.sock");
+    let daemon = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    // (`nc -U` connects and waits on its input, which is held open: a quiet client)
+    let mut child = std::process::Command::new("nc")
+        .arg("-U")
+        .arg(&path)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("nc");
+    let _conn = daemon.accept().unwrap();
+    let end = Instant::now() + Duration::from_secs(3);
+    let mut said = connected_outside(child.id());
+    while !said.iter().any(|s| s.ends_with("d.sock")) && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(20));
+        said = connected_outside(child.id());
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(said.iter().any(|s| s.ends_with("d.sock")), "{said:?}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// #200: a stuck card parked in a session behind, its run still silent, is looked at after every event
 /// (`sync`) — and that look must not say the event changed nothing. It did: every key, resize and job came
 /// back unchanged, nothing was drawn for 30 minutes (no card settled, no toast aged) until the run ended.
@@ -227,6 +359,7 @@ fn a_stuck_card_behind_leaves_the_front_drawn() {
             quiet: 11 * MIN,
             cpu: 0.0,
             at: 0,
+            reach: None,
         };
         let o = crate::offer::Offer::new(
             "Stuck? Claude's command".into(),

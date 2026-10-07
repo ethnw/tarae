@@ -38,8 +38,8 @@ pub struct Watcher {
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Summary {
     keys: (String, String, String, bool, bool),
-    /// (id, rev, up, session, the line `said` gives it)
-    cards: Vec<(String, u64, &'static str, String, String)>,
+    /// (id, rev, up, session, its `asks`, the line `said` gives it)
+    cards: Vec<(String, u64, &'static str, String, String, String)>,
     /// (id, name, doing, its reviewer's)
     sessions: Vec<(String, String, String, Option<&'static str>)>,
     /// (id, kind, text)
@@ -81,8 +81,9 @@ fn summary(s: &super::UiState) -> Summary {
             .map(|c| {
                 let answers: Vec<String> =
                     c.answers.iter().map(|(k, d)| format!("{k} {}", d.to_lowercase())).collect();
-                let line = format!("{} — {}", super::asks_line(&c.asks), answers.join(" · "));
-                (c.id.clone(), c.rev, c.up, c.session.clone(), line)
+                // (whole: what a driver is asked to approve, all of it — frictions15)
+                let line = format!("{} — {}", c.asks, answers.join(" · "));
+                (c.id.clone(), c.rev, c.up, c.session.clone(), c.asks.clone(), line)
             })
             .collect(),
         sessions: s
@@ -106,7 +107,7 @@ fn diff(old: &Summary, new: &Summary) -> Vec<Value> {
         out.push(json!({ "event": "keys", "to": to, "region": region, "takes": takes, "drawn": drawn,
                          "held": held, "was": old.keys.0, "said": said }));
     }
-    for (id, rev, up, session, line) in &new.cards {
+    for (id, rev, up, session, asks, line) in &new.cards {
         let before = old.cards.iter().find(|c| &c.0 == id);
         if before.is_none_or(|b| b.1 != *rev || b.2 != *up) {
             let said = match before {
@@ -114,7 +115,7 @@ fn diff(old: &Summary, new: &Summary) -> Vec<Value> {
                 Some(_) => format!("{id} now {up}: {line}"),
             };
             out.push(json!({ "event": "card-up", "id": id, "rev": rev, "up": up, "session": session,
-                             "said": said }));
+                             "asks": asks, "said": said }));
         }
     }
     // (its reviewer said after what its chat does: `idle · reviewing`)

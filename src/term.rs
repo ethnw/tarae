@@ -6921,8 +6921,23 @@ impl OfferCard {
                 } else {
                     None
                 };
-                if let Some(whose) = whose {
+                // What waits behind it, and where (frictions15 #5: `C-q` takes the oldest here — the rest
+                // were a queue the card didn't name)
+                let behind = editor.cards_behind_said();
+                if behind.is_some() || whose.is_some() {
                     v.push((String::new(), true));
+                }
+                // (too long for a row: where they are, then the key — not the key's words cut off alone)
+                if let Some(behind) = &behind {
+                    match behind.split_once(" · ").filter(|_| behind.width() > max_inner) {
+                        Some((wheres, key)) => {
+                            v.extend(wrapped(wheres, 2));
+                            v.extend(wrapped(key, 1));
+                        }
+                        None => v.extend(wrapped(behind, 2)),
+                    }
+                }
+                if let Some(whose) = whose {
                     v.extend(wrapped(whose, 2));
                 }
                 (v, Some(b))
@@ -6962,8 +6977,15 @@ impl OfferCard {
                     "aside while you look — C-q answers it".into()
                 }
                 OfferState::Asking if o.aside => "esc goes back, unanswered".into(),
-                OfferState::Asking if editor.offer_seen_whole() => "read to its end — y answers".to_string(),
-                OfferState::Asking => format!("{} to its end, then y answers", editor.end_key()),
+                // (whose keys they are, read: frictions15 — a card holding them unseen let go at `C-q`)
+                OfferState::Asking if !editor.card_has_keys() => "C-q answers it".into(),
+                // (held: shorter, so Esc's way back fits beside the answers)
+                OfferState::Asking => match (editor.offer_seen_whole(), editor.card_keys) {
+                    (true, false) => "read to its end — y answers".to_string(),
+                    (true, true) => "y answers · esc goes back".to_string(),
+                    (false, false) => format!("{} to its end, then y answers", editor.end_key()),
+                    (false, true) => format!("{} to its end · esc goes back", editor.end_key()),
+                },
                 _ => lines.get(1).map(|l| l.0.clone()).unwrap_or_default(),
             };
             let title = lines.first().map(|l| l.0.clone()).unwrap_or_default();

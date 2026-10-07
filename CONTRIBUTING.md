@@ -258,6 +258,17 @@ process, or the disk.
 
 ## Tests
 
+- **Tests are the direction.** A test tells the next reader what the code must do and why. That means:
+  - Its name states the property in plain words (`a_card_answers_only_once_drawn`, not `test_offer_3`).
+  - A comment says why: which decision or incident it pins.
+  - It has been seen failing once, with that property broken by hand, and then passing again.
+  - It has one reason to fail.
+  - Regression tests, perf budgets, goldens and fuzz targets also say what they pin.
+  - Tests that mirror the implementation (restating the code step by step) aren't wanted, and neither are
+    snapshots with no stated intent.
+  - When a decision changes, its tests change in the same commit.
+
+  The second reviewer (`src/reviewer.rs`) asks what each new test explains.
 - **New behavior gets a key-sequence test.** In `editor.rs`, `run("text", "keys")` feeds keys to a fresh editor, and you
   assert on the text and selections:
 

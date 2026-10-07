@@ -113,6 +113,9 @@ pub struct Session {
     /// pass (the bring card's `p`).
     pub rebase: Option<crate::rebase::Rebase>,
     pub bring_after_preflight: bool,
+    /// A turn's review `:restart` carried, waiting for the session's kept turns to load to open again
+    /// (`codereview::reopen`; frictions15 — it held the restart).
+    pub turn_review_back: Option<serde_json::Value>,
     /// The files last open in this folder that are still there — the start screen's `r` (`restore.rs`).
     pub restorable: Option<Vec<PathBuf>>,
     /// Cards that came while it was behind, and Claude's that were up when it left — up again when it's in
@@ -245,6 +248,7 @@ impl Session {
             preflight: None,
             rebase: None,
             bring_after_preflight: false,
+            turn_review_back: None,
             restorable: None,
             parked: Vec::new(),
             waiting_told: false,
@@ -454,6 +458,43 @@ impl Editor {
         let inbox: Vec<_> = self.inbox().into_iter().filter(crate::inbox::Entry::asks_answer).collect();
         let here = inbox.iter().filter(|e| e.session == front).count();
         (here, inbox.len() - here)
+    }
+
+    /// What waits behind the card in front, as the card says it (frictions15 #5: `C-q` takes the oldest here
+    /// first, so the others are a queue nobody named): `2 more wait — 1 here, 1 in feat · space I lists them`
+    /// — each other session by its name, the key the keymap's. None: nothing else waits.
+    pub fn cards_behind_said(&self) -> Option<String> {
+        let front = crate::uistate::session_id(self.session.id);
+        let up = self.offers.first().map(|o| format!("card#{}", o.id));
+        let behind: Vec<_> =
+            self.inbox().into_iter().filter(|e| e.asks_answer() && Some(&e.id) != up.as_ref()).collect();
+        if behind.is_empty() {
+            return None;
+        }
+        let mut wheres: Vec<(String, usize)> = Vec::new();
+        for e in &behind {
+            let at = match e.session == front {
+                true => "here".to_string(),
+                false => std::iter::once(&self.session)
+                    .chain(&self.sessions)
+                    .find(|l| crate::uistate::session_id(l.id) == e.session)
+                    .map_or_else(|| format!("in {}", e.session), |l| format!("in {}", l.label())),
+            };
+            match wheres.iter_mut().find(|w| w.0 == at) {
+                Some(w) => w.1 += 1,
+                None => wheres.push((at, 1)),
+            }
+        }
+        // (here first, then the sessions in the order their oldest came)
+        wheres.sort_by_key(|w| w.0 != "here");
+        let wheres: Vec<String> = wheres.iter().map(|(at, n)| format!("{n} {at}")).collect();
+        let lists = match self.keymaps.bindings().remove("inbox") {
+            Some(key) => format!("{key} lists them"),
+            None => ":inbox lists them".into(),
+        };
+        let n = behind.len();
+        let wait = if n == 1 { "waits" } else { "wait" };
+        Some(format!("{n} more {wait} — {} · {lists}", wheres.join(", ")))
     }
 
     /// Sessions whose Claude is about to ask (its next call needs a card, held back by claude until the one

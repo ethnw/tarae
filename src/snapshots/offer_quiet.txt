@@ -1,0 +1,97 @@
+# offer_quiet · 100x30 · theme meok · cursor 2:4
+## text
+00  tarae  ›  src  ›  demo.rs
+01  ──────────────────────────────────────────────────────────────────────────────────────────────────
+02   1 use std::collections::HashMap;
+03   1
+04   2 ▎ Counts how often each word appears.
+05     ▎
+06     ▎ Words are split on whitespace; case is kept.
+07   5 pub fn word_counts(text: &str) -> HashMap<&str, usize> {
+08   6     let mut counts = HashMap::new();    ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+09   7     for word in text.split_whitespace()  ▎ Quiet: Claude's command
+10   8     │   *counts.entry(word).or_insert(0)   No output for 14 min, 0% CPU — Claude's command
+11   9     }                                      cargo xtask linux test in the task panel. Claude's
+12  10     counts                                 turn waits on it, and only you can stop it.
+13  11 }
+14  12                                            Its processes are connected to
+15  13 fn main() {                                ~/.colima/default/docker.sock — the work may be
+16  14     let text = "the quick brown fox jump   going on there: next to no CPU here doesn't mean
+17  15     let counts = word_counts(text);        it's stuck.
+18  16     println!("{} distinct words", counts
+19  17 }                                          What each of its threads waits in is in its output
+20                                                now (w), kept if you stop it:
+21                                                    pid 4242 · cargo xtask linux test · 1 thread
+22                                                      cargo — waiting · 0.31 s CPU
+23                                                    pid 4250 · docker run --rm tarae-linux cargo
+24                                                        test · 9 threads
+25                                                      9 × docker — waiting · 0.12 s CPU
+26
+27                                                y Stop it   w What it waits on   n Keep waiting
+28                                             ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+29  ▐ NORMAL ▌                                                                  rust   utf-8 LF   1:1
+## bg · surface per cell, blank = ui.background
+00
+01
+02     Accccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+03
+04     111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
+05     111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
+06     111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
+07
+08
+09                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+10                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+11                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+12                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+13                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+14                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+15                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+16                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+17                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+18                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+19                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+20                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+21                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+22                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+23                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+24                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+25                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+26                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+27                                             ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+28
+29   AAAAAAAA
+## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
+00  ddddd  f  ddd  f  TTTTTTT
+01  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+02   A
+03   f
+04   f
+05
+06
+07   f
+08   f
+09   f                                          a BBBBBB BBBBBBBB BBBBBBB
+10   f
+11   f
+12  ff
+13  ff
+14  ff
+15  ff
+16  ff                gggg ggggg ggggg ggg gggg
+17  ff
+18  ff              ggg gggggggg gggggg
+19  ff                                            dddd dddd dd ddd ddddddd ddddd dd dd dd ddd dddddd
+20                                                ddd dddd dddd dd ddd dddd ddd
+21                                                    ddd dddd d ddddd ddddd ddddd dddd d d dddddd
+22                                                      ddddd d ddddddd d dddd d ddd
+23                                                    ddd dddd d dddddd ddd dddd ddddddddddd ddddd
+24                                                        dddd d d ddddddd
+25                                                      d d dddddd d ddddddd d dddd d ddd
+26
+27                                                A           A dddd dd ddddd dd   A dddd ddddddd
+28
+29  a BBBBBB a                                                                  dddd   ddddd dd   TTT
+## legend
+bg: c=ui.cursorline.primary  p=ui.popup  A=ui.cursor.primary  1=other
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  g=diff.plus  B=bold

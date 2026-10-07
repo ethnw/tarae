@@ -6,6 +6,13 @@
 //! put in its output, so it's kept whatever comes next (stopped, its output is in Claude's report); then a
 //! card asks: `y` stops it · `w` shows what it waits in (its panel, at those lines) · `n` keeps waiting
 //! (asked again after as long again). The card goes once the run prints or ends.
+//!
+//! Quiet isn't always stuck (frictions15): a client whose work goes on elsewhere — a container engine in a VM
+//! or on another host, a build server — prints nothing and uses no CPU here. What its tree is connected to
+//! outside itself (`procs::sockets`, read beside its threads) and what it was let reach (`Guard::reaches_out`)
+//! are said on the card — titled `Quiet:` when it's connected outside or was granted a daemon's socket (the
+//! network or no sandbox alone say nothing of where it is: a note); it's asked all the same — a daemon gone
+//! dead looks the same.
 
 use std::time::{Duration, Instant};
 
@@ -35,24 +42,28 @@ pub struct Stuck {
     pub cpu: f32,
     /// Where what its threads wait in starts in its output.
     pub at: usize,
+    /// What it was let reach through which its work may go on elsewhere (`Guard::reaches_out`: a socket
+    /// granted, the network, no sandbox) — None: neither.
+    pub reach: Option<crate::sandbox::ReachOut>,
 }
 
-/// A run of Claude's running in session `l`'s `slot`: its pid, trace id, when it last printed and its waits.
-fn running(
-    l: &mut crate::session::Session,
-    slot: Slot,
-) -> Option<(u32, u64, Instant, &mut crate::waits::Waiting)> {
+/// A run of Claude's running in session `l`'s `slot`: its pid, trace id, when it last printed, its waits and
+/// what it was let reach (`Guard::reaches_out`).
+type Running<'a> = (u32, u64, Instant, &'a mut crate::waits::Waiting, Option<crate::sandbox::ReachOut>);
+
+fn running(l: &mut crate::session::Session, slot: Slot) -> Option<Running<'_>> {
+    let reach = |g: &Option<crate::sandbox::Guard>| g.as_ref().and_then(crate::sandbox::Guard::reaches_out);
     match slot {
         Slot::Task => {
             let r = l.task_run.as_mut().filter(|r| r.by_claude && r.state == crate::task::State::Running)?;
-            Some((r.pid()?, r.trace.id(), r.last_output, &mut r.wait))
+            Some((r.pid()?, r.trace.id(), r.last_output, &mut r.wait, reach(&r.guard)))
         }
         Slot::Test => {
             let r = l
                 .test_run
                 .as_mut()
                 .filter(|r| r.by_claude && r.state == crate::testing::RunState::Running)?;
-            Some((r.pid()?, r.trace.id(), r.last_output, &mut r.wait))
+            Some((r.pid()?, r.trace.id(), r.last_output, &mut r.wait, reach(&r.guard)))
         }
         _ => None,
     }
@@ -65,14 +76,14 @@ pub fn look(ed: &mut Editor, rows: &[Row], now: Instant) {
     let mut due: Vec<(SessionId, Stuck)> = Vec::new();
     for l in std::iter::once(&mut ed.session).chain(&mut ed.sessions) {
         for slot in [Slot::Task, Slot::Test] {
-            let Some((pid, run, last, wait)) = running(l, slot) else { continue };
+            let Some((pid, run, last, wait, reach)) = running(l, slot) else { continue };
             if let Some((pct, _)) = crate::procs::summed(rows, &[pid]) {
                 wait.looked(pct, now);
             }
             if let Some(quiet) = wait.stuck_for(last, now, after) {
                 wait.stuck_asked = Some(now);
                 let cpu = wait.cpu.unwrap_or(0.0);
-                due.push((l.id, Stuck { slot, run, pid, asked: now, quiet, cpu, at: 0 }));
+                due.push((l.id, Stuck { slot, run, pid, asked: now, quiet, cpu, at: 0, reach }));
             }
         }
     }
@@ -80,10 +91,22 @@ pub fn look(ed: &mut Editor, rows: &[Row], now: Instant) {
         ed.with_session(session, |ed| {
             ed.events.jobs().spawn(move || {
                 let lines = waits_in(s.pid);
-                move |ed: &mut Editor| ask(ed, s, lines)
+                let peers = connected_outside(s.pid);
+                move |ed: &mut Editor| ask(ed, s, lines, peers)
             })
         });
     }
+}
+
+/// What `pid`'s tree is connected to outside itself (`procs::sockets`), as said — a daemon's socket, a host
+/// and port: where its work may be going on while nothing here uses CPU.
+pub fn connected_outside(pid: u32) -> Vec<String> {
+    let socks: Vec<crate::procs::sockets::Sock> = crate::procs::tree(pid)
+        .iter()
+        .take(PROCS_MAX)
+        .flat_map(|os| crate::procs::sockets::of(os.pid))
+        .collect();
+    crate::procs::sockets::outside(&socks)
 }
 
 /// What each thread of `pid`'s tree waits in, as its output says it: a process's line, then its threads
@@ -146,8 +169,9 @@ fn said(s: &Stuck) -> String {
     format!("no output for {} min, {:.0}% CPU", s.quiet.as_secs() / 60, s.cpu)
 }
 
-/// Its threads read: into its output (from `s.at`) — then the card, if it's still running and still quiet.
-fn ask(ed: &mut Editor, mut s: Stuck, lines: Vec<String>) {
+/// Its threads read: into its output (from `s.at`) — then the card (`card`), if it's still running and still
+/// quiet.
+fn ask(ed: &mut Editor, mut s: Stuck, lines: Vec<String>, peers: Vec<String>) {
     let head = format!("── tarae: {} — what each of its threads waits in ──", said(&s));
     let still = |at: Instant| at <= s.asked;
     let label = match s.slot {
@@ -174,27 +198,53 @@ fn ask(ed: &mut Editor, mut s: Stuck, lines: Vec<String>) {
             format!("Claude's tests {} in the test pane", r.target.label)
         }
     };
-    crate::log::line("stuck", "ask", &format!("{label}: {}", said(&s)));
+    let o = card(s, &label, &lines, &peers);
+    crate::log::line("stuck", "ask", &format!("{label}: {}", o.question.lines().next().unwrap_or_default()));
+    ed.push_offer(o);
+}
+
+/// The card about run `s` (`label`: which it is and where), its threads' `lines`, what its tree is connected
+/// to outside itself (`peers`). Connected, or granted a daemon's socket (`s.reach`), it may be working there —
+/// said, and `Quiet:` rather than `Stuck?`. Let reach only the network, or no sandbox around it, with nothing
+/// connected: still `Stuck?` (#181 — cargo hung under qemu, outside a sandbox too), the reach a note.
+pub fn card(s: Stuck, label: &str, lines: &[String], peers: &[String]) -> crate::offer::Offer {
+    use crate::sandbox::ReachOut;
     let shown: Vec<&str> = lines.iter().take(6).map(String::as_str).collect();
     let more = if lines.len() > shown.len() { "\n    …" } else { "" };
+    let there = " — the work may be going on there: next to no CPU here doesn't mean it's stuck.";
+    let (quiet, elsewhere) = match (peers, &s.reach) {
+        ([], None) => (false, String::new()),
+        ([], Some(ReachOut::Sockets(socks))) => (true, format!("\n\nIt can reach {socks}{there}")),
+        ([], Some(reach)) => {
+            let seen = "but no connection outside its processes was seen";
+            (false, format!("\n\nIt can reach {}, {seen}.", reach.said()))
+        }
+        (peers, _) => (true, format!("\n\nIts processes are connected to {}{there}", peers.join(", "))),
+    };
     let question = format!(
-        "N{} — {label}. Claude's turn waits on it, and only you can stop it.\n\nWhat each of its threads \
-         waits in is in its output now (w), kept if you stop it:\n    {}{more}",
+        "N{} — {label}. Claude's turn waits on it, and only you can stop it.{elsewhere}\n\nWhat each of its \
+         threads waits in is in its output now (w), kept if you stop it:\n    {}{more}",
         &said(&s)[1..],
         shown.join("\n    "),
     );
-    let title = match s.slot {
-        Slot::Task => "Stuck? Claude's command".to_string(),
-        _ => "Stuck? Claude's tests".to_string(),
+    let title = match (s.slot, quiet) {
+        (Slot::Task, false) => "Stuck? Claude's command",
+        (Slot::Task, true) => "Quiet: Claude's command",
+        (_, false) => "Stuck? Claude's tests",
+        (_, true) => "Quiet: Claude's tests",
     };
     let o = crate::offer::Offer::new(
-        title,
+        title.into(),
         &question,
         "Stopping…",
         String::new(),
         crate::offer::What::Stuck(Box::new(s)),
     );
-    ed.push_offer(o);
+    // (where the work may be going on is what tells this card from `Stuck?`: at full strength, with the run)
+    match quiet {
+        false => o,
+        true => o.deciding(0..3),
+    }
 }
 
 /// `w` on the card: its run's panel in sight, at what its threads wait in — the card stays, to answer.
@@ -276,7 +326,7 @@ pub fn sync(ed: &mut Editor) {
 fn drop_gone(ed: &mut Editor) {
     let mut live = Vec::new();
     for slot in [Slot::Task, Slot::Test] {
-        if let Some((_, run, last, _)) = running(&mut ed.session, slot) {
+        if let Some((_, run, last, ..)) = running(&mut ed.session, slot) {
             live.push((run, last));
         }
     }

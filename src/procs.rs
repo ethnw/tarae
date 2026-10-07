@@ -18,6 +18,8 @@
 //!   with what tarae did (`Procs.checks`, under the list, and the log); while one holds, the status line
 //!   says so (`Procs::mark`) — nothing otherwise.
 
+pub mod sockets;
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};

@@ -226,6 +226,19 @@ impl Shot {
         let text = snapshot(&self.ed, name, &bytes, self.w, self.h);
         compare(name, &text);
     }
+
+    /// With `TARAE_FRAMES_DIR` set, the frame in both built-in themes there, `<name>-meok.bin` and
+    /// `<name>-hanji.bin` — for a new element's screenshots (`cargo xtask shot` draws them:
+    /// `TARAE_SHOT_REPLAY`). Nothing without it.
+    fn frames_both(&mut self, name: &str) {
+        let Some(dir) = std::env::var_os("TARAE_FRAMES_DIR") else { return };
+        std::fs::create_dir_all(&dir).unwrap();
+        for theme in ["meok", "hanji"] {
+            self.ed.theme = crate::theme::load(theme).unwrap();
+            std::fs::write(Path::new(&dir).join(format!("{name}-{theme}.bin")), self.frame()).unwrap();
+        }
+        self.ed.theme = crate::theme::load("meok").unwrap();
+    }
 }
 
 // ── Screen → text ─────────────────────────────────────────────────────────
@@ -759,6 +772,7 @@ fn snapshot_offer_stuck() {
         quiet: std::time::Duration::from_secs(12 * 60 + 4),
         cpu: 0.0,
         at: 0,
+        reach: None,
     };
     s.ed.push_offer(crate::offer::Offer::new(
         "Stuck? Claude's command".into(),
@@ -773,6 +787,100 @@ fn snapshot_offer_stuck() {
         crate::offer::What::Stuck(Box::new(stuck)),
     ));
     s.check("offer_stuck");
+}
+
+/// frictions15 #3: a quiet run connected to a daemon outside its tree — `Quiet:`, not `Stuck?`, and where its
+/// work may be going on, made by `stuck::card` itself.
+#[test]
+fn snapshot_offer_quiet() {
+    let mut s = Shot::new(100, 30);
+    s.ed.offer_popups = true;
+    s.file("src/demo.rs", DEMO_RS);
+    let stuck = crate::stuck::Stuck {
+        slot: crate::sizes::Slot::Task,
+        run: 1,
+        pid: 4242,
+        asked: std::time::Instant::now(),
+        quiet: std::time::Duration::from_secs(14 * 60),
+        cpu: 0.0,
+        at: 0,
+        reach: Some(crate::sandbox::ReachOut::Sockets("~/.colima/default/docker.sock".into())),
+    };
+    let lines = [
+        "pid 4242 · cargo xtask linux test · 1 thread".to_string(),
+        "  cargo — waiting · 0.31 s CPU".to_string(),
+        "pid 4250 · docker run --rm tarae-linux cargo test · 9 threads".to_string(),
+        "  9 × docker — waiting · 0.12 s CPU".to_string(),
+    ];
+    let label = "Claude's command cargo xtask linux test in the task panel";
+    let peers = ["~/.colima/default/docker.sock".to_string()];
+    s.ed.push_offer(crate::stuck::card(stuck, label, &lines, &peers));
+    s.check("offer_quiet");
+    s.frames_both("offer_quiet");
+}
+
+/// A tall card being read in its buffer (frictions15 #1): the bar over the status line says whose keys they
+/// are — the card's after `C-q` (`esc goes back`), the code's with a view key pending (`C-q answers it`) —
+/// where a hidden hold made `C-q` let go instead.
+#[test]
+fn snapshot_card_reading_bar() {
+    let mut s = Shot::new(100, 24);
+    s.ed.offer_popups = true;
+    let script: String = (1..=60).map(|i| format!("echo step {i}\n")).collect();
+    let what = crate::offer::What::Install {
+        tool: "script".into(),
+        run: vec!["true".into()],
+        cwd: std::env::temp_dir(),
+        then: crate::install::Then::Lsp,
+    };
+    let q = format!("{script}\nRuns the script Claude wrote this turn.");
+    s.ed.push_offer(crate::offer::Offer::new(
+        "Claude wants to run a script".into(),
+        &q,
+        "",
+        String::new(),
+        what,
+    ));
+    s.frame();
+    let o = (s.ed.offers[0].id, s.ed.offers[0].rev);
+    s.ed.offer_seen.set(Some((o.0, o.1, Instant::now() - crate::offer::SETTLE * 2)));
+    s.keys("<C-q>vjj");
+    s.check("card_reading_bar");
+    s.frames_both("card_reading_bar");
+    s.keys("<esc>z");
+    s.frames_both("card_reading_bar_code");
+}
+
+/// The card in front says how many more wait and where (frictions15 #5) — one stacked here, one in a session
+/// behind — and the key that lists them.
+#[test]
+fn snapshot_card_says_who_waits_behind_it() {
+    let mut s = Shot::new(100, 30);
+    s.ed.offer_popups = true;
+    s.ed.session.name = "main".into();
+    s.file("src/demo.rs", DEMO_RS);
+    let card = |n: u64| {
+        let what = crate::offer::What::Screen { call: crate::tools::Call::test(n) };
+        crate::offer::Offer::new(
+            "Claude asks to see the screen".into(),
+            "As text, once.",
+            "",
+            String::new(),
+            what,
+        )
+    };
+    s.ed.push_offer(card(1));
+    s.ed.push_offer(card(2));
+    let back = s.ed.session_add(std::env::temp_dir());
+    if let Some(l) = s.ed.sessions.iter_mut().find(|l| l.id == back) {
+        l.name = "fix-login".into();
+        s.ed.offer_seq += 1;
+        let mut o = card(3);
+        o.id = s.ed.offer_seq;
+        l.parked.push(o);
+    }
+    s.check("card_says_who_waits_behind");
+    s.frames_both("card_says_who_waits_behind");
 }
 
 /// A command Claude wants to run — shown whole (a commit message past four lines too), `y Run` · `n No`.

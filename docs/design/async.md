@@ -295,7 +295,8 @@ it now.
   — <why>".
 - **Running**: as now, SIGTERM to the group (`Run::drop`, `TestRun::drop`).
 - **`:restart`** answers every waiting entry ("tarae restarted — run it again"). A running entry is
-  waited for, as the restart's turn already is.
+  named on the restart's card with every session's turns (frictions15): `y` restarts anyway and ends it,
+  `w` waits for it.
 
 ### 3.6 How a queued run is seen
 
