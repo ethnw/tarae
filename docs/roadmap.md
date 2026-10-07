@@ -149,14 +149,17 @@ Two or more at one tarae — a person and a person, a person and a shuttle, two 
 programming). Builds on the remote split — one host, several interfaces, people and shuttles through the same
 protocol — and on shuttle keys.
 
-- Each participant's chat stays their own; a shared room chat sits beside them — people's messages, and what an
-  agent hands over only when its person sends it.
-- A session belongs to one person: only its owner — or a shuttle working for them — answers its cards, never a
-  peer. Everyone sees who is where (presence, following someone), and each card's record says who answered.
-- Work stays in sessions and their checkouts: a peer reviews another's session live in review mode (driver and
-  navigator); bring is where the work meets.
-- Open: how one joins and is let in, two people typing in one file, how agents in the room are paced. A plan
-  first.
+- Everyone gathers in the main session by default. Each edits the code directly and sees the others' edits as
+  they happen: one host holds the buffers, and each person has their own cursor, selection and mode.
+- Everyone sees who is where (presence, following someone), and each card's record says who answered.
+- Each has their own chat (their own `space l`) and their own Claude, signed in as them: the work is theirs, and
+  so is the bill.
+- Anyone can open a session of their own for work apart, and bring it back as today.
+- The shared room chat is for the people to talk. What an agent made goes there only when its person sends it.
+- A session's cards are its owner's, or a shuttle's working for them. In the main session, a Claude's cards are
+  its person's.
+- Open, for the plan: how one joins and is let in, two people (and two Claudes) changing the same lines, how
+  agents in the room are paced.
 
 ### 6. Plugin API 0.3
 
