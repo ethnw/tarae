@@ -8,7 +8,8 @@ next follows from that.
 How to read this file:
 
 - **Done** is what's in the code today, checked against it.
-- **Now** is under way. **Next** comes right after, in order. **Later** is planned but not scheduled closely.
+- **Now** is under way. **Next** comes right after, in order. **Alongside** is done between them, in no order.
+  **Later** is planned but not scheduled closely.
 - Items are in the order they're meant to happen. Each links its design document where there is one
   ([`design/`](design)).
 - "Not confirmed" marks a status that couldn't be checked against the code.
@@ -19,6 +20,7 @@ For how tarae is built and why, see [architecture.md](architecture.md). For what
 - [Done](#done)
 - [Now: the Linux sandbox keeper](#now-the-linux-sandbox-keeper)
 - [Next](#next)
+- [Alongside, not ordered](#alongside-not-ordered)
 - [Later](#later)
 
 ## Done
@@ -81,7 +83,9 @@ from each other. Daemons such as Gradle's stay warm between runs.
 
 ## Next
 
-### Sandbox validation
+In this order, after the keeper's last step.
+
+### 1. Sandbox validation
 
 After step 10. The aim is to state what the sandbox guarantees and show that it holds.
 
@@ -95,7 +99,7 @@ After step 10. The aim is to state what the sandbox guarantees and show that it 
 4. **Yama ptrace scope 2**: today tarae can't serve a run's sockets there and falls back to plain mode.
 5. **A speed comparison** against a bubblewrap-style sandbox. An external review some day.
 
-### Frictions
+### 2. Frictions, and lighter cards and reviews
 
 Small fixes found while using tarae every day:
 
@@ -105,7 +109,14 @@ Small fixes found while using tarae every day:
   one run at a time.
 - `tarae state` cuts a card's question short; it should show the whole command.
 
-### Shuttle keys
+**IMPORTANT — the card and review burden.** Cards and reviews must stay few enough to read, or they protect
+nothing. Risk marks precise enough to trust (one large review had well over a hundred high-risk marks); like
+cards and marks grouped; fewer wrong cards. This includes the card model's last two phases: **P3**, deciding by
+what the session may do rather than by what a command looks like, and **P4**, scopes and a list of grants
+([design/cards.md](design/cards.md)). And a review lens: links between what Claude claims and the code, an
+evidence panel, "explain this hunk".
+
+### 3. Shuttle keys
 
 A **shuttle** is a program that works a running tarae from outside: an AI assistant, a test script. ("Agent" in
 tarae means a session's own Claude.) Today a shuttle reads tarae's state as data (`tarae state`). Shuttle keys
@@ -120,23 +131,55 @@ The person at the keyboard already has the same guards: a card ignores keys type
 after the text was in sight, and no key changes state in silence. This was "guarded keys", phase 4 of
 [design/ui-state.md](design/ui-state.md), dropped there and now back under its new name.
 
-### Linux in real use
+### 4. A remote split
 
-On test machines:
+tarae as a host — sessions, Claude, runs, the sandbox — and its interfaces — the screen and the keys — apart,
+joined by one thin protocol: the screen's changes go out (tarae already draws by cell diff), keys come in. An
+interface reaches the host from anywhere the host can be reached; how it authenticates and encrypts is decided in
+its plan. Two interfaces:
 
-- The terminal, the clipboard, file watching, Java (jdtls), the Kubernetes plugin, WSL, and working over ssh.
-- Several distributions, kernels and languages, and a large repository. Crash recovery, with no work lost.
-- A BPF measurement kit for development, outside the tarae binary. Its start is in [`trace/`](../trace)
-  (`tarae-trace`, see [CONTRIBUTING](../CONTRIBUTING.md)).
+- **The terminal**, as today.
+- **A web client**: the thin client built to WebAssembly, in a browser. The same screen, not a GUI.
 
-### Lighter cards and reviews, and new panels
+The egress proxy is designed to live with the runs, wherever they are.
 
-- **IMPORTANT — the card and review burden.** Cards and reviews must stay few enough to read, or they protect
-  nothing. Risk marks precise enough to trust (one large review had well over a hundred high-risk marks); like
-  cards and marks grouped; fewer wrong cards. This includes the card model's last two phases: **P3**, deciding
-  by what the session may do rather than by what a command looks like, and **P4**, scopes and a list of grants
-  ([design/cards.md](design/cards.md)). And a review lens: links between what Claude claims and the code, an
-  evidence panel, "explain this hunk". This comes first in this group.
+### 5. Working together
+
+Two or more at one tarae — a person and a person, a person and a shuttle, two shuttles (pair or mob
+programming). Builds on the remote split — one host, several interfaces, people and shuttles through the same
+protocol — and on shuttle keys.
+
+- Each participant's chat stays their own; a shared room chat sits beside them — people's messages, and what an
+  agent hands over only when its person sends it.
+- A session belongs to one person: only its owner — or a shuttle working for them — answers its cards, never a
+  peer. Everyone sees who is where (presence, following someone), and each card's record says who answered.
+- Work stays in sessions and their checkouts: a peer reviews another's session live in review mode (driver and
+  navigator); bring is where the work meets.
+- Open: how one joins and is let in, two people typing in one file, how agents in the room are paced. A plan
+  first.
+
+### 6. Plugin API 0.3
+
+One batch with the forge plugin: regions, cards, tools for Claude, a masked prompt, notes, the repository
+([plugins.md](plugins.md)). The database plugin waits for its regions.
+
+### 7. The forge plugin
+
+GitHub, read and write, through `gh`'s login. Pull requests, CI, review comments beside the code; create, comment,
+approve, merge — every write on a card.
+
+### 8. Publishing
+
+One draft pull request, then the homepage: an animation that feels like several agents working at once, and the
+README's demo from the same scripted recording.
+
+## Alongside, not ordered
+
+- **Linux in real use**, on test machines:
+  - The terminal, the clipboard, file watching, Java (jdtls), the Kubernetes plugin, WSL, and working over ssh.
+  - Several distributions, kernels and languages, and a large repository. Crash recovery, with no work lost.
+  - A BPF measurement kit for development, outside the tarae binary. Its start is in [`trace/`](../trace)
+    (`tarae-trace`, see [CONTRIBUTING](../CONTRIBUTING.md)).
 - **A first-use check.** which-key, the palette (`space ?`) and `:tutor` exist, and the start screen lists
   `:tutor`. Go through them as a first-timer: do they cover sessions, review mode, cards, bringing a session in,
   the git tab?
@@ -151,35 +194,15 @@ On test machines:
 
 ## Later
 
-### The forge, size, publishing
-
-- **The forge plugin**: GitHub, read and write, through `gh`'s login. Pull requests, CI, review comments beside the
-  code; create, comment, approve, merge — every write on a card.
-- **A size pass.** The release binary's budget was raised to 10 MB for now.
-- **Publishing**: a homepage with an animation that feels like several agents working at once, and the README's
-  demo from the same scripted recording.
-
 ### Queued, not scheduled
 
 - **The lineup** ([design/async.md](design/async.md) phases 2–4): one scheduler for heavy runs across sessions,
   exclusive runs (perf) on a quiet machine, the queue position shown, resources declared by language packs, and
   language-server work that holds a resource.
-- **Core audit**: a session's own build folders; plugin API 0.3. (Sandbox rules as pack data are done.)
+- **Core audit**: a session's own build folders. (Sandbox rules as pack data are done.)
 - **Image viewing** — undecided: an external viewer, a canvas in the core with a WebAssembly decoder plugin, or a
   viewer in the core.
-- **A remote split**: the interface here, the work on a remote host. The egress proxy is designed to live with the
-  runs, wherever they are.
-- **Working together**: two or more at one tarae — a person and a person, a person and a shuttle, two shuttles
-  (pair or mob programming). Builds on the remote split (one host process, several interfaces attached) and on
-  shuttle keys.
-  - Each participant's chat stays their own; a shared room chat sits beside them — people's messages, and what an
-    agent hands over only when its person sends it.
-  - A session belongs to one person: only its owner answers its cards, never a peer or a shuttle. Everyone sees
-    who is where (presence, following someone), and each card's record says who answered.
-  - Work stays in sessions and their checkouts: a peer reviews another's session live in review mode (driver and
-    navigator); bring is where the work meets.
-  - Open: how one joins and is let in (over SSH?), two people typing in one file, how agents in the room are
-    paced. A plan first.
+- **A size pass.** The release binary's budget was raised to 10 MB for now.
 - **ACP**: hosting other agents inside tarae. Claude is the only agent tarae runs today.
 
 Non-goals: a GUI, vim emulation, copying Helix behavior for its own sake.
