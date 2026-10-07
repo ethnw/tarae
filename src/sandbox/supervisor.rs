@@ -18,6 +18,11 @@
 //! `CAP_NET_RAW`). A run sees its connections made by tarae: a unix server's peer credentials name tarae's
 //! process, not the run's.
 //!
+//! Netlink (the routing protocol's, for name lookups) is read only: the kernel judges a netlink call by the
+//! capability of whoever makes it — tarae, who holds `CAP_NET_ADMIN` over the session's network namespace (and
+//! over this machine's, run as root) — so tarae makes one for a run only where a sender without it may: a
+//! batch of reads (`netlink_reads`), to the kernel's address, joining no group that asks the capability.
+//!
 //! What it needs from the system (`unavailable` says what's missing): a seccomp listener (none inside
 //! another one's filter — a sandboxed tarae) and `pidfd_getfd` (Docker's default filter refuses it without
 //! `CAP_SYS_PTRACE`). Reading a run's memory takes what ptrace takes: under Yama's `ptrace_scope` 1 (the
@@ -1261,6 +1266,18 @@ fn bind(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
             return refuse(p, &c, "network-bind", format!("@{}", String::from_utf8_lossy(&name)));
         }
         (libc::AF_UNIX, _) => return refuse(p, &c, "network-bind", "an unnamed unix socket".into()),
+        (libc::AF_NETLINK, Addr::Netlink) => {
+            netlink_route(p, &c, &sock)?;
+            let (_, groups) = netlink_address(&addr)?;
+            // (rtnetlink asks these groups' listeners for `CAP_NET_ADMIN` — whoever binds: tarae —
+            // `rtnetlink_bind`; a group is bit `group − 1`)
+            let gated = (1 << (libc::RTNLGRP_IPV4_MROUTE_R - 1)) | (1 << (libc::RTNLGRP_IPV6_MROUTE_R - 1));
+            if groups & gated != 0 {
+                return refuse(p, &c, "network-netlink", format!("joining groups {:#x}", groups & gated));
+            }
+            (addr, None)
+        }
+        // (as the kernel reads it: `EINVAL`)
         (libc::AF_NETLINK, _) => (addr, None),
         _ => return Err(libc::EPERM),
     };
@@ -1327,9 +1344,94 @@ fn destination(
         }
         (libc::AF_UNIX, Addr::Unspec) => Ok((sock, addr, None)),
         (libc::AF_UNIX, _) => Err(libc::EINVAL),
+        // (the kernel's address only: any other port or group is reached with the capability of whoever makes
+        // the call — `netlink_allowed`, tarae's — and a connect to one holds for the run's own sends after)
+        (libc::AF_NETLINK, Addr::Netlink) => {
+            netlink_route(p, c, &sock)?;
+            match netlink_address(&addr)? {
+                (0, 0) => Ok((sock, addr, None)),
+                (port, groups) => refuse(p, c, "network-netlink", format!("port {port}, groups {groups:#x}"))
+                    .map(|_| (sock, addr, None)),
+            }
+        }
+        // (a connect's disconnect; a send's `EINVAL`, as the kernel answers it)
         (libc::AF_NETLINK, _) => Ok((sock, addr, None)),
         _ => Err(libc::EPERM),
     }
+}
+
+/// A netlink socket tarae calls on for a run is the routing protocol's — the only one a run makes
+/// (`seccomp::ops`); another, handed in from outside the sandbox, has rules of its own that `netlink_reads`
+/// doesn't know: refused, said.
+fn netlink_route(p: &Served, c: &Caller, sock: &OwnedFd) -> Result<(), i32> {
+    match sockopt(sock, libc::SO_PROTOCOL)? {
+        libc::NETLINK_ROUTE => Ok(()),
+        n => refuse(p, c, "network-netlink", format!("protocol {n}")).map(drop),
+    }
+}
+
+/// A netlink address (`struct sockaddr_nl`: family, padding, port, groups) as (port, groups); too short:
+/// `EINVAL`, as the kernel says it.
+fn netlink_address(addr: &[u8]) -> Result<(u32, u32), i32> {
+    let word = |at: usize| addr.get(at..at + 4).map(|w| u32::from_ne_bytes(w.try_into().unwrap_or_default()));
+    match (word(4), word(8)) {
+        (Some(port), Some(groups)) => Ok((port, groups)),
+        _ => Err(libc::EINVAL),
+    }
+}
+
+/// rtnetlink's message types come in fours from here — new, delete, get, set (`include/uapi/linux/rtnetlink.h`:
+/// every `RTM_GET…` is the third of its four, nothing else is) — and the kernel lets a sender without
+/// `CAP_NET_ADMIN` only the gets (`rtnetlink_rcv_msg`: `kind != RTNL_KIND_GET` needs it).
+const RTM_BASE: u16 = 16;
+
+/// The flags a read carries: a request, a dump, an ack — what a name lookup sends.
+const NETLINK_READ_FLAGS: u16 = (libc::NLM_F_REQUEST | libc::NLM_F_DUMP | libc::NLM_F_ACK) as u16;
+
+/// Whether `data`, a batch of rtnetlink messages, only reads: each `struct nlmsghdr` whole (its length at least
+/// its own and within what's left, the next at the 4-byte alignment, nothing left over), its type a get, its
+/// flags within `NETLINK_READ_FLAGS` — else what's refused, in words.
+fn netlink_reads(data: &[u8]) -> Result<(), String> {
+    let mut rest = data;
+    loop {
+        if rest.len() < 16 {
+            return Err("a message cut short".into());
+        }
+        let len = u32::from_ne_bytes(rest[..4].try_into().unwrap_or_default()) as usize;
+        let kind = u16::from_ne_bytes([rest[4], rest[5]]);
+        let flags = u16::from_ne_bytes([rest[6], rest[7]]);
+        if len < 16 || len > rest.len() {
+            return Err("a message cut short".into());
+        }
+        if kind < RTM_BASE || (kind - RTM_BASE) % 4 != 2 {
+            return Err(format!("message type {kind}"));
+        }
+        if flags & !NETLINK_READ_FLAGS != 0 {
+            return Err(format!("message flags {flags:#x}"));
+        }
+        rest = &rest[len.next_multiple_of(4).min(rest.len())..];
+        if rest.is_empty() {
+            return Ok(());
+        }
+    }
+}
+
+/// A send tarae makes for the run on `sock` carrying `data`: on a netlink socket only reads go
+/// (`netlink_reads`) — anything else refused, said, `EPERM` to the run (where the kernel would ack a sender
+/// without the capability with `-EPERM`: tarae can't put an ack in the run's socket, so its send fails).
+fn netlink_send(p: &Served, c: &Caller, sock: &OwnedFd, data: &[u8]) -> Result<(), i32> {
+    if sockopt(sock, libc::SO_DOMAIN)? != libc::AF_NETLINK {
+        return Ok(());
+    }
+    netlink_route(p, c, sock)?;
+    netlink_reads(data).or_else(|what| refuse(p, c, "network-netlink", what).map(drop))
+}
+
+/// Whether a send on a socket of `kind` (`SO_TYPE`) goes whole or not at all — every kind but a stream: a
+/// datagram, a sequenced packet, a netlink batch (raw) — so one past `SEND_MAX` fails (`payload`) rather than
+/// going cut short: a netlink batch cut would end mid-message.
+fn whole(kind: i32) -> bool {
+    kind != libc::SOCK_STREAM
 }
 
 /// What a send carries, read once: `len` bytes at `at` — at most `SEND_MAX`; a datagram past it fails.
@@ -1348,9 +1450,10 @@ fn sendto(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
     let flags = args[3] as i32;
     let addr = address(&c, args[4], args[5])?;
     let sock = c.fd(args[0])?;
-    let datagram = sockopt(&sock, libc::SO_TYPE)? == libc::SOCK_DGRAM;
+    let datagram = whole(sockopt(&sock, libc::SO_TYPE)?);
     let (sock, to, _held) = destination(l, n, p, &c, (args[0], sock), addr)?;
     let data = payload(&c, args[1], args[2], datagram)?;
+    netlink_send(p, &c, &sock, &data)?;
     // SAFETY: the socket, the data and the address are ours, live for the call.
     let r = unsafe {
         libc::sendto(
@@ -1456,6 +1559,7 @@ fn send_one(
         }
         None => (Vec::new(), None),
     };
+    netlink_send(p, c, sock, &m.data)?;
     let mut iov = libc::iovec { iov_base: m.data.as_ptr() as *mut libc::c_void, iov_len: m.data.len() };
     // SAFETY: an all-integer/pointer struct, zeroed then set.
     let mut h: libc::msghdr = unsafe { std::mem::zeroed() };
@@ -1479,7 +1583,7 @@ fn sendmsg(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
     let c = Caller::open(l, n)?;
     let args = n.data.args;
     let mut sock = c.fd(args[0])?;
-    let m = read_msg(&c, args[1], sockopt(&sock, libc::SO_TYPE)? != libc::SOCK_STREAM)?;
+    let m = read_msg(&c, args[1], whole(sockopt(&sock, libc::SO_TYPE)?))?;
     send_one((l, n), p, &c, (args[0], &mut sock), m, args[2] as i32)
 }
 
@@ -1490,7 +1594,7 @@ fn sendmmsg(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
     let c = Caller::open(l, n)?;
     let args = n.data.args;
     let mut sock = c.fd(args[0])?;
-    let datagram = sockopt(&sock, libc::SO_TYPE)? != libc::SOCK_STREAM;
+    let datagram = whole(sockopt(&sock, libc::SO_TYPE)?);
     let count = args[2].min(libc::UIO_MAXIOV as u64);
     let mut sent = 0;
     for i in 0..count {
@@ -1512,6 +1616,61 @@ fn sendmmsg(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A run's netlink send goes to the kernel only when every message in it is a read: an `RTM_GET…` (every
+    /// one `include/uapi/linux/rtnetlink.h` names; every other type it names refused — those need
+    /// `CAP_NET_ADMIN`, and tarae, who sends, has it: 2026-10-07's finding), flags no more than a lookup's, the
+    /// batch walked by its headers and refused when one is cut short, runs past the end or leaves bytes over.
+    #[test]
+    fn only_a_batch_of_reads_goes_to_the_kernel() {
+        let (dump, ack) = (libc::NLM_F_REQUEST | libc::NLM_F_DUMP, libc::NLM_F_REQUEST | libc::NLM_F_ACK);
+        // (the uapi's types, by their four: new, delete, get, set — 6.1 to 7.0)
+        let gets = [
+            18, 22, 26, 30, 34, 38, 42, 46, 50, 58, 62, 66, 74, 78, 82, 86, 90, 94, 102, 106, 110, 114, 118,
+            122,
+        ];
+        let changes = [
+            16, 17, 19, 20, 21, 24, 25, 28, 29, 32, 33, 36, 37, 40, 41, 44, 45, 48, 49, 52, 56, 57, 60, 61,
+            64, 67, 68, 72, 73, 79, 80, 81, 84, 85, 88, 89, 92, 95, 96, 100, 101, 104, 105, 108, 109, 112,
+            113, 116, 117, 120, 121,
+        ];
+        for t in gets {
+            assert_eq!(netlink_reads(&nl_msg(t, dump, &[0; 16])), Ok(()), "type {t}: a read");
+        }
+        for t in changes {
+            assert_eq!(
+                netlink_reads(&nl_msg(t, ack, &[0; 16])),
+                Err(format!("message type {t}")),
+                "a change"
+            );
+        }
+        let lookup = nl_msg(libc::RTM_GETADDR, dump, &[0; 8]);
+        let links = nl_msg(libc::RTM_GETLINK, ack, &[0; 16]);
+        let add = nl_msg(libc::RTM_NEWADDR, ack | libc::NLM_F_CREATE, &[0; 8]);
+        let mut short = lookup.clone();
+        short[..4].copy_from_slice(&64u32.to_ne_bytes());
+        let mut under = lookup.clone();
+        under[..4].copy_from_slice(&8u32.to_ne_bytes());
+        let cases: [(&str, Vec<u8>, Result<(), &str>); 9] = [
+            ("a lookup's dump", lookup.clone(), Ok(())),
+            ("two reads in one batch", [links.clone(), lookup.clone()].concat(), Ok(())),
+            ("a change after a read", [lookup.clone(), add].concat(), Err("message type 20")),
+            (
+                "a read's flags and more",
+                nl_msg(libc::RTM_GETLINK, dump | libc::NLM_F_ECHO, &[]),
+                Err("message flags 0x309"),
+            ),
+            ("netlink's own types (no-op)", nl_msg(1, libc::NLM_F_REQUEST, &[]), Err("message type 1")),
+            ("a header cut short", lookup[..10].to_vec(), Err("a message cut short")),
+            ("a length past the end", short, Err("a message cut short")),
+            ("a length under a header's", under, Err("a message cut short")),
+            ("bytes left over", [links, vec![0; 4]].concat(), Err("a message cut short")),
+        ];
+        for (what, bytes, want) in cases {
+            assert_eq!(netlink_reads(&bytes), want.map_err(String::from), "{what}");
+        }
+        assert_eq!(netlink_reads(&[]), Err("a message cut short".into()), "nothing");
+    }
 
     /// Addresses as the kernel lays them out — read as it reads them; too short for the family, refused.
     #[test]
@@ -2078,6 +2237,15 @@ mod tests {
                 ["pair-sendmsg", n] => pair_sendmsg(n.parse().unwrap()),
                 ["lookup", name] => lookup(name),
                 ["netlink-route"] => said(netlink_route()),
+                ["net-state"] => net_state().unwrap_or_else(|e| format!("err {e}")),
+                ["netlink-add-address"] => netlink_add_address(),
+                ["netlink-delete-route"] => netlink_delete_route(),
+                ["netlink-add-link"] => netlink_add_link(),
+                ["netlink-bind-group", g] => netlink_bind_group(g.parse().unwrap()),
+                ["netlink-sendto-group"] => netlink_sendto_group(),
+                ["netlink-connect-port"] => netlink_connect_port(),
+                ["netlink-handed", path] => netlink_handed(path),
+                ["netlink-oversized"] => netlink_oversized(),
                 ["netlink", protocol] => {
                     // SAFETY: a plain call; a descriptor it makes is closed at once.
                     let fd =
@@ -2167,6 +2335,330 @@ mod tests {
             n if n >= 16 && kind == libc::RTM_NEWLINK => Ok(()),
             _ => Err(io::Error::other(format!("netlink answered type {kind}"))),
         }
+    }
+
+    /// One netlink message: its `struct nlmsghdr` (length, type, flags, sequence 1, port 0), then `body`.
+    fn nl_msg(kind: u16, flags: i32, body: &[u8]) -> Vec<u8> {
+        let mut m = Vec::new();
+        m.extend((16 + body.len() as u32).to_ne_bytes());
+        m.extend(kind.to_ne_bytes());
+        m.extend((flags as u16).to_ne_bytes());
+        m.extend(1u32.to_ne_bytes());
+        m.extend(0u32.to_ne_bytes());
+        m.extend(body);
+        m
+    }
+
+    /// An attribute (`struct rtattr`: its length, its type, the data), padded to 4.
+    fn nl_attr(kind: u16, data: &[u8]) -> Vec<u8> {
+        let mut a = Vec::new();
+        a.extend((4 + data.len() as u16).to_ne_bytes());
+        a.extend(kind.to_ne_bytes());
+        a.extend(data);
+        a.resize(a.len().div_ceil(4) * 4, 0);
+        a
+    }
+
+    /// What netlink answered, message by message (each `nlmsg_len` long, aligned to 4): (type, body).
+    fn nl_split(mut buf: &[u8]) -> Vec<(u16, &[u8])> {
+        let mut out = Vec::new();
+        while buf.len() >= 16 {
+            let len = u32::from_ne_bytes(buf[..4].try_into().unwrap()) as usize;
+            if len < 16 || len > buf.len() {
+                break;
+            }
+            out.push((u16::from_ne_bytes([buf[4], buf[5]]), &buf[16..len]));
+            buf = &buf[(len.div_ceil(4) * 4).min(buf.len())..];
+        }
+        out
+    }
+
+    /// The attribute of type `kind` among `attrs` (`struct rtattr`s, aligned to 4), its data.
+    fn nl_find(mut attrs: &[u8], kind: u16) -> Option<&[u8]> {
+        while attrs.len() >= 4 {
+            let len = u16::from_ne_bytes([attrs[0], attrs[1]]) as usize;
+            if len < 4 || len > attrs.len() {
+                return None;
+            }
+            // (the type's top two bits are flags: nested, network byte order)
+            if u16::from_ne_bytes([attrs[2], attrs[3]]) & 0x3fff == kind {
+                return Some(&attrs[4..len]);
+            }
+            attrs = &attrs[(len.div_ceil(4) * 4).min(attrs.len())..];
+        }
+        None
+    }
+
+    /// A netlink routing socket of the run's own, its answers awaited at most 10 s.
+    fn nl_socket() -> io::Result<OwnedFd> {
+        // SAFETY: a plain call; a descriptor it makes is ours.
+        let fd = unsafe {
+            libc::socket(libc::AF_NETLINK, libc::SOCK_RAW | libc::SOCK_CLOEXEC, libc::NETLINK_ROUTE)
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: just made, ours.
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        let wait = libc::timeval { tv_sec: 10, tv_usec: 0 };
+        // SAFETY: a timeval and its size, live for the call.
+        unsafe {
+            libc::setsockopt(
+                fd.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_RCVTIMEO,
+                (&raw const wait).cast(),
+                std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+            )
+        };
+        Ok(fd)
+    }
+
+    /// A netlink address: the kernel's is port 0, no groups.
+    fn nl_addr(port: u32, groups: u32) -> libc::sockaddr_nl {
+        // SAFETY: an all-integer struct, zeroed then set.
+        let mut a: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
+        a.nl_family = libc::AF_NETLINK as libc::sa_family_t;
+        a.nl_pid = port;
+        a.nl_groups = groups;
+        a
+    }
+
+    /// `call` (`libc::bind`, `libc::connect`) on `fd` with the netlink address `port`, `groups`.
+    fn nl_call(
+        call: unsafe extern "C" fn(i32, *const libc::sockaddr, libc::socklen_t) -> i32,
+        fd: &OwnedFd,
+        (port, groups): (u32, u32),
+    ) -> io::Result<()> {
+        let a = nl_addr(port, groups);
+        let alen = std::mem::size_of::<libc::sockaddr_nl>() as libc::socklen_t;
+        // SAFETY: our descriptor and an address of ours, live for the call.
+        match unsafe { call(fd.as_raw_fd(), (&raw const a).cast(), alen) } {
+            0 => Ok(()),
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
+
+    /// The `RTM_GETLINK` dump a lookup asks, sent (`sendto`) to netlink port `port` and groups `groups`.
+    fn nl_dump_to(fd: &OwnedFd, port: u32, groups: u32) -> io::Result<()> {
+        let req = nl_msg(libc::RTM_GETLINK, libc::NLM_F_REQUEST | libc::NLM_F_DUMP, &[0; 16]);
+        let to = nl_addr(port, groups);
+        // SAFETY: the request and the address, live for the call.
+        let sent = unsafe {
+            libc::sendto(
+                fd.as_raw_fd(),
+                req.as_ptr().cast(),
+                req.len(),
+                0,
+                (&raw const to).cast(),
+                std::mem::size_of::<libc::sockaddr_nl>() as libc::socklen_t,
+            )
+        };
+        if sent < 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
+    }
+
+    /// A bind joining rtnetlink's group `group` (bit `group − 1` of `nl_groups`).
+    fn netlink_bind_group(group: u32) -> String {
+        said(nl_socket().and_then(|fd| nl_call(libc::bind, &fd, (0, 1 << (group - 1)))))
+    }
+
+    /// A read sent to rtnetlink's group 1 (`RTNLGRP_LINK`'s listeners) — a group, not the kernel.
+    fn netlink_sendto_group() -> String {
+        said(nl_socket().and_then(|fd| nl_dump_to(&fd, 0, 1)))
+    }
+
+    /// The port another netlink socket is bound to — the run's own, standing in for another process's.
+    const OTHER_PORT: u32 = 0x7a7a_0001;
+
+    /// A connect to another netlink socket's port (`OTHER_PORT`, bound first): after it, the run's own sends
+    /// without an address would go there.
+    fn netlink_connect_port() -> String {
+        said((|| {
+            let other = nl_socket()?;
+            nl_call(libc::bind, &other, (OTHER_PORT, 0))?;
+            nl_call(libc::connect, &nl_socket()?, (OTHER_PORT, 0))
+        })())
+    }
+
+    /// A netlink socket of another protocol than routing, made outside the sandbox and handed to the run over
+    /// the unix socket at `path` (`SCM_RIGHTS`) — a run can make none — a read sent on it to the kernel's
+    /// address. (Socket diagnostics' type 18 is its oldest read, `TCPDIAG_GETSOCK`: nothing changes either way.)
+    fn netlink_handed(path: &str) -> String {
+        said((|| {
+            let s = std::os::unix::net::UnixStream::connect(path)?;
+            let fd = super::super::handed::received_fds(&s)
+                .into_iter()
+                .next()
+                .ok_or_else(|| io::Error::other("no descriptor came"))?;
+            nl_send(&fd, &nl_msg(18, libc::NLM_F_REQUEST | libc::NLM_F_DUMP, &[0; 16]), "sendto")
+        })())
+    }
+
+    /// A batch of reads past `SEND_MAX` (`sendto`), each 20 bytes so that one cut at `SEND_MAX` ends mid-message.
+    fn netlink_oversized() -> String {
+        let one = nl_msg(libc::RTM_GETLINK, libc::NLM_F_REQUEST | libc::NLM_F_DUMP, &[0; 4]);
+        let batch = one.repeat(SEND_MAX / one.len() + 1);
+        said(nl_socket().and_then(|fd| nl_send(&fd, &batch, "sendto")))
+    }
+
+    /// `req` sent to the kernel's netlink address `how`: `sendto`, `sendmsg` (the address in the message, as
+    /// `ip` sends) or `sendmmsg` — each a call tarae makes for the run.
+    fn nl_send(fd: &OwnedFd, req: &[u8], how: &str) -> io::Result<()> {
+        let mut kernel = nl_addr(0, 0);
+        let alen = std::mem::size_of::<libc::sockaddr_nl>() as libc::socklen_t;
+        let mut iov = libc::iovec { iov_base: req.as_ptr() as *mut libc::c_void, iov_len: req.len() };
+        // SAFETY: an all-integer/pointer struct, zeroed then set.
+        let mut h: libc::msghdr = unsafe { std::mem::zeroed() };
+        h.msg_name = (&raw mut kernel).cast();
+        h.msg_namelen = alen;
+        h.msg_iov = &mut iov;
+        h.msg_iovlen = 1;
+        // SAFETY: the request, the address and the headers pointing at them are live for each call.
+        let r = unsafe {
+            match how {
+                "sendto" => libc::sendto(
+                    fd.as_raw_fd(),
+                    req.as_ptr().cast(),
+                    req.len(),
+                    0,
+                    (&raw const kernel).cast(),
+                    alen,
+                ),
+                "sendmsg" => libc::sendmsg(fd.as_raw_fd(), &h, 0),
+                _ => {
+                    let mut m = libc::mmsghdr { msg_hdr: h, msg_len: 0 };
+                    libc::sendmmsg(fd.as_raw_fd(), &mut m, 1, 0) as isize
+                }
+            }
+        };
+        if r < 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
+    }
+
+    /// The messages netlink answers on `fd` up to a dump's end or an error message (an ack is one).
+    fn nl_answers(fd: &OwnedFd) -> io::Result<Vec<(u16, Vec<u8>)>> {
+        let mut out = Vec::new();
+        let mut buf = vec![0u8; 1 << 16];
+        loop {
+            // SAFETY: a buffer of ours and its length.
+            let n = unsafe { libc::recv(fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), 0) };
+            if n <= 0 {
+                return Err(if n < 0 { io::Error::last_os_error() } else { io::Error::other("no answer") });
+            }
+            for (kind, body) in nl_split(&buf[..n as usize]) {
+                out.push((kind, body.to_vec()));
+                if [libc::NLMSG_DONE, libc::NLMSG_ERROR].contains(&i32::from(kind)) {
+                    return Ok(out);
+                }
+            }
+        }
+    }
+
+    /// A change to the network asked of the kernel, with an ack (`NLM_F_ACK` and `flags`), sent `how`: `ok` when
+    /// the kernel made it, else the errno — the send's own (tarae refused it) or the ack's (the kernel did).
+    fn nl_change(how: &str, kind: u16, flags: i32, body: &[u8]) -> String {
+        said(nl_socket().and_then(|fd| {
+            nl_send(&fd, &nl_msg(kind, libc::NLM_F_REQUEST | libc::NLM_F_ACK | flags, body), how)?;
+            match nl_answers(&fd)?.last() {
+                Some((k, ack)) if i32::from(*k) == libc::NLMSG_ERROR && ack.len() >= 4 => {
+                    match i32::from_ne_bytes(ack[..4].try_into().unwrap()) {
+                        0 => Ok(()),
+                        e => Err(io::Error::from_raw_os_error(-e)),
+                    }
+                }
+                _ => Err(io::Error::other("no ack")),
+            }
+        }))
+    }
+
+    /// `ip addr add 198.51.100.9/32 dev lo`, as `ip` sends it (`sendmsg`, the address in the message).
+    fn netlink_add_address() -> String {
+        // SAFETY: a C string, live for the call.
+        let lo = unsafe { libc::if_nametoindex(c"lo".as_ptr()) };
+        // `struct ifaddrmsg`: family, prefix length, flags, scope, device
+        let mut body = vec![libc::AF_INET as u8, 32, 0, 0];
+        body.extend(lo.to_ne_bytes());
+        body.extend(nl_attr(libc::IFA_LOCAL, &[198, 51, 100, 9]));
+        body.extend(nl_attr(libc::IFA_ADDRESS, &[198, 51, 100, 9]));
+        nl_change("sendmsg", libc::RTM_NEWADDR, libc::NLM_F_CREATE | libc::NLM_F_EXCL, &body)
+    }
+
+    /// `ip route del local 127.0.0.0/8 table local` (`sendto`) — the loopback's route, one every netns with `lo` up
+    /// has (the session's has no default route to delete).
+    fn netlink_delete_route() -> String {
+        // `struct rtmsg`: family, destination length, source length, tos, table, protocol, scope, type, flags
+        let mut body = vec![
+            libc::AF_INET as u8,
+            8,
+            0,
+            0,
+            libc::RT_TABLE_LOCAL,
+            0,
+            libc::RT_SCOPE_NOWHERE,
+            libc::RTN_LOCAL,
+        ];
+        body.extend(0u32.to_ne_bytes());
+        body.extend(nl_attr(libc::RTA_DST, &[127, 0, 0, 0]));
+        nl_change("sendto", libc::RTM_DELROUTE, 0, &body)
+    }
+
+    /// `ip link add d0 type dummy` (`sendmmsg`).
+    fn netlink_add_link() -> String {
+        // `struct ifinfomsg`, every field 0
+        let mut body = vec![0u8; 16];
+        body.extend(nl_attr(libc::IFLA_IFNAME, b"d0\0"));
+        body.extend(nl_attr(libc::IFLA_LINKINFO, &nl_attr(libc::IFLA_INFO_KIND, b"dummy\0")));
+        nl_change("sendmmsg", libc::RTM_NEWLINK, libc::NLM_F_CREATE | libc::NLM_F_EXCL, &body)
+    }
+
+    /// The network the run is in, as netlink dumps it — what a change moves and nothing that moves alone (no
+    /// counters): links (index, name, flags, MTU), addresses (family, address/prefix, device), routes (family,
+    /// table, type, destination/length, device). One line, sorted.
+    fn net_state() -> io::Result<String> {
+        let fd = nl_socket()?;
+        let word =
+            |b: &[u8], at: usize| b.get(at..at + 4).map_or(0, |w| u32::from_ne_bytes(w.try_into().unwrap()));
+        let ip = |b: Option<&[u8]>| match b.map(<[u8]>::len) {
+            Some(4) => std::net::Ipv4Addr::from(<[u8; 4]>::try_from(b.unwrap()).unwrap()).to_string(),
+            Some(16) => std::net::Ipv6Addr::from(<[u8; 16]>::try_from(b.unwrap()).unwrap()).to_string(),
+            _ => "-".into(),
+        };
+        let mut seen = Vec::new();
+        // (the requests' bodies: an empty `ifinfomsg` (16), `ifaddrmsg` (8), `rtmsg` (12) — every family)
+        for (ask, len) in [(libc::RTM_GETLINK, 16), (libc::RTM_GETADDR, 8), (libc::RTM_GETROUTE, 12)] {
+            let req = nl_msg(ask, libc::NLM_F_REQUEST | libc::NLM_F_DUMP, &vec![0u8; len]);
+            nl_send(&fd, &req, "sendto")?;
+            for (kind, m) in nl_answers(&fd)? {
+                let attrs = m.get(len..).unwrap_or_default();
+                match kind {
+                    libc::RTM_NEWLINK => {
+                        let name = nl_find(attrs, libc::IFLA_IFNAME).unwrap_or_default();
+                        let name = String::from_utf8_lossy(name).trim_end_matches('\0').to_string();
+                        let mtu = word(nl_find(attrs, libc::IFLA_MTU).unwrap_or_default(), 0);
+                        seen.push(format!("link {} {name} flags {:x} mtu {mtu}", word(&m, 4), word(&m, 8)));
+                    }
+                    libc::RTM_NEWADDR => {
+                        let at = ip(nl_find(attrs, libc::IFA_ADDRESS));
+                        seen.push(format!("addr {} {at}/{} dev {}", m[0], m[1], word(&m, 4)));
+                    }
+                    libc::RTM_NEWROUTE => {
+                        let table = nl_find(attrs, libc::RTA_TABLE).map_or(u32::from(m[4]), |t| word(t, 0));
+                        let to = ip(nl_find(attrs, libc::RTA_DST));
+                        let dev = word(nl_find(attrs, libc::RTA_OIF).unwrap_or_default(), 0);
+                        seen.push(format!(
+                            "route {} table {table} type {} {to}/{} dev {dev}",
+                            m[0], m[7], m[1]
+                        ));
+                    }
+                    k if i32::from(k) == libc::NLMSG_ERROR => {
+                        let e = word(&m, 0) as i32;
+                        return Err(io::Error::from_raw_os_error(-e));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        seen.sort();
+        Ok(seen.join(", "))
     }
 
     /// A UDP datagram sent with `sendmsg`, the address in the message.
@@ -2304,6 +2796,144 @@ mod tests {
         // llm.sandbox-localhost: every port of this machine's
         let all = s.policy(Vec::new(), true, Vec::new());
         assert_eq!(probe_in(&all, &[format!("connect {closed_at}")]), ["ok"]);
+    }
+
+    /// A run's netlink reads the session's network and never changes it: an address added, a route deleted, a
+    /// link made — each through another of the calls tarae makes for the run (`sendmsg`, `sendto`, `sendmmsg`) —
+    /// are refused by tarae (`EPERM`, each said in the run's report by its type), and the links, addresses and
+    /// routes after are the ones before; a lookup and a dump still answer. Why: the kernel judges a netlink
+    /// message sent *with an address* by the sender's capability alone (`NETLINK_SKB_DST`), and tarae, who sends
+    /// it, holds `CAP_NET_ADMIN` over the session's network namespace (2026-10-07,
+    /// `target/sb/step6-checks-notes.md` §1b). Only where the run has a network namespace of its own
+    /// (`own_netns`): a guard that let a change through then changes a namespace made for this test.
+    #[test]
+    fn a_runs_netlink_reads_but_never_changes_the_sessions_network() {
+        if !served("a_runs_netlink_reads_but_never_changes_the_sessions_network") {
+            return;
+        }
+        let s = Scratch::new("netlink");
+        let p = s.policy(Vec::new(), false, Vec::new());
+        if !own_netns(&p, "a_runs_netlink_reads_but_never_changes_the_sessions_network") {
+            return;
+        }
+        let ops = [
+            "net-state",
+            "netlink-add-address",
+            "netlink-delete-route",
+            "netlink-add-link",
+            "net-state",
+            "lookup localhost",
+            "netlink-route",
+        ]
+        .map(String::from);
+        let got = probe_in(&p, &ops);
+        let before = &got[0];
+        assert!(
+            before.contains("table 255 type 2 127.0.0.0/8"),
+            "the route the run deletes is there: {before}"
+        );
+        let no = refused();
+        let want = [no.as_str(), &no, &no, before, "ok", "ok"];
+        assert_eq!(got[1..], want, "{ops:?}");
+        // (tarae's refusals, not the kernel's: each said, by the message's type — new address, delete route,
+        // new link)
+        let said = netlink_said(&p);
+        assert_eq!(said, ["message type 20", "message type 25", "message type 16"], "{said:?}");
+    }
+
+    /// A run's netlink reaches the kernel and nothing else: joining the groups rtnetlink asks the capability of
+    /// (multicast-routing reports, 30 and 31), sending to a group (1, the links'), connecting to another
+    /// socket's port — after which its own sends, which tarae never sees, would go there — and sending on a
+    /// netlink socket of another protocol (socket diagnostics, made outside and handed in: a run can make none)
+    /// are each refused by tarae, `EPERM`, said. Why: each is judged by the capability of whoever makes the call
+    /// — `netlink_allowed`, `rtnetlink_bind` — and that's tarae (2026-10-07). Where the run has its own netns
+    /// (`own_netns`: elsewhere tarae holds no capability to lend, so a broken guard wouldn't show).
+    #[test]
+    fn a_runs_netlink_reaches_only_the_kernel() {
+        use std::os::fd::AsFd;
+        if !served("a_runs_netlink_reaches_only_the_kernel") {
+            return;
+        }
+        let s = Scratch::new("netlink-kernel");
+        let p = s.policy(Vec::new(), false, Vec::new());
+        if !own_netns(&p, "a_runs_netlink_reaches_only_the_kernel") {
+            return;
+        }
+        // SAFETY: a plain call; a descriptor it makes is ours.
+        let diag = unsafe {
+            libc::socket(libc::AF_NETLINK, libc::SOCK_RAW | libc::SOCK_CLOEXEC, libc::NETLINK_SOCK_DIAG)
+        };
+        assert!(diag >= 0, "a socket diagnostics socket: {}", io::Error::last_os_error());
+        // SAFETY: just made, ours.
+        let diag = unsafe { OwnedFd::from_raw_fd(diag) };
+        let at = s.root.join("hand.sock");
+        let hand = std::os::unix::net::UnixListener::bind(&at).unwrap();
+        // (left to itself: a probe that never connects mustn't hold the test)
+        std::thread::spawn(move || {
+            let (c, _) = hand.accept().unwrap();
+            super::super::handed::send_fds(&c, &[diag.as_fd()]);
+        });
+        let ops = [
+            "netlink-bind-group 30".to_string(),
+            "netlink-bind-group 31".to_string(),
+            "netlink-sendto-group".to_string(),
+            "netlink-connect-port".to_string(),
+            format!("netlink-handed {}", at.display()),
+        ];
+        let got = probe_in(&p, &ops);
+        assert_eq!(got, vec![refused(); 5], "{ops:?}");
+        let said = netlink_said(&p);
+        let port = format!("port {OTHER_PORT}, groups 0x0");
+        let want = ["joining groups 0x20000000", "joining groups 0x40000000", "port 0, groups 0x1", &port];
+        assert_eq!(said, [&want[..], &["protocol 4"]].concat(), "{said:?}");
+    }
+
+    /// A netlink batch past `SEND_MAX` fails whole, `EMSGSIZE` (`whole`): cut there, it would end mid-message
+    /// and be refused as malformed, said for nothing. (`sendto` cut it before 2026-10-07; `sendmsg` never did.)
+    #[test]
+    fn a_netlink_batch_past_the_limit_fails_whole() {
+        if !served("a_netlink_batch_past_the_limit_fails_whole") {
+            return;
+        }
+        let s = Scratch::new("whole");
+        let p = s.policy(Vec::new(), false, Vec::new());
+        let got = probe_in(&p, &["netlink-oversized".to_string()]);
+        assert_eq!(got, [format!("err {}", libc::EMSGSIZE)]);
+    }
+
+    /// Every socket but a stream sends a message whole or not at all — a datagram, a sequenced packet, a netlink
+    /// batch (raw) — the same for `sendto` and `sendmsg`. (A unix sequenced packet past `SEND_MAX` fails either
+    /// way from a run's side: the kernel refuses one over the socket's buffer, which `net.core.wmem_max` keeps
+    /// far under it — measured 2026-10-07, so only this pins it.)
+    #[test]
+    fn a_message_goes_whole_on_every_socket_but_a_stream() {
+        let kinds = [libc::SOCK_STREAM, libc::SOCK_DGRAM, libc::SOCK_SEQPACKET, libc::SOCK_RAW];
+        assert_eq!(kinds.map(whole), [false, true, true, true]);
+    }
+
+    /// Whether the run of `p` has a network namespace of its own (Routed: `cargo xtask linux --userns`) — else
+    /// `test` skips, said.
+    fn own_netns(p: &Policy, test: &str) -> bool {
+        let net = match &p.confine {
+            Some(Ok(c)) => format!("{:?}", c.net),
+            Some(Err(e)) => e.clone(),
+            None => "no sandbox".into(),
+        };
+        if net != "Routed" {
+            let line = format!(
+                "{}sandbox::supervisor::tests::{test} — no network namespace for the run here ({net}; \
+                 `cargo xtask linux --userns`)\n",
+                crate::test_results::SELF_SKIP
+            );
+            let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+        }
+        net == "Routed"
+    }
+
+    /// What tarae said it refused of the run of `p`'s netlink, in order.
+    fn netlink_said(p: &Policy) -> Vec<String> {
+        let blocked = p.watch.as_ref().unwrap().blocked();
+        blocked.seen.iter().filter(|d| d.op == "network-netlink").map(|d| d.target.clone()).collect()
     }
 
     /// The address a connect names is read once and decided on tarae's copy: changed by another thread of

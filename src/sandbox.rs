@@ -30,6 +30,8 @@
 pub mod channel;
 #[cfg(test)]
 mod golden;
+#[cfg(all(test, target_os = "linux"))]
+mod handed;
 #[cfg(target_os = "linux")]
 pub mod keeper;
 #[cfg(target_os = "linux")]
@@ -1163,6 +1165,10 @@ impl Denial {
                 None => self.shown(),
             },
             "network-bind" if self.target.starts_with('/') => format!("making socket {t}"),
+            // (Linux's supervisor: a run's netlink only reads, from the kernel — `supervisor::netlink_reads`)
+            "network-netlink" => {
+                format!("netlink ({t}) — a command's netlink only reads the network, never changes it")
+            }
             "appleevent-send" if !t.is_empty() => format!("Apple Event to {t}"),
             "mach-lookup"
                 if t.starts_with("com.apple.lsd") || t == "com.apple.coreservices.launchservicesd" =>
@@ -5987,6 +5993,11 @@ mod tests {
         assert_eq!(
             plain("network-bound", bound),
             "connecting to 93.184.216.34:443 from a socket it bound itself — a bound socket stays in the session"
+        );
+        // Linux's supervisor: a run's netlink reads only
+        assert_eq!(
+            plain("network-netlink", "message type 20"),
+            "netlink (message type 20) — a command's netlink only reads the network, never changes it"
         );
         assert_eq!(plain("system-info", ""), "system-info");
         assert_eq!(denial("file-write-unlink", "/a").reported(), "deleting /a (file-write-unlink, touch)");
