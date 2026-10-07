@@ -61,6 +61,22 @@ fn sender() -> Option<&'static Sender<String>> {
     .as_ref()
 }
 
+/// Tests: the lines `line` was given (every thread's) while a test captures them — tests write no log, so what a
+/// line would carry is read here (`capture`).
+#[cfg(test)]
+static CAPTURED: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+
+/// Tests: `on` starts capturing every line (an earlier capture's dropped); off stops and gives back what came.
+#[cfg(test)]
+pub fn capture(on: bool) -> Vec<String> {
+    let mut c = CAPTURED.lock().unwrap_or_else(|e| e.into_inner());
+    let got = c.take().unwrap_or_default();
+    if on {
+        *c = Some(Vec::new());
+    }
+    got
+}
+
 /// Local (year, month, day, hour, minute, second).
 fn now() -> (i32, i32, i32, i32, i32, i32) {
     local(std::time::SystemTime::now())
@@ -92,6 +108,10 @@ fn local(at: std::time::SystemTime) -> (i32, i32, i32, i32, i32, i32) {
 
 /// One line: `12:03:04  rust-analyzer  error  message` (multi-line text is indented under it).
 pub fn line(source: &str, level: &str, text: &str) {
+    #[cfg(test)]
+    if let Some(lines) = CAPTURED.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        lines.push(format!("{source}  {level}  {text}"));
+    }
     let Some(tx) = sender() else { return };
     let (.., h, m, sec) = now();
     let text = text.trim_end().replace('\n', &format!("\n{:36}", ""));

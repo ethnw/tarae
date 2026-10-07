@@ -123,14 +123,15 @@ public class Repo {
 "#;
 
 /// A program on `PATH` — None: not there.
-fn on_path(name: &str) -> Option<PathBuf> {
+pub(super) fn on_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH").unwrap_or_default();
     std::env::split_paths(&path).map(|d| d.join(name)).find(|p| p.is_file())
 }
 
-/// The test says it skips itself, and why.
-fn skip(test: &str, why: &str) {
-    let line = format!("{}sandbox::proxy::packs_tests::{test} — {why}\n", crate::test_results::SELF_SKIP);
+/// The test says it skips itself, and why (`test`: its name in this module, else its path from `proxy::`).
+pub(super) fn skip(test: &str, why: &str) {
+    let path = if test.contains("::") { test.to_string() } else { format!("packs_tests::{test}") };
+    let line = format!("{}sandbox::proxy::{path} — {why}\n", crate::test_results::SELF_SKIP);
     let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
 }
 

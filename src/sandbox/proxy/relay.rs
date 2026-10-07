@@ -2,6 +2,8 @@
 //! the server answers the first ClientHello with a TLS 1.3 HelloRetryRequest, the client sends a second one (RFC
 //! 8446 §4.1.2), and it must name the server the first did — else the tunnel closes. The server's first
 //! handshake bytes and that second ClientHello are held until they're judged; nothing else of the stream is read.
+//! A plain request sent to an upstream proxy (step 5g) has one look too: the answer's head, held until its status
+//! says whether it's that proxy's 407 — meant for tarae, never passed on.
 //!
 //! Linux (step 6a, `target/sb/step6a-plan.md`): once nothing is left to judge and nothing waits in tarae, the
 //! rest goes through a pipe each way by `splice` — the kernel moves it (R3: the direct rate, ≈ 2.0–2.5 GB/s, at
@@ -42,6 +44,9 @@ pub enum End {
     Dropped(usize),
     /// The proxy closed it: why, as the report says it.
     Closed(String),
+    /// A plain request through an upstream proxy (step 5g) was answered 407 — by that proxy, about tarae's
+    /// credentials: none of it went to the client.
+    Upstream407(super::upstream::Answer),
 }
 
 /// What's held back to be judged.
@@ -50,6 +55,9 @@ enum Look {
     Server(Vec<u8>),
     /// After one: the client's second ClientHello, until its name is read — by the deadline.
     Client(Vec<u8>, Instant),
+    /// A plain request through an upstream proxy: the answer's head, until its status says whether it's that
+    /// proxy's 407.
+    Answer(Vec<u8>),
     Off,
 }
 
@@ -58,6 +66,8 @@ enum Look {
 /// HelloRetryRequest checked against it, within `hello_time`. `body` — a plain request's — makes it one request
 /// in, one out: exactly that body goes on, then the server's side is half-closed and the client no longer read;
 /// what the client sent after its request (one pipelined behind it) is dropped, and said (`End::Dropped`).
+/// `upstream`: the server is an upstream proxy a plain request went to — its answer's head is held until its
+/// status is read, and a 407 (that proxy's, about tarae's credentials) ends the relay with none of it sent on.
 pub fn relay(
     client: TcpStream,
     server: TcpStream,
@@ -65,12 +75,13 @@ pub fn relay(
     hello_time: Duration,
     first: &[u8],
     body: Option<parse::Body>,
+    upstream: bool,
 ) -> End {
     #[cfg(target_os = "linux")]
     let pipes = splice::pipes;
     #[cfg(not(target_os = "linux"))]
     let pipes = || Err(io::Error::from(io::ErrorKind::Unsupported));
-    relay_with(client, server, name, hello_time, first, body, pipes)
+    relay_with(client, server, name, hello_time, first, body, upstream, pipes)
 }
 
 /// Tests: each relay's spliced bytes by its client's peer — the test's own end of it (`spliced_by`): None while
@@ -116,6 +127,7 @@ pub fn spliced_by(end: std::net::SocketAddr) -> Option<usize> {
 }
 
 /// `relay`, the pipes to splice through made by `pipes` (an Err: it stays on the pump).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn relay_with(
     client: TcpStream,
     server: TcpStream,
@@ -123,6 +135,7 @@ pub(super) fn relay_with(
     hello_time: Duration,
     first: &[u8],
     body: Option<parse::Body>,
+    upstream: bool,
     pipes: fn() -> io::Result<Pipes>,
 ) -> End {
     let sides = [client, server];
@@ -138,7 +151,11 @@ pub(super) fn relay_with(
             return End::Done;
         }
     }
-    let look = if name.is_some() { Look::Server(Vec::new()) } else { Look::Off };
+    let look = match (name, upstream) {
+        (Some(_), _) => Look::Server(Vec::new()),
+        (None, true) => Look::Answer(Vec::new()),
+        (None, false) => Look::Off,
+    };
     let plain = body.is_some();
     let mut f = Flow { look, body, pending: [Vec::new(), Vec::new()], name, hello_time, dropped: 0 };
     let mut spliced = 0;
@@ -210,15 +227,15 @@ fn pump(
     // for writing, `poll` waits until it takes bytes — no spin: `a_half_closed_slow_reader_doesnt_spin_the_relay`)
     let (mut eof, mut shut, mut hup) = ([false; 2], [false; 2], [false; 2]);
     let mut buf = vec![0u8; CHUNK];
-    if let Some(why) = feed(f, 0, first, false) {
-        return End::Closed(why);
+    if let Some(end) = feed(f, 0, first, false) {
+        return end;
     }
     let whole = |f: &Flow| f.body.as_ref().is_some_and(parse::Body::done);
     eof[0] |= whole(f);
     loop {
         let (look, pending) = (&f.look, &f.pending);
         let held = match look {
-            Look::Server(b) | Look::Client(b, _) => b.len(),
+            Look::Server(b) | Look::Client(b, _) | Look::Answer(b) => b.len(),
             Look::Off => 0,
         };
         let mut fds: [libc::pollfd; 2] = std::array::from_fn(|i| {
@@ -272,8 +289,8 @@ fn pump(
                 eof[i] = true;
             }
             let bytes = &buf[..got];
-            if let Some(why) = feed(f, i, bytes, got == 0) {
-                return End::Closed(why);
+            if let Some(end) = feed(f, i, bytes, got == 0) {
+                return end;
             }
             // (a plain request's body whole: the client isn't read any more, the server's side half-closes)
             eof[0] |= whole(f);
@@ -333,10 +350,11 @@ struct Flow<'a> {
 }
 
 /// Bytes read from side `from` (0 the client, 1 the server; `end`: it read to its end) put where they go — held
-/// while `look` judges them, a client's past its request's `body` dropped. Some: why the tunnel closes.
-fn feed(f: &mut Flow, from: usize, bytes: &[u8], end: bool) -> Option<String> {
+/// while `look` judges them, a client's past its request's `body` dropped. Some: how the relay ends now.
+fn feed(f: &mut Flow, from: usize, bytes: &[u8], end: bool) -> Option<End> {
     let Flow { look, body, pending, name, hello_time, dropped } = f;
     let (name, hello_time) = (*name, *hello_time);
+    let closed = |why: String| Some(End::Closed(why));
     let to = 1 - from;
     let next = match look {
         Look::Server(b) if from == 1 => {
@@ -345,7 +363,16 @@ fn feed(f: &mut Flow, from: usize, bytes: &[u8], end: bool) -> Option<String> {
                 Said::More => return None,
                 Said::Retry => Look::Client(Vec::new(), Instant::now() + hello_time),
                 Said::Other => Look::Off,
-                Said::Cut => return Some("a ServerHello cut shorter than its random".into()),
+                Said::Cut => return closed("a ServerHello cut shorter than its random".into()),
+            }
+        }
+        // (what isn't an answer tarae reads, or ends before its head does, goes on as it came: it isn't tarae's)
+        Look::Answer(b) if from == 1 => {
+            b.extend_from_slice(bytes);
+            match super::upstream::answer(b) {
+                Ok(None) if !end => return None,
+                Ok(Some(a)) if a.status == 407 => return Some(End::Upstream407(a)),
+                _ => Look::Off,
             }
         }
         Look::Client(b, _) if from == 0 => {
@@ -358,17 +385,17 @@ fn feed(f: &mut Flow, from: usize, bytes: &[u8], end: bool) -> Option<String> {
             let first = name.unwrap_or_default();
             match parse::server_name(rest) {
                 Ok(None) if !end => return None,
-                Ok(None) => return Some("it ended before its second ClientHello was whole".into()),
+                Ok(None) => return closed("it ended before its second ClientHello was whole".into()),
                 Ok(Some(n)) if n == first => Look::Off,
-                Ok(Some(n)) => return Some(format!("its second ClientHello names {n}, not {first}")),
-                Err(e) => return Some(format!("its second ClientHello: {}", e.said())),
+                Ok(Some(n)) => return closed(format!("its second ClientHello names {n}, not {first}")),
+                Err(e) => return closed(format!("its second ClientHello: {}", e.said())),
             }
         }
         _ => {
             let n = match body.as_mut().filter(|_| from == 0) {
                 Some(b) => match b.take(bytes) {
                     Ok(n) => n,
-                    Err(why) => return Some(format!("its request's body: {why}")),
+                    Err(why) => return closed(format!("its request's body: {why}")),
                 },
                 None => bytes.len(),
             };
@@ -378,7 +405,7 @@ fn feed(f: &mut Flow, from: usize, bytes: &[u8], end: bool) -> Option<String> {
         }
     };
     // What was held goes on as it came
-    if let Look::Server(b) | Look::Client(b, _) = look {
+    if let Look::Server(b) | Look::Client(b, _) | Look::Answer(b) = look {
         pending[to].append(b);
     }
     *look = next;

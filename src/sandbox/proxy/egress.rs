@@ -2,13 +2,16 @@
 //! session may reach, a read-only snapshot each message carries (D23) — and the addresses a name resolves to,
 //! each checked as `route` checks a run's own connect (this machine, the never-reached, this machine's own
 //! addresses beyond loopback; an IPv4-mapped address as its IPv4 one), the connection made to the very address
-//! checked: one lookup, never a second.
+//! checked: one lookup, never a second. Or, where tarae itself goes out through a proxy (step 5g, `upstream`),
+//! through that one: the run's name goes to it unresolved — its addresses are the upstream's to look up, so the
+//! address checks don't hold there, and the run's report says so.
 
 use std::io;
 use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::upstream::{self, Failed, Proto, Upstream, Way};
 use crate::sandbox::route;
 
 /// A host a rule names: one name, or every name under a domain (`*.crates.io` — not `crates.io` itself); at a
@@ -91,6 +94,9 @@ pub struct Egress {
     /// This machine's own addresses beyond loopback, as the run's policy read them — None where they couldn't
     /// be read: every address is refused (as `route` refuses it).
     pub own_addresses: Option<Vec<IpAddr>>,
+    /// The proxy tarae itself goes out by, as its environment named it when the run's policy was made (step 5g):
+    /// a host not in its `NO_PROXY` goes through it — the address checks then are the upstream's, not tarae's.
+    pub upstream: super::upstream::Upstreams,
     /// Test-only: loopback addresses taken for beyond this machine — the test's own listeners stand in for the
     /// outside (as `own_addresses: Some([])` stood in for step 4).
     #[cfg(test)]
@@ -190,6 +196,197 @@ pub fn connect(
     }
     let e = last.map(|e| e.to_string()).unwrap_or_default();
     Err(Refused::new(502, format!("no address of it answered ({e})")))
+}
+
+/// Where a request was let out: the connection, and the upstream it goes through (None: direct). A tunnel through
+/// an upstream is open to its host already (the upstream answered 2xx).
+pub struct Reached {
+    pub stream: TcpStream,
+    pub through: Option<Upstream>,
+}
+
+/// Why a request wasn't let out: tarae's own refusal, or the upstream's failure (its variable, what failed).
+#[derive(Debug)]
+pub enum NotReached {
+    Refused(Refused),
+    Upstream(&'static str, Failed),
+}
+
+/// The way out for `name:port` (`tunnel`: a CONNECT's; else a plain request's) as the run's rules say it
+/// (`Upstreams::way`): direct, `connect`'s — looked up, every address checked; or through the upstream proxy —
+/// its own address not checked (it's the user's, named by tarae's environment, never by a run), the run's name
+/// never looked up by tarae; a tunnel asked of it (`CONNECT name:port`, the credentials at once) and its answer
+/// read within `timeout`. Its failures go to tarae's log with its host:port, never its credentials.
+pub fn reach(
+    rules: &Egress,
+    resolve: &Resolve,
+    name: &str,
+    port: u16,
+    tunnel: bool,
+    timeout: Duration,
+) -> Result<Reached, NotReached> {
+    let up = match rules.upstream.way(name, port, tunnel) {
+        Way::Direct => {
+            let stream = connect(rules, resolve, name, port, timeout).map_err(NotReached::Refused)?;
+            return Ok(Reached { stream, through: None });
+        }
+        Way::Unusable(u) => return Err(NotReached::Upstream(u.var, Failed::Unusable(u.why))),
+        Way::Through(up) => up,
+    };
+    let failed = |f: Failed| NotReached::Upstream(up.var, upstream_said(up, name, port, f));
+    let stream = dial_upstream(up, resolve, timeout).map_err(failed)?;
+    // (an http one: a tunnel asked of it, a plain request goes as it is in absolute form; a SOCKS5 one: either
+    // asked by name, then what the run sends goes on as it would to the host)
+    match up.proto {
+        Proto::Http if tunnel => tunnel_through(&stream, up, name, port, timeout).map_err(failed)?,
+        Proto::Http => {}
+        Proto::Socks5 => socks_through(&stream, up, name, port, timeout).map_err(failed)?,
+    }
+    Ok(Reached { stream, through: Some(up.clone()) })
+}
+
+/// The upstream's failure for `name:port`, said in tarae's log — where it is (host:port, which a report never
+/// names), never its credentials.
+pub fn upstream_said(up: &Upstream, name: &str, port: u16, f: Failed) -> Failed {
+    let line = format!("the upstream proxy {} ({}) for {name}:{port}: {}", up.at(), up.var, f.said(up.var));
+    crate::log::line("sandbox", "warning", &line);
+    f
+}
+
+/// A connection to the upstream itself: its address as written, else its name looked up.
+fn dial_upstream(up: &Upstream, resolve: &Resolve, timeout: Duration) -> Result<TcpStream, Failed> {
+    let found = match up.host.parse::<IpAddr>() {
+        Ok(ip) => vec![SocketAddr::new(ip, up.port)],
+        Err(_) => resolve(&up.host, up.port).map_err(|_| Failed::NotFound)?,
+    };
+    let mut last = Failed::NotFound;
+    for a in found {
+        match dial(a, timeout) {
+            Ok(s) => return Ok(s),
+            // (the error's kind only: its text could carry what it was about)
+            Err(e) => last = Failed::Unreachable(e.kind().to_string()),
+        }
+    }
+    Err(last)
+}
+
+/// A tunnel asked of the upstream on `s`: its CONNECT sent, its answer read whole within `timeout` — 2xx with
+/// nothing after it, else why not (a 407 as tarae's credentials meet it).
+fn tunnel_through(
+    s: &TcpStream,
+    up: &Upstream,
+    name: &str,
+    port: u16,
+    timeout: Duration,
+) -> Result<(), Failed> {
+    use std::io::{Read, Write};
+    let silent = Failed::Silent(timeout);
+    (&*s).write_all(&up.connect_head(name, port)).map_err(|e| Failed::Unreachable(e.kind().to_string()))?;
+    let by = std::time::Instant::now() + timeout;
+    let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
+    let a = loop {
+        match upstream::answer(&buf) {
+            Ok(Some(a)) => break a,
+            Ok(None) => {}
+            Err(why) => return Err(Failed::Unreadable(why)),
+        }
+        let left = by.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() || s.set_read_timeout(Some(left)).is_err() {
+            return Err(silent);
+        }
+        match (&*s).read(&mut chunk) {
+            Ok(0) => return Err(Failed::Cut),
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
+                return Err(silent);
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return Err(Failed::Cut),
+        }
+    };
+    let _ = s.set_read_timeout(None);
+    match a.status {
+        200..=299 if buf.len() > a.len => Err(Failed::Extra),
+        200..=299 => Ok(()),
+        407 => Err(Failed::of_407(&a, up.has_credentials())),
+        other => Err(Failed::Status(other)),
+    }
+}
+
+/// A SOCKS5 connection to `name:port` asked of the upstream on `s` (RFC 1928, 1929): its greeting, its sign-in
+/// where it asks for tarae's credentials, its CONNECT by name — every answer read whole within `timeout`, byte by
+/// byte: nothing past the last is taken from what the host sends next.
+fn socks_through(
+    s: &TcpStream,
+    up: &Upstream,
+    name: &str,
+    port: u16,
+    timeout: Duration,
+) -> Result<(), Failed> {
+    use std::io::Write;
+    let by = std::time::Instant::now() + timeout;
+    let send = |b: &[u8]| (&*s).write_all(b).map_err(|e| Failed::Unreachable(e.kind().to_string()));
+    let not = Failed::Unreadable("not a SOCKS5 reply");
+    send(&up.socks_greeting())?;
+    let way = read_exactly(s, 2, by, timeout)?;
+    if way[0] != 5 {
+        return Err(not);
+    }
+    match (way[1], up.socks_sign_in()) {
+        (0, _) => {}
+        (2, Some(sign_in)) => {
+            send(&sign_in)?;
+            let said = read_exactly(s, 2, by, timeout)?;
+            if said[0] != 1 {
+                return Err(Failed::Unreadable("not a SOCKS5 sign-in reply"));
+            }
+            if said[1] != 0 {
+                return Err(Failed::SocksWrongCredentials);
+            }
+        }
+        (0xff, None) => return Err(Failed::SocksNoCredentials),
+        _ => return Err(Failed::SocksMethod),
+    }
+    send(&Upstream::socks_connect(name, port))?;
+    let mut reply = Vec::new();
+    loop {
+        match upstream::socks_reply(&reply) {
+            Ok(Some((0, _))) => break,
+            Ok(Some((rep, _))) => return Err(Failed::SocksRefused(rep)),
+            Ok(None) => reply.extend(read_exactly(s, 1, by, timeout)?),
+            Err(why) => return Err(Failed::Unreadable(why)),
+        }
+    }
+    let _ = s.set_read_timeout(None);
+    Ok(())
+}
+
+/// `n` bytes from `s` by `by` — Err: its end came first (`Cut`), or the time (`Silent`, said as `timeout`).
+fn read_exactly(
+    s: &TcpStream,
+    n: usize,
+    by: std::time::Instant,
+    timeout: Duration,
+) -> Result<Vec<u8>, Failed> {
+    use std::io::Read;
+    let mut got = vec![0u8; n];
+    let mut at = 0;
+    while at < n {
+        let left = by.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() || s.set_read_timeout(Some(left)).is_err() {
+            return Err(Failed::Silent(timeout));
+        }
+        match (&*s).read(&mut got[at..]) {
+            Ok(0) => return Err(Failed::Cut),
+            Ok(k) => at += k,
+            Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
+                return Err(Failed::Silent(timeout));
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return Err(Failed::Cut),
+        }
+    }
+    Ok(got)
 }
 
 /// The one place the proxy connects out. In tests only this machine is dialled — its loopback, or one of its own

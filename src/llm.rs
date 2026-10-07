@@ -109,6 +109,9 @@ pub struct LlmConfig {
     /// With the network on, the hosts reached without asking (`llm.sandbox-hosts`) — None: any host (`"any"`);
     /// another is held and asked on a card (`hosts.rs`).
     pub sandbox_hosts: Option<Vec<crate::sandbox::proxy::egress::Pattern>>,
+    /// With the network on, whether tarae's proxy goes on through the proxy tarae's own environment names
+    /// (`HTTPS_PROXY`…, `NO_PROXY` — `proxy::upstream`), or straight out.
+    pub sandbox_upstream: crate::sandbox::proxy::upstream::Setting,
     /// More folders the sandbox may write to (`~/` for home).
     pub sandbox_write: Vec<String>,
     /// Paths in the project the sandbox keeps as they are, besides the names it always keeps
@@ -150,6 +153,7 @@ impl Default for LlmConfig {
             sandbox: true,
             sandbox_network: false,
             sandbox_hosts: None,
+            sandbox_upstream: Default::default(),
             sandbox_write: Vec::new(),
             sandbox_protect: Vec::new(),
             sandbox_ports: Vec::new(),

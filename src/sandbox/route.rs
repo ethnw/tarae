@@ -98,6 +98,17 @@ const METADATA: [IpAddr; 4] = [
     IpAddr::V6(Ipv6Addr::new(0xfd20, 0xce, 0, 0, 0, 0, 0, 0x254)),
 ];
 
+/// The cloud metadata servers' own names, as their providers document them (Google Cloud's three, AWS's two):
+/// what the egress proxy refuses by name (step 5g) — through an upstream proxy, which looks names up itself,
+/// tarae never sees their addresses. A partial check: another name leading there (a wildcard DNS's) isn't caught.
+const METADATA_NAMES: [&str; 5] =
+    ["metadata.google.internal", "metadata.goog", "metadata", "instance-data", "instance-data.ec2.internal"];
+
+/// Whether `name` (as `proxy::parse::name` makes it: lowercase, no trailing dot) is a metadata server's own.
+pub fn never_named(name: &str) -> bool {
+    METADATA_NAMES.contains(&name)
+}
+
 /// An address never reached beyond this machine (D-d): link-local (`169.254.0.0/16` with `169.254.169.254`,
 /// `fe80::/10`), the cloud metadata servers that aren't (`METADATA`), multicast, broadcast — and an IPv6 address
 /// carrying one of those IPv4 ones to a gateway (`carried`).

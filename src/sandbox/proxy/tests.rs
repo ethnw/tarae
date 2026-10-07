@@ -9,6 +9,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::egress::Pattern;
 use super::*;
 
+// (step 5g: the proxy chaining to the one tarae itself goes out by — a stand-in upstream on loopback)
+mod upstream;
+
 const LO: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 /// How long a test waits for what it expects; the proxy's own limits are short (`limits`).
 const WAIT: Duration = Duration::from_secs(5);
@@ -827,7 +830,7 @@ fn relay_thread(
     pipes: fn() -> io::Result<relay::Pipes>,
 ) -> Bounded<(relay::End, f64)> {
     bounded(move || {
-        let end = relay::relay_with(client, server, None, WAIT, b"", None, pipes);
+        let end = relay::relay_with(client, server, None, WAIT, b"", None, false, pipes);
         // SAFETY: a timespec of ours, filled for this thread.
         let mut t: libc::timespec = unsafe { std::mem::zeroed() };
         unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) };

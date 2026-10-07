@@ -207,6 +207,14 @@ impl Guard {
             s.push_str(&kept);
             s.push_str(&quiet_said(&b).unwrap_or_default());
             s.push_str(&rules);
+            // (step 5g: what the proxy tarae itself goes out by failed is the user's proxy's, not the sandbox's)
+            if all_seen.iter().any(|d| d.op == proxy::UPSTREAM_OP) {
+                s.push_str(
+                    "\nWhat says network-upstream isn't the sandbox: the proxy tarae itself goes out by (its proxy \
+                     variables) failed or refused it — tell the user; their proxy, its credentials, or \
+                     llm.sandbox-upstream = \"none\" (straight out) is theirs to change.",
+                );
+            }
             if !all || b.distinct > b.seen.len() || o.distinct > o.seen.len() {
                 s.push_str(
                     "\nIf the command needs one of these, tell the user — they can open it from the run's \
@@ -392,6 +400,35 @@ impl Guard {
                     }
                 };
                 let loopback_only = routed.then(|| p.loopback_only()).flatten();
+                // (step 5g: through the proxy tarae itself uses, the names are that proxy's to look up — the
+                // address checks don't hold there, said plainly; its variables named, never where it is)
+                let never = "never link-local addresses, the cloud metadata servers tarae knows of, multicast or \
+                             broadcast";
+                let checks = match (p.egress.upstream.said(), p.egress.upstream.through()) {
+                    (None, _) => never.to_string(),
+                    (Some(ways), true) => format!(
+                        "beyond it, the proxy tarae itself uses ({ways}) — which looks the names up, so host names \
+                         and TLS server names are checked but not the addresses they lead to: link-local \
+                         addresses, the cloud metadata servers and this machine's own addresses aren't refused for \
+                         what goes through it (only the metadata servers' own names are — a partial check); \
+                         NO_PROXY's hosts go direct, {never}"
+                    ),
+                    (Some(ways), false) => format!("beyond it: {ways}; {never}"),
+                };
+                // (that proxy on this machine, at a port opened to the runs: they reach it themselves)
+                let reached_itself = p
+                    .egress
+                    .upstream
+                    .on_loopback()
+                    .into_iter()
+                    .any(|at| p.localhost || p.ports.contains(&at));
+                let checks = match reached_itself {
+                    true => format!(
+                        "{checks} (that proxy is on this machine, at a port open to your commands: they can reach it \
+                         themselves, around tarae's host checks, though without tarae's credentials)"
+                    ),
+                    false => checks,
+                };
                 let net = match (beyond, p.localhost, ports.is_empty()) {
                     _ if loopback_only.is_some() => format!(
                         ", and connect to nothing but this machine's loopback, {lo} — {}{}",
@@ -403,8 +440,7 @@ impl Guard {
                     (true, here, none) => format!(
                         ", and reach the network beyond this machine (its loopback and its own addresses) only \
                          through tarae's proxy (HTTPS_PROXY, set for every run) — a tool that ignores it (ssh, a \
-                         database client, Node's fetch without NODE_USE_ENV_PROXY) can't go out; never link-local \
-                         addresses, the cloud metadata servers tarae knows of, multicast or broadcast — {}",
+                         database client, Node's fetch without NODE_USE_ENV_PROXY) can't go out; {checks} — {}",
                         match (here, none) {
                             (true, _) => format!("and every port of this machine's{every}"),
                             (false, false) => format!("and this machine's ports {ports} only (llm.sandbox-ports)"),
@@ -712,8 +748,13 @@ pub struct Here {
 
 impl Here {
     pub fn now() -> Here {
+        let env = std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v)));
+        // (tests: no upstream proxy but one a test gives — a `cargo test` run by a sandboxed run with the network
+        // open has the outer tarae's proxy in its environment, and every proxy test would chain to it)
+        #[cfg(test)]
+        let env = env.filter(|(k, _)| !runenv::PROXIES.contains(&k.as_str()));
         Here {
-            env: std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v))).collect(),
+            env: env.collect(),
             tmp: std::fs::canonicalize(std::env::temp_dir()).ok(),
             // SAFETY: getuid has no preconditions and can't fail.
             uid: unsafe { libc::getuid() },
@@ -1159,6 +1200,11 @@ impl Denial {
             }
             // (step 5: the egress proxy's own refusals, `host:port: why` — `proxy::tell`)
             "network-proxy" => format!("reaching {t}"),
+            // (step 5g: the upstream proxy's failure, not tarae's refusal — `host:port: through …`)
+            "network-upstream" => match t.split_once(": ") {
+                Some((at, why)) => format!("reaching {at} — {why}"),
+                None => format!("reaching {t}"),
+            },
             // (a host the user's answer would lift: not among the hosts, no answer, refused — `hosts.rs`)
             "network-host" => match t.split_once(": ") {
                 Some((at, why)) => format!("reaching {at} — {why}"),
@@ -2764,6 +2810,7 @@ impl Policy {
             egress: proxy::egress::Egress {
                 any: env.network && env.hosts.is_none(),
                 hosts: if env.network { env.hosts.clone().unwrap_or_default() } else { Vec::new() },
+                upstream: if env.network { env.upstream.clone() } else { Default::default() },
                 ..Default::default()
             },
             run_id: next_run(),
@@ -2854,6 +2901,8 @@ pub struct Env {
     pub localhost: bool,
     /// `llm.sandbox-hosts` (None: any host).
     pub hosts: Option<Vec<proxy::egress::Pattern>>,
+    /// The proxy tarae itself goes out by, as its environment names it (`llm.sandbox-upstream`, step 5g).
+    pub upstream: proxy::upstream::Upstreams,
     /// `$TMUX_TMPDIR` · `$ZELLIJ_SOCKET_DIR` · the user's id (their socket folders — `mux_dirs`).
     pub tmux_tmpdir: Option<PathBuf>,
     pub zellij_dir: Option<PathBuf>,
@@ -3007,6 +3056,7 @@ pub(crate) fn env_in(
         ports: llm.sandbox_ports.clone(),
         localhost: llm.sandbox_localhost,
         hosts: llm.sandbox_hosts.clone(),
+        upstream: upstream_of(here, llm.sandbox_upstream),
         tmux_tmpdir: here.path("TMUX_TMPDIR"),
         zellij_dir: here.path("ZELLIJ_SOCKET_DIR"),
         uid: here.uid,
@@ -3034,6 +3084,19 @@ pub(crate) fn env_in(
         env.reads.kept.dedup();
     }
     (env, above)
+}
+
+/// The upstream proxy `here`'s environment names, as `setting` takes it (step 5g) — variables set in both cases
+/// with different values said in tarae's log once since tarae started (which one was taken: curl's order).
+fn upstream_of(here: &Here, setting: proxy::upstream::Setting) -> proxy::upstream::Upstreams {
+    let u = proxy::upstream::of(&here.env, setting);
+    static SAID: std::sync::Once = std::sync::Once::new();
+    if !u.mixed.is_empty() {
+        let pairs: Vec<String> = u.mixed.iter().map(|(t, l)| format!("{t} over {l}")).collect();
+        let line = format!("tarae's proxy variables differ in case — taken: {}", pairs.join(", "));
+        SAID.call_once(|| crate::log::line("sandbox", "warning", &line));
+    }
+    u
 }
 
 /// The tools' homes kept across the project's runs (`run-home`s with `keep`, in a project with one of their
@@ -5477,6 +5540,114 @@ mod tests {
         let here = Here { tmp: Some(t.clone()), uid: 501, os, ..Here::default() };
         let llm = crate::llm::LlmConfig { sandbox_network: network, ..Default::default() };
         (policy_in(&t.join("p"), &llm, &[], &here), t)
+    }
+
+    /// Step 5g: the proxy tarae itself goes out by is read from tarae's environment for tarae's proxy alone — a run
+    /// never gets it. With the network open the run's proxy variables name tarae's own proxy, and so do the packs'
+    /// proxy files; closed, none at all. The upstream's host and credentials are nowhere in the run's environment
+    /// or its files, on either system's policy.
+    #[test]
+    fn runs_never_see_the_upstream() {
+        fn files(dir: &Path, out: &mut Vec<String>) {
+            for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                match e.file_type().is_ok_and(|t| t.is_dir()) {
+                    true => files(&e.path(), out),
+                    false => out.extend(std::fs::read_to_string(e.path())),
+                }
+            }
+        }
+        // (one with credentials — left out as token-like anyway — and one without: its host alone mustn't pass)
+        let (user, bare) =
+            ("http://u:tarae-fake-token-1@up.example.invalid:3128", "http://up.example.invalid:3128");
+        for (os, network) in [(Os::Mac, true), (Os::Linux, true), (Os::Mac, false), (Os::Linux, false)] {
+            let name = format!("tarae-sb-upstream-{os:?}-{network}-{}", std::process::id());
+            let t = profile_path(&std::env::temp_dir()).join(name);
+            std::fs::remove_dir_all(&t).ok();
+            std::fs::create_dir_all(t.join("p")).unwrap();
+            std::fs::create_dir_all(t.join("run")).unwrap();
+            let vars =
+                [("HTTPS_PROXY", user), ("http_proxy", bare), ("ALL_PROXY", user), ("PATH", "/usr/bin:/bin")];
+            let env = vars.iter().map(|(k, v)| (k.to_string(), std::ffi::OsString::from(v))).collect();
+            let here = Here { env, tmp: Some(t.clone()), uid: 501, os, ..Here::default() };
+            let llm = crate::llm::LlmConfig { sandbox_network: network, ..Default::default() };
+            let p = policy_in(&t.join("p"), &llm, &[], &here);
+            assert_eq!(
+                p.egress.upstream.through(),
+                network,
+                "{os:?}: the proxy's own, from tarae's environment"
+            );
+            let cmd = command(Some(&p), "true", &[]);
+            let https = cmd.get_envs().find(|(k, _)| *k == "HTTPS_PROXY").and_then(|(_, v)| v?.to_str());
+            assert_eq!(https.map(str::to_string), p.proxy_url().map(|u| u.url()), "{os:?} {network}");
+            let mut seen: Vec<String> = cmd.get_envs().map(|(k, v)| format!("{k:?}={v:?}")).collect();
+            let packs = proxied(&t, &t.join("run"), &[], p.proxy_url().as_ref());
+            seen.extend(packs.into_iter().map(|(k, v)| format!("{k}={v}")));
+            files(&t.join("run"), &mut seen);
+            assert!(network == seen.iter().any(|s| s.contains("proxyHost")), "{os:?}: the Java pack's lines");
+            for s in &seen {
+                assert!(
+                    !s.contains("up.example.invalid") && !s.contains("tarae-fake-token-1"),
+                    "{os:?}: {s}"
+                );
+            }
+            std::fs::remove_dir_all(&t).ok();
+        }
+    }
+
+    /// Step 5g (macOS; Linux's in `linux::tests::the_report_says_how_linux_differs`): where tarae itself goes out
+    /// through a proxy, the run's report says plainly what that changes — its names go to that proxy unresolved, so
+    /// the address checks don't hold for them (only the metadata servers' own names are refused, a partial check),
+    /// and NO_PROXY's hosts go direct, checked — naming the variables, never where that proxy is nor its
+    /// credentials. Without one, the line as it was; one tarae can't chain to: nothing goes that way, and the
+    /// setting that sends runs direct.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_report_says_the_address_checks_are_skipped() {
+        let opened = |vars: &[(&str, &str)], ports: Vec<u16>| {
+            let named = vars.iter().map(|(k, v)| (k.to_string(), std::ffi::OsString::from(v))).collect();
+            let upstream = proxy::upstream::of(&named, proxy::upstream::Setting::Env);
+            let p =
+                Policy::for_project(&Env { network: true, upstream, ports, ..env(Path::new("/Users/u/p")) });
+            let p = Policy { proxy: Some(proxy::RunPort::new(0).unwrap()), ..p };
+            let r = Guard::In(Box::new(p)).report(&[]);
+            r.split_whitespace().collect::<Vec<_>>().join(" ")
+        };
+        let said = |vars: &[(&str, &str)]| opened(vars, Vec::new());
+        let corp = "http://u:tarae-fake-token-4@corp-proxy.example.invalid:3128";
+        let r = said(&[("HTTPS_PROXY", corp), ("http_proxy", corp)]);
+        assert!(
+            r.contains(
+                "can't go out; beyond it, the proxy tarae itself uses (https through tarae's own HTTPS_PROXY, plain \
+                 http through tarae's own http_proxy) — which looks the names up, so host names and TLS server names \
+                 are checked but not the addresses they lead to: link-local addresses, the cloud metadata servers \
+                 and this machine's own addresses aren't refused for what goes through it (only the metadata \
+                 servers' own names are — a partial check); NO_PROXY's hosts go direct, never link-local \
+                 addresses, the cloud metadata servers tarae knows of, multicast or broadcast — but none of this \
+                 machine's ports"
+            ),
+            "{r}"
+        );
+        assert!(!r.contains("corp-proxy") && !r.contains("tarae-fake-token"), "{r}");
+        let r = said(&[]);
+        assert!(
+            r.contains("can't go out; never link-local addresses") && !r.contains("tarae itself uses"),
+            "{r}"
+        );
+        let r = said(&[("HTTPS_PROXY", "https://corp-proxy.example.invalid:3129")]);
+        assert!(
+            r.contains(
+                "can't go out; beyond it: https nowhere — tarae's own HTTPS_PROXY names an https:// proxy, which \
+                 tarae's proxy doesn't chain to yet (llm.sandbox-upstream = \"none\" sends it direct), plain http \
+                 direct; never link-local addresses"
+            ),
+            "{r}"
+        );
+        // That proxy on this machine, at a port open to the runs: they reach it themselves — said; not open, not
+        let itself =
+            "that proxy is on this machine, at a port open to your commands: they can reach it themselves";
+        let local = [("HTTPS_PROXY", "http://127.0.0.1:3128")];
+        assert!(opened(&local, vec![3128]).contains(itself));
+        assert!(!opened(&local, vec![3129]).contains(itself) && !said(&local).contains(itself));
     }
 
     /// A run's proxy URL is the one decision every proxy line hangs on (step 5f), made from the policy alone —

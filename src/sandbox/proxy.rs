@@ -12,11 +12,15 @@
 //! every address checked, the connection made to the address checked (`egress::connect`), then for a tunnel the
 //! ClientHello's server name (`parse::server_name`) within `hello_time`, which must be the CONNECT host, and the
 //! relay (`relay::relay`, one thread with `poll`; a second ClientHello after a HelloRetryRequest names the same
-//! server). Every refusal is said on the run's sender, as the supervisor's are.
+//! server). Every refusal is said on the run's sender, as the supervisor's are. Where tarae itself goes out
+//! through a proxy (step 5g, `upstream`), the connection is made through that one instead (`egress::reach`): the
+//! host and server-name checks as ever, the addresses the upstream's — and its failures said apart
+//! (`UPSTREAM_OP`). A cloud metadata server's own name is refused whichever way (`route::never_named`).
 
 pub mod egress;
 pub mod parse;
 pub mod relay;
+pub mod upstream;
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Write};
@@ -27,10 +31,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
-use egress::{Egress, Refused, Resolve};
+use egress::{Egress, NotReached, Reached, Refused, Resolve};
 use parse::{Auth, Host, Request};
+use upstream::{Failed, Proto};
 
-use super::Denial;
+use super::{Denial, route};
 
 /// The op a proxy's refusal is said with in a run's report.
 pub const OP: &str = "network-proxy";
@@ -38,6 +43,10 @@ pub const OP: &str = "network-proxy";
 /// The op of a refusal the user's answer would lift — the host isn't among the run's, and the user said no, didn't
 /// answer in time, or had too many questions up (`:sandbox-blocked` offers that host).
 pub const HOST_OP: &str = "network-host";
+
+/// The op of the upstream proxy's failure (step 5g: the one tarae itself goes out by — unreachable, its 407, its
+/// refusal): not tarae's, and no answer of the user's would lift it.
+pub const UPSTREAM_OP: &str = "network-upstream";
 
 /// A run's connection, as the supervisor hands it (Linux): the proxy's end of the TCP pair whose other end is
 /// in the run's place.
@@ -756,6 +765,20 @@ fn serve(c: Conn, shared: &Shared) {
         answer(s, r.status, &why, "");
         tell(&c, &why);
     };
+    // (the upstream proxy's failure, not tarae's refusal: its own op — no answer of the user's would lift it)
+    let upstream_failed = |var: &str, f: &Failed| {
+        let why = format!("{name}:{port}: {}", f.said(var));
+        answer(s, 502, &why, "");
+        tell_op(&c, UPSTREAM_OP, &why);
+    };
+    // (whichever way it'd go: through an upstream, tarae never sees the addresses a name leads to)
+    if route::never_named(&name) {
+        return refuse(Refused::new(
+            403,
+            "a cloud metadata server's own name — never reached (refused by name: another name leading there \
+             through an upstream proxy isn't caught)",
+        ));
+    }
     // (a refusal the user's answer would lift: its own op — `:sandbox-blocked` offers the host)
     let refuse_host = |why: String| {
         let why = format!("{name}:{port}: {why}");
@@ -788,14 +811,24 @@ fn serve(c: Conn, shared: &Shared) {
             }
         }
     }
-    let up = match egress::connect(&c.rules, &shared.resolve, &name, port, limits.connect) {
-        Ok(up) => up,
-        Err(r) => return refuse(r),
-    };
+    let tunnel = matches!(h.request, Request::Connect { .. });
+    let Reached { stream: up, through } =
+        match egress::reach(&c.rules, &shared.resolve, &name, port, tunnel, limits.connect) {
+            Ok(r) => r,
+            Err(NotReached::Refused(r)) => return refuse(r),
+            Err(NotReached::Upstream(var, f)) => return upstream_failed(var, &f),
+        };
     let rest = buf.split_off(h.len);
     let (sni, first, body) = match h.request {
-        // (only the head and its body: what follows them isn't this request's — `relay` drops it)
-        Request::Plain { head, body, .. } => {
+        // (only the head and its body: what follows them isn't this request's — `relay` drops it; to an http
+        // upstream in absolute form, with its credentials; through a SOCKS5 one as to the host, in origin form)
+        Request::Plain { method, host, head, body, .. } => {
+            let head = match &through {
+                Some(u) if u.proto == Proto::Http => {
+                    u.plain_head(&parse::absolute(method, &host, port, &head))
+                }
+                _ => head,
+            };
             if relay_send(&up, &head).is_err() {
                 return;
             }
@@ -829,8 +862,17 @@ fn serve(c: Conn, shared: &Shared) {
         Ok(s) => s,
         Err(_) => return,
     };
-    match relay::relay(client, up, sni.as_deref(), limits.hello_time, &first, body) {
+    // (an http upstream's 407 is its own, about tarae's credentials; through SOCKS5 the answer is the host's)
+    let plain_through = through.as_ref().is_some_and(|u| u.proto == Proto::Http) && !tunnel;
+    match relay::relay(client, up, sni.as_deref(), limits.hello_time, &first, body, plain_through) {
         relay::End::Done => {}
+        relay::End::Upstream407(a) => {
+            let Some(u) = &through else { return };
+            let f = egress::upstream_said(u, &name, port, Failed::of_407(&a, u.has_credentials()));
+            // (the relay left it non-blocking: the answer is written whole)
+            let _ = c.stream.set_nonblocking(false);
+            upstream_failed(u.var, &f);
+        }
         relay::End::Dropped(n) => tell(
             &c,
             &format!(
@@ -1230,6 +1272,9 @@ mod tests;
 // (the packs' proxy lines through the real path, both systems — and the tests' run time limit)
 #[cfg(test)]
 mod packs_tests;
+// (step 5g: a run's way out through the upstream proxy, the real path on both systems)
+#[cfg(test)]
+mod upstream_real;
 // (macOS's runs through the real path: a run's port, its profile, its environment, its spawn and end)
 #[cfg(all(test, target_os = "macos"))]
 mod macos_tests;

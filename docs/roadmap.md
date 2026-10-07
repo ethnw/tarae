@@ -61,11 +61,14 @@ from each other. Daemons such as Gradle's stay warm between runs.
    own loopback, to this machine, or out. An outbound socket is replaced by one made in tarae's own network, so
    the session's network stays closed. Link-local, metadata, multicast, broadcast and unspecified addresses are
    refused. Measured: a cost of about 0.2 s per Gradle run, seen only in tier A+.
-5. **The egress proxy** — done but for two parts. One proxy in tarae, as threads: connections go out by host
+5. **The egress proxy** — done. One proxy in tarae, as threads: connections go out by host
    name. It reads the HTTP CONNECT line and the TLS SNI, and never decrypts; plain HTTP goes through it too. A host
    the run's rules don't name waits for the user's card; `llm.sandbox-hosts` lists the ones allowed. On macOS each
    run gets a port and a token of its own. On Linux the relay splices a connection once it has read its start.
-   Still to do: tools that ignore the proxy variables, as pack data (under way), and an upstream proxy.
+   Tools that ignore the proxy variables are told by their packs. Where tarae itself goes out through a proxy,
+   it chains to that one, http:// or SOCKS5 (host and SNI checks kept; the address checks are that proxy's, said
+   in the report).
+   Later: an `https://` upstream, and Negotiate/NTLM.
 6. **The transparent proxy** — on Linux where the session has a capable user namespace (tiers A+ and A; stock
    Ubuntu with tarae's AppArmor profile). Sockets tarae plants in the session's network take every connection and
    UDP datagram, each keeping its address (TPROXY, set up by tarae's own netlink): no proxy variables, nothing a

@@ -20,7 +20,7 @@ use crate::keymap::Keymaps;
 
 /// Settings a project file sets only once trusted: they run commands, or change what Claude's commands do
 /// unasked (`llm.sandbox*` comes with the sandbox), or what Claude sees.
-pub const RISKY: [&str; 20] = [
+pub const RISKY: [&str; 21] = [
     "editor.restart-build",
     "editor.restart-binary",
     "llm.command",
@@ -34,6 +34,8 @@ pub const RISKY: [&str; 20] = [
     "llm.sandbox-network",
     // (a project's list takes the user's place — it could name more)
     "llm.sandbox-hosts",
+    // (where the runs' traffic goes: around the user's own proxy, or through it)
+    "llm.sandbox-upstream",
     "llm.sandbox-write",
     "llm.sandbox-protect",
     "llm.sandbox-ports",
@@ -520,6 +522,22 @@ mod tests {
         record(path.clone(), toml(&wt), v(0xa), false).unwrap();
         assert_eq!(Store::read(Some(&path)).state(&toml(&main), v(0xa)), State::Ignored);
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Every `llm.sandbox*` setting changes what Claude's commands may do unasked — where they write, what they
+    /// reach and by which way (`llm.sandbox-upstream`: around the user's own proxy, or through it) — so a
+    /// project's waits for trust. A new one is risky unless it's named here as tarae's own housekeeping.
+    #[test]
+    fn every_sandbox_setting_waits_for_trust() {
+        // (when tarae removes the kept run homes no run has used: nothing a run can do changes)
+        const HOUSEKEEPING: [&str; 1] = ["llm.sandbox-kept-days"];
+        let sandbox = crate::settings::SETTINGS.iter().filter(|s| s.path.starts_with("llm.sandbox"));
+        let mut n = 0;
+        for s in sandbox {
+            assert_eq!(is_risky(s.path), !HOUSEKEEPING.contains(&s.path), "{}", s.path);
+            n += 1;
+        }
+        assert!(n >= 10, "the sandbox's settings found: {n}");
     }
 
     #[test]

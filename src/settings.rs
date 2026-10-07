@@ -477,6 +477,17 @@ pub static SETTINGS: &[Setting] = &[
         },
     },
     Setting {
+        path: "llm.sandbox-upstream",
+        kind: Kind::Enum(&["env", "none"]),
+        doc: "Chat, with llm.sandbox-network on: \"env\" — where tarae's own environment names a proxy (HTTPS_PROXY, HTTP_PROXY, ALL_PROXY; NO_PROXY's hosts direct), tarae's proxy goes on through it — http://, or SOCKS5 (socks5:// and socks5h:// alike: the name goes to it): hosts and TLS server names are still checked, the addresses they lead to are that proxy's to look up and aren't; an https:// or SOCKS4 one isn't chained to, and nothing goes that way. \"none\": straight out, every address checked",
+        get: |c| Value::from(c.llm.sandbox_upstream.as_str()),
+        set: |c, v| {
+            if let Some(s) = v.as_str().and_then(crate::sandbox::proxy::upstream::Setting::parse) {
+                c.llm.sandbox_upstream = s
+            }
+        },
+    },
+    Setting {
         path: "llm.sandbox-ports",
         kind: Kind::Ports { max: crate::sandbox::PORTS_MAX },
         doc: "Chat: ports on this machine Claude's commands may connect to in the sandbox — a dev server, a test's database ([3000, 5432])",

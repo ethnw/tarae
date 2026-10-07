@@ -633,3 +633,36 @@ fn only_a_checkable_server_name_is_taken() {
     assert!(same_host(&named, "a.test") && !same_host(&named, "b.test"));
     assert!(!same_host(&Host::Addr(IpAddr::V4(Ipv4Addr::LOCALHOST)), "127.0.0.1"));
 }
+
+/// What tarae sends an upstream proxy as `Basic` is what a proxy reads back — every length's padding (none, one
+/// `=`, two), every byte value — and RFC 4648's own vectors.
+#[test]
+fn base64_reads_back_as_it_was_written() {
+    for (raw, b64) in [("", ""), ("f", "Zg=="), ("fo", "Zm8="), ("foo", "Zm9v"), ("foobar", "Zm9vYmFy")] {
+        assert_eq!(base64(raw.as_bytes()), b64, "{raw}");
+    }
+    let mut rng = Rng(0xba5e_64ee_d1ce_0005);
+    for _ in 0..2000 {
+        let b: Vec<u8> = (0..rng.below(40) + 1).map(|_| rng.next() as u8).collect();
+        assert_eq!(unbase64(base64(&b).as_bytes()), Some(b.clone()), "{b:?}");
+    }
+}
+
+/// A plain request's head in absolute form is the origin-form head with the scheme and its host put before the
+/// path — nothing else changed: its `Host`, its headers and its end as they were (step 5g: what an upstream
+/// proxy takes). A port other than 80 is kept; an IPv6 host in brackets.
+#[test]
+fn a_plain_head_in_absolute_form() {
+    let raw = b"POST http://web.test:8080/f?q=1 HTTP/1.1\r\nHost: web.test:8080\r\nContent-Length: 3\r\n\r\n";
+    let Some(Head { request: Request::Plain { method, host, port, head: origin, .. }, .. }) =
+        head(raw).unwrap()
+    else {
+        panic!("a plain request")
+    };
+    let abs = String::from_utf8(absolute(method, &host, port, &origin)).unwrap();
+    let origin = String::from_utf8(origin).unwrap();
+    assert!(origin.starts_with("POST /f?q=1 HTTP/1.1\r\n"), "{origin}");
+    assert_eq!(abs, origin.replacen("POST /f", "POST http://web.test:8080/f", 1));
+    let v6 = absolute("GET", &Host::Addr("::1".parse().unwrap()), 80, b"GET / HTTP/1.1\r\n\r\n");
+    assert_eq!(v6, b"GET http://[::1]/ HTTP/1.1\r\n\r\n");
+}

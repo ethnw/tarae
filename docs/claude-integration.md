@@ -616,6 +616,24 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
   in `sandbox.json`; `:sandbox-allowed` lists hosts (always, this session) and `:sandbox-disallow host
   name:port` takes one back — for the runs going on too. A host refused (unanswered, or `n`) is offered on
   `space m s` as well. While the network is off, the list does nothing
+- **Through your own proxy.** Where tarae itself goes out through a proxy — `HTTPS_PROXY`, `HTTP_PROXY` or
+  `ALL_PROXY` in the environment you started it from, lowercase forms first, as curl reads them — tarae's proxy
+  goes on through that one, with the `user:password` its URL carries. Through an `http://` one a tunnel becomes a
+  `CONNECT` for the same host and port, and a plain request goes to it in the form proxies take. Through a SOCKS5
+  one (`socks5h://`, as local VPN and proxy clients set `ALL_PROXY`, or `socks5://`: the same, since tarae always
+  sends the host's name) both are asked of it by name, signed in with the user and password where there are any.
+  The host and TLS server-name checks still
+  apply. **The address checks don't**: that proxy looks the names up, so tarae can't refuse link-local
+  addresses, the cloud metadata servers or this machine's own addresses for what goes through it. Only the
+  metadata servers' own names (`metadata.google.internal`, `instance-data`, …) are refused, by name, which is a
+  partial check: another name that leads there isn't caught. The run's report says so whenever such a proxy is
+  in use. `NO_PROXY`'s hosts go direct, with every check. The commands never see your proxy: their proxy
+  variables name tarae's. Its credentials stay in tarae's memory: they're sent to that proxy alone, never
+  logged, and never in a command's environment or report. The report names the variable only, never where the
+  proxy is; tarae's log names its host and port. When that proxy refuses, can't be reached or answers 407, the
+  report says so as the proxy's (`network-upstream`), not the sandbox's. An `https://` or SOCKS4 proxy, or one
+  asking for Negotiate/NTLM, isn't spoken to yet: nothing goes that way, and the report says why.
+  `llm.sandbox-upstream = "none"` sends the commands straight out, with every check
 - Unix sockets work only in the project and in a temp folder made for each run, which the command gets as
   `TMPDIR`. The sockets in `/tmp` and your own temp folder belong to programs running outside the sandbox
   (tmux, zellij, ssh-agent), and some of them would run whatever they're told. tmux's and zellij's socket

@@ -263,6 +263,33 @@ fn unbase64(s: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Standard base64, padded (`unbase64` reads it back): an upstream proxy's credentials as `Basic` sends them.
+pub fn base64(b: &[u8]) -> String {
+    const ABC: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(b.len().div_ceil(3) * 4);
+    for chunk in b.chunks(3) {
+        let n = chunk.iter().enumerate().fold(0u32, |acc, (i, &c)| acc | u32::from(c) << (16 - 8 * i));
+        for i in 0..4 {
+            match i <= chunk.len() {
+                true => out.push(char::from(ABC[(n >> (18 - 6 * i) & 63) as usize])),
+                false => out.push('='),
+            }
+        }
+    }
+    out
+}
+
+/// A plain request's head (`Request::Plain`'s, in origin form) in absolute form, as a proxy takes it — what goes
+/// to an upstream proxy (step 5g): its target `http://` + its host (as its `Host` says it) + the path.
+pub fn absolute(method: &str, host: &Host, port: u16, head: &[u8]) -> Vec<u8> {
+    let path = head.get(method.len() + 1..).unwrap_or_default();
+    let mut out = Vec::with_capacity(head.len() + 300);
+    out.extend_from_slice(method.as_bytes());
+    out.extend_from_slice(format!(" http://{}", host.header(port, 80)).as_bytes());
+    out.extend_from_slice(path);
+    out
+}
+
 /// The headers a plain-http request's head loses on its way (`Host` made again from the URI) besides every
 /// `Proxy-*` one: the hop-by-hop ones (RFC 9110 §7.6.1).
 const HOP_BY_HOP: [&str; 5] = ["host", "connection", "keep-alive", "te", "upgrade"];

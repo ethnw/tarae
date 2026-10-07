@@ -892,6 +892,43 @@ Z = ["move_line_down", ":sh touch marker"]
         assert_eq!(i.editor.restart_build, "");
     }
 
+    /// `llm.sandbox-upstream` from a project file, all the way to a run's policy: held back until the project is
+    /// trusted (else an untrusted file could send the runs around the user's proxy), then `"none"` reaches
+    /// `LlmConfig` and the policy made from it — the proxy named in tarae's environment isn't chained to; with
+    /// `"env"` it is.
+    #[test]
+    fn a_projects_upstream_setting_waits_for_trust_then_reaches_the_policy() {
+        use crate::sandbox::{Here, Os, policy_in};
+        use crate::trust::{State, Store};
+        let path = project_file("upstream", "[llm]\nsandbox-upstream = \"none\"\n");
+        let (c, _) = load_from(None, Some(path.clone()), &Store::default());
+        let p = c.project.as_ref().expect("held back");
+        assert_eq!(p.state, State::Ask);
+        assert!(p.items.iter().any(|(k, v)| k == "llm.sandbox-upstream" && v == "\"none\""), "{:?}", p.items);
+        let mut store = Store::default();
+        store.answer(&path, p.hash, true);
+        let (t, _) = load_from(None, Some(path.clone()), &store);
+        // The policy each config makes, the network on, tarae's environment naming a proxy
+        let root = path.parent().unwrap();
+        let here = Here {
+            env: std::collections::HashMap::from([(
+                "HTTPS_PROXY".to_string(),
+                std::ffi::OsString::from("http://up.example.invalid:3128"),
+            )]),
+            tmp: Some(root.to_path_buf()),
+            uid: 501,
+            os: Os::HOST,
+            ..Here::default()
+        };
+        let through = |c: &Config| {
+            let llm = crate::llm::LlmConfig { sandbox_network: true, ..c.editor.llm.clone() };
+            policy_in(root, &llm, &[], &here).egress.upstream.through()
+        };
+        assert!(through(&c), "untrusted: the user's own choice (\"env\") holds");
+        assert!(!through(&t), "trusted: \"none\" — straight out");
+        fs::remove_dir_all(root).ok();
+    }
+
     #[test]
     fn the_users_own_file_is_never_held_back() {
         let user = project_file("user", RISKY_PROJECT);

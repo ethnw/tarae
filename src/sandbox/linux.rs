@@ -1697,6 +1697,27 @@ mod tests {
                 let opened = said(Policy { network: true, ports: vec![3000], ..s.policy() });
                 assert!(opened.contains("and this machine's ports 3000 only"), "{opened}");
                 assert!(!open.contains("doesn't open the network"), "{open}");
+                // (step 5g: through the proxy tarae itself uses, the address checks don't hold — said, naming its
+                // variable only, never where it is nor its credentials)
+                let corp = "http://u:tarae-fake-token-4@corp-proxy.example.invalid:3128";
+                let named = std::collections::HashMap::from([(
+                    "HTTPS_PROXY".to_string(),
+                    std::ffi::OsString::from(corp),
+                )]);
+                use crate::sandbox::proxy::{egress::Egress, upstream};
+                let upstream = upstream::of(&named, upstream::Setting::Env);
+                let p = s.policy();
+                let egress = Egress { upstream, ..p.egress.clone() };
+                let through = said(Policy { network: true, egress, ..p });
+                assert!(
+                    through.contains("tarae's own HTTPS_PROXY")
+                        && through.contains("but not the addresses they lead to"),
+                    "{through}"
+                );
+                assert!(
+                    !through.contains("corp-proxy") && !through.contains("tarae-fake-token"),
+                    "{through}"
+                );
                 // (this machine's addresses unread: loopback only, the open network too — `route` refuses the rest)
                 let unread =
                     said(Policy { network: true, ports: vec![3000], own_addresses: None, ..s.policy() });
