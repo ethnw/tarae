@@ -224,7 +224,9 @@ the keys. While the debugger or the terminal has its place, it's out of sight an
 [`plugin-sdk/sdk`](../plugin-sdk/sdk) (`tarae-plugin`) goes beside the bindings:
 
 - `now::set(millis, &entropy)` — hand it each call's `now` first thing. Then `getrandom` works (a ChaCha20 generator
-  stirred with each call's bytes), and so do the crates that use it.
+  stirred with each call's bytes), and so do the crates that use it. getrandom 0.3 and 0.4 (rand 0.9 and later)
+  too, with the `getrandom04` feature and `--cfg getrandom_backend="custom"` in your `.cargo/config.toml`'s
+  `[target.wasm32-unknown-unknown] rustflags` (without it they don't build for `wasm32-unknown-unknown`).
 - `http` — requests written out (what's given can't add a line of its own); responses read as their bytes come
   (by length, chunked, until close; `100 Continue` skipped), and a streamed body cut into lines.
 - `tls` (feature) — a TLS client over bytes: rustls with RustCrypto, no sockets. What it wants sent goes out with
@@ -302,6 +304,25 @@ so, and offers to install it.
 Nothing is Flux's or Argo CD's own: their objects read like any CRD's (kstatus), and what they install is found by
 Kubernetes' and Helm's own marks. Not yet: other credential programs (gcloud, kubelogin), `proxy-url`, a
 release's own values; never `insecure-skip-tls-verify`.
+
+[`plugin-sdk/db`](../plugin-sdk/db) (under way) is the database in the code: PostgreSQL, MySQL and Redis. So far it
+finds the project's connections and shows them — the side panel's `db` tab and the status line (`db dev`, `db prod ·
+production`); `:db` turns it on, and with several asks which to use; `:db-off`. They come from `.tarae/db.toml`
+(the project's, committed), **`.tarae/db.local.toml` (yours: add it to `.gitignore`** — a connection there replaces
+the project's of the same name; the tab says so when git doesn't ignore it), the project's compose files (a
+PostgreSQL, MySQL/MariaDB or Redis service published on this machine, its account from the image's variables) and
+`DATABASE_URL`, `REDIS_URL` and libpq's `PG*` variables. Neither config holds a password — `password-env`,
+`password-file = "~/.pgpass"` or `ask = true` say where it comes from — and none is ever shown. A connection's
+`paths` (`["migrations/**"]`) make it the one for those files. A host that isn't this machine is production until
+marked `dev = true`.
+
+```toml
+[[connection]]
+name = "dev"
+url = "postgres://app@localhost:5433/shop"
+password-env = "PGPASSWORD"
+paths = ["migrations/**"]
+```
 
 ## Limits
 

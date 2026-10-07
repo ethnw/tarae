@@ -1,0 +1,39 @@
+# Databases for tarae: the database in the code — PostgreSQL, MySQL and Redis, what the live database says beside
+# the statements and keys your code holds. Pure Rust in WebAssembly; tarae only carries the bytes.
+#   cargo build --release && cp target/wasm32-unknown-unknown/release/db.wasm ~/.config/tarae/plugins/
+#   cargo test --target aarch64-apple-darwin      (the tests run on your machine, not in wasm)
+[package]
+name = "db"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "=0.62.0"
+# (getrandom04: postgres-protocol's rand needs a source in wasm — .cargo/config.toml sets the cfg)
+tarae-plugin = { path = "../sdk", features = ["getrandom04", "tls"] }
+# PostgreSQL: the wire's messages and md5_hash (SCRAM is ours: its nonce must be ours to give)
+postgres-protocol = "0.6.12"
+bytes = "1"
+fallible-iterator = "0.2"
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+stringprep = "0.1"
+serde = { version = "1", features = ["derive"] }
+# compose files
+serde_yaml = "0.9"
+# .tarae/db.toml
+toml = { version = "1.1", default-features = false, features = ["std", "serde", "parse"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Not part of tarae's workspace
+[workspace]

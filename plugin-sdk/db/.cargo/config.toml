@@ -1,0 +1,6 @@
+[build]
+target = "wasm32-unknown-unknown"
+
+# getrandom 0.3/0.4 (postgres-protocol's SCRAM) from the SDK's `getrandom04` (docs/plugins.md, "The SDK")
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg", 'getrandom_backend="custom"']

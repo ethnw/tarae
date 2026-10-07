@@ -9,14 +9,22 @@ license = "MIT OR Apache-2.0"
 
 [features]
 tls = ["dep:rustls", "dep:rustls-rustcrypto"]
+# getrandom 0.3 and 0.4's custom backend too (rand 0.9 and later — postgres-protocol's SCRAM, for one). The
+# plugin's build then needs `--cfg getrandom_backend="custom"` for wasm32 (rustflags in its .cargo/config.toml)
+getrandom04 = ["dep:getrandom04"]
 
 [dependencies]
 getrandom = { version = "0.2", features = ["custom"] }
+getrandom04 = { package = "getrandom", version = "0.4", optional = true }
 rand_chacha = "0.3"
 rand_core = "0.6"
 httparse = "1"
 rustls = { version = "0.23", default-features = false, features = ["tls12"], optional = true }
 rustls-rustcrypto = { version = "0.0.2-alpha", default-features = false, features = ["alloc", "tls12"], optional = true }
+
+# (getrandom's backend cfg: a plugin's build sets it; a test runs only with it)
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(getrandom_backend, values("custom"))'] }
 
 # Not part of tarae's workspace
 [workspace]
