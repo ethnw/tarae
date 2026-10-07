@@ -64,13 +64,13 @@ from each other. Daemons such as Gradle's stay warm between runs.
    the run's rules don't name waits for the user's card; `llm.sandbox-hosts` lists the ones allowed. On macOS each
    run gets a port and a token of its own. On Linux the relay splices a connection once it has read its start.
    Still to do: tools that ignore the proxy variables, as pack data (under way), and an upstream proxy.
-6. **The redirect** — on Linux where the session has a capable user namespace (tiers A+ and A; stock Ubuntu with
-   tarae's AppArmor profile). The session's network sends every connection and UDP datagram to sockets tarae
-   plants in it (TPROXY, set up by tarae's own netlink): no proxy variables, nothing a tool can ignore, IPv6 and
-   UDP included. It replaces step 4's swap and the in-session proxy there. Where it can't run (macOS, Linux
-   without a capable user namespace) the per-run proxy of step 5 stays, the supervisor enforcing it on Linux;
-   where even the supervisor can't run, the network is closed. Inside it: netlink, the session's rules at birth,
-   accepting and checking, DNS, the supervisor slimmed, telling runs apart.
+6. **The transparent proxy** — on Linux where the session has a capable user namespace (tiers A+ and A; stock
+   Ubuntu with tarae's AppArmor profile). Sockets tarae plants in the session's network take every connection and
+   UDP datagram, each keeping its address (TPROXY, set up by tarae's own netlink): no proxy variables, nothing a
+   tool can ignore, IPv6 and UDP included. It replaces step 4's swap and the in-session proxy there. Where it
+   can't run (macOS, Linux without a capable user namespace) the per-run proxy of step 5 stays, the supervisor
+   enforcing it on Linux; where even the supervisor can't run, the network is closed. Inside it: netlink, the
+   session's rules at birth, accepting and checking, DNS, the supervisor slimmed, telling runs apart.
 7. **Sessions kept apart** — tests that one session can't reach another's processes, sockets or files. Also: the
    keepers' memory with many sessions, and tarae's log holding every session's activity.
 8. **The loopback rule** where sessions share one loopback (tiers without a network namespace): a session reaches
@@ -90,8 +90,8 @@ After step 10. The aim is to state what the sandbox guarantees and show that it 
    and its commands go through tarae's `run` into the sandbox.
 2. **Fuzzing the parsers that read what a run sends**: the supervisor's reading of system-call arguments, and the
    proxy's parsers.
-3. **A "must be refused" property suite**, run on several kernels on a schedule. With the redirect: nothing a run
-   does changes the session's rules, and nothing is reached but through tarae's sockets.
+3. **A "must be refused" property suite**, run on several kernels on a schedule. With the transparent proxy:
+   nothing a run does changes the session's rules, and nothing is reached but through tarae's sockets.
 4. **Yama ptrace scope 2**: today tarae can't serve a run's sockets there and falls back to plain mode.
 5. **A speed comparison** against a bubblewrap-style sandbox. An external review some day.
 
