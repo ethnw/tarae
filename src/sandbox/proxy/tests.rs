@@ -731,6 +731,38 @@ fn no_token_or_a_wrong_one_is_407() {
     }
 }
 
+/// The pair a run's connection to the proxy is made of (Linux's `supervisor::proxied`) holds only the run's
+/// end and the proxy's: another connect into the pair's listener in its window (an intruder stood there by the
+/// test) is closed, never taken for the run's — else a process of this machine could stand in for a run, its
+/// bytes going out under the run's rules. The run's end is readied (what the run set) before it connects, and is
+/// a real TCP socket of the run's family, for IPv4 and IPv6 alike.
+#[test]
+fn the_pair_takes_only_its_own_peer() {
+    for domain in [libc::AF_INET, libc::AF_INET6] {
+        let intruder = std::cell::RefCell::new(None);
+        let readied_unconnected = std::cell::Cell::new(false);
+        let ready = |s: &OwnedFd| {
+            let probe = TcpStream::from(s.try_clone()?);
+            readied_unconnected.set(probe.peer_addr().is_err());
+            probe.set_nodelay(true)
+        };
+        let between = |at: SocketAddr| *intruder.borrow_mut() = Some(TcpStream::connect(at).unwrap());
+        let (run, mut proxy) = pair(domain, ready, between).unwrap();
+        proxy.set_read_timeout(Some(WAIT)).unwrap();
+        let mut run = TcpStream::from(run);
+        assert!(readied_unconnected.get() && run.nodelay().unwrap(), "readied before it connects");
+        let family = |a: SocketAddr| if a.is_ipv4() { libc::AF_INET } else { libc::AF_INET6 };
+        assert_eq!(family(run.local_addr().unwrap()), domain, "the run's own family");
+        run.write_all(b"from the run").unwrap();
+        let mut got = [0u8; 12];
+        proxy.read_exact(&mut got).unwrap();
+        assert_eq!(&got, b"from the run", "the proxy's end is the run's peer");
+        let mut intruder = intruder.into_inner().unwrap();
+        intruder.set_read_timeout(Some(WAIT)).unwrap();
+        assert_eq!(to_close(&mut intruder), b"", "the intruder was closed, not taken");
+    }
+}
+
 /// A token is the same only byte for byte, whatever the lengths.
 #[test]
 fn a_token_is_the_same_only_byte_for_byte() {

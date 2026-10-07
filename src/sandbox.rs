@@ -34,9 +34,9 @@ mod golden;
 pub mod keeper;
 #[cfg(target_os = "linux")]
 pub mod linux;
-// (the egress proxy: built and tested on its own until 5c and 5d hand it runs' connections)
-#[cfg(test)]
-mod proxy;
+// (the egress proxy: Linux's runs reach it through their supervisors; macOS's with step 5d)
+#[cfg(any(target_os = "linux", test))]
+pub mod proxy;
 #[cfg(any(target_os = "linux", test))]
 pub mod route;
 pub mod runenv;
@@ -1082,6 +1082,20 @@ impl Denial {
                 ),
                 None => self.shown(),
             },
+            // (step 5: beyond this machine only through tarae's proxy — a direct connect, or a send naming it)
+            "network-direct" => {
+                match t.strip_prefix("remote:").map(|r| r.split_once(" — ").unwrap_or((r, ""))) {
+                    Some((at, "")) => format!(
+                        "connecting to {at} directly — beyond this machine your commands go only through tarae's \
+                     proxy (HTTPS_PROXY); a tool that ignores it (ssh, a database client, Node's fetch without \
+                     NODE_USE_ENV_PROXY) can't go out"
+                    ),
+                    Some((at, why)) => format!("connecting to {at} — {why}"),
+                    None => self.shown(),
+                }
+            }
+            // (step 5: the egress proxy's own refusals, `host:port: why` — `proxy::tell`)
+            "network-proxy" => format!("reaching {t}"),
             "network-bound" => match t.strip_prefix("remote:").and_then(|t| t.split_once(' ')) {
                 Some((at, why)) => format!("connecting to {at} {why}"),
                 None => self.shown(),
@@ -3515,7 +3529,12 @@ pub fn run_env_of(here: &Here, llm: &crate::llm::LlmConfig) -> runenv::RunEnv {
     let colors = &crate::languages::get().color_off;
     let mut set: Vec<&str> = SET_IN_RUNS.to_vec();
     set.extend(colors.iter().map(|(k, _)| k.as_str()));
-    runenv::of(here, llm.sandbox_network, &policy, &packs.pass, &llm.sandbox_env, &set)
+    // (Linux: the network open goes through tarae's proxy — its variables take the user's own proxies' place)
+    let proxies_passed = llm.sandbox_network && !cfg!(target_os = "linux");
+    if cfg!(target_os = "linux") && llm.sandbox_network {
+        set.extend(runenv::PROXIES);
+    }
+    runenv::of(here, proxies_passed, &policy, &packs.pass, &llm.sandbox_env, &set)
 }
 
 /// A sandboxed command's environment: tarae's own isn't inherited — only what `run_env` passes of it. Every
@@ -3675,6 +3694,11 @@ pub fn command(policy: Option<&Policy>, program: &str, args: &[String]) -> Comma
             c.env("npm_config_update_notifier", "false");
             for (var, copy) in &p.reads.copies.env {
                 c.env(var, copy);
+            }
+            // (Linux: the network open goes through tarae's egress proxy — step 5)
+            #[cfg(target_os = "linux")]
+            if p.network {
+                c.envs(proxy::run_env());
             }
             c
         }
@@ -5569,6 +5593,39 @@ mod tests {
     /// JVM writes its own `/proc/<pid>/coredump_filter` and goes on; getaddrinfo `connect`s a UDP socket to
     /// port 0 of each address to sort them (nothing is sent). Those last two quiet — a write or a connect
     /// beside them still named.
+    /// Step 5 (Linux): a run with the network open gets tarae's proxy variables — each naming the proxy's address,
+    /// this machine's loopback left direct — and never the user's own proxies (theirs would send it past the
+    /// proxy, where only `network-direct` refusals wait), nor are those said as left out; with the network
+    /// closed, none of them.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_run_under_the_proxy_has_its_variables() {
+        let here = Here {
+            env: HashMap::from([
+                ("HTTPS_PROXY".to_string(), std::ffi::OsString::from("http://users-proxy.example:3128")),
+                ("PATH".to_string(), "/usr/bin:/bin".into()),
+            ]),
+            ..Here::default()
+        };
+        let env_of = |c: &Command| -> HashMap<String, String> {
+            let set =
+                c.get_envs().filter_map(|(k, v)| Some((k.to_str()?.to_string(), v?.to_str()?.to_string())));
+            set.collect()
+        };
+        let open = crate::llm::LlmConfig { sandbox_network: true, ..Default::default() };
+        let run_env = run_env_of(&here, &open);
+        assert!(run_env.var("HTTPS_PROXY").is_none() && !run_env.left_out().any(|n| n == "HTTPS_PROXY"));
+        let p = Policy { network: true, run_env, ..Policy::for_project(&env(Path::new("/w/p"))) };
+        let set = env_of(&command(Some(&p), "true", &[]));
+        let url = format!("http://{}", route::PROXY);
+        for k in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"] {
+            assert_eq!(set.get(k), Some(&url), "{k}");
+        }
+        assert_eq!(set.get("NO_PROXY").map(String::as_str), Some("localhost,127.0.0.1,::1"));
+        let closed = Policy { network: false, ..p };
+        assert!(!env_of(&command(Some(&closed), "true", &[])).contains_key("HTTPS_PROXY"));
+    }
+
     #[test]
     fn what_runs_try_harmlessly_stays_quiet() {
         let p = Policy { run: RunDir::new().ok(), ..Policy::for_project(&env(Path::new("/Users/u/p"))) };

@@ -49,6 +49,7 @@ pub struct Connection {
 
 /// How far an answer of the user's reaches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))] // (the main loop's answers come with step 5e)
 pub enum Scope {
     /// The run that asked (`y`).
     Run,
@@ -61,6 +62,7 @@ pub enum Scope {
 }
 
 /// What comes in.
+#[cfg_attr(not(test), allow(dead_code))] // (macOS's runs come with step 5d, the main loop's answers with 5e)
 pub enum ToProxy {
     /// Linux: a run's connection, from the supervisor.
     Connection(Connection),
@@ -645,6 +647,147 @@ fn serve(c: Conn, shared: &Shared) {
 
 fn relay_send(mut up: &TcpStream, bytes: &[u8]) -> io::Result<()> {
     up.write_all(bytes)
+}
+
+/// What a run's environment gets while its network goes through the proxy (Linux): every proxy variable naming
+/// `route::PROXY` — the supervisor hands a connect there to the proxy, so no credential is needed — and this
+/// machine's loopback left direct (a test's own server). In place of the user's own (`runenv`).
+#[cfg(target_os = "linux")]
+pub fn run_env() -> Vec<(&'static str, String)> {
+    let url = format!("http://{}", super::route::PROXY);
+    let direct = "localhost,127.0.0.1,::1".to_string();
+    let mut env: Vec<(&str, String)> =
+        ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]
+            .into_iter()
+            .map(|k| (k, url.clone()))
+            .collect();
+    env.extend([("NO_PROXY", direct.clone()), ("no_proxy", direct)]);
+    env
+}
+
+/// The proxy of this tarae (Linux: the runs' connections come to it from their supervisors), started on first
+/// use — on a supervisor's thread, never the main loop. Names are looked up by the system's resolver. The
+/// user's answers come with step 5e: until then a host no rule names waits out its hold and is refused.
+#[cfg(target_os = "linux")]
+pub fn get() -> &'static Proxy {
+    static PROXY: std::sync::OnceLock<Proxy> = std::sync::OnceLock::new();
+    PROXY.get_or_init(|| {
+        let (asks, _) = mpsc::channel();
+        let system = egress::system();
+        #[cfg(test)]
+        let resolve: Resolve = Arc::new(move |host: &str, port| {
+            let names = TEST_NAMES.lock().unwrap_or_else(|e| e.into_inner());
+            match names.iter().find(|(n, _)| n == host) {
+                Some((_, at)) => Ok(vec![*at]),
+                None => system(host, port),
+            }
+        });
+        #[cfg(not(test))]
+        let resolve = system;
+        Proxy::start(resolve, asks, Limits::default())
+    })
+}
+
+/// Tests (Linux): names the proxy `get` gives looks up here first — a listener of the test's on this machine's
+/// own address standing for the outside (a name, as the proxy takes no address).
+#[cfg(all(test, target_os = "linux"))]
+pub static TEST_NAMES: std::sync::Mutex<Vec<(String, std::net::SocketAddr)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// A connected loopback TCP pair for a run's connection to the proxy (Linux, `supervisor::proxied`): the run's
+/// end — a socket of `domain`, readied by `ready` (what the run set on its own) before it connects — and the
+/// proxy's, accepted on a listener made for this pair alone and closed at once. An accepted peer that isn't the
+/// run's end (another connect to the listener in that window) is closed, and the next one taken. `between`:
+/// called with the listener's address before the run's end connects (tests stand an intruder in the window).
+pub fn pair(
+    domain: i32,
+    ready: impl FnOnce(&OwnedFd) -> io::Result<()>,
+    between: impl FnOnce(std::net::SocketAddr),
+) -> io::Result<(OwnedFd, TcpStream)> {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
+    use std::os::fd::FromRawFd;
+    let six = domain == libc::AF_INET6;
+    let listener = match six {
+        true => TcpListener::bind((Ipv6Addr::LOCALHOST, 0))
+            .or_else(|_| TcpListener::bind((Ipv4Addr::LOCALHOST, 0))),
+        false => TcpListener::bind((Ipv4Addr::LOCALHOST, 0)),
+    }?;
+    let at = listener.local_addr()?;
+    // (an IPv6 socket reaches an IPv4 listener at its mapped address)
+    let to = match (six, at.ip()) {
+        (true, IpAddr::V4(v4)) => SocketAddr::new(IpAddr::V6(v4.to_ipv6_mapped()), at.port()),
+        _ => at,
+    };
+    #[cfg(target_os = "linux")]
+    let kind = libc::SOCK_STREAM | libc::SOCK_CLOEXEC;
+    #[cfg(not(target_os = "linux"))]
+    let kind = libc::SOCK_STREAM;
+    // SAFETY: plain call; a descriptor it makes is ours.
+    let s = unsafe { libc::socket(domain, kind, libc::IPPROTO_TCP) };
+    if s < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: just made.
+    let run = unsafe { OwnedFd::from_raw_fd(s) };
+    #[cfg(not(target_os = "linux"))]
+    // SAFETY: a flag set on our own descriptor.
+    unsafe {
+        libc::fcntl(run.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC);
+    }
+    ready(&run)?;
+    between(at);
+    let (sa, len) = raw_addr(to);
+    // SAFETY: our socket and an address of ours, live for the call.
+    if unsafe { libc::connect(run.as_raw_fd(), (&raw const sa).cast(), len) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mine = TcpStream::from(run.try_clone()?).local_addr()?;
+    let canonical = |a: SocketAddr| SocketAddr::new(a.ip().to_canonical(), a.port());
+    // (the run's end is in the listener's queue once its connect returned: it comes within a few accepts)
+    for _ in 0..8 {
+        let (proxy, peer) = listener.accept()?;
+        if canonical(peer) == canonical(mine) {
+            return Ok((run, proxy));
+        }
+        crate::log::line(
+            "sandbox",
+            "warning",
+            &format!("a connection not the run's took the proxy's pair: {peer}"),
+        );
+    }
+    Err(io::Error::other("the run's end never came to the pair's listener"))
+}
+
+/// `a` as the kernel takes it.
+fn raw_addr(a: std::net::SocketAddr) -> (libc::sockaddr_storage, libc::socklen_t) {
+    // SAFETY: an all-zero sockaddr_storage is valid; each arm writes the family's own struct, which fits in it.
+    unsafe {
+        let mut ss: libc::sockaddr_storage = std::mem::zeroed();
+        match a {
+            std::net::SocketAddr::V4(v4) => {
+                let sin = &mut *(&raw mut ss).cast::<libc::sockaddr_in>();
+                sin.sin_family = libc::AF_INET as libc::sa_family_t;
+                sin.sin_port = v4.port().to_be();
+                sin.sin_addr.s_addr = u32::from(*v4.ip()).to_be();
+                #[cfg(target_os = "macos")]
+                {
+                    sin.sin_len = std::mem::size_of::<libc::sockaddr_in>() as u8;
+                }
+                (ss, std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t)
+            }
+            std::net::SocketAddr::V6(v6) => {
+                let sin6 = &mut *(&raw mut ss).cast::<libc::sockaddr_in6>();
+                sin6.sin6_family = libc::AF_INET6 as libc::sa_family_t;
+                sin6.sin6_port = v6.port().to_be();
+                sin6.sin6_addr.s6_addr = v6.ip().octets();
+                #[cfg(target_os = "macos")]
+                {
+                    sin6.sin6_len = std::mem::size_of::<libc::sockaddr_in6>() as u8;
+                }
+                (ss, std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t)
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -162,6 +162,11 @@ pub struct Served {
     /// Rust's `UdpSocket` and Java's `DatagramSocket` do before sending): by inode. Such a socket goes out as
     /// one it never bound would (`swapped_for`): nothing of its address is its own.
     any_port: std::sync::Mutex<std::collections::HashSet<u64>>,
+    /// For the egress proxy (step 5): this run's id, its session's (its project's), and its rules — what each
+    /// connection's message carries (D23).
+    run: u64,
+    session: u64,
+    egress: Arc<super::proxy::egress::Egress>,
 }
 
 impl Served {
@@ -171,6 +176,8 @@ impl Served {
             ports: &self.ports,
             network: self.network,
             resolvers: &self.resolvers,
+            // (the network open goes through tarae's egress proxy: step 5)
+            proxy: self.network.then_some(super::route::PROXY),
         }
     }
 
@@ -306,8 +313,29 @@ pub fn serve(
     refused: std::sync::mpsc::Sender<Denial>,
 ) -> io::Result<std::sync::mpsc::SyncSender<OwnedFd>> {
     let (tx, rx) = std::sync::mpsc::sync_channel::<OwnedFd>(1);
-    let policy =
-        Arc::new(Served { policy, net, refused, swapped: Default::default(), any_port: Default::default() });
+    static RUNS: AtomicU64 = AtomicU64::new(1);
+    let session = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        policy.root.hash(&mut h);
+        h.finish()
+    };
+    // (5c: any host through the proxy with the network open — the hosts' list and the user's answers are 5e's)
+    let egress = Arc::new(super::proxy::egress::Egress {
+        any: policy.network,
+        own_addresses: policy.own_addresses.clone(),
+        ..Default::default()
+    });
+    let policy = Arc::new(Served {
+        policy,
+        net,
+        refused,
+        swapped: Default::default(),
+        any_port: Default::default(),
+        run: RUNS.fetch_add(1, Relaxed),
+        session,
+        egress,
+    });
     std::thread::Builder::new().name("tarae-serve".into()).spawn(move || {
         quiet_signals();
         let Ok(fd) = rx.recv() else { return };
@@ -599,8 +627,16 @@ fn opt(fd: &OwnedFd, level: libc::c_int, name: libc::c_int) -> Result<i32, i32> 
 /// the session listens there read from the caller's own `/proc/<tid>/net` — its netns's, the session's — and
 /// whether an address is this machine's own (`Served::mine`), only where that decides.
 fn routed(p: &Served, c: &Caller, to: SocketAddr, kind: i32) -> Route {
+    #[cfg(test)]
+    if p.resolvers.iter().any(|r| r.ip().to_canonical() == to.ip().to_canonical() && r.port() == to.port()) {
+        RESOLVER_CALLS.fetch_add(1, Relaxed);
+    }
     super::route::route(to, p.netns(), &p.reach(), || session_listens(c, to.port(), kind), |ip| p.mine(ip))
 }
+
+/// Tests (Q4's measure): calls naming a resolver's port 53, every run's.
+#[cfg(test)]
+static RESOLVER_CALLS: AtomicU64 = AtomicU64::new(0);
 
 /// Whether the session has a TCP listener (`kind` stream) or a bound UDP socket (datagram) on `port` — any
 /// address of its loopback, IPv4 or IPv6 (`/proc/<tid>/net/{tcp,tcp6}` or `{udp,udp6}`: a row's local address
@@ -901,7 +937,103 @@ fn routed_socket(
             refuse(p, c, "network-outbound", format!("remote:{to}")).map(|_| sock)
         }
         Route::Refused(Refusal::Never) => refuse(p, c, "network-never", format!("remote:{to}")).map(|_| sock),
+        Route::Refused(Refusal::Direct) => {
+            let resolver =
+                |r: &SocketAddr| r.ip().to_canonical() == to.ip().to_canonical() && r.port() == to.port();
+            let lookup = p.resolvers.iter().any(resolver);
+            let why = match lookup {
+                true => {
+                    " — a name lookup: with the network through tarae's proxy, names are looked up by the proxy"
+                }
+                false => "",
+            };
+            refuse(p, c, "network-direct", format!("remote:{to}{why}")).map(|_| sock)
+        }
+        // (a datagram or a send naming the proxy's address: only a connection goes to it — `connect`)
+        Route::Proxy => {
+            let why = format!("remote:{to} — a send, not a connection: only a connection goes to the proxy");
+            refuse(p, c, "network-direct", why).map(|_| sock)
+        }
     }
+}
+
+/// A connect to the egress proxy's address (`Route::Proxy`): a loopback TCP pair of tarae's (`proxy::pair`) —
+/// its run's end carrying what the run set on its own socket (as `swapped_for` does), put in the run's place at
+/// the same descriptor (`SECCOMP_ADDFD_FLAG_SETFD`), recorded as tarae's before the run holds it; the proxy's end
+/// handed to the proxy in a message with the run's rules (D23). The run's connect answers 0: connected — its
+/// `O_NONBLOCK` as it had it. TCP only; a socket the run bound (its source can't move), one connected already,
+/// or one of tarae's put there before isn't taken; without the swap (before 5.14) nothing goes beyond this
+/// machine's loopback, said.
+fn proxied(
+    l: &Listener,
+    n: &libc::seccomp_notif,
+    p: &Served,
+    c: &Caller,
+    (fd, sock): (u64, OwnedFd),
+    to: SocketAddr,
+) -> Answer {
+    if let Some(why) = p.swap_missing() {
+        let target = format!("remote:{to} — {why}: nothing goes beyond this machine's loopback");
+        return refuse(p, c, "network-outbound", target);
+    }
+    let (domain, kind) = (sockopt(&sock, libc::SO_DOMAIN)?, sockopt(&sock, libc::SO_TYPE)?);
+    if (kind, sockopt(&sock, libc::SO_PROTOCOL)?) != (libc::SOCK_STREAM, libc::IPPROTO_TCP) {
+        return refuse(
+            p,
+            c,
+            "network-direct",
+            format!("remote:{to} — only a TCP connection goes to the proxy"),
+        );
+    }
+    let ino = inode(&sock)?;
+    let mut peer = [0u8; std::mem::size_of::<libc::sockaddr_storage>()];
+    let mut len = peer.len() as libc::socklen_t;
+    // SAFETY: a sockaddr buffer and its length for the call to fill.
+    let connected = unsafe { libc::getpeername(sock.as_raw_fd(), peer.as_mut_ptr().cast(), &mut len) } == 0;
+    if connected || p.swapped.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&ino) {
+        return Err(libc::EISCONN);
+    }
+    let mut me = [0u8; std::mem::size_of::<libc::sockaddr_storage>()];
+    let mut len = me.len() as libc::socklen_t;
+    // SAFETY: as above.
+    if unsafe { libc::getsockname(sock.as_raw_fd(), me.as_mut_ptr().cast(), &mut len) } != 0 {
+        return Err(errno(&io::Error::last_os_error()));
+    }
+    let any = p.any_port.lock().unwrap_or_else(|e| e.into_inner()).contains(&ino);
+    if matches!(parse(&me[..(len as usize).min(me.len())]), Ok(Addr::Ip(a)) if a.port() != 0) && !any {
+        let why = format!("remote:{to} from a socket it bound itself — a bound socket stays in the session");
+        return refuse_with(p, c, libc::EADDRNOTAVAIL, "network-bound", why);
+    }
+    // SAFETY: plain call on our own descriptor.
+    let nonblock = unsafe { libc::fcntl(sock.as_raw_fd(), libc::F_GETFL) } & libc::O_NONBLOCK != 0;
+    let ready = |new: &OwnedFd| carry(&sock, new, domain, kind).map_err(io::Error::from_raw_os_error);
+    let (run_end, proxy_end) = super::proxy::pair(domain, ready, |_| {}).map_err(|e| errno(&e))?;
+    if nonblock {
+        // SAFETY: plain calls on our own descriptor.
+        unsafe {
+            let flags = libc::fcntl(run_end.as_raw_fd(), libc::F_GETFL);
+            libc::fcntl(run_end.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+    }
+    let at = u32::try_from(fd).map_err(|_| libc::EBADF)?;
+    // Known as tarae's before the run holds it (as `swapped_for`)
+    let new_ino = inode(&run_end)?;
+    p.swapped.lock().unwrap_or_else(|e| e.into_inner()).insert(new_ino, Route::Proxy);
+    if let Err(e) = l.add_fd(n.id, &run_end, Some(at), cloexec(c, fd)) {
+        p.swapped.lock().unwrap_or_else(|e| e.into_inner()).remove(&new_ino);
+        return Err(errno(&e));
+    }
+    let to_proxy = super::proxy::Connection {
+        fd: proxy_end.into(),
+        run: p.run,
+        session: p.session,
+        process: c.name(),
+        rules: p.egress.clone(),
+        told: p.refused.clone(),
+    };
+    // (the proxy gone, the run's end reads its end at once: nothing goes out)
+    super::proxy::get().send(super::proxy::ToProxy::Connection(to_proxy));
+    Ok(0)
 }
 
 /// Whether tarae can put a socket of its own in a run's place here (`SECCOMP_ADDFD_FLAG_SETFD`, Linux 5.14) —
@@ -1075,6 +1207,13 @@ fn connect(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
     let args = n.data.args;
     let addr = address(&c, args[1], args[2])?;
     let sock = c.fd(args[0])?;
+    // (the proxy's address: connected here, through a pair of tarae's — `proxied`)
+    if let (libc::AF_INET | libc::AF_INET6, Ok(Addr::Ip(to))) =
+        (sockopt(&sock, libc::SO_DOMAIN)?, parse(&addr))
+        && routed(p, &c, to, sockopt(&sock, libc::SO_TYPE)?) == Route::Proxy
+    {
+        return proxied(l, n, p, &c, (args[0], sock), to);
+    }
     let (sock, to, _held) = destination(l, n, p, &c, (args[0], sock), addr)?;
     // SAFETY: the socket and an address of ours, live for the call.
     let r = unsafe { libc::connect(sock.as_raw_fd(), to.as_ptr().cast(), to.len() as libc::socklen_t) };
@@ -2349,7 +2488,18 @@ mod tests {
     /// `sandboxed`, under `llm`'s settings. `$TARAE_SAY_REPORT`: a failed run's report printed too (`report:`,
     /// its first lines) — what Claude would read of it.
     fn sandboxed_under(root: &Path, script: &str, llm: &crate::llm::LlmConfig) -> (u128, bool, String) {
+        sandboxed_with(root, script, llm, |_| {})
+    }
+
+    /// `sandboxed_under`, the policy `change`d first.
+    fn sandboxed_with(
+        root: &Path,
+        script: &str,
+        llm: &crate::llm::LlmConfig,
+        change: impl FnOnce(&mut Policy),
+    ) -> (u128, bool, String) {
         let mut p = super::super::policy(root, llm, &[]);
+        change(&mut p);
         p.watch = super::super::watch_for(&p);
         let at = std::time::Instant::now();
         // (every part's errors too, not only the last's)
@@ -2525,6 +2675,41 @@ mod tests {
             let (ms, ok, said) = sandboxed(&root, script);
             println!("measure: {script} — {} in {ms} ms: {said}", if ok { "ok" } else { "FAILED" });
             super::super::end_leftovers(Some(&root));
+        }
+    }
+
+    /// Step 5c's measure (Q4, M4 through the proxy): each `$TARAE_M6` line `<name>\t<project>\t<script>` — a
+    /// tool reaching the real network — run through the real path with the network open (so through tarae's
+    /// proxy), twice: the resolvers' port 53 as D-c opens it, then closed (no resolver in the policy). How each
+    /// ended, how long it took, its last lines, and how many calls named a resolver's port 53 while it was open —
+    /// which tools look a name up even with a proxy, and which fail without. `TARAE_TEST_NO_NS`: tier C. Reaches
+    /// the real network: run by hand on a VM (`target/sb/step5-notes.md`), never in `cargo test`.
+    #[test]
+    #[ignore = "a measurement (step 5c, Q4): run by hand on a VM"]
+    fn measure_through_the_proxy() {
+        let Ok(cases) = std::env::var("TARAE_M6") else { return };
+        let llm = crate::llm::LlmConfig { sandbox_network: true, ..Default::default() };
+        println!();
+        for line in cases.lines().filter(|l| !l.trim().is_empty()) {
+            let mut parts = line.splitn(3, '\t');
+            let (Some(name), Some(project), Some(script)) = (parts.next(), parts.next(), parts.next()) else {
+                continue;
+            };
+            let root = std::fs::canonicalize(project).unwrap();
+            let before = RESOLVER_CALLS.load(Relaxed);
+            let (ms, ok, said) = sandboxed_with(&root, script, &llm, |_| {});
+            let looked = RESOLVER_CALLS.load(Relaxed) - before;
+            super::super::end_leftovers(Some(&root));
+            let (ms_closed, ok_closed, said_closed) =
+                sandboxed_with(&root, script, &llm, |p| p.resolvers.clear());
+            super::super::end_leftovers(Some(&root));
+            let ended = |ok| if ok { "ok" } else { "FAILED" };
+            println!(
+                "measure: Q4 {name}: port 53 open {} in {ms} ms ({looked} calls to a resolver): {said} · closed {} \
+                 in {ms_closed} ms: {said_closed}",
+                ended(ok),
+                ended(ok_closed),
+            );
         }
     }
 

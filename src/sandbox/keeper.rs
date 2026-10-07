@@ -2648,6 +2648,7 @@ mod tests {
             "listen" => return helper_listen(),
             "connect" => helper_connect(&std::env::var("TARAE_TO").unwrap_or_default()),
             "swap" => helper_swap(&std::env::var("TARAE_TO").unwrap_or_default()),
+            "proxied" => helper_proxied(&std::env::var("TARAE_TO").unwrap_or_default()),
             "bound" => helper_bound(&std::env::var("TARAE_TO").unwrap_or_default()),
             "swaplisten" => helper_swap_listen(&std::env::var("TARAE_TO").unwrap_or_default()),
             "racelo" => helper_race_lo(&std::env::var("TARAE_TO").unwrap_or_default()),
@@ -2843,6 +2844,54 @@ mod tests {
                 get(libc::SOL_SOCKET, libc::SO_ERROR),
             )
         }
+    }
+
+    /// `proxied`: a non-blocking, close-on-exec TCP socket with `TCP_NODELAY` set, connected to `$TARAE_TO` (the
+    /// proxy's address), then — once it's up — what the socket at that number is, and a plain request for
+    /// `http://$TARAE_HOST/` sent through it, its answer's first line read (`connect=<errno> family= stream=
+    /// nodelay= nonblock= peer=<its address's ip> reply=<line>`).
+    fn helper_proxied(to: &str) -> String {
+        use std::io::{BufRead, Write};
+        let sa = sockaddr(to);
+        let host = std::env::var("TARAE_HOST").unwrap_or_default();
+        // SAFETY: plain calls on a socket this makes; buffers of their sizes, live for each call.
+        let (said, facts, fd) = unsafe {
+            let fd =
+                libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC, 0);
+            let one = 1i32;
+            let int = std::mem::size_of::<i32>() as libc::socklen_t;
+            libc::setsockopt(fd, libc::IPPROTO_TCP, libc::TCP_NODELAY, (&raw const one).cast(), int);
+            let sa_len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+            let r = libc::connect(fd, (&raw const sa).cast(), sa_len);
+            let said = if r == 0 { 0 } else { errno_now() };
+            let mut pfd = libc::pollfd { fd, events: libc::POLLOUT, revents: 0 };
+            libc::poll(&mut pfd, 1, 5000);
+            let get = |level, name| {
+                let (mut v, mut len) = (0i32, int);
+                libc::getsockopt(fd, level, name, (&raw mut v).cast(), &mut len);
+                v
+            };
+            let mut peer: libc::sockaddr_in = std::mem::zeroed();
+            let mut len = sa_len;
+            libc::getpeername(fd, (&raw mut peer).cast(), &mut len);
+            let facts = format!(
+                "family={} stream={} nodelay={} nonblock={} peer={}",
+                get(libc::SOL_SOCKET, libc::SO_DOMAIN),
+                (get(libc::SOL_SOCKET, libc::SO_TYPE) == libc::SOCK_STREAM) as u8,
+                get(libc::IPPROTO_TCP, libc::TCP_NODELAY),
+                (libc::fcntl(fd, libc::F_GETFL) & libc::O_NONBLOCK != 0) as u8,
+                std::net::Ipv4Addr::from(u32::from_be(peer.sin_addr.s_addr)),
+            );
+            libc::fcntl(fd, libc::F_SETFL, libc::fcntl(fd, libc::F_GETFL) & !libc::O_NONBLOCK);
+            (said, facts, fd)
+        };
+        // SAFETY: the socket made above, ours from here.
+        let s = unsafe { std::net::TcpStream::from_raw_fd(fd) };
+        s.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        let _ = (&s).write_all(format!("GET http://{host}/ HTTP/1.1\r\n\r\n").as_bytes());
+        let mut reply = String::new();
+        let _ = std::io::BufReader::new(&s).read_line(&mut reply);
+        format!("connect={said} {facts} reply={}", reply.trim_end())
     }
 
     /// `bound`: a TCP socket bound to `0.0.0.0:$TARAE_PORT` first (0: the kernel's pick), then connected to
@@ -3767,11 +3816,10 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// The egress swap: with the network open, a non-blocking connect beyond this machine is made on a socket of
-    /// tarae's put in the run's place — `EINPROGRESS` as the run's own would answer, and what it set carried:
-    /// non-blocking, close-on-exec, `TCP_NODELAY`, `SO_KEEPALIVE`, `SO_RCVTIMEO`; its connection arrives. The
-    /// "outside" is a listener of the test's on this machine's own address beyond loopback, beyond it for a policy
-    /// made with no own addresses (`outside`).
+    /// The swap: a non-blocking connect out of the session (here to this machine's own address beyond loopback,
+    /// its port opened — the route that swaps since the network open goes through the proxy, step 5) is made on
+    /// a socket of tarae's put in the run's place — `EINPROGRESS` as the run's own would answer, and what it set
+    /// carried: non-blocking, close-on-exec, `TCP_NODELAY`, `SO_KEEPALIVE`, `SO_RCVTIMEO`; its connection arrives.
     #[test]
     fn a_swapped_socket_keeps_nonblocking() {
         if !routed_here("a_swapped_socket_keeps_nonblocking") {
@@ -3780,8 +3828,10 @@ mod tests {
         let Some(ip) = outside() else { return };
         let (at, served) = answering(&format!("{ip}:0"), "out hello");
         let k = keeper("swap");
-        let (p, c, root) =
-            routed_project("swap", &k, |p| (p.network, p.own_addresses) = (true, Some(Vec::new())));
+        let own = |p: &mut super::super::Policy| {
+            (p.ports, p.own_addresses) = (vec![at.port()], Some(vec![ip.into()]))
+        };
+        let (p, c, root) = routed_project("swap", &k, own);
         let (said, refused) = served_said(&k, (&p, &c, &root), "swap", &[("TARAE_TO", &at.to_string())]);
         assert_eq!(said, swapped_said(), "{refused:?}");
         assert!(served.recv_timeout(Duration::from_secs(5)).is_ok(), "its connection arrived");
@@ -3796,39 +3846,89 @@ mod tests {
         format!("connect={n} nonblock=1 cloexec=1 nodelay=1 keepalive=1 rcvtimeo=7 error=0 dev=")
     }
 
-    /// D-e: in tier C (a keeper with no namespaces, served — tarae makes every internet socket, bound to the
-    /// loopback device) the network open goes out too, by the same swap: the socket in the run's place is one
-    /// bound to no device, carrying what the run set.
+    /// Step 5: with the network open a run's connect to the proxy's address holds a real TCP socket of its own
+    /// family — every option a client sets on it works (a unix socket in its place broke Python's `TCP_NODELAY`,
+    /// M5) and its `O_NONBLOCK` is kept — and what it sends goes through tarae's proxy to the host it names, in
+    /// tier C (D-e) and the session's netns alike. The outside is a listener of the test's on this machine's own
+    /// address, named for the proxy (`proxy::TEST_NAMES`), beyond this machine for a policy made with no own
+    /// addresses.
     #[test]
-    fn in_tier_c_the_network_open_goes_out_too() {
-        if super::super::supervisor::unavailable().is_some() || open_rules("in_tier_c").is_none() {
-            return;
-        }
+    fn a_proxied_connect_holds_a_tcp_socket() {
+        let Some(tiers) = served_tiers("a_proxied_connect_holds_a_tcp_socket") else { return };
         let Some(ip) = outside() else { return };
-        let (at, served) = answering(&format!("{ip}:0"), "out hello");
-        let k = keeper_in("tier-c-out", Ns::NONE);
-        let (p, c, root) = project_served("tier-c-out", Vec::new(), Some(&k), &[], Ok(()));
-        assert_eq!(c.net, RunNet::Served);
-        let p = Arc::new(super::super::Policy { network: true, own_addresses: Some(Vec::new()), ..p });
-        let (said, refused) = served_said(&k, (&p, &c, &root), "swap", &[("TARAE_TO", &at.to_string())]);
-        assert_eq!(said, swapped_said(), "{refused:?}");
-        assert!(served.recv_timeout(Duration::from_secs(5)).is_ok(), "its connection arrived");
-        k.end();
-        std::fs::remove_dir_all(&root).ok();
+        for (tier, ns) in tiers {
+            let (at, served) = answering(&format!("{ip}:0"), "out hello");
+            let host = format!("outside-{tier}.test");
+            super::super::proxy::TEST_NAMES.lock().unwrap().push((host.clone(), at));
+            let name = format!("proxied-{tier}");
+            let k = keeper_in(&name, ns);
+            let (p, c, root) = project_served(&name, Vec::new(), Some(&k), &[], Ok(()));
+            let p = Arc::new(super::super::Policy { network: true, own_addresses: Some(Vec::new()), ..p });
+            let env = [
+                ("TARAE_TO", super::super::route::PROXY.to_string()),
+                ("TARAE_HOST", format!("{host}:{}", at.port())),
+            ];
+            let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            let (said, refused) = served_said(&k, (&p, &c, &root), "proxied", &env);
+            assert_eq!(
+                said, "connect=0 family=2 stream=1 nodelay=1 nonblock=1 peer=127.0.0.1 reply=out hello",
+                "{tier}: {refused:?}"
+            );
+            assert!(served.recv_timeout(Duration::from_secs(5)).is_ok(), "{tier}: it arrived outside");
+            k.end();
+            std::fs::remove_dir_all(&root).ok();
+        }
+    }
+
+    /// Step 5: with the network through the proxy, a connect beyond this machine that doesn't go through it — a
+    /// tool that ignores `HTTPS_PROXY` — is refused (`EPERM`, `network-direct`) and said in words that name the
+    /// way out; nothing arrives outside. A datagram out is refused the same way. In tier C and the netns alike.
+    #[test]
+    fn a_direct_connect_is_refused_with_the_proxy() {
+        let Some(tiers) = served_tiers("a_direct_connect_is_refused_with_the_proxy") else { return };
+        let Some(ip) = outside() else { return };
+        for (tier, ns) in tiers {
+            let l = std::net::TcpListener::bind((ip, 0)).unwrap();
+            l.set_nonblocking(true).unwrap();
+            let udp = std::net::UdpSocket::bind((ip, 0)).unwrap();
+            udp.set_nonblocking(true).unwrap();
+            let name = format!("direct-{tier}");
+            let k = keeper_in(&name, ns);
+            let (p, c, root) = project_served(&name, Vec::new(), Some(&k), &[], Ok(()));
+            let p = Arc::new(super::super::Policy { network: true, own_addresses: Some(Vec::new()), ..p });
+            let to = l.local_addr().unwrap().to_string();
+            let (said, refused) = served_said(&k, (&p, &c, &root), "connect", &[("TARAE_TO", &to)]);
+            assert_eq!(said, libc::EPERM.to_string(), "{tier}: {refused:?}");
+            let d =
+                refused.iter().find(|d| d.op == "network-direct").unwrap_or_else(|| panic!("{refused:?}"));
+            assert!(
+                d.plain().contains(&format!("{to} directly")) && d.plain().contains("HTTPS_PROXY"),
+                "{}",
+                d.plain()
+            );
+            let udp_to = udp.local_addr().unwrap().to_string();
+            let (said, refused) = served_said(&k, (&p, &c, &root), "udp", &[("TARAE_TO", &udp_to)]);
+            assert!(!said.starts_with("answer="), "{tier}: {said}");
+            assert!(refused.iter().any(|d| d.op == "network-direct"), "{tier}: {refused:?}");
+            assert!(
+                l.accept().is_err_and(|e| e.kind() == io::ErrorKind::WouldBlock),
+                "{tier}: nothing arrived"
+            );
+            assert!(udp.recv_from(&mut [0u8; 8]).is_err(), "{tier}: no datagram arrived");
+            k.end();
+            std::fs::remove_dir_all(&root).ok();
+        }
     }
 
     /// Where no socket of tarae's can take a run's place (a kernel before 5.14 — D-a: tier C; forced here, every
-    /// kernel tried has it), the network open reaches nothing beyond this machine's loopback: a connect out is
-    /// refused (`EPERM`, `network-outbound`) and said with why, nothing arrives, and the report says loopback only;
-    /// an opened port on
-    /// loopback — tier C's own socket, no swap — is still reached.
+    /// kernel tried has it), the network open reaches nothing beyond this machine's loopback: a connect to the
+    /// proxy is refused (`EPERM`, `network-outbound`) and said with why, and the report says loopback only; an
+    /// opened port on loopback — tier C's own socket, no swap — is still reached.
     #[test]
     fn without_the_swap_nothing_goes_beyond_loopback() {
         if super::super::supervisor::unavailable().is_some() || open_rules("without_the_swap").is_none() {
             return;
         }
-        let Some(ip) = outside() else { return };
-        let (at, served) = answering(&format!("{ip}:0"), "out hello");
         let (lo_at, lo_served) = answering("127.0.0.1:0", "machine hello");
         let k = keeper_in("no-swap", Ns::NONE);
         let (p, c, root) = project_served("no-swap", Vec::new(), Some(&k), &[], Ok(()));
@@ -3840,14 +3940,13 @@ mod tests {
             test_swap_missing: Some(why.into()),
             ..p
         });
-        let to = at.to_string();
+        let to = super::super::route::PROXY.to_string();
         let (said, refused) = served_said(&k, (&p, &c, &root), "connect", &[("TARAE_TO", &to)]);
         let (lo_said, _) = served_said(&k, (&p, &c, &root), "connect", &[("TARAE_TO", &lo_at.to_string())]);
         assert_eq!((said, lo_said), (libc::EPERM.to_string(), "reached machine hello".into()), "{refused:?}");
         let d = refused.iter().find(|d| d.op == "network-outbound").unwrap_or_else(|| panic!("{refused:?}"));
         assert!(d.plain().starts_with(&format!("connecting to {to} — {why}")), "{}", d.plain());
         assert_eq!(d.port_here(), None, "beyond this machine: no port to open");
-        assert!(served.recv_timeout(Duration::from_millis(300)).is_err(), "nothing arrived beyond");
         assert!(lo_served.recv_timeout(Duration::from_secs(5)).is_ok());
         let made = super::super::Policy { confine: Some(Ok(c.clone())), ..(*p).clone() };
         let report = super::super::Guard::In(Box::new(made)).report(&[]);
@@ -3877,8 +3976,10 @@ mod tests {
         l.set_nonblocking(true).unwrap();
         let to = l.local_addr().unwrap().to_string();
         let k = keeper("bound");
+        let port = l.local_addr().unwrap().port();
+        // (this machine's own address, its port opened: the route that swaps — step 5)
         let (p, c, root) =
-            routed_project("bound", &k, |p| (p.network, p.own_addresses) = (true, Some(Vec::new())));
+            routed_project("bound", &k, |p| (p.ports, p.own_addresses) = (vec![port], Some(vec![ip.into()])));
         let env = [("TARAE_TO", to.as_str()), ("TARAE_PORT", "41999")];
         let (said, refused) = served_said(&k, (&p, &c, &root), "bound", &env);
         assert_eq!(said, format!("bound={}", libc::EADDRNOTAVAIL));
@@ -3894,34 +3995,28 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// D-c: a resolver `resolv.conf` names on this machine's loopback (a stand-in of the test's, on its own port)
-    /// is reached with the network open, from a socket the run never bound, as a lookup sends; with the
-    /// network closed the datagram stays in the session and no answer comes.
+    /// Step 5c (Q4, closing what D-c opened): with the network through the proxy a resolver `resolv.conf` names
+    /// (a stand-in of the test's on this machine's loopback, on its own port) isn't reached — names are the
+    /// proxy's to look up, and an open port 53 would be a way out no host rule sees. The datagram is refused,
+    /// said as a name lookup, and nothing arrives; in tier C and the session's netns alike. (Measured first: no
+    /// tool going through the proxy looked a name up itself — `measure_through_the_proxy`.)
     #[test]
-    fn a_resolvers_port_reaches_this_machine() {
-        if !routed_here("a_resolvers_port_reaches_this_machine") {
-            return;
-        }
-        let resolver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        let at = resolver.local_addr().unwrap();
-        std::thread::spawn(move || {
-            let mut buf = [0u8; 64];
-            while let Ok((_, from)) = resolver.recv_from(&mut buf) {
-                let _ = resolver.send_to(b"answer", from);
-            }
-        });
-        let to = at.to_string();
-        for network in [true, false] {
-            let k = keeper(&format!("resolver-{network}"));
-            let (p, c, root) = routed_project(&format!("resolver-{network}"), &k, |p| {
-                p.network = network;
-                p.resolvers = vec![at];
-            });
-            let (said, _) = served_said(&k, (&p, &c, &root), "udp", &[("TARAE_TO", &to)]);
-            match network {
-                true => assert_eq!(said, "answer=answer"),
-                false => assert!(said.starts_with("recv="), "no answer with the network closed: {said}"),
-            }
+    fn under_the_proxy_a_resolver_isnt_reached() {
+        let Some(tiers) = served_tiers("under_the_proxy_a_resolver_isnt_reached") else { return };
+        for (tier, ns) in tiers {
+            let resolver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            resolver.set_nonblocking(true).unwrap();
+            let at = resolver.local_addr().unwrap();
+            let name = format!("resolver-{tier}");
+            let k = keeper_in(&name, ns);
+            let (p, c, root) = project_served(&name, Vec::new(), Some(&k), &[], Ok(()));
+            let p = Arc::new(super::super::Policy { network: true, resolvers: vec![at], ..p });
+            let (said, refused) = served_said(&k, (&p, &c, &root), "udp", &[("TARAE_TO", &at.to_string())]);
+            assert!(!said.starts_with("answer="), "{tier}: {said}");
+            let d =
+                refused.iter().find(|d| d.op == "network-direct").unwrap_or_else(|| panic!("{refused:?}"));
+            assert!(d.plain().contains("a name lookup"), "{tier}: {}", d.plain());
+            assert!(resolver.recv_from(&mut [0u8; 64]).is_err(), "{tier}: nothing reached the resolver");
             k.end();
             std::fs::remove_dir_all(&root).ok();
         }
@@ -4003,12 +4098,14 @@ mod tests {
             let name = format!("swaplisten-{tier}");
             let k = keeper_in(&name, ns);
             let (p, c, root) = project_served(&name, Vec::new(), Some(&k), &[], Ok(()));
-            let p = Arc::new(super::super::Policy { network: true, own_addresses: Some(Vec::new()), ..p });
             let closed = std::net::TcpListener::bind((ip, 0)).unwrap();
             let to = closed.local_addr().unwrap().to_string();
             drop(closed);
-            let (failed, refused) = served_said(&k, (&p, &c, &root), "swaplisten", &[("TARAE_TO", &to)]);
             let (at, served) = answering(&format!("{ip}:0"), "out hello");
+            // (this machine's own address, both ports opened: the route that swaps — step 5)
+            let ports = vec![to.rsplit_once(':').unwrap().1.parse().unwrap(), at.port()];
+            let p = Arc::new(super::super::Policy { ports, own_addresses: Some(vec![ip.into()]), ..p });
+            let (failed, refused) = served_said(&k, (&p, &c, &root), "swaplisten", &[("TARAE_TO", &to)]);
             let env = [("TARAE_TO", at.to_string()), ("TARAE_UNSPEC", "1".into())];
             let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
             let (undone, refused_after) = served_said(&k, (&p, &c, &root), "swaplisten", &env);
@@ -4043,8 +4140,9 @@ mod tests {
         let users = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         users.set_nonblocking(true).unwrap();
         let k = keeper("swaprace");
+        // (this machine's own address, its port opened: the route that swaps — step 5)
         let (p, c, root) = routed_project("swaprace", &k, |p| {
-            (p.network, p.own_addresses) = (true, Some(Vec::new()));
+            (p.ports, p.own_addresses) = (vec![at.port()], Some(vec![ip.into()]));
             p.swap_pause = Some(Duration::from_secs(1));
         });
         let (to, lo) = (at.to_string(), users.local_addr().unwrap().to_string());

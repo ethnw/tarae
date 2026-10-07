@@ -55,8 +55,8 @@ const FLOOR: [&str; 21] = [
 const FLOOR_FAMILIES: [&str; 1] = ["LC_"];
 
 /// While the network is open (`llm.sandbox-network`): where it goes through. A proxy with a password in it is
-/// left out as any token is.
-const PROXIES: [&str; 8] = [
+/// left out as any token is. (Linux: tarae's egress proxy's own take their place — `proxy::run_env`.)
+pub(crate) const PROXIES: [&str; 8] = [
     "HTTP_PROXY",
     "HTTPS_PROXY",
     "ALL_PROXY",

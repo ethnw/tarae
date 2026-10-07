@@ -14,11 +14,13 @@ use crate::sandbox::route;
 /// A host a rule names: one name, or every name under a domain (`*.crates.io` — not `crates.io` itself); at a
 /// port, else at the request's own default (443 for a tunnel, 80 for plain http).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))] // (the setting's list of hosts comes with step 5e)
 pub enum Pattern {
     Name(String, Option<u16>),
     Under(String, Option<u16>),
 }
 
+#[cfg_attr(not(test), allow(dead_code))] // (as `Pattern`)
 impl Pattern {
     /// A rule as written (`github.com`, `*.crates.io`, `host:8443`): a name as `parse::name` takes it, never an
     /// address, `*.` only at its start.
@@ -168,12 +170,51 @@ pub fn connect(
     Err(Refused::new(502, format!("no address of it answered ({e})")))
 }
 
-/// The one place the proxy connects out. In tests only this machine's loopback is dialled: whatever a broken
-/// check above lets through shows as a failed connect, never a packet past this machine.
+/// The one place the proxy connects out. In tests only this machine is dialled — its loopback, or one of its own
+/// addresses (a container's, standing for the outside in the Linux tests): whatever a broken check above lets
+/// through shows as a failed connect, never a packet past this machine.
 fn dial(a: SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
+    // (`TARAE_MEASURE_REACHES_NETWORK`: an `#[ignore]`d measurement run by hand on a VM — never `cargo test`)
     #[cfg(test)]
-    if !a.ip().is_loopback() {
+    if !a.ip().is_loopback()
+        && !this_machines(a.ip())
+        && std::env::var_os("TARAE_MEASURE_REACHES_NETWORK").is_none()
+    {
         return Err(io::Error::other("a test's connection past this machine, held back"));
     }
     TcpStream::connect_timeout(&a, timeout)
+}
+
+/// Tests: whether `ip` is one of this machine's own addresses (`getifaddrs`).
+#[cfg(test)]
+fn this_machines(ip: IpAddr) -> bool {
+    let mut found = false;
+    let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: the list the call makes is walked while it's there, read only, then freed once.
+    unsafe {
+        if libc::getifaddrs(&mut list) != 0 {
+            return false;
+        }
+        let mut at = list;
+        while !at.is_null() {
+            let sa = (*at).ifa_addr;
+            if !sa.is_null() {
+                let mine = match i32::from((*sa).sa_family) {
+                    libc::AF_INET => {
+                        let sin = &*sa.cast::<libc::sockaddr_in>();
+                        IpAddr::from(u32::from_be(sin.sin_addr.s_addr).to_be_bytes())
+                    }
+                    libc::AF_INET6 => IpAddr::from((*sa.cast::<libc::sockaddr_in6>()).sin6_addr.s6_addr),
+                    _ => {
+                        at = (*at).ifa_next;
+                        continue;
+                    }
+                };
+                found |= mine == ip;
+            }
+            at = (*at).ifa_next;
+        }
+        libc::freeifaddrs(list);
+    }
+    found
 }

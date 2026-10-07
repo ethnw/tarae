@@ -28,8 +28,15 @@ pub enum Route {
     OwnAddress,
     /// Beyond this machine: a socket of tarae's in its own namespace in place of the run's (the egress swap).
     Out,
+    /// The egress proxy's reserved address (`PROXY`), the network going through it: a loopback TCP pair of
+    /// tarae's, one end in the run's place, the other the proxy's (`supervisor::proxied`).
+    Proxy,
     Refused(Refusal),
 }
+
+/// Where a run's proxy variables point while its network goes through tarae's proxy (step 5): the session's
+/// documentation address (`keeper::SESSION_V4`), never anyone's listener — a connect there is the proxy's.
+pub const PROXY: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), 3128);
 
 /// Why a call is refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,6 +45,9 @@ pub enum Refusal {
     Closed,
     /// An address never reached: link-local, the cloud metadata servers, multicast, broadcast (D-d).
     Never,
+    /// Beyond this machine directly, while the network goes through the proxy: only the proxy goes out (a tool
+    /// that ignores `HTTPS_PROXY` can't).
+    Direct,
 }
 
 /// What a run's policy opens.
@@ -51,6 +61,9 @@ pub struct Reach<'a> {
     pub network: bool,
     /// The resolvers `resolv.conf` names, each at its port 53 (`resolvers`).
     pub resolvers: &'a [SocketAddr],
+    /// The network goes through the proxy at this address (`PROXY`): a connect there is `Proxy`, and beyond
+    /// this machine nothing else goes out.
+    pub proxy: Option<SocketAddr>,
 }
 
 /// The port a resolver is reached on.
@@ -124,7 +137,15 @@ pub fn route(
     mine: impl FnOnce(IpAddr) -> Option<bool>,
 ) -> Route {
     let ip = plain(to.ip());
+    if reach.proxy.is_some_and(|p| plain(p.ip()) == ip && p.port() == to.port()) {
+        return Route::Proxy;
+    }
     let resolver = reach.resolvers.iter().any(|r| plain(r.ip()) == ip && r.port() == to.port());
+    // (through the proxy names are looked up by the proxy: no tool measured that goes through it looked one up
+    // itself — step 5c's Q4 — and an open port 53 would be a way out no rule sees)
+    if resolver && reach.proxy.is_some() {
+        return Route::Refused(Refusal::Direct);
+    }
     let opened = reach.localhost || reach.ports.contains(&to.port()) || (reach.network && resolver);
     if this_machine(ip) {
         return match (netns, opened) {
@@ -143,6 +164,7 @@ pub fn route(
     }
     match (reach.network, resolver || !never(ip)) {
         (false, _) => Route::Refused(Refusal::Closed),
+        (true, true) if reach.proxy.is_some() => Route::Refused(Refusal::Direct),
         (true, true) => Route::Out,
         (true, false) => Route::Refused(Refusal::Never),
     }
@@ -179,7 +201,8 @@ mod tests {
     #[test]
     fn the_route_table() {
         let resolvers: Vec<SocketAddr> = ["127.0.0.53:53", "169.254.169.254:53"].map(at).into();
-        let closed = Reach { localhost: false, ports: &[], network: false, resolvers: &resolvers };
+        let closed =
+            Reach { localhost: false, ports: &[], network: false, resolvers: &resolvers, proxy: None };
         let port = Reach { ports: &[3000], ..closed };
         let localhost = Reach { localhost: true, ..closed };
         let open = Reach { network: true, ..closed };
@@ -274,6 +297,42 @@ mod tests {
         assert_eq!(asked.get(), 1);
     }
 
+    /// With the network through the proxy, the proxy is the only way beyond this machine: its reserved address
+    /// (IPv4-mapped too) is `Proxy`, any other address beyond is refused as direct — a tool that ignores
+    /// `HTTPS_PROXY` reaches nothing — and so is a resolver's port 53, on this machine or beyond (the proxy looks
+    /// names up; Q4: no tool that goes through it looked one up itself), while what isn't beyond stays as it was
+    /// (the session's loopback, opened ports, the never-reached). The network closed, the reserved address is
+    /// nothing special: refused as any address beyond.
+    #[test]
+    fn the_proxy_is_the_only_way_out() {
+        let resolvers: Vec<SocketAddr> = ["127.0.0.53:53", "169.254.169.254:53"].map(at).into();
+        let closed =
+            Reach { localhost: false, ports: &[], network: false, resolvers: &resolvers, proxy: None };
+        let proxied = Reach { network: true, proxy: Some(PROXY), ..closed };
+        use Refusal::*;
+        use Route::*;
+        let rows: Vec<(&str, Reach, Route, Route)> = vec![
+            ("192.0.2.1:3128", proxied, Proxy, Proxy),
+            ("[::ffff:192.0.2.1]:3128", proxied, Proxy, Proxy),
+            ("192.0.2.1:3129", proxied, Refused(Direct), Refused(Direct)),
+            ("93.184.216.34:443", proxied, Refused(Direct), Refused(Direct)),
+            ("10.0.0.5:22", proxied, Refused(Direct), Refused(Direct)),
+            ("[2001:db8::1]:443", proxied, Refused(Direct), Refused(Direct)),
+            ("169.254.169.254:80", proxied, Refused(Never), Refused(Never)),
+            ("127.0.0.1:3000", proxied, Session, Refused(Closed)),
+            ("127.0.0.53:53", proxied, Refused(Direct), Refused(Direct)),
+            ("169.254.169.254:53", proxied, Refused(Direct), Refused(Direct)),
+            ("127.0.0.53:80", proxied, Session, Refused(Closed)),
+            ("192.0.2.1:3128", closed, Refused(Closed), Refused(Closed)),
+        ];
+        let none = |_| Some(false);
+        for (to, reach, netns, c) in rows {
+            let got =
+                (route(at(to), true, &reach, || false, none), route(at(to), false, &reach, || false, none));
+            assert_eq!(got, (netns, c), "{to} under {reach:?}");
+        }
+    }
+
     /// This machine's own addresses beyond loopback (its LAN's, Docker's bridge's) are this machine: reached on
     /// an opened port (from no device: `OwnAddress`), the session listening or not; else refused — never out
     /// with the network open, never the session's. A link-local one is never reached. Whether an address is its own is asked only where it
@@ -281,7 +340,8 @@ mod tests {
     #[test]
     fn this_machines_own_addresses_are_this_machine() {
         let resolvers: Vec<SocketAddr> = vec![at("192.168.1.5:53")];
-        let closed = Reach { localhost: false, ports: &[], network: false, resolvers: &resolvers };
+        let closed =
+            Reach { localhost: false, ports: &[], network: false, resolvers: &resolvers, proxy: None };
         let port = Reach { ports: &[8888], ..closed };
         let open = Reach { network: true, ..closed };
         let open_port = Reach { network: true, ..port };
@@ -334,7 +394,8 @@ mod tests {
     #[test]
     fn unread_own_addresses_only_refuse() {
         let resolvers: Vec<SocketAddr> = vec![at("10.0.0.2:53")];
-        let closed = Reach { localhost: false, ports: &[], network: false, resolvers: &resolvers };
+        let closed =
+            Reach { localhost: false, ports: &[], network: false, resolvers: &resolvers, proxy: None };
         let port = Reach { ports: &[3000], ..closed };
         let open = Reach { network: true, ..closed };
         let open_port = Reach { network: true, ..port };
