@@ -34,7 +34,7 @@ For how tarae is built and why, see [architecture.md](architecture.md). For what
 | **Review mode** | A pull-request-style review over the real buffers, comments sent in one go. Claude's turn is reviewed at its end and can be undone as a whole, a run's file changes included. A second Claude can review the changes, and risk grades mark what a person must look at ([code review](claude-integration.md#code-review)) |
 | **Cards and the inbox** | Questions come as cards, one calm stack. The inbox lists every card and edit waiting, in every session. Phases P0, P1, P2 and P5 of the card model are built ([design/cards.md](design/cards.md)) |
 | **Sandbox, macOS** | Claude's commands run under Seatbelt: writes only in the project, never to files that run later outside the sandbox; reads in home confined, keys and tokens never readable; the network closed unless opened ([the sandbox](claude-integration.md#the-sandbox)) |
-| **Sandbox, Linux** | The same policy, enforced by Landlock for files and seccomp for sockets, with tarae deciding each address. Each session's runs are forked by a keeper of its own, in namespaces of their own where the system allows it ([on Linux](claude-integration.md#on-linux), [design/sandbox-keeper.md](design/sandbox-keeper.md) steps 1–3) |
+| **Sandbox, Linux** | The same policy, enforced by Landlock for files and seccomp for sockets, with tarae deciding each address. Each session's runs are forked by a keeper of its own, in namespaces of their own where the system allows it ([on Linux](claude-integration.md#on-linux), [design/sandbox-keeper.md](design/sandbox-keeper.md) steps 1–4) |
 | **Repository trust** | A project's risky settings, and a repository's own git config and hooks, wait for a yes before anything of theirs runs |
 | **Queues** | A run waits its turn instead of being refused, and says what it waited for (phases 0, H and 1 of [design/async.md](design/async.md)) |
 | **UI state** | What's on screen as data: `tarae state`, a socket for outside programs, Claude's `ui` tool, ids that are links, pointing at things (phases 1–3 of [design/ui-state.md](design/ui-state.md)) |
@@ -55,34 +55,43 @@ from each other. Daemons such as Gradle's stay warm between runs.
 2. **One keeper per session** — done. A fork server and child subreaper on every system.
 3. **Namespaces by tier** — done. Where user namespaces work, the keeper is PID 1 of the session's own user,
    network, IPC, PID and mount namespaces. Each tier, from A+ (all of them) to D (none), says what it keeps apart.
-4. **Routing every socket** — in progress, not on the main branch yet. Each address-bearing call is routed by one
-   table: to the session's own loopback, to this machine, or out. An outbound socket is replaced by one made in
-   tarae's own network, so the session's network stays closed. Link-local, metadata, multicast, broadcast and
-   unspecified addresses are refused. Also measured at this step's end: a cost of about 0.2 s per Gradle run,
-   seen only in tier A+.
-5. **The egress proxy** — one in tarae, as threads. Connections go out by host name, against a per-session
-   allow-list. It reads the HTTP CONNECT line and the TLS SNI, and never decrypts. On macOS, where there is no
-   keeper, a per-session token in the proxy address is one way to tell sessions apart; not decided.
-6. **Sessions kept apart** — tests that one session can't reach another's processes, sockets or files. Also: the
+4. **Routing every socket** — done. The supervisor routes each address-bearing call by one table: to the session's
+   own loopback, to this machine, or out. An outbound socket is replaced by one made in tarae's own network, so
+   the session's network stays closed. Link-local, metadata, multicast, broadcast and unspecified addresses are
+   refused. Measured: a cost of about 0.2 s per Gradle run, seen only in tier A+.
+5. **The egress proxy** — done but for two parts. One proxy in tarae, as threads: connections go out by host
+   name. It reads the HTTP CONNECT line and the TLS SNI, and never decrypts; plain HTTP goes through it too. A host
+   the run's rules don't name waits for the user's card; `llm.sandbox-hosts` lists the ones allowed. On macOS each
+   run gets a port and a token of its own. On Linux the relay splices a connection once it has read its start.
+   Still to do: tools that ignore the proxy variables, as pack data (under way), and an upstream proxy.
+6. **The redirect** — on Linux where the session has a capable user namespace (tiers A+ and A; stock Ubuntu with
+   tarae's AppArmor profile). The session's network sends every connection and UDP datagram to sockets tarae
+   plants in it (TPROXY, set up by tarae's own netlink): no proxy variables, nothing a tool can ignore, IPv6 and
+   UDP included. It replaces step 4's swap and the in-session proxy there. Where it can't run (macOS, Linux
+   without a capable user namespace) the per-run proxy of step 5 stays, the supervisor enforcing it on Linux;
+   where even the supervisor can't run, the network is closed. Inside it: netlink, the session's rules at birth,
+   accepting and checking, DNS, the supervisor slimmed, telling runs apart.
+7. **Sessions kept apart** — tests that one session can't reach another's processes, sockets or files. Also: the
    keepers' memory with many sessions, and tarae's log holding every session's activity.
-7. **The loopback rule** where sessions share one loopback (tiers without a network namespace): a session reaches
-   only its own listeners.
-8. **Showing the tier** — what the sandbox guarantees for a run, said in its report, the sandbox panel, `tarae
-   state` and the run's environment.
-9. **Docs.**
+8. **The loopback rule** where sessions share one loopback (tiers without a network namespace): a session reaches
+   only its own listeners. It now matters mostly in the per-run proxy's tier.
+9. **Showing the tier** — what the sandbox guarantees for a run, said in its report, the sandbox panel, `tarae
+   state` and the run's environment. Also when tarae's AppArmor profile would raise the tier.
+10. **Docs.**
 
 ## Next
 
 ### Sandbox validation
 
-After step 9. The aim is to state what the sandbox guarantees and show that it holds.
+After step 10. The aim is to state what the sandbox guarantees and show that it holds.
 
 1. **One threat-model document**: what is kept from a run and what isn't, per tier and per OS. It also decides
    whether the `claude` process itself should be confined. Today it has only Read, Grep, Glob, Edit and Write,
    and its commands go through tarae's `run` into the sandbox.
 2. **Fuzzing the parsers that read what a run sends**: the supervisor's reading of system-call arguments, and the
    proxy's parsers.
-3. **A "must be refused" property suite**, run on several kernels on a schedule.
+3. **A "must be refused" property suite**, run on several kernels on a schedule. With the redirect: nothing a run
+   does changes the session's rules, and nothing is reached but through tarae's sockets.
 4. **Yama ptrace scope 2**: today tarae can't serve a run's sockets there and falls back to plain mode.
 5. **A speed comparison** against a bubblewrap-style sandbox. An external review some day.
 
