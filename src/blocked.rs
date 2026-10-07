@@ -67,6 +67,19 @@ pub fn choices(denials: &[Denial], home: &Path, root: &Path, path: &[PathBuf]) -
         };
         let file = d.target.starts_with('/');
         let mut found: Vec<Choice> = Vec::new();
+        // A host the proxy held and the user's answer would lift (`host:port: why`) — never what its other checks
+        // refused (an address, the server name)
+        if d.op == crate::sandbox::proxy::HOST_OP
+            && let Some((host, port)) =
+                d.target.split_once(": ").and_then(|(at, _)| crate::allow::host_port(at))
+        {
+            let why = format!("{} was reaching it", d.process);
+            found.push(Choice {
+                grant: Grant::Host(host, port),
+                hint: format!("{} reaching", d.process),
+                why,
+            });
+        }
         if file && (d.op.starts_with("file-read-data") || d.op == crate::sandbox::EITHER) {
             found.extend(crate::allow::read_choices(&target, home, &kept).into_iter().map(|place| {
                 let why = format!("{} was reading {} in it", d.process, below(&place));
@@ -173,6 +186,7 @@ impl Editor {
                     Grant::Write(p) => format!("allow writing in {}", crate::allow::tilde(p)),
                     Grant::Port(n) => format!("allow port {n} on this machine"),
                     Grant::Socket(s) => format!("allow the socket {} only", crate::allow::tilde(s)),
+                    Grant::Host(h, p) => format!("allow reaching {h}:{p}"),
                 },
                 action: Action::Grant(i.to_string()),
                 hint: c.hint.clone(),
@@ -244,9 +258,12 @@ fn grant_card(
 ) -> crate::offer::Offer {
     use crate::cards::{Asked, Request, Why};
     // (a socket: this run, or this conversation — everything else stays in the sandbox)
-    let lasts = match grant.keepable() {
-        true => "Always lasts until :sandbox-allowed takes it back.",
-        false => "Everything else stays in the sandbox; it's never kept past this conversation.",
+    let lasts = match (&grant, grant.keepable()) {
+        (Grant::Host(..), _) => {
+            "This session lasts until you quit, always until :sandbox-allowed takes it back."
+        }
+        (_, true) => "Always lasts until :sandbox-allowed takes it back.",
+        (_, false) => "Everything else stays in the sandbox; it's never kept past this conversation.",
     };
     let mut question = format!(
         "Let Claude's commands {}\n\n{why}, in `{cmd}` — which runs again now with it open, whichever you \
@@ -282,7 +299,11 @@ pub fn grant_answer(ed: &mut Editor, id: u64, grant: Grant, run: BlockedRun, sco
     let Some(scope) = scope else {
         return ed.set_status("nothing opened — the sandbox stays as it was");
     };
-    crate::allow::grant(ed, &grant, scope);
+    match &grant {
+        // (a host is the proxy's to let through — and the session's, not the conversation's)
+        Grant::Host(h, p) => crate::hosts::granted(ed, h, *p, scope),
+        _ => crate::allow::grant(ed, &grant, scope),
+    }
     let head = format!(
         "The user ran `{}` again, letting it {}{}. How it ended:",
         run.label(),
@@ -343,6 +364,42 @@ mod tests {
             "Docker's port, an address beyond this machine and the project's .git aren't offered; each folder once"
         );
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// A host the proxy held and the user's answer would lift (`network-host`: not among the hosts, no answer,
+    /// refused) is offered — that host at that port, once; what the proxy's other checks refused (an address
+    /// never reached, a server name not the host's, `network-proxy`) never is: no grant makes those safe.
+    #[test]
+    fn a_host_refusal_offers_that_host_only() {
+        let d =
+            |op: &str, target: &str| Denial { process: "curl".into(), op: op.into(), target: target.into() };
+        let host = crate::sandbox::proxy::HOST_OP;
+        let denials = [
+            d(host, "static.example.invalid:443: the user refused it for this session"),
+            d(host, "static.example.invalid:443: 8 hosts already wait for the user's answer"),
+            d(
+                host,
+                "api.example.invalid:8443: not among the hosts it may reach (llm.sandbox-hosts); the user was asked and didn't answer within 20 s",
+            ),
+            d(
+                crate::sandbox::proxy::OP,
+                "meta.example.invalid:443: it resolves only to addresses never reached: 169.254.169.254",
+            ),
+            d(
+                crate::sandbox::proxy::OP,
+                "sni.example.invalid:443: its ClientHello names other.example.invalid — the tunnel closed",
+            ),
+        ];
+        let all = choices(&denials, Path::new("/Users/u"), Path::new("/Users/u/p"), &[]);
+        assert_eq!((all[0].hint.as_str(), all[0].why.as_str()), ("curl reaching", "curl was reaching it"));
+        let got: Vec<Grant> = all.into_iter().map(|c| c.grant).collect();
+        assert_eq!(
+            got,
+            [
+                Grant::Host("static.example.invalid".into(), 443),
+                Grant::Host("api.example.invalid".into(), 8443)
+            ]
+        );
     }
 
     /// A toolchain's shared cache is never offered for writing, in a project that isn't the tool's either (no

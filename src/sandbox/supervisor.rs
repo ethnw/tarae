@@ -313,21 +313,20 @@ pub fn serve(
     refused: std::sync::mpsc::Sender<Denial>,
 ) -> io::Result<std::sync::mpsc::SyncSender<OwnedFd>> {
     let (tx, rx) = std::sync::mpsc::sync_channel::<OwnedFd>(1);
-    static RUNS: AtomicU64 = AtomicU64::new(1);
-    let session = super::proxy::session_of(&policy.root);
-    // (5c: any host through the proxy with the network open — the hosts' list and the user's answers are 5e's)
+    let session = policy.session;
+    // (the policy's hosts and the user's answers as it was made; this machine's own addresses as it read them)
     let egress = Arc::new(super::proxy::egress::Egress {
-        any: policy.network,
         own_addresses: policy.own_addresses.clone(),
-        ..Default::default()
+        ..policy.egress.clone()
     });
+    let run = policy.run_id;
     let policy = Arc::new(Served {
         policy,
         net,
         refused,
         swapped: Default::default(),
         any_port: Default::default(),
-        run: RUNS.fetch_add(1, Relaxed),
+        run,
         session,
         egress,
     });

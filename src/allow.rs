@@ -24,6 +24,9 @@ pub struct Allowed {
     /// Unix sockets Claude's commands may connect to — each one file, by its real path (#119); this
     /// conversation's at most, never kept.
     pub sockets: Vec<PathBuf>,
+    /// Hosts Claude's commands reach through tarae's proxy without asking, each at its port — kept for the
+    /// project only (the card's `A`, `hosts.rs`).
+    pub hosts: Vec<(String, u16)>,
 }
 
 impl Allowed {
@@ -47,6 +50,12 @@ impl Allowed {
         }
     }
 
+    pub fn add_host(&mut self, host: &str, port: u16) {
+        if !self.hosts.iter().any(|(h, p)| h == host && *p == port) {
+            self.hosts.push((host.to_string(), port));
+        }
+    }
+
     pub fn add(&mut self, g: &Grant) {
         match g {
             Grant::Read(p) => self.add_read(p.clone()),
@@ -59,6 +68,7 @@ impl Allowed {
                     self.sockets.push(s.clone());
                 }
             }
+            Grant::Host(h, p) => self.add_host(h, *p),
         }
     }
 
@@ -73,10 +83,26 @@ impl Allowed {
         if let Some(s) = what.strip_prefix("socket ") {
             self.sockets.retain(|p| p != Path::new(s));
         }
+        if let Some((host, port)) = what.strip_prefix("host ").and_then(host_port) {
+            self.hosts.retain(|(h, p)| *h != host || *p != port);
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.read.is_empty() && self.write.is_empty() && self.ports.is_empty() && self.sockets.is_empty()
+        self.read.is_empty()
+            && self.write.is_empty()
+            && self.ports.is_empty()
+            && self.sockets.is_empty()
+            && self.hosts.is_empty()
+    }
+}
+
+/// `host:port` as a kept answer or `:sandbox-disallow` writes it: one name (as the proxy reads names) at its
+/// port — None for anything else (a pattern, an address, no port).
+pub fn host_port(s: &str) -> Option<(String, u16)> {
+    match crate::sandbox::proxy::egress::Pattern::parse(s.trim()).ok()? {
+        crate::sandbox::proxy::egress::Pattern::Name(h, Some(p)) => Some((h, p)),
+        _ => None,
     }
 }
 
@@ -97,6 +123,8 @@ pub enum Grant {
     Port(u16),
     /// That socket file only (its real path) — never a folder of them, never kept.
     Socket(PathBuf),
+    /// A host at its port, through tarae's proxy (`hosts.rs`) — kept for the project, or this session's.
+    Host(String, u16),
 }
 
 impl Grant {
@@ -107,6 +135,7 @@ impl Grant {
             Grant::Write(p) => format!("write in {} and everything in it", tilde(p)),
             Grant::Port(n) => format!("connect to port {n} on this machine"),
             Grant::Socket(s) => format!("connect to the socket {} — that one file", tilde(s)),
+            Grant::Host(h, p) => format!("reach {h}:{p} through tarae's proxy"),
         }
     }
 
@@ -154,6 +183,8 @@ pub fn tilde(p: &Path) -> String {
 pub enum Scope {
     Once,
     ThisChat,
+    /// This tarae session, until you quit (a host — `hosts.rs`).
+    Session,
     Always,
 }
 
@@ -179,10 +210,18 @@ impl Store {
             };
             let ports = a["ports"].as_array().into_iter().flatten().filter_map(Json::as_u64);
             let ports = ports.filter_map(|p| u16::try_from(p).ok()).collect();
-            projects.insert(
-                PathBuf::from(project),
-                Allowed { read: paths("read"), write: paths("write"), ports, sockets: Vec::new() },
-            );
+            // (one the proxy can't read — a hand edit — is left out, and said)
+            let mut hosts = Vec::new();
+            for h in a["hosts"].as_array().into_iter().flatten().filter_map(Json::as_str) {
+                match host_port(h) {
+                    Some(hp) => hosts.push(hp),
+                    None => {
+                        crate::log::line("sandbox", "warning", &format!("sandbox.json: not a host:port: {h}"))
+                    }
+                }
+            }
+            let (read, write, sockets) = (paths("read"), paths("write"), Vec::new());
+            projects.insert(PathBuf::from(project), Allowed { read, write, ports, sockets, hosts });
         }
         Store { projects }
     }
@@ -196,7 +235,8 @@ impl Store {
         // Inserted, not collected: a Map's `collect` sorts — a copy of the sort for each (~6 KB)
         let mut projects = serde_json::Map::new();
         for (p, a) in self.projects.iter().filter(|(_, a)| !a.is_empty()) {
-            let body = json!({ "read": strings(&a.read), "write": strings(&a.write), "ports": a.ports });
+            let hosts: Vec<String> = a.hosts.iter().map(|(h, p)| format!("{h}:{p}")).collect();
+            let body = json!({ "read": strings(&a.read), "write": strings(&a.write), "ports": a.ports, "hosts": hosts });
             projects.insert(p.to_string_lossy().into_owned(), body);
         }
         serde_json::to_string_pretty(&json!({ "projects": projects })).unwrap_or_default()
@@ -556,13 +596,13 @@ pub fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from).filter(|h| h.is_absolute())
 }
 
-/// Keeps `change` for the project (the editor's root — the real path the kept answers know it by), on a
-/// worker (an error says so).
-fn keep_later(ed: &mut crate::editor::Editor, change: impl FnOnce(&mut Allowed) + Send + 'static) {
+/// Keeps `change` for the project (the session's root, resolved on the worker as a run's policy resolves it —
+/// the real path the next runs read the kept answers by: `tools::guard_then_go`), on a worker (an error says so).
+pub fn keep_later(ed: &mut crate::editor::Editor, change: impl FnOnce(&mut Allowed) + Send + 'static) {
     let Some(path) = ed.allow_path.clone() else { return };
     let project = ed.session.root.clone();
     ed.events.jobs().spawn(move || {
-        let r = keep(&path, &project, change);
+        let r = keep(&path, &crate::sandbox::profile_path(&project), change);
         move |ed: &mut crate::editor::Editor| {
             if let Err(e) = r {
                 ed.set_error(format!("couldn't keep it: {e}"));
@@ -624,8 +664,9 @@ impl crate::editor::Editor {
         use crate::picker::{Action, FillError, Item};
         let chat = self.session.chat.as_ref().map(|c| c.allowed.clone()).unwrap_or_default();
         let (path, project) = (self.allow_path.clone(), self.session.root.clone());
+        let session_hosts = self.session.hosts.clone();
         let fill: crate::picker::Fill = Box::new(move || {
-            let kept = Store::read(path.as_deref()).get(&project);
+            let kept = Store::read(path.as_deref()).get(&crate::sandbox::profile_path(&project));
             let row = |label: String, hint: String| Item {
                 action: Action::Typed(format!("sandbox-disallow {label}")),
                 label,
@@ -648,6 +689,11 @@ impl crate::editor::Editor {
                     items.push(row(format!("socket {}", s.display()), format!("connects · {when}")));
                 }
             }
+            // (hosts: the project's, and this session's — not a conversation's)
+            let kept_hosts = kept.hosts.iter().map(|h| (h, "always"));
+            for ((h, p), when) in kept_hosts.chain(session_hosts.iter().map(|h| (h, "this session"))) {
+                items.push(row(format!("host {h}:{p}"), format!("reaches · {when}")));
+            }
             match items.is_empty() {
                 true => Err(FillError::Nothing("nothing allowed past the defaults in this project".into())),
                 false => Ok(items),
@@ -658,18 +704,27 @@ impl crate::editor::Editor {
         self.open_picker(p, Some(fill));
     }
 
-    /// `:sandbox-disallow <path | port N>` — taken back (this conversation and kept): Claude asks again before
-    /// reading there, its commands can't write there or connect there.
+    /// `:sandbox-disallow <path | port N | socket path | host name:port>` — taken back (this conversation, this
+    /// session and kept): Claude asks again before reading there, its commands can't write there or connect
+    /// there, a host is asked again (its runs going on too — the proxy is told).
     pub fn sandbox_disallow(&mut self, what: &str) -> Result<(), String> {
         let what = what.trim().to_string();
-        if !what.starts_with('/') && !what.starts_with("port ") && !what.starts_with("socket /") {
-            return Err(
-                "usage: :sandbox-disallow <path | port N | socket path> — as :sandbox-allowed lists it"
-                    .into(),
-            );
+        let host = what.strip_prefix("host ").and_then(host_port);
+        if !what.starts_with('/')
+            && !what.starts_with("port ")
+            && !what.starts_with("socket /")
+            && host.is_none()
+        {
+            return Err("usage: :sandbox-disallow <path | port N | socket path | host name:port> — as \
+                        :sandbox-allowed lists it"
+                .into());
         }
         if let Some(c) = self.session.chat.as_mut() {
             c.allowed.remove(&what);
+        }
+        if let Some((h, p)) = host {
+            self.session.hosts.retain(|(sh, sp)| *sh != h || *sp != p);
+            crate::hosts::taken(&self.session, &h, p);
         }
         let taken = what.clone();
         keep_later(self, move |a| a.remove(&taken));
@@ -721,6 +776,68 @@ pub(crate) mod tests {
         // Taken back: the project goes from the file
         keep(&path, Path::new("/p/two"), |a| a.read.clear()).unwrap();
         assert!(!std::fs::read_to_string(&path).unwrap().contains("/p/two"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A project's hosts (the card's `A`) are kept in `sandbox.json` as `host:port`, read back into the next run's
+    /// rules (`with_allowed` → `Egress::answered`, named among what was granted), and taken back by
+    /// `:sandbox-disallow` — from what's kept and the session's, the proxy told (`Taken`) so the runs going on ask
+    /// again. A hand-edited entry the proxy can't read (a pattern, an address, no port) is left out.
+    #[test]
+    fn a_projects_hosts_are_kept_and_read_back() {
+        let dir = std::env::temp_dir().join(format!("tarae-allow-hosts-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join("p")).unwrap();
+        let root = std::fs::canonicalize(dir.join("p")).unwrap();
+        let path = dir.join("state/sandbox.json");
+        keep(&path, &root, |a| a.add(&Grant::Host("static.example.invalid".into(), 443))).unwrap();
+        keep(&path, &root, |a| a.add_host("static.example.invalid", 443)).unwrap();
+        let kept = Store::read(Some(&path)).get(&root);
+        assert_eq!(kept.hosts, [("static.example.invalid".to_string(), 443)], "once");
+        let once = Grant::Host("once.example.invalid".into(), 8443);
+        let w = crate::tools::with_allowed(&crate::llm::LlmConfig::default(), &[&kept], Some(&once));
+        assert!(w.granted.contains(&"reach static.example.invalid:443 through tarae's proxy".to_string()));
+        let mut p = crate::sandbox::Policy::for_project(&crate::sandbox::Env {
+            root: root.clone(),
+            network: true,
+            hosts: Some(Vec::new()),
+            ..Default::default()
+        });
+        w.onto(&mut p);
+        let rules = &p.egress;
+        assert!(
+            rules.answered("static.example.invalid", 443) && rules.answered("once.example.invalid", 8443)
+        );
+        assert!(!rules.answered("static.example.invalid", 8443), "at its port");
+        // A hand edit: only what the proxy reads
+        let text = std::fs::read_to_string(&path).unwrap().replace(
+            "\"static.example.invalid:443\"",
+            "\"static.example.invalid:443\", \"*.example.invalid:443\", \"1.2.3.4:443\", \"bare.example.invalid\"",
+        );
+        std::fs::write(&path, text).unwrap();
+        assert_eq!(Store::read(Some(&path)).get(&root).hosts.len(), 1);
+        // Taken back
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        (ed.session.root, ed.allow_path) = (root.clone(), Some(path.clone()));
+        ed.session.hosts.push(("static.example.invalid".into(), 443));
+        crate::hosts::SENT.with(|s| s.borrow_mut().clear());
+        ed.sandbox_disallow("host static.example.invalid:443").unwrap();
+        assert!(ed.session.hosts.is_empty(), "the session's");
+        let taken = crate::hosts::SENT.with(|s| {
+            s.borrow().iter().any(|m| {
+                matches!(m, crate::sandbox::proxy::ToProxy::Taken { session, host, port: 443 }
+                    if *session == crate::sandbox::proxy::session_of(&root) && host == "static.example.invalid")
+            })
+        });
+        assert!(taken, "the proxy told");
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !Store::read(Some(&path)).get(&root).hosts.is_empty() {
+            assert!(std::time::Instant::now() < end, "what's kept, taken back");
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(50)) {
+                ed.handle_event(ev);
+            }
+        }
+        assert!(ed.sandbox_disallow("host *.example.invalid:443").is_err(), "a host:port, as listed");
         std::fs::remove_dir_all(&dir).ok();
     }
 

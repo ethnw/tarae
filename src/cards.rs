@@ -120,6 +120,8 @@ pub enum Why {
     Screen,
     /// The user opening what the sandbox blocked (`blocked.rs`).
     Blocked,
+    /// A host a run's rules don't name, held by tarae's proxy (`hosts.rs`).
+    Host,
 }
 
 impl Why {
@@ -142,6 +144,7 @@ impl Why {
             Why::Read => "read".into(),
             Why::Screen => "screen".into(),
             Why::Blocked => "blocked".into(),
+            Why::Host => "host".into(),
         }
     }
 
@@ -172,7 +175,8 @@ impl Why {
             | Why::ProtectedMade
             | Why::Read
             | Why::Screen
-            | Why::Blocked => return None,
+            | Why::Blocked
+            | Why::Host => return None,
         })
     }
 }
@@ -207,6 +211,8 @@ pub enum Request {
     Screen,
     /// The sandbox opened for what it blocked: a place to read, a folder to write in, a port — or one socket.
     Grant(crate::allow::Grant),
+    /// A host reached through tarae's proxy (`host:port`).
+    Host(String),
 }
 
 /// What the capability model does with a request (docs/design/cards.md §3).
@@ -220,6 +226,8 @@ pub enum Decision {
     Outside,
     NoSandbox,
     Screen,
+    /// A host past the session's (the proxy holds it).
+    Host,
 }
 
 impl Decision {
@@ -233,6 +241,7 @@ impl Decision {
             Decision::Outside => "outside",
             Decision::NoSandbox => "no-sandbox",
             Decision::Screen => "screen",
+            Decision::Host => "host",
         }
     }
 }
@@ -256,6 +265,8 @@ pub fn decide(r: &Request) -> Decision {
         Request::Grant(crate::allow::Grant::Write(_)) => Decision::Grant(Verb::Write),
         Request::Grant(crate::allow::Grant::Port(_)) => Decision::Grant(Verb::Port),
         Request::Grant(crate::allow::Grant::Socket(_)) => Decision::Socket,
+        Request::Grant(crate::allow::Grant::Host(..)) => Decision::Host,
+        Request::Host(_) => Decision::Host,
     }
 }
 
@@ -282,6 +293,7 @@ fn kind(w: &What) -> &'static str {
         What::Screen { .. } => "screen",
         What::Grant { .. } => "grant",
         What::Outside { .. } => "outside",
+        What::Host(_) => "host",
         _ => "other",
     }
 }

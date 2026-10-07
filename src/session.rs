@@ -162,6 +162,11 @@ pub struct Session {
     /// Its Claude's conversation compacted since tarae started — how often, the last one, and whether one
     /// came behind and it hasn't been in front since (`compaction.rs`).
     pub compacted: crate::compaction::Compacted,
+    /// The hosts its commands reach through tarae's proxy by the user's `s` (this session, until you quit) —
+    /// what `:sandbox-allowed` lists and takes back; the proxy holds the answers itself (`hosts.rs`).
+    pub hosts: Vec<(String, u16)>,
+    /// Its id for tarae's proxy, with the root it was worked out for (`proxy_id`).
+    proxy_id: std::cell::RefCell<(PathBuf, u64)>,
 }
 
 /// How long a tool call may wait before its session is marked possibly stuck (a `diagnostics` call's own
@@ -201,6 +206,8 @@ impl Session {
     pub fn new(id: SessionId, root: PathBuf, view: crate::split::ViewId) -> Self {
         let name =
             root.file_name().map_or_else(|| root.display().to_string(), |n| n.to_string_lossy().into());
+        // (worked out once, here, as the root is made real here: the main loop names it with no look at the disk)
+        let proxy_id = std::cell::RefCell::new((root.clone(), crate::sandbox::proxy::session_of(&root)));
         Self {
             id,
             root,
@@ -265,7 +272,20 @@ impl Session {
             reloaded: 0,
             usage: Default::default(),
             compacted: Default::default(),
+            hosts: Vec::new(),
+            proxy_id,
         }
+    }
+
+    /// The session as tarae's proxy names it — `proxy::session_of` its root, resolved as a run's policy resolves
+    /// it: the answers the main loop sends (`hosts.rs`) reach the session its runs' connections are of, whatever
+    /// way the root was given. Worked out when the session is made, and again only if its root is changed since.
+    pub fn proxy_id(&self) -> u64 {
+        let mut c = self.proxy_id.borrow_mut();
+        if c.0 != self.root {
+            *c = (self.root.clone(), crate::sandbox::proxy::session_of(&self.root));
+        }
+        c.1
     }
 
     /// What the tabs, the chip and the list call it: a session by its name (its branch), the checkout tarae

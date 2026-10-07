@@ -3839,7 +3839,14 @@ mod tests {
             let name = format!("proxied-{tier}");
             let k = keeper_in(&name, ns);
             let (p, c, root) = project_served(&name, Vec::new(), Some(&k), &[], Ok(()));
-            let p = Arc::new(super::super::Policy { network: true, own_addresses: Some(Vec::new()), ..p });
+            // (the network open to any host — `llm.sandbox-hosts = "any"`, as `policy_in` makes it)
+            let egress = super::super::proxy::egress::Egress { any: true, ..Default::default() };
+            let p = Arc::new(super::super::Policy {
+                network: true,
+                own_addresses: Some(Vec::new()),
+                egress,
+                ..p
+            });
             let env = [
                 ("TARAE_TO", super::super::route::PROXY.to_string()),
                 ("TARAE_HOST", format!("{host}:{}", at.port())),
@@ -3851,6 +3858,84 @@ mod tests {
                 "{tier}: {refused:?}"
             );
             assert!(served.recv_timeout(Duration::from_secs(5)).is_ok(), "{tier}: it arrived outside");
+            k.end();
+            std::fs::remove_dir_all(&root).ok();
+        }
+    }
+
+    /// Step 5e: a host a run's rules don't name (`llm.sandbox-hosts = []`) is held at the proxy — reached through
+    /// the supervisor's TCP pair as macOS's runs reach it through their ports — and the main loop is asked, for
+    /// that run; the session's answer lets it through, and the session's next run reaches the host unasked. The
+    /// test stands in for the main loop (`proxy::TEST_ASKS`). In tier C and the netns alike.
+    #[test]
+    fn an_unknown_host_waits_for_the_answer() {
+        use super::super::proxy::{self, FromProxy, Scope, ToProxy};
+        let Some(tiers) = served_tiers("an_unknown_host_waits_for_the_answer") else { return };
+        let Some(ip) = outside() else { return };
+        for (tier, ns) in tiers {
+            // (the outside answers two requests: the first run's, then the next's)
+            let l = std::net::TcpListener::bind((ip, 0)).unwrap();
+            let at = l.local_addr().unwrap();
+            let (tx, served) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                for s in l.incoming().take(2).flatten() {
+                    let mut line = String::new();
+                    let _ = io::BufRead::read_line(&mut std::io::BufReader::new(&s), &mut line);
+                    let _ = io::Write::write_all(&mut &s, b"out hello\n");
+                    let _ = tx.send(());
+                }
+            });
+            let host = format!("ask-{tier}.test");
+            proxy::TEST_NAMES.lock().unwrap().push((host.clone(), at));
+            let name = format!("asked-{tier}");
+            let k = keeper_in(&name, ns);
+            let (p, c, root) = project_served(&name, Vec::new(), Some(&k), &[], Ok(()));
+            let session = proxy::session_of(&p.root);
+            let (asks, asked) = std::sync::mpsc::channel();
+            proxy::TEST_ASKS.lock().unwrap().push((session, asks));
+            // (two runs of the session, ids of their own; their rules name no host)
+            let listed = |run_id| {
+                let egress = proxy::egress::Egress::default();
+                let own = Some(Vec::new());
+                Arc::new(super::super::Policy {
+                    network: true,
+                    own_addresses: own,
+                    egress,
+                    run_id,
+                    ..p.clone()
+                })
+            };
+            let (first, second) = (listed(5_000_001), listed(5_000_002));
+            // The main loop, stood in: the session's answer to the first question
+            let answer = std::thread::spawn(move || {
+                let ask = asked.recv_timeout(Duration::from_secs(10)).ok()?;
+                let FromProxy::Ask { run, host, port, .. } = ask.clone();
+                proxy::get().send(ToProxy::Answer { session, run, host, port, scope: Scope::Session });
+                Some((ask, asked))
+            });
+            let env = [
+                ("TARAE_TO", super::super::route::PROXY.to_string()),
+                ("TARAE_HOST", format!("{host}:{}", at.port())),
+            ];
+            let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            let reached = "connect=0 family=2 stream=1 nodelay=1 nonblock=1 peer=127.0.0.1 reply=out hello";
+            let (said, refused) = served_said(&k, (&first, &c, &root), "proxied", &env);
+            assert_eq!(said, reached, "{tier}: the held request went on — {refused:?}");
+            let (ask, asked) =
+                answer.join().unwrap().unwrap_or_else(|| panic!("{tier}: the main loop asked"));
+            assert!(
+                matches!(&ask, FromProxy::Ask { run: 5_000_001, host: h, process, .. } if *h == host && !process.is_empty()),
+                "{tier}: {ask:?}"
+            );
+            let (said, refused) = served_said(&k, (&second, &c, &root), "proxied", &env);
+            assert_eq!(said, reached, "{tier}: the session's next run — {refused:?}");
+            assert!(asked.try_recv().is_err(), "{tier}: not asked again");
+            for n in ["first", "second"] {
+                assert!(
+                    served.recv_timeout(Duration::from_secs(5)).is_ok(),
+                    "{tier}: the {n} arrived outside"
+                );
+            }
             k.end();
             std::fs::remove_dir_all(&root).ok();
         }

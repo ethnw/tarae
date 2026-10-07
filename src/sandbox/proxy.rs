@@ -35,6 +35,10 @@ use super::Denial;
 /// The op a proxy's refusal is said with in a run's report.
 pub const OP: &str = "network-proxy";
 
+/// The op of a refusal the user's answer would lift — the host isn't among the run's, and the user said no, didn't
+/// answer in time, or had too many questions up (`:sandbox-blocked` offers that host).
+pub const HOST_OP: &str = "network-host";
+
 /// A run's connection, as the supervisor hands it (Linux): the proxy's end of the TCP pair whose other end is
 /// in the run's place.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -50,7 +54,6 @@ pub struct Connection {
 
 /// How far an answer of the user's reaches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))] // (the main loop's answers come with step 5e)
 pub enum Scope {
     /// The run that asked (`y`).
     Run,
@@ -63,7 +66,7 @@ pub enum Scope {
 }
 
 /// What comes in.
-#[cfg_attr(not(test), allow(dead_code))] // (the main loop's answers come with 5e; each system sends its own runs')
+#[cfg_attr(not(test), allow(dead_code))] // (each system sends its own runs')
 pub enum ToProxy {
     /// Linux: a run's connection, from the supervisor.
     Connection(Connection),
@@ -78,10 +81,18 @@ pub enum ToProxy {
         rules: Arc<Egress>,
         told: Sender<Denial>,
     },
-    /// macOS: the run ended — its listener closes, its token is gone.
+    /// The run ended (reaped): macOS's listener closes, its token is gone (`sandbox::after_run`); on both
+    /// systems (the main loop, `hosts::run_ended`) a question asked for it goes to whoever still waits.
     RunEnded { run: u64 },
-    /// The user's answer to an `Ask` (main loop).
+    /// The user's answer to an `Ask`, or a grant from what a run was refused (main loop). An allow takes the place
+    /// of a refusal before it, and a refusal of an allow.
     Answer { session: u64, run: u64, host: String, port: u16, scope: Scope },
+    /// The user took back an answer for the session or the project (`:sandbox-disallow`): the host is asked
+    /// again — whatever the runs' rules answered when they were made.
+    Taken { session: u64, host: String, port: u16 },
+    /// The user let a run go again with the host (`:sandbox-blocked`'s `y`): the session's latest answer goes —
+    /// a refusal no longer holds; a run's rules that name it let it through, the others ask.
+    Lifted { session: u64, host: String, port: u16 },
     /// The session ended: its answers go.
     SessionEnded { session: u64 },
 }
@@ -90,7 +101,17 @@ pub enum ToProxy {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FromProxy {
     /// A host the run's rules don't name: the user is asked (a card); the connection waits up to `Limits::hold`.
-    Ask { session: u64, run: u64, host: String, port: u16 },
+    /// `process`: what asked (the run's process, as its report names it).
+    Ask { session: u64, run: u64, host: String, port: u16, process: String },
+}
+
+/// The user's latest answer for a host in a session — before what a run's rules carried from when they were made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Latest {
+    Allowed,
+    Refused,
+    /// Taken back: asked again.
+    Taken,
 }
 
 /// The proxy's limits.
@@ -108,6 +129,9 @@ pub struct Limits {
     pub per_session: usize,
     /// Tunnels in all.
     pub total: usize,
+    /// Hosts a session may have waiting on the user's answer at once — one card each: past it, refused unasked
+    /// (a run trying many hosts would stack cards).
+    pub questions: usize,
 }
 
 impl Default for Limits {
@@ -120,6 +144,7 @@ impl Default for Limits {
             connect: Duration::from_secs(10),
             per_session: 256,
             total: 1024,
+            questions: 8,
         }
     }
 }
@@ -134,14 +159,19 @@ enum Verdict {
 /// What the dispatcher reads: the messages, and its own connections' questions.
 enum In {
     Msg(ToProxy),
-    /// A connection whose rules don't name its host: the answers so far, else the user's (`id`: the waiter's).
+    /// A connection whose setting doesn't name its host: the answers so far, else the user's (`id`: the waiter's;
+    /// `answered`: its rules had the user's yes when they were made).
     Decide {
         session: u64,
         run: u64,
         host: String,
         port: u16,
+        process: String,
+        answered: bool,
         id: u64,
         reply: Sender<Verdict>,
+        /// Its connection, to tell whether it's still there when its run ends.
+        alive: Option<TcpStream>,
     },
     /// A connection that stopped waiting (its hold ran out): no longer a waiter.
     GaveUp {
@@ -190,8 +220,7 @@ impl Proxy {
             runs: HashMap::new(),
             per_session: HashMap::new(),
             total: 0,
-            allowed: HashSet::new(),
-            refused: HashSet::new(),
+            latest: HashMap::new(),
             run_allowed: HashSet::new(),
             waiting: HashMap::new(),
         };
@@ -238,17 +267,45 @@ struct State {
     runs: HashMap<u64, Run>,
     per_session: HashMap<u64, usize>,
     total: usize,
-    /// (session, host, port) let go, or refused, by the user's answer for the session.
-    allowed: HashSet<(u64, String, u16)>,
-    refused: HashSet<(u64, String, u16)>,
+    /// (session, host, port): the user's latest answer for the session (or the project, or taken back).
+    latest: HashMap<(u64, String, u16), Latest>,
     /// (session, run, host, port) let go for that run.
     run_allowed: HashSet<(u64, u64, String, u16)>,
     /// The questions out, each with the connections waiting on it.
-    waiting: HashMap<(u64, String, u16), Vec<Waiter>>,
+    waiting: HashMap<(u64, String, u16), Question>,
 }
 
-/// A connection waiting on the user's answer: its id, its run, and where its verdict goes.
-type Waiter = (u64, u64, Sender<Verdict>);
+/// A question out: the run it was asked for (the card names it), and the connections waiting on it.
+struct Question {
+    run: u64,
+    waiters: Vec<Waiter>,
+}
+
+/// A connection waiting on the user's answer: its id, its run, what asked, where its verdict goes, and its
+/// connection (a copy — whether it's still there).
+struct Waiter {
+    id: u64,
+    run: u64,
+    /// What asked (the card names it).
+    process: String,
+    reply: Sender<Verdict>,
+    alive: Option<TcpStream>,
+}
+
+/// Whether a waiting connection is still there: its client hasn't closed it (peeked, never read — nor its flags
+/// changed: its thread reads it after).
+fn open(s: &TcpStream) -> bool {
+    let mut b = [0u8; 1];
+    // SAFETY: our socket, a buffer of its size.
+    let n =
+        unsafe { libc::recv(s.as_raw_fd(), b.as_mut_ptr().cast(), 1, libc::MSG_PEEK | libc::MSG_DONTWAIT) };
+    n > 0
+        || (n < 0
+            && matches!(
+                io::Error::last_os_error().kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+            ))
+}
 
 /// A connection, ready to be served.
 struct Conn {
@@ -288,31 +345,34 @@ impl State {
                         self.runs.insert(run, Run { session, process, token, rules, told, _stop: stop_w });
                     }
                 }
-                In::Msg(ToProxy::RunEnded { run }) => {
-                    self.runs.remove(&run);
-                    self.run_allowed.retain(|(_, r, ..)| *r != run);
-                }
+                In::Msg(ToProxy::RunEnded { run }) => self.run_ended(run),
                 In::Msg(ToProxy::Answer { session, run, host, port, scope }) => {
                     self.answer(session, run, host, port, scope)
                 }
+                In::Msg(ToProxy::Taken { session, host, port }) => {
+                    self.latest.insert((session, host, port), Latest::Taken);
+                }
+                In::Msg(ToProxy::Lifted { session, host, port }) => {
+                    self.latest.remove(&(session, host, port));
+                }
                 In::Msg(ToProxy::SessionEnded { session }) => {
-                    self.allowed.retain(|(s, ..)| *s != session);
-                    self.refused.retain(|(s, ..)| *s != session);
+                    self.latest.retain(|(s, ..), _| *s != session);
                     self.run_allowed.retain(|(s, ..)| *s != session);
                     self.waiting.retain(|(s, ..), _| *s != session);
                 }
-                In::Decide { session, run, host, port, id, reply } => {
-                    self.decide(session, run, host, port, (id, run, reply))
+                In::Decide { session, run, host, port, process, answered, id, reply, alive } => {
+                    self.decide((session, host, port), answered, Waiter { id, run, process, reply, alive })
                 }
                 #[cfg(test)]
                 In::Waiting { session, host, port, reply } => {
-                    let _ = reply.send(self.waiting.get(&(session, host, port)).map_or(0, Vec::len));
+                    let _ =
+                        reply.send(self.waiting.get(&(session, host, port)).map_or(0, |q| q.waiters.len()));
                 }
                 In::GaveUp { session, host, port, id } => {
                     let key = (session, host, port);
-                    if let Some(w) = self.waiting.get_mut(&key) {
-                        w.retain(|(i, ..)| *i != id);
-                        if w.is_empty() {
+                    if let Some(q) = self.waiting.get_mut(&key) {
+                        q.waiters.retain(|w| w.id != id);
+                        if q.waiters.is_empty() {
                             self.waiting.remove(&key);
                         }
                     }
@@ -381,21 +441,68 @@ impl State {
         }
     }
 
-    /// The answers so far for a host a connection's rules don't name — else the user asked, once a host.
-    fn decide(&mut self, session: u64, run: u64, host: String, port: u16, waiter: Waiter) {
-        let key = (session, host, port);
-        if self.refused.contains(&key) {
-            let _ = waiter.2.send(Verdict::No("the user refused it for this session".into()));
-            return;
-        }
-        if self.allowed.contains(&key) || self.run_allowed.contains(&(session, run, key.1.clone(), port)) {
-            let _ = waiter.2.send(Verdict::Go);
+    /// The answers so far for a host a connection's setting doesn't name — the user's latest for the session,
+    /// the run's own, then what its rules carried (`answered`) — else the user asked, once a host, at most
+    /// `Limits::questions` hosts of a session at once.
+    fn decide(&mut self, key: (u64, String, u16), answered: bool, waiter: Waiter) {
+        let (session, run) = (key.0, waiter.run);
+        let latest = self.latest.get(&key).copied();
+        let ran = self.run_allowed.contains(&(session, run, key.1.clone(), key.2));
+        let verdict = match latest {
+            Some(Latest::Refused) => Some(Verdict::No("the user refused it for this session".into())),
+            Some(Latest::Allowed) => Some(Verdict::Go),
+            _ if ran => Some(Verdict::Go),
+            None if answered => Some(Verdict::Go),
+            _ => None,
+        };
+        if let Some(v) = verdict {
+            let _ = waiter.reply.send(v);
             return;
         }
         if !self.waiting.contains_key(&key) {
-            let _ = self.asks.send(FromProxy::Ask { session, run, host: key.1.clone(), port });
+            let max = self.shared.limits.questions;
+            if self.waiting.keys().filter(|(s, ..)| *s == session).count() >= max {
+                let why = format!("{max} hosts already wait for the user's answer");
+                let _ = waiter.reply.send(Verdict::No(why));
+                return;
+            }
+            let (host, port, process) = (key.1.clone(), key.2, waiter.process.clone());
+            let _ = self.asks.send(FromProxy::Ask { session, run, host, port, process });
         }
-        self.waiting.entry(key).or_default().push(waiter);
+        self.waiting.entry(key).or_insert_with(|| Question { run, waiters: Vec::new() }).waiters.push(waiter);
+    }
+
+    /// Run `run` ended (reaped — the main loop says so on both systems; macOS's port closes with it): what it
+    /// was let reach alone goes, and so does a connection of its that closed with it. A question asked for it
+    /// goes to whoever still waits — another run's connection, else one of a process it left running (Linux: a
+    /// daemon keeps its run) — asked again: none waits out its hold with no card.
+    fn run_ended(&mut self, run: u64) {
+        self.runs.remove(&run);
+        self.run_allowed.retain(|(_, r, ..)| *r != run);
+        let asks = &self.asks;
+        self.waiting.retain(|(session, host, port), q| {
+            q.waiters.retain(|w| {
+                let live = w.run != run || w.alive.as_ref().is_some_and(open);
+                if !live {
+                    let _ = w.reply.send(Verdict::No("its run ended".into()));
+                }
+                live
+            });
+            if q.run == run
+                && let Some(next) = q.waiters.iter().find(|w| w.run != run).or(q.waiters.first())
+            {
+                q.run = next.run;
+                let (host, process) = (host.clone(), next.process.clone());
+                let _ = asks.send(FromProxy::Ask {
+                    session: *session,
+                    run: next.run,
+                    host,
+                    port: *port,
+                    process,
+                });
+            }
+            !q.waiters.is_empty()
+        });
     }
 
     /// The user's answer: kept as far as it reaches, and the connections waiting on it let go or refused.
@@ -410,22 +517,23 @@ impl State {
                 self.run_allowed.insert((session, run, key.1.clone(), port));
             }
             Scope::Session | Scope::Project => {
-                self.allowed.insert(key.clone());
+                self.latest.insert(key.clone(), Latest::Allowed);
             }
             Scope::Refused => {
-                self.refused.insert(key.clone());
+                self.latest.insert(key.clone(), Latest::Refused);
             }
         }
-        let Some(waiters) = self.waiting.remove(&key) else { return };
+        let Some(q) = self.waiting.remove(&key) else { return };
         let (now, rest): (Vec<_>, Vec<_>) =
-            waiters.into_iter().partition(|(_, r, _)| scope != Scope::Run || *r == run);
-        for (.., reply) in now {
-            let _ = reply.send(verdict.clone());
+            q.waiters.into_iter().partition(|w| scope != Scope::Run || w.run == run);
+        for w in now {
+            let _ = w.reply.send(verdict.clone());
         }
         // (an answer for one run leaves the others' connections waiting: the user is asked for the next one's)
-        if let Some(&(_, next, _)) = rest.first() {
-            let _ = self.asks.send(FromProxy::Ask { session, run: next, host: key.1.clone(), port });
-            self.waiting.insert(key, rest);
+        if let Some(next) = rest.first() {
+            let (run, process) = (next.run, next.process.clone());
+            let _ = self.asks.send(FromProxy::Ask { session, run, host: key.1.clone(), port, process });
+            self.waiting.insert(key, Question { run, waiters: rest });
         }
     }
 }
@@ -519,7 +627,11 @@ fn after_accept_error(e: &io::Error) -> Option<Duration> {
 
 /// A refusal said on the run's sender, as the supervisor says its own.
 fn tell(c: &Conn, target: &str) {
-    let _ = c.told.send(Denial { process: c.process.clone(), op: OP.into(), target: target.into() });
+    tell_op(c, OP, target);
+}
+
+fn tell_op(c: &Conn, op: &str, target: &str) {
+    let _ = c.told.send(Denial { process: c.process.clone(), op: op.into(), target: target.into() });
 }
 
 /// An HTTP answer (`extra`: header lines, each ending CR LF), its body the why; the connection closes after.
@@ -644,26 +756,35 @@ fn serve(c: Conn, shared: &Shared) {
         answer(s, r.status, &why, "");
         tell(&c, &why);
     };
+    // (a refusal the user's answer would lift: its own op — `:sandbox-blocked` offers the host)
+    let refuse_host = |why: String| {
+        let why = format!("{name}:{port}: {why}");
+        answer(s, 403, &why, "");
+        tell_op(&c, HOST_OP, &why);
+    };
     if !c.rules.allows(&name, port, default) {
         static WAITERS: AtomicU64 = AtomicU64::new(0);
         let id = WAITERS.fetch_add(1, Ordering::Relaxed);
         let (reply, verdict) = mpsc::channel();
-        let (session, host) = (c.session, name.clone());
-        let ask = In::Decide { session, run: c.run, host: host.clone(), port, id, reply };
+        let (session, host, process) = (c.session, name.clone(), c.process.clone());
+        let answered = c.rules.answered(&name, port);
+        let alive = c.stream.try_clone().ok();
+        let ask =
+            In::Decide { session, run: c.run, host: host.clone(), port, process, answered, id, reply, alive };
         if shared.tx.send(ask).is_err() {
             return;
         }
         match verdict.recv_timeout(limits.hold) {
             Ok(Verdict::Go) => {}
-            Ok(Verdict::No(why)) => return refuse(Refused::new(403, why)),
+            Ok(Verdict::No(why)) => return refuse_host(why),
             Err(_) => {
                 // (no longer waiting: the next connection to it asks again)
                 let _ = shared.tx.send(In::GaveUp { session, host, port, id });
-                let why = format!(
-                    "not in the session's hosts; asked the user — no answer within {} s",
+                return refuse_host(format!(
+                    "not among the hosts it may reach (llm.sandbox-hosts); the user was asked and didn't answer \
+                     within {} s",
                     limits.hold.as_secs_f32()
-                );
-                return refuse(Refused::new(403, why));
+                ));
             }
         }
     }
@@ -751,11 +872,14 @@ pub fn git_basic(count: usize) -> [(String, String); 3] {
     ]
 }
 
-/// A session as the proxy knows it: its project's root, hashed (the answers a session gets are kept by it).
+/// A session as the proxy knows it: its project's root resolved as a run's policy resolves it
+/// (`sandbox::profile_path` — a path through a link is its real one), hashed. The one way both sides name it: the
+/// policy's (`Policy.session`, on its worker) and the main loop's (`Session::proxy_id`, once per root). It looks at
+/// the disk: never on the key path.
 pub fn session_of(root: &std::path::Path) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    root.hash(&mut h);
+    super::profile_path(root).hash(&mut h);
     h.finish()
 }
 
@@ -778,7 +902,8 @@ pub struct RunPort {
 
 #[cfg_attr(target_os = "linux", allow(dead_code))]
 impl RunPort {
-    pub fn new() -> io::Result<Arc<RunPort>> {
+    /// For run `run` (`Policy.run_id`).
+    pub fn new(run: u64) -> io::Result<Arc<RunPort>> {
         let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
         let port = listener.local_addr()?.port();
         let mut raw = [0u8; 32];
@@ -787,9 +912,8 @@ impl RunPort {
             return Err(io::Error::last_os_error());
         }
         let token = raw.iter().map(|b| format!("{b:02x}")).collect();
-        static RUNS: AtomicU64 = AtomicU64::new(1);
         Ok(Arc::new(RunPort {
-            run: RUNS.fetch_add(1, Ordering::Relaxed),
+            run,
             port,
             token,
             listener: std::sync::Mutex::new(Some(listener.into())),
@@ -818,20 +942,19 @@ impl RunPort {
     }
 
     /// Its run started (`sandbox::spawn`): the listener to the proxy, with what each of its connections gets —
-    /// the session (`root`'s), the rules (any host, as Linux's until 5e's list; this machine's own addresses as
+    /// the session (its project's), the rules (its policy's hosts and answers; this machine's own addresses as
     /// read with the policy), where its refusals are said (`told`), and what they name (`process`).
-    pub fn started(&self, root: &std::path::Path, process: String, told: Sender<Denial>) {
+    pub fn started(&self, policy: &super::Policy, process: String, told: Sender<Denial>) {
         let Some(listener) = self.take() else { return };
         #[cfg(all(test, not(target_os = "linux")))]
         let beyond = TEST_BEYOND.lock().unwrap_or_else(|e| e.into_inner());
         let rules = Egress {
-            any: true,
             own_addresses: self.own_addresses.clone(),
             #[cfg(all(test, not(target_os = "linux")))]
-            beyond: beyond.iter().filter(|(r, _)| r == root).map(|(_, ip)| *ip).collect(),
-            ..Default::default()
+            beyond: beyond.iter().filter(|(r, _)| *r == policy.root).map(|(_, ip)| *ip).collect(),
+            ..policy.egress.clone()
         };
-        let session = session_of(root);
+        let session = policy.session;
         let token = self.token.clone();
         let (run, rules) = (self.run, Arc::new(rules));
         get().send(ToProxy::RunStarts { run, session, process, listener, token, rules, told });
@@ -858,14 +981,46 @@ impl PartialEq for RunPort {
 
 impl Eq for RunPort {}
 
+/// Where the proxy's questions go (`listen`).
+static ASKS: std::sync::OnceLock<Sender<FromProxy>> = std::sync::OnceLock::new();
+
+static PROXY: std::sync::OnceLock<Proxy> = std::sync::OnceLock::new();
+
+/// The proxy, if a run started it — the main loop's answers go to it, never starting it.
+#[cfg_attr(test, allow(dead_code))]
+pub fn running() -> Option<&'static Proxy> {
+    PROXY.get()
+}
+
+/// The main loop takes the proxy's questions on `asks` — its only asker (`hosts.rs`), set once at start, before
+/// any run. Unset (tests that don't), a question has no reader: its connection waits out its hold and is refused.
+pub fn listen(asks: Sender<FromProxy>) {
+    let _ = ASKS.set(asks);
+}
+
 /// The proxy of this tarae, started on first use — never on the main loop's key path (Linux: a supervisor's
 /// thread; macOS: a run's spawn, whose first one starts a thread). Names are looked up by the system's
-/// resolver. The user's answers come with step 5e: until then a host no rule names waits out its hold and is
-/// refused.
+/// resolver; the user is asked through `listen`'s sender.
 pub fn get() -> &'static Proxy {
-    static PROXY: std::sync::OnceLock<Proxy> = std::sync::OnceLock::new();
     PROXY.get_or_init(|| {
-        let (asks, _) = mpsc::channel();
+        #[cfg(not(test))]
+        let asks = ASKS.get().cloned().unwrap_or_else(|| mpsc::channel().0);
+        // (tests: each question to the sender its session's test registered — `TEST_ASKS`)
+        #[cfg(test)]
+        let asks = {
+            let _ = &ASKS;
+            let (asks, rx) = mpsc::channel::<FromProxy>();
+            crate::event::thread("tarae-test-asks", move || {
+                for a in rx {
+                    let FromProxy::Ask { session, .. } = &a;
+                    let to = TEST_ASKS.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some((_, tx)) = to.iter().find(|(s, _)| s == session) {
+                        let _ = tx.send(a);
+                    }
+                }
+            });
+            asks
+        };
         let system = egress::system();
         #[cfg(test)]
         let resolve: Resolve = Arc::new(move |host: &str, port| {
@@ -887,6 +1042,10 @@ pub fn get() -> &'static Proxy {
 #[cfg(test)]
 pub static TEST_NAMES: std::sync::Mutex<Vec<(String, std::net::SocketAddr)>> =
     std::sync::Mutex::new(Vec::new());
+
+/// Tests: where the proxy `get` gives asks about a session's hosts — the test standing in for the main loop.
+#[cfg(test)]
+pub static TEST_ASKS: std::sync::Mutex<Vec<(u64, Sender<FromProxy>)>> = std::sync::Mutex::new(Vec::new());
 
 /// Tests (macOS): loopback taken for beyond in the rules of the runs of the project at the root given
 /// (`Egress::beyond`) — the test's own listeners stand for the outside.

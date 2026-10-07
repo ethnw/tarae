@@ -20,7 +20,7 @@ use crate::keymap::Keymaps;
 
 /// Settings a project file sets only once trusted: they run commands, or change what Claude's commands do
 /// unasked (`llm.sandbox*` comes with the sandbox), or what Claude sees.
-pub const RISKY: [&str; 19] = [
+pub const RISKY: [&str; 20] = [
     "editor.restart-build",
     "editor.restart-binary",
     "llm.command",
@@ -32,6 +32,8 @@ pub const RISKY: [&str; 19] = [
     "llm.chat-settings",
     "llm.sandbox",
     "llm.sandbox-network",
+    // (a project's list takes the user's place — it could name more)
+    "llm.sandbox-hosts",
     "llm.sandbox-write",
     "llm.sandbox-protect",
     "llm.sandbox-ports",

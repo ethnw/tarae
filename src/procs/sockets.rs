@@ -16,6 +16,8 @@ pub enum Sock {
     Tcp { local: SocketAddr, peer: SocketAddr },
     /// A connected unix socket: the kernel's id of it and of its peer (the same number in every process for
     /// one socket — how two ends in one tree are told), and the path the peer is bound to, if any.
+    // (Linux reads TCP only for now — a unix socket's peer there takes `sock_diag`)
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
     Unix { id: u64, peer: u64, path: Option<PathBuf> },
 }
 

@@ -18,7 +18,7 @@ use crate::sandbox::{Guard, Here, Policy, Watch, after_run, command, run_env_of,
 /// A policy for `root` with the network open and a port of its own to tarae's proxy, as `policy_in` makes it.
 pub(super) fn open(root: &Path) -> Policy {
     let p = Policy::for_project(&crate::sandbox::Env { network: true, ..env(root) });
-    Policy { proxy: Some(RunPort::new().unwrap()), ..p }
+    Policy { proxy: Some(RunPort::new(p.run_id).unwrap()), ..p }
 }
 
 /// What `c` sets, by name.
@@ -372,6 +372,62 @@ fn a_runs_port_takes_it_to_the_outside() {
     assert!(!h.to_ascii_lowercase().contains("proxy-"), "no proxy header, no token outside: {h:?}");
 }
 
+/// A host a run's rules don't name (`llm.sandbox-hosts = []`) is held at the proxy, and the main loop is asked —
+/// for that run, in its session, naming what asked; the session's answer lets the held request through, and the
+/// session's next run reaches the host unasked though its own rules don't name it: the proxy keeps the session's
+/// answers. Through the real `spawn` and `after_run` of a curl given the run's proxy variables (the Seatbelt half
+/// of a run's way to its port is `a_run_goes_out_only_through_its_proxy`); the test stands in for the main loop
+/// (`TEST_ASKS`).
+#[test]
+fn an_unknown_host_waits_for_the_answer() {
+    use super::{FromProxy, Scope, ToProxy};
+    let root = Path::new("/Users/u/p-5e-ask");
+    let name = "ask-5e.example.invalid";
+    let (port, seen) = outside(name, root, 30);
+    let (asks, asked) = std::sync::mpsc::channel();
+    let session = super::session_of(root);
+    super::TEST_ASKS.lock().unwrap().push((session, asks));
+    let listed = || {
+        let env = crate::sandbox::Env { network: true, hosts: Some(Vec::new()), ..env(root) };
+        let p = Policy::for_project(&env);
+        Policy { proxy: Some(RunPort::new(p.run_id).unwrap()), ..p }
+    };
+    let curl = |p: &Policy, path: &str| {
+        let mut c = Command::new("/usr/bin/curl");
+        c.args(["-s", "--max-time", "10", &format!("http://{name}:{port}/{path}")]);
+        let set = env_of(&command(Some(p), "true", &[]));
+        c.envs(set.into_iter().filter(|(k, _)| k.to_lowercase().ends_with("_proxy")));
+        c
+    };
+    let p = listed();
+    let ended = after_run(Some(&p));
+    let s = spawn(Some(&p), &curl(&p, "first")).unwrap();
+    let ask = asked.recv_timeout(Duration::from_secs(10)).expect("the main loop asked");
+    let FromProxy::Ask { run, host, port: at, process, .. } = ask;
+    assert_eq!((run, host.as_str(), at, process.as_str()), (p.run_id, name, port, "curl"));
+    super::get().send(ToProxy::Answer { session, run, host: name.into(), port, scope: Scope::Session });
+    let (_, out, _) = finish(s, 30);
+    ended();
+    let (h, l) = seen.join().unwrap();
+    assert_eq!(out, "ok", "the held request went on");
+    assert!(h.is_some_and(|h| h.starts_with("GET /first ")));
+    // The session's next run: its rules don't name it, the session's answer does
+    let again = crate::event::thread("tarae-5e-test", move || {
+        accept_within(&l, 15).map(|s| {
+            let h = head(&s);
+            let _ = (&s).write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+            String::from_utf8_lossy(&h).into_owned()
+        })
+    });
+    let p = listed();
+    let ended = after_run(Some(&p));
+    let (_, out, _) = finish(spawn(Some(&p), &curl(&p, "second")).unwrap(), 30);
+    ended();
+    assert_eq!(out, "ok", "the session's next run");
+    assert!(again.join().unwrap().is_some_and(|h| h.starts_with("GET /second ")));
+    assert!(asked.try_recv().is_err(), "not asked again");
+}
+
 /// A run whose policy couldn't read this machine's own addresses reaches no address through its port: the proxy
 /// can't tell them from the network's, so it refuses every one (`Egress::refuses`), and the run's report says
 /// nothing goes beyond this machine, and why (`Policy::loopback_only`). Through the real `spawn`, as
@@ -382,9 +438,10 @@ fn a_run_whose_own_addresses_are_unread_reaches_nothing() {
     let name = "unread-5d.example.invalid";
     // (asked once curl has its answer: a connection to the outside would have come before it)
     let (port, seen) = outside(name, root, 1);
-    let mut r = RunPort::new().unwrap();
+    let base = open(root);
+    let mut r = RunPort::new(base.run_id).unwrap();
     std::sync::Arc::get_mut(&mut r).expect("a new run's port, ours alone").own_addresses = None;
-    let p = Policy { proxy: Some(r), ..open(root) };
+    let p = Policy { proxy: Some(r), ..base };
     let report = Guard::In(Box::new(p.clone())).report(&[]);
     let report = report.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(

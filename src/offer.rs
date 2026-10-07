@@ -184,6 +184,9 @@ pub enum What {
     /// A run of Claude's printing nothing at next to no CPU for minutes (`stuck.rs`, #181): `y` stops it, `w`
     /// shows what its threads wait in (its output), `n` keeps waiting. Gone once it prints or ends.
     Stuck(Box<crate::stuck::Stuck>),
+    /// A host a run's rules don't name, its connection held by tarae's proxy (`hosts.rs`): `y` this run, `s`
+    /// this session, `A` always in this project, `n` refused for this session. Gone with its run.
+    Host(Box<crate::hosts::Ask>),
 }
 
 /// What becomes of a card waiting at `:restart` (`restart.rs`). Claude's can't be there — the restart waits
@@ -240,7 +243,9 @@ impl What {
             | What::ChangeSet { .. }
             | What::NotesStale { .. }
             | What::NotesClose { .. }
-            | What::Stuck(_) => Lost,
+            | What::Stuck(_)
+            // (its run ends with the restart)
+            | What::Host(_) => Lost,
         }
     }
 }
@@ -401,7 +406,22 @@ impl Offer {
                 | What::RestartSame { .. }
                 | What::Recover(_)
                 | What::Stuck(_)
+                | What::Host(_)
         )
+    }
+
+    /// The host it asks about, if it's that card.
+    pub fn host(&self) -> Option<&crate::hosts::Ask> {
+        match &self.what {
+            What::Host(a) => Some(a),
+            _ => None,
+        }
+    }
+
+    /// Whether `s` answers it — for this session: a host's card, or a host to grant from what a run was refused.
+    pub fn for_session(&self) -> bool {
+        self.host().is_some()
+            || matches!(&self.what, What::Grant { grant: crate::allow::Grant::Host(..), .. })
     }
 
     /// The stuck run it asks about, if it's that card (`w` shows what it waits in).
@@ -454,7 +474,7 @@ impl Offer {
     /// that do something too).
     pub fn weighty_answer(&self, c: char) -> bool {
         matches!(c, 'y' | 'a' | 'A' | 'D' | 'R' | 'c')
-            || (c == 's' && self.stashes())
+            || (c == 's' && (self.stashes() || self.for_session()))
             || (c == 'p' && self.preflights())
             || (c == 'X' && self.aborts())
             || (c == 'f' && self.restart_other())
@@ -495,6 +515,8 @@ impl Offer {
         // (Docker's socket is never the chat's: a run card's `a` is then its command's, when it has one — #193)
         let as_outside = |s: &std::path::Path| crate::allow::Grant::Socket(s.to_path_buf()).as_outside();
         match &self.what {
+            // (a host lasts for the session, `s` — never the conversation's)
+            What::Grant { grant: crate::allow::Grant::Host(..), .. } => false,
             What::Grant { grant, .. } => !grant.as_outside(),
             What::NoSandbox { .. } | What::Read { keep: true, .. } | What::Screen { .. } => true,
             // (what it reads outside, this command again, or its socket for the rest of the chat)
@@ -512,6 +534,7 @@ impl Offer {
             What::Run(r) => r.keep,
             // (a socket is this conversation's at most — #119)
             What::Grant { grant, .. } => grant.keepable(),
+            What::Host(_) => true,
             _ => self.lasts() && matches!(self.what, What::Read { .. }),
         }
     }
@@ -535,7 +558,12 @@ impl Offer {
         self.claudes()
             || matches!(
                 self.what,
-                What::ReviewEnd { .. } | What::Stuck(_) | What::NotesStale { .. } | What::NotesClose { .. }
+                What::ReviewEnd { .. }
+                    | What::Stuck(_)
+                    | What::NotesStale { .. }
+                    | What::NotesClose { .. }
+                    // (its session's: a key of another session's never answers it)
+                    | What::Host(_)
             )
     }
 
@@ -600,6 +628,10 @@ impl Offer {
                 vec![('y', "Once"), ('a', "This chat"), ('A', "Always"), ('n', "No")]
             }
             W::Read { keep: false, .. } => vec![('y', "Once"), ('n', "No")],
+            // (as the host's own card)
+            W::Grant { grant: crate::allow::Grant::Host(..), .. } => {
+                vec![('y', "This run"), ('s', "This session"), ('A', "Always here"), ('n', "No")]
+            }
             // (Docker's socket: this run's only — #193)
             W::Grant { grant, .. } if grant.as_outside() => vec![('y', "This run"), ('n', "No")],
             W::Grant { grant, .. } if !grant.keepable() => {
@@ -666,6 +698,7 @@ impl Offer {
                 vec![('y', "Accept all"), ('r', "One by one"), ('v', "See them"), ('n', "Decline all")]
             }
             W::Stuck(_) => vec![('y', "Stop it"), ('w', "What it waits on"), ('n', "Keep waiting")],
+            W::Host(_) => vec![('y', "This run"), ('s', "This session"), ('A', "Always here"), ('n', "No")],
         }
     }
 
@@ -709,6 +742,7 @@ impl Offer {
             W::NotesClose { .. } => "notes-close",
             W::Recover(_) => "recover",
             W::Stuck(_) => "stuck",
+            W::Host(_) => "host",
         }
     }
 }
@@ -781,7 +815,9 @@ impl crate::editor::Editor {
         // (one holding a call isn't merged into another by its title — the other's call would be lost; nor is a
         // plugin's ask — the other's request would be: one asking the same joins its card, `plugin_ask`; nor a
         // repository's commands — a submodule's card would take its parent's place: one each, `git_trust_check`)
-        let own = o.asker().is_some() || matches!(o.what, What::PluginAsk { .. } | What::GitTrust(_));
+        // (a host's card is joined by `hosts::asked` itself — by its host, never by its title)
+        let own = o.asker().is_some()
+            || matches!(o.what, What::PluginAsk { .. } | What::GitTrust(_) | What::Host(_));
         if let Some(old) = self.offers.iter_mut().find(|x| x.title == o.title).filter(|_| !own) {
             // Replaced whole — what it says with what it does — and it settles again before `y` counts
             if !old.installing() {
@@ -880,6 +916,8 @@ impl crate::editor::Editor {
             Code::Char(c @ ('s' | 'g')) if (c == 's' && o.stashes()) || (c == 'g' && o.held().is_some()) => {
                 self.offer_held(c)
             }
+            Code::Char('s') if o.for_session() => self.offer_host_session(),
+            Code::Char('a') if o.for_session() => self.set_status("this card asks y, s, A or n"),
             Code::Char('X') if o.aborts() => self.offer_abort(),
             Code::Char('b') if o.base_steps() => self.offer_session_base(),
             Code::Char('f') if o.restart_other() => self.offer_restart_other(),
@@ -1018,6 +1056,25 @@ impl crate::editor::Editor {
                 self.offer_finished(id, Ok(()));
                 crate::stuck::stop(self, &s);
             }
+            What::Host(a) => crate::hosts::answer(self, id, *a, crate::sandbox::proxy::Scope::Run),
+        }
+    }
+
+    /// `s` on a host's card (or a host's grant): that host for every run of this session.
+    fn offer_host_session(&mut self) {
+        if !self.offers.first().is_some_and(Offer::for_session) {
+            return;
+        }
+        let o = self.offers.remove(0);
+        o.said(self.session.label(), "s");
+        self.card_how(o.id, "answered s");
+        self.card_answered(o.id);
+        match o.what {
+            What::Host(a) => crate::hosts::answer(self, o.id, *a, crate::sandbox::proxy::Scope::Session),
+            What::Grant { grant, run } => {
+                crate::blocked::grant_answer(self, o.id, grant, *run, Some(crate::allow::Scope::Session))
+            }
+            _ => {}
         }
     }
 
@@ -1362,6 +1419,9 @@ impl crate::editor::Editor {
             What::Run(card) => crate::tools::run_answer(self, o.id, *card, Some(scope)),
             What::Grant { grant, run } => crate::blocked::grant_answer(self, o.id, grant, *run, Some(scope)),
             What::Screen { call } => crate::seeing::answer(self, o.id, call, Some(scope)),
+            What::Host(a) if scope == crate::allow::Scope::Always => {
+                crate::hosts::answer(self, o.id, *a, crate::sandbox::proxy::Scope::Project)
+            }
             _ => {}
         }
     }
@@ -1447,6 +1507,7 @@ impl crate::editor::Editor {
             What::NotesClose { by, ids } => crate::notes::close_by_answer(self, o.id, by, ids, false),
             What::Recover(f) => crate::recovery::not_now(self, *f),
             What::Stuck(s) => crate::stuck::keep_waiting(self, &s),
+            What::Host(a) => crate::hosts::answer(self, o.id, *a, crate::sandbox::proxy::Scope::Refused),
         }
     }
 

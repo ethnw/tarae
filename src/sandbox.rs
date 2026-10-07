@@ -208,9 +208,9 @@ impl Guard {
             if !all || b.distinct > b.seen.len() || o.distinct > o.seen.len() {
                 s.push_str(
                     "\nIf the command needs one of these, tell the user — they can open it from the run's \
-                     panel (space m s), or llm.sandbox-write, llm.sandbox-ports, llm.sandbox-localhost and \
-                     llm.sandbox-network open more — or ask to run it outside the sandbox (outside_sandbox, \
-                     with your reason); don't work around it.",
+                     panel (space m s), or llm.sandbox-write, llm.sandbox-ports, llm.sandbox-localhost, \
+                     llm.sandbox-network and llm.sandbox-hosts open more — or ask to run it outside the sandbox \
+                     (outside_sandbox, with your reason); don't work around it.",
                 );
             }
             return s;
@@ -554,6 +554,15 @@ pub struct Policy {
     /// then nothing goes beyond this machine (`loopback_only` says so). None on Linux (the supervisor hands its
     /// connections over); made for a macOS `Here` on any system, so both systems' policies pin alike (`golden`).
     pub proxy: Option<std::sync::Arc<proxy::RunPort>>,
+    /// The hosts its network reaches through the proxy, as its rules there hold them (`llm.sandbox-hosts`, and
+    /// what the user answered for the project and for this run alone — `tools::with_allowed`). Not part of its key
+    /// (`policy_key`): an answer mustn't end what an earlier run left (a daemon) — the proxy's newer answers go
+    /// before these.
+    pub egress: proxy::egress::Egress,
+    /// The run, as the proxy and the main loop name it (`next_run`; a copy of the policy is the same run's).
+    pub run_id: u64,
+    /// Its session, as the proxy and the main loop name it (`proxy::session_of` its root).
+    pub session: u64,
     /// What the sandbox denied this run, watched while it goes (`Watch`).
     pub watch: Option<std::sync::Arc<Watch>>,
     /// What the user let Claude's commands do besides (`allow.rs`) — as the result says it.
@@ -1144,6 +1153,11 @@ impl Denial {
             }
             // (step 5: the egress proxy's own refusals, `host:port: why` — `proxy::tell`)
             "network-proxy" => format!("reaching {t}"),
+            // (a host the user's answer would lift: not among the hosts, no answer, refused — `hosts.rs`)
+            "network-host" => match t.split_once(": ") {
+                Some((at, why)) => format!("reaching {at} — {why}"),
+                None => format!("reaching {t}"),
+            },
             "network-bound" => match t.strip_prefix("remote:").and_then(|t| t.split_once(' ')) {
                 Some((at, why)) => format!("connecting to {at} {why}"),
                 None => self.shown(),
@@ -1779,6 +1793,7 @@ fn end_tagged(root: Option<&Path>) -> Vec<u32> {
 pub fn policy_key(p: &Policy) -> String {
     let mut q = p.clone();
     (q.run, q.tag, q.proxy, q.watch, q.env) = (None, None, None, None, Vec::new());
+    (q.egress, q.run_id) = (Default::default(), 0);
     // (the kept homes are the project's and the key's — granted by them, not part of what's compared)
     q.write.retain(|w| !p.kept.iter().any(|k| k.home == *w));
     q.kept = Vec::new();
@@ -2692,6 +2707,7 @@ impl Policy {
         ports.sort_unstable();
         ports.dedup();
         ports.truncate(PORTS_MAX);
+        let session = proxy::session_of(&root);
         Policy {
             root,
             protect,
@@ -2706,6 +2722,14 @@ impl Policy {
             run: None,
             tag: None,
             proxy: None,
+            // (with the network off no host is reached, whatever the list says)
+            egress: proxy::egress::Egress {
+                any: env.network && env.hosts.is_none(),
+                hosts: if env.network { env.hosts.clone().unwrap_or_default() } else { Vec::new() },
+                ..Default::default()
+            },
+            run_id: next_run(),
+            session,
             watch: None,
             granted: Vec::new(),
             sockets: Vec::new(),
@@ -2729,6 +2753,13 @@ impl Policy {
             confine: None,
         }
     }
+}
+
+/// A new run's id — one counter for both systems: the proxy's questions name it, and the main loop finds the run
+/// by it (`hosts.rs`).
+fn next_run() -> u64 {
+    static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Where tmux and zellij keep their sockets: tmux in `$TMUX_TMPDIR` (else `/tmp`) `/tmux-<uid>`, zellij in
@@ -2783,6 +2814,8 @@ pub struct Env {
     pub network: bool,
     pub ports: Vec<u16>,
     pub localhost: bool,
+    /// `llm.sandbox-hosts` (None: any host).
+    pub hosts: Option<Vec<proxy::egress::Pattern>>,
     /// `$TMUX_TMPDIR` · `$ZELLIJ_SOCKET_DIR` · the user's id (their socket folders — `mux_dirs`).
     pub tmux_tmpdir: Option<PathBuf>,
     pub zellij_dir: Option<PathBuf>,
@@ -2935,6 +2968,7 @@ pub(crate) fn env_in(
         network: llm.sandbox_network,
         ports: llm.sandbox_ports.clone(),
         localhost: llm.sandbox_localhost,
+        hosts: llm.sandbox_hosts.clone(),
         tmux_tmpdir: here.path("TMUX_TMPDIR"),
         zellij_dir: here.path("ZELLIJ_SOCKET_DIR"),
         uid: here.uid,
@@ -3086,7 +3120,7 @@ pub(crate) fn policy_in(root: &Path, llm: &crate::llm::LlmConfig, reads: &[PathB
     let mut p = Policy { run, tag, ..Policy::for_project(&env) };
     // (macOS: the network open goes out through tarae's proxy, at a port of the run's own)
     if p.network && here.os == Os::Mac {
-        p.proxy = proxy::RunPort::new()
+        p.proxy = proxy::RunPort::new(p.run_id)
             .inspect_err(|e| crate::log::line("sandbox", "warning", &format!("a run's proxy port: {e}")))
             .ok();
     }
@@ -3708,7 +3742,7 @@ pub fn spawn(policy: Option<&Policy>, cmd: &Command) -> std::io::Result<crate::s
     // (macOS, the network open: the run's own port goes to tarae's proxy — its end comes with `after_run`)
     #[cfg(not(target_os = "linux"))]
     if let Some((p, r)) = policy.and_then(|p| Some((p, p.proxy.as_ref()?))) {
-        r.started(&p.root, program_of(cmd), told(std::sync::Arc::new(p.clone())));
+        r.started(p, program_of(cmd), told(std::sync::Arc::new(p.clone())));
     }
     #[cfg(target_os = "linux")]
     let _ = policy;
@@ -5117,6 +5151,35 @@ mod tests {
         assert_ne!(policy_key(&a), policy_key(&p(Path::new("/w/q"), Vec::new())), "another project");
     }
 
+    /// A run's rules for the proxy (`Policy.egress`) are the setting's as the network has them — off: no host,
+    /// whatever the list; on with `"any"`: any host; on with a list: those, every other asked — and they're not
+    /// the policy's key: an answer, or the list changed, mustn't end what an earlier run left (Linux ends a kept
+    /// daemon under another key). Every run has an id of its own, the proxy's questions name it.
+    #[test]
+    fn a_runs_rules_carry_the_setting_and_the_answers() {
+        use proxy::egress::Pattern;
+        let root = Path::new("/w/p");
+        let list = Some(vec![Pattern::parse("github.com").unwrap(), Pattern::parse("*.crates.io").unwrap()]);
+        let p =
+            |network, hosts: Option<Vec<Pattern>>| Policy::for_project(&Env { network, hosts, ..env(root) });
+        let off = p(false, list.clone());
+        assert!(!off.egress.any && off.egress.hosts.is_empty(), "the network off: {:?}", off.egress);
+        let any = p(true, None);
+        assert!(any.egress.any && any.egress.allows("anything.test", 443, 443));
+        let listed = p(true, list.clone());
+        assert!(!listed.egress.any);
+        assert!(
+            listed.egress.allows("github.com", 443, 443)
+                && listed.egress.allows("static.crates.io", 443, 443)
+        );
+        assert!(!listed.egress.allows("example.invalid", 443, 443), "another host is asked");
+        assert_eq!(policy_key(&listed), policy_key(&p(true, Some(Vec::new()))), "the list isn't the key");
+        let mut answered = listed.clone();
+        answered.egress.answered.push(("example.invalid".into(), 443));
+        assert_eq!(policy_key(&listed), policy_key(&answered), "nor an answer");
+        assert_ne!(listed.run_id, p(true, list).run_id, "each run its own id");
+    }
+
     /// What Claude reads about Gradle (Java under P2): its writes in the user's Gradle home — the read-only
     /// dependency cache's index, measured in every build — are expected and said so, not offered to open; a
     /// JVM refused a port on this machine says Gradle needs this machine's ports, only while they're closed — the
@@ -5463,7 +5526,7 @@ mod tests {
         let open = Policy { network: true, ports: vec![6379], ..p.clone() };
         let listed_only = ["(allow network-outbound (remote ip \"localhost:6379\"))"];
         assert_eq!(outbound(&open), listed_only, "no port of its own to the proxy: nothing more");
-        let port = proxy::RunPort::new().unwrap();
+        let port = proxy::RunPort::new(0).unwrap();
         let proxied = Policy { proxy: Some(port.clone()), ..open.clone() };
         assert_eq!(
             outbound(&proxied),
@@ -5772,7 +5835,7 @@ mod tests {
             r.split_whitespace().collect::<Vec<_>>().join(" ")
         };
         let base = Policy::for_project(&env(Path::new("/Users/u/p")));
-        let open = Policy { network: true, proxy: Some(proxy::RunPort::new().unwrap()), ..base.clone() };
+        let open = Policy { network: true, proxy: Some(proxy::RunPort::new(0).unwrap()), ..base.clone() };
         let r = said(Policy { ports: vec![3000], ..open.clone() });
         assert!(
             r.contains(
@@ -5847,6 +5910,32 @@ mod tests {
                 && !r.contains("The sandbox blocked one thing"),
             "{r}"
         );
+    }
+
+    /// A host the proxy held, refused, says why in the report Claude reads — not among the hosts and unanswered,
+    /// refused by the user, past the questions a session may have up — with its own op, so Claude can tell it
+    /// from the proxy's other refusals; and the report's way out names `llm.sandbox-hosts`.
+    #[test]
+    fn the_report_says_why_a_host_was_refused() {
+        let reported = |target: &str| denial(proxy::HOST_OP, target).reported();
+        assert_eq!(
+            reported(
+                "static.example.invalid:443: not among the hosts it may reach (llm.sandbox-hosts); the user was \
+                 asked and didn't answer within 20 s"
+            ),
+            "reaching static.example.invalid:443 — not among the hosts it may reach (llm.sandbox-hosts); the user \
+             was asked and didn't answer within 20 s (network-host, touch)"
+        );
+        assert_eq!(
+            reported("static.example.invalid:443: the user refused it for this session"),
+            "reaching static.example.invalid:443 — the user refused it for this session (network-host, touch)"
+        );
+        assert_eq!(
+            reported("static.example.invalid:443: 8 hosts already wait for the user's answer"),
+            "reaching static.example.invalid:443 — 8 hosts already wait for the user's answer (network-host, touch)"
+        );
+        let golden = include_str!("snapshots/sandbox_report.txt");
+        assert!(golden.contains("llm.sandbox-network and llm.sandbox-hosts open more"));
     }
 
     /// Seatbelt's words in plain ones (its network denials name only the port: measured) — and its own
@@ -5970,6 +6059,9 @@ mod tests {
             run: None,
             tag: None,
             proxy: None,
+            egress: Default::default(),
+            run_id: 0,
+            session: 0,
             watch: None,
             granted: Vec::new(),
             sockets: Vec::new(),
@@ -6044,6 +6136,9 @@ mod tests {
                 run: Some(run.clone()),
                 tag: None,
                 proxy: None,
+                egress: Default::default(),
+                run_id: 0,
+                session: 0,
                 watch: None,
                 granted: Vec::new(),
                 sockets: Vec::new(),
@@ -6118,6 +6213,9 @@ mod tests {
             run: None,
             tag: Some(tag.to_string()),
             proxy: None,
+            egress: Default::default(),
+            run_id: 0,
+            session: 0,
             watch: None,
             granted: Vec::new(),
             sockets: Vec::new(),
@@ -6179,6 +6277,9 @@ mod tests {
             run: None,
             tag: None,
             proxy: None,
+            egress: Default::default(),
+            run_id: 0,
+            session: 0,
             watch: None,
             granted: Vec::new(),
             sockets: Vec::new(),
@@ -7223,6 +7324,9 @@ mod tests {
             run: None,
             tag: None,
             proxy: None,
+            egress: Default::default(),
+            run_id: 0,
+            session: 0,
             watch: None,
             granted: Vec::new(),
             sockets: Vec::new(),

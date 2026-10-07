@@ -106,6 +106,9 @@ pub struct LlmConfig {
     /// toolchain's folders; no network but this machine.
     pub sandbox: bool,
     pub sandbox_network: bool,
+    /// With the network on, the hosts reached without asking (`llm.sandbox-hosts`) — None: any host (`"any"`);
+    /// another is held and asked on a card (`hosts.rs`).
+    pub sandbox_hosts: Option<Vec<crate::sandbox::proxy::egress::Pattern>>,
     /// More folders the sandbox may write to (`~/` for home).
     pub sandbox_write: Vec<String>,
     /// Paths in the project the sandbox keeps as they are, besides the names it always keeps
@@ -146,6 +149,7 @@ impl Default for LlmConfig {
             review_ask: Vec::new(),
             sandbox: true,
             sandbox_network: false,
+            sandbox_hosts: None,
             sandbox_write: Vec::new(),
             sandbox_protect: Vec::new(),
             sandbox_ports: Vec::new(),

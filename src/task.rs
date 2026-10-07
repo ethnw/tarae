@@ -686,6 +686,7 @@ impl Editor {
         let install = after.is_some();
         let watched = sandbox.is_some_and(|p| p.watch.is_some());
         let after_run = crate::sandbox::after_run(sandbox);
+        let run_id = sandbox.map(|p| p.run_id);
         let mut cmd = crate::sandbox::command(sandbox, "sh", &["-c".into(), task.cmd.clone()]);
         // (the user's own find this tarae's UI state — `tarae state`; Claude's never get a socket's path, and
         // couldn't reach it from the sandbox anyway)
@@ -831,6 +832,8 @@ impl Editor {
                 std::thread::sleep(crate::sandbox::WATCH_LAST);
             }
             let done = move |ed: &mut Editor| {
+                // (a host its proxy holds for it has no one left to ask for — its card goes)
+                crate::hosts::run_ended(ed, run_id);
                 let session = ed.session.label().to_string();
                 let Some(r) = ed.session.task_run.as_mut().filter(|r| r.generation == generation) else {
                     return;

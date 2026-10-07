@@ -19,6 +19,8 @@ pub enum Kind {
     Ports {
         max: usize,
     },
+    /// `"any"`, or a list of host rules (`github.com`, `*.crates.io`, `host:8443` — `egress::Pattern`).
+    Hosts,
 }
 
 impl Kind {
@@ -32,7 +34,18 @@ impl Kind {
                 a.len()
             ));
         }
+        // (a rule the proxy can't read is said with the parser's words — never taken as some other host)
+        if let (Kind::Hosts, Value::Array(a)) = (self, v) {
+            for r in a {
+                let Some(s) = r.as_str() else { continue };
+                if let Err(why) = crate::sandbox::proxy::egress::Pattern::parse(s) {
+                    return Err(format!("\"{s}\": {why}"));
+                }
+            }
+        }
         let ok = match (self, v) {
+            (Kind::Hosts, Value::String(s)) => s == "any",
+            (Kind::Hosts, Value::Array(a)) => a.iter().all(Value::is_str),
             (Kind::Ports { .. }, Value::Array(a)) => {
                 a.iter().all(|p| p.as_integer().is_some_and(|n| (1..=65535).contains(&n)))
             }
@@ -54,6 +67,7 @@ impl Kind {
             Kind::Str => "string".into(),
             Kind::StrList => "list of strings".into(),
             Kind::Ports { max } => format!("list of ports 1..=65535, at most {max}"),
+            Kind::Hosts => "\"any\" | list of hosts (\"github.com\", \"*.crates.io\", \"host:8443\")".into(),
         }
     }
 }
@@ -448,6 +462,21 @@ pub static SETTINGS: &[Setting] = &[
         set: |c, v| c.llm.sandbox_network = b(v),
     },
     Setting {
+        path: "llm.sandbox-hosts",
+        kind: Kind::Hosts,
+        doc: "Chat, with llm.sandbox-network on (unused while it's off): the hosts Claude's commands reach without asking — \"any\", the default, is every host; with a list (\"github.com\", \"*.crates.io\" — its subdomains, \"host:8443\"; else 443, or 80 for plain http) another host waits up to 20 s on a card: this run, this session, always here, or no",
+        get: |c| match &c.llm.sandbox_hosts {
+            None => Value::from("any"),
+            Some(h) => Value::Array(h.iter().map(|p| Value::from(p.to_string())).collect()),
+        },
+        set: |c, v| {
+            c.llm.sandbox_hosts = v.as_array().map(|a| {
+                let rules = a.iter().filter_map(Value::as_str);
+                rules.filter_map(|s| crate::sandbox::proxy::egress::Pattern::parse(s).ok()).collect()
+            })
+        },
+    },
+    Setting {
         path: "llm.sandbox-ports",
         kind: Kind::Ports { max: crate::sandbox::PORTS_MAX },
         doc: "Chat: ports on this machine Claude's commands may connect to in the sandbox — a dev server, a test's database ([3000, 5432])",
@@ -744,6 +773,7 @@ mod tests {
                 Kind::Str => "string".into(),
                 Kind::StrList => "list of strings".into(),
                 Kind::Ports { max } => format!("list of ports (at most {max})"),
+                Kind::Hosts => md_code("\"any\"") + " or a list of hosts",
             };
             let default = md_code(&(s.get)(&defaults).to_string());
             out.push_str(&format!("| {} | {kind} | {default} | {} |\n", md_code(s.path), md_cell(s.doc)));
@@ -820,6 +850,31 @@ mod tests {
             ]
         );
         assert!(RENAMED.iter().all(|r| find(r.1).is_some() && find(r.0).is_none()));
+    }
+
+    /// `llm.sandbox-hosts` takes `"any"` or a list of rules the proxy reads (`[]`: every host asked); a rule it
+    /// can't read is refused where it's set, in the parser's words — never kept as some other host, never dropped
+    /// in silence (a dropped rule would ask for a host the user meant to let go; a mangled one could let another).
+    #[test]
+    fn a_host_rule_is_checked_where_it_is_set() {
+        let set = |v: Value| {
+            let mut cfg = EditorConfig::default();
+            apply(&mut cfg, "llm.sandbox-hosts", &v).map(|_| cfg.llm.sandbox_hosts)
+        };
+        assert_eq!(set(Value::from("any")), Ok(None));
+        let list = ["github.com", "*.crates.io", "api.test:8443"];
+        let rules = set(Value::Array(list.iter().map(|s| Value::from(*s)).collect())).unwrap().unwrap();
+        assert_eq!(rules.iter().map(ToString::to_string).collect::<Vec<_>>(), list);
+        assert_eq!(set(Value::Array(Vec::new())), Ok(Some(Vec::new())));
+        for (bad, why) in [
+            ("1.2.3.4", "an address — a rule names hosts"),
+            ("*", "a `*` but as `*.` at its start"),
+            ("a.test:0", "a port that isn't 1–65535"),
+        ] {
+            let e = set(Value::Array(vec![Value::from("github.com"), Value::from(bad)])).unwrap_err();
+            assert!(e.contains(&format!("\"{bad}\": {why}")), "{bad}: {e}");
+        }
+        assert!(set(Value::from("all")).is_err(), "a string but \"any\"");
     }
 
     #[test]

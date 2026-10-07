@@ -1969,6 +1969,17 @@ pub struct Widened {
     pub sockets: Vec<PathBuf>,
     /// The places in home it may read (real paths — what Claude's Read was let read too).
     pub reads: Vec<PathBuf>,
+    /// The hosts the user let its network reach through tarae's proxy — the project's, and this run's alone
+    /// (`Egress::answered`).
+    pub hosts: Vec<(String, u16)>,
+}
+
+impl Widened {
+    /// What no setting carries, onto the policy made from `llm`: how the result says what was allowed, the
+    /// sockets, the hosts its proxy rules let through.
+    pub fn onto(self, p: &mut crate::sandbox::Policy) {
+        (p.granted, p.sockets, p.egress.answered) = (self.granted, self.sockets, self.hosts);
+    }
 }
 
 /// The settings a run's policy is made from with what's allowed added — kept for the project, for this
@@ -1989,6 +2000,7 @@ pub fn with_allowed(
                 .chain(a.write.iter().map(|p| Grant::Write(p.clone())))
                 .chain(a.ports.iter().map(|n| Grant::Port(*n)))
                 .chain(a.sockets.iter().map(|s| Grant::Socket(s.clone())))
+                .chain(a.hosts.iter().map(|(h, p)| Grant::Host(h.clone(), *p)))
         })
         .chain(once.cloned());
     for g in grants {
@@ -1997,7 +2009,8 @@ pub fn with_allowed(
             Grant::Write(p) => w.llm.sandbox_write.push(p.display().to_string()),
             Grant::Port(n) => w.llm.sandbox_ports.push(*n),
             Grant::Socket(s) if !w.sockets.contains(s) => w.sockets.push(s.clone()),
-            Grant::Read(_) | Grant::Socket(_) => {}
+            Grant::Host(h, p) if !w.hosts.contains(&(h.clone(), *p)) => w.hosts.push((h.clone(), *p)),
+            Grant::Read(_) | Grant::Socket(_) | Grant::Host(..) => {}
         }
         let said = g.shown();
         if !w.granted.contains(&said) {
@@ -2226,7 +2239,7 @@ pub(crate) fn guard_then_go(ed: &mut Editor, who: For, job: Job, ride: Ride) {
             let kept = crate::allow::Store::read(store.as_deref()).get(&crate::sandbox::profile_path(&root));
             let w = with_allowed(&llm, &[&kept, &chat], grant.as_ref());
             let mut p = crate::sandbox::policy(&root, &w.llm, &w.reads);
-            (p.granted, p.sockets) = (w.granted, w.sockets);
+            w.onto(&mut p);
             // (settings holding a token that take no copy — cargo's: the user hears once — `tokens::tell_holders`)
             told = crate::tokens::to_tell(&p.reads.copies.told, said.as_deref());
             // Its denials watched from before it starts (the stream up first — measured)

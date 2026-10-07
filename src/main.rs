@@ -44,6 +44,7 @@ mod grammar;
 mod graphemes;
 mod grep;
 mod hooks;
+mod hosts;
 mod inbox;
 mod indent;
 mod install;
@@ -268,6 +269,8 @@ fn main() -> Result<()> {
     gitrepo::set_trust_store(editor.trust_path.clone());
     // (and where a resolve that finds them unanswered puts the card up — any repository, any git call)
     gitrepo::set_asker(std::path::Path::new("/"), editor.events.shared_sender());
+    // (the egress proxy asks the user about hosts through the main loop — before any run can start one)
+    hosts::listen(editor.events.shared_sender());
     // Started without a file: recent files on the start screen (existing ones only; reads one small file)
     editor.recent = recent::load();
     editor.restore = restore::State::load();

@@ -605,6 +605,17 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
   sandbox wouldn't let it read or write counts as denied too, and Claude is told it came from the output.
 - It reaches nothing over the network, so a build that needs to download something fails.
   `llm.sandbox-network` lets it through, and `llm.sandbox-write` adds folders
+- **Which hosts.** With `llm.sandbox-network` on, a command goes out only through tarae's proxy, and
+  `llm.sandbox-hosts` says which hosts it reaches without asking: `"any"`, the default, is every host; a list
+  (`["github.com", "*.crates.io", "api.example.com:8443"]` — `*.` its subdomains, else port 443, or 80 for plain
+  http) lets those through, and holds a connection to any other up to 20 s while a card asks: `y` this run,
+  `s` this session (until you quit), `A` always in this project, `n` refused for this session. `[]` asks for
+  every host. One card per host, in the session of the run that asked — another session's keys never answer
+  it — and it goes when its run ends. At most 8 hosts of a session wait on cards at once; a ninth is refused
+  unasked, and the result says so. An answer after the 20 s counts from the tool's next try. "Always" is kept
+  in `sandbox.json`; `:sandbox-allowed` lists hosts (always, this session) and `:sandbox-disallow host
+  name:port` takes one back — for the runs going on too. A host refused (unanswered, or `n`) is offered on
+  `space m s` as well. While the network is off, the list does nothing
 - Unix sockets work only in the project and in a temp folder made for each run, which the command gets as
   `TMPDIR`. The sockets in `/tmp` and your own temp folder belong to programs running outside the sandbox
   (tmux, zellij, ssh-agent), and some of them would run whatever they're told. tmux's and zellij's socket

@@ -623,6 +623,7 @@ impl Editor {
         };
         let watched = policy.is_some_and(|p| p.watch.is_some());
         let after_run = crate::sandbox::after_run(policy);
+        let run_id = policy.map(|p| p.run_id);
         let mut cmd = crate::sandbox::command(policy, &argv[0], &argv[1..]);
         cmd.current_dir(&target.cwd);
         crate::task::color_off(&mut cmd);
@@ -729,6 +730,8 @@ impl Editor {
             }
             let cases = junit.map(|(reports, src)| crate::test_results::junit(&reports, wall, &src));
             let done = move |ed: &mut Editor| {
+                // (a host its proxy holds for it has no one left to ask for — its card goes)
+                crate::hosts::run_ended(ed, run_id);
                 let session = ed.session.label().to_string();
                 let Some(r) = ed.session.test_run.as_mut().filter(|r| r.generation == generation) else {
                     return;

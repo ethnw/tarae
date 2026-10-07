@@ -1425,7 +1425,7 @@ impl Editor {
     /// Session `id` closes: the one tarae started in comes to the front first if it was there; what it ran
     /// stops with it (its Claude, terminal, tests and tasks are dropped), its files close (their servers stop
     /// once nothing of theirs is open). What it was, to open it again.
-    fn session_close(&mut self, root: &Path) -> Option<Kept> {
+    pub(crate) fn session_close(&mut self, root: &Path) -> Option<Kept> {
         // (by its checkout: one opened again after a failed end has another id)
         let id = std::iter::once(&self.session).chain(&self.sessions).find(|l| l.root == root)?.id;
         if id == 0 {
@@ -1436,6 +1436,8 @@ impl Editor {
         }
         let i = self.sessions.iter().position(|l| l.id == id)?;
         let session = self.sessions.remove(i);
+        // (the proxy's answers for it go with it)
+        crate::hosts::session_ended(&session);
         let kept = Kept::of(&session);
         // What it has now is what opening it again in this run brings back (`session_kept_back`): its notes
         // where the restore reads them (with its files still open, for their anchors), its turns written

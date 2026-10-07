@@ -14,13 +14,25 @@ use crate::sandbox::route;
 /// A host a rule names: one name, or every name under a domain (`*.crates.io` — not `crates.io` itself); at a
 /// port, else at the request's own default (443 for a tunnel, 80 for plain http).
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))] // (the setting's list of hosts comes with step 5e)
 pub enum Pattern {
     Name(String, Option<u16>),
     Under(String, Option<u16>),
 }
 
-#[cfg_attr(not(test), allow(dead_code))] // (as `Pattern`)
+/// As written (`parse` reads it back).
+impl std::fmt::Display for Pattern {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (star, name, port) = match self {
+            Pattern::Name(n, p) => ("", n, p),
+            Pattern::Under(d, p) => ("*.", d, p),
+        };
+        match port {
+            Some(p) => write!(f, "{star}{name}:{p}"),
+            None => write!(f, "{star}{name}"),
+        }
+    }
+}
+
 impl Pattern {
     /// A rule as written (`github.com`, `*.crates.io`, `host:8443`): a name as `parse::name` takes it, never an
     /// address, `*.` only at its start.
@@ -65,12 +77,17 @@ impl Pattern {
 }
 
 /// A run's egress rules, as its message carries them: read-only once sent.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Egress {
-    /// Any host (`llm.sandbox-network = true`): never asked; the address checks and the server name still hold.
+    /// Any host (`llm.sandbox-network` on, `llm.sandbox-hosts = "any"`): never asked; the address checks and the
+    /// server name still hold.
     pub any: bool,
-    /// The hosts reached without asking.
+    /// The hosts reached without asking (`llm.sandbox-hosts`).
     pub hosts: Vec<Pattern>,
+    /// The user's answers when the run's policy was made — what the project keeps (`A`) and a grant for this run
+    /// alone (`:sandbox-blocked`'s `y`): each host at its port. An answer the proxy was told since (`Answer`,
+    /// `Taken`) goes before them — a host taken back is asked again, a daemon's older rules too.
+    pub answered: Vec<(String, u16)>,
     /// This machine's own addresses beyond loopback, as the run's policy read them — None where they couldn't
     /// be read: every address is refused (as `route` refuses it).
     pub own_addresses: Option<Vec<IpAddr>>,
@@ -81,9 +98,14 @@ pub struct Egress {
 }
 
 impl Egress {
-    /// Whether a rule lets `host:port` go without asking (`default`: the request's own port).
+    /// Whether the setting lets `host:port` go without asking (`default`: the request's own port).
     pub fn allows(&self, host: &str, port: u16, default: u16) -> bool {
         self.any || self.hosts.iter().any(|p| p.matches(host, port, default))
+    }
+
+    /// Whether the user's answers, as the run's policy had them, let `host:port` go.
+    pub fn answered(&self, host: &str, port: u16) -> bool {
+        self.answered.iter().any(|(h, p)| h == host && *p == port)
     }
 
     /// Why `ip` is never reached through the proxy — None: it may be. As `route`: never (link-local, the cloud
