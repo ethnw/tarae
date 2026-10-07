@@ -1662,7 +1662,8 @@ mod tests {
     }
 
     /// What Claude reads of a Linux run: the network where tarae serves it as routed (beyond this machine with
-    /// `llm.sandbox-network`, never link-local, multicast or broadcast; this machine's ports as opened), else no
+    /// `llm.sandbox-network` only through tarae's proxy, never link-local, multicast or broadcast; this machine's
+    /// ports as opened), else no
     /// socket at all and why; the protected names where
     /// they are, what Landlock can't keep, and where what it refused is read from — this kernel's ABI said.
     #[test]
@@ -1681,13 +1682,15 @@ mod tests {
                     "{r}"
                 );
                 // (step 4: the open network is routed out — never the addresses D-d names; this machine's
-                // ports only as opened)
+                // ports only as opened; step 5: only through the proxy, a tool that ignores it can't go out)
                 let open = said(Policy { network: true, ..s.policy() });
                 assert!(
                     open.contains(
-                        "reach the network beyond this machine (its loopback and its own addresses) — never \
-                         link-local addresses, the cloud metadata servers tarae knows of, multicast or broadcast — but none of \
-                         this machine's ports"
+                        "reach the network beyond this machine (its loopback and its own addresses) only through \
+                         tarae's proxy (HTTPS_PROXY, set for every run) — a tool that ignores it (ssh, a database \
+                         client, Node's fetch without NODE_USE_ENV_PROXY) can't go out; never link-local \
+                         addresses, the cloud metadata servers tarae knows of, multicast or broadcast — but none \
+                         of this machine's ports"
                     ),
                     "{open}"
                 );

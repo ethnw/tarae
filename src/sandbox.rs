@@ -351,9 +351,12 @@ impl Guard {
                         loopback_only.as_deref().unwrap_or_default(),
                         if p.network { ", llm.sandbox-network notwithstanding" } else { "" }
                     ),
+                    // (step 5: the open network goes through tarae's proxy, a direct connect is `network-direct`)
                     (true, here, none) if routed => format!(
-                        ", and reach the network beyond this machine (its loopback and its own addresses) — never \
-                         link-local addresses, the cloud metadata servers tarae knows of, multicast or broadcast — {}",
+                        ", and reach the network beyond this machine (its loopback and its own addresses) only \
+                         through tarae's proxy (HTTPS_PROXY, set for every run) — a tool that ignores it (ssh, a \
+                         database client, Node's fetch without NODE_USE_ENV_PROXY) can't go out; never link-local \
+                         addresses, the cloud metadata servers tarae knows of, multicast or broadcast — {}",
                         match (here, none) {
                             (true, _) => "and every port of this machine's".to_string(),
                             (false, false) => format!("and this machine's ports {ports} only (llm.sandbox-ports)"),
@@ -5588,11 +5591,6 @@ mod tests {
         assert!(r.starts_with("The sandbox blocked 2 things — 2 times:\n") && r.contains(&at), "{r}");
     }
 
-    /// Step 7 on the VMs: what was reported as blocked though nothing needed it. npm checks for its own update
-    /// once a day, writing the date in `~/.npm` — a run is told not to (the user's own runs as they are); the
-    /// JVM writes its own `/proc/<pid>/coredump_filter` and goes on; getaddrinfo `connect`s a UDP socket to
-    /// port 0 of each address to sort them (nothing is sent). Those last two quiet — a write or a connect
-    /// beside them still named.
     /// Step 5 (Linux): a run with the network open gets tarae's proxy variables — each naming the proxy's address,
     /// this machine's loopback left direct — and never the user's own proxies (theirs would send it past the
     /// proxy, where only `network-direct` refusals wait), nor are those said as left out; with the network
@@ -5626,6 +5624,11 @@ mod tests {
         assert!(!env_of(&command(Some(&closed), "true", &[])).contains_key("HTTPS_PROXY"));
     }
 
+    /// Step 7 on the VMs: what was reported as blocked though nothing needed it. npm checks for its own update
+    /// once a day, writing the date in `~/.npm` — a run is told not to (the user's own runs as they are); the
+    /// JVM writes its own `/proc/<pid>/coredump_filter` and goes on; getaddrinfo `connect`s a UDP socket to
+    /// port 0 of each address to sort them (nothing is sent). Those last two quiet — a write or a connect
+    /// beside them still named.
     #[test]
     fn what_runs_try_harmlessly_stays_quiet() {
         let p = Policy { run: RunDir::new().ok(), ..Policy::for_project(&env(Path::new("/Users/u/p"))) };
