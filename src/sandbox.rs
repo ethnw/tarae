@@ -34,6 +34,9 @@ mod golden;
 pub mod keeper;
 #[cfg(target_os = "linux")]
 pub mod linux;
+// (step 5a: only its parsers and their tests so far — the proxy that uses them comes with 5b)
+#[cfg(test)]
+mod proxy;
 #[cfg(any(target_os = "linux", test))]
 pub mod route;
 pub mod runenv;

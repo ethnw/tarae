@@ -1,0 +1,10 @@
+POST http://example.invalid/form HTTP/1.1
+Host: example.invalid
+Proxy-Authorization: Basic cnVuOnRhcmFlLWZha2UtdG9rZW4tNQ==
+User-Agent: curl/8.7.1
+Accept: */*
+Proxy-Connection: Keep-Alive
+Content-Length: 3
+Content-Type: application/x-www-form-urlencoded
+
+x=1
